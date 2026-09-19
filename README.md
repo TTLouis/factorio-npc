@@ -102,6 +102,18 @@ docker compose up -d --build
 
 See [`deploy/docker/README.md`](./deploy/docker/README.md) for source pinning, configuration, persistence, console attach, and shutdown details.
 
+### Interactive desktop operator adapter
+
+[`tools/desktop-rcon-operator.mjs`](./tools/desktop-rcon-operator.mjs) is an opt-in Node adapter for an interactive desktop session, including Codex. It is intentionally **not** an autonomous replacement for a configured provider: the desktop operator chooses the next action while the adapter only exposes the existing bounded observation and operation contracts over local HTTP.
+
+For a local E2E run, set a distinct `DESKTOP_OPERATOR_TOKEN` (at least 16 characters) and start the normal stack with the E2E and operator overlays:
+
+```bash
+docker compose -f compose.yml -f compose.e2e.yml -f compose.desktop-operator.yml --profile desktop-operator up -d --build
+```
+
+The adapter binds to `127.0.0.1` only. Its `/observe` and `/operate` endpoints require `Authorization: Bearer <DESKTOP_OPERATOR_TOKEN>`; operations stay schema-validated and run deterministic preflight before they are admitted to Factorio. It is a test/operator surface, not a public API and does not expose raw RCON or arbitrary Lua. The Compose service reaches RCON only through the internal Docker network.
+
 ## Development
 
 Install workspace dependencies with:

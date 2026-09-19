@@ -246,11 +246,12 @@ function taskBoardUiRconCommand(text) {
 const UI_RCON_READY_COMMAND = '/silent-command rcon.print("AIRI_UI_RCON_READY")'
 
 export class Rcon {
-  constructor(port, password, timeout = 5000, { auxiliary = false } = {}) {
+  constructor(port, password, timeout = 5000, { auxiliary = false, host = '127.0.0.1' } = {}) {
     this.port = port
     this.password = password
     this.timeout = timeout
     this.auxiliary = auxiliary
+    this.host = host
     this.socket = null
     this.buffer = Buffer.alloc(0)
     this.sequence = 10
@@ -264,7 +265,7 @@ export class Rcon {
   async connect() {
     check(!this.socket, 'RCON is already connected')
     this.closed = false
-    const socket = net.createConnection({ host: '127.0.0.1', port: this.port })
+    const socket = net.createConnection({ host: this.host, port: this.port })
     this.socket = socket
     socket.on('data', chunk => this.receive(chunk))
     socket.on('error', error => this.failAll(error))
@@ -349,7 +350,7 @@ export class Rcon {
     }
 
     if (!this.uiConnect) {
-      const lane = new Rcon(this.port, this.password, this.timeout, { auxiliary: true })
+      const lane = new Rcon(this.port, this.password, this.timeout, { auxiliary: true, host: this.host })
       this.uiConnect = (async () => {
         await lane.connect()
         let ready = String(await lane.command(UI_RCON_READY_COMMAND) ?? '').trim()

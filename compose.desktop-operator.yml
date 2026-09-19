@@ -1,0 +1,22 @@
+# Opt-in local-only adapter for an interactive desktop session or curl-based testing.
+# Start alongside compose.e2e.yml; it does not publish RCON outside Docker.
+services:
+  desktop-operator:
+    image: node:22-alpine
+    profiles: ["desktop-operator"]
+    working_dir: /workspace
+    command: ["node", "tools/desktop-rcon-operator.mjs"]
+    volumes:
+      - ./:/workspace:ro
+    environment:
+      SGLUNA_RCON_HOST: sgluna-factorio
+      SGLUNA_RCON_PORT: ${SGLUNA_RCON_PORT:-27015}
+      SGLUNA_RCON_PASSWORD: ${SGLUNA_RCON_PASSWORD:?Set SGLUNA_RCON_PASSWORD for the local E2E run}
+      DESKTOP_OPERATOR_TOKEN: ${DESKTOP_OPERATOR_TOKEN:?Set a distinct DESKTOP_OPERATOR_TOKEN of at least 16 characters}
+      DESKTOP_OPERATOR_BIND: 0.0.0.0
+      DESKTOP_OPERATOR_PORT: 24181
+    ports:
+      - "127.0.0.1:${DESKTOP_OPERATOR_HOST_PORT:-24181}:24181/tcp"
+    depends_on:
+      sgluna-factorio:
+        condition: service_started
