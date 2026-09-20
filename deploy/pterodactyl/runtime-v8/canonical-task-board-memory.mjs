@@ -63,6 +63,12 @@ function revisionSuffix(previousBoard, incomingPlan) {
   return includesVerifiedPrefix ? incoming.slice(completed) : incoming
 }
 
+function sameSemanticSteps(planSteps, incomingSteps) {
+  const current = (Array.isArray(planSteps) ? planSteps : []).map(step => clean(step?.description))
+  const incoming = (Array.isArray(incomingSteps) ? incomingSteps : []).map(clean)
+  return current.length === incoming.length && current.every((description, index) => description === incoming[index])
+}
+
 function safeDurableStepCompletionContract(value) {
   const contract = sanitizeStepCompletionContract(value)
   return completionContractSupported(contract) ? contract : undefined
@@ -699,12 +705,110 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       }
     }
 
+    // A fresh user instruction arriving while a committed slice is still in
+    // flight REPLACES that slice. The reducer simply dropped this case before:
+    // `ensurePlanningDraft` only drafts when there is no active plan, so the
+    // legacy board was replanned while the reducer went on executing the old
+    // plan, and the replaced slice recorded no lineage at all.
+    //
+    // Supersession is user authority and nothing else -- the reducer refuses
+    // every other source -- so this fires only for a request that actually
+    // carries a human sender and text, never for a harness continuation. The
+    // blocked-revision path above already has its own lineage event and must
+    // not supersede on top of it.
+    const supersededPlanId = userRevisionApproved
+      ? undefined
+      : this.#supersedeInFlightPlan(key, requestInfo, plan, options)
+
     const result = super.recordPlan(key, requestInfo, plan, options)
     if (result?.state) {
       this.ensureTaskBoard(result.state)
       this.ensurePlanningDraft(key, result.state, { now: result.state.updated_at })
     }
-    return userRevisionApproved ? { ...result, userRevisionApproved: true } : result
+    if (!userRevisionApproved && !supersededPlanId) return result
+    return {
+      ...result,
+      ...(userRevisionApproved ? { userRevisionApproved: true } : {}),
+      ...(supersededPlanId ? { supersededPlanId } : {}),
+    }
+  }
+
+  #supersedeInFlightPlan(key, requestInfo, plan, options) {
+    if (options?.continuation === true) return undefined
+    if (typeof requestInfo?.sender !== 'string' || !requestInfo.sender.trim()) return undefined
+    if (typeof requestInfo?.text !== 'string' || !requestInfo.text.trim()) return undefined
+    const planning = key ? this.planningByNpc.get(key) : undefined
+    const inFlight = getActivePlan(planning)
+    if (!inFlight || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(inFlight.status)) return undefined
+    const steps = (Array.isArray(plan?.plan) ? plan.plan : [])
+      .filter(step => typeof step === 'string' && step.trim())
+    // Re-emitting the same slice is continuation, not steering. Superseding on
+    // it would churn plan identity every turn and reset reasoning each time.
+    if (steps.length === 0 || sameSemanticSteps(inFlight.steps, steps)) return undefined
+
+    // Draft first, supersede second: the successor's id is what makes the
+    // replaced slice's `superseded_by_plan_id` resolvable, and it does not
+    // exist until DRAFT_CREATED mints it. DRAFT_CREATED leaves committed plans
+    // alone, so the in-flight slice survives this call untouched.
+    const now = Date.now()
+    let next = applyPlanningEvent(planning, {
+      type: PLANNING_EVENT.DRAFT_CREATED,
+      now,
+      origin: 'user_replan',
+      steps: steps.map(description => ({ description })),
+    })
+    const successor = getActivePlan(next)
+    if (!successor || successor.plan_id === inFlight.plan_id) return undefined
+
+    next = applyPlanningEvent(next, {
+      type: PLANNING_EVENT.PLAN_SUPERSEDED,
+      now,
+      source: 'user',
+      plan_id: inFlight.plan_id,
+      successor_plan_id: successor.plan_id,
+      reason: 'user_replanned',
+    })
+    // If the reducer refused the supersession the draft is thrown away rather
+    // than kept: a successor with no replaced predecessor is a silent second
+    // plan, which is worse than leaving the in-flight slice alone.
+    const replaced = next.plans.find(item => item.plan_id === inFlight.plan_id)
+    if (replaced?.status !== PLAN_STATUS.SUPERSEDED) return undefined
+
+    this.planningByNpc.set(key, next)
+    return inFlight.plan_id
+  }
+
+  /**
+   * Declare the user's goal satisfied. Only an authority may.
+   *
+   * There is deliberately no automatic emitter for this. A goal carries an
+   * objective and constraints -- prose -- and no machine-checkable acceptance
+   * criteria, so nothing the runtime observes can decide it has been met. The
+   * roadmap draws the line explicitly: plan slice completed != capability
+   * frontier reached != user goal satisfied != project ended, and the reducer
+   * enforces it by refusing to derive satisfaction from any plan outcome.
+   *
+   * So the honest wiring is this: an explicit declaration, from a named human
+   * (`user`) or from a runtime authority reporting a satisfied acceptance
+   * check, always carrying its OWN evidence refs -- distinct from the evidence
+   * that advanced any step. None is synthesized here; a declaration without
+   * evidence is refused by the reducer and returns the state unchanged.
+   */
+  recordGoalSatisfaction(key, { source = 'user', declaredBy, evidenceRefs, rationale, now = Date.now() } = {}) {
+    if (!key) return undefined
+    const refs = (Array.isArray(evidenceRefs) ? evidenceRefs : [evidenceRefs])
+      .filter(ref => typeof ref === 'string' && ref.trim())
+    const before = this.planningByNpc.get(key)
+    if (!before?.goal || refs.length === 0) return before
+    const after = this.dispatchPlanningEvent(key, {
+      type: PLANNING_EVENT.GOAL_SATISFIED,
+      now,
+      source,
+      goal_id: before.goal.goal_id,
+      evidence_refs: refs,
+      rationale: rationale ?? (declaredBy ? `declared_by:${declaredBy}` : undefined),
+    })
+    return after
   }
 
   applyOutcomeAuthority(key, candidate, options = {}) {
