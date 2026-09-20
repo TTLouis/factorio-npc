@@ -156,7 +156,7 @@ cp "$WORK/source/packages/autorio/info.json" "$WORK/source/packages/autorio/dist
 cp -a "$WORK/source/packages/autorio/dist/." "$APP/autorio/"
 
 log 'Copying v8 supervisor, shared policy, and prompt'
-for file in common.mjs canonical-task-board-memory.mjs game-files.mjs provider-base.mjs provider.mjs supervisor.mjs structured-policy.mjs supervisor-adapter.mjs outcome-authority.mjs recovery-route.mjs step-completion.mjs project-board.mjs jev-decision-taxonomy.mjs npc-agent-loop.mjs; do
+for file in common.mjs canonical-task-board-memory.mjs planning-state.mjs game-files.mjs provider-base.mjs provider.mjs supervisor.mjs structured-policy.mjs supervisor-adapter.mjs outcome-authority.mjs recovery-route.mjs step-completion.mjs project-board.mjs jev-decision-taxonomy.mjs npc-agent-loop.mjs; do
   cp "$WORK/source/deploy/pterodactyl/runtime-v8/$file" "$APP/src/runtime-v8/$file"
 done
 for file in structured-policy.mjs supervisor-adapter.mjs npc-agent-loop.mjs; do
@@ -242,6 +242,7 @@ const names = [
   'src/prompt.md',
   'src/runtime-v8/common.mjs',
   'src/runtime-v8/canonical-task-board-memory.mjs',
+  'src/runtime-v8/planning-state.mjs',
   'src/runtime-v8/game-files.mjs',
   'src/runtime-v8/provider-base.mjs',
   'src/runtime-v8/provider.mjs',
