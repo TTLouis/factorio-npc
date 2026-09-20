@@ -80,7 +80,7 @@ function sanitizePromptTraceValue(value, key = '') {
   if (SENSITIVE_PROMPT_KEY.test(key)) return '[REDACTED]'
   if (typeof value === 'string') {
     return value
-      .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, '[REDACTED]')
+      .replace(/Bearer\s+[a-z0-9._~+/=-]+/gi, '[REDACTED]')
       .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, '[REDACTED]')
       .replace(/\b(OPENAI_API_KEY|FACTORIO_TOKEN|API_KEY|PASSWORD|SECRET)\s*[:=]\s*[^\s,;]+/gi, '$1=[REDACTED]')
   }
@@ -294,8 +294,8 @@ function contentShape(content) {
   let replacementChars = 0
   for (const char of text) {
     const code = char.codePointAt(0) ?? 0
-    if (code > 0x7f) nonAsciiChars++
-    if (code === 0xfffd) replacementChars++
+    if (code > 0x7F) nonAsciiChars++
+    if (code === 0xFFFD) replacementChars++
   }
   return {
     content_chars: text.length,
@@ -853,7 +853,7 @@ export function providerEndpoint(base) {
   catch { throw new DeploymentError('Invalid provider URL') }
   check(!url.username && !url.password && !url.search && !url.hash, 'Provider URL cannot contain credentials, query, or fragment')
   check(url.protocol === 'https:' || (url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)), 'Remote provider URL requires HTTPS')
-  url.pathname = url.pathname.replace(/\/?$/, '/') + 'chat/completions'
+  url.pathname = `${url.pathname.replace(/\/?$/, '/')}chat/completions`
   return url.toString()
 }
 

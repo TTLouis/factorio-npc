@@ -35,10 +35,6 @@ function latest(rows, predicate) {
   return undefined
 }
 
-function requestId(row) {
-  return row?.data?.failure_snapshot?.request_id ?? row?.request_id
-}
-
 function promptRequestFor(promptRows, id) {
   return latest(promptRows, row => row?.event === 'provider.request' && (!id || row?.request_id === id))
 }

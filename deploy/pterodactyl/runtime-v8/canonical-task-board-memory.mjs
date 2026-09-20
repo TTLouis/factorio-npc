@@ -181,25 +181,7 @@ export function verifyDeterministicReceipt(state, evidence) {
   }
 }
 
-function attemptedLaterCanonicalStep(previousBoard, plan) {
-  if (!previousBoard || previousBoard.kind !== 'task_board_lite' || !Array.isArray(previousBoard.steps)) return false
-  const canonical = previousBoard.steps.map(step => String(step?.description ?? '')).filter(Boolean)
-  if (canonical.length === 0) return false
-  const currentIndex = Number.isSafeInteger(previousBoard.active_index)
-    ? Math.min(Math.max(previousBoard.active_index, 0), canonical.length - 1)
-    : 0
-  const incoming = Array.isArray(plan?.plan) ? plan.plan : []
-  const incomingIndex = Number.isSafeInteger(plan?.currentStep)
-    ? Math.min(Math.max(plan.currentStep, 0), Math.max(0, incoming.length - 1))
-    : 0
-  const incomingActive = incoming[incomingIndex]
-  const matched = incomingActive === undefined
-    ? -1
-    : canonical.findIndex(description => clean(description) === clean(incomingActive))
-  return matched > currentIndex
-}
-
-export function canonicalContinuationPlan(previousBoard, plan, { allowReplan = false, previousState } = {}) {
+export function canonicalContinuationPlan(previousBoard, plan, { allowReplan = false, previousState: _previousState } = {}) {
   if (!previousBoard || previousBoard.kind !== 'task_board_lite' || !Array.isArray(previousBoard.steps)) return plan
   const canonical = previousBoard.steps.map(step => String(step?.description ?? '')).filter(Boolean)
   if (canonical.length === 0) return plan

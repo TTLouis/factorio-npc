@@ -221,9 +221,7 @@ test('output-budget recovery keeps the canonical Task Board at the evidenced ste
   const calls = []
   const rcon = new FakeRcon()
   let reserves = 0
-  let agent
-
-  agent = makeAgent({
+  const agent = makeAgent({
     rcon,
     reserve: async () => { reserves++; return {} },
     provider: async (messages, context) => {
@@ -540,7 +538,7 @@ test('terminal provider budget becomes a Jev-directed fresh planner generation i
   const agent = makeAgent({
     rcon,
     maxProviderOutputUnits: 3000,
-    interactionDecisionProvider: async (state, questions) => {
+    interactionDecisionProvider: async (state, _questions) => {
       decisions.push({ state, questions })
       assert.equal(state.failure.class, 'provider_budget')
       assert.equal(state.task.active_step, canonical[0])

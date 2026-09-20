@@ -49,7 +49,7 @@ export { AgentLoopError }
 
 const TRACE_MAX_BYTES = 5 * 1024 * 1024
 const TRACE_FILES = 5
-const SENSITIVE_TRACE_KEY = /(?:authorization|api.?key|token|password|secret|cookie|session)/i
+const SENSITIVE_TRACE_KEY = /authorization|api.?key|token|password|secret|cookie|session/i
 const STATE_SCHEMA = 1
 const PLAN_HISTORY_LIMIT = 24
 const MAX_OBSERVATION_TOOL_CALLS_PER_BATCH = 4
@@ -309,7 +309,7 @@ function sanitizeTraceValue(value, key = '') {
   if (SENSITIVE_TRACE_KEY.test(key)) return '[REDACTED]'
   if (typeof value === 'string') {
     return value
-      .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, '[REDACTED]')
+      .replace(/Bearer\s+[a-z0-9._~+/=-]+/gi, '[REDACTED]')
       .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, '[REDACTED]')
       .slice(0, 20000)
   }
@@ -902,7 +902,6 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
     ].slice(-32)
     const normalized = normalizeCanonicalPlan(plan.plan, plan.currentStep)
     const incomingPlan = normalized.plan
-    const incomingStep = normalized.currentStep
     const now = Date.now()
     const runtime = safePersistentRuntime(persistentRuntime)
     const runtimeHealthy = runtime?.active === true && runtime.healthy === true && runtime.controller_live === true
@@ -4284,8 +4283,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const effectiveAllowTools = omissionRepair && this.actionOmissionForceNoTools ? false : allowTools
     const effectiveRecoveryAttempt = omissionRepair ? Math.max(1, recoveryAttempt) : recoveryAttempt
     const traceRecoveryKind = omissionRepair ? 'action_omission' : recoveryKind
-    if (omissionRepair && !effectiveAllowTools && this.actionOmissionObservationUsed) {
-    }
     const budgetStartedAt = Date.now()
     let budget
     try {

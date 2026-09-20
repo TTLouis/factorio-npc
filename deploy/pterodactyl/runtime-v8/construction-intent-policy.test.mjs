@@ -25,7 +25,7 @@ test('construction intent validates explicit remote target and preparation token
     direction: 4,
     prepare_execution: true,
   })
-  assert.match(command, /\"autorio_map_construction\",\"intent\",2,-10\.5,20\.5,'assembling-machine-2',4,true/)
+  assert.match(command, /"autorio_map_construction","intent",2,-10\.5,20\.5,'assembling-machine-2',4,true/)
   assert.throws(() => toolCommand('inspectConstructionIntent', { x: 0, y: 0, entity_name: 'x\n/c game.clear()' }))
   assert.throws(() => toolCommand('inspectConstructionIntent', { surface_index: 0, x: 0, y: 0, entity_name: 'stone-furnace' }))
   assert.throws(() => toolCommand('inspectConstructionIntent', { x: 0, y: 0, entity_name: 'stone-furnace', direction: 16 }))
