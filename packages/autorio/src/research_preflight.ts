@@ -9,10 +9,14 @@ const MAX_PREFLIGHT_QUEUE = 8
 const MAX_PREFLIGHT_BLOCKERS = 8
 const RESEARCH_PATH_MAX_NODES = 64
 
+function array_length<T>(values: T[] | undefined): number {
+  return values ? values.length : 0
+}
+
 function bounded_array<T>(values: T[] | undefined, limit: number): T[] {
   const result: T[] = []
   if (!values) return result
-  for (let index = 0; index < values.length && index < limit; index++) {
+  for (let index = 0; index < array_length(values) && index < limit; index++) {
     result.push(values[index])
   }
   return result
@@ -20,8 +24,8 @@ function bounded_array<T>(values: T[] | undefined, limit: number): T[] {
 
 function bounded_node(node: any) {
   if (!node || typeof node !== 'object') return undefined
-  const prerequisites = node.prerequisites ?? []
-  const unresolved = node.unresolved_prerequisites ?? []
+  const prerequisites: any[] = node.prerequisites ?? []
+  const unresolved: any[] = node.unresolved_prerequisites ?? []
   const result: Record<string, unknown> = {
     name: node.name,
     level: node.level,
@@ -29,18 +33,18 @@ function bounded_node(node: any) {
     mode: node.mode,
     required_action: node.required_action,
     prerequisites: bounded_array(prerequisites, MAX_PREFLIGHT_PREREQUISITES),
-    prerequisites_truncated: prerequisites.length > MAX_PREFLIGHT_PREREQUISITES,
+    prerequisites_truncated: array_length(prerequisites) > MAX_PREFLIGHT_PREREQUISITES,
     unresolved_prerequisites: bounded_array(unresolved, MAX_PREFLIGHT_PREREQUISITES),
-    unresolved_prerequisites_truncated: unresolved.length > MAX_PREFLIGHT_PREREQUISITES,
+    unresolved_prerequisites_truncated: array_length(unresolved) > MAX_PREFLIGHT_PREREQUISITES,
   }
   if (node.research_trigger) result.research_trigger = node.research_trigger
   if (node.science && typeof node.science === 'object') {
-    const ingredients = node.science.ingredients ?? []
+    const ingredients: any[] = node.science.ingredients ?? []
     result.science = {
       count: node.science.count,
       energy: node.science.energy,
       ingredients: bounded_array(ingredients, MAX_PREFLIGHT_INGREDIENTS),
-      ingredients_truncated: ingredients.length > MAX_PREFLIGHT_INGREDIENTS,
+      ingredients_truncated: array_length(ingredients) > MAX_PREFLIGHT_INGREDIENTS,
     }
   }
   return result
@@ -56,8 +60,8 @@ function bounded_path(path: any) {
     }
   }
 
-  const pending = path.pending_path ?? []
-  const blockers = path.blockers ?? []
+  const pending: any[] = path.pending_path ?? []
+  const blockers: any[] = path.blockers ?? []
   return {
     ok: true,
     target: path.target,
@@ -67,15 +71,15 @@ function bounded_path(path: any) {
     blocked: path.blocked,
     requested: bounded_path_node(path, path.target),
     pending_path: bounded_array(pending, MAX_PREFLIGHT_PENDING_NODES).map(bounded_node),
-    pending_path_truncated: pending.length > MAX_PREFLIGHT_PENDING_NODES,
+    pending_path_truncated: array_length(pending) > MAX_PREFLIGHT_PENDING_NODES,
     blockers: bounded_array(blockers, MAX_PREFLIGHT_BLOCKERS).map(bounded_node),
-    blockers_truncated: blockers.length > MAX_PREFLIGHT_BLOCKERS,
+    blockers_truncated: array_length(blockers) > MAX_PREFLIGHT_BLOCKERS,
   }
 }
 
 function bounded_path_node(path: any, name: string) {
   if (!path || path.ok !== true) return undefined
-  const nodes = path.nodes ?? []
+  const nodes: any[] = path.nodes ?? []
   for (const node of nodes) {
     if (node?.name === name) return bounded_node(node)
   }
@@ -83,14 +87,14 @@ function bounded_path_node(path: any, name: string) {
 }
 
 function queue_summary(force: any) {
-  const queue = force.research_queue ?? []
+  const queue: any[] = force.research_queue ?? []
   return {
     queue: bounded_array(queue, MAX_PREFLIGHT_QUEUE).map((technology: any) => ({
       name: technology.name,
       level: technology.level,
     })),
-    queue_length: queue.length,
-    queue_truncated: queue.length > MAX_PREFLIGHT_QUEUE,
+    queue_length: array_length(queue),
+    queue_truncated: array_length(queue) > MAX_PREFLIGHT_QUEUE,
   }
 }
 
@@ -106,7 +110,7 @@ function current_research_summary(force: any) {
 
 function requested_is_queued(force: any, name: string) {
   if (force.current_research?.name === name) return true
-  const queue = force.research_queue ?? []
+  const queue: any[] = force.research_queue ?? []
   for (const technology of queue) {
     if (technology?.name === name) return true
   }
