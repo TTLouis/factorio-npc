@@ -28,6 +28,7 @@ import {
   STEERING_BOUNDARY,
   STEERING_HOLD_REASON,
   STEERING_HYSTERESIS,
+  STEERING_PRESSURE_VOCABULARY,
   steeringContextForDraft,
   steeringRecord,
   serializePlanningState,
@@ -1400,7 +1401,7 @@ test('jev and the main llm cannot write the steering record', () => {
   assert.equal(sourceless, state, 'an unattributed steering event writes nothing')
 
   // Jev's recommendation survives only as provenance under runtime authority.
-  const recorded = steer(state, { now: 1400, mode: 'horizontal', confidence: 0.8, pressure: { horizontal: ['power margin low'] } })
+  const recorded = steer(state, { now: 1400, mode: 'horizontal', confidence: 0.8, pressure: { horizontal: ['power_margin_low'] } })
   assert.equal(recorded.steering.recommendation.recommended_by, 'jev')
   assert.equal(recorded.steering.authority, 'runtime')
 })
@@ -1422,7 +1423,7 @@ test('hysteresis permits consecutive same-mode slices without limit', () => {
     })
     state = completeSlice(state, { nodeIds: [`node_frontier_${nodeIndex}`], now: at })
     // Vertical again, and justified again: the foundation is already sufficient.
-    state = steer(state, { now: at + 50, mode: 'vertical', pressure: { vertical: ['next tier still unreached'] } })
+    state = steer(state, { now: at + 50, mode: 'vertical', pressure: { vertical: ['frontier_reached'] } })
     assert.equal(state.steering.current_mode, 'vertical')
     assert.equal(state.steering.hysteresis_applied, false)
   }
@@ -1439,7 +1440,7 @@ test('hysteresis holds the current direction when a flip is weakly grounded', ()
   const weak = evaluateSteeringTransition(record, {
     mode: 'horizontal',
     confidence: 0.3,
-    pressure: { vertical: ['blue science unreached'], horizontal: ['power margin low'] },
+    pressure: { vertical: ['technology_blocked_missing_science'], horizontal: ['power_margin_low'] },
   })
   assert.equal(weak.mode, 'vertical', 'no flip on weak grounds')
   assert.equal(weak.hysteresis_applied, true)
@@ -1448,7 +1449,7 @@ test('hysteresis holds the current direction when a flip is weakly grounded', ()
   const fresh = evaluateSteeringTransition({ current_mode: 'vertical', last_directional_mode: 'vertical', consecutive_mode_slices: 0 }, {
     mode: 'horizontal',
     confidence: 1,
-    pressure: { horizontal: ['power margin low', 'throughput unstable'] },
+    pressure: { horizontal: ['power_margin_low', 'throughput_starved'] },
   })
   assert.equal(fresh.mode, 'vertical')
   assert.deepEqual(fresh.hold_reasons, [STEERING_HOLD_REASON.MODE_TOO_NEW])
@@ -1458,7 +1459,7 @@ test('hysteresis holds the current direction when a flip is weakly grounded', ()
   const justified = evaluateSteeringTransition(record, {
     mode: 'horizontal',
     confidence: 0.9,
-    pressure: { vertical: ['blue science unreached'], horizontal: ['power margin low', 'petroleum throughput unstable'] },
+    pressure: { vertical: ['technology_blocked_missing_science'], horizontal: ['power_margin_low', 'throughput_starved'] },
   })
   assert.equal(justified.mode, 'horizontal')
   assert.equal(justified.changed, true)
@@ -1493,7 +1494,7 @@ test('explicit user priority outranks any steering recommendation', () => {
     now: 1500,
     mode: 'vertical',
     confidence: 1,
-    pressure: { vertical: ['a', 'b', 'c'] },
+    pressure: { vertical: ['frontier_reached', 'capability_absent', 'required_item_uncraftable'] },
   })
   assert.equal(pushed.steering.current_mode, 'horizontal')
   assert.equal(pushed.steering.recommendation.recommended_mode, 'vertical', 'the advice is still recorded, just not obeyed')
@@ -1507,7 +1508,7 @@ test('explicit user priority outranks any steering recommendation', () => {
     clear_user_priority: true,
     recommended_mode: 'vertical',
     confidence: 1,
-    pressure: { vertical: ['a', 'b'] },
+    pressure: { vertical: ['frontier_reached', 'capability_absent'] },
   })
   assert.equal(cleared.steering.user_priority, null)
   assert.equal(cleared.steering.current_mode, 'vertical')
@@ -1521,7 +1522,7 @@ test('steering context reaches the main llm before it drafts, as advice only', (
     confidence: 0.9,
     reason: 'smelting exists but cannot sustain the next tier',
     critical_path: 'stable iron throughput',
-    pressure: { vertical: ['red science unreached'], horizontal: ['throughput unstable', 'power margin low'] },
+    pressure: { vertical: ['technology_blocked_missing_science'], horizontal: ['throughput_starved', 'power_margin_low'] },
     candidate_shelf_nodes: ['node_science', 'fabricated_node'],
   })
 
@@ -1531,7 +1532,7 @@ test('steering context reaches the main llm before it drafts, as advice only', (
   assert.equal(context.current_mode, 'horizontal')
   assert.equal(context.previous_mode, null)
   assert.equal(context.critical_path, 'stable iron throughput')
-  assert.deepEqual(context.pressure.horizontal, ['throughput unstable', 'power margin low'])
+  assert.deepEqual(context.pressure.horizontal, ['throughput_starved', 'power_margin_low'])
   assert.equal(context.refinement_candidates[0].node_id, 'node_science')
   assert.ok(Object.isFrozen(context))
   assert.deepEqual(
@@ -1561,8 +1562,8 @@ test('steering context reaches the main llm before it drafts, as advice only', (
 
 test('the steering record survives serialize/restore with its hysteresis lineage', () => {
   let state = completeSlice(dependentShelf(goalState()), { nodeIds: ['node_smelting'], now: 1200 })
-  state = steer(state, { now: 1400, mode: 'vertical', pressure: { vertical: ['next tier unreached'] } })
-  state = steer(state, { now: 1450, mode: 'vertical', pressure: { vertical: ['still unreached'] } })
+  state = steer(state, { now: 1400, mode: 'vertical', pressure: { vertical: ['frontier_reached'] } })
+  state = steer(state, { now: 1450, mode: 'vertical', pressure: { vertical: ['capability_absent'] } })
 
   const restored = restorePlanningState(JSON.parse(JSON.stringify(serializePlanningState(state))))
   assert.deepEqual(restored.steering, state.steering)
@@ -1580,13 +1581,54 @@ test('the steering record survives serialize/restore with its hysteresis lineage
   assert.equal(tampered.steering, null)
 })
 
+test('steering pressure is a closed grounded vocabulary, not prose', () => {
+  let state = completeSlice(dependentShelf(goalState()), { nodeIds: ['node_smelting'], now: 1200 })
+  state = steer(state, {
+    now: 1400,
+    mode: 'horizontal',
+    pressure: {
+      horizontal: ['Power margin low', 'the base feels a bit slow', 'power_margin_low'],
+      vertical: ['frontier_reached', 'vibes'],
+    },
+  })
+
+  // Recognised codes survive, case-normalised and deduplicated.
+  assert.deepEqual(state.steering.pressure.horizontal, ['power_margin_low'])
+  assert.deepEqual(state.steering.pressure.vertical, ['frontier_reached'])
+
+  // Prose is dropped rather than stored -- but visibly, so a caller that
+  // invented a justification can see it did not count toward the mode. Note
+  // 'Power margin low' is prose too: the code is `power_margin_low`, and a
+  // near-miss is not quietly repaired into a match.
+  assert.deepEqual(
+    [...state.steering.dropped_pressure].sort(),
+    ['power margin low', 'the base feels a bit slow', 'vibes'],
+  )
+
+  // A code from the other direction's vocabulary is not a free pass.
+  const crossed = steer(state, {
+    now: 1500,
+    mode: 'horizontal',
+    pressure: { horizontal: ['frontier_reached'] },
+  })
+  assert.deepEqual(crossed.steering.pressure.horizontal, [])
+  assert.deepEqual(crossed.steering.dropped_pressure, ['frontier_reached'])
+
+  // The vocabulary itself: disjoint, non-empty, and snake_case throughout, so
+  // a direction can never be satisfied by a code that also means its opposite.
+  const { vertical, horizontal } = STEERING_PRESSURE_VOCABULARY
+  assert.ok(vertical.length > 0 && horizontal.length > 0)
+  for (const code of [...vertical, ...horizontal]) assert.match(code, /^[a-z][a-z0-9_]*$/)
+  assert.deepEqual(vertical.filter(code => horizontal.includes(code)), [])
+})
+
 test('a plan completion boundary is where steering and the next shelf round meet', () => {
   let state = completeSlice(dependentShelf(goalState()), { nodeIds: ['node_smelting'], now: 1200 })
   const plansBefore = state.plans
   state = steer(state, {
     now: 1400,
     mode: 'horizontal',
-    pressure: { horizontal: ['throughput unstable'] },
+    pressure: { horizontal: ['throughput_starved'] },
     plan_id: plansBefore[0].plan_id,
   })
   assert.equal(state.plans, plansBefore, 'a steering evaluation touches no plan at all')

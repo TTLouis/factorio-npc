@@ -135,6 +135,47 @@ export const SHELF_FORBIDDEN_EXECUTABLE_FIELDS = Object.freeze([
 // beyond this per-parent fan-out is dropped from the revision and recorded.
 export const SHELF_REFINEMENT_MAX_FANOUT = 4
 
+// Roadmap 4.4: `pressure` is the grounded evidence FOR a steering mode, so it
+// has to be checkable against world state. A closed vocabulary per direction,
+// not prose: an unrecognised entry is dropped rather than stored, so nothing
+// can justify a steering mode with a pressure nobody can verify or assert on.
+//
+// Each code names a condition an observer could confirm from live state alone.
+// Add codes here when the observation exists -- never to accommodate a phrase
+// a model happened to emit.
+export const STEERING_PRESSURE_VOCABULARY = Object.freeze({
+  // Widen, scale or stabilize what already exists.
+  horizontal: Object.freeze([
+    'throughput_starved',
+    'input_buffer_starved',
+    'output_backed_up',
+    'machine_idle_no_input',
+    'machine_idle_no_power',
+    'power_deficit',
+    'power_margin_low',
+    'resource_patch_depleting',
+    'logistics_bottleneck',
+    'repeated_manual_topup',
+    'defense_margin_low',
+  ]),
+  // Push the critical path toward a capability that does not exist yet.
+  vertical: Object.freeze([
+    'frontier_reached',
+    'capability_absent',
+    'technology_blocked_missing_science',
+    'recipe_locked_missing_technology',
+    'required_item_uncraftable',
+    'shelf_node_ready_to_refine',
+    'goal_requires_new_capability',
+    'surplus_unconsumed',
+  ]),
+})
+
+const STEERING_PRESSURE_SETS = Object.freeze({
+  horizontal: new Set(STEERING_PRESSURE_VOCABULARY.horizontal),
+  vertical: new Set(STEERING_PRESSURE_VOCABULARY.vertical),
+})
+
 export const GOAL_STATUS = Object.freeze({
   ACTIVE: 'active',
   COMPLETED: 'completed',
@@ -1169,12 +1210,35 @@ export function lineageOf(state, { planId } = {}) {
 
 // --- strategic steering (roadmap section 4) --------------------------------
 
+/**
+ * Keep only pressure codes in the direction's grounded vocabulary.
+ *
+ * Unrecognised codes are dropped silently at this level; the caller reports
+ * what it dropped so the loss is visible without letting prose through.
+ */
 function sanitizeSteeringPressure(raw) {
   const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
-  return {
-    vertical: Array.from(new Set(stringList(source.vertical, { max: 12, maxLength: 200 }))),
-    horizontal: Array.from(new Set(stringList(source.horizontal, { max: 12, maxLength: 200 }))),
+  const keep = direction => Array.from(new Set(
+    stringList(source[direction], { max: 12, maxLength: 200 })
+      .map(code => code.trim().toLowerCase())
+      .filter(code => STEERING_PRESSURE_SETS[direction].has(code)),
+  ))
+  return { vertical: keep('vertical'), horizontal: keep('horizontal') }
+}
+
+/** The pressure codes the caller offered that no direction recognises. */
+function unknownSteeringPressure(raw) {
+  const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
+  const unknown = []
+  for (const direction of ['vertical', 'horizontal']) {
+    for (const code of stringList(source[direction], { max: 12, maxLength: 200 })) {
+      const normalized = code.trim().toLowerCase()
+      if (!STEERING_PRESSURE_SETS[direction].has(normalized) && !unknown.includes(normalized)) {
+        unknown.push(normalized)
+      }
+    }
   }
+  return unknown.slice(0, 12)
 }
 
 function clamp01(value) {
@@ -1568,6 +1632,9 @@ Object.assign(HANDLERS, {
       reason: text(event.reason, 400) || record?.reason || null,
       critical_path: text(event.critical_path ?? event.critical_path_summary, 300) || null,
       pressure: sanitizeSteeringPressure(event.pressure),
+      // Visible, not silent: a caller that invented a pressure can see it was
+      // not counted rather than believing it justified the mode.
+      dropped_pressure: unknownSteeringPressure(event.pressure),
       last_plan_id: entry.plan_id,
       // Hysteresis bookkeeping.
       last_directional_mode: decision.last_directional_mode,
@@ -2311,6 +2378,7 @@ function restoreSteering(raw) {
     reason: text(raw.reason, 400) || null,
     critical_path: text(raw.critical_path, 300) || null,
     pressure: sanitizeSteeringPressure(raw.pressure),
+    dropped_pressure: stringList(raw.dropped_pressure, { max: 12, maxLength: 200 }),
     last_plan_id: text(raw.last_plan_id, 200) || null,
     last_directional_mode: DIRECTIONAL_MODES.includes(raw.last_directional_mode) ? raw.last_directional_mode : null,
     consecutive_mode_slices: Number.isSafeInteger(raw.consecutive_mode_slices) && raw.consecutive_mode_slices >= 0
