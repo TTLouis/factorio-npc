@@ -971,15 +971,24 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         replacePrecommit: options?.scopeRefinement === true,
       })
     }
+    const activeAfterDraft = getActivePlan(this.planningByNpc.get(key))
     const precommitRefinementApproved = options?.scopeRefinement === true
       && priorReducerPlan
       && [PLAN_STATUS.DRAFT, PLAN_STATUS.JEV_REVIEW, PLAN_STATUS.RUNTIME_VALIDATION, PLAN_STATUS.READY].includes(priorReducerPlan.status)
-    if (!userRevisionApproved && !supersededPlanId && !precommitRefinementApproved) return result
+    // Once an immutable bounded slice is COMPLETED, the reducer is allowed to
+    // mint the next shelf-linked DRAFT. The legacy Task Board must mirror that
+    // new semantic slice; preserving the completed board here would make the
+    // checkpoint normalizer rebuild the new reducer plan from stale step text.
+    const completedSliceDraftApproved = priorReducerPlan?.status === PLAN_STATUS.COMPLETED
+      && activeAfterDraft?.status === PLAN_STATUS.DRAFT
+      && activeAfterDraft.plan_id !== priorReducerPlan.plan_id
+    if (!userRevisionApproved && !supersededPlanId && !precommitRefinementApproved && !completedSliceDraftApproved) return result
     return {
       ...result,
       ...(userRevisionApproved ? { userRevisionApproved: true } : {}),
       ...(supersededPlanId ? { supersededPlanId } : {}),
       ...(precommitRefinementApproved ? { precommitRefinementApproved: true } : {}),
+      ...(completedSliceDraftApproved ? { completedSliceDraftApproved: true } : {}),
     }
   }
 
@@ -1317,10 +1326,14 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     )
     const revisionApproved = stateResult?.userRevisionApproved === true
     const precommitRefinementApproved = stateResult?.precommitRefinementApproved === true
-    // BLOCKED/COMMITTED work is frozen for ordinary continuation. Jev refinement
-    // is different: it happens before commit, so replacing the rejected draft
-    // is exactly the transition the Task Board must mirror rather than shadow.
-    const semanticReplacementApproved = revisionApproved || precommitRefinementApproved
+    const completedSliceDraftApproved = stateResult?.completedSliceDraftApproved === true
+    // BLOCKED/COMMITTED work is frozen for ordinary continuation. Two reducer-
+    // owned boundaries may replace the legacy projection without weakening
+    // immutability: Jev pre-commit refinement, and the fresh DRAFT created after
+    // an immutable bounded slice has reached COMPLETED.
+    const semanticReplacementApproved = revisionApproved
+      || precommitRefinementApproved
+      || completedSliceDraftApproved
     const guarded = semanticReplacementApproved
       ? plan
       : canonicalContinuationPlan(previousBoard, plan, {

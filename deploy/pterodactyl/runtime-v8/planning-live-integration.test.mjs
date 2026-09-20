@@ -1249,3 +1249,79 @@ test('completed reducer slice remains an active user goal boundary rather than l
   assert.equal(memory.currentPlan(key).status, 'completed')
   assert.equal(planning.steering.current_mode, 'horizontal')
 })
+
+
+test('next shelf draft replaces a completed legacy board before checkpoint refresh', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const key = 'npc:airi'
+  memory.admitPlanningGoal(key, {
+    owner: 'Louis',
+    objective: 'Build two bounded capability slices',
+    goalId: 'goal_completed_slice_projection',
+    now: 10,
+  })
+  memory.reviseRoadmap(key, [
+    { id: 'first', intent: 'First capability exists.' },
+    { id: 'second', intent: 'Second capability exists.', depends_on: ['first'] },
+  ], { now: 11, reason: 'goal_decomposed_to_shelf' })
+
+  const firstPlan = {
+    ...proposedPlan(['Build the first capability']),
+    roadmapNodeIds: ['first'],
+    developmentMode: 'vertical',
+  }
+  const firstRecorded = memory.recordPlan(key, { sender: 'Louis', text: 'Build both capabilities' }, firstPlan)
+  memory.reconcileTaskBoard(key, undefined, firstPlan, firstRecorded, { allowReplan: false })
+  memory.commitPlanningPlan(key, { now: 20, review: REVIEWED_ACTIONABLE })
+  memory.applyOutcomeAuthority(key, {
+    kind: 'verified_complete',
+    source: 'deterministic_runtime',
+    reason_code: 'first_slice_verified',
+    evidence: [{ kind: 'verified_world_state', ref: 'first_slice', summary: 'first capability verified' }],
+    metadata: { scope: 'step' },
+  })
+  assert.equal(getActivePlan(memory.planningState(key)).status, PLAN_STATUS.COMPLETED)
+  const completedBoard = memory.currentPlan(key).task_board
+  assert.equal(completedBoard.status, 'completed')
+
+  const secondPlan = {
+    ...proposedPlan(['Build the second capability']),
+    roadmapNodeIds: ['second'],
+    developmentMode: 'horizontal',
+  }
+  const secondRecorded = memory.recordPlan(
+    key,
+    { sender: 'Louis', text: 'Build both capabilities' },
+    secondPlan,
+    { continuation: true },
+  )
+  assert.equal(secondRecorded.completedSliceDraftApproved, true)
+  const secondReconciled = memory.reconcileTaskBoard(
+    key,
+    completedBoard,
+    secondPlan,
+    secondRecorded,
+    { allowReplan: false, previousState: memory.currentPlan(key) },
+  )
+
+  assert.equal(secondReconciled.state.task_board.status, 'active')
+  assert.deepEqual(
+    secondReconciled.state.task_board.steps.map(step => step.description),
+    ['Build the second capability'],
+  )
+  const draft = getActivePlan(memory.planningState(key))
+  assert.equal(draft.status, PLAN_STATUS.DRAFT)
+  assert.deepEqual(draft.steps.map(step => step.description), ['Build the second capability'])
+
+  memory.setStepCompletionContract(key, secondReconciled.state.task_board.active_step_id, {
+    mode: 'all',
+    requirements: [{ id: 'receipt', kind: 'authoritative_operation_receipt', operation_name: 'wait' }],
+  }, { now: 30 })
+  const refreshed = getActivePlan(memory.planningState(key))
+  assert.deepEqual(
+    refreshed.steps.map(step => step.description),
+    ['Build the second capability'],
+    'checkpoint refresh must never resurrect the prior completed slice text',
+  )
+  assert.deepEqual(refreshed.roadmap_node_ids, ['second'])
+})
