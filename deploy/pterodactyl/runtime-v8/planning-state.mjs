@@ -240,7 +240,7 @@ function finiteNumber(value) {
 function fingerprint(value) {
   // FNV-1a, deterministic and dependency-free. Used so step ids are not merely
   // positional (roadmap section 10).
-  let hash = 0x811c9dc5
+  let hash = 0x811C9DC5
   const source = String(value ?? '')
   for (let index = 0; index < source.length; index += 1) {
     hash ^= source.charCodeAt(index)
@@ -596,12 +596,12 @@ function maxFrontierStatus(current, candidate) {
  * Advance one node's capability frontier from accumulated VERIFIED evidence.
  *
  * Structural guarantees:
- *   * Completing a plan does NOT by itself reach a frontier. Only recognition
- *     signals the frontier itself declared, reported satisfied by a runtime
- *     authority, can do that. Unknown / fabricated ids are discarded.
- *   * A frontier with no declared recognition signals can never be `reached`,
- *     because nothing was ever said about how to recognize it.
- *   * A continuous frontier never latches to `reached`.
+ * - Completing a plan does NOT by itself reach a frontier. Only recognition
+ *   signals the frontier itself declared, reported satisfied by a runtime
+ *   authority, can do that. Unknown / fabricated ids are discarded.
+ * - A frontier with no declared recognition signals can never be `reached`,
+ *   because nothing was ever said about how to recognize it.
+ * - A continuous frontier never latches to `reached`.
  */
 function advanceFrontier(frontier, { now, planId, results, satisfiedRecognitionIds }) {
   const declared = new Set(frontier.recognition.map(item => item.id))
@@ -961,6 +961,8 @@ function blockPlan(state, plan, { now, blocker }) {
  * Pure: no I/O, no Date.now(); `now` comes from the event.
  * Total: unknown or malformed events return the state unchanged (never throws).
  */
+let HANDLERS
+
 export function applyPlanningEvent(state, event) {
   const current = state && typeof state === 'object' && !Array.isArray(state) ? state : createEmptyPlanningState()
   if (!event || typeof event !== 'object' || Array.isArray(event)) return current
@@ -974,7 +976,7 @@ export function applyPlanningEvent(state, event) {
   return next ?? current
 }
 
-const HANDLERS = {
+HANDLERS = {
   [PLANNING_EVENT.GOAL_ACCEPTED](state, event, now) {
     const sequence = nextSequence(state)
     const goal = sanitizeGoal({
