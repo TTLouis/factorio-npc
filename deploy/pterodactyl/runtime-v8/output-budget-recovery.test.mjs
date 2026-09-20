@@ -538,7 +538,7 @@ test('terminal provider budget becomes a Jev-directed fresh planner generation i
   const agent = makeAgent({
     rcon,
     maxProviderOutputUnits: 3000,
-    interactionDecisionProvider: async (state, _questions) => {
+    interactionDecisionProvider: async (state, questions) => {
       decisions.push({ state, questions })
       assert.equal(state.failure.class, 'provider_budget')
       assert.equal(state.task.active_step, canonical[0])
@@ -749,7 +749,12 @@ test('context-window exhaustion enters the same Jev planner-budget handoff witho
   const calls = []
   let recoveryRoutes = 0
   const agent = makeAgent({
-    interactionDecisionProvider: async (state, questions) => {
+    test('context-window exhaustion enters the same Jev planner-budget handoff without pausing canonical work', async () => {
+  const canonical = ['Inspect the current machine state', 'Continue the build']
+  const calls = []
+  let recoveryRoutes = 0
+  const agent = makeAgent({
+    
       if (state?.contract === 'recovery_route') {
         recoveryRoutes++
         assert.equal(state.failure.class, 'provider_budget')
