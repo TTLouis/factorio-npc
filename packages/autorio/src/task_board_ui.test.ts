@@ -259,7 +259,7 @@ describe('in-game task board UI projection', () => {
     expect(source).toContain("create_section(parent, 'Controls', CONTROLS_SECTION_WIDTH, undefined, false)")
     expect(source).not.toContain('HALF_SECTION_WIDTH')
     expect(source).toContain('right.style.vertically_stretchable = true')
-    expect(source).toMatch(/build_left_dynamic\(dynamic,[\s\S]*render_prompt\(left, player\)[\s\S]*render_world_preview\(right, runtime, player\)/)
+    expect(source).toMatch(/build_left_dynamic\(dynamic,[\s\S]*render_prompt\(left, player, runtime\)[\s\S]*render_world_preview\(right, runtime, player\)/)
   })
 
   it('puts a native Factorio camera preview in the right column with an interactive zoom slider', () => {
@@ -320,7 +320,7 @@ describe('in-game task board UI projection', () => {
     expect(source).toContain('dynamic.clear()')
     expect(source).toContain('build_left_dynamic(dynamic, player, board, synced_tick, runtime)')
     expect(source).toContain('right.clear()')
-    expect(source).toContain('render_prompt(left, player)')
+    expect(source).toContain('render_prompt(left, player, runtime)')
     expect(source).not.toMatch(/left\.clear\(\)/)
     expect(source).not.toContain('task_board_ui_prompt_draft(player.index).length === 0')
   })
@@ -453,9 +453,9 @@ describe('in-game task board UI projection', () => {
 
 it('uses SGLuna for normal console branding while retaining AIRI actor identity internally', () => {
   const source = readFileSync(new URL('./task_board_ui.ts', import.meta.url), 'utf8')
-  expect(source).toContain("caption: 'Prompt SGLuna'")
+  expect(source).toContain("caption: `Prompt ${actor_name}`")
   expect(source).toContain("'SGLuna NPC Console'")
   expect(source).toContain("add_key_value(table, 'SGLuna'")
-  expect(source).toContain("runtime.actor_name || 'AIRI'")
+  expect(source).toContain("runtime.actor_name || 'NPC'")
   expect(source).not.toContain("tooltip: 'Send a prompt directly to AIRI")
 })

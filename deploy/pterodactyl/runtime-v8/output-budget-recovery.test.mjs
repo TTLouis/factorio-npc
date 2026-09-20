@@ -235,15 +235,21 @@ test('output-budget recovery rejects replay of a completed mutation before admis
   await agent.request('run the safe two-step check', { sender: 'TTLouis' })
   assert.equal(rcon.mutations.length, 1)
 
-  const recovered = await agent.completed()
+  await assert.rejects(
+    agent.completed(),
+    /Provider strict recovery could not safely resolve remaining canonical work/i,
+  )
 
   assert.equal(calls.length, 4)
   assert.equal(rcon.mutations.length, 1)
   assert.equal(rcon.mutations.filter(text => text.includes("'wait'")).length, 1)
-  assert.equal(recovered.goalStatus, 'blocked')
-  assert.equal(recovered.taskBoard.status, 'blocked')
-  assert.equal(recovered.taskBoard.active_index, 0)
-  assert.deepEqual(recovered.plan, canonical)
+  const state = agent.memory.currentPlan('npc:airi')
+  assert.equal(state.status, 'active')
+  assert.equal(state.task_board.status, 'active')
+  assert.equal(state.task_board.active_index, 0)
+  assert.deepEqual(state.plan, canonical)
+  assert.notEqual(state.blocker, 'provider_reported_blocker')
+  assert.notEqual(state.blocker, 'recovery_no_operation')
 })
 
 test('empty recovery content cannot retire an active canonical Task Board without evidence', async () => {
