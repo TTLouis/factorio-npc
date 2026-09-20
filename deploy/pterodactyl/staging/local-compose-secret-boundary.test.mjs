@@ -38,18 +38,22 @@ function environmentKeys(block) {
   return keys
 }
 
-test('devcontainer loads repo-root interpolation and gives rcon-api only RCON variables', async () => {
+test('devcontainer loads repo-root interpolation and keeps rcon-api secrets and listeners local', async () => {
   const devcontainer = JSON.parse(await read('.devcontainer/devcontainer.json'))
   assert.deepEqual(devcontainer.dockerComposeFile, ['../compose.devcontainer.yml'])
   await assert.rejects(() => read('.devcontainer/docker-compose.yml'), error => error?.code === 'ENOENT')
 
-  const compose = await read('compose.devcontainer.yml')
+  const [compose, apiConfig] = await Promise.all([
+    read('compose.devcontainer.yml'),
+    read('.devcontainer/factorio-rcon-api.yml'),
+  ])
   const rconApi = serviceBlock(compose, 'rcon-api')
 
   assert.match(compose, /context: \.\n/)
   assert.match(compose, /dockerfile: \.devcontainer\/Dockerfile/)
   assert.match(rconApi, /image: ghcr\.io\/nekomeowww\/factorio-rcon-api:2\.0\.6/)
   assert.match(rconApi, /network_mode: host/)
+  assert.match(rconApi, /\.\/\.devcontainer\/factorio-rcon-api\.yml:\/app\/api-server\/config\/config\.yaml:ro/)
   assert.deepEqual(environmentKeys(rconApi), [
     'FACTORIO_RCON_HOST',
     'FACTORIO_RCON_PORT',
@@ -59,6 +63,10 @@ test('devcontainer loads repo-root interpolation and gives rcon-api only RCON va
   assert.doesNotMatch(rconApi, /\benv_file\s*:/)
   assert.doesNotMatch(rconApi, /\bOPENAI_API_KEY\b|\bOPENAI_API_BASEURL\b|\bOPENAI_MODEL\b|\bFACTORIO_USERNAME\b|\bFACTORIO_TOKEN\b|\bTYPESAFE_API_KEY\b/)
   assert.doesNotMatch(rconApi, /^    ports:\s*$/m)
+
+  assert.match(apiConfig, /^\s*http_server_addr:\s*["']127\.0\.0\.1:24180["']\s*$/m)
+  assert.match(apiConfig, /^\s*grpc_server_addr:\s*["']127\.0\.0\.1:24181["']\s*$/m)
+  assert.doesNotMatch(apiConfig, /0\.0\.0\.0/)
 })
 
 test('local Compose RCON configs have no password fallback and keep loopback-only published RCON', async () => {

@@ -1,0 +1,6 @@
+# factorio-rcon-api v2.0.6 defaults its unauthenticated HTTP and gRPC APIs
+# to all interfaces (:24180/:24181). The devcontainer uses host networking so
+# bind both administrative listeners to host loopback explicitly.
+api_server:
+  http_server_addr: "127.0.0.1:24180"
+  grpc_server_addr: "127.0.0.1:24181"

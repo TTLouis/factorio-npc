@@ -117,6 +117,14 @@ jobs:
             assert.equal(Object.hasOwn(rconApi.environment, key), false)
           }
 
+          const apiConfigMount = rconApi.volumes.find(volume => volume.target === '/app/api-server/config/config.yaml')
+          assert.ok(apiConfigMount, 'missing factorio-rcon-api loopback config mount')
+          assert.equal(apiConfigMount.read_only, true)
+          const apiConfig = fs.readFileSync('.devcontainer/factorio-rcon-api.yml', 'utf8')
+          assert.match(apiConfig, /^\s*http_server_addr:\s*["']127\.0\.0\.1:24180["']\s*$/m)
+          assert.match(apiConfig, /^\s*grpc_server_addr:\s*["']127\.0\.0\.1:24181["']\s*$/m)
+          assert.doesNotMatch(apiConfig, /0\.0\.0\.0/)
+
           const local = JSON.parse(fs.readFileSync('/tmp/e2e-compose.json', 'utf8'))
           assert.equal(local.services['sgluna-factorio'].environment.SGLUNA_RCON_PASSWORD, 'ci-rcon-sentinel')
           assert.equal(local.services['desktop-operator'].environment.SGLUNA_RCON_PASSWORD, 'ci-rcon-sentinel')

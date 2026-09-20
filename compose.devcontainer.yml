@@ -16,6 +16,11 @@ services:
   rcon-api:
     image: ghcr.io/nekomeowww/factorio-rcon-api:2.0.6
     network_mode: host
+    volumes:
+      # v2.0.6 defaults its unauthenticated HTTP/gRPC listeners to all
+      # interfaces. Keep host networking for localhost RCON access, but bind
+      # the API listeners themselves to host loopback.
+      - ./.devcontainer/factorio-rcon-api.yml:/app/api-server/config/config.yaml:ro
     environment:
       FACTORIO_RCON_HOST: localhost
       FACTORIO_RCON_PORT: 27015
