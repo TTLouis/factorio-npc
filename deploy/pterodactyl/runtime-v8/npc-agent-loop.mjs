@@ -5497,6 +5497,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         this.staleExactPreflightRetries = 0
         this.researchPreflightRetries = 0
         this.bootstrapDependencyPreflightRetries = 0
+        if (this.requestInfo && typeof this.memory.commitPlanningPlan === 'function') {
+          this.memory.commitPlanningPlan(this.requestInfo.memoryKey, { now: Date.now() })
+          const committed = this.memory.currentPlan?.(this.requestInfo.memoryKey)
+          if (committed) stateResult = { ...(stateResult ?? {}), state: committed }
+          await this.persistState()
+        }
         await this.traceEvent('operations.preflight_ok', {
           operations: operations.map((operation, index) => ({ ...operation, preflight: preflight[index] })),
         })
