@@ -166,20 +166,12 @@ export async function providerRequest(config, messages, options = {}) {
   if (!policy) return baseProviderRequest(config, messages, options)
 
   const semanticBudgetNeedsFullPlanner = ['normal', 'deep', 'strategic'].includes(options.reasoningBudget)
-  const structuralHierarchyTrigger = [
-    'hierarchy_split',
-    'hierarchy_collapse',
-    'hierarchy_advance',
-    'hierarchy_replan_project',
-    'hierarchy_project_complete_candidate',
-  ].includes(options.triggerSource)
   const isCompletionContinuation = completionContinuation(messages, options)
   const compactPath = options.recoveryKind === 'output_budget_exhaustion'
     || (
       isCompletionContinuation
       && options.triggerSource !== 'post_step_replan'
       && !semanticBudgetNeedsFullPlanner
-      && !structuralHierarchyTrigger
     )
   const forceFullPlanner = isCompletionContinuation && !compactPath
   const callerPatch = options.requestBodyPatch && typeof options.requestBodyPatch === 'object' && !Array.isArray(options.requestBodyPatch)

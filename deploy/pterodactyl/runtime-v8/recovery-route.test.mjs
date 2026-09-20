@@ -131,5 +131,5 @@ test('provider safety failures cannot re-enter ordinary main-provider retry rout
 
 test('provider-budget semantic scope can request a target re-anchor or milestone split without implying completion', () => {
   assert.equal(parseRecoveryDecision(response('continue_low', 'provider_budget', 'reanchor_target')).semantic_scope, 'reanchor_target')
-  assert.equal(parseRecoveryDecision(response('replan_high', 'provider_budget', 'split_milestone')).semantic_scope, 'split_milestone')
+  assert.equal(parseRecoveryDecision(response('replan_high', 'provider_budget', 'split_milestone')).semantic_scope, 'keep_target', 'retired hierarchy scope must fail closed to non-writing recovery')
 })

@@ -441,7 +441,7 @@ test('Jev deep and strategic completion decisions escape the compact 1000-token 
       { role: 'user', content: COMPLETION },
     ], {
       allowTools: true,
-      triggerSource: 'hierarchy_replan_project',
+      triggerSource: 'recovery_replan_high',
       reasoningBudget,
     })
     assert.equal(seen.body.reasoning_effort, 'max')
@@ -455,7 +455,7 @@ test('Jev normal budget keeps its full planner output budget after completion', 
     { role: 'user', content: COMPLETION },
   ], {
     allowTools: true,
-    triggerSource: 'hierarchy_vertical',
+    triggerSource: 'post_step_reanchor',
     reasoningBudget: 'normal',
   })
   assert.equal(seen.body.reasoning_effort, 'high')
@@ -476,7 +476,7 @@ test('Jev micro budget preserves compact completion behavior', async () => {
 })
 
 
-test('hierarchy collapse always uses the full planner path even with a micro semantic budget', async () => {
+test('retired hierarchy trigger names no longer force a hidden full-planner path', async () => {
   const { seen } = await captureRequest([
     { role: 'system', content: 'system' },
     { role: 'user', content: COMPLETION },
@@ -486,5 +486,5 @@ test('hierarchy collapse always uses the full planner path even with a micro sem
     reasoningBudget: 'micro',
   })
   assert.equal(seen.body.reasoning_effort, 'low')
-  assert.equal(seen.body.max_tokens, 4000)
+  assert.equal(seen.body.max_tokens, 1000)
 })

@@ -6672,7 +6672,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         route: routed.route,
         semantic_scope: semanticScope,
         budget_generation: this.providerBudgetGeneration,
-        reasoning_policy: semanticScope === 'split_milestone' || routed.route === 'replan_high' ? 'high' : 'low',
+        reasoning_policy: routed.route === 'replan_high' ? 'high' : 'low',
       })
       try {
         let result

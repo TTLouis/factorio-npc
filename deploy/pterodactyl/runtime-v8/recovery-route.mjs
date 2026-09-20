@@ -26,7 +26,6 @@ export const RECOVERY_ROUTES = new Set([
 export const RECOVERY_SEMANTIC_SCOPES = new Set([
   'keep_target',
   'reanchor_target',
-  'split_milestone',
 ])
 
 export function recoveryFailureClassHint(reason) {
@@ -72,11 +71,10 @@ export function recoveryDecisionQuestions() {
     },
     semantic_scope: {
       type: 'choice',
-      instructions: 'At a provider-budget boundary, decide whether the durable semantic scope itself still fits. This never proves completion and never advances a milestone; it only controls the next planner handoff.',
+      instructions: 'At a provider-budget boundary, decide whether the current committed semantic target still fits the next planner handoff. This is routing only: it never proves completion, splits a plan, or writes planning hierarchy.',
       criteria: {
-        keep_target: 'Keep the current milestone and active semantic target; only renew the planner budget/context.',
-        reanchor_target: 'Keep the current milestone, but let the next planner re-anchor the active target/step from authoritative state.',
-        split_milestone: 'The current milestone is too broad for another bounded planner generation; persist a hierarchy split transaction before waking the planner.',
+        keep_target: 'Keep the current committed semantic target; only renew the planner budget/context.',
+        reanchor_target: 'Keep the immutable committed plan, but let the next planner re-anchor its focus from authoritative state.',
       },
     },
     world_failure_supported: {
