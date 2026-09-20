@@ -921,7 +921,7 @@ test('the reducer source contains no wall-clock or I/O calls', async () => {
     /\bnew\s+Date\s*\(/,
     /\bMath\s*\.\s*random\s*\(/,
     /\bprocess\s*\.\s*env\b/,
-    /(^|[^A-Za-z0-9_$])fs\s*\./,
+    /(?:^|[^A-Za-z0-9_$])fs\s*\./,
     /\bawait\s/,
     /\brequire\s*\(/,
     /\bimport\s*\(/,
