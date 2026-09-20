@@ -37,6 +37,17 @@ function clean(value) {
   return String(value ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().toLocaleLowerCase()
 }
 
+function revisionSuffix(previousBoard, incomingPlan) {
+  const incoming = Array.isArray(incomingPlan) ? incomingPlan.filter(step => typeof step === 'string' && step.trim()) : []
+  const completed = Number.isSafeInteger(previousBoard?.completed_count)
+    ? Math.max(0, Math.min(previousBoard.completed_count, previousBoard.steps?.length ?? 0))
+    : 0
+  if (completed === 0 || incoming.length < completed) return incoming
+  const includesVerifiedPrefix = Array.from({ length: completed }, (_, index) =>
+    clean(incoming[index]) === clean(previousBoard.steps?.[index]?.description)).every(Boolean)
+  return includesVerifiedPrefix ? incoming.slice(completed) : incoming
+}
+
 function safeDurableStepCompletionContract(value) {
   const contract = sanitizeStepCompletionContract(value)
   return completionContractSupported(contract) ? contract : undefined
@@ -456,9 +467,38 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     // still contain one from a previous runtime version, so retire it before a
     // new request can accidentally inherit its goal_id/objective.
     this.retireCompletedPlan(key)
+
+    const priorLegacy = key ? this.planByNpc.get(key) : undefined
+    const priorPlanning = key ? this.planningByNpc.get(key) : undefined
+    const blockedPlan = getActivePlan(priorPlanning)
+    const explicitRevision = blockedPlan?.status === PLAN_STATUS.BLOCKED
+      && blockedPlan.blocker?.user_choice?.choice === 'revise'
+      && typeof requestInfo?.sender === 'string'
+      && requestInfo.sender.trim().length > 0
+      && typeof requestInfo?.text === 'string'
+      && requestInfo.text.trim().length > 0
+
+    let userRevisionApproved = false
+    if (explicitRevision && Array.isArray(plan?.plan) && plan.plan.length > 0) {
+      const steps = revisionSuffix(priorLegacy?.task_board, plan.plan)
+      const revised = applyPlanningEvent(priorPlanning, {
+        type: PLANNING_EVENT.USER_REVISION_APPROVED,
+        now: Date.now(),
+        source: 'user',
+        approved_by: requestInfo.sender,
+        plan_id: blockedPlan.plan_id,
+        steps: steps.map(description => ({ description })),
+      })
+      const successor = getActivePlan(revised)
+      if (successor && successor.plan_id !== blockedPlan.plan_id) {
+        this.planningByNpc.set(key, revised)
+        userRevisionApproved = true
+      }
+    }
+
     const result = super.recordPlan(key, requestInfo, plan, options)
     if (result?.state) this.ensurePlanningDraft(key, result.state, { now: result.state.updated_at })
-    return result
+    return userRevisionApproved ? { ...result, userRevisionApproved: true } : result
   }
 
   applyOutcomeAuthority(key, candidate, options = {}) {
@@ -618,7 +658,10 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     // Task Board is authoritative: preserve its immutable steps and freeze
     // until an explicit user revision enters through the new planning-state
     // transition path.
-    if (previousBoard?.kind === 'task_board_lite' && previousBoard.status === 'blocked' && stateResult?.state) {
+    if (previousBoard?.kind === 'task_board_lite'
+      && previousBoard.status === 'blocked'
+      && stateResult?.state
+      && stateResult?.userRevisionApproved !== true) {
       const state = stateResult.state
       state.status = 'blocked'
       state.blocker = previousBoard.blocker ?? state.blocker
@@ -638,8 +681,16 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
             : []
         }),
     )
-    const guarded = canonicalContinuationPlan(previousBoard, plan, { ...options, previousState: truthState })
-    const result = super.reconcileTaskBoard(key, previousBoard, guarded, stateResult, options)
+    const revisionApproved = stateResult?.userRevisionApproved === true
+    const guarded = canonicalContinuationPlan(previousBoard, plan, {
+      ...options,
+      previousState: truthState,
+      allowReplan: revisionApproved ? true : options.allowReplan,
+    })
+    const result = super.reconcileTaskBoard(key, previousBoard, guarded, stateResult, {
+      ...options,
+      allowReplan: revisionApproved ? true : options.allowReplan,
+    })
     if (result?.state?.task_board && Array.isArray(result.state.task_board.steps) && durableContracts.size > 0) {
       result.state.task_board.steps = result.state.task_board.steps.map(step => {
         const durable = durableContracts.get(step.id)
