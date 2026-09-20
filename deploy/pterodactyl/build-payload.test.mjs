@@ -8,7 +8,7 @@ import { buildArtifacts, channelInstaller, installerLoader, verifyGeneratedArtif
 
 const here = dirname(fileURLToPath(import.meta.url))
 const PAYLOAD_REF = 'f0511568e55f19a9c84f408fabceefb78436ed5d'
-const PAYLOAD_SHA256 = '4762796c7b221c75fefb8071bcc8bc286f0eadad6ab02c1cfac83015690c5655'
+const PAYLOAD_SHA256 = '134ba0931bddc9588d8f3b6ef3e9f5e37f095d6206c1d1c5c4e7e46c20f506fe'
 const source = Buffer.from(`#!/usr/bin/env bash
 AIRI_REF="0123456789abcdef0123456789abcdef01234567"
 REVISION="test"
@@ -138,7 +138,7 @@ test('committed Pterodactyl artifacts are internally valid and reinstall stays d
   assert.match(sourceText, /packages\/autorio\/dist\/data\.lua/)
   assert.match(sourceText, /canonical-task-board-memory\.mjs/)
   assert.match(sourceText, /provider-base\.mjs/)
-  assert.match(sourceText, /project-board\.mjs/)
+  assert.doesNotMatch(sourceText, /project-board\.mjs/)
   assert.match(sourceText, /jev-decision-taxonomy\.mjs/)
   assert.match(sourceText, /AIRI_SUPERVISOR_VERIFY=/)
   assert.match(sourceText, /await import\(pathToFileURL\(process\.env\.AIRI_SUPERVISOR_VERIFY\)\.href\)/)
