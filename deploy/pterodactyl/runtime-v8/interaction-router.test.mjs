@@ -416,7 +416,8 @@ test('cancelling the agent aborts an in-flight Jev shadow decision', async () =>
   })
 
   const pending = agent.request('status?', { sender: 'tester' })
-  for (let index = 0; index < 50 && (!decisionSignal || !routerSignal); index++) {
+  for (let index = 0; index < 50; index++) {
+    if (decisionSignal && routerSignal) break
     await new Promise(resolve => setTimeout(resolve, 1))
   }
 

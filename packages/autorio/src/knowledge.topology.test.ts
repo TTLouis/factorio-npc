@@ -66,6 +66,9 @@ describe('logistics topology knowledge', () => {
     const unrelatedChest = baseEntity({
       name: 'steel-chest', type: 'container', unit_number: 99, position: { x: 0, y: 4 },
     })
+    let inbound: ReturnType<typeof baseEntity>
+    let outbound: ReturnType<typeof baseEntity>
+    let unrelated: ReturnType<typeof baseEntity>
     const center = baseEntity({
       name: 'assembling-machine-1', type: 'assembling-machine', unit_number: 30, position: { x: 0, y: 0 },
       surface: {
@@ -76,17 +79,17 @@ describe('logistics topology knowledge', () => {
         },
       },
     })
-    const inbound = baseEntity({
+    inbound = baseEntity({
       name: 'inserter', type: 'inserter', unit_number: 31, position: { x: -1, y: 0 },
       pickup_position: { x: -2, y: 0 }, drop_position: { x: 0, y: 0 },
       pickup_target: sourceBelt, drop_target: center,
     })
-    const outbound = baseEntity({
+    outbound = baseEntity({
       name: 'inserter', type: 'inserter', unit_number: 32, position: { x: 1, y: 0 },
       pickup_position: { x: 0, y: 0 }, drop_position: { x: 2, y: 0 },
       pickup_target: center, drop_target: outputBelt,
     })
-    const unrelated = baseEntity({
+    unrelated = baseEntity({
       name: 'inserter', type: 'inserter', unit_number: 33, position: { x: 0, y: 3 },
       pickup_position: { x: 0, y: 3 }, drop_position: { x: 0, y: 4 },
       pickup_target: outputBelt, drop_target: unrelatedChest,
