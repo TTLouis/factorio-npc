@@ -207,16 +207,11 @@ function terrain_snapshot(actor: ControlledActor, center: Position, half_size: n
       types: types.slice(0, MAX_TERRAIN_TYPES),
       types_truncated: types.length > MAX_TERRAIN_TYPES,
       run_count,
-      runs: runs,
+      runs,
       runs_truncated: run_count > runs.length,
       encoding: 'row_runs_inclusive',
     },
   }
-}
-
-function requested_prototype(name: string | undefined) {
-  if (!name) return undefined
-  return prototypes.entity[name]
 }
 
 export function prototype_spatial_geometry(name: string) {
@@ -260,7 +255,6 @@ export function local_spatial_observation(actor: ControlledActor, request: Const
   const matches = actor.surface.find_entities_filtered({ area })
   sort_entities(matches)
   const entities = matches.slice(0, MAX_ENTITIES).map(entity => entity_summary(entity, actor))
-  const prototype = requested_prototype(request.requested_entity_name)
   const terrain = terrain_snapshot(actor, anchor.position, half_size)
   return {
     ok: true,

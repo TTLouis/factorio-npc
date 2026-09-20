@@ -1686,7 +1686,7 @@ export class Session {
 
   cleanEnv() {
     const env = { ...process.env }
-    for (const key of Object.keys(env)) if (/(?:OPENAI|API_KEY|TOKEN|PASSWORD|RCON)/i.test(key)) delete env[key]
+    for (const key of Object.keys(env)) if (/OPENAI|API_KEY|TOKEN|PASSWORD|RCON/i.test(key)) delete env[key]
     env.HOME = this.root
     env.TMPDIR = path.join(this.root, '.airi', 'tmp')
     return env

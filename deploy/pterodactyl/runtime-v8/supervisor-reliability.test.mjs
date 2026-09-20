@@ -210,7 +210,7 @@ test('interrupted hierarchy split recovery restores its structural trigger and s
     cancel: () => {},
     captureEpoch: async () => ({ actor_id: 3, epoch: 8 }),
     traceEvent: async () => {},
-    runGuarded: async function () {
+    async runGuarded() {
       seen.planUpdateReason = this.planUpdateReason
       seen.reasoningTriggerSource = this.reasoningTriggerSource
       seen.reasoningBudgetOverride = this.reasoningBudgetOverride

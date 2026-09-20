@@ -31,7 +31,7 @@ import { new_navigation_obstacle_recovery } from './navigation_obstacle_recovery
 import { new_orientation_runtime } from './orientation_runtime'
 import { execute_placement_candidate } from './placement_candidates'
 import { create_production_planning_remote_interface } from './production_planning_remote'
-import { create_prototype_knowledge_remote_interface, harvest_source_prototype_names } from './prototype_knowledge'
+import { create_prototype_knowledge_remote_interface } from './prototype_knowledge'
 import { new_recipe_configuration_runtime } from './recipe_configuration'
 import { new_research_controller } from './research'
 import { ensure_basic_skill_definitions } from './skills'
@@ -539,7 +539,7 @@ function state_walking_direct(actor: ControlledActor) {
   }
 }
 
-script.on_event(defines.events.on_selected_entity_changed, (unused_event: OnSelectedEntityChangedEvent) => {})
+script.on_event(defines.events.on_selected_entity_changed, (_event: OnSelectedEntityChangedEvent) => { /* Selection changes are intentionally ignored. */ })
 
 script.on_event(defines.events.on_script_path_request_finished, (event: OnScriptPathRequestFinishedEvent) => {
   navigation_controller.on_path_finished(event)
@@ -569,7 +569,7 @@ function setup() {
 
 let no_actor_found = false
 
-script.on_event(defines.events.on_tick, (unused_event) => {
+script.on_event(defines.events.on_tick, (_event) => {
   if (!setup_complete) setup()
 
   const actor = get_controlled_actor()
@@ -598,7 +598,7 @@ script.on_event(defines.events.on_tick, (unused_event) => {
   follow_controller.suspend(actor)
   defense_controller.suspend(actor)
 
-  let task_state = task_manager.player_state.task_state
+  const task_state = task_manager.player_state.task_state
   if (!is_runtime_task_state(task_state)) {
     navigation_obstacle_recovery.suspend(actor)
     task_manager.fail_unsupported_task_state(task_state)

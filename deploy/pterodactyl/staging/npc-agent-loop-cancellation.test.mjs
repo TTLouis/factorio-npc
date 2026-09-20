@@ -37,8 +37,7 @@ class StatusRcon {
 test('cancellation during provider budget reservation never leaks a missing-epoch error or calls the provider', async () => {
   const rcon = new StatusRcon()
   let providerCalls = 0
-  let agent
-  agent = new NpcAgentLoop({
+  const agent = new NpcAgentLoop({
     rcon,
     systemPrompt: 'NPC test prompt',
     provider: async () => {

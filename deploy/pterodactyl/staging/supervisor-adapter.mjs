@@ -15,7 +15,7 @@ export class OperationBatchAdmissionError extends StagingSessionError {
 function sanitizedAdmissionText(value, max = 2000) {
   return String(value ?? '')
     .replace(/[\r\n\t]+/g, ' ')
-    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, '[REDACTED]')
+    .replace(/Bearer\s+[a-z0-9._~+/=-]+/gi, '[REDACTED]')
     .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, '[REDACTED]')
     .replace(/\b(OPENAI_API_KEY|FACTORIO_TOKEN|API_KEY|PASSWORD|SECRET)\s*[:=]\s*[^\s,;]+/gi, '$1=[REDACTED]')
     .slice(0, max)

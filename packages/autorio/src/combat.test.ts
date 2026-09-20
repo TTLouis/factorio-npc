@@ -615,7 +615,7 @@ describe('bounded area-clearing combat', () => {
   it('returns ammunition the turret could not accept and records only the amount actually loaded', () => {
     const c = world()
     c.main.push(itemStack('gun-turret', 1), itemStack('piercing-rounds-magazine', 20))
-    const { turret, turretAmmo } = makeTurret(504, 5)
+    const { turret } = makeTurret(504, 5)
     c.surface.create_entity.mockReturnValue(turret)
     c.character.can_shoot.mockReturnValue(false)
 
