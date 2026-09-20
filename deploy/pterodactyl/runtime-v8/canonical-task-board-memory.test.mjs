@@ -748,7 +748,7 @@ test('blocked revise choice plus explicit user prompt creates successor and pres
     source: 'deterministic_runtime',
     reason_code: 'path_blocked',
     candidate_blocker: 'path_blocked',
-    evidence: [{ kind: 'runtime_blocker', ref: 'block_1', summary: 'blocked' }],
+    evidence: [{ kind: 'fresh_world_observation', ref: 'block_1', summary: 'blocked' }],
   })
   memory.recordBlockedChoice(key, 'revise', 'Louis', { now: 120 })
 
