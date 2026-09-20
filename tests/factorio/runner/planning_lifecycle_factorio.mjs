@@ -509,7 +509,19 @@ async function verify({ rcon, results, stateFile }) {
   assert.equal(providerCalls, 1)
   assert.equal(blockedResult.goalStatus, 'blocked')
   assert.equal(blockedResult.operations.length, 0)
-  assert.equal(blocked.plan_id, before.active_v3)
+  assert.equal(
+    blocked.plan_id,
+    before.active_v3,
+    `blocker request replaced committed v3 unexpectedly; expected=${before.active_v3}; blocked=${blocked.plan_id}; blockedResult=${JSON.stringify(blockedResult)}; legacy=${JSON.stringify(memory.currentPlan(key))}; plans=${JSON.stringify(planning.plans.map(plan => ({
+      id: plan.plan_id,
+      status: plan.status,
+      origin: plan.origin,
+      derived_from: plan.derived_from_plan_id,
+      superseded_by: plan.superseded_by_plan_id,
+      steps: plan.steps.map(step => step.description),
+      roadmap_node_ids: plan.roadmap_node_ids,
+    })))}`,
+  )
   assert.equal(blocked.status, PLAN_STATUS.BLOCKED)
   assert.equal(blocked.blocker?.reason_code, 'operation_preflight_failed:unknown_prototype')
   assert.equal(planning.plans.length, before.plan_count, 'structural blocker must not create an automatic suffix')
