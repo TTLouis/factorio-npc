@@ -1497,6 +1497,7 @@ export function steeringContextForDraft(state) {
     consecutive_mode_slices: record?.consecutive_mode_slices ?? 0,
     hysteresis_applied: record?.hysteresis_applied ?? false,
     hold_reasons: [...(record?.hold_reasons ?? [])],
+    recommendation: clone(record?.recommendation) ?? null,
     user_priority: clone(record?.user_priority) ?? null,
     ...steeringBias(record),
     // Guidance, at LOD 1. Intent and lineage only — no steps, no operations.

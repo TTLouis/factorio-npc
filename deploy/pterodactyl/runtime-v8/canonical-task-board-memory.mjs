@@ -497,7 +497,6 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   ensurePlanningDraft(key, state, { now = Date.now(), migrated = false, roadmap, roadmapNodeIds, replacePrecommit = false } = {}) {
     if (!key || !state) return undefined
     let planning = this.planningByNpc.get(key)
-    const existingPlan = getActivePlan(planning)
     let goalAdmitted = false
     if (!planning?.goal
       || planning.goal.goal_id !== state.goal_id
@@ -943,7 +942,10 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       : this.#supersedeInFlightPlan(key, requestInfo, plan, options)
 
     const result = super.recordPlan(key, requestInfo, plan, options)
-    if (result?.state && priorPlanning?.goal?.status === GOAL_STATUS.ACTIVE) {
+    const priorReducerPlan = getActivePlan(priorPlanning)
+    const reuseReducerGoal = priorPlanning?.goal?.status === GOAL_STATUS.ACTIVE
+      && priorReducerPlan?.status !== PLAN_STATUS.CANCELLED
+    if (result?.state && reuseReducerGoal) {
       result.state.goal_id = priorPlanning.goal.goal_id
       result.state.owner = priorPlanning.goal.owner
       result.state.objective = priorPlanning.goal.objective
