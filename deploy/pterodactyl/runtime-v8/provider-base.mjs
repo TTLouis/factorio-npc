@@ -506,9 +506,9 @@ export function normalizeProviderPlanContent(content) {
   if (!text) return text
   if (validPlanCandidate(text)) return text
 
-  const fenced = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)
-  if (fenced) {
-    const candidate = fenced[1].trim()
+  if (text.startsWith('```') && text.endsWith('```') && text.length >= 6) {
+    let candidate = text.slice(3, -3).trim()
+    if (candidate.slice(0, 4).toLowerCase() === 'json') candidate = candidate.slice(4).trim()
     if (validPlanCandidate(candidate)) return candidate
   }
 

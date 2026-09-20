@@ -138,6 +138,11 @@ test('provider strips a single JSON markdown fence before strict plan parsing', 
   assert.equal(message.content, plan)
 })
 
+test('normalizer handles a long unterminated markdown fence without regex backtracking', () => {
+  const content = `\`\`\`json\n${'x'.repeat(100_000)}`
+  assert.equal(normalizeProviderPlanContent(content), content)
+})
+
 test('provider extracts one unambiguous plan object from harmless prose', async () => {
   const plan = '{"chatMessage":"继续","plan":["继续"],"currentStep":0,"operations":[]}'
   const message = await providerRequest(config, messages, {
