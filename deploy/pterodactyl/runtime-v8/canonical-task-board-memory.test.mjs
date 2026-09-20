@@ -704,3 +704,27 @@ test('new goal after reducer cancellation gets fresh planning lineage under reus
   assert.equal(nextPlan.status, PLAN_STATUS.DRAFT)
 })
 
+test('legacy restart migration replays verified Task Board prefix before reducer projection', () => {
+  const key = 'npc:airi'
+  const legacy = new CanonicalTaskBoardMemory()
+  const state = planState()
+  legacy.planByNpc.set(key, state)
+  const legacySnapshot = {
+    version: 1,
+    dialogue: [],
+    plans: [{ key, state }],
+  }
+
+  const restored = new CanonicalTaskBoardMemory()
+  restored.restore(JSON.parse(JSON.stringify(legacySnapshot)))
+  const planning = restored.planningState(key)
+  const active = getActivePlan(planning)
+
+  assert.equal(active.status, PLAN_STATUS.EXECUTING)
+  assert.equal(active.active_step_index, 2)
+  assert.equal(active.execution.step_progress[active.steps[0].step_id].status, 'completed')
+  assert.equal(active.execution.step_progress[active.steps[1].step_id].status, 'completed')
+  assert.equal(restored.currentPlan(key).task_board.active_index, 2)
+  assert.equal(restored.currentPlan(key).task_board.completed_count, 2)
+})
+
