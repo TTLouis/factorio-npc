@@ -333,7 +333,12 @@ async function prepare({ rcon, results, stateFile }) {
   await waitForIdle(rcon)
 
   const second = await agent.completed()
-  assert.equal(providerCalls, 3, 'v1 completion must automatically wake the next shelf slice')
+  const afterV1 = memory.planningState(key)
+  assert.equal(
+    providerCalls,
+    3,
+    `v1 completion must automatically wake the next shelf slice; steeringCalls=${steeringCalls}; checkpointCalls=${checkpointCalls}; scopeCalls=${scopeCalls}; second=${JSON.stringify(second)}; legacy=${JSON.stringify(memory.currentPlan(key))}; planning=${JSON.stringify(afterV1)}`,
+  )
   assert.equal(second?.goalStatus, 'active')
   await waitForIdle(rcon)
 
