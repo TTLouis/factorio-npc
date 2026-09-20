@@ -1,5 +1,15 @@
 import { NpcDialogueMemory } from './npc-agent-loop.mjs'
 import { completionContractSupported, sanitizeStepCompletionContract } from './step-completion.mjs'
+import {
+  applyPlanningEvent,
+  createEmptyPlanningState,
+  getActivePlan,
+  PLAN_STATUS,
+  PLANNING_EVENT,
+  reasoningEpochOf,
+  restorePlanningState,
+  serializePlanningState,
+} from './planning-state.mjs'
 
 const STRICT_TASKS_BY_OPERATION = new Map([
   ['walk_to_entity', ['walking_to_entity']],
@@ -194,6 +204,108 @@ export function canonicalContinuationPlan(previousBoard, plan, { allowReplan = f
 }
 
 export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
+  constructor(options = {}) {
+    super(options)
+    this.planningByNpc = new Map()
+  }
+
+  planningState(key) {
+    return key ? this.planningByNpc.get(key) : undefined
+  }
+
+  planningProjection(key, legacyState = key ? this.planByNpc.get(key) : undefined) {
+    const planning = this.planningState(key)
+    const plan = getActivePlan(planning)
+    if (!planning || !plan || !legacyState) return legacyState
+    const choice = plan.blocker?.user_choice
+    legacyState.planning = {
+      reasoning_epoch: reasoningEpochOf(planning),
+      plan: {
+        plan_id: plan.plan_id,
+        plan_version: plan.plan_version,
+        roadmap_node_id: plan.roadmap_node_ids?.[0],
+        derived_from: plan.derived_from_plan_id ?? undefined,
+        superseded_by: plan.superseded_by_plan_id ?? undefined,
+      },
+      blocked: plan.status === PLAN_STATUS.BLOCKED
+        ? {
+            reason: String(plan.blocker?.reason_code ?? legacyState.blocker ?? 'blocked').slice(0, 500),
+            summary: String(plan.blocker?.detail ?? legacyState.blocker ?? '').slice(0, 500),
+            awaiting_choice: choice === undefined,
+            ...(choice ? { choice: choice.choice } : {}),
+          }
+        : undefined,
+    }
+    this.planByNpc.set(key, legacyState)
+    return legacyState
+  }
+
+  dispatchPlanningEvent(key, event) {
+    if (!key) return undefined
+    const before = this.planningByNpc.get(key) ?? createEmptyPlanningState()
+    const after = applyPlanningEvent(before, event)
+    if (after !== before || this.planningByNpc.has(key)) this.planningByNpc.set(key, after)
+    this.planningProjection(key)
+    return after
+  }
+
+  ensurePlanningDraft(key, state, { now = Date.now(), migrated = false } = {}) {
+    if (!key || !state) return undefined
+    let planning = this.planningByNpc.get(key)
+    if (!planning?.goal) {
+      planning = applyPlanningEvent(planning ?? createEmptyPlanningState(), {
+        type: PLANNING_EVENT.GOAL_ACCEPTED,
+        now,
+        goal_id: state.goal_id,
+        owner: state.owner,
+        objective: state.objective,
+      })
+    }
+    if (!getActivePlan(planning) && Array.isArray(state.task_board?.steps) && state.task_board.steps.length > 0) {
+      planning = applyPlanningEvent(planning, {
+        type: PLANNING_EVENT.DRAFT_CREATED,
+        now,
+        origin: migrated ? 'legacy_task_board_migration' : 'live_task_board',
+        steps: state.task_board.steps.map(step => ({
+          description: step.description,
+          completion_contract: safeDurableStepCompletionContract(step.completion_contract),
+        })),
+      })
+    }
+    this.planningByNpc.set(key, planning)
+    this.planningProjection(key, state)
+    return planning
+  }
+
+  commitPlanningPlan(key, { now = Date.now(), migrated = false } = {}) {
+    const legacy = key ? this.planByNpc.get(key) : undefined
+    let planning = this.ensurePlanningDraft(key, legacy, { now, migrated })
+    const plan = getActivePlan(planning)
+    if (!plan) return planning
+    if ([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING, PLAN_STATUS.COMPLETED, PLAN_STATUS.BLOCKED].includes(plan.status)) return planning
+    planning = applyPlanningEvent(planning, {
+      type: PLANNING_EVENT.PLAN_COMMITTED,
+      now,
+      plan_id: plan.plan_id,
+      jev_verdict: 'actionable',
+      runtime_validation: { passed: true },
+    })
+    this.planningByNpc.set(key, planning)
+    this.planningProjection(key, legacy)
+    return planning
+  }
+
+  recordBlockedChoice(key, choice, approvedBy, { now = Date.now() } = {}) {
+    const planning = this.dispatchPlanningEvent(key, {
+      type: PLANNING_EVENT.BLOCKED_CHOICE_RECORDED,
+      now,
+      source: 'user',
+      approved_by: approvedBy,
+      choice,
+    })
+    return this.planningProjection(key, key ? this.planByNpc.get(key) : undefined) ?? planning
+  }
+
   setStepCompletionContract(key, stepId, contract, { now = Date.now() } = {}) {
     const state = key ? this.planByNpc.get(key) : undefined
     const normalized = safeDurableStepCompletionContract(contract)
@@ -245,11 +357,88 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     // still contain one from a previous runtime version, so retire it before a
     // new request can accidentally inherit its goal_id/objective.
     this.retireCompletedPlan(key)
-    return super.recordPlan(key, requestInfo, plan, options)
+    const result = super.recordPlan(key, requestInfo, plan, options)
+    if (result?.state) this.ensurePlanningDraft(key, result.state, { now: result.state.updated_at })
+    return result
   }
 
   applyOutcomeAuthority(key, candidate, options = {}) {
-    return super.applyOutcomeAuthority(key, candidate, options)
+    const beforeLegacy = key ? this.planByNpc.get(key) : undefined
+    if (beforeLegacy) this.ensurePlanningDraft(key, beforeLegacy, { now: beforeLegacy.updated_at })
+    const result = super.applyOutcomeAuthority(key, candidate, options)
+    if (!result?.decision?.accepted || !result?.state) return result
+
+    let planning = this.planningByNpc.get(key)
+    let plan = getActivePlan(planning)
+    const now = result.state.updated_at ?? Date.now()
+    if (!plan) return result
+
+    if (result.decision.durable_status === 'blocked') {
+      planning = this.commitPlanningPlan(key, { now, migrated: true })
+      plan = getActivePlan(planning)
+      planning = applyPlanningEvent(planning, {
+        type: PLANNING_EVENT.STRUCTURAL_BLOCKER_CONFIRMED,
+        now,
+        source: 'runtime',
+        plan_id: plan?.plan_id,
+        reason_code: result.state.blocker || result.decision.reason_code || 'structural_blocker',
+        evidence_refs: (Array.isArray(candidate?.evidence) ? candidate.evidence : []).map(item => item?.ref).filter(Boolean),
+        detail: result.state.blocker || result.decision.blocker || '',
+      })
+    }
+    else if (result.decision.durable_status === 'completed') {
+      planning = this.commitPlanningPlan(key, { now, migrated: true })
+      plan = getActivePlan(planning)
+      const step = plan?.steps?.[plan.active_step_index]
+      if (step) {
+        const evidence = Array.isArray(candidate?.evidence) ? candidate.evidence : []
+        const ref = evidence.find(item => typeof item?.ref === 'string' && item.ref)?.ref
+          ?? `outcome/${plan.plan_id}/${step.step_id}/${now}`
+        planning = applyPlanningEvent(planning, {
+          type: PLANNING_EVENT.STEP_EVIDENCE_ACCEPTED,
+          now,
+          plan_id: plan.plan_id,
+          step_id: step.step_id,
+          evidence: {
+            source: 'runtime',
+            kind: 'outcome_authority',
+            ref,
+            contract_satisfied: true,
+          },
+        })
+        planning = applyPlanningEvent(planning, {
+          type: PLANNING_EVENT.STEP_COMPLETED,
+          now,
+          source: 'runtime',
+          plan_id: plan.plan_id,
+          step_id: step.step_id,
+        })
+        if (result.state.status === 'completed') {
+          planning = applyPlanningEvent(planning, {
+            type: PLANNING_EVENT.PLAN_COMPLETED,
+            now,
+            source: 'runtime',
+            plan_id: plan.plan_id,
+            verified_results: evidence.map(item => item?.summary).filter(Boolean),
+          })
+        }
+      }
+    }
+
+    this.planningByNpc.set(key, planning)
+    this.planningProjection(key, result.state)
+    return { ...result, state: result.state }
+  }
+
+  snapshot() {
+    const snapshot = super.snapshot()
+    return {
+      ...snapshot,
+      planning_states: [...this.planningByNpc.entries()].map(([key, state]) => ({
+        key,
+        state: serializePlanningState(state),
+      })),
+    }
   }
 
   restore(snapshot) {
@@ -288,6 +477,37 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         })
       }
       this.planByNpc.set(key, state)
+    }
+
+    this.planningByNpc.clear()
+    for (const item of Array.isArray(snapshot?.planning_states) ? snapshot.planning_states.slice(0, 128) : []) {
+      if (!item || typeof item.key !== 'string' || item.key.length < 1 || item.key.length > 200) continue
+      const restored = restorePlanningState(item.state)
+      if (!restored.goal) continue
+      this.planningByNpc.set(item.key, restored)
+    }
+
+    // Upgrade legacy snapshots in place. Active/blocked state in Task Board Lite
+    // represents already-admitted work, so migration may commit it immediately.
+    for (const [key, state] of this.planByNpc.entries()) {
+      let planning = this.planningByNpc.get(key)
+      if (!planning) {
+        planning = this.ensurePlanningDraft(key, state, { now: state.updated_at, migrated: true })
+        planning = this.commitPlanningPlan(key, { now: state.updated_at, migrated: true })
+        const plan = getActivePlan(planning)
+        if (state.status === 'blocked' && plan) {
+          planning = applyPlanningEvent(planning, {
+            type: PLANNING_EVENT.STRUCTURAL_BLOCKER_CONFIRMED,
+            now: state.updated_at,
+            source: 'runtime',
+            plan_id: plan.plan_id,
+            reason_code: state.blocker || 'restored_blocker',
+            detail: state.blocker || '',
+          })
+          this.planningByNpc.set(key, planning)
+        }
+      }
+      this.planningProjection(key, state)
     }
   }
 
@@ -332,6 +552,10 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
           : step
       })
       this.planByNpc.set(key, result.state)
+    }
+    if (result?.state) {
+      this.ensurePlanningDraft(key, result.state, { now: result.state.updated_at })
+      this.planningProjection(key, result.state)
     }
     if (result?.state?.status === 'completed') this.planByNpc.delete(key)
     return result
@@ -392,6 +616,17 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   terminatePlan(key) {
     const previous = key ? this.planByNpc.get(key) : undefined
     if (!previous) return undefined
+    const planning = this.planningByNpc.get(key)
+    const plan = getActivePlan(planning)
+    if (plan) {
+      this.planningByNpc.set(key, applyPlanningEvent(planning, {
+        type: PLANNING_EVENT.PLAN_CANCELLED,
+        now: Date.now(),
+        source: 'user',
+        plan_id: plan.plan_id,
+        reason: 'task_context_terminated',
+      }))
+    }
     this.planByNpc.delete(key)
     return previous
   }
