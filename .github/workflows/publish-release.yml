@@ -23,9 +23,9 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.value }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
 
@@ -52,8 +52,16 @@ jobs:
         run: bash deploy/pterodactyl/package-smoke.sh
 
       - name: Run zero-player Factorio integration harness
+        shell: bash
         run: |
-          docker build -f tests/factorio/Dockerfile -t factorio-npc-release-test .
+          set -Eeuo pipefail
+          for attempt in 1 2 3; do
+            if docker build -f tests/factorio/Dockerfile -t factorio-npc-release-test .; then
+              break
+            fi
+            [[ "$attempt" -lt 3 ]] || exit 1
+            sleep $((attempt * 10))
+          done
           docker run --rm factorio-npc-release-test
 
   publish:
@@ -64,9 +72,9 @@ jobs:
       VERSION: ${{ needs.verify.outputs.version }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
 
