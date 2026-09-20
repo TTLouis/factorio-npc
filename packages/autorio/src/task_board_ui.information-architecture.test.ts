@@ -36,12 +36,10 @@ describe('NPC console information architecture', () => {
     expect(prompt).toContain('NEW_TASK_BUTTON_NAME')
   })
 
-  it('separates Project Board strategy from Plan Tracker execution', () => {
-    expect(consoleSource).toContain("create_section(parent, 'Project Board'")
+  it('keeps Plan Tracker execution after retiring the Project Board renderer', () => {
+    expect(consoleSource).not.toContain("create_section(parent, 'Project Board'")
+    expect(consoleSource).not.toContain('render_project_board(parent, board)')
     expect(consoleSource).toContain("create_section(parent, 'Plan Tracker'")
-    expect(consoleSource).toMatch(/add_key_value\(\s*table,\s*'MILESTONE'/)
-    expect(consoleSource).toMatch(/add_key_value\(\s*table,\s*'DEVELOPMENT'/)
-    expect(consoleSource).toMatch(/add_key_value\(\s*table,\s*'UP NEXT'/)
     expect(consoleSource).toMatch(/build_left_dynamic\(dynamic,[\s\S]*render_tracker\(left, board, player\)/)
   })
 
