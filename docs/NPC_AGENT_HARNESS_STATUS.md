@@ -8,6 +8,36 @@ As of 2026-09-16, `feat/npc-transition-work` is the active promotion-candidate/i
 
 That SHA is a status reference, not a permanent release pin. If the branch moves before promotion, freeze a new candidate SHA and rerun the promotion gates against that exact commit.
 
+## Experimental Jev planning line — verified lifecycle checkpoint
+
+The planning architecture described in `docs/NPC_PLANNING_ROADMAP.md` has a separate experimental implementation line on
+`experiment/jev-agent-architecture`. This is not a promotion claim for `feat/npc-transition-work` or `main`.
+
+As of 2026-09-20, code checkpoint
+`8a64a2e6bc93e9b7dd8d23e3882d8ae6726dfa25` passed:
+
+- GitHub Actions CI run `35544667059` — `pterodactyl-runtime`, `typescript-quality`, and `factorio-npc-deterministic` all successful;
+- Pterodactyl release-gates run `35544667056` — successful.
+
+That checkpoint verifies the redesigned planning acceptance path against real Factorio, including:
+
+- reducer-owned Goal / Roadmap Shelf / Plan Tracker authority;
+- player-facing Plan Tracker rendering from `planTrackerView()`, not stale legacy-board progress;
+- bounded Jev pre-commit refinement with rejected drafts blocked from operation admission;
+- durable plan-to-shelf lineage and verified-result feedback;
+- boundary steering reaching the next Main-LLM draft;
+- `VERTICAL -> HORIZONTAL -> VERTICAL` across bounded slices;
+- real Factorio restart with active planning/shelf/steering lineage preserved;
+- structural preflight blocker freezing without mutation;
+- ordinary continuation remaining frozen while blocked;
+- explicit user revision creating a versioned successor with `derived_from_plan_id`;
+- committed completion semantics frozen against post-commit checkpoint rewriting;
+- legacy Task Board and `[RUNTIME_COMPAT_STATE]` retained only as compatibility projections, with `[PLANNING_STATE]` the sole model-facing planning authority.
+
+The compatibility projection should not be deleted merely for cosmetic cleanup while other runtime/UI
+features still consume it. Future removal should be driven by eliminating those consumers, not by creating
+another planning source of truth.
+
 ## Verified standalone-NPC foundation
 
 User-reported real-Factorio acceptance work has covered the bounded single-NPC foundation at its stated scopes, including:

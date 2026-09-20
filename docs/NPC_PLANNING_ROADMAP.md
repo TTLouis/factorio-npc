@@ -873,6 +873,37 @@ user long-horizon goal
 
 This E2E is the acceptance gate for the redesigned planning subsystem.
 
+### Verified implementation status — experiment/jev-agent-architecture
+
+As of 2026-09-20, the redesigned planning lifecycle is implemented and its acceptance gate is green on
+`experiment/jev-agent-architecture` at code checkpoint
+`8a64a2e6bc93e9b7dd8d23e3882d8ae6726dfa25`.
+
+Verified status by phase:
+
+- Phase 1 — invariants: **complete**. Committed plans are immutable; planner focus/currentStep and Jev output cannot independently advance the reducer Plan Tracker; structural blockers freeze.
+- Phase 2 — Goal / Shelf / Plan model: **complete**. Versioned Goal, non-executable Roadmap Shelf, active plan lineage and committed step contracts persist/restore.
+- Phase 3 — read-only Plan Tracker: **complete for planning authority**. Player-facing task progress is now rendered from reducer-owned `planTrackerView()`; the legacy Task Board remains only as a compatibility projection for runtime/UI fields that are not planning authority.
+- Phase 4 — Jev pre-commit scope review: **complete**. Non-actionable reviews cannot reach operation admission; bounded Main-LLM re-authoring is enforced and user clarification is the escape hatch.
+- Phase 5 — LOD Roadmap Shelf: **complete for the redesigned lifecycle**. Drafts link to shelf nodes, verified results feed lineage, and refinement candidates are returned to the next draft.
+- Phase 6 — strategic steering: **complete for the acceptance scenario**. Jev boundary recommendations are durably evaluated and the real lifecycle proves `VERTICAL -> HORIZONTAL -> VERTICAL` before successive bounded drafts.
+- Phase 7 — blocker / explicit user revision: **complete**. `BLOCKED` survives restart, ordinary continuation remains frozen, and only explicit user revision creates a successor.
+- Phase 8 — conflicting hierarchy writers: **complete at the semantic-authority boundary**. Stale hierarchy recovery routes are retired; committed checkpoint meaning is frozen in both reducer and compatibility projection; model-facing planning authority is only `[PLANNING_STATE]`; `[RUNTIME_COMPAT_STATE]` is explicitly non-authoritative; compact continuation preserves that split.
+- Phase 9 — real lifecycle E2E: **complete**. The real Factorio gate covers long-horizon shelf planning, Jev scope refinement, V/H/V steering, execution, real process restart, structural blocking, explicit user revision, successor lineage and continued progress.
+
+Validation on that checkpoint:
+
+- GitHub Actions CI run `35544667059`: **success**
+  - `pterodactyl-runtime`: success
+  - `typescript-quality`: success
+  - `factorio-npc-deterministic`: success
+- Pterodactyl release-gates run `35544667056`: **success**
+
+The remaining Task Board code is not a second planning architecture. It is a compatibility surface for
+conversation/activity/pause/runtime metadata and older consumers. Any future cleanup may reduce that
+surface further, but it must not reintroduce a second semantic writer or make UI/provider compatibility
+state authoritative over the reducer.
+
 ## 14. Non-goals
 
 This roadmap does not mean:
