@@ -62,13 +62,14 @@ async function waitForIdle(rcon, timeoutMs = 15000) {
   throw new Error(`Autorio did not become idle: ${JSON.stringify(last)}`)
 }
 
-function checkpoint(operationName = 'gather_resource') {
+function checkpoint(itemName, minimum) {
   return {
     mode: 'all',
     requirements: [{
-      id: 'operation_receipt',
-      kind: 'authoritative_operation_receipt',
-      operation_name: operationName,
+      id: 'inventory_target',
+      kind: 'inventory_count',
+      item_name: itemName,
+      minimum,
     }],
   }
 }
@@ -78,6 +79,7 @@ function planMessage({
   step,
   resourceName = 'iron-ore',
   count = 1,
+  minimum = 1,
   roadmap,
   roadmapNodeIds,
   developmentMode,
@@ -95,7 +97,7 @@ function planMessage({
           search_radius: 32,
         },
       }],
-      checkpoint: checkpoint('gather_resource'),
+      checkpoint: checkpoint(resourceName, minimum),
       ...(roadmap ? { roadmap } : {}),
       ...(roadmapNodeIds ? { roadmapNodeIds } : {}),
       ...(developmentMode ? { developmentMode } : {}),
@@ -138,12 +140,14 @@ function makeAgent({
   stateFile,
   memory,
   provider,
+  interactionDecisionProvider,
   scopeReviewDecisionProvider,
   steeringDecisionProvider,
 }) {
   return new NpcAgentLoop({
     rcon,
     provider,
+    interactionDecisionProvider,
     scopeReviewDecisionProvider,
     steeringDecisionProvider,
     systemPrompt: 'real Factorio full planning lifecycle acceptance test',
@@ -214,6 +218,7 @@ async function prepare({ rcon, results, stateFile }) {
       return planMessage({
         chatMessage: 'Drafting too much of the project in one slice.',
         step: 'Establish iron acquisition and all downstream support in one oversized slice',
+        minimum: ironBefore + 1,
         roadmap,
         roadmapNodeIds: ['acquisition-frontier'],
         developmentMode: 'vertical',
@@ -223,6 +228,7 @@ async function prepare({ rcon, results, stateFile }) {
       return planMessage({
         chatMessage: 'Using the bounded first capability slice.',
         step: 'Demonstrate the first iron acquisition capability',
+        minimum: ironBefore + 1,
         roadmapNodeIds: ['acquisition-frontier'],
         developmentMode: 'vertical',
       })
@@ -231,6 +237,7 @@ async function prepare({ rcon, results, stateFile }) {
       return planMessage({
         chatMessage: 'Strengthening the reached acquisition frontier.',
         step: 'Exercise the iron acquisition path again as supporting capacity',
+        minimum: ironBefore + 2,
         roadmapNodeIds: ['acquisition-support'],
         developmentMode: 'horizontal',
       })
@@ -239,11 +246,28 @@ async function prepare({ rcon, results, stateFile }) {
       return planMessage({
         chatMessage: 'Starting the next vertical frontier slice.',
         step: 'Advance the next capability frontier',
+        minimum: ironBefore + 3,
         roadmapNodeIds: ['next-capability-frontier'],
         developmentMode: 'vertical',
       })
     }
     throw new Error(`unexpected prepare provider call ${providerCalls}`)
+  }
+
+  let checkpointCalls = 0
+  const interactionDecisionProvider = async (_state, questions) => {
+    checkpointCalls++
+    const hasGroundedCandidate = Boolean(questions?.contract?.criteria?.candidate_1)
+    return {
+      answers: {
+        contract: { choice: hasGroundedCandidate ? 'candidate_1' : 'semantic_unknown', confidence: 0.95 },
+        compound_step: { noul: 0.1 },
+        step_relation: { choice: 'advances_current', confidence: 0.95 },
+        checkpoint_boundary: { choice: hasGroundedCandidate ? 'checkpoint_here' : 'keep_step_open', confidence: 0.95 },
+      },
+      provider: 'fixture-jev',
+      model: 'fixture-checkpoint',
+    }
   }
 
   const scopeReviewDecisionProvider = async () => {
@@ -297,6 +321,7 @@ async function prepare({ rcon, results, stateFile }) {
     stateFile,
     memory,
     provider,
+    interactionDecisionProvider,
     scopeReviewDecisionProvider,
     steeringDecisionProvider,
   })
@@ -348,6 +373,7 @@ async function prepare({ rcon, results, stateFile }) {
   )
   assert.equal(steeringCalls, 3)
   assert.equal(scopeCalls, 4)
+  assert.equal(checkpointCalls, 4, 'each authored prepare draft uses the live checkpoint-normalization contract')
 
   const ironAfter = JSON.parse(await rcon.command(actorIronCommand())).iron
   assert.ok(ironAfter >= ironBefore + 3, `real Factorio inventory did not reflect three admitted acquisition slices: before=${ironBefore} after=${ironAfter}`)
@@ -400,11 +426,28 @@ async function verify({ rcon, results, stateFile }) {
       return planMessage({
         chatMessage: 'Following the user-approved bounded alternate route.',
         step: 'Use the verified iron route while the unavailable frontier dependency is reconsidered',
+        minimum: before.iron_after + 1,
         roadmapNodeIds: ['next-capability-frontier'],
         developmentMode: 'vertical',
       })
     }
     throw new Error(`unexpected verify provider call ${providerCalls}`)
+  }
+
+  let checkpointCalls = 0
+  const interactionDecisionProvider = async (_state, questions) => {
+    checkpointCalls++
+    const hasGroundedCandidate = Boolean(questions?.contract?.criteria?.candidate_1)
+    return {
+      answers: {
+        contract: { choice: hasGroundedCandidate ? 'candidate_1' : 'semantic_unknown', confidence: 0.95 },
+        compound_step: { noul: 0.1 },
+        step_relation: { choice: 'advances_current', confidence: 0.95 },
+        checkpoint_boundary: { choice: hasGroundedCandidate ? 'checkpoint_here' : 'keep_step_open', confidence: 0.95 },
+      },
+      provider: 'fixture-jev',
+      model: 'fixture-checkpoint',
+    }
   }
 
   const scopeReviewDecisionProvider = async () => {
@@ -417,6 +460,7 @@ async function verify({ rcon, results, stateFile }) {
     stateFile,
     memory,
     provider,
+    interactionDecisionProvider,
     scopeReviewDecisionProvider,
     steeringDecisionProvider: async () => {
       throw new Error('restoring or blocking an in-flight plan must not invent a new steering boundary')
@@ -496,6 +540,7 @@ async function verify({ rcon, results, stateFile }) {
     steering_modes: planning.steering.history.slice(-3).map(entry => entry.mode),
     roadmap_revision_id: planning.roadmap.roadmap_revision_id,
     provider_calls: providerCalls,
+    checkpoint_calls: checkpointCalls,
     scope_calls: scopeCalls,
   }, null, 2))
 
