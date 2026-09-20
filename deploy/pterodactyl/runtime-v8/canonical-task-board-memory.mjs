@@ -329,6 +329,25 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     state.revision = (state.revision ?? 0) + 1
     state.updated_at = now
     this.planByNpc.set(key, state)
+    // Completion contracts are still discovered after the initial draft is
+    // accepted. Pre-commit reducer steps may be safely replaced with a fresh
+    // draft carrying the newly grounded contract; immutable plans are never
+    // edited in place.
+    const planning = this.planningByNpc.get(key)
+    const active = getActivePlan(planning)
+    if (active && ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING, PLAN_STATUS.COMPLETED, PLAN_STATUS.BLOCKED].includes(active.status)) {
+      let refreshed = applyPlanningEvent(planning, {
+        type: PLANNING_EVENT.DRAFT_CREATED,
+        now,
+        origin: 'checkpoint_contract_refresh',
+        steps: state.task_board.steps.map(step => ({
+          description: step.description,
+          completion_contract: safeDurableStepCompletionContract(step.completion_contract),
+        })),
+      })
+      this.planningByNpc.set(key, refreshed)
+      this.planningProjection(key, state)
+    }
     return state
   }
 
@@ -336,7 +355,21 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const state = key ? this.planByNpc.get(key) : undefined
     if (!state || state.status !== 'completed') return state
     this.planByNpc.delete(key)
+    // The current slot is retired. Historical/learning surfaces own completed
+    // task history; leaving this reducer under the reusable NPC key would make
+    // the next goal inherit the completed plan identity.
+    this.planningByNpc.delete(key)
     return undefined
+  }
+
+  clearTaskContext(key) {
+    const result = super.clearTaskContext(key)
+    if (key) this.planningByNpc.delete(key)
+    return result
+  }
+
+  planningReasoningEpoch(key) {
+    return reasoningEpochOf(this.planningByNpc.get(key))
   }
 
   planContext(key) {
