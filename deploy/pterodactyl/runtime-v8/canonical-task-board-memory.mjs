@@ -695,6 +695,13 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const state = key ? this.planByNpc.get(key) : undefined
     const normalized = safeDurableStepCompletionContract(contract)
     if (!state || state.status !== 'active' || !normalized || !state.task_board || !Array.isArray(state.task_board.steps)) return state
+    // Completion meaning freezes with the committed reducer plan. Guard BEFORE
+    // touching the legacy compatibility board so no post-commit Jev/checkpoint
+    // pass can make compatibility code reason from semantics different from the
+    // immutable plan the runtime is actually executing.
+    const planning = this.planningByNpc.get(key)
+    const active = getActivePlan(planning)
+    if (active && [PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING, PLAN_STATUS.COMPLETED, PLAN_STATUS.BLOCKED].includes(active.status)) return state
     const index = state.task_board.steps.findIndex(step => step?.id === stepId)
     if (index < 0) return state
     const previous = state.task_board.steps[index]
@@ -714,13 +721,10 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     state.revision = (state.revision ?? 0) + 1
     state.updated_at = now
     this.planByNpc.set(key, state)
-    // Completion contracts are still discovered after the initial draft is
-    // accepted. Pre-commit reducer steps may be safely replaced with a fresh
-    // draft carrying the newly grounded contract; immutable plans are never
-    // edited in place.
-    const planning = this.planningByNpc.get(key)
-    const active = getActivePlan(planning)
-    if (active && ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING, PLAN_STATUS.COMPLETED, PLAN_STATUS.BLOCKED].includes(active.status)) {
+    // Completion contracts are discovered before commit. A mutable pre-commit
+    // reducer draft may be replaced with a fresh draft carrying the newly
+    // grounded contract; immutable plans were already rejected above.
+    if (active) {
       const refreshed = applyPlanningEvent(planning, {
         type: PLANNING_EVENT.DRAFT_CREATED,
         now,

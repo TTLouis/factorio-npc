@@ -1325,3 +1325,39 @@ test('next shelf draft replaces a completed legacy board before checkpoint refre
   )
   assert.deepEqual(refreshed.roadmap_node_ids, ['second'])
 })
+
+
+test('committed completion meaning cannot be rewritten through the legacy checkpoint adapter', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const key = 'npc:airi'
+  const plan = proposedPlan(['Gather iron'])
+  const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Gather iron safely' }, plan)
+  const reconciled = memory.reconcileTaskBoard(key, undefined, plan, recorded, { allowReplan: false })
+  const stepId = reconciled.state.task_board.active_step_id
+  const committedContract = {
+    mode: 'all',
+    confidence: 0.95,
+    requirements: [{ kind: 'inventory_count', item_name: 'iron-ore', minimum: 10 }],
+  }
+  memory.setStepCompletionContract(key, stepId, committedContract, { now: 20 })
+  memory.commitPlanningPlan(key, { now: 30, review: REVIEWED_ACTIONABLE })
+
+  const reducerBefore = getActivePlan(memory.planningState(key))
+  const legacyBefore = memory.currentPlan(key).task_board.steps[0].completion_contract
+  assert.equal(reducerBefore.status, PLAN_STATUS.COMMITTED)
+  assert.deepEqual(reducerBefore.steps[0].completion_contract, legacyBefore)
+
+  const attemptedRewrite = {
+    mode: 'all',
+    confidence: 0.99,
+    requirements: [{ kind: 'inventory_count', item_name: 'iron-ore', minimum: 999 }],
+  }
+  memory.setStepCompletionContract(key, stepId, attemptedRewrite, { now: 40 })
+
+  const reducerAfter = getActivePlan(memory.planningState(key))
+  const legacyAfter = memory.currentPlan(key).task_board.steps[0].completion_contract
+  assert.equal(reducerAfter.plan_id, reducerBefore.plan_id)
+  assert.equal(reducerAfter.status, PLAN_STATUS.COMMITTED)
+  assert.deepEqual(reducerAfter.steps[0].completion_contract, reducerBefore.steps[0].completion_contract)
+  assert.deepEqual(legacyAfter, legacyBefore, 'compatibility board must freeze with the committed semantic contract')
+})
