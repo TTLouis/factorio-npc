@@ -723,6 +723,45 @@ test('STRUCTURAL_BLOCKER_CONFIRMED freezes the immutable plan with evidence', ()
   assert.equal(state.plans.length, 1)
 })
 
+
+test('BLOCKED_CHOICE_RECORDED persists explicit user choice without thawing or replanning', () => {
+  let state = committedFixture()
+  const plan = getActivePlan(state)
+  state = applyPlanningEvent(state, {
+    type: PLANNING_EVENT.STRUCTURAL_BLOCKER_CONFIRMED,
+    now: 1600,
+    source: 'runtime',
+    plan_id: plan.plan_id,
+    reason_code: 'resource_not_in_scope',
+    evidence_refs: ['batch_11'],
+  })
+
+  const ignored = applyPlanningEvent(state, {
+    type: PLANNING_EVENT.BLOCKED_CHOICE_RECORDED,
+    now: 1650,
+    source: 'main_llm',
+    approved_by: 'louis',
+    choice: 'revise',
+  })
+  assert.equal(ignored, state, 'only explicit user authority may record a blocked choice')
+
+  const recorded = applyPlanningEvent(state, {
+    type: PLANNING_EVENT.BLOCKED_CHOICE_RECORDED,
+    now: 1700,
+    source: 'user',
+    approved_by: 'louis',
+    choice: 'revise',
+  })
+  const blocked = getActivePlan(recorded)
+  assert.equal(blocked.status, PLAN_STATUS.BLOCKED)
+  assert.equal(blocked.blocker.user_choice.choice, 'revise')
+  assert.equal(blocked.blocker.user_choice.approved_by, 'louis')
+  assert.equal(blocked.blocker.user_choice.at, 1700)
+  assert.equal(recorded.plans.length, 1, 'recording revise must not create a successor plan')
+  assert.equal(blocked.superseded_by_plan_id, null)
+  assert.deepEqual(blocked.steps.map(step => step.description), plan.steps.map(step => step.description))
+})
+
 // --- successor plans ------------------------------------------------------------
 
 test('only USER_REVISION_APPROVED produces plan_version + 1 with lineage', () => {
