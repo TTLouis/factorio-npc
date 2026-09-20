@@ -249,10 +249,13 @@ export function mixedDirectionThresholds() {
  * The steering question — "what kind of development next?" — is answered
  * separately by `parseSteeringRecommendation` (roadmap 4.9).
  *
- * `inseparable` is Jev's escape hatch for the genuinely inseparable case:
- * it downgrades the finding to a note instead of a scope smell.
+ * There is deliberately NO inseparability escape hatch. Jev used to be able to
+ * answer "this mixture cannot be cut" and suppress the finding outright, but
+ * that was an unverifiable model claim silencing the one check §4.5 exists to
+ * make. Jev reports the smell; the Main LLM — the author, and the only party
+ * that can actually move the boundary — decides whether the mixed slice stands.
  */
-export function classifySliceDirection(stepDirections, { inseparable = false } = {}) {
+export function classifySliceDirection(stepDirections) {
   const classified = asArray(stepDirections)
     .map((value) => (typeof value === 'string' ? value.trim().toLowerCase() : undefined))
     .filter((value) => FAMILY_CHOICES.development.includes(value))
@@ -263,7 +266,6 @@ export function classifySliceDirection(stepDirections, { inseparable = false } =
     classified_step_count: classified.length,
     directional_step_count: directional,
     counts,
-    inseparable_claimed: inseparable === true,
     ...mixedDirectionThresholds(),
   }
   if (directional === 0) {
@@ -282,7 +284,7 @@ export function classifySliceDirection(stepDirections, { inseparable = false } =
     minority_step_count: minorityCount,
     minority_share: minorityShare,
     supporting_work_allowed: minorityCount > 0 && withinTolerance,
-    mixed_direction: minorityCount > 0 && !withinTolerance && inseparable !== true,
+    mixed_direction: minorityCount > 0 && !withinTolerance,
   }
 }
 
@@ -319,15 +321,6 @@ export function scopeReviewQuestions() {
       instructions:
         'For each draft step in order, classify the development direction that step pulls in, relative to the current critical path rather than the surface action. Use one entry per step. This DESCRIBES the draft; it is not a recommendation about what the next slice should be.',
       criteria: developmentDecisionQuestions().development.criteria,
-    },
-    mixed_direction_inseparable: {
-      type: 'choice',
-      instructions:
-        'Only if the draft mixes both development directions: is the mixture genuinely inseparable, meaning the supporting work from the other direction is what makes this slice executable at all?',
-      criteria: {
-        yes: 'The opposite-direction work cannot be cut without making the slice unexecutable.',
-        no: 'The slice could end at a cleaner boundary with one dominant direction.',
-      },
     },
     actionable_prefix: {
       type: 'score',
@@ -407,25 +400,20 @@ export function parseScopeReview(response, { draftStepCount } = {}) {
   const prefixSection = sectionOf(response, 'actionable_prefix')
 
   const directionSection = sectionOf(response, 'step_directions')
-  const inseparableSection = sectionOf(response, 'mixed_direction_inseparable')
 
   const choices = FAMILY_CHOICES.scope_review
   const selected = choiceOf(response, 'scope_review') ?? section.choice ?? section.verdict
   let verdict = choices.includes(selected) ? selected : 'refine'
 
-  // Roadmap 4.5: one dominant development mode per committed slice.
-  const inseparableAnswer = choiceOf(response, 'mixed_direction_inseparable')
-    ?? inseparableSection.choice
-    ?? section.mixed_direction_inseparable
-  const direction = classifySliceDirection(
-    [
-      ...asArray(section.step_directions),
-      ...asArray(directionSection.choices),
-      ...asArray(directionSection.step_directions),
-      ...asArray(response?.answers?.step_directions?.choices),
-    ],
-    { inseparable: inseparableAnswer === 'yes' || inseparableAnswer === true },
-  )
+  // Roadmap 4.5: one dominant development mode per committed slice. A provider
+  // that still answers the retired `mixed_direction_inseparable` question is
+  // simply ignored — the claim has no route into the classification.
+  const direction = classifySliceDirection([
+    ...asArray(section.step_directions),
+    ...asArray(directionSection.choices),
+    ...asArray(directionSection.step_directions),
+    ...asArray(response?.answers?.step_directions?.choices),
+  ])
 
   const rawReasonCodes = [
     ...asArray(section.reason_codes),

@@ -554,7 +554,10 @@ test('the scope review asks for per-step direction relative to the critical path
   assert.match(questions.step_directions.instructions, /relative to the current critical path rather than the surface action/i)
   assert.match(questions.step_directions.instructions, /DESCRIBES the draft/)
   assert.deepEqual(Object.keys(questions.step_directions.criteria), ['vertical', 'horizontal', 'maintain', 'recover'])
-  assert.deepEqual(Object.keys(questions.mixed_direction_inseparable.criteria), ['yes', 'no'])
+  // Tripwire, not an omission: Jev is never asked whether a mixture is
+  // inseparable. That was an unverifiable model claim suppressing the §4.5
+  // finding; the boundary call belongs to the Main LLM.
+  assert.equal(questions.mixed_direction_inseparable, undefined)
 })
 
 test('mixed-direction classification uses named thresholds, not magic numbers', () => {
@@ -580,10 +583,10 @@ test('mixed-direction classification uses named thresholds, not magic numbers', 
   assert.equal(smell.mixed_direction, true)
   assert.equal(smell.minority_share, 0.5)
 
-  // Unless Jev says the mixture is genuinely inseparable.
-  const inseparable = classifySliceDirection(['vertical', 'horizontal', 'horizontal', 'vertical'], { inseparable: true })
-  assert.equal(inseparable.mixed_direction, false)
-  assert.equal(inseparable.inseparable_claimed, true)
+  // ...and no second argument can talk it out of that.
+  const claimed = classifySliceDirection(['vertical', 'horizontal', 'horizontal', 'vertical'], { inseparable: true })
+  assert.equal(claimed.mixed_direction, true)
+  assert.equal(claimed.inseparable_claimed, undefined)
 
   // maintain/recover steps are not directions and do not create a mixture.
   const undirected = classifySliceDirection(['vertical', 'maintain', 'recover', 'vertical'])
@@ -609,16 +612,22 @@ test('a substantially mixed draft cannot be reported as actionable', () => {
   assert.equal(parsed.supporting_work_allowed, false)
 })
 
-test('an inseparable mixture, and genuine supporting work, stay actionable', () => {
-  const inseparable = parseScopeReview({
-    answers: {
-      scope_review: { choice: 'actionable', step_directions: ['vertical', 'horizontal'] },
-      mixed_direction_inseparable: { choice: 'yes' },
-    },
-  }, { draftStepCount: 2 })
-  assert.equal(inseparable.verdict, 'actionable')
-  assert.equal(inseparable.mixed_direction, false)
-  assert.deepEqual(inseparable.reason_codes, [])
+test('a claimed inseparable mixture no longer buys its way out; supporting work still does', () => {
+  // An even vertical/horizontal split is a 50% minority share -- well past the
+  // tolerance. It used to pass review purely because the flag said so, which is
+  // the whole reason the flag is gone. It is sent back however loudly the
+  // provider insists the mixture cannot be cut.
+  for (const directions of [['vertical', 'horizontal'], ['vertical', 'horizontal', 'horizontal', 'vertical']]) {
+    const insisted = parseScopeReview({
+      answers: {
+        scope_review: { choice: 'actionable', step_directions: directions },
+        mixed_direction_inseparable: { choice: 'yes' },
+      },
+    }, { draftStepCount: directions.length })
+    assert.equal(insisted.verdict, 'refine')
+    assert.equal(insisted.mixed_direction, true)
+    assert.ok(insisted.reason_codes.includes('mixed_outcomes'))
+  }
 
   const supporting = parseScopeReview({
     answers: {

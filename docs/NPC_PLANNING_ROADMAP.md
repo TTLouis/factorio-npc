@@ -344,7 +344,9 @@ Should normally not also include:
 - pushing through multiple new science tiers.
 ```
 
-Jev's pre-commit scope review should detect substantial mixed-direction drafts and ask the Main LLM to choose a cleaner boundary unless the mixture is genuinely inseparable.
+Jev's pre-commit scope review should detect substantial mixed-direction drafts and ask the Main LLM to choose a cleaner boundary.
+
+**Amended 2026-09-20.** This originally read "unless the mixture is genuinely inseparable", implemented as a yes/no question to Jev. That made an unverifiable model claim able to suppress the very finding this section exists to produce, so it is gone. Jev reports the smell and never waives it; the Main LLM — the author, and the only party that can actually move the boundary — decides whether the mixed slice stands. Genuinely small supporting work is still allowed, but by the measured tolerance in `mixedDirectionThresholds()`, not by assertion.
 
 ### 4.6 Steering changes how the Main LLM should plan
 
@@ -812,7 +814,7 @@ Add durable advisory steering context and a bounded Jev steering contract:
 - allow shelf nodes to carry non-binding development hints;
 - feed steering recommendation into the Main LLM before it drafts the next plan slice;
 - keep scope review separate from steering review;
-- require one dominant steering mode per committed slice unless a mixed slice is demonstrably inseparable;
+- require one dominant steering mode per committed slice, waivable only by the measured supporting-work tolerance and never by a Jev inseparability claim (see 4.5);
 - prove that steering cannot mutate or replace an executing plan.
 
 ### Phase 7 — Blocker / user revision protocol
