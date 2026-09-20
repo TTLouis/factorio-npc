@@ -71,6 +71,65 @@ jobs:
         with:
           node-version: '24'
 
+      - name: Validate local Compose RCON secret boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .env
+          trap 'rm -f .env' EXIT
+
+          if env -u FACTORIO_RCON_PASSWORD docker compose -f compose.devcontainer.yml config >/tmp/devcontainer-missing-password.log 2>&1; then
+            echo 'compose.devcontainer.yml accepted a missing FACTORIO_RCON_PASSWORD'
+            exit 1
+          fi
+          grep -F 'set FACTORIO_RCON_PASSWORD in repo-root .env' /tmp/devcontainer-missing-password.log
+
+          cat > .env <<'EOF'
+          FACTORIO_RCON_PASSWORD=ci-rcon-sentinel
+          OPENAI_API_KEY=ci-openai-must-not-leak
+          OPENAI_API_BASEURL=https://example.invalid/v1
+          OPENAI_MODEL=ci-model
+          FACTORIO_USERNAME=ci-factorio-user-must-not-leak
+          FACTORIO_TOKEN=ci-factorio-token-must-not-leak
+          JEV_TYPESAFE_API_KEY=ci-jev-sentinel
+          DESKTOP_OPERATOR_TOKEN=ci-desktop-operator-sentinel
+          EOF
+
+          docker compose -f compose.devcontainer.yml config --format json > /tmp/devcontainer-compose.json
+          docker compose -f compose.yml -f compose.e2e.yml -f compose.desktop-operator.yml --profile desktop-operator config --format json > /tmp/e2e-compose.json
+
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict'
+          import fs from 'node:fs'
+
+          const dev = JSON.parse(fs.readFileSync('/tmp/devcontainer-compose.json', 'utf8'))
+          const rconApi = dev.services['rcon-api']
+          assert.deepEqual(Object.keys(rconApi.environment).sort(), [
+            'FACTORIO_RCON_HOST',
+            'FACTORIO_RCON_PASSWORD',
+            'FACTORIO_RCON_PORT',
+          ])
+          assert.equal(rconApi.environment.FACTORIO_RCON_PASSWORD, 'ci-rcon-sentinel')
+          assert.equal(rconApi.environment.FACTORIO_RCON_HOST, 'localhost')
+          assert.equal(rconApi.network_mode, 'host')
+          assert.equal(rconApi.ports, undefined)
+          for (const key of ['OPENAI_API_KEY', 'OPENAI_API_BASEURL', 'OPENAI_MODEL', 'FACTORIO_USERNAME', 'FACTORIO_TOKEN', 'TYPESAFE_API_KEY']) {
+            assert.equal(Object.hasOwn(rconApi.environment, key), false)
+          }
+
+          const local = JSON.parse(fs.readFileSync('/tmp/e2e-compose.json', 'utf8'))
+          assert.equal(local.services['sgluna-factorio'].environment.SGLUNA_RCON_PASSWORD, 'ci-rcon-sentinel')
+          assert.equal(local.services['desktop-operator'].environment.SGLUNA_RCON_PASSWORD, 'ci-rcon-sentinel')
+
+          const rconPort = local.services['sgluna-factorio'].ports.find(port => Number(port.target) === 27015)
+          assert.ok(rconPort, 'missing local E2E RCON port')
+          assert.equal(rconPort.host_ip, '127.0.0.1')
+
+          const operatorPort = local.services['desktop-operator'].ports.find(port => Number(port.target) === 24181)
+          assert.ok(operatorPort, 'missing desktop operator port')
+          assert.equal(operatorPort.host_ip, '127.0.0.1')
+          NODE
+
       - name: Check generated egg artifacts
         run: |
           sha256sum deploy/pterodactyl/payload-src/installer.sh

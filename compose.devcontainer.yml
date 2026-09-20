@@ -1,0 +1,23 @@
+# Dev Container Compose entrypoint.
+# Keep this file at the repository root so Docker Compose loads the repo-root
+# .env for interpolation. Only explicitly listed variables are injected into
+# each service; do not add env_file: .env to the third-party rcon-api service.
+services:
+  factorio-npc:
+    build:
+      context: .
+      dockerfile: .devcontainer/Dockerfile
+    network_mode: host
+    volumes:
+      # Mount the root folder that contains .git
+      - ./:/workspace:cached
+    entrypoint: /bin/bash
+    command: ["-c", "trap : TERM INT; sleep infinity & wait"]
+  rcon-api:
+    image: ghcr.io/nekomeowww/factorio-rcon-api:2.0.6
+    network_mode: host
+    environment:
+      FACTORIO_RCON_HOST: localhost
+      FACTORIO_RCON_PORT: 27015
+      FACTORIO_RCON_PASSWORD: ${FACTORIO_RCON_PASSWORD:?set FACTORIO_RCON_PASSWORD in repo-root .env}
+    restart: always
