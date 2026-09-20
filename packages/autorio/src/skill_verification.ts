@@ -690,7 +690,9 @@ export function evaluate_live_topology(skill: SkillDefinition, analysis_id: stri
       const observed = skill_candidate_definition_from_block(analysis.id, block.id, 1)
       if (skill_novelty_key(observed) === expected) return { match: true, block_id: block.id }
     }
-    catch (_) {}
+    catch {
+      // Ignore blocks that cannot be reconstructed as reusable skill candidates.
+    }
   }
   return { match: false, reason: `no live block matched reusable topology across ${analysis.blocks.length} observed block(s)` }
 }
@@ -803,14 +805,14 @@ function begin_reobservation(run: SkillVerificationRun, skill: SkillDefinition) 
   })
 }
 
-function get_controlled_actor_for_run(run: SkillVerificationRun) {
+let verification_actor_getter: (() => ControlledActor | undefined) | undefined
+
+function get_controlled_actor_for_run(_run: SkillVerificationRun) {
   const status = remote.call('autorio_operations', 'status') as any
   const actor_id = status?.actor?.actor_id
   if (actor_id === undefined) return undefined
   return verification_actor_getter?.()
 }
-
-let verification_actor_getter: (() => ControlledActor | undefined) | undefined
 
 function process_run_tick(run: SkillVerificationRun) {
   const skill = get_skill_definition(run.skill_id)
@@ -828,7 +830,7 @@ function process_run_tick(run: SkillVerificationRun) {
     if (!actor || !actor.is_valid || actor.surface.index !== run.target_surface_index) return fail_skill_verification_run(run, 'execution', 'controlled actor changed surface or became unavailable after construction')
     const resolved = resolve_built_entities(actor, run, template)
     if (!resolved.ok) return fail_skill_verification_run(run, 'execution', resolved.error)
-    let next = update_run(run, { built_entities: resolved.entities, ...clear_batch_identity() })
+    const next = update_run(run, { built_entities: resolved.entities, ...clear_batch_identity() })
     const power_reason = power_block_reason(next, template)
     if (power_reason) return block_run(next, power_reason)
     const configured = queue_configuration(next, template)
@@ -858,7 +860,7 @@ function process_run_tick(run: SkillVerificationRun) {
 
   if (run.state === 'observing_output') {
     const current = count_output_items(run, skill)
-    let next = update_run(run, { observed_output_counts: current })
+    const next = update_run(run, { observed_output_counts: current })
     if (output_delta_satisfied(skill, run.baseline_output_counts, current)) {
       if (run.topology_match !== true) return fail_skill_verification_run(next, 'semantic', 'production output appeared, but the live topology did not match the reusable candidate authority', [topology_evidence(next)])
       return finish_verified(next)

@@ -85,7 +85,7 @@ function duplicate_for_key(novelty_key: string) {
 
 function unique_candidate_id(candidate: SkillDefinition, novelty_key: string) {
   const existing = list_skill_definitions()
-  let id = candidate.id
+  const id = candidate.id
   for (const skill of existing) {
     if (skill.id !== id) continue
     if (skill_novelty_key(skill) === novelty_key) return id

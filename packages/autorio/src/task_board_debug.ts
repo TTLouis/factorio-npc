@@ -5,11 +5,8 @@ import * as gui_text from './task_board_gui_text'
 
 export const DEBUG_BUTTON_NAME = 'airi_task_board_debug'
 export const DEBUG_CLOSE_BUTTON_NAME = 'airi_task_board_debug_close'
-const DEBUG_ROOT_NAME = 'airi_task_board_debug_panel'
-const DEBUG_BODY_NAME = 'airi_task_board_debug_body'
 const DEBUG_WIDTH = 720
 const DEBUG_KEY_WIDTH = 118
-const DEBUG_VALUE_WIDTH = DEBUG_WIDTH - DEBUG_KEY_WIDTH - 54
 const CONVERSATION_HEIGHT = 300
 const CONVERSATION = {
   section: 'airi_task_board_conversation_section',
@@ -23,14 +20,6 @@ const CONVERSATION = {
 }
 export const DEBUG_ACTIVITY_STATE_NAME = 'airi_task_board_debug_activity_state'
 export const DEBUG_ACTIVITY_SCROLL_NAME = 'airi_task_board_debug_activity_scroll'
-const DEBUG_ACTIVITY = {
-  section: 'airi_task_board_debug_activity_section',
-  header: 'airi_task_board_debug_activity_header',
-  count: 'airi_task_board_debug_activity_count',
-  empty: 'airi_task_board_debug_activity_empty',
-  feed: 'airi_task_board_debug_activity_feed',
-}
-const DEBUG_ACTIVITY_ROWS = 48
 
 declare const storage: {
   airi_task_board_debug_open?: Record<number, boolean>

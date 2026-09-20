@@ -256,7 +256,6 @@ export function new_crafting_controller(get_actor: () => ControlledActor | undef
   }
 
   function tick(actor: ControlledActor) {
-    const task = manager.player_state.parameters_craft_item
     if (!task || manager.player_state.task_state !== TaskStates.CRAFTING) {
       return
     }

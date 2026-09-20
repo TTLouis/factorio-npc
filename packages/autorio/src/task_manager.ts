@@ -275,7 +275,6 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
       default:
         assert_task_activation_exhaustive(task)
         fail_unsupported_task_state(task_type)
-        return
     }
   }
 
