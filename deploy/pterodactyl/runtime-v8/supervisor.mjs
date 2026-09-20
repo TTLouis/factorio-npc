@@ -1142,6 +1142,8 @@ export function taskBoardUiSnapshot(state, live) {
   return {
     goal_id: String(board.goal_id ?? state.goal_id ?? '').slice(0, 100),
     objective: String(state.objective ?? '').slice(0, 500),
+    plan: state?.planning?.plan,
+    blocked: state?.planning?.blocked,
     status: board.status,
     blocker: blocker.raw,
     blocker_summary: blocker.summary,
@@ -1281,12 +1283,22 @@ export async function finalizeCompletedTaskBoundary(session, result) {
 export async function executeUiControl(session, event) {
   if (!session?.rcon || !session?.agent) return false
 
+  const recordBlockedChoice = async (choice) => {
+    const agent = session.agent
+    const key = typeof agent.activePlanKey === 'function' ? agent.activePlanKey() : `npc:${session.npcId ?? 'airi'}`
+    const state = agent.memory?.recordBlockedChoice?.(key, choice, event.player_name, { now: Date.now() })
+    if (!state) return undefined
+    await agent.persistState?.()
+    return session.currentPlanState?.() ?? state
+  }
+
   if (event.action === 'keep_paused') {
     // BLOCKED is already a durable freeze. Do not relabel it PAUSED or ask the
     // model to recover it; this is an explicit acknowledgement only.
-    const state = session.currentPlanState?.()
+    let state = session.currentPlanState?.()
     if (state?.status !== 'blocked') return false
     await stopWorldWork(session)
+    state = await recordBlockedChoice('keep_paused') ?? state
     await session.syncTaskBoardUi(state)
     await session.printChat('Kept the blocked AIRI plan frozen. No replanning or world work will start until you explicitly revise it or cancel it.')
     return true
@@ -1295,9 +1307,10 @@ export async function executeUiControl(session, event) {
   if (event.action === 'revise') {
     // A click opens the user-controlled revision path, but contains no goals
     // or constraints from which the runtime may fabricate a successor plan.
-    const state = session.currentPlanState?.()
+    let state = session.currentPlanState?.()
     if (state?.status !== 'blocked') return false
     await stopWorldWork(session)
+    state = await recordBlockedChoice('revise') ?? state
     await session.syncTaskBoardUi(state)
     await session.printChat('The blocked plan remains frozen. Enter the revised goal or constraints in the Task Board prompt; AIRI will not replace this plan until you explicitly provide that revision.')
     return true
@@ -1307,9 +1320,10 @@ export async function executeUiControl(session, event) {
     // The control acknowledges the cancellation choice and makes the world
     // safe, but preserves the existing two-click TERMINATE confirmation for
     // irreversible durable-plan deletion.
-    const state = session.currentPlanState?.()
+    let state = session.currentPlanState?.()
     if (state?.status !== 'blocked') return false
     await stopWorldWork(session)
+    state = await recordBlockedChoice('cancel') ?? state
     await session.syncTaskBoardUi(state)
     await session.printChat('Cancellation selected. The blocked plan remains frozen until you confirm TERMINATE in the Task Board.')
     return true
