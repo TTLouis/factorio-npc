@@ -104,6 +104,37 @@ const FRONTIER_STATUS_RANK = Object.freeze({
 
 export const DEVELOPMENT_MODES = Object.freeze(['vertical', 'horizontal', 'maintain', 'recover'])
 
+// The two modes that form the tick-tock cadence. `maintain` and `recover` are
+// real modes but they are not directions: they must not erase which direction
+// the cadence was last travelling in (roadmap 4.4).
+export const DIRECTIONAL_MODES = Object.freeze(['vertical', 'horizontal'])
+
+// --- roadmap shelf tuning (named, not magic) --------------------------------
+
+// Fields a caller might attach to a shelf node that would make it executable.
+// They are never read into a node; they are reported on the node as
+// `dropped_executable_fields` so an attempt to smuggle execution onto the
+// shelf is visible rather than silent (roadmap 3 / 14).
+export const SHELF_FORBIDDEN_EXECUTABLE_FIELDS = Object.freeze([
+  'steps',
+  'plan',
+  'plan_steps',
+  'operations',
+  'operation',
+  'actions',
+  'commands',
+  'completion',
+  'completion_contract',
+  'step_contracts',
+  'entities',
+  'blueprint',
+])
+
+// Roadmap 14 non-goal: "the shelf becomes a hidden executable mega-plan".
+// Refining one node may only produce a handful of coarser successors. Anything
+// beyond this per-parent fan-out is dropped from the revision and recorded.
+export const SHELF_REFINEMENT_MAX_FANOUT = 4
+
 export const GOAL_STATUS = Object.freeze({
   ACTIVE: 'active',
   COMPLETED: 'completed',
@@ -128,11 +159,54 @@ export const DEADLOCK_SIGNAL_KIND = Object.freeze({
   PROSE_ONLY_CEILING: 'prose_only_operation_ceiling',
 })
 
+// --- strategic steering (roadmap section 4) --------------------------------
+//
+// The steering record is ADVISORY PLANNING CONTEXT. It is not execution
+// authority: nothing in this module reads it to choose a step, an operation or
+// a completion, and no transition may touch a plan because of it.
+
+/** The only boundaries at which steering may be (re-)evaluated (roadmap 4.3). */
+export const STEERING_BOUNDARY = Object.freeze({
+  GOAL_ADMISSION: 'goal_admission',
+  PLAN_COMPLETED: 'plan_completed',
+  USER_REVISION_APPROVED: 'user_revision_approved',
+  USER_PRIORITY_CHANGE: 'user_priority_change',
+})
+
+const STEERING_BOUNDARIES = Object.freeze(Object.values(STEERING_BOUNDARY))
+
+/**
+ * Hysteresis tuning (roadmap 4.4). Tick-tock is a BIAS, not a state machine:
+ * there is deliberately no cap on consecutive same-mode slices. These
+ * constants only make it harder to FLIP direction on weak grounds.
+ */
+export const STEERING_HYSTERESIS = Object.freeze({
+  // A directional flip needs at least this much confidence in the proposal.
+  MIN_CONFIDENCE_TO_SWITCH: 0.6,
+  // The mode being left must have owned at least this many evaluated slices.
+  MIN_SLICES_BEFORE_SWITCH: 1,
+  // Grounded pressure for the proposed direction must exceed pressure for the
+  // current direction by at least this many distinct items.
+  MIN_PRESSURE_MARGIN: 1,
+  // Explicitly unbounded: consecutive vertical (or horizontal) slices are
+  // legal whenever they are justified. Stored as null, never as a number.
+  MAX_CONSECUTIVE_SAME_MODE: null,
+})
+
+export const STEERING_HOLD_REASON = Object.freeze({
+  LOW_CONFIDENCE: 'confidence_below_switch_threshold',
+  INSUFFICIENT_PRESSURE: 'insufficient_grounded_pressure_margin',
+  MODE_TOO_NEW: 'current_mode_owned_too_few_slices',
+  USER_PRIORITY_LOCKED: 'user_priority_locked',
+})
+
 // --- events ----------------------------------------------------------------
 
 export const PLANNING_EVENT = Object.freeze({
   GOAL_ACCEPTED: 'GOAL_ACCEPTED',
   ROADMAP_REVISED: 'ROADMAP_REVISED',
+  // Advisory steering evaluated at a safe planning boundary (roadmap 4.3).
+  STEERING_EVALUATED: 'STEERING_EVALUATED',
   DRAFT_CREATED: 'DRAFT_CREATED',
   JEV_REVIEW_REQUESTED: 'JEV_REVIEW_REQUESTED',
   JEV_REFINEMENT_REQUESTED: 'JEV_REFINEMENT_REQUESTED',
@@ -349,18 +423,34 @@ export function sanitizeCapabilityFrontier(raw, { nodeId = '' } = {}) {
 /**
  * Sanitize one Roadmap Shelf node. Shelf nodes are storage only: they carry
  * intent and lineage, never operations, never step contracts.
+ *
+ * `trusted` distinguishes two callers:
+ *   - restore (`trusted: true`) rehydrates a status this module itself derived;
+ *   - a roadmap revision (`trusted: false`, the default) is INCOMING guidance,
+ *     so its asserted status is discarded. Realization status is derived from
+ *     verified evidence and lineage, never from what the author claims
+ *     (roadmap 3). `invalidated` is the one status an author may assert,
+ *     because dropping a node is a legitimate revision act and is a downgrade.
  */
-export function sanitizeShelfNode(raw, { sequence = 0 } = {}) {
+export function sanitizeShelfNode(raw, { sequence = 0, trusted = false } = {}) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
   const intent = text(raw.intent, 400)
   if (!intent) return undefined
   const id = text(raw.id, 120) || `node_${sequence}_${fingerprint(intent)}`
   const developmentHint = DEVELOPMENT_MODES.includes(raw.development_hint) ? raw.development_hint : undefined
+  const droppedExecutable = SHELF_FORBIDDEN_EXECUTABLE_FIELDS
+    .filter(field => raw[field] !== undefined && raw[field] !== null)
+  const assertedStatus = SHELF_NODE_STATUSES.includes(raw.status) ? raw.status : SHELF_NODE_STATUS.TENTATIVE
+  const status = trusted || assertedStatus === SHELF_NODE_STATUS.INVALIDATED
+    ? assertedStatus
+    : SHELF_NODE_STATUS.TENTATIVE
   return {
     id,
+    ready_since: finiteNumber(raw.ready_since) ?? null,
+    ...(droppedExecutable.length > 0 ? { dropped_executable_fields: droppedExecutable } : {}),
     intent,
     why_it_matters: text(raw.why_it_matters, 400),
-    status: SHELF_NODE_STATUSES.includes(raw.status) ? raw.status : SHELF_NODE_STATUS.TENTATIVE,
+    status,
     depends_on: stringList(raw.depends_on, { max: 16, maxLength: 120 }),
     resolved_by: stringList(raw.resolved_by, { max: 32, maxLength: 160 }),
     assumptions: stringList(raw.assumptions, { max: 16, maxLength: 300 }),
@@ -455,6 +545,8 @@ export function createEmptyPlanningState() {
     roadmap_history: [],
     plans: [],
     active_plan_id: null,
+    // Durable ADVISORY steering record (roadmap 4.4). Planning context only.
+    steering: null,
     updated_at: 0,
     // Reasoning continuity marker. See REASONING_RESET_EVENTS above.
     reasoning_epoch: 0,
@@ -526,24 +618,40 @@ function mergeFrontierLineage(prior, next) {
   }
 }
 
-function createRoadmapRevision(state, { now, nodes, reason, sequence }) {
+function createRoadmapRevision(state, { now, nodes, reason, sequence, authority, evidenceRefs }) {
   const previous = state.roadmap
   const revisionId = `${state.goal.goal_id}_r${sequence}`
   const previousById = new Map((previous?.nodes ?? []).map(node => [node.id, node]))
   const incoming = []
   const seen = new Set()
+  // Roadmap 14 non-goal guard: one parent node may only fan out into a handful
+  // of coarse successors. Anything past the cap is dropped and recorded, so a
+  // refinement cannot quietly deposit a step-by-step mega-plan on the shelf.
+  const fanout = new Map()
+  const droppedForCoarseness = []
 
   boundedList(nodes, 64).forEach((raw, index) => {
     const node = sanitizeShelfNode(raw, { sequence: `${sequence}_${index + 1}` })
     if (!node || seen.has(node.id)) return
-    seen.add(node.id)
     const prior = previousById.get(node.id)
+    if (!prior && node.derived_from_node_id) {
+      const used = fanout.get(node.derived_from_node_id) ?? 0
+      if (used >= SHELF_REFINEMENT_MAX_FANOUT) {
+        droppedForCoarseness.push(node.id)
+        return
+      }
+      fanout.set(node.derived_from_node_id, used + 1)
+    }
+    seen.add(node.id)
     incoming.push({
       ...node,
       // Frontier evidence is durable state and survives roadmap revisions: a
       // revision may restate the frontier, but cannot erase what was verified.
       capability_frontier: mergeFrontierLineage(prior?.capability_frontier, node.capability_frontier),
       status: prior ? maxShelfNodeStatus(node.status, prior.status) : node.status,
+      // How long a node has been refinable is lineage too: restating it must
+      // not send it to the back of the refinement queue.
+      ready_since: prior?.ready_since ?? node.ready_since,
       // lineage preservation: results and plan links survive revisions.
       resolved_by: Array.from(new Set([...(prior?.resolved_by ?? []), ...node.resolved_by])),
       verified_results: Array.from(new Set([...(prior?.verified_results ?? []), ...node.verified_results])),
@@ -566,15 +674,21 @@ function createRoadmapRevision(state, { now, nodes, reason, sequence }) {
     })
   }
 
-  return {
+  return promoteReadyNodes({
     roadmap_revision_id: revisionId,
     goal_id: state.goal.goal_id,
     revision_index: (previous?.revision_index ?? 0) + 1,
     derived_from_revision_id: previous?.roadmap_revision_id ?? null,
     reason: text(reason, 300),
+    // Who was allowed to move long-horizon guidance, and on what evidence.
+    authority: text(authority, 60) || null,
+    evidence_refs: stringList(evidenceRefs, { max: 16, maxLength: 200 }),
     created_at: now,
     nodes: incoming,
-  }
+    ...(droppedForCoarseness.length > 0
+      ? { dropped_for_coarseness: { node_ids: droppedForCoarseness, max_fanout: SHELF_REFINEMENT_MAX_FANOUT } }
+      : {}),
+  }, now)
 }
 
 function maxShelfNodeStatus(current, candidate) {
@@ -633,6 +747,136 @@ function shelfStatusForFrontier(frontier) {
   return SHELF_NODE_STATUS.READY_TO_REFINE
 }
 
+// --- grounded shelf refinement readiness (roadmap 2 / 3 / 13 phase 5) -------
+
+/**
+ * Did this node actually acquire verified world evidence?
+ *
+ * `resolved_by` is only written by PLAN_COMPLETED, which itself requires
+ * runtime authority and every committed step completed by accepted runtime
+ * evidence. So all three of these are runtime-grounded; none can be written by
+ * the planner or by Jev.
+ */
+function nodeHasVerifiedEvidence(node) {
+  return node.resolved_by.length > 0
+    || node.verified_results.length > 0
+    || (node.capability_frontier?.satisfied_recognition_ids?.length ?? 0) > 0
+}
+
+/**
+ * A dependency counts as satisfied only when the world says so.
+ *
+ * REALIZED is the normal case. A CONTINUOUS frontier is the documented
+ * exception: it never latches to `reached`, so requiring REALIZED would leave
+ * everything downstream of an open-ended frontier permanently unrefinable.
+ * PARTIALLY_REALIZED on a continuous frontier therefore satisfies, but only
+ * once that frontier has verified evidence behind it.
+ */
+function dependencySatisfied(dependency) {
+  if (!dependency) return false
+  if (dependency.status === SHELF_NODE_STATUS.INVALIDATED) return false
+  if (!nodeHasVerifiedEvidence(dependency)) return false
+  if (dependency.status === SHELF_NODE_STATUS.REALIZED) return true
+  return dependency.status === SHELF_NODE_STATUS.PARTIALLY_REALIZED
+    && dependency.capability_frontier?.continuous === true
+}
+
+/**
+ * Readiness of one node, computed from the shelf itself. Never from an
+ * assertion: `sanitizeShelfNode` has already discarded any status an author
+ * claimed on an incoming revision.
+ *
+ * A node with no declared dependencies is ready because nothing on the shelf
+ * says anything blocks it — readiness is grounded in the (empty) dependency
+ * set, not in a claim. Coarse guidance that IS blocked has to say so.
+ */
+export function shelfNodeReadiness(roadmap, nodeId) {
+  const nodes = roadmap?.nodes ?? []
+  const byId = new Map(nodes.map(node => [node.id, node]))
+  const node = byId.get(text(nodeId, 120))
+  if (!node) return { node_id: text(nodeId, 120), exists: false, ready: false, reason: 'unknown_node', blocked_by: [] }
+  const blockedBy = []
+  for (const dependencyId of node.depends_on) {
+    const dependency = byId.get(dependencyId)
+    if (!dependency) blockedBy.push({ node_id: dependencyId, reason: 'dependency_not_on_shelf' })
+    else if (!dependencySatisfied(dependency)) {
+      blockedBy.push({
+        node_id: dependencyId,
+        reason: nodeHasVerifiedEvidence(dependency) ? 'dependency_not_realized' : 'dependency_has_no_verified_evidence',
+        status: dependency.status,
+      })
+    }
+  }
+  const terminal = node.status === SHELF_NODE_STATUS.INVALIDATED || node.status === SHELF_NODE_STATUS.REALIZED
+  const ready = !terminal && blockedBy.length === 0
+  return {
+    node_id: node.id,
+    exists: true,
+    ready,
+    status: node.status,
+    reason: terminal ? `node_${node.status}` : (ready ? 'dependencies_satisfied' : 'dependencies_unsatisfied'),
+    has_verified_evidence: nodeHasVerifiedEvidence(node),
+    blocked_by: blockedBy,
+  }
+}
+
+/**
+ * Promote TENTATIVE nodes whose dependencies the world has satisfied to
+ * READY_TO_REFINE. Monotonic, like the rest of the ladder: nothing is ever
+ * demoted here, and nothing is promoted past READY_TO_REFINE — the higher rungs
+ * belong to verified plan results only.
+ */
+function promoteReadyNodes(roadmap, now) {
+  if (!roadmap) return roadmap
+  let changed = false
+  const nodes = roadmap.nodes.map((node) => {
+    if (node.status !== SHELF_NODE_STATUS.TENTATIVE) return node
+    if (!shelfNodeReadiness(roadmap, node.id).ready) return node
+    changed = true
+    return { ...node, status: SHELF_NODE_STATUS.READY_TO_REFINE, ready_since: node.ready_since ?? now }
+  })
+  return changed ? { ...roadmap, nodes } : roadmap
+}
+
+/**
+ * The nearest useful nodes to refine next, ordered.
+ *
+ * "Nearest useful" means: work already underway first (PARTIALLY_REALIZED),
+ * then nodes the world has unblocked, longest-ready first so guidance does not
+ * starve. This is a READ. It returns intent and lineage — never steps, never
+ * operations. The Main LLM chooses from it; nothing here commits anything.
+ */
+export function shelfRefinementCandidates(state, { limit = 8 } = {}) {
+  const roadmap = state?.roadmap
+  const nodes = roadmap?.nodes ?? []
+  const order = { [SHELF_NODE_STATUS.PARTIALLY_REALIZED]: 0, [SHELF_NODE_STATUS.READY_TO_REFINE]: 1 }
+  const candidates = nodes
+    .map((node, index) => ({ node, index, readiness: shelfNodeReadiness(roadmap, node.id) }))
+    .filter(entry => entry.readiness.ready && order[entry.node.status] !== undefined)
+    .sort((left, right) => (order[left.node.status] - order[right.node.status])
+      || ((left.node.ready_since ?? Number.MAX_SAFE_INTEGER) - (right.node.ready_since ?? Number.MAX_SAFE_INTEGER))
+      || (left.index - right.index))
+    .slice(0, Math.max(0, Math.min(32, limit)))
+    .map(entry => ({
+      node_id: entry.node.id,
+      intent: entry.node.intent,
+      why_it_matters: entry.node.why_it_matters,
+      status: entry.node.status,
+      // Non-binding (roadmap 4.8). Advice about KIND of work, not an operation.
+      development_hint: entry.node.development_hint ?? null,
+      depends_on: [...entry.node.depends_on],
+      resolved_by: [...entry.node.resolved_by],
+      verified_results: [...entry.node.verified_results],
+      ready_since: entry.node.ready_since ?? null,
+    }))
+  return deepFreeze(candidates)
+}
+
+/** The single nearest useful node, or undefined when the shelf has none. */
+export function nearestShelfRefinementTarget(state) {
+  return shelfRefinementCandidates(state, { limit: 1 })[0]
+}
+
 /**
  * Attach a completed plan's verified results back to the shelf nodes it
  * resolved, moving each node along the realization ladder.
@@ -686,6 +930,13 @@ function createPlan(state, {
 }) {
   const planId = `${state.goal.goal_id}_p${sequence}`
   const sanitizedSteps = sanitizeSteps(steps, { planId, planVersion })
+  const nodeIds = stringList(roadmapNodeIds, { max: 16, maxLength: 120 })
+  const mode = DEVELOPMENT_MODES.includes(developmentMode) ? developmentMode : 'maintain'
+  // Which of the nodes this draft claims to refine had actually been unblocked
+  // by the world when it was authored. Recorded, not enforced: the Main LLM
+  // authors plans (roadmap 1.3) and may deliberately refine a node the shelf
+  // still considers blocked. Making that visible is the point.
+  const readiness = nodeIds.map(id => shelfNodeReadiness(state.roadmap, id))
   const progress = {}
   sanitizedSteps.forEach((step, index) => {
     progress[step.step_id] = { ...emptyStepProgress(), status: index === 0 ? 'active' : 'pending' }
@@ -695,8 +946,24 @@ function createPlan(state, {
     plan_version: planVersion,
     goal_id: state.goal.goal_id,
     roadmap_revision_id: state.roadmap?.roadmap_revision_id ?? null,
-    roadmap_node_ids: stringList(roadmapNodeIds, { max: 16, maxLength: 120 }),
-    development_mode: DEVELOPMENT_MODES.includes(developmentMode) ? developmentMode : 'maintain',
+    roadmap_node_ids: nodeIds,
+    development_mode: mode,
+    refinement_grounding: {
+      ready_node_ids: readiness.filter(item => item.ready).map(item => item.node_id),
+      not_ready: readiness.filter(item => !item.ready).map(item => ({ node_id: item.node_id, reason: item.reason })),
+    },
+    // Which advisory steering the draft was written under (roadmap 4.9:
+    // steering is fed to the Main LLM BEFORE it drafts). Snapshot, not a rule.
+    steering_at_draft: state.steering
+      ? {
+          mode: state.steering.current_mode,
+          steering_sequence: state.steering.sequence,
+          critical_path: state.steering.critical_path,
+          // One dominant mode per slice (roadmap 4.5) is judged by Jev's scope
+          // review; a divergence from the advisory mode is merely recorded.
+          diverges_from_steering: state.steering.current_mode !== null && mode !== state.steering.current_mode,
+        }
+      : null,
     status: PLAN_STATUS.DRAFT,
     steps: sanitizedSteps,
     active_step_index: 0,
@@ -900,6 +1167,185 @@ export function lineageOf(state, { planId } = {}) {
   })
 }
 
+// --- strategic steering (roadmap section 4) --------------------------------
+
+function sanitizeSteeringPressure(raw) {
+  const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
+  return {
+    vertical: Array.from(new Set(stringList(source.vertical, { max: 12, maxLength: 200 }))),
+    horizontal: Array.from(new Set(stringList(source.horizontal, { max: 12, maxLength: 200 }))),
+  }
+}
+
+function clamp01(value) {
+  const number = finiteNumber(value)
+  if (number === undefined) return 0
+  return Math.max(0, Math.min(1, number))
+}
+
+/**
+ * Is `boundary` a SAFE semantic boundary in the current state (roadmap 4.3)?
+ *
+ * Two independent gates, both required:
+ *
+ *   1. No plan may be in flight. If any plan is COMMITTED or EXECUTING,
+ *      steering is refused outright — "steering" must never become a loophole
+ *      for touching a healthy committed plan mid-flight.
+ *   2. The claimed boundary must actually be true of durable state. Naming
+ *      `plan_completed` does not make a plan complete.
+ */
+export function isSafeSteeringBoundary(state, { boundary, planId, source } = {}) {
+  const current = state ?? createEmptyPlanningState()
+  const name = text(boundary, 60)
+  if (!STEERING_BOUNDARIES.includes(name)) return { safe: false, boundary: name, reason: 'unknown_boundary' }
+  if (!current.goal) return { safe: false, boundary: name, reason: 'no_goal' }
+  const inFlight = current.plans.find(plan => plan.status === PLAN_STATUS.COMMITTED || plan.status === PLAN_STATUS.EXECUTING)
+  if (inFlight) return { safe: false, boundary: name, reason: 'plan_in_flight', plan_id: inFlight.plan_id }
+
+  if (name === STEERING_BOUNDARY.GOAL_ADMISSION) {
+    return current.plans.some(plan => plan.committed_at)
+      ? { safe: false, boundary: name, reason: 'goal_already_past_admission' }
+      : { safe: true, boundary: name, reason: 'initial_goal_admission' }
+  }
+  if (name === STEERING_BOUNDARY.PLAN_COMPLETED) {
+    const plan = planId ? getPlan(current, planId) : [...current.plans].reverse().find(item => item.status === PLAN_STATUS.COMPLETED)
+    return plan?.status === PLAN_STATUS.COMPLETED
+      ? { safe: true, boundary: name, reason: 'immutable_plan_completed', plan_id: plan.plan_id }
+      : { safe: false, boundary: name, reason: 'no_completed_plan' }
+  }
+  if (name === STEERING_BOUNDARY.USER_REVISION_APPROVED) {
+    if (!isUserAuthority(source)) return { safe: false, boundary: name, reason: 'requires_user_authority' }
+    const plan = planId ? getPlan(current, planId) : getActivePlan(current)
+    return plan?.origin === 'user_approved_revision'
+      ? { safe: true, boundary: name, reason: 'successor_plan_admitted', plan_id: plan.plan_id }
+      : { safe: false, boundary: name, reason: 'no_user_approved_successor' }
+  }
+  // USER_PRIORITY_CHANGE
+  return isUserAuthority(source)
+    ? { safe: true, boundary: name, reason: 'explicit_user_priority_change' }
+    : { safe: false, boundary: name, reason: 'requires_user_authority' }
+}
+
+/**
+ * The tick-tock BIAS (roadmap 4.4): after a directional slice, the other
+ * direction is the thing to consider next. It is a suggestion to weigh, never
+ * a rule that fires — `evaluateSteeringTransition` will happily keep the same
+ * mode forever when the grounded pressure keeps pointing that way.
+ */
+export function steeringBias(record) {
+  const last = record?.last_directional_mode
+  if (!DIRECTIONAL_MODES.includes(last)) return { bias: null, note: 'no directional history yet' }
+  return {
+    bias: last === 'vertical' ? 'horizontal' : 'vertical',
+    after: last,
+    note: 'advisory cadence bias only; consecutive same-mode slices remain legal when justified',
+  }
+}
+
+/**
+ * Pure hysteresis decision (roadmap 4.4).
+ *
+ * Deliberate asymmetries:
+ *   - Proposing the SAME directional mode is always accepted. There is no cap
+ *     on consecutive vertical or consecutive horizontal slices; tick-tock is a
+ *     bias, not a state machine.
+ *   - Flipping direction must clear all three named thresholds. Two of them
+ *     (confidence, pressure margin) come from the boundary evaluation; the
+ *     third makes a mode own at least one slice before it can be abandoned.
+ *   - `recover` is exempt: a lost capability is not a cadence question.
+ *   - `maintain` is "no strategic change", so it does not move — or reset —
+ *     the directional cadence at all.
+ */
+export function evaluateSteeringTransition(record, proposal) {
+  const previousMode = record?.current_mode ?? null
+  const lastDirectional = DIRECTIONAL_MODES.includes(record?.last_directional_mode) ? record.last_directional_mode : null
+  const consecutive = Number.isSafeInteger(record?.consecutive_mode_slices) ? record.consecutive_mode_slices : 0
+  const proposed = DEVELOPMENT_MODES.includes(proposal?.mode) ? proposal.mode : 'maintain'
+  const confidence = clamp01(proposal?.confidence)
+  const pressure = sanitizeSteeringPressure(proposal?.pressure)
+
+  const accept = (mode, extra = {}) => ({
+    mode,
+    previous_mode: previousMode,
+    last_directional_mode: DIRECTIONAL_MODES.includes(mode) ? mode : lastDirectional,
+    changed: mode !== previousMode,
+    hysteresis_applied: false,
+    hold_reasons: [],
+    consecutive_mode_slices: consecutive,
+    proposed_mode: proposed,
+    ...extra,
+  })
+
+  if (proposed === 'recover') return accept('recover', { exempt: 'recover_is_not_a_cadence_decision' })
+  if (proposed === 'maintain') return accept('maintain', { exempt: 'maintain_does_not_move_the_cadence' })
+  if (!lastDirectional) return accept(proposed, { consecutive_mode_slices: 1, exempt: 'no_directional_history' })
+  if (proposed === lastDirectional) {
+    return accept(proposed, {
+      consecutive_mode_slices: consecutive + 1,
+      exempt: 'same_direction_sustained',
+    })
+  }
+
+  const holdReasons = []
+  if (confidence < STEERING_HYSTERESIS.MIN_CONFIDENCE_TO_SWITCH) holdReasons.push(STEERING_HOLD_REASON.LOW_CONFIDENCE)
+  if (consecutive < STEERING_HYSTERESIS.MIN_SLICES_BEFORE_SWITCH) holdReasons.push(STEERING_HOLD_REASON.MODE_TOO_NEW)
+  const margin = pressure[proposed].length - pressure[lastDirectional].length
+  if (margin < STEERING_HYSTERESIS.MIN_PRESSURE_MARGIN) holdReasons.push(STEERING_HOLD_REASON.INSUFFICIENT_PRESSURE)
+
+  if (holdReasons.length === 0) {
+    return accept(proposed, { consecutive_mode_slices: 1, switched_from: lastDirectional, pressure_margin: margin })
+  }
+  return {
+    mode: lastDirectional,
+    previous_mode: previousMode,
+    last_directional_mode: lastDirectional,
+    changed: false,
+    hysteresis_applied: true,
+    hold_reasons: holdReasons,
+    consecutive_mode_slices: consecutive + 1,
+    proposed_mode: proposed,
+    pressure_margin: margin,
+  }
+}
+
+/** The durable advisory steering record, or null. Frozen; a copy, not the state. */
+export function steeringRecord(state) {
+  return state?.steering ? deepFreeze(clone(state.steering)) : null
+}
+
+/**
+ * Everything the Main LLM should see BEFORE it drafts the next slice
+ * (roadmap 4.9): what kind of development the boundary suggests, and which
+ * shelf nodes the world has actually unblocked.
+ *
+ * Steering review and scope review stay separate questions. This answers
+ * "what kind of development next?" only; nothing here says whether any
+ * particular draft is committable, and nothing here is execution authority.
+ */
+export function steeringContextForDraft(state) {
+  const record = state?.steering ?? null
+  return deepFreeze({
+    kind: 'steering_context',
+    advisory: true,
+    execution_authority: false,
+    goal_id: state?.goal?.goal_id ?? null,
+    current_mode: record?.current_mode ?? null,
+    previous_mode: record?.previous_mode ?? null,
+    last_directional_mode: record?.last_directional_mode ?? null,
+    reason: record?.reason ?? null,
+    critical_path: record?.critical_path ?? null,
+    pressure: clone(record?.pressure) ?? { vertical: [], horizontal: [] },
+    last_plan_id: record?.last_plan_id ?? null,
+    consecutive_mode_slices: record?.consecutive_mode_slices ?? 0,
+    hysteresis_applied: record?.hysteresis_applied ?? false,
+    hold_reasons: [...(record?.hold_reasons ?? [])],
+    user_priority: clone(record?.user_priority) ?? null,
+    ...steeringBias(record),
+    // Guidance, at LOD 1. Intent and lineage only — no steps, no operations.
+    refinement_candidates: shelfRefinementCandidates(state, { limit: 5 }),
+  })
+}
+
 // --- the one transition authority ------------------------------------------
 
 function contractSatisfiedBy(step, progress, evidence) {
@@ -1006,12 +1452,23 @@ Object.assign(HANDLERS, {
 
   [PLANNING_EVENT.ROADMAP_REVISED](state, event, now) {
     if (!state.goal) return state
+    // Long-horizon guidance moves for exactly two reasons (roadmap 3):
+    // explicit USER direction, or a grounded VERIFIED world change that
+    // invalidates it. Planner preference and Jev output are neither, and are
+    // structurally excluded here rather than by convention.
+    const source = text(event.source, 60)
+    const byUser = isUserAuthority(source)
+    const byWorld = isRuntimeAuthority(source)
+      && stringList(event.evidence_refs, { max: 16, maxLength: 200 }).length > 0
+    if (!byUser && !byWorld) return state
     const sequence = nextSequence(state)
     const roadmap = createRoadmapRevision(state, {
       now,
       sequence,
       nodes: event.nodes,
       reason: event.reason,
+      authority: byUser ? 'user' : 'verified_world_change',
+      evidenceRefs: event.evidence_refs,
     })
     // The shelf moved under the planner: the next round restarts from durable
     // state rather than from reasoning about the previous shelf.
@@ -1028,6 +1485,126 @@ Object.assign(HANDLERS, {
         reason: roadmap.reason,
       }),
     }, { now, eventType: PLANNING_EVENT.ROADMAP_REVISED, reason: roadmap.reason || 'roadmap_revised' })
+  },
+
+  /**
+   * Record advisory steering at a planning boundary (roadmap 4.3 / 4.4 / 4.7).
+   *
+   * What this handler can do: write `state.steering`.
+   * What it can NOT do, structurally: touch a plan. It never appears in the
+   * returned object's `plans`, so there is no expression of this transition
+   * that mutates, replaces, unfreezes or re-scopes any plan — committed,
+   * executing or otherwise. It is refused outright while anything is in flight.
+   *
+   * Jev and the Main LLM are excluded by the source allowlist. A Jev
+   * recommendation may ride along in `recommended_by` / `reason_codes` as
+   * PROVENANCE; it is never the authority.
+   */
+  [PLANNING_EVENT.STEERING_EVALUATED](state, event, now) {
+    const source = text(event.source, 60)
+    if (!isRuntimeAuthority(source) && !isUserAuthority(source)) return state
+    const gate = isSafeSteeringBoundary(state, {
+      boundary: event.boundary,
+      planId: event.plan_id,
+      source,
+    })
+    if (!gate.safe) return state
+
+    const record = state.steering ?? null
+    const byUser = isUserAuthority(source)
+
+    // Explicit user priority outranks any recommendation, permanently, until
+    // the user changes or clears it (roadmap 4.7: steering may not force a
+    // mode against explicit user priorities).
+    let userPriority = record?.user_priority ?? null
+    if (byUser && event.clear_user_priority === true) userPriority = null
+    if (byUser && DEVELOPMENT_MODES.includes(event.user_priority_mode)) {
+      userPriority = {
+        mode: event.user_priority_mode,
+        set_by: text(event.approved_by, 128) || source,
+        at: now,
+      }
+    }
+
+    const proposal = {
+      mode: event.recommended_mode ?? event.mode,
+      confidence: event.confidence,
+      pressure: event.pressure,
+    }
+    const decision = userPriority
+      ? {
+          mode: userPriority.mode,
+          previous_mode: record?.current_mode ?? null,
+          last_directional_mode: DIRECTIONAL_MODES.includes(userPriority.mode)
+            ? userPriority.mode
+            : (record?.last_directional_mode ?? null),
+          changed: userPriority.mode !== (record?.current_mode ?? null),
+          hysteresis_applied: false,
+          hold_reasons: DEVELOPMENT_MODES.includes(proposal.mode) && proposal.mode !== userPriority.mode
+            ? [STEERING_HOLD_REASON.USER_PRIORITY_LOCKED]
+            : [],
+          consecutive_mode_slices: Number.isSafeInteger(record?.consecutive_mode_slices)
+            ? record.consecutive_mode_slices + 1
+            : 1,
+          proposed_mode: DEVELOPMENT_MODES.includes(proposal.mode) ? proposal.mode : null,
+          forced_by_user: true,
+        }
+      : evaluateSteeringTransition(record, proposal)
+
+    const entry = {
+      mode: decision.mode,
+      boundary: gate.boundary,
+      at: now,
+      plan_id: gate.plan_id ?? (text(event.plan_id, 200) || null),
+      changed: decision.changed,
+      hysteresis_applied: decision.hysteresis_applied,
+      hold_reasons: [...decision.hold_reasons],
+    }
+
+    const steering = {
+      // Roadmap 4.4 shape.
+      current_mode: decision.mode,
+      previous_mode: decision.previous_mode,
+      reason: text(event.reason, 400) || record?.reason || null,
+      critical_path: text(event.critical_path ?? event.critical_path_summary, 300) || null,
+      pressure: sanitizeSteeringPressure(event.pressure),
+      last_plan_id: entry.plan_id,
+      // Hysteresis bookkeeping.
+      last_directional_mode: decision.last_directional_mode,
+      consecutive_mode_slices: decision.consecutive_mode_slices,
+      hysteresis_applied: decision.hysteresis_applied,
+      hold_reasons: [...decision.hold_reasons],
+      proposed_mode: decision.proposed_mode ?? null,
+      forced_by_user: decision.forced_by_user === true,
+      // Provenance of the advice, never its authority.
+      recommendation: {
+        recommended_by: text(event.recommended_by, 60) || null,
+        recommended_mode: DEVELOPMENT_MODES.includes(proposal.mode) ? proposal.mode : null,
+        confidence: clamp01(event.confidence),
+        reason_codes: stringList(event.reason_codes, { max: 8, maxLength: 80 }),
+        candidate_shelf_nodes: stringList(event.candidate_shelf_nodes, { max: 5, maxLength: 120 })
+          .filter(id => (state.roadmap?.nodes ?? []).some(node => node.id === id)),
+      },
+      user_priority: userPriority,
+      boundary: gate.boundary,
+      authority: source,
+      sequence: (Number.isSafeInteger(record?.sequence) ? record.sequence : 0) + 1,
+      updated_at: now,
+      history: [...boundedList(record?.history, 31), entry].slice(-32),
+    }
+
+    return {
+      ...state,
+      steering,
+      updated_at: now,
+      log: logEntry(state, {
+        type: PLANNING_EVENT.STEERING_EVALUATED,
+        at: now,
+        boundary: gate.boundary,
+        mode: steering.current_mode,
+        hysteresis_applied: steering.hysteresis_applied,
+      }),
+    }
   },
 
   [PLANNING_EVENT.DRAFT_CREATED](state, event, now) {
@@ -1093,7 +1670,12 @@ Object.assign(HANDLERS, {
         intent: step.description,
         why_it_matters: `deferred tail of ${plan.plan_id} (jev refine)`,
         status: SHELF_NODE_STATUS.TENTATIVE,
-        derived_from_node_id: undefined,
+        // A deferred tail comes AFTER the slice it was cut from. Recording that
+        // as a real dependency is what keeps the tail out of the refinement
+        // candidate set until the world has actually realized the node in
+        // front of it — instead of a whole plan tail appearing "ready".
+        depends_on: [...plan.roadmap_node_ids],
+        derived_from_node_id: plan.roadmap_node_ids[0],
       })),
     ]
 
@@ -1120,6 +1702,10 @@ Object.assign(HANDLERS, {
         sequence,
         nodes: merged,
         reason: text(event.reason ?? 'deferred_tail_from_jev_refine', 300),
+        // Shelving a tail is additive bookkeeping about the draft Jev just
+        // criticised, not a revision of long-horizon guidance. It is recorded
+        // under its own authority so it can never be mistaken for one.
+        authority: 'deferred_tail',
       })
       next = {
         ...next,
@@ -1351,14 +1937,17 @@ Object.assign(HANDLERS, {
     // signals the frontier itself declared, reported satisfied here by the
     // runtime, can advance it. And a reached frontier is NOT a satisfied goal —
     // that needs its own GOAL_SATISFIED event with its own evidence.
-    const roadmap = attachPlanResultsToShelf(state.roadmap, {
+    const roadmap = promoteReadyNodes(attachPlanResultsToShelf(state.roadmap, {
       now,
       nodeIds: plan.roadmap_node_ids,
       planId: plan.plan_id,
       results: event.verified_results,
       satisfiedRecognitionIds: event.satisfied_recognition_ids,
       status: SHELF_NODE_STATUS.REALIZED,
-    })
+    }), now)
+    // Attach first, THEN re-derive readiness: whatever the completed slice
+    // realized is exactly what may unblock the next node to refine. The shelf
+    // is the guide for the next round, not abandoned work.
     return {
       ...state,
       roadmap,
@@ -1586,6 +2175,7 @@ export function serializePlanningState(state) {
     roadmap_history: clone(current.roadmap_history) ?? [],
     plans: clone(current.plans) ?? [],
     active_plan_id: current.active_plan_id ?? null,
+    steering: clone(current.steering) ?? null,
     updated_at: finiteNumber(current.updated_at) ?? 0,
     reasoning_epoch: currentReasoningEpoch(current),
     last_reasoning_reset: clone(current.last_reasoning_reset) ?? null,
@@ -1622,6 +2212,20 @@ function restorePlan(raw) {
     roadmap_revision_id: text(raw.roadmap_revision_id, 120) || null,
     roadmap_node_ids: stringList(raw.roadmap_node_ids, { max: 16, maxLength: 120 }),
     development_mode: DEVELOPMENT_MODES.includes(raw.development_mode) ? raw.development_mode : 'maintain',
+    refinement_grounding: raw.refinement_grounding && typeof raw.refinement_grounding === 'object' && !Array.isArray(raw.refinement_grounding)
+      ? {
+          ready_node_ids: stringList(raw.refinement_grounding.ready_node_ids, { max: 16, maxLength: 120 }),
+          not_ready: boundedList(raw.refinement_grounding.not_ready, 16).map(item => clone(item)),
+        }
+      : { ready_node_ids: [], not_ready: [] },
+    steering_at_draft: raw.steering_at_draft && DEVELOPMENT_MODES.includes(raw.steering_at_draft.mode)
+      ? {
+          mode: raw.steering_at_draft.mode,
+          steering_sequence: Number.isSafeInteger(raw.steering_at_draft.steering_sequence) ? raw.steering_at_draft.steering_sequence : 0,
+          critical_path: text(raw.steering_at_draft.critical_path, 300) || null,
+          diverges_from_steering: raw.steering_at_draft.diverges_from_steering === true,
+        }
+      : null,
     status,
     steps,
     active_step_index: Number.isSafeInteger(raw.active_step_index)
@@ -1656,8 +2260,11 @@ function restoreRoadmap(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
   const revisionId = text(raw.roadmap_revision_id, 120)
   if (!revisionId) return null
+  // `trusted`: these statuses were derived by this module from verified
+  // evidence before they were persisted. A restart must not silently demote
+  // realized shelf lineage back to tentative.
   const nodes = boundedList(raw.nodes, 64)
-    .map((node, index) => sanitizeShelfNode(node, { sequence: index + 1 }))
+    .map((node, index) => sanitizeShelfNode(node, { sequence: index + 1, trusted: true }))
     .filter(Boolean)
   return {
     roadmap_revision_id: revisionId,
@@ -1665,8 +2272,71 @@ function restoreRoadmap(raw) {
     revision_index: Number.isSafeInteger(raw.revision_index) ? raw.revision_index : 1,
     derived_from_revision_id: text(raw.derived_from_revision_id, 120) || null,
     reason: text(raw.reason, 300),
+    authority: text(raw.authority, 60) || null,
+    evidence_refs: stringList(raw.evidence_refs, { max: 16, maxLength: 200 }),
     created_at: finiteNumber(raw.created_at) ?? 0,
     nodes,
+    ...(raw.dropped_for_coarseness ? { dropped_for_coarseness: clone(raw.dropped_for_coarseness) } : {}),
+  }
+}
+
+/**
+ * Restore the advisory steering record. Everything is re-validated: a
+ * hand-edited snapshot cannot inject a mode outside the allowlist, and cannot
+ * pre-load hysteresis with a bogus slice count.
+ */
+function restoreSteering(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const mode = DEVELOPMENT_MODES.includes(raw.current_mode) ? raw.current_mode : null
+  if (!mode) return null
+  const userPriority = raw.user_priority && DEVELOPMENT_MODES.includes(raw.user_priority.mode)
+    ? {
+        mode: raw.user_priority.mode,
+        set_by: text(raw.user_priority.set_by, 128) || 'user',
+        at: finiteNumber(raw.user_priority.at) ?? 0,
+      }
+    : null
+  const recommendation = raw.recommendation && typeof raw.recommendation === 'object' && !Array.isArray(raw.recommendation)
+    ? {
+        recommended_by: text(raw.recommendation.recommended_by, 60) || null,
+        recommended_mode: DEVELOPMENT_MODES.includes(raw.recommendation.recommended_mode) ? raw.recommendation.recommended_mode : null,
+        confidence: clamp01(raw.recommendation.confidence),
+        reason_codes: stringList(raw.recommendation.reason_codes, { max: 8, maxLength: 80 }),
+        candidate_shelf_nodes: stringList(raw.recommendation.candidate_shelf_nodes, { max: 5, maxLength: 120 }),
+      }
+    : { recommended_by: null, recommended_mode: null, confidence: 0, reason_codes: [], candidate_shelf_nodes: [] }
+  return {
+    current_mode: mode,
+    previous_mode: DEVELOPMENT_MODES.includes(raw.previous_mode) ? raw.previous_mode : null,
+    reason: text(raw.reason, 400) || null,
+    critical_path: text(raw.critical_path, 300) || null,
+    pressure: sanitizeSteeringPressure(raw.pressure),
+    last_plan_id: text(raw.last_plan_id, 200) || null,
+    last_directional_mode: DIRECTIONAL_MODES.includes(raw.last_directional_mode) ? raw.last_directional_mode : null,
+    consecutive_mode_slices: Number.isSafeInteger(raw.consecutive_mode_slices) && raw.consecutive_mode_slices >= 0
+      ? raw.consecutive_mode_slices
+      : 0,
+    hysteresis_applied: raw.hysteresis_applied === true,
+    hold_reasons: stringList(raw.hold_reasons, { max: 8, maxLength: 80 }),
+    proposed_mode: DEVELOPMENT_MODES.includes(raw.proposed_mode) ? raw.proposed_mode : null,
+    forced_by_user: raw.forced_by_user === true,
+    recommendation,
+    user_priority: userPriority,
+    boundary: STEERING_BOUNDARIES.includes(raw.boundary) ? raw.boundary : null,
+    authority: text(raw.authority, 60) || null,
+    sequence: Number.isSafeInteger(raw.sequence) && raw.sequence > 0 ? raw.sequence : 1,
+    updated_at: finiteNumber(raw.updated_at) ?? 0,
+    history: boundedList(raw.history, 32)
+      .filter(entry => entry && typeof entry === 'object' && DEVELOPMENT_MODES.includes(entry.mode))
+      .map(entry => ({
+        mode: entry.mode,
+        boundary: STEERING_BOUNDARIES.includes(entry.boundary) ? entry.boundary : null,
+        at: finiteNumber(entry.at) ?? 0,
+        plan_id: text(entry.plan_id, 200) || null,
+        changed: entry.changed === true,
+        hysteresis_applied: entry.hysteresis_applied === true,
+        hold_reasons: stringList(entry.hold_reasons, { max: 8, maxLength: 80 }),
+      })),
   }
 }
 
@@ -1685,6 +2355,7 @@ export function restorePlanningState(raw) {
     roadmap_history: boundedList(raw.roadmap_history, 32).map(restoreRoadmap).filter(Boolean),
     plans,
     active_plan_id: plans.some(plan => plan.plan_id === activePlanId) ? activePlanId : null,
+    steering: restoreSteering(raw.steering),
     updated_at: finiteNumber(raw.updated_at) ?? 0,
     // Reasoning epochs are durable: a restart must not look like a reset, and
     // must not silently re-use an epoch the loop has already reasoned under.

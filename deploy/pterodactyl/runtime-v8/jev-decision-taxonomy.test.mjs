@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 
 import {
   boundarySteeringGate,
+  classifySliceDirection,
+  mixedDirectionThresholds,
   decisionEnvelopeQuestions,
   developmentDecisionQuestions,
   jevDecisionFamilyChoices,
@@ -285,6 +287,10 @@ test('parses the representative refine response from roadmap 5.2', () => {
     actionable_prefix: 3,
     recommended_boundary: 'first_stable_smelting_checkpoint',
     explanation: 'Stop at stable smelting; the tail assumes oil that does not exist yet.',
+    dominant_direction: undefined,
+    mixed_direction: false,
+    supporting_work_allowed: false,
+    direction_detail: classifySliceDirection([]),
     dropped_authority_fields: [],
     model: 'jev-scope',
     provider: 'jev',
@@ -387,14 +393,18 @@ test('Jev cannot return replacement plan steps, contracts, or operations', () =>
   assert.deepEqual(Object.keys(parsed).sort(), [
     'actionable_prefix',
     'confidence',
+    'direction_detail',
+    'dominant_direction',
     'dropped_authority_fields',
     'explanation',
     'family',
+    'mixed_direction',
     'model',
     'problem_steps',
     'provider',
     'recommended_boundary',
     'reason_codes',
+    'supporting_work_allowed',
     'usage',
     'verdict',
   ].sort())
@@ -534,4 +544,119 @@ test('boundary gate is defensive about garbage steering input', () => {
   }
   assert.equal(boundarySteeringGate({ development: 'maintain' }).allow_runtime_continuation, false)
   assert.equal(boundarySteeringGate({ development: 'maintain' }, { runtimeHealthy: 'yes' }).allow_runtime_continuation, false)
+})
+
+// --- roadmap 4.5: one dominant development mode per committed slice ----------
+
+test('the scope review asks for per-step direction relative to the critical path', () => {
+  const questions = scopeReviewQuestions()
+  assert.equal(questions.step_directions.type, 'multi_choice')
+  assert.match(questions.step_directions.instructions, /relative to the current critical path rather than the surface action/i)
+  assert.match(questions.step_directions.instructions, /DESCRIBES the draft/)
+  assert.deepEqual(Object.keys(questions.step_directions.criteria), ['vertical', 'horizontal', 'maintain', 'recover'])
+  assert.deepEqual(Object.keys(questions.mixed_direction_inseparable.criteria), ['yes', 'no'])
+})
+
+test('mixed-direction classification uses named thresholds, not magic numbers', () => {
+  const thresholds = mixedDirectionThresholds()
+  assert.equal(thresholds.minority_max_share, 0.25)
+  assert.equal(thresholds.max_supporting_steps, 2)
+
+  // No directional information at all is not a smell.
+  const silent = classifySliceDirection([])
+  assert.equal(silent.mixed_direction, false)
+  assert.equal(silent.dominant_direction, undefined)
+
+  // Small supporting work from the other direction: the minimum extra power a
+  // vertical oil slice needs (roadmap 4.5) stays committable.
+  const supporting = classifySliceDirection(['vertical', 'vertical', 'vertical', 'horizontal'])
+  assert.equal(supporting.dominant_direction, 'vertical')
+  assert.equal(supporting.minority_direction, 'horizontal')
+  assert.equal(supporting.supporting_work_allowed, true)
+  assert.equal(supporting.mixed_direction, false)
+
+  // A slice pulling substantially both ways is a scope smell.
+  const smell = classifySliceDirection(['vertical', 'horizontal', 'horizontal', 'vertical'])
+  assert.equal(smell.mixed_direction, true)
+  assert.equal(smell.minority_share, 0.5)
+
+  // Unless Jev says the mixture is genuinely inseparable.
+  const inseparable = classifySliceDirection(['vertical', 'horizontal', 'horizontal', 'vertical'], { inseparable: true })
+  assert.equal(inseparable.mixed_direction, false)
+  assert.equal(inseparable.inseparable_claimed, true)
+
+  // maintain/recover steps are not directions and do not create a mixture.
+  const undirected = classifySliceDirection(['vertical', 'maintain', 'recover', 'vertical'])
+  assert.equal(undirected.mixed_direction, false)
+  assert.equal(undirected.directional_step_count, 2)
+})
+
+test('a substantially mixed draft cannot be reported as actionable', () => {
+  const parsed = parseScopeReview({
+    answers: {
+      scope_review: {
+        choice: 'actionable',
+        confidence: 0.9,
+        step_directions: ['vertical', 'horizontal', 'horizontal', 'vertical'],
+      },
+    },
+  }, { draftStepCount: 4 })
+
+  assert.equal(parsed.verdict, 'refine', 'a scope smell goes back for a cleaner boundary')
+  assert.ok(parsed.reason_codes.includes('mixed_outcomes'), 'the existing reason code carries the finding')
+  assert.equal(parsed.mixed_direction, true)
+  assert.equal(parsed.dominant_direction, 'vertical')
+  assert.equal(parsed.supporting_work_allowed, false)
+})
+
+test('an inseparable mixture, and genuine supporting work, stay actionable', () => {
+  const inseparable = parseScopeReview({
+    answers: {
+      scope_review: { choice: 'actionable', step_directions: ['vertical', 'horizontal'] },
+      mixed_direction_inseparable: { choice: 'yes' },
+    },
+  }, { draftStepCount: 2 })
+  assert.equal(inseparable.verdict, 'actionable')
+  assert.equal(inseparable.mixed_direction, false)
+  assert.deepEqual(inseparable.reason_codes, [])
+
+  const supporting = parseScopeReview({
+    answers: {
+      scope_review: { choice: 'actionable' },
+      step_directions: { choices: ['vertical', 'vertical', 'vertical', 'horizontal'] },
+    },
+  }, { draftStepCount: 4 })
+  assert.equal(supporting.verdict, 'actionable')
+  assert.equal(supporting.supporting_work_allowed, true)
+  assert.deepEqual(supporting.reason_codes, [])
+})
+
+// --- roadmap 4.9: steering review and scope review are separate questions ----
+
+test('steering review and scope review stay separate questions', () => {
+  const scope = parseScopeReview({
+    answers: { scope_review: { choice: 'refine', step_directions: ['vertical', 'horizontal', 'horizontal'] } },
+  }, { draftStepCount: 3 })
+  const steering = parseSteeringRecommendation({
+    answers: { steering: { choice: 'horizontal', confidence: 'high' } },
+    steering: {
+      reason_codes: ['frontier_reached', 'power_margin_low'],
+      critical_path_summary: 'stabilize oil throughput before blue science',
+      candidate_shelf_nodes: ['roadmap_oil_stabilization'],
+    },
+  })
+
+  // Scope review answers "is this slice committable?" and never recommends a mode.
+  for (const steeringKey of ['recommended_mode', 'critical_path_summary', 'candidate_shelf_nodes']) {
+    assert.equal(Object.prototype.hasOwnProperty.call(scope, steeringKey), false, `${steeringKey} belongs to steering review`)
+  }
+  // Steering answers "what kind of development next?" and never judges the draft.
+  for (const scopeKey of ['verdict', 'actionable_prefix', 'problem_steps', 'recommended_boundary', 'mixed_direction']) {
+    assert.equal(Object.prototype.hasOwnProperty.call(steering, scopeKey), false, `${scopeKey} belongs to scope review`)
+  }
+  assert.equal(scope.family, 'scope_review')
+  assert.equal(steering.family, 'steering')
+  assert.equal(steering.recommended_mode, 'horizontal')
+  // The descriptive §4.5 finding is about the draft in hand, not the next slice.
+  assert.equal(scope.dominant_direction, 'horizontal')
 })

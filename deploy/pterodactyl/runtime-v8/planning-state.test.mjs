@@ -18,6 +18,18 @@ import {
   PROSE_ONLY_STEP_OPERATION_CEILING,
   restorePlanningState,
   sanitizeShelfNode,
+  SHELF_FORBIDDEN_EXECUTABLE_FIELDS,
+  SHELF_REFINEMENT_MAX_FANOUT,
+  shelfNodeReadiness,
+  shelfRefinementCandidates,
+  nearestShelfRefinementTarget,
+  evaluateSteeringTransition,
+  isSafeSteeringBoundary,
+  STEERING_BOUNDARY,
+  STEERING_HOLD_REASON,
+  STEERING_HYSTERESIS,
+  steeringContextForDraft,
+  steeringRecord,
   serializePlanningState,
   SHELF_NODE_STATUS,
 } from './planning-state.mjs'
@@ -54,6 +66,7 @@ function goalState(now = 1000) {
 function shelved(state, now = 1100) {
   return applyPlanningEvent(state, {
     type: PLANNING_EVENT.ROADMAP_REVISED,
+    source: 'user',
     now,
     reason: 'initial shelf',
     nodes: [
@@ -138,6 +151,7 @@ test('roadmap shelf stores nodes with lineage and preserves dropped nodes as inv
 
   const second = applyPlanningEvent(first, {
     type: PLANNING_EVENT.ROADMAP_REVISED,
+    source: 'user',
     now: 1150,
     reason: 'oil found, automation deferred',
     nodes: [{ id: 'roadmap_early_smelting', intent: 'establish reliable early iron and copper smelting', status: 'ready_to_refine' }],
@@ -184,6 +198,7 @@ test('reasoning epochs reset only on durable reasoning-boundary transitions and 
 test('continuous capability frontiers advance deterministically but never latch or complete the goal', () => {
   let state = applyPlanningEvent(goalState(), {
     type: PLANNING_EVENT.ROADMAP_REVISED,
+    source: 'user',
     now: 1100,
     reason: 'introduce sustained iron frontier',
     nodes: [{
@@ -1051,4 +1066,532 @@ test('an empty state produces an empty tracker view without throwing', () => {
   assert.equal(view.plan_id, null)
   assert.deepEqual(view.steps, [])
   assert.equal(lineageOf(createEmptyPlanningState()), undefined)
+})
+
+// --- phase 5: LOD roadmap shelf progressive refinement -----------------------
+
+function dependentShelf(state, now = 1100) {
+  return applyPlanningEvent(state, {
+    type: PLANNING_EVENT.ROADMAP_REVISED,
+    source: 'user',
+    now,
+    reason: 'initial shelf',
+    nodes: [
+      { id: 'node_smelting', intent: 'establish reliable early iron and copper smelting' },
+      {
+        id: 'node_science',
+        intent: 'automation and red science',
+        depends_on: ['node_smelting'],
+        development_hint: 'vertical',
+        // Deliberate overreach: an author ASSERTING the node is already done.
+        status: 'realized',
+      },
+    ],
+  })
+}
+
+function completeSlice(state, { nodeIds, now, mode = 'vertical', results = ['verified world result'], steps, recognitionIds } = {}) {
+  let next = applyPlanningEvent(state, {
+    type: PLANNING_EVENT.DRAFT_CREATED,
+    now,
+    development_mode: mode,
+    roadmap_node_ids: nodeIds,
+    steps: steps ?? [{ description: 'resolve the slice', completion_contract: GROUNDED_CONTRACT }],
+  })
+  next = committed(next, { now: now + 10 })
+  const plan = getActivePlan(next)
+  next = runtimeEvidence(next, { ref: `ev_${plan.plan_id}`, requirementIds: ['req_stone'], now: now + 20 })
+  next = completeActiveStep(next, { now: now + 30 })
+  return applyPlanningEvent(next, {
+    type: PLANNING_EVENT.PLAN_COMPLETED,
+    now: now + 40,
+    source: 'runtime',
+    plan_id: plan.plan_id,
+    verified_results: results,
+    satisfied_recognition_ids: recognitionIds,
+  })
+}
+
+test('shelf node readiness is grounded in verified dependency realization, not in an asserted status', () => {
+  const state = dependentShelf(goalState())
+  const science = state.roadmap.nodes.find(node => node.id === 'node_science')
+  assert.equal(science.status, SHELF_NODE_STATUS.TENTATIVE, 'an asserted realization must be discarded')
+
+  const readiness = shelfNodeReadiness(state.roadmap, 'node_science')
+  assert.equal(readiness.ready, false)
+  assert.deepEqual(readiness.blocked_by, [{
+    node_id: 'node_smelting',
+    reason: 'dependency_has_no_verified_evidence',
+    status: SHELF_NODE_STATUS.READY_TO_REFINE,
+  }])
+
+  // The dependency-free node IS ready: nothing on the shelf says otherwise.
+  const smelting = state.roadmap.nodes.find(node => node.id === 'node_smelting')
+  assert.equal(smelting.status, SHELF_NODE_STATUS.READY_TO_REFINE)
+  assert.equal(smelting.ready_since, 1100)
+  assert.equal(nearestShelfRefinementTarget(state).node_id, 'node_smelting')
+})
+
+test('a completed plan attaches verified results and then unblocks the nearest useful node', () => {
+  const before = dependentShelf(goalState())
+  const state = completeSlice(before, { nodeIds: ['node_smelting'], now: 1200, results: ['two furnaces smelting iron'] })
+
+  const smelting = state.roadmap.nodes.find(node => node.id === 'node_smelting')
+  assert.equal(smelting.status, SHELF_NODE_STATUS.REALIZED)
+  assert.deepEqual(smelting.verified_results, ['two furnaces smelting iron'])
+  assert.equal(smelting.resolved_by.length, 1, 'lineage links the plan that resolved the node')
+
+  const science = state.roadmap.nodes.find(node => node.id === 'node_science')
+  assert.equal(science.status, SHELF_NODE_STATUS.READY_TO_REFINE, 'the shelf guides the NEXT round')
+  assert.equal(shelfNodeReadiness(state.roadmap, 'node_science').ready, true)
+
+  // Realized work leaves the candidate set; the next useful node takes its place.
+  const target = nearestShelfRefinementTarget(state)
+  assert.equal(target.node_id, 'node_science')
+  assert.equal(target.development_hint, 'vertical', 'the coarse hint travels with the guidance')
+})
+
+test('a continuous frontier dependency satisfies once evidence exists, because it never latches', () => {
+  let state = applyPlanningEvent(goalState(), {
+    type: PLANNING_EVENT.ROADMAP_REVISED,
+    source: 'user',
+    now: 1100,
+    reason: 'sustained iron gates the next tier',
+    nodes: [
+      {
+        id: 'node_sustained_iron',
+        intent: 'sustain iron plate output',
+        capability_frontier: {
+          continuous: true,
+          recognition: [{ id: 'throughput', description: 'measured throughput meets target' }],
+        },
+      },
+      { id: 'node_next_tier', intent: 'reach the next science tier', depends_on: ['node_sustained_iron'] },
+    ],
+  })
+  assert.equal(shelfNodeReadiness(state.roadmap, 'node_next_tier').ready, false)
+
+  state = completeSlice(state, { nodeIds: ['node_sustained_iron'], now: 1200, recognitionIds: ['throughput'] })
+  const iron = state.roadmap.nodes.find(node => node.id === 'node_sustained_iron')
+  assert.equal(iron.status, SHELF_NODE_STATUS.PARTIALLY_REALIZED, 'a continuous frontier never latches to realized')
+  assert.equal(shelfNodeReadiness(state.roadmap, 'node_next_tier').ready, true)
+  // The open-ended node stays refinable itself, and stays first in line.
+  assert.equal(nearestShelfRefinementTarget(state).node_id, 'node_sustained_iron')
+})
+
+test('a deferred tail is shelved behind the node it was cut from, not offered as ready work', () => {
+  const draft = drafted(dependentShelf(goalState()), {
+    now: 1200,
+    nodeIds: ['node_smelting'],
+    steps: [
+      { description: 'Acquire stone', completion_contract: GROUNDED_CONTRACT },
+      { description: 'Build a full red science complex' },
+    ],
+  })
+  const plan = getActivePlan(draft)
+  const refined = applyPlanningEvent(draft, {
+    type: PLANNING_EVENT.JEV_REFINEMENT_REQUESTED,
+    now: 1250,
+    plan_id: plan.plan_id,
+    verdict: 'refine',
+    reason_codes: ['horizon_too_long'],
+    actionable_prefix: 1,
+  })
+  const tail = refined.roadmap.nodes.find(node => node.intent === 'Build a full red science complex')
+  assert.equal(tail.status, SHELF_NODE_STATUS.TENTATIVE)
+  assert.deepEqual(tail.depends_on, ['node_smelting'])
+  assert.equal(tail.derived_from_node_id, 'node_smelting')
+  assert.equal(refined.roadmap.authority, 'deferred_tail', 'shelving a tail is not a guidance revision')
+  assert.equal(
+    shelfRefinementCandidates(refined).some(candidate => candidate.node_id === tail.id),
+    false,
+    'a deferred tail is guidance for later, not the next thing to refine',
+  )
+})
+
+test('only explicit user direction or grounded verified world change may revise the roadmap', () => {
+  const base = dependentShelf(goalState())
+  const nodes = [{ id: 'node_smelting', intent: 'a different long-horizon direction entirely' }]
+
+  for (const source of [undefined, 'jev', 'main_llm', 'planner', 'runtime']) {
+    const attempt = applyPlanningEvent(base, {
+      type: PLANNING_EVENT.ROADMAP_REVISED,
+      now: 1300,
+      source,
+      reason: 'planner preference',
+      nodes,
+    })
+    assert.equal(attempt, base, `${source ?? 'no source'} must not be able to move long-horizon guidance`)
+  }
+
+  // Runtime authority alone is not enough: a world change must be evidenced.
+  const grounded = applyPlanningEvent(base, {
+    type: PLANNING_EVENT.ROADMAP_REVISED,
+    now: 1300,
+    source: 'runtime',
+    reason: 'the ore patch the guidance assumed is exhausted',
+    evidence_refs: ['receipt_ore_patch_depleted'],
+    nodes,
+  })
+  assert.equal(grounded.roadmap.authority, 'verified_world_change')
+  assert.deepEqual(grounded.roadmap.evidence_refs, ['receipt_ore_patch_depleted'])
+  assert.equal(grounded.roadmap.revision_index, 2)
+
+  const byUser = applyPlanningEvent(base, {
+    type: PLANNING_EVENT.ROADMAP_REVISED,
+    now: 1300,
+    source: 'user',
+    reason: 'I want to go for oil first',
+    nodes,
+  })
+  assert.equal(byUser.roadmap.authority, 'user')
+  // Lineage survives either way: the dropped node is preserved, not erased.
+  const dropped = byUser.roadmap.nodes.find(node => node.id === 'node_science')
+  assert.equal(dropped.status, SHELF_NODE_STATUS.INVALIDATED)
+  assert.equal(dropped.revision_reason, 'I want to go for oil first')
+})
+
+test('refinement cannot smuggle a step-by-step mega-plan onto the shelf', () => {
+  const base = dependentShelf(goalState())
+  const children = Array.from({ length: SHELF_REFINEMENT_MAX_FANOUT + 5 }, (item, index) => ({
+    id: `node_micro_${index}`,
+    intent: `micro step ${index}`,
+    derived_from_node_id: 'node_smelting',
+  }))
+  const revised = applyPlanningEvent(base, {
+    type: PLANNING_EVENT.ROADMAP_REVISED,
+    source: 'user',
+    now: 1300,
+    reason: 'refine smelting',
+    nodes: [...base.roadmap.nodes, ...children],
+  })
+  const kept = revised.roadmap.nodes.filter(node => node.id.startsWith('node_micro_'))
+  assert.equal(kept.length, SHELF_REFINEMENT_MAX_FANOUT)
+  assert.equal(revised.roadmap.dropped_for_coarseness.node_ids.length, 5)
+  assert.equal(revised.roadmap.dropped_for_coarseness.max_fanout, SHELF_REFINEMENT_MAX_FANOUT)
+})
+
+test('the shelf stays non-executable: a node can inform a draft but never become one', () => {
+  const node = sanitizeShelfNode({
+    id: 'n1',
+    intent: 'place furnaces',
+    operations: [{ name: 'place_entity' }],
+    steps: ['do the thing'],
+    completion_contract: GROUNDED_CONTRACT,
+    blueprint: { entities: [] },
+  })
+  for (const field of SHELF_FORBIDDEN_EXECUTABLE_FIELDS) {
+    assert.equal(node[field], undefined, `${field} must never live on a shelf node`)
+  }
+  assert.deepEqual(node.dropped_executable_fields, ['steps', 'operations', 'completion_contract', 'blueprint'])
+
+  // The refinement guidance handed to the Main LLM carries intent and lineage only.
+  const state = dependentShelf(goalState())
+  const candidate = nearestShelfRefinementTarget(state)
+  assert.deepEqual(Object.keys(candidate).sort(), [
+    'depends_on', 'development_hint', 'intent', 'node_id', 'ready_since',
+    'resolved_by', 'status', 'verified_results', 'why_it_matters',
+  ])
+  assert.ok(Object.isFrozen(candidate))
+
+  // And there is no transition that turns a ready node into a plan: a draft
+  // still needs steps an author wrote, node ids alone produce nothing.
+  const empty = applyPlanningEvent(state, {
+    type: PLANNING_EVENT.DRAFT_CREATED,
+    now: 1200,
+    development_mode: 'vertical',
+    roadmap_node_ids: ['node_smelting'],
+    steps: [],
+  })
+  assert.equal(empty, state)
+  assert.equal(empty.plans.length, 0)
+})
+
+test('a draft records whether the world had actually unblocked the nodes it claims to refine', () => {
+  const state = drafted(dependentShelf(goalState()), { now: 1200, nodeIds: ['node_science', 'node_smelting'] })
+  const plan = getActivePlan(state)
+  assert.deepEqual(plan.refinement_grounding.ready_node_ids, ['node_smelting'])
+  assert.deepEqual(plan.refinement_grounding.not_ready, [
+    { node_id: 'node_science', reason: 'dependencies_unsatisfied' },
+  ])
+  assert.equal(plan.status, PLAN_STATUS.DRAFT, 'recorded, not enforced: the Main LLM authors plans')
+})
+
+test('shelf refinement state survives serialize/restore with lineage intact', () => {
+  const state = completeSlice(dependentShelf(goalState()), { nodeIds: ['node_smelting'], now: 1200 })
+  const restored = restorePlanningState(JSON.parse(JSON.stringify(serializePlanningState(state))))
+  assert.deepEqual(restored.roadmap.nodes, state.roadmap.nodes)
+  assert.equal(restored.roadmap.nodes.find(node => node.id === 'node_smelting').status, SHELF_NODE_STATUS.REALIZED)
+  assert.deepEqual(shelfRefinementCandidates(restored), shelfRefinementCandidates(state))
+  assert.equal(nearestShelfRefinementTarget(restored).node_id, 'node_science')
+})
+
+// --- phase 6: strategic steering at plan boundaries --------------------------
+
+function steer(state, { now, mode, confidence = 0.9, pressure, boundary = STEERING_BOUNDARY.PLAN_COMPLETED, source = 'runtime', ...rest }) {
+  return applyPlanningEvent(state, {
+    type: PLANNING_EVENT.STEERING_EVALUATED,
+    now,
+    source,
+    boundary,
+    recommended_mode: mode,
+    confidence,
+    pressure,
+    recommended_by: 'jev',
+    ...rest,
+  })
+}
+
+test('steering is admitted at safe boundaries and refused everywhere else', () => {
+  const admitted = steer(dependentShelf(goalState()), {
+    now: 1150,
+    boundary: STEERING_BOUNDARY.GOAL_ADMISSION,
+    mode: 'vertical',
+    critical_path: 'first smelting capability',
+    reason: 'nothing exists yet',
+  })
+  assert.equal(admitted.steering.current_mode, 'vertical')
+  assert.equal(admitted.steering.boundary, STEERING_BOUNDARY.GOAL_ADMISSION)
+
+  // A boundary must be TRUE of durable state, not merely claimed.
+  const claimed = steer(dependentShelf(goalState()), { now: 1150, boundary: STEERING_BOUNDARY.PLAN_COMPLETED, mode: 'vertical' })
+  assert.equal(claimed.steering, null)
+  assert.equal(isSafeSteeringBoundary(claimed, { boundary: STEERING_BOUNDARY.PLAN_COMPLETED }).reason, 'no_completed_plan')
+
+  const unknown = steer(admitted, { now: 1160, boundary: 'whenever_we_feel_like_it', mode: 'horizontal' })
+  assert.equal(unknown, admitted)
+
+  // User-only boundaries need user authority.
+  const notUser = steer(admitted, { now: 1160, boundary: STEERING_BOUNDARY.USER_PRIORITY_CHANGE, mode: 'horizontal', source: 'runtime' })
+  assert.equal(notUser, admitted)
+})
+
+test('steering cannot mutate, replace or even touch an executing plan', () => {
+  let state = committedFixture()
+  state = runtimeEvidence(state, { ref: 'b1', requirementIds: ['req_stone'] })
+  assert.equal(getActivePlan(state).status, PLAN_STATUS.EXECUTING)
+
+  for (const boundary of Object.values(STEERING_BOUNDARY)) {
+    for (const source of ['runtime', 'user']) {
+      const attempt = steer(state, { now: 1500, boundary, mode: 'horizontal', source, confidence: 1, plan_id: getActivePlan(state).plan_id })
+      assert.equal(attempt, state, `steering must be refused at ${boundary} while a plan is in flight`)
+    }
+  }
+  assert.equal(state.steering, null)
+  assert.equal(isSafeSteeringBoundary(state, { boundary: STEERING_BOUNDARY.PLAN_COMPLETED }).reason, 'plan_in_flight')
+
+  // Even a committed-but-not-yet-executing plan is in flight.
+  const committedOnly = committedFixture()
+  assert.equal(steer(committedOnly, { now: 1400, mode: 'horizontal' }), committedOnly)
+})
+
+test('jev and the main llm cannot write the steering record', () => {
+  const state = completeSlice(dependentShelf(goalState()), { nodeIds: ['node_smelting'], now: 1200 })
+  for (const source of ['jev', 'main_llm', 'planner', 'model']) {
+    const attempt = steer(state, { now: 1400, mode: 'horizontal', source })
+    assert.equal(attempt, state, `${source ?? 'no source'} must not be able to write steering`)
+  }
+  const sourceless = applyPlanningEvent(state, {
+    type: PLANNING_EVENT.STEERING_EVALUATED,
+    now: 1400,
+    boundary: STEERING_BOUNDARY.PLAN_COMPLETED,
+    recommended_mode: 'horizontal',
+  })
+  assert.equal(sourceless, state, 'an unattributed steering event writes nothing')
+
+  // Jev's recommendation survives only as provenance under runtime authority.
+  const recorded = steer(state, { now: 1400, mode: 'horizontal', confidence: 0.8, pressure: { horizontal: ['power margin low'] } })
+  assert.equal(recorded.steering.recommendation.recommended_by, 'jev')
+  assert.equal(recorded.steering.authority, 'runtime')
+})
+
+test('hysteresis permits consecutive same-mode slices without limit', () => {
+  assert.equal(STEERING_HYSTERESIS.MAX_CONSECUTIVE_SAME_MODE, null, 'tick-tock is a bias, not a state machine')
+
+  let state = dependentShelf(goalState())
+  state = steer(state, { now: 1100, boundary: STEERING_BOUNDARY.GOAL_ADMISSION, mode: 'vertical' })
+  let nodeIndex = 0
+  for (const at of [1200, 1300, 1400]) {
+    nodeIndex += 1
+    state = applyPlanningEvent(state, {
+      type: PLANNING_EVENT.ROADMAP_REVISED,
+      source: 'user',
+      now: at - 5,
+      reason: 'next coarse node',
+      nodes: [...state.roadmap.nodes, { id: `node_frontier_${nodeIndex}`, intent: `frontier ${nodeIndex}` }],
+    })
+    state = completeSlice(state, { nodeIds: [`node_frontier_${nodeIndex}`], now: at })
+    // Vertical again, and justified again: the foundation is already sufficient.
+    state = steer(state, { now: at + 50, mode: 'vertical', pressure: { vertical: ['next tier still unreached'] } })
+    assert.equal(state.steering.current_mode, 'vertical')
+    assert.equal(state.steering.hysteresis_applied, false)
+  }
+  assert.equal(state.steering.consecutive_mode_slices, 4)
+  assert.equal(steeringContextForDraft(state).bias, 'horizontal', 'the bias points the other way without forcing anything')
+})
+
+test('hysteresis holds the current direction when a flip is weakly grounded', () => {
+  const record = {
+    current_mode: 'vertical',
+    last_directional_mode: 'vertical',
+    consecutive_mode_slices: 2,
+  }
+  const weak = evaluateSteeringTransition(record, {
+    mode: 'horizontal',
+    confidence: 0.3,
+    pressure: { vertical: ['blue science unreached'], horizontal: ['power margin low'] },
+  })
+  assert.equal(weak.mode, 'vertical', 'no flip on weak grounds')
+  assert.equal(weak.hysteresis_applied, true)
+  assert.deepEqual(weak.hold_reasons, [STEERING_HOLD_REASON.LOW_CONFIDENCE, STEERING_HOLD_REASON.INSUFFICIENT_PRESSURE])
+
+  const fresh = evaluateSteeringTransition({ current_mode: 'vertical', last_directional_mode: 'vertical', consecutive_mode_slices: 0 }, {
+    mode: 'horizontal',
+    confidence: 1,
+    pressure: { horizontal: ['power margin low', 'throughput unstable'] },
+  })
+  assert.equal(fresh.mode, 'vertical')
+  assert.deepEqual(fresh.hold_reasons, [STEERING_HOLD_REASON.MODE_TOO_NEW])
+
+  // Well grounded: enough confidence, the mode has owned a slice, and the
+  // opposite direction carries strictly more grounded pressure.
+  const justified = evaluateSteeringTransition(record, {
+    mode: 'horizontal',
+    confidence: 0.9,
+    pressure: { vertical: ['blue science unreached'], horizontal: ['power margin low', 'petroleum throughput unstable'] },
+  })
+  assert.equal(justified.mode, 'horizontal')
+  assert.equal(justified.changed, true)
+  assert.equal(justified.hysteresis_applied, false)
+  assert.equal(justified.consecutive_mode_slices, 1)
+
+  // recover is exempt; maintain does not disturb the cadence at all.
+  assert.equal(evaluateSteeringTransition(record, { mode: 'recover', confidence: 0 }).mode, 'recover')
+  const maintained = evaluateSteeringTransition(record, { mode: 'maintain', confidence: 0 })
+  assert.equal(maintained.mode, 'maintain')
+  assert.equal(maintained.last_directional_mode, 'vertical')
+  assert.equal(maintained.consecutive_mode_slices, 2)
+})
+
+test('explicit user priority outranks any steering recommendation', () => {
+  let state = completeSlice(dependentShelf(goalState()), { nodeIds: ['node_smelting'], now: 1200 })
+  state = steer(state, {
+    now: 1400,
+    boundary: STEERING_BOUNDARY.USER_PRIORITY_CHANGE,
+    source: 'user',
+    approved_by: 'louis',
+    user_priority_mode: 'horizontal',
+    mode: 'vertical',
+    confidence: 1,
+  })
+  assert.equal(state.steering.current_mode, 'horizontal')
+  assert.equal(state.steering.forced_by_user, true)
+  assert.deepEqual(state.steering.hold_reasons, [STEERING_HOLD_REASON.USER_PRIORITY_LOCKED])
+
+  // A later well-grounded recommendation still cannot override the user.
+  const pushed = steer(state, {
+    now: 1500,
+    mode: 'vertical',
+    confidence: 1,
+    pressure: { vertical: ['a', 'b', 'c'] },
+  })
+  assert.equal(pushed.steering.current_mode, 'horizontal')
+  assert.equal(pushed.steering.recommendation.recommended_mode, 'vertical', 'the advice is still recorded, just not obeyed')
+
+  const cleared = applyPlanningEvent(pushed, {
+    type: PLANNING_EVENT.STEERING_EVALUATED,
+    now: 1600,
+    source: 'user',
+    approved_by: 'louis',
+    boundary: STEERING_BOUNDARY.USER_PRIORITY_CHANGE,
+    clear_user_priority: true,
+    recommended_mode: 'vertical',
+    confidence: 1,
+    pressure: { vertical: ['a', 'b'] },
+  })
+  assert.equal(cleared.steering.user_priority, null)
+  assert.equal(cleared.steering.current_mode, 'vertical')
+})
+
+test('steering context reaches the main llm before it drafts, as advice only', () => {
+  let state = completeSlice(dependentShelf(goalState()), { nodeIds: ['node_smelting'], now: 1200 })
+  state = steer(state, {
+    now: 1400,
+    mode: 'horizontal',
+    confidence: 0.9,
+    reason: 'smelting exists but cannot sustain the next tier',
+    critical_path: 'stable iron throughput',
+    pressure: { vertical: ['red science unreached'], horizontal: ['throughput unstable', 'power margin low'] },
+    candidate_shelf_nodes: ['node_science', 'fabricated_node'],
+  })
+
+  const context = steeringContextForDraft(state)
+  assert.equal(context.advisory, true)
+  assert.equal(context.execution_authority, false)
+  assert.equal(context.current_mode, 'horizontal')
+  assert.equal(context.previous_mode, null)
+  assert.equal(context.critical_path, 'stable iron throughput')
+  assert.deepEqual(context.pressure.horizontal, ['throughput unstable', 'power margin low'])
+  assert.equal(context.refinement_candidates[0].node_id, 'node_science')
+  assert.ok(Object.isFrozen(context))
+  assert.deepEqual(
+    state.steering.recommendation.candidate_shelf_nodes,
+    ['node_science'],
+    'a candidate node id that is not on the shelf is discarded',
+  )
+
+  // The draft records which advice it was written under; it is not bound by it.
+  const drafting = applyPlanningEvent(state, {
+    type: PLANNING_EVENT.DRAFT_CREATED,
+    now: 1500,
+    development_mode: 'vertical',
+    roadmap_node_ids: ['node_science'],
+    steps: [{ description: 'push to red science anyway', completion_contract: GROUNDED_CONTRACT }],
+  })
+  const plan = getActivePlan(drafting)
+  assert.equal(plan.development_mode, 'vertical')
+  assert.deepEqual(plan.steering_at_draft, {
+    mode: 'horizontal',
+    steering_sequence: 1,
+    critical_path: 'stable iron throughput',
+    diverges_from_steering: true,
+  })
+  assert.equal(drafting.steering.current_mode, 'horizontal', 'drafting does not rewrite steering')
+})
+
+test('the steering record survives serialize/restore with its hysteresis lineage', () => {
+  let state = completeSlice(dependentShelf(goalState()), { nodeIds: ['node_smelting'], now: 1200 })
+  state = steer(state, { now: 1400, mode: 'vertical', pressure: { vertical: ['next tier unreached'] } })
+  state = steer(state, { now: 1450, mode: 'vertical', pressure: { vertical: ['still unreached'] } })
+
+  const restored = restorePlanningState(JSON.parse(JSON.stringify(serializePlanningState(state))))
+  assert.deepEqual(restored.steering, state.steering)
+  assert.equal(restored.steering.consecutive_mode_slices, 2)
+  assert.equal(restored.steering.history.length, 2)
+  assert.deepEqual(steeringRecord(restored), steeringRecord(state))
+  assert.ok(Object.isFrozen(steeringRecord(restored)))
+
+  // A hand-edited snapshot cannot inject an unknown mode or a bogus cadence.
+  const snapshot = JSON.parse(JSON.stringify(serializePlanningState(state)))
+  const tampered = restorePlanningState({
+    ...snapshot,
+    steering: { ...snapshot.steering, current_mode: 'sideways', consecutive_mode_slices: -9 },
+  })
+  assert.equal(tampered.steering, null)
+})
+
+test('a plan completion boundary is where steering and the next shelf round meet', () => {
+  let state = completeSlice(dependentShelf(goalState()), { nodeIds: ['node_smelting'], now: 1200 })
+  const plansBefore = state.plans
+  state = steer(state, {
+    now: 1400,
+    mode: 'horizontal',
+    pressure: { horizontal: ['throughput unstable'] },
+    plan_id: plansBefore[0].plan_id,
+  })
+  assert.equal(state.plans, plansBefore, 'a steering evaluation touches no plan at all')
+  assert.equal(state.steering.last_plan_id, plansBefore[0].plan_id)
+  assert.equal(state.steering.history[0].boundary, STEERING_BOUNDARY.PLAN_COMPLETED)
+  // Shelf refinement and steering answer different questions at the same boundary.
+  assert.equal(nearestShelfRefinementTarget(state).node_id, 'node_science')
 })

@@ -61,6 +61,16 @@ const FORBIDDEN_AUTHORITY_FIELDS = Object.freeze([
   'shelf_nodes',
 ])
 
+// --- one dominant development mode per slice (roadmap 4.5) -----------------
+//
+// A committed slice should have ONE dominant development direction. Small
+// supporting work from the opposite direction is legal when it is what makes
+// the slice executable at all; a draft that substantially mixes both
+// directions is a scope smell and goes back to the Main LLM for a cleaner
+// boundary. These two named thresholds are the whole rule.
+const MIXED_DIRECTION_MINORITY_MAX_SHARE = 0.25
+const MIXED_DIRECTION_MAX_SUPPORTING_STEPS = 2
+
 const MAX_REASON_CODES = 8
 const MAX_PROBLEM_STEPS = 16
 const MAX_SHELF_NODES = 5
@@ -223,6 +233,59 @@ export function reasoningBudgetDecisionQuestions() {
   }
 }
 
+/** The named §4.5 thresholds, exposed so callers and tests share one source. */
+export function mixedDirectionThresholds() {
+  return {
+    minority_max_share: MIXED_DIRECTION_MINORITY_MAX_SHARE,
+    max_supporting_steps: MIXED_DIRECTION_MAX_SUPPORTING_STEPS,
+  }
+}
+
+/**
+ * Detect the §4.5 scope smell from per-step development directions.
+ *
+ * This is a DESCRIPTION of the draft in front of Jev ("what direction is this
+ * slice actually pulling in?"), not a recommendation about the next slice.
+ * The steering question — "what kind of development next?" — is answered
+ * separately by `parseSteeringRecommendation` (roadmap 4.9).
+ *
+ * `inseparable` is Jev's escape hatch for the genuinely inseparable case:
+ * it downgrades the finding to a note instead of a scope smell.
+ */
+export function classifySliceDirection(stepDirections, { inseparable = false } = {}) {
+  const classified = asArray(stepDirections)
+    .map((value) => (typeof value === 'string' ? value.trim().toLowerCase() : undefined))
+    .filter((value) => FAMILY_CHOICES.development.includes(value))
+  const counts = { vertical: 0, horizontal: 0, maintain: 0, recover: 0 }
+  for (const direction of classified) counts[direction] += 1
+  const directional = counts.vertical + counts.horizontal
+  const base = {
+    classified_step_count: classified.length,
+    directional_step_count: directional,
+    counts,
+    inseparable_claimed: inseparable === true,
+    ...mixedDirectionThresholds(),
+  }
+  if (directional === 0) {
+    return { ...base, dominant_direction: undefined, minority_direction: undefined, minority_step_count: 0, minority_share: 0, mixed_direction: false, supporting_work_allowed: false }
+  }
+  const dominant = counts.vertical >= counts.horizontal ? 'vertical' : 'horizontal'
+  const minority = dominant === 'vertical' ? 'horizontal' : 'vertical'
+  const minorityCount = counts[minority]
+  const minorityShare = minorityCount / directional
+  const withinTolerance = minorityCount <= MIXED_DIRECTION_MAX_SUPPORTING_STEPS
+    && minorityShare <= MIXED_DIRECTION_MINORITY_MAX_SHARE
+  return {
+    ...base,
+    dominant_direction: dominant,
+    minority_direction: minorityCount > 0 ? minority : undefined,
+    minority_step_count: minorityCount,
+    minority_share: minorityShare,
+    supporting_work_allowed: minorityCount > 0 && withinTolerance,
+    mixed_direction: minorityCount > 0 && !withinTolerance && inseparable !== true,
+  }
+}
+
 export function scopeReviewQuestions() {
   return {
     scope_review: {
@@ -249,6 +312,21 @@ export function scopeReviewQuestions() {
         unsupported_completion_contract: 'A step completion condition cannot be expressed by supported grounded predicates.',
         assumption_not_grounded: 'The draft assumes world facts that verified state does not establish.',
         bad_checkpoint_boundary: 'The slice ends somewhere that is not a useful re-observation or replanning checkpoint.',
+      },
+    },
+    step_directions: {
+      type: 'multi_choice',
+      instructions:
+        'For each draft step in order, classify the development direction that step pulls in, relative to the current critical path rather than the surface action. Use one entry per step. This DESCRIBES the draft; it is not a recommendation about what the next slice should be.',
+      criteria: developmentDecisionQuestions().development.criteria,
+    },
+    mixed_direction_inseparable: {
+      type: 'choice',
+      instructions:
+        'Only if the draft mixes both development directions: is the mixture genuinely inseparable, meaning the supporting work from the other direction is what makes this slice executable at all?',
+      criteria: {
+        yes: 'The opposite-direction work cannot be cut without making the slice unexecutable.',
+        no: 'The slice could end at a cleaner boundary with one dominant direction.',
       },
     },
     actionable_prefix: {
@@ -328,9 +406,26 @@ export function parseScopeReview(response, { draftStepCount } = {}) {
   const reasonSection = sectionOf(response, 'scope_review_reason_codes')
   const prefixSection = sectionOf(response, 'actionable_prefix')
 
+  const directionSection = sectionOf(response, 'step_directions')
+  const inseparableSection = sectionOf(response, 'mixed_direction_inseparable')
+
   const choices = FAMILY_CHOICES.scope_review
   const selected = choiceOf(response, 'scope_review') ?? section.choice ?? section.verdict
-  const verdict = choices.includes(selected) ? selected : 'refine'
+  let verdict = choices.includes(selected) ? selected : 'refine'
+
+  // Roadmap 4.5: one dominant development mode per committed slice.
+  const inseparableAnswer = choiceOf(response, 'mixed_direction_inseparable')
+    ?? inseparableSection.choice
+    ?? section.mixed_direction_inseparable
+  const direction = classifySliceDirection(
+    [
+      ...asArray(section.step_directions),
+      ...asArray(directionSection.choices),
+      ...asArray(directionSection.step_directions),
+      ...asArray(response?.answers?.step_directions?.choices),
+    ],
+    { inseparable: inseparableAnswer === 'yes' || inseparableAnswer === true },
+  )
 
   const rawReasonCodes = [
     ...asArray(section.reason_codes),
@@ -339,9 +434,18 @@ export function parseScopeReview(response, { draftStepCount } = {}) {
     ...asArray(response?.answers?.scope_review_reason_codes?.choices),
   ]
   const reason_codes = uniqueBounded(
-    rawReasonCodes.map((code) => snakeCode(code)).filter((code) => SCOPE_REVIEW_REASON_CODE_SET.has(code)),
+    [
+      ...rawReasonCodes.map((code) => snakeCode(code)).filter((code) => SCOPE_REVIEW_REASON_CODE_SET.has(code)),
+      // A substantially mixed-direction slice IS `mixed_outcomes`; the code is
+      // added deterministically so the finding cannot be reported without it.
+      ...(direction.mixed_direction ? ['mixed_outcomes'] : []),
+    ],
     MAX_REASON_CODES,
   )
+  // A mixed slice is not committable as written: send it back for a cleaner
+  // boundary. Every other verdict (needs_grounding, needs_user_clarification)
+  // is a stronger objection and is left alone.
+  if (direction.mixed_direction && verdict === 'actionable') verdict = 'refine'
 
   const rawProblemSteps = [
     ...asArray(section.problem_steps),
@@ -378,9 +482,15 @@ export function parseScopeReview(response, { draftStepCount } = {}) {
     reason_codes,
     problem_steps,
     actionable_prefix,
+    // Descriptive §4.5 finding about THIS draft. Deliberately not a mode
+    // recommendation: steering review is a separate question (roadmap 4.9).
+    dominant_direction: direction.dominant_direction,
+    mixed_direction: direction.mixed_direction,
+    supporting_work_allowed: direction.supporting_work_allowed,
+    direction_detail: direction,
     recommended_boundary: boundedText(section.recommended_boundary ?? section.recommended_semantic_boundary, 120),
     explanation: boundedText(section.explanation ?? section.notes, 400),
-    dropped_authority_fields: droppedAuthorityFields(section, reasonSection, prefixSection, response),
+    dropped_authority_fields: droppedAuthorityFields(section, reasonSection, prefixSection, directionSection, response),
     ...providerMetadata(response),
   }
 }
