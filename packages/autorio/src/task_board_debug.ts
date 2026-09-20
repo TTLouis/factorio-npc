@@ -5,8 +5,6 @@ import * as gui_text from './task_board_gui_text'
 
 export const DEBUG_BUTTON_NAME = 'airi_task_board_debug'
 export const DEBUG_CLOSE_BUTTON_NAME = 'airi_task_board_debug_close'
-const DEBUG_WIDTH = 720
-const DEBUG_KEY_WIDTH = 118
 const CONVERSATION_HEIGHT = 300
 const CONVERSATION = {
   section: 'airi_task_board_conversation_section',

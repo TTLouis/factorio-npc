@@ -48,10 +48,10 @@ function normalizedMetaText(value) {
 export function isLifecycleMetaStep(value) {
   const text = normalizedMetaText(value)
   if (!text) return true
-  if (/^(?:please\s+)?(?:stop|done|finish(?:ed)?|complete(?:d)?)(?:\s+(?:the\s+)?(?:task|goal|request))?$/.test(text)) return true
+  if (/^(?:please\s+)?(?:stop|done|finish(?:ed)?|completed?)(?:\s+(?:the\s+)?(?:task|goal|request))?$/.test(text)) return true
   if (/^(?:end|close)\s+(?:the\s+)?(?:task|goal|request)$/.test(text)) return true
   if (/^(?:report|announce|confirm)\s+(?:the\s+)?completion(?:\s+to\s+(?:the\s+)?(?:player|user|requester|operator))?$/.test(text)) return true
-  if (/^(?:report|tell|notify|inform)\s+(?:the\s+)?(?:player|user|requester|operator)(?:\s+that)?(?:\s+(?:it|the\s+task|the\s+goal)\s+is)?\s+(?:done|finished|complete(?:d)?)$/.test(text)) return true
+  if (/^(?:report|tell|notify|inform)\s+(?:the\s+)?(?:player|user|requester|operator)(?:\s+that)?(?:\s+(?:it|the\s+task|the\s+goal)\s+is)?\s+(?:done|finished|completed?)$/.test(text)) return true
   if (/^(?:wait|idle)\s+(?:for\s+)?(?:the\s+)?(?:next|further)\s+(?:instruction|instructions|request|task)$/.test(text)) return true
   return false
 }

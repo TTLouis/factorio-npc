@@ -656,7 +656,7 @@ function steeringDomain(state, failure, userText = '') {
   if (/place_entity|placing|construction|PLANNED_COLLISION|WORLD_COLLISION|execute_construction_plan|validateConstructionPlan/i.test(haystack)) return 'construction'
   if (/gather_resource|mine_entity|mine_resource|mining/i.test(haystack)) return 'mining'
   if (/move_items|supply_entity|moving_items|transfer/i.test(haystack)) return 'logistics'
-  if (/water|shore|coast|river|lake|terrain|tile|水边|岸边|海岸|河|湖|水|地形|地图/i.test(haystack)) return 'terrain'
+  if (/water|shore|coast|river|lake|terrain|tile|水边|岸边|海岸|[河湖水]|地形|地图/i.test(haystack)) return 'terrain'
   return 'general'
 }
 
