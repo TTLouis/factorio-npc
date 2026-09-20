@@ -4347,7 +4347,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     recoveryKind,
     providerMessagesOverride,
   }) {
-    this.refreshPlanningReasoningEpoch()
     const omissionRepair = this.actionOmissionRepairActive && recoveryKind !== 'output_budget_exhaustion'
     const effectiveAllowTools = omissionRepair && this.actionOmissionForceNoTools ? false : allowTools
     const effectiveRecoveryAttempt = omissionRepair ? Math.max(1, recoveryAttempt) : recoveryAttempt
