@@ -17,7 +17,7 @@ function serviceBlock(compose, service) {
   assert.notEqual(start, -1, `missing ${service} service`)
   let end = lines.length
   for (let i = start + 1; i < lines.length; i += 1) {
-    if (/^  [A-Za-z0-9_.-]+:\s*$/.test(lines[i])) {
+    if (/^\x20{2}[A-Za-z0-9_.-]+:\s*$/.test(lines[i])) {
       end = i
       break
     }
@@ -31,7 +31,7 @@ function environmentKeys(block) {
   assert.notEqual(start, -1, 'missing environment block')
   const keys = []
   for (let i = start + 1; i < lines.length; i += 1) {
-    const match = /^      ([A-Z0-9_]+):/.exec(lines[i])
+    const match = /^\x20{6}([A-Z0-9_]+):/.exec(lines[i])
     if (!match) break
     keys.push(match[1])
   }
@@ -62,7 +62,7 @@ test('devcontainer loads repo-root interpolation and keeps rcon-api secrets and 
   assert.match(rconApi, /FACTORIO_RCON_PASSWORD: \$\{FACTORIO_RCON_PASSWORD:\?set FACTORIO_RCON_PASSWORD in repo-root \.env\}/)
   assert.doesNotMatch(rconApi, /\benv_file\s*:/)
   assert.doesNotMatch(rconApi, /\bOPENAI_API_KEY\b|\bOPENAI_API_BASEURL\b|\bOPENAI_MODEL\b|\bFACTORIO_USERNAME\b|\bFACTORIO_TOKEN\b|\bTYPESAFE_API_KEY\b/)
-  assert.doesNotMatch(rconApi, /^    ports:\s*$/m)
+  assert.doesNotMatch(rconApi, /^\x20{4}ports:\s*$/m)
 
   assert.match(apiConfig, /^\s*http_server_addr:\s*["']127\.0\.0\.1:24180["']\s*$/m)
   assert.match(apiConfig, /^\s*grpc_server_addr:\s*["']127\.0\.0\.1:24181["']\s*$/m)
