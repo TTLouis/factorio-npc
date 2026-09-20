@@ -233,14 +233,22 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const reducerSteps = Array.isArray(plan.steps) ? plan.steps.map(step => step.description) : []
     if (reducerSteps.length > 0 && legacyState.task_board?.kind === 'task_board_lite') {
       const boardBefore = legacyState.task_board
-      const sameSemanticPlan = reducerSteps.length === boardBefore.steps.length
-        && reducerSteps.every((description, index) => clean(description) === clean(boardBefore.steps[index]?.description))
+      const carriedPrefix = Array.isArray(plan.carried_forward_evidence) ? plan.carried_forward_evidence.length : 0
+      const suffixAligned = boardBefore.steps.length === carriedPrefix + reducerSteps.length
+        && reducerSteps.every((description, index) => clean(description) === clean(boardBefore.steps[carriedPrefix + index]?.description))
+      const sameSemanticPlan = carriedPrefix === 0 && suffixAligned
+      const authoritativeIndex = suffixAligned
+        ? carriedPrefix + plan.active_step_index
+        : plan.active_step_index
       const proposedFocusIndex = boardBefore.proposed_focus_index
       const proposedFocusStepId = boardBefore.proposed_focus_step_id
+      const semanticPlan = suffixAligned
+        ? boardBefore.steps.map(step => String(step?.description ?? '')).filter(Boolean)
+        : reducerSteps
       legacyState.task_board = reconcileTaskBoard(
         boardBefore,
-        reducerSteps,
-        plan.active_step_index,
+        semanticPlan,
+        authoritativeIndex,
         { now: planning.updated_at || legacyState.updated_at || Date.now(), authoritativeAdvance: true, allowReplan: false },
       )
       // The reducer owns verified progress, not planner focus. On an unchanged
