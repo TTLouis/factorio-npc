@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 
 import { canonicalContinuationPlan, CanonicalTaskBoardMemory, verifyDeterministicReceipt } from './canonical-task-board-memory.mjs'
 import { createTaskBoard, reconcileTaskBoard } from './common.mjs'
-import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
+import { getActivePlan, GOAL_STATUS, PLAN_STATUS } from './planning-state.mjs'
 
 // A plan only commits on a real Jev scope review plus a real preflight result;
 // there is deliberately no default, so tests state the review they mean.
@@ -785,5 +785,154 @@ test('blocked revise choice plus explicit user prompt creates successor and pres
   assert.equal(reconciled.state.task_board.completed_count, 2)
   assert.equal(reconciled.state.task_board.active_index, 2)
   assert.equal(reconciled.state.task_board.steps[2].description, 'Use alternate furnace recipe')
+})
+
+// A two-step slice, both steps still pending, so one live adapter sequence can
+// drive a plan from commit to PLAN_COMPLETED without fixture replay.
+function twoStepState() {
+  return planState({
+    task_board: {
+      ...board(),
+      active_index: 0,
+      active_step_id: 'step_1',
+      completed_count: 0,
+      total_steps: 2,
+      steps: [
+        { id: 'step_1', description: 'Gather iron', status: 'active' },
+        { id: 'step_2', description: 'Build furnace', status: 'pending' },
+      ],
+    },
+    current_step: 0,
+  })
+}
+
+function driveSliceToCompletion(memory, key) {
+  memory.planByNpc.set(key, twoStepState())
+  memory.ensurePlanningDraft(key, memory.planByNpc.get(key), { now: 100 })
+  memory.commitPlanningPlan(key, { now: 110, review: REVIEWED_ACTIONABLE })
+  const first = { kind: 'deterministic_verification', ref: 'proof_step_1', summary: 'iron gathered' }
+  memory.recordBoardEvidence(key, first)
+  memory.applyOutcomeAuthority(key, {
+    kind: 'verified_complete',
+    source: 'deterministic_runtime',
+    reason_code: 'step_1_verified',
+    evidence: [first],
+    metadata: { scope: 'step' },
+  })
+  const last = { kind: 'deterministic_verification', ref: 'proof_step_2', summary: 'furnace built' }
+  memory.recordBoardEvidence(key, last)
+  memory.applyOutcomeAuthority(key, {
+    kind: 'verified_complete',
+    source: 'deterministic_runtime',
+    reason_code: 'verified_final_step',
+    evidence: [last],
+  })
+}
+
+test('a plan driven to completion through the live outcome path does NOT satisfy the goal', () => {
+  const key = 'npc:airi'
+  const memory = new CanonicalTaskBoardMemory()
+  driveSliceToCompletion(memory, key)
+
+  // The slice really did finish -- this is not a test that nothing happened.
+  assert.equal(getActivePlan(memory.planningState(key)).status, PLAN_STATUS.COMPLETED)
+  // And the goal is untouched. plan slice completed != user goal satisfied:
+  // the runtime has no acceptance criteria for prose intent, so it may not
+  // decide the intent was met.
+  assert.equal(memory.planningState(key).goal.status, GOAL_STATUS.ACTIVE)
+  assert.equal(memory.planningState(key).goal.satisfied_at, undefined)
+  assert.equal(memory.planningState(key).log.some(entry => entry.type === 'GOAL_SATISFIED'), false)
+})
+
+test('an explicit user declaration carrying its own evidence satisfies the goal through the adapter', () => {
+  const key = 'npc:airi'
+  const memory = new CanonicalTaskBoardMemory()
+  driveSliceToCompletion(memory, key)
+
+  const satisfied = memory.recordGoalSatisfaction(key, {
+    source: 'user',
+    declaredBy: 'Louis',
+    evidenceRefs: ['chat/Louis/goal_confirmed'],
+    rationale: 'Louis confirmed the furnace line covers what he asked for.',
+  })
+
+  assert.equal(satisfied.goal.status, GOAL_STATUS.COMPLETED)
+  assert.equal(satisfied.goal.satisfaction.source, 'user')
+  assert.deepEqual(satisfied.goal.satisfaction.evidence_refs, ['chat/Louis/goal_confirmed'])
+  assert.equal(satisfied.goal.satisfaction.rationale, 'Louis confirmed the furnace line covers what he asked for.')
+  assert.ok(satisfied.log.some(entry => entry.type === 'GOAL_SATISFIED'))
+  assert.equal(memory.planningState(key).goal.status, GOAL_STATUS.COMPLETED)
+})
+
+test('a goal-satisfaction declaration without its own evidence is refused', () => {
+  const key = 'npc:airi'
+  const memory = new CanonicalTaskBoardMemory()
+  driveSliceToCompletion(memory, key)
+
+  const unchanged = memory.recordGoalSatisfaction(key, { source: 'user', declaredBy: 'Louis', evidenceRefs: [] })
+  assert.equal(unchanged.goal.status, GOAL_STATUS.ACTIVE)
+  // Jev is not an authority over the user's intent, whatever it brings.
+  const refused = memory.recordGoalSatisfaction(key, { source: 'jev', evidenceRefs: ['jev/review_1'] })
+  assert.equal(refused.goal.status, GOAL_STATUS.ACTIVE)
+})
+
+test('a new user instruction supersedes the in-flight committed slice and records the lineage', () => {
+  const key = 'npc:airi'
+  const memory = new CanonicalTaskBoardMemory()
+  memory.planByNpc.set(key, twoStepState())
+  memory.ensurePlanningDraft(key, memory.planByNpc.get(key), { now: 100 })
+  memory.commitPlanningPlan(key, { now: 110, review: REVIEWED_ACTIONABLE })
+  const inFlight = getActivePlan(memory.planningState(key))
+  assert.equal(inFlight.status, PLAN_STATUS.COMMITTED)
+
+  const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Forget the furnace, get a coal line running first' }, {
+    chatMessage: 'Switching to coal.',
+    plan: ['Find coal', 'Build a drill'],
+    currentStep: 0,
+    operations: [{ name: 'wait', args: { ticks: 1 } }],
+  })
+
+  assert.equal(recorded.supersededPlanId, inFlight.plan_id)
+  const planning = memory.planningState(key)
+  const replaced = planning.plans.find(item => item.plan_id === inFlight.plan_id)
+  const successor = getActivePlan(planning)
+  assert.equal(replaced.status, PLAN_STATUS.SUPERSEDED)
+  assert.equal(replaced.superseded_by_plan_id, successor.plan_id)
+  assert.notEqual(successor.plan_id, inFlight.plan_id)
+  assert.deepEqual(successor.steps.map(step => step.description), ['Find coal', 'Build a drill'])
+  // The successor is a draft: supersession replaces a slice, it does not admit
+  // one. The commit gate still has to pass on the replacement.
+  assert.equal(successor.status, PLAN_STATUS.DRAFT)
+  assert.ok(planning.log.some(entry => entry.type === 'PLAN_SUPERSEDED' && entry.plan_id === inFlight.plan_id))
+  // The replaced slice must stop steering reasoning.
+  assert.ok(memory.planningReasoningEpoch(key) > 0)
+})
+
+test('harness continuation and an unchanged plan never supersede the in-flight slice', () => {
+  const key = 'npc:airi'
+  const memory = new CanonicalTaskBoardMemory()
+  memory.planByNpc.set(key, twoStepState())
+  memory.ensurePlanningDraft(key, memory.planByNpc.get(key), { now: 100 })
+  memory.commitPlanningPlan(key, { now: 110, review: REVIEWED_ACTIONABLE })
+  const inFlight = getActivePlan(memory.planningState(key))
+
+  const continued = memory.recordPlan(key, { sender: 'Louis', text: 'continue' }, {
+    chatMessage: 'Continuing.',
+    plan: ['Find coal', 'Build a drill'],
+    currentStep: 0,
+    operations: [{ name: 'wait', args: { ticks: 1 } }],
+  }, { continuation: true })
+  assert.equal(continued.supersededPlanId, undefined)
+  assert.equal(getActivePlan(memory.planningState(key)).plan_id, inFlight.plan_id)
+
+  const reEmitted = memory.recordPlan(key, { sender: 'Louis', text: 'keep going with the furnace' }, {
+    chatMessage: 'Same slice.',
+    plan: ['Gather iron', 'Build furnace'],
+    currentStep: 0,
+    operations: [{ name: 'wait', args: { ticks: 1 } }],
+  })
+  assert.equal(reEmitted.supersededPlanId, undefined)
+  assert.equal(getActivePlan(memory.planningState(key)).plan_id, inFlight.plan_id)
+  assert.equal(getActivePlan(memory.planningState(key)).status, PLAN_STATUS.COMMITTED)
 })
 
