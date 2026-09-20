@@ -84,6 +84,8 @@ export interface PlayerParametersMineEntity {
   last_target_amount?: number
   /** Consecutive engine-rejected mining starts for bounded approach recovery. */
   mining_rejects?: number
+  /** True after this target was handed to Factorio; a stopped state on a later tick is a rejected start. */
+  mining_attempted?: boolean
 }
 
 export interface PlayerParametersHarvestProduct {

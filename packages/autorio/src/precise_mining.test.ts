@@ -50,17 +50,22 @@ function fixture() {
     return []
   })
 
+  const character: Record<string, any> = {
+    valid: true,
+    resource_reach_distance: 2.7,
+    reach_distance: 10,
+    selected: undefined,
+  }
   const actor = {
     is_valid: true,
-    character: {
-      valid: true,
-      resource_reach_distance: 2.7,
-      reach_distance: 10,
-    },
+    character,
     position: { x: 0, y: 0 },
     surface,
     force,
-    update_selected_entity: vi.fn(),
+    update_selected_entity: vi.fn((position: { x: number, y: number }) => {
+      if (position.x !== 2 || position.y !== 0) character.selected = undefined
+      else character.selected = (globalThis as any).game.get_entity_by_unit_number(91) ?? exactResource
+    }),
     get_mining_state: vi.fn(() => ({ mining })),
     set_mining_state: vi.fn((state: { mining: boolean }) => { mining = state.mining }),
     set_walking_state: vi.fn(),

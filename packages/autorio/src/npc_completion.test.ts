@@ -133,7 +133,7 @@ describe('standalone NPC completion polling', () => {
     expect(character.mining_state.mining).toBe(false)
   })
 
-  it('also restarts mining when Factorio clears the selected entity', () => {
+  it('moves closer instead of restarting every tick when Factorio clears the selected entity', () => {
     const resource: Record<string, any> = {
       valid: true,
       name: 'iron-ore',
@@ -152,9 +152,17 @@ describe('standalone NPC completion polling', () => {
     character.character_mining_progress = 0.5
     on_tick({})
 
-    expect(task_manager.player_state.parameters_mine_entity?.count).toBe(1)
-    expect(character.selected).toBe(resource)
-    expect(character.mining_state.mining).toBe(true)
+    expect(task_manager.player_state.task_state).toBe(TaskStates.WALKING_TO_ENTITY)
+    expect(task_manager.get_status_snapshot()).toMatchObject({
+      queue_length: 1,
+      queued_task_types: [TaskStates.MINING],
+      current_task: {
+        target_kind: 'position',
+        requested_position: resource.position,
+      },
+    })
+    expect(character.selected).toBeUndefined()
+    expect(character.mining_state.mining).toBe(false)
   })
 })
 

@@ -17,6 +17,7 @@ type BasicOperationCode = 'queued' | 'completed' | 'cancelled'
   | 'invalid_entity' | 'unknown_entity' | 'not_item_placeable' | 'ambiguous_placement_item' | 'invalid_placement_item'
   | 'item_missing' | 'no_position' | 'not_placeable' | 'create_failed'
   | 'nothing_moved' | 'player_unavailable' | 'different_surface' | 'too_far'
+  | 'mining_rejected'
   | 'not_rotatable' | 'rotation_failed'
   | 'not_recipe_machine' | 'recipe_disabled' | 'incompatible_recipe' | 'set_recipe_failed'
 

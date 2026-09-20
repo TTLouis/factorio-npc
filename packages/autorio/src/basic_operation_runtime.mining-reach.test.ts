@@ -14,6 +14,8 @@ function fixture(target_x: number) {
     position: { x: target_x, y: 0 },
     amount: 100,
     unit_number: 91,
+    surface: undefined as any,
+    force: { index: 1 },
   }
   const surface = {
     index: 1,
@@ -22,17 +24,21 @@ function fixture(target_x: number) {
   const set_mining_state = vi.fn((state: { mining: boolean }) => {
     mining = state.mining
   })
+  const character: Record<string, any> = {
+    valid: true,
+    resource_reach_distance: 2.7,
+    reach_distance: 10,
+    selected: undefined,
+  }
+  resource.surface = surface
+  const update_selected_entity = vi.fn(() => { character.selected = resource })
   const actor = {
     is_valid: true,
-    character: {
-      valid: true,
-      resource_reach_distance: 2.7,
-      reach_distance: 10,
-    },
+    character,
     position: { x: 0, y: 0 },
     surface,
     force: { index: 1 },
-    update_selected_entity: vi.fn(),
+    update_selected_entity,
     get_mining_state: vi.fn(() => ({ mining })),
     set_mining_state,
     set_walking_state: vi.fn(),
@@ -51,7 +57,7 @@ function fixture(target_x: number) {
   const manager = new_task_manager(get_actor)
   const controller = new_basic_operation_controller(get_actor, manager)
   const runtime = new_basic_operation_runtime(manager, controller)
-  return { actor, resource, surface, set_mining_state, manager, controller, runtime }
+  return { actor, character, resource, surface, set_mining_state, manager, controller, runtime, set_mining: (value: boolean) => { mining = value } }
 }
 
 beforeEach(() => {
@@ -191,5 +197,60 @@ describe('mining reach recovery', () => {
       last_target_amount: 100,
     })
     expect(f.set_mining_state).toHaveBeenLastCalledWith({ mining: true, position: { x: 2, y: 0 } })
+  })
+
+  it('moves farther toward the exact mining target when Factorio clears a started mining selection', () => {
+    const f = fixture(2)
+    expect(f.controller.submit_mining_exact(91)).toBe(true)
+    ;(globalThis as any).game.get_entity_by_unit_number = (unit: number) => unit === 91 ? f.resource : undefined
+
+    f.runtime.state_mining(f.actor)
+    expect(f.manager.player_state.parameters_mine_entity).toMatchObject({
+      target_unit_number: 91,
+      mining_attempted: true,
+    })
+
+    f.character.selected = undefined
+    f.set_mining(false)
+    f.runtime.state_mining(f.actor)
+
+    expect(f.manager.player_state.task_state).toBe(TaskStates.WALKING_TO_ENTITY)
+    expect(f.manager.player_state.parameters_walk_to_entity).toMatchObject({
+      target_kind: 'position',
+      requested_position: { x: 2, y: 0 },
+      reach_distance: 1.25,
+    })
+    expect(f.manager.get_status_snapshot()).toMatchObject({
+      queue_length: 1,
+      queued_task_types: [TaskStates.MINING],
+    })
+  })
+
+  it('fails closed after bounded repeated engine rejections instead of restarting mining every tick', () => {
+    const f = fixture(2)
+    expect(f.controller.submit_mining('iron-ore', 1)).toBe(true)
+    f.runtime.state_mining(f.actor)
+
+    for (let rejection = 1; rejection <= 4; rejection++) {
+      f.character.selected = undefined
+      f.set_mining(false)
+      f.runtime.state_mining(f.actor)
+      if (rejection <= 3) {
+        expect(f.manager.player_state.task_state).toBe(TaskStates.WALKING_TO_ENTITY)
+        f.manager.reset_task_state()
+        f.manager.next_task()
+        expect(f.manager.player_state.task_state).toBe(TaskStates.MINING)
+        f.runtime.state_mining(f.actor)
+      }
+    }
+
+    expect(f.manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(f.controller.status().last_result).toMatchObject({
+      accepted: false,
+      completed: false,
+      code: 'mining_rejected',
+    })
+    const starts = f.set_mining_state.mock.calls.filter(([state]) => state.mining === true)
+    expect(starts).toHaveLength(4)
   })
 })

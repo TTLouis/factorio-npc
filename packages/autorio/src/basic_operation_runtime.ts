@@ -3,7 +3,7 @@ import type { ControlledActor } from './actors/types'
 import type { new_basic_operation_controller } from './basic_operations'
 import { resolve_exact_entity } from './entity_reference'
 import { build_interaction_reach, entity_interaction_reach } from './interaction_range'
-import { mining_reach_distance, within_mining_reach } from './mining_reach'
+import { MAX_MINING_START_REJECTIONS, mining_navigation_reach, mining_navigation_requires_movement, select_exact_mining_target, within_mining_reach } from './mining_reach'
 import { resolve_entity_placement_item } from './placement_item'
 import type { new_task_manager } from './task_manager'
 import type { PlayerParametersMineEntity, PlayerParametersWalkToEntity } from './types'
@@ -31,7 +31,7 @@ function squared_distance(a: { x: number, y: number }, b: { x: number, y: number
   return (a.x - b.x) ** 2 + (a.y - b.y) ** 2
 }
 
-function mining_reposition_task(actor: ControlledActor, entity: LuaEntity): PlayerParametersWalkToEntity | undefined {
+function mining_reposition_task(actor: ControlledActor, entity: LuaEntity, rejected_starts: number = 0): PlayerParametersWalkToEntity | undefined {
   const identity = actor.status_snapshot()
   if (identity.actor_id === undefined) return undefined
   const target_position = { x: entity.position.x, y: entity.position.y }
@@ -41,7 +41,7 @@ function mining_reposition_task(actor: ControlledActor, entity: LuaEntity): Play
     search_radius: MINING_TARGET_SEARCH_RADIUS,
     target_kind: 'position',
     requested_position: target_position,
-    reach_distance: mining_reach_distance(actor, entity),
+    reach_distance: mining_navigation_reach(actor, entity, rejected_starts),
     path: null,
     path_drawn: false,
     path_index: 1,
@@ -76,9 +76,37 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     if (!task) return
     task.position = { x: entity.position.x, y: entity.position.y }
     task.last_target_amount = entity.type === 'resource' ? entity.amount : undefined
-    actor.update_selected_entity(entity.position)
+    if (!select_exact_mining_target(actor, entity)) {
+      reposition_after_rejected_mining_start(actor, entity, task)
+      return
+    }
     actor.set_mining_state({ mining: true, position: entity.position })
+    task.mining_attempted = true
+    if (!actor.get_mining_state().mining) {
+      reposition_after_rejected_mining_start(actor, entity, task)
+      return
+    }
     log(`[AUTORIO] Started mining ${entity.name} at position: ${serpent.line(entity.position)}`)
+  }
+
+  function reposition_after_rejected_mining_start(actor: ControlledActor, entity: LuaEntity, task: PlayerParametersMineEntity) {
+    actor.set_mining_state({ mining: false })
+    task.mining_attempted = false
+    task.mining_rejects = (task.mining_rejects ?? 0) + 1
+    if (task.mining_rejects > MAX_MINING_START_REJECTIONS) {
+      controller.fail(actor, task, 'mining_rejected')
+      return false
+    }
+
+    const navigation = mining_reposition_task(actor, entity, task.mining_rejects)
+    const reach = navigation?.reach_distance ?? 0
+    if (!navigation || !mining_navigation_requires_movement(actor, entity, reach)
+      || !manager.interrupt_current_with(navigation, task)) {
+      controller.fail(actor, task, 'mining_rejected')
+      return false
+    }
+    log(`[AUTORIO] Mining start rejected for ${entity.name}; moving toward the mining target before retry ${task.mining_rejects}/${MAX_MINING_START_REJECTIONS}`)
+    return true
   }
 
   function current_mining_target(actor: ControlledActor) {
@@ -109,6 +137,8 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     actor.set_mining_state({ mining: false })
     task.position = undefined
     task.last_target_amount = undefined
+    task.mining_attempted = false
+    task.mining_rejects = 0
     if (!manager.interrupt_current_with(navigation, task)) {
       controller.fail(actor, task, 'too_far')
       return false
@@ -134,6 +164,8 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       task.count -= 1
       task.position = undefined
       task.last_target_amount = undefined
+      task.mining_attempted = false
+      task.mining_rejects = 0
       actor.set_mining_state({ mining: false })
       log(`[AUTORIO] Standalone actor completed mining cycle, remaining: ${task.count}`)
     }
@@ -146,6 +178,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
         const mined = math.min(task.count, task.last_target_amount - amount)
         task.count -= mined
         task.last_target_amount = amount
+        task.mining_rejects = 0
         log(`[AUTORIO] Standalone actor mined ${mined} ${target.name}, remaining: ${task.count}`)
       }
     }
@@ -192,11 +225,17 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     if (task.position) {
       const existing = current_mining_target(actor)
       if (existing) {
+        if (task.mining_attempted) {
+          reposition_after_rejected_mining_start(actor, existing, task)
+          return
+        }
         start_mining(actor, existing)
         return
       }
       task.position = undefined
       task.last_target_amount = undefined
+      task.mining_attempted = false
+      task.mining_rejects = 0
     }
 
     let target: LuaEntity | undefined
@@ -267,6 +306,8 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     task.count -= 1
     task.position = undefined
     task.last_target_amount = undefined
+    task.mining_attempted = false
+    task.mining_rejects = 0
     log(`[AUTORIO] Controlled player completed mining cycle, remaining: ${task.count}`)
     if (task.count <= 0) finish_mining(actor)
   }
