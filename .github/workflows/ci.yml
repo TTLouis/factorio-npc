@@ -11,6 +11,7 @@ on:
     branches:
       - main
       - feat/npc-transition-work
+      - experiment/jev-agent-architecture
 
   workflow_dispatch:
 
