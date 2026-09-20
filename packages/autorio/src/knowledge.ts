@@ -2,6 +2,7 @@ import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import { recipe_bootstrap_for_actor } from './bootstrap_planning'
 import { resolve_exact_entity } from './entity_reference'
+import { recipe_categories } from './recipe_categories'
 
 const MAX_RECIPE_MATCHES = 8
 const MAX_MACHINE_MATCHES = 8
@@ -69,23 +70,14 @@ function sort_strings(values: string[]) {
 }
 
 function categories_for(recipe: any): string[] {
-  // The deterministic/runtime floor is Factorio 2.0.77. In 2.0 a recipe exposes
-  // its primary category plus optional additional categories directly; reading
-  // those fields avoids calling the LuaRecipe category predicate through a
-  // transpiled wrapper and avoids scanning the global recipe-category table.
-  const categories: string[] = []
-  if (typeof recipe.category === 'string') categories.push(recipe.category)
-  for (const category of recipe.additional_categories ?? []) {
-    if (typeof category !== 'string') continue
-    let duplicate = false
-    for (const existing of categories) {
-      if (existing === category) {
-        duplicate = true
-        break
-      }
-    }
-    if (!duplicate) categories.push(category)
-  }
+  // Reading the shape is recipe_categories' job -- see that module for why
+  // `recipe.categories` is fatal rather than merely wrong. This was a fourth
+  // hand-rolled copy of that read; it happened to be correct, but its existence
+  // is what made three of the other copies survive unnoticed.
+  //
+  // The sort stays here: this is the only caller that needs a deterministic
+  // order, because these categories reach the model as observation text.
+  const categories = recipe_categories(recipe)
   sort_strings(categories)
   return categories
 }

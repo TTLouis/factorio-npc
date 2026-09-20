@@ -13,7 +13,10 @@
 // tests that mocked a `categories` array the engine never provides — so the
 // suites were green while every live set_machine_recipe killed the server.
 //
-// Keep this the only place that reads recipe categories.
+// Keep this the only place that reads recipe categories. knowledge.ts held a
+// fourth copy that happened to be correct -- and a correct duplicate is exactly
+// what let the three broken ones go unnoticed, since any one of them read
+// plausibly on its own.
 export function recipe_categories(recipe: any): string[] {
   const categories: string[] = []
   if (typeof recipe?.category === 'string') categories.push(recipe.category)
