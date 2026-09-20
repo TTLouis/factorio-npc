@@ -924,7 +924,7 @@ test('a goal-satisfaction declaration without its own evidence is refused', () =
   assert.equal(refused.goal.status, GOAL_STATUS.ACTIVE)
 })
 
-test('a new user instruction supersedes the in-flight committed slice and records the lineage', () => {
+test('a committed slice is frozen: a new instruction cannot replace it', () => {
   const key = 'npc:airi'
   const memory = new CanonicalTaskBoardMemory()
   memory.planByNpc.set(key, twoStepState())
@@ -932,6 +932,7 @@ test('a new user instruction supersedes the in-flight committed slice and record
   memory.commitPlanningPlan(key, { now: 110, review: REVIEWED_ACTIONABLE })
   const inFlight = getActivePlan(memory.planningState(key))
   assert.equal(inFlight.status, PLAN_STATUS.COMMITTED)
+  const planCountBefore = memory.planningState(key).plans.length
 
   const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Forget the furnace, get a coal line running first' }, {
     chatMessage: 'Switching to coal.',
@@ -940,20 +941,40 @@ test('a new user instruction supersedes the in-flight committed slice and record
     operations: [{ name: 'wait', args: { ticks: 1 } }],
   })
 
-  assert.equal(recorded.supersededPlanId, inFlight.plan_id)
+  // This used to supersede, at RECORD time -- before scope review and before
+  // preflight. A replacement that fails either gate would then have destroyed
+  // a validated plan and left an extra one behind. Supersession is a handover,
+  // and an unreviewed draft is not a successor.
+  assert.equal(recorded.supersededPlanId, undefined)
   const planning = memory.planningState(key)
-  const replaced = planning.plans.find(item => item.plan_id === inFlight.plan_id)
-  const successor = getActivePlan(planning)
-  assert.equal(replaced.status, PLAN_STATUS.SUPERSEDED)
-  assert.equal(replaced.superseded_by_plan_id, successor.plan_id)
-  assert.notEqual(successor.plan_id, inFlight.plan_id)
-  assert.deepEqual(successor.steps.map(step => step.description), ['Find coal', 'Build a drill'])
-  // The successor is a draft: supersession replaces a slice, it does not admit
-  // one. The commit gate still has to pass on the replacement.
-  assert.equal(successor.status, PLAN_STATUS.DRAFT)
-  assert.ok(planning.log.some(entry => entry.type === 'PLAN_SUPERSEDED' && entry.plan_id === inFlight.plan_id))
-  // The replaced slice must stop steering reasoning.
-  assert.ok(memory.planningReasoningEpoch(key) > 0)
+  const active = getActivePlan(planning)
+  assert.equal(active.plan_id, inFlight.plan_id, 'the frozen slice is still the active plan')
+  assert.equal(active.status, PLAN_STATUS.COMMITTED)
+  assert.deepEqual(active.steps.map(step => step.description), inFlight.steps.map(step => step.description))
+  assert.equal(planning.plans.length, planCountBefore, 'no successor was minted')
+  assert.equal(planning.plans.some(item => item.status === PLAN_STATUS.SUPERSEDED), false)
+  assert.equal(planning.log.some(entry => entry.type === 'PLAN_SUPERSEDED'), false)
+})
+
+test('an unadmitted draft may still be replaced outright', () => {
+  const key = 'npc:airi'
+  const memory = new CanonicalTaskBoardMemory()
+  memory.planByNpc.set(key, twoStepState())
+  memory.ensurePlanningDraft(key, memory.planByNpc.get(key), { now: 100 })
+  const draft = getActivePlan(memory.planningState(key))
+  assert.equal(draft.status, PLAN_STATUS.DRAFT, 'nothing has been admitted yet')
+
+  memory.recordPlan(key, { sender: 'Louis', text: 'Actually, coal first' }, {
+    chatMessage: 'Switching to coal.',
+    plan: ['Find coal', 'Build a drill'],
+    currentStep: 0,
+    operations: [{ name: 'wait', args: { ticks: 1 } }],
+  })
+
+  // Nothing was frozen, so replacing it destroys no validated work.
+  const active = getActivePlan(memory.planningState(key))
+  assert.deepEqual(active.steps.map(step => step.description), ['Find coal', 'Build a drill'])
+  assert.notEqual(active.status, PLAN_STATUS.COMMITTED)
 })
 
 test('harness continuation and an unchanged plan never supersede the in-flight slice', () => {

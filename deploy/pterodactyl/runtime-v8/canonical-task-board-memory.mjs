@@ -30,6 +30,15 @@ const ATTEMPT_OUTCOME_KINDS = new Set([
 // failure signal.
 const FAILED_ATTEMPT_OUTCOME_KINDS = new Set(['recoverable_provider_failure'])
 
+// Statuses whose plan may still be replaced outright by a new submission:
+// nothing has been admitted yet, so nothing is frozen.
+const PRE_COMMIT_REPLACEABLE_STATUSES = Object.freeze([
+  PLAN_STATUS.DRAFT,
+  PLAN_STATUS.JEV_REVIEW,
+  PLAN_STATUS.RUNTIME_VALIDATION,
+  PLAN_STATUS.READY,
+])
+
 const STRICT_TASKS_BY_OPERATION = new Map([
   ['walk_to_entity', ['walking_to_entity']],
   ['walk_to_entity_exact', ['walking_to_entity']],
@@ -998,7 +1007,20 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     if (typeof requestInfo?.text !== 'string' || !requestInfo.text.trim()) return undefined
     const planning = key ? this.planningByNpc.get(key) : undefined
     const inFlight = getActivePlan(planning)
-    if (!inFlight || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(inFlight.status)) return undefined
+    // A COMMITTED or EXECUTING slice is FROZEN and is deliberately excluded.
+    //
+    // This used to include them, which meant an ordinary submission replaced a
+    // healthy committed plan at RECORD time -- before scope review, before
+    // preflight. When that replacement then failed preflight, the committed
+    // slice had already been superseded and an extra plan was left behind: a
+    // validated plan traded for a dead draft. The real Factorio lifecycle gate
+    // catches exactly this, on a turn where the user only said "continue".
+    //
+    // Supersession is a handover, and a draft that has passed neither gate is
+    // not a successor. The roadmap has one path from a frozen slice to its
+    // replacement -- structural blocker, then explicit user-approved revision --
+    // and it produces plan_vN+1 with lineage rather than replacing in place.
+    if (!inFlight || !PRE_COMMIT_REPLACEABLE_STATUSES.includes(inFlight.status)) return undefined
     const steps = (Array.isArray(plan?.plan) ? plan.plan : [])
       .filter(step => typeof step === 'string' && step.trim())
     // Re-emitting the same slice is continuation, not steering. Superseding on
