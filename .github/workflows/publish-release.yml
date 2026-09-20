@@ -23,9 +23,9 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.value }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
 
@@ -52,8 +52,16 @@ jobs:
         run: bash deploy/pterodactyl/package-smoke.sh
 
       - name: Run zero-player Factorio integration harness
+        shell: bash
         run: |
-          docker build -f tests/factorio/Dockerfile -t airi-factorio-release-test .
+          set -Eeuo pipefail
+          for attempt in 1 2 3; do
+            if docker build -f tests/factorio/Dockerfile -t airi-factorio-release-test .; then
+              break
+            fi
+            [[ "$attempt" -lt 3 ]] || exit 1
+            sleep $((attempt * 10))
+          done
           docker run --rm airi-factorio-release-test
 
   publish:
@@ -64,9 +72,9 @@ jobs:
       VERSION: ${{ needs.verify.outputs.version }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
 
@@ -107,14 +115,20 @@ jobs:
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
           echo "image=$image" >> "$GITHUB_OUTPUT"
           printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          docker build --pull \
-            -f deploy/docker/Dockerfile \
-            --build-arg AIRI_SOURCE_REF="$GITHUB_SHA" \
-            --build-arg FACTORIO_VERSION=latest \
-            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
-            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
-            --label "org.opencontainers.image.version=$VERSION" \
-            -t "$image:$VERSION" .
+          for attempt in 1 2 3; do
+            if docker build --pull \
+              -f deploy/docker/Dockerfile \
+              --build-arg AIRI_SOURCE_REF="$GITHUB_SHA" \
+              --build-arg FACTORIO_VERSION=latest \
+              --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+              --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+              --label "org.opencontainers.image.version=$VERSION" \
+              -t "$image:$VERSION" .; then
+              break
+            fi
+            [[ "$attempt" -lt 3 ]] || exit 1
+            sleep $((attempt * 10))
+          done
 
           name="airi-release-smoke-${GITHUB_RUN_ID}"
           cleanup() { docker rm -f -v "$name" >/dev/null 2>&1 || true; }
