@@ -573,9 +573,30 @@ export const plannerControlToolDefinitions = [{
           type: 'object',
           description: 'Optional semantic completion contract for the active step. Runtime-supported requirement shapes are validated by the harness.',
         },
-        project: {
-          type: 'object',
-          description: 'Optional bounded Project Board proposal for hierarchy transitions. Jev/runtime validate it before persistence.',
+        // LOD 1 guidance (roadmap 2 / 3). Deliberately NOT an object with steps
+        // or operations: a shelf node says what should eventually be true and
+        // why, and the runtime re-derives realization status from verified
+        // evidence. `status`, `steps` and `operations` are absent from this
+        // schema on purpose -- a node that could assert its own progress would
+        // let the planner grade its own homework.
+        roadmap: {
+          type: 'array',
+          maxItems: 24,
+          description: 'Optional coarse Roadmap Shelf guidance for the long-horizon goal. Each entry is intent only -- what should eventually be true and why it matters -- never steps, operations or progress claims. The shelf guides which slice to plan next; it never executes. Restate the nodes that still apply: omitting a node marks it invalidated with its lineage preserved.',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['intent'],
+            properties: {
+              id: { type: 'string', minLength: 1, maxLength: 120, description: 'Stable id. Reuse the previous id when restating a node so its lineage and verified results survive.' },
+              intent: { type: 'string', minLength: 1, maxLength: 400 },
+              why_it_matters: { type: 'string', maxLength: 400 },
+              depends_on: { type: 'array', maxItems: 16, items: { type: 'string', minLength: 1, maxLength: 120 } },
+              assumptions: { type: 'array', maxItems: 16, items: { type: 'string', minLength: 1, maxLength: 300 } },
+              derived_from_node_id: { type: 'string', minLength: 1, maxLength: 120, description: 'The coarser node this one refines, when it is a refinement.' },
+              development_hint: { type: 'string', maxLength: 60, description: 'Non-binding steering hint about the KIND of work (roadmap 4.8), not an instruction.' },
+            },
+          },
         },
       },
     },
@@ -596,10 +617,11 @@ export function plannerControlPayloadFromMessage(message) {
   let args
   try { args = JSON.parse(rawArgs) }
   catch { throw new base.PolicyError('submitPlan arguments must be valid JSON') }
-  exactKeys(args, ['chatMessage', 'plan', 'currentStep', 'operations', 'checkpoint', 'project'])
+  exactKeys(args, ['chatMessage', 'plan', 'currentStep', 'operations', 'checkpoint', 'roadmap'])
   check(Array.isArray(args.plan), 'submitPlan.plan must be an array')
   check(Number.isSafeInteger(args.currentStep), 'submitPlan.currentStep must be an integer')
   check(Array.isArray(args.operations), 'submitPlan.operations must be an array')
+  check(args.roadmap === undefined || Array.isArray(args.roadmap), 'submitPlan.roadmap must be an array of coarse shelf nodes')
   const natural = typeof message?.content === 'string' ? message.content.trim() : ''
   const fallback = typeof args.chatMessage === 'string' ? args.chatMessage : ''
   return {
@@ -608,7 +630,7 @@ export function plannerControlPayloadFromMessage(message) {
     currentStep: args.currentStep,
     operations: args.operations,
     ...(args.checkpoint !== undefined ? { checkpoint: args.checkpoint } : {}),
-    ...(args.project !== undefined ? { project: args.project } : {}),
+    ...(args.roadmap !== undefined ? { roadmap: args.roadmap } : {}),
   }
 }
 

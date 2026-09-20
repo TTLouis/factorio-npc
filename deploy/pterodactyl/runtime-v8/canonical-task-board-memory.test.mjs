@@ -564,6 +564,54 @@ test('replan keeps every unverified remaining step even when proposed currentSte
 })
 
 
+// The shelf emitter's job is to tell authorship apart from authority. The
+// Main LLM authors every node either way, so these cover the two cases where
+// that distinction decides whether the shelf moves at all.
+function shelfMemory() {
+  const memory = new CanonicalTaskBoardMemory()
+  const state = planState()
+  memory.planByNpc.set('npc:airi', state)
+  memory.ensurePlanningDraft('npc:airi', state, { now: 1000 })
+  return memory
+}
+
+const SHELF_NODES = Object.freeze([
+  { id: 'roadmap_early_smelting', intent: 'establish reliable early iron and copper smelting' },
+])
+
+test('a re-shelved roadmap with no verified world change since the last one is refused', () => {
+  const memory = shelfMemory()
+  memory.reviseRoadmap('npc:airi', SHELF_NODES, { now: 1100 })
+  const first = memory.planningState('npc:airi').roadmap
+  assert.ok(first)
+
+  memory.reviseRoadmap('npc:airi', [
+    { id: 'roadmap_rethink', intent: 'skip smelting and go straight to oil' },
+  ], { now: 1200 })
+
+  // Preferring a different shelf is not a reason for the shelf to move.
+  assert.equal(memory.planningState('npc:airi').roadmap.roadmap_revision_id, first.roadmap_revision_id)
+  assert.deepEqual(memory.planningState('npc:airi').roadmap.nodes.map(node => node.id), ['roadmap_early_smelting'])
+})
+
+test('a roadmap revision standing on runtime-owned verified evidence moves the shelf', () => {
+  const memory = shelfMemory()
+  memory.reviseRoadmap('npc:airi', SHELF_NODES, { now: 1100 })
+  memory.recordBoardEvidence('npc:airi', completedReceipt())
+
+  memory.reviseRoadmap('npc:airi', [
+    ...SHELF_NODES,
+    { id: 'roadmap_red_science', intent: 'sustain red science production' },
+  ], { now: 1300, reason: 'smelting proved out' })
+
+  const roadmap = memory.planningState('npc:airi').roadmap
+  assert.equal(roadmap.authority, 'verified_world_change')
+  assert.deepEqual(roadmap.evidence_refs, ['batch_7'])
+  assert.deepEqual(roadmap.nodes.map(node => node.id), ['roadmap_early_smelting', 'roadmap_red_science'])
+  // Lineage survives the revision rather than being replaced.
+  assert.equal(roadmap.derived_from_revision_id, memory.planningState('npc:airi').roadmap_history.at(-1).roadmap_revision_id)
+})
+
 test('canonical task memory exposes no project or milestone hierarchy control API', () => {
   const forbidden = Object.getOwnPropertyNames(CanonicalTaskBoardMemory.prototype)
     .filter(name => /project|milestone|hierarchy/i.test(name))

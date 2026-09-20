@@ -4497,7 +4497,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         plan_steps: Array.isArray(plannerSubmission.plan) ? plannerSubmission.plan.length : 0,
         operation_count: Array.isArray(plannerSubmission.operations) ? plannerSubmission.operations.length : 0,
         has_checkpoint: plannerSubmission.checkpoint !== undefined,
-        has_project: plannerSubmission.project !== undefined,
+        roadmap_nodes: Array.isArray(plannerSubmission.roadmap) ? plannerSubmission.roadmap.length : 0,
         natural_content_chars: typeof message.content === 'string' ? message.content.length : 0,
       })
       message = {
@@ -4612,12 +4612,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw error
     }
     let checkpoint
+    let roadmap
     let baseMessage = message
     if (typeof message?.content === 'string') {
       let raw
       try { raw = JSON.parse(message.content) }
       catch {}
       if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        // `parsePlan` is strict-exact-keys over the executable plan surface, so
+        // anything that is not a step/operation has to be lifted off here or the
+        // whole submission is rejected as an unexpected argument. `project` used
+        // to be parsed by submitPlan and then die exactly here.
+        if (Array.isArray(raw.roadmap)) roadmap = raw.roadmap
         if (Object.prototype.hasOwnProperty.call(raw, 'checkpoint')) {
           checkpoint = sanitizeStepCompletionContract(raw.checkpoint)
           if (!completionContractSupported(checkpoint)) {
@@ -4628,14 +4634,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           }
           checkpoint = { ...checkpoint, source: 'planner_semantic_checkpoint' }
         }
-        if (checkpoint) {
-          const { checkpoint: _checkpoint, ...base } = raw
+        if (checkpoint || roadmap || Object.prototype.hasOwnProperty.call(raw, 'roadmap')) {
+          const { checkpoint: _checkpoint, roadmap: _roadmap, ...base } = raw
           baseMessage = { ...message, content: JSON.stringify(base) }
         }
       }
     }
     const plan = super.parsePlanMessage(baseMessage)
     if (checkpoint) plan.checkpoint = checkpoint
+    if (roadmap) plan.roadmap = roadmap
     const normalizedPlan = normalizeCanonicalPlan(plan.plan, plan.currentStep)
     plan.plan = normalizedPlan.plan
     plan.currentStep = normalizedPlan.currentStep
@@ -5336,7 +5343,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       plan: plan.plan,
       current_step: plan.currentStep,
       operations,
-      ...(plan.project ? { project: plan.project } : {}),
+      ...(Array.isArray(plan.roadmap) && plan.roadmap.length > 0 ? { roadmap: plan.roadmap } : {}),
       ...(plan.checkpoint ? { checkpoint: plan.checkpoint } : {}),
     })
 
@@ -5497,6 +5504,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         verifiedCompletion: finalCompletionVerified,
         completionEvidence,
       })
+      // The shelf can only be revised once the goal it belongs to has been
+      // admitted, and `recordPlan` is what admits it, so this runs after it and
+      // not with the rest of the plan-surface parsing.
+      if (Array.isArray(plan.roadmap) && typeof this.memory.reviseRoadmap === 'function') {
+        this.memory.reviseRoadmap(this.requestInfo.memoryKey, plan.roadmap, {
+          now: Date.now(),
+          reason: this.reasoningTriggerSource ?? this.planUpdateReason ?? 'planner_submission',
+        })
+      }
       stateResult = this.memory.reconcileTaskBoard?.(this.requestInfo.memoryKey, previousBoard, durablePlan, stateResult, {
         // A committed suffix is immutable. Runtime recovery re-observes and
         // continues it; only USER_REVISION_APPROVED may replace it.
