@@ -16,6 +16,8 @@ The intended actor is a real standalone Factorio `character` controlled through 
 - Do not replace difficult Factorio mechanics with test-only teleporting, instant item insertion, fake completion, or other production shortcuts.
 - Model mutations must remain structured and bounded. Do not reintroduce arbitrary model-generated Lua, shell commands, console commands, or unrestricted `remote.call(...)` strings.
 - The harness/runtime owns authoritative state, validation, admission, receipts, and recovery. The model chooses actions from approved observations/tools.
+- Planning has explicit ownership boundaries: user goal, non-executable LOD Roadmap Shelf, and immutable committed Active Plan. The Main LLM authors drafts; Jev may critique scope before commit but must not mutate committed plan semantics or advance Plan Tracker.
+- A structural blocker freezes the committed plan. Do not silently replan; a revised plan version requires explicit user approval. Ordinary bounded runtime recovery that preserves the committed semantic step does not require user interruption.
 - Prefer deterministic game data and validated constraints over asking the LLM to guess Factorio rules.
 - Do not silently treat a successful admission/command as proof that the user's gameplay goal is complete. Verify relevant world state.
 - Preserve exact actor/operation correlation across asynchronous work. Stale work after actor replacement, death, restart, or epoch change must fail safely.
@@ -59,6 +61,7 @@ Secrets such as `OPENAI_API_KEY` and Factorio credentials must not be committed 
 - `README.md`: current public/project overview and deployment entry points.
 - `docs/NPC_CHARACTER_ARCHITECTURE.md`: stable actor/body design decisions.
 - `docs/NPC_AGENT_HARNESS_PLAN.md`: current single-NPC roadmap and promotion gates.
+- `docs/NPC_PLANNING_ROADMAP.md`: canonical planning semantics and implementation roadmap; Goal / LOD Shelf / immutable Active Plan / Jev review authority.
 - `docs/NPC_AGENT_HARNESS_STATUS.md`: current verified status and known limits.
 - `docs/validation/`: historical checkpoints, transcripts, superseded staging plans, and release-candidate evidence.
 - `deploy/pterodactyl/README.md`: current Pterodactyl operational contract.

@@ -8,6 +8,28 @@ The project has moved beyond the original "prove a zero-player character can wai
 
 As of the 2026-09-16 promotion cleanup, `feat/npc-transition-work` had a green ordinary CI at commit `02167ac690c46b056ba2f0a62db056438c702419`. The branch is long-lived and continues to move, so any actual promotion must freeze and record a fresh candidate SHA before heavyweight validation.
 
+
+
+## Planning architecture authority
+
+The planning subsystem now has a dedicated canonical roadmap:
+
+- `docs/NPC_PLANNING_ROADMAP.md`
+
+Its core direction is:
+
+- separate the durable user goal, the non-executable LOD Roadmap Shelf, and the current Active Plan;
+- use shelfed long-horizon intent as progressive-detail guidance for later planning rounds instead of discarding it;
+- let the Main LLM author plan drafts;
+- use Jev as a bounded **pre-commit scope critic**, not a co-planner or Plan Tracker writer;
+- make committed plans immutable;
+- freeze on structural blockers and ask the user before creating a revised plan version;
+- fix semantic completion contracts before commit;
+- make Plan Tracker a read-only view of the one committed plan and its accepted evidence;
+- consolidate plan advancement/replacement behind one transition authority.
+
+Where older Task Board, Project Board, hierarchy, checkpoint, or Jev planning experiments conflict with that roadmap, `NPC_PLANNING_ROADMAP.md` is authoritative.
+
 ## Promotion goal
 
 Promote a **validated standalone-NPC baseline** to `main` without claiming that every experimental capability on the integration branch has equivalent E2E coverage.

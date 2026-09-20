@@ -4,6 +4,9 @@ Status: experimental design
 Branch: `experiment/jev-agent-architecture`
 Base at branch creation: `feat/npc-transition-work@c42f4ca5109cd33839fe759dae834634c653f132`
 
+> **Planning-direction supersession notice (2026-09-19):** The canonical planning/Plan Tracker direction is now `docs/NPC_PLANNING_ROADMAP.md`. In particular, newer planning work treats the Roadmap Shelf as an LOD-style non-executable guide, the Main LLM as plan author, Jev as a pre-commit scope critic, and committed plans as immutable until completed/cancelled/superseded after explicit user-approved revision. Sections below describing Jev-driven milestone splitting, post-step semantic plan mutation, or multiple planning authorities are retained as experimental history and must not override the new roadmap. Non-planning Jev/provider/runtime observations in this document may still be useful where they do not conflict.
+
+
 ## Purpose
 
 This document records the intended architecture for integrating TypeSafe Jev into the standalone Factorio NPC without replacing the main reasoning model or losing SGLuna's conversational personality.
