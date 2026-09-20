@@ -4632,7 +4632,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const plan = super.parsePlanMessage(baseMessage)
     if (checkpoint) plan.checkpoint = checkpoint
     const normalizedPlan = normalizeCanonicalPlan(plan.plan, plan.currentStep)
-    const triggerSource = this.reasoningTriggerSource ?? this.planUpdateReason
     plan.plan = normalizedPlan.plan
     plan.currentStep = normalizedPlan.currentStep
     for (const operation of plan.operations) {
