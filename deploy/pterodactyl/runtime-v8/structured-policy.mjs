@@ -573,6 +573,12 @@ export const plannerControlToolDefinitions = [{
           type: 'object',
           description: 'Optional semantic completion contract for the active step. Runtime-supported requirement shapes are validated by the harness.',
         },
+        roadmapNodeIds: {
+          type: 'array',
+          maxItems: 16,
+          description: 'Optional stable Roadmap Shelf node ids this draft intentionally refines. Choose them from [PLANNING_STATE] refinement candidates/current shelf; the harness discards ids that are not present on the admitted shelf.',
+          items: { type: 'string', minLength: 1, maxLength: 120 },
+        },
         // LOD 1 guidance (roadmap 2 / 3). Deliberately NOT an object with steps
         // or operations: a shelf node says what should eventually be true and
         // why, and the runtime re-derives realization status from verified
@@ -617,10 +623,11 @@ export function plannerControlPayloadFromMessage(message) {
   let args
   try { args = JSON.parse(rawArgs) }
   catch { throw new base.PolicyError('submitPlan arguments must be valid JSON') }
-  exactKeys(args, ['chatMessage', 'plan', 'currentStep', 'operations', 'checkpoint', 'roadmap'])
+  exactKeys(args, ['chatMessage', 'plan', 'currentStep', 'operations', 'checkpoint', 'roadmapNodeIds', 'roadmap'])
   check(Array.isArray(args.plan), 'submitPlan.plan must be an array')
   check(Number.isSafeInteger(args.currentStep), 'submitPlan.currentStep must be an integer')
   check(Array.isArray(args.operations), 'submitPlan.operations must be an array')
+  check(args.roadmapNodeIds === undefined || Array.isArray(args.roadmapNodeIds), 'submitPlan.roadmapNodeIds must be an array of shelf node ids')
   check(args.roadmap === undefined || Array.isArray(args.roadmap), 'submitPlan.roadmap must be an array of coarse shelf nodes')
   const natural = typeof message?.content === 'string' ? message.content.trim() : ''
   const fallback = typeof args.chatMessage === 'string' ? args.chatMessage : ''
@@ -630,6 +637,7 @@ export function plannerControlPayloadFromMessage(message) {
     currentStep: args.currentStep,
     operations: args.operations,
     ...(args.checkpoint !== undefined ? { checkpoint: args.checkpoint } : {}),
+    ...(args.roadmapNodeIds !== undefined ? { roadmapNodeIds: args.roadmapNodeIds } : {}),
     ...(args.roadmap !== undefined ? { roadmap: args.roadmap } : {}),
   }
 }

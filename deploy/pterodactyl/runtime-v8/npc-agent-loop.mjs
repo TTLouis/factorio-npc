@@ -111,6 +111,8 @@ The [PLANNING_STATE] message carries the durable Goal, the Roadmap Shelf and the
 
 You author the shelf through the optional roadmap field on submitPlan: a short list of coarse nodes, each stating what should eventually be true for the goal and why it matters. Keep them at that altitude — a node is not a step, carries no operations, and never claims its own progress; the harness derives realization from verified results and strips anything executable. For a long-horizon goal, send the shelf on the first plan of that goal. Afterwards it only moves when verified world state has actually invalidated the guidance, so restate the nodes that still apply with their original ids (omitting a node marks it invalidated and keeps its lineage), and do not re-send an unchanged shelf just to restate a preference.
 
+When a draft intentionally refines one or more existing Shelf nodes, add roadmapNodeIds beside plan/currentStep/operations and choose stable ids from [PLANNING_STATE].steering.refinement_candidates or the current shelf. On the first long-horizon submission you may create the shelf with roadmap and select ids from those same nodes in roadmapNodeIds. This is lineage, not execution authority; never invent an id for a node that is not on the admitted shelf.
+
 For the active Plan Tracker step, you may add one optional root field named checkpoint beside chatMessage/plan/currentStep/operations. checkpoint is a semantic completion proposal for Jev to judge and runtime to verify, not a claim that the step is already done. It must use a runtime-supported contract: {"mode":"all|any","requirements":[...]} with requirement kinds inventory_count, entity_inventory_count, entity_exists, entity_state, authoritative_operation_receipt, or runtime_controller_state. Prefer world-state outcomes over action occurrence. Example: if the step means "have 100 stone" and the next operation only gathers 40 more because 62 are already held, checkpoint must say inventory_count stone >= 100, not >= 40. The operation batch describes what to do next; checkpoint describes what would prove the semantic step complete. Jev may keep the step open or request a split even when you propose a checkpoint, and runtime remains completion authority. Omit checkpoint when no safe deterministic predicate represents the step.
 
 Plan entries must represent goal-bearing Factorio work or verification. Do not add terminal lifecycle/meta steps such as "Stop", "Done", "Finish", or "Report completion"; stopping after the verified goal is represented by returning plan: [], currentStep: 0, operations: [].
@@ -4615,6 +4617,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     let checkpoint
     let roadmap
+    let roadmapNodeIds
     let baseMessage = message
     if (typeof message?.content === 'string') {
       let raw
@@ -4626,6 +4629,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         // whole submission is rejected as an unexpected argument. `project` used
         // to be parsed by submitPlan and then die exactly here.
         if (Array.isArray(raw.roadmap)) roadmap = raw.roadmap
+        if (Array.isArray(raw.roadmapNodeIds)) {
+          roadmapNodeIds = Array.from(new Set(raw.roadmapNodeIds
+            .filter(id => typeof id === 'string')
+            .map(id => cleanMemoryText(id, 120))
+            .filter(Boolean)))
+            .slice(0, 16)
+        }
         if (Object.prototype.hasOwnProperty.call(raw, 'checkpoint')) {
           checkpoint = sanitizeStepCompletionContract(raw.checkpoint)
           if (!completionContractSupported(checkpoint)) {
@@ -4636,8 +4646,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           }
           checkpoint = { ...checkpoint, source: 'planner_semantic_checkpoint' }
         }
-        if (checkpoint || roadmap || Object.prototype.hasOwnProperty.call(raw, 'roadmap')) {
-          const { checkpoint: _checkpoint, roadmap: _roadmap, ...base } = raw
+        if (checkpoint || roadmap || roadmapNodeIds || Object.prototype.hasOwnProperty.call(raw, 'roadmap') || Object.prototype.hasOwnProperty.call(raw, 'roadmapNodeIds')) {
+          const { checkpoint: _checkpoint, roadmap: _roadmap, roadmapNodeIds: _roadmapNodeIds, ...base } = raw
           baseMessage = { ...message, content: JSON.stringify(base) }
         }
       }
@@ -4645,6 +4655,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const plan = super.parsePlanMessage(baseMessage)
     if (checkpoint) plan.checkpoint = checkpoint
     if (roadmap) plan.roadmap = roadmap
+    if (roadmapNodeIds) plan.roadmapNodeIds = roadmapNodeIds
     const normalizedPlan = normalizeCanonicalPlan(plan.plan, plan.currentStep)
     plan.plan = normalizedPlan.plan
     plan.currentStep = normalizedPlan.currentStep
@@ -5346,6 +5357,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       current_step: plan.currentStep,
       operations,
       ...(Array.isArray(plan.roadmap) && plan.roadmap.length > 0 ? { roadmap: plan.roadmap } : {}),
+      ...(Array.isArray(plan.roadmapNodeIds) && plan.roadmapNodeIds.length > 0 ? { roadmap_node_ids: plan.roadmapNodeIds } : {}),
       ...(plan.checkpoint ? { checkpoint: plan.checkpoint } : {}),
     })
 

@@ -474,7 +474,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     })
   }
 
-  ensurePlanningDraft(key, state, { now = Date.now(), migrated = false } = {}) {
+  ensurePlanningDraft(key, state, { now = Date.now(), migrated = false, roadmap, roadmapNodeIds } = {}) {
     if (!key || !state) return undefined
     let planning = this.planningByNpc.get(key)
     const existingPlan = getActivePlan(planning)
@@ -491,11 +491,31 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         objective: state.objective,
       })
     }
+    // The initial shelf and the draft may arrive in the same planner submission.
+    // Admit the user goal first, then the non-executable shelf, and only then
+    // mint the draft so its roadmap_node_ids point at a revision that already
+    // exists. Otherwise the first slice can never be linked to the shelf it is
+    // supposed to refine.
+    this.planningByNpc.set(key, planning)
+    if (Array.isArray(roadmap) && roadmap.length > 0) {
+      planning = this.reviseRoadmap(key, roadmap, {
+        now,
+        reason: goalAdmitted ? 'goal_decomposed_to_shelf' : 'verified_world_change',
+      }) ?? planning
+    }
     if (!getActivePlan(planning) && Array.isArray(state.task_board?.steps) && state.task_board.steps.length > 0) {
+      const knownNodeIds = new Set((planning.roadmap?.nodes ?? []).map(node => node.id))
+      const linkedNodeIds = Array.from(new Set(
+        (Array.isArray(roadmapNodeIds) ? roadmapNodeIds : [])
+          .filter(id => typeof id === 'string')
+          .map(id => id.trim())
+          .filter(id => id && knownNodeIds.has(id)),
+      )).slice(0, 16)
       planning = applyPlanningEvent(planning, {
         type: PLANNING_EVENT.DRAFT_CREATED,
         now,
         origin: migrated ? 'legacy_task_board_migration' : 'live_task_board',
+        roadmap_node_ids: linkedNodeIds,
         steps: state.task_board.steps.map(step => ({
           description: step.description,
           completion_contract: safeDurableStepCompletionContract(step.completion_contract),
@@ -870,7 +890,11 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const result = super.recordPlan(key, requestInfo, plan, options)
     if (result?.state) {
       this.ensureTaskBoard(result.state)
-      this.ensurePlanningDraft(key, result.state, { now: result.state.updated_at })
+      this.ensurePlanningDraft(key, result.state, {
+        now: result.state.updated_at,
+        roadmap: plan?.roadmap,
+        roadmapNodeIds: plan?.roadmapNodeIds,
+      })
     }
     if (!userRevisionApproved && !supersededPlanId) return result
     return {

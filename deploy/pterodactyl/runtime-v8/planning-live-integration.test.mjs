@@ -765,3 +765,26 @@ test('live model context exposes reducer planning state, shelf refinement candid
   assert.match(combined, /\[PLAN_STATE\]/)
   assert.match(combined, /\[PLANNING_STATE\]/)
 })
+
+
+test('first live long-horizon draft links to shelf nodes created in the same submission', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const key = 'npc:airi'
+  const request = { sender: 'Louis', text: 'Build an expandable factory' }
+  const plan = {
+    ...proposedPlan(['Establish smelting']),
+    roadmap: [
+      { id: 'smelting-foundation', intent: 'A working smelting foundation exists.', why_it_matters: 'Unlocks production.' },
+      { id: 'plate-automation', intent: 'Plate production is automated.', why_it_matters: 'Reduces manual work.', depends_on: ['smelting-foundation'] },
+    ],
+    roadmapNodeIds: ['smelting-foundation', 'fabricated-node'],
+  }
+
+  memory.recordPlan(key, request, plan)
+  const planning = memory.planningState(key)
+  const draft = getActivePlan(planning)
+  assert.equal(planning.roadmap.nodes[0].id, 'smelting-foundation')
+  assert.deepEqual(draft.roadmap_node_ids, ['smelting-foundation'])
+  assert.equal(draft.roadmap_revision_id, planning.roadmap.roadmap_revision_id)
+  assert.deepEqual(draft.refinement_grounding.ready_node_ids, ['smelting-foundation'])
+})
