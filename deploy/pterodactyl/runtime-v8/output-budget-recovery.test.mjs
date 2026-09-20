@@ -538,7 +538,7 @@ test('terminal provider budget becomes a Jev-directed fresh planner generation i
   const agent = makeAgent({
     rcon,
     maxProviderOutputUnits: 3000,
-    interactionDecisionProvider: async (state, _questions) => {
+    interactionDecisionProvider: async (state, questions) => {
       decisions.push({ state, questions })
       assert.equal(state.failure.class, 'provider_budget')
       assert.equal(state.task.active_step, canonical[0])
@@ -613,7 +613,7 @@ test('provider-budget recovery cannot replace the existing committed plan', asyn
   const canonical = ['Run one bounded machine cycle', 'Inspect the output']
   const agent = makeAgent({
     maxProviderOutputUnits: 3000,
-    interactionDecisionProvider: async (state, questions) => {
+    interactionDecisionProvider: async (state, _questions) => {
       assert.equal(state.failure.class, 'provider_budget')
       return {
         model: 'jev-latest',
