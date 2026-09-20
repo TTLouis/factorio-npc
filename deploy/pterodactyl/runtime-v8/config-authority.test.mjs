@@ -5,7 +5,7 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { prepareServerSettings } from './game-files.mjs'
-import { configuration, factorioVisibilityDiagnostics, migrateCanonicalConfig, Session } from './supervisor.mjs'
+import { configuration, factorioVisibilityDiagnostics, migrateCanonicalConfig, rconConfiguration, Session } from './supervisor.mjs'
 
 async function temp(t) {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'airi-config-authority-'))
@@ -52,6 +52,21 @@ function eggEnv(overrides = {}) {
     ...overrides,
   }
 }
+
+test('RCON remains private and random by default, with a bounded local test override', () => {
+  const defaults = rconConfiguration({})
+  assert.equal(defaults.port, null)
+  assert.equal(defaults.bind, '127.0.0.1')
+  assert.match(defaults.password, /^[A-Za-z0-9]+$/)
+
+  const override = rconConfiguration({
+    SGLUNA_RCON_PORT: '27015',
+    SGLUNA_RCON_BIND: '0.0.0.0',
+    SGLUNA_RCON_PASSWORD: fixtureSecret('rcon'),
+  })
+  assert.deepEqual(override, { port: 27015, bind: '0.0.0.0', password: fixtureSecret('rcon') })
+  assert.throws(() => rconConfiguration({ SGLUNA_RCON_BIND: '192.168.1.20' }), /SGLUNA_RCON_BIND/)
+})
 
 test('SGLuna Egg environment overrides stored runtime config and is synchronized into sgluna-config.json on every restart', async t => {
   const root = await temp(t)

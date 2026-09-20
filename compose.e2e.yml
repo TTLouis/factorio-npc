@@ -1,0 +1,15 @@
+# Local-only RCON E2E overlay. It deliberately publishes no RCON listener to
+# the LAN; Docker binds the host side to 127.0.0.1 only.
+services:
+  sgluna-factorio:
+    build:
+      args:
+        SGLUNA_LOCAL_RUNTIME_OVERRIDE: 1
+    ports:
+      - "127.0.0.1:${SGLUNA_RCON_HOST_PORT:-27015}:${SGLUNA_RCON_PORT:-27015}/tcp"
+    environment:
+      SGLUNA_RCON_BIND: 0.0.0.0
+      SGLUNA_RCON_PORT: ${SGLUNA_RCON_PORT:-27015}
+      SGLUNA_RCON_PASSWORD: ${SGLUNA_RCON_PASSWORD:?Set SGLUNA_RCON_PASSWORD for the local E2E run}
+      # Deliberately distinct from any host/Codex TYPESAFE_API_KEY.
+      TYPESAFE_API_KEY: ${JEV_TYPESAFE_API_KEY:?Set the dedicated JEV key for the local E2E run}

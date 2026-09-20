@@ -135,6 +135,21 @@ export function configuration(raw = {}, env = process.env) {
   return config
 }
 
+// Docker normally keeps the generated RCON listener private inside the
+// container.  This opt-in configuration exists for local integration tests;
+// callers must still publish the port explicitly in their Compose override.
+export function rconConfiguration(env = process.env) {
+  const requestedPort = String(env.SGLUNA_RCON_PORT ?? '').trim()
+  const port = requestedPort === '' ? null : safeInteger(requestedPort, 'SGLUNA_RCON_PORT', 1024, 65535)
+  const bind = cleanString(env.SGLUNA_RCON_BIND ?? '127.0.0.1', 'SGLUNA_RCON_BIND', 15)
+  check(bind === '127.0.0.1' || bind === '0.0.0.0', 'SGLUNA_RCON_BIND must be 127.0.0.1 or 0.0.0.0')
+  const suppliedPassword = String(env.SGLUNA_RCON_PASSWORD ?? '')
+  const password = suppliedPassword === ''
+    ? nonce() + nonce()
+    : cleanString(suppliedPassword, 'SGLUNA_RCON_PASSWORD', 256)
+  return { port, bind, password }
+}
+
 export function factorioVisibilityDiagnostics(factorio = { username: '', token: '', public: false }, chatPlayers = { mode: 'disabled', names: [] }) {
   if (factorio?.public === true) {
     const diagnostics = ['Factorio visibility: PUBLIC']
@@ -1476,10 +1491,12 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}) {
 }
 
 export class Session {
-  constructor({ root, app, game, config, save, settingsFile, modDir, ini, log = console.log, provider = providerRequest, startupMs = 120000 }) {
+  constructor({ root, app, game, config, save, settingsFile, modDir, ini, rcon = rconConfiguration(), log = console.log, provider = providerRequest, startupMs = 120000 }) {
     Object.assign(this, { root, app, game, config, save, settingsFile, modDir, ini, log, provider, startupMs })
     this.session = nonce() + nonce()
-    this.rconPassword = nonce() + nonce()
+    this.rconPassword = rcon.password
+    this.rconPort = rcon.port
+    this.rconBind = rcon.bind
     this.rcon = null
     this.gameChild = null
     this.agent = null
@@ -1682,7 +1699,7 @@ export class Session {
       '--start-server', this.save,
       '--server-settings', this.settingsFile,
       '--bind', `0.0.0.0:${this.config.gamePort}`,
-      '--rcon-bind', `127.0.0.1:${rconPort}`,
+      '--rcon-bind', `${this.rconBind}:${rconPort}`,
       '--rcon-password', this.rconPassword,
     ]
   }
@@ -1937,7 +1954,7 @@ export class Session {
   }
 
   async start() {
-    const rconPort = await freeTcpPort([this.config.gamePort])
+    const rconPort = this.rconPort ?? await freeTcpPort([this.config.gamePort])
     const secrets = [this.config.key, this.rconPassword, this.session, this.config.factorio.token]
     const gameLog = line => {
       this.log(redact(secrets, line))
@@ -2333,7 +2350,7 @@ async function main() {
       log(`Creating initial save ${path.basename(selected.filename)}`)
       await createSave(selected.filename, game, modDir, ini, root, log)
     }
-    session = new Session({ root, app, game, config, save: selected.filename, settingsFile, modDir, ini, log })
+    session = new Session({ root, app, game, config, save: selected.filename, settingsFile, modDir, ini, rcon: rconConfiguration(), log })
     try {
       await session.start()
     }
