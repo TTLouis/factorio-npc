@@ -68,11 +68,34 @@ def run(client: Rcon, results: Path) -> None:
             require(result[1] == reason, result)
         return result
 
+    def preflight(name: str) -> dict:
+        command_text = (
+            "/silent-command rcon.print(helpers.table_to_json(remote.call('autorio_preflight','operation',"
+            "'research_technology',{technology_name=" + repr(name) + "})))"
+        )
+        return json_command(command_text, 'research preflight')
+
     original_id = json.loads((results / 'runner.json').read_text())['actor_id']
     initial = status('before research')
     require(initial['actor']['actor_id'] == original_id and initial['actor']['valid'] is True, initial)
     validate_clock(initial['runtime'])
     require(initial['task_state'] == 'idle' and initial['queue_length'] == 0, initial)
+
+    # Check real early-game deterministic preflight before any mutation admission.
+    # The same locked target is then submitted directly below to preserve the
+    # engine-backed assertion that real Autorio admission still rejects it.
+    unknown_preflight = preflight('__airi_missing_technology__')
+    trigger_preflight = preflight('steam-power')
+    locked_preflight = preflight('automation')
+    require(unknown_preflight['ok'] is False and unknown_preflight['code'] == 'unknown_technology', unknown_preflight)
+    require(trigger_preflight['ok'] is False and trigger_preflight['code'] == 'trigger_research', trigger_preflight)
+    require(locked_preflight['ok'] is False and locked_preflight['code'] == 'missing_prerequisites', locked_preflight)
+    next_actionable = locked_preflight.get('next_actionable')
+    require(isinstance(next_actionable, dict) and next_actionable.get('name') and next_actionable.get('name') != 'automation', locked_preflight)
+    trigger_observation = technology('steam-power')
+    require(trigger_preflight.get('research_trigger') == trigger_observation.get('research_trigger'), (trigger_preflight, trigger_observation))
+    untouched_research = research_status()
+    require(untouched_research.get('current') is None and untouched_research.get('queue_length', 0) == 0, untouched_research)
 
     # Check real early-game rejection BEFORE setting up this isolated research
     # fixture. The success target (automation) is never directly researched.

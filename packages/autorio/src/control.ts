@@ -34,6 +34,7 @@ import { create_production_planning_remote_interface } from './production_planni
 import { create_prototype_knowledge_remote_interface } from './prototype_knowledge'
 import { new_recipe_configuration_runtime } from './recipe_configuration'
 import { new_research_controller } from './research'
+import { research_operation_preflight } from './research_preflight'
 import { ensure_basic_skill_definitions } from './skills'
 import { with_research_trigger } from './research_trigger'
 import { is_runtime_task_state, type RuntimeTaskState } from './task_state_runtime'
@@ -199,6 +200,10 @@ function operation_preflight(name: string, args: Record<string, any>) {
   })
 
   if (!args || typeof args !== 'object') return reject('invalid_preflight_args')
+
+  if (name === 'research_technology') {
+    return research_operation_preflight(actor, args.technology_name)
+  }
 
   let exact_target: Record<string, unknown> | undefined
   const exact_unit_operations = [

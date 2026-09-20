@@ -207,6 +207,11 @@ test('mutation identity preflight is read-only and limited to operations that ne
   assert.match(gather, /'gather_resource'/)
   assert.match(gather, /'tree-02-red'/)
 
+  const research = renderOperationPreflight({ name: 'research_technology', args: { technology_name: 'automation' } })
+  assert.match(research, /^\/silent-command rcon\.print\(helpers\.table_to_json\(remote\.call\("autorio_preflight","operation",/)
+  assert.match(research, /'research_technology'/)
+  assert.match(research, /'automation'/)
+
   assert.equal(renderOperationPreflight({ name: 'wait', args: { ticks: 60 } }), null)
 })
 

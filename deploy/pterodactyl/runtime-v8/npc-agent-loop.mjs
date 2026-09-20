@@ -59,6 +59,8 @@ const ACTION_OMISSION_MAX_TOKENS = 700
 const ACTION_OMISSION_BLOCKER_PREFIX = 'BLOCKED:'
 const ACTION_OMISSION_REPAIR_MESSAGE = 'Finite canonical work remains, but no executable operation was submitted. Reuse the authoritative evidence already collected and do not repeat completed observations. If that evidence already parameterizes the next action, submit the next executable operation now. If exactly one mutable fact is genuinely missing, use exactly one targeted observation for that fact; after it, no more observation turns are allowed. Do not stop and wait for a human "continue" message. Otherwise keep the remaining plan and start chatMessage with "BLOCKED: " followed by the exact missing fact or truthful blocker.'
 const ACTION_OMISSION_AFTER_OBSERVATION_MESSAGE = 'The targeted observation budget for this decision is complete. Do not observe again or switch to another read-only tool. Submit the next executable operation now, or keep the remaining plan and start chatMessage with "BLOCKED: " followed by the exact still-missing fact or truthful blocker.'
+const RESEARCH_PREFLIGHT_RECOVERABLE_CODES = new Set(['missing_prerequisites', 'trigger_research', 'force_busy'])
+const RESEARCH_PREFLIGHT_RETRY_BUDGET = 2
 const EXACT_ENTITY_TARGET_OPERATIONS = new Set([
   'walk_to_entity_exact',
   'mine_entity_exact',
@@ -2039,6 +2041,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.liveEntityObservations = new Map()
     this.rejectedExactTargets = new Set()
     this.staleExactPreflightRetries = 0
+    this.researchPreflightRetries = 0
     this.onActivity = typeof options.onActivity === 'function' ? options.onActivity : null
     this.turnSequence = Math.max(this.turnSequence, memory.maxTurnId?.() ?? 0)
     const traceFile = options.traceFile ?? process.env.SGLUNA_BEHAVIOR_TRACE_FILE ?? process.env.AIRI_BEHAVIOR_TRACE_FILE
@@ -3716,6 +3719,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.liveEntityObservations = new Map()
     this.rejectedExactTargets = new Set()
     this.staleExactPreflightRetries = 0
+    this.researchPreflightRetries = 0
     this.bootstrapDependencyPreflightRetries = 0
     this.planUpdateReason = resumeHierarchySplit
       ? 'reanchor_plan'
@@ -3865,6 +3869,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.liveEntityObservations = new Map()
     this.rejectedExactTargets = new Set()
     this.staleExactPreflightRetries = 0
+    this.researchPreflightRetries = 0
     this.bootstrapDependencyPreflightRetries = 0
     return true
   }
@@ -4029,6 +4034,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.freshObservationSinceContinuation = false
     this.genericRecoveryDecisionActive = false
     this.staleExactPreflightRetries = 0
+    this.researchPreflightRetries = 0
     this.messages.push({ role: 'user', content: cleanMemoryText(modMessage, 18000) })
     await this.traceEvent(traceEventName)
     return this.runGuarded()
@@ -4897,13 +4903,27 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   async preflightOperations(operations) {
     const results = []
+    const memoryKey = this.requestInfo?.memoryKey
+    const assertPreflightCurrent = async () => {
+      try {
+        return await this.assertCurrent()
+      }
+      catch (error) {
+        if (memoryKey && /NPC actor epoch changed/i.test(error instanceof Error ? error.message : String(error))) {
+          this.memory.setAdmissionState?.(memoryKey, 'preflight_rejected')
+          await this.persistState()
+        }
+        throw error
+      }
+    }
+
     for (let index = 0; index < operations.length; index++) {
       const command = renderOperationPreflight(operations[index])
       if (!command) {
         results.push({ ok: true, operation: operations[index].name, validation: 'not_required' })
         continue
       }
-      await this.assertCurrent()
+      await assertPreflightCurrent()
       let result
       try {
         result = JSON.parse(String(await this.rcon.command(command)).trim())
@@ -4913,7 +4933,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         failure.preflight = { ok: false, code: 'preflight_transport_error', operation_index: index }
         throw failure
       }
-      await this.assertCurrent()
+      await assertPreflightCurrent()
       results.push(result)
       if (result?.ok !== true) {
         const failure = new AgentLoopError(`Operation preflight rejected operation ${index + 1} (${operations[index].name}): ${result?.code ?? 'unknown_preflight_failure'}`)
@@ -4922,6 +4942,131 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
     return results
+  }
+
+  researchPreflightFacts(preflight) {
+    return {
+      code: preflight?.code,
+      technology: preflight?.technology,
+      requested: preflight?.requested,
+      next_actionable: preflight?.next_actionable,
+      research_trigger: preflight?.research_trigger,
+      current_research: preflight?.current_research,
+      queue: Array.isArray(preflight?.queue) ? preflight.queue.slice(0, 8) : undefined,
+      queue_length: preflight?.queue_length,
+      queue_truncated: preflight?.queue_truncated,
+      research_path: preflight?.research_path,
+    }
+  }
+
+  researchPreflightEvidenceSummary(preflight) {
+    const next = preflight?.next_actionable
+    return JSON.stringify({
+      code: preflight?.code,
+      operation_index: preflight?.operation_index,
+      operation: preflight?.operation,
+      technology: preflight?.technology,
+      next_actionable: next
+        ? {
+            name: next.name,
+            mode: next.mode,
+            status: next.status,
+            research_trigger: next.research_trigger,
+          }
+        : undefined,
+      research_trigger: preflight?.research_trigger,
+      current_research: preflight?.current_research,
+      queue: Array.isArray(preflight?.queue) ? preflight.queue.slice(0, 4) : undefined,
+      queue_length: preflight?.queue_length,
+    })
+  }
+
+  researchPreflightCorrectionMessage(preflight) {
+    const facts = this.researchPreflightFacts(preflight)
+    let guidance = 'Use the supplied deterministic facts to choose the next executable decision.'
+    if (preflight?.code === 'missing_prerequisites') {
+      guidance = 'Follow next_actionable exactly. If its mode is science, research that technology; if its mode is trigger, perform its exact research_trigger and then verify. Do not retry the requested locked technology until deterministic eligibility changes.'
+    }
+    else if (preflight?.code === 'trigger_research') {
+      guidance = 'If next_actionable is an earlier prerequisite, resolve it first. If the requested trigger technology itself is next_actionable, perform the exact research_trigger returned here and then verify it before continuing.'
+    }
+    else if (preflight?.code === 'force_busy') {
+      guidance = 'Preserve the existing force research/queue. Use the exact current/queue identities to wait, observe, or do other work that remains part of this semantic step; do not clear or replace the force queue just to admit this request.'
+    }
+    return `[HARNESS] Deterministic research preflight rejected the requested operation before any Autorio batch admission, so no operation from that batch ran. This is a recoverable dependency/control-state result, not WORLD_BLOCKED. Preserve the same user goal and active canonical semantic step. Tools remain enabled. ${guidance} Deterministic facts: ${JSON.stringify(facts)}`
+  }
+
+  async recordRecoverableResearchPreflight(stateResult, preflight) {
+    if (!this.requestInfo) return stateResult
+    const state = this.memory.setAdmissionState?.(this.requestInfo.memoryKey, 'preflight_rejected')
+    if (state) stateResult = { ...(stateResult ?? {}), state }
+    this.memory.recordBoardEvidence?.(this.requestInfo.memoryKey, {
+      kind: 'operation_preflight_recoverable',
+      ref: `${this.traceRequest?.id ?? 'request'}/research_${preflight?.code ?? 'recoverable'}`,
+      summary: this.researchPreflightEvidenceSummary(preflight),
+    })
+    await this.persistState()
+    return stateResult
+  }
+
+  async finishResearchPreflightRecoveryFailure(stateResult, plan, before, preflight) {
+    let state = stateResult?.state
+    if (this.requestInfo) {
+      const runtime = await this.readInteractionTaskStatus()
+      const persistentRuntime = await this.persistentRuntimeStatus()
+      const failureCandidate = {
+        kind: 'recoverable_provider_failure',
+        source: 'research_preflight_recovery',
+        reason_code: 'research_preflight_retry_exhausted',
+        evidence: [],
+      }
+      await this.traceEvent('outcome.candidate', failureCandidate)
+      const reduced = this.memory.applyOutcomeAuthority?.(this.requestInfo.memoryKey, failureCandidate, {
+        world: {
+          ...runtime,
+          persistent_runtime: persistentRuntime,
+          persistent_runtime_healthy: persistentRuntimeHealthy(persistentRuntime),
+          condition_wait_active: state?.condition_wait?.state === 'active',
+          condition_wait: state?.condition_wait,
+        },
+        chatMessage: plan.chatMessage,
+      })
+      state = reduced?.state ?? state
+      if (state) stateResult = { ...(stateResult ?? {}), state }
+      await this.traceEvent(reduced?.decision?.accepted ? 'outcome.validated' : 'outcome.rejected', reduced?.decision ?? failureCandidate)
+      await this.persistState()
+    }
+
+    this.active = false
+    await this.traceEvent('operations.preflight_recovery_exhausted', {
+      failure_class: 'research_preflight_retry_exhausted',
+      retry_budget: RESEARCH_PREFLIGHT_RETRY_BUDGET,
+      preflight,
+      task_board: visibleTaskBoard(state?.task_board),
+    })
+    await this.traceEvent('request.completed', {
+      chat_message: plan.chatMessage,
+      outcome: 'recoverable_provider_failure',
+      task_board: visibleTaskBoard(state?.task_board),
+      usage: this.traceRequest?.usage,
+    })
+    this.traceRequest = null
+    return {
+      chatMessage: '[Plan paused] Deterministic research correction was ignored repeatedly; planner/control recovery stopped without declaring a world blocker.',
+      plan: state?.plan ?? plan.plan,
+      currentStep: state?.current_step ?? plan.currentStep,
+      operations: [],
+      epoch: before.epoch,
+      actorId: before.actor_id,
+      goalId: state?.goal_id,
+      goalStatus: state?.status,
+      taskBoard: visibleTaskBoard(state?.task_board),
+      recoverableFailure: {
+        class: 'provider_control_plane',
+        reason: 'research_preflight_retry_exhausted',
+        preflight: this.researchPreflightFacts(preflight),
+      },
+    }
   }
 
   async markAdmissionFailure(stateResult, operations, failure, kind = 'admission_failure') {
@@ -5375,12 +5520,33 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       try {
         preflight = await this.preflightOperations(plan.operations)
         this.staleExactPreflightRetries = 0
+        this.researchPreflightRetries = 0
         this.bootstrapDependencyPreflightRetries = 0
         await this.traceEvent('operations.preflight_ok', {
           operations: operations.map((operation, index) => ({ ...operation, preflight: preflight[index] })),
         })
       }
       catch (error) {
+        if (!error?.preflight) throw error
+        if (error.preflight.operation === 'research_technology' && RESEARCH_PREFLIGHT_RECOVERABLE_CODES.has(error.preflight.code)) {
+          this.researchPreflightRetries++
+          stateResult = await this.recordRecoverableResearchPreflight(stateResult, error.preflight)
+          await this.traceEvent('operations.preflight_recoverable', {
+            failure_class: `research_${error.preflight.code}`,
+            preflight: error.preflight,
+            tools_enabled: true,
+            retry: this.researchPreflightRetries,
+            retry_budget: RESEARCH_PREFLIGHT_RETRY_BUDGET,
+          })
+          if (this.researchPreflightRetries <= RESEARCH_PREFLIGHT_RETRY_BUDGET) {
+            this.messages.push({
+              role: 'user',
+              content: this.researchPreflightCorrectionMessage(error.preflight),
+            })
+            return this.runTurn()
+          }
+          return this.finishResearchPreflightRecoveryFailure(stateResult, plan, before, error.preflight)
+        }
         if (error?.preflight?.code === 'bootstrap_dependency_unresolved' && this.bootstrapDependencyPreflightRetries < 2) {
           this.bootstrapDependencyPreflightRetries++
           if (this.requestInfo) {

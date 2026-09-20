@@ -245,6 +245,7 @@ const PREFLIGHTED_OPERATIONS = new Set([
   'gather_resource',
   'harvest_product',
   'clear_construction_area',
+  'research_technology',
   'mine_resource_at',
   'place_entity',
   'mine_entity',
