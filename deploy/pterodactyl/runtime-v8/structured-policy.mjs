@@ -579,6 +579,11 @@ export const plannerControlToolDefinitions = [{
           description: 'Optional stable Roadmap Shelf node ids this draft intentionally refines. Choose them from [PLANNING_STATE] refinement candidates/current shelf; the harness discards ids that are not present on the admitted shelf.',
           items: { type: 'string', minLength: 1, maxLength: 120 },
         },
+        developmentMode: {
+          type: 'string',
+          enum: ['vertical', 'horizontal', 'maintain', 'recover'],
+          description: 'Dominant development direction of this authored slice relative to the current critical path. This describes the draft; it does not override runtime steering or Jev scope review.',
+        },
         // LOD 1 guidance (roadmap 2 / 3). Deliberately NOT an object with steps
         // or operations: a shelf node says what should eventually be true and
         // why, and the runtime re-derives realization status from verified
@@ -623,11 +628,12 @@ export function plannerControlPayloadFromMessage(message) {
   let args
   try { args = JSON.parse(rawArgs) }
   catch { throw new base.PolicyError('submitPlan arguments must be valid JSON') }
-  exactKeys(args, ['chatMessage', 'plan', 'currentStep', 'operations', 'checkpoint', 'roadmapNodeIds', 'roadmap'])
+  exactKeys(args, ['chatMessage', 'plan', 'currentStep', 'operations', 'checkpoint', 'roadmapNodeIds', 'developmentMode', 'roadmap'])
   check(Array.isArray(args.plan), 'submitPlan.plan must be an array')
   check(Number.isSafeInteger(args.currentStep), 'submitPlan.currentStep must be an integer')
   check(Array.isArray(args.operations), 'submitPlan.operations must be an array')
   check(args.roadmapNodeIds === undefined || Array.isArray(args.roadmapNodeIds), 'submitPlan.roadmapNodeIds must be an array of shelf node ids')
+  check(args.developmentMode === undefined || ['vertical', 'horizontal', 'maintain', 'recover'].includes(args.developmentMode), 'submitPlan.developmentMode must be vertical, horizontal, maintain, or recover')
   check(args.roadmap === undefined || Array.isArray(args.roadmap), 'submitPlan.roadmap must be an array of coarse shelf nodes')
   const natural = typeof message?.content === 'string' ? message.content.trim() : ''
   const fallback = typeof args.chatMessage === 'string' ? args.chatMessage : ''
@@ -638,6 +644,7 @@ export function plannerControlPayloadFromMessage(message) {
     operations: args.operations,
     ...(args.checkpoint !== undefined ? { checkpoint: args.checkpoint } : {}),
     ...(args.roadmapNodeIds !== undefined ? { roadmapNodeIds: args.roadmapNodeIds } : {}),
+    ...(args.developmentMode !== undefined ? { developmentMode: args.developmentMode } : {}),
     ...(args.roadmap !== undefined ? { roadmap: args.roadmap } : {}),
   }
 }

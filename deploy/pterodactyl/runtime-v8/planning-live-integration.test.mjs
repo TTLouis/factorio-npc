@@ -778,6 +778,7 @@ test('first live long-horizon draft links to shelf nodes created in the same sub
       { id: 'plate-automation', intent: 'Plate production is automated.', why_it_matters: 'Reduces manual work.', depends_on: ['smelting-foundation'] },
     ],
     roadmapNodeIds: ['smelting-foundation', 'fabricated-node'],
+    developmentMode: 'vertical',
   }
 
   memory.recordPlan(key, request, plan)
@@ -787,6 +788,8 @@ test('first live long-horizon draft links to shelf nodes created in the same sub
   assert.deepEqual(draft.roadmap_node_ids, ['smelting-foundation'])
   assert.equal(draft.roadmap_revision_id, planning.roadmap.roadmap_revision_id)
   assert.deepEqual(draft.refinement_grounding.ready_node_ids, ['smelting-foundation'])
+  assert.equal(draft.development_mode, 'vertical')
+  assert.equal(draft.steering_at_draft?.mode ?? null, memory.planningState(key).steering?.current_mode ?? null)
 })
 
 

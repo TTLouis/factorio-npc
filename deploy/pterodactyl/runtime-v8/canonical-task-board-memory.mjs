@@ -494,7 +494,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     })
   }
 
-  ensurePlanningDraft(key, state, { now = Date.now(), migrated = false, roadmap, roadmapNodeIds, replacePrecommit = false } = {}) {
+  ensurePlanningDraft(key, state, { now = Date.now(), migrated = false, roadmap, roadmapNodeIds, developmentMode, replacePrecommit = false } = {}) {
     if (!key || !state) return undefined
     let planning = this.planningByNpc.get(key)
     let goalAdmitted = false
@@ -543,6 +543,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         now,
         origin: migrated ? 'legacy_task_board_migration' : 'live_task_board',
         roadmap_node_ids: linkedNodeIds,
+        ...(developmentMode ? { development_mode: developmentMode } : {}),
         steps: state.task_board.steps.map(step => ({
           description: step.description,
           completion_contract: safeDurableStepCompletionContract(step.completion_contract),
@@ -918,6 +919,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         approved_by: requestInfo.sender,
         plan_id: blockedPlan.plan_id,
         steps: steps.map(description => ({ description })),
+        ...(Array.isArray(plan?.roadmapNodeIds) ? { roadmap_node_ids: plan.roadmapNodeIds } : {}),
+        ...(plan?.developmentMode ? { development_mode: plan.developmentMode } : {}),
       })
       const successor = getActivePlan(revised)
       if (successor && successor.plan_id !== blockedPlan.plan_id) {
@@ -957,6 +960,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         now: result.state.updated_at,
         roadmap: plan?.roadmap,
         roadmapNodeIds: plan?.roadmapNodeIds,
+        developmentMode: plan?.developmentMode,
         replacePrecommit: options?.scopeRefinement === true,
       })
     }
@@ -991,6 +995,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       now,
       origin: 'user_replan',
       steps: steps.map(description => ({ description })),
+      ...(Array.isArray(plan?.roadmapNodeIds) ? { roadmap_node_ids: plan.roadmapNodeIds } : {}),
+      ...(plan?.developmentMode ? { development_mode: plan.developmentMode } : {}),
     })
     const successor = getActivePlan(next)
     if (!successor || successor.plan_id === inFlight.plan_id) return undefined

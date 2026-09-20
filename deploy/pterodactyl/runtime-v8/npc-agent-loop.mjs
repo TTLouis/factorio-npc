@@ -130,6 +130,8 @@ You author the shelf through the optional roadmap field on submitPlan: a short l
 
 When a draft intentionally refines one or more existing Shelf nodes, add roadmapNodeIds beside plan/currentStep/operations and choose stable ids from [PLANNING_STATE].steering.refinement_candidates or the current shelf. On the first long-horizon submission you may create the shelf with roadmap and select ids from those same nodes in roadmapNodeIds. This is lineage, not execution authority; never invent an id for a node that is not on the admitted shelf.
 
+For a bounded planning slice, add developmentMode as vertical, horizontal, maintain, or recover to describe the dominant direction YOU authored relative to the current critical path. Follow [PLANNING_STATE].steering when it remains appropriate, but this field describes the draft rather than granting steering authority. Small measured supporting work does not require a second mode; substantial mixed-direction work should be split at a better checkpoint.
+
 For the active Plan Tracker step, you may add one optional root field named checkpoint beside chatMessage/plan/currentStep/operations. checkpoint is a semantic completion proposal for Jev to judge and runtime to verify, not a claim that the step is already done. It must use a runtime-supported contract: {"mode":"all|any","requirements":[...]} with requirement kinds inventory_count, entity_inventory_count, entity_exists, entity_state, authoritative_operation_receipt, or runtime_controller_state. Prefer world-state outcomes over action occurrence. Example: if the step means "have 100 stone" and the next operation only gathers 40 more because 62 are already held, checkpoint must say inventory_count stone >= 100, not >= 40. The operation batch describes what to do next; checkpoint describes what would prove the semantic step complete. Jev may keep the step open or request a split even when you propose a checkpoint, and runtime remains completion authority. Omit checkpoint when no safe deterministic predicate represents the step.
 
 Plan entries must represent goal-bearing Factorio work or verification. Do not add terminal lifecycle/meta steps such as "Stop", "Done", "Finish", or "Report completion"; stopping after the verified goal is represented by returning plan: [], currentStep: 0, operations: [].
@@ -4847,6 +4849,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let checkpoint
     let roadmap
     let roadmapNodeIds
+    let developmentMode
     let baseMessage = message
     if (typeof message?.content === 'string') {
       let raw
@@ -4865,6 +4868,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             .filter(Boolean)))
             .slice(0, 16)
         }
+        if (Object.prototype.hasOwnProperty.call(raw, 'developmentMode')) {
+          if (!['vertical', 'horizontal', 'maintain', 'recover'].includes(raw.developmentMode)) {
+            const error = new AgentLoopError('developmentMode must be vertical, horizontal, maintain, or recover')
+            error.failureClass = 'plan_category'
+            error.code = 'invalid_development_mode'
+            throw error
+          }
+          developmentMode = raw.developmentMode
+        }
         if (Object.prototype.hasOwnProperty.call(raw, 'checkpoint')) {
           checkpoint = sanitizeStepCompletionContract(raw.checkpoint)
           if (!completionContractSupported(checkpoint)) {
@@ -4875,8 +4887,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           }
           checkpoint = { ...checkpoint, source: 'planner_semantic_checkpoint' }
         }
-        if (checkpoint || roadmap || roadmapNodeIds || Object.prototype.hasOwnProperty.call(raw, 'roadmap') || Object.prototype.hasOwnProperty.call(raw, 'roadmapNodeIds')) {
-          const { checkpoint: _checkpoint, roadmap: _roadmap, roadmapNodeIds: _roadmapNodeIds, ...base } = raw
+        if (checkpoint || roadmap || roadmapNodeIds || developmentMode
+          || Object.prototype.hasOwnProperty.call(raw, 'roadmap')
+          || Object.prototype.hasOwnProperty.call(raw, 'roadmapNodeIds')
+          || Object.prototype.hasOwnProperty.call(raw, 'developmentMode')) {
+          const {
+            checkpoint: _checkpoint,
+            roadmap: _roadmap,
+            roadmapNodeIds: _roadmapNodeIds,
+            developmentMode: _developmentMode,
+            ...base
+          } = raw
           baseMessage = { ...message, content: JSON.stringify(base) }
         }
       }
@@ -4885,6 +4906,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (checkpoint) plan.checkpoint = checkpoint
     if (roadmap) plan.roadmap = roadmap
     if (roadmapNodeIds) plan.roadmapNodeIds = roadmapNodeIds
+    if (developmentMode) plan.developmentMode = developmentMode
     const normalizedPlan = normalizeCanonicalPlan(plan.plan, plan.currentStep)
     plan.plan = normalizedPlan.plan
     plan.currentStep = normalizedPlan.currentStep
@@ -5656,6 +5678,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       operations,
       ...(Array.isArray(plan.roadmap) && plan.roadmap.length > 0 ? { roadmap: plan.roadmap } : {}),
       ...(Array.isArray(plan.roadmapNodeIds) && plan.roadmapNodeIds.length > 0 ? { roadmap_node_ids: plan.roadmapNodeIds } : {}),
+      ...(plan.developmentMode ? { development_mode: plan.developmentMode } : {}),
       ...(plan.checkpoint ? { checkpoint: plan.checkpoint } : {}),
     })
 
