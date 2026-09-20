@@ -177,7 +177,296 @@ A shelf revision is allowed when verified world state or explicit user direction
 
 Shelf revisions should preserve lineage and record the reason for the change instead of replacing history silently.
 
-## 4. Draft -> review -> commit lifecycle
+
+## 4. Strategic steering between plan slices
+
+Games such as Factorio are not well served by a single monotonically "forward" planning style. Effective development often has a **tick-tock cadence**:
+
+```text
+VERTICAL
+unlock / reach the next useful capability
+      |
+      v
+HORIZONTAL
+make the new capability sustainable, scalable, and resilient
+      |
+      v
+VERTICAL
+use that foundation to reach the next capability frontier
+      |
+      v
+HORIZONTAL
+broaden again
+      |
+     ...
+```
+
+This is **strategic steering**, not plan mutation.
+
+Steering is evaluated at planning boundaries and influences which Roadmap Shelf node should be refined next and what planning style the Main LLM should use for the next draft.
+
+It does not alter an already committed Active Plan.
+
+### 4.1 Steering modes
+
+Use the existing useful semantic distinction, with narrower authority:
+
+```text
+development_mode =
+  vertical
+  horizontal
+  maintain
+  recover
+```
+
+**Vertical** means pushing the current critical path forward toward a new capability, unlock, production tier, or other goal-relevant frontier.
+
+Examples may include:
+
+- enabling a required technology;
+- establishing the first usable instance of a new production chain;
+- reaching the next science tier;
+- unlocking a capability required by the user's long-horizon goal.
+
+**Horizontal** means strengthening an already-reached frontier so later vertical progress is sustainable.
+
+Examples may include:
+
+- increasing mining/smelting capacity;
+- improving power margin;
+- expanding logistics throughput;
+- adding buffers or redundancy;
+- making an early production chain reliable enough to support the next tier;
+- broadening defensive or supply support when it protects the current development frontier.
+
+**Maintain** means the current direction remains valid and no strategic change is justified yet. This may include waiting for an already-started deterministic process or continuing bounded work that does not need another strategic plan.
+
+**Recover** means restoring a previously established capability or resolving material degradation before normal development can continue.
+
+### 4.2 Vertical/horizontal are relative to the critical path
+
+Do not classify development mode from the surface action.
+
+For example:
+
+- building more miners can be **vertical** if insufficient ore is the direct blocker to the next required capability;
+- researching a technology can be **horizontal** if it is optional support rather than part of the active critical path;
+- adding power can be **vertical** when power is the current gating dependency, or **horizontal** when it is adding margin for future growth.
+
+The classification is therefore relative to:
+
+```text
+user goal
++ current roadmap frontier
++ current critical path
++ verified world state
++ known constraints
+```
+
+The runtime supplies grounded facts. Jev and the Main LLM interpret those facts semantically.
+
+### 4.3 Steering happens only at safe semantic boundaries
+
+Normal steering points are:
+
+- initial goal admission;
+- completion of an immutable Active Plan;
+- explicit user-approved revision after a structural blocker;
+- explicit user change of goal/priority.
+
+Do **not** switch vertical/horizontal mode halfway through a healthy committed plan.
+
+If new evidence merely changes low-level execution details, use local recovery.
+
+If new evidence destroys a committed semantic assumption, freeze the plan as `BLOCKED`; do not use "steering" as a loophole for silent replanning.
+
+### 4.4 Tick-tock is a bias, not a hard alternation rule
+
+The system should remember development cadence, but must not enforce:
+
+```text
+vertical -> horizontal -> vertical -> horizontal
+```
+
+as a blind state machine.
+
+Sometimes two vertical slices in succession are correct because the existing foundation is already sufficient. Sometimes several horizontal slices are required before further vertical progress is viable.
+
+Use **steering hysteresis** so the system does not oscillate modes merely because the previous plan used the other mode.
+
+A durable advisory steering record may contain:
+
+```json
+{
+  "current_mode": "horizontal",
+  "previous_mode": "vertical",
+  "reason": "new oil capability exists but throughput and power margin are insufficient for blue science",
+  "critical_path": "stable petroleum and sulfur production",
+  "pressure": {
+    "vertical": ["blue science remains unreached"],
+    "horizontal": ["power margin low", "petroleum throughput unstable"]
+  },
+  "last_plan_id": "plan_12"
+}
+```
+
+This record is planning context, not execution authority.
+
+### 4.5 One dominant steering mode per plan slice
+
+Because vertical and horizontal development use different planning approaches, each committed Active Plan should normally have **one dominant development mode**.
+
+Small supporting work from the opposite mode is allowed when it is necessary to make the slice executable, but a draft that substantially mixes both directions should be treated as a scope smell.
+
+Examples:
+
+```text
+VERTICAL slice:
+"Reach a usable oil-processing capability."
+
+May include:
+- the minimum extra power required for the oil setup.
+
+Should normally not also include:
+- broad redesign of the entire electrical grid,
+- large defensive expansion,
+- unrelated smelting scale-up.
+```
+
+```text
+HORIZONTAL slice:
+"Raise iron production and logistics to reliably support the next science tier."
+
+May include:
+- an enabling belt/inserter technology if it is necessary for that scaling target.
+
+Should normally not also include:
+- pushing through multiple new science tiers.
+```
+
+Jev's pre-commit scope review should detect substantial mixed-direction drafts and ask the Main LLM to choose a cleaner boundary unless the mixture is genuinely inseparable.
+
+### 4.6 Steering changes how the Main LLM should plan
+
+A **vertical** planning prompt should bias toward:
+
+- the shortest grounded route to the next useful capability frontier;
+- minimum sufficient supporting infrastructure;
+- explicit dependencies on the active critical path;
+- stopping once the new capability is demonstrably usable;
+- avoiding speculative broad expansion.
+
+A **horizontal** planning prompt should bias toward:
+
+- capacity, throughput, resilience, logistics, and support;
+- measurable sufficiency for the next expected vertical push;
+- improving weak links in the already-reached frontier;
+- avoiding unnecessary new capability horizons;
+- ending when the foundation is demonstrably adequate rather than "maximized."
+
+A **recover** prompt should bias toward restoring the last known valid frontier with minimum semantic change.
+
+A **maintain** decision should avoid waking the Main LLM when deterministic progress can continue safely without a new semantic plan.
+
+### 4.7 Jev's steering role
+
+Jev may provide a bounded **steering recommendation** at a plan boundary:
+
+```json
+{
+  "recommended_mode": "horizontal",
+  "confidence": "high",
+  "reason_codes": [
+    "frontier_reached",
+    "capacity_below_next_frontier_need",
+    "power_margin_low"
+  ],
+  "critical_path_summary": "stabilize oil throughput before blue science",
+  "candidate_shelf_nodes": [
+    "roadmap_oil_stabilization",
+    "roadmap_power_margin"
+  ]
+}
+```
+
+This is advisory.
+
+Jev does not:
+
+- author the next plan;
+- mutate the Roadmap Shelf directly;
+- pick arbitrary Factorio operations;
+- change a committed plan;
+- force a mode transition against explicit user priorities.
+
+The Main LLM receives the user goal, shelf, verified world state, steering history, and Jev recommendation, then chooses the actual next shelf refinement and writes the draft.
+
+### 4.8 Shelf nodes carry steering intent without becoming executable
+
+Roadmap nodes may optionally record coarse development intent:
+
+```json
+{
+  "id": "roadmap_scale_iron",
+  "intent": "increase iron throughput enough to sustain the next science push",
+  "development_hint": "horizontal",
+  "status": "ready_to_refine",
+  "depends_on": ["roadmap_automation_frontier"]
+}
+```
+
+This hint may change in a later roadmap revision because the same work can become part of a different critical path.
+
+The hint is not an operation and is not binding on the executor.
+
+### 4.9 Planning-boundary flow with steering
+
+The full boundary now becomes:
+
+```text
+completed immutable plan
+        |
+        v
+verified world results
+        |
+        +--------------------+
+        |                    |
+        v                    v
+LOD Roadmap Shelf      steering history
+        |                    |
+        +----------+---------+
+                   |
+                   v
+          JEV STEERING REVIEW
+        vertical / horizontal /
+          maintain / recover
+                   |
+                   v
+             MAIN LLM
+      choose next shelf refinement
+        + draft bounded plan
+                   |
+                   v
+            JEV SCOPE REVIEW
+                   |
+             refine / actionable
+                   |
+                   v
+          RUNTIME VALIDATION
+                   |
+                   v
+        COMMITTED IMMUTABLE PLAN
+```
+
+Steering review and scope review are separate questions:
+
+- **Steering:** what kind of development should the next slice pursue?
+- **Scope:** is the proposed slice concrete and bounded enough to commit?
+
+Keeping them separate prevents "vertical/horizontal" from becoming another hidden planning authority.
+
+
+## 5. Draft -> review -> commit lifecycle
 
 Planning should have an explicit pre-commit boundary:
 
@@ -219,7 +508,7 @@ JEV_REVIEW
 
 The plan remains freely editable only before `COMMITTED`.
 
-### 4.1 No fixed maximum step count
+### 5.1 No fixed maximum step count
 
 Do not define actionability as a hard rule such as `steps <= 5`.
 
@@ -236,7 +525,7 @@ Jev should judge semantic scope using signals such as:
 
 Plan length may be a signal, not authority.
 
-### 4.2 Actionable prefix / tail shelving
+### 5.2 Actionable prefix / tail shelving
 
 When an initial draft reaches too far ahead, Jev may identify an **actionable prefix** or an appropriate earlier checkpoint.
 
@@ -256,7 +545,7 @@ This is criticism, not rewriting.
 
 The Main LLM produces a new bounded draft from that feedback. The deferred tail remains represented on the Roadmap Shelf as higher-level guidance for later rounds.
 
-## 5. Step contracts are fixed before commit
+## 6. Step contracts are fixed before commit
 
 A committed semantic step should already know what successful completion means.
 
@@ -307,7 +596,7 @@ Do not wait until post-operation execution to renegotiate what a semantic step m
 
 If a required semantic completion condition cannot be represented by supported grounded predicates, the draft is not ready to commit. The planner should refine/split it or explicitly define a supported control-only boundary.
 
-## 6. Execution and recovery do not rewrite the plan
+## 7. Execution and recovery do not rewrite the plan
 
 Under a committed step, the executor may perform bounded operations and local recovery.
 
@@ -340,7 +629,7 @@ On a structural blocker:
 5. ask whether to keep it paused, revise, or cancel;
 6. if revision is approved, create a new version with lineage to the blocked plan.
 
-## 7. Plan Tracker becomes a view of one immutable plan
+## 8. Plan Tracker becomes a view of one immutable plan
 
 The Plan Tracker should stop acting as a mutable planning workspace.
 
@@ -361,7 +650,7 @@ Jev output must not advance the active step.
 
 Only accepted evidence satisfying the committed current step contract may advance the Plan Tracker.
 
-## 8. One transition authority
+## 9. One transition authority
 
 The current experiment accumulated multiple semantic writers: planner reconciliation, Jev completion logic, hierarchy transitions, outcome authority, and milestone reset paths.
 
@@ -390,7 +679,7 @@ Events may include:
 
 Planner, Jev, runtime receipts, and UI should emit facts/events into this boundary rather than mutating Plan Tracker fields independently.
 
-## 9. Identity and lineage
+## 10. Identity and lineage
 
 Do not rely on reusable positional IDs such as only `goal_id + step_1`.
 
@@ -408,7 +697,7 @@ execution_epoch / batch_id where relevant
 
 Receipts and completion evidence must correlate to the active committed plan identity, not merely to a step number that may recur in later plan slices.
 
-## 10. Jev planning-review contract
+## 11. Jev planning-review contract
 
 Keep the contract intentionally narrow.
 
@@ -444,7 +733,7 @@ Jev may additionally return:
 
 Jev must not return replacement operations or authoritative new plan steps.
 
-## 11. User interaction rules
+## 12. User interaction rules
 
 Ask the user when the semantic contract truly needs user authority, especially:
 
@@ -457,7 +746,7 @@ Do not interrupt the user for ordinary runtime recovery that stays within the co
 
 When blocked, present the verified reason and bounded choices without silently selecting a new strategy.
 
-## 12. Implementation roadmap
+## 13. Implementation roadmap
 
 ### Phase 1 — Freeze the invariants with regression tests
 
@@ -513,13 +802,26 @@ Make deferred long-horizon intent durable and useful across planning rounds:
 - revise shelf guidance only from user changes or grounded world changes;
 - keep the shelf non-executable.
 
-### Phase 6 — Blocker / user revision protocol
+### Phase 6 — Add strategic steering at plan boundaries
+
+Add durable advisory steering context and a bounded Jev steering contract:
+
+- evaluate `vertical | horizontal | maintain | recover` only at safe planning boundaries;
+- classify mode relative to the current critical path, not the action type;
+- preserve previous mode/reason to provide hysteresis and avoid oscillation;
+- allow shelf nodes to carry non-binding development hints;
+- feed steering recommendation into the Main LLM before it drafts the next plan slice;
+- keep scope review separate from steering review;
+- require one dominant steering mode per committed slice unless a mixed slice is demonstrably inseparable;
+- prove that steering cannot mutate or replace an executing plan.
+
+### Phase 7 — Blocker / user revision protocol
 
 Add a first-class `BLOCKED` state and user-facing choices.
 
 Revision produces `plan_vN+1`; it never edits `plan_vN` in place.
 
-### Phase 7 — Retire conflicting experimental hierarchy writers
+### Phase 8 — Retire conflicting experimental hierarchy writers
 
 Once the new lifecycle is covered, remove/simplify old behavior that conflicts with it, including any path where:
 
@@ -530,31 +832,38 @@ Once the new lifecycle is covered, remove/simplify old behavior that conflicts w
 
 Preserve useful grounded predicates, receipt correlation, provider routing, condition waits, and deterministic runtime recovery where they fit the new authority model.
 
-### Phase 8 — Full real lifecycle E2E
+### Phase 9 — Full real lifecycle E2E
 
 Add a representative long goal:
 
 ```text
 user long-horizon goal
 -> LOD shelf
--> draft slice
--> Jev refine
+-> Jev recommends VERTICAL at boundary
+-> Main LLM drafts bounded vertical slice
+-> Jev scope-refines
 -> commit v1
 -> execute several steps
 -> local recovery without replan
--> complete v1
--> use shelf to draft v2
--> restart/persist/restore
+-> complete v1 / reach new frontier
+-> verified world state shows weak support
+-> Jev recommends HORIZONTAL
+-> Main LLM refines shelf into capacity/resilience slice
+-> commit v2
+-> complete horizontal foundation
+-> Jev recommends VERTICAL toward next frontier
+-> draft/commit v3
+-> restart/persist/restore with steering + shelf lineage intact
 -> encounter structural blocker
 -> freeze
 -> user approves revision
--> v3 supersedes v2
--> continue without losing goal/shelf lineage
+-> successor plan supersedes blocked plan
+-> continue without losing goal/shelf/steering lineage
 ```
 
 This E2E is the acceptance gate for the redesigned planning subsystem.
 
-## 13. Non-goals
+## 14. Non-goals
 
 This roadmap does not mean:
 
@@ -563,19 +872,23 @@ This roadmap does not mean:
 - the shelf becomes a hidden executable mega-plan;
 - every low-level operation must be frozen at plan commit;
 - ordinary runtime recovery must ask the user;
-- long-horizon planning is abandoned.
+- long-horizon planning is abandoned;
+- vertical/horizontal steering becomes a blind alternating state machine;
+- Jev steering recommendations become execution authority.
 
 The goal is the opposite: preserve long-horizon direction at low detail, resolve only what is currently useful, and make the committed executable contract small enough to remain stable.
 
-## 14. Summary
+## 15. Summary
 
-The planning system should converge on four simple ownership rules:
+The planning system should converge on five simple ownership rules:
 
 > **Goal:** user-owned intent.
 
 > **Shelf:** LOD-style long-horizon guidance for future rounds; tentative, durable, lineage-preserving, non-executable.
 
-> **Plan:** Main-LLM-authored bounded executable slice; immutable after commit.
+> **Steering:** planning-boundary guidance about whether the next slice should advance the frontier, broaden the foundation, maintain, or recover; advisory and relative to the current critical path.
+
+> **Plan:** Main-LLM-authored bounded executable slice with one dominant development mode; immutable after commit.
 
 > **Jev:** pre-commit critic that decides whether the draft is scoped and grounded enough to commit, not a second planner.
 

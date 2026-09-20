@@ -18,6 +18,7 @@ The intended actor is a real standalone Factorio `character` controlled through 
 - The harness/runtime owns authoritative state, validation, admission, receipts, and recovery. The model chooses actions from approved observations/tools.
 - Planning has explicit ownership boundaries: user goal, non-executable LOD Roadmap Shelf, and immutable committed Active Plan. The Main LLM authors drafts; Jev may critique scope before commit but must not mutate committed plan semantics or advance Plan Tracker.
 - A structural blocker freezes the committed plan. Do not silently replan; a revised plan version requires explicit user approval. Ordinary bounded runtime recovery that preserves the committed semantic step does not require user interruption.
+- Strategic steering (`vertical | horizontal | maintain | recover`) is evaluated at safe planning boundaries and is relative to the current critical path. It may guide which shelf node the Main LLM refines next, but it must not mutate or replace a healthy committed plan; vertical/horizontal cadence is evidence-driven, not a forced alternation.
 - Prefer deterministic game data and validated constraints over asking the LLM to guess Factorio rules.
 - Do not silently treat a successful admission/command as proof that the user's gameplay goal is complete. Verify relevant world state.
 - Preserve exact actor/operation correlation across asynchronous work. Stale work after actor replacement, death, restart, or epoch change must fail safely.

@@ -20,6 +20,8 @@ Its core direction is:
 
 - separate the durable user goal, the non-executable LOD Roadmap Shelf, and the current Active Plan;
 - use shelfed long-horizon intent as progressive-detail guidance for later planning rounds instead of discarding it;
+- evaluate strategic steering at plan boundaries using `vertical | horizontal | maintain | recover`, relative to the current critical path rather than action type;
+- treat Factorio's common vertical -> horizontal -> vertical cadence as an evidence-driven bias, not a mandatory alternation;
 - let the Main LLM author plan drafts;
 - use Jev as a bounded **pre-commit scope critic**, not a co-planner or Plan Tracker writer;
 - make committed plans immutable;
