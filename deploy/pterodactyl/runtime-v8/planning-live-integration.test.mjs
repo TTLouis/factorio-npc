@@ -757,7 +757,7 @@ test('live model context exposes reducer planning state, shelf refinement candid
   assert.equal('steps' in visible.roadmap.nodes[0], false)
   assert.equal(visible.steering.kind, 'steering_context')
   assert.equal(visible.steering.execution_authority, false)
-  assert.equal(visible.steering.refinement_candidates[0].node.id, 'smelting-foundation')
+  assert.equal(visible.steering.refinement_candidates[0].node_id, 'smelting-foundation')
   assert.equal(visible.plan_tracker.kind, 'plan_tracker_view')
   assert.deepEqual(visible.plan_tracker.steps.map(step => step.description), ['Establish smelting', 'Automate plates'])
 
