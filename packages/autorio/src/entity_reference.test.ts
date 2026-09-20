@@ -41,6 +41,17 @@ describe('exact entity reference recovery', () => {
     expect(a.surface.find_entities_filtered).not.toHaveBeenCalled()
   })
 
+  it('never exposes the internal awareness radar through exact entity references', () => {
+    const a = actor()
+    const internal = entity(104, { name: 'airi-npc-awareness-radar' })
+
+    remember_entity_reference(internal)
+    expect((globalThis as any).storage).toEqual({})
+
+    ;(globalThis as any).game.get_entity_by_unit_number = vi.fn(() => internal)
+    expect(resolve_exact_entity(a, 104)).toBeUndefined()
+  })
+
   it('recovers an observed exact entity by position without substituting another unit', () => {
     const a = actor()
     const observed = entity(104)

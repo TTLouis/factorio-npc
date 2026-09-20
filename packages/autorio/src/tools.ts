@@ -1,5 +1,6 @@
 import { create_actor_remote_interface, get_controlled_actor } from './actors/actor_controller'
 import { remember_entity_reference } from './entity_reference'
+import { is_internal_observation_entity, is_internal_observation_entity_name } from './internal_entities'
 import { get_actor_inventory_items } from './utils/inventory'
 
 const MAX_NEARBY_RADIUS = 64
@@ -105,11 +106,24 @@ export function create_tools_remote_interface() {
         filters.type = entity_type
       }
 
+      if (is_internal_observation_entity_name(name)) {
+        return {
+          actor_position: actor.position,
+          radius: bounded_radius,
+          entities: [],
+          matched_count: 0,
+          returned_count: 0,
+          truncated: false,
+        }
+      }
+
       const matches = actor.surface.find_entities_filtered(filters as any)
       const entities: Array<Record<string, unknown>> = []
-      const returned = math.min(matches.length, bounded_limit)
-      for (let i = 0; i < returned; i++) {
-        const entity = matches[i]
+      let matched_count = 0
+      for (const entity of matches) {
+        if (is_internal_observation_entity(entity)) continue
+        matched_count++
+        if (entities.length >= bounded_limit) continue
         remember_entity_reference(entity)
         entities.push({
           name: entity.name,
@@ -125,9 +139,9 @@ export function create_tools_remote_interface() {
         actor_position: actor.position,
         radius: bounded_radius,
         entities,
-        matched_count: matches.length,
+        matched_count,
         returned_count: entities.length,
-        truncated: matches.length > entities.length,
+        truncated: matched_count > entities.length,
       }
     },
     get_entity_status: (name: string, radius: number = 8) => {
@@ -140,6 +154,14 @@ export function create_tools_remote_interface() {
       }
 
       const bounded_radius = math.max(1, math.min(MAX_ENTITY_STATUS_RADIUS, radius || 8))
+      if (is_internal_observation_entity_name(name)) {
+        return {
+          found: false,
+          actor_position: actor.position,
+          radius: bounded_radius,
+          name,
+        }
+      }
       const matches = actor.surface.find_entities_filtered({
         position: actor.position,
         radius: bounded_radius,

@@ -111,6 +111,40 @@ describe('map-first remote control', () => {
     expect(surface.find_entities_filtered).toHaveBeenCalledTimes(2)
   })
 
+  it('keeps the internal awareness radar out of map observations', () => {
+    const surface = make_surface()
+    const actor = make_actor(surface, new Set(['0,0']), new Set(['0,0']))
+    const internal = make_entity(surface, {
+      name: 'airi-npc-awareness-radar',
+      type: 'radar',
+      position: { x: 4, y: 4 },
+      unit_number: 7,
+    })
+    const machine = make_entity(surface, { position: { x: 6, y: 6 }, unit_number: 8 })
+    ;(surface.find_entities_filtered as any).mockReturnValue([internal, machine])
+    ;(globalThis as any).game.get_surface.mockReturnValue(surface)
+
+    const result = query_charted_entities(actor, 1, 4, 4, 8, 8)
+
+    expect(result.ok).toBe(true)
+    expect(result.entities).toHaveLength(1)
+    expect(result.entities[0].unit_number).toBe(8)
+  })
+
+  it('treats the internal awareness radar as nonexistent for exact inspection', () => {
+    const surface = make_surface()
+    const actor = make_actor(surface, new Set(['0,0']), new Set(['0,0']))
+    const internal = make_entity(surface, {
+      name: 'airi-npc-awareness-radar',
+      type: 'radar',
+      position: { x: 4, y: 4 },
+      unit_number: 7,
+    })
+    ;(globalThis as any).game.get_entity_by_unit_number.mockReturnValue(internal)
+
+    expect(inspect_charted_entity(actor, 7)).toEqual({ ok: false, code: 'entity_not_found', unit_number: 7 })
+  })
+
   it('refuses exact entity inspection for charted but currently invisible entities', () => {
     const surface = make_surface()
     const actor = make_actor(surface, new Set(['0,0']), new Set())

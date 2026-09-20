@@ -1,5 +1,6 @@
 import type { LuaEntity, LuaSurface, UnitNumber } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
+import { is_internal_observation_entity } from './internal_entities'
 
 const MAX_MAP_QUERY_RADIUS = 256
 const MAX_MAP_QUERY_RESULTS = 64
@@ -193,7 +194,7 @@ export function query_charted_entities(
     if (name !== undefined) filters.name = name
     const candidates = surface.find_entities_filtered(filters)
     for (const entity of candidates) {
-      if (!entity.valid) continue
+      if (!entity.valid || is_internal_observation_entity(entity)) continue
       if (!is_position_visible(actor, surface, entity.position)) continue
       const identity = entity_identity(entity)
       if (seen[identity]) continue
@@ -222,7 +223,7 @@ function resolve_visible_entity(actor: ControlledActor, unit_number: number) {
     return { code: 'entity_not_found' as MapObservationCode, entity: undefined }
   }
   const entity = game.get_entity_by_unit_number(unit_number as UnitNumber)
-  if (!entity || !entity.valid) {
+  if (!entity || !entity.valid || is_internal_observation_entity(entity)) {
     return { code: 'entity_not_found' as MapObservationCode, entity: undefined }
   }
   if (!is_position_charted(actor, entity.surface, entity.position)) {

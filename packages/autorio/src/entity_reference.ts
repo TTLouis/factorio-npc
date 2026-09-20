@@ -1,6 +1,7 @@
 import type { MapPositionStruct } from 'factorio:prototype'
 import type { LuaEntity, LuaSurface, UnitNumber } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
+import { is_internal_observation_entity } from './internal_entities'
 
 interface EntityReferenceHint {
   name: string
@@ -20,7 +21,7 @@ function hints() {
 }
 
 export function remember_entity_reference(entity: LuaEntity | undefined) {
-  if (!entity || !entity.valid || entity.unit_number === undefined) return
+  if (!entity || !entity.valid || entity.unit_number === undefined || is_internal_observation_entity(entity)) return
   hints()[entity.unit_number] = {
     name: entity.name,
     surface_index: entity.surface.index,
@@ -33,6 +34,7 @@ export function remember_entity_reference(entity: LuaEntity | undefined) {
 export function resolve_exact_entity(actor: ControlledActor, unit_number: number) {
   const direct = game.get_entity_by_unit_number(unit_number as UnitNumber)
   if (direct && direct.valid) {
+    if (is_internal_observation_entity(direct)) return undefined
     remember_entity_reference(direct)
     return direct
   }
@@ -48,7 +50,7 @@ export function resolve_exact_entity(actor: ControlledActor, unit_number: number
     force: actor.force,
   })
   for (const candidate of candidates) {
-    if (!candidate.valid || candidate.unit_number !== unit_number) continue
+    if (!candidate.valid || candidate.unit_number !== unit_number || is_internal_observation_entity(candidate)) continue
     remember_entity_reference(candidate)
     return candidate
   }
