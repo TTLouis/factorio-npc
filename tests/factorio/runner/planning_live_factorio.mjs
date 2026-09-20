@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
+import process from 'node:process'
 import { promisify } from 'node:util'
 
 import { CanonicalTaskBoardMemory } from '../pterodactyl/runtime-v8/canonical-task-board-memory.mjs'
@@ -126,7 +127,7 @@ async function prepare({ rcon, results, stateFile }) {
     },
   }, null, 2))
 
-  console.log(`PASS: live coordinator reached BLOCKED on real Factorio preflight without mutation plan_id=${blocked.plan_id}`)
+  process.stdout.write(`PASS: live coordinator reached BLOCKED on real Factorio preflight without mutation plan_id=${blocked.plan_id}\n`)
 }
 
 async function verify({ rcon, results, stateFile }) {
@@ -211,7 +212,7 @@ async function verify({ rcon, results, stateFile }) {
     provider_calls: providerCalls,
   }, null, 2))
 
-  console.log(`PASS: BLOCKED survived real Factorio restart; ordinary continuation stayed frozen and explicit revision created successor=${successor.plan_id}`)
+  process.stdout.write(`PASS: BLOCKED survived real Factorio restart; ordinary continuation stayed frozen and explicit revision created successor=${successor.plan_id}\n`)
 }
 
 async function main() {
