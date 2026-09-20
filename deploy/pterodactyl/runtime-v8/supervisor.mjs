@@ -1994,6 +1994,20 @@ export class Session {
     await this.bindNpc()
 
     const prompt = await fsp.readFile(path.join(this.app, 'src', 'prompt.md'), 'utf8')
+    const jevDecisionProvider = this.config.decisionProvider
+      ? (state, questions, context = {}) => decisionProviderRequest(
+          this.config.decisionProvider,
+          state,
+          questions,
+          {
+            signal: context.signal,
+            reserve: () => reserveBudget(
+              path.join(this.root, '.airi', 'decision-provider-budget.json'),
+              this.config.decisionProvider.maxRequestsPerHour,
+            ),
+          },
+        )
+      : undefined
     this.agent = new NpcAgentLoop({
       rcon: this.rcon,
       systemPrompt: `${prompt}\n\n${RUNTIME_RELIABILITY_GUIDANCE}`,
@@ -2014,20 +2028,8 @@ export class Session {
         profile: this.config.profile,
         timeoutMs: this.config.providerTimeoutMs,
       }, messages, context),
-      interactionDecisionProvider: this.config.decisionProvider
-        ? (state, questions, context = {}) => decisionProviderRequest(
-            this.config.decisionProvider,
-            state,
-            questions,
-            {
-              signal: context.signal,
-              reserve: () => reserveBudget(
-                path.join(this.root, '.airi', 'decision-provider-budget.json'),
-                this.config.decisionProvider.maxRequestsPerHour,
-              ),
-            },
-          )
-        : undefined,
+      interactionDecisionProvider: jevDecisionProvider,
+      scopeReviewDecisionProvider: jevDecisionProvider,
       reserve: async context => reserveBudget(
         path.join(this.root, '.airi', 'provider-budget.json'),
         this.config.budget,

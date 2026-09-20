@@ -1992,6 +1992,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     this.interactionProvider = typeof options.interactionProvider === 'function' ? options.interactionProvider : null
     this.interactionDecisionProvider = typeof options.interactionDecisionProvider === 'function' ? options.interactionDecisionProvider : null
+    // Scope review is an explicit capability. A generic interaction-decision
+    // callback may intentionally support only routing/budget questions; treating
+    // its mere presence as Jev scope-review support made unrelated decision
+    // stubs fail closed at the pre-commit gate. Production wires the same Jev
+    // provider into both slots explicitly.
+    this.scopeReviewDecisionProvider = typeof options.scopeReviewDecisionProvider === 'function'
+      ? options.scopeReviewDecisionProvider
+      : null
     this.interactionAbort = null
     this.postStepDecisionAbort = null
     this.recoveryDecisionAbort = null
@@ -4981,10 +4989,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
    * caller treats a missing review as a refusal, which is the whole point of
    * the gate.
    *
-   * When no decision provider is configured there is no Jev and no authoring
-   * model either -- plans come from fixtures, as in the deterministic lanes.
-   * That is recorded in the verdict's provenance rather than hidden, so a
-   * commit made without review is visible in state as exactly that.
+   * When no scope-review provider is configured, this is a deterministic/direct
+   * harness lane rather than a live Jev-reviewed lane. Those plans may still
+   * come from fixtures or narrow tests that install other decision families.
+   * Production wires scope review explicitly; generic routing/budget callbacks
+   * do not silently become Jev just because they exist.
    */
   async reviewDraftForCommit(memoryKey) {
     const planning = this.memory.planningState?.(memoryKey)
@@ -4994,7 +5003,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (steps.length === 0) return undefined
 
     const runtime_validation = { passed: true }
-    if (!this.interactionDecisionProvider) {
+    if (!this.scopeReviewDecisionProvider) {
       return {
         verdict: 'actionable',
         reason_codes: ['jev_unavailable_no_decision_provider'],
@@ -5014,7 +5023,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
 
     try {
-      const response = await this.interactionDecisionProvider(reviewState, scopeReviewQuestions(), {
+      const response = await this.scopeReviewDecisionProvider(reviewState, scopeReviewQuestions(), {
         epoch: this.requestInfo?.epoch,
         actorId: this.requestInfo?.actorId,
       })

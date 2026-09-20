@@ -899,6 +899,16 @@ test('live Jev refusal re-authors once and never admits the rejected operation b
           },
         }
       }
+      return {
+        answers: {
+          routing: { choice: 'wake_planner', confidence: 0.9 },
+          reasoning_budget: { choice: 'normal', confidence: 0.9 },
+          planning_horizon: { choice: 'checkpoint', confidence: 0.9 },
+          observation_budget: { score: 0, confidence: 0.9 },
+        },
+      }
+    },
+    scopeReviewDecisionProvider: async (_state, questions) => {
       reviewCall++
       return reviewCall === 1
         ? {
