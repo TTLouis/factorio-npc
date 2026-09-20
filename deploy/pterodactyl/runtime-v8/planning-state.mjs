@@ -1772,15 +1772,24 @@ Object.assign(HANDLERS, {
   [PLANNING_EVENT.DRAFT_CREATED](state, event, now) {
     if (!state.goal || state.goal.status !== GOAL_STATUS.ACTIVE) return state
     const sequence = nextSequence(state)
+    // Re-authoring or checkpoint-refreshing a PRE-COMMIT draft is still the
+    // same successor attempt. USER_REVISION_APPROVED is the only transition
+    // allowed to CREATE successor lineage; DRAFT_CREATED may only PRESERVE
+    // lineage that already exists on the mutable draft it replaces.
+    const replacedDraft = getActivePlan(state)
+    const inheritedLineage = replacedDraft && PRE_COMMIT_STATUSES.includes(replacedDraft.status)
+      ? replacedDraft
+      : undefined
     const plan = createPlan(state, {
       now,
       sequence,
-      planVersion: 1,
-      derivedFrom: null,
+      planVersion: inheritedLineage?.plan_version ?? 1,
+      derivedFrom: inheritedLineage?.derived_from_plan_id ?? null,
       steps: event.steps,
       roadmapNodeIds: event.roadmap_node_ids,
       developmentMode: event.development_mode,
       origin: event.origin ?? 'main_llm_draft',
+      carriedForwardEvidence: inheritedLineage?.carried_forward_evidence ?? [],
     })
     if (plan.steps.length === 0) return state
     // A new draft supersedes any still-uncommitted draft; committed plans are

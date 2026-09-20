@@ -825,6 +825,46 @@ test('only USER_REVISION_APPROVED produces plan_version + 1 with lineage', () =>
   assert.deepEqual(preserved.steps.map(step => step.description), predecessor.steps.map(step => step.description))
 })
 
+test('pre-commit draft replacement preserves user-approved successor lineage', () => {
+  let state = committedFixture()
+  const predecessor = getActivePlan(state)
+  state = applyPlanningEvent(state, {
+    type: PLANNING_EVENT.STRUCTURAL_BLOCKER_CONFIRMED,
+    now: 1600,
+    source: 'runtime',
+    plan_id: predecessor.plan_id,
+    reason_code: 'blocked',
+  })
+  state = applyPlanningEvent(state, {
+    type: PLANNING_EVENT.USER_REVISION_APPROVED,
+    now: 1700,
+    source: 'user',
+    approved_by: 'louis',
+    plan_id: predecessor.plan_id,
+    steps: [{ description: 'Mine a different stone patch' }],
+  })
+  const approved = getActivePlan(state)
+  assert.equal(approved.plan_version, predecessor.plan_version + 1)
+  assert.equal(approved.derived_from_plan_id, predecessor.plan_id)
+
+  const refreshed = applyPlanningEvent(state, {
+    type: PLANNING_EVENT.DRAFT_CREATED,
+    now: 1750,
+    origin: 'checkpoint_contract_refresh',
+    roadmap_node_ids: approved.roadmap_node_ids,
+    development_mode: approved.development_mode,
+    steps: [{ description: 'Mine a different stone patch', completion_contract: GROUNDED_CONTRACT }],
+  })
+  const replacement = getActivePlan(refreshed)
+
+  assert.notEqual(replacement.plan_id, approved.plan_id)
+  assert.equal(replacement.plan_version, approved.plan_version)
+  assert.equal(replacement.derived_from_plan_id, predecessor.plan_id)
+  assert.deepEqual(replacement.carried_forward_evidence, approved.carried_forward_evidence)
+  assert.equal(getPlan(refreshed, approved.plan_id).status, PLAN_STATUS.SUPERSEDED)
+  assert.equal(getPlan(refreshed, approved.plan_id).superseded_by_plan_id, replacement.plan_id)
+})
+
 test('a user revision carries forward verified completed work as evidence references', () => {
   let state = committedFixture()
   const predecessor = getActivePlan(state)
