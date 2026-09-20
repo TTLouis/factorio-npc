@@ -474,7 +474,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     })
   }
 
-  ensurePlanningDraft(key, state, { now = Date.now(), migrated = false, roadmap, roadmapNodeIds } = {}) {
+  ensurePlanningDraft(key, state, { now = Date.now(), migrated = false, roadmap, roadmapNodeIds, replacePrecommit = false } = {}) {
     if (!key || !state) return undefined
     let planning = this.planningByNpc.get(key)
     const existingPlan = getActivePlan(planning)
@@ -503,7 +503,11 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         reason: goalAdmitted ? 'goal_decomposed_to_shelf' : 'verified_world_change',
       }) ?? planning
     }
-    if (!getActivePlan(planning) && Array.isArray(state.task_board?.steps) && state.task_board.steps.length > 0) {
+    const draftBefore = getActivePlan(planning)
+    const replaceableDraft = replacePrecommit
+      && draftBefore
+      && ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING, PLAN_STATUS.COMPLETED, PLAN_STATUS.BLOCKED].includes(draftBefore.status)
+    if ((!draftBefore || replaceableDraft) && Array.isArray(state.task_board?.steps) && state.task_board.steps.length > 0) {
       const knownNodeIds = new Set((planning.roadmap?.nodes ?? []).map(node => node.id))
       const linkedNodeIds = Array.from(new Set(
         (Array.isArray(roadmapNodeIds) ? roadmapNodeIds : [])
@@ -565,6 +569,20 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     })
 
     if (review.verdict !== 'actionable') {
+      planning = applyPlanningEvent(planning, {
+        type: PLANNING_EVENT.JEV_REFINEMENT_REQUESTED,
+        now,
+        source: 'jev',
+        plan_id: plan.plan_id,
+        verdict: review.verdict,
+        reason_codes: review.reason_codes,
+        problem_step_ids: review.problem_steps,
+        ...(Number.isSafeInteger(review.actionable_prefix) && review.actionable_prefix > 0
+          ? { actionable_prefix: review.actionable_prefix }
+          : {}),
+        recommended_boundary: review.recommended_boundary,
+        reason: review.explanation ?? review.reason_codes?.join(',') ?? review.verdict,
+      })
       this.planningByNpc.set(key, planning)
       this.syncPlanningState(key, legacy)
       return planning
@@ -663,6 +681,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         type: PLANNING_EVENT.DRAFT_CREATED,
         now,
         origin: 'checkpoint_contract_refresh',
+        roadmap_node_ids: [...(active.roadmap_node_ids ?? [])],
+        development_mode: active.development_mode,
         steps: state.task_board.steps.map(step => ({
           description: step.description,
           completion_contract: safeDurableStepCompletionContract(step.completion_contract),
@@ -894,6 +914,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         now: result.state.updated_at,
         roadmap: plan?.roadmap,
         roadmapNodeIds: plan?.roadmapNodeIds,
+        replacePrecommit: options?.scopeRefinement === true,
       })
     }
     if (!userRevisionApproved && !supersededPlanId) return result

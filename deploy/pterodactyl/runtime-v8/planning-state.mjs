@@ -1845,7 +1845,9 @@ Object.assign(HANDLERS, {
       jev_review: {
         refinement_count: item.jev_review.refinement_count + 1,
         last_reason_codes: reasonCodes,
-        last_verdict: 'refine',
+        last_verdict: ['refine', 'needs_grounding', 'needs_user_clarification'].includes(event.verdict)
+          ? event.verdict
+          : 'refine',
         last_reviewed_at: now,
         actionable_prefix: prefix ?? null,
         problem_step_ids: stringList(event.problem_step_ids, { max: 16, maxLength: 200 }),

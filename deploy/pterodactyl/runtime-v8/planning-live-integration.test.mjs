@@ -788,3 +788,152 @@ test('first live long-horizon draft links to shelf nodes created in the same sub
   assert.equal(draft.roadmap_revision_id, planning.roadmap.roadmap_revision_id)
   assert.deepEqual(draft.refinement_grounding.ready_node_ids, ['smelting-foundation'])
 })
+
+
+test('checkpoint refresh preserves draft-to-shelf lineage before Jev review', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const key = 'npc:airi'
+  const plan = {
+    ...proposedPlan(['Establish smelting']),
+    roadmap: [{ id: 'smelting-foundation', intent: 'A working smelting foundation exists.' }],
+    roadmapNodeIds: ['smelting-foundation'],
+  }
+  const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Build smelting' }, plan)
+  const stepId = recorded.state.task_board.steps[0].id
+  memory.setStepCompletionContract(key, stepId, {
+    mode: 'all',
+    requirements: [{ id: 'receipt', kind: 'authoritative_operation_receipt', operation_name: 'wait' }],
+  }, { now: 90 })
+
+  const refreshed = getActivePlan(memory.planningState(key))
+  assert.deepEqual(refreshed.roadmap_node_ids, ['smelting-foundation'])
+  assert.equal(refreshed.roadmap_revision_id, memory.planningState(key).roadmap.roadmap_revision_id)
+})
+
+test('Jev refine refusal returns draft to re-authorable state with bounded criticism recorded', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const key = 'npc:airi'
+  const plan = proposedPlan(['Gather stone', 'Craft furnace', 'Build power'])
+  const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Build early automation' }, plan)
+  memory.reconcileTaskBoard(key, undefined, plan, recorded, { allowReplan: false })
+
+  memory.commitPlanningPlan(key, {
+    now: 100,
+    review: {
+      verdict: 'refine',
+      reason_codes: ['too_broad'],
+      problem_steps: ['2'],
+      actionable_prefix: 1,
+      recommended_boundary: 'after stone is gathered',
+      confidence: 0.9,
+      runtime_validation: { passed: true },
+    },
+  })
+
+  const refused = getActivePlan(memory.planningState(key))
+  assert.equal(refused.status, PLAN_STATUS.DRAFT)
+  assert.equal(refused.jev_review.refinement_count, 1)
+  assert.equal(refused.jev_review.last_verdict, 'refine')
+  assert.deepEqual(refused.jev_review.last_reason_codes, ['too_broad'])
+  assert.equal(refused.jev_review.actionable_prefix, 1)
+  assert.ok(memory.planningState(key).roadmap.nodes.some(node => /Craft furnace/.test(node.intent)))
+})
+
+class ScopeReviewRcon {
+  constructor() {
+    this.mutations = []
+  }
+
+  async command(text) {
+    if (text.includes('remote.call("airi_deployment","status")')) return JSON.stringify(deployment())
+    if (text.includes('remote.call("autorio_actor","status")')) {
+      return JSON.stringify({
+        mode: 'npc',
+        connected_players: 0,
+        actor: { actor_id: 18, kind: 'standalone_character', valid: true, has_character: true },
+        load_reconciliation: { pending: false, last_actor_id: 18 },
+      })
+    }
+    if (text.includes('remote.call("autorio_preflight","operation"')) return JSON.stringify({ ok: true })
+    if (text.includes('local ok,result=pcall')) {
+      this.mutations.push(text)
+      const marker = text.match(/AIRI_RESULT_[a-f0-9]{24}:/)?.[0]
+      const admissions = [...text.matchAll(/return remote\.call\('autorio_operations'/g)].length
+      return `${marker}${JSON.stringify({ ok: true, result: Array.from({ length: admissions }, () => [true, 'Task started']) })}`
+    }
+    return '{}'
+  }
+}
+
+test('live Jev refusal re-authors once and never admits the rejected operation batch', async () => {
+  const rcon = new ScopeReviewRcon()
+  const memory = new CanonicalTaskBoardMemory()
+  const providerPlans = [
+    {
+      chatMessage: 'Trying an over-broad slice.',
+      plan: ['Gather stone', 'Craft furnace', 'Build power'],
+      currentStep: 0,
+      operations: [{ name: 'wait', args: { ticks: 1 } }],
+    },
+    {
+      chatMessage: 'Using the narrower reviewed boundary.',
+      plan: ['Gather stone'],
+      currentStep: 0,
+      operations: [{ name: 'wait', args: { ticks: 1 } }],
+    },
+  ]
+  let providerCall = 0
+  let reviewCall = 0
+  const agent = new NpcAgentLoop({
+    rcon,
+    memory,
+    provider: async () => ({ content: JSON.stringify(providerPlans[Math.min(providerCall++, providerPlans.length - 1)]) }),
+    interactionDecisionProvider: async (_state, questions) => {
+      if (!questions?.scope_review) {
+        return {
+          answers: {
+            routing: { choice: 'wake_planner', confidence: 0.9 },
+            reasoning_budget: { choice: 'normal', confidence: 0.9 },
+            planning_horizon: { choice: 'checkpoint', confidence: 0.9 },
+            observation_budget: { score: 0, confidence: 0.9 },
+          },
+        }
+      }
+      reviewCall++
+      return reviewCall === 1
+        ? {
+            answers: {
+              scope_review: { choice: 'refine', confidence: 0.9 },
+              scope_review_reason_codes: { choices: ['too_broad'] },
+              actionable_prefix: { score: 1 },
+              step_directions: { choices: ['vertical', 'vertical', 'vertical'] },
+            },
+          }
+        : {
+            answers: {
+              scope_review: { choice: 'actionable', confidence: 0.9 },
+              scope_review_reason_codes: { choices: [] },
+              actionable_prefix: { score: 1 },
+              step_directions: { choices: ['vertical'] },
+            },
+          }
+    },
+    systemPrompt: 'bounded Jev refinement integration test',
+    stateFile: null,
+    traceFile: null,
+    decisionTraceFile: null,
+    npcId: 'airi',
+  })
+
+  await agent.request('build early automation', { sender: 'Louis' })
+
+  assert.equal(reviewCall, 2)
+  assert.ok(providerCall >= 2)
+  assert.equal(rcon.mutations.length, 1, 'only the actionable replacement draft may reach Autorio admission')
+  const planning = memory.planningState('npc:airi')
+  const active = getActivePlan(planning)
+  assert.ok([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(active.status))
+  assert.equal(active.steps.length, 1)
+  assert.equal(active.steps[0].description, 'Gather stone')
+  assert.ok(planning.plans.some(item => item.status === PLAN_STATUS.SUPERSEDED && item.jev_review.refinement_count >= 1))
+})

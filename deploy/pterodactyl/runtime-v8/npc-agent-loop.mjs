@@ -63,6 +63,7 @@ const ACTION_OMISSION_REPAIR_MESSAGE = 'Finite canonical work remains, but no ex
 const ACTION_OMISSION_AFTER_OBSERVATION_MESSAGE = 'The targeted observation budget for this decision is complete. Do not observe again or switch to another read-only tool. Submit the next executable operation now, or keep the remaining plan and start chatMessage with "BLOCKED: " followed by the exact still-missing fact or truthful blocker.'
 const RESEARCH_PREFLIGHT_RECOVERABLE_CODES = new Set(['missing_prerequisites', 'trigger_research', 'force_busy'])
 const RESEARCH_PREFLIGHT_RETRY_BUDGET = 2
+const JEV_SCOPE_REFINEMENT_BUDGET = 2
 const EXACT_ENTITY_TARGET_OPERATIONS = new Set([
   'walk_to_entity_exact',
   'mine_entity_exact',
@@ -3859,6 +3860,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.staleExactPreflightRetries = 0
     this.researchPreflightRetries = 0
     this.bootstrapDependencyPreflightRetries = 0
+    this.scopeRefinementAttempts = 0
+    this.scopeRefinementPending = false
     this.planUpdateReason = intent === 'new_goal'
       ? 'new_goal'
       : intent === 'amend_current'
@@ -5042,6 +5045,74 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  scopeReviewCorrectionMessage(review) {
+    const reasons = Array.isArray(review?.reason_codes) && review.reason_codes.length > 0
+      ? review.reason_codes.join(', ')
+      : 'scope_not_actionable'
+    const problems = Array.isArray(review?.problem_steps) && review.problem_steps.length > 0
+      ? ` Problem steps: ${review.problem_steps.join(', ')}.`
+      : ''
+    const boundary = review?.recommended_boundary ? ` Recommended boundary: ${review.recommended_boundary}.` : ''
+    const prefix = Number.isSafeInteger(review?.actionable_prefix) && review.actionable_prefix > 0
+      ? ` The first ${review.actionable_prefix} step(s) were judged actionable; re-author a bounded draft around that earlier checkpoint and leave the deferred tail on the Shelf.`
+      : ''
+    const grounding = review?.verdict === 'needs_grounding'
+      ? ' Obtain only the targeted live facts needed to ground the draft, then submit a new draft; do not execute the rejected operations.'
+      : ' Re-author the draft more narrowly/precisely; do not merely repeat it unchanged.'
+    return `[HARNESS][JEV_SCOPE_REVIEW] This draft was NOT committed and none of its operations were admitted. Verdict: ${review?.verdict ?? 'refine'}. Reasons: ${reasons}.${problems}${boundary}${prefix}${grounding} The Main LLM remains the plan author; Jev criticism is not a replacement plan.`
+  }
+
+  async handleScopeReviewRefusal(plan, before, stateResult, review) {
+    this.scopeRefinementAttempts = (this.scopeRefinementAttempts ?? 0) + 1
+    await this.traceEvent('planning.scope_refinement_required', {
+      verdict: review?.verdict,
+      reason_codes: review?.reason_codes,
+      actionable_prefix: review?.actionable_prefix,
+      attempt: this.scopeRefinementAttempts,
+      retry_budget: JEV_SCOPE_REFINEMENT_BUDGET,
+    })
+
+    const mustAskUser = review?.verdict === 'needs_user_clarification'
+      || this.scopeRefinementAttempts > JEV_SCOPE_REFINEMENT_BUDGET
+    if (mustAskUser) {
+      this.active = false
+      const reason = review?.verdict === 'needs_user_clarification'
+        ? 'Jev found genuine ambiguity that needs your direction before a safe bounded plan can be committed.'
+        : `The draft still did not converge after ${JEV_SCOPE_REFINEMENT_BUDGET} bounded refinement passes.`
+      await this.traceEvent('operations.skipped', {
+        reason: review?.verdict === 'needs_user_clarification' ? 'jev_needs_user_clarification' : 'jev_refinement_budget_exhausted',
+        review,
+      })
+      await this.traceEvent('request.completed', {
+        chat_message: reason,
+        outcome: 'awaiting_user_clarification',
+        task_board: visibleTaskBoard(stateResult?.state?.task_board),
+        usage: this.traceRequest?.usage,
+      })
+      this.traceRequest = null
+      return {
+        chatMessage: `[Plan needs clarification] ${reason} Jev reasons: ${(review?.reason_codes ?? []).join(', ') || 'scope_not_actionable'}.`,
+        plan: stateResult?.state?.plan ?? plan.plan,
+        currentStep: stateResult?.state?.current_step ?? plan.currentStep,
+        operations: [],
+        epoch: before.epoch,
+        actorId: before.actor_id,
+        goalId: stateResult?.state?.goal_id,
+        goalStatus: stateResult?.state?.status,
+        taskBoard: visibleTaskBoard(stateResult?.state?.task_board),
+        blocker: {
+          class: review?.verdict === 'needs_user_clarification' ? 'jev_needs_user_clarification' : 'jev_refinement_budget_exhausted',
+          reason,
+          reason_codes: review?.reason_codes ?? [],
+        },
+      }
+    }
+
+    this.scopeRefinementPending = true
+    this.messages.push({ role: 'user', content: this.scopeReviewCorrectionMessage(review) })
+    return this.runTurn()
+  }
+
   async preflightOperations(operations) {
     const results = []
     const memoryKey = this.requestInfo?.memoryKey
@@ -5517,7 +5588,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         exactTargetAudit,
         verifiedCompletion: finalCompletionVerified,
         completionEvidence,
+        scopeRefinement: this.scopeRefinementPending === true,
       })
+      this.scopeRefinementPending = false
       // The shelf can only be revised once the goal it belongs to has been
       // admitted, and `recordPlan` is what admits it, so this runs after it and
       // not with the rest of the plan-surface parsing.
@@ -5649,6 +5722,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           const committed = this.memory.currentPlan?.(this.requestInfo.memoryKey)
           if (committed) stateResult = { ...(stateResult ?? {}), state: committed }
           await this.persistState()
+          if (review?.verdict !== 'actionable') {
+            return this.handleScopeReviewRefusal(plan, before, stateResult, review)
+          }
         }
         await this.traceEvent('operations.preflight_ok', {
           operations: operations.map((operation, index) => ({ ...operation, preflight: preflight[index] })),
