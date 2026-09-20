@@ -201,7 +201,14 @@ async function prepare({ rcon, results, stateFile }) {
   const provider = async (messages) => {
     providerCalls++
     const expectedModes = ['vertical', 'vertical', 'horizontal', 'vertical']
-    assertPlannerMode(messages, expectedModes[providerCalls - 1], `planner call ${providerCalls}`)
+    const expectedMode = expectedModes[providerCalls - 1]
+    const durableSteering = memory.planningState(key)?.steering
+    assert.equal(
+      durableSteering?.current_mode,
+      expectedMode,
+      `planner call ${providerCalls}: durable steering mismatch before provider context; steeringCalls=${steeringCalls}; steering=${JSON.stringify(durableSteering)}`,
+    )
+    assertPlannerMode(messages, expectedMode, `planner call ${providerCalls}`)
 
     if (providerCalls === 1) {
       return planMessage({
