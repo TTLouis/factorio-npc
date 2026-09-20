@@ -12,6 +12,8 @@ export default antfu(
       // The codebase legitimately mixes Lua-facing snake_case, TypeScript
       // camelCase/CONSTANT_CASE, and external Factorio keys with hyphens.
       'ts/naming-convention': 'off',
+      // unused-imports provides the single authoritative unused check.
+      'no-unused-vars': 'off',
 
       // These are preference/ordering rules, not correctness invariants.
       'perfectionist/sort-imports': 'off',
@@ -83,8 +85,9 @@ export default antfu(
       'unused-imports/no-unused-vars': [
         'error',
         {
-          argsIgnorePattern: '^unused_',
-          destructuredArrayIgnorePattern: '^unused_',
+          argsIgnorePattern: '^_',
+          varsIgnorePattern: '^_',
+          destructuredArrayIgnorePattern: '^_',
         },
       ],
     },
