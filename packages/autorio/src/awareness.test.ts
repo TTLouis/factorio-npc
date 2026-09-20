@@ -19,7 +19,7 @@ function make_actor(kind = 'standalone_character') {
   const actor = {
     position: { x: 40, y: -1 },
     surface,
-    force: { index: 1 },
+    force: { index: 1, chart: vi.fn() },
     status_snapshot: vi.fn(() => ({
       kind,
       valid: true,
@@ -52,6 +52,10 @@ describe('standalone NPC awareness radar', () => {
     expect(radar.operable).toBe(false)
     expect(surface.request_to_generate_chunks).toHaveBeenCalledWith(actor.position, 1)
     expect(surface.force_generate_chunk_requests).toHaveBeenCalledTimes(1)
+    expect((actor.force as any).chart).toHaveBeenCalledWith(surface, {
+      left_top: { x: 0, y: -64 },
+      right_bottom: { x: 96, y: 32 },
+    })
   })
 
   it('does not teleport or regenerate while AIRI remains in the same chunk', () => {
@@ -80,6 +84,11 @@ describe('standalone NPC awareness radar', () => {
     expect(radar.teleport).toHaveBeenLastCalledWith(actor.position)
     expect(surface.request_to_generate_chunks).toHaveBeenCalledTimes(2)
     expect(surface.force_generate_chunk_requests).toHaveBeenCalledTimes(2)
+    expect((actor.force as any).chart).toHaveBeenCalledTimes(2)
+    expect((actor.force as any).chart).toHaveBeenLastCalledWith(surface, {
+      left_top: { x: 32, y: -64 },
+      right_bottom: { x: 128, y: 32 },
+    })
   })
 
   it('destroys the companion instead of giving radar awareness to a connected human actor', () => {

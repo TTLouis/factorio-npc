@@ -19,6 +19,19 @@ function chunk_coordinate(value: number) {
   return math.floor(value / 32)
 }
 
+function chart_awareness_window(actor: ControlledActor, chunk_x: number, chunk_y: number) {
+  actor.force.chart(actor.surface, {
+    left_top: {
+      x: (chunk_x - RADAR_CHUNK_RADIUS) * 32,
+      y: (chunk_y - RADAR_CHUNK_RADIUS) * 32,
+    },
+    right_bottom: {
+      x: (chunk_x + RADAR_CHUNK_RADIUS + 1) * 32,
+      y: (chunk_y + RADAR_CHUNK_RADIUS + 1) * 32,
+    },
+  })
+}
+
 function destroy_radar() {
   const radar = storage.airi_awareness_radar
   if (radar?.valid) radar.destroy()
@@ -83,6 +96,11 @@ export function new_awareness_controller() {
     // generation bubble.
     actor.surface.request_to_generate_chunks(actor.position, RADAR_CHUNK_RADIUS)
     actor.surface.force_generate_chunk_requests()
+    // A standalone actor has no LuaPlayer exploration bubble. Chart exactly the
+    // same 3x3 physical-awareness window after generation so a zero-player
+    // world has map data to refresh; the hidden radar supplies current
+    // visibility/fog state without expanding that window.
+    chart_awareness_window(actor, chunk_x, chunk_y)
 
     storage.airi_awareness_chunk = {
       surface_index: actor.surface.index,

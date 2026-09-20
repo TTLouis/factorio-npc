@@ -48,8 +48,8 @@ export async function prepareNativeNpcSource(sourceRoot, guardSource) {
   // stale package cannot silently omit data.lua, grow the scan window, or
   // reintroduce inherited world graphics/ground decals.
   check(dataLua.includes('airi-npc-awareness-radar'), 'NPC awareness radar prototype is missing')
-  check(dataLua.includes('max_distance_of_sector_revealed = 1'), 'NPC awareness radar sector scan must stay bounded to a 3x3 chunk window')
-  check(dataLua.includes('max_distance_of_nearby_sector_revealed = 1'), 'NPC awareness radar nearby scan must stay bounded to a 3x3 chunk window')
+  check(/^\s*radar\.max_distance_of_sector_revealed\s*=\s*0\s*$/m.test(dataLua), 'NPC awareness radar must disable long-range sector scanning')
+  check(/^\s*radar\.max_distance_of_nearby_sector_revealed\s*=\s*1\s*$/m.test(dataLua), 'NPC awareness radar nearby scan must stay bounded to a 3x3 chunk window')
   check(dataLua.includes('energy_source = {type = "void"}'), 'NPC awareness radar must not depend on the electric network')
   check(dataLua.includes('radar.pictures = nil'), 'NPC awareness radar must not render the inherited radar sprite/shadow')
   check(dataLua.includes('radar.integration_patch = nil'), 'NPC awareness radar must not render the inherited ground integration patch')

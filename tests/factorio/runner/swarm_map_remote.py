@@ -107,6 +107,22 @@ def run(client, results: Path) -> None:
 
     chunk_x = int(position['x'] // 32)
     chunk_y = int(position['y'] // 32)
+    chart_left = (chunk_x - 1) * 32
+    chart_top = (chunk_y - 1) * 32
+    chart_right = (chunk_x + 2) * 32
+    chart_bottom = (chunk_y + 2) * 32
+    chart_bootstrap_expr = (
+        '(function() local f=game.forces["player"]; local s=game.surfaces[1]; '
+        f'f.chart(s,{{{{x={chart_left},y={chart_top}}},{{x={chart_right},y={chart_bottom}}}}}); '
+        f'local c={{x={chunk_x},y={chunk_y}}}; '
+        'return {charted=f.is_chunk_charted(s,c),visible=f.is_chunk_visible(s,c)} end)()'
+    )
+    chart_bootstrap = decode_json(command(lua_json(chart_bootstrap_expr)), 'bounded actor-awareness chart bootstrap')
+    assert_true(
+        chart_bootstrap.get('charted') is True,
+        f'bounded actor-awareness chart bootstrap did not chart the actor chunk: {chart_bootstrap!r}',
+    )
+
     chart_state_expr = (
         '(function() local f=game.forces["player"]; local s=game.surfaces[1]; '
         f'local r=s.find_entity("airi-npc-awareness-radar",{{x={radar_x},y={radar_y}}}); '
@@ -124,7 +140,7 @@ def run(client, results: Path) -> None:
         time.sleep(0.1)
     assert_true(
         chart_state is not None and chart_state.get('charted') is True and chart_state.get('visible') is True,
-        f'powered radar did not make actor chunk charted+visible within 12s: {chart_state!r}; radar={radar!r}',
+        f'hidden awareness radar did not keep the charted actor chunk visible within 12s: {chart_state!r}; radar={radar!r}',
     )
 
     query = call(
@@ -199,6 +215,7 @@ def run(client, results: Path) -> None:
         'after_physical_actor_id': after_physical,
         'prechart_code': prechart_query.get('code'),
         'radar': radar,
+        'chart_bootstrap': chart_bootstrap,
         'chart_state': chart_state,
         'query_returned_count': query.get('returned_count'),
         'rebound_query_returned_count': rebound_query.get('returned_count'),
