@@ -10,6 +10,7 @@ import {
   reasoningEpochOf,
   restorePlanningState,
   serializePlanningState,
+  STEERING_BOUNDARY,
 } from './planning-state.mjs'
 
 const STRICT_TASKS_BY_OPERATION = new Map([
@@ -309,13 +310,74 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return after
   }
 
+  /**
+   * Record the advisory steering mode at a planning boundary (roadmap 4.3).
+   *
+   * The HARNESS emits this, deterministically, at every boundary it reaches --
+   * not the Main LLM and not Jev. Two reasons, both structural:
+   *
+   *   - "the model is never the steering authority" is only true if the model
+   *     is not the thing deciding when steering happens;
+   *   - a model-emitted event stops arriving the moment the model forgets,
+   *     and steering that silently stops running looks exactly like steering
+   *     that decided to hold.
+   *
+   * A Jev recommendation, when there is one, rides along as PROVENANCE in
+   * `recommended_by` / `recommended_mode` / `pressure`. The reducer decides
+   * what the mode actually becomes, and refuses outright if anything is still
+   * in flight.
+   *
+   * `user_revision_approved` and `user_priority_change` are deliberately NOT
+   * emitted here: the reducer requires user authority for those, and the
+   * harness does not have it.
+   */
+  evaluateSteeringAtBoundary(key, { boundary, now = Date.now(), planId, recommendation } = {}) {
+    if (!key) return undefined
+    if (boundary !== STEERING_BOUNDARY.GOAL_ADMISSION && boundary !== STEERING_BOUNDARY.PLAN_COMPLETED) return undefined
+    const advice = recommendation ?? this.steeringAdviceByNpc?.get(key)
+    return this.dispatchPlanningEvent(key, {
+      type: PLANNING_EVENT.STEERING_EVALUATED,
+      source: 'runtime',
+      now,
+      boundary,
+      ...(planId ? { plan_id: planId } : {}),
+      ...(advice
+        ? {
+            recommended_mode: advice.recommended_mode ?? advice.mode,
+            confidence: advice.confidence,
+            pressure: advice.pressure,
+            reason_codes: advice.reason_codes,
+            critical_path: advice.critical_path_summary ?? advice.critical_path,
+            candidate_shelf_nodes: advice.candidate_shelf_nodes,
+            recommended_by: advice.recommended_by ?? 'jev',
+          }
+        : {}),
+    })
+  }
+
+  /**
+   * Stash Jev's latest steering advice so the next boundary can carry it.
+   *
+   * Stored, never applied: advice that never reaches a boundary never becomes
+   * a mode, and it is consumed once so a stale recommendation cannot steer a
+   * second boundary it was not written for.
+   */
+  recordSteeringAdvice(key, recommendation) {
+    if (!key) return
+    this.steeringAdviceByNpc ??= new Map()
+    if (recommendation) this.steeringAdviceByNpc.set(key, recommendation)
+    else this.steeringAdviceByNpc.delete(key)
+  }
+
   ensurePlanningDraft(key, state, { now = Date.now(), migrated = false } = {}) {
     if (!key || !state) return undefined
     let planning = this.planningByNpc.get(key)
     const existingPlan = getActivePlan(planning)
     const terminalReusableSlot = existingPlan
       && [PLAN_STATUS.COMPLETED, PLAN_STATUS.CANCELLED, PLAN_STATUS.SUPERSEDED].includes(existingPlan.status)
+    let goalAdmitted = false
     if (!planning?.goal || planning.goal.goal_id !== state.goal_id || terminalReusableSlot) {
+      goalAdmitted = true
       planning = applyPlanningEvent(planning ?? createEmptyPlanningState(), {
         type: PLANNING_EVENT.GOAL_ACCEPTED,
         now,
@@ -336,6 +398,10 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       })
     }
     this.planningByNpc.set(key, planning)
+    // Only on actual admission: the gate would happily accept a repeat while
+    // nothing is committed, and re-evaluating the same boundary on every draft
+    // would inflate the steering sequence without a boundary having occurred.
+    if (goalAdmitted) planning = this.evaluateSteeringAtBoundary(key, { boundary: STEERING_BOUNDARY.GOAL_ADMISSION, now }) ?? planning
     this.syncPlanningState(key, state)
     return planning
   }
@@ -585,6 +651,22 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
             plan_id: plan.plan_id,
             verified_results: evidence.map(item => item?.summary).filter(Boolean),
           })
+          // A completed plan is the boundary the roadmap cares about most: the
+          // slice is immutable and done, nothing is in flight, and the next
+          // draft has not been authored yet.
+          this.planningByNpc.set(key, planning)
+          const steeringBefore = planning.steering?.sequence ?? 0
+          planning = this.evaluateSteeringAtBoundary(key, {
+            boundary: STEERING_BOUNDARY.PLAN_COMPLETED,
+            now,
+            planId: plan.plan_id,
+          }) ?? planning
+          // Advice is written for one boundary and consumed by it -- but only
+          // if the reducer actually accepted that boundary. The legacy board
+          // can report `completed` before the reducer's last step lands, and
+          // discarding the advice on a refused evaluation would silently drop
+          // it before the real boundary arrived.
+          if ((planning.steering?.sequence ?? 0) > steeringBefore) this.recordSteeringAdvice(key, null)
         }
       }
     }

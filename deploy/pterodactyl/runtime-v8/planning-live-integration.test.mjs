@@ -263,3 +263,88 @@ test('real state-file restart preserves BLOCKED, successor lineage, and reasonin
   assert.equal(restartedAgain.memory.planningReasoningEpoch(key), successorEpoch)
 })
 
+
+test('the harness evaluates steering at goal admission, without the model asking', () => {
+  const key = 'npc:airi'
+  const memory = new CanonicalTaskBoardMemory()
+  startCommittedPlan(memory, key)
+
+  const steering = memory.planningState(key).steering
+  assert.ok(steering, 'admitting a goal is a boundary; steering runs whether or not anyone requested it')
+  assert.equal(steering.boundary, 'goal_admission')
+  assert.equal(steering.authority, 'runtime', 'the harness is the authority, never the model')
+  assert.equal(steering.sequence, 1)
+
+  // Drafting again is not a boundary: the sequence must not inflate.
+  memory.ensurePlanningDraft(key, memory.currentPlan(key), { now: 150 })
+  assert.equal(memory.planningState(key).steering.sequence, 1)
+})
+
+test('the harness evaluates steering when a plan completes, carrying jev advice as provenance only', () => {
+  const key = 'npc:airi'
+  const memory = new CanonicalTaskBoardMemory()
+  startCommittedPlan(memory, key)
+
+  // Jev advises; the advice is stored, never applied on its own.
+  memory.recordSteeringAdvice(key, {
+    recommended_mode: 'horizontal',
+    confidence: 0.9,
+    pressure: { horizontal: ['power_margin_low', 'a hunch about belts'] },
+    reason_codes: ['frontier_reached'],
+    recommended_by: 'jev',
+  })
+  assert.equal(
+    memory.planningState(key).steering.recommendation.recommended_mode,
+    null,
+    'advice alone changes nothing',
+  )
+
+  // Drive the REAL completion path: outcome authority, one step at a time,
+  // exactly as the running loop does. Nothing here asks for steering.
+  const planId = getActivePlan(memory.planningState(key)).plan_id
+  const stepCount = getActivePlan(memory.planningState(key)).steps.length
+  for (let index = 0; index < stepCount; index += 1) {
+    memory.applyOutcomeAuthority(key, {
+      kind: 'verified_complete',
+      source: 'deterministic_runtime',
+      reason_code: 'step_verified',
+      evidence: [{
+        kind: 'verified_world_state',
+        ref: `verified_step_${index}`,
+        summary: 'step outcome verified against world state',
+      }],
+    })
+  }
+
+  const planning = memory.planningState(key)
+  const completed = planning.plans.find(item => item.plan_id === planId)
+  assert.equal(completed.status, PLAN_STATUS.COMPLETED, 'the slice actually finished')
+
+  const steering = planning.steering
+  assert.equal(steering.boundary, 'plan_completed', 'the harness reached the boundary on its own')
+  assert.equal(steering.authority, 'runtime')
+  assert.equal(steering.last_plan_id, planId)
+  assert.equal(steering.recommendation.recommended_by, 'jev', 'advice is provenance, not authority')
+  assert.equal(steering.recommendation.recommended_mode, 'horizontal')
+
+  // Grounded pressure survives; the hunch does not, and says so.
+  assert.deepEqual(steering.pressure.horizontal, ['power_margin_low'])
+  assert.deepEqual(steering.dropped_pressure, ['a hunch about belts'])
+
+  // Advice is written for one boundary and is consumed by it.
+  assert.equal(memory.steeringAdviceByNpc.get(key), undefined)
+})
+
+test('a boundary the harness has no authority for is refused, not forged', () => {
+  const key = 'npc:airi'
+  const memory = new CanonicalTaskBoardMemory()
+  startCommittedPlan(memory, key)
+  const before = memory.planningState(key).steering.sequence
+
+  // The reducer requires user authority for these two, and the harness does
+  // not have it. The emitter must decline rather than claim to be the user.
+  for (const boundary of ['user_revision_approved', 'user_priority_change']) {
+    assert.equal(memory.evaluateSteeringAtBoundary(key, { boundary, now: 500 }), undefined)
+  }
+  assert.equal(memory.planningState(key).steering.sequence, before)
+})
