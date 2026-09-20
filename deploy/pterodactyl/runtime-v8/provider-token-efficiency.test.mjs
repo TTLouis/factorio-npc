@@ -92,7 +92,7 @@ test('successful operation completion uses compact context and bounded fallback 
   assert.ok(body.tools.every(tool => !tool.function?.description || tool.function.description.length <= 120))
 
   const compactMemory = body.messages[1].content
-  assert.match(compactMemory, /^\[PLAN_STATE\] Compact harness-owned/)
+  assert.match(compactMemory, /^\[PLAN_STATE\] Compact legacy compatibility state/)
   assert.match(compactMemory, /collect starter resources/)
   assert.match(compactMemory, /deterministic_verification/)
   assert.doesNotMatch(compactMemory, /old history/)

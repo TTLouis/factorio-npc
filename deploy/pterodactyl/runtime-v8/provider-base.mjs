@@ -832,7 +832,6 @@ export function compactPlanStateContent(content) {
   const text = String(content ?? '')
   const runtimeState = parsePlanStateFromContent(text)
   const planningState = parsePlanningStateFromContent(text)
-  const legacyMarkerAt = text.lastIndexOf(PLAN_STATE_MARKER)
   const runtimeMarkerAt = text.lastIndexOf(RUNTIME_COMPAT_STATE_MARKER)
 
   if (!runtimeState && !planningState) {

@@ -256,7 +256,9 @@ test('durable plan survives a new agent instance and empty actions cannot preten
   await second.loadPersistentState()
 
   const context = second.memory.planContext('npc:airi')
-  assert.match(context, /\[PLAN_STATE\]/)
+  assert.match(context, /\[RUNTIME_COMPAT_STATE\]/)
+  assert.match(context, /\[PLANNING_STATE\]/)
+  assert.doesNotMatch(context, /\[PLAN_STATE\]/)
   assert.match(context, /task_board/)
   assert.match(context, /prepare the furnace/)
   assert.match(context, /action_omission_repair/)
@@ -1013,7 +1015,8 @@ test('verified final completion is not mistaken for an action omission', async (
   assert.equal(agent.messages.length, 0)
   assert.equal(agent.baseMessages.length, 0)
   const resetContext = agent.memory.context('npc:airi')
-  assert.match(resetContext, /No active durable goal/)
+  assert.match(resetContext, /\[RUNTIME_COMPAT_STATE\] No active compatibility task/)
+  assert.doesNotMatch(resetContext, /\[PLANNING_STATE\]/)
   assert.doesNotMatch(resetContext, /place one furnace|requested furnace/i)
 })
 

@@ -386,7 +386,9 @@ test('completed durable goals are retired from the current task slot', () => {
 
   assert.equal(memory.currentPlan('npc:airi'), undefined)
   assert.equal(memory.planByNpc.has('npc:airi'), false)
-  assert.match(memory.planContext('npc:airi'), /No active durable goal/)
+  const retiredContext = memory.planContext('npc:airi')
+  assert.match(retiredContext, /\[RUNTIME_COMPAT_STATE\] No active compatibility task/)
+  assert.doesNotMatch(retiredContext, /\[PLANNING_STATE\]/)
 })
 
 test('whole-goal completion returns the final completed receipt but retires it before the next UI sync', () => {

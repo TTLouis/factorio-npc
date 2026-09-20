@@ -762,8 +762,9 @@ test('live model context exposes reducer planning state, shelf refinement candid
   assert.deepEqual(visible.plan_tracker.steps.map(step => step.description), ['Establish smelting', 'Automate plates'])
 
   const combined = memory.planContext(key)
-  assert.match(combined, /\[PLAN_STATE\]/)
+  assert.match(combined, /\[RUNTIME_COMPAT_STATE\]/)
   assert.match(combined, /\[PLANNING_STATE\]/)
+  assert.doesNotMatch(combined, /\[PLAN_STATE\]/)
 })
 
 
