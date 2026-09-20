@@ -1,5 +1,5 @@
 import { NpcDialogueMemory } from './npc-agent-loop.mjs'
-import { reconcileTaskBoard, setTaskBoardStatus } from './common.mjs'
+import { createTaskBoard, reconcileTaskBoard, setTaskBoardStatus } from './common.mjs'
 import { completionContractSupported, provePermanentlyUnsatisfiable, sanitizeStepCompletionContract } from './step-completion.mjs'
 import {
   applyPlanningEvent,
@@ -1363,7 +1363,25 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
           previousState: truthState,
           allowReplan: options.allowReplan,
         })
-    const result = super.reconcileTaskBoard(key, previousBoard, guarded, stateResult, {
+    // A completed slice needs a FRESH board, not a replan of the old one.
+    //
+    // `allowReplan` routes into `replanTaskBoardRemaining`, which is exactly
+    // what its name says: it preserves `steps.slice(0, completed_count)` and
+    // appends the incoming remainder. That is right when a slice is still in
+    // progress, and wrong at a completed-slice boundary -- a board whose only
+    // step had completed kept that step and gained the next slice's, so the
+    // new board showed both slices at once.
+    //
+    // The completed steps belong to the finished immutable plan, which still
+    // holds them. The next slice starts clean.
+    const boardForReconcile = completedSliceDraftApproved
+      ? createTaskBoard(
+          Array.isArray(guarded?.plan) ? guarded.plan : [],
+          guarded?.currentStep ?? 0,
+          { goalId: truthState?.goal_id ?? '', now: truthState?.updated_at ?? Date.now() },
+        )
+      : previousBoard
+    const result = super.reconcileTaskBoard(key, boardForReconcile, guarded, stateResult, {
       ...options,
       allowReplan: semanticReplacementApproved ? true : options.allowReplan,
     })
