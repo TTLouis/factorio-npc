@@ -48,7 +48,7 @@ function operationStatusCommand() {
 }
 
 function actorIronCommand() {
-  return '/silent-command local a=remote.call("autorio_actor","get"); rcon.print(helpers.table_to_json({iron=a and a.valid and a.get_item_count("iron-ore") or 0}))'
+  return '/silent-command local request={kind="inventory_count",item_name="iron-ore",minimum=1}; local result=remote.call("autorio_tools","evaluate_condition",request); rcon.print(helpers.table_to_json({iron=result and result.current or 0,ok=result and result.ok or false}))'
 }
 
 async function waitForIdle(rcon, timeoutMs = 15000) {
