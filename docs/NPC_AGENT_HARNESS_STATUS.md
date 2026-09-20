@@ -81,6 +81,7 @@ These remain roadmap work and should continue to be validated incrementally rath
 
 - Current roadmap: `docs/NPC_AGENT_HARNESS_PLAN.md`
 - Planning architecture: `docs/NPC_PLANNING_ROADMAP.md` — canonical Goal / LOD Shelf / immutable Active Plan / Jev pre-commit review direction.
+- Production validation: `docs/NPC_PRODUCTION_VALIDATION_ROADMAP.md` — canonical production E2E ladder, historical canary, powered-assembler frontier, fluid known-red track, and promotion evidence.
 - Stable actor architecture: `docs/NPC_CHARACTER_ARCHITECTURE.md`
 - Current Pterodactyl operation/deployment: `deploy/pterodactyl/README.md`
 - Detailed single-NPC reliability history: `docs/NPC_RELIABILITY_WORK.md`

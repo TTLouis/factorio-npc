@@ -12,6 +12,26 @@ Primary working branch: `feat/npc-transition-work`
 
 Repository history note: this project was previously under `TTLouis/airi-factorio`; the repository was renamed/detached to `factorio-npc`. Do not assume the old repo URL is authoritative.
 
+
+
+## Production E2E validation authority
+
+Production planning machinery and real gameplay capability are intentionally tracked separately.
+
+Use:
+
+- `docs/NPC_PRODUCTION_VALIDATION_ROADMAP.md`
+
+for the canonical production capability ladder, current historical baseline, powered-assembler frontier, fluid validation track, E2E fixtures, semantic acceptance states, and evidence requirements.
+
+Important current direction:
+
+- the historically successful burner mining drill -> stone furnace case is a **canary**, not the next milestone;
+- the immediate new capability frontier is a powered chest -> inserter -> assembler -> inserter -> chest production cell;
+- validate each scenario first as a deterministic exact-layout fixture, then guided AI arrangement, then autonomous AI planning;
+- fluid systems remain a separate known-red validation track;
+- code-level solver/topology/geometry coverage must not be reported as a real production E2E pass.
+
 ## Governing design principle
 
 The goal is not to turn the NPC into a giant deterministic factory bot.

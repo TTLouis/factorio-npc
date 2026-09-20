@@ -49,6 +49,24 @@ A promotion checkpoint must preserve these baseline properties:
 - ordinary CI is green on the candidate;
 - package smoke and real Factorio integration pass for the frozen promotion candidate.
 
+
+
+## Production capability validation authority
+
+Use `docs/NPC_PRODUCTION_VALIDATION_ROADMAP.md` for real production-building promotion gates.
+
+Near-term priority is not additional factory-planning sophistication. The next unproven frontier is a **powered assembler production cell** whose input movement, recipe execution, and output movement are observed in real Factorio.
+
+The production ladder separates:
+
+```text
+A1 deterministic exact-layout harness proof
+-> A2 guided AI arrangement
+-> A3 autonomous AI production planning
+```
+
+The historical burner-drill -> furnace success is retained as a regression canary. Fluid construction/operation remains a separate known-red validation track and must restart from a minimal source -> pipe -> storage scenario before oil/refinery complexity.
+
 ## Validation ladder
 
 Use the cheapest deterministic layer that can actually prove the behavior:

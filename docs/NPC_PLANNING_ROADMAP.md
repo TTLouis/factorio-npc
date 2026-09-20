@@ -878,6 +878,25 @@ This roadmap does not mean:
 
 The goal is the opposite: preserve long-horizon direction at low detail, resolve only what is currently useful, and make the committed executable contract small enough to remain stable.
 
+
+
+## Later factory-performance frontiers
+
+The planning shelf must not assume that "launch a rocket" is always the terminal node.
+
+Once ordinary production construction, item transport, fluids, and sustained-rate verification are proven, later goals may use open-ended capability frontiers such as sustained science per minute (SPM), logistics/power headroom, resource expansion, resilience, and throughput scaling.
+
+Treat these as later maturity work documented in `docs/NPC_PRODUCTION_VALIDATION_ROADMAP.md`. They must not displace the current micro-production validation priority.
+
+For continuous factory goals, distinguish:
+
+```text
+plan slice completed
+!= capability frontier reached
+!= user goal satisfied
+!= project ended
+```
+
 ## 15. Summary
 
 The planning system should converge on five simple ownership rules:

@@ -31,6 +31,8 @@ The intended actor is a real standalone Factorio `character` controlled through 
 - Do not pass unvalidated throughput assumptions to the model. Inserter, belt-lane, stacking, recipe, and transport constraints should be measured or derived deterministically before becoming planning facts.
 - Keep real provider credentials out of repository tests and CI.
 - Pterodactyl package smoke/release gates are separate from ordinary CI and should be used for promotion checkpoints.
+- Production gameplay capability is promoted by real Factorio evidence, not by code presence alone. Follow `docs/NPC_PRODUCTION_VALIDATION_ROADMAP.md`: exact-layout harness proof before guided/autonomous provider trials, semantic output verification instead of placement-only success, and a separate fluid validation track.
+- Preserve the historical burner-drill -> furnace path as a production canary. The current unproven frontier is powered assembler/inserter production; fluid systems remain known-red until revalidated from a minimal live network.
 
 ## Branch and promotion policy
 
@@ -63,6 +65,7 @@ Secrets such as `OPENAI_API_KEY` and Factorio credentials must not be committed 
 - `docs/NPC_CHARACTER_ARCHITECTURE.md`: stable actor/body design decisions.
 - `docs/NPC_AGENT_HARNESS_PLAN.md`: current single-NPC roadmap and promotion gates.
 - `docs/NPC_PLANNING_ROADMAP.md`: canonical planning semantics and implementation roadmap; Goal / LOD Shelf / immutable Active Plan / Jev review authority.
+- `docs/NPC_PRODUCTION_VALIDATION_ROADMAP.md`: canonical production-building E2E ladder, fixture/evidence requirements, powered-item frontier, fluid validation track, and later sustained-throughput maturity path.
 - `docs/NPC_AGENT_HARNESS_STATUS.md`: current verified status and known limits.
 - `docs/validation/`: historical checkpoints, transcripts, superseded staging plans, and release-candidate evidence.
 - `deploy/pterodactyl/README.md`: current Pterodactyl operational contract.
