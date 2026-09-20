@@ -724,3 +724,44 @@ test('planner focus reaches the reducer and still cannot advance or complete a s
   assert.equal(tracker.verified_completed_step_ids.length, 0, 'planner focus must not complete a step')
   assert.notEqual(after.status, PLAN_STATUS.COMPLETED)
 })
+
+
+test('live model context exposes reducer planning state, shelf refinement candidates, and tracker', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const key = 'npc:airi'
+  const request = { sender: 'Louis', text: 'Build an expandable early factory' }
+  const plan = proposedPlan(['Establish smelting', 'Automate plates'])
+  memory.recordPlan(key, request, plan)
+  memory.reviseRoadmap(key, [
+    {
+      id: 'smelting-foundation',
+      intent: 'A working smelting foundation exists.',
+      why_it_matters: 'It unlocks the first production slice.',
+      operations: [{ name: 'forbidden-on-shelf', args: {} }],
+      steps: ['also forbidden on shelf'],
+    },
+    {
+      id: 'plate-automation',
+      intent: 'Plate production is automated.',
+      why_it_matters: 'It reduces manual bootstrap work.',
+      depends_on: ['smelting-foundation'],
+    },
+  ], { now: 120, reason: 'initial_goal_decomposition' })
+
+  const planningContext = memory.planningContext(key)
+  assert.match(planningContext, /^\[PLANNING_STATE\]/)
+  const visible = JSON.parse(planningContext.slice(planningContext.indexOf('\n') + 1))
+  assert.equal(visible.goal.objective, 'Build an expandable early factory')
+  assert.equal(visible.roadmap.nodes[0].id, 'smelting-foundation')
+  assert.equal('operations' in visible.roadmap.nodes[0], false)
+  assert.equal('steps' in visible.roadmap.nodes[0], false)
+  assert.equal(visible.steering.kind, 'steering_context')
+  assert.equal(visible.steering.execution_authority, false)
+  assert.equal(visible.steering.refinement_candidates[0].node.id, 'smelting-foundation')
+  assert.equal(visible.plan_tracker.kind, 'plan_tracker_view')
+  assert.deepEqual(visible.plan_tracker.steps.map(step => step.description), ['Establish smelting', 'Automate plates'])
+
+  const combined = memory.planContext(key)
+  assert.match(combined, /\[PLAN_STATE\]/)
+  assert.match(combined, /\[PLANNING_STATE\]/)
+})

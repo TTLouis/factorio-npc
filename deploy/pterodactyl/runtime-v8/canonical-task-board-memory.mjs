@@ -8,10 +8,12 @@ import {
   getActivePlan,
   PLAN_STATUS,
   PLANNING_EVENT,
+  planTrackerView,
   reasoningEpochOf,
   restorePlanningState,
   serializePlanningState,
   STEERING_BOUNDARY,
+  steeringContextForDraft,
 } from './planning-state.mjs'
 
 // Outcome kinds that represent an ATTEMPT on the active step. `verified_complete`
@@ -779,12 +781,36 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return reasoningEpochOf(this.planningByNpc.get(key))
   }
 
+  planningContext(key) {
+    const planning = this.planningState(key)
+    if (!planning?.goal) return ''
+    const roadmap = planning.roadmap
+      ? {
+          roadmap_revision_id: planning.roadmap.roadmap_revision_id,
+          goal_id: planning.roadmap.goal_id,
+          revision_index: planning.roadmap.revision_index,
+          derived_from_revision_id: planning.roadmap.derived_from_revision_id,
+          reason: planning.roadmap.reason,
+          authority: planning.roadmap.authority,
+          evidence_refs: [...(planning.roadmap.evidence_refs ?? [])],
+          nodes: (planning.roadmap.nodes ?? []).map(node => ({ ...node })),
+        }
+      : null
+    const visible = {
+      goal: { ...planning.goal },
+      roadmap,
+      steering: steeringContextForDraft(planning),
+      plan_tracker: planTrackerView(planning),
+    }
+    return `[PLANNING_STATE] Reducer-owned planning context. Goal is user-owned; Roadmap Shelf nodes are non-executable intent/lineage; steering is advisory; Plan Tracker is read-only authoritative progress.\n${JSON.stringify(visible)}`
+  }
+
   planContext(key) {
     const state = this.retireCompletedPlan(key)
     if (!state) {
       return '[PLAN_STATE] No active durable goal. Completed goals are retired from the current task slot and remain only in bounded dialogue history. Do not resume or steer a completed goal merely because the human says continue; a new actionable instruction must start a new goal.'
     }
-    return super.planContext(key)
+    return [super.planContext(key), this.planningContext(key)].filter(Boolean).join('\n')
   }
 
   currentPlan(key) {
