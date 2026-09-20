@@ -1,4 +1,5 @@
 import { NpcDialogueMemory } from './npc-agent-loop.mjs'
+import { reconcileTaskBoard, setTaskBoardStatus } from './common.mjs'
 import { completionContractSupported, sanitizeStepCompletionContract } from './step-completion.mjs'
 import {
   applyPlanningEvent,
@@ -218,6 +219,32 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const plan = getActivePlan(planning)
     if (!planning || !plan || !legacyState) return legacyState
     const choice = plan.blocker?.user_choice
+    const reducerSteps = Array.isArray(plan.steps) ? plan.steps.map(step => step.description) : []
+    if (reducerSteps.length > 0 && legacyState.task_board?.kind === 'task_board_lite') {
+      legacyState.task_board = reconcileTaskBoard(
+        legacyState.task_board,
+        reducerSteps,
+        plan.active_step_index,
+        { now: planning.updated_at || legacyState.updated_at || Date.now(), authoritativeAdvance: true, allowReplan: false },
+      )
+    }
+    if (plan.status === PLAN_STATUS.BLOCKED) {
+      legacyState.status = 'blocked'
+      legacyState.blocker = String(plan.blocker?.reason_code ?? legacyState.blocker ?? 'blocked').slice(0, 500)
+      legacyState.pause_reason = ''
+      legacyState.task_board = setTaskBoardStatus(legacyState.task_board, 'blocked', {
+        blocker: legacyState.blocker,
+        now: planning.updated_at || legacyState.updated_at || Date.now(),
+      })
+    }
+    else if (plan.status === PLAN_STATUS.COMPLETED) {
+      legacyState.status = 'completed'
+      legacyState.blocker = ''
+      legacyState.pause_reason = ''
+      legacyState.task_board = setTaskBoardStatus(legacyState.task_board, 'completed', {
+        now: planning.updated_at || legacyState.updated_at || Date.now(),
+      })
+    }
     legacyState.planning = {
       reasoning_epoch: reasoningEpochOf(planning),
       plan: {
@@ -296,6 +323,42 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     this.planningByNpc.set(key, planning)
     this.planningProjection(key, legacy)
     return planning
+  }
+
+  replayLegacyVerifiedPrefix(key, state, planning, { now = Date.now() } = {}) {
+    if (!state?.task_board || !planning) return planning
+    const completedCount = Number.isSafeInteger(state.task_board.completed_count)
+      ? Math.max(0, Math.min(state.task_board.completed_count, state.task_board.steps?.length ?? 0))
+      : 0
+    let next = planning
+    for (let index = 0; index < completedCount; index++) {
+      const plan = getActivePlan(next)
+      const step = plan?.steps?.[plan.active_step_index]
+      if (!step) break
+      const progress = plan.execution?.step_progress?.[step.step_id]
+      if (progress?.status === 'completed') continue
+      next = applyPlanningEvent(next, {
+        type: PLANNING_EVENT.STEP_EVIDENCE_ACCEPTED,
+        now,
+        plan_id: plan.plan_id,
+        step_id: step.step_id,
+        evidence: {
+          source: 'runtime_receipt',
+          kind: 'legacy_task_board_migration',
+          ref: `migration/${state.goal_id}/${state.task_board.steps[index]?.id ?? index + 1}`,
+          contract_satisfied: true,
+        },
+      })
+      next = applyPlanningEvent(next, {
+        type: PLANNING_EVENT.STEP_COMPLETED,
+        now,
+        source: 'runtime',
+        plan_id: plan.plan_id,
+        step_id: step.step_id,
+      })
+    }
+    this.planningByNpc.set(key, next)
+    return next
   }
 
   recordBlockedChoice(key, choice, approvedBy, { now = Date.now() } = {}) {
@@ -530,6 +593,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       if (!planning) {
         planning = this.ensurePlanningDraft(key, state, { now: state.updated_at, migrated: true })
         planning = this.commitPlanningPlan(key, { now: state.updated_at, migrated: true })
+        planning = this.replayLegacyVerifiedPrefix(key, state, planning, { now: state.updated_at })
         const plan = getActivePlan(planning)
         if (state.status === 'blocked' && plan) {
           planning = applyPlanningEvent(planning, {
