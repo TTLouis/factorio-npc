@@ -141,7 +141,7 @@ describe('map-first remote control', () => {
     ;(actor.force.recipes as any)['electronic-circuit'] = {
       name: 'electronic-circuit',
       enabled: true,
-      categories: ['crafting'],
+      category: 'crafting', additional_categories: [],
     }
     const entity = make_entity(surface)
     let recipe: { name: string } | undefined
@@ -172,7 +172,7 @@ describe('map-first remote control', () => {
     ;(actor.force.recipes as any)['electronic-circuit'] = {
       name: 'electronic-circuit',
       enabled: true,
-      categories: ['crafting'],
+      category: 'crafting', additional_categories: [],
     }
     const entity = make_entity(surface, {
       get_inventory: vi.fn(() => ({ is_empty: vi.fn(() => false) }) as any),
@@ -196,7 +196,7 @@ describe('map-first remote control', () => {
     ;(actor.force.recipes as any)['electronic-circuit'] = {
       name: 'electronic-circuit',
       enabled: true,
-      categories: ['crafting'],
+      category: 'crafting', additional_categories: [],
     }
     const entity = make_entity(surface)
     let recipe: { name: string } | undefined

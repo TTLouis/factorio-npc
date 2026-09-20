@@ -11,7 +11,8 @@ function recipe({
   enabled = true,
   hidden = false,
   energy = 0.5,
-  categories = ['crafting'],
+  category = 'crafting',
+  additional_categories = [],
   ingredients = [],
   products = [],
 }: {
@@ -19,11 +20,12 @@ function recipe({
   enabled?: boolean
   hidden?: boolean
   energy?: number
-  categories?: string[]
+  category?: string
+  additional_categories?: string[]
   ingredients?: Array<Record<string, unknown>>
   products?: Array<Record<string, unknown>>
 }) {
-  return { name, enabled, hidden, energy, categories, ingredients, products }
+  return { name, enabled, hidden, energy, category, additional_categories, ingredients, products }
 }
 
 function actorWith(recipes: Record<string, unknown>) {

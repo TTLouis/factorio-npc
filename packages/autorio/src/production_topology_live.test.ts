@@ -7,7 +7,7 @@ function actor(recipes: Record<string, unknown>) {
 }
 
 function recipe(name: string, ingredients: Array<Record<string, unknown>>, products: Array<Record<string, unknown>>) {
-  return { name, enabled: true, hidden: false, energy: 1, categories: ['crafting'], ingredients, products }
+  return { name, enabled: true, hidden: false, energy: 1, category: 'crafting', additional_categories: [], ingredients, products }
 }
 
 describe('production topology integration', () => {

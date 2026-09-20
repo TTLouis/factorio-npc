@@ -1,5 +1,6 @@
 import type { LuaEntity, LuaSurface, UnitNumber } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
+import { crafting_categories_support_recipe } from './recipe_categories'
 
 const MAX_MAP_QUERY_RADIUS = 256
 const MAX_MAP_QUERY_RESULTS = 64
@@ -247,12 +248,7 @@ export function inspect_charted_entity(actor: ControlledActor, unit_number: numb
 }
 
 function supports_recipe_category(target: LuaEntity, recipe: any) {
-  const supported = target.prototype?.crafting_categories
-  if (!supported) return false
-  for (const category of recipe.categories ?? []) {
-    if (supported[category]) return true
-  }
-  return false
+  return crafting_categories_support_recipe(target.prototype?.crafting_categories, recipe)
 }
 
 function nonempty_inventory(target: LuaEntity, inventory: any) {

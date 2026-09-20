@@ -1,4 +1,5 @@
 import type { ControlledActor } from './actors/types'
+import { crafting_categories_support_recipe } from './recipe_categories'
 import type {
   ProductionEvidenceRef,
   ProductionMachineSelection,
@@ -109,15 +110,7 @@ function machine_selection_for(selections: LiveProductionMachineSelection[], rec
 }
 
 function machine_supports_recipe(machine: any, recipe: any) {
-  const supported = machine?.crafting_categories
-  if (!supported) return false
-  const categories: string[] = []
-  for (const category of recipe.categories ?? []) categories.push(category)
-  if (categories.length === 0) return false
-  for (const category of categories) {
-    if (supported[category] === true) return true
-  }
-  return false
+  return crafting_categories_support_recipe(machine?.crafting_categories, recipe)
 }
 
 function fixed_amount_or_placeholder(product: any) {

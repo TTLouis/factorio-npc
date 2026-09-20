@@ -20,7 +20,7 @@ function recipe({
     enabled: true,
     hidden: false,
     energy: 1,
-    categories: ['crafting'],
+    category: 'crafting', additional_categories: [],
     ingredients,
     products,
   }

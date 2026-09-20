@@ -34,7 +34,12 @@ function context(recipeOverrides: Record<string, unknown> = {}) {
   const recipe = {
     name: 'iron-gear-wheel',
     enabled: true,
-    categories: ['crafting'],
+    // Match the real LuaRecipe shape: a single `category` plus
+    // `additional_categories`. This previously mocked a `categories` array the
+    // engine never provides, so the suite passed while every live
+    // set_machine_recipe raised inside on_tick and killed the server.
+    category: 'crafting',
+    additional_categories: [],
     ...recipeOverrides,
   }
   const force = {

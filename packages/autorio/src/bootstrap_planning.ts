@@ -86,7 +86,7 @@ function sort_named<T extends { name: string }>(values: T[]) {
 function categories_for(recipe: any): string[] {
   const categories: string[] = []
   if (typeof recipe?.category === 'string') categories.push(recipe.category)
-  for (const category of recipe?.additional_categories ?? recipe?.categories ?? []) {
+  for (const category of recipe?.additional_categories ?? []) {
     if (typeof category !== 'string') continue
     let duplicate = false
     for (const existing of categories) {
