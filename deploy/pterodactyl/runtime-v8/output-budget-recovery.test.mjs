@@ -749,12 +749,7 @@ test('context-window exhaustion enters the same Jev planner-budget handoff witho
   const calls = []
   let recoveryRoutes = 0
   const agent = makeAgent({
-    test('context-window exhaustion enters the same Jev planner-budget handoff without pausing canonical work', async () => {
-  const canonical = ['Inspect the current machine state', 'Continue the build']
-  const calls = []
-  let recoveryRoutes = 0
-  const agent = makeAgent({
-    
+    interactionDecisionProvider: async (state, _questions) => {
       if (state?.contract === 'recovery_route') {
         recoveryRoutes++
         assert.equal(state.failure.class, 'provider_budget')
