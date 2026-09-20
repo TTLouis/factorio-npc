@@ -252,7 +252,10 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   ensurePlanningDraft(key, state, { now = Date.now(), migrated = false } = {}) {
     if (!key || !state) return undefined
     let planning = this.planningByNpc.get(key)
-    if (!planning?.goal) {
+    const existingPlan = getActivePlan(planning)
+    const terminalReusableSlot = existingPlan
+      && [PLAN_STATUS.COMPLETED, PLAN_STATUS.CANCELLED, PLAN_STATUS.SUPERSEDED].includes(existingPlan.status)
+    if (!planning?.goal || planning.goal.goal_id !== state.goal_id || terminalReusableSlot) {
       planning = applyPlanningEvent(planning ?? createEmptyPlanningState(), {
         type: PLANNING_EVENT.GOAL_ACCEPTED,
         now,
