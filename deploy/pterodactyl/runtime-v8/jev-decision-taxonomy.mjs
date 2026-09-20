@@ -304,6 +304,11 @@ export function decisionEnvelopeQuestions() {
   }
 }
 
+const DEPRECATED_FAMILY_CHOICES = Object.freeze({
+  granularity: ['keep', 'split', 'collapse'],
+  milestone_transition: ['advance_next', 'replan_project', 'project_complete_candidate'],
+})
+
 export function parseDecisionFamily(response, family, fallback) {
   // DEPRECATED_FAMILY_CHOICES is part of the retirement shim at the end of this
   // file. Retired families must degrade rather than throw: npc-agent-loop.mjs
@@ -499,11 +504,6 @@ export function boundarySteeringGate(steering, { runtimeHealthy = false, boundar
 // npc-agent-loop.mjs no longer consumes hierarchy telemetry. Nothing new should
 // import from here. If you are adding a caller, you are going the wrong way.
 // ---------------------------------------------------------------------------
-
-const DEPRECATED_FAMILY_CHOICES = Object.freeze({
-  granularity: ['keep', 'split', 'collapse'],
-  milestone_transition: ['advance_next', 'replan_project', 'project_complete_candidate'],
-})
 
 function parseDeprecatedFamily(response, family, fallback) {
   const choices = DEPRECATED_FAMILY_CHOICES[family]
