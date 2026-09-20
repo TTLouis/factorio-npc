@@ -1135,3 +1135,56 @@ test('verified PLAN_COMPLETED consumes its exact Jev steering recommendation bef
   assert.match(context, /"recommended_mode":"horizontal"/)
   assert.match(context, /"candidate_shelf_nodes":\["support"\]/)
 })
+
+
+test('Jev pre-commit refinement replaces the legacy Task Board before execution', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const key = 'npc:airi'
+  const request = { sender: 'Louis', text: 'Build a staged factory' }
+  const oversized = {
+    ...proposedPlan(['Establish iron acquisition and all downstream support in one oversized slice']),
+    roadmap: [
+      { id: 'frontier', intent: 'Establish the first capability.' },
+      { id: 'support', intent: 'Strengthen that capability.', depends_on: ['frontier'] },
+    ],
+    roadmapNodeIds: ['frontier'],
+    developmentMode: 'vertical',
+  }
+  const first = memory.recordPlan(key, request, oversized)
+  const firstReconciled = memory.reconcileTaskBoard(key, undefined, oversized, first, { allowReplan: false })
+  memory.commitPlanningPlan(key, {
+    now: 100,
+    review: {
+      verdict: 'refine',
+      reason_codes: ['too_broad'],
+      actionable_prefix: 0,
+      confidence: 0.95,
+      runtime_validation: { passed: true },
+    },
+  })
+
+  const refined = {
+    ...proposedPlan(['Demonstrate the first iron acquisition capability']),
+    roadmapNodeIds: ['frontier'],
+    developmentMode: 'vertical',
+  }
+  const recorded = memory.recordPlan(key, request, refined, { scopeRefinement: true })
+  assert.equal(recorded.precommitRefinementApproved, true)
+  const reconciled = memory.reconcileTaskBoard(
+    key,
+    firstReconciled.state.task_board,
+    refined,
+    recorded,
+    { allowReplan: false, previousState: firstReconciled.state },
+  )
+
+  assert.deepEqual(
+    reconciled.state.task_board.steps.map(step => step.description),
+    ['Demonstrate the first iron acquisition capability'],
+    'the legacy projection must follow the re-authored pre-commit draft',
+  )
+  assert.equal(reconciled.state.task_board.active_index, 0)
+  const reducer = getActivePlan(memory.planningState(key))
+  assert.equal(reducer.status, PLAN_STATUS.DRAFT)
+  assert.deepEqual(reducer.steps.map(step => step.description), ['Demonstrate the first iron acquisition capability'])
+})

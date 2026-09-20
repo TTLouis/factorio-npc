@@ -971,11 +971,15 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         replacePrecommit: options?.scopeRefinement === true,
       })
     }
-    if (!userRevisionApproved && !supersededPlanId) return result
+    const precommitRefinementApproved = options?.scopeRefinement === true
+      && priorReducerPlan
+      && [PLAN_STATUS.DRAFT, PLAN_STATUS.JEV_REVIEW, PLAN_STATUS.RUNTIME_VALIDATION, PLAN_STATUS.READY].includes(priorReducerPlan.status)
+    if (!userRevisionApproved && !supersededPlanId && !precommitRefinementApproved) return result
     return {
       ...result,
       ...(userRevisionApproved ? { userRevisionApproved: true } : {}),
       ...(supersededPlanId ? { supersededPlanId } : {}),
+      ...(precommitRefinementApproved ? { precommitRefinementApproved: true } : {}),
     }
   }
 
@@ -1312,9 +1316,12 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         }),
     )
     const revisionApproved = stateResult?.userRevisionApproved === true
-    // BLOCKED is frozen for ordinary continuation. The only exception is the
-    // explicit user-revision path already authorized by USER_REVISION_APPROVED.
-    const guarded = revisionApproved
+    const precommitRefinementApproved = stateResult?.precommitRefinementApproved === true
+    // BLOCKED/COMMITTED work is frozen for ordinary continuation. Jev refinement
+    // is different: it happens before commit, so replacing the rejected draft
+    // is exactly the transition the Task Board must mirror rather than shadow.
+    const semanticReplacementApproved = revisionApproved || precommitRefinementApproved
+    const guarded = semanticReplacementApproved
       ? plan
       : canonicalContinuationPlan(previousBoard, plan, {
           ...options,
@@ -1323,7 +1330,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         })
     const result = super.reconcileTaskBoard(key, previousBoard, guarded, stateResult, {
       ...options,
-      allowReplan: revisionApproved ? true : options.allowReplan,
+      allowReplan: semanticReplacementApproved ? true : options.allowReplan,
     })
     if (result?.state?.task_board && Array.isArray(result.state.task_board.steps) && durableContracts.size > 0) {
       result.state.task_board.steps = result.state.task_board.steps.map(step => {
