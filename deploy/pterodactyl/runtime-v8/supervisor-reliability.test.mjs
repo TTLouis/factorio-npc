@@ -94,6 +94,74 @@ test('Jev shadow diagnostics survive the following planner request reset and rem
   assert.match(activity?.activity?.text ?? '', /120 in/)
 })
 
+test('player tracker renders reducer planTrackerView even when legacy board is stale', () => {
+  const state = {
+    goal_id: 'legacy_goal',
+    objective: 'Build a staged factory',
+    status: 'active',
+    planning: {
+      plan: { plan_id: 'legacy_plan', plan_version: 1 },
+    },
+    task_board: {
+      kind: 'task_board_lite',
+      goal_id: 'legacy_goal',
+      status: 'active',
+      blocker: '',
+      pause_reason: '',
+      completed_count: 0,
+      total_steps: 2,
+      active_index: 0,
+      steps: [
+        { id: 'legacy_1', description: 'STALE first step', status: 'active' },
+        { id: 'legacy_2', description: 'STALE second step', status: 'pending' },
+      ],
+      evidence: [],
+    },
+  }
+  const tracker = {
+    kind: 'plan_tracker_view',
+    goal_id: 'goal_reducer',
+    plan_id: 'goal_reducer_p7',
+    plan_version: 3,
+    roadmap_node_ids: ['support-node'],
+    status: 'BLOCKED',
+    active_step_index: 1,
+    steps: [
+      { step_id: 'p7_s1', description: 'Verified reducer step', status: 'completed', completion_contract: { mode: 'all' }, reduced_confidence: false },
+      { step_id: 'p7_s2', description: 'Frozen reducer step', status: 'active', completion_contract: null, reduced_confidence: true },
+    ],
+    blocker: {
+      kind: 'structural',
+      reason_code: 'missing_dependency',
+      detail: 'Need an explicit user revision.',
+      requires_user_decision: true,
+    },
+    derived_from_plan_id: 'goal_reducer_p6',
+    superseded_by_plan_id: null,
+  }
+
+  const snapshot = taskBoardUiSnapshot(state, undefined, tracker)
+  assert.equal(snapshot.goal_id, 'goal_reducer')
+  assert.equal(snapshot.status, 'blocked')
+  assert.deepEqual(snapshot.plan, {
+    plan_id: 'goal_reducer_p7',
+    plan_version: 3,
+    roadmap_node_id: 'support-node',
+    derived_from: 'goal_reducer_p6',
+  })
+  assert.equal(snapshot.completed_count, 1)
+  assert.equal(snapshot.total_steps, 2)
+  assert.equal(snapshot.active_index, 1)
+  assert.deepEqual(snapshot.steps, [
+    { id: 'p7_s1', description: 'Verified reducer step', status: 'completed', contract_kind: 'grounded' },
+    { id: 'p7_s2', description: 'Frozen reducer step', status: 'blocked', contract_kind: 'prose', reduced_confidence: true },
+  ])
+  assert.equal(snapshot.blocker, 'missing_dependency')
+  assert.equal(snapshot.blocker_summary, 'Need an explicit user revision.')
+  assert.equal(snapshot.blocked.awaiting_choice, true)
+  assert.equal(snapshot.steps.some(step => step.description.startsWith('STALE')), false)
+})
+
 test('in-game task board snapshot is a projection of canonical durable state', () => {
   const state = {
     objective: '爬科技树',

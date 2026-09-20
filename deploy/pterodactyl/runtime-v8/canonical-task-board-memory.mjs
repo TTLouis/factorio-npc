@@ -274,6 +274,10 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return key ? this.planningByNpc.get(key) : undefined
   }
 
+  planningTrackerView(key) {
+    return planTrackerView(this.planningState(key))
+  }
+
   admitPlanningGoal(key, { owner = 'unknown', objective = '', goalId, now = Date.now() } = {}) {
     if (!key || typeof objective !== 'string' || !objective.trim()) return this.planningState(key)
     const current = this.planningState(key)

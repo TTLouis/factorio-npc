@@ -1104,8 +1104,77 @@ function uiActivityEntry(entry) {
   return rest
 }
 
-export function taskBoardUiSnapshot(state, live) {
+function trackerUiStatus(tracker, state) {
+  if (state?.status === 'paused') return 'paused'
+  if (tracker?.status === 'BLOCKED') return 'blocked'
+  if (tracker?.status === 'COMPLETED') return 'completed'
+  if (tracker?.plan_id) return 'active'
+  return undefined
+}
+
+function trackerUiBlocked(tracker) {
+  if (!tracker || tracker.status !== 'BLOCKED') return undefined
+  const blocker = tracker.blocker && typeof tracker.blocker === 'object' ? tracker.blocker : {}
+  const reason = uiText(blocker.reason_code, 500) || 'blocked'
+  const summary = uiText(blocker.detail, 500)
+  const choice = blocker.user_choice?.choice
+  const result = {
+    reason,
+    ...(summary ? { summary } : {}),
+    awaiting_choice: blocker.requires_user_decision === true && !choice,
+    ...(choice ? { choice } : {}),
+  }
+  if (blocker.kind === 'deadlock' && Array.isArray(blocker.signals) && blocker.signals.length > 0) {
+    const first = blocker.signals[0]
+    if (['evidence_stall', 'repeated_failure', 'unsatisfiable_contract'].includes(first?.kind)) {
+      result.deadlock = {
+        signal: first.kind,
+        count: blocker.signals.filter(signal => signal?.kind === first.kind).length,
+        ...(uiText(first?.detail, 200) ? { detail: uiText(first.detail, 200) } : {}),
+      }
+    }
+  }
+  return result
+}
+
+function trackerUiPlan(tracker) {
+  if (!tracker?.plan_id) return undefined
+  return {
+    plan_id: String(tracker.plan_id).slice(0, 100),
+    plan_version: Number.isSafeInteger(tracker.plan_version) && tracker.plan_version > 0 ? tracker.plan_version : 1,
+    ...(Array.isArray(tracker.roadmap_node_ids) && tracker.roadmap_node_ids[0]
+      ? { roadmap_node_id: String(tracker.roadmap_node_ids[0]).slice(0, 100) }
+      : {}),
+    ...(tracker.derived_from_plan_id ? { derived_from: String(tracker.derived_from_plan_id).slice(0, 100) } : {}),
+    ...(tracker.superseded_by_plan_id ? { superseded_by: String(tracker.superseded_by_plan_id).slice(0, 100) } : {}),
+  }
+}
+
+function trackerUiSteps(tracker, state) {
+  if (!tracker?.plan_id || !Array.isArray(tracker.steps)) return undefined
+  const paused = state?.status === 'paused'
+  const blocked = tracker.status === 'BLOCKED'
+  return tracker.steps.slice(0, 30).map((step, index) => {
+    let status = step?.status === 'completed' ? 'completed' : step?.status === 'active' ? 'active' : 'pending'
+    if (index === tracker.active_step_index && status === 'active') {
+      if (blocked) status = 'blocked'
+      else if (paused) status = 'paused'
+    }
+    return {
+      id: String(step?.step_id ?? '').slice(0, 80),
+      description: String(step?.description ?? '').slice(0, 500),
+      status,
+      contract_kind: step?.completion_contract ? 'grounded' : 'prose',
+      ...(step?.reduced_confidence === true ? { reduced_confidence: true } : {}),
+    }
+  })
+}
+
+export function taskBoardUiSnapshot(state, live, tracker) {
   const board = state?.task_board
+  const trackerSteps = trackerUiSteps(tracker, state)
+  const trackerStatus = trackerUiStatus(tracker, state)
+  const trackerBlocked = trackerUiBlocked(tracker)
   const agent = {
     phase: UI_AGENT_PHASES.has(live?.phase) ? live.phase : 'idle',
     detail: uiText(live?.detail, 300),
@@ -1114,7 +1183,7 @@ export function taskBoardUiSnapshot(state, live) {
   const liveActivity = Array.isArray(live?.activity) ? live.activity : []
   const liveConversation = Array.isArray(live?.conversation) ? live.conversation.slice(-UI_CONVERSATION_LIMIT) : []
   const conversationId = uiText(live?.conversation_id, 120)
-  if (!board || board.kind !== 'task_board_lite' || !Array.isArray(board.steps)) {
+  if ((!board || board.kind !== 'task_board_lite' || !Array.isArray(board.steps)) && trackerSteps === undefined) {
     if (!live || (agent.phase === 'idle' && liveActivity.length === 0 && liveConversation.length === 0)) return undefined
     return {
       goal_id: '',
@@ -1137,26 +1206,37 @@ export function taskBoardUiSnapshot(state, live) {
       debug,
     }
   }
-  const blocker = formatTaskCondition(board.blocker, 'blocker')
-  const pauseReason = formatTaskCondition(board.pause_reason, 'pause')
+  const blocker = formatTaskCondition(board?.blocker, 'blocker')
+  const pauseReason = formatTaskCondition(board?.pause_reason, 'pause')
+  const steps = trackerSteps ?? board.steps.slice(0, 30).map(step => ({
+    id: String(step?.id ?? '').slice(0, 80),
+    description: String(step?.description ?? '').slice(0, 500),
+    status: step?.status,
+  }))
+  const completedCount = trackerSteps
+    ? trackerSteps.filter(step => step.status === 'completed').length
+    : board.completed_count
+  const activeIndex = trackerSteps
+    ? Math.max(0, Math.min(Number.isSafeInteger(tracker?.active_step_index) ? tracker.active_step_index : 0, Math.max(0, trackerSteps.length - 1)))
+    : board.active_index
+  const topStatus = trackerStatus ?? board.status
+  const topBlocked = trackerBlocked ?? state?.planning?.blocked
+  const blockerRaw = trackerBlocked?.reason ?? blocker.raw
+  const blockerSummary = trackerBlocked?.summary ?? blocker.summary
   return {
-    goal_id: String(board.goal_id ?? state.goal_id ?? '').slice(0, 100),
-    objective: String(state.objective ?? '').slice(0, 500),
-    plan: state?.planning?.plan,
-    blocked: state?.planning?.blocked,
-    status: board.status,
-    blocker: blocker.raw,
-    blocker_summary: blocker.summary,
+    goal_id: String(tracker?.goal_id ?? board?.goal_id ?? state?.goal_id ?? '').slice(0, 100),
+    objective: String(state?.objective ?? live?.objective ?? '').slice(0, 500),
+    plan: trackerUiPlan(tracker) ?? state?.planning?.plan,
+    blocked: topBlocked,
+    status: topStatus,
+    blocker: blockerRaw,
+    blocker_summary: blockerSummary,
     pause_reason: pauseReason.raw,
     pause_summary: pauseReason.summary,
-    completed_count: board.completed_count,
-    total_steps: board.total_steps,
-    active_index: board.active_index,
-    steps: board.steps.slice(0, 30).map(step => ({
-      id: String(step?.id ?? '').slice(0, 80),
-      description: String(step?.description ?? '').slice(0, 500),
-      status: step?.status,
-    })),
+    completed_count: completedCount,
+    total_steps: steps.length,
+    active_index: activeIndex,
+    steps,
     activity: [...deriveActivity(state), ...liveActivity.filter(entry => !entry.covered_by_receipt)].slice(-UI_ACTIVITY_LIMIT).map(uiActivityEntry),
     wanted_items: deriveWantedItems(state),
     conversation_id: conversationId,
@@ -1785,6 +1865,12 @@ export class Session {
     return this.agent.memory.currentPlan(key)
   }
 
+  currentPlanTrackerView() {
+    if (!this.agent?.memory?.planningTrackerView) return undefined
+    const key = typeof this.agent.activePlanKey === 'function' ? this.agent.activePlanKey() : `npc:${this.npcId}`
+    return this.agent.memory.planningTrackerView(key)
+  }
+
   async recoverInterruptedPlan(reason, details = {}) {
     if (!this.agent || !shouldRecoverInterruptedPlan(this.currentPlanState())) return null
     this.log(`Recovering interrupted AIRI plan after ${reason}; mutable world state will be re-observed before resuming`)
@@ -1850,7 +1936,7 @@ export class Session {
       await this.restoreTaskBoardUiConversation(state)
     }
     this.ensureUiConversationForState(state)
-    const snapshot = taskBoardUiSnapshot(state, this.liveAgentStatus())
+    const snapshot = taskBoardUiSnapshot(state, this.liveAgentStatus(), this.currentPlanTrackerView())
     if (!snapshot) return this.clearTaskBoardUi()
     const json = taskBoardUiJson(snapshot)
     if (json === undefined) {
