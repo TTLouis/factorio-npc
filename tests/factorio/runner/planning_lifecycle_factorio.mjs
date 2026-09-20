@@ -472,9 +472,22 @@ async function verify({ rcon, results, stateFile }) {
     },
   })
 
+  const persistedSnapshot = JSON.parse(await fsp.readFile(stateFile, 'utf8'))
+  const persistedPlanning = (persistedSnapshot.planning_states ?? []).find(item => item?.key === key)?.state
+  assert.equal(
+    persistedPlanning?.active_plan_id,
+    before.active_v3,
+    `persisted lifecycle snapshot drifted before restore; expected=${before.active_v3}; active=${persistedPlanning?.active_plan_id}; plans=${JSON.stringify((persistedPlanning?.plans ?? []).map(plan => ({ id: plan.plan_id, status: plan.status })))}`,
+  )
+
   await agent.loadPersistentState()
   let planning = memory.planningState(key)
   const active = getActivePlan(planning)
+  assert.equal(
+    active?.plan_id,
+    persistedPlanning?.active_plan_id,
+    `restore changed authoritative active plan identity; persisted=${persistedPlanning?.active_plan_id}; restored=${active?.plan_id}; persistedPlans=${JSON.stringify((persistedPlanning?.plans ?? []).map(plan => ({ id: plan.plan_id, status: plan.status })))}; restoredPlans=${JSON.stringify((planning?.plans ?? []).map(plan => ({ id: plan.plan_id, status: plan.status })))}`,
+  )
   assert.equal(providerCalls, 0, 'restore itself must not wake the Main LLM')
   assert.equal(planning.goal.goal_id, before.goal_id)
   assert.equal(planning.goal.status, 'active')
