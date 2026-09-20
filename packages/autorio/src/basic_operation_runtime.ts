@@ -1,7 +1,7 @@
 import type { LuaEntity, LuaInventory, SurfaceCreateEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import type { new_basic_operation_controller } from './basic_operations'
-import { resolve_exact_entity } from './entity_reference'
+import { remember_entity_reference, resolve_exact_entity } from './entity_reference'
 import { build_interaction_reach, entity_interaction_reach } from './interaction_range'
 import { MAX_MINING_START_REJECTIONS, mining_navigation_reach, mining_navigation_requires_movement, select_exact_mining_target, within_mining_reach } from './mining_reach'
 import { resolve_entity_placement_item } from './placement_item'
@@ -378,6 +378,14 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       controller.fail(actor, task, 'create_failed')
       return [false, 'Failed to place entity']
     }
+
+    // Remember what we just built. game.get_entity_by_unit_number() can return nil
+    // for an entity created this tick even though find_entities_filtered returns it
+    // with that exact unit_number, so resolve_exact_entity falls through to the hint
+    // map. Only the observation tools populated that map, which meant every exact
+    // operation on a freshly placed entity failed with target_gone unless an
+    // unrelated observation happened to scan it first.
+    remember_entity_reference(entity)
 
     const removed = inventory.remove({ name: requirement.item_name, count: requirement.count })
     if (removed !== requirement.count) {

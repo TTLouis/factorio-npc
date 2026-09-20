@@ -29,6 +29,9 @@ function fixture(itemName = 'steel-chest', itemCount = 2) {
     position: { x: args.position.x, y: args.position.y },
     direction: args.direction ?? 0,
     surface,
+    // A real LuaEntity always carries force; placement now remembers the entity
+    // it just built so exact operations can resolve it before any observation.
+    force: { index: 1 },
   }))
   const actor = {
     is_valid: true,
