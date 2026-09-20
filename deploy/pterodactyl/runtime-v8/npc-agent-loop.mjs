@@ -17,10 +17,16 @@ import {
   parseBoundarySteeringTelemetry,
   parseDecisionFamily,
   parseScopeReview,
+  parseSteeringRecommendation,
   scopeReviewQuestions,
+  steeringRecommendationQuestions,
 } from './jev-decision-taxonomy.mjs'
 import { isLifecycleMetaStep, normalizeCanonicalPlan, validateOutcomeCandidate } from './outcome-authority.mjs'
-import { getActivePlan as getActivePlanningPlan } from './planning-state.mjs'
+import {
+  getActivePlan as getActivePlanningPlan,
+  STEERING_BOUNDARY,
+  STEERING_PRESSURE_VOCABULARY,
+} from './planning-state.mjs'
 import { RECOVERY_SEMANTIC_SCOPES, parseRecoveryDecision, recoveryDecisionQuestions, recoveryFailureClassHint, validateRecoveryRoute } from './recovery-route.mjs'
 import {
   applyConditionObservation,
@@ -80,6 +86,8 @@ const JEV_PIPELINE_RUNTIME_GUARDS = [
   ['parseDecisionFamily', typeof parseDecisionFamily],
   ['scopeReviewQuestions', typeof scopeReviewQuestions],
   ['parseScopeReview', typeof parseScopeReview],
+  ['steeringRecommendationQuestions', typeof steeringRecommendationQuestions],
+  ['parseSteeringRecommendation', typeof parseSteeringRecommendation],
   ['parseBoundarySteeringTelemetry', typeof parseBoundarySteeringTelemetry],
   ['completionContractSupported', typeof completionContractSupported],
   ['sanitizeStepCompletionContract', typeof sanitizeStepCompletionContract],
@@ -87,6 +95,14 @@ const JEV_PIPELINE_RUNTIME_GUARDS = [
 ]
 for (const [name, type] of JEV_PIPELINE_RUNTIME_GUARDS) {
   if (type !== 'function') throw new Error(`Jev pipeline dependency ${name} is unavailable`)
+}
+
+function steeringPressureFromReasonCodes(reasonCodes) {
+  const codes = new Set(Array.isArray(reasonCodes) ? reasonCodes : [])
+  return {
+    vertical: STEERING_PRESSURE_VOCABULARY.vertical.filter(code => codes.has(code)),
+    horizontal: STEERING_PRESSURE_VOCABULARY.horizontal.filter(code => codes.has(code)),
+  }
 }
 
 const DURABLE_PLAN_PROMPT = `
@@ -2000,6 +2016,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.scopeReviewDecisionProvider = typeof options.scopeReviewDecisionProvider === 'function'
       ? options.scopeReviewDecisionProvider
       : null
+    this.steeringDecisionProvider = typeof options.steeringDecisionProvider === 'function'
+      ? options.steeringDecisionProvider
+      : null
     this.interactionAbort = null
     this.postStepDecisionAbort = null
     this.recoveryDecisionAbort = null
@@ -3194,6 +3213,113 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return facts
   }
 
+  async requestBoundarySteeringRecommendation(memoryKey, {
+    boundary,
+    receipt,
+    world,
+  } = {}) {
+    if (!this.steeringDecisionProvider) return undefined
+    const planning = this.memory.planningState?.(memoryKey)
+    if (!planning?.goal) return undefined
+
+    const activePlan = getActivePlanningPlan(planning)
+    const state = {
+      contract: 'planning_boundary_steering',
+      boundary,
+      goal: {
+        goal_id: sanitizeDurableModelText(planning.goal.goal_id, 120),
+        objective: sanitizeDurableModelText(planning.goal.objective, 600),
+        status: planning.goal.status,
+      },
+      roadmap: planning.roadmap
+        ? {
+            roadmap_revision_id: planning.roadmap.roadmap_revision_id,
+            nodes: (planning.roadmap.nodes ?? []).slice(0, 24).map(node => ({
+              id: sanitizeDurableModelText(node.id, 120),
+              intent: sanitizeDurableModelText(node.intent, 400),
+              status: node.status,
+              depends_on: Array.isArray(node.depends_on) ? node.depends_on.slice(0, 16) : [],
+              development_hint: node.development_hint ?? null,
+              verified_results: Array.isArray(node.verified_results) ? node.verified_results.slice(-8) : [],
+            })),
+          }
+        : null,
+      steering: sanitizeDurableModelValue(planning.steering),
+      active_plan: activePlan
+        ? {
+            plan_id: activePlan.plan_id,
+            status: activePlan.status,
+            roadmap_node_ids: [...(activePlan.roadmap_node_ids ?? [])],
+            development_mode: activePlan.development_mode,
+            steps: (activePlan.steps ?? []).slice(0, 16).map(step => ({
+              step_id: step.step_id,
+              description: sanitizeDurableModelText(step.description, 400),
+              status: activePlan.execution?.step_progress?.[step.step_id]?.status,
+            })),
+          }
+        : null,
+      verified_world: sanitizeDurableModelValue(receipt?.providerStatus ?? receipt?.view ?? world),
+    }
+
+    const questions = steeringRecommendationQuestions()
+    const decisionId = `decision_${Date.now().toString(36)}_${(++this.decisionRequestSequence).toString(36)}`
+    const startedAt = Date.now()
+    await this.decisionTraceEvent('decision.request', {
+      decision_id: decisionId,
+      contract: 'planning_boundary_steering',
+      boundary,
+      question_ids: Object.keys(questions),
+    })
+
+    try {
+      const response = await this.steeringDecisionProvider(state, questions, {
+        epoch: this.epoch?.epoch,
+        actorId: this.epoch?.actor_id,
+      })
+      const parsed = parseSteeringRecommendation(response)
+      const recommendation = {
+        ...parsed,
+        pressure: steeringPressureFromReasonCodes(parsed.reason_codes),
+        recommended_by: 'jev',
+      }
+      await this.decisionTraceEvent('decision.response', {
+        decision_id: decisionId,
+        contract: 'planning_boundary_steering',
+        boundary,
+        recommended_mode: recommendation.recommended_mode,
+        confidence: recommendation.confidence,
+        reason_codes: recommendation.reason_codes,
+        candidate_shelf_nodes: recommendation.candidate_shelf_nodes,
+        pressure: recommendation.pressure,
+        provider: recommendation.provider,
+        model: recommendation.model,
+        latency_ms: Date.now() - startedAt,
+      })
+      await this.traceEvent('planning.steering_recommendation', {
+        boundary,
+        recommended_mode: recommendation.recommended_mode,
+        confidence: recommendation.confidence,
+        reason_codes: recommendation.reason_codes,
+        candidate_shelf_nodes: recommendation.candidate_shelf_nodes,
+        pressure: recommendation.pressure,
+      })
+      return recommendation
+    }
+    catch (error) {
+      const message = cleanMemoryText(error instanceof Error ? error.message : String(error), 300)
+      await this.decisionTraceEvent('decision.fallback', {
+        decision_id: decisionId,
+        contract: 'planning_boundary_steering',
+        boundary,
+        fallback_target: 'runtime_boundary_default',
+        reason: message,
+        latency_ms: Date.now() - startedAt,
+      })
+      await this.traceEvent('planning.steering_recommendation_failed', { boundary, reason: message })
+      return undefined
+    }
+  }
+
   async routeStepCompletionDecision(receipt) {
     const key = this.activePlanKey()
     const planState = this.memory.planByNpc?.get?.(key) ?? this.memory.currentPlan?.(key)
@@ -3370,6 +3496,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return { verified: false, reason: 'checkpoint_requirements_unsatisfied', state: planState, contract: checkpoint.contract }
     }
 
+    const finalPlanStep = activeIndex === (Array.isArray(board?.steps) ? board.steps.length - 1 : -1)
+    let stashedSteeringAdvice = false
+    if (finalPlanStep && this.steeringDecisionProvider && typeof this.memory.recordSteeringAdvice === 'function') {
+      const recommendation = await this.requestBoundarySteeringRecommendation(key, {
+        boundary: STEERING_BOUNDARY.PLAN_COMPLETED,
+        receipt,
+      })
+      if (recommendation) {
+        this.memory.recordSteeringAdvice(key, recommendation)
+        stashedSteeringAdvice = true
+      }
+    }
+
     const reduced = this.memory.applyOutcomeAuthority?.(key, {
       kind: 'verified_complete',
       source: 'step_checkpoint_gate',
@@ -3382,6 +3521,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       metadata: { scope: 'step' },
     })
     await this.persistState()
+    // PLAN_COMPLETED consumes the advice inside CanonicalTaskBoardMemory. If
+    // the reducer refused the boundary, drop it here so a stale recommendation
+    // cannot steer a later, unrelated completion.
+    if (stashedSteeringAdvice && typeof this.memory.recordSteeringAdvice === 'function') {
+      this.memory.recordSteeringAdvice(key, null)
+    }
     if (reduced?.decision?.accepted !== true) {
       const reason = reduced?.decision?.rejection_reason || 'outcome_authority_rejected_completion'
       await this.traceEvent('step.completion_rejected', { active_step_id: step.id, reason, contract: checkpoint.contract })
@@ -3936,6 +4081,42 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       action_omission_recovery: resumeActionOmission,
       provider_budget_handoff_resume: resumeProviderBudgetHandoff,
     })
+
+    if (intent === 'new_goal'
+      && this.steeringDecisionProvider
+      && typeof this.memory.admitPlanningGoal === 'function'
+      && typeof this.memory.evaluateSteeringAtBoundary === 'function') {
+      const admitted = this.memory.admitPlanningGoal(memoryKey, {
+        owner: sender,
+        objective: text,
+        now: Date.now(),
+      })
+      if (admitted?.goal) {
+        const recommendation = await this.requestBoundarySteeringRecommendation(memoryKey, {
+          boundary: STEERING_BOUNDARY.GOAL_ADMISSION,
+          world: taskStatus,
+        })
+        if (recommendation && typeof this.memory.recordSteeringAdvice === 'function') {
+          this.memory.recordSteeringAdvice(memoryKey, recommendation)
+        }
+        const beforeSequence = admitted.steering?.sequence ?? 0
+        const steered = this.memory.evaluateSteeringAtBoundary(memoryKey, {
+          boundary: STEERING_BOUNDARY.GOAL_ADMISSION,
+          now: Date.now(),
+        }) ?? admitted
+        if ((steered.steering?.sequence ?? 0) > beforeSequence
+          && typeof this.memory.recordSteeringAdvice === 'function') {
+          this.memory.recordSteeringAdvice(memoryKey, null)
+        }
+        await this.persistState()
+        await this.traceEvent('planning.goal_admission_steered', {
+          goal_id: steered.goal?.goal_id,
+          steering_mode: steered.steering?.current_mode,
+          recommended_mode: steered.steering?.recommendation?.recommended_mode,
+        })
+      }
+    }
+
     try {
       const result = await super.request(text, options)
       if (this.requestInfo?.memoryKey) this.lastMemoryKey = this.requestInfo.memoryKey
@@ -4198,6 +4379,43 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       ? { verified: false, reason: 'pending_amendment' }
       : await this.routeStepCompletionDecision(receipt)
     const completionState = stepCompletion?.state
+    const planningAfterCompletion = this.memory.planningState?.(this.activePlanKey())
+    const reducerPlanAfterCompletion = planningAfterCompletion
+      ? getActivePlanningPlan(planningAfterCompletion)
+      : undefined
+    const boundedSliceCompleted = !pendingAmendment
+      && completionState?.status === 'completed'
+      && planningAfterCompletion?.goal?.status === 'active'
+      && Array.isArray(planningAfterCompletion?.roadmap?.nodes)
+      && planningAfterCompletion.roadmap.nodes.length > 0
+      && reducerPlanAfterCompletion?.status === 'completed'
+
+    if (boundedSliceCompleted) {
+      const completedBoard = visibleTaskBoard(completionState.task_board)
+      await this.traceEvent('outcome.validated', {
+        kind: 'plan_slice_completed',
+        source: 'step_completion_gate',
+        reason_code: 'verified_final_step_of_bounded_slice',
+        plan_id: reducerPlanAfterCompletion.plan_id,
+        task_board: completedBoard,
+      })
+      await this.traceEvent('planner.wake', {
+        source: 'planning_boundary',
+        route: 'next_shelf_slice',
+        steering_mode: planningAfterCompletion.steering?.current_mode,
+      })
+      this.reasoningTriggerSource = 'plan_slice_completed'
+      try {
+        return await this.continueFromModMessage(
+          `[MOD] The current immutable plan slice is verified complete. The user goal remains active. Refine the next useful Roadmap Shelf node using [PLANNING_STATE]; do not treat plan completion as goal completion. Completed plan_id=${reducerPlanAfterCompletion.plan_id}.`,
+          'planning.slice_completion_continuation',
+        )
+      }
+      finally {
+        this.reasoningTriggerSource = null
+      }
+    }
+
     if (!pendingAmendment && completionState?.status === 'completed') {
       this.active = false
       const completedBoard = visibleTaskBoard(completionState.task_board)

@@ -2030,6 +2030,7 @@ export class Session {
       }, messages, context),
       interactionDecisionProvider: jevDecisionProvider,
       scopeReviewDecisionProvider: jevDecisionProvider,
+      steeringDecisionProvider: jevDecisionProvider,
       reserve: async context => reserveBudget(
         path.join(this.root, '.airi', 'provider-budget.json'),
         this.config.budget,

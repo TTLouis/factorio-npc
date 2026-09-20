@@ -947,3 +947,118 @@ test('live Jev refusal re-authors once and never admits the rejected operation b
   assert.equal(active.steps[0].description, 'Gather stone')
   assert.ok(planning.plans.some(item => item.status === PLAN_STATUS.SUPERSEDED && item.jev_review.refinement_count >= 1))
 })
+
+
+test('goal-admission Jev steering is visible to the Main LLM before its first draft', async () => {
+  const rcon = new ScopeReviewRcon()
+  const memory = new CanonicalTaskBoardMemory()
+  let firstPlannerContext = ''
+  let steeringCalls = 0
+  const agent = new NpcAgentLoop({
+    rcon,
+    memory,
+    provider: async (messages) => {
+      firstPlannerContext = messages.map(message => String(message?.content ?? '')).join('\n')
+      return {
+        content: JSON.stringify({
+          chatMessage: 'Starting the first capability slice.',
+          plan: ['Establish the first capability'],
+          currentStep: 0,
+          operations: [{ name: 'wait', args: { ticks: 1 } }],
+          roadmap: [
+            { id: 'capability-1', intent: 'The first required capability exists.', development_hint: 'vertical' },
+            { id: 'support-1', intent: 'The first capability has enough support for the next push.', depends_on: ['capability-1'], development_hint: 'horizontal' },
+          ],
+          roadmapNodeIds: ['capability-1'],
+        }),
+      }
+    },
+    steeringDecisionProvider: async (_state, questions) => {
+      steeringCalls++
+      assert.ok(questions.steering, 'the dedicated boundary steering contract must be used')
+      return {
+        answers: {
+          development: { choice: 'vertical', confidence: 0.95 },
+          steering: {
+            choice: 'vertical',
+            confidence: 0.95,
+            reason_codes: ['goal_requires_new_capability'],
+            critical_path_summary: 'establish the first missing capability',
+          },
+        },
+      }
+    },
+    systemPrompt: 'pre-draft steering visibility test',
+    stateFile: null,
+    traceFile: null,
+    decisionTraceFile: null,
+    npcId: 'airi',
+  })
+
+  await agent.request('build a staged long-horizon factory', { sender: 'Louis' })
+
+  assert.equal(steeringCalls, 1, 'goal admission gets exactly one steering recommendation before drafting')
+  assert.match(firstPlannerContext, /\[PLANNING_STATE\]/)
+  const contextMessage = firstPlannerContext.split('\n').find(line => line.startsWith('{') && line.includes('"steering"'))
+  assert.ok(contextMessage || /"current_mode":"vertical"/.test(firstPlannerContext))
+  assert.match(firstPlannerContext, /"current_mode":"vertical"/)
+  assert.match(firstPlannerContext, /"recommended_mode":"vertical"/)
+  assert.match(firstPlannerContext, /goal_requires_new_capability/)
+  assert.equal(memory.planningState('npc:airi').steering.current_mode, 'vertical')
+})
+
+test('a completed long-horizon slice stays attached to its goal and permits the next shelf draft', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const key = 'npc:airi'
+  const planning = memory.admitPlanningGoal(key, {
+    owner: 'Louis',
+    objective: 'Build a staged factory',
+    goalId: 'goal_long_horizon',
+    now: 10,
+  })
+  assert.equal(planning.goal.status, 'active')
+
+  const first = {
+    ...proposedPlan(['Establish capability']),
+    roadmap: [
+      { id: 'capability-1', intent: 'Capability exists.' },
+      { id: 'support-1', intent: 'Support is adequate.', depends_on: ['capability-1'] },
+    ],
+    roadmapNodeIds: ['capability-1'],
+  }
+  const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Build a staged factory' }, first)
+  memory.reconcileTaskBoard(key, undefined, first, recorded, { allowReplan: false })
+  memory.commitPlanningPlan(key, { now: 20, review: REVIEWED_ACTIONABLE })
+
+  const active = getActivePlan(memory.planningState(key))
+  memory.applyOutcomeAuthority(key, {
+    kind: 'verified_complete',
+    source: 'deterministic_runtime',
+    reason_code: 'slice_verified',
+    evidence: [{ kind: 'verified_world_state', ref: 'slice_1', summary: 'capability exists' }],
+    metadata: { scope: 'step' },
+  })
+
+  const after = memory.planningState(key)
+  const completed = getActivePlan(after)
+  assert.equal(completed.plan_id, active.plan_id)
+  assert.equal(completed.status, PLAN_STATUS.COMPLETED)
+  assert.equal(after.goal.status, 'active', 'plan completion must not satisfy the user goal')
+  assert.ok(memory.currentPlan(key), 'legacy projection stays available at the safe next-slice boundary')
+
+  const next = {
+    ...proposedPlan(['Strengthen support']),
+    roadmapNodeIds: ['support-1'],
+  }
+  const nextRecorded = memory.recordPlan(key, { sender: 'Louis', text: 'continue' }, next, { continuation: true })
+  const nextReconciled = memory.reconcileTaskBoard(key, memory.currentPlan(key)?.task_board, next, nextRecorded, {
+    allowReplan: false,
+    previousState: memory.currentPlan(key),
+  })
+  assert.equal(nextReconciled.state.status, 'active')
+  const nextDraft = getActivePlan(memory.planningState(key))
+  assert.notEqual(nextDraft.plan_id, completed.plan_id)
+  assert.equal(nextDraft.status, PLAN_STATUS.DRAFT)
+  assert.deepEqual(nextDraft.roadmap_node_ids, ['support-1'])
+  assert.equal(memory.planningState(key).goal.goal_id, 'goal_long_horizon')
+})

@@ -6,6 +6,7 @@ import {
   createEmptyPlanningState,
   evaluateDeadlockSignals,
   getActivePlan,
+  GOAL_STATUS,
   PLAN_STATUS,
   PLANNING_EVENT,
   planTrackerView,
@@ -243,6 +244,7 @@ export function canonicalContinuationPlan(previousBoard, plan, { allowReplan = f
   if (previousBoard.status === 'blocked') {
     return { ...plan, plan: canonical, currentStep: currentIndex, operations: [] }
   }
+  if (previousBoard.status === 'completed') return plan
   if (allowReplan) return plan
   return {
     ...plan,
@@ -261,6 +263,24 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
 
   planningState(key) {
     return key ? this.planningByNpc.get(key) : undefined
+  }
+
+  admitPlanningGoal(key, { owner = 'unknown', objective = '', goalId, now = Date.now() } = {}) {
+    if (!key || typeof objective !== 'string' || !objective.trim()) return this.planningState(key)
+    const current = this.planningState(key)
+    if (current?.goal?.status === GOAL_STATUS.ACTIVE) return current
+    const resolvedGoalId = typeof goalId === 'string' && goalId.trim()
+      ? goalId.trim().slice(0, 120)
+      : `goal_${Math.max(0, Math.trunc(now)).toString(36)}`
+    const next = applyPlanningEvent(current ?? createEmptyPlanningState(), {
+      type: PLANNING_EVENT.GOAL_ACCEPTED,
+      now,
+      goal_id: resolvedGoalId,
+      owner: String(owner ?? 'unknown').slice(0, 128),
+      objective: objective.slice(0, 1000),
+    })
+    this.planningByNpc.set(key, next)
+    return next
   }
 
   syncPlanningState(key, legacyState = key ? this.planByNpc.get(key) : undefined) {
@@ -478,10 +498,10 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     if (!key || !state) return undefined
     let planning = this.planningByNpc.get(key)
     const existingPlan = getActivePlan(planning)
-    const terminalReusableSlot = existingPlan
-      && [PLAN_STATUS.COMPLETED, PLAN_STATUS.CANCELLED, PLAN_STATUS.SUPERSEDED].includes(existingPlan.status)
     let goalAdmitted = false
-    if (!planning?.goal || planning.goal.goal_id !== state.goal_id || terminalReusableSlot) {
+    if (!planning?.goal
+      || planning.goal.goal_id !== state.goal_id
+      || planning.goal.status !== GOAL_STATUS.ACTIVE) {
       goalAdmitted = true
       planning = applyPlanningEvent(planning ?? createEmptyPlanningState(), {
         type: PLANNING_EVENT.GOAL_ACCEPTED,
@@ -507,7 +527,11 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const replaceableDraft = replacePrecommit
       && draftBefore
       && ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING, PLAN_STATUS.COMPLETED, PLAN_STATUS.BLOCKED].includes(draftBefore.status)
-    if ((!draftBefore || replaceableDraft) && Array.isArray(state.task_board?.steps) && state.task_board.steps.length > 0) {
+    const completedSliceBoundary = draftBefore?.status === PLAN_STATUS.COMPLETED
+      && planning.goal?.status === GOAL_STATUS.ACTIVE
+    if ((!draftBefore || replaceableDraft || completedSliceBoundary)
+      && Array.isArray(state.task_board?.steps)
+      && state.task_board.steps.length > 0) {
       const knownNodeIds = new Set((planning.roadmap?.nodes ?? []).map(node => node.id))
       const linkedNodeIds = Array.from(new Set(
         (Array.isArray(roadmapNodeIds) ? roadmapNodeIds : [])
@@ -803,17 +827,24 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   retireCompletedPlan(key) {
     const state = key ? this.planByNpc.get(key) : undefined
     if (!state || state.status !== 'completed') return state
+    const planning = this.planningByNpc.get(key)
+    const longHorizonGoalStillActive = planning?.goal?.status === GOAL_STATUS.ACTIVE
+      && Array.isArray(planning?.roadmap?.nodes)
+      && planning.roadmap.nodes.length > 0
+    if (longHorizonGoalStillActive) return state
     this.planByNpc.delete(key)
-    // The current slot is retired. Historical/learning surfaces own completed
-    // task history; leaving this reducer under the reusable NPC key would make
-    // the next goal inherit the completed plan identity.
+    // The current slot is retired only when there is no active long-horizon
+    // reducer goal. Completing one immutable slice must not discard its shelf.
     this.planningByNpc.delete(key)
     return undefined
   }
 
   clearTaskContext(key) {
     const result = super.clearTaskContext(key)
-    if (key) this.planningByNpc.delete(key)
+    if (key) {
+      this.planningByNpc.delete(key)
+      this.steeringAdviceByNpc?.delete(key)
+    }
     return result
   }
 
@@ -847,10 +878,14 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
 
   planContext(key) {
     const state = this.retireCompletedPlan(key)
+    const planningContext = this.planningContext(key)
     if (!state) {
+      if (planningContext) {
+        return `[PLAN_STATE] The user goal is admitted to the reducer but no executable legacy plan has been committed yet. Draft from [PLANNING_STATE]; do not invent progress.\n${planningContext}`
+      }
       return '[PLAN_STATE] No active durable goal. Completed goals are retired from the current task slot and remain only in bounded dialogue history. Do not resume or steer a completed goal merely because the human says continue; a new actionable instruction must start a new goal.'
     }
-    return [super.planContext(key), this.planningContext(key)].filter(Boolean).join('\n')
+    return [super.planContext(key), planningContext].filter(Boolean).join('\n')
   }
 
   currentPlan(key) {
@@ -908,6 +943,12 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       : this.#supersedeInFlightPlan(key, requestInfo, plan, options)
 
     const result = super.recordPlan(key, requestInfo, plan, options)
+    if (result?.state && priorPlanning?.goal?.status === GOAL_STATUS.ACTIVE) {
+      result.state.goal_id = priorPlanning.goal.goal_id
+      result.state.owner = priorPlanning.goal.owner
+      result.state.objective = priorPlanning.goal.objective
+      this.planByNpc.set(key, result.state)
+    }
     if (result?.state) {
       this.ensureTaskBoard(result.state)
       this.ensurePlanningDraft(key, result.state, {
@@ -1287,7 +1328,13 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       // After sync, because sync is what settles which focus survives.
       this.recordPlannerFocus(key, { now: result.state.updated_at })
     }
-    if (result?.state?.status === 'completed') this.planByNpc.delete(key)
+    if (result?.state?.status === 'completed') {
+      const planning = this.planningByNpc.get(key)
+      const keepForNextSlice = planning?.goal?.status === GOAL_STATUS.ACTIVE
+        && Array.isArray(planning?.roadmap?.nodes)
+        && planning.roadmap.nodes.length > 0
+      if (!keepForNextSlice) this.planByNpc.delete(key)
+    }
     return result
   }
 
