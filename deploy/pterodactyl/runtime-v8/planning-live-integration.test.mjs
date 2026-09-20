@@ -43,6 +43,7 @@ test('live planning state survives restart BLOCKED and requires explicit revisio
   block(beforeRestart, key)
 
   const blockedBefore = getActivePlan(beforeRestart.planningState(key))
+  const blockedEpoch = beforeRestart.planningReasoningEpoch(key)
   assert.equal(blockedBefore.status, PLAN_STATUS.BLOCKED)
   assert.equal(beforeRestart.planningState(key).plans.length, 1)
 
@@ -54,6 +55,7 @@ test('live planning state survives restart BLOCKED and requires explicit revisio
   assert.equal(afterRestart.currentPlan(key).status, 'blocked')
   assert.equal(afterRestart.planningState(key).plans.length, 1)
   assert.equal(afterRestart.currentPlan(key).planning.blocked.awaiting_choice, true)
+  assert.equal(afterRestart.planningReasoningEpoch(key), blockedEpoch, 'restart must preserve the reducer reasoning epoch')
 
   // A normal provider continuation cannot thaw BLOCKED or replace the suffix.
   const ordinary = proposedPlan(['Gather stone', 'Craft furnace differently', 'Build power'], 1)
@@ -97,6 +99,7 @@ test('live planning state survives restart BLOCKED and requires explicit revisio
   assert.equal(successor.status, PLAN_STATUS.DRAFT)
   assert.equal(successor.plan_version, blockedAfter.plan_version + 1)
   assert.equal(successor.derived_from_plan_id, blockedAfter.plan_id)
+  assert.ok(afterRestart.planningReasoningEpoch(key) > blockedEpoch, 'user-approved successor must invalidate predecessor reasoning')
   assert.equal(afterRestart.planningState(key).plans.length, 2)
   assert.equal(revised.state.status, 'active')
   assert.equal(revised.blockedByHarness, false)
