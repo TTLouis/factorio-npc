@@ -728,3 +728,53 @@ test('legacy restart migration replays verified Task Board prefix before reducer
   assert.equal(restored.currentPlan(key).task_board.completed_count, 2)
 })
 
+test('blocked revise choice plus explicit user prompt creates successor and preserves completed prefix in predecessor', () => {
+  const key = 'npc:airi'
+  const blockedBoard = board()
+  blockedBoard.status = 'blocked'
+  blockedBoard.blocker = 'path_blocked'
+  const memory = new CanonicalTaskBoardMemory()
+  memory.planByNpc.set(key, planState({
+    task_board: blockedBoard,
+    status: 'blocked',
+    blocker: 'path_blocked',
+  }))
+  let planning = memory.ensurePlanningDraft(key, memory.planByNpc.get(key), { now: 100, migrated: true })
+  planning = memory.commitPlanningPlan(key, { now: 110, migrated: true })
+  planning = memory.replayLegacyVerifiedPrefix(key, memory.planByNpc.get(key), planning, { now: 115 })
+  memory.planningByNpc.set(key, planning)
+  memory.applyOutcomeAuthority(key, {
+    kind: 'world_blocked',
+    source: 'deterministic_runtime',
+    reason_code: 'path_blocked',
+    candidate_blocker: 'path_blocked',
+    evidence: [{ kind: 'runtime_blocker', ref: 'block_1', summary: 'blocked' }],
+  })
+  memory.recordBlockedChoice(key, 'revise', 'Louis', { now: 120 })
+
+  const predecessor = getActivePlan(memory.planningState(key))
+  const proposed = {
+    chatMessage: 'Use another route.',
+    plan: ['Find stone', 'Mine stone', 'Use alternate furnace recipe', 'Build power', 'Start research'],
+    currentStep: 2,
+    operations: [{ name: 'wait', args: { ticks: 1 } }],
+  }
+  const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Use the alternate route instead' }, proposed)
+  const reconciled = memory.reconcileTaskBoard(key, blockedBoard, proposed, recorded, { previousState: planState({ task_board: blockedBoard, status: 'blocked', blocker: 'path_blocked' }) })
+  const successor = getActivePlan(memory.planningState(key))
+
+  assert.equal(recorded.userRevisionApproved, true)
+  assert.equal(successor.plan_version, predecessor.plan_version + 1)
+  assert.equal(successor.derived_from_plan_id, predecessor.plan_id)
+  assert.equal(successor.status, PLAN_STATUS.DRAFT)
+  assert.deepEqual(successor.steps.map(step => step.description), ['Use alternate furnace recipe', 'Build power', 'Start research'])
+  assert.deepEqual(successor.carried_forward_evidence, [
+    `${predecessor.plan_id}:${predecessor.steps[0].step_id}`,
+    `${predecessor.plan_id}:${predecessor.steps[1].step_id}`,
+  ])
+  assert.equal(reconciled.state.status, 'active')
+  assert.equal(reconciled.state.task_board.completed_count, 2)
+  assert.equal(reconciled.state.task_board.active_index, 2)
+  assert.equal(reconciled.state.task_board.steps[2].description, 'Use alternate furnace recipe')
+})
+
