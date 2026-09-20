@@ -908,7 +908,7 @@ test('live Jev refusal re-authors once and never admits the rejected operation b
         },
       }
     },
-    scopeReviewDecisionProvider: async (_state, questions) => {
+    scopeReviewDecisionProvider: async (_state, _questions) => {
       reviewCall++
       return reviewCall === 1
         ? {
