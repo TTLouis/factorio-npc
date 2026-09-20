@@ -184,6 +184,19 @@ case "$LANE" in
     run_py crafting_restart_verify.py
     ;;
 
+  production)
+    # Production-capability validation lane (docs/NPC_PRODUCTION_VALIDATION_ROADMAP.md).
+    # Kept isolated from `core` because these gates rewrite terrain, force
+    # always_day and raise game.speed inside their own save.
+    # Ordering matters: the assembler gate ends by exercising the NPC recipe
+    # operation, which currently kills the Factorio process (see the runtime
+    # defect documented in powered_assembler_cell.py), so it must run last.
+    printf '[npc-test][production] Running A1 belt/inserter transport gate...\n'
+    run_py belt_transport_cell.py
+    printf '[npc-test][production] Running A1 powered assembler production cell gate...\n'
+    run_py powered_assembler_cell.py
+    ;;
+
   *)
     printf '[npc-test][%s] Unknown lane.\n' "$LANE" >&2
     exit 2

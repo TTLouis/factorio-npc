@@ -104,6 +104,7 @@ lane_offset() {
     core) printf '0' ;;
     research-combat) printf '1' ;;
     resilience) printf '2' ;;
+    production) printf '3' ;;
     *) printf '[npc-test] Unknown lane requested: %s\n' "$1" >&2; return 2 ;;
   esac
 }
