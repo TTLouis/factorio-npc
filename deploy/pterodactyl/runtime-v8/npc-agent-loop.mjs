@@ -4412,10 +4412,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
 
     const reducerGoalSatisfied = planningAfterCompletion?.goal?.status === GOAL_STATUS.SATISFIED
-    const legacyOnlyCompletion = !planningAfterCompletion?.goal
+    const hasLongHorizonRoadmap = Array.isArray(planningAfterCompletion?.roadmap?.nodes)
+      && planningAfterCompletion.roadmap.nodes.length > 0
+    const legacyCompatibleCompletion = !planningAfterCompletion?.goal || !hasLongHorizonRoadmap
     if (!pendingAmendment
       && completionState?.status === 'completed'
-      && (reducerGoalSatisfied || legacyOnlyCompletion)) {
+      && (reducerGoalSatisfied || legacyCompatibleCompletion)) {
       this.active = false
       const completedBoard = visibleTaskBoard(completionState.task_board)
       await this.traceEvent('outcome.validated', {
@@ -4450,6 +4452,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
     if (!pendingAmendment
       && completionState?.status === 'completed'
+      && hasLongHorizonRoadmap
       && planningAfterCompletion?.goal?.status === GOAL_STATUS.ACTIVE) {
       await this.traceEvent('planner.wake', {
         source: 'planning_boundary',
