@@ -119,9 +119,7 @@ test('missing prerequisite recovery preserves goal and active semantic step and 
   let calls = 0
   let rejectedState
   let restoredState
-  let agent
-
-  agent = new NpcAgentLoop({
+  const agent = new NpcAgentLoop({
     rcon,
     memory: new NpcDialogueMemory(),
     systemPrompt: 'research dependency recovery regression',

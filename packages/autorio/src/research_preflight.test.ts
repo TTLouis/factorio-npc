@@ -151,7 +151,7 @@ describe('deterministic research operation preflight', () => {
 
   it('reports force_busy with bounded current and queue identity and never replaces the force queue', () => {
     const target = technology('automation')
-    const queue = Array.from({ length: 12 }, (_, index) => technology('queued-' + index))
+    const queue = Array.from({ length: 12 }, (_, index) => technology(`queued-${index}`))
     const { actor, force } = world(
       {
         automation: target,
@@ -215,7 +215,7 @@ describe('deterministic research operation preflight', () => {
     const technologies: Record<string, any> = {}
     let previous: any
     for (let index = 0; index < 20; index++) {
-      const name = 'tech-' + index
+      const name = `tech-${index}`
       const prerequisites = previous ? { [previous.name]: previous } : {}
       const current = technology(name, { prerequisites })
       technologies[name] = current
