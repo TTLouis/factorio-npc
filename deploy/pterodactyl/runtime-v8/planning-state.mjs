@@ -961,7 +961,7 @@ function blockPlan(state, plan, { now, blocker }) {
  * Pure: no I/O, no Date.now(); `now` comes from the event.
  * Total: unknown or malformed events return the state unchanged (never throws).
  */
-let HANDLERS
+const HANDLERS = {}
 
 export function applyPlanningEvent(state, event) {
   const current = state && typeof state === 'object' && !Array.isArray(state) ? state : createEmptyPlanningState()
@@ -976,7 +976,7 @@ export function applyPlanningEvent(state, event) {
   return next ?? current
 }
 
-HANDLERS = {
+Object.assign(HANDLERS, {
   [PLANNING_EVENT.GOAL_ACCEPTED](state, event, now) {
     const sequence = nextSequence(state)
     const goal = sanitizeGoal({
@@ -1572,7 +1572,7 @@ HANDLERS = {
       log: logEntry(state, { type: PLANNING_EVENT.GOAL_SATISFIED, at: now, goal_id: state.goal.goal_id }),
     }
   },
-}
+})
 
 // --- persistence -----------------------------------------------------------
 
