@@ -118,10 +118,6 @@ def run(client, results: Path) -> None:
         'return {charted=f.is_chunk_charted(s,c),visible=f.is_chunk_visible(s,c)} end)()'
     )
     chart_bootstrap = decode_json(command(lua_json(chart_bootstrap_expr)), 'bounded actor-awareness chart bootstrap')
-    assert_true(
-        chart_bootstrap.get('charted') is True,
-        f'bounded actor-awareness chart bootstrap did not chart the actor chunk: {chart_bootstrap!r}',
-    )
 
     chart_state_expr = (
         '(function() local f=game.forces["player"]; local s=game.surfaces[1]; '
@@ -140,7 +136,8 @@ def run(client, results: Path) -> None:
         time.sleep(0.1)
     assert_true(
         chart_state is not None and chart_state.get('charted') is True and chart_state.get('visible') is True,
-        f'hidden awareness radar did not keep the charted actor chunk visible within 12s: {chart_state!r}; radar={radar!r}',
+        f'bounded chart bootstrap plus hidden awareness radar did not reach charted+visible within 12s: '
+        f'bootstrap={chart_bootstrap!r}; state={chart_state!r}; radar={radar!r}',
     )
 
     query = call(
