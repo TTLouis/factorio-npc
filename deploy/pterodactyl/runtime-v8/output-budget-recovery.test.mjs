@@ -538,7 +538,7 @@ test('terminal provider budget becomes a Jev-directed fresh planner generation i
   const agent = makeAgent({
     rcon,
     maxProviderOutputUnits: 3000,
-    interactionDecisionProvider: async (state, questions) => {
+    interactionDecisionProvider: async (state, _questions) => {
       decisions.push({ state, questions })
       assert.equal(state.failure.class, 'provider_budget')
       assert.equal(state.task.active_step, canonical[0])
