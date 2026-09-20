@@ -1155,6 +1155,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
             boundary: STEERING_BOUNDARY.PLAN_COMPLETED,
             now,
             planId: plan.plan_id,
+            recommendation: options.steeringRecommendation,
           }) ?? planning
           // Advice is written for one boundary and consumed by it -- but only
           // if the reducer actually accepted that boundary. The legacy board

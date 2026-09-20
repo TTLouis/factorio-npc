@@ -3499,17 +3499,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
 
     const finalPlanStep = activeIndex === (Array.isArray(board?.steps) ? board.steps.length - 1 : -1)
-    let stashedSteeringAdvice = false
-    if (finalPlanStep && this.steeringDecisionProvider && typeof this.memory.recordSteeringAdvice === 'function') {
-      const recommendation = await this.requestBoundarySteeringRecommendation(key, {
-        boundary: STEERING_BOUNDARY.PLAN_COMPLETED,
-        receipt,
-      })
-      if (recommendation) {
-        this.memory.recordSteeringAdvice(key, recommendation)
-        stashedSteeringAdvice = true
-      }
-    }
+    const steeringRecommendation = finalPlanStep && this.steeringDecisionProvider
+      ? await this.requestBoundarySteeringRecommendation(key, {
+          boundary: STEERING_BOUNDARY.PLAN_COMPLETED,
+          receipt,
+        })
+      : undefined
 
     const reduced = this.memory.applyOutcomeAuthority?.(key, {
       kind: 'verified_complete',
@@ -3521,14 +3516,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         summary: JSON.stringify({ contract: checkpoint.contract, results: evaluation.results }),
       }],
       metadata: { scope: 'step' },
+    }, {
+      steeringRecommendation,
     })
     await this.persistState()
-    // PLAN_COMPLETED consumes the advice inside CanonicalTaskBoardMemory. If
-    // the reducer refused the boundary, drop it here so a stale recommendation
-    // cannot steer a later, unrelated completion.
-    if (stashedSteeringAdvice && typeof this.memory.recordSteeringAdvice === 'function') {
-      this.memory.recordSteeringAdvice(key, null)
-    }
     if (reduced?.decision?.accepted !== true) {
       const reason = reduced?.decision?.rejection_reason || 'outcome_authority_rejected_completion'
       await this.traceEvent('step.completion_rejected', { active_step_id: step.id, reason, contract: checkpoint.contract })

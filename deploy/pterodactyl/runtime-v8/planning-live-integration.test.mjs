@@ -1065,3 +1065,73 @@ test('a completed long-horizon slice stays attached to its goal and permits the 
   assert.deepEqual(nextDraft.roadmap_node_ids, ['support-1'])
   assert.equal(memory.planningState(key).goal.goal_id, 'goal_long_horizon')
 })
+
+
+test('verified PLAN_COMPLETED consumes its exact Jev steering recommendation before the next draft context', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const key = 'npc:airi'
+  memory.admitPlanningGoal(key, {
+    owner: 'Louis',
+    objective: 'Build a staged long-horizon factory',
+    goalId: 'goal_transactional_steering',
+    now: 10,
+  })
+  memory.reviseRoadmap(key, [
+    { id: 'frontier', intent: 'Establish the first capability.', development_hint: 'vertical' },
+    { id: 'support', intent: 'Strengthen the established capability.', depends_on: ['frontier'], development_hint: 'horizontal' },
+  ], { now: 11, reason: 'goal_decomposed_to_shelf' })
+  memory.evaluateSteeringAtBoundary(key, {
+    boundary: 'goal_admission',
+    now: 12,
+    recommendation: {
+      recommended_mode: 'vertical',
+      confidence: 0.95,
+      pressure: { vertical: ['goal_requires_new_capability'] },
+      reason_codes: ['goal_requires_new_capability'],
+      recommended_by: 'jev',
+    },
+  })
+
+  const plan = {
+    ...proposedPlan(['Establish the first capability']),
+    roadmapNodeIds: ['frontier'],
+    developmentMode: 'vertical',
+  }
+  const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Build a staged long-horizon factory' }, plan)
+  memory.reconcileTaskBoard(key, undefined, plan, recorded, { allowReplan: false })
+  memory.commitPlanningPlan(key, { now: 20, review: REVIEWED_ACTIONABLE })
+
+  const result = memory.applyOutcomeAuthority(key, {
+    kind: 'verified_complete',
+    source: 'deterministic_runtime',
+    reason_code: 'slice_verified',
+    evidence: [{
+      kind: 'verified_world_state',
+      ref: 'slice_frontier_verified',
+      summary: 'first capability verified',
+    }],
+    metadata: { scope: 'step' },
+  }, {
+    steeringRecommendation: {
+      recommended_mode: 'horizontal',
+      confidence: 0.95,
+      pressure: { horizontal: ['power_margin_low'] },
+      reason_codes: ['power_margin_low'],
+      critical_path_summary: 'strengthen the reached frontier',
+      candidate_shelf_nodes: ['support'],
+      recommended_by: 'jev',
+    },
+  })
+
+  assert.equal(result.decision.accepted, true)
+  const planning = memory.planningState(key)
+  assert.equal(getActivePlan(planning).status, PLAN_STATUS.COMPLETED)
+  assert.equal(planning.steering.current_mode, 'horizontal')
+  assert.equal(planning.steering.recommendation.recommended_mode, 'horizontal')
+  assert.deepEqual(planning.steering.recommendation.candidate_shelf_nodes, ['support'])
+  assert.deepEqual(planning.steering.pressure.horizontal, ['power_margin_low'])
+  const context = memory.planningContext(key)
+  assert.match(context, /"current_mode":"horizontal"/)
+  assert.match(context, /"recommended_mode":"horizontal"/)
+  assert.match(context, /"candidate_shelf_nodes":\["support"\]/)
+})
