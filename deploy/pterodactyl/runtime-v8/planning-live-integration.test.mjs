@@ -8,6 +8,46 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 
+function deployment() {
+  return {
+    revision: 'airi-deploy-v8-npc-staging',
+    session: '0123456789abcdef0123456789abcdef',
+    mode: 'npc',
+    actor_id: 18,
+    actor_kind: 'standalone_character',
+    connected_players: 1,
+    allowed: true,
+    idle: true,
+    epoch: 3,
+    actor_interface: true,
+    operations: true,
+    tools: true,
+  }
+}
+
+class RejectingPreflightRcon {
+  constructor() {
+    this.mutations = []
+  }
+
+  async command(text) {
+    if (text.includes('remote.call("airi_deployment","status")')) return JSON.stringify(deployment())
+    if (text.includes('remote.call("autorio_preflight","operation"')) {
+      return JSON.stringify({
+        ok: false,
+        code: 'missing_runtime_capability',
+        operation: 'craft_item',
+        detail: 'required deterministic capability is unavailable',
+      })
+    }
+    if (text.includes('local ok,result=pcall')) {
+      this.mutations.push(text)
+      throw new Error('mutation must not be admitted after failed preflight')
+    }
+    return '{}'
+  }
+}
+
 function proposedPlan(steps, currentStep = 0) {
   return {
     chatMessage: 'Working on the durable plan.',
@@ -39,6 +79,40 @@ function block(memory, key = 'npc:airi') {
     }],
   }).state
 }
+
+test('live coordinator turns deterministic preflight rejection into reducer BLOCKED with no mutation', async () => {
+  const rcon = new RejectingPreflightRcon()
+  const memory = new CanonicalTaskBoardMemory()
+  const agent = new NpcAgentLoop({
+    rcon,
+    memory,
+    provider: async () => ({
+      content: JSON.stringify({
+        chatMessage: 'Crafting the first furnace.',
+        plan: ['Craft the first furnace', 'Place the furnace'],
+        currentStep: 0,
+        operations: [{ name: 'craft_item', args: { item_name: 'stone-furnace', count: 1 } }],
+      }),
+    }),
+    systemPrompt: 'planning preflight integration test',
+    stateFile: null,
+    traceFile: null,
+    decisionTraceFile: null,
+    npcId: 'airi',
+  })
+
+  const result = await agent.request('build the first furnace', { sender: 'Louis' })
+  const planning = memory.planningState('npc:airi')
+  const blocked = getActivePlan(planning)
+
+  assert.equal(result.goalStatus, 'blocked')
+  assert.equal(result.operations.length, 0)
+  assert.equal(rcon.mutations.length, 0)
+  assert.equal(blocked.status, PLAN_STATUS.BLOCKED)
+  assert.equal(blocked.blocker.reason_code, 'operation_preflight_failed:missing_runtime_capability')
+  assert.equal(blocked.blocker.evidence_refs.length, 1)
+  assert.equal(planning.plans.length, 1, 'preflight failure must freeze rather than auto-create a suffix plan')
+})
 
 test('live planning state survives restart BLOCKED and requires explicit revision before successor', () => {
   const key = 'npc:airi'
