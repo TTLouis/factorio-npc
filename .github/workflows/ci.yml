@@ -5,9 +5,7 @@ on:
     branches:
       - main
       - feat/npc-transition-work
-      - feat/swarm-pterodactyl-playable
-      - tmp/swarm-npc-parity-integration
-      - tmp/swarm-jev-integration
+      - experiment/swarm-jev-integration
 
   pull_request:
     branches:
@@ -21,13 +19,13 @@ concurrency:
 
 jobs:
   lint-typescript:
-    if: github.ref != 'refs/heads/feat/swarm-pterodactyl-playable' && github.ref != 'refs/heads/tmp/swarm-npc-parity-integration' && github.ref != 'refs/heads/tmp/swarm-jev-integration' && github.head_ref != 'feat/swarm-pterodactyl-playable' && github.head_ref != 'tmp/swarm-jev-integration'
+    if: github.ref != 'refs/heads/experiment/swarm-jev-integration' && github.head_ref != 'experiment/swarm-jev-integration'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v3
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: lts/*
           cache: pnpm
@@ -37,11 +35,11 @@ jobs:
         run: pnpm run lint
 
   lint-python:
-    if: github.ref != 'refs/heads/feat/swarm-pterodactyl-playable' && github.ref != 'refs/heads/tmp/swarm-npc-parity-integration' && github.ref != 'refs/heads/tmp/swarm-jev-integration' && github.head_ref != 'feat/swarm-pterodactyl-playable' && github.head_ref != 'tmp/swarm-jev-integration'
+    if: github.ref != 'refs/heads/experiment/swarm-jev-integration' && github.head_ref != 'experiment/swarm-jev-integration'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: prefix-dev/setup-pixi@v0.9.1
         with:
           cache: true
@@ -49,13 +47,13 @@ jobs:
         run: pixi run lint
 
   typecheck-typescript:
-    if: github.ref != 'refs/heads/feat/swarm-pterodactyl-playable' && github.ref != 'refs/heads/tmp/swarm-npc-parity-integration' && github.ref != 'refs/heads/tmp/swarm-jev-integration' && github.head_ref != 'feat/swarm-pterodactyl-playable' && github.head_ref != 'tmp/swarm-jev-integration'
+    if: github.ref != 'refs/heads/experiment/swarm-jev-integration' && github.head_ref != 'experiment/swarm-jev-integration'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v3
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: lts/*
           cache: pnpm
@@ -70,11 +68,11 @@ jobs:
           pnpm --filter autorio.ts run build
 
   typecheck-python:
-    if: github.ref != 'refs/heads/feat/swarm-pterodactyl-playable' && github.ref != 'refs/heads/tmp/swarm-npc-parity-integration' && github.ref != 'refs/heads/tmp/swarm-jev-integration' && github.head_ref != 'feat/swarm-pterodactyl-playable' && github.head_ref != 'tmp/swarm-jev-integration'
+    if: github.ref != 'refs/heads/experiment/swarm-jev-integration' && github.head_ref != 'experiment/swarm-jev-integration'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: prefix-dev/setup-pixi@v0.9.1
         with:
           cache: true
@@ -82,13 +80,13 @@ jobs:
         run: pixi run typecheck
 
   test-typescript:
-    if: github.ref != 'refs/heads/feat/swarm-pterodactyl-playable' && github.ref != 'refs/heads/tmp/swarm-npc-parity-integration' && github.ref != 'refs/heads/tmp/swarm-jev-integration' && github.head_ref != 'feat/swarm-pterodactyl-playable' && github.head_ref != 'tmp/swarm-jev-integration'
+    if: github.ref != 'refs/heads/experiment/swarm-jev-integration' && github.head_ref != 'experiment/swarm-jev-integration'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v3
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: lts/*
           cache: pnpm
@@ -101,8 +99,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
       - name: Test swarm Pterodactyl infrastructure
@@ -115,10 +113,10 @@ jobs:
         run: node deploy/pterodactyl/build-payload.mjs --check
 
   swarm-factorio-integration:
-    if: github.ref == 'refs/heads/feat/swarm-pterodactyl-playable' || github.ref == 'refs/heads/tmp/swarm-npc-parity-integration' || github.ref == 'refs/heads/tmp/swarm-jev-integration' || github.head_ref == 'feat/swarm-pterodactyl-playable' || github.head_ref == 'tmp/swarm-jev-integration'
+    if: github.ref == 'refs/heads/experiment/swarm-jev-integration' || github.head_ref == 'experiment/swarm-jev-integration'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Run swarm Factorio harness lane
         run: docker build -f tests/factorio/Dockerfile -t airi-factorio-swarm-test . && docker run --rm -e NPC_TEST_LANES=swarm airi-factorio-swarm-test
