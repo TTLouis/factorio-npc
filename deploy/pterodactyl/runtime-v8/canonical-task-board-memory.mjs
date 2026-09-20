@@ -420,18 +420,51 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return planning
   }
 
-  commitPlanningPlan(key, { now = Date.now(), migrated = false } = {}) {
+  /**
+   * Commit the active draft, if and only if it earned it.
+   *
+   * This used to pass `jev_verdict: 'actionable'` and
+   * `runtime_validation: { passed: true }` as literals. The reducer's commit
+   * gate is strict and correct, so the effect was that every draft satisfied
+   * it: scope review could not refuse anything, and the roadmap's central
+   * claim -- that the system commits only what Jev found actionable -- was not
+   * true of the running agent.
+   *
+   * Both inputs must now come from the caller, and a missing review is a
+   * refusal rather than a pass. `review.verdict` is Jev's parsed scope review;
+   * `review.runtime_validation` is the deterministic preflight result.
+   */
+  commitPlanningPlan(key, { now = Date.now(), migrated = false, review } = {}) {
     const legacy = key ? this.planByNpc.get(key) : undefined
     let planning = this.ensurePlanningDraft(key, legacy, { now, migrated })
     const plan = getActivePlan(planning)
     if (!plan) return planning
     if ([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING, PLAN_STATUS.COMPLETED, PLAN_STATUS.BLOCKED].includes(plan.status)) return planning
+    // No review, no commit. Silence is not consent.
+    if (!review || typeof review !== 'object') return planning
+
+    planning = applyPlanningEvent(planning, {
+      type: PLANNING_EVENT.JEV_REVIEW_REQUESTED,
+      now,
+      source: 'jev',
+      plan_id: plan.plan_id,
+      verdict: review.verdict,
+      reason_codes: review.reason_codes,
+      confidence: review.confidence,
+    })
+
+    if (review.verdict !== 'actionable') {
+      this.planningByNpc.set(key, planning)
+      this.syncPlanningState(key, legacy)
+      return planning
+    }
+
     planning = applyPlanningEvent(planning, {
       type: PLANNING_EVENT.PLAN_COMMITTED,
       now,
       plan_id: plan.plan_id,
-      jev_verdict: 'actionable',
-      runtime_validation: { passed: true },
+      jev_verdict: review.verdict,
+      runtime_validation: review.runtime_validation,
     })
     this.planningByNpc.set(key, planning)
     this.syncPlanningState(key, legacy)
@@ -616,13 +649,21 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     let plan = getActivePlan(planning)
     const now = result.state.updated_at ?? Date.now()
     if (!plan) return result
+    // An outcome arriving is not a reason to commit a plan. These three
+    // branches each used to force a commit so they had somewhere to record
+    // themselves, which meant execution could admit its own plan retroactively.
+    // Progress on an unreviewed draft is simply not recorded; the reducer
+    // already refuses evidence for anything that is not the active committed
+    // step, so this only removes the path that manufactured the exception.
+    // A blocker may be recorded against a pre-commit plan; progress may not.
+    const admitted = [PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan.status)
+    if (!admitted && result.decision.durable_status !== 'blocked') return result
 
     // Every attempt to move the active step forward is counted, including the
     // ones that fail. The deadlock signals are all progress measurements -- an
     // evidence stall, a failure code that keeps repeating -- so a batch that is
     // never counted is progress the harness cannot tell apart from success.
     if (ATTEMPT_OUTCOME_KINDS.has(result.decision.kind)) {
-      planning = this.commitPlanningPlan(key, { now, migrated: true })
       plan = getActivePlan(planning)
       planning = applyPlanningEvent(planning, {
         type: PLANNING_EVENT.OPERATION_BATCH_ATTEMPTED,
@@ -640,7 +681,6 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     }
 
     if (result.decision.durable_status === 'blocked') {
-      planning = this.commitPlanningPlan(key, { now, migrated: true })
       plan = getActivePlan(planning)
       planning = applyPlanningEvent(planning, {
         type: PLANNING_EVENT.STRUCTURAL_BLOCKER_CONFIRMED,
@@ -653,7 +693,6 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       })
     }
     else if (result.decision.durable_status === 'completed') {
-      planning = this.commitPlanningPlan(key, { now, migrated: true })
       plan = getActivePlan(planning)
       const step = plan?.steps?.[plan.active_step_index]
       if (step) {
@@ -790,7 +829,19 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       let planning = this.planningByNpc.get(key)
       if (!planning) {
         planning = this.ensurePlanningDraft(key, state, { now: state.updated_at, migrated: true })
-        planning = this.commitPlanningPlan(key, { now: state.updated_at, migrated: true })
+        // Not a fresh admission: this plan was admitted by a previous run and
+        // is being reconstructed from disk. The review is stated explicitly so
+        // the provenance is visible, rather than defaulted into existence.
+        planning = this.commitPlanningPlan(key, {
+          now: state.updated_at,
+          migrated: true,
+          review: {
+            verdict: 'actionable',
+            reason_codes: ['restored_from_legacy_snapshot'],
+            confidence: 0,
+            runtime_validation: { passed: true },
+          },
+        })
         planning = this.replayLegacyVerifiedPrefix(key, state, planning, { now: state.updated_at })
         const plan = getActivePlan(planning)
         if (state.status === 'blocked' && plan) {

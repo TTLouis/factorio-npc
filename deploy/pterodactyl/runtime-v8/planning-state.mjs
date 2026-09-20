@@ -2146,7 +2146,12 @@ Object.assign(HANDLERS, {
 
   [PLANNING_EVENT.STRUCTURAL_BLOCKER_CONFIRMED](state, event, now) {
     const plan = getPlan(state, event.plan_id ?? state.active_plan_id)
-    if (!plan || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan.status)) return state
+    // A pre-commit plan can block too. Deterministic preflight runs BEFORE the
+    // commit, so a draft it proves unexecutable would otherwise have to be
+    // committed first purely to have somewhere to be marked blocked -- admitting
+    // a plan already known to be invalid, to record that it is invalid.
+    const blockable = [PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING, ...PRE_COMMIT_STATUSES]
+    if (!plan || !blockable.includes(plan.status)) return state
     // The runtime owns the failure fact (roadmap 1.4 / 7).
     if (!isRuntimeAuthority(event.source)) return state
     const next = blockPlan(state, plan, {

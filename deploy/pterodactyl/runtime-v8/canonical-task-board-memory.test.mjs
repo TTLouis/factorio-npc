@@ -5,6 +5,15 @@ import { canonicalContinuationPlan, CanonicalTaskBoardMemory, verifyDeterministi
 import { createTaskBoard, reconcileTaskBoard } from './common.mjs'
 import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 
+// A plan only commits on a real Jev scope review plus a real preflight result;
+// there is deliberately no default, so tests state the review they mean.
+const REVIEWED_ACTIONABLE = Object.freeze({
+  verdict: 'actionable',
+  reason_codes: [],
+  confidence: 0.9,
+  runtime_validation: { passed: true },
+})
+
 function board() {
   return {
     kind: 'task_board_lite',
@@ -654,7 +663,7 @@ test('authoritative planning reducer persists BLOCKED and explicit user choice a
   }))
 
   memory.ensurePlanningDraft(key, memory.planByNpc.get(key), { now: 100 })
-  memory.commitPlanningPlan(key, { now: 110 })
+  memory.commitPlanningPlan(key, { now: 110, review: REVIEWED_ACTIONABLE })
   memory.applyOutcomeAuthority(key, {
     kind: 'world_blocked',
     source: 'deterministic_runtime',
@@ -685,7 +694,7 @@ test('new goal after reducer cancellation gets fresh planning lineage under reus
   const memory = new CanonicalTaskBoardMemory()
   memory.planByNpc.set(key, planState({ goal_id: 'goal_old' }))
   memory.ensurePlanningDraft(key, memory.planByNpc.get(key), { now: 100 })
-  memory.commitPlanningPlan(key, { now: 110 })
+  memory.commitPlanningPlan(key, { now: 110, review: REVIEWED_ACTIONABLE })
   const oldPlanId = getActivePlan(memory.planningState(key)).plan_id
 
   memory.terminatePlan(key)
@@ -740,7 +749,7 @@ test('blocked revise choice plus explicit user prompt creates successor and pres
     blocker: 'path_blocked',
   }))
   let planning = memory.ensurePlanningDraft(key, memory.planByNpc.get(key), { now: 100, migrated: true })
-  planning = memory.commitPlanningPlan(key, { now: 110, migrated: true })
+  planning = memory.commitPlanningPlan(key, { now: 110, migrated: true, review: REVIEWED_ACTIONABLE })
   planning = memory.replayLegacyVerifiedPrefix(key, memory.planByNpc.get(key), planning, { now: 115 })
   memory.planningByNpc.set(key, planning)
   memory.applyOutcomeAuthority(key, {

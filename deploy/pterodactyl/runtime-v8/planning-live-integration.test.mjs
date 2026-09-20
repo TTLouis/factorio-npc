@@ -62,12 +62,22 @@ function proposedPlan(steps, currentStep = 0) {
   }
 }
 
+// A plan only commits on a real Jev scope review plus a real preflight result.
+// Tests that need a committed plan state that review explicitly rather than
+// relying on a default, because there is deliberately no longer a default.
+const REVIEWED_ACTIONABLE = Object.freeze({
+  verdict: 'actionable',
+  reason_codes: [],
+  confidence: 0.9,
+  runtime_validation: { passed: true },
+})
+
 function startCommittedPlan(memory, key = 'npc:airi') {
   const request = { sender: 'Louis', text: 'Build early automation' }
   const plan = proposedPlan(['Gather stone', 'Craft furnace', 'Build power'])
   const recorded = memory.recordPlan(key, request, plan)
   const reconciled = memory.reconcileTaskBoard(key, undefined, plan, recorded, { allowReplan: false })
-  memory.commitPlanningPlan(key, { now: 100 })
+  memory.commitPlanningPlan(key, { now: 100, review: REVIEWED_ACTIONABLE })
   return { request, plan, state: reconciled.state }
 }
 
@@ -405,7 +415,7 @@ test('an evidence stall deadlocks even when every batch reports success', () => 
     confidence: 0.9,
     requirements: [{ kind: 'inventory_count', item_name: 'iron-plate', minimum: 20 }],
   })
-  memory.commitPlanningPlan(key, { now: 120 })
+  memory.commitPlanningPlan(key, { now: 120, review: REVIEWED_ACTIONABLE })
   assert.ok(
     getActivePlan(memory.planningState(key)).steps[0].completion_contract,
     'the committed step carries the contract the stall signal reads',
@@ -476,4 +486,70 @@ test('successful batches do not accumulate toward a deadlock', () => {
   // Non-vacuous: the run has to have actually moved, or "never blocked" would
   // be satisfied by a plan that did nothing at all.
   assert.ok(completedSteps > 0, 'verified evidence advanced the plan while batches accumulated')
+})
+
+test('a draft cannot commit without a jev scope review', () => {
+  const key = 'npc:airi'
+  const memory = new CanonicalTaskBoardMemory()
+  const plan = proposedPlan(['Gather stone', 'Craft furnace', 'Build power'])
+  const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Build early automation' }, plan)
+  memory.reconcileTaskBoard(key, undefined, plan, recorded, { allowReplan: false })
+
+  // Silence is not consent. This used to commit, because the adapter supplied
+  // jev_verdict: 'actionable' as a literal.
+  memory.commitPlanningPlan(key, { now: 100 })
+  assert.equal(getActivePlan(memory.planningState(key)).status, PLAN_STATUS.DRAFT)
+
+  // Neither is a refusal.
+  for (const verdict of ['refine', 'needs_grounding', 'needs_user_clarification']) {
+    memory.commitPlanningPlan(key, {
+      now: 110,
+      review: { verdict, reason_codes: ['mixed_outcomes'], confidence: 0.8, runtime_validation: { passed: true } },
+    })
+    // A reviewed-and-refused plan legitimately sits in JEV_REVIEW; what matters
+    // is that it is not admitted.
+    assert.notEqual(
+      getActivePlan(memory.planningState(key)).status,
+      PLAN_STATUS.COMMITTED,
+      `${verdict} must not admit the draft`,
+    )
+  }
+
+  // Nor an actionable verdict whose runtime validation failed.
+  memory.commitPlanningPlan(key, {
+    now: 120,
+    review: { verdict: 'actionable', reason_codes: [], confidence: 0.9, runtime_validation: { passed: false } },
+  })
+  assert.notEqual(getActivePlan(memory.planningState(key)).status, PLAN_STATUS.COMMITTED)
+
+  // Both gates satisfied, and only then.
+  memory.commitPlanningPlan(key, { now: 130, review: REVIEWED_ACTIONABLE })
+  const committed = getActivePlan(memory.planningState(key))
+  assert.equal(committed.status, PLAN_STATUS.COMMITTED)
+  assert.equal(committed.jev_review.last_verdict, 'actionable')
+})
+
+test('execution cannot admit its own plan retroactively', () => {
+  const key = 'npc:airi'
+  const memory = new CanonicalTaskBoardMemory()
+  const plan = proposedPlan(['Gather stone', 'Craft furnace', 'Build power'])
+  const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Build early automation' }, plan)
+  memory.reconcileTaskBoard(key, undefined, plan, recorded, { allowReplan: false })
+  assert.equal(getActivePlan(memory.planningState(key)).status, PLAN_STATUS.DRAFT)
+
+  // Outcomes arriving against an unreviewed draft used to force it committed so
+  // they had somewhere to record themselves.
+  memory.applyOutcomeAuthority(key, {
+    kind: 'verified_complete',
+    source: 'deterministic_runtime',
+    reason_code: 'step_verified',
+    evidence: [{ kind: 'verified_world_state', ref: 'verified_0', summary: 'done' }],
+  })
+  const after = getActivePlan(memory.planningState(key))
+  assert.equal(after.status, PLAN_STATUS.DRAFT, 'an outcome is not an admission')
+  assert.equal(
+    Object.values(after.execution.step_progress).filter(entry => entry.status === 'completed').length,
+    0,
+    'and it records no progress against unadmitted work',
+  )
 })
