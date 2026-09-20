@@ -488,6 +488,10 @@ export function sanitizeShelfNode(raw, { sequence = 0, trusted = false } = {}) {
   return {
     id,
     ready_since: finiteNumber(raw.ready_since) ?? null,
+    // Set by the fan-out cap, not by the author: this node is remembered but
+    // not yet refinable. Carried through revisions and restore so the cap
+    // cannot be escaped by simply restating the node.
+    ...(raw.deferred_by_fanout === true ? { deferred_by_fanout: true } : {}),
     ...(droppedExecutable.length > 0 ? { dropped_executable_fields: droppedExecutable } : {}),
     intent,
     why_it_matters: text(raw.why_it_matters, 400),
@@ -666,26 +670,31 @@ function createRoadmapRevision(state, { now, nodes, reason, sequence, authority,
   const incoming = []
   const seen = new Set()
   // Roadmap 14 non-goal guard: one parent node may only fan out into a handful
-  // of coarse successors. Anything past the cap is dropped and recorded, so a
-  // refinement cannot quietly deposit a step-by-step mega-plan on the shelf.
+  // of coarse successors, so a refinement cannot quietly deposit a step-by-step
+  // mega-plan on the shelf.
+  //
+  // The cap limits what becomes REFINABLE now, not what is remembered. Overflow
+  // successors are kept as tentative nodes marked `deferred_by_fanout` and are
+  // held back from promotion; dropping them outright lost real guidance with no
+  // surface the user or the model could see.
   const fanout = new Map()
-  const droppedForCoarseness = []
+  const deferredForCoarseness = []
 
   boundedList(nodes, 64).forEach((raw, index) => {
     const node = sanitizeShelfNode(raw, { sequence: `${sequence}_${index + 1}` })
     if (!node || seen.has(node.id)) return
     const prior = previousById.get(node.id)
+    let deferred = node.deferred_by_fanout === true
     if (!prior && node.derived_from_node_id) {
       const used = fanout.get(node.derived_from_node_id) ?? 0
-      if (used >= SHELF_REFINEMENT_MAX_FANOUT) {
-        droppedForCoarseness.push(node.id)
-        return
-      }
-      fanout.set(node.derived_from_node_id, used + 1)
+      if (used >= SHELF_REFINEMENT_MAX_FANOUT) deferred = true
+      else fanout.set(node.derived_from_node_id, used + 1)
     }
+    if (deferred) deferredForCoarseness.push(node.id)
     seen.add(node.id)
     incoming.push({
       ...node,
+      ...(deferred ? { deferred_by_fanout: true } : {}),
       // Frontier evidence is durable state and survives roadmap revisions: a
       // revision may restate the frontier, but cannot erase what was verified.
       capability_frontier: mergeFrontierLineage(prior?.capability_frontier, node.capability_frontier),
@@ -697,7 +706,13 @@ function createRoadmapRevision(state, { now, nodes, reason, sequence, authority,
       resolved_by: Array.from(new Set([...(prior?.resolved_by ?? []), ...node.resolved_by])),
       verified_results: Array.from(new Set([...(prior?.verified_results ?? []), ...node.verified_results])),
       first_seen_revision_id: prior?.first_seen_revision_id ?? node.first_seen_revision_id ?? revisionId,
-      derived_from_node_id: prior ? prior.id : node.derived_from_node_id,
+      // Parentage is lineage and comes from the PRIOR node, not from the
+      // incoming restatement. This read `prior.id`, which is trivially the
+      // node's own id, so restating any node made it its own ancestor and
+      // erased the parent that put it on the shelf.
+      derived_from_node_id: prior
+        ? (prior.derived_from_node_id ?? node.derived_from_node_id)
+        : node.derived_from_node_id,
       revision_reason: prior && prior.intent !== node.intent
         ? text(reason || 'node_revised', 300)
         : node.revision_reason,
@@ -726,8 +741,8 @@ function createRoadmapRevision(state, { now, nodes, reason, sequence, authority,
     evidence_refs: stringList(evidenceRefs, { max: 16, maxLength: 200 }),
     created_at: now,
     nodes: incoming,
-    ...(droppedForCoarseness.length > 0
-      ? { dropped_for_coarseness: { node_ids: droppedForCoarseness, max_fanout: SHELF_REFINEMENT_MAX_FANOUT } }
+    ...(deferredForCoarseness.length > 0
+      ? { deferred_for_coarseness: { node_ids: deferredForCoarseness, max_fanout: SHELF_REFINEMENT_MAX_FANOUT } }
       : {}),
   }, now)
 }
@@ -867,11 +882,50 @@ export function shelfNodeReadiness(roadmap, nodeId) {
  * demoted here, and nothing is promoted past READY_TO_REFINE — the higher rungs
  * belong to verified plan results only.
  */
-function promoteReadyNodes(roadmap, now) {
+/**
+ * Release fan-out deferrals whose parent has room again.
+ *
+ * The cap is a limit on how much of one parent is refinable AT ONCE, not a
+ * permanent cut: a node parked with nothing able to un-park it is just a
+ * slower drop. A sibling that has been realized or invalidated no longer
+ * occupies budget, so the longest-parked deferred child takes its place.
+ *
+ * Deterministic: siblings are released in shelf order, never by recency or by
+ * any claim on the node itself.
+ */
+function releaseDeferredFanout(roadmap) {
+  if (!roadmap) return roadmap
+  const occupied = new Map()
+  for (const node of roadmap.nodes) {
+    const parent = node.derived_from_node_id
+    if (!parent || node.deferred_by_fanout === true) continue
+    if (node.status === SHELF_NODE_STATUS.REALIZED || node.status === SHELF_NODE_STATUS.INVALIDATED) continue
+    occupied.set(parent, (occupied.get(parent) ?? 0) + 1)
+  }
+
+  let changed = false
+  const nodes = roadmap.nodes.map((node) => {
+    if (node.deferred_by_fanout !== true) return node
+    const parent = node.derived_from_node_id
+    if (!parent) return node
+    const used = occupied.get(parent) ?? 0
+    if (used >= SHELF_REFINEMENT_MAX_FANOUT) return node
+    occupied.set(parent, used + 1)
+    changed = true
+    const { deferred_by_fanout: _released, ...released } = node
+    return released
+  })
+  return changed ? { ...roadmap, nodes } : roadmap
+}
+
+function promoteReadyNodes(rawRoadmap, now) {
+  const roadmap = releaseDeferredFanout(rawRoadmap)
   if (!roadmap) return roadmap
   let changed = false
   const nodes = roadmap.nodes.map((node) => {
     if (node.status !== SHELF_NODE_STATUS.TENTATIVE) return node
+    // Held back by the fan-out cap: remembered, but not refinable yet.
+    if (node.deferred_by_fanout === true) return node
     if (!shelfNodeReadiness(roadmap, node.id).ready) return node
     changed = true
     return { ...node, status: SHELF_NODE_STATUS.READY_TO_REFINE, ready_since: node.ready_since ?? now }
@@ -2343,7 +2397,7 @@ function restoreRoadmap(raw) {
     evidence_refs: stringList(raw.evidence_refs, { max: 16, maxLength: 200 }),
     created_at: finiteNumber(raw.created_at) ?? 0,
     nodes,
-    ...(raw.dropped_for_coarseness ? { dropped_for_coarseness: clone(raw.dropped_for_coarseness) } : {}),
+    ...(raw.deferred_for_coarseness ? { deferred_for_coarseness: clone(raw.deferred_for_coarseness) } : {}),
   }
 }
 

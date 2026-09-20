@@ -1266,10 +1266,84 @@ test('refinement cannot smuggle a step-by-step mega-plan onto the shelf', () => 
     reason: 'refine smelting',
     nodes: [...base.roadmap.nodes, ...children],
   })
-  const kept = revised.roadmap.nodes.filter(node => node.id.startsWith('node_micro_'))
-  assert.equal(kept.length, SHELF_REFINEMENT_MAX_FANOUT)
-  assert.equal(revised.roadmap.dropped_for_coarseness.node_ids.length, 5)
-  assert.equal(revised.roadmap.dropped_for_coarseness.max_fanout, SHELF_REFINEMENT_MAX_FANOUT)
+  // Everything the refinement proposed is remembered -- the cap governs what
+  // becomes refinable, not what survives.
+  const micro = revised.roadmap.nodes.filter(node => node.id.startsWith('node_micro_'))
+  assert.equal(micro.length, SHELF_REFINEMENT_MAX_FANOUT + 5)
+
+  const refinable = micro.filter(node => node.deferred_by_fanout !== true)
+  assert.equal(refinable.length, SHELF_REFINEMENT_MAX_FANOUT)
+  assert.equal(revised.roadmap.deferred_for_coarseness.node_ids.length, 5)
+  assert.equal(revised.roadmap.deferred_for_coarseness.max_fanout, SHELF_REFINEMENT_MAX_FANOUT)
+
+  // Deferred nodes stay tentative: parked guidance is not a refinement queue.
+  const deferred = micro.filter(node => node.deferred_by_fanout === true)
+  assert.equal(deferred.length, 5)
+  for (const node of deferred) assert.equal(node.status, SHELF_NODE_STATUS.TENTATIVE)
+
+  // And restating them does not launder the deferral away.
+  const restated = applyPlanningEvent(revised, {
+    type: PLANNING_EVENT.ROADMAP_REVISED,
+    source: 'user',
+    now: 1400,
+    reason: 'restate',
+    nodes: revised.roadmap.nodes,
+  })
+  const stillDeferred = restated.roadmap.nodes.filter(node => node.deferred_by_fanout === true)
+  assert.equal(stillDeferred.length, 5)
+  for (const node of stillDeferred) assert.equal(node.status, SHELF_NODE_STATUS.TENTATIVE)
+
+  // Survives persistence.
+  const roundTripped = restorePlanningState(JSON.parse(JSON.stringify(serializePlanningState(restated))))
+  assert.equal(roundTripped.roadmap.nodes.filter(node => node.deferred_by_fanout === true).length, 5)
+  assert.equal(roundTripped.roadmap.deferred_for_coarseness.node_ids.length, 5)
+})
+
+test('a fan-out deferral is released when a sibling stops occupying the budget', () => {
+  const base = dependentShelf(goalState())
+  const children = Array.from({ length: SHELF_REFINEMENT_MAX_FANOUT + 2 }, (item, index) => ({
+    id: `node_micro_${index}`,
+    intent: `micro step ${index}`,
+    derived_from_node_id: 'node_smelting',
+  }))
+  const revised = applyPlanningEvent(base, {
+    type: PLANNING_EVENT.ROADMAP_REVISED,
+    source: 'user',
+    now: 1300,
+    reason: 'refine smelting',
+    nodes: [...base.roadmap.nodes, ...children],
+  })
+  const deferredIds = revised.roadmap.nodes.filter(node => node.deferred_by_fanout === true).map(node => node.id)
+  assert.deepEqual(deferredIds, ['node_micro_4', 'node_micro_5'])
+
+  // Parentage survives a restatement: this used to be overwritten with the
+  // node's own id, which silently orphaned every child from its parent.
+  const restated = applyPlanningEvent(revised, {
+    type: PLANNING_EVENT.ROADMAP_REVISED,
+    source: 'user',
+    now: 1350,
+    reason: 'restate',
+    nodes: revised.roadmap.nodes,
+  })
+  for (const node of restated.roadmap.nodes.filter(item => item.id.startsWith('node_micro_'))) {
+    assert.equal(node.derived_from_node_id, 'node_smelting', `${node.id} kept its parent`)
+  }
+
+  // Invalidating two occupying siblings frees exactly two slots, and the
+  // longest-parked deferred children take them in shelf order.
+  const freed = applyPlanningEvent(restated, {
+    type: PLANNING_EVENT.ROADMAP_REVISED,
+    source: 'user',
+    now: 1400,
+    reason: 'two micro steps turned out to be unnecessary',
+    nodes: restated.roadmap.nodes.filter(node => node.id !== 'node_micro_0' && node.id !== 'node_micro_1'),
+  })
+  assert.deepEqual(freed.roadmap.nodes.filter(node => node.deferred_by_fanout === true).map(node => node.id), [])
+  for (const id of deferredIds) {
+    const node = freed.roadmap.nodes.find(item => item.id === id)
+    assert.equal(node.deferred_by_fanout, undefined, `${id} is refinable once a slot opened`)
+    assert.equal(node.status, SHELF_NODE_STATUS.READY_TO_REFINE)
+  }
 })
 
 test('the shelf stays non-executable: a node can inform a draft but never become one', () => {
