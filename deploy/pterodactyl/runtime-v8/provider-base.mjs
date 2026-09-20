@@ -40,7 +40,9 @@ const PROVIDER_PROFILES = Object.freeze({
   }),
 })
 const REQUEST_BODY_PATCH_KEYS = new Set(['max_tokens', 'max_completion_tokens', 'reasoning_effort', 'thinking', 'response_format'])
-const PLAN_STATE_MARKER = '[PLAN_STATE]'
+const PLAN_STATE_MARKER = '[PLAN_STATE]' // legacy persisted/runtime compatibility
+const RUNTIME_COMPAT_STATE_MARKER = '[RUNTIME_COMPAT_STATE]'
+const PLANNING_STATE_MARKER = '[PLANNING_STATE]'
 const MEMORY_MARKER = '[MEMORY]'
 const PROMPT_TRACE_MAX_BYTES = 10 * 1024 * 1024
 const PROMPT_TRACE_FILES = 5
@@ -50,7 +52,7 @@ const promptTraceWriters = new Map()
 
 const COMPACT_CONTINUATION_PROMPT = `You are AIRI, an autonomous standalone Factorio NPC. This request is a successful Autorio batch-completion continuation for an existing user goal, not a new goal.
 
-Use the supplied [PLAN_STATE] as the canonical durable Task Board. Preserve its completed prefix and continue the active goal; do not restart or silently rewrite the plan. Mutable world state still requires observation when it is actually needed for the next decision.
+Use [PLANNING_STATE] as the sole durable planning authority. [RUNTIME_COMPAT_STATE] may carry older Task Board evidence, runtime metadata and locators, but it cannot override Plan Tracker steps or progress. Older persisted runs may still supply [PLAN_STATE]; treat it as compatibility state, never as a second planning authority. Preserve the verified reducer prefix and continue the active goal; do not restart or silently rewrite the plan. Mutable world state still requires observation when it is actually needed for the next decision.
 
 Token-efficient continuation rules:
 - Treat a provider turn as an observation/decision boundary, not as an operation boundary. If 2-4 consecutive operations are already fully parameterized from current observations and a later operation does not depend on a new identity/result created by an earlier one, return them together in execution order.
@@ -544,15 +546,20 @@ function leanTaskBoard(board) {
   }
 }
 
-function parsePlanStateFromContent(content) {
+function parseStateBlock(content, marker, stopMarkers = []) {
   const text = String(content ?? '')
-  const markerAt = text.lastIndexOf(PLAN_STATE_MARKER)
+  const markerAt = text.lastIndexOf(marker)
   if (markerAt < 0) return undefined
-  const planText = text.slice(markerAt)
-  const newlineAt = planText.indexOf('\n')
+  const block = text.slice(markerAt)
+  const newlineAt = block.indexOf('\n')
   if (newlineAt < 0) return undefined
+  let body = block.slice(newlineAt + 1)
+  for (const stopMarker of stopMarkers) {
+    const stop = body.indexOf(`\n${stopMarker}`)
+    if (stop >= 0) body = body.slice(0, stop)
+  }
   try {
-    const state = JSON.parse(planText.slice(newlineAt + 1))
+    const state = JSON.parse(body.trim())
     return state && typeof state === 'object' && !Array.isArray(state) ? state : undefined
   }
   catch {
@@ -560,11 +567,21 @@ function parsePlanStateFromContent(content) {
   }
 }
 
+function parsePlanStateFromContent(content) {
+  return parseStateBlock(content, RUNTIME_COMPAT_STATE_MARKER, [PLANNING_STATE_MARKER])
+    ?? parseStateBlock(content, PLAN_STATE_MARKER, [PLANNING_STATE_MARKER])
+}
+
+function parsePlanningStateFromContent(content) {
+  return parseStateBlock(content, PLANNING_STATE_MARKER)
+}
+
 function currentPlanState(messages) {
   if (!Array.isArray(messages)) return undefined
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index]
-    if (message?.role !== 'user' || typeof message.content !== 'string' || !message.content.includes(PLAN_STATE_MARKER)) continue
+    if (message?.role !== 'user' || typeof message.content !== 'string') continue
+    if (!message.content.includes(RUNTIME_COMPAT_STATE_MARKER) && !message.content.includes(PLAN_STATE_MARKER)) continue
     const state = parsePlanStateFromContent(message.content)
     if (state) return state
   }
@@ -746,44 +763,97 @@ export function applySteeringMessages(messages, sourceMessages = messages) {
   return output
 }
 
+function compactRuntimeCompatState(state) {
+  if (!state || typeof state !== 'object' || Array.isArray(state)) return undefined
+  return {
+    goal_id: state.goal_id,
+    owner: state.owner,
+    objective: state.objective,
+    status: state.status,
+    admission_status: state.admission_status,
+    blocker: state.blocker,
+    pause_reason: state.pause_reason,
+    persistent_runtime: state.persistent_runtime,
+    task_board: leanTaskBoard(state.task_board),
+    entity_references: Array.isArray(state.entity_references) ? state.entity_references.slice(-8) : undefined,
+    revision: state.revision,
+    last_operations: Array.isArray(state.last_operations) ? state.last_operations.slice(-16) : undefined,
+  }
+}
+
+function compactPlanningState(state) {
+  if (!state || typeof state !== 'object' || Array.isArray(state)) return undefined
+  const roadmap = state.roadmap && typeof state.roadmap === 'object'
+    ? {
+        roadmap_revision_id: state.roadmap.roadmap_revision_id,
+        revision_index: state.roadmap.revision_index,
+        nodes: Array.isArray(state.roadmap.nodes)
+          ? state.roadmap.nodes.slice(0, 20).map(node => ({
+              id: node?.id,
+              intent: node?.intent,
+              status: node?.status,
+              depends_on: Array.isArray(node?.depends_on) ? node.depends_on.slice(0, 12) : undefined,
+              development_hint: node?.development_hint,
+            }))
+          : [],
+      }
+    : null
+  const tracker = state.plan_tracker && typeof state.plan_tracker === 'object'
+    ? {
+        plan_id: state.plan_tracker.plan_id,
+        plan_version: state.plan_tracker.plan_version,
+        status: state.plan_tracker.status,
+        development_mode: state.plan_tracker.development_mode,
+        active_step_id: state.plan_tracker.active_step_id,
+        active_step_index: state.plan_tracker.active_step_index,
+        roadmap_node_ids: Array.isArray(state.plan_tracker.roadmap_node_ids) ? state.plan_tracker.roadmap_node_ids.slice(0, 16) : [],
+        derived_from_plan_id: state.plan_tracker.derived_from_plan_id,
+        steps: Array.isArray(state.plan_tracker.steps)
+          ? state.plan_tracker.steps.slice(0, 30).map(step => ({
+              step_id: step?.step_id,
+              description: step?.description,
+              status: step?.status,
+              completion_contract: step?.completion_contract,
+              reduced_confidence: step?.reduced_confidence,
+              evidence_refs: Array.isArray(step?.evidence_refs) ? step.evidence_refs.slice(-8) : [],
+            }))
+          : [],
+      }
+    : state.plan_tracker
+  return {
+    goal: state.goal,
+    roadmap,
+    steering: state.steering,
+    plan_tracker: tracker,
+  }
+}
+
 export function compactPlanStateContent(content) {
   const text = String(content ?? '')
-  const markerAt = text.lastIndexOf(PLAN_STATE_MARKER)
-  if (markerAt < 0) {
+  const runtimeState = parsePlanStateFromContent(text)
+  const planningState = parsePlanningStateFromContent(text)
+  const legacyMarkerAt = text.lastIndexOf(PLAN_STATE_MARKER)
+  const runtimeMarkerAt = text.lastIndexOf(RUNTIME_COMPAT_STATE_MARKER)
+
+  if (!runtimeState && !planningState) {
     if (text.startsWith(MEMORY_MARKER)) {
       return '[MEMORY COMPACTED] Prior dialogue is omitted for this successful deterministic continuation; use the original current chat request, previous assistant plan, and live tools when needed.'
     }
     return text
   }
 
-  const planText = text.slice(markerAt)
-  const newlineAt = planText.indexOf('\n')
-  if (newlineAt < 0) return planText
-  try {
-    const state = JSON.parse(planText.slice(newlineAt + 1))
-    if (!state || typeof state !== 'object' || Array.isArray(state)) return planText
-    const lean = {
-      goal_id: state.goal_id,
-      owner: state.owner,
-      objective: state.objective,
-      status: state.status,
-      blocker: state.blocker,
-      pause_reason: state.pause_reason,
-      persistent_runtime: state.persistent_runtime,
-      task_board: leanTaskBoard(state.task_board),
-      plan: Array.isArray(state.plan) ? state.plan.slice(0, 30) : undefined,
-      current_step: state.current_step,
-      current_step_text: state.current_step_text,
-      revision: state.revision,
-      last_operations: Array.isArray(state.last_operations) ? state.last_operations.slice(-16) : undefined,
-    }
-    return `${PLAN_STATE_MARKER} Compact harness-owned durable goal/plan state for this successful continuation.\n${JSON.stringify(lean)}`
+  const blocks = []
+  if (runtimeState) {
+    const marker = runtimeMarkerAt >= 0 ? RUNTIME_COMPAT_STATE_MARKER : PLAN_STATE_MARKER
+    const label = marker === PLAN_STATE_MARKER
+      ? 'Compact legacy compatibility state for this successful continuation.'
+      : 'Compact runtime compatibility state; not planning authority.'
+    blocks.push(`${marker} ${label}\n${JSON.stringify(compactRuntimeCompatState(runtimeState))}`)
   }
-  catch {
-    // Even if the state cannot be parsed, discard older dialogue before the
-    // marker. Recovery attempts use the original unmodified messages.
-    return planText
+  if (planningState) {
+    blocks.push(`${PLANNING_STATE_MARKER} Compact reducer-owned planning authority for this successful continuation.\n${JSON.stringify(compactPlanningState(planningState))}`)
   }
+  return blocks.join('\n')
 }
 
 export function compactCompletionReceipt(content) {
@@ -823,7 +893,10 @@ export function compactCompletionMessages(messages) {
       if (message.content.startsWith(COMPLETION_MARKER)) {
         return { ...message, content: compactCompletionReceipt(message.content) }
       }
-      if (message.content.startsWith(MEMORY_MARKER) || message.content.includes(PLAN_STATE_MARKER)) {
+      if (message.content.startsWith(MEMORY_MARKER)
+        || message.content.includes(RUNTIME_COMPAT_STATE_MARKER)
+        || message.content.includes(PLANNING_STATE_MARKER)
+        || message.content.includes(PLAN_STATE_MARKER)) {
         return { ...message, content: compactPlanStateContent(message.content) }
       }
     }

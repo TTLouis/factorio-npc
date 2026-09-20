@@ -107,6 +107,65 @@ test('successful operation completion uses compact context and bounded fallback 
   assert.doesNotMatch(compactReceipt, /unused actor snapshot/)
 })
 
+test('compact continuation preserves reducer planning authority in the new two-block context', () => {
+  const runtime = {
+    goal_id: 'goal_new',
+    objective: 'build staged production',
+    status: 'active',
+    task_board: {
+      kind: 'task_board_lite',
+      goal_id: 'goal_new',
+      status: 'active',
+      completed_count: 0,
+      total_steps: 1,
+      active_index: 0,
+      steps: [{ id: 'legacy_step', description: 'legacy projection', status: 'active' }],
+      evidence: [{ kind: 'deterministic_verification', ref: 'legacy-proof', summary: 'verified' }],
+    },
+    history: ['drop me'],
+  }
+  const planning = {
+    goal: { goal_id: 'goal_new', objective: 'build staged production', status: 'active' },
+    roadmap: {
+      roadmap_revision_id: 'roadmap_1',
+      revision_index: 1,
+      nodes: [{ id: 'node_1', intent: 'Smelting exists.', status: 'ready_to_refine', depends_on: [] }],
+    },
+    steering: { current_mode: 'horizontal', sequence: 2 },
+    plan_tracker: {
+      plan_id: 'goal_new_p4',
+      plan_version: 2,
+      status: 'COMMITTED',
+      development_mode: 'horizontal',
+      active_step_id: 'p4_s1',
+      active_step_index: 0,
+      roadmap_node_ids: ['node_1'],
+      derived_from_plan_id: 'goal_new_p3',
+      steps: [{
+        step_id: 'p4_s1',
+        description: 'Build support capacity',
+        status: 'active',
+        completion_contract: { mode: 'all', requirements: [{ kind: 'inventory_count', item_name: 'iron-plate', minimum: 20 }] },
+        evidence_refs: ['proof_1'],
+      }],
+    },
+  }
+  const content = `[MEMORY] old dialogue
+[RUNTIME_COMPAT_STATE] compatibility only
+${JSON.stringify(runtime)}
+[PLANNING_STATE] reducer authority
+${JSON.stringify(planning)}`
+
+  const compact = compactPlanStateContent(content)
+  assert.match(compact, /^\[RUNTIME_COMPAT_STATE\]/)
+  assert.match(compact, /\[PLANNING_STATE\]/)
+  assert.match(compact, /goal_new_p4/)
+  assert.match(compact, /Build support capacity/)
+  assert.match(compact, /"current_mode":"horizontal"/)
+  assert.doesNotMatch(compact, /drop me/)
+  assert.doesNotMatch(compact, /\[MEMORY\]/)
+})
+
 test('initial requests and recovery attempts retain the full prompt and full output budget', async () => {
   const bodies = []
   const fetchImpl = async (_url, options) => {
