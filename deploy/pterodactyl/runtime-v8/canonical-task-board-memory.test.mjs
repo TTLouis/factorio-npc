@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import { canonicalContinuationPlan, CanonicalTaskBoardMemory, verifyDeterministicReceipt } from './canonical-task-board-memory.mjs'
 import { createTaskBoard, reconcileTaskBoard } from './common.mjs'
+import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 
 function board() {
   return {
@@ -637,3 +638,69 @@ test('durable step completion contracts survive snapshot restore and only follow
   assert.notEqual(replanned.steps[0].id, 'step_1')
   assert.equal(replanned.steps[0].completion_contract, undefined)
 })
+
+test('authoritative planning reducer persists BLOCKED and explicit user choice across restart', () => {
+  const key = 'npc:airi'
+  const memory = new CanonicalTaskBoardMemory()
+  memory.planByNpc.set(key, planState({
+    task_board: {
+      ...board(),
+      active_index: 0,
+      active_step_id: 'step_1',
+      completed_count: 0,
+      steps: board().steps.map((step, index) => ({ ...step, status: index === 0 ? 'active' : 'pending' })),
+    },
+    current_step: 0,
+  }))
+
+  memory.ensurePlanningDraft(key, memory.planByNpc.get(key), { now: 100 })
+  memory.commitPlanningPlan(key, { now: 110 })
+  memory.applyOutcomeAuthority(key, {
+    kind: 'world_blocked',
+    source: 'deterministic_runtime',
+    reason_code: 'operation_preflight_failed:missing_dependency',
+    candidate_blocker: 'operation_preflight_failed:missing_dependency',
+    evidence: [{ kind: 'operation_preflight_blocker', ref: 'preflight_1', summary: 'missing dependency' }],
+  })
+  memory.recordBlockedChoice(key, 'revise', 'Louis', { now: 130 })
+
+  const before = getActivePlan(memory.planningState(key))
+  assert.equal(before.status, PLAN_STATUS.BLOCKED)
+  assert.equal(before.blocker.user_choice.choice, 'revise')
+  assert.equal(memory.currentPlan(key).planning.blocked.awaiting_choice, false)
+  assert.equal(memory.currentPlan(key).planning.blocked.choice, 'revise')
+
+  const restored = new CanonicalTaskBoardMemory()
+  restored.restore(JSON.parse(JSON.stringify(memory.snapshot())))
+  const after = getActivePlan(restored.planningState(key))
+  assert.equal(after.status, PLAN_STATUS.BLOCKED)
+  assert.equal(after.blocker.user_choice.choice, 'revise')
+  assert.equal(restored.currentPlan(key).status, 'blocked')
+  assert.equal(restored.currentPlan(key).planning.plan.plan_id, after.plan_id)
+  assert.equal(restored.currentPlan(key).planning.blocked.choice, 'revise')
+})
+
+test('new goal after reducer cancellation gets fresh planning lineage under reused NPC key', () => {
+  const key = 'npc:airi'
+  const memory = new CanonicalTaskBoardMemory()
+  memory.planByNpc.set(key, planState({ goal_id: 'goal_old' }))
+  memory.ensurePlanningDraft(key, memory.planByNpc.get(key), { now: 100 })
+  memory.commitPlanningPlan(key, { now: 110 })
+  const oldPlanId = getActivePlan(memory.planningState(key)).plan_id
+
+  memory.terminatePlan(key)
+  const cancelled = getActivePlan(memory.planningState(key))
+  assert.equal(cancelled.status, PLAN_STATUS.CANCELLED)
+
+  const next = memory.recordPlan(key, { sender: 'Louis', text: 'Build a new smelting line' }, {
+    chatMessage: 'Starting over.',
+    plan: ['Inspect ore', 'Build smelting'],
+    currentStep: 0,
+    operations: [{ name: 'wait', args: { ticks: 1 } }],
+  })
+  const nextPlan = getActivePlan(memory.planningState(key))
+  assert.equal(next.state.objective, 'Build a new smelting line')
+  assert.notEqual(nextPlan.plan_id, oldPlanId)
+  assert.equal(nextPlan.status, PLAN_STATUS.DRAFT)
+})
+
