@@ -217,6 +217,21 @@ test('receipt task types must match the submitted strict operations exactly', ()
   assert.deepEqual(result, { verified: false, reason: 'receipt_operation_mismatch' })
 })
 
+test('receipt correlation must belong to the currently active goal and canonical step', () => {
+  const state = planState()
+  for (const correlation of [
+    { goal_id: 'older_goal', step_id: 'step_3' },
+    { goal_id: 'goal_1', step_id: 'step_2' },
+  ]) {
+    const evidence = completedReceipt()
+    const summary = JSON.parse(evidence.summary)
+    evidence.summary = JSON.stringify({ ...summary, correlation })
+    const result = verifyDeterministicReceipt(state, evidence)
+    assert.equal(result.verified, false)
+    assert.match(result.reason, /^receipt_(goal|step)_mismatch$/)
+  }
+})
+
 test('verified mutation receipt records proof without advancing semantic canonical progress', () => {
   const memory = new CanonicalTaskBoardMemory()
   memory.planByNpc.set('npc:airi', planState())

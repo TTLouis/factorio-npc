@@ -29,7 +29,9 @@ import {
   completionContractSupported,
   evaluateCompletionContract,
   makeConditionWait,
+  parseReceiptCompletionDecision,
   parseStepCheckpointDecision,
+  receiptCompletionDecisionQuestions,
   sanitizeStepCompletionContract,
   stepCheckpointDecisionQuestions,
   stepRelationAllowsAdmission,
@@ -509,6 +511,8 @@ function compactBasicOperationResult(result) {
   if (!result || typeof result !== 'object' || Array.isArray(result)) return undefined
   return {
     operation_id: Number.isSafeInteger(result.operation_id) ? result.operation_id : undefined,
+    tick: Number.isFinite(result.tick) ? result.tick : undefined,
+    actor_id: Number.isSafeInteger(result.actor_id) ? result.actor_id : undefined,
     type: typeof result.type === 'string' ? cleanMemoryText(result.type, 64) : undefined,
     accepted: result.accepted === true,
     completed: result.completed === true,
@@ -531,7 +535,37 @@ function compactBasicOperationResult(result) {
   }
 }
 
-export function receiptEvidence(raw, outcome) {
+const BASIC_OPERATION_TASK_TYPE = new Map([
+  ['walking_to_entity', 'walking_to_entity'],
+  ['mining', 'mining'],
+  ['placing', 'placing'],
+  ['moving_items', 'moving_items'],
+  ['setting_recipe', 'setting_recipe'],
+  ['crafting', 'crafting'],
+  ['attacking', 'attacking'],
+])
+
+export function correlateBasicOperationResult(receipt, result, { actorId } = {}) {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return { result: undefined }
+  const reasons = []
+  const expectedTaskType = BASIC_OPERATION_TASK_TYPE.get(result.type)
+  if (!expectedTaskType || !Array.isArray(receipt?.task_types) || !receipt.task_types.includes(expectedTaskType)) {
+    reasons.push('task_type_mismatch')
+  }
+  if (Number.isFinite(receipt?.tick)) {
+    if (!Number.isFinite(result.tick)) reasons.push('missing_tick_identity')
+    else if (receipt.tick !== result.tick) reasons.push('tick_mismatch')
+  }
+  if (Number.isSafeInteger(actorId)) {
+    if (!Number.isSafeInteger(result.actor_id)) reasons.push('missing_actor_identity')
+    else if (actorId !== result.actor_id) reasons.push('actor_mismatch')
+  }
+  return reasons.length > 0
+    ? { result: undefined, stale: { code: 'stale_operation_result', reasons, operation_id: result.operation_id } }
+    : { result: compactBasicOperationResult(result) }
+}
+
+export function receiptEvidence(raw, outcome, context = {}) {
   try {
     const parsed = JSON.parse(raw)
     const receipt = outcome === 'failed'
@@ -542,6 +576,9 @@ export function receiptEvidence(raw, outcome) {
     const batchRef = typeof receipt?.batch_ref === 'string' && receipt.batch_ref.length > 0
       ? cleanMemoryText(receipt.batch_ref, 160)
       : undefined
+    const correlated = correlateBasicOperationResult(receipt, parsed?.basic_operation?.last_result, {
+      actorId: context.actor_id ?? parsed?.actor?.actor_id,
+    })
     return {
       kind: outcome === 'failed' ? 'operation_error_receipt' : 'operation_receipt',
       ref: batchRef ?? (batchId === undefined ? '' : `batch_${batchId}`),
@@ -556,7 +593,14 @@ export function receiptEvidence(raw, outcome) {
         task_types: Array.isArray(receipt?.task_types) ? receipt.task_types.slice(0, 16) : undefined,
         tick: receipt?.tick,
         reason: receipt?.reason,
-        basic_operation: compactBasicOperationResult(parsed?.basic_operation?.last_result),
+        basic_operation: correlated.result,
+        stale_operation_result: correlated.stale,
+        correlation: {
+          goal_id: context.goal_id,
+          step_id: context.step_id,
+          actor_id: context.actor_id,
+          actor_epoch: context.actor_epoch,
+        },
       }),
     }
   }
@@ -2940,27 +2984,137 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return { verified: false, reason: 'no_authoritative_operation_receipt', state: planState }
     }
 
-    const checkpoint = persistedStepCheckpoint(board, step.id)
-    if (!checkpoint || checkpoint.boundary !== 'checkpoint_here' || checkpoint.contract?.mode === 'semantic_unknown') {
-      const reason = checkpoint?.boundary === 'split_recommended'
-        ? 'checkpoint_split_recommended'
-        : checkpoint?.boundary === 'keep_step_open'
-          ? 'checkpoint_kept_open'
-          : 'missing_pre_admission_checkpoint'
-      await this.traceEvent('step.completion_rejected', {
-        active_step_id: step.id,
-        reason,
-        checkpoint_boundary: checkpoint?.boundary,
-      })
-      return { verified: false, reason, state: planState, contract: checkpoint?.contract }
-    }
-
     let operationNames = []
     try {
       const parsed = JSON.parse(verification.summary)
       operationNames = Array.isArray(parsed?.operations) ? parsed.operations.filter(name => typeof name === 'string').slice(0, 8) : []
     }
     catch {}
+
+    let checkpoint = persistedStepCheckpoint(board, step.id)
+    if (!checkpoint || checkpoint.boundary !== 'checkpoint_here' || checkpoint.contract?.mode === 'semantic_unknown') {
+      const reason = checkpoint?.boundary === 'split_recommended'
+        ? 'checkpoint_split_recommended'
+        : checkpoint?.boundary === 'keep_step_open'
+          ? 'checkpoint_kept_open'
+          : 'missing_pre_admission_checkpoint'
+
+      // The pre-admission pass intentionally cannot know whether an operation
+      // will complete. Once runtime has correlated a strict deterministic
+      // receipt to this exact canonical step, Jev may normalize only the
+      // semantic scope: whether that completed batch covers the whole step.
+      // Runtime keeps sole authority over the receipt and state transition.
+      if (reason !== 'checkpoint_split_recommended'
+        && operationNames.length > 0
+        && this.interactionDecisionProvider) {
+        const current = await this.assertCurrent()
+        const generation = this.generation
+        const decisionId = `decision_${Date.now().toString(36)}_${(++this.decisionRequestSequence).toString(36)}`
+        const controller = new AbortController()
+        const startedAt = Date.now()
+        try {
+          const decisionState = {
+            contract: 'receipt_completion_normalizer',
+            goal: {
+              goal_id: sanitizeDurableModelText(planState.goal_id, 100),
+              objective: sanitizeDurableModelText(planState.objective, 500),
+            },
+            active_step: {
+              id: sanitizeDurableModelText(step.id, 80),
+              description: sanitizeDurableModelText(step.description, 400),
+            },
+            remaining_steps: (Array.isArray(board?.steps) ? board.steps : [])
+              .slice(activeIndex, activeIndex + 6)
+              .map(item => ({
+                id: sanitizeDurableModelText(item?.id, 80),
+                description: sanitizeDurableModelText(item?.description, 400),
+              })),
+            authoritative_receipt: {
+              ref,
+              operation_names: operationNames,
+              summary: sanitizeDurableModelText(verification.summary, 1000),
+            },
+            pre_admission_checkpoint: checkpoint
+              ? sanitizeDurableModelValue({ boundary: checkpoint.boundary, relation: checkpoint.relation, contract: checkpoint.contract })
+              : undefined,
+          }
+          await this.decisionTraceEvent('decision.request', {
+            decision_id: decisionId,
+            contract: 'receipt_completion_normalizer',
+            mode: 'active',
+            active_step_id: step.id,
+            question_ids: ['receipt_scope'],
+          })
+          const response = await this.interactionDecisionProvider(decisionState, receiptCompletionDecisionQuestions(), {
+            epoch: current.epoch,
+            actorId: current.actor_id,
+            signal: controller.signal,
+          })
+          if (generation !== this.generation || controller.signal.aborted) throw new AgentLoopError('Model turn was cancelled or superseded')
+          await this.assertCurrent()
+          const normalized = parseReceiptCompletionDecision(response)
+          const accepted = normalized.choice === 'complete_current_step' && normalized.confidence >= 0.85
+          await this.decisionTraceEvent('decision.response', {
+            decision_id: decisionId,
+            contract: 'receipt_completion_normalizer',
+            mode: 'active',
+            choice: normalized.choice,
+            confidence: normalized.confidence,
+            accepted,
+            provider: normalized.provider,
+            model: normalized.model,
+            latency_ms: Date.now() - startedAt,
+            input_units: Number.isFinite(normalized.usage?.input_tokens) ? Math.max(0, Math.trunc(normalized.usage.input_tokens)) : 0,
+            output_units: Number.isFinite(normalized.usage?.output_tokens) ? Math.max(0, Math.trunc(normalized.usage.output_tokens)) : 0,
+            cost_usd: Number.isFinite(normalized.usage?.cost) && normalized.usage.cost >= 0 ? normalized.usage.cost : 0,
+          })
+          if (accepted) {
+            checkpoint = {
+              boundary: 'checkpoint_here',
+              relation: 'advances_current',
+              contract: {
+                mode: 'all',
+                source: 'jev_receipt_scope',
+                confidence: normalized.confidence,
+                requirements: operationNames.map((operationName, index) => ({
+                  id: `receipt_${index + 1}`,
+                  kind: 'authoritative_operation_receipt',
+                  operation_name: operationName,
+                })),
+              },
+            }
+            await this.traceEvent('step.checkpoint_normalized', {
+              active_step_id: step.id,
+              source: 'jev_receipt_scope',
+              previous_reason: reason,
+              contract: checkpoint.contract,
+            })
+          }
+        }
+        catch (error) {
+          await this.decisionTraceEvent('decision.fallback', {
+            decision_id: decisionId,
+            contract: 'receipt_completion_normalizer',
+            mode: 'active',
+            fallback_target: 'keep_step_open',
+            reason: cleanMemoryText(error instanceof Error ? error.message : String(error), 300),
+            latency_ms: Date.now() - startedAt,
+          })
+        }
+        finally {
+          controller.abort()
+        }
+      }
+
+      if (!checkpoint || checkpoint.boundary !== 'checkpoint_here' || checkpoint.contract?.mode === 'semantic_unknown') {
+        await this.traceEvent('step.completion_rejected', {
+          active_step_id: step.id,
+          reason,
+          checkpoint_boundary: checkpoint?.boundary,
+        })
+        return { verified: false, reason, state: planState, contract: checkpoint?.contract }
+      }
+    }
 
     const facts = await this.completionFactsForContract(checkpoint.contract, verification, operationNames)
     const evaluation = evaluateCompletionContract(checkpoint.contract, facts)
@@ -3801,7 +3955,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     try {
       const raw = String(await this.rcon.command(toolCommand('getTaskStatus', {}))).slice(0, 16000)
       this.recordPlacementReceipt(raw)
-      const evidence = receiptEvidence(raw, this.planUpdateReason === 'failure' ? 'failed' : 'completed')
+      const currentPlan = this.memory.currentPlan?.(this.activePlanKey())
+      const evidence = receiptEvidence(raw, this.planUpdateReason === 'failure' ? 'failed' : 'completed', {
+        goal_id: currentPlan?.goal_id,
+        step_id: currentPlan?.task_board?.active_step_id,
+        actor_id: this.epoch?.actor_id,
+        actor_epoch: this.epoch?.epoch,
+      })
       const taskBoard = this.memory.recordBoardEvidence?.(this.activePlanKey(), evidence)
       if (taskBoard) await this.persistState()
       const view = taskStatusDecisionView(raw)

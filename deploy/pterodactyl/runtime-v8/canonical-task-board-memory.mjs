@@ -111,6 +111,12 @@ function transferFailureReason(evidence) {
 export function verifyDeterministicReceipt(state, evidence) {
   const receipt = parseReceiptSummary(evidence)
   if (!receipt) return { verified: false, reason: 'not_completed_operation_receipt' }
+  if (receipt.correlation?.goal_id && receipt.correlation.goal_id !== state?.goal_id) {
+    return { verified: false, reason: 'receipt_goal_mismatch' }
+  }
+  if (receipt.correlation?.step_id && receipt.correlation.step_id !== state?.task_board?.active_step_id) {
+    return { verified: false, reason: 'receipt_step_mismatch' }
+  }
   if (receipt.outcome !== 'completed' || receipt.task_state !== 'idle' || receipt.queue_length !== 0) {
     return { verified: false, reason: 'batch_not_cleanly_completed' }
   }

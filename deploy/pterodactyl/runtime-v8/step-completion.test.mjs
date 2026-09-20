@@ -6,13 +6,36 @@ import {
   completionCandidatesFromOperations,
   evaluateCompletionContract,
   makeConditionWait,
+  parseReceiptCompletionDecision,
   parseStepCheckpointDecision,
   parseStepCompletionDecision,
   sanitizeStepCompletionContract,
+  receiptCompletionDecisionQuestions,
   stepCheckpointDecisionQuestions,
   stepCompletionDecisionQuestions,
   stepRelationAllowsAdmission,
 } from './step-completion.mjs'
+
+test('receipt completion formatter is bounded and defaults malformed Jev output to semantic unknown', () => {
+  const questions = receiptCompletionDecisionQuestions()
+  assert.deepEqual(Object.keys(questions.receipt_scope.criteria), [
+    'complete_current_step',
+    'progress_only',
+    'semantic_unknown',
+  ])
+  assert.match(questions.receipt_scope.instructions, /runtime has already verified/i)
+
+  assert.deepEqual(parseReceiptCompletionDecision({ answers: { receipt_scope: { choice: 'foreign', confidence: 9 } } }), {
+    choice: 'semantic_unknown',
+    confidence: 1,
+    model: undefined,
+    provider: undefined,
+    usage: undefined,
+  })
+  assert.equal(parseReceiptCompletionDecision({
+    answers: { receipt_scope: { choice: 'complete_current_step', confidence: 0.91 } },
+  }).choice, 'complete_current_step')
+})
 
 test('unsupported, mixed, truncated, or malformed completion semantics fail closed', () => {
   assert.equal(sanitizeStepCompletionContract({ mode: 'all', requirements: [{ kind: 'natural_language', predicate: 'looks done' }] }).mode, 'semantic_unknown')

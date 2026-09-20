@@ -329,6 +329,73 @@ test('Jev may deliberately keep a compound semantic step open after a useful bat
   assert.equal(memory.planByNpc.get('npc:airi').task_board.active_index, 0)
 })
 
+test('Jev may normalize a correlated authoritative receipt into a completion contract without owning world truth', async () => {
+  const state = activeState({ boundary: 'keep_step_open' })
+  state.task_board.evidence[1].summary = JSON.stringify({
+    boundary: 'keep_step_open',
+    relation: 'advances_current',
+    contract: { mode: 'semantic_unknown', requirements: [], confidence: 0.2 },
+  })
+  const { agent, memory } = agentWithState({
+    state,
+    decisionProvider: async (decisionState, questions) => {
+      assert.equal(decisionState.contract, 'receipt_completion_normalizer')
+      assert.equal(decisionState.active_step.description, 'Gather 10 stone')
+      assert.deepEqual(decisionState.authoritative_receipt.operation_names, ['gather_resource'])
+      assert.ok(questions.receipt_scope.criteria.complete_current_step)
+      return {
+        model: 'jev-latest',
+        provider: 'TypeSafe',
+        answers: {
+          receipt_scope: {
+            type: 'choice',
+            choice: 'complete_current_step',
+            confidence: 0.93,
+            probabilities: { complete_current_step: 0.93, progress_only: 0.05, semantic_unknown: 0.02 },
+          },
+        },
+      }
+    },
+  })
+
+  const result = await agent.routeStepCompletionDecision({ view: { last_completed_batch: { batch_id: 7 } } })
+  assert.equal(result.verified, true)
+  assert.equal(result.contract.source, 'jev_receipt_scope')
+  assert.equal(memory.planByNpc.get('npc:airi').task_board.steps[0].status, 'completed')
+  assert.equal(memory.planByNpc.get('npc:airi').task_board.active_index, 1)
+})
+
+test('receipt completion normalization fails closed on low confidence, progress-only, or Jev outage', async () => {
+  for (const decisionProvider of [
+    async () => ({ answers: { receipt_scope: { choice: 'complete_current_step', confidence: 0.84 } } }),
+    async () => ({ answers: { receipt_scope: { choice: 'progress_only', confidence: 0.99 } } }),
+    async () => { throw new Error('temporary Jev outage') },
+  ]) {
+    const { agent, memory } = agentWithState({
+      state: activeState({ boundary: 'keep_step_open' }),
+      decisionProvider,
+    })
+    const result = await agent.routeStepCompletionDecision({ view: { last_completed_batch: { batch_id: 7 } } })
+    assert.equal(result.verified, false)
+    assert.equal(result.reason, 'checkpoint_kept_open')
+    assert.equal(memory.planByNpc.get('npc:airi').task_board.active_index, 0)
+  }
+})
+
+test('receipt completion normalization never runs without same-step deterministic verification', async () => {
+  const state = activeState({ boundary: 'keep_step_open' })
+  state.task_board.evidence[0].step_id = 'step_2'
+  let calls = 0
+  const { agent } = agentWithState({
+    state,
+    decisionProvider: async () => { calls++; throw new Error('must not run') },
+  })
+  const result = await agent.routeStepCompletionDecision({ view: { last_completed_batch: { batch_id: 7 } } })
+  assert.equal(result.verified, false)
+  assert.equal(result.reason, 'no_authoritative_operation_receipt')
+  assert.equal(calls, 0)
+})
+
 test('Jev split recommendation cannot itself advance canonical state', async () => {
   const { agent, memory } = agentWithState({ state: activeState({ boundary: 'split_recommended' }) })
   const result = await agent.routeStepCompletionDecision({ view: { last_completed_batch: { batch_id: 7 } } })

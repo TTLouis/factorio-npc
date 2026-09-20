@@ -280,6 +280,37 @@ export function parseStepCompletionDecision(response, candidates = []) {
   }
 }
 
+export function receiptCompletionDecisionQuestions() {
+  return {
+    receipt_scope: {
+      type: 'choice',
+      instructions: 'Normalize the semantic scope of the already-completed authoritative operation batch against the currently active canonical step. Do not judge whether the batch really ran; runtime has already verified that separately. Choose complete_current_step only when completing exactly the listed operations is sufficient to satisfy the whole active step as written. A prerequisite, partial amount, compound step, later-step action, or ambiguous wording must not close the step.',
+      criteria: {
+        complete_current_step: 'The completed operation batch fully satisfies the active canonical step as written; no additional world action or observation is part of that step.',
+        progress_only: 'The completed batch is useful progress or a prerequisite, but the active step still includes additional action, quantity, verification, configuration, or outcome.',
+        semantic_unknown: 'The supplied descriptions are ambiguous or insufficient to determine whether the completed batch covers the whole active step.',
+      },
+    },
+  }
+}
+
+export function parseReceiptCompletionDecision(response) {
+  const answer = response?.answers?.receipt_scope
+  const choice = answer?.choice
+  const confidence = typeof answer?.confidence === 'number' && Number.isFinite(answer.confidence)
+    ? Math.max(0, Math.min(1, answer.confidence))
+    : 0
+  return {
+    choice: ['complete_current_step', 'progress_only', 'semantic_unknown'].includes(choice)
+      ? choice
+      : 'semantic_unknown',
+    confidence,
+    model: typeof response?.model === 'string' ? response.model : undefined,
+    provider: typeof response?.provider === 'string' ? response.provider : undefined,
+    usage: response?.usage && typeof response.usage === 'object' ? response.usage : undefined,
+  }
+}
+
 function evaluateRequirementFact(requirement, fact) {
   if (!fact || typeof fact !== 'object' || Array.isArray(fact)) return { satisfied: false, missing: true }
   if (fact.kind !== requirement.kind) return { satisfied: false, mismatched: true }
