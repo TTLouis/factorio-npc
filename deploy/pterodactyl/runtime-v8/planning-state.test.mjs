@@ -912,7 +912,7 @@ test('the reducer source contains no wall-clock or I/O calls', async () => {
   // Strip comments: prose may legitimately mention what the module must not do.
   const source = raw
     .split(/\r?\n/)
-    .filter(line => !/^\s*(\/\/|\/\*|\*)/.test(line))
+    .filter(line => !/^\s*(?:\/\/|\/\*|\*)/.test(line))
     .join(' ')
   // Word-boundary anchored: a naive substring scan for 'fs.' also matches
   // innocent identifiers such as `evidenceRefs.length`.
