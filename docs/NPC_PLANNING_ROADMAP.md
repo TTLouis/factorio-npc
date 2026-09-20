@@ -155,6 +155,14 @@ Shelf nodes may contain:
 - useful sequencing relationships;
 - uncertainty or assumptions;
 - status such as `tentative | ready_to_refine | partially_realized | realized | invalidated`;
+  - **Amended 2026-09-20.** `tentative <-> ready_to_refine` moves in BOTH directions. A node is
+    promoted when its declared dependencies are satisfied and demoted when they stop being
+    satisfied, so it cannot sit refinable forever on a premise the world has since contradicted.
+    Both directions are computed from the same readiness reading; demotion is never a claim.
+    The upper rungs stay monotonic: `partially_realized` and `realized` rest on verified plan
+    results, and a node whose guidance is genuinely void is `invalidated` instead.
+  - Nodes parked by the refinement fan-out cap are held at `tentative` and marked
+    `deferred_by_fanout` — remembered, but not refinable until a sibling frees a slot.
 - lineage to previous roadmap revisions;
 - links to active/completed plan versions that refined the node.
 

@@ -1299,6 +1299,82 @@ test('refinement cannot smuggle a step-by-step mega-plan onto the shelf', () => 
   assert.equal(roundTripped.roadmap.deferred_for_coarseness.node_ids.length, 5)
 })
 
+test('a ready node is demoted when the world stops satisfying its dependencies', () => {
+  // node_science depends on node_smelting; completing the smelting slice is
+  // what makes it refinable in the first place.
+  const state = completeSlice(dependentShelf(goalState()), { nodeIds: ['node_smelting'], now: 1200 })
+  const ready = state.roadmap.nodes.find(node => node.id === 'node_science')
+  assert.equal(ready.status, SHELF_NODE_STATUS.READY_TO_REFINE)
+  assert.ok(Number.isFinite(ready.ready_since), 'it took its place in the queue when the slice completed')
+
+  // Dropping the dependency it stood on demotes it. Nothing about the node
+  // itself changed -- it is restated verbatim.
+  const dropped = applyPlanningEvent(state, {
+    type: PLANNING_EVENT.ROADMAP_REVISED,
+    source: 'user',
+    now: 1300,
+    reason: 'smelting approach abandoned',
+    nodes: state.roadmap.nodes.filter(node => node.id !== 'node_smelting'),
+  })
+  const afterDrop = dropped.roadmap.nodes.find(node => node.id === 'node_science')
+  assert.equal(afterDrop.status, SHELF_NODE_STATUS.TENTATIVE, 'readiness rested on a premise the shelf no longer holds')
+  assert.equal(afterDrop.ready_since, null, 'an unready node holds no place in the refinement queue')
+  assert.equal(afterDrop.demoted_at, 1300)
+  assert.equal(shelfRefinementCandidates(dropped).some(node => node.node_id === 'node_science'), false)
+})
+
+test('demotion is a reading of the shelf, not a verdict on the node', () => {
+  const state = completeSlice(dependentShelf(goalState()), { nodeIds: ['node_smelting'], now: 1200 })
+  const withNewDependency = nodes => nodes.map(node => (node.id === 'node_science'
+    ? { ...node, depends_on: [...node.depends_on, 'node_oil'] }
+    : node))
+
+  // A revision declares a NEW prerequisite that nothing has satisfied yet.
+  const blocked = applyPlanningEvent(state, {
+    type: PLANNING_EVENT.ROADMAP_REVISED,
+    source: 'user',
+    now: 1300,
+    reason: 'red science needs oil after all',
+    nodes: [...withNewDependency(state.roadmap.nodes), { id: 'node_oil', intent: 'reach basic oil processing' }],
+  })
+  assert.equal(blocked.roadmap.nodes.find(node => node.id === 'node_science').status, SHELF_NODE_STATUS.TENTATIVE)
+
+  // Withdrawing that prerequisite makes it refinable again, with a fresh
+  // standing in the queue rather than the one it used to hold.
+  const unblocked = applyPlanningEvent(blocked, {
+    type: PLANNING_EVENT.ROADMAP_REVISED,
+    source: 'user',
+    now: 1400,
+    reason: 'oil is not on the critical path for red science',
+    nodes: blocked.roadmap.nodes.map(node => (node.id === 'node_science'
+      ? { ...node, depends_on: node.depends_on.filter(id => id !== 'node_oil') }
+      : node)),
+  })
+  const repromoted = unblocked.roadmap.nodes.find(node => node.id === 'node_science')
+  assert.equal(repromoted.status, SHELF_NODE_STATUS.READY_TO_REFINE)
+  assert.equal(repromoted.ready_since, 1400)
+})
+
+test('demotion stops at the bottom rung: verified rungs are never walked back', () => {
+  // node_science reaches REALIZED through a verified plan result, then loses
+  // its dependency. Evidence does not stop having happened.
+  let state = completeSlice(dependentShelf(goalState()), { nodeIds: ['node_smelting'], now: 1200 })
+  state = completeSlice(state, { nodeIds: ['node_science'], now: 1300 })
+  const realized = state.roadmap.nodes.find(node => node.id === 'node_science')
+  assert.ok([SHELF_NODE_STATUS.REALIZED, SHELF_NODE_STATUS.PARTIALLY_REALIZED].includes(realized.status))
+
+  const revised = applyPlanningEvent(state, {
+    type: PLANNING_EVENT.ROADMAP_REVISED,
+    source: 'user',
+    now: 1400,
+    reason: 'smelting approach abandoned',
+    nodes: state.roadmap.nodes.filter(node => node.id !== 'node_smelting'),
+  })
+  const after = revised.roadmap.nodes.find(node => node.id === 'node_science')
+  assert.equal(after.status, realized.status)
+  assert.equal(after.demoted_at, undefined)
+})
+
 test('a fan-out deferral is released when a sibling stops occupying the budget', () => {
   const base = dependentShelf(goalState())
   const children = Array.from({ length: SHELF_REFINEMENT_MAX_FANOUT + 2 }, (item, index) => ({

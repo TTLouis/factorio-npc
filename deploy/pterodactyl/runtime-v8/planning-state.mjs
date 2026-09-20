@@ -492,6 +492,7 @@ export function sanitizeShelfNode(raw, { sequence = 0, trusted = false } = {}) {
     // not yet refinable. Carried through revisions and restore so the cap
     // cannot be escaped by simply restating the node.
     ...(raw.deferred_by_fanout === true ? { deferred_by_fanout: true } : {}),
+    ...(finiteNumber(raw.demoted_at) !== undefined ? { demoted_at: finiteNumber(raw.demoted_at) } : {}),
     ...(droppedExecutable.length > 0 ? { dropped_executable_fields: droppedExecutable } : {}),
     intent,
     why_it_matters: text(raw.why_it_matters, 400),
@@ -918,17 +919,56 @@ function releaseDeferredFanout(roadmap) {
   return changed ? { ...roadmap, nodes } : roadmap
 }
 
+/**
+ * Reconcile the bottom of the ladder with what the shelf actually says.
+ *
+ * TENTATIVE <-> READY_TO_REFINE moves BOTH ways, deliberately breaking the
+ * ladder's monotonicity at this one rung. A node is promoted when its
+ * dependencies are satisfied and demoted when they stop being satisfied -- a
+ * dependency invalidated, dropped from the shelf, or newly declared by a
+ * revision. Otherwise a node promoted once stayed refinable forever on a
+ * premise the world had since contradicted, and only contract validation at
+ * commit time would ever notice.
+ *
+ * Both directions read the same `shelfNodeReadiness`, so demotion needs no new
+ * authority and no claim: it is exactly the absence of the condition that
+ * promoted the node.
+ *
+ * The upper rungs stay monotonic. PARTIALLY_REALIZED and REALIZED are backed by
+ * verified plan results, and evidence does not stop having happened; a node
+ * whose guidance is genuinely void is INVALIDATED instead.
+ */
 function promoteReadyNodes(rawRoadmap, now) {
   const roadmap = releaseDeferredFanout(rawRoadmap)
   if (!roadmap) return roadmap
   let changed = false
+  const demote = node => ({
+    ...node,
+    status: SHELF_NODE_STATUS.TENTATIVE,
+    // Cleared: an unready node has no standing in the longest-ready-first
+    // refinement queue to preserve.
+    ready_since: null,
+    demoted_at: now,
+  })
   const nodes = roadmap.nodes.map((node) => {
-    if (node.status !== SHELF_NODE_STATUS.TENTATIVE) return node
     // Held back by the fan-out cap: remembered, but not refinable yet.
-    if (node.deferred_by_fanout === true) return node
-    if (!shelfNodeReadiness(roadmap, node.id).ready) return node
-    changed = true
-    return { ...node, status: SHELF_NODE_STATUS.READY_TO_REFINE, ready_since: node.ready_since ?? now }
+    if (node.deferred_by_fanout === true) {
+      if (node.status !== SHELF_NODE_STATUS.READY_TO_REFINE) return node
+      changed = true
+      return demote(node)
+    }
+    if (node.status !== SHELF_NODE_STATUS.TENTATIVE && node.status !== SHELF_NODE_STATUS.READY_TO_REFINE) return node
+
+    const ready = shelfNodeReadiness(roadmap, node.id).ready
+    if (ready && node.status === SHELF_NODE_STATUS.TENTATIVE) {
+      changed = true
+      return { ...node, status: SHELF_NODE_STATUS.READY_TO_REFINE, ready_since: node.ready_since ?? now }
+    }
+    if (!ready && node.status === SHELF_NODE_STATUS.READY_TO_REFINE) {
+      changed = true
+      return demote(node)
+    }
+    return node
   })
   return changed ? { ...roadmap, nodes } : roadmap
 }
