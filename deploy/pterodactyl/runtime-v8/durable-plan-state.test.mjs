@@ -310,7 +310,7 @@ test('canonical task board prevents model plan-length drift from resetting visib
   assert.equal(third.taskBoard.proposed_focus_step_id, 'step_3')
 })
 
-test('Autorio errors feed the detailed task receipt back into the active goal for replanning', async () => {
+test('Autorio errors feed detailed receipt back without silently replacing the committed suffix', async () => {
   const replies = [
     planMessage({
       chatMessage: 'Mining iron.',
@@ -341,7 +341,8 @@ test('Autorio errors feed the detailed task receipt back into the active goal fo
   const replanned = await agent.failed('mining failed: no_target; dependent operations cancelled')
 
   assert.equal(replanned.operations[0].name, 'walk_to_entity')
-  assert.equal(replanned.taskBoard.steps[0].description, 'Find another iron patch')
+  assert.equal(replanned.taskBoard.steps[0].description, 'Mine iron')
+  assert.equal(replanned.taskBoard.steps[1].description, 'Return to furnace')
   assert.equal(replanned.taskBoard.evidence.some(item => item.kind === 'operation_error_receipt'), true)
   assert.equal(agent.active, true)
   const continuation = observed[1].map(message => message.content ?? '').join('\n')
@@ -1017,18 +1018,18 @@ test('verified final completion is not mistaken for an action omission', async (
 })
 
 
-test('runtime accepts an optional bounded project hierarchy while preserving the strict operation-plan surface', () => {
+test('strict runtime plan surface rejects retired project hierarchy payloads', () => {
   const agent = new NpcAgentLoop({
     rcon: new FakeRcon(),
     memory: new CanonicalTaskBoardMemory(),
     npcId: 'airi',
-    systemPrompt: 'project hierarchy parse test',
+    systemPrompt: 'retired project hierarchy parse test',
     stateFile: null,
     traceFile: null,
     decisionTraceFile: null,
     provider: async () => { throw new Error('unused') },
   })
-  const parsed = agent.parsePlanMessage({
+  assert.throws(() => agent.parsePlanMessage({
     content: JSON.stringify({
       chatMessage: 'Starting with burner production.',
       project: {
@@ -1043,12 +1044,7 @@ test('runtime accepts an optional bounded project hierarchy while preserving the
       currentStep: 0,
       operations: [{ name: 'gather_resource', args: { resource_name: 'stone', count: 20, search_radius: 256 } }],
     }),
-  })
-  assert.equal(parsed.project.current_milestone.title, 'Establish burner production')
-  assert.equal(parsed.project.next_milestones[0].title, 'Reach Automation')
-  assert.equal(parsed.project.development_direction, 'vertical')
-  assert.equal(parsed.plan[0], 'Gather stone for the first furnaces')
-  assert.equal(parsed.operations[0].name, 'gather_resource')
+  }), /Unexpected argument/)
 })
 
 test('ordinary short-task responses remain backward compatible without project hierarchy', () => {
@@ -1073,35 +1069,27 @@ test('ordinary short-task responses remain backward compatible without project h
 })
 
 
-test('structural hierarchy turns reject flat plans that omit the required milestone proposal', () => {
+test('retired hierarchy trigger labels do not reintroduce a project payload requirement', () => {
   const agent = new NpcAgentLoop({
     rcon: new FakeRcon(),
     memory: new CanonicalTaskBoardMemory(),
     npcId: 'airi',
-    systemPrompt: 'hierarchy structural contract test',
+    systemPrompt: 'retired hierarchy trigger compatibility test',
     stateFile: null,
     traceFile: null,
     decisionTraceFile: null,
     provider: async () => { throw new Error('unused') },
   })
 
-  for (const triggerSource of ['hierarchy_initial_split', 'hierarchy_split', 'hierarchy_replan_project']) {
+  for (const triggerSource of ['hierarchy_initial_split', 'hierarchy_split', 'hierarchy_replan_project', 'hierarchy_advance']) {
     agent.reasoningTriggerSource = triggerSource
-    assert.throws(() => agent.parsePlanMessage(planMessage({
-      chatMessage: 'Trying a flat plan.',
-      plan: ['Do a broad amount of work'],
+    assert.doesNotThrow(() => agent.parsePlanMessage(planMessage({
+      chatMessage: 'Using the strict flat plan surface.',
+      plan: ['Do one bounded unit of work'],
       currentStep: 0,
       operations: [{ name: 'wait', args: { ticks: 1 } }],
-    })), /requires a bounded project\.currentMilestone proposal/i)
+    })))
   }
-
-  agent.reasoningTriggerSource = 'hierarchy_advance'
-  assert.doesNotThrow(() => agent.parsePlanMessage(planMessage({
-    chatMessage: 'Planning the already activated milestone.',
-    plan: ['Build the milestone-local plan'],
-    currentStep: 0,
-    operations: [{ name: 'wait', args: { ticks: 1 } }],
-  })))
 })
 
 
