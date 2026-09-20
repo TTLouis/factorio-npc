@@ -1993,6 +1993,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.observationBudgetOverride = null
     this.observationBudgetRemaining = null
     this.planningHorizonOverride = null
+    this.planningReasoningEpochSeen = new Map()
     this.persistQueue = Promise.resolve()
     this.traceRequest = null
     this.traceRequestSequence = 0
@@ -2114,10 +2115,45 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     ]
   }
 
+  refreshPlanningReasoningEpoch() {
+    const key = this.activePlanKey()
+    const epoch = this.memory.planningReasoningEpoch?.(key)
+    if (!Number.isSafeInteger(epoch) || epoch < 0) return false
+    const previous = this.planningReasoningEpochSeen.get(key)
+    this.planningReasoningEpochSeen.set(key, epoch)
+    if (previous === undefined || previous === epoch || !this.requestInfo) return false
+
+    // A reducer epoch bump is an explicit invalidation boundary. Rebuild the
+    // working provider context from durable memory and the current user request;
+    // never carry tool/scratch exchanges that argued for the predecessor plan.
+    this.clearLoadedSkillContext()
+    const memoryContext = this.memory.context?.(key) ?? ''
+    this.baseMessages = [
+      { role: 'system', content: this.systemPrompt },
+      ...(memoryContext ? [{ role: 'user', content: memoryContext }] : []),
+      { role: 'user', content: `[CHAT] ${this.requestInfo.sender}: ${this.requestInfo.text}` },
+    ]
+    this.messages = this.baseMessages.map(message => ({ ...message }))
+    this.toolCache.clear()
+    this.duplicateToolRounds = 0
+    this.observationRecoveryRounds = 0
+    this.observationOnlyRounds = 0
+    this.resetObservationDecisionState()
+    void this.traceEvent('planning.reasoning_epoch_reset', {
+      previous_epoch: previous,
+      reasoning_epoch: epoch,
+      goal_id: this.memory.currentPlan?.(key)?.goal_id,
+    })
+    return true
+  }
+
   prepareContinuationContext() {
-    super.prepareContinuationContext()
-    const planContext = this.memory.planContext?.(this.activePlanKey())
-    if (planContext) this.messages.push({ role: 'user', content: planContext })
+    const reset = this.refreshPlanningReasoningEpoch()
+    if (!reset) {
+      super.prepareContinuationContext()
+      const planContext = this.memory.planContext?.(this.activePlanKey())
+      if (planContext) this.messages.push({ role: 'user', content: planContext })
+    }
   }
 
   isObservationToolName(name) {
@@ -4311,6 +4347,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     recoveryKind,
     providerMessagesOverride,
   }) {
+    this.refreshPlanningReasoningEpoch()
     const omissionRepair = this.actionOmissionRepairActive && recoveryKind !== 'output_budget_exhaustion'
     const effectiveAllowTools = omissionRepair && this.actionOmissionForceNoTools ? false : allowTools
     const effectiveRecoveryAttempt = omissionRepair ? Math.max(1, recoveryAttempt) : recoveryAttempt
