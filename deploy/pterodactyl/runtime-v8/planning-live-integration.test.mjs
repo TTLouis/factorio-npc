@@ -207,7 +207,7 @@ test('real state-file restart preserves BLOCKED, successor lineage, and reasonin
   const stateFile = path.join(root, 'npc-state.json')
   const key = 'npc:airi'
   const makeAgent = () => new NpcAgentLoop({
-    rcon: {},
+    rcon: { command: async () => '{}' },
     provider: async () => { throw new Error('provider must not run in persistence test') },
     systemPrompt: 'planning persistence integration test',
     stateFile,
