@@ -304,17 +304,8 @@ export function decisionEnvelopeQuestions() {
   }
 }
 
-const DEPRECATED_FAMILY_CHOICES = Object.freeze({
-  granularity: ['keep', 'split', 'collapse'],
-  milestone_transition: ['advance_next', 'replan_project', 'project_complete_candidate'],
-})
-
 export function parseDecisionFamily(response, family, fallback) {
-  // DEPRECATED_FAMILY_CHOICES is part of the retirement shim at the end of this
-  // file. Retired families must degrade rather than throw: npc-agent-loop.mjs
-  // still calls this with 'granularity', and throwing there routes the whole
-  // decision down the provider-failure path. Delete this fallback with the shim.
-  const choices = FAMILY_CHOICES[family] ?? DEPRECATED_FAMILY_CHOICES[family]
+  const choices = FAMILY_CHOICES[family]
   if (!choices) throw new Error(`Unknown Jev decision family: ${family}`)
   const selected = choiceOf(response, family)
   const safeFallback = choices.includes(fallback) ? fallback : choices[0]
@@ -487,94 +478,4 @@ export function boundarySteeringGate(steering, { runtimeHealthy = false, boundar
     return { allow_runtime_continuation: false, reason: 'steering_requires_planner', development }
   }
   return { allow_runtime_continuation: true, reason: 'maintain_with_authoritative_runtime', development }
-}
-
-// ---------------------------------------------------------------------------
-// DEPRECATED HIERARCHY COMPATIBILITY SHIM — SCAFFOLDING, NOT ARCHITECTURE.
-//
-// docs/NPC_PLANNING_ROADMAP.md retires the granularity / completion /
-// milestone_transition decision families: Jev is a pre-commit scope critic and
-// has no authority to split, collapse, advance, or complete a plan.
-//
-// These exports exist for ONE reason: npc-agent-loop.mjs still imports them, so
-// removing them outright makes the whole runtime fail at module load. They keep
-// the import graph resolvable while the call sites are removed.
-//
-// DELETE THIS ENTIRE BLOCK at deletion Step 6 (see the integration plan), once
-// npc-agent-loop.mjs no longer consumes hierarchy telemetry. Nothing new should
-// import from here. If you are adding a caller, you are going the wrong way.
-// ---------------------------------------------------------------------------
-
-function parseDeprecatedFamily(response, family, fallback) {
-  const choices = DEPRECATED_FAMILY_CHOICES[family]
-  const selected = choiceOf(response, family)
-  const safeFallback = choices.includes(fallback) ? fallback : choices[0]
-  return {
-    family,
-    decision: choices.includes(selected) ? selected : safeFallback,
-    confidence: choiceConfidence(response, family),
-    ...providerMetadata(response),
-  }
-}
-
-/** @deprecated Retired by the planning roadmap. Replaced by scopeReviewQuestions(). */
-export function granularityDecisionQuestions() {
-  return {
-    granularity: {
-      type: 'choice',
-      instructions: 'DEPRECATED. Judge only whether the current semantic objective is at the right level for bounded planning/execution. Do not invent the decomposition itself; the Main LLM owns how a split is written.',
-      criteria: {
-        keep: 'The current objective is already a bounded milestone or plan-step-sized problem and can be planned/executed without another hierarchy layer.',
-        split: 'The current objective spans multiple independently verifiable capability changes or phases and should be decomposed before direct execution.',
-        collapse: 'The current decomposition is unnecessarily fragmented and adjacent work can safely be represented as one coherent semantic objective.',
-      },
-    },
-  }
-}
-
-/** @deprecated Retired by the planning roadmap. Milestones no longer exist. */
-export function milestoneTransitionDecisionQuestions() {
-  return {
-    milestone_transition: {
-      type: 'choice',
-      instructions: 'DEPRECATED. The current milestone has already been authoritatively verified complete by runtime outcome authority. Decide what strategic transition is needed next. Do not claim project completion yourself and do not invent milestone content.',
-      criteria: {
-        advance_next: 'The first tentative next milestone is still a sensible immediate continuation of the user project from the current world state.',
-        replan_project: 'The queued next milestone is missing, stale, poorly scoped, or no longer the best immediate continuation; wake the Main LLM to choose a new bounded milestone.',
-        project_complete_candidate: 'The evidence suggests the user-level project goal itself may now be satisfied; wake the Main LLM for grounded final-goal verification rather than completing it here.',
-      },
-    },
-  }
-}
-
-/** @deprecated Retired by the planning roadmap. */
-export function parseMilestoneTransitionDecision(response) {
-  return parseDeprecatedFamily(response, 'milestone_transition', 'replan_project')
-}
-
-/** @deprecated Retired by the planning roadmap. Use parseBoundarySteeringTelemetry(). */
-export function parseHierarchyTelemetry(response) {
-  const granularity = parseDeprecatedFamily(response, 'granularity', 'keep')
-  const steering = parseBoundarySteeringTelemetry(response)
-  return {
-    granularity: granularity.decision,
-    granularity_confidence: granularity.confidence,
-    ...steering,
-  }
-}
-
-/** @deprecated Retired by the planning roadmap. Use boundarySteeringGate(). */
-export function hierarchyRuntimeGate(hierarchy, { runtimeHealthy = false, boundary = 'completion' } = {}) {
-  const granularity = DEPRECATED_FAMILY_CHOICES.granularity.includes(hierarchy?.granularity)
-    ? hierarchy.granularity
-    : 'keep'
-  const gate = boundarySteeringGate(hierarchy, { runtimeHealthy, boundary })
-  if (gate.allow_runtime_continuation && granularity !== 'keep') {
-    return { allow_runtime_continuation: false, reason: 'granularity_requires_planner', granularity, development: gate.development }
-  }
-  return {
-    ...gate,
-    reason: gate.reason === 'steering_requires_planner' ? 'development_requires_planner' : gate.reason,
-    granularity,
-  }
 }

@@ -647,7 +647,7 @@ test('provider-budget recovery cannot replace the existing committed plan', asyn
 
       return {
         content: JSON.stringify({
-          chatMessage: 'Continuing with a smaller bounded milestone.',
+          chatMessage: 'Continuing with a smaller bounded objective.',
           plan: ['Inspect one machine output cycle'],
           currentStep: 0,
           operations: [{ name: 'wait', args: { ticks: 1 } }],
@@ -763,7 +763,6 @@ test('context-window exhaustion enters the same Jev planner-budget handoff witho
           checkpoint_boundary: { type: 'choice', choice: 'keep_step_open', confidence: 0.9 },
           completion: { type: 'choice', choice: 'progress', confidence: 0.9 },
           next_route: { type: 'choice', choice: 'wake_planner', confidence: 0.9 },
-          granularity: { type: 'choice', choice: 'keep', confidence: 0.9 },
           development: { type: 'choice', choice: 'maintain', confidence: 0.9 },
           reasoning_budget: { type: 'choice', choice: 'normal', confidence: 0.9 },
           planning_horizon: { type: 'choice', choice: 'checkpoint', confidence: 0.9 },
@@ -840,7 +839,6 @@ function rolloverDecisionProvider(counter) {
         completion: { type: 'choice', choice: 'progress', confidence: 0.9 },
         route: { type: 'choice', choice: 'replan', confidence: 0.9 },
         next_route: { type: 'choice', choice: 'wake_planner', confidence: 0.9 },
-        granularity: { type: 'choice', choice: 'keep', confidence: 0.9 },
         development: { type: 'choice', choice: 'maintain', confidence: 0.9 },
         reasoning_budget: { type: 'choice', choice: 'normal', confidence: 0.9 },
         planning_horizon: { type: 'choice', choice: 'checkpoint', confidence: 0.9 },

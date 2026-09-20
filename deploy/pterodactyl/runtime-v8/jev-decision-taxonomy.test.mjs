@@ -42,29 +42,26 @@ test('removed families hold no authority in the canonical contract', async () =>
   assert.throws(() => parseDecisionFamily({ answers: {} }, 'completion', 'incomplete'), /Unknown Jev decision family/)
 })
 
-// TRIPWIRE. The exports below are the deprecation shim at the foot of
-// jev-decision-taxonomy.mjs, kept only so npc-agent-loop.mjs still resolves its
-// imports while its hierarchy call sites are being removed. They are scaffolding.
-//
-// At deletion Step 6, remove the shim block, then INVERT this test to assert each
-// name is `undefined`. This test failing because a name vanished is the intended
-// end state, not a regression.
-test('retired hierarchy exports survive only as scaffolding', async () => {
+// TRIPWIRE, now inverted. The retired hierarchy shim at the foot of
+// jev-decision-taxonomy.mjs has been deleted (deletion Step 6). These names must
+// stay gone: Jev is a pre-commit scope critic with no authority to split,
+// collapse, advance, or complete a plan. If one of these assertions fails,
+// someone has re-added retired hierarchy machinery.
+test('retired hierarchy exports are gone', async () => {
   const module = await import(MODULE)
-  for (const deprecated of [
+  for (const retired of [
     'granularityDecisionQuestions',
     'milestoneTransitionDecisionQuestions',
     'parseMilestoneTransitionDecision',
     'parseHierarchyTelemetry',
     'hierarchyRuntimeGate',
   ]) {
-    assert.equal(typeof module[deprecated], 'function', `${deprecated} is shim scaffolding; delete it at Step 6`)
+    assert.equal(module[retired], undefined, `${retired} is retired hierarchy machinery and must not exist`)
   }
-  // The shim must degrade, never throw: npc-agent-loop.mjs calls parseDecisionFamily
-  // with 'granularity' directly, and throwing routes the whole decision to fallback.
-  const parsed = parseDecisionFamily({ answers: { granularity: { choice: 'split' } } }, 'granularity', 'keep')
-  assert.equal(parsed.decision, 'split')
-  assert.equal(parseDecisionFamily({ answers: {} }, 'granularity', 'keep').decision, 'keep')
+  // Retired families no longer degrade — they throw. Nothing calls parseDecisionFamily
+  // with these any more, so an unknown family is a programming error, not a fallback.
+  assert.throws(() => parseDecisionFamily({ answers: { granularity: { choice: 'split' } } }, 'granularity', 'keep'), /Unknown Jev decision family/)
+  assert.throws(() => parseDecisionFamily({ answers: {} }, 'milestone_transition', 'replan_project'), /Unknown Jev decision family/)
 })
 
 test('no removed family leaks into the wake envelope questions or parse result', () => {

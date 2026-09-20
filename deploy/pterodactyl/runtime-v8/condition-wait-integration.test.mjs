@@ -361,7 +361,6 @@ test('post-step Jev wait_runtime accepts idle Autorio only after deterministic w
 test('steering maintain converts continue_current into runtime wait with healthy deterministic progress', async () => {
   const { agent, memory } = makeAgent({
     decisionProvider: async () => postStepDecisionResponse('continue_current', {
-      granularity: 'keep',
       development: 'maintain',
       reasoningBudget: 'micro',
       observationBudget: 0,
@@ -390,7 +389,6 @@ test('steering maintain converts continue_current into runtime wait with healthy
 test('post-step routing accepts canonical continue_runtime vocabulary and preserves the existing internal continuation path', async () => {
   const { agent, memory } = makeAgent({
     decisionProvider: async () => postStepDecisionResponse('continue_runtime', {
-      granularity: 'keep',
       development: 'maintain',
       reasoningBudget: 'micro',
       observationBudget: 0,
@@ -418,7 +416,6 @@ test('post-step routing accepts canonical continue_runtime vocabulary and preser
 test('steering refuses runtime wait when Jev says the direction is not maintain', async () => {
   const { agent, memory } = makeAgent({
     decisionProvider: async () => postStepDecisionResponse('wait_runtime', {
-      granularity: 'keep',
       development: 'vertical',
     }),
   })
