@@ -16,8 +16,11 @@ import {
   developmentDecisionQuestions,
   parseBoundarySteeringTelemetry,
   parseDecisionFamily,
+  parseScopeReview,
+  scopeReviewQuestions,
 } from './jev-decision-taxonomy.mjs'
 import { isLifecycleMetaStep, normalizeCanonicalPlan, validateOutcomeCandidate } from './outcome-authority.mjs'
+import { getActivePlan as getActivePlanningPlan } from './planning-state.mjs'
 import { RECOVERY_SEMANTIC_SCOPES, parseRecoveryDecision, recoveryDecisionQuestions, recoveryFailureClassHint, validateRecoveryRoute } from './recovery-route.mjs'
 import {
   applyConditionObservation,
@@ -74,6 +77,8 @@ const JEV_PIPELINE_RUNTIME_GUARDS = [
   ['developmentDecisionQuestions', typeof developmentDecisionQuestions],
   ['boundarySteeringGate', typeof boundarySteeringGate],
   ['parseDecisionFamily', typeof parseDecisionFamily],
+  ['scopeReviewQuestions', typeof scopeReviewQuestions],
+  ['parseScopeReview', typeof parseScopeReview],
   ['parseBoundarySteeringTelemetry', typeof parseBoundarySteeringTelemetry],
   ['completionContractSupported', typeof completionContractSupported],
   ['sanitizeStepCompletionContract', typeof sanitizeStepCompletionContract],
@@ -4945,6 +4950,78 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return ACTION_OMISSION_REPAIR_MESSAGE
   }
 
+  /**
+   * Jev's pre-commit scope review (roadmap 4.5 / 6), run once per draft.
+   *
+   * Returns the review the commit gate needs, or undefined when there is
+   * nothing to review. There is deliberately no "assume actionable" path: the
+   * caller treats a missing review as a refusal, which is the whole point of
+   * the gate.
+   *
+   * When no decision provider is configured there is no Jev and no authoring
+   * model either -- plans come from fixtures, as in the deterministic lanes.
+   * That is recorded in the verdict's provenance rather than hidden, so a
+   * commit made without review is visible in state as exactly that.
+   */
+  async reviewDraftForCommit(memoryKey) {
+    const planning = this.memory.planningState?.(memoryKey)
+    const plan = planning ? getActivePlanningPlan(planning) : undefined
+    if (!plan) return undefined
+    const steps = Array.isArray(plan.steps) ? plan.steps : []
+    if (steps.length === 0) return undefined
+
+    const runtime_validation = { passed: true }
+    if (!this.interactionDecisionProvider) {
+      return {
+        verdict: 'actionable',
+        reason_codes: ['jev_unavailable_no_decision_provider'],
+        confidence: 0,
+        runtime_validation,
+      }
+    }
+
+    const reviewState = {
+      boundary: 'pre_commit_scope_review',
+      goal: cleanMemoryText(planning.goal?.objective ?? '', 600),
+      draft_steps: steps.map((step, index) => ({
+        index,
+        description: cleanMemoryText(step.description ?? '', 400),
+        has_completion_contract: Boolean(step.completion_contract),
+      })),
+    }
+
+    try {
+      const response = await this.interactionDecisionProvider(reviewState, scopeReviewQuestions(), {
+        epoch: this.requestInfo?.epoch,
+        actorId: this.requestInfo?.actorId,
+      })
+      const review = parseScopeReview(response, { draftStepCount: steps.length })
+      await this.traceEvent('planning.scope_review', {
+        plan_id: plan.plan_id,
+        verdict: review.verdict,
+        reason_codes: review.reason_codes,
+        mixed_direction: review.mixed_direction,
+        actionable_prefix: review.actionable_prefix,
+      })
+      return { ...review, runtime_validation }
+    }
+    catch (error) {
+      // A review that could not be obtained is not an approval. Returning the
+      // failure as a verdict keeps the refusal visible in planning state
+      // instead of looking like a plan nobody got round to reviewing.
+      await this.traceEvent('planning.scope_review_failed', {
+        plan_id: plan.plan_id,
+        reason: String(error?.message ?? error).slice(0, 300),
+      })
+      return {
+        verdict: 'needs_grounding',
+        reason_codes: ['jev_scope_review_unavailable'],
+        confidence: 0,
+        runtime_validation,
+      }
+    }
+  }
+
   async preflightOperations(operations) {
     const results = []
     const memoryKey = this.requestInfo?.memoryKey
@@ -5533,7 +5610,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         this.researchPreflightRetries = 0
         this.bootstrapDependencyPreflightRetries = 0
         if (this.requestInfo && typeof this.memory.commitPlanningPlan === 'function') {
-          this.memory.commitPlanningPlan(this.requestInfo.memoryKey, { now: Date.now() })
+          // Preflight has just passed, which IS the runtime validation half of
+          // the commit gate. Jev's scope review is the other half, and it runs
+          // here because this is the last point before the draft becomes
+          // immutable and starts executing.
+          const review = await this.reviewDraftForCommit(this.requestInfo.memoryKey)
+          this.memory.commitPlanningPlan(this.requestInfo.memoryKey, { now: Date.now(), review })
           const committed = this.memory.currentPlan?.(this.requestInfo.memoryKey)
           if (committed) stateResult = { ...(stateResult ?? {}), state: committed }
           await this.persistState()
