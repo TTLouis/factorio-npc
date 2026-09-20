@@ -9,28 +9,37 @@ const MAX_PREFLIGHT_QUEUE = 8
 const MAX_PREFLIGHT_BLOCKERS = 8
 const RESEARCH_PATH_MAX_NODES = 64
 
+function bounded_array<T>(values: T[] | undefined, limit: number): T[] {
+  const result: T[] = []
+  if (!values) return result
+  for (let index = 0; index < values.length && index < limit; index++) {
+    result.push(values[index])
+  }
+  return result
+}
+
 function bounded_node(node: any) {
   if (!node || typeof node !== 'object') return undefined
-  const prerequisites = Array.isArray(node.prerequisites) ? node.prerequisites : []
-  const unresolved = Array.isArray(node.unresolved_prerequisites) ? node.unresolved_prerequisites : []
+  const prerequisites = node.prerequisites ?? []
+  const unresolved = node.unresolved_prerequisites ?? []
   const result: Record<string, unknown> = {
     name: node.name,
     level: node.level,
     status: node.status,
     mode: node.mode,
     required_action: node.required_action,
-    prerequisites: prerequisites.slice(0, MAX_PREFLIGHT_PREREQUISITES),
+    prerequisites: bounded_array(prerequisites, MAX_PREFLIGHT_PREREQUISITES),
     prerequisites_truncated: prerequisites.length > MAX_PREFLIGHT_PREREQUISITES,
-    unresolved_prerequisites: unresolved.slice(0, MAX_PREFLIGHT_PREREQUISITES),
+    unresolved_prerequisites: bounded_array(unresolved, MAX_PREFLIGHT_PREREQUISITES),
     unresolved_prerequisites_truncated: unresolved.length > MAX_PREFLIGHT_PREREQUISITES,
   }
   if (node.research_trigger) result.research_trigger = node.research_trigger
   if (node.science && typeof node.science === 'object') {
-    const ingredients = Array.isArray(node.science.ingredients) ? node.science.ingredients : []
+    const ingredients = node.science.ingredients ?? []
     result.science = {
       count: node.science.count,
       energy: node.science.energy,
-      ingredients: ingredients.slice(0, MAX_PREFLIGHT_INGREDIENTS),
+      ingredients: bounded_array(ingredients, MAX_PREFLIGHT_INGREDIENTS),
       ingredients_truncated: ingredients.length > MAX_PREFLIGHT_INGREDIENTS,
     }
   }
@@ -47,8 +56,8 @@ function bounded_path(path: any) {
     }
   }
 
-  const pending = Array.isArray(path.pending_path) ? path.pending_path : []
-  const blockers = Array.isArray(path.blockers) ? path.blockers : []
+  const pending = path.pending_path ?? []
+  const blockers = path.blockers ?? []
   return {
     ok: true,
     target: path.target,
@@ -57,25 +66,26 @@ function bounded_path(path: any) {
     pending_count: path.pending_count,
     blocked: path.blocked,
     requested: bounded_path_node(path, path.target),
-    pending_path: pending.slice(0, MAX_PREFLIGHT_PENDING_NODES).map(bounded_node),
+    pending_path: bounded_array(pending, MAX_PREFLIGHT_PENDING_NODES).map(bounded_node),
     pending_path_truncated: pending.length > MAX_PREFLIGHT_PENDING_NODES,
-    blockers: blockers.slice(0, MAX_PREFLIGHT_BLOCKERS).map(bounded_node),
+    blockers: bounded_array(blockers, MAX_PREFLIGHT_BLOCKERS).map(bounded_node),
     blockers_truncated: blockers.length > MAX_PREFLIGHT_BLOCKERS,
   }
 }
 
 function bounded_path_node(path: any, name: string) {
-  if (!path || path.ok !== true || !Array.isArray(path.nodes)) return undefined
-  for (const node of path.nodes) {
+  if (!path || path.ok !== true) return undefined
+  const nodes = path.nodes ?? []
+  for (const node of nodes) {
     if (node?.name === name) return bounded_node(node)
   }
   return undefined
 }
 
 function queue_summary(force: any) {
-  const queue = Array.isArray(force.research_queue) ? force.research_queue : []
+  const queue = force.research_queue ?? []
   return {
-    queue: queue.slice(0, MAX_PREFLIGHT_QUEUE).map((technology: any) => ({
+    queue: bounded_array(queue, MAX_PREFLIGHT_QUEUE).map((technology: any) => ({
       name: technology.name,
       level: technology.level,
     })),
@@ -96,7 +106,7 @@ function current_research_summary(force: any) {
 
 function requested_is_queued(force: any, name: string) {
   if (force.current_research?.name === name) return true
-  const queue = Array.isArray(force.research_queue) ? force.research_queue : []
+  const queue = force.research_queue ?? []
   for (const technology of queue) {
     if (technology?.name === name) return true
   }
