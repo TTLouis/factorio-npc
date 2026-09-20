@@ -86,6 +86,11 @@ export const TERMINATE_CONFIRM_TICKS = 5 * 60
 // synchronized storage. Bound it so a lost runtime/RCON ACK cannot leave the
 // controls disabled forever across save/reload cycles.
 export const LIFECYCLE_PENDING_TICKS = 60 * 60
+// A prompt send has no goal/status transition to key off (unlike pause/resume/
+// terminate), so its "picked up" signal is any fresh runtime snapshot after the
+// send tick. This is only the fallback bound in case that snapshot never
+// arrives - short, since it is purely visual reassurance, not a durable lock.
+export const PROMPT_SEND_PENDING_TICKS = 3 * 60
 export const LEFT_COLUMN_WIDTH = 640
 export const PREVIEW_COLUMN_WIDTH = 680
 export const COLUMN_SPACING = 12
@@ -156,8 +161,11 @@ export const PREVIEW_ZOOM_DEFAULT = 0.75
 export const PREVIEW_ZOOM_MIN = 0.25
 export const PREVIEW_ZOOM_MAX = 2
 export const PREVIEW_ZOOM_STEP = 0.05
-export const COMPACT_BUTTON_HEIGHT = 32
-export const COMPACT_BUTTON_SPACING = 6
+export const COMPACT_BUTTON_HEIGHT = 36
+// Wide enough that a slightly off click lands on empty gap instead of the
+// neighboring button - PAUSE and TERMINATE sit side by side, and a misclick
+// there discards a durable goal instead of just pausing it.
+export const COMPACT_BUTTON_SPACING = 12
 // Every control is the same size. Two sizes across two rows read as a ragged
 // grid, and sizing each button to its own caption made the panel look
 // accidental. Two of these plus the gap exactly fill the section's inner width.

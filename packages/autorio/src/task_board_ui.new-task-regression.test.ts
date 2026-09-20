@@ -7,7 +7,7 @@ function taskBoardUiSource() {
   // UI constants moved into a namespace to preserve Factorio Lua local headroom.
   // Normalize that namespace for source-architecture assertions while retaining
   // the constants module so declaration/geometry checks still test real code.
-  return `${main.replaceAll('ui_constants.', '')}\n${constants}`
+  return `${main.replaceAll('ui_constants.', '')}\n${constants}`.replace(/\r\n/g, '\n')
 }
 
 

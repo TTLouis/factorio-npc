@@ -107,6 +107,9 @@ declare const storage: {
   airi_task_board_skills_open?: Record<number, boolean>
   airi_task_board_terminate_confirm_until?: Record<number, number>
   airi_task_board_prompt_draft?: Record<number, string>
+  // Tick a prompt was submitted at, keyed by player. Not goal/status-keyed like
+  // LIFECYCLE - see task_board_ui_prompt_send_pending.
+  airi_task_board_prompt_pending?: Record<number, number>
   airi_task_board_ui_inputs?: TaskBoardUiInput[]
   airi_task_board_preview_zoom?: Record<number, number>
   airi_task_board_lifecycle_pending?: Record<number, TaskBoardUiLifecyclePending>
@@ -312,6 +315,27 @@ const LIFECYCLE = {
   },
 }
 function ensure_terminate_confirm_state() { if (storage.airi_task_board_terminate_confirm_until === undefined) storage.airi_task_board_terminate_confirm_until = {}; return storage.airi_task_board_terminate_confirm_until }
+function ensure_prompt_pending_state() { if (storage.airi_task_board_prompt_pending === undefined) storage.airi_task_board_prompt_pending = {}; return storage.airi_task_board_prompt_pending }
+// Sending a free-text prompt is not goal/status-keyed the way pause/resume/
+// terminate are, so this does not reuse LIFECYCLE: LIFECYCLE.current()'s "done"
+// check is built entirely from board?.status and goal_id transitions specific
+// to those three actions, and a prompt has no equivalent guaranteed
+// transition (an in-progress goal's status usually never changes just because
+// a follow-up prompt was sent). Instead this mirrors the lighter
+// terminate-confirmation pattern: a per-player tick stamp. "Picked up" is
+// inferred from the runtime pushing any fresh snapshot after the send tick;
+// the tick bound is only the fallback for a lost round-trip, so it can stay
+// short - this is visual reassurance, not a durable cross-save lock.
+function task_board_ui_prompt_send_pending(player_index: number, tick: number) {
+  const started = storage.airi_task_board_prompt_pending?.[player_index]
+  if (started === undefined) return false
+  const synced_tick = storage.airi_task_board_ui_synced_tick
+  const picked_up = synced_tick !== undefined && synced_tick > started
+  const expired = math.max(0, tick - started) >= ui_constants.PROMPT_SEND_PENDING_TICKS
+  if (picked_up || expired) { delete ensure_prompt_pending_state()[player_index]; return false }
+  return true
+}
+function mark_prompt_sent(player_index: number) { ensure_prompt_pending_state()[player_index] = game.tick }
 function ensure_prompt_draft_state() { if (storage.airi_task_board_prompt_draft === undefined) storage.airi_task_board_prompt_draft = {}; return storage.airi_task_board_prompt_draft }
 function ensure_ui_input_queue() { if (storage.airi_task_board_ui_inputs === undefined) storage.airi_task_board_ui_inputs = []; return storage.airi_task_board_ui_inputs }
 function ensure_preview_zoom_state() { if (storage.airi_task_board_preview_zoom === undefined) storage.airi_task_board_preview_zoom = {}; return storage.airi_task_board_preview_zoom }
@@ -350,6 +374,12 @@ function set_prompt_draft(player_index: number, value: unknown) { ensure_prompt_
 export function task_board_ui_is_open(player_index: number) { return storage.airi_task_board_ui_open?.[player_index] === true }
 export function toggle_task_board_ui_open(player_index: number) { const next = !task_board_ui_is_open(player_index); ensure_open_state()[player_index] = next; return next }
 function close_task_board_ui(player_index: number) { ensure_open_state()[player_index] = false }
+/** Plain chat text standing in for the console during the first few seconds after joining. */
+function join_status_line() {
+  const board = storage.airi_task_board_ui
+  if (board === undefined) return '[SGLuna] No active task yet. Click the SGLuna button to open the console.'
+  return `[SGLuna] ${board.status.toUpperCase()} - ${board.objective || 'no objective set'}. Click the SGLuna button to open the console.`
+}
 function ensure_skills_open_state() { if (storage.airi_task_board_skills_open === undefined) storage.airi_task_board_skills_open = {}; return storage.airi_task_board_skills_open }
 export function task_board_skills_ui_is_open(player_index: number) { return storage.airi_task_board_skills_open?.[player_index] === true }
 export function toggle_task_board_skills_ui_open(player_index: number) { const next = !task_board_skills_ui_is_open(player_index); ensure_skills_open_state()[player_index] = next; return next }
@@ -932,7 +962,9 @@ function render_prompt(parent: LuaGuiElement, player: LuaPlayer) {
   new_task.enabled = pending === undefined
   const row = section.add({ type: 'flow', name: ui_constants.PROMPT_FLOW_NAME, direction: 'horizontal' }); row.style.padding = ui_constants.SECTION_PADDING; row.style.horizontally_stretchable = true; row.style.vertical_align = 'center'; row.style.horizontal_spacing = 8
   const field = row.add({ type: 'textfield', name: ui_constants.PROMPT_FIELD_NAME, text: task_board_ui_prompt_draft(player.index), tooltip: 'Send a prompt directly to SGLuna without typing !luna in chat. Press Enter to send.' }); field.style.width = ui_constants.PROMPT_FIELD_WIDTH; field.style.minimal_width = ui_constants.PROMPT_FIELD_WIDTH; field.style.maximal_width = ui_constants.PROMPT_FIELD_WIDTH
-  const send = row.add({ type: 'button', name: ui_constants.PROMPT_SEND_BUTTON_NAME, caption: 'SEND', style: 'confirm_button', tooltip: 'Send this prompt directly to SGLuna' }); send.style.width = ui_constants.PROMPT_SEND_WIDTH; send.style.minimal_width = ui_constants.PROMPT_SEND_WIDTH; send.style.maximal_width = ui_constants.PROMPT_SEND_WIDTH; send.style.height = ui_constants.COMPACT_BUTTON_HEIGHT
+  const send_pending = task_board_ui_prompt_send_pending(player.index, game.tick)
+  const send = row.add({ type: 'button', name: ui_constants.PROMPT_SEND_BUTTON_NAME, caption: send_pending ? 'SENDING...' : 'SEND', style: 'confirm_button', tooltip: send_pending ? 'Waiting for SGLuna runtime to pick up this prompt.' : 'Send this prompt directly to SGLuna' }) as ButtonGuiElement; send.style.width = ui_constants.PROMPT_SEND_WIDTH; send.style.minimal_width = ui_constants.PROMPT_SEND_WIDTH; send.style.maximal_width = ui_constants.PROMPT_SEND_WIDTH; send.style.height = ui_constants.COMPACT_BUTTON_HEIGHT
+  send.enabled = !send_pending
 }
 function render_titlebar(root: FrameGuiElement, caption = 'SGLuna NPC Console', close_name = ui_constants.CLOSE_BUTTON_NAME) {
   const titlebar = root.add({ type: 'flow', direction: 'horizontal' }); titlebar.style.horizontally_stretchable = true; titlebar.style.horizontal_spacing = 8; titlebar.drag_target = root
@@ -1003,7 +1035,7 @@ function render_debug_popout(player: LuaPlayer) { render_task_board_debug_popout
 function render(player: LuaPlayer) { ensure_button(player); render_panel(player); render_skills_popout(player); project_ui.render_projects_popout(player, task_board_ui_is_open(player.index), storage.airi_task_board_ui?.goal_id ?? ''); render_debug_popout(player) }
 function render_all() { for (const player of game.connected_players) { ensure_button(player); render_panel(player); render_skills_popout(player); project_ui.render_projects_popout(player, task_board_ui_is_open(player.index), storage.airi_task_board_ui?.goal_id ?? ''); render_debug_popout(player) } }
 function prompt_field(player: LuaPlayer) { const root = player.gui.screen[ui_constants.ROOT_NAME]; const columns = root?.valid ? root[ui_constants.COLUMNS_NAME] : undefined; const left = columns?.valid ? columns[ui_constants.LEFT_COLUMN_NAME] : undefined; const section = left?.valid ? left[ui_constants.PROMPT_SECTION_NAME] : undefined; const row = section?.valid ? section[ui_constants.PROMPT_FLOW_NAME] : undefined; const field = row?.valid ? row[ui_constants.PROMPT_FIELD_NAME] : undefined; return field?.valid ? field as TextFieldGuiElement : undefined }
-function submit_prompt(player: LuaPlayer, raw: unknown) { if (!emit_prompt(player, raw)) return false; const field = prompt_field(player); if (field !== undefined) field.text = ''; render_panel(player); return true }
+function submit_prompt(player: LuaPlayer, raw: unknown) { if (!emit_prompt(player, raw)) return false; mark_prompt_sent(player.index); const field = prompt_field(player); if (field !== undefined) field.text = ''; render_panel(player); return true }
 function handle_control_click(player: LuaPlayer, element_name: string) {
   if (element_name === ui_constants.PAUSE_BUTTON_NAME) {
     if (LIFECYCLE.current(player.index) !== undefined) return true
@@ -1031,7 +1063,7 @@ function handle_control_click(player: LuaPlayer, element_name: string) {
   }
   if (element_name === ui_constants.FOLLOW_BUTTON_NAME) { clear_terminate_confirmation(player.index); const follow = read_follow_status(); emit_control(player, follow?.active ? 'stop_follow' : 'follow'); return true }
   if (element_name === ui_constants.NEW_TASK_BUTTON_NAME) { if (LIFECYCLE.current(player.index) !== undefined) return true; clear_terminate_confirmation(player.index); debug_ui.suppress_snapshot(storage.airi_task_board_ui); debug_ui.reset_task_conversation(); emit_control(player, 'new_task'); render_panel(player); return true }
-  if (element_name === ui_constants.PROMPT_SEND_BUTTON_NAME) { submit_prompt(player, task_board_ui_prompt_draft(player.index)); return true }
+  if (element_name === ui_constants.PROMPT_SEND_BUTTON_NAME) { if (task_board_ui_prompt_send_pending(player.index, game.tick)) return true; submit_prompt(player, task_board_ui_prompt_draft(player.index)); return true }
   return false
 }
 
@@ -1049,7 +1081,24 @@ export function create_task_board_ui_remote_interface() {
   // not look identical every session. The roll lands in synchronized storage
   // here rather than being decided while drawing, which would make the button a
   // client-local decision.
-  script.on_event(defines.events.on_player_joined_game, (event: any) => { const player = game.get_player(event.player_index); if (!player?.valid) return; provider_ui.roll_provider_avatar(player.index, game.tick); render(player) })
+  //
+  // The console never reopens itself on join, even if this player left it open
+  // last session: rebuilding the panel rebinds the live remote-position camera,
+  // and doing that automatically right as a peer's own simulation is still
+  // settling into the game reproduced a real multiplayer desync. Requiring an
+  // explicit click keeps that rebuild off every join transition, not just the
+  // exact join tick. A short chat line stands in for the first few seconds so
+  // the player still has an immediate read on AIRI without needing to open
+  // anything - plain player-local text, no GUI or camera involved.
+  script.on_event(defines.events.on_player_joined_game, (event: any) => {
+    const player = game.get_player(event.player_index)
+    if (!player?.valid) return
+    provider_ui.roll_provider_avatar(player.index, game.tick)
+    close_task_board_ui(player.index)
+    destroy_panel(player)
+    ensure_button(player)
+    player.print(join_status_line())
+  })
   script.on_event(defines.events.on_gui_click, (event: any) => {
     const element = event.element; if (!element?.valid) return; const player = game.get_player(event.player_index); if (!player?.valid) return
     if (element.name === ui_constants.BUTTON_NAME) { toggle_task_board_ui_open(player.index); render(player); return }
