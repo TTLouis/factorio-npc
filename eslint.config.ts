@@ -51,6 +51,28 @@ export default antfu(
   },
   {
     files: [
+      'deploy/**/*.mjs',
+      'packages/agent/src/llm/operations.ts',
+    ],
+    rules: {
+      // These regexes intentionally reject ASCII control characters at input
+      // boundaries; the control ranges are the behavior being validated.
+      'no-control-regex': 'off',
+    },
+  },
+  {
+    files: ['**/*.test.ts'],
+    rules: {
+      // Vitest mock factories must be declared before loading the module under
+      // test, and several regression tests intentionally assert literal source
+      // strings containing ${...}. Setter-only helpers are test fixtures.
+      'import/first': 'off',
+      'no-template-curly-in-string': 'off',
+      'accessor-pairs': 'off',
+    },
+  },
+  {
+    files: [
       'packages/autorio/**/*.ts',
       'packages/tstl-plugin-reload-factorio-mod/example/*.ts',
     ],
