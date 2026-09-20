@@ -1188,3 +1188,64 @@ test('Jev pre-commit refinement replaces the legacy Task Board before execution'
   assert.equal(reducer.status, PLAN_STATUS.DRAFT)
   assert.deepEqual(reducer.steps.map(step => step.description), ['Demonstrate the first iron acquisition capability'])
 })
+
+
+test('completed reducer slice remains an active user goal boundary rather than legacy goal completion', async () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const key = 'npc:airi'
+  memory.admitPlanningGoal(key, {
+    owner: 'Louis',
+    objective: 'Build a staged long-horizon factory',
+    goalId: 'goal_status_vocabulary',
+    now: 10,
+  })
+  memory.reviseRoadmap(key, [
+    { id: 'frontier', intent: 'Establish a frontier.' },
+    { id: 'support', intent: 'Strengthen the frontier.', depends_on: ['frontier'] },
+  ], { now: 11, reason: 'goal_decomposed_to_shelf' })
+
+  const plan = {
+    ...proposedPlan(['Establish frontier']),
+    roadmapNodeIds: ['frontier'],
+    developmentMode: 'vertical',
+  }
+  const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Build a staged long-horizon factory' }, plan)
+  memory.reconcileTaskBoard(key, undefined, plan, recorded, { allowReplan: false })
+  memory.commitPlanningPlan(key, { now: 20, review: REVIEWED_ACTIONABLE })
+  const active = getActivePlan(memory.planningState(key))
+
+  const legacy = memory.currentPlan(key)
+  const stepId = legacy.task_board.active_step_id
+  memory.recordBoardEvidence(key, {
+    kind: 'deterministic_verification',
+    ref: 'batch_status_vocab',
+    summary: JSON.stringify({ verdict: 'verified_complete', operations: ['wait'] }),
+    step_id: stepId,
+  })
+  memory.applyOutcomeAuthority(key, {
+    kind: 'verified_complete',
+    source: 'deterministic_runtime',
+    reason_code: 'slice_verified',
+    evidence: [{
+      kind: 'deterministic_verification',
+      ref: 'batch_status_vocab',
+      summary: 'frontier verified',
+    }],
+    metadata: { scope: 'step' },
+  }, {
+    steeringRecommendation: {
+      recommended_mode: 'horizontal',
+      confidence: 0.95,
+      pressure: { horizontal: ['power_margin_low'] },
+      reason_codes: ['power_margin_low'],
+      recommended_by: 'jev',
+    },
+  })
+
+  const planning = memory.planningState(key)
+  assert.equal(getActivePlan(planning).plan_id, active.plan_id)
+  assert.equal(getActivePlan(planning).status, PLAN_STATUS.COMPLETED)
+  assert.equal(planning.goal.status, 'active')
+  assert.equal(memory.currentPlan(key).status, 'completed')
+  assert.equal(planning.steering.current_mode, 'horizontal')
+})

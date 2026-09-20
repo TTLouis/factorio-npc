@@ -24,6 +24,8 @@ import {
 import { isLifecycleMetaStep, normalizeCanonicalPlan, validateOutcomeCandidate } from './outcome-authority.mjs'
 import {
   getActivePlan as getActivePlanningPlan,
+  GOAL_STATUS,
+  PLAN_STATUS,
   STEERING_BOUNDARY,
   STEERING_PRESSURE_VOCABULARY,
 } from './planning-state.mjs'
@@ -4381,7 +4383,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       && planningAfterCompletion?.goal?.status === 'active'
       && Array.isArray(planningAfterCompletion?.roadmap?.nodes)
       && planningAfterCompletion.roadmap.nodes.length > 0
-      && reducerPlanAfterCompletion?.status === 'completed'
+      && reducerPlanAfterCompletion?.status === PLAN_STATUS.COMPLETED
 
     if (boundedSliceCompleted) {
       const completedBoard = visibleTaskBoard(completionState.task_board)
@@ -4409,7 +4411,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
 
-    if (!pendingAmendment && completionState?.status === 'completed') {
+    const reducerGoalSatisfied = planningAfterCompletion?.goal?.status === GOAL_STATUS.SATISFIED
+    const legacyOnlyCompletion = !planningAfterCompletion?.goal
+    if (!pendingAmendment
+      && completionState?.status === 'completed'
+      && (reducerGoalSatisfied || legacyOnlyCompletion)) {
       this.active = false
       const completedBoard = visibleTaskBoard(completionState.task_board)
       await this.traceEvent('outcome.validated', {
@@ -4439,6 +4445,26 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         goalId: completionState.goal_id,
         goalStatus: 'completed',
         taskBoard: completedBoard,
+      }
+    }
+
+    if (!pendingAmendment
+      && completionState?.status === 'completed'
+      && planningAfterCompletion?.goal?.status === GOAL_STATUS.ACTIVE) {
+      await this.traceEvent('planner.wake', {
+        source: 'planning_boundary',
+        route: 'active_goal_after_plan_completion',
+        plan_status: reducerPlanAfterCompletion?.status,
+      })
+      this.reasoningTriggerSource = 'plan_slice_completed'
+      try {
+        return await this.continueFromModMessage(
+          '[MOD] The current bounded work is complete, but the reducer-owned user goal is still active. Reconcile [PLANNING_STATE] and choose the next bounded action or explicitly surface why the goal cannot yet advance. Do not infer GOAL_SATISFIED from Task Board completion.',
+          'planning.active_goal_continuation',
+        )
+      }
+      finally {
+        this.reasoningTriggerSource = null
       }
     }
 
