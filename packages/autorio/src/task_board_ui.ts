@@ -797,38 +797,6 @@ function refresh_world_preview(parent: LuaGuiElement, runtime: TaskBoardUiRuntim
   return true
 }
 
-function project_direction_caption(direction: string) {
-  if (direction === 'vertical') return 'VERTICAL · advancing the active critical path'
-  if (direction === 'horizontal') return 'HORIZONTAL · strengthening existing capability'
-  if (direction === 'recover') return 'RECOVER · restoring a valid capability/state'
-  if (direction === 'maintain') return 'MAINTAIN · current path remains valid'
-  return 'UNSET · planner has not selected a development direction'
-}
-
-function render_project_board(parent: LuaGuiElement, board: TaskBoardUiSnapshot | undefined) {
-  const project = board?.project
-  if (project === undefined || project.title.length === 0) return
-  const { body } = create_section(parent, 'Project Board', ui_constants.LEFT_COLUMN_WIDTH, 'Long-horizon intent. Future milestones are tentative; Plan Tracker below is the current execution contract.', true)
-  const table = body.add({ type: 'table', column_count: 2 }); table.style.horizontal_spacing = 10; table.style.vertical_spacing = 4
-  add_key_value(table, 'PROJECT', project.title, { width: ui_constants.LEFT_COLUMN_WIDTH - 145 })
-
-  const current = project.current_milestone
-  const waiting = project.transition_state === 'awaiting_next_milestone'
-  add_key_value(
-    table,
-    'MILESTONE',
-    current?.title || (waiting ? 'Verified milestone complete · selecting what comes next' : 'Not selected yet'),
-    { width: ui_constants.LEFT_COLUMN_WIDTH - 145 },
-  )
-  add_key_value(table, 'DEVELOPMENT', project_direction_caption(project.development_direction), { width: ui_constants.LEFT_COLUMN_WIDTH - 145 })
-  add_key_value(table, 'PROGRESS', `${project.completed_milestones.length} milestones verified`, { width: ui_constants.LEFT_COLUMN_WIDTH - 145 })
-
-  if (project.next_milestones.length > 0) {
-    const next = project.next_milestones.map((milestone, index) => `${index + 1}. ${milestone.title}`).join('  ·  ')
-    add_key_value(table, 'UP NEXT', next, { width: ui_constants.LEFT_COLUMN_WIDTH - 145 })
-  }
-}
-
 function render_world_preview(parent: LuaGuiElement, runtime: TaskBoardUiRuntimeSnapshot, player: LuaPlayer) {
   const { header, body } = create_section(parent, 'NPC World Preview', ui_constants.PREVIEW_COLUMN_WIDTH, undefined, true, { section: ui_constants.PREVIEW_SECTION_NAME, header: ui_constants.PREVIEW_HEADER_NAME, body: ui_constants.PREVIEW_BODY_NAME })
   const preview = runtime.preview
@@ -1063,7 +1031,6 @@ function render_titlebar(root: FrameGuiElement, caption = 'SGLuna NPC Console', 
 }
 function build_left_dynamic(parent: LuaGuiElement, player: LuaPlayer, board: TaskBoardUiSnapshot | undefined, synced_tick: number | undefined, runtime: TaskBoardUiRuntimeSnapshot) {
   const top = parent.add({ type: 'flow', direction: 'horizontal' }); top.style.horizontal_spacing = ui_constants.COLUMN_SPACING; top.style.vertical_align = 'top'; render_status_panel(top, board, runtime, synced_tick); render_controls_panel(top, player, board, runtime)
-  render_project_board(parent, board)
 }
 function build_columns(columns: LuaGuiElement, player: LuaPlayer) {
   const board = storage.airi_task_board_ui; const synced_tick = storage.airi_task_board_ui_synced_tick; const runtime = runtime_snapshot()
