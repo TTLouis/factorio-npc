@@ -78,6 +78,47 @@ describe('in-game task board UI projection', () => {
     })
   })
 
+  it('preserves immutable plan identity and explicit blocked-choice state', () => {
+    const board = sanitize_task_board_ui_snapshot({
+      goal_id: 'goal_blocked',
+      objective: 'Build early automation',
+      plan: {
+        plan_id: 'goal_blocked_p4',
+        plan_version: 2,
+        derived_from: 'goal_blocked_p1',
+      },
+      blocked: {
+        reason: 'operation_preflight_failed:missing_dependency',
+        summary: 'The committed route cannot satisfy a required dependency.',
+        awaiting_choice: false,
+        choice: 'revise',
+      },
+      status: 'blocked',
+      blocker: 'operation_preflight_failed:missing_dependency',
+      pause_reason: '',
+      completed_count: 1,
+      total_steps: 2,
+      active_index: 1,
+      steps: [
+        { id: 'step_1', description: 'Gather stone', status: 'completed' },
+        { id: 'step_2', description: 'Build furnace', status: 'blocked' },
+      ],
+      activity: [],
+      wanted_items: [],
+    })
+    expect(board?.plan).toEqual({
+      plan_id: 'goal_blocked_p4',
+      plan_version: 2,
+      derived_from: 'goal_blocked_p1',
+    })
+    expect(board?.blocked).toEqual({
+      reason: 'operation_preflight_failed:missing_dependency',
+      summary: 'The committed route cannot satisfy a required dependency.',
+      awaiting_choice: false,
+      choice: 'revise',
+    })
+  })
+
   it('ignores retired Project Board payload while preserving Plan Tracker steps', () => {
     const board = sanitize_task_board_ui_snapshot({
       goal_id: 'goal_rocket',
