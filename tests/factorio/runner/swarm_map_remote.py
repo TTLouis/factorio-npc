@@ -87,29 +87,52 @@ def run(client, results: Path) -> None:
     assert_true(prechart_observer.get('actor_id') == actor_id, f'uncharted query lost actor provenance: {prechart_query!r}')
     assert_true(prechart_observer.get('body_revision') == before_revision, f'uncharted query lost body revision: {prechart_query!r}')
 
+    # Give the radar a real electric network. Writing LuaEntity.energy only
+    # fills the radar's tiny per-tick input buffer; it does not keep the radar
+    # powered long enough for Factorio's periodic nearby-coverage pulse. A full
+    # accumulator can sustain one 300 kW radar for longer than this gate while
+    # a substation connects both entities through normal engine power semantics.
     radar_create_expr = (
         '(function() local s=game.surfaces[1]; local f=game.forces["player"]; '
-        f'local p=s.find_non_colliding_position("radar", {{x={position["x"]},y={position["y"]}}}, 24, 1); '
-        'if not p then return {ok=false,code="no_radar_position"} end; '
-        'local r=s.create_entity{name="radar",position=p,force=f,raise_built=false}; '
+        f'local rp=s.find_non_colliding_position("radar", {{x={position["x"]},y={position["y"]}}}, 24, 1); '
+        'if not rp then return {ok=false,code="no_radar_position"} end; '
+        'local r=s.create_entity{name="radar",position=rp,force=f,raise_built=false}; '
         'if not r then return {ok=false,code="radar_create_failed"} end; '
-        'r.energy=100000000; return {ok=true,unit_number=r.unit_number,position=r.position} end)()'
+        'local pp=s.find_non_colliding_position("substation",{x=rp.x+4,y=rp.y},3,0.5); '
+        'if not pp then r.destroy{raise_destroy=false}; return {ok=false,code="no_substation_position"} end; '
+        'local p=s.create_entity{name="substation",position=pp,force=f,raise_built=false}; '
+        'if not p then r.destroy{raise_destroy=false}; return {ok=false,code="substation_create_failed"} end; '
+        'local ap=s.find_non_colliding_position("accumulator",{x=pp.x+4,y=pp.y},3,0.5); '
+        'if not ap then p.destroy{raise_destroy=false}; r.destroy{raise_destroy=false}; return {ok=false,code="no_accumulator_position"} end; '
+        'local a=s.create_entity{name="accumulator",position=ap,force=f,raise_built=false}; '
+        'if not a then p.destroy{raise_destroy=false}; r.destroy{raise_destroy=false}; return {ok=false,code="accumulator_create_failed"} end; '
+        'a.energy=5000000; '
+        'return {ok=true,radar_position=r.position,substation_position=p.position,accumulator_position=a.position,accumulator_energy=a.energy} end)()'
     )
-    radar = decode_json(command(lua_json(radar_create_expr)), 'temporary radar creation')
-    assert_true(radar.get('ok') is True and radar.get('position') is not None, f'could not create temporary powered radar: {radar!r}')
-    radar_position = radar['position']
+    radar = decode_json(command(lua_json(radar_create_expr)), 'temporary powered radar fixture')
+    assert_true(
+        radar.get('ok') is True
+        and radar.get('radar_position') is not None
+        and radar.get('substation_position') is not None
+        and radar.get('accumulator_position') is not None,
+        f'could not create temporary powered radar fixture: {radar!r}',
+    )
+    radar_position = radar['radar_position']
     radar_x = radar_position['x']
     radar_y = radar_position['y']
+    substation_position = radar['substation_position']
+    accumulator_position = radar['accumulator_position']
 
     chunk_x = int(position['x'] // 32)
     chunk_y = int(position['y'] // 32)
     chart_state_expr = (
         '(function() local f=game.forces["player"]; local s=game.surfaces[1]; '
         f'local r=s.find_entity("radar",{{x={radar_x},y={radar_y}}}); '
-        'if r and r.valid then r.energy=100000000 end; '
+        f'local a=s.find_entity("accumulator",{{x={accumulator_position["x"]},y={accumulator_position["y"]}}}); '
         f'local c={{x={chunk_x},y={chunk_y}}}; '
         'return {radar_found=(r~=nil), radar_valid=(r and r.valid) or false, '
         'radar_energy=(r and r.valid and r.energy) or 0, '
+        'accumulator_found=(a~=nil), accumulator_energy=(a and a.valid and a.energy) or 0, '
         'charted=f.is_chunk_charted(s,c), visible=f.is_chunk_visible(s,c), '
         'requested=f.is_chunk_requested_for_charting(s,c)} end)()'
     )
@@ -182,10 +205,15 @@ def run(client, results: Path) -> None:
     assert_true((rebound_query.get('observer') or {}).get('body_revision') == after_revision, f'post-replacement query used stale provenance: {rebound_query!r}')
 
     cleanup_expr = (
-        f'(function() local s=game.surfaces[1]; local r=s.find_entity("radar",{{x={radar_x},y={radar_y}}}); '
-        'if r and r.valid then r.destroy{raise_destroy=false} end; return true end)()'
+        '(function() local s=game.surfaces[1]; '
+        f'local r=s.find_entity("radar",{{x={radar_x},y={radar_y}}}); '
+        f'local p=s.find_entity("substation",{{x={substation_position["x"]},y={substation_position["y"]}}}); '
+        f'local a=s.find_entity("accumulator",{{x={accumulator_position["x"]},y={accumulator_position["y"]}}}); '
+        'if r and r.valid then r.destroy{raise_destroy=false} end; '
+        'if p and p.valid then p.destroy{raise_destroy=false} end; '
+        'if a and a.valid then a.destroy{raise_destroy=false} end; return true end)()'
     )
-    decode_json(command(lua_json(cleanup_expr)), 'temporary radar cleanup')
+    decode_json(command(lua_json(cleanup_expr)), 'temporary powered radar fixture cleanup')
 
     result = {
         'status': 'pass',
