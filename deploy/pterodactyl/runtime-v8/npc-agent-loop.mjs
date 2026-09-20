@@ -27,14 +27,17 @@ import {
   applyConditionObservation,
   completionCandidatesFromOperations,
   completionContractSupported,
+  createGroundedCheckpointSymbolTable,
   evaluateCompletionContract,
   makeConditionWait,
+  mutationAmountsFromOperations,
   parseReceiptCompletionDecision,
   parseStepCheckpointDecision,
   receiptCompletionDecisionQuestions,
   sanitizeStepCompletionContract,
   stepCheckpointDecisionQuestions,
   stepRelationAllowsAdmission,
+  validateGroundedCompletionContract,
 } from './step-completion.mjs'
 import {
   isObservationToolName,
@@ -2694,6 +2697,143 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  async authoritativeGroundCheckpointRequirement(requirement, { allowedReceiptNames = new Set() } = {}) {
+    const one = sanitizeStepCompletionContract({ mode: 'all', requirements: [requirement] })
+    const normalized = one.requirements?.[0]
+    if (!completionContractSupported(one) || !normalized) {
+      return { ok: false, reason: 'unsupported_or_malformed_predicate' }
+    }
+
+    if (['inventory_count', 'entity_inventory_count', 'entity_exists', 'entity_state'].includes(normalized.kind)) {
+      const exact = Number.isSafeInteger(normalized.unit_number)
+        ? this.liveObservedExactTarget(normalized.unit_number)
+        : undefined
+      if (Number.isSafeInteger(normalized.unit_number) && !exact) {
+        return { ok: false, reason: 'exact_identity_not_bound_to_current_request' }
+      }
+      const { id: _id, ...condition } = normalized
+      try {
+        const raw = JSON.parse(String(await this.rcon.command(runtimeConditionCommand(condition))).trim())
+        if (!raw || raw.ok !== true) {
+          return {
+            ok: false,
+            reason: cleanMemoryText(raw?.error || 'condition_not_authoritatively_evaluable', 160),
+          }
+        }
+        return {
+          ok: true,
+          requirement: normalized,
+          entity: exact,
+          fact: {
+            ...(Number.isFinite(raw.current) ? { current: raw.current } : {}),
+            ...(Number.isSafeInteger(normalized.unit_number) ? { exists: true } : {}),
+            ...(raw.progressing !== undefined ? { working: raw.progressing === true } : {}),
+          },
+        }
+      }
+      catch (error) {
+        return {
+          ok: false,
+          reason: `condition_grounding_failed:${cleanMemoryText(error instanceof Error ? error.message : String(error), 160)}`,
+        }
+      }
+    }
+
+    if (normalized.kind === 'authoritative_operation_receipt') {
+      if (!allowedReceiptNames.has(normalized.operation_name)) {
+        return { ok: false, reason: 'operation_receipt_not_semantically_grounded' }
+      }
+      return { ok: true, requirement: normalized }
+    }
+
+    if (normalized.kind === 'runtime_controller_state') {
+      if (normalized.controller !== 'follow') {
+        return { ok: false, reason: 'unsupported_runtime_controller' }
+      }
+      try {
+        const raw = JSON.parse(String(await this.rcon.command(toolCommand('getFollowStatus', {}))).trim())
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+          return { ok: false, reason: 'runtime_controller_not_authoritatively_evaluable' }
+        }
+        return {
+          ok: true,
+          requirement: normalized,
+          fact: {
+            active: raw.active === true,
+            healthy: raw.healthy === true,
+            controller_live: raw.controller_live === true,
+          },
+        }
+      }
+      catch (error) {
+        return {
+          ok: false,
+          reason: `controller_grounding_failed:${cleanMemoryText(error instanceof Error ? error.message : String(error), 160)}`,
+        }
+      }
+    }
+
+    return { ok: false, reason: 'unsupported_predicate_kind' }
+  }
+
+  async groundedCheckpointContext(rawCandidates, operations) {
+    const receiptCandidates = completionCandidatesFromOperations(operations)
+    const allowedReceiptNames = new Set(
+      receiptCandidates.flatMap(candidate =>
+        (Array.isArray(candidate?.requirements) ? candidate.requirements : [])
+          .filter(requirement => requirement?.kind === 'authoritative_operation_receipt')
+          .map(requirement => requirement.operation_name)),
+    )
+    const candidates = []
+    const entries = []
+    const rejections = []
+
+    for (const [candidateIndex, rawCandidate] of (Array.isArray(rawCandidates) ? rawCandidates : []).slice(0, 8).entries()) {
+      const candidate = sanitizeStepCompletionContract(rawCandidate)
+      if (!completionContractSupported(candidate)) {
+        rejections.push({ candidate_index: candidateIndex, reason: 'unsupported_or_malformed_contract' })
+        continue
+      }
+      const grounded = []
+      let rejected
+      for (const requirement of candidate.requirements) {
+        const result = await this.authoritativeGroundCheckpointRequirement(requirement, { allowedReceiptNames })
+        if (!result.ok) {
+          rejected = {
+            candidate_index: candidateIndex,
+            requirement_id: requirement.id,
+            kind: requirement.kind,
+            reason: result.reason,
+          }
+          break
+        }
+        grounded.push(result)
+      }
+      if (rejected) {
+        rejections.push(rejected)
+        continue
+      }
+      candidates.push(candidate)
+      for (const result of grounded) {
+        entries.push({
+          requirement: result.requirement,
+          source: candidate.source ?? 'runtime_grounded_candidate',
+          fact: result.fact,
+          entity: result.entity,
+        })
+      }
+    }
+
+    const groundedSymbols = createGroundedCheckpointSymbolTable(entries, {
+      mutationAmounts: mutationAmountsFromOperations(operations),
+    })
+    return {
+      candidates,
+      groundedSymbols,
+      rejections: rejections.slice(0, 8),
+    }
+  }
+
   async routeStepCheckpointDecision(plan) {
     const key = this.activePlanKey()
     const planState = this.memory.planByNpc?.get?.(key) ?? this.memory.currentPlan?.(key)
@@ -2705,14 +2845,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
 
     const existing = persistedStepCheckpoint(board, step.id)
-    const candidates = [
+    const rawCandidates = [
       ...(existing && completionContractSupported(existing.contract)
         ? [{ ...existing.contract, source: existing.durable ? (existing.contract.source ?? 'durable_step_contract') : 'persisted_step_checkpoint' }]
         : []),
       ...(completionContractSupported(plan.checkpoint) ? [{ ...plan.checkpoint, source: 'planner_semantic_checkpoint' }] : []),
       ...completionCandidatesFromOperations(plan.operations),
     ]
-    const questions = stepCheckpointDecisionQuestions(candidates)
+    const groundedContext = await this.groundedCheckpointContext(rawCandidates, plan.operations)
+    const candidates = groundedContext.candidates
+    const groundedSymbols = groundedContext.groundedSymbols
+    const questions = stepCheckpointDecisionQuestions(candidates, groundedSymbols)
 
     const deterministicCheckpointFallback = async reason => {
       // Non-quantity operations may have a runtime-authored receipt contract
@@ -2791,6 +2934,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           id: sanitizeDurableModelText(item?.id, 80),
           description: sanitizeDurableModelText(item?.description, 400),
         })),
+      grounded_symbols: sanitizeDurableModelValue(groundedSymbols),
+      grounding_rejections: sanitizeDurableModelValue(groundedContext.rejections),
       supported_requirement_kinds: [
         'inventory_count',
         'entity_inventory_count',
@@ -2799,6 +2944,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         'authoritative_operation_receipt',
         'runtime_controller_state',
       ],
+      supported_predicate_grammar: {
+        contract_modes: ['all', 'any'],
+        max_requirements: 4,
+        operands_must_reference_grounded_symbols: true,
+        mutation_amounts_are_semantic_targets: false,
+      },
     }
     const decisionId = `decision_${Date.now().toString(36)}_${(++this.decisionRequestSequence).toString(36)}`
     const controller = new AbortController()
@@ -2808,6 +2959,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       contract: 'step_checkpoint_normalizer',
       mode: 'active',
       active_step_id: step.id,
+      grounded_predicates: groundedSymbols.predicates.length,
+      grounding_rejections: groundedContext.rejections,
       question_ids: Object.keys(questions),
     })
 
@@ -2833,10 +2986,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         throw new AgentLoopError('invalid Jev step checkpoint decision')
       }
 
-      const normalized = parseStepCheckpointDecision(response, candidates)
+      const normalized = parseStepCheckpointDecision(response, candidates, groundedSymbols)
+      const groundedValidation = validateGroundedCompletionContract(normalized.contract, groundedSymbols)
       const confidenceAccepted = normalized.contract?.confidence >= 0.7
-      const contract = confidenceAccepted
-        ? sanitizeStepCompletionContract(normalized.contract)
+      const contract = confidenceAccepted && groundedValidation.accepted
+        ? sanitizeStepCompletionContract(groundedValidation.contract)
         : { mode: 'semantic_unknown', requirements: [], confidence: normalized.contract?.confidence ?? 0 }
       const compoundNeedsStrongProof = typeof normalized.compound_probability !== 'number'
         || normalized.compound_probability >= 0.5
@@ -2852,7 +3006,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
       if (boundary === 'checkpoint_here'
         && relation === 'advances_current'
-        && contract.source === 'planner_semantic_checkpoint'
         && completionContractSupported(contract)) {
         this.memory.setStepCompletionContract?.(key, step.id, contract)
       }
@@ -2864,6 +3017,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           boundary,
           relation,
           compound_probability: normalized.compound_probability,
+          synthesis_used: normalized.synthesis_used,
+          synthesis_reason: normalized.synthesis_reason,
+          synthesis_symbol: normalized.synthesis_symbol,
+          grounding_rejections: groundedContext.rejections,
           provider: normalized.provider,
           model: normalized.model,
         }),
@@ -2875,6 +3032,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         relation,
         contract,
         compound_probability: normalized.compound_probability,
+        synthesis_used: normalized.synthesis_used,
+        synthesis_reason: normalized.synthesis_reason,
+        grounding_rejections: groundedContext.rejections,
       })
       await this.decisionTraceEvent('decision.response', {
         decision_id: decisionId,
@@ -2932,6 +3092,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         continue
       }
       if (['inventory_count', 'entity_inventory_count', 'entity_exists', 'entity_state'].includes(requirement.kind)) {
+        if (Number.isSafeInteger(requirement.unit_number) && !this.liveObservedExactTarget(requirement.unit_number)) {
+          facts[requirement.id] = {
+            kind: requirement.kind,
+            unit_number: requirement.unit_number,
+            stale: true,
+            summary: 'exact_identity_not_bound_to_current_request',
+          }
+          continue
+        }
         const { id: _id, ...condition } = requirement
         try {
           const raw = JSON.parse(String(await this.rcon.command(runtimeConditionCommand(condition))).trim())
@@ -2941,8 +3110,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             ...(Number.isSafeInteger(requirement.unit_number) ? { unit_number: requirement.unit_number } : {}),
             ...(typeof requirement.item_name === 'string' ? { item_name: requirement.item_name } : {}),
             ...(Number.isFinite(raw?.current) ? { current: raw.current } : {}),
+            ...(Number.isSafeInteger(requirement.unit_number) && raw?.ok === true ? { exists: true } : {}),
             ...(raw?.exists !== undefined ? { exists: raw.exists === true } : {}),
             ...(raw?.working !== undefined ? { working: raw.working === true } : {}),
+            ...(raw?.progressing !== undefined ? { working: raw.progressing === true } : {}),
             ...(raw?.stale !== undefined ? { stale: raw.stale === true } : {}),
             satisfied: observation.satisfied === true,
             progressing: observation.progressing === true,
@@ -2953,6 +3124,43 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           facts[requirement.id] = {
             kind: requirement.kind,
             summary: `condition_observation_failed:${cleanMemoryText(error instanceof Error ? error.message : String(error), 160)}`,
+          }
+        }
+        continue
+      }
+      if (requirement.kind === 'runtime_controller_state') {
+        try {
+          const raw = requirement.controller === 'follow'
+            ? JSON.parse(String(await this.rcon.command(toolCommand('getFollowStatus', {}))).trim())
+            : undefined
+          const authoritative = Boolean(raw && typeof raw === 'object' && !Array.isArray(raw))
+          const satisfied = authoritative && (
+            requirement.expected === 'idle'
+              ? raw.active !== true
+              : requirement.expected === 'active'
+                ? raw.active === true
+                : raw.active === true && raw.healthy === true && raw.controller_live === true
+          )
+          facts[requirement.id] = {
+            kind: requirement.kind,
+            authoritative,
+            controller: requirement.controller,
+            state: satisfied
+              ? requirement.expected
+              : raw?.active === true
+                ? 'active'
+                : 'idle',
+            summary: authoritative
+              ? `${requirement.controller}:${raw.active === true ? 'active' : 'idle'}:${raw.healthy === true && raw.controller_live === true ? 'healthy' : 'not_healthy'}`
+              : 'runtime_controller_not_authoritatively_evaluable',
+          }
+        }
+        catch (error) {
+          facts[requirement.id] = {
+            kind: requirement.kind,
+            authoritative: false,
+            controller: requirement.controller,
+            summary: `controller_observation_failed:${cleanMemoryText(error instanceof Error ? error.message : String(error), 160)}`,
           }
         }
       }

@@ -47,6 +47,7 @@ function evaluate_runtime_condition(request: Record<string, unknown>) {
     const item_name = request.item_name
     const minimum = request.minimum
     if (typeof item_name !== 'string' || !positive_integer(minimum)) return { ok: false, error: 'invalid_inventory_count_condition' }
+    if (!prototypes.item[item_name]) return { ok: false, error: 'unknown_item', item_name }
     const current = actor_item_count(actor, item_name)
     return { ok: true, kind, satisfied: current >= (minimum as number), current, minimum, progress_known: false }
   }
@@ -78,6 +79,7 @@ function evaluate_runtime_condition(request: Record<string, unknown>) {
     const item_name = request.item_name
     const minimum = request.minimum
     if (typeof item_name !== 'string' || !positive_integer(minimum)) return { ok: false, error: 'invalid_entity_inventory_count_condition' }
+    if (!prototypes.item[item_name]) return { ok: false, error: 'unknown_item', item_name }
     const current = entity_item_count(entity, item_name)
     return {
       ok: true,

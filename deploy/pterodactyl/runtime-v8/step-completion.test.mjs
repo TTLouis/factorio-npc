@@ -4,8 +4,11 @@ import test from 'node:test'
 import {
   applyConditionObservation,
   completionCandidatesFromOperations,
+  createGroundedCheckpointSymbolTable,
   evaluateCompletionContract,
   makeConditionWait,
+  mutationAmountsFromOperations,
+  parseGroundedCheckpointSynthesis,
   parseReceiptCompletionDecision,
   parseStepCheckpointDecision,
   parseStepCompletionDecision,
@@ -14,6 +17,7 @@ import {
   stepCheckpointDecisionQuestions,
   stepCompletionDecisionQuestions,
   stepRelationAllowsAdmission,
+  validateGroundedCompletionContract,
 } from './step-completion.mjs'
 
 test('receipt completion formatter is bounded and defaults malformed Jev output to semantic unknown', () => {
@@ -137,6 +141,105 @@ test('quantity operations do not synthesize absolute semantic checkpoints from d
   ]) {
     assert.deepEqual(completionCandidatesFromOperations(operations), [])
   }
+})
+
+test('grounded synthesis keeps semantic target 100 separate from gather_resource mutation amount 40', () => {
+  const candidate = {
+    mode: 'all',
+    source: 'planner_semantic_checkpoint',
+    requirements: [{ id: 'stone_total', kind: 'inventory_count', item_name: 'stone', minimum: 100 }],
+  }
+  const symbols = createGroundedCheckpointSymbolTable([
+    {
+      requirement: candidate.requirements[0],
+      source: candidate.source,
+      fact: { current: 62 },
+    },
+  ], {
+    mutationAmounts: mutationAmountsFromOperations([
+      { name: 'gather_resource', args: { resource_name: 'stone', count: 40, search_radius: 512 } },
+    ]),
+  })
+
+  assert.deepEqual(symbols.quantities.map(symbol => symbol.value), [100])
+  assert.equal(symbols.items[0].name, 'stone')
+  assert.equal(symbols.items[0].current_count, 62)
+  assert.equal(symbols.mutation_amounts[0].value, 40)
+  assert.equal(symbols.mutation_amounts[0].eligible_for_checkpoint, false)
+
+  const questions = stepCheckpointDecisionQuestions([candidate], symbols)
+  assert.ok(questions.synthesis_mode.criteria.all)
+  assert.ok(questions.synthesis_requirement_1.criteria.predicate_1)
+
+  const selected = parseStepCheckpointDecision({
+    answers: {
+      contract: { type: 'choice', choice: 'candidate_1', confidence: 0.96 },
+      synthesis_mode: { type: 'choice', choice: 'all', confidence: 0.97 },
+      synthesis_requirement_1: { type: 'choice', choice: 'predicate_1', confidence: 0.98 },
+      compound_step: { type: 'noul', noul: 0.05 },
+      step_relation: { type: 'choice', choice: 'advances_current', confidence: 0.97 },
+      checkpoint_boundary: { type: 'choice', choice: 'checkpoint_here', confidence: 0.96 },
+    },
+  }, [candidate], symbols)
+
+  assert.equal(selected.synthesis_used, true)
+  assert.equal(selected.contract.source, 'jev_grounded_synthesis')
+  assert.equal(selected.contract.requirements[0].item_name, 'stone')
+  assert.equal(selected.contract.requirements[0].minimum, 100)
+})
+
+test('operation amount without a grounded semantic target cannot become an absolute synthesized checkpoint', () => {
+  const symbols = createGroundedCheckpointSymbolTable([], {
+    mutationAmounts: mutationAmountsFromOperations([
+      { name: 'gather_resource', args: { resource_name: 'stone', count: 40, search_radius: 512 } },
+    ]),
+  })
+  assert.equal(symbols.predicates.length, 0)
+  assert.equal(symbols.quantities.length, 0)
+  assert.equal(symbols.mutation_amounts[0].value, 40)
+  assert.equal(symbols.mutation_amounts[0].eligible_for_checkpoint, false)
+
+  const synthesis = parseGroundedCheckpointSynthesis({
+    answers: {
+      synthesis_mode: { type: 'choice', choice: 'all', confidence: 0.99 },
+      synthesis_requirement_1: { type: 'choice', choice: 'predicate_1', confidence: 0.99 },
+    },
+  }, symbols)
+  assert.equal(synthesis.contract.mode, 'semantic_unknown')
+  assert.equal(synthesis.reason, 'unknown_grounded_symbol')
+})
+
+test('grounded contract validation rejects unknown symbols and unsupported predicate kinds', () => {
+  const symbols = createGroundedCheckpointSymbolTable([
+    {
+      requirement: { id: 'stone_total', kind: 'inventory_count', item_name: 'stone', minimum: 100 },
+      source: 'planner_semantic_checkpoint',
+      fact: { current: 62 },
+    },
+  ])
+
+  const unknownItem = validateGroundedCompletionContract({
+    mode: 'all',
+    requirements: [{ id: 'invented', kind: 'inventory_count', item_name: 'invented-item', minimum: 100 }],
+  }, symbols)
+  assert.equal(unknownItem.accepted, false)
+  assert.equal(unknownItem.reason, 'unknown_or_ungrounded_predicate')
+
+  const unsupported = validateGroundedCompletionContract({
+    mode: 'all',
+    requirements: [{ id: 'guess', kind: 'natural_language', predicate: 'looks complete' }],
+  }, symbols)
+  assert.equal(unsupported.accepted, false)
+  assert.equal(unsupported.reason, 'unsupported_or_malformed_contract')
+
+  const maliciousSelection = parseGroundedCheckpointSynthesis({
+    answers: {
+      synthesis_mode: { type: 'choice', choice: 'all', confidence: 0.99 },
+      synthesis_requirement_1: { type: 'choice', choice: 'predicate_999', confidence: 0.99 },
+    },
+  }, symbols)
+  assert.equal(maliciousSelection.contract.mode, 'semantic_unknown')
+  assert.equal(maliciousSelection.reason, 'unknown_grounded_symbol')
 })
 
 test('Jev checkpoint pass chooses semantic boundary separately from the grounded contract', () => {

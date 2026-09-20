@@ -107,6 +107,349 @@ export function completionContractSupported(contract) {
   return normalized.mode !== 'semantic_unknown' && normalized.requirements.length > 0
 }
 
+const MAX_SYNTHESIZED_REQUIREMENTS = 4
+
+function requirementFingerprint(raw) {
+  const requirement = boundedRequirement(raw, 0)
+  if (!requirement) return ''
+  if (requirement.kind === 'inventory_count') {
+    return `inventory_count|${requirement.item_name}|${requirement.minimum}`
+  }
+  if (requirement.kind === 'entity_inventory_count') {
+    return `entity_inventory_count|${requirement.unit_number}|${requirement.item_name}|${requirement.minimum}`
+  }
+  if (requirement.kind === 'entity_exists') return `entity_exists|${requirement.unit_number}`
+  if (requirement.kind === 'entity_state') return `entity_state|${requirement.unit_number}|${requirement.expected}`
+  if (requirement.kind === 'authoritative_operation_receipt') {
+    return `authoritative_operation_receipt|${requirement.operation_name}`
+  }
+  return `runtime_controller_state|${requirement.controller}|${requirement.expected}`
+}
+
+function safeGroundedFact(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const fact = {}
+  if (Number.isFinite(value.current)) fact.current = Math.max(0, Math.trunc(value.current))
+  if (value.exists !== undefined) fact.exists = value.exists === true
+  if (value.working !== undefined) fact.working = value.working === true
+  if (value.active !== undefined) fact.active = value.active === true
+  if (value.healthy !== undefined) fact.healthy = value.healthy === true
+  if (value.controller_live !== undefined) fact.controller_live = value.controller_live === true
+  return Object.keys(fact).length > 0 ? fact : undefined
+}
+
+function safeEntitySymbol(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const unitNumber = positiveInteger(value.unit_number)
+  if (!unitNumber) return undefined
+  const symbol = { unit_number: unitNumber }
+  const name = clean(value.name, 160)
+  const type = clean(value.type, 80)
+  const surface = clean(value.surface, 120)
+  if (name) symbol.name = name
+  if (type) symbol.type = type
+  if (surface) symbol.surface = surface
+  if (Number.isSafeInteger(value.surface_index)) symbol.surface_index = value.surface_index
+  return symbol
+}
+
+export function mutationAmountsFromOperations(operations = []) {
+  const amounts = []
+  const bounded = Array.isArray(operations) ? operations.slice(0, 16) : []
+  bounded.forEach((operation, operationIndex) => {
+    const name = clean(operation?.name, 100)
+    const args = operation?.args
+    if (!name || !args || typeof args !== 'object' || Array.isArray(args)) return
+    if (positiveInteger(args.count)) {
+      amounts.push({
+        operation_index: operationIndex,
+        operation_name: name,
+        field: 'count',
+        value: args.count,
+        eligible_for_checkpoint: false,
+      })
+    }
+    if (Array.isArray(args.items)) {
+      args.items.slice(0, 8).forEach((item, itemIndex) => {
+        if (!positiveInteger(item?.count)) return
+        amounts.push({
+          operation_index: operationIndex,
+          operation_name: name,
+          field: `items[${itemIndex}].count`,
+          value: item.count,
+          eligible_for_checkpoint: false,
+        })
+      })
+    }
+  })
+  return amounts.slice(0, 16)
+}
+
+export function createGroundedCheckpointSymbolTable(entries = [], { mutationAmounts = [] } = {}) {
+  const items = []
+  const entities = []
+  const quantities = []
+  const operations = []
+  const controllers = []
+  const predicates = []
+  const itemByName = new Map()
+  const entityByUnit = new Map()
+  const quantityByValue = new Map()
+  const operationByName = new Map()
+  const controllerByName = new Map()
+  const predicateByFingerprint = new Map()
+
+  const itemSymbol = (name, fact) => {
+    if (!itemByName.has(name)) {
+      const symbol = { id: `item_${items.length + 1}`, name }
+      if (Number.isFinite(fact?.current)) symbol.current_count = fact.current
+      items.push(symbol)
+      itemByName.set(name, symbol)
+    }
+    else if (Number.isFinite(fact?.current)) {
+      itemByName.get(name).current_count = fact.current
+    }
+    return itemByName.get(name)
+  }
+  const entitySymbol = (unitNumber, entity) => {
+    if (!entityByUnit.has(unitNumber)) {
+      const safe = safeEntitySymbol({ ...(entity ?? {}), unit_number: unitNumber }) ?? { unit_number: unitNumber }
+      const symbol = { id: `entity_${entities.length + 1}`, ...safe }
+      entities.push(symbol)
+      entityByUnit.set(unitNumber, symbol)
+    }
+    return entityByUnit.get(unitNumber)
+  }
+  const quantitySymbol = value => {
+    if (!quantityByValue.has(value)) {
+      const symbol = { id: `quantity_${quantities.length + 1}`, value, semantic_target: true }
+      quantities.push(symbol)
+      quantityByValue.set(value, symbol)
+    }
+    return quantityByValue.get(value)
+  }
+  const operationSymbol = name => {
+    if (!operationByName.has(name)) {
+      const symbol = { id: `operation_${operations.length + 1}`, name }
+      operations.push(symbol)
+      operationByName.set(name, symbol)
+    }
+    return operationByName.get(name)
+  }
+  const controllerSymbol = name => {
+    if (!controllerByName.has(name)) {
+      const symbol = { id: `controller_${controllers.length + 1}`, name }
+      controllers.push(symbol)
+      controllerByName.set(name, symbol)
+    }
+    return controllerByName.get(name)
+  }
+
+  for (const entry of Array.isArray(entries) ? entries.slice(0, 24) : []) {
+    const requirement = boundedRequirement(entry?.requirement, predicates.length)
+    if (!requirement) continue
+    const fingerprint = requirementFingerprint(requirement)
+    if (!fingerprint || predicateByFingerprint.has(fingerprint)) continue
+    const fact = safeGroundedFact(entry?.fact)
+    const source = clean(entry?.source, 80) || 'runtime_grounded'
+    const operands = {}
+
+    if (requirement.kind === 'inventory_count') {
+      operands.item = itemSymbol(requirement.item_name, fact).id
+      operands.minimum = quantitySymbol(requirement.minimum).id
+    }
+    else if (requirement.kind === 'entity_inventory_count') {
+      operands.entity = entitySymbol(requirement.unit_number, entry?.entity).id
+      operands.item = itemSymbol(requirement.item_name, fact).id
+      operands.minimum = quantitySymbol(requirement.minimum).id
+    }
+    else if (requirement.kind === 'entity_exists') {
+      operands.entity = entitySymbol(requirement.unit_number, entry?.entity).id
+    }
+    else if (requirement.kind === 'entity_state') {
+      operands.entity = entitySymbol(requirement.unit_number, entry?.entity).id
+      operands.expected = requirement.expected
+    }
+    else if (requirement.kind === 'authoritative_operation_receipt') {
+      operands.operation = operationSymbol(requirement.operation_name).id
+    }
+    else {
+      operands.controller = controllerSymbol(requirement.controller).id
+      operands.expected = requirement.expected
+    }
+
+    const predicate = {
+      id: `predicate_${predicates.length + 1}`,
+      kind: requirement.kind,
+      operands,
+      requirement,
+      source,
+    }
+    predicates.push(predicate)
+    predicateByFingerprint.set(fingerprint, predicate)
+  }
+
+  const safeMutationAmounts = (Array.isArray(mutationAmounts) ? mutationAmounts : []).slice(0, 16).flatMap(value => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return []
+    const operationName = clean(value.operation_name, 100)
+    const field = clean(value.field, 80)
+    if (!operationName || !field || !positiveInteger(value.value)) return []
+    return [{
+      operation_index: nonNegativeInteger(value.operation_index) ?? 0,
+      operation_name: operationName,
+      field,
+      value: value.value,
+      eligible_for_checkpoint: false,
+    }]
+  })
+
+  return {
+    schema: 1,
+    items,
+    entities,
+    quantities,
+    operations,
+    controllers,
+    predicates,
+    mutation_amounts: safeMutationAmounts,
+  }
+}
+
+export function validateGroundedCompletionContract(contract, groundedSymbols) {
+  const normalized = sanitizeStepCompletionContract(contract)
+  if (!completionContractSupported(normalized)) {
+    return { accepted: false, reason: 'unsupported_or_malformed_contract', contract: normalized }
+  }
+  const allowed = new Set(
+    (Array.isArray(groundedSymbols?.predicates) ? groundedSymbols.predicates : [])
+      .map(predicate => requirementFingerprint(predicate?.requirement))
+      .filter(Boolean),
+  )
+  for (const requirement of normalized.requirements) {
+    if (!allowed.has(requirementFingerprint(requirement))) {
+      return {
+        accepted: false,
+        reason: 'unknown_or_ungrounded_predicate',
+        requirement_id: requirement.id,
+        contract: { mode: 'semantic_unknown', requirements: [], confidence: normalized.confidence ?? 0 },
+      }
+    }
+  }
+  return { accepted: true, reason: 'grounded_contract', contract: normalized }
+}
+
+function groundedSynthesisQuestions(groundedSymbols) {
+  const predicates = Array.isArray(groundedSymbols?.predicates)
+    ? groundedSymbols.predicates.slice(0, 8)
+    : []
+  if (predicates.length === 0) return {}
+
+  const criteria = {
+    use_candidate: 'Keep one supplied candidate contract unchanged when it already expresses the correct semantic boundary.',
+    semantic_unknown: 'No safe contract can be formed from the grounded predicates. Keep completion authority closed.',
+    all: 'Compose an ALL contract from selected grounded predicate symbols.',
+    any: 'Compose an ANY contract only when any one selected grounded predicate is independently sufficient for the whole step.',
+  }
+  const predicateCriteria = {
+    none: 'Leave this synthesis slot unused.',
+  }
+  for (const predicate of predicates) {
+    predicateCriteria[predicate.id] = `Use only this runtime-grounded predicate: ${JSON.stringify({
+      kind: predicate.kind,
+      operands: predicate.operands,
+      source: predicate.source,
+    })}`
+  }
+
+  const questions = {
+    synthesis_mode: {
+      type: 'choice',
+      instructions: 'Normalize or synthesize the semantic checkpoint using only the supplied grounded predicate symbols. Operation mutation amounts are not semantic targets and must never be promoted into checkpoint quantities.',
+      criteria,
+    },
+  }
+  const slotCount = Math.min(MAX_SYNTHESIZED_REQUIREMENTS, predicates.length)
+  for (let index = 0; index < slotCount; index++) {
+    questions[`synthesis_requirement_${index + 1}`] = {
+      type: 'choice',
+      instructions: `Select grounded predicate slot ${index + 1}. Never invent a symbol, item, entity identity, quantity, operation, controller, or predicate kind.`,
+      criteria: predicateCriteria,
+    }
+  }
+  return questions
+}
+
+export function parseGroundedCheckpointSynthesis(response, groundedSymbols) {
+  const answer = response?.answers?.synthesis_mode
+  const mode = answer?.choice
+  const confidence = typeof answer?.confidence === 'number' && Number.isFinite(answer.confidence)
+    ? Math.max(0, Math.min(1, answer.confidence))
+    : 0
+  if (!mode || mode === 'use_candidate') return { used: false }
+  if (mode === 'semantic_unknown') {
+    return {
+      used: true,
+      contract: { mode: 'semantic_unknown', requirements: [], confidence },
+      reason: 'semantic_unknown',
+    }
+  }
+  if (!['all', 'any'].includes(mode)) {
+    return {
+      used: true,
+      contract: { mode: 'semantic_unknown', requirements: [], confidence },
+      reason: 'unsupported_synthesis_mode',
+    }
+  }
+
+  const predicates = Array.isArray(groundedSymbols?.predicates)
+    ? groundedSymbols.predicates.slice(0, 8)
+    : []
+  const predicateById = new Map(predicates.map(predicate => [predicate.id, predicate]))
+  const selected = []
+  const seen = new Set()
+  for (let index = 0; index < MAX_SYNTHESIZED_REQUIREMENTS; index++) {
+    const choice = response?.answers?.[`synthesis_requirement_${index + 1}`]?.choice
+    if (!choice || choice === 'none') continue
+    const predicate = predicateById.get(choice)
+    if (!predicate) {
+      return {
+        used: true,
+        contract: { mode: 'semantic_unknown', requirements: [], confidence },
+        reason: 'unknown_grounded_symbol',
+        symbol: clean(choice, 80),
+      }
+    }
+    if (seen.has(predicate.id)) continue
+    seen.add(predicate.id)
+    selected.push(predicate)
+  }
+  if (selected.length === 0) {
+    return {
+      used: true,
+      contract: { mode: 'semantic_unknown', requirements: [], confidence },
+      reason: 'no_grounded_predicates_selected',
+    }
+  }
+
+  const contract = sanitizeStepCompletionContract({
+    mode,
+    source: 'jev_grounded_synthesis',
+    confidence,
+    requirements: selected.map((predicate, index) => ({
+      ...predicate.requirement,
+      id: `synth_${index + 1}`,
+    })),
+  })
+  const validated = validateGroundedCompletionContract(contract, groundedSymbols)
+  return validated.accepted
+    ? { used: true, contract: validated.contract, reason: 'grounded_synthesis' }
+    : {
+        used: true,
+        contract: { mode: 'semantic_unknown', requirements: [], confidence },
+        reason: validated.reason,
+      }
+}
+
 
 const RECEIPT_SAFE_OPERATION_NAMES = new Set([
   'walk_to_entity',
@@ -187,10 +530,11 @@ export function stepRelationAllowsAdmission(relation) {
   return relation === 'advances_current' || relation === 'prerequisite_for_current'
 }
 
-export function stepCheckpointDecisionQuestions(candidates = []) {
+export function stepCheckpointDecisionQuestions(candidates = [], groundedSymbols) {
   const base = stepCompletionDecisionQuestions(candidates)
   return {
     ...base,
+    ...groundedSynthesisQuestions(groundedSymbols),
     step_relation: {
       type: 'choice',
       instructions: 'Judge the semantic relationship between the proposed operation batch and the currently active canonical step. This is an admission/alignment judgment, not completion verification. Do not infer that an earlier step is complete merely because a later-step operation was proposed.',
@@ -214,12 +558,17 @@ export function stepCheckpointDecisionQuestions(candidates = []) {
   }
 }
 
-export function parseStepCheckpointDecision(response, candidates = []) {
+export function parseStepCheckpointDecision(response, candidates = [], groundedSymbols) {
   const normalized = parseStepCompletionDecision(response, candidates)
+  const synthesis = parseGroundedCheckpointSynthesis(response, groundedSymbols)
   const boundary = response?.answers?.checkpoint_boundary?.choice
   const relation = response?.answers?.step_relation?.choice
   return {
     ...normalized,
+    contract: synthesis.used ? synthesis.contract : normalized.contract,
+    synthesis_used: synthesis.used === true,
+    synthesis_reason: synthesis.reason,
+    synthesis_symbol: synthesis.symbol,
     relation: STEP_RELATIONS.has(relation) ? relation : 'replan_needed',
     boundary: ['checkpoint_here', 'keep_step_open', 'split_recommended'].includes(boundary)
       ? boundary

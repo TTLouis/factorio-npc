@@ -102,6 +102,7 @@ function activeState({ inventoryMinimum = 10, boundary = 'checkpoint_here', rela
 class Rcon {
   constructor(stone = 10) {
     this.stone = stone
+    this.staleUnits = new Set()
   }
 
   async command(text) {
@@ -109,6 +110,21 @@ class Rcon {
     if (text.includes('remote.call("autorio_follow","status")')) return JSON.stringify({ active: false, healthy: false, controller_live: false })
     if (text.includes('remote.call("autorio_operations","status")')) return JSON.stringify({ task_state: 'idle', queue_length: 0, queue_empty: true })
     if (text.includes('remote.call("autorio_tools","evaluate_condition"')) {
+      if (text.includes('invented-item')) return JSON.stringify({ ok: false, error: 'unknown_item', item_name: 'invented-item' })
+      for (const unitNumber of this.staleUnits) {
+        if (text.includes(String(unitNumber))) {
+          return JSON.stringify({ ok: false, error: 'stale_exact_identity', stale: true, unit_number: unitNumber })
+        }
+      }
+      if (text.includes('entity_exists')) {
+        return JSON.stringify({ ok: true, kind: 'entity_exists', satisfied: true, unit_number: 582, progressing: false, progress_known: true })
+      }
+      if (text.includes('entity_state')) {
+        return JSON.stringify({ ok: true, kind: 'entity_state', satisfied: true, unit_number: 582, progressing: true, progress_known: true })
+      }
+      if (text.includes('entity_inventory_count')) {
+        return JSON.stringify({ ok: true, kind: 'entity_inventory_count', item_name: 'stone', unit_number: 582, current: this.stone, minimum: 10, satisfied: this.stone >= 10, progressing: false, progress_known: true })
+      }
       return JSON.stringify({
         ok: true,
         kind: 'inventory_count',
@@ -153,11 +169,35 @@ function checkpointDecision(choice = 'candidate_1', boundary = 'checkpoint_here'
   }
 }
 
+function synthesizedCheckpointDecision({
+  predicate = 'predicate_1',
+  mode = 'all',
+  boundary = 'checkpoint_here',
+  confidence = 0.96,
+  relation = 'advances_current',
+} = {}) {
+  const response = checkpointDecision('candidate_1', boundary, confidence, relation)
+  response.answers.synthesis_mode = {
+    type: 'choice',
+    choice: mode,
+    confidence,
+    probabilities: { use_candidate: 0.01, semantic_unknown: 0.01, all: mode === 'all' ? 0.96 : 0.01, any: mode === 'any' ? 0.96 : 0.01 },
+  }
+  response.answers.synthesis_requirement_1 = {
+    type: 'choice',
+    choice: predicate,
+    confidence,
+    probabilities: { none: 0.01, [predicate]: 0.99 },
+  }
+  return response
+}
+
 function agentWithState({ state = activeState(), stone = 10, decisionProvider = async () => checkpointDecision() } = {}) {
   const memory = new CanonicalTaskBoardMemory()
   memory.planByNpc.set('npc:airi', state)
+  const rcon = new Rcon(stone)
   const agent = new NpcAgentLoop({
-    rcon: new Rcon(stone),
+    rcon,
     memory,
     npcId: 'airi',
     systemPrompt: 'checkpoint integration',
@@ -171,7 +211,7 @@ function agentWithState({ state = activeState(), stone = 10, decisionProvider = 
   agent.epoch = deployment()
   agent.lastMemoryKey = 'npc:airi'
   agent.requestInfo = { memoryKey: 'npc:airi', turnId: 1, sender: 'tester', text: 'continue' }
-  return { agent, memory }
+  return { agent, memory, rcon }
 }
 
 test('quantity operation without an explicit semantic checkpoint fails closed before completion', async () => {
@@ -483,7 +523,13 @@ test('Jev can select a semantic total checkpoint that differs from the next oper
       assert.equal(decisionState.proposed_checkpoint.requirements[0].minimum, 100)
       assert.match(questions.contract.criteria.candidate_1, /"minimum":100/)
       assert.equal(questions.contract.criteria.candidate_2, undefined)
-      return checkpointDecision('candidate_1', 'checkpoint_here', 0.96, 'advances_current')
+      assert.deepEqual(decisionState.grounded_symbols.quantities.map(symbol => symbol.value), [100])
+      assert.equal(decisionState.grounded_symbols.items[0].name, 'stone')
+      assert.equal(decisionState.grounded_symbols.items[0].current_count, 102)
+      assert.equal(decisionState.grounded_symbols.mutation_amounts[0].value, 40)
+      assert.equal(decisionState.grounded_symbols.mutation_amounts[0].eligible_for_checkpoint, false)
+      assert.ok(questions.synthesis_requirement_1.criteria.predicate_1)
+      return synthesizedCheckpointDecision()
     },
   })
 
@@ -503,14 +549,113 @@ test('Jev can select a semantic total checkpoint that differs from the next oper
   })
 
   assert.equal(result.boundary, 'checkpoint_here')
-  assert.equal(result.contract.source, 'planner_semantic_checkpoint')
+  assert.equal(result.contract.source, 'jev_grounded_synthesis')
   assert.equal(result.contract.requirements[0].minimum, 100)
+
+  const durable = memory.planByNpc.get('npc:airi').task_board.steps[0].completion_contract
+  assert.equal(durable.source, 'jev_grounded_synthesis')
+  assert.equal(durable.requirements[0].minimum, 100)
 
   const stored = memory.planByNpc.get('npc:airi').task_board.evidence.find(item => item.kind === 'step_checkpoint_contract')
   const summary = JSON.parse(stored.summary)
   assert.equal(summary.contract.requirements[0].minimum, 100)
+  assert.equal(summary.synthesis_used, true)
 })
 
+
+test('runtime rejects an unknown planner item symbol before Jev can turn it into completion authority', async () => {
+  const state = activeState({ includeCheckpoint: false })
+  state.task_board.evidence = []
+  const { agent, memory } = agentWithState({
+    state,
+    decisionProvider: async (decisionState, questions) => {
+      assert.equal(decisionState.grounded_symbols.predicates.length, 0)
+      assert.equal(decisionState.grounding_rejections[0].reason, 'unknown_item')
+      assert.equal(questions.contract.criteria.candidate_1, undefined)
+      const response = checkpointDecision('semantic_unknown', 'checkpoint_here', 0.98, 'advances_current')
+      response.answers.synthesis_mode = { type: 'choice', choice: 'all', confidence: 0.99 }
+      response.answers.synthesis_requirement_1 = { type: 'choice', choice: 'predicate_999', confidence: 0.99 }
+      return response
+    },
+  })
+
+  const result = await agent.routeStepCheckpointDecision({
+    checkpoint: {
+      mode: 'all',
+      source: 'planner_semantic_checkpoint',
+      requirements: [{ id: 'invented_total', kind: 'inventory_count', item_name: 'invented-item', minimum: 100 }],
+    },
+    operations: [{ name: 'gather_resource', args: { resource_name: 'stone', count: 40, search_radius: 64 } }],
+  })
+
+  assert.equal(result.boundary, 'keep_step_open')
+  assert.equal(result.contract.mode, 'semantic_unknown')
+  assert.equal(memory.planByNpc.get('npc:airi').task_board.steps[0].completion_contract, undefined)
+})
+
+test('stale exact entity symbols are rejected even when the old unit was observed in the current request', async () => {
+  const state = activeState({ includeCheckpoint: false })
+  state.task_board.evidence = []
+  const { agent, memory, rcon } = agentWithState({
+    state,
+    decisionProvider: async (decisionState) => {
+      assert.equal(decisionState.grounded_symbols.predicates.length, 0)
+      assert.equal(decisionState.grounding_rejections[0].reason, 'stale_exact_identity')
+      return checkpointDecision('semantic_unknown', 'checkpoint_here', 0.98, 'advances_current')
+    },
+  })
+  agent.liveEntityObservations.set('unit:582', {
+    name: 'stone-furnace',
+    type: 'furnace',
+    unit_number: 582,
+    position: { x: 1, y: 2 },
+    surface: 'nauvis',
+  })
+  rcon.staleUnits.add(582)
+
+  const result = await agent.routeStepCheckpointDecision({
+    checkpoint: {
+      mode: 'all',
+      source: 'planner_semantic_checkpoint',
+      requirements: [{ id: 'furnace_exists', kind: 'entity_exists', unit_number: 582 }],
+    },
+    operations: [{ name: 'craft_item', args: { item_name: 'stone-furnace', count: 1 } }],
+  })
+
+  assert.equal(result.boundary, 'keep_step_open')
+  assert.equal(result.contract.mode, 'semantic_unknown')
+  assert.equal(memory.planByNpc.get('npc:airi').task_board.steps[0].completion_contract, undefined)
+})
+
+test('planner receipt checkpoint cannot bypass quantity-operation semantic target rules', async () => {
+  const state = activeState({ includeCheckpoint: false })
+  state.task_board.evidence = []
+  const { agent, memory } = agentWithState({
+    state,
+    decisionProvider: async (decisionState) => {
+      assert.equal(decisionState.grounded_symbols.predicates.length, 0)
+      assert.equal(decisionState.grounding_rejections[0].reason, 'operation_receipt_not_semantically_grounded')
+      return checkpointDecision('semantic_unknown', 'checkpoint_here', 0.98, 'advances_current')
+    },
+  })
+
+  const result = await agent.routeStepCheckpointDecision({
+    checkpoint: {
+      mode: 'all',
+      source: 'planner_semantic_checkpoint',
+      requirements: [{
+        id: 'receipt_only',
+        kind: 'authoritative_operation_receipt',
+        operation_name: 'gather_resource',
+      }],
+    },
+    operations: [{ name: 'gather_resource', args: { resource_name: 'stone', count: 40, search_radius: 64 } }],
+  })
+
+  assert.equal(result.boundary, 'keep_step_open')
+  assert.equal(result.contract.mode, 'semantic_unknown')
+  assert.equal(memory.planByNpc.get('npc:airi').task_board.steps[0].completion_contract, undefined)
+})
 
 test('checkpoint routing outage keeps useful admission open while withholding completion authority', async () => {
   const state = activeState({ includeCheckpoint: false })
@@ -545,6 +690,30 @@ test('checkpoint decision failure does not masquerade as semantic drift', async 
   assert.equal(result.reason, 'checkpoint_decision_failed')
 })
 
+
+test('durable exact-entity checkpoint cannot verify after request-local identity binding is lost', async () => {
+  const state = activeState({ includeCheckpoint: false })
+  state.task_board.evidence = state.task_board.evidence.filter(item => item.kind === 'deterministic_verification')
+  state.task_board.steps[0].completion_contract = {
+    mode: 'all',
+    source: 'planner_semantic_checkpoint',
+    confidence: 0.96,
+    requirements: [{
+      id: 'furnace_exists',
+      kind: 'entity_exists',
+      unit_number: 582,
+    }],
+  }
+  state.task_board.steps[0].completion_contract_at = Date.now()
+
+  const { agent, memory } = agentWithState({ state })
+  const result = await agent.routeStepCompletionDecision({ view: { last_completed_batch: { batch_id: 7 } } })
+
+  assert.equal(result.verified, false)
+  assert.equal(result.reason, 'checkpoint_requirements_unsatisfied')
+  assert.equal(memory.planByNpc.get('npc:airi').task_board.active_index, 0)
+  assert.equal(memory.planByNpc.get('npc:airi').task_board.completed_count, 0)
+})
 
 test('durable step completion contract survives without checkpoint evidence and remains completion authority', async () => {
   const state = activeState({ includeCheckpoint: false })
