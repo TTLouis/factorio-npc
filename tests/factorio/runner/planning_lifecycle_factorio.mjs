@@ -418,7 +418,7 @@ async function verify({ rcon, results, stateFile }) {
 
   await agent.loadPersistentState()
   let planning = memory.planningState(key)
-  let active = getActivePlan(planning)
+  const active = getActivePlan(planning)
   assert.equal(providerCalls, 0, 'restore itself must not wake the Main LLM')
   assert.equal(planning.goal.goal_id, before.goal_id)
   assert.equal(planning.goal.status, 'active')

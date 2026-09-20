@@ -522,6 +522,17 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         reason: goalAdmitted ? 'goal_decomposed_to_shelf' : 'verified_world_change',
       }) ?? planning
     }
+    // Goal admission is a semantic boundary that exists BEFORE the first
+    // draft. Evaluate it after the initial non-executable shelf is admitted
+    // but before DRAFT_CREATED snapshots steering_at_draft. Production may
+    // pre-admit the goal to obtain Jev advice; adapter/direct lanes still need
+    // the same ordering with the reducer's default maintain recommendation.
+    if (goalAdmitted) {
+      planning = this.evaluateSteeringAtBoundary(key, {
+        boundary: STEERING_BOUNDARY.GOAL_ADMISSION,
+        now,
+      }) ?? planning
+    }
     const draftBefore = getActivePlan(planning)
     const replaceableDraft = replacePrecommit
       && draftBefore
@@ -551,10 +562,6 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       })
     }
     this.planningByNpc.set(key, planning)
-    // Only on actual admission: the gate would happily accept a repeat while
-    // nothing is committed, and re-evaluating the same boundary on every draft
-    // would inflate the steering sequence without a boundary having occurred.
-    if (goalAdmitted) planning = this.evaluateSteeringAtBoundary(key, { boundary: STEERING_BOUNDARY.GOAL_ADMISSION, now }) ?? planning
     this.syncPlanningState(key, state)
     return planning
   }
