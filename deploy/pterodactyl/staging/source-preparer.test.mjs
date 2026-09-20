@@ -83,13 +83,13 @@ test('preparer fails closed if the hidden 3x3 radar data-stage contract is missi
 
   const longRange = await fixture(t)
   const longRangePath = path.join(longRange.autorio, 'data.lua')
-  await fs.writeFile(longRangePath, (await fs.readFile(longRangePath, 'utf8')).replace('max_distance_of_sector_revealed = 0', 'max_distance_of_sector_revealed = 14'))
-  await assert.rejects(() => prepareNativeNpcSource(longRange.root, longRange.guard), /must disable long-range sector scanning/)
+  await fs.writeFile(longRangePath, (await fs.readFile(longRangePath, 'utf8')).replace('max_distance_of_sector_revealed = 1', 'max_distance_of_sector_revealed = 14'))
+  await assert.rejects(() => prepareNativeNpcSource(longRange.root, longRange.guard), /sector scan must stay bounded to a 3x3 chunk window/)
 
   const oversized = await fixture(t)
   const oversizedPath = path.join(oversized.autorio, 'data.lua')
   await fs.writeFile(oversizedPath, (await fs.readFile(oversizedPath, 'utf8')).replace('max_distance_of_nearby_sector_revealed = 1', 'max_distance_of_nearby_sector_revealed = 3'))
-  await assert.rejects(() => prepareNativeNpcSource(oversized.root, oversized.guard), /bounded to a 3x3 chunk window/)
+  await assert.rejects(() => prepareNativeNpcSource(oversized.root, oversized.guard), /nearby scan must stay bounded to a 3x3 chunk window/)
 })
 
 test('preparer fails closed if the Autorio build stops packaging data.lua', async t => {

@@ -23,11 +23,17 @@ radar.is_military_target = false
 radar.collision_box = {{0, 0}, {0, 0}}
 radar.selection_box = {{0, 0}, {0, 0}}
 radar.collision_mask = {layers = {}}
+-- Void power means this internal companion consumes nothing from the player's
+-- electric network. Keep tiny non-zero internal energy accounting so Factorio
+-- still advances its normal sector/nearby scan cadence.
 radar.energy_source = {type = "void"}
 radar.energy_usage = "1W"
 radar.energy_per_sector = "1J"
 radar.energy_per_nearby_scan = "1J"
-radar.max_distance_of_sector_revealed = 0
+-- Both scan mechanisms are bounded to the same 3x3 chunk footprint. Sector
+-- scanning is required to chart a zero-player, previously unexplored map;
+-- nearby scanning then keeps that exact footprint currently visible.
+radar.max_distance_of_sector_revealed = 1
 radar.max_distance_of_nearby_sector_revealed = 1
 
 -- The companion radar is intentionally world-invisible. The base radar stores
