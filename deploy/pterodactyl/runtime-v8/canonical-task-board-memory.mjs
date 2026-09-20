@@ -383,6 +383,74 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     else this.steeringAdviceByNpc.delete(key)
   }
 
+  /**
+   * Deterministic-verification refs recorded since the shelf last moved.
+   *
+   * This is the runtime's own receipt log, not anything the planner said. It
+   * is the only evidence a roadmap revision is allowed to stand on, so it
+   * deliberately has no parameter a caller could use to supply its own.
+   */
+  verifiedWorldChangeRefsSinceRoadmap(key) {
+    const planning = this.planningState(key)
+    const since = Number.isFinite(planning?.roadmap?.created_at) ? planning.roadmap.created_at : 0
+    const evidence = (key ? this.planByNpc.get(key) : undefined)?.task_board?.evidence
+    if (!Array.isArray(evidence)) return []
+    return evidence
+      .filter(item => item?.kind === 'deterministic_verification' && Number.isFinite(item?.at) && item.at > since)
+      .map(item => String(item.ref ?? item.id ?? '').slice(0, 200))
+      .filter(Boolean)
+      .slice(-16)
+  }
+
+  /**
+   * Put the Main LLM's coarse roadmap guidance onto the Roadmap Shelf.
+   *
+   * The reducer has always known how to do this; nothing on the live path ever
+   * asked it to, so the shelf was permanently empty and the whole LOD layer --
+   * refinement readiness, fan-out parking, demotion -- was inert in the running
+   * agent. This is the emitter.
+   *
+   * Authorship and authority are different things, and this is where the
+   * difference is enforced. The Main LLM AUTHORS the nodes (Jev never does,
+   * and the harness never invents one), but the reducer only moves long-horizon
+   * guidance for explicit user direction or a grounded verified world change
+   * (roadmap 3). So:
+   *
+   *   - the FIRST shelf of an admitted goal is not a revision of anything. It
+   *     is the user's own objective restated at LOD 1, and carries the user's
+   *     direction -- hence `user_steering`, not `runtime`;
+   *   - every later revision is a claim that the world moved under the
+   *     guidance, and is admitted only against deterministic verification refs
+   *     this adapter already holds. Those come from the runtime's receipt log,
+   *     so a planner cannot mint the evidence that authorizes its own revision.
+   *
+   * A submission with neither is dropped: preferring a different shelf is not
+   * a reason for the shelf to move.
+   *
+   * Node contents are NOT sanitized here on purpose. `sanitizeShelfNode` in
+   * the reducer is the single definition of "a shelf node is non-executable";
+   * stripping `steps`/`operations` here too would be a second copy of that
+   * rule to keep in sync, and the copy that drifts is the one that lets an
+   * executable node onto the shelf.
+   */
+  reviseRoadmap(key, nodes, { now = Date.now(), reason } = {}) {
+    if (!key || !Array.isArray(nodes) || nodes.length === 0) return undefined
+    const planning = this.planningState(key)
+    const goalId = planning?.goal?.goal_id
+    if (!goalId) return planning
+    const firstShelfForGoal = planning.roadmap?.goal_id !== goalId
+    const evidenceRefs = firstShelfForGoal ? [] : this.verifiedWorldChangeRefsSinceRoadmap(key)
+    if (!firstShelfForGoal && evidenceRefs.length === 0) return planning
+    return this.dispatchPlanningEvent(key, {
+      type: PLANNING_EVENT.ROADMAP_REVISED,
+      now,
+      source: firstShelfForGoal ? 'user_steering' : 'runtime',
+      nodes,
+      reason: String(reason ?? (firstShelfForGoal ? 'goal_decomposed_to_shelf' : 'verified_world_change')).slice(0, 300),
+      ...(evidenceRefs.length > 0 ? { evidence_refs: evidenceRefs } : {}),
+    })
+  }
+
   ensurePlanningDraft(key, state, { now = Date.now(), migrated = false } = {}) {
     if (!key || !state) return undefined
     let planning = this.planningByNpc.get(key)

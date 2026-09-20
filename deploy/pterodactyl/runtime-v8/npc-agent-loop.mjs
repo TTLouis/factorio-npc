@@ -109,6 +109,8 @@ Once a plan is COMMITTED its steps, their order and their completion meaning are
 
 The [PLANNING_STATE] message carries the durable Goal, the Roadmap Shelf and the committed Plan. Shelf nodes are storage: they record intent and lineage, never operations and never plan steps. Do not compile a shelf node into steps on your own initiative.
 
+You author the shelf through the optional roadmap field on submitPlan: a short list of coarse nodes, each stating what should eventually be true for the goal and why it matters. Keep them at that altitude — a node is not a step, carries no operations, and never claims its own progress; the harness derives realization from verified results and strips anything executable. For a long-horizon goal, send the shelf on the first plan of that goal. Afterwards it only moves when verified world state has actually invalidated the guidance, so restate the nodes that still apply with their original ids (omitting a node marks it invalidated and keeps its lineage), and do not re-send an unchanged shelf just to restate a preference.
+
 For the active Plan Tracker step, you may add one optional root field named checkpoint beside chatMessage/plan/currentStep/operations. checkpoint is a semantic completion proposal for Jev to judge and runtime to verify, not a claim that the step is already done. It must use a runtime-supported contract: {"mode":"all|any","requirements":[...]} with requirement kinds inventory_count, entity_inventory_count, entity_exists, entity_state, authoritative_operation_receipt, or runtime_controller_state. Prefer world-state outcomes over action occurrence. Example: if the step means "have 100 stone" and the next operation only gathers 40 more because 62 are already held, checkpoint must say inventory_count stone >= 100, not >= 40. The operation batch describes what to do next; checkpoint describes what would prove the semantic step complete. Jev may keep the step open or request a split even when you propose a checkpoint, and runtime remains completion authority. Omit checkpoint when no safe deterministic predicate represents the step.
 
 Plan entries must represent goal-bearing Factorio work or verification. Do not add terminal lifecycle/meta steps such as "Stop", "Done", "Finish", or "Report completion"; stopping after the verified goal is represented by returning plan: [], currentStep: 0, operations: [].
@@ -4497,7 +4499,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         plan_steps: Array.isArray(plannerSubmission.plan) ? plannerSubmission.plan.length : 0,
         operation_count: Array.isArray(plannerSubmission.operations) ? plannerSubmission.operations.length : 0,
         has_checkpoint: plannerSubmission.checkpoint !== undefined,
-        has_project: plannerSubmission.project !== undefined,
+        roadmap_nodes: Array.isArray(plannerSubmission.roadmap) ? plannerSubmission.roadmap.length : 0,
         natural_content_chars: typeof message.content === 'string' ? message.content.length : 0,
       })
       message = {
@@ -4612,12 +4614,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw error
     }
     let checkpoint
+    let roadmap
     let baseMessage = message
     if (typeof message?.content === 'string') {
       let raw
       try { raw = JSON.parse(message.content) }
       catch {}
       if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        // `parsePlan` is strict-exact-keys over the executable plan surface, so
+        // anything that is not a step/operation has to be lifted off here or the
+        // whole submission is rejected as an unexpected argument. `project` used
+        // to be parsed by submitPlan and then die exactly here.
+        if (Array.isArray(raw.roadmap)) roadmap = raw.roadmap
         if (Object.prototype.hasOwnProperty.call(raw, 'checkpoint')) {
           checkpoint = sanitizeStepCompletionContract(raw.checkpoint)
           if (!completionContractSupported(checkpoint)) {
@@ -4628,14 +4636,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           }
           checkpoint = { ...checkpoint, source: 'planner_semantic_checkpoint' }
         }
-        if (checkpoint) {
-          const { checkpoint: _checkpoint, ...base } = raw
+        if (checkpoint || roadmap || Object.prototype.hasOwnProperty.call(raw, 'roadmap')) {
+          const { checkpoint: _checkpoint, roadmap: _roadmap, ...base } = raw
           baseMessage = { ...message, content: JSON.stringify(base) }
         }
       }
     }
     const plan = super.parsePlanMessage(baseMessage)
     if (checkpoint) plan.checkpoint = checkpoint
+    if (roadmap) plan.roadmap = roadmap
     const normalizedPlan = normalizeCanonicalPlan(plan.plan, plan.currentStep)
     plan.plan = normalizedPlan.plan
     plan.currentStep = normalizedPlan.currentStep
@@ -5336,7 +5345,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       plan: plan.plan,
       current_step: plan.currentStep,
       operations,
-      ...(plan.project ? { project: plan.project } : {}),
+      ...(Array.isArray(plan.roadmap) && plan.roadmap.length > 0 ? { roadmap: plan.roadmap } : {}),
       ...(plan.checkpoint ? { checkpoint: plan.checkpoint } : {}),
     })
 
@@ -5497,6 +5506,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         verifiedCompletion: finalCompletionVerified,
         completionEvidence,
       })
+      // The shelf can only be revised once the goal it belongs to has been
+      // admitted, and `recordPlan` is what admits it, so this runs after it and
+      // not with the rest of the plan-surface parsing.
+      if (Array.isArray(plan.roadmap) && typeof this.memory.reviseRoadmap === 'function') {
+        this.memory.reviseRoadmap(this.requestInfo.memoryKey, plan.roadmap, {
+          now: Date.now(),
+          reason: this.reasoningTriggerSource ?? this.planUpdateReason ?? 'planner_submission',
+        })
+      }
       stateResult = this.memory.reconcileTaskBoard?.(this.requestInfo.memoryKey, previousBoard, durablePlan, stateResult, {
         // A committed suffix is immutable. Runtime recovery re-observes and
         // continues it; only USER_REVISION_APPROVED may replace it.

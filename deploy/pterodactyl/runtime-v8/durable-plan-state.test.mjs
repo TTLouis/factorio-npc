@@ -1185,3 +1185,83 @@ test('tool-native submitPlan lets assistant content stay natural language on the
   assert.equal(rcon.mutations.length, 1)
   assert.equal(agent.memory.byNpc.get('npc:airi').recent.at(-1).assistant, 'I am mining one iron ore now.')
 })
+
+
+// These drive the WHOLE live path -- provider tool call, submitPlan parse, plan
+// surface, memory adapter, reducer -- because the bug being fixed here was never
+// a reducer bug. ROADMAP_REVISED had a correct handler and passing unit tests
+// the entire time; nothing in the running agent emitted it, so the Roadmap Shelf
+// was empty in production and a reducer-level test stayed green throughout.
+// Asserting on `memory.planningState(...).roadmap` is the point: it is non-null
+// only if the live path actually reached the reducer.
+function roadmapSubmissionAgent(roadmap) {
+  return new NpcAgentLoop({
+    rcon: new FakeRcon(),
+    provider: async () => ({
+      content: 'Starting on early smelting.',
+      tool_calls: [{
+        id: 'submit-plan-roadmap',
+        type: 'function',
+        function: {
+          name: 'submitPlan',
+          arguments: JSON.stringify({
+            plan: ['Mine one iron ore'],
+            currentStep: 0,
+            operations: [{ name: 'mine_entity', args: { entity_name: 'iron-ore', count: 1 } }],
+            roadmap,
+          }),
+        },
+      }],
+    }),
+    systemPrompt: 'roadmap shelf live path test',
+    memory: new CanonicalTaskBoardMemory(),
+    stateFile: null,
+    traceFile: null,
+  })
+}
+
+test('planner roadmap guidance reaches the Roadmap Shelf through the live path', async () => {
+  const agent = roadmapSubmissionAgent([
+    { id: 'roadmap_early_smelting', intent: 'establish reliable early iron and copper smelting', why_it_matters: 'everything downstream needs plates' },
+    { id: 'roadmap_red_science', intent: 'sustain red science production', depends_on: ['roadmap_early_smelting'] },
+  ])
+
+  await agent.request('build toward a rocket-capable factory', { sender: 'TTLouis' })
+
+  const planning = agent.memory.planningState('npc:airi')
+  assert.ok(planning?.roadmap, 'the live path must actually populate the shelf, not merely be able to')
+  assert.deepEqual(planning.roadmap.nodes.map(node => node.id), ['roadmap_early_smelting', 'roadmap_red_science'])
+  assert.equal(planning.roadmap.nodes[0].intent, 'establish reliable early iron and copper smelting')
+  assert.deepEqual(planning.roadmap.nodes[1].depends_on, ['roadmap_early_smelting'])
+  assert.equal(planning.roadmap.goal_id, planning.goal.goal_id)
+  // The Main LLM authored the nodes; what let the shelf move is the user's own
+  // objective at LOD 1 -- not the runtime, and not the planner's preference.
+  assert.equal(planning.roadmap.authority, 'user')
+  // Lineage exists from the first revision onward (roadmap 10).
+  assert.equal(planning.roadmap.nodes[0].first_seen_revision_id, planning.roadmap.roadmap_revision_id)
+})
+
+test('shelf nodes stay non-executable across the live path', async () => {
+  const agent = roadmapSubmissionAgent([{
+    id: 'roadmap_smuggled_plan',
+    intent: 'establish reliable early iron and copper smelting',
+    status: 'realized',
+    steps: ['Mine 20 iron ore', 'Craft a stone furnace'],
+    operations: [{ name: 'mine_entity', args: { entity_name: 'iron-ore', count: 20 } }],
+  }])
+
+  await agent.request('build toward a rocket-capable factory', { sender: 'TTLouis' })
+
+  const node = agent.memory.planningState('npc:airi')?.roadmap?.nodes?.[0]
+  assert.ok(node)
+  assert.equal(node.steps, undefined)
+  assert.equal(node.operations, undefined)
+  assert.equal(JSON.stringify(node).includes('stone furnace'), false)
+  // Stripped visibly, not silently: the shelf records that an executable
+  // payload was removed, so the attempt is inspectable rather than lost.
+  assert.deepEqual(node.dropped_executable_fields, ['steps', 'operations'])
+  // The asserted `realized` is discarded: realization rests on verified plan
+  // results, and the status the shelf shows is the one readiness derived (the
+  // node declares no dependencies, so it is refinable, not done).
+  assert.equal(node.status, 'ready_to_refine')
+})

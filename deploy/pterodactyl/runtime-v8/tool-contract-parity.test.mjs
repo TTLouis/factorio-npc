@@ -179,6 +179,46 @@ test('submitPlan accepts natural-language assistant content while keeping contro
   assert.equal(payload.operations[0].name, 'mine_entity')
 })
 
+// The advertised schema and the parser's exact-key list are two statements of
+// the same contract. `project` drifted between them: the parser accepted it long
+// after anything consumed it, and the strict plan surface then rejected the whole
+// submission as an unexpected argument. Pin them to each other.
+test('submitPlan advertises exactly the fields its parser accepts', () => {
+  const definition = runtime.plannerControlToolDefinitions
+    .find(tool => tool.function.name === runtime.PLANNER_CONTROL_TOOL_NAME)
+  const advertised = Object.keys(definition.function.parameters.properties).sort()
+  assert.deepEqual(advertised, ['chatMessage', 'checkpoint', 'currentStep', 'operations', 'plan', 'roadmap'])
+  assert.equal(advertised.includes('project'), false)
+
+  const sample = { chatMessage: 'x', plan: [], currentStep: 0, operations: [], roadmap: [], checkpoint: {} }
+  for (const field of advertised) {
+    assert.ok(Object.hasOwn(sample, field), `no parity sample for advertised field ${field}`)
+    assert.doesNotThrow(() => runtime.plannerControlPayloadFromMessage({
+      content: '',
+      tool_calls: [{
+        id: 'control-1',
+        type: 'function',
+        function: {
+          name: runtime.PLANNER_CONTROL_TOOL_NAME,
+          arguments: JSON.stringify({ chatMessage: 'x', plan: [], currentStep: 0, operations: [], [field]: sample[field] }),
+        },
+      }],
+    }), `submitPlan advertises ${field} but its parser refuses it`)
+  }
+})
+
+test('the Roadmap Shelf surface cannot carry executable work', () => {
+  const definition = runtime.plannerControlToolDefinitions
+    .find(tool => tool.function.name === runtime.PLANNER_CONTROL_TOOL_NAME)
+  const node = definition.function.parameters.properties.roadmap.items
+  assert.equal(node.additionalProperties, false)
+  // Not advertised, and not merely undocumented: a node that could carry steps,
+  // operations or its own status would stop being coarse guidance.
+  for (const forbidden of ['steps', 'plan', 'operations', 'status', 'currentStep']) {
+    assert.equal(Object.hasOwn(node.properties, forbidden), false, `roadmap node must not advertise ${forbidden}`)
+  }
+})
+
 test('submitPlan rejects mixed observation/control batches and malformed arguments', () => {
   assert.throws(() => runtime.plannerControlPayloadFromMessage({
     content: '',
