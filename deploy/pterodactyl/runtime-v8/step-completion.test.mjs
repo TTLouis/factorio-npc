@@ -12,6 +12,7 @@ import {
   parseReceiptCompletionDecision,
   parseStepCheckpointDecision,
   parseStepCompletionDecision,
+  provePermanentlyUnsatisfiable,
   sanitizeStepCompletionContract,
   receiptCompletionDecisionQuestions,
   stepCheckpointDecisionQuestions,
@@ -380,4 +381,56 @@ test('condition wait carries bounded lifecycle identity when supplied', () => {
   assert.equal(wait.actor_id, 18)
   assert.equal(wait.actor_epoch, 3)
   assert.ok(wait.timeout_ms <= 2 * 60 * 60 * 1000)
+})
+
+test('unsatisfiability is proven only by a destroyed exact identity the contract names', () => {
+  const contract = {
+    mode: 'all',
+    requirements: [
+      { id: 'fuel', kind: 'entity_inventory_count', unit_number: 4412, item_name: 'coal', minimum: 5 },
+      { id: 'plates', kind: 'inventory_count', item_name: 'iron-plate', minimum: 20 },
+    ],
+  }
+
+  const proven = provePermanentlyUnsatisfiable(contract, { staleUnitNumbers: [4412] })
+  assert.equal(proven.proven, true)
+  assert.deepEqual(proven.requirement_ids, ['fuel'])
+  assert.deepEqual(proven.unit_numbers, [4412])
+
+  assert.equal(provePermanentlyUnsatisfiable(contract, { staleUnitNumbers: [] }), undefined)
+  assert.equal(provePermanentlyUnsatisfiable(contract, { staleUnitNumbers: [9999] }), undefined,
+    'an identity this contract never names proves nothing about it')
+})
+
+test('an unpinned requirement can never be proven unsatisfiable however often it failed', () => {
+  // `inventory_count`, receipts and controller state are not bound to an entity
+  // the world can destroy, so no amount of destruction makes them impossible.
+  const unpinned = {
+    mode: 'all',
+    requirements: [
+      { id: 'plates', kind: 'inventory_count', item_name: 'iron-plate', minimum: 20 },
+      { id: 'receipt', kind: 'authoritative_operation_receipt', operation_name: 'craft_item' },
+      { id: 'controller', kind: 'runtime_controller_state', controller: 'mining', expected: 'idle' },
+    ],
+  }
+  assert.equal(provePermanentlyUnsatisfiable(unpinned, { staleUnitNumbers: [1, 2, 3, 4412] }), undefined)
+})
+
+test('any-mode needs every branch dead, all-mode only needs one', () => {
+  const requirements = [
+    { id: 'a', kind: 'entity_exists', unit_number: 10 },
+    { id: 'b', kind: 'entity_state', unit_number: 11, expected: 'working' },
+  ]
+
+  assert.equal(provePermanentlyUnsatisfiable({ mode: 'any', requirements }, { staleUnitNumbers: [10] }), undefined,
+    'a surviving branch keeps an any-mode contract reachable')
+  assert.equal(provePermanentlyUnsatisfiable({ mode: 'any', requirements }, { staleUnitNumbers: [10, 11] }).proven, true)
+  assert.equal(provePermanentlyUnsatisfiable({ mode: 'all', requirements }, { staleUnitNumbers: [10] }).proven, true)
+})
+
+test('a contract with nothing to falsify is never proven unsatisfiable', () => {
+  assert.equal(provePermanentlyUnsatisfiable({ mode: 'semantic_unknown', requirements: [] }, { staleUnitNumbers: [10] }), undefined)
+  assert.equal(provePermanentlyUnsatisfiable(undefined, { staleUnitNumbers: [10] }), undefined)
+  // A malformed contract sanitizes to semantic_unknown rather than proving anything.
+  assert.equal(provePermanentlyUnsatisfiable({ mode: 'all', requirements: [{ id: 'x', kind: 'nonsense' }] }, { staleUnitNumbers: [10] }), undefined)
 })

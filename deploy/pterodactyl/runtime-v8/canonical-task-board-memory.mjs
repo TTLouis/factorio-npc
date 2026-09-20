@@ -1,6 +1,6 @@
 import { NpcDialogueMemory } from './npc-agent-loop.mjs'
 import { reconcileTaskBoard, setTaskBoardStatus } from './common.mjs'
-import { completionContractSupported, sanitizeStepCompletionContract } from './step-completion.mjs'
+import { completionContractSupported, provePermanentlyUnsatisfiable, sanitizeStepCompletionContract } from './step-completion.mjs'
 import {
   applyPlanningEvent,
   createEmptyPlanningState,
@@ -93,6 +93,21 @@ function parseReceiptSummary(evidence) {
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : undefined
   }
   catch { return undefined }
+}
+
+// The deterministic preflight rejection that proves an exact identity is gone.
+// `npc-agent-loop` records it as board evidence on the recoverable path, which
+// makes this the live seam where the world's proof reaches the reducer.
+function staleExactTargetProof(evidence) {
+  if (evidence?.kind !== 'operation_preflight_recoverable' || typeof evidence.summary !== 'string') return undefined
+  let parsed
+  try { parsed = JSON.parse(evidence.summary) }
+  catch { return undefined }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+  if (parsed.code !== 'stale_exact_target') return undefined
+  const identity = Number(parsed.identity)
+  if (!Number.isSafeInteger(identity) || identity <= 0) return undefined
+  return { unitNumber: identity, ref: typeof evidence.ref === 'string' ? evidence.ref : undefined }
 }
 
 function taskTypesMatch(actual, expected) {
@@ -637,6 +652,112 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return state
   }
 
+  /**
+   * Record that the world destroyed an exact identity, and block the plan if
+   * that kills the active step's contract (roadmap 6 / 7).
+   *
+   * `stale_exact_target` is the one impossibility the runtime can actually
+   * PROVE. The game answered a deterministic preflight with "unit N does not
+   * resolve", unit_numbers are never reused, so every requirement pinned to N
+   * is dead for good. No threshold, no retry count, no model opinion -- which
+   * is exactly what separates this from the repeating-failure signal, and why
+   * the reducer refuses this event from any source but the runtime.
+   *
+   * Stale identities accumulate per NPC because an `any`-mode contract only
+   * dies once EVERY branch is dead, and those branches are proven one rejected
+   * preflight at a time.
+   */
+  recordStaleExactIdentity(key, unitNumber, { now = Date.now(), proofRef } = {}) {
+    if (!key || !Number.isSafeInteger(unitNumber) || unitNumber <= 0) return undefined
+    this.staleExactIdentitiesByNpc ??= new Map()
+    const stale = this.staleExactIdentitiesByNpc.get(key) ?? new Set()
+    stale.add(unitNumber)
+    this.staleExactIdentitiesByNpc.set(key, stale)
+
+    let planning = this.planningByNpc.get(key)
+    const plan = getActivePlan(planning)
+    if (!plan || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan.status)) return planning
+    const step = plan.steps?.[plan.active_step_index]
+    if (!step?.completion_contract) return planning
+    const proof = provePermanentlyUnsatisfiable(step.completion_contract, { staleUnitNumbers: [...stale] })
+    if (!proof) return planning
+
+    planning = applyPlanningEvent(planning, {
+      type: PLANNING_EVENT.CONTRACT_PROVEN_UNSATISFIABLE,
+      now,
+      source: 'runtime',
+      plan_id: plan.plan_id,
+      step_id: step.step_id,
+      reason: proof.reason,
+      proof_ref: proofRef ?? `stale_exact_target/${proof.unit_numbers.join('+')}`,
+    })
+    this.planningByNpc.set(key, planning)
+    // The proof only matters if it reaches the deadlock detector: `unsatisfiable`
+    // is inert state until a signal reads it and freezes the plan for the user.
+    planning = this.evaluatePlanningDeadlock(key, planning, now)
+    this.syncPlanningState(key)
+    return planning
+  }
+
+  /**
+   * Run the deterministic deadlock evaluators and freeze the plan on a signal.
+   *
+   * Kept separate from the copy inside `applyOutcomeAuthority` on purpose: that
+   * one fires on the attempt that crossed a counting threshold, this one fires
+   * the moment a proof lands, and the two paths reach the detector at different
+   * times. Folding them together is a later cleanup, not this change.
+   */
+  evaluatePlanningDeadlock(key, planning, now) {
+    const deadlock = evaluateDeadlockSignals(planning)
+    if (!deadlock.deadlocked) return planning
+    const next = applyPlanningEvent(planning, {
+      type: PLANNING_EVENT.DEADLOCK_DETECTED,
+      now,
+      source: 'runtime',
+      plan_id: deadlock.plan_id,
+      reason_code: deadlock.signals[0]?.kind ?? 'deadlock_detected',
+      signals: deadlock.signals,
+    })
+    this.planningByNpc.set(key, next)
+    return next
+  }
+
+  /**
+   * Carry the planner's advisory focus onto the reducer plan (roadmap 8).
+   *
+   * The legacy board has always tracked `proposed_focus_index` -- where the
+   * provider THINKS work is -- next to `active_index`, which is where verified
+   * evidence says it actually is. That focus never reached the reducer, so the
+   * Plan Tracker had no way to show the divergence it exists to make visible.
+   *
+   * Recorded, never acted on: the reducer writes it to `advisory` and nothing
+   * reads `advisory` when deciding progress. Focus cannot advance the active
+   * step and cannot complete one -- only accepted runtime evidence does that.
+   * The index is translated through the carried-forward prefix so the id stored
+   * is a reducer step_id and not a legacy board position.
+   */
+  recordPlannerFocus(key, { now = Date.now() } = {}) {
+    if (!key) return undefined
+    const planning = this.planningByNpc.get(key)
+    const plan = getActivePlan(planning)
+    const board = this.planByNpc.get(key)?.task_board
+    if (!plan || board?.kind !== 'task_board_lite') return planning
+    const focusIndex = board.proposed_focus_index
+    if (!Number.isSafeInteger(focusIndex)) return planning
+    const carriedPrefix = Array.isArray(plan.carried_forward_evidence) ? plan.carried_forward_evidence.length : 0
+    const step = plan.steps?.[focusIndex - carriedPrefix]
+    // A focus pointing outside the committed slice is not a step to record.
+    if (!step) return planning
+    if (plan.advisory?.planner_focus_step_id === step.step_id) return planning
+    return this.dispatchPlanningEvent(key, {
+      type: PLANNING_EVENT.PLANNER_FOCUS_PROPOSED,
+      now,
+      source: 'planner',
+      plan_id: plan.plan_id,
+      step_id: step.step_id,
+    })
+  }
+
   retireCompletedPlan(key) {
     const state = key ? this.planByNpc.get(key) : undefined
     if (!state || state.status !== 'completed') return state
@@ -1092,6 +1213,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     if (result?.state) {
       this.ensurePlanningDraft(key, result.state, { now: result.state.updated_at })
       this.syncPlanningState(key, result.state)
+      // After sync, because sync is what settles which focus survives.
+      this.recordPlannerFocus(key, { now: result.state.updated_at })
     }
     if (result?.state?.status === 'completed') this.planByNpc.delete(key)
     return result
@@ -1101,6 +1224,15 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const boardAfterReceipt = super.recordBoardEvidence(key, evidence)
     const state = key ? this.planByNpc.get(key) : undefined
     if (!state || !boardAfterReceipt) return boardAfterReceipt
+
+    const staleProof = staleExactTargetProof(evidence)
+    if (staleProof) {
+      this.recordStaleExactIdentity(key, staleProof.unitNumber, {
+        now: state.updated_at ?? Date.now(),
+        proofRef: staleProof.ref,
+      })
+      return this.planByNpc.get(key)?.task_board ?? boardAfterReceipt
+    }
 
     if (evidence?.kind === 'operation_error_receipt' && stateHasUnverifiedTransferIntent(state)) {
       const reason = transferFailureReason(evidence)
