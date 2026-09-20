@@ -9,8 +9,10 @@ import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import {
   DEADLOCK_EVIDENCE_STALL_BATCHES,
   DEADLOCK_REPEATED_FAILURE_LIMIT,
+  DEADLOCK_SIGNAL_KIND,
   getActivePlan,
   PLAN_STATUS,
+  planTrackerView,
 } from './planning-state.mjs'
 
 function deployment() {
@@ -552,4 +554,173 @@ test('execution cannot admit its own plan retroactively', () => {
     0,
     'and it records no progress against unadmitted work',
   )
+})
+
+// --- CONTRACT_PROVEN_UNSATISFIABLE / PLANNER_FOCUS_PROPOSED ----------------
+//
+// Both events had reducer handlers and reducer tests and no live emitter, so
+// the reducer tests proved the handlers correct while nothing ever called them.
+// These tests therefore drive the ADAPTER, never `applyPlanningEvent` directly.
+
+function committedPlanWithExactContract(memory, key = 'npc:airi', { mode = 'all', unitNumber = 4412 } = {}) {
+  const plan = proposedPlan(['Refuel the stone furnace', 'Craft gears', 'Build power'])
+  const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Keep the furnace fed' }, plan)
+  const reconciled = memory.reconcileTaskBoard(key, undefined, plan, recorded, { allowReplan: false })
+  const stepId = reconciled.state.task_board.steps[0].id
+  memory.setStepCompletionContract(key, stepId, {
+    mode,
+    confidence: 0.9,
+    requirements: mode === 'any'
+      ? [
+          { id: 'furnace_fuel', kind: 'entity_inventory_count', unit_number: unitNumber, item_name: 'coal', minimum: 5 },
+          { id: 'furnace_alive', kind: 'entity_exists', unit_number: unitNumber + 1 },
+        ]
+      : [{ id: 'furnace_fuel', kind: 'entity_inventory_count', unit_number: unitNumber, item_name: 'coal', minimum: 5 }],
+  }, { now: 90 })
+  memory.commitPlanningPlan(key, { now: 100, review: REVIEWED_ACTIONABLE })
+  return { plan, state: memory.currentPlan(key) }
+}
+
+// The exact evidence `npc-agent-loop` records on the recoverable preflight path.
+function staleExactTargetEvidence(unitNumber, ref = 'request/stale_exact_target') {
+  return {
+    kind: 'operation_preflight_recoverable',
+    ref,
+    summary: JSON.stringify({
+      code: 'stale_exact_target',
+      operation_index: 0,
+      operation: 'move_items_exact',
+      identity: unitNumber,
+      last_observed: { name: 'stone-furnace', position: { x: 12, y: -4 } },
+    }),
+  }
+}
+
+test('live board evidence proves a contract unsatisfiable and the deadlock signal blocks the plan', () => {
+  const key = 'npc:airi'
+  const memory = new CanonicalTaskBoardMemory()
+  committedPlanWithExactContract(memory, key, { unitNumber: 4412 })
+
+  const before = getActivePlan(memory.planningState(key))
+  assert.ok([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(before.status))
+  const stepId = before.steps[before.active_step_index].step_id
+  assert.equal(before.execution.step_progress[stepId]?.unsatisfiable ?? null, null, 'nothing is proven impossible yet')
+  const plansBefore = memory.planningState(key).plans.length
+
+  // The game destroyed the furnace. This is the only input the test gives.
+  memory.recordBoardEvidence(key, staleExactTargetEvidence(4412))
+
+  const after = getActivePlan(memory.planningState(key))
+  const progress = after.execution.step_progress[stepId]
+
+  // (1) the event reached the reducer from the live path
+  assert.ok(progress.unsatisfiable, 'CONTRACT_PROVEN_UNSATISFIABLE must have been emitted live')
+  assert.match(progress.unsatisfiable.reason, /4412/)
+  assert.equal(progress.unsatisfiable.proof_ref, 'request/stale_exact_target')
+
+  // (2) the deterministic deadlock signal that reads it actually fired
+  assert.equal(after.status, PLAN_STATUS.BLOCKED)
+  assert.equal(after.blocker.kind, 'deadlock')
+  assert.equal(after.blocker.reason_code, DEADLOCK_SIGNAL_KIND.UNSATISFIABLE_CONTRACT)
+  assert.ok(after.blocker.signals.some(signal => signal.kind === DEADLOCK_SIGNAL_KIND.UNSATISFIABLE_CONTRACT))
+
+  // (3) and it freezes for the user rather than replanning itself
+  assert.equal(after.blocker.requires_user_decision, true)
+  assert.equal(memory.planningState(key).plans.length, plansBefore, 'a proven-impossible contract must not auto-create a successor')
+  assert.equal(memory.currentPlan(key).status, 'blocked')
+})
+
+test('a stale identity the contract does not name proves nothing', () => {
+  const key = 'npc:airi'
+  const memory = new CanonicalTaskBoardMemory()
+  committedPlanWithExactContract(memory, key, { unitNumber: 4412 })
+
+  memory.recordBoardEvidence(key, staleExactTargetEvidence(9999))
+
+  const after = getActivePlan(memory.planningState(key))
+  const stepId = after.steps[after.active_step_index].step_id
+  assert.equal(after.execution.step_progress[stepId]?.unsatisfiable ?? null, null)
+  assert.notEqual(after.status, PLAN_STATUS.BLOCKED, 'an unrelated destroyed entity is not a proof about this contract')
+})
+
+test('an any-mode contract survives until every branch identity is destroyed', () => {
+  const key = 'npc:airi'
+  const memory = new CanonicalTaskBoardMemory()
+  committedPlanWithExactContract(memory, key, { mode: 'any', unitNumber: 4412 })
+  const stepId = getActivePlan(memory.planningState(key)).steps[0].step_id
+
+  // One dead branch leaves the other reachable, so the contract is still live.
+  memory.recordBoardEvidence(key, staleExactTargetEvidence(4412, 'request/stale_a'))
+  const midway = getActivePlan(memory.planningState(key))
+  assert.equal(midway.execution.step_progress[stepId]?.unsatisfiable ?? null, null)
+  assert.notEqual(midway.status, PLAN_STATUS.BLOCKED)
+
+  // The second proof kills the last branch, and only now is it impossible.
+  memory.recordBoardEvidence(key, staleExactTargetEvidence(4413, 'request/stale_b'))
+  const after = getActivePlan(memory.planningState(key))
+  assert.ok(after.execution.step_progress[stepId].unsatisfiable)
+  assert.equal(after.status, PLAN_STATUS.BLOCKED)
+  assert.equal(after.blocker.reason_code, DEADLOCK_SIGNAL_KIND.UNSATISFIABLE_CONTRACT)
+})
+
+test('repeated failures alone never prove a contract unsatisfiable', () => {
+  const key = 'npc:airi'
+  const memory = new CanonicalTaskBoardMemory()
+  committedPlanWithExactContract(memory, key, { unitNumber: 4412 })
+  const stepId = getActivePlan(memory.planningState(key)).steps[0].step_id
+
+  for (let index = 0; index < DEADLOCK_REPEATED_FAILURE_LIMIT + 2; index++) {
+    memory.applyOutcomeAuthority(key, {
+      kind: 'recoverable_provider_failure',
+      source: 'deterministic_runtime',
+      reason_code: 'transfer_failed:full',
+      evidence: [],
+    })
+  }
+
+  const after = getActivePlan(memory.planningState(key))
+  // It may well be deadlocked -- by the repeating-failure signal. It must not
+  // be deadlocked by a contract it never proved impossible.
+  assert.equal(after.execution.step_progress[stepId]?.unsatisfiable ?? null, null)
+  assert.ok(
+    !(after.blocker?.signals ?? []).some(signal => signal.kind === DEADLOCK_SIGNAL_KIND.UNSATISFIABLE_CONTRACT),
+    'N failures is the repeating-failure signal, never an impossibility proof',
+  )
+})
+
+test('planner focus reaches the reducer and still cannot advance or complete a step', () => {
+  const key = 'npc:airi'
+  const memory = new CanonicalTaskBoardMemory()
+  const plan = proposedPlan(['Gather stone', 'Craft furnace', 'Build power'], 0)
+  const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Build early automation' }, plan)
+  const reconciled = memory.reconcileTaskBoard(key, undefined, plan, recorded, { allowReplan: false })
+  memory.commitPlanningPlan(key, { now: 100, review: REVIEWED_ACTIONABLE })
+
+  const before = getActivePlan(memory.planningState(key))
+  assert.equal(before.active_step_index, 0)
+
+  // The provider now claims it is working on step 3 while nothing verified
+  // step 1. This is the divergence the Plan Tracker exists to show.
+  const ahead = proposedPlan(['Gather stone', 'Craft furnace', 'Build power'], 2)
+  const aheadRecorded = memory.recordPlan(key, { sender: 'Louis', text: 'continue' }, ahead, { continuation: true })
+  memory.reconcileTaskBoard(key, reconciled.state.task_board, ahead, aheadRecorded, {
+    previousState: memory.currentPlan(key),
+    allowReplan: false,
+  })
+
+  const after = getActivePlan(memory.planningState(key))
+  const tracker = planTrackerView(memory.planningState(key))
+
+  // Recorded: PLANNER_FOCUS_PROPOSED ran on the live path.
+  assert.equal(after.advisory.planner_focus_step_id, after.steps[2].step_id)
+  assert.ok(Number.isFinite(after.advisory.planner_focus_at))
+  assert.equal(tracker.advisory_planner_focus_step_id, after.steps[2].step_id)
+
+  // Advisory: it moved nothing (roadmap 8).
+  assert.equal(after.active_step_index, 0, 'planner focus must not advance the active step')
+  assert.equal(tracker.active_step_index, 0)
+  assert.equal(tracker.active_step_id, after.steps[0].step_id)
+  assert.equal(after.execution.step_progress[after.steps[1].step_id]?.status ?? 'pending', 'pending')
+  assert.equal(tracker.verified_completed_step_ids.length, 0, 'planner focus must not complete a step')
+  assert.notEqual(after.status, PLAN_STATUS.COMPLETED)
 })

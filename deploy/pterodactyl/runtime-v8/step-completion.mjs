@@ -695,6 +695,64 @@ export function evaluateCompletionContract(contract, facts = {}) {
   return { status: satisfied ? 'verified' : 'waiting', satisfied, contract: normalized, results }
 }
 
+// Requirement kinds that name ONE exact entity identity. Only these can ever be
+// proven permanently unsatisfiable, because only these are pinned to a
+// unit_number that the world can destroy.
+const IDENTITY_PINNED_REQUIREMENT_KINDS = new Set([
+  'entity_inventory_count',
+  'entity_exists',
+  'entity_state',
+])
+
+/**
+ * Prove, deterministically, that a completion contract can never be satisfied.
+ *
+ * The ONLY proof this accepts is a destroyed exact identity. Factorio
+ * unit_numbers are allocated monotonically and never reused, so once the game
+ * itself reports that unit N no longer resolves -- which is what the
+ * `stale_exact_target` preflight rejection is -- no future world state can make
+ * a requirement pinned to unit N true again. That is a proof, not an estimate:
+ * it is monotone (a stale identity never becomes live), it comes from the game
+ * rather than from a model, and it needs no threshold or retry count.
+ *
+ * Deliberately NOT proofs: `inventory_count`, `authoritative_operation_receipt`
+ * and `runtime_controller_state` are not pinned to an identity, so they stay
+ * satisfiable no matter how often they have failed so far. "Failed N times" is
+ * the separate repeating-failure signal and must not leak in here.
+ *
+ * Mode matters, because the contract is a boolean combination:
+ *   - `all` dies with its first dead requirement;
+ *   - `any` survives while a single requirement is still reachable.
+ *
+ * Returns undefined when nothing is proven -- the honest answer for "not yet
+ * known to be impossible", which is not the same as "possible".
+ */
+export function provePermanentlyUnsatisfiable(contract, { staleUnitNumbers = [] } = {}) {
+  const normalized = sanitizeStepCompletionContract(contract)
+  if (normalized.mode === 'semantic_unknown' || normalized.requirements.length === 0) return undefined
+  const stale = new Set(
+    (Array.isArray(staleUnitNumbers) ? staleUnitNumbers : [staleUnitNumbers])
+      .map(value => positiveInteger(value))
+      .filter(value => value !== undefined),
+  )
+  if (stale.size === 0) return undefined
+
+  const dead = normalized.requirements.filter(requirement =>
+    IDENTITY_PINNED_REQUIREMENT_KINDS.has(requirement.kind) && stale.has(requirement.unit_number))
+  if (dead.length === 0) return undefined
+  // `any` needs every branch dead; one live branch keeps the contract reachable.
+  if (normalized.mode === 'any' && dead.length !== normalized.requirements.length) return undefined
+
+  const units = [...new Set(dead.map(requirement => requirement.unit_number))].sort((a, b) => a - b)
+  return {
+    proven: true,
+    mode: normalized.mode,
+    requirement_ids: dead.map(requirement => requirement.id),
+    unit_numbers: units,
+    reason: `destroyed exact ${units.length === 1 ? 'identity' : 'identities'} ${units.join(', ')} can never satisfy ${normalized.mode === 'any' ? 'any requirement of' : 'requirement'} ${dead.map(requirement => requirement.id).join(', ')}`,
+  }
+}
+
 export function conditionFromRequirement(requirement) {
   const normalized = boundedRequirement(requirement, 0)
   if (!normalized) return undefined
