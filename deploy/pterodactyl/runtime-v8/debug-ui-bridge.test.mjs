@@ -537,19 +537,6 @@ test('active Jev post-step routing is tracked separately from interaction shadow
       model: 'jev-latest',
       route: 'wait_runtime',
       confidence: 0.88,
-      hierarchy: {
-        granularity: 'keep',
-        granularity_confidence: 0.92,
-        development: 'maintain',
-        development_confidence: 0.86,
-        reasoning_budget: 'micro',
-        reasoning_confidence: 0.81,
-        planning_horizon: 'checkpoint',
-        observation_budget: 1,
-      },
-      milestone_transition: { decision: 'advance_next', confidence: 0.87 },
-      hierarchy_runtime_gate: { allow_runtime_continuation: false, reason: 'milestone_transition' },
-      hierarchy_budget_shadow_only: true,
       usage: { input_tokens: 90, output_tokens: 8, cost: 0.00000378 },
     },
   }, debug)
@@ -560,16 +547,6 @@ test('active Jev post-step routing is tracked separately from interaction shadow
   assert.equal(debug.decision_post_step_applied_route, 'fallback_planner')
   assert.equal(debug.decision_post_step_confidence_percent, 88)
   assert.equal(debug.decision_post_step_latency_ms, 44)
-  assert.equal(debug.decision_granularity, 'keep')
-  assert.equal(debug.decision_granularity_confidence_percent, 92)
-  assert.equal(debug.decision_development, 'maintain')
-  assert.equal(debug.decision_development_confidence_percent, 86)
-  assert.equal(debug.decision_reasoning_budget, 'micro')
-  assert.equal(debug.decision_reasoning_confidence_percent, 81)
-  assert.equal(debug.decision_planning_horizon, 'checkpoint')
-  assert.equal(debug.decision_observation_budget, 1)
-  assert.equal(debug.decision_milestone_transition, 'advance_next')
-  assert.equal(debug.decision_milestone_transition_confidence_percent, 87)
   assert.match(debug.decision_post_step_fallback, /wait_runtime_without/)
   assert.equal(debug.decision_calls_total, 2)
   assert.equal(debug.decision_input_units_total, 210)
@@ -584,7 +561,7 @@ test('active Jev post-step routing is tracked separately from interaction shadow
 })
 
 
-test('task board UI snapshot projects durable project hierarchy separately from plan steps', () => {
+test('task board UI omits retired project hierarchy while preserving plan steps', () => {
   const state = {
     goal_id: 'goal-rocket',
     objective: 'Launch a rocket',
@@ -612,9 +589,6 @@ test('task board UI snapshot projects durable project hierarchy separately from 
     },
   }
   const snapshot = taskBoardUiSnapshot(state, { phase: 'thinking', activity: [], debug: {} })
-  assert.equal(snapshot.project.title, 'Launch a rocket')
-  assert.equal(snapshot.project.current_milestone.title, 'Establish burner production')
-  assert.equal(snapshot.project.development_direction, 'vertical')
-  assert.deepEqual(snapshot.project.next_milestones.map(item => item.title), ['Reach Automation'])
+  assert.equal(snapshot.project, undefined)
   assert.equal(snapshot.steps[0].description, 'Gather stone for the first furnaces')
 })

@@ -64,6 +64,18 @@ export const PAUSE_BUTTON_NAME = 'airi_task_board_pause'
 export const TERMINATE_BUTTON_NAME = 'airi_task_board_terminate'
 export const NEW_TASK_BUTTON_NAME = 'airi_task_board_new_task'
 export const FOLLOW_BUTTON_NAME = 'airi_task_board_follow'
+// A blocked plan must be answerable, not just visible. These three buttons are
+// the bounded choices roadmap §7/§12 requires; they ride the same control queue
+// as PAUSE / TERMINATE / NEW TASK.
+export const BLOCKED_SECTION_NAME = 'airi_task_board_blocked_section'
+export const BLOCKED_KEEP_PAUSED_BUTTON_NAME = 'airi_task_board_blocked_keep_paused'
+export const BLOCKED_REVISE_BUTTON_NAME = 'airi_task_board_blocked_revise'
+export const BLOCKED_CANCEL_BUTTON_NAME = 'airi_task_board_blocked_cancel'
+// A blocked choice has no guaranteed status transition to key off (the plan is
+// meant to stay frozen when the answer is "keep paused"), so it mirrors the
+// lighter prompt-send pattern: a per-player tick stamp cleared by any fresher
+// runtime snapshot. Purely visual reassurance, not a durable lock.
+export const BLOCKED_CHOICE_PENDING_TICKS = 5 * 60
 export const PROMPT_FIELD_NAME = 'airi_task_board_prompt'
 export const PROMPT_SEND_BUTTON_NAME = 'airi_task_board_prompt_send'
 export const MAX_STEPS = 24

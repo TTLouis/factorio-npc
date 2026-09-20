@@ -2,7 +2,6 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  hierarchyTransitionPending,
   liveAgentDebugEvent,
   liveAgentEvent,
   navigationObstaclePolicy,
@@ -140,8 +139,15 @@ test('in-game task board snapshot is a projection of canonical durable state', (
   assert.equal(snapshot.debug.request_id, '')
   assert.equal(snapshot.debug.provider_model, '')
   assert.equal(snapshot.debug.decision_model, '')
-  assert.equal(snapshot.debug.decision_granularity, '')
+  assert.equal(snapshot.debug.decision_scope_review, '')
+  assert.equal(snapshot.debug.decision_scope_review_reason_codes, '')
+  assert.equal(snapshot.debug.decision_scope_review_actionable_prefix, 0)
   assert.equal(snapshot.debug.decision_development, '')
+  assert.equal(snapshot.debug.decision_steering, '')
+  // Retired with the milestone hierarchy; must not reappear.
+  assert.equal('decision_granularity' in snapshot.debug, false)
+  assert.equal('decision_milestone_transition' in snapshot.debug, false)
+  assert.equal('decision_hierarchy_action' in snapshot.debug, false)
   assert.equal(snapshot.debug.step_relation, '')
   assert.equal(snapshot.debug.step_checkpoint_boundary, '')
   assert.equal(snapshot.debug.step_admission_alignment, '')
@@ -151,50 +157,64 @@ test('in-game task board snapshot is a projection of canonical durable state', (
 })
 
 
-test('structural hierarchy transactions are not auto-paused after an idle request failure', async () => {
+// Behaviour change (planning refactor): leftover structural-transition markers no
+// longer suppress auto-pause. An ACTIVE plan stranded by a provider failure while
+// Autorio is idle pauses like any other, so the player gets a visible signal
+// instead of a silently-preserved "transaction".
+test('a stranded plan carrying legacy structural markers is paused after an idle request failure', async () => {
   const state = {
     status: 'active',
     hierarchy_split_pending: {
       kind: 'split_current_milestone',
       reason_code: 'hierarchy_split_requested',
     },
+    milestone_transition_pending: true,
+    milestone_plan_pending: true,
   }
   let pauses = 0
+  let pauseReason = ''
+  let synced
   const session = {
     currentPlanState: () => state,
-    syncTaskBoardUi: async () => {},
+    syncTaskBoardUi: async (value) => { synced = value },
     agent: {
       readInteractionTaskStatus: async () => ({ task_state: 'idle', queue_length: 0 }),
-      pausePersistentPlan: async () => {
+      pausePersistentPlan: async (reason) => {
         pauses++
+        pauseReason = reason
         return { status: 'paused' }
       },
     },
   }
 
-  assert.equal(hierarchyTransitionPending(state), true)
-  assert.equal(await pauseStrandedPlanAfterRequestError(session, 'synthetic planner failure'), undefined)
-  assert.equal(pauses, 0)
+  const paused = await pauseStrandedPlanAfterRequestError(session, 'synthetic planner failure')
+  assert.deepEqual(paused, { status: 'paused' })
+  assert.equal(pauses, 1)
+  assert.match(pauseReason, /^request_failed: synthetic planner failure$/)
+  assert.deepEqual(synced, { status: 'paused' })
 })
 
-test('interrupted hierarchy split recovery restores its structural trigger and semantic budgets', async () => {
+// Behaviour change (planning refactor): runtime recovery has exactly one shape.
+// It never re-anchors, never carries a hierarchy trigger source, and never
+// inherits semantic budget overrides from a durable structural marker.
+test('interrupted plan recovery always uses the plain runtime-recovery path', async () => {
   const state = {
     goal_id: 'goal_long',
     owner: 'tester',
     objective: 'Reach Automation',
     status: 'active',
+    // Legacy markers are inert: they must not steer recovery any more.
     hierarchy_split_pending: {
       kind: 'split_project_goal',
-      reason_code: 'hierarchy_initial_split',
       reasoning_budget: 'strategic',
       planning_horizon: 'strategic',
       observation_budget: 3,
-      requested_at: 1,
     },
+    milestone_plan_pending: true,
   }
   const memory = {
     currentPlan: () => state,
-    context: () => '[PLAN_STATE] durable hierarchy split',
+    context: () => '[PLAN_STATE] durable goal',
   }
   const seen = {}
   const agent = {
@@ -218,19 +238,21 @@ test('interrupted hierarchy split recovery restores its structural trigger and s
       seen.observationBudgetRemaining = this.observationBudgetRemaining
       seen.planningHorizonOverride = this.planningHorizonOverride
       seen.message = this.messages.at(-1)?.content
-      return { chatMessage: 'recovered hierarchy' }
+      return { chatMessage: 'recovered' }
     },
   }
 
   const result = await recoverInterruptedAgentPlan(agent, 'runtime_restart')
   assert.equal(result.recovered, true)
-  assert.equal(seen.planUpdateReason, 'reanchor_plan')
-  assert.equal(seen.reasoningTriggerSource, 'hierarchy_split')
-  assert.equal(seen.reasoningBudgetOverride, 'strategic')
-  assert.equal(seen.observationBudgetOverride, 3)
-  assert.equal(seen.observationBudgetRemaining, 3)
-  assert.equal(seen.planningHorizonOverride, 'strategic')
-  assert.match(seen.message, /durably pending hierarchy split/i)
+  assert.equal(seen.planUpdateReason, 'recovery')
+  assert.equal(seen.reasoningTriggerSource, null)
+  // No structural budget inheritance: the overrides stay untouched.
+  assert.equal(seen.reasoningBudgetOverride, null)
+  assert.equal(seen.observationBudgetOverride, null)
+  assert.equal(seen.observationBudgetRemaining, null)
+  assert.equal(seen.planningHorizonOverride, null)
+  assert.match(seen.message, /^\[HARNESS\] Runtime recovery after runtime_restart\./)
+  assert.doesNotMatch(seen.message, /hierarchy|milestone/i)
   assert.equal(agent.reasoningBudgetOverride, null)
   assert.equal(agent.observationBudgetOverride, null)
   assert.equal(agent.observationBudgetRemaining, null)

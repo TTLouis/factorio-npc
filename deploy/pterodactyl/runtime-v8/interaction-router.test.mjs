@@ -116,18 +116,6 @@ function agentFor(intent, {
     return {
       content: JSON.stringify({
         chatMessage: 'Replanned current work.',
-        ...((intent === 'new_goal' && decisionGranularity === 'split') || context.triggerSource === 'hierarchy_split'
-          ? {
-              project: {
-                currentMilestone: {
-                  title: 'Establish bounded starter production',
-                  completionSummary: 'A stable starter production capability exists.',
-                },
-                nextMilestones: [{ title: 'Reach the next technology capability' }],
-                developmentDirection: 'vertical',
-              },
-            }
-          : {}),
         plan: ['continue the updated production goal'],
         currentStep: 0,
         operations: [{ name: 'wait', args: { ticks: 1 } }],
@@ -152,11 +140,6 @@ function agentFor(intent, {
             queue_conflict: {
               type: 'noul',
               noul: decisionConflictProbability,
-            },
-            granularity: {
-              type: 'choice',
-              choice: decisionGranularity,
-              confidence: 0.9,
             },
             reasoning_budget: { type: 'choice', choice: decisionGranularity === 'split' ? 'strategic' : 'normal', confidence: 0.85 },
             planning_horizon: { type: 'choice', choice: decisionGranularity === 'split' ? 'strategic' : 'checkpoint', confidence: 0.84 },
@@ -237,7 +220,6 @@ test('Jev shadow disagreement is observed without changing the active interactio
   assert.equal(decisionCalls[0].state.message, 'what are you doing?')
   assert.equal(decisionCalls[0].questions.intent.type, 'choice')
   assert.equal(decisionCalls[0].questions.queue_conflict.type, 'noul')
-  assert.equal(decisionCalls[0].questions.granularity.type, 'choice')
   assert.equal(decisionCalls[0].questions.reasoning_budget.type, 'choice')
   assert.equal(decisionCalls[0].questions.planning_horizon.type, 'choice')
   assert.equal(decisionCalls[0].questions.observation_budget.type, 'score')
@@ -260,7 +242,7 @@ test('Jev shadow writes a dedicated decision lifecycle trace without copying the
   assert.equal(events[0].data.mode, 'shadow')
   assert.equal(events[0].data.message_chars, 'what are you doing?'.length)
   assert.equal(events[0].data.message, undefined)
-  assert.deepEqual(events[0].data.question_ids, ['intent', 'queue_conflict', 'granularity', 'reasoning_budget', 'planning_horizon', 'observation_budget'])
+  assert.deepEqual(events[0].data.question_ids, ['intent', 'queue_conflict', 'reasoning_budget', 'planning_horizon', 'observation_budget'])
   assert.equal(events[1].data.intent, 'new_goal')
   assert.equal(events[1].data.input_units, 120)
   assert.equal(events[1].data.output_units, 20)
@@ -552,60 +534,6 @@ test('interaction router does not receive historical exact ids from durable goal
 })
 
 
-test('new broad goal uses Jev granularity to require Project -> Milestone -> Plan hierarchy before planning', async () => {
-  const { agent, memory, decisionCalls } = agentFor('new_goal', {
-    running: false,
-    withPlan: false,
-    decisionIntent: 'new_goal',
-    decisionGranularity: 'split',
-  })
-
-  const result = await agent.request('Launch a rocket from this fresh start.', { sender: 'tester' })
-
-  assert.equal(result.interactionIntent, 'new_goal')
-  assert.equal(result.routedOnly, false)
-  assert.equal(decisionCalls.filter(call => call.questions?.intent).length, 1)
-  assert.equal(decisionCalls.filter(call => call.state?.contract === 'step_checkpoint_normalizer').length, 1)
-  assert.equal(decisionCalls.find(call => call.questions?.intent).questions.granularity.type, 'choice')
-  const state = memory.currentPlan('npc:airi')
-  assert.equal(state.project_board.title, 'Launch a rocket from this fresh start.')
-  assert.equal(state.project_board.current_milestone.title, 'Establish bounded starter production')
-  assert.equal(state.project_board.next_milestones[0].title, 'Reach the next technology capability')
-  assert.equal(state.project_board.development_direction, 'vertical')
-  assert.equal(state.task_board.steps[0].description, 'continue the updated production goal')
-})
-
-
-test('new broad goal carries Jev semantic budgets into the first planner call', async () => {
-  const { agent, calls } = agentFor('new_goal', {
-    withPlan: false,
-    running: false,
-    decisionIntent: 'new_goal',
-    decisionGranularity: 'split',
-  })
-  await agent.request('prepare all the way to Automation', { sender: 'TTLouis' })
-  const plannerCall = calls.find(call => call.interactionRouter !== true)
-  assert.equal(plannerCall.reasoningBudget, 'strategic')
-  assert.equal(agent.observationBudgetOverride, null)
-  assert.equal(agent.planningHorizonOverride, null)
-})
-
-
-test('shadow intent disagreement cannot force hierarchy split or planner budgets', async () => {
-  const { agent, calls } = agentFor('new_goal', {
-    running: false,
-    withPlan: false,
-    decisionIntent: 'status_query',
-    decisionGranularity: 'split',
-  })
-
-  await agent.request('Launch a rocket from this fresh start.', { sender: 'tester' })
-  const plannerCall = calls.find(call => call.interactionRouter !== true)
-  assert.equal(plannerCall.triggerSource, 'new_goal')
-  assert.equal(plannerCall.reasoningBudget, undefined)
-})
-
-
 test('Jev observation budget is enforced before decision pressure', async () => {
   const { agent } = agentFor('new_goal', { running: false, withPlan: false })
   agent.active = true
@@ -638,89 +566,4 @@ test('Jev observation budget is enforced before decision pressure', async () => 
   assert.equal(agent.messages.filter(message => message.role === 'tool').length, firstToolResults)
   assert.equal(agent.observationDecisionForced, true)
   assert.equal(agent.observationBudgetRemaining, 0)
-})
-
-
-test('durable hierarchy split resumes transactionally after an interrupted planner turn', async () => {
-  const { agent, memory, calls } = agentFor('continue_current', {
-    running: false,
-    withPlan: true,
-    decisionIntent: 'continue_current',
-    decisionGranularity: 'keep',
-  })
-  memory.markHierarchySplitPending('npc:airi', {
-    reason_code: 'hierarchy_split_requested',
-    reasoning_budget: 'deep',
-    planning_horizon: 'subgoal',
-    observation_budget: 2,
-  })
-
-  const result = await agent.request('continue', { sender: 'tester' })
-  const plannerCall = calls.find(call => call.interactionRouter !== true)
-
-  assert.equal(plannerCall.triggerSource, 'hierarchy_split')
-  assert.equal(plannerCall.reasoningBudget, 'deep')
-  assert.equal(result.interactionIntent, 'continue_current')
-  const state = memory.currentPlan('npc:airi')
-  assert.equal(state.hierarchy_split_pending, undefined)
-  assert.equal(state.project_board.current_milestone.title, 'Establish bounded starter production')
-  assert.equal(state.task_board.steps[0].description, 'continue the updated production goal')
-})
-
-
-test('initial hierarchy split is durable before the first planner call succeeds', async () => {
-  const memory = new CanonicalTaskBoardMemory()
-  const rcon = new RouterRcon({ running: false })
-  const interactionProvider = async () => ({
-    content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }),
-  })
-  const interactionDecisionProvider = async (_state, questions) => {
-    const intentProbabilities = Object.fromEntries(Object.keys(questions.intent.criteria).map(key => [key, key === 'new_goal' ? 0.95 : 0.01]))
-    const granularityProbabilities = Object.fromEntries(Object.keys(questions.granularity.criteria).map(key => [key, key === 'split' ? 0.95 : 0.01]))
-    const reasoningProbabilities = Object.fromEntries(Object.keys(questions.reasoning_budget.criteria).map(key => [key, key === 'strategic' ? 0.95 : 0.01]))
-    const horizonProbabilities = Object.fromEntries(Object.keys(questions.planning_horizon.criteria).map(key => [key, key === 'strategic' ? 0.95 : 0.01]))
-    return {
-      model: 'jev-latest',
-      provider: 'TypeSafe',
-      answers: {
-        intent: { type: 'choice', choice: 'new_goal', probabilities: intentProbabilities, confidence: 0.95 },
-        queue_conflict: { type: 'noul', noul: 0.01 },
-        granularity: { type: 'choice', choice: 'split', probabilities: granularityProbabilities, confidence: 0.95 },
-        reasoning_budget: { type: 'choice', choice: 'strategic', probabilities: reasoningProbabilities, confidence: 0.9 },
-        planning_horizon: { type: 'choice', choice: 'strategic', probabilities: horizonProbabilities, confidence: 0.9 },
-        observation_budget: {
-          type: 'score',
-          score: 3,
-          legend: Object.fromEntries(questions.observation_budget.criteria.map((label, index) => [String(index), label])),
-          probabilities: Object.fromEntries(questions.observation_budget.criteria.map((_label, index) => [String(index), index === 3 ? 0.9 : 0.0125])),
-          confidence: 0.9,
-        },
-      },
-    }
-  }
-  const agent = new NpcAgentLoop({
-    rcon,
-    memory,
-    systemPrompt: 'initial hierarchy durability regression',
-    npcId: 'airi',
-    provider: async () => { throw new Error('synthetic first planner failure') },
-    interactionProvider,
-    interactionDecisionProvider,
-    traceFile: null,
-    decisionTraceFile: null,
-    stateFile: null,
-  })
-
-  await assert.rejects(
-    agent.request('至少完成一个科研瓶的全自动化', { sender: 'tester' }),
-    /synthetic first planner failure/,
-  )
-
-  const state = memory.currentPlan('npc:airi')
-  assert.equal(state.status, 'active')
-  assert.equal(state.objective, '至少完成一个科研瓶的全自动化')
-  assert.equal(state.hierarchy_split_pending.kind, 'split_project_goal')
-  assert.equal(state.hierarchy_split_pending.reasoning_budget, 'strategic')
-  assert.equal(state.hierarchy_split_pending.observation_budget, 3)
-  assert.equal(state.task_board.steps.length, 0)
 })

@@ -1,6 +1,4 @@
 import { NpcDialogueMemory } from './npc-agent-loop.mjs'
-import { createTaskBoard, setTaskBoardStatus } from './common.mjs'
-import { activateNextMilestone, completeCurrentMilestone, sanitizeProjectBoard, updateProjectBoard } from './project-board.mjs'
 import { completionContractSupported, sanitizeStepCompletionContract } from './step-completion.mjs'
 
 const STRICT_TASKS_BY_OPERATION = new Map([
@@ -31,24 +29,6 @@ function clean(value) {
 function safeDurableStepCompletionContract(value) {
   const contract = sanitizeStepCompletionContract(value)
   return completionContractSupported(contract) ? contract : undefined
-}
-
-function safeHierarchySplitPending(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
-  if (!['split_project_goal', 'split_current_milestone'].includes(value.kind)) return undefined
-  const reasoningBudget = ['micro', 'normal', 'deep', 'strategic'].includes(value.reasoning_budget) ? value.reasoning_budget : undefined
-  const planningHorizon = ['immediate', 'checkpoint', 'subgoal', 'strategic'].includes(value.planning_horizon) ? value.planning_horizon : undefined
-  const observationBudget = Number.isSafeInteger(value.observation_budget)
-    ? Math.max(0, Math.min(8, value.observation_budget))
-    : undefined
-  return {
-    kind: value.kind,
-    reason_code: String(value.reason_code ?? 'hierarchy_split_requested').slice(0, 120),
-    reasoning_budget: reasoningBudget,
-    planning_horizon: planningHorizon,
-    observation_budget: observationBudget,
-    requested_at: Number.isFinite(value.requested_at) ? value.requested_at : Date.now(),
-  }
 }
 
 function parseStoredOperation(value) {
@@ -198,6 +178,11 @@ export function canonicalContinuationPlan(previousBoard, plan, { allowReplan = f
     ? -1
     : canonical.findIndex(description => clean(description) === clean(incomingActive))
 
+  // BLOCKED is a user-controlled freeze, not a continuation boundary. Do not
+  // admit planner operations or a replacement suffix while it is frozen.
+  if (previousBoard.status === 'blocked') {
+    return { ...plan, plan: canonical, currentStep: currentIndex, operations: [] }
+  }
   if (allowReplan) return plan
   return {
     ...plan,
@@ -209,65 +194,6 @@ export function canonicalContinuationPlan(previousBoard, plan, { allowReplan = f
 }
 
 export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
-  beginHierarchyGoal(key, requestInfo = {}, envelope = {}) {
-    if (!key) return undefined
-    const now = Date.now()
-    const state = {
-      goal_id: `goal_${now.toString(36)}`,
-      owner: String(requestInfo?.sender ?? 'unknown').slice(0, 128),
-      objective: String(requestInfo?.text ?? '').slice(0, 1000),
-      status: 'active',
-      admission_status: undefined,
-      blocker: '',
-      pause_reason: '',
-      persistent_runtime: undefined,
-      condition_wait: undefined,
-      plan: [],
-      current_step: 0,
-      revision: 1,
-      last_chat_message: '',
-      last_operations: [],
-      durable_last_operations: [],
-      exact_target_audit: [],
-      last_mutation_verified: false,
-      last_verified_batch_id: undefined,
-      updated_at: now,
-      history: [],
-    }
-    state.task_board = setTaskBoardStatus(
-      createTaskBoard([], 0, { goalId: state.goal_id, now }),
-      'active',
-      { now },
-    )
-    state.project_board = sanitizeProjectBoard(undefined, {
-      goalId: state.goal_id,
-      objective: state.objective,
-      status: state.status,
-      now,
-    })
-    state.hierarchy_split_pending = safeHierarchySplitPending({
-      kind: 'split_project_goal',
-      reason_code: envelope.reason_code ?? 'hierarchy_initial_split',
-      reasoning_budget: envelope.reasoning_budget,
-      planning_horizon: envelope.planning_horizon,
-      observation_budget: envelope.observation_budget,
-      requested_at: now,
-    })
-    this.planByNpc.set(key, state)
-    return state
-  }
-
-  ensureProjectBoard(state) {
-    if (!state) return undefined
-    state.project_board = sanitizeProjectBoard(state.project_board, {
-      goalId: state.goal_id,
-      objective: state.objective,
-      status: state.status,
-      now: state.updated_at,
-    })
-    return state.project_board
-  }
-
   setStepCompletionContract(key, stepId, contract, { now = Date.now() } = {}) {
     const state = key ? this.planByNpc.get(key) : undefined
     const normalized = safeDurableStepCompletionContract(contract)
@@ -294,58 +220,6 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return state
   }
 
-  markHierarchySplitPending(key, envelope = {}) {
-    const state = key ? this.planByNpc.get(key) : undefined
-    if (!state || state.status !== 'active') return undefined
-    const now = Date.now()
-    state.hierarchy_split_pending = {
-      kind: ['split_project_goal', 'split_current_milestone'].includes(envelope.kind)
-        ? envelope.kind
-        : 'split_current_milestone',
-      reason_code: String(envelope.reason_code ?? 'hierarchy_split_requested').slice(0, 120),
-      reasoning_budget: ['micro', 'normal', 'deep', 'strategic'].includes(envelope.reasoning_budget) ? envelope.reasoning_budget : undefined,
-      planning_horizon: ['immediate', 'checkpoint', 'subgoal', 'strategic'].includes(envelope.planning_horizon) ? envelope.planning_horizon : undefined,
-      observation_budget: Number.isSafeInteger(envelope.observation_budget)
-        ? Math.max(0, Math.min(8, envelope.observation_budget))
-        : undefined,
-      requested_at: now,
-    }
-    state.revision = (state.revision ?? 0) + 1
-    state.updated_at = now
-    this.planByNpc.set(key, state)
-    return state.hierarchy_split_pending
-  }
-
-  clearHierarchySplitPending(key) {
-    const state = key ? this.planByNpc.get(key) : undefined
-    if (!state?.hierarchy_split_pending) return state
-    state.hierarchy_split_pending = undefined
-    state.revision = (state.revision ?? 0) + 1
-    state.updated_at = Date.now()
-    this.planByNpc.set(key, state)
-    return state
-  }
-
-  updateProjectBoard(key, patch = {}, options = {}) {
-    const state = key ? this.planByNpc.get(key) : undefined
-    if (!state) return undefined
-    const now = Date.now()
-    const current = this.ensureProjectBoard(state)
-    const effectivePatch = options.preserveCurrentMilestone === true && current?.current_milestone
-      ? { ...patch, current_milestone: current.current_milestone }
-      : patch
-    state.project_board = updateProjectBoard(current, effectivePatch, {
-      goalId: state.goal_id,
-      objective: state.objective,
-      status: state.status,
-      now,
-    })
-    state.revision = (state.revision ?? 0) + 1
-    state.updated_at = now
-    this.planByNpc.set(key, state)
-    return state.project_board
-  }
-
   retireCompletedPlan(key) {
     const state = key ? this.planByNpc.get(key) : undefined
     if (!state || state.status !== 'completed') return state
@@ -358,22 +232,12 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     if (!state) {
       return '[PLAN_STATE] No active durable goal. Completed goals are retired from the current task slot and remain only in bounded dialogue history. Do not resume or steer a completed goal merely because the human says continue; a new actionable instruction must start a new goal.'
     }
-    const plan = super.planContext(key)
-    const project = this.ensureProjectBoard(state)
-    const pending = state.hierarchy_split_pending
-      ? `\n[HIERARCHY_TRANSITION] A Jev split decision is durably pending. Do not continue the old flat Plan Tracker. Resolve the transition by proposing one bounded project.currentMilestone and a milestone-local plan before new world mutation.\n${JSON.stringify(state.hierarchy_split_pending)}`
-      : ''
-    const milestonePlanPending = project.transition_state === 'awaiting_milestone_plan'
-      ? '\n[MILESTONE_PLAN_TRANSITION] The current milestone is already activated, but its fresh milestone-local Task Board has not been committed yet. Plan only this current milestone; do not skip ahead or treat the empty Task Board as project completion.'
-      : ''
-    return `${plan}\n[PROJECT_STATE] Durable long-horizon hierarchy. Future milestones are tentative; the current Task Board remains the execution contract.\n${JSON.stringify(project)}${pending}${milestonePlanPending}`
+    return super.planContext(key)
   }
 
   currentPlan(key) {
     this.retireCompletedPlan(key)
-    const state = super.currentPlan(key)
-    this.ensureProjectBoard(state)
-    return state
+    return super.currentPlan(key)
   }
 
   recordPlan(key, requestInfo, plan, options = {}) {
@@ -381,91 +245,18 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     // still contain one from a previous runtime version, so retire it before a
     // new request can accidentally inherit its goal_id/objective.
     this.retireCompletedPlan(key)
-    const result = super.recordPlan(key, requestInfo, plan, options)
-    if (result?.state) this.ensureProjectBoard(result.state)
-    return result
+    return super.recordPlan(key, requestInfo, plan, options)
   }
 
   applyOutcomeAuthority(key, candidate, options = {}) {
-    const before = key ? this.planByNpc.get(key) : undefined
-    const boardBefore = before?.task_board
-    const projectBefore = before ? this.ensureProjectBoard(before) : undefined
-    const finalStepOfMilestone = candidate?.metadata?.scope === 'step'
-      && projectBefore?.current_milestone
-      && Array.isArray(boardBefore?.steps)
-      && boardBefore.steps.length > 0
-      && Number.isSafeInteger(boardBefore.active_index)
-      && boardBefore.active_index === boardBefore.steps.length - 1
-
-    const result = super.applyOutcomeAuthority(key, candidate, options)
-    if (finalStepOfMilestone && result?.decision?.accepted === true && result?.state?.status === 'completed') {
-      const state = result.state
-      const transition = completeCurrentMilestone(projectBefore, {
-        verified: true,
-        goalId: state.goal_id,
-        objective: state.objective,
-        status: 'active',
-        now: state.updated_at,
-      })
-      if (transition.changed) {
-        state.status = 'active'
-        state.admission_status = undefined
-        state.blocker = ''
-        state.pause_reason = ''
-        state.persistent_runtime = undefined
-        state.condition_wait = undefined
-        state.project_board = transition.board
-        state.plan = []
-        state.current_step = 0
-        state.revision = (state.revision ?? 0) + 1
-        this.planByNpc.set(key, state)
-        return { ...result, state, changed: true, milestoneCompleted: true }
-      }
-    }
-    if (result?.state) this.ensureProjectBoard(result.state)
-    return result
-  }
-
-  activateNextMilestone(key) {
-    const state = key ? this.planByNpc.get(key) : undefined
-    if (!state || state.status !== 'active') return { state, changed: false, reason: 'no_active_project' }
-    const now = Date.now()
-    const transition = activateNextMilestone(this.ensureProjectBoard(state), {
-      goalId: state.goal_id,
-      objective: state.objective,
-      status: state.status,
-      now,
-    })
-    if (!transition.changed) return { state, changed: false, reason: transition.reason }
-    state.project_board = transition.board
-    state.task_board = createTaskBoard([], 0, { goalId: state.goal_id, now })
-    state.plan = []
-    state.current_step = 0
-    state.revision = (state.revision ?? 0) + 1
-    state.updated_at = now
-    this.planByNpc.set(key, state)
-    return { state, changed: true, reason: transition.reason }
+    return super.applyOutcomeAuthority(key, candidate, options)
   }
 
   restore(snapshot) {
-    const persistedProjects = new Map(
-      Array.isArray(snapshot?.plans)
-        ? snapshot.plans
-            .filter(item => item && typeof item.key === 'string')
-            .map(item => [item.key, item?.state?.project_board])
-        : [],
-    )
-    const persistedHierarchyState = new Map(
-      Array.isArray(snapshot?.plans)
-        ? snapshot.plans
-            .filter(item => item && typeof item.key === 'string')
-            .map(item => [item.key, {
-              hierarchy_split_pending: item?.state?.hierarchy_split_pending,
-              legacy_milestone_transition_pending: item?.state?.milestone_transition_pending === true,
-              legacy_milestone_plan_pending: item?.state?.milestone_plan_pending === true,
-            }])
-        : [],
-    )
+    // Rehydrate contracts before the generic memory sanitization can discard
+    // unknown fields. This is deliberately independent of the retired project
+    // hierarchy: the Task Board remains the compatibility projection for a
+    // single ordinary plan.
     const persistedStepContracts = new Map(
       Array.isArray(snapshot?.plans)
         ? snapshot.plans
@@ -482,34 +273,6 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     )
     super.restore(snapshot)
     for (const [key, state] of this.planByNpc.entries()) {
-      const hierarchyState = persistedHierarchyState.get(key)
-      state.project_board = sanitizeProjectBoard(persistedProjects.get(key), {
-        goalId: state.goal_id,
-        objective: state.objective,
-        status: state.status,
-        now: state.updated_at,
-      })
-      state.hierarchy_split_pending = safeHierarchySplitPending(hierarchyState?.hierarchy_split_pending)
-      if (hierarchyState?.legacy_milestone_transition_pending === true
-        && !state.project_board.current_milestone
-        && state.project_board.transition_state === '') {
-        state.project_board = updateProjectBoard(state.project_board, { transition_state: 'awaiting_next_milestone' }, {
-          goalId: state.goal_id,
-          objective: state.objective,
-          status: state.status,
-          now: state.updated_at,
-        })
-      }
-      if (hierarchyState?.legacy_milestone_plan_pending === true
-        && state.project_board.current_milestone
-        && state.project_board.transition_state === '') {
-        state.project_board = updateProjectBoard(state.project_board, { transition_state: 'awaiting_milestone_plan' }, {
-          goalId: state.goal_id,
-          objective: state.objective,
-          status: state.status,
-          now: state.updated_at,
-        })
-      }
       const stepContracts = persistedStepContracts.get(key)
       if (state.task_board && Array.isArray(state.task_board.steps) && stepContracts) {
         state.task_board.steps = state.task_board.steps.map(step => {
@@ -530,29 +293,21 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
 
   reconcileTaskBoard(key, previousBoard, plan, stateResult, options = {}) {
     const truthState = options.previousState ?? stateResult?.state
-    if (options.newMilestone === true && stateResult?.state) {
+    // `recordPlan()` predates immutable planning and may have tentatively set
+    // the legacy state back to active before reconciliation runs. A blocked
+    // Task Board is authoritative: preserve its immutable steps and freeze
+    // until an explicit user revision enters through the new planning-state
+    // transition path.
+    if (previousBoard?.kind === 'task_board_lite' && previousBoard.status === 'blocked' && stateResult?.state) {
       const state = stateResult.state
-      const now = state.updated_at ?? Date.now()
-      const incoming = Array.isArray(plan?.plan) ? plan.plan : []
-      state.task_board = createTaskBoard(incoming, Number.isSafeInteger(plan?.currentStep) ? plan.currentStep : 0, {
-        goalId: state.goal_id,
-        now,
-      })
-      state.task_board = setTaskBoardStatus(state.task_board, state.status, {
-        blocker: state.blocker,
-        pauseReason: state.pause_reason,
-        now,
-      })
-      state.plan = state.task_board.steps.map(step => step.description)
-      state.current_step = state.task_board.active_index
-      state.project_board = updateProjectBoard(this.ensureProjectBoard(state), { transition_state: '' }, {
-        goalId: state.goal_id,
-        objective: state.objective,
-        status: state.status,
-        now,
-      })
+      state.status = 'blocked'
+      state.blocker = previousBoard.blocker ?? state.blocker
+      state.pause_reason = previousBoard.pause_reason ?? state.pause_reason
+      state.task_board = previousBoard
+      state.plan = previousBoard.steps.map(step => String(step?.description ?? '')).filter(Boolean)
+      state.current_step = Number.isSafeInteger(previousBoard.active_index) ? previousBoard.active_index : 0
       this.planByNpc.set(key, state)
-      return { ...stateResult, state }
+      return { ...stateResult, state, blockedByHarness: true }
     }
     const durableContracts = new Map(
       (Array.isArray(previousBoard?.steps) ? previousBoard.steps : [])

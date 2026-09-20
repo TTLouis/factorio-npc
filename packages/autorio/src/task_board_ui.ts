@@ -16,7 +16,7 @@ import { get_actor_inventory_items } from './utils/inventory'
 
 
 
-type TaskBoardUiControlAction = 'pause' | 'terminate' | 'follow' | 'stop_follow' | 'new_task'
+type TaskBoardUiControlAction = 'pause' | 'terminate' | 'follow' | 'stop_follow' | 'new_task' | 'keep_paused' | 'revise' | 'cancel'
 type TaskBoardUiLifecycleAction = 'pause' | 'resume' | 'terminate'
 type TaskBoardUiActivityKind = 'observation' | 'decision' | 'action' | 'result' | 'blocker' | 'system' | 'note'
 type TaskBoardUiAgentPhase = 'idle' | 'thinking' | 'observing' | 'executing' | 'waiting' | 'error'
@@ -39,27 +39,57 @@ const TONE_SPRITES: Record<Tone, SpritePath> = {
   muted: 'utility/status_inactive',
 }
 
-export interface TaskBoardUiStep { id: string, description: string, status: 'pending' | 'active' | 'completed' | 'blocked' | 'paused' }
+export interface TaskBoardUiStep {
+  id: string
+  description: string
+  status: 'pending' | 'active' | 'completed' | 'blocked' | 'paused'
+  /**
+   * Completion contracts are best-effort, so a prose-only step is legal. Both
+   * fields are optional and absent-tolerant: the runtime does not emit them
+   * until the immutable-plan writer is wired, and a step without them renders
+   * exactly as it always did.
+   */
+  contract_kind?: 'grounded' | 'prose'
+  reduced_confidence?: boolean
+}
 export interface TaskBoardUiActivity { id?: string, kind: TaskBoardUiActivityKind, text: string, timestamp?: string }
 export interface TaskBoardUiWantedItem { name: string, count: number, reason: string }
 export interface TaskBoardUiConversationMessage { id: string, role: 'user' | 'assistant', sender: string, text: string }
 export interface TaskBoardUiAgentStatus { phase: TaskBoardUiAgentPhase, detail: string }
-export interface TaskBoardUiProjectMilestone { id: string, title: string, completion_summary: string, status: string }
-export interface TaskBoardUiProject {
-  kind: 'project_board_v1'
-  project_id: string
-  title: string
-  status: string
-  completed_milestones: TaskBoardUiProjectMilestone[]
-  current_milestone?: TaskBoardUiProjectMilestone
-  next_milestones: TaskBoardUiProjectMilestone[]
-  development_direction: string
-  transition_state: string
+/**
+ * Which deterministic harness signal tripped the freeze. These are measured,
+ * not categorized by a model: evidence stall over N batches, the same failure
+ * reason code K times, or a committed contract proven unsatisfiable.
+ */
+export type TaskBoardUiDeadlockSignal = 'evidence_stall' | 'repeated_failure' | 'unsatisfiable_contract'
+export type TaskBoardUiBlockedChoice = 'keep_paused' | 'revise' | 'cancel'
+export interface TaskBoardUiDeadlockEvidence { signal: TaskBoardUiDeadlockSignal, count: number, detail?: string }
+/**
+ * A first-class structural blocker, distinct from an ordinary pause. `blocked`
+ * carries the verified reason plus, when the freeze came from harness deadlock
+ * detection, which signal tripped and how many times.
+ */
+export interface TaskBoardUiBlocked {
+  reason: string
+  summary?: string
+  deadlock?: TaskBoardUiDeadlockEvidence
+  awaiting_choice: boolean
+  choice?: TaskBoardUiBlockedChoice
+}
+/** Identity and lineage of the one immutable plan the tracker is a view of. */
+export interface TaskBoardUiPlanIdentity {
+  plan_id: string
+  plan_version: number
+  roadmap_node_id?: string
+  derived_from?: string
+  superseded_by?: string
 }
 export interface TaskBoardUiSnapshot {
   goal_id: string
   objective: string
-  project?: TaskBoardUiProject
+  plan?: TaskBoardUiPlanIdentity
+  blocked?: TaskBoardUiBlocked
+  steering?: string
   response: string
   status: 'idle' | 'active' | 'blocked' | 'paused' | 'completed'
   blocker: string
@@ -110,6 +140,9 @@ declare const storage: {
   // Tick a prompt was submitted at, keyed by player. Not goal/status-keyed like
   // LIFECYCLE - see task_board_ui_prompt_send_pending.
   airi_task_board_prompt_pending?: Record<number, number>
+  // A blocked plan deliberately has no automatic state transition. This is a
+  // visual debounce only; it never changes the durable blocked plan.
+  airi_task_board_blocked_choice_pending?: Record<number, number>
   airi_task_board_ui_inputs?: TaskBoardUiInput[]
   airi_task_board_preview_zoom?: Record<number, number>
   airi_task_board_lifecycle_pending?: Record<number, TaskBoardUiLifecyclePending>
@@ -131,44 +164,53 @@ function step_status(value: unknown): TaskBoardUiStep['status'] { return value =
 function activity_kind(value: unknown): TaskBoardUiActivityKind { return value === 'observation' || value === 'decision' || value === 'action' || value === 'result' || value === 'blocker' || value === 'system' ? value : 'note' }
 function agent_phase(value: unknown): TaskBoardUiAgentPhase { return value === 'thinking' || value === 'observing' || value === 'executing' || value === 'waiting' || value === 'error' ? value : 'idle' }
 
-function sanitize_project_milestone(value: any, fallback_status: string): TaskBoardUiProjectMilestone | undefined {
+function deadlock_signal(value: unknown): TaskBoardUiDeadlockSignal | undefined { return value === 'evidence_stall' || value === 'repeated_failure' || value === 'unsatisfiable_contract' ? value : undefined }
+function blocked_choice(value: unknown): TaskBoardUiBlockedChoice | undefined { return value === 'keep_paused' || value === 'revise' || value === 'cancel' ? value : undefined }
+function contract_kind(value: unknown): TaskBoardUiStep['contract_kind'] { return value === 'grounded' || value === 'prose' ? value : undefined }
+
+function sanitize_deadlock_evidence(value: any): TaskBoardUiDeadlockEvidence | undefined {
   if (value === undefined || value === null || typeof value !== 'object') return undefined
-  const title = text(value.title, 500)
-  if (title.length === 0) return undefined
-  return {
-    id: text(value.id, 100),
-    title,
-    completion_summary: text(value.completion_summary, 800),
-    status: text(value.status || fallback_status, 32),
-  }
+  const signal = deadlock_signal(value.signal)
+  if (signal === undefined) return undefined
+  const evidence: TaskBoardUiDeadlockEvidence = { signal, count: integer(value.count) }
+  const detail = text(value.detail, 200)
+  if (detail.length > 0) evidence.detail = detail
+  return evidence
 }
 
-function sanitize_project(value: any): TaskBoardUiProject | undefined {
-  if (value === undefined || value === null || typeof value !== 'object' || value.kind !== 'project_board_v1') return undefined
-  const raw_completed = (Array.isArray(value.completed_milestones) ? value.completed_milestones : []) as any[]
-  const completed_milestones: TaskBoardUiProjectMilestone[] = []
-  for (let index = math.max(0, raw_completed.length - 12); index < raw_completed.length; index++) {
-    const milestone = sanitize_project_milestone(raw_completed[index], 'completed')
-    if (milestone !== undefined) completed_milestones.push(milestone)
-  }
-  const raw_next = (Array.isArray(value.next_milestones) ? value.next_milestones : []) as any[]
-  const next_milestones: TaskBoardUiProjectMilestone[] = []
-  for (let index = 0; index < raw_next.length && index < 3; index++) {
-    const milestone = sanitize_project_milestone(raw_next[index], 'tentative')
-    if (milestone !== undefined) next_milestones.push(milestone)
-  }
-  const current_milestone = sanitize_project_milestone(value.current_milestone, 'active')
-  return {
-    kind: 'project_board_v1',
-    project_id: text(value.project_id, 100),
-    title: text(value.title, 500),
-    status: text(value.status, 32),
-    completed_milestones,
-    current_milestone,
-    next_milestones,
-    development_direction: text(value.development_direction, 32),
-    transition_state: text(value.transition_state, 48),
-  }
+/**
+ * The runtime side of the immutable-plan refactor is being wired separately, so
+ * every field here is optional in both directions: a snapshot with no `blocked`
+ * object, or with a partially filled one, must sanitize without throwing and
+ * must not invent a blocker that was never reported.
+ */
+function sanitize_blocked(value: any): TaskBoardUiBlocked | undefined {
+  if (value === undefined || value === null || typeof value !== 'object') return undefined
+  const reason = text(value.reason, 500)
+  const summary = text(value.summary, 500)
+  const deadlock = sanitize_deadlock_evidence(value.deadlock)
+  const awaiting_choice = value.awaiting_choice === true
+  const choice = blocked_choice(value.choice)
+  if (reason.length === 0 && summary.length === 0 && deadlock === undefined && !awaiting_choice && choice === undefined) return undefined
+  const blocked: TaskBoardUiBlocked = { reason, awaiting_choice }
+  if (summary.length > 0) blocked.summary = summary
+  if (deadlock !== undefined) blocked.deadlock = deadlock
+  if (choice !== undefined) blocked.choice = choice
+  return blocked
+}
+
+function sanitize_plan_identity(value: any): TaskBoardUiPlanIdentity | undefined {
+  if (value === undefined || value === null || typeof value !== 'object') return undefined
+  const plan_id = text(value.plan_id, 100)
+  if (plan_id.length === 0) return undefined
+  const plan: TaskBoardUiPlanIdentity = { plan_id, plan_version: positive_integer(value.plan_version, 1) }
+  const roadmap_node_id = text(value.roadmap_node_id, 100)
+  const derived_from = text(value.derived_from, 100)
+  const superseded_by = text(value.superseded_by, 100)
+  if (roadmap_node_id.length > 0) plan.roadmap_node_id = roadmap_node_id
+  if (derived_from.length > 0) plan.derived_from = derived_from
+  if (superseded_by.length > 0) plan.superseded_by = superseded_by
+  return plan
 }
 
 export function sanitize_task_board_ui_snapshot(value: any): TaskBoardUiSnapshot | undefined {
@@ -185,7 +227,11 @@ export function sanitize_task_board_ui_snapshot(value: any): TaskBoardUiSnapshot
     const step = raw_steps[index]
     const description = text(step?.description, ui_constants.MAX_TEXT)
     if (description.length === 0) continue
-    steps.push({ id: text(step?.id || `step_${index + 1}`, 80), description, status: step_status(step?.status) })
+    const next_step: TaskBoardUiStep = { id: text(step?.id || `step_${index + 1}`, 80), description, status: step_status(step?.status) }
+    const kind = contract_kind(step?.contract_kind)
+    if (kind !== undefined) next_step.contract_kind = kind
+    if (step?.reduced_confidence === true) next_step.reduced_confidence = true
+    steps.push(next_step)
   }
 
   const raw_activity = (Array.isArray(value.activity) ? value.activity : []) as any[]
@@ -229,11 +275,13 @@ export function sanitize_task_board_ui_snapshot(value: any): TaskBoardUiSnapshot
   }
 
   const total = integer(value.total_steps, steps.length)
-  const project = sanitize_project(value.project)
+  const plan = sanitize_plan_identity(value.plan)
+  const blocked = sanitize_blocked(value.blocked)
+  const steering = text(value.steering, 32)
   const agent = value.agent !== null && typeof value.agent === 'object' ? value.agent : undefined
   const debug = value.debug !== undefined ? debug_ui.sanitize_debug_snapshot(value.debug) : undefined
   return {
-    goal_id: text(value.goal_id, 100), objective: text(value.objective, 500), project, response: text(value.response, 2000), status: status(value.status), blocker: text(value.blocker, 500), blocker_summary: text(value.blocker_summary, 500), pause_reason: text(value.pause_reason, 300), pause_summary: text(value.pause_summary, 500),
+    goal_id: text(value.goal_id, 100), objective: text(value.objective, 500), plan, blocked, steering: steering.length > 0 ? steering : undefined, response: text(value.response, 2000), status: status(value.status), blocker: text(value.blocker, 500), blocker_summary: text(value.blocker_summary, 500), pause_reason: text(value.pause_reason, 300), pause_summary: text(value.pause_summary, 500),
     completed_count: math.min(integer(value.completed_count), total), total_steps: total, active_index: math.min(integer(value.active_index), math.max(0, total - 1)), steps, activity, wanted_items,
     conversation_id: text(value.conversation_id, 120), conversation,
     agent: { phase: agent_phase(agent?.phase), detail: text(agent?.detail, 300) }, debug,
@@ -316,6 +364,7 @@ const LIFECYCLE = {
 }
 function ensure_terminate_confirm_state() { if (storage.airi_task_board_terminate_confirm_until === undefined) storage.airi_task_board_terminate_confirm_until = {}; return storage.airi_task_board_terminate_confirm_until }
 function ensure_prompt_pending_state() { if (storage.airi_task_board_prompt_pending === undefined) storage.airi_task_board_prompt_pending = {}; return storage.airi_task_board_prompt_pending }
+function ensure_blocked_choice_pending_state() { if (storage.airi_task_board_blocked_choice_pending === undefined) storage.airi_task_board_blocked_choice_pending = {}; return storage.airi_task_board_blocked_choice_pending }
 // Sending a free-text prompt is not goal/status-keyed the way pause/resume/
 // terminate are, so this does not reuse LIFECYCLE: LIFECYCLE.current()'s "done"
 // check is built entirely from board?.status and goal_id transitions specific
@@ -336,6 +385,16 @@ function task_board_ui_prompt_send_pending(player_index: number, tick: number) {
   return true
 }
 function mark_prompt_sent(player_index: number) { ensure_prompt_pending_state()[player_index] = game.tick }
+function task_board_ui_blocked_choice_pending(player_index: number, tick: number) {
+  const started = storage.airi_task_board_blocked_choice_pending?.[player_index]
+  if (started === undefined) return false
+  const synced_tick = storage.airi_task_board_ui_synced_tick
+  const picked_up = synced_tick !== undefined && synced_tick > started
+  const expired = math.max(0, tick - started) >= ui_constants.BLOCKED_CHOICE_PENDING_TICKS
+  if (picked_up || expired) { delete ensure_blocked_choice_pending_state()[player_index]; return false }
+  return true
+}
+function mark_blocked_choice_sent(player_index: number) { ensure_blocked_choice_pending_state()[player_index] = game.tick }
 function ensure_prompt_draft_state() { if (storage.airi_task_board_prompt_draft === undefined) storage.airi_task_board_prompt_draft = {}; return storage.airi_task_board_prompt_draft }
 function ensure_ui_input_queue() { if (storage.airi_task_board_ui_inputs === undefined) storage.airi_task_board_ui_inputs = []; return storage.airi_task_board_ui_inputs }
 function ensure_preview_zoom_state() { if (storage.airi_task_board_preview_zoom === undefined) storage.airi_task_board_preview_zoom = {}; return storage.airi_task_board_preview_zoom }
@@ -583,6 +642,37 @@ function render_controls_panel(parent: LuaGuiElement, player: LuaPlayer, board: 
   const { body } = create_section(parent, 'Controls', ui_constants.CONTROLS_SECTION_WIDTH, undefined, false)
   body.style.vertical_spacing = ui_constants.COMPACT_BUTTON_SPACING
   const follow = runtime.follow
+  // BLOCKED is a durable freeze, not a variant of PAUSED. Keep the reason and
+  // the only three user-authorized exits beside the controls rather than
+  // hiding them in the old-task archive.
+  const blocked = board?.status === 'blocked' ? board.blocked : undefined
+  if (board?.status === 'blocked') {
+    const blocked_flow = body.add({ type: 'flow', name: ui_constants.BLOCKED_SECTION_NAME, direction: 'vertical' })
+    blocked_flow.style.vertical_spacing = 4
+    const summary = blocked?.summary ?? task_condition_text(board.blocker_summary, board.blocker, 'AIRI stopped because the committed plan needs your decision.')
+    const reason = blocked?.reason ?? board.blocker
+    const heading = gui_text.literal_gui_text(blocked_flow.add({ type: 'label', caption: `BLOCKED · ${summary}` }))
+    heading.style.single_line = false; heading.style.maximal_width = ui_constants.CONTROLS_SECTION_WIDTH - 2 * ui_constants.SECTION_PADDING; heading.style.font_color = TONE_COLORS.bad
+    if (reason.length > 0 && reason !== summary) {
+      const detail = gui_text.literal_gui_text(blocked_flow.add({ type: 'label', caption: `Reason: ${reason}` }))
+      detail.style.single_line = false; detail.style.maximal_width = ui_constants.CONTROLS_SECTION_WIDTH - 2 * ui_constants.SECTION_PADDING; detail.style.font_color = TONE_COLORS.muted
+    }
+    if (blocked?.deadlock !== undefined) {
+      const detail = blocked.deadlock.detail?.length ? ` — ${blocked.deadlock.detail}` : ''
+      const evidence = gui_text.literal_gui_text(blocked_flow.add({ type: 'label', caption: `Deadlock: ${blocked.deadlock.signal.replace('_', ' ')} (${blocked.deadlock.count})${detail}` }))
+      evidence.style.single_line = false; evidence.style.maximal_width = ui_constants.CONTROLS_SECTION_WIDTH - 2 * ui_constants.SECTION_PADDING; evidence.style.font_color = TONE_COLORS.warn
+    }
+    const choices = blocked_flow.add({ type: 'table', column_count: 2 })
+    choices.style.horizontal_spacing = ui_constants.COMPACT_BUTTON_SPACING; choices.style.vertical_spacing = ui_constants.COMPACT_BUTTON_SPACING
+    const choice_pending = task_board_ui_blocked_choice_pending(player.index, game.tick)
+    const choice_tip = choice_pending ? 'Waiting for SGLuna runtime to acknowledge your blocked-plan decision.' : ''
+    const keep = compact_button(choices.add({ type: 'button', name: ui_constants.BLOCKED_KEEP_PAUSED_BUTTON_NAME, caption: choice_pending ? 'SAVING...' : 'KEEP PAUSED', style: 'dialog_button', tooltip: choice_tip || 'Keep this committed plan frozen. No work or replanning will start.' })) as ButtonGuiElement
+    keep.enabled = !choice_pending
+    const revise = compact_button(choices.add({ type: 'button', name: ui_constants.BLOCKED_REVISE_BUTTON_NAME, caption: 'REVISE…', style: 'confirm_button', tooltip: choice_tip || 'Keep the plan frozen, then describe the revised goal or constraints in the prompt below. AIRI will not invent a replacement plan.' })) as ButtonGuiElement
+    revise.enabled = !choice_pending
+    const cancel = compact_button(choices.add({ type: 'button', name: ui_constants.BLOCKED_CANCEL_BUTTON_NAME, caption: 'CANCEL…', style: 'red_button', tooltip: choice_tip || 'Request cancellation, then use the existing TERMINATE confirmation to discard this blocked goal permanently.' })) as ButtonGuiElement
+    cancel.enabled = !choice_pending
+  }
   const has_open_goal = board !== undefined && board.status !== 'idle' && board.status !== 'completed'
   const paused = board?.status === 'paused'
   const controls = body.add({ type: 'table', column_count: 2 })
@@ -1037,6 +1127,23 @@ function render_all() { for (const player of game.connected_players) { ensure_bu
 function prompt_field(player: LuaPlayer) { const root = player.gui.screen[ui_constants.ROOT_NAME]; const columns = root?.valid ? root[ui_constants.COLUMNS_NAME] : undefined; const left = columns?.valid ? columns[ui_constants.LEFT_COLUMN_NAME] : undefined; const section = left?.valid ? left[ui_constants.PROMPT_SECTION_NAME] : undefined; const row = section?.valid ? section[ui_constants.PROMPT_FLOW_NAME] : undefined; const field = row?.valid ? row[ui_constants.PROMPT_FIELD_NAME] : undefined; return field?.valid ? field as TextFieldGuiElement : undefined }
 function submit_prompt(player: LuaPlayer, raw: unknown) { if (!emit_prompt(player, raw)) return false; mark_prompt_sent(player.index); const field = prompt_field(player); if (field !== undefined) field.text = ''; render_panel(player); return true }
 function handle_control_click(player: LuaPlayer, element_name: string) {
+  const blocked_action: TaskBoardUiControlAction | undefined = element_name === ui_constants.BLOCKED_KEEP_PAUSED_BUTTON_NAME
+    ? 'keep_paused'
+    : element_name === ui_constants.BLOCKED_REVISE_BUTTON_NAME
+      ? 'revise'
+      : element_name === ui_constants.BLOCKED_CANCEL_BUTTON_NAME
+        ? 'cancel'
+        : undefined
+  if (blocked_action !== undefined) {
+    // The names are only rendered for a blocked plan, but verify the current
+    // snapshot again so an old GUI click cannot race a fresh state transition.
+    if (storage.airi_task_board_ui?.status !== 'blocked' || task_board_ui_blocked_choice_pending(player.index, game.tick)) return true
+    clear_terminate_confirmation(player.index)
+    mark_blocked_choice_sent(player.index)
+    emit_control(player, blocked_action)
+    render_panel(player)
+    return true
+  }
   if (element_name === ui_constants.PAUSE_BUTTON_NAME) {
     if (LIFECYCLE.current(player.index) !== undefined) return true
     clear_terminate_confirmation(player.index)

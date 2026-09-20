@@ -373,6 +373,35 @@ test('pause preserves plan and stops autorio work plus follow mode', async () =>
   assert.ok(session.commands.some(command => command.includes('stop_follow_player')))
 })
 
+test('blocked-plan controls preserve the frozen plan and require a later explicit revision or termination', async () => {
+  const state = { status: 'blocked', goal_id: 'goal_blocked', task_board: { status: 'blocked' } }
+  const session = sessionFixture({ state })
+  let paused = false
+  session.agent.pausePersistentPlan = async () => { paused = true; return { ...state, status: 'paused' } }
+
+  assert.equal(await executeUiControl(session, { action: 'keep_paused', player_name: 'TTLouis' }), true)
+  assert.equal(session.syncs.at(-1), state)
+  assert.equal(paused, false)
+  assert.match(session.chats.at(-1), /No replanning or world work/i)
+
+  assert.equal(await executeUiControl(session, { action: 'revise', player_name: 'TTLouis' }), true)
+  assert.equal(session.syncs.at(-1), state)
+  assert.match(session.chats.at(-1), /revised goal or constraints/i)
+
+  assert.equal(await executeUiControl(session, { action: 'cancel', player_name: 'TTLouis' }), true)
+  assert.equal(session.syncs.at(-1), state)
+  assert.match(session.chats.at(-1), /confirm TERMINATE/i)
+  assert.equal(paused, false)
+})
+
+test('blocked-plan controls reject a state that is no longer blocked', async () => {
+  const session = sessionFixture({ state: { status: 'active', goal_id: 'goal_active' } })
+  assert.equal(await executeUiControl(session, { action: 'keep_paused', player_name: 'TTLouis' }), false)
+  assert.equal(await executeUiControl(session, { action: 'revise', player_name: 'TTLouis' }), false)
+  assert.equal(await executeUiControl(session, { action: 'cancel', player_name: 'TTLouis' }), false)
+  assert.equal(session.syncs.length, 0)
+})
+
 test('terminate discards durable state, stops work, and clears the Current Task Conversation UI', async () => {
   const session = sessionFixture()
   let terminated = false

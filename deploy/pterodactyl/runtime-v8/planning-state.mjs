@@ -66,6 +66,42 @@ export const SHELF_NODE_STATUS = Object.freeze({
 
 const SHELF_NODE_STATUSES = Object.freeze(Object.values(SHELF_NODE_STATUS))
 
+// Monotonic realization ladder. A node may only move forward along it; the
+// ladder is driven by accumulated verified evidence, never by an assertion from
+// the planner or from Jev. INVALIDATED is off-ladder and is set only by a
+// roadmap revision that drops the node.
+const SHELF_NODE_STATUS_RANK = Object.freeze({
+  [SHELF_NODE_STATUS.TENTATIVE]: 0,
+  [SHELF_NODE_STATUS.READY_TO_REFINE]: 1,
+  [SHELF_NODE_STATUS.PARTIALLY_REALIZED]: 2,
+  [SHELF_NODE_STATUS.REALIZED]: 3,
+})
+
+/**
+ * A capability frontier is a PROPERTY OF A SHELF NODE — not a separate layer and
+ * not derived on demand. It records what capability the node advances and how
+ * the world would be recognized as having reached it.
+ *
+ * Roadmap section "Later factory-performance frontiers" distinguishes four
+ * things this module deliberately keeps separate:
+ *
+ *   plan slice completed
+ *   != capability frontier reached
+ *   != user goal satisfied
+ *   != project ended
+ */
+export const FRONTIER_STATUS = Object.freeze({
+  NOT_REACHED: 'not_reached',
+  PARTIALLY_REACHED: 'partially_reached',
+  REACHED: 'reached',
+})
+
+const FRONTIER_STATUS_RANK = Object.freeze({
+  [FRONTIER_STATUS.NOT_REACHED]: 0,
+  [FRONTIER_STATUS.PARTIALLY_REACHED]: 1,
+  [FRONTIER_STATUS.REACHED]: 2,
+})
+
 export const DEVELOPMENT_MODES = Object.freeze(['vertical', 'horizontal', 'maintain', 'recover'])
 
 export const GOAL_STATUS = Object.freeze({
@@ -112,6 +148,9 @@ export const PLANNING_EVENT = Object.freeze({
   USER_REVISION_APPROVED: 'USER_REVISION_APPROVED',
   PLAN_SUPERSEDED: 'PLAN_SUPERSEDED',
   PLAN_CANCELLED: 'PLAN_CANCELLED',
+  // Goal satisfaction is its OWN explicit event with its OWN evidence. No
+  // amount of completed plans or reached frontiers produces it implicitly.
+  GOAL_SATISFIED: 'GOAL_SATISFIED',
 })
 
 const PLANNING_EVENT_TYPES = Object.freeze(Object.values(PLANNING_EVENT))
@@ -120,6 +159,71 @@ const PLANNING_EVENT_TYPES = Object.freeze(Object.values(PLANNING_EVENT))
 // and Jev are deliberately absent.
 const EVIDENCE_AUTHORITIES = Object.freeze(['runtime', 'autorio', 'runtime_receipt'])
 const USER_AUTHORITIES = Object.freeze(['user', 'human', 'user_steering'])
+
+// --- reasoning epoch (owner decision, 2026-09-19) ---------------------------
+//
+// When a plan is shelved or superseded, accumulated REASONING context does not
+// carry forward. The next planning round restarts from durable state only —
+// goal, shelf and verified evidence — not from accumulated reasoning or
+// conversation history. Lineage is preserved; reasoning continuity is not.
+//
+// This module owns no I/O and therefore clears nothing itself. It publishes a
+// monotonic signal that the agent loop consumes:
+//
+//   state.reasoning_epoch        monotonically increasing integer, never reset
+//   state.last_reasoning_reset   { epoch, at, event_type, reason } | null
+//
+// A consumer caches the epoch it last reasoned under; when
+// `state.reasoning_epoch` differs, it must discard accumulated reasoning /
+// conversation context and rebuild the next round's context from durable state.
+export const REASONING_RESET_EVENTS = Object.freeze([
+  // a new goal: nothing from the previous one may be clung to
+  PLANNING_EVENT.GOAL_ACCEPTED,
+  // the shelf itself moved under the planner
+  PLANNING_EVENT.ROADMAP_REVISED,
+  // a deferred tail was shelved: the plan the model argued for no longer exists
+  PLANNING_EVENT.JEV_REFINEMENT_REQUESTED,
+  // the plan was set aside, replaced or abandoned
+  PLANNING_EVENT.PLAN_SUPERSEDED,
+  PLANNING_EVENT.USER_REVISION_APPROVED,
+  PLANNING_EVENT.PLAN_CANCELLED,
+])
+
+function currentReasoningEpoch(state) {
+  return Number.isSafeInteger(state?.reasoning_epoch) && state.reasoning_epoch >= 0 ? state.reasoning_epoch : 0
+}
+
+/**
+ * Bump the reasoning epoch on a state that is already otherwise final.
+ * Applied ONLY on the transitions listed in REASONING_RESET_EVENTS, and only
+ * when the transition actually took effect.
+ */
+function withReasoningReset(state, { now, eventType, reason }) {
+  const epoch = currentReasoningEpoch(state) + 1
+  return {
+    ...state,
+    reasoning_epoch: epoch,
+    last_reasoning_reset: {
+      epoch,
+      at: now,
+      event_type: text(eventType, 80),
+      reason: text(reason, 200) || null,
+    },
+  }
+}
+
+/** Current reasoning epoch of a state. Safe on undefined / restored junk. */
+export function reasoningEpochOf(state) {
+  return currentReasoningEpoch(state)
+}
+
+/**
+ * True when applying an event moved the state across a reasoning-reset boundary.
+ * The agent loop uses this to decide whether to drop accumulated reasoning.
+ */
+export function reasoningWasReset(before, after) {
+  return currentReasoningEpoch(after) > currentReasoningEpoch(before)
+}
 
 // --- small pure helpers ----------------------------------------------------
 
@@ -171,14 +275,73 @@ function sanitizeGoal(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
   const goalId = text(raw.goal_id, 120)
   if (!goalId) return undefined
+  const satisfaction = raw.satisfaction && typeof raw.satisfaction === 'object' && !Array.isArray(raw.satisfaction)
+    ? {
+        source: text(raw.satisfaction.source, 60),
+        evidence_refs: stringList(raw.satisfaction.evidence_refs, { max: 32, maxLength: 200 }),
+        rationale: text(raw.satisfaction.rationale, 400) || null,
+        at: finiteNumber(raw.satisfaction.at) ?? 0,
+      }
+    : null
   return {
     goal_id: goalId,
+    ...(satisfaction ? { satisfaction, satisfied_at: finiteNumber(raw.satisfied_at) ?? satisfaction.at } : {}),
     owner: text(raw.owner, 128) || 'unknown',
     objective: text(raw.objective, 1000),
     constraints: stringList(raw.constraints, { max: 24, maxLength: 300 }),
     status: Object.values(GOAL_STATUS).includes(raw.status) ? raw.status : GOAL_STATUS.ACTIVE,
     created_at: finiteNumber(raw.created_at) ?? 0,
     updated_at: finiteNumber(raw.updated_at) ?? finiteNumber(raw.created_at) ?? 0,
+  }
+}
+
+/**
+ * Sanitize the OPTIONAL capability frontier a shelf node advances.
+ *
+ * Like the node that owns it, a frontier is storage: intent plus recognition
+ * criteria in prose. It carries no operations and no step contracts — its
+ * recognition signals describe how the world would be recognized as having
+ * reached the frontier; they are never executed and never compiled into steps.
+ *
+ * `continuous: true` marks an OPEN-ENDED frontier (sustained SPM, logistics or
+ * power headroom, throughput scaling, resilience). "Launch a rocket" is not
+ * assumed terminal. A continuous frontier can sit at `partially_reached`
+ * indefinitely: it never latches to `reached`, so it can never become the
+ * silent reason a goal completes.
+ */
+export function sanitizeCapabilityFrontier(raw, { nodeId = '' } = {}) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const intent = text(raw.intent ?? raw.description, 400)
+  if (!intent) return undefined
+  const seen = new Set()
+  const recognition = boundedList(raw.recognition ?? raw.reached_when, 16)
+    .map((item, index) => {
+      const source = typeof item === 'string' ? { description: item } : item
+      if (!source || typeof source !== 'object' || Array.isArray(source)) return undefined
+      const description = text(source.description ?? source.intent, 300)
+      if (!description) return undefined
+      const id = text(source.id, 120) || `recog_${fingerprint(`${nodeId}|${index}|${description}`)}`
+      if (seen.has(id)) return undefined
+      seen.add(id)
+      return { id, description }
+    })
+    .filter(Boolean)
+  const declaredIds = new Set(recognition.map(item => item.id))
+  const satisfied = stringList(raw.satisfied_recognition_ids, { max: 16, maxLength: 120 })
+    .filter(id => declaredIds.has(id))
+  const status = Object.values(FRONTIER_STATUS).includes(raw.status) ? raw.status : FRONTIER_STATUS.NOT_REACHED
+  const continuous = raw.continuous === true
+  return {
+    id: text(raw.id, 120) || `frontier_${nodeId || fingerprint(intent)}`,
+    intent,
+    continuous,
+    recognition,
+    // A continuous frontier never latches; clamp any stored REACHED back down.
+    status: continuous && status === FRONTIER_STATUS.REACHED ? FRONTIER_STATUS.PARTIALLY_REACHED : status,
+    satisfied_recognition_ids: Array.from(new Set(satisfied)),
+    verified_results: stringList(raw.verified_results, { max: 32, maxLength: 300 }),
+    resolved_by: stringList(raw.resolved_by, { max: 32, maxLength: 160 }),
+    reached_at: continuous ? null : (finiteNumber(raw.reached_at) ?? null),
   }
 }
 
@@ -207,6 +370,16 @@ export function sanitizeShelfNode(raw, { sequence = 0 } = {}) {
     derived_from_node_id: text(raw.derived_from_node_id, 120) || undefined,
     revision_reason: text(raw.revision_reason, 300) || undefined,
     verified_results: stringList(raw.verified_results, { max: 32, maxLength: 300 }),
+    // The capability frontier this node advances, if it declares one.
+    // A frontier normally inherits the shelf node's capability intent. Requiring
+    // a duplicate `intent` field silently discarded otherwise valid frontiers
+    // during persistence/restore and made their recognition evidence inert.
+    capability_frontier: sanitizeCapabilityFrontier(
+      raw.capability_frontier && typeof raw.capability_frontier === 'object'
+        ? { ...raw.capability_frontier, intent: raw.capability_frontier.intent ?? raw.intent }
+        : raw.capability_frontier,
+      { nodeId: id },
+    ) ?? null,
   }
 }
 
@@ -282,6 +455,9 @@ export function createEmptyPlanningState() {
     plans: [],
     active_plan_id: null,
     updated_at: 0,
+    // Reasoning continuity marker. See REASONING_RESET_EVENTS above.
+    reasoning_epoch: 0,
+    last_reasoning_reset: null,
     log: [],
   }
 }
@@ -325,6 +501,30 @@ export function isPlanImmutable(plan) {
 
 // --- roadmap shelf ---------------------------------------------------------
 
+function mergeFrontierLineage(prior, next) {
+  if (!next) return prior ? { ...prior } : null
+  if (!prior) return next
+  const declared = new Set(next.recognition.map(item => item.id))
+  const satisfied = Array.from(new Set([
+    ...prior.satisfied_recognition_ids.filter(id => declared.has(id)),
+    ...next.satisfied_recognition_ids,
+  ]))
+  const allSatisfied = declared.size > 0 && next.recognition.every(item => satisfied.includes(item.id))
+  let status = maxFrontierStatus(next.status, prior.status)
+  // A restated frontier that added new recognition signals is no longer proven
+  // reached by the old evidence alone.
+  if (status === FRONTIER_STATUS.REACHED && !allSatisfied) status = FRONTIER_STATUS.PARTIALLY_REACHED
+  if (next.continuous && status === FRONTIER_STATUS.REACHED) status = FRONTIER_STATUS.PARTIALLY_REACHED
+  return {
+    ...next,
+    status,
+    satisfied_recognition_ids: satisfied,
+    verified_results: Array.from(new Set([...prior.verified_results, ...next.verified_results])).slice(0, 64),
+    resolved_by: Array.from(new Set([...prior.resolved_by, ...next.resolved_by])).slice(0, 32),
+    reached_at: status === FRONTIER_STATUS.REACHED ? (prior.reached_at ?? next.reached_at ?? null) : null,
+  }
+}
+
 function createRoadmapRevision(state, { now, nodes, reason, sequence }) {
   const previous = state.roadmap
   const revisionId = `${state.goal.goal_id}_r${sequence}`
@@ -339,6 +539,10 @@ function createRoadmapRevision(state, { now, nodes, reason, sequence }) {
     const prior = previousById.get(node.id)
     incoming.push({
       ...node,
+      // Frontier evidence is durable state and survives roadmap revisions: a
+      // revision may restate the frontier, but cannot erase what was verified.
+      capability_frontier: mergeFrontierLineage(prior?.capability_frontier, node.capability_frontier),
+      status: prior ? maxShelfNodeStatus(node.status, prior.status) : node.status,
       // lineage preservation: results and plan links survive revisions.
       resolved_by: Array.from(new Set([...(prior?.resolved_by ?? []), ...node.resolved_by])),
       verified_results: Array.from(new Set([...(prior?.verified_results ?? []), ...node.verified_results])),
@@ -372,20 +576,97 @@ function createRoadmapRevision(state, { now, nodes, reason, sequence }) {
   }
 }
 
-function attachPlanResultsToShelf(roadmap, { nodeIds, planId, results, status }) {
+function maxShelfNodeStatus(current, candidate) {
+  // Monotonic: the ladder only moves forward. INVALIDATED is off-ladder and is
+  // never overwritten by accumulated evidence.
+  if (current === SHELF_NODE_STATUS.INVALIDATED) return current
+  const currentRank = SHELF_NODE_STATUS_RANK[current] ?? 0
+  const candidateRank = SHELF_NODE_STATUS_RANK[candidate] ?? 0
+  return candidateRank > currentRank ? candidate : current
+}
+
+function maxFrontierStatus(current, candidate) {
+  const currentRank = FRONTIER_STATUS_RANK[current] ?? 0
+  const candidateRank = FRONTIER_STATUS_RANK[candidate] ?? 0
+  return candidateRank > currentRank ? candidate : current
+}
+
+/**
+ * Advance one node's capability frontier from accumulated VERIFIED evidence.
+ *
+ * Structural guarantees:
+ *   * Completing a plan does NOT by itself reach a frontier. Only recognition
+ *     signals the frontier itself declared, reported satisfied by a runtime
+ *     authority, can do that. Unknown / fabricated ids are discarded.
+ *   * A frontier with no declared recognition signals can never be `reached`,
+ *     because nothing was ever said about how to recognize it.
+ *   * A continuous frontier never latches to `reached`.
+ */
+function advanceFrontier(frontier, { now, planId, results, satisfiedRecognitionIds }) {
+  const declared = new Set(frontier.recognition.map(item => item.id))
+  const incoming = stringList(satisfiedRecognitionIds, { max: 16, maxLength: 120 }).filter(id => declared.has(id))
+  const satisfied = Array.from(new Set([...frontier.satisfied_recognition_ids, ...incoming]))
+  const allSatisfied = declared.size > 0 && frontier.recognition.every(item => satisfied.includes(item.id))
+
+  let candidate = FRONTIER_STATUS.NOT_REACHED
+  if (allSatisfied && !frontier.continuous) candidate = FRONTIER_STATUS.REACHED
+  else if (satisfied.length > 0) candidate = FRONTIER_STATUS.PARTIALLY_REACHED
+
+  let status = maxFrontierStatus(frontier.status, candidate)
+  if (frontier.continuous && status === FRONTIER_STATUS.REACHED) status = FRONTIER_STATUS.PARTIALLY_REACHED
+
+  return {
+    ...frontier,
+    status,
+    satisfied_recognition_ids: satisfied,
+    verified_results: Array.from(new Set([...frontier.verified_results, ...results])).slice(0, 64),
+    resolved_by: planId ? Array.from(new Set([...frontier.resolved_by, planId])).slice(0, 32) : frontier.resolved_by,
+    reached_at: status === FRONTIER_STATUS.REACHED ? (frontier.reached_at ?? now) : null,
+  }
+}
+
+function shelfStatusForFrontier(frontier) {
+  if (frontier.status === FRONTIER_STATUS.REACHED) return SHELF_NODE_STATUS.REALIZED
+  if (frontier.status === FRONTIER_STATUS.PARTIALLY_REACHED) return SHELF_NODE_STATUS.PARTIALLY_REALIZED
+  // Verified results landed, but nothing the frontier recognizes has been shown.
+  return SHELF_NODE_STATUS.READY_TO_REFINE
+}
+
+/**
+ * Attach a completed plan's verified results back to the shelf nodes it
+ * resolved, moving each node along the realization ladder.
+ *
+ * Nodes that declare no capability frontier keep the original behaviour: the
+ * plan that resolved them realizes them, because there is no frontier to
+ * measure against.
+ */
+function attachPlanResultsToShelf(roadmap, { nodeIds, planId, results, satisfiedRecognitionIds, status, now }) {
   if (!roadmap) return roadmap
   const targets = new Set(nodeIds ?? [])
   if (targets.size === 0) return roadmap
+  const cleanResults = stringList(results, { max: 32, maxLength: 300 })
   return {
     ...roadmap,
-    nodes: roadmap.nodes.map(node => (targets.has(node.id)
-      ? {
-          ...node,
-          status,
-          resolved_by: Array.from(new Set([...node.resolved_by, planId])),
-          verified_results: Array.from(new Set([...node.verified_results, ...stringList(results, { max: 32, maxLength: 300 })])).slice(0, 64),
-        }
-      : node)),
+    nodes: roadmap.nodes.map((node) => {
+      if (!targets.has(node.id)) return node
+      const base = {
+        ...node,
+        resolved_by: Array.from(new Set([...node.resolved_by, planId])),
+        verified_results: Array.from(new Set([...node.verified_results, ...cleanResults])).slice(0, 64),
+      }
+      if (!node.capability_frontier) return { ...base, status: maxShelfNodeStatus(node.status, status) }
+      const frontier = advanceFrontier(node.capability_frontier, {
+        now,
+        planId,
+        results: cleanResults,
+        satisfiedRecognitionIds,
+      })
+      return {
+        ...base,
+        capability_frontier: frontier,
+        status: maxShelfNodeStatus(node.status, shelfStatusForFrontier(frontier)),
+      }
+    }),
   }
 }
 
@@ -708,13 +989,16 @@ const HANDLERS = {
     // A new goal starts a fresh planning state. Previous goals are history held
     // by the caller's snapshot store, not silently merged here.
     const fresh = createEmptyPlanningState()
-    return {
+    // The epoch is monotonic across the process lifetime, so it carries over
+    // from the abandoned goal rather than restarting at 0.
+    return withReasoningReset({
       ...fresh,
       sequence,
       goal,
+      reasoning_epoch: currentReasoningEpoch(state),
       updated_at: now,
       log: logEntry(fresh, { type: PLANNING_EVENT.GOAL_ACCEPTED, at: now, goal_id: goal.goal_id }),
-    }
+    }, { now, eventType: PLANNING_EVENT.GOAL_ACCEPTED, reason: 'new_goal' })
   },
 
   [PLANNING_EVENT.ROADMAP_REVISED](state, event, now) {
@@ -726,7 +1010,9 @@ const HANDLERS = {
       nodes: event.nodes,
       reason: event.reason,
     })
-    return {
+    // The shelf moved under the planner: the next round restarts from durable
+    // state rather than from reasoning about the previous shelf.
+    return withReasoningReset({
       ...state,
       sequence,
       roadmap,
@@ -738,7 +1024,7 @@ const HANDLERS = {
         roadmap_revision_id: roadmap.roadmap_revision_id,
         reason: roadmap.reason,
       }),
-    }
+    }, { now, eventType: PLANNING_EVENT.ROADMAP_REVISED, reason: roadmap.reason || 'roadmap_revised' })
   },
 
   [PLANNING_EVENT.DRAFT_CREATED](state, event, now) {
@@ -821,7 +1107,9 @@ const HANDLERS = {
       },
     }, PLAN_STATUS.DRAFT, { now, reason: 'jev_refine' }))
 
+    let shelvedTail = false
     if (tailNodes.length > 0 && state.goal) {
+      shelvedTail = true
       const sequence = nextSequence(next)
       const merged = [...(next.roadmap?.nodes ?? []), ...tailNodes]
       const roadmap = createRoadmapRevision(next, {
@@ -838,7 +1126,7 @@ const HANDLERS = {
       }
     }
 
-    return {
+    const refined = {
       ...next,
       updated_at: now,
       log: logEntry(next, {
@@ -849,6 +1137,15 @@ const HANDLERS = {
         shelved_tail: tailNodes.length,
       }),
     }
+    // Reasoning resets only when a tail was actually SHELVED. A refinement that
+    // shelves nothing is an ordinary pre-commit critique of the same draft.
+    return shelvedTail
+      ? withReasoningReset(refined, {
+          now,
+          eventType: PLANNING_EVENT.JEV_REFINEMENT_REQUESTED,
+          reason: 'deferred_tail_shelved',
+        })
+      : refined
   },
 
   [PLANNING_EVENT.PLAN_COMMITTED](state, event, now) {
@@ -1044,11 +1341,19 @@ const HANDLERS = {
     const allComplete = plan.steps.every(step => plan.execution.step_progress[step.step_id]?.status === 'completed')
     if (!allComplete) return state
     const completed = withStatus({ ...plan, completed_at: now }, PLAN_STATUS.COMPLETED, { now, reason: 'all_steps_completed' })
-    // Attach verified results back to shelf lineage before the next round.
+    // Attach verified results back to shelf lineage before the next round, and
+    // move each resolved node along the realization ladder.
+    //
+    // A completed plan slice is NOT a reached frontier: only recognition
+    // signals the frontier itself declared, reported satisfied here by the
+    // runtime, can advance it. And a reached frontier is NOT a satisfied goal —
+    // that needs its own GOAL_SATISFIED event with its own evidence.
     const roadmap = attachPlanResultsToShelf(state.roadmap, {
+      now,
       nodeIds: plan.roadmap_node_ids,
       planId: plan.plan_id,
       results: event.verified_results,
+      satisfiedRecognitionIds: event.satisfied_recognition_ids,
       status: SHELF_NODE_STATUS.REALIZED,
     })
     return {
@@ -1140,7 +1445,9 @@ const HANDLERS = {
       ? { ...item, superseded_by_plan_id: successor.plan_id, updated_at: now }
       : item))
 
-    return {
+    // Lineage is preserved; reasoning continuity is not. The successor is
+    // planned from durable state, not from the argument for its predecessor.
+    return withReasoningReset({
       ...state,
       sequence,
       plans: [...plans, successor],
@@ -1153,7 +1460,7 @@ const HANDLERS = {
         derived_from_plan_id: predecessor.plan_id,
         approved_by: text(event.approved_by, 128),
       }),
-    }
+    }, { now, eventType: PLANNING_EVENT.USER_REVISION_APPROVED, reason: 'successor_plan_approved' })
   },
 
   [PLANNING_EVENT.PLAN_SUPERSEDED](state, event, now) {
@@ -1167,12 +1474,13 @@ const HANDLERS = {
       ...plan,
       superseded_by_plan_id: text(event.successor_plan_id, 200) || plan.superseded_by_plan_id,
     }, PLAN_STATUS.SUPERSEDED, { now, reason: text(event.reason, 200) || 'user_steering' })
-    return {
+    // A set-aside plan must not keep steering the model's reasoning.
+    return withReasoningReset({
       ...state,
       plans: state.plans.map(item => (item.plan_id === plan.plan_id ? superseded : item)),
       updated_at: now,
       log: logEntry(state, { type: PLANNING_EVENT.PLAN_SUPERSEDED, at: now, plan_id: plan.plan_id }),
-    }
+    }, { now, eventType: PLANNING_EVENT.PLAN_SUPERSEDED, reason: text(event.reason, 200) || 'user_steering' })
   },
 
   [PLANNING_EVENT.PLAN_CANCELLED](state, event, now) {
@@ -1181,11 +1489,44 @@ const HANDLERS = {
     if ([PLAN_STATUS.COMPLETED, PLAN_STATUS.CANCELLED].includes(plan.status)) return state
     if (!isUserAuthority(event.source)) return state
     const cancelled = withStatus(plan, PLAN_STATUS.CANCELLED, { now, reason: text(event.reason, 200) || 'user_cancelled' })
-    return {
+    return withReasoningReset({
       ...state,
       plans: state.plans.map(item => (item.plan_id === plan.plan_id ? cancelled : item)),
       updated_at: now,
       log: logEntry(state, { type: PLANNING_EVENT.PLAN_CANCELLED, at: now, plan_id: plan.plan_id }),
+    }, { now, eventType: PLANNING_EVENT.PLAN_CANCELLED, reason: text(event.reason, 200) || 'user_cancelled' })
+  },
+
+  /**
+   * Goal satisfaction is a separate, explicit event carrying its OWN evidence.
+   *
+   * Nothing in this module can produce it implicitly: not a completed plan, not
+   * a realized shelf node, not a reached frontier, and never a continuous
+   * frontier. Jev and the planner are excluded by the source allowlist.
+   */
+  [PLANNING_EVENT.GOAL_SATISFIED](state, event, now) {
+    if (!state.goal || state.goal.status !== GOAL_STATUS.ACTIVE) return state
+    if (text(event.goal_id, 120) && text(event.goal_id, 120) !== state.goal.goal_id) return state
+    if (!isRuntimeAuthority(event.source) && !isUserAuthority(event.source)) return state
+    // Its own evidence, distinct from the evidence that advanced any plan.
+    const evidenceRefs = stringList(event.evidence_refs, { max: 32, maxLength: 200 })
+    if (evidenceRefs.length === 0) return state
+    return {
+      ...state,
+      goal: {
+        ...state.goal,
+        status: GOAL_STATUS.COMPLETED,
+        updated_at: now,
+        satisfied_at: now,
+        satisfaction: {
+          source: text(event.source, 60),
+          evidence_refs: evidenceRefs,
+          rationale: text(event.rationale, 400) || null,
+          at: now,
+        },
+      },
+      updated_at: now,
+      log: logEntry(state, { type: PLANNING_EVENT.GOAL_SATISFIED, at: now, goal_id: state.goal.goal_id }),
     }
   },
 }
@@ -1203,6 +1544,8 @@ export function serializePlanningState(state) {
     plans: clone(current.plans) ?? [],
     active_plan_id: current.active_plan_id ?? null,
     updated_at: finiteNumber(current.updated_at) ?? 0,
+    reasoning_epoch: currentReasoningEpoch(current),
+    last_reasoning_reset: clone(current.last_reasoning_reset) ?? null,
     log: clone(current.log) ?? [],
   }
 }
@@ -1300,6 +1643,17 @@ export function restorePlanningState(raw) {
     plans,
     active_plan_id: plans.some(plan => plan.plan_id === activePlanId) ? activePlanId : null,
     updated_at: finiteNumber(raw.updated_at) ?? 0,
+    // Reasoning epochs are durable: a restart must not look like a reset, and
+    // must not silently re-use an epoch the loop has already reasoned under.
+    reasoning_epoch: currentReasoningEpoch(raw),
+    last_reasoning_reset: raw.last_reasoning_reset && typeof raw.last_reasoning_reset === 'object' && !Array.isArray(raw.last_reasoning_reset)
+      ? {
+          epoch: Number.isSafeInteger(raw.last_reasoning_reset.epoch) ? raw.last_reasoning_reset.epoch : currentReasoningEpoch(raw),
+          at: finiteNumber(raw.last_reasoning_reset.at) ?? 0,
+          event_type: text(raw.last_reasoning_reset.event_type, 80),
+          reason: text(raw.last_reasoning_reset.reason, 200) || null,
+        }
+      : null,
     log: boundedList(raw.log, 256).map(item => clone(item)),
   }
 }

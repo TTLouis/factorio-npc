@@ -358,7 +358,7 @@ test('post-step Jev wait_runtime accepts idle Autorio only after deterministic w
 })
 
 
-test('hierarchy gate converts continue_current into runtime wait only for maintain+keep with healthy deterministic progress', async () => {
+test('steering maintain converts continue_current into runtime wait with healthy deterministic progress', async () => {
   const { agent, memory } = makeAgent({
     decisionProvider: async () => postStepDecisionResponse('continue_current', {
       granularity: 'keep',
@@ -383,8 +383,8 @@ test('hierarchy gate converts continue_current into runtime wait only for mainta
   const routed = await agent.routePostStepDecision({ view: { task_state: 'idle', queue_length: 0 } })
   assert.equal(routed.requested_route, 'continue_current')
   assert.equal(routed.route, 'wait_runtime')
-  assert.equal(routed.fallback_reason, 'hierarchy_maintain_authoritative_runtime')
-  assert.equal(routed.hierarchy_gate.allow_runtime_continuation, true)
+  assert.equal(routed.fallback_reason, 'steering_maintain_authoritative_runtime')
+  assert.equal('hierarchy_gate' in routed, false)
 })
 
 test('post-step routing accepts canonical continue_runtime vocabulary and preserves the existing internal continuation path', async () => {
@@ -412,10 +412,10 @@ test('post-step routing accepts canonical continue_runtime vocabulary and preser
   const routed = await agent.routePostStepDecision({ view: { task_state: 'idle', queue_length: 0 } })
   assert.equal(routed.requested_route, 'continue_current')
   assert.equal(routed.route, 'wait_runtime')
-  assert.equal(routed.hierarchy_gate.allow_runtime_continuation, true)
+  assert.equal('hierarchy_gate' in routed, false)
 })
 
-test('hierarchy gate refuses runtime wait when Jev says strategic direction is not maintain', async () => {
+test('steering refuses runtime wait when Jev says the direction is not maintain', async () => {
   const { agent, memory } = makeAgent({
     decisionProvider: async () => postStepDecisionResponse('wait_runtime', {
       granularity: 'keep',
@@ -438,12 +438,12 @@ test('hierarchy gate refuses runtime wait when Jev says strategic direction is n
   const routed = await agent.routePostStepDecision({ view: { task_state: 'idle', queue_length: 0 } })
   assert.equal(routed.requested_route, 'wait_runtime')
   assert.equal(routed.route, 'fallback_planner')
-  assert.equal(routed.fallback_reason, 'development_requires_planner')
-  assert.equal(routed.hierarchy_action, 'development_vertical')
-  assert.equal(routed.hierarchy_gate.allow_runtime_continuation, false)
+  assert.equal(routed.fallback_reason, 'steering_requires_planner')
+  assert.equal('hierarchy_action' in routed, false)
+  assert.equal('hierarchy_gate' in routed, false)
 })
 
-test('granularity split becomes an explicit milestone replan request on a completion boundary', async () => {
+test('retired granularity split advice cannot create a replan on a completion boundary', async () => {
   const { agent, memory } = makeAgent({
     decisionProvider: async () => postStepDecisionResponse('wait_runtime', {
       granularity: 'split',
@@ -465,9 +465,8 @@ test('granularity split becomes an explicit milestone replan request on a comple
 
   const routed = await agent.routePostStepDecision({ view: { task_state: 'idle', queue_length: 0 } })
   assert.equal(routed.requested_route, 'wait_runtime')
-  assert.equal(routed.route, 'replan')
-  assert.equal(routed.hierarchy_action, 'split_current_milestone')
-  assert.equal(routed.fallback_reason, 'hierarchy_split_requested')
+  assert.equal(routed.route, 'wait_runtime')
+  assert.equal('hierarchy_action' in routed, false)
 })
 
 test('idle Autorio plus Jev wait_runtime is rejected when no valid watcher exists', async () => {
@@ -601,7 +600,7 @@ test('actor epoch change cancels the watcher and a stale poll cannot complete th
 })
 
 
-test('verified milestone transition can activate the next tentative milestone but still wakes the Main LLM for its Plan Tracker', async () => {
+test('legacy milestone transition data is inert for post-step routing', async () => {
   const { agent, memory } = makeAgent({
     decisionProvider: async () => postStepDecisionResponse('continue_current', {
       milestoneTransition: 'advance_next',
@@ -624,17 +623,15 @@ test('verified milestone transition can activate the next tentative milestone bu
     updated_at: Date.now(),
   }
   const routed = await agent.routePostStepDecision({ view: { task_state: 'idle', queue_length: 0 } })
-  assert.equal(routed.route, 'replan')
-  assert.equal(routed.hierarchy_action, 'advance_next_milestone')
-  assert.equal(routed.fallback_reason, 'verified_milestone_complete_advance_next')
-  const advanced = memory.planByNpc.get('npc:airi')
-  assert.equal(advanced.project_board.current_milestone.title, 'Reach Automation')
-  assert.equal(advanced.project_board.transition_state, 'awaiting_milestone_plan')
-  assert.equal(advanced.task_board.total_steps, 0)
+  assert.equal(routed.route, 'continue_current')
+  assert.equal('hierarchy_action' in routed, false)
+  const retained = memory.planByNpc.get('npc:airi')
+  assert.equal(retained.project_board.transition_state, 'awaiting_next_milestone')
+  assert.equal(retained.task_board.total_steps, durable.task_board.total_steps)
 })
 
 
-test('granularity collapse wakes bounded simplification instead of silently behaving like keep', async () => {
+test('retired granularity collapse advice is inert instead of silently replanning', async () => {
   const { agent } = makeAgent({
     decisionProvider: async () => postStepDecisionResponse('continue_current', {
       granularity: 'collapse',
@@ -642,9 +639,8 @@ test('granularity collapse wakes bounded simplification instead of silently beha
     }),
   })
   const routed = await agent.routePostStepDecision({ view: { task_state: 'idle', queue_length: 0 } })
-  assert.equal(routed.route, 'replan')
-  assert.equal(routed.hierarchy_action, 'collapse_current_scope')
-  assert.equal(routed.fallback_reason, 'hierarchy_collapse_requested')
+  assert.equal(routed.route, 'continue_current')
+  assert.equal('hierarchy_action' in routed, false)
 })
 
 

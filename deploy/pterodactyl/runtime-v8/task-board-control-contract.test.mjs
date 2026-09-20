@@ -26,7 +26,7 @@ test('runtime accepts every Task Board control action declared by Autorio', asyn
   const source = await readFile(autorioTaskBoardUrl, 'utf8')
   const actions = declaredControlActions(source)
 
-  assert.deepEqual(actions, ['pause', 'terminate', 'follow', 'stop_follow', 'new_task'])
+  assert.deepEqual(actions, ['pause', 'terminate', 'follow', 'stop_follow', 'new_task', 'keep_paused', 'revise', 'cancel'])
   for (const action of actions) {
     assert.equal(parseUiControlLine(uiControlLine(action))?.action, action, `runtime rejected Autorio control action: ${action}`)
   }

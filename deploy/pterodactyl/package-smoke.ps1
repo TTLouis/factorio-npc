@@ -1,7 +1,15 @@
 param(
     [string]$Image = 'ghcr.io/ptero-eggs/yolks:debian_bookworm',
-    [string]$FactorioSmokeVersion = '2.0.77'
+    [string]$FactorioSmokeVersion = '2.0.77',
+    # Exact 40-character commit SHA to install, matching package-smoke.sh's
+    # SGLUNA_SMOKE_SOURCE_REF/AIRI_SMOKE_SOURCE_REF. Defaults to either env
+    # var, then to the egg's own default channel (normally main) when unset.
+    [string]$SourceRef = $(if ($env:SGLUNA_SMOKE_SOURCE_REF) { $env:SGLUNA_SMOKE_SOURCE_REF } else { $env:AIRI_SMOKE_SOURCE_REF })
 )
+
+if ($SourceRef -and $SourceRef -notmatch '^[a-f0-9]{40}$') {
+    throw 'SourceRef must be an exact 40-character commit SHA.'
+}
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -71,18 +79,20 @@ try {
         'bash', '/tmp/install.sh', '--verify-only'
     )
 
-    Write-Host '[pterodactyl-smoke] Performing clean installation through the egg loader.'
-    Invoke-Docker -Arguments @(
+    Write-Host "[pterodactyl-smoke] Performing clean installation through the egg loader.$(if ($SourceRef) { " Pinned source: $SourceRef" })"
+    $SourceRefArgs = if ($SourceRef) { @('-e', "SGLUNA_SOURCE_REF=$SourceRef") } else { @() }
+    Invoke-Docker -Arguments (@(
         'run', '--rm',
         '-v', "${EggInstallScript}:/tmp/egg-install.sh:ro",
         '-v', "${Volume}:/mnt/server",
         '-e', 'SGLUNA_INSTALL_ROOT=/mnt/server',
         '-e', 'SGLUNA_ACTOR_MODE=npc',
         '-e', 'SGLUNA_CHAT_PLAYERS=SmokeOperator',
-        '-e', "FACTORIO_VERSION=$FactorioSmokeVersion",
+        '-e', "FACTORIO_VERSION=$FactorioSmokeVersion"
+    ) + $SourceRefArgs + @(
         $Image,
         'bash', '/tmp/egg-install.sh'
-    )
+    ))
 
     Write-Host '[pterodactyl-smoke] Verifying installed release layout.'
     Invoke-Docker -Arguments @(

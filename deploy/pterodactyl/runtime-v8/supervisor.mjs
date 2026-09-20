@@ -34,7 +34,7 @@ import { configureNpcSession } from './supervisor-adapter.mjs'
 import { luaString } from './structured-policy.mjs'
 
 const UI_CONTROL_MARKER = '[AIRI_UI_CONTROL]'
-const UI_CONTROL_ACTIONS = new Set(['pause', 'terminate', 'follow', 'stop_follow', 'new_task'])
+const UI_CONTROL_ACTIONS = new Set(['pause', 'terminate', 'follow', 'stop_follow', 'new_task', 'keep_paused', 'revise', 'cancel'])
 const UI_PROMPT_MARKER = '[AIRI_UI_PROMPT]'
 const UI_PROMPT_MAX_CHARS = 4000
 const UI_INPUT_POLL_MS = 250
@@ -617,17 +617,18 @@ function emptyAgentDebug(fallback = {}) {
     decision_post_step_confidence_percent: 0,
     decision_post_step_latency_ms: 0,
     decision_post_step_fallback: '',
-    decision_granularity: '',
-    decision_granularity_confidence_percent: 0,
+    decision_scope_review: '',
+    decision_scope_review_confidence_percent: 0,
+    decision_scope_review_reason_codes: '',
+    decision_scope_review_actionable_prefix: 0,
     decision_development: '',
     decision_development_confidence_percent: 0,
+    decision_steering: '',
+    decision_steering_confidence_percent: 0,
     decision_reasoning_budget: '',
     decision_reasoning_confidence_percent: 0,
     decision_planning_horizon: '',
     decision_observation_budget: 0,
-    decision_milestone_transition: '',
-    decision_milestone_transition_confidence_percent: 0,
-    decision_hierarchy_action: '',
     decision_confidence_percent: 0,
     decision_queue_conflict_percent: 0,
     decision_latency_ms: 0,
@@ -677,17 +678,18 @@ function decisionDebugFields(value = {}) {
     decision_post_step_confidence_percent: debugInteger(value.decision_post_step_confidence_percent),
     decision_post_step_latency_ms: debugInteger(value.decision_post_step_latency_ms),
     decision_post_step_fallback: uiText(value.decision_post_step_fallback, 300),
-    decision_granularity: uiText(value.decision_granularity, 32),
-    decision_granularity_confidence_percent: debugInteger(value.decision_granularity_confidence_percent),
+    decision_scope_review: uiText(value.decision_scope_review, 32),
+    decision_scope_review_confidence_percent: debugInteger(value.decision_scope_review_confidence_percent),
+    decision_scope_review_reason_codes: uiText(value.decision_scope_review_reason_codes, 300),
+    decision_scope_review_actionable_prefix: debugInteger(value.decision_scope_review_actionable_prefix),
     decision_development: uiText(value.decision_development, 32),
     decision_development_confidence_percent: debugInteger(value.decision_development_confidence_percent),
+    decision_steering: uiText(value.decision_steering, 32),
+    decision_steering_confidence_percent: debugInteger(value.decision_steering_confidence_percent),
     decision_reasoning_budget: uiText(value.decision_reasoning_budget, 32),
     decision_reasoning_confidence_percent: debugInteger(value.decision_reasoning_confidence_percent),
     decision_planning_horizon: uiText(value.decision_planning_horizon, 32),
     decision_observation_budget: debugInteger(value.decision_observation_budget),
-    decision_milestone_transition: uiText(value.decision_milestone_transition, 48),
-    decision_milestone_transition_confidence_percent: debugInteger(value.decision_milestone_transition_confidence_percent),
-    decision_hierarchy_action: uiText(value.decision_hierarchy_action, 80),
     decision_confidence_percent: debugInteger(value.decision_confidence_percent),
     decision_queue_conflict_percent: debugInteger(value.decision_queue_conflict_percent),
     decision_latency_ms: debugInteger(value.decision_latency_ms),
@@ -829,9 +831,9 @@ export function liveAgentDebugEvent(event, data = {}, previous = {}, fallback = 
       debug.decision_shadow_intent = uiText(shadow.intent, 80)
       debug.decision_active_intent = uiText(data.intent, 80)
       debug.decision_confidence_percent = decisionPercent(shadow.intent_confidence)
-      if (shadow.granularity) {
-        debug.decision_granularity = uiText(shadow.granularity, 32)
-        debug.decision_granularity_confidence_percent = decisionPercent(shadow.granularity_confidence)
+      if (shadow.development) {
+        debug.decision_development = uiText(shadow.development, 32)
+        debug.decision_development_confidence_percent = decisionPercent(shadow.development_confidence)
       }
       debug.decision_queue_conflict_percent = decisionPercent(shadow.queue_conflict_probability)
       debug.decision_latency_ms = debugInteger(data.decision_shadow_latency_ms)
@@ -864,24 +866,38 @@ export function liveAgentDebugEvent(event, data = {}, previous = {}, fallback = 
       debug.decision_provider = uiText(decision.provider, 80)
       debug.decision_model = uiText(decision.model, 160)
       debug.decision_post_step_confidence_percent = decisionPercent(decision.confidence)
-      const hierarchy = decision.hierarchy && typeof decision.hierarchy === 'object' ? decision.hierarchy : undefined
-      const milestoneTransition = decision.milestone_transition && typeof decision.milestone_transition === 'object'
-        ? decision.milestone_transition
+      // Jev families after the planning refactor: a pre-commit scope review
+      // (parseScopeReview) and advisory boundary steering
+      // (parseSteeringRecommendation / parseBoundarySteeringTelemetry).
+      const scopeReview = decision.scope_review && typeof decision.scope_review === 'object'
+        ? decision.scope_review
         : undefined
-      if (milestoneTransition) {
-        debug.decision_milestone_transition = uiText(milestoneTransition.decision, 48)
-        debug.decision_milestone_transition_confidence_percent = decisionPercent(milestoneTransition.confidence)
+      if (scopeReview) {
+        debug.decision_scope_review = uiText(scopeReview.verdict, 32)
+        debug.decision_scope_review_confidence_percent = decisionPercent(scopeReview.confidence)
+        debug.decision_scope_review_reason_codes = uiText(
+          (Array.isArray(scopeReview.reason_codes) ? scopeReview.reason_codes : []).join(','),
+          300,
+        )
+        debug.decision_scope_review_actionable_prefix = debugInteger(scopeReview.actionable_prefix)
       }
-      debug.decision_hierarchy_action = uiText(data.hierarchy_action, 80)
-      if (hierarchy) {
-        debug.decision_granularity = uiText(hierarchy.granularity, 32)
-        debug.decision_granularity_confidence_percent = decisionPercent(hierarchy.granularity_confidence)
-        debug.decision_development = uiText(hierarchy.development, 32)
-        debug.decision_development_confidence_percent = decisionPercent(hierarchy.development_confidence)
-        debug.decision_reasoning_budget = uiText(hierarchy.reasoning_budget, 32)
-        debug.decision_reasoning_confidence_percent = decisionPercent(hierarchy.reasoning_confidence)
-        debug.decision_planning_horizon = uiText(hierarchy.planning_horizon, 32)
-        debug.decision_observation_budget = debugInteger(hierarchy.observation_budget)
+      const steeringRecommendation = decision.steering && typeof decision.steering === 'object'
+        ? decision.steering
+        : undefined
+      if (steeringRecommendation) {
+        debug.decision_steering = uiText(steeringRecommendation.recommended_mode, 32)
+        debug.decision_steering_confidence_percent = decisionPercent(steeringRecommendation.confidence)
+      }
+      const steering = decision.boundary_steering && typeof decision.boundary_steering === 'object'
+        ? decision.boundary_steering
+        : undefined
+      if (steering) {
+        debug.decision_development = uiText(steering.development, 32)
+        debug.decision_development_confidence_percent = decisionPercent(steering.development_confidence)
+        debug.decision_reasoning_budget = uiText(steering.reasoning_budget, 32)
+        debug.decision_reasoning_confidence_percent = decisionPercent(steering.reasoning_confidence)
+        debug.decision_planning_horizon = uiText(steering.planning_horizon, 32)
+        debug.decision_observation_budget = debugInteger(steering.observation_budget)
       }
       const decisionInput = debugInteger(decision.usage?.input_tokens)
       const decisionOutput = debugInteger(decision.usage?.output_tokens)
@@ -1123,35 +1139,9 @@ export function taskBoardUiSnapshot(state, live) {
   }
   const blocker = formatTaskCondition(board.blocker, 'blocker')
   const pauseReason = formatTaskCondition(board.pause_reason, 'pause')
-  const project = state?.project_board?.kind === 'project_board_v1'
-    ? {
-        kind: 'project_board_v1',
-        project_id: uiText(state.project_board.project_id, 100),
-        title: uiText(state.project_board.title, 500),
-        status: uiText(state.project_board.status, 32),
-        completed_milestones: (Array.isArray(state.project_board.completed_milestones) ? state.project_board.completed_milestones : []).slice(-12).map(item => ({
-          id: uiText(item?.id, 100),
-          title: uiText(item?.title, 500),
-        })),
-        current_milestone: state.project_board.current_milestone
-          ? {
-              id: uiText(state.project_board.current_milestone.id, 100),
-              title: uiText(state.project_board.current_milestone.title, 500),
-              completion_summary: uiText(state.project_board.current_milestone.completion_summary, 800),
-            }
-          : undefined,
-        next_milestones: (Array.isArray(state.project_board.next_milestones) ? state.project_board.next_milestones : []).slice(0, 3).map(item => ({
-          id: uiText(item?.id, 100),
-          title: uiText(item?.title, 500),
-        })),
-        development_direction: uiText(state.project_board.development_direction, 32),
-        transition_state: uiText(state.project_board.transition_state, 48),
-      }
-    : undefined
   return {
     goal_id: String(board.goal_id ?? state.goal_id ?? '').slice(0, 100),
     objective: String(state.objective ?? '').slice(0, 500),
-    project,
     status: board.status,
     blocker: blocker.raw,
     blocker_summary: blocker.summary,
@@ -1291,6 +1281,40 @@ export async function finalizeCompletedTaskBoundary(session, result) {
 export async function executeUiControl(session, event) {
   if (!session?.rcon || !session?.agent) return false
 
+  if (event.action === 'keep_paused') {
+    // BLOCKED is already a durable freeze. Do not relabel it PAUSED or ask the
+    // model to recover it; this is an explicit acknowledgement only.
+    const state = session.currentPlanState?.()
+    if (state?.status !== 'blocked') return false
+    await stopWorldWork(session)
+    await session.syncTaskBoardUi(state)
+    await session.printChat('Kept the blocked AIRI plan frozen. No replanning or world work will start until you explicitly revise it or cancel it.')
+    return true
+  }
+
+  if (event.action === 'revise') {
+    // A click opens the user-controlled revision path, but contains no goals
+    // or constraints from which the runtime may fabricate a successor plan.
+    const state = session.currentPlanState?.()
+    if (state?.status !== 'blocked') return false
+    await stopWorldWork(session)
+    await session.syncTaskBoardUi(state)
+    await session.printChat('The blocked plan remains frozen. Enter the revised goal or constraints in the Task Board prompt; AIRI will not replace this plan until you explicitly provide that revision.')
+    return true
+  }
+
+  if (event.action === 'cancel') {
+    // The control acknowledges the cancellation choice and makes the world
+    // safe, but preserves the existing two-click TERMINATE confirmation for
+    // irreversible durable-plan deletion.
+    const state = session.currentPlanState?.()
+    if (state?.status !== 'blocked') return false
+    await stopWorldWork(session)
+    await session.syncTaskBoardUi(state)
+    await session.printChat('Cancellation selected. The blocked plan remains frozen until you confirm TERMINATE in the Task Board.')
+    return true
+  }
+
   if (event.action === 'pause') {
     const state = await pausePlanIfPresent(session, 'ui_pause')
     await stopWorldWork(session)
@@ -1350,14 +1374,6 @@ function providerRecoveryExhausted(message) {
   return /^Provider response recovery exhausted after \d+ attempts:/.test(String(message))
 }
 
-export function hierarchyTransitionPending(state) {
-  return Boolean(
-    state?.hierarchy_split_pending
-    || state?.milestone_transition_pending === true
-    || state?.milestone_plan_pending === true
-  )
-}
-
 export function shouldRecoverInterruptedPlan(state) {
   if (!state || state.status === 'completed' || state.status === 'blocked') return false
   if (state.status === 'active') return true
@@ -1377,10 +1393,6 @@ export async function pauseStrandedPlanAfterRequestError(session, message) {
   const state = session?.currentPlanState?.()
   if (!agent || state?.status !== 'active') return undefined
   if (state.condition_wait?.state === 'active') return undefined
-  // Structural hierarchy work is already represented durably. A provider
-  // exception while Autorio is idle must not relabel that transaction as a
-  // paused task; leave it active so continue/restart can resume the same split.
-  if (hierarchyTransitionPending(state)) return undefined
 
   let runtime
   try {
@@ -1433,23 +1445,14 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}) {
   const epoch = await agent.captureEpoch()
   const memoryContext = agent.memory?.context?.(key) ?? ''
   const recoveryDetails = JSON.stringify(details ?? {}).slice(0, 2000)
-  const pendingSplit = state.hierarchy_split_pending
-  const pendingMilestonePlan = state.milestone_plan_pending === true && state.project_board?.current_milestone
-  const structuralRecovery = Boolean(pendingSplit || pendingMilestonePlan)
-  const recoveryMessage = pendingSplit
-    ? `[HARNESS] Resume the durably pending hierarchy split after ${uiText(reason, 120)}. Do not continue the old flat Plan Tracker and do not mutate the world until you return a bounded project.currentMilestone plus a milestone-local plan. Preserve the user project goal and verified history. Recovery details: ${recoveryDetails}`
-    : pendingMilestonePlan
-      ? `[HARNESS] Resume planning for the already activated current milestone after ${uiText(reason, 120)}. Preserve that milestone identity and write its bounded milestone-local Plan Tracker before new world mutation. Recovery details: ${recoveryDetails}`
-      : `[HARNESS] Runtime recovery after ${uiText(reason, 120)}. The previous finite Autorio task queue was discarded and its last operation MUST NOT be assumed complete. Re-observe the mutable Factorio state required for the canonical current Task Board step before choosing any world mutation. Preserve the existing goal and completed Task Board prefix. If the current step is already satisfied, verify it and advance; if work remains, submit only the minimum deterministic operations needed to continue. Never blindly replay last_operations. Recovery details: ${recoveryDetails}`
+  const recoveryMessage = `[HARNESS] Runtime recovery after ${uiText(reason, 120)}. The previous finite Autorio task queue was discarded and its last operation MUST NOT be assumed complete. Re-observe the mutable Factorio state required for the canonical current Task Board step before choosing any world mutation. Preserve the existing goal and completed Task Board prefix. If the current step is already satisfied, verify it and advance; if work remains, submit only the minimum deterministic operations needed to continue. Never blindly replay last_operations. Recovery details: ${recoveryDetails}`
 
   agent.epoch = epoch
   agent.lastMemoryKey = key
-  agent.planUpdateReason = structuralRecovery ? 'reanchor_plan' : 'recovery'
-  agent.reasoningTriggerSource = pendingSplit
-    ? 'hierarchy_split'
-    : pendingMilestonePlan
-      ? 'hierarchy_advance'
-      : null
+  // Ordinary runtime recovery only. This path has never had replan authority:
+  // it re-observes the world and continues the committed plan.
+  agent.planUpdateReason = 'recovery'
+  agent.reasoningTriggerSource = null
   agent.baseMessages = [
     { role: 'system', content: agent.systemPrompt },
     ...(memoryContext ? [{ role: 'user', content: memoryContext }] : []),
@@ -1468,12 +1471,6 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}) {
   const previousObservationBudget = agent.observationBudgetOverride
   const previousObservationBudgetRemaining = agent.observationBudgetRemaining
   const previousPlanningHorizon = agent.planningHorizonOverride
-  if (pendingSplit) {
-    agent.reasoningBudgetOverride = pendingSplit.reasoning_budget ?? 'deep'
-    agent.observationBudgetOverride = Number.isSafeInteger(pendingSplit.observation_budget) ? pendingSplit.observation_budget : 0
-    agent.observationBudgetRemaining = agent.observationBudgetOverride
-    agent.planningHorizonOverride = pendingSplit.planning_horizon ?? 'subgoal'
-  }
   if (typeof agent.traceEvent === 'function') {
     agent.traceRequest = { id: `recovery_${Date.now().toString(36)}`, seq: 0 }
     await agent.traceEvent('runtime.recovery_started', { reason, details })
@@ -1489,6 +1486,7 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}) {
     agent.planningHorizonOverride = previousPlanningHorizon
   }
 }
+
 
 export class Session {
   constructor({ root, app, game, config, save, settingsFile, modDir, ini, rcon = rconConfiguration(), log = console.log, provider = providerRequest, startupMs = 120000 }) {
@@ -1786,12 +1784,6 @@ export class Session {
     catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       this.log(`Interrupted plan recovery failed after ${reason}: ${message}`)
-      const current = this.currentPlanState()
-      if (hierarchyTransitionPending(current)) {
-        await this.syncTaskBoardUi(current)
-        await this.printChat(`The hierarchy transition is still pending after ${reason}; I preserved it instead of pausing or reverting to the old flat plan. ${message}`)
-        return null
-      }
       const paused = typeof this.agent.pausePersistentPlan === 'function'
         ? await this.agent.pausePersistentPlan(`runtime_recovery_failed:${uiText(reason, 80)}:${uiText(message, 180)}`)
         : undefined
@@ -2061,30 +2053,21 @@ export class Session {
     this.eventQueue = this.eventQueue.then(fn).catch(async error => {
       const message = error instanceof Error ? error.message : String(error)
       this.log(message)
-      let structuralRecoveryHandled = false
       if (reportError && !expectedCancellation(error) && this.agent) {
         try {
-          const current = this.currentPlanState()
-          if (current?.status === 'active' && hierarchyTransitionPending(current)) {
-            structuralRecoveryHandled = true
-            const recovered = await this.recoverInterruptedPlan('request_failure', { message })
-            if (recovered) this.log('Resumed pending hierarchy transition after request failure')
-          }
-          else {
-            const state = await pauseStrandedPlanAfterRequestError(this, message)
-            if (state) this.log('Canonical Task Board paused after a failed request left Autorio idle')
-            else if (providerRecoveryExhausted(message)) {
-              // Preserve the old diagnostic signal without blindly pausing if
-              // Autorio status is unknown or still owns live world work.
-              this.log('Provider recovery exhausted; durable task was not auto-paused because Autorio was not authoritatively idle')
-            }
+          const state = await pauseStrandedPlanAfterRequestError(this, message)
+          if (state) this.log('Canonical Task Board paused after a failed request left Autorio idle')
+          else if (providerRecoveryExhausted(message)) {
+            // Preserve the old diagnostic signal without blindly pausing if
+            // Autorio status is unknown or still owns live world work.
+            this.log('Provider recovery exhausted; durable task was not auto-paused because Autorio was not authoritatively idle')
           }
         }
         catch (pauseError) {
           this.log(`Unable to reconcile Task Board after request failure: ${pauseError instanceof Error ? pauseError.message : pauseError}`)
         }
       }
-      if (reportError && !expectedCancellation(error) && !structuralRecoveryHandled) {
+      if (reportError && !expectedCancellation(error)) {
         try { await this.printChat(`Request failed: ${message}`) }
         catch (printError) { this.log(`Unable to report AIRI error in chat: ${printError instanceof Error ? printError.message : printError}`) }
       }

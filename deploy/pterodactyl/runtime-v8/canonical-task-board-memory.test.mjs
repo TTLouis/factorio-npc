@@ -554,263 +554,36 @@ test('replan keeps every unverified remaining step even when proposed currentSte
 })
 
 
-test('canonical memory persists project and milestone hierarchy across restore', () => {
-  const memory = new CanonicalTaskBoardMemory()
-  memory.planByNpc.set('npc:airi', planState())
-  memory.updateProjectBoard('npc:airi', {
-    current_milestone: { id: 'bootstrap', title: 'Establish burner production', completion_summary: 'Stable early production is available.' },
-    next_milestones: [{ id: 'automation', title: 'Reach Automation' }, { id: 'power', title: 'Establish electric power' }],
-    development_direction: 'vertical',
-  })
-  const snapshot = memory.snapshot()
-  const restored = new CanonicalTaskBoardMemory()
-  restored.restore(snapshot)
-  const state = restored.currentPlan('npc:airi')
-  assert.equal(state.project_board.project_id, 'goal_1')
-  assert.equal(state.project_board.title, 'Build early automation')
-  assert.equal(state.project_board.current_milestone.title, 'Establish burner production')
-  assert.deepEqual(state.project_board.next_milestones.map(item => item.title), ['Reach Automation', 'Establish electric power'])
-  assert.equal(state.project_board.development_direction, 'vertical')
-  assert.match(restored.planContext('npc:airi'), /\[PROJECT_STATE\]/)
+test('canonical task memory exposes no project or milestone hierarchy control API', () => {
+  const forbidden = Object.getOwnPropertyNames(CanonicalTaskBoardMemory.prototype)
+    .filter(name => /project|milestone|hierarchy/i.test(name))
+  assert.deepEqual(forbidden, [])
 })
 
-test('project status follows durable goal lifecycle authority', () => {
-  const memory = new CanonicalTaskBoardMemory()
-  memory.planByNpc.set('npc:airi', planState())
-  memory.currentPlan('npc:airi')
-  memory.pausePlan('npc:airi', 'user_pause')
-  assert.equal(memory.planByNpc.get('npc:airi').project_board.status, 'paused')
-})
-
-
-test('final Plan Tracker step completes the milestone without completing the long-horizon project', () => {
-  const memory = new CanonicalTaskBoardMemory()
-  const oneStepBoard = createTaskBoard(['Establish burner production'], 0, { goalId: 'goal_long', now: 1 })
-  memory.planByNpc.set('npc:airi', planState({
-    goal_id: 'goal_long',
-    objective: 'Launch a rocket',
-    plan: ['Establish burner production'],
-    current_step: 0,
-    task_board: oneStepBoard,
-    project_board: {
-      kind: 'project_board_v1',
-      project_id: 'goal_long',
-      title: 'Launch a rocket',
-      status: 'active',
-      completed_milestones: [],
-      current_milestone: { title: 'Establish burner production', status: 'active' },
-      next_milestones: [{ title: 'Reach Automation', status: 'tentative' }],
-      development_direction: 'vertical',
-      transition_state: '',
-      revision: 1,
-      updated_at: 1,
-    },
-  }))
-
-  const result = memory.applyOutcomeAuthority('npc:airi', {
-    kind: 'verified_complete',
-    source: 'step_checkpoint_gate',
-    reason_code: 'checkpoint_satisfied',
-    evidence: [{ kind: 'deterministic_verification', ref: 'milestone-final', summary: 'verified' }],
-    metadata: { scope: 'step' },
-  })
-
-  assert.equal(result.decision.accepted, true)
-  assert.equal(result.milestoneCompleted, true)
-  assert.equal(result.state.status, 'active')
-  assert.equal(result.state.project_board.current_milestone, undefined)
-  assert.equal(result.state.project_board.completed_milestones.at(-1).title, 'Establish burner production')
-  assert.equal(result.state.project_board.transition_state, 'awaiting_next_milestone')
-  assert.equal(memory.currentPlan('npc:airi').goal_id, 'goal_long')
-})
-
-test('activating a tentative next milestone resets the Plan Tracker for a fresh milestone plan', () => {
-  const memory = new CanonicalTaskBoardMemory()
-  const state = planState({
-    goal_id: 'goal_long',
-    objective: 'Launch a rocket',
-    project_board: {
-      kind: 'project_board_v1',
-      project_id: 'goal_long',
-      title: 'Launch a rocket',
-      status: 'active',
-      completed_milestones: [{ title: 'Establish burner production', status: 'completed' }],
-      current_milestone: undefined,
-      next_milestones: [{ title: 'Reach Automation', status: 'tentative' }],
-      development_direction: 'vertical',
-      transition_state: 'awaiting_next_milestone',
-      revision: 2,
-      updated_at: 2,
-    },
-  })
-  memory.planByNpc.set('npc:airi', state)
-  const advanced = memory.activateNextMilestone('npc:airi')
-  assert.equal(advanced.changed, true)
-  assert.equal(advanced.state.project_board.current_milestone.title, 'Reach Automation')
-  assert.equal(advanced.state.project_board.transition_state, 'awaiting_milestone_plan')
-  assert.equal(advanced.state.task_board.total_steps, 0)
-  assert.equal(advanced.state.plan.length, 0)
-})
-
-
-test('activated next milestone stays pending until a fresh milestone-local plan is committed', () => {
-  const memory = new CanonicalTaskBoardMemory()
-  const key = 'npc:airi'
-  memory.planByNpc.set(key, planState({
-    goal_id: 'goal_long',
-    objective: 'Launch a rocket',
-    plan: [],
-    current_step: 0,
-    task_board: createTaskBoard([], 0, { goalId: 'goal_long', now: 1 }),
-    project_board: {
-      kind: 'project_board_v1',
-      project_id: 'goal_long',
-      title: 'Launch a rocket',
-      status: 'active',
-      completed_milestones: [{ title: 'Establish burner production', status: 'completed' }],
-      current_milestone: undefined,
-      next_milestones: [{ title: 'Reach Automation', status: 'tentative' }],
-      development_direction: 'vertical',
-      transition_state: 'awaiting_next_milestone',
-      revision: 2,
-      updated_at: 1,
-    },
-  }))
-
-  const advanced = memory.activateNextMilestone(key)
-  assert.equal(advanced.changed, true)
-  assert.equal(advanced.state.project_board.current_milestone.title, 'Reach Automation')
-  assert.equal(advanced.state.project_board.transition_state, 'awaiting_milestone_plan')
-  assert.equal(advanced.state.task_board.steps.length, 0)
-
+test('a blocked continuation is frozen even when a caller requests a replan', () => {
+  const frozen = { ...board(), status: 'blocked', blocker: 'world_geometry_unresolved' }
   const proposal = {
-    chatMessage: 'Planning Automation.',
-    plan: ['Prepare science production', 'Research Automation'],
-    currentStep: 0,
-    operations: [],
+    plan: ['Find stone', 'Use a different patch'],
+    currentStep: 1,
+    operations: [{ name: 'mine_resource', args: { resource_name: 'stone' } }],
   }
-  const previous = memory.currentPlan(key)
-  const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'continue' }, proposal, { continuation: true })
-  const reconciled = memory.reconcileTaskBoard(key, previous.task_board, proposal, recorded, {
-    previousState: previous,
-    allowReplan: true,
-    newMilestone: true,
-  })
-  assert.equal(reconciled.state.project_board.transition_state, '')
-  assert.equal(reconciled.state.task_board.steps.length, 2)
-  assert.equal(reconciled.state.project_board.current_milestone.title, 'Reach Automation')
+  const guarded = canonicalContinuationPlan(frozen, proposal, { allowReplan: true })
+  assert.deepEqual(guarded.plan, board().steps.map(step => step.description))
+  assert.equal(guarded.currentStep, frozen.active_index)
+  assert.deepEqual(guarded.operations, [])
 })
 
-
-test('planner cannot silently replace an already-activated next milestone', () => {
+test('blocked reconciliation cannot create a suffix-replacement or no-op loop', () => {
   const memory = new CanonicalTaskBoardMemory()
   const key = 'npc:airi'
-  memory.planByNpc.set(key, planState({
-    goal_id: 'goal_long',
-    objective: 'Launch a rocket',
-    project_board: {
-      kind: 'project_board_v1',
-      project_id: 'goal_long',
-      title: 'Launch a rocket',
-      status: 'active',
-      completed_milestones: [{ title: 'Establish burner production', status: 'completed' }],
-      current_milestone: { id: 'automation', title: 'Reach Automation', status: 'active' },
-      next_milestones: [{ title: 'Establish electric power', status: 'tentative' }],
-      development_direction: 'vertical',
-      transition_state: '',
-      revision: 3,
-      updated_at: 1,
-    },
-  }))
-
-  const updated = memory.updateProjectBoard(key, {
-    current_milestone: { title: 'Skip ahead to oil processing' },
-    next_milestones: [{ title: 'Automate red and green science' }],
-    development_direction: 'vertical',
-  }, { preserveCurrentMilestone: true })
-
-  assert.equal(updated.current_milestone.title, 'Reach Automation')
-  assert.deepEqual(updated.next_milestones.map(item => item.title), ['Automate red and green science'])
-})
-
-
-test('hierarchy split transaction survives persistence and stays in model context', () => {
-  const memory = new CanonicalTaskBoardMemory()
-  memory.planByNpc.set('npc:airi', planState())
-  memory.markHierarchySplitPending('npc:airi', {
-    reason_code: 'hierarchy_split_requested',
-    reasoning_budget: 'deep',
-    planning_horizon: 'subgoal',
-    observation_budget: 2,
-  })
-
-  const snapshot = memory.snapshot()
-  const restored = new CanonicalTaskBoardMemory()
-  restored.restore(snapshot)
-  const state = restored.currentPlan('npc:airi')
-
-  assert.equal(state.hierarchy_split_pending.kind, 'split_current_milestone')
-  assert.equal(state.hierarchy_split_pending.reasoning_budget, 'deep')
-  assert.equal(state.hierarchy_split_pending.observation_budget, 2)
-  assert.match(restored.planContext('npc:airi'), /\[HIERARCHY_TRANSITION\]/)
-  assert.match(restored.planContext('npc:airi'), /Do not continue the old flat Plan Tracker/)
-})
-
-
-test('legacy milestone pending flags migrate into the canonical project transition state', () => {
-  const memory = new CanonicalTaskBoardMemory()
-  memory.planByNpc.set('npc:airi', planState({
-    project_board: {
-      kind: 'project_board_v1',
-      project_id: 'goal_test',
-      title: 'Long project',
-      status: 'active',
-      completed_milestones: [],
-      current_milestone: { title: 'Reach Automation', status: 'active' },
-      next_milestones: [],
-      development_direction: 'vertical',
-      transition_state: '',
-      revision: 1,
-      updated_at: 1,
-    },
-    milestone_plan_pending: true,
-  }))
-
-  const snapshot = memory.snapshot()
-  const restored = new CanonicalTaskBoardMemory()
-  restored.restore(snapshot)
-  const state = restored.currentPlan('npc:airi')
-
-  assert.equal(state.project_board.transition_state, 'awaiting_milestone_plan')
-  assert.equal(state.milestone_transition_pending, undefined)
-  assert.equal(state.milestone_plan_pending, undefined)
-  assert.match(restored.planContext('npc:airi'), /\[MILESTONE_PLAN_TRANSITION\]/)
-})
-
-
-test('initial project split transaction survives persistence', () => {
-  const memory = new CanonicalTaskBoardMemory()
-  memory.beginHierarchyGoal('npc:airi', {
-    sender: 'tester',
-    text: 'Reach Automation',
-  }, {
-    reasoning_budget: 'strategic',
-    planning_horizon: 'strategic',
-    observation_budget: 3,
-  })
-
-  const snapshot = memory.snapshot()
-  const restored = new CanonicalTaskBoardMemory()
-  restored.restore(snapshot)
-  const state = restored.currentPlan('npc:airi')
-
-  assert.equal(state.status, 'active')
-  assert.equal(state.objective, 'Reach Automation')
-  assert.equal(state.hierarchy_split_pending.kind, 'split_project_goal')
-  assert.equal(state.hierarchy_split_pending.reasoning_budget, 'strategic')
-  assert.equal(state.hierarchy_split_pending.planning_horizon, 'strategic')
-  assert.equal(state.hierarchy_split_pending.observation_budget, 3)
-  assert.match(restored.planContext('npc:airi'), /HIERARCHY_TRANSITION/)
+  const frozen = { ...board(), status: 'blocked', blocker: 'world_geometry_unresolved' }
+  memory.planByNpc.set(key, planState({ status: 'blocked', blocker: frozen.blocker, task_board: frozen }))
+  const proposal = { plan: ['Find stone', 'Use a different patch'], currentStep: 1, operations: [{ name: 'wait', args: { ticks: 1 } }] }
+  const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'continue' }, proposal, { continuation: true })
+  const reconciled = memory.reconcileTaskBoard(key, frozen, proposal, recorded, { allowReplan: true })
+  assert.equal(reconciled.state.status, 'blocked')
+  assert.deepEqual(reconciled.state.task_board.steps.map(step => step.description), board().steps.map(step => step.description))
+  assert.equal(reconciled.state.task_board.revision, frozen.revision)
 })
 
 

@@ -666,7 +666,11 @@ export function reconcileTaskBoard(board, plan, currentStep, { now = Date.now(),
     })
   }
 
-  if ((allowReplan || taskBoardCompletedPrefixMatches(board, incoming)) && incomingActive && normalizeTaskBoardStep(incomingActive) !== normalizeTaskBoardStep(board.steps[currentIndex]?.description)) {
+  // Matching a completed prefix is not authority to replace the remaining
+  // committed suffix. That legacy shortcut created an automatic replan/no-op
+  // loop after recoverable failures. Callers must carry explicit user-revision
+  // authority before allowing a replacement.
+  if (allowReplan && incomingActive && normalizeTaskBoardStep(incomingActive) !== normalizeTaskBoardStep(board.steps[currentIndex]?.description)) {
     return replanTaskBoardRemaining(board, incoming, incomingIndex, now)
   }
 

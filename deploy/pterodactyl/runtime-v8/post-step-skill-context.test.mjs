@@ -278,7 +278,6 @@ test('post-step Jev receives a bounded grounded gate state instead of dialogue h
   assert.equal(Object.prototype.hasOwnProperty.call(captured.state, 'dialogue'), false)
   assert.deepEqual(Object.keys(captured.questions), [
     'route',
-    'granularity',
     'development',
     'reasoning_budget',
     'planning_horizon',

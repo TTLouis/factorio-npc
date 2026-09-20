@@ -10,16 +10,12 @@ import {
   taskBoardProgress,
 } from './common.mjs'
 import { executeAuthorizedBatch } from './supervisor-adapter.mjs'
-import { parseProjectProposal } from './project-board.mjs'
 import {
+  boundarySteeringGate,
   decisionEnvelopeQuestions,
   developmentDecisionQuestions,
-  granularityDecisionQuestions,
-  hierarchyRuntimeGate,
-  milestoneTransitionDecisionQuestions,
+  parseBoundarySteeringTelemetry,
   parseDecisionFamily,
-  parseHierarchyTelemetry,
-  parseMilestoneTransitionDecision,
 } from './jev-decision-taxonomy.mjs'
 import { isLifecycleMetaStep, normalizeCanonicalPlan, validateOutcomeCandidate } from './outcome-authority.mjs'
 import { RECOVERY_SEMANTIC_SCOPES, parseRecoveryDecision, recoveryDecisionQuestions, recoveryFailureClassHint, validateRecoveryRoute } from './recovery-route.mjs'
@@ -75,14 +71,10 @@ const EXACT_ENTITY_TARGET_OPERATIONS = new Set([
 
 const JEV_PIPELINE_RUNTIME_GUARDS = [
   ['decisionEnvelopeQuestions', typeof decisionEnvelopeQuestions],
-  ['granularityDecisionQuestions', typeof granularityDecisionQuestions],
   ['developmentDecisionQuestions', typeof developmentDecisionQuestions],
-  ['hierarchyRuntimeGate', typeof hierarchyRuntimeGate],
+  ['boundarySteeringGate', typeof boundarySteeringGate],
   ['parseDecisionFamily', typeof parseDecisionFamily],
-  ['parseHierarchyTelemetry', typeof parseHierarchyTelemetry],
-  ['milestoneTransitionDecisionQuestions', typeof milestoneTransitionDecisionQuestions],
-  ['parseMilestoneTransitionDecision', typeof parseMilestoneTransitionDecision],
-  ['parseProjectProposal', typeof parseProjectProposal],
+  ['parseBoundarySteeringTelemetry', typeof parseBoundarySteeringTelemetry],
   ['completionContractSupported', typeof completionContractSupported],
   ['sanitizeStepCompletionContract', typeof sanitizeStepCompletionContract],
   ['plannerControlPayloadFromMessage', typeof plannerControlPayloadFromMessage],
@@ -96,9 +88,9 @@ const DURABLE_PLAN_PROMPT = `
 
 ### Planner submission protocol
 
-When tools are available, prefer the submitPlan control tool for the planner decision instead of serializing the whole decision as assistant JSON content. Your normal assistant content may be concise natural-language text for the human. Put canonical plan/currentStep/operations plus optional checkpoint/project proposals in submitPlan.
+When tools are available, prefer the submitPlan control tool for the planner decision instead of serializing the whole decision as assistant JSON content. Your normal assistant content may be concise natural-language text for the human. Put canonical plan/currentStep/operations plus an optional checkpoint proposal in submitPlan.
 
-submitPlan is a proposal boundary, not execution authority: Jev checks semantic alignment, the harness validates checkpoint/project shapes, Outcome Authority owns durable completion/blocking truth, and Autorio validates mutations before admission. Do not mix submitPlan with observation tool calls in the same assistant message. Observe first when needed, then submit one control decision.
+submitPlan is a proposal boundary, not execution authority: Jev checks semantic alignment, the harness validates the checkpoint shape, Outcome Authority owns durable completion/blocking truth, and Autorio validates mutations before admission. Do not mix submitPlan with observation tool calls in the same assistant message. Observe first when needed, then submit one control decision.
 
 Strict JSON assistant content is retained only as a compatibility/fallback path, especially when tools are disabled during bounded recovery. It is no longer the preferred normal-path protocol.
 
@@ -108,11 +100,11 @@ The task_board field is the canonical single-NPC Task Board Lite. Its stable ste
 
 For a multi-step request, keep the plan stable enough that the harness can track progress across Autorio batches. currentStep must identify the step you are actually executing or verifying now. If you replan, preserve already-completed intent instead of silently replacing the whole task with a vague new one.
 
-For a genuinely long-horizon goal, you may add one optional root field named project beside chatMessage/plan/currentStep/operations. project must be {"currentMilestone":{"title":"...","completionSummary":"..."},"nextMilestones":[{"title":"...","completionSummary":"..."}],"developmentDirection":"vertical|horizontal|maintain|recover"}. Keep exactly one current milestone and at most three tentative next milestones. The user goal itself is harness-owned and must not be rewritten in project. currentMilestone is a bounded strategic outcome above the Plan Tracker; plan contains only the steps for that current milestone. For short tasks, omit project. During ordinary continuation of an unchanged milestone, prefer omitting project and reuse [PROJECT_STATE] instead of restating or reshuffling future milestones.
+Once a plan is COMMITTED its steps, their order and their completion meaning are frozen — frozen against you as well as against Jev. From that point you are fulfilling committed step checkpoints, not authoring them. Re-proposing different steps during ordinary continuation changes nothing; the committed plan is what runs. A committed plan is replaced only by an explicit user-approved revision, and a structural blocker or detected deadlock freezes it as BLOCKED and asks the user rather than silently replanning.
 
-Vertical means removing a blocker on the active milestone's critical path. Horizontal means strengthening an already-viable capability for throughput, resilience, logistics, buffers, or future scale. Do not classify by building type or research type alone.
+The [PLANNING_STATE] message carries the durable Goal, the Roadmap Shelf and the committed Plan. Shelf nodes are storage: they record intent and lineage, never operations and never plan steps. Do not compile a shelf node into steps on your own initiative.
 
-For the active Plan Tracker step, you may add one optional root field named checkpoint beside project/chatMessage/plan/currentStep/operations. checkpoint is a semantic completion proposal for Jev to judge and runtime to verify, not a claim that the step is already done. It must use a runtime-supported contract: {"mode":"all|any","requirements":[...]} with requirement kinds inventory_count, entity_inventory_count, entity_exists, entity_state, authoritative_operation_receipt, or runtime_controller_state. Prefer world-state outcomes over action occurrence. Example: if the step means "have 100 stone" and the next operation only gathers 40 more because 62 are already held, checkpoint must say inventory_count stone >= 100, not >= 40. The operation batch describes what to do next; checkpoint describes what would prove the semantic step complete. Jev may keep the step open or request a split even when you propose a checkpoint, and runtime remains completion authority. Omit checkpoint when no safe deterministic predicate represents the step.
+For the active Plan Tracker step, you may add one optional root field named checkpoint beside chatMessage/plan/currentStep/operations. checkpoint is a semantic completion proposal for Jev to judge and runtime to verify, not a claim that the step is already done. It must use a runtime-supported contract: {"mode":"all|any","requirements":[...]} with requirement kinds inventory_count, entity_inventory_count, entity_exists, entity_state, authoritative_operation_receipt, or runtime_controller_state. Prefer world-state outcomes over action occurrence. Example: if the step means "have 100 stone" and the next operation only gathers 40 more because 62 are already held, checkpoint must say inventory_count stone >= 100, not >= 40. The operation batch describes what to do next; checkpoint describes what would prove the semantic step complete. Jev may keep the step open or request a split even when you propose a checkpoint, and runtime remains completion authority. Omit checkpoint when no safe deterministic predicate represents the step.
 
 Plan entries must represent goal-bearing Factorio work or verification. Do not add terminal lifecycle/meta steps such as "Stop", "Done", "Finish", or "Report completion"; stopping after the verified goal is represented by returning plan: [], currentStep: 0, operations: [].
 
@@ -1005,15 +997,13 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
     return { state, blockedByHarness: false, changed: incomingPlan.length > 0 }
   }
 
-  reconcileTaskBoard(key, previousBoard, plan, stateResult, { allowReplan = false, authoritativeAdvance = false, newMilestone = false } = {}) {
+  reconcileTaskBoard(key, previousBoard, plan, stateResult, { allowReplan = false, authoritativeAdvance = false } = {}) {
     const state = stateResult?.state
     if (!state) return stateResult
     const now = state.updated_at ?? Date.now()
-    let board = newMilestone
-      ? sanitizeTaskBoard(undefined, { fallbackPlan: plan.plan, fallbackCurrentStep: 0, goalId: state.goal_id, now })
-      : previousBoard
-        ? sanitizeTaskBoard(previousBoard, { fallbackPlan: state.plan, fallbackCurrentStep: state.current_step, goalId: state.goal_id, now })
-        : sanitizeTaskBoard(state.task_board, { fallbackPlan: state.plan, fallbackCurrentStep: state.current_step, goalId: state.goal_id, now })
+    let board = previousBoard
+      ? sanitizeTaskBoard(previousBoard, { fallbackPlan: state.plan, fallbackCurrentStep: state.current_step, goalId: state.goal_id, now })
+      : sanitizeTaskBoard(state.task_board, { fallbackPlan: state.plan, fallbackCurrentStep: state.current_step, goalId: state.goal_id, now })
 
     if (state.status === 'completed') {
       board = setTaskBoardStatus(board, 'completed', { now })
@@ -1643,15 +1633,6 @@ export function interactionDecisionQuestions() {
         false: 'There is no amendment, or the amendment is compatible with the work already running or queued.',
       },
     },
-    granularity: {
-      type: 'choice',
-      instructions: 'Judge the semantic scope of the incoming actionable goal. Use split when it is too broad to become one flat Plan Tracker and should first be represented as Project -> current Milestone -> Plan Steps. For status/chat/cancel or already-bounded work, use keep. Do not invent the decomposition.',
-      criteria: {
-        keep: 'The incoming work is already bounded enough to plan directly, or it is not a new actionable goal.',
-        split: 'The incoming goal spans multiple independently verifiable capability phases and needs a milestone layer before execution.',
-        collapse: 'The incoming request is over-fragmented and adjacent intent can be represented as one bounded objective.',
-      },
-    },
     reasoning_budget: envelope.reasoning_budget,
     planning_horizon: envelope.planning_horizon,
     observation_budget: envelope.observation_budget,
@@ -1661,8 +1642,7 @@ export function interactionDecisionQuestions() {
 export function parseInteractionDecisionShadow(response) {
   const intentAnswer = response?.answers?.intent
   const conflictAnswer = response?.answers?.queue_conflict
-  const granularity = parseDecisionFamily(response, 'granularity', 'keep')
-  const hierarchy = parseHierarchyTelemetry(response)
+  const steering = parseBoundarySteeringTelemetry(response)
   if (!intentAnswer || !INTERACTION_INTENTS.has(intentAnswer.choice)) throw new AgentLoopError('Decision provider returned invalid interaction intent')
   if (typeof intentAnswer.confidence !== 'number' || !Number.isFinite(intentAnswer.confidence) || intentAnswer.confidence < 0 || intentAnswer.confidence > 1) {
     throw new AgentLoopError('Decision provider returned invalid interaction confidence')
@@ -1676,12 +1656,10 @@ export function parseInteractionDecisionShadow(response) {
     intent_probabilities: intentAnswer.probabilities,
     queue_conflict_probability: conflictAnswer.noul,
     queue_conflict: intentAnswer.choice === 'amend_current' && conflictAnswer.noul >= 0.5,
-    granularity: granularity.decision,
-    granularity_confidence: granularity.confidence,
-    reasoning_budget: hierarchy.reasoning_budget,
-    reasoning_confidence: hierarchy.reasoning_confidence,
-    planning_horizon: hierarchy.planning_horizon,
-    observation_budget: hierarchy.observation_budget,
+    reasoning_budget: steering.reasoning_budget,
+    reasoning_confidence: steering.reasoning_confidence,
+    planning_horizon: steering.planning_horizon,
+    observation_budget: steering.observation_budget,
     model: typeof response?.model === 'string' ? response.model : undefined,
     provider: typeof response?.provider === 'string' ? response.provider : undefined,
     usage: response?.usage && typeof response.usage === 'object' ? response.usage : undefined,
@@ -1863,8 +1841,6 @@ function terminalProviderBudgetFailure(value) {
 
 function canonicalWorkRemains(state) {
   if (state?.status !== 'active') return false
-  if (state?.hierarchy_split_pending) return true
-  if (state?.project_board?.transition_state === 'awaiting_milestone_plan' && state?.project_board?.current_milestone) return true
   const board = state?.task_board
   if (board?.kind !== 'task_board_lite' || !Array.isArray(board.steps) || board.steps.length === 0) return false
   return board.status === 'active' && (board.completed_count ?? 0) < board.steps.length
@@ -1952,7 +1928,6 @@ function actionOmissionRecoveryCapsule(state, runtimeStatus) {
 }
 
 function providerBudgetTriggerSource(semanticScope, route) {
-  if (semanticScope === 'split_milestone') return 'hierarchy_split'
   if (semanticScope === 'reanchor_target') return 'post_step_reanchor'
   return route === 'replan_high' ? 'recovery_replan_high' : 'recovery_continue_low'
 }
@@ -1968,7 +1943,6 @@ function providerBudgetHandoffCapsule(state, runtimeStatus, reason, semanticScop
           status: state.status,
         }
       : null,
-    project: state?.project_board ? sanitizeDurableModelValue(state.project_board) : null,
     task_board: board ? modelFacingTaskBoard(board) : null,
     active_target: sanitizeDurableModelText(board?.steps?.[activeIndex]?.description ?? currentPlanStep(state?.plan, activeIndex), 500),
     authoritative_evidence: activeStepEvidence(board).map(item => sanitizeDurableModelValue(item)),
@@ -1980,8 +1954,8 @@ function providerBudgetHandoffCapsule(state, runtimeStatus, reason, semanticScop
     },
     contract: {
       completion_authority: 'unchanged',
-      milestone_completion: 'provider budget exhaustion is not completion evidence',
-      verified_prefix: 'preserve every completed milestone and verified Task Board step',
+      committed_plan: 'provider budget exhaustion is not completion evidence and never reopens a committed plan',
+      verified_prefix: 'preserve every verified Task Board step',
       next_turn: 'resume from this bounded capsule; re-observe mutable world facts when needed before mutation',
     },
   }
@@ -2627,8 +2601,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             intent: shadow.intent,
             confidence: shadow.intent_confidence,
             queue_conflict_probability: shadow.queue_conflict_probability,
-            granularity: shadow.granularity,
-            granularity_confidence: shadow.granularity_confidence,
             latency_ms,
             input_units: Number.isFinite(shadow.usage?.input_tokens) ? Math.max(0, Math.trunc(shadow.usage.input_tokens)) : 0,
             output_units: Number.isFinite(shadow.usage?.output_tokens) ? Math.max(0, Math.trunc(shadow.usage.output_tokens)) : 0,
@@ -3434,9 +3406,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             status: planState.status,
           }
         : null,
-      project: planState?.project_board
-        ? sanitizeDurableModelValue(planState.project_board)
-        : null,
       task_board: board
         ? {
             active_index: activeIndex,
@@ -3479,23 +3448,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       ...(failure ? { failure: cleanMemoryText(failure, 1200) } : {}),
     }
     const envelopeQuestions = decisionEnvelopeQuestions()
-    const milestoneTransitionPending = planState?.project_board?.transition_state === 'awaiting_next_milestone'
-    const questions = milestoneTransitionPending
-      ? {
-          ...postStepDecisionQuestions(),
-          ...milestoneTransitionDecisionQuestions(),
-          reasoning_budget: envelopeQuestions.reasoning_budget,
-          planning_horizon: envelopeQuestions.planning_horizon,
-          observation_budget: envelopeQuestions.observation_budget,
-        }
-      : {
-          ...postStepDecisionQuestions(),
-          ...granularityDecisionQuestions(),
-          ...developmentDecisionQuestions(),
-          reasoning_budget: envelopeQuestions.reasoning_budget,
-          planning_horizon: envelopeQuestions.planning_horizon,
-          observation_budget: envelopeQuestions.observation_budget,
-        }
+    const questions = {
+      ...postStepDecisionQuestions(),
+      ...developmentDecisionQuestions(),
+      reasoning_budget: envelopeQuestions.reasoning_budget,
+      planning_horizon: envelopeQuestions.planning_horizon,
+      observation_budget: envelopeQuestions.observation_budget,
+    }
     const decisionId = `decision_${Date.now().toString(36)}_${(++this.decisionRequestSequence).toString(36)}`
     this.postStepDecisionAbort?.abort()
     const controller = new AbortController()
@@ -3524,10 +3483,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       await this.assertCurrent()
       const decision = parsePostStepDecision(response)
-      const hierarchyTelemetry = parseHierarchyTelemetry(response)
-      const milestoneTransition = milestoneTransitionPending
-        ? parseMilestoneTransitionDecision(response)
-        : undefined
+      const steeringTelemetry = parseBoundarySteeringTelemetry(response)
       const latency_ms = Date.now() - startedAt
       if (decision.route === 'wait_runtime' && conditionWaitHealthy) {
         conditionValidation = await this.validateConditionWaitHealth()
@@ -3543,72 +3499,31 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       let appliedRoute = decision.route
       let fallbackReason = ''
-      let hierarchyAction
-      const hierarchyGate = hierarchyRuntimeGate(hierarchyTelemetry, {
+      const steeringGate = boundarySteeringGate(steeringTelemetry, {
         runtimeHealthy,
         boundary: state.boundary,
       })
 
-      // Phase 3: hierarchy may only suppress a planner wake in the narrow case
-      // where authoritative runtime work is already active, the semantic scope
-      // is stable, and Jev classifies the next strategic move as maintain.
-      // Split/vertical/horizontal/recover remain planner-owned; budget/horizon
-      // fields are still telemetry only.
-      if (milestoneTransitionPending && milestoneTransition?.decision === 'advance_next') {
-        const advanced = this.memory.activateNextMilestone?.(this.activePlanKey())
-        appliedRoute = 'replan'
-        if (advanced?.changed) {
-          hierarchyAction = 'advance_next_milestone'
-          fallbackReason = 'verified_milestone_complete_advance_next'
-        }
-        else {
-          hierarchyAction = 'replan_project'
-          fallbackReason = advanced?.reason || 'advance_next_unavailable'
-        }
-      }
-      else if (milestoneTransitionPending && milestoneTransition?.decision === 'project_complete_candidate') {
-        appliedRoute = 'replan'
-        hierarchyAction = 'project_complete_candidate'
-        fallbackReason = 'project_completion_requires_main_planner_verification'
-      }
-      else if (milestoneTransitionPending) {
-        appliedRoute = 'replan'
-        hierarchyAction = 'replan_project'
-        fallbackReason = 'verified_milestone_complete_replan_project'
-      }
-      else if (state.boundary === 'completion' && hierarchyTelemetry.granularity === 'split') {
-        appliedRoute = 'replan'
-        hierarchyAction = 'split_current_milestone'
-        fallbackReason = 'hierarchy_split_requested'
-      }
-      else if (state.boundary === 'completion' && hierarchyTelemetry.granularity === 'collapse') {
-        appliedRoute = 'replan'
-        hierarchyAction = 'collapse_current_scope'
-        fallbackReason = 'hierarchy_collapse_requested'
-      }
-      else if (hierarchyGate.allow_runtime_continuation && decision.route === 'continue_current') {
+      // Boundary steering is advisory: it may only SUPPRESS a planner wake when
+      // authoritative runtime work is already active and Jev says the current
+      // direction still holds. It can never author, split or replace a plan.
+      if (steeringGate.allow_runtime_continuation && decision.route === 'continue_current') {
         appliedRoute = 'wait_runtime'
-        fallbackReason = 'hierarchy_maintain_authoritative_runtime'
+        fallbackReason = 'steering_maintain_authoritative_runtime'
       }
       else if (decision.route === 'wait_runtime' && !runtimeHealthy) {
         appliedRoute = 'fallback_planner'
         fallbackReason = 'wait_runtime_without_authoritative_active_runtime'
       }
-      else if (decision.route === 'wait_runtime' && !hierarchyGate.allow_runtime_continuation) {
+      else if (decision.route === 'wait_runtime' && !steeringGate.allow_runtime_continuation) {
         appliedRoute = 'fallback_planner'
-        fallbackReason = hierarchyGate.reason
+        fallbackReason = steeringGate.reason
       }
       const semanticNeedsReanchor = state.semantic_alignment?.admission_aligned === false
         && ['belongs_to_later_step', 'replan_needed', 'unrelated'].includes(state.semantic_alignment?.step_relation)
       if (semanticNeedsReanchor && !['reanchor_plan', 'replan'].includes(appliedRoute)) {
         appliedRoute = 'reanchor_plan'
         fallbackReason = 'semantic_alignment_requires_reanchor'
-      }
-      if (!hierarchyAction
-        && state.boundary === 'completion'
-        && ['vertical', 'horizontal', 'recover'].includes(hierarchyTelemetry.development)
-        && appliedRoute !== 'wait_runtime') {
-        hierarchyAction = `development_${hierarchyTelemetry.development}`
       }
 
       await this.decisionTraceEvent('decision.response', {
@@ -3620,10 +3535,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         model: decision.model,
         route: decision.route,
         confidence: decision.confidence,
-        hierarchy_telemetry: hierarchyTelemetry,
-        milestone_transition: milestoneTransition,
-        hierarchy_runtime_gate: hierarchyGate,
-        hierarchy_budget_shadow_only: true,
+        steering_telemetry: steeringTelemetry,
+        boundary_steering_gate: steeringGate,
+        steering_budget_shadow_only: true,
         latency_ms,
         input_units: Number.isFinite(decision.usage?.input_tokens) ? Math.max(0, Math.trunc(decision.usage.input_tokens)) : 0,
         output_units: Number.isFinite(decision.usage?.output_tokens) ? Math.max(0, Math.trunc(decision.usage.output_tokens)) : 0,
@@ -3639,7 +3553,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         fallback_reason: fallbackReason,
         runtime_healthy: runtimeHealthy,
         runtime_reason: runtimeReason,
-        hierarchy_runtime_gate: hierarchyGate,
+        boundary_steering_gate: steeringGate,
       })
       await this.traceEvent('post_step.routed', {
         mode: 'active',
@@ -3649,16 +3563,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         fallback_reason: fallbackReason,
         runtime_healthy: runtimeHealthy,
         runtime_reason: runtimeReason,
-        hierarchy_action: hierarchyAction,
         decision: {
           provider: decision.provider,
           model: decision.model,
           route: decision.route,
           confidence: decision.confidence,
-          hierarchy: hierarchyTelemetry,
-          milestone_transition: milestoneTransition,
-          hierarchy_runtime_gate: hierarchyGate,
-          hierarchy_budget_shadow_only: true,
+          steering: steeringTelemetry,
+          boundary_steering_gate: steeringGate,
+          steering_budget_shadow_only: true,
           usage: decision.usage,
         },
         decision_latency_ms: latency_ms,
@@ -3690,9 +3602,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         runtime: persistentRuntime,
         runtime_reason: runtimeReason,
         decision,
-        hierarchy: hierarchyTelemetry,
-        hierarchy_gate: hierarchyGate,
-        hierarchy_action: hierarchyAction,
+        steering: steeringTelemetry,
+        steering_gate: steeringGate,
         fallback_reason: fallbackReason,
         decision_called: true,
       }
@@ -3815,7 +3726,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
     const intent = routed.route.intent
     const jevNewGoalAligned = intent === 'new_goal' && routed.decision_shadow?.intent === 'new_goal'
-    const initialHierarchySplit = jevNewGoalAligned && routed.decision_shadow?.granularity === 'split'
     await this.traceEvent('interaction.routed', {
       sender,
       text,
@@ -3830,10 +3740,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       decision_shadow: routed.decision_shadow,
       decision_shadow_error: routed.decision_shadow_error,
       decision_shadow_latency_ms: routed.decision_shadow_latency_ms,
-      hierarchy_initial_granularity: routed.decision_shadow?.granularity,
-      hierarchy_initial_granularity_confidence: routed.decision_shadow?.granularity_confidence,
-      hierarchy_initial_split: initialHierarchySplit,
-      hierarchy_initial_jev_aligned: jevNewGoalAligned,
+      jev_new_goal_aligned: jevNewGoalAligned,
       decision_shadow_status: routed.classifier_skipped
         ? 'classifier_skipped'
         : routed.decision_shadow
@@ -3893,57 +3800,29 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       this.clearLoadedSkillContext()
       super.cancel()
       this.memory.clearTaskContext?.(memoryKey)
-      if (initialHierarchySplit) {
-        this.memory.beginHierarchyGoal?.(memoryKey, { sender, text }, {
-          reason_code: 'hierarchy_initial_split',
-          reasoning_budget: routed.decision_shadow?.reasoning_budget,
-          planning_horizon: routed.decision_shadow?.planning_horizon,
-          observation_budget: routed.decision_shadow?.observation_budget,
-        })
-        this.memory.setNextContextOverride?.(
-          memoryKey,
-          '[HIERARCHY_REQUEST] Jev classified this new user goal as too broad for one flat Plan Tracker. Create a bounded Project hierarchy now: keep the user goal unchanged, choose exactly one currentMilestone with a verifiable outcome, keep at most three tentative nextMilestones, and make plan contain only the executable/verifiable steps for that current milestone. Jev decides that a split is needed; you decide how to decompose it.',
-        )
-      }
       await this.persistState()
     }
 
-    const resumeHierarchySplit = intent === 'continue_current'
-      && planBefore?.status === 'active'
-      && planBefore?.hierarchy_split_pending
-      && !healthyRuntime
     const resumeProviderBudgetHandoff = intent === 'continue_current'
       && planBefore?.status === 'active'
       && planBefore?.provider_recovery?.kind === 'budget_handoff'
       && planBefore?.provider_recovery?.phase === 'planner_pending'
       && !healthyRuntime
-    if (resumeHierarchySplit) {
-      this.memory.setNextContextOverride?.(
-        memoryKey,
-        '[HIERARCHY_REQUEST] A Jev-approved split is durably pending from the previous planner boundary. Do not continue the old flat Plan Tracker. Resolve the transaction now by proposing one bounded project.currentMilestone and a milestone-local plan before any new world mutation.',
-      )
-    }
 
     this.liveEntityObservations = new Map()
     this.rejectedExactTargets = new Set()
     this.staleExactPreflightRetries = 0
     this.researchPreflightRetries = 0
     this.bootstrapDependencyPreflightRetries = 0
-    this.planUpdateReason = resumeHierarchySplit
-      ? 'reanchor_plan'
-      : intent === 'new_goal'
-        ? 'new_goal'
-        : intent === 'amend_current'
-          ? 'amend_current'
-          : 'continue_current'
+    this.planUpdateReason = intent === 'new_goal'
+      ? 'new_goal'
+      : intent === 'amend_current'
+        ? 'amend_current'
+        : 'continue_current'
     this.requestLifecycle = intent
-    this.reasoningTriggerSource = initialHierarchySplit
-      ? 'hierarchy_initial_split'
-      : resumeHierarchySplit
-        ? 'hierarchy_split'
-        : resumeProviderBudgetHandoff
-          ? providerBudgetTriggerSource(planBefore.provider_recovery.semantic_scope, planBefore.provider_recovery.route)
-          : null
+    this.reasoningTriggerSource = resumeProviderBudgetHandoff
+      ? providerBudgetTriggerSource(planBefore.provider_recovery.semantic_scope, planBefore.provider_recovery.route)
+      : null
     const previousReasoningBudget = this.reasoningBudgetOverride
     const previousObservationBudget = this.observationBudgetOverride
     const previousObservationBudgetRemaining = this.observationBudgetRemaining
@@ -3953,14 +3832,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       this.observationBudgetOverride = Number.isSafeInteger(routed.decision_shadow.observation_budget) ? routed.decision_shadow.observation_budget : null
       this.observationBudgetRemaining = this.observationBudgetOverride
       this.planningHorizonOverride = routed.decision_shadow.planning_horizon ?? null
-    }
-    else if (resumeHierarchySplit) {
-      this.reasoningBudgetOverride = planBefore.hierarchy_split_pending.reasoning_budget ?? 'deep'
-      this.observationBudgetOverride = Number.isSafeInteger(planBefore.hierarchy_split_pending.observation_budget)
-        ? planBefore.hierarchy_split_pending.observation_budget
-        : 0
-      this.observationBudgetRemaining = this.observationBudgetOverride
-      this.planningHorizonOverride = planBefore.hierarchy_split_pending.planning_horizon ?? 'subgoal'
     }
     this.lastTaskStatusView = null
     this.lastHandledRuntimeReceipt = { completion: null, failure: null }
@@ -3983,7 +3854,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.pendingFiniteNoOperationPlan = null
     this.freshObservationSinceContinuation = false
     this.genericRecoveryDecisionActive = false
-    if (resumeProviderBudgetHandoff && !resumeHierarchySplit) {
+    if (resumeProviderBudgetHandoff) {
       const budgetCapsule = providerBudgetHandoffCapsule(
         planBefore,
         taskStatus,
@@ -3993,7 +3864,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const repairCapsule = resumeActionOmission ? `\n${actionOmissionRecoveryCapsule(planBefore, taskStatus)}` : ''
       this.memory.setNextContextOverride?.(memoryKey, `${budgetCapsule}${repairCapsule}`)
     }
-    else if (resumeActionOmission && !resumeHierarchySplit) {
+    else if (resumeActionOmission) {
       this.memory.setNextContextOverride?.(memoryKey, actionOmissionRecoveryCapsule(planBefore, taskStatus))
     }
     if (this.traceRequest) await this.traceEvent('request.superseded', { usage: this.traceRequest.usage })
@@ -4007,7 +3878,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       text,
       interaction_intent: intent,
       action_omission_recovery: resumeActionOmission,
-      hierarchy_split_resume: resumeHierarchySplit,
       provider_budget_handoff_resume: resumeProviderBudgetHandoff,
     })
     try {
@@ -4322,77 +4192,25 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     if (routed.route === 'wait_runtime') return null
 
-    if (routed.hierarchy_action === 'split_current_milestone' && this.requestInfo?.memoryKey) {
-      const pending = this.memory.markHierarchySplitPending?.(this.requestInfo.memoryKey, {
-        reason_code: routed.fallback_reason || 'hierarchy_split_requested',
-        reasoning_budget: routed.hierarchy?.reasoning_budget,
-        planning_horizon: routed.hierarchy?.planning_horizon,
-        observation_budget: routed.hierarchy?.observation_budget,
-      })
-      if (pending) {
-        await this.persistState()
-        await this.traceEvent('hierarchy.transition_pending', {
-          kind: pending.kind,
-          reason_code: pending.reason_code,
-          reasoning_budget: pending.reasoning_budget,
-          planning_horizon: pending.planning_horizon,
-          observation_budget: pending.observation_budget,
-        })
-      }
-    }
-
-    this.reasoningTriggerSource = routed.hierarchy_action === 'split_current_milestone'
-      ? 'hierarchy_split'
-      : routed.hierarchy_action === 'collapse_current_scope'
-        ? 'hierarchy_collapse'
-      : routed.hierarchy_action === 'advance_next_milestone'
-        ? 'hierarchy_advance'
-        : routed.hierarchy_action === 'development_vertical'
-          ? 'hierarchy_vertical'
-          : routed.hierarchy_action === 'development_horizontal'
-            ? 'hierarchy_horizontal'
-            : routed.hierarchy_action === 'development_recover'
-              ? 'hierarchy_recover'
-              : routed.hierarchy_action === 'replan_project'
-          ? 'hierarchy_replan_project'
-          : routed.hierarchy_action === 'project_complete_candidate'
-            ? 'hierarchy_project_complete_candidate'
-            : routed.route === 'continue_current'
-              ? 'post_step_continue'
-              : routed.route === 'reanchor_plan'
-                ? 'post_step_reanchor'
-                : routed.route === 'replan'
-                  ? 'post_step_replan'
-                  : null
+    this.reasoningTriggerSource = routed.route === 'continue_current'
+      ? 'post_step_continue'
+      : routed.route === 'reanchor_plan'
+        ? 'post_step_reanchor'
+        : routed.route === 'replan'
+          ? 'post_step_replan'
+          : null
     if (routed.route === 'reanchor_plan') this.planUpdateReason = 'reanchor_plan'
     const previousReasoningBudget = this.reasoningBudgetOverride
     const previousObservationBudget = this.observationBudgetOverride
     const previousObservationBudgetRemaining = this.observationBudgetRemaining
     const previousPlanningHorizon = this.planningHorizonOverride
-    this.reasoningBudgetOverride = routed.hierarchy?.reasoning_budget ?? null
-    this.observationBudgetOverride = Number.isSafeInteger(routed.hierarchy?.observation_budget) ? routed.hierarchy.observation_budget : null
+    this.reasoningBudgetOverride = routed.steering?.reasoning_budget ?? null
+    this.observationBudgetOverride = Number.isSafeInteger(routed.steering?.observation_budget) ? routed.steering.observation_budget : null
     this.observationBudgetRemaining = this.observationBudgetOverride
-    this.planningHorizonOverride = routed.hierarchy?.planning_horizon ?? null
+    this.planningHorizonOverride = routed.steering?.planning_horizon ?? null
     try {
-      const hierarchyInstruction = routed.hierarchy_action === 'split_current_milestone'
-        ? ' [HIERARCHY] Jev determined the current milestone is too broad. Preserve the user project goal and verified Plan Tracker progress, replace currentMilestone with a smaller bounded strategic outcome, keep at most three tentative nextMilestones, and make plan contain only executable/verifiable steps for the new current milestone.'
-        : routed.hierarchy_action === 'collapse_current_scope'
-          ? ' [HIERARCHY] Jev determined the current scope is unnecessarily fragmented. Preserve the active milestone identity and every verified Plan Tracker result, but simplify the remaining unverified steps into the smallest coherent bounded plan. Do not merge across a verified milestone boundary.'
-        : routed.hierarchy_action === 'advance_next_milestone'
-          ? ' [HIERARCHY] The previous milestone is authoritatively verified complete and Jev approved the first tentative next milestone. Build a fresh bounded Plan Tracker only for the newly active currentMilestone. You may refresh the tentative nextMilestones if needed, but do not rewrite the user project goal.'
-          : routed.hierarchy_action === 'development_vertical'
-            ? ' [HIERARCHY] Jev classified the next development move as VERTICAL relative to the active milestone: advance its critical path by unlocking a required capability or removing the blocking prerequisite. Choose the concrete Factorio strategy yourself; do not interpret vertical as research-only.'
-            : routed.hierarchy_action === 'development_horizontal'
-              ? ' [HIERARCHY] Jev classified the next development move as HORIZONTAL relative to the active milestone: strengthen an already-viable capability for throughput, logistics, redundancy, buffers, resource access, or resilience. Choose the concrete Factorio strategy yourself; do not expand unrelated systems.'
-              : routed.hierarchy_action === 'development_recover'
-                ? ' [HIERARCHY] Jev classified the next move as RECOVER: restore a valid capability or world state before resuming vertical/horizontal progress. Re-observe invalidated mutable state and choose the smallest grounded recovery.'
-                : routed.hierarchy_action === 'replan_project'
-            ? ' [HIERARCHY] The previous milestone is authoritatively verified complete, but Jev requires a project-level replan. Choose one new bounded currentMilestone, keep at most three tentative nextMilestones, and make plan contain only the new current milestone steps.'
-            : routed.hierarchy_action === 'project_complete_candidate'
-              ? ' [HIERARCHY] The previous milestone is authoritatively verified complete and Jev believes the user-level project may now be complete. Verify that project goal from authoritative evidence. If it is not proven complete, choose the next bounded currentMilestone instead. Jev is not completion authority.'
-              : ''
       const result = await this.continueFromModMessage(
-        `[MOD] Autorio operation batch completed. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}${hierarchyInstruction}`,
+        `[MOD] Autorio operation batch completed. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}`,
         'factorio.completion_continuation',
       )
       if (pendingAmendment) this.pendingInteractionAmendment = null
@@ -4443,10 +4261,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const previousObservationBudget = this.observationBudgetOverride
     const previousObservationBudgetRemaining = this.observationBudgetRemaining
     const previousPlanningHorizon = this.planningHorizonOverride
-    this.reasoningBudgetOverride = routed.hierarchy?.reasoning_budget ?? null
-    this.observationBudgetOverride = Number.isSafeInteger(routed.hierarchy?.observation_budget) ? routed.hierarchy.observation_budget : null
+    this.reasoningBudgetOverride = routed.steering?.reasoning_budget ?? null
+    this.observationBudgetOverride = Number.isSafeInteger(routed.steering?.observation_budget) ? routed.steering.observation_budget : null
     this.observationBudgetRemaining = this.observationBudgetOverride
-    this.planningHorizonOverride = routed.hierarchy?.planning_horizon ?? null
+    this.planningHorizonOverride = routed.steering?.planning_horizon ?? null
     try {
       return await this.continueFromModMessage(
         `[MOD] Autorio operation error: ${cleanError}. Dependent queued operations may have been cancelled. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}`,
@@ -4752,7 +4570,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       error.code = 'provider_safety_blocked'
       throw error
     }
-    let project
     let checkpoint
     let baseMessage = message
     if (typeof message?.content === 'string') {
@@ -4760,7 +4577,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       try { raw = JSON.parse(message.content) }
       catch {}
       if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-        if (Object.prototype.hasOwnProperty.call(raw, 'project')) project = parseProjectProposal(raw.project)
         if (Object.prototype.hasOwnProperty.call(raw, 'checkpoint')) {
           checkpoint = sanitizeStepCompletionContract(raw.checkpoint)
           if (!completionContractSupported(checkpoint)) {
@@ -4771,31 +4587,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           }
           checkpoint = { ...checkpoint, source: 'planner_semantic_checkpoint' }
         }
-        if (project || checkpoint) {
-          const { project: _project, checkpoint: _checkpoint, ...base } = raw
+        if (checkpoint) {
+          const { checkpoint: _checkpoint, ...base } = raw
           baseMessage = { ...message, content: JSON.stringify(base) }
         }
       }
     }
     const plan = super.parsePlanMessage(baseMessage)
-    if (project) plan.project = project
     if (checkpoint) plan.checkpoint = checkpoint
     const normalizedPlan = normalizeCanonicalPlan(plan.plan, plan.currentStep)
     const triggerSource = this.reasoningTriggerSource ?? this.planUpdateReason
-    const structuralHierarchyRequiresProject = [
-      'hierarchy_initial_split',
-      'hierarchy_split',
-      'hierarchy_replan_project',
-    ].includes(triggerSource)
-      || (triggerSource === 'hierarchy_project_complete_candidate' && normalizedPlan.plan.length > 0)
-    if (structuralHierarchyRequiresProject && !plan.project?.current_milestone) {
-      const error = new AgentLoopError(
-        'This hierarchy transition requires a bounded project.currentMilestone proposal. Do not flatten the long-horizon project into Plan Tracker steps.',
-      )
-      error.failureClass = 'plan_category'
-      error.code = 'hierarchy_project_proposal_required'
-      throw error
-    }
     plan.plan = normalizedPlan.plan
     plan.currentStep = normalizedPlan.currentStep
     for (const operation of plan.operations) {
@@ -5585,45 +5386,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         completionEvidence,
       })
       stateResult = this.memory.reconcileTaskBoard?.(this.requestInfo.memoryKey, previousBoard, durablePlan, stateResult, {
-        allowReplan: ['failure', 'reanchor_plan'].includes(this.planUpdateReason) || ['hierarchy_initial_split', 'hierarchy_split', 'hierarchy_collapse', 'hierarchy_advance', 'hierarchy_replan_project', 'hierarchy_project_complete_candidate'].includes(triggerSource),
-        newMilestone: ['hierarchy_initial_split', 'hierarchy_split', 'hierarchy_advance', 'hierarchy_replan_project'].includes(triggerSource)
-          || (triggerSource === 'hierarchy_project_complete_candidate' && durablePlan.plan.length > 0),
+        // A committed suffix is immutable. Runtime recovery re-observes and
+        // continues it; only USER_REVISION_APPROVED may replace it.
+        allowReplan: false,
         previousState,
       }) ?? stateResult
-      const projectProposalAllowed = Boolean(plan.project)
-        && !this.actionOmissionRepairActive
-        && !this.genericRecoveryDecisionActive
-        && !this.outputBudgetRecoveryGuard
-        && (!previousState?.project_board?.current_milestone
-          || ['new_goal', 'request', 'amend_current', 'failure', 'reanchor_plan'].includes(this.planUpdateReason)
-          || ['hierarchy_split', 'hierarchy_advance', 'hierarchy_replan_project', 'hierarchy_project_complete_candidate'].includes(triggerSource))
-      if (projectProposalAllowed) {
-        const preserveCurrentMilestone = triggerSource === 'hierarchy_advance'
-        const projectBoard = this.memory.updateProjectBoard?.(
-          this.requestInfo.memoryKey,
-          plan.project,
-          { preserveCurrentMilestone },
-        )
-        if (projectBoard && stateResult?.state) {
-          if (['hierarchy_initial_split', 'hierarchy_split'].includes(triggerSource)) {
-            this.memory.clearHierarchySplitPending?.(this.requestInfo.memoryKey)
-          }
-          stateResult = { ...stateResult, state: this.memory.currentPlan?.(this.requestInfo.memoryKey) ?? stateResult.state }
-          await this.traceEvent('project.updated', {
-            project_id: projectBoard.project_id,
-            current_milestone: projectBoard.current_milestone,
-            next_milestones: projectBoard.next_milestones,
-            development_direction: projectBoard.development_direction,
-            source: 'main_planner',
-          })
-        }
-      }
-      else if (plan.project) {
-        await this.traceEvent('project.proposal_ignored', {
-          reason: 'hierarchy_change_not_authorized_in_this_planner_context',
-          trigger_source: triggerSource,
-        })
-      }
       if (commands.length > 0 && stateResult?.state && stateResult?.blockedByHarness !== true) {
         const state = this.memory.setAdmissionState?.(this.requestInfo.memoryKey, 'admitting')
         if (state) stateResult = { ...stateResult, state }
@@ -6189,7 +5956,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // This is a controlled decision boundary, not a provider/world failure.
       // The observation allowance was intentionally spent; routing it through
       // generic recovery can incorrectly choose pause_recoverable while the
-      // hierarchy planner still owes an act-or-block decision.
+      // planner still owes an act-or-block decision.
       await this.traceEvent('recovery.observation_budget_force_decision', {
         reason_code: 'observation_decision_pressure_complete',
         trigger_source: this.reasoningTriggerSource ?? this.planUpdateReason,
@@ -6198,7 +5965,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       })
       return super.recoverPlan(
         generation,
-        new AgentLoopError('The targeted observation budget for this decision is complete. Reuse the grounded evidence already collected and return the required strict-JSON hierarchy/plan decision now; do not request another observation.'),
+        new AgentLoopError('The targeted observation budget for this decision is complete. Reuse the grounded evidence already collected and return the required strict-JSON plan decision now; do not request another observation.'),
         roundBase,
       )
     }
@@ -6360,20 +6127,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (providerBudgetFailure && plannerRecoveryRoutes.includes(routed.route)) {
       const semanticScope = routed.decision?.semantic_scope ?? 'keep_target'
       const key = this.activePlanKey()
-      if (semanticScope === 'split_milestone') {
-        const pending = this.memory.markHierarchySplitPending?.(key, {
-          reason_code: 'provider_budget_handoff_split',
-        })
-        if (pending) {
-          await this.persistState()
-          await this.traceEvent('hierarchy.transition_pending', {
-            kind: pending.kind,
-            reason_code: pending.reason_code,
-            source: 'provider_budget_handoff',
-          })
-        }
-      }
-
       this.providerBudgetHandoffCount++
       this.providerBudgetGeneration = Math.max(1, this.providerBudgetGeneration) + 1
       this.providerBudgetGenerationOutputUnits = 0

@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+      - feat/npc-transition-work
+      - experiment/jev-agent-architecture
 
   workflow_dispatch:
 
@@ -32,6 +34,11 @@ jobs:
         run: bash deploy/pterodactyl/package-smoke.sh
 
   npc-factorio-integration:
+    # ci.yml's factorio-npc-deterministic job already runs this same real
+    # zero-player Factorio harness on feat/npc-transition-work and
+    # experiment/jev-agent-architecture pushes; only run it here for main and
+    # manual dispatch to avoid paying for it twice per commit.
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

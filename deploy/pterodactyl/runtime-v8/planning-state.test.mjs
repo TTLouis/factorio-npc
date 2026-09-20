@@ -150,6 +150,86 @@ test('roadmap shelf stores nodes with lineage and preserves dropped nodes as inv
   assert.equal(second.roadmap_history[0].roadmap_revision_id, first.roadmap.roadmap_revision_id)
 })
 
+test('reasoning epochs reset only on durable reasoning-boundary transitions and survive restore', () => {
+  let state = goalState(1000)
+  assert.equal(state.reasoning_epoch, 1)
+  assert.deepEqual(state.last_reasoning_reset, {
+    epoch: 1,
+    at: 1000,
+    event_type: PLANNING_EVENT.GOAL_ACCEPTED,
+    reason: 'new_goal',
+  })
+
+  state = shelved(state, 1100)
+  assert.equal(state.reasoning_epoch, 2)
+  assert.equal(state.last_reasoning_reset.event_type, PLANNING_EVENT.ROADMAP_REVISED)
+
+  const draft = drafted(state, { now: 1200 })
+  assert.equal(draft.reasoning_epoch, 2, 'creating an ordinary draft must not discard fresh reasoning')
+
+  const restored = restorePlanningState(JSON.parse(JSON.stringify(serializePlanningState(draft))))
+  assert.equal(restored.reasoning_epoch, 2)
+  assert.deepEqual(restored.last_reasoning_reset, draft.last_reasoning_reset)
+
+  const nextGoal = applyPlanningEvent(restored, {
+    type: PLANNING_EVENT.GOAL_ACCEPTED,
+    now: 1300,
+    owner: 'louis',
+    objective: 'Build a second furnace',
+  })
+  assert.equal(nextGoal.reasoning_epoch, 3, 'a replacement goal invalidates accumulated reasoning')
+  assert.equal(nextGoal.last_reasoning_reset.reason, 'new_goal')
+})
+
+test('continuous capability frontiers advance deterministically but never latch or complete the goal', () => {
+  let state = applyPlanningEvent(goalState(), {
+    type: PLANNING_EVENT.ROADMAP_REVISED,
+    now: 1100,
+    reason: 'introduce sustained iron frontier',
+    nodes: [{
+      id: 'roadmap_sustained_iron',
+      intent: 'Maintain sustained iron plate output',
+      status: 'ready_to_refine',
+      capability_frontier: {
+        id: 'frontier_sustained_iron',
+        intent: 'Sustain iron plate output beyond a one-off checkpoint.',
+        continuous: true,
+        recognition: [
+          { id: 'throughput', description: 'Measured throughput meets the target.' },
+          { id: 'stability', description: 'Output remains stable across the sample.' },
+        ],
+      },
+    }],
+  })
+  state = drafted(state, {
+    now: 1200,
+    nodeIds: ['roadmap_sustained_iron'],
+    steps: [{ description: 'Measure sustained iron output', completion_contract: GROUNDED_CONTRACT }],
+  })
+  state = committed(state, { now: 1300 })
+  state = runtimeEvidence(state, { ref: 'batch_1', requirementIds: ['req_stone'], now: 1400 })
+  state = completeActiveStep(state, { now: 1500 })
+  const plan = getActivePlan(state)
+  state = applyPlanningEvent(state, {
+    type: PLANNING_EVENT.PLAN_COMPLETED,
+    now: 1600,
+    source: 'runtime',
+    plan_id: plan.plan_id,
+    verified_results: ['60 iron plates per minute for one minute'],
+    satisfied_recognition_ids: ['stability', 'throughput', 'unknown_fabricated_id'],
+  })
+
+  const frontier = state.roadmap.nodes[0].capability_frontier
+  assert.equal(frontier.continuous, true)
+  assert.equal(frontier.status, 'partially_reached')
+  assert.deepEqual(frontier.satisfied_recognition_ids, ['stability', 'throughput'])
+  assert.equal(frontier.reached_at, null)
+  assert.equal(state.goal.status, 'active')
+
+  const restored = restorePlanningState(serializePlanningState(state))
+  assert.deepEqual(restored.roadmap.nodes[0].capability_frontier, frontier)
+})
+
 test('shelf nodes are non-executable: no operations survive sanitization', () => {
   const node = sanitizeShelfNode({
     id: 'n1',
@@ -795,8 +875,20 @@ test('the reducer source contains no wall-clock or I/O calls', async () => {
     .split(/\r?\n/)
     .filter(line => !/^\s*(\/\/|\/\*|\*)/.test(line))
     .join(' ')
-  for (const forbidden of ['Date.now(', 'new Date(', 'Math.random(', 'process.env', 'fs.', 'await ']) {
-    assert.equal(source.includes(forbidden), false, `planning-state.mjs must not contain ${forbidden}`)
+  // Word-boundary anchored: a naive substring scan for 'fs.' also matches
+  // innocent identifiers such as `evidenceRefs.length`.
+  const forbidden = [
+    /\bDate\s*\.\s*now\s*\(/,
+    /\bnew\s+Date\s*\(/,
+    /\bMath\s*\.\s*random\s*\(/,
+    /\bprocess\s*\.\s*env\b/,
+    /(^|[^A-Za-z0-9_$])fs\s*\./,
+    /\bawait\s/,
+    /\brequire\s*\(/,
+    /\bimport\s*\(/,
+  ]
+  for (const pattern of forbidden) {
+    assert.equal(pattern.test(source), false, `planning-state.mjs must not contain ${pattern}`)
   }
 })
 
