@@ -1361,3 +1361,24 @@ test('committed completion meaning cannot be rewritten through the legacy checkp
   assert.deepEqual(reducerAfter.steps[0].completion_contract, reducerBefore.steps[0].completion_contract)
   assert.deepEqual(legacyAfter, legacyBefore, 'compatibility board must freeze with the committed semantic contract')
 })
+
+
+test('model context exposes one planning authority and labels the legacy board compatibility-only', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const key = 'npc:airi'
+  const plan = proposedPlan(['Establish smelting'])
+  memory.recordPlan(key, { sender: 'Louis', text: 'Build a staged factory' }, {
+    ...plan,
+    roadmap: [{ id: 'smelting', intent: 'Smelting exists.' }],
+    roadmapNodeIds: ['smelting'],
+  })
+
+  const context = memory.planContext(key)
+  assert.match(context, /\[RUNTIME_COMPAT_STATE\]/)
+  assert.match(context, /\[PLANNING_STATE\]/)
+  assert.doesNotMatch(context, /\[PLAN_STATE\]/)
+  assert.match(context, /Planning steps\/progress are authoritative only in \[PLANNING_STATE\]/)
+  const planningIndex = context.indexOf('[PLANNING_STATE]')
+  const trackerIndex = context.indexOf('"plan_tracker"')
+  assert.ok(planningIndex >= 0 && trackerIndex > planningIndex, 'reducer Plan Tracker is carried inside the authoritative planning block')
+})

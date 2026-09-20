@@ -905,11 +905,16 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const planningContext = this.planningContext(key)
     if (!state) {
       if (planningContext) {
-        return `[PLAN_STATE] The user goal is admitted to the reducer but no executable legacy plan has been committed yet. Draft from [PLANNING_STATE]; do not invent progress.\n${planningContext}`
+        return `[RUNTIME_COMPAT_STATE] No legacy executable projection exists yet. This block is not planning authority; draft only from [PLANNING_STATE] plus live observations.\n${planningContext}`
       }
-      return '[PLAN_STATE] No active durable goal. Completed goals are retired from the current task slot and remain only in bounded dialogue history. Do not resume or steer a completed goal merely because the human says continue; a new actionable instruction must start a new goal.'
+      return '[RUNTIME_COMPAT_STATE] No active compatibility task. Completed goals are history; do not infer a new goal from this empty projection.'
     }
-    return [super.planContext(key), planningContext].filter(Boolean).join('\n')
+    const compatibility = super.planContext(key)
+      .replace(
+        '[PLAN_STATE] Harness-owned durable goal/plan state.',
+        '[RUNTIME_COMPAT_STATE] Legacy compatibility projection for runtime evidence, locators and recovery. Planning steps/progress are authoritative only in [PLANNING_STATE].',
+      )
+    return [compatibility, planningContext].filter(Boolean).join('\n')
   }
 
   currentPlan(key) {
