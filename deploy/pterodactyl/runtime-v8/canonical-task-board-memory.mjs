@@ -435,7 +435,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const planning = this.planningByNpc.get(key)
     const active = getActivePlan(planning)
     if (active && ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING, PLAN_STATUS.COMPLETED, PLAN_STATUS.BLOCKED].includes(active.status)) {
-      let refreshed = applyPlanningEvent(planning, {
+      const refreshed = applyPlanningEvent(planning, {
         type: PLANNING_EVENT.DRAFT_CREATED,
         now,
         origin: 'checkpoint_contract_refresh',
