@@ -1,7 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fsp from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
+import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 
 function proposedPlan(steps, currentStep = 0) {
@@ -122,3 +126,66 @@ test('blocked cancel choice remains frozen until terminate emits PLAN_CANCELLED'
   assert.equal(cancelled.status, PLAN_STATUS.CANCELLED)
   assert.equal(memory.currentPlan(key), undefined)
 })
+
+test('real state-file restart preserves BLOCKED, successor lineage, and reasoning epoch', async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-planning-restart-'))
+  t.after(() => fsp.rm(root, { recursive: true, force: true }))
+  const stateFile = path.join(root, 'npc-state.json')
+  const key = 'npc:airi'
+  const makeAgent = () => new NpcAgentLoop({
+    rcon: {},
+    provider: async () => { throw new Error('provider must not run in persistence test') },
+    systemPrompt: 'planning persistence integration test',
+    stateFile,
+    traceFile: null,
+    decisionTraceFile: null,
+    npcId: 'airi',
+    memory: new CanonicalTaskBoardMemory(),
+  })
+
+  const first = makeAgent()
+  startCommittedPlan(first.memory, key)
+  block(first.memory, key)
+  const blocked = getActivePlan(first.memory.planningState(key))
+  const blockedEpoch = first.memory.planningReasoningEpoch(key)
+  assert.equal(blocked.status, PLAN_STATUS.BLOCKED)
+  await first.persistState()
+
+  const restarted = makeAgent()
+  await restarted.loadPersistentState()
+  const restoredBlocked = getActivePlan(restarted.memory.planningState(key))
+  assert.equal(restoredBlocked.status, PLAN_STATUS.BLOCKED)
+  assert.equal(restoredBlocked.plan_id, blocked.plan_id)
+  assert.equal(restarted.memory.planningReasoningEpoch(key), blockedEpoch)
+  assert.equal(restarted.memory.currentPlan(key).planning.blocked.awaiting_choice, true)
+
+  restarted.memory.recordBlockedChoice(key, 'revise', 'Louis', { now: 400 })
+  const revisedPlan = proposedPlan(['Gather stone', 'Use alternate furnace route', 'Build power'], 1)
+  const previousBoard = restarted.memory.currentPlan(key).task_board
+  const recorded = restarted.memory.recordPlan(key, {
+    sender: 'Louis',
+    text: 'Use the alternate furnace route instead.',
+  }, revisedPlan)
+  restarted.memory.reconcileTaskBoard(
+    key,
+    previousBoard,
+    revisedPlan,
+    recorded,
+    { previousState: restarted.memory.currentPlan(key), allowReplan: false },
+  )
+  const successor = getActivePlan(restarted.memory.planningState(key))
+  const successorEpoch = restarted.memory.planningReasoningEpoch(key)
+  assert.equal(recorded.userRevisionApproved, true)
+  assert.equal(successor.derived_from_plan_id, blocked.plan_id)
+  assert.equal(successor.plan_version, blocked.plan_version + 1)
+  assert.ok(successorEpoch > blockedEpoch)
+  await restarted.persistState()
+
+  const restartedAgain = makeAgent()
+  await restartedAgain.loadPersistentState()
+  const restoredSuccessor = getActivePlan(restartedAgain.memory.planningState(key))
+  assert.equal(restoredSuccessor.plan_id, successor.plan_id)
+  assert.equal(restoredSuccessor.derived_from_plan_id, blocked.plan_id)
+  assert.equal(restartedAgain.memory.planningReasoningEpoch(key), successorEpoch)
+})
+
