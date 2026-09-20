@@ -225,19 +225,33 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return key ? this.planningByNpc.get(key) : undefined
   }
 
-  planningProjection(key, legacyState = key ? this.planByNpc.get(key) : undefined) {
+  syncPlanningState(key, legacyState = key ? this.planByNpc.get(key) : undefined) {
     const planning = this.planningState(key)
     const plan = getActivePlan(planning)
     if (!planning || !plan || !legacyState) return legacyState
     const choice = plan.blocker?.user_choice
     const reducerSteps = Array.isArray(plan.steps) ? plan.steps.map(step => step.description) : []
     if (reducerSteps.length > 0 && legacyState.task_board?.kind === 'task_board_lite') {
+      const boardBefore = legacyState.task_board
+      const sameSemanticPlan = reducerSteps.length === boardBefore.steps.length
+        && reducerSteps.every((description, index) => clean(description) === clean(boardBefore.steps[index]?.description))
+      const proposedFocusIndex = boardBefore.proposed_focus_index
+      const proposedFocusStepId = boardBefore.proposed_focus_step_id
       legacyState.task_board = reconcileTaskBoard(
-        legacyState.task_board,
+        boardBefore,
         reducerSteps,
         plan.active_step_index,
         { now: planning.updated_at || legacyState.updated_at || Date.now(), authoritativeAdvance: true, allowReplan: false },
       )
+      // The reducer owns verified progress, not planner focus. On an unchanged
+      // semantic plan, preserve the provider's advisory focus exactly.
+      if (sameSemanticPlan && Number.isSafeInteger(proposedFocusIndex)) {
+        legacyState.task_board = {
+          ...legacyState.task_board,
+          proposed_focus_index: proposedFocusIndex,
+          proposed_focus_step_id: proposedFocusStepId,
+        }
+      }
     }
     if (plan.status === PLAN_STATUS.BLOCKED) {
       legacyState.status = 'blocked'
@@ -283,7 +297,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const before = this.planningByNpc.get(key) ?? createEmptyPlanningState()
     const after = applyPlanningEvent(before, event)
     if (after !== before || this.planningByNpc.has(key)) this.planningByNpc.set(key, after)
-    this.planningProjection(key)
+    this.syncPlanningState(key)
     return after
   }
 
@@ -314,7 +328,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       })
     }
     this.planningByNpc.set(key, planning)
-    this.planningProjection(key, state)
+    this.syncPlanningState(key, state)
     return planning
   }
 
@@ -332,7 +346,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       runtime_validation: { passed: true },
     })
     this.planningByNpc.set(key, planning)
-    this.planningProjection(key, legacy)
+    this.syncPlanningState(key, legacy)
     return planning
   }
 
@@ -380,7 +394,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       approved_by: approvedBy,
       choice,
     })
-    return this.planningProjection(key, key ? this.planByNpc.get(key) : undefined) ?? planning
+    return this.syncPlanningState(key, key ? this.planByNpc.get(key) : undefined) ?? planning
   }
 
   setStepCompletionContract(key, stepId, contract, { now = Date.now() } = {}) {
@@ -423,7 +437,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         })),
       })
       this.planningByNpc.set(key, refreshed)
-      this.planningProjection(key, state)
+      this.syncPlanningState(key, state)
     }
     return state
   }
@@ -497,7 +511,10 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     }
 
     const result = super.recordPlan(key, requestInfo, plan, options)
-    if (result?.state) this.ensurePlanningDraft(key, result.state, { now: result.state.updated_at })
+    if (result?.state) {
+      this.ensureTaskBoard(result.state)
+      this.ensurePlanningDraft(key, result.state, { now: result.state.updated_at })
+    }
     return userRevisionApproved ? { ...result, userRevisionApproved: true } : result
   }
 
@@ -565,7 +582,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     }
 
     this.planningByNpc.set(key, planning)
-    this.planningProjection(key, result.state)
+    this.syncPlanningState(key, result.state)
     return { ...result, state: result.state }
   }
 
@@ -647,7 +664,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
           this.planningByNpc.set(key, planning)
         }
       }
-      this.planningProjection(key, state)
+      this.syncPlanningState(key, state)
     }
   }
 
@@ -682,11 +699,15 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         }),
     )
     const revisionApproved = stateResult?.userRevisionApproved === true
-    const guarded = canonicalContinuationPlan(previousBoard, plan, {
-      ...options,
-      previousState: truthState,
-      allowReplan: revisionApproved ? true : options.allowReplan,
-    })
+    // BLOCKED is frozen for ordinary continuation. The only exception is the
+    // explicit user-revision path already authorized by USER_REVISION_APPROVED.
+    const guarded = revisionApproved
+      ? plan
+      : canonicalContinuationPlan(previousBoard, plan, {
+          ...options,
+          previousState: truthState,
+          allowReplan: options.allowReplan,
+        })
     const result = super.reconcileTaskBoard(key, previousBoard, guarded, stateResult, {
       ...options,
       allowReplan: revisionApproved ? true : options.allowReplan,
@@ -706,7 +727,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     }
     if (result?.state) {
       this.ensurePlanningDraft(key, result.state, { now: result.state.updated_at })
-      this.planningProjection(key, result.state)
+      this.syncPlanningState(key, result.state)
     }
     if (result?.state?.status === 'completed') this.planByNpc.delete(key)
     return result
