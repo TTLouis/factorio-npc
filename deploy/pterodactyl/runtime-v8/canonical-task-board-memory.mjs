@@ -4,6 +4,7 @@ import { completionContractSupported, sanitizeStepCompletionContract } from './s
 import {
   applyPlanningEvent,
   createEmptyPlanningState,
+  evaluateDeadlockSignals,
   getActivePlan,
   PLAN_STATUS,
   PLANNING_EVENT,
@@ -12,6 +13,19 @@ import {
   serializePlanningState,
   STEERING_BOUNDARY,
 } from './planning-state.mjs'
+
+// Outcome kinds that represent an ATTEMPT on the active step. `verified_complete`
+// is excluded: it carries evidence, and evidence is progress, not an attempt to
+// make progress. `world_blocked` and `cancelled` are terminal and route
+// elsewhere.
+const ATTEMPT_OUTCOME_KINDS = new Set([
+  'execution_required',
+  'recoverable_provider_failure',
+])
+
+// The subset of the above whose reason code should count toward the repeating
+// failure signal.
+const FAILED_ATTEMPT_OUTCOME_KINDS = new Set(['recoverable_provider_failure'])
 
 const STRICT_TASKS_BY_OPERATION = new Map([
   ['walk_to_entity', ['walking_to_entity']],
@@ -603,6 +617,28 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const now = result.state.updated_at ?? Date.now()
     if (!plan) return result
 
+    // Every attempt to move the active step forward is counted, including the
+    // ones that fail. The deadlock signals are all progress measurements -- an
+    // evidence stall, a failure code that keeps repeating -- so a batch that is
+    // never counted is progress the harness cannot tell apart from success.
+    if (ATTEMPT_OUTCOME_KINDS.has(result.decision.kind)) {
+      planning = this.commitPlanningPlan(key, { now, migrated: true })
+      plan = getActivePlan(planning)
+      planning = applyPlanningEvent(planning, {
+        type: PLANNING_EVENT.OPERATION_BATCH_ATTEMPTED,
+        now,
+        source: 'runtime',
+        plan_id: plan?.plan_id,
+        step_id: plan?.steps?.[plan.active_step_index]?.step_id,
+        operation_count: Array.isArray(candidate?.operations) ? candidate.operations.length : 1,
+        // Only failures carry a reason code: counting a successful batch under
+        // its kind would make the repeating-failure signal fire on healthy work.
+        ...(FAILED_ATTEMPT_OUTCOME_KINDS.has(result.decision.kind)
+          ? { failure_reason_code: result.decision.reason_code }
+          : {}),
+      })
+    }
+
     if (result.decision.durable_status === 'blocked') {
       planning = this.commitPlanningPlan(key, { now, migrated: true })
       plan = getActivePlan(planning)
@@ -669,6 +705,21 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
           if ((planning.steering?.sequence ?? 0) > steeringBefore) this.recordSteeringAdvice(key, null)
         }
       }
+    }
+
+    // Deterministic, harness-side, no model call (roadmap 7). Evaluated after
+    // the batch is counted so a signal fires on the attempt that crossed the
+    // threshold rather than one attempt late.
+    const deadlock = evaluateDeadlockSignals(planning)
+    if (deadlock.deadlocked) {
+      planning = applyPlanningEvent(planning, {
+        type: PLANNING_EVENT.DEADLOCK_DETECTED,
+        now,
+        source: 'runtime',
+        plan_id: deadlock.plan_id,
+        reason_code: deadlock.signals[0]?.kind ?? 'deadlock_detected',
+        signals: deadlock.signals,
+      })
     }
 
     this.planningByNpc.set(key, planning)

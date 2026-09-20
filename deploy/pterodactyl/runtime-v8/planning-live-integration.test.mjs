@@ -6,7 +6,12 @@ import path from 'node:path'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
-import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
+import {
+  DEADLOCK_EVIDENCE_STALL_BATCHES,
+  DEADLOCK_REPEATED_FAILURE_LIMIT,
+  getActivePlan,
+  PLAN_STATUS,
+} from './planning-state.mjs'
 
 function deployment() {
   return {
@@ -347,4 +352,128 @@ test('a boundary the harness has no authority for is refused, not forged', () =>
     assert.equal(memory.evaluateSteeringAtBoundary(key, { boundary, now: 500 }), undefined)
   }
   assert.equal(memory.planningState(key).steering.sequence, before)
+})
+
+test('repeated live failures reach the deterministic deadlock signal and stop for the user', () => {
+  const key = 'npc:airi'
+  const memory = new CanonicalTaskBoardMemory()
+  startCommittedPlan(memory, key)
+  const planId = getActivePlan(memory.planningState(key)).plan_id
+
+  // The same recoverable failure, over and over, on the same committed step.
+  // Nothing here evaluates anything: the harness counts attempts, and the
+  // deterministic signal is what notices.
+  const failure = () => memory.applyOutcomeAuthority(key, {
+    kind: 'recoverable_provider_failure',
+    source: 'deterministic_runtime',
+    reason_code: 'operation_rejected_by_preflight',
+    operations: [{ name: 'wait', args: { ticks: 1 } }],
+  })
+
+  for (let attempt = 1; attempt < DEADLOCK_REPEATED_FAILURE_LIMIT; attempt += 1) {
+    failure()
+    const plan = getActivePlan(memory.planningState(key))
+    assert.notEqual(plan.status, PLAN_STATUS.BLOCKED, `attempt ${attempt} is not yet a deadlock`)
+  }
+
+  failure()
+  const blocked = getActivePlan(memory.planningState(key))
+  assert.equal(blocked.status, PLAN_STATUS.BLOCKED, 'the repeating failure limit is reached')
+  assert.equal(blocked.blocker.kind, 'deadlock')
+  assert.equal(blocked.blocker.requires_user_decision, true, 'a deadlock asks the user; it never replans itself')
+  assert.equal(blocked.blocker.signals[0].kind, 'repeating_failure')
+  assert.equal(blocked.plan_id, planId, 'no successor was invented')
+  assert.equal(memory.planningState(key).plans.length, 1)
+
+  // And the player can actually see it.
+  assert.equal(memory.currentPlan(key).planning.blocked.awaiting_choice, true)
+})
+
+test('an evidence stall deadlocks even when every batch reports success', () => {
+  const key = 'npc:airi'
+  const memory = new CanonicalTaskBoardMemory()
+
+  // The evidence-stall signal reads a contract: it measures batches that fail
+  // to advance one, so a prose-only step is invisible to it by design and gets
+  // the operation ceiling as its backstop instead. The contract has to be in
+  // place BEFORE the commit -- a committed plan is immutable.
+  const plan = proposedPlan(['Gather stone', 'Craft furnace', 'Build power'])
+  const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Build early automation' }, plan)
+  const reconciled = memory.reconcileTaskBoard(key, undefined, plan, recorded, { allowReplan: false })
+  memory.setStepCompletionContract(key, reconciled.state.task_board.steps[0].id, {
+    mode: 'all',
+    confidence: 0.9,
+    requirements: [{ kind: 'inventory_count', item_name: 'iron-plate', minimum: 20 }],
+  })
+  memory.commitPlanningPlan(key, { now: 120 })
+  assert.ok(
+    getActivePlan(memory.planningState(key)).steps[0].completion_contract,
+    'the committed step carries the contract the stall signal reads',
+  )
+
+  // Batches keep being submitted and keep being accepted, but no step evidence
+  // ever lands. This is the failure mode that looks healthiest from inside.
+  for (let attempt = 0; attempt < DEADLOCK_EVIDENCE_STALL_BATCHES; attempt += 1) {
+    memory.applyOutcomeAuthority(key, {
+      kind: 'execution_required',
+      source: 'deterministic_runtime',
+      reason_code: 'operations_submitted',
+      operations: [{ name: 'wait', args: { ticks: 1 } }],
+    })
+  }
+
+  const blocked = getActivePlan(memory.planningState(key))
+  assert.equal(blocked.status, PLAN_STATUS.BLOCKED)
+  assert.equal(blocked.blocker.kind, 'deadlock')
+  assert.equal(blocked.blocker.signals[0].kind, 'evidence_stall')
+})
+
+test('successful batches do not accumulate toward a deadlock', () => {
+  const key = 'npc:airi'
+  const memory = new CanonicalTaskBoardMemory()
+  startCommittedPlan(memory, key)
+
+  let completedSteps = 0
+  // Interleave attempts with real verified evidence. The stall counter resets
+  // on evidence, so healthy work must never trip the signal however long it
+  // runs -- otherwise the harness would punish slow steps.
+  for (let round = 0; round < DEADLOCK_EVIDENCE_STALL_BATCHES * 2; round += 1) {
+    memory.applyOutcomeAuthority(key, {
+      kind: 'execution_required',
+      source: 'deterministic_runtime',
+      reason_code: 'operations_submitted',
+      operations: [{ name: 'wait', args: { ticks: 1 } }],
+    })
+    memory.applyOutcomeAuthority(key, {
+      kind: 'verified_complete',
+      source: 'deterministic_runtime',
+      reason_code: 'step_verified',
+      evidence: [{ kind: 'verified_world_state', ref: `verified_${round}`, summary: 'progress' }],
+    })
+    // Checked every round, not just at the end: once the plan finishes its
+    // planning state is retired, so a late-only assertion would pass vacuously.
+    const planning = memory.planningState(key)
+    // Once the plan finishes, its planning state is retired -- reaching that
+    // point is itself proof the run was healthy.
+    if (!planning) {
+      completedSteps = Infinity
+      break
+    }
+    // Step completion lives in execution.step_progress, not on the step.
+    for (const item of planning.plans) {
+      const progress = Object.values(item.execution?.step_progress ?? {})
+      completedSteps = Math.max(completedSteps, progress.filter(entry => entry.status === 'completed').length)
+      if (item.status === PLAN_STATUS.COMPLETED) completedSteps = Math.max(completedSteps, 1)
+    }
+    assert.equal(
+      planning.plans.some(item => item.status === PLAN_STATUS.BLOCKED),
+      false,
+      `round ${round}: evidence keeps resetting the stall counter`,
+    )
+    if (memory.currentPlan(key)?.status !== 'active') break
+  }
+
+  // Non-vacuous: the run has to have actually moved, or "never blocked" would
+  // be satisfied by a plan that did nothing at all.
+  assert.ok(completedSteps > 0, 'verified evidence advanced the plan while batches accumulated')
 })
