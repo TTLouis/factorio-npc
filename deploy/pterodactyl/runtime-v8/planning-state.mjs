@@ -145,6 +145,7 @@ export const PLANNING_EVENT = Object.freeze({
   PLAN_COMPLETED: 'PLAN_COMPLETED',
   DEADLOCK_DETECTED: 'DEADLOCK_DETECTED',
   STRUCTURAL_BLOCKER_CONFIRMED: 'STRUCTURAL_BLOCKER_CONFIRMED',
+  BLOCKED_CHOICE_RECORDED: 'BLOCKED_CHOICE_RECORDED',
   USER_REVISION_APPROVED: 'USER_REVISION_APPROVED',
   PLAN_SUPERSEDED: 'PLAN_SUPERSEDED',
   PLAN_CANCELLED: 'PLAN_CANCELLED',
@@ -1411,6 +1412,46 @@ const HANDLERS = {
       ...next,
       updated_at: now,
       log: logEntry(next, { type: PLANNING_EVENT.STRUCTURAL_BLOCKER_CONFIRMED, at: now, plan_id: plan.plan_id }),
+    }
+  },
+
+  [PLANNING_EVENT.BLOCKED_CHOICE_RECORDED](state, event, now) {
+    const plan = getPlan(state, event.plan_id ?? state.active_plan_id)
+    if (!plan || plan.status !== PLAN_STATUS.BLOCKED) return state
+    if (!isUserAuthority(event.source)) return state
+    const choice = text(event.choice, 40)
+    if (!['keep_paused', 'revise', 'cancel'].includes(choice)) return state
+    const approvedBy = text(event.approved_by, 128)
+    if (!approvedBy) return state
+
+    // A UI choice is durable planning input, not a loop-control side effect.
+    // Recording the choice must not thaw or rewrite the immutable blocked plan.
+    // In particular, "revise" only authorizes the next user-supplied revision;
+    // USER_REVISION_APPROVED remains the sole successor-producing transition.
+    const updated = {
+      ...plan,
+      blocker: {
+        ...(plan.blocker ?? {}),
+        requires_user_decision: true,
+        user_choice: {
+          choice,
+          approved_by: approvedBy,
+          at: now,
+        },
+      },
+      updated_at: now,
+    }
+    return {
+      ...state,
+      plans: state.plans.map(item => (item.plan_id === plan.plan_id ? updated : item)),
+      updated_at: now,
+      log: logEntry(state, {
+        type: PLANNING_EVENT.BLOCKED_CHOICE_RECORDED,
+        at: now,
+        plan_id: plan.plan_id,
+        choice,
+        approved_by: approvedBy,
+      }),
     }
   },
 
