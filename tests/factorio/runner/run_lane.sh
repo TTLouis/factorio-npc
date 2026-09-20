@@ -160,6 +160,9 @@ case "$LANE" in
     ;;
 
   resilience)
+    printf '[npc-test][resilience] Preparing full planning lifecycle acceptance state on real Factorio...\n'
+    run_node planning_lifecycle_factorio.mjs --mode prepare
+
     printf '[npc-test][resilience] Preparing live planning BLOCKED state against real Factorio preflight...\n'
     run_node planning_live_factorio.mjs --mode prepare
 
@@ -167,6 +170,9 @@ case "$LANE" in
     run_py persistence_prepare.py --save "$SAVE"
     restart_factorio
     run_py persistence_verify.py
+
+    printf '[npc-test][resilience] Verifying full planning lifecycle lineage after real Factorio restart...\n'
+    run_node planning_lifecycle_factorio.mjs --mode verify
 
     printf '[npc-test][resilience] Restoring planning BLOCKED state after real Factorio restart...\n'
     run_node planning_live_factorio.mjs --mode verify
