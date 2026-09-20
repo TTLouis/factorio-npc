@@ -116,6 +116,33 @@ describe('deterministic research path planning', () => {
     expect(result.next_actionable).toBeUndefined()
   })
 
+  it('bounds large science ingredient lists without losing deterministic order', () => {
+    const ingredients = Array.from({ length: 20 }, (_, index) => ({
+      name: `science-${index}`,
+      amount: index + 1,
+    }))
+    const target = technology('large-research', { ingredients })
+    const actor = {
+      is_valid: true,
+      character: { valid: true },
+      force: {
+        index: 1,
+        research_enabled: true,
+        technologies: {
+          'large-research': target,
+        },
+      },
+    } as unknown as ControlledActor
+    ;(globalThis as any).prototypes.technology['large-research'] = {}
+
+    const result: any = plan_research_path(actor, 'large-research')
+    expect(result).toMatchObject({ ok: true, node_count: 1, pending_count: 1 })
+    expect(result.nodes[0].science.ingredients).toHaveLength(16)
+    expect(result.nodes[0].science.ingredients[0]).toEqual({ name: 'science-0', amount: 1 })
+    expect(result.nodes[0].science.ingredients[15]).toEqual({ name: 'science-15', amount: 16 })
+    expect(result.nodes[0].science.ingredients_truncated).toBe(true)
+  })
+
   it('fails closed instead of returning an incomplete path when max_nodes is too small', () => {
     const { actor } = fixture()
     expect(plan_research_path(actor, 'automation', 1)).toMatchObject({
