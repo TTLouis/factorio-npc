@@ -552,6 +552,7 @@ function persistedStepCheckpoint(board, stepId) {
           ? parsed.relation
           : 'replan_needed',
         compound_probability: parsed?.compound_probability,
+        claimed_done: parsed?.claimed_done === true,
         provider: parsed?.provider,
         model: parsed?.model,
       }
@@ -3114,6 +3115,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // act-or-block repair path.
   async closeActiveStepOnPlannerDone(plan, before) {
     if (plan?.operations?.length !== 0 || plan?.plan?.length !== 0 || providerBlockerReason(plan)) return false
+    if (!before?.checkpoint) before = await this.checkpointFromEarlierSteps(plan, before)
+    // A mapping Jev declined on an earlier "done" claim stays declined.
+    if (before?.checkpoint?.claimed_done && before.checkpoint.boundary !== 'checkpoint_here') return false
     return this.closeActiveStepOnMetContract(before, {
       reasonCode: 'planner_done_with_satisfied_contract',
       source: 'planner_done',
@@ -3132,6 +3136,35 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!contract.requirements.every(requirement => WORLD_STATE_REQUIREMENT_KINDS.has(requirement?.kind))) return undefined
     const facts = await this.completionFactsForContract(contract, undefined, [])
     return evaluateCompletionContract(contract, facts)
+  }
+
+  // A step that never ran work of its own (e.g. "verify I hold 6 stone") has
+  // no checkpoint. Offer Jev the world-state targets earlier steps were
+  // verified against; if it maps one onto this step as its checkpoint, that
+  // becomes the step's contract, still re-read from Factorio before closing.
+  async checkpointFromEarlierSteps(plan, before) {
+    const board = this.memory.currentPlan?.(this.activePlanKey())?.task_board
+    const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : -1
+    if (!before?.stepId || activeIndex <= 0) return before
+    const seen = new Set()
+    const extraCandidates = board.steps.slice(0, activeIndex)
+      .map(step => sanitizeStepCompletionContract(step?.completion_contract))
+      .filter(contract => completionContractSupported(contract)
+        && contract.mode !== 'semantic_unknown'
+        && contract.requirements?.length > 0
+        && contract.requirements.every(requirement => WORLD_STATE_REQUIREMENT_KINDS.has(requirement?.kind)))
+      .filter(contract => {
+        const signature = JSON.stringify(contract.requirements)
+        if (seen.has(signature)) return false
+        seen.add(signature)
+        return true
+      })
+      .slice(-4)
+      .map(contract => ({ ...contract, source: 'verified_earlier_step' }))
+    if (extraCandidates.length === 0) return before
+    const decision = await this.routeStepCheckpointDecision(plan, { claimedDone: true, extraCandidates })
+    if (decision?.boundary !== 'checkpoint_here' || decision?.relation !== 'advances_current') return before
+    return activeStepCheckpointSnapshot(this.memory.currentPlan?.(this.activePlanKey())?.task_board) ?? before
   }
 
   async closeActiveStepOnMetContract(before, { reasonCode, source, admits, plannerStep }) {
@@ -3169,13 +3202,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return reduced.state ?? true
   }
 
-  async routeStepCheckpointDecision(plan) {
+  // `claimedDone` asks the same question for a step the planner says is
+  // already finished without new work; its candidates are then the verified
+  // world-state targets of earlier steps, which Jev may map onto this step.
+  async routeStepCheckpointDecision(plan, { claimedDone = false, extraCandidates = [] } = {}) {
     const key = this.activePlanKey()
     const planState = this.memory.planByNpc?.get?.(key) ?? this.memory.currentPlan?.(key)
     const board = planState?.task_board
     const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
     const step = activeIndex === undefined ? undefined : board?.steps?.[activeIndex]
-    if (!planState || planState.status !== 'active' || !step || !Array.isArray(plan?.operations) || plan.operations.length === 0) {
+    if (!planState || planState.status !== 'active' || !step || !Array.isArray(plan?.operations) || (plan.operations.length === 0 && !claimedDone)) {
       return { boundary: 'keep_step_open', relation: 'advances_current', state: planState }
     }
 
@@ -3186,6 +3222,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         : []),
       ...(completionContractSupported(plan.checkpoint) ? [{ ...plan.checkpoint, source: 'planner_semantic_checkpoint' }] : []),
       ...completionCandidatesFromOperations(plan.operations),
+      ...extraCandidates,
     ]
     if (rawCandidates.length === 0) rawCandidates.push(...await this.inventoryDeltaCandidates(plan.operations))
     const groundedContext = await this.groundedCheckpointContext(rawCandidates, plan.operations)
@@ -3254,6 +3291,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         description: sanitizeDurableModelText(step.description, 400),
         active_index: activeIndex,
       },
+      ...(claimedDone ? { planner_claim: 'step_already_complete_no_new_operation' } : {}),
       proposed_operations: plan.operations.slice(0, 8).map(operation => ({
         name: cleanMemoryText(operation?.name, 100),
         args: sanitizeDurableModelValue(operation?.args),
@@ -3353,6 +3391,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           boundary,
           relation,
           compound_probability: normalized.compound_probability,
+          ...(claimedDone ? { claimed_done: true } : {}),
           synthesis_used: normalized.synthesis_used,
           synthesis_reason: normalized.synthesis_reason,
           synthesis_symbol: normalized.synthesis_symbol,

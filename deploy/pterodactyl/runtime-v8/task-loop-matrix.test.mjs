@@ -555,3 +555,68 @@ test('a planner "done" on a plain completion turn still closes a met quantity go
   const { result } = await plannerSaysDone({ held: 8, route: 'continue_current' })
   assert.equal(result?.goalStatus, 'completed', `not closed: ${result?.chatMessage ?? result?.error?.message}`)
 })
+
+async function verifyOnlyStep({ heldAtDone, verifyBoundary = 'checkpoint_here' }) {
+  const game = new FakeFactorio({ inventory: { stone: 0 } })
+  const memory = new CanonicalTaskBoardMemory()
+  // Live req_mubeawua_1: step 1 closed on stone>=6, the plan's step 2 was a
+  // work-less "verify" step, and the planner then said done with no tool call.
+  const jev = recordingJev(async (state, questions) => {
+    if (questions.intent) return { overrides: { intent: { choice: 'new_goal', confidence: 0.9 } } }
+    if (questions.checkpoint_boundary && state?.planner_claim) {
+      return { overrides: { checkpoint_boundary: { choice: verifyBoundary, confidence: 0.9 }, compound_step: { noul: 0.1 } } }
+    }
+  })
+  const plan = ['Gather 6 stone', 'Verify inventory shows 6 stone']
+  let calls = 0
+  const agent = new NpcAgentLoop({
+    rcon: game,
+    memory,
+    provider: async () => {
+      calls++
+      if (calls === 1) return planReply({ plan, operations: [gather('stone', 6)], checkpoint: inventoryCheckpoint('stone', 6) })
+      return planReply({ chatMessage: 'Task complete, I hold 6 stone.', plan: [], operations: [] })
+    },
+    interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
+    interactionDecisionProvider: jev,
+    scopeReviewDecisionProvider: jev,
+    steeringDecisionProvider: jev,
+    systemPrompt: 'task loop matrix',
+    stateFile: null,
+    traceFile: null,
+    decisionTraceFile: null,
+    npcId: 'airi',
+  })
+  await agent.request('gather 6 stone, that is the only task', { sender: 'Louis' })
+  game.inventory.stone = 6
+  // Step 1 closes on its receipt/contract and the planner is asked what next.
+  const afterGather = { stone: heldAtDone }
+  const base = game.command.bind(game)
+  game.command = async text => {
+    if (text.includes('evaluate_condition') && memory.currentPlan(KEY)?.task_board?.completed_count >= 1) {
+      Object.assign(game.inventory, afterGather)
+    }
+    return base(text)
+  }
+  let result
+  try { result = await agent.completed() }
+  catch (error) { result = { error } }
+  return { result, memory, jev }
+}
+
+test('a work-less verify step closes when Jev maps it to an earlier met target', async () => {
+  const { result, memory, jev } = await verifyOnlyStep({ heldAtDone: 6 })
+  assert.ok(jev.calls.some(call => call.state?.planner_claim), 'Jev was asked about the verify step')
+  assert.equal(result?.goalStatus, 'completed', `not closed: ${result?.chatMessage ?? result?.error?.message}`)
+  assert.equal(memory.planningState(KEY)?.goal?.status, 'completed')
+})
+
+test('a work-less verify step stays open when the earlier target no longer holds', async () => {
+  const { result } = await verifyOnlyStep({ heldAtDone: 5 })
+  assert.notEqual(result?.goalStatus, 'completed')
+})
+
+test('a work-less verify step stays open when Jev does not map an earlier target onto it', async () => {
+  const { result } = await verifyOnlyStep({ heldAtDone: 6, verifyBoundary: 'keep_step_open' })
+  assert.notEqual(result?.goalStatus, 'completed')
+})
