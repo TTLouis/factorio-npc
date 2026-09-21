@@ -408,3 +408,67 @@ The next real E2E should reuse the simple diagnostic goal:
 ```
 
 If scope review is unavailable again, capture the new Debug rows `Jev scope review`, `Scope review packet`, and `Scope review failure`. That should identify whether the remaining defect is provider, transport/timeout, cancellation, or parse/schema without relying on the generic `jev_scope_review_unavailable` wrapper.
+
+
+## Cold-start budget floor + provider-compatible scope review (2026-09-20)
+
+The next live E2E exposed two distinct control-plane restrictions that were making the first planning turn fail before the Factorio task itself became difficult.
+
+Observed live symptoms:
+
+```text
+reasoning policy: jev_budget_micro
+observation budget: exhausted after the initial useful read
+scope review: UNAVAILABLE
+scope review failure: provider
+reason: Decision question scope_review_reason_codes has an unsupported type
+```
+
+The first issue was a cold-start budget problem. When the active router and Jev shadow both classified a request as a true `new_goal`, the runtime copied Jev's semantic budget directly onto the first Main-LLM turn even though request-local live observations had just been cleared. A `micro` reasoning choice plus a 0/1 observation allowance could therefore force the planner to stop observing before it had enough world state to choose a safe bootstrap action.
+
+The live policy now applies a minimum grounding floor only to an aligned fresh `new_goal` first turn:
+
+- `micro` or missing reasoning budget is raised to `normal`;
+- `normal`, `deep`, and `strategic` retain their relative authority, with `deep`/`strategic` never reduced;
+- the fresh observation allowance is at least 3, while a larger Jev allowance is preserved;
+- the Jev-selected planning horizon remains unchanged;
+- later planner boundaries continue using normal Jev-controlled budgets.
+
+This is an allowance floor, not a requirement to spend all observations. The Main LLM may act sooner when sufficient grounded evidence is already available.
+
+The second issue was a provider-contract mismatch. `scopeReviewQuestions()` used `multi_choice` for reason codes and step directions, while the live TypeSafe decision-provider boundary accepts only `choice`, `score`, and `noul`. The scope review therefore never reached Jev.
+
+The scope-review contract now uses only provider-supported primitives:
+
+- verdict: `choice`;
+- primary scope reason: `choice` including `none`;
+- optional secondary scope reason: another `choice`;
+- actionable prefix: a bounded dynamic `score` rubric whose score range matches the draft step count;
+- per-step development direction: bounded individual `choice` questions for the first six draft steps.
+
+The parser remains backward-compatible with the earlier aggregate response shape for tests/historical traces, while the live request no longer emits unsupported `multi_choice` questions. The live call now builds the question set with the actual draft step count.
+
+Implementation commits:
+
+- `1f8c7db657a98d345749bf22d59ab8c057fb888c` — replace unsupported Jev scope-review question schemas;
+- `28231930798d8b7e2bca58cda9be5cbfd4fa0dc9` — apply fresh-new-goal reasoning/observation floor and pass draft step count into scope review;
+- `fde63343b15a0805413204026c9bc8ae907365ec` — taxonomy regressions for provider-supported scope questions;
+- `52c63e94b61e88cdfcae94df31efc35b7d55bd58` — validate the real scope question set against the TypeSafe request normalizer;
+- `5e21050ac3ced8d07b90cede4c92eb291b303856` — regression proving a Jev `micro + 0 observations` cold start reaches the Main LLM as `normal + 3 observations`;
+- `b68f1da2ee3b2832a0218f5b80f860db88bc669b` — fix scalar primary/secondary reason parsing found by CI.
+
+Validation at `b68f1da2ee3b2832a0218f5b80f860db88bc669b`:
+
+- CI run `35554820564`: **success**
+  - `pterodactyl-runtime`: success
+  - `typescript-quality`: success
+  - `factorio-npc-deterministic`: success
+- Pterodactyl release gates run `35554820595`: **success**
+
+The next E2E should retry the same diagnostic goal rather than simplifying it:
+
+```text
+半自动化铁板和铜片
+```
+
+Expected first-turn diagnostics now include `jev_budget_normal` (or a stronger Jev budget), a fresh observation allowance of at least 3, and an actual Jev scope-review verdict instead of `unsupported type`. If scope review still becomes unavailable, the live Debug failure row should now identify the next concrete provider/transport/parse error.
