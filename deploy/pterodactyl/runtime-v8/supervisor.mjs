@@ -302,6 +302,8 @@ const UI_TASK_PAUSE_SUMMARIES = new Map([
   ['npc_identity_or_session_changed', 'AIRI paused because the active NPC session changed.'],
   ['actor_replaced', 'AIRI paused because the controlled NPC was replaced.'],
   ['follow_mode', 'AIRI paused the current task while following a player.'],
+  ['jev_needs_user_clarification', 'AIRI needs your direction before it can commit a plan. Reply with the clarification, or continue to retry.'],
+  ['jev_refinement_budget_exhausted', 'AIRI could not settle on a plan it could commit. Reply with more specific direction, or continue to retry.'],
 ])
 
 function requestFailurePauseSummary(raw) {

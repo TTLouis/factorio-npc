@@ -118,7 +118,10 @@ test('tools-disabled recovery cannot turn an unresolved identity into a craft mu
   })
 
   const result = await agent.request('establish early resources', { sender: 'tester' })
-  assert.equal(calls, 2)
+  // malformed draft, tools-disabled recovery (unknown_recipe), one bounded
+  // tools-enabled naming-correction turn that repeats the malformed draft, and
+  // its recovery repeating the same unknown recipe, which then freezes.
+  assert.equal(calls, 4)
   assert.equal(contexts[1].allowTools, false)
   assert.equal(result.blocker.code, 'unknown_recipe')
   assert.equal(rcon.mutations.length, 0)

@@ -421,7 +421,9 @@ async function verify({ rcon, results, stateFile }) {
   const provider = async (messages) => {
     providerCalls++
     assertPlannerMode(messages, 'vertical', `restored planner call ${providerCalls}`)
-    if (providerCalls === 1) {
+    // The missing resource is a naming error preflight gives one bounded
+    // correction turn for; repeating it on that turn is what freezes the plan.
+    if (providerCalls <= 2) {
       return planMessage({
         chatMessage: 'Testing the committed frontier against its now-known structural dependency.',
         step: 'Advance the next capability frontier',
@@ -430,7 +432,7 @@ async function verify({ rcon, results, stateFile }) {
         developmentMode: 'vertical',
       })
     }
-    if (providerCalls === 2) {
+    if (providerCalls === 3) {
       return planMessage({
         chatMessage: 'Following the user-approved bounded alternate route.',
         step: 'Use the verified iron route while the unavailable frontier dependency is reconsidered',
@@ -509,7 +511,7 @@ async function verify({ rcon, results, stateFile }) {
   const blockedResult = await agent.request('continue', { sender: 'Louis' })
   planning = memory.planningState(key)
   const blocked = getActivePlan(planning)
-  assert.equal(providerCalls, 1)
+  assert.equal(providerCalls, 2)
   assert.equal(blockedResult.goalStatus, 'blocked')
   assert.equal(blockedResult.operations.length, 0)
   assert.equal(
@@ -543,7 +545,7 @@ async function verify({ rcon, results, stateFile }) {
   planning = memory.planningState(key)
   const successor = getActivePlan(planning)
 
-  assert.equal(providerCalls, 2)
+  assert.equal(providerCalls, 3)
   assert.equal(scopeCalls, 1, 'the user-approved successor still passes Jev pre-commit scope review')
   assert.equal(revisedResult.goalStatus, 'active')
   assert.equal(successor.derived_from_plan_id, before.active_v3)

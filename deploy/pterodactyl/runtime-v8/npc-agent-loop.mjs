@@ -70,8 +70,20 @@ const ACTION_OMISSION_BLOCKER_PREFIX = 'BLOCKED:'
 const ACTION_OMISSION_REPAIR_MESSAGE = 'Finite canonical work remains, but no executable operation was submitted. Reuse the authoritative evidence already collected and do not repeat completed observations. If that evidence already parameterizes the next action, submit the next executable operation now. If exactly one mutable fact is genuinely missing, use exactly one targeted observation for that fact; after it, no more observation turns are allowed. Do not stop and wait for a human "continue" message. Otherwise keep the remaining plan and start chatMessage with "BLOCKED: " followed by the exact missing fact or truthful blocker.'
 const ACTION_OMISSION_AFTER_OBSERVATION_MESSAGE = 'The targeted observation budget for this decision is complete. Do not observe again or switch to another read-only tool. Submit the next executable operation now, or keep the remaining plan and start chatMessage with "BLOCKED: " followed by the exact still-missing fact or truthful blocker.'
 const RESEARCH_PREFLIGHT_RECOVERABLE_CODES = new Set(['missing_prerequisites', 'trigger_research', 'force_busy'])
+// Preflight codes that mean the planner named something wrongly (a prototype,
+// recipe, identity or argument), not that the world blocks the step. They get
+// one bounded correction turn before the plan is frozen as BLOCKED.
+const MODEL_CORRECTABLE_PREFLIGHT_CODES = new Set(['unknown_prototype', 'unknown_recipe', 'invalid_unit_number', 'invalid_target_kind', 'invalid_preflight_args'])
+const MODEL_CORRECTABLE_PREFLIGHT_RETRY_BUDGET = 1
 const RESEARCH_PREFLIGHT_RETRY_BUDGET = 2
 const JEV_SCOPE_REFINEMENT_BUDGET = 2
+// A scope review that cannot be obtained is a control-plane failure, not a
+// verdict. It is retried once, then the draft commits on deterministic runtime
+// validation alone, exactly as it does when no Jev provider is configured.
+const JEV_SCOPE_REVIEW_ATTEMPTS = 2
+// Once the system commits a plan it is frozen against its authors, Jev
+// included: later batches fulfil the committed steps and are not re-reviewed.
+const FROZEN_PLAN_STATUSES = new Set([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING])
 const JEV_SCOPE_REVIEW_MAX_OBSERVATIONS = 8
 const JEV_SCOPE_REVIEW_MAX_OBSERVATION_CHARS = 12000
 const JEV_SCOPE_REVIEW_MAX_LIVE_ENTITIES = 12
@@ -1847,10 +1859,18 @@ function stateFileFromOptions(options) {
   return path.join(path.resolve(process.env.CONTAINER_ROOT || '/home/container'), '.airi', 'npc-state.json')
 }
 
+function blockedPlanReply(plan) {
+  const reason = cleanMemoryText(plan?.blocker?.detail || plan?.blocker?.reason_code || 'a structural blocker', 240)
+  const step = plan?.steps?.[plan?.active_step_index ?? 0]?.description
+  const where = step ? ` at "${cleanMemoryText(step, 160)}"` : ''
+  return `The current plan is blocked${where}: ${reason}. Continuing unchanged would hit the same blocker. Tell me how to revise it (for example a different route or target), or cancel it.`
+}
+
 function planProgress(plan, stateResult) {
   const progress = taskBoardProgress(stateResult?.state?.task_board)
-  if (stateResult?.blockedByHarness) {
-    return `[Plan paused] ${progress?.step || 'Remaining work'}: no Autorio operation was submitted, so AIRI did not pretend that execution continued.`
+  if (stateResult?.blockedByHarness || stateResult?.state?.status === 'blocked') {
+    const blocker = stateResult?.state?.blocker ? ` (${cleanMemoryText(stateResult.state.blocker, 200)})` : ''
+    return `[Plan blocked] ${progress?.step || 'Remaining work'}${blocker}: no Autorio operation was submitted. Tell me how to revise the plan, or cancel it.`
   }
   if (stateResult?.persistentRuntimeActive) return plan.chatMessage
   if (plan.operations.length > 0 && progress?.total > 0) {
@@ -2113,6 +2133,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.scopeReviewObservations = []
     this.rejectedExactTargets = new Set()
     this.staleExactPreflightRetries = 0
+    this.modelCorrectablePreflightRetries = 0
     this.researchPreflightRetries = 0
     this.onActivity = typeof options.onActivity === 'function' ? options.onActivity : null
     this.turnSequence = Math.max(this.turnSequence, memory.maxTurnId?.() ?? 0)
@@ -2193,6 +2214,41 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const payload = JSON.stringify(skills)
     if (payload.length > SKILL_CONTEXT_MAX_CHARS) return ''
     return `[SKILL_CONTEXT] Explicitly loaded AIRI skills for this logical task. They are reusable strategy/constraint context, not authoritative live world state. Revalidate mutable facts before acting.\n${payload}`
+  }
+
+  // Two defects lived in the inherited compaction:
+  //  - it ran INSIDE the base tool batch, so when one real (multi-KB) read
+  //    overflowed the working budget, the just-pushed exchange was spliced out
+  //    before this class sliced `this.messages` for its results. Nothing was
+  //    recorded, and Jev judged every draft on an empty grounding packet
+  //    (grounding_observation_count: 0 -> needs_grounding, every time);
+  //  - it could compact the NEWEST exchange, replacing fresh observations with
+  //    an 800-char summary before the planner had read them once.
+  // Compaction now waits until this class has consumed the batch, and never
+  // takes the newest exchange; older exchanges still compact as before.
+  compactWorkingContext() {
+    if (this.compactionDeferred) return
+    const overBudget = () => this.messages.length > this.maxWorkingMessages
+      || this.messages.reduce((total, message) => total + messageChars(message), 0) > this.maxWorkingChars
+    while (overBudget()) {
+      const newest = this.messages.findLastIndex(message => message.role === 'assistant' && Array.isArray(message.tool_calls))
+      const start = this.messages.findIndex((message, index) => index >= this.baseMessages.length
+        && index !== newest
+        && message.role === 'assistant'
+        && Array.isArray(message.tool_calls))
+      if (start < 0) break
+      let end = start + 1
+      while (end < this.messages.length && this.messages[end].role === 'tool') end++
+      const removed = this.messages.splice(start, end - start)
+      const summary = this.summarizeToolExchange(removed)
+      const previous = this.messages[start - 1]
+      if (previous?.role === 'user' && typeof previous.content === 'string' && previous.content.startsWith('[OBSERVATIONS COMPACTED]')) {
+        previous.content = cleanMemoryText(`${previous.content}\n${summary}`, 12000)
+      }
+      else {
+        this.messages.splice(start, 0, { role: 'user', content: `[OBSERVATIONS COMPACTED] ${summary}` })
+      }
+    }
   }
 
   providerMessages() {
@@ -4047,6 +4103,32 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return { chatMessage: reply, plan: [], currentStep: 0, operations: [], interactionIntent: intent, routedOnly: true }
     }
 
+    // A BLOCKED plan is frozen until the user decides. The Task Board offers
+    // Revise, but a player talking only in chat must be able to decide too:
+    // an explicit amendment from a human IS user steering, which roadmap
+    // authority allows to supersede the plan. A bare "continue" is not a
+    // revision, so it gets the blocker explained instead of a planner turn
+    // whose output the frozen plan would silently discard.
+    const planningBeforeRequest = this.memory.planningState?.(memoryKey)
+    const reducerPlanBeforeRequest = planningBeforeRequest ? getActivePlanningPlan(planningBeforeRequest) : undefined
+    const blockedAwaitingUser = reducerPlanBeforeRequest?.status === PLAN_STATUS.BLOCKED
+      && reducerPlanBeforeRequest.blocker?.user_choice?.choice !== 'revise'
+    if (!routed.router_bypassed && blockedAwaitingUser && intent === 'continue_current') {
+      const reply = blockedPlanReply(reducerPlanBeforeRequest)
+      await this.rememberRoutedInteraction(memoryKey, sender, text, reply)
+      return { chatMessage: reply, plan: [], currentStep: 0, operations: [], interactionIntent: intent, routedOnly: true, goalStatus: 'blocked' }
+    }
+    if (!routed.router_bypassed && blockedAwaitingUser && intent === 'amend_current'
+      && typeof this.memory.recordBlockedChoice === 'function') {
+      this.memory.recordBlockedChoice(memoryKey, 'revise', sender, { now: Date.now() })
+      await this.persistState()
+      await this.traceEvent('planning.blocked_revision_from_chat', {
+        plan_id: reducerPlanBeforeRequest.plan_id,
+        blocker: reducerPlanBeforeRequest.blocker?.reason_code,
+        approved_by: sender,
+      })
+    }
+
     if (!routed.router_bypassed && intent === 'amend_current' && healthyRuntime && routed.route.queue_conflict !== true) {
       if (this.stageCompatibleAmendment(sender, text)) {
         const reply = `The amendment is compatible with the Autorio work already running (queue ${taskStatus.queue_length ?? 0}), so I will not cancel that batch. I will apply the amendment at the next main-planner boundary.`
@@ -4077,6 +4159,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.scopeReviewObservations = []
     this.rejectedExactTargets = new Set()
     this.staleExactPreflightRetries = 0
+    this.modelCorrectablePreflightRetries = 0
     this.researchPreflightRetries = 0
     this.bootstrapDependencyPreflightRetries = 0
     this.scopeRefinementAttempts = 0
@@ -4261,6 +4344,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.scopeReviewObservations = []
     this.rejectedExactTargets = new Set()
     this.staleExactPreflightRetries = 0
+    this.modelCorrectablePreflightRetries = 0
     this.researchPreflightRetries = 0
     this.bootstrapDependencyPreflightRetries = 0
     return true
@@ -4426,6 +4510,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.freshObservationSinceContinuation = false
     this.genericRecoveryDecisionActive = false
     this.staleExactPreflightRetries = 0
+    this.modelCorrectablePreflightRetries = 0
     this.researchPreflightRetries = 0
     this.messages.push({ role: 'user', content: cleanMemoryText(modMessage, 18000) })
     await this.traceEvent(traceEventName)
@@ -5202,12 +5287,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     const beforeCount = this.messages.length
     const admittedMessage = { ...message, tool_calls: admittedPrepared.map(entry => entry.tool) }
+    this.compactionDeferred = true
     try {
       await super.handleToolBatch(admittedMessage, admittedPrepared)
     }
     catch (error) {
       await this.traceEvent('tool.error', { message: error instanceof Error ? error.message : String(error) })
       throw error
+    }
+    finally {
+      this.compactionDeferred = false
     }
     const results = this.messages.slice(beforeCount + 1).filter(item => item.role === 'tool')
     if (!this.actionOmissionRepairActive && Number.isSafeInteger(this.observationBudgetRemaining) && freshRequestedCount > 0) {
@@ -5467,45 +5556,71 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       },
     }
 
-    let response
-    try {
-      response = await this.scopeReviewDecisionProvider(reviewState, scopeReviewQuestions({ draftStepCount: steps.length }), {
-        epoch: this.requestInfo?.epoch,
-        actorId: this.requestInfo?.actorId,
-      })
-    }
-    catch (error) {
-      const reason = String(error?.message ?? error).slice(0, 300)
+    const recordFailure = async (error, stage, attempt) => {
+      const failureKind = scopeReviewFailureKind(error, stage)
       await this.traceEvent('planning.scope_review_failed', {
         plan_id: plan.plan_id,
-        failure_stage: 'provider',
-        failure_kind: scopeReviewFailureKind(error, 'provider'),
-        reason,
+        failure_stage: stage,
+        failure_kind: failureKind,
+        reason: String(error?.message ?? error).slice(0, 300),
+        attempt,
+        max_attempts: JEV_SCOPE_REVIEW_ATTEMPTS,
         review_packet_version: reviewState.review_packet_version,
         grounding_observation_count: recentObservations.length,
         live_entity_count: liveEntities.length,
         deterministic_preflight_count: deterministicPreflight.length,
       })
-      return { verdict: 'needs_grounding', reason_codes: ['jev_scope_review_unavailable'], confidence: 0, runtime_validation }
+      return failureKind
     }
 
     let review
-    try {
-      review = parseScopeReview(response, { draftStepCount: steps.length })
+    let lastFailure
+    for (let attempt = 1; attempt <= JEV_SCOPE_REVIEW_ATTEMPTS && !review; attempt++) {
+      let response
+      try {
+        response = await this.scopeReviewDecisionProvider(reviewState, scopeReviewQuestions({ draftStepCount: steps.length }), {
+          epoch: this.requestInfo?.epoch,
+          actorId: this.requestInfo?.actorId,
+        })
+      }
+      catch (error) {
+        const kind = await recordFailure(error, 'provider', attempt)
+        lastFailure = { stage: 'provider', kind }
+        if (kind === 'cancellation') break
+        continue
+      }
+      try {
+        review = parseScopeReview(response, { draftStepCount: steps.length })
+      }
+      catch (error) {
+        const kind = await recordFailure(error, 'parse', attempt)
+        lastFailure = { stage: 'parse', kind }
+      }
     }
-    catch (error) {
-      const reason = String(error?.message ?? error).slice(0, 300)
-      await this.traceEvent('planning.scope_review_failed', {
+
+    if (!review && lastFailure?.kind === 'cancellation') {
+      // A cancelled review belongs to a superseded request; it must neither
+      // commit the draft nor count as criticism of it.
+      throw new AgentLoopError('Jev scope review was cancelled; the draft stays uncommitted')
+    }
+    if (!review) {
+      // Deterministic preflight already passed for this batch, which is the
+      // runtime-validation half of the gate. Missing criticism is not
+      // criticism: do not spend the semantic refinement budget on it and do
+      // not ask the user to clarify a goal Jev never judged.
+      await this.traceEvent('planning.scope_review_degraded', {
         plan_id: plan.plan_id,
-        failure_stage: 'parse',
-        failure_kind: scopeReviewFailureKind(error, 'parse'),
-        reason,
-        review_packet_version: reviewState.review_packet_version,
-        grounding_observation_count: recentObservations.length,
-        live_entity_count: liveEntities.length,
-        deterministic_preflight_count: deterministicPreflight.length,
+        failure_stage: lastFailure?.stage,
+        failure_kind: lastFailure?.kind,
+        commit_authority: 'runtime_validation_only',
       })
-      return { verdict: 'needs_grounding', reason_codes: ['jev_scope_review_unavailable'], confidence: 0, runtime_validation }
+      return {
+        verdict: 'actionable',
+        reason_codes: ['jev_scope_review_unavailable'],
+        confidence: 0,
+        degraded: true,
+        runtime_validation,
+      }
     }
 
     await this.traceEvent('planning.scope_review', {
@@ -5557,10 +5672,20 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const reason = review?.verdict === 'needs_user_clarification'
         ? 'Jev found genuine ambiguity that needs your direction before a safe bounded plan can be committed.'
         : `The draft still did not converge after ${JEV_SCOPE_REFINEMENT_BUDGET} bounded refinement passes.`
+      const blockerClass = review?.verdict === 'needs_user_clarification' ? 'jev_needs_user_clarification' : 'jev_refinement_budget_exhausted'
       await this.traceEvent('operations.skipped', {
-        reason: review?.verdict === 'needs_user_clarification' ? 'jev_needs_user_clarification' : 'jev_refinement_budget_exhausted',
+        reason: blockerClass,
         review,
       })
+      // The request stops here waiting on the user. Leaving the durable plan
+      // `active` made the Task Board show a running step with nothing running:
+      // the silent stall again. Pause it with the reason so the board says why,
+      // and so a later "continue" or clarification resumes it explicitly.
+      if (this.requestInfo?.memoryKey) {
+        const paused = this.memory.pausePlan?.(this.requestInfo.memoryKey, blockerClass)
+        if (paused) stateResult = { ...(stateResult ?? {}), state: paused }
+        await this.persistState()
+      }
       await this.traceEvent('request.completed', {
         chat_message: reason,
         outcome: 'awaiting_user_clarification',
@@ -6155,7 +6280,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (commands.length > 0 && stateResult?.blockedByHarness === true) {
       this.active = false
       await this.traceEvent('operations.skipped', {
-        reason: 'unresolved_transfer_step',
+        reason: 'plan_blocked_awaiting_user',
         blocker: stateResult?.state?.blocker,
         operations,
         task_board: visibleTaskBoard(stateResult?.state?.task_board),
@@ -6178,8 +6303,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         goalStatus: stateResult?.state?.status,
         taskBoard: visibleTaskBoard(stateResult?.state?.task_board),
         blocker: {
-          class: 'unverified_transfer_step',
-          reason: stateResult?.state?.blocker ?? 'unverified_transfer_step',
+          class: 'plan_blocked_awaiting_user',
+          reason: stateResult?.state?.blocker ?? 'plan_blocked_awaiting_user',
         },
       }
     }
@@ -6189,9 +6314,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       try {
         preflight = await this.preflightOperations(plan.operations)
         this.staleExactPreflightRetries = 0
+        this.modelCorrectablePreflightRetries = 0
         this.researchPreflightRetries = 0
         this.bootstrapDependencyPreflightRetries = 0
-        if (this.requestInfo && typeof this.memory.commitPlanningPlan === 'function') {
+        const planningBeforeReview = this.requestInfo ? this.memory.planningState?.(this.requestInfo.memoryKey) : undefined
+        const reducerPlanBeforeReview = planningBeforeReview ? getActivePlanningPlan(planningBeforeReview) : undefined
+        const planFrozen = FROZEN_PLAN_STATUSES.has(reducerPlanBeforeReview?.status)
+        if (!planFrozen && this.requestInfo && typeof this.memory.commitPlanningPlan === 'function') {
           // Preflight has just passed, which IS the runtime validation half of
           // the commit gate. Jev's scope review is the other half, and it runs
           // here because this is the last point before the draft becomes
@@ -6264,6 +6393,38 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           this.messages.push({
             role: 'user',
             content: `[HARNESS] Deterministic craft preflight rejected the requested craft before Autorio admission because it is not currently craftable. Resolve the first unresolved bootstrap dependency before retrying the downstream craft. Reuse held items/buildings marked already_satisfied; bootstrap only missing quantities. A machine dependency with satisfaction_scope=inventory_acquisition means the machine item is already owned, not that a placed live machine instance exists. If processing requires that machine, first use an existing live observed compatible instance or place one from the held item; after placement, re-observe it and bind its real unit_number before any exact supply/configuration operation. Never invent a unit_number. This bootstrap inventory is for construction/startup only and does not remove steady-state recipe flow from a continuous production topology. Preflight: ${JSON.stringify(error.preflight.bootstrap ?? {})}`,
+          })
+          return this.runTurn()
+        }
+        if (MODEL_CORRECTABLE_PREFLIGHT_CODES.has(error?.preflight?.code)
+          && (this.modelCorrectablePreflightRetries ?? 0) < MODEL_CORRECTABLE_PREFLIGHT_RETRY_BUDGET) {
+          this.modelCorrectablePreflightRetries = (this.modelCorrectablePreflightRetries ?? 0) + 1
+          if (this.requestInfo) {
+            const state = this.memory.setAdmissionState?.(this.requestInfo.memoryKey, 'preflight_rejected')
+            if (state) stateResult = { ...(stateResult ?? {}), state }
+            this.memory.recordBoardEvidence?.(this.requestInfo.memoryKey, {
+              kind: 'operation_preflight_recoverable',
+              ref: `${this.traceRequest?.id ?? 'request'}/${error.preflight.code}`,
+              summary: JSON.stringify({
+                code: error.preflight.code,
+                operation_index: error.preflight.operation_index,
+                operation: error.preflight.operation,
+                detail: cleanMemoryText(error.preflight.detail ?? error.preflight.identity ?? '', 300),
+              }),
+            })
+            await this.persistState()
+          }
+          await this.traceEvent('operations.preflight_recoverable', {
+            failure_class: `model_correctable_${error.preflight.code}`,
+            preflight: error.preflight,
+            tools_enabled: true,
+            retry: this.modelCorrectablePreflightRetries,
+            retry_budget: MODEL_CORRECTABLE_PREFLIGHT_RETRY_BUDGET,
+          })
+          const index = Number.isSafeInteger(error.preflight.operation_index) ? error.preflight.operation_index : 0
+          this.messages.push({
+            role: 'user',
+            content: `[HARNESS] Deterministic preflight rejected operation ${index + 1} (${cleanMemoryText(plan.operations[index]?.name, 80)}) before Autorio admission with code ${error.preflight.code}; no mutation from this batch ran. This is a naming/argument error in the proposed operation, not a world blocker. Correct the prototype, recipe, identity or argument using exact Factorio names already confirmed by observation (observe once if the exact name is unknown), then resubmit the same step. Do not change the plan's steps to avoid the error. Preflight: ${JSON.stringify(error.preflight).slice(0, 600)}`,
           })
           return this.runTurn()
         }
