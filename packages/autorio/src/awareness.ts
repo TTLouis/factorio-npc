@@ -77,12 +77,12 @@ export function new_awareness_controller() {
     if (!changed_chunk) return false
 
     // The hidden RadarPrototype handles the actual continuously refreshed 3x3
-    // fog-of-war visibility. Chunk generation remains an explicit bounded
-    // safety net because a radar cannot reveal terrain that does not exist yet,
-    // and standalone characters do not get the normal LuaPlayer exploration
-    // generation bubble.
+    // fog-of-war visibility. Queue the nearby terrain as a bounded safety net,
+    // but do NOT synchronously drain the global chunk-generation queue here.
+    // force_generate_chunk_requests() can block an entire simulation frame and
+    // made cold starts / chunk-boundary crossings look like hard mod freezes.
+    // The engine can amortize this queued 3x3 request over subsequent ticks.
     actor.surface.request_to_generate_chunks(actor.position, RADAR_CHUNK_RADIUS)
-    actor.surface.force_generate_chunk_requests()
 
     storage.airi_awareness_chunk = {
       surface_index: actor.surface.index,
