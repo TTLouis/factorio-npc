@@ -857,12 +857,14 @@ test('pre-commit draft replacement preserves user-approved successor lineage', (
   })
   const replacement = getActivePlan(refreshed)
 
-  assert.notEqual(replacement.plan_id, approved.plan_id)
+  // A contract refresh edits the unreviewed draft in place: same identity, no
+  // throwaway superseded record, lineage untouched.
+  assert.equal(replacement.plan_id, approved.plan_id)
+  assert.equal(refreshed.plans.length, state.plans.length)
   assert.equal(replacement.plan_version, approved.plan_version)
   assert.equal(replacement.derived_from_plan_id, predecessor.plan_id)
   assert.deepEqual(replacement.carried_forward_evidence, approved.carried_forward_evidence)
-  assert.equal(getPlan(refreshed, approved.plan_id).status, PLAN_STATUS.SUPERSEDED)
-  assert.equal(getPlan(refreshed, approved.plan_id).superseded_by_plan_id, replacement.plan_id)
+  assert.ok(replacement.steps[0].completion_contract)
 })
 
 test('a user revision carries forward verified completed work as evidence references', () => {

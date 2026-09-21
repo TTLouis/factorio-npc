@@ -83,6 +83,15 @@ test('a committed multi-step plan runs to verified completion with one pre-commi
   assert.equal(planning.goal.satisfaction?.source, 'runtime')
 })
 
+test('a first-draft commit yields exactly one plan record', async () => {
+  const world = harness()
+  await world.say('gather 10 iron ore', 'new_goal')
+  const planning = world.memory.planningState(KEY)
+  assert.equal(planning.plans.length, 1, 'checkpoint discovery must not mint a throwaway superseded draft')
+  assert.equal(world.reducerPlan().status, PLAN_STATUS.COMMITTED)
+  assert.ok(world.reducerPlan().steps[0].completion_contract, 'the refreshed contract still lands on the committed plan')
+})
+
 test('continue after a finished goal does not invent a goal named "continue"', async () => {
   const world = harness()
   await world.say('semi-automate iron and copper plates', 'new_goal')

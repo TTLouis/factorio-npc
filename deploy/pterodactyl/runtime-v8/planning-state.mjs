@@ -1794,6 +1794,35 @@ Object.assign(HANDLERS, {
     const inheritedLineage = replacedDraft && PRE_COMMIT_STATUSES.includes(replacedDraft.status)
       ? replacedDraft
       : undefined
+    // Attaching a newly grounded completion contract to an unreviewed draft is
+    // an edit of that draft, not a new authoring attempt. Minting a successor
+    // here left a throwaway SUPERSEDED record on every first commit and two per
+    // refinement pass, so plan ids and the tracker churned for one submission.
+    const inPlaceSequence = event.origin === 'checkpoint_contract_refresh' && inheritedLineage
+      ? Number(inheritedLineage.plan_id.slice(inheritedLineage.plan_id.lastIndexOf('_p') + 2))
+      : undefined
+    if (Number.isSafeInteger(inPlaceSequence)) {
+      const refreshed = createPlan(state, {
+        now,
+        sequence: inPlaceSequence,
+        planVersion: inheritedLineage.plan_version,
+        derivedFrom: inheritedLineage.derived_from_plan_id ?? null,
+        steps: event.steps,
+        roadmapNodeIds: event.roadmap_node_ids,
+        developmentMode: event.development_mode,
+        origin: inheritedLineage.origin,
+        carriedForwardEvidence: inheritedLineage.carried_forward_evidence ?? [],
+      })
+      if (refreshed.plan_id !== inheritedLineage.plan_id || refreshed.steps.length === 0) return state
+      return {
+        ...state,
+        plans: state.plans.map(existing => (existing.plan_id === refreshed.plan_id
+          ? { ...refreshed, created_at: existing.created_at ?? refreshed.created_at }
+          : existing)),
+        updated_at: now,
+        log: logEntry(state, { type: PLANNING_EVENT.DRAFT_CREATED, at: now, plan_id: refreshed.plan_id, in_place: true }),
+      }
+    }
     const plan = createPlan(state, {
       now,
       sequence,
