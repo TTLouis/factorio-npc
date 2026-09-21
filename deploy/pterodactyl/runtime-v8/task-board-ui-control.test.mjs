@@ -933,3 +933,10 @@ test('real provider lifecycle events reach the supervisor sync as the current re
   assert.match(writes[0].command, /"role":"user".*"text":"inspect the factory without changing anything"/)
   assert.match(writes[0].command, /"role":"assistant".*"text":"The read-only inspection is complete\."/)
 })
+
+test('pause summaries keep the agent failure class instead of a generic request failure', () => {
+  const omission = formatTaskCondition('provider_action_omission_repair_failed: bounded act-or-block repair returned no executable operation', 'pause')
+  assert.match(omission.summary, /without starting the next action/)
+  const drift = formatTaskCondition('provider_semantic_alignment_failed: relation=unrelated', 'pause')
+  assert.match(drift.summary, /did not match the current step/)
+})

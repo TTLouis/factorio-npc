@@ -324,6 +324,12 @@ export function formatTaskCondition(value, kind = 'blocker') {
     if (raw.startsWith('provider_recovery_exhausted:')) {
       return { raw, summary: 'AIRI could not get a usable model response after retrying.' }
     }
+    if (raw.startsWith('provider_action_omission_repair_failed:')) {
+      return { raw, summary: 'AIRI kept planning without starting the next action, so it paused. Continue to retry, or give more specific direction.' }
+    }
+    if (raw.startsWith('provider_semantic_alignment_failed:')) {
+      return { raw, summary: 'AIRI proposed work that did not match the current step, so it paused instead of drifting. Continue to retry, or revise the task.' }
+    }
     if (raw.startsWith('server_stop_')) {
       return { raw, summary: 'AIRI paused because the server is stopping.' }
     }
@@ -1568,8 +1574,19 @@ export async function pauseStrandedPlanAfterRequestError(session, message) {
   if (!idleAutorioRuntime(runtime)) return undefined
 
   const clean = uiText(message, 240)
-  const outputBudget = /provider_output_budget_exhausted|finish=length|output budget/i.test(clean)
-  const reason = `${outputBudget ? 'provider_output_budget_exhausted' : 'request_failed'}: ${clean || 'unexpected request failure'}`
+  // Keep the agent's own failure class: "the model answered but proposed no
+  // action / the wrong step" needs a different response from the player than
+  // a network failure, and all of them used to read as "request failed".
+  const reasonCode = /provider_output_budget_exhausted|finish=length|output budget/i.test(clean)
+    ? 'provider_output_budget_exhausted'
+    : /^Provider response recovery exhausted after \d+ attempts/i.test(clean)
+      ? 'provider_recovery_exhausted'
+      : /provider_action_omission_repair_failed/i.test(clean)
+        ? 'provider_action_omission_repair_failed'
+        : /provider_semantic_alignment_failed/i.test(clean)
+          ? 'provider_semantic_alignment_failed'
+          : 'request_failed'
+  const reason = `${reasonCode}: ${clean || 'unexpected request failure'}`
   const paused = await agent.pausePersistentPlan?.(reason)
   if (paused) await session.syncTaskBoardUi?.(paused)
   return paused
