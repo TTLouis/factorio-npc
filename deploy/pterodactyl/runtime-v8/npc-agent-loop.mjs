@@ -48,6 +48,7 @@ import {
 } from './step-completion.mjs'
 import {
   isObservationToolName,
+  isPlannerControlToolName,
   plannerControlPayloadFromMessage,
   renderOperation,
   renderOperationPreflight,
@@ -4977,7 +4978,29 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     await this.assertCurrent()
     if (!message || typeof message !== 'object') throw new AgentLoopError('Provider returned no message')
 
-    const plannerSubmission = effectiveAllowTools ? plannerControlPayloadFromMessage(message) : undefined
+    let plannerSubmission
+    try {
+      plannerSubmission = effectiveAllowTools ? plannerControlPayloadFromMessage(message) : undefined
+    }
+    catch (error) {
+      // A malformed submitPlan call is a plan-format error, exactly like
+      // malformed JSON content. Throwing here skipped the bounded format
+      // recovery and ended the whole request (recoverable:false) on one bad
+      // tool call. Hand the raw arguments on as content so parsePlanMessage
+      // fails into recoverPlan, and keep a bounded preview for diagnosis.
+      const call = (Array.isArray(message.tool_calls) ? message.tool_calls : [])
+        .find(item => isPlannerControlToolName(item?.function?.name))
+      const rawArgs = typeof call?.function?.arguments === 'string' ? call.function.arguments : ''
+      await this.traceEvent('provider.plan_submission_invalid', {
+        reason: cleanMemoryText(error instanceof Error ? error.message : String(error), 300),
+        tool_call_count: Array.isArray(message.tool_calls) ? message.tool_calls.length : 0,
+        arguments_chars: rawArgs.length,
+        arguments_head: cleanMemoryText(rawArgs.slice(0, 300), 300),
+        arguments_tail: cleanMemoryText(rawArgs.slice(-200), 200),
+        finish_reason: message._airiProvider?.finish_reason,
+      })
+      message = { ...message, tool_calls: undefined, content: rawArgs }
+    }
     if (plannerSubmission) {
       await this.traceEvent('provider.plan_submission', {
         source: 'submitPlan',

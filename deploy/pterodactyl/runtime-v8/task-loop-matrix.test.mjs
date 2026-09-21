@@ -259,3 +259,41 @@ test('the inventory delta is relative to what was already held', async () => {
   assert.notEqual(state?.status, 'completed')
   assert.equal(state?.task_board?.completed_count ?? 0, 0)
 })
+
+test('a malformed submitPlan tool call is recovered, not a fatal request failure', async () => {
+  const game = new FakeFactorio()
+  const memory = new CanonicalTaskBoardMemory()
+  const jev = recordingJev(async (_state, questions) => (questions.intent
+    ? { overrides: { intent: { choice: 'new_goal', confidence: 0.9 } } }
+    : undefined))
+  const events = []
+  let calls = 0
+  const agent = new NpcAgentLoop({
+    rcon: game,
+    memory,
+    provider: async () => {
+      calls++
+      if (calls === 1) {
+        return {
+          content: '',
+          tool_calls: [{ id: 'p1', type: 'function', function: { name: 'submitPlan', arguments: '{"chatMessage":"Gathering","plan":["Gather 10 coal"],"currentStep":0,"operations":[{"name":"gather_resource","args":{"resource_name":"coal","count":10' } }],
+        }
+      }
+      return planReply({ plan: ['Gather 10 coal'], operations: [gather('coal', 10)], checkpoint: inventoryCheckpoint('coal', 10) })
+    },
+    interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
+    interactionDecisionProvider: jev,
+    scopeReviewDecisionProvider: jev,
+    steeringDecisionProvider: jev,
+    systemPrompt: 'task loop matrix',
+    stateFile: null,
+    traceFile: null,
+    decisionTraceFile: null,
+    npcId: 'airi',
+    onActivity: event => events.push(event),
+  })
+  const result = await agent.request('gather 10 coal', { sender: 'Louis' })
+  assert.equal(result.goalStatus, 'active')
+  assert.equal(game.mutations.length, 1)
+  assert.ok(events.includes('provider.plan_submission_invalid'))
+})
