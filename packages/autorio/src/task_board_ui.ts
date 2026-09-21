@@ -878,26 +878,35 @@ function render_tracker(parent: LuaGuiElement, board: TaskBoardUiSnapshot | unde
   workspace.style.horizontal_spacing = ui_constants.CONSOLE_LAYOUT.tracker_column_gap
   workspace.style.vertical_align = 'top'
 
-  const shelf = workspace.add({ type: 'flow', name: ui_constants.TRACKER.shelf, direction: 'vertical' })
+  // Each half of the workspace is its own bordered, titled sub-panel - a
+  // standalone list, not a bare flow glued to its neighbour - so the shelf and
+  // the executing plan read as two distinct trackers sharing one card.
+  const shelf = workspace.add({ type: 'frame', name: ui_constants.TRACKER.shelf, direction: 'vertical', style: 'inside_shallow_frame' })
   shelf.style.width = ui_constants.CONSOLE_LAYOUT.tracker_shelf_width
-  shelf.style.vertical_spacing = 4
-  const shelf_header = shelf.add({ type: 'flow', name: ui_constants.TRACKER.shelf_header, direction: 'horizontal' })
-  shelf_header.style.width = ui_constants.CONSOLE_LAYOUT.tracker_shelf_width
+  const shelf_header = shelf.add({ type: 'frame', name: ui_constants.TRACKER.shelf_header, direction: 'horizontal', style: 'subheader_frame' })
+  shelf_header.style.horizontally_stretchable = true
   shelf_header.style.vertical_align = 'center'
-  shelf_header.add({ type: 'label', caption: 'Roadmap Shelf', style: 'semibold_label' })
+  shelf_header.add({ type: 'label', caption: 'Roadmap Shelf', style: 'subheader_caption_label' })
   const shelf_spacer = shelf_header.add({ type: 'empty-widget' }); shelf_spacer.style.horizontally_stretchable = true
   shelf_header.add({ type: 'label', name: ui_constants.TRACKER.shelf_count, caption: '0', style: 'semibold_label' })
-  const shelf_scroll = shelf.add({ type: 'scroll-pane', name: ui_constants.TRACKER.shelf_scroll, style: 'scroll_pane_in_shallow_frame', horizontal_scroll_policy: 'never' })
-  shelf_scroll.style.width = ui_constants.CONSOLE_LAYOUT.tracker_shelf_width
+  const shelf_body = shelf.add({ type: 'flow', direction: 'vertical' }); shelf_body.style.padding = ui_constants.SECTION_PADDING; shelf_body.style.horizontally_stretchable = true
+  const shelf_scroll = shelf_body.add({ type: 'scroll-pane', name: ui_constants.TRACKER.shelf_scroll, style: 'scroll_pane_in_shallow_frame', horizontal_scroll_policy: 'never' })
+  shelf_scroll.style.horizontally_stretchable = true
   const shelf_table = shelf_scroll.add({ type: 'table', name: ui_constants.TRACKER.shelf_table, column_count: 2, tags: { signature: '' } })
   shelf_table.style.horizontal_spacing = 6
   shelf_table.style.vertical_spacing = 5
 
-  const plan_column = workspace.add({ type: 'flow', name: ui_constants.TRACKER.plan_column, direction: 'vertical' })
+  const plan_column = workspace.add({ type: 'frame', name: ui_constants.TRACKER.plan_column, direction: 'vertical', style: 'inside_shallow_frame' })
   plan_column.style.width = ui_constants.CONSOLE_LAYOUT.tracker_plan_width
-  plan_column.style.vertical_spacing = 4
-  const empty = plan_column.add({ type: 'label', name: ui_constants.TRACKER.empty, caption: 'No active plan slice.' }); empty.style.font_color = TONE_COLORS.muted
-  const plan = plan_column.add({ type: 'flow', name: ui_constants.TRACKER.plan, direction: 'vertical' }); plan.style.width = ui_constants.CONSOLE_LAYOUT.tracker_plan_width; plan.style.vertical_spacing = 6
+  const plan_header = plan_column.add({ type: 'frame', name: ui_constants.TRACKER.plan_header, direction: 'horizontal', style: 'subheader_frame' })
+  plan_header.style.horizontally_stretchable = true
+  plan_header.style.vertical_align = 'center'
+  plan_header.add({ type: 'label', caption: 'Active Plan', style: 'subheader_caption_label' })
+  const plan_header_spacer = plan_header.add({ type: 'empty-widget' }); plan_header_spacer.style.horizontally_stretchable = true
+  plan_header.add({ type: 'label', name: ui_constants.TRACKER.plan_summary, caption: '', style: 'semibold_label' })
+  const plan_body = plan_column.add({ type: 'flow', direction: 'vertical' }); plan_body.style.padding = ui_constants.SECTION_PADDING; plan_body.style.horizontally_stretchable = true; plan_body.style.vertical_spacing = 6
+  const empty = plan_body.add({ type: 'label', name: ui_constants.TRACKER.empty, caption: 'No active plan slice.' }); empty.style.font_color = TONE_COLORS.muted
+  const plan = plan_body.add({ type: 'flow', name: ui_constants.TRACKER.plan, direction: 'vertical' }); plan.style.horizontally_stretchable = true; plan.style.vertical_spacing = 6
   const progress = plan.add({ type: 'progressbar', name: ui_constants.TRACKER.progress, value: 0 }); progress.style.horizontally_stretchable = true
   const steps_scroll = plan.add({ type: 'scroll-pane', name: ui_constants.TRACKER.steps_scroll, style: 'scroll_pane_in_shallow_frame', horizontal_scroll_policy: 'never' }); steps_scroll.style.horizontally_stretchable = true
   const steps_table = steps_scroll.add({ type: 'table', name: ui_constants.TRACKER.steps_table, column_count: 4 }); steps_table.style.horizontal_spacing = 8; steps_table.style.vertical_spacing = 4
@@ -925,6 +934,8 @@ function refresh_tracker(parent: LuaGuiElement, board: TaskBoardUiSnapshot | und
   const shelf = workspace?.valid ? workspace[ui_constants.TRACKER.shelf] : undefined
   const plan_column = workspace?.valid ? workspace[ui_constants.TRACKER.plan_column] : undefined
   const summary = header[ui_constants.TRACKER.summary]
+  const plan_header = plan_column?.valid ? plan_column[ui_constants.TRACKER.plan_header] : undefined
+  const plan_summary = plan_header?.valid ? plan_header[ui_constants.TRACKER.plan_summary] : undefined
   const empty = plan_column?.valid ? plan_column[ui_constants.TRACKER.empty] : undefined
   const plan = plan_column?.valid ? plan_column[ui_constants.TRACKER.plan] : undefined
   const divider = body[ui_constants.TRACKER.divider]
@@ -932,7 +943,7 @@ function refresh_tracker(parent: LuaGuiElement, board: TaskBoardUiSnapshot | und
   const activity_empty = body[ui_constants.TRACKER.activity_empty]
   const activity_scroll = body[ui_constants.TRACKER.activity_scroll]
   const activity_table = activity_scroll?.valid ? activity_scroll[ui_constants.TRACKER.activity_table] : undefined
-  if (!workspace?.valid || !shelf?.valid || !plan_column?.valid || !summary?.valid || !empty?.valid || !plan?.valid || !divider?.valid || !activity_header?.valid || !activity_empty?.valid || !activity_scroll?.valid || !activity_table?.valid) return false
+  if (!workspace?.valid || !shelf?.valid || !plan_column?.valid || !summary?.valid || !plan_header?.valid || !plan_summary?.valid || !empty?.valid || !plan?.valid || !divider?.valid || !activity_header?.valid || !activity_empty?.valid || !activity_scroll?.valid || !activity_table?.valid) return false
 
   const shelf_nodes = board?.shelf ?? []
   const row_count = board === undefined ? 0 : math.max(board.steps.length, shelf_nodes.length)
@@ -946,14 +957,14 @@ function refresh_tracker(parent: LuaGuiElement, board: TaskBoardUiSnapshot | und
   divider.visible = false
   activity_header.visible = false
   summary.caption = ''
+  plan_summary.caption = ''
 
   if (!refresh_shelf(shelf, shelf_nodes, tracker_heights.steps)) return false
   if (board !== undefined && has_steps) {
     if (!refresh_steps(plan, board, tracker_heights.steps)) return false
     const active_number = board.status === 'completed' ? board.total_steps : math.min(board.active_index + 1, board.total_steps)
-    summary.caption = `STEP ${active_number}/${board.total_steps} · ${board.completed_count} verified · SHELF ${shelf_nodes.length}`
+    plan_summary.caption = `STEP ${active_number}/${board.total_steps} · ${board.completed_count} verified`
   }
-  else if (has_shelf) summary.caption = `SHELF ${shelf_nodes.length} · no active slice`
 
   refresh_activity(activity_header, activity_empty, activity_scroll, activity_table, all_activity, tracker_heights.activity, player)
   activity_empty.visible = false
@@ -978,7 +989,7 @@ function refresh_shelf(shelf: LuaGuiElement, nodes: TaskBoardUiShelfNode[], max_
     table.add({ type: 'sprite', sprite: TONE_SPRITES.muted, style: 'status_image' })
     const label = gui_text.literal_gui_text(table.add({ type: 'label', caption: 'No shelved roadmap nodes.' }))
     label.style.single_line = false
-    label.style.maximal_width = ui_constants.CONSOLE_LAYOUT.tracker_shelf_width - 36
+    label.style.maximal_width = ui_constants.CONSOLE_LAYOUT.tracker_shelf_width - 2 * ui_constants.SECTION_PADDING - 36
   }
   else {
     for (const node of visible) {
@@ -991,7 +1002,7 @@ function refresh_shelf(shelf: LuaGuiElement, nodes: TaskBoardUiShelfNode[], max_
       const caption = node.linked ? `→ ${node.intent}` : node.intent
       const label = gui_text.literal_gui_text(table.add({ type: 'label', caption, style: node.linked ? 'bold_label' : 'label', tooltip }))
       label.style.single_line = false
-      label.style.maximal_width = ui_constants.CONSOLE_LAYOUT.tracker_shelf_width - 36
+      label.style.maximal_width = ui_constants.CONSOLE_LAYOUT.tracker_shelf_width - 2 * ui_constants.SECTION_PADDING - 36
       if (node.status === 'invalidated') label.style.font_color = TONE_COLORS.muted
     }
   }
@@ -1016,7 +1027,7 @@ function refresh_steps(plan: LuaGuiElement, board: TaskBoardUiSnapshot, max_heig
     for (let index = 0; index < visible.length; index++) {
       const step = visible[index]; const tone = step_tone(step)
       steps_table.add({ type: 'sprite', sprite: TONE_SPRITES[tone], style: 'status_image', tooltip: step.status }); steps_table.add({ type: 'label', caption: `${index + 1}.`, style: 'semibold_label' })
-      const description = gui_text.literal_gui_text(steps_table.add({ type: 'label', caption: step_caption(step.description), style: step.status === 'active' ? 'bold_label' : 'label' })); description.style.single_line = false; description.style.maximal_width = ui_constants.CONSOLE_LAYOUT.tracker_plan_width - 140
+      const description = gui_text.literal_gui_text(steps_table.add({ type: 'label', caption: step_caption(step.description), style: step.status === 'active' ? 'bold_label' : 'label' })); description.style.single_line = false; description.style.maximal_width = ui_constants.CONSOLE_LAYOUT.tracker_plan_width - 2 * ui_constants.SECTION_PADDING - 140
       if (step.status === 'completed' || step.status === 'pending') description.style.font_color = TONE_COLORS.muted
       const state = steps_table.add({ type: 'label', caption: step.status.toUpperCase(), style: 'semibold_label' }); state.style.font_color = TONE_COLORS[tone]; state.style.minimal_width = 72
       if (index === active_index) active_label = description

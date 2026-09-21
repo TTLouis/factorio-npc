@@ -30,6 +30,8 @@ export const TRACKER = {
   shelf_scroll: 'airi_task_board_tracker_shelf_scroll',
   shelf_table: 'airi_task_board_tracker_shelf_table',
   plan_column: 'airi_task_board_tracker_plan_column',
+  plan_header: 'airi_task_board_tracker_plan_header',
+  plan_summary: 'airi_task_board_tracker_plan_summary',
   plan: 'airi_task_board_tracker_plan',
   progress: 'airi_task_board_tracker_progress',
   steps_scroll: 'airi_task_board_tracker_steps',
