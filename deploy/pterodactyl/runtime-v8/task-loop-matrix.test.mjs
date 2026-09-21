@@ -210,3 +210,52 @@ test('large observations still reach the Jev grounding packet after context comp
   await world.say('gather 10 iron ore', 'new_goal')
   assert.deepEqual(packets, [['getInventoryItems', 'getActorStatus']])
 })
+
+function uncheckpointedGather(game) {
+  const memory = new CanonicalTaskBoardMemory()
+  const jev = recordingJev(async (_state, questions) => (questions.intent
+    ? { overrides: { intent: { choice: 'new_goal', confidence: 0.9 } } }
+    : undefined))
+  let plannerCalls = 0
+  const agent = new NpcAgentLoop({
+    rcon: game,
+    memory,
+    // The live planner often submits a gather with no checkpoint at all.
+    provider: async () => {
+      plannerCalls++
+      return planReply({ plan: ['Gather 10 coal'], operations: [gather('coal', 10)] })
+    },
+    interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
+    interactionDecisionProvider: jev,
+    scopeReviewDecisionProvider: jev,
+    steeringDecisionProvider: jev,
+    systemPrompt: 'task loop matrix',
+    stateFile: null,
+    traceFile: null,
+    decisionTraceFile: null,
+    npcId: 'airi',
+  })
+  return { agent, memory, plannerCalls: () => plannerCalls }
+}
+
+test('an uncheckpointed gather closes on the grounded inventory delta, not a model claim', async () => {
+  const game = new FakeFactorio({ inventory: { coal: 3 } })
+  const run = uncheckpointedGather(game)
+  await run.agent.request('gather 10 coal, nothing else', { sender: 'Louis' })
+  game.inventory.coal = 13
+  const done = await run.agent.completed()
+  assert.equal(done.goalStatus, 'completed')
+  assert.equal(run.plannerCalls(), 1, 'the runtime closes the goal without asking the planner')
+})
+
+test('the inventory delta is relative to what was already held', async () => {
+  const game = new FakeFactorio({ inventory: { coal: 3 } })
+  const run = uncheckpointedGather(game)
+  await run.agent.request('gather 10 coal, nothing else', { sender: 'Louis' })
+  // Receipt completes, but only 9 new coal actually arrived.
+  game.inventory.coal = 12
+  await run.agent.completed()
+  const state = run.memory.currentPlan(KEY)
+  assert.notEqual(state?.status, 'completed')
+  assert.equal(state?.task_board?.completed_count ?? 0, 0)
+})

@@ -3009,6 +3009,38 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  // Quantity operations deliberately yield no receipt candidate: gathering 40
+  // stone does not mean "have 40 stone". But with no planner checkpoint either,
+  // Jev had nothing to judge and the step could only stay semantic_unknown, so
+  // a verified "mined 10 coal" receipt never closed "Gather 10 coal". Offer the
+  // grounded delta instead -- current held count plus the requested amount --
+  // as one CANDIDATE. Jev still decides whether it is what the step means.
+  async inventoryDeltaCandidates(operations) {
+    const targets = new Map()
+    for (const operation of (Array.isArray(operations) ? operations : []).slice(0, 8)) {
+      const itemName = operation?.name === 'gather_resource'
+        ? operation.args?.resource_name
+        : operation?.name === 'craft_item'
+          ? operation.args?.item_name
+          : undefined
+      const count = operation?.args?.count
+      if (typeof itemName !== 'string' || !itemName || !Number.isSafeInteger(count) || count < 1) continue
+      targets.set(itemName, (targets.get(itemName) ?? 0) + count)
+    }
+    const requirements = []
+    for (const [itemName, count] of targets) {
+      let current
+      try {
+        const raw = JSON.parse(String(await this.rcon.command(runtimeConditionCommand({ kind: 'inventory_count', item_name: itemName, minimum: 1 }))).trim())
+        current = Number.isFinite(raw?.current) ? Math.max(0, Math.trunc(raw.current)) : undefined
+      }
+      catch {}
+      if (current === undefined) return []
+      requirements.push({ id: `inventory_${requirements.length + 1}`, kind: 'inventory_count', item_name: itemName, minimum: current + count })
+    }
+    return requirements.length > 0 ? [{ mode: 'all', source: 'runtime_inventory_delta', requirements }] : []
+  }
+
   async routeStepCheckpointDecision(plan) {
     const key = this.activePlanKey()
     const planState = this.memory.planByNpc?.get?.(key) ?? this.memory.currentPlan?.(key)
@@ -3027,6 +3059,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       ...(completionContractSupported(plan.checkpoint) ? [{ ...plan.checkpoint, source: 'planner_semantic_checkpoint' }] : []),
       ...completionCandidatesFromOperations(plan.operations),
     ]
+    if (rawCandidates.length === 0) rawCandidates.push(...await this.inventoryDeltaCandidates(plan.operations))
     const groundedContext = await this.groundedCheckpointContext(rawCandidates, plan.operations)
     const candidates = groundedContext.candidates
     const groundedSymbols = groundedContext.groundedSymbols
