@@ -275,3 +275,39 @@ later step whose prerequisite is explicitly produced earlier in the same draft
 This keeps Jev a critic rather than a planner and keeps Factorio/runtime as world-truth authority. The packet is bounded so the repair does not turn scope review into a full world dump.
 
 The separate `jev_scope_review_unavailable` fail-closed behavior is intentionally left unchanged in this first slice. Re-run E2E with the richer packet before deciding whether the next repair should alter provider-failure handling.
+
+
+## Screenshot correction — stale `LAST` row was from the previous terminated run
+
+A later review of the second screenshot clarified that the Status panel's red `LAST` value:
+
+```text
+submitPlan.plan must be an array
+```
+
+did **not** belong to the current `半自动化铁和铜片` attempt. It was retained from the previous run that the user terminated and remained visible after starting a new task.
+
+Source inspection explains the UI artifact: `packages/autorio/src/task_board_ui.ts` prefers the global retained `activity_state.activity_history()` when rendering the Status-panel `LAST` row. The New Task path resets the task conversation but does not reset or re-scope that retained activity history. Therefore an old blocker/result can remain visible under a new logical task.
+
+Do not use that stale `submitPlan.plan must be an array` row as evidence for the current Jev scope-review failure.
+
+The current run still ended with:
+
+```text
+jev_scope_review_unavailable
+```
+
+after the richer V2 review packet was installed. That keeps the next diagnostic priority on the scope-review provider/parse path itself.
+
+Follow-up UI requirement:
+
+- make retained activity task-scoped (prefer `conversation_id`, with `goal_id` as fallback);
+- reset/rebind it on New Task and runtime-originated logical-task changes;
+- ensure Status `LAST`, Plan Tracker activity, and Debug activity cannot display a previous task as though it belongs to the current task;
+- keep historical activity available only through old-task/project history surfaces.
+
+Follow-up Jev observability requirement:
+
+- surface the exact `planning.scope_review_failed.reason` in the live debug UI;
+- show scope-review state explicitly as `actionable | refine | needs_grounding | needs_user_clarification | unavailable`;
+- keep `jev_scope_review_unavailable` as the classification, but expose whether the underlying failure was provider, parse/schema, transport, timeout, cancellation, or another concrete error.
