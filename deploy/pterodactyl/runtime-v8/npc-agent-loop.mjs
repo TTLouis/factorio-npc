@@ -3246,6 +3246,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const candidates = groundedContext.candidates
     const groundedSymbols = groundedContext.groundedSymbols
     const questions = stepCheckpointDecisionQuestions(candidates, groundedSymbols)
+    // step_relation judges an operation batch against the step. A "done"
+    // claim has no batch and is about the active step by construction; live
+    // Jev answered `unrelated` there and the accepted mapping was discarded.
+    if (claimedDone) delete questions.step_relation
 
     const deterministicCheckpointFallback = async reason => {
       // Non-quantity operations may have a runtime-authored receipt contract
@@ -3370,7 +3374,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // semantic drift. Treat malformed/foreign decision envelopes exactly like
       // a checkpoint-provider outage: keep completion authority closed, but do
       // not manufacture replan_needed and block an otherwise-valid batch.
-      const relationChoice = response?.answers?.step_relation?.choice
+      const relationChoice = claimedDone ? 'advances_current' : response?.answers?.step_relation?.choice
       const boundaryChoice = response?.answers?.checkpoint_boundary?.choice
       if (!['advances_current', 'prerequisite_for_current', 'belongs_to_later_step', 'replan_needed', 'unrelated'].includes(relationChoice)
         || !['checkpoint_here', 'keep_step_open', 'split_recommended'].includes(boundaryChoice)) {
@@ -3389,7 +3393,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         && Array.isArray(contract.requirements)
         && contract.requirements.length > 1
       let boundary = normalized.boundary
-      const relation = normalized.relation
+      const relation = claimedDone ? 'advances_current' : normalized.relation
       if (boundary === 'checkpoint_here' && contract.mode === 'semantic_unknown') boundary = 'keep_step_open'
       if (boundary === 'checkpoint_here' && compoundNeedsStrongProof && !compoundProofStrongEnough) {
         boundary = 'split_recommended'

@@ -564,7 +564,13 @@ async function verifyOnlyStep({ heldAtDone, verifyBoundary = 'checkpoint_here' }
   const jev = recordingJev(async (state, questions) => {
     if (questions.intent) return { overrides: { intent: { choice: 'new_goal', confidence: 0.9 } } }
     if (questions.checkpoint_boundary && state?.planner_claim) {
-      return { overrides: { checkpoint_boundary: { choice: verifyBoundary, confidence: 0.9 }, compound_step: { noul: 0.1 } } }
+      assert.equal(questions.step_relation, undefined, 'a done claim has no batch to relate')
+      // Live req_mubf15vp_1 answered `unrelated` for the empty batch.
+      return { overrides: {
+        checkpoint_boundary: { choice: verifyBoundary, confidence: 0.9 },
+        compound_step: { noul: 0.1 },
+        step_relation: { choice: 'unrelated', confidence: 0.6 },
+      } }
     }
   })
   const plan = ['Gather 6 stone', 'Verify inventory shows 6 stone']
@@ -633,6 +639,9 @@ async function revisedStepDone({ heldAtDone }) {
     if (questions.scope_review && ++reviews === 1) return REFINE
     if (questions.receipt_scope) return { overrides: { receipt_scope: { choice: 'progress_only', confidence: 0.2 } } }
     if (questions.route) return { overrides: { route: { choice: 'reanchor_plan', confidence: 0.8 } } }
+    if (questions.checkpoint_boundary && state?.planner_claim) {
+      return { overrides: { step_relation: { choice: 'unrelated', confidence: 0.6 } } }
+    }
     if (questions.checkpoint_boundary && !state?.planner_claim) {
       const revised = /finish/i.test(state?.step?.description ?? '')
       return { overrides: {
