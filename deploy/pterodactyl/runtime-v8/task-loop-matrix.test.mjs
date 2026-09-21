@@ -297,3 +297,32 @@ test('a malformed submitPlan tool call is recovered, not a fatal request failure
   assert.equal(game.mutations.length, 1)
   assert.ok(events.includes('provider.plan_submission_invalid'))
 })
+
+test('harvest_product gets the same grounded inventory delta as gather_resource', async () => {
+  const game = new FakeFactorio({ inventory: { wood: 2 } })
+  const memory = new CanonicalTaskBoardMemory()
+  const jev = recordingJev(async (_state, questions) => (questions.intent
+    ? { overrides: { intent: { choice: 'new_goal', confidence: 0.9 } } }
+    : undefined))
+  const agent = new NpcAgentLoop({
+    rcon: game,
+    memory,
+    provider: async () => planReply({
+      plan: ['Gather 6 wood'],
+      operations: [{ name: 'harvest_product', args: { product_name: 'wood', count: 6, search_radius: 32 } }],
+    }),
+    interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
+    interactionDecisionProvider: jev,
+    scopeReviewDecisionProvider: jev,
+    steeringDecisionProvider: jev,
+    systemPrompt: 'task loop matrix',
+    stateFile: null,
+    traceFile: null,
+    decisionTraceFile: null,
+    npcId: 'airi',
+  })
+  await agent.request('gather 6 wood, nothing else', { sender: 'Louis' })
+  const board = memory.currentPlan(KEY).task_board
+  const contract = board.steps[0].completion_contract
+  assert.deepEqual(contract?.requirements?.map(r => [r.kind, r.item_name, r.minimum]), [['inventory_count', 'wood', 8]])
+})

@@ -85,6 +85,12 @@ const JEV_SCOPE_REVIEW_ATTEMPTS = 2
 // Once the system commits a plan it is frozen against its authors, Jev
 // included: later batches fulfil the committed steps and are not re-reviewed.
 const FROZEN_PLAN_STATUSES = new Set([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING])
+const INVENTORY_PRODUCT_FIELD_BY_OPERATION = Object.freeze({
+  gather_resource: 'resource_name',
+  mine_resource_at: 'resource_name',
+  harvest_product: 'product_name',
+  craft_item: 'item_name',
+})
 const JEV_SCOPE_REVIEW_MAX_OBSERVATIONS = 8
 const JEV_SCOPE_REVIEW_MAX_OBSERVATION_CHARS = 12000
 const JEV_SCOPE_REVIEW_MAX_LIVE_ENTITIES = 12
@@ -3019,11 +3025,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async inventoryDeltaCandidates(operations) {
     const targets = new Map()
     for (const operation of (Array.isArray(operations) ? operations : []).slice(0, 8)) {
-      const itemName = operation?.name === 'gather_resource'
-        ? operation.args?.resource_name
-        : operation?.name === 'craft_item'
-          ? operation.args?.item_name
-          : undefined
+      // Only operations whose argument names the item they add to inventory.
+      // mine_entity is excluded: an entity's product is often not its name
+      // (a tree yields wood), so a target keyed on it would be false.
+      const itemField = INVENTORY_PRODUCT_FIELD_BY_OPERATION[operation?.name]
+      const itemName = itemField ? operation.args?.[itemField] : undefined
       const count = operation?.args?.count
       if (typeof itemName !== 'string' || !itemName || !Number.isSafeInteger(count) || count < 1) continue
       targets.set(itemName, (targets.get(itemName) ?? 0) + count)
