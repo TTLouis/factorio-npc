@@ -62,11 +62,14 @@ describe('SGLuna NPC console compact tracker layout', () => {
     expect(task_board_preview_min_height(4320)).toBe(900)
   })
 
-  it('spends the main tracker height on plan steps and leaves execution activity to Debug', () => {
+  it('sizes the shared Shelf / plan workspace from the larger visible planning list and leaves execution activity to Debug', () => {
     const source = taskBoardUiSource()
     expect(source).toContain('fixed_height: 560,')
     expect(source).not.toContain('const CONSOLE_FIXED_HEIGHT')
-    expect(source).toContain('task_board_tracker_heights(player_gui_height(player), board === undefined ? 0 : math.min(board.steps.length, MAX_STEPS))')
+    expect(source).toContain('const row_count = board === undefined ? 0 : math.max(board.steps.length, shelf_nodes.length)')
+    expect(source).toContain('task_board_tracker_heights(player_gui_height(player), math.min(row_count, MAX_STEPS))')
+    expect(source).toContain('tracker_shelf_width: 200')
+    expect(source).toContain('tracker_plan_width: LEFT_COLUMN_WIDTH - 2 * SECTION_PADDING - 12 - 200')
 
     const short_plan = task_board_tracker_heights(1286, 6)
     const long_plan = task_board_tracker_heights(1286, 24)
@@ -160,7 +163,7 @@ describe('SGLuna NPC console compact tracker layout', () => {
     expect(refresh_body).not.toContain('.clear()')
   })
 
-  it('uses compact controls with a plan-only main tracker and keeps timestamped activity as retained history', () => {
+  it('uses compact controls with a Shelf + active-plan tracker and keeps current-task timestamped activity as retained history', () => {
     const source = taskBoardUiSource()
     expect(source).toContain('function compact_button(')
     expect(source).toContain("'Plan Tracker'")
@@ -169,7 +172,8 @@ describe('SGLuna NPC console compact tracker layout', () => {
     expect(source).toContain('activity_header.visible = false')
     expect(source).toContain('activity_scroll.visible = false')
     expect(source).toContain('const previous = storage.airi_task_board_ui')
-    expect(source).toContain('stamp_activity_times(next, previous, game.tick)')
+    expect(source).toContain('const changed_task = activity_state.bind_activity_context(next.conversation_id, next.goal_id)')
+    expect(source).toContain('stamp_activity_times(next, changed_task ? undefined : previous, game.tick)')
     expect(source).toContain("caption: entry.timestamp ?? '--:--:--'")
     expect(source).not.toContain('render_steps(left, board)')
     expect(source).not.toContain('render_activity(left, board)')
