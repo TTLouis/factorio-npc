@@ -95,6 +95,9 @@ function agentFor(intent, {
   queueConflict = intent === 'amend_current',
   decisionIntent,
   decisionGranularity = 'keep',
+  decisionReasoningBudget,
+  decisionObservationBudget,
+  decisionPlanningHorizon,
   decisionConflictProbability = 0.2,
   decisionError,
   decisionTraceFile = null,
@@ -105,8 +108,8 @@ function agentFor(intent, {
   const rcon = new RouterRcon({ running })
   const calls = []
   const decisionCalls = []
-  const mockProvider = async (_messages, context) => {
-    calls.push(context)
+  const mockProvider = async (messages, context) => {
+    calls.push({ ...context, messages })
     if (context.interactionRouter) {
       assert.equal(context.allowTools, false)
       assert.equal(context.triggerSource, 'interaction_router')
@@ -141,9 +144,9 @@ function agentFor(intent, {
               type: 'noul',
               noul: decisionConflictProbability,
             },
-            reasoning_budget: { type: 'choice', choice: decisionGranularity === 'split' ? 'strategic' : 'normal', confidence: 0.85 },
-            planning_horizon: { type: 'choice', choice: decisionGranularity === 'split' ? 'strategic' : 'checkpoint', confidence: 0.84 },
-            observation_budget: { type: 'score', score: decisionGranularity === 'split' ? 3 : 1, confidence: 0.83 },
+            reasoning_budget: { type: 'choice', choice: decisionReasoningBudget ?? (decisionGranularity === 'split' ? 'strategic' : 'normal'), confidence: 0.85 },
+            planning_horizon: { type: 'choice', choice: decisionPlanningHorizon ?? (decisionGranularity === 'split' ? 'strategic' : 'checkpoint'), confidence: 0.84 },
+            observation_budget: { type: 'score', score: decisionObservationBudget ?? (decisionGranularity === 'split' ? 3 : 1), confidence: 0.83 },
           },
           usage: {
             input_tokens: 120,
@@ -327,6 +330,26 @@ test('idle no-plan real new goal is classified before the main planner runs once
   assert.equal(rcon.cancelCount, 0)
 })
 
+test('aligned fresh new goal floors micro reasoning and zero observations before the first planner turn', async () => {
+  const { agent, calls } = agentFor('new_goal', {
+    running: false,
+    withPlan: false,
+    decisionIntent: 'new_goal',
+    decisionReasoningBudget: 'micro',
+    decisionObservationBudget: 0,
+    decisionPlanningHorizon: 'immediate',
+  })
+
+  const result = await agent.request('半自动化铁板和铜片', { sender: 'tester' })
+
+  assert.equal(result.interactionIntent, 'new_goal')
+  assert.equal(calls.length, 2)
+  assert.equal(calls[1].reasoningBudget, 'normal')
+  const envelope = calls[1].messages.find(message => typeof message?.content === 'string' && message.content.startsWith('[DECISION_ENVELOPE]'))
+  assert.ok(envelope)
+  assert.match(envelope.content, /planning_horizon=immediate/)
+  assert.match(envelope.content, /observation_budget_remaining=3/)
+})
 test('idle no-plan Jev shadow failure does not alter the active routed interaction', async () => {
   const { agent, memory, rcon, calls, decisionCalls } = agentFor('status_query', {
     running: false,
