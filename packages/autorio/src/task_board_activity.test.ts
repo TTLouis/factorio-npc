@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import {
   ACTIVITY_FILTER_ALL,
   activity_filter_mask,
+  bind_activity_context,
+  clear_activity_history,
   activity_filter_selected,
   activity_history,
   activity_key,
@@ -83,7 +85,11 @@ describe('recent activity filters', () => {
 })
 
 describe('recent activity rows', () => {
-  beforeEach(() => { delete store.airi_task_board_activity_history })
+  beforeEach(() => {
+    delete store.airi_task_board_activity_history
+    delete store.airi_task_board_activity_history_context
+    delete store.airi_task_board_activity_view
+  })
 
   it('identifies runtime events by id and derived ones by content', () => {
     expect(activity_key({ id: 'e1', kind: 'action', text: 'x' })).toBe('id:e1')
@@ -107,6 +113,20 @@ describe('recent activity rows', () => {
     expect(activity_history()).toHaveLength(160)
     expect(activity_history()[0].id).toBe('e20')
     expect(activity_history().at(-1)?.id).toBe('e179')
+  })
+
+  it('rebinds retained history at a logical task boundary', () => {
+    expect(bind_activity_context('task-old', 'goal-old')).toBe(true)
+    merge_activity_history([{ id: 'old', kind: 'blocker', text: 'old failure' }])
+    expect(activity_history().map(entry => entry.id)).toEqual(['old'])
+    expect(bind_activity_context('task-old', 'goal-old')).toBe(false)
+    expect(activity_history().map(entry => entry.id)).toEqual(['old'])
+    expect(bind_activity_context('task-new', 'goal-new')).toBe(true)
+    expect(activity_history()).toEqual([])
+    merge_activity_history([{ id: 'new', kind: 'action', text: 'new task action' }])
+    expect(activity_history().map(entry => entry.id)).toEqual(['new'])
+    clear_activity_history()
+    expect(activity_history()).toEqual([])
   })
 
   it('appends new rows and drops trimmed ones instead of rebuilding the feed', () => {

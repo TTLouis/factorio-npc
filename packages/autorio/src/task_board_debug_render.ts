@@ -17,11 +17,11 @@ import type { TaskBoardUiDebugSnapshot } from './task_board_debug'
 
 const DEBUG_ROOT_NAME = 'airi_task_board_debug_panel'
 const DEBUG_BODY_NAME = 'airi_task_board_debug_body'
-const DEBUG_WIDTH = 1040
+const DEBUG_WIDTH = 1320
 const DEBUG_KEY_WIDTH = 132
 const DEBUG_BODY_INNER_WIDTH = DEBUG_WIDTH - 20
 const DEBUG_COLUMN_GAP = 16
-const DEBUG_COLUMN_WIDTH = math.floor((DEBUG_BODY_INNER_WIDTH - DEBUG_COLUMN_GAP) / 2)
+const DEBUG_COLUMN_WIDTH = math.floor((DEBUG_BODY_INNER_WIDTH - 2 * DEBUG_COLUMN_GAP) / 3)
 const DEBUG_VALUE_WIDTH = DEBUG_WIDTH - DEBUG_KEY_WIDTH - 54
 const DEBUG_COLUMN_VALUE_WIDTH = DEBUG_COLUMN_WIDTH - DEBUG_KEY_WIDTH - 34
 const DEBUG_ACTIVITY = {
@@ -113,6 +113,25 @@ function add_debug_decision_rows(table: LuaGuiElement, debug: TaskBoardUiDebugSn
   const decision_planner_high = integer(debug.decision_planner_replan_high_wakes_total)
   const decision_planner_fallback = integer(debug.decision_planner_fallback_wakes_total)
 
+  const scope_review = clean_text(debug.decision_scope_review, 32)
+  const scope_review_confidence = math.min(100, integer(debug.decision_scope_review_confidence_percent))
+  const scope_review_reasons = clean_text(debug.decision_scope_review_reason_codes, 300)
+  const scope_review_prefix = integer(debug.decision_scope_review_actionable_prefix)
+  const scope_failure_stage = clean_text(debug.decision_scope_review_failure_stage, 40)
+  const scope_failure_reason = clean_text(debug.decision_scope_review_failure_reason, 500)
+  const scope_packet_version = integer(debug.decision_scope_review_packet_version)
+  const scope_observations = integer(debug.decision_scope_review_grounding_observations)
+  const scope_live_entities = integer(debug.decision_scope_review_live_entities)
+  const scope_preflight = integer(debug.decision_scope_review_preflight_count)
+  add_compact_row(table, 'Jev scope review', scope_review.length > 0
+    ? `${scope_review.toUpperCase()} · ${scope_review_confidence}%${scope_review_reasons ? ` · ${scope_review_reasons}` : ''}${scope_review_prefix > 0 ? ` · prefix ${scope_review_prefix}` : ''}`
+    : '—')
+  add_compact_row(table, 'Scope review packet', scope_packet_version > 0
+    ? `v${scope_packet_version} · obs ${scope_observations} · live ${scope_live_entities} · preflight ${scope_preflight}`
+    : '—')
+  add_compact_row(table, 'Scope review failure', scope_failure_reason.length > 0
+    ? `${scope_failure_stage || 'unknown'} · ${scope_failure_reason}`
+    : '—')
   add_compact_row(table, 'Decision provider', decision_model.length > 0 ? `${decision_provider || 'decision'} · ${decision_model}` : '—')
   add_compact_row(table, 'Decision shadow', decision_shadow.length > 0 ? `${decision_shadow} · ${decision_confidence}% · active ${decision_active || 'unknown'} · conflict ${decision_conflict}%` : '—')
   add_compact_row(table, 'Jev ACTIVE post-step', decision_post_step.length > 0 ? `${decision_post_step}${decision_post_step_applied.length > 0 && decision_post_step_applied !== decision_post_step ? ` → ${decision_post_step_applied}` : ''} · ${decision_post_step_confidence}% · ${decision_post_step_latency} ms${decision_post_step_fallback.length > 0 ? ` · ${decision_post_step_fallback}` : ''}` : '—')
@@ -192,17 +211,20 @@ function fill_debug_body(body: LuaGuiElement, board: any, runtime: any, synced_t
   add_row(overview, 'Turn', integer(debug.turn) > 0 ? `${integer(debug.turn)}` : '—')
 
   const columns = body.add({ type: 'flow', direction: 'horizontal' }); columns.style.width = DEBUG_BODY_INNER_WIDTH; columns.style.horizontal_spacing = DEBUG_COLUMN_GAP; columns.style.vertical_align = 'top'
+  const provider_column = columns.add({ type: 'flow', direction: 'vertical' }); provider_column.style.width = DEBUG_COLUMN_WIDTH; provider_column.style.vertical_spacing = 4
+  provider_column.add({ type: 'label', caption: 'LLM / Provider', style: 'semibold_label' })
+  const provider_table = provider_column.add({ type: 'table', column_count: 2 }); provider_table.style.width = DEBUG_COLUMN_WIDTH; provider_table.style.horizontal_spacing = 12; provider_table.style.vertical_spacing = 5
+  add_compact_row(provider_table, 'Provider', provider.length > 0 ? `${provider} · round ${integer(debug.provider_round) + 1}` : '—')
+  add_compact_row(provider_table, 'Provider profile', clean_text(debug.provider_capability_profile, 40) || '—')
+  add_compact_row(provider_table, 'Wire output cap', clean_text(debug.requested_token_field, 40).length > 0 ? `${clean_text(debug.requested_token_field, 40)}=${integer(debug.requested_output_cap)}` : '—')
+  add_compact_row(provider_table, 'Reasoning effort · latest round', clean_text(debug.reasoning_effort, 32) || '—')
+  add_compact_row(provider_table, 'Policy reason · latest round', clean_text(debug.reasoning_policy_reason, 80) || '—')
+  add_compact_row(provider_table, 'Latency', latency > 0 ? `${latency} ms` : '—')
+  add_compact_row(provider_table, 'Tokens · request cumulative', tokens)
+  add_compact_row(provider_table, 'Latest completed round', latest_round_tokens)
   const decision_column = columns.add({ type: 'flow', direction: 'vertical' }); decision_column.style.width = DEBUG_COLUMN_WIDTH; decision_column.style.vertical_spacing = 4
-  decision_column.add({ type: 'label', caption: 'LLM / Jev / Decision', style: 'semibold_label' })
+  decision_column.add({ type: 'label', caption: 'Jev / Planning', style: 'semibold_label' })
   const decision_table = decision_column.add({ type: 'table', column_count: 2 }); decision_table.style.width = DEBUG_COLUMN_WIDTH; decision_table.style.horizontal_spacing = 12; decision_table.style.vertical_spacing = 5
-  add_compact_row(decision_table, 'Provider', provider.length > 0 ? `${provider} · round ${integer(debug.provider_round) + 1}` : '—')
-  add_compact_row(decision_table, 'Provider profile', clean_text(debug.provider_capability_profile, 40) || '—')
-  add_compact_row(decision_table, 'Wire output cap', clean_text(debug.requested_token_field, 40).length > 0 ? `${clean_text(debug.requested_token_field, 40)}=${integer(debug.requested_output_cap)}` : '—')
-  add_compact_row(decision_table, 'Reasoning effort · latest round', clean_text(debug.reasoning_effort, 32) || '—')
-  add_compact_row(decision_table, 'Policy reason · latest round', clean_text(debug.reasoning_policy_reason, 80) || '—')
-  add_compact_row(decision_table, 'Latency', latency > 0 ? `${latency} ms` : '—')
-  add_compact_row(decision_table, 'Tokens · request cumulative', tokens)
-  add_compact_row(decision_table, 'Latest completed round', latest_round_tokens)
   add_debug_decision_rows(decision_table, debug)
 
   const runtime_column = columns.add({ type: 'flow', direction: 'vertical' }); runtime_column.style.width = DEBUG_COLUMN_WIDTH; runtime_column.style.vertical_spacing = 4

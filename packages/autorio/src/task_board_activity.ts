@@ -69,6 +69,7 @@ declare const storage: {
   airi_task_board_project_activity_filters?: Record<number, number>
   airi_task_board_activity_view?: Record<number, ActivityView>
   airi_task_board_activity_history?: TaskBoardUiActivity[]
+  airi_task_board_activity_history_context?: string
 }
 
 function has_flag(mask: number, flag: number) { return math.floor(mask / flag) % 2 === 1 }
@@ -132,6 +133,30 @@ export function activity_filter_selected(mask: number, flag: number) {
 }
 
 export function activity_matches_mask(kind: ActivityKind, mask: number) { return has_flag(mask, kind_flag(kind)) }
+
+function activity_context_id(conversation_id: unknown, goal_id: unknown) {
+  const conversation = typeof conversation_id === 'string' ? conversation_id : ''
+  const goal = typeof goal_id === 'string' ? goal_id : ''
+  if (conversation.length > 0) return `conversation:${conversation}`
+  if (goal.length > 0) return `goal:${goal}`
+  return ''
+}
+
+export function bind_activity_context(conversation_id: unknown, goal_id: unknown) {
+  const next = activity_context_id(conversation_id, goal_id)
+  const current = storage.airi_task_board_activity_history_context ?? ''
+  if (current === next) return false
+  storage.airi_task_board_activity_history_context = next
+  storage.airi_task_board_activity_history = []
+  storage.airi_task_board_activity_view = undefined
+  return true
+}
+
+export function clear_activity_history() {
+  storage.airi_task_board_activity_history_context = ''
+  storage.airi_task_board_activity_history = []
+  storage.airi_task_board_activity_view = undefined
+}
 
 /**
  * The time a content-keyed entry (one without an id) was first seen, if it is
