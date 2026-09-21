@@ -518,6 +518,12 @@ function safeProviderRecovery(value) {
   }
 }
 
+function activeStepCheckpointSnapshot(board) {
+  const index = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
+  const step = index === undefined ? undefined : board?.steps?.[index]
+  return step ? { stepId: step.id, checkpoint: persistedStepCheckpoint(board, step.id) } : undefined
+}
+
 function persistedStepCheckpoint(board, stepId) {
   if (!board || !stepId) return undefined
   const step = Array.isArray(board.steps) ? board.steps.find(item => item?.id === stepId) : undefined
@@ -3083,6 +3089,52 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       requirements.push({ id: `inventory_${requirements.length + 1}`, kind: 'inventory_count', item_name: itemName, minimum: current + count })
     }
     return requirements.length > 0 ? [{ mode: 'all', source: 'runtime_inventory_delta', requirements }] : []
+  }
+
+  // Three independent signals that the active step is done: the planner moved
+  // its focus past it, Jev placed the new batch in a LATER step, and the
+  // active step's own Jev-selected world-state contract is met in Factorio.
+  // Without this the loop dead-ended: completion kept the step open, the
+  // planner correctly moved on, and alignment rejected the next step's work
+  // against a board that never advanced. A genuinely compound step cannot
+  // pass: its remaining work would align as current-step work, not later.
+  async closeActiveStepOnLaterStepWork(plan, before) {
+    const key = this.activePlanKey()
+    const planState = this.memory.planByNpc?.get?.(key) ?? this.memory.currentPlan?.(key)
+    const board = planState?.task_board
+    const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
+    const step = activeIndex === undefined ? undefined : board?.steps?.[activeIndex]
+    if (!planState || planState.status !== 'active' || !step || before?.stepId !== step.id) return false
+    if (!Number.isSafeInteger(plan?.currentStep) || plan.currentStep <= activeIndex) return false
+    const checkpoint = before.checkpoint
+    const contract = checkpoint?.contract
+    if (!checkpoint || checkpoint.relation !== 'advances_current' || !completionContractSupported(contract)) return false
+    if (contract.mode === 'semantic_unknown' || !(contract.requirements?.length > 0)) return false
+    if (!contract.requirements.every(requirement => WORLD_STATE_REQUIREMENT_KINDS.has(requirement?.kind))) return false
+
+    const facts = await this.completionFactsForContract(contract, undefined, [])
+    const evaluation = evaluateCompletionContract(contract, facts)
+    if (!evaluation.satisfied) return false
+    const reduced = this.memory.applyOutcomeAuthority?.(key, {
+      kind: 'verified_complete',
+      source: 'step_checkpoint_gate',
+      reason_code: 'later_step_work_with_satisfied_contract',
+      evidence: [{
+        kind: 'verified_world_state',
+        ref: `checkpoint/${step.id}`,
+        summary: JSON.stringify({ contract, results: evaluation.results, planner_step: plan.currentStep }),
+      }],
+      metadata: { scope: 'step' },
+    })
+    await this.persistState()
+    if (reduced?.decision?.accepted !== true) return false
+    await this.traceEvent('step.verified', {
+      active_step_id: step.id,
+      source: 'later_step_alignment',
+      contract,
+      task_board: visibleTaskBoard(reduced?.state?.task_board),
+    })
+    return true
   }
 
   async routeStepCheckpointDecision(plan) {
@@ -6223,6 +6275,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const previousState = this.requestInfo
       ? this.memory.currentPlan?.(this.requestInfo.memoryKey)
       : undefined
+    // The active step's own checkpoint as it stood BEFORE this batch; the
+    // checkpoint pass below re-records one shaped by the new batch.
+    const checkpointBeforeBatch = activeStepCheckpointSnapshot(previousState?.task_board)
     const runtimeHealthy = persistentRuntimeHealthy(persistentRuntime)
     const finalCompletionVerified = verifiedFinalCompletion(plan, previousState, this.planUpdateReason, {
       freshObservation: this.freshObservationSinceContinuation,
@@ -6406,6 +6461,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
 
+    if (commands.length > 0 && stateResult?.blockedByHarness !== true && stepCheckpoint && !stepRelationAllowsAdmission(stepCheckpoint.relation)
+      && stepCheckpoint.relation === 'belongs_to_later_step'
+      && this.laterStepCloseUsed !== true
+      && await this.closeActiveStepOnLaterStepWork(plan, checkpointBeforeBatch)) {
+      // The active step is proven done; re-admit this batch against the step
+      // it actually belongs to. Bounded to once per batch.
+      this.laterStepCloseUsed = true
+      return this.commitPlan(plan)
+    }
     if (commands.length > 0 && stateResult?.blockedByHarness !== true && stepCheckpoint && !stepRelationAllowsAdmission(stepCheckpoint.relation)) {
       const activeBoard = stateResult?.state?.task_board
       const activeIndex = Number.isSafeInteger(activeBoard?.active_index) ? activeBoard.active_index : undefined
@@ -6453,7 +6517,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         this.reasoningTriggerSource = null
       }
     }
-    if (commands.length > 0) this.semanticAlignmentRetries = 0
+    if (commands.length > 0) {
+      this.semanticAlignmentRetries = 0
+      this.laterStepCloseUsed = false
+    }
     this.outputBudgetRecoveryGuard = null
     if (commands.length > 0) this.clearActionOmissionRecovery()
 

@@ -417,3 +417,70 @@ test('a submitPlan cut off inside its optional checkpoint keeps the complete pla
   const done = await agent.completed()
   assert.equal(done.goalStatus, 'completed')
 })
+
+async function laterStepWork(stoneHeld) {
+  const game = new FakeFactorio({ inventory: { stone: 0, coal: 0 } })
+  const memory = new CanonicalTaskBoardMemory()
+  const activeStepText = () => {
+    const board = memory.currentPlan(KEY)?.task_board
+    return board?.steps?.[board.active_index]?.description ?? ''
+  }
+  // Live Jev on goal_muarr9vw: stone step rated 0.52 compound and kept open,
+  // receipt rated progress_only, then the coal batch classified as later-step
+  // work because the board never left the stone step.
+  const jev = recordingJev(async (state, questions) => {
+    if (questions.intent) return { overrides: { intent: { choice: 'new_goal', confidence: 0.9 } } }
+    if (questions.receipt_scope) return { overrides: { receipt_scope: { choice: 'progress_only', confidence: 0.2 } } }
+    if (questions.route) return { overrides: { route: { choice: 'reanchor_plan', confidence: 0.8 } } }
+    if (questions.checkpoint_boundary) {
+      const coalBatch = JSON.stringify(state).includes('"resource_name":"coal"')
+      const onStoneStep = /stone/i.test(activeStepText())
+      return { overrides: {
+        checkpoint_boundary: { choice: 'keep_step_open', confidence: 0.53 },
+        compound_step: { noul: 0.52 },
+        step_relation: { choice: coalBatch && onStoneStep ? 'belongs_to_later_step' : 'advances_current', confidence: 0.9 },
+      } }
+    }
+  })
+  const plan = ['Gather 5 stone', 'Separately gather 5 coal']
+  let calls = 0
+  const agent = new NpcAgentLoop({
+    rcon: game,
+    memory,
+    provider: async () => {
+      calls++
+      if (calls === 1) return planReply({ plan, operations: [gather('stone', 5)] })
+      // The planner correctly judges stone done and moves to coal.
+      return planReply({ chatMessage: 'Step 1 complete. Now step 2.', plan, currentStep: 1, operations: [gather('coal', 5)] })
+    },
+    interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
+    interactionDecisionProvider: jev,
+    scopeReviewDecisionProvider: jev,
+    steeringDecisionProvider: jev,
+    systemPrompt: 'task loop matrix',
+    stateFile: null,
+    traceFile: null,
+    decisionTraceFile: null,
+    npcId: 'airi',
+  })
+  await agent.request('first gather 5 stone, then separately gather 5 coal', { sender: 'Louis' })
+  game.inventory.stone = stoneHeld
+  let next
+  try { next = await agent.completed() }
+  catch (error) { next = { error } }
+  return { next, memory, game }
+}
+
+test('a met active step is closed when the planner and Jev both place new work in the next step', async () => {
+  const { next, memory, game } = await laterStepWork(5)
+  assert.equal(next.goalStatus, 'active', `stalled: ${next?.chatMessage}`)
+  assert.equal(memory.currentPlan(KEY).task_board.completed_count, 1)
+  assert.equal(game.mutations.length, 2, 'the coal batch was admitted under the coal step')
+})
+
+test('an unmet active step is not closed just because the planner moved on', async () => {
+  const { next, memory, game } = await laterStepWork(4)
+  assert.notEqual(next?.goalStatus, 'active')
+  assert.equal(memory.currentPlan(KEY)?.task_board?.completed_count ?? 0, 0)
+  assert.equal(game.mutations.length, 1, 'the coal batch was never admitted under the stone step')
+})
