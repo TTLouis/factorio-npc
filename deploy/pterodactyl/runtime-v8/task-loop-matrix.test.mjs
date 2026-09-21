@@ -683,3 +683,50 @@ test('a reworded step does not close on its replaced revision target when that t
   const { result } = await revisedStepDone({ heldAtDone: 14 })
   assert.notEqual(result?.goalStatus, 'completed')
 })
+
+test('a needs_grounding refinement can observe even after the request spent its observation budget', async () => {
+  const game = new FakeFactorio({ inventory: { 'iron-ore': 13 } })
+  const memory = new CanonicalTaskBoardMemory()
+  let reviews = 0
+  const jev = recordingJev(async (_state, questions) => {
+    if (questions.intent) return { overrides: { intent: { choice: 'new_goal', confidence: 0.9 }, ...(questions.observation_budget ? { observation_budget: { score: 3 } } : {}) } }
+    if (questions.observation_budget) return { overrides: { observation_budget: { score: 3 } } }
+    if (questions.scope_review && ++reviews === 1) {
+      return { overrides: { scope_review: { choice: 'needs_grounding', confidence: 0.4 }, scope_review_reason_codes: { choice: 'assumption_not_grounded' } } }
+    }
+  })
+  const offered = []
+  let calls = 0
+  const read = (id, name) => ({ id, type: 'function', function: { name, arguments: '{}' } })
+  const agent = new NpcAgentLoop({
+    rcon: game,
+    memory,
+    // Live goal_mubeg8bb: three reads spent the budget, so the refinement
+    // turn that was told to ground the draft had tools switched off.
+    provider: async (_messages, options) => {
+      calls++
+      offered.push(options?.allowTools)
+      assert.ok(calls < 12, 'planner loop did not terminate')
+      if (calls === 1) {
+        return { content: '', tool_calls: [read('t1', 'getInventoryItems'), read('t2', 'getActorStatus'), read('t3', 'getNearbyEntities')] }
+      }
+      if (reviews === 1 && offered.at(-1) === true && !offered.slice(2, -1).includes(true)) {
+        return { content: '', tool_calls: [read('t4', 'getActorStatus')] }
+      }
+      return planReply({ plan: ['Gather 40 iron ore'], operations: [gather('iron-ore', 40)] })
+    },
+    interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
+    interactionDecisionProvider: jev,
+    scopeReviewDecisionProvider: jev,
+    steeringDecisionProvider: jev,
+    systemPrompt: 'task loop matrix',
+    stateFile: null,
+    traceFile: null,
+    decisionTraceFile: null,
+    npcId: 'airi',
+  })
+  await agent.request('mine exactly 40 iron ore, that is the only task', { sender: 'Louis' })
+  assert.equal(offered[1], false, 'fixture: the first draft was forced with tools off')
+  assert.equal(offered[2], true, 'the grounding refinement turn was offered tools')
+  assert.equal(game.mutations.length, 1, 'the grounded redraft committed')
+})

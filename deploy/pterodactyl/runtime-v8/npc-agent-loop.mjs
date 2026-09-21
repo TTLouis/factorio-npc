@@ -82,6 +82,7 @@ const JEV_SCOPE_REFINEMENT_BUDGET = 2
 // verdict. It is retried once, then the draft commits on deterministic runtime
 // validation alone, exactly as it does when no Jev provider is configured.
 const JEV_SCOPE_REVIEW_ATTEMPTS = 2
+const SCOPE_GROUNDING_OBSERVATION_ALLOWANCE = 2
 // Once the system commits a plan it is frozen against its authors, Jev
 // included: later batches fulfil the committed steps and are not re-reviewed.
 const FROZEN_PLAN_STATUSES = new Set([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING])
@@ -5906,12 +5907,29 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
     let review
     let lastFailure
+    const decisionId = `decision_${Date.now().toString(36)}_${(++this.decisionRequestSequence).toString(36)}`
+    await this.decisionTraceEvent('decision.request', {
+      decision_id: decisionId,
+      contract: 'plan_scope_review',
+      plan_id: plan.plan_id,
+      state: reviewState,
+    })
     for (let attempt = 1; attempt <= JEV_SCOPE_REVIEW_ATTEMPTS && !review; attempt++) {
       let response
       try {
         response = await this.scopeReviewDecisionProvider(reviewState, scopeReviewQuestions({ draftStepCount: steps.length }), {
           epoch: this.requestInfo?.epoch,
           actorId: this.requestInfo?.actorId,
+        })
+        // Jev's own answers, so a refused draft can be explained afterwards.
+        await this.decisionTraceEvent('decision.response', {
+          decision_id: decisionId,
+          contract: 'plan_scope_review',
+          plan_id: plan.plan_id,
+          attempt,
+          provider: response?.provider,
+          model: response?.model,
+          answers: sanitizeDurableModelValue(response?.answers),
         })
       }
       catch (error) {
@@ -5986,6 +6004,25 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return `[HARNESS][JEV_SCOPE_REVIEW] This draft was NOT committed and none of its operations were admitted. Verdict: ${review?.verdict ?? 'refine'}. Reasons: ${reasons}.${problems}${boundary}${prefix}${grounding} The Main LLM remains the plan author; Jev criticism is not a replacement plan.`
   }
 
+  // needs_grounding tells the planner to fetch the missing facts. If earlier
+  // reads already spent the request's observation budget, the base loop has
+  // closed the observation phase with tools off, and the planner could only
+  // resubmit the same draft reworded (live goal_mubeg8bb). Grant a small
+  // fresh allowance; the refinement budget still bounds how often.
+  async reopenObservationForGrounding() {
+    const exhausted = this.observationDecisionForced === true
+      || (Number.isSafeInteger(this.observationBudgetRemaining) && this.observationBudgetRemaining < SCOPE_GROUNDING_OBSERVATION_ALLOWANCE)
+    if (!exhausted) return
+    this.resetObservationDecisionState()
+    if (Number.isSafeInteger(this.observationBudgetRemaining)) {
+      this.observationBudgetRemaining = SCOPE_GROUNDING_OBSERVATION_ALLOWANCE
+    }
+    await this.traceEvent('planning.grounding_observation_reopened', {
+      observation_budget: SCOPE_GROUNDING_OBSERVATION_ALLOWANCE,
+      refinement_attempt: this.scopeRefinementAttempts,
+    })
+  }
+
   async handleScopeReviewRefusal(plan, before, stateResult, review) {
     this.scopeRefinementAttempts = (this.scopeRefinementAttempts ?? 0) + 1
     await this.traceEvent('planning.scope_refinement_required', {
@@ -6043,6 +6080,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
 
     this.scopeRefinementPending = true
+    if (review?.verdict === 'needs_grounding') await this.reopenObservationForGrounding()
     this.messages.push({ role: 'user', content: this.scopeReviewCorrectionMessage(review) })
     return this.runTurn()
   }
