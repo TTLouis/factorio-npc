@@ -54,6 +54,16 @@ export interface TaskBoardUiStep {
 }
 export interface TaskBoardUiActivity { id?: string, kind: TaskBoardUiActivityKind, text: string, timestamp?: string }
 export interface TaskBoardUiWantedItem { name: string, count: number, reason: string }
+export type TaskBoardUiShelfStatus = 'tentative' | 'ready_to_refine' | 'partially_realized' | 'realized' | 'invalidated'
+export interface TaskBoardUiShelfNode {
+  id: string
+  intent: string
+  why_it_matters: string
+  status: TaskBoardUiShelfStatus
+  depends_on: string[]
+  development_hint?: string
+  linked: boolean
+}
 export interface TaskBoardUiConversationMessage { id: string, role: 'user' | 'assistant', sender: string, text: string }
 export interface TaskBoardUiAgentStatus { phase: TaskBoardUiAgentPhase, detail: string }
 /**
@@ -102,6 +112,7 @@ export interface TaskBoardUiSnapshot {
   steps: TaskBoardUiStep[]
   activity: TaskBoardUiActivity[]
   wanted_items: TaskBoardUiWantedItem[]
+  shelf?: TaskBoardUiShelfNode[]
   conversation_id: string
   conversation: TaskBoardUiConversationMessage[]
   agent: TaskBoardUiAgentStatus
@@ -259,6 +270,34 @@ export function sanitize_task_board_ui_snapshot(value: any): TaskBoardUiSnapshot
     wanted_items.push({ name, count: positive_integer(item?.count, 1), reason: text(item?.reason, 300) })
   }
 
+  const raw_shelf = (Array.isArray(value.shelf) ? value.shelf : []) as any[]
+  const shelf: TaskBoardUiShelfNode[] = []
+  const shelf_count = math.min(raw_shelf.length, ui_constants.MAX_SHELF_NODES)
+  for (let index = 0; index < shelf_count; index++) {
+    const node = raw_shelf[index]
+    const id = text(node?.id, 100)
+    const intent = text(node?.intent, 300)
+    if (id.length === 0 || intent.length === 0) continue
+    const raw_status = node?.status
+    const shelf_status: TaskBoardUiShelfStatus = raw_status === 'ready_to_refine' || raw_status === 'partially_realized' || raw_status === 'realized' || raw_status === 'invalidated' ? raw_status : 'tentative'
+    const raw_dependencies = (Array.isArray(node?.depends_on) ? node.depends_on : []) as any[]
+    const depends_on: string[] = []
+    for (let dep_index = 0; dep_index < raw_dependencies.length && dep_index < 4; dep_index++) {
+      const dependency = text(raw_dependencies[dep_index], 100)
+      if (dependency.length > 0) depends_on.push(dependency)
+    }
+    const development_hint = text(node?.development_hint, 32)
+    shelf.push({
+      id,
+      intent,
+      why_it_matters: text(node?.why_it_matters, 240),
+      status: shelf_status,
+      depends_on,
+      ...(development_hint.length > 0 ? { development_hint } : {}),
+      linked: node?.linked === true,
+    })
+  }
+
   const raw_conversation = (Array.isArray(value.conversation) ? value.conversation : []) as any[]
   const conversation: TaskBoardUiConversationMessage[] = []
   for (let index = 0; index < raw_conversation.length && index < 96; index++) {
@@ -282,7 +321,7 @@ export function sanitize_task_board_ui_snapshot(value: any): TaskBoardUiSnapshot
   const debug = value.debug !== undefined ? debug_ui.sanitize_debug_snapshot(value.debug) : undefined
   return {
     goal_id: text(value.goal_id, 100), objective: text(value.objective, 500), plan, blocked, steering: steering.length > 0 ? steering : undefined, response: text(value.response, 2000), status: status(value.status), blocker: text(value.blocker, 500), blocker_summary: text(value.blocker_summary, 500), pause_reason: text(value.pause_reason, 300), pause_summary: text(value.pause_summary, 500),
-    completed_count: math.min(integer(value.completed_count), total), total_steps: total, active_index: math.min(integer(value.active_index), math.max(0, total - 1)), steps, activity, wanted_items,
+    completed_count: math.min(integer(value.completed_count), total), total_steps: total, active_index: math.min(integer(value.active_index), math.max(0, total - 1)), steps, activity, wanted_items, shelf,
     conversation_id: text(value.conversation_id, 120), conversation,
     agent: { phase: agent_phase(agent?.phase), detail: text(agent?.detail, 300) }, debug,
   }
@@ -831,22 +870,41 @@ export function task_board_activity_for_display(board: TaskBoardUiSnapshot | und
  * refresh_tracker, which the once-a-second refresh calls instead of rebuilding.
  */
 function render_tracker(parent: LuaGuiElement, board: TaskBoardUiSnapshot | undefined, player: LuaPlayer) {
-  const { header, body } = create_section(parent, 'Plan Tracker', undefined, 'Canonical durable plan progress. Full execution activity is available in Debug.', true, { section: ui_constants.TRACKER.section, header: ui_constants.TRACKER.header, body: ui_constants.TRACKER.body })
+  const { header, body } = create_section(parent, 'Plan Tracker', undefined, 'Roadmap Shelf on the left; the immutable executable plan slice on the right. Full execution activity is available in Debug.', true, { section: ui_constants.TRACKER.section, header: ui_constants.TRACKER.header, body: ui_constants.TRACKER.body })
   const summary = header.add({ type: 'label', name: ui_constants.TRACKER.summary, caption: '', style: 'semibold_label' }); summary.style.right_padding = 4
-  const empty = body.add({ type: 'label', name: ui_constants.TRACKER.empty, caption: 'No active plan.' }); empty.style.font_color = TONE_COLORS.muted
-  const plan = body.add({ type: 'flow', name: ui_constants.TRACKER.plan, direction: 'vertical' }); plan.style.horizontally_stretchable = true; plan.style.vertical_spacing = 6
+
+  const workspace = body.add({ type: 'flow', name: ui_constants.TRACKER.workspace, direction: 'horizontal' })
+  workspace.style.width = ui_constants.LEFT_COLUMN_WIDTH - 2 * ui_constants.SECTION_PADDING
+  workspace.style.horizontal_spacing = ui_constants.CONSOLE_LAYOUT.tracker_column_gap
+  workspace.style.vertical_align = 'top'
+
+  const shelf = workspace.add({ type: 'flow', name: ui_constants.TRACKER.shelf, direction: 'vertical' })
+  shelf.style.width = ui_constants.CONSOLE_LAYOUT.tracker_shelf_width
+  shelf.style.vertical_spacing = 4
+  const shelf_header = shelf.add({ type: 'flow', name: ui_constants.TRACKER.shelf_header, direction: 'horizontal' })
+  shelf_header.style.width = ui_constants.CONSOLE_LAYOUT.tracker_shelf_width
+  shelf_header.style.vertical_align = 'center'
+  shelf_header.add({ type: 'label', caption: 'Roadmap Shelf', style: 'semibold_label' })
+  const shelf_spacer = shelf_header.add({ type: 'empty-widget' }); shelf_spacer.style.horizontally_stretchable = true
+  shelf_header.add({ type: 'label', name: ui_constants.TRACKER.shelf_count, caption: '0', style: 'semibold_label' })
+  const shelf_scroll = shelf.add({ type: 'scroll-pane', name: ui_constants.TRACKER.shelf_scroll, style: 'scroll_pane_in_shallow_frame', horizontal_scroll_policy: 'never' })
+  shelf_scroll.style.width = ui_constants.CONSOLE_LAYOUT.tracker_shelf_width
+  const shelf_table = shelf_scroll.add({ type: 'table', name: ui_constants.TRACKER.shelf_table, column_count: 2, tags: { signature: '' } })
+  shelf_table.style.horizontal_spacing = 6
+  shelf_table.style.vertical_spacing = 5
+
+  const plan_column = workspace.add({ type: 'flow', name: ui_constants.TRACKER.plan_column, direction: 'vertical' })
+  plan_column.style.width = ui_constants.CONSOLE_LAYOUT.tracker_plan_width
+  plan_column.style.vertical_spacing = 4
+  const empty = plan_column.add({ type: 'label', name: ui_constants.TRACKER.empty, caption: 'No active plan slice.' }); empty.style.font_color = TONE_COLORS.muted
+  const plan = plan_column.add({ type: 'flow', name: ui_constants.TRACKER.plan, direction: 'vertical' }); plan.style.width = ui_constants.CONSOLE_LAYOUT.tracker_plan_width; plan.style.vertical_spacing = 6
   const progress = plan.add({ type: 'progressbar', name: ui_constants.TRACKER.progress, value: 0 }); progress.style.horizontally_stretchable = true
   const steps_scroll = plan.add({ type: 'scroll-pane', name: ui_constants.TRACKER.steps_scroll, style: 'scroll_pane_in_shallow_frame', horizontal_scroll_policy: 'never' }); steps_scroll.style.horizontally_stretchable = true
   const steps_table = steps_scroll.add({ type: 'table', name: ui_constants.TRACKER.steps_table, column_count: 4 }); steps_table.style.horizontal_spacing = 8; steps_table.style.vertical_spacing = 4
   plan.add({ type: 'flow', name: ui_constants.TRACKER.attention, direction: 'vertical' })
+
   const divider = body.add({ type: 'line', name: ui_constants.TRACKER.divider, direction: 'horizontal' }); divider.style.horizontally_stretchable = true
-  // The feed controls belong to the section subheader, beside the title, the
-  // same way Conversation carries its own. A second "Recent activity" header row
-  // inside the body used to hold them, which made two sections of the same
-  // console put the same kind of control in two different places.
   const activity_header = header.add({ type: 'flow', name: ui_constants.TRACKER.activity_header, direction: 'horizontal' }); activity_header.style.vertical_align = 'center'; activity_header.style.horizontal_spacing = 6
-  // Factorio's drop-down can only ever hold one selection, so the filter is a
-  // row of toggle buttons. The flag rides in tags rather than a name per button.
   const filters = activity_header.add({ type: 'flow', name: ui_constants.TRACKER.filters, direction: 'horizontal' }); filters.style.horizontal_spacing = 2
   activity_state.style_feed_button(filters.add({ type: 'button', caption: 'ALL', tooltip: 'Show every kind of activity', tags: { airi_activity_filter: activity_state.ACTIVITY_FILTER_ALL } }))
   for (const filter of activity_state.ACTIVITY_FILTERS) activity_state.style_feed_button(filters.add({ type: 'button', caption: filter.caption, tooltip: `${filter.tooltip}. Click to show or hide; several can be on at once.`, tags: { airi_activity_filter: filter.flag } }))
@@ -854,37 +912,93 @@ function render_tracker(parent: LuaGuiElement, board: TaskBoardUiSnapshot | unde
   const count = activity_header.add({ type: 'label', name: ui_constants.TRACKER.count, caption: '', style: 'semibold_label' }); count.style.right_padding = 4
   const activity_empty = body.add({ type: 'label', name: ui_constants.TRACKER.activity_empty, caption: '' }); activity_empty.style.font_color = TONE_COLORS.muted
   const activity_scroll = body.add({ type: 'scroll-pane', name: ui_constants.TRACKER.activity_scroll, style: 'scroll_pane_in_shallow_frame', horizontal_scroll_policy: 'never' }); activity_scroll.style.horizontally_stretchable = true
-  // Rows ignore interaction so manual wheel input reaches the scroll pane; the
-  // synchronized wheel handler is the only pointer-adjacent signal that changes follow.
   const activity_table = activity_scroll.add({ type: 'table', name: ui_constants.TRACKER.activity_table, column_count: 3, ignored_by_interaction: true, tags: { keys: [] } }); activity_table.style.horizontal_spacing = 10; activity_table.style.vertical_spacing = 4
   refresh_tracker(parent, board, player)
 }
-/** Write the current board into the tracker. False when the skeleton is missing. */
+
 function refresh_tracker(parent: LuaGuiElement, board: TaskBoardUiSnapshot | undefined, player: LuaPlayer) {
-  const section = parent[ui_constants.TRACKER.section]; const header = section?.valid ? section[ui_constants.TRACKER.header] : undefined; const body = section?.valid ? section[ui_constants.TRACKER.body] : undefined
+  const section = parent[ui_constants.TRACKER.section]
+  const header = section?.valid ? section[ui_constants.TRACKER.header] : undefined
+  const body = section?.valid ? section[ui_constants.TRACKER.body] : undefined
   if (!header?.valid || !body?.valid) return false
-  const summary = header[ui_constants.TRACKER.summary]; const empty = body[ui_constants.TRACKER.empty]; const plan = body[ui_constants.TRACKER.plan]; const divider = body[ui_constants.TRACKER.divider]; const activity_header = header[ui_constants.TRACKER.activity_header]; const activity_empty = body[ui_constants.TRACKER.activity_empty]; const activity_scroll = body[ui_constants.TRACKER.activity_scroll]
+  const workspace = body[ui_constants.TRACKER.workspace]
+  const shelf = workspace?.valid ? workspace[ui_constants.TRACKER.shelf] : undefined
+  const plan_column = workspace?.valid ? workspace[ui_constants.TRACKER.plan_column] : undefined
+  const summary = header[ui_constants.TRACKER.summary]
+  const empty = plan_column?.valid ? plan_column[ui_constants.TRACKER.empty] : undefined
+  const plan = plan_column?.valid ? plan_column[ui_constants.TRACKER.plan] : undefined
+  const divider = body[ui_constants.TRACKER.divider]
+  const activity_header = header[ui_constants.TRACKER.activity_header]
+  const activity_empty = body[ui_constants.TRACKER.activity_empty]
+  const activity_scroll = body[ui_constants.TRACKER.activity_scroll]
   const activity_table = activity_scroll?.valid ? activity_scroll[ui_constants.TRACKER.activity_table] : undefined
-  if (!summary?.valid || !empty?.valid || !plan?.valid || !divider?.valid || !activity_header?.valid || !activity_empty?.valid || !activity_scroll?.valid || !activity_table?.valid) return false
-  const tracker_heights = task_board_tracker_heights(player_gui_height(player), board === undefined ? 0 : math.min(board.steps.length, ui_constants.MAX_STEPS))
+  if (!workspace?.valid || !shelf?.valid || !plan_column?.valid || !summary?.valid || !empty?.valid || !plan?.valid || !divider?.valid || !activity_header?.valid || !activity_empty?.valid || !activity_scroll?.valid || !activity_table?.valid) return false
+
+  const shelf_nodes = board?.shelf ?? []
+  const row_count = board === undefined ? 0 : math.max(board.steps.length, shelf_nodes.length)
+  const tracker_heights = task_board_tracker_heights(player_gui_height(player), math.min(row_count, ui_constants.MAX_STEPS))
   const all_activity = task_board_activity_for_display(board)
   const has_steps = board !== undefined && board.steps.length > 0
-  empty.visible = !has_steps; plan.visible = has_steps; divider.visible = false; activity_header.visible = false
+  const has_shelf = shelf_nodes.length > 0
+  empty.visible = !has_steps
+  empty.caption = has_shelf ? 'No active plan slice.' : 'No active plan.'
+  plan.visible = has_steps
+  divider.visible = false
+  activity_header.visible = false
   summary.caption = ''
+
+  if (!refresh_shelf(shelf, shelf_nodes, tracker_heights.steps)) return false
   if (board !== undefined && has_steps) {
     if (!refresh_steps(plan, board, tracker_heights.steps)) return false
     const active_number = board.status === 'completed' ? board.total_steps : math.min(board.active_index + 1, board.total_steps)
-    summary.caption = `STEP ${active_number}/${board.total_steps} · ${board.completed_count} verified`
+    summary.caption = `STEP ${active_number}/${board.total_steps} · ${board.completed_count} verified · SHELF ${shelf_nodes.length}`
   }
+  else if (has_shelf) summary.caption = `SHELF ${shelf_nodes.length} · no active slice`
+
   refresh_activity(activity_header, activity_empty, activity_scroll, activity_table, all_activity, tracker_heights.activity, player)
   activity_empty.visible = false
   activity_scroll.visible = false
   return true
 }
-/**
- * Steps are rebuilt only when the plan text or a status actually changed, and
- * the list only scrolls to the active step when that step is a different one.
- */
+
+function refresh_shelf(shelf: LuaGuiElement, nodes: TaskBoardUiShelfNode[], max_height: number) {
+  const header = shelf[ui_constants.TRACKER.shelf_header]
+  const count = header?.valid ? header[ui_constants.TRACKER.shelf_count] : undefined
+  const scroll = shelf[ui_constants.TRACKER.shelf_scroll]
+  const table = scroll?.valid ? scroll[ui_constants.TRACKER.shelf_table] : undefined
+  if (!header?.valid || !count?.valid || !scroll?.valid || !table?.valid) return false
+  count.caption = `${nodes.length}`
+  scroll.style.maximal_height = max_height
+  const visible = nodes.slice(0, ui_constants.MAX_SHELF_NODES)
+  let signature = `${visible.length}`
+  for (const node of visible) signature = `${signature}#${node.id}:${node.status}:${node.linked ? '1' : '0'}:${node.intent}`
+  if (table.tags.signature === signature) return true
+  table.clear()
+  if (visible.length === 0) {
+    table.add({ type: 'sprite', sprite: TONE_SPRITES.muted, style: 'status_image' })
+    const label = gui_text.literal_gui_text(table.add({ type: 'label', caption: 'No shelved roadmap nodes.' }))
+    label.style.single_line = false
+    label.style.maximal_width = ui_constants.CONSOLE_LAYOUT.tracker_shelf_width - 36
+  }
+  else {
+    for (const node of visible) {
+      const tone: Tone = node.status === 'realized' ? 'good' : node.status === 'partially_realized' ? 'info' : node.status === 'ready_to_refine' ? 'warn' : node.status === 'invalidated' ? 'bad' : 'muted'
+      table.add({ type: 'sprite', sprite: TONE_SPRITES[tone], style: 'status_image', tooltip: node.status.split('_').join(' ') })
+      let tooltip = node.status.split('_').join(' ').toUpperCase()
+      if (node.development_hint) tooltip = `${tooltip} · ${node.development_hint}`
+      if (node.depends_on.length > 0) tooltip = `${tooltip} · depends on ${node.depends_on.join(', ')}`
+      if (node.why_it_matters.length > 0) tooltip = `${tooltip}\n${node.why_it_matters}`
+      const caption = node.linked ? `→ ${node.intent}` : node.intent
+      const label = gui_text.literal_gui_text(table.add({ type: 'label', caption, style: node.linked ? 'bold_label' : 'label', tooltip }))
+      label.style.single_line = false
+      label.style.maximal_width = ui_constants.CONSOLE_LAYOUT.tracker_shelf_width - 36
+      if (node.status === 'invalidated') label.style.font_color = TONE_COLORS.muted
+    }
+  }
+  table.tags = { signature }
+  return true
+}
+
 function refresh_steps(plan: LuaGuiElement, board: TaskBoardUiSnapshot, max_height: number) {
   const progress = plan[ui_constants.TRACKER.progress]; const steps_scroll = plan[ui_constants.TRACKER.steps_scroll]; const steps_table = steps_scroll?.valid ? steps_scroll[ui_constants.TRACKER.steps_table] : undefined; const attention = plan[ui_constants.TRACKER.attention]
   if (!progress?.valid || !steps_scroll?.valid || !steps_table?.valid || !attention?.valid) return false
@@ -902,7 +1016,7 @@ function refresh_steps(plan: LuaGuiElement, board: TaskBoardUiSnapshot, max_heig
     for (let index = 0; index < visible.length; index++) {
       const step = visible[index]; const tone = step_tone(step)
       steps_table.add({ type: 'sprite', sprite: TONE_SPRITES[tone], style: 'status_image', tooltip: step.status }); steps_table.add({ type: 'label', caption: `${index + 1}.`, style: 'semibold_label' })
-      const description = gui_text.literal_gui_text(steps_table.add({ type: 'label', caption: step_caption(step.description), style: step.status === 'active' ? 'bold_label' : 'label' })); description.style.single_line = false; description.style.maximal_width = ui_constants.LEFT_COLUMN_WIDTH - 2 * ui_constants.SECTION_PADDING - 170
+      const description = gui_text.literal_gui_text(steps_table.add({ type: 'label', caption: step_caption(step.description), style: step.status === 'active' ? 'bold_label' : 'label' })); description.style.single_line = false; description.style.maximal_width = ui_constants.CONSOLE_LAYOUT.tracker_plan_width - 140
       if (step.status === 'completed' || step.status === 'pending') description.style.font_color = TONE_COLORS.muted
       const state = steps_table.add({ type: 'label', caption: step.status.toUpperCase(), style: 'semibold_label' }); state.style.font_color = TONE_COLORS[tone]; state.style.minimal_width = 72
       if (index === active_index) active_label = description
@@ -913,7 +1027,8 @@ function refresh_steps(plan: LuaGuiElement, board: TaskBoardUiSnapshot, max_heig
   }
   attention.clear()
   if (board.blocker.length > 0 || board.pause_reason.length > 0) {
-    const table = create_key_value_table(attention); const width = ui_constants.LEFT_COLUMN_WIDTH - 2 * ui_constants.SECTION_PADDING - ui_constants.KEY_COLUMN_WIDTH - 12
+    const table = create_key_value_table(attention)
+    const width = ui_constants.CONSOLE_LAYOUT.tracker_plan_width - ui_constants.KEY_COLUMN_WIDTH - 12
     if (board.blocker.length > 0) add_key_value(table, 'BLOCKED', task_condition_text(board.blocker_summary, board.blocker, 'SGLuna is blocked by an internal task condition.'), { tone: 'bad', width })
     if (board.pause_reason.length > 0) add_key_value(table, 'PAUSED', task_condition_text(board.pause_summary, board.pause_reason, 'SGLuna is paused by an internal task condition.'), { tone: 'warn', width })
   }

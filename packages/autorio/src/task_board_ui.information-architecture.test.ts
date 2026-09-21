@@ -36,6 +36,16 @@ describe('NPC console information architecture', () => {
     expect(prompt).toContain('NEW_TASK_BUTTON_NAME')
   })
 
+  it('keeps the Roadmap Shelf in the left third and executable Plan Tracker slice in the right two thirds', () => {
+    expect(consoleSource).toContain("caption: 'Roadmap Shelf'")
+    expect(consoleSource).toContain('tracker_shelf_width: 200')
+    expect(consoleSource).toContain('tracker_plan_width: LEFT_COLUMN_WIDTH - 2 * SECTION_PADDING - 12 - 200')
+    expect(consoleSource).toContain("name: TRACKER.workspace, direction: 'horizontal'")
+    expect(consoleSource).toContain("name: TRACKER.shelf, direction: 'vertical'")
+    expect(consoleSource).toContain("name: TRACKER.plan_column, direction: 'vertical'")
+    expect(consoleSource).toContain('refresh_shelf(shelf, shelf_nodes, tracker_heights.steps)')
+  })
+
   it('keeps Plan Tracker execution after retiring the Project Board renderer', () => {
     expect(consoleSource).not.toContain("create_section(parent, 'Project Board'")
     expect(consoleSource).not.toContain('render_project_board(parent, board)')

@@ -23,6 +23,13 @@ export const TRACKER = {
   body: 'airi_task_board_tracker_body',
   summary: 'airi_task_board_tracker_summary',
   empty: 'airi_task_board_tracker_empty',
+  workspace: 'airi_task_board_tracker_workspace',
+  shelf: 'airi_task_board_tracker_shelf',
+  shelf_header: 'airi_task_board_tracker_shelf_header',
+  shelf_count: 'airi_task_board_tracker_shelf_count',
+  shelf_scroll: 'airi_task_board_tracker_shelf_scroll',
+  shelf_table: 'airi_task_board_tracker_shelf_table',
+  plan_column: 'airi_task_board_tracker_plan_column',
   plan: 'airi_task_board_tracker_plan',
   progress: 'airi_task_board_tracker_progress',
   steps_scroll: 'airi_task_board_tracker_steps',
@@ -79,6 +86,7 @@ export const BLOCKED_CHOICE_PENDING_TICKS = 5 * 60
 export const PROMPT_FIELD_NAME = 'airi_task_board_prompt'
 export const PROMPT_SEND_BUTTON_NAME = 'airi_task_board_prompt_send'
 export const MAX_STEPS = 24
+export const MAX_SHELF_NODES = 12
 export const MAX_ACTIVITY = 18
 export const MAX_INVENTORY_ITEMS = 80
 export const MAX_WANTED_ITEMS = 48
@@ -167,6 +175,11 @@ export const CONSOLE_LAYOUT = {
   preview_min_height: 360,
   preview_max_height: 900,
   preview_screen_fraction: 0.5,
+  // The Roadmap Shelf is intentionally the smaller planning context. The
+  // executable immutable slice keeps two thirds of the tracker's inner width.
+  tracker_column_gap: 12,
+  tracker_shelf_width: 200,
+  tracker_plan_width: LEFT_COLUMN_WIDTH - 2 * SECTION_PADDING - 12 - 200,
 }
 export const PREVIEW_CAMERA_WIDTH = PREVIEW_COLUMN_WIDTH - 2 * SECTION_PADDING
 export const PREVIEW_ZOOM_DEFAULT = 0.75

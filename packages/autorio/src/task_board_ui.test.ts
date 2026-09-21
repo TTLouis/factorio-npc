@@ -57,6 +57,10 @@ describe('in-game task board UI projection', () => {
         { name: 'boiler', count: 1, reason: 'planned craft' },
         { name: 'pipe', count: 5, reason: 'steam connection' },
       ],
+      shelf: [
+        { id: 'node-smelting', intent: 'Establish smelting', why_it_matters: 'Feeds automation', status: 'ready_to_refine', depends_on: [], development_hint: 'vertical', linked: true },
+        { id: 'node-science', intent: 'Unlock automation science', why_it_matters: 'Advances research', status: 'tentative', depends_on: ['node-smelting'], linked: false },
+      ],
     })
     expect(board).toMatchObject({
       status: 'blocked',
@@ -74,6 +78,10 @@ describe('in-game task board UI projection', () => {
       wanted_items: [
         { name: 'boiler', count: 1 },
         { name: 'pipe', count: 5 },
+      ],
+      shelf: [
+        { id: 'node-smelting', status: 'ready_to_refine', linked: true },
+        { id: 'node-science', status: 'tentative', depends_on: ['node-smelting'], linked: false },
       ],
     })
   })
