@@ -673,58 +673,6 @@ function emptyAgentDebug(fallback = {}) {
   }
 }
 
-function decisionDebugFields(value = {}) {
-  return {
-    decision_provider: uiText(value.decision_provider, 80),
-    decision_model: uiText(value.decision_model, 160),
-    decision_shadow_intent: uiText(value.decision_shadow_intent, 80),
-    decision_active_intent: uiText(value.decision_active_intent, 80),
-    decision_post_step_route: uiText(value.decision_post_step_route, 80),
-    decision_post_step_applied_route: uiText(value.decision_post_step_applied_route, 80),
-    decision_post_step_confidence_percent: debugInteger(value.decision_post_step_confidence_percent),
-    decision_post_step_latency_ms: debugInteger(value.decision_post_step_latency_ms),
-    decision_post_step_fallback: uiText(value.decision_post_step_fallback, 300),
-    decision_scope_review: uiText(value.decision_scope_review, 32),
-    decision_scope_review_confidence_percent: debugInteger(value.decision_scope_review_confidence_percent),
-    decision_scope_review_reason_codes: uiText(value.decision_scope_review_reason_codes, 300),
-    decision_scope_review_actionable_prefix: debugInteger(value.decision_scope_review_actionable_prefix),
-    decision_scope_review_failure_stage: uiText(value.decision_scope_review_failure_stage, 40),
-    decision_scope_review_failure_reason: uiText(value.decision_scope_review_failure_reason, 500),
-    decision_scope_review_packet_version: debugInteger(value.decision_scope_review_packet_version),
-    decision_scope_review_grounding_observations: debugInteger(value.decision_scope_review_grounding_observations),
-    decision_scope_review_live_entities: debugInteger(value.decision_scope_review_live_entities),
-    decision_scope_review_preflight_count: debugInteger(value.decision_scope_review_preflight_count),
-    decision_development: uiText(value.decision_development, 32),
-    decision_development_confidence_percent: debugInteger(value.decision_development_confidence_percent),
-    decision_steering: uiText(value.decision_steering, 32),
-    decision_steering_confidence_percent: debugInteger(value.decision_steering_confidence_percent),
-    decision_reasoning_budget: uiText(value.decision_reasoning_budget, 32),
-    decision_reasoning_confidence_percent: debugInteger(value.decision_reasoning_confidence_percent),
-    decision_planning_horizon: uiText(value.decision_planning_horizon, 32),
-    decision_observation_budget: debugInteger(value.decision_observation_budget),
-    decision_confidence_percent: debugInteger(value.decision_confidence_percent),
-    decision_queue_conflict_percent: debugInteger(value.decision_queue_conflict_percent),
-    decision_latency_ms: debugInteger(value.decision_latency_ms),
-    decision_input_units: debugInteger(value.decision_input_units),
-    decision_output_units: debugInteger(value.decision_output_units),
-    decision_cost_micro_usd: debugInteger(value.decision_cost_micro_usd),
-    decision_calls_total: debugInteger(value.decision_calls_total),
-    decision_input_units_total: debugInteger(value.decision_input_units_total),
-    decision_output_units_total: debugInteger(value.decision_output_units_total),
-    decision_cost_micro_usd_total: debugInteger(value.decision_cost_micro_usd_total),
-    decision_shadow_matches_total: debugInteger(value.decision_shadow_matches_total),
-    decision_shadow_mismatches_total: debugInteger(value.decision_shadow_mismatches_total),
-    decision_post_step_calls_total: debugInteger(value.decision_post_step_calls_total),
-    decision_planner_skips_total: debugInteger(value.decision_planner_skips_total),
-    decision_planner_wakes_total: debugInteger(value.decision_planner_wakes_total),
-    decision_planner_continue_low_wakes_total: debugInteger(value.decision_planner_continue_low_wakes_total),
-    decision_planner_reanchor_low_wakes_total: debugInteger(value.decision_planner_reanchor_low_wakes_total),
-    decision_planner_replan_high_wakes_total: debugInteger(value.decision_planner_replan_high_wakes_total),
-    decision_planner_fallback_wakes_total: debugInteger(value.decision_planner_fallback_wakes_total),
-    decision_error: uiText(value.decision_error, 300),
-  }
-}
-
 function decisionCumulativeFields(value = {}) {
   return {
     decision_calls_total: debugInteger(value.decision_calls_total),
