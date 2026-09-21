@@ -123,6 +123,55 @@ test('live debug bridge retains request, provider, tool, recovery, and actor dia
   assert.equal(debug.last_event, 'tool.result')
 })
 
+test('scope review diagnostics expose exact unavailable stage and reset on the next request', () => {
+  let debug = liveAgentDebugEvent('interaction.routed', {
+    intent: 'new_goal',
+    decision_shadow_latency_ms: 12,
+    decision_shadow: {
+      provider: 'TypeSafe', model: 'jev-1.13.0', intent: 'new_goal', intent_confidence: 0.9,
+      queue_conflict_probability: 0, usage: { input_tokens: 50, output_tokens: 5 },
+    },
+  })
+  debug = liveAgentDebugEvent('request.received', {}, debug, { request_id: 'req-a' })
+  debug = liveAgentDebugEvent('planning.scope_review_failed', {
+    failure_stage: 'parse', failure_kind: 'parse_schema', reason: 'scope_review answer was missing',
+    review_packet_version: 2, grounding_observation_count: 4, live_entity_count: 3, deterministic_preflight_count: 1,
+  }, debug)
+  assert.equal(debug.decision_scope_review, 'unavailable')
+  assert.equal(debug.decision_scope_review_reason_codes, 'jev_scope_review_unavailable')
+  assert.equal(debug.decision_scope_review_failure_stage, 'parse_schema')
+  assert.equal(debug.decision_scope_review_failure_reason, 'scope_review answer was missing')
+  assert.equal(debug.decision_scope_review_packet_version, 2)
+  assert.equal(debug.decision_scope_review_grounding_observations, 4)
+  assert.equal(debug.decision_scope_review_live_entities, 3)
+  assert.equal(debug.decision_scope_review_preflight_count, 1)
+  assert.match(debug.decision_error, /Jev scope review unavailable/)
+  const calls = debug.decision_calls_total
+  debug = liveAgentDebugEvent('interaction.routed', {
+    intent: 'new_goal',
+    decision_shadow_latency_ms: 10,
+    decision_shadow: {
+      provider: 'TypeSafe', model: 'jev-1.13.0', intent: 'new_goal', intent_confidence: 0.95,
+      queue_conflict_probability: 0, usage: { input_tokens: 40, output_tokens: 4 },
+    },
+  }, debug)
+  debug = liveAgentDebugEvent('request.received', {}, debug, { request_id: 'req-b' })
+  assert.equal(debug.decision_scope_review, '')
+  assert.equal(debug.decision_scope_review_failure_stage, '')
+  assert.equal(debug.decision_scope_review_failure_reason, '')
+  assert.equal(debug.decision_error, '')
+  assert.equal(debug.decision_shadow_intent, 'new_goal')
+  assert.equal(debug.decision_calls_total, calls + 1)
+  debug = liveAgentDebugEvent('planning.scope_review', {
+    verdict: 'actionable', confidence: 0.88, reason_codes: [], actionable_prefix: 3,
+    review_packet_version: 2, grounding_observation_count: 5, live_entity_count: 2, deterministic_preflight_count: 1,
+  }, debug)
+  assert.equal(debug.decision_scope_review, 'actionable')
+  assert.equal(debug.decision_scope_review_confidence_percent, 88)
+  assert.equal(debug.decision_scope_review_actionable_prefix, 3)
+  assert.equal(debug.decision_scope_review_failure_reason, '')
+})
+
 test('live debug bridge drops malformed second-layer metrics instead of reusing stale round data', () => {
   let debug = liveAgentDebugEvent('provider.response', {
     round: 1,

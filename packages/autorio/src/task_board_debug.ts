@@ -86,6 +86,16 @@ export interface TaskBoardUiDebugSnapshot {
   decision_post_step_confidence_percent: number
   decision_post_step_latency_ms: number
   decision_post_step_fallback: string
+  decision_scope_review: string
+  decision_scope_review_confidence_percent: number
+  decision_scope_review_reason_codes: string
+  decision_scope_review_actionable_prefix: number
+  decision_scope_review_failure_stage: string
+  decision_scope_review_failure_reason: string
+  decision_scope_review_packet_version: number
+  decision_scope_review_grounding_observations: number
+  decision_scope_review_live_entities: number
+  decision_scope_review_preflight_count: number
   decision_granularity: string
   decision_granularity_confidence_percent: number
   decision_development: string
@@ -212,6 +222,16 @@ export function sanitize_debug_snapshot(value: any): TaskBoardUiDebugSnapshot {
     decision_post_step_confidence_percent: math.min(100, integer(debug.decision_post_step_confidence_percent)),
     decision_post_step_latency_ms: integer(debug.decision_post_step_latency_ms),
     decision_post_step_fallback: clean_text(debug.decision_post_step_fallback, 300),
+    decision_scope_review: clean_text(debug.decision_scope_review, 32),
+    decision_scope_review_confidence_percent: math.min(100, integer(debug.decision_scope_review_confidence_percent)),
+    decision_scope_review_reason_codes: clean_text(debug.decision_scope_review_reason_codes, 300),
+    decision_scope_review_actionable_prefix: math.min(100, integer(debug.decision_scope_review_actionable_prefix)),
+    decision_scope_review_failure_stage: clean_text(debug.decision_scope_review_failure_stage, 40),
+    decision_scope_review_failure_reason: clean_text(debug.decision_scope_review_failure_reason, 500),
+    decision_scope_review_packet_version: integer(debug.decision_scope_review_packet_version),
+    decision_scope_review_grounding_observations: integer(debug.decision_scope_review_grounding_observations),
+    decision_scope_review_live_entities: integer(debug.decision_scope_review_live_entities),
+    decision_scope_review_preflight_count: integer(debug.decision_scope_review_preflight_count),
     decision_granularity: clean_text(debug.decision_granularity, 32),
     decision_granularity_confidence_percent: math.min(100, integer(debug.decision_granularity_confidence_percent)),
     decision_development: clean_text(debug.decision_development, 32),

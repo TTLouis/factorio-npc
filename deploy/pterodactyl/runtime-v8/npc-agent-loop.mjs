@@ -206,6 +206,15 @@ function boundedScopeReviewValue(value, depth = 0) {
   return Object.fromEntries(entries)
 }
 
+function scopeReviewFailureKind(error, stage) {
+  const message = String(error?.message ?? error ?? '').toLowerCase()
+  if (/timed out|timeout/.test(message)) return 'timeout'
+  if (/abort|cancel/.test(message)) return 'cancellation'
+  if (/econn|network|fetch|socket|dns|http status|status code|connection/.test(message)) return 'transport'
+  if (stage === 'parse' || /schema|parse|invalid json|missing answer|invalid answer|choice/.test(message)) return 'parse_schema'
+  return stage === 'provider' ? 'provider' : 'unknown'
+}
+
 function boundedScopeReviewObservationWindow(observations) {
   const source = Array.isArray(observations) ? observations : []
   const selected = []
@@ -5448,42 +5457,60 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       },
     }
 
+    let response
     try {
-      const response = await this.scopeReviewDecisionProvider(reviewState, scopeReviewQuestions(), {
+      response = await this.scopeReviewDecisionProvider(reviewState, scopeReviewQuestions(), {
         epoch: this.requestInfo?.epoch,
         actorId: this.requestInfo?.actorId,
       })
-      const review = parseScopeReview(response, { draftStepCount: steps.length })
-      await this.traceEvent('planning.scope_review', {
+    }
+    catch (error) {
+      const reason = String(error?.message ?? error).slice(0, 300)
+      await this.traceEvent('planning.scope_review_failed', {
         plan_id: plan.plan_id,
-        verdict: review.verdict,
-        reason_codes: review.reason_codes,
-        mixed_direction: review.mixed_direction,
-        actionable_prefix: review.actionable_prefix,
+        failure_stage: 'provider',
+        failure_kind: scopeReviewFailureKind(error, 'provider'),
+        reason,
         review_packet_version: reviewState.review_packet_version,
         grounding_observation_count: recentObservations.length,
         live_entity_count: liveEntities.length,
         deterministic_preflight_count: deterministicPreflight.length,
       })
-      return { ...review, runtime_validation }
+      return { verdict: 'needs_grounding', reason_codes: ['jev_scope_review_unavailable'], confidence: 0, runtime_validation }
+    }
+
+    let review
+    try {
+      review = parseScopeReview(response, { draftStepCount: steps.length })
     }
     catch (error) {
-      // A review that could not be obtained is not an approval. Returning the
-      // failure as a verdict keeps the refusal visible in planning state
-      // instead of looking like a plan nobody got round to reviewing.
+      const reason = String(error?.message ?? error).slice(0, 300)
       await this.traceEvent('planning.scope_review_failed', {
         plan_id: plan.plan_id,
-        reason: String(error?.message ?? error).slice(0, 300),
+        failure_stage: 'parse',
+        failure_kind: scopeReviewFailureKind(error, 'parse'),
+        reason,
         review_packet_version: reviewState.review_packet_version,
         grounding_observation_count: recentObservations.length,
+        live_entity_count: liveEntities.length,
+        deterministic_preflight_count: deterministicPreflight.length,
       })
-      return {
-        verdict: 'needs_grounding',
-        reason_codes: ['jev_scope_review_unavailable'],
-        confidence: 0,
-        runtime_validation,
-      }
+      return { verdict: 'needs_grounding', reason_codes: ['jev_scope_review_unavailable'], confidence: 0, runtime_validation }
     }
+
+    await this.traceEvent('planning.scope_review', {
+      plan_id: plan.plan_id,
+      verdict: review.verdict,
+      confidence: review.confidence,
+      reason_codes: review.reason_codes,
+      mixed_direction: review.mixed_direction,
+      actionable_prefix: review.actionable_prefix,
+      review_packet_version: reviewState.review_packet_version,
+      grounding_observation_count: recentObservations.length,
+      live_entity_count: liveEntities.length,
+      deterministic_preflight_count: deterministicPreflight.length,
+    })
+    return { ...review, runtime_validation }
   }
 
   scopeReviewCorrectionMessage(review) {
