@@ -103,6 +103,22 @@ test('decision request normalization rejects oversized payloads before spending 
   )
 })
 
+test('scope review questions are directly valid for the TypeSafe decision provider', async () => {
+  const { scopeReviewQuestions } = await import('./jev-decision-taxonomy.mjs')
+  const config = decisionProviderConfiguration({ TYPESAFE_API_KEY: KEY })
+  const questions = scopeReviewQuestions({ draftStepCount: 4 })
+  assert.ok(Object.keys(questions).length <= config.maxQuestions)
+  for (const question of Object.values(questions)) assert.ok(['choice', 'score', 'noul'].includes(question.type))
+  const normalized = normalizeDecisionProviderRequest(
+    config,
+    { goal: 'semi-automate iron and copper plates', draft_steps: ['observe', 'gather', 'smelt', 'verify'] },
+    questions,
+  )
+  assert.equal(normalized.body.questions.scope_review_reason_codes.type, 'choice')
+  assert.equal(normalized.body.questions.scope_review_reason_code_secondary.type, 'choice')
+  assert.equal(normalized.body.questions.step_direction_0.type, 'choice')
+  assert.equal(normalized.body.questions.actionable_prefix.type, 'score')
+})
 test('decision provider batches questions into one TypeSafe System One request and preserves usage', async () => {
   const config = decisionProviderConfiguration({ TYPESAFE_API_KEY: KEY })
   const questions = {
