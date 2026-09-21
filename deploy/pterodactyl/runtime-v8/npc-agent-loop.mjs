@@ -4095,8 +4095,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const previousObservationBudgetRemaining = this.observationBudgetRemaining
     const previousPlanningHorizon = this.planningHorizonOverride
     if (jevNewGoalAligned) {
-      this.reasoningBudgetOverride = routed.decision_shadow.reasoning_budget ?? null
-      this.observationBudgetOverride = Number.isSafeInteger(routed.decision_shadow.observation_budget) ? routed.decision_shadow.observation_budget : null
+      // A true new goal starts with no request-local world grounding: the task
+      // context and live observation caches were just cleared above. Jev still
+      // chooses the semantic budget, but it may not starve the first planner
+      // turn before that planner can establish basic world state.
+      const requestedReasoningBudget = routed.decision_shadow.reasoning_budget
+      const requestedObservationBudget = Number.isSafeInteger(routed.decision_shadow.observation_budget)
+        ? routed.decision_shadow.observation_budget
+        : 0
+      this.reasoningBudgetOverride = requestedReasoningBudget === 'deep' || requestedReasoningBudget === 'strategic'
+        ? requestedReasoningBudget
+        : 'normal'
+      this.observationBudgetOverride = Math.max(3, requestedObservationBudget)
       this.observationBudgetRemaining = this.observationBudgetOverride
       this.planningHorizonOverride = routed.decision_shadow.planning_horizon ?? null
     }
@@ -5459,7 +5469,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
     let response
     try {
-      response = await this.scopeReviewDecisionProvider(reviewState, scopeReviewQuestions(), {
+      response = await this.scopeReviewDecisionProvider(reviewState, scopeReviewQuestions({ draftStepCount: steps.length }), {
         epoch: this.requestInfo?.epoch,
         actorId: this.requestInfo?.actorId,
       })
