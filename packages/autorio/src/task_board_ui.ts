@@ -1129,6 +1129,7 @@ function handle_control_click(player: LuaPlayer, element_name: string) {
       if (LIFECYCLE.begin(player.index, 'terminate')) {
         debug_ui.suppress_snapshot(storage.airi_task_board_ui)
         debug_ui.reset_task_conversation()
+        activity_state.clear_activity_history()
         emit_control(player, 'terminate')
       }
     } else arm_terminate(player.index)
@@ -1136,7 +1137,7 @@ function handle_control_click(player: LuaPlayer, element_name: string) {
     return true
   }
   if (element_name === ui_constants.FOLLOW_BUTTON_NAME) { clear_terminate_confirmation(player.index); const follow = read_follow_status(); emit_control(player, follow?.active ? 'stop_follow' : 'follow'); return true }
-  if (element_name === ui_constants.NEW_TASK_BUTTON_NAME) { if (LIFECYCLE.current(player.index) !== undefined) return true; clear_terminate_confirmation(player.index); debug_ui.suppress_snapshot(storage.airi_task_board_ui); debug_ui.reset_task_conversation(); emit_control(player, 'new_task'); render_panel(player); return true }
+  if (element_name === ui_constants.NEW_TASK_BUTTON_NAME) { if (LIFECYCLE.current(player.index) !== undefined) return true; clear_terminate_confirmation(player.index); debug_ui.suppress_snapshot(storage.airi_task_board_ui); debug_ui.reset_task_conversation(); activity_state.clear_activity_history(); emit_control(player, 'new_task'); render_panel(player); return true }
   if (element_name === ui_constants.PROMPT_SEND_BUTTON_NAME) { if (task_board_ui_prompt_send_pending(player.index, game.tick)) return true; submit_prompt(player, task_board_ui_prompt_draft(player.index)); return true }
   return false
 }
@@ -1144,8 +1145,31 @@ function handle_control_click(player: LuaPlayer, element_name: string) {
 export function create_task_board_ui_remote_interface() {
   create_skill_remote_interface(); create_learning_remote_interface()
   remote.add_interface('autorio_task_board', {
-    set_snapshot: (value: unknown, generation?: unknown, revision?: unknown) => { if (!debug_ui.accept_sync_version(generation, revision)) return true; const next = sanitize_task_board_ui_snapshot(value); if (next === undefined) return false; const previous = storage.airi_task_board_ui; const stamped = stamp_activity_times(next, previous, game.tick); activity_state.merge_activity_history(stamped.activity); storage.airi_task_board_ui = stamped; storage.airi_task_board_ui_synced_tick = game.tick; provider_ui.remember_provider_model(stamped.debug?.provider_model); project_ui.record_project_snapshot(stamped, game.tick); try { handle_task_board_learning_transition(previous, stamped) } catch (error) { log(`[SGLuna learning] completion learning skipped: ${error instanceof Error ? error.message : 'unknown error'}`) }; render_all(); return true },
-    clear: (generation?: unknown, revision?: unknown) => { if (!debug_ui.accept_sync_version(generation, revision)) return true; storage.airi_task_board_ui = undefined; storage.airi_task_board_ui_synced_tick = game.tick; render_all(); return true },
+    set_snapshot: (value: unknown, generation?: unknown, revision?: unknown) => {
+      if (!debug_ui.accept_sync_version(generation, revision)) return true
+      const next = sanitize_task_board_ui_snapshot(value)
+      if (next === undefined) return false
+      const previous = storage.airi_task_board_ui
+      const changed_task = activity_state.bind_activity_context(next.conversation_id, next.goal_id)
+      const stamped = stamp_activity_times(next, changed_task ? undefined : previous, game.tick)
+      activity_state.merge_activity_history(stamped.activity)
+      storage.airi_task_board_ui = stamped
+      storage.airi_task_board_ui_synced_tick = game.tick
+      provider_ui.remember_provider_model(stamped.debug?.provider_model)
+      project_ui.record_project_snapshot(stamped, game.tick)
+      try { handle_task_board_learning_transition(previous, stamped) }
+      catch (error) { log(`[SGLuna learning] completion learning skipped: ${error instanceof Error ? error.message : 'unknown error'}`) }
+      render_all()
+      return true
+    },
+    clear: (generation?: unknown, revision?: unknown) => {
+      if (!debug_ui.accept_sync_version(generation, revision)) return true
+      activity_state.clear_activity_history()
+      storage.airi_task_board_ui = undefined
+      storage.airi_task_board_ui_synced_tick = game.tick
+      render_all()
+      return true
+    },
     ack_lifecycle: (player_index: unknown, action: unknown) => { const index = integer(player_index); const kind: TaskBoardUiLifecycleAction | undefined = action === 'pause' || action === 'resume' || action === 'terminate' ? action : undefined; if (index < 1 || kind === undefined) return false; LIFECYCLE.ack(index, kind); render_all(); return true },
     status: () => storage.airi_task_board_ui,
     sync_version: () => debug_ui.current_sync_version(),
