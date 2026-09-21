@@ -113,7 +113,7 @@ describe('actor mode', () => {
     expect(get_npc_recovery_status().last_result).toBeUndefined()
   })
 
-  it('requests and forces spawn chunk generation before creating the NPC when no player ever generated it', () => {
+  it('forces only a bounded 3x3 spawn neighborhood before creating the NPC when no player ever generated it', () => {
     const surface = (globalThis as any).game.surfaces[1]
     const force = (globalThis as any).game.forces.player
     const character = fake_character(42)
@@ -126,7 +126,7 @@ describe('actor mode', () => {
     const actor = get_controlled_actor()
 
     expect(surface.is_chunk_generated).toHaveBeenCalledWith({ x: 0, y: 0 })
-    expect(surface.request_to_generate_chunks).toHaveBeenCalledWith({ x: 0, y: 0 }, 3)
+    expect(surface.request_to_generate_chunks).toHaveBeenCalledWith({ x: 0, y: 0 }, 1)
     expect(surface.force_generate_chunk_requests).toHaveBeenCalled()
     expect(actor?.status_snapshot().kind).toBe('standalone_character')
   })
