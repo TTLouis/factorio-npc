@@ -288,8 +288,26 @@ export function classifySliceDirection(stepDirections) {
   }
 }
 
-export function scopeReviewQuestions() {
-  return {
+export function scopeReviewQuestions({ draftStepCount = 0 } = {}) {
+  const boundedStepCount = Number.isSafeInteger(draftStepCount)
+    ? Math.max(0, Math.min(MAX_ACTIONABLE_PREFIX, draftStepCount))
+    : 0
+  const providerDirectionCount = Math.min(boundedStepCount, 6)
+  const actionableMaximum = Math.max(1, Math.min(63, boundedStepCount))
+  const reasonCriteria = {
+    none: 'No listed scope-review problem applies.',
+    too_broad: 'The slice covers substantially more than one bounded semantic objective.',
+    horizon_too_long: 'The draft plans further ahead than the currently known world can support without likely invalidation.',
+    step_too_vague: 'At least one step does not say concretely enough what must be done to choose an action now.',
+    mixed_outcomes: 'A single step (or the slice) mixes multiple independent semantic outcomes or substantially mixes development directions.',
+    missing_dependency: 'An obvious prerequisite capability, resource, or technology is not accounted for.',
+    completion_not_observable: 'A step has no observable condition by which completion could be recognised.',
+    unsupported_completion_contract: 'A step completion condition cannot be expressed by supported grounded predicates.',
+    assumption_not_grounded: 'The draft assumes world facts that verified state does not establish.',
+    bad_checkpoint_boundary: 'The slice ends somewhere that is not a useful re-observation or replanning checkpoint.',
+  }
+
+  const questions = {
     scope_review: {
       type: 'choice',
       instructions:
@@ -302,35 +320,37 @@ export function scopeReviewQuestions() {
       },
     },
     scope_review_reason_codes: {
-      type: 'multi_choice',
-      instructions: 'Select every reason code that applies to the draft. Return an empty list when the verdict is actionable. Do not invent new codes.',
-      criteria: {
-        too_broad: 'The slice covers substantially more than one bounded semantic objective.',
-        horizon_too_long: 'The draft plans further ahead than the currently known world can support without likely invalidation.',
-        step_too_vague: 'At least one step does not say concretely enough what must be done to choose an action now.',
-        mixed_outcomes: 'A single step (or the slice) mixes multiple independent semantic outcomes or substantially mixes development directions.',
-        missing_dependency: 'An obvious prerequisite capability, resource, or technology is not accounted for.',
-        completion_not_observable: 'A step has no observable condition by which completion could be recognised.',
-        unsupported_completion_contract: 'A step completion condition cannot be expressed by supported grounded predicates.',
-        assumption_not_grounded: 'The draft assumes world facts that verified state does not establish.',
-        bad_checkpoint_boundary: 'The slice ends somewhere that is not a useful re-observation or replanning checkpoint.',
-      },
+      type: 'choice',
+      instructions: 'Select the most important reason code that applies to the draft, or none when the verdict is actionable. Do not invent new codes.',
+      criteria: reasonCriteria,
     },
-    step_directions: {
-      type: 'multi_choice',
-      instructions:
-        'For each draft step in order, classify the development direction that step pulls in, relative to the current critical path rather than the surface action. Use one entry per step. This DESCRIBES the draft; it is not a recommendation about what the next slice should be.',
-      criteria: developmentDecisionQuestions().development.criteria,
+    scope_review_reason_code_secondary: {
+      type: 'choice',
+      instructions: 'Select one additional distinct reason code if another materially applies; otherwise choose none. Do not invent new codes.',
+      criteria: reasonCriteria,
     },
     actionable_prefix: {
       type: 'score',
       instructions:
         'How many leading draft steps are already committable as written. 0 means none. Use this to point at an earlier, better boundary; the deferred tail stays on the Roadmap Shelf and the Main LLM authors the next draft. Do not supply replacement steps.',
-      criteria: ['count of leading draft steps that are already committable'],
+      criteria: Array.from(
+        { length: actionableMaximum + 1 },
+        (_, index) => `${index} leading draft step${index === 1 ? '' : 's'} already committable`,
+      ),
     },
   }
-}
 
+  for (let index = 0; index < providerDirectionCount; index++) {
+    questions[`step_direction_${index}`] = {
+      type: 'choice',
+      instructions:
+        `Classify draft step ${index + 1} by the development direction it pulls in relative to the current critical path, not merely its surface action. This DESCRIBES the draft and is not a recommendation about the next slice.`,
+      criteria: developmentDecisionQuestions().development.criteria,
+    }
+  }
+
+  return questions
+}
 export function steeringRecommendationQuestions() {
   return {
     ...developmentDecisionQuestions(),
@@ -400,6 +420,14 @@ export function parseScopeReview(response, { draftStepCount } = {}) {
   const prefixSection = sectionOf(response, 'actionable_prefix')
 
   const directionSection = sectionOf(response, 'step_directions')
+  const dynamicDirections = Object.entries(
+    response?.answers && typeof response.answers === 'object' && !Array.isArray(response.answers)
+      ? response.answers
+      : {},
+  )
+    .filter(([id, answer]) => /^step_direction_\d+$/.test(id) && typeof answer?.choice === 'string')
+    .sort(([left], [right]) => Number(left.slice('step_direction_'.length)) - Number(right.slice('step_direction_'.length)))
+    .map(([, answer]) => answer.choice)
 
   const choices = FAMILY_CHOICES.scope_review
   const selected = choiceOf(response, 'scope_review') ?? section.choice ?? section.verdict
@@ -413,13 +441,17 @@ export function parseScopeReview(response, { draftStepCount } = {}) {
     ...asArray(directionSection.choices),
     ...asArray(directionSection.step_directions),
     ...asArray(response?.answers?.step_directions?.choices),
+    ...dynamicDirections,
   ])
 
   const rawReasonCodes = [
     ...asArray(section.reason_codes),
     ...asArray(reasonSection.reason_codes),
     ...asArray(reasonSection.choices),
+    ...asArray(reasonSection.choice),
     ...asArray(response?.answers?.scope_review_reason_codes?.choices),
+    ...asArray(choiceOf(response, 'scope_review_reason_codes')),
+    ...asArray(choiceOf(response, 'scope_review_reason_code_secondary')),
   ]
   const reason_codes = uniqueBounded(
     [
