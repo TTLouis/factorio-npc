@@ -485,6 +485,17 @@ test('an unmet active step is not closed just because the planner moved on', asy
   assert.equal(game.mutations.length, 1, 'the coal batch was never admitted under the stone step')
 })
 
+// Every step that stays open must say why (step.close_declined).
+function recordCloseDeclines(agent) {
+  const declines = []
+  const trace = agent.traceEvent.bind(agent)
+  agent.traceEvent = async (event, data) => {
+    if (event === 'step.close_declined') declines.push(data)
+    return trace(event, data)
+  }
+  return declines
+}
+
 async function plannerSaysDone({ held, compoundProbability = 0.8, route = 'reanchor_plan' }) {
   const game = new FakeFactorio({ inventory: { wood: 0 } })
   const memory = new CanonicalTaskBoardMemory()
@@ -526,12 +537,13 @@ async function plannerSaysDone({ held, compoundProbability = 0.8, route = 'reanc
     decisionTraceFile: null,
     npcId: 'airi',
   })
+  const declines = recordCloseDeclines(agent)
   await agent.request('harvest 7 wood, that is the only task', { sender: 'Louis' })
   game.inventory.wood = held
   let result
   try { result = await agent.completed() }
   catch (error) { result = { error } }
-  return { result, calls, memory }
+  return { result, calls, memory, declines }
 }
 
 test('a planner "done" is accepted when the kept-open step contract is met in Factorio', async () => {
@@ -541,13 +553,15 @@ test('a planner "done" is accepted when the kept-open step contract is met in Fa
 })
 
 test('a planner "done" is not accepted while the step contract is unmet', async () => {
-  const { result } = await plannerSaysDone({ held: 5 })
+  const { result, declines } = await plannerSaysDone({ held: 5 })
   assert.notEqual(result?.goalStatus, 'completed')
+  assert.ok(declines.some(item => item.reason === 'target_unmet'), `no traced reason: ${JSON.stringify(declines)}`)
 })
 
 test('a planner "done" on a plain completion turn cannot close an unmet quantity goal', async () => {
-  const { result, memory } = await plannerSaysDone({ held: 5, route: 'continue_current' })
+  const { result, memory, declines } = await plannerSaysDone({ held: 5, route: 'continue_current' })
   assert.notEqual(result?.goalStatus, 'completed', 'closed with 5 of 7 wood')
+  assert.ok(declines.some(item => item.reason === 'target_unmet'), `no traced reason: ${JSON.stringify(declines)}`)
   assert.notEqual(memory.planningState(KEY)?.goal?.status, 'completed')
 })
 
@@ -593,6 +607,7 @@ async function verifyOnlyStep({ heldAtDone, verifyBoundary = 'checkpoint_here' }
     decisionTraceFile: null,
     npcId: 'airi',
   })
+  const declines = recordCloseDeclines(agent)
   await agent.request('gather 6 stone, that is the only task', { sender: 'Louis' })
   game.inventory.stone = 6
   // Step 1 closes on its receipt/contract and the planner is asked what next.
@@ -607,7 +622,7 @@ async function verifyOnlyStep({ heldAtDone, verifyBoundary = 'checkpoint_here' }
   let result
   try { result = await agent.completed() }
   catch (error) { result = { error } }
-  return { result, memory, jev }
+  return { result, memory, jev, declines }
 }
 
 test('a work-less verify step closes when Jev maps it to an earlier met target', async () => {
@@ -618,13 +633,17 @@ test('a work-less verify step closes when Jev maps it to an earlier met target',
 })
 
 test('a work-less verify step stays open when the earlier target no longer holds', async () => {
-  const { result } = await verifyOnlyStep({ heldAtDone: 5 })
+  const { result, declines } = await verifyOnlyStep({ heldAtDone: 5 })
   assert.notEqual(result?.goalStatus, 'completed')
+  assert.ok(declines.some(item => item.trigger === 'planner_done' && item.reason === 'target_unmet'),
+    `no traced reason: ${JSON.stringify(declines)}`)
 })
 
 test('a work-less verify step stays open when Jev does not map an earlier target onto it', async () => {
-  const { result } = await verifyOnlyStep({ heldAtDone: 6, verifyBoundary: 'keep_step_open' })
+  const { result, declines } = await verifyOnlyStep({ heldAtDone: 6, verifyBoundary: 'keep_step_open' })
   assert.notEqual(result?.goalStatus, 'completed')
+  assert.ok(declines.some(item => item.trigger === 'planner_done' && item.reason === 'mapping_declined'),
+    `no traced reason: ${JSON.stringify(declines)}`)
 })
 
 async function revisedStepDone({ heldAtDone }) {

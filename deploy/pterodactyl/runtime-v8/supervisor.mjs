@@ -993,8 +993,8 @@ export function liveAgentDebugEvent(event, data = {}, previous = {}, fallback = 
     debug.step_completion_status = uiText(data.status, 80) || debug.step_completion_status
     debug.step_completion_evidence = uiText(JSON.stringify(data.evidence ?? []), 300)
   }
-  if (event === 'step.completion_rejected') {
-    debug.step_completion_status = uiText(data.reason, 120) || 'rejected'
+  if (event === 'step.close_declined') {
+    debug.step_completion_status = uiText(`${data.trigger ?? 'close'}: ${data.reason ?? 'declined'}`, 120)
   }
   if (event === 'step.verified') {
     debug.step_completion_status = 'verified'

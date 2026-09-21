@@ -526,6 +526,11 @@ function worldStateContract(contract) {
     && contract.requirements.every(requirement => WORLD_STATE_REQUIREMENT_KINDS.has(requirement?.kind))
 }
 
+// Jev was asked about an earlier "done" claim and did not map a checkpoint.
+function declinedDoneMapping(checkpoint) {
+  return checkpoint?.claimed_done === true && checkpoint.boundary !== 'checkpoint_here'
+}
+
 function activeStepCheckpointSnapshot(board) {
   const index = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
   const step = index === undefined ? undefined : board?.steps?.[index]
@@ -3101,41 +3106,114 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return requirements.length > 0 ? [{ mode: 'all', source: 'runtime_inventory_delta', requirements }] : []
   }
 
-  // Three independent signals that the active step is done: the planner moved
-  // its focus past it, Jev placed the new batch in a LATER step, and the
-  // active step's own Jev-selected world-state contract is met in Factorio.
-  // Without this the loop dead-ended: completion kept the step open, the
-  // planner correctly moved on, and alignment rejected the next step's work
-  // against a board that never advanced. A genuinely compound step cannot
-  // pass: its remaining work would align as current-step work, not later.
-  async closeActiveStepOnLaterStepWork(plan, before) {
-    return this.closeActiveStepOnMetContract(before, {
-      reasonCode: 'later_step_work_with_satisfied_contract',
-      source: 'later_step_alignment',
-      admits: activeIndex => Number.isSafeInteger(plan?.currentStep) && plan.currentStep > activeIndex,
+  // The one authority on "may the active step close now?". Every trigger
+  // calls it:
+  // - batch_receipt: a batch's deterministic receipt. routeStepCompletionDecision
+  //   resolves the receipt-aware checkpoint, then closes via applyStepClose.
+  // - later_step_work: Jev placed a new batch in a LATER step while the
+  //   planner's focus moved past this one. A genuinely compound step cannot
+  //   pass: its remaining work would align as current-step work.
+  // - planner_done: no plan left, no operation, no BLOCKED, step still open.
+  // - final_completion_claim: the planner's final "done" after a receipt. It is
+  //   veto-only, since recordPlan performs that close.
+  // The planner's word never closes a step by itself. What closes it is the
+  // step's world-state target, re-read from Factorio now. A planner "done"
+  // whose step has no such target of its own may borrow one: Jev maps it from
+  // this step's earlier offers, earlier steps, or superseded revisions. Every
+  // decline traces step.close_declined with a reason, so an open step is
+  // always explained.
+  async evaluateStepClose(trigger, { plan, before, blockedBy } = {}) {
+    const key = this.activePlanKey()
+    const planState = this.memory.planByNpc?.get?.(key) ?? this.memory.currentPlan?.(key)
+    if (!planState) return { closed: false, reason: 'no_plan' }
+    const board = planState.task_board
+    const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
+    const step = activeIndex === undefined ? undefined : board?.steps?.[activeIndex]
+    const decline = (reason, detail = {}) => this.declineStepClose(trigger, reason, {
+      active_step_id: step?.id ?? before?.stepId,
+      planner_step: plan?.currentStep,
+      ...detail,
+    })
+
+    if (trigger === 'final_completion_claim') {
+      const evaluation = await this.evaluateWorldStateCheckpoint(before?.checkpoint)
+      if (evaluation && !evaluation.satisfied) {
+        await decline('target_unmet', { contract: before.checkpoint.contract, results: evaluation.results })
+        return { closed: false, vetoed: true }
+      }
+      return { closed: false, vetoed: false }
+    }
+
+    if (blockedBy) return decline(blockedBy)
+    if (planState.status !== 'active' || !step) return decline('no_active_step')
+    if (before?.stepId !== step.id) return decline('active_step_changed', { checkpoint_step_id: before?.stepId })
+    if (trigger === 'later_step_work' && !(Number.isSafeInteger(plan?.currentStep) && plan.currentStep > activeIndex)) {
+      return decline('planner_focus_not_past_step')
+    }
+    if (trigger === 'planner_done') {
+      if (plan?.operations?.length !== 0 || plan?.plan?.length !== 0) return decline('not_a_done_claim')
+      if (providerBlockerReason(plan)) return decline('planner_reported_blocker')
+      // A mapping Jev declined on an earlier "done" claim stays declined.
+      if (declinedDoneMapping(before.checkpoint)) return decline('mapping_declined_earlier')
+      if (!worldStateContract(before.checkpoint?.contract)) {
+        const mapped = await this.checkpointFromEarlierSteps(plan, before)
+        if (!mapped.before) return decline(mapped.reason, mapped.detail)
+        before = mapped.before
+        if (before.stepId !== step.id) return decline('active_step_changed', { checkpoint_step_id: before.stepId })
+      }
+    }
+
+    const checkpoint = before.checkpoint
+    if (!checkpoint) return decline('no_checkpoint')
+    if (checkpoint.relation !== 'advances_current') return decline('checkpoint_not_current_step', { relation: checkpoint.relation })
+    const evaluation = await this.evaluateWorldStateCheckpoint(checkpoint)
+    if (!evaluation) return decline('no_world_state_target', { contract_mode: checkpoint.contract?.mode })
+    if (!evaluation.satisfied) return decline('target_unmet', { contract: checkpoint.contract, results: evaluation.results })
+    return this.applyStepClose(trigger, {
+      key,
+      step,
+      contract: checkpoint.contract,
+      results: evaluation.results,
+      reasonCode: trigger === 'planner_done' ? 'planner_done_with_satisfied_contract' : 'later_step_work_with_satisfied_contract',
+      source: trigger === 'planner_done' ? 'planner_done' : 'later_step_alignment',
       plannerStep: plan?.currentStep,
     })
   }
 
-  // The planner reported the goal finished (no plan left, no operation, no
-  // BLOCKED) while the active step was still open. Its word alone never closes
-  // a step; the step's own pre-recorded world-state contract, re-read from
-  // Factorio now, does. Unmet or unverifiable contracts keep the old
-  // act-or-block repair path.
-  async closeActiveStepOnPlannerDone(plan, before) {
-    if (plan?.operations?.length !== 0 || plan?.plan?.length !== 0 || providerBlockerReason(plan)) return false
-    // A mapping Jev declined on an earlier "done" claim stays declined.
-    const declined = checkpoint => checkpoint?.claimed_done && checkpoint.boundary !== 'checkpoint_here'
-    if (declined(before?.checkpoint)) return false
-    // semantic_unknown and receipt-only checkpoints leave nothing to re-read.
-    if (!worldStateContract(before?.checkpoint?.contract)) before = await this.checkpointFromEarlierSteps(plan, before)
-    if (declined(before?.checkpoint)) return false
-    return this.closeActiveStepOnMetContract(before, {
-      reasonCode: 'planner_done_with_satisfied_contract',
-      source: 'planner_done',
-      admits: () => true,
-      plannerStep: plan?.currentStep,
+  async declineStepClose(trigger, reason, detail = {}) {
+    await this.traceEvent('step.close_declined', { trigger, reason, ...detail })
+    return { closed: false, reason }
+  }
+
+  // The single write for a step close: the outcome authority, never the
+  // planner, advances the board.
+  async applyStepClose(trigger, { key, step, contract, results, reasonCode, source, plannerStep, extraEvidence = [], steeringRecommendation }) {
+    const reduced = this.memory.applyOutcomeAuthority?.(key, {
+      kind: 'verified_complete',
+      source: 'step_checkpoint_gate',
+      reason_code: reasonCode,
+      evidence: [...extraEvidence, {
+        kind: 'verified_world_state',
+        ref: `checkpoint/${step.id}`,
+        summary: JSON.stringify({ contract, results, planner_step: plannerStep }),
+      }],
+      metadata: { scope: 'step' },
+    }, { steeringRecommendation })
+    await this.persistState()
+    if (reduced?.decision?.accepted !== true) {
+      const declined = await this.declineStepClose(trigger, reduced?.decision?.rejection_reason || 'outcome_authority_rejected_completion', {
+        active_step_id: step.id,
+        contract,
+      })
+      return { ...declined, state: reduced?.state }
+    }
+    await this.traceEvent('step.verified', {
+      active_step_id: step.id,
+      source,
+      contract,
+      task_board: visibleTaskBoard(reduced?.state?.task_board),
     })
+    return { closed: true, state: reduced.state }
   }
 
   // Re-reads a recorded step checkpoint against Factorio. Undefined when the
@@ -3148,18 +3226,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return evaluateCompletionContract(contract, facts)
   }
 
-  // A step with no checkable target of its own: one that never ran work
-  // ("verify I hold 6 stone"), a reworded revision whose checkpoint is
-  // semantic_unknown while the wording it replaced recorded a real target, or
-  // a step whose own grounded target Jev was not confident in before its batch
-  // ran. Offer Jev those world-state targets (this step's earlier offers,
-  // earlier steps, superseded step ids); if it maps one onto this step as its
-  // checkpoint, that
-  // becomes the step's contract, still re-read from Factorio before closing.
+  // Covers a step with no checkable target of its own. Examples: a step that
+  // never ran work ("verify I hold 6 stone"); a reworded revision whose
+  // checkpoint is semantic_unknown while the wording it replaced recorded a
+  // real target; a step whose own grounded target Jev was not confident in
+  // before its batch ran. Jev is offered those world-state targets (this
+  // step's earlier offers, earlier steps, superseded step ids). If it maps one
+  // onto this step as its checkpoint, that becomes the step's contract, still
+  // re-read from Factorio before closing. Returns { before } on a mapping,
+  // otherwise { reason, detail }.
   async checkpointFromEarlierSteps(plan, before) {
     const board = this.memory.currentPlan?.(this.activePlanKey())?.task_board
     const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : -1
-    if (!before?.stepId || activeIndex < 0) return before
+    if (!before?.stepId || activeIndex < 0) return { reason: 'no_active_step' }
     const ownOffered = before.checkpoint?.claimed_done ? [] : (before.checkpoint?.offered_candidates ?? [])
     const liveStepIds = new Set(board.steps.map(step => step?.id))
     const superseded = (Array.isArray(board.evidence) ? board.evidence : [])
@@ -3183,45 +3262,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       })
       .slice(0, 4)
       .map(contract => ({ ...contract, source: contract.source ?? 'verified_earlier_step' }))
-    if (extraCandidates.length === 0) return before
+    if (extraCandidates.length === 0) {
+      return { reason: 'no_world_state_candidates', detail: { contract_mode: before.checkpoint?.contract?.mode } }
+    }
     const decision = await this.routeStepCheckpointDecision(plan, { claimedDone: true, extraCandidates })
-    if (decision?.boundary !== 'checkpoint_here' || decision?.relation !== 'advances_current') return before
-    return activeStepCheckpointSnapshot(this.memory.currentPlan?.(this.activePlanKey())?.task_board) ?? before
-  }
-
-  async closeActiveStepOnMetContract(before, { reasonCode, source, admits, plannerStep }) {
-    const key = this.activePlanKey()
-    const planState = this.memory.planByNpc?.get?.(key) ?? this.memory.currentPlan?.(key)
-    const board = planState?.task_board
-    const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
-    const step = activeIndex === undefined ? undefined : board?.steps?.[activeIndex]
-    if (!planState || planState.status !== 'active' || !step || before?.stepId !== step.id) return false
-    if (!admits(activeIndex)) return false
-    const checkpoint = before.checkpoint
-    if (!checkpoint || checkpoint.relation !== 'advances_current') return false
-    const evaluation = await this.evaluateWorldStateCheckpoint(checkpoint)
-    if (!evaluation?.satisfied) return false
-    const contract = checkpoint.contract
-    const reduced = this.memory.applyOutcomeAuthority?.(key, {
-      kind: 'verified_complete',
-      source: 'step_checkpoint_gate',
-      reason_code: reasonCode,
-      evidence: [{
-        kind: 'verified_world_state',
-        ref: `checkpoint/${step.id}`,
-        summary: JSON.stringify({ contract, results: evaluation.results, planner_step: plannerStep }),
-      }],
-      metadata: { scope: 'step' },
-    })
-    await this.persistState()
-    if (reduced?.decision?.accepted !== true) return false
-    await this.traceEvent('step.verified', {
-      active_step_id: step.id,
-      source,
-      contract,
-      task_board: visibleTaskBoard(reduced?.state?.task_board),
-    })
-    return reduced.state ?? true
+    if (decision?.boundary !== 'checkpoint_here' || decision?.relation !== 'advances_current') {
+      return {
+        reason: 'mapping_declined',
+        detail: { boundary: decision?.boundary, relation: decision?.relation, candidates: extraCandidates.length },
+      }
+    }
+    const mapped = activeStepCheckpointSnapshot(this.memory.currentPlan?.(this.activePlanKey())?.task_board)
+    return mapped ? { before: mapped } : { reason: 'mapping_not_recorded' }
   }
 
   // `claimedDone` asks the same question for a step the planner says is
@@ -3706,8 +3758,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       : undefined
 
     if (!planState || planState.status !== 'active' || !step || !verification) {
-      await this.traceEvent('step.completion_rejected', {
-        reason: 'no_authoritative_operation_receipt',
+      await this.declineStepClose('batch_receipt', 'no_authoritative_operation_receipt', {
         active_step_id: step?.id,
         batch_id: batchId,
       })
@@ -3860,9 +3911,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
 
       if (!checkpoint || checkpoint.boundary !== 'checkpoint_here' || checkpoint.contract?.mode === 'semantic_unknown') {
-        await this.traceEvent('step.completion_rejected', {
+        await this.declineStepClose('batch_receipt', reason, {
           active_step_id: step.id,
-          reason,
           checkpoint_boundary: checkpoint?.boundary,
         })
         return { verified: false, reason, state: planState, contract: checkpoint?.contract }
@@ -3879,10 +3929,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       checkpoint_boundary: checkpoint.boundary,
     })
     if (!evaluation.satisfied) {
-      await this.traceEvent('step.completion_rejected', {
+      await this.declineStepClose('batch_receipt', 'target_unmet', {
         active_step_id: step.id,
-        reason: 'checkpoint_requirements_unsatisfied',
         contract: checkpoint.contract,
+        results: evaluation.results,
       })
       return { verified: false, reason: 'checkpoint_requirements_unsatisfied', state: planState, contract: checkpoint.contract }
     }
@@ -3895,32 +3945,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         })
       : undefined
 
-    const reduced = this.memory.applyOutcomeAuthority?.(key, {
-      kind: 'verified_complete',
+    const closed = await this.applyStepClose('batch_receipt', {
+      key,
+      step,
+      contract: checkpoint.contract,
+      results: evaluation.results,
+      reasonCode: 'pre_admission_checkpoint_satisfied',
       source: 'step_checkpoint_gate',
-      reason_code: 'pre_admission_checkpoint_satisfied',
-      evidence: [verification, {
-        kind: 'verified_world_state',
-        ref: `checkpoint/${step.id}`,
-        summary: JSON.stringify({ contract: checkpoint.contract, results: evaluation.results }),
-      }],
-      metadata: { scope: 'step' },
-    }, {
+      extraEvidence: [verification],
       steeringRecommendation,
     })
-    await this.persistState()
-    if (reduced?.decision?.accepted !== true) {
-      const reason = reduced?.decision?.rejection_reason || 'outcome_authority_rejected_completion'
-      await this.traceEvent('step.completion_rejected', { active_step_id: step.id, reason, contract: checkpoint.contract })
-      return { verified: false, reason, state: reduced?.state ?? planState, contract: checkpoint.contract }
-    }
-    await this.traceEvent('step.verified', {
-      active_step_id: step.id,
-      source: 'step_checkpoint_gate',
-      contract: checkpoint.contract,
-      task_board: visibleTaskBoard(reduced?.state?.task_board),
-    })
-    return { verified: true, state: reduced?.state, contract: checkpoint.contract }
+    if (!closed.closed) return { verified: false, reason: closed.reason, state: closed.state ?? planState, contract: checkpoint.contract }
+    return { verified: true, state: closed.state, contract: checkpoint.contract }
   }
 
   async routePostStepDecision(receipt, { boundary = 'completion', failure = '' } = {}) {
@@ -6436,16 +6472,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // "The batch ran" is not "the step is done". When the open step carries a
     // world-state target, a planner's final "done" must also meet it.
     if (finalCompletionVerified && checkpointBeforeBatch?.checkpoint) {
-      const evaluation = await this.evaluateWorldStateCheckpoint(checkpointBeforeBatch.checkpoint)
-      if (evaluation && !evaluation.satisfied) {
-        finalCompletionVerified = false
-        await this.traceEvent('step.completion_claim_rejected', {
-          active_step_id: checkpointBeforeBatch.stepId,
-          reason_code: 'planner_done_with_unmet_contract',
-          contract: checkpointBeforeBatch.checkpoint.contract,
-          results: evaluation.results,
-        })
-      }
+      const claim = await this.evaluateStepClose('final_completion_claim', { plan, before: checkpointBeforeBatch })
+      if (claim.vetoed) finalCompletionVerified = false
     }
     const remainingCanonicalWork = !finalCompletionVerified && (
       canonicalWorkRemains(previousState)
@@ -6474,14 +6502,22 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     const conditionWaitActive = conditionWait?.state === 'active'
 
-    let plannerDoneClosed
-    if (commands.length === 0 && remainingCanonicalWork && !runtimeHealthy && !conditionWaitActive
-      && this.plannerDoneCloseUsed !== true
-      && (plannerDoneClosed = await this.closeActiveStepOnPlannerDone(plan, checkpointBeforeBatch))) {
-      const settled = await this.settleCompletedStepState(
-        plannerDoneClosed === true ? undefined : plannerDoneClosed,
-        { allowContinuation: false },
-      )
+    // A "done" claim: no operation and no plan left. When a guard skips the
+    // check, the evaluator still records why the open step stayed open.
+    const plannerDoneClaim = commands.length === 0 && plan.operations?.length === 0 && plan.plan?.length === 0
+      && !finalCompletionVerified && previousState?.status === 'active'
+    const plannerDoneGate = !remainingCanonicalWork
+      ? 'no_remaining_canonical_work'
+      : runtimeHealthy
+        ? 'persistent_runtime_active'
+        : conditionWaitActive
+          ? 'condition_wait_active'
+          : this.plannerDoneCloseUsed === true ? 'planner_done_close_already_used' : undefined
+    const plannerDone = plannerDoneClaim
+      ? await this.evaluateStepClose('planner_done', { plan, before: checkpointBeforeBatch, blockedBy: plannerDoneGate })
+      : undefined
+    if (plannerDone?.closed) {
+      const settled = await this.settleCompletedStepState(plannerDone.state, { allowContinuation: false })
       if (settled) {
         this.clearActionOmissionRecovery()
         return settled
@@ -6646,7 +6682,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (commands.length > 0 && stateResult?.blockedByHarness !== true && stepCheckpoint && !stepRelationAllowsAdmission(stepCheckpoint.relation)
       && stepCheckpoint.relation === 'belongs_to_later_step'
       && this.laterStepCloseUsed !== true
-      && await this.closeActiveStepOnLaterStepWork(plan, checkpointBeforeBatch)) {
+      && (await this.evaluateStepClose('later_step_work', { plan, before: checkpointBeforeBatch })).closed) {
       // The active step is proven done; re-admit this batch against the step
       // it actually belongs to. Bounded to once per batch.
       this.laterStepCloseUsed = true
