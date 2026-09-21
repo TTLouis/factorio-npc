@@ -953,6 +953,113 @@ test('live Jev refusal re-authors once and never admits the rejected operation b
 })
 
 
+test('pre-commit Jev scope review receives bounded grounding and current-frontier evidence', async () => {
+  class GroundingScopeReviewRcon extends ScopeReviewRcon {
+    async command(text) {
+      if (text.includes('remote.call("autorio_tools","get_inventory_items")')) {
+        return JSON.stringify({
+          items: [
+            { name: 'iron-ore', count: 12 },
+            { name: 'copper-ore', count: 4 },
+            { name: 'coal', count: 3 },
+          ],
+        })
+      }
+      if (text.includes('remote.call("autorio_tools","get_nearby_entities"')) {
+        return JSON.stringify({
+          actor_position: { x: 0, y: 0 },
+          entities: [
+            { name: 'iron-ore', type: 'resource', position: { x: 3, y: 0 }, distance: 3 },
+            { name: 'copper-ore', type: 'resource', position: { x: 6, y: 0 }, distance: 6 },
+          ],
+        })
+      }
+      return super.command(text)
+    }
+  }
+
+  const rcon = new GroundingScopeReviewRcon()
+  const memory = new CanonicalTaskBoardMemory()
+  let providerCall = 0
+  let reviewState
+
+  const agent = new NpcAgentLoop({
+    rcon,
+    memory,
+    provider: async () => {
+      providerCall++
+      if (providerCall === 1) {
+        return {
+          content: null,
+          tool_calls: [{
+            id: 'scope-inventory',
+            type: 'function',
+            function: { name: 'getInventoryItems', arguments: '{}' },
+          }],
+        }
+      }
+      if (providerCall === 2) {
+        return {
+          content: null,
+          tool_calls: [{
+            id: 'scope-nearby',
+            type: 'function',
+            function: { name: 'getNearbyEntities', arguments: JSON.stringify({ radius: 16, limit: 8 }) },
+          }],
+        }
+      }
+      return {
+        content: JSON.stringify({
+          chatMessage: 'Start the bounded smelting bootstrap.',
+          plan: ['Gather iron ore', 'Gather copper ore', 'Establish a first smelting checkpoint'],
+          currentStep: 0,
+          operations: [{ name: 'wait', args: { ticks: 1 } }],
+        }),
+      }
+    },
+    scopeReviewDecisionProvider: async state => {
+      reviewState = state
+      return {
+        answers: {
+          scope_review: { choice: 'actionable', confidence: 0.9 },
+          scope_review_reason_codes: { choices: [] },
+          actionable_prefix: { score: 1 },
+          step_directions: { choices: ['horizontal', 'horizontal', 'horizontal'] },
+        },
+      }
+    },
+    systemPrompt: 'rich Jev scope review packet integration test',
+    stateFile: null,
+    traceFile: null,
+    decisionTraceFile: null,
+    npcId: 'airi',
+  })
+
+  const result = await agent.request('semi-automate iron and copper plates', { sender: 'Louis' })
+
+  assert.equal(reviewState.review_packet_version, 2)
+  assert.equal(reviewState.draft.step_count, 3)
+  assert.equal(reviewState.current_frontier.active_index, 0)
+  assert.equal(reviewState.current_frontier.active_step, 'Gather iron ore')
+  assert.equal(reviewState.current_frontier.proposed_operations[0].name, 'wait')
+  assert.equal(reviewState.current_frontier.deterministic_preflight[0].result.validation, 'not_required')
+  assert.equal(reviewState.current_frontier.semantic_alignment.relation, 'advances_current')
+  assert.equal(reviewState.current_frontier.semantic_alignment.admission_aligned, true)
+  assert.equal(reviewState.review_semantics.current_frontier_must_be_grounded_now, true)
+  assert.equal(reviewState.review_semantics.later_steps_may_depend_on_prior_step_outputs, true)
+  assert.equal(reviewState.review_semantics.planned_dependency_is_not_an_unverified_world_fact, true)
+
+  const observations = reviewState.grounding.recent_observations
+  assert.deepEqual(observations.map(item => item.tool), ['getInventoryItems', 'getNearbyEntities'])
+  assert.match(JSON.stringify(observations), /iron-ore/)
+  assert.match(JSON.stringify(observations), /copper-ore/)
+  assert.match(JSON.stringify(reviewState.grounding.live_entities), /iron-ore/)
+  assert.ok(reviewState.grounding.observation_window_chars <= 12000)
+
+  assert.equal(result.operations[0].name, 'wait')
+  assert.equal(rcon.mutations.length, 1)
+})
+
 test('goal-admission Jev steering is visible to the Main LLM before its first draft', async () => {
   const rcon = new ScopeReviewRcon()
   const memory = new CanonicalTaskBoardMemory()

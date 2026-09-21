@@ -72,6 +72,9 @@ const ACTION_OMISSION_AFTER_OBSERVATION_MESSAGE = 'The targeted observation budg
 const RESEARCH_PREFLIGHT_RECOVERABLE_CODES = new Set(['missing_prerequisites', 'trigger_research', 'force_busy'])
 const RESEARCH_PREFLIGHT_RETRY_BUDGET = 2
 const JEV_SCOPE_REFINEMENT_BUDGET = 2
+const JEV_SCOPE_REVIEW_MAX_OBSERVATIONS = 8
+const JEV_SCOPE_REVIEW_MAX_OBSERVATION_CHARS = 12000
+const JEV_SCOPE_REVIEW_MAX_LIVE_ENTITIES = 12
 const EXACT_ENTITY_TARGET_OPERATIONS = new Set([
   'walk_to_entity_exact',
   'mine_entity_exact',
@@ -185,6 +188,46 @@ function sanitizeDurableModelValue(value) {
     result[key] = sanitizeDurableModelValue(child)
   }
   return result
+}
+
+function boundedScopeReviewValue(value, depth = 0) {
+  if (depth > 4) return undefined
+  if (typeof value === 'string') return cleanMemoryText(value, 800)
+  if (typeof value === 'number' || typeof value === 'boolean' || value === null) return value
+  if (Array.isArray(value)) {
+    return value.slice(0, 16)
+      .map(item => boundedScopeReviewValue(item, depth + 1))
+      .filter(item => item !== undefined)
+  }
+  if (!value || typeof value !== 'object') return undefined
+  const entries = Object.entries(value).slice(0, 32)
+    .map(([key, child]) => [key, boundedScopeReviewValue(child, depth + 1)])
+    .filter(([, child]) => child !== undefined)
+  return Object.fromEntries(entries)
+}
+
+function boundedScopeReviewObservationWindow(observations) {
+  const source = Array.isArray(observations) ? observations : []
+  const selected = []
+  let chars = 0
+  for (let index = source.length - 1; index >= 0 && selected.length < JEV_SCOPE_REVIEW_MAX_OBSERVATIONS; index--) {
+    let item = boundedScopeReviewValue(source[index])
+    if (!item) continue
+    let encoded = JSON.stringify(item)
+    if (encoded.length > JEV_SCOPE_REVIEW_MAX_OBSERVATION_CHARS) {
+      item = {
+        tool: cleanMemoryText(source[index]?.tool, 100),
+        cached: source[index]?.cached === true,
+        truncated: true,
+        result_preview: cleanMemoryText(encoded, 1800),
+      }
+      encoded = JSON.stringify(item)
+    }
+    if (selected.length > 0 && chars + encoded.length > JEV_SCOPE_REVIEW_MAX_OBSERVATION_CHARS) break
+    selected.unshift(item)
+    chars += encoded.length
+  }
+  return selected
 }
 
 function durableEntityLocator(observation, semanticRole = '') {
@@ -2058,6 +2101,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.genericRecoveryDecisionActive = false
     this.conditionPollPromise = null
     this.liveEntityObservations = new Map()
+    this.scopeReviewObservations = []
     this.rejectedExactTargets = new Set()
     this.staleExactPreflightRetries = 0
     this.researchPreflightRetries = 0
@@ -2203,6 +2247,23 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   observationToolCommand(name, args) {
     return toolCommand(name, args)
+  }
+
+  recordScopeReviewObservation(toolName, args, raw, { cached = false } = {}) {
+    if (!this.isObservationToolName(toolName)) return
+    let parsed
+    try { parsed = JSON.parse(String(raw ?? '')) }
+    catch { parsed = cleanMemoryText(raw, 1600) }
+    const record = {
+      tool: cleanMemoryText(toolName, 100),
+      args: boundedScopeReviewValue(sanitizeDurableModelValue(args ?? {})),
+      result: boundedScopeReviewValue(sanitizeDurableModelValue(parsed)),
+      cached: cached === true,
+    }
+    this.scopeReviewObservations.push(record)
+    if (this.scopeReviewObservations.length > JEV_SCOPE_REVIEW_MAX_OBSERVATIONS * 2) {
+      this.scopeReviewObservations.splice(0, this.scopeReviewObservations.length - JEV_SCOPE_REVIEW_MAX_OBSERVATIONS * 2)
+    }
   }
 
   recordLiveEntityObservation(entity, actorPosition, source, observationMeta = {}) {
@@ -4004,6 +4065,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       && !healthyRuntime
 
     this.liveEntityObservations = new Map()
+    this.scopeReviewObservations = []
     this.rejectedExactTargets = new Set()
     this.staleExactPreflightRetries = 0
     this.researchPreflightRetries = 0
@@ -4177,6 +4239,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.outputBudgetRecoveryGuard = null
     this.clearActionOmissionRecovery()
     this.liveEntityObservations = new Map()
+    this.scopeReviewObservations = []
     this.rejectedExactTargets = new Set()
     this.staleExactPreflightRetries = 0
     this.researchPreflightRetries = 0
@@ -5155,6 +5218,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const original = String(results[index].content ?? '')
       const toolName = admittedPrepared[index]?.tool?.function?.name
       this.recordLiveEntityToolResult(toolName, original)
+      this.recordScopeReviewObservation(toolName, admittedPrepared[index]?.args, original, {
+        cached: admittedCached[index] === true || admittedStaticCached[index] === true,
+      })
       const loadedSkill = this.recordLoadedSkillToolResult(toolName, admittedPrepared[index]?.args, original)
       if (loadedSkill) {
         await this.traceEvent('skill.context_loaded', {
@@ -5255,7 +5321,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
    * Production wires scope review explicitly; generic routing/budget callbacks
    * do not silently become Jev just because they exist.
    */
-  async reviewDraftForCommit(memoryKey) {
+  async reviewDraftForCommit(memoryKey, context = {}) {
     const planning = this.memory.planningState?.(memoryKey)
     const plan = planning ? getActivePlanningPlan(planning) : undefined
     if (!plan) return undefined
@@ -5272,14 +5338,114 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
 
+    const activeIndex = Math.max(0, Math.min(
+      Number.isSafeInteger(plan.active_step_index) ? plan.active_step_index : 0,
+      Math.max(0, steps.length - 1),
+    ))
+    const proposedOperations = (Array.isArray(context.operations) ? context.operations : []).slice(0, 8)
+      .map(operation => ({
+        name: cleanMemoryText(operation?.name, 100),
+        args: boundedScopeReviewValue(sanitizeDurableModelValue(operation?.args ?? {})),
+      }))
+    const deterministicPreflight = (Array.isArray(context.preflight) ? context.preflight : []).slice(0, 8)
+      .map((result, index) => ({
+        operation_index: index,
+        operation: proposedOperations[index]?.name,
+        result: boundedScopeReviewValue(sanitizeDurableModelValue(result)),
+      }))
+    const recentObservations = boundedScopeReviewObservationWindow(this.scopeReviewObservations)
+    const liveEntities = [...(this.liveEntityObservations?.values?.() ?? [])]
+      .slice(-JEV_SCOPE_REVIEW_MAX_LIVE_ENTITIES)
+      .map(observation => boundedScopeReviewValue(sanitizeDurableModelValue({
+        name: observation?.name,
+        type: observation?.type,
+        position: observation?.position,
+        distance: observation?.distance,
+        surface: observation?.surface,
+        surface_index: observation?.surface_index,
+        source: observation?.source,
+        working: observation?.working,
+        status: observation?.status,
+        inventories: observation?.inventories,
+        recipe: observation?.recipe,
+      })))
+      .filter(Boolean)
+
+    const proposedCheckpoint = completionContractSupported(context.checkpoint)
+      ? sanitizeStepCompletionContract(context.checkpoint)
+      : undefined
+    const normalizedCheckpoint = completionContractSupported(context.stepCheckpoint?.contract)
+      ? sanitizeStepCompletionContract(context.stepCheckpoint.contract)
+      : undefined
+    const semanticAlignment = context.stepCheckpoint
+      ? {
+          relation: context.stepCheckpoint.relation,
+          checkpoint_boundary: context.stepCheckpoint.boundary,
+          admission_aligned: stepRelationAllowsAdmission(context.stepCheckpoint.relation),
+          deterministic_fallback: context.stepCheckpoint.deterministic_fallback === true,
+        }
+      : undefined
+
     const reviewState = {
+      review_packet_version: 2,
       boundary: 'pre_commit_scope_review',
       goal: cleanMemoryText(planning.goal?.objective ?? '', 600),
-      draft_steps: steps.map((step, index) => ({
-        index,
-        description: cleanMemoryText(step.description ?? '', 400),
-        has_completion_contract: Boolean(step.completion_contract),
-      })),
+      goal_context: {
+        goal_id: cleanMemoryText(planning.goal?.goal_id, 120),
+        owner: cleanMemoryText(planning.goal?.owner, 120),
+        status: planning.goal?.status,
+      },
+      draft: {
+        plan_id: cleanMemoryText(plan.plan_id, 120),
+        plan_version: Number.isSafeInteger(plan.plan_version) ? plan.plan_version : undefined,
+        active_step_index: activeIndex,
+        step_count: steps.length,
+        development_mode: cleanMemoryText(plan.development_mode, 40),
+        roadmap_node_ids: Array.isArray(plan.roadmap_node_ids)
+          ? plan.roadmap_node_ids.slice(0, 16).map(id => cleanMemoryText(id, 120))
+          : [],
+      },
+      draft_steps: steps.map((step, index) => {
+        const rawContract = step?.completion_contract
+        const contract = rawContract ? sanitizeStepCompletionContract(rawContract) : undefined
+        const supported = completionContractSupported(contract)
+        return {
+          index,
+          id: cleanMemoryText(step?.step_id ?? step?.id, 120),
+          description: cleanMemoryText(step?.description ?? '', 400),
+          has_completion_contract: Boolean(rawContract),
+          completion_contract_status: supported ? 'supported' : rawContract ? 'unsupported' : 'missing',
+          ...(supported ? { completion_contract: boundedScopeReviewValue(sanitizeDurableModelValue(contract)) } : {}),
+        }
+      }),
+      current_frontier: {
+        active_index: activeIndex,
+        active_step_id: cleanMemoryText(steps[activeIndex]?.step_id ?? steps[activeIndex]?.id, 120),
+        active_step: cleanMemoryText(steps[activeIndex]?.description ?? '', 400),
+        proposed_operations: proposedOperations,
+        deterministic_preflight: deterministicPreflight,
+        ...(proposedCheckpoint
+          ? { proposed_completion_contract: boundedScopeReviewValue(sanitizeDurableModelValue(proposedCheckpoint)) }
+          : {}),
+        ...(normalizedCheckpoint
+          ? { normalized_completion_contract: boundedScopeReviewValue(sanitizeDurableModelValue(normalizedCheckpoint)) }
+          : {}),
+        ...(semanticAlignment ? { semantic_alignment: semanticAlignment } : {}),
+      },
+      grounding: {
+        recent_observations: recentObservations,
+        observation_window_chars: JSON.stringify(recentObservations).length,
+        fresh_observation_seen: this.freshObservationSinceContinuation === true,
+        live_entities: liveEntities,
+        runtime_task_status: boundedScopeReviewValue(sanitizeDurableModelValue(this.lastTaskStatusView)),
+      },
+      review_semantics: {
+        runtime_is_world_truth_authority: true,
+        current_frontier_must_be_grounded_now: true,
+        later_steps_may_depend_on_prior_step_outputs: true,
+        planned_dependency_is_not_an_unverified_world_fact: true,
+        missing_dependency_means_the_required_chain_is_absent_or_contradicted: true,
+      },
     }
 
     try {
@@ -5294,6 +5460,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         reason_codes: review.reason_codes,
         mixed_direction: review.mixed_direction,
         actionable_prefix: review.actionable_prefix,
+        review_packet_version: reviewState.review_packet_version,
+        grounding_observation_count: recentObservations.length,
+        live_entity_count: liveEntities.length,
+        deterministic_preflight_count: deterministicPreflight.length,
       })
       return { ...review, runtime_validation }
     }
@@ -5304,6 +5474,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       await this.traceEvent('planning.scope_review_failed', {
         plan_id: plan.plan_id,
         reason: String(error?.message ?? error).slice(0, 300),
+        review_packet_version: reviewState.review_packet_version,
+        grounding_observation_count: recentObservations.length,
       })
       return {
         verdict: 'needs_grounding',
@@ -5987,7 +6159,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           // the commit gate. Jev's scope review is the other half, and it runs
           // here because this is the last point before the draft becomes
           // immutable and starts executing.
-          const review = await this.reviewDraftForCommit(this.requestInfo.memoryKey)
+          const review = await this.reviewDraftForCommit(this.requestInfo.memoryKey, {
+            operations: plan.operations,
+            preflight,
+            stepCheckpoint,
+            checkpoint: plan.checkpoint,
+          })
           this.memory.commitPlanningPlan(this.requestInfo.memoryKey, { now: Date.now(), review })
           const committed = this.memory.currentPlan?.(this.requestInfo.memoryKey)
           if (committed) stateResult = { ...(stateResult ?? {}), state: committed }

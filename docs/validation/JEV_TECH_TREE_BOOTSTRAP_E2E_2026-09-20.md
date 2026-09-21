@@ -234,3 +234,44 @@ The fix should preserve the pre-commit safety boundary without making Jev a sing
 - return a precise recoverable control-plane failure without asking the user to clarify an already-clear goal.
 
 Simply increasing `JEV_SCOPE_REFINEMENT_BUDGET` is not considered a real fix.
+
+
+## Scope-review packet expansion — implementation started 2026-09-20
+
+The first repair intentionally does **not** loosen Jev's verdict handling or increase the refinement budget. It expands the evidence packet first so the next E2E can distinguish a genuinely strict reviewer from an under-informed reviewer.
+
+The scope-review packet is being upgraded from roughly:
+
+```text
+goal
++ step descriptions
++ has_completion_contract true/false
+```
+
+to a bounded V2 packet containing:
+
+- goal and draft identity;
+- active step index and plan lineage metadata;
+- each draft step's completion-contract status and supported contract when available;
+- current proposed operation names/arguments;
+- deterministic operation-preflight results;
+- step semantic-alignment/checkpoint result;
+- bounded recent observation-tool results, including inventory/recipe/research/world reads already obtained by the Main LLM;
+- a bounded live-entity summary from observed nearby/exact entities;
+- current runtime task status when available;
+- explicit review semantics distinguishing the current executable frontier from later steps that are intentionally produced by earlier steps.
+
+The key semantic clarification is:
+
+```text
+current frontier
+  -> must be grounded enough to execute now
+
+later step whose prerequisite is explicitly produced earlier in the same draft
+  -> conditionally grounded / planned dependency
+  -> not automatically an ungrounded world assumption
+```
+
+This keeps Jev a critic rather than a planner and keeps Factorio/runtime as world-truth authority. The packet is bounded so the repair does not turn scope review into a full world dump.
+
+The separate `jev_scope_review_unavailable` fail-closed behavior is intentionally left unchanged in this first slice. Re-run E2E with the richer packet before deciding whether the next repair should alter provider-failure handling.
