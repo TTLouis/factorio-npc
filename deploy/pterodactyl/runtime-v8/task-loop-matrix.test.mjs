@@ -620,3 +620,66 @@ test('a work-less verify step stays open when Jev does not map an earlier target
   const { result } = await verifyOnlyStep({ heldAtDone: 6, verifyBoundary: 'keep_step_open' })
   assert.notEqual(result?.goalStatus, 'completed')
 })
+
+async function revisedStepDone({ heldAtDone }) {
+  const game = new FakeFactorio({ inventory: { coal: 10 } })
+  const memory = new CanonicalTaskBoardMemory()
+  // Live req_mubenlbp_1: step_1 kept open on its grounded delta (coal>=15),
+  // a refinement reworded the draft step (new id, semantic_unknown
+  // checkpoint), then the planner said done holding 15 coal.
+  let reviews = 0
+  const jev = recordingJev(async (state, questions) => {
+    if (questions.intent) return { overrides: { intent: { choice: 'new_goal', confidence: 0.9 } } }
+    if (questions.scope_review && ++reviews === 1) return REFINE
+    if (questions.receipt_scope) return { overrides: { receipt_scope: { choice: 'progress_only', confidence: 0.2 } } }
+    if (questions.route) return { overrides: { route: { choice: 'reanchor_plan', confidence: 0.8 } } }
+    if (questions.checkpoint_boundary && !state?.planner_claim) {
+      const revised = /finish/i.test(state?.step?.description ?? '')
+      return { overrides: {
+        ...(revised ? { contract: { choice: 'semantic_unknown', confidence: 0.9 } } : {}),
+        checkpoint_boundary: { choice: 'keep_step_open', confidence: 0.8 },
+        compound_step: { noul: 0.8 },
+      } }
+    }
+  })
+  let calls = 0
+  const agent = new NpcAgentLoop({
+    rcon: game,
+    memory,
+    provider: async () => {
+      calls++
+      if (calls === 1) return planReply({ plan: ['Gather 5 coal'], operations: [gather('coal', 5)] })
+      if (calls === 2) return planReply({ plan: ['Finish gathering the 5 coal'], operations: [gather('coal', 5)] })
+      return planReply({ chatMessage: 'Complete, inventory holds 15 coal.', plan: [], operations: [] })
+    },
+    interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
+    interactionDecisionProvider: jev,
+    scopeReviewDecisionProvider: jev,
+    steeringDecisionProvider: jev,
+    systemPrompt: 'task loop matrix',
+    stateFile: null,
+    traceFile: null,
+    decisionTraceFile: null,
+    npcId: 'airi',
+  })
+  await agent.request('gather exactly 5 coal, that is the only task', { sender: 'Louis' })
+  const first = { chatMessage: 'after refinement' }
+  const revisedStepId = memory.currentPlan(KEY)?.task_board?.active_step_id
+  game.inventory.coal = heldAtDone
+  let result
+  try { result = await agent.completed() }
+  catch (error) { result = { error } }
+  return { first, result, revisedStepId, memory, calls }
+}
+
+test('a planner "done" on a reworded step can use the target its replaced revision recorded', async () => {
+  const { first, result, revisedStepId, memory } = await revisedStepDone({ heldAtDone: 15 })
+  assert.match(revisedStepId ?? '', /_r\d+$/, `the reanchor did not reword the step: ${first?.chatMessage ?? first?.error?.message}`)
+  assert.equal(result?.goalStatus, 'completed', `not closed: ${result?.chatMessage ?? result?.error?.message}`)
+  assert.equal(memory.planningState(KEY)?.goal?.status, 'completed')
+})
+
+test('a reworded step does not close on its replaced revision target when that target is unmet', async () => {
+  const { result } = await revisedStepDone({ heldAtDone: 14 })
+  assert.notEqual(result?.goalStatus, 'completed')
+})

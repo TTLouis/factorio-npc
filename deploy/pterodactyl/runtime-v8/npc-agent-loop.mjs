@@ -518,6 +518,13 @@ function safeProviderRecovery(value) {
   }
 }
 
+function worldStateContract(contract) {
+  return completionContractSupported(contract)
+    && contract.mode !== 'semantic_unknown'
+    && contract.requirements?.length > 0
+    && contract.requirements.every(requirement => WORLD_STATE_REQUIREMENT_KINDS.has(requirement?.kind))
+}
+
 function activeStepCheckpointSnapshot(board) {
   const index = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
   const step = index === undefined ? undefined : board?.steps?.[index]
@@ -3115,9 +3122,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // act-or-block repair path.
   async closeActiveStepOnPlannerDone(plan, before) {
     if (plan?.operations?.length !== 0 || plan?.plan?.length !== 0 || providerBlockerReason(plan)) return false
-    if (!before?.checkpoint) before = await this.checkpointFromEarlierSteps(plan, before)
     // A mapping Jev declined on an earlier "done" claim stays declined.
-    if (before?.checkpoint?.claimed_done && before.checkpoint.boundary !== 'checkpoint_here') return false
+    const declined = checkpoint => checkpoint?.claimed_done && checkpoint.boundary !== 'checkpoint_here'
+    if (declined(before?.checkpoint)) return false
+    // semantic_unknown and receipt-only checkpoints leave nothing to re-read.
+    if (!worldStateContract(before?.checkpoint?.contract)) before = await this.checkpointFromEarlierSteps(plan, before)
+    if (declined(before?.checkpoint)) return false
     return this.closeActiveStepOnMetContract(before, {
       reasonCode: 'planner_done_with_satisfied_contract',
       source: 'planner_done',
@@ -3131,28 +3141,34 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // only world state can be re-checked after the fact.
   async evaluateWorldStateCheckpoint(checkpoint) {
     const contract = checkpoint?.contract
-    if (!completionContractSupported(contract)) return undefined
-    if (contract.mode === 'semantic_unknown' || !(contract.requirements?.length > 0)) return undefined
-    if (!contract.requirements.every(requirement => WORLD_STATE_REQUIREMENT_KINDS.has(requirement?.kind))) return undefined
+    if (!worldStateContract(contract)) return undefined
     const facts = await this.completionFactsForContract(contract, undefined, [])
     return evaluateCompletionContract(contract, facts)
   }
 
-  // A step that never ran work of its own (e.g. "verify I hold 6 stone") has
-  // no checkpoint. Offer Jev the world-state targets earlier steps were
-  // verified against; if it maps one onto this step as its checkpoint, that
+  // A step with no checkable target of its own: one that never ran work
+  // ("verify I hold 6 stone"), or a reworded revision whose checkpoint is
+  // semantic_unknown while the wording it replaced recorded a real target.
+  // Offer Jev those world-state targets (earlier steps, and superseded step
+  // ids on this board); if it maps one onto this step as its checkpoint, that
   // becomes the step's contract, still re-read from Factorio before closing.
   async checkpointFromEarlierSteps(plan, before) {
     const board = this.memory.currentPlan?.(this.activePlanKey())?.task_board
     const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : -1
-    if (!before?.stepId || activeIndex <= 0) return before
+    if (!before?.stepId || activeIndex < 0) return before
+    const liveStepIds = new Set(board.steps.map(step => step?.id))
+    const superseded = (Array.isArray(board.evidence) ? board.evidence : [])
+      .filter(item => item?.kind === 'step_checkpoint_contract' && item.step_id && !liveStepIds.has(item.step_id))
+      .map(item => {
+        try { return sanitizeStepCompletionContract(JSON.parse(item.summary)?.contract) }
+        catch { return undefined }
+      })
     const seen = new Set()
-    const extraCandidates = board.steps.slice(0, activeIndex)
-      .map(step => sanitizeStepCompletionContract(step?.completion_contract))
-      .filter(contract => completionContractSupported(contract)
-        && contract.mode !== 'semantic_unknown'
-        && contract.requirements?.length > 0
-        && contract.requirements.every(requirement => WORLD_STATE_REQUIREMENT_KINDS.has(requirement?.kind)))
+    const extraCandidates = [
+      ...board.steps.slice(0, activeIndex).map(step => sanitizeStepCompletionContract(step?.completion_contract)),
+      ...superseded,
+    ]
+      .filter(worldStateContract)
       .filter(contract => {
         const signature = JSON.stringify(contract.requirements)
         if (seen.has(signature)) return false
