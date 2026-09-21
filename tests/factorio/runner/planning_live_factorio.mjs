@@ -101,7 +101,9 @@ async function prepare({ rcon, results, stateFile }) {
   const blocked = getActivePlan(planning)
   const engine = JSON.parse(await rcon.command(operationStatusCommand()))
 
-  assert.equal(providerCalls, 1)
+  // The deliberately missing resource is a naming error: preflight grants one
+  // bounded correction turn, and repeating it there freezes the plan.
+  assert.equal(providerCalls, 2)
   assert.equal(result.goalStatus, 'blocked')
   assert.equal(result.operations.length, 0)
   assert.equal(result.blocker?.code, 'unknown_prototype')
