@@ -169,3 +169,68 @@ A useful promotion record should capture at minimum:
 - provider usage and no-progress/refinement counts.
 
 Once one clean unassisted run passes, repeat the same initial-state fixture enough times to distinguish a real capability from a stochastic one-off.
+
+
+## Second observed failure — simpler production goal
+
+A second E2E attempt used the substantially simpler user goal:
+
+```text
+半自动化铁和铜片
+```
+
+The generated five-step draft was:
+
+1. collect iron ore;
+2. collect copper ore;
+3. collect coal and make a stone furnace;
+4. place/configure the furnace for iron/copper smelting;
+5. verify iron- and copper-plate output.
+
+This attempt failed at the same pre-commit boundary before meaningful execution completed:
+
+```text
+[Plan needs clarification] The draft still did not converge after 2 bounded refinement passes.
+Jev reasons: jev_scope_review_unavailable.
+```
+
+The debug state simultaneously showed the active first operation as aligned with the current step and semantically advancing it. This makes the failure materially stronger evidence that the problem is not simply an over-ambitious tech-tree goal.
+
+### Source inspection after the second failure
+
+Inspection of current `deploy/pterodactyl/runtime-v8/npc-agent-loop.mjs` on branch HEAD showed the exact fail-closed path:
+
+- if no scope-review provider exists at all, the runtime returns an `actionable` review with reason `jev_unavailable_no_decision_provider`;
+- if a scope-review provider exists but throws/fails, the catch path converts that availability failure into:
+  - `verdict: needs_grounding`;
+  - `reason_codes: [jev_scope_review_unavailable]`;
+- `handleScopeReviewRefusal()` then increments `scopeRefinementAttempts`;
+- after the bounded refinement budget is exhausted, the runtime ends the request as `awaiting_user_clarification`.
+
+This means a Jev transport/provider/capability failure is currently treated like a substantive semantic criticism of the Main LLM's draft.
+
+### Updated diagnosis
+
+The current gate is too strict specifically around **review availability**, not necessarily around Jev's semantic scope criteria.
+
+The desired distinction is:
+
+```text
+Jev says "refine / needs grounding"
+    -> semantic refusal; bounded re-authoring is appropriate
+
+Jev says "needs user clarification"
+    -> user clarification is appropriate
+
+Jev review cannot be obtained
+    -> control-plane availability failure; do not pretend Jev semantically rejected the draft
+```
+
+An unavailable review should not repeatedly consume the same semantic refinement budget and should not be transformed into a user-clarification requirement.
+
+The fix should preserve the pre-commit safety boundary without making Jev a single point of failure. The exact fallback should be regression-driven, but it should distinguish `review unavailable` from an actual negative review, keep the error visible in telemetry, and either:
+
+- safely commit when deterministic/runtime validation plus the existing plan contract make the draft independently admissible; or
+- return a precise recoverable control-plane failure without asking the user to clarify an already-clear goal.
+
+Simply increasing `JEV_SCOPE_REFINEMENT_BUDGET` is not considered a real fix.
