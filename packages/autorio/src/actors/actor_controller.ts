@@ -245,10 +245,13 @@ function get_npc_actor(): ControlledActor | undefined {
   const spawn_position = force.get_spawn_position(surface)
   // With zero human players ever connecting, nothing else ever triggers chunk
   // generation around spawn: normally a joining client's position does that.
-  // Without this, create_entity silently fails on a freshly created save
-  // because the target chunk was never generated.
+  // Creating the NPC really only needs the local spawn neighborhood. The old
+  // radius=3 request synchronously generated up to a 7x7 chunk square here,
+  // which could freeze the simulation during a cold standalone-NPC launch.
+  // A radius=1 (3x3) window is enough for the 32-tile collision search below
+  // and matches the awareness bubble that will continue generation afterwards.
   if (!surface.is_chunk_generated({ x: Math.floor(spawn_position.x / 32), y: Math.floor(spawn_position.y / 32) })) {
-    surface.request_to_generate_chunks(spawn_position, 3)
+    surface.request_to_generate_chunks(spawn_position, 1)
     surface.force_generate_chunk_requests()
   }
   const position = surface.find_non_colliding_position('character', spawn_position, 32, 0.5) ?? spawn_position
