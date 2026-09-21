@@ -229,8 +229,8 @@ test('observation budget rounds fractional score output instead of collapsing to
 
 // --- pre-commit scope review ------------------------------------------------
 
-test('scope review question set is criticism-only and enumerates the roadmap codes', () => {
-  const questions = scopeReviewQuestions()
+test('scope review question set is criticism-only and uses only provider-supported schemas', () => {
+  const questions = scopeReviewQuestions({ draftStepCount: 4 })
   assert.equal(questions.scope_review.type, 'choice')
   assert.deepEqual(Object.keys(questions.scope_review.criteria), [
     'actionable',
@@ -241,11 +241,35 @@ test('scope review question set is criticism-only and enumerates the roadmap cod
   assert.match(questions.scope_review.instructions, /critic, not a planner/i)
   assert.match(questions.scope_review.instructions, /do not write, rewrite, reorder, or supply plan steps/i)
   assert.match(questions.scope_review.instructions, /no fixed maximum step count/i)
-  assert.deepEqual(Object.keys(questions.scope_review_reason_codes.criteria), jevScopeReviewReasonCodes())
+  assert.equal(questions.scope_review_reason_codes.type, 'choice')
+  assert.deepEqual(Object.keys(questions.scope_review_reason_codes.criteria), ['none', ...jevScopeReviewReasonCodes()])
+  assert.equal(questions.scope_review_reason_code_secondary.type, 'choice')
   assert.equal(questions.actionable_prefix.type, 'score')
+  assert.equal(questions.actionable_prefix.criteria.length, 5)
   assert.match(questions.actionable_prefix.instructions, /Do not supply replacement steps/i)
+  for (const question of Object.values(questions)) {
+    assert.ok(['choice', 'score', 'noul'].includes(question.type), `unsupported provider question type ${question.type}`)
+  }
 })
 
+test('provider-supported scope answers preserve multiple reasons, prefix and direction diagnostics', () => {
+  const parsed = parseScopeReview({
+    answers: {
+      scope_review: { choice: 'refine', confidence: 0.84 },
+      scope_review_reason_codes: { choice: 'horizon_too_long' },
+      scope_review_reason_code_secondary: { choice: 'step_too_vague' },
+      actionable_prefix: { score: 2 },
+      step_direction_0: { choice: 'vertical' },
+      step_direction_1: { choice: 'vertical' },
+      step_direction_2: { choice: 'horizontal' },
+    },
+  }, { draftStepCount: 3 })
+
+  assert.deepEqual(parsed.reason_codes, ['horizon_too_long', 'step_too_vague', 'mixed_outcomes'])
+  assert.equal(parsed.actionable_prefix, 2)
+  assert.equal(parsed.dominant_direction, 'vertical')
+  assert.equal(parsed.mixed_direction, true)
+})
 test('reason code vocabulary matches roadmap section 11 exactly', () => {
   assert.deepEqual(jevScopeReviewReasonCodes(), [
     'too_broad',
@@ -548,12 +572,16 @@ test('boundary gate is defensive about garbage steering input', () => {
 
 // --- roadmap 4.5: one dominant development mode per committed slice ----------
 
-test('the scope review asks for per-step direction relative to the critical path', () => {
-  const questions = scopeReviewQuestions()
-  assert.equal(questions.step_directions.type, 'multi_choice')
-  assert.match(questions.step_directions.instructions, /relative to the current critical path rather than the surface action/i)
-  assert.match(questions.step_directions.instructions, /DESCRIBES the draft/)
-  assert.deepEqual(Object.keys(questions.step_directions.criteria), ['vertical', 'horizontal', 'maintain', 'recover'])
+test('the scope review asks bounded per-step direction questions relative to the critical path', () => {
+  const questions = scopeReviewQuestions({ draftStepCount: 4 })
+  assert.equal(questions.step_directions, undefined)
+  for (let index = 0; index < 4; index++) {
+    const question = questions[`step_direction_${index}`]
+    assert.equal(question.type, 'choice')
+    assert.match(question.instructions, /relative to the current critical path/i)
+    assert.match(question.instructions, /DESCRIBES the draft/)
+    assert.deepEqual(Object.keys(question.criteria), ['vertical', 'horizontal', 'maintain', 'recover'])
+  }
   // Tripwire, not an omission: Jev is never asked whether a mixture is
   // inseparable. That was an unverifiable model claim suppressing the §4.5
   // finding; the boundary call belongs to the Main LLM.
