@@ -311,3 +311,100 @@ Follow-up Jev observability requirement:
 - surface the exact `planning.scope_review_failed.reason` in the live debug UI;
 - show scope-review state explicitly as `actionable | refine | needs_grounding | needs_user_clarification | unavailable`;
 - keep `jev_scope_review_unavailable` as the classification, but expose whether the underlying failure was provider, parse/schema, transport, timeout, cancellation, or another concrete error.
+
+
+## Scope-review observability + current-task UI boundary implemented
+
+The diagnostic/UI follow-up has now landed. The implementation intentionally leaves Jev's semantic review criteria and the existing unavailable-review fail-closed behavior unchanged so the next E2E can reveal the actual failure rather than masking it.
+
+Implementation sequence:
+
+- `4cf6b6c8b08f8a5ce0d20a5e40836ed17c514c53` — exact Jev scope-review failure classification and live debug wiring;
+- `bdccf2afd88a1199b30b4f10bde40cd831a91d04` — current-task retained-activity context plus three-column Debug layout;
+- `1df03bc008d615db364fb17f1f47f940bdd743a5` — New Task / Terminate / snapshot boundaries explicitly rebind retained activity;
+- `f7e110e18219e98e441369f9386613e78995cb4a` — read-only Roadmap Shelf projected through the authoritative Plan Tracker view;
+- `3b65f6f49fa019ffd9a31c50d56909bbb16e0c1d` — Roadmap Shelf rendered in the left planning column and active immutable plan slice moved to the right;
+- follow-up regression alignment through `252bac478cd832d63804dc9ffbc5f5ef9155533e`.
+
+### Jev scope-review diagnostics
+
+The runtime now separates scope-review failure stage from semantic verdict:
+
+```text
+scope-review provider call throws
+  -> planning.scope_review_failed
+  -> failure_stage=provider
+  -> failure_kind=provider | transport | timeout | cancellation | unknown
+
+provider call returns, parseScopeReview throws
+  -> planning.scope_review_failed
+  -> failure_stage=parse
+  -> failure_kind=parse_schema
+```
+
+The live Debug snapshot now carries:
+
+- scope-review status;
+- reason codes and confidence;
+- actionable prefix;
+- review packet version;
+- grounding-observation count;
+- live-entity count;
+- deterministic-preflight count;
+- exact bounded failure stage/kind and reason.
+
+The Debug UI is now three columns:
+
+```text
+LLM / Provider | Jev / Planning | Step / Runtime
+```
+
+so provider-generation diagnostics, Jev/planning diagnostics, and runtime/step diagnostics no longer compete for the same two columns.
+
+Request-local scope-review/post-step failure fields are cleared when a new request begins. Cumulative Jev economics/counters may persist, while stale request-local verdicts/errors do not.
+
+### Current-task activity boundary
+
+Retained execution activity is now treated as a current-logical-task cache rather than a global feed. It is keyed primarily by `conversation_id`, with `goal_id` as fallback.
+
+A logical-task change, New Task, Terminate, or board clear resets/rebinds that retained activity. Therefore:
+
+- Status `LAST`;
+- the retained Plan Tracker activity compatibility feed;
+- Debug execution activity
+
+must not present a previous terminated task as though it belongs to the current task. Historical task activity remains an Old Tasks / project-history concern.
+
+### Roadmap Shelf visibility
+
+The authoritative read-only `planTrackerView` now carries a bounded Roadmap Shelf projection alongside the immutable active plan slice.
+
+The console Plan Tracker renders approximately:
+
+```text
++----------------------+------------------------------------------+
+| Roadmap Shelf        | Active immutable plan slice              |
+| ~1/3                 | ~2/3                                     |
+| coarse future intent | executable semantic steps + verification |
++----------------------+------------------------------------------+
+```
+
+Shelf nodes expose bounded planning context such as intent, status, dependencies, development hint, and whether the node is linked to the active slice. They remain non-executable storage: rendering the Shelf does not give it operation authority.
+
+### Validation
+
+At final implementation HEAD `252bac478cd832d63804dc9ffbc5f5ef9155533e`:
+
+- CI run `35552750568`: **success**
+  - `factorio-npc-deterministic`: success
+  - `typescript-quality`: success
+  - `pterodactyl-runtime`: success
+- Pterodactyl release gates run `35552750731`: **success**
+
+The next real E2E should reuse the simple diagnostic goal:
+
+```text
+半自动化铁和铜片
+```
+
+If scope review is unavailable again, capture the new Debug rows `Jev scope review`, `Scope review packet`, and `Scope review failure`. That should identify whether the remaining defect is provider, transport/timeout, cancellation, or parse/schema without relying on the generic `jev_scope_review_unavailable` wrapper.
