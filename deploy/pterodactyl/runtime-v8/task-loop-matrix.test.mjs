@@ -739,3 +739,60 @@ test('a needs_grounding refinement can observe even after the request spent its 
   assert.equal(offered[2], true, 'the grounding refinement turn was offered tools')
   assert.equal(game.mutations.length, 1, 'the grounded redraft committed')
 })
+
+async function leadingConfirmStep({ redraft }) {
+  const game = new FakeFactorio({ inventory: { 'iron-ore': 13 } })
+  const memory = new CanonicalTaskBoardMemory()
+  const activeStepText = () => {
+    const board = memory.currentPlan(KEY)?.task_board
+    return board?.steps?.[board.active_index]?.description ?? ''
+  }
+  // Live req_mubf6mpl_2: the draft led with a work-less "confirm" step and
+  // proposed the gather for step 2; Jev placed it in the later step twice.
+  const jev = recordingJev(async (_state, questions) => {
+    if (questions.intent) return { overrides: { intent: { choice: 'new_goal', confidence: 0.9 } } }
+    if (questions.checkpoint_boundary) {
+      return { overrides: {
+        checkpoint_boundary: { choice: 'keep_step_open', confidence: 0.7 },
+        step_relation: { choice: /confirm/i.test(activeStepText()) ? 'belongs_to_later_step' : 'advances_current', confidence: 0.9 },
+      } }
+    }
+  })
+  const messages = []
+  let calls = 0
+  const agent = new NpcAgentLoop({
+    rcon: game,
+    memory,
+    provider: async providerMessages => {
+      calls++
+      messages.push(providerMessages.map(message => typeof message.content === 'string' ? message.content : '').join(' | '))
+      if (calls === 1 || !redraft) {
+        return planReply({
+          plan: ['Confirm current iron ore held in inventory (13)', 'Mine 27 more iron ore', 'Verify inventory shows 40 iron ore'],
+          currentStep: 1,
+          operations: [gather('iron-ore', 27)],
+        })
+      }
+      return planReply({ plan: ['Mine 27 more iron ore to hold 40'], currentStep: 0, operations: [gather('iron-ore', 27)] })
+    },
+    interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
+    interactionDecisionProvider: jev,
+    scopeReviewDecisionProvider: jev,
+    steeringDecisionProvider: jev,
+    systemPrompt: 'task loop matrix',
+    stateFile: null,
+    traceFile: null,
+    decisionTraceFile: null,
+    npcId: 'airi',
+  })
+  let result
+  try { result = await agent.request('mine exactly 40 iron ore, that is the only task', { sender: 'Louis' }) }
+  catch (error) { result = { error } }
+  return { result, game, messages }
+}
+
+test('a draft led by a work-less step gets told it can drop that step, and a redraft commits', async () => {
+  const { result, game, messages } = await leadingConfirmStep({ redraft: true })
+  assert.match(String(messages[1]), /no operation of its own/i)
+  assert.equal(game.mutations.length, 1, `redraft not admitted: ${result?.chatMessage ?? result?.error?.message}`)
+})

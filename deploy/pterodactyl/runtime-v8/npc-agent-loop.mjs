@@ -6678,9 +6678,23 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       this.semanticAlignmentRetries = retries + 1
       this.planUpdateReason = 'reanchor_plan'
       this.reasoningTriggerSource = 'semantic_reanchor'
+      // An uncommitted draft is still the planner's to restructure. Without
+      // this, a redraft was ignored and the board kept the rejected step
+      // order (live req_mubf6mpl_2: a work-less "Confirm current iron ore"
+      // step led the draft, so every gather belonged to a later step). The
+      // reducer only honours the replacement while the plan is pre-commit.
+      const reducerPlan = this.requestInfo
+        ? getActivePlanningPlan(this.memory.planningState?.(this.requestInfo.memoryKey))
+        : undefined
+      const draftRevisable = Boolean(reducerPlan) && !FROZEN_PLAN_STATUSES.has(reducerPlan.status)
+        && reducerPlan.status !== PLAN_STATUS.BLOCKED
+      if (draftRevisable) this.scopeRefinementPending = true
+      const draftGuidance = draftRevisable
+        ? ' This plan is still an uncommitted draft, so you may restructure it. The runtime can mark a step done only from world state it can re-check, never from intent: a step with no operation of its own (for example one that only confirms or verifies what you already observed) can never close before later work. Either give the active step its own operation, or submit a revised draft whose steps each carry the work that proves them.'
+        : ''
       this.messages.push({
         role: 'user',
-        content: `[HARNESS] Autorio admission was stopped before any world mutation because Jev classified the proposed batch as "${stepCheckpoint.relation}" relative to the active canonical step "${cleanMemoryText(activeStep?.description, 400)}". Re-anchor the plan to authoritative Task Board evidence before proposing another batch. Do not assume the active step completed merely because you intended later work. If existing grounded evidence proves an earlier step complete, propose a plan aligned with that evidence; otherwise continue or split the active step. Avoid extra observations unless one specific mutable fact is genuinely missing.`,
+        content: `[HARNESS] Autorio admission was stopped before any world mutation because Jev classified the proposed batch as "${stepCheckpoint.relation}" relative to the active canonical step "${cleanMemoryText(activeStep?.description, 400)}". Re-anchor the plan to authoritative Task Board evidence before proposing another batch. Do not assume the active step completed merely because you intended later work. If existing grounded evidence proves an earlier step complete, propose a plan aligned with that evidence; otherwise continue or split the active step.${draftGuidance} Avoid extra observations unless one specific mutable fact is genuinely missing.`,
       })
       try {
         return await this.runTurn()
