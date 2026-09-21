@@ -85,6 +85,7 @@ const JEV_SCOPE_REVIEW_ATTEMPTS = 2
 // Once the system commits a plan it is frozen against its authors, Jev
 // included: later batches fulfil the committed steps and are not re-reviewed.
 const FROZEN_PLAN_STATUSES = new Set([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING])
+const WORLD_STATE_REQUIREMENT_KINDS = new Set(['inventory_count', 'entity_inventory_count', 'entity_exists', 'entity_state'])
 const INVENTORY_PRODUCT_FIELD_BY_OPERATION = Object.freeze({
   gather_resource: 'resource_name',
   mine_resource_at: 'resource_name',
@@ -3531,6 +3532,29 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     catch {}
 
     let checkpoint = persistedStepCheckpoint(board, step.id)
+    // keep_step_open protects compound steps whose contract covers only part
+    // of the meaning. When Jev itself judged the step NOT compound, a grounded
+    // world-state contract it selected does cover the step: check it. Live,
+    // "gather 4 iron ore" held its iron but stayed open because Jev forecast
+    // keep_step_open (compound 0.37) and then rated the receipt progress_only.
+    // An unknown compound probability still counts as possibly compound.
+    const nonCompoundWorldContract = checkpoint?.boundary === 'keep_step_open'
+      && checkpoint.relation === 'advances_current'
+      && typeof checkpoint.compound_probability === 'number'
+      && checkpoint.compound_probability < 0.5
+      && completionContractSupported(checkpoint.contract)
+      && checkpoint.contract.mode !== 'semantic_unknown'
+      && checkpoint.contract.requirements?.length > 0
+      && checkpoint.contract.requirements.every(requirement => WORLD_STATE_REQUIREMENT_KINDS.has(requirement?.kind))
+    if (nonCompoundWorldContract) {
+      checkpoint = { ...checkpoint, boundary: 'checkpoint_here' }
+      await this.traceEvent('step.checkpoint_promoted', {
+        active_step_id: step.id,
+        reason: 'non_compound_world_state_contract',
+        compound_probability: checkpoint.compound_probability,
+        contract: checkpoint.contract,
+      })
+    }
     if (!checkpoint || checkpoint.boundary !== 'checkpoint_here' || checkpoint.contract?.mode === 'semantic_unknown') {
       const reason = checkpoint?.boundary === 'split_recommended'
         ? 'checkpoint_split_recommended'

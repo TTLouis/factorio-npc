@@ -326,3 +326,56 @@ test('harvest_product gets the same grounded inventory delta as gather_resource'
   const contract = board.steps[0].completion_contract
   assert.deepEqual(contract?.requirements?.map(r => [r.kind, r.item_name, r.minimum]), [['inventory_count', 'wood', 8]])
 })
+
+async function keptOpenGather(compoundProbability) {
+  const game = new FakeFactorio({ inventory: { 'iron-ore': 0 } })
+  const memory = new CanonicalTaskBoardMemory()
+  // Live Jev: picked the grounded delta but forecast keep_step_open, then
+  // rated the completed receipt progress_only at 0.2.
+  const jev = recordingJev(async (_state, questions) => {
+    if (questions.intent) return { overrides: { intent: { choice: 'new_goal', confidence: 0.9 } } }
+    if (questions.receipt_scope) return { overrides: { receipt_scope: { choice: 'progress_only', confidence: 0.2 } } }
+    if (questions.checkpoint_boundary) {
+      return { overrides: {
+        checkpoint_boundary: { choice: 'keep_step_open', confidence: 0.88 },
+        compound_step: { noul: compoundProbability },
+      } }
+    }
+  })
+  let calls = 0
+  const agent = new NpcAgentLoop({
+    rcon: game,
+    memory,
+    provider: async () => {
+      calls++
+      return planReply({ plan: ['Gather 4 iron ore'], operations: [gather('iron-ore', 4)] })
+    },
+    interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
+    interactionDecisionProvider: jev,
+    scopeReviewDecisionProvider: jev,
+    steeringDecisionProvider: jev,
+    systemPrompt: 'task loop matrix',
+    stateFile: null,
+    traceFile: null,
+    decisionTraceFile: null,
+    npcId: 'airi',
+  })
+  await agent.request('gather 4 iron ore, nothing else', { sender: 'Louis' })
+  game.inventory['iron-ore'] = 4
+  let result
+  try { result = await agent.completed() }
+  catch (error) { result = { error } }
+  return { result, calls, memory }
+}
+
+test('a non-compound step Jev kept open still closes on its met world-state contract', async () => {
+  const { result, calls } = await keptOpenGather(0.37)
+  assert.equal(result.goalStatus, 'completed')
+  assert.equal(calls, 1)
+})
+
+test('a step Jev judged compound stays open even when its partial contract is met', async () => {
+  const { result, memory } = await keptOpenGather(0.8)
+  assert.notEqual(result?.goalStatus, 'completed')
+  assert.equal(memory.currentPlan(KEY)?.task_board?.completed_count ?? 0, 0)
+})
