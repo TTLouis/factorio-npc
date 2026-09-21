@@ -37,7 +37,7 @@ beforeEach(() => {
 })
 
 describe('standalone NPC awareness radar', () => {
-  it('creates a hidden companion and generates the 3x3 terrain window on first tick', () => {
+  it('creates a hidden companion and queues the 3x3 terrain window without a synchronous generation drain', () => {
     const { actor, surface, radar } = make_actor()
     const controller = new_awareness_controller()
 
@@ -51,7 +51,7 @@ describe('standalone NPC awareness radar', () => {
     expect(radar.minable_flag).toBe(false)
     expect(radar.operable).toBe(false)
     expect(surface.request_to_generate_chunks).toHaveBeenCalledWith(actor.position, 1)
-    expect(surface.force_generate_chunk_requests).toHaveBeenCalledTimes(1)
+    expect(surface.force_generate_chunk_requests).not.toHaveBeenCalled()
   })
 
   it('does not teleport or regenerate while AIRI remains in the same chunk', () => {
@@ -65,7 +65,7 @@ describe('standalone NPC awareness radar', () => {
 
     expect(radar.teleport).not.toHaveBeenCalled()
     expect(surface.request_to_generate_chunks).toHaveBeenCalledTimes(1)
-    expect(surface.force_generate_chunk_requests).toHaveBeenCalledTimes(1)
+    expect(surface.force_generate_chunk_requests).not.toHaveBeenCalled()
   })
 
   it('moves the companion exactly once after crossing a chunk boundary', () => {
@@ -79,7 +79,7 @@ describe('standalone NPC awareness radar', () => {
     expect(radar.teleport).toHaveBeenCalledTimes(1)
     expect(radar.teleport).toHaveBeenLastCalledWith(actor.position)
     expect(surface.request_to_generate_chunks).toHaveBeenCalledTimes(2)
-    expect(surface.force_generate_chunk_requests).toHaveBeenCalledTimes(2)
+    expect(surface.force_generate_chunk_requests).not.toHaveBeenCalled()
   })
 
   it('destroys the companion instead of giving radar awareness to a connected human actor', () => {
