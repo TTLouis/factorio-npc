@@ -1239,10 +1239,23 @@ export function evaluateDeadlockSignals(state, { limits = {}, extraEvaluators = 
  */
 export function planTrackerView(state, { planId } = {}) {
   const plan = planId ? getPlan(state, planId) : getActivePlan(state)
+  const linkedNodeIds = new Set(plan?.roadmap_node_ids ?? [])
+  const roadmapShelf = boundedList(state?.roadmap?.nodes, 32).map(node => ({
+    id: node.id,
+    intent: node.intent,
+    why_it_matters: node.why_it_matters,
+    status: node.status,
+    depends_on: [...node.depends_on],
+    development_hint: node.development_hint,
+    linked: linkedNodeIds.has(node.id),
+  }))
   if (!plan) {
     return deepFreeze({
       kind: 'plan_tracker_view',
       goal_id: state?.goal?.goal_id ?? null,
+      goal_status: state?.goal?.status ?? null,
+      roadmap_revision_id: state?.roadmap?.roadmap_revision_id ?? null,
+      roadmap_shelf: roadmapShelf,
       plan_id: null,
       steps: [],
     })
@@ -1250,7 +1263,9 @@ export function planTrackerView(state, { planId } = {}) {
   return deepFreeze({
     kind: 'plan_tracker_view',
     goal_id: plan.goal_id,
+    goal_status: state?.goal?.status ?? null,
     roadmap_revision_id: plan.roadmap_revision_id,
+    roadmap_shelf: roadmapShelf,
     roadmap_node_ids: [...plan.roadmap_node_ids],
     plan_id: plan.plan_id,
     plan_version: plan.plan_version,
@@ -1277,7 +1292,6 @@ export function planTrackerView(state, { planId } = {}) {
     blocker: clone(plan.blocker),
     derived_from_plan_id: plan.derived_from_plan_id,
     superseded_by_plan_id: plan.superseded_by_plan_id,
-    // Advisory only. Never advances anything.
     advisory_planner_focus_step_id: plan.advisory.planner_focus_step_id,
     carried_forward_evidence: [...plan.carried_forward_evidence],
   })

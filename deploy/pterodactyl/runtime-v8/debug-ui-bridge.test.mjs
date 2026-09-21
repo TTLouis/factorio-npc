@@ -473,6 +473,32 @@ test('request failure snapshot wins over transient debug state and remains displ
   assert.equal(debug.last_error, 'Provider response recovery exhausted after 3 attempts: Invalid provider content JSON')
 })
 
+test('task board UI snapshot carries the read-only Roadmap Shelf beside the active slice', () => {
+  const snapshot = taskBoardUiSnapshot({
+    objective: 'build toward automation',
+    task_board: {
+      kind: 'task_board_lite', goal_id: 'goal-shelf', status: 'active', blocker: '', pause_reason: '',
+      completed_count: 0, total_steps: 1, active_index: 0,
+      steps: [{ id: 'legacy-step', description: 'legacy projection', status: 'active' }],
+    },
+  }, {
+    phase: 'idle', detail: '', activity: [], conversation_id: 'task-shelf', conversation: [],
+  }, {
+    kind: 'plan_tracker_view', goal_id: 'goal-shelf', goal_status: 'active',
+    plan_id: 'plan-1', plan_version: 1, status: 'COMMITTED', active_step_index: 0,
+    roadmap_node_ids: ['node-smelting'],
+    roadmap_shelf: [
+      { id: 'node-smelting', intent: 'reliable smelting', why_it_matters: 'feeds automation', status: 'ready_to_refine', depends_on: [], development_hint: 'vertical', linked: true },
+      { id: 'node-science', intent: 'automation science', why_it_matters: 'unlocks automation', status: 'tentative', depends_on: ['node-smelting'], linked: false },
+    ],
+    steps: [{ step_id: 'step-1', description: 'gather ore', status: 'active', reduced_confidence: true }],
+  })
+  assert.equal(snapshot.shelf.length, 2)
+  assert.equal(snapshot.shelf[0].linked, true)
+  assert.equal(snapshot.shelf[1].depends_on[0], 'node-smelting')
+  assert.equal(snapshot.steps[0].description, 'gather ore')
+})
+
 test('task board UI snapshot includes live debug diagnostics', () => {
   const state = {
     goal_id: 'goal-1',

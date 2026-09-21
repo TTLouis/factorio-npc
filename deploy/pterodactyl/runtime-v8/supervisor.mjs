@@ -1194,8 +1194,8 @@ function uiActivityEntry(entry) {
 function trackerUiStatus(tracker, state) {
   if (state?.status === 'paused') return 'paused'
   if (tracker?.status === 'BLOCKED') return 'blocked'
-  if (tracker?.status === 'COMPLETED') return 'completed'
-  if (tracker?.plan_id) return 'active'
+  if (tracker?.status === 'COMPLETED' || tracker?.goal_status === 'completed') return 'completed'
+  if (tracker?.plan_id || (tracker?.goal_id && tracker?.goal_status === 'active')) return 'active'
   return undefined
 }
 
@@ -1237,6 +1237,20 @@ function trackerUiPlan(tracker) {
   }
 }
 
+function trackerUiShelf(tracker) {
+  if (!Array.isArray(tracker?.roadmap_shelf)) return []
+  const statuses = new Set(['tentative', 'ready_to_refine', 'partially_realized', 'realized', 'invalidated'])
+  return tracker.roadmap_shelf.slice(0, 12).map(node => ({
+    id: String(node?.id ?? '').slice(0, 100),
+    intent: String(node?.intent ?? '').slice(0, 300),
+    why_it_matters: String(node?.why_it_matters ?? '').slice(0, 240),
+    status: statuses.has(node?.status) ? node.status : 'tentative',
+    depends_on: (Array.isArray(node?.depends_on) ? node.depends_on : []).slice(0, 4).map(id => String(id).slice(0, 100)),
+    ...(node?.development_hint ? { development_hint: String(node.development_hint).slice(0, 32) } : {}),
+    linked: node?.linked === true,
+  })).filter(node => node.id && node.intent)
+}
+
 function trackerUiSteps(tracker, state) {
   if (!tracker?.plan_id || !Array.isArray(tracker.steps)) return undefined
   const paused = state?.status === 'paused'
@@ -1260,6 +1274,7 @@ function trackerUiSteps(tracker, state) {
 export function taskBoardUiSnapshot(state, live, tracker) {
   const board = state?.task_board
   const trackerSteps = trackerUiSteps(tracker, state)
+  const trackerShelf = trackerUiShelf(tracker)
   const trackerStatus = trackerUiStatus(tracker, state)
   const trackerBlocked = trackerUiBlocked(tracker)
   const agent = {
@@ -1270,12 +1285,13 @@ export function taskBoardUiSnapshot(state, live, tracker) {
   const liveActivity = Array.isArray(live?.activity) ? live.activity : []
   const liveConversation = Array.isArray(live?.conversation) ? live.conversation.slice(-UI_CONVERSATION_LIMIT) : []
   const conversationId = uiText(live?.conversation_id, 120)
-  if ((!board || board.kind !== 'task_board_lite' || !Array.isArray(board.steps)) && trackerSteps === undefined) {
+  if ((!board || board.kind !== 'task_board_lite' || !Array.isArray(board.steps)) && trackerSteps === undefined && trackerShelf.length === 0) {
     if (!live || (agent.phase === 'idle' && liveActivity.length === 0 && liveConversation.length === 0)) return undefined
     return {
-      goal_id: '',
-      objective: uiText(live.objective, 500),
+      goal_id: String(tracker?.goal_id ?? '').slice(0, 100),
+      objective: uiText(state?.objective ?? live.objective, 500),
       project: undefined,
+      shelf: trackerShelf,
       status: 'idle',
       blocker: '',
       blocker_summary: '',
@@ -1324,6 +1340,7 @@ export function taskBoardUiSnapshot(state, live, tracker) {
     total_steps: steps.length,
     active_index: activeIndex,
     steps,
+    shelf: trackerShelf,
     activity: [...deriveActivity(state), ...liveActivity.filter(entry => !entry.covered_by_receipt)].slice(-UI_ACTIVITY_LIMIT).map(uiActivityEntry),
     wanted_items: deriveWantedItems(state),
     conversation_id: conversationId,
@@ -1343,6 +1360,18 @@ export function taskBoardUiJson(snapshot) {
   for (const limit of [240, 120, 60]) {
     if (Buffer.byteLength(json) <= UI_SNAPSHOT_MAX_BYTES) break
     candidate = { ...candidate, steps: candidate.steps.map(step => ({ ...step, description: uiText(step.description, limit) })) }
+    json = JSON.stringify(candidate)
+  }
+  for (const limit of [200, 120, 80]) {
+    if (Buffer.byteLength(json) <= UI_SNAPSHOT_MAX_BYTES) break
+    candidate = {
+      ...candidate,
+      shelf: (candidate.shelf ?? []).map(node => ({
+        ...node,
+        intent: uiText(node.intent, limit),
+        why_it_matters: uiText(node.why_it_matters, Math.max(60, Math.floor(limit * 0.75))),
+      })),
+    }
     json = JSON.stringify(candidate)
   }
   // Conversation is a separate UI concern from model dialogue memory. Preserve

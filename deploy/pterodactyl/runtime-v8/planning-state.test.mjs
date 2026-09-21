@@ -1090,6 +1090,11 @@ test('plan tracker view is a deep-frozen read-only projection', () => {
   assert.equal(getActivePlan(state).active_step_index, 0)
   assert.equal(view.steps[0].completion_confidence, 'grounded')
   assert.equal(view.plan_version, 1)
+  assert.equal(view.roadmap_shelf.length, 2)
+  assert.equal(view.roadmap_shelf[0].id, 'roadmap_early_smelting')
+  assert.equal(view.roadmap_shelf[0].linked, true)
+  assert.equal(view.roadmap_shelf[1].linked, false)
+  assert.throws(() => { view.roadmap_shelf[0].intent = 'x' }, TypeError)
 })
 
 test('getActiveStep tracks authoritative progress only', () => {
@@ -1106,6 +1111,7 @@ test('an empty state produces an empty tracker view without throwing', () => {
   const view = planTrackerView(createEmptyPlanningState())
   assert.equal(view.plan_id, null)
   assert.deepEqual(view.steps, [])
+  assert.deepEqual(view.roadmap_shelf, [])
   assert.equal(lineageOf(createEmptyPlanningState()), undefined)
 })
 
