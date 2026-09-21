@@ -484,3 +484,74 @@ test('an unmet active step is not closed just because the planner moved on', asy
   assert.equal(memory.currentPlan(KEY)?.task_board?.completed_count ?? 0, 0)
   assert.equal(game.mutations.length, 1, 'the coal batch was never admitted under the stone step')
 })
+
+async function plannerSaysDone({ held, compoundProbability = 0.8, route = 'reanchor_plan' }) {
+  const game = new FakeFactorio({ inventory: { wood: 0 } })
+  const memory = new CanonicalTaskBoardMemory()
+  // Live req_mubdxf20_1: Jev kept the wood step open, then the planner
+  // correctly reported the goal done with an empty plan and no tool call.
+  const jev = recordingJev(async (_state, questions) => {
+    if (questions.intent) return { overrides: { intent: { choice: 'new_goal', confidence: 0.9 } } }
+    if (questions.receipt_scope) return { overrides: { receipt_scope: { choice: 'progress_only', confidence: 0.2 } } }
+    if (questions.route && route) return { overrides: { route: { choice: route, confidence: 0.8 } } }
+    if (questions.checkpoint_boundary) {
+      return { overrides: {
+        checkpoint_boundary: { choice: 'keep_step_open', confidence: 0.88 },
+        compound_step: { noul: compoundProbability },
+      } }
+    }
+  })
+  let calls = 0
+  const agent = new NpcAgentLoop({
+    rcon: game,
+    memory,
+    provider: async () => {
+      calls++
+      if (calls === 1) {
+        return planReply({
+          plan: ['Harvest 7 wood'],
+          operations: [{ name: 'harvest_product', args: { product_name: 'wood', count: 7, search_radius: 32 } }],
+          checkpoint: inventoryCheckpoint('wood', 7),
+        })
+      }
+      return planReply({ chatMessage: 'Done: wood total is 8 (>= 7). No steps remain.', plan: [], operations: [] })
+    },
+    interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
+    interactionDecisionProvider: jev,
+    scopeReviewDecisionProvider: jev,
+    steeringDecisionProvider: jev,
+    systemPrompt: 'task loop matrix',
+    stateFile: null,
+    traceFile: null,
+    decisionTraceFile: null,
+    npcId: 'airi',
+  })
+  await agent.request('harvest 7 wood, that is the only task', { sender: 'Louis' })
+  game.inventory.wood = held
+  let result
+  try { result = await agent.completed() }
+  catch (error) { result = { error } }
+  return { result, calls, memory }
+}
+
+test('a planner "done" is accepted when the kept-open step contract is met in Factorio', async () => {
+  const { result, memory } = await plannerSaysDone({ held: 8 })
+  assert.equal(result.goalStatus, 'completed', `not closed: ${result?.chatMessage ?? result?.error?.message}`)
+  assert.equal(memory.planningState(KEY)?.goal?.status, 'completed', 'the reducer goal is satisfied, not just the board')
+})
+
+test('a planner "done" is not accepted while the step contract is unmet', async () => {
+  const { result } = await plannerSaysDone({ held: 5 })
+  assert.notEqual(result?.goalStatus, 'completed')
+})
+
+test('a planner "done" on a plain completion turn cannot close an unmet quantity goal', async () => {
+  const { result, memory } = await plannerSaysDone({ held: 5, route: 'continue_current' })
+  assert.notEqual(result?.goalStatus, 'completed', 'closed with 5 of 7 wood')
+  assert.notEqual(memory.planningState(KEY)?.goal?.status, 'completed')
+})
+
+test('a planner "done" on a plain completion turn still closes a met quantity goal', async () => {
+  const { result } = await plannerSaysDone({ held: 8, route: 'continue_current' })
+  assert.equal(result?.goalStatus, 'completed', `not closed: ${result?.chatMessage ?? result?.error?.message}`)
+})

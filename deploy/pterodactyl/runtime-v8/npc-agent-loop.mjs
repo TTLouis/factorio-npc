@@ -3099,30 +3099,62 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // against a board that never advanced. A genuinely compound step cannot
   // pass: its remaining work would align as current-step work, not later.
   async closeActiveStepOnLaterStepWork(plan, before) {
+    return this.closeActiveStepOnMetContract(before, {
+      reasonCode: 'later_step_work_with_satisfied_contract',
+      source: 'later_step_alignment',
+      admits: activeIndex => Number.isSafeInteger(plan?.currentStep) && plan.currentStep > activeIndex,
+      plannerStep: plan?.currentStep,
+    })
+  }
+
+  // The planner reported the goal finished (no plan left, no operation, no
+  // BLOCKED) while the active step was still open. Its word alone never closes
+  // a step; the step's own pre-recorded world-state contract, re-read from
+  // Factorio now, does. Unmet or unverifiable contracts keep the old
+  // act-or-block repair path.
+  async closeActiveStepOnPlannerDone(plan, before) {
+    if (plan?.operations?.length !== 0 || plan?.plan?.length !== 0 || providerBlockerReason(plan)) return false
+    return this.closeActiveStepOnMetContract(before, {
+      reasonCode: 'planner_done_with_satisfied_contract',
+      source: 'planner_done',
+      admits: () => true,
+      plannerStep: plan?.currentStep,
+    })
+  }
+
+  // Re-reads a recorded step checkpoint against Factorio. Undefined when the
+  // contract is not purely world state (receipts, semantic_unknown), since
+  // only world state can be re-checked after the fact.
+  async evaluateWorldStateCheckpoint(checkpoint) {
+    const contract = checkpoint?.contract
+    if (!completionContractSupported(contract)) return undefined
+    if (contract.mode === 'semantic_unknown' || !(contract.requirements?.length > 0)) return undefined
+    if (!contract.requirements.every(requirement => WORLD_STATE_REQUIREMENT_KINDS.has(requirement?.kind))) return undefined
+    const facts = await this.completionFactsForContract(contract, undefined, [])
+    return evaluateCompletionContract(contract, facts)
+  }
+
+  async closeActiveStepOnMetContract(before, { reasonCode, source, admits, plannerStep }) {
     const key = this.activePlanKey()
     const planState = this.memory.planByNpc?.get?.(key) ?? this.memory.currentPlan?.(key)
     const board = planState?.task_board
     const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
     const step = activeIndex === undefined ? undefined : board?.steps?.[activeIndex]
     if (!planState || planState.status !== 'active' || !step || before?.stepId !== step.id) return false
-    if (!Number.isSafeInteger(plan?.currentStep) || plan.currentStep <= activeIndex) return false
+    if (!admits(activeIndex)) return false
     const checkpoint = before.checkpoint
-    const contract = checkpoint?.contract
-    if (!checkpoint || checkpoint.relation !== 'advances_current' || !completionContractSupported(contract)) return false
-    if (contract.mode === 'semantic_unknown' || !(contract.requirements?.length > 0)) return false
-    if (!contract.requirements.every(requirement => WORLD_STATE_REQUIREMENT_KINDS.has(requirement?.kind))) return false
-
-    const facts = await this.completionFactsForContract(contract, undefined, [])
-    const evaluation = evaluateCompletionContract(contract, facts)
-    if (!evaluation.satisfied) return false
+    if (!checkpoint || checkpoint.relation !== 'advances_current') return false
+    const evaluation = await this.evaluateWorldStateCheckpoint(checkpoint)
+    if (!evaluation?.satisfied) return false
+    const contract = checkpoint.contract
     const reduced = this.memory.applyOutcomeAuthority?.(key, {
       kind: 'verified_complete',
       source: 'step_checkpoint_gate',
-      reason_code: 'later_step_work_with_satisfied_contract',
+      reason_code: reasonCode,
       evidence: [{
         kind: 'verified_world_state',
         ref: `checkpoint/${step.id}`,
-        summary: JSON.stringify({ contract, results: evaluation.results, planner_step: plan.currentStep }),
+        summary: JSON.stringify({ contract, results: evaluation.results, planner_step: plannerStep }),
       }],
       metadata: { scope: 'step' },
     })
@@ -3130,11 +3162,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (reduced?.decision?.accepted !== true) return false
     await this.traceEvent('step.verified', {
       active_step_id: step.id,
-      source: 'later_step_alignment',
+      source,
       contract,
       task_board: visibleTaskBoard(reduced?.state?.task_board),
     })
-    return true
+    return reduced.state ?? true
   }
 
   async routeStepCheckpointDecision(plan) {
@@ -4684,30 +4716,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return this.runGuarded()
   }
 
-  async completed() {
-    await this.loadPersistentState()
-    if (!this.active) return null
-    const pendingAmendment = this.pendingInteractionAmendment
-    this.planUpdateReason = pendingAmendment ? 'amend_current' : 'completion'
-    if (pendingAmendment) this.requestLifecycle = 'amend_current'
-    await this.traceEvent('factorio.completed_signal', pendingAmendment ? { pending_amendment: true } : {})
-    const receipt = await this.taskStatusReceipt()
-    const receiptKey = runtimeReceiptKey('completion', receipt.view, '', this.epoch?.epoch)
-    if (this.lastHandledRuntimeReceipt.completion === receiptKey) {
-      if (this.traceRequest?.usage) this.traceRequest.usage.coalesced_runtime_events++
-      await this.traceEvent('factorio.event_coalesced', {
-        kind: 'completion',
-        receipt_key: receiptKey,
-        observation_mode: receipt.providerStatus.observation_mode,
-      })
-      return null
-    }
-    this.lastHandledRuntimeReceipt.completion = receiptKey
-
-    const stepCompletion = pendingAmendment
-      ? { verified: false, reason: 'pending_amendment' }
-      : await this.routeStepCompletionDecision(receipt)
-    const completionState = stepCompletion?.state
+  // What a step closing on its verified contract means for the plan and goal:
+  // the next Shelf slice, a verified finite goal, or an active goal to
+  // reconcile. Returns undefined when the loop should carry on as normal.
+  // Callers already inside a planner turn pass allowContinuation: false so
+  // this never starts a nested planner run.
+  async settleCompletedStepState(completionState, { pendingAmendment, allowContinuation = true } = {}) {
     const planningAfterCompletion = this.memory.planningState?.(this.activePlanKey())
     const reducerPlanAfterCompletion = planningAfterCompletion
       ? getActivePlanningPlan(planningAfterCompletion)
@@ -4719,7 +4733,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       && planningAfterCompletion.roadmap.nodes.length > 0
       && reducerPlanAfterCompletion?.status === PLAN_STATUS.COMPLETED
 
-    if (boundedSliceCompleted) {
+    if (boundedSliceCompleted && allowContinuation) {
       const completedBoard = visibleTaskBoard(completionState.task_board)
       await this.traceEvent('outcome.validated', {
         kind: 'plan_slice_completed',
@@ -4811,6 +4825,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!pendingAmendment
       && completionState?.status === 'completed'
       && hasLongHorizonRoadmap
+      && allowContinuation
       && planningAfterCompletion?.goal?.status === GOAL_STATUS.ACTIVE) {
       await this.traceEvent('planner.wake', {
         source: 'planning_boundary',
@@ -4828,6 +4843,35 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         this.reasoningTriggerSource = null
       }
     }
+    return undefined
+  }
+
+  async completed() {
+    await this.loadPersistentState()
+    if (!this.active) return null
+    const pendingAmendment = this.pendingInteractionAmendment
+    this.planUpdateReason = pendingAmendment ? 'amend_current' : 'completion'
+    if (pendingAmendment) this.requestLifecycle = 'amend_current'
+    await this.traceEvent('factorio.completed_signal', pendingAmendment ? { pending_amendment: true } : {})
+    const receipt = await this.taskStatusReceipt()
+    const receiptKey = runtimeReceiptKey('completion', receipt.view, '', this.epoch?.epoch)
+    if (this.lastHandledRuntimeReceipt.completion === receiptKey) {
+      if (this.traceRequest?.usage) this.traceRequest.usage.coalesced_runtime_events++
+      await this.traceEvent('factorio.event_coalesced', {
+        kind: 'completion',
+        receipt_key: receiptKey,
+        observation_mode: receipt.providerStatus.observation_mode,
+      })
+      return null
+    }
+    this.lastHandledRuntimeReceipt.completion = receiptKey
+
+    const stepCompletion = pendingAmendment
+      ? { verified: false, reason: 'pending_amendment' }
+      : await this.routeStepCompletionDecision(receipt)
+    const completionState = stepCompletion?.state
+    const settled = await this.settleCompletedStepState(completionState, { pendingAmendment })
+    if (settled) return settled
 
     let routed
     if (pendingAmendment) {
@@ -6279,9 +6323,23 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // checkpoint pass below re-records one shaped by the new batch.
     const checkpointBeforeBatch = activeStepCheckpointSnapshot(previousState?.task_board)
     const runtimeHealthy = persistentRuntimeHealthy(persistentRuntime)
-    const finalCompletionVerified = verifiedFinalCompletion(plan, previousState, this.planUpdateReason, {
+    let finalCompletionVerified = verifiedFinalCompletion(plan, previousState, this.planUpdateReason, {
       freshObservation: this.freshObservationSinceContinuation,
     })
+    // "The batch ran" is not "the step is done". When the open step carries a
+    // world-state target, a planner's final "done" must also meet it.
+    if (finalCompletionVerified && checkpointBeforeBatch?.checkpoint) {
+      const evaluation = await this.evaluateWorldStateCheckpoint(checkpointBeforeBatch.checkpoint)
+      if (evaluation && !evaluation.satisfied) {
+        finalCompletionVerified = false
+        await this.traceEvent('step.completion_claim_rejected', {
+          active_step_id: checkpointBeforeBatch.stepId,
+          reason_code: 'planner_done_with_unmet_contract',
+          contract: checkpointBeforeBatch.checkpoint.contract,
+          results: evaluation.results,
+        })
+      }
+    }
     const remainingCanonicalWork = !finalCompletionVerified && (
       canonicalWorkRemains(previousState)
       || (!previousState && Array.isArray(plan.plan) && plan.plan.length > 0)
@@ -6308,6 +6366,23 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
     const conditionWaitActive = conditionWait?.state === 'active'
+
+    let plannerDoneClosed
+    if (commands.length === 0 && remainingCanonicalWork && !runtimeHealthy && !conditionWaitActive
+      && this.plannerDoneCloseUsed !== true
+      && (plannerDoneClosed = await this.closeActiveStepOnPlannerDone(plan, checkpointBeforeBatch))) {
+      const settled = await this.settleCompletedStepState(
+        plannerDoneClosed === true ? undefined : plannerDoneClosed,
+        { allowContinuation: false },
+      )
+      if (settled) {
+        this.clearActionOmissionRecovery()
+        return settled
+      }
+      this.plannerDoneCloseUsed = true
+      try { return await this.commitPlan(plan) }
+      finally { this.plannerDoneCloseUsed = false }
+    }
 
     if (commands.length === 0 && this.actionOmissionRepairActive && !runtimeHealthy && !conditionWaitActive && !finalCompletionVerified) {
       if (explicitBlocker) {
