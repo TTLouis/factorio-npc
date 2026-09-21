@@ -796,3 +796,60 @@ test('a draft led by a work-less step gets told it can drop that step, and a red
   assert.match(String(messages[1]), /no operation of its own/i)
   assert.equal(game.mutations.length, 1, `redraft not admitted: ${result?.chatMessage ?? result?.error?.message}`)
 })
+
+async function lowConfidenceTargetDone({ held }) {
+  const game = new FakeFactorio({ inventory: { 'iron-ore': 13 } })
+  const memory = new CanonicalTaskBoardMemory()
+  // Live goal_mubfl8p6: at admission Jev picked the grounded delta
+  // (iron-ore>=53) at 0.32 confidence, so the step recorded semantic_unknown;
+  // after the batch the planner said done with nothing left to check.
+  const jev = recordingJev(async (state, questions) => {
+    if (questions.intent) return { overrides: { intent: { choice: 'new_goal', confidence: 0.9 } } }
+    if (questions.receipt_scope) return { overrides: { receipt_scope: { choice: 'progress_only', confidence: 0.35 } } }
+    if (questions.route) return { overrides: { route: { choice: 'reanchor_plan', confidence: 0.8 } } }
+    if (questions.checkpoint_boundary && !state?.planner_claim) {
+      return { overrides: {
+        contract: { choice: 'candidate_1', confidence: 0.32 },
+        checkpoint_boundary: { choice: 'keep_step_open', confidence: 0.56 },
+        compound_step: { noul: 0.54 },
+      } }
+    }
+  })
+  let calls = 0
+  const agent = new NpcAgentLoop({
+    rcon: game,
+    memory,
+    provider: async () => {
+      calls++
+      if (calls === 1) return planReply({ plan: ['Mine 40 iron ore from the nearest patch'], operations: [gather('iron-ore', 40)] })
+      return planReply({ chatMessage: 'Mining complete, the 40 iron ore goal is fulfilled.', plan: [], operations: [] })
+    },
+    interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
+    interactionDecisionProvider: jev,
+    scopeReviewDecisionProvider: jev,
+    steeringDecisionProvider: jev,
+    systemPrompt: 'task loop matrix',
+    stateFile: null,
+    traceFile: null,
+    decisionTraceFile: null,
+    npcId: 'airi',
+  })
+  await agent.request('mine exactly 40 iron ore, that is the only task', { sender: 'Louis' })
+  game.inventory['iron-ore'] = held
+  let result
+  try { result = await agent.completed() }
+  catch (error) { result = { error } }
+  return { result, jev }
+}
+
+test('a done claim can re-offer the step\'s own target Jev was unsure of before the batch ran', async () => {
+  const { result, jev } = await lowConfidenceTargetDone({ held: 53 })
+  const claim = jev.calls.find(call => call.state?.planner_claim)
+  assert.ok(claim, 'Jev was asked about the done claim')
+  assert.equal(result?.goalStatus, 'completed', `not closed: ${result?.chatMessage ?? result?.error?.message}`)
+})
+
+test('a re-offered own target still has to hold in Factorio', async () => {
+  const { result } = await lowConfidenceTargetDone({ held: 50 })
+  assert.notEqual(result?.goalStatus, 'completed')
+})

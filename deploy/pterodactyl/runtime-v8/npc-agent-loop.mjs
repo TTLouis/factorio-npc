@@ -561,6 +561,7 @@ function persistedStepCheckpoint(board, stepId) {
           : 'replan_needed',
         compound_probability: parsed?.compound_probability,
         claimed_done: parsed?.claimed_done === true,
+        offered_candidates: Array.isArray(parsed?.offered_candidates) ? parsed.offered_candidates : [],
         provider: parsed?.provider,
         model: parsed?.model,
       }
@@ -3148,15 +3149,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   // A step with no checkable target of its own: one that never ran work
-  // ("verify I hold 6 stone"), or a reworded revision whose checkpoint is
-  // semantic_unknown while the wording it replaced recorded a real target.
-  // Offer Jev those world-state targets (earlier steps, and superseded step
-  // ids on this board); if it maps one onto this step as its checkpoint, that
+  // ("verify I hold 6 stone"), a reworded revision whose checkpoint is
+  // semantic_unknown while the wording it replaced recorded a real target, or
+  // a step whose own grounded target Jev was not confident in before its batch
+  // ran. Offer Jev those world-state targets (this step's earlier offers,
+  // earlier steps, superseded step ids); if it maps one onto this step as its
+  // checkpoint, that
   // becomes the step's contract, still re-read from Factorio before closing.
   async checkpointFromEarlierSteps(plan, before) {
     const board = this.memory.currentPlan?.(this.activePlanKey())?.task_board
     const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : -1
     if (!before?.stepId || activeIndex < 0) return before
+    const ownOffered = before.checkpoint?.claimed_done ? [] : (before.checkpoint?.offered_candidates ?? [])
     const liveStepIds = new Set(board.steps.map(step => step?.id))
     const superseded = (Array.isArray(board.evidence) ? board.evidence : [])
       .filter(item => item?.kind === 'step_checkpoint_contract' && item.step_id && !liveStepIds.has(item.step_id))
@@ -3166,6 +3170,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       })
     const seen = new Set()
     const extraCandidates = [
+      ...ownOffered.map(sanitizeStepCompletionContract),
       ...board.steps.slice(0, activeIndex).map(step => sanitizeStepCompletionContract(step?.completion_contract)),
       ...superseded,
     ]
@@ -3176,8 +3181,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         seen.add(signature)
         return true
       })
-      .slice(-4)
-      .map(contract => ({ ...contract, source: 'verified_earlier_step' }))
+      .slice(0, 4)
+      .map(contract => ({ ...contract, source: contract.source ?? 'verified_earlier_step' }))
     if (extraCandidates.length === 0) return before
     const decision = await this.routeStepCheckpointDecision(plan, { claimedDone: true, extraCandidates })
     if (decision?.boundary !== 'checkpoint_here' || decision?.relation !== 'advances_current') return before
@@ -3356,6 +3361,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       active_step_id: step.id,
       grounded_predicates: groundedSymbols.predicates.length,
       grounding_rejections: groundedContext.rejections,
+      candidates: candidates.slice(0, 8).map(sanitizeStepCompletionContract),
+      ...(claimedDone ? { planner_claim: 'step_already_complete_no_new_operation' } : {}),
       question_ids: Object.keys(questions),
     })
 
@@ -3413,6 +3420,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           relation,
           compound_probability: normalized.compound_probability,
           ...(claimedDone ? { claimed_done: true } : {}),
+          // Kept so a later "done" claim can re-offer a target Jev was not
+          // yet confident in before the batch ran (live goal_mubfl8p6).
+          offered_candidates: candidates.map(sanitizeStepCompletionContract).filter(worldStateContract).slice(0, 4),
           synthesis_used: normalized.synthesis_used,
           synthesis_reason: normalized.synthesis_reason,
           synthesis_symbol: normalized.synthesis_symbol,
