@@ -379,3 +379,41 @@ test('a step Jev judged compound stays open even when its partial contract is me
   assert.notEqual(result?.goalStatus, 'completed')
   assert.equal(memory.currentPlan(KEY)?.task_board?.completed_count ?? 0, 0)
 })
+
+test('a submitPlan cut off inside its optional checkpoint keeps the complete plan', async () => {
+  const game = new FakeFactorio({ inventory: { wood: 0 } })
+  const memory = new CanonicalTaskBoardMemory()
+  const jev = recordingJev(async (_state, questions) => (questions.intent
+    ? { overrides: { intent: { choice: 'new_goal', confidence: 0.9 } } }
+    : undefined))
+  const events = []
+  let calls = 0
+  // Exact live deepseek signature: clean finish, stops at `"checkpoint"::`.
+  const truncated = '{"chatMessage": "Harvesting wood", "plan": ["Harvest 3 wood"], "currentStep": 0, "operations": [{"name": "harvest_product", "args": {"product_name": "wood", "count": 3, "search_radius": 256}}], "checkpoint"::'
+  const agent = new NpcAgentLoop({
+    rcon: game,
+    memory,
+    provider: async () => {
+      calls++
+      return { content: '', tool_calls: [{ id: 'p1', type: 'function', function: { name: 'submitPlan', arguments: truncated } }] }
+    },
+    interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
+    interactionDecisionProvider: jev,
+    scopeReviewDecisionProvider: jev,
+    steeringDecisionProvider: jev,
+    systemPrompt: 'task loop matrix',
+    stateFile: null,
+    traceFile: null,
+    decisionTraceFile: null,
+    npcId: 'airi',
+    onActivity: event => events.push(event),
+  })
+  const result = await agent.request('harvest exactly 3 wood, that is the only task', { sender: 'Louis' })
+  assert.equal(result.goalStatus, 'active')
+  assert.equal(calls, 1, 'the salvaged plan needs no recovery round')
+  assert.equal(game.mutations.length, 1)
+  assert.ok(events.includes('provider.plan_submission_salvaged'))
+  game.inventory.wood = 3
+  const done = await agent.completed()
+  assert.equal(done.goalStatus, 'completed')
+})

@@ -28,6 +28,7 @@ export function deployment(overrides = {}) {
 const TASK_TYPES_BY_OPERATION = {
   gather_resource: ['walking_to_entity', 'mining'],
   mine_entity: ['mining'],
+  harvest_product: ['harvesting'],
   craft_item: ['crafting'],
   place_entity: ['placing'],
   walk_to_entity: ['walking_to_entity'],

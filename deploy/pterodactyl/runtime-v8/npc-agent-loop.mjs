@@ -1867,6 +1867,42 @@ function stateFileFromOptions(options) {
   return path.join(path.resolve(process.env.CONTAINER_ROOT || '/home/container'), '.airi', 'npc-state.json')
 }
 
+// Cut a truncated JSON object back to its last complete top-level member.
+// Never invents content: it only drops an incomplete trailing member.
+export function salvageTruncatedJsonObject(raw) {
+  if (typeof raw !== 'string') return undefined
+  const text = raw.trimStart()
+  if (!text.startsWith('{')) return undefined
+  const cuts = []
+  let depth = 0
+  let inString = false
+  let escaped = false
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index]
+    if (inString) {
+      if (escaped) escaped = false
+      else if (char === '\\') escaped = true
+      else if (char === '"') inString = false
+      continue
+    }
+    if (char === '"') inString = true
+    else if (char === '{' || char === '[') depth++
+    else if (char === '}' || char === ']') depth--
+    else if (char === ',' && depth === 1) cuts.push(index)
+  }
+  for (let index = cuts.length - 1; index >= 0; index--) {
+    const candidate = `${text.slice(0, cuts[index])}}`
+    try {
+      const parsed = JSON.parse(candidate)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return { text: candidate, cut: cuts[index], keys: Object.keys(parsed) }
+      }
+    }
+    catch {}
+  }
+  return undefined
+}
+
 function blockedPlanReply(plan) {
   const reason = cleanMemoryText(plan?.blocker?.detail || plan?.blocker?.reason_code || 'a structural blocker', 240)
   const step = plan?.steps?.[plan?.active_step_index ?? 0]?.description
@@ -5036,7 +5072,26 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         arguments_tail: cleanMemoryText(rawArgs.slice(-200), 200),
         finish_reason: message._airiProvider?.finish_reason,
       })
-      message = { ...message, tool_calls: undefined, content: rawArgs }
+      // Live, deepseek reproducibly stops a submitPlan mid-way through an
+      // optional trailing member (`..."operations":[...], "checkpoint"::`)
+      // while reporting a clean finish. Everything before that member is a
+      // complete plan. Keep it -- but only if the salvaged object passes the
+      // same validation as an intact submission.
+      const salvaged = salvageTruncatedJsonObject(rawArgs)
+      if (salvaged) {
+        try {
+          plannerSubmission = plannerControlPayloadFromMessage({
+            ...message,
+            tool_calls: [{ ...call, function: { ...call.function, arguments: salvaged.text } }],
+          })
+          await this.traceEvent('provider.plan_submission_salvaged', {
+            kept_keys: salvaged.keys,
+            dropped_chars: rawArgs.length - salvaged.cut,
+          })
+        }
+        catch {}
+      }
+      if (!plannerSubmission) message = { ...message, tool_calls: undefined, content: rawArgs }
     }
     if (plannerSubmission) {
       await this.traceEvent('provider.plan_submission', {
