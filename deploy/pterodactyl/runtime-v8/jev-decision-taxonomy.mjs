@@ -450,8 +450,8 @@ export function parseScopeReview(response, { draftStepCount } = {}) {
     ...asArray(reasonSection.choices),
     ...asArray(reasonSection.choice),
     ...asArray(response?.answers?.scope_review_reason_codes?.choices),
-    ...asArray(choiceOf(response, 'scope_review_reason_codes')),
-    ...asArray(choiceOf(response, 'scope_review_reason_code_secondary')),
+    choiceOf(response, 'scope_review_reason_codes'),
+    choiceOf(response, 'scope_review_reason_code_secondary'),
   ]
   const reason_codes = uniqueBounded(
     [
