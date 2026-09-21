@@ -78,6 +78,22 @@ test('a committed multi-step plan runs to verified completion with one pre-commi
   assert.equal(world.reducerPlan().status, PLAN_STATUS.COMPLETED)
   assert.equal(world.game.mutations.length, 3)
   assert.equal(world.scopeReviews(), 1, 'later batches fulfil the committed plan and are not re-reviewed')
+  const planning = world.memory.planningState(KEY)
+  assert.equal(planning.goal.status, 'completed', 'a finite goal told "verified complete" must be satisfied in the reducer too')
+  assert.equal(planning.goal.satisfaction?.source, 'runtime')
+})
+
+test('continue after a finished goal does not invent a goal named "continue"', async () => {
+  const world = harness()
+  await world.say('semi-automate iron and copper plates', 'new_goal')
+  await runToCompletion(world)
+  const plannerCalls = world.plannerCalls
+
+  const reply = await world.say('continue', 'continue_current')
+  assert.equal(reply.routedOnly, true)
+  assert.match(reply.chatMessage, /no current goal/)
+  assert.equal(world.plannerCalls, plannerCalls)
+  assert.notEqual(world.memory.currentPlan(KEY)?.objective, 'continue')
 })
 
 test('a Jev refusal after commit cannot halt the frozen plan', async () => {

@@ -4113,6 +4113,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const reducerPlanBeforeRequest = planningBeforeRequest ? getActivePlanningPlan(planningBeforeRequest) : undefined
     const blockedAwaitingUser = reducerPlanBeforeRequest?.status === PLAN_STATUS.BLOCKED
       && reducerPlanBeforeRequest.blocker?.user_choice?.choice !== 'revise'
+    // Nothing to continue: the last goal finished (and was retired) or there
+    // never was one. Planning from here would admit the chat text itself --
+    // literally "continue" -- as a brand-new goal objective.
+    if (!routed.router_bypassed && intent === 'continue_current' && !planBefore && !healthyRuntime) {
+      const reply = 'There is no current goal to continue; the last one is finished. Tell me what you want me to do next.'
+      await this.rememberRoutedInteraction(memoryKey, sender, text, reply)
+      return { chatMessage: reply, plan: [], currentStep: 0, operations: [], interactionIntent: intent, routedOnly: true }
+    }
     if (!routed.router_bypassed && blockedAwaitingUser && intent === 'continue_current') {
       const reply = blockedPlanReply(reducerPlanBeforeRequest)
       await this.rememberRoutedInteraction(memoryKey, sender, text, reply)
@@ -4578,13 +4586,37 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
 
-    const reducerGoalSatisfied = planningAfterCompletion?.goal?.status === GOAL_STATUS.SATISFIED
+    // GOAL_SATISFIED completes the goal; there is no separate SATISFIED status.
+    const reducerGoalSatisfied = planningAfterCompletion?.goal?.status === GOAL_STATUS.COMPLETED
     const hasLongHorizonRoadmap = Array.isArray(planningAfterCompletion?.roadmap?.nodes)
       && planningAfterCompletion.roadmap.nodes.length > 0
     const legacyCompatibleCompletion = !planningAfterCompletion?.goal || !hasLongHorizonRoadmap
     if (!pendingAmendment
       && completionState?.status === 'completed'
       && (reducerGoalSatisfied || legacyCompatibleCompletion)) {
+      // A finite goal has no Shelf, so no frontier exists that could stand in
+      // for satisfaction; the runtime's own deterministic verification of the
+      // final step is the evidence. Record it, or the reducer keeps the goal
+      // active while the user is told it is done, and nothing else ever
+      // decides it.
+      if (!reducerGoalSatisfied
+        && !hasLongHorizonRoadmap
+        && planningAfterCompletion?.goal?.status === GOAL_STATUS.ACTIVE
+        && typeof this.memory.recordGoalSatisfaction === 'function') {
+        const evidenceRefs = [...(completionState.task_board?.evidence ?? [])]
+          .reverse()
+          .filter(item => item?.kind === 'deterministic_verification' && typeof item?.ref === 'string' && item.ref)
+          .slice(0, 2)
+          .map(item => item.ref)
+        if (evidenceRefs.length > 0) {
+          this.memory.recordGoalSatisfaction(this.activePlanKey(), {
+            source: 'runtime',
+            evidenceRefs,
+            rationale: 'finite_goal_final_step_verified',
+          })
+          await this.persistState()
+        }
+      }
       this.active = false
       const completedBoard = visibleTaskBoard(completionState.task_board)
       await this.traceEvent('outcome.validated', {
