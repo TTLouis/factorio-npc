@@ -191,6 +191,6 @@ describe('old tasks and New Task conversation integration', () => {
 
   it('tombstones and clears the current conversation binding before queueing New Task', () => {
     const handler = source.split('function handle_control_click(')[1]?.split('\n}\n\nexport function create_task_board_ui_remote_interface')[0] ?? ''
-    expect(handler).toContain("debug_ui.suppress_snapshot(storage.airi_task_board_ui); debug_ui.reset_task_conversation(); emit_control(player, 'new_task')")
+    expect(handler).toContain("debug_ui.suppress_snapshot(storage.airi_task_board_ui); debug_ui.reset_task_conversation(); activity_state.clear_activity_history(); emit_control(player, 'new_task')")
   })
 })
