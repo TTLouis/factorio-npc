@@ -3254,6 +3254,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         boundary,
         relation,
         confidence: contract.confidence,
+        // `boundary` above is derived (it may be demoted). Keep Jev's own
+        // answer too, so a trace can tell its judgement from runtime policy.
+        jev_boundary_choice: cleanMemoryText(boundaryChoice, 40),
+        jev_boundary_confidence: Number.isFinite(response?.answers?.checkpoint_boundary?.confidence)
+          ? response.answers.checkpoint_boundary.confidence
+          : undefined,
+        compound_probability: normalized.compound_probability,
         latency_ms: Date.now() - startedAt,
         input_units: Number.isFinite(normalized.usage?.input_tokens) ? Math.max(0, Math.trunc(normalized.usage.input_tokens)) : 0,
         output_units: Number.isFinite(normalized.usage?.output_tokens) ? Math.max(0, Math.trunc(normalized.usage.output_tokens)) : 0,
