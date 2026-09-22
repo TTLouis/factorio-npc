@@ -67,6 +67,15 @@ const DECISION_CONFIDENCE_POLICY = Object.freeze({
   }),
 })
 
+const DECISION_CONFIDENCE_POLICY_ALIASES = Object.freeze({
+  wait_runtime: 'continue_runtime',
+  continue_current: 'continue_runtime',
+  targeted_observation: 'observe',
+  reanchor_plan: 'wake_planner',
+  replan: 'wake_planner',
+  fallback_planner: 'wake_planner',
+})
+
 const TYPED_STATE_BOTTLENECKS = Object.freeze([
   'none_known',
   'materials',
@@ -236,10 +245,11 @@ export function observationRelevancePolicy() {
 }
 
 export function decisionConfidencePolicy(route) {
-  if (!Object.hasOwn(DECISION_CONFIDENCE_POLICY, route)) {
-    throw new Error(`Unknown canonical decision route: ${route}`)
-  }
-  return { route, ...DECISION_CONFIDENCE_POLICY[route] }
+  const canonicalRoute = Object.hasOwn(DECISION_CONFIDENCE_POLICY, route)
+    ? route
+    : DECISION_CONFIDENCE_POLICY_ALIASES[route]
+  if (!canonicalRoute) throw new Error(`Unknown canonical decision route: ${route}`)
+  return { route: canonicalRoute, ...DECISION_CONFIDENCE_POLICY[canonicalRoute] }
 }
 
 export function decisionConfidencePolicyCatalog() {

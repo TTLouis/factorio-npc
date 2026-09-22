@@ -117,6 +117,10 @@ test('M10 decision confidence policy never converts confidence into authority', 
   assert.equal(catalog.ask_user.deterministic_guard, 'authoritative_user_boundary')
   for (const policy of Object.values(catalog)) assert.equal(policy.confidence_can_authorize, false)
   assert.equal(decisionConfidencePolicy('ask_user').numeric_threshold_status, 'not_applicable')
+  assert.equal(decisionConfidencePolicy('wait_runtime').route, 'continue_runtime')
+  assert.equal(decisionConfidencePolicy('continue_current').route, 'continue_runtime')
+  assert.equal(decisionConfidencePolicy('targeted_observation').route, 'observe')
+  assert.equal(decisionConfidencePolicy('replan').route, 'wake_planner')
   assert.throws(() => decisionConfidencePolicy('complete_goal'), /Unknown canonical decision route/)
 })
 

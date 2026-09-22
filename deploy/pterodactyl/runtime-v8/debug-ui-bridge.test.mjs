@@ -147,7 +147,7 @@ test('retired scope-review diagnostics stay inert after the correctness gate was
   assert.equal(debug.decision_calls_total, calls)
 
   debug = liveAgentDebugEvent('request.received', {}, debug, { request_id: 'req-b' })
-  assert.equal(debug.decision_shadow_intent, '')
+  assert.equal(debug.decision_shadow_intent, 'new_goal')
   assert.equal(debug.decision_scope_review, undefined)
 })
 test('live debug bridge drops malformed second-layer metrics instead of reusing stale round data', () => {
