@@ -34,7 +34,6 @@ const FAILED_ATTEMPT_OUTCOME_KINDS = new Set(['recoverable_provider_failure'])
 // nothing has been admitted yet, so nothing is frozen.
 const PRE_COMMIT_REPLACEABLE_STATUSES = Object.freeze([
   PLAN_STATUS.DRAFT,
-  PLAN_STATUS.JEV_REVIEW,
   PLAN_STATUS.RUNTIME_VALIDATION,
   PLAN_STATUS.READY,
 ])
@@ -591,7 +590,6 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     migrated = false,
     runtime_validation,
     runtimeValidation,
-    review,
   } = {}) {
     const legacy = key ? this.planByNpc.get(key) : undefined
     let planning = this.ensurePlanningDraft(key, legacy, { now, migrated })
@@ -599,7 +597,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     if (!plan) return planning
     if ([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING, PLAN_STATUS.COMPLETED, PLAN_STATUS.BLOCKED].includes(plan.status)) return planning
 
-    const validation = runtime_validation ?? runtimeValidation ?? review?.runtime_validation
+    const validation = runtime_validation ?? runtimeValidation
     if (!validation || validation.passed !== true) return planning
 
     planning = applyPlanningEvent(planning, {
@@ -959,26 +957,20 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         roadmap: plan?.roadmap,
         roadmapNodeIds: plan?.roadmapNodeIds,
         developmentMode: plan?.developmentMode,
-        replacePrecommit: options?.scopeRefinement === true,
       })
     }
     const activeAfterDraft = getActivePlan(this.planningByNpc.get(key))
-    const precommitRefinementApproved = options?.scopeRefinement === true
-      && priorReducerPlan
-      && [PLAN_STATUS.DRAFT, PLAN_STATUS.JEV_REVIEW, PLAN_STATUS.RUNTIME_VALIDATION, PLAN_STATUS.READY].includes(priorReducerPlan.status)
     // Once an immutable bounded slice is COMPLETED, the reducer is allowed to
-    // mint the next shelf-linked DRAFT. The legacy Task Board must mirror that
-    // new semantic slice; preserving the completed board here would make the
-    // checkpoint normalizer rebuild the new reducer plan from stale step text.
+    // mint the next shelf-linked DRAFT. The legacy Task Board mirrors that new
+    // semantic slice instead of preserving the completed board.
     const completedSliceDraftApproved = priorReducerPlan?.status === PLAN_STATUS.COMPLETED
       && activeAfterDraft?.status === PLAN_STATUS.DRAFT
       && activeAfterDraft.plan_id !== priorReducerPlan.plan_id
-    if (!userRevisionApproved && !supersededPlanId && !precommitRefinementApproved && !completedSliceDraftApproved) return result
+    if (!userRevisionApproved && !supersededPlanId && !completedSliceDraftApproved) return result
     return {
       ...result,
       ...(userRevisionApproved ? { userRevisionApproved: true } : {}),
       ...(supersededPlanId ? { supersededPlanId } : {}),
-      ...(precommitRefinementApproved ? { precommitRefinementApproved: true } : {}),
       ...(completedSliceDraftApproved ? { completedSliceDraftApproved: true } : {}),
     }
   }
@@ -992,13 +984,13 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     // A COMMITTED or EXECUTING slice is FROZEN and is deliberately excluded.
     //
     // This used to include them, which meant an ordinary submission replaced a
-    // healthy committed plan at RECORD time -- before scope review, before
+    // healthy committed plan at RECORD time -- before deterministic
     // preflight. When that replacement then failed preflight, the committed
     // slice had already been superseded and an extra plan was left behind: a
     // validated plan traded for a dead draft. The real Factorio lifecycle gate
     // catches exactly this, on a turn where the user only said "continue".
     //
-    // Supersession is a handover, and a draft that has passed neither gate is
+    // Supersession is a handover, and a draft that has not passed deterministic admission is
     // not a successor. The roadmap has one path from a frozen slice to its
     // replacement -- structural blocker, then explicit user-approved revision --
     // and it produces plan_vN+1 with lineage rather than replacing in place.
@@ -1268,17 +1260,12 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       if (!planning) {
         planning = this.ensurePlanningDraft(key, state, { now: state.updated_at, migrated: true })
         // Not a fresh admission: this plan was admitted by a previous run and
-        // is being reconstructed from disk. The review is stated explicitly so
-        // the provenance is visible, rather than defaulted into existence.
+        // is being reconstructed from disk through the deterministic admission
+        // boundary used by live plans.
         planning = this.commitPlanningPlan(key, {
           now: state.updated_at,
           migrated: true,
-          review: {
-            verdict: 'actionable',
-            reason_codes: ['restored_from_legacy_snapshot'],
-            confidence: 0,
-            runtime_validation: { passed: true },
-          },
+          runtime_validation: { passed: true },
         })
         planning = this.replayLegacyVerifiedPrefix(key, state, planning, { now: state.updated_at })
         const plan = getActivePlan(planning)
@@ -1329,14 +1316,11 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         }),
     )
     const revisionApproved = stateResult?.userRevisionApproved === true
-    const precommitRefinementApproved = stateResult?.precommitRefinementApproved === true
     const completedSliceDraftApproved = stateResult?.completedSliceDraftApproved === true
-    // BLOCKED/COMMITTED work is frozen for ordinary continuation. Two reducer-
-    // owned boundaries may replace the legacy projection without weakening
-    // immutability: Jev pre-commit refinement, and the fresh DRAFT created after
-    // an immutable bounded slice has reached COMPLETED.
+    // BLOCKED/COMMITTED work is frozen for ordinary continuation. Replacement
+    // is allowed only for explicit user revision or a fresh draft after the
+    // previous immutable slice completed.
     const semanticReplacementApproved = revisionApproved
-      || precommitRefinementApproved
       || completedSliceDraftApproved
     const guarded = semanticReplacementApproved
       ? plan
