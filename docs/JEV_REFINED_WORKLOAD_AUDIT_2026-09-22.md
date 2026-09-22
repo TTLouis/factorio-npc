@@ -77,17 +77,29 @@ This follows the official "select instead of generate" / function-calling patter
 
 ### 3.1 P0 — exact provider-schema fidelity
 
-The adapter must model the TypeSafe wire contract exactly rather than as generic JSON.
+The adapter must model the current official TypeSafe SDK contract exactly rather than
+a remembered/hand-written approximation.
 
-Required corrections:
+The current official JavaScript SDK defines `EntryType` as:
 
-- top-level `state` accepts the documented string/object/array forms, not arbitrary
-  scalar JSON values;
-- structured `instructions` do not accept root `null`;
-- Score criteria entries do not accept root `null`;
-- Noul true/false descriptions do not accept root `null`;
-- Choice descriptions may remain nullable where TypeSafe explicitly permits it;
-- tests must exercise the exact accepted/rejected forms.
+```text
+string | object | array | null
+```
+
+and uses it for state, instructions and criterion descriptions. Therefore:
+
+- top-level `state` must reject root number/boolean values, but **null is valid**;
+- `instructions` are optional and may be `null`;
+- Choice descriptions may be `null`;
+- Score rubric entries may be `null`;
+- Noul criteria may be absent, `null`, or an object containing optional
+  `true`/`false` EntryType descriptions;
+- nested JSON inside an object/array may still contain ordinary JSON scalars;
+- tests must mirror the official SDK's accepted/rejected forms rather than impose
+  stricter undocumented rules.
+
+The current adapter already gets several of these right; M11A should change only real
+contract mismatches.
 
 Do this before interpreting any E2E provider failure as a Jev/model failure.
 
@@ -127,9 +139,11 @@ capacity_is_current_bottleneck:
 Do not ask Jev for generated reason text or summaries. Code may render typed values and
 authoritative provenance for the Main LLM.
 
-### 3.3 P2 — remove permanent interaction-router duplication
+### 3.3 P2 — redesign interaction routing as a hybrid, not a Jev replacement
 
-Intent classification is a natural Jev/System One task.
+The user interface is still natural language. Jev should not replace the Main LLM's
+ability to understand nuance, converse naturally, explain state, or interpret open-ended
+requests.
 
 Current live flow spends:
 
@@ -139,23 +153,36 @@ Main-LLM JSON interaction router
 Jev interaction classifier in shadow
 ```
 
-The target is:
+That duplication is not automatically wrong. The question is whether both calculations
+provide independent value.
+
+Target policy:
 
 ```text
-user message
-   |
-   v
-Jev intent Choice
-   |
-   +--> status_query      -> deterministic status reply
-   +--> continue_current  -> deterministic lifecycle
-   +--> cancel_current    -> deterministic cancellation
-   +--> amend_current     -> deterministic lifecycle / Main LLM when semantic work is needed
-   +--> new_goal          -> Main LLM planner
-   +--> chat_only         -> language model only if a natural reply is wanted
+user natural language
+        |
+        +--> Jev bounded intent / conflict signal
+        |
+        +--> Main LLM natural-language interpretation when semantic nuance,
+             amendment meaning, conversational response, or open-ended planning matters
+        |
+        v
+deterministic lifecycle dispatch
 ```
 
-Promotion must preserve a deterministic/fallback path when Jev is unavailable.
+For obvious low-ambiguity control intents, Jev plus deterministic state may be enough to
+avoid a separate Main-LLM routing-only call. For ambiguous/high-impact interactions,
+**double evaluation is allowed and desirable** when the Main LLM and Jev answer different
+questions:
+
+- Jev: bounded intent/conflict probability;
+- Main LLM: natural-language meaning, user-facing interpretation and semantic planning.
+
+Do not require duplicate classification on every turn merely for agreement. Use the
+second calculation where disagreement/ambiguity/high impact changes handling, and trace
+both signals so later measurement can determine whether the extra call is worth it.
+
+Natural-language user interaction remains a first-class Main-LLM responsibility.
 
 ### 3.4 P3 — shrink recovery to fuzzy judgments only
 
@@ -241,6 +268,11 @@ The preferred steady-state architecture has five Jev responsibilities:
 4. **ambiguous recovery classification**;
 5. **optional bounded planning steering**.
 
+Interaction intent is a hybrid boundary: Jev contributes a typed signal, while the Main
+LLM remains available for natural-language interpretation and user-facing conversation.
+Selective double evaluation is part of the design when the two computations are
+meaningfully independent.
+
 Everything else must justify itself with measurable value.
 
 A retained Jev call should do at least one of:
@@ -266,10 +298,13 @@ Fix the TypeSafe adapter and exact contract tests.
 Delete generated-field expectations and duplicate steering questions. Add finite
 runtime shelf-node selection only where useful.
 
-### M11C — interaction routing consolidation
+### M11C — hybrid interaction routing
 
-Promote Jev intent routing from shadow toward the live routing source while preserving
-fallback behavior.
+Remove wasteful routing-only duplication without removing natural-language interaction.
+
+Use Jev as a typed intent/conflict signal; retain Main-LLM interpretation for ambiguous,
+open-ended, conversational, amendment, and planning-heavy requests. Permit selective
+double evaluation where independent signals improve handling.
 
 ### M11D — recovery simplification
 
