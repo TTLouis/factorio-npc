@@ -298,7 +298,7 @@ the Main LLM, or the user rather than fabricate it.
 
 ## 7. Routing
 
-After an authoritative runtime boundary, Jev chooses the cheapest useful next reasoning route:
+M9 makes the live post-step and recovery vocabulary identical:
 
 ```text
 continue_runtime
@@ -307,32 +307,57 @@ wake_planner
 ask_user
 ```
 
-Examples:
+These are **control-plane requests**, not authority-bearing outcomes.
 
-- a healthy persistent controller is still progressing -> `continue_runtime`;
-- one mutable fact is missing -> `observe`;
-- the result changes strategy or the current plan no longer explains the situation -> `wake_planner`;
-- the goal itself is ambiguous or requires user preference -> `ask_user`.
+The deterministic runtime validates them as follows:
 
-Routing is not correctness review. The runtime validates whether a requested wait/continue route is actually possible.
+- `continue_runtime` is applied only when Autorio, a persistent controller, or a validated condition wait is authoritatively active;
+- `observe` enters bounded read-only grounding and remains subject to M7 relevance/caching/cap rules;
+- `wake_planner` wakes the Main LLM without changing immutable-plan or completion semantics;
+- `ask_user` is honored only when reducer/runtime lifecycle state already requires user authority.
+
+If a route cannot be validated, code falls back to a safer planner/runtime path. Jev does
+not get to make runtime activity true by selecting `continue_runtime`, and it does not
+get to create a user-authority boundary by selecting `ask_user`.
+
+Reasoning effort, planning horizon, observation relevance, typed state, and strategic
+steering remain bounded context/resource signals around this routing layer.
 
 ## 8. Recovery
 
-Jev may choose among bounded recovery paths after a deterministic failure.
+Recovery uses the same four canonical routes plus a bounded failure-class classification.
+
+M9 removes the old live recovery choices that blurred routing with authority:
+
+- `deterministic_close` is no longer a Jev option. If deterministic final-completion
+  proof already exists, Outcome Authority closes it **before Jev is called**.
+- `propose_blocker` is no longer a Jev option. Jev cannot author durable BLOCKED state.
+- `retry_compact | continue_low | replan_high` are no longer live route choices.
+  The runtime maps canonical `wake_planner` plus the bounded failure class onto the
+  existing planner reasoning path.
+- provider-budget recovery no longer asks Jev to change semantic scope. New handoffs keep
+  the committed target.
+
+Legacy route names and old persisted semantic-scope values are accepted only so older
+saved state/responses can be restored safely; they normalize into canonical
+non-authoritative behavior.
 
 Example:
 
 ```text
-place_entity -> blocked_position
-
-Jev may choose:
-- inspect placement candidates;
-- reuse a known valid candidate;
-- wake planner;
-- ask user if a genuine preference is required.
+authoritative operation/runtime failure
+        |
+        v
+Jev failure class + canonical route
+        |
+        +--> continue_runtime -> code proves runtime is active
+        +--> observe          -> bounded deterministic read
+        +--> wake_planner     -> Main LLM recovery reasoning
+        +--> ask_user         -> only if lifecycle already requires user choice
 ```
 
-Jev never decides that the failed operation actually succeeded, and it never turns a runtime failure into a completion claim.
+Jev never decides that a failed operation succeeded, never claims completion, never
+creates a blocker, and never turns confidence into user authority.
 
 ## 9. Reasoning effort and horizon
 
