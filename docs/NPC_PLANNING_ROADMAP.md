@@ -103,12 +103,9 @@ LOD 2  DRAFT PLAN SLICE
        Main LLM proposes a bounded checkpoint-sized plan
           |
           v
-       JEV SCOPE REVIEW
-       refine <----------+
-          |              |
-          +----> Main LLM+
+       DETERMINISTIC VALIDATION
+       schema / supported contracts / identity
           |
-       actionable
           v
 LOD 3  COMMITTED ACTIVE PLAN
        exact semantic steps + completion contracts
@@ -456,66 +453,60 @@ LOD Roadmap Shelf      steering history
         + draft bounded plan
                    |
                    v
-            JEV SCOPE REVIEW
-                   |
-             refine / actionable
-                   |
-                   v
           RUNTIME VALIDATION
                    |
                    v
         COMMITTED IMMUTABLE PLAN
 ```
 
-Steering review and scope review are separate questions:
+Steering is advisory context only:
 
-- **Steering:** what kind of development should the next slice pursue?
-- **Scope:** is the proposed slice concrete and bounded enough to commit?
+- **Steering:** what kind of development might best support the next slice?
+- **Commit:** deterministic structure/runtime validation decides whether the authored
+  slice can enter the immutable plan lifecycle.
 
-Keeping them separate prevents "vertical/horizontal" from becoming another hidden planning authority.
+This prevents "vertical/horizontal" from becoming hidden planning authority.
 
 
-## 5. Draft -> review -> commit lifecycle
+## 5. Draft -> deterministic validation -> commit lifecycle
 
-Planning should have an explicit pre-commit boundary:
+Planning has an explicit pre-commit boundary, but no second-AI correctness review:
 
 ```text
 DRAFT
   |
   v
-JEV_REVIEW
-  |\
-  | +--> REFINE --> Main LLM --> DRAFT
+DETERMINISTIC VALIDATION
   |
-  +----> ACTIONABLE
-             |
-             v
-      RUNTIME_VALIDATION
-             |
-             v
-           READY
-             |
-             v
-         COMMITTED
-             |
-             v
-         EXECUTING
-          /      \
-         /        \
-   COMPLETED     BLOCKED
-                    |
-                    v
-                  USER
-                    |
-           +--------+---------+
-           |                  |
-       keep paused       approve change
-                              |
-                              v
-                         PLAN vN+1
+  +--> malformed / unsupported / stale -> Main LLM repair or observe
+  |
+  +--> valid
+          |
+          v
+      COMMITTED
+          |
+          v
+      EXECUTING
+       /      \
+      /        \
+COMPLETED     BLOCKED
+                 |
+                 v
+               USER
+                 |
+        +--------+---------+
+        |                  |
+    keep paused       approve change
+                           |
+                           v
+                      PLAN vN+1
 ```
 
 The plan remains freely editable only before `COMMITTED`.
+
+Plan quality, decomposition, and semantic scope are Main-LLM responsibilities. The
+runtime may reject concrete contract violations, but it does not ask Jev whether a draft
+is "actionable", "too broad", or at the right semantic boundary.
 
 ### 5.1 No fixed maximum step count
 
@@ -523,36 +514,16 @@ Do not define actionability as a hard rule such as `steps <= 5`.
 
 Six small concrete steps may be better than two enormous vague ones.
 
-Jev should judge semantic scope using signals such as:
+The Main LLM should keep the active slice bounded enough that later world changes do not
+invalidate most of it. Jev may recommend planning horizon or strategic steering before
+the draft, but it does not grade the resulting plan afterward.
 
-- can the current world support choosing the action now?
-- is the completion condition observable?
-- does the step represent one useful semantic outcome?
-- is dependency uncertainty bounded?
-- is the plan horizon close enough that later world changes are unlikely to invalidate most of it?
-- does the slice end at a meaningful re-observation/replanning checkpoint?
+### 5.2 Deferred long-horizon work stays on the shelf
 
-Plan length may be a signal, not authority.
+When a draft would reach too far ahead, the Main LLM should keep only the current useful
+slice executable and leave the deferred tail represented by Roadmap Shelf nodes.
 
-### 5.2 Actionable prefix / tail shelving
-
-When an initial draft reaches too far ahead, Jev may identify an **actionable prefix** or an appropriate earlier checkpoint.
-
-Representative response:
-
-```json
-{
-  "verdict": "refine",
-  "reason_codes": ["horizon_too_long", "step_too_vague"],
-  "actionable_prefix": 3,
-  "problem_steps": ["draft_step_4"],
-  "recommended_boundary": "first_stable_smelting_checkpoint"
-}
-```
-
-This is criticism, not rewriting.
-
-The Main LLM produces a new bounded draft from that feedback. The deferred tail remains represented on the Roadmap Shelf as higher-level guidance for later rounds.
+This is authoring discipline, not a Jev rejection loop.
 
 ## 6. Step contracts are fixed before commit
 
@@ -586,24 +557,23 @@ or:
 }
 ```
 
-The intended pre-commit collaboration is:
+The intended pre-commit flow is:
 
 ```text
 Main LLM proposes semantic step
         |
         v
-Jev checks scope / ambiguity
-        |
-        v
-runtime validates that the completion contract is supported
+runtime validates any deterministic completion contract
         |
         v
 commit
 ```
 
-Do not wait until post-operation execution to renegotiate what a semantic step meant.
+Do not wait until post-operation execution to renegotiate what a deterministic completion
+contract meant.
 
-If a required semantic completion condition cannot be represented by supported grounded predicates, the draft is not ready to commit. The planner should refine/split it or explicitly define a supported control-only boundary.
+A semantic/prose step may intentionally have no deterministic predicate; in that case the
+Main LLM retains semantic completion authority. Jev is not inserted as a substitute judge.
 
 ## 7. Execution and recovery do not rewrite the plan
 
@@ -676,8 +646,7 @@ Events may include:
 - `GOAL_ACCEPTED`
 - `ROADMAP_REVISED`
 - `DRAFT_CREATED`
-- `JEV_REFINEMENT_REQUESTED`
-- `PLAN_COMMITTED`
+- - `PLAN_COMMITTED`
 - `STEP_EVIDENCE_ACCEPTED`
 - `STEP_COMPLETED`
 - `PLAN_COMPLETED`
@@ -706,41 +675,31 @@ execution_epoch / batch_id where relevant
 
 Receipts and completion evidence must correlate to the active committed plan identity, not merely to a step number that may recur in later plan slices.
 
-## 11. Jev planning-review contract
+## 11. Jev coprocessor contract
 
-Keep the contract intentionally narrow.
+Jev is a TypeSafe/System One coprocessor, not a plan reviewer.
 
-Suggested verdicts:
+Use Jev for bounded typed judgments such as:
 
-```text
-actionable
-refine
-needs_grounding
-needs_user_clarification
-```
+- interaction/intent classification;
+- observation relevance;
+- operation-family routing;
+- closed-set argument selection;
+- selection among runtime-generated candidates;
+- recovery-route choice;
+- Main-LLM wake/continue routing;
+- reasoning effort and planning horizon;
+- advisory `vertical | horizontal | maintain | recover` steering;
+- typed state features that code can render into bounded planner context.
 
-Suggested reason codes:
+Jev returns Choice / Score / Noul answers and probabilities. It does not generate free-form
+plan steps, prose summaries, arbitrary JSON operations, exact numeric arguments, or user-facing
+questions.
 
-```text
-too_broad
-horizon_too_long
-step_too_vague
-mixed_outcomes
-missing_dependency
-completion_not_observable
-unsupported_completion_contract
-assumption_not_grounded
-bad_checkpoint_boundary
-```
+For the complete provider-grounded contract, see:
 
-Jev may additionally return:
-
-- indices/ids of problematic draft steps;
-- an actionable prefix length;
-- a recommended semantic boundary;
-- a compact explanation for the Main LLM.
-
-Jev must not return replacement operations or authoritative new plan steps.
+- `NPC_JEV_COPROCESSOR_ARCHITECTURE.md`
+- `JEV_TYPESAFE_RESEARCH_AND_AUDIT_2026-09-21.md`
 
 ## 12. User interaction rules
 
@@ -755,153 +714,160 @@ Do not interrupt the user for ordinary runtime recovery that stays within the co
 
 When blocked, present the verified reason and bounded choices without silently selecting a new strategy.
 
-## 13. Implementation roadmap
+## 13. Updated implementation roadmap
 
-### Phase 1 — Freeze the invariants with regression tests
+The older scope-review roadmap is retired. The current roadmap is organized around
+deterministic planning authority plus TypeSafe-native semantic offload.
 
-Before further Jev planning features, add tests that prove:
+### Phase 0 — provider reality and document reconciliation
 
-- committed plan content cannot change during ordinary continuation;
-- planner `currentStep`/focus cannot advance Plan Tracker;
-- Jev cannot mutate committed plan state;
-- ordinary local recovery cannot replace a plan;
-- structural blocker freezes rather than replans;
-- only explicit user-approved revision creates a successor plan;
-- plan/shelf lineage survives persistence/restart.
+Status: **in progress / mostly complete**
 
-### Phase 2 — Introduce explicit Goal / Shelf / Plan data model
+- keep the TypeSafe research/audit current;
+- remove stale scope-review references from canonical docs and tests;
+- mark experimental typed-projection code as non-authoritative until validated;
+- keep the harness correct with Jev disabled.
 
-Add durable, versioned objects for:
+Exit condition: docs, code comments, and tests agree on Jev's actual capabilities.
 
-- user goal;
-- roadmap revision + shelf nodes;
-- active plan identity/version;
-- immutable committed step contracts.
+### Phase 1 — TypeSafe adapter fidelity
 
-Migrate existing Project Board / Task Board state without allowing ordinary `recordPlan` calls to drop extension state.
+Update the local decision-provider adapter to match the live public API:
 
-### Phase 3 — Make Plan Tracker read-only with respect to planning
+- structured instructions;
+- structured Choice criteria;
+- correct Choice / Score / Noul validation;
+- current provider/model limits;
+- bounded request sizes;
+- representative provider-response tests.
 
-Consolidate semantic transition authority.
+Exit condition: the wrapper is not a lossy or invented subset of TypeSafe.
 
-Remove direct state advancement/replacement from planner reconciliation, Jev routing, trigger strings, and incidental post-operation paths.
+### Phase 2 — authoritative operation/type registry
 
-### Phase 4 — Move Jev to pre-commit scope review
+For every Autorio operation, centralize:
 
-Implement the bounded draft-review loop:
+- name;
+- semantic scopes;
+- argument keys and argument kinds;
+- risk class;
+- preflight support;
+- candidate source where applicable.
 
-```text
-Main LLM draft
--> Jev scope review
--> Main LLM refine if needed
--> runtime contract validation
--> commit
-```
+Argument kinds should distinguish:
 
-Do not let this loop run indefinitely. Use a bounded number of refinement passes; if it cannot converge because user intent is ambiguous, ask the user rather than fabricating precision.
+- closed enum / boolean;
+- deterministic numeric/default;
+- runtime candidate;
+- exact entity identity;
+- planner-owned open semantic value.
 
-### Phase 5 — Implement LOD Roadmap Shelf
+Add invariants that every approved operation has compatible metadata.
 
-Make deferred long-horizon intent durable and useful across planning rounds:
+### Phase 3 — Main-LLM intent boundary
 
-- preserve shelf nodes;
-- link active plans to nodes;
-- attach verified results back to lineage;
-- refine the nearest useful node after each completed plan;
-- revise shelf guidance only from user changes or grounded world changes;
-- keep the shelf non-executable.
+Keep `submitPlan` for durable plan state, but separate:
 
-### Phase 6 — Add strategic steering at plan boundaries
+- semantic operation intent;
+- fully formed deterministic operation objects.
 
-Add durable advisory steering context and a bounded Jev steering contract:
+Do not require the Main LLM to reconstruct low-level formatting when enough intent and
+runtime candidates already exist for the harness/Jev to project safely.
 
-- evaluate `vertical | horizontal | maintain | recover` only at safe planning boundaries;
-- classify mode relative to the current critical path, not the action type;
-- preserve previous mode/reason to provide hysteresis and avoid oscillation;
-- allow shelf nodes to carry non-binding development hints;
-- feed steering recommendation into the Main LLM before it drafts the next plan slice;
-- keep scope review separate from steering review;
-- require one dominant steering mode per committed slice, waivable only by the measured supporting-work tolerance and never by a Jev inseparability claim (see 4.5);
-- prove that steering cannot mutate or replace an executing plan.
+### Phase 4 — TypeSafe-native operation projection
 
-### Phase 7 — Blocker / user revision protocol
+Use the official function-calling / candidate-selection pattern:
 
-Add a first-class `BLOCKED` state and user-facing choices.
+1. harness determines active scope;
+2. code enumerates valid operations and candidates;
+3. Jev chooses the function/operation;
+4. parallel Choice/Noul questions fill closed-set arguments;
+5. code ignores unused branch answers;
+6. deterministic code or Main LLM supplies open numeric/free values;
+7. code assembles the operation;
+8. normal parser + preflight remain mandatory.
 
-Revision produces `plan_vN+1`; it never edits `plan_vN` in place.
+If a complete operation is already represented as a finite runtime candidate, prefer one
+Choice over candidate IDs plus `need_observation / wake_planner / ask_user`.
 
-### Phase 8 — Retire conflicting experimental hierarchy writers
+### Phase 5 — typed observation selection
 
-Once the new lifecycle is covered, remove/simplify old behavior that conflicts with it, including any path where:
+Replace integer-only observation budgets with typed relevance questions over available
+deterministic reads.
 
-- Jev splits or rewrites an executing plan;
-- milestone trigger strings reset the Task Board;
-- post-step checkpoint synthesis changes committed semantic meaning;
-- multiple components can independently declare semantic plan advancement.
+Code applies thresholds and caps; Jev never invents observation results.
 
-Preserve useful grounded predicates, receipt correlation, provider routing, condition waits, and deterministic runtime recovery where they fit the new authority model.
+### Phase 6 — typed state distillation
 
-### Phase 9 — Full real lifecycle E2E
+Replace free-form "Jev summary" ideas with typed features such as bottleneck, readiness,
+risk, capability presence, and next-handler choice.
 
-Add a representative long goal:
+Deterministic code renders those features plus provenance into Main-LLM context.
 
-```text
-user long-horizon goal
--> LOD shelf
--> Jev recommends VERTICAL at boundary
--> Main LLM drafts bounded vertical slice
--> Jev scope-refines
--> commit v1
--> execute several steps
--> local recovery without replan
--> complete v1 / reach new frontier
--> verified world state shows weak support
--> Jev recommends HORIZONTAL
--> Main LLM refines shelf into capacity/resilience slice
--> commit v2
--> complete horizontal foundation
--> Jev recommends VERTICAL toward next frontier
--> draft/commit v3
--> restart/persist/restore with steering + shelf lineage intact
--> encounter structural blocker
--> freeze
--> user approves revision
--> successor plan supersedes blocked plan
--> continue without losing goal/shelf/steering lineage
-```
+### Phase 7 — routing and recovery
 
-This E2E is the acceptance gate for the redesigned planning subsystem.
+Retain Jev where it naturally fits:
 
-### Verified implementation status — experiment/jev-agent-architecture
+- continue runtime;
+- observe;
+- wake planner;
+- ask user;
+- bounded recovery route;
+- reasoning effort;
+- planning horizon;
+- advisory steering.
 
-As of 2026-09-20, the redesigned planning lifecycle is implemented and its acceptance gate is green on
-`experiment/jev-agent-architecture` at code checkpoint
-`8a64a2e6bc93e9b7dd8d23e3882d8ae6726dfa25`.
+No route may override deterministic impossibility or claim completion.
 
-Verified status by phase:
+### Phase 8 — confidence/risk policy
 
-- Phase 1 — invariants: **complete**. Committed plans are immutable; planner focus/currentStep and Jev output cannot independently advance the reducer Plan Tracker; structural blockers freeze.
-- Phase 2 — Goal / Shelf / Plan model: **complete**. Versioned Goal, non-executable Roadmap Shelf, active plan lineage and committed step contracts persist/restore.
-- Phase 3 — read-only Plan Tracker: **complete for planning authority**. Player-facing task progress is now rendered from reducer-owned `planTrackerView()`; the legacy Task Board remains only as a compatibility projection for runtime/UI fields that are not planning authority.
-- Phase 4 — Jev pre-commit scope review: **complete**. Non-actionable reviews cannot reach operation admission; bounded Main-LLM re-authoring is enforced and user clarification is the escape hatch.
-- Phase 5 — LOD Roadmap Shelf: **complete for the redesigned lifecycle**. Drafts link to shelf nodes, verified results feed lineage, and refinement candidates are returned to the next draft.
-- Phase 6 — strategic steering: **complete for the acceptance scenario**. Jev boundary recommendations are durably evaluated and the real lifecycle proves `VERTICAL -> HORIZONTAL -> VERTICAL` before successive bounded drafts.
-- Phase 7 — blocker / explicit user revision: **complete**. `BLOCKED` survives restart, ordinary continuation remains frozen, and only explicit user revision creates a successor.
-- Phase 8 — conflicting hierarchy writers: **complete at the semantic-authority boundary**. Stale hierarchy recovery routes are retired; committed checkpoint meaning is frozen in both reducer and compatibility projection; model-facing planning authority is only `[PLANNING_STATE]`; `[RUNTIME_COMPAT_STATE]` is explicitly non-authoritative; compact continuation preserves that split.
-- Phase 9 — real lifecycle E2E: **complete**. The real Factorio gate covers long-horizon shelf planning, Jev scope refinement, V/H/V steering, execution, real process restart, structural blocking, explicit user revision, successor lineage and continued progress.
+Calibrate per-decision and per-operation thresholds from AIRI E2E data.
 
-Validation on that checkpoint:
+Do not use one global confidence threshold. Higher-impact actions require stricter policy;
+user-authority changes are never inferred solely from Jev confidence.
 
-- GitHub Actions CI run `35544667059`: **success**
-  - `pterodactyl-runtime`: success
-  - `typescript-quality`: success
-  - `factorio-npc-deterministic`: success
-- Pterodactyl release-gates run `35544667056`: **success**
+### Phase 9 — E2E comparison
 
-The remaining Task Board code is not a second planning architecture. It is a compatibility surface for
-conversation/activity/pause/runtime metadata and older consumers. Any future cleanup may reduce that
-surface further, but it must not reintroduce a second semantic writer or make UI/provider compatibility
-state authoritative over the reducer.
+Compare:
+
+1. Main-LLM-only structured-control baseline;
+2. retired Jev correctness-gate behavior (historical evidence only);
+3. TypeSafe-native coprocessor.
+
+Measure:
+
+- task success;
+- malformed/omitted Main-LLM control outputs;
+- Main-LLM calls and tokens;
+- Jev calls/tokens;
+- candidate/projection fallbacks;
+- observation count;
+- operation/preflight failures;
+- replans;
+- latency;
+- human intervention.
+
+Start with previously successful micro tasks, then production lines, research dependencies,
+fluids, combat, and long-horizon factory work.
+
+### Current branch checkpoint
+
+As of 2026-09-21, the branch has already:
+
+- removed live Jev plan-commit scope review;
+- deleted the retired scope-review implementation/taxonomy;
+- removed old Jev checkpoint/receipt correctness machinery from the main matrix;
+- added shared operation-name/argument metadata;
+- added scope-specific operation catalogs;
+- added an **experimental** typed-projection module.
+
+The experimental projection module is **not yet the final design**. Its independent
+route/type/candidate questions should be replaced by a TypeSafe-native coherent
+function/candidate-selection shape before live execution wiring.
+
+No GitHub status checks/workflow runs were reported for audited HEAD
+`9d5c0d2fe2a06cd9ddec74be8aa5b833550c00e7` during this audit, so this checkpoint
+must not be described as CI-validated.
 
 ## 14. Non-goals
 
@@ -949,6 +915,6 @@ The planning system should converge on five simple ownership rules:
 
 > **Plan:** Main-LLM-authored bounded executable slice with one dominant development mode; immutable after commit.
 
-> **Jev:** pre-commit critic that decides whether the draft is scoped and grounded enough to commit, not a second planner.
+> **Jev:** typed probabilistic coprocessor for bounded selection, routing, scoring, observation relevance, candidate choice, and advisory steering; never a correctness reviewer.
 
 Everything else in Plan Tracker, completion, recovery, hierarchy, and UI should be simplified around those boundaries.
