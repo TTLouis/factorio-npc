@@ -78,6 +78,58 @@ const operationKeys = {
   wait: ['ticks'],
 } 
 
+const operationScopes = Object.freeze({
+  navigation: Object.freeze([
+    'walk_to_entity',
+    'walk_to_entity_exact',
+    'walk_to_position',
+    'walk_to_player',
+    'follow_player',
+    'stop_follow_player',
+  ]),
+  combat: Object.freeze([
+    'set_auto_defense',
+    'equip_weapon',
+    'equip_ammo',
+    'equip_armor',
+    'select_weapon_slot',
+    'attack_nearest_enemy',
+    'clear_enemy_area',
+  ]),
+  resources: Object.freeze([
+    'mine_entity',
+    'mine_entity_exact',
+    'mine_resource_at',
+    'gather_resource',
+    'harvest_product',
+  ]),
+  construction: Object.freeze([
+    'clear_construction_area',
+    'execute_construction_plan',
+    'place_entity',
+    'rotate_entity',
+  ]),
+  logistics: Object.freeze([
+    'supply_entity',
+    'move_items',
+    'move_items_exact',
+    'move_items_with_player',
+  ]),
+  production: Object.freeze([
+    'supply_entity',
+    'move_items',
+    'move_items_exact',
+    'set_machine_recipe',
+    'craft_item',
+  ]),
+  research: Object.freeze([
+    'research_technology',
+  ]),
+  runtime: Object.freeze([
+    'wait',
+  ]),
+})
+
 export function approvedOperationNames() {
   return Object.keys(operationKeys)
 }
@@ -85,6 +137,30 @@ export function approvedOperationNames() {
 export function operationArgumentKeys(name) {
   check(typeof name === 'string' && Object.hasOwn(operationKeys, name), `Unapproved operation: ${name}`)
   return [...operationKeys[name]]
+}
+
+export function approvedOperationScopes() {
+  return Object.keys(operationScopes)
+}
+
+export function operationNamesForScope(scope) {
+  check(typeof scope === 'string' && Object.hasOwn(operationScopes, scope), `Unknown operation scope: ${scope}`)
+  return [...operationScopes[scope]]
+}
+
+export function operationScopesForName(name) {
+  check(typeof name === 'string' && Object.hasOwn(operationKeys, name), `Unapproved operation: ${name}`)
+  return Object.entries(operationScopes)
+    .filter(([, names]) => names.includes(name))
+    .map(([scope]) => scope)
+}
+
+export function operationTypeCatalog() {
+  return approvedOperationNames().map(name => ({
+    name,
+    args: operationArgumentKeys(name),
+    scopes: operationScopesForName(name),
+  }))
 }
 
 export function isApprovedOperationName(name) {
