@@ -67,17 +67,18 @@ async function runToCompletion(world) {
   return result
 }
 
-test('a committed multi-step plan runs to verified completion with one pre-commit scope review', async () => {
+test('a committed multi-step plan runs to verified completion without Jev correctness review', async () => {
   const world = harness()
   const first = await world.say('semi-automate iron and copper plates', 'new_goal')
   assert.equal(first.goalStatus, 'active')
   assert.equal(world.reducerPlan().status, PLAN_STATUS.COMMITTED)
+  assert.equal(world.scopeReviews(), 0, 'plan commit must not ask Jev to approve the draft')
 
   const last = await runToCompletion(world)
   assert.equal(last.goalStatus, 'completed')
   assert.equal(world.reducerPlan().status, PLAN_STATUS.COMPLETED)
   assert.equal(world.game.mutations.length, 3)
-  assert.equal(world.scopeReviews(), 1, 'later batches fulfil the committed plan and are not re-reviewed')
+  assert.equal(world.scopeReviews(), 0)
   const planning = world.memory.planningState(KEY)
   assert.equal(planning.goal.status, 'completed', 'a finite goal told "verified complete" must be satisfied in the reducer too')
   assert.equal(planning.goal.satisfaction?.source, 'runtime')
@@ -105,18 +106,19 @@ test('continue after a finished goal does not invent a goal named "continue"', a
   assert.notEqual(world.memory.currentPlan(KEY)?.objective, 'continue')
 })
 
-test('a Jev refusal after commit cannot halt the frozen plan', async () => {
-  // Commit the first draft under an actionable review, then make Jev hostile.
-  const world = harness()
-  await world.say('semi-automate iron and copper plates', 'new_goal')
-  world.jevScript = (_state, questions) => (questions.scope_review ? REFINE : undefined)
+test('a hostile Jev scope-review answer is outside plan-commit authority', async () => {
+  const world = harness({ jev: (_state, questions) => (questions.scope_review ? REFINE : undefined) })
+  const first = await world.say('semi-automate iron and copper plates', 'new_goal')
+  assert.equal(first.goalStatus, 'active')
+  assert.equal(world.reducerPlan().status, PLAN_STATUS.COMMITTED)
+  assert.equal(world.scopeReviews(), 0, 'scope review is not on the live commit path')
 
   const last = await runToCompletion(world)
   assert.equal(last.goalStatus, 'completed')
-  assert.equal(world.scopeReviews(), 1)
+  assert.equal(world.scopeReviews(), 0)
 })
 
-test('an unavailable Jev scope review is retried, then the draft commits on runtime validation', async () => {
+test('an unavailable Jev scope-review provider cannot delay deterministic plan commit', async () => {
   const world = harness({
     jev: (_state, questions) => {
       if (questions.scope_review) throw new Error('decision provider budget exhausted')
@@ -126,23 +128,18 @@ test('an unavailable Jev scope review is retried, then the draft commits on runt
   assert.equal(first.goalStatus, 'active')
   assert.equal(first.operations.length, 1)
   assert.equal(world.reducerPlan().status, PLAN_STATUS.COMMITTED)
-  assert.equal(world.plannerCalls, 1, 'unavailability must not spend the semantic refinement budget')
-  assert.equal(world.scopeReviews(), 2, 'one retry before degrading')
+  assert.equal(world.plannerCalls, 1)
+  assert.equal(world.scopeReviews(), 0, 'the unavailable correctness reviewer is never called')
 })
 
-test('refinement exhaustion pauses the plan visibly and continue resumes it', async () => {
+test('Jev scope criticism cannot pause or block a preflight-valid task', async () => {
   const world = harness({ jev: (_state, questions) => (questions.scope_review ? REFINE : undefined) })
-  const stuck = await world.say('semi-automate iron and copper plates', 'new_goal')
-  assert.match(stuck.chatMessage, /Plan needs clarification/)
-  assert.equal(stuck.goalStatus, 'paused', 'the board must not show a running step while nothing runs')
-  assert.equal(world.memory.currentPlan(KEY).pause_reason, 'jev_refinement_budget_exhausted')
-  assert.equal(world.game.mutations.length, 0)
-
-  world.jevScript = undefined
-  const resumed = await world.say('continue', 'continue_current')
-  assert.equal(resumed.goalStatus, 'active')
+  const result = await world.say('semi-automate iron and copper plates', 'new_goal')
+  assert.equal(result.goalStatus, 'active')
   assert.equal(world.reducerPlan().status, PLAN_STATUS.COMMITTED)
+  assert.equal(world.memory.currentPlan(KEY).pause_reason, '')
   assert.equal(world.game.mutations.length, 1)
+  assert.equal(world.scopeReviews(), 0)
 })
 
 test('a misnamed prototype gets one correction turn instead of freezing the plan', async () => {
@@ -185,7 +182,7 @@ test('a blocked plan explains itself on continue and a chat amendment revises it
   assert.equal(game.mutations.length, 1)
 })
 
-test('large observations still reach the Jev grounding packet after context compaction', async () => {
+test('large observations do not summon a pre-commit Jev correctness packet', async () => {
   const game = new FakeFactorio()
   const baseCommand = game.command.bind(game)
   game.command = async (text) => {
@@ -197,7 +194,7 @@ test('large observations still reach the Jev grounding packet after context comp
     game,
     systemPrompt: 'P'.repeat(30000),
     jev: (state, questions) => {
-      if (questions.scope_review) packets.push(state.grounding.recent_observations.map(item => item.tool))
+      if (questions.scope_review) packets.push(state)
     },
     observe: () => ({
       content: '',
@@ -207,8 +204,11 @@ test('large observations still reach the Jev grounding packet after context comp
       ],
     }),
   })
-  await world.say('gather 10 iron ore', 'new_goal')
-  assert.deepEqual(packets, [['getInventoryItems', 'getActorStatus']])
+  const result = await world.say('gather 10 iron ore', 'new_goal')
+  assert.equal(result.goalStatus, 'active')
+  assert.equal(game.mutations.length, 1)
+  assert.deepEqual(packets, [])
+  assert.equal(world.scopeReviews(), 0)
 })
 
 function uncheckpointedGather(game) {
@@ -712,14 +712,15 @@ test('a reworded step does not close on its replaced revision target when that t
   assert.notEqual(result?.goalStatus, 'completed')
 })
 
-test('a needs_grounding refinement can observe even after the request spent its observation budget', async () => {
+test('retired scope-review grounding cannot reopen the observation budget', async () => {
   const game = new FakeFactorio({ inventory: { 'iron-ore': 13 } })
   const memory = new CanonicalTaskBoardMemory()
   let reviews = 0
   const jev = recordingJev(async (_state, questions) => {
     if (questions.intent) return { overrides: { intent: { choice: 'new_goal', confidence: 0.9 }, ...(questions.observation_budget ? { observation_budget: { score: 3 } } : {}) } }
     if (questions.observation_budget) return { overrides: { observation_budget: { score: 3 } } }
-    if (questions.scope_review && ++reviews === 1) {
+    if (questions.scope_review) {
+      reviews++
       return { overrides: { scope_review: { choice: 'needs_grounding', confidence: 0.4 }, scope_review_reason_codes: { choice: 'assumption_not_grounded' } } }
     }
   })
@@ -729,17 +730,12 @@ test('a needs_grounding refinement can observe even after the request spent its 
   const agent = new NpcAgentLoop({
     rcon: game,
     memory,
-    // Live goal_mubeg8bb: three reads spent the budget, so the refinement
-    // turn that was told to ground the draft had tools switched off.
     provider: async (_messages, options) => {
       calls++
       offered.push(options?.allowTools)
       assert.ok(calls < 12, 'planner loop did not terminate')
       if (calls === 1) {
         return { content: '', tool_calls: [read('t1', 'getInventoryItems'), read('t2', 'getActorStatus'), read('t3', 'getNearbyEntities')] }
-      }
-      if (reviews === 1 && offered.at(-1) === true && !offered.slice(2, -1).includes(true)) {
-        return { content: '', tool_calls: [read('t4', 'getActorStatus')] }
       }
       return planReply({ plan: ['Gather 40 iron ore'], operations: [gather('iron-ore', 40)] })
     },
@@ -753,10 +749,11 @@ test('a needs_grounding refinement can observe even after the request spent its 
     decisionTraceFile: null,
     npcId: 'airi',
   })
-  await agent.request('mine exactly 40 iron ore, that is the only task', { sender: 'Louis' })
-  assert.equal(offered[1], false, 'fixture: the first draft was forced with tools off')
-  assert.equal(offered[2], true, 'the grounding refinement turn was offered tools')
-  assert.equal(game.mutations.length, 1, 'the grounded redraft committed')
+  const result = await agent.request('mine exactly 40 iron ore, that is the only task', { sender: 'Louis' })
+  assert.equal(result.goalStatus, 'active')
+  assert.equal(reviews, 0)
+  assert.equal(game.mutations.length, 1)
+  assert.equal(offered.slice(2).some(Boolean), false, 'retired scope review must not grant a fresh observation phase')
 })
 
 async function leadingConfirmStep({ redraft }) {
