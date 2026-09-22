@@ -1956,22 +1956,21 @@ Object.assign(HANDLERS, {
   [PLANNING_EVENT.PLAN_COMMITTED](state, event, now) {
     const plan = getPlan(state, event.plan_id ?? state.active_plan_id)
     if (!plan || !PRE_COMMIT_STATUSES.includes(plan.status)) return state
-    // Commit gate: Jev actionable + runtime validation pass. No user approval in
-    // the normal path.
-    if (text(event.jev_verdict, 40) !== 'actionable') return state
+    // Commit authority is deterministic. Jev may advise routing/effort/context,
+    // but a model verdict is never required to make a structurally valid draft
+    // executable.
     if (event.runtime_validation?.passed !== true) return state
     if (plan.steps.length === 0) return state
 
     const committed = freezeCommittedPlan(withStatus({
       ...plan,
       committed_at: now,
-      jev_review: { ...plan.jev_review, last_verdict: 'actionable', last_reviewed_at: now },
       runtime_validation: {
         passed: true,
         validated_at: now,
         unsupported_step_ids: stringList(event.runtime_validation?.unsupported_step_ids, { max: 16, maxLength: 200 }),
       },
-    }, PLAN_STATUS.COMMITTED, { now, reason: 'auto_commit_actionable_and_validated' }))
+    }, PLAN_STATUS.COMMITTED, { now, reason: 'auto_commit_runtime_validated' }))
 
     return {
       ...state,
