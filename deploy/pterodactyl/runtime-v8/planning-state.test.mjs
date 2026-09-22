@@ -94,7 +94,6 @@ function committed(state, { now = 1300 } = {}) {
   return applyPlanningEvent(state, {
     type: PLANNING_EVENT.PLAN_COMMITTED,
     now,
-    jev_verdict: 'actionable',
     runtime_validation: { passed: true },
   })
 }
@@ -322,17 +321,12 @@ test('all six grounded predicate kinds are accepted in committed contracts', () 
 
 // --- lifecycle & commit gate -------------------------------------------------
 
-test('lifecycle reaches COMMITTED only when jev is actionable and runtime validation passes', () => {
+test('lifecycle reaches COMMITTED when deterministic runtime validation passes', () => {
   const draft = drafted(shelved(goalState()))
   assert.equal(getActivePlan(draft).status, PLAN_STATUS.DRAFT)
 
-  const noVerdict = applyPlanningEvent(draft, {
-    type: PLANNING_EVENT.PLAN_COMMITTED, now: 1300, runtime_validation: { passed: true },
-  })
-  assert.equal(getActivePlan(noVerdict).status, PLAN_STATUS.DRAFT)
-
   const noValidation = applyPlanningEvent(draft, {
-    type: PLANNING_EVENT.PLAN_COMMITTED, now: 1300, jev_verdict: 'actionable', runtime_validation: { passed: false },
+    type: PLANNING_EVENT.PLAN_COMMITTED, now: 1300, runtime_validation: { passed: false },
   })
   assert.equal(getActivePlan(noValidation).status, PLAN_STATUS.DRAFT)
 
@@ -346,57 +340,9 @@ test('commit needs no user approval in the normal path', () => {
   const plan = getActivePlan(state)
   assert.equal(plan.status, PLAN_STATUS.COMMITTED)
   assert.equal(plan.origin, 'main_llm_draft')
-  assert.equal(plan.lifecycle.at(-1).reason, 'auto_commit_actionable_and_validated')
+  assert.equal(plan.lifecycle.at(-1).reason, 'auto_commit_runtime_validated')
   // Nothing in the log records a user approval for this transition.
   assert.equal(state.log.some(entry => entry.type === PLANNING_EVENT.USER_REVISION_APPROVED), false)
-})
-
-test('JEV_REFINEMENT_REQUESTED shelves the deferred tail instead of dropping it', () => {
-  const draft = drafted(shelved(goalState()), {
-    steps: [
-      { description: 'Acquire stone', completion_contract: GROUNDED_CONTRACT },
-      { description: 'Build first furnace' },
-      { description: 'Build a full red science complex' },
-      { description: 'Launch a rocket' },
-    ],
-  })
-  const plan = getActivePlan(draft)
-  const refined = applyPlanningEvent(draft, {
-    type: PLANNING_EVENT.JEV_REFINEMENT_REQUESTED,
-    now: 1250,
-    plan_id: plan.plan_id,
-    verdict: 'refine',
-    reason_codes: ['horizon_too_long', 'step_too_vague'],
-    actionable_prefix: 2,
-    problem_step_ids: [plan.steps[2].step_id],
-    recommended_boundary: 'first_stable_smelting_checkpoint',
-  })
-  const intents = refined.roadmap.nodes.map(node => node.intent)
-  assert.ok(intents.includes('Build a full red science complex'))
-  assert.ok(intents.includes('Launch a rocket'))
-  const tailNode = refined.roadmap.nodes.find(node => node.intent === 'Launch a rocket')
-  assert.equal(tailNode.status, SHELF_NODE_STATUS.TENTATIVE)
-  assert.ok(tailNode.why_it_matters.includes(plan.plan_id))
-  assert.equal(refined.roadmap.reason, 'deferred_tail_from_jev_refine')
-  // Original shelf nodes survive the revision.
-  assert.ok(intents.includes('establish reliable early iron and copper smelting'))
-  const after = getActivePlan(refined)
-  assert.equal(after.status, PLAN_STATUS.DRAFT)
-  assert.equal(after.jev_review.refinement_count, 1)
-  assert.deepEqual(after.jev_review.last_reason_codes, ['horizon_too_long', 'step_too_vague'])
-})
-
-test('jev cannot request refinement of a committed plan', () => {
-  const state = committedFixture()
-  const plan = getActivePlan(state)
-  const attempted = applyPlanningEvent(state, {
-    type: PLANNING_EVENT.JEV_REFINEMENT_REQUESTED,
-    now: 1400,
-    plan_id: plan.plan_id,
-    actionable_prefix: 1,
-    reason_codes: ['too_broad'],
-  })
-  assert.equal(attempted, state)
 })
 
 // --- immutability of committed content ---------------------------------------
@@ -467,7 +413,7 @@ test('jev output cannot advance the tracker', () => {
   const plan = getActivePlan(state)
   const stepId = plan.steps[0].step_id
   for (const event of [
-    { type: PLANNING_EVENT.STEP_EVIDENCE_ACCEPTED, now: 1400, plan_id: plan.plan_id, step_id: stepId, evidence: { source: 'jev', kind: 'jev_verdict', ref: 'jev_1', satisfied_requirement_ids: ['req_stone'] } },
+    { type: PLANNING_EVENT.STEP_EVIDENCE_ACCEPTED, now: 1400, plan_id: plan.plan_id, step_id: stepId, evidence: { source: 'jev', kind: 'jev_advisory_claim', ref: 'jev_1', satisfied_requirement_ids: ['req_stone'] } },
     { type: PLANNING_EVENT.STEP_COMPLETED, now: 1401, source: 'jev', plan_id: plan.plan_id, step_id: stepId },
     { type: PLANNING_EVENT.PLAN_COMPLETED, now: 1402, source: 'jev', plan_id: plan.plan_id },
     { type: PLANNING_EVENT.STRUCTURAL_BLOCKER_CONFIRMED, now: 1403, source: 'jev', plan_id: plan.plan_id, reason_code: 'jev_says_so' },
@@ -930,7 +876,7 @@ test('applyPlanningEvent is total: unknown and malformed events return state unc
     { type: 'NOT_A_REAL_EVENT', now: 1 },
     { type: PLANNING_EVENT.STEP_COMPLETED },
     { type: PLANNING_EVENT.STEP_COMPLETED, now: Number.NaN, source: 'runtime' },
-    { type: PLANNING_EVENT.PLAN_COMMITTED, now: 'soon', jev_verdict: 'actionable', runtime_validation: { passed: true } },
+    { type: PLANNING_EVENT.PLAN_COMMITTED, now: 'soon', runtime_validation: { passed: true } },
     { type: PLANNING_EVENT.DRAFT_CREATED, now: 2000, steps: [] },
     { type: PLANNING_EVENT.DRAFT_CREATED, now: 2000, steps: 'not an array' },
     { type: PLANNING_EVENT.STEP_COMPLETED, now: 2000, source: 'runtime', plan_id: 'nope', step_id: 'nope' },
@@ -1226,36 +1172,6 @@ test('a continuous frontier dependency satisfies once evidence exists, because i
   assert.equal(shelfNodeReadiness(state.roadmap, 'node_next_tier').ready, true)
   // The open-ended node stays refinable itself, and stays first in line.
   assert.equal(nearestShelfRefinementTarget(state).node_id, 'node_sustained_iron')
-})
-
-test('a deferred tail is shelved behind the node it was cut from, not offered as ready work', () => {
-  const draft = drafted(dependentShelf(goalState()), {
-    now: 1200,
-    nodeIds: ['node_smelting'],
-    steps: [
-      { description: 'Acquire stone', completion_contract: GROUNDED_CONTRACT },
-      { description: 'Build a full red science complex' },
-    ],
-  })
-  const plan = getActivePlan(draft)
-  const refined = applyPlanningEvent(draft, {
-    type: PLANNING_EVENT.JEV_REFINEMENT_REQUESTED,
-    now: 1250,
-    plan_id: plan.plan_id,
-    verdict: 'refine',
-    reason_codes: ['horizon_too_long'],
-    actionable_prefix: 1,
-  })
-  const tail = refined.roadmap.nodes.find(node => node.intent === 'Build a full red science complex')
-  assert.equal(tail.status, SHELF_NODE_STATUS.TENTATIVE)
-  assert.deepEqual(tail.depends_on, ['node_smelting'])
-  assert.equal(tail.derived_from_node_id, 'node_smelting')
-  assert.equal(refined.roadmap.authority, 'deferred_tail', 'shelving a tail is not a guidance revision')
-  assert.equal(
-    shelfRefinementCandidates(refined).some(candidate => candidate.node_id === tail.id),
-    false,
-    'a deferred tail is guidance for later, not the next thing to refine',
-  )
 })
 
 test('only explicit user direction or grounded verified world change may revise the roadmap', () => {
