@@ -392,7 +392,6 @@ export function parseBoundarySteeringTelemetry(response) {
     reasoning_budget: reasoning.decision,
     reasoning_confidence: reasoning.confidence,
     planning_horizon: PLANNING_HORIZONS.has(horizon) ? horizon : 'checkpoint',
-    observation_relevance: observation,
     // Compatibility field for the existing bounded admission machinery. This
     // value is now derived by code from typed relevance, never asked as an
     // integer/Score question in the live TypeSafe contract.

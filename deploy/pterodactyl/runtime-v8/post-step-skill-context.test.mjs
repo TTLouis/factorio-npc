@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
+import { observationRelevanceFamilies } from './jev-decision-taxonomy.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 
 function deployment() {
@@ -281,7 +282,7 @@ test('post-step Jev receives a bounded grounded gate state instead of dialogue h
     'development',
     'reasoning_budget',
     'planning_horizon',
-    'observation_budget',
+    ...observationRelevanceFamilies().map(family => `need_${family}`),
   ])
 })
 

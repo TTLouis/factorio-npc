@@ -275,18 +275,24 @@ test('decision provider rejects an answer outside the declared choice contract',
 })
 
 
-test('hierarchy observation budget uses the provider-supported score schema', async () => {
-  const { decisionEnvelopeQuestions } = await import('./jev-decision-taxonomy.mjs')
+test('typed observation relevance uses the provider-supported Noul schema', async () => {
+  const { decisionEnvelopeQuestions, observationRelevanceFamilies } = await import('./jev-decision-taxonomy.mjs')
   const config = decisionProviderConfiguration({ TYPESAFE_API_KEY: KEY })
   const questions = decisionEnvelopeQuestions()
-  assert.equal(questions.observation_budget.type, 'score')
-  assert.equal(questions.observation_budget.criteria.length, 9)
+  assert.equal(questions.observation_budget, undefined)
+  for (const family of observationRelevanceFamilies()) {
+    const id = `need_${family}`
+    assert.equal(questions[id].type, 'noul')
+    assert.deepEqual(Object.keys(questions[id].criteria), ['true', 'false'])
+  }
   const normalized = normalizeDecisionProviderRequest(
     config,
     { goal: 'Reach Automation', boundary: 'planning' },
     questions,
   )
-  assert.equal(normalized.body.questions.observation_budget.type, 'score')
+  for (const family of observationRelevanceFamilies()) {
+    assert.equal(normalized.body.questions[`need_${family}`].type, 'noul')
+  }
 })
 
 

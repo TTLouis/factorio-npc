@@ -14,8 +14,10 @@ import {
   boundarySteeringGate,
   decisionEnvelopeQuestions,
   developmentDecisionQuestions,
+  observationRelevanceQuestions,
   parseBoundarySteeringTelemetry,
   parseDecisionFamily,
+  parseObservationRelevance,
   parseSteeringRecommendation,
   steeringRecommendationQuestions,
 } from './jev-decision-taxonomy.mjs'
@@ -37,6 +39,7 @@ import {
 } from './step-completion.mjs'
 import {
   isObservationToolName,
+  observationToolFamily,
   isPlannerControlToolName,
   plannerControlPayloadFromMessage,
   renderOperation,
@@ -1658,7 +1661,7 @@ export function interactionDecisionQuestions() {
     },
     reasoning_budget: envelope.reasoning_budget,
     planning_horizon: envelope.planning_horizon,
-    observation_budget: envelope.observation_budget,
+    ...observationRelevanceQuestions(),
   }
 }
 
@@ -1666,6 +1669,7 @@ export function parseInteractionDecisionShadow(response) {
   const intentAnswer = response?.answers?.intent
   const conflictAnswer = response?.answers?.queue_conflict
   const steering = parseBoundarySteeringTelemetry(response)
+  const observationRelevance = parseObservationRelevance(response)
   if (!intentAnswer || !INTERACTION_INTENTS.has(intentAnswer.choice)) throw new AgentLoopError('Decision provider returned invalid interaction intent')
   if (typeof intentAnswer.confidence !== 'number' || !Number.isFinite(intentAnswer.confidence) || intentAnswer.confidence < 0 || intentAnswer.confidence > 1) {
     throw new AgentLoopError('Decision provider returned invalid interaction confidence')
@@ -1682,7 +1686,8 @@ export function parseInteractionDecisionShadow(response) {
     reasoning_budget: steering.reasoning_budget,
     reasoning_confidence: steering.reasoning_confidence,
     planning_horizon: steering.planning_horizon,
-    observation_budget: steering.observation_budget,
+    observation_relevance: observationRelevance,
+    observation_budget: observationRelevance.budget,
     model: typeof response?.model === 'string' ? response.model : undefined,
     provider: typeof response?.provider === 'string' ? response.provider : undefined,
     usage: response?.usage && typeof response.usage === 'object' ? response.usage : undefined,
@@ -2068,6 +2073,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.reasoningBudgetOverride = null
     this.observationBudgetOverride = null
     this.observationBudgetRemaining = null
+    this.observationRelevanceOverride = null
     this.planningHorizonOverride = null
     this.planningReasoningEpochSeen = new Map()
     this.persistQueue = Promise.resolve()
@@ -2090,6 +2096,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.actionOmissionForceNoTools = false
     this.pendingFiniteNoOperationPlan = null
     this.freshObservationSinceContinuation = false
+    this.observationRelevanceOverride = null
     this.genericRecoveryDecisionActive = false
     this.conditionPollPromise = null
     this.liveEntityObservations = new Map()
@@ -3590,7 +3597,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       ...developmentDecisionQuestions(),
       reasoning_budget: envelopeQuestions.reasoning_budget,
       planning_horizon: envelopeQuestions.planning_horizon,
-      observation_budget: envelopeQuestions.observation_budget,
+      ...observationRelevanceQuestions(),
     }
     const decisionId = `decision_${Date.now().toString(36)}_${(++this.decisionRequestSequence).toString(36)}`
     this.postStepDecisionAbort?.abort()
@@ -3621,6 +3628,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       await this.assertCurrent()
       const decision = parsePostStepDecision(response)
       const steeringTelemetry = parseBoundarySteeringTelemetry(response)
+      const observationRelevance = parseObservationRelevance(response)
+      const steeringContext = { ...steeringTelemetry, observation_relevance: observationRelevance }
       const latency_ms = Date.now() - startedAt
       if (decision.route === 'wait_runtime' && conditionWaitHealthy) {
         conditionValidation = await this.validateConditionWaitHealth()
@@ -3665,7 +3674,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         model: decision.model,
         route: decision.route,
         confidence: decision.confidence,
-        steering_telemetry: steeringTelemetry,
+        steering_telemetry: steeringContext,
         boundary_steering_gate: steeringGate,
         steering_budget_shadow_only: true,
         latency_ms,
@@ -3698,7 +3707,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           model: decision.model,
           route: decision.route,
           confidence: decision.confidence,
-          steering: steeringTelemetry,
+          steering: steeringContext,
           boundary_steering_gate: steeringGate,
           steering_budget_shadow_only: true,
           usage: decision.usage,
@@ -3732,7 +3741,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         runtime: persistentRuntime,
         runtime_reason: runtimeReason,
         decision,
-        steering: steeringTelemetry,
+        steering: steeringContext,
         steering_gate: steeringGate,
         fallback_reason: fallbackReason,
         decision_called: true,
@@ -3990,6 +3999,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const previousReasoningBudget = this.reasoningBudgetOverride
     const previousObservationBudget = this.observationBudgetOverride
     const previousObservationBudgetRemaining = this.observationBudgetRemaining
+    const previousObservationRelevance = this.observationRelevanceOverride
     const previousPlanningHorizon = this.planningHorizonOverride
     if (jevNewGoalAligned) {
       // A true new goal starts with no request-local world grounding: the task
@@ -4000,9 +4010,20 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const requestedObservationBudget = Number.isSafeInteger(routed.decision_shadow.observation_budget)
         ? routed.decision_shadow.observation_budget
         : 0
+      const selectedObservationFamilies = routed.decision_shadow.observation_relevance?.source === 'typed_relevance'
+        && Array.isArray(routed.decision_shadow.observation_relevance.selected_families)
+        ? routed.decision_shadow.observation_relevance.selected_families
+        : []
       this.reasoningBudgetOverride = requestedReasoningBudget === 'deep' || requestedReasoningBudget === 'strategic'
         ? requestedReasoningBudget
         : 'normal'
+      // Keep the existing three-read first-turn bootstrap reserve, but use
+      // typed relevance to narrow which fresh read families can consume it.
+      // If Jev selects no family at all, fail open for this ungrounded first
+      // turn rather than starving the Main LLM of all world observations.
+      this.observationRelevanceOverride = selectedObservationFamilies.length > 0
+        ? selectedObservationFamilies
+        : null
       this.observationBudgetOverride = Math.max(3, requestedObservationBudget)
       this.observationBudgetRemaining = this.observationBudgetOverride
       this.planningHorizonOverride = routed.decision_shadow.planning_horizon ?? null
@@ -4121,6 +4142,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       this.reasoningBudgetOverride = previousReasoningBudget
       this.observationBudgetOverride = previousObservationBudget
       this.observationBudgetRemaining = previousObservationBudgetRemaining
+      this.observationRelevanceOverride = previousObservationRelevance
       this.planningHorizonOverride = previousPlanningHorizon
     }
   }
@@ -4503,10 +4525,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const previousReasoningBudget = this.reasoningBudgetOverride
     const previousObservationBudget = this.observationBudgetOverride
     const previousObservationBudgetRemaining = this.observationBudgetRemaining
+    const previousObservationRelevance = this.observationRelevanceOverride
     const previousPlanningHorizon = this.planningHorizonOverride
     this.reasoningBudgetOverride = routed.steering?.reasoning_budget ?? null
     this.observationBudgetOverride = Number.isSafeInteger(routed.steering?.observation_budget) ? routed.steering.observation_budget : null
     this.observationBudgetRemaining = this.observationBudgetOverride
+    this.observationRelevanceOverride = routed.steering?.observation_relevance?.source === 'typed_relevance'
+      && Array.isArray(routed.steering.observation_relevance.selected_families)
+      ? routed.steering.observation_relevance.selected_families
+      : null
     this.planningHorizonOverride = routed.steering?.planning_horizon ?? null
     try {
       const result = await this.continueFromModMessage(
@@ -4521,6 +4548,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       this.reasoningBudgetOverride = previousReasoningBudget
       this.observationBudgetOverride = previousObservationBudget
       this.observationBudgetRemaining = previousObservationBudgetRemaining
+      this.observationRelevanceOverride = previousObservationRelevance
       this.planningHorizonOverride = previousPlanningHorizon
     }
   }
@@ -4560,10 +4588,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const previousReasoningBudget = this.reasoningBudgetOverride
     const previousObservationBudget = this.observationBudgetOverride
     const previousObservationBudgetRemaining = this.observationBudgetRemaining
+    const previousObservationRelevance = this.observationRelevanceOverride
     const previousPlanningHorizon = this.planningHorizonOverride
     this.reasoningBudgetOverride = routed.steering?.reasoning_budget ?? null
     this.observationBudgetOverride = Number.isSafeInteger(routed.steering?.observation_budget) ? routed.steering.observation_budget : null
     this.observationBudgetRemaining = this.observationBudgetOverride
+    this.observationRelevanceOverride = routed.steering?.observation_relevance?.source === 'typed_relevance'
+      && Array.isArray(routed.steering.observation_relevance.selected_families)
+      ? routed.steering.observation_relevance.selected_families
+      : null
     this.planningHorizonOverride = routed.steering?.planning_horizon ?? null
     try {
       return await this.continueFromModMessage(
@@ -4576,6 +4609,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       this.reasoningBudgetOverride = previousReasoningBudget
       this.observationBudgetOverride = previousObservationBudget
       this.observationBudgetRemaining = previousObservationBudgetRemaining
+      this.observationRelevanceOverride = previousObservationRelevance
       this.planningHorizonOverride = previousPlanningHorizon
     }
   }
@@ -4648,7 +4682,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         subgoal: 'Plan only the bounded current milestone/subgoal; do not flatten later milestones into this Plan Tracker.',
         strategic: 'Choose or revise bounded milestone direction, but keep execution plan scoped to the current milestone and keep future milestones tentative.',
       }[this.planningHorizonOverride]
-      const envelope = `[DECISION_ENVELOPE] planning_horizon=${this.planningHorizonOverride}; observation_budget_remaining=${Number.isSafeInteger(this.observationBudgetRemaining) ? this.observationBudgetRemaining : 'runtime-default'}. ${horizonGuidance ?? ''}`
+      const envelope = `[DECISION_ENVELOPE] planning_horizon=${this.planningHorizonOverride}; observation_budget_remaining=${Number.isSafeInteger(this.observationBudgetRemaining) ? this.observationBudgetRemaining : 'runtime-default'}; observation_families=${Array.isArray(this.observationRelevanceOverride) ? this.observationRelevanceOverride.join(',') : 'runtime-default'}. ${horizonGuidance ?? ''}`
       providerMessages = [...providerMessages, { role: 'user', content: envelope }]
     }
     const startedAt = Date.now()
@@ -4666,6 +4700,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       reasoning_budget: this.reasoningBudgetOverride ?? undefined,
       planning_horizon: this.planningHorizonOverride ?? undefined,
       observation_budget: this.observationBudgetOverride ?? undefined,
+      observation_relevance_families: Array.isArray(this.observationRelevanceOverride)
+        ? this.observationRelevanceOverride
+        : undefined,
       allow_tools: effectiveAllowTools,
       recovery_attempt: effectiveRecoveryAttempt,
       recovery_kind: traceRecoveryKind,
@@ -5125,13 +5162,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const admittedCached = []
     const admittedStaticCached = []
     const deferredPrepared = []
+    const deferredByRelevance = []
+    const selectedObservationFamilies = Array.isArray(this.observationRelevanceOverride)
+      ? new Set(this.observationRelevanceOverride)
+      : null
     let freshSlots = Number.isSafeInteger(this.observationBudgetRemaining)
       ? Math.max(0, this.observationBudgetRemaining)
       : Number.POSITIVE_INFINITY
 
     for (let index = 0; index < prepared.length; index++) {
       const fresh = cachedPrepared[index] !== true && staticCachedPrepared[index] !== true
-      if (!fresh || freshSlots > 0) {
+      const family = observationToolFamily(prepared[index]?.tool?.function?.name)
+      const relevant = !fresh || selectedObservationFamilies === null || selectedObservationFamilies.has(family)
+      if (relevant && (!fresh || freshSlots > 0)) {
         admittedPrepared.push(prepared[index])
         admittedCached.push(cachedPrepared[index])
         admittedStaticCached.push(staticCachedPrepared[index])
@@ -5139,6 +5182,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       else {
         deferredPrepared.push(prepared[index])
+        if (fresh && !relevant) deferredByRelevance.push(prepared[index])
       }
     }
 
@@ -5150,6 +5194,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         admitted_count: admittedPrepared.length,
         deferred_count: totalDeferredCount,
         budget_remaining_before: Number.isSafeInteger(this.observationBudgetRemaining) ? this.observationBudgetRemaining : undefined,
+        selected_families: selectedObservationFamilies ? [...selectedObservationFamilies] : undefined,
+        deferred_by_relevance_count: deferredByRelevance.length,
         deferred_tools: [
           ...deferredPrepared.map(entry => entry.tool.function.name),
           ...rawDeferredTools.map(tool => tool?.function?.name).filter(Boolean),
@@ -5162,7 +5208,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       0,
     )
     if (admittedPrepared.length === 0) {
-      const reason = `Jev observation budget had ${this.observationBudgetRemaining ?? 0} fresh call(s) remaining, so the requested fresh observations were deferred.`
+      const reason = deferredByRelevance.length > 0
+        ? `Jev typed observation relevance did not select the requested fresh observation family; selected families: ${selectedObservationFamilies ? [...selectedObservationFamilies].join(', ') || 'none' : 'runtime-default'}.`
+        : `Jev observation cap had ${this.observationBudgetRemaining ?? 0} fresh call(s) remaining, so the requested fresh observations were deferred.`
       await this.forceDecisionFromObservations(reason, 'jev_observation_budget_exhausted')
       return
     }

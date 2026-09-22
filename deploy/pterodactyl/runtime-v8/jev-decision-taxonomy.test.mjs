@@ -7,6 +7,7 @@ import {
   developmentDecisionQuestions,
   jevDecisionFamilyChoices,
   jevForbiddenAuthorityFields,
+  observationRelevanceFamilies,
   parseBoundarySteeringTelemetry,
   parseDecisionEnvelope,
   parseDecisionFamily,
@@ -65,12 +66,15 @@ test('retired hierarchy exports are gone', async () => {
 
 test('no removed family leaks into the wake envelope questions or parse result', () => {
   const questions = decisionEnvelopeQuestions()
-  assert.deepEqual(Object.keys(questions).sort(), [
-    'observation_budget',
-    'planning_horizon',
-    'reasoning_budget',
-    'routing',
-  ])
+  assert.deepEqual(
+    Object.keys(questions).sort(),
+    [
+      'planning_horizon',
+      'reasoning_budget',
+      'routing',
+      ...observationRelevanceFamilies().map(family => `need_${family}`),
+    ].sort(),
+  )
   const parsed = parseDecisionEnvelope({ answers: {} })
   for (const key of ['granularity', 'granularity_confidence', 'completion', 'milestone_transition']) {
     assert.equal(Object.prototype.hasOwnProperty.call(parsed, key), false)
@@ -116,13 +120,15 @@ test('routing and reasoning budget questions are preserved and non-planning', ()
 
 // --- envelope ---------------------------------------------------------------
 
-test('decision envelope separates wake routing, reasoning, horizon, and observation allowance', () => {
+test('decision envelope separates wake routing, reasoning, horizon, and typed observation relevance', () => {
   const questions = decisionEnvelopeQuestions()
   assert.equal(questions.routing.type, 'choice')
   assert.equal(questions.reasoning_budget.type, 'choice')
   assert.equal(questions.planning_horizon.type, 'choice')
-  assert.equal(questions.observation_budget.type, 'score')
-  assert.equal(questions.observation_budget.criteria.length, 9)
+  assert.equal(questions.observation_budget, undefined)
+  for (const family of observationRelevanceFamilies()) {
+    assert.equal(questions[`need_${family}`].type, 'noul')
+  }
   assert.doesNotMatch(questions.planning_horizon.criteria.subgoal, /milestone/i)
 })
 

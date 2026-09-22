@@ -7,6 +7,7 @@ import {
   observationRelevanceQuestions,
   parseObservationRelevance,
 } from './jev-decision-taxonomy.mjs'
+import { NpcAgentLoop, NpcDialogueMemory } from './npc-agent-loop.mjs'
 import {
   observationToolFamilies,
   observationToolFamily,
@@ -85,4 +86,137 @@ test('every deterministic observation tool belongs to exactly one typed relevanc
   assert.equal(observationToolFamily('getResearchPath'), 'research_state')
   assert.equal(observationToolFamily('getPlacementCandidates'), 'placement_candidates')
   assert.equal(observationToolFamily('validateConstructionPlan'), 'construction_state')
+})
+
+
+class ObservationSelectionRcon {
+  constructor() {
+    this.commands = []
+  }
+
+  async command(text) {
+    this.commands.push(text)
+    if (text.includes('remote.call("airi_deployment","status")')) {
+      return JSON.stringify({
+        revision: 'airi-deploy-v8-npc-staging',
+        session: '0123456789abcdef0123456789abcdef',
+        mode: 'npc',
+        actor_id: 18,
+        actor_kind: 'standalone_character',
+        connected_players: 0,
+        allowed: true,
+        idle: true,
+        epoch: 3,
+        actor_interface: true,
+        operations: true,
+        tools: true,
+      })
+    }
+    if (text.includes('remote.call("autorio_tools","get_inventory_items"')) return JSON.stringify({ items: [{ name: 'iron-plate', count: 4 }] })
+    if (text.includes('remote.call("autorio_tools","get_nearby_entities"')) return JSON.stringify({ actor_position: { x: 0, y: 0 }, entities: [] })
+    return '{}'
+  }
+}
+
+test('M7 live admission executes selected fresh observation families and defers unselected families', async () => {
+  const rcon = new ObservationSelectionRcon()
+  const agent = new NpcAgentLoop({
+    rcon,
+    memory: new NpcDialogueMemory(),
+    systemPrompt: 'typed observation admission test',
+    provider: async () => { throw new Error('planner should not run') },
+    traceFile: null,
+    stateFile: null,
+  })
+  agent.active = true
+  agent.epoch = {
+    revision: 'airi-deploy-v8-npc-staging',
+    session: '0123456789abcdef0123456789abcdef',
+    mode: 'npc',
+    actor_id: 18,
+    actor_kind: 'standalone_character',
+    connected_players: 0,
+    allowed: true,
+    idle: true,
+    epoch: 3,
+    actor_interface: true,
+    operations: true,
+    tools: true,
+  }
+  agent.messages = [{ role: 'system', content: 'test' }]
+  agent.observationBudgetOverride = 2
+  agent.observationBudgetRemaining = 2
+  agent.observationRelevanceOverride = ['inventory_equipment']
+
+  await agent.handleToolBatch({
+    tool_calls: [
+      {
+        id: 'inventory',
+        type: 'function',
+        function: { name: 'getInventoryItems', arguments: '{}' },
+      },
+      {
+        id: 'nearby',
+        type: 'function',
+        function: { name: 'getNearbyEntities', arguments: '{"radius":20}' },
+      },
+    ],
+  })
+
+  assert.equal(rcon.commands.some(command => command.includes('get_inventory_items')), true)
+  assert.equal(rcon.commands.some(command => command.includes('get_nearby_entities')), false)
+  assert.equal(agent.observationBudgetRemaining, 1)
+  assert.equal(agent.messages.filter(message => message.role === 'tool').length, 1)
+})
+
+test('M7 cached observations remain reusable even when their family is not currently selected', async () => {
+  const rcon = new ObservationSelectionRcon()
+  const agent = new NpcAgentLoop({
+    rcon,
+    memory: new NpcDialogueMemory(),
+    systemPrompt: 'typed observation cache test',
+    provider: async () => { throw new Error('planner should not run') },
+    traceFile: null,
+    stateFile: null,
+  })
+  agent.active = true
+  agent.epoch = {
+    revision: 'airi-deploy-v8-npc-staging',
+    session: '0123456789abcdef0123456789abcdef',
+    mode: 'npc',
+    actor_id: 18,
+    actor_kind: 'standalone_character',
+    connected_players: 0,
+    allowed: true,
+    idle: true,
+    epoch: 3,
+    actor_interface: true,
+    operations: true,
+    tools: true,
+  }
+  agent.messages = [{ role: 'system', content: 'test' }]
+  agent.observationBudgetOverride = 2
+  agent.observationBudgetRemaining = 2
+  agent.observationRelevanceOverride = null
+
+  const request = {
+    tool_calls: [{
+      id: 'nearby-first',
+      type: 'function',
+      function: { name: 'getNearbyEntities', arguments: '{"radius":20}' },
+    }],
+  }
+  await agent.handleToolBatch(request)
+  const afterFirst = rcon.commands.filter(command => command.includes('get_nearby_entities')).length
+
+  agent.observationRelevanceOverride = ['inventory_equipment']
+  await agent.handleToolBatch({
+    tool_calls: [{
+      id: 'nearby-again',
+      type: 'function',
+      function: { name: 'getNearbyEntities', arguments: '{"radius":20}' },
+    }],
+  })
+
+  assert.equal(rcon.commands.filter(command => command.includes('get_nearby_entities')).length, afterFirst)
 })

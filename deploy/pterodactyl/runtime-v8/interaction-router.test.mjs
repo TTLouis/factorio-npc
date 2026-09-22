@@ -5,6 +5,7 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
+import { observationRelevanceFamilies } from './jev-decision-taxonomy.mjs'
 import { NpcAgentLoop, interactionRuntimeHealthy, parseInteractionRoute } from './npc-agent-loop.mjs'
 
 function deployment() {
@@ -146,7 +147,17 @@ function agentFor(intent, {
             },
             reasoning_budget: { type: 'choice', choice: decisionReasoningBudget ?? (decisionGranularity === 'split' ? 'strategic' : 'normal'), confidence: 0.85 },
             planning_horizon: { type: 'choice', choice: decisionPlanningHorizon ?? (decisionGranularity === 'split' ? 'strategic' : 'checkpoint'), confidence: 0.84 },
-            observation_budget: { type: 'score', score: decisionObservationBudget ?? (decisionGranularity === 'split' ? 3 : 1), confidence: 0.83 },
+            ...Object.fromEntries(
+              Object.keys(questions)
+                .filter(key => key.startsWith('need_'))
+                .map((key, index) => [
+                  key,
+                  {
+                    type: 'noul',
+                    noul: index < (decisionObservationBudget ?? (decisionGranularity === 'split' ? 3 : 1)) ? 0.9 : 0.1,
+                  },
+                ]),
+            ),
           },
           usage: {
             input_tokens: 120,
@@ -225,7 +236,8 @@ test('Jev shadow disagreement is observed without changing the active interactio
   assert.equal(decisionCalls[0].questions.queue_conflict.type, 'noul')
   assert.equal(decisionCalls[0].questions.reasoning_budget.type, 'choice')
   assert.equal(decisionCalls[0].questions.planning_horizon.type, 'choice')
-  assert.equal(decisionCalls[0].questions.observation_budget.type, 'score')
+  assert.equal(decisionCalls[0].questions.observation_budget, undefined)
+  assert.equal(decisionCalls[0].questions.need_nearby_world.type, 'noul')
   assert.ok(decisionCalls[0].context.signal instanceof AbortSignal)
   assert.equal(rcon.cancelCount, 0)
 })
@@ -245,7 +257,13 @@ test('Jev shadow writes a dedicated decision lifecycle trace without copying the
   assert.equal(events[0].data.mode, 'shadow')
   assert.equal(events[0].data.message_chars, 'what are you doing?'.length)
   assert.equal(events[0].data.message, undefined)
-  assert.deepEqual(events[0].data.question_ids, ['intent', 'queue_conflict', 'reasoning_budget', 'planning_horizon', 'observation_budget'])
+  assert.deepEqual(events[0].data.question_ids, [
+    'intent',
+    'queue_conflict',
+    'reasoning_budget',
+    'planning_horizon',
+    ...observationRelevanceFamilies().map(family => `need_${family}`),
+  ])
   assert.equal(events[1].data.intent, 'new_goal')
   assert.equal(events[1].data.input_units, 120)
   assert.equal(events[1].data.output_units, 20)
