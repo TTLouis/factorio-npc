@@ -21,7 +21,6 @@ import {
   parseObservationRelevance,
   parseSteeringRecommendation,
   parseTypedStateDistillation,
-  renderTypedStateContext,
   steeringRecommendationQuestions,
   typedStateDistillationQuestions,
   typedStateProvenance,
@@ -109,7 +108,6 @@ const JEV_PIPELINE_RUNTIME_GUARDS = [
   ['parseBoundarySteeringTelemetry', typeof parseBoundarySteeringTelemetry],
   ['typedStateDistillationQuestions', typeof typedStateDistillationQuestions],
   ['parseTypedStateDistillation', typeof parseTypedStateDistillation],
-  ['renderTypedStateContext', typeof renderTypedStateContext],
   ['completionContractSupported', typeof completionContractSupported],
   ['sanitizeStepCompletionContract', typeof sanitizeStepCompletionContract],
   ['plannerControlPayloadFromMessage', typeof plannerControlPayloadFromMessage],
@@ -3748,6 +3746,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         ...steeringTelemetry,
         observation_relevance: observationRelevance,
         typed_state: typedState,
+        typed_state_mode: 'experimental_trace_only',
       }
       const latency_ms = Date.now() - startedAt
       if (decision.route === 'wait_runtime' && conditionWaitHealthy) {
@@ -3803,6 +3802,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         confidence: decision.confidence,
         confidence_policy: decisionConfidencePolicy(decision.requested_route),
         steering_telemetry: steeringContext,
+        typed_state_experimental: typedState.available === true,
+        typed_state_context_injected: false,
         boundary_steering_gate: steeringGate,
         steering_budget_shadow_only: true,
         latency_ms,
@@ -3836,6 +3837,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           route: decision.route,
           confidence: decision.confidence,
           steering: steeringContext,
+          typed_state_experimental: typedState.available === true,
+          typed_state_context_injected: false,
           boundary_steering_gate: steeringGate,
           steering_budget_shadow_only: true,
           usage: decision.usage,
@@ -4676,12 +4679,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       : null
     this.planningHorizonOverride = routed.steering?.planning_horizon ?? null
     try {
-      const typedStateContext = renderTypedStateContext(routed.steering?.typed_state)
       const result = await this.continueFromModMessage(
-        [
-          typedStateContext,
-          `[MOD] Autorio operation batch completed. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}`,
-        ].filter(Boolean).join('\n'),
+        `[MOD] Autorio operation batch completed. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}`,
         'factorio.completion_continuation',
       )
       if (pendingAmendment) this.pendingInteractionAmendment = null
@@ -4745,12 +4744,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       : null
     this.planningHorizonOverride = routed.steering?.planning_horizon ?? null
     try {
-      const typedStateContext = renderTypedStateContext(routed.steering?.typed_state)
       return await this.continueFromModMessage(
-        [
-          typedStateContext,
-          `[MOD] Autorio operation error: ${cleanError}. Dependent queued operations may have been cancelled. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}`,
-        ].filter(Boolean).join('\n'),
+        `[MOD] Autorio operation error: ${cleanError}. Dependent queued operations may have been cancelled. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}`,
         'factorio.error_continuation',
       )
     }

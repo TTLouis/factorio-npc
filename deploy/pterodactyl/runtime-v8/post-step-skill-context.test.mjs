@@ -321,8 +321,8 @@ test('M9 post-step observe route wakes the planner with the bounded observation 
   assert.equal(result.triggerSource, 'post_step_observe')
 })
 
-test('M8 renders Jev typed state into post-step Main-LLM context with deterministic provenance', async () => {
-  const { agent } = agentForRoute('continue_current')
+test('M11E typed state remains experimental telemetry and is not injected into Main-LLM context', async () => {
+  const { agent, events } = agentForRoute('continue_current')
   agent.taskStatusReceipt = async () => ({
     raw: '{}',
     view: { task_state: 'idle', queue_empty: true, queue_length: 0, last_completed_batch: { batch_id: 7 } },
@@ -336,14 +336,17 @@ test('M8 renders Jev typed state into post-step Main-LLM context with determinis
 
   await agent.completed()
 
-  assert.match(continuation, /^\[JEV_TYPED_STATE\]/)
-  assert.match(continuation, /bottleneck=logistics confidence=0\.82/)
-  assert.match(continuation, /readiness_score=2\.60\/4/)
-  assert.match(continuation, /risk_score=1\.20\/3/)
-  assert.match(continuation, /evidence_conflict_probability=0\.18/)
-  assert.match(continuation, /provenance=task_board,autorio_status/)
-  assert.match(continuation, /not world truth, completion evidence, plan authority, operation admission, or user authority/i)
-  assert.match(continuation, /\[MOD\] Autorio operation batch completed/)
+  assert.match(continuation, /^\[MOD\] Autorio operation batch completed/)
+  assert.doesNotMatch(continuation, /\[JEV_TYPED_STATE\]|bottleneck=logistics|readiness_score=/)
+
+  const routed = events.find(entry => entry.event === 'post_step.routed')
+  assert.ok(routed)
+  assert.equal(routed.data.decision.typed_state_experimental, true)
+  assert.equal(routed.data.decision.typed_state_context_injected, false)
+  assert.equal(routed.data.decision.steering.typed_state_mode, 'experimental_trace_only')
+  assert.equal(routed.data.decision.steering.typed_state.bottleneck, 'logistics')
+  assert.equal(routed.data.decision.steering.typed_state.readiness_score, 2.6)
+  assert.deepEqual(routed.data.decision.steering.typed_state.provenance, ['task_board', 'autorio_status'])
 })
 
 test('invalid Jev post-step output fails open to the planner', async () => {
