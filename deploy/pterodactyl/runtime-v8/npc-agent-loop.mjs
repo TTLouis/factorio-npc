@@ -1519,9 +1519,11 @@ const INTERACTION_INTENTS = new Set([
 
 const POST_STEP_ROUTES = new Set([
   'continue_current',
+  'targeted_observation',
   'reanchor_plan',
   'replan',
   'wait_runtime',
+  'ask_user',
   'fallback_planner',
 ])
 const SKILL_CONTEXT_MAX_SKILLS = 3
@@ -1590,13 +1592,20 @@ function postStepDecisionQuestions() {
   return {
     route: {
       type: 'choice',
-      instructions: 'After one authoritative Autorio completion or error boundary, choose the smallest safe planner transition. This is routing only; do not invent world facts, mutation success, or goal completion.',
+      instructions: {
+        task: 'After one authoritative Autorio completion or error boundary, choose the cheapest useful next reasoning route.',
+        rules: [
+          'Routing only: do not invent world facts, mutation success, blockers, or goal completion.',
+          'continue_runtime is only a request; deterministic code independently verifies active runtime work.',
+          'observe requests bounded deterministic grounding before semantic reasoning.',
+          'ask_user is only valid when runtime lifecycle state already requires explicit user authority.',
+        ],
+      },
       criteria: {
-        continue_runtime: 'The next bounded continuation is already parameterized. Continue through deterministic runtime control when healthy runtime work can carry it; otherwise this maps to the existing compact planner continuation.',
-        reanchor_plan: 'The user goal is still valid, but authoritative runtime evidence shows the current local approach needs a small correction before more work. Preserve verified progress and re-anchor without redesigning the whole goal.',
-        wake_planner: 'The completion evidence materially changes the remaining approach or the current plan needs a broader structural reconsideration; wake the planner with higher reasoning.',
-        wait_runtime: 'A persistent runtime controller is authoritatively active, healthy, and live, so waking the main planner now would only duplicate ongoing work.',
-        fallback_planner: 'The evidence is ambiguous or outside this routing contract; use the existing safe main-planner continuation.',
+        continue_runtime: 'Authoritative deterministic runtime work is already active and should continue without waking the Main LLM.',
+        observe: 'A bounded deterministic read is useful before the next semantic decision.',
+        wake_planner: 'The Main LLM must reason about the next semantic step, local repair, or broader strategy.',
+        ask_user: 'The runtime is already at a lifecycle boundary that requires an explicit user choice.',
       },
     },
   }
@@ -1607,9 +1616,11 @@ function parsePostStepDecision(response) {
   if (!answer) throw new AgentLoopError('Decision provider returned invalid post-step route')
   const normalizedRoute = answer.choice === 'continue_runtime'
     ? 'continue_current'
-    : answer.choice === 'wake_planner'
-      ? 'replan'
-      : answer.choice
+    : answer.choice === 'observe'
+      ? 'targeted_observation'
+      : answer.choice === 'wake_planner'
+        ? 'replan'
+        : answer.choice
   if (!POST_STEP_ROUTES.has(normalizedRoute)) throw new AgentLoopError('Decision provider returned invalid post-step route')
   if (typeof answer.confidence !== 'number' || !Number.isFinite(answer.confidence) || answer.confidence < 0 || answer.confidence > 1) {
     throw new AgentLoopError('Decision provider returned invalid post-step confidence')
@@ -3678,6 +3689,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         appliedRoute = 'fallback_planner'
         fallbackReason = steeringGate.reason
       }
+      else if (decision.route === 'ask_user' && planState?.status !== PLAN_STATUS.BLOCKED) {
+        appliedRoute = 'fallback_planner'
+        fallbackReason = 'ask_user_without_authoritative_user_boundary'
+      }
       await this.decisionTraceEvent('decision.response', {
         decision_id: decisionId,
         contract: 'post_step_planner_gate',
@@ -3739,7 +3754,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         await this.traceEvent('planner.wake', {
           source: 'decision_provider',
           route: appliedRoute,
-          reasoning_policy: appliedRoute === 'continue_current'
+          reasoning_policy: appliedRoute === 'continue_current' || appliedRoute === 'targeted_observation'
             ? 'low'
             : appliedRoute === 'reanchor_plan'
               ? 'low'
@@ -4529,11 +4544,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
     this.reasoningTriggerSource = routed.route === 'continue_current'
       ? 'post_step_continue'
-      : routed.route === 'reanchor_plan'
-        ? 'post_step_reanchor'
-        : routed.route === 'replan'
-          ? 'post_step_replan'
-          : null
+      : routed.route === 'targeted_observation'
+        ? 'post_step_observe'
+        : routed.route === 'reanchor_plan'
+          ? 'post_step_reanchor'
+          : routed.route === 'replan'
+            ? 'post_step_replan'
+            : null
     if (routed.route === 'reanchor_plan') this.planUpdateReason = 'reanchor_plan'
     const previousReasoningBudget = this.reasoningBudgetOverride
     const previousObservationBudget = this.observationBudgetOverride
@@ -4597,11 +4614,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
     this.reasoningTriggerSource = routed.route === 'continue_current'
       ? 'post_step_continue'
-      : routed.route === 'reanchor_plan'
-        ? 'post_step_reanchor'
-        : routed.route === 'replan'
-          ? 'post_step_replan'
-          : null
+      : routed.route === 'targeted_observation'
+        ? 'post_step_observe'
+        : routed.route === 'reanchor_plan'
+          ? 'post_step_reanchor'
+          : routed.route === 'replan'
+            ? 'post_step_replan'
+            : null
     const previousReasoningBudget = this.reasoningBudgetOverride
     const previousObservationBudget = this.observationBudgetOverride
     const previousObservationBudgetRemaining = this.observationBudgetRemaining
@@ -6305,10 +6324,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const persistentRuntime = await this.persistentRuntimeStatus()
     const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
     const evidence = activeStepEvidence(board)
-    const finalIndex = Array.isArray(board?.steps) ? board.steps.length - 1 : -1
-    const finalCompletionProven = latestDeterministicCompletionEvidence(planState)
-      && Number.isSafeInteger(activeIndex)
-      && activeIndex === finalIndex
     const failureClass = recoveryFailureClassHint(reasonText)
     const key = [
       generation,
@@ -6414,7 +6429,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       await this.assertCurrent()
       const decision = parseRecoveryDecision(response)
-      if (decision.route === 'wait_runtime' && conditionValidation.healthy) {
+      if (decision.route === 'continue_runtime' && conditionValidation.healthy) {
         conditionValidation = await this.validateConditionWaitHealth()
       }
       const validated = validateRecoveryRoute(decision, {
@@ -6425,11 +6440,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           condition_wait_active: conditionValidation.healthy === true,
           condition_wait: conditionValidation.healthy ? conditionValidation.wait : undefined,
         },
-        finalCompletionProven,
         observationBudgetAvailable: this.actionOmissionObservationUsed !== true
           && (!Number.isSafeInteger(this.observationBudgetRemaining) || this.observationBudgetRemaining > 0),
-        evidence,
         failureClassHint: failureClass,
+        userDecisionRequired: planState?.status === PLAN_STATUS.BLOCKED,
       })
       const result = {
         route: validated.route,
@@ -6571,29 +6585,26 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       )
     }
 
-    let routed
-    try {
-      routed = await this.routeRecoveryDecision(reason, roundBase)
-    }
-    catch (error) {
-      if (/cancelled|superseded|epoch changed/i.test(String(error?.message ?? error))) throw error
-      routed = { route: 'fallback_runtime', error: cleanMemoryText(error instanceof Error ? error.message : String(error), 300) }
-    }
-
-    if (routed.route === 'deterministic_close') {
-      const state = this.memory.planByNpc?.get?.(this.activePlanKey()) ?? this.memory.currentPlan?.(this.activePlanKey())
-      const proof = [...(state?.task_board?.evidence ?? [])].reverse().find(item => item?.kind === 'deterministic_verification')
+    const recoveryState = this.memory.planByNpc?.get?.(this.activePlanKey()) ?? this.memory.currentPlan?.(this.activePlanKey())
+    const recoveryBoard = recoveryState?.task_board
+    const recoveryActiveIndex = Number.isSafeInteger(recoveryBoard?.active_index) ? recoveryBoard.active_index : undefined
+    const recoveryFinalIndex = Array.isArray(recoveryBoard?.steps) ? recoveryBoard.steps.length - 1 : -1
+    const deterministicFinalCompletion = latestDeterministicCompletionEvidence(recoveryState)
+      && Number.isSafeInteger(recoveryActiveIndex)
+      && recoveryActiveIndex === recoveryFinalIndex
+    if (deterministicFinalCompletion) {
+      const proof = [...(recoveryBoard?.evidence ?? [])].reverse().find(item => item?.kind === 'deterministic_verification')
       const reduced = this.memory.applyOutcomeAuthority?.(this.activePlanKey(), {
         kind: 'verified_complete',
         source: 'deterministic_runtime',
-        reason_code: 'jev_suggested_deterministic_close',
+        reason_code: 'recovery_final_completion_proven',
         evidence: proof ? [proof] : [],
       })
       if (reduced?.decision?.accepted) {
         await this.persistState()
         this.active = false
         await this.traceEvent('planner.skipped', {
-          source: 'decision_provider',
+          source: 'deterministic_runtime',
           contract: 'recovery_route',
           route: 'deterministic_close',
         })
@@ -6611,7 +6622,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
 
-    const plannerRecoveryRoutes = ['retry_compact', 'continue_low', 'replan_high', 'targeted_observation']
+    let routed
+    try {
+      routed = await this.routeRecoveryDecision(reason, roundBase)
+    }
+    catch (error) {
+      if (/cancelled|superseded|epoch changed/i.test(String(error?.message ?? error))) throw error
+      routed = { route: 'fallback_runtime', error: cleanMemoryText(error instanceof Error ? error.message : String(error), 300) }
+    }
+
+    const plannerRecoveryRoutes = ['wake_planner', 'targeted_observation']
     if (providerBudgetFailure
       && this.providerBudgetHandoffCount >= this.maxProviderBudgetHandoffs
       && plannerRecoveryRoutes.includes(routed.route)) {
@@ -6692,41 +6712,30 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
 
-    if (routed.route === 'propose_blocker') {
+    if (routed.route === 'ask_user') {
       const state = this.memory.currentPlan?.(this.activePlanKey())
-      const evidence = activeStepEvidence(state?.task_board)
-      const candidate = cleanMemoryText(reasonText, 500)
-      const reduced = this.memory.applyOutcomeAuthority?.(this.activePlanKey(), {
-        kind: 'world_blocked',
-        source: 'jev',
-        reason_code: routed.failure_class || 'grounded_world_failure',
-        candidate_blocker: candidate,
-        evidence,
+      this.active = false
+      await this.traceEvent('planner.skipped', {
+        source: 'decision_provider',
+        contract: 'recovery_route',
+        route: 'ask_user',
+        reason: 'authoritative_user_boundary',
       })
-      await this.traceEvent(reduced?.decision?.accepted ? 'outcome.validated' : 'outcome.rejected', {
-        ...(reduced?.decision ?? {}),
-        source: 'jev',
-        candidate_blocker: candidate,
-      })
-      if (reduced?.decision?.accepted) {
-        await this.persistState()
-        this.active = false
-        return {
-          chatMessage: `[Plan blocked] ${candidate}`,
-          plan: reduced.state?.plan ?? [],
-          currentStep: reduced.state?.current_step ?? 0,
-          operations: [],
-          epoch: this.epoch?.epoch,
-          actorId: this.epoch?.actor_id,
-          goalId: reduced.state?.goal_id,
-          goalStatus: 'blocked',
-          taskBoard: visibleTaskBoard(reduced.state?.task_board),
-        }
+      return {
+        chatMessage: `The current plan is blocked and requires your decision before it can change. ${cleanMemoryText(state?.blocker, 500)}`,
+        plan: state?.plan ?? [],
+        currentStep: state?.current_step ?? 0,
+        operations: [],
+        epoch: this.epoch?.epoch,
+        actorId: this.epoch?.actor_id,
+        goalId: state?.goal_id,
+        goalStatus: state?.status,
+        taskBoard: visibleTaskBoard(state?.task_board),
       }
     }
 
     if (providerBudgetFailure && plannerRecoveryRoutes.includes(routed.route)) {
-      const semanticScope = routed.decision?.semantic_scope ?? 'keep_target'
+      const semanticScope = 'keep_target'
       const key = this.activePlanKey()
       this.providerBudgetHandoffCount++
       this.providerBudgetGeneration = Math.max(1, this.providerBudgetGeneration) + 1
@@ -6774,7 +6783,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         route: routed.route,
         semantic_scope: semanticScope,
         budget_generation: this.providerBudgetGeneration,
-        reasoning_policy: routed.route === 'replan_high' ? 'high' : 'low',
+        reasoning_policy: 'low',
       })
       try {
         let result
@@ -6812,22 +6821,24 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (plannerRecoveryRoutes.includes(routed.route)) {
       const previousTrigger = this.reasoningTriggerSource
       const previousReasoningBudget = this.reasoningBudgetOverride
-      this.reasoningTriggerSource = routed.route === 'replan_high' ? 'recovery_replan_high' : 'recovery_continue_low'
-      // Recovery-route low/high policy is explicit Jev output. Do not let the
-      // parent planning turn's semantic reasoning budget override that route.
+      const highRecoveryReasoning = routed.failure_class === 'semantic_replan'
+        || routed.failure_class === 'grounded_world_failure'
+      this.reasoningTriggerSource = highRecoveryReasoning ? 'recovery_replan_high' : 'recovery_continue_low'
+      // Jev chooses the canonical route/failure class; deterministic code maps
+      // that bounded classification onto the existing low/high planner budget.
       this.reasoningBudgetOverride = null
       const state = this.memory.currentPlan?.(this.activePlanKey())
       const board = state?.task_board
       const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : state?.current_step ?? 0
       this.messages.push({
         role: 'user',
-        content: `[RECOVERY_ROUTE] Jev selected ${routed.route}. Preserve the verified canonical prefix and use only current runtime truth. Failure: ${cleanMemoryText(reasonText, 1000)}. Active step: ${cleanMemoryText(board?.steps?.[activeIndex]?.description ?? currentPlanStep(state?.plan, activeIndex), 500)}.`,
+        content: `[RECOVERY_ROUTE] Jev selected ${routed.route}. Preserve the verified canonical prefix and use only current runtime truth. This route has no completion or blocker authority. Failure: ${cleanMemoryText(reasonText, 1000)}. Active step: ${cleanMemoryText(board?.steps?.[activeIndex]?.description ?? currentPlanStep(state?.plan, activeIndex), 500)}.`,
       })
       await this.traceEvent('planner.wake', {
         source: 'decision_provider',
         contract: 'recovery_route',
         route: routed.route,
-        reasoning_policy: routed.route === 'replan_high' ? 'high' : 'low',
+        reasoning_policy: highRecoveryReasoning ? 'high' : 'low',
       })
       try {
         const current = await this.assertCurrent()

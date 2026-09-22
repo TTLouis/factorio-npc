@@ -90,6 +90,9 @@ export function selectReasoningPolicy(config, messages, options = {}) {
   if (options.triggerSource === 'post_step_continue') {
     return { effort: 'low', reason: 'jev_post_step_continue' }
   }
+  if (options.triggerSource === 'post_step_observe') {
+    return { effort: 'low', reason: 'jev_post_step_observe' }
+  }
   if (options.triggerSource === 'post_step_reanchor') {
     return { effort: 'low', reason: 'jev_post_step_reanchor' }
   }
@@ -128,6 +131,7 @@ function reasoningOutputBudget(policy) {
     case 'jev_recovery_replan':
       return 6000
     case 'same_goal_continue':
+    case 'jev_post_step_observe':
     case 'jev_recovery_continue':
       return 3000
     case 'repeated_failure_compact_finalize':
