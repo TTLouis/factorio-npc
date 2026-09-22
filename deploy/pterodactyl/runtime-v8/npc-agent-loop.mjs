@@ -19,7 +19,11 @@ import {
   parseDecisionFamily,
   parseObservationRelevance,
   parseSteeringRecommendation,
+  parseTypedStateDistillation,
+  renderTypedStateContext,
   steeringRecommendationQuestions,
+  typedStateDistillationQuestions,
+  typedStateProvenance,
 } from './jev-decision-taxonomy.mjs'
 import { isLifecycleMetaStep, normalizeCanonicalPlan, validateOutcomeCandidate } from './outcome-authority.mjs'
 import {
@@ -102,6 +106,9 @@ const JEV_PIPELINE_RUNTIME_GUARDS = [
   ['steeringRecommendationQuestions', typeof steeringRecommendationQuestions],
   ['parseSteeringRecommendation', typeof parseSteeringRecommendation],
   ['parseBoundarySteeringTelemetry', typeof parseBoundarySteeringTelemetry],
+  ['typedStateDistillationQuestions', typeof typedStateDistillationQuestions],
+  ['parseTypedStateDistillation', typeof parseTypedStateDistillation],
+  ['renderTypedStateContext', typeof renderTypedStateContext],
   ['completionContractSupported', typeof completionContractSupported],
   ['sanitizeStepCompletionContract', typeof sanitizeStepCompletionContract],
   ['plannerControlPayloadFromMessage', typeof plannerControlPayloadFromMessage],
@@ -3598,6 +3605,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       reasoning_budget: envelopeQuestions.reasoning_budget,
       planning_horizon: envelopeQuestions.planning_horizon,
       ...observationRelevanceQuestions(),
+      ...typedStateDistillationQuestions(),
     }
     const decisionId = `decision_${Date.now().toString(36)}_${(++this.decisionRequestSequence).toString(36)}`
     this.postStepDecisionAbort?.abort()
@@ -3629,7 +3637,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const decision = parsePostStepDecision(response)
       const steeringTelemetry = parseBoundarySteeringTelemetry(response)
       const observationRelevance = parseObservationRelevance(response)
-      const steeringContext = { ...steeringTelemetry, observation_relevance: observationRelevance }
+      const typedState = parseTypedStateDistillation(response, { provenance: typedStateProvenance(state) })
+      const steeringContext = {
+        ...steeringTelemetry,
+        observation_relevance: observationRelevance,
+        typed_state: typedState,
+      }
       const latency_ms = Date.now() - startedAt
       if (decision.route === 'wait_runtime' && conditionWaitHealthy) {
         conditionValidation = await this.validateConditionWaitHealth()
@@ -4536,8 +4549,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       : null
     this.planningHorizonOverride = routed.steering?.planning_horizon ?? null
     try {
+      const typedStateContext = renderTypedStateContext(routed.steering?.typed_state)
       const result = await this.continueFromModMessage(
-        `[MOD] Autorio operation batch completed. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}`,
+        [
+          typedStateContext,
+          `[MOD] Autorio operation batch completed. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}`,
+        ].filter(Boolean).join('\n'),
         'factorio.completion_continuation',
       )
       if (pendingAmendment) this.pendingInteractionAmendment = null
@@ -4599,8 +4616,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       : null
     this.planningHorizonOverride = routed.steering?.planning_horizon ?? null
     try {
+      const typedStateContext = renderTypedStateContext(routed.steering?.typed_state)
       return await this.continueFromModMessage(
-        `[MOD] Autorio operation error: ${cleanError}. Dependent queued operations may have been cancelled. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}`,
+        [
+          typedStateContext,
+          `[MOD] Autorio operation error: ${cleanError}. Dependent queued operations may have been cancelled. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}`,
+        ].filter(Boolean).join('\n'),
         'factorio.error_continuation',
       )
     }

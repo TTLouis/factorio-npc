@@ -205,7 +205,7 @@ export const DECISION_PROVIDER_DEFAULTS = Object.freeze({
   timeoutMs: 5000,
   maxRequestsPerHour: 180,
   maxInputChars: 16000,
-  maxQuestions: 16,
+  maxQuestions: 24,
 })
 
 function decisionProviderInteger(value, fallback, name, min, max) {

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
-import { observationRelevanceFamilies } from './jev-decision-taxonomy.mjs'
+import { observationRelevanceFamilies, typedStateDistillationQuestions } from './jev-decision-taxonomy.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 
 function deployment() {
@@ -104,6 +104,15 @@ function decisionResponse(route) {
         },
         confidence: 0.9,
       },
+      state_bottleneck: {
+        type: 'choice',
+        choice: 'logistics',
+        probabilities: { none_known: 0.02, materials: 0.03, power: 0.03, logistics: 0.72, production: 0.05, research: 0.03, spatial: 0.03, safety: 0.02, runtime_health: 0.02, information: 0.05 },
+        confidence: 0.82,
+      },
+      state_readiness: { type: 'score', score: 2.6, confidence: 0.78 },
+      state_risk: { type: 'score', score: 1.2, confidence: 0.74 },
+      state_evidence_conflict: { type: 'noul', noul: 0.18 },
     },
     usage: { input_tokens: 80, output_tokens: 8, cost: 0.00000336 },
   }
@@ -283,7 +292,34 @@ test('post-step Jev receives a bounded grounded gate state instead of dialogue h
     'reasoning_budget',
     'planning_horizon',
     ...observationRelevanceFamilies().map(family => `need_${family}`),
+    ...Object.keys(typedStateDistillationQuestions()),
   ])
+  assert.equal(Object.keys(captured.questions).length, 19)
+})
+
+test('M8 renders Jev typed state into post-step Main-LLM context with deterministic provenance', async () => {
+  const { agent } = agentForRoute('continue_current')
+  agent.taskStatusReceipt = async () => ({
+    raw: '{}',
+    view: { task_state: 'idle', queue_empty: true, queue_length: 0, last_completed_batch: { batch_id: 7 } },
+    providerStatus: { observation_mode: 'full', task_state: 'idle', queue_empty: true, queue_length: 0, last_completed_batch: { batch_id: 7 } },
+  })
+  let continuation
+  agent.continueFromModMessage = async message => {
+    continuation = message
+    return { message }
+  }
+
+  await agent.completed()
+
+  assert.match(continuation, /^\[JEV_TYPED_STATE\]/)
+  assert.match(continuation, /bottleneck=logistics confidence=0\.82/)
+  assert.match(continuation, /readiness_score=2\.60\/4/)
+  assert.match(continuation, /risk_score=1\.20\/3/)
+  assert.match(continuation, /evidence_conflict_probability=0\.18/)
+  assert.match(continuation, /provenance=task_board,autorio_status/)
+  assert.match(continuation, /not world truth, completion evidence, plan authority, operation admission, or user authority/i)
+  assert.match(continuation, /\[MOD\] Autorio operation batch completed/)
 })
 
 test('invalid Jev post-step output fails open to the planner', async () => {

@@ -28,7 +28,7 @@ test('TypeSafe credentials automatically configure Jev with conservative request
     timeoutMs: 5000,
     maxRequestsPerHour: 180,
     maxInputChars: 16000,
-    maxQuestions: 16,
+    maxQuestions: 24,
   })
   assert.equal(Object.prototype.hasOwnProperty.call(config, 'enabled'), false)
 })
@@ -50,6 +50,22 @@ test('decision provider accepts explicit generic configuration and bounded conse
   assert.equal(config.maxRequestsPerHour, 60)
   assert.equal(config.maxInputChars, 4096)
   assert.equal(config.maxQuestions, 6)
+})
+
+test('default question conservation accommodates one post-step routing plus M7 and M8 typed questions in one request', () => {
+  const config = decisionProviderConfiguration({ TYPESAFE_API_KEY: KEY })
+  const questions = Object.fromEntries(
+    Array.from({ length: 19 }, (_, index) => [
+      `q_${index}`,
+      {
+        type: 'noul',
+        instructions: 'Bounded fixture question.',
+        criteria: { true: 'yes', false: 'no' },
+      },
+    ]),
+  )
+  assert.equal(config.maxQuestions, 24)
+  assert.doesNotThrow(() => normalizeDecisionProviderRequest(config, { phase: 'post_step' }, questions))
 })
 
 test('decision request normalization keeps state and multiple questions in one bounded call', () => {

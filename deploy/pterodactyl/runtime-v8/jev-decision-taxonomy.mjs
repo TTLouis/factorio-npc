@@ -33,6 +33,34 @@ const OBSERVATION_RELEVANCE = Object.freeze({
 const OBSERVATION_RELEVANCE_THRESHOLD = 0.5
 const OBSERVATION_RELEVANCE_MAX_SELECTED = 4
 
+const TYPED_STATE_BOTTLENECKS = Object.freeze([
+  'none_known',
+  'materials',
+  'power',
+  'logistics',
+  'production',
+  'research',
+  'spatial',
+  'safety',
+  'runtime_health',
+  'information',
+])
+
+const TYPED_STATE_READINESS_CRITERIA = Object.freeze([
+  'No grounded route is visible from the supplied evidence.',
+  'Important grounded prerequisites or facts are still missing.',
+  'Some useful grounded progress exists, but material uncertainty or dependency work remains.',
+  'The supplied evidence supports a concrete next planner decision with limited uncertainty.',
+  'The supplied evidence strongly grounds the next planner decision and its immediate dependencies.',
+])
+
+const TYPED_STATE_RISK_CRITERIA = Object.freeze([
+  'Low semantic risk: the next planner decision is well bounded and easily reversible.',
+  'Guarded semantic risk: mistakes are recoverable but could waste noticeable work.',
+  'High semantic risk: the next planner decision has material branching, cost, or recovery burden.',
+  'Critical semantic risk: the next planner decision could cause substantial irreversible or user-authority impact.',
+])
+
 // Fields a provider might emit that would give Jev planning authority. They are
 // never read into a parsed result; they are only reported for telemetry so the
 // runtime can see that a provider attempted to overreach.
@@ -294,6 +322,153 @@ export function parseObservationRelevance(response, {
     signal_count: signalCount,
     budget: selected.length,
   }
+}
+
+export function typedStateDistillationQuestions() {
+  return {
+    state_bottleneck: {
+      type: 'choice',
+      instructions: {
+        task: 'Classify the dominant semantic bottleneck visible in the supplied authoritative state for the NEXT Main LLM decision.',
+        rules: [
+          'Choose only from the supplied categories.',
+          'Do not invent an unobserved world fact.',
+          'This is advisory context only and never completion, admission, or plan authority.',
+        ],
+      },
+      criteria: {
+        none_known: 'No single dominant bottleneck is supported by the supplied evidence.',
+        materials: 'Item, resource, fuel, or ingredient availability is the dominant constraint.',
+        power: 'Electrical or other energy availability/capacity is the dominant constraint.',
+        logistics: 'Movement, transport, insertion, routing, or buffering is the dominant constraint.',
+        production: 'Machine capability, recipe execution, throughput, or production topology is the dominant constraint.',
+        research: 'Technology prerequisites, research eligibility, or research progress is the dominant constraint.',
+        spatial: 'Placement, geometry, reachability, target location, or construction-space feasibility is the dominant constraint.',
+        safety: 'Combat, hostile pressure, survivability, or another safety concern is the dominant constraint.',
+        runtime_health: 'A running controller, task, condition wait, or runtime lifecycle issue is the dominant constraint.',
+        information: 'The dominant constraint is missing or conflicting authoritative evidence rather than a known world capability.',
+      },
+    },
+    state_readiness: {
+      type: 'score',
+      instructions: {
+        task: 'Score how ready the supplied authoritative state is for the NEXT Main LLM decision.',
+        rules: [
+          'Judge grounding/readiness only, not whether a plan is correct.',
+          'Do not infer facts absent from the supplied state.',
+          'The score is advisory context and cannot admit operations or close steps.',
+        ],
+      },
+      criteria: [...TYPED_STATE_READINESS_CRITERIA],
+    },
+    state_risk: {
+      type: 'score',
+      instructions: {
+        task: 'Score the semantic consequence/risk of choosing the next planner direction from the supplied evidence.',
+        rules: [
+          'Risk is advisory and does not grant or revoke permission.',
+          'Deterministic safety, preflight, and user authority remain separate.',
+        ],
+      },
+      criteria: [...TYPED_STATE_RISK_CRITERIA],
+    },
+    state_evidence_conflict: {
+      type: 'noul',
+      instructions: {
+        task: 'Does the supplied authoritative state contain material evidence that conflicts or points in incompatible directions for the next planner decision?',
+        rules: [
+          'Judge only the supplied evidence.',
+          'Do not create a conflict from missing information alone.',
+          'This probability is advisory context, not world truth or a blocker.',
+        ],
+      },
+      criteria: {
+        true: 'Two or more supplied authoritative signals materially conflict for the next planner decision.',
+        false: 'The supplied authoritative signals are mutually compatible, or no material conflict is visible.',
+      },
+    },
+  }
+}
+
+export function typedStateProvenance(state) {
+  const sources = []
+  if (state?.task_board && typeof state.task_board === 'object') sources.push('task_board')
+  if (state?.autorio && typeof state.autorio === 'object') sources.push('autorio_status')
+  if (Array.isArray(state?.deterministic_evidence) && state.deterministic_evidence.length > 0) {
+    sources.push(`deterministic_evidence:${Math.min(4, state.deterministic_evidence.length)}`)
+  }
+  if (state?.dependency_context && typeof state.dependency_context === 'object') sources.push('dependency_context')
+  if (Array.isArray(state?.skills) && state.skills.length > 0) sources.push(`skill_context:${Math.min(8, state.skills.length)}`)
+  if (state?.persistent_runtime && typeof state.persistent_runtime === 'object') sources.push('persistent_runtime')
+  if (state?.condition_wait && typeof state.condition_wait === 'object') sources.push('condition_wait')
+  if (typeof state?.failure === 'string' && state.failure.length > 0) sources.push('failure')
+  return sources
+}
+
+function boundedScoreAnswer(response, key, maximum) {
+  const answer = response?.answers?.[key]
+  const score = answer?.score
+  return typeof score === 'number' && Number.isFinite(score) && score >= 0 && score <= maximum
+    ? {
+        score,
+        confidence: clampConfidence(answer?.confidence),
+      }
+    : undefined
+}
+
+export function parseTypedStateDistillation(response, { provenance = [] } = {}) {
+  const bottleneckAnswer = response?.answers?.state_bottleneck
+  const rawBottleneck = bottleneckAnswer?.choice
+  const bottleneck = TYPED_STATE_BOTTLENECKS.includes(rawBottleneck) ? rawBottleneck : undefined
+  const readiness = boundedScoreAnswer(response, 'state_readiness', TYPED_STATE_READINESS_CRITERIA.length - 1)
+  const risk = boundedScoreAnswer(response, 'state_risk', TYPED_STATE_RISK_CRITERIA.length - 1)
+  const rawConflict = response?.answers?.state_evidence_conflict?.noul
+  const evidenceConflictProbability = typeof rawConflict === 'number' && Number.isFinite(rawConflict) && rawConflict >= 0 && rawConflict <= 1
+    ? rawConflict
+    : undefined
+  const safeProvenance = uniqueBounded(
+    asArray(provenance)
+      .map(value => (typeof value === 'string' && /^[a-z0-9_:-]{1,80}$/i.test(value) ? value : undefined))
+      .filter(value => value !== undefined),
+    12,
+  )
+  const available = bottleneck !== undefined
+    || readiness !== undefined
+    || risk !== undefined
+    || evidenceConflictProbability !== undefined
+
+  return {
+    available,
+    bottleneck,
+    bottleneck_confidence: bottleneck === undefined ? 0 : clampConfidence(bottleneckAnswer?.confidence),
+    readiness_score: readiness?.score,
+    readiness_confidence: readiness?.confidence ?? 0,
+    risk_score: risk?.score,
+    risk_confidence: risk?.confidence ?? 0,
+    evidence_conflict_probability: evidenceConflictProbability,
+    provenance: safeProvenance,
+  }
+}
+
+function fixedDecimal(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : 'unknown'
+}
+
+export function renderTypedStateContext(distillation) {
+  if (!distillation?.available) return ''
+  const provenance = Array.isArray(distillation.provenance) && distillation.provenance.length > 0
+    ? distillation.provenance.join(',')
+    : 'none'
+  return [
+    '[JEV_TYPED_STATE]',
+    'Advisory typed semantic features derived from the authoritative evidence listed below. These are not world truth, completion evidence, plan authority, operation admission, or user authority.',
+    `bottleneck=${distillation.bottleneck ?? 'unknown'} confidence=${fixedDecimal(distillation.bottleneck_confidence)}`,
+    `readiness_score=${fixedDecimal(distillation.readiness_score)}/4 confidence=${fixedDecimal(distillation.readiness_confidence)}`,
+    `risk_score=${fixedDecimal(distillation.risk_score)}/3 confidence=${fixedDecimal(distillation.risk_confidence)}`,
+    `evidence_conflict_probability=${fixedDecimal(distillation.evidence_conflict_probability)}`,
+    `provenance=${provenance}`,
+    '[/JEV_TYPED_STATE]',
+  ].join('\n')
 }
 
 export function steeringRecommendationQuestions() {
