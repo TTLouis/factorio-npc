@@ -1,4 +1,5 @@
 import {
+  approvedOperationNames,
   approvedOperationScopes,
   operationMetadataForName,
   operationTypeCatalogForScope,
@@ -21,6 +22,34 @@ const FALLBACK_ACTIONS = Object.freeze([
 const CANDIDATE_ID = /^[A-Za-z0-9_.:-]{1,80}$/
 const FRESHNESS_TOKEN = /^[A-Za-z0-9_.:-]{1,160}$/
 const MAX_CANDIDATES = 32
+
+const PROJECTION_RISK_POLICY = Object.freeze({
+  low: Object.freeze({
+    automatic_projection_eligible: true,
+    calibration_status: 'operation_specific',
+  }),
+  moderate: Object.freeze({
+    automatic_projection_eligible: false,
+    calibration_status: 'pending_phase9_e2e',
+  }),
+  high: Object.freeze({
+    automatic_projection_eligible: false,
+    calibration_status: 'pending_phase9_e2e',
+  }),
+  combat: Object.freeze({
+    automatic_projection_eligible: false,
+    calibration_status: 'pending_phase9_e2e',
+  }),
+})
+
+const PROJECTION_OPERATION_POLICY = Object.freeze({
+  walk_to_entity_exact: Object.freeze({
+    automatic_projection: true,
+    minimum_confidence: 0.85,
+    low_confidence_route: 'wake_planner',
+    calibration_status: 'existing_m6_live_baseline',
+  }),
+})
 
 function check(ok, message) {
   if (!ok) throw new Error(message)
@@ -81,6 +110,43 @@ export function typedProjectionScopes() {
 export function typedProjectionTypeCatalog(scope) {
   check(approvedOperationScopes().includes(scope), `Unknown operation scope: ${scope}`)
   return operationTypeCatalogForScope(scope)
+}
+
+export function typedProjectionRiskPolicy(risk) {
+  check(Object.hasOwn(PROJECTION_RISK_POLICY, risk), `Unknown projection risk class: ${risk}`)
+  return { risk, ...PROJECTION_RISK_POLICY[risk] }
+}
+
+export function typedProjectionOperationPolicy(operationType) {
+  const metadata = operationMetadataForName(operationType)
+  const riskPolicy = typedProjectionRiskPolicy(metadata.risk)
+  const explicit = PROJECTION_OPERATION_POLICY[operationType]
+  if (explicit) {
+    return {
+      operation_type: operationType,
+      risk: metadata.risk,
+      automatic_projection: explicit.automatic_projection === true,
+      minimum_confidence: explicit.minimum_confidence,
+      low_confidence_route: explicit.low_confidence_route,
+      calibration_status: explicit.calibration_status,
+      risk_automatic_projection_eligible: riskPolicy.automatic_projection_eligible,
+    }
+  }
+  return {
+    operation_type: operationType,
+    risk: metadata.risk,
+    automatic_projection: false,
+    minimum_confidence: null,
+    low_confidence_route: 'wake_planner',
+    calibration_status: 'pending_phase9_e2e',
+    risk_automatic_projection_eligible: riskPolicy.automatic_projection_eligible,
+  }
+}
+
+export function typedProjectionPolicyCatalog() {
+  return Object.fromEntries(
+    approvedOperationNames().map(name => [name, typedProjectionOperationPolicy(name)]),
+  )
 }
 
 export function normalizeTypedOperationCandidates(scope, candidates = []) {
@@ -204,22 +270,13 @@ export function parseTypedProjection(response, { scope, candidates = [] } = {}) 
 }
 
 export function routeTypedProjectionByRisk(projection, {
-  minimumConfidenceByRisk,
-  lowConfidenceRouteByRisk,
   currentFreshnessToken,
 } = {}) {
   check(projection && typeof projection === 'object' && !Array.isArray(projection), 'Typed projection result must be an object')
   if (projection.route !== 'emit_operation') return { ...projection }
 
-  check(
-    minimumConfidenceByRisk && typeof minimumConfidenceByRisk === 'object' && !Array.isArray(minimumConfidenceByRisk),
-    'Typed projection execution routing requires explicit minimumConfidenceByRisk policy',
-  )
-  const threshold = minimumConfidenceByRisk[projection.risk]
-  check(
-    typeof threshold === 'number' && Number.isFinite(threshold) && threshold >= 0 && threshold <= 1,
-    `Typed projection has no confidence policy for risk class ${projection.risk}`,
-  )
+  const policy = typedProjectionOperationPolicy(projection.operation_type)
+  check(policy.risk === projection.risk, `Typed projection risk mismatch for ${projection.operation_type}`)
 
   if (projection.freshness_required) {
     if (
@@ -229,28 +286,40 @@ export function routeTypedProjectionByRisk(projection, {
       return fallbackProjection(projection.scope, 'need_observation', 'stale_exact_identity', {
         confidence: projection.confidence,
         probabilities: projection.probabilities,
+        confidence_policy: policy,
       })
     }
   }
 
+  if (policy.automatic_projection !== true) {
+    return fallbackProjection(projection.scope, 'wake_planner', 'projection_operation_not_calibrated', {
+      confidence: projection.confidence,
+      probabilities: projection.probabilities,
+      confidence_policy: policy,
+    })
+  }
+
+  const threshold = policy.minimum_confidence
+  check(
+    typeof threshold === 'number' && Number.isFinite(threshold) && threshold >= 0 && threshold <= 1,
+    `Calibrated projection operation ${projection.operation_type} has no valid confidence threshold`,
+  )
+
   const confidence = projection.confidence
   if (typeof confidence !== 'number' || !Number.isFinite(confidence) || confidence < threshold) {
-    const requestedRoute = lowConfidenceRouteByRisk?.[projection.risk]
-    const route = requestedRoute === 'need_observation' || requestedRoute === 'wake_planner'
-      ? requestedRoute
+    const route = policy.low_confidence_route === 'need_observation' || policy.low_confidence_route === 'wake_planner'
+      ? policy.low_confidence_route
       : 'wake_planner'
     return fallbackProjection(projection.scope, route, 'projection_confidence_below_policy', {
       confidence,
       probabilities: projection.probabilities,
+      confidence_policy: policy,
     })
   }
 
   return {
     ...projection,
-    confidence_policy: {
-      risk: projection.risk,
-      minimum: threshold,
-    },
+    confidence_policy: policy,
     admission: 'requires_normal_preflight',
   }
 }

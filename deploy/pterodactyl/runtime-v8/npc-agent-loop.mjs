@@ -12,6 +12,7 @@ import {
 import { executeAuthorizedBatch } from './supervisor-adapter.mjs'
 import {
   boundarySteeringGate,
+  decisionConfidencePolicy,
   decisionEnvelopeQuestions,
   developmentDecisionQuestions,
   observationRelevanceQuestions,
@@ -54,6 +55,7 @@ import {
 import {
   parseTypedProjection,
   routeTypedProjectionByRisk,
+  typedProjectionOperationPolicy,
   typedProjectionQuestions,
 } from './jev-typed-projection.mjs'
 
@@ -78,7 +80,6 @@ const RESEARCH_PREFLIGHT_RECOVERABLE_CODES = new Set(['missing_prerequisites', '
 const MODEL_CORRECTABLE_PREFLIGHT_CODES = new Set(['unknown_prototype', 'unknown_recipe', 'invalid_unit_number', 'invalid_target_kind', 'invalid_preflight_args'])
 const MODEL_CORRECTABLE_PREFLIGHT_RETRY_BUDGET = 1
 const RESEARCH_PREFLIGHT_RETRY_BUDGET = 2
-const LOW_RISK_NAVIGATION_PROJECTION_MIN_CONFIDENCE = 0.85
 const LOW_RISK_NAVIGATION_PROJECTION_MAX_CANDIDATES = 8
 // Once the system commits a plan, its semantic content is immutable; later batches fulfil it rather than rewriting it.
 const FROZEN_PLAN_STATUSES = new Set([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING])
@@ -2497,8 +2498,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         : undefined
       const currentObservation = selectedUnit === undefined ? undefined : this.liveObservedExactTarget(selectedUnit)
       const routed = routeTypedProjectionByRisk(projection, {
-        minimumConfidenceByRisk: { low: LOW_RISK_NAVIGATION_PROJECTION_MIN_CONFIDENCE },
-        lowConfidenceRouteByRisk: { low: 'wake_planner' },
         currentFreshnessToken: currentObservation ? this.liveExactEntityFreshnessToken(selectedUnit) : undefined,
       })
       const latencyMs = Date.now() - startedAt
@@ -2512,6 +2511,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         candidate_id: routed.candidate_id,
         operation_type: routed.operation_type,
         confidence: routed.confidence,
+        confidence_policy: routed.confidence_policy,
         projection_failure: routed.projection_failure,
         latency_ms: latencyMs,
       })
@@ -2534,7 +2534,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         projected_operation: routed.operation.name,
         candidate_id: routed.candidate_id,
         confidence: routed.confidence,
-        minimum_confidence: LOW_RISK_NAVIGATION_PROJECTION_MIN_CONFIDENCE,
+        confidence_policy: routed.confidence_policy ?? typedProjectionOperationPolicy(routed.operation.name),
+        minimum_confidence: routed.confidence_policy?.minimum_confidence,
         normal_preflight_required: true,
       })
       return { ...plan, operations: [routed.operation] }
@@ -3706,6 +3707,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         model: decision.model,
         route: decision.route,
         confidence: decision.confidence,
+        confidence_policy: decisionConfidencePolicy(decision.requested_route),
         steering_telemetry: steeringContext,
         boundary_steering_gate: steeringGate,
         steering_budget_shadow_only: true,
@@ -6474,6 +6476,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         failure_class: decision.failure_class,
         route: decision.route,
         confidence: decision.confidence,
+        confidence_policy: decisionConfidencePolicy(decision.route),
         latency_ms: Date.now() - startedAt,
         input_units: Number.isFinite(decision.usage?.input_tokens) ? Math.max(0, Math.trunc(decision.usage.input_tokens)) : 0,
         output_units: Number.isFinite(decision.usage?.output_tokens) ? Math.max(0, Math.trunc(decision.usage.output_tokens)) : 0,

@@ -30,8 +30,42 @@ const OBSERVATION_RELEVANCE = Object.freeze({
   construction_state: 'Read construction sites, construction-plan validation, or construction-intent inspection only when construction feasibility is material to the next planner decision.',
 })
 
-const OBSERVATION_RELEVANCE_THRESHOLD = 0.5
-const OBSERVATION_RELEVANCE_MAX_SELECTED = 4
+const OBSERVATION_RELEVANCE_POLICY = Object.freeze({
+  probability_threshold: 0.5,
+  max_selected_families: 4,
+  confidence_role: 'bounded_read_relevance_only',
+  calibration_status: 'existing_m7_baseline_pending_phase9_measurement',
+})
+
+const OBSERVATION_RELEVANCE_THRESHOLD = OBSERVATION_RELEVANCE_POLICY.probability_threshold
+const OBSERVATION_RELEVANCE_MAX_SELECTED = OBSERVATION_RELEVANCE_POLICY.max_selected_families
+
+const DECISION_CONFIDENCE_POLICY = Object.freeze({
+  continue_runtime: Object.freeze({
+    confidence_role: 'telemetry_only',
+    deterministic_guard: 'authoritative_active_runtime',
+    confidence_can_authorize: false,
+    numeric_threshold_status: 'pending_phase9_e2e',
+  }),
+  observe: Object.freeze({
+    confidence_role: 'permissive_bounded_read',
+    deterministic_guard: 'observation_admission',
+    confidence_can_authorize: false,
+    numeric_threshold_status: 'pending_phase9_e2e',
+  }),
+  wake_planner: Object.freeze({
+    confidence_role: 'safe_reasoning_fallback',
+    deterministic_guard: 'main_llm_authority',
+    confidence_can_authorize: false,
+    numeric_threshold_status: 'not_required',
+  }),
+  ask_user: Object.freeze({
+    confidence_role: 'never_sufficient_for_user_authority',
+    deterministic_guard: 'authoritative_user_boundary',
+    confidence_can_authorize: false,
+    numeric_threshold_status: 'not_applicable',
+  }),
+})
 
 const TYPED_STATE_BOTTLENECKS = Object.freeze([
   'none_known',
@@ -195,6 +229,23 @@ export function jevDecisionFamilyChoices() {
 
 export function jevForbiddenAuthorityFields() {
   return FORBIDDEN_AUTHORITY_FIELDS
+}
+
+export function observationRelevancePolicy() {
+  return { ...OBSERVATION_RELEVANCE_POLICY }
+}
+
+export function decisionConfidencePolicy(route) {
+  if (!Object.hasOwn(DECISION_CONFIDENCE_POLICY, route)) {
+    throw new Error(`Unknown canonical decision route: ${route}`)
+  }
+  return { route, ...DECISION_CONFIDENCE_POLICY[route] }
+}
+
+export function decisionConfidencePolicyCatalog() {
+  return Object.fromEntries(
+    Object.keys(DECISION_CONFIDENCE_POLICY).map(route => [route, decisionConfidencePolicy(route)]),
+  )
 }
 
 export function developmentDecisionQuestions() {
