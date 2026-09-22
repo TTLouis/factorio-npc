@@ -37,6 +37,7 @@ const LEGACY_RECOVERY_ROUTE_ALIASES = Object.freeze({
   fallback_runtime: 'wake_planner',
   pause_recoverable: 'ask_user',
   propose_blocker: 'ask_user',
+  deterministic_close: 'wake_planner',
 })
 
 export function recoveryFailureClassHint(reason) {

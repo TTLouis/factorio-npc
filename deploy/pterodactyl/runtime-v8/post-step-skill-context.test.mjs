@@ -89,18 +89,26 @@ class TestRcon {
 }
 
 function decisionResponse(route) {
+  const canonicalRoute = {
+    continue_current: 'continue_runtime',
+    wait_runtime: 'continue_runtime',
+    targeted_observation: 'observe',
+    reanchor_plan: 'wake_planner',
+    replan: 'wake_planner',
+    fallback_planner: 'wake_planner',
+  }[route] ?? route
   return {
     model: 'jev-latest',
     provider: 'TypeSafe',
     answers: {
       route: {
         type: 'choice',
-        choice: route,
+        choice: canonicalRoute,
         probabilities: {
-          continue_current: route === 'continue_current' ? 0.9 : 0.03,
-          replan: route === 'replan' ? 0.9 : 0.03,
-          wait_runtime: route === 'wait_runtime' ? 0.9 : 0.03,
-          fallback_planner: route === 'fallback_planner' ? 0.9 : 0.03,
+          continue_runtime: canonicalRoute === 'continue_runtime' ? 0.9 : 0.03,
+          observe: canonicalRoute === 'observe' ? 0.9 : 0.03,
+          wake_planner: canonicalRoute === 'wake_planner' ? 0.9 : 0.03,
+          ask_user: canonicalRoute === 'ask_user' ? 0.9 : 0.03,
         },
         confidence: 0.9,
       },
@@ -237,7 +245,7 @@ test('wait_runtime skips the planner for active Autorio work or a healthy persis
     providerStatus: { task_state: 'idle', queue_empty: true, queue_length: 0 },
   })
   assert.equal(idleRoute.route, 'fallback_planner')
-  assert.equal(idleRoute.fallback_reason, 'wait_runtime_without_authoritative_active_runtime')
+  assert.equal(idleRoute.fallback_reason, 'continue_runtime_without_authoritative_active_runtime')
   assert.ok(idle.events.some(entry => entry.event === 'planner.wake'))
 })
 
@@ -295,6 +303,24 @@ test('post-step Jev receives a bounded grounded gate state instead of dialogue h
     ...Object.keys(typedStateDistillationQuestions()),
   ])
   assert.equal(Object.keys(captured.questions).length, 19)
+  assert.deepEqual(Object.keys(captured.questions.route.criteria), [
+    'continue_runtime',
+    'observe',
+    'wake_planner',
+    'ask_user',
+  ])
+})
+
+test('M9 post-step observe route wakes the planner with the bounded observation path', async () => {
+  const { agent } = agentForRoute('targeted_observation')
+  agent.taskStatusReceipt = async () => ({
+    raw: '{}',
+    view: { task_state: 'idle', queue_empty: true, queue_length: 0, last_completed_batch: { batch_id: 7 } },
+    providerStatus: { observation_mode: 'full', task_state: 'idle', queue_empty: true, queue_length: 0, last_completed_batch: { batch_id: 7 } },
+  })
+  agent.continueFromModMessage = async () => ({ triggerSource: agent.reasoningTriggerSource })
+  const result = await agent.completed()
+  assert.equal(result.triggerSource, 'post_step_observe')
 })
 
 test('M8 renders Jev typed state into post-step Main-LLM context with deterministic provenance', async () => {

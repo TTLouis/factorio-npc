@@ -3677,7 +3677,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // Boundary steering is advisory: it may only SUPPRESS a planner wake when
       // authoritative runtime work is already active and Jev says the current
       // direction still holds. It can never author, split or replace a plan.
-      if (steeringGate.allow_runtime_continuation && decision.route === 'continue_current') {
+      if (decision.requested_route === 'continue_runtime' && !runtimeHealthy) {
+        appliedRoute = 'fallback_planner'
+        fallbackReason = 'continue_runtime_without_authoritative_active_runtime'
+      }
+      else if (steeringGate.allow_runtime_continuation && decision.route === 'continue_current') {
         appliedRoute = 'wait_runtime'
         fallbackReason = 'steering_maintain_authoritative_runtime'
       }
