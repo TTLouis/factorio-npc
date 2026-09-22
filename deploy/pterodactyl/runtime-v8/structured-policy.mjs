@@ -127,6 +127,11 @@ export function operationTypeCatalog() {
   })
 }
 
+export function operationTypeCatalogForScope(scope) {
+  const allowed = new Set(operationNamesForScope(scope))
+  return operationTypeCatalog().filter(entry => allowed.has(entry.name))
+}
+
 export function parseOperation(value) {
   if (value?.name !== 'place_candidate') return base.parseOperation(value)
   check(value && typeof value === 'object' && !Array.isArray(value), 'Operation must be an object')

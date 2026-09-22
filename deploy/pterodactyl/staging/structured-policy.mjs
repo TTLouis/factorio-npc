@@ -432,6 +432,11 @@ export function operationTypeCatalog() {
   })
 }
 
+export function operationTypeCatalogForScope(scope) {
+  const allowed = new Set(operationNamesForScope(scope))
+  return operationTypeCatalog().filter(entry => allowed.has(entry.name))
+}
+
 export function isApprovedOperationName(name) {
   return typeof name === 'string' && Object.hasOwn(OPERATION_METADATA, name)
 }
