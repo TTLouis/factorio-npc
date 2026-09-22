@@ -333,7 +333,9 @@ function validateDecisionQuestion(id, question) {
   check(['choice', 'score', 'noul'].includes(question.type), `Decision question ${id} has an unsupported type`)
   const allowedKeys = new Set(['type', 'instructions', 'criteria'])
   for (const key of Object.keys(question)) check(allowedKeys.has(key), `Decision question ${id} has unsupported field ${key}`)
-  validateDecisionEntry(question.instructions, `Decision question ${id} instructions`)
+  if (question.instructions !== undefined) {
+    validateDecisionEntry(question.instructions, `Decision question ${id} instructions`)
+  }
 
   if (question.type === 'choice') {
     check(plainDecisionObject(question.criteria), `Choice question ${id} requires criteria`)
@@ -352,10 +354,10 @@ function validateDecisionQuestion(id, question) {
     }
   }
 
-  if (question.type === 'noul' && question.criteria !== undefined) {
-    check(plainDecisionObject(question.criteria), `Noul question ${id} criteria must be an object when provided`)
+  if (question.type === 'noul' && question.criteria !== undefined && question.criteria !== null) {
+    check(plainDecisionObject(question.criteria), `Noul question ${id} criteria must be an object or null when provided`)
     const entries = Object.entries(question.criteria)
-    check(entries.length >= 1 && entries.length <= 2, `Noul question ${id} criteria must describe true and/or false`)
+    check(entries.length <= 2, `Noul question ${id} criteria may describe only true and/or false`)
     for (const [key, description] of entries) {
       check(key === 'true' || key === 'false', `Noul question ${id} has unsupported criterion ${key}`)
       validateDecisionEntry(description, `Noul question ${id} criterion ${key}`)
@@ -370,6 +372,7 @@ export function normalizeDecisionProviderRequest(config, state, questions) {
   const entries = Object.entries(questions)
   check(entries.length >= 1 && entries.length <= config.maxQuestions, `Decision request must contain 1 to ${config.maxQuestions} questions`)
   for (const [id, question] of entries) validateDecisionQuestion(id, question)
+  validateDecisionEntry(state, 'Decision provider state')
 
   const body = {
     state,

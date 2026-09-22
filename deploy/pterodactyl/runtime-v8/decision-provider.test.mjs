@@ -357,6 +357,54 @@ test('decision provider accepts TypeSafe structured instructions and criteria', 
   assert.deepEqual(normalized.body.questions, questions)
 })
 
+test('M11A decision provider matches the official TypeSafe EntryType and optional-field contract', () => {
+  const config = decisionProviderConfiguration({ TYPESAFE_API_KEY: KEY })
+
+  const minimalNoul = { relevant: { type: 'noul' } }
+  for (const state of [
+    null,
+    'plain state',
+    { nested: { count: 2, enabled: true, empty: null }, values: [1, false, null] },
+    ['state', 3, true, null, { source: 'runtime' }],
+  ]) {
+    assert.doesNotThrow(() => normalizeDecisionProviderRequest(config, state, minimalNoul))
+  }
+
+  assert.doesNotThrow(() => normalizeDecisionProviderRequest(config, null, {
+    nullable_noul: {
+      type: 'noul',
+      instructions: null,
+      criteria: null,
+    },
+    empty_noul_criteria: {
+      type: 'noul',
+      criteria: {},
+    },
+    nullable_choice: {
+      type: 'choice',
+      criteria: {
+        first: null,
+        second: { explanation: 'structured description' },
+      },
+    },
+    nullable_score: {
+      type: 'score',
+      instructions: null,
+      criteria: [
+        null,
+        { level: 'high', metadata: { reversible: false } },
+      ],
+    },
+  }))
+
+  for (const invalidState of [undefined, 1, true, false]) {
+    assert.throws(
+      () => normalizeDecisionProviderRequest(config, invalidState, minimalNoul),
+      /Decision provider state must be a string, object, array, or null/,
+    )
+  }
+})
+
 test('decision provider keeps local question conservation separate from undocumented provider count limits', () => {
   const config = decisionProviderConfiguration({
     TYPESAFE_API_KEY: KEY,
