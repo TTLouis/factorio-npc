@@ -788,6 +788,94 @@ export const providerToolDefinitions = [
   ...plannerControlToolDefinitions,
 ]
 
+const OBSERVATION_TOOL_FAMILY = Object.freeze({
+  getActorStatus: 'runtime_status',
+  getTaskStatus: 'runtime_status',
+  getNavigationStatus: 'runtime_status',
+  getFollowStatus: 'runtime_status',
+  getDefenseStatus: 'runtime_status',
+  getCraftingStatus: 'runtime_status',
+  getCombatStatus: 'runtime_status',
+
+  getInventoryItems: 'inventory_equipment',
+  getEquipmentStatus: 'inventory_equipment',
+
+  getRecipe: 'recipe_production',
+  getRecipeDetails: 'recipe_production',
+  getProductionScope: 'recipe_production',
+  solveProduction: 'recipe_production',
+
+  discoverPrototypes: 'prototype_knowledge',
+  getPrototypeDetails: 'prototype_knowledge',
+  findSkills: 'prototype_knowledge',
+  getSkillDetails: 'prototype_knowledge',
+
+  getPlayerStatus: 'player_state',
+
+  getNearbyEntities: 'nearby_world',
+  findLongRangeEntities: 'nearby_world',
+  findNearestEnemy: 'nearby_world',
+
+  getEntityStatus: 'entity_status',
+  getEntityGeometry: 'entity_status',
+  getLocalSpatialObservation: 'entity_status',
+
+  getLogisticsTopology: 'logistics_transport',
+  measureTransportThroughput: 'logistics_transport',
+  getTransportCapacity: 'logistics_transport',
+
+  getResearchStatus: 'research_state',
+  getResearchRequest: 'research_state',
+  getTechnology: 'research_state',
+  getResearchPath: 'research_state',
+
+  getPlacementCandidates: 'placement_candidates',
+  planPlacement: 'placement_candidates',
+
+  findConstructionSites: 'construction_state',
+  validateConstructionPlan: 'construction_state',
+  inspectConstructionIntent: 'construction_state',
+})
+
+const OBSERVATION_TOOL_FAMILIES = Object.freeze([
+  'runtime_status',
+  'inventory_equipment',
+  'recipe_production',
+  'prototype_knowledge',
+  'player_state',
+  'nearby_world',
+  'entity_status',
+  'logistics_transport',
+  'research_state',
+  'placement_candidates',
+  'construction_state',
+])
+
+const observationToolNames = toolDefinitions.map(tool => tool?.function?.name).filter(Boolean)
+for (const name of observationToolNames) {
+  check(Object.hasOwn(OBSERVATION_TOOL_FAMILY, name), `Observation tool ${name} has no relevance family`)
+}
+for (const name of Object.keys(OBSERVATION_TOOL_FAMILY)) {
+  check(observationToolNames.includes(name), `Observation relevance metadata references unknown tool ${name}`)
+}
+for (const family of Object.values(OBSERVATION_TOOL_FAMILY)) {
+  check(OBSERVATION_TOOL_FAMILIES.includes(family), `Unknown observation relevance family ${family}`)
+}
+
+export function observationToolFamilies() {
+  return [...OBSERVATION_TOOL_FAMILIES]
+}
+
+export function observationToolFamily(name) {
+  return typeof name === 'string' && Object.hasOwn(OBSERVATION_TOOL_FAMILY, name)
+    ? OBSERVATION_TOOL_FAMILY[name]
+    : undefined
+}
+
+export function observationToolFamilyCatalog() {
+  return { ...OBSERVATION_TOOL_FAMILY }
+}
+
 export function isObservationToolName(name) {
   return typeof name === 'string'
     && toolDefinitions.some(tool => tool?.type === 'function' && tool.function?.name === name)

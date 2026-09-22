@@ -5,8 +5,8 @@
 //   - The Main LLM owns semantic planning and intent.
 //   - The deterministic runtime owns world truth, admission, safety and
 //     deterministic completion.
-//   - Jev only shapes bounded routing, reasoning effort, observation budget and
-//     advisory strategic steering. Jev is never a correctness reviewer.
+//   - Jev only shapes bounded routing, reasoning effort, typed observation
+//     relevance and advisory strategic steering. Jev is never a correctness reviewer.
 
 const FAMILY_CHOICES = Object.freeze({
   development: ['vertical', 'horizontal', 'maintain', 'recover'],
@@ -15,6 +15,23 @@ const FAMILY_CHOICES = Object.freeze({
 })
 
 const PLANNING_HORIZONS = new Set(['immediate', 'checkpoint', 'subgoal', 'strategic'])
+
+const OBSERVATION_RELEVANCE = Object.freeze({
+  runtime_status: 'Read actor/task/controller status only when current runtime state can change the next planner decision.',
+  inventory_equipment: 'Read inventory or equipment only when owned items, ammo, armor, or equipped state can change the next planner decision.',
+  recipe_production: 'Read recipe or production-solver state only when crafting/production dependencies can change the next planner decision.',
+  prototype_knowledge: 'Read prototypes or reusable skill knowledge only when static capability knowledge is missing and material to the next planner decision.',
+  player_state: 'Read human-player state only when a named player position/availability is material to the next planner decision.',
+  nearby_world: 'Read nearby or long-range entities/resources/enemies only when spatial world discovery is material to the next planner decision.',
+  entity_status: 'Read exact entity status, geometry, or local spatial detail only when a known entity must be inspected before acting.',
+  logistics_transport: 'Read logistics topology, transport capacity, or measured throughput only when transport behavior/capacity is material to the next planner decision.',
+  research_state: 'Read technologies, research status, or dependency paths only when research eligibility/progress is material to the next planner decision.',
+  placement_candidates: 'Read deterministic placement candidates or placement plans only when the next planner decision requires choosing where an entity can validly go.',
+  construction_state: 'Read construction sites, construction-plan validation, or construction-intent inspection only when construction feasibility is material to the next planner decision.',
+})
+
+const OBSERVATION_RELEVANCE_THRESHOLD = 0.5
+const OBSERVATION_RELEVANCE_MAX_SELECTED = 4
 
 // Fields a provider might emit that would give Jev planning authority. They are
 // never read into a parsed result; they are only reported for telemetry so the
@@ -197,6 +214,88 @@ export function reasoningBudgetDecisionQuestions() {
   }
 }
 
+export function observationRelevanceFamilies() {
+  return Object.keys(OBSERVATION_RELEVANCE)
+}
+
+export function observationRelevanceQuestions() {
+  return Object.fromEntries(
+    Object.entries(OBSERVATION_RELEVANCE).map(([family, description]) => [
+      `need_${family}`,
+      {
+        type: 'noul',
+        instructions: {
+          task: 'Estimate whether this deterministic observation family is useful before the NEXT Main LLM decision.',
+          family,
+          rules: [
+            'Judge relevance only; do not invent the observation result.',
+            'Prefer false when current grounded evidence is already sufficient.',
+            'A true/high value is advisory. Code still applies caps, caching, and deterministic tool validation.',
+          ],
+        },
+        criteria: {
+          true: description,
+          false: 'Current grounded evidence is sufficient for this family, or this family is not material to the next planner decision.',
+        },
+      },
+    ]),
+  )
+}
+
+export function parseObservationRelevance(response, {
+  threshold = OBSERVATION_RELEVANCE_THRESHOLD,
+  maxSelected = OBSERVATION_RELEVANCE_MAX_SELECTED,
+} = {}) {
+  const boundedThreshold = typeof threshold === 'number' && Number.isFinite(threshold)
+    ? Math.max(0, Math.min(1, threshold))
+    : OBSERVATION_RELEVANCE_THRESHOLD
+  const boundedMax = Number.isSafeInteger(maxSelected)
+    ? Math.max(1, Math.min(8, maxSelected))
+    : OBSERVATION_RELEVANCE_MAX_SELECTED
+
+  const probabilities = {}
+  let signalCount = 0
+  const ranked = []
+  for (const family of observationRelevanceFamilies()) {
+    const raw = response?.answers?.[`need_${family}`]?.noul
+    const valid = typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 && raw <= 1
+    const probability = valid ? raw : 0
+    probabilities[family] = probability
+    if (valid) {
+      signalCount++
+      ranked.push({ family, probability })
+    }
+  }
+
+  if (signalCount === 0) {
+    const legacyAnswer = response?.answers?.observation_budget
+    const legacyBudget = boundedInteger(legacyAnswer?.score ?? legacyAnswer?.number, 0, 8)
+    return {
+      source: legacyAnswer ? 'legacy_score_compat' : 'none',
+      threshold: boundedThreshold,
+      probabilities,
+      selected_families: [],
+      signal_count: 0,
+      budget: legacyBudget,
+    }
+  }
+
+  ranked.sort((left, right) => right.probability - left.probability || left.family.localeCompare(right.family))
+  const selected = ranked
+    .filter(entry => entry.probability >= boundedThreshold)
+    .slice(0, boundedMax)
+    .map(entry => entry.family)
+
+  return {
+    source: 'typed_relevance',
+    threshold: boundedThreshold,
+    probabilities,
+    selected_families: selected,
+    signal_count: signalCount,
+    budget: selected.length,
+  }
+}
+
 export function steeringRecommendationQuestions() {
   return {
     ...developmentDecisionQuestions(),
@@ -223,21 +322,7 @@ export function decisionEnvelopeQuestions() {
         strategic: 'Plan or revise overall goal direction and which shelf node to refine next.',
       },
     },
-    observation_budget: {
-      type: 'score',
-      instructions: 'Maximum count of independent targeted read-only observations justified before the planner must act, block truthfully, or return for another control decision. Choose the exact integer allowance from 0 through 8. Use 0 when current grounded evidence is enough. Runtime will clamp and enforce this budget.',
-      criteria: [
-        '0 additional targeted observations',
-        '1 additional targeted observation',
-        '2 additional targeted observations',
-        '3 additional targeted observations',
-        '4 additional targeted observations',
-        '5 additional targeted observations',
-        '6 additional targeted observations',
-        '7 additional targeted observations',
-        '8 additional targeted observations',
-      ],
-    },
+    ...observationRelevanceQuestions(),
   }
 }
 
@@ -300,17 +385,18 @@ export function parseBoundarySteeringTelemetry(response) {
   const development = parseDecisionFamily(response, 'development', 'maintain')
   const reasoning = parseDecisionFamily(response, 'reasoning_budget', 'normal')
   const horizon = choiceOf(response, 'planning_horizon')
+  const observation = parseObservationRelevance(response)
   return {
     development: development.decision,
     development_confidence: development.confidence,
     reasoning_budget: reasoning.decision,
     reasoning_confidence: reasoning.confidence,
     planning_horizon: PLANNING_HORIZONS.has(horizon) ? horizon : 'checkpoint',
-    observation_budget: boundedInteger(
-      response?.answers?.observation_budget?.score ?? response?.answers?.observation_budget?.number,
-      0,
-      8,
-    ),
+    observation_relevance: observation,
+    // Compatibility field for the existing bounded admission machinery. This
+    // value is now derived by code from typed relevance, never asked as an
+    // integer/Score question in the live TypeSafe contract.
+    observation_budget: observation.budget,
   }
 }
 
