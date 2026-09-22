@@ -262,9 +262,9 @@ test('observation budget rounds fractional score output instead of collapsing to
 test('steering recommendation cannot smuggle plan authority either', () => {
   const parsed = parseSteeringRecommendation({
     answers: {
-      steering: {
-        recommended_mode: 'horizontal',
-        confidence: 'high',
+      development: {
+        choice: 'horizontal',
+        confidence: 0.9,
         plan: { steps: ['do the thing'] },
         operations: [{ name: 'craft' }],
       },
@@ -286,70 +286,94 @@ test('forbidden authority field list covers step and operation shapes', () => {
 
 // --- steering recommendation -------------------------------------------------
 
-test('parses the roadmap 4.7 steering recommendation shape', () => {
+const STEERING_TEST_PRESSURE = {
+  vertical: ['frontier_reached', 'capability_absent'],
+  horizontal: ['power_margin_low', 'logistics_bottleneck'],
+}
+
+const STEERING_TEST_SHELF = [
+  { id: 'roadmap_oil_stabilization', intent: 'stabilize oil throughput', status: 'ready_to_refine', development_hint: 'horizontal' },
+  { id: 'roadmap_power_margin', intent: 'increase power margin', status: 'ready_to_refine', development_hint: 'horizontal' },
+]
+
+test('M11B steering is composed only from actual Choice and Noul answers', () => {
   const parsed = parseSteeringRecommendation({
     answers: {
-      steering: {
-        recommended_mode: 'horizontal',
-        confidence: 'high',
-        reason_codes: ['frontier_reached', 'capacity_below_next_frontier_need', 'power_margin_low'],
-        critical_path_summary: 'stabilize oil throughput before blue science',
-        candidate_shelf_nodes: ['roadmap_oil_stabilization', 'roadmap_power_margin'],
-      },
+      development: { choice: 'horizontal', confidence: 0.9 },
+      pressure_frontier_reached: { type: 'noul', noul: 0.22 },
+      pressure_capability_absent: { type: 'noul', noul: 0.18 },
+      pressure_power_margin_low: { type: 'noul', noul: 0.94 },
+      pressure_logistics_bottleneck: { type: 'noul', noul: 0.71 },
+      next_shelf_node: { choice: 'node_1', confidence: 0.82 },
     },
     model: 'jev-steer',
     provider: 'jev',
     usage: { tokens: 12 },
+  }, {
+    candidateShelfNodes: STEERING_TEST_SHELF,
+    pressureVocabulary: STEERING_TEST_PRESSURE,
   })
-  assert.deepEqual(parsed, {
-    family: 'steering',
-    recommended_mode: 'horizontal',
-    confidence: 0.9,
-    reason_codes: ['frontier_reached', 'capacity_below_next_frontier_need', 'power_margin_low'],
-    critical_path_summary: 'stabilize oil throughput before blue science',
-    candidate_shelf_nodes: ['roadmap_oil_stabilization', 'roadmap_power_margin'],
-    dropped_authority_fields: [],
-    model: 'jev-steer',
-    provider: 'jev',
-    usage: { tokens: 12 },
-  })
+
+  assert.equal(parsed.recommended_mode, 'horizontal')
+  assert.equal(parsed.confidence, 0.9)
+  assert.deepEqual(parsed.reason_codes, ['power_margin_low', 'logistics_bottleneck'])
+  assert.deepEqual(parsed.candidate_shelf_nodes, ['roadmap_oil_stabilization'])
+  assert.equal(parsed.pressure_probabilities.power_margin_low, 0.94)
+  assert.equal(parsed.pressure_threshold, 0.5)
+  assert.equal(parsed.shelf_node_confidence, 0.82)
+  assert.equal(Object.prototype.hasOwnProperty.call(parsed, 'critical_path_summary'), false)
+  assert.deepEqual(parsed.dropped_authority_fields, [])
+  assert.equal(parsed.model, 'jev-steer')
+  assert.equal(parsed.provider, 'jev')
 })
 
-test('steering recommendation bounds, sanitizes and falls back safely', () => {
+test('M11B steering ignores old generated fields and falls back safely', () => {
   const parsed = parseSteeringRecommendation({
     answers: {
+      development: { choice: 'sideways', confidence: 2 },
       steering: {
-        recommended_mode: 'sideways',
-        confidence: 2,
-        reason_codes: ['ok_code', 'Bad Code', '', 7, 'ok_code', 'a'.repeat(200), 'b_1', 'c_2', 'd_3', 'e_4', 'f_5', 'g_6', 'h_7', 'i_8'],
-        critical_path_summary: 's'.repeat(900),
-        candidate_shelf_nodes: ['roadmap_a', 'roadmap b', 'roadmap_a', 'n1', 'n2', 'n3', 'n4', 'n5', 'n6'],
+        recommended_mode: 'vertical',
+        reason_codes: ['fabricated_reason'],
+        critical_path_summary: 'generated prose that is no longer consumed',
+        candidate_shelf_nodes: ['fabricated_node'],
       },
+      pressure_power_margin_low: { type: 'noul', noul: 7 },
+      next_shelf_node: { choice: 'node_99', confidence: 1 },
     },
+  }, {
+    candidateShelfNodes: STEERING_TEST_SHELF,
+    pressureVocabulary: STEERING_TEST_PRESSURE,
   })
+
   assert.equal(parsed.recommended_mode, 'maintain')
   assert.equal(parsed.confidence, 1)
-  assert.equal(parsed.reason_codes.length, 8)
-  assert.ok(!parsed.reason_codes.includes('Bad Code'))
-  assert.equal(parsed.critical_path_summary.length, 200)
-  assert.deepEqual(parsed.candidate_shelf_nodes, ['roadmap_a', 'n1', 'n2', 'n3', 'n4'])
+  assert.deepEqual(parsed.reason_codes, [])
+  assert.deepEqual(parsed.candidate_shelf_nodes, [])
+  assert.equal(Object.prototype.hasOwnProperty.call(parsed, 'critical_path_summary'), false)
+  assert.doesNotMatch(JSON.stringify(parsed), /generated prose|fabricated_node|fabricated_reason/)
 })
 
-test('steering recommendation falls back to the development answer when no steering section exists', () => {
+test('steering recommendation still works with only the development head', () => {
   const parsed = parseSteeringRecommendation({ answers: { development: { choice: 'recover', confidence: 0.5 } } })
   assert.equal(parsed.recommended_mode, 'recover')
   assert.equal(parsed.confidence, 0.5)
   assert.deepEqual(parsed.reason_codes, [])
-  assert.equal(parsed.critical_path_summary, undefined)
+  assert.deepEqual(parsed.candidate_shelf_nodes, [])
 })
 
-test('steering question set is advisory and lists the four modes', () => {
-  const questions = steeringRecommendationQuestions()
-  assert.deepEqual(Object.keys(questions).sort(), ['development', 'steering'])
-  assert.match(questions.steering.instructions, /advisory/i)
-  assert.match(questions.steering.instructions, /may not author the next plan/i)
-  assert.match(questions.steering.instructions, /mutate the shelf/i)
-  assert.deepEqual(Object.keys(questions.steering.criteria), ['vertical', 'horizontal', 'maintain', 'recover'])
+test('M11B steering questions are independent typed heads over authoritative candidates', () => {
+  const questions = steeringRecommendationQuestions({
+    candidateShelfNodes: STEERING_TEST_SHELF,
+    pressureVocabulary: STEERING_TEST_PRESSURE,
+  })
+  assert.equal(questions.steering, undefined)
+  assert.deepEqual(Object.keys(questions.development.criteria), ['vertical', 'horizontal', 'maintain', 'recover'])
+  assert.equal(questions.pressure_frontier_reached.type, 'noul')
+  assert.equal(questions.pressure_power_margin_low.type, 'noul')
+  assert.equal(questions.next_shelf_node.type, 'choice')
+  assert.deepEqual(Object.keys(questions.next_shelf_node.criteria), ['none', 'node_1', 'node_2'])
+  assert.equal(questions.next_shelf_node.criteria.node_1.node_id, 'roadmap_oil_stabilization')
+  assert.match(JSON.stringify(questions.next_shelf_node.instructions), /does not author/i)
 })
 
 // --- boundary gate ----------------------------------------------------------

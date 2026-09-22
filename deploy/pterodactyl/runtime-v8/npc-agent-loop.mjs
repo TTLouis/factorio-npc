@@ -3356,7 +3356,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       verified_world: sanitizeDurableModelValue(receipt?.providerStatus ?? receipt?.view ?? world),
     }
 
-    const questions = steeringRecommendationQuestions()
+    const steeringQuestionOptions = {
+      candidateShelfNodes: state.roadmap?.nodes ?? [],
+      pressureVocabulary: STEERING_PRESSURE_VOCABULARY,
+    }
+    const questions = steeringRecommendationQuestions(steeringQuestionOptions)
     const decisionId = `decision_${Date.now().toString(36)}_${(++this.decisionRequestSequence).toString(36)}`
     const startedAt = Date.now()
     await this.decisionTraceEvent('decision.request', {
@@ -3371,7 +3375,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         epoch: this.epoch?.epoch,
         actorId: this.epoch?.actor_id,
       })
-      const parsed = parseSteeringRecommendation(response)
+      const parsed = parseSteeringRecommendation(response, steeringQuestionOptions)
       const recommendation = {
         ...parsed,
         pressure: steeringPressureFromReasonCodes(parsed.reason_codes),
@@ -3385,6 +3389,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         confidence: recommendation.confidence,
         reason_codes: recommendation.reason_codes,
         candidate_shelf_nodes: recommendation.candidate_shelf_nodes,
+        shelf_node_confidence: recommendation.shelf_node_confidence,
+        pressure_probabilities: recommendation.pressure_probabilities,
         pressure: recommendation.pressure,
         provider: recommendation.provider,
         model: recommendation.model,

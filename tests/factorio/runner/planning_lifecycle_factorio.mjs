@@ -106,23 +106,27 @@ function planMessage({
   }
 }
 
-function steeringAnswer(mode, reasonCode, criticalPath, candidateShelfNodes = []) {
+function steeringAnswer(questions, mode, reasonCode, candidateShelfNodes = []) {
+  const answers = {
+    development: { choice: mode, confidence: 0.95 },
+  }
+  for (const key of Object.keys(questions)) {
+    if (key.startsWith('pressure_')) {
+      answers[key] = { type: 'noul', noul: key === `pressure_${reasonCode}` ? 0.95 : 0.05 }
+    }
+  }
+  if (questions.next_shelf_node) {
+    const wanted = candidateShelfNodes[0]
+    const selected = Object.entries(questions.next_shelf_node.criteria)
+      .find(([, description]) => description?.node_id === wanted)?.[0] ?? 'none'
+    answers.next_shelf_node = { choice: selected, confidence: wanted ? 0.9 : 0.7 }
+  }
   return {
-    answers: {
-      development: { choice: mode, confidence: 0.95 },
-      steering: {
-        choice: mode,
-        confidence: 0.95,
-        reason_codes: [reasonCode],
-        critical_path_summary: criticalPath,
-        candidate_shelf_nodes: candidateShelfNodes,
-      },
-    },
+    answers,
     provider: 'fixture-jev',
     model: 'fixture-steering',
   }
 }
-
 function makeAgent({
   rcon,
   stateFile,
@@ -230,30 +234,31 @@ async function prepare({ rcon, results, stateFile }) {
 
   const steeringDecisionProvider = async (state, questions) => {
     steeringCalls++
-    assert.ok(questions.steering, 'Phase 9 must use the dedicated steering recommendation contract')
+    assert.ok(questions.development, 'M11B must use the typed development steering head')
+    assert.equal(questions.steering, undefined, 'duplicate/generated steering head must stay retired')
     if (steeringCalls === 1) {
       assert.equal(state.boundary, 'goal_admission')
       return steeringAnswer(
+        questions,
         'vertical',
         'goal_requires_new_capability',
-        'establish the first verified acquisition frontier',
       )
     }
     if (steeringCalls === 2) {
       assert.equal(state.boundary, 'plan_completed')
       return steeringAnswer(
+        questions,
         'horizontal',
         'power_margin_low',
-        'strengthen the reached acquisition frontier before pushing again',
         ['acquisition-support'],
       )
     }
     if (steeringCalls === 3) {
       assert.equal(state.boundary, 'plan_completed')
       return steeringAnswer(
+        questions,
         'vertical',
         'shelf_node_ready_to_refine',
-        'advance the next capability frontier from the supported base',
         ['next-capability-frontier'],
       )
     }

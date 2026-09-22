@@ -532,16 +532,99 @@ export function renderTypedStateContext(distillation) {
   ].join('\n')
 }
 
-export function steeringRecommendationQuestions() {
-  return {
-    ...developmentDecisionQuestions(),
-    steering: {
-      type: 'choice',
-      instructions:
-        'Advisory boundary steering recommendation. Return the recommended development mode for the NEXT plan slice, bounded reason codes, a one-line critical path summary, and up to five candidate Roadmap Shelf node ids to refine next. You may not author the next plan, mutate the shelf, choose operations, change a committed plan, or override explicit user priorities.',
-      criteria: developmentDecisionQuestions().development.criteria,
-    },
+function normalizedSteeringPressureEntries(raw) {
+  const out = []
+  const seen = new Set()
+  const source = isPlainObject(raw) ? raw : {}
+  for (const direction of ['vertical', 'horizontal']) {
+    for (const value of asArray(source[direction])) {
+      const code = snakeCode(value)
+      if (!code || seen.has(code)) continue
+      seen.add(code)
+      out.push({ direction, code })
+      if (out.length >= 24) return out
+    }
   }
+  return out
+}
+
+function normalizedSteeringShelfCandidates(raw) {
+  const out = []
+  const seen = new Set()
+  for (const value of asArray(raw)) {
+    const source = isPlainObject(value) ? value : { id: value }
+    const id = boundedText(source.id, 120)
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    out.push({
+      id,
+      intent: boundedText(source.intent, 400),
+      status: boundedText(source.status, 80),
+      development_hint: boundedText(source.development_hint, 40),
+    })
+    if (out.length >= 24) break
+  }
+  return out
+}
+
+export function steeringRecommendationQuestions({
+  candidateShelfNodes = [],
+  pressureVocabulary = {},
+} = {}) {
+  const questions = {
+    ...developmentDecisionQuestions(),
+  }
+
+  for (const { direction, code } of normalizedSteeringPressureEntries(pressureVocabulary)) {
+    questions[`pressure_${code}`] = {
+      type: 'noul',
+      instructions: {
+        task: 'Judge whether the supplied authoritative planning-boundary state supports this specific steering-pressure condition.',
+        direction,
+        pressure_code: code,
+        condition: code.replaceAll('_', ' '),
+        rules: [
+          'Judge only evidence present in the supplied state.',
+          'This is advisory pressure provenance; it cannot create world truth or planning authority.',
+          'Return false when the condition is merely plausible but not supported by the supplied state.',
+        ],
+      },
+      criteria: {
+        true: { meaning: 'The supplied state supports this named steering-pressure condition.' },
+        false: { meaning: 'The supplied state does not support this named steering-pressure condition.' },
+      },
+    }
+  }
+
+  const shelf = normalizedSteeringShelfCandidates(candidateShelfNodes)
+  if (shelf.length > 0) {
+    const criteria = {
+      none: 'No supplied Roadmap Shelf node should be singled out as the next refinement candidate.',
+    }
+    for (let index = 0; index < shelf.length; index++) {
+      const node = shelf[index]
+      criteria[`node_${index + 1}`] = {
+        node_id: node.id,
+        intent: node.intent ?? null,
+        status: node.status ?? null,
+        development_hint: node.development_hint ?? null,
+      }
+    }
+    questions.next_shelf_node = {
+      type: 'choice',
+      instructions: {
+        task: 'Select at most one supplied Roadmap Shelf node that is the most useful candidate for the NEXT Main-LLM refinement.',
+        rules: [
+          'Choose only from the supplied candidates or none.',
+          'This does not author, mutate, commit, or execute the node.',
+          'Prefer none when the supplied state does not justify singling out one candidate.',
+        ],
+      },
+      criteria,
+    }
+  }
+
+  return questions
 }
 
 export function decisionEnvelopeQuestions() {
@@ -578,37 +661,52 @@ export function parseDecisionFamily(response, family, fallback) {
 /**
  * Bounded advisory steering recommendation (roadmap section 4.7).
  */
-export function parseSteeringRecommendation(response) {
-  const section = sectionOf(response, 'steering')
-  const modes = FAMILY_CHOICES.development
-  const rawMode = choiceOf(response, 'steering')
-    ?? section.recommended_mode
-    ?? section.choice
-    ?? choiceOf(response, 'development')
-  const recommended_mode = modes.includes(rawMode) ? rawMode : 'maintain'
+export function parseSteeringRecommendation(response, {
+  candidateShelfNodes = [],
+  pressureVocabulary = {},
+  pressureThreshold = 0.5,
+} = {}) {
+  const development = parseDecisionFamily(response, 'development', 'maintain')
+  const pressureEntries = normalizedSteeringPressureEntries(pressureVocabulary)
+  const threshold = typeof pressureThreshold === 'number' && Number.isFinite(pressureThreshold)
+    ? Math.max(0, Math.min(1, pressureThreshold))
+    : 0.5
+  const pressure_probabilities = {}
+  const reason_codes = []
 
-  const reason_codes = uniqueBounded(
-    asArray(section.reason_codes).map((code) => snakeCode(code)).filter((code) => code !== undefined),
-    MAX_REASON_CODES,
-  )
+  for (const { code } of pressureEntries) {
+    const raw = response?.answers?.[`pressure_${code}`]?.noul
+    const valid = typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 && raw <= 1
+    if (!valid) continue
+    pressure_probabilities[code] = raw
+    if (raw >= threshold && reason_codes.length < MAX_REASON_CODES) reason_codes.push(code)
+  }
 
-  const candidate_shelf_nodes = uniqueBounded(
-    asArray(section.candidate_shelf_nodes)
-      .map((value) => (typeof value === 'string' && ID_PATTERN.test(value.trim()) ? value.trim() : undefined))
-      .filter((value) => value !== undefined),
-    MAX_SHELF_NODES,
-  )
+  const shelf = normalizedSteeringShelfCandidates(candidateShelfNodes)
+  const shelfAnswer = response?.answers?.next_shelf_node
+  const selected = typeof shelfAnswer?.choice === 'string' ? shelfAnswer.choice : 'none'
+  let candidate_shelf_nodes = []
+  const match = /^node_([1-9][0-9]*)$/.exec(selected)
+  if (match) {
+    const index = Number(match[1]) - 1
+    if (index >= 0 && index < shelf.length) candidate_shelf_nodes = [shelf[index].id]
+  }
 
+  const legacySection = sectionOf(response, 'steering')
   return {
     family: 'steering',
-    recommended_mode,
-    confidence: clampConfidence(
-      section.confidence ?? response?.answers?.steering?.confidence ?? response?.answers?.development?.confidence,
-    ),
+    recommended_mode: development.decision,
+    confidence: development.confidence,
     reason_codes,
-    critical_path_summary: boundedText(section.critical_path_summary, 200),
     candidate_shelf_nodes,
-    dropped_authority_fields: droppedAuthorityFields(section, response),
+    pressure_probabilities,
+    pressure_threshold: threshold,
+    shelf_node_confidence: choiceConfidence(response, 'next_shelf_node'),
+    dropped_authority_fields: droppedAuthorityFields(
+      response?.answers?.development,
+      legacySection,
+      response,
+    ),
     ...providerMetadata(response),
   }
 }
