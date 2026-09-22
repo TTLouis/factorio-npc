@@ -653,9 +653,6 @@ function emptyAgentDebug(fallback = {}) {
     decision_planner_replan_high_wakes_total: 0,
     decision_planner_fallback_wakes_total: 0,
     decision_error: '',
-    step_relation: '',
-    step_checkpoint_boundary: '',
-    step_admission_alignment: '',
     step_completion_contract: '',
     step_completion_status: '',
     step_completion_evidence: '',
@@ -914,28 +911,13 @@ export function liveAgentDebugEvent(event, data = {}, previous = {}, fallback = 
     }
   }
 
-  if (event === 'step.contract_created' || event === 'step.checkpoint_created') {
+  if (event === 'step.contract_created' || event === 'step.checkpoint_validated') {
     const contract = data?.contract && typeof data.contract === 'object' ? data.contract : {}
     const kinds = Array.isArray(contract.requirements)
       ? contract.requirements.map(requirement => uiText(requirement?.kind, 60)).filter(Boolean).join('+')
       : ''
     debug.step_completion_contract = uiText(kinds || contract.mode || 'semantic_unknown', 200)
     debug.step_completion_status = contract.mode === 'semantic_unknown' ? 'unknown' : 'waiting'
-    if (event === 'step.checkpoint_created') {
-      debug.step_relation = uiText(data.relation, 80)
-      debug.step_checkpoint_boundary = uiText(data.boundary, 80)
-      debug.step_admission_alignment = ['advances_current', 'prerequisite_for_current'].includes(data.relation)
-        ? 'aligned'
-        : 'reanchor_required'
-    }
-  }
-  if (event === 'operations.semantic_alignment_rejected') {
-    debug.step_relation = uiText(data.relation, 80) || debug.step_relation
-    debug.step_checkpoint_boundary = uiText(data.checkpoint_boundary, 80) || debug.step_checkpoint_boundary
-    debug.step_admission_alignment = 'reanchor_required'
-  }
-  if (event === 'operations.admit' && debug.step_admission_alignment === 'aligned') {
-    debug.step_admission_alignment = 'admitted'
   }
   if (event === 'step.completion_checked') {
     debug.step_completion_status = uiText(data.status, 80) || debug.step_completion_status
