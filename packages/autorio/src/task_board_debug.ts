@@ -127,9 +127,6 @@ export interface TaskBoardUiDebugSnapshot {
   decision_planner_replan_high_wakes_total: number
   decision_planner_fallback_wakes_total: number
   decision_error: string
-  step_relation: string
-  step_checkpoint_boundary: string
-  step_admission_alignment: string
   step_completion_contract: string
   step_completion_status: string
   step_completion_evidence: string
@@ -263,9 +260,6 @@ export function sanitize_debug_snapshot(value: any): TaskBoardUiDebugSnapshot {
     decision_planner_replan_high_wakes_total: integer(debug.decision_planner_replan_high_wakes_total),
     decision_planner_fallback_wakes_total: integer(debug.decision_planner_fallback_wakes_total),
     decision_error: clean_text(debug.decision_error, 300),
-    step_relation: clean_text(debug.step_relation, 80),
-    step_checkpoint_boundary: clean_text(debug.step_checkpoint_boundary, 80),
-    step_admission_alignment: clean_text(debug.step_admission_alignment, 80),
     step_completion_contract: clean_text(debug.step_completion_contract, 200),
     step_completion_status: clean_text(debug.step_completion_status, 120),
     step_completion_evidence: clean_text(debug.step_completion_evidence, 300),
