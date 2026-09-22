@@ -16,9 +16,7 @@ import {
   developmentDecisionQuestions,
   parseBoundarySteeringTelemetry,
   parseDecisionFamily,
-  parseScopeReview,
   parseSteeringRecommendation,
-  scopeReviewQuestions,
   steeringRecommendationQuestions,
 } from './jev-decision-taxonomy.mjs'
 import { isLifecycleMetaStep, normalizeCanonicalPlan, validateOutcomeCandidate } from './outcome-authority.mjs'
@@ -77,12 +75,6 @@ const RESEARCH_PREFLIGHT_RECOVERABLE_CODES = new Set(['missing_prerequisites', '
 const MODEL_CORRECTABLE_PREFLIGHT_CODES = new Set(['unknown_prototype', 'unknown_recipe', 'invalid_unit_number', 'invalid_target_kind', 'invalid_preflight_args'])
 const MODEL_CORRECTABLE_PREFLIGHT_RETRY_BUDGET = 1
 const RESEARCH_PREFLIGHT_RETRY_BUDGET = 2
-const JEV_SCOPE_REFINEMENT_BUDGET = 2
-// A scope review that cannot be obtained is a control-plane failure, not a
-// verdict. It is retried once, then the draft commits on deterministic runtime
-// validation alone, exactly as it does when no Jev provider is configured.
-const JEV_SCOPE_REVIEW_ATTEMPTS = 2
-const SCOPE_GROUNDING_OBSERVATION_ALLOWANCE = 2
 // Once the system commits a plan it is frozen against its authors, Jev
 // included: later batches fulfil the committed steps and are not re-reviewed.
 const FROZEN_PLAN_STATUSES = new Set([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING])
@@ -93,9 +85,6 @@ const INVENTORY_PRODUCT_FIELD_BY_OPERATION = Object.freeze({
   harvest_product: 'product_name',
   craft_item: 'item_name',
 })
-const JEV_SCOPE_REVIEW_MAX_OBSERVATIONS = 8
-const JEV_SCOPE_REVIEW_MAX_OBSERVATION_CHARS = 12000
-const JEV_SCOPE_REVIEW_MAX_LIVE_ENTITIES = 12
 const EXACT_ENTITY_TARGET_OPERATIONS = new Set([
   'walk_to_entity_exact',
   'mine_entity_exact',
@@ -110,8 +99,6 @@ const JEV_PIPELINE_RUNTIME_GUARDS = [
   ['developmentDecisionQuestions', typeof developmentDecisionQuestions],
   ['boundarySteeringGate', typeof boundarySteeringGate],
   ['parseDecisionFamily', typeof parseDecisionFamily],
-  ['scopeReviewQuestions', typeof scopeReviewQuestions],
-  ['parseScopeReview', typeof parseScopeReview],
   ['steeringRecommendationQuestions', typeof steeringRecommendationQuestions],
   ['parseSteeringRecommendation', typeof parseSteeringRecommendation],
   ['parseBoundarySteeringTelemetry', typeof parseBoundarySteeringTelemetry],
@@ -209,55 +196,6 @@ function sanitizeDurableModelValue(value) {
     result[key] = sanitizeDurableModelValue(child)
   }
   return result
-}
-
-function boundedScopeReviewValue(value, depth = 0) {
-  if (depth > 4) return undefined
-  if (typeof value === 'string') return cleanMemoryText(value, 800)
-  if (typeof value === 'number' || typeof value === 'boolean' || value === null) return value
-  if (Array.isArray(value)) {
-    return value.slice(0, 16)
-      .map(item => boundedScopeReviewValue(item, depth + 1))
-      .filter(item => item !== undefined)
-  }
-  if (!value || typeof value !== 'object') return undefined
-  const entries = Object.entries(value).slice(0, 32)
-    .map(([key, child]) => [key, boundedScopeReviewValue(child, depth + 1)])
-    .filter(([, child]) => child !== undefined)
-  return Object.fromEntries(entries)
-}
-
-function scopeReviewFailureKind(error, stage) {
-  const message = String(error?.message ?? error ?? '').toLowerCase()
-  if (/timed out|timeout/.test(message)) return 'timeout'
-  if (/abort|cancel/.test(message)) return 'cancellation'
-  if (/econn|network|fetch|socket|dns|http status|status code|connection/.test(message)) return 'transport'
-  if (stage === 'parse' || /schema|parse|invalid json|missing answer|invalid answer|choice/.test(message)) return 'parse_schema'
-  return stage === 'provider' ? 'provider' : 'unknown'
-}
-
-function boundedScopeReviewObservationWindow(observations) {
-  const source = Array.isArray(observations) ? observations : []
-  const selected = []
-  let chars = 0
-  for (let index = source.length - 1; index >= 0 && selected.length < JEV_SCOPE_REVIEW_MAX_OBSERVATIONS; index--) {
-    let item = boundedScopeReviewValue(source[index])
-    if (!item) continue
-    let encoded = JSON.stringify(item)
-    if (encoded.length > JEV_SCOPE_REVIEW_MAX_OBSERVATION_CHARS) {
-      item = {
-        tool: cleanMemoryText(source[index]?.tool, 100),
-        cached: source[index]?.cached === true,
-        truncated: true,
-        result_preview: cleanMemoryText(encoded, 1800),
-      }
-      encoded = JSON.stringify(item)
-    }
-    if (selected.length > 0 && chars + encoded.length > JEV_SCOPE_REVIEW_MAX_OBSERVATION_CHARS) break
-    selected.unshift(item)
-    chars += encoded.length
-  }
-  return selected
 }
 
 function durableEntityLocator(observation, semanticRole = '') {
@@ -2149,14 +2087,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     this.interactionProvider = typeof options.interactionProvider === 'function' ? options.interactionProvider : null
     this.interactionDecisionProvider = typeof options.interactionDecisionProvider === 'function' ? options.interactionDecisionProvider : null
-    // Scope review is an explicit capability. A generic interaction-decision
-    // callback may intentionally support only routing/budget questions; treating
-    // its mere presence as Jev scope-review support made unrelated decision
-    // stubs fail closed at the pre-commit gate. Production wires the same Jev
-    // provider into both slots explicitly.
-    this.scopeReviewDecisionProvider = typeof options.scopeReviewDecisionProvider === 'function'
-      ? options.scopeReviewDecisionProvider
-      : null
     this.steeringDecisionProvider = typeof options.steeringDecisionProvider === 'function'
       ? options.steeringDecisionProvider
       : null
@@ -2195,7 +2125,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.genericRecoveryDecisionActive = false
     this.conditionPollPromise = null
     this.liveEntityObservations = new Map()
-    this.scopeReviewObservations = []
     this.rejectedExactTargets = new Set()
     this.staleExactPreflightRetries = 0
     this.modelCorrectablePreflightRetries = 0
@@ -2377,23 +2306,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   observationToolCommand(name, args) {
     return toolCommand(name, args)
-  }
-
-  recordScopeReviewObservation(toolName, args, raw, { cached = false } = {}) {
-    if (!this.isObservationToolName(toolName)) return
-    let parsed
-    try { parsed = JSON.parse(String(raw ?? '')) }
-    catch { parsed = cleanMemoryText(raw, 1600) }
-    const record = {
-      tool: cleanMemoryText(toolName, 100),
-      args: boundedScopeReviewValue(sanitizeDurableModelValue(args ?? {})),
-      result: boundedScopeReviewValue(sanitizeDurableModelValue(parsed)),
-      cached: cached === true,
-    }
-    this.scopeReviewObservations.push(record)
-    if (this.scopeReviewObservations.length > JEV_SCOPE_REVIEW_MAX_OBSERVATIONS * 2) {
-      this.scopeReviewObservations.splice(0, this.scopeReviewObservations.length - JEV_SCOPE_REVIEW_MAX_OBSERVATIONS * 2)
-    }
   }
 
   recordLiveEntityObservation(entity, actorPosition, source, observationMeta = {}) {
@@ -4461,13 +4373,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       && !healthyRuntime
 
     this.liveEntityObservations = new Map()
-    this.scopeReviewObservations = []
     this.rejectedExactTargets = new Set()
     this.staleExactPreflightRetries = 0
     this.modelCorrectablePreflightRetries = 0
     this.researchPreflightRetries = 0
     this.bootstrapDependencyPreflightRetries = 0
-    this.scopeRefinementAttempts = 0
     this.scopeRefinementPending = false
     this.planUpdateReason = intent === 'new_goal'
       ? 'new_goal'
@@ -4646,7 +4556,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.outputBudgetRecoveryGuard = null
     this.clearActionOmissionRecovery()
     this.liveEntityObservations = new Map()
-    this.scopeReviewObservations = []
     this.rejectedExactTargets = new Set()
     this.staleExactPreflightRetries = 0
     this.modelCorrectablePreflightRetries = 0
@@ -5708,9 +5617,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const original = String(results[index].content ?? '')
       const toolName = admittedPrepared[index]?.tool?.function?.name
       this.recordLiveEntityToolResult(toolName, original)
-      this.recordScopeReviewObservation(toolName, admittedPrepared[index]?.args, original, {
-        cached: admittedCached[index] === true || admittedStaticCached[index] === true,
-      })
       const loadedSkill = this.recordLoadedSkillToolResult(toolName, admittedPrepared[index]?.args, original)
       if (loadedSkill) {
         await this.traceEvent('skill.context_loaded', {
@@ -5795,344 +5701,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!latestVerification) return ''
     this.pendingFiniteNoOperationPlan = plan
     return ACTION_OMISSION_REPAIR_MESSAGE
-  }
-
-  /**
-   * Jev's pre-commit scope review (roadmap 4.5 / 6), run once per draft.
-   *
-   * Returns the review the commit gate needs, or undefined when there is
-   * nothing to review. There is deliberately no "assume actionable" path: the
-   * caller treats a missing review as a refusal, which is the whole point of
-   * the gate.
-   *
-   * When no scope-review provider is configured, this is a deterministic/direct
-   * harness lane rather than a live Jev-reviewed lane. Those plans may still
-   * come from fixtures or narrow tests that install other decision families.
-   * Production wires scope review explicitly; generic routing/budget callbacks
-   * do not silently become Jev just because they exist.
-   */
-  async reviewDraftForCommit(memoryKey, context = {}) {
-    const planning = this.memory.planningState?.(memoryKey)
-    const plan = planning ? getActivePlanningPlan(planning) : undefined
-    if (!plan) return undefined
-    const steps = Array.isArray(plan.steps) ? plan.steps : []
-    if (steps.length === 0) return undefined
-
-    const runtime_validation = { passed: true }
-    if (!this.scopeReviewDecisionProvider) {
-      return {
-        verdict: 'actionable',
-        reason_codes: ['jev_unavailable_no_decision_provider'],
-        confidence: 0,
-        runtime_validation,
-      }
-    }
-
-    const activeIndex = Math.max(0, Math.min(
-      Number.isSafeInteger(plan.active_step_index) ? plan.active_step_index : 0,
-      Math.max(0, steps.length - 1),
-    ))
-    const proposedOperations = (Array.isArray(context.operations) ? context.operations : []).slice(0, 8)
-      .map(operation => ({
-        name: cleanMemoryText(operation?.name, 100),
-        args: boundedScopeReviewValue(sanitizeDurableModelValue(operation?.args ?? {})),
-      }))
-    const deterministicPreflight = (Array.isArray(context.preflight) ? context.preflight : []).slice(0, 8)
-      .map((result, index) => ({
-        operation_index: index,
-        operation: proposedOperations[index]?.name,
-        result: boundedScopeReviewValue(sanitizeDurableModelValue(result)),
-      }))
-    const recentObservations = boundedScopeReviewObservationWindow(this.scopeReviewObservations)
-    const liveEntities = [...(this.liveEntityObservations?.values?.() ?? [])]
-      .slice(-JEV_SCOPE_REVIEW_MAX_LIVE_ENTITIES)
-      .map(observation => boundedScopeReviewValue(sanitizeDurableModelValue({
-        name: observation?.name,
-        type: observation?.type,
-        position: observation?.position,
-        distance: observation?.distance,
-        surface: observation?.surface,
-        surface_index: observation?.surface_index,
-        source: observation?.source,
-        working: observation?.working,
-        status: observation?.status,
-        inventories: observation?.inventories,
-        recipe: observation?.recipe,
-      })))
-      .filter(Boolean)
-
-    const proposedCheckpoint = completionContractSupported(context.checkpoint)
-      ? sanitizeStepCompletionContract(context.checkpoint)
-      : undefined
-    const normalizedCheckpoint = completionContractSupported(context.stepCheckpoint?.contract)
-      ? sanitizeStepCompletionContract(context.stepCheckpoint.contract)
-      : undefined
-    const semanticAlignment = context.stepCheckpoint
-      ? {
-          relation: context.stepCheckpoint.relation,
-          checkpoint_boundary: context.stepCheckpoint.boundary,
-          admission_aligned: stepRelationAllowsAdmission(context.stepCheckpoint.relation),
-          deterministic_fallback: context.stepCheckpoint.deterministic_fallback === true,
-        }
-      : undefined
-
-    const reviewState = {
-      review_packet_version: 2,
-      boundary: 'pre_commit_scope_review',
-      goal: cleanMemoryText(planning.goal?.objective ?? '', 600),
-      goal_context: {
-        goal_id: cleanMemoryText(planning.goal?.goal_id, 120),
-        owner: cleanMemoryText(planning.goal?.owner, 120),
-        status: planning.goal?.status,
-      },
-      draft: {
-        plan_id: cleanMemoryText(plan.plan_id, 120),
-        plan_version: Number.isSafeInteger(plan.plan_version) ? plan.plan_version : undefined,
-        active_step_index: activeIndex,
-        step_count: steps.length,
-        development_mode: cleanMemoryText(plan.development_mode, 40),
-        roadmap_node_ids: Array.isArray(plan.roadmap_node_ids)
-          ? plan.roadmap_node_ids.slice(0, 16).map(id => cleanMemoryText(id, 120))
-          : [],
-      },
-      draft_steps: steps.map((step, index) => {
-        const rawContract = step?.completion_contract
-        const contract = rawContract ? sanitizeStepCompletionContract(rawContract) : undefined
-        const supported = completionContractSupported(contract)
-        return {
-          index,
-          id: cleanMemoryText(step?.step_id ?? step?.id, 120),
-          description: cleanMemoryText(step?.description ?? '', 400),
-          has_completion_contract: Boolean(rawContract),
-          completion_contract_status: supported ? 'supported' : rawContract ? 'unsupported' : 'missing',
-          ...(supported ? { completion_contract: boundedScopeReviewValue(sanitizeDurableModelValue(contract)) } : {}),
-        }
-      }),
-      current_frontier: {
-        active_index: activeIndex,
-        active_step_id: cleanMemoryText(steps[activeIndex]?.step_id ?? steps[activeIndex]?.id, 120),
-        active_step: cleanMemoryText(steps[activeIndex]?.description ?? '', 400),
-        proposed_operations: proposedOperations,
-        deterministic_preflight: deterministicPreflight,
-        ...(proposedCheckpoint
-          ? { proposed_completion_contract: boundedScopeReviewValue(sanitizeDurableModelValue(proposedCheckpoint)) }
-          : {}),
-        ...(normalizedCheckpoint
-          ? { normalized_completion_contract: boundedScopeReviewValue(sanitizeDurableModelValue(normalizedCheckpoint)) }
-          : {}),
-        ...(semanticAlignment ? { semantic_alignment: semanticAlignment } : {}),
-      },
-      grounding: {
-        recent_observations: recentObservations,
-        observation_window_chars: JSON.stringify(recentObservations).length,
-        fresh_observation_seen: this.freshObservationSinceContinuation === true,
-        live_entities: liveEntities,
-        runtime_task_status: boundedScopeReviewValue(sanitizeDurableModelValue(this.lastTaskStatusView)),
-      },
-      review_semantics: {
-        runtime_is_world_truth_authority: true,
-        current_frontier_must_be_grounded_now: true,
-        later_steps_may_depend_on_prior_step_outputs: true,
-        planned_dependency_is_not_an_unverified_world_fact: true,
-        missing_dependency_means_the_required_chain_is_absent_or_contradicted: true,
-      },
-    }
-
-    const recordFailure = async (error, stage, attempt) => {
-      const failureKind = scopeReviewFailureKind(error, stage)
-      await this.traceEvent('planning.scope_review_failed', {
-        plan_id: plan.plan_id,
-        failure_stage: stage,
-        failure_kind: failureKind,
-        reason: String(error?.message ?? error).slice(0, 300),
-        attempt,
-        max_attempts: JEV_SCOPE_REVIEW_ATTEMPTS,
-        review_packet_version: reviewState.review_packet_version,
-        grounding_observation_count: recentObservations.length,
-        live_entity_count: liveEntities.length,
-        deterministic_preflight_count: deterministicPreflight.length,
-      })
-      return failureKind
-    }
-
-    let review
-    let lastFailure
-    const decisionId = `decision_${Date.now().toString(36)}_${(++this.decisionRequestSequence).toString(36)}`
-    await this.decisionTraceEvent('decision.request', {
-      decision_id: decisionId,
-      contract: 'plan_scope_review',
-      plan_id: plan.plan_id,
-      state: reviewState,
-    })
-    for (let attempt = 1; attempt <= JEV_SCOPE_REVIEW_ATTEMPTS && !review; attempt++) {
-      let response
-      try {
-        response = await this.scopeReviewDecisionProvider(reviewState, scopeReviewQuestions({ draftStepCount: steps.length }), {
-          epoch: this.requestInfo?.epoch,
-          actorId: this.requestInfo?.actorId,
-        })
-        // Jev's own answers, so a refused draft can be explained afterwards.
-        await this.decisionTraceEvent('decision.response', {
-          decision_id: decisionId,
-          contract: 'plan_scope_review',
-          plan_id: plan.plan_id,
-          attempt,
-          provider: response?.provider,
-          model: response?.model,
-          answers: sanitizeDurableModelValue(response?.answers),
-        })
-      }
-      catch (error) {
-        const kind = await recordFailure(error, 'provider', attempt)
-        lastFailure = { stage: 'provider', kind }
-        if (kind === 'cancellation') break
-        continue
-      }
-      try {
-        review = parseScopeReview(response, { draftStepCount: steps.length })
-      }
-      catch (error) {
-        const kind = await recordFailure(error, 'parse', attempt)
-        lastFailure = { stage: 'parse', kind }
-      }
-    }
-
-    if (!review && lastFailure?.kind === 'cancellation') {
-      // A cancelled review belongs to a superseded request; it must neither
-      // commit the draft nor count as criticism of it.
-      throw new AgentLoopError('Jev scope review was cancelled; the draft stays uncommitted')
-    }
-    if (!review) {
-      // Deterministic preflight already passed for this batch, which is the
-      // runtime-validation half of the gate. Missing criticism is not
-      // criticism: do not spend the semantic refinement budget on it and do
-      // not ask the user to clarify a goal Jev never judged.
-      await this.traceEvent('planning.scope_review_degraded', {
-        plan_id: plan.plan_id,
-        failure_stage: lastFailure?.stage,
-        failure_kind: lastFailure?.kind,
-        commit_authority: 'runtime_validation_only',
-      })
-      return {
-        verdict: 'actionable',
-        reason_codes: ['jev_scope_review_unavailable'],
-        confidence: 0,
-        degraded: true,
-        runtime_validation,
-      }
-    }
-
-    await this.traceEvent('planning.scope_review', {
-      plan_id: plan.plan_id,
-      verdict: review.verdict,
-      confidence: review.confidence,
-      reason_codes: review.reason_codes,
-      mixed_direction: review.mixed_direction,
-      actionable_prefix: review.actionable_prefix,
-      review_packet_version: reviewState.review_packet_version,
-      grounding_observation_count: recentObservations.length,
-      live_entity_count: liveEntities.length,
-      deterministic_preflight_count: deterministicPreflight.length,
-    })
-    return { ...review, runtime_validation }
-  }
-
-  scopeReviewCorrectionMessage(review) {
-    const reasons = Array.isArray(review?.reason_codes) && review.reason_codes.length > 0
-      ? review.reason_codes.join(', ')
-      : 'scope_not_actionable'
-    const problems = Array.isArray(review?.problem_steps) && review.problem_steps.length > 0
-      ? ` Problem steps: ${review.problem_steps.join(', ')}.`
-      : ''
-    const boundary = review?.recommended_boundary ? ` Recommended boundary: ${review.recommended_boundary}.` : ''
-    const prefix = Number.isSafeInteger(review?.actionable_prefix) && review.actionable_prefix > 0
-      ? ` The first ${review.actionable_prefix} step(s) were judged actionable; re-author a bounded draft around that earlier checkpoint and leave the deferred tail on the Shelf.`
-      : ''
-    const grounding = review?.verdict === 'needs_grounding'
-      ? ' Obtain only the targeted live facts needed to ground the draft, then submit a new draft; do not execute the rejected operations.'
-      : ' Re-author the draft more narrowly/precisely; do not merely repeat it unchanged.'
-    return `[HARNESS][JEV_SCOPE_REVIEW] This draft was NOT committed and none of its operations were admitted. Verdict: ${review?.verdict ?? 'refine'}. Reasons: ${reasons}.${problems}${boundary}${prefix}${grounding} The Main LLM remains the plan author; Jev criticism is not a replacement plan.`
-  }
-
-  // needs_grounding tells the planner to fetch the missing facts. If earlier
-  // reads already spent the request's observation budget, the base loop has
-  // closed the observation phase with tools off, and the planner could only
-  // resubmit the same draft reworded (live goal_mubeg8bb). Grant a small
-  // fresh allowance; the refinement budget still bounds how often.
-  async reopenObservationForGrounding() {
-    const exhausted = this.observationDecisionForced === true
-      || (Number.isSafeInteger(this.observationBudgetRemaining) && this.observationBudgetRemaining < SCOPE_GROUNDING_OBSERVATION_ALLOWANCE)
-    if (!exhausted) return
-    this.resetObservationDecisionState()
-    if (Number.isSafeInteger(this.observationBudgetRemaining)) {
-      this.observationBudgetRemaining = SCOPE_GROUNDING_OBSERVATION_ALLOWANCE
-    }
-    await this.traceEvent('planning.grounding_observation_reopened', {
-      observation_budget: SCOPE_GROUNDING_OBSERVATION_ALLOWANCE,
-      refinement_attempt: this.scopeRefinementAttempts,
-    })
-  }
-
-  async handleScopeReviewRefusal(plan, before, stateResult, review) {
-    this.scopeRefinementAttempts = (this.scopeRefinementAttempts ?? 0) + 1
-    await this.traceEvent('planning.scope_refinement_required', {
-      verdict: review?.verdict,
-      reason_codes: review?.reason_codes,
-      actionable_prefix: review?.actionable_prefix,
-      attempt: this.scopeRefinementAttempts,
-      retry_budget: JEV_SCOPE_REFINEMENT_BUDGET,
-    })
-
-    const mustAskUser = review?.verdict === 'needs_user_clarification'
-      || this.scopeRefinementAttempts > JEV_SCOPE_REFINEMENT_BUDGET
-    if (mustAskUser) {
-      this.active = false
-      const reason = review?.verdict === 'needs_user_clarification'
-        ? 'Jev found genuine ambiguity that needs your direction before a safe bounded plan can be committed.'
-        : `The draft still did not converge after ${JEV_SCOPE_REFINEMENT_BUDGET} bounded refinement passes.`
-      const blockerClass = review?.verdict === 'needs_user_clarification' ? 'jev_needs_user_clarification' : 'jev_refinement_budget_exhausted'
-      await this.traceEvent('operations.skipped', {
-        reason: blockerClass,
-        review,
-      })
-      // The request stops here waiting on the user. Leaving the durable plan
-      // `active` made the Task Board show a running step with nothing running:
-      // the silent stall again. Pause it with the reason so the board says why,
-      // and so a later "continue" or clarification resumes it explicitly.
-      if (this.requestInfo?.memoryKey) {
-        const paused = this.memory.pausePlan?.(this.requestInfo.memoryKey, blockerClass)
-        if (paused) stateResult = { ...(stateResult ?? {}), state: paused }
-        await this.persistState()
-      }
-      await this.traceEvent('request.completed', {
-        chat_message: reason,
-        outcome: 'awaiting_user_clarification',
-        task_board: visibleTaskBoard(stateResult?.state?.task_board),
-        usage: this.traceRequest?.usage,
-      })
-      this.traceRequest = null
-      return {
-        chatMessage: `[Plan needs clarification] ${reason} Jev reasons: ${(review?.reason_codes ?? []).join(', ') || 'scope_not_actionable'}.`,
-        plan: stateResult?.state?.plan ?? plan.plan,
-        currentStep: stateResult?.state?.current_step ?? plan.currentStep,
-        operations: [],
-        epoch: before.epoch,
-        actorId: before.actor_id,
-        goalId: stateResult?.state?.goal_id,
-        goalStatus: stateResult?.state?.status,
-        taskBoard: visibleTaskBoard(stateResult?.state?.task_board),
-        blocker: {
-          class: review?.verdict === 'needs_user_clarification' ? 'jev_needs_user_clarification' : 'jev_refinement_budget_exhausted',
-          reason,
-          reason_codes: review?.reason_codes ?? [],
-        },
-      }
-    }
-
-    this.scopeRefinementPending = true
-    if (review?.verdict === 'needs_grounding') await this.reopenObservationForGrounding()
-    this.messages.push({ role: 'user', content: this.scopeReviewCorrectionMessage(review) })
-    return this.runTurn()
   }
 
   async preflightOperations(operations) {
