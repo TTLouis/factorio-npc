@@ -19,6 +19,7 @@ const FALLBACK_ACTIONS = Object.freeze([
 ])
 
 const CANDIDATE_ID = /^[A-Za-z0-9_.:-]{1,80}$/
+const FRESHNESS_TOKEN = /^[A-Za-z0-9_.:-]{1,160}$/
 const MAX_CANDIDATES = 32
 
 function check(ok, message) {
@@ -52,6 +53,23 @@ function candidateActionKey(index) {
   return `candidate_${index + 1}`
 }
 
+function exactIdentityRequired(metadata) {
+  return Object.values(metadata.arguments).some(argument => argument.kind === 'exact_entity_identity')
+}
+
+function fallbackProjection(scope, route, failure, extras = {}) {
+  return {
+    route,
+    scope,
+    operation_type: undefined,
+    candidate_id: undefined,
+    operation: undefined,
+    admission: 'not_applicable',
+    ...extras,
+    ...(failure ? { projection_failure: failure } : {}),
+  }
+}
+
 export function typedProjectionRoutes() {
   return [...PROJECTION_ROUTES]
 }
@@ -83,12 +101,24 @@ export function normalizeTypedOperationCandidates(scope, candidates = []) {
     const operation = parseOperation(candidate.operation)
     check(allowed.has(operation.name), `Operation ${operation.name} is outside scope ${scope}`)
     const metadata = operationMetadataForName(operation.name)
+    const freshness_required = exactIdentityRequired(metadata)
+    const freshness_token = candidate.freshness_token === undefined
+      ? undefined
+      : String(candidate.freshness_token).trim()
+    if (freshness_required) {
+      check(FRESHNESS_TOKEN.test(freshness_token ?? ''), `Candidate ${id} requires a valid freshness_token for exact identity`)
+    }
+    else if (freshness_token !== undefined) {
+      check(FRESHNESS_TOKEN.test(freshness_token), `Candidate ${id} has an invalid freshness_token`)
+    }
 
     return {
       id,
       action_key: candidateActionKey(index),
       operation,
       risk: metadata.risk,
+      freshness_required,
+      freshness_token,
       description: cleanText(candidate.description || `${operation.name} with grounded harness arguments`),
     }
   })
@@ -106,6 +136,7 @@ export function typedProjectionQuestions({ scope, candidates = [] } = {}) {
       risk: candidate.risk,
       meaning: candidate.description,
       rule: 'Select only if this complete harness-built operation exactly expresses the already-decided semantic intent. Do not reinterpret or modify its arguments.',
+      freshness_required: candidate.freshness_required,
     }
   }
 
@@ -149,29 +180,12 @@ export function parseTypedProjection(response, { scope, candidates = [] } = {}) 
   const probabilities = answerProbabilities(response)
 
   if (FALLBACK_ACTIONS.includes(selected)) {
-    return {
-      route: selected,
-      scope,
-      operation_type: undefined,
-      candidate_id: undefined,
-      operation: undefined,
-      confidence,
-      probabilities,
-    }
+    return fallbackProjection(scope, selected, undefined, { confidence, probabilities })
   }
 
   const candidate = normalized.find(entry => entry.action_key === selected)
   if (!candidate) {
-    return {
-      route: 'wake_planner',
-      scope,
-      operation_type: undefined,
-      candidate_id: undefined,
-      operation: undefined,
-      confidence,
-      probabilities,
-      projection_failure: 'unknown_projection_action',
-    }
+    return fallbackProjection(scope, 'wake_planner', 'unknown_projection_action', { confidence, probabilities })
   }
 
   return {
@@ -181,7 +195,62 @@ export function parseTypedProjection(response, { scope, candidates = [] } = {}) 
     candidate_id: candidate.id,
     operation: parseOperation(candidate.operation),
     risk: candidate.risk,
+    freshness_required: candidate.freshness_required,
+    freshness_token: candidate.freshness_token,
     confidence,
     probabilities,
+    admission: 'requires_normal_preflight',
+  }
+}
+
+export function routeTypedProjectionByRisk(projection, {
+  minimumConfidenceByRisk,
+  lowConfidenceRouteByRisk,
+  currentFreshnessToken,
+} = {}) {
+  check(projection && typeof projection === 'object' && !Array.isArray(projection), 'Typed projection result must be an object')
+  if (projection.route !== 'emit_operation') return { ...projection }
+
+  check(
+    minimumConfidenceByRisk && typeof minimumConfidenceByRisk === 'object' && !Array.isArray(minimumConfidenceByRisk),
+    'Typed projection execution routing requires explicit minimumConfidenceByRisk policy',
+  )
+  const threshold = minimumConfidenceByRisk[projection.risk]
+  check(
+    typeof threshold === 'number' && Number.isFinite(threshold) && threshold >= 0 && threshold <= 1,
+    `Typed projection has no confidence policy for risk class ${projection.risk}`,
+  )
+
+  if (projection.freshness_required) {
+    if (
+      typeof currentFreshnessToken !== 'string'
+      || currentFreshnessToken !== projection.freshness_token
+    ) {
+      return fallbackProjection(projection.scope, 'need_observation', 'stale_exact_identity', {
+        confidence: projection.confidence,
+        probabilities: projection.probabilities,
+      })
+    }
+  }
+
+  const confidence = projection.confidence
+  if (typeof confidence !== 'number' || !Number.isFinite(confidence) || confidence < threshold) {
+    const requestedRoute = lowConfidenceRouteByRisk?.[projection.risk]
+    const route = requestedRoute === 'need_observation' || requestedRoute === 'wake_planner'
+      ? requestedRoute
+      : 'wake_planner'
+    return fallbackProjection(projection.scope, route, 'projection_confidence_below_policy', {
+      confidence,
+      probabilities: projection.probabilities,
+    })
+  }
+
+  return {
+    ...projection,
+    confidence_policy: {
+      risk: projection.risk,
+      minimum: threshold,
+    },
+    admission: 'requires_normal_preflight',
   }
 }
