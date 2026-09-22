@@ -44,6 +44,44 @@ function candidateReference(value, label, prefix) {
   return value
 }
 
+const EXPERIMENT_OPERATION_SCOPES = Object.freeze({
+  place_candidate: Object.freeze(['construction']),
+})
+
+export function approvedOperationNames() {
+  return [...base.approvedOperationNames(), ...Object.keys(EXPERIMENT_OPERATION_SCOPES)]
+}
+
+export function operationArgumentKeys(name) {
+  if (name === 'place_candidate') return ['candidate_set_id', 'candidate_id']
+  return base.operationArgumentKeys(name)
+}
+
+export function approvedOperationScopes() {
+  return base.approvedOperationScopes()
+}
+
+export function operationScopesForName(name) {
+  if (Object.hasOwn(EXPERIMENT_OPERATION_SCOPES, name)) return [...EXPERIMENT_OPERATION_SCOPES[name]]
+  return base.operationScopesForName(name)
+}
+
+export function operationNamesForScope(scope) {
+  const baseNames = base.operationNamesForScope(scope)
+  const experimental = Object.entries(EXPERIMENT_OPERATION_SCOPES)
+    .filter(([, scopes]) => scopes.includes(scope))
+    .map(([name]) => name)
+  return [...baseNames, ...experimental]
+}
+
+export function operationTypeCatalog() {
+  return approvedOperationNames().map(name => ({
+    name,
+    args: operationArgumentKeys(name),
+    scopes: operationScopesForName(name),
+  }))
+}
+
 export function parseOperation(value) {
   if (value?.name !== 'place_candidate') return base.parseOperation(value)
   check(value && typeof value === 'object' && !Array.isArray(value), 'Operation must be an object')
