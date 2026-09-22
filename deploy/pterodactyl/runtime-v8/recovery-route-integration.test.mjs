@@ -105,15 +105,15 @@ class RecoveryRcon {
   }
 }
 
-function decisionResponse(route, failureClass = 'unknown') {
+function decisionResponse(semantic = 'unclear', observationProbability = 0.1) {
   return {
     model: 'jev-latest',
     provider: 'TypeSafe',
     answers: {
-      failure_class: { type: 'choice', choice: failureClass, confidence: 0.9 },
-      next_recovery: { type: 'choice', choice: route, confidence: 0.95 },
+      recovery_semantics: { type: 'choice', choice: semantic, confidence: 0.95 },
+      one_observation_can_resolve: { type: 'noul', noul: observationProbability },
     },
-    usage: { input_tokens: 90, output_tokens: 10, cost: 0.0000042 },
+    usage: { input_tokens: 60, output_tokens: 6, cost: 0.00000252 },
   }
 }
 
@@ -129,8 +129,8 @@ function planMessage() {
 }
 
 function makeAgent({
-  route = 'wake_planner',
-  failureClass = 'unknown',
+  semantic = 'unclear',
+  observationProbability = 0.1,
   taskState = 'idle',
   queueLength = 0,
   finalProof = false,
@@ -151,7 +151,7 @@ function makeAgent({
     decisionTraceFile: null,
     interactionDecisionProvider: decisionProvider ?? (async (state, questions) => {
       decisionCalls.push({ state, questions })
-      return decisionResponse(route, failureClass)
+      return decisionResponse(semantic, observationProbability)
     }),
     provider: provider ?? (async (_messages, options) => {
       mainCalls.push(options)
@@ -175,120 +175,81 @@ function makeAgent({
   return { agent, memory, mainCalls, decisionCalls }
 }
 
-test('M9 continue_runtime skips the planner only while runtime is authoritatively active', async () => {
-  const active = makeAgent({ route: 'continue_runtime', failureClass: 'runtime_busy', taskState: 'mining', queueLength: 1 })
+test('M11D authoritative active runtime bypasses Jev and the Main planner', async () => {
+  const active = makeAgent({ taskState: 'mining', queueLength: 1 })
   const result = await active.agent.recoverPlan(active.agent.generation, new Error('provider timeout'), 1)
   assert.equal(result.goalStatus, 'active')
   assert.equal(active.mainCalls.length, 0)
-  assert.equal(active.decisionCalls.length, 1)
+  assert.equal(active.decisionCalls.length, 0)
+})
 
-  const idle = makeAgent({ route: 'continue_runtime', failureClass: 'runtime_busy', taskState: 'idle', queueLength: 0 })
-  const resumed = await idle.agent.recoverPlan(idle.agent.generation, new Error('provider timeout'), 1)
-  assert.equal(resumed.operations.length, 1)
-  assert.equal(idle.mainCalls.length, 1)
-  assert.equal(idle.mainCalls[0].triggerSource, 'recovery_continue_low')
+test('M11D provider-format recovery bypasses Jev and wakes the planner directly', async () => {
+  const { agent, mainCalls, decisionCalls } = makeAgent({ taskState: 'idle', queueLength: 0 })
+  const result = await agent.recoverPlan(agent.generation, new Error('invalid provider JSON'), 1)
+  assert.equal(result.operations.length, 1)
+  assert.equal(mainCalls.length, 1)
+  assert.equal(mainCalls[0].triggerSource, 'recovery_continue_low')
+  assert.equal(decisionCalls.length, 0)
 })
 
 test('M9 deterministic final completion bypasses Jev and the main planner entirely', async () => {
-  const { agent, mainCalls, decisionCalls } = makeAgent({
-    route: 'wake_planner',
-    failureClass: 'provider_format',
-    finalProof: true,
-  })
+  const { agent, mainCalls, decisionCalls } = makeAgent({ finalProof: true })
   const result = await agent.recoverPlan(agent.generation, new Error('invalid provider JSON'), 1)
   assert.equal(result.goalStatus, 'completed')
   assert.equal(mainCalls.length, 0)
   assert.equal(decisionCalls.length, 0)
 })
 
-test('M9 wake_planner uses low reasoning for provider-format recovery', async () => {
-  const { agent, mainCalls } = makeAgent({ route: 'wake_planner', failureClass: 'provider_format' })
-  const result = await agent.recoverPlan(agent.generation, new Error('invalid provider JSON'), 1)
-  assert.equal(result.operations.length, 1)
-  assert.equal(mainCalls.length, 1)
-  assert.equal(mainCalls[0].triggerSource, 'recovery_continue_low')
-  assert.equal(mainCalls[0].allowTools, false)
-})
-
-test('M9 wake_planner uses high reasoning for semantic recovery', async () => {
-  const { agent, mainCalls } = makeAgent({ route: 'wake_planner', failureClass: 'semantic_replan' })
+test('M11D ambiguous semantic replan uses Jev and high planner reasoning', async () => {
+  const { agent, mainCalls, decisionCalls } = makeAgent({ semantic: 'semantic_replan' })
   const result = await agent.recoverPlan(agent.generation, new Error('strategy invalidated by fresh evidence'), 1)
   assert.equal(result.operations.length, 1)
   assert.equal(mainCalls.length, 1)
   assert.equal(mainCalls[0].triggerSource, 'recovery_replan_high')
+  assert.equal(decisionCalls.length, 1)
+  assert.deepEqual(Object.keys(decisionCalls[0].questions), ['recovery_semantics', 'one_observation_can_resolve'])
 })
 
-test('M9 observe maps to one bounded targeted-observation planner turn', async () => {
-  const { agent, decisionCalls } = makeAgent({ route: 'observe', failureClass: 'missing_fact' })
+test('M11D ambiguous missing fact may buy exactly one bounded observation', async () => {
+  const { agent, decisionCalls } = makeAgent({ semantic: 'missing_fact', observationProbability: 0.9 })
   const routed = await agent.routeRecoveryDecision(new Error('one targeted observation is missing'), 2)
   assert.equal(routed.route, 'targeted_observation')
-  assert.deepEqual(Object.keys(decisionCalls[0].questions.next_recovery.criteria), [
-    'continue_runtime',
-    'observe',
-    'wake_planner',
-    'ask_user',
-  ])
+  assert.equal(routed.failure_class, 'missing_fact')
+  assert.equal(decisionCalls.length, 1)
 })
 
-test('duplicate recovery event coalesces the Jev call', async () => {
-  const { agent, decisionCalls } = makeAgent({ route: 'continue_runtime', failureClass: 'runtime_busy', taskState: 'mining', queueLength: 1 })
-  const reason = new Error('provider timeout')
+test('M11D exhausted observation budget bypasses Jev for a known missing-fact failure', async () => {
+  const { agent, decisionCalls } = makeAgent({ semantic: 'missing_fact', observationProbability: 0.9 })
+  agent.observationBudgetRemaining = 0
+  const routed = await agent.routeRecoveryDecision(new Error('one targeted observation is missing'), 2)
+  assert.equal(routed.route, 'wake_planner')
+  assert.equal(routed.decision_called, false)
+  assert.equal(decisionCalls.length, 0)
+})
+
+test('duplicate ambiguous recovery event coalesces the Jev call', async () => {
+  const { agent, decisionCalls } = makeAgent({ semantic: 'semantic_replan' })
+  const reason = new Error('semantic strategy dependency changed')
   const first = await agent.routeRecoveryDecision(reason, 2)
   const second = await agent.routeRecoveryDecision(reason, 2)
-  assert.equal(first.route, 'wait_runtime')
-  assert.equal(second.route, 'wait_runtime')
+  assert.equal(first.route, 'wake_planner')
+  assert.equal(second.route, 'wake_planner')
   assert.equal(second.duplicate, true)
   assert.equal(decisionCalls.length, 1)
 })
 
-test('recovery Jev cancellation cannot apply a stale decision', async () => {
+test('ambiguous recovery Jev cancellation cannot apply a stale decision', async () => {
   let release
   const pending = new Promise(resolve => { release = resolve })
   const { agent } = makeAgent({
     decisionProvider: async () => {
       await pending
-      return decisionResponse('wake_planner', 'semantic_replan')
+      return decisionResponse('semantic_replan', 0.1)
     },
   })
-  const routing = agent.routeRecoveryDecision(new Error('semantic failure'), 1)
+  const routing = agent.routeRecoveryDecision(new Error('semantic strategy failure'), 1)
   agent.cancel('new_task')
   release()
   await assert.rejects(routing, /cancelled|superseded/i)
 })
 
-test('M9 ask_user cannot manufacture a durable blocker from an active recovery', async () => {
-  const { agent, memory, mainCalls } = makeAgent({
-    route: 'ask_user',
-    failureClass: 'grounded_world_failure',
-    taskState: 'idle',
-    queueLength: 0,
-  })
-  const result = await agent.recoverPlan(agent.generation, new Error('provider claims capability missing'), 1)
-  assert.equal(result.operations.length, 1)
-  assert.equal(memory.planByNpc.get('npc:airi').status, 'active')
-  assert.equal(memory.planByNpc.get('npc:airi').blocker, '')
-  assert.equal(mainCalls.length, 1)
-})
-
-test('older world evidence cannot let an M9 recovery routing choice create durable BLOCKED', async () => {
-  const { agent, memory, mainCalls } = makeAgent({
-    route: 'ask_user',
-    failureClass: 'provider_format',
-    taskState: 'idle',
-    queueLength: 0,
-  })
-  memory.planByNpc.get('npc:airi').task_board.evidence.push({
-    id: 'evidence_prior_world_failure',
-    kind: 'operation_preflight_blocker',
-    ref: 'old/preflight',
-    summary: 'an older deterministic blocker record',
-    step_id: 'step_1',
-    at: Date.now(),
-  })
-
-  const result = await agent.recoverPlan(agent.generation, new Error('Invalid provider content JSON'), 1)
-  assert.equal(result.operations.length, 1)
-  assert.equal(memory.planByNpc.get('npc:airi').status, 'active')
-  assert.equal(memory.planByNpc.get('npc:airi').blocker, '')
-  assert.equal(mainCalls.length, 1)
-})

@@ -50,38 +50,37 @@ export function recoveryFailureClassHint(reason) {
   return 'unknown'
 }
 
+export const RECOVERY_SEMANTIC_CLASSES = new Set([
+  'missing_fact',
+  'semantic_replan',
+  'grounded_world_failure',
+  'unclear',
+])
+
 export function recoveryDecisionQuestions() {
   return {
-    failure_class: {
-      type: 'choice',
-      instructions: 'Classify this bounded recovery failure for routing telemetry only. Do not invent Factorio facts, completion, blockers, or plan changes.',
-      criteria: {
-        provider_format: 'Malformed or invalid provider response/tool-call formatting.',
-        provider_budget: 'Provider output budget or finish=length exhaustion.',
-        provider_safety: 'Provider safety/content-filter refusal. This is terminal for ordinary main-provider retry.',
-        missing_fact: 'One bounded authoritative observation may resolve the immediate uncertainty.',
-        semantic_replan: 'The remaining strategy needs semantic reconsideration.',
-        runtime_busy: 'Authoritative runtime work is already active.',
-        grounded_world_failure: 'Supplied authoritative evidence describes a real world/runtime failure.',
-        unknown: 'The bounded capsule is insufficient to classify safely.',
-      },
-    },
-    next_recovery: {
+    recovery_semantics: {
       type: 'choice',
       instructions: {
-        task: 'Choose the cheapest useful next reasoning route after this bounded failure.',
+        task: 'Classify only the ambiguous semantic recovery need left after deterministic runtime/provider checks have already run.',
         rules: [
-          'Routing only: do not claim completion, author blockers, mutate plans, or invent world facts.',
-          'continue_runtime is only a request; deterministic code independently verifies active runtime work.',
-          'observe requests bounded read-only grounding; deterministic observation admission still applies.',
-          'ask_user is only valid when deterministic lifecycle state already requires user authority.',
+          'Do not re-classify provider budget, provider safety, provider formatting, runtime activity, completion, or user lifecycle state; code already owns those facts.',
+          'Do not claim completion, author blockers, mutate plans, or invent Factorio facts.',
         ],
       },
       criteria: {
-        continue_runtime: 'Authoritative runtime work is already active and can continue without another Main-LLM decision.',
-        observe: 'A bounded deterministic read is needed before the next semantic decision.',
-        wake_planner: 'The Main LLM must reason about the next semantic step, repair, or strategy.',
-        ask_user: 'The runtime is already at a lifecycle boundary that requires an explicit user choice.',
+        missing_fact: 'The next semantic decision is blocked mainly by one missing or stale authoritative fact.',
+        semantic_replan: 'Grounded evidence means the Main LLM should reconsider the remaining semantic approach.',
+        grounded_world_failure: 'Grounded world evidence indicates the attempted approach failed in a way the Main LLM must interpret.',
+        unclear: 'The supplied bounded state does not support a more specific semantic recovery class.',
+      },
+    },
+    one_observation_can_resolve: {
+      type: 'noul',
+      instructions: 'Can one bounded deterministic read plausibly resolve the immediate semantic uncertainty before the Main LLM reasons again? Judge only from supplied state; this does not authorize the read.',
+      criteria: {
+        true: 'One targeted deterministic observation is likely sufficient to resolve the immediate uncertainty.',
+        false: 'A single targeted observation is not sufficient or the Main LLM should reason directly.',
       },
     },
   }
@@ -93,6 +92,32 @@ function normalizeRecoveryRoute(value) {
 }
 
 export function parseRecoveryDecision(response) {
+  const semantic = response?.answers?.recovery_semantics
+  if (semantic) {
+    if (!RECOVERY_SEMANTIC_CLASSES.has(semantic.choice)) throw new Error('Decision provider returned invalid recovery semantic class')
+    const confidence = typeof semantic.confidence === 'number' && Number.isFinite(semantic.confidence) ? semantic.confidence : 0
+    if (confidence < 0 || confidence > 1) throw new Error('Decision provider returned invalid recovery confidence')
+    const rawObservation = response?.answers?.one_observation_can_resolve?.noul
+    if (typeof rawObservation !== 'number' || !Number.isFinite(rawObservation) || rawObservation < 0 || rawObservation > 1) {
+      throw new Error('Decision provider returned invalid recovery observation probability')
+    }
+    const route = semantic.choice === 'missing_fact' && rawObservation >= 0.5
+      ? 'observe'
+      : 'wake_planner'
+    return {
+      failure_class: semantic.choice === 'unclear' ? 'unknown' : semantic.choice,
+      semantic_class: semantic.choice,
+      route,
+      requested_route: route,
+      confidence,
+      observation_probability: rawObservation,
+      model: typeof response?.model === 'string' ? response.model : undefined,
+      provider: typeof response?.provider === 'string' ? response.provider : undefined,
+      usage: response?.usage && typeof response.usage === 'object' ? response.usage : undefined,
+    }
+  }
+
+  // Parser-only compatibility for pre-M11D persisted fixtures/responses.
   const failure = response?.answers?.failure_class
   const route = response?.answers?.next_recovery
   if (!failure || !RECOVERY_FAILURE_CLASSES.has(failure.choice)) throw new Error('Decision provider returned invalid recovery failure class')
@@ -105,10 +130,62 @@ export function parseRecoveryDecision(response) {
     route: normalizedRoute,
     requested_route: route.choice,
     confidence,
+    legacy: true,
     model: typeof response?.model === 'string' ? response.model : undefined,
     provider: typeof response?.provider === 'string' ? response.provider : undefined,
     usage: response?.usage && typeof response.usage === 'object' ? response.usage : undefined,
   }
+}
+
+export function deterministicRecoveryRoute({
+  failureClass = 'unknown',
+  world = {},
+  observationBudgetAvailable = true,
+  userDecisionRequired = false,
+} = {}) {
+  const runtime = authoritativeRuntimeState(world)
+
+  if (userDecisionRequired) {
+    return {
+      route: 'ask_user',
+      failure_class: failureClass,
+      reason: 'authoritative_user_boundary',
+      runtime,
+    }
+  }
+  if (runtime.active) {
+    return {
+      route: 'wait_runtime',
+      failure_class: failureClass,
+      reason: 'authoritative_runtime_active',
+      runtime,
+    }
+  }
+  if (failureClass === 'provider_safety') {
+    return {
+      route: runtime.idle ? 'pause_recoverable' : 'fallback_runtime',
+      failure_class: failureClass,
+      reason: 'provider_safety_is_terminal_for_main_provider',
+      runtime,
+    }
+  }
+  if (failureClass === 'provider_budget' || failureClass === 'provider_format') {
+    return {
+      route: 'wake_planner',
+      failure_class: failureClass,
+      reason: 'deterministic_provider_failure_class',
+      runtime,
+    }
+  }
+  if (failureClass === 'missing_fact' && !observationBudgetAvailable) {
+    return {
+      route: 'wake_planner',
+      failure_class: failureClass,
+      reason: 'targeted_observation_budget_exhausted',
+      runtime,
+    }
+  }
+  return null
 }
 
 export function validateRecoveryRoute(decision, {

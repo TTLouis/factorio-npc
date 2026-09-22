@@ -34,7 +34,7 @@ import {
   STEERING_BOUNDARY,
   STEERING_PRESSURE_VOCABULARY,
 } from './planning-state.mjs'
-import { RECOVERY_SEMANTIC_SCOPES, parseRecoveryDecision, recoveryDecisionQuestions, recoveryFailureClassHint, validateRecoveryRoute } from './recovery-route.mjs'
+import { RECOVERY_SEMANTIC_SCOPES, deterministicRecoveryRoute, parseRecoveryDecision, recoveryDecisionQuestions, recoveryFailureClassHint, validateRecoveryRoute } from './recovery-route.mjs'
 import {
   applyConditionObservation,
   completionContractSupported,
@@ -6452,15 +6452,59 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return { ...this.lastRecoveryDecision, duplicate: true }
     }
 
+    const recoveryWorld = {
+      ...runtime,
+      persistent_runtime: persistentRuntime,
+      persistent_runtime_healthy: persistentRuntimeHealthy(persistentRuntime),
+      condition_wait_active: conditionValidation.healthy === true,
+      condition_wait: conditionValidation.healthy ? conditionValidation.wait : undefined,
+    }
+    const observationBudgetAvailable = this.actionOmissionObservationUsed !== true
+      && (!Number.isSafeInteger(this.observationBudgetRemaining) || this.observationBudgetRemaining > 0)
+    const deterministicRoute = deterministicRecoveryRoute({
+      failureClass,
+      world: recoveryWorld,
+      observationBudgetAvailable,
+      userDecisionRequired: planState?.status === PLAN_STATUS.BLOCKED,
+    })
+    if (deterministicRoute) {
+      const result = {
+        route: deterministicRoute.route,
+        requested_route: deterministicRoute.route,
+        failure_class: failureClass,
+        rejection_reason: deterministicRoute.reason,
+        runtime,
+        persistentRuntime,
+        conditionWaitHealthy: conditionValidation.healthy === true,
+        conditionWait: conditionValidation.wait,
+        runtime_state: deterministicRoute.runtime,
+        decision_called: false,
+        source: 'deterministic_recovery',
+      }
+      this.lastRecoveryDecisionKey = key
+      this.lastRecoveryDecision = result
+      await this.traceEvent('recovery.routed', {
+        failure_class: failureClass,
+        route: deterministicRoute.route,
+        applied_route: deterministicRoute.route,
+        fallback_reason: deterministicRoute.reason,
+        decision_called: false,
+        source: 'deterministic_recovery',
+        runtime: deterministicRoute.runtime,
+      })
+      return result
+    }
+
     if (!this.interactionDecisionProvider) {
       const result = {
-        route: conditionValidation.healthy ? 'wait_runtime' : failureClass === 'provider_budget' ? 'pause_recoverable' : 'fallback_runtime',
+        route: 'fallback_runtime',
         failure_class: failureClass,
         runtime,
         persistentRuntime,
         conditionWaitHealthy: conditionValidation.healthy === true,
         conditionWait: conditionValidation.wait,
         decision_called: false,
+        source: 'jev_unavailable',
       }
       this.lastRecoveryDecisionKey = key
       this.lastRecoveryDecision = result
@@ -6468,9 +6512,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
 
     const state = {
-      contract: 'recovery_route',
+      contract: 'ambiguous_semantic_recovery',
       failure: {
-        class: failureClass,
+        hint: failureClass,
         reason_code: cleanMemoryText(this.traceRequest?.recovery?.reason_code || failureClass, 120),
         detail: reasonText,
         provider_finish_reason: cleanMemoryText(this.traceRequest?.last_provider_event?.provider?.finish_reason, 80) || undefined,
@@ -6539,21 +6583,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       await this.assertCurrent()
       const decision = parseRecoveryDecision(response)
-      if (decision.route === 'continue_runtime' && conditionValidation.healthy) {
-        conditionValidation = await this.validateConditionWaitHealth()
-      }
       const validated = validateRecoveryRoute(decision, {
-        world: {
-          ...runtime,
-          persistent_runtime: persistentRuntime,
-          persistent_runtime_healthy: persistentRuntimeHealthy(persistentRuntime),
-          condition_wait_active: conditionValidation.healthy === true,
-          condition_wait: conditionValidation.healthy ? conditionValidation.wait : undefined,
-        },
-        observationBudgetAvailable: this.actionOmissionObservationUsed !== true
-          && (!Number.isSafeInteger(this.observationBudgetRemaining) || this.observationBudgetRemaining > 0),
+        world: recoveryWorld,
+        observationBudgetAvailable,
         failureClassHint: failureClass,
-        userDecisionRequired: planState?.status === PLAN_STATUS.BLOCKED,
+        userDecisionRequired: false,
       })
       const result = {
         route: validated.route,
@@ -6578,6 +6612,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         provider: decision.provider,
         model: decision.model,
         failure_class: decision.failure_class,
+        semantic_class: decision.semantic_class,
+        observation_probability: decision.observation_probability,
         route: decision.route,
         confidence: decision.confidence,
         confidence_policy: decisionConfidencePolicy(decision.route),
@@ -6768,7 +6804,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         await this.persistState()
       }
       await this.traceEvent('planner.skipped', {
-        source: 'decision_provider',
+        source: routed.source ?? 'decision_provider',
         contract: 'recovery_route',
         route: 'wait_runtime',
       })
@@ -6827,7 +6863,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const state = this.memory.currentPlan?.(this.activePlanKey())
       this.active = false
       await this.traceEvent('planner.skipped', {
-        source: 'decision_provider',
+        source: routed.source ?? 'decision_provider',
         contract: 'recovery_route',
         route: 'ask_user',
         reason: 'authoritative_user_boundary',
@@ -6946,7 +6982,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         content: `[RECOVERY_ROUTE] Jev selected ${routed.route}. Preserve the verified canonical prefix and use only current runtime truth. This route has no completion or blocker authority. Failure: ${cleanMemoryText(reasonText, 1000)}. Active step: ${cleanMemoryText(board?.steps?.[activeIndex]?.description ?? currentPlanStep(state?.plan, activeIndex), 500)}.`,
       })
       await this.traceEvent('planner.wake', {
-        source: 'decision_provider',
+        source: routed.source ?? 'decision_provider',
         contract: 'recovery_route',
         route: routed.route,
         reasoning_policy: highRecoveryReasoning ? 'high' : 'low',
