@@ -147,19 +147,13 @@ function add_debug_decision_rows(table: LuaGuiElement, debug: TaskBoardUiDebugSn
 }
 
 function add_debug_step_rows(table: LuaGuiElement, debug: TaskBoardUiDebugSnapshot) {
-  const step_relation = clean_text(debug.step_relation, 80)
-  const step_checkpoint_boundary = clean_text(debug.step_checkpoint_boundary, 80)
-  const step_admission_alignment = clean_text(debug.step_admission_alignment, 80)
   const step_completion_contract = clean_text(debug.step_completion_contract, 200)
   const step_completion_status = clean_text(debug.step_completion_status, 120)
   const step_completion_evidence = clean_text(debug.step_completion_evidence, 300)
   const runtime_condition = clean_text(debug.runtime_condition, 300)
   const runtime_condition_state = clean_text(debug.runtime_condition_state, 80)
 
-  add_compact_row(table, 'Step relation', step_relation.length > 0 ? step_relation.split('_').join(' ').toUpperCase() : '—')
-  add_compact_row(table, 'Step checkpoint', step_checkpoint_boundary.length > 0 ? step_checkpoint_boundary.split('_').join(' ').toUpperCase() : '—')
-  add_compact_row(table, 'Step admission', step_admission_alignment.length > 0 ? step_admission_alignment.split('_').join(' ').toUpperCase() : '—')
-  add_compact_row(table, 'Completion proof', step_completion_contract.length > 0 || step_completion_status.length > 0 ? `${step_completion_contract.length > 0 ? step_completion_contract : 'semantic_unknown'} · ${step_completion_status.length > 0 ? step_completion_status : 'unknown'}${step_completion_evidence.length > 0 ? ` · ${step_completion_evidence}` : ''}` : '—')
+  add_compact_row(table, 'Completion proof', step_completion_contract.length > 0 || step_completion_status.length > 0 ? `${step_completion_contract.length > 0 ? step_completion_contract : 'semantic'} · ${step_completion_status.length > 0 ? step_completion_status : 'unknown'}${step_completion_evidence.length > 0 ? ` · ${step_completion_evidence}` : ''}` : '—')
   add_compact_row(table, 'Runtime wait', runtime_condition.length > 0 || runtime_condition_state.length > 0 ? `${runtime_condition_state.length > 0 ? runtime_condition_state : 'unknown'} · ${runtime_condition.length > 0 ? runtime_condition : '—'}` : '—')
 }
 
