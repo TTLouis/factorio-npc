@@ -7,12 +7,8 @@ import * as staging from '../staging/structured-policy.mjs'
 
 const root = new URL('../../../', import.meta.url)
 const contract = JSON.parse(await readFile(new URL('contracts/factorio-tool-contract.json', root), 'utf8'))
-const stagingSource = await readFile(new URL('deploy/pterodactyl/staging/structured-policy.mjs', root), 'utf8')
-
 function stagingOperationNames() {
-  const block = stagingSource.match(/const operationKeys = \{([\s\S]*?)\n\}/)?.[1]
-  assert.ok(block, 'operationKeys contract block must remain discoverable')
-  return [...block.matchAll(/^\s{2}([a-z0-9_]+):/gm)].map(match => match[1]).sort()
+  return staging.approvedOperationNames().sort()
 }
 
 function namesForSurface(definitions, surface) {
