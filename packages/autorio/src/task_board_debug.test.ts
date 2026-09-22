@@ -52,9 +52,6 @@ describe('task board debug and UI freshness helpers', () => {
       decision_planner_reanchor_low_wakes_total: 2,
       decision_planner_replan_high_wakes_total: 1,
       decision_planner_fallback_wakes_total: 1,
-      step_relation: 'belongs_to_later_step',
-      step_checkpoint_boundary: 'keep_step_open',
-      step_admission_alignment: 'reanchor_required',
       decision_error: '',
     })
 
@@ -88,9 +85,6 @@ describe('task board debug and UI freshness helpers', () => {
     expect(debug.decision_planner_reanchor_low_wakes_total).toBe(2)
     expect(debug.decision_planner_replan_high_wakes_total).toBe(1)
     expect(debug.decision_planner_fallback_wakes_total).toBe(1)
-    expect(debug.step_relation).toBe('belongs_to_later_step')
-    expect(debug.step_checkpoint_boundary).toBe('keep_step_open')
-    expect(debug.step_admission_alignment).toBe('reanchor_required')
   })
 
   it('bounds second-layer provider diagnostics and keeps missing or malformed fields unknown', () => {
