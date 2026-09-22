@@ -814,11 +814,7 @@ function rolloverDecisionProvider(counter) {
         provider: 'TypeSafe',
         answers: {
           failure_class: { type: 'choice', choice: 'provider_budget', confidence: 0.99 },
-          next_recovery: { type: 'choice', choice: 'continue_low', confidence: 0.97 },
-          semantic_scope: { type: 'choice', choice: 'keep_target', confidence: 0.98 },
-          world_failure_supported: { type: 'noul', noul: 0.01 },
-          need_fresh_observation: { type: 'noul', noul: 0.05 },
-          need_semantic_replan: { type: 'noul', noul: 0.1 },
+          next_recovery: { type: 'choice', choice: 'wake_planner', confidence: 0.97 },
         },
         usage: { input_tokens: 30, output_tokens: 6, cost: 0 },
       }
