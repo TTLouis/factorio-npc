@@ -138,7 +138,7 @@ const DURABLE_PLAN_PROMPT = `
 
 When tools are available, prefer the submitPlan control tool for the planner decision instead of serializing the whole decision as assistant JSON content. Your normal assistant content may be concise natural-language text for the human. Put canonical plan/currentStep/operations plus an optional checkpoint proposal in submitPlan.
 
-submitPlan is a proposal boundary, not execution authority: Jev checks semantic alignment, the harness validates the checkpoint shape, Outcome Authority owns durable completion/blocking truth, and Autorio validates mutations before admission. Do not mix submitPlan with observation tool calls in the same assistant message. Observe first when needed, then submit one control decision.
+submitPlan is a proposal boundary, not execution authority: the deterministic harness validates structured plan/checkpoint shape, Outcome Authority owns durable completion/blocking truth, and Autorio validates mutations before admission. Jev is not a plan-commit or operation-admission gate. Do not mix submitPlan with observation tool calls in the same assistant message. Observe first when needed, then submit one control decision.
 
 Strict JSON assistant content is retained only as a compatibility/fallback path, especially when tools are disabled during bounded recovery. It is no longer the preferred normal-path protocol.
 
@@ -158,7 +158,7 @@ When a draft intentionally refines one or more existing Shelf nodes, add roadmap
 
 For a bounded planning slice, add developmentMode as vertical, horizontal, maintain, or recover to describe the dominant direction YOU authored relative to the current critical path. Follow [PLANNING_STATE].steering when it remains appropriate, but this field describes the draft rather than granting steering authority. Small measured supporting work does not require a second mode; substantial mixed-direction work should be split at a better checkpoint.
 
-For the active Plan Tracker step, you may add one optional root field named checkpoint beside chatMessage/plan/currentStep/operations. checkpoint is a semantic completion proposal for Jev to judge and runtime to verify, not a claim that the step is already done. It must use a runtime-supported contract: {"mode":"all|any","requirements":[...]} with requirement kinds inventory_count, entity_inventory_count, entity_exists, entity_state, authoritative_operation_receipt, or runtime_controller_state. Prefer world-state outcomes over action occurrence. Example: if the step means "have 100 stone" and the next operation only gathers 40 more because 62 are already held, checkpoint must say inventory_count stone >= 100, not >= 40. The operation batch describes what to do next; checkpoint describes what would prove the semantic step complete. Jev may keep the step open or request a split even when you propose a checkpoint, and runtime remains completion authority. Omit checkpoint when no safe deterministic predicate represents the step.
+For the active Plan Tracker step, you may add one optional root field named checkpoint beside chatMessage/plan/currentStep/operations. checkpoint is your semantic completion proposal for deterministic runtime validation and verification, not a claim that the step is already done. It must use a runtime-supported contract: {"mode":"all|any","requirements":[...]} with requirement kinds inventory_count, entity_inventory_count, entity_exists, entity_state, authoritative_operation_receipt, or runtime_controller_state. Prefer world-state outcomes over action occurrence. Example: if the step means "have 100 stone" and the next operation only gathers 40 more because 62 are already held, checkpoint must say inventory_count stone >= 100, not >= 40. The operation batch describes what to do next; checkpoint describes what would prove the semantic step complete. Runtime remains completion authority for supported deterministic contracts. Omit checkpoint when no safe deterministic predicate represents the step; prose-only semantic steps remain the Main LLM's responsibility rather than being delegated to a second AI judge.
 
 Plan entries must represent goal-bearing Factorio work or verification. Do not add terminal lifecycle/meta steps such as "Stop", "Done", "Finish", or "Report completion"; stopping after the verified goal is represented by returning plan: [], currentStep: 0, operations: [].
 
@@ -6796,27 +6796,20 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         this.modelCorrectablePreflightRetries = 0
         this.researchPreflightRetries = 0
         this.bootstrapDependencyPreflightRetries = 0
-        const planningBeforeReview = this.requestInfo ? this.memory.planningState?.(this.requestInfo.memoryKey) : undefined
-        const reducerPlanBeforeReview = planningBeforeReview ? getActivePlanningPlan(planningBeforeReview) : undefined
-        const planFrozen = FROZEN_PLAN_STATUSES.has(reducerPlanBeforeReview?.status)
+        const planningBeforeCommit = this.requestInfo ? this.memory.planningState?.(this.requestInfo.memoryKey) : undefined
+        const reducerPlanBeforeCommit = planningBeforeCommit ? getActivePlanningPlan(planningBeforeCommit) : undefined
+        const planFrozen = FROZEN_PLAN_STATUSES.has(reducerPlanBeforeCommit?.status)
         if (!planFrozen && this.requestInfo && typeof this.memory.commitPlanningPlan === 'function') {
-          // Preflight has just passed, which IS the runtime validation half of
-          // the commit gate. Jev's scope review is the other half, and it runs
-          // here because this is the last point before the draft becomes
-          // immutable and starts executing.
-          const review = await this.reviewDraftForCommit(this.requestInfo.memoryKey, {
-            operations: plan.operations,
-            preflight,
-            stepCheckpoint,
-            checkpoint: plan.checkpoint,
+          // Preflight is the authoritative commit gate. Jev may help decide
+          // what to observe or when to wake the planner, but it does not review
+          // whether the Main LLM's draft is "correct" before execution.
+          this.memory.commitPlanningPlan(this.requestInfo.memoryKey, {
+            now: Date.now(),
+            runtime_validation: { passed: true },
           })
-          this.memory.commitPlanningPlan(this.requestInfo.memoryKey, { now: Date.now(), review })
           const committed = this.memory.currentPlan?.(this.requestInfo.memoryKey)
           if (committed) stateResult = { ...(stateResult ?? {}), state: committed }
           await this.persistState()
-          if (review?.verdict !== 'actionable') {
-            return this.handleScopeReviewRefusal(plan, before, stateResult, review)
-          }
         }
         await this.traceEvent('operations.preflight_ok', {
           operations: operations.map((operation, index) => ({ ...operation, preflight: preflight[index] })),
