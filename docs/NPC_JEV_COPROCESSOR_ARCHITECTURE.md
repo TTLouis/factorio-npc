@@ -240,35 +240,38 @@ manufacture their values.
 ## 6. Typed state distillation and working memory
 
 Jev does not generate prose summaries. TypeSafe System One returns typed judgments
-(Choice, Score, and Noul), so "semantic compression" must be implemented as typed
+(Choice, Score, and Noul), so semantic compression is implemented as bounded typed
 features over authoritative state.
 
-Examples:
-
-- current bottleneck: `stone | iron | copper | fuel | power | logistics | none_known`;
-- capability-present Nouls;
-- readiness/risk Scores;
-- observation-relevance Nouls;
-- next-handler Choice;
-- selected entity/resource/recipe candidate from a runtime-generated finite set.
-
-Deterministic code may render those typed values into a compact Main-LLM context block:
+M8's first live slice runs at the post-step boundary and derives four features from the
+same bounded state already supplied to routing:
 
 ```text
-Derived typed state:
-- bottleneck: stone
-- iron bootstrap ready: yes
-- copper bootstrap ready: yes
-- fuel risk: low
-- planner wake: not needed
+state_bottleneck:
+  none_known | materials | power | logistics | production |
+  research | spatial | safety | runtime_health | information
 
-Authoritative provenance:
-- inventory observation ...
-- nearby resource observation ...
+state_readiness:
+  Score 0..4 over a grounded-readiness rubric
+
+state_risk:
+  Score 0..3 over semantic consequence/reversibility
+
+state_evidence_conflict:
+  Noul probability
 ```
 
-The rendered block is not new world truth. Material facts remain tied to authoritative
-observations/receipts, and the Main LLM must retain enough provenance to verify claims.
+The deterministic runtime, not Jev, derives provenance labels from the authoritative
+state sections actually supplied. Code renders the result in a fixed
+`[JEV_TYPED_STATE]` block before the post-step Main-LLM continuation.
+
+The rendered block explicitly says it is advisory and is not world truth, completion
+evidence, plan authority, operation admission, or user authority. Malformed or absent
+answers render no synthetic state.
+
+The M8 questions are batched into the existing post-step Jev request rather than creating
+another provider call. The local conservation default allows 24 questions; the current
+M7+M8 post-step request uses 19.
 
 Jev must never be treated as a prose summarizer or free-form memory generator.
 
