@@ -44,6 +44,11 @@ import {
   runtimeConditionCommand,
   toolCommand,
 } from './structured-policy.mjs'
+import {
+  parseTypedProjection,
+  routeTypedProjectionByRisk,
+  typedProjectionQuestions,
+} from './jev-typed-projection.mjs'
 
 export { AgentLoopError }
 
@@ -66,6 +71,8 @@ const RESEARCH_PREFLIGHT_RECOVERABLE_CODES = new Set(['missing_prerequisites', '
 const MODEL_CORRECTABLE_PREFLIGHT_CODES = new Set(['unknown_prototype', 'unknown_recipe', 'invalid_unit_number', 'invalid_target_kind', 'invalid_preflight_args'])
 const MODEL_CORRECTABLE_PREFLIGHT_RETRY_BUDGET = 1
 const RESEARCH_PREFLIGHT_RETRY_BUDGET = 2
+const LOW_RISK_NAVIGATION_PROJECTION_MIN_CONFIDENCE = 0.85
+const LOW_RISK_NAVIGATION_PROJECTION_MAX_CANDIDATES = 8
 // Once the system commits a plan, its semantic content is immutable; later batches fulfil it rather than rewriting it.
 const FROZEN_PLAN_STATUSES = new Set([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING])
 const WORLD_STATE_REQUIREMENT_KINDS = new Set(['inventory_count', 'entity_inventory_count', 'entity_exists', 'entity_state'])
@@ -2047,9 +2054,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.steeringDecisionProvider = typeof options.steeringDecisionProvider === 'function'
       ? options.steeringDecisionProvider
       : null
+    this.operationProjectionDecisionProvider = typeof options.operationProjectionDecisionProvider === 'function'
+      ? options.operationProjectionDecisionProvider
+      : null
     this.interactionAbort = null
     this.postStepDecisionAbort = null
     this.recoveryDecisionAbort = null
+    this.operationProjectionAbort = null
     this.lastRecoveryDecisionKey = ''
     this.lastRecoveryDecision = null
     this.loadedSkillContext = new Map()
@@ -2358,6 +2369,173 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return Number.isSafeInteger(unitNumber)
       ? this.liveEntityObservations?.get?.(`unit:${unitNumber}`)
       : undefined
+  }
+
+  liveExactEntityFreshnessToken(unitNumber) {
+    if (!Number.isSafeInteger(unitNumber)) return undefined
+    const epoch = Number.isSafeInteger(this.epoch?.epoch) ? this.epoch.epoch : 0
+    const actorId = Number.isSafeInteger(this.epoch?.actor_id) ? this.epoch.actor_id : 0
+    return `entity:${actorId}:${epoch}:${unitNumber}`
+  }
+
+  lowRiskNavigationProjectionCandidates(operation) {
+    if (operation?.name !== 'walk_to_entity') return []
+    const entityName = operation.args?.entity_name
+    const searchRadius = operation.args?.search_radius
+    if (typeof entityName !== 'string' || !Number.isFinite(searchRadius)) return []
+
+    return [...(this.liveEntityObservations?.values?.() ?? [])]
+      .filter(observation => observation?.name === entityName
+        && Number.isSafeInteger(observation?.unit_number)
+        && Number.isFinite(observation?.distance)
+        && observation.distance <= searchRadius)
+      .sort((left, right) => left.distance - right.distance || left.unit_number - right.unit_number)
+      .slice(0, LOW_RISK_NAVIGATION_PROJECTION_MAX_CANDIDATES)
+      .map(observation => ({
+        id: `walk-unit-${observation.unit_number}`,
+        freshness_token: this.liveExactEntityFreshnessToken(observation.unit_number),
+        operation: {
+          name: 'walk_to_entity_exact',
+          args: { unit_number: observation.unit_number },
+        },
+        description: cleanMemoryText(
+          `Observed ${observation.name} unit ${observation.unit_number}`
+            + `${observation.type ? ` type ${observation.type}` : ''}`
+            + `${observation.position ? ` at (${observation.position.x}, ${observation.position.y})` : ''}`
+            + ` distance ${Number(observation.distance.toFixed(2))} from the controlled actor`
+            + `${observation.source ? ` via ${observation.source}` : ''}.`,
+          400,
+        ),
+      }))
+  }
+
+  async applyLowRiskTypedProjection(plan) {
+    if (!this.operationProjectionDecisionProvider) return plan
+    if (!plan || !Array.isArray(plan.operations) || plan.operations.length !== 1) return plan
+    const sourceOperation = plan.operations[0]
+    if (sourceOperation?.name !== 'walk_to_entity') return plan
+
+    const candidates = this.lowRiskNavigationProjectionCandidates(sourceOperation)
+    if (candidates.length < 2) return plan
+
+    const generation = this.generation
+    const current = await this.assertCurrent()
+    const questions = typedProjectionQuestions({ scope: 'navigation', candidates })
+    const state = {
+      contract: 'typed_operation_projection',
+      mode: 'active_low_risk_navigation_exactification',
+      semantic_intent: {
+        step: cleanMemoryText(currentPlanStep(plan.plan, plan.currentStep), 500),
+        chat_message: cleanMemoryText(plan.chatMessage, 800),
+        source_operation: {
+          name: sourceOperation.name,
+          args: sanitizeDurableModelValue(sourceOperation.args),
+        },
+      },
+      candidate_count: candidates.length,
+      safety: {
+        projection_may_only_replace_name_navigation_with_observed_exact_navigation: true,
+        normal_preflight_still_required: true,
+        fallback_preserves_main_llm_operation: true,
+      },
+    }
+
+    const decisionId = `decision_${Date.now().toString(36)}_${(++this.decisionRequestSequence).toString(36)}`
+    this.operationProjectionAbort?.abort()
+    const controller = new AbortController()
+    this.operationProjectionAbort = controller
+    const startedAt = Date.now()
+    await this.decisionTraceEvent('decision.request', {
+      decision_id: decisionId,
+      contract: 'typed_operation_projection',
+      mode: 'active',
+      projection_scope: 'navigation',
+      candidate_count: candidates.length,
+      source_operation: sourceOperation.name,
+      question_ids: Object.keys(questions),
+    })
+
+    try {
+      const response = await this.operationProjectionDecisionProvider(state, questions, {
+        epoch: current.epoch,
+        actorId: current.actor_id,
+        signal: controller.signal,
+      })
+      if (generation !== this.generation || !this.active || controller.signal.aborted) {
+        throw new AgentLoopError('Model turn was cancelled or superseded')
+      }
+      await this.assertCurrent()
+
+      const projection = parseTypedProjection(response, { scope: 'navigation', candidates })
+      const selectedUnit = Number.isSafeInteger(projection.operation?.args?.unit_number)
+        ? projection.operation.args.unit_number
+        : undefined
+      const currentObservation = selectedUnit === undefined ? undefined : this.liveObservedExactTarget(selectedUnit)
+      const routed = routeTypedProjectionByRisk(projection, {
+        minimumConfidenceByRisk: { low: LOW_RISK_NAVIGATION_PROJECTION_MIN_CONFIDENCE },
+        lowConfidenceRouteByRisk: { low: 'wake_planner' },
+        currentFreshnessToken: currentObservation ? this.liveExactEntityFreshnessToken(selectedUnit) : undefined,
+      })
+      const latencyMs = Date.now() - startedAt
+      await this.decisionTraceEvent('decision.response', {
+        decision_id: decisionId,
+        contract: 'typed_operation_projection',
+        mode: 'active',
+        provider: typeof response?.provider === 'string' ? response.provider : undefined,
+        model: typeof response?.model === 'string' ? response.model : undefined,
+        route: routed.route,
+        candidate_id: routed.candidate_id,
+        operation_type: routed.operation_type,
+        confidence: routed.confidence,
+        projection_failure: routed.projection_failure,
+        latency_ms: latencyMs,
+      })
+
+      if (routed.route !== 'emit_operation' || routed.operation?.name !== 'walk_to_entity_exact') {
+        await this.traceEvent('projection.skipped', {
+          contract: 'typed_operation_projection',
+          scope: 'navigation',
+          reason: routed.projection_failure ?? routed.route,
+          source_operation: sourceOperation.name,
+          candidate_count: candidates.length,
+        })
+        return plan
+      }
+
+      await this.traceEvent('projection.applied', {
+        contract: 'typed_operation_projection',
+        scope: 'navigation',
+        source_operation: sourceOperation.name,
+        projected_operation: routed.operation.name,
+        candidate_id: routed.candidate_id,
+        confidence: routed.confidence,
+        minimum_confidence: LOW_RISK_NAVIGATION_PROJECTION_MIN_CONFIDENCE,
+        normal_preflight_required: true,
+      })
+      return { ...plan, operations: [routed.operation] }
+    }
+    catch (error) {
+      if (/cancelled|superseded|epoch changed/i.test(String(error?.message ?? error))) throw error
+      await this.decisionTraceEvent('decision.fallback', {
+        decision_id: decisionId,
+        contract: 'typed_operation_projection',
+        mode: 'active',
+        fallback_target: 'main_llm_operation',
+        reason: cleanMemoryText(error instanceof Error ? error.message : String(error), 300),
+        latency_ms: Date.now() - startedAt,
+      })
+      await this.traceEvent('projection.skipped', {
+        contract: 'typed_operation_projection',
+        scope: 'navigation',
+        reason: 'decision_provider_failure',
+        source_operation: sourceOperation.name,
+        candidate_count: candidates.length,
+      })
+      return plan
+    }
+    finally {
+      if (this.operationProjectionAbort === controller) this.operationProjectionAbort = null
+    }
   }
 
   passiveProgressWaitCandidate(state = this.memory.currentPlan?.(this.activePlanKey())) {
@@ -4409,6 +4587,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.postStepDecisionAbort = null
     this.recoveryDecisionAbort?.abort()
     this.recoveryDecisionAbort = null
+    this.operationProjectionAbort?.abort()
+    this.operationProjectionAbort = null
     if (/terminate|new_task|cancel_current|user_cancel/i.test(String(reason))) this.clearLoadedSkillContext()
     this.reasoningTriggerSource = null
     void this.traceEvent('request.cancelled', { reason, usage: this.traceRequest?.usage })
@@ -5528,6 +5708,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async commitPlan(plan) {
+    plan = await this.applyLowRiskTypedProjection(plan)
     const triggerSource = this.reasoningTriggerSource ?? this.planUpdateReason
     const commands = plan.operations.map(renderOperation)
     const operations = plan.operations.map((operation, index) => ({
