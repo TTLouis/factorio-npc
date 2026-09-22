@@ -5,7 +5,6 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
-import { observationRelevanceFamilies } from './jev-decision-taxonomy.mjs'
 import { NpcAgentLoop, interactionRuntimeHealthy, parseInteractionRoute } from './npc-agent-loop.mjs'
 
 function deployment() {
@@ -130,21 +129,34 @@ function agentFor(intent, {
     ? async (state, questions, context) => {
         decisionCalls.push({ state, questions, context })
         if (decisionError) throw new Error(decisionError)
-        const probabilities = Object.fromEntries(Object.keys(questions.intent.criteria).map(key => [key, key === decisionIntent ? 0.95 : 0.01]))
+        if (questions.intent) {
+          const probabilities = Object.fromEntries(Object.keys(questions.intent.criteria).map(key => [key, key === decisionIntent ? 0.95 : 0.01]))
+          return {
+            model: 'jev-latest',
+            provider: 'TypeSafe',
+            answers: {
+              intent: {
+                type: 'choice',
+                choice: decisionIntent,
+                probabilities,
+                confidence: 0.91,
+              },
+              queue_conflict: {
+                type: 'noul',
+                noul: decisionConflictProbability,
+              },
+            },
+            usage: {
+              input_tokens: 80,
+              output_tokens: 8,
+              cost: 0.00000336,
+            },
+          }
+        }
         return {
           model: 'jev-latest',
           provider: 'TypeSafe',
           answers: {
-            intent: {
-              type: 'choice',
-              choice: decisionIntent,
-              probabilities,
-              confidence: 0.91,
-            },
-            queue_conflict: {
-              type: 'noul',
-              noul: decisionConflictProbability,
-            },
             reasoning_budget: { type: 'choice', choice: decisionReasoningBudget ?? (decisionGranularity === 'split' ? 'strategic' : 'normal'), confidence: 0.85 },
             planning_horizon: { type: 'choice', choice: decisionPlanningHorizon ?? (decisionGranularity === 'split' ? 'strategic' : 'checkpoint'), confidence: 0.84 },
             ...Object.fromEntries(
@@ -160,9 +172,9 @@ function agentFor(intent, {
             ),
           },
           usage: {
-            input_tokens: 120,
-            output_tokens: 20,
-            cost: 0.00000504,
+            input_tokens: 90,
+            output_tokens: 12,
+            cost: 0.0000042,
           },
         }
       }
@@ -234,10 +246,9 @@ test('Jev shadow disagreement is observed without changing the active interactio
   assert.equal(decisionCalls[0].state.message, 'what are you doing?')
   assert.equal(decisionCalls[0].questions.intent.type, 'choice')
   assert.equal(decisionCalls[0].questions.queue_conflict.type, 'noul')
-  assert.equal(decisionCalls[0].questions.reasoning_budget.type, 'choice')
-  assert.equal(decisionCalls[0].questions.planning_horizon.type, 'choice')
-  assert.equal(decisionCalls[0].questions.observation_budget, undefined)
-  assert.equal(decisionCalls[0].questions.need_nearby_world.type, 'noul')
+  assert.deepEqual(Object.keys(decisionCalls[0].questions), ['intent', 'queue_conflict'])
+  assert.equal(decisionCalls[0].questions.reasoning_budget, undefined)
+  assert.equal(decisionCalls[0].questions.need_nearby_world, undefined)
   assert.ok(decisionCalls[0].context.signal instanceof AbortSignal)
   assert.equal(rcon.cancelCount, 0)
 })
@@ -257,16 +268,10 @@ test('Jev shadow writes a dedicated decision lifecycle trace without copying the
   assert.equal(events[0].data.mode, 'shadow')
   assert.equal(events[0].data.message_chars, 'what are you doing?'.length)
   assert.equal(events[0].data.message, undefined)
-  assert.deepEqual(events[0].data.question_ids, [
-    'intent',
-    'queue_conflict',
-    'reasoning_budget',
-    'planning_horizon',
-    ...observationRelevanceFamilies().map(family => `need_${family}`),
-  ])
+  assert.deepEqual(events[0].data.question_ids, ['intent', 'queue_conflict'])
   assert.equal(events[1].data.intent, 'new_goal')
-  assert.equal(events[1].data.input_units, 120)
-  assert.equal(events[1].data.output_units, 20)
+  assert.equal(events[1].data.input_units, 80)
+  assert.equal(events[1].data.output_units, 8)
   assert.equal(events[2].data.active_source, 'interaction_router')
   assert.equal(events[2].data.active_intent, 'status_query')
   assert.equal(events[2].data.shadow_intent, 'new_goal')
@@ -305,6 +310,8 @@ test('idle no-plan status query is classified, reaches Jev shadow, and skips the
   assert.equal(calls.length, 1)
   assert.equal(calls[0].interactionRouter, true)
   assert.equal(decisionCalls.length, 1)
+  assert.equal(decisionCalls[0].state.contract, undefined)
+  assert.deepEqual(Object.keys(decisionCalls[0].questions), ['intent', 'queue_conflict'])
   assert.equal(decisionCalls[0].state.current_goal, null)
   assert.equal(decisionCalls[0].state.runtime.task_state, 'idle')
   assert.equal(decisionCalls[0].state.runtime.queue_length, 0)
@@ -349,7 +356,7 @@ test('idle no-plan real new goal is classified before the main planner runs once
 })
 
 test('aligned fresh new goal floors micro reasoning and zero observations before the first planner turn', async () => {
-  const { agent, calls } = agentFor('new_goal', {
+  const { agent, calls, decisionCalls } = agentFor('new_goal', {
     running: false,
     withPlan: false,
     decisionIntent: 'new_goal',
@@ -362,6 +369,12 @@ test('aligned fresh new goal floors micro reasoning and zero observations before
 
   assert.equal(result.interactionIntent, 'new_goal')
   assert.equal(calls.length, 2)
+  assert.equal(decisionCalls.filter(call => call.questions?.intent).length, 1)
+  const shapeCalls = decisionCalls.filter(call => call.state?.contract === 'interaction_planner_shape')
+  assert.equal(shapeCalls.length, 1)
+  assert.equal(shapeCalls[0].questions.reasoning_budget.type, 'choice')
+  assert.equal(shapeCalls[0].questions.planning_horizon.type, 'choice')
+  assert.equal(shapeCalls[0].questions.need_nearby_world.type, 'noul')
   assert.equal(calls[1].reasoningBudget, 'normal')
   const envelope = calls[1].messages.find(message => typeof message?.content === 'string' && message.content.startsWith('[DECISION_ENVELOPE]'))
   assert.ok(envelope)

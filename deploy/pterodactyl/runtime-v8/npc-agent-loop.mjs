@@ -1656,11 +1656,10 @@ Return exactly one JSON object with exactly three fields:
 reply must be empty except for chat_only, where it may contain one brief conversational response. No markdown.`
 
 export function interactionDecisionQuestions() {
-  const envelope = decisionEnvelopeQuestions()
   return {
     intent: {
       type: 'choice',
-      instructions: 'Classify the incoming human message relative to the current Factorio goal and authoritative runtime state.',
+      instructions: 'Classify the incoming human message relative to the current Factorio goal and authoritative runtime state. This is an independent typed signal; natural-language interpretation and user-facing language remain with the Main LLM.',
       criteria: {
         continue_current: 'The player asks SGLuna to keep or resume the same goal without changing its constraints.',
         status_query: 'The player asks what is happening, current progress, a blocker, or why the agent is stuck.',
@@ -1678,6 +1677,12 @@ export function interactionDecisionQuestions() {
         false: 'There is no amendment, or the amendment is compatible with the work already running or queued.',
       },
     },
+  }
+}
+
+export function interactionPlannerShapeQuestions() {
+  const envelope = decisionEnvelopeQuestions()
+  return {
     reasoning_budget: envelope.reasoning_budget,
     planning_horizon: envelope.planning_horizon,
     ...observationRelevanceQuestions(),
@@ -1687,8 +1692,6 @@ export function interactionDecisionQuestions() {
 export function parseInteractionDecisionShadow(response) {
   const intentAnswer = response?.answers?.intent
   const conflictAnswer = response?.answers?.queue_conflict
-  const steering = parseBoundarySteeringTelemetry(response)
-  const observationRelevance = parseObservationRelevance(response)
   if (!intentAnswer || !INTERACTION_INTENTS.has(intentAnswer.choice)) throw new AgentLoopError('Decision provider returned invalid interaction intent')
   if (typeof intentAnswer.confidence !== 'number' || !Number.isFinite(intentAnswer.confidence) || intentAnswer.confidence < 0 || intentAnswer.confidence > 1) {
     throw new AgentLoopError('Decision provider returned invalid interaction confidence')
@@ -1702,11 +1705,6 @@ export function parseInteractionDecisionShadow(response) {
     intent_probabilities: intentAnswer.probabilities,
     queue_conflict_probability: conflictAnswer.noul,
     queue_conflict: intentAnswer.choice === 'amend_current' && conflictAnswer.noul >= 0.5,
-    reasoning_budget: steering.reasoning_budget,
-    reasoning_confidence: steering.reasoning_confidence,
-    planning_horizon: steering.planning_horizon,
-    observation_relevance: observationRelevance,
-    observation_budget: observationRelevance.budget,
     model: typeof response?.model === 'string' ? response.model : undefined,
     provider: typeof response?.provider === 'string' ? response.provider : undefined,
     usage: response?.usage && typeof response.usage === 'object' ? response.usage : undefined,
@@ -3007,6 +3005,96 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  async requestInteractionPlannerShape(text, sender, taskStatus, planState, intent, epoch) {
+    if (!this.interactionDecisionProvider) return undefined
+    const questions = interactionPlannerShapeQuestions()
+    const state = {
+      contract: 'interaction_planner_shape',
+      active_intent: INTERACTION_INTENTS.has(intent) ? intent : 'continue_current',
+      message: cleanMemoryText(text, 4000),
+      sender: cleanMemoryText(sender, 128),
+      current_goal: planState
+        ? {
+            goal_id: sanitizeDurableModelText(planState.goal_id, 100),
+            objective: sanitizeDurableModelText(planState.objective, 500),
+            status: planState.status,
+            active_step: Number.isSafeInteger(planState.task_board?.active_index)
+              ? sanitizeDurableModelText(planState.task_board?.steps?.[planState.task_board.active_index]?.description, 300)
+              : undefined,
+          }
+        : null,
+      runtime: taskStatus,
+    }
+
+    this.interactionAbort?.abort()
+    const controller = new AbortController()
+    this.interactionAbort = controller
+    const decisionId = `decision_${Date.now().toString(36)}_${(++this.decisionRequestSequence).toString(36)}`
+    const startedAt = Date.now()
+
+    await this.decisionTraceEvent('decision.request', {
+      decision_id: decisionId,
+      contract: 'interaction_planner_shape',
+      mode: 'active_advisory',
+      active_intent: state.active_intent,
+      question_ids: Object.keys(questions),
+    })
+
+    try {
+      const response = await this.interactionDecisionProvider(state, questions, {
+        epoch: epoch?.epoch ?? this.epoch?.epoch,
+        actorId: epoch?.actor_id ?? this.epoch?.actor_id,
+        signal: controller.signal,
+      })
+      const steering = parseBoundarySteeringTelemetry(response)
+      const observationRelevance = parseObservationRelevance(response)
+      const shape = {
+        reasoning_budget: steering.reasoning_budget,
+        reasoning_confidence: steering.reasoning_confidence,
+        planning_horizon: steering.planning_horizon,
+        observation_relevance: observationRelevance,
+        observation_budget: observationRelevance.budget,
+        model: typeof response?.model === 'string' ? response.model : undefined,
+        provider: typeof response?.provider === 'string' ? response.provider : undefined,
+        usage: response?.usage && typeof response.usage === 'object' ? response.usage : undefined,
+      }
+      await this.decisionTraceEvent('decision.response', {
+        decision_id: decisionId,
+        contract: 'interaction_planner_shape',
+        mode: 'active_advisory',
+        active_intent: state.active_intent,
+        reasoning_budget: shape.reasoning_budget,
+        reasoning_confidence: shape.reasoning_confidence,
+        planning_horizon: shape.planning_horizon,
+        observation_families: shape.observation_relevance?.selected_families,
+        observation_budget: shape.observation_budget,
+        provider: shape.provider,
+        model: shape.model,
+        latency_ms: Date.now() - startedAt,
+        input_units: Number.isFinite(shape.usage?.input_tokens) ? Math.max(0, Math.trunc(shape.usage.input_tokens)) : 0,
+        output_units: Number.isFinite(shape.usage?.output_tokens) ? Math.max(0, Math.trunc(shape.usage.output_tokens)) : 0,
+        cost_usd: Number.isFinite(shape.usage?.cost) && shape.usage.cost >= 0 ? shape.usage.cost : 0,
+      })
+      return shape
+    }
+    catch (error) {
+      await this.decisionTraceEvent('decision.fallback', {
+        decision_id: decisionId,
+        contract: 'interaction_planner_shape',
+        mode: 'active_advisory',
+        active_intent: state.active_intent,
+        fallback_target: 'main_planner_defaults',
+        reason: cleanMemoryText(error instanceof Error ? error.message : String(error), 300),
+        latency_ms: Date.now() - startedAt,
+      })
+      return undefined
+    }
+    finally {
+      controller.abort()
+      if (this.interactionAbort === controller) this.interactionAbort = null
+    }
+  }
+
   async authoritativeGroundCheckpointRequirement(requirement, { allowedReceiptNames = new Set() } = {}) {
     const one = sanitizeStepCompletionContract({ mode: 'all', requirements: [requirement] })
     const normalized = one.requirements?.[0]
@@ -3919,6 +4007,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       decision_shadow_error: routed.decision_shadow_error,
       decision_shadow_latency_ms: routed.decision_shadow_latency_ms,
       jev_new_goal_aligned: jevNewGoalAligned,
+      hybrid_interaction_policy: 'main_llm_language_plus_jev_typed_signal',
       decision_shadow_status: routed.classifier_skipped
         ? 'classifier_skipped'
         : routed.decision_shadow
@@ -4020,6 +4109,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       && planBefore?.provider_recovery?.kind === 'budget_handoff'
       && planBefore?.provider_recovery?.phase === 'planner_pending'
       && !healthyRuntime
+    const plannerShape = !resumeProviderBudgetHandoff
+      && ['new_goal', 'amend_current', 'continue_current'].includes(intent)
+      ? await this.requestInteractionPlannerShape(text, sender, taskStatus, planBefore, intent, routed.epoch)
+      : undefined
 
     this.liveEntityObservations = new Map()
     this.rejectedExactTargets = new Set()
@@ -4041,32 +4134,37 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const previousObservationBudgetRemaining = this.observationBudgetRemaining
     const previousObservationRelevance = this.observationRelevanceOverride
     const previousPlanningHorizon = this.planningHorizonOverride
-    if (jevNewGoalAligned) {
-      // A true new goal starts with no request-local world grounding: the task
-      // context and live observation caches were just cleared above. Jev still
-      // chooses the semantic budget, but it may not starve the first planner
-      // turn before that planner can establish basic world state.
-      const requestedReasoningBudget = routed.decision_shadow.reasoning_budget
-      const requestedObservationBudget = Number.isSafeInteger(routed.decision_shadow.observation_budget)
-        ? routed.decision_shadow.observation_budget
+    if (plannerShape) {
+      const requestedReasoningBudget = plannerShape.reasoning_budget
+      const requestedObservationBudget = Number.isSafeInteger(plannerShape.observation_budget)
+        ? plannerShape.observation_budget
         : 0
-      const selectedObservationFamilies = routed.decision_shadow.observation_relevance?.source === 'typed_relevance'
-        && Array.isArray(routed.decision_shadow.observation_relevance.selected_families)
-        ? routed.decision_shadow.observation_relevance.selected_families
+      const selectedObservationFamilies = plannerShape.observation_relevance?.source === 'typed_relevance'
+        && Array.isArray(plannerShape.observation_relevance.selected_families)
+        ? plannerShape.observation_relevance.selected_families
         : []
-      this.reasoningBudgetOverride = requestedReasoningBudget === 'deep' || requestedReasoningBudget === 'strategic'
-        ? requestedReasoningBudget
-        : 'normal'
-      // Keep the existing three-read first-turn bootstrap reserve, but use
-      // typed relevance to narrow which fresh read families can consume it.
-      // If Jev selects no family at all, fail open for this ungrounded first
-      // turn rather than starving the Main LLM of all world observations.
-      this.observationRelevanceOverride = selectedObservationFamilies.length > 0
-        ? selectedObservationFamilies
-        : null
-      this.observationBudgetOverride = Math.max(3, requestedObservationBudget)
+
+      if (intent === 'new_goal') {
+        // A fresh goal has no request-local world grounding. Keep the existing
+        // minimum bootstrap reserve and do not let a cheap under-informed
+        // budget judgment starve the first natural-language planner turn.
+        this.reasoningBudgetOverride = requestedReasoningBudget === 'deep' || requestedReasoningBudget === 'strategic'
+          ? requestedReasoningBudget
+          : 'normal'
+        this.observationRelevanceOverride = selectedObservationFamilies.length > 0
+          ? selectedObservationFamilies
+          : null
+        this.observationBudgetOverride = Math.max(3, requestedObservationBudget)
+      }
+      else {
+        this.reasoningBudgetOverride = requestedReasoningBudget ?? null
+        this.observationRelevanceOverride = plannerShape.observation_relevance?.source === 'typed_relevance'
+          ? selectedObservationFamilies
+          : null
+        this.observationBudgetOverride = requestedObservationBudget
+      }
       this.observationBudgetRemaining = this.observationBudgetOverride
-      this.planningHorizonOverride = routed.decision_shadow.planning_horizon ?? null
+      this.planningHorizonOverride = plannerShape.planning_horizon ?? null
     }
     this.lastTaskStatusView = null
     this.lastHandledRuntimeReceipt = { completion: null, failure: null }
