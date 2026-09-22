@@ -1,21 +1,18 @@
-// EXPERIMENTAL DESIGN PROTOTYPE.
-//
-// Do not wire this module into live operation admission/execution yet.
-// The 2026-09-21 TypeSafe audit found that projection_route, operation_type,
-// and operation_candidate are independent questions in one System One request;
-// they cannot depend on one another. Replace this prototype with the
-// TypeSafe-native function-calling / finite-candidate selection shape described
-// in docs/JEV_TYPESAFE_RESEARCH_AND_AUDIT_2026-09-21.md before live use.
-//
 import {
   approvedOperationScopes,
-  operationNamesForScope,
-  operationTypeCatalog,
+  operationMetadataForName,
+  operationTypeCatalogForScope,
   parseOperation,
 } from './structured-policy.mjs'
 
 const PROJECTION_ROUTES = Object.freeze([
   'emit_operation',
+  'need_observation',
+  'wake_planner',
+  'ask_user',
+])
+
+const FALLBACK_ACTIONS = Object.freeze([
   'need_observation',
   'wake_planner',
   'ask_user',
@@ -33,8 +30,26 @@ function cleanText(value, max = 500) {
   return text.length <= max ? text : text.slice(0, max)
 }
 
-function choice(response, id) {
-  return response?.answers?.[id]?.choice
+function answerChoice(response) {
+  return response?.answers?.projection_action?.choice
+}
+
+function answerConfidence(response) {
+  const value = response?.answers?.projection_action?.confidence
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1
+    ? value
+    : undefined
+}
+
+function answerProbabilities(response) {
+  const value = response?.answers?.projection_action?.probabilities
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? { ...value }
+    : undefined
+}
+
+function candidateActionKey(index) {
+  return `candidate_${index + 1}`
 }
 
 export function typedProjectionRoutes() {
@@ -47,8 +62,7 @@ export function typedProjectionScopes() {
 
 export function typedProjectionTypeCatalog(scope) {
   check(approvedOperationScopes().includes(scope), `Unknown operation scope: ${scope}`)
-  const allowed = new Set(operationNamesForScope(scope))
-  return operationTypeCatalog().filter(entry => allowed.has(entry.name))
+  return operationTypeCatalogForScope(scope)
 }
 
 export function normalizeTypedOperationCandidates(scope, candidates = []) {
@@ -56,119 +70,118 @@ export function normalizeTypedOperationCandidates(scope, candidates = []) {
   check(Array.isArray(candidates), 'Typed projection candidates must be an array')
   check(candidates.length <= MAX_CANDIDATES, `Typed projection supports at most ${MAX_CANDIDATES} candidates`)
 
-  const allowed = new Set(operationNamesForScope(scope))
+  const allowed = new Set(operationTypeCatalogForScope(scope).map(entry => entry.name))
   const seen = new Set()
 
   return candidates.map((candidate, index) => {
     check(candidate && typeof candidate === 'object' && !Array.isArray(candidate), `Candidate ${index} must be an object`)
     const id = String(candidate.id ?? '').trim()
     check(CANDIDATE_ID.test(id), `Candidate ${index} has an invalid id`)
-    check(id !== 'none', 'Candidate id "none" is reserved')
     check(!seen.has(id), `Duplicate typed projection candidate id: ${id}`)
     seen.add(id)
 
     const operation = parseOperation(candidate.operation)
     check(allowed.has(operation.name), `Operation ${operation.name} is outside scope ${scope}`)
+    const metadata = operationMetadataForName(operation.name)
 
     return {
       id,
+      action_key: candidateActionKey(index),
       operation,
+      risk: metadata.risk,
       description: cleanText(candidate.description || `${operation.name} with grounded harness arguments`),
     }
   })
 }
 
 export function typedProjectionQuestions({ scope, candidates = [] } = {}) {
-  const types = typedProjectionTypeCatalog(scope)
   const normalized = normalizeTypedOperationCandidates(scope, candidates)
+  const criteria = {}
 
-  const typeCriteria = {
-    none: 'No operation type in this scope is sufficiently specified by the supplied intent and grounded facts.',
-  }
-  for (const entry of types) {
-    typeCriteria[entry.name] = `Project the intent as ${entry.name}; required/accepted argument keys: ${entry.args.join(', ') || '(none)'}.`
+  for (const candidate of normalized) {
+    criteria[candidate.action_key] = {
+      candidate_id: candidate.id,
+      operation: candidate.operation.name,
+      scope,
+      risk: candidate.risk,
+      meaning: candidate.description,
+      rule: 'Select only if this complete harness-built operation exactly expresses the already-decided semantic intent. Do not reinterpret or modify its arguments.',
+    }
   }
 
-  const questions = {
-    projection_route: {
+  criteria.need_observation = {
+    meaning: 'A bounded deterministic observation can supply a missing authoritative fact or candidate.',
+    authority: 'runtime',
+  }
+  criteria.wake_planner = {
+    meaning: 'Semantic intent, strategy, target choice, quantity, coordinates, or another open value is still unresolved.',
+    authority: 'main_llm',
+  }
+  criteria.ask_user = {
+    meaning: 'A genuine user-owned preference, constraint, approval, or authority decision is required.',
+    authority: 'user',
+  }
+
+  return {
+    projection_action: {
       type: 'choice',
-      instructions:
-        'Choose the cheapest safe typed-projection route. This is formatting/projection, not correctness review. Emit an operation only when the supplied semantic intent plus grounded candidate data already determine it. Never invent a missing target, quantity, entity identity, recipe, technology, position, or other argument.',
-      criteria: {
-        emit_operation: 'A supplied prevalidated candidate exactly expresses the already-decided Main-LLM intent.',
-        need_observation: 'A bounded deterministic read can provide a missing factual argument or candidate.',
-        wake_planner: 'Semantic intent is underspecified or a strategy/quantity/target choice still belongs to the Main LLM.',
-        ask_user: 'A genuine user preference or authority decision is required.',
+      instructions: {
+        task: 'Select exactly one complete typed-projection action.',
+        architecture: 'Main LLM reasons; Jev selects; harness validates; Autorio executes.',
+        rules: [
+          'Candidate operations are complete harness-built values and may only be selected verbatim.',
+          'Never invent or repair an operation argument.',
+          'Use need_observation when an authoritative runtime fact is missing.',
+          'Use wake_planner when semantic or open-valued intent is unresolved.',
+          'Use ask_user only for user-owned authority or preference.',
+          'This selection is not completion truth and does not bypass parseOperation or preflight.',
+        ],
       },
-    },
-    operation_type: {
-      type: 'choice',
-      instructions:
-        `Select only an operation type available in the "${scope}" scope. Choose none when the operation type is not already determined by Main-LLM intent and grounded facts. This selection does not authorize execution by itself.`,
-      criteria: typeCriteria,
+      criteria,
     },
   }
-
-  if (normalized.length > 0) {
-    const candidateCriteria = {
-      none: 'No supplied prevalidated candidate exactly matches the already-decided Main-LLM intent.',
-    }
-    for (const candidate of normalized) {
-      candidateCriteria[candidate.id] = `${candidate.operation.name}: ${candidate.description}`
-    }
-    questions.operation_candidate = {
-      type: 'choice',
-      instructions:
-        'Choose one supplied prevalidated operation candidate. Candidates are harness-built typed values. Do not reinterpret or modify their arguments. Choose none if the correct operation is absent.',
-      criteria: candidateCriteria,
-    }
-  }
-
-  return questions
 }
 
 export function parseTypedProjection(response, { scope, candidates = [] } = {}) {
   const normalized = normalizeTypedOperationCandidates(scope, candidates)
-  const allowedTypes = new Set(operationNamesForScope(scope))
-  const requestedRoute = choice(response, 'projection_route')
-  const route = PROJECTION_ROUTES.includes(requestedRoute) ? requestedRoute : 'wake_planner'
+  const selected = answerChoice(response)
+  const confidence = answerConfidence(response)
+  const probabilities = answerProbabilities(response)
 
-  const selectedType = choice(response, 'operation_type')
-  const operation_type = allowedTypes.has(selectedType) ? selectedType : undefined
-
-  const selectedCandidateId = choice(response, 'operation_candidate')
-  const candidate = normalized.find(entry => entry.id === selectedCandidateId)
-
-  if (route !== 'emit_operation') {
+  if (FALLBACK_ACTIONS.includes(selected)) {
     return {
-      route,
+      route: selected,
       scope,
-      operation_type,
-      candidate_id: candidate?.id,
+      operation_type: undefined,
+      candidate_id: undefined,
       operation: undefined,
+      confidence,
+      probabilities,
     }
   }
 
-  if (!candidate || !operation_type || candidate.operation.name !== operation_type) {
+  const candidate = normalized.find(entry => entry.action_key === selected)
+  if (!candidate) {
     return {
       route: 'wake_planner',
       scope,
-      operation_type,
-      candidate_id: candidate?.id,
+      operation_type: undefined,
+      candidate_id: undefined,
       operation: undefined,
-      projection_failure: !candidate
-        ? 'missing_prevalidated_candidate'
-        : !operation_type
-          ? 'missing_scope_operation_type'
-          : 'candidate_type_mismatch',
+      confidence,
+      probabilities,
+      projection_failure: 'unknown_projection_action',
     }
   }
 
   return {
     route: 'emit_operation',
     scope,
-    operation_type,
+    operation_type: candidate.operation.name,
     candidate_id: candidate.id,
-    operation: candidate.operation,
+    operation: parseOperation(candidate.operation),
+    risk: candidate.risk,
+    confidence,
+    probabilities,
   }
 }
