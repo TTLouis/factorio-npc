@@ -836,18 +836,36 @@ Broader routing and recovery remain Phase 7 work.
 
 ### Phase 7 — routing and recovery
 
-Retain Jev where it naturally fits:
+Status: **implemented in M9 (2026-09-21)**
 
-- continue runtime;
-- observe;
-- wake planner;
-- ask user;
-- bounded recovery route;
-- reasoning effort;
-- planning horizon;
-- advisory steering.
+Post-step routing and recovery now expose the same canonical Jev control-plane vocabulary:
 
-No route may override deterministic impossibility or claim completion.
+```text
+continue_runtime
+observe
+wake_planner
+ask_user
+```
+
+The runtime interprets those requests conservatively:
+
+- `continue_runtime` only suppresses the Main LLM when authoritative runtime work is actually active;
+- `observe` enters the existing bounded read-only observation path and still obeys M7 relevance/cap admission;
+- `wake_planner` enters the existing planner path; recovery maps bounded failure classes onto low/high reasoning without giving Jev plan authority;
+- `ask_user` only surfaces an already-authoritative lifecycle boundary requiring user choice. It cannot create one.
+
+Deterministic final completion is checked before recovery Jev is called. Jev is no longer
+offered `deterministic_close` or `propose_blocker`, and recovery cannot convert an old
+world-evidence record into a new durable blocker. Provider-budget recovery also no longer
+asks Jev to choose a semantic scope; new handoffs preserve the committed target.
+
+Legacy route names and persisted semantic-scope values remain parse/restore compatibility
+only. They are normalized into the canonical non-authoritative routes and are not emitted
+in live TypeSafe questions.
+
+Reasoning effort, planning horizon, observation relevance, typed state, and advisory
+steering remain bounded resource/context signals. No route may override deterministic
+impossibility, claim completion, author a blocker, or invent user authority.
 
 ### Phase 8 — confidence/risk policy
 
