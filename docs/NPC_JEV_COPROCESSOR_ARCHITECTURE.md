@@ -201,25 +201,41 @@ Principle:
 
 Observation selection is a primary Jev responsibility.
 
-Instead of merely allocating an integer observation budget, Jev should be able to request named bounded observations such as:
+M7 implements this as eleven named deterministic observation families rather than an
+integer-only observation budget:
 
-- inventory;
-- nearby resources;
-- nearby entities;
-- recipe/crafting availability;
-- technology/research state;
-- entity configuration/status;
-- production state;
-- placement candidates;
-- transport/logistics state;
-- persistent-controller state.
+```text
+runtime_status
+inventory_equipment
+recipe_production
+prototype_knowledge
+player_state
+nearby_world
+entity_status
+logistics_transport
+research_state
+placement_candidates
+construction_state
+```
 
-A TypeSafe-native implementation should prefer parallel typed judgments such as
-`need_inventory?`, `need_nearby_resources?`, `need_recipe_state?`, and
-`need_placement_candidates?`. Code applies thresholds/caps and then invokes the
-selected deterministic reads.
+The TypeSafe request asks one parallel Noul question per family. Deterministic code
+applies a `0.5` threshold and a four-family cap, then maps every observation tool to
+exactly one family.
 
-All observations remain deterministic reads. Jev does not manufacture their values.
+Selection governs **fresh** information acquisition. A fresh read outside the selected
+families is deferred before execution and still remains subject to the existing
+per-turn observation cap. Cached observations remain reusable even when their family
+is not selected because they are already-grounded evidence, not new world reads.
+
+A completely new, ungrounded goal preserves the existing minimum bootstrap read
+allowance. If Jev selects no family there, the runtime fails open for observation
+selection rather than starving the Main LLM of all world grounding.
+
+The old integer `observation_budget` response is retained only as parser compatibility;
+the live TypeSafe decision envelopes no longer ask that Score question.
+
+All observations remain deterministic reads. Jev chooses relevance only and does not
+manufacture their values.
 
 ## 6. Typed state distillation and working memory
 

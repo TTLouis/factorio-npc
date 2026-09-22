@@ -792,10 +792,28 @@ Choice over candidate IDs plus `need_observation / wake_planner / ask_user`.
 
 ### Phase 5 — typed observation selection
 
-Replace integer-only observation budgets with typed relevance questions over available
-deterministic reads.
+Status: **implemented in M7 (2026-09-21)**
 
-Code applies thresholds and caps; Jev never invents observation results.
+Integer-only observation-budget questions are no longer emitted to Jev. The live
+decision envelopes ask parallel Noul relevance questions for eleven deterministic
+observation families: runtime status, inventory/equipment, recipe/production,
+prototype/skill knowledge, player state, nearby world, exact entity status/geometry,
+logistics/transport, research state, placement candidates, and construction state.
+
+Deterministic code applies a `0.5` relevance threshold and a four-family cap. Fresh
+read-only tool calls must belong to a selected family and still fit the existing
+deterministic observation-call cap. Cached observations remain reusable regardless of
+the current relevance selection.
+
+A first turn for a completely new goal keeps the existing minimum bootstrap read
+allowance and fails open when Jev selects no family, so an under-informed relevance
+classification cannot starve the Main LLM of all world grounding.
+
+The old integer `observation_budget` response remains parse-only compatibility for
+older fixtures/providers; it is not part of the live TypeSafe question contract.
+
+Jev chooses relevance only. Every admitted observation is still a deterministic
+Factorio/Autorio read, and Jev never manufactures observation values.
 
 ### Phase 6 — typed state distillation
 

@@ -566,26 +566,43 @@ Exit condition:
 
 ### Phase 5 — observation selection
 
-Replace integer-only observation budgeting with typed relevance judgments.
+Status: **implemented in M7 (2026-09-21)**
 
-Prefer speculative parallel Noul questions such as:
+The live decision contract now replaces the integer observation-budget Score with
+parallel Noul relevance judgments over eleven reviewable families:
 
 ```text
-need_inventory?
-need_nearby_resources?
-need_recipe_state?
-need_research_state?
-need_entity_status?
-need_placement_candidates?
+need_runtime_status
+need_inventory_equipment
+need_recipe_production
+need_prototype_knowledge
+need_player_state
+need_nearby_world
+need_entity_status
+need_logistics_transport
+need_research_state
+need_placement_candidates
+need_construction_state
 ```
 
-Code applies thresholds and caps.
+The runtime has a complete observation-tool-to-family registry. Deterministic code uses
+a `0.5` relevance threshold and selects at most four families. Fresh observation calls
+outside the selected families are deferred before tool execution; the normal per-turn
+read cap still applies. Identical cached observations remain reusable because relevance
+selection controls new information acquisition, not access to already-grounded facts.
+
+For a completely new ungrounded goal, the existing minimum bootstrap observation
+allowance is preserved and an empty relevance selection fails open rather than starving
+the Main LLM of all grounding. Legacy `observation_budget` Score answers are accepted
+only as parser compatibility and are no longer emitted in the TypeSafe question set.
 
 Jev chooses relevance; deterministic tools produce the facts.
 
-Exit condition:
+Exit condition status:
 
-- Main LLM receives fewer redundant observations without losing needed facts.
+- the typed selection/admission contract is implemented and covered by focused tests;
+- measurement of whether it reduces redundant observations belongs to the later E2E
+  comparison phase.
 
 ### Phase 6 — typed state distillation
 
