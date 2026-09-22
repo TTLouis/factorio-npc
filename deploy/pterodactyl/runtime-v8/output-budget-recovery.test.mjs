@@ -542,17 +542,19 @@ test('terminal provider budget becomes a Jev-directed fresh planner generation i
       decisions.push({ state, questions })
       assert.equal(state.failure.class, 'provider_budget')
       assert.equal(state.task.active_step, canonical[0])
-      assert.ok(questions.semantic_scope)
+      assert.equal(questions.semantic_scope, undefined)
+      assert.deepEqual(Object.keys(questions.next_recovery.criteria), [
+        'continue_runtime',
+        'observe',
+        'wake_planner',
+        'ask_user',
+      ])
       return {
         model: 'jev-latest',
         provider: 'TypeSafe',
         answers: {
           failure_class: { type: 'choice', choice: 'provider_budget', confidence: 0.99 },
-          next_recovery: { type: 'choice', choice: 'continue_low', confidence: 0.96 },
-          semantic_scope: { type: 'choice', choice: 'reanchor_target', confidence: 0.94 },
-          world_failure_supported: { type: 'noul', noul: 0.01 },
-          need_fresh_observation: { type: 'noul', noul: 0.1 },
-          need_semantic_replan: { type: 'noul', noul: 0.4 },
+          next_recovery: { type: 'choice', choice: 'wake_planner', confidence: 0.96 },
         },
         usage: { input_tokens: 40, output_tokens: 8, cost: 0 },
       }
@@ -620,10 +622,7 @@ test('provider-budget recovery cannot replace the existing committed plan', asyn
         provider: 'TypeSafe',
         answers: {
           failure_class: { type: 'choice', choice: 'provider_budget', confidence: 0.99 },
-          next_recovery: { type: 'choice', choice: 'replan_high', confidence: 0.97 },
-          world_failure_supported: { type: 'noul', noul: 0.01 },
-          need_fresh_observation: { type: 'noul', noul: 0.05 },
-          need_semantic_replan: { type: 'noul', noul: 0.99 },
+          next_recovery: { type: 'choice', choice: 'wake_planner', confidence: 0.97 },
         },
         usage: { input_tokens: 44, output_tokens: 9, cost: 0 },
       }
@@ -640,7 +639,7 @@ test('provider-budget recovery cannot replace the existing committed plan', asyn
       }
       if (calls.length === 2 || calls.length === 3) return exhaustedMessage()
 
-      assert.equal(context.triggerSource, 'recovery_replan_high')
+      assert.equal(context.triggerSource, 'recovery_continue_low')
       const duringHandoff = agent.memory.currentPlan('npc:airi')
       assert.equal(duringHandoff.hierarchy_split_pending, undefined)
       pendingObserved = true
@@ -744,11 +743,7 @@ test('context-window exhaustion enters the same Jev planner-budget handoff witho
           provider: 'TypeSafe',
           answers: {
             failure_class: { type: 'choice', choice: 'provider_budget', confidence: 0.99 },
-            next_recovery: { type: 'choice', choice: 'continue_low', confidence: 0.97 },
-            semantic_scope: { type: 'choice', choice: 'keep_target', confidence: 0.98 },
-            world_failure_supported: { type: 'noul', noul: 0.01 },
-            need_fresh_observation: { type: 'noul', noul: 0.05 },
-            need_semantic_replan: { type: 'noul', noul: 0.1 },
+            next_recovery: { type: 'choice', choice: 'wake_planner', confidence: 0.97 },
           },
           usage: { input_tokens: 30, output_tokens: 6, cost: 0 },
         }

@@ -445,9 +445,9 @@ function safeProviderRecovery(value) {
   }
   if (value.kind !== 'budget_handoff' || value.phase !== 'planner_pending') return undefined
   const semanticScope = RECOVERY_SEMANTIC_SCOPES.has(value.semantic_scope) ? value.semantic_scope : 'keep_target'
-  const route = ['retry_compact', 'continue_low', 'replan_high', 'targeted_observation'].includes(value.route)
+  const route = ['wake_planner', 'targeted_observation', 'retry_compact', 'continue_low', 'replan_high'].includes(value.route)
     ? value.route
-    : 'continue_low'
+    : 'wake_planner'
   return {
     kind: 'budget_handoff',
     phase: 'planner_pending',
