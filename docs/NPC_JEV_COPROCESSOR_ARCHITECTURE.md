@@ -427,6 +427,32 @@ Steering must never:
 - advance completion;
 - force a mode transition.
 
+## 10.1 Refined workload boundary — 2026-09-22
+
+The current official TypeSafe guidance reinforces a stricter design rule:
+
+> Keep rules, exact lookups, calculations and workflow control in code; use Jev for
+> narrow typed semantic judgments that code cannot express reliably.
+
+The live architecture therefore converges on five Jev responsibilities:
+
+1. interaction intent routing;
+2. observation relevance;
+3. complete candidate / typed operation selection;
+4. ambiguous semantic recovery;
+5. optional bounded planning steering.
+
+Before E2E measurement:
+
+- finish exact TypeSafe adapter schema fidelity;
+- redesign steering so every consumed value comes from an actual typed question;
+- eliminate the permanent Main-LLM-router + Jev-shadow duplication;
+- move deterministic recovery classification/routing out of Jev;
+- demote typed-state-to-text planner injection to experimental/trace-only until measured.
+
+See `JEV_REFINED_WORKLOAD_AUDIT_2026-09-22.md` for the full traced rationale and
+M11A-E cleanup order.
+
 ## 11. Harness independence requirement
 
 The deterministic harness must be able to operate with Jev disabled.

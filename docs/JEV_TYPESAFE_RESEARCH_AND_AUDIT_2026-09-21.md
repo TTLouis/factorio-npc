@@ -774,6 +774,29 @@ systems, combat, and long-horizon factory tasks.
 - confidence-as-permission without deterministic validation;
 - hand-maintained candidate values that runtime could enumerate authoritatively.
 
+## 9.1 Refined workload audit — 2026-09-22
+
+A second live-branch trace was compared against the current official TypeSafe skill and
+System One design guidance.
+
+The detailed result is now authoritative in:
+
+`docs/JEV_REFINED_WORKLOAD_AUDIT_2026-09-22.md`
+
+The main correction is not a reversal of M6-M10. Observation relevance and complete
+candidate selection remain strong TypeSafe-native designs. The additional cleanup is:
+
+- finish exact adapter schema fidelity;
+- replace the current steering parser's unsupported generated-field expectations with
+  actual Choice/Noul questions;
+- stop paying permanently for both a Main-LLM interaction classifier and a Jev shadow
+  classifier;
+- remove deterministic recovery cases from Jev's workload;
+- treat typed-state-to-text injection as experimental until it demonstrates measurable
+  context/call savings.
+
+Phase 9 E2E is therefore deferred until this pre-measurement cleanup is complete.
+
 ## 10. Are we on the right track?
 
 **Broadly yes, after this correction.**

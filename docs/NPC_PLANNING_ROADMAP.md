@@ -900,13 +900,34 @@ This deliberately does **not** invent stricter numeric thresholds for constructi
 destruction, combat, or other higher-impact actions. Their automatic-projection policy
 stays disabled until Phase 9 produces calibration data.
 
+### Pre-Phase 9 gate — M11 workload refinement
+
+Status: **required before E2E; added 2026-09-22 after re-auditing the live workload
+against current official TypeSafe/System One guidance.**
+
+Phase 9 is deferred until the cleanup in
+`JEV_REFINED_WORKLOAD_AUDIT_2026-09-22.md` is complete.
+
+Required order:
+
+1. exact provider-schema fidelity;
+2. steering redesign into real typed questions;
+3. interaction-router consolidation;
+4. deterministic recovery simplification;
+5. typed-state demotion to experimental/trace-only pending evidence.
+
+The strongest current Jev roles — observation-relevance fan-out and complete candidate
+selection — remain core and should not be weakened by this cleanup.
+
 ### Phase 9 — E2E comparison
 
-Compare:
+After the pre-Phase 9 gate is green, compare:
 
 1. Main-LLM-only structured-control baseline;
-2. retired Jev correctness-gate behavior (historical evidence only);
-3. TypeSafe-native coprocessor.
+2. TypeSafe-native coprocessor.
+
+Use retired correctness-gate traces as historical evidence only; do not revive that
+architecture as a live experimental arm.
 
 Measure:
 
