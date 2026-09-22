@@ -3,11 +3,14 @@ import assert from 'node:assert/strict'
 
 import {
   boundarySteeringGate,
+  decisionConfidencePolicy,
+  decisionConfidencePolicyCatalog,
   decisionEnvelopeQuestions,
   developmentDecisionQuestions,
   jevDecisionFamilyChoices,
   jevForbiddenAuthorityFields,
   observationRelevanceFamilies,
+  observationRelevancePolicy,
   parseBoundarySteeringTelemetry,
   parseDecisionEnvelope,
   parseDecisionFamily,
@@ -103,6 +106,27 @@ test('development is reframed as advisory boundary steering against the user goa
   for (const text of Object.values(question.criteria)) {
     assert.doesNotMatch(text, /milestone/i)
   }
+})
+
+test('M10 decision confidence policy never converts confidence into authority', () => {
+  const catalog = decisionConfidencePolicyCatalog()
+  assert.deepEqual(Object.keys(catalog), ['continue_runtime', 'observe', 'wake_planner', 'ask_user'])
+  assert.equal(catalog.continue_runtime.deterministic_guard, 'authoritative_active_runtime')
+  assert.equal(catalog.observe.deterministic_guard, 'observation_admission')
+  assert.equal(catalog.wake_planner.deterministic_guard, 'main_llm_authority')
+  assert.equal(catalog.ask_user.deterministic_guard, 'authoritative_user_boundary')
+  for (const policy of Object.values(catalog)) assert.equal(policy.confidence_can_authorize, false)
+  assert.equal(decisionConfidencePolicy('ask_user').numeric_threshold_status, 'not_applicable')
+  assert.throws(() => decisionConfidencePolicy('complete_goal'), /Unknown canonical decision route/)
+})
+
+test('M10 observation confidence policy records the existing bounded-read baseline explicitly', () => {
+  assert.deepEqual(observationRelevancePolicy(), {
+    probability_threshold: 0.5,
+    max_selected_families: 4,
+    confidence_role: 'bounded_read_relevance_only',
+    calibration_status: 'existing_m7_baseline_pending_phase9_measurement',
+  })
 })
 
 test('routing and reasoning budget questions are preserved and non-planning', () => {

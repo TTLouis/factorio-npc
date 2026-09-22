@@ -5,7 +5,10 @@ import {
   normalizeTypedOperationCandidates,
   parseTypedProjection,
   routeTypedProjectionByRisk,
+  typedProjectionOperationPolicy,
+  typedProjectionPolicyCatalog,
   typedProjectionQuestions,
+  typedProjectionRiskPolicy,
   typedProjectionTypeCatalog,
 } from './jev-typed-projection.mjs'
 
@@ -205,70 +208,111 @@ test('missing candidate coverage exposes only explicit observation/planner/user 
   assert.equal(result.operation, undefined)
 })
 
-test('risk routing requires explicit per-risk confidence policy and never treats confidence as correctness', () => {
+test('M10 central projection policy calibrates only the existing low-risk live slice', () => {
+  assert.deepEqual(typedProjectionRiskPolicy('low'), {
+    risk: 'low',
+    automatic_projection_eligible: true,
+    calibration_status: 'operation_specific',
+  })
+  for (const risk of ['moderate', 'high', 'combat']) {
+    assert.deepEqual(typedProjectionRiskPolicy(risk), {
+      risk,
+      automatic_projection_eligible: false,
+      calibration_status: 'pending_phase9_e2e',
+    })
+  }
+
+  assert.deepEqual(typedProjectionOperationPolicy('walk_to_entity_exact'), {
+    operation_type: 'walk_to_entity_exact',
+    risk: 'low',
+    automatic_projection: true,
+    minimum_confidence: 0.85,
+    low_confidence_route: 'wake_planner',
+    calibration_status: 'existing_m6_live_baseline',
+    risk_automatic_projection_eligible: true,
+  })
+
+  const catalog = typedProjectionPolicyCatalog()
+  assert.equal(catalog.walk_to_position.automatic_projection, false)
+  assert.equal(catalog.walk_to_position.calibration_status, 'pending_phase9_e2e')
+  assert.equal(catalog.place_entity.automatic_projection, false)
+  assert.equal(catalog.attack_nearest_enemy.automatic_projection, false)
+})
+
+test('M10 calibrated low-risk navigation uses the central threshold and still requires preflight', () => {
   const candidates = [{
-    id: 'move',
-    operation: {
-      name: 'walk_to_position',
-      args: { x: 4, y: 5 },
-    },
+    id: 'furnace-1',
+    operation: { name: 'walk_to_entity_exact', args: { unit_number: 7 } },
+    freshness_token: 'entity-snapshot-7',
   }]
-  const projection = parseTypedProjection({
+  const high = parseTypedProjection({
     answers: {
       projection_action: {
         type: 'choice',
         choice: 'candidate_1',
-        probabilities: {
-          candidate_1: 0.62,
-          need_observation: 0.08,
-          wake_planner: 0.25,
-          ask_user: 0.05,
-        },
-        confidence: 0.55,
+        probabilities: { candidate_1: 0.95, need_observation: 0.02, wake_planner: 0.02, ask_user: 0.01 },
+        confidence: 0.9,
       },
     },
   }, { scope: 'navigation', candidates })
+  const admitted = routeTypedProjectionByRisk(high, { currentFreshnessToken: 'entity-snapshot-7' })
+  assert.equal(admitted.route, 'emit_operation')
+  assert.equal(admitted.confidence_policy.minimum_confidence, 0.85)
+  assert.equal(admitted.admission, 'requires_normal_preflight')
 
-  assert.throws(
-    () => routeTypedProjectionByRisk(projection),
-    /requires explicit minimumConfidenceByRisk policy/,
-  )
-
-  const conservative = routeTypedProjectionByRisk(projection, {
-    minimumConfidenceByRisk: { low: 0.7 },
-    lowConfidenceRouteByRisk: { low: 'wake_planner' },
-  })
-  assert.equal(conservative.route, 'wake_planner')
-  assert.equal(conservative.operation, undefined)
-  assert.equal(conservative.projection_failure, 'projection_confidence_below_policy')
-
-  const permissive = routeTypedProjectionByRisk(projection, {
-    minimumConfidenceByRisk: { low: 0.5 },
-  })
-  assert.equal(permissive.route, 'emit_operation')
-  assert.deepEqual(permissive.operation, projection.operation)
-  assert.equal(permissive.admission, 'requires_normal_preflight')
+  const low = { ...high, confidence: 0.6 }
+  const fallback = routeTypedProjectionByRisk(low, { currentFreshnessToken: 'entity-snapshot-7' })
+  assert.equal(fallback.route, 'wake_planner')
+  assert.equal(fallback.operation, undefined)
+  assert.equal(fallback.projection_failure, 'projection_confidence_below_policy')
+  assert.equal(fallback.confidence_policy.minimum_confidence, 0.85)
 })
 
-test('low-confidence policy cannot escalate to ask_user solely from confidence', () => {
-  const projection = {
-    route: 'emit_operation',
-    scope: 'construction',
-    operation_type: 'place_entity',
-    candidate_id: 'place-1',
-    operation: { name: 'place_entity', args: { entity_name: 'stone-furnace' } },
-    risk: 'high',
-    freshness_required: false,
-    confidence: 0.2,
-    probabilities: {},
-    admission: 'requires_normal_preflight',
+test('M10 uncalibrated moderate high and combat projections wake the planner regardless of confidence', () => {
+  for (const projection of [
+    {
+      route: 'emit_operation',
+      scope: 'production',
+      operation_type: 'set_machine_recipe',
+      candidate_id: 'recipe',
+      operation: { name: 'set_machine_recipe', args: { unit_number: 4, recipe_name: 'iron-gear-wheel' } },
+      risk: 'moderate',
+      freshness_required: false,
+      confidence: 1,
+      probabilities: {},
+      admission: 'requires_normal_preflight',
+    },
+    {
+      route: 'emit_operation',
+      scope: 'construction',
+      operation_type: 'place_entity',
+      candidate_id: 'place',
+      operation: { name: 'place_entity', args: { entity_name: 'stone-furnace' } },
+      risk: 'high',
+      freshness_required: false,
+      confidence: 1,
+      probabilities: {},
+      admission: 'requires_normal_preflight',
+    },
+    {
+      route: 'emit_operation',
+      scope: 'combat',
+      operation_type: 'attack_nearest_enemy',
+      candidate_id: 'combat',
+      operation: { name: 'attack_nearest_enemy', args: { search_radius: 20 } },
+      risk: 'combat',
+      freshness_required: false,
+      confidence: 1,
+      probabilities: {},
+      admission: 'requires_normal_preflight',
+    },
+  ]) {
+    const result = routeTypedProjectionByRisk(projection)
+    assert.equal(result.route, 'wake_planner')
+    assert.equal(result.operation, undefined)
+    assert.equal(result.projection_failure, 'projection_operation_not_calibrated')
+    assert.equal(result.confidence_policy.calibration_status, 'pending_phase9_e2e')
   }
-
-  const result = routeTypedProjectionByRisk(projection, {
-    minimumConfidenceByRisk: { high: 0.9 },
-    lowConfidenceRouteByRisk: { high: 'ask_user' },
-  })
-  assert.equal(result.route, 'wake_planner')
 })
 
 test('exact entity identity candidates require and revalidate an opaque freshness token', () => {
@@ -302,7 +346,6 @@ test('exact entity identity candidates require and revalidate an opaque freshnes
   }, { scope: 'resources', candidates })
 
   const stale = routeTypedProjectionByRisk(projection, {
-    minimumConfidenceByRisk: { high: 0.8 },
     currentFreshnessToken: 'entity-snapshot-43',
   })
   assert.equal(stale.route, 'need_observation')
@@ -310,11 +353,11 @@ test('exact entity identity candidates require and revalidate an opaque freshnes
   assert.equal(stale.projection_failure, 'stale_exact_identity')
 
   const fresh = routeTypedProjectionByRisk(projection, {
-    minimumConfidenceByRisk: { high: 0.8 },
     currentFreshnessToken: 'entity-snapshot-42',
   })
-  assert.equal(fresh.route, 'emit_operation')
-  assert.deepEqual(fresh.operation, { name: 'mine_entity_exact', args: { unit_number: 99 } })
+  assert.equal(fresh.route, 'wake_planner')
+  assert.equal(fresh.operation, undefined)
+  assert.equal(fresh.projection_failure, 'projection_operation_not_calibrated')
 })
 
 test('malformed Jev results fail closed without mutating candidate or planning-like caller state', () => {
