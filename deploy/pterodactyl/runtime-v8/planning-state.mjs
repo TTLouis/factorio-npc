@@ -11,7 +11,7 @@
 //     frozen against the Main LLM and against Jev, which authored/reviewed it.
 //     After commit both are limited to FULFILLING the committed contracts.
 //   * Only accepted RUNTIME evidence may advance progress. Planner focus and
-//     Jev output are recorded as advisory metadata and cannot advance anything.
+//     Jev output is advisory and cannot advance authoritative progress.
 //   * A deadlock or structural blocker FREEZES the plan as BLOCKED. There is no
 //     code path from BLOCKED to automatic replanning.
 //   * A successor plan (plan_version + 1) exists only via USER_REVISION_APPROVED.
@@ -26,7 +26,6 @@ export const PLANNING_STATE_VERSION = 1
 
 export const PLAN_STATUS = Object.freeze({
   DRAFT: 'DRAFT',
-  JEV_REVIEW: 'JEV_REVIEW',
   RUNTIME_VALIDATION: 'RUNTIME_VALIDATION',
   READY: 'READY',
   COMMITTED: 'COMMITTED',
@@ -51,7 +50,6 @@ const IMMUTABLE_STATUSES = Object.freeze([
 
 const PRE_COMMIT_STATUSES = Object.freeze([
   PLAN_STATUS.DRAFT,
-  PLAN_STATUS.JEV_REVIEW,
   PLAN_STATUS.RUNTIME_VALIDATION,
   PLAN_STATUS.READY,
 ])
@@ -249,8 +247,6 @@ export const PLANNING_EVENT = Object.freeze({
   // Advisory steering evaluated at a safe planning boundary (roadmap 4.3).
   STEERING_EVALUATED: 'STEERING_EVALUATED',
   DRAFT_CREATED: 'DRAFT_CREATED',
-  JEV_REVIEW_REQUESTED: 'JEV_REVIEW_REQUESTED',
-  JEV_REFINEMENT_REQUESTED: 'JEV_REFINEMENT_REQUESTED',
   PLAN_COMMITTED: 'PLAN_COMMITTED',
   PLANNER_FOCUS_PROPOSED: 'PLANNER_FOCUS_PROPOSED',
   OPERATION_BATCH_ATTEMPTED: 'OPERATION_BATCH_ATTEMPTED',
@@ -297,8 +293,6 @@ export const REASONING_RESET_EVENTS = Object.freeze([
   PLANNING_EVENT.GOAL_ACCEPTED,
   // the shelf itself moved under the planner
   PLANNING_EVENT.ROADMAP_REVISED,
-  // a deferred tail was shelved: the plan the model argued for no longer exists
-  PLANNING_EVENT.JEV_REFINEMENT_REQUESTED,
   // the plan was set aside, replaced or abandoned
   PLANNING_EVENT.PLAN_SUPERSEDED,
   PLANNING_EVENT.USER_REVISION_APPROVED,
@@ -1094,8 +1088,7 @@ function createPlan(state, {
           mode: state.steering.current_mode,
           steering_sequence: state.steering.sequence,
           critical_path: state.steering.critical_path,
-          // One dominant mode per slice (roadmap 4.5) is judged by Jev's scope
-          // review; a divergence from the advisory mode is merely recorded.
+          // Divergence from advisory steering is recorded, not enforced.
           diverges_from_steering: state.steering.current_mode !== null && mode !== state.steering.current_mode,
         }
       : null,
@@ -1111,7 +1104,6 @@ function createPlan(state, {
     completed_at: null,
     blocker: null,
     execution: { step_progress: progress, batches_attempted: 0 },
-    jev_review: { refinement_count: 0, last_reason_codes: [], last_verdict: null, last_reviewed_at: null },
     advisory: { planner_focus_step_id: null, planner_focus_at: null, steering_note: null },
     carried_forward_evidence: stringList(carriedForwardEvidence, { max: 64, maxLength: 200 }),
     lifecycle: [{ status: PLAN_STATUS.DRAFT, at: now, reason: text(origin, 80) || 'draft_created' }],
@@ -1850,109 +1842,6 @@ Object.assign(HANDLERS, {
     }
   },
 
-  [PLANNING_EVENT.JEV_REVIEW_REQUESTED](state, event, now) {
-    const plan = getPlan(state, event.plan_id ?? state.active_plan_id)
-    if (!plan || plan.status !== PLAN_STATUS.DRAFT) return state
-    return {
-      ...state,
-      updated_at: now,
-      plans: state.plans.map(item => (item.plan_id === plan.plan_id
-        ? withStatus(item, PLAN_STATUS.JEV_REVIEW, { now, reason: 'jev_scope_review' })
-        : item)),
-    }
-  },
-
-  [PLANNING_EVENT.JEV_REFINEMENT_REQUESTED](state, event, now) {
-    const plan = getPlan(state, event.plan_id ?? state.active_plan_id)
-    if (!plan) return state
-    // Jev has no authority over committed content.
-    if (isPlanImmutable(plan)) return state
-
-    const reasonCodes = stringList(event.reason_codes, { max: 12, maxLength: 80 })
-    const prefix = Number.isSafeInteger(event.actionable_prefix)
-      ? Math.max(0, Math.min(event.actionable_prefix, plan.steps.length))
-      : undefined
-
-    // The deferred tail must land somewhere or it is simply dropped. It becomes
-    // tentative Roadmap Shelf guidance in a new roadmap revision.
-    const tailSteps = prefix === undefined ? [] : plan.steps.slice(prefix)
-    const explicitTail = boundedList(event.shelved_tail, 32)
-    const tailNodes = [
-      ...explicitTail,
-      ...tailSteps.map(step => ({
-        id: `shelf_${plan.plan_id}_${fingerprint(step.step_id)}`,
-        intent: step.description,
-        why_it_matters: `deferred tail of ${plan.plan_id} (jev refine)`,
-        status: SHELF_NODE_STATUS.TENTATIVE,
-        // A deferred tail comes AFTER the slice it was cut from. Recording that
-        // as a real dependency is what keeps the tail out of the refinement
-        // candidate set until the world has actually realized the node in
-        // front of it — instead of a whole plan tail appearing "ready".
-        depends_on: [...plan.roadmap_node_ids],
-        derived_from_node_id: plan.roadmap_node_ids[0],
-      })),
-    ]
-
-    let next = withPlan(state, plan.plan_id, item => withStatus({
-      ...item,
-      jev_review: {
-        refinement_count: item.jev_review.refinement_count + 1,
-        last_reason_codes: reasonCodes,
-        last_verdict: ['refine', 'needs_grounding', 'needs_user_clarification'].includes(event.verdict)
-          ? event.verdict
-          : 'refine',
-        last_reviewed_at: now,
-        actionable_prefix: prefix ?? null,
-        problem_step_ids: stringList(event.problem_step_ids, { max: 16, maxLength: 200 }),
-        recommended_boundary: text(event.recommended_boundary, 200) || null,
-      },
-    }, PLAN_STATUS.DRAFT, { now, reason: 'jev_refine' }))
-
-    let shelvedTail = false
-    if (tailNodes.length > 0 && state.goal) {
-      shelvedTail = true
-      const sequence = nextSequence(next)
-      const merged = [...(next.roadmap?.nodes ?? []), ...tailNodes]
-      const roadmap = createRoadmapRevision(next, {
-        now,
-        sequence,
-        nodes: merged,
-        reason: text(event.reason ?? 'deferred_tail_from_jev_refine', 300),
-        // Shelving a tail is additive bookkeeping about the draft Jev just
-        // criticised, not a revision of long-horizon guidance. It is recorded
-        // under its own authority so it can never be mistaken for one.
-        authority: 'deferred_tail',
-      })
-      next = {
-        ...next,
-        sequence,
-        roadmap,
-        roadmap_history: [...boundedList(next.roadmap_history, 31), ...(next.roadmap ? [next.roadmap] : [])].slice(-32),
-      }
-    }
-
-    const refined = {
-      ...next,
-      updated_at: now,
-      log: logEntry(next, {
-        type: PLANNING_EVENT.JEV_REFINEMENT_REQUESTED,
-        at: now,
-        plan_id: plan.plan_id,
-        reason_codes: reasonCodes,
-        shelved_tail: tailNodes.length,
-      }),
-    }
-    // Reasoning resets only when a tail was actually SHELVED. A refinement that
-    // shelves nothing is an ordinary pre-commit critique of the same draft.
-    return shelvedTail
-      ? withReasoningReset(refined, {
-          now,
-          eventType: PLANNING_EVENT.JEV_REFINEMENT_REQUESTED,
-          reason: 'deferred_tail_shelved',
-        })
-      : refined
-  },
-
   [PLANNING_EVENT.PLAN_COMMITTED](state, event, now) {
     const plan = getPlan(state, event.plan_id ?? state.active_plan_id)
     if (!plan || !PRE_COMMIT_STATUSES.includes(plan.status)) return state
@@ -2463,7 +2352,6 @@ function restorePlan(raw) {
       step_progress: progress,
       batches_attempted: Number.isSafeInteger(raw.execution?.batches_attempted) ? raw.execution.batches_attempted : 0,
     },
-    jev_review: clone(raw.jev_review) ?? { refinement_count: 0, last_reason_codes: [], last_verdict: null, last_reviewed_at: null },
     advisory: clone(raw.advisory) ?? { planner_focus_step_id: null, planner_focus_at: null, steering_note: null },
     carried_forward_evidence: stringList(raw.carried_forward_evidence, { max: 64, maxLength: 200 }),
     lifecycle: boundedList(raw.lifecycle, 64).map(item => clone(item)),
