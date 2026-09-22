@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> **Historical / superseded Jev design.** This file records earlier Jev decision-layer experiments and should not be used as the current authority model. The canonical Jev direction as of 2026-09-21 is `docs/NPC_JEV_COPROCESSOR_ARCHITECTURE.md`: Jev is a cognitive coprocessor for observation selection, semantic state compression, routing, recovery, reasoning effort, and advisory steering. It is **not** a correctness reviewer or harness admission/completion authority. Preserve this file as implementation history; do not extend its old scope-review/checkpoint-authority model.
+
 # SGLuna Jev decision-layer architecture
 
 Status: experimental design
