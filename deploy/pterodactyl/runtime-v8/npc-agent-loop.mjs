@@ -30,19 +30,10 @@ import {
 import { RECOVERY_SEMANTIC_SCOPES, parseRecoveryDecision, recoveryDecisionQuestions, recoveryFailureClassHint, validateRecoveryRoute } from './recovery-route.mjs'
 import {
   applyConditionObservation,
-  completionCandidatesFromOperations,
   completionContractSupported,
-  createGroundedCheckpointSymbolTable,
   evaluateCompletionContract,
   makeConditionWait,
-  mutationAmountsFromOperations,
-  parseReceiptCompletionDecision,
-  parseStepCheckpointDecision,
-  receiptCompletionDecisionQuestions,
   sanitizeStepCompletionContract,
-  stepCheckpointDecisionQuestions,
-  stepRelationAllowsAdmission,
-  validateGroundedCompletionContract,
 } from './step-completion.mjs'
 import {
   isObservationToolName,
@@ -75,8 +66,7 @@ const RESEARCH_PREFLIGHT_RECOVERABLE_CODES = new Set(['missing_prerequisites', '
 const MODEL_CORRECTABLE_PREFLIGHT_CODES = new Set(['unknown_prototype', 'unknown_recipe', 'invalid_unit_number', 'invalid_target_kind', 'invalid_preflight_args'])
 const MODEL_CORRECTABLE_PREFLIGHT_RETRY_BUDGET = 1
 const RESEARCH_PREFLIGHT_RETRY_BUDGET = 2
-// Once the system commits a plan it is frozen against its authors, Jev
-// included: later batches fulfil the committed steps and are not re-reviewed.
+// Once the system commits a plan, its semantic content is immutable; later batches fulfil it rather than rewriting it.
 const FROZEN_PLAN_STATUSES = new Set([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING])
 const WORLD_STATE_REQUIREMENT_KINDS = new Set(['inventory_count', 'entity_inventory_count', 'entity_exists', 'entity_state'])
 const INVENTORY_PRODUCT_FIELD_BY_OPERATION = Object.freeze({
@@ -466,11 +456,6 @@ function worldStateContract(contract) {
     && contract.requirements.every(requirement => WORLD_STATE_REQUIREMENT_KINDS.has(requirement?.kind))
 }
 
-// Jev was asked about an earlier "done" claim and did not map a checkpoint.
-function declinedDoneMapping(checkpoint) {
-  return checkpoint?.claimed_done === true && checkpoint.boundary !== 'checkpoint_here'
-}
-
 function activeStepCheckpointSnapshot(board) {
   const index = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
   const step = index === undefined ? undefined : board?.steps?.[index]
@@ -480,40 +465,8 @@ function activeStepCheckpointSnapshot(board) {
 function persistedStepCheckpoint(board, stepId) {
   if (!board || !stepId) return undefined
   const step = Array.isArray(board.steps) ? board.steps.find(item => item?.id === stepId) : undefined
-  const durableContract = sanitizeStepCompletionContract(step?.completion_contract)
-  if (completionContractSupported(durableContract)) {
-    return {
-      contract: durableContract,
-      boundary: 'checkpoint_here',
-      relation: 'advances_current',
-      durable: true,
-    }
-  }
-  if (!Array.isArray(board.evidence)) return undefined
-  for (let index = board.evidence.length - 1; index >= 0; index--) {
-    const item = board.evidence[index]
-    if (item?.kind !== 'step_checkpoint_contract' || item?.step_id !== stepId || typeof item.summary !== 'string') continue
-    try {
-      const parsed = JSON.parse(item.summary)
-      const contract = sanitizeStepCompletionContract(parsed?.contract)
-      return {
-        contract,
-        boundary: ['checkpoint_here', 'keep_step_open', 'split_recommended'].includes(parsed?.boundary)
-          ? parsed.boundary
-          : 'keep_step_open',
-        relation: ['advances_current', 'prerequisite_for_current', 'belongs_to_later_step', 'replan_needed', 'unrelated'].includes(parsed?.relation)
-          ? parsed.relation
-          : 'replan_needed',
-        compound_probability: parsed?.compound_probability,
-        claimed_done: parsed?.claimed_done === true,
-        offered_candidates: Array.isArray(parsed?.offered_candidates) ? parsed.offered_candidates : [],
-        provider: parsed?.provider,
-        model: parsed?.model,
-      }
-    }
-    catch {}
-  }
-  return undefined
+  const contract = sanitizeStepCompletionContract(step?.completion_contract)
+  return completionContractSupported(contract) ? { contract, durable: true } : undefined
 }
 
 function conditionWaitLifecycleMatches(wait, deployment) {
@@ -1623,7 +1576,7 @@ function postStepDecisionQuestions() {
       instructions: 'After one authoritative Autorio completion or error boundary, choose the smallest safe planner transition. This is routing only; do not invent world facts, mutation success, or goal completion.',
       criteria: {
         continue_runtime: 'The next bounded continuation is already parameterized. Continue through deterministic runtime control when healthy runtime work can carry it; otherwise this maps to the existing compact planner continuation.',
-        reanchor_plan: 'The user goal is still valid, but semantic_alignment shows the planner focus and canonical active step need a small alignment correction before more work. Preserve verified progress and re-anchor the plan without redesigning the whole goal.',
+        reanchor_plan: 'The user goal is still valid, but authoritative runtime evidence shows the current local approach needs a small correction before more work. Preserve verified progress and re-anchor without redesigning the whole goal.',
         wake_planner: 'The completion evidence materially changes the remaining approach or the current plan needs a broader structural reconsideration; wake the planner with higher reasoning.',
         wait_runtime: 'A persistent runtime controller is authoritatively active, healthy, and live, so waking the main planner now would only duplicate ongoing work.',
         fallback_planner: 'The evidence is ambiguous or outside this routing contract; use the existing safe main-planner continuation.',
@@ -2930,168 +2883,94 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return { ok: false, reason: 'unsupported_predicate_kind' }
   }
 
-  async groundedCheckpointContext(rawCandidates, operations) {
-    const receiptCandidates = completionCandidatesFromOperations(operations)
+  async validatePlannerCheckpointContract(contract, operations = []) {
+    const normalized = sanitizeStepCompletionContract(contract)
+    if (!completionContractSupported(normalized)) {
+      return { accepted: false, reason: 'unsupported_or_malformed_contract' }
+    }
     const allowedReceiptNames = new Set(
-      receiptCandidates.flatMap(candidate =>
-        (Array.isArray(candidate?.requirements) ? candidate.requirements : [])
-          .filter(requirement => requirement?.kind === 'authoritative_operation_receipt')
-          .map(requirement => requirement.operation_name)),
+      (Array.isArray(operations) ? operations : [])
+        .map(operation => operation?.name)
+        .filter(name => typeof name === 'string' && name),
     )
-    const candidates = []
-    const entries = []
-    const rejections = []
-
-    for (const [candidateIndex, rawCandidate] of (Array.isArray(rawCandidates) ? rawCandidates : []).slice(0, 8).entries()) {
-      const candidate = sanitizeStepCompletionContract(rawCandidate)
-      if (!completionContractSupported(candidate)) {
-        rejections.push({ candidate_index: candidateIndex, reason: 'unsupported_or_malformed_contract' })
-        continue
-      }
-      const grounded = []
-      let rejected
-      for (const requirement of candidate.requirements) {
-        const result = await this.authoritativeGroundCheckpointRequirement(requirement, { allowedReceiptNames })
-        if (!result.ok) {
-          rejected = {
-            candidate_index: candidateIndex,
-            requirement_id: requirement.id,
-            kind: requirement.kind,
-            reason: result.reason,
-          }
-          break
+    for (const requirement of normalized.requirements ?? []) {
+      const grounded = await this.authoritativeGroundCheckpointRequirement(requirement, { allowedReceiptNames })
+      if (!grounded.ok) {
+        return {
+          accepted: false,
+          reason: grounded.reason,
+          requirement_id: requirement.id,
+          requirement_kind: requirement.kind,
         }
-        grounded.push(result)
-      }
-      if (rejected) {
-        rejections.push(rejected)
-        continue
-      }
-      candidates.push(candidate)
-      for (const result of grounded) {
-        entries.push({
-          requirement: result.requirement,
-          source: candidate.source ?? 'runtime_grounded_candidate',
-          fact: result.fact,
-          entity: result.entity,
-        })
       }
     }
-
-    const groundedSymbols = createGroundedCheckpointSymbolTable(entries, {
-      mutationAmounts: mutationAmountsFromOperations(operations),
-    })
-    return {
-      candidates,
-      groundedSymbols,
-      rejections: rejections.slice(0, 8),
-    }
+    return { accepted: true, contract: normalized }
   }
 
-  // Quantity operations deliberately yield no receipt candidate: gathering 40
-  // stone does not mean "have 40 stone". But with no planner checkpoint either,
-  // Jev had nothing to judge and the step could only stay semantic_unknown, so
-  // a verified "mined 10 coal" receipt never closed "Gather 10 coal". Offer the
-  // grounded delta instead -- current held count plus the requested amount --
-  // as one CANDIDATE. Jev still decides whether it is what the step means.
-  async inventoryDeltaCandidates(operations) {
-    const targets = new Map()
-    for (const operation of (Array.isArray(operations) ? operations : []).slice(0, 8)) {
-      // Only operations whose argument names the item they add to inventory.
-      // mine_entity is excluded: an entity's product is often not its name
-      // (a tree yields wood), so a target keyed on it would be false.
-      const itemField = INVENTORY_PRODUCT_FIELD_BY_OPERATION[operation?.name]
-      const itemName = itemField ? operation.args?.[itemField] : undefined
-      const count = operation?.args?.count
-      if (typeof itemName !== 'string' || !itemName || !Number.isSafeInteger(count) || count < 1) continue
-      targets.set(itemName, (targets.get(itemName) ?? 0) + count)
+  async persistPlannerCheckpoint(plan) {
+    if (!plan?.checkpoint || !this.requestInfo?.memoryKey) {
+      return { state: this.memory.currentPlan?.(this.activePlanKey()) }
     }
-    const requirements = []
-    for (const [itemName, count] of targets) {
-      let current
-      try {
-        const raw = JSON.parse(String(await this.rcon.command(runtimeConditionCommand({ kind: 'inventory_count', item_name: itemName, minimum: 1 }))).trim())
-        current = Number.isFinite(raw?.current) ? Math.max(0, Math.trunc(raw.current)) : undefined
-      }
-      catch {}
-      if (current === undefined) return []
-      requirements.push({ id: `inventory_${requirements.length + 1}`, kind: 'inventory_count', item_name: itemName, minimum: current + count })
-    }
-    return requirements.length > 0 ? [{ mode: 'all', source: 'runtime_inventory_delta', requirements }] : []
-  }
-
-  // The one authority on "may the active step close now?". Every trigger
-  // calls it:
-  // - batch_receipt: a batch's deterministic receipt. routeStepCompletionDecision
-  //   resolves the receipt-aware checkpoint, then closes via applyStepClose.
-  // - later_step_work: Jev placed a new batch in a LATER step while the
-  //   planner's focus moved past this one. A genuinely compound step cannot
-  //   pass: its remaining work would align as current-step work.
-  // - planner_done: no plan left, no operation, no BLOCKED, step still open.
-  // - final_completion_claim: the planner's final "done" after a receipt. It is
-  //   veto-only, since recordPlan performs that close.
-  // The planner's word never closes a step by itself. What closes it is the
-  // step's world-state target, re-read from Factorio now. A planner "done"
-  // whose step has no such target of its own may borrow one: Jev maps it from
-  // this step's earlier offers, earlier steps, or superseded revisions. Every
-  // decline traces step.close_declined with a reason, so an open step is
-  // always explained.
-  async evaluateStepClose(trigger, { plan, before, blockedBy } = {}) {
-    const key = this.activePlanKey()
-    const planState = this.memory.planByNpc?.get?.(key) ?? this.memory.currentPlan?.(key)
-    if (!planState) return { closed: false, reason: 'no_plan' }
-    const board = planState.task_board
+    const key = this.requestInfo.memoryKey
+    const state = this.memory.currentPlan?.(key)
+    const board = state?.task_board
     const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
     const step = activeIndex === undefined ? undefined : board?.steps?.[activeIndex]
-    const decline = (reason, detail = {}) => this.declineStepClose(trigger, reason, {
-      active_step_id: step?.id ?? before?.stepId,
-      planner_step: plan?.currentStep,
-      ...detail,
-    })
+    if (!state || state.status !== 'active' || !step) {
+      throw new AgentLoopError('checkpoint_requires_active_step')
+    }
 
-    if (trigger === 'final_completion_claim') {
-      const evaluation = await this.evaluateWorldStateCheckpoint(before?.checkpoint)
-      if (evaluation && !evaluation.satisfied) {
-        await decline('target_unmet', { contract: before.checkpoint.contract, results: evaluation.results })
-        return { closed: false, vetoed: true }
+    const validation = await this.validatePlannerCheckpointContract(plan.checkpoint, plan.operations)
+    if (!validation.accepted) {
+      const error = new AgentLoopError(
+        `deterministic_checkpoint_rejected: ${validation.reason}${validation.requirement_id ? `; requirement=${validation.requirement_id}` : ''}`,
+      )
+      error.failureClass = 'plan_category'
+      error.code = 'invalid_semantic_checkpoint'
+      error.details = validation
+      throw error
+    }
+
+    const planning = this.memory.planningState?.(key)
+    const reducerPlan = planning ? getActivePlanningPlan(planning) : undefined
+    const frozen = FROZEN_PLAN_STATUSES.has(reducerPlan?.status)
+    const existing = persistedStepCheckpoint(board, step.id)
+    const incomingSignature = JSON.stringify(validation.contract)
+    const existingSignature = existing ? JSON.stringify(existing.contract) : ''
+
+    if (frozen) {
+      if (!existing || existingSignature !== incomingSignature) {
+        const error = new AgentLoopError('committed_completion_contract_is_immutable')
+        error.failureClass = 'plan_category'
+        error.code = 'committed_completion_contract_immutable'
+        throw error
       }
-      return { closed: false, vetoed: false }
+      return { state, contract: existing.contract, stepId: step.id }
     }
 
-    if (blockedBy) return decline(blockedBy)
-    if (planState.status !== 'active' || !step) return decline('no_active_step')
-    if (before?.stepId !== step.id) return decline('active_step_changed', { checkpoint_step_id: before?.stepId })
-    if (trigger === 'later_step_work' && !(Number.isSafeInteger(plan?.currentStep) && plan.currentStep > activeIndex)) {
-      return decline('planner_focus_not_past_step')
-    }
-    if (trigger === 'planner_done') {
-      if (plan?.operations?.length !== 0 || plan?.plan?.length !== 0) return decline('not_a_done_claim')
-      if (providerBlockerReason(plan)) return decline('planner_reported_blocker')
-      // A mapping Jev declined on an earlier "done" claim stays declined.
-      if (declinedDoneMapping(before.checkpoint)) return decline('mapping_declined_earlier')
-      if (!worldStateContract(before.checkpoint?.contract)) {
-        const mapped = await this.checkpointFromEarlierSteps(plan, before)
-        if (!mapped.before) return decline(mapped.reason, mapped.detail)
-        before = mapped.before
-        if (before.stepId !== step.id) return decline('active_step_changed', { checkpoint_step_id: before.stepId })
-      }
+    this.memory.setStepCompletionContract?.(key, step.id, validation.contract)
+    const updated = this.memory.currentPlan?.(key)
+    const persisted = persistedStepCheckpoint(updated?.task_board, step.id)
+    if (!persisted || JSON.stringify(persisted.contract) !== incomingSignature) {
+      throw new AgentLoopError('deterministic_checkpoint_failed_to_persist')
     }
 
-    const checkpoint = before.checkpoint
-    if (!checkpoint) return decline('no_checkpoint')
-    if (checkpoint.relation !== 'advances_current') return decline('checkpoint_not_current_step', { relation: checkpoint.relation })
-    const evaluation = await this.evaluateWorldStateCheckpoint(checkpoint)
-    if (!evaluation) return decline('no_world_state_target', { contract_mode: checkpoint.contract?.mode })
-    if (!evaluation.satisfied) return decline('target_unmet', { contract: checkpoint.contract, results: evaluation.results })
-    return this.applyStepClose(trigger, {
-      key,
-      step,
-      contract: checkpoint.contract,
-      results: evaluation.results,
-      reasonCode: trigger === 'planner_done' ? 'planner_done_with_satisfied_contract' : 'later_step_work_with_satisfied_contract',
-      source: trigger === 'planner_done' ? 'planner_done' : 'later_step_alignment',
-      plannerStep: plan?.currentStep,
+    this.memory.recordBoardEvidence?.(key, {
+      kind: 'step_completion_contract_validated',
+      ref: `checkpoint/${step.id}`,
+      summary: JSON.stringify({
+        source: 'main_planner',
+        validation: 'deterministic_runtime',
+        contract: persisted.contract,
+      }),
     })
+    await this.persistState()
+    await this.traceEvent('step.checkpoint_validated', {
+      active_step_id: step.id,
+      contract: persisted.contract,
+      authority: 'deterministic_runtime',
+    })
+    return { state: this.memory.currentPlan?.(key), contract: persisted.contract, stepId: step.id }
   }
 
   async declineStepClose(trigger, reason, detail = {}) {
@@ -3099,12 +2978,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return { closed: false, reason }
   }
 
-  // The single write for a step close: the outcome authority, never the
-  // planner, advances the board.
   async applyStepClose(trigger, { key, step, contract, results, reasonCode, source, plannerStep, extraEvidence = [], steeringRecommendation }) {
     const reduced = this.memory.applyOutcomeAuthority?.(key, {
       kind: 'verified_complete',
-      source: 'step_checkpoint_gate',
+      source: 'deterministic_runtime',
       reason_code: reasonCode,
       evidence: [...extraEvidence, {
         kind: 'verified_world_state',
@@ -3130,330 +3007,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return { closed: true, state: reduced.state }
   }
 
-  // Re-reads a recorded step checkpoint against Factorio. Undefined when the
-  // contract is not purely world state (receipts, semantic_unknown), since
-  // only world state can be re-checked after the fact.
   async evaluateWorldStateCheckpoint(checkpoint) {
     const contract = checkpoint?.contract
     if (!worldStateContract(contract)) return undefined
     const facts = await this.completionFactsForContract(contract, undefined, [])
     return evaluateCompletionContract(contract, facts)
-  }
-
-  // Covers a step with no checkable target of its own. Examples: a step that
-  // never ran work ("verify I hold 6 stone"); a reworded revision whose
-  // checkpoint is semantic_unknown while the wording it replaced recorded a
-  // real target; a step whose own grounded target Jev was not confident in
-  // before its batch ran. Jev is offered those world-state targets (this
-  // step's earlier offers, earlier steps, superseded step ids). If it maps one
-  // onto this step as its checkpoint, that becomes the step's contract, still
-  // re-read from Factorio before closing. Returns { before } on a mapping,
-  // otherwise { reason, detail }.
-  async checkpointFromEarlierSteps(plan, before) {
-    const board = this.memory.currentPlan?.(this.activePlanKey())?.task_board
-    const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : -1
-    if (!before?.stepId || activeIndex < 0) return { reason: 'no_active_step' }
-    const ownOffered = before.checkpoint?.claimed_done ? [] : (before.checkpoint?.offered_candidates ?? [])
-    const liveStepIds = new Set(board.steps.map(step => step?.id))
-    const superseded = (Array.isArray(board.evidence) ? board.evidence : [])
-      .filter(item => item?.kind === 'step_checkpoint_contract' && item.step_id && !liveStepIds.has(item.step_id))
-      .map(item => {
-        try { return sanitizeStepCompletionContract(JSON.parse(item.summary)?.contract) }
-        catch { return undefined }
-      })
-    const seen = new Set()
-    const extraCandidates = [
-      ...ownOffered.map(sanitizeStepCompletionContract),
-      ...board.steps.slice(0, activeIndex).map(step => sanitizeStepCompletionContract(step?.completion_contract)),
-      ...superseded,
-    ]
-      .filter(worldStateContract)
-      .filter(contract => {
-        const signature = JSON.stringify(contract.requirements)
-        if (seen.has(signature)) return false
-        seen.add(signature)
-        return true
-      })
-      .slice(0, 4)
-      .map(contract => ({ ...contract, source: contract.source ?? 'verified_earlier_step' }))
-    if (extraCandidates.length === 0) {
-      return { reason: 'no_world_state_candidates', detail: { contract_mode: before.checkpoint?.contract?.mode } }
-    }
-    const decision = await this.routeStepCheckpointDecision(plan, { claimedDone: true, extraCandidates })
-    if (decision?.boundary !== 'checkpoint_here' || decision?.relation !== 'advances_current') {
-      return {
-        reason: 'mapping_declined',
-        detail: { boundary: decision?.boundary, relation: decision?.relation, candidates: extraCandidates.length },
-      }
-    }
-    const mapped = activeStepCheckpointSnapshot(this.memory.currentPlan?.(this.activePlanKey())?.task_board)
-    return mapped ? { before: mapped } : { reason: 'mapping_not_recorded' }
-  }
-
-  // `claimedDone` asks the same question for a step the planner says is
-  // already finished without new work; its candidates are then the verified
-  // world-state targets of earlier steps, which Jev may map onto this step.
-  async routeStepCheckpointDecision(plan, { claimedDone = false, extraCandidates = [] } = {}) {
-    const key = this.activePlanKey()
-    const planState = this.memory.planByNpc?.get?.(key) ?? this.memory.currentPlan?.(key)
-    const board = planState?.task_board
-    const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
-    const step = activeIndex === undefined ? undefined : board?.steps?.[activeIndex]
-    if (!planState || planState.status !== 'active' || !step || !Array.isArray(plan?.operations) || (plan.operations.length === 0 && !claimedDone)) {
-      return { boundary: 'keep_step_open', relation: 'advances_current', state: planState }
-    }
-
-    const existing = persistedStepCheckpoint(board, step.id)
-    const rawCandidates = [
-      ...(existing && completionContractSupported(existing.contract)
-        ? [{ ...existing.contract, source: existing.durable ? (existing.contract.source ?? 'durable_step_contract') : 'persisted_step_checkpoint' }]
-        : []),
-      ...(completionContractSupported(plan.checkpoint) ? [{ ...plan.checkpoint, source: 'planner_semantic_checkpoint' }] : []),
-      ...completionCandidatesFromOperations(plan.operations),
-      ...extraCandidates,
-    ]
-    if (rawCandidates.length === 0) rawCandidates.push(...await this.inventoryDeltaCandidates(plan.operations))
-    const groundedContext = await this.groundedCheckpointContext(rawCandidates, plan.operations)
-    const candidates = groundedContext.candidates
-    const groundedSymbols = groundedContext.groundedSymbols
-    const questions = stepCheckpointDecisionQuestions(candidates, groundedSymbols)
-    // step_relation judges an operation batch against the step. A "done"
-    // claim has no batch and is about the active step by construction; live
-    // Jev answered `unrelated` there and the accepted mapping was discarded.
-    if (claimedDone) delete questions.step_relation
-
-    const deterministicCheckpointFallback = async reason => {
-      // Non-quantity operations may have a runtime-authored receipt contract
-      // whose semantics are already narrow enough to be safe without Jev. Use
-      // that one deterministic candidate so ordinary placement/navigation/etc.
-      // can still complete when Jev is unavailable. Quantity/delta operations
-      // intentionally produce no receipt candidate and therefore remain open.
-      const sole = candidates.length === 1 && candidates[0]?.source === 'operation_receipt'
-        ? sanitizeStepCompletionContract(candidates[0])
-        : undefined
-      const contract = sole && sole.mode !== 'semantic_unknown'
-        ? { ...sole, confidence: 1, source: sole.source ?? 'operation_receipt' }
-        : { mode: 'semantic_unknown', requirements: [], confidence: 0 }
-      const boundary = contract.mode === 'semantic_unknown' ? 'keep_step_open' : 'checkpoint_here'
-      const relation = 'advances_current'
-      this.memory.recordBoardEvidence?.(key, {
-        kind: 'step_checkpoint_contract',
-        ref: `checkpoint/${step.id}`,
-        summary: JSON.stringify({
-          contract,
-          boundary,
-          relation,
-          provider: 'deterministic_runtime',
-          model: 'receipt_fallback',
-          fallback_reason: reason,
-        }),
-      })
-      await this.persistState()
-      await this.traceEvent('step.checkpoint_fallback', {
-        active_step_id: step.id,
-        boundary,
-        relation,
-        contract,
-        reason,
-      })
-      return {
-        boundary,
-        relation,
-        contract,
-        state: this.memory.currentPlan?.(key) ?? planState,
-        reason,
-        deterministic_fallback: true,
-      }
-    }
-
-    if (!this.interactionDecisionProvider) {
-      return deterministicCheckpointFallback('decision_provider_unavailable')
-    }
-
-    const current = await this.assertCurrent()
-    const generation = this.generation
-    const decisionState = {
-      contract: 'step_checkpoint_normalizer',
-      goal: {
-        goal_id: sanitizeDurableModelText(planState.goal_id, 100),
-        objective: sanitizeDurableModelText(planState.objective, 500),
-      },
-      step: {
-        id: step.id,
-        description: sanitizeDurableModelText(step.description, 400),
-        active_index: activeIndex,
-      },
-      ...(claimedDone ? { planner_claim: 'step_already_complete_no_new_operation' } : {}),
-      proposed_operations: plan.operations.slice(0, 8).map(operation => ({
-        name: cleanMemoryText(operation?.name, 100),
-        args: sanitizeDurableModelValue(operation?.args),
-      })),
-      proposed_checkpoint: completionContractSupported(plan.checkpoint)
-        ? sanitizeDurableModelValue(plan.checkpoint)
-        : undefined,
-      durable_completion_contract: existing?.durable && completionContractSupported(existing.contract)
-        ? sanitizeDurableModelValue(existing.contract)
-        : undefined,
-      remaining_steps: (Array.isArray(board?.steps) ? board.steps : [])
-        .slice(activeIndex, activeIndex + 6)
-        .map(item => ({
-          id: sanitizeDurableModelText(item?.id, 80),
-          description: sanitizeDurableModelText(item?.description, 400),
-        })),
-      grounded_symbols: sanitizeDurableModelValue(groundedSymbols),
-      grounding_rejections: sanitizeDurableModelValue(groundedContext.rejections),
-      supported_requirement_kinds: [
-        'inventory_count',
-        'entity_inventory_count',
-        'entity_exists',
-        'entity_state',
-        'authoritative_operation_receipt',
-        'runtime_controller_state',
-      ],
-      supported_predicate_grammar: {
-        contract_modes: ['all', 'any'],
-        max_requirements: 4,
-        operands_must_reference_grounded_symbols: true,
-        mutation_amounts_are_semantic_targets: false,
-      },
-    }
-    const decisionId = `decision_${Date.now().toString(36)}_${(++this.decisionRequestSequence).toString(36)}`
-    const controller = new AbortController()
-    const startedAt = Date.now()
-    await this.decisionTraceEvent('decision.request', {
-      decision_id: decisionId,
-      contract: 'step_checkpoint_normalizer',
-      mode: 'active',
-      active_step_id: step.id,
-      grounded_predicates: groundedSymbols.predicates.length,
-      grounding_rejections: groundedContext.rejections,
-      candidates: candidates.slice(0, 8).map(sanitizeStepCompletionContract),
-      ...(claimedDone ? { planner_claim: 'step_already_complete_no_new_operation' } : {}),
-      question_ids: Object.keys(questions),
-    })
-
-    try {
-      const response = await this.interactionDecisionProvider(decisionState, questions, {
-        epoch: current.epoch,
-        actorId: current.actor_id,
-        signal: controller.signal,
-      })
-      if (generation !== this.generation || controller.signal.aborted) {
-        throw new AgentLoopError('Model turn was cancelled or superseded')
-      }
-      await this.assertCurrent()
-
-      // Missing checkpoint fields are an invalid Jev response, not evidence of
-      // semantic drift. Treat malformed/foreign decision envelopes exactly like
-      // a checkpoint-provider outage: keep completion authority closed, but do
-      // not manufacture replan_needed and block an otherwise-valid batch.
-      const relationChoice = claimedDone ? 'advances_current' : response?.answers?.step_relation?.choice
-      const boundaryChoice = response?.answers?.checkpoint_boundary?.choice
-      if (!['advances_current', 'prerequisite_for_current', 'belongs_to_later_step', 'replan_needed', 'unrelated'].includes(relationChoice)
-        || !['checkpoint_here', 'keep_step_open', 'split_recommended'].includes(boundaryChoice)) {
-        throw new AgentLoopError('invalid Jev step checkpoint decision')
-      }
-
-      const normalized = parseStepCheckpointDecision(response, candidates, groundedSymbols)
-      const groundedValidation = validateGroundedCompletionContract(normalized.contract, groundedSymbols)
-      const confidenceAccepted = normalized.contract?.confidence >= 0.7
-      const contract = confidenceAccepted && groundedValidation.accepted
-        ? sanitizeStepCompletionContract(groundedValidation.contract)
-        : { mode: 'semantic_unknown', requirements: [], confidence: normalized.contract?.confidence ?? 0 }
-      const compoundNeedsStrongProof = typeof normalized.compound_probability !== 'number'
-        || normalized.compound_probability >= 0.5
-      const compoundProofStrongEnough = contract.mode === 'all'
-        && Array.isArray(contract.requirements)
-        && contract.requirements.length > 1
-      let boundary = normalized.boundary
-      const relation = claimedDone ? 'advances_current' : normalized.relation
-      if (boundary === 'checkpoint_here' && contract.mode === 'semantic_unknown') boundary = 'keep_step_open'
-      if (boundary === 'checkpoint_here' && compoundNeedsStrongProof && !compoundProofStrongEnough) {
-        boundary = 'split_recommended'
-      }
-
-      if (boundary === 'checkpoint_here'
-        && relation === 'advances_current'
-        && completionContractSupported(contract)) {
-        this.memory.setStepCompletionContract?.(key, step.id, contract)
-      }
-      this.memory.recordBoardEvidence?.(key, {
-        kind: 'step_checkpoint_contract',
-        ref: `checkpoint/${step.id}`,
-        summary: JSON.stringify({
-          contract,
-          boundary,
-          relation,
-          compound_probability: normalized.compound_probability,
-          ...(claimedDone ? { claimed_done: true } : {}),
-          // Kept so a later "done" claim can re-offer a target Jev was not
-          // yet confident in before the batch ran (live goal_mubfl8p6).
-          offered_candidates: candidates.map(sanitizeStepCompletionContract).filter(worldStateContract).slice(0, 4),
-          synthesis_used: normalized.synthesis_used,
-          synthesis_reason: normalized.synthesis_reason,
-          synthesis_symbol: normalized.synthesis_symbol,
-          grounding_rejections: groundedContext.rejections,
-          provider: normalized.provider,
-          model: normalized.model,
-        }),
-      })
-      await this.persistState()
-      await this.traceEvent('step.checkpoint_created', {
-        active_step_id: step.id,
-        boundary,
-        relation,
-        contract,
-        compound_probability: normalized.compound_probability,
-        synthesis_used: normalized.synthesis_used,
-        synthesis_reason: normalized.synthesis_reason,
-        grounding_rejections: groundedContext.rejections,
-      })
-      await this.decisionTraceEvent('decision.response', {
-        decision_id: decisionId,
-        contract: 'step_checkpoint_normalizer',
-        mode: 'active',
-        provider: normalized.provider,
-        model: normalized.model,
-        boundary,
-        relation,
-        confidence: contract.confidence,
-        // `boundary` above is derived (it may be demoted). Keep Jev's own
-        // answer too, so a trace can tell its judgement from runtime policy.
-        jev_boundary_choice: cleanMemoryText(boundaryChoice, 40),
-        jev_boundary_confidence: Number.isFinite(response?.answers?.checkpoint_boundary?.confidence)
-          ? response.answers.checkpoint_boundary.confidence
-          : undefined,
-        compound_probability: normalized.compound_probability,
-        latency_ms: Date.now() - startedAt,
-        input_units: Number.isFinite(normalized.usage?.input_tokens) ? Math.max(0, Math.trunc(normalized.usage.input_tokens)) : 0,
-        output_units: Number.isFinite(normalized.usage?.output_tokens) ? Math.max(0, Math.trunc(normalized.usage.output_tokens)) : 0,
-        cost_usd: Number.isFinite(normalized.usage?.cost) && normalized.usage.cost >= 0 ? normalized.usage.cost : 0,
-      })
-      return { boundary, relation, contract, state: this.memory.currentPlan?.(key), compound_probability: normalized.compound_probability }
-    }
-    catch (error) {
-      const message = cleanMemoryText(error instanceof Error ? error.message : String(error), 300)
-      await this.traceEvent('step.checkpoint_failed', {
-        active_step_id: step.id,
-        reason: 'checkpoint_decision_failed',
-        error: message,
-      })
-      await this.decisionTraceEvent('decision.fallback', {
-        decision_id: decisionId,
-        contract: 'step_checkpoint_normalizer',
-        mode: 'active',
-        fallback_target: 'keep_step_open',
-        reason: message,
-        latency_ms: Date.now() - startedAt,
-      })
-      // A Jev/decision-provider outage must not manufacture semantic drift.
-      // Reuse only a deterministic receipt-safe checkpoint when the runtime can
-      // authoritatively define one; otherwise keep the semantic step open.
-      return deterministicCheckpointFallback('checkpoint_decision_failed')
-    }
-    finally {
-      controller.abort()
-    }
   }
 
   async completionFactsForContract(contract, verification, operationNames) {
@@ -3915,7 +3473,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const board = planState?.task_board
     const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
     const activeStep = activeIndex === undefined ? undefined : board?.steps?.[activeIndex]
-    const activeCheckpoint = activeStep ? persistedStepCheckpoint(board, activeStep.id) : undefined
     const skills = this.loadedSkillContext instanceof Map
       ? [...this.loadedSkillContext.values()].slice(-SKILL_CONTEXT_MAX_SKILLS).map(skill => ({
           id: typeof skill?.id === 'string' ? cleanMemoryText(skill.id, 80) : undefined,
@@ -3949,13 +3506,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
               : (Array.isArray(board?.steps) ? board.steps.length : undefined),
             blocker: cleanMemoryText(board?.blocker, 300),
             pause_reason: cleanMemoryText(board?.pause_reason, 300),
-          }
-        : null,
-      semantic_alignment: activeCheckpoint
-        ? {
-            step_relation: activeCheckpoint.relation,
-            checkpoint_boundary: activeCheckpoint.boundary,
-            admission_aligned: stepRelationAllowsAdmission(activeCheckpoint.relation),
           }
         : null,
       autorio: {
@@ -4050,13 +3600,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         appliedRoute = 'fallback_planner'
         fallbackReason = steeringGate.reason
       }
-      const semanticNeedsReanchor = state.semantic_alignment?.admission_aligned === false
-        && ['belongs_to_later_step', 'replan_needed', 'unrelated'].includes(state.semantic_alignment?.step_relation)
-      if (semanticNeedsReanchor && !['reanchor_plan', 'replan'].includes(appliedRoute)) {
-        appliedRoute = 'reanchor_plan'
-        fallbackReason = 'semantic_alignment_requires_reanchor'
-      }
-
       await this.decisionTraceEvent('decision.response', {
         decision_id: decisionId,
         contract: 'post_step_planner_gate',
@@ -4208,7 +3751,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   async request(text, options = {}) {
     await this.loadPersistentState()
-    this.semanticAlignmentRetries = 0
     const sender = options.sender ?? 'unknown'
     this.lastMemoryKey = `npc:${this.npcId}`
     const memoryKey = this.activePlanKey()
@@ -4380,7 +3922,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.modelCorrectablePreflightRetries = 0
     this.researchPreflightRetries = 0
     this.bootstrapDependencyPreflightRetries = 0
-    this.scopeRefinementPending = false
     this.planUpdateReason = intent === 'new_goal'
       ? 'new_goal'
       : intent === 'amend_current'
@@ -6179,7 +5720,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
     let stateResult
     let durablePlan = plan
-    let stepCheckpoint
     if (this.requestInfo) {
       this.lastMemoryKey = this.requestInfo.memoryKey
       const previousBoard = previousState?.task_board
@@ -6233,10 +5773,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         exactTargetAudit,
         verifiedCompletion: finalCompletionVerified,
         completionEvidence,
-        scopeRefinement: this.scopeRefinementPending === true,
       })
-      this.scopeRefinementPending = false
-      // The shelf can only be revised once the goal it belongs to has been
+        // The shelf can only be revised once the goal it belongs to has been
       // admitted, and `recordPlan` is what admits it, so this runs after it and
       // not with the rest of the plan-surface parsing.
       if (Array.isArray(plan.roadmap) && typeof this.memory.reviseRoadmap === 'function') {
@@ -6261,86 +5799,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         goal_id: stateResult?.state?.goal_id,
         task_board: visibleTaskBoard(stateResult?.state?.task_board),
       })
-      if (commands.length > 0 && stateResult?.blockedByHarness !== true) {
-        stepCheckpoint = await this.routeStepCheckpointDecision(plan)
-        if (stepCheckpoint?.state) stateResult = { ...(stateResult ?? {}), state: stepCheckpoint.state }
+      if (stateResult?.blockedByHarness !== true && plan.checkpoint) {
+        const checkpointResult = await this.persistPlannerCheckpoint(plan)
+        if (checkpointResult?.state) stateResult = { ...(stateResult ?? {}), state: checkpointResult.state }
       }
     }
 
-    if (commands.length > 0 && stateResult?.blockedByHarness !== true && stepCheckpoint && !stepRelationAllowsAdmission(stepCheckpoint.relation)
-      && stepCheckpoint.relation === 'belongs_to_later_step'
-      && this.laterStepCloseUsed !== true
-      && (await this.evaluateStepClose('later_step_work', { plan, before: checkpointBeforeBatch })).closed) {
-      // The active step is proven done; re-admit this batch against the step
-      // it actually belongs to. Bounded to once per batch.
-      this.laterStepCloseUsed = true
-      return this.commitPlan(plan)
-    }
-    if (commands.length > 0 && stateResult?.blockedByHarness !== true && stepCheckpoint && !stepRelationAllowsAdmission(stepCheckpoint.relation)) {
-      const activeBoard = stateResult?.state?.task_board
-      const activeIndex = Number.isSafeInteger(activeBoard?.active_index) ? activeBoard.active_index : undefined
-      const activeStep = activeIndex === undefined ? undefined : activeBoard?.steps?.[activeIndex]
-      if (this.requestInfo) {
-        const state = this.memory.setAdmissionState?.(this.requestInfo.memoryKey, 'preflight_rejected')
-        if (state) stateResult = { ...(stateResult ?? {}), state }
-        this.memory.recordBoardEvidence?.(this.requestInfo.memoryKey, {
-          kind: 'step_semantic_alignment_rejection',
-          ref: `${this.traceRequest?.id ?? 'request'}/semantic_alignment`,
-          summary: JSON.stringify({
-            relation: stepCheckpoint.relation,
-            checkpoint_boundary: stepCheckpoint.boundary,
-            active_step_id: activeStep?.id,
-            active_step: activeStep?.description,
-            proposed_operations: plan.operations.slice(0, 8).map(operation => operation?.name),
-          }),
-        })
-        await this.persistState()
-      }
-      await this.traceEvent('operations.semantic_alignment_rejected', {
-        relation: stepCheckpoint.relation,
-        checkpoint_boundary: stepCheckpoint.boundary,
-        active_step_id: activeStep?.id,
-        active_step: activeStep?.description,
-        operations,
-        task_board: visibleTaskBoard(stateResult?.state?.task_board),
-      })
-
-      const retries = Number.isSafeInteger(this.semanticAlignmentRetries) ? this.semanticAlignmentRetries : 0
-      if (retries >= 1) {
-        throw new AgentLoopError(`provider_semantic_alignment_failed: proposed operations still do not align with active canonical step after re-anchor; relation=${stepCheckpoint.relation}`)
-      }
-      this.semanticAlignmentRetries = retries + 1
-      this.planUpdateReason = 'reanchor_plan'
-      this.reasoningTriggerSource = 'semantic_reanchor'
-      // An uncommitted draft is still the planner's to restructure. Without
-      // this, a redraft was ignored and the board kept the rejected step
-      // order (live req_mubf6mpl_2: a work-less "Confirm current iron ore"
-      // step led the draft, so every gather belonged to a later step). The
-      // reducer only honours the replacement while the plan is pre-commit.
-      const reducerPlan = this.requestInfo
-        ? getActivePlanningPlan(this.memory.planningState?.(this.requestInfo.memoryKey))
-        : undefined
-      const draftRevisable = Boolean(reducerPlan) && !FROZEN_PLAN_STATUSES.has(reducerPlan.status)
-        && reducerPlan.status !== PLAN_STATUS.BLOCKED
-      if (draftRevisable) this.scopeRefinementPending = true
-      const draftGuidance = draftRevisable
-        ? ' This plan is still an uncommitted draft, so you may restructure it. The runtime can mark a step done only from world state it can re-check, never from intent: a step with no operation of its own (for example one that only confirms or verifies what you already observed) can never close before later work. Either give the active step its own operation, or submit a revised draft whose steps each carry the work that proves them.'
-        : ''
-      this.messages.push({
-        role: 'user',
-        content: `[HARNESS] Autorio admission was stopped before any world mutation because Jev classified the proposed batch as "${stepCheckpoint.relation}" relative to the active canonical step "${cleanMemoryText(activeStep?.description, 400)}". Re-anchor the plan to authoritative Task Board evidence before proposing another batch. Do not assume the active step completed merely because you intended later work. If existing grounded evidence proves an earlier step complete, propose a plan aligned with that evidence; otherwise continue or split the active step.${draftGuidance} Avoid extra observations unless one specific mutable fact is genuinely missing.`,
-      })
-      try {
-        return await this.runTurn()
-      }
-      finally {
-        this.reasoningTriggerSource = null
-      }
-    }
-    if (commands.length > 0) {
-      this.semanticAlignmentRetries = 0
-      this.laterStepCloseUsed = false
-    }
     this.outputBudgetRecoveryGuard = null
     if (commands.length > 0) this.clearActionOmissionRecovery()
 
