@@ -359,6 +359,37 @@ Jev failure class + canonical route
 Jev never decides that a failed operation succeeded, never claims completion, never
 creates a blocker, and never turns confidence into user authority.
 
+## 8.1 Confidence and risk policy
+
+M10 centralizes confidence policy and keeps confidence separate from authority.
+
+Typed operation projection uses operation metadata risk classes, but automatic projection
+is **operation-specific**, not a blanket threshold per risk class. The only calibrated
+live operation is currently:
+
+```text
+walk_to_entity_exact
+risk: low
+minimum confidence: 0.85
+status: existing M6 live baseline
+```
+
+All other operations are marked `automatic_projection=false` pending Phase 9 AIRI E2E
+measurement. In particular, moderate/high/combat candidates return to the Main LLM even
+at confidence 1.0 rather than receiving guessed thresholds.
+
+The routing layer records separate confidence roles for
+`continue_runtime | observe | wake_planner | ask_user`, but deterministic guards remain
+decisive. Confidence cannot make runtime work active, grant observation admission, claim
+planner correctness, or create a user-authority boundary.
+
+The M7 observation relevance probability threshold (`0.5`, at most four selected
+families) is documented as an existing bounded-read baseline, not a universal confidence
+standard.
+
+Every projected operation still requires normal parsing, freshness checks where
+applicable, and deterministic preflight. Confidence is a routing signal only.
+
 ## 9. Reasoning effort and horizon
 
 Jev may recommend how much Main-LLM reasoning to buy:

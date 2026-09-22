@@ -869,10 +869,36 @@ impossibility, claim completion, author a blocker, or invent user authority.
 
 ### Phase 8 — confidence/risk policy
 
-Calibrate per-decision and per-operation thresholds from AIRI E2E data.
+Status: **implemented in M10 (2026-09-22), calibration framework complete**
 
-Do not use one global confidence threshold. Higher-impact actions require stricter policy;
-user-authority changes are never inferred solely from Jev confidence.
+Confidence policy is now explicit and centralized instead of being scattered through
+callers.
+
+For typed operation projection:
+
+- operation metadata remains the source of `low | moderate | high | combat` risk;
+- `walk_to_entity_exact` keeps the existing M6 live baseline of `0.85`;
+- every other operation currently has `automatic_projection=false` and
+  `calibration_status=pending_phase9_e2e`;
+- moderate/high/combat operations therefore wake the Main LLM even at confidence 1.0
+  until Phase 9 supplies real AIRI E2E evidence;
+- confidence never bypasses normal parse/preflight/freshness validation.
+
+For routing and observation:
+
+- `continue_runtime`, `observe`, `wake_planner`, and `ask_user` each have an
+  explicit confidence-role policy and deterministic guard;
+- none of those policies lets confidence create runtime truth or authority;
+- `ask_user` can never be authorized by confidence alone;
+- M7's existing observation relevance baseline remains `0.5` with a four-family cap,
+  explicitly marked as a bounded-read baseline pending Phase 9 measurement.
+
+Legacy internal route aliases are normalized only for compatibility; live TypeSafe
+questions remain canonical.
+
+This deliberately does **not** invent stricter numeric thresholds for construction,
+destruction, combat, or other higher-impact actions. Their automatic-projection policy
+stays disabled until Phase 9 produces calibration data.
 
 ### Phase 9 — E2E comparison
 

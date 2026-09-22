@@ -675,18 +675,38 @@ Exit condition status:
 
 ### Phase 8 — confidence and risk policy
 
-Add explicit per-decision/per-operation confidence policy.
+Status: **implemented in M10 (2026-09-22), calibration framework complete**
 
-Do not use one global threshold.
+The runtime now exposes explicit policy catalogs rather than accepting caller-supplied
+confidence thresholds.
 
-Examples:
+Typed projection policy is operation-specific:
 
-- harmless observation routing: permissive;
-- reversible movement: moderate;
-- construction/destruction/combat: stricter;
-- user-authority changes: never inferred solely from confidence.
+- the existing `walk_to_entity_exact` M6 slice is the only automatically projected
+  operation and retains its `0.85` confidence baseline;
+- moderate/high/combat operations are explicitly uncalibrated and route to the Main LLM
+  regardless of confidence;
+- other low-risk operations are also non-automatic until measured;
+- freshness and deterministic preflight remain mandatory after any confidence check.
 
-Calibrate thresholds from AIRI E2E data rather than copying cookbook examples.
+Decision routes have separate policy records:
+
+- `continue_runtime` -> authoritative-active-runtime guard;
+- `observe` -> deterministic observation-admission guard;
+- `wake_planner` -> Main-LLM authority;
+- `ask_user` -> authoritative user-boundary guard.
+
+All four have `confidence_can_authorize=false`. Confidence is telemetry/routing evidence,
+never proof. Compatibility aliases normalize to those canonical policy records without
+reappearing in live questions.
+
+Observation relevance records the existing M7 `0.5` probability threshold and
+four-family cap as a bounded-read baseline. It is not generalized into a global confidence
+threshold.
+
+No ungrounded "high-risk = 0.97" style constants were added. Phase 9 is responsible for
+collecting AIRI E2E distributions and deciding whether any additional operation should
+become auto-projectable.
 
 ### Phase 9 — E2E measurement
 
