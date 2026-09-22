@@ -122,33 +122,16 @@ function steeringAnswer(mode, reasonCode, criticalPath, candidateShelfNodes = []
   }
 }
 
-function scopeAnswer({ verdict = 'actionable', mode = 'vertical', reasonCodes = [], prefix = 1 } = {}) {
-  return {
-    answers: {
-      scope_review: { choice: verdict, confidence: 0.95 },
-      scope_review_reason_codes: { choices: reasonCodes },
-      actionable_prefix: { score: prefix },
-      step_directions: { choices: [mode] },
-    },
-    provider: 'fixture-jev',
-    model: 'fixture-scope',
-  }
-}
-
 function makeAgent({
   rcon,
   stateFile,
   memory,
   provider,
-  interactionDecisionProvider,
-  scopeReviewDecisionProvider,
   steeringDecisionProvider,
 }) {
   return new NpcAgentLoop({
     rcon,
     provider,
-    interactionDecisionProvider,
-    scopeReviewDecisionProvider,
     steeringDecisionProvider,
     systemPrompt: 'real Factorio full planning lifecycle acceptance test',
     stateFile,
@@ -198,13 +181,12 @@ async function prepare({ rcon, results, stateFile }) {
   ]
 
   let providerCalls = 0
-  let scopeCalls = 0
   let steeringCalls = 0
   const memory = new CanonicalTaskBoardMemory()
 
   const provider = async (messages) => {
     providerCalls++
-    const expectedModes = ['vertical', 'vertical', 'horizontal', 'vertical']
+    const expectedModes = ['vertical', 'horizontal', 'vertical']
     const expectedMode = expectedModes[providerCalls - 1]
     const durableSteering = memory.planningState(key)?.steering
     assert.equal(
@@ -216,8 +198,8 @@ async function prepare({ rcon, results, stateFile }) {
 
     if (providerCalls === 1) {
       return planMessage({
-        chatMessage: 'Drafting too much of the project in one slice.',
-        step: 'Establish iron acquisition and all downstream support in one oversized slice',
+        chatMessage: 'Using the bounded first capability slice.',
+        step: 'Demonstrate the first iron acquisition capability',
         minimum: ironBefore + 1,
         roadmap,
         roadmapNodeIds: ['acquisition-frontier'],
@@ -226,15 +208,6 @@ async function prepare({ rcon, results, stateFile }) {
     }
     if (providerCalls === 2) {
       return planMessage({
-        chatMessage: 'Using the bounded first capability slice.',
-        step: 'Demonstrate the first iron acquisition capability',
-        minimum: ironBefore + 1,
-        roadmapNodeIds: ['acquisition-frontier'],
-        developmentMode: 'vertical',
-      })
-    }
-    if (providerCalls === 3) {
-      return planMessage({
         chatMessage: 'Strengthening the reached acquisition frontier.',
         step: 'Exercise the iron acquisition path again as supporting capacity',
         minimum: ironBefore + 2,
@@ -242,7 +215,7 @@ async function prepare({ rcon, results, stateFile }) {
         developmentMode: 'horizontal',
       })
     }
-    if (providerCalls === 4) {
+    if (providerCalls === 3) {
       return planMessage({
         chatMessage: 'Starting the next vertical frontier slice.',
         step: 'Advance the next capability frontier',
@@ -252,36 +225,6 @@ async function prepare({ rcon, results, stateFile }) {
       })
     }
     throw new Error(`unexpected prepare provider call ${providerCalls}`)
-  }
-
-  let checkpointCalls = 0
-  const interactionDecisionProvider = async (_state, questions) => {
-    checkpointCalls++
-    const hasGroundedCandidate = Boolean(questions?.contract?.criteria?.candidate_1)
-    return {
-      answers: {
-        contract: { choice: hasGroundedCandidate ? 'candidate_1' : 'semantic_unknown', confidence: 0.95 },
-        compound_step: { noul: 0.1 },
-        step_relation: { choice: 'advances_current', confidence: 0.95 },
-        checkpoint_boundary: { choice: hasGroundedCandidate ? 'checkpoint_here' : 'keep_step_open', confidence: 0.95 },
-      },
-      provider: 'fixture-jev',
-      model: 'fixture-checkpoint',
-    }
-  }
-
-  const scopeReviewDecisionProvider = async () => {
-    scopeCalls++
-    if (scopeCalls === 1) {
-      return scopeAnswer({
-        verdict: 'refine',
-        mode: 'vertical',
-        reasonCodes: ['too_broad'],
-        prefix: 0,
-      })
-    }
-    const mode = scopeCalls === 3 ? 'horizontal' : 'vertical'
-    return scopeAnswer({ mode })
   }
 
   const steeringDecisionProvider = async (state, questions) => {
@@ -321,14 +264,11 @@ async function prepare({ rcon, results, stateFile }) {
     stateFile,
     memory,
     provider,
-    interactionDecisionProvider,
-    scopeReviewDecisionProvider,
     steeringDecisionProvider,
   })
 
   const first = await agent.request('Build a staged long-horizon factory through successive capability frontiers.', { sender: 'Louis' })
-  assert.equal(providerCalls, 2, 'the first draft must be rejected once and re-authored by the Main LLM')
-  assert.equal(scopeCalls, 2)
+  assert.equal(providerCalls, 1, 'a structurally valid first draft must not require retired Jev correctness review')
   assert.equal(first.goalStatus, 'active')
   await waitForIdle(rcon)
 
@@ -336,14 +276,14 @@ async function prepare({ rcon, results, stateFile }) {
   const afterV1 = memory.planningState(key)
   assert.equal(
     providerCalls,
-    3,
-    `v1 completion must automatically wake the next shelf slice; steeringCalls=${steeringCalls}; checkpointCalls=${checkpointCalls}; scopeCalls=${scopeCalls}; second=${JSON.stringify(second)}; legacy=${JSON.stringify(memory.currentPlan(key))}; planning=${JSON.stringify(afterV1)}`,
+    2,
+    `v1 completion must automatically wake the next shelf slice; steeringCalls=${steeringCalls}; second=${JSON.stringify(second)}; legacy=${JSON.stringify(memory.currentPlan(key))}; planning=${JSON.stringify(afterV1)}`,
   )
   assert.equal(second?.goalStatus, 'active')
   await waitForIdle(rcon)
 
   const third = await agent.completed()
-  assert.equal(providerCalls, 4, 'v2 completion must automatically wake the next vertical shelf slice')
+  assert.equal(providerCalls, 3, 'v2 completion must automatically wake the next vertical shelf slice')
   assert.equal(third?.goalStatus, 'active')
   await waitForIdle(rcon)
 
@@ -380,8 +320,6 @@ async function prepare({ rcon, results, stateFile }) {
     ['vertical', 'horizontal', 'vertical'],
   )
   assert.equal(steeringCalls, 3)
-  assert.equal(scopeCalls, 4)
-  assert.equal(checkpointCalls, 4, 'each authored prepare draft uses the live checkpoint-normalization contract')
 
   const ironAfter = JSON.parse(await rcon.command(actorIronCommand())).iron
   assert.ok(ironAfter >= ironBefore + 3, `real Factorio inventory did not reflect three admitted acquisition slices: before=${ironBefore} after=${ironAfter}`)
@@ -416,7 +354,6 @@ async function verify({ rcon, results, stateFile }) {
   const before = JSON.parse(await fsp.readFile(path.join(results, 'planning-lifecycle-prepare.json'), 'utf8'))
 
   let providerCalls = 0
-  let scopeCalls = 0
   const memory = new CanonicalTaskBoardMemory()
   const provider = async (messages) => {
     providerCalls++
@@ -444,34 +381,11 @@ async function verify({ rcon, results, stateFile }) {
     throw new Error(`unexpected verify provider call ${providerCalls}`)
   }
 
-  let checkpointCalls = 0
-  const interactionDecisionProvider = async (_state, questions) => {
-    checkpointCalls++
-    const hasGroundedCandidate = Boolean(questions?.contract?.criteria?.candidate_1)
-    return {
-      answers: {
-        contract: { choice: hasGroundedCandidate ? 'candidate_1' : 'semantic_unknown', confidence: 0.95 },
-        compound_step: { noul: 0.1 },
-        step_relation: { choice: 'advances_current', confidence: 0.95 },
-        checkpoint_boundary: { choice: hasGroundedCandidate ? 'checkpoint_here' : 'keep_step_open', confidence: 0.95 },
-      },
-      provider: 'fixture-jev',
-      model: 'fixture-checkpoint',
-    }
-  }
-
-  const scopeReviewDecisionProvider = async () => {
-    scopeCalls++
-    return scopeAnswer({ mode: 'vertical' })
-  }
-
   const agent = makeAgent({
     rcon,
     stateFile,
     memory,
     provider,
-    interactionDecisionProvider,
-    scopeReviewDecisionProvider,
     steeringDecisionProvider: async () => {
       throw new Error('restoring or blocking an in-flight plan must not invent a new steering boundary')
     },
@@ -546,7 +460,6 @@ async function verify({ rcon, results, stateFile }) {
   const successor = getActivePlan(planning)
 
   assert.equal(providerCalls, 3)
-  assert.equal(scopeCalls, 1, 'the user-approved successor still passes Jev pre-commit scope review')
   assert.equal(revisedResult.goalStatus, 'active')
   assert.equal(successor.derived_from_plan_id, before.active_v3)
   assert.equal(successor.plan_version, before.active_v3_version + 1)
@@ -575,8 +488,6 @@ async function verify({ rcon, results, stateFile }) {
     steering_modes: planning.steering.history.slice(-3).map(entry => entry.mode),
     roadmap_revision_id: planning.roadmap.roadmap_revision_id,
     provider_calls: providerCalls,
-    checkpoint_calls: checkpointCalls,
-    scope_calls: scopeCalls,
   }, null, 2))
 
   process.stdout.write(`PASS: full planning lifecycle survived real Factorio restart, froze on structural blocker, and resumed only through explicit user successor=${successor.plan_id}\n`)
