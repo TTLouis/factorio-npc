@@ -625,16 +625,6 @@ function emptyAgentDebug(fallback = {}) {
     decision_post_step_confidence_percent: 0,
     decision_post_step_latency_ms: 0,
     decision_post_step_fallback: '',
-    decision_scope_review: '',
-    decision_scope_review_confidence_percent: 0,
-    decision_scope_review_reason_codes: '',
-    decision_scope_review_actionable_prefix: 0,
-    decision_scope_review_failure_stage: '',
-    decision_scope_review_failure_reason: '',
-    decision_scope_review_packet_version: 0,
-    decision_scope_review_grounding_observations: 0,
-    decision_scope_review_live_entities: 0,
-    decision_scope_review_preflight_count: 0,
     decision_development: '',
     decision_development_confidence_percent: 0,
     decision_steering: '',
@@ -859,34 +849,6 @@ export function liveAgentDebugEvent(event, data = {}, previous = {}, fallback = 
     if (decisionError) debug.decision_error = decisionError
   }
 
-  if (event === 'planning.scope_review') {
-    debug.decision_scope_review = uiText(data.verdict, 32)
-    debug.decision_scope_review_confidence_percent = decisionPercent(data.confidence)
-    debug.decision_scope_review_reason_codes = uiText((Array.isArray(data.reason_codes) ? data.reason_codes : []).join(','), 300)
-    debug.decision_scope_review_actionable_prefix = debugInteger(data.actionable_prefix)
-    debug.decision_scope_review_failure_stage = ''
-    debug.decision_scope_review_failure_reason = ''
-    debug.decision_scope_review_packet_version = debugInteger(data.review_packet_version)
-    debug.decision_scope_review_grounding_observations = debugInteger(data.grounding_observation_count)
-    debug.decision_scope_review_live_entities = debugInteger(data.live_entity_count)
-    debug.decision_scope_review_preflight_count = debugInteger(data.deterministic_preflight_count)
-    debug.decision_error = ''
-  }
-  if (event === 'planning.scope_review_failed') {
-    const kind = uiText(data.failure_kind ?? data.failure_stage, 40) || 'unknown'
-    const reason = uiText(data.reason, 500)
-    debug.decision_scope_review = 'unavailable'
-    debug.decision_scope_review_confidence_percent = 0
-    debug.decision_scope_review_reason_codes = 'jev_scope_review_unavailable'
-    debug.decision_scope_review_actionable_prefix = 0
-    debug.decision_scope_review_failure_stage = kind
-    debug.decision_scope_review_failure_reason = reason
-    debug.decision_scope_review_packet_version = debugInteger(data.review_packet_version)
-    debug.decision_scope_review_grounding_observations = debugInteger(data.grounding_observation_count)
-    debug.decision_scope_review_live_entities = debugInteger(data.live_entity_count)
-    debug.decision_scope_review_preflight_count = debugInteger(data.deterministic_preflight_count)
-    debug.decision_error = uiText(`Jev scope review unavailable · ${kind}${reason ? `: ${reason}` : ''}`, 300)
-  }
 
   if (event === 'post_step.routed') {
     debug.decision_post_step_calls_total = debugInteger(debug.decision_post_step_calls_total) + 1
@@ -899,21 +861,7 @@ export function liveAgentDebugEvent(event, data = {}, previous = {}, fallback = 
       debug.decision_provider = uiText(decision.provider, 80)
       debug.decision_model = uiText(decision.model, 160)
       debug.decision_post_step_confidence_percent = decisionPercent(decision.confidence)
-      // Jev families after the planning refactor: a pre-commit scope review
-      // (parseScopeReview) and advisory boundary steering
-      // (parseSteeringRecommendation / parseBoundarySteeringTelemetry).
-      const scopeReview = decision.scope_review && typeof decision.scope_review === 'object'
-        ? decision.scope_review
-        : undefined
-      if (scopeReview) {
-        debug.decision_scope_review = uiText(scopeReview.verdict, 32)
-        debug.decision_scope_review_confidence_percent = decisionPercent(scopeReview.confidence)
-        debug.decision_scope_review_reason_codes = uiText(
-          (Array.isArray(scopeReview.reason_codes) ? scopeReview.reason_codes : []).join(','),
-          300,
-        )
-        debug.decision_scope_review_actionable_prefix = debugInteger(scopeReview.actionable_prefix)
-      }
+      // Jev is advisory here: boundary steering and routing only.
       const steeringRecommendation = decision.steering && typeof decision.steering === 'object'
         ? decision.steering
         : undefined
@@ -1039,16 +987,6 @@ export function liveAgentDebugEvent(event, data = {}, previous = {}, fallback = 
 export function liveAgentEvent(event, data = {}) {
   const count = value => Array.isArray(value) ? value.length : 0
   switch (event) {
-    case 'planning.scope_review': {
-      const verdict = uiText(data.verdict, 48) || 'unknown'
-      const reasons = Array.isArray(data.reason_codes) ? data.reason_codes.map(code => uiText(code, 80)).filter(Boolean).join(', ') : ''
-      return { activity: { kind: 'system', text: `Jev scope review: ${verdict}${reasons ? ` · ${reasons}` : ''}` } }
-    }
-    case 'planning.scope_review_failed': {
-      const kind = uiText(data.failure_kind ?? data.failure_stage, 48) || 'unknown'
-      const reason = uiText(data.reason, 240)
-      return { activity: { kind: 'system', text: `Jev scope review unavailable · ${kind}${reason ? ` · ${reason}` : ''}` } }
-    }
     case 'post_step.routed': {
       const requested = uiText(data.route, 80) || 'fallback_planner'
       const applied = uiText(data.applied_route, 80) || requested
@@ -2198,7 +2136,6 @@ export class Session {
         timeoutMs: this.config.providerTimeoutMs,
       }, messages, context),
       interactionDecisionProvider: jevDecisionProvider,
-      scopeReviewDecisionProvider: jevDecisionProvider,
       steeringDecisionProvider: jevDecisionProvider,
       reserve: async context => reserveBudget(
         path.join(this.root, '.airi', 'provider-budget.json'),
