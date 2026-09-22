@@ -103,22 +103,6 @@ test('decision request normalization rejects oversized payloads before spending 
   )
 })
 
-test('scope review questions are directly valid for the TypeSafe decision provider', async () => {
-  const { scopeReviewQuestions } = await import('./jev-decision-taxonomy.mjs')
-  const config = decisionProviderConfiguration({ TYPESAFE_API_KEY: KEY })
-  const questions = scopeReviewQuestions({ draftStepCount: 4 })
-  assert.ok(Object.keys(questions).length <= config.maxQuestions)
-  for (const question of Object.values(questions)) assert.ok(['choice', 'score', 'noul'].includes(question.type))
-  const normalized = normalizeDecisionProviderRequest(
-    config,
-    { goal: 'semi-automate iron and copper plates', draft_steps: ['observe', 'gather', 'smelt', 'verify'] },
-    questions,
-  )
-  assert.equal(normalized.body.questions.scope_review_reason_codes.type, 'choice')
-  assert.equal(normalized.body.questions.scope_review_reason_code_secondary.type, 'choice')
-  assert.equal(normalized.body.questions.step_direction_0.type, 'choice')
-  assert.equal(normalized.body.questions.actionable_prefix.type, 'score')
-})
 test('decision provider batches questions into one TypeSafe System One request and preserves usage', async () => {
   const config = decisionProviderConfiguration({ TYPESAFE_API_KEY: KEY })
   const questions = {
@@ -303,4 +287,236 @@ test('hierarchy observation budget uses the provider-supported score schema', as
     questions,
   )
   assert.equal(normalized.body.questions.observation_budget.type, 'score')
+})
+
+
+test('decision provider accepts TypeSafe structured instructions and criteria', () => {
+  const config = decisionProviderConfiguration({ TYPESAFE_API_KEY: KEY })
+  const questions = {
+    route: {
+      type: 'choice',
+      instructions: {
+        question: 'Which bounded route matches the current state?',
+        compare: ['active_step', 'available_candidates'],
+        policy: { never_invent_open_values: true },
+      },
+      criteria: {
+        continue_runtime: {
+          what: 'A grounded deterministic candidate is already available.',
+          not_for: ['missing facts', 'unresolved semantic intent'],
+        },
+        wake_planner: ['Semantic intent is still unresolved.', { owner: 'main_llm' }],
+        ask_user: null,
+      },
+    },
+    risk: {
+      type: 'score',
+      instructions: ['Rate consequence if this bounded decision is wrong.', { dimension: 'reversibility' }],
+      criteria: [
+        { level: 'low', examples: ['read-only observation'] },
+        { level: 'medium', examples: ['reversible movement'] },
+        { level: 'high', examples: ['construction or removal'] },
+      ],
+    },
+    needs_observation: {
+      type: 'noul',
+      instructions: {
+        question: 'Is an authoritative runtime fact missing?',
+        required_fact: { family: 'inventory', fresh: true },
+      },
+      criteria: {
+        true: { meaning: 'A deterministic observation can supply the missing fact.' },
+        false: ['No factual gap remains.', { semantic_gap_belongs_to: 'planner' }],
+      },
+    },
+  }
+
+  const normalized = normalizeDecisionProviderRequest(config, { active_step: 'Acquire iron.' }, questions)
+  assert.deepEqual(normalized.body.questions, questions)
+})
+
+test('decision provider keeps local question conservation separate from undocumented provider count limits', () => {
+  const config = decisionProviderConfiguration({
+    TYPESAFE_API_KEY: KEY,
+    DECISION_PROVIDER_MAX_QUESTIONS: '256',
+  })
+  assert.equal(config.maxQuestions, 256)
+
+  const criteria = Object.fromEntries(Array.from({ length: 255 }, (_, index) => [`candidate_${index}`, null]))
+  assert.doesNotThrow(() => normalizeDecisionProviderRequest(config, 'state', {
+    candidate: {
+      type: 'choice',
+      instructions: 'Choose one supplied candidate.',
+      criteria,
+    },
+  }))
+
+  assert.throws(() => normalizeDecisionProviderRequest(config, 'state', {
+    candidate: {
+      type: 'choice',
+      instructions: 'Choose one supplied candidate.',
+      criteria: { ...criteria, candidate_255: null },
+    },
+  }), /1 to 255 criteria/)
+})
+
+test('decision provider bounds recursive structured entries without flattening them', () => {
+  const config = decisionProviderConfiguration({ TYPESAFE_API_KEY: KEY })
+
+  let tooDeep = 'leaf'
+  for (let index = 0; index < 14; index++) tooDeep = { next: tooDeep }
+
+  const base = instructions => ({
+    check: {
+      type: 'noul',
+      instructions,
+    },
+  })
+
+  assert.throws(
+    () => normalizeDecisionProviderRequest(config, 'state', base(tooDeep)),
+    /maximum structured depth/,
+  )
+  assert.throws(
+    () => normalizeDecisionProviderRequest(config, 'state', base(Array.from({ length: 129 }, () => 'x'))),
+    /array larger than 128 items/,
+  )
+  assert.throws(
+    () => normalizeDecisionProviderRequest(config, 'state', base('x'.repeat(8001))),
+    /string longer than 8000 characters/,
+  )
+  assert.throws(
+    () => normalizeDecisionProviderRequest(config, 'state', base({ bad: () => true })),
+    /unsupported value/,
+  )
+})
+
+test('decision provider enforces current Score cardinality and closed Noul criteria', () => {
+  const config = decisionProviderConfiguration({ TYPESAFE_API_KEY: KEY })
+
+  assert.throws(() => normalizeDecisionProviderRequest(config, 'state', {
+    severity: {
+      type: 'score',
+      instructions: 'Rate severity.',
+      criteria: Array.from({ length: 11 }, (_, index) => `level-${index}`),
+    },
+  }), /2 to 10 criteria/)
+
+  assert.throws(() => normalizeDecisionProviderRequest(config, 'state', {
+    relevant: {
+      type: 'noul',
+      instructions: 'Is this relevant?',
+      criteria: { maybe: 'Unknown.' },
+    },
+  }), /unsupported criterion maybe/)
+})
+
+test('decision provider rejects unknown primitive types and unsupported question fields', () => {
+  const config = decisionProviderConfiguration({ TYPESAFE_API_KEY: KEY })
+
+  assert.throws(() => normalizeDecisionProviderRequest(config, 'state', {
+    route: {
+      type: 'boolean',
+      instructions: 'Yes or no?',
+    },
+  }), /unsupported type/)
+
+  assert.throws(() => normalizeDecisionProviderRequest(config, 'state', {
+    route: {
+      type: 'noul',
+      instructions: 'Yes or no?',
+      arbitrary_json: { unsafe: true },
+    },
+  }), /unsupported field arbitrary_json/)
+})
+
+test('decision provider rejects malformed Choice probability contracts', async () => {
+  const config = decisionProviderConfiguration({ TYPESAFE_API_KEY: KEY })
+  await assert.rejects(
+    decisionProviderRequest(
+      config,
+      'state',
+      {
+        route: {
+          type: 'choice',
+          instructions: 'Choose.',
+          criteria: { a: null, b: null },
+        },
+      },
+      {
+        reserve: async () => {},
+        fetchImpl: async () => new Response(JSON.stringify({
+          answers: {
+            route: {
+              type: 'choice',
+              choice: 'a',
+              probabilities: { a: 0.8, b: 0.1 },
+              confidence: 0.7,
+            },
+          },
+        }), { status: 200 }),
+      },
+    ),
+    /probabilities must sum to 1/,
+  )
+})
+
+test('decision provider rejects malformed Score answers', async () => {
+  const config = decisionProviderConfiguration({ TYPESAFE_API_KEY: KEY })
+  await assert.rejects(
+    decisionProviderRequest(
+      config,
+      'state',
+      {
+        severity: {
+          type: 'score',
+          instructions: { question: 'Rate severity.' },
+          criteria: [{ level: 'low' }, { level: 'high' }],
+        },
+      },
+      {
+        reserve: async () => {},
+        fetchImpl: async () => new Response(JSON.stringify({
+          answers: {
+            severity: {
+              type: 'score',
+              score: 1,
+              legend: { 0: { level: 'low' }, 1: { level: 'wrong' } },
+              probabilities: { 0: 0, 1: 1 },
+              confidence: 1,
+            },
+          },
+        }), { status: 200 }),
+      },
+    ),
+    /legend does not match the declared rubric/,
+  )
+})
+
+test('decision provider rejects malformed Noul answers', async () => {
+  const config = decisionProviderConfiguration({ TYPESAFE_API_KEY: KEY })
+  await assert.rejects(
+    decisionProviderRequest(
+      config,
+      'state',
+      {
+        relevant: {
+          type: 'noul',
+          instructions: ['Is this relevant?', { source: 'runtime' }],
+        },
+      },
+      {
+        reserve: async () => {},
+        fetchImpl: async () => new Response(JSON.stringify({
+          answers: {
+            relevant: {
+              type: 'noul',
+              noul: 1.01,
+            },
+          },
+        }), { status: 200 }),
+      },
+    ),
+    /invalid noul value/,
+  )
 })

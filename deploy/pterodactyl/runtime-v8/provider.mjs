@@ -265,36 +265,97 @@ export function decisionProviderConfiguration(env = process.env) {
       DECISION_PROVIDER_DEFAULTS.maxQuestions,
       'DECISION_PROVIDER_MAX_QUESTIONS',
       1,
-      64,
+      512,
     ),
   }
 }
 
+const DECISION_ENTRY_LIMITS = Object.freeze({
+  maxDepth: 12,
+  maxCollectionItems: 128,
+  maxStringChars: 8000,
+  maxNodes: 1024,
+  maxObjectKeyChars: 200,
+})
+
+function plainDecisionObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+function validateDecisionEntryValue(value, label, depth, budget) {
+  check(depth <= DECISION_ENTRY_LIMITS.maxDepth, `${label} exceeds maximum structured depth ${DECISION_ENTRY_LIMITS.maxDepth}`)
+  budget.nodes++
+  check(budget.nodes <= DECISION_ENTRY_LIMITS.maxNodes, `${label} exceeds maximum structured node count ${DECISION_ENTRY_LIMITS.maxNodes}`)
+
+  if (value === null) return
+  if (typeof value === 'string') {
+    check(value.length <= DECISION_ENTRY_LIMITS.maxStringChars, `${label} contains a string longer than ${DECISION_ENTRY_LIMITS.maxStringChars} characters`)
+    return
+  }
+  if (typeof value === 'number') {
+    check(Number.isFinite(value), `${label} contains a non-finite number`)
+    return
+  }
+  if (typeof value === 'boolean') return
+
+  if (Array.isArray(value)) {
+    check(value.length <= DECISION_ENTRY_LIMITS.maxCollectionItems, `${label} contains an array larger than ${DECISION_ENTRY_LIMITS.maxCollectionItems} items`)
+    for (const entry of value) validateDecisionEntryValue(entry, label, depth + 1, budget)
+    return
+  }
+
+  check(plainDecisionObject(value), `${label} contains an unsupported value`)
+  const entries = Object.entries(value)
+  check(entries.length <= DECISION_ENTRY_LIMITS.maxCollectionItems, `${label} contains an object larger than ${DECISION_ENTRY_LIMITS.maxCollectionItems} entries`)
+  for (const [key, entry] of entries) {
+    check(key.length > 0 && key.length <= DECISION_ENTRY_LIMITS.maxObjectKeyChars, `${label} contains an invalid object key`)
+    validateDecisionEntryValue(entry, label, depth + 1, budget)
+  }
+}
+
+function validateDecisionEntry(value, label) {
+  check(
+    value === null || typeof value === 'string' || Array.isArray(value) || plainDecisionObject(value),
+    `${label} must be a string, object, array, or null`,
+  )
+  validateDecisionEntryValue(value, label, 0, { nodes: 0 })
+}
+
 function validateDecisionQuestion(id, question) {
   check(/^[A-Za-z0-9_.-]{1,80}$/.test(id), 'Invalid decision question identifier')
-  check(question && typeof question === 'object' && !Array.isArray(question), `Decision question ${id} must be an object`)
+  check(plainDecisionObject(question), `Decision question ${id} must be an object`)
   check(['choice', 'score', 'noul'].includes(question.type), `Decision question ${id} has an unsupported type`)
-  check(typeof question.instructions === 'string' && question.instructions.trim().length > 0 && question.instructions.length <= 2000, `Decision question ${id} has invalid instructions`)
+  const allowedKeys = new Set(['type', 'instructions', 'criteria'])
+  for (const key of Object.keys(question)) check(allowedKeys.has(key), `Decision question ${id} has unsupported field ${key}`)
+  validateDecisionEntry(question.instructions, `Decision question ${id} instructions`)
 
   if (question.type === 'choice') {
-    check(question.criteria && typeof question.criteria === 'object' && !Array.isArray(question.criteria), `Choice question ${id} requires criteria`)
+    check(plainDecisionObject(question.criteria), `Choice question ${id} requires criteria`)
     const entries = Object.entries(question.criteria)
-    check(entries.length >= 2 && entries.length <= 255, `Choice question ${id} must have 2 to 255 criteria`)
+    check(entries.length >= 1 && entries.length <= 255, `Choice question ${id} must have 1 to 255 criteria`)
     for (const [key, description] of entries) {
       check(/^[A-Za-z0-9_.-]{1,80}$/.test(key), `Choice question ${id} has an invalid criterion key`)
-      check(typeof description === 'string' && description.trim().length > 0 && description.length <= 1000, `Choice question ${id} has an invalid criterion description`)
+      validateDecisionEntry(description, `Choice question ${id} criterion ${key}`)
     }
   }
 
   if (question.type === 'score') {
-    check(Array.isArray(question.criteria) && question.criteria.length >= 2 && question.criteria.length <= 64, `Score question ${id} must have 2 to 64 criteria`)
-    for (const description of question.criteria) {
-      check(typeof description === 'string' && description.trim().length > 0 && description.length <= 1000, `Score question ${id} has an invalid criterion description`)
+    check(Array.isArray(question.criteria) && question.criteria.length >= 2 && question.criteria.length <= 10, `Score question ${id} must have 2 to 10 criteria`)
+    for (let index = 0; index < question.criteria.length; index++) {
+      validateDecisionEntry(question.criteria[index], `Score question ${id} criterion ${index}`)
     }
   }
 
   if (question.type === 'noul' && question.criteria !== undefined) {
-    check(question.criteria && typeof question.criteria === 'object' && !Array.isArray(question.criteria), `Noul question ${id} criteria must be an object when provided`)
+    check(plainDecisionObject(question.criteria), `Noul question ${id} criteria must be an object when provided`)
+    const entries = Object.entries(question.criteria)
+    check(entries.length >= 1 && entries.length <= 2, `Noul question ${id} criteria must describe true and/or false`)
+    for (const [key, description] of entries) {
+      check(key === 'true' || key === 'false', `Noul question ${id} has unsupported criterion ${key}`)
+      validateDecisionEntry(description, `Noul question ${id} criterion ${key}`)
+    }
   }
 }
 
@@ -324,27 +385,61 @@ function validProbability(value) {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1
 }
 
+function exactDecisionKeys(value, expected) {
+  const actual = Object.keys(value).sort()
+  const wanted = [...expected].sort()
+  return actual.length === wanted.length && actual.every((key, index) => key === wanted[index])
+}
+
+function probabilityDistribution(value, expectedKeys, label) {
+  check(value && typeof value === 'object' && !Array.isArray(value), `${label} has invalid probabilities`)
+  check(exactDecisionKeys(value, expectedKeys), `${label} probabilities do not match the declared rubric`)
+  let total = 0
+  for (const key of expectedKeys) {
+    check(validProbability(value[key]), `${label} has an invalid probability`)
+    total += value[key]
+  }
+  check(Math.abs(total - 1) <= 0.0001, `${label} probabilities must sum to 1`)
+}
+
+function decisionEntriesEqual(left, right) {
+  if (left === right) return true
+  if (typeof left !== typeof right || left === null || right === null) return false
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left)
+      && Array.isArray(right)
+      && left.length === right.length
+      && left.every((entry, index) => decisionEntriesEqual(entry, right[index]))
+  }
+  if (!plainDecisionObject(left) || !plainDecisionObject(right)) return false
+  const leftKeys = Object.keys(left).sort()
+  const rightKeys = Object.keys(right).sort()
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key, index) => key === rightKeys[index] && decisionEntriesEqual(left[key], right[key]))
+}
+
 function validateDecisionAnswer(id, question, answer) {
   check(answer && typeof answer === 'object' && !Array.isArray(answer), `Decision provider answer ${id} is missing`)
   check(answer.type === question.type, `Decision provider answer ${id} has the wrong type`)
 
   if (question.type === 'choice') {
+    const criteriaKeys = Object.keys(question.criteria)
     check(typeof answer.choice === 'string' && Object.prototype.hasOwnProperty.call(question.criteria, answer.choice), `Decision provider answer ${id} returned an unknown choice`)
-    check(answer.probabilities && typeof answer.probabilities === 'object' && !Array.isArray(answer.probabilities), `Decision provider answer ${id} has invalid probabilities`)
-    for (const key of Object.keys(question.criteria)) {
-      check(validProbability(answer.probabilities[key]), `Decision provider answer ${id} has an invalid probability`)
-    }
+    probabilityDistribution(answer.probabilities, criteriaKeys, `Decision provider answer ${id}`)
     check(validProbability(answer.confidence), `Decision provider answer ${id} has invalid confidence`)
+    const selectedProbability = answer.probabilities[answer.choice]
+    check(criteriaKeys.every(key => selectedProbability >= answer.probabilities[key] - 0.0000001), `Decision provider answer ${id} choice is not the highest-probability option`)
   }
   else if (question.type === 'score') {
     check(typeof answer.score === 'number' && Number.isFinite(answer.score), `Decision provider answer ${id} has an invalid score`)
     check(answer.score >= 0 && answer.score <= question.criteria.length - 1, `Decision provider answer ${id} score is outside the declared rubric`)
     check(answer.legend && typeof answer.legend === 'object' && !Array.isArray(answer.legend), `Decision provider answer ${id} has an invalid legend`)
-    check(answer.probabilities && typeof answer.probabilities === 'object' && !Array.isArray(answer.probabilities), `Decision provider answer ${id} has invalid probabilities`)
+    const expectedKeys = question.criteria.map((_, index) => String(index))
+    check(exactDecisionKeys(answer.legend, expectedKeys), `Decision provider answer ${id} legend does not match the declared rubric`)
+    probabilityDistribution(answer.probabilities, expectedKeys, `Decision provider answer ${id}`)
     for (let index = 0; index < question.criteria.length; index++) {
       const key = String(index)
-      check(answer.legend[key] === question.criteria[index], `Decision provider answer ${id} legend does not match the declared rubric`)
-      check(validProbability(answer.probabilities[key]), `Decision provider answer ${id} has an invalid probability`)
+      check(decisionEntriesEqual(answer.legend[key], question.criteria[index]), `Decision provider answer ${id} legend does not match the declared rubric`)
     }
     check(validProbability(answer.confidence), `Decision provider answer ${id} has invalid confidence`)
   }
