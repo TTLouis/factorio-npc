@@ -183,12 +183,12 @@ test('M11D authoritative active runtime bypasses Jev and the Main planner', asyn
   assert.equal(active.decisionCalls.length, 0)
 })
 
-test('M11D provider-format recovery bypasses Jev and wakes the planner directly', async () => {
+test('M11D provider-format recovery bypasses Jev and uses strict/base recovery', async () => {
   const { agent, mainCalls, decisionCalls } = makeAgent({ taskState: 'idle', queueLength: 0 })
   const result = await agent.recoverPlan(agent.generation, new Error('invalid provider JSON'), 1)
   assert.equal(result.operations.length, 1)
   assert.equal(mainCalls.length, 1)
-  assert.equal(mainCalls[0].triggerSource, 'recovery_continue_low')
+  assert.ok(mainCalls[0].recoveryAttempt >= 1)
   assert.equal(decisionCalls.length, 0)
 })
 

@@ -169,11 +169,19 @@ export function deterministicRecoveryRoute({
       runtime,
     }
   }
-  if (failureClass === 'provider_budget' || failureClass === 'provider_format') {
+  if (failureClass === 'provider_budget') {
     return {
       route: 'wake_planner',
       failure_class: failureClass,
-      reason: 'deterministic_provider_failure_class',
+      reason: 'deterministic_provider_budget_handoff',
+      runtime,
+    }
+  }
+  if (failureClass === 'provider_format') {
+    return {
+      route: 'fallback_runtime',
+      failure_class: failureClass,
+      reason: 'deterministic_provider_format_recovery',
       runtime,
     }
   }

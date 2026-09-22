@@ -103,7 +103,7 @@ function makeAgent({
   })
 }
 
-test('second output-budget exhaustion pauses canonical work after exactly one compact recovery and never loops', async () => {
+test('provider-budget exhaustion uses one compact retry per generation and respects the fresh-generation handoff limit', async () => {
   const calls = []
   const rcon = new FakeRcon()
   let reserves = 0
@@ -111,6 +111,7 @@ test('second output-budget exhaustion pauses canonical work after exactly one co
   const agent = makeAgent({
     rcon,
     reserve: async () => { reserves++; return {} },
+    maxProviderBudgetHandoffs: 1,
     provider: async (messages, context) => {
       calls.push({ messages, context })
       if (calls.length === 1) {
@@ -129,12 +130,15 @@ test('second output-budget exhaustion pauses canonical work after exactly one co
   assert.equal(rcon.mutations.length, 1)
   const result = await agent.completed()
 
-  assert.equal(calls.length, 3)
-  assert.equal(reserves, 3)
+  assert.equal(calls.length, 5)
+  assert.equal(reserves, 5)
   assert.equal(calls[1].context.recoveryKind, undefined)
   assert.equal(calls[2].context.recoveryAttempt, 1)
   assert.equal(calls[2].context.recoveryKind, 'output_budget_exhaustion')
-  assert.match(calls[2].messages.at(-1).content, /immediately preceding provider response exhausted its output budget/)
+  assert.equal(calls[3].context.triggerSource, 'recovery_continue_low')
+  assert.equal(calls[4].context.recoveryAttempt, 1)
+  assert.equal(calls[4].context.recoveryKind, 'output_budget_exhaustion')
+  assert.match(calls[4].messages.at(-1).content, /immediately preceding provider response exhausted its output budget/)
   assert.equal(result.goalStatus, 'paused')
   assert.equal(rcon.mutations.length, 1)
   assert.equal(rcon.mutations.filter(text => text.includes("'wait'")).length, 1)
@@ -530,7 +534,7 @@ test('each independent provider decision gets one bounded output-budget recovery
 })
 
 
-test('terminal provider budget becomes a Jev-directed fresh planner generation instead of pausing the project', async () => {
+test('terminal provider budget becomes a deterministic fresh planner generation instead of pausing the project', async () => {
   const calls = []
   const decisions = []
   const rcon = new FakeRcon()
@@ -598,7 +602,7 @@ test('terminal provider budget becomes a Jev-directed fresh planner generation i
   await agent.request('run a long bounded task without stopping on planner budget rollover', { sender: 'TTLouis' })
   const result = await agent.completed()
 
-  assert.equal(decisions.filter(item => item.state?.contract === 'recovery_route').length, 1)
+  assert.equal(decisions.filter(item => item.state?.contract === 'recovery_route').length, 0)
   assert.equal(calls.length, 4)
   assert.equal(result.goalStatus, 'active')
   assert.notEqual(result.goalStatus, 'paused')
@@ -730,7 +734,7 @@ test('budget handoff survives memory restore and resumes from the compact handof
 })
 
 
-test('context-window exhaustion enters the same Jev planner-budget handoff without pausing canonical work', async () => {
+test('context-window exhaustion enters the same deterministic planner-budget handoff without pausing canonical work', async () => {
   const canonical = ['Inspect the current machine state', 'Continue the build']
   const calls = []
   let recoveryRoutes = 0
@@ -797,7 +801,7 @@ test('context-window exhaustion enters the same Jev planner-budget handoff witho
   await agent.request('run a context rollover test', { sender: 'TTLouis' })
   const result = await agent.completed()
 
-  assert.equal(recoveryRoutes, 1)
+  assert.equal(recoveryRoutes, 0)
   assert.equal(result.goalStatus, 'active')
   assert.notEqual(result.goalStatus, 'paused')
   assert.equal(agent.providerBudgetGeneration, 2)
@@ -879,7 +883,7 @@ test('fresh planner generations can roll over provider budget more than once in 
   await agent.request('exercise repeated planner budget rollover', { sender: 'TTLouis' })
   const result = await agent.completed()
 
-  assert.equal(recoveryRoutes.count, 2)
+  assert.equal(recoveryRoutes.count, 0)
   assert.equal(calls.length, 4)
   assert.equal(result.goalStatus, 'active')
   assert.equal(agent.providerBudgetGeneration, 3)
@@ -911,7 +915,7 @@ test('provider budget rollover limit stops recursive fresh generations without c
   await agent.request('exercise bounded planner budget rollover', { sender: 'TTLouis' })
   const result = await agent.completed()
 
-  assert.equal(recoveryRoutes.count, 2)
+  assert.equal(recoveryRoutes.count, 0)
   assert.equal(calls.length, 3)
   assert.equal(agent.providerBudgetGeneration, 2)
   assert.equal(agent.providerBudgetHandoffCount, 1)
