@@ -64,22 +64,12 @@ function proposedPlan(steps, currentStep = 0) {
   }
 }
 
-// A plan only commits on a real Jev scope review plus a real preflight result.
-// Tests that need a committed plan state that review explicitly rather than
-// relying on a default, because there is deliberately no longer a default.
-const REVIEWED_ACTIONABLE = Object.freeze({
-  verdict: 'actionable',
-  reason_codes: [],
-  confidence: 0.9,
-  runtime_validation: { passed: true },
-})
-
 function startCommittedPlan(memory, key = 'npc:airi') {
   const request = { sender: 'Louis', text: 'Build early automation' }
   const plan = proposedPlan(['Gather stone', 'Craft furnace', 'Build power'])
   const recorded = memory.recordPlan(key, request, plan)
   const reconciled = memory.reconcileTaskBoard(key, undefined, plan, recorded, { allowReplan: false })
-  memory.commitPlanningPlan(key, { now: 100, review: REVIEWED_ACTIONABLE })
+  memory.commitPlanningPlan(key, { now: 100, runtime_validation: { passed: true } })
   return { request, plan, state: reconciled.state }
 }
 
@@ -417,7 +407,7 @@ test('an evidence stall deadlocks even when every batch reports success', () => 
     confidence: 0.9,
     requirements: [{ kind: 'inventory_count', item_name: 'iron-plate', minimum: 20 }],
   })
-  memory.commitPlanningPlan(key, { now: 120, review: REVIEWED_ACTIONABLE })
+  memory.commitPlanningPlan(key, { now: 120, runtime_validation: { passed: true } })
   assert.ok(
     getActivePlan(memory.planningState(key)).steps[0].completion_contract,
     'the committed step carries the contract the stall signal reads',
@@ -490,45 +480,21 @@ test('successful batches do not accumulate toward a deadlock', () => {
   assert.ok(completedSteps > 0, 'verified evidence advanced the plan while batches accumulated')
 })
 
-test('a draft cannot commit without a jev scope review', () => {
+test('a draft commits only after deterministic runtime validation', () => {
   const key = 'npc:airi'
   const memory = new CanonicalTaskBoardMemory()
   const plan = proposedPlan(['Gather stone', 'Craft furnace', 'Build power'])
   const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Build early automation' }, plan)
   memory.reconcileTaskBoard(key, undefined, plan, recorded, { allowReplan: false })
 
-  // Silence is not consent. This used to commit, because the adapter supplied
-  // jev_verdict: 'actionable' as a literal.
   memory.commitPlanningPlan(key, { now: 100 })
   assert.equal(getActivePlan(memory.planningState(key)).status, PLAN_STATUS.DRAFT)
 
-  // Neither is a refusal.
-  for (const verdict of ['refine', 'needs_grounding', 'needs_user_clarification']) {
-    memory.commitPlanningPlan(key, {
-      now: 110,
-      review: { verdict, reason_codes: ['mixed_outcomes'], confidence: 0.8, runtime_validation: { passed: true } },
-    })
-    // A reviewed-and-refused plan legitimately sits in JEV_REVIEW; what matters
-    // is that it is not admitted.
-    assert.notEqual(
-      getActivePlan(memory.planningState(key)).status,
-      PLAN_STATUS.COMMITTED,
-      `${verdict} must not admit the draft`,
-    )
-  }
+  memory.commitPlanningPlan(key, { now: 110, runtime_validation: { passed: false } })
+  assert.equal(getActivePlan(memory.planningState(key)).status, PLAN_STATUS.DRAFT)
 
-  // Nor an actionable verdict whose runtime validation failed.
-  memory.commitPlanningPlan(key, {
-    now: 120,
-    review: { verdict: 'actionable', reason_codes: [], confidence: 0.9, runtime_validation: { passed: false } },
-  })
-  assert.notEqual(getActivePlan(memory.planningState(key)).status, PLAN_STATUS.COMMITTED)
-
-  // Both gates satisfied, and only then.
-  memory.commitPlanningPlan(key, { now: 130, review: REVIEWED_ACTIONABLE })
-  const committed = getActivePlan(memory.planningState(key))
-  assert.equal(committed.status, PLAN_STATUS.COMMITTED)
-  assert.equal(committed.jev_review.last_verdict, 'actionable')
+  memory.commitPlanningPlan(key, { now: 120, runtime_validation: { passed: true } })
+  assert.equal(getActivePlan(memory.planningState(key)).status, PLAN_STATUS.COMMITTED)
 })
 
 test('execution cannot admit its own plan retroactively', () => {
@@ -539,7 +505,7 @@ test('execution cannot admit its own plan retroactively', () => {
   memory.reconcileTaskBoard(key, undefined, plan, recorded, { allowReplan: false })
   assert.equal(getActivePlan(memory.planningState(key)).status, PLAN_STATUS.DRAFT)
 
-  // Outcomes arriving against an unreviewed draft used to force it committed so
+  // Outcomes arriving against an uncommitted draft used to force it committed so
   // they had somewhere to record themselves.
   memory.applyOutcomeAuthority(key, {
     kind: 'verified_complete',
@@ -577,7 +543,7 @@ function committedPlanWithExactContract(memory, key = 'npc:airi', { mode = 'all'
         ]
       : [{ id: 'furnace_fuel', kind: 'entity_inventory_count', unit_number: unitNumber, item_name: 'coal', minimum: 5 }],
   }, { now: 90 })
-  memory.commitPlanningPlan(key, { now: 100, review: REVIEWED_ACTIONABLE })
+  memory.commitPlanningPlan(key, { now: 100, runtime_validation: { passed: true } })
   return { plan, state: memory.currentPlan(key) }
 }
 
@@ -694,7 +660,7 @@ test('planner focus reaches the reducer and still cannot advance or complete a s
   const plan = proposedPlan(['Gather stone', 'Craft furnace', 'Build power'], 0)
   const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Build early automation' }, plan)
   const reconciled = memory.reconcileTaskBoard(key, undefined, plan, recorded, { allowReplan: false })
-  memory.commitPlanningPlan(key, { now: 100, review: REVIEWED_ACTIONABLE })
+  memory.commitPlanningPlan(key, { now: 100, runtime_validation: { passed: true } })
 
   const before = getActivePlan(memory.planningState(key))
   assert.equal(before.active_step_index, 0)
@@ -794,7 +760,7 @@ test('first live long-horizon draft links to shelf nodes created in the same sub
 })
 
 
-test('checkpoint refresh preserves draft-to-shelf lineage before Jev review', () => {
+test('checkpoint refresh preserves draft-to-shelf lineage before commit', () => {
   const memory = new CanonicalTaskBoardMemory()
   const key = 'npc:airi'
   const plan = {
@@ -814,254 +780,8 @@ test('checkpoint refresh preserves draft-to-shelf lineage before Jev review', ()
   assert.equal(refreshed.roadmap_revision_id, memory.planningState(key).roadmap.roadmap_revision_id)
 })
 
-test('Jev refine refusal returns draft to re-authorable state with bounded criticism recorded', () => {
-  const memory = new CanonicalTaskBoardMemory()
-  const key = 'npc:airi'
-  const plan = proposedPlan(['Gather stone', 'Craft furnace', 'Build power'])
-  const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Build early automation' }, plan)
-  memory.reconcileTaskBoard(key, undefined, plan, recorded, { allowReplan: false })
-
-  memory.commitPlanningPlan(key, {
-    now: 100,
-    review: {
-      verdict: 'refine',
-      reason_codes: ['too_broad'],
-      problem_steps: ['2'],
-      actionable_prefix: 1,
-      recommended_boundary: 'after stone is gathered',
-      confidence: 0.9,
-      runtime_validation: { passed: true },
-    },
-  })
-
-  const refused = getActivePlan(memory.planningState(key))
-  assert.equal(refused.status, PLAN_STATUS.DRAFT)
-  assert.equal(refused.jev_review.refinement_count, 1)
-  assert.equal(refused.jev_review.last_verdict, 'refine')
-  assert.deepEqual(refused.jev_review.last_reason_codes, ['too_broad'])
-  assert.equal(refused.jev_review.actionable_prefix, 1)
-  assert.ok(memory.planningState(key).roadmap.nodes.some(node => /Craft furnace/.test(node.intent)))
-})
-
-class ScopeReviewRcon {
-  constructor() {
-    this.mutations = []
-  }
-
-  async command(text) {
-    if (text.includes('remote.call("airi_deployment","status")')) return JSON.stringify(deployment())
-    if (text.includes('remote.call("autorio_actor","status")')) {
-      return JSON.stringify({
-        mode: 'npc',
-        connected_players: 0,
-        actor: { actor_id: 18, kind: 'standalone_character', valid: true, has_character: true },
-        load_reconciliation: { pending: false, last_actor_id: 18 },
-      })
-    }
-    if (text.includes('remote.call("autorio_preflight","operation"')) return JSON.stringify({ ok: true })
-    if (text.includes('local ok,result=pcall')) {
-      this.mutations.push(text)
-      const marker = text.match(/AIRI_RESULT_[a-f0-9]{24}:/)?.[0]
-      const admissions = [...text.matchAll(/return remote\.call\('autorio_operations'/g)].length
-      return `${marker}${JSON.stringify({ ok: true, result: Array.from({ length: admissions }, () => [true, 'Task started']) })}`
-    }
-    return '{}'
-  }
-}
-
-test('live Jev refusal re-authors once and never admits the rejected operation batch', async () => {
-  const rcon = new ScopeReviewRcon()
-  const memory = new CanonicalTaskBoardMemory()
-  const providerPlans = [
-    {
-      chatMessage: 'Trying an over-broad slice.',
-      plan: ['Gather stone', 'Craft furnace', 'Build power'],
-      currentStep: 0,
-      operations: [{ name: 'wait', args: { ticks: 1 } }],
-    },
-    {
-      chatMessage: 'Using the narrower reviewed boundary.',
-      plan: ['Gather stone'],
-      currentStep: 0,
-      operations: [{ name: 'wait', args: { ticks: 1 } }],
-    },
-  ]
-  let providerCall = 0
-  let reviewCall = 0
-  const agent = new NpcAgentLoop({
-    rcon,
-    memory,
-    provider: async () => ({ content: JSON.stringify(providerPlans[Math.min(providerCall++, providerPlans.length - 1)]) }),
-    interactionDecisionProvider: async (_state, questions) => {
-      if (!questions?.scope_review) {
-        return {
-          answers: {
-            routing: { choice: 'wake_planner', confidence: 0.9 },
-            reasoning_budget: { choice: 'normal', confidence: 0.9 },
-            planning_horizon: { choice: 'checkpoint', confidence: 0.9 },
-            observation_budget: { score: 0, confidence: 0.9 },
-          },
-        }
-      }
-      return {
-        answers: {
-          routing: { choice: 'wake_planner', confidence: 0.9 },
-          reasoning_budget: { choice: 'normal', confidence: 0.9 },
-          planning_horizon: { choice: 'checkpoint', confidence: 0.9 },
-          observation_budget: { score: 0, confidence: 0.9 },
-        },
-      }
-    },
-    scopeReviewDecisionProvider: async (_state, _questions) => {
-      reviewCall++
-      return reviewCall === 1
-        ? {
-            answers: {
-              scope_review: { choice: 'refine', confidence: 0.9 },
-              scope_review_reason_codes: { choices: ['too_broad'] },
-              actionable_prefix: { score: 1 },
-              step_directions: { choices: ['vertical', 'vertical', 'vertical'] },
-            },
-          }
-        : {
-            answers: {
-              scope_review: { choice: 'actionable', confidence: 0.9 },
-              scope_review_reason_codes: { choices: [] },
-              actionable_prefix: { score: 1 },
-              step_directions: { choices: ['vertical'] },
-            },
-          }
-    },
-    systemPrompt: 'bounded Jev refinement integration test',
-    stateFile: null,
-    traceFile: null,
-    decisionTraceFile: null,
-    npcId: 'airi',
-  })
-
-  await agent.request('build early automation', { sender: 'Louis' })
-
-  assert.equal(reviewCall, 2)
-  assert.ok(providerCall >= 2)
-  assert.equal(rcon.mutations.length, 1, 'only the actionable replacement draft may reach Autorio admission')
-  const planning = memory.planningState('npc:airi')
-  const active = getActivePlan(planning)
-  assert.ok([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(active.status))
-  assert.equal(active.steps.length, 1)
-  assert.equal(active.steps[0].description, 'Gather stone')
-  assert.ok(planning.plans.some(item => item.status === PLAN_STATUS.SUPERSEDED && item.jev_review.refinement_count >= 1))
-})
-
-
-test('pre-commit Jev scope review receives bounded grounding and current-frontier evidence', async () => {
-  class GroundingScopeReviewRcon extends ScopeReviewRcon {
-    async command(text) {
-      if (text.includes('remote.call("autorio_tools","get_inventory_items")')) {
-        return JSON.stringify({
-          items: [
-            { name: 'iron-ore', count: 12 },
-            { name: 'copper-ore', count: 4 },
-            { name: 'coal', count: 3 },
-          ],
-        })
-      }
-      if (text.includes('remote.call("autorio_tools","get_nearby_entities"')) {
-        return JSON.stringify({
-          actor_position: { x: 0, y: 0 },
-          entities: [
-            { name: 'iron-ore', type: 'resource', position: { x: 3, y: 0 }, distance: 3 },
-            { name: 'copper-ore', type: 'resource', position: { x: 6, y: 0 }, distance: 6 },
-          ],
-        })
-      }
-      return super.command(text)
-    }
-  }
-
-  const rcon = new GroundingScopeReviewRcon()
-  const memory = new CanonicalTaskBoardMemory()
-  let providerCall = 0
-  let reviewState
-
-  const agent = new NpcAgentLoop({
-    rcon,
-    memory,
-    provider: async () => {
-      providerCall++
-      if (providerCall === 1) {
-        return {
-          content: null,
-          tool_calls: [{
-            id: 'scope-inventory',
-            type: 'function',
-            function: { name: 'getInventoryItems', arguments: '{}' },
-          }],
-        }
-      }
-      if (providerCall === 2) {
-        return {
-          content: null,
-          tool_calls: [{
-            id: 'scope-nearby',
-            type: 'function',
-            function: { name: 'getNearbyEntities', arguments: JSON.stringify({ radius: 16, limit: 8 }) },
-          }],
-        }
-      }
-      return {
-        content: JSON.stringify({
-          chatMessage: 'Start the bounded smelting bootstrap.',
-          plan: ['Gather iron ore', 'Gather copper ore', 'Establish a first smelting checkpoint'],
-          currentStep: 0,
-          operations: [{ name: 'wait', args: { ticks: 1 } }],
-        }),
-      }
-    },
-    scopeReviewDecisionProvider: async state => {
-      reviewState = state
-      return {
-        answers: {
-          scope_review: { choice: 'actionable', confidence: 0.9 },
-          scope_review_reason_codes: { choices: [] },
-          actionable_prefix: { score: 1 },
-          step_directions: { choices: ['horizontal', 'horizontal', 'horizontal'] },
-        },
-      }
-    },
-    systemPrompt: 'rich Jev scope review packet integration test',
-    stateFile: null,
-    traceFile: null,
-    decisionTraceFile: null,
-    npcId: 'airi',
-  })
-
-  const result = await agent.request('semi-automate iron and copper plates', { sender: 'Louis' })
-
-  assert.equal(reviewState.review_packet_version, 2)
-  assert.equal(reviewState.draft.step_count, 3)
-  assert.equal(reviewState.current_frontier.active_index, 0)
-  assert.equal(reviewState.current_frontier.active_step, 'Gather iron ore')
-  assert.equal(reviewState.current_frontier.proposed_operations[0].name, 'wait')
-  assert.equal(reviewState.current_frontier.deterministic_preflight[0].result.validation, 'not_required')
-  assert.equal(reviewState.current_frontier.semantic_alignment.relation, 'advances_current')
-  assert.equal(reviewState.current_frontier.semantic_alignment.admission_aligned, true)
-  assert.equal(reviewState.review_semantics.current_frontier_must_be_grounded_now, true)
-  assert.equal(reviewState.review_semantics.later_steps_may_depend_on_prior_step_outputs, true)
-  assert.equal(reviewState.review_semantics.planned_dependency_is_not_an_unverified_world_fact, true)
-
-  const observations = reviewState.grounding.recent_observations
-  assert.deepEqual(observations.map(item => item.tool), ['getInventoryItems', 'getNearbyEntities'])
-  assert.match(JSON.stringify(observations), /iron-ore/)
-  assert.match(JSON.stringify(observations), /copper-ore/)
-  assert.match(JSON.stringify(reviewState.grounding.live_entities), /iron-ore/)
-  assert.ok(reviewState.grounding.observation_window_chars <= 12000)
-
-  assert.equal(result.operations[0].name, 'wait')
-  assert.equal(rcon.mutations.length, 1)
-})
-
 test('goal-admission Jev steering is visible to the Main LLM before its first draft', async () => {
-  const rcon = new ScopeReviewRcon()
+  const rcon = new PlanningRcon()
   const memory = new CanonicalTaskBoardMemory()
   let firstPlannerContext = ''
   let steeringCalls = 0
@@ -1139,7 +859,7 @@ test('a completed long-horizon slice stays attached to its goal and permits the 
   }
   const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Build a staged factory' }, first)
   memory.reconcileTaskBoard(key, undefined, first, recorded, { allowReplan: false })
-  memory.commitPlanningPlan(key, { now: 20, review: REVIEWED_ACTIONABLE })
+  memory.commitPlanningPlan(key, { now: 20, runtime_validation: { passed: true } })
 
   const active = getActivePlan(memory.planningState(key))
   memory.applyOutcomeAuthority(key, {
@@ -1207,7 +927,7 @@ test('verified PLAN_COMPLETED consumes its exact Jev steering recommendation bef
   }
   const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Build a staged long-horizon factory' }, plan)
   memory.reconcileTaskBoard(key, undefined, plan, recorded, { allowReplan: false })
-  memory.commitPlanningPlan(key, { now: 20, review: REVIEWED_ACTIONABLE })
+  memory.commitPlanningPlan(key, { now: 20, runtime_validation: { passed: true } })
 
   const result = memory.applyOutcomeAuthority(key, {
     kind: 'verified_complete',
@@ -1245,59 +965,6 @@ test('verified PLAN_COMPLETED consumes its exact Jev steering recommendation bef
 })
 
 
-test('Jev pre-commit refinement replaces the legacy Task Board before execution', () => {
-  const memory = new CanonicalTaskBoardMemory()
-  const key = 'npc:airi'
-  const request = { sender: 'Louis', text: 'Build a staged factory' }
-  const oversized = {
-    ...proposedPlan(['Establish iron acquisition and all downstream support in one oversized slice']),
-    roadmap: [
-      { id: 'frontier', intent: 'Establish the first capability.' },
-      { id: 'support', intent: 'Strengthen that capability.', depends_on: ['frontier'] },
-    ],
-    roadmapNodeIds: ['frontier'],
-    developmentMode: 'vertical',
-  }
-  const first = memory.recordPlan(key, request, oversized)
-  const firstReconciled = memory.reconcileTaskBoard(key, undefined, oversized, first, { allowReplan: false })
-  memory.commitPlanningPlan(key, {
-    now: 100,
-    review: {
-      verdict: 'refine',
-      reason_codes: ['too_broad'],
-      actionable_prefix: 0,
-      confidence: 0.95,
-      runtime_validation: { passed: true },
-    },
-  })
-
-  const refined = {
-    ...proposedPlan(['Demonstrate the first iron acquisition capability']),
-    roadmapNodeIds: ['frontier'],
-    developmentMode: 'vertical',
-  }
-  const recorded = memory.recordPlan(key, request, refined, { scopeRefinement: true })
-  assert.equal(recorded.precommitRefinementApproved, true)
-  const reconciled = memory.reconcileTaskBoard(
-    key,
-    firstReconciled.state.task_board,
-    refined,
-    recorded,
-    { allowReplan: false, previousState: firstReconciled.state },
-  )
-
-  assert.deepEqual(
-    reconciled.state.task_board.steps.map(step => step.description),
-    ['Demonstrate the first iron acquisition capability'],
-    'the legacy projection must follow the re-authored pre-commit draft',
-  )
-  assert.equal(reconciled.state.task_board.active_index, 0)
-  const reducer = getActivePlan(memory.planningState(key))
-  assert.equal(reducer.status, PLAN_STATUS.DRAFT)
-  assert.deepEqual(reducer.steps.map(step => step.description), ['Demonstrate the first iron acquisition capability'])
-})
-
-
 test('completed reducer slice remains an active user goal boundary rather than legacy goal completion', async () => {
   const memory = new CanonicalTaskBoardMemory()
   const key = 'npc:airi'
@@ -1319,7 +986,7 @@ test('completed reducer slice remains an active user goal boundary rather than l
   }
   const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Build a staged long-horizon factory' }, plan)
   memory.reconcileTaskBoard(key, undefined, plan, recorded, { allowReplan: false })
-  memory.commitPlanningPlan(key, { now: 20, review: REVIEWED_ACTIONABLE })
+  memory.commitPlanningPlan(key, { now: 20, runtime_validation: { passed: true } })
   const active = getActivePlan(memory.planningState(key))
 
   const legacy = memory.currentPlan(key)
@@ -1380,7 +1047,7 @@ test('next shelf draft replaces a completed legacy board before checkpoint refre
   }
   const firstRecorded = memory.recordPlan(key, { sender: 'Louis', text: 'Build both capabilities' }, firstPlan)
   memory.reconcileTaskBoard(key, undefined, firstPlan, firstRecorded, { allowReplan: false })
-  memory.commitPlanningPlan(key, { now: 20, review: REVIEWED_ACTIONABLE })
+  memory.commitPlanningPlan(key, { now: 20, runtime_validation: { passed: true } })
   memory.applyOutcomeAuthority(key, {
     kind: 'verified_complete',
     source: 'deterministic_runtime',
@@ -1448,7 +1115,7 @@ test('committed completion meaning cannot be rewritten through the legacy checkp
     requirements: [{ kind: 'inventory_count', item_name: 'iron-ore', minimum: 10 }],
   }
   memory.setStepCompletionContract(key, stepId, committedContract, { now: 20 })
-  memory.commitPlanningPlan(key, { now: 30, review: REVIEWED_ACTIONABLE })
+  memory.commitPlanningPlan(key, { now: 30, runtime_validation: { passed: true } })
 
   const reducerBefore = getActivePlan(memory.planningState(key))
   const legacyBefore = memory.currentPlan(key).task_board.steps[0].completion_contract
