@@ -1128,25 +1128,40 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         const evidence = Array.isArray(candidate?.evidence) ? candidate.evidence : []
         const ref = evidence.find(item => typeof item?.ref === 'string' && item.ref)?.ref
           ?? `outcome/${plan.plan_id}/${step.step_id}/${now}`
-        planning = applyPlanningEvent(planning, {
-          type: PLANNING_EVENT.STEP_EVIDENCE_ACCEPTED,
-          now,
-          plan_id: plan.plan_id,
-          step_id: step.step_id,
-          evidence: {
+        if (result.decision.kind === 'semantic_complete') {
+          planning = applyPlanningEvent(planning, {
+            type: PLANNING_EVENT.STEP_COMPLETED,
+            now,
+            source: 'main_planner',
+            semantic_claim: true,
+            grounding_refs: Array.isArray(candidate?.metadata?.grounding_refs)
+              ? candidate.metadata.grounding_refs
+              : [ref],
+            plan_id: plan.plan_id,
+            step_id: step.step_id,
+          })
+        }
+        else {
+          planning = applyPlanningEvent(planning, {
+            type: PLANNING_EVENT.STEP_EVIDENCE_ACCEPTED,
+            now,
+            plan_id: plan.plan_id,
+            step_id: step.step_id,
+            evidence: {
+              source: 'runtime',
+              kind: 'outcome_authority',
+              ref,
+              contract_satisfied: true,
+            },
+          })
+          planning = applyPlanningEvent(planning, {
+            type: PLANNING_EVENT.STEP_COMPLETED,
+            now,
             source: 'runtime',
-            kind: 'outcome_authority',
-            ref,
-            contract_satisfied: true,
-          },
-        })
-        planning = applyPlanningEvent(planning, {
-          type: PLANNING_EVENT.STEP_COMPLETED,
-          now,
-          source: 'runtime',
-          plan_id: plan.plan_id,
-          step_id: step.step_id,
-        })
+            plan_id: plan.plan_id,
+            step_id: step.step_id,
+          })
+        }
         if (result.state.status === 'completed') {
           planning = applyPlanningEvent(planning, {
             type: PLANNING_EVENT.PLAN_COMPLETED,
