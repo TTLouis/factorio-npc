@@ -1,4 +1,4 @@
-import { authoritativeRuntimeState, hasAuthoritativeBlockerEvidence } from './outcome-authority.mjs'
+import { authoritativeRuntimeState } from './outcome-authority.mjs'
 
 export const RECOVERY_FAILURE_CLASSES = new Set([
   'provider_format',
@@ -11,22 +11,33 @@ export const RECOVERY_FAILURE_CLASSES = new Set([
   'unknown',
 ])
 
+// Canonical Jev control-plane vocabulary. Internal runtime fallbacks such as
+// wait_runtime, targeted_observation and pause_recoverable are code-owned
+// implementation details and are never offered to Jev.
 export const RECOVERY_ROUTES = new Set([
-  'deterministic_close',
-  'wait_runtime',
-  'targeted_observation',
-  'retry_compact',
-  'continue_low',
-  'replan_high',
-  'pause_recoverable',
-  'propose_blocker',
-  'fallback_runtime',
+  'continue_runtime',
+  'observe',
+  'wake_planner',
+  'ask_user',
 ])
 
+// Compatibility only for persisted provider-budget handoffs created before M9.
+// No live M9 question asks Jev to choose a semantic scope.
 export const RECOVERY_SEMANTIC_SCOPES = new Set([
   'keep_target',
   'reanchor_target',
 ])
+
+const LEGACY_RECOVERY_ROUTE_ALIASES = Object.freeze({
+  wait_runtime: 'continue_runtime',
+  targeted_observation: 'observe',
+  retry_compact: 'wake_planner',
+  continue_low: 'wake_planner',
+  replan_high: 'wake_planner',
+  fallback_runtime: 'wake_planner',
+  pause_recoverable: 'ask_user',
+  propose_blocker: 'ask_user',
+})
 
 export function recoveryFailureClassHint(reason) {
   const text = String(reason ?? '')
@@ -42,76 +53,57 @@ export function recoveryDecisionQuestions() {
   return {
     failure_class: {
       type: 'choice',
-      instructions: 'Classify this bounded recovery failure. Routing only: do not invent Factorio facts.',
+      instructions: 'Classify this bounded recovery failure for routing telemetry only. Do not invent Factorio facts, completion, blockers, or plan changes.',
       criteria: {
         provider_format: 'Malformed or invalid provider response/tool-call formatting.',
         provider_budget: 'Provider output budget or finish=length exhaustion.',
         provider_safety: 'Provider safety/content-filter refusal. This is terminal for ordinary main-provider retry.',
-        missing_fact: 'Exactly one mutable fact is missing and one bounded observation may resolve it.',
+        missing_fact: 'One bounded authoritative observation may resolve the immediate uncertainty.',
         semantic_replan: 'The remaining strategy needs semantic reconsideration.',
         runtime_busy: 'Authoritative runtime work is already active.',
-        grounded_world_failure: 'Supplied authoritative evidence supports an actual world/runtime blocker.',
+        grounded_world_failure: 'Supplied authoritative evidence describes a real world/runtime failure.',
         unknown: 'The bounded capsule is insufficient to classify safely.',
       },
     },
     next_recovery: {
       type: 'choice',
-      instructions: 'Choose the smallest bounded next recovery. Runtime independently validates the route and owns durable state.',
-      criteria: {
-        deterministic_close: 'Existing authoritative evidence already proves the canonical final work complete.',
-        wait_runtime: 'Authoritative runtime work is active; skip the main planner.',
-        targeted_observation: 'Exactly one admissible observation is needed before deciding.',
-        retry_compact: 'Retry once with compact context and low reasoning.',
-        continue_low: 'Continue once with compact context and low reasoning.',
-        replan_high: 'Wake once with high reasoning because strategy changed.',
-        pause_recoverable: 'No world work is active; preserve the task and pause recoverably.',
-        propose_blocker: 'Authoritative evidence appears to support a real world blocker.',
-        fallback_runtime: 'Use the existing safe runtime fallback.',
+      instructions: {
+        task: 'Choose the cheapest useful next reasoning route after this bounded failure.',
+        rules: [
+          'Routing only: do not claim completion, author blockers, mutate plans, or invent world facts.',
+          'continue_runtime is only a request; deterministic code independently verifies active runtime work.',
+          'observe requests bounded read-only grounding; deterministic observation admission still applies.',
+          'ask_user is only valid when deterministic lifecycle state already requires user authority.',
+        ],
       },
-    },
-    semantic_scope: {
-      type: 'choice',
-      instructions: 'At a provider-budget boundary, decide whether the current committed semantic target still fits the next planner handoff. This is routing only: it never proves completion, splits a plan, or writes planning hierarchy.',
       criteria: {
-        keep_target: 'Keep the current committed semantic target; only renew the planner budget/context.',
-        reanchor_target: 'Keep the immutable committed plan, but let the next planner re-anchor its focus from authoritative state.',
+        continue_runtime: 'Authoritative runtime work is already active and can continue without another Main-LLM decision.',
+        observe: 'A bounded deterministic read is needed before the next semantic decision.',
+        wake_planner: 'The Main LLM must reason about the next semantic step, repair, or strategy.',
+        ask_user: 'The runtime is already at a lifecycle boundary that requires an explicit user choice.',
       },
-    },
-    world_failure_supported: {
-      type: 'noul',
-      instructions: 'Do the supplied authoritative facts support a real world blocker?',
-    },
-    need_fresh_observation: {
-      type: 'noul',
-      instructions: 'Is exactly one fresh mutable fact required before a safe next action?',
-    },
-    need_semantic_replan: {
-      type: 'noul',
-      instructions: 'Does the remaining strategy require semantic replanning rather than a compact retry?',
     },
   }
+}
+
+function normalizeRecoveryRoute(value) {
+  if (RECOVERY_ROUTES.has(value)) return value
+  return LEGACY_RECOVERY_ROUTE_ALIASES[value]
 }
 
 export function parseRecoveryDecision(response) {
   const failure = response?.answers?.failure_class
   const route = response?.answers?.next_recovery
   if (!failure || !RECOVERY_FAILURE_CLASSES.has(failure.choice)) throw new Error('Decision provider returned invalid recovery failure class')
-  if (!route || !RECOVERY_ROUTES.has(route.choice)) throw new Error('Decision provider returned invalid recovery route')
-  const confidence = typeof route.confidence === 'number' && Number.isFinite(route.confidence) ? route.confidence : 0
+  const normalizedRoute = normalizeRecoveryRoute(route?.choice)
+  if (!normalizedRoute) throw new Error('Decision provider returned invalid recovery route')
+  const confidence = typeof route?.confidence === 'number' && Number.isFinite(route.confidence) ? route.confidence : 0
   if (confidence < 0 || confidence > 1) throw new Error('Decision provider returned invalid recovery confidence')
-  const noul = key => {
-    const value = response?.answers?.[key]?.noul
-    return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : undefined
-  }
-  const semanticScope = response?.answers?.semantic_scope?.choice
   return {
     failure_class: failure.choice,
-    route: route.choice,
-    semantic_scope: RECOVERY_SEMANTIC_SCOPES.has(semanticScope) ? semanticScope : 'keep_target',
+    route: normalizedRoute,
+    requested_route: route.choice,
     confidence,
-    world_failure_supported: noul('world_failure_supported'),
-    need_fresh_observation: noul('need_fresh_observation'),
-    need_semantic_replan: noul('need_semantic_replan'),
     model: typeof response?.model === 'string' ? response.model : undefined,
     provider: typeof response?.provider === 'string' ? response.provider : undefined,
     usage: response?.usage && typeof response.usage === 'object' ? response.usage : undefined,
@@ -120,51 +112,59 @@ export function parseRecoveryDecision(response) {
 
 export function validateRecoveryRoute(decision, {
   world = {},
-  finalCompletionProven = false,
   observationBudgetAvailable = true,
-  evidence = [],
   failureClassHint = 'unknown',
+  userDecisionRequired = false,
 } = {}) {
   const runtime = authoritativeRuntimeState(world)
-  const requested = RECOVERY_ROUTES.has(decision?.route) ? decision.route : 'fallback_runtime'
+  const requested = normalizeRecoveryRoute(decision?.route) ?? 'wake_planner'
   const hintedFailureClass = RECOVERY_FAILURE_CLASSES.has(failureClassHint) ? failureClassHint : 'unknown'
-  const providerControlPlaneFailure = hintedFailureClass === 'provider_format' || hintedFailureClass === 'provider_budget' || hintedFailureClass === 'provider_safety'
   const providerSafetyFailure = hintedFailureClass === 'provider_safety'
-  const safeNonBlockingRoute = runtime.idle ? 'pause_recoverable' : runtime.active ? 'wait_runtime' : 'fallback_runtime'
-  let route = requested
+  const safeNoProviderRoute = runtime.active ? 'wait_runtime' : runtime.idle ? 'pause_recoverable' : 'fallback_runtime'
+  let route
   let rejection_reason = ''
 
-  if (providerSafetyFailure && ['targeted_observation', 'retry_compact', 'continue_low', 'replan_high'].includes(route)) {
-    route = safeNonBlockingRoute
+  if (requested === 'continue_runtime') {
+    if (runtime.active) route = 'wait_runtime'
+    else if (providerSafetyFailure) {
+      route = safeNoProviderRoute
+      rejection_reason = 'continue_runtime_without_authoritative_active_runtime'
+    }
+    else {
+      route = 'wake_planner'
+      rejection_reason = 'continue_runtime_without_authoritative_active_runtime'
+    }
+  }
+  else if (requested === 'observe') {
+    if (providerSafetyFailure) {
+      route = safeNoProviderRoute
+      rejection_reason = 'provider_safety_is_terminal_for_main_provider'
+    }
+    else if (!observationBudgetAvailable) {
+      route = 'wake_planner'
+      rejection_reason = 'targeted_observation_budget_exhausted'
+    }
+    else {
+      route = 'targeted_observation'
+    }
+  }
+  else if (requested === 'ask_user') {
+    if (userDecisionRequired) route = 'ask_user'
+    else if (providerSafetyFailure) {
+      route = safeNoProviderRoute
+      rejection_reason = 'ask_user_without_authoritative_user_boundary'
+    }
+    else {
+      route = 'wake_planner'
+      rejection_reason = 'ask_user_without_authoritative_user_boundary'
+    }
+  }
+  else if (providerSafetyFailure) {
+    route = safeNoProviderRoute
     rejection_reason = 'provider_safety_is_terminal_for_main_provider'
   }
-  else if (route === 'deterministic_close' && !finalCompletionProven) {
-    route = 'fallback_runtime'
-    rejection_reason = 'deterministic_close_without_authoritative_completion'
-  }
-  else if (route === 'wait_runtime' && !runtime.active) {
-    route = runtime.idle ? 'pause_recoverable' : 'fallback_runtime'
-    rejection_reason = 'wait_runtime_without_authoritative_active_runtime'
-  }
-  else if (route === 'pause_recoverable' && !runtime.idle) {
-    route = runtime.active ? 'wait_runtime' : 'fallback_runtime'
-    rejection_reason = 'pause_recoverable_requires_authoritative_idle'
-  }
-  else if (route === 'targeted_observation' && !observationBudgetAvailable) {
-    route = 'fallback_runtime'
-    rejection_reason = 'targeted_observation_budget_exhausted'
-  }
-  else if (route === 'propose_blocker' && providerControlPlaneFailure) {
-    route = safeNonBlockingRoute
-    rejection_reason = 'provider_failure_cannot_be_world_blocker'
-  }
-  else if (route === 'propose_blocker' && decision?.failure_class !== 'grounded_world_failure') {
-    route = safeNonBlockingRoute
-    rejection_reason = 'blocker_proposal_requires_grounded_world_failure'
-  }
-  else if (route === 'propose_blocker' && !hasAuthoritativeBlockerEvidence(evidence)) {
-    route = safeNonBlockingRoute
-    rejection_reason = 'blocker_proposal_without_authoritative_evidence'
+  else {
+    route = 'wake_planner'
   }
 
   return {
