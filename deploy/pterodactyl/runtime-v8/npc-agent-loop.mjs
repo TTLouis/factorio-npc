@@ -1928,6 +1928,8 @@ function verifiedFinalCompletion(plan, state, triggerSource, { freshObservation 
   if (!board || board.kind !== 'task_board_lite' || !Array.isArray(board.steps) || board.steps.length === 0) return false
   const activeIndex = Number.isSafeInteger(board.active_index) ? board.active_index : -1
   if (activeIndex < 0 || activeIndex >= board.steps.length) return false
+  const activeStep = board.steps[activeIndex]
+  if (!completionContractSupported(activeStep?.completion_contract)) return false
   const trailingSteps = board.steps.slice(activeIndex + 1)
   if (trailingSteps.some(step => !terminalControlOnlyPlanStep(step?.description))) return false
   const ref = Number.isSafeInteger(state.last_verified_batch_id) ? `batch_${state.last_verified_batch_id}` : ''
@@ -2166,11 +2168,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   // Two defects lived in the inherited compaction:
-  //  - it ran INSIDE the base tool batch, so when one real (multi-KB) read
-  //    overflowed the working budget, the just-pushed exchange was spliced out
-  //    before this class sliced `this.messages` for its results. Nothing was
-  //    recorded, and Jev judged every draft on an empty grounding packet
-  //    (grounding_observation_count: 0 -> needs_grounding, every time);
+  //  - it ran INSIDE the base tool batch, so a large fresh read could be
+  //    spliced out before this class consumed it;
   //  - it could compact the NEWEST exchange, replacing fresh observations with
   //    an 800-char summary before the planner had read them once.
   // Compaction now waits until this class has consumed the batch, and never
@@ -4310,21 +4309,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const settled = await this.settleCompletedStepState(completionState, { pendingAmendment })
     if (settled) return settled
 
-    let routed
-    if (pendingAmendment) {
-      routed = { route: 'fallback_planner', decision_called: false }
-    }
-    else if (stepCompletion?.reason === 'checkpoint_split_recommended') {
-      routed = { route: 'replan', decision_called: false, source: 'step_checkpoint_normalizer' }
-      await this.traceEvent('planner.wake', {
-        source: 'step_checkpoint_normalizer',
-        route: 'replan',
-        reason: 'checkpoint_split_recommended',
-      })
-    }
-    else {
-      routed = await this.routePostStepDecision(receipt)
-    }
+    const routed = pendingAmendment
+      ? { route: 'fallback_planner', decision_called: false }
+      : await this.routePostStepDecision(receipt)
     if (routed.route === 'wait_runtime') return null
 
     this.reasoningTriggerSource = routed.route === 'continue_current'
