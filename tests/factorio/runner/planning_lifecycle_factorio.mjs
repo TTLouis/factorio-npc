@@ -83,6 +83,7 @@ function planMessage({
   roadmap,
   roadmapNodeIds,
   developmentMode,
+  includeCheckpoint = true,
 }) {
   return {
     content: JSON.stringify({
@@ -97,7 +98,7 @@ function planMessage({
           search_radius: 32,
         },
       }],
-      checkpoint: checkpoint(resourceName, minimum),
+      ...(includeCheckpoint ? { checkpoint: checkpoint(resourceName, minimum) } : {}),
       ...(roadmap ? { roadmap } : {}),
       ...(roadmapNodeIds ? { roadmapNodeIds } : {}),
       ...(developmentMode ? { developmentMode } : {}),
@@ -365,6 +366,7 @@ async function verify({ rcon, results, stateFile }) {
         chatMessage: 'Testing the committed frontier against its now-known structural dependency.',
         step: 'Advance the next capability frontier',
         resourceName: 'sgluna-missing-resource',
+        includeCheckpoint: false,
         roadmapNodeIds: ['next-capability-frontier'],
         developmentMode: 'vertical',
       })
