@@ -3,6 +3,7 @@ const OUTCOME_KINDS = new Set([
   'runtime_active',
   'condition_wait_active',
   'verified_complete',
+  'semantic_complete',
   'world_blocked',
   'recoverable_provider_failure',
   'cancelled',
@@ -135,6 +136,18 @@ export function validateOutcomeCandidate(candidate, { world = {} } = {}) {
     return hasAuthoritativeCompletionEvidence(evidence)
       ? { ...base, accepted: true, durable_status: 'completed' }
       : { ...base, rejection_reason: 'completion_without_authoritative_evidence' }
+  }
+
+  if (kind === 'semantic_complete') {
+    const metadata = candidate?.metadata && typeof candidate.metadata === 'object' ? candidate.metadata : {}
+    const groundingRefs = Array.isArray(metadata.grounding_refs)
+      ? metadata.grounding_refs.filter(ref => typeof ref === 'string' && ref.trim()).slice(0, 16)
+      : []
+    if (source !== 'main_planner') return { ...base, rejection_reason: 'semantic_completion_requires_main_planner' }
+    if (metadata.scope !== 'step') return { ...base, rejection_reason: 'semantic_completion_must_target_step' }
+    if (!clean(metadata.step_id, 200)) return { ...base, rejection_reason: 'semantic_completion_missing_step_id' }
+    if (groundingRefs.length === 0) return { ...base, rejection_reason: 'semantic_completion_without_runtime_grounding' }
+    return { ...base, accepted: true, durable_status: 'completed', semantic: true }
   }
 
   if (kind === 'world_blocked') {
