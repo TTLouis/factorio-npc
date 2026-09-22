@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parseOperation, parsePlan, renderOperation, renderOperationPreflight, toolCommand, toolDefinitions } from './structured-policy.mjs'
+import { approvedOperationNames, operationArgumentKeys, operationMetadataCatalog, operationMetadataForName, parseOperation, parsePlan, renderOperation, renderOperationPreflight, toolCommand, toolDefinitions } from './structured-policy.mjs'
 
 test('structured operations apply bounded defaults and render only approved Autorio calls', () => {
   assert.deepEqual(parseOperation({ name: 'mine_entity', args: { entity_name: 'iron-ore' } }), {
@@ -253,4 +253,62 @@ test('tool calls reject unknown names, unsafe names, extras, and out-of-bound sc
   assert.throws(() => toolCommand('getResearchRequest', { request_id: 0 }))
   assert.throws(() => toolCommand('getResearchRequest', { request_id: 1.5 }))
   assert.throws(() => toolCommand('getResearchRequest', { request_id: 42, force: 'enemy' }))
+})
+
+
+test('operation metadata is the authoritative base operation registry', () => {
+  const catalog = operationMetadataCatalog()
+  assert.deepEqual(Object.keys(catalog), approvedOperationNames())
+  assert.equal(new Set(approvedOperationNames()).size, approvedOperationNames().length)
+
+  for (const name of approvedOperationNames()) {
+    const metadata = operationMetadataForName(name)
+    assert.equal(metadata.name, name)
+    assert.deepEqual(Object.keys(metadata.arguments), operationArgumentKeys(name))
+    assert.ok(metadata.scopes.length >= 1)
+    assert.equal(new Set(metadata.scopes).size, metadata.scopes.length)
+    assert.ok(['low', 'moderate', 'high', 'combat'].includes(metadata.risk))
+    assert.equal(typeof metadata.preflight, 'boolean')
+    for (const spec of Object.values(metadata.arguments)) {
+      assert.ok([
+        'closed_enum',
+        'boolean',
+        'deterministic_numeric',
+        'planner_numeric',
+        'runtime_candidate',
+        'exact_entity_identity',
+        'planner_semantic_value',
+        'deterministic_default',
+      ].includes(spec.kind))
+      assert.equal(typeof spec.required, 'boolean')
+      assert.equal(typeof spec.defaulted, 'boolean')
+      assert.equal(spec.required && spec.defaulted, false)
+    }
+  }
+})
+
+test('operation metadata captures projection ownership for representative operations', () => {
+  assert.deepEqual(operationMetadataForName('gather_resource').arguments, {
+    resource_name: {
+      kind: 'runtime_candidate',
+      required: true,
+      defaulted: false,
+      provenance: 'nearby_resources',
+    },
+    count: {
+      kind: 'planner_numeric',
+      required: false,
+      defaulted: true,
+    },
+    search_radius: {
+      kind: 'deterministic_numeric',
+      required: false,
+      defaulted: true,
+    },
+  })
+
+  assert.equal(operationMetadataForName('mine_entity_exact').arguments.unit_number.kind, 'exact_entity_identity')
+  assert.equal(operationMetadataForName('set_machine_recipe').arguments.recipe_name.provenance, 'live_recipe_candidates')
+  assert.equal(operationMetadataForName('research_technology').arguments.technology_name.provenance, 'live_researchable_technologies')
+  assert.deepEqual(operationMetadataForName('supply_entity').scopes, ['logistics', 'production'])
 })

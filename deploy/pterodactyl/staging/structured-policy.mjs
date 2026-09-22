@@ -45,126 +45,395 @@ function exactKeys(value, allowed) {
   check(keys.every(key => allowed.includes(key)), 'Unexpected argument')
 }
 
-const operationKeys = {
-  walk_to_entity: ['entity_name', 'search_radius'],
-  walk_to_entity_exact: ['unit_number', 'reach_distance'],
-  walk_to_position: ['x', 'y', 'reach_distance'],
-  walk_to_player: ['player_name'],
-  follow_player: ['player_name', 'follow_distance'],
-  stop_follow_player: [],
-  set_auto_defense: ['enabled'],
-  equip_weapon: ['item_name', 'slot'],
-  equip_ammo: ['item_name', 'slot'],
-  equip_armor: ['item_name'],
-  select_weapon_slot: ['slot'],
-  mine_entity: ['entity_name', 'count'],
-  mine_entity_exact: ['unit_number'],
-  mine_resource_at: ['resource_name', 'x', 'y', 'count'],
-  gather_resource: ['resource_name', 'count', 'search_radius'],
-  harvest_product: ['product_name', 'count', 'search_radius'],
-  clear_construction_area: ['x', 'y', 'width', 'height'],
-  supply_entity: ['unit_number', 'items'],
-  execute_construction_plan: ['validation_id', 'placement_count'],
-  place_entity: ['entity_name', 'x', 'y', 'direction'],
-  rotate_entity: ['unit_number', 'reverse'],
-  move_items: ['item_name', 'entity_name', 'max_count', 'to_entity'],
-  move_items_exact: ['item_name', 'unit_number', 'max_count', 'to_entity'],
-  set_machine_recipe: ['unit_number', 'recipe_name'],
-  move_items_with_player: ['item_name', 'player_name', 'max_count', 'to_player'],
-  craft_item: ['item_name', 'count'],
-  attack_nearest_enemy: ['search_radius'],
-  clear_enemy_area: ['search_radius'],
-  research_technology: ['technology_name'],
-  wait: ['ticks'],
-} 
+export const OPERATION_ARGUMENT_KINDS = Object.freeze([
+  'closed_enum',
+  'boolean',
+  'deterministic_numeric',
+  'planner_numeric',
+  'runtime_candidate',
+  'exact_entity_identity',
+  'planner_semantic_value',
+  'deterministic_default',
+])
 
-const operationScopes = Object.freeze({
-  navigation: Object.freeze([
-    'walk_to_entity',
-    'walk_to_entity_exact',
-    'walk_to_position',
-    'walk_to_player',
-    'follow_player',
-    'stop_follow_player',
-  ]),
-  combat: Object.freeze([
-    'set_auto_defense',
-    'equip_weapon',
-    'equip_ammo',
-    'equip_armor',
-    'select_weapon_slot',
-    'attack_nearest_enemy',
-    'clear_enemy_area',
-  ]),
-  resources: Object.freeze([
-    'mine_entity',
-    'mine_entity_exact',
-    'mine_resource_at',
-    'gather_resource',
-    'harvest_product',
-  ]),
-  construction: Object.freeze([
-    'clear_construction_area',
-    'execute_construction_plan',
-    'place_entity',
-    'rotate_entity',
-  ]),
-  logistics: Object.freeze([
-    'supply_entity',
-    'move_items',
-    'move_items_exact',
-    'move_items_with_player',
-  ]),
-  production: Object.freeze([
-    'supply_entity',
-    'move_items',
-    'move_items_exact',
-    'set_machine_recipe',
-    'craft_item',
-  ]),
-  research: Object.freeze([
-    'research_technology',
-  ]),
-  runtime: Object.freeze([
-    'wait',
-  ]),
+export const OPERATION_RISK_CLASSES = Object.freeze(['low', 'moderate', 'high', 'combat'])
+
+const SEMANTIC_OPERATION_SCOPES = Object.freeze([
+  'navigation',
+  'combat',
+  'resources',
+  'construction',
+  'logistics',
+  'production',
+  'research',
+  'runtime',
+])
+
+function argumentMetadata(kind, { required = true, defaulted = false, provenance } = {}) {
+  check(OPERATION_ARGUMENT_KINDS.includes(kind), `Unknown operation argument kind: ${kind}`)
+  check(typeof required === 'boolean' && typeof defaulted === 'boolean', 'Invalid operation argument requirement metadata')
+  check(!(required && defaulted), 'Required operation arguments cannot be defaulted')
+  const value = { kind, required, defaulted }
+  if (provenance !== undefined) {
+    check(typeof provenance === 'string' && provenance.length >= 1 && provenance.length <= 120, 'Invalid operation argument provenance')
+    value.provenance = provenance
+  }
+  return Object.freeze(value)
+}
+
+function operationMetadata(scopes, { preflight, risk, arguments: args }) {
+  check(Array.isArray(scopes) && scopes.length >= 1, 'Operation metadata requires at least one scope')
+  check(scopes.every(scope => SEMANTIC_OPERATION_SCOPES.includes(scope)), 'Operation metadata references an unknown scope')
+  check(new Set(scopes).size === scopes.length, 'Operation metadata scopes must be duplicate-free')
+  check(typeof preflight === 'boolean', 'Operation metadata preflight flag must be boolean')
+  check(OPERATION_RISK_CLASSES.includes(risk), 'Operation metadata has an unknown risk class')
+  check(args && typeof args === 'object' && !Array.isArray(args), 'Operation metadata arguments must be an object')
+  for (const [name, spec] of Object.entries(args)) {
+    check(/^[A-Za-z0-9_]+$/.test(name), 'Invalid operation argument metadata name')
+    check(spec && typeof spec === 'object' && !Array.isArray(spec), 'Invalid operation argument metadata')
+    check(OPERATION_ARGUMENT_KINDS.includes(spec.kind), 'Operation metadata has an unknown argument kind')
+    check(typeof spec.required === 'boolean' && typeof spec.defaulted === 'boolean', 'Invalid operation argument requirement metadata')
+    check(!(spec.required && spec.defaulted), 'Required operation arguments cannot be defaulted')
+  }
+  return Object.freeze({
+    scopes: Object.freeze([...scopes]),
+    preflight,
+    risk,
+    arguments: Object.freeze({ ...args }),
+  })
+}
+
+const OPERATION_METADATA = Object.freeze({
+  walk_to_entity: operationMetadata(['navigation'], {
+    preflight: true,
+    risk: 'low',
+    arguments: {
+      entity_name: argumentMetadata('runtime_candidate', { provenance: 'nearby_entities' }),
+      search_radius: argumentMetadata('deterministic_numeric'),
+    },
+  }),
+  walk_to_entity_exact: operationMetadata(['navigation'], {
+    preflight: true,
+    risk: 'low',
+    arguments: {
+      unit_number: argumentMetadata('exact_entity_identity', { provenance: 'live_entity_unit' }),
+      reach_distance: argumentMetadata('deterministic_numeric', { required: false, defaulted: true }),
+    },
+  }),
+  walk_to_position: operationMetadata(['navigation'], {
+    preflight: false,
+    risk: 'low',
+    arguments: {
+      x: argumentMetadata('planner_numeric'),
+      y: argumentMetadata('planner_numeric'),
+      reach_distance: argumentMetadata('deterministic_numeric', { required: false, defaulted: true }),
+    },
+  }),
+  walk_to_player: operationMetadata(['navigation'], {
+    preflight: false,
+    risk: 'low',
+    arguments: {
+      player_name: argumentMetadata('runtime_candidate', { provenance: 'connected_players' }),
+    },
+  }),
+  follow_player: operationMetadata(['navigation'], {
+    preflight: false,
+    risk: 'low',
+    arguments: {
+      player_name: argumentMetadata('runtime_candidate', { provenance: 'connected_players' }),
+      follow_distance: argumentMetadata('deterministic_numeric', { required: false, defaulted: true }),
+    },
+  }),
+  stop_follow_player: operationMetadata(['navigation'], {
+    preflight: false,
+    risk: 'low',
+    arguments: {},
+  }),
+  set_auto_defense: operationMetadata(['combat'], {
+    preflight: false,
+    risk: 'moderate',
+    arguments: {
+      enabled: argumentMetadata('boolean'),
+    },
+  }),
+  equip_weapon: operationMetadata(['combat'], {
+    preflight: false,
+    risk: 'moderate',
+    arguments: {
+      item_name: argumentMetadata('runtime_candidate', { provenance: 'inventory_weapon_items' }),
+      slot: argumentMetadata('closed_enum', { required: false, defaulted: true }),
+    },
+  }),
+  equip_ammo: operationMetadata(['combat'], {
+    preflight: false,
+    risk: 'moderate',
+    arguments: {
+      item_name: argumentMetadata('runtime_candidate', { provenance: 'inventory_ammo_items' }),
+      slot: argumentMetadata('closed_enum', { required: false, defaulted: true }),
+    },
+  }),
+  equip_armor: operationMetadata(['combat'], {
+    preflight: false,
+    risk: 'moderate',
+    arguments: {
+      item_name: argumentMetadata('runtime_candidate', { provenance: 'inventory_armor_items' }),
+    },
+  }),
+  select_weapon_slot: operationMetadata(['combat'], {
+    preflight: false,
+    risk: 'moderate',
+    arguments: {
+      slot: argumentMetadata('closed_enum'),
+    },
+  }),
+  mine_entity: operationMetadata(['resources'], {
+    preflight: true,
+    risk: 'moderate',
+    arguments: {
+      entity_name: argumentMetadata('runtime_candidate', { provenance: 'nearby_mineable_entities' }),
+      count: argumentMetadata('planner_numeric', { required: false, defaulted: true }),
+    },
+  }),
+  mine_entity_exact: operationMetadata(['resources'], {
+    preflight: true,
+    risk: 'high',
+    arguments: {
+      unit_number: argumentMetadata('exact_entity_identity', { provenance: 'live_entity_unit' }),
+    },
+  }),
+  mine_resource_at: operationMetadata(['resources'], {
+    preflight: true,
+    risk: 'moderate',
+    arguments: {
+      resource_name: argumentMetadata('runtime_candidate', { provenance: 'nearby_resources' }),
+      x: argumentMetadata('planner_numeric'),
+      y: argumentMetadata('planner_numeric'),
+      count: argumentMetadata('planner_numeric', { required: false, defaulted: true }),
+    },
+  }),
+  gather_resource: operationMetadata(['resources'], {
+    preflight: true,
+    risk: 'moderate',
+    arguments: {
+      resource_name: argumentMetadata('runtime_candidate', { provenance: 'nearby_resources' }),
+      count: argumentMetadata('planner_numeric', { required: false, defaulted: true }),
+      search_radius: argumentMetadata('deterministic_numeric', { required: false, defaulted: true }),
+    },
+  }),
+  harvest_product: operationMetadata(['resources'], {
+    preflight: true,
+    risk: 'moderate',
+    arguments: {
+      product_name: argumentMetadata('runtime_candidate', { provenance: 'mineable_products' }),
+      count: argumentMetadata('planner_numeric', { required: false, defaulted: true }),
+      search_radius: argumentMetadata('deterministic_numeric', { required: false, defaulted: true }),
+    },
+  }),
+  clear_construction_area: operationMetadata(['construction'], {
+    preflight: true,
+    risk: 'high',
+    arguments: {
+      x: argumentMetadata('planner_numeric'),
+      y: argumentMetadata('planner_numeric'),
+      width: argumentMetadata('planner_numeric'),
+      height: argumentMetadata('planner_numeric'),
+    },
+  }),
+  supply_entity: operationMetadata(['logistics', 'production'], {
+    preflight: true,
+    risk: 'moderate',
+    arguments: {
+      unit_number: argumentMetadata('exact_entity_identity', { provenance: 'live_entity_unit' }),
+      items: argumentMetadata('planner_semantic_value'),
+    },
+  }),
+  execute_construction_plan: operationMetadata(['construction'], {
+    preflight: false,
+    risk: 'high',
+    arguments: {
+      validation_id: argumentMetadata('runtime_candidate', { provenance: 'construction_validation' }),
+      placement_count: argumentMetadata('deterministic_numeric', { provenance: 'construction_validation' }),
+    },
+  }),
+  place_entity: operationMetadata(['construction'], {
+    preflight: true,
+    risk: 'high',
+    arguments: {
+      entity_name: argumentMetadata('runtime_candidate', { provenance: 'placeable_inventory_entities' }),
+      x: argumentMetadata('planner_numeric', { required: false }),
+      y: argumentMetadata('planner_numeric', { required: false }),
+      direction: argumentMetadata('closed_enum', { required: false }),
+    },
+  }),
+  rotate_entity: operationMetadata(['construction'], {
+    preflight: true,
+    risk: 'moderate',
+    arguments: {
+      unit_number: argumentMetadata('exact_entity_identity', { provenance: 'live_entity_unit' }),
+      reverse: argumentMetadata('boolean', { required: false, defaulted: true }),
+    },
+  }),
+  move_items: operationMetadata(['logistics', 'production'], {
+    preflight: false,
+    risk: 'moderate',
+    arguments: {
+      item_name: argumentMetadata('runtime_candidate', { provenance: 'inventory_or_entity_items' }),
+      entity_name: argumentMetadata('runtime_candidate', { provenance: 'nearby_entities' }),
+      max_count: argumentMetadata('planner_numeric'),
+      to_entity: argumentMetadata('boolean'),
+    },
+  }),
+  move_items_exact: operationMetadata(['logistics', 'production'], {
+    preflight: true,
+    risk: 'moderate',
+    arguments: {
+      item_name: argumentMetadata('runtime_candidate', { provenance: 'inventory_or_entity_items' }),
+      unit_number: argumentMetadata('exact_entity_identity', { provenance: 'live_entity_unit' }),
+      max_count: argumentMetadata('planner_numeric'),
+      to_entity: argumentMetadata('boolean'),
+    },
+  }),
+  set_machine_recipe: operationMetadata(['production'], {
+    preflight: true,
+    risk: 'moderate',
+    arguments: {
+      unit_number: argumentMetadata('exact_entity_identity', { provenance: 'live_entity_unit' }),
+      recipe_name: argumentMetadata('runtime_candidate', { provenance: 'live_recipe_candidates' }),
+    },
+  }),
+  move_items_with_player: operationMetadata(['logistics'], {
+    preflight: false,
+    risk: 'moderate',
+    arguments: {
+      item_name: argumentMetadata('runtime_candidate', { provenance: 'inventory_items' }),
+      player_name: argumentMetadata('runtime_candidate', { provenance: 'connected_players' }),
+      max_count: argumentMetadata('planner_numeric'),
+      to_player: argumentMetadata('boolean'),
+    },
+  }),
+  craft_item: operationMetadata(['production'], {
+    preflight: true,
+    risk: 'moderate',
+    arguments: {
+      item_name: argumentMetadata('runtime_candidate', { provenance: 'craftable_items' }),
+      count: argumentMetadata('planner_numeric', { required: false, defaulted: true }),
+    },
+  }),
+  attack_nearest_enemy: operationMetadata(['combat'], {
+    preflight: false,
+    risk: 'combat',
+    arguments: {
+      search_radius: argumentMetadata('deterministic_numeric', { required: false, defaulted: true }),
+    },
+  }),
+  clear_enemy_area: operationMetadata(['combat'], {
+    preflight: false,
+    risk: 'combat',
+    arguments: {
+      search_radius: argumentMetadata('deterministic_numeric', { required: false, defaulted: true }),
+    },
+  }),
+  research_technology: operationMetadata(['research'], {
+    preflight: true,
+    risk: 'high',
+    arguments: {
+      technology_name: argumentMetadata('runtime_candidate', { provenance: 'live_researchable_technologies' }),
+    },
+  }),
+  wait: operationMetadata(['runtime'], {
+    preflight: false,
+    risk: 'low',
+    arguments: {
+      ticks: argumentMetadata('planner_numeric'),
+    },
+  }),
 })
 
+function cloneOperationMetadata(name, metadata) {
+  return {
+    name,
+    scopes: [...metadata.scopes],
+    preflight: metadata.preflight,
+    risk: metadata.risk,
+    arguments: Object.fromEntries(Object.entries(metadata.arguments).map(([key, value]) => [key, { ...value }])),
+  }
+}
+
+function normalizeCatalogRecord(name, metadata) {
+  check(typeof name === 'string' && name.length >= 1 && name.length <= 120, 'Invalid operation metadata name')
+  check(metadata && typeof metadata === 'object' && !Array.isArray(metadata), `Invalid operation metadata for ${name}`)
+  check(metadata.name === undefined || metadata.name === name, `Operation metadata name mismatch for ${name}`)
+  return operationMetadata(metadata.scopes, {
+    preflight: metadata.preflight,
+    risk: metadata.risk,
+    arguments: metadata.arguments,
+  })
+}
+
+export function mergeOperationMetadataCatalog(baseCatalog, extensionCatalog) {
+  check(baseCatalog && typeof baseCatalog === 'object' && !Array.isArray(baseCatalog), 'Base operation metadata catalog must be an object')
+  check(extensionCatalog && typeof extensionCatalog === 'object' && !Array.isArray(extensionCatalog), 'Extension operation metadata catalog must be an object')
+  const merged = {}
+  for (const [name, metadata] of Object.entries(baseCatalog)) merged[name] = normalizeCatalogRecord(name, metadata)
+  for (const [name, metadata] of Object.entries(extensionCatalog)) {
+    const normalized = normalizeCatalogRecord(name, metadata)
+    if (Object.hasOwn(merged, name)) {
+      const current = JSON.stringify(cloneOperationMetadata(name, merged[name]))
+      const incoming = JSON.stringify(cloneOperationMetadata(name, normalized))
+      check(current === incoming, `Operation metadata extension cannot redefine ${name}`)
+      continue
+    }
+    merged[name] = normalized
+  }
+  return Object.freeze(merged)
+}
+
+export function operationMetadataCatalog() {
+  return Object.fromEntries(Object.entries(OPERATION_METADATA).map(([name, metadata]) => [name, cloneOperationMetadata(name, metadata)]))
+}
+
+export function operationMetadataForName(name) {
+  check(typeof name === 'string' && Object.hasOwn(OPERATION_METADATA, name), `Unapproved operation: ${name}`)
+  return cloneOperationMetadata(name, OPERATION_METADATA[name])
+}
+
 export function approvedOperationNames() {
-  return Object.keys(operationKeys)
+  return Object.keys(OPERATION_METADATA)
 }
 
 export function operationArgumentKeys(name) {
-  check(typeof name === 'string' && Object.hasOwn(operationKeys, name), `Unapproved operation: ${name}`)
-  return [...operationKeys[name]]
+  return Object.keys(operationMetadataForName(name).arguments)
 }
 
 export function approvedOperationScopes() {
-  return Object.keys(operationScopes)
+  return [...SEMANTIC_OPERATION_SCOPES]
 }
 
 export function operationNamesForScope(scope) {
-  check(typeof scope === 'string' && Object.hasOwn(operationScopes, scope), `Unknown operation scope: ${scope}`)
-  return [...operationScopes[scope]]
+  check(typeof scope === 'string' && SEMANTIC_OPERATION_SCOPES.includes(scope), `Unknown operation scope: ${scope}`)
+  return approvedOperationNames().filter(name => OPERATION_METADATA[name].scopes.includes(scope))
 }
 
 export function operationScopesForName(name) {
-  check(typeof name === 'string' && Object.hasOwn(operationKeys, name), `Unapproved operation: ${name}`)
-  return Object.entries(operationScopes)
-    .filter(([, names]) => names.includes(name))
-    .map(([scope]) => scope)
+  return operationMetadataForName(name).scopes
 }
 
 export function operationTypeCatalog() {
-  return approvedOperationNames().map(name => ({
-    name,
-    args: operationArgumentKeys(name),
-    scopes: operationScopesForName(name),
-  }))
+  return approvedOperationNames().map(name => {
+    const metadata = operationMetadataForName(name)
+    return {
+      name,
+      args: Object.keys(metadata.arguments),
+      arguments: metadata.arguments,
+      scopes: metadata.scopes,
+      preflight: metadata.preflight,
+      risk: metadata.risk,
+    }
+  })
 }
 
 export function isApprovedOperationName(name) {
-  return typeof name === 'string' && Object.hasOwn(operationKeys, name)
+  return typeof name === 'string' && Object.hasOwn(OPERATION_METADATA, name)
 }
 
 export function parseOperation(value) {
@@ -172,8 +441,8 @@ export function parseOperation(value) {
   exactKeys(value, ['name', 'args'])
   const { name, args } = value
   check(typeof name === 'string', 'Operation name must be a string')
-  check(Object.hasOwn(operationKeys, name), `Unapproved operation: ${name}`)
-  exactKeys(args, operationKeys[name])
+  check(Object.hasOwn(OPERATION_METADATA, name), `Unapproved operation: ${name}`)
+  exactKeys(args, operationArgumentKeys(name))
 
   switch (name) {
     case 'walk_to_entity':
@@ -325,27 +594,9 @@ function luaPreflightValue(value) {
   return `{${Object.keys(value).sort().map(key => `[${luaString(key)}]=${luaPreflightValue(value[key])}`).join(',')}}`
 }
 
-const PREFLIGHTED_OPERATIONS = new Set([
-  'craft_item',
-  'gather_resource',
-  'harvest_product',
-  'clear_construction_area',
-  'research_technology',
-  'mine_resource_at',
-  'place_entity',
-  'mine_entity',
-  'walk_to_entity',
-  'walk_to_entity_exact',
-  'mine_entity_exact',
-  'supply_entity',
-  'rotate_entity',
-  'move_items_exact',
-  'set_machine_recipe',
-])
-
 export function renderOperationPreflight(value) {
   const operation = parseOperation(value)
-  if (!PREFLIGHTED_OPERATIONS.has(operation.name)) return null
+  if (!operationMetadataForName(operation.name).preflight) return null
   return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_preflight","operation",${luaString(operation.name)},${luaPreflightValue(operation.args)})))`
 }
 

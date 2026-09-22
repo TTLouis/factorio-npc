@@ -44,17 +44,60 @@ function candidateReference(value, label, prefix) {
   return value
 }
 
-const EXPERIMENT_OPERATION_SCOPES = Object.freeze({
-  place_candidate: Object.freeze(['construction']),
+const EXPERIMENT_OPERATION_METADATA = Object.freeze({
+  place_candidate: Object.freeze({
+    name: 'place_candidate',
+    scopes: Object.freeze(['construction']),
+    preflight: false,
+    risk: 'high',
+    arguments: Object.freeze({
+      candidate_set_id: Object.freeze({
+        kind: 'runtime_candidate',
+        required: true,
+        defaulted: false,
+        provenance: 'placement_candidate_registry',
+      }),
+      candidate_id: Object.freeze({
+        kind: 'runtime_candidate',
+        required: true,
+        defaulted: false,
+        provenance: 'placement_candidate_registry',
+      }),
+    }),
+  }),
 })
 
+const RUNTIME_OPERATION_METADATA = base.mergeOperationMetadataCatalog(
+  base.operationMetadataCatalog(),
+  EXPERIMENT_OPERATION_METADATA,
+)
+
+function runtimeMetadata(name) {
+  check(typeof name === 'string' && Object.hasOwn(RUNTIME_OPERATION_METADATA, name), `Unapproved operation: ${name}`)
+  const metadata = RUNTIME_OPERATION_METADATA[name]
+  return {
+    name,
+    scopes: [...metadata.scopes],
+    preflight: metadata.preflight,
+    risk: metadata.risk,
+    arguments: Object.fromEntries(Object.entries(metadata.arguments).map(([key, value]) => [key, { ...value }])),
+  }
+}
+
+export function operationMetadataCatalog() {
+  return Object.fromEntries(approvedOperationNames().map(name => [name, runtimeMetadata(name)]))
+}
+
+export function operationMetadataForName(name) {
+  return runtimeMetadata(name)
+}
+
 export function approvedOperationNames() {
-  return [...base.approvedOperationNames(), ...Object.keys(EXPERIMENT_OPERATION_SCOPES)]
+  return Object.keys(RUNTIME_OPERATION_METADATA)
 }
 
 export function operationArgumentKeys(name) {
-  if (name === 'place_candidate') return ['candidate_set_id', 'candidate_id']
-  return base.operationArgumentKeys(name)
+  return Object.keys(runtimeMetadata(name).arguments)
 }
 
 export function approvedOperationScopes() {
@@ -62,31 +105,33 @@ export function approvedOperationScopes() {
 }
 
 export function operationScopesForName(name) {
-  if (Object.hasOwn(EXPERIMENT_OPERATION_SCOPES, name)) return [...EXPERIMENT_OPERATION_SCOPES[name]]
-  return base.operationScopesForName(name)
+  return runtimeMetadata(name).scopes
 }
 
 export function operationNamesForScope(scope) {
-  const baseNames = base.operationNamesForScope(scope)
-  const experimental = Object.entries(EXPERIMENT_OPERATION_SCOPES)
-    .filter(([, scopes]) => scopes.includes(scope))
-    .map(([name]) => name)
-  return [...baseNames, ...experimental]
+  check(approvedOperationScopes().includes(scope), `Unknown operation scope: ${scope}`)
+  return approvedOperationNames().filter(name => RUNTIME_OPERATION_METADATA[name].scopes.includes(scope))
 }
 
 export function operationTypeCatalog() {
-  return approvedOperationNames().map(name => ({
-    name,
-    args: operationArgumentKeys(name),
-    scopes: operationScopesForName(name),
-  }))
+  return approvedOperationNames().map(name => {
+    const metadata = runtimeMetadata(name)
+    return {
+      name,
+      args: Object.keys(metadata.arguments),
+      arguments: metadata.arguments,
+      scopes: metadata.scopes,
+      preflight: metadata.preflight,
+      risk: metadata.risk,
+    }
+  })
 }
 
 export function parseOperation(value) {
   if (value?.name !== 'place_candidate') return base.parseOperation(value)
   check(value && typeof value === 'object' && !Array.isArray(value), 'Operation must be an object')
   exactKeys(value, ['name', 'args'])
-  exactKeys(value.args, ['candidate_set_id', 'candidate_id'])
+  exactKeys(value.args, operationArgumentKeys('place_candidate'))
   return {
     name: 'place_candidate',
     args: {
