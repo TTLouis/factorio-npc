@@ -1,3 +1,12 @@
+// EXPERIMENTAL DESIGN PROTOTYPE.
+//
+// Do not wire this module into live operation admission/execution yet.
+// The 2026-09-21 TypeSafe audit found that projection_route, operation_type,
+// and operation_candidate are independent questions in one System One request;
+// they cannot depend on one another. Replace this prototype with the
+// TypeSafe-native function-calling / finite-candidate selection shape described
+// in docs/JEV_TYPESAFE_RESEARCH_AND_AUDIT_2026-09-21.md before live use.
+//
 import {
   approvedOperationScopes,
   operationNamesForScope,
