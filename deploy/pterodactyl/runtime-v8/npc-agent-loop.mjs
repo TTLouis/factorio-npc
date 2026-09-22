@@ -135,7 +135,7 @@ Your plan/currentStep submission fields are proposals only. currentStep is advis
 
 For a multi-step request, keep the plan stable enough that the harness can track progress across Autorio batches. currentStep must identify the step you are actually executing or verifying now. If you replan, preserve already-completed intent instead of silently replacing the whole task with a vague new one.
 
-Once a plan is COMMITTED its steps, their order and their completion meaning are frozen — frozen against you as well as against Jev. From that point you are fulfilling committed step checkpoints, not authoring them. Re-proposing different steps during ordinary continuation changes nothing; the committed plan is what runs. A committed plan is replaced only by an explicit user-approved revision, and a structural blocker or detected deadlock freezes it as BLOCKED and asks the user rather than silently replanning.
+Once a plan is COMMITTED its steps, their order and their completion meaning are frozen. Jev is outside plan-authoring and correctness authority. From that point you are fulfilling committed step checkpoints, not authoring them. Re-proposing different steps during ordinary continuation changes nothing; the committed plan is what runs. A committed plan is replaced only by an explicit user-approved revision, and a structural blocker or detected deadlock freezes it as BLOCKED and asks the user rather than silently replanning.
 
 Within [PLANNING_STATE], Shelf nodes are storage: they record intent and lineage, never operations and never plan steps. Do not compile a shelf node into steps on your own initiative.
 
@@ -146,6 +146,8 @@ When a draft intentionally refines one or more existing Shelf nodes, add roadmap
 For a bounded planning slice, add developmentMode as vertical, horizontal, maintain, or recover to describe the dominant direction YOU authored relative to the current critical path. Follow [PLANNING_STATE].steering when it remains appropriate, but this field describes the draft rather than granting steering authority. Small measured supporting work does not require a second mode; substantial mixed-direction work should be split at a better checkpoint.
 
 For the active Plan Tracker step, you may add one optional root field named checkpoint beside chatMessage/plan/currentStep/operations. checkpoint is your semantic completion proposal for deterministic runtime validation and verification, not a claim that the step is already done. It must use a runtime-supported contract: {"mode":"all|any","requirements":[...]} with requirement kinds inventory_count, entity_inventory_count, entity_exists, entity_state, authoritative_operation_receipt, or runtime_controller_state. Prefer world-state outcomes over action occurrence. Example: if the step means "have 100 stone" and the next operation only gathers 40 more because 62 are already held, checkpoint must say inventory_count stone >= 100, not >= 40. The operation batch describes what to do next; checkpoint describes what would prove the semantic step complete. Runtime remains completion authority for supported deterministic contracts. Omit checkpoint when no safe deterministic predicate represents the step; prose-only semantic steps remain the Main LLM's responsibility rather than being delegated to a second AI judge.
+
+For a prose-only active step that intentionally has no deterministic checkpoint, you may explicitly close that semantic step with semanticCompletion: {"stepId":"<exact active step id>","rationale":"..."}. Use the stable active step id from [PLANNING_STATE]. The harness accepts this only when the id is still current, the step has no deterministic completion contract, and recent authoritative runtime evidence or a fresh live observation grounds your judgment. Never use semanticCompletion to bypass an unmet deterministic checkpoint. You may pair a valid semanticCompletion with operations for the newly-active next step; the harness advances the semantic step first, then validates those operations normally.
 
 Plan entries must represent goal-bearing Factorio work or verification. Do not add terminal lifecycle/meta steps such as "Stop", "Done", "Finish", or "Report completion"; stopping after the verified goal is represented by returning plan: [], currentStep: 0, operations: [].
 
@@ -5328,6 +5330,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let roadmap
     let roadmapNodeIds
     let developmentMode
+    let semanticCompletion
     let baseMessage = message
     if (typeof message?.content === 'string') {
       let raw
@@ -5355,6 +5358,20 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           }
           developmentMode = raw.developmentMode
         }
+        if (Object.prototype.hasOwnProperty.call(raw, 'semanticCompletion')) {
+          const value = raw.semanticCompletion
+          if (!value || typeof value !== 'object' || Array.isArray(value)
+            || typeof value.stepId !== 'string' || !value.stepId.trim()) {
+            const error = new AgentLoopError('semanticCompletion must identify the exact active prose-only step')
+            error.failureClass = 'plan_category'
+            error.code = 'invalid_semantic_completion'
+            throw error
+          }
+          semanticCompletion = {
+            stepId: cleanMemoryText(value.stepId, 200),
+            rationale: cleanMemoryText(value.rationale, 600),
+          }
+        }
         if (Object.prototype.hasOwnProperty.call(raw, 'checkpoint')) {
           checkpoint = sanitizeStepCompletionContract(raw.checkpoint)
           if (!completionContractSupported(checkpoint)) {
@@ -5365,12 +5382,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           }
           checkpoint = { ...checkpoint, source: 'planner_semantic_checkpoint' }
         }
-        if (checkpoint || roadmap || roadmapNodeIds || developmentMode
+        if (checkpoint || semanticCompletion || roadmap || roadmapNodeIds || developmentMode
           || Object.prototype.hasOwnProperty.call(raw, 'roadmap')
           || Object.prototype.hasOwnProperty.call(raw, 'roadmapNodeIds')
-          || Object.prototype.hasOwnProperty.call(raw, 'developmentMode')) {
+          || Object.prototype.hasOwnProperty.call(raw, 'developmentMode')
+          || Object.prototype.hasOwnProperty.call(raw, 'semanticCompletion')) {
           const {
             checkpoint: _checkpoint,
+            semanticCompletion: _semanticCompletion,
             roadmap: _roadmap,
             roadmapNodeIds: _roadmapNodeIds,
             developmentMode: _developmentMode,
@@ -5382,6 +5401,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     const plan = super.parsePlanMessage(baseMessage)
     if (checkpoint) plan.checkpoint = checkpoint
+    if (semanticCompletion) plan.semanticCompletion = semanticCompletion
     if (roadmap) plan.roadmap = roadmap
     if (roadmapNodeIds) plan.roadmapNodeIds = roadmapNodeIds
     if (developmentMode) plan.developmentMode = developmentMode
