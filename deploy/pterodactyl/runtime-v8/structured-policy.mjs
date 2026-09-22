@@ -542,7 +542,7 @@ export const plannerControlToolDefinitions = [{
   type: 'function',
   function: {
     name: PLANNER_CONTROL_TOOL_NAME,
-    description: 'Submit the planner/control-plane decision to the AIRI harness. Prefer this tool over serializing the whole response as JSON content. Normal assistant content may remain natural-language text for the user. The harness/Jev/runtime will validate semantics, checkpoint alignment, plan state, and world mutations before persistence or execution.',
+    description: 'Submit the planner/control-plane decision to the AIRI harness. Prefer this tool over serializing the whole response as JSON content. Normal assistant content may remain natural-language text for the user. The deterministic harness/runtime validates structured plan state, completion contracts, and world mutations before persistence or execution; Jev is not a correctness gate.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -571,7 +571,17 @@ export const plannerControlToolDefinitions = [{
         },
         checkpoint: {
           type: 'object',
-          description: 'Optional semantic completion contract for the active step. Runtime-supported requirement shapes are validated by the harness.',
+          description: 'Optional deterministic completion contract authored by the Main LLM for the active step. Runtime-supported requirement shapes are validated and evaluated by the harness.',
+        },
+        semanticCompletion: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['stepId'],
+          description: 'Explicit Main-LLM semantic completion claim for the current prose-only step when no deterministic completion contract represents its meaning. The harness accepts it only for the exact active step and only when recent authoritative runtime evidence grounds the claim.',
+          properties: {
+            stepId: { type: 'string', minLength: 1, maxLength: 200 },
+            rationale: { type: 'string', maxLength: 600 },
+          },
         },
         roadmapNodeIds: {
           type: 'array',
@@ -582,7 +592,7 @@ export const plannerControlToolDefinitions = [{
         developmentMode: {
           type: 'string',
           enum: ['vertical', 'horizontal', 'maintain', 'recover'],
-          description: 'Dominant development direction of this authored slice relative to the current critical path. This describes the draft; it does not override runtime steering or Jev scope review.',
+          description: 'Dominant development direction of this authored slice relative to the current critical path. This describes the draft and does not override runtime truth or user priorities.',
         },
         // LOD 1 guidance (roadmap 2 / 3). Deliberately NOT an object with steps
         // or operations: a shelf node says what should eventually be true and
@@ -628,10 +638,14 @@ export function plannerControlPayloadFromMessage(message) {
   let args
   try { args = JSON.parse(rawArgs) }
   catch { throw new base.PolicyError('submitPlan arguments must be valid JSON') }
-  exactKeys(args, ['chatMessage', 'plan', 'currentStep', 'operations', 'checkpoint', 'roadmapNodeIds', 'developmentMode', 'roadmap'])
+  exactKeys(args, ['chatMessage', 'plan', 'currentStep', 'operations', 'checkpoint', 'semanticCompletion', 'roadmapNodeIds', 'developmentMode', 'roadmap'])
   check(Array.isArray(args.plan), 'submitPlan.plan must be an array')
   check(Number.isSafeInteger(args.currentStep), 'submitPlan.currentStep must be an integer')
   check(Array.isArray(args.operations), 'submitPlan.operations must be an array')
+  check(args.semanticCompletion === undefined
+    || (args.semanticCompletion && typeof args.semanticCompletion === 'object' && !Array.isArray(args.semanticCompletion)
+      && typeof args.semanticCompletion.stepId === 'string' && args.semanticCompletion.stepId.trim()),
+  'submitPlan.semanticCompletion must contain the active stepId')
   check(args.roadmapNodeIds === undefined || Array.isArray(args.roadmapNodeIds), 'submitPlan.roadmapNodeIds must be an array of shelf node ids')
   check(args.developmentMode === undefined || ['vertical', 'horizontal', 'maintain', 'recover'].includes(args.developmentMode), 'submitPlan.developmentMode must be vertical, horizontal, maintain, or recover')
   check(args.roadmap === undefined || Array.isArray(args.roadmap), 'submitPlan.roadmap must be an array of coarse shelf nodes')
@@ -643,6 +657,7 @@ export function plannerControlPayloadFromMessage(message) {
     currentStep: args.currentStep,
     operations: args.operations,
     ...(args.checkpoint !== undefined ? { checkpoint: args.checkpoint } : {}),
+    ...(args.semanticCompletion !== undefined ? { semanticCompletion: args.semanticCompletion } : {}),
     ...(args.roadmapNodeIds !== undefined ? { roadmapNodeIds: args.roadmapNodeIds } : {}),
     ...(args.developmentMode !== undefined ? { developmentMode: args.developmentMode } : {}),
     ...(args.roadmap !== undefined ? { roadmap: args.roadmap } : {}),
