@@ -7,8 +7,8 @@ import { fileURLToPath } from 'node:url'
 import { buildArtifacts, channelInstaller, installerLoader, verifyGeneratedArtifacts } from './build-payload.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const PAYLOAD_REF = '57bac4303691ba7343927704435a14c708284ae5'
-const PAYLOAD_SHA256 = '134ba0931bddc9588d8f3b6ef3e9f5e37f095d6206c1d1c5c4e7e46c20f506fe'
+const PAYLOAD_REF = '709041e4959b49039810da6378a61f3e397f5aaa'
+const PAYLOAD_SHA256 = '5ac479b03aee2f63f2d6196965218f626663d29f26c2300251ea5ec80e65da1f'
 const source = Buffer.from(`#!/usr/bin/env bash
 AIRI_REF="0123456789abcdef0123456789abcdef01234567"
 REVISION="test"
@@ -140,6 +140,7 @@ test('committed Pterodactyl artifacts are internally valid and reinstall stays d
   assert.match(sourceText, /provider-base\.mjs/)
   assert.doesNotMatch(sourceText, /project-board\.mjs/)
   assert.match(sourceText, /jev-decision-taxonomy\.mjs/)
+  assert.match(sourceText, /jev-typed-projection\.mjs/)
   assert.match(sourceText, /AIRI_SUPERVISOR_VERIFY=/)
   assert.match(sourceText, /await import\(pathToFileURL\(process\.env\.AIRI_SUPERVISOR_VERIFY\)\.href\)/)
   assert.match(sourceText, /src\/runtime-v8\/canonical-task-board-memory\.mjs/)
