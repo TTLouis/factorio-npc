@@ -633,18 +633,45 @@ Exit condition status:
 
 ### Phase 7 — routing and recovery
 
-Retain/finish Jev where it naturally fits:
+Status: **implemented in M9 (2026-09-21)**
 
-- continue runtime;
-- observe;
-- wake planner;
-- ask user;
-- bounded failure-class/recovery-route choice;
-- reasoning effort;
-- planning horizon;
-- advisory vertical/horizontal/maintain/recover steering.
+The live post-step and recovery contracts now converge on exactly four Jev control-plane
+choices:
 
-No route may override deterministic impossibility or claim completion.
+```text
+continue_runtime
+observe
+wake_planner
+ask_user
+```
+
+Recovery still asks for a bounded failure class, but it no longer asks Jev for
+`deterministic_close`, `propose_blocker`, retry/replan severity route names, or a
+semantic-scope mutation choice.
+
+Deterministic code validates every route:
+
+- runtime continuation requires authoritative active runtime;
+- observation requires remaining deterministic read admission;
+- planner wake uses the existing immutable-plan continuation/recovery path;
+- user routing requires an already-authoritative lifecycle boundary.
+
+Final deterministic completion is resolved before any recovery Jev call. A Jev response
+therefore cannot cause completion. Likewise, `ask_user` cannot create durable BLOCKED
+state; blocker creation remains Outcome Authority/runtime work.
+
+Old route names are accepted only as parser/restore compatibility and normalize into
+non-authoritative canonical routes. Old persisted provider-budget semantic scopes remain
+restorable, while new budget handoffs preserve the committed target rather than asking
+Jev to rewrite its semantic scope.
+
+Exit condition status:
+
+- post-step and recovery use the canonical route vocabulary;
+- completion/blocker/user authority are outside Jev;
+- route validation, cancellation, duplicate coalescing, provider-safety handling, bounded
+  observation, deterministic completion bypass, and budget-handoff restore are covered
+  by focused regression tests.
 
 ### Phase 8 — confidence and risk policy
 
