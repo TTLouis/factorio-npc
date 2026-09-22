@@ -78,6 +78,15 @@ const operationKeys = {
   wait: ['ticks'],
 } 
 
+export function approvedOperationNames() {
+  return Object.keys(operationKeys)
+}
+
+export function operationArgumentKeys(name) {
+  check(typeof name === 'string' && Object.hasOwn(operationKeys, name), `Unapproved operation: ${name}`)
+  return [...operationKeys[name]]
+}
+
 export function isApprovedOperationName(name) {
   return typeof name === 'string' && Object.hasOwn(operationKeys, name)
 }
