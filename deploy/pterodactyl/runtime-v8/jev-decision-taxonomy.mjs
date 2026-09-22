@@ -1,38 +1,18 @@
-// Jev decision contract.
+// Jev cognitive-coprocessor decision contract.
 //
-// Authority model (docs/NPC_PLANNING_ROADMAP.md sections 1.3, 4 and 11):
+// Authority model (docs/NPC_JEV_COPROCESSOR_ARCHITECTURE.md):
 //   - The user owns the goal.
-//   - The Main LLM authors plans.
-//   - Jev critiques a DRAFT plan before commit and may advise on steering at a
-//     planning boundary. It never authors, rewrites, reorders or replaces plan
-//     steps, and it has no completion vote.
-//   - The runtime owns world truth, admission and completion evidence.
-//
-// Removed in this revision (deliberately, do not re-add here):
-//   - `granularity`         -> replaced by the pre-commit scope review family.
-//   - `completion`          -> runtime evidence is the sole completion authority.
-//   - `milestone_transition`-> the milestone hierarchy no longer exists.
+//   - The Main LLM owns semantic planning and intent.
+//   - The deterministic runtime owns world truth, admission, safety and
+//     deterministic completion.
+//   - Jev only shapes bounded routing, reasoning effort, observation budget and
+//     advisory strategic steering. Jev is never a correctness reviewer.
 
 const FAMILY_CHOICES = Object.freeze({
   development: ['vertical', 'horizontal', 'maintain', 'recover'],
   routing: ['wait_runtime', 'continue_runtime', 'wake_planner'],
   reasoning_budget: ['micro', 'normal', 'deep', 'strategic'],
-  scope_review: ['actionable', 'refine', 'needs_grounding', 'needs_user_clarification'],
 })
-
-const SCOPE_REVIEW_REASON_CODES = Object.freeze([
-  'too_broad',
-  'horizon_too_long',
-  'step_too_vague',
-  'mixed_outcomes',
-  'missing_dependency',
-  'completion_not_observable',
-  'unsupported_completion_contract',
-  'assumption_not_grounded',
-  'bad_checkpoint_boundary',
-])
-
-const SCOPE_REVIEW_REASON_CODE_SET = new Set(SCOPE_REVIEW_REASON_CODES)
 
 const PLANNING_HORIZONS = new Set(['immediate', 'checkpoint', 'subgoal', 'strategic'])
 
@@ -61,20 +41,8 @@ const FORBIDDEN_AUTHORITY_FIELDS = Object.freeze([
   'shelf_nodes',
 ])
 
-// --- one dominant development mode per slice (roadmap 4.5) -----------------
-//
-// A committed slice should have ONE dominant development direction. Small
-// supporting work from the opposite direction is legal when it is what makes
-// the slice executable at all; a draft that substantially mixes both
-// directions is a scope smell and goes back to the Main LLM for a cleaner
-// boundary. These two named thresholds are the whole rule.
-const MIXED_DIRECTION_MINORITY_MAX_SHARE = 0.25
-const MIXED_DIRECTION_MAX_SUPPORTING_STEPS = 2
-
 const MAX_REASON_CODES = 8
-const MAX_PROBLEM_STEPS = 16
 const MAX_SHELF_NODES = 5
-const MAX_ACTIONABLE_PREFIX = 64
 const ID_PATTERN = /^[A-Za-z0-9_.:-]{1,64}$/
 
 const CONFIDENCE_LABELS = Object.freeze({
@@ -180,10 +148,6 @@ export function jevDecisionFamilyChoices() {
   return FAMILY_CHOICES
 }
 
-export function jevScopeReviewReasonCodes() {
-  return SCOPE_REVIEW_REASON_CODES
-}
-
 export function jevForbiddenAuthorityFields() {
   return FORBIDDEN_AUTHORITY_FIELDS
 }
@@ -233,124 +197,6 @@ export function reasoningBudgetDecisionQuestions() {
   }
 }
 
-/** The named §4.5 thresholds, exposed so callers and tests share one source. */
-export function mixedDirectionThresholds() {
-  return {
-    minority_max_share: MIXED_DIRECTION_MINORITY_MAX_SHARE,
-    max_supporting_steps: MIXED_DIRECTION_MAX_SUPPORTING_STEPS,
-  }
-}
-
-/**
- * Detect the §4.5 scope smell from per-step development directions.
- *
- * This is a DESCRIPTION of the draft in front of Jev ("what direction is this
- * slice actually pulling in?"), not a recommendation about the next slice.
- * The steering question — "what kind of development next?" — is answered
- * separately by `parseSteeringRecommendation` (roadmap 4.9).
- *
- * There is deliberately NO inseparability escape hatch. Jev used to be able to
- * answer "this mixture cannot be cut" and suppress the finding outright, but
- * that was an unverifiable model claim silencing the one check §4.5 exists to
- * make. Jev reports the smell; the Main LLM — the author, and the only party
- * that can actually move the boundary — decides whether the mixed slice stands.
- */
-export function classifySliceDirection(stepDirections) {
-  const classified = asArray(stepDirections)
-    .map((value) => (typeof value === 'string' ? value.trim().toLowerCase() : undefined))
-    .filter((value) => FAMILY_CHOICES.development.includes(value))
-  const counts = { vertical: 0, horizontal: 0, maintain: 0, recover: 0 }
-  for (const direction of classified) counts[direction] += 1
-  const directional = counts.vertical + counts.horizontal
-  const base = {
-    classified_step_count: classified.length,
-    directional_step_count: directional,
-    counts,
-    ...mixedDirectionThresholds(),
-  }
-  if (directional === 0) {
-    return { ...base, dominant_direction: undefined, minority_direction: undefined, minority_step_count: 0, minority_share: 0, mixed_direction: false, supporting_work_allowed: false }
-  }
-  const dominant = counts.vertical >= counts.horizontal ? 'vertical' : 'horizontal'
-  const minority = dominant === 'vertical' ? 'horizontal' : 'vertical'
-  const minorityCount = counts[minority]
-  const minorityShare = minorityCount / directional
-  const withinTolerance = minorityCount <= MIXED_DIRECTION_MAX_SUPPORTING_STEPS
-    && minorityShare <= MIXED_DIRECTION_MINORITY_MAX_SHARE
-  return {
-    ...base,
-    dominant_direction: dominant,
-    minority_direction: minorityCount > 0 ? minority : undefined,
-    minority_step_count: minorityCount,
-    minority_share: minorityShare,
-    supporting_work_allowed: minorityCount > 0 && withinTolerance,
-    mixed_direction: minorityCount > 0 && !withinTolerance,
-  }
-}
-
-export function scopeReviewQuestions({ draftStepCount = 0 } = {}) {
-  const boundedStepCount = Number.isSafeInteger(draftStepCount)
-    ? Math.max(0, Math.min(MAX_ACTIONABLE_PREFIX, draftStepCount))
-    : 0
-  const providerDirectionCount = Math.min(boundedStepCount, 6)
-  const actionableMaximum = Math.max(1, Math.min(63, boundedStepCount))
-  const reasonCriteria = {
-    none: 'No listed scope-review problem applies.',
-    too_broad: 'The slice covers substantially more than one bounded semantic objective.',
-    horizon_too_long: 'The draft plans further ahead than the currently known world can support without likely invalidation.',
-    step_too_vague: 'At least one step does not say concretely enough what must be done to choose an action now.',
-    mixed_outcomes: 'A single step (or the slice) mixes multiple independent semantic outcomes or substantially mixes development directions.',
-    missing_dependency: 'An obvious prerequisite capability, resource, or technology is not accounted for.',
-    completion_not_observable: 'A step has no observable condition by which completion could be recognised.',
-    unsupported_completion_contract: 'A step completion condition cannot be expressed by supported grounded predicates.',
-    assumption_not_grounded: 'The draft assumes world facts that verified state does not establish.',
-    bad_checkpoint_boundary: 'The slice ends somewhere that is not a useful re-observation or replanning checkpoint.',
-  }
-
-  const questions = {
-    scope_review: {
-      type: 'choice',
-      instructions:
-        'Pre-commit scope review of a DRAFT plan authored by the Main LLM. Judge only whether the draft is concrete, bounded and grounded enough to commit. Use the supplied review packet, especially current_frontier, deterministic preflight/alignment, completion-contract data, and bounded recent grounded observations. The current frontier must be grounded enough to execute now; later draft steps may be conditionally grounded by effects of earlier steps in the same draft and do not need to already exist in live world state. Do not call a later step assumption_not_grounded merely because its prerequisite is explicitly produced by an earlier step; missing_dependency applies when the required chain is absent, unsupported, or contradicted by supplied facts. You are a critic, not a planner: do not write, rewrite, reorder, or supply plan steps, completion contracts, or operations. There is no fixed maximum step count; judge semantic scope, observability of completion, bounded dependency uncertainty, and whether the slice ends at a meaningful re-observation checkpoint.',
-      criteria: {
-        actionable: 'The draft is concrete and bounded; the current frontier is grounded by supplied verified/runtime facts, later dependencies are explicitly chained through earlier steps or already-observed capabilities, and each step has one observable semantic outcome. Later-step effects do not need to exist yet.',
-        refine: 'The draft is workable in direction but must be re-authored more narrowly or more precisely by the Main LLM, for example because it is too broad, reaches too far ahead, mixes outcomes, or ends at a poor checkpoint.',
-        needs_grounding: 'The current executable frontier, a required external dependency, or a completion condition depends on a fact that the supplied verified/runtime packet does not establish and that is not produced by an earlier step in the draft; targeted observation or a supported completion contract is required before commit.',
-        needs_user_clarification: 'The draft cannot be bounded without user authority because the goal interpretation, constraints, or acceptable outcome are genuinely ambiguous. Ask the user rather than fabricating precision.',
-      },
-    },
-    scope_review_reason_codes: {
-      type: 'choice',
-      instructions: 'Select the most important reason code that applies to the draft, or none when the verdict is actionable. Do not invent new codes.',
-      criteria: reasonCriteria,
-    },
-    scope_review_reason_code_secondary: {
-      type: 'choice',
-      instructions: 'Select one additional distinct reason code if another materially applies; otherwise choose none. Do not invent new codes.',
-      criteria: reasonCriteria,
-    },
-    actionable_prefix: {
-      type: 'score',
-      instructions:
-        'How many leading draft steps are already committable as written. 0 means none. Use this to point at an earlier, better boundary; the deferred tail stays on the Roadmap Shelf and the Main LLM authors the next draft. Do not supply replacement steps.',
-      criteria: Array.from(
-        { length: actionableMaximum + 1 },
-        (_, index) => `${index} leading draft step${index === 1 ? '' : 's'} already committable`,
-      ),
-    },
-  }
-
-  for (let index = 0; index < providerDirectionCount; index++) {
-    questions[`step_direction_${index}`] = {
-      type: 'choice',
-      instructions:
-        `Classify draft step ${index + 1} by the development direction it pulls in relative to the current critical path, not merely its surface action. This DESCRIBES the draft and is not a recommendation about the next slice.`,
-      criteria: developmentDecisionQuestions().development.criteria,
-    }
-  }
-
-  return questions
-}
 export function steeringRecommendationQuestions() {
   return {
     ...developmentDecisionQuestions(),
@@ -404,113 +250,6 @@ export function parseDecisionFamily(response, family, fallback) {
     family,
     decision: choices.includes(selected) ? selected : safeFallback,
     confidence: choiceConfidence(response, family),
-    ...providerMetadata(response),
-  }
-}
-
-/**
- * Pre-commit scope review (roadmap section 11).
- *
- * Returns ONLY criticism. Any provider-supplied plan steps, operations, or
- * completion contracts are dropped and reported in `dropped_authority_fields`.
- */
-export function parseScopeReview(response, { draftStepCount } = {}) {
-  const section = sectionOf(response, 'scope_review')
-  const reasonSection = sectionOf(response, 'scope_review_reason_codes')
-  const prefixSection = sectionOf(response, 'actionable_prefix')
-
-  const directionSection = sectionOf(response, 'step_directions')
-  const dynamicDirections = Object.entries(
-    response?.answers && typeof response.answers === 'object' && !Array.isArray(response.answers)
-      ? response.answers
-      : {},
-  )
-    .filter(([id, answer]) => /^step_direction_\d+$/.test(id) && typeof answer?.choice === 'string')
-    .sort(([left], [right]) => Number(left.slice('step_direction_'.length)) - Number(right.slice('step_direction_'.length)))
-    .map(([, answer]) => answer.choice)
-
-  const choices = FAMILY_CHOICES.scope_review
-  const selected = choiceOf(response, 'scope_review') ?? section.choice ?? section.verdict
-  let verdict = choices.includes(selected) ? selected : 'refine'
-
-  // Roadmap 4.5: one dominant development mode per committed slice. A provider
-  // that still answers the retired `mixed_direction_inseparable` question is
-  // simply ignored — the claim has no route into the classification.
-  const direction = classifySliceDirection([
-    ...asArray(section.step_directions),
-    ...asArray(directionSection.choices),
-    ...asArray(directionSection.step_directions),
-    ...asArray(response?.answers?.step_directions?.choices),
-    ...dynamicDirections,
-  ])
-
-  const rawReasonCodes = [
-    ...asArray(section.reason_codes),
-    ...asArray(reasonSection.reason_codes),
-    ...asArray(reasonSection.choices),
-    ...asArray(reasonSection.choice),
-    ...asArray(response?.answers?.scope_review_reason_codes?.choices),
-    choiceOf(response, 'scope_review_reason_codes'),
-    choiceOf(response, 'scope_review_reason_code_secondary'),
-  ]
-  const reason_codes = uniqueBounded(
-    [
-      ...rawReasonCodes.map((code) => snakeCode(code)).filter((code) => SCOPE_REVIEW_REASON_CODE_SET.has(code)),
-      // A substantially mixed-direction slice IS `mixed_outcomes`; the code is
-      // added deterministically so the finding cannot be reported without it.
-      ...(direction.mixed_direction ? ['mixed_outcomes'] : []),
-    ],
-    MAX_REASON_CODES,
-  )
-  // A mixed slice is not committable as written: send it back for a cleaner
-  // boundary. Every other verdict (needs_grounding, needs_user_clarification)
-  // is a stronger objection and is left alone.
-  if (direction.mixed_direction && verdict === 'actionable') verdict = 'refine'
-
-  const rawProblemSteps = [
-    ...asArray(section.problem_steps),
-    ...asArray(section.problem_step_ids),
-    ...asArray(section.problem_step_indices),
-  ]
-  const problem_steps = uniqueBounded(
-    rawProblemSteps
-      .map((value) => {
-        if (typeof value === 'number' && Number.isFinite(value)) return String(Math.trunc(value))
-        if (typeof value !== 'string') return undefined
-        const trimmed = value.trim()
-        return ID_PATTERN.test(trimmed) ? trimmed : undefined
-      })
-      .filter((value) => value !== undefined),
-    MAX_PROBLEM_STEPS,
-  )
-
-  const prefixMaximum = typeof draftStepCount === 'number' && Number.isFinite(draftStepCount)
-    ? Math.max(0, Math.min(MAX_ACTIONABLE_PREFIX, Math.trunc(draftStepCount)))
-    : MAX_ACTIONABLE_PREFIX
-  const rawPrefix = section.actionable_prefix
-    ?? prefixSection.score
-    ?? prefixSection.number
-    ?? prefixSection.actionable_prefix
-  const actionable_prefix = boundedInteger(rawPrefix, 0, prefixMaximum)
-
-  return {
-    family: 'scope_review',
-    verdict,
-    confidence: clampConfidence(
-      response?.answers?.scope_review?.confidence ?? section.confidence,
-    ),
-    reason_codes,
-    problem_steps,
-    actionable_prefix,
-    // Descriptive §4.5 finding about THIS draft. Deliberately not a mode
-    // recommendation: steering review is a separate question (roadmap 4.9).
-    dominant_direction: direction.dominant_direction,
-    mixed_direction: direction.mixed_direction,
-    supporting_work_allowed: direction.supporting_work_allowed,
-    direction_detail: direction,
-    recommended_boundary: boundedText(section.recommended_boundary ?? section.recommended_semantic_boundary, 120),
-    explanation: boundedText(section.explanation ?? section.notes, 400),
-    dropped_authority_fields: droppedAuthorityFields(section, reasonSection, prefixSection, directionSection, response),
     ...providerMetadata(response),
   }
 }
