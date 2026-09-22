@@ -817,10 +817,22 @@ Factorio/Autorio read, and Jev never manufactures observation values.
 
 ### Phase 6 — typed state distillation
 
-Replace free-form "Jev summary" ideas with typed features such as bottleneck, readiness,
-risk, capability presence, and next-handler choice.
+Status: **implemented in M8 (2026-09-21), first live post-step slice**
 
-Deterministic code renders those features plus provenance into Main-LLM context.
+The live post-step Jev request now distills four bounded state features over the same
+authoritative state already used for routing: a dominant bottleneck Choice, a grounded
+readiness Score, a semantic-risk Score, and an evidence-conflict Noul.
+
+Deterministic code owns provenance and renders the parsed values into a fixed
+`[JEV_TYPED_STATE]` block before the post-step Main-LLM continuation. The block is
+explicitly advisory and has no world-truth, completion, planning, operation-admission,
+or user-authority role. Malformed or absent answers render no synthetic state.
+
+The M8 questions share the existing post-step Jev request instead of spending a second
+provider round. The local question-conservation default is 24; the current M7+M8
+post-step request uses 19 questions.
+
+Broader routing and recovery remain Phase 7 work.
 
 ### Phase 7 — routing and recovery
 
