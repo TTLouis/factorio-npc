@@ -206,19 +206,17 @@ test('findSkills remains discovery-only while getSkillDetails creates task-local
   assert.equal(agent.skillContext(), '')
 })
 
-test('active Jev post-step continue and replan routes map to low/high planner trigger overrides', async () => {
-  for (const [route, expectedTrigger] of [['continue_current', 'post_step_continue'], ['replan', 'post_step_replan']]) {
-    const { agent } = agentForRoute(route)
-    agent.taskStatusReceipt = async () => ({
-      raw: '{}',
-      view: { task_state: 'idle', queue_empty: true, queue_length: 0, last_completed_batch: { batch_id: 7 } },
-      providerStatus: { observation_mode: 'full', task_state: 'idle', queue_empty: true, queue_length: 0, last_completed_batch: { batch_id: 7 } },
-    })
-    agent.continueFromModMessage = async () => ({ triggerSource: agent.reasoningTriggerSource })
-    const result = await agent.completed()
-    assert.equal(result.triggerSource, expectedTrigger)
-    assert.equal(agent.reasoningTriggerSource, null)
-  }
+test('M9 post-step wake_planner maps to the high-reasoning planner trigger', async () => {
+  const { agent } = agentForRoute('wake_planner')
+  agent.taskStatusReceipt = async () => ({
+    raw: '{}',
+    view: { task_state: 'idle', queue_empty: true, queue_length: 0, last_completed_batch: { batch_id: 7 } },
+    providerStatus: { observation_mode: 'full', task_state: 'idle', queue_empty: true, queue_length: 0, last_completed_batch: { batch_id: 7 } },
+  })
+  agent.continueFromModMessage = async () => ({ triggerSource: agent.reasoningTriggerSource })
+  const result = await agent.completed()
+  assert.equal(result.triggerSource, 'post_step_replan')
+  assert.equal(agent.reasoningTriggerSource, null)
 })
 
 test('wait_runtime skips the planner for active Autorio work or a healthy persistent controller, but never strands idle work', async () => {

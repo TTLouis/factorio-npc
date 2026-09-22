@@ -466,12 +466,14 @@ test('retired granularity split advice cannot create a replan on a completion bo
   assert.equal('hierarchy_action' in routed, false)
 })
 
-test('idle Autorio plus Jev wait_runtime is rejected when no valid watcher exists', async () => {
+test('M9 idle continue_runtime falls back to planner when no valid watcher exists', async () => {
   const { agent, memory, mainCalls } = makeAgent({
-    decisionProvider: async () => decisionResponse('wait_runtime'),
+    decisionProvider: async () => decisionResponse('continue_runtime'),
   })
-  const result = await agent.recoverPlan(agent.generation, new Error('provider timeout'), 1)
-  assert.equal(result.goalStatus, 'paused')
+  const routed = await agent.routeRecoveryDecision(new Error('provider timeout'), 1)
+  assert.equal(routed.requested_route, 'continue_runtime')
+  assert.equal(routed.route, 'wake_planner')
+  assert.equal(routed.rejection_reason, 'continue_runtime_without_authoritative_active_runtime')
   assert.equal(memory.planByNpc.get('npc:airi').condition_wait, undefined)
   assert.equal(mainCalls(), 0)
 })
@@ -674,7 +676,7 @@ test('adaptive observation-pressure completion forces a no-tools planner decisio
 test('recovery route does not inherit the parent planning reasoning budget', async () => {
   let seenOptions
   const { agent } = makeAgent({
-    decisionProvider: async () => decisionResponse('continue_low'),
+    decisionProvider: async () => decisionResponse('wake_planner'),
     provider: async (_messages, options) => {
       seenOptions = options
       throw new Error('stop after capture')
@@ -691,15 +693,15 @@ test('recovery route does not inherit the parent planning reasoning budget', asy
   assert.equal(agent.reasoningBudgetOverride, 'strategic')
 })
 
-test('recovery targeted observation is rejected when the Jev observation budget is exhausted', async () => {
+test('M9 recovery observe falls back to planner when the deterministic observation budget is exhausted', async () => {
   const { agent } = makeAgent({
-    decisionProvider: async () => decisionResponse('targeted_observation'),
+    decisionProvider: async () => decisionResponse('observe'),
   })
   agent.observationBudgetRemaining = 0
 
   const routed = await agent.routeRecoveryDecision(new Error('one mutable fact is missing'), 1)
-  assert.equal(routed.requested_route, 'targeted_observation')
-  assert.equal(routed.route, 'fallback_runtime')
+  assert.equal(routed.requested_route, 'observe')
+  assert.equal(routed.route, 'wake_planner')
   assert.equal(routed.rejection_reason, 'targeted_observation_budget_exhausted')
 })
 

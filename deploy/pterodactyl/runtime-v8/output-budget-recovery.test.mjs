@@ -571,10 +571,11 @@ test('terminal provider budget becomes a Jev-directed fresh planner generation i
       }
       if (calls.length === 2 || calls.length === 3) return exhaustedMessage()
 
-      assert.equal(context.triggerSource, 'post_step_reanchor')
+      assert.equal(context.triggerSource, 'recovery_continue_low')
       assert.equal(context.recoveryKind, undefined)
       assert.match(messages.at(-1).content, /\[PROVIDER_BUDGET_HANDOFF\]/)
-      assert.match(messages.at(-1).content, /reanchor_target/)
+      assert.match(messages.at(-1).content, /keep_target/)
+      assert.doesNotMatch(messages.at(-1).content, /reanchor_target/)
       const message = planMessage({
         chatMessage: 'Re-anchored the same target with a fresh planner budget.',
         plan: canonical,
