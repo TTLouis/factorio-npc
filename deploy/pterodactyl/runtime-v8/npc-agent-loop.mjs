@@ -3237,159 +3237,26 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return { verified: false, reason: 'no_authoritative_operation_receipt', state: planState }
     }
 
+    const checkpoint = persistedStepCheckpoint(board, step.id)
+    if (!checkpoint?.contract) {
+      await this.declineStepClose('batch_receipt', 'semantic_completion_requires_planner', {
+        active_step_id: step.id,
+      })
+      return {
+        verified: false,
+        reason: 'semantic_completion_requires_planner',
+        state: planState,
+      }
+    }
+
     let operationNames = []
     try {
       const parsed = JSON.parse(verification.summary)
-      operationNames = Array.isArray(parsed?.operations) ? parsed.operations.filter(name => typeof name === 'string').slice(0, 8) : []
+      operationNames = Array.isArray(parsed?.operations)
+        ? parsed.operations.filter(name => typeof name === 'string').slice(0, 8)
+        : []
     }
     catch {}
-
-    let checkpoint = persistedStepCheckpoint(board, step.id)
-    // keep_step_open protects compound steps whose contract covers only part
-    // of the meaning. When Jev itself judged the step NOT compound, a grounded
-    // world-state contract it selected does cover the step: check it. Live,
-    // "gather 4 iron ore" held its iron but stayed open because Jev forecast
-    // keep_step_open (compound 0.37) and then rated the receipt progress_only.
-    // An unknown compound probability still counts as possibly compound.
-    const nonCompoundWorldContract = checkpoint?.boundary === 'keep_step_open'
-      && checkpoint.relation === 'advances_current'
-      && typeof checkpoint.compound_probability === 'number'
-      && checkpoint.compound_probability < 0.5
-      && completionContractSupported(checkpoint.contract)
-      && checkpoint.contract.mode !== 'semantic_unknown'
-      && checkpoint.contract.requirements?.length > 0
-      && checkpoint.contract.requirements.every(requirement => WORLD_STATE_REQUIREMENT_KINDS.has(requirement?.kind))
-    if (nonCompoundWorldContract) {
-      checkpoint = { ...checkpoint, boundary: 'checkpoint_here' }
-      await this.traceEvent('step.checkpoint_promoted', {
-        active_step_id: step.id,
-        reason: 'non_compound_world_state_contract',
-        compound_probability: checkpoint.compound_probability,
-        contract: checkpoint.contract,
-      })
-    }
-    if (!checkpoint || checkpoint.boundary !== 'checkpoint_here' || checkpoint.contract?.mode === 'semantic_unknown') {
-      const reason = checkpoint?.boundary === 'split_recommended'
-        ? 'checkpoint_split_recommended'
-        : checkpoint?.boundary === 'keep_step_open'
-          ? 'checkpoint_kept_open'
-          : 'missing_pre_admission_checkpoint'
-
-      // The pre-admission pass intentionally cannot know whether an operation
-      // will complete. Once runtime has correlated a strict deterministic
-      // receipt to this exact canonical step, Jev may normalize only the
-      // semantic scope: whether that completed batch covers the whole step.
-      // Runtime keeps sole authority over the receipt and state transition.
-      if (reason !== 'checkpoint_split_recommended'
-        && operationNames.length > 0
-        && this.interactionDecisionProvider) {
-        const current = await this.assertCurrent()
-        const generation = this.generation
-        const decisionId = `decision_${Date.now().toString(36)}_${(++this.decisionRequestSequence).toString(36)}`
-        const controller = new AbortController()
-        const startedAt = Date.now()
-        try {
-          const decisionState = {
-            contract: 'receipt_completion_normalizer',
-            goal: {
-              goal_id: sanitizeDurableModelText(planState.goal_id, 100),
-              objective: sanitizeDurableModelText(planState.objective, 500),
-            },
-            active_step: {
-              id: sanitizeDurableModelText(step.id, 80),
-              description: sanitizeDurableModelText(step.description, 400),
-            },
-            remaining_steps: (Array.isArray(board?.steps) ? board.steps : [])
-              .slice(activeIndex, activeIndex + 6)
-              .map(item => ({
-                id: sanitizeDurableModelText(item?.id, 80),
-                description: sanitizeDurableModelText(item?.description, 400),
-              })),
-            authoritative_receipt: {
-              ref,
-              operation_names: operationNames,
-              summary: sanitizeDurableModelText(verification.summary, 1000),
-            },
-            pre_admission_checkpoint: checkpoint
-              ? sanitizeDurableModelValue({ boundary: checkpoint.boundary, relation: checkpoint.relation, contract: checkpoint.contract })
-              : undefined,
-          }
-          await this.decisionTraceEvent('decision.request', {
-            decision_id: decisionId,
-            contract: 'receipt_completion_normalizer',
-            mode: 'active',
-            active_step_id: step.id,
-            question_ids: ['receipt_scope'],
-          })
-          const response = await this.interactionDecisionProvider(decisionState, receiptCompletionDecisionQuestions(), {
-            epoch: current.epoch,
-            actorId: current.actor_id,
-            signal: controller.signal,
-          })
-          if (generation !== this.generation || controller.signal.aborted) throw new AgentLoopError('Model turn was cancelled or superseded')
-          await this.assertCurrent()
-          const normalized = parseReceiptCompletionDecision(response)
-          const accepted = normalized.choice === 'complete_current_step' && normalized.confidence >= 0.85
-          await this.decisionTraceEvent('decision.response', {
-            decision_id: decisionId,
-            contract: 'receipt_completion_normalizer',
-            mode: 'active',
-            choice: normalized.choice,
-            confidence: normalized.confidence,
-            accepted,
-            provider: normalized.provider,
-            model: normalized.model,
-            latency_ms: Date.now() - startedAt,
-            input_units: Number.isFinite(normalized.usage?.input_tokens) ? Math.max(0, Math.trunc(normalized.usage.input_tokens)) : 0,
-            output_units: Number.isFinite(normalized.usage?.output_tokens) ? Math.max(0, Math.trunc(normalized.usage.output_tokens)) : 0,
-            cost_usd: Number.isFinite(normalized.usage?.cost) && normalized.usage.cost >= 0 ? normalized.usage.cost : 0,
-          })
-          if (accepted) {
-            checkpoint = {
-              boundary: 'checkpoint_here',
-              relation: 'advances_current',
-              contract: {
-                mode: 'all',
-                source: 'jev_receipt_scope',
-                confidence: normalized.confidence,
-                requirements: operationNames.map((operationName, index) => ({
-                  id: `receipt_${index + 1}`,
-                  kind: 'authoritative_operation_receipt',
-                  operation_name: operationName,
-                })),
-              },
-            }
-            await this.traceEvent('step.checkpoint_normalized', {
-              active_step_id: step.id,
-              source: 'jev_receipt_scope',
-              previous_reason: reason,
-              contract: checkpoint.contract,
-            })
-          }
-        }
-        catch (error) {
-          await this.decisionTraceEvent('decision.fallback', {
-            decision_id: decisionId,
-            contract: 'receipt_completion_normalizer',
-            mode: 'active',
-            fallback_target: 'keep_step_open',
-            reason: cleanMemoryText(error instanceof Error ? error.message : String(error), 300),
-            latency_ms: Date.now() - startedAt,
-          })
-        }
-        finally {
-          controller.abort()
-        }
-      }
-
-      if (!checkpoint || checkpoint.boundary !== 'checkpoint_here' || checkpoint.contract?.mode === 'semantic_unknown') {
-        await this.declineStepClose('batch_receipt', reason, {
-          active_step_id: step.id,
-          checkpoint_boundary: checkpoint?.boundary,
-        })
-        return { verified: false, reason, state: planState, contract: checkpoint?.contract }
-      }
-    }
 
     const facts = await this.completionFactsForContract(checkpoint.contract, verification, operationNames)
     const evaluation = evaluateCompletionContract(checkpoint.contract, facts)
@@ -3398,7 +3265,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       status: evaluation.status,
       contract: evaluation.contract,
       evidence: evaluation.results,
-      checkpoint_boundary: checkpoint.boundary,
+      authority: 'deterministic_runtime',
     })
     if (!evaluation.satisfied) {
       await this.declineStepClose('batch_receipt', 'target_unmet', {
@@ -3406,7 +3273,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         contract: checkpoint.contract,
         results: evaluation.results,
       })
-      return { verified: false, reason: 'checkpoint_requirements_unsatisfied', state: planState, contract: checkpoint.contract }
+      return {
+        verified: false,
+        reason: 'checkpoint_requirements_unsatisfied',
+        state: planState,
+        contract: checkpoint.contract,
+      }
     }
 
     const finalPlanStep = activeIndex === (Array.isArray(board?.steps) ? board.steps.length - 1 : -1)
@@ -3422,12 +3294,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       step,
       contract: checkpoint.contract,
       results: evaluation.results,
-      reasonCode: 'pre_admission_checkpoint_satisfied',
-      source: 'step_checkpoint_gate',
+      reasonCode: 'deterministic_checkpoint_satisfied',
+      source: 'deterministic_completion_contract',
       extraEvidence: [verification],
       steeringRecommendation,
     })
-    if (!closed.closed) return { verified: false, reason: closed.reason, state: closed.state ?? planState, contract: checkpoint.contract }
+    if (!closed.closed) {
+      return {
+        verified: false,
+        reason: closed.reason,
+        state: closed.state ?? planState,
+        contract: checkpoint.contract,
+      }
+    }
     return { verified: true, state: closed.state, contract: checkpoint.contract }
   }
 
@@ -5564,6 +5443,103 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  async applySemanticCompletionClaim(plan, state) {
+    const claim = plan?.semanticCompletion
+    if (!claim) return { applied: false, state }
+    if (!this.requestInfo?.memoryKey || !state || state.status !== 'active') {
+      const error = new AgentLoopError('semantic_completion_requires_active_step')
+      error.failureClass = 'plan_category'
+      error.code = 'invalid_semantic_completion'
+      throw error
+    }
+
+    const board = state.task_board
+    const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
+    const step = activeIndex === undefined ? undefined : board?.steps?.[activeIndex]
+    if (!step || claim.stepId !== step.id) {
+      const error = new AgentLoopError(
+        `semantic_completion_step_mismatch: claimed=${claim.stepId || 'none'} active=${step?.id || 'none'}`,
+      )
+      error.failureClass = 'plan_category'
+      error.code = 'semantic_completion_step_mismatch'
+      throw error
+    }
+    if (completionContractSupported(step.completion_contract)) {
+      const error = new AgentLoopError('semantic_completion_cannot_bypass_deterministic_contract')
+      error.failureClass = 'plan_category'
+      error.code = 'semantic_completion_contract_exists'
+      throw error
+    }
+
+    const groundingKinds = new Set([
+      'deterministic_verification',
+      'operation_receipt',
+      'verified_world_state',
+      'condition_satisfied',
+      'fresh_world_observation',
+    ])
+    const grounding = [...(board?.evidence ?? [])]
+      .filter(item => item?.step_id === step.id
+        && typeof item?.ref === 'string'
+        && item.ref
+        && groundingKinds.has(item?.kind))
+      .slice(-4)
+      .map(item => ({
+        kind: item.kind,
+        ref: item.ref,
+        summary: cleanMemoryText(item.summary, 1200),
+      }))
+
+    if (this.freshObservationSinceContinuation) {
+      grounding.push({
+        kind: 'verified_world_state',
+        ref: `${this.traceRequest?.id ?? 'request'}/semantic_fresh_observation`,
+        summary: 'The Main LLM made this semantic completion judgment after a fresh authoritative read-only world observation in the active request.',
+      })
+    }
+    const deduped = Array.from(new Map(
+      grounding.map(item => [`${item.kind}:${item.ref}`, item]),
+    ).values()).slice(-4)
+    if (deduped.length === 0) {
+      const error = new AgentLoopError('semantic_completion_requires_runtime_grounding')
+      error.failureClass = 'plan_category'
+      error.code = 'semantic_completion_requires_grounding'
+      throw error
+    }
+
+    const groundingRefs = deduped.map(item => item.ref)
+    const reduced = this.memory.applyOutcomeAuthority?.(this.requestInfo.memoryKey, {
+      kind: 'semantic_complete',
+      source: 'main_planner',
+      reason_code: 'planner_semantic_step_complete',
+      evidence: deduped,
+      metadata: {
+        scope: 'step',
+        step_id: step.id,
+        grounding_refs: groundingRefs,
+        rationale: cleanMemoryText(claim.rationale, 600),
+      },
+    }, { chatMessage: plan.chatMessage })
+
+    if (reduced?.decision?.accepted !== true) {
+      const error = new AgentLoopError(
+        `semantic_completion_rejected:${reduced?.decision?.rejection_reason || 'unknown'}`,
+      )
+      error.failureClass = 'plan_category'
+      error.code = 'semantic_completion_rejected'
+      throw error
+    }
+    await this.persistState()
+    await this.traceEvent('step.semantic_completed', {
+      active_step_id: step.id,
+      source: 'main_planner',
+      grounding_refs: groundingRefs,
+      rationale: cleanMemoryText(claim.rationale, 600),
+      task_board: visibleTaskBoard(reduced?.state?.task_board),
+    })
+    return { applied: true, state: reduced.state }
+  }
+
   async commitPlan(plan) {
     const triggerSource = this.reasoningTriggerSource ?? this.planUpdateReason
     const commands = plan.operations.map(renderOperation)
@@ -5582,15 +5558,30 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       ...(Array.isArray(plan.roadmapNodeIds) && plan.roadmapNodeIds.length > 0 ? { roadmap_node_ids: plan.roadmapNodeIds } : {}),
       ...(plan.developmentMode ? { development_mode: plan.developmentMode } : {}),
       ...(plan.checkpoint ? { checkpoint: plan.checkpoint } : {}),
+      ...(plan.semanticCompletion ? { semantic_completion: plan.semanticCompletion } : {}),
     })
 
     const before = await this.assertCurrent()
     const persistentRuntime = commands.length === 0 && plan.plan.length > 0
       ? await this.persistentRuntimeStatus()
       : undefined
-    const previousState = this.requestInfo
+    let previousState = this.requestInfo
       ? this.memory.currentPlan?.(this.requestInfo.memoryKey)
       : undefined
+    if (plan.semanticCompletion) {
+      const semantic = await this.applySemanticCompletionClaim(plan, previousState)
+      previousState = semantic.state ?? previousState
+      if (previousState?.status === 'completed' && commands.length > 0) {
+        const error = new AgentLoopError('semantic_completion_final_step_cannot_have_followup_operations')
+        error.failureClass = 'plan_category'
+        error.code = 'semantic_completion_after_final_step'
+        throw error
+      }
+      if (previousState?.status === 'completed' && commands.length === 0) {
+        const settled = await this.settleCompletedStepState(previousState, { allowContinuation: false })
+        if (settled) return settled
+      }
+    }
     // The active step's own checkpoint as it stood BEFORE this batch; the
     // checkpoint pass below re-records one shaped by the new batch.
     const checkpointBeforeBatch = activeStepCheckpointSnapshot(previousState?.task_board)
@@ -5598,11 +5589,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let finalCompletionVerified = verifiedFinalCompletion(plan, previousState, this.planUpdateReason, {
       freshObservation: this.freshObservationSinceContinuation,
     })
-    // "The batch ran" is not "the step is done". When the open step carries a
-    // world-state target, a planner's final "done" must also meet it.
+    // "The batch ran" is not "the deterministic step is done". A final
+    // completion claim still has to satisfy the immutable runtime contract.
     if (finalCompletionVerified && checkpointBeforeBatch?.checkpoint) {
-      const claim = await this.evaluateStepClose('final_completion_claim', { plan, before: checkpointBeforeBatch })
-      if (claim.vetoed) finalCompletionVerified = false
+      const evaluation = await this.evaluateWorldStateCheckpoint(checkpointBeforeBatch.checkpoint)
+      if (!evaluation?.satisfied) finalCompletionVerified = false
     }
     const remainingCanonicalWork = !finalCompletionVerified && (
       canonicalWorkRemains(previousState)
@@ -5630,31 +5621,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
     const conditionWaitActive = conditionWait?.state === 'active'
-
-    // A "done" claim: no operation and no plan left. When a guard skips the
-    // check, the evaluator still records why the open step stayed open.
-    const plannerDoneClaim = commands.length === 0 && plan.operations?.length === 0 && plan.plan?.length === 0
-      && !finalCompletionVerified && previousState?.status === 'active'
-    const plannerDoneGate = !remainingCanonicalWork
-      ? 'no_remaining_canonical_work'
-      : runtimeHealthy
-        ? 'persistent_runtime_active'
-        : conditionWaitActive
-          ? 'condition_wait_active'
-          : this.plannerDoneCloseUsed === true ? 'planner_done_close_already_used' : undefined
-    const plannerDone = plannerDoneClaim
-      ? await this.evaluateStepClose('planner_done', { plan, before: checkpointBeforeBatch, blockedBy: plannerDoneGate })
-      : undefined
-    if (plannerDone?.closed) {
-      const settled = await this.settleCompletedStepState(plannerDone.state, { allowContinuation: false })
-      if (settled) {
-        this.clearActionOmissionRecovery()
-        return settled
-      }
-      this.plannerDoneCloseUsed = true
-      try { return await this.commitPlan(plan) }
-      finally { this.plannerDoneCloseUsed = false }
-    }
 
     if (commands.length === 0 && this.actionOmissionRepairActive && !runtimeHealthy && !conditionWaitActive && !finalCompletionVerified) {
       if (explicitBlocker) {
