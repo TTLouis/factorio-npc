@@ -267,9 +267,11 @@ export const PLANNING_EVENT = Object.freeze({
 
 const PLANNING_EVENT_TYPES = Object.freeze(Object.values(PLANNING_EVENT))
 
-// Sources permitted to advance authoritative progress. The planner (Main LLM)
-// and Jev are deliberately absent.
+// Runtime sources own deterministic facts. The Main LLM has one narrower
+// authority: it may close a prose-only step semantically when the claim is
+// explicitly bound to the active step and grounded in runtime evidence.
 const EVIDENCE_AUTHORITIES = Object.freeze(['runtime', 'autorio', 'runtime_receipt'])
+const SEMANTIC_COMPLETION_AUTHORITIES = Object.freeze(['main_planner'])
 const USER_AUTHORITIES = Object.freeze(['user', 'human', 'user_steering'])
 
 // --- reasoning epoch (owner decision, 2026-09-19) ---------------------------
@@ -1532,6 +1534,10 @@ function isRuntimeAuthority(source) {
   return EVIDENCE_AUTHORITIES.includes(text(source, 60))
 }
 
+function isSemanticCompletionAuthority(source) {
+  return SEMANTIC_COMPLETION_AUTHORITIES.includes(text(source, 60))
+}
+
 function isUserAuthority(source) {
   return USER_AUTHORITIES.includes(text(source, 60))
 }
@@ -1549,8 +1555,8 @@ function updateProgress(plan, stepId, updater, { now }) {
 }
 
 function freezeCommittedPlan(plan) {
-  // The committed semantic content is frozen against the LLM and against Jev.
-  // Execution bookkeeping stays outside the frozen region.
+  // The committed plan content is frozen. Main-LLM semantic completion is a
+  // progress decision about a prose-only step, never a mutation of that content.
   deepFreeze(plan.steps)
   deepFreeze(plan.roadmap_node_ids)
   return plan
@@ -1989,23 +1995,49 @@ Object.assign(HANDLERS, {
   [PLANNING_EVENT.STEP_COMPLETED](state, event, now) {
     const plan = getPlan(state, event.plan_id ?? state.active_plan_id)
     if (!plan || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan.status)) return state
-    // Completion is a runtime fact. Jev output and planner focus cannot assert it.
-    if (!isRuntimeAuthority(event.source)) return state
     const index = plan.active_step_index
     const step = plan.steps[index]
     if (!step || text(event.step_id, 200) !== step.step_id) return state
-    const progress = plan.execution.step_progress[step.step_id] ?? emptyStepProgress()
+
+    const runtimeCompletion = isRuntimeAuthority(event.source)
+    const semanticCompletion = isSemanticCompletionAuthority(event.source)
+      && event.semantic_claim === true
+      && !step.completion_contract
+    if (!runtimeCompletion && !semanticCompletion) return state
+
+    let progress = plan.execution.step_progress[step.step_id] ?? emptyStepProgress()
     if (step.completion_contract) {
-      // Grounded step: the committed contract must actually be satisfied.
-      if (!progress.contract_satisfied) return state
+      // Deterministic step: only runtime evidence satisfying the immutable
+      // contract may close it. A planner semantic claim is structurally barred.
+      if (!runtimeCompletion || !progress.contract_satisfied) return state
+    }
+    else if (semanticCompletion) {
+      const groundingRefs = stringList(event.grounding_refs, { max: 16, maxLength: 200 })
+      if (groundingRefs.length === 0) return state
+      progress = {
+        ...progress,
+        accepted_evidence: [...progress.accepted_evidence, {
+          ref: groundingRefs[0],
+          kind: 'semantic_completion_grounding',
+          source: 'main_planner',
+          batch_id: null,
+          satisfied_requirement_ids: [],
+          at: now,
+        }].slice(-32),
+        batches_since_evidence: 0,
+      }
     }
     else if (progress.accepted_evidence.length === 0) {
-      // Prose-only (reduced-confidence) step: still requires at least one piece
-      // of accepted runtime evidence before it may advance.
+      // Runtime may close an uncontracted step only when it already carries
+      // authoritative evidence. Normal prose-only completion should use the
+      // explicit Main-LLM semantic-completion path above.
       return state
     }
 
-    const completed = updateProgress(plan, step.step_id, item => ({
+    const completed = updateProgress({ ...plan, execution: {
+      ...plan.execution,
+      step_progress: { ...plan.execution.step_progress, [step.step_id]: progress },
+    } }, step.step_id, item => ({
       ...item,
       status: 'completed',
       completed_at: now,
