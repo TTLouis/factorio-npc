@@ -580,64 +580,33 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   }
 
   /**
-   * Commit the active draft, if and only if it earned it.
+   * Commit the active draft after deterministic runtime validation.
    *
-   * This used to pass `jev_verdict: 'actionable'` and
-   * `runtime_validation: { passed: true }` as literals. The reducer's commit
-   * gate is strict and correct, so the effect was that every draft satisfied
-   * it: scope review could not refuse anything, and the roadmap's central
-   * claim -- that the system commits only what Jev found actionable -- was not
-   * true of the running agent.
-   *
-   * Both inputs must now come from the caller, and a missing review is a
-   * refusal rather than a pass. `review.verdict` is Jev's parsed scope review;
-   * `review.runtime_validation` is the deterministic preflight result.
+   * Jev is deliberately absent from this authority boundary. A caller may
+   * still pass the legacy review object during migration; only its embedded
+   * runtime_validation field is read for backward compatibility.
    */
-  commitPlanningPlan(key, { now = Date.now(), migrated = false, review } = {}) {
+  commitPlanningPlan(key, {
+    now = Date.now(),
+    migrated = false,
+    runtime_validation,
+    runtimeValidation,
+    review,
+  } = {}) {
     const legacy = key ? this.planByNpc.get(key) : undefined
     let planning = this.ensurePlanningDraft(key, legacy, { now, migrated })
     const plan = getActivePlan(planning)
     if (!plan) return planning
     if ([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING, PLAN_STATUS.COMPLETED, PLAN_STATUS.BLOCKED].includes(plan.status)) return planning
-    // No review, no commit. Silence is not consent.
-    if (!review || typeof review !== 'object') return planning
 
-    planning = applyPlanningEvent(planning, {
-      type: PLANNING_EVENT.JEV_REVIEW_REQUESTED,
-      now,
-      source: 'jev',
-      plan_id: plan.plan_id,
-      verdict: review.verdict,
-      reason_codes: review.reason_codes,
-      confidence: review.confidence,
-    })
-
-    if (review.verdict !== 'actionable') {
-      planning = applyPlanningEvent(planning, {
-        type: PLANNING_EVENT.JEV_REFINEMENT_REQUESTED,
-        now,
-        source: 'jev',
-        plan_id: plan.plan_id,
-        verdict: review.verdict,
-        reason_codes: review.reason_codes,
-        problem_step_ids: review.problem_steps,
-        ...(Number.isSafeInteger(review.actionable_prefix) && review.actionable_prefix > 0
-          ? { actionable_prefix: review.actionable_prefix }
-          : {}),
-        recommended_boundary: review.recommended_boundary,
-        reason: review.explanation ?? review.reason_codes?.join(',') ?? review.verdict,
-      })
-      this.planningByNpc.set(key, planning)
-      this.syncPlanningState(key, legacy)
-      return planning
-    }
+    const validation = runtime_validation ?? runtimeValidation ?? review?.runtime_validation
+    if (!validation || validation.passed !== true) return planning
 
     planning = applyPlanningEvent(planning, {
       type: PLANNING_EVENT.PLAN_COMMITTED,
       now,
       plan_id: plan.plan_id,
-      jev_verdict: review.verdict,
-      runtime_validation: review.runtime_validation,
+      runtime_validation: validation,
     })
     this.planningByNpc.set(key, planning)
     this.syncPlanningState(key, legacy)
