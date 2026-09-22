@@ -4,11 +4,11 @@ Status: **canonical planning direction**
 Branch of origin: `experiment/jev-agent-architecture`
 Adopted: 2026-09-19
 
-This document is the authority for future planning, Plan Tracker, roadmap/shelf, and Jev planning-review work. Where older planning or Jev documents conflict with this file, this file wins.
+This document is the authority for Goal / Roadmap Shelf / immutable-plan lifecycle. Jev's current authority model is defined by `NPC_JEV_COPROCESSOR_ARCHITECTURE.md`; where older Jev planning-review text in this file conflicts with that document, the coprocessor architecture wins.
 
-The redesign is intentionally simpler than the current experimental hierarchy/checkpoint stack:
+The redesign is intentionally simpler than the earlier experimental hierarchy/checkpoint stack:
 
-> The user owns the goal. The Main LLM authors plans. Jev critiques draft scope. The runtime validates and executes. A committed plan is immutable. Future intent lives on a non-executable shelf and is progressively refined like level of detail (LOD).
+> The user owns the goal. The Main LLM authors semantic plans and intent. The deterministic runtime validates structured operations and owns world truth. Jev is a cognitive coprocessor for observation selection, state compression, routing, recovery, reasoning effort, and advisory steering; Jev is not a correctness gate for the Main LLM. A committed plan is immutable. Future intent lives on a non-executable shelf and is progressively refined like level of detail (LOD).
 
 ## 1. Core invariants
 
@@ -45,26 +45,25 @@ The durable planning model has three semantic layers:
 
 The shelf is not abandoned work. It is the guide for subsequent planning rounds.
 
-### 1.3 Jev is a plan critic, not a co-planner
+### 1.3 Jev is a cognitive coprocessor, not a correctness reviewer
 
-For planning, Jev's primary role is **pre-commit scope review**.
+Jev is outside the authoritative correctness path.
 
-Jev may judge whether a draft is:
+Jev may help decide:
 
-- actionable;
-- too vague;
-- too broad;
-- too long-horizon for the currently known world;
-- missing an obvious prerequisite;
-- mixing multiple semantic outcomes into one step;
-- ending at a poor checkpoint;
-- insufficiently grounded for deterministic validation.
+- which deterministic observations are worth gathering before a Main-LLM wake;
+- whether healthy deterministic runtime work can continue without waking the Main LLM;
+- whether a runtime result is material enough to wake the Main LLM;
+- which bounded recovery route to try next;
+- how much Main-LLM reasoning effort and planning horizon are justified;
+- advisory strategic steering such as `vertical | horizontal | maintain | recover`;
+- bounded semantic compression of authoritative runtime facts.
 
-Jev does **not** rewrite the plan. It returns bounded criticism to the Main LLM, which authors the next draft.
+Jev must not approve or reject a Main-LLM plan, decide whether an operation belongs to a semantic step, synthesize required completion truth, vote on deterministic completion, or block execution because it dislikes plan scope.
 
-After commitment, Jev has no authority to add/remove/reorder steps, advance the Plan Tracker, redefine completion, or silently replan around a blocker.
+The harness must remain correct when Jev is unavailable. Jev failure may reduce efficiency; it must not make a structurally valid plan uncommittable or an otherwise valid operation inadmissible.
 
-Jev may still assist with **diagnosing** an execution failure, but runtime evidence owns the failure fact and the user owns approval of any plan revision.
+For the complete current Jev contract, see `NPC_JEV_COPROCESSOR_ARCHITECTURE.md`.
 
 ### 1.4 Runtime owns truth, admission, and completion evidence
 
