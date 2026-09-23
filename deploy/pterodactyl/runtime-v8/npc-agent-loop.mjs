@@ -7084,12 +7084,20 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
 
+    // Deterministic format recovery repairs a reply; it is not planning, so it
+    // must not inherit a strategic budget from the turn that failed.
+    const previousTrigger = this.reasoningTriggerSource
+    const previousReasoningBudget = this.reasoningBudgetOverride
+    this.reasoningTriggerSource = 'recovery_continue_low'
+    this.reasoningBudgetOverride = null
     this.genericRecoveryDecisionActive = true
     try {
       return await super.recoverPlan(generation, reason, roundBase)
     }
     finally {
       this.genericRecoveryDecisionActive = false
+      this.reasoningTriggerSource = previousTrigger
+      this.reasoningBudgetOverride = previousReasoningBudget
     }
   }
 }

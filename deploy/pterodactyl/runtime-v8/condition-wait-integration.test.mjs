@@ -686,7 +686,9 @@ test('recovery route does not inherit the parent planning reasoning budget', asy
 
   await assert.rejects(
     agent.recoverPlan(agent.generation, new Error('provider returned invalid JSON'), 1),
-    /provider_jev_recovery_route_failed/,
+    // M11D routes a format failure deterministically, without a Jev route
+    // call, so the capturing provider's own error surfaces unwrapped.
+    /stop after capture/,
   )
   assert.equal(seenOptions.triggerSource, 'recovery_continue_low')
   assert.equal(seenOptions.reasoningBudget, undefined)
