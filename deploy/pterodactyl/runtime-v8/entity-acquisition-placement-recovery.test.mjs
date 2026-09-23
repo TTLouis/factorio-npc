@@ -33,9 +33,10 @@ function planMessage(operations, {
   chatMessage = '',
   plan = ['Do the current step'],
   currentStep = 0,
+  checkpoint,
 } = {}) {
   return {
-    content: JSON.stringify({ chatMessage, plan, currentStep, operations }),
+    content: JSON.stringify({ chatMessage, plan, currentStep, operations, ...(checkpoint ? { checkpoint } : {}) }),
   }
 }
 
@@ -310,9 +311,16 @@ test('remote name-only entity requires approach and navigation completion automa
       if (calls === 3) {
         const text = messages.map(message => String(message.content ?? '')).join('\n')
         assert.match(text, /Approach it first with walk_to_entity/)
+        // The approach step means "arrived", so the planner authors the
+        // arrival receipt as its deterministic checkpoint; runtime then
+        // closes it without a second AI judge.
         return planMessage([{ name: 'walk_to_entity', args: { entity_name: 'tree-05', search_radius: 22 } }], {
           plan: canonicalPlan,
           currentStep: 0,
+          checkpoint: {
+            mode: 'all',
+            requirements: [{ id: 'arrived', kind: 'authoritative_operation_receipt', operation_name: 'walk_to_entity' }],
+          },
         })
       }
       if (calls === 4) {

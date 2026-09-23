@@ -68,13 +68,20 @@ function toolMessage() {
   }
 }
 
-function planMessage(operations, chatMessage = 'Working.') {
+// The planner authors each placement's receipt as its deterministic
+// checkpoint; runtime closes the step on it without a second AI judge.
+function placementReceiptCheckpoint() {
+  return { mode: 'all', requirements: [{ id: 'placed', kind: 'authoritative_operation_receipt', operation_name: 'place_entity' }] }
+}
+
+function planMessage(operations, chatMessage = 'Working.', checkpoint) {
   return {
     content: JSON.stringify({
       chatMessage,
       plan: operations.length ? ['Perform bounded step'] : [],
       currentStep: 0,
       operations,
+      ...(checkpoint ? { checkpoint } : {}),
     }),
   }
 }
@@ -165,7 +172,7 @@ test('behavior trace correlates request through verification, records usage, and
   const traceFile = path.join(dir, 'airi-behavior.jsonl')
   const replies = [
     toolMessage(),
-    planMessage([{ name: 'place_entity', args: { entity_name: 'stone-furnace', x: 4, y: 4 } }]),
+    planMessage([{ name: 'place_entity', args: { entity_name: 'stone-furnace', x: 4, y: 4 } }], 'Working.', placementReceiptCheckpoint()),
   ]
   let budgetCount = 0
   const agent = new NpcAgentLoop({
@@ -247,6 +254,7 @@ test('duplicate completion receipts do not spend another provider call, while a 
         plan: ['Place first furnace', 'Place second furnace'],
         currentStep: 0,
         operations: [{ name: 'place_entity', args: { entity_name: 'stone-furnace', x: 4, y: 4 } }],
+        checkpoint: placementReceiptCheckpoint(),
       }),
     },
     {
@@ -255,6 +263,16 @@ test('duplicate completion receipts do not spend another provider call, while a 
         plan: ['Place first furnace', 'Place second furnace'],
         currentStep: 1,
         operations: [{ name: 'place_entity', args: { entity_name: 'stone-furnace', x: 6, y: 4 } }],
+      }),
+    },
+    // Step 2 is prose-only once the plan is committed, so the planner closes
+    // it with an explicit final completion claim after its receipt.
+    {
+      content: JSON.stringify({
+        chatMessage: 'Both furnaces are placed.',
+        plan: [],
+        currentStep: 0,
+        operations: [],
       }),
     },
   ]
@@ -288,7 +306,7 @@ test('duplicate completion receipts do not spend another provider call, while a 
 
   rcon.batchId = 2
   const closed = await agent.completed()
-  assert.equal(providerCalls, 2)
+  assert.equal(providerCalls, 3)
   assert.equal(closed.goalStatus, 'completed')
   assert.equal(agent.active, false)
 })

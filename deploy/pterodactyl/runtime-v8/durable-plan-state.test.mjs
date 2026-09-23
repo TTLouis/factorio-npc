@@ -905,8 +905,13 @@ test('verified completion can close before a trailing control-only Stop step', a
   const plan = ['Place the requested furnace', 'Stop']
   const agent = new NpcAgentLoop({
     rcon,
+    // The receipt proves the placement ran; closing this prose-only step is
+    // the Main LLM's judgment, so the planner confirms it on the next turn.
     provider: async () => {
       calls++
+      if (calls > 1) {
+        return planMessage({ chatMessage: 'The requested furnace is placed.', plan: [], currentStep: 0, operations: [] })
+      }
       return planMessage({
         chatMessage: 'Placing the requested furnace.',
         plan,
@@ -928,7 +933,7 @@ test('verified completion can close before a trailing control-only Stop step', a
   assert.equal(started.taskBoard.steps.some(step => step.description === 'Stop'), false)
 
   const finished = await agent.completed()
-  assert.equal(calls, 1)
+  assert.equal(calls, 2)
   assert.equal(finished.goalStatus, 'completed')
   assert.equal(finished.operations.length, 0)
   assert.equal(agent.memory.currentPlan('npc:airi'), undefined)
@@ -941,8 +946,13 @@ test('verified completion can close before a trailing Report completion control-
   const plan = ['Place the requested furnace', 'Report completion']
   const agent = new NpcAgentLoop({
     rcon,
+    // The receipt proves the placement ran; closing this prose-only step is
+    // the Main LLM's judgment, so the planner confirms it on the next turn.
     provider: async () => {
       calls++
+      if (calls > 1) {
+        return planMessage({ chatMessage: 'The requested furnace is placed.', plan: [], currentStep: 0, operations: [] })
+      }
       return planMessage({
         chatMessage: 'Placing the requested furnace.',
         plan,
@@ -964,7 +974,7 @@ test('verified completion can close before a trailing Report completion control-
   assert.equal(started.taskBoard.steps.some(step => step.description === 'Report completion'), false)
 
   const finished = await agent.completed()
-  assert.equal(calls, 1)
+  assert.equal(calls, 2)
   assert.equal(finished.goalStatus, 'completed')
   assert.equal(finished.operations.length, 0)
   assert.equal(agent.memory.currentPlan('npc:airi'), undefined)
@@ -1004,8 +1014,9 @@ test('verified final completion is not mistaken for an action omission', async (
   const started = await agent.request('place one furnace', { sender: 'TTLouis' })
   assert.equal(started.operations[0].name, 'place_entity')
   const finished = await agent.completed()
-  assert.equal(calls, 1)
+  assert.equal(calls, 2)
   assert.equal(finished.goalStatus, 'completed')
+  assert.equal(rcon.mutations.length, 1)
   assert.equal(finished.operations.length, 0)
   assert.equal(agent.memory.currentPlan('npc:airi'), undefined)
   assert.match(agent.memory.context('npc:airi'), /place one furnace|requested furnace/i)

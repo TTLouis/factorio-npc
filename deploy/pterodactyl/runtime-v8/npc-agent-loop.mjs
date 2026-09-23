@@ -1978,8 +1978,13 @@ function verifiedFinalCompletion(plan, state, triggerSource, { freshObservation 
   if (!board || board.kind !== 'task_board_lite' || !Array.isArray(board.steps) || board.steps.length === 0) return false
   const activeIndex = Number.isSafeInteger(board.active_index) ? board.active_index : -1
   if (activeIndex < 0 || activeIndex >= board.steps.length) return false
-  const activeStep = board.steps[activeIndex]
-  if (!completionContractSupported(activeStep?.completion_contract)) return false
+  // A step with a deterministic contract must still meet it (checked by the
+  // caller). A prose-only final step has no contract, and its completion is
+  // the Main LLM's judgment: an explicit final-completion claim (plan: [])
+  // counts as that judgment under the same grounding rule as
+  // semanticCompletion -- an authoritative receipt for this step, or a fresh
+  // observation. Without this, a verified "place one furnace" ended as an
+  // action omission because no Jev receipt normalizer records a contract.
   const trailingSteps = board.steps.slice(activeIndex + 1)
   if (trailingSteps.some(step => !terminalControlOnlyPlanStep(step?.description))) return false
   const ref = Number.isSafeInteger(state.last_verified_batch_id) ? `batch_${state.last_verified_batch_id}` : ''
