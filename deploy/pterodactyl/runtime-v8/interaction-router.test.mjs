@@ -94,6 +94,7 @@ function agentFor(intent, {
   withPlan = true,
   queueConflict = intent === 'amend_current',
   decisionIntent,
+  decisionIntentConfidence = 0.91,
   decisionGranularity = 'keep',
   decisionReasoningBudget,
   decisionObservationBudget,
@@ -139,7 +140,7 @@ function agentFor(intent, {
                 type: 'choice',
                 choice: decisionIntent,
                 probabilities,
-                confidence: 0.91,
+                confidence: decisionIntentConfidence,
               },
               queue_conflict: {
                 type: 'noul',
@@ -235,8 +236,8 @@ test('constructor initializes routed lifecycle without requiring an intent varia
   assert.equal(agent.pendingInteractionAmendment, null)
 })
 
-test('Jev shadow disagreement is observed without changing the active interaction route', async () => {
-  const { agent, rcon, calls, decisionCalls } = agentFor('status_query', { decisionIntent: 'new_goal' })
+test('M11C ambiguous Jev disagreement keeps the language router authoritative', async () => {
+  const { agent, rcon, calls, decisionCalls } = agentFor('status_query', { decisionIntent: 'new_goal', decisionIntentConfidence: 0.6 })
   const result = await agent.request('what are you doing?', { sender: 'tester' })
 
   assert.equal(result.interactionIntent, 'status_query')
@@ -254,18 +255,18 @@ test('Jev shadow disagreement is observed without changing the active interactio
 })
 
 
-test('Jev shadow writes a dedicated decision lifecycle trace without copying the player message', async t => {
+test('M11C double evaluation writes a dedicated decision lifecycle trace without copying the player message', async t => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-jev-trace-'))
   t.after(() => fsp.rm(dir, { recursive: true, force: true }))
   const decisionTraceFile = path.join(dir, 'decision.jsonl')
-  const { agent } = agentFor('status_query', { decisionIntent: 'new_goal', decisionTraceFile })
+  const { agent } = agentFor('status_query', { decisionIntent: 'new_goal', decisionIntentConfidence: 0.6, decisionTraceFile })
 
   await agent.request('what are you doing?', { sender: 'tester' })
   const events = (await fsp.readFile(decisionTraceFile, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
 
   assert.deepEqual(events.map(event => event.event), ['decision.request', 'decision.response', 'decision.route_applied'])
   assert.equal(events[0].data.contract, 'interaction_route')
-  assert.equal(events[0].data.mode, 'shadow')
+  assert.equal(events[0].data.mode, 'hybrid_signal')
   assert.equal(events[0].data.message_chars, 'what are you doing?'.length)
   assert.equal(events[0].data.message, undefined)
   assert.deepEqual(events[0].data.question_ids, ['intent', 'queue_conflict'])
@@ -274,11 +275,12 @@ test('Jev shadow writes a dedicated decision lifecycle trace without copying the
   assert.equal(events[1].data.output_units, 8)
   assert.equal(events[2].data.active_source, 'interaction_router')
   assert.equal(events[2].data.active_intent, 'status_query')
-  assert.equal(events[2].data.shadow_intent, 'new_goal')
+  assert.equal(events[2].data.typed_intent, 'new_goal')
   assert.equal(events[2].data.agreement, false)
+  assert.equal(events[2].data.language_router_called, true)
 })
 
-test('Jev shadow provider failure records fallback while the existing router remains authoritative', async t => {
+test('M11C Jev failure falls back to the language router', async t => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-jev-fallback-'))
   t.after(() => fsp.rm(dir, { recursive: true, force: true }))
   const decisionTraceFile = path.join(dir, 'decision.jsonl')
@@ -293,7 +295,7 @@ test('Jev shadow provider failure records fallback while the existing router rem
   assert.equal(events[1].data.fallback_target, 'interaction_router')
   assert.match(events[1].data.reason, /temporary Jev outage/)
   assert.equal(events[2].data.active_intent, 'status_query')
-  assert.equal(events[2].data.shadow_available, false)
+  assert.equal(events[2].data.typed_available, false)
 })
 
 test('idle no-plan status query is classified, reaches Jev shadow, and skips the main planner', async () => {
@@ -301,6 +303,7 @@ test('idle no-plan status query is classified, reaches Jev shadow, and skips the
     running: false,
     withPlan: false,
     decisionIntent: 'new_goal',
+    decisionIntentConfidence: 0.6,
   })
 
   const result = await agent.request('What are you doing right now?', { sender: 'tester' })
@@ -317,6 +320,22 @@ test('idle no-plan status query is classified, reaches Jev shadow, and skips the
   assert.equal(decisionCalls[0].state.runtime.queue_length, 0)
   assert.equal(rcon.cancelCount, 0)
   assert.equal(Boolean(memory.currentPlan('npc:airi')), false)
+})
+
+test('M11C high-confidence status intent uses Jev directly without a routing-only Main-LLM call', async () => {
+  const { agent, calls, decisionCalls } = agentFor('status_query', {
+    running: false,
+    withPlan: false,
+    decisionIntent: 'status_query',
+  })
+
+  const result = await agent.request('What are you doing right now?', { sender: 'tester' })
+
+  assert.equal(result.interactionIntent, 'status_query')
+  assert.equal(result.routedOnly, true)
+  assert.equal(calls.length, 0)
+  assert.equal(decisionCalls.length, 1)
+  assert.deepEqual(Object.keys(decisionCalls[0].questions), ['intent', 'queue_conflict'])
 })
 
 test('idle no-plan chat_only is routed without the main planner and reaches Jev shadow', async () => {
@@ -355,7 +374,7 @@ test('idle no-plan real new goal is classified before the main planner runs once
   assert.equal(rcon.cancelCount, 0)
 })
 
-test('aligned fresh new goal floors micro reasoning and zero observations before the first planner turn', async () => {
+test('M11C aligned fresh new goal skips the routing-only Main-LLM call and preserves planner shaping', async () => {
   const { agent, calls, decisionCalls } = agentFor('new_goal', {
     running: false,
     withPlan: false,
@@ -368,15 +387,16 @@ test('aligned fresh new goal floors micro reasoning and zero observations before
   const result = await agent.request('半自动化铁板和铜片', { sender: 'tester' })
 
   assert.equal(result.interactionIntent, 'new_goal')
-  assert.equal(calls.length, 2)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].triggerSource, 'new_goal')
   assert.equal(decisionCalls.filter(call => call.questions?.intent).length, 1)
   const shapeCalls = decisionCalls.filter(call => call.state?.contract === 'interaction_planner_shape')
   assert.equal(shapeCalls.length, 1)
   assert.equal(shapeCalls[0].questions.reasoning_budget.type, 'choice')
   assert.equal(shapeCalls[0].questions.planning_horizon.type, 'choice')
   assert.equal(shapeCalls[0].questions.need_nearby_world.type, 'noul')
-  assert.equal(calls[1].reasoningBudget, 'normal')
-  const envelope = calls[1].messages.find(message => typeof message?.content === 'string' && message.content.startsWith('[DECISION_ENVELOPE]'))
+  assert.equal(calls[0].reasoningBudget, 'normal')
+  const envelope = calls[0].messages.find(message => typeof message?.content === 'string' && message.content.startsWith('[DECISION_ENVELOPE]'))
   assert.ok(envelope)
   assert.match(envelope.content, /planning_horizon=immediate/)
   assert.match(envelope.content, /observation_budget_remaining=3/)
@@ -415,15 +435,13 @@ test('idle no-plan interaction-router failure keeps the conservative new_goal fa
   assert.equal(rcon.cancelCount, 0)
 })
 
-test('cancelling the agent aborts an in-flight Jev shadow decision', async () => {
+test('M11C cancellation aborts an in-flight Jev decision before any language-router fallback', async () => {
   const memory = new CanonicalTaskBoardMemory()
   memory.planByNpc.set('npc:airi', activePlan())
   const rcon = new RouterRcon({ running: true })
 
   let decisionSignal
-  let routerSignal
-  let releaseRouter
-  const routerWait = new Promise(resolve => { releaseRouter = resolve })
+  let routerCalls = 0
 
   const agent = new NpcAgentLoop({
     rcon,
@@ -433,11 +451,9 @@ test('cancelling the agent aborts an in-flight Jev shadow decision', async () =>
     provider: async () => {
       throw new Error('main planner should not run')
     },
-    interactionProvider: async (_messages, context) => {
-      routerSignal = context.signal
-      await routerWait
-      if (context.signal.aborted) throw new Error('router aborted')
-      return { content: JSON.stringify({ intent: 'status_query', queue_conflict: false, reply: '' }) }
+    interactionProvider: async () => {
+      routerCalls++
+      throw new Error('language router should not start before Jev resolves')
     },
     interactionDecisionProvider: async (_state, _questions, context) => {
       decisionSignal = context.signal
@@ -453,17 +469,16 @@ test('cancelling the agent aborts an in-flight Jev shadow decision', async () =>
 
   const pending = agent.request('status?', { sender: 'tester' })
   for (let index = 0; index < 50; index++) {
-    if (decisionSignal && routerSignal) break
+    if (decisionSignal) break
     await new Promise(resolve => setTimeout(resolve, 1))
   }
 
   assert.ok(decisionSignal)
-  assert.equal(decisionSignal, routerSignal)
   agent.cancel('test_cancel')
   assert.equal(decisionSignal.aborted, true)
-  releaseRouter()
 
   await pending.catch(() => undefined)
+  assert.equal(routerCalls, 0)
   assert.equal(agent.interactionAbort, null)
 })
 
