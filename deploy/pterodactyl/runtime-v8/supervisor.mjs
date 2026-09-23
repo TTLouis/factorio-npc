@@ -983,22 +983,24 @@ export function liveAgentEvent(event, data = {}) {
       }
     }
     case 'interaction.routed': {
-      const shadow = data?.decision_shadow && typeof data.decision_shadow === 'object' ? data.decision_shadow : undefined
-      if (shadow) {
-        const confidence = decisionPercent(shadow.intent_confidence)
-        const match = shadow.intent === data.intent ? 'match' : `active ${uiText(data.intent, 80) || 'unknown'}`
-        const input = debugInteger(shadow.usage?.input_tokens)
-        const cost = decisionMicroUsd(shadow.usage?.cost)
+      const signal = data?.decision_shadow && typeof data.decision_shadow === 'object' ? data.decision_shadow : undefined
+      if (signal) {
+        const confidence = decisionPercent(signal.intent_confidence)
+        const routeSource = uiText(data.interaction_route_source, 40)
+        const direct = routeSource === 'jev'
+        const match = signal.intent === data.intent ? 'match' : `active ${uiText(data.intent, 80) || 'unknown'}`
+        const input = debugInteger(signal.usage?.input_tokens)
+        const cost = decisionMicroUsd(signal.usage?.cost)
         return {
           activity: {
             kind: 'system',
-            text: `Jev shadow: ${uiText(shadow.intent, 80) || 'unknown'} · ${confidence}% · ${match} · ${debugInteger(data.decision_shadow_latency_ms)} ms${input > 0 ? ` · ${input} in` : ''}${cost > 0 ? ` · ${cost} µUSD` : ''}`,
+            text: `Jev ${direct ? 'ACTIVE route' : 'hybrid signal'}: ${uiText(signal.intent, 80) || 'unknown'} · ${confidence}% · ${match} · ${debugInteger(data.decision_shadow_latency_ms)} ms${input > 0 ? ` · ${input} in` : ''}${cost > 0 ? ` · ${cost} µUSD` : ''}`,
           },
         }
       }
       const decisionError = uiText(data.decision_shadow_error, 200)
       return decisionError
-        ? { activity: { kind: 'system', text: `Jev shadow unavailable: ${decisionError}` } }
+        ? { activity: { kind: 'system', text: `Jev interaction signal unavailable: ${decisionError}` } }
         : undefined
     }
     case 'request.received':
