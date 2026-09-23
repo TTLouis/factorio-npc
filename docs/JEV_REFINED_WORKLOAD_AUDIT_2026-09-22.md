@@ -41,7 +41,7 @@ As of HEAD `584b04832dc0b6964aaee9171f0a1be384535785`, Jev is called in these li
 
 | Boundary | Live Jev workload | Current status |
 | --- | --- | --- |
-| incoming interaction | intent Choice, queue-conflict Noul, reasoning budget, planning horizon, 11 observation-relevance Nouls | shadow classifier alongside a separate Main-LLM interaction router |
+| incoming interaction | intent Choice + queue-conflict Noul; planner-shape questions only when planning will wake | M11C hybrid: high-confidence simple intents route directly from Jev; ambiguous, conversational, and uncertain amendment-conflict cases use the Main-LLM language router |
 | goal/plan boundary steering | development/steering Choice | useful semantic classification, but schema/parser currently expect unsupported extra generated fields |
 | observation selection | 11 parallel relevance Nouls | strong TypeSafe-native fit |
 | typed operation projection | one Choice across complete harness-built candidates plus observe/planner/user fallbacks | strong TypeSafe-native fit |
@@ -145,16 +145,16 @@ The user interface is still natural language. Jev should not replace the Main LL
 ability to understand nuance, converse naturally, explain state, or interpret open-ended
 requests.
 
-Current live flow spends:
+Before M11C, the live flow spent a Main-LLM JSON interaction-router call plus a Jev
+classifier call on every routed interaction. M11C removes that permanent duplication.
 
-```text
-Main-LLM JSON interaction router
-+
-Jev interaction classifier in shadow
-```
+The live policy now uses the Jev intent/conflict result directly for high-confidence,
+low-ambiguity lifecycle intents. It calls the Main-LLM language router only when
+natural-language nuance is still useful: conversational replies, low-confidence intent,
+or an amendment whose queue-conflict probability is not decisive.
 
-That duplication is not automatically wrong. The question is whether both calculations
-provide independent value.
+Selective double evaluation remains intentional where both calculations provide
+independent value.
 
 Target policy:
 
