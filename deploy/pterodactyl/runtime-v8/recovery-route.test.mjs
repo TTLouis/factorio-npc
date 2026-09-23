@@ -70,7 +70,7 @@ test('M11D exact recovery facts are routed deterministically before Jev', () => 
   assert.equal(deterministicRecoveryRoute({
     failureClass: 'provider_format',
     world: { task_state: 'idle', queue_length: 0 },
-  }).route, 'wake_planner')
+  }).route, 'fallback_runtime')
   assert.equal(deterministicRecoveryRoute({
     failureClass: 'provider_budget',
     world: { task_state: 'idle', queue_length: 0 },
