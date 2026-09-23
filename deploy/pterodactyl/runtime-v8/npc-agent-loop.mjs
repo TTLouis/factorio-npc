@@ -1516,6 +1516,10 @@ const INTERACTION_INTENTS = new Set([
   'chat_only',
 ])
 
+const INTERACTION_DIRECT_INTENT_CONFIDENCE = 0.9
+const INTERACTION_AMEND_CONFLICT_LOW = 0.2
+const INTERACTION_AMEND_CONFLICT_HIGH = 0.8
+
 const POST_STEP_ROUTES = new Set([
   'continue_current',
   'targeted_observation',
@@ -1706,6 +1710,25 @@ export function parseInteractionDecisionShadow(response) {
     model: typeof response?.model === 'string' ? response.model : undefined,
     provider: typeof response?.provider === 'string' ? response.provider : undefined,
     usage: response?.usage && typeof response.usage === 'object' ? response.usage : undefined,
+  }
+}
+
+function interactionDecisionNeedsLanguageRouter(decision) {
+  if (!decision) return true
+  if (decision.intent === 'chat_only') return true
+  if (decision.intent_confidence < INTERACTION_DIRECT_INTENT_CONFIDENCE) return true
+  if (decision.intent === 'amend_current') {
+    const conflict = decision.queue_conflict_probability
+    if (conflict > INTERACTION_AMEND_CONFLICT_LOW && conflict < INTERACTION_AMEND_CONFLICT_HIGH) return true
+  }
+  return false
+}
+
+function interactionRouteFromTypedDecision(decision) {
+  return {
+    intent: decision.intent,
+    queue_conflict: decision.intent === 'amend_current' ? decision.queue_conflict === true : false,
+    reply: '',
   }
 }
 
@@ -2887,7 +2910,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             : undefined,
         }
       : null
-    if (!this.interactionProvider) throw new AgentLoopError('Interaction router provider is unavailable')
 
     const state = {
       message: cleanMemoryText(text, 4000),
@@ -2904,59 +2926,90 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const decisionId = this.interactionDecisionProvider
       ? `decision_${Date.now().toString(36)}_${(++this.decisionRequestSequence).toString(36)}`
       : undefined
-    if (decisionId) {
-      await this.decisionTraceEvent('decision.request', {
-        decision_id: decisionId,
-        contract: 'interaction_route',
-        mode: 'shadow',
-        question_ids: Object.keys(decisionQuestions),
-        message_chars: state.message.length,
-        has_current_goal: currentGoal !== null,
-        runtime_task_state: cleanMemoryText(taskStatus?.task_state, 64),
-        runtime_queue_length: Number.isSafeInteger(taskStatus?.queue_length) ? taskStatus.queue_length : 0,
-      })
-    }
+    let typedDecision
+    let decisionError
+    let decisionLatencyMs
 
-    const decisionStartedAt = Date.now()
-    const decisionPromise = this.interactionDecisionProvider
-      ? this.interactionDecisionProvider(state, decisionQuestions, {
-          epoch: current.epoch,
-          actorId: current.actor_id,
-          signal: controller.signal,
-        }).then(async response => {
-          const shadow = parseInteractionDecisionShadow(response)
-          const latency_ms = Date.now() - decisionStartedAt
+    try {
+      if (decisionId) {
+        await this.decisionTraceEvent('decision.request', {
+          decision_id: decisionId,
+          contract: 'interaction_route',
+          mode: 'hybrid_signal',
+          question_ids: Object.keys(decisionQuestions),
+          message_chars: state.message.length,
+          has_current_goal: currentGoal !== null,
+          runtime_task_state: cleanMemoryText(taskStatus?.task_state, 64),
+          runtime_queue_length: Number.isSafeInteger(taskStatus?.queue_length) ? taskStatus.queue_length : 0,
+        })
+
+        const decisionStartedAt = Date.now()
+        try {
+          const response = await this.interactionDecisionProvider(state, decisionQuestions, {
+            epoch: current.epoch,
+            actorId: current.actor_id,
+            signal: controller.signal,
+          })
+          typedDecision = parseInteractionDecisionShadow(response)
+          decisionLatencyMs = Date.now() - decisionStartedAt
           await this.decisionTraceEvent('decision.response', {
             decision_id: decisionId,
             contract: 'interaction_route',
-            mode: 'shadow',
-            provider: shadow.provider,
-            model: shadow.model,
-            intent: shadow.intent,
-            confidence: shadow.intent_confidence,
-            queue_conflict_probability: shadow.queue_conflict_probability,
-            latency_ms,
-            input_units: Number.isFinite(shadow.usage?.input_tokens) ? Math.max(0, Math.trunc(shadow.usage.input_tokens)) : 0,
-            output_units: Number.isFinite(shadow.usage?.output_tokens) ? Math.max(0, Math.trunc(shadow.usage.output_tokens)) : 0,
-            cost_usd: Number.isFinite(shadow.usage?.cost) && shadow.usage.cost >= 0 ? shadow.usage.cost : 0,
+            mode: 'hybrid_signal',
+            provider: typedDecision.provider,
+            model: typedDecision.model,
+            intent: typedDecision.intent,
+            confidence: typedDecision.intent_confidence,
+            queue_conflict_probability: typedDecision.queue_conflict_probability,
+            latency_ms: decisionLatencyMs,
+            input_units: Number.isFinite(typedDecision.usage?.input_tokens) ? Math.max(0, Math.trunc(typedDecision.usage.input_tokens)) : 0,
+            output_units: Number.isFinite(typedDecision.usage?.output_tokens) ? Math.max(0, Math.trunc(typedDecision.usage.output_tokens)) : 0,
+            cost_usd: Number.isFinite(typedDecision.usage?.cost) && typedDecision.usage.cost >= 0 ? typedDecision.usage.cost : 0,
           })
-          return { shadow, latency_ms }
-        }).catch(async error => {
-          const latency_ms = Date.now() - decisionStartedAt
-          const message = cleanMemoryText(error instanceof Error ? error.message : String(error), 300)
+        }
+        catch (error) {
+          decisionLatencyMs = Date.now() - decisionStartedAt
+          decisionError = cleanMemoryText(error instanceof Error ? error.message : String(error), 300)
           await this.decisionTraceEvent('decision.fallback', {
             decision_id: decisionId,
             contract: 'interaction_route',
-            mode: 'shadow',
+            mode: 'hybrid_signal',
             fallback_target: 'interaction_router',
-            reason: message,
-            latency_ms,
+            reason: decisionError,
+            latency_ms: decisionLatencyMs,
           })
-          return { error: message, latency_ms }
-        })
-      : Promise.resolve(undefined)
+        }
+      }
 
-    try {
+      if (typedDecision && !interactionDecisionNeedsLanguageRouter(typedDecision)) {
+        const route = interactionRouteFromTypedDecision(typedDecision)
+        await this.decisionTraceEvent('decision.route_applied', {
+          decision_id: decisionId,
+          contract: 'interaction_route',
+          mode: 'active_typed',
+          active_source: 'jev',
+          active_intent: route.intent,
+          typed_intent: typedDecision.intent,
+          typed_confidence: typedDecision.intent_confidence,
+          language_router_called: false,
+        })
+        return {
+          route,
+          epoch: current,
+          decision_id: decisionId,
+          decision_shadow: typedDecision,
+          decision_shadow_error: decisionError,
+          decision_shadow_latency_ms: decisionLatencyMs,
+          interaction_router_called: false,
+          route_source: 'jev',
+          router_bypassed: false,
+        }
+      }
+
+      if (!this.interactionProvider) {
+        throw new AgentLoopError('Interaction router provider is unavailable for ambiguous or conversational interaction')
+      }
+
       const message = await this.interactionProvider([
         { role: 'system', content: INTERACTION_ROUTER_PROMPT },
         { role: 'user', content: JSON.stringify(state) },
@@ -2975,26 +3028,29 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         },
       })
       const route = parseInteractionRoute(message)
-      const decision = await decisionPromise
       if (decisionId) {
         await this.decisionTraceEvent('decision.route_applied', {
           decision_id: decisionId,
           contract: 'interaction_route',
-          mode: 'shadow',
+          mode: typedDecision ? 'hybrid_double_evaluation' : 'language_router_fallback',
           active_source: 'interaction_router',
           active_intent: route.intent,
-          shadow_intent: decision?.shadow?.intent ?? '',
-          agreement: decision?.shadow ? decision.shadow.intent === route.intent : undefined,
-          shadow_available: Boolean(decision?.shadow),
+          typed_intent: typedDecision?.intent ?? '',
+          agreement: typedDecision ? typedDecision.intent === route.intent : undefined,
+          typed_available: Boolean(typedDecision),
+          language_router_called: true,
         })
       }
       return {
         route,
         epoch: current,
         decision_id: decisionId,
-        decision_shadow: decision?.shadow,
-        decision_shadow_error: decision?.error,
-        decision_shadow_latency_ms: decision?.latency_ms,
+        decision_shadow: typedDecision,
+        decision_shadow_error: decisionError,
+        decision_shadow_latency_ms: decisionLatencyMs,
+        interaction_router_called: true,
+        route_source: 'interaction_router',
+        router_bypassed: false,
       }
     }
     finally {
@@ -3971,12 +4027,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
     let routed
-    if (!this.interactionProvider) {
+    if (!this.interactionProvider && !this.interactionDecisionProvider) {
       routed = {
         route: { intent: planBefore ? 'continue_current' : 'new_goal', queue_conflict: false, reply: '' },
         epoch: undefined,
         router_bypassed: true,
-        classifier_skipped: 'interaction_router_unavailable',
+        classifier_skipped: 'interaction_classifiers_unavailable',
       }
     }
     else {
@@ -4006,6 +4062,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       router_error: routed.router_error,
       classifier_skipped: routed.classifier_skipped,
       router_bypassed: routed.router_bypassed === true,
+      interaction_router_called: routed.interaction_router_called === true,
+      interaction_route_source: routed.route_source,
       decision_shadow: routed.decision_shadow,
       decision_shadow_error: routed.decision_shadow_error,
       decision_shadow_latency_ms: routed.decision_shadow_latency_ms,
