@@ -370,7 +370,8 @@ test('idle no-plan real new goal is classified before the main planner runs once
   assert.equal(calls[0].interactionRouter, true)
   assert.equal(calls[1].triggerSource, 'new_goal')
   assert.equal(decisionCalls.filter(call => call.questions?.intent).length, 1)
-  assert.equal(decisionCalls.filter(call => call.state?.contract === 'step_checkpoint_normalizer').length, 1)
+  // Jev no longer normalizes checkpoints before admission.
+  assert.equal(decisionCalls.filter(call => call.state?.contract === 'step_checkpoint_normalizer').length, 0)
   assert.equal(rcon.cancelCount, 0)
 })
 

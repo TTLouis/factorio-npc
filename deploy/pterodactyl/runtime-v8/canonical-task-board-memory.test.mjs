@@ -7,12 +7,8 @@ import { getActivePlan, GOAL_STATUS, PLAN_STATUS } from './planning-state.mjs'
 
 // A plan only commits on a real Jev scope review plus a real preflight result;
 // there is deliberately no default, so tests state the review they mean.
-const REVIEWED_ACTIONABLE = Object.freeze({
-  verdict: 'actionable',
-  reason_codes: [],
-  confidence: 0.9,
-  runtime_validation: { passed: true },
-})
+// Commit authority is deterministic runtime validation; Jev scope review was retired.
+const RUNTIME_VALIDATED = Object.freeze({ passed: true })
 
 function board() {
   return {
@@ -713,7 +709,7 @@ test('authoritative planning reducer persists BLOCKED and explicit user choice a
   }))
 
   memory.ensurePlanningDraft(key, memory.planByNpc.get(key), { now: 100 })
-  memory.commitPlanningPlan(key, { now: 110, review: REVIEWED_ACTIONABLE })
+  memory.commitPlanningPlan(key, { now: 110, runtime_validation: RUNTIME_VALIDATED })
   memory.applyOutcomeAuthority(key, {
     kind: 'world_blocked',
     source: 'deterministic_runtime',
@@ -744,7 +740,7 @@ test('new goal after reducer cancellation gets fresh planning lineage under reus
   const memory = new CanonicalTaskBoardMemory()
   memory.planByNpc.set(key, planState({ goal_id: 'goal_old' }))
   memory.ensurePlanningDraft(key, memory.planByNpc.get(key), { now: 100 })
-  memory.commitPlanningPlan(key, { now: 110, review: REVIEWED_ACTIONABLE })
+  memory.commitPlanningPlan(key, { now: 110, runtime_validation: RUNTIME_VALIDATED })
   const oldPlanId = getActivePlan(memory.planningState(key)).plan_id
 
   memory.terminatePlan(key)
@@ -799,7 +795,7 @@ test('blocked revise choice plus explicit user prompt creates successor and pres
     blocker: 'path_blocked',
   }))
   let planning = memory.ensurePlanningDraft(key, memory.planByNpc.get(key), { now: 100, migrated: true })
-  planning = memory.commitPlanningPlan(key, { now: 110, migrated: true, review: REVIEWED_ACTIONABLE })
+  planning = memory.commitPlanningPlan(key, { now: 110, migrated: true, runtime_validation: RUNTIME_VALIDATED })
   planning = memory.replayLegacyVerifiedPrefix(key, memory.planByNpc.get(key), planning, { now: 115 })
   memory.planningByNpc.set(key, planning)
   memory.applyOutcomeAuthority(key, {
@@ -859,7 +855,7 @@ function twoStepState() {
 function driveSliceToCompletion(memory, key) {
   memory.planByNpc.set(key, twoStepState())
   memory.ensurePlanningDraft(key, memory.planByNpc.get(key), { now: 100 })
-  memory.commitPlanningPlan(key, { now: 110, review: REVIEWED_ACTIONABLE })
+  memory.commitPlanningPlan(key, { now: 110, runtime_validation: RUNTIME_VALIDATED })
   const first = { kind: 'deterministic_verification', ref: 'proof_step_1', summary: 'iron gathered' }
   memory.recordBoardEvidence(key, first)
   memory.applyOutcomeAuthority(key, {
@@ -931,7 +927,7 @@ test('a committed slice is frozen: a new instruction cannot replace it', () => {
   const memory = new CanonicalTaskBoardMemory()
   memory.planByNpc.set(key, twoStepState())
   memory.ensurePlanningDraft(key, memory.planByNpc.get(key), { now: 100 })
-  memory.commitPlanningPlan(key, { now: 110, review: REVIEWED_ACTIONABLE })
+  memory.commitPlanningPlan(key, { now: 110, runtime_validation: RUNTIME_VALIDATED })
   const inFlight = getActivePlan(memory.planningState(key))
   assert.equal(inFlight.status, PLAN_STATUS.COMMITTED)
   const planCountBefore = memory.planningState(key).plans.length
@@ -984,7 +980,7 @@ test('harness continuation and an unchanged plan never supersede the in-flight s
   const memory = new CanonicalTaskBoardMemory()
   memory.planByNpc.set(key, twoStepState())
   memory.ensurePlanningDraft(key, memory.planByNpc.get(key), { now: 100 })
-  memory.commitPlanningPlan(key, { now: 110, review: REVIEWED_ACTIONABLE })
+  memory.commitPlanningPlan(key, { now: 110, runtime_validation: RUNTIME_VALIDATED })
   const inFlight = getActivePlan(memory.planningState(key))
 
   const continued = memory.recordPlan(key, { sender: 'Louis', text: 'continue' }, {

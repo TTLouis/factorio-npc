@@ -55,6 +55,26 @@ class RejectingPreflightRcon {
   }
 }
 
+// Admits every preflight and operation batch, so a test can drive the live
+// request path up to the first draft.
+class PlanningRcon {
+  constructor() {
+    this.mutations = []
+  }
+
+  async command(text) {
+    if (text.includes('remote.call("airi_deployment","status")')) return JSON.stringify(deployment())
+    if (text.includes('remote.call("autorio_preflight","operation"')) return JSON.stringify({ ok: true })
+    if (text.includes('local ok,result=pcall')) {
+      this.mutations.push(text)
+      const marker = text.match(/AIRI_RESULT_[a-f0-9]{24}:/)?.[0]
+      const admissions = [...text.matchAll(/return remote\.call\('autorio_operations'/g)].length
+      return `${marker}${JSON.stringify({ ok: true, result: Array.from({ length: admissions }, () => [true, 'Task started']) })}`
+    }
+    return '{}'
+  }
+}
+
 function proposedPlan(steps, currentStep = 0) {
   return {
     chatMessage: 'Working on the durable plan.',
@@ -806,16 +826,14 @@ test('goal-admission Jev steering is visible to the Main LLM before its first dr
     },
     steeringDecisionProvider: async (_state, questions) => {
       steeringCalls++
-      assert.ok(questions.steering, 'the dedicated boundary steering contract must be used')
+      // Steering is fully typed: the mode is a development choice and each
+      // reason code is its own pressure_* noul.
+      assert.ok(questions.development, 'the typed boundary steering contract must be used')
+      assert.ok(questions.pressure_goal_requires_new_capability)
       return {
         answers: {
-          development: { choice: 'vertical', confidence: 0.95 },
-          steering: {
-            choice: 'vertical',
-            confidence: 0.95,
-            reason_codes: ['goal_requires_new_capability'],
-            critical_path_summary: 'establish the first missing capability',
-          },
+          development: { type: 'choice', choice: 'vertical', confidence: 0.95, probabilities: { vertical: 0.95 } },
+          pressure_goal_requires_new_capability: { type: 'noul', noul: 0.9 },
         },
       }
     },
