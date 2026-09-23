@@ -1,6 +1,6 @@
 # Jev Workload Refinement Audit — 2026-09-22
 
-Status: **pre-E2E architecture cleanup authority**
+Status: **pre-E2E architecture cleanup authority — M11A-E implementation reconciled on 2026-09-22; CI/E2E validation still pending**
 
 This audit pauses Phase 9 E2E work until the live Jev workload matches the current
 TypeSafe/System One programming model closely enough that an experiment would measure
@@ -291,14 +291,20 @@ E2E comparison is deferred until this cleanup is complete.
 
 ### M11A — provider-schema fidelity
 
+Status: **implemented / contract-audited; CI validation pending.**
+
 Fix the TypeSafe adapter and exact contract tests.
 
 ### M11B — steering contract redesign
+
+Status: **implemented; typed steering heads and finite shelf-node selection are live.**
 
 Delete generated-field expectations and duplicate steering questions. Add finite
 runtime shelf-node selection only where useful.
 
 ### M11C — hybrid interaction routing
+
+Status: **implemented on 2026-09-22.** High-confidence bounded Jev intents can now handle simple routing directly; ambiguous, low-confidence, amendment-conflict, and conversational cases retain the Main-LLM language router. Planning/open-ended semantics still wake the Main LLM.
 
 Remove wasteful routing-only duplication without removing natural-language interaction.
 
@@ -308,10 +314,14 @@ double evaluation where independent signals improve handling.
 
 ### M11D — recovery simplification
 
+Status: **implemented and regression expectations reconciled on 2026-09-22; CI validation pending.**
+
 Move deterministic classifications/routes entirely into code and retain Jev only for
 ambiguous semantic recovery.
 
 ### M11E — typed-state demotion
+
+Status: **implemented.** Typed state remains trace-only telemetry and is not injected into Main-LLM context.
 
 Make M8 typed-state planner injection experimental/trace-only pending measurement.
 
