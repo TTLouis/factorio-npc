@@ -446,7 +446,7 @@ Before E2E measurement:
 
 - finish exact TypeSafe adapter schema fidelity;
 - redesign steering so every consumed value comes from an actual typed question;
-- eliminate the permanent Main-LLM-router + Jev-shadow duplication;
+- **implemented in M11C:** eliminate permanent Main-LLM-router + Jev-shadow duplication by using high-confidence Jev intent/conflict signals directly for simple lifecycle routing and reserving the language router for ambiguous/conversational cases;
 - move deterministic recovery classification/routing out of Jev;
 - demote typed-state-to-text planner injection to experimental/trace-only until measured.
 
