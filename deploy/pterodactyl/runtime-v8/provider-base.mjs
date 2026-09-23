@@ -503,6 +503,45 @@ function validPlanCandidate(candidate) {
   }
 }
 
+// DeepSeek sometimes leaks its native tool-call markup into `content` instead
+// of returning `tool_calls` (live: `<｜｜DSML｜｜ invoke name="submitPlan">`).
+// Parse it back into ordinary tool calls so they take the same admission path
+// as a native call. `string="false"` parameters carry JSON values. Anything
+// that does not parse completely is left as content for the format recovery.
+const DSML_TAG = String.raw`<\s*(/?)\s*[｜|]+\s*DSML\s*[｜|]+\s*`
+const DSML_CALLS = new RegExp(`${DSML_TAG}calls\\s*>([\\s\\S]*?)${DSML_TAG}calls\\s*>`)
+const DSML_INVOKE = new RegExp(`${DSML_TAG}invoke\\s+name="([^"]+)"\\s*>([\\s\\S]*?)${DSML_TAG}invoke\\s*>`, 'g')
+const DSML_PARAMETER = new RegExp(`${DSML_TAG}parameter\\s+name="([^"]+)"(?:\\s+string="(true|false)")?\\s*>([\\s\\S]*?)${DSML_TAG}parameter\\s*>`, 'g')
+
+export function recoverDsmlToolCalls(content) {
+  const text = String(content ?? '')
+  const block = DSML_CALLS.exec(text)
+  if (!block || block[1] !== '' || block[3] !== '/') return undefined
+  const calls = []
+  for (const invoke of block[2].matchAll(DSML_INVOKE)) {
+    if (invoke[1] !== '' || invoke[4] !== '/') return undefined
+    const args = {}
+    for (const parameter of invoke[3].matchAll(DSML_PARAMETER)) {
+      if (parameter[1] !== '' || parameter[5] !== '/') return undefined
+      const [, , key, isString, raw] = parameter
+      if (isString === 'false') {
+        try { args[key] = JSON.parse(raw) }
+        catch { return undefined }
+      }
+      else {
+        args[key] = raw
+      }
+    }
+    calls.push({
+      id: `call_dsml_${calls.length + 1}`,
+      type: 'function',
+      function: { name: invoke[2], arguments: JSON.stringify(args) },
+    })
+  }
+  if (calls.length === 0) return undefined
+  return { content: text.slice(0, block.index).trim(), tool_calls: calls }
+}
+
 export function normalizeProviderPlanContent(content) {
   const text = String(content ?? '').trim()
   if (!text) return text
@@ -1074,6 +1113,24 @@ export async function providerRequest(config, messages, {
     const rawContent = typeof message.content === 'string' ? message.content : ''
     const rawShape = contentShape(rawContent)
     const reasoningContentChars = providerReasoningChars(message)
+    const dsml = message.tool_calls === undefined && typeof message.content === 'string'
+      ? recoverDsmlToolCalls(message.content)
+      : undefined
+    let dsmlRecovered
+    if (dsml && !allowTools) {
+      // No tools were offered, so only a leaked submitPlan is usable: its
+      // arguments are the plan object the content was supposed to hold.
+      const sole = dsml.tool_calls.length === 1 && dsml.tool_calls[0].function.name === 'submitPlan'
+      if (sole) {
+        message.content = dsml.tool_calls[0].function.arguments
+        dsmlRecovered = 'submit_plan_content'
+      }
+    }
+    else if (dsml) {
+      message.content = dsml.content
+      message.tool_calls = dsml.tool_calls
+      dsmlRecovered = 'tool_calls'
+    }
     const toolCallCount = Array.isArray(message.tool_calls) ? message.tool_calls.length : 0
     if (message.tool_calls === undefined && typeof message.content === 'string') {
       message.content = normalizeProviderPlanContent(message.content)
@@ -1113,6 +1170,7 @@ export async function providerRequest(config, messages, {
       choice_keys: choice && typeof choice === 'object' ? Object.keys(choice) : [],
       message_keys: Object.keys(message),
       tool_call_count: toolCallCount,
+      dsml_recovery: dsmlRecovered,
       reasoning_content_chars: reasoningContentChars,
       ...rawShape,
       normalized_content_chars: normalizedContent.length,

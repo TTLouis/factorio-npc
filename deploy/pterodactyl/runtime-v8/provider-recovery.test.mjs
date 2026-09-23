@@ -258,3 +258,69 @@ test('ordinary provider HTTP failures remain transport failures rather than budg
     },
   )
 })
+
+// Live deepseek (goal_mubkwykj, goal_mubm2fdg) leaked its native tool-call
+// markup as content twice per goal, which ended both goals as
+// provider_content_invalid_json.
+const DSML_SUBMIT_PLAN = [
+  '<｜｜DSML｜｜ calls>',
+  '<｜｜DSML｜｜ invoke name="submitPlan">',
+  '<｜｜DSML｜｜ parameter name="chatMessage" string="true">熔炉已放置在(52,20)。</｜｜DSML｜｜ parameter>',
+  '<｜｜DSML｜｜ parameter name="plan" string="false">["采集铁矿、煤和石头","放置熔炉并烧出 10 个 iron-plate"]</｜｜DSML｜｜ parameter>',
+  '<｜｜DSML｜｜ parameter name="currentStep" string="false">1</｜｜DSML｜｜ parameter>',
+  '<｜｜DSML｜｜ parameter name="operations" string="false">[{"name": "supply_entity", "args": {"unit_number": 69, "items": [{"item_name": "iron-ore", "count": 12}]}}]</｜｜DSML｜｜ parameter>',
+  '</｜｜DSML｜｜ invoke>',
+  '</｜｜DSML｜｜ calls>',
+].join('\n')
+
+test('leaked DSML tool-call markup is recovered as native tool calls', async () => {
+  const message = await providerRequest(config, messages, { fetchImpl: contentFetch(DSML_SUBMIT_PLAN), allowTools: true })
+  assert.equal(message._airiProvider.diagnostic_code, 'ok')
+  assert.equal(message._airiProvider.dsml_recovery, 'tool_calls')
+  assert.equal(message.content, '')
+  assert.equal(message.tool_calls.length, 1)
+  assert.equal(message.tool_calls[0].function.name, 'submitPlan')
+  const args = JSON.parse(message.tool_calls[0].function.arguments)
+  assert.equal(args.chatMessage, '熔炉已放置在(52,20)。')
+  assert.deepEqual(args.plan, ['采集铁矿、煤和石头', '放置熔炉并烧出 10 个 iron-plate'])
+  assert.equal(args.currentStep, 1)
+  assert.equal(args.operations[0].args.unit_number, 69)
+})
+
+test('leaked DSML submitPlan becomes plan content when tools are disabled', async () => {
+  const message = await providerRequest(config, messages, {
+    fetchImpl: contentFetch(DSML_SUBMIT_PLAN),
+    allowTools: false,
+    recoveryAttempt: 1,
+  })
+  assert.equal(message.tool_calls, undefined)
+  assert.equal(message._airiProvider.dsml_recovery, 'submit_plan_content')
+  assert.equal(message._airiProvider.diagnostic_code, 'ok')
+  assert.equal(JSON.parse(message.content).currentStep, 1)
+})
+
+test('several leaked DSML invokes become several tool calls', async () => {
+  const content = [
+    '<｜｜DSML｜｜ calls>',
+    '<｜｜DSML｜｜ invoke name="craft_item">',
+    '<｜｜DSML｜｜ parameter name="item_name" string="true">stone-furnace</｜｜DSML｜｜ parameter>',
+    '<｜｜DSML｜｜ parameter name="count" string="false">1</｜｜DSML｜｜ parameter>',
+    '</｜｜DSML｜｜ invoke>',
+    '<｜DSML｜ invoke name="getInventory">',
+    '</｜DSML｜ invoke>',
+    '</｜｜DSML｜｜ calls>',
+  ].join('\n')
+  const message = await providerRequest(config, messages, { fetchImpl: contentFetch(content), allowTools: true })
+  assert.deepEqual(message.tool_calls.map(call => call.function.name), ['craft_item', 'getInventory'])
+  assert.deepEqual(JSON.parse(message.tool_calls[0].function.arguments), { item_name: 'stone-furnace', count: 1 })
+  assert.deepEqual(JSON.parse(message.tool_calls[1].function.arguments), {})
+  assert.notEqual(message.tool_calls[0].id, message.tool_calls[1].id)
+})
+
+test('malformed DSML markup is left for the ordinary format recovery', async () => {
+  const content = '<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="submitPlan">\n<｜｜DSML｜｜ parameter name="plan" string="false">[broken</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>'
+  const message = await providerRequest(config, messages, { fetchImpl: contentFetch(content), allowTools: true })
+  assert.equal(message.tool_calls, undefined)
+  assert.equal(message._airiProvider.diagnostic_code, 'provider_content_invalid_json')
+  assert.equal(message._airiProvider.dsml_recovery, undefined)
+})
