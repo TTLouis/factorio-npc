@@ -89,7 +89,7 @@ test('Jev shadow diagnostics survive the following planner request reset and rem
     decision_shadow_latency_ms: 84,
   })
   assert.equal(activity?.activity?.kind, 'system')
-  assert.match(activity?.activity?.text ?? '', /Jev shadow: new_goal/)
+  assert.match(activity?.activity?.text ?? '', /Jev hybrid signal: new_goal/)
   assert.match(activity?.activity?.text ?? '', /active status_query/)
   assert.match(activity?.activity?.text ?? '', /120 in/)
 })
