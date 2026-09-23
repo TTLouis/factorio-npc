@@ -2981,6 +2981,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
       }
 
+      if (controller.signal.aborted) {
+        throw new AgentLoopError('Interaction routing cancelled or superseded')
+      }
+
       if (typedDecision && !interactionDecisionNeedsLanguageRouter(typedDecision)) {
         const route = interactionRouteFromTypedDecision(typedDecision)
         await this.decisionTraceEvent('decision.route_applied', {
