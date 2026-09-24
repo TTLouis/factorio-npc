@@ -2013,8 +2013,8 @@ function terminalControlOnlyPlanStep(value) {
   return isLifecycleMetaStep(value)
 }
 
-// A plan that keeps the committed steps and moves currentStep exactly one step
-// past the active step, with operations for that step, implies a semantic
+// A plan that keeps the active and next step and moves currentStep exactly one
+// step past the active step, with operations for that step, implies a semantic
 // completion claim for the active step.
 function impliedSemanticCompletion(plan, state) {
   const board = state?.task_board
@@ -2023,9 +2023,11 @@ function impliedSemanticCompletion(plan, state) {
   const activeIndex = Number.isSafeInteger(board.active_index) ? board.active_index : -1
   const step = board.steps[activeIndex]
   if (!step || plan.currentStep !== activeIndex + 1 || activeIndex + 1 >= board.steps.length) return undefined
+  // Later steps are proposals the committed plan ignores, and the planner
+  // often rewords them; only the active and next step must be unchanged.
   const sameSteps = Array.isArray(plan.plan)
-    && plan.plan.length === board.steps.length
-    && board.steps.every((entry, index) => cleanMemoryText(plan.plan[index], 500) === cleanMemoryText(entry?.description, 500))
+    && [activeIndex, activeIndex + 1].every(index =>
+      cleanMemoryText(plan.plan[index], 500) === cleanMemoryText(board.steps[index]?.description, 500))
   if (!sameSteps) return undefined
   return {
     stepId: step.id,
@@ -4623,6 +4625,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           ...exchange,
           model: typeof response?.model === 'string' ? response.model : undefined,
           answers: response?.answers,
+          ...(response?.invalid_answers ? { invalid_answers: response.invalid_answers } : {}),
           latency_ms: Date.now() - startedAt,
         })
         return response
@@ -6059,6 +6062,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  // Closing a step changes no world state, so a fresh read taken earlier in
+  // this continuation still grounds the next step's claim. Any new batch
+  // returns through a continuation, which clears it.
+  resetRepairAfterClosedStep() {
+    const freshObservation = this.freshObservationSinceContinuation
+    this.clearActionOmissionRecovery()
+    this.freshObservationSinceContinuation = freshObservation
+  }
+
   clearActionOmissionRecovery() {
     this.actionOmissionRepairActive = false
     this.actionOmissionObservationUsed = false
@@ -6460,7 +6472,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (this.freshObservationSinceContinuation) {
       grounding.push({
         kind: 'verified_world_state',
-        ref: `${this.traceRequest?.id ?? 'request'}/semantic_fresh_observation`,
+        // One record per step: the evidence store drops a repeated ref, which
+        // would leave the next step's claim with nothing bound to it.
+        ref: `${this.traceRequest?.id ?? 'request'}/semantic_fresh_observation/${step.id}`,
         summary: 'The Main LLM made this semantic completion judgment after a fresh authoritative read-only world observation in the active request.',
       })
     }
@@ -6544,7 +6558,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       try {
         const semantic = await this.applySemanticCompletionClaim({ ...plan, semanticCompletion: implied }, previousState)
         previousState = semantic.state ?? previousState
-        if (semantic.applied === true) this.clearActionOmissionRecovery()
+        if (semantic.applied === true) this.resetRepairAfterClosedStep()
       }
       catch (error) {
         await this.traceEvent('step.implied_completion_skipped', {
@@ -6558,7 +6572,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       previousState = semantic.state ?? previousState
       // A closed step is progress: the next step gets a fresh act-or-block
       // repair instead of failing on the one this claim just resolved.
-      if (semantic.applied === true) this.clearActionOmissionRecovery()
+      if (semantic.applied === true) this.resetRepairAfterClosedStep()
       if (previousState?.status === 'completed' && commands.length > 0) {
         const error = new AgentLoopError('semantic_completion_final_step_cannot_have_followup_operations')
         error.failureClass = 'plan_category'
