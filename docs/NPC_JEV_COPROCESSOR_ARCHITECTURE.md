@@ -243,13 +243,20 @@ marked `stale` once a newer batch has completed), `plan_steps`, and
 `active_step_has_completion_evidence`. A missing or stale read never counts as
 sufficient evidence.
 
-Two harness rules keep relevance from blocking progress:
+Reads cost no API money; extra planner rounds and large results do. Jev's budget
+therefore bounds rounds, not which facts the planner may see. Every read tool has an
+admission tier (`OBSERVATION_TOOL_TIER` in `structured-policy.mjs`):
 
-- **Completion-proof reads.** While a goal has an active step, fresh reads of current
-  state (actor, task, crafting, inventory, equipment, entity, research status) are
-  admitted even when the budget or relevance would defer them, because a step cannot
-  close without authoritative evidence. They still count against the budget, so an
-  exhausted budget forces the next decision without tools.
+| Tier | Reads | Jev's role |
+|---|---|---|
+| fact | current state (actor, task, navigation, crafting, combat, inventory, equipment, entity status/geometry, research status) and deterministic game data (recipes, production scope/solve, prototype details, technology, research path) | none; only harness caps apply (per-batch cap, cache, duplicate suppression) |
+| discovery | nearby and long-range entities, enemies, spatial observation, placement, logistics, transport, construction queries, prototype search | ranks them; one is admitted per batch when the planner asks |
+| optional | player state, skill lookup | relevance gates them |
+
+Every admitted fresh read counts against the budget. When it reaches zero the
+observation phase closes and nothing is admitted, facts included, until the next
+decision: that is what bounds the planner's rounds.
+
 - **Observe-route floor.** When the post-step route is `targeted_observation` but no
   family clears the threshold, one read on the highest-ranked family is admitted.
 
