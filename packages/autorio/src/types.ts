@@ -14,6 +14,7 @@ export enum TaskStates {
   WALKING_DIRECT = 'walking_direct',
   MOVING_ITEMS = 'moving_items',
   SETTING_RECIPE = 'setting_recipe',
+  LAUNCHING_ROCKET = 'launching_rocket',
   ATTACKING = 'attacking',
   WAITING = 'waiting',
 }
@@ -177,6 +178,20 @@ export interface PlayerParametersSetRecipe {
   recipe_name: string
 }
 
+export interface PlayerParametersLaunchRocket {
+  type: TaskStates.LAUNCHING_ROCKET
+  operation_id?: number
+  owner_actor_id?: number
+  owner_actor_kind?: string
+  owner_force_index?: number
+  /** Stable Factorio identity of the exact rocket silo. Never falls back to another silo. */
+  target_unit_number: number
+  /** Force rockets_launched when the launch was ordered; set once the order succeeds. */
+  rockets_launched_before?: number
+  /** Tick the launch was ordered; bounds the wait for the launch to register. */
+  launch_ordered_tick?: number
+}
+
 export interface PlayerParametersCraftItem {
   type: TaskStates.CRAFTING
   item_name: string
@@ -278,6 +293,7 @@ export type PlayerParameters
     | PlayerParametersRotateEntity
     | PlayerParametersMoveItems
     | PlayerParametersSetRecipe
+    | PlayerParametersLaunchRocket
     | PlayerParametersCraftItem
     | PlayerParametersAttackNearestEnemy
     | PlayerParametersResearchTechnology
@@ -294,6 +310,7 @@ export interface PlayerState {
   parameters_rotate_entity?: PlayerParametersRotateEntity
   parameters_move_items?: PlayerParametersMoveItems
   parameters_set_recipe?: PlayerParametersSetRecipe
+  parameters_launch_rocket?: PlayerParametersLaunchRocket
   parameters_craft_item?: PlayerParametersCraftItem
   parameters_attack_nearest_enemy?: PlayerParametersAttackNearestEnemy
   parameters_research_technology?: PlayerParametersResearchTechnology

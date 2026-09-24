@@ -52,6 +52,7 @@ const STRICT_TASKS_BY_OPERATION = new Map([
   ['move_items_exact', ['moving_items']],
   ['move_items_with_player', ['moving_items']],
   ['set_machine_recipe', ['setting_recipe']],
+  ['launch_rocket', ['launching_rocket']],
   ['craft_item', ['crafting']],
   ['attack_nearest_enemy', ['attacking']],
   ['clear_enemy_area', ['attacking']],

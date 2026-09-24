@@ -12,6 +12,7 @@ export const SUPPORTED_RUNTIME_TASK_STATES = [
   TaskStates.ROTATING,
   TaskStates.MOVING_ITEMS,
   TaskStates.SETTING_RECIPE,
+  TaskStates.LAUNCHING_ROCKET,
   TaskStates.CRAFTING,
   TaskStates.RESEARCHING,
   TaskStates.ATTACKING,

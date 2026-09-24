@@ -114,6 +114,7 @@ const EXACT_ENTITY_TARGET_OPERATIONS = new Set([
   'rotate_entity',
   'move_items_exact',
   'set_machine_recipe',
+  'launch_rocket',
 ])
 
 const JEV_PIPELINE_RUNTIME_GUARDS = [
@@ -581,6 +582,9 @@ function compactBasicOperationResult(result) {
     placed_direction: Number.isSafeInteger(result.placed_direction) ? result.placed_direction : undefined,
     to_entity: typeof result.to_entity === 'boolean' ? result.to_entity : undefined,
     to_player: typeof result.to_player === 'boolean' ? result.to_player : undefined,
+    rocket_parts: Number.isSafeInteger(result.rocket_parts) ? result.rocket_parts : undefined,
+    rocket_parts_required: Number.isSafeInteger(result.rocket_parts_required) ? result.rocket_parts_required : undefined,
+    rockets_launched: Number.isSafeInteger(result.rockets_launched) ? result.rockets_launched : undefined,
   }
 }
 
@@ -590,6 +594,7 @@ const BASIC_OPERATION_TASK_TYPE = new Map([
   ['placing', 'placing'],
   ['moving_items', 'moving_items'],
   ['setting_recipe', 'setting_recipe'],
+  ['launching_rocket', 'launching_rocket'],
   ['crafting', 'crafting'],
   ['attacking', 'attacking'],
 ])

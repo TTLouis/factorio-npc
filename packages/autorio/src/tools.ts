@@ -398,6 +398,11 @@ export function create_tools_remote_interface() {
         inventories_truncated: entity.get_max_inventory_index() > MAX_ENTITY_INVENTORIES,
         inventory_items_truncated,
       }
+      if (entity.type === 'rocket-silo') {
+        entity_summary.rocket_parts = entity.rocket_parts
+        entity_summary.rocket_parts_required = entity.prototype.rocket_parts_required
+        entity_summary.rocket_ready = entity.rocket_silo_status === defines.rocket_silo_status.rocket_ready
+      }
       const spatial = compact_spatial_summary(entity)
       if (spatial !== undefined) entity_summary.spatial = spatial
 

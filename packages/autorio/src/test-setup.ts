@@ -119,6 +119,11 @@ import { event_handlers, set_load_handler } from './test-event-registry'
     crafter_trash: 'crafter_trash',
     assembling_machine_dump: 'assembling_machine_dump',
   },
+  rocket_silo_status: {
+    building_rocket: 'building_rocket',
+    rocket_ready: 'rocket_ready',
+    launch_started: 'launch_started',
+  },
 }
 
 ;(globalThis as any).math = {

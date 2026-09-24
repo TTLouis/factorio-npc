@@ -42,7 +42,7 @@ describe('canonical Factorio provider contract parity', () => {
     expect(Object.entries(operationContract)
       .filter(([, definition]) => !definition.surfaces.includes('ordinary-agent'))
       .map(([name]) => name)
-      .sort()).toEqual(['execute_construction_plan', 'gather_resource', 'supply_entity'])
+      .sort()).toEqual(['execute_construction_plan', 'gather_resource', 'launch_rocket', 'supply_entity'])
   })
 
   it('keeps the complete ordinary-agent tool surface aligned with the manifest', () => {

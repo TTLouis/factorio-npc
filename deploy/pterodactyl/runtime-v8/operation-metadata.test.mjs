@@ -42,6 +42,7 @@ const fixtures = Object.freeze({
   move_items: { name: 'move_items', args: { item_name: 'coal', entity_name: 'stone-furnace', max_count: 1, to_entity: true } },
   move_items_exact: { name: 'move_items_exact', args: { item_name: 'coal', unit_number: 1, max_count: 1, to_entity: true } },
   set_machine_recipe: { name: 'set_machine_recipe', args: { unit_number: 1, recipe_name: 'iron-gear-wheel' } },
+  launch_rocket: { name: 'launch_rocket', args: { unit_number: 1 } },
   move_items_with_player: { name: 'move_items_with_player', args: { item_name: 'coal', player_name: 'player', max_count: 1, to_player: true } },
   craft_item: { name: 'craft_item', args: { item_name: 'iron-gear-wheel' } },
   attack_nearest_enemy: { name: 'attack_nearest_enemy', args: {} },

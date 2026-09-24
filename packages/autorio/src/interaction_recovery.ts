@@ -180,6 +180,16 @@ export function new_interaction_recovery(manager: Manager) {
       return interrupt(manager, entity_navigation(actor, target, reach), task, `recipe-machine approach to <=${reach} tiles`)
     }
 
+    if (manager.player_state.task_state === TaskStates.LAUNCHING_ROCKET) {
+      const task = manager.player_state.parameters_launch_rocket
+      if (!task || task.launch_ordered_tick !== undefined) return false
+      const target = resolve_exact_entity(actor, task.target_unit_number)
+      if (!target || !target.valid || target.surface.index !== actor.surface.index || target.force.index !== actor.force.index) return false
+      const reach = entity_interaction_reach(actor)
+      if (squared_distance(actor.position, target.position) <= reach ** 2) return false
+      return interrupt(manager, entity_navigation(actor, target, reach), task, `rocket-silo approach to <=${reach} tiles`)
+    }
+
     if (manager.player_state.task_state !== TaskStates.MOVING_ITEMS) return false
     const task = manager.player_state.parameters_move_items
     if (!task) return false

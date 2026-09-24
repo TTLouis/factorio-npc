@@ -33,6 +33,7 @@ import { execute_placement_candidate } from './placement_candidates'
 import { create_production_planning_remote_interface } from './production_planning_remote'
 import { create_prototype_knowledge_remote_interface } from './prototype_knowledge'
 import { new_recipe_configuration_runtime } from './recipe_configuration'
+import { new_rocket_launch_runtime } from './rocket_launch'
 import { new_research_controller } from './research'
 import { research_operation_preflight } from './research_preflight'
 import { ensure_basic_skill_definitions } from './skills'
@@ -62,6 +63,7 @@ const basic_operation_controller = new_basic_operation_controller(get_controlled
 const basic_operation_runtime = new_basic_operation_runtime(task_manager, basic_operation_controller)
 const orientation_runtime = new_orientation_runtime(task_manager, basic_operation_controller)
 const recipe_configuration_runtime = new_recipe_configuration_runtime(task_manager, basic_operation_controller)
+const rocket_launch_runtime = new_rocket_launch_runtime(task_manager, basic_operation_controller)
 const interaction_recovery = new_interaction_recovery(task_manager)
 const navigation_controller = new_navigation_controller(get_controlled_actor, task_manager)
 const composite_operation_controller = new_composite_operation_controller(navigation_controller, basic_operation_controller, task_manager)
@@ -92,6 +94,7 @@ const runtime_task_dispatchers: Record<RuntimeTaskState, RuntimeTaskDispatcher> 
   [TaskStates.ROTATING]: actor => orientation_runtime.state_rotating(actor),
   [TaskStates.MOVING_ITEMS]: actor => basic_operation_runtime.state_moving_items(actor),
   [TaskStates.SETTING_RECIPE]: actor => recipe_configuration_runtime.state_setting_recipe(actor),
+  [TaskStates.LAUNCHING_ROCKET]: actor => rocket_launch_runtime.state_launching_rocket(actor),
   [TaskStates.CRAFTING]: actor => crafting_controller.tick(actor),
   [TaskStates.RESEARCHING]: actor => research_controller.tick(actor),
   [TaskStates.ATTACKING]: actor => combat_controller.tick(actor),
@@ -213,6 +216,7 @@ function operation_preflight(name: string, args: Record<string, any>) {
     'rotate_entity',
     'move_items_exact',
     'set_machine_recipe',
+    'launch_rocket',
   ]
   if (exact_unit_operations.indexOf(name) >= 0) {
     if (!actor || !actor.is_valid) return reject('no_actor')
@@ -462,6 +466,11 @@ remote.add_interface('autorio_operations', {
   set_machine_recipe: (unit_number: number, recipe_name: string): [boolean, string] => {
     const result = basic_operation_controller.submit_set_recipe_exact(unit_number, recipe_name)
     if (result[0]) log(`[AUTORIO] New set_machine_recipe task for entity unit ${unit_number}: ${recipe_name}`)
+    return result
+  },
+  launch_rocket: (unit_number: number): [boolean, string] => {
+    const result = basic_operation_controller.submit_launch_rocket_exact(unit_number)
+    if (result[0]) log(`[AUTORIO] New launch_rocket task for silo unit ${unit_number}`)
     return result
   },
   move_items_with_player: (item_name: string, player_name: string, max_count: number, to_player: boolean): [boolean, string] => {

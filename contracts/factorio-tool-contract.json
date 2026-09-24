@@ -414,6 +414,19 @@
       ],
       "pterodactyl_layer": "staging-base"
     },
+    "launch_rocket": {
+      "args": [
+        "unit_number"
+      ],
+      "remote": [
+        "autorio_operations",
+        "launch_rocket"
+      ],
+      "surfaces": [
+        "pterodactyl-runtime-v8"
+      ],
+      "pterodactyl_layer": "staging-base"
+    },
     "move_items_with_player": {
       "args": [
         "item_name",
