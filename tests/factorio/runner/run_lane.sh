@@ -197,6 +197,8 @@ case "$LANE" in
     # Ordering matters: the assembler gate ends by exercising the NPC recipe
     # operation, which currently kills the Factorio process (see the runtime
     # defect documented in powered_assembler_cell.py), so it must run last.
+    printf '[npc-test][production] Running candidate drill -> furnace placement gate...\n'
+    run_py burner_drill_placement_cell.py
     printf '[npc-test][production] Running A1 belt/inserter transport gate...\n'
     run_py belt_transport_cell.py
     printf '[npc-test][production] Running A1 powered assembler production cell gate...\n'
