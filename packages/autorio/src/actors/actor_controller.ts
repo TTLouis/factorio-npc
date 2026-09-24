@@ -1,3 +1,4 @@
+import type { LuaSurface } from 'factorio:runtime'
 import type { ControlledActor } from './types'
 import { ConnectedPlayerActor } from './connected_player_actor'
 import { StandaloneCharacterActor } from './standalone_character_actor'
@@ -37,6 +38,25 @@ declare const storage: {
   standalone_character_unit_number?: number
   airi_last_npc_recovery?: NpcRecoveryReceipt
   airi_owned_crafting?: OwnedCraftingMarker
+  // Surface the NPC body was last seen alive on; a replacement body respawns
+  // there, at (0, 0), rather than always on Nauvis.
+  airi_npc_surface_index?: number
+}
+
+const RESPAWN_POSITION = { x: 0, y: 0 }
+
+function npc_home_surface(): LuaSurface | undefined {
+  const index = storage.airi_npc_surface_index
+  if (index !== undefined) {
+    const surface = game.get_surface(index as LuaSurface['index'])
+    if (surface !== undefined && surface.valid) return surface
+  }
+  return game.surfaces[1]
+}
+
+function remember_npc_surface(actor: StandaloneCharacterActor) {
+  const index = actor.surface.index
+  if (storage.airi_npc_surface_index !== index) storage.airi_npc_surface_index = index
 }
 
 let standalone_actor: StandaloneCharacterActor | undefined
@@ -220,11 +240,12 @@ function record_npc_recovery(previous_actor_id: number, actor: StandaloneCharact
 
 function get_npc_actor(): ControlledActor | undefined {
   if (standalone_actor?.is_valid) {
+    remember_npc_surface(standalone_actor)
     maybe_reconcile_loaded_npc(standalone_actor)
     return standalone_actor
   }
 
-  const surface = game.surfaces[1]
+  const surface = npc_home_surface()
   const force = game.forces.player
   if (!surface || !force) {
     return undefined
@@ -234,6 +255,7 @@ function get_npc_actor(): ControlledActor | undefined {
   standalone_actor = StandaloneCharacterActor.reacquire(surface)
   if (standalone_actor?.is_valid) {
     recovery_invalidated_actor_id = undefined
+    remember_npc_surface(standalone_actor)
     maybe_reconcile_loaded_npc(standalone_actor)
     return standalone_actor
   }
@@ -242,7 +264,8 @@ function get_npc_actor(): ControlledActor | undefined {
     invalidate_missing_npc(persisted_actor_id)
   }
 
-  const spawn_position = force.get_spawn_position(surface)
+  // Respawn at (0, 0) of the surface the body was last alive on.
+  const spawn_position = RESPAWN_POSITION
   // With zero human players ever connecting, nothing else ever triggers chunk
   // generation around spawn: normally a joining client's position does that.
   // Creating the NPC really only needs the local spawn neighborhood. The old
@@ -257,6 +280,7 @@ function get_npc_actor(): ControlledActor | undefined {
   const position = surface.find_non_colliding_position('character', spawn_position, 32, 0.5) ?? spawn_position
   standalone_actor = StandaloneCharacterActor.create(surface, force, position)
   if (standalone_actor?.is_valid) {
+    remember_npc_surface(standalone_actor)
     if (persisted_actor_id !== undefined) {
       record_npc_recovery(persisted_actor_id, standalone_actor)
     }
@@ -287,7 +311,7 @@ export function peek_controlled_actor(): ControlledActor | undefined {
   if (standalone_actor?.is_valid) {
     return standalone_actor
   }
-  const surface = game.surfaces[1]
+  const surface = npc_home_surface()
   return surface !== undefined ? StandaloneCharacterActor.peek(surface) : undefined
 }
 
@@ -314,7 +338,7 @@ export function reconcile_npc_after_load(): NpcLoadReconciliationResult {
     return { reconciled: false, reason: 'actor_mode_is_player', tick: game.tick }
   }
 
-  const surface = game.surfaces[1]
+  const surface = npc_home_surface()
   const actor = standalone_actor?.is_valid
     ? standalone_actor
     : surface !== undefined

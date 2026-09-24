@@ -49,7 +49,7 @@ This round was traced and fixed without E2E. Each item has a deterministic regre
 - **Space Age:** after a save load, the NPC body was searched only on `game.surfaces[1]`. A body on another planet or a space platform was treated as dead, and a second body spawned on Nauvis.
   - It is now found game-wide by unit number.
   - Known limits:
-    - A body that really died still respawns at the Nauvis spawn point.
+    - A body that really died respawns empty-handed at (0, 0) of the surface it was last alive on; the mod remembers that surface while the body lives.
     - Goal conditions are checked only at slice boundaries, not mid-slice.
     - An RCON failure during the goal check counts as "not yet met", so one extra slice may be planned.
 

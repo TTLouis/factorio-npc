@@ -36,6 +36,8 @@ function make_world() {
   }
   const surface = {
     name: 'nauvis',
+    index: 1,
+    valid: true,
     find_entities_filtered: vi.fn(() => [] as any[]),
     find_non_colliding_position: vi.fn(() => ({ x: 1, y: 2 })),
     create_entity: vi.fn(),
@@ -52,6 +54,7 @@ beforeEach(() => {
   ;(globalThis as any).game = {
     connected_players: [],
     surfaces: { 1: surface },
+    get_surface: vi.fn((index: number) => (index === 1 ? surface : undefined)),
     forces: { player: force },
     print: vi.fn(),
     tick: 123,
@@ -145,6 +148,46 @@ describe('actor mode', () => {
 
     expect(surface.request_to_generate_chunks).not.toHaveBeenCalled()
     expect(surface.force_generate_chunk_requests).not.toHaveBeenCalled()
+  })
+
+  it('respawns a dead NPC at (0, 0) of the surface it was last alive on', () => {
+    const nauvis = (globalThis as any).game.surfaces[1]
+    const force = (globalThis as any).game.forces.player
+    const platform = {
+      name: 'platform-1',
+      index: 7,
+      valid: true,
+      find_entities_filtered: vi.fn(() => [] as any[]),
+      find_non_colliding_position: vi.fn(() => ({ x: 0.5, y: 0.5 })),
+      create_entity: vi.fn(),
+      is_chunk_generated: vi.fn(() => true),
+      request_to_generate_chunks: vi.fn(),
+      force_generate_chunk_requests: vi.fn(),
+    }
+    ;(globalThis as any).game.get_surface = vi.fn((index: number) => (index === 1 ? nauvis : index === 7 ? platform : undefined))
+    const first = fake_character(42)
+    first.surface = nauvis
+    first.force = force
+    nauvis.create_entity.mockReturnValueOnce(first)
+
+    set_actor_mode('npc')
+    expect(get_controlled_actor()?.character).toBe(first)
+    expect((globalThis as any).storage.airi_npc_surface_index).toBe(1)
+
+    // It travels, then dies there.
+    first.surface = platform
+    get_controlled_actor()
+    expect((globalThis as any).storage.airi_npc_surface_index).toBe(7)
+    first.valid = false
+    const replacement = fake_character(99)
+    replacement.surface = platform
+    replacement.force = force
+    platform.create_entity.mockReturnValueOnce(replacement)
+
+    expect(get_controlled_actor()?.character).toBe(replacement)
+    expect(platform.find_non_colliding_position).toHaveBeenCalledWith('character', { x: 0, y: 0 }, 32, 0.5)
+    expect(nauvis.create_entity).toHaveBeenCalledTimes(1)
+    expect(force.get_spawn_position).not.toHaveBeenCalled()
   })
 
   it('reacquires a persisted standalone character instead of creating a duplicate', () => {
