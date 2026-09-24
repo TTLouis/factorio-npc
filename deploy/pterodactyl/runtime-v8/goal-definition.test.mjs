@@ -413,7 +413,10 @@ test('a planner "done" with steps left completes a defined goal the game confirm
   assert.match(result.chatMessage, /verified complete: the game reports 1\/1/)
   const ended = events.filter(entry => entry.event === 'request.completed')
   assert.equal(ended.at(-1).data.outcome, 'goal_verified_complete')
+  assert.notEqual(ended.at(-1).data.task_board?.status, 'active')
   assert.notEqual(memory.planningState(KEY)?.goal?.status, GOAL_STATUS.ACTIVE)
+  // Nothing is left for a later "continue" to resume.
+  assert.equal(memory.currentPlan(KEY), undefined)
 })
 
 test('a planner "done" with steps left is told which goal conditions the game reports unmet', async () => {
