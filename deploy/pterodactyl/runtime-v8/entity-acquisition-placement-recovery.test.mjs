@@ -452,3 +452,51 @@ test('wood collection flow uses exact mining, verifies inventory twenty, and com
   assert.equal(memory.currentPlan('npc:airi'), undefined)
   assert.equal(rcon.commands.some(command => command.includes("gather_resource") && command.includes("tree")), false)
 })
+
+// Live rung 1 (goal_mueryuql): a two-step prose plan, the planner saw 10 stone
+// and answered plan: [] on step 1, and the act-or-block repair offered no way
+// to close a prose-only step, so the goal paused although the stone was there.
+test('act-or-block repair lets the planner close a satisfied prose-only step', async () => {
+  const rcon = new E2eRcon()
+  rcon.inventory = { items: [{ name: 'stone', count: 10 }] }
+  const memory = new CanonicalTaskBoardMemory()
+  const plan = ['Mine 10 stone', 'Verify 10 stone in inventory']
+  let calls = 0
+  let repairPrompt = ''
+  const agent = new NpcAgentLoop({
+    rcon,
+    memory,
+    systemPrompt: 'prose-only repair test',
+    provider: async messages => {
+      calls++
+      if (calls === 1) {
+        return planMessage([{ name: 'gather_resource', args: { resource_name: 'stone', count: 10 } }], { plan, currentStep: 0 })
+      }
+      if (calls === 2) return planMessage([], { chatMessage: 'Done, 10 stone gathered.', plan: [], currentStep: 0 })
+      if (calls === 3) {
+        repairPrompt = String(messages.at(-1)?.content ?? '')
+        const stepId = memory.currentPlan('npc:airi').task_board.steps[0].id
+        return {
+          content: JSON.stringify({
+            chatMessage: '',
+            plan,
+            currentStep: 1,
+            operations: [],
+            semanticCompletion: { stepId, rationale: 'The completed gather receipt and inventory show 10 stone.' },
+          }),
+        }
+      }
+      if (calls === 4) return { content: null, tool_calls: [toolCall('inventory', 'getInventoryItems')] }
+      return planMessage([], { chatMessage: 'Verified: 10 stone in inventory.', plan: [], currentStep: 0 })
+    },
+  })
+
+  await agent.request('gather 10 stone', { sender: 'tester' })
+  rcon.completedStatus(1, ['mining'])
+  const finished = await agent.completed()
+
+  assert.match(repairPrompt, /semanticCompletion/)
+  assert.match(repairPrompt, /Mine 10 stone/)
+  assert.equal(finished.goalStatus, 'completed')
+  assert.equal(rcon.mutations.length, 1)
+})

@@ -71,6 +71,16 @@ const OUTPUT_BUDGET_RECOVERY_MESSAGE = '[HARNESS] The immediately preceding prov
 const ACTION_OMISSION_MAX_TOKENS = 700
 const ACTION_OMISSION_BLOCKER_PREFIX = 'BLOCKED:'
 const ACTION_OMISSION_REPAIR_MESSAGE = 'Finite canonical work remains, but no executable operation was submitted. Reuse the authoritative evidence already collected and do not repeat completed observations. If that evidence already parameterizes the next action, submit the next executable operation now. If exactly one mutable fact is genuinely missing, use exactly one targeted observation for that fact; after it, no more observation turns are allowed. Do not stop and wait for a human "continue" message. Otherwise keep the remaining plan and start chatMessage with "BLOCKED: " followed by the exact missing fact or truthful blocker.'
+// The act-or-block repair also has to offer the Slice C close: a planner that
+// judges a prose-only step already done has no operation to submit, and live
+// (goal_mueryuql) it repeated plan: [] until the repair failed.
+function actionOmissionRepairMessage(state) {
+  const board = state?.task_board
+  const index = Number.isSafeInteger(board?.active_index) ? board.active_index : -1
+  const step = index >= 0 && Array.isArray(board?.steps) ? board.steps[index] : undefined
+  if (!step?.id || completionContractSupported(step.completion_contract)) return ACTION_OMISSION_REPAIR_MESSAGE
+  return `${ACTION_OMISSION_REPAIR_MESSAGE} If the evidence you already hold shows that the active prose-only step ${JSON.stringify(cleanMemoryText(step.description, 200))} is complete, close it with semanticCompletion {"stepId":${JSON.stringify(step.id)},"rationale":"..."} and add the operations for the next step if one remains. Do not answer plan: [] while later steps remain.`
+}
 const ACTION_OMISSION_AFTER_OBSERVATION_MESSAGE = 'The targeted observation budget for this decision is complete. Do not observe again or switch to another read-only tool. Submit the next executable operation now, or keep the remaining plan and start chatMessage with "BLOCKED: " followed by the exact still-missing fact or truthful blocker.'
 const RESEARCH_PREFLIGHT_RECOVERABLE_CODES = new Set(['missing_prerequisites', 'trigger_research', 'force_busy'])
 // Preflight codes that mean the planner named something wrongly (a prototype,
@@ -1963,7 +1973,16 @@ function persistentRuntimeHealthy(runtime) {
 function finalStepCanCloseFromFreshObservation(state) {
   const stored = Array.isArray(state?.last_operations) ? state.last_operations.slice(-16) : []
   if (state?.last_mutation_verified === true) return true
-  if (stored.length === 0) return false
+  // The flag is reset when a later plan (e.g. a semanticCompletion turn) is
+  // recorded, but the batch's authoritative receipt still stands; the caller
+  // only gets here on a completion trigger. Live rung 1: a verify-only final
+  // step after a semantically closed gather could not close.
+  const evidence = Array.isArray(state?.task_board?.evidence) ? state.task_board.evidence : []
+  const latestReceipt = [...evidence].reverse().find(item =>
+    ['operation_receipt', 'operation_error_receipt', 'deterministic_verification'].includes(item?.kind))
+  if (latestReceipt && latestReceipt.kind !== 'operation_error_receipt' && String(latestReceipt.ref ?? '')) return true
+  // No operation since the last recorded plan means no mutation is pending.
+  if (stored.length === 0) return true
   return stored.every(value => /^wait(?:\s|$)/i.test(String(value ?? '').trim()))
 }
 
@@ -5567,7 +5586,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const latestVerification = [...(state?.task_board?.evidence ?? [])].reverse().find(item => item?.kind === 'deterministic_verification')
     if (!latestVerification) return ''
     this.pendingFiniteNoOperationPlan = plan
-    return ACTION_OMISSION_REPAIR_MESSAGE
+    return actionOmissionRepairMessage(state)
   }
 
   async preflightOperations(operations) {
@@ -5999,6 +6018,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (plan.semanticCompletion) {
       const semantic = await this.applySemanticCompletionClaim(plan, previousState)
       previousState = semantic.state ?? previousState
+      // A closed step is progress: the next step gets a fresh act-or-block
+      // repair instead of failing on the one this claim just resolved.
+      if (semantic.applied === true) this.clearActionOmissionRecovery()
       if (previousState?.status === 'completed' && commands.length > 0) {
         const error = new AgentLoopError('semantic_completion_final_step_cannot_have_followup_operations')
         error.failureClass = 'plan_category'
@@ -6105,7 +6127,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const state = await this.beginActionOmissionRepair(plan, 'no_operation_for_remaining_plan')
       if (state?.status === 'active') {
         this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
-        this.messages.push({ role: 'user', content: `[HARNESS] ${ACTION_OMISSION_REPAIR_MESSAGE}` })
+        this.messages.push({ role: 'user', content: `[HARNESS] ${actionOmissionRepairMessage(state)}` })
         return this.runTurn()
       }
     }
