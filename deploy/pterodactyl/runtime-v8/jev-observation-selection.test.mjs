@@ -220,3 +220,52 @@ test('M7 cached observations remain reusable even when their family is not curre
 
   assert.equal(rcon.commands.filter(command => command.includes('get_nearby_entities')).length, afterFirst)
 })
+
+test('reads that can prove the active step bypass an exhausted Jev observation budget', async () => {
+  // Jev budget and relevance as observed in the 2026-09-24 cloud trial.
+  async function run(planStatus) {
+    const rcon = new ObservationSelectionRcon()
+    const memory = new NpcDialogueMemory()
+    const agent = new NpcAgentLoop({
+      rcon,
+      memory,
+      systemPrompt: 'completion proof admission test',
+      provider: async () => { throw new Error('planner should not run') },
+      traceFile: null,
+      stateFile: null,
+    })
+    agent.active = true
+    agent.epoch = await rcon.command('remote.call("airi_deployment","status")').then(JSON.parse)
+    agent.lastMemoryKey = 'npc:airi'
+    if (planStatus) {
+      memory.planByNpc.set('npc:airi', {
+        goal_id: 'goal_trial',
+        status: planStatus,
+        task_board: {
+          active_index: 0,
+          steps: [{ id: 'step_1', description: 'Hand-craft 1 stone furnace', status: 'active' }],
+        },
+      })
+    }
+    agent.messages = [{ role: 'system', content: 'test' }]
+    agent.observationBudgetOverride = 0
+    agent.observationBudgetRemaining = 0
+    agent.observationRelevanceOverride = []
+
+    await agent.handleToolBatch({
+      tool_calls: [
+        { id: 'crafting', type: 'function', function: { name: 'getCraftingStatus', arguments: '{}' } },
+        { id: 'inventory', type: 'function', function: { name: 'getInventoryItems', arguments: '{}' } },
+        { id: 'nearby', type: 'function', function: { name: 'getNearbyEntities', arguments: '{"radius":20}' } },
+      ],
+    })
+    return {
+      executed: agent.messages.filter(message => message.role === 'tool').map(message => message.tool_call_id),
+      nearbyRead: rcon.commands.some(command => command.includes('get_nearby_entities')),
+      budget: agent.observationBudgetRemaining,
+    }
+  }
+
+  assert.deepEqual(await run('active'), { executed: ['crafting', 'inventory'], nearbyRead: false, budget: 0 })
+  assert.deepEqual(await run(undefined), { executed: [], nearbyRead: false, budget: 0 })
+})
