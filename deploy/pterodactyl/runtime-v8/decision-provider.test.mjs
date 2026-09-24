@@ -590,3 +590,22 @@ test('decision provider rejects malformed Noul answers', async () => {
     /invalid noul value/,
   )
 })
+
+// Live 2026-09-24: every Jev call fell back in 1-4 ms with "Decision provider
+// state contains an unsupported value", because runtime state objects carry
+// optional members that are undefined (e.g. proposed_checkpoint).
+test('decision state members that are undefined are omitted like JSON, not rejected', () => {
+  const config = decisionProviderConfiguration({ TYPESAFE_API_KEY: KEY })
+  const state = {
+    contract: 'interaction_route',
+    goal: { goal_id: 'goal_1', objective: undefined },
+    proposed_checkpoint: undefined,
+    steps: [{ id: 'step_1', description: 'Gather stone', contract: undefined }, undefined],
+  }
+  const { body, serialized } = normalizeDecisionProviderRequest(config, state, { relevant: { type: 'noul' } })
+  assert.equal(body.state, state)
+  const wire = JSON.parse(serialized).state
+  assert.equal('proposed_checkpoint' in wire, false)
+  assert.equal('objective' in wire.goal, false)
+  assert.deepEqual(wire.steps, [{ id: 'step_1', description: 'Gather stone' }, null])
+})

@@ -306,12 +306,16 @@ function validateDecisionEntryValue(value, label, depth, budget) {
 
   if (Array.isArray(value)) {
     check(value.length <= DECISION_ENTRY_LIMITS.maxCollectionItems, `${label} contains an array larger than ${DECISION_ENTRY_LIMITS.maxCollectionItems} items`)
-    for (const entry of value) validateDecisionEntryValue(entry, label, depth + 1, budget)
+    // JSON serializes an undefined array slot as null.
+    for (const entry of value) validateDecisionEntryValue(entry === undefined ? null : entry, label, depth + 1, budget)
     return
   }
 
   check(plainDecisionObject(value), `${label} contains an unsupported value`)
-  const entries = Object.entries(value)
+  // An undefined member is omitted on the wire, exactly like JSON.stringify.
+  // Rejecting it failed every live Jev call: runtime state objects routinely
+  // carry optional fields that are undefined.
+  const entries = Object.entries(value).filter(([, entry]) => entry !== undefined)
   check(entries.length <= DECISION_ENTRY_LIMITS.maxCollectionItems, `${label} contains an object larger than ${DECISION_ENTRY_LIMITS.maxCollectionItems} entries`)
   for (const [key, entry] of entries) {
     check(key.length > 0 && key.length <= DECISION_ENTRY_LIMITS.maxObjectKeyChars, `${label} contains an invalid object key`)
