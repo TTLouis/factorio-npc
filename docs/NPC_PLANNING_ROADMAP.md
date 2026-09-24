@@ -59,7 +59,15 @@ The harness validates the definition (one corrective retry, then it stops and as
 
 Completion then belongs to the harness: at the end of every plan slice it reads each `doneWhen` condition from the game through `autorio_tools.evaluate_condition`. All met → `GOAL_SATISFIED` with runtime evidence. Any unmet → the next slice, with the unmet conditions named to the planner. Finishing a plan's steps never completes a defined goal by itself, and a goal with unmet conditions is not retired when a plan completes. A condition the game cannot recognise (unknown technology/item/location) pauses the goal and asks the player rather than rolling slices forever.
 
-The conditions are force-level facts on purpose, so the same contract carries to Space Age (other planets, space platforms) without base-game assumptions.
+The conditions are force-level facts on purpose, so the same contract carries to Space Age (other planets, space platforms) without base-game assumptions. They are read from the NPC's force even while its body is dead, so a goal met during a respawn gap is not missed.
+
+`rockets_launched` and `items_produced` are cumulative counters, so they count from when the goal starts (`countFrom: "goal_start"`, the default): "launch a rocket" on a save that already launched one needs a new launch.
+- The harness reads where each counter stood when the goal was defined and records it through the runtime-only `GOAL_BASELINES_RECORDED` event.
+- The event fills a missing baseline and never moves a recorded one, and a baseline sent by the planner is dropped.
+- If that first read fails, the next evaluation records it, and the condition stays unmet until then.
+- `countFrom: "save_start"` is for a player who explicitly means the save's lifetime total.
+
+The player can ask `status` at any time and gets a deterministic answer (conditions read from the game, current slice, roadmap progress) without a model call. After each verified slice with the goal still open, one progress line is printed in game.
 
 Production runs with `goalDefinitionPolicy: 'required'`; direct constructions of the loop default to `optional` and accept a definition when present.
 

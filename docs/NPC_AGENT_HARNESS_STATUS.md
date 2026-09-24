@@ -53,6 +53,35 @@ This round was traced and fixed without E2E. Each item has a deterministic regre
     - Goal conditions are checked only at slice boundaries, not mid-slice.
     - An RCON failure during the goal check counts as "not yet met", so one extra slice may be planned.
 
+### 2026-09-24 rocket-path edge cases and QoL (unit/integration evidence only)
+
+A second offline round, again without E2E. Each item has a regression test.
+
+- **Launch:** nothing could launch a built rocket.
+  - `launch_rocket {unit_number}` now targets one exact, live-observed silo.
+  - It never passes a character to `launch_rocket()`, because that would board the NPC.
+  - It completes only when the force's `rockets_launched` rises.
+  - `rocket_not_ready` reports the silo's `rocket_parts`, and `getEntityStatus` on a silo reports parts and readiness.
+- **Counter goals:** `rockets_launched` and `items_produced` count from goal start, with a game-read baseline. A save that had already launched a rocket completed "launch a rocket" instantly.
+- **Dead body:** force-level goal checks now work with no body.
+  - A body that died on a space platform respawns on Nauvis.
+  - A failed respawn create falls back to Nauvis instead of retrying every tick.
+- **Transfers:** NPC→entity and player transfers now move the whole held count, not just the first stack.
+- **Player control:**
+  - `status` (and `进度`, `状态`) answers without a model call.
+  - `Stop!`, `pause`, `停止` and `暂停` now stop at once.
+  - A progress line is printed after each verified slice.
+- **CI and tracing:**
+  - The runtime suite no longer uses `--test-force-exit`, which had silently dropped the last tests of `planning-state.test.mjs`.
+  - Prompt tracing now recovers after a failed write.
+- **Dry runs:** `rocket-goal-dry-run.test.mjs` runs a whole rocket goal through the real loop against the fake game. It covers a restart, a boundary provider failure, `status`, a death, `rocket_not_ready`, and the launch.
+
+Still unverified in real Factorio:
+- the launch confirmation bound (3600 ticks);
+- base-game victory handling on a headless server after the first launch;
+- whether transfers into a silo can spill into its non-input inventories;
+- respawn on platforms.
+
 The compatibility projection should not be deleted merely for cosmetic cleanup while other runtime/UI
 features still consume it. Future removal should be driven by eliminating those consumers, not by creating
 another planning source of truth.
