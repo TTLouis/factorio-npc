@@ -4583,16 +4583,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   recordedDecisionProvider(provider) {
     if (typeof provider !== 'function') return null
     return async (state, questions, context = {}) => {
-      const decisionId = this.pendingDecisionRequestId
-      this.pendingDecisionRequestId = undefined
+      const pending = this.pendingDecisionRequest
+      this.pendingDecisionRequest = undefined
       // The decision trace never copies the player's message; the behavior
       // trace already holds it for the same request.
       const tracedState = state && typeof state === 'object' && typeof state.message === 'string'
         ? { ...state, message: undefined, message_chars: state.message.length }
         : state
       const exchange = {
-        decision_id: decisionId,
-        contract: typeof state?.contract === 'string' ? state.contract : state?.reason,
+        decision_id: pending?.decision_id,
+        contract: pending?.contract ?? (typeof state?.contract === 'string' ? state.contract : state?.reason),
         state: tracedState,
         question_ids: Object.keys(questions ?? {}),
       }
@@ -4619,7 +4619,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   decisionTraceEvent(event, data = {}) {
-    if (event === 'decision.request') this.pendingDecisionRequestId = data?.decision_id
+    if (event === 'decision.request') {
+      this.pendingDecisionRequest = { decision_id: data?.decision_id, contract: data?.contract }
+    }
     this.recordJevHealthEvent(event, data)
     if (!this.decisionTrace) return Promise.resolve()
     const { decision_id, ...details } = data ?? {}
@@ -6401,7 +6403,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const board = state.task_board
     const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
     const step = activeIndex === undefined ? undefined : board?.steps?.[activeIndex]
-    if (!step || claim.stepId !== step.id) {
+    // The prompt tells the planner to use the Plan Tracker id from
+    // [PLANNING_STATE]; the Task Board projection names the same step
+    // step_N. Accept the tracker id only while both point at the same step.
+    const trackerPlan = getActivePlanningPlan(this.memory.planningState?.(this.requestInfo.memoryKey))
+    const trackerStepId = trackerPlan?.active_step_index === activeIndex
+      ? trackerPlan?.steps?.[activeIndex]?.step_id
+      : undefined
+    if (!step || (claim.stepId !== step.id && claim.stepId !== trackerStepId)) {
       const error = new AgentLoopError(
         `semantic_completion_step_mismatch: claimed=${claim.stepId || 'none'} active=${step?.id || 'none'}`,
       )
