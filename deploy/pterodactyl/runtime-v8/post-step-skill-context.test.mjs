@@ -408,6 +408,33 @@ test('post-step observe route keeps one read when no relevance family clears the
   assert.deepEqual(observed.replan, { budget: 0, families: [] })
 })
 
+test('post-step Jev state shows what the planner already knows instead of asking Jev to infer it', async () => {
+  let seenState
+  const { agent } = agentForRoute('targeted_observation', {
+    decisionProvider: async state => {
+      seenState = state
+      return decisionResponse('targeted_observation')
+    },
+  })
+  agent.latestCompletedBatchId = 6
+  agent.recordJevObservations(['getInventoryItems'])
+  agent.taskStatusReceipt = async () => ({
+    raw: '{}',
+    view: { task_state: 'idle', queue_empty: true, queue_length: 0, last_completed_batch: { batch_id: 7 } },
+    providerStatus: { observation_mode: 'full', task_state: 'idle', queue_empty: true, queue_length: 0, last_completed_batch: { batch_id: 7 } },
+  })
+  agent.continueFromModMessage = async () => ({})
+  await agent.completed()
+
+  // The inventory was read before batch 7 completed, so it no longer counts.
+  assert.deepEqual(seenState.known_observations, [{ tool: 'getInventoryItems', family: 'inventory_equipment', stale: true }])
+  assert.deepEqual(seenState.plan_steps, [
+    { description: 'place and start the loop', status: 'active' },
+    { description: 'verify it stays fueled', status: 'pending' },
+  ])
+  assert.equal(seenState.active_step_has_completion_evidence, false)
+})
+
 test('M11E typed state remains experimental telemetry and is not injected into Main-LLM context', async () => {
   const { agent, events } = agentForRoute('continue_current')
   agent.taskStatusReceipt = async () => ({

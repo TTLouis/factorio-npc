@@ -65,6 +65,9 @@ class PlanningRcon {
   async command(text) {
     if (text.includes('remote.call("airi_deployment","status")')) return JSON.stringify(deployment())
     if (text.includes('remote.call("autorio_preflight","operation"')) return JSON.stringify({ ok: true })
+    if (text.includes('remote.call("autorio_tools","goal_progress_facts"')) {
+      return JSON.stringify({ ok: true, rockets_launched: 0, researched_technologies: 0, enabled_technologies: 200, milestones: [] })
+    }
     if (text.includes('local ok,result=pcall')) {
       this.mutations.push(text)
       const marker = text.match(/AIRI_RESULT_[a-f0-9]{24}:/)?.[0]
