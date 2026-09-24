@@ -2175,7 +2175,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     })
     this.stateFile = stateFileFromOptions(options)
     this.stateLoaded = false
-    this.maxProviderOutputUnits = Number.isSafeInteger(options.maxProviderOutputUnits) ? options.maxProviderOutputUnits : 20000
+    this.maxProviderOutputUnits = Number.isSafeInteger(options.maxProviderOutputUnits) ? options.maxProviderOutputUnits : 100000
     if (this.maxProviderOutputUnits < 1000 || this.maxProviderOutputUnits > 200000) {
       throw new AgentLoopError('maxProviderOutputUnits must be an integer from 1000 to 200000')
     }

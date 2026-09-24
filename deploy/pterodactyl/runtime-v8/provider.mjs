@@ -6,7 +6,9 @@ export * from './provider-base.mjs'
 const COMPLETION_MARKER = '[MOD] Autorio operation batch completed.'
 const FAILURE_MARKER = '[MOD] Autorio operation error:'
 const CHAT_MARKER = '[CHAT]'
-const FULL_PLANNER_FALLBACK_OUTPUT_BUDGET = 4000
+const FULL_PLANNER_FALLBACK_OUTPUT_BUDGET = 12000
+// Turns whose job is to author or revise the plan.
+const PLAN_AUTHORING_TRIGGERS = new Set(['new_goal', 'amend_current', 'plan_slice_completed', 'post_step_replan', 'recovery_replan_high'])
 
 function deepSeekModel(config) {
   return /^deepseek(?:[-_./:]|$)/i.test(String(config?.model ?? ''))
@@ -79,6 +81,11 @@ export function selectReasoningPolicy(config, messages, options = {}) {
   if (Number.isSafeInteger(options.recoveryAttempt) && options.recoveryAttempt > 0) {
     return { effort: 'none', reason: 'strict_recovery' }
   }
+  // Authoring a plan is where extra reasoning pays off; it gets the largest
+  // bracket whatever Jev rated the turn, so it is not cut off and retried.
+  if (PLAN_AUTHORING_TRIGGERS.has(options.triggerSource)) {
+    return { effort: 'max', reason: 'plan_authoring' }
+  }
   const semanticBudget = semanticBudgetPolicy(options.reasoningBudget)
   if (semanticBudget) return semanticBudget
   if (options.triggerSource === 'amend_current') {
@@ -121,25 +128,30 @@ export function selectReasoningPolicy(config, messages, options = {}) {
   return { effort: 'high', reason: 'ordinary_planning' }
 }
 
+// Output caps are ceilings, not spend: a turn stops when it is done. A cap
+// that is too small costs twice, because the exhausted call is discarded and
+// retried, so every bracket leaves room for reasoning plus the plan itself.
 function reasoningOutputBudget(policy) {
   switch (policy?.reason) {
-    case 'jev_budget_strategic': return 8000
-    case 'jev_budget_deep': return 7000
-    case 'jev_budget_normal': return 5000
+    case 'plan_authoring': return 32000
+    case 'jev_budget_strategic': return 24000
+    case 'jev_budget_deep': return 16000
     case 'ordinary_replan':
     case 'jev_post_step_replan':
     case 'jev_recovery_replan':
-      return 6000
+      return 16000
+    case 'jev_budget_normal': return 12000
     case 'same_goal_continue':
     case 'jev_post_step_observe':
     case 'jev_recovery_continue':
-      return 3000
+      return 8000
     case 'repeated_failure_compact_finalize':
-      return 2000
+      return 4000
     default:
-      if (policy?.effort === 'max') return 6000
-      if (policy?.effort === 'high') return 4000
-      return undefined
+      if (policy?.effort === 'max') return 16000
+      if (policy?.effort === 'high') return 12000
+      if (policy?.effort === 'low') return 6000
+      return 4000
   }
 }
 
@@ -174,7 +186,7 @@ export async function providerRequest(config, messages, options = {}) {
   const compactPath = options.recoveryKind === 'output_budget_exhaustion'
     || (
       isCompletionContinuation
-      && options.triggerSource !== 'post_step_replan'
+      && !PLAN_AUTHORING_TRIGGERS.has(options.triggerSource)
       && !semanticBudgetNeedsFullPlanner
     )
   const forceFullPlanner = isCompletionContinuation && !compactPath
