@@ -62,6 +62,18 @@ function ensure_identity(): StandaloneNpcIdentity {
  * with explicit persisted identities without mutating the legacy primary-body
  * storage keys.
  */
+// The NPC body may be on any surface once it travels (another planet, a space
+// platform). Look it up by unit_number game-wide first; searching only the
+// home surface re-spawned a second body on Nauvis after a save load and left
+// the real one, with its inventory, stranded where it was.
+function find_npc_character(home_surface: LuaSurface, unit_number: number): LuaEntity | undefined {
+  const anywhere = game.get_entity_by_unit_number(unit_number as any)
+  if (anywhere !== undefined && anywhere.valid && anywhere.name === 'character') return anywhere
+  return home_surface
+    .find_entities_filtered({ name: 'character' })
+    .find(candidate => candidate.unit_number === unit_number)
+}
+
 export class StandaloneCharacterActor implements ControlledActor {
   private constructor(
     private readonly character_entity: LuaEntity,
@@ -108,9 +120,7 @@ export class StandaloneCharacterActor implements ControlledActor {
     const unit_number = storage.standalone_character_unit_number
     if (unit_number === undefined) return undefined
 
-    const entity = surface
-      .find_entities_filtered({ name: 'character' })
-      .find(candidate => candidate.unit_number === unit_number)
+    const entity = find_npc_character(surface, unit_number)
 
     if (!entity) return undefined
 
@@ -129,9 +139,7 @@ export class StandaloneCharacterActor implements ControlledActor {
     const identity = storage.standalone_npc_identity
     if (unit_number === undefined || identity === undefined) return undefined
 
-    const entity = surface
-      .find_entities_filtered({ name: 'character' })
-      .find(candidate => candidate.unit_number === unit_number)
+    const entity = find_npc_character(surface, unit_number)
 
     if (!entity) return undefined
 

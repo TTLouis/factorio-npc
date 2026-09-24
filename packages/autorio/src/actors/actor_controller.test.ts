@@ -56,6 +56,7 @@ beforeEach(() => {
     print: vi.fn(),
     tick: 123,
     is_multiplayer: vi.fn(() => false),
+    get_entity_by_unit_number: vi.fn(() => undefined),
   }
   ;(globalThis as any).rendering = { clear: vi.fn() }
   register_npc_recovery_handler(undefined)

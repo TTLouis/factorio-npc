@@ -31,6 +31,7 @@ function fake_surface(entities_by_query: Record<string, unknown[]> = {}) {
 
 beforeEach(() => {
   (globalThis as any).storage = {}
+  ;(globalThis as any).game = { get_entity_by_unit_number: vi.fn(() => undefined) }
 })
 
 describe('StandaloneCharacterActor.create', () => {
@@ -96,6 +97,18 @@ describe('StandaloneCharacterActor.reacquire', () => {
     expect(actor!.character).toBe(character)
     expect((character as any).color).toEqual({ r: 0.35, g: 0.65, b: 1, a: 1 })
     expect(actor!.status_snapshot()).toMatchObject({ npc_id: 'npc-1', name: 'Aster-1' })
+  })
+
+  it('finds the body on another surface (planet or space platform) instead of respawning it', () => {
+    (globalThis as any).storage.standalone_character_unit_number = 42
+    const character = fake_character({ unit_number: 42, name: 'character', surface: { name: 'vulcanus' } })
+    ;(globalThis as any).game.get_entity_by_unit_number = vi.fn(() => character)
+    const nauvis = fake_surface({ character: [] })
+
+    const actor = StandaloneCharacterActor.reacquire(nauvis)
+
+    expect(actor?.character).toBe(character)
+    expect(nauvis.find_entities_filtered).not.toHaveBeenCalled()
   })
 
   it('returns undefined when the persisted unit_number no longer exists (e.g. it died)', () => {
