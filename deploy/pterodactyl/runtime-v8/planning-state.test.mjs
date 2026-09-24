@@ -1792,8 +1792,10 @@ test('Jev is asked only the steering pressures that the supplied state has facts
     roadmap: { nodes: [{ id: 'node_1' }] },
     save_progress: { researched_technologies: 3 },
   })
+  // Only the roadmap grounds a horizontal pressure today: a ready node the
+  // shelf marks as horizontal support work.
   assert.deepEqual(withFacts, {
-    horizontal: [],
+    horizontal: ['shelf_support_node_ready'],
     vertical: ['frontier_reached', 'capability_absent', 'shelf_node_ready_to_refine', 'goal_requires_new_capability'],
   })
 

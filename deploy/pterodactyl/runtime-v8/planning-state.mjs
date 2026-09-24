@@ -156,6 +156,9 @@ export const STEERING_PRESSURE_VOCABULARY = Object.freeze({
     'logistics_bottleneck',
     'repeated_manual_topup',
     'defense_margin_low',
+    // The one horizontal code the steering state can show today: the roadmap
+    // itself marks the next ready node as support work.
+    'shelf_support_node_ready',
   ]),
   // Push the critical path toward a capability that does not exist yet.
   vertical: Object.freeze([
@@ -193,6 +196,7 @@ export const STEERING_PRESSURE_EVIDENCE = Object.freeze({
   technology_blocked_missing_science: { definition: 'A needed research cannot start because its science packs are not being produced.', requires: ['research'] },
   recipe_locked_missing_technology: { definition: 'A needed recipe is locked behind technology that is not researched.', requires: ['research'] },
   required_item_uncraftable: { definition: 'A needed item cannot be crafted with the recipes and materials available.', requires: ['recipes'] },
+  shelf_support_node_ready: { definition: 'A Roadmap Shelf node marked development_hint "horizontal" has its dependencies met, so the next slice widens or stabilizes what exists.', requires: ['roadmap'] },
   shelf_node_ready_to_refine: { definition: 'A Roadmap Shelf node has its dependencies met and can be planned in detail next.', requires: ['roadmap'] },
   goal_requires_new_capability: { definition: 'Finishing the goal from this save needs a capability that save_progress shows is not unlocked yet.', requires: ['save_progress'] },
   surplus_unconsumed: { definition: 'Some output keeps piling up with nothing consuming it.', requires: ['production'] },

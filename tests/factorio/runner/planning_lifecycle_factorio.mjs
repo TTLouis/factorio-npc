@@ -249,7 +249,9 @@ async function prepare({ rcon, results, stateFile }) {
       return steeringAnswer(
         questions,
         'horizontal',
-        'power_margin_low',
+        // The only horizontal pressure the steering state can ground: the
+        // shelf marks acquisition-support as horizontal and it is now ready.
+        'shelf_support_node_ready',
         ['acquisition-support'],
       )
     }
