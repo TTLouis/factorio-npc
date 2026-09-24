@@ -4782,7 +4782,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return !plan || plan.status === PLAN_STATUS.COMPLETED
   }
 
-  async evaluateGoalCompletion() {
+  async evaluateGoalCompletion({ record = true } = {}) {
     const key = this.activePlanKey()
     const definition = this.memory.goalDefinition?.(key)
     if (!definition) return undefined
@@ -4793,15 +4793,82 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       progress: formatGoalProgress(evaluation),
       results: evaluation.results,
     })
-    if (evaluation.satisfied && typeof this.memory.recordGoalSatisfaction === 'function') {
-      this.memory.recordGoalSatisfaction(key, {
-        source: 'runtime',
-        evidenceRefs: evaluation.results.map(result => `goal_condition/${result.id}/${result.current ?? 'true'}`),
-        rationale: 'goal_definition_conditions_satisfied',
-      })
-      await this.persistState()
-    }
+    if (record && evaluation.satisfied) await this.recordGoalEvaluationSatisfied(evaluation)
     return evaluation
+  }
+
+  async recordGoalEvaluationSatisfied(evaluation) {
+    if (typeof this.memory.recordGoalSatisfaction !== 'function') return
+    this.memory.recordGoalSatisfaction(this.activePlanKey(), {
+      source: 'runtime',
+      evidenceRefs: evaluation.results.map(result => `goal_condition/${result.id}/${result.current ?? 'true'}`),
+      rationale: 'goal_definition_conditions_satisfied',
+    })
+    await this.persistState()
+  }
+
+  // The planner declared the whole goal done while plan steps remain. With a
+  // game-checked definition the game decides: met completes the goal and the
+  // remaining steps are moot; unmet leaves the repair path to continue, now
+  // told which conditions are still open.
+  async finishIfGoalMet(plan, previousState) {
+    const key = this.activePlanKey()
+    if (!this.memory.goalDefinition?.(key)) return undefined
+    const evaluation = await this.evaluateGoalCompletion({ record: false })
+    if (!evaluation) return undefined
+    const unverifiable = evaluation.results.filter(result => /^(?:unknown_|invalid_)/.test(result.error ?? ''))
+    if (unverifiable.length > 0) return this.pauseForUnverifiableGoal(unverifiable)
+    if (!evaluation.satisfied) return undefined
+    // Close the legacy plan before recording satisfaction: recording first
+    // would let the plan-close path re-admit the goal as a new active one.
+    const reduced = this.memory.applyOutcomeAuthority?.(key, {
+      kind: 'verified_complete',
+      source: 'deterministic_runtime',
+      reason_code: 'goal_definition_satisfied',
+      evidence: [{
+        kind: 'verified_world_state',
+        ref: `${this.traceRequest?.id ?? 'request'}/goal_definition_satisfied`,
+        summary: `The game reports ${formatGoalProgress(evaluation)}.`,
+      }],
+    }, { chatMessage: plan.chatMessage })
+    await this.recordGoalEvaluationSatisfied(evaluation)
+    this.clearActionOmissionRecovery()
+    this.active = false
+    const completedBoard = visibleTaskBoard(reduced?.state?.task_board ?? previousState?.task_board)
+    const chatMessage = `The requested goal is verified complete: the game reports ${formatGoalProgress(evaluation)}.`
+    await this.traceEvent('outcome.validated', {
+      kind: 'verified_complete',
+      source: 'goal_definition',
+      reason_code: 'goal_definition_satisfied',
+      task_board: completedBoard,
+    })
+    await this.traceEvent('request.completed', {
+      chat_message: chatMessage,
+      outcome: 'goal_verified_complete',
+      task_board: completedBoard,
+      usage: this.traceRequest?.usage,
+    })
+    this.traceRequest = null
+    return {
+      chatMessage,
+      plan: [],
+      currentStep: 0,
+      operations: [],
+      epoch: this.epoch?.epoch,
+      actorId: this.epoch?.actor_id,
+      goalId: previousState?.goal_id,
+      goalStatus: 'completed',
+      taskBoard: completedBoard,
+    }
+  }
+
+  unmetGoalNote() {
+    const evaluation = this.lastGoalEvaluation
+    if (!evaluation || evaluation.satisfied) return ''
+    const unmet = evaluation.results.filter(result => !result.satisfied)
+      .map(result => `${result.id}${result.current !== undefined ? ` (currently ${result.current})` : ''}`)
+      .join(', ')
+    return ` The goal is not complete: the game reports ${formatGoalProgress(evaluation)}; still unmet: ${unmet}.`
   }
 
   // Counts every Jev boundary's outcome independently of the decision trace
@@ -6671,6 +6738,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       || (!previousState && Array.isArray(plan.plan) && plan.plan.length > 0)
     )
     const explicitBlocker = providerBlockerReason(plan)
+    if (commands.length === 0 && plan.plan.length === 0 && remainingCanonicalWork && !runtimeHealthy && !explicitBlocker) {
+      const finished = await this.finishIfGoalMet(plan, previousState)
+      if (finished) return finished
+    }
     let conditionWait = previousState?.condition_wait?.state === 'active'
       ? previousState.condition_wait
       : undefined
@@ -6748,7 +6819,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const state = await this.beginActionOmissionRepair(plan, 'no_operation_for_remaining_plan')
       if (state?.status === 'active') {
         this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
-        this.messages.push({ role: 'user', content: `[HARNESS] ${actionOmissionRepairMessage(state)}` })
+        this.messages.push({ role: 'user', content: `[HARNESS] ${actionOmissionRepairMessage(state)}${plan.plan.length === 0 ? this.unmetGoalNote() : ''}` })
         return this.runTurn()
       }
     }
