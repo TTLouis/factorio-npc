@@ -18,7 +18,7 @@ test('decision provider is absent when no API key is supplied, without a separat
   }), undefined)
 })
 
-test('TypeSafe credentials automatically configure Jev with conservative request limits', () => {
+test('TypeSafe credentials automatically configure Jev with bounded default request limits', () => {
   const config = decisionProviderConfiguration({ TYPESAFE_API_KEY: KEY })
   assert.deepEqual(config, {
     provider: 'typesafe',
@@ -26,7 +26,7 @@ test('TypeSafe credentials automatically configure Jev with conservative request
     url: DECISION_PROVIDER_DEFAULTS.url,
     model: 'jev-latest',
     timeoutMs: 5000,
-    maxRequestsPerHour: 180,
+    maxRequestsPerHour: 600,
     maxInputChars: 48000,
     maxQuestions: 24,
   })

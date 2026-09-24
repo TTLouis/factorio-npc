@@ -207,7 +207,7 @@ export const DECISION_PROVIDER_DEFAULTS = Object.freeze({
   url: 'https://api.typesafe.ai/v1/systemone',
   model: 'jev-latest',
   timeoutMs: 5000,
-  maxRequestsPerHour: 180,
+  maxRequestsPerHour: 600,
   // A local cost guard, not a TypeSafe API limit. The post-step boundary's 19
   // questions alone serialize to ~15k characters, so the old 16k default made
   // every live post-step call fall back before reaching Jev.

@@ -132,7 +132,7 @@
             "name": "Max Jev Requests Per Hour",
             "description": "Persisted hourly cap for Jev decision-provider calls. Separate from the main planner provider budget.",
             "env_variable": "MAX_DECISION_PROVIDER_REQUESTS_PER_HOUR",
-            "default_value": "60",
+            "default_value": "600",
             "user_viewable": true,
             "user_editable": true,
             "rules": "required|numeric|between:1,1200",

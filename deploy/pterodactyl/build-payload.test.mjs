@@ -98,7 +98,7 @@ test('Jev credentials and conservation controls exist only on the NPC E2E experi
   assert.match(key?.description ?? '', /Leave blank to disable the decision lane/)
 
   assert.equal(e2eEgg.variables.find(entry => entry.env_variable === 'DECISION_PROVIDER_MODEL')?.default_value, 'jev-latest')
-  assert.equal(e2eEgg.variables.find(entry => entry.env_variable === 'MAX_DECISION_PROVIDER_REQUESTS_PER_HOUR')?.default_value, '60')
+  assert.equal(e2eEgg.variables.find(entry => entry.env_variable === 'MAX_DECISION_PROVIDER_REQUESTS_PER_HOUR')?.default_value, '600')
 })
 
 test('generated artifact verifier rejects source or channel drift', () => {

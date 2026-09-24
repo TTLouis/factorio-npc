@@ -164,7 +164,7 @@ function egg(installScript, channel) {
     ? [
         variable('TypeSafe API Key', 'Optional Jev/System One decision-provider credential. Leave blank to disable the decision lane. Kept environment-only and never written to sgluna-config.json.', 'TYPESAFE_API_KEY', '', 'nullable|string|max:512', { viewable: false }),
         variable('Jev Decision Model', 'TypeSafe System One model used for bounded decision routing when a TypeSafe API key is present.', 'DECISION_PROVIDER_MODEL', 'jev-latest', 'required|string|max:200'),
-        variable('Max Jev Requests Per Hour', 'Persisted hourly cap for Jev decision-provider calls. Separate from the main planner provider budget.', 'MAX_DECISION_PROVIDER_REQUESTS_PER_HOUR', '60', 'required|numeric|between:1,1200'),
+        variable('Max Jev Requests Per Hour', 'Persisted hourly cap for Jev decision-provider calls. Separate from the main planner provider budget.', 'MAX_DECISION_PROVIDER_REQUESTS_PER_HOUR', '600', 'required|numeric|between:1,1200'),
       ]
     : []
   return {
