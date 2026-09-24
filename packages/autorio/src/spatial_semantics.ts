@@ -111,11 +111,21 @@ function mining_radius(prototype: any) {
   return typeof radius === 'number' && radius > 0 && finite(radius) ? radius : undefined
 }
 
+// Factorio 2.0 returns prototype vectors in array form ({-0.5, -1.3}); older
+// data and tests use {x, y}. Accept both.
+function vector_xy(raw: any): { x: number, y: number } | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const values = raw as number[]
+  const x = typeof raw.x === 'number' ? raw.x : values[0]
+  const y = typeof raw.y === 'number' ? raw.y : values[1]
+  if (typeof x !== 'number' || typeof y !== 'number' || !finite(x) || !finite(y)) return undefined
+  return { x, y }
+}
+
 function mining_offset(prototype: any, direction: number) {
-  const raw = prototype?.radius_visualisation_specification?.offset
-  if (!raw || typeof raw.x !== 'number' || typeof raw.y !== 'number') return { x: 0, y: 0 }
-  if (!finite(raw.x) || !finite(raw.y)) return { x: 0, y: 0 }
-  return rotate_cardinal({ x: raw.x, y: raw.y }, direction)
+  const offset = vector_xy(prototype?.radius_visualisation_specification?.offset)
+  if (!offset) return { x: 0, y: 0 }
+  return rotate_cardinal(offset, direction)
 }
 
 function mining_categories(prototype: any) {
