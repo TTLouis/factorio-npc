@@ -2115,17 +2115,31 @@ function providerBudgetTriggerSource(semanticScope, route) {
   return route === 'replan_high' ? 'recovery_replan_high' : 'recovery_continue_low'
 }
 
-function providerBudgetHandoffCapsule(state, runtimeStatus, reason, semanticScope = 'keep_target') {
+function providerBudgetHandoffCapsule(state, runtimeStatus, reason, semanticScope = 'keep_target', { admittedGoal, request } = {}) {
   const board = state?.task_board
   const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : state?.current_step ?? 0
-  const capsule = {
-    goal: state
+  // The capsule replaces the whole conversation. On the first turn of a new
+  // goal no plan is stored yet, so without the admitted goal and the player's
+  // request the fresh generation would not know what it was asked to do.
+  const goal = state
+    ? {
+        goal_id: sanitizeDurableModelText(state.goal_id, 100),
+        objective: sanitizeDurableModelText(state.objective, 1000),
+        status: state.status,
+      }
+    : admittedGoal
       ? {
-          goal_id: sanitizeDurableModelText(state.goal_id, 100),
-          objective: sanitizeDurableModelText(state.objective, 1000),
-          status: state.status,
+          goal_id: sanitizeDurableModelText(admittedGoal.goal_id, 100),
+          objective: sanitizeDurableModelText(admittedGoal.objective, 1000),
+          status: admittedGoal.status,
+          first_plan_of_goal: true,
         }
-      : null,
+      : null
+  const capsule = {
+    goal,
+    ...(!state && request?.text
+      ? { player_request: { sender: cleanMemoryText(request.sender, 128), text: cleanMemoryText(request.text, 4000) } }
+      : {}),
     task_board: board ? modelFacingTaskBoard(board) : null,
     active_target: sanitizeDurableModelText(board?.steps?.[activeIndex]?.description ?? currentPlanStep(state?.plan, activeIndex), 500),
     authoritative_evidence: activeStepEvidence(board).map(item => sanitizeDurableModelValue(item)),
@@ -7719,11 +7733,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       this.reasoningTriggerSource = providerBudgetTriggerSource(semanticScope, routed.route)
       this.reasoningBudgetOverride = null
       const state = this.memory.currentPlan?.(key)
+      const admittedGoal = this.memory.planningState?.(key)?.goal
       const capsule = providerBudgetHandoffCapsule(
         state,
         routed.runtime ?? routed.persistentRuntime,
         reasonText,
         semanticScope,
+        {
+          admittedGoal: admittedGoal?.status === GOAL_STATUS.ACTIVE ? admittedGoal : undefined,
+          request: this.requestInfo,
+        },
       )
       this.messages = [
         { role: 'system', content: this.systemPrompt },
