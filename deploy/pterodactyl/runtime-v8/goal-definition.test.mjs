@@ -161,6 +161,48 @@ test('a second missing definition stops before any mutation and asks the player'
   assert.match(result.chatMessage, /Please restate the goal and what "done" means/)
 })
 
+test('a different goal-definition mistake per retry gets another correction naming the field', async () => {
+  // 2026-09-24 cloud trial: the goal was first missing, then used "item" for
+  // "item_name"; the second, different mistake stopped the goal.
+  const game = new FakeFactorio()
+  const memory = new CanonicalTaskBoardMemory()
+  const prompts = []
+  let calls = 0
+  const agent = agentWith(game, memory, async messages => {
+    calls++
+    prompts.push(String(messages.at(-1)?.content ?? ''))
+    const base = { plan: ['Gather 10 iron ore'], operations: [gather('iron-ore', 10)] }
+    if (calls === 1) return planReply(base)
+    const condition = calls === 2
+      ? { kind: 'inventory_count', item: 'iron-ore', minimum: 10 }
+      : { kind: 'inventory_count', item_name: 'iron-ore', minimum: 10 }
+    return planReply({ ...base, goal: { scope: 'finite', summary: 'Gather 10 iron ore.', doneWhen: [condition] } })
+  })
+
+  const result = await agent.request('gather 10 iron ore', { sender: 'Louis' })
+
+  assert.equal(calls, 3)
+  assert.match(prompts[2], /inventory_count needs the field "item_name"; it has "item", "minimum"/)
+  assert.notEqual(result.blocked, true)
+  assert.equal(game.mutations.length, 1)
+})
+
+test('stopping to ask the player for a goal ends the request trace', async () => {
+  const game = new FakeFactorio()
+  const events = []
+  const agent = agentWith(game, new CanonicalTaskBoardMemory(), async () =>
+    planReply({ plan: ['Gather 10 iron ore'], operations: [gather('iron-ore', 10)] }), {
+    onActivity: (event, data) => events.push({ event, data }),
+  })
+
+  await agent.request('do the thing', { sender: 'Louis' })
+
+  const ended = events.filter(entry => entry.event === 'request.completed' || entry.event === 'request.failed')
+  assert.equal(ended.length, 1)
+  assert.equal(ended[0].data.outcome, 'blocked_before_mutation')
+  assert.equal(ended[0].data.blocker.class, 'goal_definition_needed')
+})
+
 test('a long-horizon definition without a Roadmap Shelf is asked again', async () => {
   const game = new FakeFactorio()
   const memory = new CanonicalTaskBoardMemory()
