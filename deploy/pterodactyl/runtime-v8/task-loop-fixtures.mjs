@@ -66,6 +66,7 @@ const TASK_TYPES_BY_OPERATION = {
   craft_item: ['crafting'],
   place_entity: ['placing'],
   walk_to_entity: ['walking_to_entity'],
+  launch_rocket: ['launching_rocket'],
 }
 
 export class FakeFactorio {
@@ -85,6 +86,12 @@ export class FakeFactorio {
     this.produced = {}
     this.knownTechnologies = new Set(['automation', 'logistics', 'rocket-silo', 'electronics'])
     this.progressFactsAvailable = true
+    // Optional hook run on every admitted batch, for scenarios whose world
+    // changes because of what was admitted (a launch raising the rocket count).
+    this.onMutation = null
+    // What getNearbyEntities reports, so a scenario can bind an exact
+    // unit_number through a live observation.
+    this.nearby = { actor_position: { x: 0, y: 0 }, entities: [] }
   }
 
   // Mirrors autorio_tools.goal_progress_facts.
@@ -133,6 +140,7 @@ export class FakeFactorio {
         basic_operation: this.batchId > 0 ? { last_result: { operation_id: this.batchId, code: 'completed', completed: true } } : undefined,
       })
     }
+    if (text.includes('remote.call("autorio_tools","get_nearby_entities"')) return JSON.stringify(this.nearby)
     if (text.includes('remote.call("autorio_follow","status")')) {
       return JSON.stringify({ active: false, healthy: false, controller_live: false, state: 'idle' })
     }
@@ -163,6 +171,7 @@ export class FakeFactorio {
       this.lastTaskTypes = [...text.matchAll(/remote\.call\('autorio_operations','([a-z_]+)'/g)]
         .flatMap(([, name]) => TASK_TYPES_BY_OPERATION[name] ?? ['waiting'])
       const admissions = [...text.matchAll(/return remote\.call\('autorio_operations'/g)].length
+      this.onMutation?.(text)
       return `${marker}${JSON.stringify({ ok: true, result: Array.from({ length: admissions }, () => [true, 'Task started']) })}`
     }
     this.unknown.push(text.slice(0, 160))
