@@ -1509,8 +1509,11 @@ function providerRecoveryExhausted(message) {
   return /^Provider response recovery exhausted after \d+ attempts:/.test(String(message))
 }
 
-export function shouldRecoverInterruptedPlan(state) {
-  if (!state || state.status === 'completed' || state.status === 'blocked') return false
+// `awaitingNextSlice`: the agent reports a verified-complete plan slice whose
+// user goal is still active, i.e. the goal was between slices when it stopped.
+export function shouldRecoverInterruptedPlan(state, { awaitingNextSlice = false } = {}) {
+  if (!state || state.status === 'blocked') return false
+  if (state.status === 'completed') return awaitingNextSlice === true
   if (state.status === 'active') return true
   if (state.status !== 'paused') return false
   const pauseReason = String(state.pause_reason ?? '')
@@ -1600,7 +1603,8 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}) {
   await agent.loadPersistentState?.()
   const key = `npc:${agent.npcId ?? 'airi'}`
   const state = agent.memory?.currentPlan?.(key)
-  if (!shouldRecoverInterruptedPlan(state)) return { recovered: false, reason: 'plan_not_recoverable', state }
+  const awaitingNextSlice = agent.goalAwaitingNextSlice?.(key) === true
+  if (!shouldRecoverInterruptedPlan(state, { awaitingNextSlice })) return { recovered: false, reason: 'plan_not_recoverable', state }
 
   if (state?.provider_recovery?.kind === 'output_budget_exhaustion' && state.provider_recovery.phase === 'in_flight') {
     const runtime = await agent.readInteractionTaskStatus?.()
@@ -1625,6 +1629,35 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}) {
   const epoch = await agent.captureEpoch()
   const memoryContext = agent.memory?.context?.(key) ?? ''
   const recoveryDetails = JSON.stringify(details ?? {}).slice(0, 2000)
+  if (awaitingNextSlice) {
+    // Between slices there is no current step to re-observe: re-check the goal
+    // in game and plan the next slice, exactly as the completed slice would
+    // have done had nothing interrupted it.
+    agent.epoch = epoch
+    agent.lastMemoryKey = key
+    agent.planUpdateReason = 'completion'
+    agent.reasoningTriggerSource = null
+    agent.baseMessages = [
+      { role: 'system', content: agent.systemPrompt },
+      ...(memoryContext ? [{ role: 'user', content: memoryContext }] : []),
+      { role: 'user', content: `[HARNESS] Runtime recovery after ${uiText(reason, 120)} at a plan-slice boundary: the last plan slice was already verified complete and the user goal is still active. Recovery details: ${recoveryDetails}` },
+    ]
+    agent.messages = agent.baseMessages.map(message => ({ ...message }))
+    agent.requestInfo = {
+      memoryKey: key,
+      turnId: ++agent.turnSequence,
+      sender: uiText(state.owner || 'runtime-recovery', 128),
+      text: uiText(state.objective || 'Resume interrupted AIRI goal', 4000),
+    }
+    agent.active = true
+    agent.continuations = 1
+    if (typeof agent.traceEvent === 'function') {
+      agent.traceRequest = { id: `recovery_${Date.now().toString(36)}`, seq: 0 }
+      await agent.traceEvent('runtime.recovery_started', { reason, details, boundary: 'plan_slice' })
+    }
+    const result = await agent.settleCompletedStepState(state)
+    return { recovered: true, result, state: agent.memory?.currentPlan?.(key) }
+  }
   const recoveryMessage = `[HARNESS] Runtime recovery after ${uiText(reason, 120)}. The previous finite Autorio task queue was discarded and its last operation MUST NOT be assumed complete. Re-observe the mutable Factorio state required for the canonical current Task Board step before choosing any world mutation. Preserve the existing goal and completed Task Board prefix. If the current step is already satisfied, verify it and advance; if work remains, submit only the minimum deterministic operations needed to continue. Never blindly replay last_operations. Recovery details: ${recoveryDetails}`
 
   agent.epoch = epoch
@@ -2014,7 +2047,8 @@ export class Session {
 
   async runAutoResume() {
     const state = this.currentPlanState()
-    if (this.stopping || state?.status !== 'paused' || !String(state.pause_reason ?? '').startsWith(`${TRANSIENT_PAUSE_PREFIX}:`)) {
+    const pausedTransient = state?.status === 'paused' && String(state.pause_reason ?? '').startsWith(`${TRANSIENT_PAUSE_PREFIX}:`)
+    if (this.stopping || !(pausedTransient || this.agent?.goalAwaitingNextSlice?.() === true)) {
       // The plan moved on (player continue, stop, new goal): nothing to resume.
       this.clearAutoResume()
       return null
@@ -2025,8 +2059,12 @@ export class Session {
     })
   }
 
+  recoverablePlan(state = this.currentPlanState()) {
+    return shouldRecoverInterruptedPlan(state, { awaitingNextSlice: this.agent?.goalAwaitingNextSlice?.() === true })
+  }
+
   async recoverInterruptedPlan(reason, details = {}) {
-    if (!this.agent || !shouldRecoverInterruptedPlan(this.currentPlanState())) return null
+    if (!this.agent || !this.recoverablePlan()) return null
     this.log(`Recovering interrupted AIRI plan after ${reason}; mutable world state will be re-observed before resuming`)
     try {
       const recovery = await recoverInterruptedAgentPlan(this.agent, reason, details)
@@ -2038,6 +2076,15 @@ export class Session {
     catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       this.log(`Interrupted plan recovery failed after ${reason}: ${message}`)
+      if (this.agent.goalAwaitingNextSlice?.() === true) {
+        // Nothing is executing between slices, so there is nothing to pause.
+        if (transientProviderFailure(message)) {
+          await this.scheduleAutoResume(message)
+          return null
+        }
+        await this.printChat(`I could not plan the next slice of the goal after ${reason}: ${message}. Say continue to retry.`)
+        return null
+      }
       if (transientProviderFailure(message) && typeof this.agent.pausePersistentPlan === 'function') {
         const paused = await this.agent.pausePersistentPlan(`${TRANSIENT_PAUSE_PREFIX}: ${uiText(message, 200)}`)
         if (paused) await this.syncTaskBoardUi(paused)
@@ -2306,7 +2353,7 @@ export class Session {
       this.ensureAuthorization().catch(error => this.log(`NPC authorization health check failed: ${error.message}`))
     }, 2000)
     const startupState = this.currentPlanState()
-    if (startupState?.condition_wait?.state !== 'active' && shouldRecoverInterruptedPlan(startupState)) {
+    if (startupState?.condition_wait?.state !== 'active' && this.recoverablePlan(startupState)) {
       this.queueEvent(async () => {
         await this.recoverInterruptedPlan('runtime_restart', { actor_id: this.lastStatus?.actor_id, epoch: this.lastStatus?.epoch })
       })
@@ -2324,6 +2371,11 @@ export class Session {
           const state = await pauseStrandedPlanAfterRequestError(this, message)
           if (state) this.log('Canonical Task Board paused after a failed request left Autorio idle')
           if (state && String(state.pause_reason ?? '').startsWith(`${TRANSIENT_PAUSE_PREFIX}:`)) {
+            await this.scheduleAutoResume(message)
+          }
+          else if (!state && transientProviderFailure(message) && this.agent.goalAwaitingNextSlice?.() === true) {
+            // The failure hit the planner call for the next slice: there is no
+            // active plan to pause, but the goal is still live.
             await this.scheduleAutoResume(message)
           }
           else if (providerRecoveryExhausted(message)) {
@@ -2450,7 +2502,7 @@ export class Session {
         const planBeforeRecovery = this.currentPlanState()
         this.agent.cancel?.('actor_replaced_stale_turn')
         await this.ensureAuthorization()
-        if (shouldRecoverInterruptedPlan(planBeforeRecovery)) {
+        if (this.recoverablePlan(planBeforeRecovery)) {
           const result = await this.recoverInterruptedPlan('actor_replaced', {
             previous_actor_id: Number(recovery[1]),
             replacement_actor_id: Number(recovery[2]),
@@ -2508,7 +2560,12 @@ export class Session {
       let gracefulResult
       if (this.agent?.active) {
         try {
-          if (typeof this.agent.pausePersistentPlan === 'function') {
+          if (this.agent.goalAwaitingNextSlice?.() === true) {
+            // Between slices nothing is executing; keep the verified slice as
+            // completed so restart recovery plans the next slice.
+            this.agent.cancel()
+          }
+          else if (typeof this.agent.pausePersistentPlan === 'function') {
             const state = await this.agent.pausePersistentPlan(`server_stop_${reason}`)
             await this.syncTaskBoardUi(state)
           }

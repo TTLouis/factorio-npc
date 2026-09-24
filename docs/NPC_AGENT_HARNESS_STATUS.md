@@ -34,6 +34,25 @@ That checkpoint verifies the redesigned planning acceptance path against real Fa
 - committed completion semantics frozen against post-commit checkpoint rewriting;
 - legacy Task Board and `[RUNTIME_COMPAT_STATE]` retained only as compatibility projections, with `[PLANNING_STATE]` the sole model-facing planning authority.
 
+### 2026-09-24 hand trace of the rocket-goal tracks (unit/integration evidence only)
+
+This round was traced and fixed without E2E. Each item has a deterministic regression test, but none of it has real-Factorio evidence yet.
+
+- **Restart mid-slice:** the goal definition, Roadmap Shelf and committed step are restored, and there is no request to redefine the goal.
+  - Fixed: a planner restating a *different* checkpoint for a committed step threw `committed_completion_contract_is_immutable` after the plan was already persisted as admitting. That killed the continuation, and after a restart it paused the plan as "could not safely recover".
+  - The committed contract is now kept, the proposal is ignored and traced (`step.checkpoint_change_ignored`), and the planner is told why.
+- **Between slices** (slice verified, goal still active): restart, a provider failure, and shutdown all silently stranded the goal. The legacy plan reads `completed` there, so neither restart recovery nor auto-resume picked it up.
+  - `goalAwaitingNextSlice()` now makes the goal recoverable.
+  - Recovery re-checks `doneWhen` in game (and completes the goal if it was met while down) before planning the next slice.
+  - Transient failures there schedule auto-resume.
+  - Shutdown no longer pauses the verified slice.
+- **Space Age:** after a save load, the NPC body was searched only on `game.surfaces[1]`. A body on another planet or a space platform was treated as dead, and a second body spawned on Nauvis.
+  - It is now found game-wide by unit number.
+  - Known limits:
+    - A body that really died still respawns at the Nauvis spawn point.
+    - Goal conditions are checked only at slice boundaries, not mid-slice.
+    - An RCON failure during the goal check counts as "not yet met", so one extra slice may be planned.
+
 The compatibility projection should not be deleted merely for cosmetic cleanup while other runtime/UI
 features still consume it. Future removal should be driven by eliminating those consumers, not by creating
 another planning source of truth.

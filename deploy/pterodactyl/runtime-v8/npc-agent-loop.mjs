@@ -3371,10 +3371,22 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
     if (frozen) {
       if (!existing || existingSignature !== incomingSignature) {
-        const error = new AgentLoopError('committed_completion_contract_is_immutable')
-        error.failureClass = 'plan_category'
-        error.code = 'committed_completion_contract_immutable'
-        throw error
+        // A committed step's meaning is immutable, so the resent contract is
+        // ignored and the committed one (or none) stays authoritative. This
+        // used to throw after the plan was already persisted as admitting,
+        // which killed continuation and restart recovery whenever the planner
+        // re-stated a checkpoint with, say, an adjusted minimum.
+        await this.traceEvent('step.checkpoint_change_ignored', {
+          active_step_id: step.id,
+          reason: 'committed_completion_contract_is_immutable',
+          committed_contract: existing?.contract,
+          proposed_contract: validation.contract,
+        })
+        this.messages.push({
+          role: 'user',
+          content: `[HARNESS] Step ${step.id} is committed, so its completion contract cannot change; the checkpoint you sent was ignored and ${existing ? 'the committed checkpoint still decides completion' : 'the step keeps its committed completion rules'}. Do not resend a different checkpoint for this step.`,
+        })
+        return { state, contract: existing?.contract, stepId: step.id, ignored: true }
       }
       return { state, contract: existing.contract, stepId: step.id }
     }
@@ -4646,6 +4658,23 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // The harness, not the plan, decides whether the user's goal is met: every
   // done_when condition is read from the game. Records GOAL_SATISFIED on
   // positive evidence only.
+  // True between plan slices of a long goal: the last committed slice is
+  // verified complete but the user goal is still active and has a way to
+  // continue (a game-checked definition or a Roadmap Shelf). The legacy plan
+  // reads "completed" here, so without this check a restart or a provider
+  // failure at the slice boundary stranded the goal silently.
+  goalAwaitingNextSlice(key = this.activePlanKey()) {
+    const legacy = this.memory.currentPlan?.(key)
+    if (legacy?.status !== 'completed') return false
+    const planning = this.memory.planningState?.(key)
+    if (planning?.goal?.status !== GOAL_STATUS.ACTIVE) return false
+    if (legacy.goal_id && planning.goal.goal_id && legacy.goal_id !== planning.goal.goal_id) return false
+    const hasShelf = (planning.roadmap?.nodes?.length ?? 0) > 0
+    if (!planning.goal.definition && !hasShelf) return false
+    const plan = getActivePlanningPlan(planning)
+    return !plan || plan.status === PLAN_STATUS.COMPLETED
+  }
+
   async evaluateGoalCompletion() {
     const key = this.activePlanKey()
     const definition = this.memory.goalDefinition?.(key)

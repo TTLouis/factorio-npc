@@ -296,13 +296,15 @@ test('unsupported or ungrounded planner checkpoint is rejected without a second 
 
 test('committed prose-only step cannot acquire a new deterministic meaning after commit', async () => {
   const state = activeState({ withContract: false, withVerification: true })
-  const { agent } = agentWithState({ state })
+  const { agent, memory, key } = agentWithState({ state })
 
-  await assert.rejects(
-    agent.persistPlannerCheckpoint({
-      checkpoint: inventoryContract(10),
-      operations: [],
-    }),
-    /committed_completion_contract_is_immutable/,
-  )
+  // Ignored rather than thrown: throwing here killed the whole continuation
+  // after the plan had already been persisted as admitting.
+  const result = await agent.persistPlannerCheckpoint({
+    checkpoint: inventoryContract(10),
+    operations: [],
+  })
+  assert.equal(result.ignored, true)
+  assert.equal(memory.currentPlan(key).task_board.steps[0].completion_contract, undefined)
+  assert.match(String(agent.messages.at(-1)?.content), /completion contract cannot change/)
 })
