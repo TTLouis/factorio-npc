@@ -87,8 +87,10 @@ function makeAgent({
   maxProviderOutputUnits,
   maxProviderBudgetHandoffs,
   memory = new CanonicalTaskBoardMemory(),
+  onActivity,
 } = {}) {
   return new NpcAgentLoop({
+    onActivity,
     rcon,
     provider,
     reserve,
@@ -895,8 +897,10 @@ test('provider budget rollover limit stops recursive fresh generations without c
   const canonical = ['Inspect machine state', 'Continue the build']
   const calls = []
   const recoveryRoutes = { count: 0 }
+  const events = []
   const agent = makeAgent({
     maxProviderBudgetHandoffs: 1,
+    onActivity: (event, data) => events.push({ event, data }),
     interactionDecisionProvider: rolloverDecisionProvider(recoveryRoutes),
     provider: async () => {
       calls.push(calls.length + 1)
@@ -924,6 +928,10 @@ test('provider budget rollover limit stops recursive fresh generations without c
   assert.equal(state.status, 'paused')
   assert.notEqual(state.status, 'blocked')
   assert.equal(state.provider_recovery, undefined)
+  // Burner-drill canary attempt 3: the pause wrote no terminal event, so the
+  // trace read as a stalled request.
+  const ended = events.filter(entry => entry.event === 'request.completed' || entry.event === 'request.failed')
+  assert.equal(ended.at(-1)?.data.outcome, 'paused_recoverable')
 })
 
 test('a budget handoff on the first turn of a new goal keeps the player request', async () => {
