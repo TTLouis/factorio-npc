@@ -176,11 +176,12 @@ export function parsePlan(value) {
 }
 
 function parsePlacementCandidates(args) {
-  exactKeys(args, ['entity_name', 'center', 'radius', 'target_resource', 'limit'])
+  exactKeys(args, ['entity_name', 'center', 'radius', 'target_resource', 'covers_position', 'limit'])
   const parsed = { entity_name: base.factorioName(args.entity_name) }
   if (args.center !== undefined) parsed.center = position(args.center)
   if (args.radius !== undefined) parsed.radius = optionalInteger(args.radius, 'radius', 1, 24)
   if (args.target_resource !== undefined) parsed.target_resource = base.factorioName(args.target_resource)
+  if (args.covers_position !== undefined) parsed.covers_position = position(args.covers_position)
   if (args.limit !== undefined) parsed.limit = optionalInteger(args.limit, 'limit', 1, 8)
   return parsed
 }
@@ -191,6 +192,7 @@ function renderPlacementCandidates(args) {
   if (parsed.center !== undefined) fields.push(`center={x=${parsed.center.x},y=${parsed.center.y}}`)
   if (parsed.radius !== undefined) fields.push(`radius=${parsed.radius}`)
   if (parsed.target_resource !== undefined) fields.push(`target_resource=${base.luaString(parsed.target_resource)}`)
+  if (parsed.covers_position !== undefined) fields.push(`covers_position={x=${parsed.covers_position.x},y=${parsed.covers_position.y}}`)
   if (parsed.limit !== undefined) fields.push(`limit=${parsed.limit}`)
   return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_tools","get_placement_candidates",{${fields.join(',')}})))`
 }
@@ -507,7 +509,7 @@ const placementCandidatesDefinition = {
   type: 'function',
   function: {
     name: 'getPlacementCandidates',
-    description: 'Ask the local Factorio harness for a bounded set of live legal placement candidates derived from the current prototype and surface. For resource-bound mining placement, provide target_resource so non-covering placements are rejected; candidates may include live resource coverage, direct item output position, and current-prototype fluid port geometry. Use returned candidate ids with place_candidate rather than retyping coordinates.',
+    description: 'Ask the local Factorio harness for a bounded set of live legal placement candidates derived from the current prototype and surface. For resource-bound mining placement, provide target_resource so non-covering placements are rejected; candidates may include live resource coverage, direct item output position, and current-prototype fluid port geometry. For an entity that must receive another entity\'s output (a furnace or chest fed by a drill), pass that candidate\'s item_output_position as covers_position so only placements whose footprint covers it are returned. Use returned candidate ids with place_candidate rather than retyping coordinates.',
     parameters: {
       type: 'object', additionalProperties: false, required: ['entity_name'],
       properties: {
@@ -515,6 +517,7 @@ const placementCandidatesDefinition = {
         center: positionSchema,
         radius: { type: 'integer', minimum: 1, maximum: 24, default: 8 },
         target_resource: { type: 'string', minLength: 1, maxLength: 200 },
+        covers_position: positionSchema,
         limit: { type: 'integer', minimum: 1, maximum: 8, default: 5 },
       },
     },
@@ -948,8 +951,9 @@ export const OBSERVATION_TOOL_TIER = Object.freeze({
   getLogisticsTopology: 'discovery',
   measureTransportThroughput: 'discovery',
   getTransportCapacity: 'discovery',
-  getPlacementCandidates: 'discovery',
-  planPlacement: 'discovery',
+  // Deterministic harness-computed placement choices with bounded output.
+  getPlacementCandidates: 'fact',
+  planPlacement: 'fact',
   findConstructionSites: 'discovery',
   validateConstructionPlan: 'discovery',
   inspectConstructionIntent: 'discovery',

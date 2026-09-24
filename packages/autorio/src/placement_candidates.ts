@@ -14,6 +14,9 @@ export interface PlacementCandidateRequest {
   center?: { x: number, y: number }
   radius?: number
   target_resource?: string
+  // Only placements whose footprint covers this point, for example a drill's
+  // item_output_position when the new entity must receive its output.
+  covers_position?: { x: number, y: number }
   limit?: number
 }
 
@@ -74,6 +77,18 @@ function store_candidate_set(value: PlacementCandidateSet) {
 
 function finite(value: number) {
   return value === value && value !== math.huge && value !== -math.huge
+}
+
+const COVERS_POSITION_DEFAULT_RADIUS = 3
+
+function footprint_covers(prototype: any, position: { x: number, y: number }, direction: number, point: { x: number, y: number }) {
+  const width = finite(prototype.tile_width) ? prototype.tile_width : 1
+  const height = finite(prototype.tile_height) ? prototype.tile_height : 1
+  // East/west rotation swaps the footprint's extents.
+  const rotated = direction === 4 || direction === 12
+  const half_x = (rotated ? height : width) / 2
+  const half_y = (rotated ? width : height) / 2
+  return math.abs(point.x - position.x) < half_x && math.abs(point.y - position.y) < half_y
 }
 
 function squared_distance(a: { x: number, y: number }, b: { x: number, y: number }) {
@@ -299,9 +314,13 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
   const prototype = prototypes.entity[request.entity_name]
   if (!prototype) return { ok: false as const, error: 'entity prototype not found', entity_name: request.entity_name }
 
-  const center = request.center ?? actor.position
+  const covers = request.covers_position
+  if (covers !== undefined && (!finite(covers.x) || !finite(covers.y))) {
+    return { ok: false as const, error: 'covers_position must be finite', entity_name: request.entity_name }
+  }
+  const center = request.center ?? covers ?? actor.position
   if (!finite(center.x) || !finite(center.y)) return { ok: false as const, error: 'center must be finite', entity_name: request.entity_name }
-  const radius = math.max(1, math.min(MAX_RADIUS, math.floor(request.radius ?? 8)))
+  const radius = math.max(1, math.min(MAX_RADIUS, math.floor(request.radius ?? (covers !== undefined ? COVERS_POSITION_DEFAULT_RADIUS : 8))))
   const limit = math.max(1, math.min(MAX_LIMIT, math.floor(request.limit ?? 5)))
   const x_offset = grid_offset((prototype as any).tile_width)
   const y_offset = grid_offset((prototype as any).tile_height)
@@ -323,6 +342,7 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
           direction,
           force: actor.force,
         })) continue
+        if (covers !== undefined && !footprint_covers(prototype, position, direction, covers)) continue
 
         const coverage = resource_coverage(actor, prototype, position, direction, request.target_resource)
         if (request.target_resource !== undefined) {
@@ -359,6 +379,7 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
     center,
     radius,
     target_resource: request.target_resource,
+    covers_position: covers,
     scanned,
     legal_candidate_count: candidates.length,
     returned_candidate_count: selected.length,
