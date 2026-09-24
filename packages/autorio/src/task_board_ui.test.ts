@@ -340,7 +340,7 @@ describe('in-game task board UI projection', () => {
     expect(source).toContain('left.style.vertical_spacing = COLUMN_SPACING')
     expect(source).toContain('dynamic.style.vertical_spacing = COLUMN_SPACING')
     expect(source).toContain('resources.style.horizontal_spacing = COLUMN_SPACING')
-    expect(source).toContain('console_ui.render_goal_card(now, goal); console_ui.render_now_card(now, console_now_card(board)); console_ui.render_goal_card(plan, goal)')
+    expect(source).toContain('console_ui.render_goal_card(now, goal); console_ui.render_now_card(now, console_now_card(board)); console_ui.render_latest_card(now, console_latest_card(board)); console_ui.render_goal_card(plan, goal)')
     // The old Controls grid is gone: window buttons are in the title bar and
     // PAUSE / FOLLOW / … sit in one row under the prompt.
     expect(source).not.toContain("create_section(parent, 'Controls'")

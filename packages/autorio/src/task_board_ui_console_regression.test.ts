@@ -143,7 +143,7 @@ describe('SGLuna NPC console layout regressions', () => {
 
     const refresh_activity = source.split('function refresh_activity(')[1]?.split('function activity_scroll_of(')[0] ?? ''
     // Rows are appended and trimmed; the pane itself is never cleared...
-    expect(refresh_activity).toContain('activity_state.activity_rows_diff(shown, keys)')
+    expect(refresh_activity).toContain('activity_state.activity_row_diff(shown_heads, shown_tails, rows)')
     expect(refresh_activity).not.toContain('scroll.clear()')
     // ...and it only moves when the follow state says so.
     expect(refresh_activity).toContain('if (activity_state.activity_should_scroll(view, appended, last_key)) (scroll as ScrollPaneGuiElement).scroll_to_bottom()')

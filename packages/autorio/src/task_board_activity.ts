@@ -304,3 +304,48 @@ export function activity_should_scroll(view: ActivityView, appended: number, las
   view.behind = false
   return scroll
 }
+
+/**
+ * One feed row: a run of consecutive entries with the same kind and text,
+ * shown once with ×N. `head` and `tail` are the keys of the run's first and
+ * newest entries, and `entry` is the newest, so the row shows its latest time.
+ */
+export interface ActivityRow { entry: TaskBoardUiActivity, head: string, tail: string, count: number }
+
+export function activity_rows(entries: TaskBoardUiActivity[]): ActivityRow[] {
+  const rows: ActivityRow[] = []
+  for (const entry of entries) {
+    const key = activity_key(entry)
+    const last = rows[rows.length - 1]
+    if (last !== undefined && last.entry.kind === entry.kind && last.entry.text === entry.text) {
+      last.entry = entry
+      last.tail = key
+      last.count++
+    }
+    else rows.push({ entry, head: key, tail: key, count: 1 })
+  }
+  return rows
+}
+
+export function activity_row_text(row: ActivityRow) {
+  return row.count > 1 ? `${row.entry.text}  ×${row.count}` : row.entry.text
+}
+
+/**
+ * activity_rows_diff for merged rows. A row drawn earlier is the same row if
+ * either end of its run is unchanged: a new repeat moves only the tail, and
+ * trimming the oldest entries moves only the head, so both update in place.
+ */
+export function activity_row_diff(shown_heads: string[], shown_tails: string[], wanted: ActivityRow[]) {
+  const same = (shown: number, want: number) => shown_heads[shown] === wanted[want].head || shown_tails[shown] === wanted[want].tail
+  const count = shown_heads.length
+  for (let overlap = math.min(count, wanted.length); overlap >= 0; overlap--) {
+    if (overlap === 0 && count > 0) return undefined
+    let matches = true
+    for (let index = 0; index < overlap; index++) {
+      if (!same(count - overlap + index, index)) { matches = false; break }
+    }
+    if (matches) return { drop: count - overlap, append: wanted.length - overlap }
+  }
+  return undefined
+}

@@ -292,6 +292,44 @@ export function render_now_card(parent: LuaGuiElement, now: ConsoleNowCard) {
   if (now.last.length > 0) wrapped(body, now.last, inner).style.font_color = ui_constants.TONE_COLORS[now.last_tone]
 }
 
+export interface ConsoleLatestCard {
+  // Feed rows after merging repeats, and the entries they came from.
+  rows: number
+  entries: number
+  lines: Array<{ time: string, tag: string, tone: ui_constants.Tone, text: string }>
+}
+
+/**
+ * The newest few feed rows on NOW, so the player sees what just happened
+ * without leaving the tab, and a button that opens ACTIVITY for the rest.
+ */
+export function render_latest_card(parent: LuaGuiElement, latest: ConsoleLatestCard) {
+  const body = card(parent, ui_constants.CONSOLE_TABS.latest_card, 'Latest', latest.entries > 0 ? `${latest.entries} event${latest.entries === 1 ? '' : 's'}` : '')
+  const inner = ui_constants.LEFT_COLUMN_WIDTH - 2 * ui_constants.SECTION_PADDING
+  if (latest.lines.length === 0) {
+    wrapped(body, 'Nothing yet. What AIRI observes, decides and does appears here.', inner).style.font_color = ui_constants.TONE_COLORS.muted
+    return
+  }
+  const table = body.add({ type: 'table', column_count: 3 })
+  table.style.horizontal_spacing = 8
+  table.style.vertical_spacing = 4
+  for (const line of latest.lines) {
+    const time = table.add({ type: 'label', caption: line.time })
+    time.style.minimal_width = 66
+    time.style.font_color = ui_constants.TONE_COLORS.muted
+    const tag = table.add({ type: 'label', caption: line.tag, style: 'bold_label' })
+    tag.style.minimal_width = 52
+    tag.style.font_color = ui_constants.TONE_COLORS[line.tone]
+    wrapped(table, line.text, inner - 140)
+  }
+  const footer = body.add({ type: 'flow', direction: 'horizontal' })
+  footer.style.horizontally_stretchable = true
+  const filler = footer.add({ type: 'empty-widget' })
+  filler.style.horizontally_stretchable = true
+  const more = latest.rows > latest.lines.length ? `All activity (${latest.rows - latest.lines.length} more)` : 'All activity'
+  footer.add({ type: 'button', caption: more, tooltip: 'Open the ACTIVITY tab', tags: { [ui_constants.CONSOLE_TABS.tag]: 'activity' } })
+}
+
 export function console_tab_of(value: unknown): ui_constants.ConsoleTab | undefined {
   return value === 'now' || value === 'plan' || value === 'activity' ? value : undefined
 }

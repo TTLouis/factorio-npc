@@ -1121,24 +1121,37 @@ function refresh_activity(header: LuaGuiElement, empty: LuaGuiElement, scroll: L
   scroll.visible = entries.length > 0
   empty.visible = entries.length === 0
   empty.caption = total === 0 ? 'No activity yet.' : mask === 0 ? 'No activity categories selected.' : 'No recent activity matches this filter.'
-  const add_row = (entry: TaskBoardUiActivity) => {
+  // Repeats of one line are one row with ×N, updated in place as they arrive.
+  const rows = activity_state.activity_rows(entries)
+  const add_row = (row: activity_state.ActivityRow) => {
+    const entry = row.entry
     const timestamp = table.add({ type: 'label', caption: entry.timestamp ?? '--:--:--', ignored_by_interaction: true }); timestamp.style.minimal_width = 66; timestamp.style.font_color = TONE_COLORS.muted
     const tag = table.add({ type: 'label', caption: activity_prefix(entry.kind), style: 'bold_label', ignored_by_interaction: true }); tag.style.minimal_width = 52; tag.style.font_color = TONE_COLORS[activity_tone(entry.kind)]
-    const line = gui_text.literal_gui_text(table.add({ type: 'label', caption: entry.text, ignored_by_interaction: true })); line.style.single_line = false; line.style.maximal_width = ui_constants.LEFT_COLUMN_WIDTH - 2 * ui_constants.SECTION_PADDING - 160
+    const line = gui_text.literal_gui_text(table.add({ type: 'label', caption: activity_state.activity_row_text(row), ignored_by_interaction: true })); line.style.single_line = false; line.style.maximal_width = ui_constants.LEFT_COLUMN_WIDTH - 2 * ui_constants.SECTION_PADDING - 160
   }
-  const shown = (table.tags.keys ?? []) as string[]
-  const diff = activity_state.activity_rows_diff(shown, keys)
+  const shown_heads = table.tags.heads as string[] | undefined
+  const shown_tails = table.tags.tails as string[] | undefined
+  const diff = shown_heads === undefined || shown_tails === undefined ? undefined : activity_state.activity_row_diff(shown_heads, shown_tails, rows)
   let appended = 0
   if (diff === undefined) {
-    table.clear(); for (const entry of entries) add_row(entry); appended = entries.length
+    table.clear(); for (const row of rows) add_row(row); appended = rows.length
   }
   else {
     const children = table.children
     for (let index = 0; index < diff.drop * 3 && index < children.length; index++) children[index].destroy()
-    for (let index = entries.length - diff.append; index < entries.length; index++) add_row(entries[index])
+    // Only the ends of the kept rows can have changed: the oldest run loses
+    // trimmed entries and the newest run gains repeats.
+    const kept = rows.length - diff.append
+    const remaining = table.children
+    for (const index of kept > 1 ? [0, kept - 1] : kept === 1 ? [0] : []) {
+      const time = remaining[index * 3]; const line = remaining[index * 3 + 2]; const caption = activity_state.activity_row_text(rows[index])
+      if (time?.valid && time.caption !== (rows[index].entry.timestamp ?? '--:--:--')) time.caption = rows[index].entry.timestamp ?? '--:--:--'
+      if (line?.valid && line.caption !== caption) line.caption = caption
+    }
+    for (let index = kept; index < rows.length; index++) add_row(rows[index])
     appended = diff.append
   }
-  table.tags = { keys }
+  table.tags = { keys, heads: rows.map(row => row.head), tails: rows.map(row => row.tail) }
   const view = activity_state.activity_view(player.index)
   const last_key = keys.length > 0 ? keys[keys.length - 1] : undefined
   if (activity_state.activity_should_scroll(view, appended, last_key)) (scroll as ScrollPaneGuiElement).scroll_to_bottom()
@@ -1211,11 +1224,19 @@ function render_titlebar(root: FrameGuiElement, caption = 'SGLuna NPC Console', 
   titlebar.add({ type: 'label', caption, style: 'frame_title', ignored_by_interaction: true }); const dragger = titlebar.add({ type: 'empty-widget', style: 'draggable_space_header', ignored_by_interaction: true }); dragger.style.horizontally_stretchable = true; dragger.style.height = 24
   titlebar.add({ type: 'sprite-button', name: close_name, sprite: 'utility/close', style: 'frame_action_button', tooltip: `Close ${caption}` })
 }
+function console_latest_card(board: TaskBoardUiSnapshot | undefined): console_ui.ConsoleLatestCard {
+  // Same rows as the ACTIVITY feed, minus its filters: what the conversation shows is left out.
+  const in_conversation = debug_ui.conversation_activity_keys(board)
+  const entries = task_board_activity_for_display(board).filter(entry => !in_conversation[activity_state.activity_key(entry)])
+  const rows = activity_state.activity_rows(entries)
+  const lines = rows.slice(math.max(0, rows.length - ui_constants.CONSOLE_TABS.latest_rows)).map(row => ({ time: row.entry.timestamp ?? '--:--:--', tag: activity_prefix(row.entry.kind), tone: activity_tone(row.entry.kind), text: activity_state.activity_row_text(row) }))
+  return { rows: rows.length, entries: entries.length, lines }
+}
 function selected_console_tab(player: LuaPlayer): ui_constants.ConsoleTab { return console_ui.console_tab_of(storage.airi_task_board_tab?.[player.index]) ?? 'now' }
 /** What is rebuilt every refresh: the blocked banner and the NOW and PLAN cards. None of it owns a scroll-pane. */
 function build_left_dynamic(banner: LuaGuiElement, now: LuaGuiElement, plan: LuaGuiElement, player: LuaPlayer, board: TaskBoardUiSnapshot | undefined) {
   render_blocked(banner, player, board)
-  const goal = console_goal_card(board); console_ui.render_goal_card(now, goal); console_ui.render_now_card(now, console_now_card(board)); console_ui.render_goal_card(plan, goal)
+  const goal = console_goal_card(board); console_ui.render_goal_card(now, goal); console_ui.render_now_card(now, console_now_card(board)); console_ui.render_latest_card(now, console_latest_card(board)); console_ui.render_goal_card(plan, goal)
 }
 function build_columns(columns: LuaGuiElement, player: LuaPlayer) {
   const board = storage.airi_task_board_ui; const runtime = runtime_snapshot()

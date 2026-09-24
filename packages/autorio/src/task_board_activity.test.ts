@@ -186,3 +186,29 @@ describe('recent activity follow', () => {
     expect(view).toEqual({ follow: true, behind: false, seen_key: undefined })
   })
 })
+describe('merged repeat rows', () => {
+  const entry = (id: string, text: string, kind: 'action' | 'result' = 'action') => ({ id, kind, text, timestamp: `t${id}` })
+
+  it('merges consecutive entries with the same kind and text, keeping the newest time', async () => {
+    const { activity_rows, activity_row_text } = await import('./task_board_activity')
+    const rows = activity_rows([entry('1', 'mine iron'), entry('2', 'mine iron'), entry('3', 'mine iron', 'result'), entry('4', 'mine iron'), entry('5', 'mine iron')])
+    expect(rows.map(row => [row.head, row.tail, row.count])).toEqual([['id:1', 'id:2', 2], ['id:3', 'id:3', 1], ['id:4', 'id:5', 2]])
+    expect(rows[0].entry.timestamp).toBe('t2')
+    expect(activity_row_text(rows[0])).toBe('mine iron  ×2')
+    expect(activity_row_text(rows[1])).toBe('mine iron')
+  })
+
+  it('keeps a row in place when a repeat arrives or its oldest entries are trimmed', async () => {
+    const { activity_rows, activity_row_diff } = await import('./task_board_activity')
+    const before = activity_rows([entry('1', 'a'), entry('2', 'a'), entry('3', 'b')])
+    const heads = before.map(row => row.head); const tails = before.map(row => row.tail)
+    // A repeat of the newest line: nothing appended, the last row grows.
+    expect(activity_row_diff(heads, tails, activity_rows([entry('1', 'a'), entry('2', 'a'), entry('3', 'b'), entry('4', 'b')]))).toEqual({ drop: 0, append: 0 })
+    // The oldest entry trimmed out of the run: the first row stays.
+    expect(activity_row_diff(heads, tails, activity_rows([entry('2', 'a'), entry('3', 'b'), entry('5', 'c')]))).toEqual({ drop: 0, append: 1 })
+    // The whole first run trimmed: that row is dropped.
+    expect(activity_row_diff(heads, tails, activity_rows([entry('3', 'b'), entry('5', 'c')]))).toEqual({ drop: 1, append: 1 })
+    // Nothing in common: the caller rebuilds.
+    expect(activity_row_diff(heads, tails, activity_rows([entry('9', 'z')]))).toBeUndefined()
+  })
+})
