@@ -170,6 +170,57 @@ export const STEERING_PRESSURE_VOCABULARY = Object.freeze({
   ]),
 })
 
+// What each pressure means in game terms, and which facts in the steering
+// state could show it. Jev is a general-purpose judge: it can weigh supplied
+// facts, but it cannot be expected to know Factorio mechanics or to see world
+// state it was not given. A pressure is therefore asked only when the state
+// carries every fact it requires; a pressure whose facts the runtime does not
+// gather yet is not asked at all.
+export const STEERING_PRESSURE_EVIDENCE = Object.freeze({
+  throughput_starved: { definition: 'A production line makes less than what consumes its output needs.', requires: ['production'] },
+  input_buffer_starved: { definition: 'Machine input slots or input chests are empty or nearly empty.', requires: ['production'] },
+  output_backed_up: { definition: 'Machine outputs or output belts are full, so machines stop working.', requires: ['production'] },
+  machine_idle_no_input: { definition: 'Placed machines are idle because an ingredient or fuel is missing.', requires: ['production'] },
+  machine_idle_no_power: { definition: 'Placed electric machines are idle because they have no power.', requires: ['power'] },
+  power_deficit: { definition: 'Electric demand is higher than generation.', requires: ['power'] },
+  power_margin_low: { definition: 'Electric generation only barely covers demand.', requires: ['power'] },
+  resource_patch_depleting: { definition: 'A resource patch that is being mined is running out.', requires: ['resources'] },
+  logistics_bottleneck: { definition: 'Belts, inserters, or other transport limit a production line.', requires: ['logistics'] },
+  repeated_manual_topup: { definition: 'The NPC has repeatedly hand-delivered the same items to keep something running.', requires: ['operation_history'] },
+  defense_margin_low: { definition: 'Defenses are too weak for the enemy pressure nearby.', requires: ['defense'] },
+  frontier_reached: { definition: 'Every Roadmap Shelf node that current capability allows is done; progress now needs a new capability.', requires: ['roadmap'] },
+  capability_absent: { definition: 'The goal needs a building, recipe, or technology that save_progress shows this save does not have yet.', requires: ['save_progress'] },
+  technology_blocked_missing_science: { definition: 'A needed research cannot start because its science packs are not being produced.', requires: ['research'] },
+  recipe_locked_missing_technology: { definition: 'A needed recipe is locked behind technology that is not researched.', requires: ['research'] },
+  required_item_uncraftable: { definition: 'A needed item cannot be crafted with the recipes and materials available.', requires: ['recipes'] },
+  shelf_node_ready_to_refine: { definition: 'A Roadmap Shelf node has its dependencies met and can be planned in detail next.', requires: ['roadmap'] },
+  goal_requires_new_capability: { definition: 'Finishing the goal from this save needs a capability that save_progress shows is not unlocked yet.', requires: ['save_progress'] },
+  surplus_unconsumed: { definition: 'Some output keeps piling up with nothing consuming it.', requires: ['production'] },
+})
+
+// Facts the steering state can carry today. Add a detector here when the
+// runtime starts gathering a new fact, and the pressures that need it start
+// being asked automatically.
+const STEERING_STATE_FACTS = Object.freeze({
+  roadmap: state => Array.isArray(state?.roadmap?.nodes) && state.roadmap.nodes.length > 0,
+  save_progress: state => Boolean(state?.save_progress) && typeof state.save_progress === 'object',
+})
+
+export function askableSteeringPressures(state) {
+  const present = new Set(Object.entries(STEERING_STATE_FACTS)
+    .filter(([, detect]) => detect(state))
+    .map(([fact]) => fact))
+  const askable = code => STEERING_PRESSURE_EVIDENCE[code]?.requires.every(fact => present.has(fact)) === true
+  return {
+    horizontal: STEERING_PRESSURE_VOCABULARY.horizontal.filter(askable),
+    vertical: STEERING_PRESSURE_VOCABULARY.vertical.filter(askable),
+  }
+}
+
+export function steeringPressureDefinitions() {
+  return Object.fromEntries(Object.entries(STEERING_PRESSURE_EVIDENCE).map(([code, entry]) => [code, entry.definition]))
+}
+
 const STEERING_PRESSURE_SETS = Object.freeze({
   horizontal: new Set(STEERING_PRESSURE_VOCABULARY.horizontal),
   vertical: new Set(STEERING_PRESSURE_VOCABULARY.vertical),

@@ -33,6 +33,8 @@ import {
   PLAN_STATUS,
   STEERING_BOUNDARY,
   STEERING_PRESSURE_VOCABULARY,
+  askableSteeringPressures,
+  steeringPressureDefinitions,
 } from './planning-state.mjs'
 import { emptyJevHealth, recordJevHealth, summarizeJevHealth } from './jev-health.mjs'
 import { evaluateGoalDefinition, formatGoalProgress, GOAL_SCOPE, sanitizeGoalDefinition } from './goal-definition.mjs'
@@ -78,6 +80,15 @@ const SENSITIVE_TRACE_KEY = /authorization|api.?key|token|password|secret|cookie
 const STATE_SCHEMA = 1
 const PLAN_HISTORY_LIMIT = 24
 const MAX_OBSERVATION_TOOL_CALLS_PER_BATCH = 4
+const JEV_OBSERVATION_LOG_LIMIT = 12
+// Evidence kinds that let a semantic step completion claim through.
+const SEMANTIC_GROUNDING_KINDS = new Set([
+  'deterministic_verification',
+  'operation_receipt',
+  'verified_world_state',
+  'condition_satisfied',
+  'fresh_world_observation',
+])
 const DUPLICATE_OBSERVATION_MESSAGE = '[HARNESS] Duplicate observation suppressed. The result is unchanged from the earlier identical tool call already present in this decision context; reuse it and act or report a blocker.'
 const OUTPUT_BUDGET_RECOVERY_MESSAGE = '[HARNESS] The immediately preceding provider response exhausted its output budget before emitting content or tool calls. Continue the same logical request and goal from this unchanged harness context. Tools remain available. Do not treat the empty response as an action, plan update, completion, or evidence. Do not replay any world mutation already proven complete by the supplied receipts or canonical Task Board. Return the next necessary observation tool call(s), or use submitPlan for the planner decision. Legacy strict-JSON content remains a compatibility fallback only.'
 // The cap covers reasoning tokens too. Live (goal_mueryuql) a reasoning model spent
@@ -2129,13 +2140,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw new AgentLoopError('maxProviderBudgetHandoffs must be an integer from 1 to 16')
     }
     this.interactionProvider = typeof options.interactionProvider === 'function' ? options.interactionProvider : null
-    this.interactionDecisionProvider = typeof options.interactionDecisionProvider === 'function' ? options.interactionDecisionProvider : null
-    this.steeringDecisionProvider = typeof options.steeringDecisionProvider === 'function'
-      ? options.steeringDecisionProvider
-      : null
-    this.operationProjectionDecisionProvider = typeof options.operationProjectionDecisionProvider === 'function'
-      ? options.operationProjectionDecisionProvider
-      : null
+    this.interactionDecisionProvider = this.recordedDecisionProvider(options.interactionDecisionProvider)
+    this.steeringDecisionProvider = this.recordedDecisionProvider(options.steeringDecisionProvider)
+    this.operationProjectionDecisionProvider = this.recordedDecisionProvider(options.operationProjectionDecisionProvider)
     this.interactionAbort = null
     this.postStepDecisionAbort = null
     this.recoveryDecisionAbort = null
@@ -3114,7 +3121,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async requestInteractionPlannerShape(text, sender, taskStatus, planState, intent, epoch) {
-    if (intent === 'new_goal') this.goalReading = null
+    if (intent === 'new_goal') {
+      this.goalReading = null
+      this.jevObservationLog = []
+    }
     if (!this.interactionDecisionProvider) return undefined
     // A new goal also gets Jev's blind goal reading in the same request: the
     // player's words plus save-progress facts, never the planner's answer.
@@ -3140,6 +3150,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         : null,
       runtime: taskStatus,
       ...(readGoal ? { save_progress: saveProgress ?? null } : {}),
+      ...this.jevObservationContext(intent === 'new_goal' ? undefined : planState),
     }
 
     this.interactionAbort?.abort()
@@ -3590,11 +3601,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           }
         : null,
       verified_world: sanitizeDurableModelValue(receipt?.providerStatus ?? receipt?.view ?? world),
+      save_progress: (await this.readGoalProgressFacts()) ?? null,
     }
 
     const steeringQuestionOptions = {
       candidateShelfNodes: state.roadmap?.nodes ?? [],
-      pressureVocabulary: STEERING_PRESSURE_VOCABULARY,
+      pressureVocabulary: askableSteeringPressures(state),
+      pressureDefinitions: steeringPressureDefinitions(),
     }
     const questions = steeringRecommendationQuestions(steeringQuestionOptions)
     const decisionId = `decision_${Date.now().toString(36)}_${(++this.decisionRequestSequence).toString(36)}`
@@ -3837,6 +3850,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const autorioStatus = receipt?.view && typeof receipt.view === 'object'
       ? receipt.view
       : (receipt?.providerStatus && typeof receipt.providerStatus === 'object' ? receipt.providerStatus : {})
+    if (Number.isSafeInteger(autorioStatus?.last_completed_batch?.batch_id)) {
+      this.latestCompletedBatchId = autorioStatus.last_completed_batch.batch_id
+    }
     const autorioRuntimeHealthy = interactionRuntimeHealthy(autorioStatus)
     const persistentControllerHealthy = persistentRuntimeHealthy(persistentRuntime)
     const planState = this.memory.planByNpc?.get?.(this.activePlanKey()) ?? this.memory.currentPlan?.(this.activePlanKey())
@@ -3925,6 +3941,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       condition_wait_active: conditionWaitHealthy,
       ...(conditionWaitHealthy ? { condition_wait: sanitizeDurableModelValue(conditionValidation.wait) } : {}),
       ...(failure ? { failure: cleanMemoryText(failure, 1200) } : {}),
+      ...this.jevObservationContext(planState),
     }
     // Gate call: only the judgments that decide whether the Main LLM wakes.
     // Planner-shape questions are asked separately, and only on a wake.
@@ -4560,7 +4577,49 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return true
   }
 
+  // Every Jev call is written to the decision trace with the state it judged
+  // and the answers it gave, so a round can be audited or replayed
+  // offline against reworded questions without a new game run.
+  recordedDecisionProvider(provider) {
+    if (typeof provider !== 'function') return null
+    return async (state, questions, context = {}) => {
+      const decisionId = this.pendingDecisionRequestId
+      this.pendingDecisionRequestId = undefined
+      // The decision trace never copies the player's message; the behavior
+      // trace already holds it for the same request.
+      const tracedState = state && typeof state === 'object' && typeof state.message === 'string'
+        ? { ...state, message: undefined, message_chars: state.message.length }
+        : state
+      const exchange = {
+        decision_id: decisionId,
+        contract: typeof state?.contract === 'string' ? state.contract : state?.reason,
+        state: tracedState,
+        question_ids: Object.keys(questions ?? {}),
+      }
+      const startedAt = Date.now()
+      try {
+        const response = await provider(state, questions, context)
+        await this.decisionTraceEvent('decision.exchange', {
+          ...exchange,
+          model: typeof response?.model === 'string' ? response.model : undefined,
+          answers: response?.answers,
+          latency_ms: Date.now() - startedAt,
+        })
+        return response
+      }
+      catch (error) {
+        await this.decisionTraceEvent('decision.exchange', {
+          ...exchange,
+          error: cleanMemoryText(error instanceof Error ? error.message : String(error), 300),
+          latency_ms: Date.now() - startedAt,
+        })
+        throw error
+      }
+    }
+  }
+
   decisionTraceEvent(event, data = {}) {
+    if (event === 'decision.request') this.pendingDecisionRequestId = data?.decision_id
     this.recordJevHealthEvent(event, data)
     if (!this.decisionTrace) return Promise.resolve()
     const { decision_id, ...details } = data ?? {}
@@ -5739,6 +5798,38 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  recordJevObservations(names) {
+    if (names.length === 0) return
+    this.jevObservationLog = [
+      ...(this.jevObservationLog ?? []),
+      ...names.map(tool => ({ tool, family: observationToolFamily(tool), after_batch: this.latestCompletedBatchId ?? 0 })),
+    ].slice(-JEV_OBSERVATION_LOG_LIMIT)
+  }
+
+  // What the planner already knows, computed by code so Jev does not have to
+  // infer it: recent fresh reads (stale once a newer batch has completed), the
+  // plan's steps, and whether the active step has completion evidence yet.
+  jevObservationContext(planState) {
+    const latest = this.latestCompletedBatchId ?? 0
+    const board = planState?.task_board
+    const steps = Array.isArray(board?.steps) ? board.steps : []
+    const activeStep = Number.isSafeInteger(board?.active_index) ? steps[board.active_index] : undefined
+    return {
+      known_observations: (this.jevObservationLog ?? []).map(entry => ({
+        tool: entry.tool,
+        family: entry.family,
+        stale: entry.after_batch < latest,
+      })),
+      plan_steps: steps.slice(0, 16).map(step => ({
+        description: sanitizeDurableModelText(step?.description, 200),
+        status: step?.status,
+      })),
+      active_step_has_completion_evidence: activeStep
+        ? (board?.evidence ?? []).some(item => item?.step_id === activeStep.id && SEMANTIC_GROUNDING_KINDS.has(item?.kind))
+        : false,
+    }
+  }
+
   completionProofReadsEligible() {
     const key = this.activePlanKey()
     const state = this.memory.planByNpc?.get?.(key) ?? this.memory.currentPlan?.(key)
@@ -5900,6 +5991,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     const freshResultObserved = results.some((_, index) => admittedCached[index] !== true && admittedStaticCached[index] !== true)
     if (freshResultObserved) this.freshObservationSinceContinuation = true
+    this.recordJevObservations(admittedPrepared
+      .filter((_, index) => admittedCached[index] !== true && admittedStaticCached[index] !== true)
+      .map(entry => entry.tool.function.name))
     if (this.outputBudgetRecoveryGuard && freshResultObserved) {
       this.outputBudgetRecoveryGuard.world_evidence_observed = true
       this.outputBudgetRecoveryGuard.fresh_tool_evidence = true
@@ -6322,18 +6416,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw error
     }
 
-    const groundingKinds = new Set([
-      'deterministic_verification',
-      'operation_receipt',
-      'verified_world_state',
-      'condition_satisfied',
-      'fresh_world_observation',
-    ])
     const grounding = [...(board?.evidence ?? [])]
       .filter(item => item?.step_id === step.id
         && typeof item?.ref === 'string'
         && item.ref
-        && groundingKinds.has(item?.kind))
+        && SEMANTIC_GROUNDING_KINDS.has(item?.kind))
       .slice(-4)
       .map(item => ({
         kind: item.kind,
