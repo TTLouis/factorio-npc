@@ -1,14 +1,17 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { step_caption, task_board_game_time, task_board_gui_height, task_board_preview_min_height, task_board_tracker_heights } from './task_board_ui'
 
 function taskBoardUiSource() {
   const main = readFileSync(new URL('./task_board_ui.ts', import.meta.url), 'utf8')
   const constants = readFileSync(new URL('./task_board_ui_constants.ts', import.meta.url), 'utf8')
+  // The console's chrome (title bar, blocked banner, action row) lives in its
+  // own module for Lua local headroom; it is part of the same console.
+  const chrome = readFileSync(new URL('./task_board_console.ts', import.meta.url), 'utf8')
   // UI constants moved into a namespace to preserve Factorio Lua local headroom.
   // Normalize that namespace for source-architecture assertions while retaining
   // the constants module so declaration/geometry checks still test real code.
-  return `${main.replaceAll('ui_constants.', '')}\n${constants}`.replace(/\r\n/g, '\n')
+  return `${main.replaceAll('ui_constants.', '')}\n${chrome.replaceAll('ui_constants.', '')}\n${constants}`.replace(/\r\n/g, '\n')
 }
 
 function taskBoardDebugSource() {
@@ -81,16 +84,34 @@ describe('SGLuna NPC console compact tracker layout', () => {
     expect(task_board_tracker_heights(1286, 0)).toEqual({ steps: 0, activity: 0 })
   })
 
-  it('spends the left column width on the panel that wraps text, not on the button grid', () => {
+  it('spends the whole left column on the panel that wraps text and moves window buttons to the title bar', () => {
     const source = taskBoardUiSource()
-    expect(source).toContain('const CONTROLS_SECTION_WIDTH = 264')
-    expect(source).toContain('const STATUS_SECTION_WIDTH = LEFT_COLUMN_WIDTH - COLUMN_SPACING - CONTROLS_SECTION_WIDTH')
+    expect(source).not.toContain('CONTROLS_SECTION_WIDTH')
+    expect(source).toContain('const STATUS_SECTION_WIDTH = LEFT_COLUMN_WIDTH')
     expect(source).toContain('const STATUS_VALUE_WIDTH = STATUS_SECTION_WIDTH - 2 * SECTION_PADDING - KEY_COLUMN_WIDTH - 12')
-    expect(source).toContain('issue.style.maximal_width = CONTROLS_SECTION_WIDTH - 2 * SECTION_PADDING')
+    expect(source).toContain('issue.style.maximal_width = LEFT_COLUMN_WIDTH')
     expect(source).not.toContain('HALF_SECTION_WIDTH')
     expect(source).not.toContain('HALF_VALUE_WIDTH')
-    expect(source).toContain("caption: skills_open ? 'CLOSE' : 'LEARN'")
-    expect(source).toContain('Open area learning and saved skill candidates in a separate movable window.')
+    // Learn, Old tasks and Debug are icon buttons beside Close, and show
+    // whether their window is open.
+    expect(source).toContain("{ name: SKILLS_BUTTON_NAME, icon: 'learn', open: skills_open")
+    expect(source).toContain("{ name: project_ui.PROJECTS_BUTTON_NAME, icon: 'history', open: projects_open")
+    expect(source).toContain("{ name: debug_ui.DEBUG_BUTTON_NAME, icon: 'debug', open: debug_open")
+    expect(source).toContain("style: 'frame_action_button',\n      tooltip: button.tooltip")
+    expect(source).toContain('element.toggled = button.open')
+  })
+
+  it('declares both variants of every title-bar icon the console draws', () => {
+    const data = readFileSync(new URL('../data.lua', import.meta.url), 'utf8')
+    const chrome = readFileSync(new URL('./task_board_console.ts', import.meta.url), 'utf8')
+    expect(data).toContain('for _, name in ipairs({"learn", "history", "debug"}) do')
+    expect(data).toContain('for _, variant in ipairs({"white", "black"}) do')
+    for (const icon of ['learn', 'history', 'debug']) {
+      expect(chrome).toContain(`'${icon}'`)
+      for (const variant of ['white', 'black']) {
+        expect(existsSync(new URL(`../graphics/icons/console/${icon}-${variant}.png`, import.meta.url))).toBe(true)
+      }
+    }
   })
 
   it('does not print the plan step number twice when the plan numbers itself', () => {
@@ -103,23 +124,31 @@ describe('SGLuna NPC console compact tracker layout', () => {
     expect(step_caption('')).toBe('')
   })
 
-  it('gives every control the same size and aligns controls in a two-column grid', () => {
+  it('puts PAUSE, FOLLOW and … in one fixed-width row and keeps NEW TASK and TERMINATE behind …', () => {
     const source = taskBoardUiSource()
-    expect(source).toContain('const COMPACT_BUTTON_WIDTH = (CONTROLS_SECTION_WIDTH - 2 * SECTION_PADDING - COMPACT_BUTTON_SPACING) / 2')
-    expect(source).toContain('function compact_button(button: LuaGuiElement)')
+    expect(source).toContain('const PAUSE_BUTTON_WIDTH = LEFT_COLUMN_WIDTH - FOLLOW_BUTTON_WIDTH - MORE_BUTTON_WIDTH - 2 * COMPACT_BUTTON_SPACING')
+    expect(source).toContain('function action_button(element: LuaGuiElement, width: number)')
     expect(source).not.toContain('COMPACT_TASK_BUTTON_WIDTH')
     expect(source).not.toContain('COMPACT_ACTION_BUTTON_WIDTH')
-    expect(source).toContain("const controls = body.add({ type: 'table', column_count: 2 })")
-    expect(source).toContain('controls.style.horizontal_spacing = COMPACT_BUTTON_SPACING')
-    expect(source).toContain('controls.style.vertical_spacing = COMPACT_BUTTON_SPACING')
+    const row = source.split('export function render_action_row(')[1] ?? ''
+    // The destructive pair is only drawn inside the open menu.
+    expect(row.indexOf('if (state.more_open) {')).toBeLessThan(row.indexOf('name: NEW_TASK_BUTTON_NAME'))
+    expect(row.indexOf('name: TERMINATE_BUTTON_NAME')).toBeLessThan(row.indexOf("const row = actions.add({ type: 'flow', direction: 'horizontal' })"))
+    expect(row).toContain('name: PAUSE_BUTTON_NAME')
+    expect(row).toContain('name: FOLLOW_BUTTON_NAME')
+    expect(row).toContain('name: MORE_BUTTON_NAME')
 
-    expect(source).toContain('pause.enabled = pending === undefined')
-    expect(source).toContain('terminate.enabled = pending === undefined')
+    expect(source).toContain('pause.enabled = state.pause_enabled')
+    expect(source).toContain('terminate.enabled = state.terminate_enabled')
+    expect(source).toContain('pause_enabled: pending === undefined')
+    expect(source).toContain('terminate_enabled: pending === undefined')
+    // An armed TERMINATE keeps the menu open for its confirming click.
+    expect(source).toContain('more_open: storage.airi_task_board_more_open?.[player.index] === true || armed')
 
-    expect(source).toContain('caption: debug_ui.follow_button_caption(follow?.active === true)')
+    expect(source).toContain('follow_caption: debug_ui.follow_button_caption(follow?.active === true)')
     expect(source).toContain("return follow?.active ? 'Click to stop following. A goal paused by Follow will automatically resume.'")
     expect(source).not.toContain('Distance: ${math.floor(follow.current_distance * 10) / 10} tiles')
-    expect(source).toContain('if (issue_text.length > 0)')
+    expect(source).toContain('if (state.follow_issue.length > 0)')
   })
 
   it('keeps the large inventory beside a wanted/equipped sidebar below the world preview', () => {
@@ -165,7 +194,7 @@ describe('SGLuna NPC console compact tracker layout', () => {
 
   it('uses compact controls with a Shelf + active-plan tracker and keeps current-task timestamped activity as retained history', () => {
     const source = taskBoardUiSource()
-    expect(source).toContain('function compact_button(')
+    expect(source).toContain('function action_button(')
     expect(source).toContain("'Plan Tracker'")
     expect(source).toContain('function render_tracker(')
     expect(source).toMatch(/render_tracker\(\w+, board[,)]/)

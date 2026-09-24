@@ -2,6 +2,7 @@ import type { MapPositionStruct } from 'factorio:prototype'
 import type { ButtonGuiElement, CameraGuiElement, FrameGuiElement, LuaEntity, LuaGuiElement, LuaInventory, LuaPlayer, LuaSurface, ProgressBarGuiElement, ScrollPaneGuiElement, SpriteButtonGuiElement, SpritePath, TextFieldGuiElement } from 'factorio:runtime'
 
 import * as ui_constants from './task_board_ui_constants'
+import * as console_ui from './task_board_console'
 import { peek_controlled_actor } from './actors/actor_controller'
 import { create_learning_remote_interface, handle_learning_ui_click, handle_task_board_learning_transition, render_learning_status } from './learning_pipeline'
 import { create_skill_remote_interface, handle_skill_export_click, render_learn_area_button, render_skill_export_section } from './skills'
@@ -157,6 +158,9 @@ declare const storage: {
   airi_task_board_ui_inputs?: TaskBoardUiInput[]
   airi_task_board_preview_zoom?: Record<number, number>
   airi_task_board_lifecycle_pending?: Record<number, TaskBoardUiLifecyclePending>
+  // Whether a player has the … menu (NEW TASK, TERMINATE) open. Written only
+  // by the click handler.
+  airi_task_board_more_open?: Record<number, boolean>
 }
 
 let world_task_provider: ((this: void) => unknown) | undefined
@@ -484,6 +488,7 @@ export function toggle_task_board_skills_ui_open(player_index: number) { const n
 function close_task_board_skills_ui(player_index: number) { ensure_skills_open_state()[player_index] = false }
 export function task_board_ui_terminate_is_armed(player_index: number, tick: number) { return (storage.airi_task_board_terminate_confirm_until?.[player_index] ?? 0) >= tick }
 function clear_terminate_confirmation(player_index: number) { ensure_terminate_confirm_state()[player_index] = 0 }
+function close_more_menu(player_index: number) { if (storage.airi_task_board_more_open !== undefined) storage.airi_task_board_more_open[player_index] = false }
 function arm_terminate(player_index: number) { ensure_terminate_confirm_state()[player_index] = game.tick + ui_constants.TERMINATE_CONFIRM_TICKS }
 
 function mod_gui_button_flow(player: LuaPlayer): LuaGuiElement {
@@ -676,67 +681,62 @@ function render_status_panel(parent: LuaGuiElement, board: TaskBoardUiSnapshot |
   add_key_value(table, 'SYNC', sync_summary(synced_tick), { tone: 'muted', width: ui_constants.STATUS_VALUE_WIDTH })
 }
 function follow_button_tooltip(follow: TaskBoardUiFollowStatus | undefined) { return follow?.active ? 'Click to stop following. A goal paused by Follow will automatically resume.' : 'Temporarily suspend current world work and follow this player. A goal paused by Follow automatically resumes when Follow stops.' }
-function compact_button(button: LuaGuiElement) { button.style.width = ui_constants.COMPACT_BUTTON_WIDTH; button.style.height = ui_constants.COMPACT_BUTTON_HEIGHT; button.style.minimal_width = ui_constants.COMPACT_BUTTON_WIDTH; button.style.maximal_width = ui_constants.COMPACT_BUTTON_WIDTH; button.style.minimal_height = ui_constants.COMPACT_BUTTON_HEIGHT; button.style.maximal_height = ui_constants.COMPACT_BUTTON_HEIGHT; return button }
-function render_controls_panel(parent: LuaGuiElement, player: LuaPlayer, board: TaskBoardUiSnapshot | undefined, runtime: TaskBoardUiRuntimeSnapshot) {
-  const { body } = create_section(parent, 'Controls', ui_constants.CONTROLS_SECTION_WIDTH, undefined, false)
-  body.style.vertical_spacing = ui_constants.COMPACT_BUTTON_SPACING
+// State for the chrome drawn by task_board_console. Built here because it reads
+// this module's lifecycle, confirmation and window state; drawn there.
+function console_window_buttons(player: LuaPlayer): console_ui.ConsoleWindowButton[] {
+  const skills_open = task_board_skills_ui_is_open(player.index)
+  const projects_open = project_ui.projects_ui_is_open(player.index)
+  const debug_open = debug_ui.debug_ui_is_open(player.index)
+  return [
+    { name: ui_constants.SKILLS_BUTTON_NAME, icon: 'learn', open: skills_open, tooltip: skills_open ? 'Close area learning.' : 'Area learning and saved skill candidates, in their own window.' },
+    { name: project_ui.PROJECTS_BUTTON_NAME, icon: 'history', open: projects_open, tooltip: projects_open ? 'Close old tasks.' : 'Old tasks: history, conversations and evidence.' },
+    { name: debug_ui.DEBUG_BUTTON_NAME, icon: 'debug', open: debug_open, tooltip: debug_open ? 'Close diagnostics.' : 'SGLuna runtime diagnostics, provider usage, actor state and execution activity.' },
+  ]
+}
+function console_action_state(player: LuaPlayer, board: TaskBoardUiSnapshot | undefined, runtime: TaskBoardUiRuntimeSnapshot): console_ui.ConsoleActionState {
   const follow = runtime.follow
-  // BLOCKED is a durable freeze, not a variant of PAUSED. Keep the reason and
-  // the only three user-authorized exits beside the controls rather than
-  // hiding them in the old-task archive.
-  const blocked = board?.status === 'blocked' ? board.blocked : undefined
-  if (board?.status === 'blocked') {
-    const blocked_flow = body.add({ type: 'flow', name: ui_constants.BLOCKED_SECTION_NAME, direction: 'vertical' })
-    blocked_flow.style.vertical_spacing = 4
-    const summary = blocked?.summary ?? task_condition_text(board.blocker_summary, board.blocker, 'AIRI stopped because the committed plan needs your decision.')
-    const reason = blocked?.reason ?? board.blocker
-    const heading = gui_text.literal_gui_text(blocked_flow.add({ type: 'label', caption: `BLOCKED · ${summary}` }))
-    heading.style.single_line = false; heading.style.maximal_width = ui_constants.CONTROLS_SECTION_WIDTH - 2 * ui_constants.SECTION_PADDING; heading.style.font_color = TONE_COLORS.bad
-    if (reason.length > 0 && reason !== summary) {
-      const detail = gui_text.literal_gui_text(blocked_flow.add({ type: 'label', caption: `Reason: ${reason}` }))
-      detail.style.single_line = false; detail.style.maximal_width = ui_constants.CONTROLS_SECTION_WIDTH - 2 * ui_constants.SECTION_PADDING; detail.style.font_color = TONE_COLORS.muted
-    }
-    if (blocked?.deadlock !== undefined) {
-      const detail = blocked.deadlock.detail?.length ? ` — ${blocked.deadlock.detail}` : ''
-      const evidence = gui_text.literal_gui_text(blocked_flow.add({ type: 'label', caption: `Deadlock: ${blocked.deadlock.signal.replace('_', ' ')} (${blocked.deadlock.count})${detail}` }))
-      evidence.style.single_line = false; evidence.style.maximal_width = ui_constants.CONTROLS_SECTION_WIDTH - 2 * ui_constants.SECTION_PADDING; evidence.style.font_color = TONE_COLORS.warn
-    }
-    const choices = blocked_flow.add({ type: 'table', column_count: 2 })
-    choices.style.horizontal_spacing = ui_constants.COMPACT_BUTTON_SPACING; choices.style.vertical_spacing = ui_constants.COMPACT_BUTTON_SPACING
-    const choice_pending = task_board_ui_blocked_choice_pending(player.index, game.tick)
-    const choice_tip = choice_pending ? 'Waiting for SGLuna runtime to acknowledge your blocked-plan decision.' : ''
-    const keep = compact_button(choices.add({ type: 'button', name: ui_constants.BLOCKED_KEEP_PAUSED_BUTTON_NAME, caption: choice_pending ? 'SAVING...' : 'KEEP PAUSED', style: 'dialog_button', tooltip: choice_tip || 'Keep this committed plan frozen. No work or replanning will start.' })) as ButtonGuiElement
-    keep.enabled = !choice_pending
-    const revise = compact_button(choices.add({ type: 'button', name: ui_constants.BLOCKED_REVISE_BUTTON_NAME, caption: 'REVISE…', style: 'confirm_button', tooltip: choice_tip || 'Keep the plan frozen, then describe the revised goal or constraints in the prompt below. AIRI will not invent a replacement plan.' })) as ButtonGuiElement
-    revise.enabled = !choice_pending
-    const cancel = compact_button(choices.add({ type: 'button', name: ui_constants.BLOCKED_CANCEL_BUTTON_NAME, caption: 'CANCEL…', style: 'red_button', tooltip: choice_tip || 'Request cancellation, then use the existing TERMINATE confirmation to discard this blocked goal permanently.' })) as ButtonGuiElement
-    cancel.enabled = !choice_pending
-  }
   const has_open_goal = board !== undefined && board.status !== 'idle' && board.status !== 'completed'
   const paused = board?.status === 'paused'
-  const controls = body.add({ type: 'table', column_count: 2 })
-  controls.style.horizontal_spacing = ui_constants.COMPACT_BUTTON_SPACING
-  controls.style.vertical_spacing = ui_constants.COMPACT_BUTTON_SPACING
   const pending = LIFECYCLE.current(player.index)
   const pending_tip = pending === undefined ? '' : `Waiting for SGLuna runtime to confirm ${pending.action}.`
-  const pause_caption = pending?.action === 'pause' ? 'PAUSING...' : pending?.action === 'resume' ? 'RESUMING...' : paused ? 'UNPAUSE' : 'PAUSE'
-  const pause = compact_button(controls.add({ type: 'button', name: ui_constants.PAUSE_BUTTON_NAME, caption: pause_caption, style: 'dialog_button', tooltip: pending_tip.length > 0 ? pending_tip : paused ? 'Resume this durable SGLuna goal. SGLuna will re-observe mutable state before acting.' : has_open_goal ? 'Pause the durable SGLuna goal and stop current world work' : 'Stop the current world work. There is no durable SGLuna goal to pause.' })) as ButtonGuiElement
-  pause.enabled = pending === undefined
   const armed = task_board_ui_terminate_is_armed(player.index, game.tick)
-  const terminate_caption = pending?.action === 'terminate' ? 'TERMINATING...' : armed ? 'CONFIRM' : 'TERMINATE'
-  const terminate = compact_button(controls.add({ type: 'button', name: ui_constants.TERMINATE_BUTTON_NAME, caption: terminate_caption, style: 'red_button', tooltip: pending_tip.length > 0 ? pending_tip : armed ? 'Click again within 5 seconds to discard the goal permanently' : has_open_goal ? 'Discard the current durable SGLuna goal permanently' : 'Stop the current world work. There is no durable SGLuna goal to discard.' })) as ButtonGuiElement
-  terminate.enabled = pending === undefined
-  compact_button(controls.add({ type: 'button', name: ui_constants.FOLLOW_BUTTON_NAME, caption: debug_ui.follow_button_caption(follow?.active === true), style: follow?.active ? 'confirm_button' : 'dialog_button', tooltip: follow_button_tooltip(follow) }))
-  const skills_open = task_board_skills_ui_is_open(player.index)
-  compact_button(controls.add({ type: 'button', name: ui_constants.SKILLS_BUTTON_NAME, caption: skills_open ? 'CLOSE' : 'LEARN', style: 'dialog_button', tooltip: skills_open ? 'Close the area learning window.' : 'Open area learning and saved skill candidates in a separate movable window.' }))
-  const debug_open = debug_ui.debug_ui_is_open(player.index)
-  compact_button(controls.add({ type: 'button', name: debug_ui.DEBUG_BUTTON_NAME, caption: debug_ui.debug_button_caption(player.index), style: debug_open ? 'confirm_button' : 'dialog_button', tooltip: debug_open ? 'Close the SGLuna runtime diagnostics window.' : 'Open structured SGLuna runtime diagnostics, provider usage, actor state, and UI sync information.' }))
-  const projects_open = project_ui.projects_ui_is_open(player.index)
-  compact_button(controls.add({ type: 'button', name: project_ui.PROJECTS_BUTTON_NAME, caption: 'OLD TASKS', style: projects_open ? 'confirm_button' : 'dialog_button', tooltip: projects_open ? 'Close old task history.' : 'Open old task history, conversations, and evidence.' }))
-  // A blank last_failure is still truthy, which drew a lone warning triangle with
-  // no message next to it. Render the row only when there is something to read.
-  const issue_text = text(follow?.last_failure ?? '', 100)
-  if (issue_text.length > 0) { const issue = gui_text.literal_gui_text(body.add({ type: 'label', caption: `⚠ ${issue_text}` })); issue.style.single_line = false; issue.style.maximal_width = ui_constants.CONTROLS_SECTION_WIDTH - 2 * ui_constants.SECTION_PADDING; issue.style.font_color = TONE_COLORS.bad }
+  return {
+    pause_caption: pending?.action === 'pause' ? 'PAUSING...' : pending?.action === 'resume' ? 'RESUMING...' : paused ? 'RESUME' : 'PAUSE',
+    pause_tooltip: pending_tip.length > 0 ? pending_tip : paused ? 'Resume this durable SGLuna goal. SGLuna will re-observe mutable state before acting.' : has_open_goal ? 'Pause the durable SGLuna goal and stop current world work' : 'Stop the current world work. There is no durable SGLuna goal to pause.',
+    pause_enabled: pending === undefined,
+    follow_caption: debug_ui.follow_button_caption(follow?.active === true),
+    follow_tooltip: follow_button_tooltip(follow),
+    follow_active: follow?.active === true,
+    // A blank last_failure is still truthy, which drew a lone warning triangle
+    // with no message. Only report a failure there is something to read about.
+    follow_issue: text(follow?.last_failure ?? '', 100),
+    // Armed TERMINATE keeps the menu open so the confirming click is there.
+    more_open: storage.airi_task_board_more_open?.[player.index] === true || armed,
+    new_task_tooltip: pending === undefined ? "Stop current work and clear this NPC's conversation and durable plan. Learned skills and Factorio world state are kept." : pending_tip,
+    new_task_enabled: pending === undefined,
+    terminate_caption: pending?.action === 'terminate' ? 'TERMINATING...' : armed ? 'CONFIRM' : 'TERMINATE',
+    terminate_tooltip: pending_tip.length > 0 ? pending_tip : armed ? 'Click again within 5 seconds to discard the goal permanently' : has_open_goal ? 'Discard the current durable SGLuna goal permanently' : 'Stop the current world work. There is no durable SGLuna goal to discard.',
+    terminate_enabled: pending === undefined,
+    issue_color: TONE_COLORS.bad,
+    muted_color: TONE_COLORS.muted,
+  }
+}
+// BLOCKED is a durable freeze, not a variant of PAUSED: its reason and the only
+// three user-authorized exits sit in a banner above everything else.
+function render_blocked(parent: LuaGuiElement, player: LuaPlayer, board: TaskBoardUiSnapshot | undefined) {
+  if (board?.status !== 'blocked') return
+  const blocked = board.blocked
+  const summary = blocked?.summary ?? task_condition_text(board.blocker_summary, board.blocker, 'AIRI stopped because the committed plan needs your decision.')
+  const deadlock = blocked?.deadlock === undefined ? '' : `Deadlock: ${blocked.deadlock.signal.replace('_', ' ')} (${blocked.deadlock.count})${blocked.deadlock.detail?.length ? ` — ${blocked.deadlock.detail}` : ''}`
+  console_ui.render_blocked_banner(parent, {
+    summary,
+    reason: blocked?.reason ?? board.blocker,
+    deadlock,
+    choice_pending: task_board_ui_blocked_choice_pending(player.index, game.tick),
+    bad_color: TONE_COLORS.bad,
+    muted_color: TONE_COLORS.muted,
+    warn_color: TONE_COLORS.warn,
+  })
 }
 
 /**
@@ -1140,10 +1140,6 @@ function render_prompt(parent: LuaGuiElement, player: LuaPlayer) {
   const section = parent.add({ type: 'frame', name: ui_constants.PROMPT_SECTION_NAME, direction: 'vertical', style: 'inside_shallow_frame' }); section.style.width = ui_constants.LEFT_COLUMN_WIDTH; section.style.horizontally_stretchable = false
   const header = section.add({ type: 'frame', direction: 'horizontal', style: 'subheader_frame' }); header.style.horizontally_stretchable = true; header.style.vertical_align = 'center'
   header.add({ type: 'label', caption: 'Prompt SGLuna', style: 'subheader_caption_label' })
-  const header_spacer = header.add({ type: 'empty-widget' }); header_spacer.style.horizontally_stretchable = true
-  const pending = LIFECYCLE.current(player.index)
-  const new_task = compact_button(header.add({ type: 'button', name: ui_constants.NEW_TASK_BUTTON_NAME, caption: 'NEW TASK', style: 'dialog_button', tooltip: pending === undefined ? "Stop current work and clear this NPC's conversation and durable plan. Learned skills and Factorio world state are kept." : `Waiting for SGLuna runtime to confirm ${pending.action}.` })) as ButtonGuiElement
-  new_task.enabled = pending === undefined
   const row = section.add({ type: 'flow', name: ui_constants.PROMPT_FLOW_NAME, direction: 'horizontal' }); row.style.padding = ui_constants.SECTION_PADDING; row.style.horizontally_stretchable = true; row.style.vertical_align = 'center'; row.style.horizontal_spacing = 8
   const field = row.add({ type: 'textfield', name: ui_constants.PROMPT_FIELD_NAME, text: task_board_ui_prompt_draft(player.index), tooltip: 'Send a prompt directly to SGLuna without typing !luna in chat. Press Enter to send.' }); field.style.width = ui_constants.PROMPT_FIELD_WIDTH; field.style.minimal_width = ui_constants.PROMPT_FIELD_WIDTH; field.style.maximal_width = ui_constants.PROMPT_FIELD_WIDTH
   const send_pending = task_board_ui_prompt_send_pending(player.index, game.tick)
@@ -1156,12 +1152,12 @@ function render_titlebar(root: FrameGuiElement, caption = 'SGLuna NPC Console', 
   titlebar.add({ type: 'sprite-button', name: close_name, sprite: 'utility/close', style: 'frame_action_button', tooltip: `Close ${caption}` })
 }
 function build_left_dynamic(parent: LuaGuiElement, player: LuaPlayer, board: TaskBoardUiSnapshot | undefined, synced_tick: number | undefined, runtime: TaskBoardUiRuntimeSnapshot) {
-  const top = parent.add({ type: 'flow', direction: 'horizontal' }); top.style.horizontal_spacing = ui_constants.COLUMN_SPACING; top.style.vertical_align = 'top'; render_status_panel(top, board, runtime, synced_tick); render_controls_panel(top, player, board, runtime)
+  render_blocked(parent, player, board); render_status_panel(parent, board, runtime, synced_tick)
 }
 function build_columns(columns: LuaGuiElement, player: LuaPlayer) {
   const board = storage.airi_task_board_ui; const synced_tick = storage.airi_task_board_ui_synced_tick; const runtime = runtime_snapshot()
   const left = columns.add({ type: 'flow', name: ui_constants.LEFT_COLUMN_NAME, direction: 'vertical' }); left.style.width = ui_constants.LEFT_COLUMN_WIDTH; left.style.vertical_spacing = ui_constants.COLUMN_SPACING
-  const dynamic = left.add({ type: 'flow', name: ui_constants.LEFT_DYNAMIC_NAME, direction: 'vertical' }); dynamic.style.width = ui_constants.LEFT_COLUMN_WIDTH; dynamic.style.vertical_spacing = ui_constants.COLUMN_SPACING; build_left_dynamic(dynamic, player, board, synced_tick, runtime); render_tracker(left, board, player); debug_ui.render_ai_reply(dynamic, board?.response ?? '', ui_constants.LEFT_COLUMN_WIDTH); render_prompt(left, player)
+  const dynamic = left.add({ type: 'flow', name: ui_constants.LEFT_DYNAMIC_NAME, direction: 'vertical' }); dynamic.style.width = ui_constants.LEFT_COLUMN_WIDTH; dynamic.style.vertical_spacing = ui_constants.COLUMN_SPACING; build_left_dynamic(dynamic, player, board, synced_tick, runtime); render_tracker(left, board, player); debug_ui.render_ai_reply(dynamic, board?.response ?? '', ui_constants.LEFT_COLUMN_WIDTH); render_prompt(left, player); console_ui.render_action_row(left, console_action_state(player, board, runtime))
   const right = columns.add({ type: 'flow', name: ui_constants.RIGHT_COLUMN_NAME, direction: 'vertical' }); right.style.width = ui_constants.PREVIEW_COLUMN_WIDTH; right.style.vertical_spacing = ui_constants.COLUMN_SPACING; right.style.vertically_stretchable = true; render_world_preview(right, runtime, player)
   const resources = right.add({ type: 'flow', name: ui_constants.RIGHT_RESOURCES_NAME, direction: 'horizontal' }); resources.style.horizontal_spacing = ui_constants.COLUMN_SPACING; resources.style.vertical_align = 'top'; render_inventory(resources, runtime, player); render_resource_sidebar(resources, board, runtime, player)
 }
@@ -1177,6 +1173,7 @@ function refresh_columns(columns: LuaGuiElement, player: LuaPlayer) {
   // explicitly refreshed here; otherwise snapshots update storage while an
   // already-open console keeps stale rows until it is closed and reopened.
   debug_ui.render_ai_reply(dynamic, board?.response ?? '', ui_constants.LEFT_COLUMN_WIDTH)
+  const actions = left[ui_constants.ACTIONS_NAME]; if (actions?.valid) actions.destroy(); console_ui.render_action_row(left, console_action_state(player, board, runtime))
   // Never clear the preview column on a routine refresh: it owns the zoom slider.
   const resources = right[ui_constants.RIGHT_RESOURCES_NAME]
   if (!refresh_world_preview(right, runtime, player) || !resources?.valid) {
@@ -1194,13 +1191,13 @@ function build_panel(player: LuaPlayer) {
   const root = player.gui.screen.add({ type: 'frame', name: ui_constants.ROOT_NAME, direction: 'vertical' }) as FrameGuiElement
   if (previous_location !== undefined) root.location = previous_location
   else root.auto_center = true
-  render_titlebar(root)
+  console_ui.render_console_titlebar(root, 'SGLuna NPC Console', console_window_buttons(player))
   const columns = root.add({ type: 'flow', name: ui_constants.COLUMNS_NAME, direction: 'horizontal' }); columns.style.horizontal_spacing = ui_constants.COLUMN_SPACING; build_columns(columns, player); root.bring_to_front()
 }
 function render_panel(player: LuaPlayer) {
   if (!task_board_ui_is_open(player.index)) { destroy_panel(player); return }
   const root = player.gui.screen[ui_constants.ROOT_NAME]; const columns = root?.valid ? root[ui_constants.COLUMNS_NAME] : undefined
-  if (columns?.valid && refresh_columns(columns, player)) return
+  if (columns?.valid && refresh_columns(columns, player) && root !== undefined && console_ui.refresh_console_titlebar(root as FrameGuiElement, console_window_buttons(player))) return
   build_panel(player)
 }
 function destroy_skills_popout(player: LuaPlayer) { const existing = player.gui.screen[ui_constants.SKILLS_ROOT_NAME]; const location = existing?.valid ? existing.location : undefined; if (existing?.valid) existing.destroy(); return location }
@@ -1258,12 +1255,22 @@ function handle_control_click(player: LuaPlayer, element_name: string) {
         activity_state.clear_activity_history()
         emit_control(player, 'terminate')
       }
+      close_more_menu(player.index)
     } else arm_terminate(player.index)
     render_panel(player)
     return true
   }
+  if (element_name === ui_constants.MORE_BUTTON_NAME) {
+    const open = storage.airi_task_board_more_open ?? {}
+    open[player.index] = open[player.index] !== true
+    storage.airi_task_board_more_open = open
+    // Closing the menu also disarms a pending TERMINATE confirmation.
+    if (open[player.index] !== true) clear_terminate_confirmation(player.index)
+    render_panel(player)
+    return true
+  }
   if (element_name === ui_constants.FOLLOW_BUTTON_NAME) { clear_terminate_confirmation(player.index); const follow = read_follow_status(); emit_control(player, follow?.active ? 'stop_follow' : 'follow'); return true }
-  if (element_name === ui_constants.NEW_TASK_BUTTON_NAME) { if (LIFECYCLE.current(player.index) !== undefined) return true; clear_terminate_confirmation(player.index); debug_ui.suppress_snapshot(storage.airi_task_board_ui); debug_ui.reset_task_conversation(); activity_state.clear_activity_history(); emit_control(player, 'new_task'); render_panel(player); return true }
+  if (element_name === ui_constants.NEW_TASK_BUTTON_NAME) { if (LIFECYCLE.current(player.index) !== undefined) return true; clear_terminate_confirmation(player.index); debug_ui.suppress_snapshot(storage.airi_task_board_ui); debug_ui.reset_task_conversation(); activity_state.clear_activity_history(); emit_control(player, 'new_task'); close_more_menu(player.index); render_panel(player); return true }
   if (element_name === ui_constants.PROMPT_SEND_BUTTON_NAME) { if (task_board_ui_prompt_send_pending(player.index, game.tick)) return true; submit_prompt(player, task_board_ui_prompt_draft(player.index)); return true }
   return false
 }

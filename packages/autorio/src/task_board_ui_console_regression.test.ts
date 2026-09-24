@@ -5,10 +5,13 @@ import { task_board_resource_rows, task_board_wanted_rows } from './task_board_u
 function taskBoardUiSource() {
   const main = readFileSync(new URL('./task_board_ui.ts', import.meta.url), 'utf8')
   const constants = readFileSync(new URL('./task_board_ui_constants.ts', import.meta.url), 'utf8')
+  // The console's chrome (title bar, blocked banner, action row) lives in its
+  // own module for Lua local headroom; it is part of the same console.
+  const chrome = readFileSync(new URL('./task_board_console.ts', import.meta.url), 'utf8')
   // UI constants moved into a namespace to preserve Factorio Lua local headroom.
   // Normalize that namespace for source-architecture assertions while retaining
   // the constants module so declaration/geometry checks still test real code.
-  return `${main.replaceAll('ui_constants.', '')}\n${constants}`.replace(/\r\n/g, '\n')
+  return `${main.replaceAll('ui_constants.', '')}\n${chrome.replaceAll('ui_constants.', '')}\n${constants}`.replace(/\r\n/g, '\n')
 }
 
 function taskBoardDebugSource() {
@@ -97,19 +100,19 @@ describe('SGLuna NPC console layout regressions', () => {
   })
 
   it('locks control and prompt widths instead of shrinking to their captions', () => {
-    expect(source).toContain('button.style.minimal_width = COMPACT_BUTTON_WIDTH')
-    expect(source).toContain('button.style.maximal_width = COMPACT_BUTTON_WIDTH')
+    expect(source).toContain('element.style.minimal_width = width')
+    expect(source).toContain('element.style.maximal_width = width')
     expect(source).toContain('field.style.minimal_width = PROMPT_FIELD_WIDTH')
     expect(source).toContain('field.style.maximal_width = PROMPT_FIELD_WIDTH')
     expect(source).toContain('send.style.maximal_width = PROMPT_SEND_WIDTH')
   })
 
   it('turns pause into a resumable unpause control without discarding the prompt draft', () => {
-    expect(source).toContain("pending?.action === 'resume' ? 'RESUMING...' : paused ? 'UNPAUSE' : 'PAUSE'")
+    expect(source).toContain("pending?.action === 'resume' ? 'RESUMING...' : paused ? 'RESUME' : 'PAUSE'")
     expect(source).toContain("const action: TaskBoardUiLifecycleAction = storage.airi_task_board_ui?.status === 'paused' ? 'resume' : 'pause'")
     expect(source).toContain("if (action === 'resume') emit_resume(player)")
-    expect(source).toContain('pause.enabled = pending === undefined')
-    expect(source).toContain('terminate.enabled = pending === undefined')
+    expect(source).toContain('pause_enabled: pending === undefined')
+    expect(source).toContain('terminate_enabled: pending === undefined')
     expect(source).toContain("text: 'continue'")
     const resumeBody = source.split('function emit_resume(')[1]?.split('function emit_prompt(')[0] ?? ''
     expect(resumeBody).not.toContain('set_prompt_draft')
@@ -183,7 +186,7 @@ describe('old tasks and New Task conversation integration', () => {
   const projects = readFileSync(new URL('./projects/project_window.ts', import.meta.url), 'utf8')
 
   it('renders an independent old-task history button and explicit lifecycle acknowledgement route', () => {
-    expect(source).toContain("name: project_ui.PROJECTS_BUTTON_NAME, caption: 'OLD TASKS'")
+    expect(source).toContain("{ name: project_ui.PROJECTS_BUTTON_NAME, icon: 'history'")
     expect(projects).toContain("PROJECTS_BUTTON_NAME = 'airi_task_board_projects'")
     expect(projects).toContain("PROJECTS_CLOSE_BUTTON_NAME = 'airi_task_board_projects_close'")
     expect(source).toContain("ack_lifecycle: (player_index: unknown, action: unknown)")

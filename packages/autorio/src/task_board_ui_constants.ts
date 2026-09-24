@@ -69,6 +69,12 @@ export const SKILLS_POPOUT_TITLE = 'Area Learning & Skills'
 // resolves from the reported model identifier on every render.
 export const BUTTON_SPRITE: SpritePath = 'entity/character'
 export const CLOSE_BUTTON_NAME = 'airi_task_board_close'
+export const TITLEBAR_NAME = 'airi_task_board_titlebar'
+// PAUSE / FOLLOW / … under the prompt, and the … menu holding NEW TASK and
+// TERMINATE. Rebuilt on every refresh like the old Controls grid was.
+export const ACTIONS_NAME = 'airi_task_board_actions'
+export const MORE_BUTTON_NAME = 'airi_task_board_more'
+export const MORE_MENU_NAME = 'airi_task_board_more_menu'
 export const PAUSE_BUTTON_NAME = 'airi_task_board_pause'
 export const TERMINATE_BUTTON_NAME = 'airi_task_board_terminate'
 export const NEW_TASK_BUTTON_NAME = 'airi_task_board_new_task'
@@ -116,13 +122,10 @@ export const PROMPT_SEND_PENDING_TICKS = 3 * 60
 export const LEFT_COLUMN_WIDTH = 640
 export const PREVIEW_COLUMN_WIDTH = 680
 export const COLUMN_SPACING = 12
-// Status and Controls do not deserve the same width. Status carries wrapping
-// prose - the live phase and its detail, the goal, the sync age - and every unit
-// it lacks turns into another wrapped line. Controls carries fixed-width buttons
-// in a two-column grid that grows downward as controls are added, so it needs
-// enough width for two captions and nothing more.
-export const CONTROLS_SECTION_WIDTH = 264
-export const STATUS_SECTION_WIDTH = LEFT_COLUMN_WIDTH - COLUMN_SPACING - CONTROLS_SECTION_WIDTH
+// Status takes the full left column: it carries wrapping prose (the live phase
+// and its detail, the goal, the sync age), and the buttons that used to share
+// its row now live in the title bar and the action row under the prompt.
+export const STATUS_SECTION_WIDTH = LEFT_COLUMN_WIDTH
 export const SECTION_PADDING = 10
 export const KEY_COLUMN_WIDTH = 64
 export const STATUS_VALUE_WIDTH = STATUS_SECTION_WIDTH - 2 * SECTION_PADDING - KEY_COLUMN_WIDTH - 12
@@ -196,7 +199,13 @@ export const COMPACT_BUTTON_SPACING = 12
 // Every control is the same size. Two sizes across two rows read as a ragged
 // grid, and sizing each button to its own caption made the panel look
 // accidental. Two of these plus the gap exactly fill the section's inner width.
-export const COMPACT_BUTTON_WIDTH = (CONTROLS_SECTION_WIDTH - 2 * SECTION_PADDING - COMPACT_BUTTON_SPACING) / 2
+export const COMPACT_BUTTON_WIDTH = 116
+// The action row: FOLLOW and … at fixed widths, PAUSE takes the rest, so the
+// button used most is also the largest target.
+export const FOLLOW_BUTTON_WIDTH = 160
+export const MORE_BUTTON_WIDTH = 48
+export const PAUSE_BUTTON_WIDTH = LEFT_COLUMN_WIDTH - FOLLOW_BUTTON_WIDTH - MORE_BUTTON_WIDTH - 2 * COMPACT_BUTTON_SPACING
+export const MORE_MENU_BUTTON_WIDTH = 140
 export const PROMPT_SEND_WIDTH = 84
 export const PROMPT_FIELD_WIDTH = LEFT_COLUMN_WIDTH - 2 * SECTION_PADDING - 8 - PROMPT_SEND_WIDTH
 export const SKILLS_POPOUT_WIDTH = 720

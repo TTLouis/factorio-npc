@@ -123,3 +123,23 @@ for _, entry in ipairs(provider_variants) do
 end
 
 data:extend(provider_avatars)
+
+-- The console's title-bar buttons (Learn, Old tasks, Debug). Drawn by
+-- scripts/draw_console_icons.py: a light variant for the title bar and a dark
+-- one for the hovered/clicked button, like Factorio's own frame action icons.
+-- As above, a missing file is a hard load failure, so every name listed here
+-- must have both PNGs committed.
+local console_icons = {}
+for _, name in ipairs({"learn", "history", "debug"}) do
+  for _, variant in ipairs({"white", "black"}) do
+    console_icons[#console_icons + 1] = {
+      type = "sprite",
+      name = "airi-console-" .. name .. "-" .. variant,
+      filename = "__autorio__/graphics/icons/console/" .. name .. "-" .. variant .. ".png",
+      size = 32,
+      flags = {"gui-icon"},
+    }
+  end
+end
+
+data:extend(console_icons)

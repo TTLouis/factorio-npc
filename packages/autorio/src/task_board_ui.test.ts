@@ -17,10 +17,13 @@ import {
 function taskBoardUiSource() {
   const main = readFileSync(new URL('./task_board_ui.ts', import.meta.url), 'utf8')
   const constants = readFileSync(new URL('./task_board_ui_constants.ts', import.meta.url), 'utf8')
+  // The console's chrome (title bar, blocked banner, action row) lives in its
+  // own module for Lua local headroom; it is part of the same console.
+  const chrome = readFileSync(new URL('./task_board_console.ts', import.meta.url), 'utf8')
   // UI constants moved into a namespace to preserve Factorio Lua local headroom.
   // Normalize that namespace for source-architecture assertions while retaining
   // the constants module so declaration/geometry checks still test real code.
-  return `${main.replaceAll('ui_constants.', '')}\n${constants}`.replace(/\r\n/g, '\n')
+  return `${main.replaceAll('ui_constants.', '')}\n${chrome.replaceAll('ui_constants.', '')}\n${constants}`.replace(/\r\n/g, '\n')
 }
 
 
@@ -323,7 +326,7 @@ describe('in-game task board UI projection', () => {
     expect(source).toContain("style: 'inside_shallow_frame'")
     expect(source).toContain("style: 'dialog_button'")
     expect(source).toContain("style: 'red_button'")
-    expect(source).toContain("style: follow?.active ? 'confirm_button' : 'dialog_button'")
+    expect(source).toContain("style: state.follow_active ? 'confirm_button' : 'dialog_button'")
     expect(source).toContain("style: 'deep_slots_scroll_pane'")
     expect(source).toContain("type: 'progressbar'")
     expect(source).toContain('root.location = previous_location')
@@ -332,17 +335,18 @@ describe('in-game task board UI projection', () => {
     expect(source).not.toContain('RESOURCE_SECTION_HEIGHT')
   })
 
-  it('aligns the two columns, keeps section spacing uniform, and lets status/controls hug their content', () => {
+  it('aligns the two columns, keeps section spacing uniform, and puts the actions under the prompt', () => {
     const source = taskBoardUiSource()
     expect(source).toContain('left.style.vertical_spacing = COLUMN_SPACING')
     expect(source).toContain('dynamic.style.vertical_spacing = COLUMN_SPACING')
-    expect(source).toContain('top.style.horizontal_spacing = COLUMN_SPACING')
     expect(source).toContain('resources.style.horizontal_spacing = COLUMN_SPACING')
     expect(source).toContain("create_section(parent, 'Status', STATUS_SECTION_WIDTH, undefined, false)")
-    expect(source).toContain("create_section(parent, 'Controls', CONTROLS_SECTION_WIDTH, undefined, false)")
+    // The old Controls grid is gone: window buttons are in the title bar and
+    // PAUSE / FOLLOW / … sit in one row under the prompt.
+    expect(source).not.toContain("create_section(parent, 'Controls'")
     expect(source).not.toContain('HALF_SECTION_WIDTH')
     expect(source).toContain('right.style.vertically_stretchable = true')
-    expect(source).toMatch(/build_left_dynamic\(dynamic,[\s\S]*render_prompt\(left, player\)[\s\S]*render_world_preview\(right, runtime, player\)/)
+    expect(source).toMatch(/build_left_dynamic\(dynamic,[\s\S]*render_prompt\(left, player\); console_ui\.render_action_row\(left,[\s\S]*render_world_preview\(right, runtime, player\)/)
   })
 
   it('puts a native Factorio camera preview in the right column with an interactive zoom slider', () => {
@@ -410,7 +414,7 @@ describe('in-game task board UI projection', () => {
 
   it('places the window before building content so it never opens in the corner', () => {
     const source = taskBoardUiSource()
-    expect(source).toMatch(/root\.auto_center = true[\s\S]*render_titlebar\(root\)/)
+    expect(source).toMatch(/root\.auto_center = true[\s\S]*console_ui\.render_console_titlebar\(root,/)
     expect(source).not.toContain('root.force_auto_center()')
   })
 

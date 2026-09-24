@@ -4,29 +4,31 @@ import { describe, expect, it } from 'vitest'
 function taskBoardUiSource() {
   const main = readFileSync(new URL('./task_board_ui.ts', import.meta.url), 'utf8')
   const constants = readFileSync(new URL('./task_board_ui_constants.ts', import.meta.url), 'utf8')
+  // The console's chrome (title bar, blocked banner, action row) lives in its
+  // own module for Lua local headroom; it is part of the same console.
+  const chrome = readFileSync(new URL('./task_board_console.ts', import.meta.url), 'utf8')
   // UI constants moved into a namespace to preserve Factorio Lua local headroom.
   // Normalize that namespace for source-architecture assertions while retaining
   // the constants module so declaration/geometry checks still test real code.
-  return `${main.replaceAll('ui_constants.', '')}\n${constants}`.replace(/\r\n/g, '\n')
+  return `${main.replaceAll('ui_constants.', '')}\n${chrome.replaceAll('ui_constants.', '')}\n${constants}`.replace(/\r\n/g, '\n')
 }
 
 
 describe('task board New Task control regression', () => {
-  it('renders New Task in the Prompt SGLuna heading and queues the server-authoritative action', () => {
+  it('renders New Task behind … beside Terminate and queues the server-authoritative action', () => {
     const source = taskBoardUiSource()
-    const controls = source.split('function render_controls_panel(')[1]?.split('export function task_board_gui_height(')[0] ?? ''
     const prompt = source.split('function render_prompt(')[1]?.split('function render_titlebar(')[0] ?? ''
+    const menu = source.split('export function render_action_row(')[1] ?? ''
     const handler = source.split('function handle_control_click(')[1]?.split('\n}\n\nexport function create_task_board_ui_remote_interface')[0] ?? ''
 
     expect(source).toContain("const NEW_TASK_BUTTON_NAME = 'airi_task_board_new_task'")
     expect(source).toContain("type TaskBoardUiControlAction = 'pause' | 'terminate' | 'follow' | 'stop_follow' | 'new_task'")
-    expect(controls).not.toContain("name: NEW_TASK_BUTTON_NAME, caption: 'NEW TASK'")
     expect(prompt).toContain("caption: 'Prompt SGLuna'")
-    expect(prompt).toContain("name: NEW_TASK_BUTTON_NAME, caption: 'NEW TASK'")
-    expect(prompt).toContain('header_spacer.style.horizontally_stretchable = true')
-    expect(prompt).not.toContain('header.style.horizontal_spacing')
-    expect(prompt).toContain('const pending = LIFECYCLE.current(player.index)')
-    expect(prompt).toContain('new_task.enabled = pending === undefined')
+    expect(prompt).not.toContain('NEW_TASK_BUTTON_NAME')
+    expect(menu).toContain("name: NEW_TASK_BUTTON_NAME, caption: 'NEW TASK'")
+    expect(menu).toContain("'Clears the goal and conversation. Skills and the world stay.'")
+    expect(menu).toContain('new_task.enabled = state.new_task_enabled')
+    expect(source).toContain('new_task_enabled: pending === undefined')
     expect(handler).toContain('if (element_name === NEW_TASK_BUTTON_NAME)')
     expect(handler).toMatch(/NEW_TASK_BUTTON_NAME\)[^\n]*LIFECYCLE\.current\(player\.index\) !== undefined[^\n]*return true[^\n]*clear_terminate_confirmation\(player\.index\)[^\n]*debug_ui\.suppress_snapshot\(storage\.airi_task_board_ui\)[^\n]*debug_ui\.reset_task_conversation\(\)[^\n]*activity_state\.clear_activity_history\(\)[^\n]*emit_control\(player, 'new_task'\)/)
     expect(handler).toContain("if (element_name === TERMINATE_BUTTON_NAME)")
