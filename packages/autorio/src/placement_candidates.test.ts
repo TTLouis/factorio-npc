@@ -239,4 +239,40 @@ describe('placement candidates', () => {
       expect(Math.abs(candidate.position.y - output.y)).toBeLessThan(rotated ? 0.5 : 1)
     }
   })
+
+  it('reads only fields that Factorio 2.0 entity prototypes have', () => {
+    // Burner-drill canary attempt 4: every live call failed with
+    // "LuaEntityPrototype doesn't contain key rotatable". Factorio objects
+    // raise on unknown keys; these are the fields confirmed on 2.0.77.
+    const fields: Record<string, unknown> = {
+      name: 'stone-furnace',
+      type: 'furnace',
+      tile_width: 2,
+      tile_height: 2,
+      supports_direction: true,
+      flags: {},
+      vector_to_place_result: undefined,
+      fluidbox_prototypes: [],
+      mining_drill_radius: undefined,
+      resource_categories: undefined,
+      radius_visualisation_specification: undefined,
+      get_mining_drill_radius: () => undefined,
+    }
+    const strictPrototype = new Proxy(fields, {
+      get(target, key) {
+        if (typeof key === 'string' && !(key in target)) throw new Error(`LuaEntityPrototype doesn't contain key ${key}.`)
+        return (target as any)[key]
+      },
+    })
+    ;(globalThis as any).prototypes.entity = { 'stone-furnace': strictPrototype }
+    const actor = {
+      position: { x: 0, y: 0 },
+      force: { index: 1 },
+      surface: { can_place_entity: () => true, find_entities_filtered: () => [] },
+    } as any
+
+    const result = placement_candidates_for_actor(actor, { entity_name: 'stone-furnace', radius: 2, limit: 3 }) as any
+    expect(result.ok).toBe(true)
+    expect(result.candidates.length).toBeGreaterThan(0)
+  })
 })
