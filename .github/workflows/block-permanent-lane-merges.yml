@@ -1,0 +1,29 @@
+name: Enforce permanent lane isolation
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, edited]
+
+jobs:
+  block-lane-to-lane:
+    name: Block permanent-lane PRs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject PRs between permanent lanes
+        env:
+          BASE: ${{ github.event.pull_request.base.ref }}
+          HEAD: ${{ github.event.pull_request.head.ref }}
+        run: |
+          is_permanent_lane() {
+            case "$1" in
+              main|feat/npc-transition-work|experiment/jev-agent-architecture|experiment/swarm-jev-integration) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          if is_permanent_lane "$BASE" && is_permanent_lane "$HEAD"; then
+            echo "::error::Pull requests between permanent lanes are not allowed ($HEAD -> $BASE). Use a non-permanent work branch instead."
+            exit 1
+          fi
+
+          echo "Allowed: $HEAD -> $BASE"
