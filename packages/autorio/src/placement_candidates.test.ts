@@ -197,4 +197,46 @@ describe('placement candidates', () => {
     expect(result.ok).toBe(true)
     expect(result.candidates).toEqual([])
   })
+
+  it('returns only placements whose footprint covers a requested point, such as a drill output', () => {
+    // Burner-drill canary: the furnace must sit on the drill's output tile.
+    ;(globalThis as any).prototypes.entity = {
+      'modded-furnace': { name: 'modded-furnace', type: 'furnace', tile_width: 2, tile_height: 2 },
+      'modded-chest': { name: 'modded-chest', type: 'container', tile_width: 1, tile_height: 2 },
+    }
+    const actor = {
+      position: { x: 20, y: 20 },
+      force: { index: 1 },
+      surface: {
+        can_place_entity: () => true,
+        find_entities_filtered: () => [],
+      },
+    } as any
+    const output = { x: 0.3, y: -1.3 }
+
+    const furnaces = placement_candidates_for_actor(actor, {
+      entity_name: 'modded-furnace',
+      covers_position: output,
+      limit: 8,
+    }) as any
+    expect(furnaces.ok).toBe(true)
+    expect(furnaces.center).toEqual(output)
+    expect(furnaces.legal_candidate_count).toBeGreaterThan(0)
+    for (const candidate of furnaces.candidates) {
+      expect(Math.abs(candidate.position.x - output.x)).toBeLessThan(1)
+      expect(Math.abs(candidate.position.y - output.y)).toBeLessThan(1)
+    }
+
+    // A rotated 1x2 entity covers the point only with its extents swapped.
+    const chests = placement_candidates_for_actor(actor, {
+      entity_name: 'modded-chest',
+      covers_position: output,
+      limit: 8,
+    }) as any
+    for (const candidate of chests.candidates) {
+      const rotated = candidate.direction === 4 || candidate.direction === 12
+      expect(Math.abs(candidate.position.x - output.x)).toBeLessThan(rotated ? 1 : 0.5)
+      expect(Math.abs(candidate.position.y - output.y)).toBeLessThan(rotated ? 0.5 : 1)
+    }
+  })
 })
