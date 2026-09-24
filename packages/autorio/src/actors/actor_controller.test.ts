@@ -153,8 +153,8 @@ describe('actor mode', () => {
   it('respawns a dead NPC at (0, 0) of the surface it was last alive on', () => {
     const nauvis = (globalThis as any).game.surfaces[1]
     const force = (globalThis as any).game.forces.player
-    const platform = {
-      name: 'platform-1',
+    const vulcanus = {
+      name: 'vulcanus',
       index: 7,
       valid: true,
       find_entities_filtered: vi.fn(() => [] as any[]),
@@ -164,7 +164,7 @@ describe('actor mode', () => {
       request_to_generate_chunks: vi.fn(),
       force_generate_chunk_requests: vi.fn(),
     }
-    ;(globalThis as any).game.get_surface = vi.fn((index: number) => (index === 1 ? nauvis : index === 7 ? platform : undefined))
+    ;(globalThis as any).game.get_surface = vi.fn((index: number) => (index === 1 ? nauvis : index === 7 ? vulcanus : undefined))
     const first = fake_character(42)
     first.surface = nauvis
     first.force = force
@@ -175,19 +175,85 @@ describe('actor mode', () => {
     expect((globalThis as any).storage.airi_npc_surface_index).toBe(1)
 
     // It travels, then dies there.
-    first.surface = platform
+    first.surface = vulcanus
     get_controlled_actor()
     expect((globalThis as any).storage.airi_npc_surface_index).toBe(7)
     first.valid = false
     const replacement = fake_character(99)
-    replacement.surface = platform
+    replacement.surface = vulcanus
     replacement.force = force
-    platform.create_entity.mockReturnValueOnce(replacement)
+    vulcanus.create_entity.mockReturnValueOnce(replacement)
 
     expect(get_controlled_actor()?.character).toBe(replacement)
-    expect(platform.find_non_colliding_position).toHaveBeenCalledWith('character', { x: 0, y: 0 }, 32, 0.5)
+    expect(vulcanus.find_non_colliding_position).toHaveBeenCalledWith('character', { x: 0, y: 0 }, 32, 0.5)
     expect(nauvis.create_entity).toHaveBeenCalledTimes(1)
     expect(force.get_spawn_position).not.toHaveBeenCalled()
+  })
+
+  it('respawns on Nauvis when the body died on a space platform', () => {
+    const nauvis = (globalThis as any).game.surfaces[1]
+    const force = (globalThis as any).game.forces.player
+    const platform = {
+      name: 'platform-1',
+      index: 8,
+      valid: true,
+      platform: { name: 'platform-1' },
+      find_entities_filtered: vi.fn(() => [] as any[]),
+      find_non_colliding_position: vi.fn(),
+      create_entity: vi.fn(),
+      is_chunk_generated: vi.fn(() => true),
+      request_to_generate_chunks: vi.fn(),
+      force_generate_chunk_requests: vi.fn(),
+    }
+    ;(globalThis as any).game.get_surface = vi.fn((index: number) => (index === 1 ? nauvis : index === 8 ? platform : undefined))
+    const first = fake_character(42)
+    first.surface = platform
+    first.force = force
+    nauvis.create_entity.mockReturnValueOnce(first)
+    set_actor_mode('npc')
+    get_controlled_actor()
+    expect((globalThis as any).storage.airi_npc_surface_index).toBe(8)
+
+    first.valid = false
+    const replacement = fake_character(99)
+    replacement.surface = nauvis
+    replacement.force = force
+    nauvis.create_entity.mockReturnValueOnce(replacement)
+
+    expect(get_controlled_actor()?.character).toBe(replacement)
+    expect(platform.create_entity).not.toHaveBeenCalled()
+  })
+
+  it('falls back to Nauvis when the body cannot be created on its last surface', () => {
+    const nauvis = (globalThis as any).game.surfaces[1]
+    const force = (globalThis as any).game.forces.player
+    const vulcanus = {
+      name: 'vulcanus',
+      index: 7,
+      valid: true,
+      find_entities_filtered: vi.fn(() => [] as any[]),
+      find_non_colliding_position: vi.fn(() => ({ x: 0.5, y: 0.5 })),
+      create_entity: vi.fn(() => undefined),
+      is_chunk_generated: vi.fn(() => true),
+      request_to_generate_chunks: vi.fn(),
+      force_generate_chunk_requests: vi.fn(),
+    }
+    ;(globalThis as any).game.get_surface = vi.fn((index: number) => (index === 1 ? nauvis : index === 7 ? vulcanus : undefined))
+    const first = fake_character(42)
+    first.surface = vulcanus
+    first.force = force
+    nauvis.create_entity.mockReturnValueOnce(first)
+    set_actor_mode('npc')
+    get_controlled_actor()
+
+    first.valid = false
+    const replacement = fake_character(99)
+    replacement.surface = nauvis
+    replacement.force = force
+    nauvis.create_entity.mockReturnValueOnce(replacement)
+
+    expect(get_controlled_actor()?.character).toBe(replacement)
+    expect(vulcanus.create_entity).toHaveBeenCalledTimes(1)
   })
 
   it('reacquires a persisted standalone character instead of creating a duplicate', () => {

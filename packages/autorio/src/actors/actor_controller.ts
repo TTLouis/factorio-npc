@@ -1,4 +1,4 @@
-import type { LuaSurface } from 'factorio:runtime'
+import type { LuaForce, LuaSurface } from 'factorio:runtime'
 import type { ControlledActor } from './types'
 import { ConnectedPlayerActor } from './connected_player_actor'
 import { StandaloneCharacterActor } from './standalone_character_actor'
@@ -52,6 +52,32 @@ function npc_home_surface(): LuaSurface | undefined {
     if (surface !== undefined && surface.valid) return surface
   }
   return game.surfaces[1]
+}
+
+// Where a dead body respawns. A space platform has no ground outside its hub
+// for a character to stand on, so a body that died on one respawns on Nauvis.
+// (Not yet verified in real Space Age.)
+function npc_respawn_surface(): LuaSurface | undefined {
+  const home = npc_home_surface()
+  if (home !== undefined && home.platform === undefined) return home
+  return game.surfaces[1]
+}
+
+function spawn_npc_body(surface: LuaSurface, force: LuaForce) {
+  const spawn_position = RESPAWN_POSITION
+  // With zero human players ever connecting, nothing else ever triggers chunk
+  // generation around spawn: normally a joining client's position does that.
+  // Creating the NPC really only needs the local spawn neighborhood. The old
+  // radius=3 request synchronously generated up to a 7x7 chunk square here,
+  // which could freeze the simulation during a cold standalone-NPC launch.
+  // A radius=1 (3x3) window is enough for the 32-tile collision search below
+  // and matches the awareness bubble that will continue generation afterwards.
+  if (!surface.is_chunk_generated({ x: Math.floor(spawn_position.x / 32), y: Math.floor(spawn_position.y / 32) })) {
+    surface.request_to_generate_chunks(spawn_position, 1)
+    surface.force_generate_chunk_requests()
+  }
+  const position = surface.find_non_colliding_position('character', spawn_position, 32, 0.5) ?? spawn_position
+  return StandaloneCharacterActor.create(surface, force, position)
 }
 
 function remember_npc_surface(actor: StandaloneCharacterActor) {
@@ -264,21 +290,15 @@ function get_npc_actor(): ControlledActor | undefined {
     invalidate_missing_npc(persisted_actor_id)
   }
 
-  // Respawn at (0, 0) of the surface the body was last alive on.
-  const spawn_position = RESPAWN_POSITION
-  // With zero human players ever connecting, nothing else ever triggers chunk
-  // generation around spawn: normally a joining client's position does that.
-  // Creating the NPC really only needs the local spawn neighborhood. The old
-  // radius=3 request synchronously generated up to a 7x7 chunk square here,
-  // which could freeze the simulation during a cold standalone-NPC launch.
-  // A radius=1 (3x3) window is enough for the 32-tile collision search below
-  // and matches the awareness bubble that will continue generation afterwards.
-  if (!surface.is_chunk_generated({ x: Math.floor(spawn_position.x / 32), y: Math.floor(spawn_position.y / 32) })) {
-    surface.request_to_generate_chunks(spawn_position, 1)
-    surface.force_generate_chunk_requests()
+  // Respawn at (0, 0) of the surface the body was last alive on. If the body
+  // cannot be created there, fall back to Nauvis rather than retrying a
+  // failing create on every tick.
+  const respawn_surface = npc_respawn_surface() ?? surface
+  standalone_actor = spawn_npc_body(respawn_surface, force)
+  const nauvis = game.surfaces[1]
+  if (!standalone_actor?.is_valid && nauvis !== undefined && nauvis !== respawn_surface) {
+    standalone_actor = spawn_npc_body(nauvis, force)
   }
-  const position = surface.find_non_colliding_position('character', spawn_position, 32, 0.5) ?? spawn_position
-  standalone_actor = StandaloneCharacterActor.create(surface, force, position)
   if (standalone_actor?.is_valid) {
     remember_npc_surface(standalone_actor)
     if (persisted_actor_id !== undefined) {
