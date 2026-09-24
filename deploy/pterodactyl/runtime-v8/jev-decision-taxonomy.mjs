@@ -383,6 +383,29 @@ export function parseObservationRelevance(response, {
   }
 }
 
+/**
+ * The post-step route and the family relevance are separate Jev judgments.
+ * When the route is `observe` but no family cleared the threshold, a literal
+ * reading admits zero reads and the route cannot make progress. Keep one
+ * bounded fresh read on the highest-ranked family instead; without typed
+ * relevance the read is not family-filtered. Returns the input unchanged when
+ * relevance already admits a read.
+ */
+export function observeRouteRelevanceFloor(relevance) {
+  if (Number.isSafeInteger(relevance?.budget) && relevance.budget >= 1) return relevance
+  if (relevance?.source !== 'typed_relevance') {
+    return { ...relevance, budget: 1, floor: 'observe_route_minimum_unfiltered' }
+  }
+  const [top] = Object.entries(relevance.probabilities ?? {})
+    .sort(([leftFamily, left], [rightFamily, right]) => right - left || leftFamily.localeCompare(rightFamily))
+  return {
+    ...relevance,
+    selected_families: top ? [top[0]] : [],
+    budget: 1,
+    floor: 'observe_route_minimum',
+  }
+}
+
 export function typedStateDistillationQuestions() {
   return {
     state_bottleneck: {

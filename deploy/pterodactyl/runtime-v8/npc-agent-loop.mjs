@@ -16,6 +16,7 @@ import {
   decisionEnvelopeQuestions,
   developmentDecisionQuestions,
   observationRelevanceQuestions,
+  observeRouteRelevanceFloor,
   parseBoundarySteeringTelemetry,
   parseDecisionFamily,
   parseObservationRelevance,
@@ -4040,6 +4041,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const plannerShape = appliedRoute === 'wait_runtime'
         ? undefined
         : await this.requestPostStepPlannerShape(state, { current, generation, signal: controller.signal })
+      if (plannerShape && appliedRoute === 'targeted_observation') {
+        const floored = observeRouteRelevanceFloor(plannerShape.observation_relevance)
+        if (floored !== plannerShape.observation_relevance) {
+          plannerShape.observation_relevance = floored
+          plannerShape.observation_budget = floored.budget
+        }
+      }
       const steeringContext = {
         ...steeringTelemetry,
         ...(plannerShape ?? {}),

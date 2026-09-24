@@ -277,6 +277,9 @@ export function decisionProviderConfiguration(env = process.env) {
   }
 }
 
+// Largest per-value error of a probability reported with two decimals.
+const DECISION_PROBABILITY_ROUNDING = 0.005
+
 const DECISION_ENTRY_LIMITS = Object.freeze({
   maxDepth: 12,
   maxCollectionItems: 128,
@@ -413,7 +416,10 @@ function probabilityDistribution(value, expectedKeys, label) {
     check(validProbability(value[key]), `${label} has an invalid probability`)
     total += value[key]
   }
-  check(Math.abs(total - 1) <= 0.0001, `${label} probabilities must sum to 1`)
+  // Jev reports probabilities with two decimals, so each value can be off by
+  // up to half a unit and a valid distribution can total 0.99 or 1.01.
+  const tolerance = Math.max(0.0001, expectedKeys.length * DECISION_PROBABILITY_ROUNDING)
+  check(Math.abs(total - 1) <= tolerance, `${label} probabilities must sum to 1`)
 }
 
 function decisionEntriesEqual(left, right) {
