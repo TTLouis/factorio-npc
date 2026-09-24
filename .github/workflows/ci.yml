@@ -146,8 +146,13 @@ jobs:
       - name: Test payload verifier portability
         run: node --test deploy/pterodactyl/build-payload.test.mjs
 
+      # No --test-force-exit: it exits a file's child process before its report
+      # is flushed, which silently dropped the tail of planning-state.test.mjs
+      # (842 of 849 tests reported, still green). The step timeout covers a
+      # leaked handle instead.
       - name: Test standalone-NPC deployment protocol and production runtime
-        run: node --test --test-force-exit deploy/pterodactyl/staging/*.test.mjs deploy/pterodactyl/runtime-v8/*.test.mjs
+        timeout-minutes: 10
+        run: node --test deploy/pterodactyl/staging/*.test.mjs deploy/pterodactyl/runtime-v8/*.test.mjs
 
   factorio-npc-deterministic:
     if: github.ref == 'refs/heads/feat/npc-transition-work' || github.ref == 'refs/heads/experiment/jev-agent-architecture' || github.base_ref == 'feat/npc-transition-work' || github.base_ref == 'experiment/jev-agent-architecture'
