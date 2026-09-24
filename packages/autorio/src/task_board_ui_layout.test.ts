@@ -197,9 +197,8 @@ describe('SGLuna NPC console compact tracker layout', () => {
     expect(source).toContain('function action_button(')
     expect(source).toContain("'Plan Tracker'")
     expect(source).toContain('function render_tracker(')
-    expect(source).toMatch(/render_tracker\(\w+, board[,)]/)
-    expect(source).toContain('activity_header.visible = false')
-    expect(source).toContain('activity_scroll.visible = false')
+    expect(source).toMatch(/render_tracker\([\w.]+, board[,)]/)
+    expect(source).toContain("create_section(parent, 'Activity'")
     expect(source).toContain('const previous = storage.airi_task_board_ui')
     expect(source).toContain('const changed_task = activity_state.bind_activity_context(next.conversation_id, next.goal_id)')
     expect(source).toContain('stamp_activity_times(next, changed_task ? undefined : previous, game.tick)')
@@ -213,17 +212,18 @@ describe('SGLuna NPC console compact tracker layout', () => {
   })
 
   // Conversation has always carried its LIVE control in its subheader. The
-  // tracker still retains its old activity controls invisibly for rolling-save
-  // compatibility, while the visible execution feed now belongs to Debug.
-  it('keeps the retained feed controls structurally stable while moving visible activity to Debug', () => {
+  // execution feed has its own ACTIVITY tab with its controls in the same
+  // place; the tracker no longer carries a hidden copy. Debug keeps its feed.
+  it('gives the execution feed its own section with its controls in the subheader', () => {
     const source = taskBoardUiSource()
     const tracker = source.split('function render_tracker(')[1]?.split('function refresh_tracker(')[0] ?? ''
-    expect(tracker).toContain('const activity_header = header.add(')
-    expect(tracker).not.toContain('const activity_header = body.add(')
-    expect(tracker).not.toContain("caption: 'Recent activity'")
-    expect(tracker).toContain('activity_state.style_feed_button(')
-    expect(source).toContain('const activity_header = header[TRACKER.activity_header]')
-    expect(source).toContain('activity_header.visible = false')
+    expect(tracker).not.toContain('activity_header')
+    const feed = source.split('function render_activity_section(')[1]?.split('function refresh_activity_section(')[0] ?? ''
+    expect(feed).toContain('const activity_header = header.add(')
+    expect(feed).not.toContain('const activity_header = body.add(')
+    expect(feed).toContain('activity_state.style_feed_button(')
+    expect(source).toContain('const activity_header = header?.valid ? header[TRACKER.activity_header] : undefined')
+    expect(source).not.toContain('activity_header.visible = false')
 
     const debug_source = taskBoardDebugSource()
     expect(debug_source).toContain('activity_state.style_feed_button(header.add(')

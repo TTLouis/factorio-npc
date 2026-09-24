@@ -130,10 +130,14 @@ describe('SGLuna NPC console layout regressions', () => {
 
   it('keeps the tracker scroll-panes alive across refreshes so the player keeps their place', () => {
     const refresh_columns = source.split('function refresh_columns(')[1]?.split('function build_panel(')[0] ?? ''
-    // The tracker is refreshed in place before the rest of the left column is
-    // rebuilt, and is never inside what gets cleared.
-    expect(refresh_columns).toContain('if (left === undefined || !refresh_tracker(left, board, player)) return false')
-    expect(refresh_columns.indexOf('refresh_tracker(left')).toBeLessThan(refresh_columns.indexOf('dynamic.clear()'))
+    // The tracker and the feed are refreshed in place before the rest of the
+    // left column is rebuilt, and are never inside what gets cleared.
+    expect(refresh_columns).toContain('if (!refresh_tracker(plan, board, player) || !refresh_activity_section(activity, board, player)) return false')
+    expect(refresh_columns.indexOf('refresh_tracker(plan')).toBeLessThan(refresh_columns.indexOf('dynamic.clear()'))
+    // Switching tabs only flips visibility; it never rebuilds a page.
+    expect(refresh_columns).toContain('console_ui.apply_console_tab(left, selected_console_tab(player))')
+    expect(refresh_columns).not.toContain('plan.clear()')
+    expect(refresh_columns).not.toContain('activity.clear()')
     const left_dynamic = source.split('function build_left_dynamic(')[1]?.split('function build_columns(')[0] ?? ''
     expect(left_dynamic).not.toContain('render_tracker(')
 

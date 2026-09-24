@@ -340,13 +340,13 @@ describe('in-game task board UI projection', () => {
     expect(source).toContain('left.style.vertical_spacing = COLUMN_SPACING')
     expect(source).toContain('dynamic.style.vertical_spacing = COLUMN_SPACING')
     expect(source).toContain('resources.style.horizontal_spacing = COLUMN_SPACING')
-    expect(source).toContain('console_ui.render_goal_card(parent, console_goal_card(board)); console_ui.render_now_card(parent, console_now_card(board))')
+    expect(source).toContain('console_ui.render_goal_card(now, goal); console_ui.render_now_card(now, console_now_card(board)); console_ui.render_goal_card(plan, goal)')
     // The old Controls grid is gone: window buttons are in the title bar and
     // PAUSE / FOLLOW / … sit in one row under the prompt.
     expect(source).not.toContain("create_section(parent, 'Controls'")
     expect(source).not.toContain('HALF_SECTION_WIDTH')
     expect(source).toContain('right.style.vertically_stretchable = true')
-    expect(source).toMatch(/build_left_dynamic\(dynamic,[\s\S]*render_prompt\(left, player\); console_ui\.render_action_row\(left,[\s\S]*render_world_preview\(right, runtime, player\)/)
+    expect(source).toMatch(/build_left_dynamic\(banner, dynamic, plan_dynamic,[\s\S]*render_prompt\(left, player\); console_ui\.render_action_row\(left,[\s\S]*render_world_preview\(right, runtime, player\)/)
   })
 
   it('puts a native Factorio camera preview in the right column with an interactive zoom slider', () => {
@@ -406,7 +406,7 @@ describe('in-game task board UI projection', () => {
   it('refreshes live content without destroying the prompt field being typed into', () => {
     const source = taskBoardUiSource()
     expect(source).toContain('dynamic.clear()')
-    expect(source).toContain('build_left_dynamic(dynamic, player, board)')
+    expect(source).toContain('build_left_dynamic(banner, dynamic, plan_dynamic, player, board)')
     expect(source).toContain('right.clear()')
     expect(source).toContain('render_prompt(left, player)')
     expect(source).not.toMatch(/left\.clear\(\)/)

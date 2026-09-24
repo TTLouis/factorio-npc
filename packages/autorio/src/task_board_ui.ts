@@ -156,6 +156,7 @@ declare const storage: {
   // Whether a player has the … menu (NEW TASK, TERMINATE) open. Written only
   // by the click handler.
   airi_task_board_more_open?: Record<number, boolean>
+  airi_task_board_tab?: Record<number, ui_constants.ConsoleTab>
 }
 
 let world_task_provider: ((this: void) => unknown) | undefined
@@ -917,7 +918,7 @@ export function task_board_activity_for_display(board: TaskBoardUiSnapshot | und
  * refresh_tracker, which the once-a-second refresh calls instead of rebuilding.
  */
 function render_tracker(parent: LuaGuiElement, board: TaskBoardUiSnapshot | undefined, player: LuaPlayer) {
-  const { header, body } = create_section(parent, 'Plan Tracker', undefined, 'Roadmap Shelf on the left; the immutable executable plan slice on the right. Full execution activity is available in Debug.', true, { section: ui_constants.TRACKER.section, header: ui_constants.TRACKER.header, body: ui_constants.TRACKER.body })
+  const { header, body } = create_section(parent, 'Plan Tracker', undefined, 'Roadmap Shelf on the left; the immutable executable plan slice on the right. Execution activity has its own tab.', true, { section: ui_constants.TRACKER.section, header: ui_constants.TRACKER.header, body: ui_constants.TRACKER.body })
   const summary = header.add({ type: 'label', name: ui_constants.TRACKER.summary, caption: '', style: 'semibold_label' }); summary.style.right_padding = 4
 
   const workspace = body.add({ type: 'flow', name: ui_constants.TRACKER.workspace, direction: 'horizontal' })
@@ -959,16 +960,6 @@ function render_tracker(parent: LuaGuiElement, board: TaskBoardUiSnapshot | unde
   const steps_table = steps_scroll.add({ type: 'table', name: ui_constants.TRACKER.steps_table, column_count: 4 }); steps_table.style.horizontal_spacing = 8; steps_table.style.vertical_spacing = 4
   plan.add({ type: 'flow', name: ui_constants.TRACKER.attention, direction: 'vertical' })
 
-  const divider = body.add({ type: 'line', name: ui_constants.TRACKER.divider, direction: 'horizontal' }); divider.style.horizontally_stretchable = true
-  const activity_header = header.add({ type: 'flow', name: ui_constants.TRACKER.activity_header, direction: 'horizontal' }); activity_header.style.vertical_align = 'center'; activity_header.style.horizontal_spacing = 6
-  const filters = activity_header.add({ type: 'flow', name: ui_constants.TRACKER.filters, direction: 'horizontal' }); filters.style.horizontal_spacing = 2
-  activity_state.style_feed_button(filters.add({ type: 'button', caption: 'ALL', tooltip: 'Show every kind of activity', tags: { airi_activity_filter: activity_state.ACTIVITY_FILTER_ALL } }))
-  for (const filter of activity_state.ACTIVITY_FILTERS) activity_state.style_feed_button(filters.add({ type: 'button', caption: filter.caption, tooltip: `${filter.tooltip}. Click to show or hide; several can be on at once.`, tags: { airi_activity_filter: filter.flag } }))
-  activity_state.style_feed_button(activity_header.add({ type: 'button', name: ui_constants.TRACKER.live, caption: '' }), activity_state.FEED_STATE_BUTTON_WIDTH)
-  const count = activity_header.add({ type: 'label', name: ui_constants.TRACKER.count, caption: '', style: 'semibold_label' }); count.style.right_padding = 4
-  const activity_empty = body.add({ type: 'label', name: ui_constants.TRACKER.activity_empty, caption: '' }); activity_empty.style.font_color = TONE_COLORS.muted
-  const activity_scroll = body.add({ type: 'scroll-pane', name: ui_constants.TRACKER.activity_scroll, style: 'scroll_pane_in_shallow_frame', horizontal_scroll_policy: 'never' }); activity_scroll.style.horizontally_stretchable = true
-  const activity_table = activity_scroll.add({ type: 'table', name: ui_constants.TRACKER.activity_table, column_count: 3, ignored_by_interaction: true, tags: { keys: [] } }); activity_table.style.horizontal_spacing = 10; activity_table.style.vertical_spacing = 4
   refresh_tracker(parent, board, player)
 }
 
@@ -985,24 +976,16 @@ function refresh_tracker(parent: LuaGuiElement, board: TaskBoardUiSnapshot | und
   const plan_summary = plan_header?.valid ? plan_header[ui_constants.TRACKER.plan_summary] : undefined
   const empty = plan_column?.valid ? plan_column[ui_constants.TRACKER.empty] : undefined
   const plan = plan_column?.valid ? plan_column[ui_constants.TRACKER.plan] : undefined
-  const divider = body[ui_constants.TRACKER.divider]
-  const activity_header = header[ui_constants.TRACKER.activity_header]
-  const activity_empty = body[ui_constants.TRACKER.activity_empty]
-  const activity_scroll = body[ui_constants.TRACKER.activity_scroll]
-  const activity_table = activity_scroll?.valid ? activity_scroll[ui_constants.TRACKER.activity_table] : undefined
-  if (!workspace?.valid || !shelf?.valid || !plan_column?.valid || !summary?.valid || !plan_header?.valid || !plan_summary?.valid || !empty?.valid || !plan?.valid || !divider?.valid || !activity_header?.valid || !activity_empty?.valid || !activity_scroll?.valid || !activity_table?.valid) return false
+  if (!workspace?.valid || !shelf?.valid || !plan_column?.valid || !summary?.valid || !plan_header?.valid || !plan_summary?.valid || !empty?.valid || !plan?.valid) return false
 
   const shelf_nodes = board?.shelf ?? []
   const row_count = board === undefined ? 0 : math.max(board.steps.length, shelf_nodes.length)
   const tracker_heights = task_board_tracker_heights(player_gui_height(player), math.min(row_count, ui_constants.MAX_STEPS))
-  const all_activity = task_board_activity_for_display(board)
   const has_steps = board !== undefined && board.steps.length > 0
   const has_shelf = shelf_nodes.length > 0
   empty.visible = !has_steps
   empty.caption = has_shelf ? 'No active plan slice.' : 'No active plan.'
   plan.visible = has_steps
-  divider.visible = false
-  activity_header.visible = false
   summary.caption = ''
   plan_summary.caption = ''
 
@@ -1012,10 +995,39 @@ function refresh_tracker(parent: LuaGuiElement, board: TaskBoardUiSnapshot | und
     const active_number = board.status === 'completed' ? board.total_steps : math.min(board.active_index + 1, board.total_steps)
     plan_summary.caption = `STEP ${active_number}/${board.total_steps} · ${board.completed_count} verified`
   }
+  return true
+}
 
-  refresh_activity(activity_header, activity_empty, activity_scroll, activity_table, all_activity, tracker_heights.activity, player)
-  activity_empty.visible = false
-  activity_scroll.visible = false
+/**
+ * The ACTIVITY page: the feed with its filters and LIVE button, built once and
+ * then brought up to date by refresh_activity, like the tracker.
+ */
+function render_activity_section(parent: LuaGuiElement, board: TaskBoardUiSnapshot | undefined, player: LuaPlayer) {
+  const names = ui_constants.CONSOLE_TABS
+  const { header, body } = create_section(parent, 'Activity', ui_constants.LEFT_COLUMN_WIDTH, 'What AIRI observed, decided and did. Messages already in the conversation on NOW are not repeated here.', false, { section: names.activity_section, header: names.activity_section_header, body: names.activity_section_body })
+  const activity_header = header.add({ type: 'flow', name: ui_constants.TRACKER.activity_header, direction: 'horizontal' }); activity_header.style.vertical_align = 'center'; activity_header.style.horizontal_spacing = 6
+  const filters = activity_header.add({ type: 'flow', name: ui_constants.TRACKER.filters, direction: 'horizontal' }); filters.style.horizontal_spacing = 2
+  activity_state.style_feed_button(filters.add({ type: 'button', caption: 'ALL', tooltip: 'Show every kind of activity', tags: { airi_activity_filter: activity_state.ACTIVITY_FILTER_ALL } }))
+  for (const filter of activity_state.ACTIVITY_FILTERS) activity_state.style_feed_button(filters.add({ type: 'button', caption: filter.caption, tooltip: `${filter.tooltip}. Click to show or hide; several can be on at once.`, tags: { airi_activity_filter: filter.flag } }))
+  activity_state.style_feed_button(activity_header.add({ type: 'button', name: ui_constants.TRACKER.live, caption: '' }), activity_state.FEED_STATE_BUTTON_WIDTH)
+  const count = activity_header.add({ type: 'label', name: ui_constants.TRACKER.count, caption: '', style: 'semibold_label' }); count.style.right_padding = 4
+  const activity_empty = body.add({ type: 'label', name: ui_constants.TRACKER.activity_empty, caption: 'No activity yet.' }); activity_empty.style.font_color = TONE_COLORS.muted
+  const activity_scroll = body.add({ type: 'scroll-pane', name: ui_constants.TRACKER.activity_scroll, style: 'scroll_pane_in_shallow_frame', horizontal_scroll_policy: 'never' }); activity_scroll.style.horizontally_stretchable = true
+  const activity_table = activity_scroll.add({ type: 'table', name: ui_constants.TRACKER.activity_table, column_count: 3, ignored_by_interaction: true, tags: { keys: [] } }); activity_table.style.horizontal_spacing = 10; activity_table.style.vertical_spacing = 4
+  refresh_activity_section(parent, board, player)
+}
+
+function refresh_activity_section(parent: LuaGuiElement, board: TaskBoardUiSnapshot | undefined, player: LuaPlayer) {
+  const names = ui_constants.CONSOLE_TABS
+  const section = parent[names.activity_section]
+  const header = section?.valid ? section[names.activity_section_header] : undefined
+  const body = section?.valid ? section[names.activity_section_body] : undefined
+  const activity_header = header?.valid ? header[ui_constants.TRACKER.activity_header] : undefined
+  const activity_empty = body?.valid ? body[ui_constants.TRACKER.activity_empty] : undefined
+  const activity_scroll = body?.valid ? body[ui_constants.TRACKER.activity_scroll] : undefined
+  const activity_table = activity_scroll?.valid ? activity_scroll[ui_constants.TRACKER.activity_table] : undefined
+  if (!activity_header?.valid || !activity_empty?.valid || !activity_scroll?.valid || !activity_table?.valid) return false
+  refresh_activity(activity_header, activity_empty, activity_scroll, activity_table, task_board_activity_for_display(board), names.activity_height, player)
   return true
 }
 
@@ -1107,8 +1119,8 @@ function refresh_activity(header: LuaGuiElement, empty: LuaGuiElement, scroll: L
   for (const entry of all_activity) { const key = activity_state.activity_key(entry); if (in_conversation[key]) continue; total++; if (!activity_state.activity_matches_mask(entry.kind, mask)) continue; entries.push(entry); keys.push(key) }
   scroll.style.maximal_height = max_height
   scroll.visible = entries.length > 0
-  empty.visible = total > 0 && entries.length === 0
-  empty.caption = mask === 0 ? 'No activity categories selected.' : 'No recent activity matches this filter.'
+  empty.visible = entries.length === 0
+  empty.caption = total === 0 ? 'No activity yet.' : mask === 0 ? 'No activity categories selected.' : 'No recent activity matches this filter.'
   const add_row = (entry: TaskBoardUiActivity) => {
     const timestamp = table.add({ type: 'label', caption: entry.timestamp ?? '--:--:--', ignored_by_interaction: true }); timestamp.style.minimal_width = 66; timestamp.style.font_color = TONE_COLORS.muted
     const tag = table.add({ type: 'label', caption: activity_prefix(entry.kind), style: 'bold_label', ignored_by_interaction: true }); tag.style.minimal_width = 52; tag.style.font_color = TONE_COLORS[activity_tone(entry.kind)]
@@ -1147,7 +1159,8 @@ function refresh_activity(header: LuaGuiElement, empty: LuaGuiElement, scroll: L
 /** The rendered activity feed for a player, if their console is open. */
 function activity_scroll_of(player: LuaPlayer) {
   const root = player.gui.screen[ui_constants.ROOT_NAME]; const columns = root?.valid ? root[ui_constants.COLUMNS_NAME] : undefined; const left = columns?.valid ? columns[ui_constants.LEFT_COLUMN_NAME] : undefined
-  const section = left?.valid ? left[ui_constants.TRACKER.section] : undefined; const body = section?.valid ? section[ui_constants.TRACKER.body] : undefined
+  const page = left?.valid ? console_ui.console_tab_page(left, 'activity') : undefined
+  const section = page?.[ui_constants.CONSOLE_TABS.activity_section]; const body = section?.valid ? section[ui_constants.CONSOLE_TABS.activity_section_body] : undefined
   const scroll = body?.valid ? body[ui_constants.TRACKER.activity_scroll] : undefined
   return scroll?.valid ? scroll : undefined
 }
@@ -1198,28 +1211,45 @@ function render_titlebar(root: FrameGuiElement, caption = 'SGLuna NPC Console', 
   titlebar.add({ type: 'label', caption, style: 'frame_title', ignored_by_interaction: true }); const dragger = titlebar.add({ type: 'empty-widget', style: 'draggable_space_header', ignored_by_interaction: true }); dragger.style.horizontally_stretchable = true; dragger.style.height = 24
   titlebar.add({ type: 'sprite-button', name: close_name, sprite: 'utility/close', style: 'frame_action_button', tooltip: `Close ${caption}` })
 }
-function build_left_dynamic(parent: LuaGuiElement, player: LuaPlayer, board: TaskBoardUiSnapshot | undefined) {
-  render_blocked(parent, player, board); console_ui.render_goal_card(parent, console_goal_card(board)); console_ui.render_now_card(parent, console_now_card(board))
+function selected_console_tab(player: LuaPlayer): ui_constants.ConsoleTab { return console_ui.console_tab_of(storage.airi_task_board_tab?.[player.index]) ?? 'now' }
+/** What is rebuilt every refresh: the blocked banner and the NOW and PLAN cards. None of it owns a scroll-pane. */
+function build_left_dynamic(banner: LuaGuiElement, now: LuaGuiElement, plan: LuaGuiElement, player: LuaPlayer, board: TaskBoardUiSnapshot | undefined) {
+  render_blocked(banner, player, board)
+  const goal = console_goal_card(board); console_ui.render_goal_card(now, goal); console_ui.render_now_card(now, console_now_card(board)); console_ui.render_goal_card(plan, goal)
 }
 function build_columns(columns: LuaGuiElement, player: LuaPlayer) {
   const board = storage.airi_task_board_ui; const runtime = runtime_snapshot()
   const left = columns.add({ type: 'flow', name: ui_constants.LEFT_COLUMN_NAME, direction: 'vertical' }); left.style.width = ui_constants.LEFT_COLUMN_WIDTH; left.style.vertical_spacing = ui_constants.COLUMN_SPACING
-  const dynamic = left.add({ type: 'flow', name: ui_constants.LEFT_DYNAMIC_NAME, direction: 'vertical' }); dynamic.style.width = ui_constants.LEFT_COLUMN_WIDTH; dynamic.style.vertical_spacing = ui_constants.COLUMN_SPACING; build_left_dynamic(dynamic, player, board); render_tracker(left, board, player); debug_ui.render_ai_reply(dynamic, board?.response ?? '', ui_constants.LEFT_COLUMN_WIDTH); render_prompt(left, player); console_ui.render_action_row(left, console_action_state(player, board, runtime))
+  // The blocked banner sits above the tabs so a plan waiting on the player is seen whichever tab is open.
+  const banner = left.add({ type: 'flow', name: ui_constants.CONSOLE_TABS.banner, direction: 'vertical' }); banner.style.width = ui_constants.LEFT_COLUMN_WIDTH
+  const pages = console_ui.render_console_tabs(left, selected_console_tab(player))
+  const dynamic = pages.now.add({ type: 'flow', name: ui_constants.LEFT_DYNAMIC_NAME, direction: 'vertical' }); dynamic.style.width = ui_constants.LEFT_COLUMN_WIDTH; dynamic.style.vertical_spacing = ui_constants.COLUMN_SPACING
+  const plan_dynamic = pages.plan.add({ type: 'flow', name: ui_constants.CONSOLE_TABS.plan_dynamic, direction: 'vertical' }); plan_dynamic.style.width = ui_constants.LEFT_COLUMN_WIDTH
+  build_left_dynamic(banner, dynamic, plan_dynamic, player, board)
+  // The conversation hosts itself beside dynamic (in the NOW page), outside the flow that is cleared.
+  debug_ui.render_ai_reply(dynamic, board?.response ?? '', ui_constants.LEFT_COLUMN_WIDTH)
+  render_tracker(pages.plan, board, player); render_activity_section(pages.activity, board, player)
+  render_prompt(left, player); console_ui.render_action_row(left, console_action_state(player, board, runtime))
   const right = columns.add({ type: 'flow', name: ui_constants.RIGHT_COLUMN_NAME, direction: 'vertical' }); right.style.width = ui_constants.PREVIEW_COLUMN_WIDTH; right.style.vertical_spacing = ui_constants.COLUMN_SPACING; right.style.vertically_stretchable = true; render_world_preview(right, runtime, player)
   const resources = right.add({ type: 'flow', name: ui_constants.RIGHT_RESOURCES_NAME, direction: 'horizontal' }); resources.style.horizontal_spacing = ui_constants.COLUMN_SPACING; resources.style.vertical_align = 'top'; render_inventory(resources, runtime, player); render_resource_sidebar(resources, board, runtime, player)
 }
 function refresh_columns(columns: LuaGuiElement, player: LuaPlayer) {
-  const left = columns[ui_constants.LEFT_COLUMN_NAME]; const dynamic = left?.valid ? left[ui_constants.LEFT_DYNAMIC_NAME] : undefined; const right = columns[ui_constants.RIGHT_COLUMN_NAME]
-  if (!dynamic?.valid || !right?.valid) return false
+  const left = columns[ui_constants.LEFT_COLUMN_NAME]; const right = columns[ui_constants.RIGHT_COLUMN_NAME]
+  if (!left?.valid || !right?.valid) return false
+  // A console built before the tabs existed has none of these, and is rebuilt.
+  const banner = left[ui_constants.CONSOLE_TABS.banner]; const now = console_ui.console_tab_page(left, 'now'); const plan = console_ui.console_tab_page(left, 'plan'); const activity = console_ui.console_tab_page(left, 'activity')
+  const dynamic = now?.[ui_constants.LEFT_DYNAMIC_NAME]; const plan_dynamic = plan?.[ui_constants.CONSOLE_TABS.plan_dynamic]
+  if (!banner?.valid || now === undefined || plan === undefined || activity === undefined || !dynamic?.valid || !plan_dynamic?.valid) return false
   const board = storage.airi_task_board_ui; const runtime = runtime_snapshot()
-  // The tracker is never cleared on a routine refresh: it owns two scroll-panes.
-  if (left === undefined || !refresh_tracker(left, board, player)) return false
-  dynamic.clear(); build_left_dynamic(dynamic, player, board)
+  // The tracker and the feed are never cleared on a routine refresh: they own scroll-panes.
+  if (!refresh_tracker(plan, board, player) || !refresh_activity_section(activity, board, player)) return false
+  banner.clear(); dynamic.clear(); plan_dynamic.clear(); build_left_dynamic(banner, dynamic, plan_dynamic, player, board)
   // Current Task Conversation intentionally lives outside the dynamic flow so
   // its scroll position survives refreshes. That also means it must be
   // explicitly refreshed here; otherwise snapshots update storage while an
   // already-open console keeps stale rows until it is closed and reopened.
   debug_ui.render_ai_reply(dynamic, board?.response ?? '', ui_constants.LEFT_COLUMN_WIDTH)
+  if (!console_ui.apply_console_tab(left, selected_console_tab(player))) return false
   const actions = left[ui_constants.ACTIONS_NAME]; if (actions?.valid) actions.destroy(); console_ui.render_action_row(left, console_action_state(player, board, runtime))
   // Never clear the preview column on a routine refresh: it owns the zoom slider.
   const resources = right[ui_constants.RIGHT_RESOURCES_NAME]
@@ -1390,6 +1420,14 @@ export function create_task_board_ui_remote_interface() {
     if (element.name === debug_ui.DEBUG_BUTTON_NAME) { debug_ui.toggle_debug_ui(player.index); render_panel(player); render_debug_popout(player); return }
     if (element.name === debug_ui.DEBUG_CLOSE_BUTTON_NAME) { debug_ui.close_debug_ui(player.index); render_debug_popout(player); render_panel(player); return }
     if (element.name === debug_ui.DEBUG_ACTIVITY_STATE_NAME) { debug_ui.toggle_debug_activity_follow(player.index); render_debug_popout(player); return }
+    const tab = console_ui.console_tab_of(element.tags?.[ui_constants.CONSOLE_TABS.tag])
+    if (tab !== undefined) {
+      const selected = storage.airi_task_board_tab ?? {}; selected[player.index] = tab; storage.airi_task_board_tab = selected
+      // Only visibility changes, so nothing is rebuilt and no scroll position is lost.
+      const root = player.gui.screen[ui_constants.ROOT_NAME]; const columns = root?.valid ? root[ui_constants.COLUMNS_NAME] : undefined; const left = columns?.valid ? columns[ui_constants.LEFT_COLUMN_NAME] : undefined
+      if (!left?.valid || !console_ui.apply_console_tab(left, tab)) render_panel(player)
+      return
+    }
     if (element.name === ui_constants.TRACKER.live) {
       const scroll = activity_scroll_of(player); const view = activity_state.activity_view(player.index)
       if (view.follow) activity_state.stop_activity_follow(player.index, last_shown_activity_key(scroll))

@@ -133,3 +133,38 @@ describe('goal block of the UI snapshot', () => {
     expect(bare).toEqual({ summary: 'Follow me.', defined: false, read: false, met: 0, total: 0, checks: [] })
   })
 })
+
+describe('console tabs', () => {
+  const pages = (parent: FakeElement) => ['now', 'plan', 'activity'].map(tab => parent[`airi_task_board_tab_${tab}`] as FakeElement)
+  const buttons = (parent: FakeElement) => (parent.airi_task_board_tab_bar as FakeElement).children
+
+  it('builds a button and a page per tab and shows only the selected page', () => {
+    const parent = element()
+    const built = console_ui.render_console_tabs(parent as any, 'plan')
+    expect(buttons(parent).map(button => button.caption)).toEqual(['NOW', 'PLAN', 'ACTIVITY'])
+    expect(buttons(parent).map(button => button.toggled)).toEqual([false, true, false])
+    expect(pages(parent).map(page => page.visible)).toEqual([false, true, false])
+    expect(built.activity).toBe(parent.airi_task_board_tab_activity)
+  })
+
+  it('switches tabs by visibility alone, so page contents survive', () => {
+    const parent = element()
+    const built = console_ui.render_console_tabs(parent as any, 'now')
+    const feed = (built.activity as unknown as FakeElement).add({ type: 'scroll-pane', name: 'feed' })
+    expect(console_ui.apply_console_tab(parent as any, 'activity')).toBe(true)
+    expect(pages(parent).map(page => page.visible)).toEqual([false, false, true])
+    expect(buttons(parent).map(button => button.toggled)).toEqual([false, false, true])
+    expect(feed.valid).toBe(true)
+    expect(parent.airi_task_board_tab_activity.feed).toBe(feed)
+  })
+
+  it('reports a console without tabs so the caller rebuilds it', () => {
+    expect(console_ui.apply_console_tab(element() as any, 'now')).toBe(false)
+  })
+
+  it('accepts only known tab names from tags or storage', () => {
+    expect(console_ui.console_tab_of('activity')).toBe('activity')
+    expect(console_ui.console_tab_of('debug')).toBeUndefined()
+    expect(console_ui.console_tab_of(2)).toBeUndefined()
+  })
+})

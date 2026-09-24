@@ -28,14 +28,16 @@ describe('NPC console information architecture', () => {
 
   it('puts window buttons in the title bar and the actions in one row under the prompt', () => {
     expect(consoleSource).toContain("create_section(parent, 'Plan Tracker'")
-    expect(consoleSource).toContain('activity_header.visible = false')
-    expect(consoleSource).toContain('activity_scroll.visible = false')
-    expect(consoleSource).toMatch(/render_tracker\(left, board, player\); debug_ui\.render_ai_reply\(dynamic,[\s\S]*render_prompt\(left, player\); console_ui\.render_action_row\(left,/)
+    expect(consoleSource).toContain("create_section(parent, 'Activity'")
+    // NOW holds the cards and the conversation, PLAN the tracker, ACTIVITY the
+    // feed; the prompt and the action row stay under the tabs.
+    expect(consoleSource).toMatch(/debug_ui\.render_ai_reply\(dynamic,[\s\S]*render_tracker\(pages\.plan, board, player\); render_activity_section\(pages\.activity, board, player\)[\s\S]*render_prompt\(left, player\); console_ui\.render_action_row\(left,/)
     expect(consoleSource).not.toContain("create_section(parent, 'Controls'")
     expect(consoleSource).toContain("console_ui.render_console_titlebar(root, 'SGLuna NPC Console', console_window_buttons(player), console_title_status(")
-    // A blocked plan is a full-width banner above everything else, then the
-    // Goal and Now cards.
-    expect(consoleSource).toMatch(/render_blocked\(parent, player, board\); console_ui\.render_goal_card\(parent,[^\n]*console_ui\.render_now_card\(parent,/)
+    // A blocked plan is a full-width banner above the tabs, so it is seen
+    // whichever tab is open; the Goal and Now cards open the NOW tab.
+    expect(consoleSource).toMatch(/name: CONSOLE_TABS\.banner[\s\S]*console_ui\.render_console_tabs\(left,/)
+    expect(consoleSource).toMatch(/render_blocked\(banner, player, board\)\n[^\n]*console_ui\.render_goal_card\(now, goal\); console_ui\.render_now_card\(now,[^\n]*console_ui\.render_goal_card\(plan, goal\)/)
     const prompt = consoleSource.split('function render_prompt(')[1]?.split('function render_titlebar(')[0] ?? ''
     expect(prompt).toContain("caption: 'Prompt SGLuna'")
     expect(prompt).not.toContain('NEW_TASK_BUTTON_NAME')
@@ -55,7 +57,7 @@ describe('NPC console information architecture', () => {
     expect(consoleSource).not.toContain("create_section(parent, 'Project Board'")
     expect(consoleSource).not.toContain('render_project_board(parent, board)')
     expect(consoleSource).toContain("create_section(parent, 'Plan Tracker'")
-    expect(consoleSource).toMatch(/build_left_dynamic\(dynamic,[\s\S]*render_tracker\(left, board, player\)/)
+    expect(consoleSource).toMatch(/build_left_dynamic\(banner, dynamic, plan_dynamic,[\s\S]*render_tracker\(pages\.plan, board, player\)/)
   })
 
   it('shows the goal checks, the current step, what comes next and the last result on the Goal and Now cards', () => {

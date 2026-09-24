@@ -39,7 +39,7 @@ describe('task board New Task control regression', () => {
     const source = taskBoardUiSource()
     const refresh = source.split('function refresh_columns(')[1]?.split('function build_panel(')[0] ?? ''
 
-    expect(refresh).toContain('dynamic.clear(); build_left_dynamic(dynamic, player, board)')
+    expect(refresh).toContain('banner.clear(); dynamic.clear(); plan_dynamic.clear(); build_left_dynamic(banner, dynamic, plan_dynamic, player, board)')
     expect(refresh).toContain("debug_ui.render_ai_reply(dynamic, board?.response ?? '', LEFT_COLUMN_WIDTH)")
     expect(refresh.indexOf('debug_ui.render_ai_reply')).toBeGreaterThan(refresh.indexOf('build_left_dynamic'))
   })

@@ -234,3 +234,27 @@ export const MORE_MENU_BUTTON_WIDTH = 140
 export const PROMPT_SEND_WIDTH = 84
 export const PROMPT_FIELD_WIDTH = LEFT_COLUMN_WIDTH - 2 * SECTION_PADDING - 8 - PROMPT_SEND_WIDTH
 export const SKILLS_POPOUT_WIDTH = 720
+// The left column's tabs. The three pages are all built once and switched by
+// toggling .visible, so every scroll-pane inside them (steps, shelf, activity,
+// conversation) keeps its position across both tab switches and refreshes.
+export type ConsoleTab = 'now' | 'plan' | 'activity'
+export const CONSOLE_TABS = {
+  order: ['now', 'plan', 'activity'] as ConsoleTab[],
+  captions: { now: 'NOW', plan: 'PLAN', activity: 'ACTIVITY' } as Record<ConsoleTab, string>,
+  tooltips: {
+    now: 'The goal, the current step and the conversation with AIRI',
+    plan: 'The goal, the Roadmap Shelf and the committed plan slice',
+    activity: 'Everything AIRI observed, decided and did, newest last',
+  } as Record<ConsoleTab, string>,
+  pages: { now: 'airi_task_board_tab_now', plan: 'airi_task_board_tab_plan', activity: 'airi_task_board_tab_activity' } as Record<ConsoleTab, string>,
+  bar: 'airi_task_board_tab_bar',
+  banner: 'airi_task_board_banner',
+  plan_dynamic: 'airi_task_board_plan_dynamic',
+  activity_section: 'airi_task_board_activity_section',
+  activity_section_header: 'airi_task_board_activity_section_header',
+  activity_section_body: 'airi_task_board_activity_section_body',
+  // Carried in the tab buttons' tags; the click handler reads it back.
+  tag: 'airi_console_tab',
+  spacing: 6,
+  activity_height: 460,
+}

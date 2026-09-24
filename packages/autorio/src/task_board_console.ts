@@ -291,3 +291,62 @@ export function render_now_card(parent: LuaGuiElement, now: ConsoleNowCard) {
   for (const line of now.attention) wrapped(body, line.caption, inner, 'semibold_label').style.font_color = ui_constants.TONE_COLORS[line.tone]
   if (now.last.length > 0) wrapped(body, now.last, inner).style.font_color = ui_constants.TONE_COLORS[now.last_tone]
 }
+
+export function console_tab_of(value: unknown): ui_constants.ConsoleTab | undefined {
+  return value === 'now' || value === 'plan' || value === 'activity' ? value : undefined
+}
+
+/**
+ * The tab strip and one empty page per tab, in the left column. Pages are
+ * filled by the caller and never rebuilt; switching tabs only flips .visible,
+ * which is what keeps each page's scroll-panes where the player left them.
+ */
+export function render_console_tabs(parent: LuaGuiElement, selected: ui_constants.ConsoleTab) {
+  const tabs = ui_constants.CONSOLE_TABS
+  const bar = parent.add({ type: 'flow', name: tabs.bar, direction: 'horizontal' })
+  bar.style.horizontal_spacing = tabs.spacing
+  const width = math.floor((ui_constants.LEFT_COLUMN_WIDTH - (tabs.order.length - 1) * tabs.spacing) / tabs.order.length)
+  for (const tab of tabs.order) {
+    const button = bar.add({ type: 'button', caption: tabs.captions[tab], tooltip: tabs.tooltips[tab], tags: { [tabs.tag]: tab } }) as ButtonGuiElement
+    button.style.width = width
+    button.style.height = ui_constants.COMPACT_BUTTON_HEIGHT
+  }
+  const pages = {} as Record<ui_constants.ConsoleTab, LuaGuiElement>
+  for (const tab of tabs.order) {
+    const page = parent.add({ type: 'flow', name: tabs.pages[tab], direction: 'vertical' })
+    page.style.width = ui_constants.LEFT_COLUMN_WIDTH
+    page.style.vertical_spacing = ui_constants.COLUMN_SPACING
+    pages[tab] = page
+  }
+  apply_console_tab(parent, selected)
+  return pages
+}
+
+/** The page for a tab, or undefined when the console predates the tabs. */
+export function console_tab_page(parent: LuaGuiElement, tab: ui_constants.ConsoleTab) {
+  const page = parent[ui_constants.CONSOLE_TABS.pages[tab]]
+  return page?.valid ? page : undefined
+}
+
+/**
+ * Show the selected page and mark its button. Idempotent, so the routine
+ * refresh can call it; captions let a tab carry a count (ACTIVITY · 3 new).
+ */
+export function apply_console_tab(parent: LuaGuiElement, selected: ui_constants.ConsoleTab, captions?: Partial<Record<ui_constants.ConsoleTab, string>>) {
+  const tabs = ui_constants.CONSOLE_TABS
+  const bar = parent[tabs.bar]
+  if (!bar?.valid) return false
+  for (const button of bar.children) {
+    const tab = console_tab_of(button.tags[tabs.tag])
+    if (tab === undefined) continue
+    ;(button as ButtonGuiElement).toggled = tab === selected
+    const caption = captions?.[tab] ?? tabs.captions[tab]
+    if (button.caption !== caption) button.caption = caption
+  }
+  for (const tab of tabs.order) {
+    const page = console_tab_page(parent, tab)
+    if (page === undefined) return false
+    page.visible = tab === selected
+  }
+  return true
+}
