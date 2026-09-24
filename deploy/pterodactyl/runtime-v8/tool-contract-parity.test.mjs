@@ -183,10 +183,10 @@ test('submitPlan advertises exactly the fields its parser accepts', () => {
   const definition = runtime.plannerControlToolDefinitions
     .find(tool => tool.function.name === runtime.PLANNER_CONTROL_TOOL_NAME)
   const advertised = Object.keys(definition.function.parameters.properties).sort()
-  assert.deepEqual(advertised, ['chatMessage', 'checkpoint', 'currentStep', 'developmentMode', 'operations', 'plan', 'roadmap', 'roadmapNodeIds', 'semanticCompletion'])
+  assert.deepEqual(advertised, ['chatMessage', 'checkpoint', 'currentStep', 'developmentMode', 'goal', 'operations', 'plan', 'roadmap', 'roadmapNodeIds', 'semanticCompletion'])
   assert.equal(advertised.includes('project'), false)
 
-  const sample = { chatMessage: 'x', plan: [], currentStep: 0, operations: [], roadmap: [], roadmapNodeIds: [], developmentMode: 'vertical', checkpoint: {}, semanticCompletion: { stepId: 'step_1' } }
+  const sample = { chatMessage: 'x', plan: [], currentStep: 0, operations: [], roadmap: [], roadmapNodeIds: [], developmentMode: 'vertical', checkpoint: {}, semanticCompletion: { stepId: 'step_1' }, goal: { scope: 'finite', summary: 'x', doneWhen: [{ kind: 'rockets_launched', minimum: 1 }] } }
   for (const field of advertised) {
     assert.ok(Object.hasOwn(sample, field), `no parity sample for advertised field ${field}`)
     assert.doesNotThrow(() => runtime.plannerControlPayloadFromMessage({

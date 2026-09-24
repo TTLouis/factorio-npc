@@ -79,6 +79,27 @@ export class FakeFactorio {
     this.taskState = 'idle'
     this.queueLength = 0
     this.unknown = []
+    // Force-level facts for goal done_when conditions.
+    this.rocketsLaunched = 0
+    this.researched = new Set()
+    this.produced = {}
+    this.knownTechnologies = new Set(['automation', 'logistics', 'rocket-silo', 'electronics'])
+  }
+
+  // Mirrors autorio_tools.evaluate_condition for goal-level kinds.
+  evaluateGoalCondition(request) {
+    if (request.kind === 'rockets_launched') {
+      return { ok: true, kind: request.kind, satisfied: this.rocketsLaunched >= request.minimum, current: this.rocketsLaunched, minimum: request.minimum }
+    }
+    if (request.kind === 'research_completed') {
+      if (!this.knownTechnologies.has(request.technology)) return { ok: false, error: 'unknown_technology', technology: request.technology }
+      return { ok: true, kind: request.kind, satisfied: this.researched.has(request.technology), technology: request.technology }
+    }
+    if (request.kind === 'items_produced') {
+      const current = this.produced[request.item_name] ?? 0
+      return { ok: true, kind: request.kind, satisfied: current >= request.minimum, current, minimum: request.minimum }
+    }
+    return undefined
   }
 
   async command(text) {
@@ -101,6 +122,12 @@ export class FakeFactorio {
       return JSON.stringify(this.preflight(text))
     }
     if (text.includes('"evaluate_condition"') || text.includes("'evaluate_condition'")) {
+      const encoded = /helpers\.json_to_table\('((?:[^'\\]|\\.)*)'\)/.exec(text)?.[1]
+      if (encoded) {
+        const request = JSON.parse(encoded.replace(/\\(.)/g, '$1'))
+        const goalResult = this.evaluateGoalCondition(request)
+        if (goalResult) return JSON.stringify(goalResult)
+      }
       const item = /item_name\s*=\s*["']([^"']+)["']/.exec(text)?.[1]
         ?? /"item_name"\s*:\s*"([^"]+)"/.exec(text)?.[1]
       const minimum = Number(/minimum\s*=\s*(\d+)/.exec(text)?.[1] ?? /"minimum"\s*:\s*(\d+)/.exec(text)?.[1] ?? 1)

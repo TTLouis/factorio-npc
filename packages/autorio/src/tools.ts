@@ -52,6 +52,47 @@ function evaluate_runtime_condition(request: Record<string, unknown>) {
     return { ok: true, kind, satisfied: current >= (minimum as number), current, minimum, progress_known: false }
   }
 
+  // Force-level goal conditions. These answer "is the user's goal met?" rather
+  // than "is this step done?", and read game-wide state so they hold across a
+  // long goal and across Space Age surfaces.
+  if (kind === 'research_completed') {
+    const technology = request.technology
+    if (typeof technology !== 'string') return { ok: false, error: 'invalid_research_completed_condition' }
+    const tech = actor.force.technologies[technology]
+    if (!tech) return { ok: false, error: 'unknown_technology', technology }
+    return { ok: true, kind, satisfied: tech.researched, technology, progress_known: false }
+  }
+
+  if (kind === 'rockets_launched') {
+    const minimum = request.minimum
+    if (!positive_integer(minimum)) return { ok: false, error: 'invalid_rockets_launched_condition' }
+    const current = actor.force.rockets_launched
+    return { ok: true, kind, satisfied: current >= (minimum as number), current, minimum, progress_known: false }
+  }
+
+  if (kind === 'items_produced') {
+    const item_name = request.item_name
+    const minimum = request.minimum
+    if (typeof item_name !== 'string' || !positive_integer(minimum)) return { ok: false, error: 'invalid_items_produced_condition' }
+    if (!prototypes.item[item_name]) return { ok: false, error: 'unknown_item', item_name }
+    // Production statistics are per surface in 2.0; sum every surface so the
+    // count includes other planets and space platforms.
+    let current = 0
+    for (const [, surface] of game.surfaces) {
+      current += actor.force.get_item_production_statistics(surface).get_input_count(item_name) as number
+    }
+    return { ok: true, kind, satisfied: current >= (minimum as number), current, minimum, progress_known: false }
+  }
+
+  if (kind === 'space_location_unlocked') {
+    const name = request.name
+    if (typeof name !== 'string') return { ok: false, error: 'invalid_space_location_condition' }
+    if (!prototypes.space_location[name]) return { ok: false, error: 'unknown_space_location', name }
+    // typed-factorio declares this as void; the runtime returns a boolean.
+    const unlocked = actor.force.is_space_location_unlocked(name) as unknown as boolean
+    return { ok: true, kind, satisfied: unlocked === true, name, progress_known: false }
+  }
+
   if (kind === 'entity_exists' || kind === 'entity_state' || kind === 'entity_inventory_count') {
     const unit_number = request.unit_number
     if (!positive_integer(unit_number)) return { ok: false, error: 'invalid_exact_identity', stale: true }

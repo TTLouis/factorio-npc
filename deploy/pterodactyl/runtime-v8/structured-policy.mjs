@@ -709,6 +709,43 @@ export const plannerControlToolDefinitions = [{
           enum: ['vertical', 'horizontal', 'maintain', 'recover'],
           description: 'Dominant development direction of this authored slice relative to the current critical path. This describes the draft and does not override runtime truth or user priorities.',
         },
+        goal: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['scope', 'summary', 'doneWhen'],
+          description: 'Required on the FIRST plan of every goal: your structured understanding of what the player asked for. The harness shows it to the player in game and owns the completion check -- the goal is complete only when the game reports every doneWhen condition true, never because plan steps ran out. Omit it on later plans of the same goal.',
+          properties: {
+            scope: {
+              type: 'string',
+              enum: ['finite', 'long_horizon'],
+              description: 'finite: one plan of at most 30 steps completes the goal. long_horizon: needs several plan slices; you MUST also send roadmap (the Roadmap Shelf) on this same first plan.',
+            },
+            summary: { type: 'string', minLength: 1, maxLength: 400, description: 'One sentence restating the goal as you understood it, in the player\'s language.' },
+            doneWhen: {
+              type: 'array',
+              minItems: 1,
+              maxItems: 6,
+              description: 'Game-checkable conditions that together prove the goal is complete. Use exact Factorio internal names. Quantities are lower bounds.',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['kind'],
+                properties: {
+                  id: { type: 'string', maxLength: 60 },
+                  kind: {
+                    type: 'string',
+                    enum: ['research_completed', 'rockets_launched', 'items_produced', 'inventory_count', 'space_location_unlocked'],
+                    description: 'research_completed {technology}; rockets_launched {minimum}; items_produced {item_name, minimum} (force-wide total across all surfaces); inventory_count {item_name, minimum} (AIRI\'s own inventory); space_location_unlocked {name} (Space Age planets/locations).',
+                  },
+                  technology: { type: 'string', maxLength: 100 },
+                  item_name: { type: 'string', maxLength: 100 },
+                  name: { type: 'string', maxLength: 100 },
+                  minimum: { type: 'integer', minimum: 1 },
+                },
+              },
+            },
+          },
+        },
         // LOD 1 guidance (roadmap 2 / 3). Deliberately NOT an object with steps
         // or operations: a shelf node says what should eventually be true and
         // why, and the runtime re-derives realization status from verified
@@ -753,7 +790,7 @@ export function plannerControlPayloadFromMessage(message) {
   let args
   try { args = JSON.parse(rawArgs) }
   catch { throw new base.PolicyError('submitPlan arguments must be valid JSON') }
-  exactKeys(args, ['chatMessage', 'plan', 'currentStep', 'operations', 'checkpoint', 'semanticCompletion', 'roadmapNodeIds', 'developmentMode', 'roadmap'])
+  exactKeys(args, ['chatMessage', 'plan', 'currentStep', 'operations', 'checkpoint', 'semanticCompletion', 'roadmapNodeIds', 'developmentMode', 'roadmap', 'goal'])
   check(Array.isArray(args.plan), 'submitPlan.plan must be an array')
   check(Number.isSafeInteger(args.currentStep), 'submitPlan.currentStep must be an integer')
   check(Array.isArray(args.operations), 'submitPlan.operations must be an array')
@@ -776,6 +813,7 @@ export function plannerControlPayloadFromMessage(message) {
     ...(args.roadmapNodeIds !== undefined ? { roadmapNodeIds: args.roadmapNodeIds } : {}),
     ...(args.developmentMode !== undefined ? { developmentMode: args.developmentMode } : {}),
     ...(args.roadmap !== undefined ? { roadmap: args.roadmap } : {}),
+    ...(args.goal !== undefined ? { goal: args.goal } : {}),
   }
 }
 

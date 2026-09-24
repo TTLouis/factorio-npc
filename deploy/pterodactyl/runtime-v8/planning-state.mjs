@@ -19,6 +19,7 @@
 //     operations or into plan steps.
 
 import { completionContractSupported, sanitizeStepCompletionContract } from './step-completion.mjs'
+import { restoreGoalDefinition, sanitizeGoalDefinition } from './goal-definition.mjs'
 
 export const PLANNING_STATE_VERSION = 1
 
@@ -263,6 +264,10 @@ export const PLANNING_EVENT = Object.freeze({
   // Goal satisfaction is its OWN explicit event with its OWN evidence. No
   // amount of completed plans or reached frontiers produces it implicitly.
   GOAL_SATISFIED: 'GOAL_SATISFIED',
+  // The system's structured understanding of the goal (scope + game-checkable
+  // done_when conditions). Authored once by the Main LLM on the goal's first
+  // plan; only the user may replace it afterwards.
+  GOAL_DEFINED: 'GOAL_DEFINED',
 })
 
 const PLANNING_EVENT_TYPES = Object.freeze(Object.values(PLANNING_EVENT))
@@ -416,9 +421,11 @@ function sanitizeGoal(raw) {
         at: finiteNumber(raw.satisfaction.at) ?? 0,
       }
     : null
+  const definition = restoreGoalDefinition(raw.definition)
   return {
     goal_id: goalId,
     ...(satisfaction ? { satisfaction, satisfied_at: finiteNumber(raw.satisfied_at) ?? satisfaction.at } : {}),
+    ...(definition ? { definition } : {}),
     owner: text(raw.owner, 128) || 'unknown',
     objective: text(raw.objective, 1000),
     constraints: stringList(raw.constraints, { max: 24, maxLength: 300 }),
@@ -2298,6 +2305,29 @@ Object.assign(HANDLERS, {
    * a realized shelf node, not a reached frontier, and never a continuous
    * frontier. Jev and the planner are excluded by the source allowlist.
    */
+  [PLANNING_EVENT.GOAL_DEFINED](state, event, now) {
+    if (!state.goal || state.goal.status !== GOAL_STATUS.ACTIVE) return state
+    if (text(event.goal_id, 120) && text(event.goal_id, 120) !== state.goal.goal_id) return state
+    const source = text(event.source, 60)
+    const fromPlanner = source === 'main_planner'
+    if (!fromPlanner && !isUserAuthority(source)) return state
+    // The planner defines a goal once; redefinition is the user's call.
+    if (state.goal.definition && fromPlanner) return state
+    let definition
+    try { definition = sanitizeGoalDefinition(event.definition) }
+    catch { return state }
+    return {
+      ...state,
+      goal: {
+        ...state.goal,
+        definition: { ...definition, source, defined_at: now },
+        updated_at: now,
+      },
+      updated_at: now,
+      log: logEntry(state, { type: PLANNING_EVENT.GOAL_DEFINED, at: now, goal_id: state.goal.goal_id }),
+    }
+  },
+
   [PLANNING_EVENT.GOAL_SATISFIED](state, event, now) {
     if (!state.goal || state.goal.status !== GOAL_STATUS.ACTIVE) return state
     if (text(event.goal_id, 120) && text(event.goal_id, 120) !== state.goal.goal_id) return state

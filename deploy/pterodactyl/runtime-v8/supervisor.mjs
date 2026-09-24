@@ -29,6 +29,7 @@ import {
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { createSave, prepareGameConfig, prepareMods, prepareServerSettings, selectSave } from './game-files.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
+import { formatGoalUnderstanding } from './goal-definition.mjs'
 import { decisionProviderConfiguration, decisionProviderRequest, providerEndpoint, providerRequest } from './provider.mjs'
 import { configureNpcSession } from './supervisor-adapter.mjs'
 import { luaString } from './structured-policy.mjs'
@@ -1787,6 +1788,7 @@ export class Session {
   }
 
   onAgentActivity(event, data) {
+    if (event === 'goal.defined') this.announceGoalUnderstanding(data)
     // Real world progress ends a transient-failure streak.
     if ((event === 'operations.ack' || event === 'step.verified') && this.autoResume && !this.autoResume.timer) {
       this.autoResume = null
@@ -1957,6 +1959,20 @@ export class Session {
     if (!this.agent?.memory?.planningTrackerView) return undefined
     const key = typeof this.agent.activePlanKey === 'function' ? this.agent.activePlanKey() : `npc:${this.npcId}`
     return this.agent.memory.planningTrackerView(key)
+  }
+
+  // Show the player, in game, how the system understood their goal and which
+  // game-checked conditions will decide that it is done.
+  announceGoalUnderstanding(data) {
+    const lines = formatGoalUnderstanding(data?.definition, {
+      objective: data?.objective,
+      roadmap: data?.roadmap,
+    })
+    if (lines.length === 0) return
+    this.appendUiConversation?.('assistant', this.npcName || 'AIRI', lines.join('\n').replace(/\[\/?color[^\]]*\]/g, ''))
+    ;(async () => {
+      for (const line of lines) await this.printChat(line)
+    })().catch(error => this.log(`Unable to announce goal understanding: ${error instanceof Error ? error.message : String(error)}`))
   }
 
   // Resume a plan paused on a transient provider failure without a human.
@@ -2255,6 +2271,9 @@ export class Session {
         profile: this.config.profile,
         timeoutMs: this.config.providerTimeoutMs,
       }, messages, context),
+      // Production contract: every goal starts from a game-checkable goal
+      // definition that the player sees in game.
+      goalDefinitionPolicy: 'required',
       interactionDecisionProvider: jevDecisionProvider,
       steeringDecisionProvider: jevDecisionProvider,
       operationProjectionDecisionProvider: jevDecisionProvider,

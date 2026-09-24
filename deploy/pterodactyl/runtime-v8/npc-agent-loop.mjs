@@ -34,6 +34,7 @@ import {
   STEERING_PRESSURE_VOCABULARY,
 } from './planning-state.mjs'
 import { emptyJevHealth, recordJevHealth, summarizeJevHealth } from './jev-health.mjs'
+import { evaluateGoalDefinition, formatGoalProgress, GOAL_SCOPE, sanitizeGoalDefinition } from './goal-definition.mjs'
 import { RECOVERY_SEMANTIC_SCOPES, deterministicRecoveryRoute, parseRecoveryDecision, recoveryDecisionQuestions, recoveryFailureClassHint, validateRecoveryRoute } from './recovery-route.mjs'
 import {
   applyConditionObservation,
@@ -159,6 +160,8 @@ For a multi-step request, keep the plan stable enough that the harness can track
 Once a plan is COMMITTED its steps, their order and their completion meaning are frozen. Jev is outside plan-authoring and correctness authority. From that point you are fulfilling committed step checkpoints, not authoring them. Re-proposing different steps during ordinary continuation changes nothing; the committed plan is what runs. A committed plan is replaced only by an explicit user-approved revision, and a structural blocker or detected deadlock freezes it as BLOCKED and asks the user rather than silently replanning.
 
 Within [PLANNING_STATE], Shelf nodes are storage: they record intent and lineage, never operations and never plan steps. Do not compile a shelf node into steps on your own initiative.
+
+Every goal starts with a goal definition. On the FIRST plan of a goal, add goal to submitPlan: {scope, summary, doneWhen}. summary restates in one sentence what the player asked for; the player sees it in game as your understanding. doneWhen lists the game-checkable conditions that together prove the goal is complete (research_completed, rockets_launched, items_produced, inventory_count, space_location_unlocked) with exact Factorio internal names. The harness, not you, decides completion: it reads doneWhen from the game at the end of every plan slice, so finishing a plan's steps never completes a goal by itself, and you never need to claim the goal is done. Use scope "finite" only when one plan of at most 30 steps completes the goal; otherwise use "long_horizon" and send the roadmap shelf on that same first plan. Omit goal on later plans of the same goal.
 
 You author the shelf through the optional roadmap field on submitPlan: a short list of coarse nodes, each stating what should eventually be true for the goal and why it matters. Keep them at that altitude — a node is not a step, carries no operations, and never claims its own progress; the harness derives realization from verified results and strips anything executable. For a long-horizon goal, send the shelf on the first plan of that goal. Afterwards it only moves when verified world state has actually invalidated the guidance, so restate the nodes that still apply with their original ids (omitting a node marks it invalidated and keeps its lineage), and do not re-send an unchanged shelf just to restate a preference.
 
@@ -2149,6 +2152,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.decisionRequestSequence = 0
     this.decisionTraceSequence = 0
     this.jevHealth = emptyJevHealth()
+    // 'required': the first plan of every goal must carry a game-checkable goal
+    // definition (production). 'optional': accepted when present.
+    this.goalDefinitionPolicy = options.goalDefinitionPolicy === 'required' ? 'required' : 'optional'
+    this.goalDefinitionRetries = 0
+    this.goalDefinitionBlock = null
     this.planUpdateReason = 'request'
     this.requestLifecycle = 'new_goal'
     this.pendingInteractionAmendment = null
@@ -4510,6 +4518,81 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     })
   }
 
+  // The first plan of a goal must say what the goal IS in game-checkable
+  // terms (and bring a Roadmap Shelf when it is long-horizon). One corrective
+  // retry is allowed; a second failure stops and asks the player.
+  enforceGoalDefinition(plan) {
+    if (this.goalDefinitionPolicy !== 'required') return
+    if (!Array.isArray(plan.plan) || plan.plan.length === 0) return
+    const key = this.activePlanKey()
+    const planning = this.memory.planningState?.(key)
+    const legacy = this.memory.currentPlan?.(key)
+    const continuing = planning?.goal?.status === GOAL_STATUS.ACTIVE
+      && legacy?.goal_id === planning.goal.goal_id
+    if (continuing && planning.goal.definition) return
+    if (!plan.goalDefinition) {
+      throw this.goalDefinitionError(
+        'goal_definition_required',
+        'This is the first plan of this goal: add submitPlan.goal {scope, summary, doneWhen} stating how you understood the goal and which game-checkable conditions prove it is complete (for example {"kind":"rockets_launched","minimum":1} or {"kind":"research_completed","technology":"automation"}).',
+      )
+    }
+    const hasShelf = continuing && (planning.roadmap?.nodes?.length ?? 0) > 0
+    if (plan.goalDefinition.scope === GOAL_SCOPE.LONG_HORIZON && !(plan.roadmap?.length > 0) && !hasShelf) {
+      throw this.goalDefinitionError(
+        'long_horizon_goal_requires_roadmap',
+        'goal.scope is long_horizon, so this first plan must also send roadmap: the coarse Roadmap Shelf nodes (what must eventually be true, in dependency order) that later plan slices will refine.',
+      )
+    }
+    this.goalDefinitionRetries = 0
+  }
+
+  goalDefinitionError(code, reason) {
+    this.goalDefinitionRetries += 1
+    const error = new AgentLoopError(reason)
+    error.failureClass = 'plan_category'
+    error.code = code
+    if (this.goalDefinitionRetries > 1) {
+      this.goalDefinitionRetries = 0
+      this.goalDefinitionBlock = `I could not form a clear, game-checkable definition of this goal (${cleanMemoryText(reason, 300)}). Please restate the goal and what "done" means — for example "launch 1 rocket", "research automation", or "produce 1000 iron plates".`
+      error.details = { deterministic_no_retry: true }
+    }
+    return error
+  }
+
+  async blockedWithoutMutation(reason, failureClass) {
+    const goalBlock = this.goalDefinitionBlock
+    this.goalDefinitionBlock = null
+    if (goalBlock) {
+      const result = await super.blockedWithoutMutation(goalBlock, 'goal_definition_needed')
+      return { ...result, chatMessage: goalBlock }
+    }
+    return super.blockedWithoutMutation(reason, failureClass)
+  }
+
+  // The harness, not the plan, decides whether the user's goal is met: every
+  // done_when condition is read from the game. Records GOAL_SATISFIED on
+  // positive evidence only.
+  async evaluateGoalCompletion() {
+    const key = this.activePlanKey()
+    const definition = this.memory.goalDefinition?.(key)
+    if (!definition) return undefined
+    const evaluation = await evaluateGoalDefinition(definition, command => this.rcon.command(command))
+    await this.traceEvent('goal.evaluated', {
+      satisfied: evaluation.satisfied,
+      progress: formatGoalProgress(evaluation),
+      results: evaluation.results,
+    })
+    if (evaluation.satisfied && typeof this.memory.recordGoalSatisfaction === 'function') {
+      this.memory.recordGoalSatisfaction(key, {
+        source: 'runtime',
+        evidenceRefs: evaluation.results.map(result => `goal_condition/${result.id}/${result.current ?? 'true'}`),
+        rationale: 'goal_definition_conditions_satisfied',
+      })
+      await this.persistState()
+    }
+    return evaluation
+  }
+
   // Counts every Jev boundary's outcome independently of the decision trace
   // file, so a run whose Jev calls silently fall back is visible in the log,
   // the live Debug UI, and the request's terminal behavior-trace event.
@@ -4715,15 +4798,29 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // Callers already inside a planner turn pass allowContinuation: false so
   // this never starts a nested planner run.
   async settleCompletedStepState(completionState, { pendingAmendment, allowContinuation = true } = {}) {
-    const planningAfterCompletion = this.memory.planningState?.(this.activePlanKey())
+    let planningAfterCompletion = this.memory.planningState?.(this.activePlanKey())
     const reducerPlanAfterCompletion = planningAfterCompletion
       ? getActivePlanningPlan(planningAfterCompletion)
       : undefined
+    // A defined goal is complete only when the game says so. Check it at every
+    // finished plan slice; a finished slice is never proof on its own.
+    const goalDefinition = planningAfterCompletion?.goal?.definition
+    let goalEvaluation
+    if (goalDefinition
+      && !pendingAmendment
+      && completionState?.status === 'completed'
+      && planningAfterCompletion?.goal?.status === GOAL_STATUS.ACTIVE
+      && reducerPlanAfterCompletion?.status === PLAN_STATUS.COMPLETED) {
+      goalEvaluation = await this.evaluateGoalCompletion()
+      planningAfterCompletion = this.memory.planningState?.(this.activePlanKey())
+      const unverifiable = goalEvaluation?.results.filter(result => /^(unknown_|invalid_)/.test(result.error ?? '')) ?? []
+      if (unverifiable.length > 0) return this.pauseForUnverifiableGoal(unverifiable)
+    }
+    const goalUnmet = goalEvaluation !== undefined && !goalEvaluation.satisfied
     const boundedSliceCompleted = !pendingAmendment
       && completionState?.status === 'completed'
       && planningAfterCompletion?.goal?.status === 'active'
-      && Array.isArray(planningAfterCompletion?.roadmap?.nodes)
-      && planningAfterCompletion.roadmap.nodes.length > 0
+      && ((Array.isArray(planningAfterCompletion?.roadmap?.nodes) && planningAfterCompletion.roadmap.nodes.length > 0) || goalUnmet)
       && reducerPlanAfterCompletion?.status === PLAN_STATUS.COMPLETED
 
     if (boundedSliceCompleted && allowContinuation) {
@@ -4742,8 +4839,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       })
       this.reasoningTriggerSource = 'plan_slice_completed'
       try {
+        const unmet = goalEvaluation
+          ? ` The game reports ${formatGoalProgress(goalEvaluation)}; still unmet: ${goalEvaluation.results.filter(result => !result.satisfied).map(result => `${result.id}${result.current !== undefined ? ` (currently ${result.current})` : ''}`).join(', ')}.`
+          : ''
+        const next = (planningAfterCompletion?.roadmap?.nodes?.length ?? 0) > 0
+          ? 'Refine the next useful Roadmap Shelf node using [PLANNING_STATE]'
+          : 'Author the next plan slice that moves the world toward the unmet goal conditions'
         return await this.continueFromModMessage(
-          `[MOD] The current immutable plan slice is verified complete. The user goal remains active. Refine the next useful Roadmap Shelf node using [PLANNING_STATE]; do not treat plan completion as goal completion. Completed plan_id=${reducerPlanAfterCompletion.plan_id}.`,
+          `[MOD] The current immutable plan slice is verified complete. The user goal remains active.${unmet} ${next}; do not treat plan completion as goal completion. Completed plan_id=${reducerPlanAfterCompletion.plan_id}.`,
           'planning.slice_completion_continuation',
         )
       }
@@ -4756,7 +4859,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const reducerGoalSatisfied = planningAfterCompletion?.goal?.status === GOAL_STATUS.COMPLETED
     const hasLongHorizonRoadmap = Array.isArray(planningAfterCompletion?.roadmap?.nodes)
       && planningAfterCompletion.roadmap.nodes.length > 0
-    const legacyCompatibleCompletion = !planningAfterCompletion?.goal || !hasLongHorizonRoadmap
+    // A defined goal completes only through its game-checked conditions.
+    const legacyCompatibleCompletion = !goalDefinition
+      && (!planningAfterCompletion?.goal || !hasLongHorizonRoadmap)
     if (!pendingAmendment
       && completionState?.status === 'completed'
       && (reducerGoalSatisfied || legacyCompatibleCompletion)) {
@@ -4795,15 +4900,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         source: 'outcome_authority',
         route: 'deterministic_close',
       })
+      const completionMessage = goalEvaluation?.satisfied
+        ? `The requested goal is verified complete: the game reports ${formatGoalProgress(goalEvaluation)}.`
+        : 'The requested goal is verified complete.'
       await this.traceEvent('request.completed', {
-        chat_message: 'The requested goal is verified complete.',
+        chat_message: completionMessage,
         outcome: 'verified_complete',
         task_board: completedBoard,
         usage: this.traceRequest?.usage,
       })
       this.traceRequest = null
       return {
-        chatMessage: 'The requested goal is verified complete.',
+        chatMessage: completionMessage,
         plan: [],
         currentStep: 0,
         operations: [],
@@ -4817,7 +4925,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
     if (!pendingAmendment
       && completionState?.status === 'completed'
-      && hasLongHorizonRoadmap
+      && (hasLongHorizonRoadmap || goalDefinition)
       && allowContinuation
       && planningAfterCompletion?.goal?.status === GOAL_STATUS.ACTIVE) {
       await this.traceEvent('planner.wake', {
@@ -4837,6 +4945,31 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
     return undefined
+  }
+
+  // A done_when condition names something the game does not know (a typo'd
+  // technology or item). Rolling more slices can never satisfy it, so stop and
+  // ask the player instead of planning forever.
+  async pauseForUnverifiableGoal(unverifiable) {
+    const detail = unverifiable.map(result => `${result.id}: ${result.error}`).join(', ')
+    const chatMessage = `I cannot verify this goal's completion in game (${detail}). Please restate what "done" means so I can check it.`
+    const state = await this.pausePersistentPlan(`goal_definition_unverifiable: ${cleanMemoryText(detail, 200)}`)
+    await this.traceEvent('request.completed', {
+      chat_message: chatMessage,
+      outcome: 'goal_definition_unverifiable',
+      usage: this.traceRequest?.usage,
+    })
+    this.traceRequest = null
+    return {
+      chatMessage,
+      plan: [],
+      currentStep: 0,
+      operations: [],
+      epoch: this.epoch?.epoch,
+      actorId: this.epoch?.actor_id,
+      goalId: state?.goal_id,
+      goalStatus: 'paused',
+    }
   }
 
   async completed() {
@@ -5312,6 +5445,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw error
     }
     let checkpoint
+    let goalDefinition
     let roadmap
     let roadmapNodeIds
     let developmentMode
@@ -5327,6 +5461,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         // whole submission is rejected as an unexpected argument. `project` used
         // to be parsed by submitPlan and then die exactly here.
         if (Array.isArray(raw.roadmap)) roadmap = raw.roadmap
+        if (Object.prototype.hasOwnProperty.call(raw, 'goal')) {
+          try { goalDefinition = sanitizeGoalDefinition(raw.goal) }
+          catch (error) {
+            throw this.goalDefinitionError(error?.code ?? 'invalid_goal_definition', error instanceof Error ? error.message : String(error))
+          }
+        }
         if (Array.isArray(raw.roadmapNodeIds)) {
           roadmapNodeIds = Array.from(new Set(raw.roadmapNodeIds
             .filter(id => typeof id === 'string')
@@ -5367,7 +5507,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           }
           checkpoint = { ...checkpoint, source: 'planner_semantic_checkpoint' }
         }
-        if (checkpoint || semanticCompletion || roadmap || roadmapNodeIds || developmentMode
+        if (checkpoint || semanticCompletion || roadmap || roadmapNodeIds || developmentMode || goalDefinition
+          || Object.prototype.hasOwnProperty.call(raw, 'goal')
           || Object.prototype.hasOwnProperty.call(raw, 'roadmap')
           || Object.prototype.hasOwnProperty.call(raw, 'roadmapNodeIds')
           || Object.prototype.hasOwnProperty.call(raw, 'developmentMode')
@@ -5378,6 +5519,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             roadmap: _roadmap,
             roadmapNodeIds: _roadmapNodeIds,
             developmentMode: _developmentMode,
+            goal: _goal,
             ...base
           } = raw
           baseMessage = { ...message, content: JSON.stringify(base) }
@@ -5390,6 +5532,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (roadmap) plan.roadmap = roadmap
     if (roadmapNodeIds) plan.roadmapNodeIds = roadmapNodeIds
     if (developmentMode) plan.developmentMode = developmentMode
+    if (goalDefinition) plan.goalDefinition = goalDefinition
+    this.enforceGoalDefinition(plan)
     const normalizedPlan = normalizeCanonicalPlan(plan.plan, plan.currentStep)
     plan.plan = normalizedPlan.plan
     plan.currentStep = normalizedPlan.currentStep
@@ -6328,6 +6472,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           now: Date.now(),
           reason: this.reasoningTriggerSource ?? this.planUpdateReason ?? 'planner_submission',
         })
+      }
+      if (plan.goalDefinition && typeof this.memory.defineGoal === 'function'
+        && !this.memory.goalDefinition?.(this.requestInfo.memoryKey)) {
+        const definition = this.memory.defineGoal(this.requestInfo.memoryKey, plan.goalDefinition)
+        if (definition) {
+          const planning = this.memory.planningState?.(this.requestInfo.memoryKey)
+          await this.traceEvent('goal.defined', {
+            goal_id: planning?.goal?.goal_id,
+            objective: planning?.goal?.objective,
+            definition,
+            roadmap: (planning?.roadmap?.nodes ?? []).slice(0, 8).map(node => ({ id: node.id, intent: node.intent })),
+          })
+        }
       }
       stateResult = this.memory.reconcileTaskBoard?.(this.requestInfo.memoryKey, previousBoard, durablePlan, stateResult, {
         // A committed suffix is immutable. Runtime recovery re-observes and

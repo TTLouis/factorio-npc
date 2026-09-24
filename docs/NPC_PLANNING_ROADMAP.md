@@ -45,6 +45,24 @@ The durable planning model has three semantic layers:
 
 The shelf is not abandoned work. It is the guide for subsequent planning rounds.
 
+### 1.2.1 Goal definition: the harness owns goal completion
+
+In project-management terms the three layers are rolling-wave planning: the goal is decomposed into work packages (committed plan slices), near-term work is detailed while later work stays coarse on the shelf, and each slice is progressively elaborated from verified results.
+
+The rolling wave needs a fixed end condition. On the first plan of every goal, the Main LLM interprets the user's words into a **goal definition** (`submitPlan.goal`):
+
+- `scope`: `finite` (one plan of at most 30 steps completes it) or `long_horizon` (several slices; the first plan must also send the Roadmap Shelf);
+- `summary`: one sentence restating the goal as understood;
+- `doneWhen`: game-checkable conditions — `research_completed`, `rockets_launched`, `items_produced` (force-wide, summed across every surface), `inventory_count`, `space_location_unlocked`.
+
+The harness validates the definition (one corrective retry, then it stops and asks the player), stores it on the reducer goal (`GOAL_DEFINED`; the planner defines once, only the user may redefine), and prints it in game as the system's understanding of the goal.
+
+Completion then belongs to the harness: at the end of every plan slice it reads each `doneWhen` condition from the game through `autorio_tools.evaluate_condition`. All met → `GOAL_SATISFIED` with runtime evidence. Any unmet → the next slice, with the unmet conditions named to the planner. Finishing a plan's steps never completes a defined goal by itself, and a goal with unmet conditions is not retired when a plan completes. A condition the game cannot recognise (unknown technology/item/location) pauses the goal and asks the player rather than rolling slices forever.
+
+The conditions are force-level facts on purpose, so the same contract carries to Space Age (other planets, space platforms) without base-game assumptions.
+
+Production runs with `goalDefinitionPolicy: 'required'`; direct constructions of the loop default to `optional` and accept a definition when present.
+
 ### 1.3 Jev is a cognitive coprocessor, not a correctness reviewer
 
 Jev is outside the authoritative correctness path.

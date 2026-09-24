@@ -819,10 +819,12 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const state = key ? this.planByNpc.get(key) : undefined
     if (!state || state.status !== 'completed') return state
     const planning = this.planningByNpc.get(key)
-    const longHorizonGoalStillActive = planning?.goal?.status === GOAL_STATUS.ACTIVE
-      && Array.isArray(planning?.roadmap?.nodes)
-      && planning.roadmap.nodes.length > 0
-    if (longHorizonGoalStillActive) return state
+    // A goal with a shelf, or with game-checked done_when conditions that are
+    // not yet met, is still live after one of its plans completes.
+    const goalStillActive = planning?.goal?.status === GOAL_STATUS.ACTIVE
+      && ((Array.isArray(planning?.roadmap?.nodes) && planning.roadmap.nodes.length > 0)
+        || Boolean(planning.goal.definition))
+    if (goalStillActive) return state
     this.planByNpc.delete(key)
     // The current slot is retired only when there is no active long-horizon
     // reducer goal. Completing one immutable slice must not discard its shelf.
@@ -1066,6 +1068,26 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       rationale: rationale ?? (declaredBy ? `declared_by:${declaredBy}` : undefined),
     })
     return after
+  }
+
+  // The system's structured understanding of the active goal. Returns the
+  // stored definition, or undefined when the reducer refused it.
+  defineGoal(key, definition, { source = 'main_planner', now = Date.now() } = {}) {
+    if (!key) return undefined
+    const before = this.planningByNpc.get(key)
+    if (!before?.goal) return undefined
+    const after = this.dispatchPlanningEvent(key, {
+      type: PLANNING_EVENT.GOAL_DEFINED,
+      now,
+      source,
+      goal_id: before.goal.goal_id,
+      definition,
+    })
+    return after?.goal?.definition
+  }
+
+  goalDefinition(key) {
+    return key ? this.planningByNpc.get(key)?.goal?.definition : undefined
   }
 
   applyOutcomeAuthority(key, candidate, options = {}) {
