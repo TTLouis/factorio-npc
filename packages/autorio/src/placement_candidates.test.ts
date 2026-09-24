@@ -256,7 +256,6 @@ describe('placement candidates', () => {
       mining_drill_radius: undefined,
       resource_categories: undefined,
       radius_visualisation_specification: undefined,
-      get_mining_drill_radius: () => undefined,
     }
     const strictPrototype = new Proxy(fields, {
       get(target, key) {

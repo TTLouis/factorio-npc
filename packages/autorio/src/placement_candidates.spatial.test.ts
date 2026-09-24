@@ -139,7 +139,7 @@ describe('placement candidate spatial behavior', () => {
         type: 'mining-drill',
         tile_width: 1,
         tile_height: 1,
-        get_mining_drill_radius: () => 0.75,
+        mining_drill_radius: 0.75,
         radius_visualisation_specification: { offset: { x: 0, y: -2 } },
         resource_categories: { ore: true },
       },
