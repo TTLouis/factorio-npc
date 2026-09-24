@@ -53,6 +53,7 @@ import {
   sanitizeStepCompletionContract,
 } from './step-completion.mjs'
 import {
+  isCompletionProofTool,
   isObservationToolName,
   observationToolFamily,
   isPlannerControlToolName,
@@ -5738,6 +5739,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  completionProofReadsEligible() {
+    const key = this.activePlanKey()
+    const state = this.memory.planByNpc?.get?.(key) ?? this.memory.currentPlan?.(key)
+    const board = state?.task_board
+    const step = Number.isSafeInteger(board?.active_index) ? board.steps?.[board.active_index] : undefined
+    return state?.status === 'active' && step?.status === 'active'
+  }
+
   observationDecisionPressureBudget() {
     if (Number.isSafeInteger(this.observationBudgetRemaining)) return Math.max(0, Math.min(8, this.observationBudgetRemaining))
     return super.observationDecisionPressureBudget()
@@ -5778,16 +5787,26 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let freshSlots = Number.isSafeInteger(this.observationBudgetRemaining)
       ? Math.max(0, this.observationBudgetRemaining)
       : Number.POSITIVE_INFINITY
+    // A step cannot close without authoritative evidence, so reads that can
+    // prove the active step are admitted even when Jev's budget or relevance
+    // would defer them. They still count against the budget below, so an
+    // exhausted budget forces the next decision without tools.
+    const proofEligible = this.completionProofReadsEligible()
+    const proofAdmitted = []
 
     for (let index = 0; index < prepared.length; index++) {
       const fresh = cachedPrepared[index] !== true && staticCachedPrepared[index] !== true
-      const family = observationToolFamily(prepared[index]?.tool?.function?.name)
+      const name = prepared[index]?.tool?.function?.name
+      const family = observationToolFamily(name)
       const relevant = !fresh || selectedObservationFamilies === null || selectedObservationFamilies.has(family)
-      if (relevant && (!fresh || freshSlots > 0)) {
+      const withinJev = relevant && (!fresh || freshSlots > 0)
+      const proof = fresh && !withinJev && proofEligible && isCompletionProofTool(name)
+      if (withinJev || proof) {
         admittedPrepared.push(prepared[index])
         admittedCached.push(cachedPrepared[index])
         admittedStaticCached.push(staticCachedPrepared[index])
-        if (fresh && Number.isFinite(freshSlots)) freshSlots--
+        if (proof) proofAdmitted.push(name)
+        else if (fresh && Number.isFinite(freshSlots)) freshSlots--
       }
       else {
         deferredPrepared.push(prepared[index])
@@ -5809,6 +5828,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           ...deferredPrepared.map(entry => entry.tool.function.name),
           ...rawDeferredTools.map(tool => tool?.function?.name).filter(Boolean),
         ],
+      })
+    }
+
+    if (proofAdmitted.length > 0) {
+      await this.traceEvent('observation.completion_proof_admitted', {
+        tools: proofAdmitted,
+        budget_remaining_before: Number.isSafeInteger(this.observationBudgetRemaining) ? this.observationBudgetRemaining : undefined,
+        selected_families: selectedObservationFamilies ? [...selectedObservationFamilies] : undefined,
       })
     }
 

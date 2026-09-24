@@ -902,6 +902,20 @@ const OBSERVATION_TOOL_FAMILY = Object.freeze({
   inspectConstructionIntent: 'construction_state',
 })
 
+// Reads of current authoritative state that can prove an active step's
+// result. The harness admits them outside Jev's observation budget and family
+// relevance, because it refuses a completion claim without such evidence.
+// Planning, discovery, and static-knowledge reads are not included.
+const COMPLETION_PROOF_TOOLS = Object.freeze(new Set([
+  'getActorStatus',
+  'getTaskStatus',
+  'getCraftingStatus',
+  'getInventoryItems',
+  'getEquipmentStatus',
+  'getEntityStatus',
+  'getResearchStatus',
+]))
+
 const OBSERVATION_TOOL_FAMILIES = Object.freeze([
   'runtime_status',
   'inventory_equipment',
@@ -939,6 +953,10 @@ export function observationToolFamily(name) {
 
 export function observationToolFamilyCatalog() {
   return { ...OBSERVATION_TOOL_FAMILY }
+}
+
+export function isCompletionProofTool(name) {
+  return COMPLETION_PROOF_TOOLS.has(name)
 }
 
 export function isObservationToolName(name) {
