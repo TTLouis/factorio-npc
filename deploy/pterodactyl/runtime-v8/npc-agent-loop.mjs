@@ -176,7 +176,7 @@ Once a plan is COMMITTED its steps, their order and their completion meaning are
 
 Within [PLANNING_STATE], Shelf nodes are storage: they record intent and lineage, never operations and never plan steps. Do not compile a shelf node into steps on your own initiative.
 
-Every goal starts with a goal definition. On the FIRST plan of a goal, add goal to submitPlan: {scope, summary, doneWhen}. summary restates in one sentence what the player asked for; the player sees it in game as your understanding. doneWhen lists the game-checkable conditions that together prove the goal is complete (research_completed, rockets_launched, items_produced, inventory_count, space_location_unlocked) with exact Factorio internal names. The harness, not you, decides completion: it reads doneWhen from the game at the end of every plan slice, so finishing a plan's steps never completes a goal by itself, and you never need to claim the goal is done. Use scope "finite" only when one plan of at most 30 steps completes the goal; otherwise use "long_horizon" and send the roadmap shelf on that same first plan. Omit goal on later plans of the same goal.
+Every goal starts with a goal definition. On the FIRST plan of a goal, add goal to submitPlan: {scope, summary, doneWhen}. summary restates in one sentence what the player asked for; the player sees it in game as your understanding. doneWhen lists the game-checkable conditions that together prove the goal is complete, each with exactly these fields and exact Factorio internal names: {"kind":"inventory_count","item_name":"stone-furnace","minimum":1}, {"kind":"items_produced","item_name":"iron-plate","minimum":100}, {"kind":"research_completed","technology":"automation"}, {"kind":"rockets_launched","minimum":1}, {"kind":"space_location_unlocked","name":"vulcanus"}. inventory_count is what AIRI holds when the goal ends, after crafting consumed its ingredients. The harness, not you, decides completion: it reads doneWhen from the game at the end of every plan slice, so finishing a plan's steps never completes a goal by itself, and you never need to claim the goal is done. Use scope "finite" only when one plan of at most 30 steps completes the goal; otherwise use "long_horizon" and send the roadmap shelf on that same first plan. Omit goal on later plans of the same goal.
 
 You author the shelf through the optional roadmap field on submitPlan: a short list of coarse nodes, each stating what should eventually be true for the goal and why it matters. Keep them at that altitude — a node is not a step, carries no operations, and never claims its own progress; the harness derives realization from verified results and strips anything executable. For a long-horizon goal, send the shelf on the first plan of that goal. Afterwards it only moves when verified world state has actually invalidated the guidance, so restate the nodes that still apply with their original ids (omitting a node marks it invalidated and keeps its lineage), and do not re-send an unchanged shelf just to restate a preference.
 
@@ -4834,7 +4834,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     await this.recordGoalEvaluationSatisfied(evaluation)
     this.clearActionOmissionRecovery()
     this.active = false
-    const completedBoard = visibleTaskBoard(reduced?.state?.task_board ?? previousState?.task_board)
+    // The legacy plan is completed and retired; its board is re-projected from
+    // the reducer plan, whose remaining steps the met goal made moot.
+    const completedBoard = { ...visibleTaskBoard(reduced?.state?.task_board ?? previousState?.task_board), status: 'completed' }
     const chatMessage = `The requested goal is verified complete: the game reports ${formatGoalProgress(evaluation)}.`
     await this.traceEvent('outcome.validated', {
       kind: 'verified_complete',
