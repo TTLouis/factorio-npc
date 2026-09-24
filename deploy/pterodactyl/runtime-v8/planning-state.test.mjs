@@ -33,6 +33,7 @@ import {
   steeringRecord,
   serializePlanningState,
   SHELF_NODE_STATUS,
+  MAX_RETAINED_PLANS,
 } from './planning-state.mjs'
 
 // --- fixtures ---------------------------------------------------------------
@@ -1750,4 +1751,26 @@ test('a plan completion boundary is where steering and the next shelf round meet
   assert.equal(state.steering.history[0].boundary, STEERING_BOUNDARY.PLAN_COMPLETED)
   // Shelf refinement and steering answer different questions at the same boundary.
   assert.equal(nearestShelfRefinementTarget(state).node_id, 'node_science')
+})
+
+test('a long goal keeps its active plan and newest history across the plan cap and a restart', () => {
+  // A rocket-length goal commits far more plan slices than the retention cap.
+  let state = shelved(goalState())
+  const total = MAX_RETAINED_PLANS + 16
+  for (let index = 0; index < total; index++) state = drafted(state, { now: 2000 + index })
+  state = committed(state, { now: 9000 })
+
+  const active = getActivePlan(state)
+  assert.ok(active, 'the newest plan stays active')
+  assert.equal(state.plans.length, MAX_RETAINED_PLANS)
+  assert.equal(state.plans.at(-1).plan_id, active.plan_id)
+
+  const restored = restorePlanningState(JSON.parse(JSON.stringify(serializePlanningState(state))))
+  assert.equal(restored.active_plan_id, active.plan_id, 'restart must not drop the active plan')
+  assert.equal(getActivePlan(restored).status, PLAN_STATUS.COMMITTED)
+
+  // Rolling logs keep the newest entries rather than freezing at the oldest.
+  assert.ok(state.log.length <= 256)
+  assert.equal(state.log.at(-1).type, PLANNING_EVENT.PLAN_COMMITTED)
+  assert.equal(restored.log.at(-1).type, PLANNING_EVENT.PLAN_COMMITTED)
 })

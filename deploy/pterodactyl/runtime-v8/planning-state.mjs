@@ -381,6 +381,27 @@ function boundedList(value, max) {
   return Array.isArray(value) ? value.slice(0, max) : []
 }
 
+// Rolling histories keep the most RECENT entries. boundedList keeps the oldest,
+// which silently froze every rolling log once it filled and, on restore, dropped
+// the newest (active) plan of any goal that ran past the plan cap.
+function recentList(value, max) {
+  return Array.isArray(value) ? value.slice(-max) : []
+}
+
+// A long goal (e.g. a rocket launch) commits many plan slices. Keep a bounded
+// recent window, never dropping the active plan; lineage lookups of pruned
+// plans already resolve to undefined.
+export const MAX_RETAINED_PLANS = 64
+
+function retainPlans(plans, activePlanId) {
+  if (!Array.isArray(plans)) return []
+  if (plans.length <= MAX_RETAINED_PLANS) return plans
+  const recent = plans.slice(-MAX_RETAINED_PLANS)
+  if (!activePlanId || recent.some(plan => plan?.plan_id === activePlanId)) return recent
+  const active = plans.find(plan => plan?.plan_id === activePlanId)
+  return active ? [active, ...recent.slice(1)] : recent
+}
+
 // --- sanitizers ------------------------------------------------------------
 
 function sanitizeGoal(raw) {
@@ -602,7 +623,7 @@ function nextSequence(state) {
 }
 
 function logEntry(state, entry) {
-  return [...boundedList(state.log, 255), entry].slice(-256)
+  return [...recentList(state.log, 255), entry]
 }
 
 function withPlan(state, planId, updater) {
@@ -1117,7 +1138,7 @@ function withStatus(plan, status, { now, reason }) {
     ...plan,
     status,
     updated_at: now,
-    lifecycle: [...boundedList(plan.lifecycle, 63), { status, at: now, reason: text(reason, 200) }].slice(-64),
+    lifecycle: [...recentList(plan.lifecycle, 63), { status, at: now, reason: text(reason, 200) }],
   }
 }
 
@@ -1647,7 +1668,7 @@ Object.assign(HANDLERS, {
       ...state,
       sequence,
       roadmap,
-      roadmap_history: [...boundedList(state.roadmap_history, 31), ...(state.roadmap ? [state.roadmap] : [])].slice(-32),
+      roadmap_history: [...recentList(state.roadmap_history, 31), ...(state.roadmap ? [state.roadmap] : [])].slice(-32),
       updated_at: now,
       log: logEntry(state, {
         type: PLANNING_EVENT.ROADMAP_REVISED,
@@ -1764,7 +1785,7 @@ Object.assign(HANDLERS, {
       authority: source,
       sequence: (Number.isSafeInteger(record?.sequence) ? record.sequence : 0) + 1,
       updated_at: now,
-      history: [...boundedList(record?.history, 31), entry].slice(-32),
+      history: [...recentList(record?.history, 31), entry],
     }
 
     return {
@@ -1841,7 +1862,7 @@ Object.assign(HANDLERS, {
     return {
       ...state,
       sequence,
-      plans: [...plans, plan],
+      plans: retainPlans([...plans, plan], plan.plan_id),
       active_plan_id: plan.plan_id,
       updated_at: now,
       log: logEntry(state, { type: PLANNING_EVENT.DRAFT_CREATED, at: now, plan_id: plan.plan_id }),
@@ -2223,7 +2244,7 @@ Object.assign(HANDLERS, {
     return withReasoningReset({
       ...state,
       sequence,
-      plans: [...plans, successor],
+      plans: retainPlans([...plans, successor], successor.plan_id),
       active_plan_id: successor.plan_id,
       updated_at: now,
       log: logEntry(state, {
@@ -2386,7 +2407,7 @@ function restorePlan(raw) {
     },
     advisory: clone(raw.advisory) ?? { planner_focus_step_id: null, planner_focus_at: null, steering_note: null },
     carried_forward_evidence: stringList(raw.carried_forward_evidence, { max: 64, maxLength: 200 }),
-    lifecycle: boundedList(raw.lifecycle, 64).map(item => clone(item)),
+    lifecycle: recentList(raw.lifecycle, 64).map(item => clone(item)),
   }
   if (raw.runtime_validation) plan.runtime_validation = clone(raw.runtime_validation)
   if (stepIds.size !== steps.length) return undefined
@@ -2467,7 +2488,7 @@ function restoreSteering(raw) {
     authority: text(raw.authority, 60) || null,
     sequence: Number.isSafeInteger(raw.sequence) && raw.sequence > 0 ? raw.sequence : 1,
     updated_at: finiteNumber(raw.updated_at) ?? 0,
-    history: boundedList(raw.history, 32)
+    history: recentList(raw.history, 32)
       .filter(entry => entry && typeof entry === 'object' && DEVELOPMENT_MODES.includes(entry.mode))
       .map(entry => ({
         mode: entry.mode,
@@ -2486,14 +2507,14 @@ export function restorePlanningState(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return empty
   const goal = sanitizeGoal(raw.goal)
   if (!goal) return empty
-  const plans = boundedList(raw.plans, 64).map(restorePlan).filter(Boolean)
   const activePlanId = text(raw.active_plan_id, 200)
+  const plans = retainPlans(Array.isArray(raw.plans) ? raw.plans : [], activePlanId).map(restorePlan).filter(Boolean)
   return {
     version: PLANNING_STATE_VERSION,
     sequence: Number.isSafeInteger(raw.sequence) ? raw.sequence : plans.length,
     goal,
     roadmap: restoreRoadmap(raw.roadmap),
-    roadmap_history: boundedList(raw.roadmap_history, 32).map(restoreRoadmap).filter(Boolean),
+    roadmap_history: recentList(raw.roadmap_history, 32).map(restoreRoadmap).filter(Boolean),
     plans,
     active_plan_id: plans.some(plan => plan.plan_id === activePlanId) ? activePlanId : null,
     steering: restoreSteering(raw.steering),
@@ -2509,6 +2530,6 @@ export function restorePlanningState(raw) {
           reason: text(raw.last_reasoning_reset.reason, 200) || null,
         }
       : null,
-    log: boundedList(raw.log, 256).map(item => clone(item)),
+    log: recentList(raw.log, 256).map(item => clone(item)),
   }
 }
