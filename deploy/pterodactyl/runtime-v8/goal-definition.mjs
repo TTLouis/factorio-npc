@@ -44,7 +44,11 @@ function fail(code, message) {
   throw new GoalDefinitionError(code, message)
 }
 
-function prototypeName(value, field, kind) {
+function prototypeName(value, field, kind, raw) {
+  if (value === undefined) {
+    const present = Object.keys(raw ?? {}).filter(key => key !== 'kind' && key !== 'id')
+    fail('invalid_goal_condition', `goal.doneWhen ${kind} needs the field "${field}"${present.length > 0 ? `; it has ${present.map(key => `"${key}"`).join(', ')}` : ''}`)
+  }
   if (typeof value !== 'string' || !NAME.test(value)) {
     fail('invalid_goal_condition', `goal.doneWhen ${kind}.${field} must be an exact Factorio internal name (lowercase, e.g. "automation" or "iron-plate")`)
   }
@@ -65,10 +69,10 @@ function sanitizeCondition(raw, index) {
     fail('invalid_goal_condition', `goal.doneWhen kind must be one of ${GOAL_CONDITION_KINDS.join(', ')}`)
   }
   const id = typeof raw.id === 'string' && /^[A-Za-z0-9_.-]{1,60}$/.test(raw.id) ? raw.id : `done_${index + 1}`
-  if (kind === 'research_completed') return { id, kind, technology: prototypeName(raw.technology, 'technology', kind) }
+  if (kind === 'research_completed') return { id, kind, technology: prototypeName(raw.technology, 'technology', kind, raw) }
   if (kind === 'rockets_launched') return { id, kind, minimum: minimum(raw.minimum, kind) }
-  if (kind === 'space_location_unlocked') return { id, kind, name: prototypeName(raw.name, 'name', kind) }
-  return { id, kind, item_name: prototypeName(raw.item_name, 'item_name', kind), minimum: minimum(raw.minimum, kind) }
+  if (kind === 'space_location_unlocked') return { id, kind, name: prototypeName(raw.name, 'name', kind, raw) }
+  return { id, kind, item_name: prototypeName(raw.item_name, 'item_name', kind, raw), minimum: minimum(raw.minimum, kind) }
 }
 
 // Validates the planner-authored `goal` object from submitPlan. Throws a

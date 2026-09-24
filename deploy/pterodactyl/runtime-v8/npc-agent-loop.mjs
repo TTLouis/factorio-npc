@@ -188,6 +188,8 @@ For the active Plan Tracker step, you may add one optional root field named chec
 
 For a prose-only active step that intentionally has no deterministic checkpoint, you may explicitly close that semantic step with semanticCompletion: {"stepId":"<exact active step id>","rationale":"..."}. Use the stable active step id from [PLANNING_STATE]. The harness accepts this only when the id is still current, the step has no deterministic completion contract, and recent authoritative runtime evidence or a fresh live observation grounds your judgment. Never use semanticCompletion to bypass an unmet deterministic checkpoint. You may pair a valid semanticCompletion with operations for the newly-active next step; the harness advances the semantic step first, then validates those operations normally. Keeping the same plan and moving currentStep exactly one step forward with operations for that next step is read as the same claim for the active step, under the same checks.
 
+Write chatMessage and plan steps in the language of the player's message.
+
 Plan entries must represent goal-bearing Factorio work or verification. Do not add terminal lifecycle/meta steps such as "Stop", "Done", "Finish", or "Report completion"; stopping after the verified goal is represented by returning plan: [], currentStep: 0, operations: [].
 
 An empty operations array normally means no new Autorio world action will happen after your reply. Never claim that a finite action is continuing when neither a new operation nor a live persistent runtime mode exists. Persistent controllers such as follow are different: if a read-only status tool proves the controller is active, healthy, and live, operations: [] may accurately describe that background mode without submitting a duplicate operation. When the whole requested goal is actually verified complete, return plan: [], currentStep: 0, operations: [], and say it is complete.
@@ -2189,6 +2191,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // definition (production). 'optional': accepted when present.
     this.goalDefinitionPolicy = options.goalDefinitionPolicy === 'required' ? 'required' : 'optional'
     this.goalDefinitionRetries = 0
+    this.lastGoalDefinitionError = null
     this.goalDefinitionBlock = null
     // Jev's blind reading of the current new goal (see goal-reading.mjs).
     this.goalReading = null
@@ -4686,6 +4689,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       )
     }
     this.goalDefinitionRetries = 0
+    this.lastGoalDefinitionError = null
     this.challengeGoalDefinition(plan.goalDefinition)
   }
 
@@ -4723,8 +4727,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const error = new AgentLoopError(reason)
     error.failureClass = 'plan_category'
     error.code = code
-    if (this.goalDefinitionRetries > 1) {
+    // A repeated mistake stops at once; a model that fixes one different
+    // mistake per retry is making progress and gets up to two corrections.
+    const repeated = this.lastGoalDefinitionError === reason
+    this.lastGoalDefinitionError = reason
+    if (repeated || this.goalDefinitionRetries > 2) {
       this.goalDefinitionRetries = 0
+      this.lastGoalDefinitionError = null
       this.goalDefinitionBlock = `I could not form a clear, game-checkable definition of this goal (${cleanMemoryText(reason, 300)}). Please restate the goal and what "done" means — for example "launch 1 rocket", "research automation", or "produce 1000 iron plates".`
       error.details = { deterministic_no_retry: true }
     }
@@ -4734,11 +4743,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async blockedWithoutMutation(reason, failureClass) {
     const goalBlock = this.goalDefinitionBlock
     this.goalDefinitionBlock = null
-    if (goalBlock) {
-      const result = await super.blockedWithoutMutation(goalBlock, 'goal_definition_needed')
-      return { ...result, chatMessage: goalBlock }
+    const result = goalBlock
+      ? { ...(await super.blockedWithoutMutation(goalBlock, 'goal_definition_needed')), chatMessage: goalBlock }
+      : await super.blockedWithoutMutation(reason, failureClass)
+    // This ending asks the player instead of acting; without a terminal event
+    // the trace reads as a stalled request.
+    if (this.traceRequest) {
+      await this.traceEvent('request.completed', {
+        outcome: 'blocked_before_mutation',
+        chat_message: result.chatMessage,
+        blocker: result.blocker,
+        usage: this.traceRequest.usage,
+      })
+      this.traceRequest = null
     }
-    return super.blockedWithoutMutation(reason, failureClass)
+    return result
   }
 
   // The harness, not the plan, decides whether the user's goal is met: every
