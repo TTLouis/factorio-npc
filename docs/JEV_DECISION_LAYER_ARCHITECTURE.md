@@ -848,8 +848,8 @@ DECISION_PROVIDER_API_URL=https://api.typesafe.ai/v1/systemone
 DECISION_PROVIDER_MODEL=jev-latest
 DECISION_PROVIDER_TIMEOUT_MS=5000
 MAX_DECISION_PROVIDER_REQUESTS_PER_HOUR=180
-DECISION_PROVIDER_MAX_INPUT_CHARS=16000
-DECISION_PROVIDER_MAX_QUESTIONS=16
+DECISION_PROVIDER_MAX_INPUT_CHARS=48000
+DECISION_PROVIDER_MAX_QUESTIONS=24
 ```
 
 The API key is runtime-only. The URL/model/limits are also intentionally environment-owned during the experiment rather than being written into the compatibility `airi-config.json`.

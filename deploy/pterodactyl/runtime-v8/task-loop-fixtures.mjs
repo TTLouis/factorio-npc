@@ -6,6 +6,40 @@
 // TypeSafe decision provider produces (one `choice`/`score`/`noul` per
 // question, never the retired aggregate `multi_choice` shape).
 
+import assert from 'node:assert/strict'
+import { after } from 'node:test'
+import { DECISION_PROVIDER_DEFAULTS, normalizeDecisionProviderRequest } from './provider.mjs'
+
+// Fake decision providers bypass the real TypeSafe adapter, so a request the
+// live adapter would reject still "works" in unit tests. That is how every live
+// Jev call fell back on 2026-09-24 while CI stayed green. Every fixture Jev
+// therefore runs the real request normalizer, with production limits, on the
+// exact state/questions the runtime built. The loop swallows provider errors
+// into fallbacks, so violations are also collected and fail the file.
+const LIVE_DECISION_CONTRACT = Object.freeze({ ...DECISION_PROVIDER_DEFAULTS, key: 'fixture-contract-check' })
+export const jevContractLog = []
+
+after(() => {
+  const violations = jevContractLog.filter(entry => !entry.ok)
+  assert.deepEqual(violations, [], 'a Jev boundary built a request the live TypeSafe adapter rejects')
+})
+
+export function contractCheckedJev(provider) {
+  const checked = async (state, questions, context) => {
+    const keys = Object.keys(questions ?? {})
+    try {
+      normalizeDecisionProviderRequest(LIVE_DECISION_CONTRACT, state, questions)
+      jevContractLog.push({ keys, ok: true })
+    }
+    catch (error) {
+      jevContractLog.push({ keys, ok: false, error: error instanceof Error ? error.message : String(error) })
+      throw error
+    }
+    return provider(state, questions, context)
+  }
+  return Object.assign(checked, provider)
+}
+
 export function deployment(overrides = {}) {
   return {
     revision: 'airi-deploy-v8-npc-staging',
@@ -122,13 +156,13 @@ export function liveShapedAnswer(questions, overrides = {}) {
 // full response, a partial `overrides` object via { overrides }, or throw.
 export function recordingJev(script) {
   const calls = []
-  const provider = async (state, questions, context) => {
+  const provider = contractCheckedJev(async (state, questions, context) => {
     const call = { index: calls.length, keys: Object.keys(questions ?? {}), state }
     calls.push(call)
     const scripted = script ? await script(state, questions, call, context) : undefined
     if (scripted?.answers) return scripted
     return liveShapedAnswer(questions, scripted?.overrides ?? {})
-  }
+  })
   provider.calls = calls
   provider.callsWith = key => calls.filter(call => call.keys.includes(key))
   return provider

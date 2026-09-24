@@ -653,6 +653,12 @@ function emptyAgentDebug(fallback = {}) {
     decision_planner_replan_high_wakes_total: 0,
     decision_planner_fallback_wakes_total: 0,
     decision_error: '',
+    decision_fallbacks_total: 0,
+    jev_measurement: '',
+    jev_request_calls: 0,
+    jev_request_fallbacks: 0,
+    jev_request_fallback_percent: 0,
+    jev_last_fallback: '',
     step_completion_contract: '',
     step_completion_status: '',
     step_completion_evidence: '',
@@ -683,11 +689,37 @@ function decisionCumulativeFields(value = {}) {
     decision_planner_reanchor_low_wakes_total: debugInteger(value.decision_planner_reanchor_low_wakes_total),
     decision_planner_replan_high_wakes_total: debugInteger(value.decision_planner_replan_high_wakes_total),
     decision_planner_fallback_wakes_total: debugInteger(value.decision_planner_fallback_wakes_total),
+    decision_fallbacks_total: debugInteger(value.decision_fallbacks_total),
+  }
+}
+
+// The agent loop owns the Jev health window (it opens before request.received
+// because interaction routing runs first), so the UI mirrors its latest values.
+function jevHealthFields(value = {}) {
+  return {
+    jev_measurement: uiText(value.jev_measurement, 32),
+    jev_request_calls: debugInteger(value.jev_request_calls),
+    jev_request_fallbacks: debugInteger(value.jev_request_fallbacks),
+    jev_request_fallback_percent: debugInteger(value.jev_request_fallback_percent),
+    jev_last_fallback: uiText(value.jev_last_fallback, 300),
+  }
+}
+
+function applyJevHealth(debug, health) {
+  if (!health || typeof health !== 'object') return
+  debug.jev_measurement = uiText(health.measurement, 32)
+  debug.jev_request_calls = debugInteger(health.requests)
+  debug.jev_request_fallbacks = debugInteger(health.fallbacks)
+  debug.jev_request_fallback_percent = debugInteger(health.fallback_rate_percent)
+  const last = health.last_fallback
+  if (last && typeof last === 'object') {
+    debug.jev_last_fallback = uiText(`${last.contract} · ${last.kind} · ${last.reason}`, 300)
   }
 }
 function requestStartDecisionFields(value = {}) {
   return {
     ...decisionCumulativeFields(value),
+    ...jevHealthFields(value),
     decision_provider: uiText(value.decision_provider, 80),
     decision_model: uiText(value.decision_model, 160),
     decision_shadow_intent: uiText(value.decision_shadow_intent, 80),
@@ -846,6 +878,16 @@ export function liveAgentDebugEvent(event, data = {}, previous = {}, fallback = 
     if (decisionError) debug.decision_error = decisionError
   }
 
+
+  if (event === 'jev.health') {
+    if (data?.outcome === 'fallback') {
+      debug.decision_fallbacks_total = debugInteger(debug.decision_fallbacks_total) + 1
+    }
+    applyJevHealth(debug, data)
+  }
+  if ((event === 'request.completed' || event === 'request.failed') && data?.jev_health) {
+    applyJevHealth(debug, data.jev_health)
+  }
 
   if (event === 'post_step.routed') {
     debug.decision_post_step_calls_total = debugInteger(debug.decision_post_step_calls_total) + 1

@@ -13,6 +13,8 @@ describe('SGLuna debug layout', () => {
     expect(source).toContain("add_row(overview, 'AI reply'")
     expect(source).toContain("add_compact_row(provider_table, 'Tokens · request cumulative'")
     expect(source).toContain('add_debug_decision_rows(decision_table, debug)')
+    expect(source).toContain("add_compact_row(table, 'Jev health'")
+    expect(source).toContain("add_compact_row(table, 'Jev last fallback'")
     expect(source).toContain("add_compact_row(table, 'Jev scope review'")
     expect(source).toContain("add_compact_row(table, 'Scope review packet'")
     expect(source).toContain("add_compact_row(table, 'Scope review failure'")

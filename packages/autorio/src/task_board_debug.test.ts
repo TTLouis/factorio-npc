@@ -53,6 +53,12 @@ describe('task board debug and UI freshness helpers', () => {
       decision_planner_replan_high_wakes_total: 1,
       decision_planner_fallback_wakes_total: 1,
       decision_error: '',
+      decision_fallbacks_total: 4,
+      jev_measurement: 'degraded',
+      jev_request_calls: 5,
+      jev_request_fallbacks: 4,
+      jev_request_fallback_percent: 180,
+      jev_last_fallback: 'post_step_planner_gate · request_contract · Decision provider state contains an unsupported value',
     })
 
     expect(debug.provider_model).toBe('deepseek-chat')
@@ -85,6 +91,12 @@ describe('task board debug and UI freshness helpers', () => {
     expect(debug.decision_planner_reanchor_low_wakes_total).toBe(2)
     expect(debug.decision_planner_replan_high_wakes_total).toBe(1)
     expect(debug.decision_planner_fallback_wakes_total).toBe(1)
+    expect(debug.decision_fallbacks_total).toBe(4)
+    expect(debug.jev_measurement).toBe('degraded')
+    expect(debug.jev_request_calls).toBe(5)
+    expect(debug.jev_request_fallbacks).toBe(4)
+    expect(debug.jev_request_fallback_percent).toBe(100)
+    expect(debug.jev_last_fallback).toBe('post_step_planner_gate · request_contract · Decision provider state contains an unsupported value')
   })
 
   it('bounds second-layer provider diagnostics and keeps missing or malformed fields unknown', () => {

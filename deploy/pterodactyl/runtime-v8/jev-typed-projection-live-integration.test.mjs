@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { NpcAgentLoop, NpcDialogueMemory } from './npc-agent-loop.mjs'
+import { contractCheckedJev } from './task-loop-fixtures.mjs'
 
 function deployment() {
   return {
@@ -116,7 +117,7 @@ test('live low-risk projection exactifies ambiguous observed name navigation bef
         args: { entity_name: 'stone-furnace', search_radius: 32 },
       })
     },
-    operationProjectionDecisionProvider: async (state, questions) => {
+    operationProjectionDecisionProvider: contractCheckedJev(async (state, questions) => {
       projectionCalls.push({ state, questions })
       assert.equal(state.contract, 'typed_operation_projection')
       assert.equal(state.mode, 'active_low_risk_navigation_exactification')
@@ -129,7 +130,7 @@ test('live low-risk projection exactifies ambiguous observed name navigation bef
         'ask_user',
       ])
       return projectionAnswer('candidate_2', 0.95)
-    },
+    }),
   })
 
   const result = await agent.request('walk to the farther observed stone furnace', { sender: 'tester' })
@@ -164,10 +165,10 @@ test('low-confidence projection preserves the Main-LLM navigation operation', as
         args: { entity_name: 'stone-furnace', search_radius: 32 },
       })
     },
-    operationProjectionDecisionProvider: async () => {
+    operationProjectionDecisionProvider: contractCheckedJev(async () => {
       projectionCalls++
       return projectionAnswer('candidate_2', 0.6)
-    },
+    }),
   })
 
   const result = await agent.request('walk to a stone furnace', { sender: 'tester' })
@@ -200,9 +201,9 @@ test('projection provider failure cannot block an already-valid low-risk Main-LL
         args: { entity_name: 'stone-furnace', search_radius: 32 },
       })
     },
-    operationProjectionDecisionProvider: async () => {
+    operationProjectionDecisionProvider: contractCheckedJev(async () => {
       throw new Error('fixture decision provider unavailable')
-    },
+    }),
   })
 
   const result = await agent.request('walk to a stone furnace', { sender: 'tester' })
@@ -233,10 +234,10 @@ test('one observed exact target does not spend a Jev projection call', async () 
         args: { entity_name: 'stone-furnace', search_radius: 32 },
       })
     },
-    operationProjectionDecisionProvider: async () => {
+    operationProjectionDecisionProvider: contractCheckedJev(async () => {
       projectionCalls++
       return projectionAnswer('candidate_1', 0.99)
-    },
+    }),
   })
 
   const result = await agent.request('walk to the observed stone furnace', { sender: 'tester' })

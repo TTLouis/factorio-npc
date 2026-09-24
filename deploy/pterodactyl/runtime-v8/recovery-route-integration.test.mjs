@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
+import { contractCheckedJev } from './task-loop-fixtures.mjs'
 
 function deployment() {
   return {
@@ -149,10 +150,10 @@ function makeAgent({
     stateFile: null,
     traceFile: null,
     decisionTraceFile: null,
-    interactionDecisionProvider: decisionProvider ?? (async (state, questions) => {
+    interactionDecisionProvider: contractCheckedJev(decisionProvider ?? (async (state, questions) => {
       decisionCalls.push({ state, questions })
       return decisionResponse(semantic, observationProbability)
-    }),
+    })),
     provider: provider ?? (async (_messages, options) => {
       mainCalls.push(options)
       return planMessage()

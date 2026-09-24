@@ -127,6 +127,12 @@ export interface TaskBoardUiDebugSnapshot {
   decision_planner_replan_high_wakes_total: number
   decision_planner_fallback_wakes_total: number
   decision_error: string
+  decision_fallbacks_total: number
+  jev_measurement: string
+  jev_request_calls: number
+  jev_request_fallbacks: number
+  jev_request_fallback_percent: number
+  jev_last_fallback: string
   step_completion_contract: string
   step_completion_status: string
   step_completion_evidence: string
@@ -260,6 +266,12 @@ export function sanitize_debug_snapshot(value: any): TaskBoardUiDebugSnapshot {
     decision_planner_replan_high_wakes_total: integer(debug.decision_planner_replan_high_wakes_total),
     decision_planner_fallback_wakes_total: integer(debug.decision_planner_fallback_wakes_total),
     decision_error: clean_text(debug.decision_error, 300),
+    decision_fallbacks_total: integer(debug.decision_fallbacks_total),
+    jev_measurement: clean_text(debug.jev_measurement, 32),
+    jev_request_calls: integer(debug.jev_request_calls),
+    jev_request_fallbacks: integer(debug.jev_request_fallbacks),
+    jev_request_fallback_percent: math.min(100, integer(debug.jev_request_fallback_percent)),
+    jev_last_fallback: clean_text(debug.jev_last_fallback, 300),
     step_completion_contract: clean_text(debug.step_completion_contract, 200),
     step_completion_status: clean_text(debug.step_completion_status, 120),
     step_completion_evidence: clean_text(debug.step_completion_evidence, 300),

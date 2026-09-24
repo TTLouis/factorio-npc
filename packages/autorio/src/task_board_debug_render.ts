@@ -113,6 +113,19 @@ function add_debug_decision_rows(table: LuaGuiElement, debug: TaskBoardUiDebugSn
   const decision_planner_high = integer(debug.decision_planner_replan_high_wakes_total)
   const decision_planner_fallback = integer(debug.decision_planner_fallback_wakes_total)
 
+  const jev_measurement = clean_text(debug.jev_measurement, 32)
+  const jev_request_calls = integer(debug.jev_request_calls)
+  const jev_request_fallbacks = integer(debug.jev_request_fallbacks)
+  const jev_request_fallback_percent = math.min(100, integer(debug.jev_request_fallback_percent))
+  const jev_last_fallback = clean_text(debug.jev_last_fallback, 300)
+  const decision_fallbacks_total = integer(debug.decision_fallbacks_total)
+  // A degraded measurement means Jev mostly fell back: this request is not
+  // evidence about Jev's judgments.
+  add_compact_row(table, 'Jev health', jev_measurement.length > 0
+    ? `${jev_measurement.toUpperCase()} · ${jev_request_fallbacks}/${jev_request_calls} fell back (${jev_request_fallback_percent}%) · ${decision_fallbacks_total} total`
+    : '—')
+  add_compact_row(table, 'Jev last fallback', jev_last_fallback.length > 0 ? jev_last_fallback : '—')
+
   const scope_review = clean_text(debug.decision_scope_review, 32)
   const scope_review_confidence = math.min(100, integer(debug.decision_scope_review_confidence_percent))
   const scope_review_reasons = clean_text(debug.decision_scope_review_reason_codes, 300)

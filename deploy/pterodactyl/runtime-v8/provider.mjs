@@ -208,7 +208,10 @@ export const DECISION_PROVIDER_DEFAULTS = Object.freeze({
   model: 'jev-latest',
   timeoutMs: 5000,
   maxRequestsPerHour: 180,
-  maxInputChars: 16000,
+  // A local cost guard, not a TypeSafe API limit. The post-step boundary's 19
+  // questions alone serialize to ~15k characters, so the old 16k default made
+  // every live post-step call fall back before reaching Jev.
+  maxInputChars: 48000,
   maxQuestions: 24,
 })
 

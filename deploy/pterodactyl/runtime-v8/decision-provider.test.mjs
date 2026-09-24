@@ -27,7 +27,7 @@ test('TypeSafe credentials automatically configure Jev with conservative request
     model: 'jev-latest',
     timeoutMs: 5000,
     maxRequestsPerHour: 180,
-    maxInputChars: 16000,
+    maxInputChars: 48000,
     maxQuestions: 24,
   })
   assert.equal(Object.prototype.hasOwnProperty.call(config, 'enabled'), false)

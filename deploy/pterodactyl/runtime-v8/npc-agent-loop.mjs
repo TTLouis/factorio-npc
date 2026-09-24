@@ -33,6 +33,7 @@ import {
   STEERING_BOUNDARY,
   STEERING_PRESSURE_VOCABULARY,
 } from './planning-state.mjs'
+import { emptyJevHealth, recordJevHealth, summarizeJevHealth } from './jev-health.mjs'
 import { RECOVERY_SEMANTIC_SCOPES, deterministicRecoveryRoute, parseRecoveryDecision, recoveryDecisionQuestions, recoveryFailureClassHint, validateRecoveryRoute } from './recovery-route.mjs'
 import {
   applyConditionObservation,
@@ -2147,6 +2148,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.traceRequestSequence = 0
     this.decisionRequestSequence = 0
     this.decisionTraceSequence = 0
+    this.jevHealth = emptyJevHealth()
     this.planUpdateReason = 'request'
     this.requestLifecycle = 'new_goal'
     this.pendingInteractionAmendment = null
@@ -4417,6 +4419,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   decisionTraceEvent(event, data = {}) {
+    this.recordJevHealthEvent(event, data)
     if (!this.decisionTrace) return Promise.resolve()
     const { decision_id, ...details } = data ?? {}
     return this.decisionTrace.emit({
@@ -4431,7 +4434,54 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     })
   }
 
+  // Counts every Jev boundary's outcome independently of the decision trace
+  // file, so a run whose Jev calls silently fall back is visible in the log,
+  // the live Debug UI, and the request's terminal behavior-trace event.
+  recordJevHealthEvent(event, data = {}) {
+    if (!['decision.request', 'decision.response', 'decision.fallback'].includes(event)) return
+    this.jevHealth ??= emptyJevHealth()
+    const fallback = recordJevHealth(this.jevHealth, event, data)
+    if (fallback) {
+      this.log(`[jev] fallback contract=${fallback.contract} kind=${fallback.kind} target=${fallback.target || '-'} reason=${fallback.reason}`)
+    }
+    if (this.onActivity) {
+      const summary = summarizeJevHealth(this.jevHealth, { configured: this.jevConfigured() })
+      try {
+        this.onActivity('jev.health', {
+          outcome: event.slice('decision.'.length),
+          contract: data?.contract,
+          measurement: summary.measurement,
+          requests: summary.requests,
+          fallbacks: summary.fallbacks,
+          fallback_rate_percent: summary.fallback_rate_percent,
+          last_fallback: summary.last_fallback,
+        })
+      }
+      catch (error) { this.log(`[trace] activity listener failed: ${error instanceof Error ? error.message : String(error)}`) }
+    }
+  }
+
+  jevConfigured() {
+    return Boolean(this.interactionDecisionProvider || this.steeringDecisionProvider || this.operationProjectionDecisionProvider)
+  }
+
+  // Attach the request's Jev health to its terminal event, then start a fresh
+  // window. The interaction-route call runs before request.received, so the
+  // window resets at request end rather than at request start.
+  takeJevHealthSummary() {
+    this.jevHealth ??= emptyJevHealth()
+    const summary = summarizeJevHealth(this.jevHealth, { configured: this.jevConfigured() })
+    this.jevHealth = emptyJevHealth()
+    if (summary.measurement === 'degraded') {
+      this.log(`[jev] request measurement degraded: ${summary.fallbacks}/${summary.requests} decisions fell back (${Object.entries(summary.by_kind).map(([kind, count]) => `${kind}=${count}`).join(', ')})`)
+    }
+    return summary
+  }
+
   traceEvent(event, data = {}) {
+    if (event === 'request.completed' || event === 'request.failed') {
+      data = { ...(data ?? {}), jev_health: this.takeJevHealthSummary() }
+    }
     if (this.onActivity) {
       try { this.onActivity(event, data) }
       catch (error) { this.log(`[trace] activity listener failed: ${error instanceof Error ? error.message : String(error)}`) }

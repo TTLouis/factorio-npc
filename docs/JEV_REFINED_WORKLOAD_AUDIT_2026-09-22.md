@@ -325,6 +325,31 @@ Status: **implemented.** Typed state remains trace-only telemetry and is not inj
 
 Make M8 typed-state planner injection experimental/trace-only pending measurement.
 
+### M11F — measurement integrity
+
+Status: **implemented 2026-09-24; no E2E required to validate the unit-level gates.**
+
+The 2026-09-24 live run showed every Jev call falling back in 1-4 ms while CI stayed
+green, because fake decision providers bypass the real adapter. M11F closes that gap:
+
+- every fixture Jev (`recordingJev`, `contractCheckedJev` in `task-loop-fixtures.mjs`)
+  runs the real `normalizeDecisionProviderRequest` with production limits on the exact
+  state/questions each boundary builds; a violation fails the test file. All six live
+  boundaries are covered.
+- that check immediately found the post-step boundary's 19 questions serialize to
+  ~15k characters, so the old 16k `DECISION_PROVIDER_MAX_INPUT_CHARS` default made
+  every live post-step call fall back. The local cost guard default is now 48k.
+- `jev-health.mjs` counts requests/responses/fallbacks per logical request and
+  classifies each fallback (`request_contract`, `timeout`, `budget`, `rate_limited`,
+  `http`, `transport`, `response_contract`, `runtime_parse`, ...). Each fallback is
+  logged as `[jev] fallback contract=… kind=…`, streamed to the Debug UI
+  (`Jev health`, `Jev last fallback`), and summarized as `jev_health` on the
+  request's terminal behavior-trace event.
+- a request's `jev_health.measurement` is `jev_off`, `no_calls`, `valid`, or
+  `degraded` (any harness-built malformed request, or more than 25% fallbacks).
+  A `degraded` run is evidence about Jev availability, not about Jev judgments,
+  and must not be scored in the Phase 9 comparison.
+
 ### Later — Phase 9 E2E measurement
 
 Only after M11A-E are stable compare Main-LLM-only and TypeSafe-coprocessor behavior.
