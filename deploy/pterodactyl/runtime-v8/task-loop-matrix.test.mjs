@@ -379,3 +379,25 @@ test('an unmet deterministic checkpoint cannot be replaced by a semantic complet
   await assert.rejects(agent.completed(), /semantic_completion_cannot_bypass_deterministic_contract/)
   assert.equal(memory.currentPlan(KEY).task_board.completed_count, 0)
 })
+
+test('moving on to the next step with its operations closes a grounded prose-only step', async () => {
+  // The 2026-09-24 cloud trial shape: the planner advanced currentStep with the
+  // next step's operation but never sent the explicit semanticCompletion.
+  const steps = ['Mine 10 stone', 'Mine 10 coal']
+  const world = harness({
+    provider: async () => {
+      const board = world.memory.currentPlan(KEY)?.task_board
+      if (!board) return planReply({ plan: steps, currentStep: 0, operations: [gather('stone', 10)] })
+      return planReply({ plan: steps, currentStep: 1, operations: [gather('coal', 10)] })
+    },
+  })
+  await world.say('mine 10 stone, then 10 coal', 'new_goal')
+  assert.equal(world.memory.currentPlan(KEY).task_board.active_index, 0)
+
+  await world.finish('stone')
+  const board = world.memory.currentPlan(KEY).task_board
+  assert.equal(board.completed_count, 1)
+  assert.equal(board.active_step_id, 'step_2')
+  assert.equal(world.reducerPlan().active_step_index, 1)
+  assert.equal(world.game.mutations.length, 2)
+})
