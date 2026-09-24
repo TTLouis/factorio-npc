@@ -316,7 +316,8 @@ export function observationRelevanceQuestions() {
           family,
           rules: [
             'Judge relevance only; do not invent the observation result.',
-            'Prefer false when current grounded evidence is already sufficient.',
+            'Evidence is sufficient only when known_observations lists a read of this family with stale=false, or the supplied state itself states the needed fact. A missing or stale read is not sufficient evidence.',
+            'When active_step_has_completion_evidence is false and a plan step asks to verify or check something this family reads, the family is material.',
             'A true/high value is advisory. Code still applies caps, caching, and deterministic tool validation.',
           ],
         },
@@ -380,6 +381,29 @@ export function parseObservationRelevance(response, {
     selected_families: selected,
     signal_count: signalCount,
     budget: selected.length,
+  }
+}
+
+/**
+ * The post-step route and the family relevance are separate Jev judgments.
+ * When the route is `observe` but no family cleared the threshold, a literal
+ * reading admits zero reads and the route cannot make progress. Keep one
+ * bounded fresh read on the highest-ranked family instead; without typed
+ * relevance the read is not family-filtered. Returns the input unchanged when
+ * relevance already admits a read.
+ */
+export function observeRouteRelevanceFloor(relevance) {
+  if (Number.isSafeInteger(relevance?.budget) && relevance.budget >= 1) return relevance
+  if (relevance?.source !== 'typed_relevance') {
+    return { ...relevance, budget: 1, floor: 'observe_route_minimum_unfiltered' }
+  }
+  const [top] = Object.entries(relevance.probabilities ?? {})
+    .sort(([leftFamily, left], [rightFamily, right]) => right - left || leftFamily.localeCompare(rightFamily))
+  return {
+    ...relevance,
+    selected_families: top ? [top[0]] : [],
+    budget: 1,
+    floor: 'observe_route_minimum',
   }
 }
 
@@ -568,6 +592,7 @@ function normalizedSteeringShelfCandidates(raw) {
 export function steeringRecommendationQuestions({
   candidateShelfNodes = [],
   pressureVocabulary = {},
+  pressureDefinitions = {},
 } = {}) {
   const questions = {
     ...developmentDecisionQuestions(),
@@ -580,7 +605,7 @@ export function steeringRecommendationQuestions({
         task: 'Judge whether the supplied authoritative planning-boundary state supports this specific steering-pressure condition.',
         direction,
         pressure_code: code,
-        condition: code.replaceAll('_', ' '),
+        condition: typeof pressureDefinitions[code] === 'string' ? pressureDefinitions[code] : code.replaceAll('_', ' '),
         rules: [
           'Judge only evidence present in the supplied state.',
           'This is advisory pressure provenance; it cannot create world truth or planning authority.',

@@ -277,6 +277,9 @@ export function decisionProviderConfiguration(env = process.env) {
   }
 }
 
+// Largest per-value error of a probability reported with two decimals.
+const DECISION_PROBABILITY_ROUNDING = 0.005
+
 const DECISION_ENTRY_LIMITS = Object.freeze({
   maxDepth: 12,
   maxCollectionItems: 128,
@@ -413,7 +416,10 @@ function probabilityDistribution(value, expectedKeys, label) {
     check(validProbability(value[key]), `${label} has an invalid probability`)
     total += value[key]
   }
-  check(Math.abs(total - 1) <= 0.0001, `${label} probabilities must sum to 1`)
+  // Jev reports probabilities with two decimals, so each value can be off by
+  // up to half a unit and a valid distribution can total 0.99 or 1.01.
+  const tolerance = Math.max(0.0001, expectedKeys.length * DECISION_PROBABILITY_ROUNDING)
+  check(Math.abs(total - 1) <= tolerance, `${label} probabilities must sum to 1`)
 }
 
 function decisionEntriesEqual(left, right) {
@@ -498,9 +504,24 @@ export async function decisionProviderRequest(config, state, questions, {
     check(data && typeof data === 'object' && !Array.isArray(data), 'Decision provider returned an invalid response')
     check(data.answers && typeof data.answers === 'object' && !Array.isArray(data.answers), 'Decision provider response has no answers')
 
+    // An invalid answer is dropped on its own: every consumer already falls
+    // back to its default for a missing answer, and discarding the whole
+    // batch lost every valid judgment in it. All-invalid still fails.
+    const answers = {}
+    const invalidAnswers = {}
+    let firstError
     for (const [id, question] of Object.entries(questions)) {
-      validateDecisionAnswer(id, question, data.answers[id])
+      try {
+        validateDecisionAnswer(id, question, data.answers[id])
+        answers[id] = data.answers[id]
+      }
+      catch (error) {
+        if (!(error instanceof DeploymentError)) throw error
+        firstError ??= error
+        invalidAnswers[id] = { reason: error.message, answer: data.answers[id] }
+      }
     }
+    if (Object.keys(answers).length === 0) throw firstError
 
     if (data.usage !== undefined) {
       check(data.usage && typeof data.usage === 'object' && !Array.isArray(data.usage), 'Decision provider returned invalid usage')
@@ -513,7 +534,8 @@ export async function decisionProviderRequest(config, state, questions, {
     return {
       model: typeof data.model === 'string' ? data.model : config.model,
       provider: typeof data.provider === 'string' ? data.provider : config.provider,
-      answers: data.answers,
+      answers,
+      ...(firstError ? { invalid_answers: invalidAnswers } : {}),
       usage: data.usage,
     }
   }

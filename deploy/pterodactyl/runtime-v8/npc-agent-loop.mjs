@@ -16,6 +16,7 @@ import {
   decisionEnvelopeQuestions,
   developmentDecisionQuestions,
   observationRelevanceQuestions,
+  observeRouteRelevanceFloor,
   parseBoundarySteeringTelemetry,
   parseDecisionFamily,
   parseObservationRelevance,
@@ -32,6 +33,8 @@ import {
   PLAN_STATUS,
   STEERING_BOUNDARY,
   STEERING_PRESSURE_VOCABULARY,
+  askableSteeringPressures,
+  steeringPressureDefinitions,
 } from './planning-state.mjs'
 import { emptyJevHealth, recordJevHealth, summarizeJevHealth } from './jev-health.mjs'
 import { describeUnmetGoalResult, evaluateGoalDefinition, formatGoalProgress, GOAL_SCOPE, needsGoalBaseline, sanitizeGoalDefinition } from './goal-definition.mjs'
@@ -54,6 +57,7 @@ import {
 import {
   isObservationToolName,
   observationToolFamily,
+  observationToolTier,
   isPlannerControlToolName,
   plannerControlPayloadFromMessage,
   renderOperation,
@@ -76,6 +80,16 @@ const SENSITIVE_TRACE_KEY = /authorization|api.?key|token|password|secret|cookie
 const STATE_SCHEMA = 1
 const PLAN_HISTORY_LIMIT = 24
 const MAX_OBSERVATION_TOOL_CALLS_PER_BATCH = 4
+const JEV_OBSERVATION_LOG_LIMIT = 12
+const PLANNING_LOD_GUIDANCE = '[PLANNING_LOD] Your reply, including all reasoning, has a fixed output budget. Work at outline level. Before any reads, only decide which reads you need. In a plan, write the goal definition (on the first plan), one short line per step (plus Roadmap Shelf nodes for a long_horizon goal), and concrete operations only for the active step. Do not work out later steps\' operations, counts, or positions now; each step is refined when it becomes active.'
+// Evidence kinds that let a semantic step completion claim through.
+const SEMANTIC_GROUNDING_KINDS = new Set([
+  'deterministic_verification',
+  'operation_receipt',
+  'verified_world_state',
+  'condition_satisfied',
+  'fresh_world_observation',
+])
 const DUPLICATE_OBSERVATION_MESSAGE = '[HARNESS] Duplicate observation suppressed. The result is unchanged from the earlier identical tool call already present in this decision context; reuse it and act or report a blocker.'
 const OUTPUT_BUDGET_RECOVERY_MESSAGE = '[HARNESS] The immediately preceding provider response exhausted its output budget before emitting content or tool calls. Continue the same logical request and goal from this unchanged harness context. Tools remain available. Do not treat the empty response as an action, plan update, completion, or evidence. Do not replay any world mutation already proven complete by the supplied receipts or canonical Task Board. Return the next necessary observation tool call(s), or use submitPlan for the planner decision. Legacy strict-JSON content remains a compatibility fallback only.'
 // The cap covers reasoning tokens too. Live (goal_mueryuql) a reasoning model spent
@@ -164,7 +178,7 @@ Once a plan is COMMITTED its steps, their order and their completion meaning are
 
 Within [PLANNING_STATE], Shelf nodes are storage: they record intent and lineage, never operations and never plan steps. Do not compile a shelf node into steps on your own initiative.
 
-Every goal starts with a goal definition. On the FIRST plan of a goal, add goal to submitPlan: {scope, summary, doneWhen}. summary restates in one sentence what the player asked for; the player sees it in game as your understanding. doneWhen lists the game-checkable conditions that together prove the goal is complete (research_completed, rockets_launched, items_produced, inventory_count, space_location_unlocked) with exact Factorio internal names. rockets_launched and items_produced count from when the goal starts (countFrom "goal_start", the default), so "launch a rocket" needs a new launch; use countFrom "save_start" only when the player means the save's lifetime total. The harness, not you, decides completion: it reads doneWhen from the game at the end of every plan slice, so finishing a plan's steps never completes a goal by itself, and you never need to claim the goal is done. Use scope "finite" only when one plan of at most 30 steps completes the goal; otherwise use "long_horizon" and send the roadmap shelf on that same first plan. Omit goal on later plans of the same goal.
+Every goal starts with a goal definition. On the FIRST plan of a goal, add goal to submitPlan: {scope, summary, doneWhen}. summary restates in one sentence what the player asked for; the player sees it in game as your understanding. doneWhen lists the game-checkable conditions that together prove the goal is complete, each with exactly these fields and exact Factorio internal names: {"kind":"inventory_count","item_name":"stone-furnace","minimum":1}, {"kind":"items_produced","item_name":"iron-plate","minimum":100}, {"kind":"research_completed","technology":"automation"}, {"kind":"rockets_launched","minimum":1}, {"kind":"space_location_unlocked","name":"vulcanus"}. inventory_count is what AIRI holds when the goal ends, after crafting consumed its ingredients. rockets_launched and items_produced count from when the goal starts (countFrom "goal_start", the default), so "launch a rocket" needs a new launch; use countFrom "save_start" only when the player means the save's lifetime total. The harness, not you, decides completion: it reads doneWhen from the game at the end of every plan slice, so finishing a plan's steps never completes a goal by itself, and you never need to claim the goal is done. Use scope "finite" only when one plan of at most 30 steps completes the goal; otherwise use "long_horizon" and send the roadmap shelf on that same first plan. Omit goal on later plans of the same goal.
 
 You author the shelf through the optional roadmap field on submitPlan: a short list of coarse nodes, each stating what should eventually be true for the goal and why it matters. Keep them at that altitude — a node is not a step, carries no operations, and never claims its own progress; the harness derives realization from verified results and strips anything executable. For a long-horizon goal, send the shelf on the first plan of that goal. Afterwards it only moves when verified world state has actually invalidated the guidance, so restate the nodes that still apply with their original ids (omitting a node marks it invalidated and keeps its lineage), and do not re-send an unchanged shelf just to restate a preference.
 
@@ -174,7 +188,9 @@ For a bounded planning slice, add developmentMode as vertical, horizontal, maint
 
 For the active Plan Tracker step, you may add one optional root field named checkpoint beside chatMessage/plan/currentStep/operations. checkpoint is your semantic completion proposal for deterministic runtime validation and verification, not a claim that the step is already done. It must use a runtime-supported contract: {"mode":"all|any","requirements":[...]} with requirement kinds inventory_count, entity_inventory_count, entity_exists, entity_state, authoritative_operation_receipt, or runtime_controller_state. Prefer world-state outcomes over action occurrence. Example: if the step means "have 100 stone" and the next operation only gathers 40 more because 62 are already held, checkpoint must say inventory_count stone >= 100, not >= 40. The operation batch describes what to do next; checkpoint describes what would prove the semantic step complete. Runtime remains completion authority for supported deterministic contracts. Omit checkpoint when no safe deterministic predicate represents the step; prose-only semantic steps remain the Main LLM's responsibility rather than being delegated to a second AI judge.
 
-For a prose-only active step that intentionally has no deterministic checkpoint, you may explicitly close that semantic step with semanticCompletion: {"stepId":"<exact active step id>","rationale":"..."}. Use the stable active step id from [PLANNING_STATE]. The harness accepts this only when the id is still current, the step has no deterministic completion contract, and recent authoritative runtime evidence or a fresh live observation grounds your judgment. Never use semanticCompletion to bypass an unmet deterministic checkpoint. You may pair a valid semanticCompletion with operations for the newly-active next step; the harness advances the semantic step first, then validates those operations normally.
+For a prose-only active step that intentionally has no deterministic checkpoint, you may explicitly close that semantic step with semanticCompletion: {"stepId":"<exact active step id>","rationale":"..."}. Use the stable active step id from [PLANNING_STATE]. The harness accepts this only when the id is still current, the step has no deterministic completion contract, and recent authoritative runtime evidence or a fresh live observation grounds your judgment. Never use semanticCompletion to bypass an unmet deterministic checkpoint. You may pair a valid semanticCompletion with operations for the newly-active next step; the harness advances the semantic step first, then validates those operations normally. Keeping the same plan and moving currentStep exactly one step forward with operations for that next step is read as the same claim for the active step, under the same checks.
+
+Write chatMessage and plan steps in the language of the player's message.
 
 Plan entries must represent goal-bearing Factorio work or verification. Do not add terminal lifecycle/meta steps such as "Stop", "Done", "Finish", or "Report completion"; stopping after the verified goal is represented by returning plan: [], currentStep: 0, operations: [].
 
@@ -2005,6 +2021,28 @@ function terminalControlOnlyPlanStep(value) {
   return isLifecycleMetaStep(value)
 }
 
+// A plan that keeps the active and next step and moves currentStep exactly one
+// step past the active step, with operations for that step, implies a semantic
+// completion claim for the active step.
+function impliedSemanticCompletion(plan, state) {
+  const board = state?.task_board
+  if (state?.status !== 'active' || !Array.isArray(board?.steps)) return undefined
+  if (!Array.isArray(plan?.operations) || plan.operations.length === 0) return undefined
+  const activeIndex = Number.isSafeInteger(board.active_index) ? board.active_index : -1
+  const step = board.steps[activeIndex]
+  if (!step || plan.currentStep !== activeIndex + 1 || activeIndex + 1 >= board.steps.length) return undefined
+  // Later steps are proposals the committed plan ignores, and the planner
+  // often rewords them; only the active and next step must be unchanged.
+  const sameSteps = Array.isArray(plan.plan)
+    && [activeIndex, activeIndex + 1].every(index =>
+      cleanMemoryText(plan.plan[index], 500) === cleanMemoryText(board.steps[index]?.description, 500))
+  if (!sameSteps) return undefined
+  return {
+    stepId: step.id,
+    rationale: `Implied by moving currentStep to step ${activeIndex + 2} with its operations.`,
+  }
+}
+
 function verifiedFinalCompletion(plan, state, triggerSource, { freshObservation = false } = {}) {
   if (triggerSource !== 'completion' || plan?.operations?.length !== 0 || plan?.plan?.length !== 0) return false
   const board = state?.task_board
@@ -2083,17 +2121,31 @@ function providerBudgetTriggerSource(semanticScope, route) {
   return route === 'replan_high' ? 'recovery_replan_high' : 'recovery_continue_low'
 }
 
-function providerBudgetHandoffCapsule(state, runtimeStatus, reason, semanticScope = 'keep_target') {
+function providerBudgetHandoffCapsule(state, runtimeStatus, reason, semanticScope = 'keep_target', { admittedGoal, request } = {}) {
   const board = state?.task_board
   const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : state?.current_step ?? 0
-  const capsule = {
-    goal: state
+  // The capsule replaces the whole conversation. On the first turn of a new
+  // goal no plan is stored yet, so without the admitted goal and the player's
+  // request the fresh generation would not know what it was asked to do.
+  const goal = state
+    ? {
+        goal_id: sanitizeDurableModelText(state.goal_id, 100),
+        objective: sanitizeDurableModelText(state.objective, 1000),
+        status: state.status,
+      }
+    : admittedGoal
       ? {
-          goal_id: sanitizeDurableModelText(state.goal_id, 100),
-          objective: sanitizeDurableModelText(state.objective, 1000),
-          status: state.status,
+          goal_id: sanitizeDurableModelText(admittedGoal.goal_id, 100),
+          objective: sanitizeDurableModelText(admittedGoal.objective, 1000),
+          status: admittedGoal.status,
+          first_plan_of_goal: true,
         }
-      : null,
+      : null
+  const capsule = {
+    goal,
+    ...(!state && request?.text
+      ? { player_request: { sender: cleanMemoryText(request.sender, 128), text: cleanMemoryText(request.text, 4000) } }
+      : {}),
     task_board: board ? modelFacingTaskBoard(board) : null,
     active_target: sanitizeDurableModelText(board?.steps?.[activeIndex]?.description ?? currentPlanStep(state?.plan, activeIndex), 500),
     authoritative_evidence: activeStepEvidence(board).map(item => sanitizeDurableModelValue(item)),
@@ -2132,13 +2184,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw new AgentLoopError('maxProviderBudgetHandoffs must be an integer from 1 to 16')
     }
     this.interactionProvider = typeof options.interactionProvider === 'function' ? options.interactionProvider : null
-    this.interactionDecisionProvider = typeof options.interactionDecisionProvider === 'function' ? options.interactionDecisionProvider : null
-    this.steeringDecisionProvider = typeof options.steeringDecisionProvider === 'function'
-      ? options.steeringDecisionProvider
-      : null
-    this.operationProjectionDecisionProvider = typeof options.operationProjectionDecisionProvider === 'function'
-      ? options.operationProjectionDecisionProvider
-      : null
+    this.interactionDecisionProvider = this.recordedDecisionProvider(options.interactionDecisionProvider)
+    this.steeringDecisionProvider = this.recordedDecisionProvider(options.steeringDecisionProvider)
+    this.operationProjectionDecisionProvider = this.recordedDecisionProvider(options.operationProjectionDecisionProvider)
     this.interactionAbort = null
     this.postStepDecisionAbort = null
     this.recoveryDecisionAbort = null
@@ -2163,6 +2211,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // definition (production). 'optional': accepted when present.
     this.goalDefinitionPolicy = options.goalDefinitionPolicy === 'required' ? 'required' : 'optional'
     this.goalDefinitionRetries = 0
+    this.lastGoalDefinitionError = null
     this.goalDefinitionBlock = null
     // Jev's blind reading of the current new goal (see goal-reading.mjs).
     this.goalReading = null
@@ -3117,7 +3166,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async requestInteractionPlannerShape(text, sender, taskStatus, planState, intent, epoch) {
-    if (intent === 'new_goal') this.goalReading = null
+    if (intent === 'new_goal') {
+      this.goalReading = null
+      this.jevObservationLog = []
+    }
     if (!this.interactionDecisionProvider) return undefined
     // A new goal also gets Jev's blind goal reading in the same request: the
     // player's words plus save-progress facts, never the planner's answer.
@@ -3143,6 +3195,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         : null,
       runtime: taskStatus,
       ...(readGoal ? { save_progress: saveProgress ?? null } : {}),
+      ...this.jevObservationContext(intent === 'new_goal' ? undefined : planState),
     }
 
     this.interactionAbort?.abort()
@@ -3593,11 +3646,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           }
         : null,
       verified_world: sanitizeDurableModelValue(receipt?.providerStatus ?? receipt?.view ?? world),
+      save_progress: (await this.readGoalProgressFacts()) ?? null,
     }
 
     const steeringQuestionOptions = {
       candidateShelfNodes: state.roadmap?.nodes ?? [],
-      pressureVocabulary: STEERING_PRESSURE_VOCABULARY,
+      pressureVocabulary: askableSteeringPressures(state),
+      pressureDefinitions: steeringPressureDefinitions(),
     }
     const questions = steeringRecommendationQuestions(steeringQuestionOptions)
     const decisionId = `decision_${Date.now().toString(36)}_${(++this.decisionRequestSequence).toString(36)}`
@@ -3840,6 +3895,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const autorioStatus = receipt?.view && typeof receipt.view === 'object'
       ? receipt.view
       : (receipt?.providerStatus && typeof receipt.providerStatus === 'object' ? receipt.providerStatus : {})
+    if (Number.isSafeInteger(autorioStatus?.last_completed_batch?.batch_id)) {
+      this.latestCompletedBatchId = autorioStatus.last_completed_batch.batch_id
+    }
     const autorioRuntimeHealthy = interactionRuntimeHealthy(autorioStatus)
     const persistentControllerHealthy = persistentRuntimeHealthy(persistentRuntime)
     const planState = this.memory.planByNpc?.get?.(this.activePlanKey()) ?? this.memory.currentPlan?.(this.activePlanKey())
@@ -3928,6 +3986,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       condition_wait_active: conditionWaitHealthy,
       ...(conditionWaitHealthy ? { condition_wait: sanitizeDurableModelValue(conditionValidation.wait) } : {}),
       ...(failure ? { failure: cleanMemoryText(failure, 1200) } : {}),
+      ...this.jevObservationContext(planState),
     }
     // Gate call: only the judgments that decide whether the Main LLM wakes.
     // Planner-shape questions are asked separately, and only on a wake.
@@ -4045,6 +4104,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const plannerShape = appliedRoute === 'wait_runtime'
         ? undefined
         : await this.requestPostStepPlannerShape(state, { current, generation, signal: controller.signal })
+      if (plannerShape && appliedRoute === 'targeted_observation') {
+        const floored = observeRouteRelevanceFloor(plannerShape.observation_relevance)
+        if (floored !== plannerShape.observation_relevance) {
+          plannerShape.observation_relevance = floored
+          plannerShape.observation_budget = floored.budget
+        }
+      }
       const steeringContext = {
         ...steeringTelemetry,
         ...(plannerShape ?? {}),
@@ -4418,6 +4484,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.actionOmissionObservationUsed = false
     this.actionOmissionForceNoTools = false
     this.pendingFiniteNoOperationPlan = null
+    this.unmetGoalContinuationUsed = false
+    this.lastGoalEvaluation = null
     this.freshObservationSinceContinuation = false
     this.genericRecoveryDecisionActive = false
     if (resumeProviderBudgetHandoff) {
@@ -4556,7 +4624,52 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return true
   }
 
+  // Every Jev call is written to the decision trace with the state it judged
+  // and the answers it gave, so a round can be audited or replayed
+  // offline against reworded questions without a new game run.
+  recordedDecisionProvider(provider) {
+    if (typeof provider !== 'function') return null
+    return async (state, questions, context = {}) => {
+      const pending = this.pendingDecisionRequest
+      this.pendingDecisionRequest = undefined
+      // The decision trace never copies the player's message; the behavior
+      // trace already holds it for the same request.
+      const tracedState = state && typeof state === 'object' && typeof state.message === 'string'
+        ? { ...state, message: undefined, message_chars: state.message.length }
+        : state
+      const exchange = {
+        decision_id: pending?.decision_id,
+        contract: pending?.contract ?? (typeof state?.contract === 'string' ? state.contract : state?.reason),
+        state: tracedState,
+        question_ids: Object.keys(questions ?? {}),
+      }
+      const startedAt = Date.now()
+      try {
+        const response = await provider(state, questions, context)
+        await this.decisionTraceEvent('decision.exchange', {
+          ...exchange,
+          model: typeof response?.model === 'string' ? response.model : undefined,
+          answers: response?.answers,
+          ...(response?.invalid_answers ? { invalid_answers: response.invalid_answers } : {}),
+          latency_ms: Date.now() - startedAt,
+        })
+        return response
+      }
+      catch (error) {
+        await this.decisionTraceEvent('decision.exchange', {
+          ...exchange,
+          error: cleanMemoryText(error instanceof Error ? error.message : String(error), 300),
+          latency_ms: Date.now() - startedAt,
+        })
+        throw error
+      }
+    }
+  }
+
   decisionTraceEvent(event, data = {}) {
+    if (event === 'decision.request') {
+      this.pendingDecisionRequest = { decision_id: data?.decision_id, contract: data?.contract }
+    }
     this.recordJevHealthEvent(event, data)
     if (!this.decisionTrace) return Promise.resolve()
     const { decision_id, ...details } = data ?? {}
@@ -4598,6 +4711,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       )
     }
     this.goalDefinitionRetries = 0
+    this.lastGoalDefinitionError = null
     this.challengeGoalDefinition(plan.goalDefinition)
   }
 
@@ -4635,8 +4749,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const error = new AgentLoopError(reason)
     error.failureClass = 'plan_category'
     error.code = code
-    if (this.goalDefinitionRetries > 1) {
+    // A repeated mistake stops at once; a model that fixes one different
+    // mistake per retry is making progress and gets up to two corrections.
+    const repeated = this.lastGoalDefinitionError === reason
+    this.lastGoalDefinitionError = reason
+    if (repeated || this.goalDefinitionRetries > 2) {
       this.goalDefinitionRetries = 0
+      this.lastGoalDefinitionError = null
       this.goalDefinitionBlock = `I could not form a clear, game-checkable definition of this goal (${cleanMemoryText(reason, 300)}). Please restate the goal and what "done" means — for example "launch 1 rocket", "research automation", or "produce 1000 iron plates".`
       error.details = { deterministic_no_retry: true }
     }
@@ -4646,11 +4765,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async blockedWithoutMutation(reason, failureClass) {
     const goalBlock = this.goalDefinitionBlock
     this.goalDefinitionBlock = null
-    if (goalBlock) {
-      const result = await super.blockedWithoutMutation(goalBlock, 'goal_definition_needed')
-      return { ...result, chatMessage: goalBlock }
+    const result = goalBlock
+      ? { ...(await super.blockedWithoutMutation(goalBlock, 'goal_definition_needed')), chatMessage: goalBlock }
+      : await super.blockedWithoutMutation(reason, failureClass)
+    // This ending asks the player instead of acting; without a terminal event
+    // the trace reads as a stalled request.
+    if (this.traceRequest) {
+      await this.traceEvent('request.completed', {
+        outcome: 'blocked_before_mutation',
+        chat_message: result.chatMessage,
+        blocker: result.blocker,
+        usage: this.traceRequest.usage,
+      })
+      this.traceRequest = null
     }
-    return super.blockedWithoutMutation(reason, failureClass)
+    return result
   }
 
   // The harness, not the plan, decides whether the user's goal is met: every
@@ -4686,25 +4815,95 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return evaluation
   }
 
-  async evaluateGoalCompletion() {
+  async evaluateGoalCompletion({ record = true } = {}) {
     const key = this.activePlanKey()
     const definition = this.memory.goalDefinition?.(key)
     if (!definition) return undefined
     const evaluation = await this.readGoalDefinition(key, definition)
+    this.lastGoalEvaluation = evaluation
     await this.traceEvent('goal.evaluated', {
       satisfied: evaluation.satisfied,
       progress: formatGoalProgress(evaluation),
       results: evaluation.results,
     })
-    if (evaluation.satisfied && typeof this.memory.recordGoalSatisfaction === 'function') {
-      this.memory.recordGoalSatisfaction(key, {
-        source: 'runtime',
-        evidenceRefs: evaluation.results.map(result => `goal_condition/${result.id}/${result.current ?? 'true'}`),
-        rationale: 'goal_definition_conditions_satisfied',
-      })
-      await this.persistState()
-    }
+    if (record && evaluation.satisfied) await this.recordGoalEvaluationSatisfied(evaluation)
     return evaluation
+  }
+
+  async recordGoalEvaluationSatisfied(evaluation) {
+    if (typeof this.memory.recordGoalSatisfaction !== 'function') return
+    this.memory.recordGoalSatisfaction(this.activePlanKey(), {
+      source: 'runtime',
+      evidenceRefs: evaluation.results.map(result => `goal_condition/${result.id}/${result.current ?? 'true'}`),
+      rationale: 'goal_definition_conditions_satisfied',
+    })
+    await this.persistState()
+  }
+
+  // The planner declared the whole goal done while plan steps remain. With a
+  // game-checked definition the game decides: met completes the goal and the
+  // remaining steps are moot; unmet leaves the repair path to continue, now
+  // told which conditions are still open.
+  async finishIfGoalMet(plan, previousState) {
+    const key = this.activePlanKey()
+    if (!this.memory.goalDefinition?.(key)) return undefined
+    const evaluation = await this.evaluateGoalCompletion({ record: false })
+    if (!evaluation) return undefined
+    const unverifiable = evaluation.results.filter(result => /^(?:unknown_|invalid_)/.test(result.error ?? ''))
+    if (unverifiable.length > 0) return this.pauseForUnverifiableGoal(unverifiable)
+    if (!evaluation.satisfied) return undefined
+    // Close the legacy plan before recording satisfaction: recording first
+    // would let the plan-close path re-admit the goal as a new active one.
+    const reduced = this.memory.applyOutcomeAuthority?.(key, {
+      kind: 'verified_complete',
+      source: 'deterministic_runtime',
+      reason_code: 'goal_definition_satisfied',
+      evidence: [{
+        kind: 'verified_world_state',
+        ref: `${this.traceRequest?.id ?? 'request'}/goal_definition_satisfied`,
+        summary: `The game reports ${formatGoalProgress(evaluation)}.`,
+      }],
+    }, { chatMessage: plan.chatMessage })
+    await this.recordGoalEvaluationSatisfied(evaluation)
+    this.clearActionOmissionRecovery()
+    this.active = false
+    // The legacy plan is completed and retired; its board is re-projected from
+    // the reducer plan, whose remaining steps the met goal made moot.
+    const completedBoard = { ...visibleTaskBoard(reduced?.state?.task_board ?? previousState?.task_board), status: 'completed' }
+    const chatMessage = `The requested goal is verified complete: the game reports ${formatGoalProgress(evaluation)}.`
+    await this.traceEvent('outcome.validated', {
+      kind: 'verified_complete',
+      source: 'goal_definition',
+      reason_code: 'goal_definition_satisfied',
+      task_board: completedBoard,
+    })
+    await this.traceEvent('request.completed', {
+      chat_message: chatMessage,
+      outcome: 'goal_verified_complete',
+      task_board: completedBoard,
+      usage: this.traceRequest?.usage,
+    })
+    this.traceRequest = null
+    return {
+      chatMessage,
+      plan: [],
+      currentStep: 0,
+      operations: [],
+      epoch: this.epoch?.epoch,
+      actorId: this.epoch?.actor_id,
+      goalId: previousState?.goal_id,
+      goalStatus: 'completed',
+      taskBoard: completedBoard,
+    }
+  }
+
+  unmetGoalNote() {
+    const evaluation = this.lastGoalEvaluation
+    if (!evaluation || evaluation.satisfied) return ''
+    const unmet = evaluation.results.filter(result => !result.satisfied)
+      .map(result => `${result.id}${result.current !== undefined ? ` (currently ${result.current})` : ''}`)
+      .join(', ')
+    return ` The goal is not complete: the game reports ${formatGoalProgress(evaluation)}; still unmet: ${unmet}.`
   }
 
   // Counts every Jev boundary's outcome independently of the decision trace
@@ -5061,6 +5260,53 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return undefined
   }
 
+  // The plan finished but the game says the goal is not met. The planner gets
+  // one turn in this request to author the next slice; a second "done"
+  // without work ends the request honestly with the goal still open.
+  async continueUnmetGoal(plan, stateResult) {
+    const planning = this.memory.planningState?.(this.activePlanKey())
+    const evaluation = this.lastGoalEvaluation
+    if (planning?.goal?.status !== GOAL_STATUS.ACTIVE || !evaluation || evaluation.satisfied) return undefined
+    const unmet = evaluation.results.filter(result => !result.satisfied)
+      .map(result => `${result.id}${result.current !== undefined ? ` (currently ${result.current})` : ''}`)
+      .join(', ')
+    await this.traceEvent('goal.unmet_after_plan', {
+      goal_id: planning.goal.goal_id,
+      progress: formatGoalProgress(evaluation),
+      unmet,
+      continued: this.unmetGoalContinuationUsed !== true,
+    })
+    if (this.unmetGoalContinuationUsed !== true) {
+      this.unmetGoalContinuationUsed = true
+      this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
+      this.messages.push({
+        role: 'user',
+        content: `[HARNESS] The plan is finished, but the game reports ${formatGoalProgress(evaluation)}; still unmet: ${unmet}. The user goal remains active. Author the next plan slice that moves the world toward the unmet conditions; do not report the goal as complete.`,
+      })
+      return this.runTurn()
+    }
+    this.active = false
+    const chatMessage = `The plan is finished, but the goal is not met yet: the game reports ${formatGoalProgress(evaluation)} (still unmet: ${unmet}).`
+    await this.traceEvent('request.completed', {
+      chat_message: chatMessage,
+      outcome: 'goal_unmet_after_plan',
+      task_board: visibleTaskBoard(stateResult?.state?.task_board),
+      usage: this.traceRequest?.usage,
+    })
+    this.traceRequest = null
+    return {
+      chatMessage,
+      plan: [],
+      currentStep: 0,
+      operations: [],
+      epoch: this.epoch?.epoch,
+      actorId: this.epoch?.actor_id,
+      goalId: planning.goal.goal_id,
+      goalStatus: 'active',
+      taskBoard: visibleTaskBoard(stateResult?.state?.task_board),
+    }
+  }
+
   // A done_when condition names something the game does not know (a typo'd
   // technology or item). Rolling more slices can never satisfy it, so stop and
   // ask the player instead of planning forever.
@@ -5292,6 +5538,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }[this.planningHorizonOverride]
       const envelope = `[DECISION_ENVELOPE] planning_horizon=${this.planningHorizonOverride}; observation_budget_remaining=${Number.isSafeInteger(this.observationBudgetRemaining) ? this.observationBudgetRemaining : 'runtime-default'}; observation_families=${Array.isArray(this.observationRelevanceOverride) ? this.observationRelevanceOverride.join(',') : 'runtime-default'}. ${horizonGuidance ?? ''}`
       providerMessages = [...providerMessages, { role: 'user', content: envelope }]
+    }
+    // Heavy planning turns spend the whole output cap, reasoning included,
+    // before emitting anything when the model works out every later step up
+    // front. Plan at outline level; each step is refined when it is active.
+    if (providerMessagesOverride === undefined
+      && (triggerSource === 'new_goal' || ['deep', 'strategic'].includes(this.reasoningBudgetOverride))) {
+      providerMessages = [...providerMessages, { role: 'user', content: PLANNING_LOD_GUIDANCE }]
     }
     const startedAt = Date.now()
     if (recoveryAttempt > 0 && this.traceRequest) {
@@ -5748,6 +6001,38 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  recordJevObservations(names) {
+    if (names.length === 0) return
+    this.jevObservationLog = [
+      ...(this.jevObservationLog ?? []),
+      ...names.map(tool => ({ tool, family: observationToolFamily(tool), after_batch: this.latestCompletedBatchId ?? 0 })),
+    ].slice(-JEV_OBSERVATION_LOG_LIMIT)
+  }
+
+  // What the planner already knows, computed by code so Jev does not have to
+  // infer it: recent fresh reads (stale once a newer batch has completed), the
+  // plan's steps, and whether the active step has completion evidence yet.
+  jevObservationContext(planState) {
+    const latest = this.latestCompletedBatchId ?? 0
+    const board = planState?.task_board
+    const steps = Array.isArray(board?.steps) ? board.steps : []
+    const activeStep = Number.isSafeInteger(board?.active_index) ? steps[board.active_index] : undefined
+    return {
+      known_observations: (this.jevObservationLog ?? []).map(entry => ({
+        tool: entry.tool,
+        family: entry.family,
+        stale: entry.after_batch < latest,
+      })),
+      plan_steps: steps.slice(0, 16).map(step => ({
+        description: sanitizeDurableModelText(step?.description, 200),
+        status: step?.status,
+      })),
+      active_step_has_completion_evidence: activeStep
+        ? (board?.evidence ?? []).some(item => item?.step_id === activeStep.id && SEMANTIC_GROUNDING_KINDS.has(item?.kind))
+        : false,
+    }
+  }
+
   observationDecisionPressureBudget() {
     if (Number.isSafeInteger(this.observationBudgetRemaining)) return Math.max(0, Math.min(8, this.observationBudgetRemaining))
     return super.observationDecisionPressureBudget()
@@ -5788,16 +6073,32 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let freshSlots = Number.isSafeInteger(this.observationBudgetRemaining)
       ? Math.max(0, this.observationBudgetRemaining)
       : Number.POSITIVE_INFINITY
+    // Jev's budget bounds planner rounds, not which facts the planner may see
+    // (see OBSERVATION_TOOL_TIER). Fact reads are always admitted; one
+    // discovery read per batch is admitted even when Jev deferred it. Both
+    // still count against the budget below, so an exhausted budget forces the
+    // next decision without tools.
+    const tierAdmitted = []
+    let discoveryAdmitted = 0
 
     for (let index = 0; index < prepared.length; index++) {
       const fresh = cachedPrepared[index] !== true && staticCachedPrepared[index] !== true
-      const family = observationToolFamily(prepared[index]?.tool?.function?.name)
+      const name = prepared[index]?.tool?.function?.name
+      const family = observationToolFamily(name)
+      const tier = observationToolTier(name)
       const relevant = !fresh || selectedObservationFamilies === null || selectedObservationFamilies.has(family)
-      if (relevant && (!fresh || freshSlots > 0)) {
+      const withinJev = relevant && (!fresh || freshSlots > 0)
+      // Once the budget closed the observation phase, nothing is admitted:
+      // that is what bounds the planner's rounds.
+      const tierOverride = fresh && !withinJev && this.observationDecisionForced !== true
+        && (tier === 'fact' || (tier === 'discovery' && discoveryAdmitted === 0))
+      if (withinJev || tierOverride) {
         admittedPrepared.push(prepared[index])
         admittedCached.push(cachedPrepared[index])
         admittedStaticCached.push(staticCachedPrepared[index])
-        if (fresh && Number.isFinite(freshSlots)) freshSlots--
+        if (tier === 'discovery') discoveryAdmitted++
+        if (tierOverride) tierAdmitted.push({ tool: name, tier })
+        else if (fresh && Number.isFinite(freshSlots)) freshSlots--
       }
       else {
         deferredPrepared.push(prepared[index])
@@ -5819,6 +6120,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           ...deferredPrepared.map(entry => entry.tool.function.name),
           ...rawDeferredTools.map(tool => tool?.function?.name).filter(Boolean),
         ],
+      })
+    }
+
+    if (tierAdmitted.length > 0) {
+      await this.traceEvent('observation.tier_admitted', {
+        tools: tierAdmitted,
+        budget_remaining_before: Number.isSafeInteger(this.observationBudgetRemaining) ? this.observationBudgetRemaining : undefined,
+        selected_families: selectedObservationFamilies ? [...selectedObservationFamilies] : undefined,
       })
     }
 
@@ -5883,6 +6192,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     const freshResultObserved = results.some((_, index) => admittedCached[index] !== true && admittedStaticCached[index] !== true)
     if (freshResultObserved) this.freshObservationSinceContinuation = true
+    this.recordJevObservations(admittedPrepared
+      .filter((_, index) => admittedCached[index] !== true && admittedStaticCached[index] !== true)
+      .map(entry => entry.tool.function.name))
     if (this.outputBudgetRecoveryGuard && freshResultObserved) {
       this.outputBudgetRecoveryGuard.world_evidence_observed = true
       this.outputBudgetRecoveryGuard.fresh_tool_evidence = true
@@ -5924,6 +6236,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         tools_enabled_next_round: false,
       })
     }
+  }
+
+  // Closing a step changes no world state, so a fresh read taken earlier in
+  // this continuation still grounds the next step's claim. Any new batch
+  // returns through a continuation, which clears it.
+  resetRepairAfterClosedStep() {
+    const freshObservation = this.freshObservationSinceContinuation
+    this.clearActionOmissionRecovery()
+    this.freshObservationSinceContinuation = freshObservation
   }
 
   clearActionOmissionRecovery() {
@@ -6290,7 +6611,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const board = state.task_board
     const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
     const step = activeIndex === undefined ? undefined : board?.steps?.[activeIndex]
-    if (!step || claim.stepId !== step.id) {
+    // The prompt tells the planner to use the Plan Tracker id from
+    // [PLANNING_STATE]; the Task Board projection names the same step
+    // step_N. Accept the tracker id only while both point at the same step.
+    const trackerPlan = getActivePlanningPlan(this.memory.planningState?.(this.requestInfo.memoryKey))
+    const trackerStepId = trackerPlan?.active_step_index === activeIndex
+      ? trackerPlan?.steps?.[activeIndex]?.step_id
+      : undefined
+    if (!step || (claim.stepId !== step.id && claim.stepId !== trackerStepId)) {
       const error = new AgentLoopError(
         `semantic_completion_step_mismatch: claimed=${claim.stepId || 'none'} active=${step?.id || 'none'}`,
       )
@@ -6305,18 +6633,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw error
     }
 
-    const groundingKinds = new Set([
-      'deterministic_verification',
-      'operation_receipt',
-      'verified_world_state',
-      'condition_satisfied',
-      'fresh_world_observation',
-    ])
     const grounding = [...(board?.evidence ?? [])]
       .filter(item => item?.step_id === step.id
         && typeof item?.ref === 'string'
         && item.ref
-        && groundingKinds.has(item?.kind))
+        && SEMANTIC_GROUNDING_KINDS.has(item?.kind))
       .slice(-4)
       .map(item => ({
         kind: item.kind,
@@ -6327,7 +6648,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (this.freshObservationSinceContinuation) {
       grounding.push({
         kind: 'verified_world_state',
-        ref: `${this.traceRequest?.id ?? 'request'}/semantic_fresh_observation`,
+        // One record per step: the evidence store drops a repeated ref, which
+        // would leave the next step's claim with nothing bound to it.
+        ref: `${this.traceRequest?.id ?? 'request'}/semantic_fresh_observation/${step.id}`,
         summary: 'The Main LLM made this semantic completion judgment after a fresh authoritative read-only world observation in the active request.',
       })
     }
@@ -6403,12 +6726,29 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let previousState = this.requestInfo
       ? this.memory.currentPlan?.(this.requestInfo.memoryKey)
       : undefined
+    const implied = plan.semanticCompletion ? undefined : impliedSemanticCompletion(plan, previousState)
+    if (implied) {
+      // The planner moved on to the next step without the explicit claim.
+      // Apply the claim it implies under the same checks; if they fail, keep
+      // the step open exactly as before instead of failing the request.
+      try {
+        const semantic = await this.applySemanticCompletionClaim({ ...plan, semanticCompletion: implied }, previousState)
+        previousState = semantic.state ?? previousState
+        if (semantic.applied === true) this.resetRepairAfterClosedStep()
+      }
+      catch (error) {
+        await this.traceEvent('step.implied_completion_skipped', {
+          active_step_id: implied.stepId,
+          reason: cleanMemoryText(error instanceof Error ? error.message : String(error), 300),
+        })
+      }
+    }
     if (plan.semanticCompletion) {
       const semantic = await this.applySemanticCompletionClaim(plan, previousState)
       previousState = semantic.state ?? previousState
       // A closed step is progress: the next step gets a fresh act-or-block
       // repair instead of failing on the one this claim just resolved.
-      if (semantic.applied === true) this.clearActionOmissionRecovery()
+      if (semantic.applied === true) this.resetRepairAfterClosedStep()
       if (previousState?.status === 'completed' && commands.length > 0) {
         const error = new AgentLoopError('semantic_completion_final_step_cannot_have_followup_operations')
         error.failureClass = 'plan_category'
@@ -6438,6 +6778,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       || (!previousState && Array.isArray(plan.plan) && plan.plan.length > 0)
     )
     const explicitBlocker = providerBlockerReason(plan)
+    if (commands.length === 0 && plan.plan.length === 0 && remainingCanonicalWork && !runtimeHealthy && !explicitBlocker) {
+      const finished = await this.finishIfGoalMet(plan, previousState)
+      if (finished) return finished
+    }
     let conditionWait = previousState?.condition_wait?.state === 'active'
       ? previousState.condition_wait
       : undefined
@@ -6515,7 +6859,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const state = await this.beginActionOmissionRepair(plan, 'no_operation_for_remaining_plan')
       if (state?.status === 'active') {
         this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
-        this.messages.push({ role: 'user', content: `[HARNESS] ${actionOmissionRepairMessage(state)}` })
+        this.messages.push({ role: 'user', content: `[HARNESS] ${actionOmissionRepairMessage(state)}${plan.plan.length === 0 ? this.unmetGoalNote() : ''}` })
         return this.runTurn()
       }
     }
@@ -6862,6 +7206,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           task_board: visibleTaskBoard(stateResult?.state?.task_board),
         })
         throw error
+      }
+    }
+
+    // A planner "done" that finished the plan is not a finished goal: when
+    // the goal has a game-checked definition, the game decides.
+    // After the one extra turn, a second "done" without work ends honestly.
+    if (commands.length === 0 && this.requestInfo && this.memory.goalDefinition?.(this.requestInfo.memoryKey)) {
+      const planFinished = finalCompletionVerified && stateResult?.state?.status === 'completed'
+      if (planFinished) {
+        const settled = await this.settleCompletedStepState(stateResult.state, { allowContinuation: false })
+        if (settled) return settled
+      }
+      if (planFinished || this.unmetGoalContinuationUsed === true) {
+        const unmet = await this.continueUnmetGoal(plan, stateResult)
+        if (unmet) return unmet
       }
     }
 
@@ -7401,16 +7760,28 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       this.reasoningTriggerSource = providerBudgetTriggerSource(semanticScope, routed.route)
       this.reasoningBudgetOverride = null
       const state = this.memory.currentPlan?.(key)
+      const admittedGoal = this.memory.planningState?.(key)?.goal
       const capsule = providerBudgetHandoffCapsule(
         state,
         routed.runtime ?? routed.persistentRuntime,
         reasonText,
         semanticScope,
+        {
+          admittedGoal: admittedGoal?.status === GOAL_STATUS.ACTIVE ? admittedGoal : undefined,
+          request: this.requestInfo,
+        },
       )
       this.messages = [
         { role: 'system', content: this.systemPrompt },
         { role: 'user', content: capsule },
       ]
+      // The capsule carries none of the earlier reads, so the fresh generation
+      // gets a fresh observation phase with the new-goal bootstrap minimum;
+      // inheriting a closed phase left it unable to re-observe anything.
+      this.resetObservationDecisionState()
+      if (Number.isSafeInteger(this.observationBudgetOverride)) {
+        this.observationBudgetRemaining = Math.max(3, this.observationBudgetOverride)
+      }
       await this.traceEvent('planner.wake', {
         source: 'decision_provider',
         contract: 'provider_budget_handoff',

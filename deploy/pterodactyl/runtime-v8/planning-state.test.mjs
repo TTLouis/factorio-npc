@@ -1,6 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
+import { steeringRecommendationQuestions } from './jev-decision-taxonomy.mjs'
+
 import {
   applyPlanningEvent,
   createEmptyPlanningState,
@@ -28,7 +30,9 @@ import {
   STEERING_BOUNDARY,
   STEERING_HOLD_REASON,
   STEERING_HYSTERESIS,
+  STEERING_PRESSURE_EVIDENCE,
   STEERING_PRESSURE_VOCABULARY,
+  askableSteeringPressures,
   steeringContextForDraft,
   steeringRecord,
   serializePlanningState,
@@ -1773,4 +1777,30 @@ test('a long goal keeps its active plan and newest history across the plan cap a
   assert.ok(state.log.length <= 256)
   assert.equal(state.log.at(-1).type, PLANNING_EVENT.PLAN_COMMITTED)
   assert.equal(restored.log.at(-1).type, PLANNING_EVENT.PLAN_COMMITTED)
+})
+
+test('Jev is asked only the steering pressures that the supplied state has facts for', () => {
+  // Every code carries a definition and the facts that could show it.
+  const { vertical, horizontal } = STEERING_PRESSURE_VOCABULARY
+  assert.deepEqual(Object.keys(STEERING_PRESSURE_EVIDENCE).sort(), [...vertical, ...horizontal].sort())
+
+  // A fresh goal on an empty map: no roadmap and no save facts, so nothing
+  // (for example machine_idle_no_input) can be asked.
+  assert.deepEqual(askableSteeringPressures({ roadmap: null, save_progress: null }), { horizontal: [], vertical: [] })
+
+  const withFacts = askableSteeringPressures({
+    roadmap: { nodes: [{ id: 'node_1' }] },
+    save_progress: { researched_technologies: 3 },
+  })
+  assert.deepEqual(withFacts, {
+    horizontal: [],
+    vertical: ['frontier_reached', 'capability_absent', 'shelf_node_ready_to_refine', 'goal_requires_new_capability'],
+  })
+
+  const questions = steeringRecommendationQuestions({
+    pressureVocabulary: withFacts,
+    pressureDefinitions: { capability_absent: STEERING_PRESSURE_EVIDENCE.capability_absent.definition },
+  })
+  assert.equal(questions.pressure_machine_idle_no_input, undefined)
+  assert.equal(questions.pressure_capability_absent.instructions.condition, STEERING_PRESSURE_EVIDENCE.capability_absent.definition)
 })

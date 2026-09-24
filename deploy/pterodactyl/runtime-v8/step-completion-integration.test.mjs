@@ -236,6 +236,49 @@ test('semantic completion requires exact active step identity', async () => {
   assert.equal(memory.currentPlan(key).task_board.completed_count, 0)
 })
 
+test('semantic completion accepts the Plan Tracker id the prompt tells the planner to use', async () => {
+  // Observed in the 2026-09-24 cloud trial: the claim used the [PLANNING_STATE]
+  // id while the Task Board projection names the same step step_1.
+  const { agent, memory, key } = agentWithState({ state: activeState({ withContract: false }) })
+  const tracker = getActivePlan(memory.planningState(key))
+  const trackerStepId = tracker.steps[0].step_id
+  assert.notEqual(trackerStepId, 'step_1')
+
+  await assert.rejects(
+    agent.applySemanticCompletionClaim({
+      chatMessage: 'Done.',
+      semanticCompletion: { stepId: tracker.steps[1].step_id, rationale: 'A later tracker step is not the active one.' },
+    }, memory.currentPlan(key)),
+    /semantic_completion_step_mismatch/,
+  )
+
+  const result = await agent.applySemanticCompletionClaim({
+    chatMessage: 'Done.',
+    semanticCompletion: { stepId: trackerStepId, rationale: 'The authoritative receipt grounds the active step.' },
+  }, memory.currentPlan(key))
+  assert.equal(result.applied, true)
+  assert.equal(memory.currentPlan(key).task_board.active_step_id, 'step_2')
+  assert.equal(getActivePlan(memory.planningState(key)).active_step_index, 1)
+})
+
+test('a fresh read still grounds the next step after a semantic claim closes one', async () => {
+  // 2026-09-24 cloud trial: one inventory read proved both the craft and the
+  // verify step, but closing the first step discarded that read.
+  const { agent, memory, key } = agentWithState({ state: activeState({ withContract: false }), freshObservation: true })
+  await agent.applySemanticCompletionClaim({
+    chatMessage: 'Stone gathered.',
+    semanticCompletion: { stepId: 'step_1', rationale: 'The gather receipt grounds step 1.' },
+  }, memory.currentPlan(key))
+  agent.resetRepairAfterClosedStep()
+
+  const result = await agent.applySemanticCompletionClaim({
+    chatMessage: 'Furnaces crafted.',
+    semanticCompletion: { stepId: 'step_2', rationale: 'The fresh inventory read shows the furnaces.' },
+  }, memory.currentPlan(key))
+  assert.equal(result.applied, true)
+  assert.equal(result.state.status, 'completed')
+})
+
 test('semantic completion requires authoritative runtime grounding', async () => {
   const state = activeState({ withContract: false, withVerification: false })
   const { agent, memory, key } = agentWithState({ state })

@@ -15,7 +15,7 @@ import {
   sanitizeGoalDefinition,
 } from './goal-definition.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
-import { GOAL_STATUS } from './planning-state.mjs'
+import { getActivePlan, GOAL_STATUS, PLAN_STATUS } from './planning-state.mjs'
 import { Session } from './supervisor.mjs'
 import { FakeFactorio, gather, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
 
@@ -112,6 +112,13 @@ test('the in-game understanding message states scope, checks and roadmap', () =>
 
 // --- whole loop ----------------------------------------------------------
 
+// The last conversation message, skipping the trailing per-turn planning
+// envelopes the harness appends after it.
+function lastConversationMessage(messages) {
+  const content = messages.map(message => String(message?.content ?? ''))
+  return content.filter(text => !/^\[(?:PLANNING_LOD|DECISION_ENVELOPE)\]/.test(text)).at(-1) ?? ''
+}
+
 function agentWith(game, memory, provider, extra = {}) {
   return new NpcAgentLoop({
     rcon: game,
@@ -136,7 +143,7 @@ test('a first plan without a goal definition is asked again once, then accepted 
   let calls = 0
   const agent = agentWith(game, memory, async messages => {
     calls++
-    prompts.push(String(messages.at(-1)?.content ?? ''))
+    prompts.push(lastConversationMessage(messages))
     const base = { plan: ['Gather 10 iron ore'], operations: [gather('iron-ore', 10)], checkpoint: inventoryCheckpoint('iron-ore', 10) }
     return calls === 1 ? planReply(base) : planReply({ ...base, goal: { ...ROCKET_GOAL, scope: 'finite' } })
   }, { onActivity: (event, data) => events.push({ event, data }) })
@@ -170,6 +177,48 @@ test('a second missing definition stops before any mutation and asks the player'
   assert.match(result.chatMessage, /Please restate the goal and what "done" means/)
 })
 
+test('a different goal-definition mistake per retry gets another correction naming the field', async () => {
+  // 2026-09-24 cloud trial: the goal was first missing, then used "item" for
+  // "item_name"; the second, different mistake stopped the goal.
+  const game = new FakeFactorio()
+  const memory = new CanonicalTaskBoardMemory()
+  const prompts = []
+  let calls = 0
+  const agent = agentWith(game, memory, async messages => {
+    calls++
+    prompts.push(lastConversationMessage(messages))
+    const base = { plan: ['Gather 10 iron ore'], operations: [gather('iron-ore', 10)] }
+    if (calls === 1) return planReply(base)
+    const condition = calls === 2
+      ? { kind: 'inventory_count', item: 'iron-ore', minimum: 10 }
+      : { kind: 'inventory_count', item_name: 'iron-ore', minimum: 10 }
+    return planReply({ ...base, goal: { scope: 'finite', summary: 'Gather 10 iron ore.', doneWhen: [condition] } })
+  })
+
+  const result = await agent.request('gather 10 iron ore', { sender: 'Louis' })
+
+  assert.equal(calls, 3)
+  assert.match(prompts[2], /inventory_count needs the field "item_name"; it has "item", "minimum"/)
+  assert.notEqual(result.blocked, true)
+  assert.equal(game.mutations.length, 1)
+})
+
+test('stopping to ask the player for a goal ends the request trace', async () => {
+  const game = new FakeFactorio()
+  const events = []
+  const agent = agentWith(game, new CanonicalTaskBoardMemory(), async () =>
+    planReply({ plan: ['Gather 10 iron ore'], operations: [gather('iron-ore', 10)] }), {
+    onActivity: (event, data) => events.push({ event, data }),
+  })
+
+  await agent.request('do the thing', { sender: 'Louis' })
+
+  const ended = events.filter(entry => entry.event === 'request.completed' || entry.event === 'request.failed')
+  assert.equal(ended.length, 1)
+  assert.equal(ended[0].data.outcome, 'blocked_before_mutation')
+  assert.equal(ended[0].data.blocker.class, 'goal_definition_needed')
+})
+
 test('a long-horizon definition without a Roadmap Shelf is asked again', async () => {
   const game = new FakeFactorio()
   const memory = new CanonicalTaskBoardMemory()
@@ -177,7 +226,7 @@ test('a long-horizon definition without a Roadmap Shelf is asked again', async (
   let calls = 0
   const agent = agentWith(game, memory, async messages => {
     calls++
-    prompts.push(String(messages.at(-1)?.content ?? ''))
+    prompts.push(lastConversationMessage(messages))
     const base = { plan: ['Gather 10 iron ore'], operations: [gather('iron-ore', 10)], checkpoint: inventoryCheckpoint('iron-ore', 10), goal: ROCKET_GOAL }
     return planReply(calls === 1 ? base : { ...base, roadmap: SHELF })
   })
@@ -196,7 +245,7 @@ test('finishing a slice does not finish the goal: the game decides, then the goa
   let calls = 0
   const agent = agentWith(game, memory, async messages => {
     calls++
-    prompts.push(String(messages.at(-1)?.content ?? ''))
+    prompts.push(lastConversationMessage(messages))
     if (calls === 1) {
       return planReply({ plan: ['Gather 10 iron ore'], operations: [gather('iron-ore', 10)], checkpoint: inventoryCheckpoint('iron-ore', 10), goal: ROCKET_GOAL, roadmap: SHELF })
     }
@@ -291,6 +340,115 @@ test('the supervisor prints the goal understanding in game', async () => {
   assert.ok(printed.some(line => line.includes('Done when (checked by the game):')))
   assert.doesNotMatch(conversation[0].text, /\[color/, 'the UI transcript gets plain text')
 })
+
+// 2026-09-24 cloud trial (run 5): a planner "done" on the last step ended the
+// request as complete without the game ever checking the goal definition.
+function doneOnLastStep(game, memory, events) {
+  let calls = 0
+  const agent = agentWith(game, memory, async () => {
+    calls++
+    if (calls === 1) {
+      return planReply({
+        plan: ['Gather 10 iron ore'],
+        operations: [gather('iron-ore', 10)],
+        goal: { scope: 'finite', summary: 'Have 5 iron plates.', doneWhen: [{ kind: 'inventory_count', item_name: 'iron-plate', minimum: 5 }] },
+      })
+    }
+    return planReply({ chatMessage: 'Done.', plan: [], currentStep: 0, operations: [] })
+  }, { onActivity: (event, data) => events.push({ event, data }) })
+  return { agent, calls: () => calls }
+}
+
+test('a planner "done" on the last step completes a defined goal when the game confirms it', async () => {
+  const game = new FakeFactorio({ inventory: { 'iron-plate': 5 } })
+  const memory = new CanonicalTaskBoardMemory()
+  const events = []
+  const { agent } = doneOnLastStep(game, memory, events)
+  await agent.request('have 5 iron plates', { sender: 'Louis' })
+  game.inventory['iron-ore'] = 10
+
+  const result = await agent.completed()
+
+  assert.equal(result.goalStatus, 'completed')
+  assert.ok(events.some(entry => entry.event === 'goal.evaluated' && entry.data.satisfied === true))
+})
+
+test('a planner "done" on the last step does not complete a defined goal the game reports unmet', async () => {
+  const game = new FakeFactorio()
+  const memory = new CanonicalTaskBoardMemory()
+  const events = []
+  const { agent, calls } = doneOnLastStep(game, memory, events)
+  await agent.request('have 5 iron plates', { sender: 'Louis' })
+  game.inventory['iron-ore'] = 10
+
+  const result = await agent.completed()
+
+  // One extra planning turn, then an honest ending with the goal still open.
+  assert.equal(calls(), 3)
+  assert.equal(result.goalStatus, 'active')
+  assert.match(result.chatMessage, /not met yet/)
+  const planning = memory.planningState(KEY)
+  assert.equal(planning.goal.status, GOAL_STATUS.ACTIVE)
+  // The finished slice is not copied into a new active draft.
+  assert.equal(getActivePlan(planning).status, PLAN_STATUS.COMPLETED)
+})
+
+// 2026-09-24 cloud trial (run 6): the planner declared the goal done while a
+// craft and a verify step were still open; the generic repair then failed the
+// request without the game ever being asked.
+function doneWithStepsLeft(game, memory, events, doneWhen) {
+  const prompts = []
+  let calls = 0
+  const agent = agentWith(game, memory, async messages => {
+    calls++
+    prompts.push(lastConversationMessage(messages))
+    if (calls === 1) {
+      return planReply({
+        plan: ['Gather 10 iron ore', 'Verify the iron ore is held'],
+        operations: [gather('iron-ore', 10)],
+        goal: { scope: 'finite', summary: 'Gather iron ore.', doneWhen },
+      })
+    }
+    return planReply({ chatMessage: 'Done.', plan: [], currentStep: 0, operations: [] })
+  }, { onActivity: (event, data) => events.push({ event, data }) })
+  return { agent, prompts, calls: () => calls }
+}
+
+test('a planner "done" with steps left completes a defined goal the game confirms', async () => {
+  const game = new FakeFactorio()
+  const memory = new CanonicalTaskBoardMemory()
+  const events = []
+  const { agent, calls } = doneWithStepsLeft(game, memory, events, [{ kind: 'inventory_count', item_name: 'iron-ore', minimum: 10 }])
+  await agent.request('gather 10 iron ore', { sender: 'Louis' })
+  game.inventory['iron-ore'] = 10
+
+  const result = await agent.completed()
+
+  assert.equal(calls(), 2)
+  assert.equal(result.goalStatus, 'completed')
+  assert.match(result.chatMessage, /verified complete: the game reports 1\/1/)
+  const ended = events.filter(entry => entry.event === 'request.completed')
+  assert.equal(ended.at(-1).data.outcome, 'goal_verified_complete')
+  assert.notEqual(ended.at(-1).data.task_board?.status, 'active')
+  assert.notEqual(memory.planningState(KEY)?.goal?.status, GOAL_STATUS.ACTIVE)
+  // Nothing is left for a later "continue" to resume.
+  assert.equal(memory.currentPlan(KEY), undefined)
+})
+
+test('a planner "done" with steps left is told which goal conditions the game reports unmet', async () => {
+  const game = new FakeFactorio()
+  const memory = new CanonicalTaskBoardMemory()
+  const events = []
+  const { agent, prompts } = doneWithStepsLeft(game, memory, events, [{ kind: 'inventory_count', item_name: 'iron-plate', minimum: 5 }])
+  await agent.request('have 5 iron plates', { sender: 'Louis' })
+  game.inventory['iron-ore'] = 10
+
+  await agent.completed().catch(() => {})
+
+  assert.ok(prompts.some(prompt => /still unmet: done_1 \(currently 0\)/.test(prompt)))
+  assert.equal(memory.planningState(KEY).goal.status, GOAL_STATUS.ACTIVE)
+})
+
 
 test('counters count from goal start: a save that already launched rockets is not done yet', async () => {
   const game = new FakeFactorio()

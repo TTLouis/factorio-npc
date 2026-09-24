@@ -237,6 +237,29 @@ the live TypeSafe decision envelopes no longer ask that Score question.
 All observations remain deterministic reads. Jev chooses relevance only and does not
 manufacture their values.
 
+Jev judges relevance from facts the runtime computes, not from what it would have to
+infer. The relevance state carries `known_observations` (recent fresh reads, each
+marked `stale` once a newer batch has completed), `plan_steps`, and
+`active_step_has_completion_evidence`. A missing or stale read never counts as
+sufficient evidence.
+
+Reads cost no API money; extra planner rounds and large results do. Jev's budget
+therefore bounds rounds, not which facts the planner may see. Every read tool has an
+admission tier (`OBSERVATION_TOOL_TIER` in `structured-policy.mjs`):
+
+| Tier | Reads | Jev's role |
+|---|---|---|
+| fact | current state (actor, task, navigation, crafting, combat, inventory, equipment, entity status/geometry, research status) and deterministic game data (recipes, production scope/solve, prototype details, technology, research path) | none; only harness caps apply (per-batch cap, cache, duplicate suppression) |
+| discovery | nearby and long-range entities, enemies, spatial observation, placement, logistics, transport, construction queries, prototype search | ranks them; one is admitted per batch when the planner asks |
+| optional | player state, skill lookup | relevance gates them |
+
+Every admitted fresh read counts against the budget. When it reaches zero the
+observation phase closes and nothing is admitted, facts included, until the next
+decision: that is what bounds the planner's rounds.
+
+- **Observe-route floor.** When the post-step route is `targeted_observation` but no
+  family clears the threshold, one read on the highest-ranked family is admitted.
+
 ## 6. Typed state distillation and working memory
 
 Jev does not generate prose summaries. TypeSafe System One returns typed judgments
@@ -419,6 +442,13 @@ The old `micro` mode may remain temporarily for compatibility, but new-goal firs
 
 Jev may summarize current pressure and recommend a direction. The Main LLM remains free to choose another direction.
 
+Each pressure code carries a plain-language definition and the facts that could show
+it (`STEERING_PRESSURE_EVIDENCE` in `planning-state.mjs`). Jev is asked a pressure only
+when the steering state carries all of its facts. Today that is the Roadmap Shelf and
+`save_progress`; production, power, logistics, resource, research, recipe, defense,
+and operation-history facts are not gathered yet, so pressures that need them are not
+asked. Add a fact detector when the runtime starts gathering one.
+
 Steering must never:
 
 - block plan commit;
@@ -585,3 +615,34 @@ The key correction is:
 
 Design new Jev features around finite selection, classification, scoring, routing, and
 candidate choice. Let deterministic code compose and execute the result.
+
+## 16. Jev input contract (2026-09-24)
+
+The TypeSafe request carries only `state`, `model`, and `questions`; there is no system
+prompt. All guidance lives in the state the runtime sends and in each question's
+`instructions` and `criteria`.
+
+Jev is a general-purpose judge. It weighs supplied facts well but cannot be expected
+to know Factorio mechanics or to see world state it was not given. Therefore:
+
+- compute Factorio facts in deterministic code and send them as state;
+- ask a question only when the state carries the facts needed to answer it;
+- define domain terms in the question text instead of relying on code names.
+
+Every Jev call is recorded in the decision trace as a `decision.exchange` event with
+the state it judged, the question ids, and the answers or error. The player's message
+is replaced by `message_chars`; the behavior trace holds it for the same request.
+
+### Proposed: offline question tuning (not implemented)
+
+Recorded `decision.exchange` states make wording changes testable without a new game
+run or any Main-LLM calls:
+
+1. collect exchanges from provider-backed rounds, keyed by contract;
+2. replay each recorded state against Jev with the current and the reworded questions;
+3. compare answer distributions against the known outcome of the round (for example,
+   whether the read that proved the step was selected);
+4. keep a wording change only when it improves those outcomes.
+
+Replay costs only Jev calls. Thresholds such as the `0.5` relevance cutoff should be
+calibrated from the same data rather than tuned by hand.

@@ -140,6 +140,10 @@ node --test deploy/pterodactyl/build-payload.test.mjs deploy/pterodactyl/staging
 pnpm test:npc
 ```
 
+`pnpm test:npc` needs a working local Docker daemon. In a sandboxed cloud container (for example Claude Code on the web), use `pnpm test:npc:cloud` instead: it starts `dockerd` if needed, pulls base images through a registry mirror to avoid Docker Hub rate limits, trusts the sandbox egress-proxy CA inside a generated copy of the test Dockerfile, and copies lane logs to `test-results/factorio/`. Select lanes with `NPC_TEST_LANES=core,production` and use `NPC_TEST_PARALLEL=0` for ordered debug output; `--no-build` reruns the last image.
+
+For provider-backed trials in the same kind of sandbox, `scripts/stack-cloud.sh` runs `compose.yml` + `compose.e2e.yml`. On first use it creates the gitignored `.env` from [`.env.cloud.example`](./.env.cloud.example) with a generated RCON password; fill in `OPENAI_API_KEY`, `OPENAI_API_BASEURL`, `OPENAI_MODEL` and `JEV_TYPESAFE_API_KEY` there or as environment variables (which override `.env`). Then use `scripts/stack-cloud.sh up`, `goal <text>`, `logs` and `down`.
+
 Repository CI does not use production provider credentials.
 
 ## Roadmap

@@ -531,6 +531,60 @@ test('decision provider rejects malformed Choice probability contracts', async (
   )
 })
 
+test('decision provider accepts Choice probabilities that miss 1 only by two-decimal rounding', async () => {
+  // Observed from jev-1.13.0 for goal_scope in the 2026-09-24 cloud trial.
+  const config = decisionProviderConfiguration({ TYPESAFE_API_KEY: KEY })
+  const result = await decisionProviderRequest(
+    config,
+    'state',
+    {
+      goal_scope: {
+        type: 'choice',
+        instructions: 'Choose.',
+        criteria: { finite: null, long_horizon: null, unclear: null },
+      },
+    },
+    {
+      reserve: async () => {},
+      fetchImpl: async () => new Response(JSON.stringify({
+        answers: {
+          goal_scope: {
+            type: 'choice',
+            choice: 'finite',
+            probabilities: { finite: 0.93, long_horizon: 0.01, unclear: 0.05 },
+            confidence: 0.93,
+          },
+        },
+      }), { status: 200 }),
+    },
+  )
+  assert.equal(result.answers.goal_scope.choice, 'finite')
+})
+
+test('decision provider drops one invalid answer and keeps the valid ones', async () => {
+  // 2026-09-24 cloud trial: a planning_horizon choice that was not its own
+  // highest-probability option discarded all 17 planner-shape answers.
+  const config = decisionProviderConfiguration({ TYPESAFE_API_KEY: KEY })
+  const choice = { type: 'choice', instructions: 'Choose.', criteria: { a: null, b: null } }
+  const result = await decisionProviderRequest(
+    config,
+    'state',
+    { planning_horizon: choice, need_inventory_equipment: { type: 'noul', instructions: 'Yes or no?', criteria: { true: 'yes', false: 'no' } } },
+    {
+      reserve: async () => {},
+      fetchImpl: async () => new Response(JSON.stringify({
+        answers: {
+          planning_horizon: { type: 'choice', choice: 'a', probabilities: { a: 0.4, b: 0.6 }, confidence: 0.4 },
+          need_inventory_equipment: { type: 'noul', noul: 0.8 },
+        },
+      }), { status: 200 }),
+    },
+  )
+  assert.deepEqual(Object.keys(result.answers), ['need_inventory_equipment'])
+  assert.match(result.invalid_answers.planning_horizon.reason, /not the highest-probability option/)
+  assert.equal(result.invalid_answers.planning_horizon.answer.choice, 'a')
+})
+
 test('decision provider rejects malformed Score answers', async () => {
   const config = decisionProviderConfiguration({ TYPESAFE_API_KEY: KEY })
   await assert.rejects(

@@ -12,6 +12,8 @@ import {
   observationToolFamilies,
   observationToolFamily,
   observationToolFamilyCatalog,
+  observationToolTier,
+  OBSERVATION_TOOL_TIER,
   toolDefinitions,
 } from './structured-policy.mjs'
 
@@ -156,17 +158,18 @@ test('M7 live admission executes selected fresh observation families and defers 
         function: { name: 'getInventoryItems', arguments: '{}' },
       },
       {
-        id: 'nearby',
+        // Relevance still gates optional-tier reads; fact and discovery reads
+        // have their own admission rules (see the tier test below).
+        id: 'player',
         type: 'function',
-        function: { name: 'getNearbyEntities', arguments: '{"radius":20}' },
+        function: { name: 'getPlayerStatus', arguments: '{"player_name":"Louis"}' },
       },
     ],
   })
 
   assert.equal(rcon.commands.some(command => command.includes('get_inventory_items')), true)
-  assert.equal(rcon.commands.some(command => command.includes('get_nearby_entities')), false)
   assert.equal(agent.observationBudgetRemaining, 1)
-  assert.equal(agent.messages.filter(message => message.role === 'tool').length, 1)
+  assert.deepEqual(agent.messages.filter(message => message.role === 'tool').map(message => message.tool_call_id), ['inventory'])
 })
 
 test('M7 cached observations remain reusable even when their family is not currently selected', async () => {
@@ -219,4 +222,53 @@ test('M7 cached observations remain reusable even when their family is not curre
   })
 
   assert.equal(rcon.commands.filter(command => command.includes('get_nearby_entities')).length, afterFirst)
+})
+
+test('Jev cannot defer fact reads, admits one discovery read, and still bounds rounds', async () => {
+  // Jev budget and relevance as observed in the 2026-09-24 cloud trials: run 1
+  // deferred the inventory read that proved the step, run 5 deferred the
+  // search for the stone patch.
+  const rcon = new ObservationSelectionRcon()
+  const agent = new NpcAgentLoop({
+    rcon,
+    memory: new NpcDialogueMemory(),
+    systemPrompt: 'observation tier admission test',
+    provider: async () => { throw new Error('planner should not run') },
+    traceFile: null,
+    stateFile: null,
+  })
+  agent.active = true
+  agent.epoch = await rcon.command('remote.call("airi_deployment","status")').then(JSON.parse)
+  agent.messages = [{ role: 'system', content: 'test' }]
+  agent.observationBudgetOverride = 0
+  agent.observationBudgetRemaining = 0
+  agent.observationRelevanceOverride = []
+
+  const call = (id, name, args = '{}') => ({ id, type: 'function', function: { name, arguments: args } })
+  await agent.handleToolBatch({
+    tool_calls: [
+      call('inventory', 'getInventoryItems'),
+      call('nearby', 'getNearbyEntities', '{"radius":20}'),
+      call('long-range', 'findLongRangeEntities', '{"name":"stone"}'),
+      call('player', 'getPlayerStatus', '{"player_name":"Louis"}'),
+    ],
+  })
+  const executed = () => agent.messages.filter(message => message.role === 'tool').map(message => message.tool_call_id)
+  assert.deepEqual(executed(), ['inventory', 'nearby'])
+  assert.equal(agent.observationBudgetRemaining, 0)
+  assert.equal(agent.observationDecisionForced, true)
+
+  // The exhausted budget closed the observation phase: not even a fact read runs.
+  await agent.handleToolBatch({ tool_calls: [call('actor', 'getActorStatus')] })
+  assert.deepEqual(executed(), ['inventory', 'nearby'])
+})
+
+test('every observation tool has an admission tier', () => {
+  for (const name of Object.keys(observationToolFamilyCatalog())) {
+    assert.ok(Object.hasOwn(OBSERVATION_TOOL_TIER, name), name)
+  }
+  assert.equal(observationToolTier('getInventoryItems'), 'fact')
+  assert.equal(observationToolTier('getRecipeDetails'), 'fact')
+  assert.equal(observationToolTier('findLongRangeEntities'), 'discovery')
+  assert.equal(observationToolTier('getPlayerStatus'), 'optional')
 })

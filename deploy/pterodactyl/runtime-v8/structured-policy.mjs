@@ -907,6 +907,58 @@ const OBSERVATION_TOOL_FAMILY = Object.freeze({
   inspectConstructionIntent: 'construction_state',
 })
 
+// Who may limit each read. Reads cost no API money; extra planner rounds and
+// large results do. Jev's budget therefore bounds rounds, not which facts the
+// planner may see:
+//   fact       current state or deterministic game data; never gated by Jev,
+//              only by harness caps (per-batch cap, cache, duplicates)
+//   discovery  searches and spatial/placement/logistics queries whose results
+//              can be large; Jev ranks them, but one is always admitted per
+//              batch when the planner asks
+//   optional   Jev relevance gates them as before
+// Every read still counts against Jev's budget, so an exhausted budget still
+// forces the next decision without tools.
+export const OBSERVATION_TOOL_TIER = Object.freeze({
+  getActorStatus: 'fact',
+  getTaskStatus: 'fact',
+  getNavigationStatus: 'fact',
+  getFollowStatus: 'fact',
+  getDefenseStatus: 'fact',
+  getCraftingStatus: 'fact',
+  getCombatStatus: 'fact',
+  getInventoryItems: 'fact',
+  getEquipmentStatus: 'fact',
+  getRecipe: 'fact',
+  getRecipeDetails: 'fact',
+  getProductionScope: 'fact',
+  solveProduction: 'fact',
+  getPrototypeDetails: 'fact',
+  getEntityStatus: 'fact',
+  getEntityGeometry: 'fact',
+  getResearchStatus: 'fact',
+  getResearchRequest: 'fact',
+  getTechnology: 'fact',
+  getResearchPath: 'fact',
+
+  discoverPrototypes: 'discovery',
+  getNearbyEntities: 'discovery',
+  findLongRangeEntities: 'discovery',
+  findNearestEnemy: 'discovery',
+  getLocalSpatialObservation: 'discovery',
+  getLogisticsTopology: 'discovery',
+  measureTransportThroughput: 'discovery',
+  getTransportCapacity: 'discovery',
+  getPlacementCandidates: 'discovery',
+  planPlacement: 'discovery',
+  findConstructionSites: 'discovery',
+  validateConstructionPlan: 'discovery',
+  inspectConstructionIntent: 'discovery',
+
+  getPlayerStatus: 'optional',
+  findSkills: 'optional',
+  getSkillDetails: 'optional',
+})
+
 const OBSERVATION_TOOL_FAMILIES = Object.freeze([
   'runtime_status',
   'inventory_equipment',
@@ -944,6 +996,12 @@ export function observationToolFamily(name) {
 
 export function observationToolFamilyCatalog() {
   return { ...OBSERVATION_TOOL_FAMILY }
+}
+
+export function observationToolTier(name) {
+  return typeof name === 'string' && Object.hasOwn(OBSERVATION_TOOL_TIER, name)
+    ? OBSERVATION_TOOL_TIER[name]
+    : 'optional'
 }
 
 export function isObservationToolName(name) {

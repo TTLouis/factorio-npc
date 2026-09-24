@@ -925,3 +925,49 @@ test('provider budget rollover limit stops recursive fresh generations without c
   assert.notEqual(state.status, 'blocked')
   assert.equal(state.provider_recovery, undefined)
 })
+
+test('a budget handoff on the first turn of a new goal keeps the player request', async () => {
+  // 2026-09-24 cloud trial: the planner spent the new-goal read budget, the
+  // tools-off decision turn exhausted its output budget before any plan was
+  // stored, and the handoff capsule had goal: null, so the fresh generation
+  // answered that it had nothing to do and the goal was dropped.
+  const calls = []
+  const request = 'build a burner mining drill on iron ore that feeds a stone furnace'
+  const read = (id, name) => ({ id, type: 'function', function: { name, arguments: '{}' } })
+  const agent = makeAgent({
+    interactionDecisionProvider: async (_state, questions) => ({
+      model: 'jev-latest',
+      provider: 'TypeSafe',
+      answers: questions.intent
+        ? {
+            intent: { type: 'choice', choice: 'new_goal', confidence: 0.99, probabilities: { new_goal: 0.99 } },
+            queue_conflict: { type: 'noul', noul: 0 },
+          }
+        : {},
+    }),
+    provider: async (messages, context) => {
+      calls.push({ messages, context })
+      if (calls.length === 1) {
+        return { tool_calls: [read('a', 'getActorStatus'), read('b', 'getInventoryItems'), read('c', 'getTaskStatus')] }
+      }
+      if (calls.length === 2) return exhaustedMessage()
+      return planMessage({
+        chatMessage: 'Starting.',
+        plan: ['Gather stone for a furnace'],
+        operations: [{ name: 'wait', args: { ticks: 1 } }],
+      })
+    },
+  })
+
+  await agent.request(request, { sender: 'TTLouis' })
+
+  assert.equal(calls[1].context.allowTools, false)
+  const handoff = calls.at(-1).messages.map(message => String(message.content ?? ''))
+    .find(content => content.startsWith('[PROVIDER_BUDGET_HANDOFF]'))
+  assert.ok(handoff, 'the fresh generation receives the handoff capsule')
+  const capsule = JSON.parse(handoff.slice(handoff.indexOf('{')))
+  assert.deepEqual(capsule.player_request, { sender: 'TTLouis', text: request })
+  // The capsule has none of the earlier reads, so the fresh generation can
+  // observe again (attempt 2 of the canary inherited a closed phase).
+  assert.equal(calls.at(-1).context.allowTools, true)
+})
