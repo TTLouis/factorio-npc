@@ -72,10 +72,13 @@ export async function prepareServerSettings(root, game, factorio = { username: '
   // Factorio refuses to start a public game unless require_user_verification
   // is also true (CommandLineMultiplayer.cpp), so this tracks visibility.public
   // exactly rather than being an independently configurable setting.
+  // The NPC must keep playing with zero connected humans, so the server never
+  // auto-pauses; Factorio's example settings ship with auto_pause=true.
   const next = {
     ...current,
     visibility: { ...current.visibility, public: factorio.public, lan: false },
     require_user_verification: factorio.public,
+    auto_pause: false,
     username: factorio.username,
     token: factorio.token,
   }

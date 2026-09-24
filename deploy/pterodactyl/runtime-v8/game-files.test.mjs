@@ -49,6 +49,17 @@ test('blank username/token produces a hidden server on first creation', async (t
   assert.equal(settings.description, 'SGLuna standalone NPC Factorio server')
 })
 
+test('the server never auto-pauses, so the NPC runs with zero connected humans', async (t) => {
+  const root = await temp(t)
+  const game = await setupGame(root)
+  await fsp.mkdir(path.join(root, 'data'), { recursive: true })
+  await fsp.writeFile(path.join(root, 'data', 'server-settings.json'), JSON.stringify({ name: 'kept', auto_pause: true, visibility: { public: false } }))
+  await prepareServerSettings(root, game, { username: '', token: '', public: false })
+  const settings = await readSettings(root)
+  assert.equal(settings.auto_pause, false)
+  assert.equal(settings.name, 'kept')
+})
+
 test('matching username/token publishes the server', async (t) => {
   const root = await temp(t)
   const game = await setupGame(root)
