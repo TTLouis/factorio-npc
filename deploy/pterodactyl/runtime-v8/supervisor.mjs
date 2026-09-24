@@ -35,6 +35,9 @@ import { decisionProviderConfiguration, decisionProviderRequest, providerEndpoin
 import { configureNpcSession } from './supervisor-adapter.mjs'
 import { luaString } from './structured-policy.mjs'
 
+// Pause-reason prefix for temporary provider failures that resume on their own
+// (see transientProviderFailure).
+export const TRANSIENT_PAUSE_PREFIX = 'provider_transient'
 const UI_CONTROL_MARKER = '[AIRI_UI_CONTROL]'
 const UI_CONTROL_ACTIONS = new Set(['pause', 'terminate', 'follow', 'stop_follow', 'new_task', 'keep_paused', 'revise', 'cancel'])
 const UI_PROMPT_MARKER = '[AIRI_UI_PROMPT]'
@@ -1533,7 +1536,6 @@ function idleAutorioRuntime(status) {
 // A long goal must not stop for one of these until a human types "continue".
 // Model-behaviour failures (bad output, action omission, context window) are
 // deliberately excluded: waiting does not fix them.
-export const TRANSIENT_PAUSE_PREFIX = 'provider_transient'
 export const AUTO_RESUME_MAX_ATTEMPTS = Object.freeze({ budget: 15, default: 6 })
 
 export function transientProviderFailure(message) {

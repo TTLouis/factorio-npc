@@ -31,7 +31,7 @@ const FALLBACK_RULES = [
   ['rate_limited', /HTTP 429/],
   ['http', /HTTP \d{3}/],
   ['not_configured', /not configured|requires a budget reservation/i],
-  ['request_contract', /Decision provider state|Decision question|Choice question|Score question|Noul question|Decision questions must|Decision request must contain|request exceeds \d+ characters|not JSON serializable|Invalid decision question identifier/],
+  ['request_contract', /Decision provider state|Decision question|Choice question|Score question|Noul question|Decision request must contain|request exceeds \d+ characters|not JSON serializable|Invalid decision question identifier/],
   ['response_contract', /Decision provider (answer|response|returned)|probabilities|legend/i],
   ['transport', /fetch failed|ECONN|ENOTFOUND|EAI_AGAIN|socket|network/i],
 ]

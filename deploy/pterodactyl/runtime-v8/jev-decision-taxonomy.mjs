@@ -130,8 +130,6 @@ const FORBIDDEN_AUTHORITY_FIELDS = Object.freeze([
 ])
 
 const MAX_REASON_CODES = 8
-const MAX_SHELF_NODES = 5
-const ID_PATTERN = /^[A-Za-z0-9_.:-]{1,64}$/
 
 const CONFIDENCE_LABELS = Object.freeze({
   none: 0,

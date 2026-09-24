@@ -508,7 +508,11 @@ function validPlanCandidate(candidate) {
 // Parse it back into ordinary tool calls so they take the same admission path
 // as a native call. `string="false"` parameters carry JSON values. Anything
 // that does not parse completely is left as content for the format recovery.
-const DSML_TAG = String.raw`<\s*(/?)\s*[｜|]+\s*DSML\s*[｜|]+\s*`
+// The optional group captures the closing slash with its leading space, so
+// it never competes with the following \s* (no super-linear backtracking).
+const DSML_TAG = String.raw`<(\s*/)?\s*[｜|]+\s*DSML\s*[｜|]+\s*`
+const opening = group => group === undefined
+const closing = group => group !== undefined
 const DSML_CALLS = new RegExp(`${DSML_TAG}calls\\s*>([\\s\\S]*?)${DSML_TAG}calls\\s*>`)
 const DSML_INVOKE = new RegExp(`${DSML_TAG}invoke\\s+name="([^"]+)"\\s*>([\\s\\S]*?)${DSML_TAG}invoke\\s*>`, 'g')
 const DSML_PARAMETER = new RegExp(`${DSML_TAG}parameter\\s+name="([^"]+)"(?:\\s+string="(true|false)")?\\s*>([\\s\\S]*?)${DSML_TAG}parameter\\s*>`, 'g')
@@ -516,13 +520,13 @@ const DSML_PARAMETER = new RegExp(`${DSML_TAG}parameter\\s+name="([^"]+)"(?:\\s+
 export function recoverDsmlToolCalls(content) {
   const text = String(content ?? '')
   const block = DSML_CALLS.exec(text)
-  if (!block || block[1] !== '' || block[3] !== '/') return undefined
+  if (!block || !opening(block[1]) || !closing(block[3])) return undefined
   const calls = []
   for (const invoke of block[2].matchAll(DSML_INVOKE)) {
-    if (invoke[1] !== '' || invoke[4] !== '/') return undefined
+    if (!opening(invoke[1]) || !closing(invoke[4])) return undefined
     const args = {}
     for (const parameter of invoke[3].matchAll(DSML_PARAMETER)) {
-      if (parameter[1] !== '' || parameter[5] !== '/') return undefined
+      if (!opening(parameter[1]) || !closing(parameter[5])) return undefined
       const [, , key, isString, raw] = parameter
       if (isString === 'false') {
         try { args[key] = JSON.parse(raw) }

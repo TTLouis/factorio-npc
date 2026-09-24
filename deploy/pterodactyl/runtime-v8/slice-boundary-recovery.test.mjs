@@ -143,7 +143,7 @@ test('if the goal was met while the server was down, recovery completes it inste
 
   game.rocketsLaunched = 1
   const callsBefore = calls
-  const { agent, memory } = await restart(game, file, provider)
+  const { agent } = await restart(game, file, provider)
   const recovery = await recoverInterruptedAgentPlan(agent, 'runtime_restart', {})
   assert.equal(recovery.result.goalStatus, 'completed')
   assert.equal(calls, callsBefore, 'no planner call needed')

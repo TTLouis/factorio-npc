@@ -107,12 +107,6 @@ const LOW_RISK_NAVIGATION_PROJECTION_MAX_CANDIDATES = 8
 // Once the system commits a plan, its semantic content is immutable; later batches fulfil it rather than rewriting it.
 const FROZEN_PLAN_STATUSES = new Set([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING])
 const WORLD_STATE_REQUIREMENT_KINDS = new Set(['inventory_count', 'entity_inventory_count', 'entity_exists', 'entity_state'])
-const INVENTORY_PRODUCT_FIELD_BY_OPERATION = Object.freeze({
-  gather_resource: 'resource_name',
-  mine_resource_at: 'resource_name',
-  harvest_product: 'product_name',
-  craft_item: 'item_name',
-})
 const EXACT_ENTITY_TARGET_OPERATIONS = new Set([
   'walk_to_entity_exact',
   'mine_entity_exact',
@@ -3875,7 +3869,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
     const board = planState?.task_board
     const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
-    const activeStep = activeIndex === undefined ? undefined : board?.steps?.[activeIndex]
     const skills = this.loadedSkillContext instanceof Map
       ? [...this.loadedSkillContext.values()].slice(-SKILL_CONTEXT_MAX_SKILLS).map(skill => ({
           id: typeof skill?.id === 'string' ? cleanMemoryText(skill.id, 80) : undefined,
@@ -4916,7 +4909,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       && reducerPlanAfterCompletion?.status === PLAN_STATUS.COMPLETED) {
       goalEvaluation = await this.evaluateGoalCompletion()
       planningAfterCompletion = this.memory.planningState?.(this.activePlanKey())
-      const unverifiable = goalEvaluation?.results.filter(result => /^(unknown_|invalid_)/.test(result.error ?? '')) ?? []
+      const unverifiable = goalEvaluation?.results.filter(result => /^(?:unknown_|invalid_)/.test(result.error ?? '')) ?? []
       if (unverifiable.length > 0) return this.pauseForUnverifiableGoal(unverifiable)
     }
     const goalUnmet = goalEvaluation !== undefined && !goalEvaluation.satisfied
