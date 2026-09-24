@@ -82,6 +82,22 @@ Still unverified in real Factorio:
 - whether transfers into a silo can spill into its non-input inventories;
 - respawn on platforms.
 
+### 2026-09-24 console redesign (unit evidence only, not yet seen in Factorio)
+
+The left column of the NPC console was rebuilt from the approved "Chosen" mock-up. The right column (camera, inventory, wanted, equipped) is unchanged.
+
+- **Title bar:** Learn, Old tasks and Debug are icon buttons before Close. A status sprite and label show the phase and its detail.
+- **Tabs:**
+  - NOW: the Goal card (the goal's game checks with progress), the Now card (current step, next steps, pause or block reasons, last result), the Latest card (the 3 newest feed rows plus an "All activity" button) and the conversation.
+  - PLAN: the Goal card and the Roadmap Shelf / Active Plan tracker.
+  - ACTIVITY: the execution feed with its filters and LIVE button. It was built but hidden before; Debug keeps its own copy.
+- **Always visible:** a blocked plan is a banner above the tabs. The prompt and the PAUSE / FOLLOW / … row (NEW TASK and TERMINATE are in …) sit below the tabs.
+- **Scroll positions:** pages are built once and a tab switch only flips visibility, so each scroll-pane keeps its position. The selected tab is stored per player, written only in the click handler.
+- **Merged repeats:** consecutive identical feed lines show as one row with ×N, updated in place.
+- **LuaJIT limit:** `new_combat_controller` was over LuaJIT's 60-upvalue limit. Its tuning constants are now one table.
+
+Not yet checked in real Factorio: the layout as a whole, the icon sprites, `toggled` on frame action buttons and tab buttons, and heights at 1080p.
+
 The compatibility projection should not be deleted merely for cosmetic cleanup while other runtime/UI
 features still consume it. Future removal should be driven by eliminating those consumers, not by creating
 another planning source of truth.

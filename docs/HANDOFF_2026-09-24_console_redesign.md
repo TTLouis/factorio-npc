@@ -57,73 +57,23 @@ Mock-up: https://claude.ai/artifact/RKkxJFh2h6p16rsE5PpQCL (frame "Chosen").
 - Right column: unchanged (camera, inventory, wanted, equipped).
 - Prompt and the PAUSE / FOLLOW / … row stay visible under the tabs.
 
-### Stage 1 — committed locally, NOT pushed: `cd146ce9`
-- Title bar: icon buttons Learn / Old tasks / Debug before Close.
-  - Sprites `airi-console-{learn,history,debug}-{white,black}` are declared in `data.lua`.
-  - The PNGs are drawn by `packages/autorio/scripts/draw_console_icons.py` (stdlib only).
-- New module `packages/autorio/src/task_board_console.ts`: title bar, blocked banner, action row. It is fed plain state objects.
-- The Controls panel is removed. The action row sits under the prompt: PAUSE (wide) + FOLLOW + ….
-  - The … menu holds NEW TASK and TERMINATE; `storage.airi_task_board_more_open` is written only in the click handler.
-  - An armed TERMINATE keeps the menu open.
-- The blocked plan shows as a full-width banner.
-- Status takes the full left-column width.
-- Constants are in `task_board_ui_constants.ts`.
-- Source-structure tests are updated. The test helpers now also read `task_board_console.ts`.
+### Stages 1–4 — all pushed to both branches
+- `cd146ce9` stage 1: title-bar icons, the action row and the … menu, the blocked banner.
+- `5371c2c8` stage 2: the Goal and Now cards, and `goalUiView()` in the runtime.
+- `e4919e38` the LuaJIT fix: `new_combat_controller` in `combat.ts` captured about 70 module locals, over LuaJIT's 60-upvalue limit. Its tuning constants are now one `COMBAT` table (36 captures). CI and release gates are green on this commit.
+  - Why CI had passed before is unexplained: a local build of `9db40a31` failed the same check. The fix removes the dependence either way.
+  - Pitfall: `pnpm run test` overwrites `dist/control.lua` with a 26-line stub. Run luajit right after `pnpm run build`, before the tests.
+- `940d7ad8` stage 3: NOW / PLAN / ACTIVITY tabs.
+  - A button strip (not a native tabbed-pane: its content padding is not settable from Lua) and three pages, switched by `.visible`.
+  - `storage.airi_task_board_tab`; clicks go through the `airi_console_tab` tag.
+  - The activity feed moved out of the tracker into its own section.
+- Stage 4: the Latest card (3 newest rows plus "All activity") and merged ×N repeats.
+  - `activity_rows` / `activity_row_diff` in `task_board_activity.ts`.
+  - A row matches by its first or last entry, so new repeats and trims update in place.
 
-### Stage 2 — committed locally, NOT pushed: `5371c2c8`
-- Runtime:
-  - `goalUiView()` in `goal-definition.mjs`;
-  - `Session.goalUiView()` in `supervisor.mjs`: 30 s cache, read-only, invalidated on `goal.evaluated`;
-  - `syncTaskBoardUi` adds `snapshot.goal`.
-- Mod:
-  - `TaskBoardUiGoal` plus `sanitize_goal` (at most 6 checks; met is recounted);
-  - the Goal card and Now card in `task_board_console.ts` replace the Status panel;
-  - the title bar gains a status sprite and label (phase · detail), with NPC / world task / sync in its tooltip;
-  - the `TONE_*` tables moved to constants.
-- Tests:
-  - `task_board_console.test.ts` has fake-GUI render tests;
-  - runtime tests are in `goal-definition.test.mjs`;
-  - `test-setup.ts` gains `defines.rich_text_setting`.
-- Locally all tests pass: mod 741, runtime 863, agent 101. Lint is clean.
-
-## OPEN PROBLEM — resolve before pushing stage 1/2
-
-`luajit -b packages/autorio/dist/control.lua` fails locally:
-
-```
-function at line 7901 has more than 60 upvalues
-```
-
-The function is `new_combat_controller` in `combat.ts`, which is untouched. Facts gathered:
-- It fails even when building the source of pushed commit `9db40a31`. CI's "Parse generated Lua with LuaJIT" step **passed** on that same commit, using the same apt LuaJIT 2.1.
-- The same local luajit check passed earlier this session, including on the first stage-2 build.
-- Installed TSTL (1.32.0) matches the lockfile. No TSTL plugin is used in the production tsconfig.
-
-Hypothesis being tested when interrupted: the build output is not deterministic between runs, or something in the local environment changed.
-
-Next checks:
-1. Build 2–3 times and diff `dist/control.lua` and the luajit result.
-2. If the output is deterministic and still fails, compare with CI's artifact, or push stage 1+2 on a scratch branch and watch CI's luajit step. The test is whether CI parses it.
-3. If CI also fails, reduce `new_combat_controller`'s upvalues in `combat.ts`. For example, group its tuning constants into one table (the same pattern as `RESOURCE_LAYOUT` / `CONSOLE_LAYOUT`).
-
-## Remaining work after that
-
-- **Stage 3 — tabs.**
-  - Add a native `tabbed-pane` in the left column. The selected tab is persisted per player from `on_gui_selected_tab_changed`, never from render.
-  - NOW = Goal and Now cards plus the conversation section (`debug_ui.render_ai_reply`; its host is `parent.parent`).
-  - PLAN = Goal card plus the existing tracker (shelf + plan).
-  - ACTIVITY = the activity feed. Today it is built but hidden inside the tracker; give it its own section and reuse `refresh_activity`.
-  - Keep scroll panes alive: toggle `.visible`, never rebuild.
-  - Update `activity_scroll_of` / `prompt_field` paths.
-  - The blocked banner stays above the tabs.
-- **Stage 4 — Latest and merged repeats.**
-  - The NOW tab gets the 3 newest activity lines plus an "All activity" button that switches tab.
-  - Consecutive identical activity lines merge into one row with `×N`, and the caption is updated in place (keep the diff/append logic in `refresh_activity` intact).
-- After each stage:
-  - run the full gates, commit (no co-author), and push to both branches;
-  - schedule a CI check-in with `send_later`;
-  - update the tasks (#2 is in progress; #3 and #4 are pending).
-- **Docs:** note the console redesign and that it is not yet seen in real Factorio in `docs/NPC_AGENT_HARNESS_STATUS.md`.
+## Remaining ideas (not started)
+- An ACTIVITY tab caption with an unseen count while another tab is open.
+- Check the heights at 1080p in real Factorio. The feed height is `CONSOLE_TABS.activity_height = 460`.
 
 ## Unverified in real Factorio (tell the user; they are offline until the 27th)
 
