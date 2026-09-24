@@ -185,12 +185,12 @@ test('cross-layer provider bodies switch high reasoning exhaustion to one no-rea
 
   assert.equal(result.goalStatus, 'active')
   assert.equal(bodies.length, 2)
-  assert.equal(bodies[0].reasoning_effort, 'high')
+  assert.equal(bodies[0].reasoning_effort, 'max')
   assert.deepEqual(bodies[0].thinking, { type: 'enabled' })
-  assert.equal(bodies[0].max_tokens, 4000)
+  assert.equal(bodies[0].max_tokens, 32000)
   assert.equal(bodies[1].reasoning_effort, 'none')
   assert.deepEqual(bodies[1].thinking, { type: 'disabled' })
-  assert.equal(bodies[1].max_tokens, 1000)
+  assert.equal(bodies[1].max_tokens, 3000)
 })
 
 test('usage normalization keeps unknown distinct and separates cached/reasoning/visible output', () => {

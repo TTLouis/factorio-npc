@@ -17,9 +17,9 @@ const env = {
 }
 
 test('provider timeout is a migrated non-secret config with a Pterodactyl env override', () => {
-  assert.equal(AIRI_CONFIG_DEFAULTS.providerTimeoutMs, 120000)
-  assert.equal(migrateConfig({}, {}).providerTimeoutMs, 120000)
-  assert.equal(configuration({}, env).providerTimeoutMs, 120000)
+  assert.equal(AIRI_CONFIG_DEFAULTS.providerTimeoutMs, 300000)
+  assert.equal(migrateConfig({}, {}).providerTimeoutMs, 300000)
+  assert.equal(configuration({}, env).providerTimeoutMs, 300000)
   assert.equal(configuration({}, { ...env, PROVIDER_TIMEOUT_MS: '90000' }).providerTimeoutMs, 90000)
 })
 

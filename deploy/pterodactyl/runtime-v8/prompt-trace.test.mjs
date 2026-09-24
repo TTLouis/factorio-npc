@@ -78,7 +78,7 @@ test('prompt trace records the exact final provider body after continuation comp
   assert.equal(requestRow.stats.body_chars, JSON.stringify(sentBody).length)
   assert.equal(requestRow.stats.message_count, sentBody.messages.length)
   assert.equal(requestRow.stats.tool_count, sentBody.tools.length)
-  assert.equal(requestRow.payload.max_tokens, 4000)
+  assert.equal(requestRow.payload.max_tokens, 8000)
   assert.match(requestRow.payload.messages[0].content, /Token-efficient continuation rules/)
   assert.ok(requestRow.payload.messages.some(message => typeof message.content === 'string' && message.content.startsWith('[STEERING]')))
   assert.equal(responseRow.diagnostic_code, 'provider_content_schema_invalid')
@@ -112,7 +112,7 @@ test('prompt trace redacts common secrets without redacting max_tokens', async t
   const rows = await readTrace(promptTraceFile)
   const requestRow = rows.find(row => row.event === 'provider.request')
   assert.ok(requestRow)
-  assert.equal(requestRow.payload.max_tokens, 2000)
+  assert.equal(requestRow.payload.max_tokens, 4000)
   assert.equal(requestRow.trigger_source, 'request')
 })
 
