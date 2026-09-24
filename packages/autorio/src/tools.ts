@@ -1,4 +1,4 @@
-import type { LuaEntity } from 'factorio:runtime'
+import type { LuaEntity, LuaForce } from 'factorio:runtime'
 import { create_actor_remote_interface, get_controlled_actor } from './actors/actor_controller'
 import type { ControlledActor } from './actors/types'
 import { remember_entity_reference, resolve_exact_entity } from './entity_reference'
@@ -38,27 +38,16 @@ function entity_item_count(entity: LuaEntity, item_name: string) {
   return count
 }
 
-function evaluate_runtime_condition(request: Record<string, unknown>) {
-  const actor = get_controlled_actor()
-  if (!actor) return { ok: false, error: 'no_actor' }
-  if (!request || typeof request !== 'object') return { ok: false, error: 'invalid_condition' }
-  const kind = request.kind
-  if (kind === 'inventory_count') {
-    const item_name = request.item_name
-    const minimum = request.minimum
-    if (typeof item_name !== 'string' || !positive_integer(minimum)) return { ok: false, error: 'invalid_inventory_count_condition' }
-    if (!prototypes.item[item_name]) return { ok: false, error: 'unknown_item', item_name }
-    const current = actor_item_count(actor, item_name)
-    return { ok: true, kind, satisfied: current >= (minimum as number), current, minimum, progress_known: false }
-  }
-
-  // Force-level goal conditions. These answer "is the user's goal met?" rather
-  // than "is this step done?", and read game-wide state so they hold across a
-  // long goal and across Space Age surfaces.
+// Force-level goal conditions. These answer "is the user's goal met?" rather
+// than "is this step done?", and read game-wide state so they hold across a
+// long goal and across Space Age surfaces. Undefined for any other kind.
+function evaluate_force_condition(force: LuaForce | undefined, kind: unknown, request: Record<string, unknown>) {
+  if (kind !== 'research_completed' && kind !== 'rockets_launched' && kind !== 'items_produced' && kind !== 'space_location_unlocked') return undefined
+  if (!force) return { ok: false, error: 'no_force' }
   if (kind === 'research_completed') {
     const technology = request.technology
     if (typeof technology !== 'string') return { ok: false, error: 'invalid_research_completed_condition' }
-    const tech = actor.force.technologies[technology]
+    const tech = force.technologies[technology]
     if (!tech) return { ok: false, error: 'unknown_technology', technology }
     return { ok: true, kind, satisfied: tech.researched, technology, progress_known: false }
   }
@@ -66,7 +55,7 @@ function evaluate_runtime_condition(request: Record<string, unknown>) {
   if (kind === 'rockets_launched') {
     const minimum = request.minimum
     if (!positive_integer(minimum)) return { ok: false, error: 'invalid_rockets_launched_condition' }
-    const current = actor.force.rockets_launched
+    const current = force.rockets_launched
     return { ok: true, kind, satisfied: current >= (minimum as number), current, minimum, progress_known: false }
   }
 
@@ -79,7 +68,7 @@ function evaluate_runtime_condition(request: Record<string, unknown>) {
     // count includes other planets and space platforms.
     let current = 0
     for (const [, surface] of game.surfaces) {
-      current += actor.force.get_item_production_statistics(surface).get_input_count(item_name) as number
+      current += force.get_item_production_statistics(surface).get_input_count(item_name) as number
     }
     return { ok: true, kind, satisfied: current >= (minimum as number), current, minimum, progress_known: false }
   }
@@ -89,8 +78,34 @@ function evaluate_runtime_condition(request: Record<string, unknown>) {
     if (typeof name !== 'string') return { ok: false, error: 'invalid_space_location_condition' }
     if (!prototypes.space_location[name]) return { ok: false, error: 'unknown_space_location', name }
     // typed-factorio declares this as void; the runtime returns a boolean.
-    const unlocked = actor.force.is_space_location_unlocked(name) as unknown as boolean
+    const unlocked = force.is_space_location_unlocked(name) as unknown as boolean
     return { ok: true, kind, satisfied: unlocked === true, name, progress_known: false }
+  }
+
+  return undefined
+}
+
+// The force whose progress a goal is judged on. Force-level facts do not need
+// a live body: while the NPC is dead and awaiting respawn they are read from
+// the force it is always created on, so a goal met in that gap is not missed.
+function goal_force(actor: ControlledActor | undefined) {
+  return actor?.force ?? game.forces.player
+}
+
+function evaluate_runtime_condition(request: Record<string, unknown>) {
+  const actor = get_controlled_actor()
+  if (!request || typeof request !== 'object') return { ok: false, error: 'invalid_condition' }
+  const kind = request.kind
+  const force_result = evaluate_force_condition(goal_force(actor), kind, request)
+  if (force_result !== undefined) return force_result
+  if (!actor) return { ok: false, error: 'no_actor' }
+  if (kind === 'inventory_count') {
+    const item_name = request.item_name
+    const minimum = request.minimum
+    if (typeof item_name !== 'string' || !positive_integer(minimum)) return { ok: false, error: 'invalid_inventory_count_condition' }
+    if (!prototypes.item[item_name]) return { ok: false, error: 'unknown_item', item_name }
+    const current = actor_item_count(actor, item_name)
+    return { ok: true, kind, satisfied: current >= (minimum as number), current, minimum, progress_known: false }
   }
 
   if (kind === 'entity_exists' || kind === 'entity_state' || kind === 'entity_inventory_count') {
@@ -144,9 +159,8 @@ const MAX_PROGRESS_TECHNOLOGIES = 16
 // scope. Read-only; the runtime chooses which milestone technologies to ask
 // about so the list can differ between the base game and Space Age.
 function goal_progress_facts(request: Record<string, unknown>) {
-  const actor = get_controlled_actor()
-  if (!actor) return { ok: false, error: 'no_actor' }
-  const force = actor.force
+  const force = goal_force(get_controlled_actor())
+  if (!force) return { ok: false, error: 'no_force' }
   const requested = request && typeof request === 'object' && Array.isArray(request.technologies)
     ? request.technologies as unknown[]
     : []
