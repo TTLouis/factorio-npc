@@ -29,7 +29,7 @@ import {
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { createSave, prepareGameConfig, prepareMods, prepareServerSettings, selectSave } from './game-files.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
-import { evaluateGoalDefinition, formatGoalStatus, formatGoalUnderstanding } from './goal-definition.mjs'
+import { evaluateGoalDefinition, formatGoalStatus, formatGoalUnderstanding, formatSliceProgressNote } from './goal-definition.mjs'
 import { formatGoalReadingNote } from './goal-reading.mjs'
 import { GOAL_STATUS } from './planning-state.mjs'
 import { decisionProviderConfiguration, decisionProviderRequest, providerEndpoint, providerRequest } from './provider.mjs'
@@ -1839,6 +1839,7 @@ export class Session {
 
   onAgentActivity(event, data) {
     if (event === 'goal.defined') this.announceGoalUnderstanding(data)
+    if (event === 'goal.evaluated') this.announceSliceProgress(data)
     // Real world progress ends a transient-failure streak.
     if ((event === 'operations.ack' || event === 'step.verified') && this.autoResume && !this.autoResume.timer) {
       this.autoResume = null
@@ -2013,6 +2014,14 @@ export class Session {
 
   // Show the player, in game, how the system understood their goal and which
   // game-checked conditions will decide that it is done.
+  announceSliceProgress(data) {
+    const note = formatSliceProgressNote(data)
+    // Recovery can re-evaluate an unchanged boundary; say it once.
+    if (!note || note === this.lastSliceProgressNote) return
+    this.lastSliceProgressNote = note
+    this.printChat(note).catch(error => this.log(`Unable to announce slice progress: ${error instanceof Error ? error.message : String(error)}`))
+  }
+
   async reportGoalStatus() {
     const agent = this.agent
     const key = agent?.activePlanKey?.()

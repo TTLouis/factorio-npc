@@ -5,6 +5,7 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import {
   evaluateGoalDefinition,
   formatGoalStatus,
+  formatSliceProgressNote,
   formatGoalUnderstanding,
   GOAL_SCOPE,
   goalConditionCommand,
@@ -416,4 +417,27 @@ test('status with no goal tells the player how to start one', () => {
   assert.match(lines[0], /— paused$/)
   assert.ok(lines.includes('  Done when (the game could not be read just now):'))
   assert.equal(lines.at(-1), '  Say continue to resume.')
+})
+
+test('a verified slice with the goal still open prints one progress line, once', async () => {
+  const evaluation = {
+    satisfied: false,
+    results: [
+      { id: 'silo', kind: 'research_completed', satisfied: true },
+      { id: 'rocket', kind: 'rockets_launched', satisfied: false, current: 3, baseline: 3 },
+    ],
+  }
+  assert.equal(
+    formatSliceProgressNote(evaluation),
+    'Slice done. Goal: 1/2 goal conditions met; still to do: rocket (currently 0 since the goal started). Planning the next slice.',
+  )
+  assert.equal(formatSliceProgressNote({ ...evaluation, satisfied: true }), undefined, 'completion has its own message')
+
+  const printed = []
+  const session = Object.create(Session.prototype)
+  Object.assign(session, { printChat: async (line) => { printed.push(line) }, log: () => {} })
+  session.announceSliceProgress(evaluation)
+  session.announceSliceProgress(evaluation)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(printed.length, 1, 'a re-evaluated unchanged boundary is announced once')
 })

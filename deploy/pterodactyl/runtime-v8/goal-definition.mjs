@@ -242,6 +242,15 @@ export function describeUnmetGoalResult(result) {
   return `${result.id} (currently ${result.current})`
 }
 
+// One in-game line after a verified slice whose goal is still open, so the
+// player sees long-goal progress without asking. Undefined once the goal is
+// met: the completion message covers that.
+export function formatSliceProgressNote(evaluation) {
+  if (!evaluation || evaluation.satisfied || !Array.isArray(evaluation.results) || evaluation.results.length === 0) return undefined
+  const unmet = evaluation.results.filter(result => !result.satisfied).map(describeUnmetGoalResult)
+  return `Slice done. Goal: ${formatGoalProgress(evaluation)}; still to do: ${unmet.join(', ')}. Planning the next slice.`
+}
+
 export function formatGoalProgress(evaluation) {
   const met = evaluation.results.filter(result => result.satisfied).length
   return `${met}/${evaluation.results.length} goal conditions met`
