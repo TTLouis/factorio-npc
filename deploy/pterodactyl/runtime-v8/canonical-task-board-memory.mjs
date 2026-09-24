@@ -549,8 +549,12 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const replaceableDraft = replacePrecommit
       && draftBefore
       && ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING, PLAN_STATUS.COMPLETED, PLAN_STATUS.BLOCKED].includes(draftBefore.status)
+    // The next slice comes from the planner's next submission. A legacy state
+    // that is itself completed is the finished slice; minting a draft from it
+    // would copy completed steps into a new active plan.
     const completedSliceBoundary = draftBefore?.status === PLAN_STATUS.COMPLETED
       && planning.goal?.status === GOAL_STATUS.ACTIVE
+      && state.status !== 'completed'
     if ((!draftBefore || replaceableDraft || completedSliceBoundary)
       && Array.isArray(state.task_board?.steps)
       && state.task_board.steps.length > 0) {

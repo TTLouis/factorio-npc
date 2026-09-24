@@ -4464,6 +4464,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.actionOmissionObservationUsed = false
     this.actionOmissionForceNoTools = false
     this.pendingFiniteNoOperationPlan = null
+    this.unmetGoalContinuationUsed = false
+    this.lastGoalEvaluation = null
     this.freshObservationSinceContinuation = false
     this.genericRecoveryDecisionActive = false
     if (resumeProviderBudgetHandoff) {
@@ -4785,6 +4787,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const definition = this.memory.goalDefinition?.(key)
     if (!definition) return undefined
     const evaluation = await evaluateGoalDefinition(definition, command => this.rcon.command(command))
+    this.lastGoalEvaluation = evaluation
     await this.traceEvent('goal.evaluated', {
       satisfied: evaluation.satisfied,
       progress: formatGoalProgress(evaluation),
@@ -5153,6 +5156,53 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
     return undefined
+  }
+
+  // The plan finished but the game says the goal is not met. The planner gets
+  // one turn in this request to author the next slice; a second "done"
+  // without work ends the request honestly with the goal still open.
+  async continueUnmetGoal(plan, stateResult) {
+    const planning = this.memory.planningState?.(this.activePlanKey())
+    const evaluation = this.lastGoalEvaluation
+    if (planning?.goal?.status !== GOAL_STATUS.ACTIVE || !evaluation || evaluation.satisfied) return undefined
+    const unmet = evaluation.results.filter(result => !result.satisfied)
+      .map(result => `${result.id}${result.current !== undefined ? ` (currently ${result.current})` : ''}`)
+      .join(', ')
+    await this.traceEvent('goal.unmet_after_plan', {
+      goal_id: planning.goal.goal_id,
+      progress: formatGoalProgress(evaluation),
+      unmet,
+      continued: this.unmetGoalContinuationUsed !== true,
+    })
+    if (this.unmetGoalContinuationUsed !== true) {
+      this.unmetGoalContinuationUsed = true
+      this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
+      this.messages.push({
+        role: 'user',
+        content: `[HARNESS] The plan is finished, but the game reports ${formatGoalProgress(evaluation)}; still unmet: ${unmet}. The user goal remains active. Author the next plan slice that moves the world toward the unmet conditions; do not report the goal as complete.`,
+      })
+      return this.runTurn()
+    }
+    this.active = false
+    const chatMessage = `The plan is finished, but the goal is not met yet: the game reports ${formatGoalProgress(evaluation)} (still unmet: ${unmet}).`
+    await this.traceEvent('request.completed', {
+      chat_message: chatMessage,
+      outcome: 'goal_unmet_after_plan',
+      task_board: visibleTaskBoard(stateResult?.state?.task_board),
+      usage: this.traceRequest?.usage,
+    })
+    this.traceRequest = null
+    return {
+      chatMessage,
+      plan: [],
+      currentStep: 0,
+      operations: [],
+      epoch: this.epoch?.epoch,
+      actorId: this.epoch?.actor_id,
+      goalId: planning.goal.goal_id,
+      goalStatus: 'active',
+      taskBoard: visibleTaskBoard(stateResult?.state?.task_board),
+    }
   }
 
   // A done_when condition names something the game does not know (a typo'd
@@ -7044,6 +7094,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           task_board: visibleTaskBoard(stateResult?.state?.task_board),
         })
         throw error
+      }
+    }
+
+    // A planner "done" that finished the plan is not a finished goal: when
+    // the goal has a game-checked definition, the game decides.
+    // After the one extra turn, a second "done" without work ends honestly.
+    if (commands.length === 0 && this.requestInfo && this.memory.goalDefinition?.(this.requestInfo.memoryKey)) {
+      const planFinished = finalCompletionVerified && stateResult?.state?.status === 'completed'
+      if (planFinished) {
+        const settled = await this.settleCompletedStepState(stateResult.state, { allowContinuation: false })
+        if (settled) return settled
+      }
+      if (planFinished || this.unmetGoalContinuationUsed === true) {
+        const unmet = await this.continueUnmetGoal(plan, stateResult)
+        if (unmet) return unmet
       }
     }
 
