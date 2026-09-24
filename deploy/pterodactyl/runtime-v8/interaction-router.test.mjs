@@ -272,6 +272,7 @@ test('M11C double evaluation writes a dedicated decision lifecycle trace without
   assert.equal(events[0].data.message, undefined)
   assert.deepEqual(events[0].data.question_ids, ['intent', 'queue_conflict'])
   assert.equal(events[1].decision_id, events[0].decision_id)
+  assert.equal(events[1].data.contract, 'interaction_route')
   assert.equal(events[1].data.state.message_chars, 'what are you doing?'.length)
   assert.deepEqual(events[1].data.question_ids, ['intent', 'queue_conflict'])
   assert.equal(events[1].data.answers.intent.choice, 'new_goal')
