@@ -35,6 +35,14 @@ import {
 } from './planning-state.mjs'
 import { emptyJevHealth, recordJevHealth, summarizeJevHealth } from './jev-health.mjs'
 import { evaluateGoalDefinition, formatGoalProgress, GOAL_SCOPE, sanitizeGoalDefinition } from './goal-definition.mjs'
+import {
+  compareGoalReading,
+  goalProgressFactsCommand,
+  goalReadingChallenge,
+  goalReadingQuestions,
+  parseGoalProgressFacts,
+  parseGoalReading,
+} from './goal-reading.mjs'
 import { RECOVERY_SEMANTIC_SCOPES, deterministicRecoveryRoute, parseRecoveryDecision, recoveryDecisionQuestions, recoveryFailureClassHint, validateRecoveryRoute } from './recovery-route.mjs'
 import {
   applyConditionObservation,
@@ -2157,6 +2165,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.goalDefinitionPolicy = options.goalDefinitionPolicy === 'required' ? 'required' : 'optional'
     this.goalDefinitionRetries = 0
     this.goalDefinitionBlock = null
+    // Jev's blind reading of the current new goal (see goal-reading.mjs).
+    this.goalReading = null
+    this.pendingGoalReadingTrace = null
     this.planUpdateReason = 'request'
     this.requestLifecycle = 'new_goal'
     this.pendingInteractionAmendment = null
@@ -3101,9 +3112,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  async readGoalProgressFacts() {
+    try { return parseGoalProgressFacts(await this.rcon.command(goalProgressFactsCommand())) }
+    catch { return undefined }
+  }
+
   async requestInteractionPlannerShape(text, sender, taskStatus, planState, intent, epoch) {
+    if (intent === 'new_goal') this.goalReading = null
     if (!this.interactionDecisionProvider) return undefined
-    const questions = interactionPlannerShapeQuestions()
+    // A new goal also gets Jev's blind goal reading in the same request: the
+    // player's words plus save-progress facts, never the planner's answer.
+    const readGoal = intent === 'new_goal' && this.goalDefinitionPolicy === 'required'
+    const saveProgress = readGoal ? await this.readGoalProgressFacts() : undefined
+    const questions = readGoal
+      ? { ...interactionPlannerShapeQuestions(), ...goalReadingQuestions() }
+      : interactionPlannerShapeQuestions()
     const state = {
       contract: 'interaction_planner_shape',
       active_intent: INTERACTION_INTENTS.has(intent) ? intent : 'continue_current',
@@ -3120,6 +3143,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           }
         : null,
       runtime: taskStatus,
+      ...(readGoal ? { save_progress: saveProgress ?? null } : {}),
     }
 
     this.interactionAbort?.abort()
@@ -3144,6 +3168,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       })
       const steering = parseBoundarySteeringTelemetry(response)
       const observationRelevance = parseObservationRelevance(response)
+      if (readGoal) {
+        const reading = parseGoalReading(response)
+        this.goalReading = reading
+          ? { ...reading, decision_id: decisionId, facts: saveProgress, challenged: false }
+          : null
+      }
       const shape = {
         reasoning_budget: steering.reasoning_budget,
         reasoning_confidence: steering.reasoning_confidence,
@@ -3164,6 +3194,20 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         planning_horizon: shape.planning_horizon,
         observation_families: shape.observation_relevance?.selected_families,
         observation_budget: shape.observation_budget,
+        ...(readGoal
+          ? {
+              goal_reading: this.goalReading
+                ? {
+                    scope: this.goalReading.scope,
+                    scope_confidence: this.goalReading.scope_confidence,
+                    family: this.goalReading.family,
+                    family_confidence: this.goalReading.family_confidence,
+                    measurable_probability: this.goalReading.measurable_probability,
+                  }
+                : null,
+              save_progress_available: saveProgress !== undefined,
+            }
+          : {}),
         provider: shape.provider,
         model: shape.model,
         latency_ms: Date.now() - startedAt,
@@ -4544,6 +4588,36 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       )
     }
     this.goalDefinitionRetries = 0
+    this.challengeGoalDefinition(plan.goalDefinition)
+  }
+
+  // Harness rule for Jev's blind goal reading: agreement or no opinion
+  // accepts; a confident disagreement costs the planner one corrective retry
+  // with the reason; after that retry the planner's answer is final.
+  challengeGoalDefinition(definition) {
+    const reading = this.goalReading
+    if (!reading) return
+    const comparison = compareGoalReading(reading, definition, { facts: reading.facts })
+    const challenge = !reading.challenged && comparison.hints.length > 0
+    this.pendingGoalReadingTrace = {
+      decision_id: reading.decision_id,
+      verdict: comparison.verdict,
+      challenged: challenge,
+      after_challenge: reading.challenged,
+      jev_scope: reading.scope,
+      jev_scope_confidence: reading.scope_confidence,
+      jev_family: reading.family,
+      jev_family_confidence: reading.family_confidence,
+      planner_scope: definition.scope,
+      planner_condition_kinds: definition.done_when.map(condition => condition.kind),
+    }
+    if (!challenge) return
+    reading.challenged = true
+    const error = new AgentLoopError(goalReadingChallenge(comparison))
+    error.failureClass = 'plan_category'
+    error.code = 'goal_reading_disagreement'
+    error.details = { goal_reading: this.pendingGoalReadingTrace }
+    throw error
   }
 
   goalDefinitionError(code, reason) {
@@ -6483,6 +6557,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             objective: planning?.goal?.objective,
             definition,
             roadmap: (planning?.roadmap?.nodes ?? []).slice(0, 8).map(node => ({ id: node.id, intent: node.intent })),
+            jev_goal_reading: this.pendingGoalReadingTrace ?? undefined,
           })
         }
       }

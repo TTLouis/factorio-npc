@@ -84,6 +84,24 @@ export class FakeFactorio {
     this.researched = new Set()
     this.produced = {}
     this.knownTechnologies = new Set(['automation', 'logistics', 'rocket-silo', 'electronics'])
+    this.progressFactsAvailable = true
+  }
+
+  // Mirrors autorio_tools.goal_progress_facts.
+  goalProgressFacts(request) {
+    if (!this.progressFactsAvailable) throw new Error('Unknown interface: goal_progress_facts')
+    const milestones = {}
+    for (const name of request.technologies ?? []) {
+      if (this.knownTechnologies.has(name)) milestones[name] = this.researched.has(name)
+    }
+    return {
+      ok: true,
+      rockets_launched: this.rocketsLaunched,
+      researched_technologies: this.researched.size,
+      enabled_technologies: this.knownTechnologies.size,
+      milestones,
+      space_age: false,
+    }
   }
 
   // Mirrors autorio_tools.evaluate_condition for goal-level kinds.
@@ -121,6 +139,10 @@ export class FakeFactorio {
     if (text.includes('remote.call("autorio_preflight","operation"')) {
       return JSON.stringify(this.preflight(text))
     }
+    if (text.includes('"goal_progress_facts"')) {
+      const encoded = /helpers\.json_to_table\('((?:[^'\\]|\\.)*)'\)/.exec(text)?.[1]
+      return JSON.stringify(this.goalProgressFacts(JSON.parse(encoded.replace(/\\(.)/g, '$1'))))
+    }
     if (text.includes('"evaluate_condition"') || text.includes("'evaluate_condition'")) {
       const encoded = /helpers\.json_to_table\('((?:[^'\\]|\\.)*)'\)/.exec(text)?.[1]
       if (encoded) {
@@ -154,11 +176,22 @@ const PREFERRED_CHOICES = [
   'vertical', 'new_goal', 'normal', 'checkpoint', 'maintain',
 ]
 
+// Jev's blind goal reading defaults to "no opinion" so it never challenges a
+// planner in tests that do not script it.
+const NEUTRAL_ANSWERS = {
+  goal_scope: { choice: 'unclear', confidence: 0.9 },
+  goal_family: { choice: 'other', confidence: 0.9 },
+}
+
 export function liveShapedAnswer(questions, overrides = {}) {
   const answers = {}
   for (const [id, question] of Object.entries(questions ?? {})) {
     if (Object.hasOwn(overrides, id)) {
       answers[id] = overrides[id]
+      continue
+    }
+    if (Object.hasOwn(NEUTRAL_ANSWERS, id)) {
+      answers[id] = NEUTRAL_ANSWERS[id]
       continue
     }
     const criteria = question?.criteria

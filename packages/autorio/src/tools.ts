@@ -138,11 +138,50 @@ function evaluate_runtime_condition(request: Record<string, unknown>) {
   return { ok: false, error: 'unsupported_condition_kind' }
 }
 
+const MAX_PROGRESS_TECHNOLOGIES = 16
+
+// Force-wide "where does this save stand" facts for classifying a new goal's
+// scope. Read-only; the runtime chooses which milestone technologies to ask
+// about so the list can differ between the base game and Space Age.
+function goal_progress_facts(request: Record<string, unknown>) {
+  const actor = get_controlled_actor()
+  if (!actor) return { ok: false, error: 'no_actor' }
+  const force = actor.force
+  const requested = request && typeof request === 'object' && Array.isArray(request.technologies)
+    ? request.technologies as unknown[]
+    : []
+  const milestones: Record<string, boolean> = {}
+  let asked = 0
+  for (const name of requested) {
+    if (asked >= MAX_PROGRESS_TECHNOLOGIES) break
+    if (typeof name !== 'string') continue
+    asked += 1
+    const tech = force.technologies[name]
+    if (tech !== undefined) milestones[name] = tech.researched
+  }
+  let researched = 0
+  let total = 0
+  for (const [, tech] of force.technologies) {
+    if (!tech.enabled) continue
+    total += 1
+    if (tech.researched) researched += 1
+  }
+  return {
+    ok: true,
+    rockets_launched: force.rockets_launched,
+    researched_technologies: researched,
+    enabled_technologies: total,
+    milestones,
+    space_age: script.active_mods['space-age'] !== undefined,
+  }
+}
+
 export function create_tools_remote_interface() {
   create_actor_remote_interface()
 
   remote.add_interface('autorio_tools', {
     evaluate_condition: (request: Record<string, unknown>) => evaluate_runtime_condition(request),
+    goal_progress_facts: (request: Record<string, unknown>) => goal_progress_facts(request),
     get_inventory_items: () => {
       const actor = get_controlled_actor()
       if (!actor) {

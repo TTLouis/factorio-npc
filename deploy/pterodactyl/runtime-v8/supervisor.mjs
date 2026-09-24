@@ -30,6 +30,7 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { createSave, prepareGameConfig, prepareMods, prepareServerSettings, selectSave } from './game-files.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { formatGoalUnderstanding } from './goal-definition.mjs'
+import { formatGoalReadingNote } from './goal-reading.mjs'
 import { decisionProviderConfiguration, decisionProviderRequest, providerEndpoint, providerRequest } from './provider.mjs'
 import { configureNpcSession } from './supervisor-adapter.mjs'
 import { luaString } from './structured-policy.mjs'
@@ -1969,6 +1970,8 @@ export class Session {
       roadmap: data?.roadmap,
     })
     if (lines.length === 0) return
+    const readingNote = formatGoalReadingNote(data?.jev_goal_reading)
+    if (readingNote) lines.push(readingNote)
     this.appendUiConversation?.('assistant', this.npcName || 'AIRI', lines.join('\n').replace(/\[\/?color[^\]]*\]/g, ''))
     ;(async () => {
       for (const line of lines) await this.printChat(line)

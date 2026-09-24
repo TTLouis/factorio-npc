@@ -143,6 +143,7 @@ test('committed Pterodactyl artifacts are internally valid and reinstall stays d
   assert.match(sourceText, /jev-typed-projection\.mjs/)
   assert.match(sourceText, /jev-health\.mjs/)
   assert.match(sourceText, /goal-definition\.mjs/)
+  assert.match(sourceText, /goal-reading\.mjs/)
   assert.match(sourceText, /AIRI_SUPERVISOR_VERIFY=/)
   assert.match(sourceText, /await import\(pathToFileURL\(process\.env\.AIRI_SUPERVISOR_VERIFY\)\.href\)/)
   assert.match(sourceText, /src\/runtime-v8\/canonical-task-board-memory\.mjs/)

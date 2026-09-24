@@ -63,6 +63,37 @@ The conditions are force-level facts on purpose, so the same contract carries to
 
 Production runs with `goalDefinitionPolicy: 'required'`; direct constructions of the loop default to `optional` and accept a definition when present.
 
+### 1.2.2 Jev's blind second reading of a new goal
+
+Jev does not review the goal definition. It independently reads the same evidence, and the harness compares the two readings in code (`goal-reading.mjs`).
+
+**Jev's input rule:** give Jev the evidence a referee needs, never the work being refereed.
+
+- **Jev sees:** the player's words, and deterministic save-progress facts from `autorio_tools.goal_progress_facts`:
+  - rockets launched;
+  - researched / enabled technology counts;
+  - which milestone technologies are done;
+  - whether Space Age is active.
+- **Jev never sees:** the planner's `goal`, roadmap, plan, system prompt, or tool catalog.
+- **Where the questions go:** they ride in the existing `interaction_planner_shape` request for a `new_goal`, so Jev gets no extra request. They are:
+  - `goal_scope`: `finite | long_horizon | unclear`;
+  - `goal_family`: `rocket_launch | research | produce_items | space_travel | build | gather | other`;
+  - `goal_measurable` (noul).
+
+**Harness rule**, applied once per goal after the definition passes validation:
+
+| Reading | Result |
+|---|---|
+| Agreement, `unclear`, or confidence below 0.6 | Accept the planner's definition. |
+| Confident scope disagreement | One corrective retry, citing the save facts. |
+| Confident `rocket_launch / research / produce_items / space_travel` family with no matching `doneWhen` kind | One corrective retry. |
+| Planner's answer after that retry | Final. Jev never blocks, and a long-horizon revision still needs its shelf. |
+| Jev error, budget, or an older mod without the facts call | Fail open to the planner. |
+
+Continuing slices of a defined goal are never re-read. The comparison is traced on `goal.defined` (`jev_goal_reading`). When the retry was used, the in-game goal message gains one "Double-checked" line.
+
+This stays within §1.3: Jev critiques scope before commit, and it can neither reject a plan nor block execution.
+
 ### 1.3 Jev is a cognitive coprocessor, not a correctness reviewer
 
 Jev is outside the authoritative correctness path.
