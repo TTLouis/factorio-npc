@@ -363,6 +363,51 @@ test('M9 post-step observe route wakes the planner with the bounded observation 
   assert.equal(result.triggerSource, 'post_step_observe')
 })
 
+test('post-step observe route keeps one read when no relevance family clears the threshold', async () => {
+  // Relevance answers observed with the observe route in the 2026-09-24 cloud trial.
+  const lowRelevance = {
+    runtime_status: 0.27,
+    inventory_equipment: 0.29,
+    recipe_production: 0.23,
+    prototype_knowledge: 0.12,
+    player_state: 0.14,
+    nearby_world: 0.17,
+    entity_status: 0.15,
+    logistics_transport: 0.09,
+    research_state: 0.1,
+    placement_candidates: 0.13,
+    construction_state: 0.2,
+  }
+  const receipt = {
+    raw: '{}',
+    view: { task_state: 'idle', queue_empty: true, queue_length: 0, last_completed_batch: { batch_id: 7 } },
+    providerStatus: { observation_mode: 'full', task_state: 'idle', queue_empty: true, queue_length: 0, last_completed_batch: { batch_id: 7 } },
+  }
+  const observed = {}
+  for (const route of ['targeted_observation', 'replan']) {
+    const { agent } = agentForRoute(route, {
+      decisionProvider: async () => {
+        const response = decisionResponse(route)
+        for (const [family, noul] of Object.entries(lowRelevance)) {
+          response.answers[`need_${family}`] = { type: 'noul', noul }
+        }
+        return response
+      },
+    })
+    agent.taskStatusReceipt = async () => receipt
+    agent.continueFromModMessage = async () => {
+      observed[route] = {
+        budget: agent.observationBudgetRemaining,
+        families: agent.observationRelevanceOverride,
+      }
+    }
+    await agent.completed()
+  }
+
+  assert.deepEqual(observed.targeted_observation, { budget: 1, families: ['inventory_equipment'] })
+  assert.deepEqual(observed.replan, { budget: 0, families: [] })
+})
+
 test('M11E typed state remains experimental telemetry and is not injected into Main-LLM context', async () => {
   const { agent, events } = agentForRoute('continue_current')
   agent.taskStatusReceipt = async () => ({

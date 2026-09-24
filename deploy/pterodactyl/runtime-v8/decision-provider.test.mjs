@@ -531,6 +531,36 @@ test('decision provider rejects malformed Choice probability contracts', async (
   )
 })
 
+test('decision provider accepts Choice probabilities that miss 1 only by two-decimal rounding', async () => {
+  // Observed from jev-1.13.0 for goal_scope in the 2026-09-24 cloud trial.
+  const config = decisionProviderConfiguration({ TYPESAFE_API_KEY: KEY })
+  const result = await decisionProviderRequest(
+    config,
+    'state',
+    {
+      goal_scope: {
+        type: 'choice',
+        instructions: 'Choose.',
+        criteria: { finite: null, long_horizon: null, unclear: null },
+      },
+    },
+    {
+      reserve: async () => {},
+      fetchImpl: async () => new Response(JSON.stringify({
+        answers: {
+          goal_scope: {
+            type: 'choice',
+            choice: 'finite',
+            probabilities: { finite: 0.93, long_horizon: 0.01, unclear: 0.05 },
+            confidence: 0.93,
+          },
+        },
+      }), { status: 200 }),
+    },
+  )
+  assert.equal(result.answers.goal_scope.choice, 'finite')
+})
+
 test('decision provider rejects malformed Score answers', async () => {
   const config = decisionProviderConfiguration({ TYPESAFE_API_KEY: KEY })
   await assert.rejects(
