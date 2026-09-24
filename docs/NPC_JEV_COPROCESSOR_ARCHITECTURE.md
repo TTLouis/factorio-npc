@@ -249,13 +249,19 @@ admission tier (`OBSERVATION_TOOL_TIER` in `structured-policy.mjs`):
 
 | Tier | Reads | Jev's role |
 |---|---|---|
-| fact | current state (actor, task, navigation, crafting, combat, inventory, equipment, entity status/geometry, research status) and deterministic game data (recipes, production scope/solve, prototype details, technology, research path) | none; only harness caps apply (per-batch cap, cache, duplicate suppression) |
-| discovery | nearby and long-range entities, enemies, spatial observation, placement, logistics, transport, construction queries, prototype search | ranks them; one is admitted per batch when the planner asks |
+| fact | current state (actor, task, navigation, crafting, combat, inventory, equipment, entity status/geometry, research status), deterministic game data (recipes, production scope/solve, prototype details, technology, research path), and harness placement choices (`getPlacementCandidates`, `planPlacement`) | none; only harness caps apply (per-batch cap, cache, duplicate suppression) |
+| discovery | nearby and long-range entities, enemies, spatial observation, logistics, transport, construction queries, prototype search | ranks them; one is admitted per batch when the planner asks |
 | optional | player state, skill lookup | relevance gates them |
 
 Every admitted fresh read counts against the budget. When it reaches zero the
 observation phase closes and nothing is admitted, facts included, until the next
 decision: that is what bounds the planner's rounds.
+
+Placement uses the harness candidate system rather than model geometry:
+`getPlacementCandidates` returns legal positions (with `target_resource` coverage and
+each candidate's `item_output_position`), and `covers_position` limits candidates to
+footprints covering a point, so a furnace fed by a drill is two harness queries plus
+`place_candidate`.
 
 - **Observe-route floor.** When the post-step route is `targeted_observation` but no
   family clears the threshold, one read on the highest-ranked family is admitted.
