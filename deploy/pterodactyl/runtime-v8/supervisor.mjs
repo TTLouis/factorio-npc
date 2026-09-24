@@ -29,8 +29,9 @@ import {
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { createSave, prepareGameConfig, prepareMods, prepareServerSettings, selectSave } from './game-files.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
-import { formatGoalUnderstanding } from './goal-definition.mjs'
+import { evaluateGoalDefinition, formatGoalStatus, formatGoalUnderstanding } from './goal-definition.mjs'
 import { formatGoalReadingNote } from './goal-reading.mjs'
+import { GOAL_STATUS } from './planning-state.mjs'
 import { decisionProviderConfiguration, decisionProviderRequest, providerEndpoint, providerRequest } from './provider.mjs'
 import { configureNpcSession } from './supervisor-adapter.mjs'
 import { luaString } from './structured-policy.mjs'
@@ -1999,6 +2000,26 @@ export class Session {
 
   // Show the player, in game, how the system understood their goal and which
   // game-checked conditions will decide that it is done.
+  async reportGoalStatus() {
+    const agent = this.agent
+    const key = agent?.activePlanKey?.()
+    const memory = agent?.memory
+    const planning = memory?.planningState?.(key)
+    const goal = planning?.goal
+    let evaluation
+    if (goal?.status === GOAL_STATUS.ACTIVE && goal.definition) {
+      try { evaluation = await evaluateGoalDefinition(goal.definition, command => this.rcon.command(command)) }
+      catch { evaluation = undefined }
+    }
+    const lines = formatGoalStatus({
+      goal,
+      tracker: memory?.planningTrackerView?.(key),
+      legacyStatus: memory?.currentPlan?.(key)?.status,
+      evaluation,
+    })
+    for (const line of lines) await this.printChat(line)
+  }
+
   announceGoalUnderstanding(data) {
     const lines = formatGoalUnderstanding(data?.definition, {
       objective: data?.objective,
@@ -2434,6 +2455,13 @@ export class Session {
   queuePlayerRequest(sender, rawText, { onSettled } = {}) {
     const text = routeNpcRequest(rawText, this.npcName)
     if (!text || !this.agent) return false
+    // Answered at once from durable state and a read-only game check, without
+    // a model call, without waiting behind the running turn, and without
+    // cancelling a pending automatic resume.
+    if (text.trim().toLowerCase() === 'status') {
+      this.reportGoalStatus().catch(error => this.log(`Unable to report goal status: ${error instanceof Error ? error.message : String(error)}`))
+      return true
+    }
     // A player turn takes over from any pending automatic resume.
     this.clearAutoResume()
     const stop = text.toLowerCase() === 'stop'

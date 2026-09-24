@@ -246,3 +246,52 @@ export function formatGoalProgress(evaluation) {
   const met = evaluation.results.filter(result => result.satisfied).length
   return `${met}/${evaluation.results.length} goal conditions met`
 }
+
+function conditionProgress(condition, result) {
+  if (!result) return 'not read'
+  if (result.error) return `could not read (${result.error})`
+  if (result.needs_baseline) return 'starting count not read yet'
+  if (condition.kind === 'research_completed' || condition.kind === 'space_location_unlocked') return result.satisfied ? 'done' : 'not yet'
+  if (!Number.isFinite(result.current)) return result.satisfied ? 'done' : 'not yet'
+  const counted = Number.isSafeInteger(result.baseline) ? result.current - result.baseline : result.current
+  return `${Math.min(counted, condition.minimum)}/${condition.minimum}`
+}
+
+const STATUS_STEP_MAX_CHARS = 120
+
+// The deterministic answer to "!airi status": no model call, read from durable
+// planning state and, for the done-when checks, the game as of now.
+export function formatGoalStatus({ goal, tracker, legacyStatus, evaluation } = {}) {
+  if (!goal) return ['No goal yet. Tell me what to do with !airi <goal>.']
+  const summary = goal.definition?.summary || goal.objective || 'unnamed goal'
+  if (goal.status === 'completed') return [`Last goal completed: ${summary}`]
+  if (goal.status === 'cancelled') return [`Last goal was cancelled: ${summary}`]
+  const state = legacyStatus === 'paused'
+    ? 'paused'
+    : tracker?.blocker ? 'blocked' : 'in progress'
+  const lines = [`[color=0.4,0.8,1]Goal:[/color] ${summary} — ${state}`]
+  const conditions = goal.definition?.done_when ?? []
+  if (conditions.length > 0) {
+    lines.push(evaluation ? '  Done when (read from the game now):' : '  Done when (the game could not be read just now):')
+    for (const condition of conditions) {
+      const result = evaluation?.results?.find(entry => entry.id === condition.id)
+      lines.push(`    ${result?.satisfied ? '✓' : '○'} ${describeGoalCondition(condition)} — ${conditionProgress(condition, result)}`)
+    }
+  }
+  const steps = Array.isArray(tracker?.steps) ? tracker.steps : []
+  if (steps.length > 0) {
+    const verified = steps.filter(step => step.status === 'completed').length
+    const index = Number.isSafeInteger(tracker.active_step_index) ? tracker.active_step_index : 0
+    const current = steps[index]
+    lines.push(`  This slice: ${verified}/${steps.length} steps verified${current && current.status !== 'completed' ? `; now: ${String(current.description ?? '').slice(0, STATUS_STEP_MAX_CHARS)}` : ''}`)
+  }
+  const nodes = (Array.isArray(tracker?.roadmap_shelf) ? tracker.roadmap_shelf : []).filter(node => node.status !== 'invalidated')
+  if (nodes.length > 0) {
+    const realized = nodes.filter(node => node.status === 'realized').length
+    const next = nodes.find(node => node.status !== 'realized')
+    lines.push(`  Roadmap: ${realized}/${nodes.length} milestones realized${next ? `; next: ${String(next.intent ?? '').slice(0, STATUS_STEP_MAX_CHARS)}` : ''}`)
+  }
+  if (tracker?.blocker) lines.push(`  Blocked: ${String(tracker.blocker.detail || tracker.blocker.reason_code || 'waiting for your decision').slice(0, STATUS_STEP_MAX_CHARS)}`)
+  if (state === 'paused') lines.push('  Say continue to resume.')
+  return lines
+}

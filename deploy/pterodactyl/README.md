@@ -170,6 +170,7 @@ Authentication tokens are never printed in diagnostics.
 - Factorio stdout/stderr are forwarded to the Pterodactyl console.
 - Pterodactyl console input is forwarded to Factorio stdin.
 - `!luna stop` can abort an in-flight provider turn; legacy `!airi stop` behaves identically.
+- `!luna status` (or `!airi status`) prints the active goal, each done-when check read from the game now, the current slice step and roadmap progress. It makes no model call, does not wait behind a running turn, and does not cancel a pending automatic resume.
 - shutdown requests Factorio's native save/quit path before bounded signal fallback;
 - `data/server-settings.json` is reconciled without discarding unrelated Factorio settings;
 - provider failures/timeouts clear the active turn rather than permanently wedging the NPC.

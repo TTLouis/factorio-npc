@@ -4,6 +4,7 @@ import test from 'node:test'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import {
   evaluateGoalDefinition,
+  formatGoalStatus,
   formatGoalUnderstanding,
   GOAL_SCOPE,
   goalConditionCommand,
@@ -364,4 +365,55 @@ test('a rocket goal on a save that already launched rockets needs a new launch, 
   game.rocketsLaunched = 3
   const done = await agent.completed()
   assert.equal(done.goalStatus, 'completed')
+})
+
+test('"status" answers from durable state and the game without a model call or cancelling auto-resume', async () => {
+  const game = new FakeFactorio()
+  game.rocketsLaunched = 2
+  const memory = new CanonicalTaskBoardMemory()
+  let calls = 0
+  const agent = agentWith(game, memory, async () => {
+    calls++
+    return planReply({ plan: ['Gather 10 iron ore', 'Gather 10 coal'], operations: [gather('iron-ore', 10)], checkpoint: inventoryCheckpoint('iron-ore', 10), goal: ROCKET_GOAL, roadmap: SHELF })
+  })
+  await agent.request('launch a rocket', { sender: 'Louis' })
+  assert.equal(calls, 1)
+
+  const printed = []
+  const session = Object.create(Session.prototype)
+  const pendingResume = { timer: 1 }
+  Object.assign(session, {
+    npcName: 'AIRI',
+    agent,
+    rcon: game,
+    autoResume: pendingResume,
+    printChat: async line => { printed.push(line) },
+    queueEvent: () => { throw new Error('status must not queue behind the running turn') },
+    log: () => {},
+  })
+  assert.equal(session.queuePlayerRequest('Louis', 'status'), true)
+  await new Promise(resolve => setTimeout(resolve, 10))
+
+  assert.equal(calls, 1, 'no model call')
+  assert.equal(session.autoResume, pendingResume, 'a pending auto-resume survives')
+  assert.match(printed[0], /Goal:.*Launch one rocket from this save\. — in progress/)
+  assert.ok(printed.some(line => line.includes('○ 1 rocket launched from now on — 0/1')), printed.join('\n'))
+  assert.ok(printed.some(line => /This slice: 0\/2 steps verified; now: Gather 10 iron ore/.test(line)), printed.join('\n'))
+  assert.ok(printed.some(line => /Roadmap: 0\/3 milestones realized; next: reliable iron and copper smelting/.test(line)), printed.join('\n'))
+
+  game.rocketsLaunched = 3
+  printed.length = 0
+  await session.reportGoalStatus()
+  assert.ok(printed.some(line => line.includes('✓ 1 rocket launched from now on — 1/1')), printed.join('\n'))
+})
+
+test('status with no goal tells the player how to start one', () => {
+  assert.deepEqual(formatGoalStatus({}), ['No goal yet. Tell me what to do with !airi <goal>.'])
+  const lines = formatGoalStatus({
+    goal: { status: 'active', objective: 'launch a rocket', definition: sanitizeGoalDefinition(ROCKET_GOAL) },
+    legacyStatus: 'paused',
+  })
+  assert.match(lines[0], /— paused$/)
+  assert.ok(lines.includes('  Done when (the game could not be read just now):'))
+  assert.equal(lines.at(-1), '  Say continue to resume.')
 })
