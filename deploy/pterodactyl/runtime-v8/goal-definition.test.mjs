@@ -103,6 +103,13 @@ test('the in-game understanding message states scope, checks and roadmap', () =>
 
 // --- whole loop ----------------------------------------------------------
 
+// The last conversation message, skipping the trailing per-turn planning
+// envelopes the harness appends after it.
+function lastConversationMessage(messages) {
+  const content = messages.map(message => String(message?.content ?? ''))
+  return content.filter(text => !/^\[(?:PLANNING_LOD|DECISION_ENVELOPE)\]/.test(text)).at(-1) ?? ''
+}
+
 function agentWith(game, memory, provider, extra = {}) {
   return new NpcAgentLoop({
     rcon: game,
@@ -127,7 +134,7 @@ test('a first plan without a goal definition is asked again once, then accepted 
   let calls = 0
   const agent = agentWith(game, memory, async messages => {
     calls++
-    prompts.push(String(messages.at(-1)?.content ?? ''))
+    prompts.push(lastConversationMessage(messages))
     const base = { plan: ['Gather 10 iron ore'], operations: [gather('iron-ore', 10)], checkpoint: inventoryCheckpoint('iron-ore', 10) }
     return calls === 1 ? planReply(base) : planReply({ ...base, goal: { ...ROCKET_GOAL, scope: 'finite' } })
   }, { onActivity: (event, data) => events.push({ event, data }) })
@@ -170,7 +177,7 @@ test('a different goal-definition mistake per retry gets another correction nami
   let calls = 0
   const agent = agentWith(game, memory, async messages => {
     calls++
-    prompts.push(String(messages.at(-1)?.content ?? ''))
+    prompts.push(lastConversationMessage(messages))
     const base = { plan: ['Gather 10 iron ore'], operations: [gather('iron-ore', 10)] }
     if (calls === 1) return planReply(base)
     const condition = calls === 2
@@ -210,7 +217,7 @@ test('a long-horizon definition without a Roadmap Shelf is asked again', async (
   let calls = 0
   const agent = agentWith(game, memory, async messages => {
     calls++
-    prompts.push(String(messages.at(-1)?.content ?? ''))
+    prompts.push(lastConversationMessage(messages))
     const base = { plan: ['Gather 10 iron ore'], operations: [gather('iron-ore', 10)], checkpoint: inventoryCheckpoint('iron-ore', 10), goal: ROCKET_GOAL }
     return planReply(calls === 1 ? base : { ...base, roadmap: SHELF })
   })
@@ -229,7 +236,7 @@ test('finishing a slice does not finish the goal: the game decides, then the goa
   let calls = 0
   const agent = agentWith(game, memory, async messages => {
     calls++
-    prompts.push(String(messages.at(-1)?.content ?? ''))
+    prompts.push(lastConversationMessage(messages))
     if (calls === 1) {
       return planReply({ plan: ['Gather 10 iron ore'], operations: [gather('iron-ore', 10)], checkpoint: inventoryCheckpoint('iron-ore', 10), goal: ROCKET_GOAL, roadmap: SHELF })
     }
@@ -385,7 +392,7 @@ function doneWithStepsLeft(game, memory, events, doneWhen) {
   let calls = 0
   const agent = agentWith(game, memory, async messages => {
     calls++
-    prompts.push(String(messages.at(-1)?.content ?? ''))
+    prompts.push(lastConversationMessage(messages))
     if (calls === 1) {
       return planReply({
         plan: ['Gather 10 iron ore', 'Verify the iron ore is held'],

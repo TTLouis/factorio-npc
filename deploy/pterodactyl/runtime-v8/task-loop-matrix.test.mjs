@@ -402,3 +402,21 @@ test('moving on to the next step with its operations closes a grounded prose-onl
   assert.equal(world.reducerPlan().active_step_index, 1)
   assert.equal(world.game.mutations.length, 2)
 })
+
+test('a new-goal planning turn is told to plan at outline level; a continuation is not', async () => {
+  // 2026-09-24 burner-drill canary: strategic effort spent the whole 8,000-unit
+  // output cap reasoning through every later step before emitting a plan.
+  const seen = []
+  const world = harness({
+    provider: async messages => {
+      seen.push(messages.some(message => String(message.content ?? '').startsWith('[PLANNING_LOD]')))
+      const board = world.memory.currentPlan(KEY)?.task_board
+      if (!board) return planReply({ plan: ['Mine 10 stone', 'Mine 10 coal'], operations: [gather('stone', 10)] })
+      return planReply({ plan: ['Mine 10 stone', 'Mine 10 coal'], currentStep: 1, operations: [gather('coal', 10)] })
+    },
+  })
+  await world.say('mine 10 stone, then 10 coal', 'new_goal')
+  await world.finish('stone')
+
+  assert.deepEqual(seen, [true, false])
+})

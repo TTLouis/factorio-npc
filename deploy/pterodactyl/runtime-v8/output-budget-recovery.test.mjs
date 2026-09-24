@@ -967,4 +967,7 @@ test('a budget handoff on the first turn of a new goal keeps the player request'
   assert.ok(handoff, 'the fresh generation receives the handoff capsule')
   const capsule = JSON.parse(handoff.slice(handoff.indexOf('{')))
   assert.deepEqual(capsule.player_request, { sender: 'TTLouis', text: request })
+  // The capsule has none of the earlier reads, so the fresh generation can
+  // observe again (attempt 2 of the canary inherited a closed phase).
+  assert.equal(calls.at(-1).context.allowTools, true)
 })
