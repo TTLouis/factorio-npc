@@ -30,6 +30,7 @@
     "test": "pnpm --filter @factorio-npc/agent --filter autorio.ts --if-present run test",
     "test:prompt": "pnpm --filter @factorio-npc/agent run test:prompt",
     "test:npc": "docker build -f tests/factorio/Dockerfile -t factorio-npc-test . && docker run --rm factorio-npc-test",
+    "test:npc:cloud": "bash scripts/e2e-cloud.sh",
     "bootstrap": "node scripts/bootstrap.ts"
   },
   "devDependencies": {

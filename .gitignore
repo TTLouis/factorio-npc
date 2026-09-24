@@ -12,6 +12,9 @@ yarn-error.log*
 lerna-debug.log*
 .pnpm-debug.log*
 
+# Real-Factorio E2E results copied out by scripts/e2e-cloud.sh
+test-results/
+
 # Detached Pterodactyl smoke state
 .package-smoke-last.result.json
 

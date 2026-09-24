@@ -140,6 +140,8 @@ node --test deploy/pterodactyl/build-payload.test.mjs deploy/pterodactyl/staging
 pnpm test:npc
 ```
 
+`pnpm test:npc` needs a working local Docker daemon. In a sandboxed cloud container (for example Claude Code on the web), use `pnpm test:npc:cloud` instead: it starts `dockerd` if needed, pulls base images through a registry mirror to avoid Docker Hub rate limits, trusts the sandbox egress-proxy CA inside a generated copy of the test Dockerfile, and copies lane logs to `test-results/factorio/`. Select lanes with `NPC_TEST_LANES=core,production` and use `NPC_TEST_PARALLEL=0` for ordered debug output; `--no-build` reruns the last image.
+
 Repository CI does not use production provider credentials.
 
 ## Roadmap
