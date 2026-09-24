@@ -186,7 +186,7 @@ For a bounded planning slice, add developmentMode as vertical, horizontal, maint
 
 For the active Plan Tracker step, you may add one optional root field named checkpoint beside chatMessage/plan/currentStep/operations. checkpoint is your semantic completion proposal for deterministic runtime validation and verification, not a claim that the step is already done. It must use a runtime-supported contract: {"mode":"all|any","requirements":[...]} with requirement kinds inventory_count, entity_inventory_count, entity_exists, entity_state, authoritative_operation_receipt, or runtime_controller_state. Prefer world-state outcomes over action occurrence. Example: if the step means "have 100 stone" and the next operation only gathers 40 more because 62 are already held, checkpoint must say inventory_count stone >= 100, not >= 40. The operation batch describes what to do next; checkpoint describes what would prove the semantic step complete. Runtime remains completion authority for supported deterministic contracts. Omit checkpoint when no safe deterministic predicate represents the step; prose-only semantic steps remain the Main LLM's responsibility rather than being delegated to a second AI judge.
 
-For a prose-only active step that intentionally has no deterministic checkpoint, you may explicitly close that semantic step with semanticCompletion: {"stepId":"<exact active step id>","rationale":"..."}. Use the stable active step id from [PLANNING_STATE]. The harness accepts this only when the id is still current, the step has no deterministic completion contract, and recent authoritative runtime evidence or a fresh live observation grounds your judgment. Never use semanticCompletion to bypass an unmet deterministic checkpoint. You may pair a valid semanticCompletion with operations for the newly-active next step; the harness advances the semantic step first, then validates those operations normally.
+For a prose-only active step that intentionally has no deterministic checkpoint, you may explicitly close that semantic step with semanticCompletion: {"stepId":"<exact active step id>","rationale":"..."}. Use the stable active step id from [PLANNING_STATE]. The harness accepts this only when the id is still current, the step has no deterministic completion contract, and recent authoritative runtime evidence or a fresh live observation grounds your judgment. Never use semanticCompletion to bypass an unmet deterministic checkpoint. You may pair a valid semanticCompletion with operations for the newly-active next step; the harness advances the semantic step first, then validates those operations normally. Keeping the same plan and moving currentStep exactly one step forward with operations for that next step is read as the same claim for the active step, under the same checks.
 
 Plan entries must represent goal-bearing Factorio work or verification. Do not add terminal lifecycle/meta steps such as "Stop", "Done", "Finish", or "Report completion"; stopping after the verified goal is represented by returning plan: [], currentStep: 0, operations: [].
 
@@ -2011,6 +2011,26 @@ function finalStepCanCloseFromFreshObservation(state) {
 
 function terminalControlOnlyPlanStep(value) {
   return isLifecycleMetaStep(value)
+}
+
+// A plan that keeps the committed steps and moves currentStep exactly one step
+// past the active step, with operations for that step, implies a semantic
+// completion claim for the active step.
+function impliedSemanticCompletion(plan, state) {
+  const board = state?.task_board
+  if (state?.status !== 'active' || !Array.isArray(board?.steps)) return undefined
+  if (!Array.isArray(plan?.operations) || plan.operations.length === 0) return undefined
+  const activeIndex = Number.isSafeInteger(board.active_index) ? board.active_index : -1
+  const step = board.steps[activeIndex]
+  if (!step || plan.currentStep !== activeIndex + 1 || activeIndex + 1 >= board.steps.length) return undefined
+  const sameSteps = Array.isArray(plan.plan)
+    && plan.plan.length === board.steps.length
+    && board.steps.every((entry, index) => cleanMemoryText(plan.plan[index], 500) === cleanMemoryText(entry?.description, 500))
+  if (!sameSteps) return undefined
+  return {
+    stepId: step.id,
+    rationale: `Implied by moving currentStep to step ${activeIndex + 2} with its operations.`,
+  }
 }
 
 function verifiedFinalCompletion(plan, state, triggerSource, { freshObservation = false } = {}) {
@@ -6516,6 +6536,23 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let previousState = this.requestInfo
       ? this.memory.currentPlan?.(this.requestInfo.memoryKey)
       : undefined
+    const implied = plan.semanticCompletion ? undefined : impliedSemanticCompletion(plan, previousState)
+    if (implied) {
+      // The planner moved on to the next step without the explicit claim.
+      // Apply the claim it implies under the same checks; if they fail, keep
+      // the step open exactly as before instead of failing the request.
+      try {
+        const semantic = await this.applySemanticCompletionClaim({ ...plan, semanticCompletion: implied }, previousState)
+        previousState = semantic.state ?? previousState
+        if (semantic.applied === true) this.clearActionOmissionRecovery()
+      }
+      catch (error) {
+        await this.traceEvent('step.implied_completion_skipped', {
+          active_step_id: implied.stepId,
+          reason: cleanMemoryText(error instanceof Error ? error.message : String(error), 300),
+        })
+      }
+    }
     if (plan.semanticCompletion) {
       const semantic = await this.applySemanticCompletionClaim(plan, previousState)
       previousState = semantic.state ?? previousState
