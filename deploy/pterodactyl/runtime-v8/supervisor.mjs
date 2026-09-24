@@ -273,6 +273,19 @@ export function routeNpcRequest(text, npcName = '') {
   return trimmed.slice(separator + 1).trim()
 }
 
+// Player words the supervisor handles itself instead of sending to the model.
+// Matched on the whole message, ignoring case and trailing punctuation, so
+// "Stop!" or "停止。" stop at once like "stop" does.
+const CONTROL_WORDS = new Map([
+  ...['stop', 'pause', 'halt', '停', '停止', '暂停', '停下', '别动'].map(word => [word, 'stop']),
+  ...['status', 'progress', '状态', '进度'].map(word => [word, 'status']),
+])
+
+export function controlWord(text) {
+  const normalized = String(text ?? '').trim().toLocaleLowerCase().replace(/[\s.!?。！？~～…]+$/u, '')
+  return CONTROL_WORDS.get(normalized)
+}
+
 export function navigationObstaclePolicy(text) {
   const normalized = String(text ?? '').trim().toLocaleLowerCase()
   const denyPhrases = [
@@ -2458,13 +2471,14 @@ export class Session {
     // Answered at once from durable state and a read-only game check, without
     // a model call, without waiting behind the running turn, and without
     // cancelling a pending automatic resume.
-    if (text.trim().toLowerCase() === 'status') {
+    const control = controlWord(text)
+    if (control === 'status') {
       this.reportGoalStatus().catch(error => this.log(`Unable to report goal status: ${error instanceof Error ? error.message : String(error)}`))
       return true
     }
     // A player turn takes over from any pending automatic resume.
     this.clearAutoResume()
-    const stop = text.toLowerCase() === 'stop'
+    const stop = control === 'stop'
     if (stop) this.agent.cancel('user_stop_immediate')
     this.queueEvent(async () => {
       try {

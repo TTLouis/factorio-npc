@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { Session, configuration, routeNpcRequest } from './supervisor.mjs'
+import { Session, configuration, controlWord, routeNpcRequest } from './supervisor.mjs'
 
 const baseEnv = {
   AIRI_ACTOR_MODE: 'npc',
@@ -54,4 +54,10 @@ test('named NPC replies keep !airi as the command prefix but label the speaking 
 
   assert.equal(commands.length, 1)
   assert.match(commands[0], /\[AIRI\/Aster-1\] Ready\./)
+})
+
+test('stop and status are recognised with punctuation, case and Chinese forms, but not inside a longer request', () => {
+  for (const text of ['stop', 'Stop!', 'STOP.', 'pause', '停止', '暂停。', '停下！']) assert.equal(controlWord(text), 'stop', text)
+  for (const text of ['status', 'Status?', '进度', '状态？']) assert.equal(controlWord(text), 'status', text)
+  for (const text of ['stop mining iron', 'what is your status', 'continue', '不要停']) assert.equal(controlWord(text), undefined, text)
 })
