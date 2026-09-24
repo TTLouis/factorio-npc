@@ -10,6 +10,7 @@ function inventoryWith(count: number) {
   return {
     stack,
     find_item_stack: vi.fn(() => stack.count > 0 ? [stack, 1] : [undefined, undefined]),
+    get_item_count: vi.fn(() => stack.count),
     can_insert: vi.fn(() => true),
     insert: vi.fn(({ count: amount }: { count: number }) => amount),
     remove: vi.fn(({ count: amount }: { count: number }) => {
