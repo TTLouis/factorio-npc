@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import {
   applyConditionObservation,
+  completionContractSupported,
   evaluateCompletionContract,
   makeConditionWait,
   provePermanentlyUnsatisfiable,
@@ -206,4 +207,40 @@ test('a contract with nothing to falsify is never proven unsatisfiable', () => {
   assert.equal(provePermanentlyUnsatisfiable(undefined, { staleUnitNumbers: [10] }), undefined)
   // A malformed contract sanitizes to semantic_unknown rather than proving anything.
   assert.equal(provePermanentlyUnsatisfiable({ mode: 'all', requirements: [{ id: 'x', kind: 'nonsense' }] }, { staleUnitNumbers: [10] }), undefined)
+})
+
+// Shapes live DeepSeek planners actually sent (sgluna-prompts 2026-09-21);
+// every one was rejected as invalid_semantic_checkpoint before normalization.
+test('live "at least N" checkpoint spellings normalize to minimum', () => {
+  const live = [
+    { kind: 'inventory_count', item_name: 'stone', count: 10 },
+    { kind: 'inventory_count', item_name: 'stone', min_count: 10 },
+    { kind: 'inventory_count', item_name: 'stone', comparison: '>=', count: 10 },
+    { kind: 'inventory_count', item_name: 'stone', op: '>=', count: 10 },
+    { kind: 'inventory_count', item_name: 'stone', comparator: '>=', count: '10' },
+    { kind: 'inventory_count', item_name: 'stone', comparison: '>', count: 9 },
+  ]
+  for (const requirement of live) {
+    const contract = sanitizeStepCompletionContract({ mode: 'all', requirements: [requirement] })
+    assert.equal(completionContractSupported(contract), true, JSON.stringify(requirement))
+    assert.deepEqual(contract.requirements[0], { id: 'requirement_1', kind: 'inventory_count', item_name: 'stone', minimum: 10 })
+  }
+})
+
+test('receipt checkpoints accept the operation alias', () => {
+  const contract = sanitizeStepCompletionContract({
+    mode: 'all',
+    requirements: [{ kind: 'authoritative_operation_receipt', operation: 'gather_resource', detail: 'mining completed' }],
+  })
+  assert.deepEqual(contract.requirements[0], { id: 'requirement_1', kind: 'authoritative_operation_receipt', operation_name: 'gather_resource' })
+})
+
+test('exact and upper-bound quantities stay unsupported', () => {
+  for (const comparison of ['==', '=', '<=', '<']) {
+    const contract = sanitizeStepCompletionContract({
+      mode: 'all',
+      requirements: [{ kind: 'inventory_count', item_name: 'stone', comparison, count: 10 }],
+    })
+    assert.equal(completionContractSupported(contract), false, comparison)
+  }
 })

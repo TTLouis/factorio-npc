@@ -29,6 +29,26 @@ function boundedTimeoutMs(value) {
     : DEFAULT_CONDITION_TIMEOUT_MS
 }
 
+function integerValue(value) {
+  if (typeof value === 'string' && /^\s*\d+\s*$/.test(value)) return Number(value)
+  return value
+}
+
+// Live planners write "at least N" several ways: minimum, count or min_count,
+// optionally with comparison/op/comparator ">=" (sgluna-prompts 2026-09-21).
+// Every such checkpoint was rejected, leaving steps prose-only. Normalize only
+// forms whose meaning is unambiguous; an exact or upper bound stays unsupported.
+function minimumFromAliases(raw) {
+  const comparator = String(raw.comparison ?? raw.comparator ?? raw.op ?? raw.operator ?? '>=').trim().toLowerCase()
+  const amount = integerValue(raw.minimum ?? raw.min_count ?? raw.min ?? raw.at_least ?? raw.count)
+  if (['>=', '≥', 'gte', 'at_least', 'at least'].includes(comparator)) return positiveInteger(amount)
+  if (['>', 'gt'].includes(comparator)) {
+    const bound = nonNegativeInteger(amount)
+    return bound === undefined ? undefined : positiveInteger(bound + 1)
+  }
+  return undefined
+}
+
 function boundedRequirement(raw, index) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
   const kind = String(raw.kind ?? '')
@@ -37,16 +57,16 @@ function boundedRequirement(raw, index) {
   if (!id) return undefined
 
   if (kind === 'inventory_count') {
-    const minimum = positiveInteger(raw.minimum)
-    const itemName = clean(raw.item_name, 160)
+    const minimum = minimumFromAliases(raw)
+    const itemName = clean(raw.item_name ?? raw.item, 160)
     if (!minimum || !itemName) return undefined
     return { id, kind, item_name: itemName, minimum }
   }
 
   if (kind === 'entity_inventory_count') {
-    const unitNumber = positiveInteger(raw.unit_number)
-    const minimum = positiveInteger(raw.minimum)
-    const itemName = clean(raw.item_name, 160)
+    const unitNumber = positiveInteger(integerValue(raw.unit_number))
+    const minimum = minimumFromAliases(raw)
+    const itemName = clean(raw.item_name ?? raw.item, 160)
     if (!unitNumber || !minimum || !itemName) return undefined
     return { id, kind, unit_number: unitNumber, item_name: itemName, minimum }
   }
@@ -65,7 +85,7 @@ function boundedRequirement(raw, index) {
   }
 
   if (kind === 'authoritative_operation_receipt') {
-    const operationName = clean(raw.operation_name, 100)
+    const operationName = clean(raw.operation_name ?? raw.operation, 100)
     if (!operationName) return undefined
     return { id, kind, operation_name: operationName }
   }

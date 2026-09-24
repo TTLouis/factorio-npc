@@ -659,7 +659,34 @@ export const plannerControlToolDefinitions = [{
         },
         checkpoint: {
           type: 'object',
-          description: 'Optional deterministic completion contract authored by the Main LLM for the active step. Runtime-supported requirement shapes are validated and evaluated by the harness.',
+          description: 'Optional deterministic completion contract authored by the Main LLM for the active step. It states what world state proves the step complete; the harness validates and evaluates it. Quantities are always lower bounds named "minimum".',
+          required: ['mode', 'requirements'],
+          properties: {
+            mode: { type: 'string', enum: ['all', 'any'] },
+            requirements: {
+              type: 'array',
+              minItems: 1,
+              maxItems: 4,
+              items: {
+                type: 'object',
+                required: ['kind'],
+                properties: {
+                  id: { type: 'string', maxLength: 80 },
+                  kind: {
+                    type: 'string',
+                    enum: ['inventory_count', 'entity_inventory_count', 'entity_exists', 'entity_state', 'authoritative_operation_receipt', 'runtime_controller_state'],
+                    description: 'inventory_count {item_name, minimum}; entity_inventory_count {unit_number, item_name, minimum}; entity_exists {unit_number}; entity_state {unit_number, expected: working|not_working|exists}; authoritative_operation_receipt {operation_name}; runtime_controller_state {controller: follow, expected: active|idle|healthy}.',
+                  },
+                  item_name: { type: 'string', maxLength: 160 },
+                  minimum: { type: 'integer', minimum: 1, description: 'Inclusive lower bound: the step is complete when the count is at least this.' },
+                  unit_number: { type: 'integer', minimum: 1 },
+                  expected: { type: 'string', maxLength: 80 },
+                  operation_name: { type: 'string', maxLength: 100 },
+                  controller: { type: 'string', maxLength: 80 },
+                },
+              },
+            },
+          },
         },
         semanticCompletion: {
           type: 'object',
