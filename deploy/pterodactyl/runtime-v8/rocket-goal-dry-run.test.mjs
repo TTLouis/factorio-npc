@@ -196,3 +196,46 @@ test('dry run: a launch before the rocket is built tells the planner how many pa
   assert.match(failurePrompt, /"rocket_parts":12/)
   assert.match(failurePrompt, /"rocket_parts_required":50/)
 })
+
+test('dry run: the NPC dies mid-slice; the goal, its baseline and the committed step survive the new body', async () => {
+  const game = new FakeFactorio()
+  const replies = [
+    planReply({ plan: ['Gather 10 iron ore'], operations: [gather('iron-ore', 10)], checkpoint: inventoryCheckpoint('iron-ore', 10), goal: ROCKET_GOAL, roadmap: SHELF }),
+    // After respawn the planner re-issues the same committed step.
+    planReply({ plan: ['Gather 10 iron ore'], operations: [gather('iron-ore', 10)], checkpoint: inventoryCheckpoint('iron-ore', 10) }),
+    planReply({ plan: ['Gather 10 coal'], operations: [gather('coal', 10)], checkpoint: inventoryCheckpoint('coal', 10) }),
+  ]
+  const prompts = []
+  const memory = new CanonicalTaskBoardMemory()
+  const agent = agentWith(game, memory, async (messages) => {
+    prompts.push(messages.map(message => String(message.content)).join('\n'))
+    const reply = replies[prompts.length - 1]
+    assert.ok(reply, `unexpected planner call ${prompts.length}`)
+    return reply
+  }, null)
+  await agent.request('launch a rocket', { sender: 'Louis' })
+  const definitionBefore = memory.goalDefinition(KEY)
+
+  // The body dies and respawns empty-handed as a new actor.
+  game.status = { ...game.status, actor_id: 42, epoch: 4 }
+  const recovered = await recoverInterruptedAgentPlan(agent, 'actor_replaced', {
+    previous_actor_id: 18,
+    replacement_actor_id: 42,
+    inventory_policy: 'no_transfer',
+  })
+  assert.equal(recovered.recovered, true)
+  assert.equal(prompts.length, 2)
+  assert.deepEqual(memory.goalDefinition(KEY), definitionBefore, 'definition and baseline unchanged')
+  assert.deepEqual(memory.currentPlan(KEY).task_board.steps.map(step => step.description), ['Gather 10 iron ore'])
+
+  game.inventory['iron-ore'] = 10
+  await agent.completed()
+  assert.equal(memory.planningState(KEY).goal.status, GOAL_STATUS.ACTIVE)
+  assert.equal(prompts.length, 3, 'the next slice is planned on the new body')
+
+  game.inventory.coal = 10
+  game.researched.add('rocket-silo')
+  game.rocketsLaunched = 1
+  const done = await agent.completed()
+  assert.equal(done.goalStatus, 'completed')
+})
