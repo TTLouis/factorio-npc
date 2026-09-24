@@ -376,3 +376,56 @@ test('a planner "done" on the last step does not complete a defined goal the gam
   // The finished slice is not copied into a new active draft.
   assert.equal(getActivePlan(planning).status, PLAN_STATUS.COMPLETED)
 })
+
+// 2026-09-24 cloud trial (run 6): the planner declared the goal done while a
+// craft and a verify step were still open; the generic repair then failed the
+// request without the game ever being asked.
+function doneWithStepsLeft(game, memory, events, doneWhen) {
+  const prompts = []
+  let calls = 0
+  const agent = agentWith(game, memory, async messages => {
+    calls++
+    prompts.push(String(messages.at(-1)?.content ?? ''))
+    if (calls === 1) {
+      return planReply({
+        plan: ['Gather 10 iron ore', 'Verify the iron ore is held'],
+        operations: [gather('iron-ore', 10)],
+        goal: { scope: 'finite', summary: 'Gather iron ore.', doneWhen },
+      })
+    }
+    return planReply({ chatMessage: 'Done.', plan: [], currentStep: 0, operations: [] })
+  }, { onActivity: (event, data) => events.push({ event, data }) })
+  return { agent, prompts, calls: () => calls }
+}
+
+test('a planner "done" with steps left completes a defined goal the game confirms', async () => {
+  const game = new FakeFactorio()
+  const memory = new CanonicalTaskBoardMemory()
+  const events = []
+  const { agent, calls } = doneWithStepsLeft(game, memory, events, [{ kind: 'inventory_count', item_name: 'iron-ore', minimum: 10 }])
+  await agent.request('gather 10 iron ore', { sender: 'Louis' })
+  game.inventory['iron-ore'] = 10
+
+  const result = await agent.completed()
+
+  assert.equal(calls(), 2)
+  assert.equal(result.goalStatus, 'completed')
+  assert.match(result.chatMessage, /verified complete: the game reports 1\/1/)
+  const ended = events.filter(entry => entry.event === 'request.completed')
+  assert.equal(ended.at(-1).data.outcome, 'goal_verified_complete')
+  assert.notEqual(memory.planningState(KEY)?.goal?.status, GOAL_STATUS.ACTIVE)
+})
+
+test('a planner "done" with steps left is told which goal conditions the game reports unmet', async () => {
+  const game = new FakeFactorio()
+  const memory = new CanonicalTaskBoardMemory()
+  const events = []
+  const { agent, prompts } = doneWithStepsLeft(game, memory, events, [{ kind: 'inventory_count', item_name: 'iron-plate', minimum: 5 }])
+  await agent.request('have 5 iron plates', { sender: 'Louis' })
+  game.inventory['iron-ore'] = 10
+
+  await agent.completed().catch(() => {})
+
+  assert.ok(prompts.some(prompt => /still unmet: done_1 \(currently 0\)/.test(prompt)))
+  assert.equal(memory.planningState(KEY).goal.status, GOAL_STATUS.ACTIVE)
+})
