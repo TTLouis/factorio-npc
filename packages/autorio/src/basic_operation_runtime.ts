@@ -429,23 +429,25 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     }
 
     let moved = 0
+    // Bounded by the whole held count, not by the first matching stack: a
+    // 200-plate transfer used to stop at one 100-plate stack.
     if (task.to_player) {
-      const [item_stack] = actor_inventory.find_item_stack(task.item_name)
-      if (!item_stack) {
+      const available = actor_inventory.get_item_count(task.item_name)
+      if (available <= 0) {
         controller.fail(actor, task, 'item_missing')
         return 0
       }
-      const to_move = math.min(item_stack.count, task.max_count)
+      const to_move = math.min(available, task.max_count)
       moved = player_inventory.insert({ name: task.item_name, count: to_move })
       if (moved > 0) actor_inventory.remove({ name: task.item_name, count: moved })
     }
     else {
-      const [item_stack] = player_inventory.find_item_stack(task.item_name)
-      if (!item_stack) {
+      const available = player_inventory.get_item_count(task.item_name)
+      if (available <= 0) {
         controller.fail(actor, task, 'item_missing')
         return 0
       }
-      const to_move = math.min(item_stack.count, task.max_count)
+      const to_move = math.min(available, task.max_count)
       if (actor_inventory.can_insert({ name: task.item_name, count: to_move })) {
         const removed = player_inventory.remove({ name: task.item_name, count: to_move })
         if (removed > 0) {
@@ -532,8 +534,8 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
 
     let moved_total = 0
     if (task.to_entity) {
-      const [item_stack] = actor_inventory.find_item_stack(task.item_name)
-      if (!item_stack) {
+      const available = actor_inventory.get_item_count(task.item_name)
+      if (available <= 0) {
         controller.fail(actor, task, 'item_missing')
         return 0
       }
@@ -543,7 +545,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
         .flat()
         .forEach((inventory) => {
           if (moved_total >= task.max_count) return
-          const to_move = math.min(item_stack.count, task.max_count - moved_total)
+          const to_move = math.min(available - moved_total, task.max_count - moved_total)
           if (to_move <= 0) return
           const moved = inventory.insert({ name: task.item_name, count: to_move })
           if (moved > 0) {

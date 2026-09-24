@@ -15,6 +15,7 @@ function inventory(initial: Record<string, number> = {}) {
       const count = counts[name] ?? 0
       return count > 0 ? [{ name, count }, 1] : [undefined, undefined]
     }),
+    get_item_count: vi.fn((name: string) => counts[name] ?? 0),
     can_insert: vi.fn(() => true),
     insert: vi.fn(({ name, count }: { name: string, count: number }) => {
       counts[name] = (counts[name] ?? 0) + count
@@ -173,5 +174,25 @@ describe('exact entity item transfers', () => {
     expect(c.actorInventory.counts['firearm-magazine']).toBe(20)
     expect(c.findEntities).not.toHaveBeenCalled()
     expect(c.manager.player_state.task_state).toBe(TaskStates.IDLE)
+  })
+
+  it('moves more than one stack when the NPC holds several stacks of the item', () => {
+    const c = context()
+    c.actorInventory.counts['iron-plate'] = 250
+    // A real find_item_stack returns one stack (100 plates); the transfer must
+    // not be capped by it.
+    ;(c.actorInventory.find_item_stack as any).mockImplementation((name: string) =>
+      (c.actorInventory.counts[name] ?? 0) > 0 ? [{ name, count: Math.min(100, c.actorInventory.counts[name]) }, 1] : [undefined, undefined])
+    const targetInventory = inventory()
+    const target = entity(101, targetInventory, { name: 'wooden-chest', type: 'container' })
+    remember_entity_reference(target)
+    ;(globalThis as any).game.get_entity_by_unit_number = vi.fn(() => target)
+
+    expect(c.controller.submit_move_exact('iron-plate', 101, 200, true)[0]).toBe(true)
+    expect(c.runtime.state_moving_items(c.actor)).toBe(200)
+
+    expect(targetInventory.counts['iron-plate']).toBe(200)
+    expect(c.actorInventory.counts['iron-plate']).toBe(50)
+    expect(c.controller.status().last_result).toMatchObject({ code: 'completed', moved_count: 200 })
   })
 })
