@@ -8,47 +8,51 @@ import { TaskStates } from './types'
 import { direction_towards } from './utils/direction'
 import { distance } from './utils/math'
 
-const MAX_SEARCH_RADIUS = 256
-const MAX_SINGLE_COMBAT_TICKS = 60 * 60
-const MAX_CLEAR_AREA_TICKS = 10 * 60 * 60
-const COMBAT_PATH_STUCK_TICKS = 3 * 60
-const LEGACY_DIRECT_STUCK_TICKS = 10 * 60
-const COMBAT_PHYSICAL_STUCK_TICKS = 90
-const COMBAT_PHYSICAL_SAMPLE_TICKS = 30
-const COMBAT_PHYSICAL_PROGRESS_DISTANCE = 0.12
-const DISTANCE_PROGRESS_EPSILON = 0.25
-const MOBILE_THREAT_PRIORITY_RADIUS = 28
-const LOCAL_SAFETY_WINDOW_TICKS = 120
-const KITE_DISTANCE = 12
-const PANIC_DISTANCE = 7
-const LOW_HEALTH_RATIO = 0.35
-const TURRET_DANGER_DISTANCE = 10
-const TURRET_STAGING_DISTANCE = 24
-const TURRET_MIN_ADVANCE_DISTANCE = 6
-const TURRET_FRONTLINE_ADVANCE_DISTANCE = 6
-const TURRET_FRONTLINE_REAR_DISTANCE = 2.5
-const TURRET_ACTOR_CLEARANCE = 2.5
-const TURRET_TARGET_SAFETY_MARGIN = 0.5
-const TURRET_COVER_MARGIN = 2
-const TURRET_PLACEMENT_SEARCH_RADIUS = 3
-const TURRET_PLACEMENT_CANDIDATES = 6
-const TURRET_LOAD_COUNT = 20
-const SUPPORT_THREAT_PER_TURRET = 4
-const MAX_SUPPORT_TURRETS_PER_STAGE = 8
-const TURRET_AMMO_PRIORITY = ['uranium-rounds-magazine', 'piercing-rounds-magazine', 'firearm-magazine']
-const WORM_THREAT_SCAN_MULTIPLIER = 2
-const WORM_NAMES = ['small-worm-turret', 'medium-worm-turret', 'big-worm-turret', 'behemoth-worm-turret']
-const COMBAT_PATH_MAX_ATTEMPTS = 4
-const COMBAT_PATH_REQUEST_TIMEOUT_TICKS = 15 * 60
-const COMBAT_PATH_RETRY_DELAY_TICKS = 30
-const COMBAT_PATH_APPROACH_GOAL_RADIUS = 8
-const COMBAT_PATH_CHASE_GOAL_RADIUS = 2.5
-const COMBAT_PATH_RETREAT_GOAL_RADIUS = 1.5
-const COMBAT_PATH_RECOVERY_GOAL_RADIUS = 0.5
-const COMBAT_PATH_WAYPOINT_DISTANCE = 0.5
-const COMBAT_PATH_PROGRESS_DISTANCE = 0.25
-const COMBAT_PATH_TARGET_REPATH_DISTANCE = 2
-const COMBAT_RECOVERY_REACHED_DISTANCE = 0.75
+// Tuning constants live in one table: new_combat_controller captures each
+// module-level local as an upvalue, and LuaJIT allows at most 60 per function.
+const COMBAT = {
+  MAX_SEARCH_RADIUS: 256,
+  MAX_SINGLE_COMBAT_TICKS: 60 * 60,
+  MAX_CLEAR_AREA_TICKS: 10 * 60 * 60,
+  COMBAT_PATH_STUCK_TICKS: 3 * 60,
+  LEGACY_DIRECT_STUCK_TICKS: 10 * 60,
+  COMBAT_PHYSICAL_STUCK_TICKS: 90,
+  COMBAT_PHYSICAL_SAMPLE_TICKS: 30,
+  COMBAT_PHYSICAL_PROGRESS_DISTANCE: 0.12,
+  DISTANCE_PROGRESS_EPSILON: 0.25,
+  MOBILE_THREAT_PRIORITY_RADIUS: 28,
+  LOCAL_SAFETY_WINDOW_TICKS: 120,
+  KITE_DISTANCE: 12,
+  PANIC_DISTANCE: 7,
+  LOW_HEALTH_RATIO: 0.35,
+  TURRET_DANGER_DISTANCE: 10,
+  TURRET_STAGING_DISTANCE: 24,
+  TURRET_MIN_ADVANCE_DISTANCE: 6,
+  TURRET_FRONTLINE_ADVANCE_DISTANCE: 6,
+  TURRET_FRONTLINE_REAR_DISTANCE: 2.5,
+  TURRET_ACTOR_CLEARANCE: 2.5,
+  TURRET_TARGET_SAFETY_MARGIN: 0.5,
+  TURRET_COVER_MARGIN: 2,
+  TURRET_PLACEMENT_SEARCH_RADIUS: 3,
+  TURRET_PLACEMENT_CANDIDATES: 6,
+  TURRET_LOAD_COUNT: 20,
+  SUPPORT_THREAT_PER_TURRET: 4,
+  MAX_SUPPORT_TURRETS_PER_STAGE: 8,
+  TURRET_AMMO_PRIORITY: ['uranium-rounds-magazine', 'piercing-rounds-magazine', 'firearm-magazine'],
+  WORM_THREAT_SCAN_MULTIPLIER: 2,
+  WORM_NAMES: ['small-worm-turret', 'medium-worm-turret', 'big-worm-turret', 'behemoth-worm-turret'],
+  COMBAT_PATH_MAX_ATTEMPTS: 4,
+  COMBAT_PATH_REQUEST_TIMEOUT_TICKS: 15 * 60,
+  COMBAT_PATH_RETRY_DELAY_TICKS: 30,
+  COMBAT_PATH_APPROACH_GOAL_RADIUS: 8,
+  COMBAT_PATH_CHASE_GOAL_RADIUS: 2.5,
+  COMBAT_PATH_RETREAT_GOAL_RADIUS: 1.5,
+  COMBAT_PATH_RECOVERY_GOAL_RADIUS: 0.5,
+  COMBAT_PATH_WAYPOINT_DISTANCE: 0.5,
+  COMBAT_PATH_PROGRESS_DISTANCE: 0.25,
+  COMBAT_PATH_TARGET_REPATH_DISTANCE: 2,
+  COMBAT_RECOVERY_REACHED_DISTANCE: 0.75,
+}
 
 type CombatPathMode = 'approach' | 'retreat'
 type CombatPhase = 'engage' | 'safety' | 'cleanup'
@@ -184,7 +188,7 @@ function preferred_target(actor: ControlledActor, entities: LuaEntity[]) {
   for (const entity of entities) {
     if (entity.type !== 'unit') continue
     const candidate = distance(actor.position, entity.position)
-    if (candidate <= MOBILE_THREAT_PRIORITY_RADIUS && candidate < mobile_distance) {
+    if (candidate <= COMBAT.MOBILE_THREAT_PRIORITY_RADIUS && candidate < mobile_distance) {
       nearest_mobile = entity
       mobile_distance = candidate
     }
@@ -196,7 +200,7 @@ function valid_radius(radius: number) {
   return typeof radius === 'number'
     && radius === math.floor(radius)
     && radius >= 1
-    && radius <= MAX_SEARCH_RADIUS
+    && radius <= COMBAT.MAX_SEARCH_RADIUS
 }
 
 function identity_matches(actor: ControlledActor, task: PlayerParametersAttackNearestEnemy) {
@@ -236,7 +240,7 @@ function support_placement_target_range(actor: ControlledActor) {
   const turret_range = gun_turret_range()
   const weapon_range = actor.character ? selected_weapon_range(actor.character) : undefined
   if (weapon_range === undefined) return turret_range
-  return math.min(turret_range, math.max(1, weapon_range - TURRET_FRONTLINE_REAR_DISTANCE))
+  return math.min(turret_range, math.max(1, weapon_range - COMBAT.TURRET_FRONTLINE_REAR_DISTANCE))
 }
 
 function is_alive(entity: LuaEntity | null | undefined) {
@@ -249,7 +253,7 @@ function is_static_enemy(entity: LuaEntity) {
 
 function is_worm_enemy(entity: LuaEntity) {
   if (entity.type !== 'turret') return false
-  for (const name of WORM_NAMES) if (entity.name === name) return true
+  for (const name of COMBAT.WORM_NAMES) if (entity.name === name) return true
   return false
 }
 
@@ -264,12 +268,12 @@ function worm_attack_range(entity?: LuaEntity, prototype_name?: string) {
 
 function worm_threat_radius(entity?: LuaEntity, prototype_name?: string) {
   const range = worm_attack_range(entity, prototype_name)
-  return range === undefined ? 0 : math.min(MAX_SEARCH_RADIUS, range * WORM_THREAT_SCAN_MULTIPLIER)
+  return range === undefined ? 0 : math.min(COMBAT.MAX_SEARCH_RADIUS, range * COMBAT.WORM_THREAT_SCAN_MULTIPLIER)
 }
 
 function max_worm_threat_scan_radius() {
   let radius = 0
-  for (const name of WORM_NAMES) radius = math.max(radius, worm_threat_radius(undefined, name))
+  for (const name of COMBAT.WORM_NAMES) radius = math.max(radius, worm_threat_radius(undefined, name))
   return radius
 }
 
@@ -331,7 +335,7 @@ function support_threat_score(enemies: LuaEntity[]) {
 
 function support_turret_budget(threat_score: number) {
   if (threat_score <= 0) return 0
-  return math.min(MAX_SUPPORT_TURRETS_PER_STAGE, math.max(1, math.ceil(threat_score / SUPPORT_THREAT_PER_TURRET)))
+  return math.min(COMBAT.MAX_SUPPORT_TURRETS_PER_STAGE, math.max(1, math.ceil(threat_score / COMBAT.SUPPORT_THREAT_PER_TURRET)))
 }
 
 function support_stage_batch_size(threat_score: number) {
@@ -343,15 +347,15 @@ function support_stage_batch_size(threat_score: number) {
   if (threat_score <= 32) return 5
   if (threat_score <= 40) return 6
   if (threat_score <= 48) return 7
-  return MAX_SUPPORT_TURRETS_PER_STAGE
+  return COMBAT.MAX_SUPPORT_TURRETS_PER_STAGE
 }
 
 function retreat_position(actor: ControlledActor, threat: LuaEntity) {
   const dx = actor.position.x - threat.position.x
   const dy = actor.position.y - threat.position.y
   const current_distance = math.sqrt(dx * dx + dy * dy)
-  if (current_distance <= 0.001) return { x: actor.position.x - KITE_DISTANCE, y: actor.position.y }
-  const retreat_distance = math.max(0, KITE_DISTANCE - current_distance)
+  if (current_distance <= 0.001) return { x: actor.position.x - COMBAT.KITE_DISTANCE, y: actor.position.y }
+  const retreat_distance = math.max(0, COMBAT.KITE_DISTANCE - current_distance)
   return {
     x: actor.position.x + dx / current_distance * retreat_distance,
     y: actor.position.y + dy / current_distance * retreat_distance,
@@ -359,7 +363,7 @@ function retreat_position(actor: ControlledActor, threat: LuaEntity) {
 }
 
 function selected_support_ammo(inventory: LuaInventory): { name: string, stack: LuaItemStack } | undefined {
-  for (const name of TURRET_AMMO_PRIORITY) {
+  for (const name of COMBAT.TURRET_AMMO_PRIORITY) {
     const [stack] = inventory.find_item_stack(name)
     if (stack?.valid_for_read === true && stack.count > 0) return { name, stack }
   }
@@ -491,14 +495,14 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
       reset_combat_physical_progress(actor, task)
       return false
     }
-    if (game.tick - task.combat_physical_sample_tick >= COMBAT_PHYSICAL_SAMPLE_TICKS) {
-      if (distance(actor.position, task.combat_physical_sample_position) >= COMBAT_PHYSICAL_PROGRESS_DISTANCE) {
+    if (game.tick - task.combat_physical_sample_tick >= COMBAT.COMBAT_PHYSICAL_SAMPLE_TICKS) {
+      if (distance(actor.position, task.combat_physical_sample_position) >= COMBAT.COMBAT_PHYSICAL_PROGRESS_DISTANCE) {
         task.combat_last_physical_progress_tick = game.tick
       }
       task.combat_physical_sample_position = copy_position(actor.position)
       task.combat_physical_sample_tick = game.tick
     }
-    return game.tick - task.combat_last_physical_progress_tick > COMBAT_PHYSICAL_STUCK_TICKS
+    return game.tick - task.combat_last_physical_progress_tick > COMBAT.COMBAT_PHYSICAL_STUCK_TICKS
   }
 
   function fail(actor: ControlledActor, task: CombatTask, code: CombatCode) {
@@ -575,15 +579,15 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
     const magnitude = math.sqrt(away_x * away_x + away_y * away_y)
     if (magnitude <= 0.001) return undefined
     return {
-      x: support.position.x + away_x / magnitude * TURRET_FRONTLINE_REAR_DISTANCE,
-      y: support.position.y + away_y / magnitude * TURRET_FRONTLINE_REAR_DISTANCE,
+      x: support.position.x + away_x / magnitude * COMBAT.TURRET_FRONTLINE_REAR_DISTANCE,
+      y: support.position.y + away_y / magnitude * COMBAT.TURRET_FRONTLINE_REAR_DISTANCE,
     }
   }
 
   function actor_is_behind_frontline(actor: ControlledActor, task: CombatTask, target: LuaEntity) {
     const support = frontmost_support(task, target)
     if (!support) return false
-    return distance(actor.position, target.position) + DISTANCE_PROGRESS_EPSILON >= distance(support.position, target.position)
+    return distance(actor.position, target.position) + COMBAT.DISTANCE_PROGRESS_EPSILON >= distance(support.position, target.position)
   }
 
   function support_cover_goal(actor: ControlledActor, task: CombatTask, target: LuaEntity) {
@@ -591,7 +595,7 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
     if (!support) return undefined
     const turret_range = support.prototype.turret_range
     if (typeof turret_range !== 'number' || turret_range <= 0) return undefined
-    const cover_radius = math.max(COMBAT_PATH_RETREAT_GOAL_RADIUS + 0.5, turret_range - TURRET_COVER_MARGIN)
+    const cover_radius = math.max(COMBAT.COMBAT_PATH_RETREAT_GOAL_RADIUS + 0.5, turret_range - COMBAT.TURRET_COVER_MARGIN)
     const actor_in_cover = distance(actor.position, support.position) <= cover_radius
     const desired = actor_in_cover ? retreat_position(actor, target) : copy_position(actor.position)
     const dx = desired.x - support.position.x
@@ -650,7 +654,7 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
     actor.set_walking_state({ walking: false, direction: defines.direction.north })
   }
 
-  function nearby_mobile_threat(actor: ControlledActor, radius = MOBILE_THREAT_PRIORITY_RADIUS) {
+  function nearby_mobile_threat(actor: ControlledActor, radius = COMBAT.MOBILE_THREAT_PRIORITY_RADIUS) {
     let threat: LuaEntity | undefined
     let best = math.huge
     const local_units = actor.surface.find_entities_filtered({ position: actor.position, radius, force: 'enemy', type: 'unit' })
@@ -782,7 +786,7 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
     stop_actor_cleanup(actor)
     actor.set_walking_state({ walking: false, direction: defines.direction.north })
     if (task.local_safe_since_tick === undefined) task.local_safe_since_tick = game.tick
-    if (game.tick - task.local_safe_since_tick < LOCAL_SAFETY_WINDOW_TICKS) return
+    if (game.tick - task.local_safe_since_tick < COMBAT.LOCAL_SAFETY_WINDOW_TICKS) return
 
     if (task.combat_safety_goal === 'cleanup') {
       enter_cleanup(actor, task)
@@ -836,8 +840,8 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
 
   function mobile_threat_requires_preemption(actor: ControlledActor, task: CombatTask, threat: LuaEntity) {
     const character = actor.character
-    if (!character || health_ratio(character) <= LOW_HEALTH_RATIO) return true
-    if (distance(actor.position, threat.position) <= PANIC_DISTANCE) return true
+    if (!character || health_ratio(character) <= COMBAT.LOW_HEALTH_RATIO) return true
+    if (distance(actor.position, threat.position) <= COMBAT.PANIC_DISTANCE) return true
     return !support_covers_target(task, threat)
   }
 
@@ -855,7 +859,7 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
   function preempt_static_target_for_panic_threat(actor: ControlledActor, task: CombatTask) {
     const target = task.target
     if (task.combat_mode !== 'clear_area' || !target || !is_alive(target) || !is_static_enemy(target)) return false
-    const threat = nearby_mobile_threat(actor, PANIC_DISTANCE)
+    const threat = nearby_mobile_threat(actor, COMBAT.PANIC_DISTANCE)
     if (!threat || threat === target) return false
     if (!task.support_stage_started) task.support_pressure_preemptions = (task.support_pressure_preemptions ?? 0) + 1
     bind_target(actor, task, threat, 'preempted')
@@ -866,7 +870,7 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
   function preempt_static_target_for_mobile_threat(actor: ControlledActor, task: CombatTask) {
     const target = task.target
     if (task.combat_mode !== 'clear_area' || !target || !is_alive(target) || !is_static_enemy(target)) return false
-    const threat = nearby_mobile_threat(actor, TURRET_DANGER_DISTANCE)
+    const threat = nearby_mobile_threat(actor, COMBAT.TURRET_DANGER_DISTANCE)
     if (!threat || threat === target) return false
     if (!mobile_threat_requires_preemption(actor, task, threat)) return false
     if (!task.support_stage_started) task.support_pressure_preemptions = (task.support_pressure_preemptions ?? 0) + 1
@@ -922,7 +926,7 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
   }
 
   function begin_support_stage(actor: ControlledActor, task: CombatTask, stage_budget: number, owned_count: number) {
-    const batch_size = support_stage_batch_size(task.initial_threat_score ?? stage_budget * SUPPORT_THREAT_PER_TURRET)
+    const batch_size = support_stage_batch_size(task.initial_threat_score ?? stage_budget * COMBAT.SUPPORT_THREAT_PER_TURRET)
     if (batch_size <= 0) return false
     task.support_stage_anchor_position = copy_position(actor.position)
     task.support_stage_start_turret_count = owned_count
@@ -934,7 +938,7 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
 
   function should_place_support(actor: ControlledActor, task: CombatTask, target: LuaEntity) {
     if (task.combat_mode !== 'clear_area' || !is_support_target(target)) return false
-    if (target.type === 'unit' && distance(actor.position, target.position) <= PANIC_DISTANCE) return false
+    if (target.type === 'unit' && distance(actor.position, target.position) <= COMBAT.PANIC_DISTANCE) return false
     const stage_budget = task.support_turret_budget ?? 0
     const owned_count = live_owned_turrets(task).length
     if (stage_budget <= 0 || !support_resources_available(actor)) return false
@@ -943,9 +947,9 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
     if (!task.support_stage_started) {
       const origin = task.origin_position ?? actor.position
       const advance_distance = distance(actor.position, origin)
-      const advanced = advance_distance >= TURRET_MIN_ADVANCE_DISTANCE
+      const advanced = advance_distance >= COMBAT.TURRET_MIN_ADVANCE_DISTANCE
       const pressure_override = is_ranged_mobile_enemy(target) || (task.support_pressure_preemptions ?? 0) >= 2
-      const staged = distance(actor.position, target.position) <= TURRET_STAGING_DISTANCE
+      const staged = distance(actor.position, target.position) <= COMBAT.TURRET_STAGING_DISTANCE
       if ((!advanced && !pressure_override) || !staged) return false
       task.support_stage_started = true
       if (!begin_support_stage(actor, task, stage_budget, owned_count)) return false
@@ -965,7 +969,7 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
     return owned_count < (task.support_stage_target_turret_count ?? owned_count)
   }
 
-  function support_anchor(actor: ControlledActor, target: LuaEntity, _turret_index: number, advance_distance = TURRET_FRONTLINE_ADVANCE_DISTANCE) {
+  function support_anchor(actor: ControlledActor, target: LuaEntity, _turret_index: number, advance_distance = COMBAT.TURRET_FRONTLINE_ADVANCE_DISTANCE) {
     let toward_x = target.position.x - actor.position.x
     let toward_y = target.position.y - actor.position.y
     const magnitude = math.sqrt(toward_x * toward_x + toward_y * toward_y)
@@ -990,8 +994,8 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
     const actor_target_distance = distance(actor.position, target.position)
     if (actor_target_distance <= 0.001) return copy_position(actor.position)
     const desired_distance = math.max(
-      TURRET_ACTOR_CLEARANCE + 1,
-      support_placement_target_range(actor) + TURRET_FRONTLINE_ADVANCE_DISTANCE - 1,
+      COMBAT.TURRET_ACTOR_CLEARANCE + 1,
+      support_placement_target_range(actor) + COMBAT.TURRET_FRONTLINE_ADVANCE_DISTANCE - 1,
     )
     const away_x = (actor.position.x - target.position.x) / actor_target_distance
     const away_y = (actor.position.y - target.position.y) / actor_target_distance
@@ -1006,7 +1010,7 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
     if (!actor.surface.can_place_entity) {
       const position = actor.surface.find_non_colliding_position('gun-turret', anchor, 2, 0.25, false)
       if (!position) return undefined
-      if (distance(position, actor.position) < TURRET_ACTOR_CLEARANCE) return undefined
+      if (distance(position, actor.position) < COMBAT.TURRET_ACTOR_CLEARANCE) return undefined
       if (distance(position, target.position) > target_range) return undefined
       return position
     }
@@ -1014,8 +1018,8 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
       entity_name: 'gun-turret',
       position: anchor,
       side: 'any',
-      search_radius: TURRET_PLACEMENT_SEARCH_RADIUS,
-      max_candidates: TURRET_PLACEMENT_CANDIDATES,
+      search_radius: COMBAT.TURRET_PLACEMENT_SEARCH_RADIUS,
+      max_candidates: COMBAT.TURRET_PLACEMENT_CANDIDATES,
     })
     task.last_turret_placement_plan = placement
     if (!placement.ok || !('candidates' in placement)) return undefined
@@ -1023,10 +1027,10 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
     let fallback: { x: number, y: number } | undefined
     for (const candidate of placement.candidates ?? []) {
       const position = candidate.position as { x: number, y: number }
-      if (distance(position, actor.position) < TURRET_ACTOR_CLEARANCE) continue
+      if (distance(position, actor.position) < COMBAT.TURRET_ACTOR_CLEARANCE) continue
       const target_distance = distance(position, target.position)
       if (target_distance > target_range) continue
-      if (target_distance + TURRET_TARGET_SAFETY_MARGIN < actor_target_distance) return position
+      if (target_distance + COMBAT.TURRET_TARGET_SAFETY_MARGIN < actor_target_distance) return position
       if (!fallback) fallback = position
     }
     return fallback
@@ -1045,9 +1049,9 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
     const turret_index = math.max(0, owned_count - stage_start)
     const total_placements = (task.turrets_placed ?? 0) + 1
     const anchor_distances = [
-      TURRET_FRONTLINE_ADVANCE_DISTANCE,
-      math.max(TURRET_ACTOR_CLEARANCE + 1, TURRET_FRONTLINE_ADVANCE_DISTANCE - 1.5),
-      TURRET_ACTOR_CLEARANCE + 0.75,
+      COMBAT.TURRET_FRONTLINE_ADVANCE_DISTANCE,
+      math.max(COMBAT.TURRET_ACTOR_CLEARANCE + 1, COMBAT.TURRET_FRONTLINE_ADVANCE_DISTANCE - 1.5),
+      COMBAT.TURRET_ACTOR_CLEARANCE + 0.75,
     ]
     let anchor = support_anchor(actor, target, turret_index, anchor_distances[0])
     let position: { x: number, y: number } | undefined
@@ -1060,8 +1064,8 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
       log(`[AUTORIO] No safe shared-planner support turret position near frontline anchors; actor=${serpent.line(actor.position)} target=${serpent.line(target.position)}`)
       return false
     }
-    if (distance(position, actor.position) < TURRET_ACTOR_CLEARANCE) {
-      log(`[AUTORIO] Refusing support turret position ${serpent.line(position)} inside actor clearance ${TURRET_ACTOR_CLEARANCE}`)
+    if (distance(position, actor.position) < COMBAT.TURRET_ACTOR_CLEARANCE) {
+      log(`[AUTORIO] Refusing support turret position ${serpent.line(position)} inside actor clearance ${COMBAT.TURRET_ACTOR_CLEARANCE}`)
       return false
     }
     const turret = actor.surface.create_entity({ name: 'gun-turret', position, raise_built: true, ...actor.entity_build_args() })
@@ -1076,7 +1080,7 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
       turret.destroy()
       return false
     }
-    const requested_ammo = math.min(TURRET_LOAD_COUNT, ammo.stack.count)
+    const requested_ammo = math.min(COMBAT.TURRET_LOAD_COUNT, ammo.stack.count)
     const removed_ammo = inventory.remove({ name: ammo.name, count: requested_ammo })
     if (removed_ammo <= 0) {
       inventory.insert({ name: 'gun-turret', count: 1 })
@@ -1138,15 +1142,15 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
     if (task.combat_recovery_position) return task.combat_path_mode !== mode
     return task.combat_path_mode !== mode
       || !task.combat_path_target_position
-      || distance(task.combat_path_target_position, goal) >= COMBAT_PATH_TARGET_REPATH_DISTANCE
+      || distance(task.combat_path_target_position, goal) >= COMBAT.COMBAT_PATH_TARGET_REPATH_DISTANCE
   }
 
   function path_goal_radius(task: CombatTask, mode: CombatPathMode) {
-    if (task.combat_recovery_position) return COMBAT_PATH_RECOVERY_GOAL_RADIUS
-    if (mode === 'retreat') return COMBAT_PATH_RETREAT_GOAL_RADIUS
+    if (task.combat_recovery_position) return COMBAT.COMBAT_PATH_RECOVERY_GOAL_RADIUS
+    if (mode === 'retreat') return COMBAT.COMBAT_PATH_RETREAT_GOAL_RADIUS
     return task.target && is_alive(task.target) && is_static_enemy(task.target)
-      ? COMBAT_PATH_APPROACH_GOAL_RADIUS
-      : COMBAT_PATH_CHASE_GOAL_RADIUS
+      ? COMBAT.COMBAT_PATH_APPROACH_GOAL_RADIUS
+      : COMBAT.COMBAT_PATH_CHASE_GOAL_RADIUS
   }
 
   function maybe_prepare_combat_escape(actor: ControlledActor, task: CombatTask, goal: { x: number, y: number }, reason: string) {
@@ -1168,7 +1172,7 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
       fail(actor, task, 'no_actor')
       return false
     }
-    if ((task.combat_path_attempts ?? 0) >= COMBAT_PATH_MAX_ATTEMPTS) {
+    if ((task.combat_path_attempts ?? 0) >= COMBAT.COMBAT_PATH_MAX_ATTEMPTS) {
       fail(actor, task, task.combat_last_recovery_reason === 'physical_stuck' ? 'stuck' : 'path_timeout')
       return false
     }
@@ -1206,7 +1210,7 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
     task.combat_path_last_waypoint_distance = undefined
     task.combat_path_last_progress_tick = game.tick
     task.combat_last_recovery_reason = reason
-    if ((task.combat_path_attempts ?? 0) >= COMBAT_PATH_MAX_ATTEMPTS) {
+    if ((task.combat_path_attempts ?? 0) >= COMBAT.COMBAT_PATH_MAX_ATTEMPTS) {
       if (!task.combat_last_spatial_observation) maybe_prepare_combat_escape(actor, task, goal, reason)
       fail(actor, task, exhausted_code)
       return false
@@ -1252,13 +1256,13 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
     task.combat_path_requested_tick = undefined
     if (event.try_again_later || !event.path || event.path.length === 0) {
       task.combat_last_recovery_reason = event.try_again_later ? 'path_busy' : 'unreachable'
-      if ((task.combat_path_attempts ?? 0) >= COMBAT_PATH_MAX_ATTEMPTS) {
+      if ((task.combat_path_attempts ?? 0) >= COMBAT.COMBAT_PATH_MAX_ATTEMPTS) {
         if (!task.combat_last_spatial_observation) maybe_prepare_combat_escape(actor, task, goal, task.combat_last_recovery_reason)
         fail(actor, task, 'path_unreachable')
         return
       }
       maybe_prepare_combat_escape(actor, task, goal, task.combat_last_recovery_reason)
-      task.combat_path_next_retry_tick = game.tick + COMBAT_PATH_RETRY_DELAY_TICKS
+      task.combat_path_next_retry_tick = game.tick + COMBAT.COMBAT_PATH_RETRY_DELAY_TICKS
       log(`[AUTORIO] Combat ${task.combat_path_mode} path unavailable on attempt ${task.combat_path_attempts ?? 0}; retry scheduled`)
       return
     }
@@ -1275,17 +1279,17 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
       return true
     }
     if (path_goal_changed(task, goal, mode)) clear_combat_path(task, true)
-    if (mode === 'retreat' && distance(actor.position, goal) <= COMBAT_PATH_RETREAT_GOAL_RADIUS) {
+    if (mode === 'retreat' && distance(actor.position, goal) <= COMBAT.COMBAT_PATH_RETREAT_GOAL_RADIUS) {
       actor.set_walking_state({ walking: false, direction: defines.direction.north })
       clear_combat_path(task, true)
       return true
     }
-    if (task.combat_recovery_position && distance(actor.position, task.combat_recovery_position) <= COMBAT_RECOVERY_REACHED_DISTANCE) {
+    if (task.combat_recovery_position && distance(actor.position, task.combat_recovery_position) <= COMBAT.COMBAT_RECOVERY_REACHED_DISTANCE) {
       return finish_escape_and_repath(actor, task, goal, mode)
     }
     if (task.combat_path_request_id !== undefined) {
       const requested_tick = task.combat_path_requested_tick ?? game.tick
-      if (game.tick - requested_tick > COMBAT_PATH_REQUEST_TIMEOUT_TICKS) retry_combat_path(actor, task, goal, mode, 'path_timeout', 'request_timeout')
+      if (game.tick - requested_tick > COMBAT.COMBAT_PATH_REQUEST_TIMEOUT_TICKS) retry_combat_path(actor, task, goal, mode, 'path_timeout', 'request_timeout')
       return true
     }
     if (task.combat_path_next_retry_tick !== undefined) {
@@ -1296,7 +1300,7 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
     if (!path || path.length === 0) return request_combat_path(actor, task, goal, mode)
     const next_position = path[0].position
     const waypoint_distance = distance(actor.position, next_position)
-    if (waypoint_distance <= COMBAT_PATH_WAYPOINT_DISTANCE) {
+    if (waypoint_distance <= COMBAT.COMBAT_PATH_WAYPOINT_DISTANCE) {
       path.shift()
       task.combat_path_last_progress_tick = game.tick
       task.combat_path_last_waypoint_distance = path.length > 0 ? distance(actor.position, path[0].position) : undefined
@@ -1308,7 +1312,7 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
       return true
     }
     const best = task.combat_path_last_waypoint_distance
-    if (best === undefined || waypoint_distance <= best - COMBAT_PATH_PROGRESS_DISTANCE) {
+    if (best === undefined || waypoint_distance <= best - COMBAT.COMBAT_PATH_PROGRESS_DISTANCE) {
       task.combat_path_last_waypoint_distance = waypoint_distance
       task.combat_path_last_progress_tick = game.tick
     }
@@ -1316,7 +1320,7 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
       retry_combat_path(actor, task, goal, mode, 'stuck', 'physical_stuck')
       return true
     }
-    if (game.tick - (task.combat_path_last_progress_tick ?? game.tick) > COMBAT_PATH_STUCK_TICKS) {
+    if (game.tick - (task.combat_path_last_progress_tick ?? game.tick) > COMBAT.COMBAT_PATH_STUCK_TICKS) {
       retry_combat_path(actor, task, goal, mode, 'stuck', 'waypoint_stuck')
       return true
     }
@@ -1326,7 +1330,7 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
 
   function stable_retreat_goal(actor: ControlledActor, task: CombatTask, target: LuaEntity) {
     if (task.combat_path_mode === 'retreat' && task.combat_path_target_position
-      && distance(task.combat_path_target_position, target.position) > distance(actor.position, target.position) + DISTANCE_PROGRESS_EPSILON) {
+      && distance(task.combat_path_target_position, target.position) > distance(actor.position, target.position) + COMBAT.DISTANCE_PROGRESS_EPSILON) {
       return task.combat_path_target_position
     }
     return retreat_position(actor, target)
@@ -1355,7 +1359,7 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
     if (!behind_frontline) {
       follow_combat_path(actor, task, rear, 'retreat')
     }
-    else if (!can_shoot && distance(actor.position, rear) > COMBAT_PATH_RETREAT_GOAL_RADIUS) {
+    else if (!can_shoot && distance(actor.position, rear) > COMBAT.COMBAT_PATH_RETREAT_GOAL_RADIUS) {
       // Being behind the turret line is not a reason to freeze outside weapon
       // range. Advance only as far as the protected rear position.
       follow_combat_path(actor, task, rear, 'retreat')
@@ -1396,7 +1400,7 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
       return
     }
     const started_tick = task.started_tick ?? game.tick
-    const max_ticks = task.combat_mode === 'clear_area' ? MAX_CLEAR_AREA_TICKS : MAX_SINGLE_COMBAT_TICKS
+    const max_ticks = task.combat_mode === 'clear_area' ? COMBAT.MAX_CLEAR_AREA_TICKS : COMBAT.MAX_SINGLE_COMBAT_TICKS
     if (game.tick - started_tick > max_ticks) {
       fail(actor, task, 'timeout')
       return
@@ -1404,12 +1408,12 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
     const can_shoot = character.can_shoot(target, target.position)
     const current_distance = distance(actor.position, target.position)
     const previous_distance = task.last_distance ?? current_distance
-    if (current_distance + DISTANCE_PROGRESS_EPSILON < previous_distance) {
+    if (current_distance + COMBAT.DISTANCE_PROGRESS_EPSILON < previous_distance) {
       task.last_distance = current_distance
       task.last_progress_tick = game.tick
     }
 
-    if (health_ratio(character) <= LOW_HEALTH_RATIO) {
+    if (health_ratio(character) <= COMBAT.LOW_HEALTH_RATIO) {
       const cover_goal = support_cover_goal(actor, task, target)
       if (cover_goal) {
         if (can_shoot) {
@@ -1442,7 +1446,7 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
     // preempts here instead of being ignored.
     if (preempt_static_target_for_mobile_threat(actor, task)) return
 
-    if (target.type === 'unit' && current_distance <= PANIC_DISTANCE) {
+    if (target.type === 'unit' && current_distance <= COMBAT.PANIC_DISTANCE) {
       if (can_shoot) shoot_while_retreating(actor, task, target)
       else if (supports_mobile_combat_path(actor, task)) follow_combat_path(actor, task, stable_retreat_goal(actor, task, target), 'retreat')
       else walk_toward(actor, stable_retreat_goal(actor, task, target))
@@ -1457,7 +1461,7 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
       actor.update_selected_entity(target.position)
       actor.set_shooting_state({ state: defines.shooting.shooting_selected, position: target.position })
       task.last_progress_tick = game.tick
-      if (target.type === 'unit' && current_distance <= KITE_DISTANCE) {
+      if (target.type === 'unit' && current_distance <= COMBAT.KITE_DISTANCE) {
         shoot_while_retreating(actor, task, target)
       }
       else if (is_static_enemy(target)) {
@@ -1474,15 +1478,15 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
     stop_actor_combat(actor)
     if (target.type === 'unit' && !supports_mobile_combat_path(actor, task)) {
       clear_combat_path(task, true)
-      if (game.tick - (task.last_progress_tick ?? started_tick) > LEGACY_DIRECT_STUCK_TICKS) {
+      if (game.tick - (task.last_progress_tick ?? started_tick) > COMBAT.LEGACY_DIRECT_STUCK_TICKS) {
         fail(actor, task, 'stuck')
         return
       }
-      if (current_distance <= PANIC_DISTANCE) walk_toward(actor, stable_retreat_goal(actor, task, target))
+      if (current_distance <= COMBAT.PANIC_DISTANCE) walk_toward(actor, stable_retreat_goal(actor, task, target))
       else walk_toward(actor, target.position)
       return
     }
-    if (target.type === 'unit' && current_distance <= PANIC_DISTANCE) {
+    if (target.type === 'unit' && current_distance <= COMBAT.PANIC_DISTANCE) {
       follow_combat_path(actor, task, stable_retreat_goal(actor, task, target), 'retreat')
       return
     }
@@ -1493,7 +1497,7 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
       if (support_available && !covered) {
         const staging_goal = support_staging_goal(actor, target)
         const staging_distance = distance(staging_goal, target.position)
-        if (current_distance > staging_distance + DISTANCE_PROGRESS_EPSILON) {
+        if (current_distance > staging_distance + COMBAT.DISTANCE_PROGRESS_EPSILON) {
           // Old support must not pin AIRI in the rear when it no longer reaches
           // the active static target. Advance only far enough to make a new
           // frontline placement feasible, then retry support on the next tick.
