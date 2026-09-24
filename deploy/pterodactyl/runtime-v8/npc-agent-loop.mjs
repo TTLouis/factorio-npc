@@ -55,9 +55,9 @@ import {
   sanitizeStepCompletionContract,
 } from './step-completion.mjs'
 import {
-  isCompletionProofTool,
   isObservationToolName,
   observationToolFamily,
+  observationToolTier,
   isPlannerControlToolName,
   plannerControlPayloadFromMessage,
   renderOperation,
@@ -5993,14 +5993,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
-  completionProofReadsEligible() {
-    const key = this.activePlanKey()
-    const state = this.memory.planByNpc?.get?.(key) ?? this.memory.currentPlan?.(key)
-    const board = state?.task_board
-    const step = Number.isSafeInteger(board?.active_index) ? board.steps?.[board.active_index] : undefined
-    return state?.status === 'active' && step?.status === 'active'
-  }
-
   observationDecisionPressureBudget() {
     if (Number.isSafeInteger(this.observationBudgetRemaining)) return Math.max(0, Math.min(8, this.observationBudgetRemaining))
     return super.observationDecisionPressureBudget()
@@ -6041,25 +6033,31 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let freshSlots = Number.isSafeInteger(this.observationBudgetRemaining)
       ? Math.max(0, this.observationBudgetRemaining)
       : Number.POSITIVE_INFINITY
-    // A step cannot close without authoritative evidence, so reads that can
-    // prove the active step are admitted even when Jev's budget or relevance
-    // would defer them. They still count against the budget below, so an
-    // exhausted budget forces the next decision without tools.
-    const proofEligible = this.completionProofReadsEligible()
-    const proofAdmitted = []
+    // Jev's budget bounds planner rounds, not which facts the planner may see
+    // (see OBSERVATION_TOOL_TIER). Fact reads are always admitted; one
+    // discovery read per batch is admitted even when Jev deferred it. Both
+    // still count against the budget below, so an exhausted budget forces the
+    // next decision without tools.
+    const tierAdmitted = []
+    let discoveryAdmitted = 0
 
     for (let index = 0; index < prepared.length; index++) {
       const fresh = cachedPrepared[index] !== true && staticCachedPrepared[index] !== true
       const name = prepared[index]?.tool?.function?.name
       const family = observationToolFamily(name)
+      const tier = observationToolTier(name)
       const relevant = !fresh || selectedObservationFamilies === null || selectedObservationFamilies.has(family)
       const withinJev = relevant && (!fresh || freshSlots > 0)
-      const proof = fresh && !withinJev && proofEligible && isCompletionProofTool(name)
-      if (withinJev || proof) {
+      // Once the budget closed the observation phase, nothing is admitted:
+      // that is what bounds the planner's rounds.
+      const tierOverride = fresh && !withinJev && this.observationDecisionForced !== true
+        && (tier === 'fact' || (tier === 'discovery' && discoveryAdmitted === 0))
+      if (withinJev || tierOverride) {
         admittedPrepared.push(prepared[index])
         admittedCached.push(cachedPrepared[index])
         admittedStaticCached.push(staticCachedPrepared[index])
-        if (proof) proofAdmitted.push(name)
+        if (tier === 'discovery') discoveryAdmitted++
+        if (tierOverride) tierAdmitted.push({ tool: name, tier })
         else if (fresh && Number.isFinite(freshSlots)) freshSlots--
       }
       else {
@@ -6085,9 +6083,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       })
     }
 
-    if (proofAdmitted.length > 0) {
-      await this.traceEvent('observation.completion_proof_admitted', {
-        tools: proofAdmitted,
+    if (tierAdmitted.length > 0) {
+      await this.traceEvent('observation.tier_admitted', {
+        tools: tierAdmitted,
         budget_remaining_before: Number.isSafeInteger(this.observationBudgetRemaining) ? this.observationBudgetRemaining : undefined,
         selected_families: selectedObservationFamilies ? [...selectedObservationFamilies] : undefined,
       })
