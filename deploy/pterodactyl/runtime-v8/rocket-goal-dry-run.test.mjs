@@ -150,3 +150,49 @@ test('dry run: a Nauvis rocket goal from definition to launch, through a restart
   assert.ok(goal.satisfaction.evidence_refs.includes('goal_condition/rocket/2'))
   assert.equal(prompts.length, 5, 'no extra planner turn after the launch')
 })
+
+test('dry run: a launch before the rocket is built tells the planner how many parts the silo still needs', async () => {
+  const game = new FakeFactorio()
+  game.researched.add('rocket-silo')
+  game.nearby = {
+    actor_position: { x: 0, y: 0 },
+    entities: [{ name: 'rocket-silo', type: 'rocket-silo', unit_number: SILO, position: { x: 6, y: 0 }, distance: 6 }],
+  }
+  const replies = [
+    { content: null, tool_calls: [{ id: 'observe-silo', type: 'function', function: { name: 'getNearbyEntities', arguments: JSON.stringify({ radius: 32, name: 'rocket-silo', limit: 2 }) } }] },
+    planReply({
+      plan: ['Launch the rocket'],
+      operations: [{ name: 'launch_rocket', args: { unit_number: SILO } }],
+      checkpoint: { mode: 'all', requirements: [{ id: 'launched', kind: 'authoritative_operation_receipt', operation_name: 'launch_rocket' }] },
+      goal: ROCKET_GOAL,
+      roadmap: SHELF,
+    }),
+    planReply({ plan: ['Launch the rocket'], operations: [gather('iron-ore', 10)] }),
+  ]
+  const prompts = []
+  const agent = agentWith(game, new CanonicalTaskBoardMemory(), async (messages) => {
+    prompts.push(messages.map(message => String(message.content)).join('\n'))
+    return replies[prompts.length - 1]
+  }, null)
+
+  await agent.request('launch a rocket', { sender: 'Louis' })
+  assert.ok(game.mutations.at(-1).includes(`'launch_rocket',${SILO}`))
+
+  game.lastBasicResult = {
+    operation_id: game.batchId,
+    type: 'launching_rocket',
+    accepted: false,
+    completed: false,
+    code: 'rocket_not_ready',
+    target_unit_number: SILO,
+    rocket_parts: 12,
+    rocket_parts_required: 50,
+    tick: 600 + game.batchId,
+  }
+  await agent.failed('[AUTORIO] [ERROR] launching_rocket failed: rocket_not_ready; dependent operations cancelled')
+
+  const failurePrompt = prompts.at(-1)
+  assert.match(failurePrompt, /rocket_not_ready/)
+  assert.match(failurePrompt, /"rocket_parts":12/)
+  assert.match(failurePrompt, /"rocket_parts_required":50/)
+})

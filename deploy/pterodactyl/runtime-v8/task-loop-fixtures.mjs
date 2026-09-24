@@ -92,6 +92,8 @@ export class FakeFactorio {
     // What getNearbyEntities reports, so a scenario can bind an exact
     // unit_number through a live observation.
     this.nearby = { actor_position: { x: 0, y: 0 }, entities: [] }
+    // Overrides the basic-operation receipt, for a scenario whose operation fails.
+    this.lastBasicResult = undefined
   }
 
   // Mirrors autorio_tools.goal_progress_facts.
@@ -137,7 +139,7 @@ export class FakeFactorio {
         last_completed_batch: this.batchId > 0
           ? { batch_id: this.batchId, task_count: this.lastTaskTypes.length, task_types: this.lastTaskTypes, tick: 600 + this.batchId }
           : undefined,
-        basic_operation: this.batchId > 0 ? { last_result: { operation_id: this.batchId, code: 'completed', completed: true } } : undefined,
+        basic_operation: this.batchId > 0 ? { last_result: this.lastBasicResult ?? { operation_id: this.batchId, code: 'completed', completed: true } } : undefined,
       })
     }
     if (text.includes('remote.call("autorio_tools","get_nearby_entities"')) return JSON.stringify(this.nearby)
