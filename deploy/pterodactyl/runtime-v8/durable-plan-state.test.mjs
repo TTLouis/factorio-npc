@@ -577,7 +577,7 @@ test('completed observation followed by prose-only intent gets exactly one cheap
   assert.equal(result.operations[0].name, 'move_items_exact')
   assert.equal(rcon.mutations.length, 1)
   assert.equal(calls[2].options.recoveryAttempt, 1)
-  assert.deepEqual(calls[2].options.requestBodyPatch, { max_tokens: 700 })
+  assert.deepEqual(calls[2].options.requestBodyPatch, { max_tokens: 2048 })
   assert.equal(calls[2].options.recoveryKind, undefined)
   const repairContext = calls[2].messages.map(message => message.content ?? '').join('\n')
   assert.match(repairContext, /Finite canonical work remains/)

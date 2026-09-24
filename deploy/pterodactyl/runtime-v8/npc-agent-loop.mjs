@@ -68,7 +68,11 @@ const PLAN_HISTORY_LIMIT = 24
 const MAX_OBSERVATION_TOOL_CALLS_PER_BATCH = 4
 const DUPLICATE_OBSERVATION_MESSAGE = '[HARNESS] Duplicate observation suppressed. The result is unchanged from the earlier identical tool call already present in this decision context; reuse it and act or report a blocker.'
 const OUTPUT_BUDGET_RECOVERY_MESSAGE = '[HARNESS] The immediately preceding provider response exhausted its output budget before emitting content or tool calls. Continue the same logical request and goal from this unchanged harness context. Tools remain available. Do not treat the empty response as an action, plan update, completion, or evidence. Do not replay any world mutation already proven complete by the supplied receipts or canonical Task Board. Return the next necessary observation tool call(s), or use submitPlan for the planner decision. Legacy strict-JSON content remains a compatibility fallback only.'
-const ACTION_OMISSION_MAX_TOKENS = 700
+// The cap covers reasoning tokens too. Live (goal_mueryuql) a reasoning model spent
+// 588 of 700 before emitting submitPlan, so the call was cut off mid-JSON
+// (finish_reason=length) and the repair failed with no operation. Keep it bounded,
+// but leave room for reasoning plus a complete submitPlan argument object.
+const ACTION_OMISSION_MAX_TOKENS = 2048
 const ACTION_OMISSION_BLOCKER_PREFIX = 'BLOCKED:'
 const ACTION_OMISSION_REPAIR_MESSAGE = 'Finite canonical work remains, but no executable operation was submitted. Reuse the authoritative evidence already collected and do not repeat completed observations. If that evidence already parameterizes the next action, submit the next executable operation now. If exactly one mutable fact is genuinely missing, use exactly one targeted observation for that fact; after it, no more observation turns are allowed. Do not stop and wait for a human "continue" message. Otherwise keep the remaining plan and start chatMessage with "BLOCKED: " followed by the exact missing fact or truthful blocker.'
 // The act-or-block repair also has to offer the Slice C close: a planner that
