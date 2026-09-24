@@ -1087,6 +1087,22 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return after?.goal?.definition
   }
 
+  // Records where goal_start counters stood when the goal began (runtime
+  // authority only; existing baselines are kept).
+  recordGoalBaselines(key, baselines, { now = Date.now() } = {}) {
+    if (!key || !baselines || Object.keys(baselines).length === 0) return undefined
+    const before = this.planningByNpc.get(key)
+    if (!before?.goal?.definition) return undefined
+    const after = this.dispatchPlanningEvent(key, {
+      type: PLANNING_EVENT.GOAL_BASELINES_RECORDED,
+      now,
+      source: 'runtime',
+      goal_id: before.goal.goal_id,
+      baselines,
+    })
+    return after?.goal?.definition
+  }
+
   goalDefinition(key) {
     return key ? this.planningByNpc.get(key)?.goal?.definition : undefined
   }

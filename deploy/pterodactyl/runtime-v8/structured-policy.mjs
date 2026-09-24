@@ -741,6 +741,11 @@ export const plannerControlToolDefinitions = [{
                   item_name: { type: 'string', maxLength: 100 },
                   name: { type: 'string', maxLength: 100 },
                   minimum: { type: 'integer', minimum: 1 },
+                  countFrom: {
+                    type: 'string',
+                    enum: ['goal_start', 'save_start'],
+                    description: 'rockets_launched and items_produced only. goal_start (default): minimum counts only what happens after the goal starts, so "launch a rocket" needs a new launch even if this save already launched one. save_start: the save\'s lifetime total, only when the player explicitly means a total.',
+                  },
                 },
               },
             },

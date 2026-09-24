@@ -19,7 +19,7 @@
 //     operations or into plan steps.
 
 import { completionContractSupported, sanitizeStepCompletionContract } from './step-completion.mjs'
-import { restoreGoalDefinition, sanitizeGoalDefinition } from './goal-definition.mjs'
+import { needsGoalBaseline, restoreGoalDefinition, sanitizeGoalDefinition } from './goal-definition.mjs'
 
 export const PLANNING_STATE_VERSION = 1
 
@@ -268,6 +268,10 @@ export const PLANNING_EVENT = Object.freeze({
   // done_when conditions). Authored once by the Main LLM on the goal's first
   // plan; only the user may replace it afterwards.
   GOAL_DEFINED: 'GOAL_DEFINED',
+  // Where each goal_start counter (rockets launched, items produced) stood
+  // when the goal started, read from the game by the runtime. Fills missing
+  // baselines only; a recorded baseline never moves.
+  GOAL_BASELINES_RECORDED: 'GOAL_BASELINES_RECORDED',
 })
 
 const PLANNING_EVENT_TYPES = Object.freeze(Object.values(PLANNING_EVENT))
@@ -2325,6 +2329,28 @@ Object.assign(HANDLERS, {
       },
       updated_at: now,
       log: logEntry(state, { type: PLANNING_EVENT.GOAL_DEFINED, at: now, goal_id: state.goal.goal_id }),
+    }
+  },
+
+  [PLANNING_EVENT.GOAL_BASELINES_RECORDED](state, event, now) {
+    const definition = state.goal?.definition
+    if (!definition || state.goal.status !== GOAL_STATUS.ACTIVE) return state
+    if (text(event.goal_id, 120) && text(event.goal_id, 120) !== state.goal.goal_id) return state
+    if (!isRuntimeAuthority(event.source)) return state
+    const baselines = event.baselines && typeof event.baselines === 'object' && !Array.isArray(event.baselines) ? event.baselines : {}
+    let changed = false
+    const doneWhen = definition.done_when.map((condition) => {
+      const value = baselines[condition.id]
+      if (!needsGoalBaseline(condition) || !Number.isSafeInteger(value) || value < 0) return condition
+      changed = true
+      return { ...condition, baseline: value }
+    })
+    if (!changed) return state
+    return {
+      ...state,
+      goal: { ...state.goal, definition: { ...definition, done_when: doneWhen }, updated_at: now },
+      updated_at: now,
+      log: logEntry(state, { type: PLANNING_EVENT.GOAL_BASELINES_RECORDED, at: now, goal_id: state.goal.goal_id }),
     }
   },
 

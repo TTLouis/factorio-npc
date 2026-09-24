@@ -34,7 +34,7 @@ import {
   STEERING_PRESSURE_VOCABULARY,
 } from './planning-state.mjs'
 import { emptyJevHealth, recordJevHealth, summarizeJevHealth } from './jev-health.mjs'
-import { evaluateGoalDefinition, formatGoalProgress, GOAL_SCOPE, sanitizeGoalDefinition } from './goal-definition.mjs'
+import { describeUnmetGoalResult, evaluateGoalDefinition, formatGoalProgress, GOAL_SCOPE, needsGoalBaseline, sanitizeGoalDefinition } from './goal-definition.mjs'
 import {
   compareGoalReading,
   goalProgressFactsCommand,
@@ -164,7 +164,7 @@ Once a plan is COMMITTED its steps, their order and their completion meaning are
 
 Within [PLANNING_STATE], Shelf nodes are storage: they record intent and lineage, never operations and never plan steps. Do not compile a shelf node into steps on your own initiative.
 
-Every goal starts with a goal definition. On the FIRST plan of a goal, add goal to submitPlan: {scope, summary, doneWhen}. summary restates in one sentence what the player asked for; the player sees it in game as your understanding. doneWhen lists the game-checkable conditions that together prove the goal is complete (research_completed, rockets_launched, items_produced, inventory_count, space_location_unlocked) with exact Factorio internal names. The harness, not you, decides completion: it reads doneWhen from the game at the end of every plan slice, so finishing a plan's steps never completes a goal by itself, and you never need to claim the goal is done. Use scope "finite" only when one plan of at most 30 steps completes the goal; otherwise use "long_horizon" and send the roadmap shelf on that same first plan. Omit goal on later plans of the same goal.
+Every goal starts with a goal definition. On the FIRST plan of a goal, add goal to submitPlan: {scope, summary, doneWhen}. summary restates in one sentence what the player asked for; the player sees it in game as your understanding. doneWhen lists the game-checkable conditions that together prove the goal is complete (research_completed, rockets_launched, items_produced, inventory_count, space_location_unlocked) with exact Factorio internal names. rockets_launched and items_produced count from when the goal starts (countFrom "goal_start", the default), so "launch a rocket" needs a new launch; use countFrom "save_start" only when the player means the save's lifetime total. The harness, not you, decides completion: it reads doneWhen from the game at the end of every plan slice, so finishing a plan's steps never completes a goal by itself, and you never need to claim the goal is done. Use scope "finite" only when one plan of at most 30 steps completes the goal; otherwise use "long_horizon" and send the roadmap shelf on that same first plan. Omit goal on later plans of the same goal.
 
 You author the shelf through the optional roadmap field on submitPlan: a short list of coarse nodes, each stating what should eventually be true for the goal and why it matters. Keep them at that altitude — a node is not a step, carries no operations, and never claims its own progress; the harness derives realization from verified results and strips anything executable. For a long-horizon goal, send the shelf on the first plan of that goal. Afterwards it only moves when verified world state has actually invalidated the guidance, so restate the nodes that still apply with their original ids (omitting a node marks it invalidated and keeps its lineage), and do not re-send an unchanged shelf just to restate a preference.
 
@@ -4673,11 +4673,24 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return !plan || plan.status === PLAN_STATUS.COMPLETED
   }
 
+  // Reads the goal's conditions from the game and records any baseline a
+  // goal_start counter still lacks. Called when the goal is defined, so the
+  // baseline is where the counter stood then, and again at every evaluation in
+  // case that first read failed.
+  async readGoalDefinition(key, definition) {
+    const evaluation = await evaluateGoalDefinition(definition, command => this.rcon.command(command))
+    if (Object.keys(evaluation.baselines ?? {}).length > 0 && typeof this.memory.recordGoalBaselines === 'function') {
+      this.memory.recordGoalBaselines(key, evaluation.baselines)
+      await this.traceEvent('goal.baselines_recorded', { baselines: evaluation.baselines })
+    }
+    return evaluation
+  }
+
   async evaluateGoalCompletion() {
     const key = this.activePlanKey()
     const definition = this.memory.goalDefinition?.(key)
     if (!definition) return undefined
-    const evaluation = await evaluateGoalDefinition(definition, command => this.rcon.command(command))
+    const evaluation = await this.readGoalDefinition(key, definition)
     await this.traceEvent('goal.evaluated', {
       satisfied: evaluation.satisfied,
       progress: formatGoalProgress(evaluation),
@@ -4941,7 +4954,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       this.reasoningTriggerSource = 'plan_slice_completed'
       try {
         const unmet = goalEvaluation
-          ? ` The game reports ${formatGoalProgress(goalEvaluation)}; still unmet: ${goalEvaluation.results.filter(result => !result.satisfied).map(result => `${result.id}${result.current !== undefined ? ` (currently ${result.current})` : ''}`).join(', ')}.`
+          ? ` The game reports ${formatGoalProgress(goalEvaluation)}; still unmet: ${goalEvaluation.results.filter(result => !result.satisfied).map(describeUnmetGoalResult).join(', ')}.`
           : ''
         const next = (planningAfterCompletion?.roadmap?.nodes?.length ?? 0) > 0
           ? 'Refine the next useful Roadmap Shelf node using [PLANNING_STATE]'
@@ -6586,6 +6599,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             roadmap: (planning?.roadmap?.nodes ?? []).slice(0, 8).map(node => ({ id: node.id, intent: node.intent })),
             jev_goal_reading: this.pendingGoalReadingTrace ?? undefined,
           })
+          if (definition.done_when.some(needsGoalBaseline)) await this.readGoalDefinition(this.requestInfo.memoryKey, definition)
         }
       }
       stateResult = this.memory.reconcileTaskBoard?.(this.requestInfo.memoryKey, previousBoard, durablePlan, stateResult, {

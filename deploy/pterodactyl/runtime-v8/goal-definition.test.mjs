@@ -76,10 +76,16 @@ test('conditions are read from the game; unreadable conditions never count as me
   const command = text => game.command(text)
   let evaluation = await evaluateGoalDefinition(definition, command)
   assert.equal(evaluation.satisfied, false)
+  // The rocket counter counts from goal start, so the first read supplies its baseline.
+  assert.deepEqual(evaluation.baselines, { rocket: 0 })
+  const stored = restoreGoalDefinition({
+    ...definition,
+    done_when: definition.done_when.map(condition => condition.id === 'rocket' ? { ...condition, baseline: 0 } : condition),
+  })
 
   game.researched.add('automation')
   game.rocketsLaunched = 1
-  evaluation = await evaluateGoalDefinition(definition, command)
+  evaluation = await evaluateGoalDefinition(stored, command)
   assert.equal(evaluation.satisfied, true)
   assert.equal(evaluation.results.find(result => result.id === 'rocket').current, 1)
 
@@ -97,7 +103,7 @@ test('the in-game understanding message states scope, checks and roadmap', () =>
   assert.match(lines[0], /Goal understood:.*Launch one rocket from this save\./)
   assert.ok(lines.some(line => line.includes('Your words: "发射火箭"')))
   assert.ok(lines.some(line => /long-horizon/.test(line)))
-  assert.ok(lines.some(line => line.includes('at least 1 rocket launched')))
+  assert.ok(lines.some(line => line.includes('1 rocket launched from now on')))
   assert.ok(lines.some(line => line.startsWith('  Roadmap: reliable iron and copper smelting → ')))
 })
 
@@ -203,7 +209,7 @@ test('finishing a slice does not finish the goal: the game decides, then the goa
   assert.equal(memory.planningState(KEY).goal.status, GOAL_STATUS.ACTIVE)
   assert.notEqual(afterFirst?.goalStatus, 'completed')
   assert.equal(calls, 2)
-  assert.match(prompts[1], /0\/1 goal conditions met; still unmet: rocket \(currently 0\)/)
+  assert.match(prompts[1], /0\/1 goal conditions met; still unmet: rocket \(currently 0 since the goal started\)/)
 
   // Slice 2 finishes after the rocket launched: now the game says it is done.
   game.inventory.coal = 10
@@ -281,4 +287,81 @@ test('the supervisor prints the goal understanding in game', async () => {
   assert.match(printed[0], /\[color=0\.4,0\.8,1\]Goal understood:\[\/color\] Launch one rocket from this save\./)
   assert.ok(printed.some(line => line.includes('Done when (checked by the game):')))
   assert.doesNotMatch(conversation[0].text, /\[color/, 'the UI transcript gets plain text')
+})
+
+test('counters count from goal start: a save that already launched rockets is not done yet', async () => {
+  const game = new FakeFactorio()
+  game.rocketsLaunched = 3
+  const command = text => game.command(text)
+  // A baseline the planner tries to supply is ignored; only the game sets it.
+  const definition = sanitizeGoalDefinition({
+    scope: 'long_horizon',
+    summary: 'Launch a rocket.',
+    doneWhen: [{ id: 'rocket', kind: 'rockets_launched', minimum: 1, baseline: 0 }],
+  })
+  assert.equal(definition.done_when[0].count_from, 'goal_start')
+  assert.equal(definition.done_when[0].baseline, undefined)
+
+  const first = await evaluateGoalDefinition(definition, command)
+  assert.equal(first.satisfied, false)
+  assert.equal(first.results[0].needs_baseline, true)
+  assert.deepEqual(first.baselines, { rocket: 3 })
+
+  const stored = restoreGoalDefinition({ ...definition, done_when: [{ ...definition.done_when[0], baseline: 3 }] })
+  assert.equal((await evaluateGoalDefinition(stored, command)).satisfied, false)
+  game.rocketsLaunched = 4
+  const after = await evaluateGoalDefinition(stored, command)
+  assert.equal(after.satisfied, true)
+  assert.equal(after.results[0].baseline, 3)
+  // The mod request never carries harness-only fields.
+  assert.doesNotMatch(goalConditionCommand(stored.done_when[0]), /baseline|count_from/)
+})
+
+test('save_start counts the lifetime total and needs no baseline', async () => {
+  const game = new FakeFactorio()
+  game.rocketsLaunched = 1
+  const definition = sanitizeGoalDefinition({
+    scope: 'finite',
+    summary: 'Make sure this save has launched a rocket.',
+    doneWhen: [{ kind: 'rockets_launched', minimum: 1, countFrom: 'save_start' }],
+  })
+  const evaluation = await evaluateGoalDefinition(definition, text => game.command(text))
+  assert.equal(evaluation.satisfied, true)
+  assert.deepEqual(evaluation.baselines, {})
+  assert.match(formatGoalUnderstanding(definition).join('\n'), /launched in this save/)
+  assert.throws(() => sanitizeGoalDefinition({
+    scope: 'finite',
+    summary: 'x',
+    doneWhen: [{ kind: 'rockets_launched', minimum: 1, countFrom: 'yesterday' }],
+  }), /countFrom/)
+})
+
+test('a rocket goal on a save that already launched rockets needs a new launch, and the baseline survives a restart', async () => {
+  const game = new FakeFactorio()
+  game.rocketsLaunched = 2
+  const memory = new CanonicalTaskBoardMemory()
+  let calls = 0
+  const agent = agentWith(game, memory, async () => {
+    calls++
+    if (calls === 1) {
+      return planReply({ plan: ['Gather 10 iron ore'], operations: [gather('iron-ore', 10)], checkpoint: inventoryCheckpoint('iron-ore', 10), goal: ROCKET_GOAL, roadmap: SHELF })
+    }
+    return planReply({ plan: ['Gather 10 coal'], operations: [gather('coal', 10)], checkpoint: inventoryCheckpoint('coal', 10) })
+  })
+
+  await agent.request('launch a rocket', { sender: 'Louis' })
+  assert.equal(memory.goalDefinition(KEY).done_when[0].baseline, 2)
+
+  const restored = new CanonicalTaskBoardMemory()
+  restored.restore(JSON.parse(JSON.stringify(memory.snapshot())))
+  assert.equal(restored.goalDefinition(KEY).done_when[0].baseline, 2)
+
+  game.inventory['iron-ore'] = 10
+  await agent.completed()
+  assert.equal(memory.planningState(KEY).goal.status, GOAL_STATUS.ACTIVE)
+
+  game.inventory.coal = 10
+  game.rocketsLaunched = 3
+  const done = await agent.completed()
+  assert.equal(done.goalStatus, 'completed')
 })

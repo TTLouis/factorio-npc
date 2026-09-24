@@ -25,6 +25,13 @@ export const GOAL_CONDITION_KINDS = Object.freeze([
   'space_location_unlocked',
 ])
 
+// Kinds that read a cumulative force counter. "Launch a rocket" on a save
+// that already launched one, or "make 100 gears" on a save that made thousands,
+// must not read as done at once, so these count from when the goal started
+// unless the planner explicitly asks for the save total.
+export const GOAL_COUNTER_KINDS = Object.freeze(['rockets_launched', 'items_produced'])
+export const GOAL_COUNT_FROM = Object.freeze({ GOAL_START: 'goal_start', SAVE_START: 'save_start' })
+
 export const GOAL_DEFINITION_LIMITS = Object.freeze({
   maxConditions: 6,
   maxSummaryChars: 400,
@@ -58,7 +65,26 @@ function minimum(value, kind) {
   return value
 }
 
-function sanitizeCondition(raw, index) {
+function countFrom(raw, kind) {
+  const value = raw.countFrom ?? raw.count_from ?? GOAL_COUNT_FROM.GOAL_START
+  if (!Object.values(GOAL_COUNT_FROM).includes(value)) {
+    fail('invalid_goal_condition', `goal.doneWhen ${kind}.countFrom must be "goal_start" (count only what happens from now on, the default) or "save_start" (the save's lifetime total)`)
+  }
+  return value
+}
+
+// Only a stored definition carries a baseline: it is read from the game by the
+// harness, never taken from the planner.
+function withCounter(condition, raw, { trusted }) {
+  const counted = { ...condition, count_from: countFrom(raw, condition.kind) }
+  if (trusted && counted.count_from === GOAL_COUNT_FROM.GOAL_START
+    && Number.isSafeInteger(raw.baseline) && raw.baseline >= 0) {
+    counted.baseline = raw.baseline
+  }
+  return counted
+}
+
+function sanitizeCondition(raw, index, options = {}) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) fail('invalid_goal_condition', 'each goal.doneWhen entry must be an object')
   const kind = raw.kind
   if (!GOAL_CONDITION_KINDS.includes(kind)) {
@@ -66,14 +92,15 @@ function sanitizeCondition(raw, index) {
   }
   const id = typeof raw.id === 'string' && /^[A-Za-z0-9_.-]{1,60}$/.test(raw.id) ? raw.id : `done_${index + 1}`
   if (kind === 'research_completed') return { id, kind, technology: prototypeName(raw.technology, 'technology', kind) }
-  if (kind === 'rockets_launched') return { id, kind, minimum: minimum(raw.minimum, kind) }
+  if (kind === 'rockets_launched') return withCounter({ id, kind, minimum: minimum(raw.minimum, kind) }, raw, options)
   if (kind === 'space_location_unlocked') return { id, kind, name: prototypeName(raw.name, 'name', kind) }
-  return { id, kind, item_name: prototypeName(raw.item_name, 'item_name', kind), minimum: minimum(raw.minimum, kind) }
+  const condition = { id, kind, item_name: prototypeName(raw.item_name, 'item_name', kind), minimum: minimum(raw.minimum, kind) }
+  return kind === 'items_produced' ? withCounter(condition, raw, options) : condition
 }
 
 // Validates the planner-authored `goal` object from submitPlan. Throws a
 // GoalDefinitionError whose message is written for the model to correct.
-export function sanitizeGoalDefinition(raw) {
+export function sanitizeGoalDefinition(raw, { trusted = false } = {}) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) fail('invalid_goal_definition', 'goal must be an object with scope, summary and doneWhen')
   if (!Object.values(GOAL_SCOPE).includes(raw.scope)) fail('invalid_goal_definition', 'goal.scope must be "finite" (one plan of at most 30 steps completes it) or "long_horizon" (needs a Roadmap Shelf and several plan slices)')
   const summary = typeof raw.summary === 'string' ? raw.summary.replace(/\s+/g, ' ').trim() : ''
@@ -86,7 +113,7 @@ export function sanitizeGoalDefinition(raw) {
   if (rawConditions.length > GOAL_DEFINITION_LIMITS.maxConditions) {
     fail('invalid_goal_definition', `goal.doneWhen may list at most ${GOAL_DEFINITION_LIMITS.maxConditions} conditions`)
   }
-  const doneWhen = rawConditions.map(sanitizeCondition)
+  const doneWhen = rawConditions.map((condition, index) => sanitizeCondition(condition, index, { trusted }))
   const ids = new Set(doneWhen.map(condition => condition.id))
   if (ids.size !== doneWhen.length) fail('invalid_goal_definition', 'goal.doneWhen ids must be unique')
   return {
@@ -101,7 +128,7 @@ export function sanitizeGoalDefinition(raw) {
 export function restoreGoalDefinition(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
   try {
-    const definition = sanitizeGoalDefinition(raw)
+    const definition = sanitizeGoalDefinition(raw, { trusted: true })
     return {
       ...definition,
       source: typeof raw.source === 'string' ? raw.source.slice(0, 60) : 'main_planner',
@@ -115,8 +142,16 @@ export function restoreGoalDefinition(raw) {
 
 // The mod-side request for one condition (autorio_tools.evaluate_condition).
 export function goalConditionRequest(condition) {
-  const { id: _id, ...request } = condition
+  const { id: _id, count_from: _countFrom, baseline: _baseline, ...request } = condition
   return request
+}
+
+// A goal_start counter with no recorded baseline yet. It cannot be judged
+// until the harness has read where the counter stood.
+export function needsGoalBaseline(condition) {
+  return GOAL_COUNTER_KINDS.includes(condition?.kind)
+    && condition.count_from !== GOAL_COUNT_FROM.SAVE_START
+    && !Number.isSafeInteger(condition.baseline)
 }
 
 export function goalConditionCommand(condition) {
@@ -127,8 +162,12 @@ export function goalConditionCommand(condition) {
 export function describeGoalCondition(condition) {
   switch (condition?.kind) {
     case 'research_completed': return `research "${condition.technology}" is completed`
-    case 'rockets_launched': return `at least ${condition.minimum} rocket${condition.minimum === 1 ? '' : 's'} launched`
-    case 'items_produced': return `at least ${condition.minimum} × ${condition.item_name} produced (all surfaces)`
+    case 'rockets_launched': return condition.count_from === GOAL_COUNT_FROM.SAVE_START
+      ? `at least ${condition.minimum} rocket${condition.minimum === 1 ? '' : 's'} launched in this save`
+      : `${condition.minimum} rocket${condition.minimum === 1 ? '' : 's'} launched from now on`
+    case 'items_produced': return condition.count_from === GOAL_COUNT_FROM.SAVE_START
+      ? `at least ${condition.minimum} × ${condition.item_name} produced in this save (all surfaces)`
+      : `${condition.minimum} × ${condition.item_name} produced from now on (all surfaces)`
     case 'inventory_count': return `AIRI holds at least ${condition.minimum} × ${condition.item_name}`
     case 'space_location_unlocked': return `space location "${condition.name}" is unlocked`
     default: return 'unknown condition'
@@ -138,23 +177,43 @@ export function describeGoalCondition(condition) {
 // Evaluates every condition through the game. `command` sends one RCON
 // command and resolves to its printed text. An unreadable or failed check is
 // "not satisfied": the goal only completes on positive evidence.
+//
+// A goal_start counter is judged as current - baseline >= minimum. A counter
+// with no baseline yet is unsatisfied; its current reading is returned in
+// `baselines` for the caller to record.
 export async function evaluateGoalDefinition(definition, command) {
   const results = []
+  const baselines = {}
   for (const condition of definition?.done_when ?? []) {
     let observation
     try { observation = JSON.parse(String(await command(goalConditionCommand(condition))).trim()) }
     catch (error) { observation = { ok: false, error: error instanceof Error ? error.message : String(error) } }
-    results.push({
+    const ok = observation?.ok === true
+    const current = Number.isFinite(observation?.current) ? observation.current : undefined
+    const result = {
       id: condition.id,
       kind: condition.kind,
-      satisfied: observation?.ok === true && observation.satisfied === true,
-      current: Number.isFinite(observation?.current) ? observation.current : undefined,
-      error: observation?.ok === true ? undefined : String(observation?.error ?? 'unreadable_condition').slice(0, 120),
-    })
+      satisfied: ok && observation.satisfied === true,
+      current,
+      error: ok ? undefined : String(observation?.error ?? 'unreadable_condition').slice(0, 120),
+    }
+    if (GOAL_COUNTER_KINDS.includes(condition.kind) && condition.count_from !== GOAL_COUNT_FROM.SAVE_START) {
+      if (Number.isSafeInteger(condition.baseline)) {
+        result.baseline = condition.baseline
+        result.satisfied = ok && Number.isSafeInteger(current) && current - condition.baseline >= condition.minimum
+      }
+      else {
+        result.satisfied = false
+        result.needs_baseline = true
+        if (ok && Number.isSafeInteger(current) && current >= 0) baselines[condition.id] = current
+      }
+    }
+    results.push(result)
   }
   return {
     satisfied: results.length > 0 && results.every(result => result.satisfied),
     results,
+    baselines,
   }
 }
 
@@ -172,6 +231,15 @@ export function formatGoalUnderstanding(definition, { objective = '', roadmap = 
   const nodes = (Array.isArray(roadmap) ? roadmap : []).slice(0, 8).map(node => node?.intent).filter(Boolean)
   if (nodes.length > 0) lines.push(`  Roadmap: ${nodes.map(intent => String(intent).slice(0, 60)).join(' → ')}`)
   return lines
+}
+
+// One unmet condition for the planner. A goal_start counter reports progress
+// since the goal began, not the save total, so the numbers match doneWhen.
+export function describeUnmetGoalResult(result) {
+  if (result.needs_baseline) return `${result.id} (starting count not read yet)`
+  if (result.current === undefined) return result.id
+  if (Number.isSafeInteger(result.baseline)) return `${result.id} (currently ${result.current - result.baseline} since the goal started)`
+  return `${result.id} (currently ${result.current})`
 }
 
 export function formatGoalProgress(evaluation) {
