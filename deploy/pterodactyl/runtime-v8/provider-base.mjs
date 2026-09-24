@@ -125,7 +125,10 @@ class PromptTraceWriter {
   emit(event) {
     const line = `${JSON.stringify(sanitizePromptTraceValue(event))}\n`
     const bytes = Buffer.byteLength(line)
-    this.queue = this.queue.then(async () => {
+    // Each write starts fresh after a failed one (a full disk, a missing
+    // directory), so one failure does not stop tracing for the rest of the
+    // process. The failed write is re-measured from disk on the next one.
+    this.queue = this.queue.catch(() => { this.bytes = null }).then(async () => {
       await this.rotate(bytes)
       await fsp.appendFile(this.filename, line, { encoding: 'utf8', mode: 0o600 })
       this.bytes += bytes

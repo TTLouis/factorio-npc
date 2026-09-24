@@ -227,3 +227,22 @@ test('response trace reports a missing provider response body explicitly', async
   assert.equal(errorRow.diagnostic_code, 'provider_missing_response_body')
   assert.equal(errorRow.http_status, 200)
 })
+
+test('prompt tracing recovers after a failed write instead of staying off for the process', async t => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'airi-prompt-trace-'))
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }))
+  // The trace directory is blocked by a plain file, so the first write fails.
+  const blocked = path.join(dir, 'logs')
+  await fsp.writeFile(blocked, 'not a directory')
+  const promptTraceFile = path.join(blocked, 'airi-prompts.jsonl')
+  const fetchImpl = async () => fakeProviderResponse()
+  const options = { fetchImpl, allowTools: false, recoveryAttempt: 0, promptTraceFile }
+
+  // Tracing is best-effort: the provider call itself still succeeds.
+  await providerRequest(config, [{ role: 'system', content: 'x' }, { role: 'user', content: '[CHAT] a: hi' }], options)
+
+  await fsp.rm(blocked)
+  await providerRequest(config, [{ role: 'system', content: 'x' }, { role: 'user', content: '[CHAT] a: hi again' }], options)
+  const rows = await readTrace(promptTraceFile)
+  assert.ok(rows.some(row => row.event === 'provider.request'))
+})
