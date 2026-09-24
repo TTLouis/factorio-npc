@@ -104,10 +104,9 @@ function compact_item_io(entity: LuaEntity) {
 }
 
 function mining_radius(prototype: any) {
-  if (typeof prototype?.get_mining_drill_radius === 'function') {
-    const radius = prototype.get_mining_drill_radius()
-    if (typeof radius === 'number' && radius > 0 && finite(radius)) return radius
-  }
+  // Read the field, not get_mining_drill_radius(): on an untyped object the
+  // call compiles to a Lua method call that passes the prototype as the
+  // quality argument ("Invalid QualityID" on 2.0.77).
   const radius = prototype?.mining_drill_radius
   return typeof radius === 'number' && radius > 0 && finite(radius) ? radius : undefined
 }
