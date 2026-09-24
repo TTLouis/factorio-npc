@@ -307,6 +307,9 @@ const UI_TASK_PAUSE_SUMMARIES = new Map([
 ])
 
 function requestFailurePauseSummary(raw) {
+  if (raw.startsWith(`${TRANSIENT_PAUSE_PREFIX}:`)) {
+    return 'AIRI paused on a temporary model-provider problem and will resume automatically from the verified task state.'
+  }
   if (raw.startsWith('provider_output_budget_exhausted:')) {
     return 'AIRI paused because the model exhausted its response budget while no Autorio work was running. Continue to retry from the verified task state.'
   }
@@ -1509,13 +1512,45 @@ export function shouldRecoverInterruptedPlan(state) {
   if (state.status === 'active') return true
   if (state.status !== 'paused') return false
   const pauseReason = String(state.pause_reason ?? '')
-  return SYSTEM_RECOVERY_PAUSE_REASONS.has(pauseReason) || pauseReason.startsWith('server_stop_')
+  return SYSTEM_RECOVERY_PAUSE_REASONS.has(pauseReason)
+    || pauseReason.startsWith('server_stop_')
+    || pauseReason.startsWith(`${TRANSIENT_PAUSE_PREFIX}:`)
 }
 
 function idleAutorioRuntime(status) {
   if (!status || typeof status !== 'object' || Array.isArray(status) || status.status_error) return false
   if (!Number.isSafeInteger(status.queue_length) || typeof status.task_state !== 'string') return false
   return status.queue_length === 0 && status.task_state.trim().toLowerCase() === 'idle'
+}
+
+// Temporary provider conditions that resolve by waiting: the hourly request
+// budget refilling, rate limiting, provider 5xx, timeouts and network errors.
+// A long goal must not stop for one of these until a human types "continue".
+// Model-behaviour failures (bad output, action omission, context window) are
+// deliberately excluded: waiting does not fix them.
+export const TRANSIENT_PAUSE_PREFIX = 'provider_transient'
+export const AUTO_RESUME_MAX_ATTEMPTS = Object.freeze({ budget: 15, default: 6 })
+
+export function transientProviderFailure(message) {
+  const text = String(message ?? '')
+  if (/provider_context_window_exceeded|provider_output_budget|finish=length/i.test(text)) return undefined
+  if (/Hourly provider request budget reached/i.test(text)) return 'budget'
+  if (/\bHTTP 429\b/.test(text)) return 'rate_limited'
+  if (/\bHTTP 5\d\d\b/.test(text)) return 'server_error'
+  if (/Provider timed out|\btimed out after \d+ ?ms/i.test(text)) return 'timeout'
+  if (/fetch failed|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|socket hang up|network error/i.test(text)) return 'transport'
+  return undefined
+}
+
+// Budget exhaustion waits for the hourly window to refill; the others back off
+// exponentially from 30 s to 8 min.
+export function autoResumeDelayMs(kind, attempt) {
+  if (kind === 'budget') return 5 * 60 * 1000
+  return Math.min(30_000 * 2 ** Math.max(0, attempt), 8 * 60 * 1000)
+}
+
+export function autoResumeMaxAttempts(kind) {
+  return AUTO_RESUME_MAX_ATTEMPTS[kind] ?? AUTO_RESUME_MAX_ATTEMPTS.default
 }
 
 export async function pauseStrandedPlanAfterRequestError(session, message) {
@@ -1541,7 +1576,9 @@ export async function pauseStrandedPlanAfterRequestError(session, message) {
   // Keep the agent's own failure class: "the model answered but proposed no
   // action / the wrong step" needs a different response from the player than
   // a network failure, and all of them used to read as "request failed".
-  const reasonCode = /provider_output_budget_exhausted|finish=length|output budget/i.test(clean)
+  const reasonCode = transientProviderFailure(clean)
+    ? TRANSIENT_PAUSE_PREFIX
+    : /provider_output_budget_exhausted|finish=length|output budget/i.test(clean)
     ? 'provider_output_budget_exhausted'
     : /^Provider response recovery exhausted after \d+ attempts/i.test(clean)
       ? 'provider_recovery_exhausted'
@@ -1750,6 +1787,10 @@ export class Session {
   }
 
   onAgentActivity(event, data) {
+    // Real world progress ends a transient-failure streak.
+    if ((event === 'operations.ack' || event === 'step.verified') && this.autoResume && !this.autoResume.timer) {
+      this.autoResume = null
+    }
     if (event === 'interaction.routed') {
       if (data?.intent === 'new_goal') this.startNewUiConversation()
       this.appendUiConversation('user', data?.sender, data?.text)
@@ -1918,6 +1959,53 @@ export class Session {
     return this.agent.memory.planningTrackerView(key)
   }
 
+  // Resume a plan paused on a transient provider failure without a human.
+  // Bounded: the attempt count resets only on real world progress, and any
+  // player request, stop, or plan change cancels a pending resume.
+  async scheduleAutoResume(message) {
+    const kind = transientProviderFailure(message)
+    if (!kind || this.stopping) return false
+    const attempt = this.autoResume?.attempt ?? 0
+    const maxAttempts = autoResumeMaxAttempts(kind)
+    this.clearAutoResume({ keepAttempts: true })
+    if (attempt >= maxAttempts) {
+      this.autoResume = null
+      this.log(`Auto-resume gave up after ${attempt} attempts (${kind}); waiting for an explicit continue`)
+      await this.printChat(`I still cannot reach the model provider after ${attempt} automatic retries (${kind}). The plan stays paused; say continue to retry.`)
+      return false
+    }
+    const delayMs = autoResumeDelayMs(kind, attempt)
+    const timer = setTimeout(() => {
+      if (this.autoResume?.timer !== timer) return
+      this.autoResume.timer = null
+      this.queueEvent(() => this.runAutoResume(), { reportError: true })
+    }, delayMs)
+    timer.unref?.()
+    this.autoResume = { attempt: attempt + 1, kind, timer }
+    this.log(`Auto-resume ${attempt + 1}/${maxAttempts} scheduled in ${Math.round(delayMs / 1000)} s after transient provider failure (${kind})`)
+    await this.printChat(`Paused on a temporary model-provider problem (${kind}). Resuming automatically in ${Math.round(delayMs / 1000)} s (attempt ${attempt + 1}/${maxAttempts}).`)
+    return true
+  }
+
+  clearAutoResume({ keepAttempts = false } = {}) {
+    if (this.autoResume?.timer) clearTimeout(this.autoResume.timer)
+    if (!keepAttempts) this.autoResume = null
+    else if (this.autoResume) this.autoResume.timer = null
+  }
+
+  async runAutoResume() {
+    const state = this.currentPlanState()
+    if (this.stopping || state?.status !== 'paused' || !String(state.pause_reason ?? '').startsWith(`${TRANSIENT_PAUSE_PREFIX}:`)) {
+      // The plan moved on (player continue, stop, new goal): nothing to resume.
+      this.clearAutoResume()
+      return null
+    }
+    return this.recoverInterruptedPlan('auto_resume_after_transient_provider_failure', {
+      attempt: this.autoResume?.attempt,
+      kind: this.autoResume?.kind,
+    })
+  }
+
   async recoverInterruptedPlan(reason, details = {}) {
     if (!this.agent || !shouldRecoverInterruptedPlan(this.currentPlanState())) return null
     this.log(`Recovering interrupted AIRI plan after ${reason}; mutable world state will be re-observed before resuming`)
@@ -1931,6 +2019,12 @@ export class Session {
     catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       this.log(`Interrupted plan recovery failed after ${reason}: ${message}`)
+      if (transientProviderFailure(message) && typeof this.agent.pausePersistentPlan === 'function') {
+        const paused = await this.agent.pausePersistentPlan(`${TRANSIENT_PAUSE_PREFIX}: ${uiText(message, 200)}`)
+        if (paused) await this.syncTaskBoardUi(paused)
+        await this.scheduleAutoResume(message)
+        return null
+      }
       const paused = typeof this.agent.pausePersistentPlan === 'function'
         ? await this.agent.pausePersistentPlan(`runtime_recovery_failed:${uiText(reason, 80)}:${uiText(message, 180)}`)
         : undefined
@@ -2207,6 +2301,9 @@ export class Session {
         try {
           const state = await pauseStrandedPlanAfterRequestError(this, message)
           if (state) this.log('Canonical Task Board paused after a failed request left Autorio idle')
+          if (state && String(state.pause_reason ?? '').startsWith(`${TRANSIENT_PAUSE_PREFIX}:`)) {
+            await this.scheduleAutoResume(message)
+          }
           else if (providerRecoveryExhausted(message)) {
             // Preserve the old diagnostic signal without blindly pausing if
             // Autorio status is unknown or still owns live world work.
@@ -2261,6 +2358,8 @@ export class Session {
   queuePlayerRequest(sender, rawText, { onSettled } = {}) {
     const text = routeNpcRequest(rawText, this.npcName)
     if (!text || !this.agent) return false
+    // A player turn takes over from any pending automatic resume.
+    this.clearAutoResume()
     const stop = text.toLowerCase() === 'stop'
     if (stop) this.agent.cancel('user_stop_immediate')
     this.queueEvent(async () => {
@@ -2377,6 +2476,7 @@ export class Session {
     if (this.stopPromise) return this.stopPromise
     this.expectedStop = ['requested', 'signal', 'console'].includes(reason)
     this.stopping = true
+    this.clearAutoResume()
     this.ready = false
     if (this.uiInputPoll) clearInterval(this.uiInputPoll)
     if (this.uiHeartbeat) clearInterval(this.uiHeartbeat)
