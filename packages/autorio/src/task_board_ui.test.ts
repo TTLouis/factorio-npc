@@ -202,7 +202,7 @@ describe('in-game task board UI projection', () => {
 
   it('labels canonical evidence as verified and keeps internal task codes diagnostic-only in the main console', () => {
     const source = taskBoardUiSource()
-    const statusPanel = source.split('function render_status_panel(')[1]?.split('function follow_button_tooltip(')[0] ?? ''
+    const statusPanel = source.split('function last_result_line(')[1]?.split('function console_now_card(')[0] ?? ''
     const refreshSteps = source.split('function refresh_steps(')[1]?.split('function refresh_activity(')[0] ?? ''
 
     expect(source).toContain('${board.completed_count} verified')
@@ -340,7 +340,7 @@ describe('in-game task board UI projection', () => {
     expect(source).toContain('left.style.vertical_spacing = COLUMN_SPACING')
     expect(source).toContain('dynamic.style.vertical_spacing = COLUMN_SPACING')
     expect(source).toContain('resources.style.horizontal_spacing = COLUMN_SPACING')
-    expect(source).toContain("create_section(parent, 'Status', STATUS_SECTION_WIDTH, undefined, false)")
+    expect(source).toContain('console_ui.render_goal_card(parent, console_goal_card(board)); console_ui.render_now_card(parent, console_now_card(board))')
     // The old Controls grid is gone: window buttons are in the title bar and
     // PAUSE / FOLLOW / … sit in one row under the prompt.
     expect(source).not.toContain("create_section(parent, 'Controls'")
@@ -387,7 +387,8 @@ describe('in-game task board UI projection', () => {
     const source = taskBoardUiSource()
     const control = readFileSync(new URL('./control.ts', import.meta.url), 'utf8')
     expect(source).toContain('storage.airi_task_board_ui_synced_tick = game.tick')
-    expect(source).toContain("add_key_value(table, 'WORLD', world_task_summary(runtime.world_task)")
+    expect(source).toContain('World task: ${world_task_summary(runtime.world_task)}')
+    expect(source).toContain('Last sync: ${sync_summary(synced_tick)}')
     expect(control).toContain('set_task_board_world_task_provider(() => task_manager.get_status_snapshot())')
   })
 
@@ -405,7 +406,7 @@ describe('in-game task board UI projection', () => {
   it('refreshes live content without destroying the prompt field being typed into', () => {
     const source = taskBoardUiSource()
     expect(source).toContain('dynamic.clear()')
-    expect(source).toContain('build_left_dynamic(dynamic, player, board, synced_tick, runtime)')
+    expect(source).toContain('build_left_dynamic(dynamic, player, board)')
     expect(source).toContain('right.clear()')
     expect(source).toContain('render_prompt(left, player)')
     expect(source).not.toMatch(/left\.clear\(\)/)
@@ -487,7 +488,8 @@ describe('in-game task board UI projection', () => {
     const source = taskBoardUiSource()
     expect(source).toContain("if (freshness === 'offline') return { tone: 'muted', caption: 'OFFLINE' }")
     expect(source).toContain("if (freshness === 'stale') return { tone: 'bad', caption: 'STALE' }")
-    expect(source).toContain("freshness === 'live' ? live_caption : stale_caption")
+    expect(source).toContain("? 'NOT CONNECTED'")
+    expect(source).toContain('NO ANSWER — last seen ${agent_caption(phase)}')
     expect(source).toContain('polls unanswered')
   })
 
@@ -545,7 +547,7 @@ it('uses SGLuna for normal console branding while retaining AIRI actor identity 
   const source = taskBoardUiSource()
   expect(source).toContain("caption: 'Prompt SGLuna'")
   expect(source).toContain("'SGLuna NPC Console'")
-  expect(source).toContain("add_key_value(table, 'SGLuna'")
+  expect(source).toContain('The console polls the SGLuna runtime')
   expect(source).toContain("runtime.actor_name || 'AIRI'")
   expect(source).not.toContain("tooltip: 'Send a prompt directly to AIRI")
 })

@@ -119,6 +119,11 @@ import { event_handlers, set_load_handler } from './test-event-registry'
     crafter_trash: 'crafter_trash',
     assembling_machine_dump: 'assembling_machine_dump',
   },
+  rich_text_setting: {
+    enabled: 'enabled',
+    disabled: 'disabled',
+    highlight: 'highlight',
+  },
   rocket_silo_status: {
     building_rocket: 'building_rocket',
     rocket_ready: 'rocket_ready',

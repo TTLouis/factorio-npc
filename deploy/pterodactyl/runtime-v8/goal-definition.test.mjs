@@ -6,6 +6,7 @@ import {
   evaluateGoalDefinition,
   formatGoalStatus,
   formatSliceProgressNote,
+  goalUiView,
   formatGoalUnderstanding,
   GOAL_SCOPE,
   goalConditionCommand,
@@ -440,4 +441,74 @@ test('a verified slice with the goal still open prints one progress line, once',
   session.announceSliceProgress(evaluation)
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(printed.length, 1, 'a re-evaluated unchanged boundary is announced once')
+})
+
+test('the console Goal card gets each check with its progress, re-read from the game at most every 30 s', async () => {
+  const game = new FakeFactorio()
+  game.rocketsLaunched = 2
+  const memory = new CanonicalTaskBoardMemory()
+  const agent = agentWith(game, memory, async () => planReply({
+    plan: ['Gather 10 iron ore'],
+    operations: [gather('iron-ore', 10)],
+    checkpoint: inventoryCheckpoint('iron-ore', 10),
+    goal: { ...ROCKET_GOAL, doneWhen: [{ id: 'silo', kind: 'research_completed', technology: 'rocket-silo' }, ...ROCKET_GOAL.doneWhen] },
+    roadmap: SHELF,
+  }))
+  await agent.request('launch a rocket', { sender: 'Louis' })
+
+  const reads = []
+  const rcon = { command: async (text) => { if (text.includes('evaluate_condition')) reads.push(text); return game.command(text) } }
+  const session = Object.create(Session.prototype)
+  Object.assign(session, { agent, rcon, log: () => {} })
+
+  game.researched.add('rocket-silo')
+  const first = await session.goalUiView(1_000)
+  assert.deepEqual(first, {
+    summary: 'Launch one rocket from this save.',
+    defined: true,
+    read: true,
+    met: 1,
+    total: 2,
+    checks: [
+      { text: 'research "rocket-silo" is completed', met: true, progress: 'done' },
+      { text: '1 rocket launched from now on', met: false, progress: '0/1' },
+    ],
+    checked_at: 1_000,
+  })
+  const readsAfterFirst = reads.length
+
+  game.rocketsLaunched = 3
+  const cached = await session.goalUiView(20_000)
+  assert.equal(reads.length, readsAfterFirst, 'no game read inside the refresh window')
+  assert.equal(cached.met, 1)
+
+  const refreshed = await session.goalUiView(32_000)
+  assert.ok(reads.length > readsAfterFirst)
+  assert.equal(refreshed.met, 2)
+  assert.equal(refreshed.checks[1].progress, '1/1')
+
+  // And a sync carries the card to the mod.
+  const written = []
+  Object.assign(session, {
+    goalUiCache: undefined,
+    currentPlanState: () => memory.currentPlan(KEY),
+    restoreTaskBoardUiConversation: async () => {},
+    ensureUiConversationForState: () => {},
+    liveAgentStatus: () => ({ phase: 'executing', detail: '', activity: [], conversation: [] }),
+    currentPlanTrackerView: () => memory.planningTrackerView(KEY),
+    writeTaskBoardUi: async (command) => { written.push(command); return true },
+  })
+  await session.syncTaskBoardUi()
+  assert.match(written.at(-1), /set_snapshot/)
+  assert.match(written.at(-1), /1 rocket launched from now on/)
+})
+
+test('the Goal card still shows the goal when its checks could not be read', () => {
+  const goal = { status: 'active', objective: 'launch a rocket', definition: sanitizeGoalDefinition(ROCKET_GOAL) }
+  const view = goalUiView(goal, undefined)
+  assert.equal(view.read, false)
+  assert.equal(view.met, 0)
+  assert.equal(view.checks[0].progress, 'not read')
+  assert.equal(goalUiView({ status: 'completed' }, undefined), undefined)
+  assert.equal(goalUiView({ status: 'active', objective: 'follow me' }, undefined).defined, false)
 })

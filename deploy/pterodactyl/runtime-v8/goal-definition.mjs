@@ -304,3 +304,28 @@ export function formatGoalStatus({ goal, tracker, legacyStatus, evaluation } = {
   if (state === 'paused') lines.push('  Say continue to resume.')
   return lines
 }
+
+// The goal as the in-game console shows it: its summary and each done-when
+// check with its progress. `evaluation` is a read-only reading of the game (or
+// undefined when it could not be read); `checkedAt` is when it was taken.
+export function goalUiView(goal, evaluation, { checkedAt } = {}) {
+  if (!goal || goal.status !== 'active') return undefined
+  const conditions = goal.definition?.done_when ?? []
+  const checks = conditions.slice(0, GOAL_DEFINITION_LIMITS.maxConditions).map((condition) => {
+    const result = evaluation?.results?.find(entry => entry.id === condition.id)
+    return {
+      text: describeGoalCondition(condition).slice(0, 160),
+      met: result?.satisfied === true,
+      progress: conditionProgress(condition, result).slice(0, 80),
+    }
+  })
+  return {
+    summary: String(goal.definition?.summary || goal.objective || '').slice(0, 400),
+    defined: conditions.length > 0,
+    read: evaluation !== undefined,
+    met: checks.filter(check => check.met).length,
+    total: checks.length,
+    checks,
+    checked_at: Number.isFinite(checkedAt) ? checkedAt : undefined,
+  }
+}

@@ -29,7 +29,7 @@ import {
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { createSave, prepareGameConfig, prepareMods, prepareServerSettings, selectSave } from './game-files.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
-import { evaluateGoalDefinition, formatGoalStatus, formatGoalUnderstanding, formatSliceProgressNote } from './goal-definition.mjs'
+import { evaluateGoalDefinition, formatGoalStatus, formatGoalUnderstanding, formatSliceProgressNote, goalUiView } from './goal-definition.mjs'
 import { formatGoalReadingNote } from './goal-reading.mjs'
 import { GOAL_STATUS } from './planning-state.mjs'
 import { decisionProviderConfiguration, decisionProviderRequest, providerEndpoint, providerRequest } from './provider.mjs'
@@ -40,6 +40,7 @@ import { luaString } from './structured-policy.mjs'
 // (see transientProviderFailure).
 export const TRANSIENT_PAUSE_PREFIX = 'provider_transient'
 const UI_CONTROL_MARKER = '[AIRI_UI_CONTROL]'
+const GOAL_UI_REFRESH_MS = 30_000
 const UI_CONTROL_ACTIONS = new Set(['pause', 'terminate', 'follow', 'stop_follow', 'new_task', 'keep_paused', 'revise', 'cancel'])
 const UI_PROMPT_MARKER = '[AIRI_UI_PROMPT]'
 const UI_PROMPT_MAX_CHARS = 4000
@@ -1839,7 +1840,11 @@ export class Session {
 
   onAgentActivity(event, data) {
     if (event === 'goal.defined') this.announceGoalUnderstanding(data)
-    if (event === 'goal.evaluated') this.announceSliceProgress(data)
+    if (event === 'goal.evaluated') {
+      this.announceSliceProgress(data)
+      // A slice boundary just read the game; let the Goal card show it now.
+      this.goalUiCache = undefined
+    }
     // Real world progress ends a transient-failure streak.
     if ((event === 'operations.ack' || event === 'step.verified') && this.autoResume && !this.autoResume.timer) {
       this.autoResume = null
@@ -2022,6 +2027,27 @@ export class Session {
     this.printChat(note).catch(error => this.log(`Unable to announce slice progress: ${error instanceof Error ? error.message : String(error)}`))
   }
 
+  // The console's Goal card. The checks are re-read from the game at most every
+  // GOAL_UI_REFRESH_MS (read-only: this never records a baseline), so a sync
+  // every second costs a few RCON calls per half minute.
+  async goalUiView(now = Date.now()) {
+    const key = this.agent?.activePlanKey?.()
+    const goal = this.agent?.memory?.planningState?.(key)?.goal
+    if (!goal || goal.status !== GOAL_STATUS.ACTIVE) return undefined
+    const definition = goal.definition
+    const cacheKey = `${goal.goal_id}#${JSON.stringify(definition?.done_when ?? [])}`
+    const cached = this.goalUiCache
+    const fresh = cached?.key === cacheKey && now - cached.at < GOAL_UI_REFRESH_MS
+    if (definition && !fresh) {
+      let evaluation
+      try { evaluation = await evaluateGoalDefinition(definition, command => this.rcon.command(command)) }
+      catch { evaluation = undefined }
+      this.goalUiCache = { key: cacheKey, at: now, evaluation }
+    }
+    const evaluation = this.goalUiCache?.key === cacheKey ? this.goalUiCache.evaluation : undefined
+    return goalUiView(goal, evaluation, { checkedAt: this.goalUiCache?.key === cacheKey ? this.goalUiCache.at : undefined })
+  }
+
   async reportGoalStatus() {
     const agent = this.agent
     const key = agent?.activePlanKey?.()
@@ -2190,6 +2216,8 @@ export class Session {
     this.ensureUiConversationForState(state)
     const snapshot = taskBoardUiSnapshot(state, this.liveAgentStatus(), this.currentPlanTrackerView())
     if (!snapshot) return this.clearTaskBoardUi()
+    const goal = await this.goalUiView()
+    if (goal) snapshot.goal = goal
     const json = taskBoardUiJson(snapshot)
     if (json === undefined) {
       this.logTaskBoardUiFailure(`Task Board UI sync skipped: snapshot exceeds ${UI_SNAPSHOT_MAX_BYTES} bytes even after trimming`)

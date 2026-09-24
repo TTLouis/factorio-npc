@@ -1,5 +1,23 @@
 import type { SpritePath } from 'factorio:runtime'
 
+export type Tone = 'good' | 'info' | 'warn' | 'bad' | 'muted'
+
+export const TONE_COLORS: Record<Tone, { r: number, g: number, b: number }> = {
+  good: { r: 0.45, g: 0.85, b: 0.35 },
+  info: { r: 0.5, g: 0.72, b: 1 },
+  warn: { r: 1, g: 0.8, b: 0.3 },
+  bad: { r: 1, g: 0.42, b: 0.35 },
+  muted: { r: 0.68, g: 0.68, b: 0.68 },
+}
+
+export const TONE_SPRITES: Record<Tone, SpritePath> = {
+  good: 'utility/status_working',
+  info: 'utility/status_blue',
+  warn: 'utility/status_yellow',
+  bad: 'utility/status_not_working',
+  muted: 'utility/status_inactive',
+}
+
 export const BUTTON_NAME = 'airi_task_board_button'
 export const MOD_GUI_LEGACY_FLOW_NAME = 'mod_gui_button_flow'
 export const MOD_GUI_TOP_FRAME_NAME = 'mod_gui_top_frame'
@@ -94,6 +112,13 @@ export const BLOCKED_CHOICE_PENDING_TICKS = 5 * 60
 export const PROMPT_FIELD_NAME = 'airi_task_board_prompt'
 export const PROMPT_SEND_BUTTON_NAME = 'airi_task_board_prompt_send'
 export const MAX_STEPS = 24
+export const MAX_GOAL_CHECKS = 6
+// The Goal and Now cards at the top of the left column, rebuilt every refresh.
+export const GOAL_CARD_NAME = 'airi_task_board_goal_card'
+export const NOW_CARD_NAME = 'airi_task_board_now_card'
+export const TITLE_STATUS_NAME = 'airi_task_board_title_status'
+export const TITLE_STATUS_WIDTH = 520
+export const GOAL_PROGRESS_WIDTH = 90
 export const MAX_SHELF_NODES = 12
 export const MAX_ACTIVITY = 18
 export const MAX_INVENTORY_ITEMS = 80

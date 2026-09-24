@@ -21,24 +21,11 @@ type TaskBoardUiControlAction = 'pause' | 'terminate' | 'follow' | 'stop_follow'
 type TaskBoardUiLifecycleAction = 'pause' | 'resume' | 'terminate'
 type TaskBoardUiActivityKind = 'observation' | 'decision' | 'action' | 'result' | 'blocker' | 'system' | 'note'
 type TaskBoardUiAgentPhase = 'idle' | 'thinking' | 'observing' | 'executing' | 'waiting' | 'error'
-type Tone = 'good' | 'info' | 'warn' | 'bad' | 'muted'
+type Tone = ui_constants.Tone
 type TaskBoardUiItem = { name: string, count: number }
 
-const TONE_COLORS: Record<Tone, { r: number, g: number, b: number }> = {
-  good: { r: 0.45, g: 0.85, b: 0.35 },
-  info: { r: 0.5, g: 0.72, b: 1 },
-  warn: { r: 1, g: 0.8, b: 0.3 },
-  bad: { r: 1, g: 0.42, b: 0.35 },
-  muted: { r: 0.68, g: 0.68, b: 0.68 },
-}
-
-const TONE_SPRITES: Record<Tone, SpritePath> = {
-  good: 'utility/status_working',
-  info: 'utility/status_blue',
-  warn: 'utility/status_yellow',
-  bad: 'utility/status_not_working',
-  muted: 'utility/status_inactive',
-}
+const TONE_COLORS = ui_constants.TONE_COLORS
+const TONE_SPRITES = ui_constants.TONE_SPRITES
 
 export interface TaskBoardUiStep {
   id: string
@@ -95,7 +82,15 @@ export interface TaskBoardUiPlanIdentity {
   derived_from?: string
   superseded_by?: string
 }
+/**
+ * The goal's done-when checks as the runtime last read them from the game.
+ * `read` is false when that read failed; `defined` is false before the planner
+ * has defined the goal.
+ */
+export interface TaskBoardUiGoalCheck { text: string, met: boolean, progress: string }
+export interface TaskBoardUiGoal { summary: string, defined: boolean, read: boolean, met: number, total: number, checks: TaskBoardUiGoalCheck[] }
 export interface TaskBoardUiSnapshot {
+  goal?: TaskBoardUiGoal
   goal_id: string
   objective: string
   plan?: TaskBoardUiPlanIdentity
@@ -214,6 +209,22 @@ function sanitize_blocked(value: any): TaskBoardUiBlocked | undefined {
   return blocked
 }
 
+function sanitize_goal(value: any): TaskBoardUiGoal | undefined {
+  if (value === undefined || value === null || typeof value !== 'object') return undefined
+  const summary = text(value.summary, 400)
+  if (summary.length === 0) return undefined
+  // Plain Lua table at runtime: index it rather than calling Array methods.
+  const raw_checks = (Array.isArray(value.checks) ? value.checks : []) as any[]
+  const checks: TaskBoardUiGoalCheck[] = []
+  for (let index = 0; index < raw_checks.length && index < ui_constants.MAX_GOAL_CHECKS; index++) {
+    const check = raw_checks[index]
+    const check_text = text(check?.text, 160)
+    if (check_text.length > 0) checks.push({ text: check_text, met: check?.met === true, progress: text(check?.progress, 80) })
+  }
+  let met = 0
+  for (const check of checks) if (check.met) met++
+  return { summary, defined: value.defined === true && checks.length > 0, read: value.read === true, met, total: checks.length, checks }
+}
 function sanitize_plan_identity(value: any): TaskBoardUiPlanIdentity | undefined {
   if (value === undefined || value === null || typeof value !== 'object') return undefined
   const plan_id = text(value.plan_id, 100)
@@ -318,13 +329,14 @@ export function sanitize_task_board_ui_snapshot(value: any): TaskBoardUiSnapshot
   }
 
   const total = integer(value.total_steps, steps.length)
+  const goal = sanitize_goal(value.goal)
   const plan = sanitize_plan_identity(value.plan)
   const blocked = sanitize_blocked(value.blocked)
   const steering = text(value.steering, 32)
   const agent = value.agent !== null && typeof value.agent === 'object' ? value.agent : undefined
   const debug = value.debug !== undefined ? debug_ui.sanitize_debug_snapshot(value.debug) : undefined
   return {
-    goal_id: text(value.goal_id, 100), objective: text(value.objective, 500), plan, blocked, steering: steering.length > 0 ? steering : undefined, response: text(value.response, 2000), status: status(value.status), blocker: text(value.blocker, 500), blocker_summary: text(value.blocker_summary, 500), pause_reason: text(value.pause_reason, 300), pause_summary: text(value.pause_summary, 500),
+    goal, goal_id: text(value.goal_id, 100), objective: text(value.objective, 500), plan, blocked, steering: steering.length > 0 ? steering : undefined, response: text(value.response, 2000), status: status(value.status), blocker: text(value.blocker, 500), blocker_summary: text(value.blocker_summary, 500), pause_reason: text(value.pause_reason, 300), pause_summary: text(value.pause_summary, 500),
     completed_count: math.min(integer(value.completed_count), total), total_steps: total, active_index: math.min(integer(value.active_index), math.max(0, total - 1)), steps, activity, wanted_items, shelf,
     conversation_id: text(value.conversation_id, 120), conversation,
     agent: { phase: agent_phase(agent?.phase), detail: text(agent?.detail, 300) }, debug,
@@ -608,7 +620,6 @@ function create_section(parent: LuaGuiElement, title: string, width?: number, to
   body.style.vertical_spacing = 6
   return { header, body }
 }
-function add_status_badge(parent: LuaGuiElement, tone: Tone, caption: string) { const badge = parent.add({ type: 'flow', direction: 'horizontal' }); badge.style.vertical_align = 'center'; badge.style.horizontal_spacing = 4; badge.style.right_padding = 4; badge.add({ type: 'sprite', sprite: TONE_SPRITES[tone], style: 'status_image' }); const label = badge.add({ type: 'label', caption, style: 'bold_label' }); label.style.font_color = TONE_COLORS[tone]; return badge }
 function create_key_value_table(parent: LuaGuiElement) { const table = parent.add({ type: 'table', column_count: 2 }); table.style.horizontal_spacing = 12; table.style.vertical_spacing = 4; return table }
 function add_key_value(table: LuaGuiElement, key: string, value: string, options: { tone?: Tone, static_tooltip?: string, width?: number } = {}) { const key_label = table.add({ type: 'label', caption: key, style: 'semibold_label' }); key_label.style.minimal_width = ui_constants.KEY_COLUMN_WIDTH; const value_label = gui_text.literal_gui_text(table.add({ type: 'label', caption: value, tooltip: options.static_tooltip })); value_label.style.single_line = false; if (options.width !== undefined) value_label.style.maximal_width = options.width; if (options.tone !== undefined) value_label.style.font_color = TONE_COLORS[options.tone]; return value_label }
 function add_empty_state(parent: LuaGuiElement, caption: string) { const label = gui_text.literal_gui_text(parent.add({ type: 'label', caption })); label.style.font_color = TONE_COLORS.muted; return label }
@@ -642,43 +653,79 @@ function overall_state(board: TaskBoardUiSnapshot | undefined, synced_tick: numb
   return { tone: board_tone(board.status), caption: board.status.toUpperCase() }
 }
 
-function render_status_panel(parent: LuaGuiElement, board: TaskBoardUiSnapshot | undefined, runtime: TaskBoardUiRuntimeSnapshot, synced_tick: number | undefined) {
-  const { header, body } = create_section(parent, 'Status', ui_constants.STATUS_SECTION_WIDTH, undefined, false)
-  const overall = overall_state(board, synced_tick); add_status_badge(header, overall.tone, overall.caption)
-  const table = create_key_value_table(body)
-  add_key_value(table, 'NPC', runtime.actor_name || 'AIRI', { width: ui_constants.STATUS_VALUE_WIDTH })
+// The title bar's status line: what AIRI is doing right now, and whether that
+// is still current. The NPC, world task and sync age are in its tooltip.
+function console_title_status(board: TaskBoardUiSnapshot | undefined, runtime: TaskBoardUiRuntimeSnapshot, synced_tick: number | undefined): console_ui.ConsoleTitleStatus {
+  const overall = overall_state(board, synced_tick)
   const freshness = task_board_sync_freshness(synced_tick, game.tick)
   const phase = board?.agent.phase ?? 'idle'; const detail = board?.agent.detail ?? ''
-  const live_caption = detail.length > 0 ? `${agent_caption(phase)} · ${text(detail, 90)}` : agent_caption(phase)
-  const stale_caption = freshness === 'offline' ? 'NOT CONNECTED' : `NO ANSWER — last seen ${agent_caption(phase)}`
-  add_key_value(table, 'SGLuna', freshness === 'live' ? live_caption : stale_caption, { tone: freshness === 'live' ? agent_tone(phase) : 'bad', static_tooltip: 'The console polls the SGLuna runtime; this row reports the answer, not a guess.', width: ui_constants.STATUS_VALUE_WIDTH })
-  add_key_value(table, 'WORLD', world_task_summary(runtime.world_task), { width: ui_constants.STATUS_VALUE_WIDTH })
-  const goal = board === undefined ? 'No active SGLuna task.' : board_goal(board)
-  add_key_value(table, 'GOAL', text(goal, 110), { width: ui_constants.STATUS_VALUE_WIDTH })
-  if (board !== undefined && board.steps.length > 0) {
-    const index = math.min(board.active_index, board.steps.length - 1)
-    const step = board.steps[index]
-    add_key_value(table, 'STEP', `${index + 1}/${board.total_steps} · ${text(step_caption(step.description), 80)}`, { tone: step_tone(step), width: ui_constants.STATUS_VALUE_WIDTH })
+  const caption = freshness === 'offline'
+    ? 'NOT CONNECTED'
+    : freshness === 'stale'
+      ? `NO ANSWER — last seen ${agent_caption(phase)}`
+      : detail.length > 0 ? `${overall.caption} · ${text(detail, 90)}` : overall.caption
+  const tooltip = `NPC: ${runtime.actor_name || 'AIRI'}\nWorld task: ${world_task_summary(runtime.world_task)}\nLast sync: ${sync_summary(synced_tick)}\nThe console polls the SGLuna runtime; this line reports its answer, not a guess.`
+  return { caption, tone: overall.tone, tooltip }
+}
+function console_goal_card(board: TaskBoardUiSnapshot | undefined): console_ui.ConsoleGoalCard {
+  const goal = board?.goal
+  if (goal !== undefined) {
+    return {
+      summary: goal.summary,
+      note: goal.defined ? '' : 'AIRI has not defined how the game will check this goal yet.',
+      read: goal.read,
+      met: goal.met,
+      total: goal.total,
+      checks: goal.checks,
+    }
   }
+  const summary = board === undefined ? 'No active goal.' : board_goal(board)
+  const note = board === undefined || board.status === 'idle' ? 'Tell AIRI what to do in the prompt below.' : ''
+  return { summary, note, read: false, met: 0, total: 0, checks: [] }
+}
+// The last meaningful result: a result or blocker, else the latest action.
+function last_result_line(board: TaskBoardUiSnapshot | undefined): { caption: string, tone: Tone } {
   const retained = activity_state.activity_history()
   const recent = retained.length > 0 ? retained : (board?.activity ?? [])
   const board_blocker_text = board === undefined ? '' : task_condition_text(board.blocker_summary, board.blocker, 'SGLuna is blocked by an internal task condition.')
-  let last = ''
-  let last_tone: Tone = 'muted'
   let action_fallback = ''
   for (let index = recent.length - 1; index >= 0; index--) {
     const entry = recent[index]
     if ((entry.kind === 'result' || entry.kind === 'blocker') && entry.text.length > 0) {
       const current_board_blocker = entry.kind === 'blocker' && board !== undefined && board.blocker.length > 0 && (entry.text === board.blocker || entry.text === board_blocker_text)
-      last = current_board_blocker ? board_blocker_text : entry.text
-      last_tone = activity_tone(entry.kind)
-      break
+      return { caption: current_board_blocker ? board_blocker_text : entry.text, tone: activity_tone(entry.kind) }
     }
     if (action_fallback.length === 0 && entry.kind === 'action' && entry.text.length > 0) action_fallback = entry.text
   }
-  if (last.length === 0 && action_fallback.length > 0) { last = action_fallback; last_tone = 'good' }
-  if (last.length > 0) add_key_value(table, 'LAST', text(last, 90), { tone: last_tone, width: ui_constants.STATUS_VALUE_WIDTH })
-  add_key_value(table, 'SYNC', sync_summary(synced_tick), { tone: 'muted', width: ui_constants.STATUS_VALUE_WIDTH })
+  return { caption: action_fallback, tone: 'good' }
+}
+function console_now_card(board: TaskBoardUiSnapshot | undefined): console_ui.ConsoleNowCard {
+  const attention: Array<{ caption: string, tone: Tone }> = []
+  if (board !== undefined && board.pause_reason.length > 0) attention.push({ caption: `Paused: ${task_condition_text(board.pause_summary, board.pause_reason, 'SGLuna is paused by an internal task condition.')}`, tone: 'warn' })
+  const last = last_result_line(board)
+  const last_caption = last.caption.length > 0 ? `Last: ${text(last.caption, 140)}` : ''
+  if (board === undefined || board.steps.length === 0) {
+    return { heading: 'Now', step: board?.agent.detail || 'No active plan slice.', step_tone: 'muted', progress: 0, show_progress: false, next: '', attention, last: last_caption, last_tone: last.tone }
+  }
+  const index = math.min(board.active_index, board.steps.length - 1)
+  const step = board.steps[index]
+  const upcoming: string[] = []
+  for (let next = index + 1; next < board.steps.length && upcoming.length < 2; next++) {
+    if (board.steps[next].status === 'pending') upcoming.push(text(step_caption(board.steps[next].description), 70))
+  }
+  const remaining = board.steps.length - index - 1 - upcoming.length
+  const next = upcoming.length === 0 ? '' : `Next: ${upcoming.join(' · ')}${remaining > 0 ? ` · +${remaining} more` : ''}`
+  return {
+    heading: `Now · step ${index + 1} of ${board.total_steps} · ${board.completed_count} verified`,
+    step: step_caption(step.description),
+    step_tone: step_tone(step),
+    progress: board.total_steps > 0 ? board.completed_count / board.total_steps : 0,
+    show_progress: true,
+    next,
+    attention,
+    last: last_caption,
+    last_tone: last.tone,
+  }
 }
 function follow_button_tooltip(follow: TaskBoardUiFollowStatus | undefined) { return follow?.active ? 'Click to stop following. A goal paused by Follow will automatically resume.' : 'Temporarily suspend current world work and follow this player. A goal paused by Follow automatically resumes when Follow stops.' }
 // State for the chrome drawn by task_board_console. Built here because it reads
@@ -1151,23 +1198,23 @@ function render_titlebar(root: FrameGuiElement, caption = 'SGLuna NPC Console', 
   titlebar.add({ type: 'label', caption, style: 'frame_title', ignored_by_interaction: true }); const dragger = titlebar.add({ type: 'empty-widget', style: 'draggable_space_header', ignored_by_interaction: true }); dragger.style.horizontally_stretchable = true; dragger.style.height = 24
   titlebar.add({ type: 'sprite-button', name: close_name, sprite: 'utility/close', style: 'frame_action_button', tooltip: `Close ${caption}` })
 }
-function build_left_dynamic(parent: LuaGuiElement, player: LuaPlayer, board: TaskBoardUiSnapshot | undefined, synced_tick: number | undefined, runtime: TaskBoardUiRuntimeSnapshot) {
-  render_blocked(parent, player, board); render_status_panel(parent, board, runtime, synced_tick)
+function build_left_dynamic(parent: LuaGuiElement, player: LuaPlayer, board: TaskBoardUiSnapshot | undefined) {
+  render_blocked(parent, player, board); console_ui.render_goal_card(parent, console_goal_card(board)); console_ui.render_now_card(parent, console_now_card(board))
 }
 function build_columns(columns: LuaGuiElement, player: LuaPlayer) {
-  const board = storage.airi_task_board_ui; const synced_tick = storage.airi_task_board_ui_synced_tick; const runtime = runtime_snapshot()
+  const board = storage.airi_task_board_ui; const runtime = runtime_snapshot()
   const left = columns.add({ type: 'flow', name: ui_constants.LEFT_COLUMN_NAME, direction: 'vertical' }); left.style.width = ui_constants.LEFT_COLUMN_WIDTH; left.style.vertical_spacing = ui_constants.COLUMN_SPACING
-  const dynamic = left.add({ type: 'flow', name: ui_constants.LEFT_DYNAMIC_NAME, direction: 'vertical' }); dynamic.style.width = ui_constants.LEFT_COLUMN_WIDTH; dynamic.style.vertical_spacing = ui_constants.COLUMN_SPACING; build_left_dynamic(dynamic, player, board, synced_tick, runtime); render_tracker(left, board, player); debug_ui.render_ai_reply(dynamic, board?.response ?? '', ui_constants.LEFT_COLUMN_WIDTH); render_prompt(left, player); console_ui.render_action_row(left, console_action_state(player, board, runtime))
+  const dynamic = left.add({ type: 'flow', name: ui_constants.LEFT_DYNAMIC_NAME, direction: 'vertical' }); dynamic.style.width = ui_constants.LEFT_COLUMN_WIDTH; dynamic.style.vertical_spacing = ui_constants.COLUMN_SPACING; build_left_dynamic(dynamic, player, board); render_tracker(left, board, player); debug_ui.render_ai_reply(dynamic, board?.response ?? '', ui_constants.LEFT_COLUMN_WIDTH); render_prompt(left, player); console_ui.render_action_row(left, console_action_state(player, board, runtime))
   const right = columns.add({ type: 'flow', name: ui_constants.RIGHT_COLUMN_NAME, direction: 'vertical' }); right.style.width = ui_constants.PREVIEW_COLUMN_WIDTH; right.style.vertical_spacing = ui_constants.COLUMN_SPACING; right.style.vertically_stretchable = true; render_world_preview(right, runtime, player)
   const resources = right.add({ type: 'flow', name: ui_constants.RIGHT_RESOURCES_NAME, direction: 'horizontal' }); resources.style.horizontal_spacing = ui_constants.COLUMN_SPACING; resources.style.vertical_align = 'top'; render_inventory(resources, runtime, player); render_resource_sidebar(resources, board, runtime, player)
 }
 function refresh_columns(columns: LuaGuiElement, player: LuaPlayer) {
   const left = columns[ui_constants.LEFT_COLUMN_NAME]; const dynamic = left?.valid ? left[ui_constants.LEFT_DYNAMIC_NAME] : undefined; const right = columns[ui_constants.RIGHT_COLUMN_NAME]
   if (!dynamic?.valid || !right?.valid) return false
-  const board = storage.airi_task_board_ui; const synced_tick = storage.airi_task_board_ui_synced_tick; const runtime = runtime_snapshot()
+  const board = storage.airi_task_board_ui; const runtime = runtime_snapshot()
   // The tracker is never cleared on a routine refresh: it owns two scroll-panes.
   if (left === undefined || !refresh_tracker(left, board, player)) return false
-  dynamic.clear(); build_left_dynamic(dynamic, player, board, synced_tick, runtime)
+  dynamic.clear(); build_left_dynamic(dynamic, player, board)
   // Current Task Conversation intentionally lives outside the dynamic flow so
   // its scroll position survives refreshes. That also means it must be
   // explicitly refreshed here; otherwise snapshots update storage while an
@@ -1191,13 +1238,13 @@ function build_panel(player: LuaPlayer) {
   const root = player.gui.screen.add({ type: 'frame', name: ui_constants.ROOT_NAME, direction: 'vertical' }) as FrameGuiElement
   if (previous_location !== undefined) root.location = previous_location
   else root.auto_center = true
-  console_ui.render_console_titlebar(root, 'SGLuna NPC Console', console_window_buttons(player))
+  console_ui.render_console_titlebar(root, 'SGLuna NPC Console', console_window_buttons(player), console_title_status(storage.airi_task_board_ui, runtime_snapshot(), storage.airi_task_board_ui_synced_tick))
   const columns = root.add({ type: 'flow', name: ui_constants.COLUMNS_NAME, direction: 'horizontal' }); columns.style.horizontal_spacing = ui_constants.COLUMN_SPACING; build_columns(columns, player); root.bring_to_front()
 }
 function render_panel(player: LuaPlayer) {
   if (!task_board_ui_is_open(player.index)) { destroy_panel(player); return }
   const root = player.gui.screen[ui_constants.ROOT_NAME]; const columns = root?.valid ? root[ui_constants.COLUMNS_NAME] : undefined
-  if (columns?.valid && refresh_columns(columns, player) && root !== undefined && console_ui.refresh_console_titlebar(root as FrameGuiElement, console_window_buttons(player))) return
+  if (columns?.valid && refresh_columns(columns, player) && root !== undefined && console_ui.refresh_console_titlebar(root as FrameGuiElement, console_window_buttons(player), console_title_status(storage.airi_task_board_ui, runtime_snapshot(), storage.airi_task_board_ui_synced_tick))) return
   build_panel(player)
 }
 function destroy_skills_popout(player: LuaPlayer) { const existing = player.gui.screen[ui_constants.SKILLS_ROOT_NAME]; const location = existing?.valid ? existing.location : undefined; if (existing?.valid) existing.destroy(); return location }

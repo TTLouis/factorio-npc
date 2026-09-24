@@ -1,4 +1,4 @@
-import type { ButtonGuiElement, FrameGuiElement, LuaGuiElement, SpriteButtonGuiElement, SpritePath } from 'factorio:runtime'
+import type { ButtonGuiElement, FrameGuiElement, LuaGuiElement, ProgressBarGuiElement, SpriteButtonGuiElement, SpriteGuiElement, SpritePath } from 'factorio:runtime'
 import * as ui_constants from './task_board_ui_constants'
 import * as gui_text from './task_board_gui_text'
 
@@ -34,6 +34,32 @@ export interface ConsoleActionState {
   muted_color: Color
 }
 
+// What AIRI is doing, in the title bar: the live phase and its detail, with
+// the NPC, the world task and the sync age in the tooltip.
+export interface ConsoleTitleStatus { caption: string, tone: ui_constants.Tone, tooltip: string }
+
+export interface ConsoleGoalCard {
+  summary: string
+  // Shown instead of checks: no goal, or a goal the planner has not defined yet.
+  note: string
+  read: boolean
+  met: number
+  total: number
+  checks: Array<{ text: string, met: boolean, progress: string }>
+}
+
+export interface ConsoleNowCard {
+  heading: string
+  step: string
+  step_tone: ui_constants.Tone
+  progress: number
+  show_progress: boolean
+  next: string
+  attention: Array<{ caption: string, tone: ui_constants.Tone }>
+  last: string
+  last_tone: ui_constants.Tone
+}
+
 export interface ConsoleBlockedState {
   summary: string
   reason: string
@@ -54,12 +80,15 @@ function icon_sprite(icon: ConsoleWindowButton['icon'], variant: 'white' | 'blac
  * of full-size buttons in the body. Built once; refresh_console_titlebar keeps
  * their open/closed state current.
  */
-export function render_console_titlebar(root: FrameGuiElement, caption: string, buttons: ConsoleWindowButton[]) {
+export function render_console_titlebar(root: FrameGuiElement, caption: string, buttons: ConsoleWindowButton[], status: ConsoleTitleStatus) {
   const titlebar = root.add({ type: 'flow', name: ui_constants.TITLEBAR_NAME, direction: 'horizontal' })
   titlebar.style.horizontally_stretchable = true
   titlebar.style.horizontal_spacing = 8
   titlebar.drag_target = root
   titlebar.add({ type: 'label', caption, style: 'frame_title', ignored_by_interaction: true })
+  titlebar.add({ type: 'sprite', name: `${ui_constants.TITLE_STATUS_NAME}_icon`, sprite: ui_constants.TONE_SPRITES[status.tone], style: 'status_image' })
+  const status_label = gui_text.literal_gui_text(titlebar.add({ type: 'label', name: ui_constants.TITLE_STATUS_NAME, caption: '', style: 'bold_label' }))
+  status_label.style.maximal_width = ui_constants.TITLE_STATUS_WIDTH
   const dragger = titlebar.add({ type: 'empty-widget', style: 'draggable_space_header', ignored_by_interaction: true })
   dragger.style.horizontally_stretchable = true
   dragger.style.height = 24
@@ -76,12 +105,19 @@ export function render_console_titlebar(root: FrameGuiElement, caption: string, 
     })
   }
   titlebar.add({ type: 'sprite-button', name: ui_constants.CLOSE_BUTTON_NAME, sprite: 'utility/close', style: 'frame_action_button', tooltip: `Close ${caption}` })
-  refresh_console_titlebar(root, buttons)
+  refresh_console_titlebar(root, buttons, status)
 }
 
-export function refresh_console_titlebar(root: FrameGuiElement, buttons: ConsoleWindowButton[]) {
+export function refresh_console_titlebar(root: FrameGuiElement, buttons: ConsoleWindowButton[], status: ConsoleTitleStatus) {
   const titlebar = root[ui_constants.TITLEBAR_NAME]
   if (!titlebar?.valid) return false
+  const icon = titlebar[`${ui_constants.TITLE_STATUS_NAME}_icon`] as SpriteGuiElement | undefined
+  const label = titlebar[ui_constants.TITLE_STATUS_NAME]
+  if (!icon?.valid || !label?.valid) return false
+  icon.sprite = ui_constants.TONE_SPRITES[status.tone]
+  label.caption = status.caption
+  label.tooltip = status.tooltip
+  label.style.font_color = ui_constants.TONE_COLORS[status.tone]
   for (const button of buttons) {
     const element = titlebar[button.name] as SpriteButtonGuiElement | undefined
     if (!element?.valid) return false
@@ -177,4 +213,81 @@ export function render_action_row(parent: LuaGuiElement, state: ConsoleActionSta
     issue.style.maximal_width = ui_constants.LEFT_COLUMN_WIDTH
     issue.style.font_color = state.issue_color
   }
+}
+
+// A titled card spanning the left column, with an optional caption on the
+// right of its header (the "1/2 checks met" of the Goal card).
+function card(parent: LuaGuiElement, name: string, title: string, right: string) {
+  const section = parent.add({ type: 'frame', name, direction: 'vertical', style: 'inside_shallow_frame' })
+  section.style.width = ui_constants.LEFT_COLUMN_WIDTH
+  const header = section.add({ type: 'frame', direction: 'horizontal', style: 'subheader_frame' })
+  header.style.horizontally_stretchable = true
+  header.style.vertical_align = 'center'
+  header.add({ type: 'label', caption: title, style: 'subheader_caption_label' })
+  const filler = header.add({ type: 'empty-widget' })
+  filler.style.horizontally_stretchable = true
+  if (right.length > 0) {
+    const caption = header.add({ type: 'label', caption: right, style: 'semibold_label' })
+    caption.style.right_padding = 4
+  }
+  const body = section.add({ type: 'flow', direction: 'vertical' })
+  body.style.padding = ui_constants.SECTION_PADDING
+  body.style.vertical_spacing = 4
+  body.style.horizontally_stretchable = true
+  return body
+}
+
+function wrapped(parent: LuaGuiElement, caption: string, width: number, style = 'label') {
+  const label = gui_text.literal_gui_text(parent.add({ type: 'label', caption, style }))
+  label.style.single_line = false
+  label.style.maximal_width = width
+  return label
+}
+
+/**
+ * The goal and each done-when check the game reports, with its progress.
+ * This is the one place the console answers "how far is the goal?", which the
+ * old Status panel never showed.
+ */
+export function render_goal_card(parent: LuaGuiElement, goal: ConsoleGoalCard) {
+  const right = goal.total > 0 ? (goal.read ? `${goal.met}/${goal.total} checks met` : 'checks not read') : ''
+  const body = card(parent, ui_constants.GOAL_CARD_NAME, 'Goal', right)
+  const inner = ui_constants.LEFT_COLUMN_WIDTH - 2 * ui_constants.SECTION_PADDING
+  wrapped(body, goal.summary, inner, 'bold_label')
+  if (goal.total === 0) {
+    if (goal.note.length > 0) wrapped(body, goal.note, inner).style.font_color = ui_constants.TONE_COLORS.muted
+    return
+  }
+  const bar = body.add({ type: 'progressbar', value: goal.met / goal.total }) as ProgressBarGuiElement
+  bar.style.horizontally_stretchable = true
+  const table = body.add({ type: 'table', column_count: 3 })
+  table.style.horizontal_spacing = 8
+  table.style.vertical_spacing = 4
+  for (const check of goal.checks) {
+    table.add({ type: 'sprite', sprite: ui_constants.TONE_SPRITES[check.met ? 'good' : 'muted'], style: 'status_image', tooltip: check.met ? 'met' : 'not yet' })
+    wrapped(table, check.text, inner - ui_constants.GOAL_PROGRESS_WIDTH - 40)
+    const progress = table.add({ type: 'label', caption: check.progress, style: 'semibold_label' })
+    progress.style.minimal_width = ui_constants.GOAL_PROGRESS_WIDTH
+    progress.style.horizontal_align = 'right'
+    progress.style.font_color = ui_constants.TONE_COLORS[check.met ? 'good' : 'muted']
+  }
+}
+
+/**
+ * The step being worked on now, the slice's progress, what comes next, and
+ * anything holding it (paused, blocked). Replaces the old Status rows GOAL,
+ * STEP and LAST, which repeated the plan list.
+ */
+export function render_now_card(parent: LuaGuiElement, now: ConsoleNowCard) {
+  const body = card(parent, ui_constants.NOW_CARD_NAME, now.heading, '')
+  const inner = ui_constants.LEFT_COLUMN_WIDTH - 2 * ui_constants.SECTION_PADDING
+  const step = wrapped(body, now.step, inner, 'bold_label')
+  step.style.font_color = ui_constants.TONE_COLORS[now.step_tone]
+  if (now.show_progress) {
+    const bar = body.add({ type: 'progressbar', value: now.progress }) as ProgressBarGuiElement
+    bar.style.horizontally_stretchable = true
+  }
+  if (now.next.length > 0) wrapped(body, now.next, inner).style.font_color = ui_constants.TONE_COLORS.muted
+  for (const line of now.attention) wrapped(body, line.caption, inner, 'semibold_label').style.font_color = ui_constants.TONE_COLORS[line.tone]
+  if (now.last.length > 0) wrapped(body, now.last, inner).style.font_color = ui_constants.TONE_COLORS[now.last_tone]
 }

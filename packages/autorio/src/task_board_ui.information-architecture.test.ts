@@ -32,9 +32,10 @@ describe('NPC console information architecture', () => {
     expect(consoleSource).toContain('activity_scroll.visible = false')
     expect(consoleSource).toMatch(/render_tracker\(left, board, player\); debug_ui\.render_ai_reply\(dynamic,[\s\S]*render_prompt\(left, player\); console_ui\.render_action_row\(left,/)
     expect(consoleSource).not.toContain("create_section(parent, 'Controls'")
-    expect(consoleSource).toContain("console_ui.render_console_titlebar(root, 'SGLuna NPC Console', console_window_buttons(player))")
-    // A blocked plan is a full-width banner above everything else.
-    expect(consoleSource).toMatch(/render_blocked\(parent, player, board\); render_status_panel\(parent,/)
+    expect(consoleSource).toContain("console_ui.render_console_titlebar(root, 'SGLuna NPC Console', console_window_buttons(player), console_title_status(")
+    // A blocked plan is a full-width banner above everything else, then the
+    // Goal and Now cards.
+    expect(consoleSource).toMatch(/render_blocked\(parent, player, board\); console_ui\.render_goal_card\(parent,[^\n]*console_ui\.render_now_card\(parent,/)
     const prompt = consoleSource.split('function render_prompt(')[1]?.split('function render_titlebar(')[0] ?? ''
     expect(prompt).toContain("caption: 'Prompt SGLuna'")
     expect(prompt).not.toContain('NEW_TASK_BUTTON_NAME')
@@ -57,9 +58,12 @@ describe('NPC console information architecture', () => {
     expect(consoleSource).toMatch(/build_left_dynamic\(dynamic,[\s\S]*render_tracker\(left, board, player\)/)
   })
 
-  it('promotes current step and last meaningful result into Status', () => {
-    expect(consoleSource).toContain("add_key_value(table, 'STEP'")
-    expect(consoleSource).toContain("add_key_value(table, 'LAST'")
+  it('shows the goal checks, the current step, what comes next and the last result on the Goal and Now cards', () => {
+    expect(consoleSource).not.toContain("create_section(parent, 'Status'")
+    expect(consoleSource).toContain('checks met')
+    expect(consoleSource).toContain('heading: `Now · step ${index + 1} of ${board.total_steps} · ${board.completed_count} verified`')
+    expect(consoleSource).toContain("`Next: ${upcoming.join(' · ')}")
+    expect(consoleSource).toContain('`Last: ${text(last.caption, 140)}`')
   })
 
   it('gives conversation more room, moves execution activity to Debug, and makes Projects taller', () => {
