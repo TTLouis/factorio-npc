@@ -12,7 +12,7 @@ import {
   sanitizeGoalDefinition,
 } from './goal-definition.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
-import { GOAL_STATUS } from './planning-state.mjs'
+import { getActivePlan, GOAL_STATUS, PLAN_STATUS } from './planning-state.mjs'
 import { Session } from './supervisor.mjs'
 import { FakeFactorio, gather, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
 
@@ -323,4 +323,56 @@ test('the supervisor prints the goal understanding in game', async () => {
   assert.match(printed[0], /\[color=0\.4,0\.8,1\]Goal understood:\[\/color\] Launch one rocket from this save\./)
   assert.ok(printed.some(line => line.includes('Done when (checked by the game):')))
   assert.doesNotMatch(conversation[0].text, /\[color/, 'the UI transcript gets plain text')
+})
+
+// 2026-09-24 cloud trial (run 5): a planner "done" on the last step ended the
+// request as complete without the game ever checking the goal definition.
+function doneOnLastStep(game, memory, events) {
+  let calls = 0
+  const agent = agentWith(game, memory, async () => {
+    calls++
+    if (calls === 1) {
+      return planReply({
+        plan: ['Gather 10 iron ore'],
+        operations: [gather('iron-ore', 10)],
+        goal: { scope: 'finite', summary: 'Have 5 iron plates.', doneWhen: [{ kind: 'inventory_count', item_name: 'iron-plate', minimum: 5 }] },
+      })
+    }
+    return planReply({ chatMessage: 'Done.', plan: [], currentStep: 0, operations: [] })
+  }, { onActivity: (event, data) => events.push({ event, data }) })
+  return { agent, calls: () => calls }
+}
+
+test('a planner "done" on the last step completes a defined goal when the game confirms it', async () => {
+  const game = new FakeFactorio({ inventory: { 'iron-plate': 5 } })
+  const memory = new CanonicalTaskBoardMemory()
+  const events = []
+  const { agent } = doneOnLastStep(game, memory, events)
+  await agent.request('have 5 iron plates', { sender: 'Louis' })
+  game.inventory['iron-ore'] = 10
+
+  const result = await agent.completed()
+
+  assert.equal(result.goalStatus, 'completed')
+  assert.ok(events.some(entry => entry.event === 'goal.evaluated' && entry.data.satisfied === true))
+})
+
+test('a planner "done" on the last step does not complete a defined goal the game reports unmet', async () => {
+  const game = new FakeFactorio()
+  const memory = new CanonicalTaskBoardMemory()
+  const events = []
+  const { agent, calls } = doneOnLastStep(game, memory, events)
+  await agent.request('have 5 iron plates', { sender: 'Louis' })
+  game.inventory['iron-ore'] = 10
+
+  const result = await agent.completed()
+
+  // One extra planning turn, then an honest ending with the goal still open.
+  assert.equal(calls(), 3)
+  assert.equal(result.goalStatus, 'active')
+  assert.match(result.chatMessage, /not met yet/)
+  const planning = memory.planningState(KEY)
+  assert.equal(planning.goal.status, GOAL_STATUS.ACTIVE)
+  // The finished slice is not copied into a new active draft.
+  assert.equal(getActivePlan(planning).status, PLAN_STATUS.COMPLETED)
 })
