@@ -261,10 +261,10 @@ test('failure boundaries also use the active Jev gate and map semantic replans t
 })
 
 test('post-step Jev receives a bounded grounded gate state instead of dialogue history', async () => {
-  let captured
+  const calls = []
   const { agent } = agentForRoute('continue_current', {
     decisionProvider: async (state, questions) => {
-      captured = { state, questions }
+      calls.push({ state, questions })
       return decisionResponse('continue_current')
     },
   })
@@ -284,6 +284,10 @@ test('post-step Jev receives a bounded grounded gate state instead of dialogue h
     providerStatus: { task_state: 'idle', queue_empty: true, queue_length: 0 },
   })
 
+  // No authoritative runtime is active, so the planner wakes: one small gate
+  // call, then one planner-shape call over the same bounded state.
+  assert.equal(calls.length, 2)
+  const [captured, shape] = calls
   assert.equal(captured.state.reason, 'post_step_planner_gate')
   assert.equal(captured.state.goal.goal_id, 'goal_existing')
   assert.equal(captured.state.task_board.active_index, 0)
@@ -292,21 +296,59 @@ test('post-step Jev receives a bounded grounded gate state instead of dialogue h
   assert.equal(captured.state.autorio.latest_basic_operation_result.placed_unit_number, undefined)
   assert.equal(captured.state.skills[0].id, 'burner-coal-loop')
   assert.equal(Object.prototype.hasOwnProperty.call(captured.state, 'dialogue'), false)
-  assert.deepEqual(Object.keys(captured.questions), [
-    'route',
-    'development',
+  assert.deepEqual(Object.keys(captured.questions), ['route', 'development'])
+  assert.equal(shape.state, captured.state)
+  assert.deepEqual(Object.keys(shape.questions), [
     'reasoning_budget',
     'planning_horizon',
     ...observationRelevanceFamilies().map(family => `need_${family}`),
     ...Object.keys(typedStateDistillationQuestions()),
   ])
-  assert.equal(Object.keys(captured.questions).length, 19)
   assert.deepEqual(Object.keys(captured.questions.route.criteria), [
     'continue_runtime',
     'observe',
     'wake_planner',
     'ask_user',
   ])
+})
+
+test('a boundary where healthy runtime continues buys only the gate questions', async () => {
+  const calls = []
+  const { agent, events } = agentForRoute('wait_runtime', {
+    followHealthy: true,
+    decisionProvider: async (state, questions) => {
+      calls.push(Object.keys(questions))
+      return decisionResponse('wait_runtime')
+    },
+  })
+  const routed = await agent.routePostStepDecision({
+    providerStatus: { task_state: 'idle', queue_empty: true, queue_length: 0 },
+  })
+
+  assert.equal(routed.route, 'wait_runtime')
+  assert.deepEqual(calls, [['route', 'development']])
+  assert.equal(routed.steering.reasoning_budget, undefined)
+  const posted = events.find(entry => entry.event === 'post_step.routed')
+  assert.equal(posted.data.decision.planner_shape_called, false)
+})
+
+test('a failed planner-shape call still wakes the planner, only without Jev shaping', async () => {
+  const { agent } = agentForRoute('replan', {
+    decisionProvider: async (_state, questions) => {
+      if (questions.route) return decisionResponse('replan')
+      throw new Error('Decision provider timed out after 5000 ms')
+    },
+  })
+  const routed = await agent.routePostStepDecision({
+    providerStatus: { task_state: 'idle', queue_empty: true, queue_length: 0 },
+  })
+
+  assert.equal(routed.route, 'replan')
+  assert.equal(routed.decision_called, true)
+  assert.equal(routed.steering.reasoning_budget, undefined)
+  assert.equal(routed.steering.planning_horizon, undefined)
+  assert.equal(agent.jevHealth.by_contract.post_step_planner_shape.fallbacks, 1)
+  assert.deepEqual(agent.jevHealth.by_kind, { timeout: 1 })
 })
 
 test('M9 post-step observe route wakes the planner with the bounded observation path', async () => {

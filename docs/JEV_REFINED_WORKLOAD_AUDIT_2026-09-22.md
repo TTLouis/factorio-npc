@@ -350,6 +350,26 @@ green, because fake decision providers bypass the real adapter. M11F closes that
   A `degraded` run is evidence about Jev availability, not about Jev judgments,
   and must not be scored in the Phase 9 comparison.
 
+### M11G — post-step gate / planner-shape split
+
+Status: **implemented 2026-09-24** (the §4 recommendation above).
+
+The post-step boundary no longer asks 19 questions every time:
+
+- **gate call** (`post_step_planner_gate`): `route` + `development` only. These
+  decide whether the Main LLM wakes (`development=maintain` with authoritative
+  healthy runtime is the only runtime-continuation path).
+- **planner-shape call** (`post_step_planner_shape`): reasoning budget, planning
+  horizon, the 11 observation-relevance Nouls, and the trace-only typed-state
+  questions. Asked over the same bounded state, and **only when the planner will
+  wake**.
+
+A failed planner-shape call is an ordinary advisory fallback: the planner still
+wakes, without Jev shaping (the same outcome as before when steering was
+missing). A boundary where healthy runtime continues now buys 2 questions
+instead of 19; a wake buys 2 + 17 in two sequential calls, which is small next
+to the Main-LLM call it precedes.
+
 ### Later — Phase 9 E2E measurement
 
 Only after M11A-E are stable compare Main-LLM-only and TypeSafe-coprocessor behavior.

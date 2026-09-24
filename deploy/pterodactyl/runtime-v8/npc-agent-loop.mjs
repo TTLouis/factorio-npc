@@ -3695,6 +3695,81 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return { verified: true, state: closed.state, contract: checkpoint.contract }
   }
 
+  // Planner-shape judgments (reasoning budget, horizon, observation relevance,
+  // and trace-only typed state) only matter when the Main LLM is about to wake,
+  // so they are not bought on boundaries where deterministic runtime continues.
+  // Returns undefined on failure: the planner then wakes without Jev shaping.
+  async requestPostStepPlannerShape(state, { current, generation, signal }) {
+    const questions = {
+      ...interactionPlannerShapeQuestions(),
+      ...typedStateDistillationQuestions(),
+    }
+    const decisionId = `decision_${Date.now().toString(36)}_${(++this.decisionRequestSequence).toString(36)}`
+    const startedAt = Date.now()
+    await this.decisionTraceEvent('decision.request', {
+      decision_id: decisionId,
+      contract: 'post_step_planner_shape',
+      mode: 'active_advisory',
+      boundary: state.boundary,
+      question_ids: Object.keys(questions),
+    })
+    try {
+      const response = await this.interactionDecisionProvider(state, questions, {
+        epoch: current.epoch,
+        actorId: current.actor_id,
+        signal,
+      })
+      if (generation !== this.generation || !this.active || signal.aborted) {
+        throw new AgentLoopError('Model turn was cancelled or superseded')
+      }
+      // Same parsing as the former single post-step call; `development` is
+      // not asked here and is owned by the gate call.
+      const { reasoning_budget, reasoning_confidence, planning_horizon, observation_budget } = parseBoundarySteeringTelemetry(response)
+      const observationRelevance = parseObservationRelevance(response)
+      const typedState = parseTypedStateDistillation(response, { provenance: typedStateProvenance(state) })
+      const shape = {
+        reasoning_budget,
+        reasoning_confidence,
+        planning_horizon,
+        observation_budget,
+        observation_relevance: observationRelevance,
+        typed_state: typedState,
+        typed_state_mode: 'experimental_trace_only',
+      }
+      await this.decisionTraceEvent('decision.response', {
+        decision_id: decisionId,
+        contract: 'post_step_planner_shape',
+        mode: 'active_advisory',
+        boundary: state.boundary,
+        provider: typeof response?.provider === 'string' ? response.provider : undefined,
+        model: typeof response?.model === 'string' ? response.model : undefined,
+        reasoning_budget: shape.reasoning_budget,
+        planning_horizon: shape.planning_horizon,
+        observation_budget: shape.observation_budget,
+        typed_state_experimental: typedState.available === true,
+        typed_state_context_injected: false,
+        latency_ms: Date.now() - startedAt,
+        input_units: Number.isFinite(response?.usage?.input_tokens) ? Math.max(0, Math.trunc(response.usage.input_tokens)) : 0,
+        output_units: Number.isFinite(response?.usage?.output_tokens) ? Math.max(0, Math.trunc(response.usage.output_tokens)) : 0,
+        cost_usd: Number.isFinite(response?.usage?.cost) && response.usage.cost >= 0 ? response.usage.cost : 0,
+      })
+      return shape
+    }
+    catch (error) {
+      if (generation !== this.generation || !this.active || signal.aborted) throw error
+      await this.decisionTraceEvent('decision.fallback', {
+        decision_id: decisionId,
+        contract: 'post_step_planner_shape',
+        mode: 'active_advisory',
+        boundary: state.boundary,
+        fallback_target: 'main_planner_defaults',
+        reason: cleanMemoryText(error instanceof Error ? error.message : String(error), 300),
+        latency_ms: Date.now() - startedAt,
+      })
+      return undefined
+    }
+  }
+
   async routePostStepDecision(receipt, { boundary = 'completion', failure = '' } = {}) {
     const generation = this.generation
     const current = await this.assertCurrent()
@@ -3792,14 +3867,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       ...(conditionWaitHealthy ? { condition_wait: sanitizeDurableModelValue(conditionValidation.wait) } : {}),
       ...(failure ? { failure: cleanMemoryText(failure, 1200) } : {}),
     }
-    const envelopeQuestions = decisionEnvelopeQuestions()
+    // Gate call: only the judgments that decide whether the Main LLM wakes.
+    // Planner-shape questions are asked separately, and only on a wake.
     const questions = {
       ...postStepDecisionQuestions(),
       ...developmentDecisionQuestions(),
-      reasoning_budget: envelopeQuestions.reasoning_budget,
-      planning_horizon: envelopeQuestions.planning_horizon,
-      ...observationRelevanceQuestions(),
-      ...typedStateDistillationQuestions(),
     }
     const decisionId = `decision_${Date.now().toString(36)}_${(++this.decisionRequestSequence).toString(36)}`
     this.postStepDecisionAbort?.abort()
@@ -3829,14 +3901,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       await this.assertCurrent()
       const decision = parsePostStepDecision(response)
-      const steeringTelemetry = parseBoundarySteeringTelemetry(response)
-      const observationRelevance = parseObservationRelevance(response)
-      const typedState = parseTypedStateDistillation(response, { provenance: typedStateProvenance(state) })
-      const steeringContext = {
-        ...steeringTelemetry,
-        observation_relevance: observationRelevance,
-        typed_state: typedState,
-        typed_state_mode: 'experimental_trace_only',
+      const development = parseDecisionFamily(response, 'development', 'maintain')
+      const steeringTelemetry = {
+        development: development.decision,
+        development_confidence: development.confidence,
       }
       const latency_ms = Date.now() - startedAt
       if (decision.route === 'wait_runtime' && conditionWaitHealthy) {
@@ -3891,9 +3959,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         route: decision.route,
         confidence: decision.confidence,
         confidence_policy: decisionConfidencePolicy(decision.requested_route),
-        steering_telemetry: steeringContext,
-        typed_state_experimental: typedState.available === true,
-        typed_state_context_injected: false,
+        steering_telemetry: steeringTelemetry,
         boundary_steering_gate: steeringGate,
         steering_budget_shadow_only: true,
         latency_ms,
@@ -3913,6 +3979,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         runtime_reason: runtimeReason,
         boundary_steering_gate: steeringGate,
       })
+
+      const plannerShape = appliedRoute === 'wait_runtime'
+        ? undefined
+        : await this.requestPostStepPlannerShape(state, { current, generation, signal: controller.signal })
+      const steeringContext = {
+        ...steeringTelemetry,
+        ...(plannerShape ?? {}),
+      }
       await this.traceEvent('post_step.routed', {
         mode: 'active',
         boundary: state.boundary,
@@ -3927,7 +4001,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           route: decision.route,
           confidence: decision.confidence,
           steering: steeringContext,
-          typed_state_experimental: typedState.available === true,
+          boundary_steering: steeringContext,
+          planner_shape_called: plannerShape !== undefined,
+          typed_state_experimental: plannerShape?.typed_state?.available === true,
           typed_state_context_injected: false,
           boundary_steering_gate: steeringGate,
           steering_budget_shadow_only: true,
