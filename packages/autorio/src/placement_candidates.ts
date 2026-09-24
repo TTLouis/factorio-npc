@@ -226,7 +226,10 @@ function snapped(value: number, offset: number) {
 }
 
 function directions_for(prototype: any) {
-  if (prototype?.supports_direction === false || prototype?.rotatable === false) return [0]
+  // `rotatable` exists on LuaEntity, not LuaEntityPrototype, and reading an
+  // unknown key on a Factorio object raises; the prototype's equivalent is the
+  // not-rotatable flag.
+  if (prototype?.supports_direction === false || prototype?.flags?.['not-rotatable'] === true) return [0]
   return CARDINAL_DIRECTIONS
 }
 
