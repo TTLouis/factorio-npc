@@ -383,12 +383,13 @@ test('an unmet deterministic checkpoint cannot be replaced by a semantic complet
 test('moving on to the next step with its operations closes a grounded prose-only step', async () => {
   // The 2026-09-24 cloud trial shape: the planner advanced currentStep with the
   // next step's operation but never sent the explicit semanticCompletion.
-  const steps = ['Mine 10 stone', 'Mine 10 coal']
+  const steps = ['Mine 10 stone', 'Mine 10 coal', 'Verify 10 stone and 10 coal are held']
   const world = harness({
     provider: async () => {
       const board = world.memory.currentPlan(KEY)?.task_board
       if (!board) return planReply({ plan: steps, currentStep: 0, operations: [gather('stone', 10)] })
-      return planReply({ plan: steps, currentStep: 1, operations: [gather('coal', 10)] })
+      // The later, still-proposed step is reworded, as in the trial.
+      return planReply({ plan: [...steps.slice(0, 2), 'Verify the coal is held'], currentStep: 1, operations: [gather('coal', 10)] })
     },
   })
   await world.say('mine 10 stone, then 10 coal', 'new_goal')

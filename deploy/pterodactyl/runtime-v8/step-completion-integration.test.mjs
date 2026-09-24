@@ -261,6 +261,24 @@ test('semantic completion accepts the Plan Tracker id the prompt tells the plann
   assert.equal(getActivePlan(memory.planningState(key)).active_step_index, 1)
 })
 
+test('a fresh read still grounds the next step after a semantic claim closes one', async () => {
+  // 2026-09-24 cloud trial: one inventory read proved both the craft and the
+  // verify step, but closing the first step discarded that read.
+  const { agent, memory, key } = agentWithState({ state: activeState({ withContract: false }), freshObservation: true })
+  await agent.applySemanticCompletionClaim({
+    chatMessage: 'Stone gathered.',
+    semanticCompletion: { stepId: 'step_1', rationale: 'The gather receipt grounds step 1.' },
+  }, memory.currentPlan(key))
+  agent.resetRepairAfterClosedStep()
+
+  const result = await agent.applySemanticCompletionClaim({
+    chatMessage: 'Furnaces crafted.',
+    semanticCompletion: { stepId: 'step_2', rationale: 'The fresh inventory read shows the furnaces.' },
+  }, memory.currentPlan(key))
+  assert.equal(result.applied, true)
+  assert.equal(result.state.status, 'completed')
+})
+
 test('semantic completion requires authoritative runtime grounding', async () => {
   const state = activeState({ withContract: false, withVerification: false })
   const { agent, memory, key } = agentWithState({ state })
