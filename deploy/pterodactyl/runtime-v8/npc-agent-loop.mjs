@@ -81,6 +81,7 @@ const STATE_SCHEMA = 1
 const PLAN_HISTORY_LIMIT = 24
 const MAX_OBSERVATION_TOOL_CALLS_PER_BATCH = 4
 const JEV_OBSERVATION_LOG_LIMIT = 12
+const PLANNING_LOD_GUIDANCE = '[PLANNING_LOD] Your reply, including all reasoning, has a fixed output budget. Work at outline level. Before any reads, only decide which reads you need. In a plan, write the goal definition (on the first plan), one short line per step (plus Roadmap Shelf nodes for a long_horizon goal), and concrete operations only for the active step. Do not work out later steps\' operations, counts, or positions now; each step is refined when it becomes active.'
 // Evidence kinds that let a semantic step completion claim through.
 const SEMANTIC_GROUNDING_KINDS = new Set([
   'deterministic_verification',
@@ -5520,6 +5521,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const envelope = `[DECISION_ENVELOPE] planning_horizon=${this.planningHorizonOverride}; observation_budget_remaining=${Number.isSafeInteger(this.observationBudgetRemaining) ? this.observationBudgetRemaining : 'runtime-default'}; observation_families=${Array.isArray(this.observationRelevanceOverride) ? this.observationRelevanceOverride.join(',') : 'runtime-default'}. ${horizonGuidance ?? ''}`
       providerMessages = [...providerMessages, { role: 'user', content: envelope }]
     }
+    // Heavy planning turns spend the whole output cap, reasoning included,
+    // before emitting anything when the model works out every later step up
+    // front. Plan at outline level; each step is refined when it is active.
+    if (providerMessagesOverride === undefined
+      && (triggerSource === 'new_goal' || ['deep', 'strategic'].includes(this.reasoningBudgetOverride))) {
+      providerMessages = [...providerMessages, { role: 'user', content: PLANNING_LOD_GUIDANCE }]
+    }
     const startedAt = Date.now()
     if (recoveryAttempt > 0 && this.traceRequest) {
       this.traceRequest.recovery = {
@@ -7748,6 +7756,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         { role: 'system', content: this.systemPrompt },
         { role: 'user', content: capsule },
       ]
+      // The capsule carries none of the earlier reads, so the fresh generation
+      // gets a fresh observation phase with the new-goal bootstrap minimum;
+      // inheriting a closed phase left it unable to re-observe anything.
+      this.resetObservationDecisionState()
+      if (Number.isSafeInteger(this.observationBudgetOverride)) {
+        this.observationBudgetRemaining = Math.max(3, this.observationBudgetOverride)
+      }
       await this.traceEvent('planner.wake', {
         source: 'decision_provider',
         contract: 'provider_budget_handoff',
