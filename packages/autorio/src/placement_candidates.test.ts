@@ -274,4 +274,28 @@ describe('placement candidates', () => {
     expect(result.ok).toBe(true)
     expect(result.candidates.length).toBeGreaterThan(0)
   })
+
+  it('reads a drill output vector in the array form Factorio 2.0 returns', () => {
+    // 2.0.77 returns vector_to_place_result as {-0.5, -1.3}, not {x, y}; the
+    // candidate lost its item_output_position until both forms were accepted.
+    ;(globalThis as any).prototypes.entity = {
+      'modded-drill': {
+        name: 'modded-drill',
+        type: 'mining-drill',
+        tile_width: 2,
+        tile_height: 2,
+        supports_direction: true,
+        flags: {},
+        vector_to_place_result: [-0.5, -1.3],
+      },
+    }
+    const actor = {
+      position: { x: 0, y: 0 },
+      force: { index: 1 },
+      surface: { can_place_entity: ({ position, direction }: any) => position.x === 0 && position.y === 0 && direction === 0, find_entities_filtered: () => [] },
+    } as any
+
+    const result = placement_candidates_for_actor(actor, { entity_name: 'modded-drill', radius: 1, limit: 1 }) as any
+    expect(result.candidates[0].item_output_position).toEqual({ x: -0.5, y: -1.3 })
+  })
 })
