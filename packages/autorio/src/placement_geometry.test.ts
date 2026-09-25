@@ -58,11 +58,11 @@ describe('shared placement geometry', () => {
         left_top: { x: -1, y: 0 },
         right_bottom: { x: 1, y: 1 },
       },
-      world_box: {
-        left_top: { x: -0.9, y: 0.1 },
-        right_bottom: { x: 0.9, y: 0.9 },
-      },
     })
+    expect(east.world_box.left_top.x).toBeCloseTo(-0.9)
+    expect(east.world_box.left_top.y).toBeCloseTo(0.1)
+    expect(east.world_box.right_bottom.x).toBeCloseTo(0.9)
+    expect(east.world_box.right_bottom.y).toBeCloseTo(0.9)
   })
 
   it('answers footprint coverage from the rotated tile footprint', () => {
