@@ -1,7 +1,9 @@
-import type { LuaEntity } from 'factorio:runtime'
+import type { LuaEntity, LuaEntityPrototype } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import { recipe_bootstrap_for_actor } from './bootstrap_planning'
 import { resolve_exact_entity } from './entity_reference'
+import * as estimate from './production_estimate_live'
+import * as rates from './production_rates'
 import { recipe_categories } from './recipe_categories'
 
 const MAX_RECIPE_MATCHES = 8
@@ -19,7 +21,7 @@ interface RecipeCandidate {
 
 interface MachineCandidate {
   name: string
-  prototype: any
+  prototype: LuaEntityPrototype
 }
 
 function sort_named<T extends { name: string }>(values: T[]) {
@@ -82,7 +84,7 @@ function categories_for(recipe: any): string[] {
   return categories
 }
 
-function machine_summaries(categories: string[]) {
+function machine_summaries(categories: string[], recipe: any, fuel_name: string | undefined) {
   const seen: Record<string, boolean> = {}
   const candidates: MachineCandidate[] = []
 
@@ -104,7 +106,19 @@ function machine_summaries(categories: string[]) {
     machines: candidates.slice(0, MAX_MACHINE_MATCHES).map(({ name, prototype }) => ({
       name,
       type: prototype.type,
+      ...rates.machine_craft_rate(prototype, recipe, fuel_name),
     })),
+  }
+}
+
+// Seconds per craft by hand for this actor, only when its hands can make the recipe.
+function hand_crafting_summary(actor: ControlledActor, recipe: any, hand_craftable: boolean) {
+  if (!hand_craftable || recipe.prototype?.hidden_from_player_crafting === true) return undefined
+  const crafting_speed = rates.hand_crafting_speed(actor)
+  if (crafting_speed === undefined || !(crafting_speed > 0) || !(recipe.energy > 0)) return undefined
+  return {
+    crafting_speed: rates.round_rate(crafting_speed),
+    seconds_per_craft: rates.round_rate(recipe.energy / crafting_speed),
   }
 }
 
@@ -266,13 +280,107 @@ function add_inserter_route(relations: Array<Record<string, unknown>>, inserter:
   })
 }
 
-export function recipe_details_for_actor(actor: ControlledActor, item_or_recipe: string, requested_count: number = 1) {
+interface ResourceCandidate {
+  name: string
+  prototype: LuaEntityPrototype
+}
+
+function resource_yields(resource: LuaEntityPrototype, item_name: string) {
+  for (const product of (resource.mineable_properties as any).products ?? []) {
+    if (product.name === item_name) return true
+  }
+  return false
+}
+
+// Resource prototypes named `resource_or_item`, or whose mining yields it.
+function resources_yielding(resource_or_item: string) {
+  const result: ResourceCandidate[] = []
+  const matches = prototypes.get_entity_filtered([{ filter: 'type', type: 'resource' }])
+  for (const [name, prototype] of pairs(matches)) {
+    if (name === resource_or_item || resource_yields(prototype, resource_or_item)) result.push({ name, prototype })
+  }
+  sort_named(result)
+  return result
+}
+
+function drill_summaries(actor: ControlledActor, resource: LuaEntityPrototype, category: string, fuel_name: string | undefined) {
+  const candidates: MachineCandidate[] = []
+  const matches = prototypes.get_entity_filtered([{ filter: 'type', type: 'mining-drill' }])
+  for (const [name, prototype] of pairs(matches)) {
+    if (prototype.resource_categories?.[category] === true) candidates.push({ name, prototype })
+  }
+  sort_named(candidates)
+  return {
+    matched_count: candidates.length,
+    truncated: candidates.length > MAX_MACHINE_MATCHES,
+    drills: candidates.slice(0, MAX_MACHINE_MATCHES).map(({ name, prototype }) => ({
+      name,
+      ...rates.drill_mining_rate(actor.force, prototype, resource, fuel_name),
+    })),
+  }
+}
+
+function hand_mining_summary(actor: ControlledActor, resource: LuaEntityPrototype, category: string, required_fluid: unknown) {
+  const categories = actor.character?.prototype.resource_categories
+  if (categories === undefined || categories[category] !== true || required_fluid !== undefined) return undefined
+  const mining_speed = rates.hand_mining_speed(actor)
+  const mining_time = rates.resource_mining_time(resource)
+  if (mining_speed === undefined || !(mining_speed > 0) || !(mining_time > 0)) return undefined
+  const cycles_per_second = mining_speed / mining_time
+  return {
+    mining_speed: rates.round_rate(mining_speed),
+    seconds_per_cycle: rates.round_rate(mining_time / mining_speed),
+    products_per_minute: rates.product_rates_per_minute((resource.mineable_properties as any).products, cycles_per_second),
+  }
+}
+
+// Mining facts for a resource (or the resources that yield an item): mining
+// time, and per compatible drill its speed and output per minute. Facts only;
+// how many drills to place is the planner's decision.
+export function mining_details_for_actor(actor: ControlledActor, resource_or_item: string, fuel_name?: string) {
+  const resources = resources_yielding(resource_or_item)
+  if (resources.length === 0) {
+    return { found: false, query: resource_or_item, error: 'no resource has this name or yields this item/fluid' }
+  }
+  return {
+    found: true,
+    query: resource_or_item,
+    rate_basis: rates.RATE_BASIS,
+    truncated: resources.length > MAX_RECIPE_MATCHES,
+    resources: resources.slice(0, MAX_RECIPE_MATCHES).map(({ name, prototype }) => {
+      const mineable = prototype.mineable_properties as any
+      const category = prototype.resource_category ?? 'basic-solid'
+      const infinite = prototype.infinite_resource === true
+      const drill_result = drill_summaries(actor, prototype, category, fuel_name)
+      return {
+        name,
+        category,
+        mining_time: mineable.mining_time,
+        products: product_summaries(mineable),
+        required_fluid: mineable.required_fluid,
+        fluid_amount: mineable.fluid_amount,
+        infinite,
+        // An infinite resource's yield scales with its current amount; the rates
+        // below are for the prototype's normal amount (100% yield).
+        normal_resource_amount: infinite ? prototype.normal_resource_amount : undefined,
+        drill_count: drill_result.matched_count,
+        drills: drill_result.drills,
+        drills_truncated: drill_result.truncated,
+        hand_mining: hand_mining_summary(actor, prototype, category, mineable.required_fluid),
+      }
+    }),
+  }
+}
+
+export function recipe_details_for_actor(actor: ControlledActor, item_or_recipe: string, requested_count: number = 1, fuel_name?: string) {
   const { candidates, truncated } = recipe_candidates(actor, item_or_recipe)
   if (candidates.length === 0) {
+    const mined_from = resources_yielding(item_or_recipe)
     return {
       found: false,
       query: item_or_recipe,
       error: 'no recipe produces this item/fluid and no recipe has this name',
+      mined_from: mined_from.length > 0 ? mined_from.map(resource => resource.name) : undefined,
     }
   }
 
@@ -280,9 +388,11 @@ export function recipe_details_for_actor(actor: ControlledActor, item_or_recipe:
     found: true,
     query: item_or_recipe,
     truncated,
+    rate_basis: rates.RATE_BASIS,
     recipes: candidates.map(({ name, recipe }) => {
       const categories = categories_for(recipe)
-      const machine_result = machine_summaries(categories)
+      const machine_result = machine_summaries(categories, recipe, fuel_name)
+      const hand_craftable = character_can_craft(actor, categories)
       const bootstrap = recipe_bootstrap_for_actor(actor, recipe, requested_count)
       return {
         name,
@@ -298,7 +408,8 @@ export function recipe_details_for_actor(actor: ControlledActor, item_or_recipe:
         hidden: recipe.hidden,
         energy: recipe.energy,
         categories,
-        hand_craftable_category: character_can_craft(actor, categories),
+        hand_craftable_category: hand_craftable,
+        hand_crafting: hand_crafting_summary(actor, recipe, hand_craftable),
         hidden_from_player_crafting: recipe.prototype?.hidden_from_player_crafting,
         ingredients: ingredient_summaries(recipe),
         products: product_summaries(recipe),
@@ -457,7 +568,7 @@ export function logistics_topology_for_actor(actor: ControlledActor, unit_number
 
 export function create_knowledge_remote_interface(get_actor: () => ControlledActor | undefined) {
   remote.add_interface('autorio_knowledge', {
-    recipe_details: (item_or_recipe: string, requested_count: number = 1) => {
+    recipe_details: (item_or_recipe: string, requested_count: number = 1, fuel_name?: string) => {
       const actor = get_actor()
       if (!actor || !actor.is_valid) {
         return {
@@ -466,7 +577,19 @@ export function create_knowledge_remote_interface(get_actor: () => ControlledAct
           error: 'no controlled actor',
         }
       }
-      return recipe_details_for_actor(actor, item_or_recipe, requested_count)
+      return recipe_details_for_actor(actor, item_or_recipe, requested_count, fuel_name)
+    },
+    mining_details: (resource_or_item: string, fuel_name?: string) => {
+      const actor = get_actor()
+      if (!actor || !actor.is_valid) {
+        return { found: false, query: resource_or_item, error: 'no controlled actor' }
+      }
+      return mining_details_for_actor(actor, resource_or_item, fuel_name)
+    },
+    production_estimate: (request: estimate.LiveEstimateRequest) => {
+      const actor = get_actor()
+      if (!actor || !actor.is_valid) return { ok: false, error: 'no controlled actor' }
+      return estimate.estimate_production_for_actor(actor, request)
     },
     entity_geometry: (unit_number: number) => {
       const actor = get_actor()
