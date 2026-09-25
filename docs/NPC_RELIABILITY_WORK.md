@@ -106,7 +106,7 @@ PASS: zero-player NPC bounded navigation routed obstacles, repathed moving targe
 
 ## Current slice: native crafting ownership and cancellation
 
-Status: implemented for user testing; not yet engine-verified.
+Status: implemented; engine-verified by the `crafting` lane (`tests/factorio/runner/crafting.py`: owned native crafting completion and cancellation).
 
 The old hand-crafting path had ambiguous ownership and completion semantics: `begin_crafting` was called directly from task activation, cancellation did not cancel task-owned native crafting, pre-existing native queue work could be mixed with an Autorio request, and queue disappearance could be treated as completion without proving requested output.
 

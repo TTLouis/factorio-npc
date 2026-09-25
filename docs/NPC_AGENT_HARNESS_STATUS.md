@@ -96,7 +96,7 @@ The left column of the NPC console was rebuilt from the approved "Chosen" mock-u
 - **Merged repeats:** consecutive identical feed lines show as one row with ×N, updated in place.
 - **LuaJIT limit:** `new_combat_controller` was over LuaJIT's 60-upvalue limit. Its tuning constants are now one table.
 
-Not yet checked in real Factorio: the layout as a whole, the icon sprites, `toggled` on frame action buttons and tab buttons, and heights at 1080p.
+The owner has since used this layout in the client (2026-09-25, see below) and considers the redesign finished.
 
 2026-09-25 (morning): the owner tried the new console in the game and found many things wrong with it. Other agents' fixes (up to `e905cc4`, prompt focus and live conversation reading) did not fix it. The console UI is **P0** for the next work session, ahead of production-rate goals. Don't treat this layout as accepted.
 

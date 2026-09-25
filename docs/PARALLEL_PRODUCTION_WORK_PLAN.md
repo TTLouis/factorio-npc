@@ -275,7 +275,7 @@ is `provider.mjs`/`npc-agent-loop.mjs`. All four can run at once.
 |---|---|---|
 | 5.1 | Router requests still get the ~0.8k `[STEERING]` planner message | Haiku |
 | 5.2 | `compactWorkingContext`: `baseMessages.length` drifts after a budget handoff (affects which exchanges compact, not validity) | Sonnet |
-| 5.3 | TSTL truthiness warning, `task_board_debug_render.ts:140` | Haiku |
+| 5.3 | ~~TSTL truthiness warning, `task_board_debug_render.ts:140`~~ **Done**: a real bug (an empty reasons string is truthy in Lua and printed a stray " · "); now a length check | — |
 | 5.4 | Mining that also needs a fluid (uranium) is left out of estimates with a warning | Sonnet |
 | 5.5 | Review the docs not read on 2026-09-25 (`NPC_RELIABILITY_WORK`, `NPC_PROVIDER_CONTINUATION_RECOVERY`, `NPC_PLANNING_REFACTOR_INTEGRATION`, `PTERODACTYL_NPC_STAGING`); archive to `docs/validation/` only what is finished | Haiku |
 

@@ -137,7 +137,7 @@ function add_debug_decision_rows(table: LuaGuiElement, debug: TaskBoardUiDebugSn
   const scope_live_entities = integer(debug.decision_scope_review_live_entities)
   const scope_preflight = integer(debug.decision_scope_review_preflight_count)
   add_compact_row(table, 'Jev scope review', scope_review.length > 0
-    ? `${scope_review.toUpperCase()} · ${scope_review_confidence}%${scope_review_reasons ? ` · ${scope_review_reasons}` : ''}${scope_review_prefix > 0 ? ` · prefix ${scope_review_prefix}` : ''}`
+    ? `${scope_review.toUpperCase()} · ${scope_review_confidence}%${scope_review_reasons.length > 0 ? ` · ${scope_review_reasons}` : ''}${scope_review_prefix > 0 ? ` · prefix ${scope_review_prefix}` : ''}`
     : '—')
   add_compact_row(table, 'Scope review packet', scope_packet_version > 0
     ? `v${scope_packet_version} · obs ${scope_observations} · live ${scope_live_entities} · preflight ${scope_preflight}`

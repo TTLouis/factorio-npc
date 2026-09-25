@@ -39,7 +39,7 @@ state need not survive.
 
 | Module | State |
 |---|---|
-| `runtime-v8/planning-state.mjs` | **New.** Goal / minimal Shelf / immutable Plan + `applyPlanningEvent` single transition authority + harness deadlock detection. 49 tests. Not yet wired in. |
+| `runtime-v8/planning-state.mjs` | **New.** Goal / minimal Shelf / immutable Plan + `applyPlanningEvent` single transition authority + harness deadlock detection. 49 tests. Not yet wired in when written; as of 2026-09-25 it is imported by `npc-agent-loop.mjs`, `canonical-task-board-memory.mjs` and `supervisor.mjs`. |
 | `runtime-v8/jev-decision-taxonomy.mjs` | **Rebuilt.** `granularity` / `completion` / `milestone_transition` stripped of authority; `scope_review` + boundary steering added. Carries a **deprecation shim** at the foot of the file. |
 | `runtime-v8/canonical-task-board-memory.mjs` | Untouched. Still the old shape. |
 | `runtime-v8/npc-agent-loop.mjs` | Untouched. Still consumes hierarchy telemetry. |
