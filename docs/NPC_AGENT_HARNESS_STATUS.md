@@ -114,6 +114,18 @@ Owner's P0 spec (2026-09-25):
   view for each. The player can also edit a skill.
 - **Later, a bigger slice:** the player picks which skill the LLM must use. It is
   not part of P0.
+- Buttons also felt laggy (owner): a rebuild between press and release destroys
+  the button, so the click is lost.
+
+Fix, `055538a` (unit evidence; not yet seen in the client). The root cause was a
+lookup bug, not the refresh rate: since `af1adf3` the tracker refresh couldn't find
+the plan list inside its new body flow, so it always failed. Every second and on
+every snapshot, the whole console window was destroyed and rebuilt. Now each card
+redraws only when its own content changes. Debug and Old tasks do the same, and the
+skills pop-out is a skills window like Old tasks, with a list, a detail pane and
+EDIT/EXPORT. A GUI stand-in test counts every add/clear/destroy: with all windows
+open, a refresh or a repeated snapshot with nothing new changes nothing. Progress:
+`docs/CONSOLE_UI_P0_PLAN.md`.
 
 The compatibility projection should not be deleted merely for cosmetic cleanup while other runtime/UI
 features still consume it. Future removal should be driven by eliminating those consumers, not by creating

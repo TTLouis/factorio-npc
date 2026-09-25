@@ -57,54 +57,71 @@ item's commit next to it.
 ## Checklist
 
 ### 0. Cut network use in the test build
-- [ ] 0.1. In `tests/factorio/Dockerfile`, give `pnpm install` a BuildKit cache
+- [x] 0.1. (`c8f96fb`; it also fetches the pinned pnpm once in a layer keyed on `package.json`) In `tests/factorio/Dockerfile`, give `pnpm install` a BuildKit cache
       mount for the pnpm store (for example
       `RUN --mount=type=cache,id=npc-test-pnpm-store,target=/pnpm/store pnpm install --frozen-lockfile --prefer-offline --store-dir /pnpm/store`),
       so that a source change stops re-downloading every package. Behaviour and
       lanes stay the same. `deploy/docker/Dockerfile` already caches its pnpm store.
-- [ ] 0.2. Check it: the second build after a source-only change fetches no
-      packages (pnpm reports them reused from the store).
+- [x] 0.2. Check it: the second build after a source-only change fetches no
+      packages (pnpm reports them reused from the store). Measured: the first build
+      downloaded 718 packages; after a source change, `reused 718, downloaded 0`.
 
 ### A. Measure first
-- [ ] A1. Add a GUI-mock counter test: with no data change, a periodic refresh must
+- [x] A1. (`055538a`) Add a GUI-mock counter test: with no data change, a periodic refresh must
       make zero `clear`/`destroy`/`add` calls on the console, the skills pop-out or
       the debug pop-out. It should fail today (at least on the skills pop-out).
-- [ ] A2. Add a test that a refresh with a changed board never destroys or replaces
+- [x] A2. (`055538a`) Add a test that a refresh with a changed board never destroys or replaces
       the prompt textfield, and never destroys any `screen` root (a destroyed root
       interrupts a drag and resets its location).
-- [ ] A3. Note in this file whether the preview camera (`refresh_world_preview`)
-      is updated every tick; it is a likely source of drag lag.
+- [x] A3. Note in this file whether the preview camera (`refresh_world_preview`)
+      is updated every tick; it is a likely source of drag lag. Result: it updates
+      the camera in place and writes a property only when its value changed, so it
+      is not the cause.
+
+**Root cause found in A (`055538a`).** `refresh_tracker` looked up the plan list and
+the shelf scroll-pane as direct children of their columns. Since `af1adf3` both sit
+inside an unnamed body flow, and Factorio's `element[name]` only finds direct
+children. The refresh always failed, so the whole console window was destroyed and
+rebuilt every second and on every snapshot. That interrupted drags, dropped prompt
+keystrokes and lost clicks: a rebuild between press and release destroys the button
+(owner, 2026-09-25: clicks felt laggy too).
 
 ### B. Sections that update independently
-- [ ] B1. Split the left dynamic part into sections, each with its own signature
+- [x] B1. (`055538a`: banner, NOW goal, NOW card and PLAN goal each have a slot;
+      tracker and activity were already in place; the conversation updates rows in place) Split the left dynamic part into sections, each with its own signature
       and container: banner, Goal card, Now card, Latest card, conversation, plan
       tracker, activity. A change rebuilds only its own section. Where possible,
       update captions in place instead of rebuilding.
-- [ ] B2. Keep the prompt row and the window/title bar outside every rebuilt
+- [x] B2. (`055538a`) Keep the prompt row and the window/title bar outside every rebuilt
       container.
-- [ ] B3. Skills and debug pop-outs: gated by a signature, so a tick with no change
+- [x] B3. (`055538a`; Old tasks too: its meta rows and conversation were cleared on
+      every refresh. Debug's sync-age label updates in place.) Skills and debug pop-outs: gated by a signature, so a tick with no change
       does nothing.
-- [ ] B4. Make A1 and A2 pass. Keep the existing layout and regression tests green.
+- [x] B4. (`055538a`; older source-text tests that pinned the whole-column rebuild
+      now check the per-card slots.) Make A1 and A2 pass. Keep the existing layout and regression tests green.
 
 ### C. Skills browser (like Old tasks)
-- [ ] C1. Pop-out layout: a skills list-box on the left (name, kind, stage/status),
+- [x] C1. (`055538a`, `skills_window.ts`) Pop-out layout: a skills list-box on the left (name, kind, stage/status),
       updated in place, and a detail pane on the right (summary, preconditions,
       flows, topology, constraints, verification, evidence refs), with a skeleton and
       a refresh. Keep Learn Area and export.
-- [ ] C2. Store the selected skill per player, and keep the selection and scroll
+- [x] C2. (`055538a`) Store the selected skill per player, and keep the selection and scroll
       across refreshes.
-- [ ] C3. Edit: an Edit button turns the editable fields (name, summary, status
+- [x] C3. (`055538a`; editing a verified skill makes it a candidate again, and the
+      form keeps the typed text when a save is refused) Edit: an Edit button turns the editable fields (name, summary, status
       incl. `deprecated`) into text fields. Save goes through
       `canonicalize_skill_definition` and `put_untrusted_skill_definition` as a new
       revision, with the source marked as a player edit. Invalid input shows an
       error and saves nothing. Curated skills are edited as a copy or a new
       revision, never by mutating the curated constant.
-- [ ] C4. Tests in `skills.test.ts` / `task_board_ui.test.ts`: list, select,
+- [x] C4. (`055538a`) Tests in `skills.test.ts` / `task_board_ui.test.ts`: list, select,
       detail, edit round trip, rejection, and that the LLM's `getSkillDetails` sees
       the edited revision.
 
 ### D. Validation and hand-off
-- [ ] D1. Unit tests, typecheck, `check:lua` and eslint on the changed files in the
+- [x] D1. (`055538a`: 108 files / 778 tests, typecheck, TSTL build, `check:lua`,
+      eslint on the changed files; `NPC_TEST_LANES=core` passes in Factorio 2.0.77.
+      The UI itself needs a client, so the lanes only prove the mod still loads and runs.) Unit tests, typecheck, `check:lua` and eslint on the changed files in the
       Docker build stage; then `NPC_TEST_LANES=core` in `tests/factorio`.
 - [ ] D2. Deploy to the local stack from local sources only (mod overlay if the tree allows, otherwise
       `scripts/build-docker-local.ps1`, reusing the cached Factorio layer), then copy the client
