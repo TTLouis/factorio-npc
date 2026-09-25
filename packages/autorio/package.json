@@ -13,6 +13,7 @@
   ],
   "scripts": {
     "build": "tstl && node -e \"const fs=require('node:fs'); fs.copyFileSync('info.json','dist/info.json'); fs.copyFileSync('data.lua','dist/data.lua'); fs.copyFileSync('LICENSE','dist/LICENSE'); fs.cpSync('graphics','dist/graphics',{recursive:true})\"",
+    "check:lua": "node scripts/check-generated-lua.mjs",
     "dev": "mkdir -p dist && cp -r info.json dist && cp data.lua dist/data.lua && cp LICENSE dist/LICENSE && cp -r graphics dist/graphics && tstl -p tsconfig.dev.json --watch",
     "typecheck": "tstl --noEmit",
     "test": "vitest run"
