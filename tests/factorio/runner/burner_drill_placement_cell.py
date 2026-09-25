@@ -17,12 +17,22 @@ array-form prototype vectors. This cell runs the whole chain against real
 Factorio. The fixture (ore patch, items) is scripted; the behavior under test
 goes through the NPC's remote interfaces.
 
+It also checks the rate facts the planner uses to size production
+(docs/PARALLEL_PRODUCTION_WORK_PLAN.md W1): the harness figures must equal the
+engine's own prototype values, and the running pair must produce at the rate
+the harness computed.
+
 Gates:
+    RATES       recipe_details / mining_details / production_estimate report
+                the stone furnace and burner drill rates and fuel burn that the
+                engine prototypes give (and the known 2.0 base values)
     CANDIDATES  the drill query returns ore-covering candidates with an output
                 tile; the furnace query returns only placements covering it
     BUILT       place_candidate places both entities
     CONNECTED   the drill's drop_target is exactly that furnace
     OPERATING   once fuelled through supply_entity, plates appear in the furnace
+    MEASURED    over a fixed window, ore mined and plates smelted (force
+                production statistics) match the computed rate within one unit
 """
 
 import argparse
@@ -40,11 +50,32 @@ FUEL_COUNT = 5
 TARGET_PLATES = 2
 ROUND_TICKS = 300
 ROUNDS = 20
+# Ten burner-drill cycles (4 s each) at game speed 4.
+MEASURE_TICKS = 2400
+RATE_EPSILON = 0.001
+
+# Factorio 2.0 base data: stone furnace speed 1 at 90 kW, iron-plate 3.2 s,
+# burner drill speed 0.25 at 150 kW, iron ore 1 s, coal 4 MJ.
+KNOWN_FURNACE_PLATES_PER_MINUTE = 18.75
+KNOWN_DRILL_ORE_PER_MINUTE = 15
+KNOWN_FURNACE_COAL_PER_MINUTE = 1.35
+KNOWN_DRILL_COAL_PER_MINUTE = 2.25
 
 
 def require(condition: bool, message: object) -> None:
     if not condition:
         raise AssertionError(json.dumps(message, sort_keys=True) if not isinstance(message, str) else message)
+
+
+def close(a: object, b: float) -> bool:
+    return isinstance(a, (int, float)) and abs(a - b) <= RATE_EPSILON
+
+
+def named(entries: object, name: str) -> dict:
+    for entry in entries or []:
+        if isinstance(entry, dict) and entry.get('name') == name:
+            return entry
+    return {}
 
 
 def run(client: Rcon, results: Path) -> None:
@@ -118,6 +149,77 @@ def run(client: Rcon, results: Path) -> None:
     evidence['fixture'] = fixture
     ore_center = f'{{x={ox + 5},y={oy}}}'
 
+    # ---- RATES: harness rate facts equal the engine prototypes -----------
+    engine = json_command(
+        "/silent-command local f=prototypes.entity['stone-furnace']; local d=prototypes.entity['burner-mining-drill']; "
+        "local r=prototypes.recipe['iron-plate']; local o=prototypes.entity['iron-ore']; local c=prototypes.item['coal']; "
+        'local a=nil; for _,e in pairs(game.surfaces[1].find_entities_filtered{name=\'character\'}) do '
+        f'if e.unit_number=={actor_id} then a=e end end; '
+        # 2.0 removed LuaEntityPrototype.crafting_speed; record whether reading it raises.
+        'local legacy_ok=pcall(function() return f.crafting_speed end); '
+        'rcon.print(helpers.table_to_json({furnace_speed=f.get_crafting_speed(),plate_energy=r.energy,'
+        'furnace_watts=f.get_max_energy_usage()*60,furnace_effectivity=f.burner_prototype.effectivity,'
+        'drill_speed=d.mining_speed,drill_watts=d.get_max_energy_usage()*60,drill_effectivity=d.burner_prototype.effectivity,'
+        'ore_time=o.mineable_properties.mining_time,coal_value=c.fuel_value,'
+        'productivity=a.force.mining_drill_productivity_bonus,legacy_crafting_speed_key_readable=legacy_ok}))',
+        'engine prototype rates',
+    )
+    evidence['engine_prototypes'] = engine
+    furnace_rate = engine['furnace_speed'] / engine['plate_energy']
+    drill_rate = engine['drill_speed'] / engine['ore_time'] * (1 + engine['productivity'])
+    furnace_coal = engine['furnace_watts'] * 60 / (engine['coal_value'] * engine['furnace_effectivity'])
+    drill_coal = engine['drill_watts'] * 60 / (engine['coal_value'] * engine['drill_effectivity'])
+
+    plate = json_command(lua_json(remote_call('autorio_knowledge', 'recipe_details', repr('iron-plate'), '1', repr('coal'))), 'iron plate rates')
+    plate_recipe = named(plate.get('recipes'), 'iron-plate')
+    stone = named(plate_recipe.get('crafting_machines'), 'stone-furnace')
+    evidence['recipe_rates'] = stone
+    require(close(stone.get('crafting_speed'), engine['furnace_speed'])
+            and close(stone.get('crafts_per_second'), furnace_rate)
+            and close(stone.get('seconds_per_craft'), 1 / furnace_rate)
+            and close(named(stone.get('products_per_minute'), 'iron-plate').get('per_minute'), furnace_rate * 60)
+            and close(stone.get('energy_watts'), engine['furnace_watts'])
+            and close((stone.get('fuel') or {}).get('per_minute'), furnace_coal), {
+        'message': 'stone furnace rate facts differ from the engine prototypes', 'reported': stone, 'engine': engine,
+    })
+    require(close(furnace_rate * 60, KNOWN_FURNACE_PLATES_PER_MINUTE) and close(furnace_coal, KNOWN_FURNACE_COAL_PER_MINUTE), {
+        'message': 'engine stone furnace values differ from the 2.0 base data', 'engine': engine,
+    })
+
+    mining = json_command(lua_json(remote_call('autorio_knowledge', 'mining_details', repr('iron-ore'), repr('coal'))), 'iron ore mining rates')
+    ore = named(mining.get('resources'), 'iron-ore')
+    burner = named(ore.get('drills'), 'burner-mining-drill')
+    evidence['mining_rates'] = {'resource': {key: ore.get(key) for key in ('mining_time', 'category', 'infinite')}, 'drill': burner, 'hand': ore.get('hand_mining')}
+    require(close(ore.get('mining_time'), engine['ore_time'])
+            and close(burner.get('mining_speed'), engine['drill_speed'])
+            and close(burner.get('productivity_bonus'), engine['productivity'])
+            and close(named(burner.get('products_per_minute'), 'iron-ore').get('per_minute'), drill_rate * 60)
+            and close(burner.get('energy_watts'), engine['drill_watts'])
+            and close((burner.get('fuel') or {}).get('per_minute'), drill_coal), {
+        'message': 'burner drill rate facts differ from the engine prototypes', 'reported': burner, 'engine': engine,
+    })
+    require(close(drill_rate * 60, KNOWN_DRILL_ORE_PER_MINUTE) and close(drill_coal, KNOWN_DRILL_COAL_PER_MINUTE), {
+        'message': 'engine burner drill values differ from the 2.0 base data', 'engine': engine,
+    })
+
+    estimate = json_command(lua_json(remote_call('autorio_knowledge', 'production_estimate',
+        "{target='iron-plate',count=100,steps={"
+        "{item='iron-plate',machine='stone-furnace',machine_count=1,fuel='coal'},"
+        "{item='iron-ore',machine='burner-mining-drill',machine_count=1,fuel='coal'}}}")), 'iron plate estimate')
+    evidence['estimate'] = estimate
+    # One drill limits one furnace: 100 ore at 4 s, then one 3.2 s smelt.
+    expected_total = 100 / drill_rate + 1 / furnace_rate
+    require(estimate.get('ok') is True
+            and (estimate.get('bottleneck') or {}).get('item') == 'iron-ore'
+            and close(estimate.get('total_seconds'), expected_total)
+            and close((estimate.get('one_more_on_bottleneck') or {}).get('total_seconds'), 100 / furnace_rate + 1 / drill_rate), {
+        'message': 'production estimate does not follow the engine rates', 'estimate': estimate, 'expected_total': expected_total,
+    })
+    print(f'PASS: RATES - stone furnace {furnace_rate * 60:g} plates/min and {furnace_coal:g} coal/min, '
+          f'burner drill {drill_rate * 60:g} ore/min and {drill_coal:g} coal/min; 100 plates with 1+1 take '
+          f"{estimate['total_seconds']:g} s, {estimate['one_more_on_bottleneck']['total_seconds']:g} s with a second drill "
+          f"(legacy crafting_speed key readable: {engine['legacy_crafting_speed_key_readable']})", flush=True)
+
     # ---- CANDIDATES + BUILT: drill -----------------------------------------
     drills = candidates(
         f"{{entity_name='burner-mining-drill',center={ore_center},radius=4,target_resource='iron-ore',limit=3}}",
@@ -183,6 +285,33 @@ def run(client: Rcon, results: Path) -> None:
     print('PASS: CONNECTED - the drill drop_target is the placed furnace', flush=True)
     require((last.get('plates') or 0) >= TARGET_PLATES, {'message': 'furnace produced too few plates', 'samples': samples})
     print(f"PASS: OPERATING - {last['plates']} iron plates smelted from drill output", flush=True)
+
+    # ---- MEASURED: the running pair produces at the computed rate --------
+    # The furnace outpaces one drill, so both ore and plates flow at the drill
+    # rate. A periodic process counted between two instants is off by at most
+    # one unit, so the tolerance is one ore and one plate.
+    stats_command = (
+        '/silent-command local s=game.surfaces[1]; local a=nil; '
+        "for _,e in pairs(s.find_entities_filtered{name='character'}) do "
+        f'if e.unit_number=={actor_id} then a=e end end; '
+        'local st=a.force.get_item_production_statistics(s); '
+        "rcon.print(helpers.table_to_json({tick=game.tick,ore=st.get_input_count('iron-ore'),plates=st.get_input_count('iron-plate')}))"
+    )
+    window_start = json_command(stats_command, 'production statistics start')
+    time.sleep(MEASURE_TICKS / 60 / 4)
+    window_end = json_command(stats_command, 'production statistics end')
+    seconds = (window_end['tick'] - window_start['tick']) / 60
+    computed_per_second = named(burner.get('products_per_minute'), 'iron-ore').get('per_minute') / 60
+    expected = computed_per_second * seconds
+    mined = window_end['ore'] - window_start['ore']
+    smelted = window_end['plates'] - window_start['plates']
+    evidence['measured'] = {'start': window_start, 'end': window_end, 'seconds': seconds, 'expected': expected, 'ore': mined, 'plates': smelted}
+    flush()
+    require(seconds >= 20, {'message': 'measurement window too short', 'measured': evidence['measured']})
+    require(abs(mined - expected) <= 1 and abs(smelted - expected) <= 1, {
+        'message': 'measured production differs from the computed rate', 'measured': evidence['measured'],
+    })
+    print(f'PASS: MEASURED - {mined} ore and {smelted} plates in {seconds:g} s game time; computed {expected:g}', flush=True)
     evidence['status'] = 'pass'
     flush()
 
