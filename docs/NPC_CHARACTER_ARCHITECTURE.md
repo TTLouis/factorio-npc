@@ -187,7 +187,7 @@ The character controller should eventually track:
 
 A stuck character should repath rather than fall back forever to blind direct walking.
 
-## Map knowledge (owner decision, 2026-09-25; not implemented yet)
+## Map knowledge (owner decision, 2026-09-25)
 
 A player's character loads and reveals the map around it. The standalone NPC
 should behave the same way. Factorio's own chart state is unusable when nobody

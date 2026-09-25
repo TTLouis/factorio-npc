@@ -121,6 +121,11 @@ Force policy for map mutations:
 - upgrade and recipe changes: the actor's own force only (`wrong_force` otherwise);
 - deconstruction: the actor's force or `neutral` (for example crash-site
   wrecks); any other force is rejected with `wrong_force`.
+  Engine fact (2.0.77): `order_deconstruction` by the player force accepts
+  neutral trees but refuses neutral unit-numbered containers such as wooden
+  chests and `crash-site-chest-1`. Map deconstruction targets unit numbers, so
+  for now the neutral allowance only lets the engine decide, and the tool
+  reports its refusal as `deconstruction_rejected`.
 
 Known limit: with zero connected players the NPC force charts no chunks
 (observed on 2.0.77, despite the awareness radar and `force.chart`), so map
