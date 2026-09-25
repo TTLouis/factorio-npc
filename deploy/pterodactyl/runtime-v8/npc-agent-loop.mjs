@@ -116,6 +116,11 @@ const RESEARCH_PREFLIGHT_RECOVERABLE_CODES = new Set(['missing_prerequisites', '
 // one bounded correction turn before the plan is frozen as BLOCKED.
 const MODEL_CORRECTABLE_PREFLIGHT_CODES = new Set(['unknown_prototype', 'unknown_recipe', 'invalid_unit_number', 'invalid_target_kind', 'invalid_preflight_args'])
 const MODEL_CORRECTABLE_PREFLIGHT_RETRY_BUDGET = 1
+// Board evidence kind for an executed operation the engine refused in a way the
+// planner can correct (a placement refused at its chosen coordinate). The board
+// memory records it instead of freezing the plan and blocks once the bounded
+// retries for the step run out.
+export const OPERATION_FAILURE_RECOVERABLE_KIND = 'operation_failure_recoverable'
 const RESEARCH_PREFLIGHT_RETRY_BUDGET = 2
 const LOW_RISK_NAVIGATION_PROJECTION_MAX_CANDIDATES = 8
 // Once the system commits a plan, its semantic content is immutable; later batches fulfil it rather than rewriting it.
@@ -1860,6 +1865,27 @@ function interactionStatusReply(status, plan) {
 
 function sameJsonValue(left, right) {
   return JSON.stringify(left) === JSON.stringify(right)
+}
+
+// The recoverable record the board memory adds right after the failure receipt
+// it classified; only the newest evidence item counts, so an older record can
+// never relabel a later, unrelated failure.
+function latestRecoverableOperationFailure(state) {
+  const evidence = state?.status === 'active' ? state?.task_board?.evidence : undefined
+  const latest = Array.isArray(evidence) ? evidence.at(-1) : undefined
+  if (latest?.kind !== OPERATION_FAILURE_RECOVERABLE_KIND) return undefined
+  try {
+    const parsed = JSON.parse(latest.summary)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+    return {
+      failure_class: cleanMemoryText(parsed.failure_class, 100),
+      code: typeof parsed.code === 'string' ? parsed.code : 'operation_failed',
+      entity_name: typeof parsed.entity_name === 'string' ? parsed.entity_name : undefined,
+      attempt: Number.isSafeInteger(parsed.attempt) ? parsed.attempt : undefined,
+      retry_budget: Number.isSafeInteger(parsed.retry_budget) ? parsed.retry_budget : undefined,
+    }
+  }
+  catch { return undefined }
 }
 
 function taskStatusDelta(previous, current) {
@@ -5489,9 +5515,20 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       ? routed.steering.observation_relevance.selected_families
       : null
     this.planningHorizonOverride = routed.steering?.planning_horizon ?? null
+    const recoverable = latestRecoverableOperationFailure(this.memory.currentPlan?.(this.activePlanKey()))
+    if (recoverable) {
+      await this.traceEvent('operations.execution_recoverable', {
+        failure_class: recoverable.failure_class,
+        attempt: recoverable.attempt,
+        retry_budget: recoverable.retry_budget,
+      })
+    }
+    const recoverableGuidance = recoverable
+      ? ` [HARNESS] The engine refused the ${cleanMemoryText(recoverable.entity_name ?? 'entity', 100)} placement at the coordinate you chose (${cleanMemoryText(recoverable.code, 64)}); this is a correctable placement error, not a world blocker, and the committed step is unchanged. Use the receipt's placement_footprint, placement_grid.nearest_valid_center and placement_blockers to choose a valid position (or clear the reported blocker), then resubmit the same step with its dependent operations. Do not change the plan's steps. Attempt ${recoverable.attempt} of ${recoverable.retry_budget} before the step is blocked.`
+      : ''
     try {
       return await this.continueFromModMessage(
-        `[MOD] Autorio operation error: ${cleanError}. Dependent queued operations may have been cancelled. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}`,
+        `[MOD] Autorio operation error: ${cleanError}. Dependent queued operations may have been cancelled. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}${recoverableGuidance}`,
         'factorio.error_continuation',
       )
     }

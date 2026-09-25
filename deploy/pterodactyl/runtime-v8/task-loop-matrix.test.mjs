@@ -504,3 +504,83 @@ test('a new-goal planning turn is told to plan at outline level; a continuation 
 
   assert.deepEqual(seen, [true, false])
 })
+
+// Live 2026-09-25 16:15 (req_muh5t1wa_1): the planner placed a burner drill at
+// a coordinate it chose and queued the dependent starter-coal transfer. The
+// engine refused the placement and cancelled the transfer; the board read the
+// cancelled transfer as `transfer_failed:not_placeable` and froze the plan.
+test('a refused placement with a dependent transfer goes back to the planner with the refusal, and blocks only when retries run out', async () => {
+  const PLACE_STEPS = ['Place a burner mining drill on iron ore and fuel it', 'Mine 10 iron ore']
+  let x = 11
+  const prompts = []
+  const world = harness({
+    provider: async messages => {
+      prompts.push(messages.map(message => String(message.content ?? '')).join('\n'))
+      x++
+      return planReply({
+        plan: PLACE_STEPS,
+        currentStep: 0,
+        operations: [
+          { name: 'place_entity', args: { entity_name: 'burner-mining-drill', x, y: -7 } },
+          { name: 'move_items', args: { item_name: 'coal', entity_name: 'burner-mining-drill', max_count: 5, to_entity: true } },
+        ],
+      })
+    },
+  })
+  const refuse = () => world.game.failLastBatch({
+    type: 'placing',
+    code: 'not_placeable',
+    entity_name: 'burner-mining-drill',
+    placement_footprint: {
+      tile_width: 2,
+      tile_height: 2,
+      tile_box: { left_top: { x: 11, y: -8 }, right_bottom: { x: 13, y: -6 } },
+      world_box: { left_top: { x: 11, y: -8 }, right_bottom: { x: 13, y: -6 } },
+    },
+    placement_grid: { x_offset: 0, y_offset: 0, nearest_valid_center: { x: 12, y: -7 } },
+    placement_blockers: [{ name: 'rock-big', type: 'simple-entity', position: { x: 12.4, y: -6.6 } }],
+  })
+
+  await world.say('place a burner drill on iron and fuel it', 'new_goal')
+  const committed = world.reducerPlan()
+  assert.equal(committed.status, PLAN_STATUS.COMMITTED)
+  const stepId = world.memory.currentPlan(KEY).task_board.active_step_id
+  assert.deepEqual(world.game.lastTaskTypes, ['placing', 'moving_items'])
+
+  const plannerCallsBefore = world.plannerCalls
+  await world.agent.failed(refuse())
+
+  let state = world.memory.currentPlan(KEY)
+  assert.equal(state.status, 'active')
+  assert.equal(state.blocker, '')
+  assert.equal(world.plannerCalls, plannerCallsBefore + 1)
+  const retryPrompt = prompts.at(-1)
+  assert.match(retryPrompt, /not_placeable/)
+  assert.match(retryPrompt, /"nearest_valid_center":\{"x":12,"y":-7\}/)
+  assert.match(retryPrompt, /rock-big/)
+  assert.match(retryPrompt, /correctable placement error/)
+  // Same committed plan, same active step; the retry is a new batch for that step.
+  const afterRetry = world.reducerPlan()
+  assert.equal(afterRetry.plan_id, committed.plan_id)
+  assert.equal(afterRetry.version, committed.version)
+  assert.equal([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(afterRetry.status), true)
+  assert.deepEqual(afterRetry.steps, committed.steps)
+  assert.equal(state.task_board.active_step_id, stepId)
+  assert.equal(state.task_board.completed_count, 0)
+  assert.equal(world.game.mutations.length, 2)
+
+  // A second refusal is still within the budget.
+  await world.agent.failed(refuse())
+  state = world.memory.currentPlan(KEY)
+  assert.equal(state.status, 'active')
+  assert.equal(world.game.mutations.length, 3)
+
+  // The third consecutive refusal of the same step exhausts the retries: now it is a world blocker.
+  await world.agent.failed(refuse())
+  state = world.memory.currentPlan(KEY)
+  assert.equal(state.status, 'blocked')
+  assert.equal(state.blocker, 'placement_failed:not_placeable')
+  assert.equal(state.task_board.active_step_id, stepId)
+  assert.equal(world.reducerPlan().plan_id, committed.plan_id)
+  assert.equal(world.game.mutations.length, 3)
+})

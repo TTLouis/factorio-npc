@@ -1,4 +1,4 @@
-import { NpcDialogueMemory } from './npc-agent-loop.mjs'
+import { NpcDialogueMemory, OPERATION_FAILURE_RECOVERABLE_KIND } from './npc-agent-loop.mjs'
 import { createTaskBoard, reconcileTaskBoard, setTaskBoardStatus } from './common.mjs'
 import { completionContractSupported, provePermanentlyUnsatisfiable, sanitizeStepCompletionContract } from './step-completion.mjs'
 import {
@@ -148,6 +148,61 @@ function stateHasUnverifiedTransferIntent(state) {
   if (!hasTransfer) return false
   if (state.admission_status === 'admission_failed') return true
   return state.last_mutation_verified !== true
+}
+
+// A placement the engine refused at a planner-chosen coordinate is a planning
+// error the planner can correct from the refusal details (footprint, grid with
+// nearest_valid_center, blockers), not proof that the world prevents the step.
+// It goes back to the planner on the ordinary failure continuation with the
+// committed step unchanged, and becomes a world blocker only when the same
+// step has been refused this many times in a row.
+export const CORRECTABLE_PLACEMENT_RETRY_BUDGET = 2
+const CORRECTABLE_PLACEMENT_CODES = new Set(['not_placeable'])
+
+function correctablePlacementRefusal(evidence) {
+  if (evidence?.kind !== 'operation_error_receipt') return undefined
+  const receipt = parseReceiptSummary(evidence)
+  const basic = receipt?.basic_operation
+  // basic_operation only survives the runtime receipt when it correlates with
+  // this batch (task type, tick, actor), so it names the operation that failed.
+  if (basic?.type !== 'placing' || basic.completed === true) return undefined
+  if (!CORRECTABLE_PLACEMENT_CODES.has(basic.code)) return undefined
+  const nearest = basic.placement_grid?.nearest_valid_center
+  return {
+    task_type: 'placing',
+    code: basic.code,
+    entity_name: typeof basic.entity_name === 'string' ? basic.entity_name : undefined,
+    nearest_valid_center: nearest && Number.isFinite(nearest.x) && Number.isFinite(nearest.y)
+      ? { x: nearest.x, y: nearest.y }
+      : undefined,
+    placement_blockers: Array.isArray(basic.placement_blockers)
+      ? basic.placement_blockers.slice(0, 4).map(blocker => ({
+          name: typeof blocker?.name === 'string' ? blocker.name : undefined,
+          position: blocker?.position && Number.isFinite(blocker.position.x) && Number.isFinite(blocker.position.y)
+            ? { x: blocker.position.x, y: blocker.position.y }
+            : undefined,
+        }))
+      : undefined,
+  }
+}
+
+// Consecutive recoverable refusals of the active step. A completed batch for
+// the same step ends the streak, so a multi-placement step is not blocked by
+// independent refusals it already corrected.
+// A re-reported failure of the same batch (same ref) is not another attempt.
+function consecutiveRecoverableFailures(board) {
+  const stepId = board?.active_step_id
+  const refs = new Set()
+  let count = 0
+  for (const item of [...(board?.evidence ?? [])].reverse()) {
+    if (item?.step_id !== stepId) continue
+    if (item.kind === OPERATION_FAILURE_RECOVERABLE_KIND) {
+      count++
+      if (item.ref) refs.add(item.ref)
+    }
+    else if (item.kind === 'operation_receipt' || item.kind === 'deterministic_verification') break
+  }
+  return { count, refs }
 }
 
 function transferFailureReason(evidence) {
@@ -1450,6 +1505,36 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         proofRef: staleProof.ref,
       })
       return this.planByNpc.get(key)?.task_board ?? boardAfterReceipt
+    }
+
+    // Before the transfer check: in a placing + dependent transfer batch the
+    // transfer was cancelled because the placement was refused, so the
+    // failure is the placement's, not the transfer's (live 2026-09-25 16:15).
+    const refusal = state.status === 'active' ? correctablePlacementRefusal(evidence) : undefined
+    if (refusal) {
+      const streak = consecutiveRecoverableFailures(boardAfterReceipt)
+      if (evidence.ref && streak.refs.has(evidence.ref)) return boardAfterReceipt
+      const previousRefusals = streak.count
+      if (previousRefusals >= CORRECTABLE_PLACEMENT_RETRY_BUDGET) {
+        const reason = `placement_failed:${refusal.code}`
+        return this.applyOutcomeAuthority(key, {
+          kind: 'world_blocked',
+          source: 'autorio',
+          reason_code: reason,
+          candidate_blocker: reason,
+          evidence: [evidence],
+        }).state?.task_board ?? boardAfterReceipt
+      }
+      return super.recordBoardEvidence(key, {
+        kind: OPERATION_FAILURE_RECOVERABLE_KIND,
+        ref: evidence.ref,
+        summary: JSON.stringify({
+          failure_class: `model_correctable_${refusal.task_type}_${refusal.code}`,
+          ...refusal,
+          attempt: previousRefusals + 1,
+          retry_budget: CORRECTABLE_PLACEMENT_RETRY_BUDGET,
+        }),
+      }) ?? boardAfterReceipt
     }
 
     if (evidence?.kind === 'operation_error_receipt' && stateHasUnverifiedTransferIntent(state)) {
