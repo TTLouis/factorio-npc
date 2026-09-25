@@ -303,6 +303,7 @@ describe('placement candidates', () => {
       type: 'furnace',
       tile_width: 2,
       tile_height: 2,
+      collision_box: { left_top: { x: -0.9, y: -0.9 }, right_bottom: { x: 0.9, y: 0.9 } },
       supports_direction: true,
       flags: {},
       vector_to_place_result: undefined,
