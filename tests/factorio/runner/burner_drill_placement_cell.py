@@ -347,6 +347,7 @@ def run(client: Rcon, results: Path) -> None:
         f"s.create_entity{{name='coal',position={{x+0.5,y+0.5}},amount={ORE_AMOUNT}}} end end; "
         'local inv=a.get_main_inventory(); inv.clear(); '
         "inv.insert{name='burner-mining-drill',count=2}; "
+        f"inv.insert{{name='coal',count={2 * FUEL_COUNT}}}; "
         'rcon.print(helpers.table_to_json({ox=ox,oy=oy,position=a.position}))',
         'reciprocal burner drill fixture',
     )
@@ -355,7 +356,7 @@ def run(client: Rcon, results: Path) -> None:
 
     first_set = candidates(
         f"{{entity_name='burner-mining-drill',center={{x={pair_ox + 5},y={pair_oy}}},"
-        "radius=5,target_resource='coal',limit=8}}",
+        "radius=5,target_resource='coal',limit=8}",
         'reciprocal drill A candidates',
     )
     selected_a: dict | None = None
@@ -378,6 +379,20 @@ def run(client: Rcon, results: Path) -> None:
             and left['y'] < point['y'] < right['y']
         )
 
+    def boxes_overlap(first: object, second: object) -> bool:
+        # Missing geometry counts as overlapping, so a malformed candidate is skipped.
+        if not isinstance(first, dict) or not isinstance(second, dict):
+            return True
+        a_left, a_right = first.get('left_top') or {}, first.get('right_bottom') or {}
+        b_left, b_right = second.get('left_top') or {}, second.get('right_bottom') or {}
+        try:
+            return (
+                a_left['x'] < b_right['x'] and b_left['x'] < a_right['x']
+                and a_left['y'] < b_right['y'] and b_left['y'] < a_right['y']
+            )
+        except (KeyError, TypeError):
+            return True
+
     for candidate_a in first_set.get('candidates') or []:
         output_a = candidate_a.get('item_output_position')
         footprint_a = candidate_a.get('footprint') or {}
@@ -396,6 +411,10 @@ def run(client: Rcon, results: Path) -> None:
         require(second_set.get('ok') is True, {'context': 'reciprocal drill B candidates', 'result': second_set})
         for candidate_b in second_set.get('candidates') or []:
             if candidate_b.get('position') == candidate_a.get('position'):
+                continue
+            # B's candidates are found before A is built, so the engine hasn't
+            # excluded footprints that overlap A yet; the placed pair must not.
+            if boxes_overlap((candidate_b.get('footprint') or {}).get('tile_box'), footprint_a.get('tile_box')):
                 continue
             if point_inside(candidate_b.get('item_output_position'), footprint_a.get('tile_box')):
                 selected_a = candidate_a
@@ -476,17 +495,52 @@ def run(client: Rcon, results: Path) -> None:
     require(isinstance(unit_b, int), {'message': 'drill B placement receipt lacks identity', 'receipt': receipt_b})
 
     reciprocal = json_command(
-        '/silent-command local a=game.get_entity_by_unit_number(' + str(unit_a) + '); '
-        'local b=game.get_entity_by_unit_number(' + str(unit_b) + '); '
+        # game.get_entity_by_unit_number returned nil for both placed drills in
+        # 2.0.77, so find them on the surface the way the harness does.
+        '/silent-command local a,b; '
+        "for _,s in pairs(game.surfaces) do for _,e in pairs(s.find_entities_filtered{name='burner-mining-drill'}) do "
+        'if e.unit_number==' + str(unit_a) + ' then a=e end; if e.unit_number==' + str(unit_b) + ' then b=e end end end; '
         'rcon.print(helpers.table_to_json({'
         'a=a and {unit=a.unit_number,position=a.position,drop=a.drop_position,drop_target=a.drop_target and a.drop_target.unit_number or 0} or nil,'
         'b=b and {unit=b.unit_number,position=b.position,drop=b.drop_position,drop_target=b.drop_target and b.drop_target.unit_number or 0} or nil}))',
         'reciprocal burner drill inspection',
     )
+    drill_a, drill_b = reciprocal.get('a') or {}, reciprocal.get('b') or {}
+    box_a = (selected_a.get('footprint') or {}).get('tile_box')
+    box_b = (selected_b.get('footprint') or {}).get('tile_box')
     require(
-        (reciprocal.get('a') or {}).get('drop_target') == unit_b
-        and (reciprocal.get('b') or {}).get('drop_target') == unit_a,
-        {'message': 'candidate-built burner drills are not mutually connected', 'reciprocal': reciprocal},
+        point_inside(drill_a.get('drop'), box_b) and point_inside(drill_b.get('drop'), box_a),
+        {'message': "a drill's drop position is not inside the other drill", 'reciprocal': reciprocal},
+    )
+
+    # drop_target stays nil for a drill dropping into another drill in 2.0.77
+    # (it is set for drill -> furnace), so prove the loop by its outcome: each
+    # drill's fuel must rise above what it was given, which only the other
+    # drill's output can do.
+    for unit in (unit_a, unit_b):
+        run_operation(
+            remote_call('autorio_operations', 'supply_entity', str(unit), f"{{{{item_name='coal',count={FUEL_COUNT}}}}}"),
+            f'fuel reciprocal drill {unit}',
+        )
+    fuel_samples = []
+    for _ in range(ROUNDS):
+        time.sleep(ROUND_TICKS / 60 / 4)
+        fuel = json_command(
+            '/silent-command local r={}; '
+            "for _,s in pairs(game.surfaces) do for _,e in pairs(s.find_entities_filtered{name='burner-mining-drill'}) do "
+            'if e.unit_number==' + str(unit_a) + " then r.a=e.get_fuel_inventory().get_item_count('coal') end; "
+            'if e.unit_number==' + str(unit_b) + " then r.b=e.get_fuel_inventory().get_item_count('coal') end end end; "
+            'rcon.print(helpers.table_to_json(r))',
+            'reciprocal fuel sample',
+        )
+        fuel_samples.append(fuel)
+        if (fuel.get('a') or 0) > FUEL_COUNT and (fuel.get('b') or 0) > FUEL_COUNT:
+            break
+    reciprocal['fuel_samples'] = fuel_samples
+    last_fuel = fuel_samples[-1]
+    require(
+        (last_fuel.get('a') or 0) > FUEL_COUNT and (last_fuel.get('b') or 0) > FUEL_COUNT,
+        {'message': 'candidate-built burner drills do not refuel each other', 'reciprocal': reciprocal},
     )
     evidence['p0_geometry'] = {
         'off_grid_receipt': off_grid,
@@ -495,7 +549,7 @@ def run(client: Rcon, results: Path) -> None:
         'drill_b': selected_b,
         'reciprocal': reciprocal,
     }
-    print(f'PASS: P0 RECIPROCAL - candidate-built drills {unit_a} and {unit_b} feed each other', flush=True)
+    print(f"PASS: P0 RECIPROCAL - candidate-built drills {unit_a} and {unit_b} feed each other (fuel {last_fuel.get('a')}/{last_fuel.get('b')} from {FUEL_COUNT})", flush=True)
 
     evidence['status'] = 'pass'
     flush()
