@@ -135,6 +135,13 @@ describe('precise placement runtime', () => {
   it('fails closed when Factorio reports that the requested position is blocked', () => {
     const f = fixture()
     f.surface.can_place_entity.mockReturnValue(false)
+    f.surface.find_entities_filtered.mockReturnValue([{
+      valid: true,
+      name: 'stone-furnace',
+      type: 'furnace',
+      unit_number: 88,
+      position: { x: 1.5, y: 0.5 },
+    }])
     expect(f.controller.submit_placement('steel-chest', 1.5, 0.5, 4)).toBe(true)
 
     const result = f.runtime.state_placing(f.actor)
@@ -156,6 +163,21 @@ describe('precise placement runtime', () => {
       completed: false,
       requested_position: { x: 1.5, y: 0.5 },
       direction: 4,
+      placement_footprint: {
+        tile_width: 1,
+        tile_height: 1,
+      },
+      placement_grid: {
+        x_offset: 0.5,
+        y_offset: 0.5,
+        nearest_valid_center: { x: 1.5, y: 0.5 },
+      },
+      placement_blockers: [{
+        name: 'stone-furnace',
+        type: 'furnace',
+        unit_number: 88,
+        position: { x: 1.5, y: 0.5 },
+      }],
     })
   })
 
