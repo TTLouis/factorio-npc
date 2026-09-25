@@ -116,6 +116,23 @@ def run(client: Rcon, results: Path) -> None:
         require(receipt.get('completed') is True and receipt.get('code') == 'completed', {'context': context, 'receipt': receipt})
         return receipt
 
+    def run_failed_operation(expression: str, context: str, expected_code: str, timeout: float = 30.0) -> dict:
+        admission = json_command(
+            '/silent-command local result=' + expression + '; '
+            'local accepted=false; local message=nil; '
+            "if type(result)=='table' then accepted=result[1]==true; message=result[2] "
+            'else accepted=result==true end; '
+            'rcon.print(helpers.table_to_json({accepted=accepted,message=message}))',
+            f'{context} admission',
+        )
+        require(admission.get('accepted') is True, {'context': context, 'admission': admission})
+        status = wait_until_idle(operation_status, context, timeout)
+        receipt = (status.get('basic_operation') or {}).get('last_result') or {}
+        require(receipt.get('completed') is not True and receipt.get('code') == expected_code, {
+            'context': context, 'expected_code': expected_code, 'receipt': receipt,
+        })
+        return receipt
+
     def candidates(request: str, context: str) -> dict:
         result = json_command(lua_json(remote_call('autorio_tools', 'get_placement_candidates', request)), context)
         require(result.get('ok') is True, {'context': context, 'result': result})
@@ -312,6 +329,169 @@ def run(client: Rcon, results: Path) -> None:
         'message': 'measured production differs from the computed rate', 'measured': evidence['measured'],
     })
     print(f'PASS: MEASURED - {mined} ore and {smelted} plates in {seconds:g} s game time; computed {expected:g}', flush=True)
+    # ---- P0 GEOMETRY: reciprocal burner drills + refusal reasons --------
+    # Rebuild a clean coal fixture. The planner relationship under test is:
+    # drill B's footprint covers drill A's output, while B's own output lands
+    # inside A's footprint. Candidate execution must preserve legal entity
+    # centers rather than reusing either drop point as a center.
+    pair_fixture = json_command(
+        "/silent-command local s=game.surfaces[1]; local a=nil; "
+        "for _,e in pairs(s.find_entities_filtered{name='character'}) do "
+        f"if e.unit_number=={actor_id} then a=e end end; assert(a); "
+        "remote.call('autorio_operations','cancel_all_tasks'); "
+        'local ox=math.floor(a.position.x); local oy=math.floor(a.position.y); '
+        'local area={{ox-10,oy-10},{ox+10,oy+10}}; '
+        "for _,e in pairs(s.find_entities_filtered{area=area}) do "
+        "if e~=a and e.type~='character' then e.destroy() end end; "
+        'for x=ox+2,ox+8 do for y=oy-4,oy+4 do '
+        f"s.create_entity{{name='coal',position={{x+0.5,y+0.5}},amount={ORE_AMOUNT}}} end end; "
+        'local inv=a.get_main_inventory(); inv.clear(); '
+        "inv.insert{name='burner-mining-drill',count=2}; "
+        'rcon.print(helpers.table_to_json({ox=ox,oy=oy,position=a.position}))',
+        'reciprocal burner drill fixture',
+    )
+    pair_ox, pair_oy = pair_fixture.get('ox'), pair_fixture.get('oy')
+    require(isinstance(pair_ox, int) and isinstance(pair_oy, int), pair_fixture)
+
+    first_set = candidates(
+        f"{{entity_name='burner-mining-drill',center={{x={pair_ox + 5},y={pair_oy}}},"
+        "radius=5,target_resource='coal',limit=8}}",
+        'reciprocal drill A candidates',
+    )
+    selected_a: dict | None = None
+    selected_b: dict | None = None
+    selected_b_set: dict | None = None
+
+    def point_inside(point: object, box: object) -> bool:
+        if not isinstance(point, dict) or not isinstance(box, dict):
+            return False
+        left = box.get('left_top') or {}
+        right = box.get('right_bottom') or {}
+        return (
+            isinstance(point.get('x'), (int, float))
+            and isinstance(point.get('y'), (int, float))
+            and isinstance(left.get('x'), (int, float))
+            and isinstance(left.get('y'), (int, float))
+            and isinstance(right.get('x'), (int, float))
+            and isinstance(right.get('y'), (int, float))
+            and left['x'] < point['x'] < right['x']
+            and left['y'] < point['y'] < right['y']
+        )
+
+    for candidate_a in first_set.get('candidates') or []:
+        output_a = candidate_a.get('item_output_position')
+        footprint_a = candidate_a.get('footprint') or {}
+        if not isinstance(output_a, dict):
+            continue
+        second_set = candidates(
+            "{entity_name='burner-mining-drill',"
+            f"covers_position={{x={output_a['x']},y={output_a['y']}}},"
+            "radius=4,target_resource='coal',limit=8}",
+            'reciprocal drill B candidates',
+        )
+        for candidate_b in second_set.get('candidates') or []:
+            if candidate_b.get('position') == candidate_a.get('position'):
+                continue
+            if point_inside(candidate_b.get('item_output_position'), footprint_a.get('tile_box')):
+                selected_a = candidate_a
+                selected_b = candidate_b
+                selected_b_set = second_set
+                break
+        if selected_a is not None:
+            break
+
+    require(selected_a is not None and selected_b is not None and selected_b_set is not None, {
+        'message': 'no reciprocal burner-drill candidate pair found',
+        'first_set': first_set,
+    })
+    assert selected_a is not None and selected_b is not None and selected_b_set is not None
+    output_a = selected_a['item_output_position']
+
+    # The live P0 regression passed a drill output/drop point as a 2x2 entity
+    # center. It must now fail before engine placement and explain the grid.
+    off_grid = run_failed_operation(
+        remote_call(
+            'autorio_operations',
+            'place_entity',
+            repr('burner-mining-drill'),
+            str(output_a['x']),
+            str(output_a['y']),
+            str(selected_a['direction']),
+        ),
+        'off-grid drill center refusal',
+        'not_placeable',
+    )
+    grid = off_grid.get('placement_grid') or {}
+    footprint = off_grid.get('placement_footprint') or {}
+    require(
+        footprint.get('tile_width') == 2
+        and footprint.get('tile_height') == 2
+        and grid.get('x_offset') == 0
+        and grid.get('y_offset') == 0
+        and isinstance(grid.get('nearest_valid_center'), dict),
+        {'message': 'off-grid refusal lacks 2x2 grid diagnostics', 'receipt': off_grid},
+    )
+    print(f"PASS: P0 OFF-GRID - output point {output_a} rejected as a 2x2 center; nearest {grid['nearest_valid_center']}", flush=True)
+
+    receipt_a = run_operation(
+        remote_call('autorio_operations', 'place_candidate', repr(first_set['candidate_set_id']), repr(selected_a['id'])),
+        'place reciprocal drill A',
+        60.0,
+    )
+    unit_a = receipt_a.get('placed_unit_number')
+    require(isinstance(unit_a, int), {'message': 'drill A placement receipt lacks identity', 'receipt': receipt_a})
+
+    # A legal-grid center that overlaps A must also explain which entity blocks it.
+    overlap = run_failed_operation(
+        remote_call(
+            'autorio_operations',
+            'place_entity',
+            repr('burner-mining-drill'),
+            str(selected_a['position']['x']),
+            str(selected_a['position']['y']),
+            str(selected_a['direction']),
+        ),
+        'overlapping drill refusal',
+        'not_placeable',
+    )
+    blockers = overlap.get('placement_blockers') or []
+    require(any(blocker.get('unit_number') == unit_a for blocker in blockers if isinstance(blocker, dict)), {
+        'message': 'overlap refusal did not identify drill A as blocker',
+        'receipt': overlap,
+        'unit_a': unit_a,
+    })
+    print(f'PASS: P0 OVERLAP - refusal identified drill A unit {unit_a} in the footprint', flush=True)
+
+    receipt_b = run_operation(
+        remote_call('autorio_operations', 'place_candidate', repr(selected_b_set['candidate_set_id']), repr(selected_b['id'])),
+        'place reciprocal drill B',
+        60.0,
+    )
+    unit_b = receipt_b.get('placed_unit_number')
+    require(isinstance(unit_b, int), {'message': 'drill B placement receipt lacks identity', 'receipt': receipt_b})
+
+    reciprocal = json_command(
+        '/silent-command local a=game.get_entity_by_unit_number(' + str(unit_a) + '); '
+        'local b=game.get_entity_by_unit_number(' + str(unit_b) + '); '
+        'rcon.print(helpers.table_to_json({'
+        'a=a and {unit=a.unit_number,position=a.position,drop=a.drop_position,drop_target=a.drop_target and a.drop_target.unit_number or 0} or nil,'
+        'b=b and {unit=b.unit_number,position=b.position,drop=b.drop_position,drop_target=b.drop_target and b.drop_target.unit_number or 0} or nil}))',
+        'reciprocal burner drill inspection',
+    )
+    require(
+        (reciprocal.get('a') or {}).get('drop_target') == unit_b
+        and (reciprocal.get('b') or {}).get('drop_target') == unit_a,
+        {'message': 'candidate-built burner drills are not mutually connected', 'reciprocal': reciprocal},
+    )
+    evidence['p0_geometry'] = {
+        'off_grid_receipt': off_grid,
+        'overlap_receipt': overlap,
+        'drill_a': selected_a,
+        'drill_b': selected_b,
+        'reciprocal': reciprocal,
+    }
+    print(f'PASS: P0 RECIPROCAL - candidate-built drills {unit_a} and {unit_b} feed each other', flush=True)
+
     evidence['status'] = 'pass'
     flush()
 
