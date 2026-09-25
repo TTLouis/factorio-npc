@@ -114,7 +114,7 @@ describe('precise placement runtime', () => {
       collision_box: { left_top: { x: -0.9, y: -0.9 }, right_bottom: { x: 0.9, y: 0.9 } },
     }
     const f = fixture('burner-mining-drill', 2)
-    expect(f.controller.submit_placement('burner-mining-drill', -70.5, -10.5, 8)).toBe(true)
+    expect(f.controller.submit_placement('burner-mining-drill', 1.5, 0.5, 8)).toBe(true)
 
     const result = f.runtime.state_placing(f.actor)
 
@@ -127,7 +127,7 @@ describe('precise placement runtime', () => {
       placement_grid: {
         x_offset: 0,
         y_offset: 0,
-        nearest_valid_center: { x: -70, y: -10 },
+        nearest_valid_center: { x: 2, y: 1 },
       },
     })
   })
