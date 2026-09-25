@@ -35,6 +35,54 @@ reasoning budgets went up, each tool round in one request took 40–55 s (live t
 - No provider (API) runs without asking the owner first.
 - Pace usage: stop starting new work at 70% weekly / 85% of the 5-hour window.
 
+## P0 — placement ignores the size of the entity being placed (owner, 2026-09-25)
+
+Goes before everything below, including the rest of W2. Owner report: "the
+placement solver does not actually calculate the size of the entity it is placing
+down".
+
+**Live case (req_muh5t1wa_1, 16:15, goal "automate coal with only burner
+drills").** Drill A came from `findPlacementCandidates` and was placed correctly at
+(-70, -9); its drop position is (-70.5, -10.3). For drill B, whose output should
+land in A, the planner passed A's drop point as B's *centre*:
+`place burner-mining-drill (-70.5, -10.5) direction 8`. A burner drill is 2×2, so
+its centre must sit on whole coordinates, and a 2×2 footprint around that point
+overlaps A. The engine refused (`placing:not_placeable`), the harness passed that
+on with no reason, and the plan blocked (`transfer_failed:not_placeable`). The
+right tool existed (`findPlacementCandidates` with `covers_position`, which does
+check the footprint), but nothing steered the planner to it, and a raw centre was
+accepted without any footprint handling.
+
+What the code does today:
+
+| Path | Size handling | Problem |
+|---|---|---|
+| `place_entity` op (`basic_operation_runtime.ts`) | none; `can_place_entity` at the given centre | a point meant to be *covered* is treated as the centre; off-grid centres for even-sized entities; `not_placeable` gives no reason (blockers, grid, footprint) |
+| `findPlacementCandidates` (`placement_candidates.ts`) | `tile_width/height` for grid snapping, `covers_position`, `can_place_entity` | grid offset isn't swapped for rotated non-square entities; candidates don't return their footprint, so the planner can't reason about spacing between several machines |
+| `plan_placement` (`construction_planning.ts`; remote + combat) | none in the search | `snap_center` always snaps to x.5 (wrong for 2×2, i.e. most early machines); "side of anchor" compares centres, ignoring both footprints; the ring search starts inside the anchor's footprint; the future-extension check uses a fixed 2 tiles; blockers are searched in a fixed 1.5 radius |
+| construction ghosts (`construction_execution.ts`) | rotated collision box | reports `world_collision_box`; not checked further here |
+
+Fix list (deterministic geometry only; the planner still chooses where):
+
+- [ ] One shared footprint helper from the prototype (`tile_width/height`,
+  `collision_box`, rotation swap): valid grid for the centre, world box for a centre
+  + direction, and "centres whose footprint covers point P".
+- [ ] `place_entity`: snap to the entity's grid only when unambiguous; otherwise
+  refuse with the reason. `not_placeable` reports the footprint box tried, what
+  collides inside it, and the grid rule. Never move an entity silently to a
+  different spot than the planner asked for.
+- [ ] Let placement target a relation instead of a centre (e.g. place so the
+  footprint covers a point / receives another entity's output), resolved by the
+  candidate search, and point the planner guidance at it for "output into X"
+  placements.
+- [ ] `findPlacementCandidates`: rotation-aware grid offset; return each
+  candidate's footprint (tile size + world box).
+- [ ] `plan_placement`: size-aware snapping, side and ring search from footprint
+  edges, extension clearance from the entity size, blockers inside the footprint.
+- [ ] Engine lane: the self-feeding burner drill pair (B's footprint covers A's
+  drop point and vice versa) built through the tools, plus off-grid and overlap
+  refusals with their reasons. Unit tests alone are not proof here.
+
 ## W0 — bugs from the 2026-09-25 container log (do first)
 
 - [x] **… button crashed the server.** `vertical_spacing` set on a frame (the …
