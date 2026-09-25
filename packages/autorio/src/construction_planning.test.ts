@@ -142,6 +142,28 @@ describe('shared local spatial observation', () => {
     expect(result.rejected.length).toBeGreaterThan(0)
   })
 
+  it('plans even-sized entities on whole-coordinate centers and returns their footprint', () => {
+    const { actor } = fixture()
+    const result: any = plan_placement(actor, {
+      entity_name: 'burner-mining-drill',
+      position: { x: 0.5, y: 0.5 },
+      side: 'east',
+      search_radius: 4,
+      max_candidates: 4,
+    })
+
+    expect(result.ok).toBe(true)
+    for (const candidate of result.candidates) {
+      expect(Number.isInteger(candidate.position.x)).toBe(true)
+      expect(Number.isInteger(candidate.position.y)).toBe(true)
+      expect(candidate.footprint).toMatchObject({
+        tile_width: 2,
+        tile_height: 2,
+        grid: { x_offset: 0, y_offset: 0 },
+      })
+    }
+  })
+
   it('reuses the same collision-aware backend to select a local navigation escape point', () => {
     const { actor } = fixture()
     const result: any = select_navigation_escape_point(actor, { x: 20, y: 0 }, 6)
