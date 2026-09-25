@@ -27,7 +27,9 @@ What is proven against real Factorio through authoritative game state:
     MEASURED    the planning tools read the running line through the engine:
                 live belt-lane and inserter throughput measurements complete
                 with items counted, and factory area analysis reads every cell
-                entity and its transfer relations (these tools crashed in the
+                entity in its factory-graph scope (all but the solar panels,
+                which have no item or fluid transfers) and their transfer
+                relations (these tools crashed in the
                 engine on untyped generated Lua; see
                 docs/validation/AUTORIO_GENERATED_LUA_ENGINE_DEFECTS_2026-09-25.md)
 
@@ -477,8 +479,13 @@ def run(client: Rcon, results: Path) -> None:
     area = f'{{area={{left_top={{x={ox - 7},y={oy - 1}}},right_bottom={{x={ox + 2},y={oy + 7}}}}}}}'
     analyzed = json_command(lua_json(remote_call('autorio_skills', 'analyze_area', area)), 'analyze the transport cell area')
     require(analyzed.get('ok') is True, {'message': 'factory area analysis failed on the cell', 'result': analyzed})
-    require((analyzed.get('entity_count') or 0) >= len(CELL) and (analyzed.get('relation_count') or 0) > 0, {
-        'message': 'factory area analysis missed cell entities or their transfer relations', 'result': analyzed,
+    # Area analysis reads the factory graph (transport, storage, inserters, poles,
+    # machines); solar panels have no item or fluid transfers and are out of scope.
+    # The cleared area holds nothing else, so the count is exact.
+    graph_entities = [spec for spec in CELL if spec['name'] != 'solar-panel']
+    require(analyzed.get('entity_count') == len(graph_entities) and (analyzed.get('relation_count') or 0) > 0, {
+        'message': 'factory area analysis missed cell entities or their transfer relations',
+        'expected_entity_count': len(graph_entities), 'result': analyzed,
     })
     evidence['area_analysis'] = analyzed
     print(
