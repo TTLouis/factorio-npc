@@ -123,10 +123,15 @@ keystrokes and lost clicks: a rebuild between press and release destroys the but
       eslint on the changed files; `NPC_TEST_LANES=core` passes in Factorio 2.0.77.
       The UI itself needs a client, so the lanes only prove the mod still loads and runs.) Unit tests, typecheck, `check:lua` and eslint on the changed files in the
       Docker build stage; then `NPC_TEST_LANES=core` in `tests/factorio`.
-- [ ] D2. Deploy to the local stack from local sources only (mod overlay if the tree allows, otherwise
+- [x] D2. (`f8eee2c` via `scripts/update-docker-mod-local.ps1 -Restart`: mod built in
+      Docker with the deployment guard, 0 packages downloaded; server up with the same
+      world and NPC; client zip sha256 `69febad0…` installed after checking it.) The other
+      agent's local-source Docker work was reviewed and committed (`e659bd5`); its mod
+      overlay skipped the deployment guard and used the Windows toolchain, so it was
+      fixed first (`f8eee2c`). Deploy to the local stack from local sources only (mod overlay if the tree allows, otherwise
       `scripts/build-docker-local.ps1`, reusing the cached Factorio layer), then copy the client
       mod zip to `%APPDATA%\Factorio\mods` with its checksum verified.
-- [ ] D3. Update the status doc (what changed, and what the owner still needs to
+- [x] D3. (status doc updated; waiting on the owner's client check) Update the status doc (what changed, and what the owner still needs to
       check in the client). Ask the owner to test drag, typing and the skills
       browser.
 
