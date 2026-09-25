@@ -1,5 +1,6 @@
-import type { LuaEntity, LuaEntityPrototype, LuaLogisticNetwork, UnitNumber } from 'factorio:runtime'
+import type { LuaEntity, LuaEntityPrototype, LuaLogisticNetwork } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
+import { resolve_entity_reference } from './entity_reference'
 
 function valid_unit_number(value: number) {
   return typeof value === 'number' && value === math.floor(value) && value >= 1 && value <= 9007199254740991
@@ -22,7 +23,7 @@ function is_visible(actor: ControlledActor, entity: LuaEntity) {
 
 function resolve_visible_entity(actor: ControlledActor, unit_number: number) {
   if (!valid_unit_number(unit_number)) return { code: 'entity_not_found', entity: undefined }
-  const entity = game.get_entity_by_unit_number(unit_number as UnitNumber)
+  const entity = resolve_entity_reference(actor, unit_number, 'map_visible')
   if (!entity || !entity.valid) return { code: 'entity_not_found', entity: undefined }
   if (!is_charted(actor, entity)) return { code: 'area_uncharted', entity: undefined }
   if (!is_visible(actor, entity)) return { code: 'area_not_visible', entity: undefined }
@@ -137,7 +138,7 @@ export function mark_remote_upgrade(actor: ControlledActor, unit_number: number,
     return { accepted: false, completed: false, execution_mode: 'remote', ...inspection }
   }
 
-  const entity = game.get_entity_by_unit_number(unit_number as UnitNumber)
+  const entity = resolve_entity_reference(actor, unit_number, 'map_visible')
   if (!entity || !entity.valid) {
     return { accepted: false, completed: false, execution_mode: 'remote', code: 'entity_not_found', unit_number }
   }

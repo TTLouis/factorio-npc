@@ -1,5 +1,6 @@
-import type { LuaEntity, UnitNumber } from 'factorio:runtime'
+import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
+import { resolve_entity_reference } from './entity_reference'
 
 const DEFAULT_HALF_SIZE = 12
 const MIN_HALF_SIZE = 4
@@ -68,7 +69,7 @@ function resolve_anchor(actor: ControlledActor, request: ConstructionObservation
     if (request.anchor_unit_number < 1 || math.floor(request.anchor_unit_number) !== request.anchor_unit_number) {
       return { error: 'invalid anchor_unit_number' }
     }
-    const entity = game.get_entity_by_unit_number(request.anchor_unit_number as UnitNumber)
+    const entity = resolve_entity_reference(actor, request.anchor_unit_number, 'map_visible')
     if (!entity || !entity.valid) return { error: 'anchor entity not found' }
     if (entity.surface.index !== actor.surface.index) return { error: 'anchor entity is on another surface' }
     return { position: entity.position, entity }

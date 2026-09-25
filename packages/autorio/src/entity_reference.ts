@@ -39,31 +39,50 @@ export function entity_reference_hint(unit_number: number) {
   }
 }
 
-export function resolve_exact_entity(actor: ControlledActor, unit_number: number) {
-  const direct = game.get_entity_by_unit_number(unit_number as UnitNumber)
-  if (direct && direct.valid) {
-    remember_entity_reference(direct)
-    return direct
-  }
+// actor_body: the actor's own surface and force (body actions).
+// map_visible: any surface and force; callers apply their own charted/visible
+// and force policy checks afterwards (map inspection and mutation, navigation
+// targets, construction anchors).
+export type EntityReferenceScope = 'actor_body' | 'map_visible'
 
-  // Some live entities observed through the actor surface are not returned by
-  // game.get_entity_by_unit_number() immediately. The observation hint is only
-  // a lookup aid for the *same* identity: never substitute a replacement that
-  // merely has the same name and position.
-  const hint = hints()[unit_number]
-  if (!hint) return undefined
-  if (hint.surface_index !== actor.surface.index || hint.force_index !== actor.force.index) return undefined
-
-  const candidates = actor.surface.find_entities_filtered({
+function identity_at(surface: LuaSurface, hint: EntityReferenceHint, unit_number: number, force?: ControlledActor['force']) {
+  const filters: Record<string, unknown> = {
     position: hint.position,
     radius: 0.25,
     name: hint.name,
-    force: actor.force,
-  })
+  }
+  if (force) filters.force = force
+  const candidates = surface.find_entities_filtered(filters as any)
   for (const candidate of candidates) {
     if (!candidate.valid || candidate.unit_number !== unit_number) continue
     remember_entity_reference(candidate)
     return candidate
   }
   return undefined
+}
+
+export function resolve_entity_reference(actor: ControlledActor, unit_number: number, scope: EntityReferenceScope) {
+  // Only prototypes flagged get-by-unit-number are indexed here; ordinary
+  // buildings are not and fall through to the observation hint.
+  const direct = game.get_entity_by_unit_number(unit_number as UnitNumber)
+  if (direct && direct.valid) {
+    remember_entity_reference(direct)
+    return direct
+  }
+
+  // The observation hint is only a lookup aid for the *same* identity: never
+  // substitute a replacement that merely has the same name and position.
+  const hint = hints()[unit_number]
+  if (!hint) return undefined
+  if (scope === 'actor_body') {
+    if (hint.surface_index !== actor.surface.index || hint.force_index !== actor.force.index) return undefined
+    return identity_at(actor.surface, hint, unit_number, actor.force)
+  }
+  const surface = game.get_surface(hint.surface_index)
+  if (!surface || !surface.valid) return undefined
+  return identity_at(surface, hint, unit_number)
+}
+
+export function resolve_exact_entity(actor: ControlledActor, unit_number: number) {
+  return resolve_entity_reference(actor, unit_number, 'actor_body')
 }

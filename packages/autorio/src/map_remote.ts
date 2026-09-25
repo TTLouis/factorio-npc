@@ -1,5 +1,6 @@
-import type { LuaEntity, LuaSurface, UnitNumber } from 'factorio:runtime'
+import type { LuaEntity, LuaSurface } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
+import { remember_entity_reference, resolve_entity_reference } from './entity_reference'
 import { crafting_categories_support_recipe } from './recipe_categories'
 
 const MAX_MAP_QUERY_RADIUS = 256
@@ -199,6 +200,9 @@ export function query_charted_entities(
       const identity = entity_identity(entity)
       if (seen[identity]) continue
       seen[identity] = true
+      // Map-observed unit numbers must resolve later, and ordinary buildings
+      // are not indexed by game.get_entity_by_unit_number().
+      remember_entity_reference(entity)
       entities.push(entity_snapshot(entity))
       if (entities.length >= limit) break
     }
@@ -222,7 +226,7 @@ function resolve_visible_entity(actor: ControlledActor, unit_number: number) {
   if (!valid_integer(unit_number, 1, 9007199254740991)) {
     return { code: 'entity_not_found' as MapObservationCode, entity: undefined }
   }
-  const entity = game.get_entity_by_unit_number(unit_number as UnitNumber)
+  const entity = resolve_entity_reference(actor, unit_number, 'map_visible')
   if (!entity || !entity.valid) {
     return { code: 'entity_not_found' as MapObservationCode, entity: undefined }
   }

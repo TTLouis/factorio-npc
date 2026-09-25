@@ -1,5 +1,6 @@
-import type { LuaEntity, LuaLogisticNetwork, UnitNumber } from 'factorio:runtime'
+import type { LuaEntity, LuaLogisticNetwork } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
+import { resolve_entity_reference } from './entity_reference'
 
 function valid_unit_number(value: number) {
   return typeof value === 'number' && value === math.floor(value) && value >= 1 && value <= 9007199254740991
@@ -22,7 +23,7 @@ function is_visible(actor: ControlledActor, entity: LuaEntity) {
 
 function resolve_visible_entity(actor: ControlledActor, unit_number: number) {
   if (!valid_unit_number(unit_number)) return { code: 'entity_not_found', entity: undefined }
-  const entity = game.get_entity_by_unit_number(unit_number as UnitNumber)
+  const entity = resolve_entity_reference(actor, unit_number, 'map_visible')
   if (!entity || !entity.valid) return { code: 'entity_not_found', entity: undefined }
   if (!is_charted(actor, entity)) return { code: 'area_uncharted', entity: undefined }
   if (!is_visible(actor, entity)) return { code: 'area_not_visible', entity: undefined }
@@ -60,6 +61,12 @@ function network_status(actor: ControlledActor, entity: LuaEntity) {
     completion_uncertainty: 'robot pathing and storage capacity are not prevalidated',
     networks: summaries,
   }
+}
+
+// Deconstruction may target the actor's own force or neutral entities (for
+// example crash-site wrecks); other forces' entities are rejected.
+function deconstructible_force(actor: ControlledActor, entity: LuaEntity) {
+  return entity.force.index === actor.force.index || entity.force.name === 'neutral'
 }
 
 function pending_or_blocked(construction: { remotely_fulfillable: boolean }) {
@@ -100,6 +107,9 @@ export function mark_remote_deconstruction(actor: ControlledActor, unit_number: 
       code: resolved.code,
       unit_number,
     }
+  }
+  if (!deconstructible_force(actor, entity)) {
+    return { accepted: false, completed: false, execution_mode: 'remote', code: 'wrong_force', unit_number }
   }
 
   const construction = network_status(actor, entity)
@@ -149,6 +159,9 @@ export function cancel_remote_deconstruction(actor: ControlledActor, unit_number
       code: resolved.code,
       unit_number,
     }
+  }
+  if (!deconstructible_force(actor, entity)) {
+    return { accepted: false, completed: false, execution_mode: 'remote', code: 'wrong_force', unit_number }
   }
 
   if (!entity.to_be_deconstructed()) {

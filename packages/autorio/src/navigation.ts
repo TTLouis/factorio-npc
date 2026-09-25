@@ -1,8 +1,9 @@
-import type { LuaEntity, OnScriptPathRequestFinishedEvent, PathfinderWaypoint, UnitNumber } from 'factorio:runtime'
+import type { LuaEntity, OnScriptPathRequestFinishedEvent, PathfinderWaypoint } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import type { new_task_manager } from './task_manager'
 import type { PlayerParametersWalkToEntity } from './types'
 import { select_navigation_escape_point } from './construction_planning'
+import { resolve_entity_reference } from './entity_reference'
 import { TaskStates } from './types'
 import { direction_towards } from './utils/direction'
 import { distance } from './utils/math'
@@ -277,7 +278,7 @@ export function new_navigation_controller(get_actor: () => ControlledActor | und
     }
     const resolved = actor_for_submission()
     if (!resolved || resolved.identity.actor_id === undefined) return [false, 'No controlled actor']
-    const entity = game.get_entity_by_unit_number(unit_number as UnitNumber)
+    const entity = resolve_entity_reference(resolved.actor, unit_number, 'map_visible')
     if (!entity || !entity.valid) {
       record(resolved.actor, undefined, false, false, 'target_gone')
       return [false, `Entity unit ${unit_number} not found`]
@@ -288,6 +289,9 @@ export function new_navigation_controller(get_actor: () => ControlledActor | und
     }
     const task = make_task(resolved.actor, resolved.identity, entity.name, 1, undefined, reach_distance, 'exact_entity')
     task.target_unit_number = unit_number
+    // Keep the resolved entity: ordinary buildings are not indexed by
+    // game.get_entity_by_unit_number(), so acquire must not look it up again.
+    task.target = entity
     manager.add_task(task)
     return [true, 'Task started']
   }
@@ -440,7 +444,9 @@ export function new_navigation_controller(get_actor: () => ControlledActor | und
       target = player.character
     }
     else if (task.target_kind === 'exact_entity' && task.target_unit_number !== undefined) {
-      target = game.get_entity_by_unit_number(task.target_unit_number as UnitNumber)
+      target = task.target?.valid && task.target.unit_number === task.target_unit_number
+        ? task.target
+        : resolve_entity_reference(actor, task.target_unit_number, 'map_visible')
       if (!target || !target.valid) {
         fail(actor, task, 'target_gone')
         return false

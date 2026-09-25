@@ -1,5 +1,6 @@
 import type { ControlledActor } from './actors/types'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { remember_entity_reference } from './entity_reference'
 import { new_navigation_controller } from './navigation'
 import { new_task_manager } from './task_manager'
 import { TaskStates } from './types'
@@ -13,6 +14,7 @@ function fixture() {
     unit_number: 88,
     position: { x: 20, y: 0 },
     surface: { index: 1 },
+    force: { index: 1 },
   }
   const character = {
     valid: true,
@@ -25,6 +27,7 @@ function fixture() {
   }
   const surface = {
     index: 1,
+    valid: true,
     find_entities_filtered: vi.fn(() => []),
     find_non_colliding_position: vi.fn(() => ({ x: 6, y: 0 })),
     get_tile: vi.fn(() => ({ name: 'grass-1' })),
@@ -95,6 +98,22 @@ describe('precise navigation primitives', () => {
       target_kind: 'exact_entity',
       target: { unit_number: 88, name: 'steel-chest' },
     })
+  })
+
+  it('reaches an observed building the unit-number index does not cover, resolving it once', () => {
+    const f = fixture()
+    // Ordinary buildings are not indexed by game.get_entity_by_unit_number();
+    // the observation hint on the target's surface finds the same identity.
+    remember_entity_reference(f.target as any)
+    f.surface.find_entities_filtered.mockReturnValue([f.target] as any)
+    ;(globalThis as any).game.get_surface = vi.fn(() => f.surface)
+
+    expect(f.controller.submit_exact(88, 2)).toEqual([true, 'Task started'])
+    f.controller.tick(f.actor)
+
+    expect(f.surface.request_path).toHaveBeenCalledWith(expect.objectContaining({ goal: { x: 20, y: 0 } }))
+    expect(f.surface.find_entities_filtered).toHaveBeenCalledTimes(1)
+    expect((globalThis as any).game.get_entity_by_unit_number).toHaveBeenCalledTimes(1)
   })
 
   it('fails closed when an exact unit disappears before movement starts', () => {

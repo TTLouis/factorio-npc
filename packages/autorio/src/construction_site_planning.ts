@@ -1,5 +1,5 @@
-import type { UnitNumber } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
+import { resolve_entity_reference } from './entity_reference'
 
 type Position = { x: number, y: number }
 type Area = { left_top: Position, right_bottom: Position }
@@ -35,7 +35,7 @@ function valid_position(value: unknown): value is Position {
 function resolve_anchor(actor: ControlledActor, request: ConstructionSiteRequest) {
   if (request.anchor_unit_number !== undefined) {
     if (!valid_integer(request.anchor_unit_number, 1, 9007199254740991)) return { error: 'invalid anchor_unit_number' }
-    const entity = game.get_entity_by_unit_number(request.anchor_unit_number as UnitNumber)
+    const entity = resolve_entity_reference(actor, request.anchor_unit_number, 'map_visible')
     if (!entity || !entity.valid) return { error: 'anchor entity not found' }
     if (entity.surface.index !== actor.surface.index) return { error: 'anchor entity is on another surface' }
     return { position: entity.position, unit_number: entity.unit_number, entity_name: entity.name }
