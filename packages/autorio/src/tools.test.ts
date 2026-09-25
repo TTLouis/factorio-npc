@@ -7,6 +7,10 @@ vi.mock('./actors/actor_controller', () => ({
   get_controlled_actor: () => actor_state.actor,
 }))
 
+vi.mock('./spatial_semantics', () => ({
+  compact_spatial_summary: () => undefined,
+}))
+
 // Lua tables are both indexable and iterable with pairs(); the TS source
 // iterates them with for..of, so the stand-in supports both.
 function lua_table<T>(entries: Record<string, T>) {
@@ -81,5 +85,35 @@ describe('goal conditions while the NPC body is dead', () => {
     const tools = await tools_interface()
 
     expect(tools.evaluate_condition({ kind: 'rockets_launched', minimum: 1 })).toMatchObject({ current: 5 })
+  })
+})
+
+describe('nearby entity observation', () => {
+  function nearby_entity(name: string, type: string, x: number, unit_number?: number) {
+    return { valid: true, name, type, unit_number, position: { x, y: 0 }, surface: { index: 1 }, force: { index: 1, name: 'player' } }
+  }
+
+  it('keeps buildings ahead of resource tiles, nearest first, and counts every match', async () => {
+    ;(globalThis as any).storage = {}
+    ;(globalThis as any).game.tick = 10
+    // Engine order puts the ore tiles first; a cap of 3 used to drop both buildings.
+    const matches = [
+      nearby_entity('iron-ore', 'resource', 1),
+      nearby_entity('iron-ore', 'resource', 2),
+      nearby_entity('iron-ore', 'resource', 3),
+      nearby_entity('stone-furnace', 'furnace', 9, 42),
+      nearby_entity('burner-mining-drill', 'mining-drill', 5, 41),
+    ]
+    const find = vi.fn(() => matches)
+    actor_state.actor = { position: { x: 0, y: 0 }, surface: { index: 1, find_entities_filtered: find } }
+    const tools = await tools_interface()
+
+    const result = tools.get_nearby_entities(20, undefined, undefined, 3)
+
+    expect(result.entities.map((entity: any) => entity.unit_number ?? entity.name)).toEqual([41, 42, 'iron-ore'])
+    expect(result.entities[2].position).toEqual({ x: 1, y: 0 })
+    expect(result).toMatchObject({ matched_count: 5, returned_count: 3, truncated: true })
+    expect(result.type_counts).toEqual({ 'resource': 3, 'furnace': 1, 'mining-drill': 1 })
+    expect((globalThis as any).storage.airi_entity_reference_hints[41]).toMatchObject({ name: 'burner-mining-drill' })
   })
 })

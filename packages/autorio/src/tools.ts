@@ -286,10 +286,28 @@ export function create_tools_remote_interface() {
       }
 
       const matches = actor.surface.find_entities_filtered(filters as any)
+      // Engine order is not meaningful and the result is capped, so keep
+      // entities with a unit_number (buildings, vehicles) ahead of resources
+      // and trees, nearest first. type_counts covers every match, so the model
+      // can see what the cap dropped and filter by name or type.
+      const type_counts: Record<string, number> = {}
+      const ranked: Array<{ entity: LuaEntity, identified: boolean, distance: number }> = []
+      for (const entity of matches) {
+        type_counts[entity.type] = (type_counts[entity.type] ?? 0) + 1
+        ranked.push({
+          entity,
+          identified: entity.unit_number !== undefined,
+          distance: squared_distance(actor.position, entity.position),
+        })
+      }
+      ranked.sort((a, b) => {
+        if (a.identified !== b.identified) return a.identified ? -1 : 1
+        return a.distance - b.distance
+      })
       const entities: Array<Record<string, unknown>> = []
-      const returned = math.min(matches.length, bounded_limit)
+      const returned = math.min(ranked.length, bounded_limit)
       for (let i = 0; i < returned; i++) {
-        const entity = matches[i]
+        const entity = ranked[i].entity
         remember_entity_reference(entity)
         const summary: Record<string, unknown> = {
           name: entity.name,
@@ -314,6 +332,7 @@ export function create_tools_remote_interface() {
         matched_count: matches.length,
         returned_count: entities.length,
         truncated: matches.length > entities.length,
+        type_counts,
       }
     },
     get_entity_status: (name: string, radius: number = 8) => {
