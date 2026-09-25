@@ -135,9 +135,12 @@ export function refresh_console_titlebar(root: FrameGuiElement, buttons: Console
  * else, so the three answers it needs are the first thing the player sees.
  */
 export function render_blocked_banner(parent: LuaGuiElement, state: ConsoleBlockedState) {
-  const banner = parent.add({ type: 'frame', name: ui_constants.BLOCKED_SECTION_NAME, direction: 'vertical', style: 'inside_shallow_frame' })
-  banner.style.width = ui_constants.LEFT_COLUMN_WIDTH
-  banner.style.padding = ui_constants.SECTION_PADDING
+  const frame = parent.add({ type: 'frame', name: ui_constants.BLOCKED_SECTION_NAME, direction: 'vertical', style: 'inside_shallow_frame' })
+  frame.style.width = ui_constants.LEFT_COLUMN_WIDTH
+  frame.style.padding = ui_constants.SECTION_PADDING
+  // Spacing is a flow/table style property; setting it on the frame is a
+  // non-recoverable mod error, so the content sits in a flow.
+  const banner = frame.add({ type: 'flow', direction: 'vertical' })
   banner.style.vertical_spacing = 4
   const width = ui_constants.LEFT_COLUMN_WIDTH - 2 * ui_constants.SECTION_PADDING
   const heading = gui_text.literal_gui_text(banner.add({ type: 'label', caption: `BLOCKED · ${state.summary}`, style: 'bold_label' }))
@@ -182,9 +185,11 @@ export function render_action_row(parent: LuaGuiElement, state: ConsoleActionSta
   actions.style.width = ui_constants.LEFT_COLUMN_WIDTH
   actions.style.vertical_spacing = 6
   if (state.more_open) {
-    const menu = actions.add({ type: 'frame', name: ui_constants.MORE_MENU_NAME, direction: 'vertical', style: 'inside_shallow_frame' })
-    menu.style.width = ui_constants.LEFT_COLUMN_WIDTH
-    menu.style.padding = ui_constants.SECTION_PADDING
+    const menu_frame = actions.add({ type: 'frame', name: ui_constants.MORE_MENU_NAME, direction: 'vertical', style: 'inside_shallow_frame' })
+    menu_frame.style.width = ui_constants.LEFT_COLUMN_WIDTH
+    menu_frame.style.padding = ui_constants.SECTION_PADDING
+    // As in the blocked banner: spacing on the frame itself crashed the server.
+    const menu = menu_frame.add({ type: 'flow', direction: 'vertical' })
     menu.style.vertical_spacing = 6
     const choice_row = () => {
       const row = menu.add({ type: 'flow', direction: 'horizontal' })

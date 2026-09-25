@@ -14,7 +14,7 @@ import {
   toggle_task_board_ui_open,
   create_task_board_ui_remote_interface,
 } from './task_board_ui'
-import { BUTTON_NAME, PROMPT_FIELD_NAME, ROOT_NAME, SKILLS_BUTTON_NAME, SKILLS_ROOT_NAME } from './task_board_ui_constants'
+import { ACTIONS_NAME, BUTTON_NAME, MORE_BUTTON_NAME, MORE_MENU_NAME, PROMPT_FIELD_NAME, ROOT_NAME, SKILLS_BUTTON_NAME, SKILLS_ROOT_NAME } from './task_board_ui_constants'
 import { get_handler } from './test-event-registry'
 import { DEBUG_BUTTON_NAME } from './task_board_debug'
 import { PROJECTS_BUTTON_NAME } from './projects/project_window'
@@ -588,7 +588,17 @@ function fake_gui_element(counter: GuiCounter, player_index: number, spec: Recor
   const children: any[] = []
   const props: Record<string, any> = { ...spec, tags: spec.tags ?? {} }
   let valid = true
-  const style: Record<string, any> = {}
+  // Factorio rejects spacing on elements that don't lay out children in a line
+  // ("Expected Table or Flow or VerticalFlow or TabbedPane style type but was
+  // Frame"), which crashed the server when the … menu opened.
+  const spaced_types = new Set(['flow', 'table', 'tabbed-pane'])
+  const style: Record<string, any> = new Proxy({}, {
+    set: (target: Record<string, any>, key, value) => {
+      if ((key === 'vertical_spacing' || key === 'horizontal_spacing') && !spaced_types.has(spec.type)) throw new Error(`${String(key)} set on a ${spec.type} (${spec.name ?? 'unnamed'})`)
+      target[key as string] = value
+      return true
+    },
+  })
   const invalidate = (element: any) => { for (const child of element.children) invalidate(child); element.__invalidate() }
   const self: any = new Proxy({}, {
     get: (_target, key) => {
@@ -682,6 +692,28 @@ describe('console refresh leaves unchanged sections alone', () => {
       ui.click(SKILLS_BUTTON_NAME); ui.click(PROJECTS_BUTTON_NAME); ui.click(DEBUG_BUTTON_NAME)
       expect(window.valid).toBe(true)
       expect(ui.counter.log.filter(line => line === `destroy ${ROOT_NAME}`)).toEqual([])
+    }
+    finally { ui.restore() }
+  })
+
+  it('the … button opens and closes the New task / Terminate menu', () => {
+    // It crashed the server: the menu frame was given flow spacing.
+    const find = (element: any, name: string): any => {
+      if (element.name === name) return element
+      for (const child of element.children) { const found = find(child, name); if (found !== undefined) return found }
+      return undefined
+    }
+    const ui = open_console()
+    try {
+      ui.click(BUTTON_NAME); ui.board.set_snapshot(snapshot()); ui.tick()
+      expect(find(ui.player.gui.screen, ACTIONS_NAME)?.valid).toBe(true)
+      expect(find(ui.player.gui.screen, MORE_MENU_NAME)).toBeUndefined()
+      ui.click(MORE_BUTTON_NAME)
+      expect(find(ui.player.gui.screen, MORE_MENU_NAME)?.valid).toBe(true)
+      ui.tick()
+      expect(find(ui.player.gui.screen, MORE_MENU_NAME)?.valid).toBe(true)
+      ui.click(MORE_BUTTON_NAME)
+      expect(find(ui.player.gui.screen, MORE_MENU_NAME)).toBeUndefined()
     }
     finally { ui.restore() }
   })
