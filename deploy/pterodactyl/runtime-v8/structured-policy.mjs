@@ -590,7 +590,7 @@ const placementPlannerDefinition = {
   type: 'function',
   function: {
     name: 'planPlacement',
-    description: 'Deterministically select collision-free, locally reachable placement candidates from the live spatial map when geometry actually matters or after simple nearby place_entity failed with a meaningful placement blocker. Do not require this tool for ordinary unconstrained nearby placement: place_entity may omit coordinates and let the runtime choose a local non-colliding position. Returns explicit rejection causes plus reserved input/output/power/future-extension corridor intent. For resource-bound, shoreline-bound, or fluid-port-sensitive entities prefer getPlacementCandidates because it uses current prototype/runtime semantic constraints and candidate-id execution.',
+    description: 'Deterministically select collision-free, locally reachable placement candidates from the live spatial map when geometry actually matters or after simple nearby place_entity failed with a meaningful placement blocker. Candidate centers, side checks, extension spacing, blockers, and returned footprints are derived from the entity's size and orientation. Do not require this tool for ordinary unconstrained nearby placement: place_entity may omit coordinates and let the runtime choose a local non-colliding position. For output/drop-point relationships, use getPlacementCandidates with covers_position instead of treating that point as a center. For resource-bound, shoreline-bound, or fluid-port-sensitive entities prefer getPlacementCandidates because it uses current prototype/runtime semantic constraints and candidate-id execution.',
     parameters: {
       type: 'object', additionalProperties: false, required: ['entity_name'],
       properties: {
