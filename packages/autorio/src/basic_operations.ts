@@ -50,6 +50,14 @@ export interface BasicOperationResult {
   placed_position?: { x: number, y: number }
   placed_surface_index?: number
   placed_direction?: number
+  placement_footprint?: {
+    tile_width: number
+    tile_height: number
+    tile_box: { left_top: { x: number, y: number }, right_bottom: { x: number, y: number } }
+    world_box: { left_top: { x: number, y: number }, right_bottom: { x: number, y: number } }
+  }
+  placement_grid?: { x_offset: number, y_offset: number, nearest_valid_center?: { x: number, y: number } }
+  placement_blockers?: Array<{ name: string, type: string, unit_number?: number, position: { x: number, y: number } }>
   previous_direction?: number
   reverse?: boolean
   rocket_silo_status?: number
