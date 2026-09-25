@@ -231,14 +231,21 @@ export function prototype_spatial_geometry(name: string) {
   }
 }
 
-function corridor_descriptors(anchor: Position, request: PlacementPlanRequest) {
+function corridor_descriptors(anchor: Position, request: PlacementPlanRequest, prototype: any, direction: number | undefined) {
   const side = request.side ?? 'any'
   const extension = request.extension_direction ?? side
+  const extension_vector = direction_vector(extension)
+  const size = placement_tile_size(prototype, direction)
+  const extension_clearance = extension_vector
+    ? (extension_vector.x !== 0 ? size.tile_width : size.tile_height)
+    : undefined
   return {
     input: request.reserve_input === true ? { reserved: true, side } : { reserved: false },
     output: request.reserve_output === true ? { reserved: true, side: extension } : { reserved: false },
     power: request.reserve_power === true ? { reserved: true, around_anchor: anchor, clearance: 1 } : { reserved: false },
-    future_extension: extension === 'any' ? { reserved: false } : { reserved: true, direction: extension, minimum_clear_tiles: 2 },
+    future_extension: extension === 'any'
+      ? { reserved: false }
+      : { reserved: true, direction: extension, minimum_clear_tiles: extension_clearance },
   }
 }
 
@@ -437,7 +444,7 @@ export function plan_placement(actor: ControlledActor, request: PlacementPlanReq
     search_radius: radius,
     max_candidates,
     prototype: prototype_spatial_geometry(request.entity_name),
-    corridors: corridor_descriptors(anchor.position, request),
+    corridors: corridor_descriptors(anchor.position, request, prototype, direction),
     best: selected[0],
     candidates: selected,
     rejected,
