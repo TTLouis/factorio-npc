@@ -383,12 +383,17 @@ def run(client: Rcon, results: Path) -> None:
         footprint_a = candidate_a.get('footprint') or {}
         if not isinstance(output_a, dict):
             continue
-        second_set = candidates(
-            "{entity_name='burner-mining-drill',"
-            f"covers_position={{x={output_a['x']},y={output_a['y']}}},"
-            "radius=4,target_resource='coal',limit=8}",
+        second_set = json_command(
+            lua_json(remote_call(
+                'autorio_tools',
+                'get_placement_candidates',
+                "{entity_name='burner-mining-drill',"
+                f"covers_position={{x={output_a['x']},y={output_a['y']}}},"
+                "radius=4,target_resource='coal',limit=8}",
+            )),
             'reciprocal drill B candidates',
         )
+        require(second_set.get('ok') is True, {'context': 'reciprocal drill B candidates', 'result': second_set})
         for candidate_b in second_set.get('candidates') or []:
             if candidate_b.get('position') == candidate_a.get('position'):
                 continue
