@@ -26,6 +26,33 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
+For a metered connection on Windows, build a clean committed checkout locally:
+
+```powershell
+.\scripts\build-docker-local.ps1 -Restart
+```
+
+This uses the checkout instead of downloading its source archive and installer
+from GitHub. It pins the resulting image and `.env` to the local HEAD commit.
+Docker keeps the verified Factorio archive, portable Node archive, npm cache,
+and pnpm package store between source builds. The first local build fills any
+missing caches; later code-only builds still compile and verify the mod but
+should not re-download unchanged dependency packages. Checksums and the small
+release metadata requests remain online. Omit `-Restart` to build without
+replacing the running container.
+
+When only the Autorio mod changed since the image was built, replace just the mod:
+
+```powershell
+.\scripts\update-docker-mod-local.ps1 -Restart
+```
+
+It builds the mod inside Docker the way the installer does (source preparation
+with the deployment guard, tests, typecheck, Lua build), reusing the Factorio
+test image's pnpm store, and layers it onto the existing image. It refuses to
+run if files outside the mod, docs, tests or these Docker files changed; use the
+full local build then.
+
 Persistent server state is stored in `${SGLUNA_DATA_DIR:-./data}`. This includes saves, `sgluna-config.json`, `data/server-settings.json`, mods, and SGLuna runtime state.
 
 Follow logs with:
@@ -54,7 +81,7 @@ The Docker build resolves that ref to an exact SHA and bakes that exact AIRI run
 
 To test ongoing NPC development instead, set `SGLUNA_SOURCE_REF=feat/npc-transition-work` explicitly. An exact 40-character commit SHA can be used for fully reproducible builds.
 
-The build is layered so a source change doesn't download Factorio again. The system packages and the official Factorio archive (verified against Factorio's published checksums) are cached. The source install layer reruns whenever its build arguments change. With an exact commit SHA, a rebuild installs exactly that commit, and a new SHA reinstalls only the source. A branch ref such as `main` is resolved only when that layer reruns, so to pick up a branch's newer commits, set a new `SGLUNA_SOURCE_NONCE` (for example `SGLUNA_SOURCE_NONCE=$(date +%s) docker compose up -d --build`) or use a SHA. The installer re-verifies the cached archive and downloads Factorio itself if the cached version differs from the one it resolves. Published prerelease images are already pinned and do not need this rebuild behavior.
+The build is layered so a source change doesn't download Factorio again. The system packages and the official Factorio archive (verified against Factorio's published checksums) are cached. Docker also caches the Node archive and package manager stores across source revisions. The source install layer reruns whenever its build arguments change. With an exact commit SHA, a rebuild installs exactly that commit, and a new SHA reinstalls only the source. A branch ref such as `main` is resolved only when that layer reruns, so to pick up a branch's newer commits, set a new `SGLUNA_SOURCE_NONCE` (for example `SGLUNA_SOURCE_NONCE=$(date +%s) docker compose up -d --build`) or use a SHA. The installer re-verifies the cached archive and downloads Factorio itself if the cached version differs from the one it resolves. Published prerelease images are already pinned and do not need this rebuild behavior.
 
 ## Configuration boundary
 
