@@ -24,6 +24,12 @@ What is proven against real Factorio through authoritative game state:
     OPERATING   inserters are powered and never report no_power
     MOVING      items are observed riding the belt, and the destination chest
                 inventory rises while the source inventory falls
+    MEASURED    the planning tools read the running line through the engine:
+                live belt-lane and inserter throughput measurements complete
+                with items counted, and factory area analysis reads every cell
+                entity and its transfer relations (these tools crashed in the
+                engine on untyped generated Lua; see
+                docs/validation/AUTORIO_GENERATED_LUA_ENGINE_DEFECTS_2026-09-25.md)
 
 Placement-only success is explicitly NOT accepted as a pass.
 """
@@ -44,6 +50,9 @@ SOURCE_ITEMS = 30
 TARGET_TRANSPORTED = 20
 ROUND_TICKS = 300
 ROUNDS = 12
+MEASURE_WARMUP_TICKS = 60
+MEASURE_WINDOW_TICKS = 600
+MEASURED_BELT = 'belt_3'
 
 # Factorio 2.0 direction constants. A transport belt moves items toward its
 # `direction`; an inserter's `direction` points at the tile it picks up from.
@@ -371,6 +380,32 @@ def run(client: Rcon, results: Path) -> None:
         'source_chest': baseline['cell']['source_chest'],
     })
 
+    # ---- MEASURED (start): sample the line while items move ---------------
+    def start_measurement(request: str, context: str) -> int:
+        started = json_command(lua_json(remote_call('autorio_planning', 'throughput_measurement_start', request)), context)
+        require(started.get('ok') is True and started.get('state') == 'running', {'context': context, 'result': started})
+        return started['measurement_id']
+
+    window = f'warmup_ticks={MEASURE_WARMUP_TICKS},window_ticks={MEASURE_WINDOW_TICKS}'
+    measurements = {
+        f'{MEASURED_BELT} lane {lane}': start_measurement(
+            f"{{kind='belt_lane',unit_number={unit_numbers[MEASURED_BELT]},lane_index={lane},item_name='{ITEM}',{window}}}",
+            f'start {MEASURED_BELT} lane {lane} measurement',
+        )
+        for lane in (1, 2)
+    }
+    measurements['destination_inserter'] = start_measurement(
+        f"{{kind='inserter_instance',unit_number={unit_numbers['destination_inserter']},item_name='{ITEM}',{window}}}",
+        'start destination inserter measurement',
+    )
+    capacity = json_command(
+        lua_json(remote_call('autorio_planning', 'capacity', f"{{kind='inserter_instance',unit_number={unit_numbers['destination_inserter']}}}")),
+        'destination inserter capacity',
+    )
+    require(capacity.get('ok') is True and capacity.get('unit_number') == unit_numbers['destination_inserter'], {
+        'message': 'inserter capacity did not resolve the observed inserter', 'capacity': capacity,
+    })
+
     # ---- OPERATING + MOVING ----------------------------------------------
     observed = baseline
     rounds_used = 0
@@ -419,6 +454,39 @@ def run(client: Rcon, results: Path) -> None:
         'message': 'no item was ever observed riding the belt run, so belt transport is unproven',
         'cell': observed['cell'],
     })
+
+    # ---- MEASURED (finish) -------------------------------------------------
+    results_by_name: dict[str, dict] = {}
+    for attempt in range(ROUNDS):
+        results_by_name = {
+            name: json_command(lua_json(remote_call('autorio_planning', 'throughput_measurement_status', str(measurement_id))), f'{name} measurement status')
+            for name, measurement_id in measurements.items()
+        }
+        if all(result.get('state') != 'running' for result in results_by_name.values()):
+            break
+        run_operation(remote_call('autorio_operations', 'wait', str(ROUND_TICKS)), f'wait for measurements {attempt + 1}', 40.0)
+    evidence['measurements'] = results_by_name
+    flush()
+    for name, result in results_by_name.items():
+        require(result.get('ok') is True and result.get('state') == 'complete', {'message': f'{name} measurement did not complete', 'result': result})
+    belt_items_measured = sum(results_by_name[f'{MEASURED_BELT} lane {lane}'].get('measured_items') or 0 for lane in (1, 2))
+    require(belt_items_measured > 0, {'message': 'belt-lane measurements counted no items on a moving line', 'measurements': results_by_name})
+    inserter_delivered = (results_by_name['destination_inserter'].get('inserter') or {}).get('delivered_items') or 0
+    require(inserter_delivered > 0, {'message': 'inserter measurement counted no deliveries on a moving line', 'measurement': results_by_name['destination_inserter']})
+
+    area = f'{{area={{left_top={{x={ox - 7},y={oy - 1}}},right_bottom={{x={ox + 2},y={oy + 7}}}}}}}'
+    analyzed = json_command(lua_json(remote_call('autorio_skills', 'analyze_area', area)), 'analyze the transport cell area')
+    require(analyzed.get('ok') is True, {'message': 'factory area analysis failed on the cell', 'result': analyzed})
+    require((analyzed.get('entity_count') or 0) >= len(CELL) and (analyzed.get('relation_count') or 0) > 0, {
+        'message': 'factory area analysis missed cell entities or their transfer relations', 'result': analyzed,
+    })
+    evidence['area_analysis'] = analyzed
+    print(
+        f'PASS: MEASURED - belt lanes counted {belt_items_measured} {ITEM}, the inserter delivered {inserter_delivered} '
+        f'in a {MEASURE_WINDOW_TICKS}-tick window, and area analysis read {analyzed["entity_count"]} entities '
+        f'and {analyzed["relation_count"]} relations',
+        flush=True,
+    )
 
     command('/silent-command game.speed=1; rcon.print("true")')
     evidence.update({
