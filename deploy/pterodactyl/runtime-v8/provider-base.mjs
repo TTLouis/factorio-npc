@@ -269,7 +269,7 @@ function providerReasoningChars(message) {
   return total
 }
 
-function structuredContentDiagnostics(content) {
+function structuredContentDiagnostics(content, { planContract = true } = {}) {
   const text = String(content ?? '')
   if (!text) return { json_valid: false, plan_valid: false, error: 'empty content' }
   let parsed
@@ -281,6 +281,10 @@ function structuredContentDiagnostics(content) {
       error: error instanceof Error ? error.message : String(error),
     }
   }
+  // The interaction router answers {intent, queue_conflict, reply}, not a
+  // plan; checking it against the plan schema marked every router reply as
+  // provider_content_schema_invalid in the trace. Its caller validates it.
+  if (!planContract) return { json_valid: true }
   try {
     parsePlan(parsed)
     return { json_valid: true, plan_valid: true }
@@ -990,6 +994,7 @@ export async function providerRequest(config, messages, {
   requestBodyPatch,
   providerPolicy,
   forceFullPlanner = false,
+  interactionRouter = false,
 } = {}) {
   check(typeof config.key === 'string' && config.key.trim().length > 0, 'OPENAI_API_KEY is missing')
   check(typeof config.model === 'string' && /^[a-zA-Z0-9._:/-]{1,200}$/.test(config.model), 'Invalid model identifier')
@@ -1145,7 +1150,7 @@ export async function providerRequest(config, messages, {
     }
     const normalizedContent = typeof message.content === 'string' ? message.content : ''
     const structured = message.tool_calls === undefined
-      ? structuredContentDiagnostics(normalizedContent)
+      ? structuredContentDiagnostics(normalizedContent, { planContract: interactionRouter !== true })
       : undefined
     const finishReason = choice?.finish_reason
     const usageNumbers = providerUsageNumbers(data?.usage)

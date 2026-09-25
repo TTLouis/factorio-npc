@@ -1377,6 +1377,27 @@ function messageChars(message) {
   return String(message?.content ?? '').length + JSON.stringify(message?.tool_calls ?? '').length
 }
 
+// Chat-completions providers require every assistant `tool_calls` message to be
+// followed directly by one tool reply per call id; DeepSeek answers anything
+// else with HTTP 400, which pauses the goal. Returns the first violation.
+export function toolReplySequenceViolation(messages) {
+  if (!Array.isArray(messages)) return undefined
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index]
+    if (message?.role !== 'assistant' || !Array.isArray(message.tool_calls) || message.tool_calls.length === 0) continue
+    const pending = new Set(message.tool_calls.map(call => call?.id))
+    let next = index + 1
+    while (next < messages.length && messages[next]?.role === 'tool') {
+      pending.delete(messages[next].tool_call_id)
+      next++
+    }
+    if (pending.size > 0) {
+      return { index, unanswered: [...pending], next_role: messages[next]?.role }
+    }
+  }
+  return undefined
+}
+
 function finiteNonNegative(value) {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
 }
@@ -2358,7 +2379,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       && message.content.startsWith('[SKILL_CONTEXT]')))
     const skillContext = this.skillContext()
     if (!skillContext) return messages
-    const insertAt = Math.min(this.baseMessages.length, messages.length)
+    // Skill context belongs to the fixed prefix, which ends before the first
+    // model turn. `baseMessages` alone is not that prefix: a budget handoff
+    // swaps the working messages for a shorter capsule prefix, and a staged
+    // amendment grows `baseMessages` for the next continuation only. Indexing
+    // by it put the skill context between an assistant `tool_calls` message
+    // and its tool replies (live HTTP 400, 2026-09-25).
+    const firstTurn = messages.findIndex(message => message?.role === 'assistant' || message?.role === 'tool')
+    const insertAt = Math.min(this.baseMessages.length, firstTurn < 0 ? messages.length : firstTurn)
     return [
       ...messages.slice(0, insertAt),
       { role: 'user', content: skillContext },
@@ -5546,6 +5574,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       && (triggerSource === 'new_goal' || ['deep', 'strategic'].includes(this.reasoningBudgetOverride))) {
       providerMessages = [...providerMessages, { role: 'user', content: PLANNING_LOD_GUIDANCE }]
     }
+    // An assembly invariant, not a repair: a split tool exchange is a harness
+    // bug, and sending it only turns that bug into a provider 400.
+    const sequenceViolation = toolReplySequenceViolation(providerMessages)
+    if (sequenceViolation) {
+      await this.traceEvent('provider.message_sequence_invalid', { round, ...sequenceViolation })
+      throw new AgentLoopError(`provider_message_sequence_invalid: assistant tool_calls at message ${sequenceViolation.index} lack tool replies for ${sequenceViolation.unanswered.join(', ')} (next role: ${sequenceViolation.next_role ?? 'none'})`)
+    }
     const startedAt = Date.now()
     if (recoveryAttempt > 0 && this.traceRequest) {
       this.traceRequest.recovery = {
@@ -5900,6 +5935,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (roadmapNodeIds) plan.roadmapNodeIds = roadmapNodeIds
     if (developmentMode) plan.developmentMode = developmentMode
     if (goalDefinition) plan.goalDefinition = goalDefinition
+    if (semanticCompletion) {
+      // Refused here, the claim reaches the planner as a correction it can act
+      // on; refused in commitPlan, it failed the request (live, 2026-09-25).
+      this.semanticCompletionClaimCheck(
+        semanticCompletion,
+        this.memory.currentPlan?.(this.requestInfo?.memoryKey ?? this.activePlanKey()),
+      )
+    }
     this.enforceGoalDefinition(plan)
     const normalizedPlan = normalizeCanonicalPlan(plan.plan, plan.currentStep)
     plan.plan = normalizedPlan.plan
@@ -6598,11 +6641,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
-  async applySemanticCompletionClaim(plan, state) {
-    const claim = plan?.semanticCompletion
-    if (!claim) return { applied: false, state }
+  // Every check a semantic completion claim must pass before the reducer sees
+  // it. None of them mutates state, so parsePlanMessage runs them too: a
+  // refused claim then goes back to the planner as a plan correction instead
+  // of failing the whole request from inside commitPlan.
+  semanticCompletionClaimCheck(claim, state) {
     if (!this.requestInfo?.memoryKey || !state || state.status !== 'active') {
-      const error = new AgentLoopError('semantic_completion_requires_active_step')
+      // A paused goal is resumed only when this turn's operations are
+      // admitted, so a claim in a resume turn (the player's "continue", the
+      // UI Resume, an automatic resume) still meets the paused board. The
+      // guard stands: a paused plan must not advance before it is resumed.
+      const status = state?.status ?? 'none'
+      const pause = state?.status === 'paused' && state.pause_reason ? ` (${cleanMemoryText(state.pause_reason, 200)})` : ''
+      const error = new AgentLoopError(state?.status === 'paused'
+        ? `semantic_completion_requires_active_step: the goal is paused${pause}, so no step can be closed in this turn. Resubmit the plan and its operations without semanticCompletion. The goal resumes when this turn's operations are admitted; a step that is already satisfied can then be closed on the next turn with the evidence you hold.`
+        : `semantic_completion_requires_active_step: the goal is ${status}, so there is no active step to close. Resubmit without semanticCompletion.`)
       error.failureClass = 'plan_category'
       error.code = 'invalid_semantic_completion'
       throw error
@@ -6663,6 +6716,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       error.code = 'semantic_completion_requires_grounding'
       throw error
     }
+    return { step, grounding: deduped }
+  }
+
+  async applySemanticCompletionClaim(plan, state) {
+    const claim = plan?.semanticCompletion
+    if (!claim) return { applied: false, state }
+    const { step, grounding: deduped } = this.semanticCompletionClaimCheck(claim, state)
 
     const groundingRefs = deduped.map(item => item.ref)
     const reduced = this.memory.applyOutcomeAuthority?.(this.requestInfo.memoryKey, {

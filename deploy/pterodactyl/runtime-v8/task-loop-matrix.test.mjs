@@ -10,6 +10,7 @@ import assert from 'node:assert/strict'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
+import { pauseStrandedPlanAfterRequestError } from './supervisor.mjs'
 import { FakeFactorio, gather, inventoryCheckpoint, planReply, recordingJev } from './task-loop-fixtures.mjs'
 
 const KEY = 'npc:airi'
@@ -344,10 +345,11 @@ test('an unmet deterministic checkpoint cannot be replaced by a semantic complet
   const jev = recordingJev(async (_state, questions) =>
     questions.intent ? { overrides: { intent: { choice: 'new_goal', confidence: 0.9 } } } : undefined)
   let calls = 0
+  const corrections = []
   const agent = new NpcAgentLoop({
     rcon: game,
     memory,
-    provider: async () => {
+    provider: async (messages) => {
       calls++
       if (calls === 1) {
         return planReply({
@@ -356,6 +358,9 @@ test('an unmet deterministic checkpoint cannot be replaced by a semantic complet
           checkpoint: inventoryCheckpoint('iron-ore', 10),
         })
       }
+      const correction = messages.map(message => String(message.content ?? ''))
+        .findLast(content => content.includes('semantic_completion_cannot_bypass_deterministic_contract'))
+      if (correction) corrections.push(correction)
       const stepId = memory.currentPlan(KEY)?.task_board?.active_step_id
       return planReply({
         chatMessage: 'Claim complete.',
@@ -376,8 +381,87 @@ test('an unmet deterministic checkpoint cannot be replaced by a semantic complet
 
   await agent.request('gather 10 iron ore', { sender: 'Louis' })
   game.inventory['iron-ore'] = 5
-  await assert.rejects(agent.completed(), /semantic_completion_cannot_bypass_deterministic_contract/)
+  // The refused claim goes back to the planner as a plan correction. A
+  // planner that keeps insisting ends the request blocked before any mutation;
+  // the refusal no longer fails the request from inside commitPlan.
+  const result = await agent.completed()
+  assert.ok(corrections.length > 0, 'the planner saw the refusal')
+  assert.match(corrections[0], /^\[HARNESS\] Plan\/tool category or targeting error/)
+  assert.equal(result.blocked, true)
+  assert.match(result.chatMessage, /semantic_completion_cannot_bypass_deterministic_contract/)
   assert.equal(memory.currentPlan(KEY).task_board.completed_count, 0)
+  assert.equal(game.mutations.length, 1)
+})
+
+test('a semantic claim in a resume turn of a paused goal is sent back to the planner instead of failing the request', async () => {
+  // 2026-09-25 live (req_muh3pge2_2): a provider 400 paused the goal, the
+  // player typed "continue" (what the UI Resume sends), and the planner closed
+  // the active prose-only step with semanticCompletion while the board was
+  // still paused. The guard refused the claim inside commitPlan and the whole
+  // request failed with semantic_completion_requires_active_step.
+  const steps = ['Mine 10 coal for starter fuel', 'Place burner drill A on coal', 'Place burner drill B feeding drill A']
+  const placeA = { name: 'place_entity', args: { entity_name: 'burner-mining-drill', x: -70, y: -12, direction: 0 } }
+  let failNext = false
+  let resumeTurn = 0
+  const corrections = []
+  const world = harness({
+    game: new FakeFactorio({ inventory: { 'burner-mining-drill': 2 } }),
+    provider: async (messages) => {
+      if (failNext) {
+        failNext = false
+        throw new Error('Provider HTTP 400; request will not be retried automatically')
+      }
+      const board = world.memory.currentPlan(KEY)?.task_board
+      if (!board) return planReply({ plan: steps, operations: [gather('coal', 10)] })
+      const activeId = board.steps[board.active_index]?.id
+      if (world.memory.currentPlan(KEY).status === 'paused' || resumeTurn > 0) {
+        resumeTurn++
+        const correction = messages.map(message => String(message.content ?? ''))
+          .findLast(content => content.includes('semantic_completion_requires_active_step'))
+        if (correction) {
+          corrections.push(correction)
+          return planReply({ chatMessage: 'Placing drill A.', plan: steps, currentStep: 1, operations: [placeA] })
+        }
+        return planReply({
+          chatMessage: 'Coal is mined; placing drill A.',
+          plan: steps,
+          currentStep: 1,
+          operations: [placeA],
+          semanticCompletion: { stepId: activeId, rationale: 'The completed coal batch grounds this prose-only step.' },
+        })
+      }
+      return planReply({ plan: steps, operations: [gather('coal', 10)] })
+    },
+  })
+
+  await world.say('build a burner coal loop', 'new_goal')
+  assert.equal(world.game.mutations.length, 1)
+
+  // The coal batch completes; the planner call that follows fails and the
+  // supervisor pauses the goal, as the live 400 did.
+  failNext = true
+  const failure = await world.finish('coal').then(() => undefined, error => error)
+  assert.match(failure?.message ?? '', /Provider HTTP 400/)
+  const paused = await pauseStrandedPlanAfterRequestError(
+    { agent: world.agent, currentPlanState: () => world.memory.currentPlan(KEY) },
+    failure.message,
+  )
+  assert.equal(paused?.status, 'paused')
+  const openStep = world.memory.currentPlan(KEY).task_board.active_step_id
+
+  const resumed = await world.say('continue', 'continue_current')
+
+  assert.equal(corrections.length, 1, 'the refused claim reached the planner as a correction')
+  assert.match(corrections[0], /^\[HARNESS\] Plan\/tool category or targeting error/)
+  assert.match(corrections[0], /the goal is paused/)
+  // The paused plan did not advance on the claim; the resubmitted operations
+  // were admitted and resumed the goal.
+  assert.equal(resumed.goalStatus, 'active')
+  assert.equal(world.memory.currentPlan(KEY).status, 'active')
+  assert.equal(world.memory.currentPlan(KEY).task_board.completed_count, 0)
+  assert.equal(world.memory.currentPlan(KEY).task_board.active_step_id, openStep)
+  assert.equal(world.game.mutations.length, 2)
+  assert.match(world.game.mutations[1], /place_entity/)
 })
 
 test('moving on to the next step with its operations closes a grounded prose-only step', async () => {
