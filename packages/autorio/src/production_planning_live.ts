@@ -11,6 +11,7 @@ import type {
   ProductionTarget,
 } from './production_planning'
 import { solve_production } from './production_planning'
+import * as rates from './production_rates'
 
 export interface LiveProductionMachineSelection {
   recipe_name: string
@@ -226,7 +227,8 @@ export function solve_live_production(actor: ControlledActor, request: LiveProdu
     const selection = machine_selection_for(selections, recipe.name)
     if (selection) {
       const prototype = (prototypes.entity as any)[selection.machine_name]
-      if (!prototype || !valid_positive_number(prototype.crafting_speed)) {
+      const crafting_speed = prototype ? rates.crafting_speed_of(prototype) : 0
+      if (!prototype || !valid_positive_number(crafting_speed)) {
         adapter_failure = fail(request.calculation_id, `machine prototype is missing or has no crafting speed: ${selection.machine_name}`)
         return
       }
@@ -238,7 +240,7 @@ export function solve_live_production(actor: ControlledActor, request: LiveProdu
       add_evidence(machine_evidence, 'engine_read')
       machine = {
         name: selection.machine_name,
-        crafting_speed: prototype.crafting_speed,
+        crafting_speed,
         evidence_ids: [machine_evidence],
       }
     }

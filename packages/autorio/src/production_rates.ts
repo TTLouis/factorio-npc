@@ -118,6 +118,12 @@ export function energy_facts(prototype: LuaEntityPrototype, fuel_name: string | 
   }
 }
 
+// For older callers holding an untyped prototype: reading `.crafting_speed`
+// raises in 2.0, and an untyped method call would pass the prototype as self.
+export function crafting_speed_of(prototype: LuaEntityPrototype) {
+  return prototype.get_crafting_speed()
+}
+
 // Per-machine crafting rate for a recipe (recipe.energy is seconds at speed 1).
 export function machine_craft_rate(prototype: LuaEntityPrototype, recipe: any, fuel_name: string | undefined) {
   const crafting_speed = prototype.get_crafting_speed()

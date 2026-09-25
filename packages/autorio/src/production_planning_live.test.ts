@@ -64,19 +64,22 @@ describe('live production planning adapter', () => {
         'assembling-machine-1': {
           name: 'assembling-machine-1',
           type: 'assembling-machine',
-          crafting_speed: 0.5,
+          // 2.0 prototypes expose only the method; the old field raises in the engine.
+          get_crafting_speed: () => 0.5,
           crafting_categories: { crafting: true },
         },
         'assembling-machine-2': {
           name: 'assembling-machine-2',
           type: 'assembling-machine',
-          crafting_speed: 0.75,
+          // 2.0 prototypes expose only the method; the old field raises in the engine.
+          get_crafting_speed: () => 0.75,
           crafting_categories: { crafting: true },
         },
         'chemical-plant': {
           name: 'chemical-plant',
           type: 'assembling-machine',
-          crafting_speed: 1,
+          // 2.0 prototypes expose only the method; the old field raises in the engine.
+          get_crafting_speed: () => 1,
           crafting_categories: { chemistry: true },
         },
       },

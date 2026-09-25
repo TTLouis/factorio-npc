@@ -60,7 +60,8 @@ describe('prototype build knowledge', () => {
       collision_box: {},
       selection_box: {},
       items_to_place_this: [{ name: 'chemical-plant', count: 1 }],
-      crafting_speed: 1,
+      // 2.0 prototypes expose only the method; the old field raises in the engine.
+      get_crafting_speed: () => 1,
       crafting_categories: { chemistry: true },
       ingredient_count: 3,
       energy_usage: 210000,

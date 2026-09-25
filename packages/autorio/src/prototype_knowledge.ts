@@ -1,5 +1,6 @@
 import type { ControlledActor } from './actors/types'
 import { get_actor_inventory_items } from './utils/inventory'
+import * as rates from './production_rates'
 
 const MAX_PLACE_ITEMS = 4
 const MAX_FLUIDBOX_PROTOTYPES = 8
@@ -236,7 +237,7 @@ function entity_details(prototype: any) {
 
   if (prototype.crafting_categories) {
     result.crafting = {
-      speed: prototype.crafting_speed,
+      speed: rates.crafting_speed_of(prototype),
       categories: dictionary_keys(prototype.crafting_categories),
       ingredient_count: prototype.ingredient_count,
       energy_usage: prototype.energy_usage,
@@ -459,7 +460,7 @@ export function discover_prototypes_for_actor(actor: ControlledActor, request: P
       candidate.mining_radius = prototype.mining_drill_radius
     }
     else if (request.capability === 'crafting') {
-      candidate.crafting_speed = prototype.crafting_speed
+      candidate.crafting_speed = rates.crafting_speed_of(prototype)
     }
     available.push(candidate)
   }
