@@ -23,6 +23,7 @@ calls were made.
 | `#fluidbox` | `1` for a pipe, `0` for a stone furnace |
 | `obj:method(...)` on any LuaObject | raises `Arguments count error … Expected N arguments but N+1 were given` |
 | `prototype:get_mining_drill_radius()` | raises `Invalid QualityID` (the self argument lands in the quality slot) |
+| `prototype.get_inserter_rotation_speed(prototype)` | raises `Invalid QualityID: expected LuaQualityPrototype or string.` |
 | `array.length`, `("abc").length` | `nil`, so a comparison raises and `=== 0` is never true |
 | `game.get_entity_by_unit_number(u)` | `nil` for transport-belt, inserter, burner-inserter, wooden-chest, stone-furnace, burner-mining-drill, assembling-machine-1, pipe, small-electric-pole and offshore-pump |
 | `chest.get_recipe()` | raises `Entity is not crafting-machine.` |
@@ -46,6 +47,8 @@ value's type. On an `any` value it emits the JavaScript form literally:
   extra argument;
 - `const f = x.method; f(x)` becomes `f(nil, x)`, which passes two extra
   arguments;
+- `x.method?.()` becomes `local f = x.method; if f ~= nil then f = f(x) end`,
+  which passes `x` as the first argument;
 - `x.slice(0, 16)` becomes `x:slice(0, 16)`, a nil method on a Lua table.
 
 JavaScript mocks accept all of these, so unit tests pass while the live engine
@@ -57,6 +60,7 @@ raises.
 |---|---|---|
 | `autorio_planning.throughput_measurement_start` (belt lane) | raw unit-number lookup; colon calls to `get_max_transport_line_index`, `get_transport_line`, `get_detailed_contents` and `get_line_item_position`; untyped `.length` | `entity not found` for every belt or inserter; after the lookup, a raise on the first transport-line call |
 | `autorio_planning.capacity` (inserter instance) | raw unit-number lookup | `entity not found` for every inserter |
+| `autorio_planning.capacity` (inserter), also run when a throughput measurement finalizes | `prototype.get_inserter_rotation_speed?.()` and `get_inserter_extension_speed?.()` on an untyped prototype | raises `Invalid QualityID`; inside a measurement's `on_nth_tick` finalize this is a non-recoverable mod error that stops the server |
 | `autorio_planning.scope_context` | `(recipe.ingredients ?? []).length` on an untyped recipe | raises when a material with producers reaches `max_depth` |
 | `autorio_skills.analyze_area`, `autorio_learning.observe_area`, skill verification re-observation | `get_recipe(nil, entity)` with no crafting-machine check; `get_inventory(nil, entity, id)`; colon `inventory:get_contents()`; `fluidbox.length`; colon `fluidbox:get_pipe_connections()` | raises on the first chest, belt, inserter, furnace, assembler or pipe in the area (reproduced: `Entity is not crafting-machine`) |
 | skill verification (power and output checks) | raw unit-number lookups; `held_stack` and transport lines read on every entity type; the same inventory read as both `crafter_output` and `furnace_result` | rebuilt entities reported as disappeared; raises on non-inserters and non-belts; each machine's output counted twice |
@@ -85,9 +89,18 @@ failing on the three `evidence_refs` calls.
   - JavaScript array methods called on tables;
   - colon calls of Factorio method names, except on the mod's own wrapper
     receivers;
-  - detached Factorio methods called with a nil self.
+  - detached Factorio methods called with a nil self;
+  - optional calls (`?.()`) of Factorio methods that pass the receiver.
 
   The method names are read from the typed-factorio declarations.
+
+## Found by the real-Factorio production lane after the first repair
+
+The new MEASURED gate in `tests/factorio/runner/belt_transport_cell.py` stopped the server at the
+end of the inserter measurement: `Invalid QualityID` in `throughput_capacity`,
+called from the measurement finalize. The first guard did not match the
+optional-call form. The repair types the prototype as `LuaEntityPrototype`,
+calls the two methods directly, and extends the guard to that form.
 
 ## Not changed — raw unit-number lookups outside these tools
 
