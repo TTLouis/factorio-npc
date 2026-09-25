@@ -240,6 +240,54 @@ describe('placement candidates', () => {
     }
   })
 
+  it('resolves a half-tile drill output relation to legal whole-coordinate 2x2 centers', () => {
+    ;(globalThis as any).prototypes.entity = {
+      'burner-mining-drill': {
+        name: 'burner-mining-drill',
+        type: 'mining-drill',
+        tile_width: 2,
+        tile_height: 2,
+        collision_box: {
+          left_top: { x: -0.9, y: -0.9 },
+          right_bottom: { x: 0.9, y: 0.9 },
+        },
+      },
+    }
+    const actor = {
+      position: { x: -70, y: -9 },
+      force: { index: 1 },
+      surface: {
+        can_place_entity: ({ position }: any) => Number.isInteger(position.x) && Number.isInteger(position.y),
+        find_entities_filtered: () => [],
+      },
+    } as any
+    const output = { x: -70.5, y: -10.3 }
+
+    const result = placement_candidates_for_actor(actor, {
+      entity_name: 'burner-mining-drill',
+      covers_position: output,
+      radius: 2,
+      limit: 8,
+    }) as any
+
+    expect(result.ok).toBe(true)
+    expect(result.candidates.length).toBeGreaterThan(0)
+    for (const candidate of result.candidates) {
+      expect(Number.isInteger(candidate.position.x)).toBe(true)
+      expect(Number.isInteger(candidate.position.y)).toBe(true)
+      expect(candidate.position).not.toEqual({ x: output.x, y: output.y })
+      expect(candidate.footprint).toMatchObject({
+        tile_width: 2,
+        tile_height: 2,
+        grid: { x_offset: 0, y_offset: 0 },
+      })
+      expect(output.x).toBeGreaterThan(candidate.footprint.tile_box.left_top.x)
+      expect(output.x).toBeLessThan(candidate.footprint.tile_box.right_bottom.x)
+      expect(output.y).toBeGreaterThan(candidate.footprint.tile_box.left_top.y)
+      expect(output.y).toBeLessThan(candidate.footprint.tile_box.right_bottom.y)
+    }
+  })
+
   it('uses rotation-aware center grids and returns each candidate footprint', () => {
     ;(globalThis as any).prototypes.entity = {
       'rect-machine': {
