@@ -296,7 +296,22 @@ the wave whose files it already touches, so it costs little extra.
 | Wave 5 (5.5) | Stale statements to correct while reviewing docs: `NPC_PLANNING_REFACTOR_INTEGRATION.md` says `planning-state.mjs` is "not yet wired in" (it is imported by the loop, board memory and supervisor); `NPC_RELIABILITY_WORK.md` says native crafting is "not yet engine-verified" (`tests/factorio/runner/crafting.py` covers it); the status doc's 2026-09-24 console section still lists client checks the owner has since done | those docs | Haiku |
 | Owner only | `PROJECT_MIGRATION_TRACKER.md`: repository topics and checking clone remotes are GitHub settings for the owner. Regenerating `pnpm-lock.yaml` and renaming the `@proj-airi/*` TSTL plugin need a networked `pnpm install`, so they wait until the metered-network period ends | tracker | — |
 
-Not along the way (their own tracks, after this plan): powered assembler/inserter
+### Planned but not built: roadmaps and approved plans
+
+Plans the owner approved or the roadmaps list, still unbuilt or with no recorded
+status (code checked 2026-09-25).
+
+| With | Item | Source | Model |
+|---|---|---|---|
+| Wave 1 (1.3) | Before changing provider budgets, reproduce one real failing and one successful request and capture the correlated debug report; the doc's stated precondition for budget changes | `deploy/pterodactyl/OBSERVABILITY.md` "Unfinished observability work" | Opus |
+| Owner checks | TERMINATE / NEW TASK: on 2026-09-19 the UI control queue never drained. Recheck with the … menu (both buttons) and the blocked banner's KEEP PAUSED / REVISE / CANCEL; if it still doesn't drain, it becomes a wave 1 bug | memory `task-board-lifecycle-control-findings`; `supervisor.mjs` `UI_CONTROL_ACTIONS` | — |
+| Wave 4 | Scenario ladder, cold, all five rungs: 10 stone; 5 gears; furnace + 10 plates; burner-drill iron setup; research automation (rung 5 has never run). Then check that skills are written and reused | memory `roadmap-2026-09-21` items 2 and 4 | — (owner runs) |
+| Wave 5 | Record the status of planning-roadmap phases 1–4 (TypeSafe adapter fidelity, operation/type registry, Main-LLM intent boundary, TypeSafe-native projection): the roadmap gives none. Audit the code and write status lines; the typed-projection module is still marked "not the final design" | `NPC_PLANNING_ROADMAP.md` §13 | Sonnet |
+| Wave 6 (new) | Phase 8: remove the legacy Task Board so the reducer is the only source of truth. Approved 2026-09-21 as the root of the step-id / draft split-brain bugs; `planByNpc` still has 60 references in runtime-v8. Large; only after waves 1–4 are green | memory `roadmap-2026-09-21` item 3 | Opus |
+| Wave 6 (new) | Jev tier-1 uses the owner ranked on 2026-09-23, none built yet: (a) "same approach or failure as before?" loop detection feeding the existing harness deadlock counter; (b) exact prototype alignment (code narrows candidates from game data, Jev picks, runtime validates; Space Age names, Chinese player text); (c) Jev judgments logged with step outcomes as features for a failure predictor. Each goes shadow → advisory → gating on E2E evidence | memory `jev-use-priorities-2026-09-23` | Opus |
+| After promotion | Phase 9 E2E comparison: Main-LLM-only vs the Jev coprocessor on the same scenarios (success, calls, tokens, latency, interventions). Needs the pre-Phase-9 M11 gate first | `NPC_PLANNING_ROADMAP.md` §13 | — |
+
+Not along the way (their own tracks, after this plan): Jev tier-2/3 uses (player understanding, skill retrieval, speak timing, chat truthfulness), the player forcing a skill, powered assembler/inserter
 production and the fluid known-red track (`NPC_PRODUCTION_VALIDATION_ROADMAP.md`),
 site pings / ghost staging and the experiment surface (design drafts), Jev offline
 question tuning, swarm coordination, vehicles/trains/space platforms.
