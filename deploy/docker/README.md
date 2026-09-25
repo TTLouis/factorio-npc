@@ -53,6 +53,8 @@ test image's pnpm store, and layers it onto the existing image. It refuses to
 run if files outside the mod, docs, tests or these Docker files changed; use the
 full local build then.
 
+To run the test suites locally instead of deploying, use `scripts/test-local.sh` (Git Bash on Windows). It runs `node --test` and the autorio checks inside the `npc-dev` image — the same image family as this deployment, already carrying dependencies — with only the mounts each suite needs, so it never has to reach the network or hit the false failures that come from missing `contracts/` or repo-root compose/env files: `scripts/test-local.sh runtime` (deploy/pterodactyl staging + runtime-v8), `scripts/test-local.sh mod` (autorio vitest, `tsc --noEmit`, Lua build, `check-generated-lua`), or `scripts/test-local.sh all` for both. It exits non-zero on any failure.
+
 Persistent server state is stored in `${SGLUNA_DATA_DIR:-./data}`. This includes saves, `sgluna-config.json`, `data/server-settings.json`, mods, and SGLuna runtime state.
 
 Follow logs with:

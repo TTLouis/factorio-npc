@@ -8,7 +8,11 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 const repo = path.resolve(here, '..', '..', '..')
 
 function read(relative) {
-  return fs.readFile(path.join(repo, relative), 'utf8')
+  // Normalise CRLF to LF so the text assertions below don't depend on the
+  // checked-out line endings (Windows checkouts can produce CRLF here).
+  // This only changes how the file is compared in this test, not what it
+  // asserts about the file's content.
+  return fs.readFile(path.join(repo, relative), 'utf8').then(text => text.replace(/\r\n/g, '\n'))
 }
 
 function serviceBlock(compose, service) {
