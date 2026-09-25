@@ -249,4 +249,30 @@ describe('Factory Area Learning V1', () => {
     const result = analyze_factory_area(actor, { area: { left_top: { x: 0, y: 0 }, right_bottom: { x: 100, y: 100 } } })
     expect(result.ok).toBe(false)
   })
+
+  it('reads fluid connections by 1-based fluidbox index and keeps them as engine relations', () => {
+    const tank = entity('storage-tank', 'storage-tank', 40, 5, 9)
+    const pipe_calls: unknown[][] = []
+    const pipe = entity('pipe', 'pipe', 41, 3, 9, {
+      get_recipe: () => { throw new Error('Entity is not crafting-machine.') },
+      fluidbox: {
+        length: 1,
+        get_pipe_connections: (...args: unknown[]) => {
+          pipe_calls.push(args)
+          return [{ flow_direction: 'input-output', connection_type: 'normal', target: { owner: tank } }]
+        },
+      },
+    })
+    const { actor } = fixture([tank, pipe])
+    const result = analyze_factory_area(actor, { area: { left_top: { x: 0, y: 0 }, right_bottom: { x: 12, y: 11 } } })
+    if (!result.ok) throw new Error(result.error)
+    const analysis = get_factory_area_analysis(result.analysis_id)!
+    // A plain call with only the 1-based index, never the fluidbox as self.
+    expect(pipe_calls.length).toBeGreaterThan(0)
+    for (const args of pipe_calls) expect(args).toEqual([1])
+    expect(analysis.entities.find(value => value.unit_number === 41)?.fluid_connections).toEqual([
+      { fluidbox_index: 1, target: 'entity-40', flow_direction: 'input-output', connection_type: 'normal' },
+    ])
+    expect(analysis.relations.some(relation => relation.kind === 'fluid_connection' && relation.from === 'entity-41' && relation.to === 'entity-40')).toBe(true)
+  })
 })
