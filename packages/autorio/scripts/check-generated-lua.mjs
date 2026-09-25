@@ -10,6 +10,9 @@
 //     reject ("Expected 0 arguments but 1 were given", "Invalid QualityID");
 //   - a method read into a local and called (`const f = entity.get_recipe`;
 //     `f(entity)`) compiles to `f(nil, entity)`, two extra arguments;
+//   - an optional call (`x.method?.()`) reads the method into a local and calls
+//     it with x (`____opt = x.method` ... `____opt = ____opt(x)`), which lands x
+//     in the first parameter ("Invalid QualityID");
 //   - `x:slice(...)` and other JavaScript array methods do not exist on a table.
 // Unit tests mock these objects in JavaScript, so none of this shows there.
 //
@@ -58,6 +61,8 @@ export function check_generated_lua(lua, factorio_methods) {
   const own_functions = new Set([...lua.matchAll(/function\s+(?:[\w.]+\.)?([a-z_]\w*)\(self\b/g)].map(match => match[1]))
   for (const module of modules(lua)) {
     if (module.name === 'lualib_bundle') continue
+    // Optional-chaining locals holding a Factorio method: local name -> method.
+    const optional_methods = new Map()
     module.lines.forEach((line, offset) => {
       const at = `${module.name} (control.lua:${module.start + offset})`
       if (/^\s*--/.test(line)) return
@@ -67,6 +72,10 @@ export function check_generated_lua(lua, factorio_methods) {
         if (JS_ARRAY_METHODS.includes(method) && receiver !== 'self') findings.push(`${at}: JavaScript array method ${receiver}:${method}(): ${line.trim()}`)
         else if (factorio_methods.has(method) && !OWN_RECEIVERS.has(receiver)) findings.push(`${at}: colon call ${receiver}:${method}() passes self to a Factorio method: ${line.trim()}`)
       }
+      const read = /^\s*local (____opt\w*) = [\w.[\]]+\.([a-z_]\w*)\s*$/.exec(line)
+      if (read && factorio_methods.has(read[2])) optional_methods.set(read[1], read[2])
+      const call = /^\s*(____opt\w*) = \1\((.+)\)\s*$/.exec(line)
+      if (call && optional_methods.has(call[1])) findings.push(`${at}: optional call of Factorio method ${optional_methods.get(call[1])}(${call[2]}) passes the receiver: ${line.trim()}`)
       for (const match of line.matchAll(/(?<![\w.:])([a-z_]\w*)\(nil,/g)) {
         if (factorio_methods.has(match[1]) && !own_functions.has(match[1])) findings.push(`${at}: detached Factorio method ${match[1]}(nil, ...) passes extra arguments: ${line.trim()}`)
       }

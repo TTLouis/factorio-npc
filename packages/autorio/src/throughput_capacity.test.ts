@@ -137,7 +137,7 @@ describe('deterministic throughput capacity facts', () => {
 
   it('caps hand capacity by the selected item stack size', () => {
     ;(globalThis as any).prototypes = {
-      entity: { 'mod-inserter': { name: 'mod-inserter', type: 'inserter', bulk: false, uses_inserter_stack_size_bonus: true, inserter_stack_size_bonus: 20 } },
+      entity: { 'mod-inserter': { name: 'mod-inserter', type: 'inserter', bulk: false, uses_inserter_stack_size_bonus: true, inserter_stack_size_bonus: 20, get_inserter_rotation_speed: () => 0.02, get_inserter_extension_speed: () => 0.03 } },
       item: { fish: { name: 'fish', stack_size: 5 } },
     }
     const result = throughput_capacity(actor({ inserter_stack_size_bonus: 20, belt_stack_size_bonus: 0 }), {

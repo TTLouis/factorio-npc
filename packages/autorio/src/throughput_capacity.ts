@@ -1,4 +1,5 @@
 import type { ControlledActor } from './actors/types'
+import type { LuaEntityPrototype } from 'factorio:runtime'
 import { resolve_exact_entity } from './entity_reference'
 
 export type ThroughputCapacityRequest
@@ -94,7 +95,7 @@ export function throughput_capacity(actor: ControlledActor, request: ThroughputC
   }
 
   if (!valid_name(request.prototype_name)) return fail('prototype_name must be a bounded non-empty string')
-  const prototype = (prototypes.entity as any)[request.prototype_name]
+  const prototype: LuaEntityPrototype | undefined = prototypes.entity[request.prototype_name]
   if (!prototype) return fail(`entity prototype not found: ${request.prototype_name}`)
 
   if (request.kind === 'belt') {
@@ -167,7 +168,8 @@ export function throughput_capacity(actor: ControlledActor, request: ThroughputC
     if (request.item_name && !item) return fail(`item prototype not found: ${request.item_name}`)
     const hand_capacity = item ? math.min(raw_hand_capacity, item.stack_size) : raw_hand_capacity
     const force_belt_stack_size = 1 + (actor.force.belt_stack_size_bonus ?? 0)
-    const prototype_belt_stack_limit = prototype.inserter_max_belt_stack_size ?? 1
+    // Read live in Factorio 2.0.77; missing from the typed-factorio 2.0.72 declarations.
+    const prototype_belt_stack_limit = (prototype as LuaEntityPrototype & { readonly inserter_max_belt_stack_size?: number }).inserter_max_belt_stack_size ?? 1
 
     return {
       ok: true as const,
@@ -182,8 +184,9 @@ export function throughput_capacity(actor: ControlledActor, request: ThroughputC
       item_stack_size: item?.stack_size,
       belt_drop_stack_limit: math.min(force_belt_stack_size, prototype_belt_stack_limit),
       movement: {
-        rotation_speed: prototype.get_inserter_rotation_speed?.(),
-        extension_speed: prototype.get_inserter_extension_speed?.(),
+        // Typed calls: on an untyped prototype `?.()` passes the prototype as the quality argument.
+        rotation_speed: prototype.get_inserter_rotation_speed(),
+        extension_speed: prototype.get_inserter_extension_speed(),
         pickup_position: prototype.inserter_pickup_position,
         drop_position: prototype.inserter_drop_position,
       },
