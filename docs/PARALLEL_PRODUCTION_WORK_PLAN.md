@@ -77,19 +77,21 @@ reasoning budgets went up, each tool round in one request took 40–55 s (live t
 
 The LLM should be able to measure time and parallelism itself, like the owner does.
 
-- [ ] `recipe_details` gains, per machine candidate: crafting speed, crafts per
+- [x] `recipe_details` gains, per machine candidate: crafting speed, crafts per
   second (`crafting_speed / energy`), and output per minute. Hand crafting gets the
   seconds per craft for the actor (`energy / character crafting speed`, including
-  the force's manual crafting modifier).
-- [ ] Resources and drills: mining time of the resource, the drill's mining speed,
+  the force's manual crafting modifier). `546b0516`
+- [x] Resources and drills: mining time of the resource, the drill's mining speed,
   and ore per minute per drill. Burner machines: fuel burn per minute for a named
-  fuel (from energy usage and fuel value).
-- [ ] A time estimate for a recipe tree: given a target item, count and a machine
+  fuel (from energy usage and fuel value). `546b0516` (`mining_details`)
+- [x] A time estimate for a recipe tree: given a target item, count and a machine
   count per step, the harness returns the total time, the slowest step (the
   bottleneck), and how the time falls as machines are added. The LLM chooses the
-  machine counts; the harness only does the arithmetic.
-- [ ] Real-Factorio lane check that the stone furnace / burner drill figures match
+  machine counts; the harness only does the arithmetic. `546b0516`, model tools
+  `getMiningDetails` / `estimateProductionTime` `db648df2`
+- [x] Real-Factorio lane check that the stone furnace / burner drill figures match
   the engine (e.g. measured plates over a fixed window vs. the computed rate).
+  `81eee251` (production lane: 10 ore and 10 plates in 40 s, computed 10.0)
 
 ## W2 — thinking time and better waits
 

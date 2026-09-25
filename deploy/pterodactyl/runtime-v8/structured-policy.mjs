@@ -424,6 +424,52 @@ function renderConstructionPlan(args) {
   return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_planning","validate_construction_plan",{plan_id=${base.luaString(parsed.plan_id)},placements={${placements}}})))`
 }
 
+function parseMiningDetails(args) {
+  exactKeys(args, ['resource_or_item', 'fuel_name'])
+  const parsed = { resource_or_item: base.factorioName(args.resource_or_item) }
+  if (args.fuel_name !== undefined) parsed.fuel_name = base.factorioName(args.fuel_name)
+  return parsed
+}
+
+function renderMiningDetails(args) {
+  const parsed = parseMiningDetails(args)
+  const fuel = parsed.fuel_name !== undefined ? `,${base.luaString(parsed.fuel_name)}` : ''
+  return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_knowledge","mining_details",${base.luaString(parsed.resource_or_item)}${fuel})))`
+}
+
+const ESTIMATE_STEP_NAMES = ['recipe', 'resource', 'machine', 'fuel']
+
+function parseProductionEstimate(args) {
+  exactKeys(args, ['target', 'count', 'steps'])
+  check(Array.isArray(args.steps) && args.steps.length >= 1 && args.steps.length <= 16, 'steps must be an array with 1 to 16 entries')
+  return {
+    target: base.factorioName(args.target),
+    count: positiveInteger(args.count, 'count', 1_000_000),
+    steps: args.steps.map((step) => {
+      exactKeys(step, ['item', ...ESTIMATE_STEP_NAMES, 'machine_count'])
+      const parsed = { item: base.factorioName(step.item) }
+      for (const key of ESTIMATE_STEP_NAMES) {
+        if (step[key] !== undefined) parsed[key] = base.factorioName(step[key])
+      }
+      if (step.machine_count !== undefined) parsed.machine_count = positiveInteger(step.machine_count, 'machine_count', 1000)
+      return parsed
+    }),
+  }
+}
+
+function renderProductionEstimate(args) {
+  const parsed = parseProductionEstimate(args)
+  const steps = parsed.steps.map((step) => {
+    const fields = [`item=${base.luaString(step.item)}`]
+    for (const key of ESTIMATE_STEP_NAMES) {
+      if (step[key] !== undefined) fields.push(`${key}=${base.luaString(step[key])}`)
+    }
+    if (step.machine_count !== undefined) fields.push(`machine_count=${step.machine_count}`)
+    return `{${fields.join(',')}}`
+  })
+  return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_knowledge","production_estimate",{target=${base.luaString(parsed.target)},count=${parsed.count},steps={${steps.join(',')}}})))`
+}
+
 function renderResearchPath(args) {
   const parsed = parseResearchPath(args)
   return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_planning","research_path",${base.luaString(parsed.name)},${parsed.max_nodes})))`
@@ -825,6 +871,58 @@ export function plannerControlPayloadFromMessage(message) {
   }
 }
 
+const miningDetailsDefinition = {
+  type: 'function',
+  function: {
+    name: 'getMiningDetails',
+    description: 'Read deterministic mining facts for a resource, or for the resources that yield an item: mining time, and per compatible drill its mining speed, output per minute (force mining productivity included) and energy source, plus hand mining for the NPC. Name fuel_name to also get that fuel\'s burn per minute on burner drills. Facts only; how many drills to build is your decision.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['resource_or_item'],
+      properties: {
+        resource_or_item: { type: 'string', minLength: 1, maxLength: 200 },
+        fuel_name: { type: 'string', minLength: 1, maxLength: 200 },
+      },
+    },
+  },
+}
+
+const productionEstimateDefinition = {
+  type: 'function',
+  function: {
+    name: 'estimateProductionTime',
+    description: 'Estimate how long making `count` of `target` takes with the steps you choose. One step per item you will produce: the machine and machine_count, or no machine for the NPC\'s own hands (hand crafting or hand mining); recipe/resource only when several fit; fuel to also get fuel burned. Returns total seconds, each step\'s rate and busy time, the limiting step, and the total with one more machine on it. Ingredients without a step are assumed on hand; transfer, walking and placement time are not included. Arithmetic over live recipe and prototype rates only: you choose the machine counts.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['target', 'count', 'steps'],
+      properties: {
+        target: { type: 'string', minLength: 1, maxLength: 200 },
+        count: { type: 'integer', minimum: 1, maximum: 1000000 },
+        steps: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 16,
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['item'],
+            properties: {
+              item: { type: 'string', minLength: 1, maxLength: 200 },
+              recipe: { type: 'string', minLength: 1, maxLength: 200 },
+              resource: { type: 'string', minLength: 1, maxLength: 200 },
+              machine: { type: 'string', minLength: 1, maxLength: 200 },
+              machine_count: { type: 'integer', minimum: 1, maximum: 1000 },
+              fuel: { type: 'string', minLength: 1, maxLength: 200 },
+            },
+          },
+        },
+      },
+    },
+  },
+}
+
 const researchPathDefinition = {
   type: 'function',
   function: {
@@ -847,6 +945,8 @@ export const toolDefinitions = [
   placementCandidatesDefinition,
   productionScopeDefinition,
   solveProductionDefinition,
+  miningDetailsDefinition,
+  productionEstimateDefinition,
   transportCapacityDefinition,
   localSpatialObservationDefinition,
   placementPlannerDefinition,
@@ -877,6 +977,8 @@ const OBSERVATION_TOOL_FAMILY = Object.freeze({
   getRecipeDetails: 'recipe_production',
   getProductionScope: 'recipe_production',
   solveProduction: 'recipe_production',
+  getMiningDetails: 'recipe_production',
+  estimateProductionTime: 'recipe_production',
 
   discoverPrototypes: 'prototype_knowledge',
   getPrototypeDetails: 'prototype_knowledge',
@@ -935,6 +1037,8 @@ export const OBSERVATION_TOOL_TIER = Object.freeze({
   getRecipeDetails: 'fact',
   getProductionScope: 'fact',
   solveProduction: 'fact',
+  getMiningDetails: 'fact',
+  estimateProductionTime: 'fact',
   getPrototypeDetails: 'fact',
   getEntityStatus: 'fact',
   getEntityGeometry: 'fact',
@@ -1018,6 +1122,8 @@ export function toolCommand(name, args) {
   if (name === 'getProductionScope') return renderProductionScope(args)
   if (name === 'solveProduction') return renderSolveProduction(args)
   if (name === 'getTransportCapacity') return renderTransportCapacity(args)
+  if (name === 'getMiningDetails') return renderMiningDetails(args)
+  if (name === 'estimateProductionTime') return renderProductionEstimate(args)
   if (name === 'getLocalSpatialObservation') return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_planning","spatial_observation",${luaTable(parseSpatialObservation(args))})))`
   if (name === 'planPlacement') return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_planning","plan_placement",${luaTable(parsePlacement(args))})))`
   if (name === 'findConstructionSites') return renderConstructionSites(args)

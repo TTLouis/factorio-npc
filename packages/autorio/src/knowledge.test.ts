@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { entity_geometry_for_actor, recipe_details_for_actor } from './knowledge'
+import { entity_geometry_for_actor, mining_details_for_actor, recipe_details_for_actor } from './knowledge'
 
 function luaPairs(value: Record<string, unknown>) {
   return Object.entries(value)
@@ -45,12 +45,16 @@ describe('recipe knowledge', () => {
         return {
           'refinery-z': {
             type: 'assembling-machine',
-            crafting_speed: 2,
+            get_crafting_speed: () => 2,
+            get_max_energy_usage: () => 7000,
+            electric_energy_source_prototype: {},
             crafting_categories: { 'oil-processing': true },
           },
           'refinery-a': {
             type: 'assembling-machine',
-            crafting_speed: 1,
+            get_crafting_speed: () => 1,
+            get_max_energy_usage: () => 7000,
+            electric_energy_source_prototype: {},
             crafting_categories: { 'oil-processing': true },
           },
         }
@@ -59,7 +63,9 @@ describe('recipe knowledge', () => {
         return {
           'assembling-machine-1': {
             type: 'assembling-machine',
-            crafting_speed: 0.5,
+            get_crafting_speed: () => 0.5,
+            get_max_energy_usage: () => 1250,
+            electric_energy_source_prototype: {},
             crafting_categories: { crafting: true },
           },
         }
@@ -90,7 +96,7 @@ describe('recipe knowledge', () => {
     const actor = {
       is_valid: true,
       force: { recipes: { 'advanced-oil-processing': advancedOil } },
-      character: { prototype: { crafting_categories: { crafting: true } } },
+      character: { prototype: { crafting_categories: { crafting: true }, get_crafting_speed: () => 1 } },
     } as any
 
     const result = recipe_details_for_actor(actor, 'advanced-oil-processing') as any
@@ -114,6 +120,20 @@ describe('recipe knowledge', () => {
         expect.objectContaining({ name: 'refinery-z', type: 'assembling-machine' }),
       ],
     })
+    // Speed 2 on a 5 s recipe: 0.4 crafts/s, so 55 petroleum per craft is 1320/min.
+    expect(result.recipes[0].crafting_machines[1]).toMatchObject({
+      crafting_speed: 2,
+      seconds_per_craft: 2.5,
+      crafts_per_second: 0.4,
+      energy_source: 'electric',
+      energy_watts: 420000,
+    })
+    expect(result.recipes[0].crafting_machines[1].products_per_minute).toEqual([
+      { type: 'fluid', name: 'heavy-oil', per_minute: 600 },
+      { type: 'fluid', name: 'petroleum-gas', per_minute: 1320 },
+    ])
+    // Oil processing is not a hand-crafting category.
+    expect(result.recipes[0].hand_crafting).toBeUndefined()
   })
 
   it('resolves an item/fluid name through recipe products when recipe names differ', () => {
@@ -126,7 +146,7 @@ describe('recipe knowledge', () => {
     const actor = {
       is_valid: true,
       force: { recipes: { 'make-widget-with-a-different-name': alternate } },
-      character: { prototype: { crafting_categories: { crafting: true } } },
+      character: { prototype: { crafting_categories: { crafting: true }, get_crafting_speed: () => 1 } },
       get_main_inventory: () => ({ get_item_count: () => 0 }),
       get_craftable_count: () => 0,
     } as any
@@ -142,7 +162,7 @@ describe('recipe knowledge', () => {
     const actor = {
       is_valid: true,
       force: { recipes: {} },
-      character: { prototype: { crafting_categories: { crafting: true } } },
+      character: { prototype: { crafting_categories: { crafting: true }, get_crafting_speed: () => 1 } },
     } as any
 
     expect(recipe_details_for_actor(actor, 'does-not-exist')).toEqual({
@@ -150,6 +170,143 @@ describe('recipe knowledge', () => {
       query: 'does-not-exist',
       error: 'no recipe produces this item/fluid and no recipe has this name',
     })
+  })
+})
+
+describe('mining knowledge', () => {
+  const originalPairs = (globalThis as any).pairs
+  const originalGetEntityFiltered = (globalThis as any).prototypes.get_entity_filtered
+  const originalItems = (globalThis as any).prototypes.item
+
+  // Factorio 2.0 base values: iron ore mines in 1 s; the burner drill has speed
+  // 0.25 at 150 kW burner, the electric drill 0.5; the character mines at 0.5.
+  const ironOre = {
+    name: 'iron-ore',
+    type: 'resource',
+    resource_category: 'basic-solid',
+    infinite_resource: false,
+    mineable_properties: { mining_time: 1, products: [{ type: 'item', name: 'iron-ore', amount: 1, probability: 1 }] },
+  }
+  const crudeOil = {
+    name: 'crude-oil',
+    type: 'resource',
+    resource_category: 'basic-fluid',
+    infinite_resource: true,
+    normal_resource_amount: 300000,
+    mineable_properties: { mining_time: 1, products: [{ type: 'fluid', name: 'crude-oil', amount: 10, probability: 1 }] },
+  }
+  const drills = {
+    'electric-mining-drill': {
+      name: 'electric-mining-drill',
+      type: 'mining-drill',
+      mining_speed: 0.5,
+      uses_force_mining_productivity_bonus: true,
+      resource_categories: { 'basic-solid': true },
+      get_max_energy_usage: () => 1500,
+      electric_energy_source_prototype: {},
+    },
+    'burner-mining-drill': {
+      name: 'burner-mining-drill',
+      type: 'mining-drill',
+      mining_speed: 0.25,
+      uses_force_mining_productivity_bonus: true,
+      resource_categories: { 'basic-solid': true },
+      get_max_energy_usage: () => 2500,
+      burner_prototype: { effectivity: 1, fuel_categories: { chemical: true } },
+    },
+    'pumpjack': {
+      name: 'pumpjack',
+      type: 'mining-drill',
+      mining_speed: 1,
+      uses_force_mining_productivity_bonus: true,
+      resource_categories: { 'basic-fluid': true },
+      get_max_energy_usage: () => 1500,
+      electric_energy_source_prototype: {},
+    },
+  }
+
+  function actor(force: Record<string, number> = {}) {
+    return {
+      is_valid: true,
+      force: { mining_drill_productivity_bonus: 0, manual_mining_speed_modifier: 0, ...force },
+      character: {
+        character_mining_speed_modifier: 0,
+        prototype: { mining_speed: 0.5, resource_categories: { 'basic-solid': true } },
+      },
+    } as any
+  }
+
+  beforeEach(() => {
+    ;(globalThis as any).pairs = luaPairs
+    ;(globalThis as any).prototypes.get_entity_filtered = (filters: Array<Record<string, unknown>>) => {
+      if (filters[0]?.type === 'resource') return { 'iron-ore': ironOre, 'crude-oil': crudeOil }
+      if (filters[0]?.type === 'mining-drill') return drills
+      return {}
+    }
+    ;(globalThis as any).prototypes.item = {
+      ...originalItems,
+      coal: { name: 'coal', fuel_category: 'chemical', fuel_value: 4000000 },
+    }
+  })
+
+  afterEach(() => {
+    ;(globalThis as any).pairs = originalPairs
+    ;(globalThis as any).prototypes.get_entity_filtered = originalGetEntityFiltered
+    ;(globalThis as any).prototypes.item = originalItems
+  })
+
+  it('gives mining time, per-drill ore per minute and burner fuel per minute', () => {
+    const result = mining_details_for_actor(actor(), 'iron-ore', 'coal') as any
+    expect(result.found).toBe(true)
+    expect(result.resources).toHaveLength(1)
+    const ore = result.resources[0]
+    expect(ore).toMatchObject({ name: 'iron-ore', category: 'basic-solid', mining_time: 1, infinite: false, drill_count: 2 })
+    expect(ore.drills.map((drill: any) => drill.name)).toEqual(['burner-mining-drill', 'electric-mining-drill'])
+    expect(ore.drills[0]).toEqual({
+      name: 'burner-mining-drill',
+      mining_speed: 0.25,
+      productivity_bonus: 0,
+      seconds_per_cycle: 4,
+      products_per_minute: [{ type: 'item', name: 'iron-ore', per_minute: 15 }],
+      energy_source: 'burner',
+      energy_watts: 150000,
+      burner_effectivity: 1,
+      fuel_categories: ['chemical'],
+      fuel: { name: 'coal', accepted: true, fuel_value_joules: 4000000, per_minute: 2.25 },
+    })
+    expect(ore.drills[1].products_per_minute).toEqual([{ type: 'item', name: 'iron-ore', per_minute: 30 }])
+    expect(ore.hand_mining).toEqual({
+      mining_speed: 0.5,
+      seconds_per_cycle: 2,
+      products_per_minute: [{ type: 'item', name: 'iron-ore', per_minute: 30 }],
+    })
+  })
+
+  it('applies the force mining productivity bonus to drills but not to hand mining', () => {
+    const result = mining_details_for_actor(actor({ mining_drill_productivity_bonus: 0.2, manual_mining_speed_modifier: 1 }), 'iron-ore') as any
+    const ore = result.resources[0]
+    expect(ore.drills[0]).toMatchObject({ productivity_bonus: 0.2, products_per_minute: [{ type: 'item', name: 'iron-ore', per_minute: 18 }] })
+    expect(ore.drills[0].fuel).toBeUndefined()
+    // Manual mining modifier 1 doubles the hand speed; productivity does not apply.
+    expect(ore.hand_mining).toMatchObject({ mining_speed: 1, products_per_minute: [{ type: 'item', name: 'iron-ore', per_minute: 60 }] })
+  })
+
+  it('flags infinite fluid resources and leaves hand mining out when the character cannot mine them', () => {
+    const result = mining_details_for_actor(actor(), 'crude-oil') as any
+    const oil = result.resources[0]
+    expect(oil).toMatchObject({ name: 'crude-oil', infinite: true, normal_resource_amount: 300000, drill_count: 1 })
+    expect(oil.drills[0]).toMatchObject({ name: 'pumpjack', products_per_minute: [{ type: 'fluid', name: 'crude-oil', per_minute: 600 }] })
+    expect(oil.hand_mining).toBeUndefined()
+  })
+
+  it('reports an unknown resource without inventing one, and points recipe lookups at mining', () => {
+    expect(mining_details_for_actor(actor(), 'unobtainium')).toEqual({
+      found: false,
+      query: 'unobtainium',
+      error: 'no resource has this name or yields this item/fluid',
+    })
+    const recipes = { ...actor(), force: { recipes: {} } } as any
+    expect((recipe_details_for_actor(recipes, 'iron-ore') as any).mined_from).toEqual(['iron-ore'])
   })
 })
 

@@ -848,6 +848,28 @@
       ],
       "surface_policy": "shared"
     },
+    "getMiningDetails": {
+      "remote": [
+        "autorio_knowledge",
+        "mining_details"
+      ],
+      "category": "knowledge",
+      "surfaces": [
+        "pterodactyl-runtime-v8"
+      ],
+      "surface_policy": "runtime-v8-only"
+    },
+    "estimateProductionTime": {
+      "remote": [
+        "autorio_knowledge",
+        "production_estimate"
+      ],
+      "category": "production",
+      "surfaces": [
+        "pterodactyl-runtime-v8"
+      ],
+      "surface_policy": "runtime-v8-only"
+    },
     "getTransportCapacity": {
       "remote": [
         "autorio_planning",
