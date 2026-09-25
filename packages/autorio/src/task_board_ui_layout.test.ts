@@ -186,7 +186,8 @@ describe('SGLuna NPC console compact tracker layout', () => {
 
     const refresh_body = source.split('function refresh_world_preview(')[1]?.split('function render_world_preview(')[0] ?? ''
     expect(refresh_body).toContain('camera.position = preview.position')
-    expect(refresh_body).toContain('position.caption = preview_position_caption(preview)')
+    expect(refresh_body).toContain('const caption = preview_position_caption(preview)')
+    expect(refresh_body).toContain('if (position.caption !== caption) position.caption = caption')
     expect(refresh_body).not.toContain('slider_value')
     expect(refresh_body).not.toContain('PREVIEW_ZOOM_SLIDER_NAME')
     expect(refresh_body).not.toContain('.clear()')

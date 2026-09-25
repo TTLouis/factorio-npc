@@ -257,7 +257,4 @@ export const CONSOLE_TABS = {
   tag: 'airi_console_tab',
   spacing: 6,
   activity_height: 460,
-  // The newest few feed rows on NOW, with a jump to the full feed.
-  latest_card: 'airi_task_board_latest_card',
-  latest_rows: 3,
 }

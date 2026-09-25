@@ -340,13 +340,14 @@ describe('in-game task board UI projection', () => {
     expect(source).toContain('left.style.vertical_spacing = COLUMN_SPACING')
     expect(source).toContain('dynamic.style.vertical_spacing = COLUMN_SPACING')
     expect(source).toContain('resources.style.horizontal_spacing = COLUMN_SPACING')
-    expect(source).toContain('console_ui.render_goal_card(now, goal); console_ui.render_now_card(now, console_now_card(board)); console_ui.render_latest_card(now, console_latest_card(board)); console_ui.render_goal_card(plan, goal)')
+    expect(source).toContain('console_ui.render_goal_card(now, goal); console_ui.render_now_card(now, console_now_card(board)); console_ui.render_goal_card(plan, goal)')
+    expect(source).not.toContain('console_ui.render_latest_card(')
     // The old Controls grid is gone: window buttons are in the title bar and
     // PAUSE / FOLLOW / … sit in one row under the prompt.
     expect(source).not.toContain("create_section(parent, 'Controls'")
     expect(source).not.toContain('HALF_SECTION_WIDTH')
     expect(source).toContain('right.style.vertically_stretchable = true')
-    expect(source).toMatch(/build_left_dynamic\(banner, dynamic, plan_dynamic,[\s\S]*render_prompt\(left, player\); console_ui\.render_action_row\(left,[\s\S]*render_world_preview\(right, runtime, player\)/)
+    expect(source).toMatch(/build_left_dynamic\(banner, dynamic, plan_dynamic,[\s\S]*render_prompt\(left, player\)[\s\S]*console_ui\.render_action_row\(left,[\s\S]*render_world_preview\(right, runtime, player\)/)
   })
 
   it('puts a native Factorio camera preview in the right column with an interactive zoom slider', () => {
@@ -379,8 +380,10 @@ describe('in-game task board UI projection', () => {
     expect(source).toContain("if (element.name === PREVIEW_POSITION_NAME) { focus_npc_preview(player); return }")
 
     const refresh = source.split('function refresh_world_preview(')[1]?.split('function render_world_preview(')[0] ?? ''
-    expect(refresh).toContain('position.caption = preview_position_caption(preview)')
-    expect(refresh).toContain('camera.zoom = task_board_preview_zoom(player.index)')
+    expect(refresh).toContain('const caption = preview_position_caption(preview)')
+    expect(refresh).toContain('if (position.caption !== caption) position.caption = caption')
+    expect(refresh).toContain('const zoom = task_board_preview_zoom(player.index)')
+    expect(refresh).toContain('if (camera.zoom !== zoom) camera.zoom = zoom')
     expect(refresh).not.toContain('.clear()')
   })
   it('shows live mod task state and when SGLuna last synced', () => {
@@ -530,7 +533,7 @@ describe('in-game task board UI projection', () => {
     expect(debug).not.toContain('set_debug_activity_hover')
     expect(debug).not.toContain('view.hover')
     expect(debug).not.toContain('HOLD')
-    expect(source).toContain('activity_state.stop_activity_follow(player.index, last_shown_activity_key(element))')
+    expect(source).toContain('activity_state.stop_activity_follow(player.index, last_shown_activity_key(activity_scroll_of(player)))')
     expect(source).toContain('activity_state.resume_activity_follow(player.index, last_shown_activity_key(scroll))')
   })
   it('only emits fixed UI control actions instead of arbitrary console commands', () => {

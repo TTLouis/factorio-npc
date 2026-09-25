@@ -6,14 +6,16 @@ import * as gui_text from './task_board_gui_text'
 export const DEBUG_BUTTON_NAME = 'airi_task_board_debug'
 export const DEBUG_CLOSE_BUTTON_NAME = 'airi_task_board_debug_close'
 const CONVERSATION_HEIGHT = 300
+export const CONVERSATION_STATE_NAME = 'airi_task_board_conversation_live'
+export const CONVERSATION_SCROLL_NAME = 'airi_task_board_conversation_scroll'
 const CONVERSATION = {
   section: 'airi_task_board_conversation_section',
   header: 'airi_task_board_conversation_header',
-  state: 'airi_task_board_activity_live',
+  state: CONVERSATION_STATE_NAME,
   count: 'airi_task_board_conversation_count',
   body: 'airi_task_board_conversation_body',
   empty: 'airi_task_board_conversation_empty',
-  scroll: 'airi_task_board_activity_scroll',
+  scroll: CONVERSATION_SCROLL_NAME,
   table: 'airi_task_board_activity_table',
 }
 export const DEBUG_ACTIVITY_STATE_NAME = 'airi_task_board_debug_activity_state'
@@ -548,7 +550,7 @@ export function latest_ai_reply(board: any) {
 }
 
 export function render_ai_reply(parent: LuaGuiElement, response: string, width: number) {
-  // Status/Controls live in a dynamic flow that is cleared once a second. The
+  // Status/Controls live in a dynamic flow that can be cleared on state changes. The
   // conversation must not live inside that flow: rebuilding a scroll-pane loses
   // the player's scroll position. Place it beside the dynamic flow in the left
   // column and refresh its rows in place, matching Recent activity's behavior.
@@ -593,9 +595,7 @@ export function render_ai_reply(parent: LuaGuiElement, response: string, width: 
     visible.push({ key: `explicit-response:${explicit}`, role: 'assistant', sender: 'AIRI', text: explicit, timestamp: '' })
   }
   const keys = visible.map(message => message.key)
-  empty.visible = visible.length === 0
   empty.caption = storage.airi_task_board_ui === undefined ? 'No current task conversation.' : 'No player/AIRI messages recorded for this task yet.'
-  scroll.visible = visible.length > 0
 
   const add_message = (message: TaskConversationMessage) => {
     const timestamp = table.add({ type: 'label', caption: message.timestamp || '--:--:--', ignored_by_interaction: true })
@@ -610,21 +610,28 @@ export function render_ai_reply(parent: LuaGuiElement, response: string, width: 
 
   const shown = (table.tags.keys ?? []) as string[]
   const previous_follow = table.tags.was_following !== false
+  const view = activity_state.activity_view((parent as any).player_index)
   let seen = String(table.tags.chat_seen ?? '')
-  const diff = activity_state.activity_rows_diff(shown, keys)
   let appended = 0
-  if (diff === undefined) {
-    table.clear()
-    for (const message of visible) add_message(message)
-    appended = visible.length
-  } else {
-    const children = table.children
-    for (let index = 0; index < diff.drop * 3 && index < children.length; index++) children[index].destroy()
-    for (let index = visible.length - diff.append; index < visible.length; index++) add_message(visible[index])
-    appended = diff.append
+  // A reader who scrolled up keeps exactly the rows they were reading. New
+  // messages stay pending until LIVE is clicked, then append and jump to bottom.
+  if (view.follow || created) {
+    const diff = activity_state.activity_rows_diff(shown, keys)
+    if (diff === undefined) {
+      table.clear()
+      for (const message of visible) add_message(message)
+      appended = visible.length
+    } else {
+      const children = table.children
+      for (let index = 0; index < diff.drop * 3 && index < children.length; index++) children[index].destroy()
+      for (let index = visible.length - diff.append; index < visible.length; index++) add_message(visible[index])
+      appended = diff.append
+    }
   }
 
-  const view = activity_state.activity_view((parent as any).player_index)
+  const displayed_keys = view.follow || created ? keys : shown
+  empty.visible = displayed_keys.length === 0
+  scroll.visible = displayed_keys.length > 0
   const last_key = keys.length > 0 ? keys[keys.length - 1] : ''
   if (!view.follow && previous_follow) seen = shown.length > 0 ? shown[shown.length - 1] : ''
   if (view.follow) {
@@ -635,7 +642,7 @@ export function render_ai_reply(parent: LuaGuiElement, response: string, width: 
     seen = last_key
   }
 
-  table.tags = { keys, chat_seen: seen, was_following: view.follow }
+  table.tags = { keys: displayed_keys, chat_seen: seen, was_following: view.follow }
   let unseen_count = 0
   let overflow = false
   if (!view.follow && keys.length > 0 && seen !== last_key) {
@@ -650,7 +657,7 @@ export function render_ai_reply(parent: LuaGuiElement, response: string, width: 
       state.tooltip = 'Following the newest conversation. Click to pause both Conversation and Activity at their current positions.'
     } else if (unseen_count > 0) {
       state.caption = gui_text.trusted_rich_text(`[img=utility/status_yellow] ${unseen_count}${overflow ? '+' : ''} NEW`)
-      state.tooltip = 'New conversation messages arrived without moving your reading position. Click to jump both feeds back to live.'
+      state.tooltip = 'New conversation messages are waiting. Click to show them and jump both feeds back to live.'
     } else {
       state.caption = gui_text.trusted_rich_text('[img=utility/status_inactive] PAUSED')
       state.tooltip = 'Conversation and Activity are paused at your reading position. Click to jump back to live.'

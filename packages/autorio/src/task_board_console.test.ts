@@ -114,7 +114,6 @@ describe('console Goal and Now cards', () => {
     ])
   })
 })
-
 describe('goal block of the UI snapshot', () => {
   const base = { steps: [], activity: [] }
 
@@ -166,23 +165,5 @@ describe('console tabs', () => {
     expect(console_ui.console_tab_of('activity')).toBe('activity')
     expect(console_ui.console_tab_of('debug')).toBeUndefined()
     expect(console_ui.console_tab_of(2)).toBeUndefined()
-  })
-})
-
-describe('Latest card', () => {
-  it('shows the newest rows and a button that opens ACTIVITY with how many more there are', () => {
-    const parent = element()
-    console_ui.render_latest_card(parent as any, { rows: 5, entries: 7, lines: [{ time: '00:01:02', tag: 'ACT', tone: 'good', text: 'Inserted 40 iron plate into assembler  ×3' }] })
-    expect(captions(parent)).toEqual(['Latest', '7 events', '00:01:02', 'ACT', 'Inserted 40 iron plate into assembler  ×3'])
-    const button = find(parent, node => node.type === 'button')[0]
-    expect(button.caption).toBe('All activity (4 more)')
-    expect(console_ui.console_tab_of(button.tags.airi_console_tab)).toBe('activity')
-  })
-
-  it('says nothing has happened yet instead of an empty table', () => {
-    const parent = element()
-    console_ui.render_latest_card(parent as any, { rows: 0, entries: 0, lines: [] })
-    expect(captions(parent)).toEqual(['Latest', 'Nothing yet. What AIRI observes, decides and does appears here.'])
-    expect(find(parent, node => node.type === 'button')).toEqual([])
   })
 })

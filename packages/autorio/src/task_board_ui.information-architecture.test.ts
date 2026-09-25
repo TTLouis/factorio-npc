@@ -31,7 +31,7 @@ describe('NPC console information architecture', () => {
     expect(consoleSource).toContain("create_section(parent, 'Activity'")
     // NOW holds the cards and the conversation, PLAN the tracker, ACTIVITY the
     // feed; the prompt and the action row stay under the tabs.
-    expect(consoleSource).toMatch(/debug_ui\.render_ai_reply\(dynamic,[\s\S]*render_tracker\(pages\.plan, board, player\); render_activity_section\(pages\.activity, board, player\)[\s\S]*render_prompt\(left, player\); console_ui\.render_action_row\(left,/)
+    expect(consoleSource).toMatch(/debug_ui\.render_ai_reply\(dynamic,[\s\S]*render_tracker\(pages\.plan, board, player\); render_activity_section\(pages\.activity, board, player\)[\s\S]*render_prompt\(left, player\)[\s\S]*console_ui\.render_action_row\(left,/)
     expect(consoleSource).not.toContain("create_section(parent, 'Controls'")
     expect(consoleSource).toContain("console_ui.render_console_titlebar(root, 'SGLuna NPC Console', console_window_buttons(player), console_title_status(")
     // A blocked plan is a full-width banner above the tabs, so it is seen

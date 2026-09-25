@@ -88,6 +88,10 @@ describe('SGLuna NPC console layout regressions', () => {
     expect(debug_source).toContain("vertical_scroll_policy: 'auto-and-reserve-space'")
     expect(debug_source).toContain('scroll.style.maximal_height = CONVERSATION_HEIGHT')
     expect(debug_source).toContain("name: CONVERSATION.scroll")
+    expect(debug_source).toContain('if (created || !previous_follow || appended > 0) (scroll as ScrollPaneGuiElement).scroll_to_bottom()')
+    expect(debug_source).toContain('if (view.follow) {')
+    expect(debug_source).toContain('if (view.follow || created) {')
+    expect(debug_source).toContain('const displayed_keys = view.follow || created ? keys : shown')
   })
 
   it('makes the top-left SGLuna mod-GUI button easier to see without changing its standard slot style', () => {
@@ -154,7 +158,18 @@ describe('SGLuna NPC console layout regressions', () => {
     expect(refresh_steps).toContain('previous_active !== active_index')
   })
 
-  it('ends follow when the player scrolls the feed, and shows whether anything new arrived', () => {
+  it('keeps the prompt and resource controls mounted during unchanged refreshes', () => {
+    const refresh = source.split('function refresh_columns(')[1]?.split('function build_panel(')[0] ?? ''
+    expect(refresh).toContain('if (dynamic.tags.signature !== signature) { banner.clear(); dynamic.clear(); plan_dynamic.clear();')
+    expect(refresh).toContain('if (resources.tags.signature !== resource_signature) { resources.clear();')
+    expect(refresh).toContain('if (!actions?.valid || actions.tags.signature !== action_signature)')
+    expect(refresh).not.toContain('render_prompt(')
+    const preview = source.split('function refresh_world_preview(')[1]?.split('function render_world_preview(')[0] ?? ''
+    expect(preview).toContain('if (preview === undefined) return body?.valid === true')
+    expect(preview).toContain('camera.entity !== preview.entity')
+  })
+
+  it('pauses live follow when the reader scrolls up in Activity or Conversation', () => {
     // Factorio gives Lua no scroll offset and no scroll event, so the wheel is
     // the signal, declared as listen-only inputs in the data stage.
     const data = readFileSync(new URL('../data.lua', import.meta.url), 'utf8')
@@ -167,8 +182,15 @@ describe('SGLuna NPC console layout regressions', () => {
     expect(source).toContain("scroll_up_input: 'airi-task-board-activity-scroll-up'")
     expect(source).toContain("scroll_down_input: 'airi-task-board-activity-scroll-down'")
     expect(source).toContain('script.on_event(TRACKER.scroll_up_input, on_activity_wheel)')
-    expect(source).toContain('script.on_event(TRACKER.scroll_down_input, on_activity_wheel)')
-    expect(source).toContain('activity_state.stop_activity_follow(player.index, last_shown_activity_key(element))')
+    expect(source).not.toContain('script.on_event(TRACKER.scroll_down_input, on_activity_wheel)')
+    expect(source).toContain('element.name !== debug_ui.CONVERSATION_SCROLL_NAME')
+    expect(source).toContain('activity_state.stop_activity_follow(player.index, last_shown_activity_key(activity_scroll_of(player)))')
+    expect(source).toContain('element.name === TRACKER.live || element.name === debug_ui.CONVERSATION_STATE_NAME')
+    expect(debug_source).toContain("CONVERSATION_STATE_NAME = 'airi_task_board_conversation_live'")
+    expect(debug_source).toContain("CONVERSATION_SCROLL_NAME = 'airi_task_board_conversation_scroll'")
+    expect(source).toContain('if (activity_state.activity_view(player.index).follow) activity_state.reset_activity_view(player.index)')
+    const build_panel = source.split('function build_panel(')[1]?.split('function render_panel(')[0] ?? ''
+    expect(build_panel).not.toContain('reset_activity_view')
 
     // Hover is deliberately not state. Rows still ignore interaction so the
     // ordinary wheel reaches the pane, while only synchronized wheel input pauses follow.

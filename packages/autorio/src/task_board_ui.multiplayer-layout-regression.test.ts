@@ -23,4 +23,16 @@ describe('task board multiplayer layout regression', () => {
     expect(source).not.toContain('player.display_resolution')
     expect(source).not.toContain('player.display_scale')
   })
+
+  it('accepts console button and field events only from the event player while the console is open', () => {
+    const source = taskBoardUiSource()
+    const click = source.split('script.on_event(defines.events.on_gui_click,')[1]?.split('script.on_event(defines.events.on_gui_text_changed,')[0] ?? ''
+    expect(click).toContain('element.player_index !== event.player_index')
+    expect(click).toContain('if (!task_board_ui_is_open(player.index)) return')
+    const text = source.split('script.on_event(defines.events.on_gui_text_changed,')[1] ?? ''
+    expect(text).toContain('element.player_index !== event.player_index')
+    expect(text).toContain('!task_board_ui_is_open(event.player_index)')
+    expect(source).not.toContain('player.display_resolution')
+    expect(source).not.toContain('player.display_scale')
+  })
 })

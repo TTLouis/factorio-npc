@@ -859,10 +859,10 @@ function focus_npc_preview(player: LuaPlayer) {
  */
 function refresh_world_preview(parent: LuaGuiElement, runtime: TaskBoardUiRuntimeSnapshot, player: LuaPlayer) {
   const preview = runtime.preview
-  if (preview === undefined) return false
   const section = parent[ui_constants.PREVIEW_SECTION_NAME]
   const header = section?.valid ? section[ui_constants.PREVIEW_HEADER_NAME] : undefined
   const body = section?.valid ? section[ui_constants.PREVIEW_BODY_NAME] : undefined
+  if (preview === undefined) return body?.valid === true && body[ui_constants.PREVIEW_CAMERA_FRAME_NAME]?.valid !== true
   const frame = body?.valid ? body[ui_constants.PREVIEW_CAMERA_FRAME_NAME] : undefined
   // Keep the element typed: the camera's live properties are read-only on the
   // base union, and casting to `any` would emit the wrong Lua self ABI.
@@ -870,17 +870,19 @@ function refresh_world_preview(parent: LuaGuiElement, runtime: TaskBoardUiRuntim
   const position = header?.valid ? header[ui_constants.PREVIEW_POSITION_NAME] : undefined
   if (!frame?.valid || !camera?.valid || !position?.valid) return false
 
-  camera.position = preview.position
-  camera.surface_index = preview.surface_index
-  if (preview.entity?.valid) camera.entity = preview.entity
+  if (camera.position.x !== preview.position.x || camera.position.y !== preview.position.y) camera.position = preview.position
+  if (camera.surface_index !== preview.surface_index) camera.surface_index = preview.surface_index
+  if (preview.entity?.valid && camera.entity !== preview.entity) camera.entity = preview.entity
   // Follow storage rather than the slider: the slider is the player's input, and
   // writing to it mid-drag is exactly what this refresh must not do.
-  camera.zoom = task_board_preview_zoom(player.index)
-  position.caption = preview_position_caption(preview)
+  const zoom = task_board_preview_zoom(player.index)
+  if (camera.zoom !== zoom) camera.zoom = zoom
+  const caption = preview_position_caption(preview)
+  if (position.caption !== caption) position.caption = caption
 
   const preview_min_height = task_board_preview_min_height(player_gui_height(player))
-  frame.style.minimal_height = preview_min_height
-  camera.style.minimal_height = preview_min_height
+  if (frame.style.minimal_height !== preview_min_height) frame.style.minimal_height = preview_min_height
+  if (camera.style.minimal_height !== preview_min_height) camera.style.minimal_height = preview_min_height
   return true
 }
 
@@ -1224,19 +1226,18 @@ function render_titlebar(root: FrameGuiElement, caption = 'SGLuna NPC Console', 
   titlebar.add({ type: 'label', caption, style: 'frame_title', ignored_by_interaction: true }); const dragger = titlebar.add({ type: 'empty-widget', style: 'draggable_space_header', ignored_by_interaction: true }); dragger.style.horizontally_stretchable = true; dragger.style.height = 24
   titlebar.add({ type: 'sprite-button', name: close_name, sprite: 'utility/close', style: 'frame_action_button', tooltip: `Close ${caption}` })
 }
-function console_latest_card(board: TaskBoardUiSnapshot | undefined): console_ui.ConsoleLatestCard {
-  // Same rows as the ACTIVITY feed, minus its filters: what the conversation shows is left out.
-  const in_conversation = debug_ui.conversation_activity_keys(board)
-  const entries = task_board_activity_for_display(board).filter(entry => !in_conversation[activity_state.activity_key(entry)])
-  const rows = activity_state.activity_rows(entries)
-  const lines = rows.slice(math.max(0, rows.length - ui_constants.CONSOLE_TABS.latest_rows)).map(row => ({ time: row.entry.timestamp ?? '--:--:--', tag: activity_prefix(row.entry.kind), tone: activity_tone(row.entry.kind), text: activity_state.activity_row_text(row) }))
-  return { rows: rows.length, entries: entries.length, lines }
-}
 function selected_console_tab(player: LuaPlayer): ui_constants.ConsoleTab { return console_ui.console_tab_of(storage.airi_task_board_tab?.[player.index]) ?? 'now' }
-/** What is rebuilt every refresh: the blocked banner and the NOW and PLAN cards. None of it owns a scroll-pane. */
+function dynamic_signature(player: LuaPlayer, board: TaskBoardUiSnapshot | undefined) {
+  return helpers.table_to_json({ goal: console_goal_card(board), now: console_now_card(board), blocked: board?.blocked, status: board?.status, blocker: board?.blocker, blocker_summary: board?.blocker_summary, choice_pending: task_board_ui_blocked_choice_pending(player.index, game.tick) })
+}
+function resources_signature(player: LuaPlayer, board: TaskBoardUiSnapshot | undefined, runtime: TaskBoardUiRuntimeSnapshot) {
+  return helpers.table_to_json({ inventory: runtime.inventory, guns: runtime.guns, ammo: runtime.ammo, wanted: board?.wanted_items, height: player_gui_height(player) })
+}
+/** These cards are rebuilt only when their displayed content changes. None owns a scroll-pane. */
 function build_left_dynamic(banner: LuaGuiElement, now: LuaGuiElement, plan: LuaGuiElement, player: LuaPlayer, board: TaskBoardUiSnapshot | undefined) {
   render_blocked(banner, player, board)
-  const goal = console_goal_card(board); console_ui.render_goal_card(now, goal); console_ui.render_now_card(now, console_now_card(board)); console_ui.render_latest_card(now, console_latest_card(board)); console_ui.render_goal_card(plan, goal)
+  const goal = console_goal_card(board); console_ui.render_goal_card(now, goal); console_ui.render_now_card(now, console_now_card(board)); console_ui.render_goal_card(plan, goal)
+  now.tags = { signature: dynamic_signature(player, board) }
 }
 function build_columns(columns: LuaGuiElement, player: LuaPlayer) {
   const board = storage.airi_task_board_ui; const runtime = runtime_snapshot()
@@ -1250,9 +1251,12 @@ function build_columns(columns: LuaGuiElement, player: LuaPlayer) {
   // The conversation hosts itself beside dynamic (in the NOW page), outside the flow that is cleared.
   debug_ui.render_ai_reply(dynamic, board?.response ?? '', ui_constants.LEFT_COLUMN_WIDTH)
   render_tracker(pages.plan, board, player); render_activity_section(pages.activity, board, player)
-  render_prompt(left, player); console_ui.render_action_row(left, console_action_state(player, board, runtime))
+  render_prompt(left, player)
+  const action_state = console_action_state(player, board, runtime)
+  console_ui.render_action_row(left, action_state)
+  const actions = left[ui_constants.ACTIONS_NAME]; if (actions?.valid) actions.tags = { signature: helpers.table_to_json(action_state) }
   const right = columns.add({ type: 'flow', name: ui_constants.RIGHT_COLUMN_NAME, direction: 'vertical' }); right.style.width = ui_constants.PREVIEW_COLUMN_WIDTH; right.style.vertical_spacing = ui_constants.COLUMN_SPACING; right.style.vertically_stretchable = true; render_world_preview(right, runtime, player)
-  const resources = right.add({ type: 'flow', name: ui_constants.RIGHT_RESOURCES_NAME, direction: 'horizontal' }); resources.style.horizontal_spacing = ui_constants.COLUMN_SPACING; resources.style.vertical_align = 'top'; render_inventory(resources, runtime, player); render_resource_sidebar(resources, board, runtime, player)
+  const resources = right.add({ type: 'flow', name: ui_constants.RIGHT_RESOURCES_NAME, direction: 'horizontal' }); resources.style.horizontal_spacing = ui_constants.COLUMN_SPACING; resources.style.vertical_align = 'top'; render_inventory(resources, runtime, player); render_resource_sidebar(resources, board, runtime, player); resources.tags = { signature: resources_signature(player, board, runtime) }
 }
 function refresh_columns(columns: LuaGuiElement, player: LuaPlayer) {
   const left = columns[ui_constants.LEFT_COLUMN_NAME]; const right = columns[ui_constants.RIGHT_COLUMN_NAME]
@@ -1264,28 +1268,32 @@ function refresh_columns(columns: LuaGuiElement, player: LuaPlayer) {
   const board = storage.airi_task_board_ui; const runtime = runtime_snapshot()
   // The tracker and the feed are never cleared on a routine refresh: they own scroll-panes.
   if (!refresh_tracker(plan, board, player) || !refresh_activity_section(activity, board, player)) return false
-  banner.clear(); dynamic.clear(); plan_dynamic.clear(); build_left_dynamic(banner, dynamic, plan_dynamic, player, board)
+  const signature = dynamic_signature(player, board)
+  if (dynamic.tags.signature !== signature) { banner.clear(); dynamic.clear(); plan_dynamic.clear(); build_left_dynamic(banner, dynamic, plan_dynamic, player, board) }
   // Current Task Conversation intentionally lives outside the dynamic flow so
   // its scroll position survives refreshes. That also means it must be
   // explicitly refreshed here; otherwise snapshots update storage while an
   // already-open console keeps stale rows until it is closed and reopened.
   debug_ui.render_ai_reply(dynamic, board?.response ?? '', ui_constants.LEFT_COLUMN_WIDTH)
   if (!console_ui.apply_console_tab(left, selected_console_tab(player))) return false
-  const actions = left[ui_constants.ACTIONS_NAME]; if (actions?.valid) actions.destroy(); console_ui.render_action_row(left, console_action_state(player, board, runtime))
+  const actions = left[ui_constants.ACTIONS_NAME]
+  const action_state = console_action_state(player, board, runtime)
+  const action_signature = helpers.table_to_json(action_state)
+  if (!actions?.valid || actions.tags.signature !== action_signature) { if (actions?.valid) actions.destroy(); console_ui.render_action_row(left, action_state); const rebuilt_actions = left[ui_constants.ACTIONS_NAME]; if (rebuilt_actions?.valid) rebuilt_actions.tags = { signature: action_signature } }
   // Never clear the preview column on a routine refresh: it owns the zoom slider.
   const resources = right[ui_constants.RIGHT_RESOURCES_NAME]
   if (!refresh_world_preview(right, runtime, player) || !resources?.valid) {
     right.clear()
     render_world_preview(right, runtime, player)
-    const rebuilt_resources = right.add({ type: 'flow', name: ui_constants.RIGHT_RESOURCES_NAME, direction: 'horizontal' }); rebuilt_resources.style.horizontal_spacing = ui_constants.COLUMN_SPACING; rebuilt_resources.style.vertical_align = 'top'; render_inventory(rebuilt_resources, runtime, player); render_resource_sidebar(rebuilt_resources, board, runtime, player)
+    const rebuilt_resources = right.add({ type: 'flow', name: ui_constants.RIGHT_RESOURCES_NAME, direction: 'horizontal' }); rebuilt_resources.style.horizontal_spacing = ui_constants.COLUMN_SPACING; rebuilt_resources.style.vertical_align = 'top'; render_inventory(rebuilt_resources, runtime, player); render_resource_sidebar(rebuilt_resources, board, runtime, player); rebuilt_resources.tags = { signature: resources_signature(player, board, runtime) }
     return true
   }
-  resources.clear(); render_inventory(resources, runtime, player); render_resource_sidebar(resources, board, runtime, player)
+  const resource_signature = resources_signature(player, board, runtime)
+  if (resources.tags.signature !== resource_signature) { resources.clear(); render_inventory(resources, runtime, player); render_resource_sidebar(resources, board, runtime, player); resources.tags = { signature: resource_signature } }
   return true
 }
 function build_panel(player: LuaPlayer) {
   const previous_location = destroy_panel(player)
-  activity_state.reset_activity_view(player.index)
   const root = player.gui.screen.add({ type: 'frame', name: ui_constants.ROOT_NAME, direction: 'vertical' }) as FrameGuiElement
   if (previous_location !== undefined) root.location = previous_location
   else root.auto_center = true
@@ -1429,8 +1437,9 @@ export function create_task_board_ui_remote_interface() {
     player.print(join_status_line())
   })
   script.on_event(defines.events.on_gui_click, (event: any) => {
-    const element = event.element; if (!element?.valid) return; const player = game.get_player(event.player_index); if (!player?.valid) return
+    const element = event.element; if (!element?.valid || element.player_index !== event.player_index) return; const player = game.get_player(event.player_index); if (!player?.valid) return
     if (element.name === ui_constants.BUTTON_NAME) { toggle_task_board_ui_open(player.index); render(player); return }
+    if (!task_board_ui_is_open(player.index)) return
     if (element.name === ui_constants.PREVIEW_POSITION_NAME) { focus_npc_preview(player); return }
     if (element.name === ui_constants.CLOSE_BUTTON_NAME) { clear_terminate_confirmation(player.index); close_task_board_ui(player.index); close_task_board_skills_ui(player.index); project_ui.close_projects_ui(player.index); debug_ui.close_debug_ui(player.index); destroy_skills_popout(player); project_ui.render_projects_popout(player, false); render_debug_popout(player); destroy_panel(player); ensure_button(player); return }
     if (element.name === project_ui.PROJECTS_BUTTON_NAME) { project_ui.toggle_projects_ui(player.index); render_panel(player); project_ui.render_projects_popout(player, true, storage.airi_task_board_ui?.goal_id ?? ''); return }
@@ -1449,7 +1458,7 @@ export function create_task_board_ui_remote_interface() {
       if (!left?.valid || !console_ui.apply_console_tab(left, tab)) render_panel(player)
       return
     }
-    if (element.name === ui_constants.TRACKER.live) {
+    if (element.name === ui_constants.TRACKER.live || element.name === debug_ui.CONVERSATION_STATE_NAME) {
       const scroll = activity_scroll_of(player); const view = activity_state.activity_view(player.index)
       if (view.follow) activity_state.stop_activity_follow(player.index, last_shown_activity_key(scroll))
       else activity_state.resume_activity_follow(player.index, last_shown_activity_key(scroll))
@@ -1457,27 +1466,27 @@ export function create_task_board_ui_remote_interface() {
     }
     const filter_flag = element.tags?.airi_activity_filter
     if (typeof filter_flag === 'number' && element.tags?.airi_activity_surface === 'projects') { activity_state.toggle_activity_filter(player.index, filter_flag, 'projects'); project_ui.render_projects_popout(player, true, storage.airi_task_board_ui?.goal_id ?? ''); return }
-    if (typeof filter_flag === 'number') { activity_state.toggle_activity_filter(player.index, filter_flag); activity_state.reset_activity_view(player.index); render_panel(player); return }
+    if (typeof filter_flag === 'number') { activity_state.toggle_activity_filter(player.index, filter_flag); if (activity_state.activity_view(player.index).follow) activity_state.reset_activity_view(player.index); render_panel(player); return }
     if (handle_learning_ui_click(player, element.name)) { render_skills_popout(player); return }
     if (handle_skill_export_click(player, element.name)) { render_skills_popout(player); return }
     handle_control_click(player, element.name)
   })
-  script.on_event(defines.events.on_gui_text_changed, (event: any) => { const element = event.element; if (!element?.valid || element.name !== ui_constants.PROMPT_FIELD_NAME) return; set_prompt_draft(event.player_index, element.text) })
-  script.on_event(defines.events.on_gui_confirmed, (event: any) => { const element = event.element; if (!element?.valid || element.name !== ui_constants.PROMPT_FIELD_NAME) return; const player = game.get_player(event.player_index); if (!player?.valid) return; submit_prompt(player, element.text) })
-  // Scrolling the feed by hand is the player taking over, so it ends follow.
+  script.on_event(defines.events.on_gui_text_changed, (event: any) => { const element = event.element; if (!element?.valid || element.player_index !== event.player_index || element.name !== ui_constants.PROMPT_FIELD_NAME || !task_board_ui_is_open(event.player_index)) return; set_prompt_draft(event.player_index, element.text) })
+  script.on_event(defines.events.on_gui_confirmed, (event: any) => { const element = event.element; if (!element?.valid || element.player_index !== event.player_index || element.name !== ui_constants.PROMPT_FIELD_NAME || !task_board_ui_is_open(event.player_index)) return; const player = game.get_player(event.player_index); if (!player?.valid) return; submit_prompt(player, element.text) })
+  // Scrolling up to read either feed ends follow. Scrolling down does not
+  // implicitly resume it; the reader uses LIVE to jump back to the newest row.
   // The inputs listen without consuming, so the pane still scrolls normally.
   const on_activity_wheel = (event: any) => {
-    if (!event.in_gui) return
+    if (!event.in_gui || !task_board_ui_is_open(event.player_index)) return
     let element = event.element; let depth = 0
-    while (element?.valid && element.name !== ui_constants.TRACKER.activity_scroll && depth < 6) { element = element.parent; depth++ }
-    if (!element?.valid || element.name !== ui_constants.TRACKER.activity_scroll) return
+    while (element?.valid && element.name !== ui_constants.TRACKER.activity_scroll && element.name !== debug_ui.CONVERSATION_SCROLL_NAME && depth < 6) { element = element.parent; depth++ }
+    if (!element?.valid || element.player_index !== event.player_index || (element.name !== ui_constants.TRACKER.activity_scroll && element.name !== debug_ui.CONVERSATION_SCROLL_NAME)) return
     const player = game.get_player(event.player_index); if (!player?.valid) return
-    if (activity_state.stop_activity_follow(player.index, last_shown_activity_key(element))) render_panel(player)
+    if (activity_state.stop_activity_follow(player.index, last_shown_activity_key(activity_scroll_of(player)))) render_panel(player)
   }
   script.on_event(ui_constants.TRACKER.scroll_up_input, on_activity_wheel)
-  script.on_event(ui_constants.TRACKER.scroll_down_input, on_activity_wheel)
   script.on_event(defines.events.on_gui_value_changed, (event: any) => {
-    const element = event.element; if (!element?.valid || element.name !== ui_constants.PREVIEW_ZOOM_SLIDER_NAME) return; const player = game.get_player(event.player_index); if (!player?.valid) return
+    const element = event.element; if (!element?.valid || element.player_index !== event.player_index || element.name !== ui_constants.PREVIEW_ZOOM_SLIDER_NAME || !task_board_ui_is_open(event.player_index)) return; const player = game.get_player(event.player_index); if (!player?.valid) return
     const zoom = set_preview_zoom(player.index, element.slider_value); element.slider_value = zoom
     const row = element.parent; const value = row?.valid ? row[ui_constants.PREVIEW_ZOOM_VALUE_NAME] : undefined; if (value?.valid) value.caption = preview_zoom_caption(zoom)
     const body = row?.parent; const frame = body?.valid ? body[ui_constants.PREVIEW_CAMERA_FRAME_NAME] : undefined; const camera = frame?.valid ? frame[ui_constants.PREVIEW_CAMERA_NAME] : undefined; if (camera?.valid) camera.zoom = zoom
