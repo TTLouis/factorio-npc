@@ -40,7 +40,7 @@ reasoning budgets went up, each tool round in one request took 40–55 s (live t
 - [x] **… button crashed the server.** `vertical_spacing` set on a frame (the …
   menu and, latent, the blocked banner). Fixed, with a regression test and a test
   GUI stand-in that rejects spacing on frames like the engine does. `0fbd0d78`
-- [ ] **B1 Provider HTTP 400 after an output-budget exhaustion.** Round 5
+- [x] **B1 Provider HTTP 400 after an output-budget exhaustion.** Round 5
   (`ordinary_planning`, high) ended with `finish_reason: length`; the
   `jev_recovery_continue` request that followed sent an assistant message with
   `tool_calls` and no matching tool replies, and DeepSeek rejected it
@@ -48,14 +48,28 @@ reasoning budgets went up, each tool round in one request took 40–55 s (live t
   Fix: whatever history a recovery path builds, every assistant `tool_calls` entry
   is followed by a reply for each `tool_call_id`, or the unanswered call is
   dropped. Test with a realistic fixture (`task-loop-fixtures.mjs`).
-- [ ] **B2 `semantic_completion_requires_active_step` failed a request.** After the
+  Cause: the budget handoff swapped the working messages for a two-message
+  capsule prefix but left `baseMessages` at three, and the skill context was
+  inserted at `baseMessages.length`, i.e. between the fresh round's assistant
+  `tool_calls` and its tool replies. It now goes before the first model turn,
+  and a split exchange fails locally before any provider call. `7acc1e3e`
+- [x] **B2 `semantic_completion_requires_active_step` failed a request.** After the
   pause, a player message led to a `same_goal_continue` plan that claimed a step
   was complete while the goal was paused. The guard is right to refuse the claim;
   the fault is that one refused claim failed the whole request instead of being
   reported back to the planner. Find why the continue path ran against a paused
   goal, and handle the refused claim without failing the request.
-- [ ] **B3 `interaction_router` returned invalid content** (`effort: none`). The
+  Why: the player's "continue" (also what UI Resume sends) is the resume path; a
+  paused goal turns active only when that turn's operations are admitted, after
+  the claim check. Claim checks now also run at parse time, so a refusal takes the
+  plan-correction path and the resubmitted operations resume the goal. Open: a
+  satisfied step can be closed only on the turn after a resume. `aebbaf25`
+- [x] **B3 `interaction_router` returned invalid content** (`effort: none`). The
   fallback worked, so this is low priority: note the frequency, fix if cheap.
+  Every router reply in the container traces (30 of 30, 2026-09-20..25) was
+  flagged; the replies were valid and routing used them. The trace diagnostic
+  checked them against the plan schema. Fixed. Also noted: router requests
+  still get a `[STEERING]` planner message appended (~0.8k chars). `109bc90f`
 
 ## W1 — recipe time and rate facts (deterministic, from game data)
 
