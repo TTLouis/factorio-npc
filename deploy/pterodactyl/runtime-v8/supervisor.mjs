@@ -629,6 +629,10 @@ function emptyAgentDebug(fallback = {}) {
     cap_enforcement_anomaly: 0,
     reasoning_effort: '',
     reasoning_policy_reason: '',
+    think_rounds: 0,
+    think_total_ms: 0,
+    think_slowest_round_ms: 0,
+    think_slowest_round_effort: '',
     content_chars: 0,
     reasoning_content_chars: 0,
     input_units: 0,
@@ -868,6 +872,22 @@ export function liveAgentDebugEvent(event, data = {}, previous = {}, fallback = 
   debug = applyDebugUsage(debug, cumulativeUsage)
   if (event === 'provider.response') {
     debug = applyLatestRoundDebugUsage(debug, data?.usage ?? providerEvent?.usage, providerEvent?.round ?? data?.round)
+    // Think time accumulates per completed round of the current planner
+    // request (reset on request.received, same as the fields above). Only
+    // a real provider.response carries a trustworthy latency_ms and the
+    // effort that round actually used; request.failed's failure snapshot
+    // re-describes a round already counted here, so it is excluded to avoid
+    // double counting.
+    const roundLatencyMs = data?.latency_ms
+    if (Number.isFinite(roundLatencyMs) && roundLatencyMs >= 0) {
+      const latency = Math.floor(roundLatencyMs)
+      debug.think_rounds = debugInteger(debug.think_rounds) + 1
+      debug.think_total_ms = debugInteger(debug.think_total_ms) + latency
+      if (latency > debugInteger(debug.think_slowest_round_ms)) {
+        debug.think_slowest_round_ms = latency
+        debug.think_slowest_round_effort = uiText(data?.provider?.reasoning_effort, 32)
+      }
+    }
   }
 
   if (event === 'interaction.routed') {

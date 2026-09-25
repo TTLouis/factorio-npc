@@ -24,6 +24,10 @@ describe('task board debug and UI freshness helpers', () => {
     const debug = sanitize_debug_snapshot({
       provider_model: 'deepseek-chat',
       input_units: 100000,
+      think_rounds: 5,
+      think_total_ms: 218400,
+      think_slowest_round_ms: 54200,
+      think_slowest_round_effort: 'high',
       decision_provider: 'TypeSafe',
       decision_model: 'jev-latest',
       decision_shadow_intent: 'status_query',
@@ -63,6 +67,10 @@ describe('task board debug and UI freshness helpers', () => {
 
     expect(debug.provider_model).toBe('deepseek-chat')
     expect(debug.input_units).toBe(100000)
+    expect(debug.think_rounds).toBe(5)
+    expect(debug.think_total_ms).toBe(218400)
+    expect(debug.think_slowest_round_ms).toBe(54200)
+    expect(debug.think_slowest_round_effort).toBe('high')
     expect(debug.decision_provider).toBe('TypeSafe')
     expect(debug.decision_model).toBe('jev-latest')
     expect(debug.decision_shadow_intent).toBe('status_query')
@@ -132,6 +140,10 @@ describe('task board debug and UI freshness helpers', () => {
     expect(missing.response_bytes).toBeUndefined()
     expect(missing.tool_call_count).toBeUndefined()
     expect(missing.structured_content).toBeUndefined()
+    expect(missing.think_rounds).toBe(0)
+    expect(missing.think_total_ms).toBe(0)
+    expect(missing.think_slowest_round_ms).toBe(0)
+    expect(missing.think_slowest_round_effort).toBe('')
 
     const malformed = sanitize_debug_snapshot({
       response_id: { secret: 'do not stringify arbitrary objects into the debug UI' },

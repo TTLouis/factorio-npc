@@ -11,6 +11,7 @@ describe('SGLuna debug layout', () => {
     expect(source).toContain("caption: 'Step / Runtime'")
     expect(source).toContain('(DEBUG_BODY_INNER_WIDTH - 2 * DEBUG_COLUMN_GAP) / 3')
     expect(source).toContain("add_row(overview, 'AI reply'")
+    expect(source).toContain("add_compact_row(provider_table, 'Think time · this request'")
     expect(source).toContain("add_compact_row(provider_table, 'Tokens · request cumulative'")
     expect(source).toContain('add_debug_decision_rows(decision_table, debug)')
     expect(source).toContain("add_compact_row(table, 'Jev health'")

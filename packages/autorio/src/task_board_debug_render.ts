@@ -242,6 +242,13 @@ function fill_debug_body(body: LuaGuiElement, board: any, runtime: any, synced_t
   add_compact_row(provider_table, 'Reasoning effort · latest round', clean_text(debug.reasoning_effort, 32) || '—')
   add_compact_row(provider_table, 'Policy reason · latest round', clean_text(debug.reasoning_policy_reason, 80) || '—')
   add_compact_row(provider_table, 'Latency', latency > 0 ? `${latency} ms` : '—')
+  const think_rounds = integer(debug.think_rounds)
+  const think_total_ms = integer(debug.think_total_ms)
+  const think_slowest_ms = integer(debug.think_slowest_round_ms)
+  const think_slowest_effort = clean_text(debug.think_slowest_round_effort, 32)
+  add_compact_row(provider_table, 'Think time · this request', think_rounds > 0
+    ? `${think_rounds} round${think_rounds === 1 ? '' : 's'} · ${math.floor(think_total_ms / 100) / 10}s total · slowest ${math.floor(think_slowest_ms / 100) / 10}s${think_slowest_effort.length > 0 ? ` (${think_slowest_effort})` : ''}`
+    : '—')
   add_compact_row(provider_table, 'Tokens · request cumulative', tokens)
   add_compact_row(provider_table, 'Latest completed round', latest_round_tokens)
   const decision_column = columns.add({ type: 'flow', direction: 'vertical' }); decision_column.style.width = DEBUG_COLUMN_WIDTH; decision_column.style.vertical_spacing = 4
