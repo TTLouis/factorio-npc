@@ -85,9 +85,9 @@ the trigger's policy; every later tool round falls through to
 `ordinary_planning` = high (`deploy/pterodactyl/runtime-v8/provider.mjs`
 `selectReasoningPolicy`). One request re-thinks at high effort 4–5 times.
 
-- [ ] Measure first: per-round latency, effort, reasoning tokens and
+- [x] Measure first: per-round latency, effort, reasoning tokens and
   `finish_reason` from `/data/logs/sgluna-prompts.jsonl`, grouped by request and
-  policy reason. Show think time in the Debug window.
+  policy reason. Show think time in the Debug window. `a34b569a`
 - [ ] Then set the effort per round from what the round has to do: gathering facts
   with tools doesn't need the full budget; writing or revising a plan does. Keep
   `max` for plan authoring. Record the chosen effort in the trace, as today.
