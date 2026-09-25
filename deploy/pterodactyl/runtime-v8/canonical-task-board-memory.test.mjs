@@ -465,6 +465,45 @@ test('the transfer itself failing in a placing + transfer batch still blocks as 
   assert.equal(state.task_board.evidence.some(item => item.kind === 'operation_failure_recoverable'), false)
 })
 
+test('a blocker names the operation that failed, not the batch transfer intent', () => {
+  // Owner, 2026-09-25: a failure in a batch that also moves items must not be
+  // labelled a transfer failure unless the transfer is what failed.
+  const cases = [
+    [{ type: 'crafting', code: 'not_enough_ingredients' }, 'crafting_failed:not_enough_ingredients'],
+    [{ type: 'walking_to_entity', code: 'unreachable' }, 'movement_failed:unreachable'],
+    [{ type: 'mining', code: 'no_resource' }, 'mining_failed:no_resource'],
+    // Placement codes other than the correctable not_placeable still block, as placement failures.
+    [{ type: 'placing', code: 'item_missing' }, 'placement_failed:item_missing'],
+  ]
+  for (const [basic, expected] of cases) {
+    const memory = new CanonicalTaskBoardMemory()
+    memory.planByNpc.set('npc:airi', placeAndSupplyState())
+    memory.recordBoardEvidence('npc:airi', placementRefusedReceipt(7, {
+      ...basic,
+      entity_name: undefined,
+      placement_footprint: undefined,
+      placement_grid: undefined,
+      placement_blockers: undefined,
+    }))
+    const state = memory.currentPlan('npc:airi')
+    assert.equal(state.status, 'blocked', expected)
+    assert.equal(state.blocker, expected)
+  }
+})
+
+test('a failure without a correlated operation is not guessed to be a transfer failure', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  memory.planByNpc.set('npc:airi', placeAndSupplyState())
+  const receipt = placementRefusedReceipt(7)
+  const summary = JSON.parse(receipt.summary)
+  delete summary.basic_operation
+  memory.recordBoardEvidence('npc:airi', { ...receipt, summary: JSON.stringify(summary) })
+  const state = memory.currentPlan('npc:airi')
+
+  assert.equal(state.status, 'blocked')
+  assert.equal(state.blocker, 'operation_failed:placing:not_placeable')
+})
+
 test('duplicate completed receipt records one deterministic proof but cannot advance semantic progress', () => {
   const memory = new CanonicalTaskBoardMemory()
   memory.planByNpc.set('npc:airi', planState())

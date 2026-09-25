@@ -205,12 +205,31 @@ function consecutiveRecoverableFailures(board) {
   return { count, refs }
 }
 
-function transferFailureReason(evidence) {
+// The blocker names the operation that failed, not the batch's transfer
+// intent: a refused placement in a place + supply batch is placement_failed,
+// and transfer_failed means items really failed to move.
+const OPERATION_FAILURE_LABELS = {
+  moving_items: 'transfer',
+  placing: 'placement',
+  crafting: 'crafting',
+  mining: 'mining',
+  harvesting: 'harvest',
+  walking_to_entity: 'movement',
+  attacking: 'combat',
+  researching: 'research',
+  rotating: 'rotation',
+  waiting: 'wait',
+}
+
+function operationFailureReasonCode(evidence) {
   const receipt = parseReceiptSummary(evidence)
   const basic = receipt?.basic_operation
   const code = typeof basic?.code === 'string' && basic.code ? basic.code : undefined
   const reason = typeof receipt?.reason === 'string' && receipt.reason ? receipt.reason : undefined
-  return code ?? reason ?? 'operation_failed'
+  // basic_operation is only present when it correlates with this batch; without
+  // it the failing operation is unknown, so the label doesn't guess.
+  const label = Object.hasOwn(OPERATION_FAILURE_LABELS, basic?.type) ? OPERATION_FAILURE_LABELS[basic.type] : 'operation'
+  return `${label}_failed:${code ?? reason ?? 'operation_failed'}`
 }
 
 export function verifyDeterministicReceipt(state, evidence) {
@@ -1538,12 +1557,12 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     }
 
     if (evidence?.kind === 'operation_error_receipt' && stateHasUnverifiedTransferIntent(state)) {
-      const reason = transferFailureReason(evidence)
+      const reasonCode = operationFailureReasonCode(evidence)
       return this.applyOutcomeAuthority(key, {
         kind: 'world_blocked',
         source: 'autorio',
-        reason_code: `transfer_failed:${reason}`,
-        candidate_blocker: `transfer_failed:${reason}`,
+        reason_code: reasonCode,
+        candidate_blocker: reasonCode,
         evidence: [evidence],
       }).state?.task_board ?? boardAfterReceipt
     }
