@@ -17,7 +17,7 @@ function taskBoardUiSource() {
 describe('task board New Task control regression', () => {
   it('renders New Task behind … beside Terminate and queues the server-authoritative action', () => {
     const source = taskBoardUiSource()
-    const prompt = source.split('function render_prompt(')[1]?.split('function render_titlebar(')[0] ?? ''
+    const prompt = source.split('function render_prompt(')[1]?.split('function selected_console_tab(')[0] ?? ''
     const menu = source.split('export function render_action_row(')[1] ?? ''
     const handler = source.split('function handle_control_click(')[1]?.split('\n}\n\nexport function create_task_board_ui_remote_interface')[0] ?? ''
 
@@ -39,7 +39,8 @@ describe('task board New Task control regression', () => {
     const source = taskBoardUiSource()
     const refresh = source.split('function refresh_columns(')[1]?.split('function build_panel(')[0] ?? ''
 
-    expect(refresh).toContain('banner.clear(); dynamic.clear(); plan_dynamic.clear(); build_left_dynamic(banner, dynamic, plan_dynamic, player, board)')
+    // Each card redraws only when its own content changes (refresh_slot).
+    expect(refresh).toContain('build_left_dynamic(banner, dynamic, plan_dynamic, player, board)')
     expect(refresh).toContain("debug_ui.render_ai_reply(dynamic, board?.response ?? '', LEFT_COLUMN_WIDTH)")
     expect(refresh.indexOf('debug_ui.render_ai_reply')).toBeGreaterThan(refresh.indexOf('build_left_dynamic'))
   })

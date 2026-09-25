@@ -14,6 +14,7 @@ import {
   serialize_skill_json,
   skill_export_relative_directory,
 } from './skills'
+import { edited_skill_revision, skill_detail_rows } from './skills_window'
 
 const writes: Array<{ filename: string, data: string, append: boolean }> = []
 
@@ -311,5 +312,57 @@ describe('learned skill record and export', () => {
     ])
     expect(messages[0]).toContain('Exported Automated Transport Belt Line r1')
     expect(messages[0]).toContain('script-output/sgluna-skills/automated-transport-belt-line/r1')
+  })
+})
+
+describe('player edits from the skills window', () => {
+  const verified_fields = {
+    status: 'verified',
+    stage: 'verified_skill',
+    verification: {
+      structural: 'passed', recipe_flow: 'passed', placement_rebuild: 'passed', production_output: 'passed', belt_capacity: 'passed',
+      inserter_sustained_throughput: 'unvalidated',
+      acceptance_conditions: [{ id: 'rebuild', description: 'Rebuilt layout produced the expected item.', status: 'passed', evidence_refs: ['result:run-7'] }],
+    },
+  }
+
+  it('saves an edit as the next revision, records the editor and is what the LLM reads next', () => {
+    const skill = create_skill_candidate(candidate())
+    const saved = edited_skill_revision(skill, { name: 'Belt Line', summary: 'Make belts from plates and gears.', status: 'candidate' }, 'owner', 900)
+    expect(saved.revision).toBe(skill.revision + 1)
+    expect(saved.name).toBe('Belt Line')
+    expect(saved.summary).toBe('Make belts from plates and gears.')
+    expect(saved.source.evidence_refs).toEqual([...skill.source.evidence_refs, 'player-edit:owner@900'])
+    // getSkillDetails reads the stored definition, so the model sees the edit.
+    expect(get_skill_definition(skill.id)).toEqual(saved)
+  })
+
+  it('turns an edited verified skill back into a candidate, and never lets a player verify', () => {
+    const skill = canonicalize_skill_definition(candidate(verified_fields))
+    const saved = edited_skill_revision(skill, { name: skill.name, summary: 'Reworded.', status: 'candidate' }, 'owner', 901)
+    expect(saved.status).toBe('candidate')
+    expect(saved.stage).toBe('executable_candidate')
+    expect(edited_skill_revision(skill, { name: skill.name, summary: skill.summary, status: 'deprecated' }, 'owner', 902).stage).toBe('verified_skill')
+    expect(() => edited_skill_revision(skill, { name: skill.name, summary: skill.summary, status: 'verified' }, 'owner', 903)).toThrow(/runtime verifier/)
+  })
+
+  it('refuses an invalid edit and leaves the stored skill as it was', () => {
+    const skill = create_skill_candidate(candidate())
+    expect(() => edited_skill_revision(skill, { name: '   ', summary: skill.summary, status: 'candidate' }, 'owner', 904)).toThrow(/name must not be empty/)
+    expect(get_skill_definition(skill.id)).toEqual(skill)
+  })
+
+  it('edits a curated skill as a stored revision that reseeding keeps', () => {
+    ensure_basic_skill_definitions()
+    const curated = get_skill_definition('burner-coal-loop')!
+    const saved = edited_skill_revision(curated, { name: 'Burner Coal Loop (house rules)', summary: curated.summary, status: 'candidate' }, 'owner', 905)
+    ensure_basic_skill_definitions()
+    expect(get_skill_definition('burner-coal-loop')).toEqual(saved)
+  })
+
+  it('shows every part of a skill the model can read, in order', () => {
+    const rows = skill_detail_rows(create_skill_candidate(candidate()))
+    expect(rows.map(([key]) => key)).toEqual(['ID', 'KIND', 'SOURCE', 'SUMMARY', 'INPUTS', 'OUTPUTS', 'NEEDS', 'MACHINES', 'LINKS', 'RULES', 'PARAMS', 'CHECKED', 'FAILS', 'CONFIDENCE', 'EXAMPLES'])
+    expect(rows.find(([key]) => key === 'LINKS')?.[1]).toContain('direct_item_output gear-assembler → belt-assembler')
   })
 })

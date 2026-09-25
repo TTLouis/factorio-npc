@@ -310,6 +310,13 @@ export function create_learning_remote_interface() {
   })
 }
 
+/** What render_learning_status shows, so a window can skip redrawing it when nothing changed. */
+export function learning_status_signature() {
+  const parts = [get_learning_policy(), `${list_learning_verification_queue().length}`]
+  for (const opportunity of list_learning_opportunities(MAX_UI_OPPORTUNITIES)) parts.push(`${opportunity.id}:${opportunity.state}:${opportunity.reason}:${opportunity.estimated_cost}:${opportunity.risk}`)
+  return parts.join('|')
+}
+
 export function render_learning_status(parent: LuaGuiElement) {
   const frame = parent.add({ type: 'frame', direction: 'vertical', style: 'inside_shallow_frame' })
   frame.style.horizontally_stretchable = true

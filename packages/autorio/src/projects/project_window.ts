@@ -657,53 +657,64 @@ function refresh_project_detail(frame: LuaGuiElement, project: ProjectHistoryRec
   }
   const count = activity_header[DETAIL_ACTIVITY_COUNT_NAME]
 
-  meta.clear()
   if (project === undefined) {
+    meta.clear()
+    meta.tags = { signature: '' }
     meta.add({ type: 'label', caption: 'Select a project from the left.' })
     step_flow.clear()
     conversation_flow.clear()
     activity_flow.clear()
     step_flow.tags = { signature: '' }
+    conversation_flow.tags = { signature: '' }
     activity_flow.tags = { keys: [], mask }
     if (count?.valid) count.caption = ''
     return true
   }
-  add_detail_row(meta, 'GOAL', project.objective)
-  add_detail_row(meta, 'STATUS', project.status.toUpperCase())
-  add_detail_row(meta, 'PROGRESS', `${project.completed_count}/${project.total_steps}`)
-  if (project.blocker.length > 0) add_detail_row(meta, 'BLOCKER', project.blocker)
-  if (project.pause_reason.length > 0) add_detail_row(meta, 'PAUSED', project.pause_reason)
-  conversation_flow.clear()
-  let conversation_count = 0
+  // Meta rows and the conversation are redrawn only when their text changes,
+  // so a routine refresh leaves the window alone.
+  const meta_rows: Array<[string, string]> = [['GOAL', project.objective], ['STATUS', project.status.toUpperCase()], ['PROGRESS', `${project.completed_count}/${project.total_steps}`]]
+  if (project.blocker.length > 0) meta_rows.push(['BLOCKER', project.blocker])
+  if (project.pause_reason.length > 0) meta_rows.push(['PAUSED', project.pause_reason])
+  const meta_signature = helpers.table_to_json(meta_rows)
+  if (meta.tags.signature !== meta_signature) {
+    meta.clear()
+    for (const [key, value] of meta_rows) add_detail_row(meta, key, value)
+    meta.tags = { signature: meta_signature }
+  }
+  const conversation_lines: string[] = []
   if ((project.conversation ?? []).length > 0) {
     for (const message of project.conversation) {
       const text = clean_text(message.text, 2000)
       if (text.length === 0) continue
       const sender = clean_text(message.sender || (message.role === 'assistant' ? 'AIRI' : 'Player'), 128)
-      const line = gui_text.literal_gui_text(conversation_flow.add({ type: 'label', caption: `${sender} · ${text}` }))
-      line.style.single_line = false
-      line.style.maximal_width = PROJECT_DETAIL_WIDTH - 60
-      conversation_count++
+      conversation_lines.push(`${sender} · ${text}`)
     }
   }
   else {
     for (const entry of project.activity) {
       const text = clean_text(entry.text, 1200)
-      if (entry.kind === 'decision' && text.length > 0) {
-        const line = gui_text.literal_gui_text(conversation_flow.add({ type: 'label', caption: `AIRI · ${text}` })); line.style.single_line = false; line.style.maximal_width = PROJECT_DETAIL_WIDTH - 60; conversation_count++
-        continue
-      }
+      if (entry.kind === 'decision' && text.length > 0) { conversation_lines.push(`AIRI · ${text}`); continue }
       if (entry.kind !== 'observation' || !String(entry.id ?? '').startsWith('live_')) continue
       const separator = text.indexOf(': ')
       if (separator < 1 || text.startsWith('Tool ')) continue
-      const line = gui_text.literal_gui_text(conversation_flow.add({ type: 'label', caption: `${text.substring(0, separator)} · ${text.substring(separator + 2)}` })); line.style.single_line = false; line.style.maximal_width = PROJECT_DETAIL_WIDTH - 60; conversation_count++
+      conversation_lines.push(`${text.substring(0, separator)} · ${text.substring(separator + 2)}`)
     }
     if (project.response.length > 0) {
       const duplicate = project.activity.some(entry => entry.kind === 'decision' && clean_text(entry.text, 1200) === project.response)
-      if (!duplicate) { const line = gui_text.literal_gui_text(conversation_flow.add({ type: 'label', caption: `AIRI · ${project.response}` })); line.style.single_line = false; line.style.maximal_width = PROJECT_DETAIL_WIDTH - 60; conversation_count++ }
+      if (!duplicate) conversation_lines.push(`AIRI · ${project.response}`)
     }
   }
-  if (conversation_count === 0) conversation_flow.add({ type: 'label', caption: 'No player/agent conversation retained for this project.' })
+  const conversation_signature = helpers.table_to_json(conversation_lines)
+  if (conversation_flow.tags.signature !== conversation_signature || conversation_flow.children.length === 0) {
+    conversation_flow.clear()
+    for (const caption of conversation_lines) {
+      const line = gui_text.literal_gui_text(conversation_flow.add({ type: 'label', caption }))
+      line.style.single_line = false
+      line.style.maximal_width = PROJECT_DETAIL_WIDTH - 60
+    }
+    if (conversation_lines.length === 0) conversation_flow.add({ type: 'label', caption: 'No player/agent conversation retained for this project.' })
+    conversation_flow.tags = { signature: conversation_signature }
+  }
 
   const signature = step_signature(project)
   if (step_flow.tags.signature !== signature) {
@@ -811,7 +822,7 @@ export function render_projects_popout(player: LuaPlayer, task_board_open: boole
   refresh_project_detail(detail_frame, selected, player.index)
 }
 
-function handle_project_selection(player: LuaPlayer, element: any) {
+export function handle_project_selection(player: LuaPlayer, element: any) {
   if (element.name !== PROJECT_LIST_NAME) return false
   const ids = element.tags?.airi_project_ids as string[] | undefined
   const index = typeof element.selected_index === 'number' ? element.selected_index - 1 : -1
@@ -819,15 +830,4 @@ function handle_project_selection(player: LuaPlayer, element: any) {
   select_project(player.index, ids[index])
   render_projects_popout(player, true, ids[index])
   return true
-}
-
-// No other Autorio UI currently owns this event, so Projects can handle its
-// selector without competing for the Task Board's single on_gui_click handler.
-if (typeof script !== 'undefined' && typeof defines !== 'undefined') {
-  script.on_event(defines.events.on_gui_selection_state_changed, (event: any) => {
-    const element = event.element
-    if (!element?.valid || element.name !== PROJECT_LIST_NAME) return
-    const player = game.get_player(event.player_index)
-    if (player?.valid) handle_project_selection(player, element)
-  })
 }

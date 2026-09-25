@@ -124,7 +124,9 @@ describe('SGLuna NPC console layout regressions', () => {
 
   it('filters recent activity with toggle buttons, since a drop-down can only hold one selection', () => {
     expect(source).not.toContain("type: 'drop-down'")
-    expect(source).not.toContain('on_gui_selection_state_changed')
+    // The console owns the one list-box selection handler (Old tasks and Skills);
+    // the activity filters never go through it.
+    expect(source).toContain('if (!project_ui.handle_project_selection(player, element)) skills_ui.handle_skills_window_selection(player, element)')
     expect(source).toContain("tags: { airi_activity_filter: activity_state.ACTIVITY_FILTER_ALL }")
     expect(source).toContain('tags: { airi_activity_filter: filter.flag }')
     expect(source).toContain('(button as ButtonGuiElement).toggled = activity_state.activity_filter_selected(mask, flag)')
@@ -137,7 +139,7 @@ describe('SGLuna NPC console layout regressions', () => {
     // The tracker and the feed are refreshed in place before the rest of the
     // left column is rebuilt, and are never inside what gets cleared.
     expect(refresh_columns).toContain('if (!refresh_tracker(plan, board, player) || !refresh_activity_section(activity, board, player)) return false')
-    expect(refresh_columns.indexOf('refresh_tracker(plan')).toBeLessThan(refresh_columns.indexOf('dynamic.clear()'))
+    expect(refresh_columns.indexOf('refresh_tracker(plan')).toBeLessThan(refresh_columns.indexOf('build_left_dynamic('))
     // Switching tabs only flips visibility; it never rebuilds a page.
     expect(refresh_columns).toContain('console_ui.apply_console_tab(left, selected_console_tab(player))')
     expect(refresh_columns).not.toContain('plan.clear()')
@@ -160,7 +162,9 @@ describe('SGLuna NPC console layout regressions', () => {
 
   it('keeps the prompt and resource controls mounted during unchanged refreshes', () => {
     const refresh = source.split('function refresh_columns(')[1]?.split('function build_panel(')[0] ?? ''
-    expect(refresh).toContain('if (dynamic.tags.signature !== signature) { banner.clear(); dynamic.clear(); plan_dynamic.clear();')
+    // Cards redraw one at a time, each gated by its own signature.
+    expect(refresh).toContain('build_left_dynamic(banner, dynamic, plan_dynamic, player, board)')
+    expect(source).toContain('if (slot.tags.signature === signature) return')
     expect(refresh).toContain('if (resources.tags.signature !== resource_signature) { resources.clear();')
     expect(refresh).toContain('if (!actions?.valid || actions.tags.signature !== action_signature)')
     expect(refresh).not.toContain('render_prompt(')

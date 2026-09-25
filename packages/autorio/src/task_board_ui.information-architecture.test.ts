@@ -37,8 +37,9 @@ describe('NPC console information architecture', () => {
     // A blocked plan is a full-width banner above the tabs, so it is seen
     // whichever tab is open; the Goal and Now cards open the NOW tab.
     expect(consoleSource).toMatch(/name: CONSOLE_TABS\.banner[\s\S]*console_ui\.render_console_tabs\(left,/)
-    expect(consoleSource).toMatch(/render_blocked\(banner, player, board\)\n[^\n]*console_ui\.render_goal_card\(now, goal\); console_ui\.render_now_card\(now,[^\n]*console_ui\.render_goal_card\(plan, goal\)/)
-    const prompt = consoleSource.split('function render_prompt(')[1]?.split('function render_titlebar(')[0] ?? ''
+    // Each card lives in its own slot and redraws only when its content changes.
+    expect(consoleSource).toMatch(/refresh_slot\(banner,[^\n]*render_blocked\(slot, player, board\)\)\n[^\n]*NOW_GOAL_SLOT_NAME\), goal_signature, slot => console_ui\.render_goal_card\(slot, goal\)\)\n[^\n]*NOW_CARD_SLOT_NAME\),[^\n]*console_ui\.render_now_card\(slot, now_card\)\)\n[^\n]*refresh_slot\(plan, goal_signature, slot => console_ui\.render_goal_card\(slot, goal\)\)/)
+    const prompt = consoleSource.split('function render_prompt(')[1]?.split('function selected_console_tab(')[0] ?? ''
     expect(prompt).toContain("caption: 'Prompt SGLuna'")
     expect(prompt).not.toContain('NEW_TASK_BUTTON_NAME')
   })

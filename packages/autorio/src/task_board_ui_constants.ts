@@ -26,6 +26,8 @@ export const ROOT_NAME = 'airi_task_board_panel'
 export const COLUMNS_NAME = 'airi_task_board_columns'
 export const LEFT_COLUMN_NAME = 'airi_task_board_left_column'
 export const LEFT_DYNAMIC_NAME = 'airi_task_board_left_dynamic'
+export const NOW_GOAL_SLOT_NAME = 'airi_task_board_now_goal'
+export const NOW_CARD_SLOT_NAME = 'airi_task_board_now_card'
 export const RIGHT_COLUMN_NAME = 'airi_task_board_right_column'
 export const RIGHT_RESOURCES_NAME = 'airi_task_board_right_resources'
 export const PROMPT_SECTION_NAME = 'airi_task_board_prompt_section'
@@ -45,11 +47,13 @@ export const TRACKER = {
   shelf: 'airi_task_board_tracker_shelf',
   shelf_header: 'airi_task_board_tracker_shelf_header',
   shelf_count: 'airi_task_board_tracker_shelf_count',
+  shelf_body: 'airi_task_board_tracker_shelf_body',
   shelf_scroll: 'airi_task_board_tracker_shelf_scroll',
   shelf_table: 'airi_task_board_tracker_shelf_table',
   plan_column: 'airi_task_board_tracker_plan_column',
   plan_header: 'airi_task_board_tracker_plan_header',
   plan_summary: 'airi_task_board_tracker_plan_summary',
+  plan_body: 'airi_task_board_tracker_plan_body',
   plan: 'airi_task_board_tracker_plan',
   progress: 'airi_task_board_tracker_progress',
   steps_scroll: 'airi_task_board_tracker_steps',
@@ -81,7 +85,7 @@ export const SKILLS_ROOT_NAME = 'airi_task_board_skills_panel'
 export const SKILLS_BODY_NAME = 'airi_task_board_skills_body'
 export const SKILLS_BUTTON_NAME = 'airi_task_board_skills'
 export const SKILLS_CLOSE_BUTTON_NAME = 'airi_task_board_skills_close'
-export const SKILLS_POPOUT_TITLE = 'Area Learning & Skills'
+export const SKILLS_POPOUT_TITLE = 'Skills & Area Learning'
 // Only the fallback the button is created with. What it wears is the avatar of
 // whichever provider AIRI is currently talking to, which task_board_provider
 // resolves from the reported model identifier on every render.
@@ -233,7 +237,6 @@ export const PAUSE_BUTTON_WIDTH = LEFT_COLUMN_WIDTH - FOLLOW_BUTTON_WIDTH - MORE
 export const MORE_MENU_BUTTON_WIDTH = 140
 export const PROMPT_SEND_WIDTH = 84
 export const PROMPT_FIELD_WIDTH = LEFT_COLUMN_WIDTH - 2 * SECTION_PADDING - 8 - PROMPT_SEND_WIDTH
-export const SKILLS_POPOUT_WIDTH = 720
 // The left column's tabs. The three pages are all built once and switched by
 // toggling .visible, so every scroll-pane inside them (steps, shelf, activity,
 // conversation) keeps its position across both tab switches and refreshes.

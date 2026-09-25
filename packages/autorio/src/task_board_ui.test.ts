@@ -12,7 +12,14 @@ import {
   task_board_ui_terminate_is_armed,
   toggle_task_board_skills_ui_open,
   toggle_task_board_ui_open,
+  create_task_board_ui_remote_interface,
 } from './task_board_ui'
+import { BUTTON_NAME, PROMPT_FIELD_NAME, ROOT_NAME, SKILLS_BUTTON_NAME, SKILLS_ROOT_NAME } from './task_board_ui_constants'
+import { get_handler } from './test-event-registry'
+import { DEBUG_BUTTON_NAME } from './task_board_debug'
+import { PROJECTS_BUTTON_NAME } from './projects/project_window'
+import { SKILLS_WINDOW } from './skills_window'
+import { ensure_basic_skill_definitions, get_skill_definition } from './skills'
 
 function taskBoardUiSource() {
   const main = readFileSync(new URL('./task_board_ui.ts', import.meta.url), 'utf8')
@@ -340,7 +347,9 @@ describe('in-game task board UI projection', () => {
     expect(source).toContain('left.style.vertical_spacing = COLUMN_SPACING')
     expect(source).toContain('dynamic.style.vertical_spacing = COLUMN_SPACING')
     expect(source).toContain('resources.style.horizontal_spacing = COLUMN_SPACING')
-    expect(source).toContain('console_ui.render_goal_card(now, goal); console_ui.render_now_card(now, console_now_card(board)); console_ui.render_goal_card(plan, goal)')
+    // Each card has its own slot, so one card changing leaves the others alone.
+    expect(source).toContain('slot => console_ui.render_goal_card(slot, goal)')
+    expect(source).toContain('slot => console_ui.render_now_card(slot, now_card)')
     expect(source).not.toContain('console_ui.render_latest_card(')
     // The old Controls grid is gone: window buttons are in the title bar and
     // PAUSE / FOLLOW / … sit in one row under the prompt.
@@ -408,7 +417,9 @@ describe('in-game task board UI projection', () => {
 
   it('refreshes live content without destroying the prompt field being typed into', () => {
     const source = taskBoardUiSource()
-    expect(source).toContain('dynamic.clear()')
+    // Only the one card whose content changed is cleared, never the column around the prompt.
+    expect(source).toContain('if (slot.tags.signature === signature) return')
+    expect(source).toContain('slot.clear(); build(slot); slot.tags = { signature }')
     expect(source).toContain('build_left_dynamic(banner, dynamic, plan_dynamic, player, board)')
     expect(source).toContain('right.clear()')
     expect(source).toContain('render_prompt(left, player)')
@@ -455,16 +466,19 @@ describe('in-game task board UI projection', () => {
     const source = taskBoardUiSource()
     const skills = readFileSync(new URL('./skills.ts', import.meta.url), 'utf8')
     expect(source).toContain('name: SKILLS_BUTTON_NAME')
+    // The skills window is its own module (like Old tasks): a skills list with a
+    // detail pane, and area learning above it. Each part redraws only on change.
+    const window = readFileSync(new URL('./skills_window.ts', import.meta.url), 'utf8')
     expect(source).not.toContain('render_skill_export_section(left)')
-    expect(source).toContain('render_learn_area_button(actions)')
-    expect(source).toContain('render_skill_export_section(body)')
+    expect(source).toContain('skills_ui.render_skills_window(player, task_board_ui_is_open(player.index) && task_board_skills_ui_is_open(player.index))')
+    expect(window).toContain('skills.render_learn_area_button(actions)')
+    expect(window).toContain("type: 'list-box', name: SKILLS_WINDOW.list")
     expect(skills).toContain('export function render_learn_area_button(')
 
-    expect(source).toContain('player.gui.screen.add')
-    expect(source).toContain('render_titlebar(root, SKILLS_POPOUT_TITLE, SKILLS_CLOSE_BUTTON_NAME)')
-    expect(source).toContain('build_skills_body(body)')
-    expect(source).toContain('body.clear()')
-    expect(source).toMatch(/close_task_board_skills_ui\(player\.index\)[\s;]*destroy_skills_popout\(player\)/)
+    expect(window).toContain('player.gui.screen.add')
+    expect(window).toContain('titlebar.drag_target = root')
+    expect(window).toContain('if (section.tags.signature === signature) return')
+    expect(source).toMatch(/close_task_board_skills_ui\(player\.index\)[\s;]*skills_ui\.close_skills_window\(player\)/)
   })
 
   it('keeps the area learning window closed by default and scoped per player', () => {
@@ -553,4 +567,170 @@ it('uses SGLuna for normal console branding while retaining AIRI actor identity 
   expect(source).toContain('The console polls the SGLuna runtime')
   expect(source).toContain("runtime.actor_name || 'AIRI'")
   expect(source).not.toContain("tooltip: 'Send a prompt directly to AIRI")
+})
+
+// A small stand-in for Factorio's GUI tree. It counts every structural change
+// (add, clear, destroy) so a test can prove that a refresh with nothing new to
+// show leaves the console alone. Rebuilding while the player drags a window or
+// types in the prompt is what made the console feel laggy and drop keystrokes.
+interface GuiCounter { add: number, clear: number, destroy: number, log: string[] }
+function fake_gui_element(counter: GuiCounter, player_index: number, spec: Record<string, any>, parent?: any): any {
+  const children: any[] = []
+  const props: Record<string, any> = { ...spec, tags: spec.tags ?? {} }
+  let valid = true
+  const style: Record<string, any> = {}
+  const invalidate = (element: any) => { for (const child of element.children) invalidate(child); element.__invalidate() }
+  const self: any = new Proxy({}, {
+    get: (_target, key) => {
+      if (typeof key !== 'string') return undefined
+      switch (key) {
+        case 'valid': return valid
+        case 'children': return children.slice()
+        case 'parent': return parent
+        case 'style': return style
+        case 'player_index': return player_index
+        case '__invalidate': return () => { valid = false }
+        case '__remove': return (child: any) => { const index = children.indexOf(child); if (index >= 0) children.splice(index, 1) }
+        case 'add': return (child_spec: Record<string, any>) => {
+          counter.add++; counter.log.push(`add ${child_spec.type}:${child_spec.name ?? ''}`)
+          const child = fake_gui_element(counter, player_index, child_spec, self); children.push(child); return child
+        }
+        case 'clear': return () => { counter.clear++; counter.log.push(`clear ${props.name ?? props.type}`); for (const child of children.splice(0)) invalidate(child) }
+        case 'destroy': return () => {
+          counter.destroy++; counter.log.push(`destroy ${props.name ?? props.type}`); invalidate(self)
+          if (parent !== undefined) parent.__remove(self)
+        }
+        case 'bring_to_front': case 'focus': case 'scroll_to_bottom': case 'scroll_to_top': case 'scroll_to_element': case 'select': case 'select_all': case 'force_auto_center': return () => {}
+      }
+      if (key in props) return props[key]
+      return children.find(child => child.name === key)
+    },
+    set: (_target, key, value) => { props[key as string] = value; return true },
+  })
+  return self
+}
+
+describe('console refresh leaves unchanged sections alone', () => {
+  function open_console() {
+    const counter: GuiCounter = { add: 0, clear: 0, destroy: 0, log: [] }
+    const root = (kind: string) => fake_gui_element(counter, 1, { type: 'flow', name: kind })
+    const player: any = { index: 1, name: 'owner', valid: true, surface: { index: 1, valid: true }, position: { x: 0, y: 0 }, gui: { screen: root('screen'), top: root('top'), left: root('left') }, print: () => {}, set_controller: () => {}, get_main_inventory: () => ({ get_contents: () => [] }), get_inventory: () => ({ get_contents: () => [] }) }
+    const g = globalThis as any
+    const interfaces: Record<string, any> = {}
+    let tick_handler: (() => void) | undefined
+    const saved = { add_interface: g.remote.add_interface, on_nth_tick: g.script.on_nth_tick, players: g.game.connected_players, get_player: g.game.get_player }
+    g.remote.add_interface = (name: string, fns: any) => { interfaces[name] = fns }
+    g.script.on_nth_tick = (_tick: number, handler: () => void) => { tick_handler = handler }
+    g.game.connected_players = [player]
+    g.game.get_player = () => player
+    create_task_board_ui_remote_interface()
+    const restore = () => { g.remote.add_interface = saved.add_interface; g.script.on_nth_tick = saved.on_nth_tick; g.game.connected_players = saved.players; g.game.get_player = saved.get_player }
+    const click = (name: string) => get_handler(g.defines.events.on_gui_click)({ player_index: 1, element: { valid: true, player_index: 1, name, tags: {} } })
+    const reset = () => { counter.add = 0; counter.clear = 0; counter.destroy = 0; counter.log = [] }
+    return { counter, player, board: interfaces.autorio_task_board, tick: () => tick_handler?.(), click, reset, restore }
+  }
+  const snapshot = (overrides: Record<string, unknown> = {}) => ({
+    goal_id: 'goal_ui', conversation_id: 'conv_ui', objective: 'Smelt iron plates', status: 'running', pause_reason: '', completed_count: 1, total_steps: 3, active_index: 1,
+    steps: [{ id: 's1', description: 'Mine ore', status: 'completed' }, { id: 's2', description: 'Build furnace', status: 'active' }, { id: 's3', description: 'Smelt', status: 'pending' }],
+    activity: [{ kind: 'action', text: 'mine iron-ore x10' }], wanted_items: [], response: 'Working on the furnace.',
+    ...overrides,
+  })
+  const find = (element: any, name: string): any => element.name === name ? element : element.children.map((child: any) => find(child, name)).find((hit: any) => hit !== undefined)
+
+  it('a periodic refresh with no new data adds, clears and destroys nothing', () => {
+    const ui = open_console()
+    try {
+      ui.click(BUTTON_NAME); ui.click(SKILLS_BUTTON_NAME); ui.click(PROJECTS_BUTTON_NAME); ui.click(DEBUG_BUTTON_NAME)
+      expect(ui.board.set_snapshot(snapshot())).toBe(true)
+      ui.tick()
+      ui.reset()
+      ui.tick(); ui.tick()
+      expect(ui.counter.log).toEqual([])
+    }
+    finally { ui.restore() }
+  })
+
+  it('a snapshot that repeats the last one changes nothing on screen', () => {
+    const ui = open_console()
+    try {
+      ui.click(BUTTON_NAME); ui.click(SKILLS_BUTTON_NAME); ui.click(PROJECTS_BUTTON_NAME); ui.click(DEBUG_BUTTON_NAME)
+      ui.board.set_snapshot(snapshot()); ui.tick()
+      ui.reset()
+      ui.board.set_snapshot(snapshot())
+      expect(ui.counter.log).toEqual([])
+    }
+    finally { ui.restore() }
+  })
+
+  it('a click never rebuilds the window the button sits in', () => {
+    const ui = open_console()
+    try {
+      ui.click(BUTTON_NAME); ui.board.set_snapshot(snapshot()); ui.tick()
+      const window = ui.player.gui.screen[ROOT_NAME]
+      ui.reset()
+      ui.click(SKILLS_BUTTON_NAME); ui.click(PROJECTS_BUTTON_NAME); ui.click(DEBUG_BUTTON_NAME)
+      ui.click(SKILLS_BUTTON_NAME); ui.click(PROJECTS_BUTTON_NAME); ui.click(DEBUG_BUTTON_NAME)
+      expect(window.valid).toBe(true)
+      expect(ui.counter.log.filter(line => line === `destroy ${ROOT_NAME}`)).toEqual([])
+    }
+    finally { ui.restore() }
+  })
+
+  it('skills window: select a skill, edit it, and a refused save keeps the typed text', () => {
+    const ui = open_console()
+    try {
+      ensure_basic_skill_definitions()
+      ui.click(BUTTON_NAME); ui.click(SKILLS_BUTTON_NAME); ui.board.set_snapshot(snapshot())
+      const skills_root = ui.player.gui.screen[SKILLS_ROOT_NAME]
+      const list = find(skills_root, SKILLS_WINDOW.list)
+      const ids = list.tags.ids as string[]
+      expect(ids.length).toBeGreaterThan(1)
+      expect(list.selected_index).toBe(1)
+      // Pick the second skill; the detail pane follows.
+      list.selected_index = 2
+      get_handler((globalThis as any).defines.events.on_gui_selection_state_changed)({ player_index: 1, element: list })
+      const second = get_skill_definition(ids[1])!
+      expect(find(skills_root, SKILLS_WINDOW.detail_title).caption).toBe(second.name)
+
+      ui.click(SKILLS_WINDOW.edit)
+      const name = find(skills_root, SKILLS_WINDOW.edit_name)
+      expect(name.text).toBe(second.name)
+      // An empty name is refused: the form stays, with the player's text and the reason.
+      name.text = '   '
+      ui.reset()
+      ui.click(SKILLS_WINDOW.save)
+      expect(name.valid).toBe(true)
+      expect(name.text).toBe('   ')
+      expect(find(skills_root, SKILLS_WINDOW.edit_error).caption).toContain('name must not be empty')
+      expect(ui.counter.log.filter(line => line.startsWith('clear'))).toEqual([])
+      expect(get_skill_definition(ids[1])).toEqual(second)
+
+      name.text = 'My Renamed Skill'
+      ui.click(SKILLS_WINDOW.save)
+      const saved = get_skill_definition(ids[1])!
+      expect(saved.name).toBe('My Renamed Skill')
+      expect(saved.revision).toBe(second.revision + 1)
+      expect(find(skills_root, SKILLS_WINDOW.edit_name)).toBeUndefined()
+      expect(skills_root.valid).toBe(true)
+    }
+    finally { ui.restore() }
+  })
+
+  it('new data never replaces a window or the prompt', () => {
+    const ui = open_console()
+    try {
+      ui.click(BUTTON_NAME); ui.click(SKILLS_BUTTON_NAME)
+      ui.board.set_snapshot(snapshot()); ui.tick()
+      const window = ui.player.gui.screen[ROOT_NAME]
+      const skills = ui.player.gui.screen[SKILLS_ROOT_NAME]
+      const prompt = find(window, PROMPT_FIELD_NAME)
+      expect(prompt?.valid).toBe(true)
+      ui.board.set_snapshot(snapshot({ status: 'blocked', blocker: 'missing_item', blocker_summary: 'No furnace.', active_index: 2, completed_count: 2, response: 'Blocked on the furnace.', activity: [{ kind: 'action', text: 'mine iron-ore x10' }, { kind: 'blocker', text: 'No furnace.' }] }))
+      ui.tick()
+      expect(window.valid).toBe(true)
+      expect(skills.valid).toBe(true)
+      expect(prompt.valid).toBe(true)
+    }
+    finally { ui.restore() }
+  })
 })

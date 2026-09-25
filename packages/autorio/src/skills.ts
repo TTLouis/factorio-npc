@@ -892,6 +892,16 @@ export function render_learn_area_button(parent: LuaGuiElement) {
   return analyze
 }
 
+/** What render_factory_learning shows, so a window can skip redrawing it when nothing changed. */
+export function factory_learning_signature() {
+  const analysis = latest_factory_area_analysis()
+  if (!analysis) return ''
+  const blocks = list_analyzed_blocks(analysis.id).slice(0, MAX_UI_BLOCKS)
+  return `${analysis.id}#${analysis.entities.length}#${analysis.relations.length}#${blocks.map(block => block.block_id).join(',')}`
+}
+
+export function skill_export_button_name(id: string) { return `${SKILL_EXPORT_BUTTON_PREFIX}${id}` }
+
 export function render_factory_learning(body: LuaGuiElement) {
   const analysis = latest_factory_area_analysis()
   if (!analysis) {

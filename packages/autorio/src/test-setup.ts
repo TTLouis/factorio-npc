@@ -93,6 +93,10 @@ import { event_handlers, set_load_handler } from './test-event-registry'
     on_research_finished: 'on_research_finished',
     on_player_joined_game: 'on_player_joined_game',
     on_gui_click: 'on_gui_click',
+    on_gui_selection_state_changed: 'on_gui_selection_state_changed',
+    on_gui_text_changed: 'on_gui_text_changed',
+    on_gui_confirmed: 'on_gui_confirmed',
+    on_gui_value_changed: 'on_gui_value_changed',
   },
   direction: {
     north: 'north',

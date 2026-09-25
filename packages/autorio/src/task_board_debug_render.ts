@@ -170,14 +170,29 @@ function add_debug_step_rows(table: LuaGuiElement, debug: TaskBoardUiDebugSnapsh
   add_compact_row(table, 'Runtime wait', runtime_condition.length > 0 || runtime_condition_state.length > 0 ? `${runtime_condition_state.length > 0 ? runtime_condition_state : 'unknown'} · ${runtime_condition.length > 0 ? runtime_condition : '—'}` : '—')
 }
 
+const DEBUG_SYNC = { columns: 'airi_debug_columns', runtime_column: 'airi_debug_runtime_column', runtime_table: 'airi_debug_runtime_table', value: 'airi_debug_sync_value' }
+function sync_caption(synced_tick: number | undefined) {
+  const version = current_sync_version()
+  return `gen ${version.generation} · rev ${version.revision} · age ${sync_age(synced_tick)}`
+}
+/**
+ * The body is rebuilt only when what it shows changes. The sync age ticks every
+ * second, so that one label is updated in place instead of rebuilding the body.
+ */
 function fill_debug_body(body: LuaGuiElement, board: any, runtime: any, synced_tick: number | undefined) {
+  const version_now = current_sync_version()
+  const signature = helpers.table_to_json({ debug: board?.debug, agent: board?.agent, status: board?.status, objective: board?.objective, goal_id: board?.goal_id, active_index: board?.active_index, total_steps: board?.total_steps, completed_count: board?.completed_count, reply: latest_ai_reply(board), actor_name: runtime?.actor_name, actor_kind: runtime?.actor_kind, follow: runtime?.follow, world: runtime?.world_task, generation: version_now.generation, revision: version_now.revision })
+  if (body.tags.signature === signature) {
+    const columns = body[DEBUG_SYNC.columns]; const column = columns?.valid ? columns[DEBUG_SYNC.runtime_column] : undefined; const table = column?.valid ? column[DEBUG_SYNC.runtime_table] : undefined; const value = table?.valid ? table[DEBUG_SYNC.value] : undefined
+    if (value?.valid) { const caption = sync_caption(synced_tick); if (value.caption !== caption) value.caption = caption; return }
+  }
   body.clear()
+  body.tags = { signature }
   const note = body.add({ type: 'label', caption: 'Structured runtime diagnostics only — no hidden chain-of-thought or secrets are exposed.' })
   note.style.font_color = { r: 0.68, g: 0.68, b: 0.68 }; note.style.single_line = false
   const debug = sanitize_debug_snapshot(board?.debug)
   const follow = runtime?.follow
   const world = runtime?.world_task
-  const version = current_sync_version()
   const step = board !== undefined && board.total_steps > 0 ? `${math.min(board.active_index + 1, board.total_steps)}/${board.total_steps} (${board.completed_count} done)` : '—'
   const phase = board?.agent.phase ? String(board.agent.phase).toUpperCase() : 'IDLE'
   const detail = clean_text(board?.agent.detail, 300)
@@ -217,7 +232,7 @@ function fill_debug_body(body: LuaGuiElement, board: any, runtime: any, synced_t
   add_row(overview, 'Request', clean_text(debug.request_id, 120) || '—')
   add_row(overview, 'Turn', integer(debug.turn) > 0 ? `${integer(debug.turn)}` : '—')
 
-  const columns = body.add({ type: 'flow', direction: 'horizontal' }); columns.style.width = DEBUG_BODY_INNER_WIDTH; columns.style.horizontal_spacing = DEBUG_COLUMN_GAP; columns.style.vertical_align = 'top'
+  const columns = body.add({ type: 'flow', name: DEBUG_SYNC.columns, direction: 'horizontal' }); columns.style.width = DEBUG_BODY_INNER_WIDTH; columns.style.horizontal_spacing = DEBUG_COLUMN_GAP; columns.style.vertical_align = 'top'
   const provider_column = columns.add({ type: 'flow', direction: 'vertical' }); provider_column.style.width = DEBUG_COLUMN_WIDTH; provider_column.style.vertical_spacing = 4
   provider_column.add({ type: 'label', caption: 'LLM / Provider', style: 'semibold_label' })
   const provider_table = provider_column.add({ type: 'table', column_count: 2 }); provider_table.style.width = DEBUG_COLUMN_WIDTH; provider_table.style.horizontal_spacing = 12; provider_table.style.vertical_spacing = 5
@@ -234,9 +249,9 @@ function fill_debug_body(body: LuaGuiElement, board: any, runtime: any, synced_t
   const decision_table = decision_column.add({ type: 'table', column_count: 2 }); decision_table.style.width = DEBUG_COLUMN_WIDTH; decision_table.style.horizontal_spacing = 12; decision_table.style.vertical_spacing = 5
   add_debug_decision_rows(decision_table, debug)
 
-  const runtime_column = columns.add({ type: 'flow', direction: 'vertical' }); runtime_column.style.width = DEBUG_COLUMN_WIDTH; runtime_column.style.vertical_spacing = 4
+  const runtime_column = columns.add({ type: 'flow', name: DEBUG_SYNC.runtime_column, direction: 'vertical' }); runtime_column.style.width = DEBUG_COLUMN_WIDTH; runtime_column.style.vertical_spacing = 4
   runtime_column.add({ type: 'label', caption: 'Step / Runtime', style: 'semibold_label' })
-  const runtime_table = runtime_column.add({ type: 'table', column_count: 2 }); runtime_table.style.width = DEBUG_COLUMN_WIDTH; runtime_table.style.horizontal_spacing = 12; runtime_table.style.vertical_spacing = 5
+  const runtime_table = runtime_column.add({ type: 'table', name: DEBUG_SYNC.runtime_table, column_count: 2 }); runtime_table.style.width = DEBUG_COLUMN_WIDTH; runtime_table.style.horizontal_spacing = 12; runtime_table.style.vertical_spacing = 5
   add_debug_step_rows(runtime_table, debug)
   add_compact_row(runtime_table, 'Provider diag', clean_text(debug.provider_diagnostic_code, 160) || '—')
   add_compact_row(runtime_table, 'Finish', clean_text(debug.provider_finish_reason, 80) || '—')
@@ -256,7 +271,8 @@ function fill_debug_body(body: LuaGuiElement, board: any, runtime: any, synced_t
   add_compact_row(runtime_table, 'Actor', actor)
   add_compact_row(runtime_table, 'World task', world_text)
   add_compact_row(runtime_table, 'Follow', follow_text)
-  add_compact_row(runtime_table, 'UI sync', `gen ${version.generation} · rev ${version.revision} · age ${sync_age(synced_tick)}`)
+  const sync_key = runtime_table.add({ type: 'label', caption: 'UI sync', style: 'semibold_label' }); sync_key.style.minimal_width = DEBUG_KEY_WIDTH
+  const sync_value = runtime_table.add({ type: 'label', name: DEBUG_SYNC.value, caption: sync_caption(synced_tick) }); sync_value.style.single_line = false; sync_value.style.maximal_width = DEBUG_COLUMN_VALUE_WIDTH
 
   const decision_error = clean_text(debug.decision_error, 300)
   const last_error = clean_text(debug.last_error, 500)
