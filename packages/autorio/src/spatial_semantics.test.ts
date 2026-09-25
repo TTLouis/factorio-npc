@@ -84,7 +84,7 @@ describe('compact spatial semantics', () => {
       drop_position: { x: 12, y: 20 },
       drop_target: undefined,
       prototype: {
-        get_mining_drill_radius: () => 1.5,
+        mining_drill_radius: 1.5,
         radius_visualisation_specification: { offset: { x: 0, y: -2 } },
         resource_categories: { 'modded-ore-category': true },
       },

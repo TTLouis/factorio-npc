@@ -46,12 +46,8 @@ jobs:
           sudo apt-get install -y -qq luajit
           luajit -b packages/autorio/dist/control.lua /tmp/autorio-control.luac
 
-      - name: Reject raw JavaScript slice calls in generated Lua
-        run: |
-          if grep -n ':slice(' packages/autorio/dist/control.lua; then
-            echo 'Generated Lua contains a raw JavaScript .slice() method call; use typed/Lua-safe iteration instead.'
-            exit 1
-          fi
+      - name: Reject untyped JavaScript semantics in generated Lua
+        run: pnpm --filter autorio.ts run check:lua
 
       - name: Compile native NPC Pterodactyl guard
         run: |

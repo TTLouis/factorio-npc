@@ -14,6 +14,9 @@ export interface PlacementCandidateRequest {
   center?: { x: number, y: number }
   radius?: number
   target_resource?: string
+  // Only placements whose footprint covers this point, for example a drill's
+  // item_output_position when the new entity must receive its output.
+  covers_position?: { x: number, y: number }
   limit?: number
 }
 
@@ -76,6 +79,18 @@ function finite(value: number) {
   return value === value && value !== math.huge && value !== -math.huge
 }
 
+const COVERS_POSITION_DEFAULT_RADIUS = 3
+
+function footprint_covers(prototype: any, position: { x: number, y: number }, direction: number, point: { x: number, y: number }) {
+  const width = finite(prototype.tile_width) ? prototype.tile_width : 1
+  const height = finite(prototype.tile_height) ? prototype.tile_height : 1
+  // East/west rotation swaps the footprint's extents.
+  const rotated = direction === 4 || direction === 12
+  const half_x = (rotated ? height : width) / 2
+  const half_y = (rotated ? width : height) / 2
+  return math.abs(point.x - position.x) < half_x && math.abs(point.y - position.y) < half_y
+}
+
 function squared_distance(a: { x: number, y: number }, b: { x: number, y: number }) {
   return (a.x - b.x) ** 2 + (a.y - b.y) ** 2
 }
@@ -112,19 +127,28 @@ function resource_categories(prototype: any) {
 }
 
 function mining_radius(prototype: any) {
-  if (typeof prototype?.get_mining_drill_radius === 'function') {
-    const radius = prototype.get_mining_drill_radius()
-    if (typeof radius === 'number' && radius > 0 && finite(radius)) return radius
-  }
+  // Read the field, not get_mining_drill_radius(): on an untyped object the
+  // call compiles to a Lua method call that passes the prototype as the
+  // quality argument ("Invalid QualityID" on 2.0.77).
   const radius = prototype?.mining_drill_radius
   return typeof radius === 'number' && radius > 0 && finite(radius) ? radius : undefined
 }
 
+// Factorio 2.0 returns prototype vectors in array form ({-0.5, -1.3}); older
+// data and tests use {x, y}. Accept both.
+function vector_xy(raw: any): { x: number, y: number } | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const values = raw as number[]
+  const x = typeof raw.x === 'number' ? raw.x : values[0]
+  const y = typeof raw.y === 'number' ? raw.y : values[1]
+  if (typeof x !== 'number' || typeof y !== 'number' || !finite(x) || !finite(y)) return undefined
+  return { x, y }
+}
+
 function mining_offset(prototype: any, direction: number) {
-  const raw = prototype?.radius_visualisation_specification?.offset
-  if (!raw || typeof raw.x !== 'number' || typeof raw.y !== 'number') return { x: 0, y: 0 }
-  if (!finite(raw.x) || !finite(raw.y)) return { x: 0, y: 0 }
-  return rotate_cardinal({ x: raw.x, y: raw.y }, direction)
+  const offset = vector_xy(prototype?.radius_visualisation_specification?.offset)
+  if (!offset) return { x: 0, y: 0 }
+  return rotate_cardinal(offset, direction)
 }
 
 function resource_coverage(
@@ -211,15 +235,17 @@ function snapped(value: number, offset: number) {
 }
 
 function directions_for(prototype: any) {
-  if (prototype?.supports_direction === false || prototype?.rotatable === false) return [0]
+  // `rotatable` exists on LuaEntity, not LuaEntityPrototype, and reading an
+  // unknown key on a Factorio object raises; the prototype's equivalent is the
+  // not-rotatable flag.
+  if (prototype?.supports_direction === false || prototype?.flags?.['not-rotatable'] === true) return [0]
   return CARDINAL_DIRECTIONS
 }
 
 function item_output_position(prototype: any, position: { x: number, y: number }, direction: number) {
-  const raw = prototype?.vector_to_place_result
-  if (!raw || typeof raw.x !== 'number' || typeof raw.y !== 'number') return undefined
-  if (!finite(raw.x) || !finite(raw.y) || (raw.x === 0 && raw.y === 0)) return undefined
-  const rotated = rotate_cardinal({ x: raw.x, y: raw.y }, direction)
+  const vector = vector_xy(prototype?.vector_to_place_result)
+  if (!vector || (vector.x === 0 && vector.y === 0)) return undefined
+  const rotated = rotate_cardinal(vector, direction)
   return { x: position.x + rotated.x, y: position.y + rotated.y }
 }
 
@@ -299,9 +325,13 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
   const prototype = prototypes.entity[request.entity_name]
   if (!prototype) return { ok: false as const, error: 'entity prototype not found', entity_name: request.entity_name }
 
-  const center = request.center ?? actor.position
+  const covers = request.covers_position
+  if (covers !== undefined && (!finite(covers.x) || !finite(covers.y))) {
+    return { ok: false as const, error: 'covers_position must be finite', entity_name: request.entity_name }
+  }
+  const center = request.center ?? covers ?? actor.position
   if (!finite(center.x) || !finite(center.y)) return { ok: false as const, error: 'center must be finite', entity_name: request.entity_name }
-  const radius = math.max(1, math.min(MAX_RADIUS, math.floor(request.radius ?? 8)))
+  const radius = math.max(1, math.min(MAX_RADIUS, math.floor(request.radius ?? (covers !== undefined ? COVERS_POSITION_DEFAULT_RADIUS : 8))))
   const limit = math.max(1, math.min(MAX_LIMIT, math.floor(request.limit ?? 5)))
   const x_offset = grid_offset((prototype as any).tile_width)
   const y_offset = grid_offset((prototype as any).tile_height)
@@ -323,6 +353,7 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
           direction,
           force: actor.force,
         })) continue
+        if (covers !== undefined && !footprint_covers(prototype, position, direction, covers)) continue
 
         const coverage = resource_coverage(actor, prototype, position, direction, request.target_resource)
         if (request.target_resource !== undefined) {
@@ -359,6 +390,7 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
     center,
     radius,
     target_resource: request.target_resource,
+    covers_position: covers,
     scanned,
     legal_candidate_count: candidates.length,
     returned_candidate_count: selected.length,

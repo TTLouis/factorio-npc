@@ -2175,7 +2175,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     })
     this.stateFile = stateFileFromOptions(options)
     this.stateLoaded = false
-    this.maxProviderOutputUnits = Number.isSafeInteger(options.maxProviderOutputUnits) ? options.maxProviderOutputUnits : 20000
+    this.maxProviderOutputUnits = Number.isSafeInteger(options.maxProviderOutputUnits) ? options.maxProviderOutputUnits : 100000
     if (this.maxProviderOutputUnits < 1000 || this.maxProviderOutputUnits > 200000) {
       throw new AgentLoopError('maxProviderOutputUnits must be an integer from 1000 to 200000')
     }
@@ -7654,6 +7654,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         contract: 'recovery_route',
         route: 'wait_runtime',
       })
+      await this.traceEvent('request.waiting', {
+        reason: routed.rejection_reason ?? 'recovery_wait_runtime',
+        task_board: visibleTaskBoard(state?.task_board),
+        usage: this.traceRequest?.usage,
+      })
       return {
         chatMessage: 'Autorio is still working; no recovery planner call was needed.',
         plan: state?.plan ?? [],
@@ -7691,6 +7696,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           contract: 'recovery_route',
           route: 'pause_recoverable',
         })
+        // The request ends here; without a terminal event a paused goal
+        // reads as a stalled request in the trace.
+        await this.traceEvent('request.completed', {
+          outcome: 'paused_recoverable',
+          reason: routed.rejection_reason ?? routed.failure_class ?? recoveryFailureClassHint(reasonText),
+          task_board: visibleTaskBoard(reduced.state?.task_board),
+          usage: this.traceRequest?.usage,
+        })
+        this.traceRequest = null
         return {
           chatMessage: 'The provider failure is recoverable; the canonical task was paused without creating a world blocker.',
           plan: reduced.state?.plan ?? [],
@@ -7714,6 +7728,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         route: 'ask_user',
         reason: 'authoritative_user_boundary',
       })
+      await this.traceEvent('request.completed', {
+        outcome: 'asked_user',
+        task_board: visibleTaskBoard(state?.task_board),
+        usage: this.traceRequest?.usage,
+      })
+      this.traceRequest = null
       return {
         chatMessage: `The current plan is blocked and requires your decision before it can change. ${cleanMemoryText(state?.blocker, 500)}`,
         plan: state?.plan ?? [],

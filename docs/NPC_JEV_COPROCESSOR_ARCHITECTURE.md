@@ -249,13 +249,19 @@ admission tier (`OBSERVATION_TOOL_TIER` in `structured-policy.mjs`):
 
 | Tier | Reads | Jev's role |
 |---|---|---|
-| fact | current state (actor, task, navigation, crafting, combat, inventory, equipment, entity status/geometry, research status) and deterministic game data (recipes, production scope/solve, prototype details, technology, research path) | none; only harness caps apply (per-batch cap, cache, duplicate suppression) |
-| discovery | nearby and long-range entities, enemies, spatial observation, placement, logistics, transport, construction queries, prototype search | ranks them; one is admitted per batch when the planner asks |
+| fact | current state (actor, task, navigation, crafting, combat, inventory, equipment, entity status/geometry, research status), deterministic game data (recipes, production scope/solve, prototype details, technology, research path), and harness placement choices (`getPlacementCandidates`, `planPlacement`) | none; only harness caps apply (per-batch cap, cache, duplicate suppression) |
+| discovery | nearby and long-range entities, enemies, spatial observation, logistics, transport, construction queries, prototype search | ranks them; one is admitted per batch when the planner asks |
 | optional | player state, skill lookup | relevance gates them |
 
 Every admitted fresh read counts against the budget. When it reaches zero the
 observation phase closes and nothing is admitted, facts included, until the next
 decision: that is what bounds the planner's rounds.
+
+Placement uses the harness candidate system rather than model geometry:
+`getPlacementCandidates` returns legal positions (with `target_resource` coverage and
+each candidate's `item_output_position`), and `covers_position` limits candidates to
+footprints covering a point, so a furnace fed by a drill is two harness queries plus
+`place_candidate`.
 
 - **Observe-route floor.** When the post-step route is `targeted_observation` but no
   family clears the threshold, one read on the highest-ranked family is admitted.
@@ -435,6 +441,29 @@ strategic
 These are resource-allocation decisions, not quality gates. Jev does not review the resulting Main-LLM answer afterward.
 
 The old `micro` mode may remain temporarily for compatibility, but new-goal first turns should not be starved by an under-informed Jev classification.
+
+### Output brackets (2026-09-24)
+
+Each Main-LLM call gets an output cap, reasoning included (`reasoningOutputBudget` in
+`runtime-v8/provider.mjs`). Caps are ceilings, not spend. A cap that is too small costs
+twice: the exhausted call is discarded and retried, so every bracket leaves room for
+reasoning plus the reply.
+
+| Bracket | When | Effort | Cap |
+|---|---|---|---|
+| plan authoring | `new_goal`, `amend_current`, `plan_slice_completed`, `post_step_replan`, `recovery_replan_high`, whatever Jev rated | max | 32,000 |
+| strategic | Jev `strategic` on other turns | max | 24,000 |
+| deep / replan | Jev `deep`, ordinary and recovery replans | max / high | 16,000 |
+| normal | Jev `normal` | high | 12,000 |
+| continue / observe | continuation and observe routes | low | 8,000 |
+| other low effort | Jev `micro` and the like | low | 6,000 |
+| no reasoning | strict recovery, compact finalization | none | 4,000 |
+
+Plan-authoring turns are never compacted, even right after a completed batch. Compact
+continuation replies get 3,000 (thinking off) or 8,000. The per-generation total
+(`MAX_PROVIDER_OUTPUT_TOKENS_PER_TURN`) defaults to 100,000 and the provider timeout
+(`PROVIDER_TIMEOUT_MS`) to 300,000 ms, since a 32,000-unit reply takes about three
+minutes on `deepseek-flash`.
 
 ## 10. Strategic steering
 

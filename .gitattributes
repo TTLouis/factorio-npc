@@ -4,6 +4,10 @@
 # their shebangs even when the repository is checked out on Windows.
 *.sh text eol=lf
 
+# ES module scripts may start with a shebang; with CRLF the Vitest transform
+# rejects the `#!...\r` line, so a test importing one fails to load on Windows.
+*.mjs text eol=lf
+
 # Installer source is hashed byte-for-byte by the generated immutable loader,
 # so normalize it consistently across Windows and Linux checkouts.
 deploy/pterodactyl/payload-src/installer.sh text eol=lf

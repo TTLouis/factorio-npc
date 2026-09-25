@@ -47,18 +47,22 @@ export function candidate_fluid_ports(
   position: { x: number, y: number },
   direction: number,
 ): CandidateFluidPort[] | undefined {
-  const fluidboxes = prototype?.fluidbox_prototypes ?? []
+  // Typed as arrays so TypeScriptToLua emits # and 1-based indexing; on an
+  // untyped value `.length` compiled to a nil field and every live call
+  // failed with "attempt to compare number with nil" (2.0.77).
+  const fluidboxes: any[] = prototype?.fluidbox_prototypes ?? []
   const ports: CandidateFluidPort[] = []
   const direction_index = cardinal_index(direction)
 
   for (let storage = 0; storage < fluidboxes.length; storage++) {
     const fluidbox = fluidboxes[storage]
     if (!fluidbox) continue
-    const connections = fluidbox.pipe_connections ?? []
+    const connections: any[] = fluidbox.pipe_connections ?? []
     for (let connection_index = 0; connection_index < connections.length; connection_index++) {
       if (ports.length >= MAX_CANDIDATE_FLUID_PORTS) return ports
       const connection = connections[connection_index]
-      const relative = connection?.positions?.[direction_index] ?? connection?.positions?.[0]
+      const positions: any[] | undefined = connection?.positions
+      const relative = positions?.[direction_index] ?? positions?.[0]
       if (!finite_position(relative)) continue
       ports.push({
         storage_index: fluidbox.index ?? storage + 1,

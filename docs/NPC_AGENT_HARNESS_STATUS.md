@@ -164,7 +164,7 @@ The next main promotion does not claim complete coverage of:
 
 - autonomous end-to-end production-line design;
 - validated inserter/belt-lane/stacking throughput reasoning across all relevant research states;
-- all map/remote operations;
+- all map/remote operations (map inspect/deconstruct/upgrade, exact-entity navigation and construction anchors still use a unit-number lookup that Factorio 2.0 does not index for ordinary buildings; see `docs/validation/AUTORIO_GENERATED_LUA_ENGINE_DEFECTS_2026-09-25.md`);
 - vehicles, trains, or space platforms;
 - swarm/multi-agent coordination;
 - every provider/model-specific behavior in production conditions.

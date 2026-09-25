@@ -79,17 +79,17 @@ test('official DeepSeek disables thinking only for successful completion continu
   const deepSeek = { ...config, base: 'https://api.deepseek.com/v1' }
   await providerRequest(deepSeek, completionMessages, { fetchImpl: successfulFetch(captured) })
   assert.deepEqual(captured[0].thinking, { type: 'disabled' })
-  assert.equal(captured[0].max_tokens, 1000)
+  assert.equal(captured[0].max_tokens, 3000)
 
   await providerRequest(deepSeek, messages, { fetchImpl: successfulFetch(captured) })
   assert.equal('thinking' in captured[1], false)
-  assert.equal(captured[1].max_tokens, 2000)
+  assert.equal(captured[1].max_tokens, 4000)
 })
 
 test('unknown compatible providers use a bounded continuation fallback without private fields', async () => {
   const captured = []
   await providerRequest(config, completionMessages, { fetchImpl: successfulFetch(captured) })
-  assert.equal(captured[0].max_tokens, 4000)
+  assert.equal(captured[0].max_tokens, 8000)
   assert.equal('thinking' in captured[0], false)
 })
 
@@ -123,7 +123,7 @@ test('explicit output-budget recovery retains compact tools and fallback budget'
     recoveryAttempt: 1,
     recoveryKind: 'output_budget_exhaustion',
   })
-  assert.equal(captured[0].max_tokens, 4000)
+  assert.equal(captured[0].max_tokens, 8000)
   assert.ok(Array.isArray(captured[0].tools))
   assert.equal(captured[0].tool_choice, 'auto')
 })

@@ -40,7 +40,7 @@ function entity(name: string, type: string, unit_number: number, x: number, y: n
   return value
 }
 
-function fixture() {
+function fixture(extra: any[] = []) {
   const outside_input = entity('transport-belt', 'transport-belt', 1, -1, 4)
   const input_belt = entity('transport-belt', 'transport-belt', 2, 1, 4)
   const plate_split_belt = entity('transport-belt', 'transport-belt', 3, 4, 1)
@@ -55,9 +55,9 @@ function fixture() {
   const gear_recipe = recipe('iron-gear-wheel', ['iron-plate'], ['iron-gear-wheel'])
   const belt_recipe = recipe('transport-belt', ['iron-plate', 'iron-gear-wheel'], ['transport-belt'])
   const cable_recipe = recipe('copper-cable', ['copper-plate'], ['copper-cable'])
-  const gear = entity('assembling-machine-1', 'assembling-machine', 10, 4, 4, { get_recipe: () => gear_recipe })
-  const belt = entity('assembling-machine-1', 'assembling-machine', 11, 8, 4, { get_recipe: () => belt_recipe })
-  const unrelated = entity('assembling-machine-1', 'assembling-machine', 12, 8, 9, { get_recipe: () => cable_recipe })
+  const gear = entity('assembling-machine-1', 'assembling-machine', 10, 4, 4, { get_recipe: () => [gear_recipe, undefined] })
+  const belt = entity('assembling-machine-1', 'assembling-machine', 11, 8, 4, { get_recipe: () => [belt_recipe, undefined] })
+  const unrelated = entity('assembling-machine-1', 'assembling-machine', 12, 8, 9, { get_recipe: () => [cable_recipe, undefined] })
 
   const plate_to_gear = entity('inserter', 'inserter', 20, 2.5, 4, {
     pickup_position: { x: 1, y: 4 }, drop_position: { x: 4, y: 4 }, pickup_target: input_belt, drop_target: gear,
@@ -72,7 +72,7 @@ function fixture() {
     pickup_position: { x: 8, y: 4 }, drop_position: { x: 10, y: 4 }, pickup_target: belt, drop_target: output_belt,
   })
 
-  const inside = [input_belt, plate_split_belt, output_belt, gear, belt, unrelated, plate_to_gear, plate_to_belt, direct, belt_to_output]
+  const inside = [input_belt, plate_split_belt, output_belt, gear, belt, unrelated, plate_to_gear, plate_to_belt, direct, belt_to_output, ...extra]
   const all = [outside_input, ...inside, outside_output]
   const surface: any = {
     index: 1,
@@ -218,9 +218,61 @@ describe('Factory Area Learning V1', () => {
     expect(ui).toContain('create_skill_candidate_from_factory_block')
   })
 
+  it('reads a chest with engine semantics: no recipe call, one typed inventory read', () => {
+    // Factorio raises on get_recipe outside crafting machines, and rejects a
+    // call that passes the entity as an extra argument.
+    const chest = entity('wooden-chest', 'container', 30, 11, 10, {
+      get_recipe: () => { throw new Error('Entity is not crafting-machine.') },
+      get_inventory: (...args: unknown[]) => {
+        if (args.length !== 1) throw new Error(`Expected 1 argument but ${args.length} were given`)
+        return { valid: true, get_contents: () => [{ name: 'coal', count: 3, quality: 'normal' }] }
+      },
+    })
+    const originalChest = (globalThis as any).defines.inventory.chest
+    ;(globalThis as any).defines.inventory.chest = 'chest'
+    try {
+      const { actor } = fixture([chest])
+      const result = analyze_factory_area(actor, { surface_index: 1, area: { left_top: { x: 0, y: 0 }, right_bottom: { x: 12, y: 11 } } })
+      expect(result.ok).toBe(true)
+      if (!result.ok) return
+      const observed = get_factory_area_analysis(result.analysis_id)!.entities.find(value => value.unit_number === 30)!
+      expect(observed.recipe).toBeUndefined()
+      expect(observed.inventories).toEqual([{ role: 'storage', items: [{ name: 'coal', count: 3 }] }])
+    }
+    finally {
+      ;(globalThis as any).defines.inventory.chest = originalChest
+    }
+  })
+
   it('rejects oversized area requests instead of scanning a megabase', () => {
     const { actor } = fixture()
     const result = analyze_factory_area(actor, { area: { left_top: { x: 0, y: 0 }, right_bottom: { x: 100, y: 100 } } })
     expect(result.ok).toBe(false)
+  })
+
+  it('reads fluid connections by 1-based fluidbox index and keeps them as engine relations', () => {
+    const tank = entity('storage-tank', 'storage-tank', 40, 5, 9)
+    const pipe_calls: unknown[][] = []
+    const pipe = entity('pipe', 'pipe', 41, 3, 9, {
+      get_recipe: () => { throw new Error('Entity is not crafting-machine.') },
+      fluidbox: {
+        length: 1,
+        get_pipe_connections: (...args: unknown[]) => {
+          pipe_calls.push(args)
+          return [{ flow_direction: 'input-output', connection_type: 'normal', target: { owner: tank } }]
+        },
+      },
+    })
+    const { actor } = fixture([tank, pipe])
+    const result = analyze_factory_area(actor, { area: { left_top: { x: 0, y: 0 }, right_bottom: { x: 12, y: 11 } } })
+    if (!result.ok) throw new Error(result.error)
+    const analysis = get_factory_area_analysis(result.analysis_id)!
+    // A plain call with only the 1-based index, never the fluidbox as self.
+    expect(pipe_calls.length).toBeGreaterThan(0)
+    for (const args of pipe_calls) expect(args).toEqual([1])
+    expect(analysis.entities.find(value => value.unit_number === 41)?.fluid_connections).toEqual([
+      { fluidbox_index: 1, target: 'entity-40', flow_direction: 'input-output', connection_type: 'normal' },
+    ])
+    expect(analysis.relations.some(relation => relation.kind === 'fluid_connection' && relation.from === 'entity-41' && relation.to === 'entity-40')).toBe(true)
   })
 })

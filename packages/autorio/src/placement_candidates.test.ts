@@ -197,4 +197,105 @@ describe('placement candidates', () => {
     expect(result.ok).toBe(true)
     expect(result.candidates).toEqual([])
   })
+
+  it('returns only placements whose footprint covers a requested point, such as a drill output', () => {
+    // Burner-drill canary: the furnace must sit on the drill's output tile.
+    ;(globalThis as any).prototypes.entity = {
+      'modded-furnace': { name: 'modded-furnace', type: 'furnace', tile_width: 2, tile_height: 2 },
+      'modded-chest': { name: 'modded-chest', type: 'container', tile_width: 1, tile_height: 2 },
+    }
+    const actor = {
+      position: { x: 20, y: 20 },
+      force: { index: 1 },
+      surface: {
+        can_place_entity: () => true,
+        find_entities_filtered: () => [],
+      },
+    } as any
+    const output = { x: 0.3, y: -1.3 }
+
+    const furnaces = placement_candidates_for_actor(actor, {
+      entity_name: 'modded-furnace',
+      covers_position: output,
+      limit: 8,
+    }) as any
+    expect(furnaces.ok).toBe(true)
+    expect(furnaces.center).toEqual(output)
+    expect(furnaces.legal_candidate_count).toBeGreaterThan(0)
+    for (const candidate of furnaces.candidates) {
+      expect(Math.abs(candidate.position.x - output.x)).toBeLessThan(1)
+      expect(Math.abs(candidate.position.y - output.y)).toBeLessThan(1)
+    }
+
+    // A rotated 1x2 entity covers the point only with its extents swapped.
+    const chests = placement_candidates_for_actor(actor, {
+      entity_name: 'modded-chest',
+      covers_position: output,
+      limit: 8,
+    }) as any
+    for (const candidate of chests.candidates) {
+      const rotated = candidate.direction === 4 || candidate.direction === 12
+      expect(Math.abs(candidate.position.x - output.x)).toBeLessThan(rotated ? 1 : 0.5)
+      expect(Math.abs(candidate.position.y - output.y)).toBeLessThan(rotated ? 0.5 : 1)
+    }
+  })
+
+  it('reads only fields that Factorio 2.0 entity prototypes have', () => {
+    // Burner-drill canary attempt 4: every live call failed with
+    // "LuaEntityPrototype doesn't contain key rotatable". Factorio objects
+    // raise on unknown keys; these are the fields confirmed on 2.0.77.
+    const fields: Record<string, unknown> = {
+      name: 'stone-furnace',
+      type: 'furnace',
+      tile_width: 2,
+      tile_height: 2,
+      supports_direction: true,
+      flags: {},
+      vector_to_place_result: undefined,
+      fluidbox_prototypes: [],
+      mining_drill_radius: undefined,
+      resource_categories: undefined,
+      radius_visualisation_specification: undefined,
+    }
+    const strictPrototype = new Proxy(fields, {
+      get(target, key) {
+        if (typeof key === 'string' && !(key in target)) throw new Error(`LuaEntityPrototype doesn't contain key ${key}.`)
+        return (target as any)[key]
+      },
+    })
+    ;(globalThis as any).prototypes.entity = { 'stone-furnace': strictPrototype }
+    const actor = {
+      position: { x: 0, y: 0 },
+      force: { index: 1 },
+      surface: { can_place_entity: () => true, find_entities_filtered: () => [] },
+    } as any
+
+    const result = placement_candidates_for_actor(actor, { entity_name: 'stone-furnace', radius: 2, limit: 3 }) as any
+    expect(result.ok).toBe(true)
+    expect(result.candidates.length).toBeGreaterThan(0)
+  })
+
+  it('reads a drill output vector in the array form Factorio 2.0 returns', () => {
+    // 2.0.77 returns vector_to_place_result as {-0.5, -1.3}, not {x, y}; the
+    // candidate lost its item_output_position until both forms were accepted.
+    ;(globalThis as any).prototypes.entity = {
+      'modded-drill': {
+        name: 'modded-drill',
+        type: 'mining-drill',
+        tile_width: 2,
+        tile_height: 2,
+        supports_direction: true,
+        flags: {},
+        vector_to_place_result: [-0.5, -1.3],
+      },
+    }
+    const actor = {
+      position: { x: 0, y: 0 },
+      force: { index: 1 },
+      surface: { can_place_entity: ({ position, direction }: any) => position.x === 0 && position.y === 0 && direction === 0, find_entities_filtered: () => [] },
+    } as any
+
+    const result = placement_candidates_for_actor(actor, { entity_name: 'modded-drill', radius: 1, limit: 1 }) as any
+    expect(result.candidates[0].item_output_position).toEqual({ x: -0.5, y: -1.3 })
+  })
 })

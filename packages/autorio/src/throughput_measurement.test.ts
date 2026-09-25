@@ -1,5 +1,6 @@
 import type { ControlledActor } from './actors/types'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { remember_entity_reference } from './entity_reference'
 import { new_throughput_measurement_controller } from './throughput_measurement'
 
 const originalPrototypes = (globalThis as any).prototypes
@@ -22,6 +23,7 @@ function fixture() {
     unit_number: 42,
     surface: { index: 1 },
     force,
+    position: { x: 0, y: 0 },
     direction: 0,
     active: true,
     held_stack: held,
@@ -52,14 +54,21 @@ function fixture() {
     get_transport_line: () => line,
   }
   const entities = new Map<number, any>([[42, inserter], [55, belt]])
+  // Factorio 2.0 only indexes prototypes flagged get-by-unit-number, which
+  // belts and inserters are not: the entities resolve through the hint an
+  // observation records, then a search at that position.
+  ;(globalThis as any).storage = {}
   ;(globalThis as any).game = {
     tick: 0,
-    get_entity_by_unit_number: (id: number) => entities.get(id),
+    get_entity_by_unit_number: () => undefined,
   }
+  const find_entities_filtered = (filter: any) => [...entities.values()].filter(entity =>
+    entity.name === filter.name && entity.position.x === filter.position.x && entity.position.y === filter.position.y)
+  for (const entity of entities.values()) remember_entity_reference(entity)
   const actor = {
     is_valid: true,
     force,
-    surface: { index: 1 },
+    surface: { index: 1, find_entities_filtered },
     status_snapshot: () => ({ actor_id: 9, kind: 'standalone_character' }),
   } as unknown as ControlledActor
   const controller = new_throughput_measurement_controller(() => actor)

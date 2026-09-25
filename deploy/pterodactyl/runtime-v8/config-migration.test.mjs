@@ -21,7 +21,7 @@ test('a fresh SGLuna config uses explicit non-provider placeholders', () => {
   assert.equal(next.providerUrl, SGLUNA_CONFIG_DEFAULTS.providerUrl)
   assert.equal(next.model, SGLUNA_CONFIG_DEFAULTS.model)
   assert.equal(next.providerProfile, 'auto')
-  assert.equal(next.maxProviderOutputTokensPerTurn, 20000)
+  assert.equal(next.maxProviderOutputTokensPerTurn, 100000)
 })
 
 test('an old config missing providerUrl is migrated to the default while preserving other values', () => {

@@ -168,7 +168,7 @@ test('provider request injects steering while preserving compact completion beha
     })}` },
   ], { fetchImpl, allowTools: true, recoveryAttempt: 0 })
 
-  assert.equal(body.max_tokens, 4000)
+  assert.equal(body.max_tokens, 8000)
   assert.match(body.messages.at(-2).content, /^\[STEERING\]/)
   assert.match(body.messages.at(-2).content, /last_receipt=completed batch=9 tasks=placing/)
   assert.match(body.messages.at(-1).content, /Compact task receipt/)

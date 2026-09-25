@@ -1,4 +1,6 @@
+import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
+import { resolve_exact_entity } from './entity_reference'
 import { throughput_capacity } from './throughput_capacity'
 
 export type ThroughputMeasurementRequest
@@ -174,7 +176,9 @@ function request_window(request: ThroughputMeasurementRequest) {
 
 function resolve_entity(actor: ControlledActor, unit_number: number) {
   if (!valid_integer(unit_number, 1, 9007199254740991)) return fail('unit_number must be a positive safe integer')
-  const entity = game.get_entity_by_unit_number(unit_number as any)
+  // Factorio only indexes prototypes flagged get-by-unit-number, which belts
+  // and inserters are not; resolve through the observation hint instead.
+  const entity = resolve_exact_entity(actor, unit_number)
   if (!entity || !entity.valid) return fail(`entity not found: ${unit_number}`)
   if (entity.surface.index !== actor.surface.index) return fail('entity is on another surface')
   if (entity.force?.index !== undefined && entity.force.index !== actor.force.index) return fail('entity belongs to another force')
@@ -244,13 +248,15 @@ function belt_direction_vector(direction: number) {
   return undefined
 }
 
-function belt_items(entity: any, lane_index: 1 | 2) {
+// Typed so TypeScriptToLua emits dot calls and `#`: Factorio rejects the
+// self argument of a colon call, and an untyped `.length` is nil in Lua.
+function belt_items(entity: LuaEntity, lane_index: 1 | 2) {
   if (entity.type !== 'transport-belt') return fail(`belt lane measurement currently supports transport-belt entities only, got ${entity.type}`, 'UNSUPPORTED_MEASUREMENT')
   const max_line = entity.get_max_transport_line_index()
   if (max_line < lane_index) return fail(`transport line ${lane_index} is unavailable`, 'UNSUPPORTED_MEASUREMENT')
   const direction = belt_direction_vector(entity.direction)
   if (!direction) return fail(`unsupported belt direction: ${entity.direction}`, 'UNSUPPORTED_MEASUREMENT')
-  const line = entity.get_transport_line(lane_index as any)
+  const line = entity.get_transport_line(lane_index)
   if (!line || !line.valid) return fail(`transport line ${lane_index} is unavailable`, 'UNSUPPORTED_MEASUREMENT')
   const detailed = line.get_detailed_contents()
   if (detailed.length > MAX_DETAILED_ITEMS) {

@@ -775,7 +775,7 @@ function render_blocked(parent: LuaGuiElement, player: LuaPlayer, board: TaskBoa
   if (board?.status !== 'blocked') return
   const blocked = board.blocked
   const summary = blocked?.summary ?? task_condition_text(board.blocker_summary, board.blocker, 'AIRI stopped because the committed plan needs your decision.')
-  const deadlock = blocked?.deadlock === undefined ? '' : `Deadlock: ${blocked.deadlock.signal.replace('_', ' ')} (${blocked.deadlock.count})${blocked.deadlock.detail?.length ? ` — ${blocked.deadlock.detail}` : ''}`
+  const deadlock = blocked?.deadlock === undefined ? '' : `Deadlock: ${blocked.deadlock.signal.replace('_', ' ')} (${blocked.deadlock.count})${typeof blocked.deadlock.detail === 'string' && blocked.deadlock.detail !== '' ? ` — ${blocked.deadlock.detail}` : ''}`
   console_ui.render_blocked_banner(parent, {
     summary,
     reason: blocked?.reason ?? board.blocker,

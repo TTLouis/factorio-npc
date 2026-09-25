@@ -84,7 +84,7 @@ test('successful operation completion uses compact context and bounded fallback 
     { role: 'user', content: `[MOD] Autorio operation batch completed. Detailed task receipt: ${JSON.stringify(receipt)}` },
   ], { fetchImpl, allowTools: true, recoveryAttempt: 0 })
 
-  assert.equal(body.max_tokens, 4000)
+  assert.equal(body.max_tokens, 8000)
   assert.notEqual(body.messages[0].content, 'FULL SYSTEM PROMPT '.repeat(500))
   assert.match(body.messages[0].content, /Token-efficient continuation rules/)
   assert.match(body.messages[0].content, /deterministic_verification/)
@@ -185,7 +185,7 @@ test('initial requests and recovery attempts retain the full prompt and full out
   ], { fetchImpl, allowTools: false, recoveryAttempt: 1 })
 
   for (const body of bodies) {
-    assert.equal(body.max_tokens, 2000)
+    assert.equal(body.max_tokens, 4000)
     assert.equal(body.messages[0].content, fullPrompt)
   }
 })

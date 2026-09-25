@@ -52,7 +52,7 @@ test('successful deterministic completion continuation uses low effort with thin
   assert.equal(seen.url, 'https://proxy.example/v1/chat/completions')
   assert.equal(seen.body.reasoning_effort, 'low')
   assert.deepEqual(seen.body.thinking, { type: 'enabled' })
-  assert.equal(seen.body.max_tokens, 1000)
+  assert.equal(seen.body.max_tokens, 3000)
   assert.equal(message._airiProvider.reasoning_effort, 'low')
   assert.equal(message._airiProvider.reasoning_policy_reason, 'deterministic_completion')
 })
@@ -66,7 +66,7 @@ test('Jev post-step reanchor stays compact and uses low reasoning', async () => 
 
   assert.equal(seen.body.reasoning_effort, 'low')
   assert.deepEqual(seen.body.thinking, { type: 'enabled' })
-  assert.equal(seen.body.max_tokens, 1000)
+  assert.equal(seen.body.max_tokens, 3000)
   assert.equal(message._airiProvider.reasoning_policy_reason, 'jev_post_step_reanchor')
 })
 
@@ -78,10 +78,10 @@ test('Jev post-step replan overrides the compact completion path and uses high e
   ], { allowTools: true, triggerSource: 'post_step_replan' })
 
   assert.equal(seen.url, 'https://proxy.example/v1/chat/completions')
-  assert.equal(seen.body.reasoning_effort, 'high')
+  assert.equal(seen.body.reasoning_effort, 'max')
   assert.deepEqual(seen.body.thinking, { type: 'enabled' })
-  assert.equal(seen.body.max_tokens, 6000)
-  assert.equal(message._airiProvider.reasoning_policy_reason, 'jev_post_step_replan')
+  assert.equal(seen.body.max_tokens, 32000)
+  assert.equal(message._airiProvider.reasoning_policy_reason, 'plan_authoring')
 })
 
 test('Jev post-step continue overrides an error boundary to low reasoning', async () => {
@@ -96,15 +96,15 @@ test('Jev post-step continue overrides an error boundary to low reasoning', asyn
   assert.equal(message._airiProvider.reasoning_policy_reason, 'jev_post_step_continue')
 })
 
-test('new ordinary DeepSeek goal uses high effort only when lifecycle routing marks it new_goal', async () => {
+test('new ordinary DeepSeek goal uses the plan-authoring bracket only when lifecycle routing marks it new_goal', async () => {
   const { seen } = await captureRequest([
     { role: 'system', content: 'system' },
     { role: 'user', content: '[CHAT] tester: automate iron production' },
   ], { allowTools: true, triggerSource: 'new_goal' })
 
-  assert.equal(seen.body.reasoning_effort, 'high')
+  assert.equal(seen.body.reasoning_effort, 'max')
   assert.deepEqual(seen.body.thinking, { type: 'enabled' })
-  assert.equal(seen.body.max_tokens, 4000)
+  assert.equal(seen.body.max_tokens, 32000)
 })
 
 test('strict JSON recovery uses none and disables thinking', async () => {
@@ -130,7 +130,7 @@ test('output-budget recovery preserves compact budget and disables thinking', as
   assert.equal(seen.url, 'https://proxy.example/v1/chat/completions')
   assert.equal(seen.body.reasoning_effort, 'none')
   assert.deepEqual(seen.body.thinking, { type: 'disabled' })
-  assert.equal(seen.body.max_tokens, 1000)
+  assert.equal(seen.body.max_tokens, 3000)
 })
 
 test('meaningful failure following a low continuation escalates the next planning turn to high', async () => {
@@ -146,7 +146,7 @@ test('meaningful failure following a low continuation escalates the next plannin
   })
   const { seen } = await captureRequest(messages, { allowTools: true })
   assert.equal(seen.body.reasoning_effort, 'high')
-  assert.equal(seen.body.max_tokens, 6000)
+  assert.equal(seen.body.max_tokens, 16000)
 })
 
 test('repeated meaningful failures switch to compact finalization instead of consuming the strategic budget', async () => {
@@ -161,7 +161,7 @@ test('repeated meaningful failures switch to compact finalization instead of con
   const { seen } = await captureRequest(messages, { allowTools: true })
   assert.equal(seen.body.reasoning_effort, 'low')
   assert.deepEqual(seen.body.thinking, { type: 'enabled' })
-  assert.equal(seen.body.max_tokens, 2000)
+  assert.equal(seen.body.max_tokens, 4000)
 })
 
 test('successful grounded execution de-escalates back to low after earlier failures', async () => {
@@ -183,16 +183,16 @@ test('routed lifecycle drives main-planner reasoning instead of raw CHAT framing
     { role: 'user', content: '[CHAT] tester: 继续当前目标，但别清周围了' },
   ]
   assert.deepEqual(selectReasoningPolicy(config(), messages, { allowTools: true, triggerSource: 'amend_current' }), {
-    effort: 'high',
-    reason: 'same_goal_amendment',
+    effort: 'max',
+    reason: 'plan_authoring',
   })
   assert.deepEqual(selectReasoningPolicy(config(), messages, { allowTools: true, triggerSource: 'continue_current' }), {
     effort: 'low',
     reason: 'same_goal_continue',
   })
   assert.deepEqual(selectReasoningPolicy(config(), messages, { allowTools: true, triggerSource: 'new_goal' }), {
-    effort: 'high',
-    reason: 'new_goal',
+    effort: 'max',
+    reason: 'plan_authoring',
   })
 })
 
@@ -203,7 +203,7 @@ test('same-goal and Jev recovery continuations get a bounded 3000-token action b
       { role: 'user', content: '[CHAT] tester: continue current work' },
     ], { allowTools: true, triggerSource })
     assert.equal(seen.body.reasoning_effort, 'low')
-    assert.equal(seen.body.max_tokens, 3000)
+    assert.equal(seen.body.max_tokens, 8000)
   }
 })
 
@@ -243,7 +243,7 @@ test('explicit caller max_tokens remains authoritative over reasoning policy bud
     requestBodyPatch: { max_tokens: 900 },
   })
 
-  assert.equal(seen.body.reasoning_effort, 'high')
+  assert.equal(seen.body.reasoning_effort, 'max')
   assert.equal(seen.body.max_tokens, 900)
 })
 
@@ -270,7 +270,7 @@ test('auto profile fails closed on an unknown DeepSeek-compatible gateway', asyn
   assert.equal(seen.url, 'https://gateway.example/custom/v1/chat/completions')
   assert.equal(seen.body.reasoning_effort, undefined)
   assert.equal(seen.body.thinking, undefined)
-  assert.equal(seen.body.max_tokens, 2000)
+  assert.equal(seen.body.max_tokens, 4000)
 })
 
 test('openai reasoning profile uses max_completion_tokens and capability-safe minimal recovery reasoning', async () => {
@@ -284,7 +284,7 @@ test('openai reasoning profile uses max_completion_tokens and capability-safe mi
     profile: 'openai-reasoning',
   }))
   assert.equal(first.seen.body.max_tokens, undefined)
-  assert.equal(first.seen.body.max_completion_tokens, 4000)
+  assert.equal(first.seen.body.max_completion_tokens, 32000)
   assert.equal(first.seen.body.reasoning_effort, 'high')
   assert.equal(first.seen.body.thinking, undefined)
 
@@ -298,7 +298,7 @@ test('openai reasoning profile uses max_completion_tokens and capability-safe mi
     profile: 'openai-reasoning',
   }))
   assert.equal(recovery.seen.body.max_tokens, undefined)
-  assert.equal(recovery.seen.body.max_completion_tokens, 1000)
+  assert.equal(recovery.seen.body.max_completion_tokens, 3000)
   assert.equal(recovery.seen.body.reasoning_effort, 'minimal')
   assert.equal(recovery.seen.body.thinking, undefined)
 })
@@ -380,12 +380,12 @@ test('provider prompt trace records selected effort and policy reason per call',
     const rows = (await fsp.readFile(traceFile, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
     const request = rows.find(row => row.event === 'provider.request')
     const result = rows.find(row => row.event === 'provider.response')
-    assert.equal(request.reasoning_effort, 'high')
-    assert.equal(request.reasoning_policy_reason, 'new_goal')
-    assert.equal(request.payload.reasoning_effort, 'high')
+    assert.equal(request.reasoning_effort, 'max')
+    assert.equal(request.reasoning_policy_reason, 'plan_authoring')
+    assert.equal(request.payload.reasoning_effort, 'max')
     assert.deepEqual(request.payload.thinking, { type: 'enabled' })
-    assert.equal(result.reasoning_effort, 'high')
-    assert.equal(result.reasoning_policy_reason, 'new_goal')
+    assert.equal(result.reasoning_effort, 'max')
+    assert.equal(result.reasoning_policy_reason, 'plan_authoring')
   }
   finally {
     await fsp.rm(dir, { recursive: true, force: true })
@@ -441,12 +441,21 @@ test('Jev deep and strategic completion decisions escape the compact 1000-token 
       { role: 'user', content: COMPLETION },
     ], {
       allowTools: true,
-      triggerSource: 'recovery_replan_high',
+      // A non-authoring trigger, so Jev's rating decides the bracket.
+      triggerSource: 'post_step_continue',
       reasoningBudget,
     })
     assert.equal(seen.body.reasoning_effort, 'max')
-    assert.equal(seen.body.max_tokens, reasoningBudget === 'strategic' ? 8000 : 7000)
+    assert.equal(seen.body.max_tokens, reasoningBudget === 'strategic' ? 24000 : 16000)
   }
+  // Plan-authoring triggers get the largest bracket whatever Jev rated.
+  const { seen } = await captureRequest([
+    { role: 'system', content: 'system' },
+    { role: 'user', content: '[CHAT] tester: continue the long project' },
+    { role: 'user', content: COMPLETION },
+  ], { allowTools: true, triggerSource: 'recovery_replan_high', reasoningBudget: 'micro' })
+  assert.equal(seen.body.reasoning_effort, 'max')
+  assert.equal(seen.body.max_tokens, 32000)
 })
 
 test('Jev normal budget keeps its full planner output budget after completion', async () => {
@@ -459,7 +468,7 @@ test('Jev normal budget keeps its full planner output budget after completion', 
     reasoningBudget: 'normal',
   })
   assert.equal(seen.body.reasoning_effort, 'high')
-  assert.equal(seen.body.max_tokens, 5000)
+  assert.equal(seen.body.max_tokens, 12000)
 })
 
 test('Jev micro budget preserves compact completion behavior', async () => {
@@ -472,7 +481,7 @@ test('Jev micro budget preserves compact completion behavior', async () => {
     reasoningBudget: 'micro',
   })
   assert.equal(seen.body.reasoning_effort, 'low')
-  assert.equal(seen.body.max_tokens, 1000)
+  assert.equal(seen.body.max_tokens, 3000)
 })
 
 
@@ -486,5 +495,5 @@ test('retired hierarchy trigger names no longer force a hidden full-planner path
     reasoningBudget: 'micro',
   })
   assert.equal(seen.body.reasoning_effort, 'low')
-  assert.equal(seen.body.max_tokens, 1000)
+  assert.equal(seen.body.max_tokens, 3000)
 })

@@ -3,8 +3,10 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 import {
+  observationToolTier,
   parseOperation,
   renderOperation,
+  toolCommand,
   toolDefinitions,
 } from './structured-policy.mjs'
 
@@ -56,6 +58,20 @@ test('semantic placement tool advertises candidate-id execution that runtime-v8 
   )
 })
 
+
+test('placement candidates can require covering a drill output and are fact reads', () => {
+  // Burner-drill canary: the furnace must be placed on the drill's output tile.
+  const tool = toolDefinition('getPlacementCandidates')
+  assert.ok(tool.function.parameters.properties.covers_position)
+  assert.match(tool.function.description, /covers_position/)
+  const command = toolCommand('getPlacementCandidates', {
+    entity_name: 'stone-furnace',
+    covers_position: { x: -77.5, y: 26.3 },
+  })
+  assert.match(command, /covers_position=\{x=-77\.5,y=26\.3\}/)
+  assert.equal(observationToolTier('getPlacementCandidates'), 'fact')
+  assert.equal(observationToolTier('planPlacement'), 'fact')
+})
 
 test('construction area clearing contract stays advertised by full and compact provider prompts', () => {
   const prompt = readFileSync(deployedPromptSource, 'utf8')

@@ -126,10 +126,10 @@ export function configuration(raw = {}, env = process.env) {
     profile: providerProfileValue(env, raw, 'auto'),
     key: env.OPENAI_API_KEY ?? '',
     decisionProvider: decisionProviderConfiguration(env),
-    providerTimeoutMs: safeInteger(env.PROVIDER_TIMEOUT_MS ?? raw.providerTimeoutMs ?? 120000, 'PROVIDER_TIMEOUT_MS', 1000, 600000),
+    providerTimeoutMs: safeInteger(env.PROVIDER_TIMEOUT_MS ?? raw.providerTimeoutMs ?? 300000, 'PROVIDER_TIMEOUT_MS', 1000, 600000),
     gamePort: safeInteger(env.SERVER_PORT ?? raw.gamePort ?? 34197, 'SERVER_PORT', 1024, 65535),
     budget: safeInteger(env.MAX_PROVIDER_REQUESTS_PER_HOUR ?? raw.maxProviderRequestsPerHour ?? 30, 'MAX_PROVIDER_REQUESTS_PER_HOUR', 1, 1200),
-    maxProviderOutputUnits: safeInteger(env.MAX_PROVIDER_OUTPUT_TOKENS_PER_TURN ?? raw.maxProviderOutputTokensPerTurn ?? 20000, 'MAX_PROVIDER_OUTPUT_TOKENS_PER_TURN', 1000, 200000),
+    maxProviderOutputUnits: safeInteger(env.MAX_PROVIDER_OUTPUT_TOKENS_PER_TURN ?? raw.maxProviderOutputTokensPerTurn ?? 100000, 'MAX_PROVIDER_OUTPUT_TOKENS_PER_TURN', 1000, 200000),
     stopMs: safeInteger(env.SHUTDOWN_TIMEOUT_MS ?? raw.shutdownTimeoutMs ?? 60000, 'SHUTDOWN_TIMEOUT_MS', 1000, 300000),
     factorio: {
       username: factorioUsername,
@@ -175,10 +175,11 @@ export const SGLUNA_CONFIG_DEFAULTS = {
   providerProfile: 'auto',
   model: 'replace-me',
   save: '',
-  providerTimeoutMs: 120000,
+  // A 32,000-unit plan-authoring reply takes about three minutes.
+  providerTimeoutMs: 300000,
   gamePort: 34197,
   maxProviderRequestsPerHour: 30,
-  maxProviderOutputTokensPerTurn: 20000,
+  maxProviderOutputTokensPerTurn: 100000,
   shutdownTimeoutMs: 60000,
 }
 

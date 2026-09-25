@@ -113,6 +113,22 @@ describe('production scope context', () => {
     expect(result.coverage.truncation_reasons).toContain('depth limit 1 reached')
   })
 
+  it('does not report a depth truncation when producers at the depth limit have no ingredients', () => {
+    const actor = actorWith({
+      a: recipe('a', [{ type: 'item', name: 'b', amount: 1 }], [{ type: 'item', name: 'a', amount: 1 }]),
+      b: recipe('b', [], [{ type: 'item', name: 'b', amount: 1 }]),
+    })
+    const result = production_scope_context(actor, {
+      calculation_id: 'leaf-at-limit',
+      target: { type: 'item', name: 'a' },
+      max_depth: 1,
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.materials.map(material => material.name)).toEqual(['a', 'b'])
+    expect(result.coverage.complete).toBe(true)
+  })
+
   it('rejects invalid bounds before reading world statistics', () => {
     const actor = actorWith({})
     expect(production_scope_context(actor, {
