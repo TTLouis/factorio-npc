@@ -182,7 +182,11 @@ export function production_scope_context(actor: ControlledActor, request: Produc
     }
     if (depth >= max_depth) {
       let has_upstream = false
-      for (const recipe of producers) if ((recipe.ingredients ?? []).length > 0) has_upstream = true
+      for (const recipe of producers) {
+        // Typed so TypeScriptToLua emits `#`; `.length` on an untyped Lua table is nil.
+        const ingredients: unknown[] = recipe.ingredients ?? []
+        if (ingredients.length > 0) has_upstream = true
+      }
       if (has_upstream) add_truncation(`depth limit ${max_depth} reached`)
       continue
     }

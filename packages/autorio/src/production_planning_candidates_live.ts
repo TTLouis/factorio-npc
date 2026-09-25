@@ -101,7 +101,7 @@ function enumerate(actor: ControlledActor, material: Material, calculation_id: s
     let partials: Plan[] = [{ recipes: [recipe.name], choices: [{ key: materialKey, material, recipe_name: recipe.name, ambiguous: options.length > 1 }] }]
     for (const ingredient of recipe.ingredients ?? []) {
       const type = materialType(ingredient?.type)
-      if (!type || typeof ingredient?.name !== 'string' || ingredient.name.length === 0) return { failure: fail(calculation_id, 'INVALID_REQUEST', `recipe has unsupported ingredient identity: ${recipe.name}`) }
+      if (!type || typeof ingredient?.name !== 'string' || ingredient.name === '') return { failure: fail(calculation_id, 'INVALID_REQUEST', `recipe has unsupported ingredient identity: ${recipe.name}`) }
       const child = enumerate(actor, { type, name: ingredient.name }, calculation_id, nextStack)
       if (child.failure) return child
       const merged: Plan[] = []

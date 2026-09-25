@@ -1,4 +1,5 @@
 import type { ControlledActor } from './actors/types'
+import { resolve_exact_entity } from './entity_reference'
 
 export type ThroughputCapacityRequest
   = | {
@@ -60,7 +61,7 @@ export function throughput_capacity(actor: ControlledActor, request: ThroughputC
 
   if (request.kind === 'inserter_instance') {
     if (!valid_unit_number(request.unit_number)) return fail('unit_number must be a positive integer')
-    const entity = game.get_entity_by_unit_number(request.unit_number as any)
+    const entity = resolve_exact_entity(actor, request.unit_number)
     if (!entity || !entity.valid) return fail(`entity not found: ${request.unit_number}`)
     if (entity.surface.index !== actor.surface.index) return fail('entity is on another surface')
     if (entity.type !== 'inserter') return fail(`entity is not an inserter: ${request.unit_number}`)

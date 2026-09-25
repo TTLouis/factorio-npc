@@ -1,5 +1,7 @@
+import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import { validate_construction_execution_plan, type ConstructionExecutionPlacement } from './construction_execution'
+import { remember_entity_reference, resolve_exact_entity } from './entity_reference'
 import {
   analyze_factory_area,
   get_factory_area_analysis,
@@ -499,7 +501,7 @@ function active_batch_identity(): ActiveOperationBatchIdentity | undefined {
   if (typeof batch?.batch_id !== 'number'
     || typeof batch?.batch_generation !== 'number'
     || typeof batch?.batch_ref !== 'string'
-    || batch.batch_ref.length === 0) return undefined
+    || batch.batch_ref === '') return undefined
   return {
     batch_id: batch.batch_id,
     batch_generation: batch.batch_generation,
@@ -518,7 +520,7 @@ function batch_state(run: SkillVerificationRun) {
   if (run.active_batch_id === undefined) {
     return { state: 'missing' as const, reason: 'verification run has no submitted operation batch identity; explicit retry required' }
   }
-  if (run.active_batch_generation === undefined || typeof run.active_batch_ref !== 'string' || run.active_batch_ref.length === 0) {
+  if (run.active_batch_generation === undefined || typeof run.active_batch_ref !== 'string' || run.active_batch_ref === '') {
     return { state: 'legacy' as const, reason: `legacy pending batch ${run.active_batch_id} has no restart-safe identity; explicit retry required` }
   }
 
@@ -569,6 +571,7 @@ function resolve_built_entities(actor: ControlledActor, run: SkillVerificationRu
       if (entity.force?.index !== undefined && entity.force.index !== actor.force.index) continue
       if (entity.unit_number !== undefined) {
         unit_number = entity.unit_number as number
+        remember_entity_reference(entity)
         break
       }
     }
@@ -588,7 +591,7 @@ function power_block_reason(run: SkillVerificationRun, template: SkillInstanceTe
     if (!template_entity.requires_power) continue
     const unit_number = unit_for(run, template_entity.template_id)
     if (unit_number === undefined) return `rebuilt powered entity ${template_entity.entity_name} has no stable unit number`
-    const entity: any = game.get_entity_by_unit_number(unit_number as any)
+    const entity = built_entity(unit_number)
     if (!entity || !entity.valid) return `rebuilt powered entity ${template_entity.entity_name} disappeared`
     if (entity.electric_network_id === undefined) return `rebuilt ${template_entity.entity_name} is not connected to electric power in the verification area`
   }
@@ -636,31 +639,41 @@ function add_contents(total: Record<string, number>, contents: any) {
   }
 }
 
+const BELT_TYPES = ['transport-belt', 'underground-belt', 'splitter', 'loader', 'loader-1x1', 'linked-belt']
+const CONTAINER_TYPES = ['container', 'logistic-container', 'infinity-container']
+
+// Each read is gated by entity type: the engine raises on held_stack outside
+// inserters and on transport lines outside belts. crafter_output and
+// furnace_result are the same inventory id, so one read per machine.
+function output_inventory_id(entity: LuaEntity) {
+  if (entity.type === 'furnace') return defines.inventory.furnace_result
+  if (entity.type === 'assembling-machine' || entity.type === 'rocket-silo') return defines.inventory.crafter_output
+  if (CONTAINER_TYPES.includes(entity.type)) return defines.inventory.chest
+  return undefined
+}
+
 function count_output_items(run: SkillVerificationRun, skill: SkillDefinition) {
   const wanted: Record<string, boolean> = {}
   for (const output of skill.outputs) wanted[output.item] = true
   const total: Record<string, number> = {}
-  const inventory_defines: any = defines.inventory as any
   for (const rebuilt of run.built_entities) {
-    const entity: any = game.get_entity_by_unit_number(rebuilt.unit_number as any)
+    const entity = built_entity(rebuilt.unit_number)
     if (!entity || !entity.valid) continue
-    if (typeof entity.get_inventory === 'function') {
-      const ids = [inventory_defines.crafter_output, inventory_defines.furnace_result, inventory_defines.chest]
-      for (const id of ids) {
-        if (id === undefined) continue
-        const inventory = entity.get_inventory(id)
-        if (inventory?.valid !== false && inventory && typeof inventory.get_contents === 'function') add_contents(total, inventory.get_contents())
-      }
+    const inventory_id = output_inventory_id(entity)
+    if (inventory_id !== undefined) {
+      const inventory = entity.get_inventory(inventory_id)
+      if (inventory?.valid) add_contents(total, inventory.get_contents())
     }
-    if (typeof entity.get_max_transport_line_index === 'function' && typeof entity.get_transport_line === 'function') {
+    if (BELT_TYPES.includes(entity.type)) {
       const max_line = entity.get_max_transport_line_index()
       for (let line_index = 1; line_index <= max_line; line_index++) {
         const line = entity.get_transport_line(line_index)
-        if (line?.valid && typeof line.get_contents === 'function') add_contents(total, line.get_contents())
+        if (line.valid) add_contents(total, line.get_contents())
       }
     }
-    if (entity.held_stack?.valid_for_read && typeof entity.held_stack.name === 'string' && typeof entity.held_stack.count === 'number') {
-      total[entity.held_stack.name] = (total[entity.held_stack.name] ?? 0) + entity.held_stack.count
+    if (entity.type === 'inserter') {
+      const held = entity.held_stack
+      if (held.valid_for_read) total[held.name] = (total[held.name] ?? 0) + held.count
     }
   }
   const result: Record<string, number> = {}
@@ -806,6 +819,15 @@ function begin_reobservation(run: SkillVerificationRun, skill: SkillDefinition) 
 }
 
 let verification_actor_getter: (() => ControlledActor | undefined) | undefined
+
+// game.get_entity_by_unit_number only indexes prototypes flagged
+// get-by-unit-number, which ordinary buildings are not; resolve_built_entities
+// records a hint so the same identity resolves here.
+function built_entity(unit_number: number): LuaEntity | undefined {
+  const actor = verification_actor_getter?.()
+  if (!actor || !actor.is_valid) return undefined
+  return resolve_exact_entity(actor, unit_number)
+}
 
 function get_controlled_actor_for_run(_run: SkillVerificationRun) {
   const status = remote.call('autorio_operations', 'status') as any
