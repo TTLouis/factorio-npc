@@ -1,6 +1,7 @@
 import type { LuaEntity, LuaSurface } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import { remember_entity_reference, resolve_entity_reference } from './entity_reference'
+import { is_chunk_known_charted, is_chunk_known_visible, map_knowledge_summary } from './map_knowledge'
 import { crafting_categories_support_recipe } from './recipe_categories'
 
 const MAX_MAP_QUERY_RADIUS = 256
@@ -30,11 +31,11 @@ function chunk_position(position: { x: number, y: number }) {
 }
 
 export function is_position_charted(actor: ControlledActor, surface: LuaSurface, position: { x: number, y: number }) {
-  return actor.force.is_chunk_charted(surface, chunk_position(position))
+  return is_chunk_known_charted(actor.force, surface, chunk_position(position))
 }
 
 export function is_position_visible(actor: ControlledActor, surface: LuaSurface, position: { x: number, y: number }) {
-  return actor.force.is_chunk_visible(surface, chunk_position(position))
+  return is_chunk_known_visible(actor.force, surface, chunk_position(position))
 }
 
 function map_coverage(actor: ControlledActor, surface: LuaSurface, area: QueryArea) {
@@ -50,8 +51,8 @@ function map_coverage(actor: ControlledActor, surface: LuaSurface, area: QueryAr
     for (let chunk_y = min_chunk_y; chunk_y <= max_chunk_y; chunk_y++) {
       total_chunks++
       const chunk = { x: chunk_x, y: chunk_y }
-      if (actor.force.is_chunk_charted(surface, chunk)) charted_chunks++
-      if (actor.force.is_chunk_visible(surface, chunk)) visible_chunks++
+      if (is_chunk_known_charted(actor.force, surface, chunk)) charted_chunks++
+      if (is_chunk_known_visible(actor.force, surface, chunk)) visible_chunks++
     }
   }
 
@@ -76,7 +77,7 @@ function visible_query_areas(actor: ControlledActor, surface: LuaSurface, area: 
   for (let chunk_x = min_chunk_x; chunk_x <= max_chunk_x; chunk_x++) {
     for (let chunk_y = min_chunk_y; chunk_y <= max_chunk_y; chunk_y++) {
       const chunk = { x: chunk_x, y: chunk_y }
-      if (!actor.force.is_chunk_visible(surface, chunk)) continue
+      if (!is_chunk_known_visible(actor.force, surface, chunk)) continue
 
       const chunk_left = chunk_x * 32
       const chunk_top = chunk_y * 32
@@ -378,6 +379,7 @@ export function create_map_remote_interface(get_actor: () => ControlledActor | u
           index: actor.surface.index,
           name: actor.surface.name,
         },
+        map_knowledge: map_knowledge_summary(actor.force),
       }
     },
     query_area: (surface_index: number, x: number, y: number, radius: number = 32, limit: number = 32, name?: string) => {

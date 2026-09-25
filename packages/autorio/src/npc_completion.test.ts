@@ -26,6 +26,7 @@ function configureNpcWorld(resource?: Record<string, any>) {
     research_progress: 0,
     get_spawn_position: () => ({ x: 0, y: 0 }),
     chart: vi.fn(),
+    connected_players: [],
   }
 
   let character_created = false

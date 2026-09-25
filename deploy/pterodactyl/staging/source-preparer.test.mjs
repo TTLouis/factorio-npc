@@ -22,6 +22,7 @@ async function fixture(t) {
     'packages/autorio/tsconfig.json',
     'packages/autorio/package.json',
     'packages/autorio/data.lua',
+    'packages/autorio/src/map_knowledge.ts',
   ]) {
     const destination = path.join(root, relative)
     await fs.copyFile(path.join(repo, relative), destination)
@@ -40,7 +41,7 @@ test('preparer injects only the v8 deployment guard into the native validated Au
   const installedGuard = await fs.readFile(path.join(f.autorio, 'src', 'airi_deployment_guard.ts'), 'utf8')
 
   assert.equal(result.controller, 'native-actor-aware-autorio')
-  assert.equal(result.awarenessRadar, 'airi-npc-awareness-radar')
+  assert.equal(result.mapKnowledge, 'bounded-5x5')
   assert.equal(result.patchedGameplaySemantics, false)
   assert.equal(after, `import './airi_deployment_guard'\n${before}`)
   assert.equal(installedGuard, f.guard)
@@ -75,21 +76,20 @@ test('preparer refuses legacy connected-player-patched or non-NPC source', async
   await assert.rejects(() => prepareNativeNpcSource(clean.root, 'remote.add_interface("airi_deployment", {})'), /Unexpected deployment guard revision/)
 })
 
-test('preparer fails closed if the hidden 3x3 radar data-stage contract is missing or unbounded', async t => {
-  const missingName = await fixture(t)
-  const missingNamePath = path.join(missingName.autorio, 'data.lua')
-  await fs.writeFile(missingNamePath, (await fs.readFile(missingNamePath, 'utf8')).replace('airi-npc-awareness-radar', 'renamed-radar'))
-  await assert.rejects(() => prepareNativeNpcSource(missingName.root, missingName.guard), /NPC awareness radar prototype is missing/)
+test('preparer fails closed if the bounded map-knowledge contract is missing, widened or the radar returns', async t => {
+  const missing = await fixture(t)
+  await fs.rm(path.join(missing.autorio, 'src', 'map_knowledge.ts'))
+  await assert.rejects(() => prepareNativeNpcSource(missing.root, missing.guard), /NPC map knowledge is missing/)
 
-  const longRange = await fixture(t)
-  const longRangePath = path.join(longRange.autorio, 'data.lua')
-  await fs.writeFile(longRangePath, (await fs.readFile(longRangePath, 'utf8')).replace('max_distance_of_sector_revealed = 0', 'max_distance_of_sector_revealed = 14'))
-  await assert.rejects(() => prepareNativeNpcSource(longRange.root, longRange.guard), /must disable long-range sector scanning/)
+  const widened = await fixture(t)
+  const widenedPath = path.join(widened.autorio, 'src', 'map_knowledge.ts')
+  await fs.writeFile(widenedPath, (await fs.readFile(widenedPath, 'utf8')).replace('KNOWLEDGE_CHUNK_RADIUS = 2', 'KNOWLEDGE_CHUNK_RADIUS = 6'))
+  await assert.rejects(() => prepareNativeNpcSource(widened.root, widened.guard), /bounded to a 5x5 chunk window/)
 
-  const oversized = await fixture(t)
-  const oversizedPath = path.join(oversized.autorio, 'data.lua')
-  await fs.writeFile(oversizedPath, (await fs.readFile(oversizedPath, 'utf8')).replace('max_distance_of_nearby_sector_revealed = 1', 'max_distance_of_nearby_sector_revealed = 3'))
-  await assert.rejects(() => prepareNativeNpcSource(oversized.root, oversized.guard), /bounded to a 3x3 chunk window/)
+  const radar = await fixture(t)
+  const radarPath = path.join(radar.autorio, 'data.lua')
+  await fs.appendFile(radarPath, '\nlocal radar = {name = "airi-npc-awareness-radar"}\n')
+  await assert.rejects(() => prepareNativeNpcSource(radar.root, radar.guard), /removed NPC awareness radar prototype is present/)
 })
 
 test('preparer fails closed if the Autorio build stops packaging data.lua', async t => {

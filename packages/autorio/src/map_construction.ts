@@ -1,6 +1,7 @@
 import type { LuaSurface } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import { compact_construction_fulfillment, inspect_construction_fulfillment } from './construction_fulfillment'
+import { is_chunk_known_charted, is_chunk_known_visible } from './map_knowledge'
 import { resolve_entity_placement_item } from './placement_item'
 
 const MAX_SURFACE_INDEX = 4294967295
@@ -48,11 +49,11 @@ function chunk_position(position: Position) {
 }
 
 function position_charted(actor: ControlledActor, surface: LuaSurface, position: Position) {
-  return actor.force.is_chunk_charted(surface, chunk_position(position))
+  return is_chunk_known_charted(actor.force, surface, chunk_position(position))
 }
 
 function position_visible(actor: ControlledActor, surface: LuaSurface, position: Position) {
-  return actor.force.is_chunk_visible(surface, chunk_position(position))
+  return is_chunk_known_visible(actor.force, surface, chunk_position(position))
 }
 
 function legacy_fulfillment(fixed: ReturnType<typeof inspect_construction_fulfillment>['fixed']) {

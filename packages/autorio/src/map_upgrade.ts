@@ -1,6 +1,7 @@
 import type { LuaEntity, LuaEntityPrototype, LuaLogisticNetwork } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import { resolve_entity_reference } from './entity_reference'
+import { is_chunk_known_charted, is_chunk_known_visible } from './map_knowledge'
 
 function valid_unit_number(value: number) {
   return typeof value === 'number' && value === math.floor(value) && value >= 1 && value <= 9007199254740991
@@ -14,11 +15,11 @@ function chunk_position(entity: LuaEntity) {
 }
 
 function is_charted(actor: ControlledActor, entity: LuaEntity) {
-  return actor.force.is_chunk_charted(entity.surface, chunk_position(entity))
+  return is_chunk_known_charted(actor.force, entity.surface, chunk_position(entity))
 }
 
 function is_visible(actor: ControlledActor, entity: LuaEntity) {
-  return actor.force.is_chunk_visible(entity.surface, chunk_position(entity))
+  return is_chunk_known_visible(actor.force, entity.surface, chunk_position(entity))
 }
 
 function resolve_visible_entity(actor: ControlledActor, unit_number: number) {

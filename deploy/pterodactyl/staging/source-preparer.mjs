@@ -17,16 +17,18 @@ export async function prepareNativeNpcSource(sourceRoot, guardSource) {
   const toolsPath = path.join(autorio, 'src', 'tools.ts')
   const actorPath = path.join(autorio, 'src', 'actors', 'actor_controller.ts')
   const dataPath = path.join(autorio, 'data.lua')
+  const mapKnowledgePath = path.join(autorio, 'src', 'map_knowledge.ts')
   const packagePath = path.join(autorio, 'package.json')
   const guardPath = path.join(autorio, 'src', 'airi_deployment_guard.ts')
 
-  const [controlOriginal, tools, actorController, tsconfigText, dataLua, packageText] = await Promise.all([
+  const [controlOriginal, tools, actorController, tsconfigText, dataLua, packageText, mapKnowledge] = await Promise.all([
     fs.readFile(controlPath, 'utf8'),
     fs.readFile(toolsPath, 'utf8'),
     fs.readFile(actorPath, 'utf8'),
     fs.readFile(path.join(autorio, 'tsconfig.json'), 'utf8'),
     fs.readFile(dataPath, 'utf8'),
     fs.readFile(packagePath, 'utf8'),
+    fs.readFile(mapKnowledgePath, 'utf8').catch(() => ''),
   ])
 
   // Fail closed if the pinned source is not the native actor-aware runtime we
@@ -43,17 +45,13 @@ export async function prepareNativeNpcSource(sourceRoot, guardSource) {
   check(!controlOriginal.includes('airi_guarded_interface'), 'Legacy guarded-interface patch is already present')
   check(!controlOriginal.includes('airi_guard_ready'), 'Legacy connected-player tick guard is already present')
 
-  // The standalone NPC's fog-of-war awareness is implemented as a hidden,
-  // engine-native RadarPrototype. Keep this deployment contract explicit so a
-  // stale package cannot silently omit data.lua, grow the scan window, or
-  // reintroduce inherited world graphics/ground decals.
-  check(dataLua.includes('airi-npc-awareness-radar'), 'NPC awareness radar prototype is missing')
-  check(dataLua.includes('max_distance_of_sector_revealed = 0'), 'NPC awareness radar must disable long-range sector scanning')
-  check(dataLua.includes('max_distance_of_nearby_sector_revealed = 1'), 'NPC awareness radar must stay bounded to a 3x3 chunk window')
-  check(dataLua.includes('energy_source = {type = "void"}'), 'NPC awareness radar must not depend on the electric network')
-  check(dataLua.includes('radar.pictures = nil'), 'NPC awareness radar must not render the inherited radar sprite/shadow')
-  check(dataLua.includes('radar.integration_patch = nil'), 'NPC awareness radar must not render the inherited ground integration patch')
-  check(dataLua.includes('radar.water_reflection = nil'), 'NPC awareness radar must not render an inherited water reflection')
+  // The standalone NPC keeps its own bounded map knowledge instead of the
+  // hidden radar, which charted nothing with zero connected players
+  // (docs/NPC_CHARACTER_ARCHITECTURE.md, "Map knowledge"). Keep the contract
+  // explicit so a stale package cannot reintroduce the radar or grow the window.
+  check(!dataLua.includes('airi-npc-awareness-radar'), 'The removed NPC awareness radar prototype is present')
+  check(mapKnowledge.includes('export function is_chunk_known_visible'), 'NPC map knowledge is missing')
+  check(/^export const KNOWLEDGE_CHUNK_RADIUS = 2\r?$/m.test(mapKnowledge), 'NPC map knowledge must stay bounded to a 5x5 chunk window')
 
   let packageJson
   try { packageJson = JSON.parse(packageText) }
@@ -81,7 +79,7 @@ export async function prepareNativeNpcSource(sourceRoot, guardSource) {
     controller: 'native-actor-aware-autorio',
     deploymentGuard: 'airi-deploy-v8-npc-staging',
     actorMode: 'npc',
-    awarenessRadar: 'airi-npc-awareness-radar',
+    mapKnowledge: 'bounded-5x5',
     patchedGameplaySemantics: false,
     controlPath,
     dataPath,
