@@ -20,6 +20,7 @@ function fixture(itemName = 'steel-chest', itemCount = 2) {
     index: 1,
     find_non_colliding_position: vi.fn(() => ({ x: 1, y: 0 })),
     can_place_entity: vi.fn(() => true),
+    find_entities_filtered: vi.fn(() => []),
   }
   surface.create_entity = vi.fn((args: any) => ({
     valid: true,
@@ -62,13 +63,16 @@ beforeEach(() => {
   ;(globalThis as any).prototypes.item['steel-chest'] = {}
   ;(globalThis as any).prototypes.entity['steel-chest'] = {
     items_to_place_this: [{ name: 'steel-chest', count: 1 }],
+    tile_width: 1,
+    tile_height: 1,
+    collision_box: { left_top: { x: -0.4, y: -0.4 }, right_bottom: { x: 0.4, y: 0.4 } },
   }
 })
 
 describe('precise placement runtime', () => {
   it('places at the exact local coordinate with the requested direction', () => {
     const f = fixture()
-    expect(f.controller.submit_placement('steel-chest', 4.5, -2, 6)).toBe(true)
+    expect(f.controller.submit_placement('steel-chest', 4.5, -1.5, 6)).toBe(true)
 
     const result = f.runtime.state_placing(f.actor)
 
@@ -76,13 +80,13 @@ describe('precise placement runtime', () => {
     expect(f.surface.find_non_colliding_position).not.toHaveBeenCalled()
     expect(f.surface.can_place_entity).toHaveBeenCalledWith({
       name: 'steel-chest',
-      position: { x: 4.5, y: -2 },
+      position: { x: 4.5, y: -1.5 },
       direction: 6,
       force: f.actor.force,
     })
     expect(f.surface.create_entity).toHaveBeenCalledWith(expect.objectContaining({
       name: 'steel-chest',
-      position: { x: 4.5, y: -2 },
+      position: { x: 4.5, y: -1.5 },
       direction: 6,
       raise_built: true,
     }))
@@ -91,13 +95,40 @@ describe('precise placement runtime', () => {
     expect(f.controller.status().last_result).toMatchObject({
       code: 'completed',
       completed: true,
-      requested_position: { x: 4.5, y: -2 },
+      requested_position: { x: 4.5, y: -1.5 },
       direction: 6,
       placed_unit_number: 77,
       placed_entity_type: 'container',
-      placed_position: { x: 4.5, y: -2 },
+      placed_position: { x: 4.5, y: -1.5 },
       placed_surface_index: 1,
       placed_direction: 6,
+    })
+  })
+
+  it('rejects the live burner-drill half-tile center before asking the engine to place it', () => {
+    ;(globalThis as any).prototypes.item['burner-mining-drill'] = {}
+    ;(globalThis as any).prototypes.entity['burner-mining-drill'] = {
+      items_to_place_this: [{ name: 'burner-mining-drill', count: 1 }],
+      tile_width: 2,
+      tile_height: 2,
+      collision_box: { left_top: { x: -0.9, y: -0.9 }, right_bottom: { x: 0.9, y: 0.9 } },
+    }
+    const f = fixture('burner-mining-drill', 2)
+    expect(f.controller.submit_placement('burner-mining-drill', -70.5, -10.5, 8)).toBe(true)
+
+    const result = f.runtime.state_placing(f.actor)
+
+    expect(result?.[0]).toBe(false)
+    expect(f.surface.can_place_entity).not.toHaveBeenCalled()
+    expect(f.surface.create_entity).not.toHaveBeenCalled()
+    expect(f.controller.status().last_result).toMatchObject({
+      code: 'not_placeable',
+      placement_footprint: { tile_width: 2, tile_height: 2 },
+      placement_grid: {
+        x_offset: 0,
+        y_offset: 0,
+        nearest_valid_center: { x: -70, y: -10 },
+      },
     })
   })
 
@@ -152,9 +183,11 @@ describe('precise placement runtime', () => {
     ;(globalThis as any).prototypes.item['custom-chest-kit'] = {}
     ;(globalThis as any).prototypes.entity['custom-chest'] = {
       items_to_place_this: [{ name: 'custom-chest-kit', count: 2 }],
+      tile_width: 1,
+      tile_height: 1,
     }
     const f = fixture('custom-chest-kit', 3)
-    expect(f.controller.submit_placement('custom-chest', 1, 0, 0)).toBe(true)
+    expect(f.controller.submit_placement('custom-chest', 1.5, 0.5, 0)).toBe(true)
 
     const result = f.runtime.state_placing(f.actor)
 
@@ -169,7 +202,7 @@ describe('precise placement runtime', () => {
   it('does not consume a resolved placement item when entity creation fails', () => {
     const f = fixture()
     f.surface.create_entity.mockReturnValueOnce(undefined)
-    expect(f.controller.submit_placement('steel-chest', 1, 0, 0)).toBe(true)
+    expect(f.controller.submit_placement('steel-chest', 1.5, 0.5, 0)).toBe(true)
 
     const result = f.runtime.state_placing(f.actor)
 
@@ -183,6 +216,8 @@ describe('precise placement runtime', () => {
     ;(globalThis as any).prototypes.item['kit-b'] = {}
     ;(globalThis as any).prototypes.entity['ambiguous-chest'] = {
       items_to_place_this: [{ name: 'kit-a', count: 1 }, { name: 'kit-b', count: 1 }],
+      tile_width: 1,
+      tile_height: 1,
     }
     const f = fixture('kit-a', 2)
     expect(f.controller.submit_placement('ambiguous-chest', 1, 0, 0)).toBe(true)
