@@ -869,7 +869,9 @@ function refresh_world_preview(parent: LuaGuiElement, runtime: TaskBoardUiRuntim
   // base union, and casting to `any` would emit the wrong Lua self ABI.
   const camera = frame?.valid ? frame[ui_constants.PREVIEW_CAMERA_NAME] as CameraGuiElement | undefined : undefined
   const position = header?.valid ? header[ui_constants.PREVIEW_POSITION_NAME] : undefined
-  if (!frame?.valid || !camera?.valid || !position?.valid) return false
+  // A header saved before the locate pin existed is rebuilt once.
+  const locate = header?.valid ? header[ui_constants.PREVIEW_LOCATE_NAME] : undefined
+  if (!frame?.valid || !camera?.valid || !position?.valid || !locate?.valid) return false
 
   if (camera.position.x !== preview.position.x || camera.position.y !== preview.position.y) camera.position = preview.position
   if (camera.surface_index !== preview.surface_index) camera.surface_index = preview.surface_index
@@ -893,7 +895,10 @@ function render_world_preview(parent: LuaGuiElement, runtime: TaskBoardUiRuntime
   if (preview === undefined) { add_empty_state(body, 'NPC world preview is unavailable.'); return }
   const zoom = task_board_preview_zoom(player.index)
   const preview_min_height = task_board_preview_min_height(player_gui_height(player))
-  const position = header.add({ type: 'button', name: ui_constants.PREVIEW_POSITION_NAME, caption: preview_position_caption(preview), style: 'mini_button_aligned_to_text_vertically', tooltip: 'Show NPC in remote view' }); position.style.right_margin = 4
+  // The coordinates are a plain label: as a 16px mini button's caption they were
+  // clipped to a lone "X". Locating is the map-pin button beside them.
+  header.add({ type: 'label', name: ui_constants.PREVIEW_POSITION_NAME, caption: preview_position_caption(preview), style: 'semibold_label' })
+  const locate = header.add({ type: 'sprite-button', name: ui_constants.PREVIEW_LOCATE_NAME, sprite: 'utility/gps_map_icon', style: 'tool_button', tooltip: 'Show NPC in remote view' }); locate.style.right_margin = 4
   const frame = body.add({ type: 'frame', name: ui_constants.PREVIEW_CAMERA_FRAME_NAME, direction: 'vertical', style: 'deep_frame_in_shallow_frame' })
   frame.style.width = ui_constants.PREVIEW_CAMERA_WIDTH; frame.style.minimal_height = preview_min_height; frame.style.horizontally_stretchable = false; frame.style.vertically_stretchable = true
   const camera = frame.add({ type: 'camera', name: ui_constants.PREVIEW_CAMERA_NAME, position: preview.position, surface_index: preview.surface_index, zoom })
@@ -1439,7 +1444,7 @@ export function create_task_board_ui_remote_interface() {
     const element = event.element; if (!element?.valid || element.player_index !== event.player_index) return; const player = game.get_player(event.player_index); if (!player?.valid) return
     if (element.name === ui_constants.BUTTON_NAME) { toggle_task_board_ui_open(player.index); render(player); return }
     if (!task_board_ui_is_open(player.index)) return
-    if (element.name === ui_constants.PREVIEW_POSITION_NAME) { focus_npc_preview(player); return }
+    if (element.name === ui_constants.PREVIEW_LOCATE_NAME) { focus_npc_preview(player); return }
     if (element.name === ui_constants.CLOSE_BUTTON_NAME) { clear_terminate_confirmation(player.index); close_task_board_ui(player.index); close_task_board_skills_ui(player.index); project_ui.close_projects_ui(player.index); debug_ui.close_debug_ui(player.index); skills_ui.close_skills_window(player); project_ui.render_projects_popout(player, false); render_debug_popout(player); destroy_panel(player); ensure_button(player); return }
     if (element.name === project_ui.PROJECTS_BUTTON_NAME) { project_ui.toggle_projects_ui(player.index); render_panel(player); project_ui.render_projects_popout(player, true, storage.airi_task_board_ui?.goal_id ?? ''); return }
     if (element.name === project_ui.PROJECTS_CLOSE_BUTTON_NAME) { project_ui.close_projects_ui(player.index); project_ui.render_projects_popout(player, true, storage.airi_task_board_ui?.goal_id ?? ''); render_panel(player); return }

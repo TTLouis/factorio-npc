@@ -84,6 +84,9 @@ export function render_console_titlebar(root: FrameGuiElement, caption: string, 
   const titlebar = root.add({ type: 'flow', name: ui_constants.TITLEBAR_NAME, direction: 'horizontal' })
   titlebar.style.horizontally_stretchable = true
   titlebar.style.horizontal_spacing = 8
+  // Flows align to the top by default, which left the 16px status light above
+  // the title's centre line.
+  titlebar.style.vertical_align = 'center'
   titlebar.drag_target = root
   titlebar.add({ type: 'label', caption, style: 'frame_title', ignored_by_interaction: true })
   titlebar.add({ type: 'sprite', name: `${ui_constants.TITLE_STATUS_NAME}_icon`, sprite: ui_constants.TONE_SPRITES[status.tone], style: 'status_image' })

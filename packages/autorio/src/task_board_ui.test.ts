@@ -373,10 +373,13 @@ describe('in-game task board UI projection', () => {
     expect(source).toContain('CONSOLE_LAYOUT.preview_min_height')
   })
 
-  it('makes preview coordinates a view-only button that uses the current runtime preview', () => {
+  it('locates the NPC from a map-pin button next to the preview coordinates', () => {
+    // The coordinates used to be the caption of a 16px mini button, which the
+    // client clipped to a lone "X". They are a label now; the pin locates.
     const source = taskBoardUiSource()
-    expect(source).toContain("type: 'button', name: PREVIEW_POSITION_NAME")
-    expect(source).toContain("style: 'mini_button_aligned_to_text_vertically'")
+    expect(source).toContain("type: 'label', name: PREVIEW_POSITION_NAME")
+    expect(source).toContain("type: 'sprite-button', name: PREVIEW_LOCATE_NAME, sprite: 'utility/gps_map_icon'")
+    expect(source).not.toContain("type: 'button', name: PREVIEW_POSITION_NAME")
     expect(source).toContain("tooltip: 'Show NPC in remote view'")
     const focus = source.split('function focus_npc_preview(')[1]?.split('/**\n * Updates the preview')[0] ?? ''
     expect(focus).toContain('const preview = runtime_snapshot().preview')
@@ -386,7 +389,8 @@ describe('in-game task board UI projection', () => {
     expect(focus).not.toContain('enqueue_ui_input')
     expect(focus).not.toContain('emit_control')
     expect(focus).not.toContain('teleport')
-    expect(source).toContain("if (element.name === PREVIEW_POSITION_NAME) { focus_npc_preview(player); return }")
+    expect(source).toContain("if (element.name === PREVIEW_LOCATE_NAME) { focus_npc_preview(player); return }")
+    expect(source).not.toContain('element.name === PREVIEW_POSITION_NAME')
 
     const refresh = source.split('function refresh_world_preview(')[1]?.split('function render_world_preview(')[0] ?? ''
     expect(refresh).toContain('const caption = preview_position_caption(preview)')
@@ -431,6 +435,12 @@ describe('in-game task board UI projection', () => {
     const source = taskBoardUiSource()
     expect(source).toMatch(/root\.auto_center = true[\s\S]*console_ui\.render_console_titlebar\(root,/)
     expect(source).not.toContain('root.force_auto_center()')
+  })
+
+  it('centres the title bar status light on the title line', () => {
+    const chrome = readFileSync(new URL('./task_board_console.ts', import.meta.url), 'utf8')
+    const titlebar = chrome.split('export function render_console_titlebar(')[1]?.split('export function refresh_console_titlebar(')[0] ?? ''
+    expect(titlebar).toMatch(/titlebar\.style\.vertical_align = 'center'[\s\S]*style: 'status_image'/)
   })
 
   it('does not create storage tables from the render path', () => {
