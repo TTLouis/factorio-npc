@@ -1,6 +1,7 @@
 import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import { resolve_entity_reference } from './entity_reference'
+import { placement_footprint, placement_tile_size, snap_placement_center, type PlacementWorldBox } from './placement_geometry'
 
 const DEFAULT_HALF_SIZE = 12
 const MIN_HALF_SIZE = 4
@@ -47,10 +48,6 @@ export interface PlacementPlanRequest extends ConstructionObservationRequest {
 
 function squared_distance(a: Position, b: Position) {
   return (a.x - b.x) ** 2 + (a.y - b.y) ** 2
-}
-
-function snap_center(value: number) {
-  return math.floor(value) + 0.5
 }
 
 function bounded_integer(value: number | undefined, fallback: number, min: number, max: number) {
@@ -280,12 +277,19 @@ export function local_spatial_observation(actor: ControlledActor, request: Const
   }
 }
 
-function preferred_side_penalty(anchor: Position, candidate: Position, side: PlacementSide) {
+function preferred_side_penalty(anchor: AnchorResult, candidate: Position, candidate_box: PlacementWorldBox, side: PlacementSide) {
   if (side === 'any') return 0
-  if (side === 'north') return candidate.y <= anchor.y ? 0 : 100
-  if (side === 'south') return candidate.y >= anchor.y ? 0 : 100
-  if (side === 'west') return candidate.x <= anchor.x ? 0 : 100
-  return candidate.x >= anchor.x ? 0 : 100
+  const anchor_box = anchor.entity?.bounding_box
+  if (anchor_box) {
+    if (side === 'north') return candidate_box.right_bottom.y <= anchor_box.left_top.y ? 0 : 100
+    if (side === 'south') return candidate_box.left_top.y >= anchor_box.right_bottom.y ? 0 : 100
+    if (side === 'west') return candidate_box.right_bottom.x <= anchor_box.left_top.x ? 0 : 100
+    return candidate_box.left_top.x >= anchor_box.right_bottom.x ? 0 : 100
+  }
+  if (side === 'north') return candidate.y <= anchor.position.y ? 0 : 100
+  if (side === 'south') return candidate.y >= anchor.position.y ? 0 : 100
+  if (side === 'west') return candidate.x <= anchor.position.x ? 0 : 100
+  return candidate.x >= anchor.position.x ? 0 : 100
 }
 
 function direction_vector(side: PlacementSide): Position | undefined {
@@ -296,8 +300,10 @@ function direction_vector(side: PlacementSide): Position | undefined {
   return undefined
 }
 
-function nearby_blockers(actor: ControlledActor, position: Position) {
-  const matches = actor.surface.find_entities_filtered({ position, radius: 1.5 })
+function nearby_blockers(actor: ControlledActor, position: Position, footprint_box?: PlacementWorldBox) {
+  const matches = footprint_box
+    ? actor.surface.find_entities_filtered({ area: footprint_box })
+    : actor.surface.find_entities_filtered({ position, radius: 1.5 })
   const blockers: Array<Record<string, unknown>> = []
   for (const entity of matches) {
     if (blockers.length >= 8) break
@@ -308,21 +314,26 @@ function nearby_blockers(actor: ControlledActor, position: Position) {
   return { entities: blockers, terrain: terrain ? { name: tile.name, kind: terrain } : undefined }
 }
 
-function extension_penalty(actor: ControlledActor, entity_name: string, position: Position, direction: number | undefined, extension: PlacementSide) {
+function extension_penalty(actor: ControlledActor, prototype: any, entity_name: string, position: Position, direction: number | undefined, extension: PlacementSide) {
   const vector = direction_vector(extension)
   if (!vector) return 0
-  const future = { x: position.x + vector.x * 2, y: position.y + vector.y * 2 }
+  const size = placement_tile_size(prototype, direction)
+  const clearance = vector.x !== 0 ? size.tile_width : size.tile_height
+  const future = {
+    x: position.x + vector.x * clearance,
+    y: position.y + vector.y * clearance,
+  }
   return actor.surface.can_place_entity({ name: entity_name, position: future, direction, force: actor.force }) ? 0 : 25
 }
 
-function candidate_positions(anchor: Position, radius: number) {
+function candidate_positions(anchor: Position, radius: number, prototype: any, direction: number | undefined) {
   const result: Position[] = []
   let evaluations = 0
   for (let ring = 1; ring <= radius && evaluations < MAX_CANDIDATE_EVALUATIONS; ring++) {
     for (let dx = -ring; dx <= ring && evaluations < MAX_CANDIDATE_EVALUATIONS; dx++) {
       for (let dy = -ring; dy <= ring && evaluations < MAX_CANDIDATE_EVALUATIONS; dy++) {
         if (math.max(math.abs(dx), math.abs(dy)) !== ring) continue
-        result.push({ x: snap_center(anchor.x + dx), y: snap_center(anchor.y + dy) })
+        result.push(snap_placement_center(prototype, { x: anchor.x + dx, y: anchor.y + dy }, direction))
         evaluations++
       }
     }
@@ -361,21 +372,22 @@ export function plan_placement(actor: ControlledActor, request: PlacementPlanReq
   const candidates: Array<Record<string, any>> = []
   const rejected: Array<Record<string, unknown>> = []
 
-  for (const position of candidate_positions(anchor.position, radius)) {
+  for (const position of candidate_positions(anchor.position, radius, prototype, direction)) {
     if (squared_distance(actor.position, position) > MAX_PLACEMENT_DISTANCE ** 2) {
       if (rejected.length < MAX_REJECTIONS) rejected.push({ position, reason: 'outside_local_build_reach' })
       continue
     }
+    const footprint = placement_footprint(prototype, position, direction)
     const placeable = actor.surface.can_place_entity({ name: request.entity_name, position, direction, force: actor.force })
     if (!placeable) {
-      if (rejected.length < MAX_REJECTIONS) rejected.push({ position, reason: 'collision', blockers: nearby_blockers(actor, position) })
+      if (rejected.length < MAX_REJECTIONS) rejected.push({ position, reason: 'collision', footprint, blockers: nearby_blockers(actor, position, footprint.world_box) })
       continue
     }
-    const score = preferred_side_penalty(anchor.position, position, side)
+    const score = preferred_side_penalty(anchor, position, footprint.world_box, side)
       + math.sqrt(squared_distance(anchor.position, position))
       + math.sqrt(squared_distance(actor.position, position)) * 0.1
-      + extension_penalty(actor, request.entity_name, position, direction, extension)
-    candidates.push({ position, direction, score })
+      + extension_penalty(actor, prototype, request.entity_name, position, direction, extension)
+    candidates.push({ position, direction, score, footprint })
   }
 
   sort_candidates(candidates)
