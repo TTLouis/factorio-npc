@@ -91,6 +91,55 @@ If a nearby/entity-status observation has already returned `unit_number`, subseq
 
 This specifically addresses the observed case where entity status found mining drill `744` while `getEntityGeometry({ unit_number: 744 })` returned `entity not found`.
 
+### Resolution scopes (owner decision, 2026-09-25)
+
+`game.get_entity_by_unit_number()` only indexes prototypes flagged
+`get-by-unit-number`. Ordinary buildings aren't flagged, so a direct lookup
+returns nil for them, and the observation hint is the path that normally finds
+them. Callers differ in what they may reach, so the resolver takes an
+explicit scope rather than one fixed rule:
+
+- `actor_body`: the entity must be on the actor's surface and force. This is
+  for body actions (operations, interaction, orientation, recipe, throughput)
+  and matches the original `resolve_exact_entity` rule.
+- `map_visible`: any surface and any force. The hint's own surface is
+  searched, and the caller then applies its charted/visible checks. This is
+  for map inspection, deconstruction and upgrade, exact-entity navigation (the
+  actor's surface is checked afterwards), and construction anchors.
+
+Both scopes verify identity by `unit_number` and never substitute a
+replacement that only shares name and position.
+
+Every observation path that returns a `unit_number` records a hint:
+nearby/status reads, placement receipts, and map-remote area observations.
+Before this change, map-remote observations didn't record one.
+
+Exact-entity navigation resolves once at submit and keeps the `LuaEntity` in
+the task. After that, each tick checks `valid`; it doesn't repeat the lookup.
+
+Force policy for map mutations:
+- upgrade and recipe changes: the actor's own force only (`wrong_force` otherwise);
+- deconstruction: the actor's force or `neutral` (for example crash-site
+  wrecks); any other force is rejected with `wrong_force`.
+
+Known limit: with zero connected players the NPC force charts no chunks
+(observed on 2.0.77, despite the awareness radar and `force.chart`), so map
+operations resolve the entity and then stop at `area_uncharted`.
+
+### Nearby observation ordering
+
+`get_nearby_entities` caps its results, so the order in which matches are
+kept decides what the model can see. The engine's order isn't meaningful: in
+an ore field the first matches are all resource tiles, which crowded out the
+buildings next to them. Matches are therefore kept in this order:
+
+1. entities that carry a `unit_number` (buildings, vehicles), nearest first;
+2. everything else (resources, trees, rocks), nearest first.
+
+The result also carries `type_counts` over all matches, so the model can see
+what the cap dropped and repeat the call with a `name` or `type` filter. The
+change only adds fields; existing fields keep their meaning.
+
 ## Special placement candidates
 
 Special placement should not require the LLM to calculate coordinates. The harness should enumerate and evaluate candidates locally.
