@@ -964,7 +964,9 @@ export class NpcAgentLoop {
             )
           }
           if (this.planCategoryRetries > this.maxToolValidationRetries) {
-            return this.blockedWithoutMutation(`Provider repeatedly placed an observation tool in operations (${error?.details?.tool_name ?? 'unknown'}).`, 'plan_category')
+            return this.blockedWithoutMutation(error?.details?.tool_name !== undefined
+              ? `Provider repeatedly placed an observation tool in operations (${error.details.tool_name}).`
+              : `Provider repeatedly returned a plan the harness refused (${error.code ?? 'plan_category'}): ${reason}`, 'plan_category')
           }
           this.messages.push({ role: 'assistant', content: cleanMemoryText(message.content, 4000) })
           const toolInstruction = this.observationDecisionForced

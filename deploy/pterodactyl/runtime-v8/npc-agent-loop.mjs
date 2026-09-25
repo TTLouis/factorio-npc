@@ -5935,6 +5935,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (roadmapNodeIds) plan.roadmapNodeIds = roadmapNodeIds
     if (developmentMode) plan.developmentMode = developmentMode
     if (goalDefinition) plan.goalDefinition = goalDefinition
+    if (semanticCompletion) {
+      // Refused here, the claim reaches the planner as a correction it can act
+      // on; refused in commitPlan, it failed the request (live, 2026-09-25).
+      this.semanticCompletionClaimCheck(
+        semanticCompletion,
+        this.memory.currentPlan?.(this.requestInfo?.memoryKey ?? this.activePlanKey()),
+      )
+    }
     this.enforceGoalDefinition(plan)
     const normalizedPlan = normalizeCanonicalPlan(plan.plan, plan.currentStep)
     plan.plan = normalizedPlan.plan
@@ -6633,11 +6641,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
-  async applySemanticCompletionClaim(plan, state) {
-    const claim = plan?.semanticCompletion
-    if (!claim) return { applied: false, state }
+  // Every check a semantic completion claim must pass before the reducer sees
+  // it. None of them mutates state, so parsePlanMessage runs them too: a
+  // refused claim then goes back to the planner as a plan correction instead
+  // of failing the whole request from inside commitPlan.
+  semanticCompletionClaimCheck(claim, state) {
     if (!this.requestInfo?.memoryKey || !state || state.status !== 'active') {
-      const error = new AgentLoopError('semantic_completion_requires_active_step')
+      // A paused goal is resumed only when this turn's operations are
+      // admitted, so a claim in a resume turn (the player's "continue", the
+      // UI Resume, an automatic resume) still meets the paused board. The
+      // guard stands: a paused plan must not advance before it is resumed.
+      const status = state?.status ?? 'none'
+      const pause = state?.status === 'paused' && state.pause_reason ? ` (${cleanMemoryText(state.pause_reason, 200)})` : ''
+      const error = new AgentLoopError(state?.status === 'paused'
+        ? `semantic_completion_requires_active_step: the goal is paused${pause}, so no step can be closed in this turn. Resubmit the plan and its operations without semanticCompletion. The goal resumes when this turn's operations are admitted; a step that is already satisfied can then be closed on the next turn with the evidence you hold.`
+        : `semantic_completion_requires_active_step: the goal is ${status}, so there is no active step to close. Resubmit without semanticCompletion.`)
       error.failureClass = 'plan_category'
       error.code = 'invalid_semantic_completion'
       throw error
@@ -6698,6 +6716,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       error.code = 'semantic_completion_requires_grounding'
       throw error
     }
+    return { step, grounding: deduped }
+  }
+
+  async applySemanticCompletionClaim(plan, state) {
+    const claim = plan?.semanticCompletion
+    if (!claim) return { applied: false, state }
+    const { step, grounding: deduped } = this.semanticCompletionClaimCheck(claim, state)
 
     const groundingRefs = deduped.map(item => item.ref)
     const reduced = this.memory.applyOutcomeAuthority?.(this.requestInfo.memoryKey, {
