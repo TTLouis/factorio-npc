@@ -94,6 +94,9 @@ export class FakeFactorio {
     this.nearby = { actor_position: { x: 0, y: 0 }, entities: [] }
     // Overrides the basic-operation receipt, for a scenario whose operation fails.
     this.lastBasicResult = undefined
+    // What autorio_skills.get returns per skill id, so getSkillDetails can
+    // load task-local skill context.
+    this.skills = {}
   }
 
   // Mirrors autorio_tools.goal_progress_facts.
@@ -143,6 +146,10 @@ export class FakeFactorio {
       })
     }
     if (text.includes('remote.call("autorio_tools","get_nearby_entities"')) return JSON.stringify(this.nearby)
+    if (text.includes('remote.call("autorio_skills","get"')) {
+      const id = /remote\.call\("autorio_skills","get",'([^']+)'\)/.exec(text)?.[1]
+      return JSON.stringify(this.skills[id] ?? { ok: false, error: 'unknown_skill' })
+    }
     if (text.includes('remote.call("autorio_follow","status")')) {
       return JSON.stringify({ active: false, healthy: false, controller_live: false, state: 'idle' })
     }

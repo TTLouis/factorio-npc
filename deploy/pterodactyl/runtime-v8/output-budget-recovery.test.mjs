@@ -2,8 +2,9 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
-import { NpcAgentLoop, normalizedProviderUsage } from './npc-agent-loop.mjs'
+import { NpcAgentLoop, normalizedProviderUsage, toolReplySequenceViolation } from './npc-agent-loop.mjs'
 import { providerRequest } from './provider.mjs'
+import { FakeFactorio, planReply, recordingJev } from './task-loop-fixtures.mjs'
 
 function deployment() {
   return {
@@ -978,4 +979,103 @@ test('a budget handoff on the first turn of a new goal keeps the player request'
   // The capsule has none of the earlier reads, so the fresh generation can
   // observe again (attempt 2 of the canary inherited a closed phase).
   assert.equal(calls.at(-1).context.allowTools, true)
+})
+
+test('a budget handoff after loaded skills keeps every tool exchange whole for the fresh generation', async () => {
+  // 2026-09-25 live trace (req_muh34c6x_1): a tools-off decision round ended
+  // with finish_reason length, the budget handoff replaced the working context
+  // with a two-message capsule prefix, and the fresh generation made one read
+  // round. Skill context was then inserted at the old three-message base index,
+  // i.e. between the assistant tool_calls and its tool replies, and DeepSeek
+  // rejected round 1 with HTTP 400 ("insufficient tool messages following
+  // tool_calls message"), pausing the goal.
+  const factorio = new FakeFactorio({ inventory: { 'burner-mining-drill': 2, coal: 12 } })
+  factorio.skills['burner-coal-loop'] = {
+    schema_version: 1,
+    revision: 1,
+    id: 'burner-coal-loop',
+    name: 'Burner Coal Loop',
+    kind: 'production',
+    stage: 'pattern',
+    status: 'candidate',
+    summary: 'Bootstrap early coal production with a small amount of starter fuel, then arrange fuel-burning miners so mined coal feeds the fuel demand of the loop.',
+    preconditions: [{ kind: 'bootstrap', subject: 'starter-fuel', description: 'Enough initial fuel exists to start at least part of the loop.' }],
+    topology: { relations: [{ kind: 'direct_item_output', from: 'miner-a', to: 'miner-b', description: 'Orient direct mining output so coal reaches the next miner fuel path.' }] },
+    constraints: [{ kind: 'placement', description: 'Every miner must cover coal and its actual output direction must line up with the receiving fuel inventory.', validation: 'unvalidated', evidence_refs: {} }],
+    verification: { mode: 'deterministic' },
+  }
+  const call = (id, index, name, args = {}) => ({ index, id, type: 'function', function: { name, arguments: JSON.stringify(args) } })
+  const isHandoff = message => String(message.content ?? '').startsWith('[PROVIDER_BUDGET_HANDOFF]')
+  const calls = []
+  const agent = makeAgent({
+    rcon: factorio,
+    interactionDecisionProvider: recordingJev(),
+    provider: async (messages, context) => {
+      calls.push({ messages: messages.map(message => ({ ...message })), context })
+      if (calls.length === 1) {
+        return {
+          content: 'I will load the coal loop pattern and check my state.',
+          tool_calls: [
+            call('call_00_skill0000000000000001', 0, 'getSkillDetails', { id: 'burner-coal-loop' }),
+            call('call_01_status000000000000001', 1, 'getActorStatus'),
+            call('call_02_inventory00000000001', 2, 'getInventoryItems'),
+          ],
+        }
+      }
+      if (!messages.some(isHandoff)) return exhaustedMessage()
+      if (!messages.some(message => message.role === 'tool')) {
+        return {
+          content: 'I\'ll verify arrival at the coal patch and scan the local area.',
+          tool_calls: [
+            call('call_00_E8h5iZhFPzJ8JJMJGZM60759', 0, 'getActorStatus'),
+            call('call_01_0g5jmVutTdLcqYDngS7P9402', 1, 'getNearbyEntities', { radius: 32, name: 'coal' }),
+            call('call_02_L2dnUpaxZcchVoFnvvMT3018', 2, 'getInventoryItems'),
+          ],
+        }
+      }
+      return planReply({
+        chatMessage: 'Placing the first burner drill on coal.',
+        plan: ['Place two burner drills that feed each other on coal', 'Verify the loop stays fueled'],
+        operations: [{ name: 'wait', args: { ticks: 1 } }],
+      })
+    },
+  })
+
+  await agent.request('now also automate coal production with only burner miner', { sender: 'TTLouis' })
+
+  const fresh = calls.filter(entry => entry.messages.some(isHandoff))
+  assert.equal(fresh.length, 2, 'the fresh generation makes one read round and one decision round')
+  assert.equal(fresh[0].context.triggerSource, 'recovery_continue_low')
+  for (const [index, entry] of calls.entries()) {
+    assert.equal(toolReplySequenceViolation(entry.messages), undefined, `provider call ${index + 1} split a tool exchange`)
+  }
+  // The loaded skill still reaches both fresh rounds, in the fixed prefix.
+  for (const entry of fresh) {
+    const skillAt = entry.messages.findIndex(message => String(message.content ?? '').startsWith('[SKILL_CONTEXT]'))
+    const firstTurn = entry.messages.findIndex(message => message.role === 'assistant' || message.role === 'tool')
+    assert.ok(skillAt > 0, 'skill context is sent')
+    assert.ok(firstTurn < 0 || skillAt < firstTurn, 'skill context precedes the first model turn')
+  }
+  assert.equal(factorio.mutations.length, 1)
+  assert.equal(agent.memory.currentPlan('npc:airi').status, 'active')
+})
+
+test('a staged amendment cannot push skill context into the middle of a tool exchange', () => {
+  const agent = makeAgent({ provider: async () => { throw new Error('no provider call in this assembly test') } })
+  agent.baseMessages = [
+    { role: 'system', content: 'NPC output-budget recovery test prompt' },
+    { role: 'user', content: '[CHAT] TTLouis: build a burner coal loop' },
+  ]
+  agent.messages = [
+    ...agent.baseMessages.map(message => ({ ...message })),
+    { role: 'assistant', content: '', tool_calls: [{ index: 0, id: 'call_00_a', type: 'function', function: { name: 'getActorStatus', arguments: '{}' } }] },
+    { role: 'tool', tool_call_id: 'call_00_a', content: '{}' },
+  ]
+  agent.recordLoadedSkillToolResult('getSkillDetails', { id: 'burner-coal-loop' }, JSON.stringify({ id: 'burner-coal-loop', name: 'Burner Coal Loop' }))
+  // A compatible amendment grows the base for the next continuation only.
+  agent.baseMessages.push({ role: 'user', content: '[CHAT] TTLouis: use the patch to the west' })
+
+  const messages = agent.providerMessages()
+  assert.equal(toolReplySequenceViolation(messages), undefined)
+  assert.match(messages[2].content, /^\[SKILL_CONTEXT\]/)
 })

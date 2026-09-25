@@ -1377,6 +1377,27 @@ function messageChars(message) {
   return String(message?.content ?? '').length + JSON.stringify(message?.tool_calls ?? '').length
 }
 
+// Chat-completions providers require every assistant `tool_calls` message to be
+// followed directly by one tool reply per call id; DeepSeek answers anything
+// else with HTTP 400, which pauses the goal. Returns the first violation.
+export function toolReplySequenceViolation(messages) {
+  if (!Array.isArray(messages)) return undefined
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index]
+    if (message?.role !== 'assistant' || !Array.isArray(message.tool_calls) || message.tool_calls.length === 0) continue
+    const pending = new Set(message.tool_calls.map(call => call?.id))
+    let next = index + 1
+    while (next < messages.length && messages[next]?.role === 'tool') {
+      pending.delete(messages[next].tool_call_id)
+      next++
+    }
+    if (pending.size > 0) {
+      return { index, unanswered: [...pending], next_role: messages[next]?.role }
+    }
+  }
+  return undefined
+}
+
 function finiteNonNegative(value) {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
 }
@@ -2358,7 +2379,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       && message.content.startsWith('[SKILL_CONTEXT]')))
     const skillContext = this.skillContext()
     if (!skillContext) return messages
-    const insertAt = Math.min(this.baseMessages.length, messages.length)
+    // Skill context belongs to the fixed prefix, which ends before the first
+    // model turn. `baseMessages` alone is not that prefix: a budget handoff
+    // swaps the working messages for a shorter capsule prefix, and a staged
+    // amendment grows `baseMessages` for the next continuation only. Indexing
+    // by it put the skill context between an assistant `tool_calls` message
+    // and its tool replies (live HTTP 400, 2026-09-25).
+    const firstTurn = messages.findIndex(message => message?.role === 'assistant' || message?.role === 'tool')
+    const insertAt = Math.min(this.baseMessages.length, firstTurn < 0 ? messages.length : firstTurn)
     return [
       ...messages.slice(0, insertAt),
       { role: 'user', content: skillContext },
@@ -5545,6 +5573,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (providerMessagesOverride === undefined
       && (triggerSource === 'new_goal' || ['deep', 'strategic'].includes(this.reasoningBudgetOverride))) {
       providerMessages = [...providerMessages, { role: 'user', content: PLANNING_LOD_GUIDANCE }]
+    }
+    // An assembly invariant, not a repair: a split tool exchange is a harness
+    // bug, and sending it only turns that bug into a provider 400.
+    const sequenceViolation = toolReplySequenceViolation(providerMessages)
+    if (sequenceViolation) {
+      await this.traceEvent('provider.message_sequence_invalid', { round, ...sequenceViolation })
+      throw new AgentLoopError(`provider_message_sequence_invalid: assistant tool_calls at message ${sequenceViolation.index} lack tool replies for ${sequenceViolation.unanswered.join(', ')} (next role: ${sequenceViolation.next_role ?? 'none'})`)
     }
     const startedAt = Date.now()
     if (recoveryAttempt > 0 && this.traceRequest) {
