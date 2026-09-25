@@ -253,13 +253,14 @@ test('request cumulative usage stays separate from the latest completed provider
 
   debug = liveAgentDebugEvent('provider.response', {
     round: 0,
+    latency_ms: 12500,
     usage: {
       input_units: 100,
       cached_input_units: 80,
       output_units: 10,
       total_units: 110,
     },
-    provider: { model: 'test-model', finish_reason: 'tool_calls' },
+    provider: { model: 'test-model', finish_reason: 'tool_calls', reasoning_effort: 'low' },
   }, debug, {
     usage: {
       input_units: 100,
@@ -277,6 +278,10 @@ test('request cumulative usage stays separate from the latest completed provider
   assert.equal(debug.latest_round_cached_input_units, 80)
   assert.equal(debug.latest_round_output_units, 10)
   assert.equal(debug.latest_round_total_units, 110)
+  assert.equal(debug.think_rounds, 1)
+  assert.equal(debug.think_total_ms, 12500)
+  assert.equal(debug.think_slowest_round_ms, 12500)
+  assert.equal(debug.think_slowest_round_effort, 'low')
 
   // Starting another provider call keeps the previous completed round visible;
   // it does not fabricate usage for the in-flight round.
@@ -294,13 +299,14 @@ test('request cumulative usage stays separate from the latest completed provider
 
   debug = liveAgentDebugEvent('provider.response', {
     round: 1,
+    latency_ms: 8000,
     usage: {
       input_units: 120,
       cached_input_units: 90,
       output_units: 20,
       total_units: 140,
     },
-    provider: { model: 'test-model', finish_reason: 'stop' },
+    provider: { model: 'test-model', finish_reason: 'stop', reasoning_effort: 'high' },
   }, debug, {
     usage: {
       input_units: 220,
@@ -309,6 +315,12 @@ test('request cumulative usage stays separate from the latest completed provider
       total_units: 250,
     },
   })
+  // A second, faster round adds to the request total but does not overtake
+  // the slowest round recorded so far (round 0, 12500 ms at 'low' effort).
+  assert.equal(debug.think_rounds, 2)
+  assert.equal(debug.think_total_ms, 20500)
+  assert.equal(debug.think_slowest_round_ms, 12500)
+  assert.equal(debug.think_slowest_round_effort, 'low')
 
   // Cached input is already included in input. Neither the per-round nor
   // cumulative total adds cached tokens a second time.
@@ -345,6 +357,10 @@ test('starting a new request resets cumulative and latest-round debug usage', ()
     structured_content: { json_valid: true, plan_valid: false, error: 'old schema error' },
     reasoning_effort: 'max',
     reasoning_policy_reason: 'repeated_failure',
+    think_rounds: 5,
+    think_total_ms: 60000,
+    think_slowest_round_ms: 22000,
+    think_slowest_round_effort: 'max',
   }
 
   const debug = liveAgentDebugEvent('request.received', { sender: 'TTLouis', text: 'new request' }, previous, {
@@ -371,6 +387,10 @@ test('starting a new request resets cumulative and latest-round debug usage', ()
   assert.equal(debug.response_bytes, undefined)
   assert.equal(debug.tool_call_count, undefined)
   assert.equal(debug.structured_content, undefined)
+  assert.equal(debug.think_rounds, 0)
+  assert.equal(debug.think_total_ms, 0)
+  assert.equal(debug.think_slowest_round_ms, 0)
+  assert.equal(debug.think_slowest_round_effort, '')
   assert.equal(debug.reasoning_effort, '')
   assert.equal(debug.reasoning_policy_reason, '')
 })

@@ -68,6 +68,10 @@ export interface TaskBoardUiDebugSnapshot {
   cap_enforcement_anomaly: number
   reasoning_effort: string
   reasoning_policy_reason: string
+  think_rounds: number
+  think_total_ms: number
+  think_slowest_round_ms: number
+  think_slowest_round_effort: string
   content_chars: number
   reasoning_content_chars: number
   input_units: number
@@ -207,6 +211,10 @@ export function sanitize_debug_snapshot(value: any): TaskBoardUiDebugSnapshot {
     cap_enforcement_anomaly: math.min(1, integer(debug.cap_enforcement_anomaly)),
     reasoning_effort: clean_text(debug.reasoning_effort, 32),
     reasoning_policy_reason: clean_text(debug.reasoning_policy_reason, 80),
+    think_rounds: integer(debug.think_rounds),
+    think_total_ms: integer(debug.think_total_ms),
+    think_slowest_round_ms: integer(debug.think_slowest_round_ms),
+    think_slowest_round_effort: clean_text(debug.think_slowest_round_effort, 32),
     content_chars: integer(debug.content_chars),
     reasoning_content_chars: integer(debug.reasoning_content_chars),
     input_units: integer(debug.input_units),
