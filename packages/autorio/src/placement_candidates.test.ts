@@ -240,6 +240,60 @@ describe('placement candidates', () => {
     }
   })
 
+  it('uses rotation-aware center grids and returns each candidate footprint', () => {
+    ;(globalThis as any).prototypes.entity = {
+      'rect-machine': {
+        name: 'rect-machine',
+        type: 'assembling-machine',
+        tile_width: 1,
+        tile_height: 2,
+        collision_box: {
+          left_top: { x: -0.4, y: -0.9 },
+          right_bottom: { x: 0.4, y: 0.9 },
+        },
+      },
+    }
+    const actor = {
+      position: { x: 0, y: 0 },
+      force: { index: 1 },
+      surface: {
+        can_place_entity: ({ position, direction }: any) => (
+          (direction === 0 && position.x === 0.5 && position.y === 0)
+          || (direction === 4 && position.x === 0 && position.y === 0.5)
+        ),
+        find_entities_filtered: () => [],
+      },
+    } as any
+
+    const result = placement_candidates_for_actor(actor, {
+      entity_name: 'rect-machine',
+      center: { x: 0, y: 0 },
+      radius: 1,
+      limit: 4,
+    }) as any
+
+    expect(result.candidates).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        position: { x: 0.5, y: 0 },
+        direction: 0,
+        footprint: expect.objectContaining({
+          tile_width: 1,
+          tile_height: 2,
+          grid: { x_offset: 0.5, y_offset: 0 },
+        }),
+      }),
+      expect.objectContaining({
+        position: { x: 0, y: 0.5 },
+        direction: 4,
+        footprint: expect.objectContaining({
+          tile_width: 2,
+          tile_height: 1,
+          grid: { x_offset: 0, y_offset: 0.5 },
+        }),
+      }),
+    ]))
+  })
+
   it('reads only fields that Factorio 2.0 entity prototypes have', () => {
     // Burner-drill canary attempt 4: every live call failed with
     // "LuaEntityPrototype doesn't contain key rotatable". Factorio objects
