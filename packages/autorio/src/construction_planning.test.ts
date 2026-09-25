@@ -138,7 +138,7 @@ describe('shared local spatial observation', () => {
     expect(result.prototype).toMatchObject({
       physical_footprint: { tile_width: 3, tile_height: 3 },
     })
-    expect(result.corridors).toMatchObject({ input: { reserved: true }, output: { reserved: true }, power: { reserved: true } })
+    expect(result.corridors).toMatchObject({ input: { reserved: true }, output: { reserved: true }, power: { reserved: true }, future_extension: { reserved: true, direction: 'east', minimum_clear_tiles: 3 } })
     expect(result.rejected.length).toBeGreaterThan(0)
   })
 
