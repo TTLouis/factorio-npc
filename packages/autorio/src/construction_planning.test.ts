@@ -142,6 +142,41 @@ describe('shared local spatial observation', () => {
     expect(result.rejected.length).toBeGreaterThan(0)
   })
 
+  it('starts entity-anchor placement search outside the anchor footprint', () => {
+    const { actor, surface } = fixture()
+    const anchor: any = {
+      valid: true,
+      name: 'assembling-machine-1',
+      type: 'assembling-machine',
+      unit_number: 99,
+      position: { x: 0.5, y: 0.5 },
+      bounding_box: { left_top: { x: -1, y: -1 }, right_bottom: { x: 2, y: 2 } },
+      force: { name: 'player' },
+      surface,
+    }
+    ;(globalThis as any).game.get_entity_by_unit_number = vi.fn(() => anchor)
+    surface.can_place_entity.mockReturnValue(true)
+
+    const result: any = plan_placement(actor, {
+      entity_name: 'burner-mining-drill',
+      anchor_unit_number: 99,
+      side: 'east',
+      search_radius: 2,
+      max_candidates: 4,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(result.best.position.x).toBeGreaterThanOrEqual(3)
+    for (const candidate of result.candidates) {
+      const box = candidate.footprint.world_box
+      const overlaps = box.left_top.x < anchor.bounding_box.right_bottom.x
+        && box.right_bottom.x > anchor.bounding_box.left_top.x
+        && box.left_top.y < anchor.bounding_box.right_bottom.y
+        && box.right_bottom.y > anchor.bounding_box.left_top.y
+      expect(overlaps).toBe(false)
+    }
+  })
+
   it('plans even-sized entities on whole-coordinate centers and returns their footprint', () => {
     const { actor } = fixture()
     const result: any = plan_placement(actor, {
