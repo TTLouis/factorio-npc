@@ -279,6 +279,28 @@ is `provider.mjs`/`npc-agent-loop.mjs`. All four can run at once.
 | 5.4 | Mining that also needs a fluid (uranium) is left out of estimates with a warning | Sonnet |
 | 5.5 | Review the docs not read on 2026-09-25 (`NPC_RELIABILITY_WORK`, `NPC_PROVIDER_CONTINUATION_RECOVERY`, `NPC_PLANNING_REFACTOR_INTEGRATION`, `PTERODACTYL_NPC_STAGING`); archive to `docs/validation/` only what is finished | Haiku |
 
+### Along the way: open items from other docs
+
+Checked on 2026-09-25 against the code, not only the doc text. Each is paired with
+the wave whose files it already touches, so it costs little extra.
+
+| With | Item | Source | Model |
+|---|---|---|---|
+| Wave 1 (1.1) | The deployed NPC never gets the spatial or production-planning prompts: only `packages/agent` imports `spatial-placement-prompt.md` and `production-planning-prompt.md`; runtime-v8 relies on tool descriptions and guidance. Give placement guidance one source both paths use, starting with the P0 relational-placement rule | `NPC_SPATIAL_PLACEMENT_ARCHITECTURE.md` "Architecture debt" | Opus |
+| Wave 1 (1.4) | Confirm the tool contract really has one source now (`contracts/factorio-tool-contract.json` + parity tests); if yes, close the debt note, if not, list the remaining skew | same | Sonnet |
+| Wave 2 (2.5) | Waits: planner-chosen `wait {ticks}` → a bounded wait derived from recipe energy, machine speed and remaining output, ending early when the condition holds; never proof of completion | `NPC_PROVIDER_CONTINUATION_RECOVERY.md` "Deferred: calculated / condition-based waits" (same work as 2.5; do them as one) | Opus |
+| Wave 2 | Crafting while doing other work: an owned hand craft is refused with `native_queue_busy` if the character's queue already has anything. Decide how concurrent operations (Later) interact with this rule before building run-ahead | `NPC_RELIABILITY_WORK.md` native crafting ownership; `crafting.ts` | Opus (design note only) |
+| Wave 4 | Skill value check: a warm run (skills learned) should be cheaper, faster or more reliable than a cold run; measure it on 4.1/4.2 using the think-time report | `NPC_LEARNING_BOOTSTRAP_E2E.md` | — (owner run) |
+| Wave 4 | Player-join map sync is unit-tested only: when the owner joins, the map should show what the NPC charted. Add to the owner's client checks | `NPC_AGENT_HARNESS_STATUS.md` limitations | — (owner check) |
+| After wave 4 | Promotion checkpoint: freeze a candidate SHA, reconcile the six main-only commits, Pterodactyl package smoke + zero-player integration on that SHA, record a new `docs/validation/` checkpoint. Owner decides when | `NPC_AGENT_HARNESS_STATUS.md` "Current promotion blockers" | Opus |
+| Wave 5 (5.5) | Stale statements to correct while reviewing docs: `NPC_PLANNING_REFACTOR_INTEGRATION.md` says `planning-state.mjs` is "not yet wired in" (it is imported by the loop, board memory and supervisor); `NPC_RELIABILITY_WORK.md` says native crafting is "not yet engine-verified" (`tests/factorio/runner/crafting.py` covers it); the status doc's 2026-09-24 console section still lists client checks the owner has since done | those docs | Haiku |
+| Owner only | `PROJECT_MIGRATION_TRACKER.md`: repository topics and checking clone remotes are GitHub settings for the owner. Regenerating `pnpm-lock.yaml` and renaming the `@proj-airi/*` TSTL plugin need a networked `pnpm install`, so they wait until the metered-network period ends | tracker | — |
+
+Not along the way (their own tracks, after this plan): powered assembler/inserter
+production and the fluid known-red track (`NPC_PRODUCTION_VALIDATION_ROADMAP.md`),
+site pings / ghost staging and the experiment surface (design drafts), Jev offline
+question tuning, swarm coordination, vehicles/trains/space platforms.
+
 ### Owner checks in the client (no code)
 
 From the e2e-planning session: the … menu, map pin, status light, blocked banner
