@@ -59,6 +59,40 @@ time the planner tried to express it anyway, with `entity_exists` for both machi
 and paid for a correction turn. This isn't fixed; adding a checkable entity or link
 condition is a product decision.
 
-## Round 2
+## Round 2 — the harness reported `verified_complete`, but the canary failed
 
-Not run yet. Retrying costs provider calls, so it is waiting for the owner's approval.
+Approved by the owner. Cold start again (saves and state backed up), source
+`023107c`. Its runtime is the same as `645a8cc`'s plus the nearby-ordering and
+map-reference changes. `MAX_PROVIDER_OUTPUT_TOKENS_PER_TURN=100000` and
+`PROVIDER_TIMEOUT_MS=300000`, confirmed in the container. The deployed runtime is
+byte-identical to `023107c`. New actor `Nova-1`, actor_id 11, empty inventory,
+`NULL_BOARD`, same request.
+
+- 04:36:09 request, 04:40:21 goal `goal_muggxdy1` defined. `doneWhen`:
+  `inventory_count iron-plate >= 10` and `items_produced iron-plate` (baseline 0).
+  The plan had 8 steps.
+- The NPC gathered, crafted and placed a stone furnace as a hand-fed smelter
+  (04:43), then smelted plates, crafted the drill, and placed it at (-59.5, 59.5)
+  facing west (04:51). It computed that position itself; it never called
+  `getPlacementCandidates` and never read the drill's drop target.
+- 04:54:02 `verified_complete`: 21 plates in inventory, 30 produced.
+- 40 Main-LLM calls: 916,557 input units (626,944 cached), 159,417 output units
+  (153,015 reasoning), 38 tool calls. The per-generation cap tripped once
+  (109,901 > 100,000) and was handed off three times in total. There was no pause.
+
+### Checked in the game afterwards: the drill does not feed the furnace
+
+- Drill at (-59, 60), facing west, mining `iron-ore`, 4 coal: `drop_target` is
+  nil and its drop position is (-60.3, 60.5), on the ground. One ore lies there, so
+  the drill is `waiting_for_space_in_destination`.
+- Furnace at (-62, 59): 12 coal, empty source and output, `no_ingredients`.
+- Every plate came from hand-feeding the furnace.
+
+**Result: fail.** By attempt 4's pass criterion (the drill's `drop_target` is the
+furnace, and it works) this round failed, even though the harness verified the goal.
+The goal conditions check counters that hand-feeding satisfies. This is the case
+behind the owner's production-rate goal decision (`docs/NPC_PLANNING_ROADMAP.md`,
+"Production goals are rate goals"). A measured automated rate would have stayed
+unmet here, and a `feeds` observation would have shown the planner the missing
+link. The planner also didn't use the placement candidates that attempt 4's repair
+made work.
