@@ -1,6 +1,7 @@
 import type { ControlledActor } from './actors/types'
 import type { CandidateFluidPort } from './placement_spatial_features'
 import { candidate_fluid_ports } from './placement_spatial_features'
+import { placement_footprint, placement_footprint_covers_point, placement_grid_rule, snap_placement_center, type PlacementFootprint } from './placement_geometry'
 
 const MAX_RADIUS = 24
 const MAX_LIMIT = 8
@@ -34,6 +35,7 @@ export interface PlacementCandidate {
   item_output_position?: { x: number, y: number }
   fluid_ports?: CandidateFluidPort[]
   resource_coverage?: ResourceCoverage[]
+  footprint: PlacementFootprint
 }
 
 interface PlacementCandidateSet {
@@ -80,16 +82,6 @@ function finite(value: number) {
 }
 
 const COVERS_POSITION_DEFAULT_RADIUS = 3
-
-function footprint_covers(prototype: any, position: { x: number, y: number }, direction: number, point: { x: number, y: number }) {
-  const width = finite(prototype.tile_width) ? prototype.tile_width : 1
-  const height = finite(prototype.tile_height) ? prototype.tile_height : 1
-  // East/west rotation swaps the footprint's extents.
-  const rotated = direction === 4 || direction === 12
-  const half_x = (rotated ? height : width) / 2
-  const half_y = (rotated ? width : height) / 2
-  return math.abs(point.x - position.x) < half_x && math.abs(point.y - position.y) < half_y
-}
 
 function squared_distance(a: { x: number, y: number }, b: { x: number, y: number }) {
   return (a.x - b.x) ** 2 + (a.y - b.y) ** 2
@@ -225,15 +217,6 @@ function sort_candidates(values: PlacementCandidate[], target_resource?: string)
   }
 }
 
-function grid_offset(size: number | undefined) {
-  if (typeof size !== 'number' || size < 1) return 0.5
-  return math.floor(size) % 2 === 0 ? 0 : 0.5
-}
-
-function snapped(value: number, offset: number) {
-  return math.floor(value - offset + 0.5) + offset
-}
-
 function directions_for(prototype: any) {
   // `rotatable` exists on LuaEntity, not LuaEntityPrototype, and reading an
   // unknown key on a Factorio object raises; the prototype's equivalent is the
@@ -333,18 +316,17 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
   if (!finite(center.x) || !finite(center.y)) return { ok: false as const, error: 'center must be finite', entity_name: request.entity_name }
   const radius = math.max(1, math.min(MAX_RADIUS, math.floor(request.radius ?? (covers !== undefined ? COVERS_POSITION_DEFAULT_RADIUS : 8))))
   const limit = math.max(1, math.min(MAX_LIMIT, math.floor(request.limit ?? 5)))
-  const x_offset = grid_offset((prototype as any).tile_width)
-  const y_offset = grid_offset((prototype as any).tile_height)
-  const center_x = snapped(center.x, x_offset)
-  const center_y = snapped(center.y, y_offset)
   const directions = directions_for(prototype)
   const candidates: PlacementCandidate[] = []
   let scanned = 0
 
-  for (let dy = -radius; dy <= radius; dy++) {
-    for (let dx = -radius; dx <= radius; dx++) {
-      const position = { x: center_x + dx, y: center_y + dy }
-      for (const direction of directions) {
+  for (const direction of directions) {
+    const grid = placement_grid_rule(prototype, direction)
+    const snapped_center = snap_placement_center(prototype, center, direction)
+    for (let dy = -radius; dy <= radius; dy++) {
+      for (let dx = -radius; dx <= radius; dx++) {
+        const position = { x: snapped_center.x + dx, y: snapped_center.y + dy }
+
         scanned += 1
         if (scanned > MAX_SCANNED_POSITIONS) break
         if (!actor.surface.can_place_entity({
@@ -353,7 +335,7 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
           direction,
           force: actor.force,
         })) continue
-        if (covers !== undefined && !footprint_covers(prototype, position, direction, covers)) continue
+        if (covers !== undefined && !placement_footprint_covers_point(prototype, position, direction, covers)) continue
 
         const coverage = resource_coverage(actor, prototype, position, direction, request.target_resource)
         if (request.target_resource !== undefined) {
@@ -367,6 +349,7 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
           position,
           direction,
           distance_from_center: math.sqrt(squared_distance(position, center)),
+          footprint: placement_footprint(prototype, position, direction),
         }
         const output = item_output_position(prototype, position, direction)
         if (output !== undefined) candidate.item_output_position = output
@@ -374,6 +357,8 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
         if (fluid_ports !== undefined) candidate.fluid_ports = fluid_ports
         if (coverage !== undefined && coverage.length > 0) candidate.resource_coverage = coverage
         candidates.push(candidate)
+      }
+        if (scanned > MAX_SCANNED_POSITIONS) break
       }
       if (scanned > MAX_SCANNED_POSITIONS) break
     }
