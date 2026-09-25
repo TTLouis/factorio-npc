@@ -5,6 +5,7 @@ import { remember_entity_reference, resolve_exact_entity } from './entity_refere
 import { build_interaction_reach, entity_interaction_reach } from './interaction_range'
 import { MAX_MINING_START_REJECTIONS, mining_navigation_reach, mining_navigation_requires_movement, select_exact_mining_target, within_mining_reach } from './mining_reach'
 import { resolve_entity_placement_item } from './placement_item'
+import { placement_footprint, placement_grid_check } from './placement_geometry'
 import type { new_task_manager } from './task_manager'
 import type { PlayerParametersMineEntity, PlayerParametersWalkToEntity } from './types'
 import { TaskStates } from './types'
@@ -13,6 +14,23 @@ type Manager = ReturnType<typeof new_task_manager>
 type BasicController = ReturnType<typeof new_basic_operation_controller>
 
 const MINING_TARGET_SEARCH_RADIUS = 5
+
+function placement_blocker_summaries(actor: ControlledActor, box: { left_top: { x: number, y: number }, right_bottom: { x: number, y: number } }) {
+  const matches = actor.surface.find_entities_filtered({ area: box })
+  const result: Array<{ name: string, type: string, unit_number?: number, position: { x: number, y: number } }> = []
+  for (const entity of matches) {
+    if (!entity.valid) continue
+    result.push({
+      name: entity.name,
+      type: entity.type,
+      unit_number: entity.unit_number,
+      position: { x: entity.position.x, y: entity.position.y },
+    })
+    if (result.length >= 8) break
+  }
+  return result
+}
+
 
 function nearest_entity(actor: ControlledActor, entities: LuaEntity[]) {
   let min_distance = math.huge
@@ -356,14 +374,56 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       }
     }
 
+    const prototype = prototypes.entity[task.entity_name]
+    if (!prototype) {
+      controller.fail(actor, task, 'unknown_entity')
+      return [false, `Unknown entity prototype ${task.entity_name}`]
+    }
+
+    const footprint = placement_footprint(prototype, task.position, task.direction)
+    const grid_check = placement_grid_check(prototype, task.position, task.direction)
+    if (!grid_check.valid) {
+      controller.fail(actor, task, 'not_placeable', {
+        placement_footprint: {
+          tile_width: footprint.tile_width,
+          tile_height: footprint.tile_height,
+          tile_box: footprint.tile_box,
+          world_box: footprint.world_box,
+        },
+        placement_grid: {
+          x_offset: grid_check.grid.x_offset,
+          y_offset: grid_check.grid.y_offset,
+          nearest_valid_center: grid_check.snapped_position,
+        },
+      })
+      return [false, `Requested placement center is off-grid for ${footprint.tile_width}x${footprint.tile_height} ${task.entity_name}; nearest valid center is (${grid_check.snapped_position.x}, ${grid_check.snapped_position.y})`]
+    }
+
     if (!surface.can_place_entity({
       name: task.entity_name,
       position: task.position,
       direction: task.direction,
       force: actor.force,
     })) {
-      controller.fail(actor, task, 'not_placeable')
-      return [false, 'Requested placement is blocked or otherwise not placeable']
+      const blockers = placement_blocker_summaries(actor, footprint.world_box)
+      controller.fail(actor, task, 'not_placeable', {
+        placement_footprint: {
+          tile_width: footprint.tile_width,
+          tile_height: footprint.tile_height,
+          tile_box: footprint.tile_box,
+          world_box: footprint.world_box,
+        },
+        placement_grid: {
+          x_offset: grid_check.grid.x_offset,
+          y_offset: grid_check.grid.y_offset,
+          nearest_valid_center: grid_check.snapped_position,
+        },
+        placement_blockers: blockers,
+      })
+      const blocker_text = blockers.length > 0
+        ? blockers.map(blocker => `${blocker.name}@(${blocker.position.x},${blocker.position.y})`).join(', ')
+        : 'no entity blocker reported in footprint'
+      return [false, `Requested placement is not placeable; footprint=${serpent.line(footprint.world_box)}; blockers=${blocker_text}`]
     }
 
     const create_entity_args: SurfaceCreateEntity = {
