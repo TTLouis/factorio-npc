@@ -187,6 +187,26 @@ The character controller should eventually track:
 
 A stuck character should repath rather than fall back forever to blind direct walking.
 
+## Map knowledge (owner decision, 2026-09-25; not implemented yet)
+
+A player's character loads and reveals the map around it. The standalone NPC
+should behave the same way. Factorio's own chart state is unusable when nobody
+is online: on 2.0.77 with zero connected players, the NPC's force had 0 charted
+chunks, even with the awareness radar running and 2,000 ticks after an explicit
+`force.chart` over generated chunks. Map operations gated on that state always
+returned `area_uncharted`.
+
+- The hidden awareness radar is removed.
+- Around the NPC, the mod requests generation of the 5×5 chunks (like a player
+  loading its surroundings) and calls `force.chart` on them, so players who join
+  later see the map.
+- The mod keeps its own map knowledge, saved with the game:
+  - visible: the 5×5 chunks around the NPC right now;
+  - explored: every chunk that was ever inside that 5×5 area.
+- Map operations treat a chunk as visible if it's visible in the mod's record or
+  in Factorio's (when a player is online), and as charted if it's explored or
+  charted. The NPC still can't act on places it has never been near.
+
 ## Controller boundary
 
 The long-term API should remain semantic and actor-oriented.

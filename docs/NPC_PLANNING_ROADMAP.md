@@ -67,6 +67,28 @@ The conditions are force-level facts on purpose, so the same contract carries to
 - If that first read fails, the next evaluation records it, and the condition stays unmet until then.
 - `countFrom: "save_start"` is for a player who explicitly means the save's lifetime total.
 
+#### Production goals are rate goals (owner decision, 2026-09-25; not implemented yet)
+
+`items_produced` counts items no matter how they were made. In burner canary
+attempts 4 and 5, plates the NPC smelted by hand-feeding a furnace satisfied "build a
+drill that feeds a furnace and produce 10 plates". Counting entities doesn't fix
+this: it checks the means rather than the result, and a planner can score it
+without the factory working.
+
+- A request to build production ends in `production_rate {item_name, per_minute}`.
+  The harness measures it itself at goal-check time: the force's production
+  statistics over a window of at least one minute, read from the game.
+- `items_produced` stays for requests that ask for a quantity, not a working
+  production setup.
+- The rate counts only automated output. If, during the window, the NPC inserts
+  anything other than fuel into a machine or container in the measured chain, or
+  crafts the measured item itself, the window is void and the condition stays
+  unmet. Inserting fuel by hand (for example coal into an early burner drill and
+  stone furnace) is allowed.
+- Link facts such as a drill's or inserter's `feeds: {unit_number, name}` are added
+  to observations as world information for the planner. They are never goal
+  conditions.
+
 The player can ask `status` at any time and gets a deterministic answer (conditions read from the game, current slice, roadmap progress) without a model call. After each verified slice with the goal still open, one progress line is printed in game.
 
 Production runs with `goalDefinitionPolicy: 'required'`; direct constructions of the loop default to `optional` and accept a definition when present.
