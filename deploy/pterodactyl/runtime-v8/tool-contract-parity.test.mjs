@@ -49,6 +49,8 @@ const toolSamples = {
   getProductionScope: { calculation_id: 'scope-1', target: { type: 'item', name: 'iron-plate' } },
   solveProduction: { calculation_id: 'solve-1', target: { type: 'item', name: 'iron-plate', rate_per_second: 1 } },
   getTransportCapacity: { kind: 'belt', prototype_name: 'transport-belt' },
+  getMiningDetails: { resource_or_item: 'iron-ore' },
+  estimateProductionTime: { target: 'iron-plate', count: 10, steps: [{ item: 'iron-plate', machine: 'stone-furnace' }] },
   getLocalSpatialObservation: { position: { x: 0, y: 0 } },
   planPlacement: { entity_name: 'assembling-machine-1', position: { x: 0, y: 0 } },
   findConstructionSites: { width: 4, height: 4, position: { x: 0, y: 0 } },
@@ -100,8 +102,10 @@ test('intentional runtime-only tools stay explicit without requiring symmetry ad
     .map(([name]) => name)
     .sort()
   assert.deepEqual(runtimeOnly, [
+    'estimateProductionTime',
     'findSkills',
     'getLocalSpatialObservation',
+    'getMiningDetails',
     'getResearchPath',
     'getResearchRequest',
     'getSkillDetails',

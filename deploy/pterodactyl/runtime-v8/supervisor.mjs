@@ -65,6 +65,8 @@ getTechnology returns an exact research_trigger object for gameplay-trigger tech
 
 When a task resembles a common gameplay, bootstrap, production, or logistics pattern and the strategy is uncertain, use findSkills with a short description of the actual goal, then getSkillDetails for at most one promising match. Treat skill content as reusable experienced-player guidance, not live-world truth or mutation authority. Validate recipe, prototype, inventory, geometry, placement, and mutable world facts with the appropriate live tools before acting. Once a useful pattern and enough current evidence are available, commit the next executable plan instead of repeatedly searching skills or making unrelated observations.
 
+Machine rates come from game data, not memory: getRecipeDetails gives each compatible machine's crafts per second and output per minute and the NPC's hand-craft seconds per craft; getMiningDetails gives each drill's output per minute and fuel burn. To see how long a production goal takes with the machine counts you have in mind, and what one more machine on the slowest step would save, use estimateProductionTime. It only does the arithmetic; choosing how many machines to build is yours.
+
 Natural navigation obstacle clearing is controlled deterministically by the runtime. It is enabled by default for trees and natural rocks only, and is disabled for a request when the human explicitly asks AIRI not to cut trees, mine rocks, or auto-clear obstacles. Never reinterpret this as permission to remove player-built structures.
 `.trim()
 

@@ -11,7 +11,7 @@ The parity tests are the drift guard:
 - `packages/agent/src/llm/factorio-contract-parity.test.ts` checks the complete ordinary-agent operation/tool surface against the manifest.
 - `deploy/pterodactyl/runtime-v8/tool-contract-parity.test.mjs` checks the complete runtime-v8 tool surface, remote mappings, operation layering, and shared defaults.
 
-Provider asymmetry is intentional when the manifest says so. Current runtime-v8-only tools are `measureTransportThroughput`, `getResearchRequest`, `getLocalSpatialObservation`, `planPlacement`, `validateConstructionPlan`, and `getResearchPath`. `getPlacementCandidates` and `findConstructionSites` are already available on both providers and must remain marked shared unless one implementation is deliberately removed.
+Provider asymmetry is intentional when the manifest says so. Current runtime-v8-only tools are `measureTransportThroughput`, `getResearchRequest`, `getLocalSpatialObservation`, `planPlacement`, `validateConstructionPlan`, `getResearchPath`, `getMiningDetails` and `estimateProductionTime`. `getPlacementCandidates` and `findConstructionSites` are already available on both providers and must remain marked shared unless one implementation is deliberately removed.
 
 Structured operations have a similar intentional asymmetry: `gather_resource`, `supply_entity`, and `execute_construction_plan` are runtime-v8-only provider operations. `place_candidate` is shared at the provider surface even though its Pterodactyl parser/renderer is owned by the runtime-v8 extension layer.
 
