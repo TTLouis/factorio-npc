@@ -54,7 +54,7 @@ The Docker build resolves that ref to an exact SHA and bakes that exact AIRI run
 
 To test ongoing NPC development instead, set `SGLUNA_SOURCE_REF=feat/npc-transition-work` explicitly. An exact 40-character commit SHA can be used for fully reproducible builds.
 
-The local Compose path intentionally disables the Docker build cache while the project is still moving quickly, so `docker compose up -d --build` resolves the selected source again. Published prerelease images are already pinned and do not need this rebuild behavior.
+The build is layered so a source change doesn't download Factorio again. The system packages and the official Factorio archive (verified against Factorio's published checksums) are cached. The source install layer reruns whenever its build arguments change. With an exact commit SHA, a rebuild installs exactly that commit, and a new SHA reinstalls only the source. A branch ref such as `main` is resolved only when that layer reruns, so to pick up a branch's newer commits, set a new `SGLUNA_SOURCE_NONCE` (for example `SGLUNA_SOURCE_NONCE=$(date +%s) docker compose up -d --build`) or use a SHA. The installer re-verifies the cached archive and downloads Factorio itself if the cached version differs from the one it resolves. Published prerelease images are already pinned and do not need this rebuild behavior.
 
 ## Configuration boundary
 

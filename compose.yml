@@ -3,9 +3,9 @@ services:
     build:
       context: .
       dockerfile: deploy/docker/Dockerfile
-      no_cache: true
       args:
         SGLUNA_SOURCE_REF: ${SGLUNA_SOURCE_REF:-main}
+        SGLUNA_SOURCE_NONCE: ${SGLUNA_SOURCE_NONCE:-}
         FACTORIO_VERSION: ${FACTORIO_VERSION:-latest}
     image: factorio-npc:local
     platform: linux/amd64
