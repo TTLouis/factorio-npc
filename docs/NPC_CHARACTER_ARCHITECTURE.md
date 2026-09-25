@@ -206,6 +206,16 @@ returned `area_uncharted`.
 - Map operations treat a chunk as visible if it's visible in the mod's record or
   in Factorio's (when a player is online), and as charted if it's explored or
   charted. The NPC still can't act on places it has never been near.
+- The NPC's map and the players' map are synced periodically in both directions,
+  like a team sharing one map:
+  - push: chunks the NPC explored are charted for the force, so a player sees
+    where the NPC has been. This happens when a player joins (the whole explored
+    record) and on a periodic tick (only new chunks);
+  - pull: chunks Factorio has charted for the force, for example by a player
+    exploring, are added to the NPC's explored record;
+  - the work per tick is bounded (a queue drained a few chunks at a time), and
+    a sync does nothing while no player is online, because the engine charts
+    nothing then.
 
 ## Controller boundary
 
