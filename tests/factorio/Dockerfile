@@ -3,8 +3,13 @@ FROM node:22-bookworm AS build
 ENV CI=true
 RUN corepack enable
 WORKDIR /src
+# Fetch the pinned pnpm once, in a layer keyed on the root package.json, and keep
+# the package store in a BuildKit cache, so a source-only change downloads nothing.
+COPY package.json ./
+RUN corepack install
 COPY . .
-RUN pnpm install --frozen-lockfile
+RUN --mount=type=cache,id=npc-test-pnpm-store,target=/pnpm/store \
+  pnpm install --frozen-lockfile --prefer-offline --store-dir /pnpm/store
 RUN pnpm test:prompt
 RUN pnpm --filter @proj-airi/tstl-plugin-reload-factorio-mod run build
 RUN pnpm --filter autorio.ts run test
