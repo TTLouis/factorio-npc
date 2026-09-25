@@ -83,6 +83,18 @@ test('generated egg variable contract keeps safe provider defaults and 300 reque
   }
 })
 
+test('Docker Compose mirrors the egg provider budget defaults', () => {
+  // A variable Compose does not pass lets a stale persisted sgluna-config.json
+  // value win; a local 20,000 output cap failed canary attempt 5 on its first turn.
+  const compose = readFileSync(join(here, '..', '..', 'compose.yml'), 'utf8')
+  const egg = JSON.parse(buildArtifacts(source).e2eEggJson)
+  for (const name of ['PROVIDER_TIMEOUT_MS', 'MAX_PROVIDER_REQUESTS_PER_HOUR', 'MAX_PROVIDER_OUTPUT_TOKENS_PER_TURN']) {
+    const match = compose.match(new RegExp(`^ +${name}: \\$\\{${name}:-([^}]*)\\}\\s*$`, 'm'))
+    assert.ok(match, `compose.yml does not pass ${name}`)
+    assert.equal(match[1], egg.variables.find(entry => entry.env_variable === name)?.default_value, name)
+  }
+})
+
 test('Jev credentials and conservation controls exist only on the NPC E2E experiment egg', () => {
   const { mainEggJson, e2eEggJson } = buildArtifacts(source)
   const mainEgg = JSON.parse(mainEggJson)
