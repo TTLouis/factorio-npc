@@ -72,6 +72,15 @@ Secrets such as `OPENAI_API_KEY` and Factorio credentials must not be committed 
 
 Do not update a historical validation record in place to describe a newer commit. Create a new checkpoint or update the current status document instead.
 
+## Claude Opus 5.5 guidance
+
+- [Getting the most out of Opus 5.5](https://claude.dev/blog/getting-the-most-out-of-opus-5-5/): prompting and long-run guidance for Claude Opus 5.5. Key points for this repo:
+  - State explicit completion criteria (for example "the tests pass") and let the run proceed autonomously.
+  - Do not add "think carefully"-style instructions; the model already decides how much to think.
+  - Keep clear stop/go rules, and confirm before anything destructive (deleting data, force-pushing).
+  - Track long-run progress in a checklist file rather than in scrollback; split audits/migrations across subagents and verify their findings before consolidating.
+  - Have diffs reviewed for merge-blocking issues before human review, and mark uncorroborated findings as such.
+
 ## Model/Hugging Face subproject notes
 
 The older Hugging Face/model guidance applies only when working specifically under the model/training subproject (for example `models/factorio-yolo-v0`) or publishing its artifacts:
