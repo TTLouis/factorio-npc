@@ -326,14 +326,50 @@ function extension_penalty(actor: ControlledActor, prototype: any, entity_name: 
   return actor.surface.can_place_entity({ name: entity_name, position: future, direction, force: actor.force }) ? 0 : 25
 }
 
-function candidate_positions(anchor: Position, radius: number, prototype: any, direction: number | undefined) {
+function boxes_overlap(a: PlacementWorldBox, b: PlacementWorldBox) {
+  return a.left_top.x < b.right_bottom.x
+    && a.right_bottom.x > b.left_top.x
+    && a.left_top.y < b.right_bottom.y
+    && a.right_bottom.y > b.left_top.y
+}
+
+function box_gap(a: PlacementWorldBox, b: PlacementWorldBox) {
+  const x_gap = a.right_bottom.x <= b.left_top.x
+    ? b.left_top.x - a.right_bottom.x
+    : b.right_bottom.x <= a.left_top.x
+      ? a.left_top.x - b.right_bottom.x
+      : 0
+  const y_gap = a.right_bottom.y <= b.left_top.y
+    ? b.left_top.y - a.right_bottom.y
+    : b.right_bottom.y <= a.left_top.y
+      ? a.left_top.y - b.right_bottom.y
+      : 0
+  return math.max(x_gap, y_gap)
+}
+
+function candidate_positions(anchor: AnchorResult, radius: number, prototype: any, direction: number | undefined) {
   const result: Position[] = []
+  const seen: Record<string, boolean> = {}
+  const anchor_box = anchor.entity?.bounding_box
+  // With an entity anchor, radius is measured outward from its footprint. The
+  // extra center rings only let us reach that edge; accepted candidates remain
+  // bounded by box_gap <= radius and the caller's local build-reach guard.
+  const ring_limit = anchor_box ? radius + MAX_PLACEMENT_DISTANCE : radius
   let evaluations = 0
-  for (let ring = 1; ring <= radius && evaluations < MAX_CANDIDATE_EVALUATIONS; ring++) {
+  for (let ring = 1; ring <= ring_limit && evaluations < MAX_CANDIDATE_EVALUATIONS; ring++) {
     for (let dx = -ring; dx <= ring && evaluations < MAX_CANDIDATE_EVALUATIONS; dx++) {
       for (let dy = -ring; dy <= ring && evaluations < MAX_CANDIDATE_EVALUATIONS; dy++) {
         if (math.max(math.abs(dx), math.abs(dy)) !== ring) continue
-        result.push(snap_placement_center(prototype, { x: anchor.x + dx, y: anchor.y + dy }, direction))
+        const position = snap_placement_center(prototype, { x: anchor.position.x + dx, y: anchor.position.y + dy }, direction)
+        const key = `${position.x},${position.y}`
+        if (seen[key]) continue
+        seen[key] = true
+        if (anchor_box) {
+          const candidate_box = placement_footprint(prototype, position, direction).world_box
+          if (boxes_overlap(candidate_box, anchor_box)) continue
+          if (box_gap(candidate_box, anchor_box) > radius) continue
+        }
+        result.push(position)
         evaluations++
       }
     }
@@ -372,7 +408,7 @@ export function plan_placement(actor: ControlledActor, request: PlacementPlanReq
   const candidates: Array<Record<string, any>> = []
   const rejected: Array<Record<string, unknown>> = []
 
-  for (const position of candidate_positions(anchor.position, radius, prototype, direction)) {
+  for (const position of candidate_positions(anchor, radius, prototype, direction)) {
     if (squared_distance(actor.position, position) > MAX_PLACEMENT_DISTANCE ** 2) {
       if (rejected.length < MAX_REJECTIONS) rejected.push({ position, reason: 'outside_local_build_reach' })
       continue
