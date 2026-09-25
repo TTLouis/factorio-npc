@@ -98,7 +98,7 @@ The left column of the NPC console was rebuilt from the approved "Chosen" mock-u
 
 Not yet checked in real Factorio: the layout as a whole, the icon sprites, `toggled` on frame action buttons and tab buttons, and heights at 1080p.
 
-2026-09-25: the owner tried the new console in the game and found many things wrong with it. Other agents' fixes (up to `e905cc4`, prompt focus and live conversation reading) did not fix it. The console UI is **P0** for the next work session, ahead of production-rate goals. Don't treat this layout as accepted.
+2026-09-25 (morning): the owner tried the new console in the game and found many things wrong with it. Other agents' fixes (up to `e905cc4`, prompt focus and live conversation reading) did not fix it. The console UI is **P0** for the next work session, ahead of production-rate goals. Don't treat this layout as accepted.
 
 Owner's P0 spec (2026-09-25):
 
@@ -125,7 +125,38 @@ redraws only when its own content changes. Debug and Old tasks do the same, and 
 skills pop-out is a skills window like Old tasks, with a list, a detail pane and
 EDIT/EXPORT. A GUI stand-in test counts every add/clear/destroy: with all windows
 open, a refresh or a repeated snapshot with nothing new changes nothing. Progress:
-`docs/CONSOLE_UI_P0_PLAN.md`.
+`docs/validation/CONSOLE_UI_P0_PLAN.md`.
+
+Owner check in the client, 2026-09-25: the console feels a lot better, and the owner
+considers the redesign finished. Follow-ups `5d2937b` (status light centred in the
+title bar; the preview's clipped "X" coordinate button replaced by a map-pin locate
+button) and `0fbd0d7` (the … menu crashed the server: `vertical_spacing` on a frame
+is a non-recoverable mod error; the blocked banner had the same latent bug).
+
+### 2026-09-25 log fixes, rate facts and think time (unit + engine-lane evidence)
+
+Deployed locally at `6476fdc`. Plan and checklist:
+`docs/PARALLEL_PRODUCTION_WORK_PLAN.md`.
+
+- **Provider HTTP 400 after an output-budget handoff** (`7acc1e3`): the skill
+  context was inserted between an assistant `tool_calls` message and its replies. It
+  now goes before the first model turn, and a split tool exchange fails locally
+  instead of reaching the provider.
+- **A refused semantic completion claim failed the request** (`aebbaf25`): claims
+  are checked at parse time and go back to the planner as a correction. After a
+  resume, a satisfied step closes on the next turn (owner's choice).
+- **Router replies were all traced as invalid plans** (`109bc90`): trace-only fix.
+- **Recipe and mining rate facts** (W1, merge `96418eb`): `getRecipeDetails` machine
+  rates and hand-craft time, new `getMiningDetails` and `estimateProductionTime`
+  tools. The `production` engine lane checks the rates against prototypes and a
+  measured 40 s window. The harness does the arithmetic; the model picks machine
+  counts.
+- **`crafting_speed` read on 2.0 prototypes raised** (`6476fdc`):
+  `solveProduction` with a machine selection and prototype details now call
+  `get_crafting_speed()`. Unit evidence only; no engine lane covers these paths yet.
+- **Think time measured** (`a34b569`): plan authoring rounds take 99 s at the
+  median (max, on every round of the request), ordinary planning 37 s. The Debug
+  window shows the last request's think time. The per-round effort policy is next.
 
 The compatibility projection should not be deleted merely for cosmetic cleanup while other runtime/UI
 features still consume it. Future removal should be driven by eliminating those consumers, not by creating

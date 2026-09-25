@@ -8,7 +8,7 @@ This document defines how AIRI production-building capability is staged, tested,
 
 It is intentionally separate from:
 
-- `docs/NPC_PRODUCTION_PLANNING_HANDOFF.md`, which describes production-planning machinery and token-efficiency work;
+- `docs/validation/NPC_PRODUCTION_PLANNING_HANDOFF.md` (historical), which describes production-planning machinery and token-efficiency work;
 - `docs/NPC_PLANNING_ROADMAP.md`, which defines Goal / LOD Shelf / immutable Active Plan / Jev planning authority.
 
 The central rule is:

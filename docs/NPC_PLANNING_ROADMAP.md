@@ -778,7 +778,7 @@ questions.
 For the complete provider-grounded contract, see:
 
 - `NPC_JEV_COPROCESSOR_ARCHITECTURE.md`
-- `JEV_TYPESAFE_RESEARCH_AND_AUDIT_2026-09-21.md`
+- `validation/JEV_TYPESAFE_RESEARCH_AND_AUDIT_2026-09-21.md`
 
 ## 12. User interaction rules
 
@@ -985,7 +985,7 @@ Status: **required before E2E; added 2026-09-22 after re-auditing the live workl
 against current official TypeSafe/System One guidance.**
 
 Phase 9 is deferred until the cleanup in
-`JEV_REFINED_WORKLOAD_AUDIT_2026-09-22.md` is complete.
+`validation/JEV_REFINED_WORKLOAD_AUDIT_2026-09-22.md` is complete.
 
 Required order:
 

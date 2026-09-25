@@ -509,7 +509,7 @@ Before E2E measurement:
 - move deterministic recovery classification/routing out of Jev;
 - demote typed-state-to-text planner injection to experimental/trace-only until measured.
 
-See `JEV_REFINED_WORKLOAD_AUDIT_2026-09-22.md` for the full traced rationale and
+See `validation/JEV_REFINED_WORKLOAD_AUDIT_2026-09-22.md` for the full traced rationale and
 M11A-E cleanup order.
 
 ## 11. Harness independence requirement
@@ -636,7 +636,7 @@ The goal is not "less harness". The goal is a **deterministic harness with less 
 ## 15. Provider-reality note (2026-09-21)
 
 The current design is grounded in live TypeSafe documentation and the provider adapter.
-See `JEV_TYPESAFE_RESEARCH_AND_AUDIT_2026-09-21.md` for the source-backed audit.
+See `validation/JEV_TYPESAFE_RESEARCH_AND_AUDIT_2026-09-21.md` for the source-backed audit.
 
 The key correction is:
 
