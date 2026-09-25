@@ -213,6 +213,77 @@ Design: `docs/NPC_PLANNING_ROADMAP.md` "Production goals are rate goals".
 - [ ] Re-run "produce 100 iron and 100 copper plates" and a rate goal. Pass: the NPC
   sizes machines from the rates, and the think time per request drops.
 
+## Next week (after the 2026-09-28 reset): everything open, in order
+
+The owner is spending next week's usage on this list. Every open item from this
+plan, the agents' reports and the 2026-09-25 live runs is here once, with where its
+detail lives. Waves run one after another; items inside a wave run in parallel,
+each agent in its own worktree, merged and re-tested by the main session.
+
+**Merge protocol (every item).** Agent commits on its worktree branch, no push, no
+attribution lines. Main session reviews the diff, merges with `--no-ff`, re-runs the
+full checks on the merged tree, pushes, and ticks the item here with the hash.
+Deploys only through `scripts/build-docker-local.ps1` (or the mod overlay when only
+the mod changed), and only when the owner asks.
+
+**Checks for "done".** Mod: vitest, `tsc`, Lua build, `check-generated-lua`, eslint
+on changed files. Runtime: `node --test` on `staging` and `runtime-v8` with
+`deploy/pterodactyl` **and `contracts/`** mounted (without `contracts/` two parity
+tests fail falsely). Engine behaviour: the relevant `tests/factorio` lane. No
+provider calls without the owner.
+
+### Wave 1: stop the live loop from breaking (P0)
+
+| # | Item | Detail | Model |
+|---|---|---|---|
+| 1.1 | Placement footprint | P0 section above: shared footprint helper, `place_entity` reasons, placement by relation, candidate footprints, `plan_placement` fixes, engine lane for the self-feeding drill pair | Opus |
+| 1.2 | A refused placement freezes the plan | `canonical-task-board-memory.mjs` `recordBoardEvidence`: any `operation_error_receipt` in a batch with an unverified transfer becomes `world_blocked` `transfer_failed:<reason>`. A `not_placeable` at a planner-chosen coordinate is a correctable planning error; it should go back to the planner (bounded) with the new placement reason, and block only when retries run out or the world truly prevents the step. Keep real transfer failures blocking. Regression test with the 16:15 batch shape (`placing` + dependent `moving_items`) | Opus |
+| 1.3 | Thinking effort per round + output budget | W2a second item. Also: the output budget still runs out at high effort (`finish_reason: length` 16:12 and 15:07; screenshot: 11 rounds, 178 s, slowest 75 s). Size the output cap with the effort, or lower the effort for fact-gathering rounds, so a round never spends the whole cap thinking. Pass `request_id` into the trace | Opus |
+| 1.4 | Local test setup | One script (or package.json alias) that runs the runtime and mod suites in `npc-dev` with the right mounts (`deploy/pterodactyl`, `contracts/`, repo-root files the compose tests read), so agents stop hitting false failures. `local-compose-secret-boundary.test.mjs` also fails on Windows CRLF in the devcontainer compose file; make it line-ending tolerant or normalise the file (`.gitattributes`) — don't weaken what it checks | Sonnet |
+
+1.1 and 1.2 touch different files (mod placement vs. runtime board memory); 1.3
+is `provider.mjs`/`npc-agent-loop.mjs`. All four can run at once.
+
+### Wave 2: facts the planner needs to scale out
+
+| # | Item | Detail | Model |
+|---|---|---|---|
+| 2.1 | Scale-out skill | W4: curated pattern skill using W1 rates and the P0 footprints; `direct-miner-smelting` and `starter-smelting-row` point to it; Jev may rank it when throughput is on the critical path | Sonnet |
+| 2.2 | `fuel_name` for `getRecipeDetails` | W1 open item: the tool is shared with the ordinary agent, so both contract sides change | Sonnet |
+| 2.3 | Engine coverage for the 2.0 `crafting_speed` fix | `solveProduction` with a machine selection and prototype details for crafting machines, in an existing lane (they raised live before `6476fdc`) | Sonnet |
+| 2.4 | Hand-craft / hand-mining modifiers | W1 assumed the force and character modifiers add; measure it in the engine lane | Sonnet |
+| 2.5 | Waits from game data | W2b first item: expected finish for a running step from W1 rates and live machine state, used to schedule the next planner wake-up | Opus |
+
+### Wave 3: goals that prove production
+
+| # | Item | Detail | Model |
+|---|---|---|---|
+| 3.1 | Production-rate goals | W3 section. The 16:1x run's goal was "20 × coal produced from now on", a count, so the same hand-feeding hole is still open | Opus |
+| 3.2 | Plan tracker lag | In the screenshot the tracker was on step 3 of 7 ("walk to the coal patch") while the batch was placing drill B (step 5), and drill A (step 4) was already built. Part of this is the owner's "close on the next turn after a resume" choice; check whether the rest is a missed deterministic close | Opus |
+
+### Wave 4: live proof (owner approves each run; API calls)
+
+| # | Item | Detail |
+|---|---|---|
+| 4.1 | Burner drill pair | "Automate coal with only burner drills" end to end: placements through the tools, no `not_placeable` freeze |
+| 4.2 | Plates, count and rate | W5: 100 iron + 100 copper, then a rate goal. Pass: machine counts sized from the rates, think time per request down from today's numbers |
+| 4.3 | Run-ahead, first slice | W2b second item, only after 4.1–4.2 are green |
+
+### Wave 5: cleanup (small, any time a slot is free)
+
+| # | Item | Model |
+|---|---|---|
+| 5.1 | Router requests still get the ~0.8k `[STEERING]` planner message | Haiku |
+| 5.2 | `compactWorkingContext`: `baseMessages.length` drifts after a budget handoff (affects which exchanges compact, not validity) | Sonnet |
+| 5.3 | TSTL truthiness warning, `task_board_debug_render.ts:140` | Haiku |
+| 5.4 | Mining that also needs a fluid (uranium) is left out of estimates with a warning | Sonnet |
+| 5.5 | Review the docs not read on 2026-09-25 (`NPC_RELIABILITY_WORK`, `NPC_PROVIDER_CONTINUATION_RECOVERY`, `NPC_PLANNING_REFACTOR_INTEGRATION`, `PTERODACTYL_NPC_STAGING`); archive to `docs/validation/` only what is finished | Haiku |
+
+### Owner checks in the client (no code)
+
+From the e2e-planning session: the … menu, map pin, status light, blocked banner
+(seen working in the 16:15 screenshot), Debug think-time row, pause → Resume.
+
 ## Later
 
 - Doing two things at once (crafting while walking or mining): admission rules for
@@ -221,15 +292,8 @@ Design: `docs/NPC_PLANNING_ROADMAP.md` "Production goals are rate goals".
 
 ## Assignments (subagents)
 
-| Work | Model | Why |
-|---|---|---|
-| W0 B1/B2 | Opus 5.5 | Subtle state across recovery paths in `npc-agent-loop.mjs` |
-| W1 | Opus 5.5 | Factorio 2.0 prototype API, TSTL limits, real-engine check |
-| W2a measurement | Sonnet 5 | Well-defined trace analysis and a Debug field |
-| W2a policy, W2b | Opus 5.5 | Policy choices, and the start of run-ahead |
-| W3 | Opus 5.5 | Anti-cheat rules and goal semantics |
-| W4 | Sonnet 5 | Skill data and tests, once W1's field names exist |
+Model choice rule: Opus for runtime state, recovery paths, Factorio engine
+semantics and goal rules; Sonnet for well-specified changes with clear tests;
+Haiku for mechanical cleanup. The per-item model is in the wave tables above.
 
-Order: W0 → W1 and W2a in parallel → W4 and W2b → W3 → W5. W0 and W2 both touch
-`npc-agent-loop.mjs`/`provider.mjs`, so their agents run one after the other, or in
-separate worktrees merged by the main session.
+Done this week: W0 (Opus), W1 (Opus), W2a measurement (Sonnet).
