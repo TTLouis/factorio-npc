@@ -596,6 +596,15 @@ function compactBasicOperationResult(result) {
       : undefined,
     placed_surface_index: Number.isSafeInteger(result.placed_surface_index) ? result.placed_surface_index : undefined,
     placed_direction: Number.isSafeInteger(result.placed_direction) ? result.placed_direction : undefined,
+    placement_footprint: result.placement_footprint && typeof result.placement_footprint === 'object'
+      ? sanitizeDurableModelValue(result.placement_footprint)
+      : undefined,
+    placement_grid: result.placement_grid && typeof result.placement_grid === 'object'
+      ? sanitizeDurableModelValue(result.placement_grid)
+      : undefined,
+    placement_blockers: Array.isArray(result.placement_blockers)
+      ? sanitizeDurableModelValue(result.placement_blockers.slice(0, 8))
+      : undefined,
     to_entity: typeof result.to_entity === 'boolean' ? result.to_entity : undefined,
     to_player: typeof result.to_player === 'boolean' ? result.to_player : undefined,
     rocket_parts: Number.isSafeInteger(result.rocket_parts) ? result.rocket_parts : undefined,
