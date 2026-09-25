@@ -233,6 +233,37 @@ test('interaction router is tool-free, disables reasoning, and CHAT alone is not
   })
 })
 
+test('a valid interaction-router reply is not traced as an invalid plan', async () => {
+  // Every live router reply through 2026-09-25 (30 of 30 in the prompt traces)
+  // was traced provider_content_schema_invalid: the diagnostic checked the
+  // {intent, queue_conflict, reply} answer against the plan schema.
+  const content = JSON.stringify({ intent: 'continue_current', queue_conflict: false, reply: '' })
+  const options = {
+    allowTools: false,
+    triggerSource: 'interaction_router',
+    requestBodyPatch: { max_tokens: 180, response_format: { type: 'json_object' } },
+    fetchImpl: async () => new Response(JSON.stringify({
+      id: 'router-response',
+      model: 'deepseek-flash',
+      choices: [{ finish_reason: 'stop', message: { role: 'assistant', content } }],
+      usage: { prompt_tokens: 580, completion_tokens: 17, total_tokens: 597 },
+    }), { status: 200, headers: { 'content-type': 'application/json' } }),
+  }
+  const routed = await providerRequest(config(), [
+    { role: 'system', content: 'classify only' },
+    { role: 'user', content: '{"text":"continue"}' },
+  ], { ...options, interactionRouter: true })
+  assert.equal(routed._airiProvider.diagnostic_code, 'ok')
+  assert.deepEqual(routed._airiProvider.structured_content, { json_valid: true })
+
+  // The same content from a planner call is still an invalid plan.
+  const planner = await providerRequest(config(), [
+    { role: 'system', content: 'system' },
+    { role: 'user', content: '[CHAT] tester: continue' },
+  ], options)
+  assert.equal(planner._airiProvider.diagnostic_code, 'provider_content_schema_invalid')
+})
+
 test('explicit caller max_tokens remains authoritative over reasoning policy budget', async () => {
   const { seen } = await captureRequest([
     { role: 'system', content: 'system' },
