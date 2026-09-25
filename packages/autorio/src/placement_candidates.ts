@@ -1,7 +1,7 @@
 import type { ControlledActor } from './actors/types'
 import type { CandidateFluidPort } from './placement_spatial_features'
 import { candidate_fluid_ports } from './placement_spatial_features'
-import { placement_footprint, placement_footprint_covers_point, placement_grid_rule, snap_placement_center, type PlacementFootprint } from './placement_geometry'
+import { placement_footprint, placement_footprint_covers_point, snap_placement_center, type PlacementFootprint } from './placement_geometry'
 
 const MAX_RADIUS = 24
 const MAX_LIMIT = 8
@@ -321,12 +321,10 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
   let scanned = 0
 
   for (const direction of directions) {
-    const grid = placement_grid_rule(prototype, direction)
     const snapped_center = snap_placement_center(prototype, center, direction)
     for (let dy = -radius; dy <= radius; dy++) {
       for (let dx = -radius; dx <= radius; dx++) {
         const position = { x: snapped_center.x + dx, y: snapped_center.y + dy }
-
         scanned += 1
         if (scanned > MAX_SCANNED_POSITIONS) break
         if (!actor.surface.can_place_entity({
@@ -357,8 +355,6 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
         if (fluid_ports !== undefined) candidate.fluid_ports = fluid_ports
         if (coverage !== undefined && coverage.length > 0) candidate.resource_coverage = coverage
         candidates.push(candidate)
-      }
-        if (scanned > MAX_SCANNED_POSITIONS) break
       }
       if (scanned > MAX_SCANNED_POSITIONS) break
     }
