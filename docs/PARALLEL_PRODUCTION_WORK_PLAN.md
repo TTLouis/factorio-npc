@@ -88,9 +88,25 @@ the trigger's policy; every later tool round falls through to
 - [x] Measure first: per-round latency, effort, reasoning tokens and
   `finish_reason` from `/data/logs/sgluna-prompts.jsonl`, grouped by request and
   policy reason. Show think time in the Debug window. `a34b569a`
+  (`think-time-report.mjs`). Live trace, 2026-09-25, 11 requests / 35 rounds:
+
+  | policy reason | rounds | p50 | max |
+  |---|---|---|---|
+  | plan_authoring (max) | 5 | 99.1 s | 129.9 s |
+  | ordinary_planning (high) | 6 | 36.5 s | 54.0 s |
+  | ordinary_replan (high) | 3 | 17.3 s | 51.8 s |
+  | deterministic_completion (low) | 11 | 3.2 s | 15.5 s |
+  | same_goal_continue (low) | 4 | 2.3 s | 11.0 s |
+
+  Plan authoring dominates. `max` applies to every round of an authoring request,
+  including the rounds that only gather facts with tools. The trace also never
+  records `request_id` (the loop doesn't pass it to the provider), so requests are
+  reconstructed from round 0 boundaries.
 - [ ] Then set the effort per round from what the round has to do: gathering facts
   with tools doesn't need the full budget; writing or revising a plan does. Keep
-  `max` for plan authoring. Record the chosen effort in the trace, as today.
+  `max` for the round that writes the plan, not for every round of an authoring
+  request. Record the chosen effort in the trace, as today, and pass `request_id`
+  into the trace.
 
 **W2b — the harness computes waits from game data.** When the NPC waits on
 production (smelting, crafting, research), the harness works out the expected
