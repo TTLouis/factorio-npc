@@ -65,6 +65,8 @@ const TASK_TYPES_BY_OPERATION = {
   harvest_product: ['harvesting'],
   craft_item: ['crafting'],
   place_entity: ['placing'],
+  move_items: ['moving_items'],
+  supply_entity: ['moving_items'],
   walk_to_entity: ['walking_to_entity'],
   launch_rocket: ['launching_rocket'],
 }
@@ -94,9 +96,23 @@ export class FakeFactorio {
     this.nearby = { actor_position: { x: 0, y: 0 }, entities: [] }
     // Overrides the basic-operation receipt, for a scenario whose operation fails.
     this.lastBasicResult = undefined
+    // The batch Autorio cancelled on a failure (see failLastBatch).
+    this.cancelledBatch = undefined
     // What autorio_skills.get returns per skill id, so getSkillDetails can
     // load task-local skill context.
     this.skills = {}
+  }
+
+  // Fails the last admitted batch the way Autorio reports it: the failing
+  // operation's result (correlated to the batch by tick and actor) and the
+  // cancelled batch with its dependent operations.
+  failLastBatch(result, reason = `${result.type}:${result.code}`) {
+    const tick = 600 + this.batchId
+    this.cancelledBatch = { batch_id: this.batchId, task_count: this.lastTaskTypes.length, task_types: this.lastTaskTypes, tick, reason }
+    this.lastBasicResult = { operation_id: this.batchId, tick, actor_id: this.status.actor_id, accepted: true, completed: false, ...result }
+    this.taskState = 'idle'
+    this.queueLength = 0
+    return reason
   }
 
   // Mirrors autorio_tools.goal_progress_facts.
@@ -139,9 +155,10 @@ export class FakeFactorio {
         task_state: this.taskState,
         queue_empty: this.queueLength === 0,
         queue_length: this.queueLength,
-        last_completed_batch: this.batchId > 0
+        last_completed_batch: this.batchId > 0 && this.cancelledBatch?.batch_id !== this.batchId
           ? { batch_id: this.batchId, task_count: this.lastTaskTypes.length, task_types: this.lastTaskTypes, tick: 600 + this.batchId }
           : undefined,
+        last_cancelled_batch: this.cancelledBatch,
         basic_operation: this.batchId > 0 ? { last_result: this.lastBasicResult ?? { operation_id: this.batchId, code: 'completed', completed: true } } : undefined,
       })
     }
@@ -177,6 +194,7 @@ export class FakeFactorio {
       const marker = text.match(/AIRI_RESULT_[a-f0-9]{24}:/)?.[0]
       this.mutations.push(text)
       this.batchId++
+      this.lastBasicResult = undefined
       this.lastTaskTypes = [...text.matchAll(/remote\.call\('autorio_operations','([a-z_]+)'/g)]
         .flatMap(([, name]) => TASK_TYPES_BY_OPERATION[name] ?? ['waiting'])
       const admissions = [...text.matchAll(/return remote\.call\('autorio_operations'/g)].length

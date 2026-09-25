@@ -335,6 +335,136 @@ test('failed or zero-effect transfer receipt blocks the active step without comp
   assert.equal(state.last_mutation_verified, false)
 })
 
+// Live 2026-09-25 16:15 (req_muh5t1wa_1): place a burner drill at a
+// planner-chosen coordinate, then supply it starter coal. The engine refused
+// the placement and cancelled the dependent transfer.
+function placeAndSupplyState() {
+  const placeBoard = board()
+  placeBoard.steps[2] = { ...placeBoard.steps[2], description: 'Place a burner drill on iron ore and fuel it' }
+  return planState({
+    task_board: placeBoard,
+    plan: placeBoard.steps.map(step => step.description),
+    last_operations: [
+      'place_entity {"entity_name":"burner-mining-drill","x":12,"y":-7,"direction":"north"}',
+      'move_items {"item_name":"coal","entity_name":"burner-mining-drill","max_count":5,"to_entity":true}',
+    ],
+    last_mutation_verified: false,
+  })
+}
+
+function placementRefusedReceipt(batchId, basicOverrides = {}) {
+  return {
+    kind: 'operation_error_receipt',
+    ref: `batch_${batchId}`,
+    summary: JSON.stringify({
+      outcome: 'failed',
+      task_state: 'idle',
+      queue_length: 0,
+      batch_id: batchId,
+      task_count: 2,
+      task_types: ['placing', 'moving_items'],
+      tick: 900 + batchId,
+      reason: 'placing:not_placeable',
+      basic_operation: {
+        operation_id: 40 + batchId,
+        tick: 900 + batchId,
+        actor_id: 18,
+        type: 'placing',
+        accepted: true,
+        completed: false,
+        code: 'not_placeable',
+        entity_name: 'burner-mining-drill',
+        placement_footprint: {
+          tile_width: 2,
+          tile_height: 2,
+          tile_box: { left_top: { x: 11, y: -8 }, right_bottom: { x: 13, y: -6 } },
+          world_box: { left_top: { x: 11, y: -8 }, right_bottom: { x: 13, y: -6 } },
+        },
+        placement_grid: { x_offset: 0, y_offset: 0, nearest_valid_center: { x: 12, y: -7 } },
+        placement_blockers: [{ name: 'rock-big', type: 'simple-entity', position: { x: 12.4, y: -6.6 } }],
+        ...basicOverrides,
+      },
+      correlation: { goal_id: 'goal_1', step_id: 'step_3', actor_id: 18, actor_epoch: 3 },
+    }),
+  }
+}
+
+test('a refused placement in a placing + dependent transfer batch goes back to the planner, bounded, without blocking', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  memory.planByNpc.set('npc:airi', placeAndSupplyState())
+
+  const first = memory.recordBoardEvidence('npc:airi', placementRefusedReceipt(7))
+  let state = memory.currentPlan('npc:airi')
+  assert.equal(state.status, 'active')
+  assert.equal(state.blocker, '')
+  assert.equal(first.status, 'active')
+  assert.equal(first.active_index, 2)
+  assert.equal(first.active_step_id, 'step_3')
+  assert.equal(first.completed_count, 2)
+  assert.equal(first.steps[2].status, 'active')
+  const record = first.evidence.at(-1)
+  assert.equal(record.kind, 'operation_failure_recoverable')
+  assert.equal(record.step_id, 'step_3')
+  const parsed = JSON.parse(record.summary)
+  assert.equal(parsed.code, 'not_placeable')
+  assert.deepEqual(parsed.nearest_valid_center, { x: 12, y: -7 })
+  assert.equal(parsed.placement_blockers[0].name, 'rock-big')
+  assert.equal(parsed.attempt, 1)
+
+  // The same batch re-reported is not another attempt.
+  memory.recordBoardEvidence('npc:airi', placementRefusedReceipt(7))
+  memory.recordBoardEvidence('npc:airi', placementRefusedReceipt(8))
+  state = memory.currentPlan('npc:airi')
+  assert.equal(state.status, 'active')
+  assert.equal(state.task_board.evidence.filter(item => item.kind === 'operation_failure_recoverable').length, 2)
+
+  // Retries exhausted: the step is now a world blocker, named as a placement failure.
+  const blocked = memory.recordBoardEvidence('npc:airi', placementRefusedReceipt(9))
+  state = memory.currentPlan('npc:airi')
+  assert.equal(state.status, 'blocked')
+  assert.equal(state.blocker, 'placement_failed:not_placeable')
+  assert.equal(blocked.active_index, 2)
+  assert.equal(blocked.completed_count, 2)
+  assert.equal(blocked.steps[2].status, 'blocked')
+})
+
+test('a completed batch for the step ends the placement refusal streak', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  memory.planByNpc.set('npc:airi', placeAndSupplyState())
+
+  memory.recordBoardEvidence('npc:airi', placementRefusedReceipt(7))
+  memory.recordBoardEvidence('npc:airi', placementRefusedReceipt(8))
+  memory.recordBoardEvidence('npc:airi', { kind: 'operation_receipt', ref: 'batch_9', summary: JSON.stringify({ outcome: 'completed', batch_id: 9 }) })
+  memory.recordBoardEvidence('npc:airi', placementRefusedReceipt(10))
+
+  const state = memory.currentPlan('npc:airi')
+  assert.equal(state.status, 'active')
+  assert.equal(JSON.parse(state.task_board.evidence.at(-1).summary).attempt, 1)
+})
+
+test('the transfer itself failing in a placing + transfer batch still blocks as a transfer failure', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  memory.planByNpc.set('npc:airi', placeAndSupplyState())
+
+  memory.recordBoardEvidence('npc:airi', placementRefusedReceipt(7, {
+    type: 'moving_items',
+    code: 'nothing_moved',
+    entity_name: undefined,
+    placement_footprint: undefined,
+    placement_grid: undefined,
+    placement_blockers: undefined,
+    item_name: 'coal',
+    requested_count: 5,
+    moved_count: 0,
+    to_entity: true,
+  }))
+  const state = memory.currentPlan('npc:airi')
+
+  assert.equal(state.status, 'blocked')
+  assert.equal(state.blocker, 'transfer_failed:nothing_moved')
+  assert.equal(state.task_board.evidence.some(item => item.kind === 'operation_failure_recoverable'), false)
+})
+
 test('duplicate completed receipt records one deterministic proof but cannot advance semantic progress', () => {
   const memory = new CanonicalTaskBoardMemory()
   memory.planByNpc.set('npc:airi', planState())
