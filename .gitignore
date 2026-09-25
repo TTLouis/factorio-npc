@@ -147,6 +147,7 @@ dist
 
 # Docker Compose server state
 /data/
+/.docker-local-source-sha
 
 # Byte-compiled asset-pipeline scripts under packages/*/scripts
 __pycache__/

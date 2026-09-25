@@ -53,6 +53,11 @@ RUN set -eux; \
   fi; \
   rm -f /tmp/releases.json /tmp/factorio-sha256sums.txt /tmp/factorio-archive.sha256
 
+# The local path uses only files in this checkout. A short-lived marker, written
+# by scripts/build-docker-local.ps1, ties those files to the requested commit.
+FROM scratch AS local-source
+COPY . /source
+
 FROM base
 
 ARG SGLUNA_REPO=
@@ -61,12 +66,17 @@ ARG AIRI_REPO=
 ARG AIRI_SOURCE_REF=
 ARG FACTORIO_VERSION=latest
 ARG SGLUNA_LOCAL_RUNTIME_OVERRIDE=0
+ARG SGLUNA_LOCAL_SOURCE=0
 # The source layer is cached by its build arguments. An exact commit SHA fully
 # determines it; a branch ref does not, so use a SHA or change this nonce to
 # install the branch's newer commits.
 ARG SGLUNA_SOURCE_NONCE=
 
 RUN --mount=type=bind,from=factorio-archive,source=/cache,target=/opt/factorio-cache \
+  --mount=type=cache,id=sgluna-pnpm-store,target=/opt/airi-pnpm-cache,sharing=locked \
+  --mount=type=cache,id=sgluna-node-archive,target=/opt/airi-node-cache,sharing=locked \
+  --mount=type=cache,id=sgluna-npm-cache,target=/opt/airi-npm-cache,sharing=locked \
+  --mount=type=bind,from=local-source,source=/source,target=/opt/airi-local-source \
   set -eux; \
   : "source nonce: ${SGLUNA_SOURCE_NONCE}"; \
   repo="${SGLUNA_REPO:-${AIRI_REPO:-TTLouis/factorio-npc}}"; \
@@ -84,23 +94,42 @@ RUN --mount=type=bind,from=factorio-archive,source=/cache,target=/opt/factorio-c
   fi; \
   printf '%s' "$resolved" | grep -Eq '^[a-f0-9]{40}$'; \
   short="$(printf '%s' "$resolved" | cut -c1-12)"; \
-  curl --fail --location --retry 3 --connect-timeout 20 --max-time 120 \
-    --proto '=https' --proto-redir '=https' \
-    "https://raw.githubusercontent.com/$repo/$resolved/deploy/pterodactyl/payload-src/installer.sh" \
-    --output /tmp/airi-installer.sh; \
+  if [ "$SGLUNA_LOCAL_SOURCE" = 1 ]; then \
+    test "$(cat /opt/airi-local-source/.docker-local-source-sha)" = "$resolved"; \
+    cp /opt/airi-local-source/deploy/pterodactyl/payload-src/installer.sh /tmp/airi-installer.sh; \
+  else \
+    curl --fail --location --retry 3 --connect-timeout 20 --max-time 120 \
+      --proto '=https' --proto-redir '=https' \
+      "https://raw.githubusercontent.com/$repo/$resolved/deploy/pterodactyl/payload-src/installer.sh" \
+      --output /tmp/airi-installer.sh; \
+  fi; \
   test "$(grep -Ec '^AIRI_REF=\"[a-f0-9]{40}\"$' /tmp/airi-installer.sh)" = 1; \
   test "$(grep -c '^AIRI_REF=' /tmp/airi-installer.sh)" = 1; \
   test "$(grep -Ec '^REVISION=\"[A-Za-z0-9._-]+\"$' /tmp/airi-installer.sh)" = 1; \
   test "$(grep -c '^REVISION=' /tmp/airi-installer.sh)" = 1; \
-  awk -v ref="$resolved" -v revision="docker-$short" ' \
+  awk -v ref="$resolved" -v revision="docker-$short" -v local_source="$SGLUNA_LOCAL_SOURCE" ' \
     /^AIRI_REF=/ { print "AIRI_REF=\"" ref "\""; next } \
     /^REVISION=/ { print "REVISION=\"" revision "\""; next } \
+    index($0, "fetch \"https://nodejs.org/dist/${NODE_VERSION}/${NODE_ARCHIVE}\" \"$WORK/$NODE_ARCHIVE\"") == 1 { \
+      print "if [[ -f \"/opt/airi-node-cache/$NODE_ARCHIVE\" ]]; then cp \"/opt/airi-node-cache/$NODE_ARCHIVE\" \"$WORK/$NODE_ARCHIVE\"; else " $0 "; fi"; next } \
+    $0 == "mkdir -p \"$APP/node\"" { \
+      print "cp \"$WORK/$NODE_ARCHIVE\" \"/opt/airi-node-cache/$NODE_ARCHIVE\""; print; next } \
+    index($0, "--store-dir \"$WORK/pnpm-store\"") > 0 { \
+      sub(/--store-dir "\$WORK\/pnpm-store"/, "--store-dir \"/opt/airi-pnpm-cache\""); print; next } \
+    local_source == "1" && index($0, "fetch \"https://codeload.github.com/TTLouis/factorio-npc/tar.gz/$AIRI_REF\" \"$WORK/airi-source.tar.gz\"") == 1 { \
+      print "mkdir -p \"$WORK/local-source/source\""; \
+      print "cp -a /opt/airi-local-source/. \"$WORK/local-source/source/\""; \
+      print "rm -f \"$WORK/local-source/source/.docker-local-source-sha\""; \
+      print "(cd \"$WORK/local-source\" && tar -czf \"$WORK/airi-source.tar.gz\" source)"; next } \
     index($0, "fetch \"https://www.factorio.com/get-download/${FACTORIO_TARGET}/headless/linux64\"") == 1 { \
       print "if [[ -f \"/opt/factorio-cache/$FACTORIO_ARCHIVE\" ]]; then log \"Using cached Factorio archive $FACTORIO_ARCHIVE\"; cp \"/opt/factorio-cache/$FACTORIO_ARCHIVE\" \"$WORK/$FACTORIO_ARCHIVE\"; else " $0 "; fi"; next } \
     { print } \
   ' /tmp/airi-installer.sh > /tmp/airi-installer-patched.sh; \
+  grep -Fq -- '--store-dir "/opt/airi-pnpm-cache"' /tmp/airi-installer-patched.sh; \
+  grep -Fq -- '/opt/airi-node-cache/$NODE_ARCHIVE' /tmp/airi-installer-patched.sh; \
+  if [ "$SGLUNA_LOCAL_SOURCE" = 1 ]; then grep -Fq -- 'cp -a /opt/airi-local-source/.' /tmp/airi-installer-patched.sh; fi; \
   if ! grep -q '/opt/factorio-cache/' /tmp/airi-installer-patched.sh; then echo '[SGLuna docker] installer has no recognised Factorio download line; it downloads Factorio itself.' >&2; fi; \
-  SGLUNA_INSTALL_ROOT=/opt/airi FACTORIO_VERSION="$FACTORIO_VERSION" bash /tmp/airi-installer-patched.sh; \
+  NPM_CONFIG_CACHE=/opt/airi-npm-cache SGLUNA_INSTALL_ROOT=/opt/airi FACTORIO_VERSION="$FACTORIO_VERSION" bash /tmp/airi-installer-patched.sh; \
   printf '%s\n' "$resolved" > /opt/airi/SOURCE_SHA; \
   printf '%s\n' "$ref" > /opt/airi/SOURCE_REF; \
   printf '%s\n' "$FACTORIO_VERSION" > /opt/airi/FACTORIO_VERSION_REQUEST; \
