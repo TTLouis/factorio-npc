@@ -100,6 +100,21 @@ Not yet checked in real Factorio: the layout as a whole, the icon sprites, `togg
 
 2026-09-25: the owner tried the new console in the game and found many things wrong with it. Other agents' fixes (up to `e905cc4`, prompt focus and live conversation reading) did not fix it. The console UI is **P0** for the next work session, ahead of production-rate goals. Don't treat this layout as accepted.
 
+Owner's P0 spec (2026-09-25):
+
+- **Dragging feels laggy, and typing gets interrupted.** The console is refreshed
+  continuously, even while the player drags it or types in it. A first look:
+  `task_board_ui.ts` refreshes every open console every 60 ticks. Most of the left
+  column only rebuilds when a signature changes, but the skills pop-out clears and
+  rebuilds its whole body on every refresh, whether or not anything changed.
+- **Fix:** split the console into sections that update independently. A section is
+  rebuilt only when its own data changes, and an update must not touch the text
+  input or the window being dragged.
+- **Skills work like past plans:** a list of skills to select from, with a detail
+  view for each. The player can also edit a skill.
+- **Later, a bigger slice:** the player picks which skill the LLM must use. It is
+  not part of P0.
+
 The compatibility projection should not be deleted merely for cosmetic cleanup while other runtime/UI
 features still consume it. Future removal should be driven by eliminating those consumers, not by creating
 another planning source of truth.
