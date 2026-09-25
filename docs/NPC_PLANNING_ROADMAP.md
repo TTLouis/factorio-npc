@@ -1082,13 +1082,34 @@ instructions:
 - If the outcome differs, the plan made ahead is thrown away and the normal path
   runs.
 
+**These are learned behaviours, not hard-wired ones.** The harness must not decide
+when to parallelize, how many machines to build or what to predict. That is
+strategy, and it goes through the skill library, the same way as production
+patterns (`packages/autorio/src/skills.ts`, `basic_skill_library.ts`):
+
+- Each way of working in parallel is a skill: a curated `pattern` to start with,
+  and verified or learned skills later. The Main LLM finds one with `findSkills`,
+  loads it with `getSkillDetails` into the task's Skill Context, and decides
+  whether and how to use it in the plan it writes. Jev can rank which skill fits.
+- A skill is guidance, not a script. The planner still checks it against the live
+  world (recipes, inventory, placement, measured throughput) before relying on it.
+- Skills are revised from evidence like any other skill. A pattern that wasted
+  time or failed is marked down; one that saved time is kept.
+
+The harness supplies only the generic mechanics these skills need. Those
+mechanics hold no Factorio strategy:
+
+- it admits two operations at once only if the real character can do both (for
+  example, a hand-craft queue during a walk or mining). It never lets them claim
+  the same items twice or send the body to two places;
+- it keeps a run-ahead proposal with the outcome it assumed, compares that with
+  the real world state when the work ends, and uses the proposal only if they
+  match.
+
 Constraints any design has to keep:
 
 - Running ahead only prepares decisions. It must not act in the world early, and
-  it must not change a committed plan (§1.1). A prediction is used only after the
-  runtime has checked, from the real world state, that the outcome matched it.
-- Parallel tasks still use the one real character, its inventory and its reach.
-  They must not reserve the same items twice or send the body to two places.
+  it must not change a committed plan (§1.1).
 - "More machines" is a throughput decision. It follows the measured-throughput rule
   (no unvalidated inserter or belt figures) and fits the production-rate goals
   above.
