@@ -62,8 +62,10 @@ reasoning budgets went up, each tool round in one request took 40–55 s (live t
   Why: the player's "continue" (also what UI Resume sends) is the resume path; a
   paused goal turns active only when that turn's operations are admitted, after
   the claim check. Claim checks now also run at parse time, so a refusal takes the
-  plan-correction path and the resubmitted operations resume the goal. Open: a
-  satisfied step can be closed only on the turn after a resume. `aebbaf25`
+  plan-correction path and the resubmitted operations resume the goal. A
+  satisfied step can be closed only on the turn after a resume; the owner chose to
+  keep it that way (2026-09-25, the safer option), so there is no resume step that
+  closes work in the same turn. `aebbaf25`
 - [x] **B3 `interaction_router` returned invalid content** (`effort: none`). The
   fallback worked, so this is low priority: note the frequency, fix if cheap.
   Every router reply in the container traces (30 of 30, 2026-09-20..25) was
