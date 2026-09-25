@@ -64,24 +64,24 @@ What the code does today:
 
 Fix list (deterministic geometry only; the planner still chooses where):
 
-- [ ] One shared footprint helper from the prototype (`tile_width/height`,
+- [x] One shared footprint helper from the prototype (`tile_width/height`,
   `collision_box`, rotation swap): valid grid for the centre, world box for a centre
-  + direction, and "centres whose footprint covers point P".
-- [ ] `place_entity`: snap to the entity's grid only when unambiguous; otherwise
+  + direction, and "centres whose footprint covers point P". `032d02e` (`placement_geometry.ts`)
+- [x] `place_entity`: snap to the entity's grid only when unambiguous; otherwise
   refuse with the reason. `not_placeable` reports the footprint box tried, what
   collides inside it, and the grid rule. Never move an entity silently to a
-  different spot than the planner asked for.
-- [ ] Let placement target a relation instead of a centre (e.g. place so the
+  different spot than the planner asked for. Off-grid centres are refused with the nearest valid centre, never moved; collisions list the entities inside the footprint; both survive the runtime receipt. `8c2ceca`, `dc9c951`, `462aa27`
+- [x] Let placement target a relation instead of a centre (e.g. place so the
   footprint covers a point / receives another entity's output), resolved by the
   candidate search, and point the planner guidance at it for "output into X"
-  placements.
-- [ ] `findPlacementCandidates`: rotation-aware grid offset; return each
-  candidate's footprint (tile size + world box).
-- [ ] `plan_placement`: size-aware snapping, side and ring search from footprint
-  edges, extension clearance from the entity size, blockers inside the footprint.
-- [ ] Engine lane: the self-feeding burner drill pair (B's footprint covers A's
+  placements. Done as guidance, not a new operation: the `planPlacement` description says to use `getPlacementCandidates` with `covers_position` for output/drop-point relations and execute the candidate id. `f01a7db`, `3ee3706`. Whether the model follows it is a wave 4 live check
+- [x] `findPlacementCandidates`: rotation-aware grid offset; return each
+  candidate's footprint (tile size + world box). `8eddeb7`, `d69dd0e`, `45b103b`
+- [x] `plan_placement`: size-aware snapping, side and ring search from footprint
+  edges, extension clearance from the entity size, blockers inside the footprint. `8c2d5f4`, `980e2a0`
+- [x] Engine lane: the self-feeding burner drill pair (B's footprint covers A's
   drop point and vice versa) built through the tools, plus off-grid and overlap
-  refusals with their reasons. Unit tests alone are not proof here.
+  refusals with their reasons. Unit tests alone are not proof here. Production lane green at `27ab40d` (2.0.77): OFF-GRID, OVERLAP (drill A named as blocker) and RECIPROCAL. `drop_target` stays nil for drill → drill, so the loop is proven by outcome: both drills refuel each other (5 → 6 coal). `63fec8a`, `e5552ee`, `27ab40d`
 
 ## W0 — bugs from the 2026-09-25 container log (do first)
 
@@ -236,7 +236,7 @@ provider calls without the owner.
 
 | # | Item | Detail | Model |
 |---|---|---|---|
-| 1.1 | Placement footprint | P0 section above: shared footprint helper, `place_entity` reasons, placement by relation, candidate footprints, `plan_placement` fixes, engine lane for the self-feeding drill pair. **In progress in another session** (`032d02e`..`fdd71a9`, pushed 2026-09-25): footprint helper, size-aware candidates and `plan_placement`, refusal geometry in receipts, relational-placement guidance, a production-lane cell for the reciprocal drill pair. Unit suite green at `fdd71a9` (802). Finish: confirm the engine lane passes and review against the P0 list, then tick the P0 list | Opus |
+| 1.1 | Placement footprint | **Done** (P0 list above, engine lane green at `27ab40d`). Left for wave 4: does the live model use candidates for relational placement | — |
 | 1.2 | A refused placement freezes the plan | `canonical-task-board-memory.mjs` `recordBoardEvidence`: any `operation_error_receipt` in a batch with an unverified transfer becomes `world_blocked` `transfer_failed:<reason>`. A `not_placeable` at a planner-chosen coordinate is a correctable planning error; it should go back to the planner (bounded) with the new placement reason, and block only when retries run out or the world truly prevents the step. Keep real transfer failures blocking. Regression test with the 16:15 batch shape (`placing` + dependent `moving_items`) | Opus |
 | 1.3 | Thinking effort per round + output budget | W2a second item. Also: the output budget still runs out at high effort (`finish_reason: length` 16:12 and 15:07; screenshot: 11 rounds, 178 s, slowest 75 s). Size the output cap with the effort, or lower the effort for fact-gathering rounds, so a round never spends the whole cap thinking. Pass `request_id` into the trace | Opus |
 | 1.4 | Local test setup | One script (or package.json alias) that runs the runtime and mod suites in `npc-dev` with the right mounts (`deploy/pterodactyl`, `contracts/`, repo-root files the compose tests read), so agents stop hitting false failures. `local-compose-secret-boundary.test.mjs` also fails on Windows CRLF in the devcontainer compose file; make it line-ending tolerant or normalise the file (`.gitattributes`) — don't weaken what it checks | Sonnet |
@@ -292,7 +292,7 @@ the wave whose files it already touches, so it costs little extra.
 | Wave 2 | Crafting while doing other work: an owned hand craft is refused with `native_queue_busy` if the character's queue already has anything. Decide how concurrent operations (Later) interact with this rule before building run-ahead | `NPC_RELIABILITY_WORK.md` native crafting ownership; `crafting.ts` | Opus (design note only) |
 | Wave 4 | Skill value check: a warm run (skills learned) should be cheaper, faster or more reliable than a cold run; measure it on 4.1/4.2 using the think-time report | `NPC_LEARNING_BOOTSTRAP_E2E.md` | — (owner run) |
 | Wave 4 | Player-join map sync is unit-tested only: when the owner joins, the map should show what the NPC charted. Add to the owner's client checks | `NPC_AGENT_HARNESS_STATUS.md` limitations | — (owner check) |
-| After wave 4 | Promotion checkpoint: freeze a candidate SHA, reconcile the six main-only commits, Pterodactyl package smoke + zero-player integration on that SHA, record a new `docs/validation/` checkpoint. Owner decides when | `NPC_AGENT_HARNESS_STATUS.md` "Current promotion blockers" | Opus |
+| After wave 4 | **Goal of this plan: merge back to `feat/npc-transition-work` and publish prerelease 2** (`v0.1.0-pre.2`). Freeze a candidate SHA, reconcile the six main-only commits, run the Pterodactyl package smoke + zero-player integration on that SHA, record a new `docs/validation/` checkpoint. Needs the fallback comparison below green | `NPC_AGENT_HARNESS_STATUS.md` "Current promotion blockers"; owner 2026-09-25 | Opus |
 | Wave 5 (5.5) | Stale statements to correct while reviewing docs: `NPC_PLANNING_REFACTOR_INTEGRATION.md` says `planning-state.mjs` is "not yet wired in" (it is imported by the loop, board memory and supervisor); `NPC_RELIABILITY_WORK.md` says native crafting is "not yet engine-verified" (`tests/factorio/runner/crafting.py` covers it); the status doc's 2026-09-24 console section still lists client checks the owner has since done | those docs | Haiku |
 | Owner only | `PROJECT_MIGRATION_TRACKER.md`: repository topics and checking clone remotes are GitHub settings for the owner. Regenerating `pnpm-lock.yaml` and renaming the `@proj-airi/*` TSTL plugin need a networked `pnpm install`, so they wait until the metered-network period ends | tracker | — |
 
@@ -304,12 +304,11 @@ status (code checked 2026-09-25).
 | With | Item | Source | Model |
 |---|---|---|---|
 | Wave 1 (1.3) | Before changing provider budgets, reproduce one real failing and one successful request and capture the correlated debug report; the doc's stated precondition for budget changes | `deploy/pterodactyl/OBSERVABILITY.md` "Unfinished observability work" | Opus |
-| Owner checks | TERMINATE / NEW TASK: on 2026-09-19 the UI control queue never drained. Recheck with the … menu (both buttons) and the blocked banner's KEEP PAUSED / REVISE / CANCEL; if it still doesn't drain, it becomes a wave 1 bug | memory `task-board-lifecycle-control-findings`; `supervisor.mjs` `UI_CONTROL_ACTIONS` | — |
 | Wave 4 | Scenario ladder, cold, all five rungs: 10 stone; 5 gears; furnace + 10 plates; burner-drill iron setup; research automation (rung 5 has never run). Then check that skills are written and reused | memory `roadmap-2026-09-21` items 2 and 4 | — (owner runs) |
 | Wave 5 | Record the status of planning-roadmap phases 1–4 (TypeSafe adapter fidelity, operation/type registry, Main-LLM intent boundary, TypeSafe-native projection): the roadmap gives none. Audit the code and write status lines; the typed-projection module is still marked "not the final design" | `NPC_PLANNING_ROADMAP.md` §13 | Sonnet |
 | Wave 6 (new) | Phase 8: remove the legacy Task Board so the reducer is the only source of truth. Approved 2026-09-21 as the root of the step-id / draft split-brain bugs; `planByNpc` still has 60 references in runtime-v8. Large; only after waves 1–4 are green | memory `roadmap-2026-09-21` item 3 | Opus |
 | Wave 6 (new) | Jev tier-1 uses the owner ranked on 2026-09-23, none built yet: (a) "same approach or failure as before?" loop detection feeding the existing harness deadlock counter; (b) exact prototype alignment (code narrows candidates from game data, Jev picks, runtime validates; Space Age names, Chinese player text); (c) Jev judgments logged with step outcomes as features for a failure predictor. Each goes shadow → advisory → gating on E2E evidence | memory `jev-use-priorities-2026-09-23` | Opus |
-| After promotion | Phase 9 E2E comparison: Main-LLM-only vs the Jev coprocessor on the same scenarios (success, calls, tokens, latency, interventions). Needs the pre-Phase-9 M11 gate first | `NPC_PLANNING_ROADMAP.md` §13 | — |
+| Before the merge back | Phase 9 comparison = **the fallback path** (owner, 2026-09-25): the Main-LLM-only path must work on the same scenarios as the Jev coprocessor path (success, calls, tokens, latency, interventions), so the branch can merge back with Jev-off as a safe fallback. Needs the pre-Phase-9 M11 gate first | `NPC_PLANNING_ROADMAP.md` §13 | Opus |
 
 Not along the way (their own tracks, after this plan): Jev tier-2/3 uses (player understanding, skill retrieval, speak timing, chat truthfulness), the player forcing a skill, powered assembler/inserter
 production and the fluid known-red track (`NPC_PRODUCTION_VALIDATION_ROADMAP.md`),
