@@ -16,6 +16,18 @@ item's commit next to it.
   `scripts/update-docker-mod-local.ps1`) belongs to another agent. Don't commit or
   revert it. `update-docker-mod-local.ps1` needs a clean tree, so while that work is
   uncommitted, use the `tests/factorio` Docker lanes for engine checks.
+- **Build from local sources and save network (owner, 2026-09-25).** Every build and
+  deploy uses the local checkout, never a GitHub fetch:
+  - the local stack uses `scripts/build-docker-local.ps1` (`SGLUNA_LOCAL_SOURCE=1`)
+    or the mod overlay, never a `SGLUNA_SOURCE_REF` rebuild from GitHub;
+  - reuse cached layers: no `--no-cache`, no `--pull`, and no re-download of
+    Factorio or base images;
+  - the `tests/factorio` image already builds from `COPY . .`, but it re-downloads
+    every npm package on each source change (see step 0).
+
+  If the local-source scripts can't run (a dirty tree from the other agent's
+  uncommitted work), stop before D2 and ask the owner. Don't fall back to a GitHub
+  build.
 - Unit tests don't prove the feel of the UI. The owner judges drag and typing in the
   real client; record what's still unverified.
 - No provider calls are needed for this work.
@@ -43,6 +55,15 @@ item's commit next to it.
   learning status, the Learn Area button and export.
 
 ## Checklist
+
+### 0. Cut network use in the test build
+- [ ] 0.1. In `tests/factorio/Dockerfile`, give `pnpm install` a BuildKit cache
+      mount for the pnpm store (for example
+      `RUN --mount=type=cache,id=npc-test-pnpm-store,target=/pnpm/store pnpm install --frozen-lockfile --prefer-offline --store-dir /pnpm/store`),
+      so that a source change stops re-downloading every package. Behaviour and
+      lanes stay the same. `deploy/docker/Dockerfile` already caches its pnpm store.
+- [ ] 0.2. Check it: the second build after a source-only change fetches no
+      packages (pnpm reports them reused from the store).
 
 ### A. Measure first
 - [ ] A1. Add a GUI-mock counter test: with no data change, a periodic refresh must
@@ -85,8 +106,8 @@ item's commit next to it.
 ### D. Validation and hand-off
 - [ ] D1. Unit tests, typecheck, `check:lua` and eslint on the changed files in the
       Docker build stage; then `NPC_TEST_LANES=core` in `tests/factorio`.
-- [ ] D2. Deploy to the local stack (mod overlay if the tree allows, otherwise a
-      full local build that reuses the cached Factorio layer), then copy the client
+- [ ] D2. Deploy to the local stack from local sources only (mod overlay if the tree allows, otherwise
+      `scripts/build-docker-local.ps1`, reusing the cached Factorio layer), then copy the client
       mod zip to `%APPDATA%\Factorio\mods` with its checksum verified.
 - [ ] D3. Update the status doc (what changed, and what the owner still needs to
       check in the client). Ask the owner to test drag, typing and the skills
