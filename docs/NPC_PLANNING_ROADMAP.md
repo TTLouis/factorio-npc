@@ -1060,6 +1060,39 @@ The goal is the opposite: preserve long-horizon direction at low detail, resolve
 
 
 
+## Parallel work and run-ahead planning (owner direction, 2026-09-25; not designed yet)
+
+The NPC should learn to do work in parallel instead of one thing at a time. There
+are two kinds of parallel work:
+
+- **More machines for the same work.** Several drills, furnaces or assemblers on
+  one job, so it finishes sooner.
+- **Different tasks at the same time.** For example, crafting while mining. In
+  Factorio, the character's hand-crafting queue keeps running while it walks or
+  mines. A plan that waits for crafting to finish before it moves on wastes that
+  time.
+
+The owner also wants the LLM to **run ahead**, like a CPU that predicts the next
+instructions:
+
+- While the current work is still running, the LLM plans what comes next on the
+  assumption that the current work succeeds as intended.
+- If the work finishes as predicted and nothing broke, that plan is used, and the
+  time spent waiting for the LLM is saved.
+- If the outcome differs, the plan made ahead is thrown away and the normal path
+  runs.
+
+Constraints any design has to keep:
+
+- Running ahead only prepares decisions. It must not act in the world early, and
+  it must not change a committed plan (§1.1). A prediction is used only after the
+  runtime has checked, from the real world state, that the outcome matched it.
+- Parallel tasks still use the one real character, its inventory and its reach.
+  They must not reserve the same items twice or send the body to two places.
+- "More machines" is a throughput decision. It follows the measured-throughput rule
+  (no unvalidated inserter or belt figures) and fits the production-rate goals
+  above.
+
 ## Later factory-performance frontiers
 
 The planning shelf must not assume that "launch a rocket" is always the terminal node.

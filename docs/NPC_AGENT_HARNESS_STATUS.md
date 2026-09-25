@@ -98,6 +98,8 @@ The left column of the NPC console was rebuilt from the approved "Chosen" mock-u
 
 Not yet checked in real Factorio: the layout as a whole, the icon sprites, `toggled` on frame action buttons and tab buttons, and heights at 1080p.
 
+2026-09-25: the owner tried the new console in the game and found many things wrong with it. Other agents are fixing the UI separately, so don't treat this layout as accepted.
+
 The compatibility projection should not be deleted merely for cosmetic cleanup while other runtime/UI
 features still consume it. Future removal should be driven by eliminating those consumers, not by creating
 another planning source of truth.
