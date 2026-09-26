@@ -26,6 +26,8 @@ services:
       OPENAI_API_BASEURL: ${OPENAI_API_BASEURL:?Set OPENAI_API_BASEURL in .env}
       OPENAI_MODEL: ${OPENAI_MODEL:?Set OPENAI_MODEL in .env}
       PROVIDER_TIMEOUT_MS: ${PROVIDER_TIMEOUT_MS:-300000}
+      # Optional Jev critic; empty leaves it off. Same dedicated key as compose.e2e.yml.
+      TYPESAFE_API_KEY: ${JEV_TYPESAFE_API_KEY:-}
       SAVE_NAME: ${SAVE_NAME:-}
       FACTORIO_USERNAME: ${FACTORIO_USERNAME:-}
       FACTORIO_TOKEN: ${FACTORIO_TOKEN:-}
