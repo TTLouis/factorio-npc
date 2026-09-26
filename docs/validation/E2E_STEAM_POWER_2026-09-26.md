@@ -249,8 +249,8 @@ Observations that matter for cost:
   nearly full input price for a two-second fix.
 - **Rounds bought little.** Fourteen `deterministic_completion` rounds averaged 735
   output units, cheap; but ten `ordinary_planning` and seven `ordinary_replan` rounds
-  spent 53,743 output units, and the last four (03:25 to 03:27) spent 17,000 output units
-  on a state that then failed anyway.
+  spent 53,743 output units, and the last six (03:25 to 03:27, ending in the failure) spent
+  20,941 output units on a state that then failed anyway.
 - **Waste signals in the trace:** 4 duplicate tool calls, 3 `duplicate_observation` and
   5 observation-pressure recoveries (rounds that observed again instead of acting), 2
   invalid plan submissions that each cost a re-planning round, one request that failed at
