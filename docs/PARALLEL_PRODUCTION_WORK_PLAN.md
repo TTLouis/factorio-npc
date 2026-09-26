@@ -407,19 +407,25 @@ provider calls without the owner.
 **Cut line.** This is more than one week of usage at about 10% a day. If the week runs
 short, finish waves 1 and 2, then 3.1–3.4 and 4.1, and carry the rest.
 
-**Usage budget per wave (Claude weekly usage; check at the end of each wave).** Stop
-new work at 70% weekly, keeping the rest for fixes that the live runs turn up (memory
-`usage-and-context-discipline`).
+**Usage budget per wave (Claude weekly usage; check at the end of each wave).** The
+owner will use a reset during the week (2026-09-26), so the week has two allowances.
+Stop new work at 70% of each allowance, keeping the rest for fixes that the local and
+live runs turn up (memory `usage-and-context-discipline`); use the reset when the
+first allowance reaches 70%.
 
-| Wave | Target | Notes |
+| Allowance | Waves | Target |
 |---|---|---|
-| 1 | 15% | Mostly Opus; 1.8 is Haiku |
-| 2 | 15% | 2.8 and 2.9 are the large ones |
-| 3 | 25% | 3.1 design first; 3.3–3.5 are the biggest items of the week |
-| 4 | 8% | Engine lanes; 4.4 local runs cost owner time, not API |
-| 5 | 7% | Observer sessions on a small model plus the fixes they need |
-| Reserve | 30% | Fixes from the local and live runs; do not spend on new items |
+| First | 1 (15%), 2 (20%), 3.1–3.3 (25%), reviews (10%) | 70% |
+| Second (after the reset) | 3.4–3.8 (30%), 4 (15%), 5 with observers (15%), reviews (10%) | 70% |
 
+With two allowances the whole list fits, so the cut line above applies only if a wave
+overruns its target by more than half. Spare budget goes, in this order, to: run-ahead
+first slice (5.5); Phase 8 full removal of the legacy Task Board; a design spike for a
+second NPC body on the 3.1 contract (doc only).
+
+**Review before merge.** Every wave-item diff gets an independent review agent (Opus)
+for merge-blocking issues before the main session merges it; findings it could not
+reproduce are marked unconfirmed. Reviews are the 10% lines in the table.
 **Who owns which files (parallel agents).** Items that edit the same file go to one
 agent or run one after another; the rest run in parallel worktrees.
 
