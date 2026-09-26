@@ -222,6 +222,41 @@ What already exists, and what the run showed:
 - Planning itself is slow and serial with the world: 239 s of think time (4 rounds)
   before the first action, of which one round was 162 s at `max` effort.
 
+### Time efficiency is its own consideration, not only scaling
+
+Owner note, 2026-09-26: the NPC should weigh time efficiency in every plan, not just
+choose between scaling up (a faster machine or lane, "vertical") and scaling out (more
+machines, "horizontal"). Some time is lost with no machine involved, and the planner
+should see it as a cost the way a player does:
+
+- **Idle time.** The actor waiting on a smelt, a craft or research while it could be
+  mining, crafting or walking. Measure it (share of the request's wall time in which
+  the actor had no active operation) and show it.
+- **Critical path.** Which step gates the goal. Work off the path can overlap with it;
+  work on it is where extra machines pay. The harness can compute the path from step
+  dependencies and W1 estimates; the LLM chooses what to overlap.
+- **Payback.** Building a machine costs its own crafting, materials and placement
+  time. Whether it pays back inside the time the plan still has to run is arithmetic
+  the harness can supply (cost in seconds, saving per minute, break-even minutes). One
+  more drill is not automatically better; for a 10-item job it is worse.
+- **Travel.** Walking between the ore patch, the furnaces and the build site is time.
+  Placement that keeps the lanes close, and batching trips, cut it. The estimate marks
+  walking as excluded today; measured walking per step should be recorded so the next
+  estimate can include it.
+- **Planning time.** The thinking rounds count too (239 s before the first action in
+  the 2026-09-26 run). A plan step that saves 2 min but costs 3 min of extra thinking
+  is not a saving; effort per round (item 1.3) and run-ahead (W2b) address this.
+
+Same rule as the rest of the plan: the harness supplies measured or derived numbers
+(idle share, critical path, break-even, walking seconds); the LLM decides, guided by
+skills. Extends the W2c items below with:
+
+- [ ] Per-request time accounting in the trace and Debug window: think, walk, work
+  (mining/crafting/machine-bound), idle.
+- [ ] Break-even estimate for "build N more machines" alongside the existing "total
+  with one more machine" in `estimateProductionTime`.
+- [ ] Critical path and idle share on the task board step, next to the W2c estimate.
+
 **Rule.** When a work plan (a step, a batch, or the sum of the remaining steps) is
 expected to take long, the planner must be asked to look for parallelism before the
 plan runs, and again when a running step overruns. The harness supplies the numbers
