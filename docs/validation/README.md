@@ -24,4 +24,6 @@ such as `docs/NPC_PRODUCTION_PLANNING_HANDOFF.md` or `../packages/...` refer to 
 the files were when written; read `docs/X.md` as `docs/validation/X.md` for these
 names.
 
+Live E2E records: `E2E_STEAM_POWER_2026-09-26.md` (cold-start DeepSeek run for steam power; stopped at step 2 by a transfer failure and the per-request output cap; fluids not reached).
+
 When a new promotion checkpoint is validated, add a new dated file here. Do not rewrite an older record to make it describe a newer commit.

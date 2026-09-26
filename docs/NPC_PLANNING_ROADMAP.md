@@ -1114,6 +1114,49 @@ Constraints any design has to keep:
   (no unvalidated inserter or belt figures) and fits the production-rate goals
   above.
 
+## Agent split: a roadmap agent and one agent per active plan (owner idea, 2026-09-26; for discussion, not designed)
+
+Trigger: the steam-power live run (`docs/validation/E2E_STEAM_POWER_2026-09-26.md`).
+One request carried the whole goal for 38 minutes and died on its output cap
+(107,322 > 100,000 output units, 99,874 of them reasoning). DeepSeek also authored a
+plan slowly (one 162 s round), never used the time tools, and stayed on one serial
+lane. The owner's conclusion: DeepSeek is not good enough at a long agentic workload
+right now, so try subagents next time.
+
+The idea, in the owner's words reduced to a shape:
+
+- **A roadmap agent** owns the whole goal: the shelf (§3), the ordering of milestones,
+  steering (§4) and the parallelization review (W2c in `docs/PARALLEL_PRODUCTION_WORK_PLAN.md`).
+  It thinks slowly and rarely, and sees summaries, not raw tool traffic.
+- **One subagent per active plan** owns one committed plan or slice (§1.1): its
+  observations, its operations, its recovery. It has its own context and its own output
+  budget, so a long goal is many small requests instead of one 38-minute request.
+- Several plan agents could run at once when the plans use different lanes (crafting
+  while mining, two machine lines), which is the concurrency W2c asks for.
+
+Why it might help, from the run: the cap and the growing context are per request, and a
+plan-scoped agent resets both at a natural boundary; a cheaper or faster model can run
+plan agents while a stronger one authors the roadmap.
+
+Questions to settle before any design (for the discussion elsewhere):
+
+- What the interface between the roadmap agent and a plan agent is. It must stay the
+  structured, bounded plan/step contract (§1.1, §6), not free text, and the harness
+  still owns admission, receipts and completion (§1.4).
+- How a plan agent's outcome returns: verified evidence only, never a claim (see the
+  completion-honesty finding in the run doc).
+- Which model per role, and who pays for the extra calls (usage pacing).
+- How actor and epoch correlation is preserved when several agents share one body: two
+  agents must not send the character to two places or claim the same items.
+- Whether this replaces or extends the Jev coprocessor (§1.3, §11), which already reads
+  goals and steers; the roles should not overlap.
+- How the per-request output budget and the "close on the next turn" rule apply to a
+  plan agent.
+
+Constraints that hold whatever the design (AGENTS.md): the model chooses among approved
+tools; the harness owns state and completion; zero connected humans stays valid; stale
+work after actor replacement or restart fails safely.
+
 ## Later factory-performance frontiers
 
 The planning shelf must not assume that "launch a rocket" is always the terminal node.
