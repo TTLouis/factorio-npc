@@ -135,6 +135,13 @@ delivered 120); or the supplied item did not fit the slot in use. Independent of
 cause, one refused item cancelling five independent moves to other furnaces is a
 design question worth a lane case.
 
+Narrowed afterwards from the code at the same commit (`basic_operation_runtime.ts`,
+entity move): a character holding none of the item fails with `item_missing`, not
+`nothing_moved`, and `insert` accepts a partial count. So the second candidate (held
+fewer than 95) is ruled out: the furnace accepted zero. Its source slot held another
+item, or the move chose an inventory that cannot take iron ore. Still unconfirmed which;
+work plan item 1.6 adds the lane case.
+
 ## Verification honesty
 
 - **No completion was claimed** and no step was closed on model assertion. Step 1

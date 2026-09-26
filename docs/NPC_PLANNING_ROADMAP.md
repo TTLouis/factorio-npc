@@ -1116,6 +1116,16 @@ Constraints any design has to keep:
 
 ## Agent split: a roadmap agent and one agent per active plan (owner idea, 2026-09-26; for discussion, not designed)
 
+**Owner decision, 2026-09-26 (later the same day):** do delegation inside one NPC first
+(several minds, one body), before several NPC bodies. Build it on the swarm design's
+records (`docs/SWARM_COORDINATION_ARCHITECTURE.md`: mission, work item, result with
+evidence, reservations for the body's lanes) so a second body later reuses the same
+contract, and integrate Jev as far as its authority allows. The swarm branch is
+audited for parts, not merged. Scheduled as wave 3 of
+`docs/PARALLEL_PRODUCTION_WORK_PLAN.md` "Next week", toward the `v0.1.0-pre.2`
+electricity target stated there; the design note (item 3.1) answers the questions
+below.
+
 Trigger: the steam-power live run (`docs/validation/E2E_STEAM_POWER_2026-09-26.md`).
 One request carried the whole goal for 38 minutes and died on its output cap
 (107,322 > 100,000 output units, 99,874 of them reasoning). DeepSeek also authored a

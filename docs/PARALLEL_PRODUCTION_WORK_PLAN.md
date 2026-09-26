@@ -74,7 +74,7 @@ Fix list (deterministic geometry only; the planner still chooses where):
 - [x] Let placement target a relation instead of a centre (e.g. place so the
   footprint covers a point / receives another entity's output), resolved by the
   candidate search, and point the planner guidance at it for "output into X"
-  placements. Done as guidance, not a new operation: the `planPlacement` description says to use `getPlacementCandidates` with `covers_position` for output/drop-point relations and execute the candidate id. `f01a7db`, `3ee3706`. Whether the model follows it is a wave 4 live check
+  placements. Done as guidance, not a new operation: the `planPlacement` description says to use `getPlacementCandidates` with `covers_position` for output/drop-point relations and execute the candidate id. `f01a7db`, `3ee3706`. Whether the model follows it is a wave 5 live check
 - [x] `findPlacementCandidates`: rotation-aware grid offset; return each
   candidate's footprint (tile size + world box). `8eddeb7`, `d69dd0e`, `45b103b`
 - [x] `plan_placement`: size-aware snapping, side and ring search from footprint
@@ -356,10 +356,42 @@ Design: `docs/NPC_PLANNING_ROADMAP.md` "Production goals are rate goals".
 
 ## Next week (after the 2026-09-28 reset): everything open, in order
 
-The owner is spending next week's usage on this list. Every open item from this
-plan, the agents' reports and the 2026-09-25 live runs is here once, with where its
-detail lives. Waves run one after another; items inside a wave run in parallel,
-each agent in its own worktree, merged and re-tested by the main session.
+Revised 2026-09-26 after the steam-power live run
+(`docs/validation/E2E_STEAM_POWER_2026-09-26.md`) and the owner discussion that
+followed it. The earlier wave list (placement P0 first) is folded in below; items
+already done keep their hashes.
+
+### Target for `v0.1.0-pre.2` (owner, 2026-09-26)
+
+Any model stronger than DeepSeek flash takes a cold-start NPC **to electricity**: an
+electric mining drill working on steam power, verified from world state (electric
+network satisfied, drill status `working`), not from item counters. Stretch: automated
+red and green science (`automation-science-pack`, `logistic-science-pack` from
+powered assemblers, measured as a rate). "Any model" means at least two non-DeepSeek
+models pass, with DeepSeek flash kept as the baseline.
+
+How we get there, in the owner's order:
+
+1. **Delegation inside one NPC first.** One conversation carrying a whole goal is the
+   failure of the steam run (one request, 38 min, 904k input units, dead at the
+   100,000 output cap). Split the work into a roadmap agent and per-plan agents that
+   share one body, before any multi-NPC swarm. Built on the swarm design's records
+   (`docs/SWARM_COORDINATION_ARCHITECTURE.md`) so a second body later reuses the same
+   contract. Design note: `NPC_PLANNING_ROADMAP.md` "Agent split".
+2. **Jev integrated as far as it can go**, inside its authority (AGENTS.md: Jev may
+   critique scope before commit; it never mutates a committed plan or advances the
+   tracker). Jev was not even on in the steam run: `jev_health.measurement` was
+   `jev_off` with 0 requests, because the local stack (`compose.yml`) does not pass
+   the Jev key; only `compose.e2e.yml` does.
+3. **Usage, cached input included, is planned, not observed afterwards.** The run was
+   904,658 input units (614,272 cached, 290,386 cache miss) and 107,322 output for one
+   closed step. With delegation there are more, smaller conversations, so prefix
+   stability per role decides the bill.
+4. **Skill lookup has to work without the model remembering to ask.** The library has
+   `steam-power-bootstrap` and `automation-science-bootstrap`, and `findSkills` is in
+   the prompt, yet the steam run never called it. Today's search
+   (`packages/autorio/src/skills.ts` `find_skill_definitions`) is substring matching
+   over the skill text, top 5, with no weighting by status or preconditions.
 
 **Merge protocol (every item).** Agent commits on its worktree branch, no push, no
 attribution lines. Main session reviews the diff, merges with `--no-ff`, re-runs the
@@ -367,60 +399,85 @@ full checks on the merged tree, pushes, and ticks the item here with the hash.
 Deploys only through `scripts/build-docker-local.ps1` (or the mod overlay when only
 the mod changed), and only when the owner asks.
 
-**Checks for "done".** Mod: vitest, `tsc`, Lua build, `check-generated-lua`, eslint
-on changed files. Runtime: `node --test` on `staging` and `runtime-v8` with
-`deploy/pterodactyl` **and `contracts/`** mounted (without `contracts/` two parity
-tests fail falsely). Engine behaviour: the relevant `tests/factorio` lane. No
+**Checks for "done".** `scripts/test-local.sh all` (mod: vitest, `tsc`, Lua build,
+`check-generated-lua`; runtime: `node --test` with `deploy/pterodactyl` and
+`contracts/` mounted). Engine behaviour: the relevant `tests/factorio` lane. No
 provider calls without the owner.
+
+**Cut line.** This is more than one week of usage at about 10% a day. If the week runs
+short, finish waves 1 and 2, then 3.1–3.4 and 4.1, and carry the rest.
 
 ### Wave 1: stop the live loop from breaking (P0)
 
 | # | Item | Detail | Model |
 |---|---|---|---|
-| 1.1 | Placement footprint | **Done** (P0 list above, engine lane green at `27ab40d`). Left for wave 4: does the live model use candidates for relational placement | — |
-| 1.2 | A refused placement freezes the plan | **Done** (`b234ef39`): a `placing:not_placeable` goes back to the planner with the refusal details (2 retries per step), then blocks as `placement_failed:not_placeable`; a failing transfer still blocks. Was: `canonical-task-board-memory.mjs` `recordBoardEvidence`: any `operation_error_receipt` in a batch with an unverified transfer becomes `world_blocked` `transfer_failed:<reason>`. A `not_placeable` at a planner-chosen coordinate is a correctable planning error; it should go back to the planner (bounded) with the new placement reason, and block only when retries run out or the world truly prevents the step. Keep real transfer failures blocking. Regression test with the 16:15 batch shape (`placing` + dependent `moving_items`) | Opus |
-| 1.3 | Thinking effort per round + output budget | W2a second item. Also: the output budget still runs out at high effort (`finish_reason: length` 16:12 and 15:07; screenshot: 11 rounds, 178 s, slowest 75 s). Size the output cap with the effort, or lower the effort for fact-gathering rounds, so a round never spends the whole cap thinking. Pass `request_id` into the trace | Opus |
-| 1.4 | Local test setup | **Done** (`scripts/test-local.sh runtime\|mod\|all` at `55714018`; runtime 895/895 node --test pass, mod 803/803 vitest + tsc + Lua build + check-generated-lua pass) | Sonnet |
+| 1.1 | Placement footprint | **Done** (engine lane green at `27ab40d`); off-grid centres snap like the engine (`641d81c3`) | — |
+| 1.2 | A refused placement freezes the plan | **Done** (`b234ef39`) | — |
+| 1.3 | Thinking effort per round + output budget | W2a second item. Size the output cap with the effort, or lower the effort for fact-gathering rounds, so a round never spends the whole cap thinking. Pass `request_id` into the trace. Precondition from `OBSERVABILITY.md`: capture one failing and one successful request first | Opus |
+| 1.4 | Local test setup | **Done** (`55714018`) | — |
+| 1.5 | New output budget per step, visible failure | Steam run regressions 3 and 4. The budget generation only rolls on an output-budget handoff (`npc-agent-loop.mjs`, `providerBudgetGeneration`), so one request carried the goal until `provider_turn_output_cap_exceeded` (non-recoverable). Roll the generation at every step close, and when a request still fails at the cap, leave the goal visibly paused with one chat line and a Resume, never a silent `blocked` plan. First slice of delegation: a fresh budget per plan | Opus |
+| 1.6 | One refused move must not cancel its siblings; `nothing_moved` gets a cause | Steam run regressions 1 and 2. Narrowed from the code (`basic_operation_runtime.ts` entity move): the NPC held the ore (else `item_missing`) and `insert` accepts partial counts, so "held fewer than 95" is ruled out; the furnace accepted zero, so its source slot held another item or `entity_inventories` chose the wrong inventory. Receipt carries held count and target slot contents; independent moves in a batch are not cancelled by one refusal. Engine lane case with three furnaces, one with a foreign item in its source slot | Opus |
+| 1.7 | OpenRouter provider profile | Today `openrouter.ai` falls back to `generic`: no effort is sent, no style block, cached/reasoning usage may not parse. Add an `openrouter` profile: effort in OpenRouter's `reasoning` field (check against their docs in a unit test), style block chosen by model family, `cache_control` breakpoints for Anthropic models (no caching without them), usage fields parsed, upstream provider pinned per model so runs compare | Sonnet |
+| 1.8 | Jev on in local runs | `scripts/build-docker-local.ps1 -Jev` adds `compose.e2e.yml` (which maps `JEV_TYPESAFE_API_KEY`); the Debug window shows `jev_off` clearly when it is not set. No key printed or persisted | Haiku |
 
-1.1 and 1.2 touch different files (mod placement vs. runtime board memory); 1.3
-is `provider.mjs`/`npc-agent-loop.mjs`. All four can run at once.
-
-### Wave 2: facts the planner needs to scale out
+### Wave 2: facts, time, cost and skills the planner needs
 
 | # | Item | Detail | Model |
 |---|---|---|---|
 | 2.1 | Scale-out skill | W4: curated pattern skill using W1 rates and the P0 footprints; `direct-miner-smelting` and `starter-smelting-row` point to it; Jev may rank it when throughput is on the critical path | Sonnet |
 | 2.2 | `fuel_name` for `getRecipeDetails` | W1 open item: the tool is shared with the ordinary agent, so both contract sides change | Sonnet |
-| 2.3 | Engine coverage for the 2.0 `crafting_speed` fix | `solveProduction` with a machine selection and prototype details for crafting machines, in an existing lane (they raised live before `6476fdc`) | Sonnet |
-| 2.4 | Hand-craft / hand-mining modifiers | W1 assumed the force and character modifiers add; measure it in the engine lane | Sonnet |
-| 2.5 | Waits from game data | W2b first item: expected finish for a running step from W1 rates and live machine state, used to schedule the next planner wake-up | Opus |
-| 2.6 | Plan duration estimate and parallelization trigger | W2c: harness estimate per step and batch, elapsed vs expected, a long-plan trigger that asks the planner to look for parallelism, a steering round at commit. Live case: 390 ore of hand mining in one step (2026-09-26 steam-power run) | Opus |
-| 2.7 | Cost accounting and goal-level budget | W2d: price table setting, cost per request/step/goal and per verified step, waste rounds counted, goal budget with a player-visible warning | Opus |
+| 2.3 | Engine coverage for the 2.0 `crafting_speed` fix | `solveProduction` with a machine selection, in an existing lane | Sonnet |
+| 2.4 | Hand-craft / hand-mining modifiers | Measure in the engine lane; the steam run measured about 2.1 s per hand-mined item including walking | Sonnet |
+| 2.5 | Waits from game data | W2b first item, done together with the calculated waits from `NPC_PROVIDER_CONTINUATION_RECOVERY.md` | Opus |
+| 2.6 | Plan duration estimate and parallelization trigger | W2c. Live case: 390 ore of hand mining in one step. Includes steam run regressions 7 and 8 | Opus |
+| 2.7 | Cost accounting and goal-level budget | W2d. Also moves the steam run's one-off counters (verbosity, time split, spend by round type) into `think-time-report.mjs`, so a run record is one command | Opus |
+| 2.8 | Skill lookup | (a) The harness offers the top skill candidates in plan-authoring context (summaries; loading stays explicit through `getSkillDetails`). (b) Better scoring: goal items and entities matched against skill outputs and topology, `verified` above `candidate`, preconditions checked against world state (research unlocked, items at hand). (c) Jev ranks the candidates (pulled forward from Jev tier 2 "skill retrieval"). (d) Trace which skills were offered, loaded and followed. Eval: fixed goal texts (steam power, red science, burner coal, smelting row) → expected skill id in the top 3, as a unit test | Opus |
+| 2.9 | Cache and usage plan | Audit what changes the prompt prefix between rounds (steering placement, compaction, the style block, tool list order) and fix it so only the tail changes. Per-role prefixes for delegation: shared system + tool block first and identical across agents of the same role, role-specific tools only, dynamic state last. Targets per role: cache-miss input share and input units per round, reported by 2.7. The two recovery rounds of the steam run had a 26% cache hit | Sonnet |
 
-### Wave 3: goals that prove production
+### Wave 3: delegation inside one NPC, with Jev
 
 | # | Item | Detail | Model |
 |---|---|---|---|
-| 3.1 | Production-rate goals | W3 section. The 16:1x run's goal was "20 × coal produced from now on", a count, so the same hand-feeding hole is still open | Opus |
-| 3.2 | Plan tracker lag | In the screenshot the tracker was on step 3 of 7 ("walk to the coal patch") while the batch was placing drill B (step 5), and drill A (step 4) was already built. Part of this is the owner's "close on the next turn after a resume" choice; check whether the rest is a missed deterministic close | Opus |
+| 3.1 | Design note: delegation inside one NPC | Roles (roadmap agent, plan agent, Jev), their interface as swarm records (mission, work item, result with evidence; `SWARM_COORDINATION_ARCHITECTURE.md` §4–§7), the body's lanes (movement and mining, the hand-craft queue) as reservations (§14), model, effort, budget and cache prefix per role, and how the output budget and "close on the next turn" apply per agent. Answers the open questions in `NPC_PLANNING_ROADMAP.md` "Agent split". Doc only | Opus |
+| 3.2 | Swarm branch audit | Read-only: what `origin/experiment/swarm-jev-integration` (1,505 behind, 282 ahead, last 2026-09-19) has that 3.3–3.5 can take, especially the Project Jev strategic split before the first planner decision and the milestone transitions; no merge of the branch | Sonnet |
+| 3.3 | The reducer is the only writer | Phase 8 minimum: every agent's output reaches plan state through the reducer; the legacy Task Board becomes a read-only projection (full removal can follow). Needed before several agents produce plan updates | Opus |
+| 3.4 | Plan agent | One committed plan or step per conversation, started from a harness-built brief (goal, plan, step, evidence so far, loaded skill), its own budget and context, returns verified evidence, never a claim. Several plan agents only on disjoint lanes | Opus |
+| 3.5 | Roadmap agent | Owns the shelf, milestones, steering, the W2c parallelization review and skill choice; runs at plan boundaries only and sees summaries, not raw tool traffic | Opus |
+| 3.6 | Jev in the split | Each goes shadow → advisory → gating on evidence: (a) critique of roadmap drafts before commit (existing authority); (b) the strategic split from 3.2 as input to the roadmap agent; (c) tier 1: loop detection feeding the deadlock counter, exact prototype name alignment, judgments logged with outcomes for a failure predictor; (d) skill ranking (2.8c); (e) the existing post-step decisions (continue, observe, reanchor, replan) at the plan agent's step boundaries | Opus |
+| 3.7 | Goals that prove production and power | Rate goals (W3). A "running" goal gets a world-state condition (electric network satisfied, drill `working`); the rate counter excludes items the character mined or crafted by hand, or the hand-feeding hole reopens (steam run regression 5) | Opus |
+| 3.8 | Plan tracker lag | Was 3.2: tracker on step 3 while the batch placed step 5 | Opus |
 
-### Wave 4: live proof (owner approves each run; API calls)
+### Wave 4: engine proof for the pre.2 target (no API calls)
+
+| # | Item | Detail | Model |
+|---|---|---|---|
+| 4.1 | Minimal steam lane | Exact layout in the production lane: offshore pump on a shoreline, boiler, steam engine, pole, electric mining drill `working`. Settles orientation and fluidbox alignment, and whether a water-edge fact query is needed (a fact, not a build order). First rung of the fluid track in `NPC_PRODUCTION_VALIDATION_ROADMAP.md` §5 | Opus |
+| 4.2 | Powered assembler and inserter lane | Exact layout: powered assemblers making gears and red science, fed by inserters, measured as a rate. The frontier AGENTS.md names; needed for the stretch | Opus |
+| 4.3 | Checkpoint saves | Save the world and NPC state after each verified step and restore one for a rerun, so a live attempt at steam starts with its materials instead of 28 min of hand mining. Test fixture only; cold runs stay cold | Sonnet |
+
+### Wave 5: live proof (owner approves each run; API calls)
+
+Every run gets an observer session writing a `docs/validation/` record from the steam
+run's template, with the numbers from 2.7.
 
 | # | Item | Detail |
 |---|---|---|
-| 4.1 | Burner drill pair | "Automate coal with only burner drills" end to end: placements through the tools, no `not_placeable` freeze |
-| 4.2 | Plates, count and rate | W5: 100 iron + 100 copper, then a rate goal. Pass: machine counts sized from the rates, think time per request down from today's numbers |
-| 4.3 | Run-ahead, first slice | W2b second item, only after 4.1–4.2 are green |
+| 5.1 | Burner drill pair | "Automate coal with only burner drills" end to end |
+| 5.2 | Plates, count and rate | W5: 100 iron + 100 copper, then a rate goal |
+| 5.3 | Electricity (pre.2 must-have) | Cold start, one short player request, first with a frontier model through OpenRouter (for example `openai/gpt-6-sol` or `anthropic/claude-opus-5.5`), then a second non-DeepSeek model; DeepSeek flash as baseline. The DeepSeek style-block A/B from the steam run doc rides along |
+| 5.4 | Red and green science (stretch) | From a checkpoint save with power running |
+| 5.5 | Run-ahead, first slice | W2b second item, only after 5.1–5.3 are green |
 
-### Wave 5: cleanup (small, any time a slot is free)
+### Wave 6: cleanup (small, any time a slot is free)
 
 | # | Item | Model |
 |---|---|---|
-| 5.1 | Router requests still get the ~0.8k `[STEERING]` planner message | Haiku |
-| 5.2 | `compactWorkingContext`: `baseMessages.length` drifts after a budget handoff (affects which exchanges compact, not validity) | Sonnet |
-| 5.3 | ~~TSTL truthiness warning, `task_board_debug_render.ts:140`~~ **Done**: a real bug (an empty reasons string is truthy in Lua and printed a stray " · "); now a length check | — |
-| 5.4 | Mining that also needs a fluid (uranium) is left out of estimates with a warning | Sonnet |
-| 5.5 | Review the docs not read on 2026-09-25 (`NPC_RELIABILITY_WORK`, `NPC_PROVIDER_CONTINUATION_RECOVERY`, `NPC_PLANNING_REFACTOR_INTEGRATION`, `PTERODACTYL_NPC_STAGING`); archive to `docs/validation/` only what is finished | Haiku |
+| 6.1 | Router requests still get the ~0.8k `[STEERING]` planner message | Haiku |
+| 6.2 | `compactWorkingContext`: `baseMessages.length` drifts after a budget handoff | Sonnet |
+| 6.3 | ~~TSTL truthiness warning, `task_board_debug_render.ts:140`~~ **Done** | — |
+| 6.4 | Mining that also needs a fluid (uranium) is left out of estimates with a warning | Sonnet |
+| 6.5 | Review the docs not read on 2026-09-25 (`NPC_RELIABILITY_WORK`, `NPC_PROVIDER_CONTINUATION_RECOVERY`, `NPC_PLANNING_REFACTOR_INTEGRATION`, `PTERODACTYL_NPC_STAGING`); archive to `docs/validation/` only what is finished | Haiku |
+| 6.6 | Invalid `submitPlan` with a stray `}` (both shapes from the steam run): salvage without a model round if the repair is safe (steam run regression 6) | Sonnet |
 
 ### Along the way: open items from other docs
 
@@ -429,34 +486,30 @@ the wave whose files it already touches, so it costs little extra.
 
 | With | Item | Source | Model |
 |---|---|---|---|
-| Wave 1 (1.1) | The deployed NPC never gets the spatial or production-planning prompts: only `packages/agent` imports `spatial-placement-prompt.md` and `production-planning-prompt.md`; runtime-v8 relies on tool descriptions and guidance. Give placement guidance one source both paths use, starting with the P0 relational-placement rule | `NPC_SPATIAL_PLACEMENT_ARCHITECTURE.md` "Architecture debt" | Opus |
-| Wave 1 (1.4) | Confirm the tool contract really has one source now (`contracts/factorio-tool-contract.json` + parity tests); if yes, close the debt note, if not, list the remaining skew | same | Sonnet |
-| Wave 2 (2.5) | Waits: planner-chosen `wait {ticks}` → a bounded wait derived from recipe energy, machine speed and remaining output, ending early when the condition holds; never proof of completion | `NPC_PROVIDER_CONTINUATION_RECOVERY.md` "Deferred: calculated / condition-based waits" (same work as 2.5; do them as one) | Opus |
-| Wave 2 | Crafting while doing other work: an owned hand craft is refused with `native_queue_busy` if the character's queue already has anything. Decide how concurrent operations (Later) interact with this rule before building run-ahead | `NPC_RELIABILITY_WORK.md` native crafting ownership; `crafting.ts` | Opus (design note only) |
-| Wave 4 | Skill value check: a warm run (skills learned) should be cheaper, faster or more reliable than a cold run; measure it on 4.1/4.2 using the think-time report | `NPC_LEARNING_BOOTSTRAP_E2E.md` | — (owner run) |
-| Wave 4 | Player-join map sync is unit-tested only: when the owner joins, the map should show what the NPC charted. Add to the owner's client checks | `NPC_AGENT_HARNESS_STATUS.md` limitations | — (owner check) |
-| After wave 4 | **Goal of this plan: merge back to `feat/npc-transition-work` and publish prerelease 2** (`v0.1.0-pre.2`). Freeze a candidate SHA, reconcile the six main-only commits, run the Pterodactyl package smoke + zero-player integration on that SHA, record a new `docs/validation/` checkpoint. Needs the fallback comparison below green | `NPC_AGENT_HARNESS_STATUS.md` "Current promotion blockers"; owner 2026-09-25 | Opus |
-| Wave 5 (5.5) | Stale statements to correct while reviewing docs: `NPC_PLANNING_REFACTOR_INTEGRATION.md` says `planning-state.mjs` is "not yet wired in" (it is imported by the loop, board memory and supervisor); `NPC_RELIABILITY_WORK.md` says native crafting is "not yet engine-verified" (`tests/factorio/runner/crafting.py` covers it); the status doc's 2026-09-24 console section still lists client checks the owner has since done | those docs | Haiku |
-| Owner only | `PROJECT_MIGRATION_TRACKER.md`: repository topics and checking clone remotes are GitHub settings for the owner. Regenerating `pnpm-lock.yaml` and renaming the `@proj-airi/*` TSTL plugin need a networked `pnpm install`, so they wait until the metered-network period ends | tracker | — |
+| Wave 3 (3.4) | The deployed NPC never gets the spatial or production-planning prompts: only `packages/agent` imports `spatial-placement-prompt.md` and `production-planning-prompt.md`. Give placement guidance one source both paths use; the plan agent's brief is the natural place | `NPC_SPATIAL_PLACEMENT_ARCHITECTURE.md` "Architecture debt" | Opus |
+| Wave 1 | Confirm the tool contract really has one source now (`contracts/factorio-tool-contract.json` + parity tests); if yes, close the debt note, if not, list the remaining skew | same | Sonnet |
+| Wave 3 (3.1) | Crafting while doing other work: an owned hand craft is refused with `native_queue_busy` if the character's queue already has anything. The lane reservations in 3.1 decide how concurrent operations interact with this rule | `NPC_RELIABILITY_WORK.md` native crafting ownership; `crafting.ts` | Opus (design) |
+| Wave 5 | Skill value check: a warm run (skills learned) should be cheaper, faster or more reliable than a cold run; measure it with the 2.7 report | `NPC_LEARNING_BOOTSTRAP_E2E.md` | — (owner run) |
+| Wave 5 | Player-join map sync is unit-tested only; add to the owner's client checks | `NPC_AGENT_HARNESS_STATUS.md` limitations | — (owner check) |
+| After wave 5 | **Merge back to `feat/npc-transition-work` and publish `v0.1.0-pre.2`** when the target above is met. Freeze a candidate SHA, reconcile the six main-only commits, run the Pterodactyl package smoke + zero-player integration on that SHA, record a new `docs/validation/` checkpoint. Needs the fallback comparison below green | `NPC_AGENT_HARNESS_STATUS.md` "Current promotion blockers"; owner 2026-09-25/26 | Opus |
+| Wave 6 (6.5) | Stale statements to correct while reviewing docs: `NPC_PLANNING_REFACTOR_INTEGRATION.md` says `planning-state.mjs` is "not yet wired in"; `NPC_RELIABILITY_WORK.md` says native crafting is "not yet engine-verified" (`tests/factorio/runner/crafting.py` covers it); the status doc's 2026-09-24 console section still lists client checks the owner has since done | those docs | Haiku |
+| Owner only | `PROJECT_MIGRATION_TRACKER.md`: repository topics and clone remotes are GitHub settings for the owner. Regenerating `pnpm-lock.yaml` and renaming the `@proj-airi/*` TSTL plugin wait until the metered-network period ends | tracker | — |
 
 ### Planned but not built: roadmaps and approved plans
 
-Plans the owner approved or the roadmaps list, still unbuilt or with no recorded
-status (code checked 2026-09-25).
-
 | With | Item | Source | Model |
 |---|---|---|---|
-| Wave 1 (1.3) | Before changing provider budgets, reproduce one real failing and one successful request and capture the correlated debug report; the doc's stated precondition for budget changes | `deploy/pterodactyl/OBSERVABILITY.md` "Unfinished observability work" | Opus |
-| Wave 4 | Scenario ladder, cold, all five rungs: 10 stone; 5 gears; furnace + 10 plates; burner-drill iron setup; research automation (rung 5 has never run). Then check that skills are written and reused | memory `roadmap-2026-09-21` items 2 and 4 | — (owner runs) |
-| Wave 5 | Record the status of planning-roadmap phases 1–4 (TypeSafe adapter fidelity, operation/type registry, Main-LLM intent boundary, TypeSafe-native projection): the roadmap gives none. Audit the code and write status lines; the typed-projection module is still marked "not the final design" | `NPC_PLANNING_ROADMAP.md` §13 | Sonnet |
-| Wave 6 (new) | Phase 8: remove the legacy Task Board so the reducer is the only source of truth. Approved 2026-09-21 as the root of the step-id / draft split-brain bugs; `planByNpc` still has 60 references in runtime-v8. Large; only after waves 1–4 are green | memory `roadmap-2026-09-21` item 3 | Opus |
-| Wave 6 (new) | Jev tier-1 uses the owner ranked on 2026-09-23, none built yet: (a) "same approach or failure as before?" loop detection feeding the existing harness deadlock counter; (b) exact prototype alignment (code narrows candidates from game data, Jev picks, runtime validates; Space Age names, Chinese player text); (c) Jev judgments logged with step outcomes as features for a failure predictor. Each goes shadow → advisory → gating on E2E evidence | memory `jev-use-priorities-2026-09-23` | Opus |
-| Before the merge back | Phase 9 comparison = **the fallback path** (owner, 2026-09-25): the Main-LLM-only path must work on the same scenarios as the Jev coprocessor path (success, calls, tokens, latency, interventions), so the branch can merge back with Jev-off as a safe fallback. Needs the pre-Phase-9 M11 gate first | `NPC_PLANNING_ROADMAP.md` §13 | Opus |
+| Wave 5 | Scenario ladder, cold, all five rungs: 10 stone; 5 gears; furnace + 10 plates; burner-drill iron setup; research automation (rung 5 has never run). Then check that skills are written and reused | memory `roadmap-2026-09-21` items 2 and 4 | — (owner runs) |
+| Wave 6 | Record the status of planning-roadmap phases 1–4 (TypeSafe adapter fidelity, operation/type registry, Main-LLM intent boundary, TypeSafe-native projection) | `NPC_PLANNING_ROADMAP.md` §13 | Sonnet |
+| After pre.2 | Phase 8 full removal of the legacy Task Board, if 3.3 left it as a projection | memory `roadmap-2026-09-21` item 3 | Opus |
+| Before the merge back | Phase 9 comparison = **the fallback path** (owner, 2026-09-25): the Main-LLM-only path (Jev off) must work on the 5.3 scenario (success, calls, tokens, latency, interventions), so the branch can merge back with Jev off as a safe fallback. Needs the pre-Phase-9 M11 gate first | `NPC_PLANNING_ROADMAP.md` §13 | Opus |
 
-Not along the way (their own tracks, after this plan): Jev tier-2/3 uses (player understanding, skill retrieval, speak timing, chat truthfulness), the player forcing a skill, powered assembler/inserter
-production and the fluid known-red track (`NPC_PRODUCTION_VALIDATION_ROADMAP.md`),
-site pings / ghost staging and the experiment surface (design drafts), Jev offline
-question tuning, swarm coordination, vehicles/trains/space platforms.
+Not in this plan (their own tracks, after pre.2): several NPC bodies coordinating
+through the message board (the swarm proper; 3.1 keeps its contract ready), Jev
+tier-2/3 uses other than skill ranking (player understanding, speak timing, chat
+truthfulness), the player forcing a skill, fluids beyond the minimal steam lane (oil,
+fluid mining), site pings / ghost staging and the experiment surface (design drafts),
+Jev offline question tuning, vehicles/trains/space platforms.
 
 ### Owner checks in the client (no code)
 

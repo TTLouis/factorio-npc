@@ -225,6 +225,13 @@ Before promotion, however, the repository should still:
 5. record the promotion SHA and gate results as a new validation checkpoint;
 6. avoid pulling unrelated failing swarm work into the single-NPC promotion.
 
+Target for `v0.1.0-pre.2` (owner, 2026-09-26): any model stronger than DeepSeek flash
+takes a cold-start NPC to electricity (an electric mining drill working on steam power,
+verified from world state); stretch goal automated red and green science. Not met yet:
+the 2026-09-26 steam run (`docs/validation/E2E_STEAM_POWER_2026-09-26.md`) stopped at
+step 2 of 6 on the per-request output cap. Plan: `docs/PARALLEL_PRODUCTION_WORK_PLAN.md`
+"Next week".
+
 ## Known non-blocking limitations / future work
 
 The next main promotion does not claim complete coverage of:
