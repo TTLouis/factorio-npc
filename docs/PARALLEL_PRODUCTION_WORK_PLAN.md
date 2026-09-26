@@ -419,6 +419,7 @@ short, finish waves 1 and 2, then 3.1–3.4 and 4.1, and carry the rest.
 | 1.6 | One refused move must not cancel its siblings; `nothing_moved` gets a cause | Steam run regressions 1 and 2. Narrowed from the code (`basic_operation_runtime.ts` entity move): the NPC held the ore (else `item_missing`) and `insert` accepts partial counts, so "held fewer than 95" is ruled out; the furnace accepted zero, so its source slot held another item or `entity_inventories` chose the wrong inventory. Receipt carries held count and target slot contents; independent moves in a batch are not cancelled by one refusal. Engine lane case with three furnaces, one with a foreign item in its source slot | Opus |
 | 1.7 | OpenRouter provider profile | Today `openrouter.ai` falls back to `generic`: no effort is sent, no style block, cached/reasoning usage may not parse. Add an `openrouter` profile whose behaviour is resolved from the model family, not once per process (today `providerCapabilityProfile` in `provider-base.mjs` runs once from the single `OPENAI_*` config): effort in OpenRouter's `reasoning` field (check against their docs in a unit test), the DeepSeek style block for DeepSeek models, `cache_control` breakpoints for Anthropic models (no caching without them), usage fields parsed. Written as a function of a model config so 3.1's per-role configs reuse it. Pin the upstream provider per role, so runs compare and cache hits stay stable | Sonnet |
 | 1.8 | Jev on in local runs | `scripts/build-docker-local.ps1 -Jev` adds `compose.e2e.yml` (which maps `JEV_TYPESAFE_API_KEY`); the Debug window shows `jev_off` clearly when it is not set. No key printed or persisted | Haiku |
+| 1.9 | Local provider (LM Studio) | Owner, 2026-09-26: use the models already downloaded in LM Studio on the owner's machine (RTX 4080 Laptop 12 GB, 64 GB DDR5); see "Local models" below. `providerEndpoint` (`provider-base.mjs`) accepts plain `http` only for `localhost`, `127.0.0.1` and `[::1]`, but the runtime runs in Docker and reaches the host as `host.docker.internal`: allow exactly that host name over `http`, nothing wider. Add a `local` capability profile (reasoning control per model family, no cached-input pricing, usage parsed from LM Studio's OpenAI-compatible responses) and a declared context window (start at 64k) so the runtime compacts before it overflows. Unconfirmed: whether LM Studio must serve on the local network for the container to reach it | Sonnet |
 
 ### Wave 2: facts, time, cost and skills the planner needs
 
@@ -431,7 +432,7 @@ short, finish waves 1 and 2, then 3.1–3.4 and 4.1, and carry the rest.
 | 2.5 | Waits from game data | W2b first item, done together with the calculated waits from `NPC_PROVIDER_CONTINUATION_RECOVERY.md` | Opus |
 | 2.6 | Plan duration estimate and parallelization trigger | W2c. Live case: 390 ore of hand mining in one step. Includes steam run regressions 7 and 8 | Opus |
 | 2.7 | Cost accounting and goal-level budget | W2d. Also moves the steam run's one-off counters (verbosity, time split, spend by round type) into `think-time-report.mjs`, so a run record is one command | Opus |
-| 2.8 | Skill lookup | (a) The harness offers the top skill candidates in plan-authoring context (summaries; loading stays explicit through `getSkillDetails`). (b) Better scoring: goal items and entities matched against skill outputs and topology, `verified` above `candidate`, preconditions checked against world state (research unlocked, items at hand). (c) Jev ranks the candidates (pulled forward from Jev tier 2 "skill retrieval"). (d) Trace which skills were offered, loaded and followed. Eval: fixed goal texts (steam power, red science, burner coal, smelting row) → expected skill id in the top 3, as a unit test | Opus |
+| 2.8 | Skill lookup | (a) The harness offers the top skill candidates in plan-authoring context (summaries; loading stays explicit through `getSkillDetails`). (b) Better scoring: goal items and entities matched against skill outputs and topology, `verified` above `candidate`, preconditions checked against world state (research unlocked, items at hand). (c) Jev ranks the candidates (pulled forward from Jev tier 2 "skill retrieval"). (d) Trace which skills were offered, loaded and followed. Eval: fixed goal texts (steam power, red science, burner coal, smelting row) → expected skill id in the top 3, as a unit test. (e) Optional meaning-based scoring with the local `nomic-embed-text-v1.5` model (1.9), always falling back to keyword scoring, since a Pterodactyl deployment has no LM Studio | Opus |
 | 2.9 | Cache and usage plan | Audit what changes the prompt prefix between rounds (steering placement, compaction, the style block, tool list order) and fix it so only the tail changes. Per-role prefixes for delegation: shared system + tool block first and identical across agents of the same role, role-specific tools only, dynamic state last. The prefix layout must survive a per-role model choice: Anthropic models cache only at explicit breakpoints, others cache automatically, so the breakpoints go where the stable prefix ends for every role. Targets per role: cache-miss input share and input units per round, reported by 2.7. The two recovery rounds of the steam run had a 26% cache hit | Sonnet |
 
 ### Wave 3: delegation inside one NPC, with Jev
@@ -466,6 +467,32 @@ Role-to-model split (recommendation, not decided; settle it in 3.1 with 2.7's nu
 | 4.1 | Minimal steam lane | Exact layout in the production lane: offshore pump on a shoreline, boiler, steam engine, pole, electric mining drill `working`. Settles orientation and fluidbox alignment, and whether a water-edge fact query is needed (a fact, not a build order). First rung of the fluid track in `NPC_PRODUCTION_VALIDATION_ROADMAP.md` §5 | Opus |
 | 4.2 | Powered assembler and inserter lane | Exact layout: powered assemblers making gears and red science, fed by inserters, measured as a rate. The frontier AGENTS.md names; needed for the stretch | Opus |
 | 4.3 | Checkpoint saves | Save the world and NPC state after each verified step and restore one for a rerun, so a live attempt at steam starts with its materials instead of 28 min of hand mining. Test fixture only; cold runs stay cold | Sonnet |
+| 4.4 | Local plumbing runs | After each of waves 1–3 lands, run ladder rungs 1–3 (10 stone; 5 gears; furnace + 10 plates) live on a local model through 1.9, from checkpoint saves (4.3). They prove the mechanics (budget per step, handoffs between agents, Jev wiring, pause and resume), not model quality, and cost no API calls. A paid wave 5 run starts only after these pass. The run record states the local model, so a failure there is not read as a harness verdict on stronger models | Sonnet |
+### Local models (owner, 2026-09-26: use what is already downloaded)
+
+On the owner's machine in LM Studio: `qwen3-coder-30b-a3b-instruct` (30B MoE, about 3B
+active, 18.6 GB), `qwen3.5-35b-a3b-uncensored-hauhaucs-aggressive` (35B MoE, about 3B
+active, 12.4 GB), `qwen/qwen3.5-9b`, `google/gemma-4-e4b`, `deepseek-r1-0528-qwen3-8b`
+and the embedding model `nomic-embed-text-v1.5`.
+
+| Use | Model | Why |
+|---|---|---|
+| Plan agent in local plumbing runs (4.4) | `qwen3-coder-30b-a3b-instruct` first, `qwen3.5-35b-a3b` as the second | Tool loop; the coder model is non-thinking, so rounds stay short. The 35B is an uncensored finetune: count its invalid tool calls before trusting it, since such finetunes often follow instructions less reliably |
+| Side jobs (compaction summaries, run-record numbers) | `qwen/qwen3.5-9b` or `gemma-4-e4b` | Small and fast; never authoritative |
+| Skill scoring (2.8e) | `nomic-embed-text-v1.5` | Optional, keyword fallback |
+| Not used | `deepseek-r1-0528-qwen3-8b` | A reasoning distill; not a tool-calling model |
+
+Not for the roadmap agent and not for the pre.2 electricity trial (5.3): the target
+is a model stronger than DeepSeek flash. A local model on ladder rungs is a floor
+data point only.
+
+Expectations, estimated and to be measured in the first 4.4 run: with most experts
+on the CPU, decode is roughly 20–35 tokens/s, so a round of about 2.9k output (the
+steam run's average) takes around 2 minutes; about 24k input per round means prompt
+processing costs time whenever the prefix changes, which makes 2.9's stable prefixes
+a speed matter locally. RAM is shared with Windows, the Factorio client and Docker's
+VM, so the 30B class is the ceiling while the game runs. LM Studio runs natively on
+Windows; nothing here touches Docker Desktop.
 
 ### Wave 5: live proof (owner approves each run; API calls)
 
