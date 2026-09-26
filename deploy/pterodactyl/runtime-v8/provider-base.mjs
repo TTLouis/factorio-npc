@@ -1004,7 +1004,7 @@ export function providerEndpoint(base) {
   try { url = new URL(base) }
   catch { throw new DeploymentError('Invalid provider URL') }
   check(!url.username && !url.password && !url.search && !url.hash, 'Provider URL cannot contain credentials, query, or fragment')
-  check(url.protocol === 'https:' || (url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)), 'Remote provider URL requires HTTPS')
+  check(url.protocol === 'https:' || (url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]', 'host.docker.internal'].includes(url.hostname)), 'Remote provider URL requires HTTPS')
   url.pathname = `${url.pathname.replace(/\/?$/, '/')}chat/completions`
   return url.toString()
 }

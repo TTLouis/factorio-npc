@@ -189,6 +189,7 @@ test('installed supervisor resolves the release root above src/runtime-v8', () =
 test('provider URL is HTTPS remotely and may be loopback HTTP', () => {
   assert.equal(providerEndpoint('https://api.openai.com/v1'), 'https://api.openai.com/v1/chat/completions')
   assert.equal(providerEndpoint('http://127.0.0.1:8000/v1'), 'http://127.0.0.1:8000/v1/chat/completions')
+  assert.equal(providerEndpoint('http://host.docker.internal:1234/v1'), 'http://host.docker.internal:1234/v1/chat/completions')
   assert.throws(() => providerEndpoint('http://example.com/v1'))
   assert.throws(() => providerEndpoint('https://user:pass@example.com/v1'))
 })
