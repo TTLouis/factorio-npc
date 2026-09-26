@@ -29,6 +29,7 @@ const COMBAT = {
   TURRET_STAGING_DISTANCE: 24,
   TURRET_MIN_ADVANCE_DISTANCE: 6,
   TURRET_FRONTLINE_ADVANCE_DISTANCE: 6,
+  TURRET_MAX_ADVANCE_DISTANCE: 8,
   TURRET_FRONTLINE_REAR_DISTANCE: 2.5,
   TURRET_ACTOR_CLEARANCE: 2.5,
   TURRET_TARGET_SAFETY_MARGIN: 0.5,
@@ -1053,6 +1054,14 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
       math.max(COMBAT.TURRET_ACTOR_CLEARANCE + 1, COMBAT.TURRET_FRONTLINE_ADVANCE_DISTANCE - 1.5),
       COMBAT.TURRET_ACTOR_CLEARANCE + 0.75,
     ]
+    // Staging can stop short of its planned distance. When even the fixed
+    // advance anchor is outside turret range, its whole search ring is too, so
+    // first try an anchor one tile inside range, within local build reach.
+    const actor_target_distance = distance(actor.position, target.position)
+    const target_range = support_placement_target_range(actor)
+    const in_range_advance = actor_target_distance - (target_range - 1)
+    if (actor_target_distance - anchor_distances[0] > target_range && in_range_advance <= COMBAT.TURRET_MAX_ADVANCE_DISTANCE)
+      anchor_distances.unshift(in_range_advance)
     let anchor = support_anchor(actor, target, turret_index, anchor_distances[0])
     let position: { x: number, y: number } | undefined
     for (const advance_distance of anchor_distances) {
@@ -1061,7 +1070,14 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
       if (position) break
     }
     if (!position) {
-      log(`[AUTORIO] No safe shared-planner support turret position near frontline anchors; actor=${serpent.line(actor.position)} target=${serpent.line(target.position)}`)
+      const plan = task.last_turret_placement_plan as { ok?: boolean, candidates?: Array<{ position: unknown }>, rejected?: Array<{ position: unknown, reason: unknown }> } | undefined
+      const plan_summary = {
+        ok: plan?.ok,
+        candidates: (plan?.candidates ?? []).map(candidate => candidate.position),
+        rejected: (plan?.rejected ?? []).slice(0, 4).map(rejection => ({ position: rejection.position, reason: rejection.reason })),
+        target_range: support_placement_target_range(actor),
+      }
+      log(`[AUTORIO] No safe shared-planner support turret position near frontline anchors; actor=${serpent.line(actor.position)} target=${serpent.line(target.position)} last_plan=${serpent.line(plan_summary)}`)
       return false
     }
     if (distance(position, actor.position) < COMBAT.TURRET_ACTOR_CLEARANCE) {

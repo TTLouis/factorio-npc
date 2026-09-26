@@ -180,4 +180,26 @@ describe('combat shared spatial navigation and placement', () => {
       last_turret_placement_plan: { ok: true, entity_name: 'gun-turret' },
     })
   })
+
+  it('reaches into turret range when staging stops short of the planned distance', () => {
+    const c = world('unit-spawner')
+    c.main.push(itemStack('gun-turret', 1), itemStack('piercing-rounds-magazine', 20))
+    // Live pistol: range 15, so support must land within 12.5 of the nest.
+    c.character.get_inventory(defines.inventory.character_guns)[0].prototype = { attack_parameters: { range: 15 } }
+    const turret: any = { valid: true, unit_number: 502, get_inventory: vi.fn(() => inventory([])), destroy: vi.fn() }
+    c.surface.create_entity.mockReturnValue(turret)
+
+    c.controller.submit_clear(80)
+    c.controller.tick(c.actor)
+    // The live clear-area lane stopped 18.95 tiles out: a fixed 6-tile advance
+    // leaves every whole-tile turret centre near its anchor out of range.
+    c.actor.position = { x: 11.05, y: 1 }
+    ;(globalThis as any).game.tick += 1
+    c.controller.tick(c.actor)
+
+    const placed = c.surface.create_entity.mock.calls.find(([args]: any[]) => args.name === 'gun-turret')?.[0]
+    expect(placed).toBeDefined()
+    expect(Math.hypot(placed.position.x - c.target.position.x, placed.position.y - c.target.position.y)).toBeLessThanOrEqual(12.5)
+    expect(c.controller.status()).toMatchObject({ turrets_placed: 1, last_turret_unit_number: 502 })
+  })
 })
