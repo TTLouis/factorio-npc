@@ -122,7 +122,7 @@ describe('precise placement runtime', () => {
     expect(f.controller.status().last_result).toMatchObject({ code: 'completed', completed: true })
   })
 
-  it('rejects the live burner-drill half-tile center before asking the engine to place it', () => {
+  it('snaps an off-grid center onto the tile the engine would use and keeps the requested point', () => {
     ;(globalThis as any).prototypes.item['burner-mining-drill'] = {}
     ;(globalThis as any).prototypes.entity['burner-mining-drill'] = {
       items_to_place_this: [{ name: 'burner-mining-drill', count: 1 }],
@@ -131,21 +131,53 @@ describe('precise placement runtime', () => {
       collision_box: { left_top: { x: -0.9, y: -0.9 }, right_bottom: { x: 0.9, y: 0.9 } },
     }
     const f = fixture('burner-mining-drill', 2)
+    // The live P0 regression passed a drill's drop point as a 2x2 center. The
+    // engine places a 2x2 on the nearest tile corner, so (1.5, 0.5) is (2, 1).
+    expect(f.controller.submit_placement('burner-mining-drill', 1.5, 0.5, 8)).toBe(true)
+
+    const result = f.runtime.state_placing(f.actor)
+
+    expect(result?.[0]).toBe(true)
+    expect(f.surface.can_place_entity).toHaveBeenCalledWith(expect.objectContaining({ position: { x: 2, y: 1 } }))
+    expect(f.surface.create_entity).toHaveBeenCalledWith(expect.objectContaining({ position: { x: 2, y: 1 } }))
+    expect(f.controller.status().last_result).toMatchObject({
+      code: 'completed',
+      requested_position: { x: 1.5, y: 0.5 },
+      placed_position: { x: 2, y: 1 },
+    })
+  })
+
+  it('snaps a 1x1 center to the tile under the point, as the engine does', () => {
+    const f = fixture()
+    expect(f.controller.submit_placement('steel-chest', 0.95, -0.2)).toBe(true)
+
+    f.runtime.state_placing(f.actor)
+
+    expect(f.surface.create_entity).toHaveBeenCalledWith(expect.objectContaining({ position: { x: 0.5, y: -0.5 } }))
+  })
+
+  it('names the snapped center it checked when the engine refuses an off-grid request', () => {
+    ;(globalThis as any).prototypes.item['burner-mining-drill'] = {}
+    ;(globalThis as any).prototypes.entity['burner-mining-drill'] = {
+      items_to_place_this: [{ name: 'burner-mining-drill', count: 1 }],
+      tile_width: 2,
+      tile_height: 2,
+      collision_box: { left_top: { x: -0.9, y: -0.9 }, right_bottom: { x: 0.9, y: 0.9 } },
+    }
+    const f = fixture('burner-mining-drill', 2)
+    f.surface.can_place_entity.mockReturnValue(false)
     expect(f.controller.submit_placement('burner-mining-drill', 1.5, 0.5, 8)).toBe(true)
 
     const result = f.runtime.state_placing(f.actor)
 
     expect(result?.[0]).toBe(false)
-    expect(f.surface.can_place_entity).not.toHaveBeenCalled()
     expect(f.surface.create_entity).not.toHaveBeenCalled()
+    expect(f.item.count).toBe(2)
     expect(f.controller.status().last_result).toMatchObject({
       code: 'not_placeable',
+      requested_position: { x: 1.5, y: 0.5 },
       placement_footprint: { tile_width: 2, tile_height: 2 },
-      placement_grid: {
-        x_offset: 0,
-        y_offset: 0,
-        nearest_valid_center: { x: 2, y: 1 },
-      },
+      placement_grid: { x_offset: 0, y_offset: 0, nearest_valid_center: { x: 2, y: 1 } },
     })
   })
 

@@ -37,6 +37,7 @@ Gates:
 
 import argparse
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -431,32 +432,6 @@ def run(client: Rcon, results: Path) -> None:
     assert selected_a is not None and selected_b is not None and selected_b_set is not None
     output_a = selected_a['item_output_position']
 
-    # The live P0 regression passed a drill output/drop point as a 2x2 entity
-    # center. It must now fail before engine placement and explain the grid.
-    off_grid = run_failed_operation(
-        remote_call(
-            'autorio_operations',
-            'place_entity',
-            repr('burner-mining-drill'),
-            str(output_a['x']),
-            str(output_a['y']),
-            str(selected_a['direction']),
-        ),
-        'off-grid drill center refusal',
-        'not_placeable',
-    )
-    grid = off_grid.get('placement_grid') or {}
-    footprint = off_grid.get('placement_footprint') or {}
-    require(
-        footprint.get('tile_width') == 2
-        and footprint.get('tile_height') == 2
-        and grid.get('x_offset') == 0
-        and grid.get('y_offset') == 0
-        and isinstance(grid.get('nearest_valid_center'), dict),
-        {'message': 'off-grid refusal lacks 2x2 grid diagnostics', 'receipt': off_grid},
-    )
-    print(f"PASS: P0 OFF-GRID - output point {output_a} rejected as a 2x2 center; nearest {grid['nearest_valid_center']}", flush=True)
-
     receipt_a = run_operation(
         remote_call('autorio_operations', 'place_candidate', repr(first_set['candidate_set_id']), repr(selected_a['id'])),
         'place reciprocal drill A',
@@ -485,6 +460,41 @@ def run(client: Rcon, results: Path) -> None:
         'unit_a': unit_a,
     })
     print(f'PASS: P0 OVERLAP - refusal identified drill A unit {unit_a} in the footprint', flush=True)
+
+    # The live P0 regression passed A's drop point as B's 2x2 center. The engine
+    # snaps scripted placements onto the grid (a 2x2 takes the nearest tile
+    # corner), so the request is not an error in itself: it lands on A's tiles
+    # and must be refused there, naming A and the snapped center it checked.
+    off_grid = run_failed_operation(
+        remote_call(
+            'autorio_operations',
+            'place_entity',
+            repr('burner-mining-drill'),
+            str(output_a['x']),
+            str(output_a['y']),
+            str(selected_a['direction']),
+        ),
+        'drop-point drill center refusal',
+        'not_placeable',
+    )
+    grid = off_grid.get('placement_grid') or {}
+    footprint = off_grid.get('placement_footprint') or {}
+    expected_center = {'x': math.floor(output_a['x'] + 0.5), 'y': math.floor(output_a['y'] + 0.5)}
+    checked_center = grid.get('nearest_valid_center') or {}
+    require(
+        footprint.get('tile_width') == 2
+        and footprint.get('tile_height') == 2
+        and checked_center.get('x') == expected_center['x']
+        and checked_center.get('y') == expected_center['y'],
+        {'message': 'off-grid request was not checked at the engine-snapped 2x2 center', 'expected': expected_center, 'receipt': off_grid},
+    )
+    off_grid_blockers = off_grid.get('placement_blockers') or []
+    require(any(blocker.get('unit_number') == unit_a for blocker in off_grid_blockers if isinstance(blocker, dict)), {
+        'message': 'snapped drop-point request did not name drill A as blocker',
+        'receipt': off_grid,
+        'unit_a': unit_a,
+    })
+    print(f'PASS: P0 OFF-GRID - drop point {output_a} snapped to {checked_center} and refused on drill A unit {unit_a}', flush=True)
 
     receipt_b = run_operation(
         remote_call('autorio_operations', 'place_candidate', repr(selected_b_set['candidate_set_id']), repr(selected_b['id'])),

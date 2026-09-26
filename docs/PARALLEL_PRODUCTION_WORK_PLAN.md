@@ -82,6 +82,17 @@ Fix list (deterministic geometry only; the planner still chooses where):
 - [x] Engine lane: the self-feeding burner drill pair (B's footprint covers A's
   drop point and vice versa) built through the tools, plus off-grid and overlap
   refusals with their reasons. Unit tests alone are not proof here. Production lane green at `27ab40d` (2.0.77): OFF-GRID, OVERLAP (drill A named as blocker) and RECIPROCAL. `drop_target` stays nil for drill → drill, so the loop is proven by outcome: both drills refuel each other (5 → 6 coal). `63fec8a`, `e5552ee`, `27ab40d`
+- [x] Off-grid centres snap instead of failing (owner call, 2026-09-25). An
+  engine probe on 2.0 showed scripted placement always lands on the grid:
+  `create_entity` snaps (odd sizes take the tile under the point, even sizes the
+  nearest tile corner) and the default `can_place_entity` checks the snapped
+  spot, which is the same rule as `snap_placement_center`. So `place_entity`
+  snaps the centre itself and the receipt keeps `requested_position` beside
+  `placed_position`. The probe also showed `create_entity` does not test
+  collisions and the `script` build check accepted a chest on a chest, so the
+  default build check stays. Lanes: core places a chest at an off-grid point on
+  the tile under it; production's OFF-GRID case now snaps A's drop point onto A
+  and is refused with A named.
 
 ## W0 — bugs from the 2026-09-25 container log (do first)
 

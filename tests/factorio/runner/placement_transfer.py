@@ -218,6 +218,39 @@ def run(client: Rcon, results: Path) -> None:
         f'chest did not lose two retrieved plates: before={after_to!r}, after={after_from!r}',
     )
 
+    # An off-grid request is not an error: Factorio places a 1x1 entity on the
+    # tile under the requested point, and so must the NPC. Seed a second chest,
+    # pick a free tile centre near the actor, then ask for an off-grid point in it.
+    off_grid_fixture = decode_json(command(
+        "/silent-command "
+        "local s=game.surfaces[1]; "
+        "local a=s.find_entities_filtered{name='character'}[1]; "
+        "local added=a.get_main_inventory().insert{name='wooden-chest',count=1}; "
+        "local p=s.find_non_colliding_position('wooden-chest',{x=a.position.x+3,y=a.position.y},4,1,true); "
+        "rcon.print(helpers.table_to_json({added=added,tile=p}))"
+    ), 'off-grid chest fixture')
+    assert_true(off_grid_fixture['added'] == 1 and isinstance(off_grid_fixture.get('tile'), dict), f'could not seed off-grid chest fixture: {off_grid_fixture!r}')
+    tile = off_grid_fixture['tile']
+    requested = {'x': tile['x'] + 0.375, 'y': tile['y'] - 0.4375}
+    response = command(lua_text(remote_call(
+        'autorio_operations', 'place_entity', repr('wooden-chest'), repr(requested['x']), repr(requested['y']),
+    )))
+    assert_true(response == 'true', f'could not start off-grid placement task: {response!r}')
+    off_grid_status = wait_for_idle('autorio_operations.status (off-grid placement)', 5.0)
+    off_grid_receipt = (off_grid_status.get('basic_operation') or {}).get('last_result') or {}
+    assert_true(
+        off_grid_receipt.get('code') == 'completed'
+        and off_grid_receipt.get('placed_position') == tile
+        and off_grid_receipt.get('requested_position') == requested,
+        f'off-grid chest request did not land on the tile under the point: tile={tile!r}, receipt={off_grid_receipt!r}',
+    )
+    off_grid_entity = decode_json(command(
+        "/silent-command "
+        f"local c=game.surfaces[1].find_entity('wooden-chest',{{x={tile['x']},y={tile['y']}}}); "
+        "rcon.print(helpers.table_to_json({found=c~=nil}))"
+    ), 'off-grid chest inspection')
+    assert_true(off_grid_entity['found'] is True, f'no wooden chest at the snapped tile {tile!r}')
+
     final_status = actor_status('autorio_actor.status after placement/transfer')
     assert_true(final_status['connected_players'] == 0, f'player appeared during placement/transfer: {final_status!r}')
     assert_true(final_status['actor']['actor_id'] == actor_id, f'actor identity changed: {final_status!r}')
@@ -229,6 +262,7 @@ def run(client: Rcon, results: Path) -> None:
         'placed': placed,
         'after_to': after_to,
         'after_from': after_from,
+        'off_grid_receipt': off_grid_receipt,
         'transcript': transcript,
     }, indent=2))
     print(

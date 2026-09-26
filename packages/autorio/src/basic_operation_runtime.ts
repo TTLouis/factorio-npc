@@ -5,7 +5,7 @@ import { remember_entity_reference, resolve_exact_entity } from './entity_refere
 import { build_interaction_reach, entity_interaction_reach } from './interaction_range'
 import { MAX_MINING_START_REJECTIONS, mining_navigation_reach, mining_navigation_requires_movement, select_exact_mining_target, within_mining_reach } from './mining_reach'
 import { resolve_entity_placement_item } from './placement_item'
-import { placement_footprint, placement_grid_check, snap_placement_center } from './placement_geometry'
+import { placement_footprint, placement_grid_rule, snap_placement_center } from './placement_geometry'
 import type { new_task_manager } from './task_manager'
 import type { PlayerParametersMineEntity, PlayerParametersWalkToEntity } from './types'
 import { TaskStates } from './types'
@@ -374,8 +374,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
 
     if (!task.position) {
       // The engine searches in whole steps from its origin, so start on the
-      // entity's grid and snap the answer: an auto-picked spot must pass the
-      // same grid check as a requested one.
+      // entity's grid and snap the answer onto it.
       const origin = snap_placement_center(prototype, actor.position, task.direction)
       const found = surface.find_non_colliding_position(task.entity_name, origin, 1, 1)
       if (!found) {
@@ -385,28 +384,21 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       task.position = snap_placement_center(prototype, found, task.direction)
     }
 
-    const footprint = placement_footprint(prototype, task.position, task.direction)
-    const grid_check = placement_grid_check(prototype, task.position, task.direction)
-    if (!grid_check.valid) {
-      controller.fail(actor, task, 'not_placeable', {
-        placement_footprint: {
-          tile_width: footprint.tile_width,
-          tile_height: footprint.tile_height,
-          tile_box: footprint.tile_box,
-          world_box: footprint.world_box,
-        },
-        placement_grid: {
-          x_offset: grid_check.grid.x_offset,
-          y_offset: grid_check.grid.y_offset,
-          nearest_valid_center: grid_check.snapped_position,
-        },
-      })
-      return [false, `Requested placement center is off-grid for ${footprint.tile_width}x${footprint.tile_height} ${task.entity_name}; nearest valid center is (${grid_check.snapped_position.x}, ${grid_check.snapped_position.y})`]
-    }
+    // Factorio snaps every scripted placement onto the entity's tile grid:
+    // create_entity lands there and the default can_place_entity checks there
+    // (probed on 2.0: odd sizes take the tile under the point, even sizes the
+    // nearest tile corner). An off-grid centre is not an error; snap it with the
+    // same rule so the check, diagnostics and receipt describe the real tiles.
+    // requested_position keeps what was asked for.
+    const position = snap_placement_center(prototype, task.position, task.direction)
+    const footprint = placement_footprint(prototype, position, task.direction)
+    const grid = placement_grid_rule(prototype, task.direction)
 
+    // Keep the default (manual) build check: create_entity itself does not test
+    // collisions, and the script check accepted a chest on top of a chest.
     if (!surface.can_place_entity({
       name: task.entity_name,
-      position: task.position,
+      position,
       direction: task.direction,
       force: actor.force,
     })) {
@@ -419,21 +411,21 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
           world_box: footprint.world_box,
         },
         placement_grid: {
-          x_offset: grid_check.grid.x_offset,
-          y_offset: grid_check.grid.y_offset,
-          nearest_valid_center: grid_check.snapped_position,
+          x_offset: grid.x_offset,
+          y_offset: grid.y_offset,
+          nearest_valid_center: position,
         },
         placement_blockers: blockers,
       })
       const blocker_text = blockers.length > 0
         ? blockers.map(blocker => `${blocker.name}@(${blocker.position.x},${blocker.position.y})`).join(', ')
         : 'no entity blocker reported in footprint'
-      return [false, `Requested placement is not placeable; footprint=${serpent.line(footprint.world_box)}; blockers=${blocker_text}`]
+      return [false, `Requested placement is not placeable at grid center (${position.x}, ${position.y}); footprint=${serpent.line(footprint.world_box)}; blockers=${blocker_text}`]
     }
 
     const create_entity_args: SurfaceCreateEntity = {
       name: task.entity_name,
-      position: task.position,
+      position,
       direction: task.direction,
       raise_built: true,
       ...actor.entity_build_args(),
@@ -456,7 +448,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     if (removed !== requirement.count) {
       log(`[AUTORIO] ERROR placement item accounting mismatch after creating ${task.entity_name}: required=${requirement.count} ${requirement.item_name}, removed=${removed}`)
     }
-    log(`[AUTORIO] Entity placed successfully: ${task.entity_name} using ${requirement.count} ${requirement.item_name} at ${serpent.line(task.position)} direction=${task.direction ?? 'default'}`)
+    log(`[AUTORIO] Entity placed successfully: ${task.entity_name} using ${requirement.count} ${requirement.item_name} at ${serpent.line(position)} direction=${task.direction ?? 'default'}`)
     controller.complete(actor, task, {
       placed_unit_number: entity.unit_number,
       placed_entity_type: entity.type,
