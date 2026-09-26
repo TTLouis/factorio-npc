@@ -407,6 +407,52 @@ provider calls without the owner.
 **Cut line.** This is more than one week of usage at about 10% a day. If the week runs
 short, finish waves 1 and 2, then 3.1–3.4 and 4.1, and carry the rest.
 
+**Usage budget per wave (Claude weekly usage; check at the end of each wave).** Stop
+new work at 70% weekly, keeping the rest for fixes that the live runs turn up (memory
+`usage-and-context-discipline`).
+
+| Wave | Target | Notes |
+|---|---|---|
+| 1 | 15% | Mostly Opus; 1.8 is Haiku |
+| 2 | 15% | 2.8 and 2.9 are the large ones |
+| 3 | 25% | 3.1 design first; 3.3–3.5 are the biggest items of the week |
+| 4 | 8% | Engine lanes; 4.4 local runs cost owner time, not API |
+| 5 | 7% | Observer sessions on a small model plus the fixes they need |
+| Reserve | 30% | Fixes from the local and live runs; do not spend on new items |
+
+**Who owns which files (parallel agents).** Items that edit the same file go to one
+agent or run one after another; the rest run in parallel worktrees.
+
+| Group | Items | Main files |
+|---|---|---|
+| A: loop and budgets | 1.3, then 1.5 | `npc-agent-loop.mjs`, `provider.mjs` |
+| B: provider profiles | 1.7, then 1.9 | `provider-base.mjs` |
+| C: mod transfers | 1.6 | `packages/autorio/src/basic_operation_runtime.ts`, `tests/factorio/runner/` |
+| D: scripts and Debug | 1.8 | `scripts/build-docker-local.ps1`, the mod's Debug window |
+| E: timing and cost | 2.6, 2.7, then 2.9 | trace and report code, `npc-agent-loop.mjs` (after A merges) |
+| F: skills | 2.1, 2.8 | `packages/autorio/src/skills.ts`, `basic_skill_library.ts`, the skill prompt |
+| G: facts | 2.2–2.5 | contract JSON and both tool sides, engine lanes |
+
+**First session of the week (checklist).**
+
+- [ ] Fetch, read the peers' commits since `cfafed8f`, and run `scripts/test-local.sh all`
+  on HEAD; record that SHA here as the week's baseline.
+- [ ] Start wave 1 by group (A, B, C, D in parallel).
+- [ ] Owner, before the first 4.4 run: in LM Studio, load `qwen3-coder-30b-a3b-instruct`
+  with a 64k context and turn on the server (and "serve on local network" if 1.9 finds
+  it is needed).
+- [ ] Owner, before wave 5: put the OpenRouter key in the gitignored `.env` (never
+  printed or committed).
+
+Small gaps from the steam run, added to existing items:
+
+- **Every placement receipt in the trace** (with 2.7): the behavior trace keeps only
+  the latest receipt per status, so two of the run's three furnace placements left no
+  receipt and their grid position could not be checked.
+- **Search radius for hand mining** (with 2.6): the run mined coal with a search
+  radius of 4096 tiles. The estimate should include the walk to the patch it picked,
+  and the trace should record the distance, so a far patch is a visible cost.
+
 ### Wave 1: stop the live loop from breaking (P0)
 
 | # | Item | Detail | Model |
