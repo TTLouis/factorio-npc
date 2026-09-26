@@ -179,6 +179,41 @@ previous run had 7 invalid submissions in 279 responses (2.5%); this run had 2 i
 (5.4%). The sample is too small to say the style block causes it. Worth counting over a
 longer run.
 
+## Owner hypothesis: the style block may be too strict (added after the run)
+
+Owner, 2026-09-26: the output blow-up may come from the model trying to describe what
+it has done while being told to say nothing, so the DeepSeek style block could be
+loosened about half way (chat allowed roughly half the time). Recorded as a hypothesis
+to test, not a change: no prompt was edited.
+
+What the logs show for and against:
+
+| Measure | Previous run | This run |
+|---|---|---|
+| Output units, total | 763,771 | 107,322 |
+| of which reasoning | 720,901 (94.4%) | 99,874 (93.1%) |
+| of which visible (chat, tool arguments, plan JSON) | 39,257 (5.1%) | 7,071 (6.6%) |
+
+- **The cap failure is reasoning, not narration.** 93% of the 107,322 output units were
+  reasoning. Visible output was 6.6%, a slightly larger share than before the style
+  block, so cutting chat did not make the model's output lighter and loosening chat
+  would not have bought back the 100,000 cap. Chat is not where the budget went.
+- **A link to the malformed plans is plausible but unproven.** Both invalid
+  `submitPlan` calls were the ones carrying an empty `chatMessage`, each with one
+  stray closing brace, which fits a model fumbling a field it is told to leave empty.
+  Two samples; the previous run's 7 of 279 (2.5%) happened before the style block, so
+  the brace problem is not new.
+- **One thing chat would give back:** a short status line while working is also the
+  player's only signal. The run went 24 minutes (03:06 to 03:29) with no chat at all and
+  ended blocked with no message. An occasional line, and always a line on a blocker,
+  would have covered that and does not require the model to narrate every turn.
+
+How to test it, next run, without guessing: keep the current block as arm A and a looser
+block (chat allowed when a step closes or a batch fails, empty otherwise) as arm B, and
+compare per arm: invalid `submitPlan` rate, reasoning tokens per round, non-empty chat
+share, and whether a blocked or failed request produced any player-visible message.
+The cap problem needs the separate fix listed under regressions (the budget per request).
+
 ## Think time per round
 
 `node deploy/pterodactyl/runtime-v8/think-time-report.mjs data/logs/sgluna-prompts.jsonl`
