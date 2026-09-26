@@ -198,6 +198,69 @@ later.
   used only if the world at the finish matches what it assumed (first slice of
   run-ahead, `NPC_PLANNING_ROADMAP.md` "Parallel work and run-ahead planning").
 
+## W2c — a plan that runs long must trigger a parallelization review
+
+Owner direction, 2026-09-26, from the steam-power live run
+(`docs/validation/E2E_STEAM_POWER_2026-09-26.md`). The NPC is still single-threaded:
+asked for steam power and an electric drill, it committed one batch of four
+hand-mining operations (80 coal, 60 stone, 180 iron ore, 70 copper ore = 390 ore) as
+step 1 of 6. Hand mining is one serial lane, about 2 s per ore at the character's
+speed. Measured in that run: coal + stone (140 items) took about 4.9 min of game time,
+so the step needs roughly 13-14 min before any smelting, research or building starts.
+No burner drill, no second lane, and no time figure was ever put next to the plan.
+
+What already exists, and what the run showed:
+
+- W1 facts and `estimateProductionTime` (which also covers hand mining and hand
+  crafting) are in the system prompt and the tool list. The model never called
+  `getMiningDetails` or `estimateProductionTime` in this run (tool calls: one inventory,
+  one actor status, one nearby scan, four long-range searches, four recipe lookups).
+  Offering a tool is not enough; nothing makes the plan face its own duration.
+- The harness computes no duration for a committed plan, step or batch. There is no
+  expected finish, no elapsed-vs-expected, and nothing that notices "this step will
+  take 14 minutes on one lane".
+- Planning itself is slow and serial with the world: 239 s of think time (4 rounds)
+  before the first action, of which one round was 162 s at `max` effort.
+
+**Rule.** When a work plan (a step, a batch, or the sum of the remaining steps) is
+expected to take long, the planner must be asked to look for parallelism before the
+plan runs, and again when a running step overruns. The harness supplies the numbers
+and the trigger; the LLM chooses how to parallelize, with the scale-out skill (W4). No
+hard-wired build orders (see "Rules for this work").
+
+- [ ] **Harness time estimate per plan step and batch.** From the operations in an
+  admitted batch and the step's completion contract, compute the expected serial time
+  on the actor's own lane (hand mining, hand crafting from W1 rates; walking is
+  excluded and flagged as excluded) and, where machines exist, on machine lanes. Put it
+  on the task board step (`expected_seconds`, `lane`, `basis`) and in observations
+  and the Debug window next to elapsed time. Arithmetic over prototype rates only, the
+  same source as `estimateProductionTime`. This is the "time calculation from the
+  harness" the plan was missing for whole plans; W1 only answers when the model asks.
+- [ ] **Elapsed vs expected.** Track the wall/game time each step has been running
+  against its estimate. Overrun (elapsed above a factor of the estimate) is a fact in
+  the next observation, not something the model must remember.
+- [ ] **Long-plan trigger.** When the estimate for the active step, or for the
+  committed plan, crosses a threshold (start at 5 min for one step, 20 min for the
+  remaining plan; tune from traces) and the work is on a single lane, the planner
+  request carries a parallelization prompt: the estimate, the lane it sits on, and the
+  W1 tools to test alternatives (`estimateProductionTime` with more machines or a
+  second lane). A batch that runs while the planner thinks is the same mechanism as
+  W2b run-ahead. The model may decline with a reason; the reason is traced.
+- [ ] **Plan-time check at commit.** A plan whose estimate exceeds the threshold and
+  whose trace shows no estimate tool call gets one steering round ("your step 1 is
+  about 13 min of hand mining; consider a burner drill + furnace lane or crafting
+  while mining") before it runs. Bounded to one round per plan revision, like the
+  other steering messages.
+- [ ] **What "parallel" means here** (mechanics only, strategy stays with skills):
+  more machines on the same job (W4); different work at once, for example the native
+  hand-craft queue while the character mines, subject to the `native_queue_busy` rule
+  (Wave 2 design note in "Along the way" and Later: concurrent operations).
+- [ ] **Regression cases.** Unit: a four-op hand-mining batch of 390 ore produces an
+  estimate near 13 min on the actor lane and trips the long-plan trigger; a batch of
+  10 ore does not. Trace test: the steering message is sent once per revision and
+  carries the estimate. Engine lane: measured hand-mining seconds per ore matches the
+  computed rate (extends item 2.4).
+
 ## W3 — production-rate goals (plan 2)
 
 Design: `docs/NPC_PLANNING_ROADMAP.md` "Production goals are rate goals".
@@ -264,6 +327,7 @@ is `provider.mjs`/`npc-agent-loop.mjs`. All four can run at once.
 | 2.3 | Engine coverage for the 2.0 `crafting_speed` fix | `solveProduction` with a machine selection and prototype details for crafting machines, in an existing lane (they raised live before `6476fdc`) | Sonnet |
 | 2.4 | Hand-craft / hand-mining modifiers | W1 assumed the force and character modifiers add; measure it in the engine lane | Sonnet |
 | 2.5 | Waits from game data | W2b first item: expected finish for a running step from W1 rates and live machine state, used to schedule the next planner wake-up | Opus |
+| 2.6 | Plan duration estimate and parallelization trigger | W2c: harness estimate per step and batch, elapsed vs expected, a long-plan trigger that asks the planner to look for parallelism, a steering round at commit. Live case: 390 ore of hand mining in one step (2026-09-26 steam-power run) | Opus |
 
 ### Wave 3: goals that prove production
 
