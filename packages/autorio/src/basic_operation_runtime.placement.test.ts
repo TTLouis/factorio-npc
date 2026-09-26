@@ -105,6 +105,23 @@ describe('precise placement runtime', () => {
     })
   })
 
+  it('snaps an auto-picked position onto the tile grid when no coordinate is given', () => {
+    const f = fixture()
+    ;(f.actor as any).position = { x: 8.18359375, y: 0.31640625 }
+    f.surface.find_non_colliding_position.mockImplementation((_name: string, origin: { x: number, y: number }) => ({ x: origin.x + 1, y: origin.y }))
+    expect(f.controller.submit_placement('steel-chest')).toBe(true)
+
+    const result = f.runtime.state_placing(f.actor)
+
+    expect(result?.[0]).toBe(true)
+    expect(f.surface.find_non_colliding_position).toHaveBeenCalledWith('steel-chest', { x: 8.5, y: 0.5 }, 1, 1)
+    expect(f.surface.create_entity).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'steel-chest',
+      position: { x: 9.5, y: 0.5 },
+    }))
+    expect(f.controller.status().last_result).toMatchObject({ code: 'completed', completed: true })
+  })
+
   it('rejects the live burner-drill half-tile center before asking the engine to place it', () => {
     ;(globalThis as any).prototypes.item['burner-mining-drill'] = {}
     ;(globalThis as any).prototypes.entity['burner-mining-drill'] = {

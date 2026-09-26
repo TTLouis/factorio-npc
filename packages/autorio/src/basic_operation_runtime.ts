@@ -5,7 +5,7 @@ import { remember_entity_reference, resolve_exact_entity } from './entity_refere
 import { build_interaction_reach, entity_interaction_reach } from './interaction_range'
 import { MAX_MINING_START_REJECTIONS, mining_navigation_reach, mining_navigation_requires_movement, select_exact_mining_target, within_mining_reach } from './mining_reach'
 import { resolve_entity_placement_item } from './placement_item'
-import { placement_footprint, placement_grid_check } from './placement_geometry'
+import { placement_footprint, placement_grid_check, snap_placement_center } from './placement_geometry'
 import type { new_task_manager } from './task_manager'
 import type { PlayerParametersMineEntity, PlayerParametersWalkToEntity } from './types'
 import { TaskStates } from './types'
@@ -366,18 +366,23 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       return [false, 'Requested placement position is out of build range']
     }
 
-    if (!task.position) {
-      task.position = surface.find_non_colliding_position(task.entity_name, actor.position, 1, 1)
-      if (!task.position) {
-        controller.fail(actor, task, 'no_position')
-        return [false, 'Could not find a valid position to place the entity']
-      }
-    }
-
     const prototype = prototypes.entity[task.entity_name]
     if (!prototype) {
       controller.fail(actor, task, 'unknown_entity')
       return [false, `Unknown entity prototype ${task.entity_name}`]
+    }
+
+    if (!task.position) {
+      // The engine searches in whole steps from its origin, so start on the
+      // entity's grid and snap the answer: an auto-picked spot must pass the
+      // same grid check as a requested one.
+      const origin = snap_placement_center(prototype, actor.position, task.direction)
+      const found = surface.find_non_colliding_position(task.entity_name, origin, 1, 1)
+      if (!found) {
+        controller.fail(actor, task, 'no_position')
+        return [false, 'Could not find a valid position to place the entity']
+      }
+      task.position = snap_placement_center(prototype, found, task.direction)
     }
 
     const footprint = placement_footprint(prototype, task.position, task.direction)
