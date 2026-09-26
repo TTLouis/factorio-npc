@@ -296,6 +296,38 @@ hard-wired build orders (see "Rules for this work").
   carries the estimate. Engine lane: measured hand-mining seconds per ore matches the
   computed rate (extends item 2.4).
 
+## W2d — usage and price efficiency
+
+Owner direction, 2026-09-26 (steam-power run, `docs/validation/E2E_STEAM_POWER_2026-09-26.md`):
+loosening how the model is held back (chat style, output budgets) means cost has to
+be tracked alongside time. The run spent about 1.01M provider units (904k input, 68% of it
+cached; 107k output, 93% reasoning) and closed one step. No price is configured anywhere.
+
+- [ ] **Cost accounting in the trace and Debug window.** Units per request already
+  exist; add a price table setting per provider/model (input, cached input, output; no
+  default guessed in code, empty means "units only") and show cost per request, per step,
+  per goal, and cost per verified step. Cached input is its own rate.
+- [ ] **Cost of rounds with no world change.** Count spend on observation-only rounds,
+  recovery rounds, duplicate tool calls, invalid plan submissions, and rounds after a plan
+  is already blocked. That is the waste the harness can remove.
+- [ ] **Budget per goal, not only per request.** Today the cap is per request
+  generation (100,000 output units) and a request can span a whole goal. A goal-level
+  budget in units or cost, with a warning threshold shown to the player, and a bounded
+  request budget that hands off at a step boundary (the existing handoff mechanism)
+  instead of failing.
+- [ ] **Effort follows value.** Output is 90% high/max effort. Continue item 1.3 (effort
+  per round), and measure it: cost per verified step by policy reason, so a policy that
+  spends a lot for no closed step is visible.
+- [ ] **Cache discipline.** Keep the stable prompt prefix stable (the two recovery rounds
+  had 26% cache hit); track cache-miss input share per round type.
+- [ ] **Time and cost together.** The plan-duration estimate (W2c) and the cost estimate
+  use the same round accounting; a parallelization or run-ahead decision should show its
+  extra cost next to the time it saves (run-ahead spends model calls whose result may be
+  thrown away).
+- [ ] **Cheap and expensive roles.** With the roadmap agent plus per-plan agents idea
+  (`docs/NPC_PLANNING_ROADMAP.md`, "Agent split") the model per role becomes a cost
+  choice; W2d supplies the numbers to decide it.
+
 ## W3 — production-rate goals (plan 2)
 
 Design: `docs/NPC_PLANNING_ROADMAP.md` "Production goals are rate goals".
@@ -363,6 +395,7 @@ is `provider.mjs`/`npc-agent-loop.mjs`. All four can run at once.
 | 2.4 | Hand-craft / hand-mining modifiers | W1 assumed the force and character modifiers add; measure it in the engine lane | Sonnet |
 | 2.5 | Waits from game data | W2b first item: expected finish for a running step from W1 rates and live machine state, used to schedule the next planner wake-up | Opus |
 | 2.6 | Plan duration estimate and parallelization trigger | W2c: harness estimate per step and batch, elapsed vs expected, a long-plan trigger that asks the planner to look for parallelism, a steering round at commit. Live case: 390 ore of hand mining in one step (2026-09-26 steam-power run) | Opus |
+| 2.7 | Cost accounting and goal-level budget | W2d: price table setting, cost per request/step/goal and per verified step, waste rounds counted, goal budget with a player-visible warning | Opus |
 
 ### Wave 3: goals that prove production
 

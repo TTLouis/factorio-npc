@@ -214,6 +214,57 @@ compare per arm: invalid `submitPlan` rate, reasoning tokens per round, non-empt
 share, and whether a blocked or failed request produced any player-visible message.
 The cap problem needs the separate fix listed under regressions (the budget per request).
 
+## Usage and price efficiency
+
+Owner, 2026-09-26: if the style and budget rules are loosened, usage and price
+efficiency has to be a first-class concern too. No price table exists in the repo and
+none is assumed here; the numbers below are provider units from the trace, so any price
+is a multiplication once the rates are configured. Price per outcome is unconfirmed.
+
+Whole run (37 provider calls, 38.7 min, 300 requests per hour allowed, about 57 used):
+
+| Measure | Value |
+|---|---|
+| Input units | 904,658 (614,272 cached, 67.9%; 290,386 cache miss) |
+| Output units | 107,322 (99,874 reasoning) |
+| Total units | 1,011,980 |
+| Verified outcomes | 1 step (step 1); no goal, no power |
+| Units per verified step | about 1.0 million (step 1 itself cost far less; the rest bought nothing that closed) |
+
+| Round type | Rounds | Input | Cached | Output | Output per round |
+|---|---|---|---|---|---|
+| `plan_authoring` (max) | 4 | 93,107 | 76% | 42,915 | 10,729 |
+| `ordinary_replan` (high) | 7 | 206,838 | 74% | 34,079 | 4,868 |
+| `ordinary_planning` (high) | 10 | 327,087 | 66% | 19,664 | 1,966 |
+| `deterministic_completion` (low) | 14 | 233,117 | 69% | 10,287 | 735 |
+| `strict_recovery` | 2 | 44,509 | 26% | 377 | 189 |
+
+Observations that matter for cost:
+
+- **Effort drives output cost.** The 21 `high` and `max` rounds produced 90% of the
+  output (96,658 of 107,322); the 14 `low` rounds produced 10% (10,287). Plan authoring
+  alone was 40% of output in 4 rounds, one round at 27,816.
+- **Input dominates volume, and cache reuse is uneven.** 904k input against 107k output.
+  Cache hit is 66 to 76% on normal rounds and 26% on the two recovery rounds, which pay
+  nearly full input price for a two-second fix.
+- **Rounds bought little.** Fourteen `deterministic_completion` rounds averaged 735
+  output units, cheap; but ten `ordinary_planning` and seven `ordinary_replan` rounds
+  spent 53,743 output units, and the last four (03:25 to 03:27) spent 17,000 output units
+  on a state that then failed anyway.
+- **Waste signals in the trace:** 4 duplicate tool calls, 3 `duplicate_observation` and
+  5 observation-pressure recoveries (rounds that observed again instead of acting), 2
+  invalid plan submissions that each cost a re-planning round, one request that failed at
+  the cap after spending roughly a million units for a blocked plan.
+- **Time and money move together.** The 10 minutes of provider time was also the spend.
+  A plan that waits with the machines running, or a step that needs one cheap round
+  instead of a 50 s high-effort one, saves both.
+
+Suggested metrics for the next run (data only; see W2d in
+`docs/PARALLEL_PRODUCTION_WORK_PLAN.md`): units and estimated cost per verified step,
+per goal and per game minute of progress; cache-miss input share; output share by effort
+level; cost of rounds that led to no world change (observation-only, recovery,
+duplicate); and units spent after a plan is already blocked.
+
 ## Think time per round
 
 `node deploy/pterodactyl/runtime-v8/think-time-report.mjs data/logs/sgluna-prompts.jsonl`
