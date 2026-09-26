@@ -146,6 +146,13 @@ Deployed locally at `6476fdc`. Plan and checklist:
   are checked at parse time and go back to the planner as a correction. After a
   resume, a satisfied step closes on the next turn (owner's choice).
 - **Router replies were all traced as invalid plans** (`109bc90`): trace-only fix.
+- **DeepSeek chat narration** (unit evidence only): DeepSeek filled chatMessage
+  with a status line on nearly every turn and narrated before tool calls. A
+  provider style block (`PROVIDER_STYLE_PROMPTS` in `provider-base.mjs`) is now
+  appended to the system message for the `deepseek` profile only: chatMessage
+  stays empty while working and is used for replies, decisions, BLOCKED: reports
+  and verified completion; content stays empty with tool calls. The interaction
+  router keeps its own JSON-reply prompt. Not yet confirmed in a live run.
 - **Recipe and mining rate facts** (W1, merge `96418eb`): `getRecipeDetails` machine
   rates and hand-craft time, new `getMiningDetails` and `estimateProductionTime`
   tools. The `production` engine lane checks the rates against prototypes and a

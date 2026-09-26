@@ -528,3 +528,34 @@ test('retired hierarchy trigger names no longer force a hidden full-planner path
   assert.equal(seen.body.reasoning_effort, 'low')
   assert.equal(seen.body.max_tokens, 3000)
 })
+
+test('the deepseek profile appends its terse output style to the system message', async () => {
+  const { seen } = await captureRequest([
+    { role: 'system', content: 'system' },
+    { role: 'user', content: '[CHAT] tester: build a furnace' },
+  ], { allowTools: true })
+
+  const system = seen.body.messages[0].content
+  assert.ok(system.startsWith('system\n\n## Output style for this provider'))
+  assert.match(system, /Leave it "" while you are simply working/)
+  assert.match(system, /leave the assistant content empty/)
+  assert.equal(seen.body.messages.filter(message => message.role === 'system').length, 1)
+})
+
+test('other provider profiles keep the shared system message unchanged', async () => {
+  const { seen } = await captureRequest([
+    { role: 'system', content: 'system' },
+    { role: 'user', content: '[CHAT] tester: build a furnace' },
+  ], { allowTools: true }, config({ profile: 'generic', model: 'generic-model' }))
+
+  assert.equal(seen.body.messages[0].content, 'system')
+})
+
+test('the interaction router keeps its JSON-reply prompt without the provider style', async () => {
+  const { seen } = await captureRequest([
+    { role: 'system', content: 'router system' },
+    { role: 'user', content: '[CHAT] tester: hello' },
+  ], { allowTools: false, interactionRouter: true })
+
+  assert.equal(seen.body.messages[0].content, 'router system')
+})

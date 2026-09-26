@@ -39,6 +39,35 @@ const PROVIDER_PROFILES = Object.freeze({
     structured_output: 'tools_or_json',
   }),
 })
+// Output style per provider profile, appended to the system message for that
+// profile only. DeepSeek narrates every turn (a status chatMessage and prose
+// before tool calls) although the shared rules ask for an empty chatMessage
+// while it is simply working, so its block restates that rule more firmly.
+const PROVIDER_STYLE_PROMPTS = Object.freeze({
+  deepseek: `## Output style for this provider
+
+Keep every turn terse. This refines the chatMessage guidance above; the "BLOCKED: " contract is unchanged.
+- chatMessage is posted to the player's in-game chat. Leave it "" while you are simply working, including before an ordinary operation batch. Fill it only to answer the player, to ask for a decision the player must make, for a "BLOCKED: " report, or for verified completion of the goal.
+- When you do write chatMessage, use one short sentence (two at most for a BLOCKED: report). Do not restate the plan, coordinates, unit numbers, receipts or what you just observed.
+- When you call tools, leave the assistant content empty. Do not announce what you are about to do or summarise tool results; the harness records them.`,
+})
+
+export function providerStylePrompt(profileId) {
+  return Object.hasOwn(PROVIDER_STYLE_PROMPTS, profileId) ? PROVIDER_STYLE_PROMPTS[profileId] : undefined
+}
+
+export function applyProviderStylePrompt(messages, profileId) {
+  const style = providerStylePrompt(profileId)
+  if (!style) return messages
+  const index = messages.findIndex(message => message?.role === 'system' && typeof message.content === 'string')
+  if (index < 0) return messages
+  const output = messages.slice()
+  output[index] = { ...output[index], content: `${output[index].content}
+
+${style}` }
+  return output
+}
+
 const REQUEST_BODY_PATCH_KEYS = new Set(['max_tokens', 'max_completion_tokens', 'reasoning_effort', 'thinking', 'response_format'])
 const PLAN_STATE_MARKER = '[PLAN_STATE]' // legacy persisted/runtime compatibility
 const RUNTIME_COMPAT_STATE_MARKER = '[RUNTIME_COMPAT_STATE]'
@@ -1016,9 +1045,11 @@ export async function providerRequest(config, messages, {
   check(!allowTools || capability.tool_support === true, 'Provider profile does not allow tool calls')
   const disableThinking = compactContinuation && capability.thinking_control === 'deepseek'
   const compactReasoningDisabled = outputBudgetRecovery && capability.reasoning_effort === true
+  const steeredMessages = applySteeringMessages(compactedMessages, messages)
   const body = {
     model: config.model,
-    messages: applySteeringMessages(compactedMessages, messages),
+    // The interaction router answers in JSON content, so it keeps its own prompt.
+    messages: interactionRouter ? steeredMessages : applyProviderStylePrompt(steeredMessages, capability.id),
   }
   body[capability.token_field] = compactContinuation
     ? ((disableThinking || compactReasoningDisabled) ? COMPLETION_MAX_TOKENS : FALLBACK_CONTINUATION_MAX_TOKENS)
