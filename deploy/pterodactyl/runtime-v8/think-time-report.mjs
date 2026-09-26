@@ -10,10 +10,6 @@ import { parseJsonl } from './debug-report.mjs'
 // named in the events themselves (ts, round, recovery_attempt, reasoning
 // policy, diagnostic/finish codes, and normalized token counts).
 
-function safeNumber(value) {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
-}
-
 function safeInteger(value) {
   return Number.isSafeInteger(value) ? value : undefined
 }
