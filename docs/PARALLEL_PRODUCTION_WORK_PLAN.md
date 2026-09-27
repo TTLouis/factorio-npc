@@ -443,12 +443,96 @@ agent or run one after another; the rest run in parallel worktrees.
 
 - [ ] Fetch, read the peers' commits since `cfafed8f`, and run `scripts/test-local.sh all`
   on HEAD; record that SHA here as the week's baseline.
+- [ ] **Owner + Claude: discuss the context-isolated delegation / Jev-first proposal
+  below before fixing the Wave 3 implementation order.** This is a design discussion,
+  not an already-approved architecture change.
 - [ ] Start wave 1 by group (A, B, C, D in parallel).
 - [ ] Owner, before the first 4.4 run: in LM Studio, load `qwen3-coder-30b-a3b-instruct`
   with a 64k context and turn on the server (and "serve on local network" if 1.9 finds
   it is needed).
 - [ ] Owner, before wave 5: put the OpenRouter key in the gitignored `.env` (never
   printed or committed).
+
+### Monday discussion proposal: context-isolated delegation, Jev-first where it fits
+
+**Owner suggestion, 2026-09-27 — discuss with Claude before implementation; not yet a
+durable architecture decision.**
+
+The first reason to add delegation may be **context isolation**, before concurrency.
+The 2026-09-26 steam run showed the cost of one execution conversation carrying most
+of a long goal: one request accumulated about 904k input units and eventually died at
+the request-wide output cap. A minimal delegation spine could make durable state, not
+a long-lived model transcript, the continuity mechanism.
+
+Candidate shape to discuss:
+
+```text
+durable reducer / world truth
+        |
+        +--> fresh roadmap-agent call at a planning boundary
+        |       -> proposal / selected next slice -> reducer
+        |
+        +--> fresh plan-agent conversation for one bounded slice
+                -> operations -> receipts / verified evidence -> reducer
+                -> discard that conversation when the slice closes
+```
+
+Start **sequentially with one physical NPC body**. Do not require concurrent plan
+agents, lane reservations, multiple bodies, or swarm execution just to gain bounded
+contexts. Those can follow after the handoff contract is proven.
+
+The harness-built handoff should be bounded and derived from authoritative state rather
+than copying the historical transcript or asking an LLM to summarize itself. Candidate
+fields are: goal definition, current Roadmap Shelf node, committed plan/slice, active
+step, verified completion evidence, relevant current world facts, blockers/failures,
+selected skill references, and the role's model/effort/output budget. Generative prose
+may annotate this packet, but must not become the only durable continuation state.
+
+**Jev-first bias.** Use Jev as much as its TypeSafe judgment model genuinely permits,
+so that the generative agents receive less irrelevant context and wake less often.
+Candidates to discuss:
+
+- use Jev's existing typed interaction routing for low-ambiguity lifecycle intent and
+  conflict signals;
+- use observation-relevance Nouls to select which fresh deterministic fact families
+  belong in a plan-agent handoff or should be refreshed before the agent wakes;
+- use Jev to rank bounded skill candidates and complete runtime-generated candidate
+  choices instead of asking the Main LLM to search broad lists;
+- use Jev's canonical route / reasoning-effort / horizon judgments to decide whether a
+  healthy slice can continue, needs a bounded observation, or deserves a fresh
+  plan-agent wake;
+- use advisory steering / next-shelf-node selection at roadmap boundaries when the
+  runtime supplies the complete candidate set and evidence needed for the question;
+- trace these judgments against later outcomes so responsibilities that do not save
+  context, calls, time, or recovery cost can be removed.
+
+Keep the authority boundary unchanged: Jev does **not** manufacture world facts, produce
+the authoritative handoff summary, mutate committed plan semantics, declare completion,
+or replace deterministic admission/preflight. The reducer/runtime composes the packet
+and owns truth; Jev selects, ranks, classifies and routes within bounded typed choices.
+
+Questions for Monday:
+
+1. Is the first delegation unit one committed plan slice, one semantic step, or an
+   adaptive boundary with a hard context/budget ceiling?
+2. Should the roadmap agent also be disposable/stateless between boundaries, with the
+   Roadmap Shelf + reducer as its memory?
+3. Can Jev observation relevance directly choose the evidence families included in a
+   new plan-agent packet, while deterministic code always includes mandatory identity,
+   lifecycle and completion facts?
+4. When a plan agent approaches its context/output budget, can the harness checkpoint
+   authoritative evidence and roll to a fresh agent automatically instead of treating
+   budget exhaustion as a task failure?
+5. Should the minimum implementation order become: fix the transfer correctness bug
+   (1.6) -> delegation contract (3.1) -> reducer-only writes (3.3) -> fresh bounded
+   plan-agent context (3.4) -> fit 1.3/1.5 budgets around those bounded agents -> add
+   concurrency/run-ahead only after the sequential handoff is proven?
+6. Which of those handoff/routing decisions can be expressed as genuine TypeSafe
+   Choice/Noul/Score questions, and which must remain deterministic code or Main-LLM
+   semantic work?
+
+This proposal is intentionally narrower than the swarm proper: **one durable brain
+state, many short-lived reasoning sessions, one body initially**.
 
 Small gaps from the steam run, added to existing items:
 
