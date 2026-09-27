@@ -6,6 +6,7 @@ on:
       - main
       - feat/npc-transition-work
       - experiment/jev-agent-architecture
+      - experiment/jev-only-agent
 
   pull_request:
     branches:
@@ -151,7 +152,7 @@ jobs:
         run: node --test deploy/pterodactyl/staging/*.test.mjs deploy/pterodactyl/runtime-v8/*.test.mjs
 
   factorio-npc-deterministic:
-    if: github.ref == 'refs/heads/feat/npc-transition-work' || github.ref == 'refs/heads/experiment/jev-agent-architecture' || github.base_ref == 'feat/npc-transition-work' || github.base_ref == 'experiment/jev-agent-architecture'
+    if: github.ref == 'refs/heads/feat/npc-transition-work' || github.ref == 'refs/heads/experiment/jev-agent-architecture' || github.ref == 'refs/heads/experiment/jev-only-agent' || github.base_ref == 'feat/npc-transition-work' || github.base_ref == 'experiment/jev-agent-architecture' || github.base_ref == 'experiment/jev-only-agent'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
