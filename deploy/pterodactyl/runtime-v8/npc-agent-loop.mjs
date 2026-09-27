@@ -2685,6 +2685,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async runJevOnlyTurn() {
     const current = await this.assertCurrent()
     const generation = this.generation
+    // JEV-only candidates are rebuilt from this decision's authoritative read.
+    // Do not let an entity remembered from a previous continuation remain
+    // selectable merely because the actor/epoch has not changed.
+    this.liveEntityObservations = new Map()
     const rawNearby = String(await this.rcon.command(toolCommand('getNearbyEntities', {
       radius: JEV_ONLY_NEARBY_RADIUS,
       limit: JEV_ONLY_NAVIGATION_MAX_CANDIDATES,
