@@ -123,6 +123,9 @@ const MODEL_CORRECTABLE_PREFLIGHT_RETRY_BUDGET = 1
 export const OPERATION_FAILURE_RECOVERABLE_KIND = 'operation_failure_recoverable'
 const RESEARCH_PREFLIGHT_RETRY_BUDGET = 2
 const LOW_RISK_NAVIGATION_PROJECTION_MAX_CANDIDATES = 8
+const REASONING_MODES = new Set(['llm_jev', 'jev_only'])
+const JEV_ONLY_NEARBY_RADIUS = 64
+const JEV_ONLY_NAVIGATION_MAX_CANDIDATES = 8
 // Once the system commits a plan, its semantic content is immutable; later batches fulfil it rather than rewriting it.
 const FROZEN_PLAN_STATUSES = new Set([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING])
 const WORLD_STATE_REQUIREMENT_KINDS = new Set(['inventory_count', 'entity_inventory_count', 'entity_exists', 'entity_state'])
@@ -2243,6 +2246,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.interactionDecisionProvider = this.recordedDecisionProvider(options.interactionDecisionProvider)
     this.steeringDecisionProvider = this.recordedDecisionProvider(options.steeringDecisionProvider)
     this.operationProjectionDecisionProvider = this.recordedDecisionProvider(options.operationProjectionDecisionProvider)
+    this.reasoningMode = options.reasoningMode ?? 'llm_jev'
+    if (!REASONING_MODES.has(this.reasoningMode)) {
+      throw new AgentLoopError(`reasoningMode must be one of: ${[...REASONING_MODES].join(', ')}`)
+    }
+    if (this.reasoningMode === 'jev_only' && !this.operationProjectionDecisionProvider) {
+      throw new AgentLoopError('reasoningMode=jev_only requires operationProjectionDecisionProvider')
+    }
     this.interactionAbort = null
     this.postStepDecisionAbort = null
     this.recoveryDecisionAbort = null
@@ -2612,6 +2622,204 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           400,
         ),
       }))
+  }
+
+  jevOnlyNavigationProjectionCandidates() {
+    return [...(this.liveEntityObservations?.values?.() ?? [])]
+      .filter(observation => Number.isSafeInteger(observation?.unit_number)
+        && typeof observation?.name === 'string'
+        && observation.name.length > 0
+        && Number.isFinite(observation?.distance))
+      .sort((left, right) => left.distance - right.distance || left.unit_number - right.unit_number)
+      .slice(0, JEV_ONLY_NAVIGATION_MAX_CANDIDATES)
+      .map(observation => ({
+        id: `walk-unit-${observation.unit_number}`,
+        freshness_token: this.liveExactEntityFreshnessToken(observation.unit_number),
+        operation: {
+          name: 'walk_to_entity_exact',
+          args: { unit_number: observation.unit_number },
+        },
+        description: cleanMemoryText(
+          `Navigate to observed ${observation.name} unit ${observation.unit_number}`
+            + `${observation.type ? ` type ${observation.type}` : ''}`
+            + `${observation.position ? ` at (${observation.position.x}, ${observation.position.y})` : ''}`
+            + ` distance ${Number(observation.distance.toFixed(2))} from the controlled actor.`,
+          400,
+        ),
+      }))
+  }
+
+  async jevOnlyUnsupportedDecision(reason, {
+    route = 'unsupported_decision_space',
+    candidateCount = 0,
+  } = {}) {
+    const cleanReason = cleanMemoryText(reason, 600)
+    const chatMessage = `JEV-only mode cannot safely represent the next decision with its current finite candidate set: ${cleanReason}`
+    this.active = false
+    await this.traceEvent('jev_only.unsupported', {
+      route,
+      reason: cleanReason,
+      candidate_count: candidateCount,
+    })
+    await this.traceEvent('request.completed', {
+      chat_message: chatMessage,
+      outcome: 'jev_only_unsupported_decision_space',
+      usage: this.traceRequest?.usage,
+    })
+    this.traceRequest = null
+    return {
+      chatMessage,
+      plan: [],
+      currentStep: 0,
+      operations: [],
+      epoch: this.epoch?.epoch,
+      actorId: this.epoch?.actor_id,
+      goalStatus: 'unsupported',
+      blocker: {
+        class: 'jev_only_unsupported_decision_space',
+        reason: cleanReason,
+      },
+    }
+  }
+
+  async runJevOnlyTurn() {
+    const current = await this.assertCurrent()
+    const generation = this.generation
+    const rawNearby = String(await this.rcon.command(toolCommand('getNearbyEntities', {
+      radius: JEV_ONLY_NEARBY_RADIUS,
+      limit: JEV_ONLY_NAVIGATION_MAX_CANDIDATES,
+    }))).slice(0, 32000)
+    await this.assertCurrent()
+    if (generation !== this.generation) throw new AgentLoopError('JEV-only decision superseded')
+
+    this.recordLiveEntityToolResult('getNearbyEntities', rawNearby)
+    this.recordJevObservations(['getNearbyEntities'])
+    this.freshObservationSinceContinuation = true
+    await this.traceEvent('tool.result', {
+      phase: 'result',
+      name: 'getNearbyEntities',
+      cached: false,
+      original_output_chars: rawNearby.length,
+      output_chars: rawNearby.length,
+      jev_only: true,
+    })
+
+    const candidates = this.jevOnlyNavigationProjectionCandidates()
+    if (candidates.length === 0) {
+      return this.jevOnlyUnsupportedDecision(
+        'no nearby entity with a fresh authoritative unit identity is available for the navigation MVP',
+        { candidateCount: 0 },
+      )
+    }
+
+    const questions = typedProjectionQuestions({ scope: 'navigation', candidates })
+    const decisionId = `decision_${Date.now().toString(36)}_${(++this.decisionRequestSequence).toString(36)}`
+    const state = {
+      contract: 'jev_only_action_selection',
+      mode: 'navigation_mvp',
+      architecture: 'Jev chooses one complete harness-built operation; deterministic preflight and Autorio remain authoritative.',
+      message: this.requestInfo?.text ?? '',
+      actor: {
+        actor_id: current.actor_id,
+        epoch: current.epoch,
+      },
+      candidates: candidates.map(candidate => ({
+        id: candidate.id,
+        description: candidate.description,
+        operation: candidate.operation.name,
+      })),
+    }
+    await this.decisionTraceEvent('decision.request', {
+      decision_id: decisionId,
+      contract: 'jev_only_action_selection',
+      mode: 'active',
+      question_ids: Object.keys(questions),
+      candidate_count: candidates.length,
+    })
+
+    const controller = new AbortController()
+    this.operationProjectionAbort?.abort()
+    this.operationProjectionAbort = controller
+    const startedAt = Date.now()
+    try {
+      const response = await this.operationProjectionDecisionProvider(state, questions, {
+        epoch: current.epoch,
+        actorId: current.actor_id,
+        signal: controller.signal,
+      })
+      await this.assertCurrent()
+      if (generation !== this.generation) throw new AgentLoopError('JEV-only decision superseded')
+
+      const projection = parseTypedProjection(response, { scope: 'navigation', candidates })
+      const selectedUnit = Number.isSafeInteger(projection.operation?.args?.unit_number)
+        ? projection.operation.args.unit_number
+        : undefined
+      const currentObservation = selectedUnit === undefined ? undefined : this.liveObservedExactTarget(selectedUnit)
+      const routed = routeTypedProjectionByRisk(projection, {
+        currentFreshnessToken: currentObservation ? this.liveExactEntityFreshnessToken(selectedUnit) : undefined,
+      })
+      await this.decisionTraceEvent('decision.response', {
+        decision_id: decisionId,
+        contract: 'jev_only_action_selection',
+        mode: 'active',
+        provider: typeof response?.provider === 'string' ? response.provider : undefined,
+        model: typeof response?.model === 'string' ? response.model : undefined,
+        route: routed.route,
+        candidate_id: routed.candidate_id,
+        operation_type: routed.operation_type,
+        confidence: routed.confidence,
+        confidence_policy: routed.confidence_policy,
+        projection_failure: routed.projection_failure,
+        latency_ms: Date.now() - startedAt,
+      })
+
+      if (routed.route !== 'emit_operation' || routed.operation?.name !== 'walk_to_entity_exact') {
+        return this.jevOnlyUnsupportedDecision(
+          routed.projection_failure ?? `JEV selected route ${routed.route}`,
+          { route: routed.route, candidateCount: candidates.length },
+        )
+      }
+
+      const selected = this.liveObservedExactTarget(routed.operation.args.unit_number)
+      const step = selected
+        ? `Navigate to ${selected.name} at (${selected.position?.x ?? '?'}, ${selected.position?.y ?? '?'})`
+        : `Navigate to selected entity ${routed.operation.args.unit_number}`
+      const plan = {
+        chatMessage: selected
+          ? `JEV selected the observed ${selected.name} at distance ${Number(selected.distance?.toFixed?.(2) ?? selected.distance ?? 0)} as the next action.`
+          : 'JEV selected a grounded exact-navigation action.',
+        plan: [step],
+        currentStep: 0,
+        operations: [routed.operation],
+      }
+      await this.traceEvent('jev_only.action_selected', {
+        candidate_id: routed.candidate_id,
+        operation: routed.operation.name,
+        unit_number: routed.operation.args.unit_number,
+        confidence: routed.confidence,
+      })
+      return this.commitPlan(plan)
+    }
+    catch (error) {
+      await this.decisionTraceEvent('decision.fallback', {
+        decision_id: decisionId,
+        contract: 'jev_only_action_selection',
+        reason: error instanceof Error ? error.message : String(error),
+        fallback_target: 'fail_closed',
+      })
+      return this.jevOnlyUnsupportedDecision(
+        `JEV action selection failed: ${error instanceof Error ? error.message : String(error)}`,
+        { route: 'decision_provider_failure', candidateCount: candidates.length },
+      )
+    }
+    finally {
+      if (this.operationProjectionAbort === controller) this.operationProjectionAbort = null
+    }
+  }
+
+  async runTurn() {
+    if (this.reasoningMode === 'jev_only') return this.runJevOnlyTurn()
+    return super.runTurn()
   }
 
   async applyLowRiskTypedProjection(plan) {
@@ -4471,7 +4679,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       && planBefore?.provider_recovery?.kind === 'budget_handoff'
       && planBefore?.provider_recovery?.phase === 'planner_pending'
       && !healthyRuntime
-    const plannerShape = !resumeProviderBudgetHandoff
+    const plannerShape = this.reasoningMode !== 'jev_only'
+      && !resumeProviderBudgetHandoff
       && ['new_goal', 'amend_current', 'continue_current'].includes(intent)
       ? await this.requestInteractionPlannerShape(text, sender, taskStatus, planBefore, intent, routed.epoch)
       : undefined
@@ -4578,7 +4787,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       provider_budget_handoff_resume: resumeProviderBudgetHandoff,
     })
 
-    if (intent === 'new_goal'
+    if (this.reasoningMode !== 'jev_only'
+      && intent === 'new_goal'
       && this.steeringDecisionProvider
       && typeof this.memory.admitPlanningGoal === 'function'
       && typeof this.memory.evaluateSteeringAtBoundary === 'function') {
