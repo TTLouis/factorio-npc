@@ -119,8 +119,12 @@ export function configuration(raw = {}, env = process.env) {
   const factorioToken = cleanString(env.FACTORIO_TOKEN ?? '', 'FACTORIO_TOKEN', 128)
   check((factorioUsername === '') === (factorioToken === ''), 'FACTORIO_USERNAME and FACTORIO_TOKEN must both be set or both left blank')
 
+  const reasoningMode = cleanString(env.SGLUNA_REASONING_MODE ?? raw.reasoningMode ?? 'llm_jev', 'SGLUNA_REASONING_MODE', 32).toLowerCase()
+  check(['llm_jev', 'jev_only'].includes(reasoningMode), 'SGLUNA_REASONING_MODE must be llm_jev or jev_only')
+
   const config = {
     actorMode,
+    reasoningMode,
     chatPlayers: parseChatPlayers(cleanString(chatPlayersSource, 'SGLUNA_CHAT_PLAYERS', 512)),
     save: cleanString(env.SAVE_NAME ?? raw.save ?? '', 'SAVE_NAME', 160),
     model: cleanString(env.OPENAI_MODEL ?? raw.model ?? 'replace-me', 'OPENAI_MODEL', 200),
@@ -139,8 +143,13 @@ export function configuration(raw = {}, env = process.env) {
       public: factorioUsername !== '' && factorioToken !== '',
     },
   }
-  check(typeof config.key === 'string' && config.key.trim().length > 0 && !/[\r\n\0]/.test(config.key), 'OPENAI_API_KEY is missing or malformed')
-  providerEndpoint(config.base)
+  if (config.reasoningMode !== 'jev_only') {
+    check(typeof config.key === 'string' && config.key.trim().length > 0 && !/[\r\n\0]/.test(config.key), 'OPENAI_API_KEY is missing or malformed')
+    providerEndpoint(config.base)
+  }
+  else {
+    check(config.decisionProvider, 'SGLUNA_REASONING_MODE=jev_only requires DECISION_PROVIDER_API_KEY or TYPESAFE_API_KEY')
+  }
   return config
 }
 
@@ -2403,23 +2412,28 @@ export class Session {
       npcId: this.npcId,
       memory: new CanonicalTaskBoardMemory(),
       stateFile: path.join(this.root, '.airi', 'npc-state.json'),
-      provider: (messages, context) => this.provider({
-        base: this.config.base,
-        key: this.config.key,
-        model: this.config.model,
-        profile: this.config.profile,
-        timeoutMs: this.config.providerTimeoutMs,
-      }, messages, context),
-      interactionProvider: (messages, context) => this.provider({
-        base: this.config.base,
-        key: this.config.key,
-        model: this.config.model,
-        profile: this.config.profile,
-        timeoutMs: this.config.providerTimeoutMs,
-      }, messages, context),
+      reasoningMode: this.config.reasoningMode,
+      provider: this.config.reasoningMode === 'jev_only'
+        ? async () => { throw new Error('Main LLM provider is disabled in JEV-only mode') }
+        : (messages, context) => this.provider({
+            base: this.config.base,
+            key: this.config.key,
+            model: this.config.model,
+            profile: this.config.profile,
+            timeoutMs: this.config.providerTimeoutMs,
+          }, messages, context),
+      interactionProvider: this.config.reasoningMode === 'jev_only'
+        ? undefined
+        : (messages, context) => this.provider({
+            base: this.config.base,
+            key: this.config.key,
+            model: this.config.model,
+            profile: this.config.profile,
+            timeoutMs: this.config.providerTimeoutMs,
+          }, messages, context),
       // Production contract: every goal starts from a game-checkable goal
       // definition that the player sees in game.
-      goalDefinitionPolicy: 'required',
+      goalDefinitionPolicy: this.config.reasoningMode === 'jev_only' ? 'optional' : 'required',
       interactionDecisionProvider: jevDecisionProvider,
       steeringDecisionProvider: jevDecisionProvider,
       operationProjectionDecisionProvider: jevDecisionProvider,
