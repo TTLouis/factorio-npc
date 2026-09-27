@@ -22,11 +22,14 @@ services:
       CONTAINER_ROOT: /data
       SGLUNA_ACTOR_MODE: ${SGLUNA_ACTOR_MODE:-npc}
       SGLUNA_CHAT_PLAYERS: ${SGLUNA_CHAT_PLAYERS:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY in .env}
-      OPENAI_API_BASEURL: ${OPENAI_API_BASEURL:?Set OPENAI_API_BASEURL in .env}
-      OPENAI_MODEL: ${OPENAI_MODEL:?Set OPENAI_MODEL in .env}
+      SGLUNA_REASONING_MODE: ${SGLUNA_REASONING_MODE:-llm_jev}
+      # Main-LLM settings are validated by the runtime in llm_jev mode. They may
+      # remain empty in jev_only mode, where the Main LLM provider is disabled.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_API_BASEURL: ${OPENAI_API_BASEURL:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
       PROVIDER_TIMEOUT_MS: ${PROVIDER_TIMEOUT_MS:-300000}
-      # Optional Jev critic; empty leaves it off. Same dedicated key as compose.e2e.yml.
+      # Jev decision provider / cognitive coprocessor. Required in jev_only mode.
       TYPESAFE_API_KEY: ${JEV_TYPESAFE_API_KEY:-}
       SAVE_NAME: ${SAVE_NAME:-}
       FACTORIO_USERNAME: ${FACTORIO_USERNAME:-}
