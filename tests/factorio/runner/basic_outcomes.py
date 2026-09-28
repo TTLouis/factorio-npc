@@ -134,6 +134,7 @@ def run(client: Rcon, results: Path) -> None:
         'steam-power-bootstrap',
         'starter-mining-belt-output',
         'automation-science-bootstrap',
+        'scale-out-production-line',
     }
     require(expected_basic_skills.issubset(skill_ids), {'skills': sorted(skill_ids)})
 

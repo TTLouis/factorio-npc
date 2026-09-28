@@ -129,7 +129,7 @@ export const BASIC_SKILL_DEFINITIONS: any[] = [
   },
   {
     schema_version: 1,
-    revision: 2,
+    revision: 3,
     id: 'direct-miner-smelting',
     name: 'Direct Miner Smelting',
     kind: 'production',
@@ -174,11 +174,12 @@ export const BASIC_SKILL_DEFINITIONS: any[] = [
     confidence: confidence(),
     examples: [
       { summary: 'Bootstrap a few iron plates with existing early infrastructure.', notes: 'Prefer an already placed compatible miner/furnace pair when available; otherwise validate exact placement before building.' },
+      { summary: 'To grow beyond the first pair, or to meet a rate or deadline, follow skill scale-out-production-line.', notes: 'It sizes the pair count from the rate tools and covers the early snowball.' },
     ],
   },
   {
     schema_version: 1,
-    revision: 2,
+    revision: 3,
     id: 'starter-smelting-row',
     name: 'Starter Smelting Row',
     kind: 'production',
@@ -223,6 +224,7 @@ export const BASIC_SKILL_DEFINITIONS: any[] = [
     confidence: confidence(),
     examples: [
       { summary: 'Build a small iron or copper smelting row that can be extended later.', notes: 'For tiny goals, direct manual supply may be cheaper than building the full transport pattern.' },
+      { summary: 'To size the row for a rate or deadline, or to extend it, follow skill scale-out-production-line.', notes: 'It sizes the furnace count from the rate tools instead of a remembered ratio.' },
     ],
   },
   {
@@ -519,6 +521,64 @@ export const BASIC_SKILL_DEFINITIONS: any[] = [
     confidence: confidence(),
     examples: [
       { summary: 'Red science / 红瓶 bootstrap.', notes: 'In vanilla this often benefits from a compact intermediate-to-science relationship, but the current recipe graph is authoritative.' },
+    ],
+  },
+  {
+    schema_version: 1,
+    revision: 1,
+    id: 'scale-out-production-line',
+    name: 'Scale Out A Production Line',
+    kind: 'production',
+    stage: 'pattern',
+    status: 'candidate',
+    goal_tags: ['scale-out', 'scale', 'throughput', 'rate', 'per-minute', 'per-second', 'more-machines', 'expand', 'snowball', 'parallel', 'faster', 'deadline'],
+    summary: 'Grow a working production cell by copying it, with the machine count sized from measured game rates instead of remembered ratios. Ask the rate tools how long the job takes with N machines, choose the count that meets the rate or deadline and still pays back its own build time, then copy the proven cell using the footprints the placement tools return. Early on, snowball: the first pair\'s plates pay for the next drills and furnaces.',
+    source: SOURCE,
+    preconditions: [
+      { kind: 'bootstrap', subject: 'working-production-cell', description: 'At least one cell of the line (for example one miner feeding one furnace, or one assembler) is built and has been seen producing.' },
+      { kind: 'custom', subject: 'target-rate-or-deadline', description: 'The goal names a rate (items per minute), an amount with a deadline, or the planner judged the current single lane too slow.' },
+    ],
+    inputs: [{ item: 'working-production-cell', role: 'proven cell to copy' }, { item: 'machine-materials', role: 'plates and parts for the added machines' }],
+    outputs: [{ item: 'production-rate', role: 'more output per minute from identical cells' }],
+    topology: {
+      nodes: [
+        { id: 'proven-cell', role: 'The first cell, verified producing' },
+        { id: 'rate-check', role: 'Per-machine rate and whole-job time from the rate tools' },
+        { id: 'added-cells', role: 'Copies of the proven cell, placed from returned footprints' },
+        { id: 'shared-input', role: 'Ore, fuel or ingredient supply shared by the cells' },
+        { id: 'shared-output', role: 'Where finished items from all cells are collected' },
+      ],
+      relations: [
+        { kind: 'custom', from: 'rate-check', to: 'added-cells', description: 'Machine count = target rate / per-machine rate (getRecipeDetails for machines, getMiningDetails for drills); confirm the whole job with estimateProductionTime before building.' },
+        { kind: 'custom', from: 'proven-cell', to: 'added-cells', description: 'Copy the proven relative layout. Place each machine from getPlacementCandidates, using covers_position for output/drop points and the returned footprint to keep cells apart.' },
+        { kind: 'belt_input', from: 'shared-input', to: 'added-cells', description: 'Every added cell receives its inputs and fuel, not only the first one.' },
+        { kind: 'belt_output', from: 'added-cells', to: 'shared-output', description: 'Output from every cell reaches the collection point without blocking.' },
+      ],
+    },
+    constraints: [
+      { kind: 'capacity', description: 'Size machine counts from live rates (getRecipeDetails crafts per second and output per minute; getMiningDetails ore and fuel per minute per drill) and check the result with estimateProductionTime. Never use a remembered ratio.', validation: 'unvalidated', evidence_refs: [] },
+      { kind: 'capacity', description: 'Payback: each added machine costs crafting, materials, walking and placement time. Add it only when estimateProductionTime shows the time saved within the remaining job exceeds that cost; for a small job, fewer machines finish sooner.', validation: 'unvalidated', evidence_refs: [] },
+      { kind: 'capacity', description: 'A shared belt or inserter has its own limit; use getTransportCapacity before feeding many cells from one input. Do not assume lane or inserter throughput.', validation: 'unvalidated', evidence_refs: [] },
+      { kind: 'placement', description: 'Space cells by the footprint each placement candidate returns (tile size and world box); even-sized machines centre on whole tiles. Reserve the extension direction when building the first cell.', validation: 'unvalidated', evidence_refs: [] },
+      { kind: 'resource', description: 'Every added burner machine needs its own fuel supply; fuel burn per minute comes from getMiningDetails.', validation: 'unvalidated', evidence_refs: [] },
+    ],
+    parameters: [
+      { name: 'target_rate', description: 'Items per minute the goal asks for, if it names one.', required: false },
+      { name: 'deadline_minutes', description: 'Time the job should finish within, if it names one.', required: false },
+      { name: 'cell_skill', description: 'Skill id of the cell being copied, for example direct-miner-smelting or starter-smelting-row.', required: false },
+    ],
+    verification: verification(),
+    known_failure_modes: [
+      'Scaling before the first cell was seen producing, so every copy repeats its defect.',
+      'Machine count taken from a remembered ratio instead of the rate tools.',
+      'Adding machines to a small job where building them costs more time than they save.',
+      'New cells overlap or block the extension direction because footprints were not used.',
+      'Output capacity grows but the shared input, fuel or collection path cannot keep up.',
+    ],
+    confidence: confidence(),
+    examples: [
+      { summary: 'Snowball early plates: one burner drill feeding one furnace makes the plates for the next drill and furnace pair; repeat while estimateProductionTime shows the added pair still pays back.', notes: 'Counts come from the rate tools, never from this example.' },
+      { summary: 'Rate goal such as N plates per minute: per-furnace rate from getRecipeDetails, per-drill ore rate from getMiningDetails, pick counts, check with estimateProductionTime, then build.', notes: 'Deadline goals work the same way with a target time instead of a rate.' },
     ],
   },
 ]
