@@ -1,9 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { configuration } from './supervisor.mjs'
+import { configuration, jevStatusLine } from './supervisor.mjs'
 
-test('startup log shows Jev on when decision provider is configured', () => {
+test('jevStatusLine returns on when decision provider is configured', () => {
   const env = {
     OPENAI_API_KEY: 'test-main-key',
     OPENAI_MODEL: 'test-model',
@@ -13,30 +13,31 @@ test('startup log shows Jev on when decision provider is configured', () => {
     DECISION_PROVIDER_MODEL: 'jev-test-model',
   }
   const config = configuration({}, env)
-  assert.ok(config.decisionProvider, 'decisionProvider should be configured')
-  assert.match(
-    String(config.decisionProvider ? 'on' : 'off (no key)'),
-    /^on$/,
-    'Jev should be on'
-  )
+  const line = jevStatusLine(config)
+  assert.equal(line, 'Jev: on')
+  // Verify no part of the key appears in the output
+  assert.ok(!line.includes('test-key'), 'Key should not appear in status line')
+  const sixCharSubstrings = []
+  for (let i = 0; i <= 'test-key-12345'.length - 6; i++) {
+    sixCharSubstrings.push('test-key-12345'.substring(i, i + 6))
+  }
+  for (const substr of sixCharSubstrings) {
+    assert.ok(!line.includes(substr), `Key substring "${substr}" should not appear in status line`)
+  }
 })
 
-test('startup log shows Jev off when TYPESAFE_API_KEY is not set', () => {
+test('jevStatusLine returns off (no key) when decision provider is not configured', () => {
   const env = {
     OPENAI_API_KEY: 'test-main-key',
     OPENAI_MODEL: 'test-model',
     OPENAI_API_BASEURL: 'https://api.example.com/v1',
   }
   const config = configuration({}, env)
-  assert.equal(config.decisionProvider, undefined, 'decisionProvider should be undefined')
-  assert.match(
-    String(!config.decisionProvider ? 'off (no key)' : 'on'),
-    /^off \(no key\)$/,
-    'Jev should be off (no key)'
-  )
+  const line = jevStatusLine(config)
+  assert.equal(line, 'Jev: off (no key)')
 })
 
-test('startup log shows Jev off when TYPESAFE_API_KEY is empty', () => {
+test('jevStatusLine returns off (no key) when TYPESAFE_API_KEY is empty', () => {
   const env = {
     OPENAI_API_KEY: 'test-main-key',
     OPENAI_MODEL: 'test-model',
@@ -44,44 +45,6 @@ test('startup log shows Jev off when TYPESAFE_API_KEY is empty', () => {
     TYPESAFE_API_KEY: '',
   }
   const config = configuration({}, env)
-  assert.equal(config.decisionProvider, undefined, 'decisionProvider should be undefined when key is empty')
-  assert.match(
-    String(!config.decisionProvider ? 'off (no key)' : 'on'),
-    /^off \(no key\)$/,
-    'Jev should be off (no key) when TYPESAFE_API_KEY is empty'
-  )
-})
-
-test('startup log shows Jev off when only partial provider config is set', () => {
-  const env = {
-    OPENAI_API_KEY: 'test-main-key',
-    OPENAI_MODEL: 'test-model',
-    OPENAI_API_BASEURL: 'https://api.example.com/v1',
-    DECISION_PROVIDER_API_KEY: 'test-key',
-    // Missing URL and model
-  }
-  const config = configuration({}, env)
-  // This should succeed because decisionProviderConfiguration checks for key first
-  const status = config.decisionProvider ? 'on' : 'off (no key)'
-  assert.ok(
-    status === 'on' || status === 'off (no key)',
-    'Jev status should be valid'
-  )
-})
-
-test('no API key or token is ever printed in status log', () => {
-  const testKey = 'secret-test-key-xyz'
-  const env = {
-    OPENAI_API_KEY: 'test-main-key',
-    OPENAI_MODEL: 'test-model',
-    OPENAI_API_BASEURL: 'https://api.example.com/v1',
-    DECISION_PROVIDER_API_KEY: testKey,
-    DECISION_PROVIDER_API_URL: 'https://api.example.com/jev',
-    DECISION_PROVIDER_MODEL: 'jev-test-model',
-  }
-  const config = configuration({}, env)
-  const status = config.decisionProvider ? 'on' : 'off (no key)'
-  assert.ok(!status.includes(testKey), 'Key should not appear in status message')
-  assert.ok(!status.includes('secret'), 'Key should not appear in status message')
-  assert.match(status, /^(on|off \(no key\))$/, 'Status should only contain safe text')
+  const line = jevStatusLine(config)
+  assert.equal(line, 'Jev: off (no key)')
 })

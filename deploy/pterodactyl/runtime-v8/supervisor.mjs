@@ -144,6 +144,10 @@ export function configuration(raw = {}, env = process.env) {
   return config
 }
 
+export function jevStatusLine(config) {
+  return `Jev: ${config.decisionProvider ? 'on' : 'off (no key)'}`
+}
+
 // Docker normally keeps the generated RCON listener private inside the
 // container.  This opt-in configuration exists for local integration tests;
 // callers must still publish the port explicitly in their Compose override.
@@ -2750,7 +2754,7 @@ async function main() {
   log(`User Factorio mod directory: ${path.join(root, 'mods')}`)
   log(`Managed runtime mod directory: ${path.join(root, '.airi', 'run-*', 'mods')} (internal; do not edit)`)
   log(`Operator help: ${path.join(root, 'README-SGLUNA.txt')}`)
-  log(`Jev: ${config.decisionProvider ? 'on' : 'off (no key)'}`)
+  log(jevStatusLine(config))
 
   const handleSignal = () => {
     requestedStop = true

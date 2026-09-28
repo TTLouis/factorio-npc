@@ -31,4 +31,11 @@ describe('SGLuna debug layout', () => {
     expect(source).toContain("add_row(errors, 'Last error'")
     expect(source).toContain('build_debug_activity(root)')
   })
+
+  it('displays three Jev status states: off, unknown, and on', () => {
+    const source = readFileSync(new URL('./task_board_debug_render.ts', import.meta.url), 'utf8')
+    // Verify the logic handles three states
+    expect(source).toContain("jev_measurement === 'jev_off' ? 'Jev: off (no key)'")
+    expect(source).toContain("jev_measurement.length === 0 ? 'Jev: unknown (no request yet)' : 'Jev: on'")
+  })
 })
