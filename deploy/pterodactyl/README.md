@@ -99,9 +99,11 @@ Fresh eggs expose these preferred deployment controls:
 | Source channel | `SGLUNA_SOURCE_REF` | branch, tag, or exact commit resolved on reinstall |
 | Actor ownership | `SGLUNA_ACTOR_MODE` | currently fixed to `npc` |
 | Chat authorization | `SGLUNA_CHAT_PLAYERS` | blank/`*` = everyone, `none` = nobody, otherwise comma-separated exact names |
+| AI API method | `AI_API_METHOD` | `direct` / `router` / `local`; see "AI provider method" below |
+| Provider URL | `OPENAI_API_BASEURL` | OpenAI-compatible endpoint; `direct`/`router` require HTTPS |
+| Model list | `OPENAI_MODEL` | comma-separated model identifiers: `[0]` main agent, `[1]` subagent (reserved, not yet used) |
 | Provider credential | `OPENAI_API_KEY` | required; environment-only |
-| Model | `OPENAI_MODEL` | OpenAI-compatible model identifier |
-| Provider URL | `OPENAI_API_BASEURL` | OpenAI-compatible HTTPS endpoint |
+| Jev credential | `TYPESAFE_API_KEY` (NPC E2E egg only; local Compose maps `JEV_TYPESAFE_API_KEY` to it) | optional; environment-only; blank disables Jev |
 | Provider timeout | `PROVIDER_TIMEOUT_MS` | provider request timeout |
 | Provider budget | `MAX_PROVIDER_REQUESTS_PER_HOUR` | persisted hourly request cap |
 | Save | `SAVE_NAME` | blank chooses newest existing save or creates `sgluna-world.zip` |
@@ -110,6 +112,16 @@ Fresh eggs expose these preferred deployment controls:
 | Factorio version | `FACTORIO_VERSION` | `latest`, `experimental`, or exact supported 2.0.x |
 
 No separate `PRIVATE_SERVER` flag exists.
+
+### AI provider method
+
+`AI_API_METHOD` picks exactly one wire contract; it replaces hand-picking a `PROVIDER_PROFILE`:
+
+- `direct` — the wire format is detected from `OPENAI_API_BASEURL`'s host and the model, the same as today's default (`auto`) behaviour. Requires HTTPS.
+- `router` — the OpenRouter capability profile (reasoning field, style block, cache breakpoints, usage parsing resolved per model). Requires HTTPS.
+- `local` — the LM Studio-style local capability profile. Plain `http` is allowed only to `localhost`, `127.0.0.1`, `[::1]`, or `host.docker.internal`.
+
+Leaving `AI_API_METHOD` unset keeps the legacy `PROVIDER_PROFILE`-driven behaviour exactly as before, including an explicit `PROVIDER_PROFILE` value. If both are set, `AI_API_METHOD` wins and the startup log says so. The startup log and the in-game Debug window both show one line, e.g. `AI: method=router host=openrouter.ai main=<model[0]> subagent=<model[1]|none>` — never a key.
 
 ### Legacy environment compatibility
 

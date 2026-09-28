@@ -70,7 +70,7 @@
         },
         {
             "name": "AI Model",
-            "description": "OpenAI-compatible model identifier used by SGLuna. Replace the placeholder with a model supported by your provider.",
+            "description": "Comma-separated OpenAI-compatible model identifiers. The first entry is the main agent model, used exactly as a single model always was. A second entry names the subagent/plan-agent model for later use; extra entries are validated but otherwise unused today.",
             "env_variable": "OPENAI_MODEL",
             "default_value": "replace-me",
             "user_viewable": true,
@@ -80,7 +80,7 @@
         },
         {
             "name": "Provider Base URL",
-            "description": "OpenAI-compatible API base URL. Replace the non-routable placeholder; remote endpoints must use HTTPS.",
+            "description": "OpenAI-compatible API base URL. Replace the non-routable placeholder. The direct and router AI API methods require HTTPS; the local method also allows plain http to localhost/127.0.0.1/[::1]/host.docker.internal.",
             "env_variable": "OPENAI_API_BASEURL",
             "default_value": "https://provider.invalid/v1",
             "user_viewable": true,
@@ -89,13 +89,13 @@
             "field_type": "text"
         },
         {
-            "name": "Provider Capability Profile",
-            "description": "Wire contract for token and reasoning fields. auto only recognizes the official DeepSeek endpoint; use deepseek for a verified DeepSeek-compatible proxy, openai-reasoning for max_completion_tokens reasoning APIs, or generic to disable optional reasoning fields.",
-            "env_variable": "PROVIDER_PROFILE",
-            "default_value": "auto",
+            "name": "AI API Method",
+            "description": "Wire contract for the AI Model endpoint: direct detects the format from the URL and model; router uses the OpenRouter capability profile; local uses the LM Studio-style local capability profile and allows plain http to localhost/host.docker.internal only. direct and router require HTTPS. Leave blank to keep this server’s existing behaviour unchanged (the legacy Provider Capability Profile, if any was set, keeps working exactly as before).",
+            "env_variable": "AI_API_METHOD",
+            "default_value": "",
             "user_viewable": true,
             "user_editable": true,
-            "rules": "required|string|in:auto,generic,deepseek,openai-reasoning",
+            "rules": "nullable|string|in:direct,router,local",
             "field_type": "text"
         },
         {

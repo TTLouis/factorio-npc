@@ -32,7 +32,15 @@ import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { evaluateGoalDefinition, formatGoalStatus, formatGoalUnderstanding, formatSliceProgressNote, goalUiView } from './goal-definition.mjs'
 import { formatGoalReadingNote } from './goal-reading.mjs'
 import { GOAL_STATUS } from './planning-state.mjs'
-import { decisionProviderConfiguration, decisionProviderRequest, providerEndpoint, providerRequest } from './provider.mjs'
+import {
+  AI_API_METHOD_IDS,
+  checkApiMethodUrlRule,
+  decisionProviderConfiguration,
+  decisionProviderRequest,
+  profileForApiMethod,
+  providerEndpoint,
+  providerRequest,
+} from './provider.mjs'
 import { configureNpcSession } from './supervisor-adapter.mjs'
 import { luaString } from './structured-policy.mjs'
 
@@ -88,10 +96,54 @@ function chatPlayersValue(env, raw = {}, fallback = '') {
   return raw.chatPlayers ?? raw.chatPlayer ?? raw.player ?? fallback
 }
 
-function providerProfileValue(env, raw = {}, fallback = 'auto') {
+// `validate: false` (used once a method has already won, see migrateConfig
+// below) skips the enum check: the value is being carried through/persisted
+// only, not used to pick a capability, so a stale or unrelated legacy value
+// already on disk must never block startup.
+function providerProfileValue(env, raw = {}, fallback = 'auto', { validate = true } = {}) {
   const value = cleanString(env.PROVIDER_PROFILE ?? raw.providerProfile ?? fallback, 'PROVIDER_PROFILE', 40).toLowerCase()
-  check(['auto', 'generic', 'deepseek', 'openai-reasoning'].includes(value), 'PROVIDER_PROFILE must be auto, generic, deepseek, or openai-reasoning')
+  if (validate) check(['auto', 'generic', 'deepseek', 'openai-reasoning'].includes(value), 'PROVIDER_PROFILE must be auto, generic, deepseek, or openai-reasoning')
   return value
+}
+
+// AI_API_METHOD (plan 1.10) replaces a hand-picked PROVIDER_PROFILE. It is
+// read directly from the environment only (never persisted/mirrored), same
+// as the deployment-env-is-authoritative rule already applied to decision
+// provider credentials: unset means "keep today's PROVIDER_PROFILE-driven
+// behaviour", including an explicit PROVIDER_PROFILE, exactly as before.
+function aiApiMethodValue(env) {
+  const raw = String(env.AI_API_METHOD ?? '').trim().toLowerCase()
+  if (!raw) return undefined
+  check(AI_API_METHOD_IDS.includes(raw), 'AI_API_METHOD must be direct, router, or local')
+  return raw
+}
+
+// Same identifier shape providerRequest (provider.mjs) already requires of
+// a single model, applied to every entry of the list below.
+const MODEL_IDENTIFIER = /^[a-zA-Z0-9._:/-]{1,200}$/
+
+// OPENAI_MODEL is a comma-separated list (plan 1.10): [0] is the main agent
+// model, used exactly as the single OPENAI_MODEL value always was; [1] is
+// the subagent/plan-agent model reserved for 3.1. Extra entries are
+// validated and carried here (config.models) but nothing yet reads past
+// index 1.
+function modelListValue(env, raw = {}, fallback = 'replace-me') {
+  const source = cleanString(env.OPENAI_MODEL ?? raw.model ?? fallback, 'OPENAI_MODEL', 200)
+  const entries = source.split(',').map(entry => entry.trim())
+  check(entries.every(entry => MODEL_IDENTIFIER.test(entry)), 'OPENAI_MODEL must be a comma-separated list of valid, non-empty model identifiers')
+  return entries
+}
+
+function aiApiHostname(base) {
+  try { return new URL(base).hostname.toLowerCase() }
+  catch { return '' }
+}
+
+// Startup log line and Debug window line (plan 1.10). Never includes a key.
+export function aiApiMethodLine(config) {
+  const method = config.aiApiMethod ?? `unset(profile=${config.profile})`
+  const subagent = config.subagentModel ?? 'none'
+  return `AI: method=${method} host=${aiApiHostname(config.base)} main=${config.model} subagent=${subagent}`
 }
 
 export function deploymentCompatibilityWarnings(env = process.env) {
@@ -119,13 +171,38 @@ export function configuration(raw = {}, env = process.env) {
   const factorioToken = cleanString(env.FACTORIO_TOKEN ?? '', 'FACTORIO_TOKEN', 128)
   check((factorioUsername === '') === (factorioToken === ''), 'FACTORIO_USERNAME and FACTORIO_TOKEN must both be set or both left blank')
 
+  const modelList = modelListValue(env, raw, 'replace-me')
+  const base = env.OPENAI_API_BASEURL ?? raw.providerUrl ?? 'https://provider.invalid/v1'
+  const aiApiMethod = aiApiMethodValue(env)
+  // A profile worth overriding can come from either the env var or a value
+  // already saved in sgluna-config.json (raw.providerProfile) by an earlier
+  // run or egg version; either one is reported to the operator when a
+  // method wins over it.
+  const overriddenProviderProfile = hasEnv(env, 'PROVIDER_PROFILE')
+    ? String(env.PROVIDER_PROFILE)
+    : (typeof raw.providerProfile === 'string' && raw.providerProfile.trim() !== '' ? raw.providerProfile : undefined)
+  const aiApiMethodOverridesProfile = Boolean(aiApiMethod) && overriddenProviderProfile !== undefined
+  // With AI_API_METHOD unset, resolution stays exactly the legacy
+  // PROVIDER_PROFILE path (including an explicit PROVIDER_PROFILE, from env
+  // or from sgluna-config.json); when set, it wins outright and an
+  // invalid/irrelevant PROVIDER_PROFILE value is never even looked at here.
+  // migrateConfig separately stops validating it once a method is set (see
+  // there), so a stale invalid value already on disk cannot block startup.
+  const profile = aiApiMethod ? profileForApiMethod(aiApiMethod) : providerProfileValue(env, raw, 'auto')
+  checkApiMethodUrlRule(aiApiMethod, base)
+
   const config = {
     actorMode,
     chatPlayers: parseChatPlayers(cleanString(chatPlayersSource, 'SGLUNA_CHAT_PLAYERS', 512)),
     save: cleanString(env.SAVE_NAME ?? raw.save ?? '', 'SAVE_NAME', 160),
-    model: cleanString(env.OPENAI_MODEL ?? raw.model ?? 'replace-me', 'OPENAI_MODEL', 200),
-    base: env.OPENAI_API_BASEURL ?? raw.providerUrl ?? 'https://provider.invalid/v1',
-    profile: providerProfileValue(env, raw, 'auto'),
+    model: modelList[0],
+    models: modelList,
+    subagentModel: modelList[1],
+    base,
+    profile,
+    aiApiMethod,
+    aiApiMethodOverridesProfile,
+    overriddenProviderProfile: aiApiMethodOverridesProfile ? overriddenProviderProfile : undefined,
     key: env.OPENAI_API_KEY ?? '',
     decisionProvider: decisionProviderConfiguration(env),
     providerTimeoutMs: safeInteger(env.PROVIDER_TIMEOUT_MS ?? raw.providerTimeoutMs ?? 300000, 'PROVIDER_TIMEOUT_MS', 1000, 600000),
@@ -200,11 +277,16 @@ export function migrateConfig(raw = {}, env = process.env) {
   )
   check(actorMode === 'npc', 'This v8 egg currently supports SGLUNA_ACTOR_MODE=npc only')
   const chatPlayers = cleanString(chatPlayersValue(env, raw, SGLUNA_CONFIG_DEFAULTS.chatPlayers), 'SGLUNA_CHAT_PLAYERS', 512)
+  // Once AI_API_METHOD is set it wins outright (see configuration() above),
+  // so a stored/legacy PROVIDER_PROFILE is carried through unvalidated here
+  // rather than rejected: an old or unrelated value on disk must never block
+  // startup for a server that has already moved to the method setting.
+  const aiApiMethod = aiApiMethodValue(env)
   const next = {
     actorMode,
     chatPlayers,
     providerUrl: env.OPENAI_API_BASEURL ?? raw.providerUrl ?? SGLUNA_CONFIG_DEFAULTS.providerUrl,
-    providerProfile: providerProfileValue(env, raw, SGLUNA_CONFIG_DEFAULTS.providerProfile),
+    providerProfile: providerProfileValue(env, raw, SGLUNA_CONFIG_DEFAULTS.providerProfile, { validate: !aiApiMethod }),
     model: cleanString(env.OPENAI_MODEL ?? raw.model ?? SGLUNA_CONFIG_DEFAULTS.model, 'OPENAI_MODEL', 200),
     save: cleanString(env.SAVE_NAME ?? raw.save ?? SGLUNA_CONFIG_DEFAULTS.save, 'SAVE_NAME', 160),
     providerTimeoutMs: safeInteger(
@@ -593,6 +675,17 @@ function debugInteger(value) {
   return Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0
 }
 
+// Same AI method/host/model summary as aiApiMethodLine, shaped for the
+// Debug window's per-field snapshot instead of one formatted log line.
+function aiMethodDebugFields(config = {}) {
+  return {
+    ai_method: config.aiApiMethod ?? `unset(profile=${config.profile ?? ''})`,
+    ai_host: aiApiHostname(config.base ?? ''),
+    ai_main_model: config.model ?? '',
+    ai_subagent_model: config.subagentModel ?? 'none',
+  }
+}
+
 function debugOptionalInteger(value) {
   return Number.isSafeInteger(value) && value >= 0 ? value : undefined
 }
@@ -621,6 +714,13 @@ function emptyAgentDebug(fallback = {}) {
     request_id: uiText(fallback.request_id, 120),
     turn: debugInteger(fallback.turn),
     provider_model: uiText(fallback.provider_model, 160),
+    // Static per-session AI method/host/model-list summary (plan 1.10); set
+    // once from config, not from a provider event, so it survives every
+    // merge below unchanged for the life of the session.
+    ai_method: uiText(fallback.ai_method, 32),
+    ai_host: uiText(fallback.ai_host, 200),
+    ai_main_model: uiText(fallback.ai_main_model, 200),
+    ai_subagent_model: uiText(fallback.ai_subagent_model, 200),
     provider_round: 0,
     provider_latency_ms: 0,
     provider_diagnostic_code: '',
@@ -1777,7 +1877,7 @@ export class Session {
       activity: [],
       conversation_id: `task_${this.activityEpoch}_0`,
       conversation: [],
-      debug: emptyAgentDebug({ provider_model: this.config?.model }),
+      debug: emptyAgentDebug({ provider_model: this.config?.model, ...aiMethodDebugFields(this.config) }),
     }
     this.activitySequence = 0
     // Live ids must not repeat across supervisor restarts: the mod keeps a
@@ -1888,6 +1988,7 @@ export class Session {
       request_id: this.agent?.traceRequest?.id,
       turn: this.agent?.traceRequest ? this.agent.continuations + 1 : 0,
       provider_model: this.config?.model,
+      ...aiMethodDebugFields(this.config),
       actor_id: this.agent?.epoch?.actor_id ?? this.lastStatus?.actor_id,
       actor_epoch: this.agent?.epoch?.epoch ?? this.lastStatus?.epoch,
       usage: this.agent?.traceRequest?.usage,
@@ -2756,6 +2857,8 @@ async function main() {
   log(`Managed runtime mod directory: ${path.join(root, '.airi', 'run-*', 'mods')} (internal; do not edit)`)
   log(`Operator help: ${path.join(root, 'README-SGLUNA.txt')}`)
   log(jevStatusLine(config))
+  log(aiApiMethodLine(config))
+  if (config.aiApiMethodOverridesProfile) log(`AI_API_METHOD=${config.aiApiMethod} overrides PROVIDER_PROFILE=${config.overriddenProviderProfile ?? ''}; the method wins`)
 
   const handleSignal = () => {
     requestedStop = true

@@ -1,6 +1,6 @@
 import type { LuaEntity, LuaInventory, SurfaceCreateEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
-import type { new_basic_operation_controller } from './basic_operations'
+import type { new_basic_operation_controller, TransferInventorySnapshot, TransferRefusalCause } from './basic_operations'
 import { remember_entity_reference, resolve_exact_entity } from './entity_reference'
 import { build_interaction_reach, entity_interaction_reach } from './interaction_range'
 import { MAX_MINING_START_REJECTIONS, mining_navigation_reach, mining_navigation_requires_movement, select_exact_mining_target, within_mining_reach } from './mining_reach'
@@ -76,16 +76,144 @@ function mining_reposition_task(actor: ControlledActor, entity: LuaEntity, rejec
   }
 }
 
-function entity_inventories(entity: LuaEntity, item_name: string, require_insert: boolean) {
-  const inventories: LuaInventory[] = []
+type InventoryRole = TransferInventorySnapshot['role']
+
+interface RoledInventory {
+  inventory: LuaInventory
+  role: InventoryRole
+}
+
+// Entities whose output inventory is a separate result slot. For a container
+// the engine reports the chest inventory itself as the output inventory, so
+// output identity is only trusted for these types.
+const SEPARATE_OUTPUT_ENTITY_TYPES: Record<string, boolean> = {
+  'furnace': true,
+  'assembling-machine': true,
+  'rocket-silo': true,
+}
+
+// Inventory names (keys of defines.inventory) that hold products or waste.
+// Factorio 2.0 names a furnace's slots crafter_input / crafter_output, and a
+// script insert into crafter_output succeeds (engine lane, 2.0.77), so these
+// are excluded by role, never by can_insert.
+const OUTPUT_INVENTORY_NAMES: Record<string, InventoryRole> = {
+  furnace_result: 'output',
+  crafter_output: 'output',
+  crafter_trash: 'output',
+  assembling_machine_output: 'output',
+  assembling_machine_dump: 'output',
+  rocket_silo_output: 'output',
+  rocket_silo_result: 'output',
+  rocket_silo_trash: 'output',
+  logistic_container_trash: 'output',
+  burnt_result: 'burnt_result',
+}
+
+const MAX_SNAPSHOT_TARGETS = 3
+const MAX_SNAPSHOT_ITEMS = 4
+
+function entity_role_inventories(entity: LuaEntity) {
+  const output = SEPARATE_OUTPUT_ENTITY_TYPES[entity.type] ? entity.get_output_inventory() : undefined
+  const fuel = entity.get_fuel_inventory()
+  const burnt = entity.get_burnt_result_inventory()
+  const output_index = output ? output.index : undefined
+  const fuel_index = fuel ? fuel.index : undefined
+  const burnt_index = burnt ? burnt.index : undefined
+  const inventories: RoledInventory[] = []
   const max_index = entity.get_max_inventory_index()
   for (let i = 1; i <= max_index; i++) {
     const inventory = entity.get_inventory(i)
     if (!inventory) continue
-    if (require_insert && !inventory.can_insert({ name: item_name })) continue
+    const index = inventory.index ?? i
+    const named_role = inventory.name !== undefined ? OUTPUT_INVENTORY_NAMES[inventory.name] : undefined
+    let role: InventoryRole = 'input'
+    if (burnt_index !== undefined && index === burnt_index) role = 'burnt_result'
+    else if (output_index !== undefined && index === output_index) role = 'output'
+    else if (named_role !== undefined) role = named_role
+    else if (fuel_index !== undefined && index === fuel_index) role = 'fuel'
+    inventories.push({ inventory, role })
+  }
+  return inventories
+}
+
+function is_insert_role(role: InventoryRole) {
+  return role === 'input' || role === 'fuel'
+}
+
+/**
+ * Inventories an item move may use. Inserting (to_entity) uses input and fuel
+ * inventories only, in inventory order, never a result/output or burnt-result
+ * slot, the way a player's hand insert works. Taking items may read every
+ * inventory, as a player can.
+ */
+function entity_inventories(entity: LuaEntity, item_name: string, require_insert: boolean) {
+  const inventories: LuaInventory[] = []
+  if (!require_insert) {
+    const max_index = entity.get_max_inventory_index()
+    for (let i = 1; i <= max_index; i++) {
+      const inventory = entity.get_inventory(i)
+      if (inventory) inventories.push(inventory)
+    }
+    return inventories
+  }
+  for (const { inventory, role } of entity_role_inventories(entity)) {
+    if (!is_insert_role(role) || !inventory.can_insert({ name: item_name })) continue
     inventories.push(inventory)
   }
   return inventories
+}
+
+function inventory_snapshot(entity: LuaEntity, inventory: LuaInventory, role: InventoryRole, item_name: string): TransferInventorySnapshot {
+  const contents: TransferInventorySnapshot['contents'] = []
+  for (const item of inventory.get_contents()) {
+    if (contents.length >= MAX_SNAPSHOT_ITEMS) break
+    contents.push({ name: item.name, quality: item.quality, count: item.count })
+  }
+  return {
+    unit_number: entity.unit_number,
+    index: inventory.index,
+    name: inventory.name,
+    role,
+    slot_count: inventory.length,
+    empty_slots: inventory.count_empty_stacks(),
+    can_insert: is_insert_role(role) && inventory.can_insert({ name: item_name }),
+    contents,
+  }
+}
+
+function is_fuel_item(item_name: string) {
+  const prototype = prototypes.item[item_name]
+  return prototype !== undefined && (prototype.fuel_value ?? 0) > 0
+}
+
+/**
+ * Explain a to-entity move that moved nothing although the NPC held the item.
+ * Only inventories that could take this item count as candidates (the fuel
+ * slot only for a fuel item). Read from the engine's inventory state.
+ */
+export function transfer_refusal_diagnostics(targets: LuaEntity[], item_name: string) {
+  const fuel_item = is_fuel_item(item_name)
+  const target_inventories: TransferInventorySnapshot[] = []
+  let has_candidate = false
+  let full_of_same = false
+  let full_of_other = false
+  for (let t = 0; t < targets.length && t < MAX_SNAPSHOT_TARGETS; t++) {
+    const entity = targets[t]
+    for (const { inventory, role } of entity_role_inventories(entity)) {
+      const snapshot = inventory_snapshot(entity, inventory, role, item_name)
+      target_inventories.push(snapshot)
+      if (!is_insert_role(role) || snapshot.slot_count <= 0 || (role === 'fuel' && !fuel_item)) continue
+      has_candidate = true
+      if (snapshot.empty_slots > 0) continue
+      if (inventory.get_item_count(item_name) > 0) full_of_same = true
+      else if (snapshot.contents.length > 0) full_of_other = true
+    }
+  }
+  let refusal_cause: TransferRefusalCause = 'target_rejects_item'
+  if (!has_candidate) refusal_cause = 'no_input_inventory_for_item'
+  else if (full_of_same) refusal_cause = 'target_full'
+  else if (full_of_other) refusal_cause = 'input_slot_holds_other_item'
+  return { refusal_cause, target_inventories }
 }
 
 export function new_basic_operation_runtime(manager: Manager, controller: BasicController) {
@@ -590,8 +718,10 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     }
 
     let moved_total = 0
+    let held_count = 0
     if (task.to_entity) {
       const available = actor_inventory.get_item_count(task.item_name)
+      held_count = available
       if (available <= 0) {
         controller.fail(actor, task, 'item_missing')
         return 0
@@ -627,12 +757,25 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     }
 
     if (moved_total <= 0) {
+      if (task.to_entity) {
+        // The target refused the item and the world is unchanged: the items
+        // are still in the NPC's inventory. Report why, and let the batch's
+        // independent operations (moves into other entities) still run.
+        const diagnostics = transfer_refusal_diagnostics(targets, task.item_name)
+        controller.refuse(actor, task, 'nothing_moved', {
+          moved_count: 0,
+          held_count,
+          refusal_cause: diagnostics.refusal_cause,
+          target_inventories: diagnostics.target_inventories,
+        })
+        return 0
+      }
       controller.fail(actor, task, 'nothing_moved', { moved_count: 0 })
       return 0
     }
     const target_label = task.target_unit_number !== undefined ? ` entity unit ${task.target_unit_number}` : ''
     log(`[AUTORIO] Moved a total of ${moved_total} ${task.item_name}${target_label}`)
-    controller.complete(actor, task, { moved_count: moved_total })
+    controller.complete(actor, task, task.to_entity ? { moved_count: moved_total, held_count } : { moved_count: moved_total })
     return moved_total
   }
 

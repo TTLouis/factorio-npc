@@ -221,7 +221,21 @@ const OPERATION_FAILURE_LABELS = {
   waiting: 'wait',
 }
 
-function operationFailureReasonCode(evidence) {
+// A refused operation's batch reason is `<task type>:<code>:<cause>` (mod
+// task_manager close_refused_batch), e.g.
+// `moving_items:nothing_moved:input_slot_holds_other_item`. The cause is kept
+// on the blocker so `nothing_moved` never reaches the plan without its why.
+const REFUSAL_CAUSE_PATTERN = /^[a-z_]+$/
+
+export function operationRefusalCause(receipt, basic) {
+  if (typeof receipt?.reason !== 'string' || typeof basic?.type !== 'string' || typeof basic?.code !== 'string') return undefined
+  const prefix = `${basic.type}:${basic.code}:`
+  if (!receipt.reason.startsWith(prefix)) return undefined
+  const cause = receipt.reason.slice(prefix.length)
+  return REFUSAL_CAUSE_PATTERN.test(cause) && cause.length <= 64 ? cause : undefined
+}
+
+export function operationFailureReasonCode(evidence) {
   const receipt = parseReceiptSummary(evidence)
   const basic = receipt?.basic_operation
   const code = typeof basic?.code === 'string' && basic.code ? basic.code : undefined
@@ -229,7 +243,8 @@ function operationFailureReasonCode(evidence) {
   // basic_operation is only present when it correlates with this batch; without
   // it the failing operation is unknown, so the label doesn't guess.
   const label = Object.hasOwn(OPERATION_FAILURE_LABELS, basic?.type) ? OPERATION_FAILURE_LABELS[basic.type] : 'operation'
-  return `${label}_failed:${code ?? reason ?? 'operation_failed'}`
+  const cause = code ? operationRefusalCause(receipt, basic) : undefined
+  return `${label}_failed:${code ?? reason ?? 'operation_failed'}${cause ? `:${cause}` : ''}`
 }
 
 export function verifyDeterministicReceipt(state, evidence) {
