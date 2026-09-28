@@ -46,6 +46,11 @@ export interface TaskBoardUiDebugSnapshot {
   request_id: string
   turn: number
   provider_model: string
+  // Static per-session AI method/host/model-list summary (plan 1.10).
+  ai_method: string
+  ai_host: string
+  ai_main_model: string
+  ai_subagent_model: string
   provider_round: number
   provider_latency_ms: number
   provider_diagnostic_code: string
@@ -189,6 +194,10 @@ export function sanitize_debug_snapshot(value: any): TaskBoardUiDebugSnapshot {
     request_id: clean_text(debug.request_id, 120),
     turn: integer(debug.turn),
     provider_model: clean_text(debug.provider_model, 160),
+    ai_method: clean_text(debug.ai_method, 32),
+    ai_host: clean_text(debug.ai_host, 200),
+    ai_main_model: clean_text(debug.ai_main_model, 200),
+    ai_subagent_model: clean_text(debug.ai_subagent_model, 200),
     provider_round: integer(debug.provider_round),
     provider_latency_ms: integer(debug.provider_latency_ms),
     provider_diagnostic_code: clean_text(debug.provider_diagnostic_code, 160),

@@ -13,6 +13,17 @@ const FALLBACK_CONTINUATION_MAX_TOKENS = 8000
 const DEFAULT_MAX_TOKENS = 4000
 const MAX_PROVIDER_OUTPUT_CAP = 65536
 const PROVIDER_PROFILE_IDS = new Set(['auto', 'generic', 'deepseek', 'openai-reasoning', 'openrouter', 'local'])
+// AI_API_METHOD (plan 1.10) is the user-facing setting that replaces a
+// hand-picked PROVIDER_PROFILE: each method names exactly one existing
+// capability profile below. 'direct' keeps today's hostname-detected 'auto'
+// resolution, so it needs no new capability logic of its own.
+export const AI_API_METHOD_IDS = Object.freeze(['direct', 'router', 'local'])
+const AI_API_METHOD_PROFILE = Object.freeze({ direct: 'auto', router: 'openrouter', local: 'local' })
+
+export function profileForApiMethod(method) {
+  check(Object.hasOwn(AI_API_METHOD_PROFILE, method), 'Invalid AI_API_METHOD')
+  return AI_API_METHOD_PROFILE[method]
+}
 // LM Studio's declared context window default (plan 1.9): the runtime has no
 // other way to learn it, so a conservative floor lets compaction stay ahead
 // of an overflow until a model config states its own value.
@@ -1160,6 +1171,20 @@ export function providerEndpoint(base) {
   check(url.protocol === 'https:' || (url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]', 'host.docker.internal'].includes(url.hostname)), 'Remote provider URL requires HTTPS')
   url.pathname = `${url.pathname.replace(/\/?$/, '/')}chat/completions`
   return url.toString()
+}
+
+// providerEndpoint above already restricts plain http to a fixed local
+// hostname allowlist for every profile; that is exactly the 'local' method's
+// rule (plan 1.10). 'direct'/'router' are stricter still: they need https
+// even to one of those same local hostnames, since they mean a real
+// (potentially remote) OpenAI-compatible or OpenRouter endpoint. This check
+// layers in front of providerEndpoint's own check, it does not replace it.
+export function checkApiMethodUrlRule(method, base) {
+  if (!method || method === 'local') return
+  let url
+  try { url = new URL(base) }
+  catch { throw new DeploymentError('Invalid provider URL') }
+  check(url.protocol === 'https:', `AI_API_METHOD=${method} requires an https OPENAI_API_BASEURL`)
 }
 
 export async function providerRequest(config, messages, {

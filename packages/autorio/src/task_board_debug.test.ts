@@ -23,6 +23,10 @@ describe('task board debug and UI freshness helpers', () => {
   it('sanitizes Jev decision diagnostics independently from planner diagnostics', () => {
     const debug = sanitize_debug_snapshot({
       provider_model: 'deepseek-chat',
+      ai_method: 'router',
+      ai_host: 'openrouter.ai',
+      ai_main_model: 'anthropic/claude-opus-5.5',
+      ai_subagent_model: 'deepseek/deepseek-chat',
       input_units: 100000,
       think_rounds: 5,
       think_total_ms: 218400,
@@ -66,6 +70,10 @@ describe('task board debug and UI freshness helpers', () => {
     })
 
     expect(debug.provider_model).toBe('deepseek-chat')
+    expect(debug.ai_method).toBe('router')
+    expect(debug.ai_host).toBe('openrouter.ai')
+    expect(debug.ai_main_model).toBe('anthropic/claude-opus-5.5')
+    expect(debug.ai_subagent_model).toBe('deepseek/deepseek-chat')
     expect(debug.input_units).toBe(100000)
     expect(debug.think_rounds).toBe(5)
     expect(debug.think_total_ms).toBe(218400)
