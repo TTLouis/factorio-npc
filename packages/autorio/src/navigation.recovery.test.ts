@@ -41,7 +41,7 @@ describe('physical navigation recovery', () => {
     const f = fixture()
     f.controller.submit('steel-chest', 40)
     f.controller.tick(f.actor)
-    const task = f.manager.player_state.parameters_walk_to_entity!
+    const task = f.manager.player_state().parameters_walk_to_entity!
     f.controller.on_path_finished({ id: task.path_request_id!, path: [waypoint(18)], try_again_later: false } as any)
 
     ;(globalThis as any).game.tick = 30
@@ -52,23 +52,23 @@ describe('physical navigation recovery', () => {
     f.controller.tick(f.actor)
 
     expect(f.surface.request_path).toHaveBeenCalledTimes(2)
-    expect((f.manager.player_state.parameters_walk_to_entity as any).last_recovery_reason).toBe('physical_stuck')
+    expect((f.manager.player_state().parameters_walk_to_entity as any).last_recovery_reason).toBe('physical_stuck')
   })
 
   it('escalates repeated path failure to a local spatial escape point before the final attempt', () => {
     const f = fixture()
     f.controller.submit('steel-chest', 40)
     f.controller.tick(f.actor)
-    let task: any = f.manager.player_state.parameters_walk_to_entity
+    let task: any = f.manager.player_state().parameters_walk_to_entity
     f.controller.on_path_finished({ id: task.path_request_id, path: undefined, try_again_later: false } as any)
     ;(globalThis as any).game.tick = 30
     f.controller.tick(f.actor)
-    task = f.manager.player_state.parameters_walk_to_entity
+    task = f.manager.player_state().parameters_walk_to_entity
     f.controller.on_path_finished({ id: task.path_request_id, path: undefined, try_again_later: false } as any)
     ;(globalThis as any).game.tick = 60
     f.controller.tick(f.actor)
 
-    task = f.manager.player_state.parameters_walk_to_entity as any
+    task = f.manager.player_state().parameters_walk_to_entity as any
     expect(task.recovery_position).toBeDefined()
     expect(task.recovery_stage).toBe('escape')
     expect(task.last_spatial_observation).toMatchObject({ ok: true })
@@ -82,7 +82,7 @@ describe('physical navigation recovery', () => {
     f.controller.tick(f.actor)
 
     for (let attempt = 1; attempt <= 4; attempt++) {
-      const task: any = f.manager.player_state.parameters_walk_to_entity
+      const task: any = f.manager.player_state().parameters_walk_to_entity
       expect(task).toBeDefined()
       f.controller.on_path_finished({ id: task.path_request_id, path: undefined, try_again_later: false } as any)
       if (attempt < 4) {
@@ -91,7 +91,7 @@ describe('physical navigation recovery', () => {
       }
     }
 
-    expect(f.manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(f.manager.player_state().task_state).toBe(TaskStates.IDLE)
     expect(f.controller.status()).toMatchObject({ state: 'blocked', blocked_reason: 'unreachable', last_result: { code: 'unreachable' } })
   })
 })

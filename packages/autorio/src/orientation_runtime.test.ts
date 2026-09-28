@@ -63,13 +63,13 @@ describe('placed entity orientation runtime', () => {
     ;(globalThis as any).game.get_entity_by_unit_number = vi.fn(() => entity)
 
     expect(f.controller.submit_rotate_exact(543)).toEqual([true, 'Task started'])
-    expect(f.manager.player_state.task_state).toBe(TaskStates.ROTATING)
+    expect(f.manager.player_state().task_state).toBe(TaskStates.ROTATING)
 
     const result = f.runtime.state_rotating(f.actor)
 
     expect(result[0]).toBe(true)
     expect(entity.rotate).toHaveBeenCalledWith({ reverse: false })
-    expect(f.manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(f.manager.player_state().task_state).toBe(TaskStates.IDLE)
     expect(f.controller.status().last_result).toMatchObject({
       type: TaskStates.ROTATING,
       target_unit_number: 543,

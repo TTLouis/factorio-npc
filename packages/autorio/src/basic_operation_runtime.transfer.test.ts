@@ -104,7 +104,7 @@ describe('exact entity item transfers', () => {
       moved_count: 7,
       target_unit_number: 101,
     })
-    expect(c.manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(c.manager.player_state().task_state).toBe(TaskStates.IDLE)
   })
 
   it('uses the actor current reach instead of a hard-coded eight-tile transfer limit', () => {
@@ -178,6 +178,6 @@ describe('exact entity item transfers', () => {
     expect(fallbackInventory.counts['firearm-magazine'] ?? 0).toBe(0)
     expect(c.actorInventory.counts['firearm-magazine']).toBe(20)
     expect(c.findEntities).not.toHaveBeenCalled()
-    expect(c.manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(c.manager.player_state().task_state).toBe(TaskStates.IDLE)
   })
 })

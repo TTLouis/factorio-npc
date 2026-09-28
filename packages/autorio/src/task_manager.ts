@@ -1,5 +1,5 @@
 import type { ControlledActor } from './actors/types'
-import { register_actor_mode_transition_handler, register_npc_recovery_handler } from './actors/actor_controller'
+import { register_actor_mode_transition_handler, register_load_reconciliation_handler, register_npc_recovery_handler } from './actors/actor_controller'
 import type { PlayerParameters, PlayerState } from './types'
 import { TaskStates } from './types'
 
@@ -11,43 +11,65 @@ interface TaskBatchReceipt {
   reason?: string
 }
 
-export function new_task_manager(get_controlled_actor: () => ControlledActor | undefined) {
-  const player_state: PlayerState = {
-    task_state: TaskStates.IDLE,
-  }
+interface TaskManagerState {
+  player_state: PlayerState
+  task_queue: PlayerParameters[]
+  batch_sequence: number
+  active_batch_id?: number
+  active_batch_task_types: TaskStates[]
+  last_completed_batch?: TaskBatchReceipt
+  last_cancelled_batch?: TaskBatchReceipt
+}
 
-  const task_queue: PlayerParameters[] = []
+declare const storage: {
+  autorio_task_manager?: TaskManagerState
+}
+
+// Task state must live in `storage`, not in module-local variables. A client
+// joining a running multiplayer game receives `storage` from the save but runs
+// control.lua fresh, so module-local task state would start IDLE/empty on the
+// client while the server is mid-batch, and the next task transition desyncs.
+// Only read/created from replicated event handlers, never from on_load.
+function task_manager_state(): TaskManagerState {
+  return storage.autorio_task_manager ??= {
+    player_state: { task_state: TaskStates.IDLE },
+    task_queue: [],
+    batch_sequence: 0,
+    active_batch_task_types: [],
+  }
+}
+
+export function new_task_manager(get_controlled_actor: () => ControlledActor | undefined) {
+  const tms = task_manager_state
+  // Handlers are functions, so they stay module-local; every peer registers the
+  // same handlers at load, which keeps them deterministic.
   const cancel_handlers: Partial<Record<TaskStates, () => void>> = {}
-  let batch_sequence = 0
-  let active_batch_id: number | undefined
-  let active_batch_task_types: TaskStates[] = []
-  let last_completed_batch: TaskBatchReceipt | undefined
-  let last_cancelled_batch: TaskBatchReceipt | undefined
 
   function begin_or_extend_batch(task: PlayerParameters) {
-    const created = active_batch_id === undefined
+    const created = tms().active_batch_id === undefined
     if (created) {
-      batch_sequence += 1
-      active_batch_id = batch_sequence
-      active_batch_task_types = []
+      tms().batch_sequence += 1
+      tms().active_batch_id = tms().batch_sequence
+      tms().active_batch_task_types = []
     }
-    active_batch_task_types.push(task.type)
+    tms().active_batch_task_types.push(task.type)
     return created
   }
 
   function close_batch(kind: 'completed' | 'cancelled', reason?: string) {
-    if (active_batch_id === undefined) return undefined
+    const batch_id = tms().active_batch_id
+    if (batch_id === undefined) return undefined
     const receipt: TaskBatchReceipt = {
-      batch_id: active_batch_id,
-      task_count: active_batch_task_types.length,
-      task_types: [...active_batch_task_types],
+      batch_id,
+      task_count: tms().active_batch_task_types.length,
+      task_types: [...tms().active_batch_task_types],
       tick: game.tick,
       reason,
     }
-    if (kind === 'completed') last_completed_batch = receipt
-    else last_cancelled_batch = receipt
-    active_batch_id = undefined
-    active_batch_task_types = []
+    if (kind === 'completed') tms().last_completed_batch = receipt
+    else tms().last_cancelled_batch = receipt
+    tms().active_batch_id = undefined
+    tms().active_batch_task_types = []
     return receipt
   }
 
@@ -58,15 +80,15 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
 
   function add_task(task: PlayerParameters) {
     const new_batch = begin_or_extend_batch(task)
-    task_queue.push(task)
-    log(`[AUTORIO] Task added: ${task.type}, batch=${active_batch_id}, task queue length: ${task_queue.length}`)
+    tms().task_queue.push(task)
+    log(`[AUTORIO] Task added: ${task.type}, batch=${tms().active_batch_id}, task queue length: ${tms().task_queue.length}`)
     if (new_batch) {
-      const details = `batch=${active_batch_id}, first_task=${task.type}, tick=${game.tick}`
+      const details = `batch=${tms().active_batch_id}, first_task=${task.type}, tick=${game.tick}`
       game.print(`[AUTORIO] Operation batch started: ${details}`)
       log(`[AUTORIO] Operation batch started: ${details}`)
     }
 
-    if (task_queue.length === 1) {
+    if (tms().task_queue.length === 1) {
       next_task()
     }
   }
@@ -76,12 +98,12 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
   }
 
   function run_cancel_cleanup() {
-    const handler = cancel_handlers[player_state.task_state]
+    const handler = cancel_handlers[tms().player_state.task_state]
     if (handler) handler()
   }
 
   function stop_task_controls() {
-    const state = player_state.task_state
+    const state = tms().player_state.task_state
     const stop_walking = state === TaskStates.WALKING_TO_ENTITY
       || state === TaskStates.WALKING_DIRECT
       || state === TaskStates.ATTACKING
@@ -98,18 +120,18 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
   }
 
   function clear_task_state_without_controls() {
-    player_state.task_state = TaskStates.IDLE
-    player_state.parameters_walk_to_entity = undefined
-    player_state.parameters_walking_direct = undefined
-    player_state.parameters_mine_entity = undefined
-    player_state.parameters_place_entity = undefined
-    player_state.parameters_rotate_entity = undefined
-    player_state.parameters_move_items = undefined
-    player_state.parameters_set_recipe = undefined
-    player_state.parameters_craft_item = undefined
-    player_state.parameters_attack_nearest_enemy = undefined
-    player_state.parameters_research_technology = undefined
-    player_state.parameters_waiting = undefined
+    tms().player_state.task_state = TaskStates.IDLE
+    tms().player_state.parameters_walk_to_entity = undefined
+    tms().player_state.parameters_walking_direct = undefined
+    tms().player_state.parameters_mine_entity = undefined
+    tms().player_state.parameters_place_entity = undefined
+    tms().player_state.parameters_rotate_entity = undefined
+    tms().player_state.parameters_move_items = undefined
+    tms().player_state.parameters_set_recipe = undefined
+    tms().player_state.parameters_craft_item = undefined
+    tms().player_state.parameters_attack_nearest_enemy = undefined
+    tms().player_state.parameters_research_technology = undefined
+    tms().player_state.parameters_waiting = undefined
   }
 
   function reset_task_state() {
@@ -118,14 +140,14 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
   }
 
   function next_task() {
-    if (player_state.task_state !== TaskStates.IDLE) {
+    if (tms().player_state.task_state !== TaskStates.IDLE) {
       log('[AUTORIO] Task state is not IDLE, wont execute next task')
       return
     }
 
-    const task = task_queue.shift()
+    const task = tms().task_queue.shift()
     if (!task) {
-      player_state.task_state = TaskStates.IDLE
+      tms().player_state.task_state = TaskStates.IDLE
       const receipt = close_batch('completed')
       const details = receipt
         ? receipt_details(receipt)
@@ -135,67 +157,67 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
       return
     }
 
-    log(`[AUTORIO] Next task: ${task.type}, batch=${active_batch_id}, task queue length: ${task_queue.length}`)
-    player_state.task_state = task.type
+    log(`[AUTORIO] Next task: ${task.type}, batch=${tms().active_batch_id}, task queue length: ${tms().task_queue.length}`)
+    tms().player_state.task_state = task.type
     switch (task.type) {
       case TaskStates.WALKING_TO_ENTITY:
-        player_state.parameters_walk_to_entity = task
+        tms().player_state.parameters_walk_to_entity = task
         break
       case TaskStates.WALKING_DIRECT:
-        player_state.parameters_walking_direct = task
+        tms().player_state.parameters_walking_direct = task
         break
       case TaskStates.MINING:
-        player_state.parameters_mine_entity = task
+        tms().player_state.parameters_mine_entity = task
         break
       case TaskStates.PLACING:
-        player_state.parameters_place_entity = task
+        tms().player_state.parameters_place_entity = task
         break
       case TaskStates.ROTATING:
-        player_state.parameters_rotate_entity = task
+        tms().player_state.parameters_rotate_entity = task
         break
       case TaskStates.MOVING_ITEMS:
-        player_state.parameters_move_items = task
+        tms().player_state.parameters_move_items = task
         break
       case TaskStates.SETTING_RECIPE:
-        player_state.parameters_set_recipe = task
+        tms().player_state.parameters_set_recipe = task
         break
       case TaskStates.CRAFTING:
-        player_state.parameters_craft_item = task
+        tms().player_state.parameters_craft_item = task
         break
       case TaskStates.ATTACKING:
-        player_state.parameters_attack_nearest_enemy = task
+        tms().player_state.parameters_attack_nearest_enemy = task
         break
       case TaskStates.RESEARCHING:
-        player_state.parameters_research_technology = task
+        tms().player_state.parameters_research_technology = task
         break
       case TaskStates.WAITING:
-        player_state.parameters_waiting = task
+        tms().player_state.parameters_waiting = task
         break
     }
   }
 
   function interrupt_current_with(recovery_task: PlayerParameters, resume_task: PlayerParameters) {
-    if (player_state.task_state === TaskStates.IDLE) return false
-    const interrupted_type = player_state.task_state
+    if (tms().player_state.task_state === TaskStates.IDLE) return false
+    const interrupted_type = tms().player_state.task_state
     stop_task_controls()
     clear_task_state_without_controls()
-    task_queue.unshift(resume_task)
-    task_queue.unshift(recovery_task)
+    tms().task_queue.unshift(resume_task)
+    tms().task_queue.unshift(recovery_task)
     log(`[AUTORIO] Temporarily interrupted ${interrupted_type} with ${recovery_task.type}; original task will resume afterward`)
     next_task()
     return true
   }
 
   function is_task_queue_empty() {
-    return task_queue.length === 0
+    return tms().task_queue.length === 0
   }
 
   function get_current_task_snapshot() {
-    switch (player_state.task_state) {
+    switch (tms().player_state.task_state) {
       case TaskStates.IDLE:
         return undefined
       case TaskStates.WALKING_TO_ENTITY: {
-        const task = player_state.parameters_walk_to_entity
+        const task = tms().player_state.parameters_walk_to_entity
         return task
           ? {
               type: task.type,
@@ -210,14 +232,14 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
               calculating_path: task.calculating_path,
               target_position: task.target_position,
             }
-          : { type: player_state.task_state }
+          : { type: tms().player_state.task_state }
       }
       case TaskStates.WALKING_DIRECT: {
-        const task = player_state.parameters_walking_direct
-        return task ? { type: task.type, target_position: task.target_position } : { type: player_state.task_state }
+        const task = tms().player_state.parameters_walking_direct
+        return task ? { type: task.type, target_position: task.target_position } : { type: tms().player_state.task_state }
       }
       case TaskStates.MINING: {
-        const task = player_state.parameters_mine_entity
+        const task = tms().player_state.parameters_mine_entity
         return task
           ? {
               type: task.type,
@@ -228,18 +250,18 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
               position: task.position,
               last_target_amount: task.last_target_amount,
             }
-          : { type: player_state.task_state }
+          : { type: tms().player_state.task_state }
       }
       case TaskStates.PLACING: {
-        const task = player_state.parameters_place_entity
-        return task ? { type: task.type, entity_name: task.entity_name, position: task.position, direction: task.direction } : { type: player_state.task_state }
+        const task = tms().player_state.parameters_place_entity
+        return task ? { type: task.type, entity_name: task.entity_name, position: task.position, direction: task.direction } : { type: tms().player_state.task_state }
       }
       case TaskStates.ROTATING: {
-        const task = player_state.parameters_rotate_entity
-        return task ? { type: task.type, target_unit_number: task.target_unit_number, reverse: task.reverse } : { type: player_state.task_state }
+        const task = tms().player_state.parameters_rotate_entity
+        return task ? { type: task.type, target_unit_number: task.target_unit_number, reverse: task.reverse } : { type: tms().player_state.task_state }
       }
       case TaskStates.MOVING_ITEMS: {
-        const task = player_state.parameters_move_items
+        const task = tms().player_state.parameters_move_items
         return task
           ? {
               type: task.type,
@@ -251,21 +273,21 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
               to_entity: task.to_entity,
               to_player: task.to_player,
             }
-          : { type: player_state.task_state }
+          : { type: tms().player_state.task_state }
       }
       case TaskStates.SETTING_RECIPE: {
-        const task = player_state.parameters_set_recipe
+        const task = tms().player_state.parameters_set_recipe
         return task
           ? {
               type: task.type,
               target_unit_number: task.target_unit_number,
               recipe_name: task.recipe_name,
             }
-          : { type: player_state.task_state }
+          : { type: tms().player_state.task_state }
       }
       case TaskStates.CRAFTING: {
-        const task = player_state.parameters_craft_item
-        if (!task) return { type: player_state.task_state }
+        const task = tms().player_state.parameters_craft_item
+        if (!task) return { type: tms().player_state.task_state }
         const actor = get_controlled_actor()
         return {
           type: task.type,
@@ -278,7 +300,7 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
         }
       }
       case TaskStates.ATTACKING: {
-        const task = player_state.parameters_attack_nearest_enemy
+        const task = tms().player_state.parameters_attack_nearest_enemy
         const target = task?.target
         return task
           ? {
@@ -288,37 +310,37 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
                 ? { name: target.name, position: target.position }
                 : undefined,
             }
-          : { type: player_state.task_state }
+          : { type: tms().player_state.task_state }
       }
       case TaskStates.RESEARCHING: {
-        const task = player_state.parameters_research_technology
-        return task ? { type: task.type, technology_name: task.technology_name } : { type: player_state.task_state }
+        const task = tms().player_state.parameters_research_technology
+        return task ? { type: task.type, technology_name: task.technology_name } : { type: tms().player_state.task_state }
       }
       case TaskStates.WAITING: {
-        const task = player_state.parameters_waiting
-        return task ? { type: task.type, remaining_ticks: task.remaining_ticks } : { type: player_state.task_state }
+        const task = tms().player_state.parameters_waiting
+        return task ? { type: task.type, remaining_ticks: task.remaining_ticks } : { type: tms().player_state.task_state }
       }
       default:
-        return { type: player_state.task_state }
+        return { type: tms().player_state.task_state }
     }
   }
 
   function get_status_snapshot() {
     return {
-      task_state: player_state.task_state,
-      queue_empty: task_queue.length === 0,
-      queue_length: task_queue.length,
-      queued_task_types: task_queue.map(task => task.type),
+      task_state: tms().player_state.task_state,
+      queue_empty: tms().task_queue.length === 0,
+      queue_length: tms().task_queue.length,
+      queued_task_types: tms().task_queue.map(task => task.type),
       current_task: get_current_task_snapshot(),
-      active_batch: active_batch_id === undefined
+      active_batch: tms().active_batch_id === undefined
         ? undefined
         : {
-            batch_id: active_batch_id,
-            task_count: active_batch_task_types.length,
-            task_types: [...active_batch_task_types],
+            batch_id: tms().active_batch_id,
+            task_count: tms().active_batch_task_types.length,
+            task_types: [...tms().active_batch_task_types],
           },
-      last_completed_batch,
-      last_cancelled_batch,
+      last_completed_batch: tms().last_completed_batch,
+      last_cancelled_batch: tms().last_cancelled_batch,
     }
   }
 
@@ -330,7 +352,7 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
   function cancel_all_tasks(reason = 'cancelled') {
     run_cancel_cleanup()
     reset_task_state()
-    task_queue.length = 0
+    tms().task_queue.length = 0
     const receipt = close_batch('cancelled', reason)
     if (receipt) {
       const details = receipt_details(receipt)
@@ -341,7 +363,7 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
 
   function discard_all_tasks_after_actor_loss() {
     clear_task_state_without_controls()
-    task_queue.length = 0
+    tms().task_queue.length = 0
     const receipt = close_batch('cancelled', 'actor_loss')
     if (receipt) {
       const details = receipt_details(receipt)
@@ -350,19 +372,31 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
     }
   }
 
+  // Logical tasks are not resumed across a save/load boundary (the harness
+  // re-plans after a restart). Now that task state is persisted, discard it
+  // explicitly in the replicated post-load reconciliation, so every peer drops
+  // the same state at the same tick.
+  register_load_reconciliation_handler(() => {
+    if (tms().player_state.task_state === TaskStates.IDLE && tms().task_queue.length === 0 && tms().active_batch_id === undefined) return
+    clear_task_state_without_controls()
+    tms().task_queue.length = 0
+    const receipt = close_batch('cancelled', 'load')
+    log(`[AUTORIO] Discarded persisted Autorio tasks after load${receipt ? `: ${receipt_details(receipt)}` : ''}`)
+  })
+
   register_npc_recovery_handler(({ previous_actor_id }) => {
     discard_all_tasks_after_actor_loss()
     log(`[AUTORIO] Discarded active and queued work after loss of actor_id=${previous_actor_id}`)
   })
 
   register_actor_mode_transition_handler(({ previous_mode, next_mode }) => {
-    if (player_state.task_state === TaskStates.IDLE && task_queue.length === 0) return
+    if (tms().player_state.task_state === TaskStates.IDLE && tms().task_queue.length === 0) return
     cancel_all_tasks('actor_mode_change')
     log(`[AUTORIO] Cancelled active and queued work before actor mode change ${previous_mode} -> ${next_mode}`)
   })
 
   return {
-    player_state,
+    player_state: () => tms().player_state,
     add_task,
     next_task,
     interrupt_current_with,

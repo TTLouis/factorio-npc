@@ -46,7 +46,7 @@ describe('task control lifecycle', () => {
       manager.add_task({ ...task })
       manager[method]()
 
-      expect(manager.player_state.task_state).toBe(TaskStates.IDLE)
+      expect(manager.player_state().task_state).toBe(TaskStates.IDLE)
       expect(actor.set_walking_state).toHaveBeenCalledTimes(walking ? 1 : 0)
       expect(actor.set_mining_state).toHaveBeenCalledTimes(mining ? 1 : 0)
       expect(actor.set_shooting_state).toHaveBeenCalledTimes(shooting ? 1 : 0)
@@ -73,8 +73,8 @@ describe('task control lifecycle', () => {
 
     manager.next_task()
 
-    expect(manager.player_state.task_state).toBe(TaskStates.CRAFTING)
-    expect(manager.player_state.parameters_craft_item).toMatchObject({
+    expect(manager.player_state().task_state).toBe(TaskStates.CRAFTING)
+    expect(manager.player_state().parameters_craft_item).toMatchObject({
       item_name: 'iron-gear-wheel',
       count: 1,
       crafted: 0,
@@ -139,13 +139,13 @@ describe('task control lifecycle', () => {
     manager.add_task(walking_task())
     expect(() => manager.cancel_all_tasks()).not.toThrow()
     expect(actor.set_walking_state).not.toHaveBeenCalled()
-    expect(manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(manager.player_state().task_state).toBe(TaskStates.IDLE)
   })
 
   it('still clears task state when no actor can be resolved', () => {
     const manager = new_task_manager(() => undefined)
     manager.add_task(walking_task())
     expect(() => manager.cancel_all_tasks()).not.toThrow()
-    expect(manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(manager.player_state().task_state).toBe(TaskStates.IDLE)
   })
 })

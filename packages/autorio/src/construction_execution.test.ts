@@ -127,8 +127,8 @@ describe('validated construction execution', () => {
       f.manager,
     )).toEqual([true, 'Validated construction plan started'])
 
-    expect(f.manager.player_state.task_state).toBe(TaskStates.PLACING)
-    expect(f.manager.player_state.parameters_place_entity).toMatchObject({
+    expect(f.manager.player_state().task_state).toBe(TaskStates.PLACING)
+    expect(f.manager.player_state().parameters_place_entity).toMatchObject({
       entity_name: 'stone-furnace',
       position: { x: -2, y: 0 },
       direction: 0,

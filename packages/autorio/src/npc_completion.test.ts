@@ -114,14 +114,14 @@ describe('standalone NPC completion polling', () => {
     expect(character.update_selected_entity).toHaveBeenCalledWith(resource.position)
     expect(character.selected).toBe(resource)
     expect(character.mining_state.mining).toBe(true)
-    expect(task_manager.player_state.parameters_mine_entity?.count).toBe(2)
+    expect(task_manager.player_state().parameters_mine_entity?.count).toBe(2)
 
     const selections_after_start = character.update_selected_entity.mock.calls.length
     resource.amount = 9
     character.character_mining_progress = 0
     on_tick({})
-    expect(task_manager.player_state.parameters_mine_entity?.count).toBe(1)
-    expect(task_manager.player_state.task_state).toBe(TaskStates.MINING)
+    expect(task_manager.player_state().parameters_mine_entity?.count).toBe(1)
+    expect(task_manager.player_state().task_state).toBe(TaskStates.MINING)
     expect(character.mining_state.mining).toBe(true)
     expect(character.selected).toBe(resource)
     expect(character.update_selected_entity.mock.calls.length).toBe(selections_after_start)
@@ -129,7 +129,7 @@ describe('standalone NPC completion polling', () => {
     resource.amount = 8
     character.character_mining_progress = 0
     on_tick({})
-    expect(task_manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(task_manager.player_state().task_state).toBe(TaskStates.IDLE)
     expect(character.mining_state.mining).toBe(false)
   })
 
@@ -152,7 +152,7 @@ describe('standalone NPC completion polling', () => {
     character.character_mining_progress = 0.5
     on_tick({})
 
-    expect(task_manager.player_state.parameters_mine_entity?.count).toBe(1)
+    expect(task_manager.player_state().parameters_mine_entity?.count).toBe(1)
     expect(character.selected).toBe(resource)
     expect(character.mining_state.mining).toBe(true)
   })
@@ -189,7 +189,7 @@ describe('connected player completion compatibility', () => {
     const on_player_mined_entity = get_handler('on_player_mined_entity')
     on_player_mined_entity({ player_index: 1 })
 
-    expect(task_manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(task_manager.player_state().task_state).toBe(TaskStates.IDLE)
     expect(player.mining_state.mining).toBe(false)
   })
 })

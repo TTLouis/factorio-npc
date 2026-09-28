@@ -95,7 +95,7 @@ describe('precise mining targeting', () => {
 
     expect(f.actor.set_mining_state).toHaveBeenCalledWith({ mining: true, position: f.exactResource.position })
     expect(f.actor.set_mining_state).not.toHaveBeenCalledWith({ mining: true, position: f.nearerResource.position })
-    expect(f.manager.player_state.parameters_mine_entity).toMatchObject({
+    expect(f.manager.player_state().parameters_mine_entity).toMatchObject({
       requested_position: { x: 2, y: 0 },
       position: { x: 2, y: 0 },
     })
@@ -110,7 +110,7 @@ describe('precise mining targeting', () => {
 
     expect(f.surface.find_entities_filtered).not.toHaveBeenCalledWith(expect.objectContaining({ name: 'steel-chest' }))
     expect(f.actor.set_mining_state).toHaveBeenCalledWith({ mining: true, position: f.exactEntity.position })
-    expect(f.manager.player_state.parameters_mine_entity).toMatchObject({
+    expect(f.manager.player_state().parameters_mine_entity).toMatchObject({
       target_unit_number: 91,
       position: { x: 2, y: 0 },
       count: 1,
@@ -123,7 +123,7 @@ describe('precise mining targeting', () => {
 
     f.runtime.state_mining(f.actor)
 
-    expect(f.manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(f.manager.player_state().task_state).toBe(TaskStates.IDLE)
     expect(f.controller.status().last_result).toMatchObject({ code: 'target_gone', target_unit_number: 999 })
     expect(f.actor.set_mining_state).not.toHaveBeenCalledWith(expect.objectContaining({ mining: true }))
   })
@@ -132,6 +132,6 @@ describe('precise mining targeting', () => {
     const f = fixture()
     expect(f.controller.submit_mining_at('steel-chest', 2, 0, 1)).toBe(false)
     expect(f.controller.status().last_result).toMatchObject({ code: 'invalid_entity' })
-    expect(f.manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(f.manager.player_state().task_state).toBe(TaskStates.IDLE)
   })
 })

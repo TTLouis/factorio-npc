@@ -68,7 +68,7 @@ describe('precise placement runtime', () => {
       raise_built: true,
     }))
     expect(f.item.count).toBe(1)
-    expect(f.manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(f.manager.player_state().task_state).toBe(TaskStates.IDLE)
     expect(f.controller.status().last_result).toMatchObject({
       code: 'completed',
       completed: true,
@@ -93,7 +93,7 @@ describe('precise placement runtime', () => {
     })
     expect(f.surface.create_entity).not.toHaveBeenCalled()
     expect(f.item.count).toBe(2)
-    expect(f.manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(f.manager.player_state().task_state).toBe(TaskStates.IDLE)
     expect(f.controller.status().last_result).toMatchObject({
       code: 'not_placeable',
       accepted: false,
@@ -113,7 +113,7 @@ describe('precise placement runtime', () => {
     expect(f.surface.can_place_entity).not.toHaveBeenCalled()
     expect(f.surface.create_entity).not.toHaveBeenCalled()
     expect(f.item.count).toBe(2)
-    expect(f.manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(f.manager.player_state().task_state).toBe(TaskStates.IDLE)
     expect(f.controller.status().last_result).toMatchObject({
       code: 'too_far',
       accepted: false,

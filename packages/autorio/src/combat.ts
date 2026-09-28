@@ -675,8 +675,8 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
   }
 
   function on_path_finished(event: OnScriptPathRequestFinishedEvent) {
-    const task = manager.player_state.parameters_attack_nearest_enemy as CombatTask | undefined
-    if (!task || manager.player_state.task_state !== TaskStates.ATTACKING) return
+    const task = manager.player_state().parameters_attack_nearest_enemy as CombatTask | undefined
+    if (!task || manager.player_state().task_state !== TaskStates.ATTACKING) return
     if (task.combat_path_request_id === undefined || event.id !== task.combat_path_request_id) return
     const actor = get_actor()
     if (!actor || !identity_matches(actor, task)) return
@@ -777,8 +777,8 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
   }
 
   function tick(actor: ControlledActor) {
-    const task = manager.player_state.parameters_attack_nearest_enemy as CombatTask | undefined
-    if (!task || manager.player_state.task_state !== TaskStates.ATTACKING) return
+    const task = manager.player_state().parameters_attack_nearest_enemy as CombatTask | undefined
+    if (!task || manager.player_state().task_state !== TaskStates.ATTACKING) return
     if (!identity_matches(actor, task)) {
       fail(actor, task, 'actor_changed')
       return
@@ -864,10 +864,10 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
 
   function status() {
     const actor = get_actor()
-    const task = manager.player_state.parameters_attack_nearest_enemy as CombatTask | undefined
+    const task = manager.player_state().parameters_attack_nearest_enemy as CombatTask | undefined
     const target = task?.target
     return {
-      task_active: manager.player_state.task_state === TaskStates.ATTACKING,
+      task_active: manager.player_state().task_state === TaskStates.ATTACKING,
       actor: actor?.status_snapshot(),
       mode: task?.combat_mode,
       origin_position: task?.origin_position,

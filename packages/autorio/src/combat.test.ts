@@ -122,7 +122,7 @@ describe('bounded combat controller', () => {
     const { surface, manager, controller } = world()
     expect(controller.submit(40)).toEqual([true, 'Combat task queued'])
     expect(surface.find_entities_filtered).not.toHaveBeenCalled()
-    expect(manager.player_state.task_state).toBe(TaskStates.ATTACKING)
+    expect(manager.player_state().task_state).toBe(TaskStates.ATTACKING)
   })
 
   it('rejects malformed radius and missing actor without queueing work', () => {
@@ -131,7 +131,7 @@ describe('bounded combat controller', () => {
     expect(controller.submit(257)).toEqual([false, 'invalid_radius'])
     get_actor.mockReturnValue(undefined)
     expect(controller.submit(40)).toEqual([false, 'no_actor'])
-    expect(manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(manager.player_state().task_state).toBe(TaskStates.IDLE)
   })
 
   it('fails a no-target one-shot task and cancels dependent work', () => {
@@ -148,7 +148,7 @@ describe('bounded combat controller', () => {
     const { actor, manager, controller } = world()
     controller.submit(40)
     controller.tick(actor)
-    expect(manager.player_state.task_state).toBe(TaskStates.ATTACKING)
+    expect(manager.player_state().task_state).toBe(TaskStates.ATTACKING)
     expect(controller.status()).toMatchObject({ last_result: { code: 'started', accepted: true } })
   })
 
@@ -219,7 +219,7 @@ describe('bounded combat controller', () => {
       expect(requestId).toBeDefined()
       controller.on_path_finished({ id: requestId, path: undefined, try_again_later: false } as any)
       if (attempt < 4) {
-        expect(manager.player_state.task_state).toBe(TaskStates.ATTACKING)
+        expect(manager.player_state().task_state).toBe(TaskStates.ATTACKING)
         ;(globalThis as any).game.tick += 30
         controller.tick(actor)
       }
@@ -264,7 +264,7 @@ describe('bounded combat controller', () => {
     controller.tick(actor)
     expect(surface.find_entities_filtered).toHaveBeenCalledTimes(1)
     expect(controller.status()).toMatchObject({ last_result: { code: 'target_destroyed', completed: true } })
-    expect(manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(manager.player_state().task_state).toBe(TaskStates.IDLE)
   })
 
   it('fails safely when weapon/ammo disappears and stops queued dependent work', () => {
@@ -343,7 +343,7 @@ describe('bounded area-clearing combat', () => {
     ;(globalThis as any).game.tick += 1
     controller.tick(actor)
     expect(controller.status()).toMatchObject({ last_result: { code: 'area_cleared', completed: true, targets_destroyed: 2 } })
-    expect(manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(manager.player_state().task_state).toBe(TaskStates.IDLE)
   })
 
   it('preempts a locked nest when a nearby mobile threat appears', () => {
@@ -533,7 +533,7 @@ describe('bounded area-clearing combat', () => {
   it('pathfinds back to the latest support turret while firing instead of retreating blindly through terrain', () => {
     const { actor, character, manager, surface, controller } = world()
     controller.submit_clear(80)
-    const task = manager.player_state.parameters_attack_nearest_enemy!
+    const task = manager.player_state().parameters_attack_nearest_enemy!
     task.last_turret_position = { x: -10, y: 0 }
     task.turrets_placed = 1
     character.can_shoot.mockReturnValue(true)
@@ -562,7 +562,7 @@ describe('bounded area-clearing combat', () => {
     character.max_health = 250
     character.can_shoot.mockReturnValue(false)
     controller.submit_clear(80)
-    const task = manager.player_state.parameters_attack_nearest_enemy!
+    const task = manager.player_state().parameters_attack_nearest_enemy!
     task.last_turret_position = { x: -12, y: 3 }
     task.turrets_placed = 1
     actor.position = { x: 10, y: 0 }

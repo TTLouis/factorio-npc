@@ -67,8 +67,8 @@ describe('standalone NPC player item interaction', () => {
   it('queues a player transfer with actor ownership and exact player identity', () => {
     const c = context()
     expect(c.controller.submit_player_move('stone', 'TTLouis', 10, true)[0]).toBe(true)
-    expect(c.manager.player_state.task_state).toBe(TaskStates.MOVING_ITEMS)
-    expect(c.manager.player_state.parameters_move_items).toMatchObject({
+    expect(c.manager.player_state().task_state).toBe(TaskStates.MOVING_ITEMS)
+    expect(c.manager.player_state().parameters_move_items).toMatchObject({
       owner_actor_id: 18,
       player_name: 'TTLouis',
       item_name: 'stone',
@@ -84,7 +84,7 @@ describe('standalone NPC player item interaction', () => {
     expect(c.runtime.state_moving_items(c.actor)).toBe(10)
     expect(c.playerInventory.insert).toHaveBeenCalledWith({ name: 'stone', count: 10 })
     expect(c.actorInventory.remove).toHaveBeenCalledWith({ name: 'stone', count: 10 })
-    expect(c.manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(c.manager.player_state().task_state).toBe(TaskStates.IDLE)
     expect(c.controller.status().last_result).toMatchObject({
       code: 'completed',
       player_name: 'TTLouis',
@@ -111,6 +111,6 @@ describe('standalone NPC player item interaction', () => {
 
     expect(c.runtime.state_moving_items(c.actor)).toBe(0)
     expect(c.controller.status().last_result).toMatchObject({ code: 'too_far', accepted: false, completed: false })
-    expect(c.manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(c.manager.player_state().task_state).toBe(TaskStates.IDLE)
   })
 })

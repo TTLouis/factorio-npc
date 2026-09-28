@@ -69,7 +69,7 @@ describe('task manager status snapshot', () => {
     // The task manager owns ordering/status only. Native admission/start is
     // performed later by crafting_controller.tick(). Simulate the controller's
     // bounded progress fields to verify the status snapshot contract.
-    const task = manager.player_state.parameters_craft_item
+    const task = manager.player_state().parameters_craft_item
     expect(task).toBeDefined()
     if (!task) {
       throw new Error('crafting task was not activated')

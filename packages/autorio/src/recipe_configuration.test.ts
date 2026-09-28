@@ -89,7 +89,7 @@ describe('exact machine recipe configuration', () => {
       target_unit_number: 101,
       recipe_name: 'iron-gear-wheel',
     })
-    expect(c.manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(c.manager.player_state().task_state).toBe(TaskStates.IDLE)
   })
 
   it('treats an already-matching recipe as idempotent success without resetting it', () => {
@@ -127,7 +127,7 @@ describe('exact machine recipe configuration', () => {
       target_unit_number: 101,
       recipe_name: 'iron-gear-wheel',
     })
-    expect(c.manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(c.manager.player_state().task_state).toBe(TaskStates.IDLE)
   })
 
   it('rejects missing and locked recipes without mutating the machine', () => {

@@ -47,6 +47,7 @@ let last_reconciled_owned_crafting: OwnedCraftingLoadReceipt | undefined
 let npc_recovery_handler: NpcRecoveryHandler | undefined
 let actor_mode_transition_handler: ActorModeTransitionHandler | undefined
 let recovery_invalidated_actor_id: number | undefined
+let load_reconciliation_handler: (() => void) | undefined
 
 // Factorio does not persist ordinary Lua module locals across save/load. Autorio's
 // logical task manager is therefore intentionally volatile for now, while the
@@ -82,6 +83,13 @@ export function set_actor_mode(mode: ActorMode): ActorMode {
   standalone_actor = undefined
   recovery_invalidated_actor_id = undefined
   return mode
+}
+
+// Called from `reconcile_loaded_npc`, i.e. from the replicated RCON reconcile in
+// multiplayer (or the single-player load path), so every peer runs it at the
+// same tick against the same `storage`.
+export function register_load_reconciliation_handler(handler: (() => void) | undefined) {
+  load_reconciliation_handler = handler
 }
 
 export function register_npc_recovery_handler(handler: NpcRecoveryHandler | undefined) {
@@ -148,6 +156,7 @@ function reconcile_loaded_npc(actor: StandaloneCharacterActor) {
   // treatment, but only when a persisted ownership marker proves Autorio owned
   // the queue before the save.
   last_reconciled_owned_crafting = reconcile_owned_crafting_after_load(actor)
+  load_reconciliation_handler?.()
   actor.set_walking_state({ walking: false, direction: defines.direction.north })
   actor.set_mining_state({ mining: false })
   actor.set_shooting_state({ state: defines.shooting.not_shooting, position: actor.position })

@@ -83,7 +83,7 @@ function entity_inventories(entity: LuaEntity, item_name: string, require_insert
 
 export function new_basic_operation_runtime(manager: Manager, controller: BasicController) {
   function start_mining(actor: ControlledActor, entity: LuaEntity) {
-    const task = manager.player_state.parameters_mine_entity
+    const task = manager.player_state().parameters_mine_entity
     if (!task) return
     task.position = { x: entity.position.x, y: entity.position.y }
     task.last_target_amount = entity.type === 'resource' ? entity.amount : undefined
@@ -93,7 +93,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
   }
 
   function current_mining_target(actor: ControlledActor) {
-    const task = manager.player_state.parameters_mine_entity
+    const task = manager.player_state().parameters_mine_entity
     if (!task) return undefined
     if (task.target_unit_number !== undefined) {
       const exact = resolve_exact_entity(actor, task.target_unit_number)
@@ -129,7 +129,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
   }
 
   function finish_mining(actor: ControlledActor) {
-    const task = manager.player_state.parameters_mine_entity
+    const task = manager.player_state().parameters_mine_entity
     if (!task) return
     actor.set_mining_state({ mining: false })
     log('[AUTORIO] Mining task complete')
@@ -137,7 +137,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
   }
 
   function poll_standalone_mining(actor: ControlledActor) {
-    const task = manager.player_state.parameters_mine_entity
+    const task = manager.player_state().parameters_mine_entity
     if (!task || !task.position || actor.status_snapshot().kind !== 'standalone_character') return false
 
     const target = current_mining_target(actor)
@@ -169,7 +169,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
   }
 
   function state_mining(actor: ControlledActor) {
-    const task = manager.player_state.parameters_mine_entity
+    const task = manager.player_state().parameters_mine_entity
     if (!task) {
       log('[AUTORIO] No parameters found when mining')
       return
@@ -258,8 +258,8 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
   }
 
   function on_player_mined_entity(actor: ControlledActor, player_index: number) {
-    if (!actor.owns_player_index(player_index) || manager.player_state.task_state !== TaskStates.MINING) return
-    const task = manager.player_state.parameters_mine_entity
+    if (!actor.owns_player_index(player_index) || manager.player_state().task_state !== TaskStates.MINING) return
+    const task = manager.player_state().parameters_mine_entity
     if (!task) return
     if (!controller.identity_matches(actor, task)) {
       controller.fail(actor, task, 'actor_changed')
@@ -273,7 +273,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
   }
 
   function state_placing(actor: ControlledActor) {
-    const task = manager.player_state.parameters_place_entity
+    const task = manager.player_state().parameters_place_entity
     if (!task) {
       log('[AUTORIO] No parameters found when placing')
       return
@@ -346,7 +346,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
   }
 
   function move_items_with_player(actor: ControlledActor) {
-    const task = manager.player_state.parameters_move_items
+    const task = manager.player_state().parameters_move_items
     if (!task?.player_name) return undefined
 
     const player = game.get_player(task.player_name)
@@ -408,7 +408,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
   }
 
   function entity_targets(actor: ControlledActor) {
-    const task = manager.player_state.parameters_move_items
+    const task = manager.player_state().parameters_move_items
     if (!task) return undefined
     const reach = entity_interaction_reach(actor)
 
@@ -452,7 +452,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
   }
 
   function state_moving_items(actor: ControlledActor) {
-    const task = manager.player_state.parameters_move_items
+    const task = manager.player_state().parameters_move_items
     if (!task) {
       log('[AUTORIO] No parameters found when moving items')
       return
@@ -521,7 +521,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
   }
 
   function state_waiting(actor: ControlledActor) {
-    const task = manager.player_state.parameters_waiting
+    const task = manager.player_state().parameters_waiting
     if (!task) {
       log('[AUTORIO] No parameters found when waiting')
       return

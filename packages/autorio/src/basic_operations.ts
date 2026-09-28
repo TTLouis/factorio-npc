@@ -381,12 +381,12 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     })
   }
 
-  register_cancel(TaskStates.MINING, () => manager.player_state.parameters_mine_entity)
-  register_cancel(TaskStates.PLACING, () => manager.player_state.parameters_place_entity)
-  register_cancel(TaskStates.ROTATING, () => manager.player_state.parameters_rotate_entity)
-  register_cancel(TaskStates.MOVING_ITEMS, () => manager.player_state.parameters_move_items)
-  register_cancel(TaskStates.SETTING_RECIPE, () => manager.player_state.parameters_set_recipe)
-  register_cancel(TaskStates.WAITING, () => manager.player_state.parameters_waiting)
+  register_cancel(TaskStates.MINING, () => manager.player_state().parameters_mine_entity)
+  register_cancel(TaskStates.PLACING, () => manager.player_state().parameters_place_entity)
+  register_cancel(TaskStates.ROTATING, () => manager.player_state().parameters_rotate_entity)
+  register_cancel(TaskStates.MOVING_ITEMS, () => manager.player_state().parameters_move_items)
+  register_cancel(TaskStates.SETTING_RECIPE, () => manager.player_state().parameters_set_recipe)
+  register_cancel(TaskStates.WAITING, () => manager.player_state().parameters_waiting)
 
   function status() {
     return {

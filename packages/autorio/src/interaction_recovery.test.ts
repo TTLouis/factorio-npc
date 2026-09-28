@@ -75,8 +75,8 @@ describe('generic interaction range recovery', () => {
     expect(f.controller.submit_move_exact('iron-plate', 101, 10, true)[0]).toBe(true)
     expect(f.recovery.tick(f.actor)).toBe(true)
 
-    expect(f.manager.player_state.task_state).toBe(TaskStates.WALKING_TO_ENTITY)
-    expect(f.manager.player_state.parameters_walk_to_entity).toMatchObject({
+    expect(f.manager.player_state().task_state).toBe(TaskStates.WALKING_TO_ENTITY)
+    expect(f.manager.player_state().parameters_walk_to_entity).toMatchObject({
       entity_name: 'steel-chest',
       target_kind: 'exact_entity',
       target: chest,
@@ -103,8 +103,8 @@ describe('generic interaction range recovery', () => {
     expect(f.controller.submit_set_recipe_exact(202, 'iron-gear-wheel')[0]).toBe(true)
     expect(f.recovery.tick(f.actor)).toBe(true)
 
-    expect(f.manager.player_state.task_state).toBe(TaskStates.WALKING_TO_ENTITY)
-    expect(f.manager.player_state.parameters_walk_to_entity).toMatchObject({
+    expect(f.manager.player_state().task_state).toBe(TaskStates.WALKING_TO_ENTITY)
+    expect(f.manager.player_state().parameters_walk_to_entity).toMatchObject({
       entity_name: 'assembling-machine-1',
       target_kind: 'exact_entity',
       target_unit_number: 202,
@@ -121,8 +121,8 @@ describe('generic interaction range recovery', () => {
     expect(f.controller.submit_rotate_exact(212, false)[0]).toBe(true)
     expect(f.recovery.tick(f.actor)).toBe(true)
 
-    expect(f.manager.player_state.task_state).toBe(TaskStates.WALKING_TO_ENTITY)
-    expect(f.manager.player_state.parameters_walk_to_entity).toMatchObject({
+    expect(f.manager.player_state().task_state).toBe(TaskStates.WALKING_TO_ENTITY)
+    expect(f.manager.player_state().parameters_walk_to_entity).toMatchObject({
       entity_name: 'steel-chest',
       target_kind: 'exact_entity',
       target_unit_number: 212,
@@ -146,7 +146,7 @@ describe('generic interaction range recovery', () => {
     expect(f.controller.submit_player_move('iron-plate', 'Louis', 5, true)[0]).toBe(true)
     expect(f.recovery.tick(f.actor)).toBe(true)
 
-    expect(f.manager.player_state.parameters_walk_to_entity).toMatchObject({
+    expect(f.manager.player_state().parameters_walk_to_entity).toMatchObject({
       target_kind: 'player',
       target_player_name: 'Louis',
       target: character,
@@ -161,8 +161,8 @@ describe('generic interaction range recovery', () => {
     expect(f.controller.submit_placement('steel-chest', 8, 0, 2)).toBe(true)
     expect(f.recovery.tick(f.actor)).toBe(true)
 
-    expect(f.manager.player_state.task_state).toBe(TaskStates.WALKING_TO_ENTITY)
-    expect(f.manager.player_state.parameters_walk_to_entity).toMatchObject({
+    expect(f.manager.player_state().task_state).toBe(TaskStates.WALKING_TO_ENTITY)
+    expect(f.manager.player_state().parameters_walk_to_entity).toMatchObject({
       target_kind: 'position',
       requested_position: { x: 8, y: 0 },
       target_position: { x: 8, y: 0 },
@@ -192,8 +192,8 @@ describe('generic interaction range recovery', () => {
       direction: 0,
     }))
     expect(f.surface.find_non_colliding_position).toHaveBeenCalled()
-    expect(f.manager.player_state.task_state).toBe(TaskStates.WALKING_TO_ENTITY)
-    expect(f.manager.player_state.parameters_walk_to_entity).toMatchObject({
+    expect(f.manager.player_state().task_state).toBe(TaskStates.WALKING_TO_ENTITY)
+    expect(f.manager.player_state().parameters_walk_to_entity).toMatchObject({
       target_kind: 'position',
       requested_position: { x: 2.3, y: 0 },
       target_position: { x: 2.3, y: 0 },
@@ -210,7 +210,7 @@ describe('generic interaction range recovery', () => {
     expect(f.recovery.tick(f.actor)).toBe(false)
 
     expect(f.surface.find_non_colliding_position).not.toHaveBeenCalled()
-    expect(f.manager.player_state.task_state).toBe(TaskStates.PLACING)
+    expect(f.manager.player_state().task_state).toBe(TaskStates.PLACING)
     expect(f.manager.get_status_snapshot().queue_length).toBe(0)
   })
 
@@ -221,7 +221,7 @@ describe('generic interaction range recovery', () => {
 
     expect(f.controller.submit_move_exact('iron-plate', 404, 1, true)[0]).toBe(true)
     expect(f.recovery.tick(f.actor)).toBe(false)
-    expect(f.manager.player_state.task_state).toBe(TaskStates.MOVING_ITEMS)
+    expect(f.manager.player_state().task_state).toBe(TaskStates.MOVING_ITEMS)
     expect(f.manager.get_status_snapshot().queue_length).toBe(0)
   })
 
@@ -237,7 +237,7 @@ describe('generic interaction range recovery', () => {
       radius: 8,
       name: 'steel-chest',
     }))
-    expect(f.manager.player_state.parameters_walk_to_entity).toMatchObject({
+    expect(f.manager.player_state().parameters_walk_to_entity).toMatchObject({
       target_kind: 'exact_entity',
       target: far,
       target_unit_number: 505,

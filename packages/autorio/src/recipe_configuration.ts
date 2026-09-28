@@ -22,7 +22,7 @@ function supports_recipe_category(target: any, recipe: any) {
 
 export function new_recipe_configuration_runtime(manager: Manager, controller: BasicController) {
   function state_setting_recipe(actor: ControlledActor) {
-    const task = manager.player_state.parameters_set_recipe
+    const task = manager.player_state().parameters_set_recipe
     if (!task) {
       log('[AUTORIO] No parameters found when setting machine recipe')
       return
