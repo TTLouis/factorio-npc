@@ -93,6 +93,7 @@ export class UsageLedger {
     this.outputCap = outputCap
     this.goals = new Map()
     this.pending = new Map()
+    this.newGoalRequests = new Set()
   }
 
   warningOutputUnits() {
@@ -109,29 +110,41 @@ export class UsageLedger {
     return bucket
   }
 
-  // `context.goalId` is the live goal when a round runs (undefined while a new
-  // goal is still being authored).
+  // `context.goalId` is the live goal when a round runs. A request that
+  // starts a new goal charges nothing to the goal that was live before it:
+  // its rounds wait in `pending` until the new goal's first plan is saved,
+  // even while the old goal is still active, paused or blocked.
   observe(event, data = {}, context = {}) {
     const after = []
     const requestId = context.requestId
+    if (event === 'request.received' && requestId && data?.interaction_intent === 'new_goal') {
+      this.newGoalRequests.add(requestId)
+      while (this.newGoalRequests.size > 64) this.newGoalRequests.delete(this.newGoalRequests.keys().next().value)
+    }
+    const authoringNewGoal = Boolean(requestId && this.newGoalRequests.has(requestId))
+    const liveGoal = authoringNewGoal ? undefined : context.goalId
     if (event === 'provider.response') {
-      if (context.goalId) addUsage(this.goal(context.goalId), data?.usage, requestId)
+      if (liveGoal) addUsage(this.goal(liveGoal), data?.usage, requestId)
       else if (requestId) {
         if (!this.pending.has(requestId)) this.pending.set(requestId, emptyBucket())
         addUsage(this.pending.get(requestId), data?.usage, requestId)
       }
     }
     const persistedGoal = event === 'plan.persisted' && typeof data?.goal_id === 'string' && data.goal_id ? data.goal_id : undefined
-    if (persistedGoal && requestId && this.pending.has(requestId)) {
-      mergeBucket(this.goal(persistedGoal), this.pending.get(requestId))
+    if (persistedGoal && requestId) {
+      if (this.pending.has(requestId)) mergeBucket(this.goal(persistedGoal), this.pending.get(requestId))
       this.pending.delete(requestId)
+      this.newGoalRequests.delete(requestId)
     }
     // A step that closes the goal leaves it completed, so the closing step is
     // counted against the goal it belonged to, whatever its status now.
     const closedGoal = context.stepGoalId ?? context.goalId
     if (STEP_CLOSE_EVENTS.has(event) && closedGoal) this.goal(closedGoal).verified_steps++
-    if (TERMINAL_EVENTS.has(event) && requestId) this.pending.delete(requestId)
-    const goalId = persistedGoal ?? context.goalId
+    if (TERMINAL_EVENTS.has(event) && requestId) {
+      this.pending.delete(requestId)
+      this.newGoalRequests.delete(requestId)
+    }
+    const goalId = persistedGoal ?? liveGoal
     const warning = goalId && (event === 'provider.response' || persistedGoal) ? this.warningFor(goalId) : undefined
     if (warning) after.push(warning)
     return { before: [], after }

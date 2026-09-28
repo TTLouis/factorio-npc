@@ -215,3 +215,43 @@ test('the supervisor shows the goal spend and announces the warning once', async
   await new Promise(resolve => setImmediate(resolve))
   assert.deepEqual(printed, ['Heads-up: this goal has used 300k model output units so far.'])
 })
+
+// Review fix: a new goal issued while the old one is still live (active,
+// paused or blocked) never charges its authoring rounds to the old goal.
+test('a new-goal request charges its authoring rounds to the new goal, never to the old live one', () => {
+  const ledger = new UsageLedger({ warningOutputUnits: 1000 })
+  const round = output => ({ usage: { input_units: 100, cached_input_units: 0, output_units: output, usage_complete: true } })
+  // The old goal is live and has spent a little.
+  ledger.observe('request.received', { interaction_intent: 'continue_current' }, { requestId: 'req_old' })
+  ledger.observe('provider.response', round(200), { requestId: 'req_old', goalId: 'goal_old' })
+  // A new goal while goal_old is still the live (paused) state.
+  const events = []
+  const observe = (event, data, goalId) => events.push(...ledger.observe(event, data, { requestId: 'req_new', goalId, stepGoalId: goalId }).after)
+  observe('request.received', { interaction_intent: 'new_goal' }, 'goal_old')
+  observe('provider.response', round(700), 'goal_old')
+  observe('provider.response', round(600), 'goal_old')
+  assert.equal(ledger.goalSummary('goal_old').output_units, 200, 'the old goal is not charged')
+  assert.equal(events.length, 0, 'no warning against the old goal')
+  observe('plan.persisted', { goal_id: 'goal_new' }, 'goal_new')
+  assert.equal(ledger.goalSummary('goal_new').output_units, 1300)
+  assert.equal(ledger.goalSummary('goal_old').output_units, 200)
+  assert.equal(events.length, 1)
+  assert.equal(events[0][0], 'budget.goal_warning')
+  assert.equal(events[0][1].goal_id, 'goal_new')
+  // Later rounds of the same request go to the new goal directly.
+  observe('provider.response', round(50), 'goal_new')
+  assert.equal(ledger.goalSummary('goal_new').output_units, 1350)
+
+  // The run record applies the same rule to a trace.
+  const at = seconds => new Date(Date.parse('2026-09-28T10:00:00Z') + seconds * 1000).toISOString()
+  const oldBoard = { goal_id: 'goal_old', active_step_id: 'step_2', status: 'paused' }
+  const response = (ts, id, output) => ({ ts: at(ts), request_id: id, event: 'provider.response', data: { usage: { input_units: 100, cached_input_units: 0, output_units: output } } })
+  const record = buildRunRecord([
+    { ts: at(0), request_id: 'req_new', event: 'request.received', data: { interaction_intent: 'new_goal' } },
+    { ts: at(1), request_id: 'req_new', event: 'factorio.status', data: { task_board: oldBoard } },
+    response(2, 'req_new', 700),
+    { ts: at(3), request_id: 'req_new', event: 'plan.persisted', data: { goal_id: 'goal_new', task_board: { goal_id: 'goal_new', active_step_id: 'step_1', status: 'active' } } },
+    response(4, 'req_new', 50),
+  ])
+  assert.deepEqual(record.by_goal.map(row => [row.goal_id, row.output_units]), [['goal_new', 750]])
+})

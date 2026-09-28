@@ -34,7 +34,6 @@ export const OVERRUN_FACTOR = 1.5
 export const ESTIMATE_TOOL_NAMES = new Set(['estimateProductionTime', 'getMiningDetails'])
 export const RATE_BASIS = 'live prototype rates via autorio_knowledge.production_estimate (hand mining: mining_time / character mining speed; hand crafting: recipe energy / hand crafting speed); wait: ticks / 60'
 export const EXCLUDED_TIME = Object.freeze(['walking', 'placement', 'transfer'])
-const RATE_CACHE_MS = 10 * 60 * 1000
 const MAX_RATE_LOOKUPS = 8
 const TICKS_PER_SECOND = 60
 const DEFAULT_SEARCH_RADIUS = 256
@@ -126,31 +125,24 @@ export function parseRateAnswer(kind, raw) {
 export class PlanTimeEstimator {
   constructor({ now = () => Date.now() } = {}) {
     this.now = now
-    this.cache = new Map()
   }
 
-  async rate(rcon, kind, target, identity) {
-    const key = `${kind}|${target}|${identity}`
-    const cached = this.cache.get(key)
-    if (cached && this.now() - cached.at < RATE_CACHE_MS) return cached.rate
-    const args = rateLookupArgs(kind, target)
-    let rate
+  // Read fresh for every batch (deduplicated within it), not cached across
+  // batches: research such as a manual mining or crafting speed bonus changes
+  // the rate, and the runtime sees no research-finished event to invalidate a
+  // cache on. The read is one small computation in the mod.
+  async rate(rcon, kind, target) {
     try {
-      const raw = await rcon.command(toolCommand('estimateProductionTime', args))
-      rate = parseRateAnswer(kind, raw)
+      const raw = await rcon.command(toolCommand('estimateProductionTime', rateLookupArgs(kind, target)))
+      return parseRateAnswer(kind, raw)
     }
     catch {
-      rate = undefined
+      return undefined
     }
-    // An unknown answer is cached too, so a batch retried in the same epoch
-    // does not re-ask the game for a rate it cannot give.
-    this.cache.set(key, { at: this.now(), rate })
-    return rate
   }
 
   // Serial time the batch keeps the actor busy, from game rates only.
-  async estimateOperations(rcon, operations, { actorId, epoch } = {}) {
-    const identity = `${actorId ?? 'actor'}|${epoch ?? 'epoch'}`
+  async estimateOperations(rcon, operations) {
     const entries = (Array.isArray(operations) ? operations : []).slice(0, 16).map(classifyOperation)
     const lookups = []
     for (const entry of entries) {
@@ -162,7 +154,7 @@ export class PlanTimeEstimator {
     }
     const rates = new Map()
     for (const lookup of lookups) {
-      rates.set(`${lookup.kind}|${lookup.target}`, rcon ? await this.rate(rcon, lookup.kind, lookup.target, identity) : undefined)
+      rates.set(`${lookup.kind}|${lookup.target}`, rcon ? await this.rate(rcon, lookup.kind, lookup.target) : undefined)
     }
     let known = 0
     let unknown = 0

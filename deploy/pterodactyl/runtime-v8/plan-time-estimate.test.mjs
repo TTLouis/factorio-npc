@@ -14,12 +14,16 @@ import {
 import {
   productionEstimateAnswer,
   STEAM_PLAN,
+  STEAM_PROTOTYPES,
   STEAM_ROUNDS,
   STEAM_STEP1_INVENTORY,
   steamReplayHarness,
   TimedSteamFactorio,
 } from './steam-run-fixtures.mjs'
+import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
+import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { plannerControlPayloadFromMessage } from './structured-policy.mjs'
+import { FakeFactorio } from './task-loop-fixtures.mjs'
 import { liveAgentDebugEvent, taskBoardUiSnapshot } from './supervisor.mjs'
 
 // A fake game that answers only the production estimate, with the mod's
@@ -41,7 +45,7 @@ const STEP1_OPERATIONS = Object.entries(STEAM_STEP1_INVENTORY).map(([resource, c
 
 test('the four-op 390-ore hand-mining batch estimates 13 min on the actor lane from game rates (regression 7)', async () => {
   const game = estimateGame()
-  const estimate = await new PlanTimeEstimator().estimateOperations(game, STEP1_OPERATIONS, { actorId: 15, epoch: 1 })
+  const estimate = await new PlanTimeEstimator().estimateOperations(game, STEP1_OPERATIONS)
   // 390 ore x (mining_time 1 / character mining speed 0.5) = 780 s.
   assert.equal(estimate.expected_seconds, 780)
   assert.equal(formatDuration(estimate.expected_seconds), '13.0 min')
@@ -57,13 +61,10 @@ test('the four-op 390-ore hand-mining batch estimates 13 min on the actor lane f
     ['iron-ore', 180, 360, 2],
     ['copper-ore', 70, 140, 2],
   ])
-  // One game read per distinct resource, cached per actor and epoch.
+  // One game read per distinct resource in the batch.
   assert.equal(game.commands.length, 4)
-  await new PlanTimeEstimator().estimateOperations(game, STEP1_OPERATIONS, { actorId: 15, epoch: 1 })
-  const estimator = new PlanTimeEstimator()
-  await estimator.estimateOperations(game, STEP1_OPERATIONS, { actorId: 15, epoch: 1 })
-  await estimator.estimateOperations(game, STEP1_OPERATIONS, { actorId: 15, epoch: 1 })
-  assert.equal(game.commands.length, 12)
+  await new PlanTimeEstimator().estimateOperations(game, [...STEP1_OPERATIONS, gatherOp('coal', 5)])
+  assert.equal(game.commands.length, 8)
 
   const trigger = isLongEstimate(estimate)
   assert.equal(trigger.long, true)
@@ -372,4 +373,85 @@ test('the Debug window and the task board step show the estimate', () => {
   const snapshot = taskBoardUiSnapshot(state, { phase: 'executing', debug }, undefined)
   assert.equal(snapshot.steps[0].time, time.step_time_caption)
   assert.equal(snapshot.steps[1].time, undefined)
+})
+
+// Review fix: research that changes the manual mining speed (a force
+// modifier) applies to the next batch; no rate outlives it in a cache.
+test('a mining speed bonus from research applies to the next batch estimate', async () => {
+  let miningSpeed = 0.5
+  const game = {
+    async command(text) {
+      return JSON.stringify(productionEstimateAnswer(text, { ...STEAM_PROTOTYPES, character_mining_speed: miningSpeed }))
+    },
+  }
+  const estimator = new PlanTimeEstimator()
+  const before = await estimator.estimateOperations(game, [gatherOp('iron-ore', 180)])
+  assert.equal(before.expected_seconds, 360)
+  miningSpeed = 1 // e.g. +100% manual mining speed
+  const after = await estimator.estimateOperations(game, [gatherOp('iron-ore', 180)])
+  assert.equal(after.expected_seconds, 180)
+})
+
+// Review fix: the time split is written before the terminal event on the
+// failed path and on the budget pause path (1.5), through the real loop.
+function assertSplitPrecedes(trace, terminalEvent) {
+  const index = trace.findIndex(record => record.event === terminalEvent)
+  assert.ok(index > 0, `${terminalEvent} traced`)
+  const split = trace[index - 1]
+  assert.equal(split.event, 'request.time_split')
+  assert.equal(split.request_id, trace[index].request_id)
+  assert.equal(split.data.request_id, trace[index].request_id)
+  assert.ok(Number.isFinite(split.data.wall_ms))
+  assert.equal(trace.filter(record => record.event === 'request.time_split').length, 1)
+  return split
+}
+
+test('a failed request ends with its time split before request.failed', async () => {
+  const game = new FakeFactorio()
+  game.status = { ...game.status, allowed: false }
+  const agent = new NpcAgentLoop({
+    rcon: game,
+    memory: new CanonicalTaskBoardMemory(),
+    provider: async () => { throw new Error('the provider is never reached') },
+    systemPrompt: 'time split test',
+    stateFile: null,
+    traceFile: null,
+    decisionTraceFile: null,
+    npcId: 'airi',
+  })
+  const trace = []
+  agent.behaviorTrace = { emit: async record => { trace.push(record) } }
+  await assert.rejects(agent.request('mine some ore', { sender: 'TTLouis' }))
+  const split = assertSplitPrecedes(trace, 'request.failed')
+  assert.equal(split.data.think_ms, 0)
+  assert.equal(split.data.batches, 0)
+})
+
+test('a request that overruns its budget before any plan exists fails with its time split first', async () => {
+  // Authoring alone (42,915 output units) overruns a 20,000 per-step budget.
+  const world = steamReplayHarness({ maxProviderOutputUnits: 20000 })
+  await assert.rejects(world.request(), /provider_turn_output_cap_exceeded/)
+  const split = assertSplitPrecedes(world.trace, 'request.failed')
+  const latencies = world.events('provider.response').reduce((total, record) => total + record.data.latency_ms, 0)
+  assert.equal(split.data.think_ms, latencies)
+})
+
+test('a request paused at the output budget ends with its time split before request.completed', async () => {
+  // After step 1 closes (a fresh step budget), step 2's first recorded rounds
+  // (147 + 1,762 output units) overrun a 1,000 per-step budget while the plan
+  // is active and unblocked: group A's visible budget pause.
+  const world = steamReplayHarness()
+  await world.request()
+  world.agent.maxProviderOutputUnits = 1000
+  const result = await world.closeStep1()
+  assert.equal(result.goalStatus, 'paused')
+  assert.equal(world.memory.currentPlan('npc:airi').status, 'paused')
+  const completed = world.events('request.completed').at(-1)
+  assert.match(completed.data.outcome, /^paused_/)
+  const split = assertSplitPrecedes(world.trace, 'request.completed')
+  assert.equal(split.data.outcome, completed.data.outcome)
+  const latencies = world.events('provider.response').reduce((total, record) => total + record.data.latency_ms, 0)
+  assert.equal(split.data.think_ms, latencies)
+  assert.equal(split.data.batches, 1, 'the step 1 batch was admitted in this request')
+  assert.ok(split.data.actor_busy_ms >= 0)
 })

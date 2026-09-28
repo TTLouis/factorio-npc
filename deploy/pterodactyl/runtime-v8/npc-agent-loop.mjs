@@ -7477,8 +7477,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         estimateToolCalled: this.planTiming.estimateToolCalledThisRequest(),
         // Recovery rounds run without tools, and a blocked plan waits for the
         // player: neither gets a review round.
-        recoveryMode: Boolean(this.genericRecoveryDecisionActive || this.outputBudgetRecoveryGuard
-          || this.actionOmissionRepairActive || state?.status === 'blocked'),
+        recoveryMode: Boolean((this.recoveryCommitDepth ?? 0) > 0 || this.genericRecoveryDecisionActive
+          || this.outputBudgetRecoveryGuard || this.actionOmissionRepairActive || state?.status === 'blocked'),
       })
     }
     catch (error) {
@@ -8327,7 +8327,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  // Every commit reached through recovery (Jev recovery routes, the budget
+  // handoff's fresh generation, format recovery) runs with the 2.6 time
+  // review off: a held draft there would run a full planner turn inside the
+  // recovery and could turn a recovery that commits into a failed one.
   async recoverPlan(generation, reason, roundBase) {
+    this.recoveryCommitDepth = (this.recoveryCommitDepth ?? 0) + 1
+    try {
+      return await this.recoverPlanRoute(generation, reason, roundBase)
+    }
+    finally {
+      this.recoveryCommitDepth--
+    }
+  }
+
+  async recoverPlanRoute(generation, reason, roundBase) {
     const reasonText = reason instanceof Error ? reason.message : String(reason)
     const recovery = {
       reason: reasonText,

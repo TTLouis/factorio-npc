@@ -335,7 +335,7 @@ export function buildRunRecord(behaviorRows, { prices } = {}) {
 
   const requestState = id => {
     if (!requests.has(id)) {
-      requests.set(id, { request_id: id, started_ts: undefined, ended_ts: undefined, outcome: undefined, goal_id: undefined, step_id: undefined, blocked: false, last_round: undefined, busy_since: undefined, busy_ms: 0, think_ms: 0, time_split: undefined, verified_steps: 0, unattributed: [] })
+      requests.set(id, { request_id: id, started_ts: undefined, ended_ts: undefined, outcome: undefined, goal_id: undefined, step_id: undefined, blocked: false, last_round: undefined, busy_since: undefined, busy_ms: 0, think_ms: 0, time_split: undefined, verified_steps: 0, unattributed: [], new_goal: false })
     }
     return requests.get(id)
   }
@@ -347,13 +347,17 @@ export function buildRunRecord(behaviorRows, { prices } = {}) {
     const data = row.data && typeof row.data === 'object' ? row.data : {}
     const ms = parseTs(row.ts)
     request.started_ts ??= safeText(row.ts)
+    // A request that starts a new goal charges nothing to the goal live
+    // before it: its rounds stay unattributed until its first plan is saved.
+    if (row.event === 'request.received' && data.interaction_intent === 'new_goal') request.new_goal = true
+    if (row.event === 'plan.persisted') request.new_goal = false
     const board = data.task_board && typeof data.task_board === 'object' ? data.task_board : undefined
-    if (board) {
+    if (!request.new_goal && board) {
       request.goal_id = safeText(board.goal_id) ?? request.goal_id
       request.step_id = safeText(board.active_step_id) ?? request.step_id
       request.blocked = board.status === 'blocked'
     }
-    else if (safeText(data.goal_id)) request.goal_id = data.goal_id
+    else if (!request.new_goal && safeText(data.goal_id)) request.goal_id = data.goal_id
     // Rounds that ran before the goal existed (authoring a new goal) belong
     // to the goal their request goes on to persist; they have no step.
     if (request.goal_id && request.unattributed.length > 0) {
