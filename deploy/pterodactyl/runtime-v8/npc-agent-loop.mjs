@@ -72,6 +72,7 @@ import {
   typedProjectionOperationPolicy,
   typedProjectionQuestions,
 } from './jev-typed-projection.mjs'
+import { abortSkillChoice, ensureSkillOffers, injectedSkillChars, refreshSkillOffersAtShelfPickup, SKILL_OFFERS_PREFIX, skillOffersContext, traceSkillLoaded, traceSkillsFollowed } from './skill-offers.mjs'
 
 export { AgentLoopError }
 
@@ -2349,6 +2350,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.interactionDecisionProvider = this.recordedDecisionProvider(options.interactionDecisionProvider)
     this.steeringDecisionProvider = this.recordedDecisionProvider(options.steeringDecisionProvider)
     this.operationProjectionDecisionProvider = this.recordedDecisionProvider(options.operationProjectionDecisionProvider)
+    this.skillDecisionProvider = this.recordedDecisionProvider(options.skillDecisionProvider) // 2.8: skill-offers.mjs
     this.interactionAbort = null
     this.postStepDecisionAbort = null
     this.recoveryDecisionAbort = null
@@ -2531,7 +2533,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   compactWorkingContext() {
     if (this.compactionDeferred) return
     const overBudget = () => this.messages.length > this.maxWorkingMessages
-      || this.messages.reduce((total, message) => total + messageChars(message), 0) > this.maxWorkingChars
+      || this.messages.reduce((total, message) => total + messageChars(message), 0) > this.maxWorkingChars - injectedSkillChars(this) // 2.8 hook: injected skill text counts
     while (overBudget()) {
       const newest = this.messages.findLastIndex(message => message.role === 'assistant' && Array.isArray(message.tool_calls))
       const start = this.messages.findIndex((message, index) => index >= this.baseMessages.length
@@ -2556,8 +2558,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   providerMessages() {
     const messages = super.providerMessages().filter(message => !(message?.role === 'user'
       && typeof message.content === 'string'
-      && message.content.startsWith('[SKILL_CONTEXT]')))
-    const skillContext = this.skillContext()
+      && (message.content.startsWith('[SKILL_CONTEXT]') || message.content.startsWith(SKILL_OFFERS_PREFIX))))
+    const skillContext = [skillOffersContext(this), this.skillContext()].filter(Boolean).join('\n\n') // 2.8 hook
     if (!skillContext) return messages
     // Skill context belongs to the fixed prefix, which ends before the first
     // model turn. `baseMessages` alone is not that prefix: a budget handoff
@@ -4765,6 +4767,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
 
+    await ensureSkillOffers(this, { memoryKey, intent, text }) // 2.8 hook: skill-offers.mjs
     try {
       this.chatRequestPending = true
       const result = await super.request(text, options)
@@ -4816,6 +4819,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const paused = this.goalPausedTrace('pause_persistent_plan')
       if (paused) await this.traceEvent('goal.paused', paused, { requestId: paused.request_id })
     }
+    abortSkillChoice(this, reason) // 2.8 hook: stop, identity/actor change
     super.cancel()
     return state
   }
@@ -4825,6 +4829,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const key = this.requestInfo?.memoryKey ?? this.lastMemoryKey ?? `npc:${this.npcId}`
     this.memory.clearTaskContext?.(key)
     this.clearLoadedSkillContext()
+    this.skillOffers = null // 2.8 hook
     await this.persistState()
 
     // Completion is a hard planner boundary. Do not carry the completed task's
@@ -5541,6 +5546,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         route: 'next_shelf_slice',
         steering_mode: planningAfterCompletion.steering?.current_mode,
       })
+      await refreshSkillOffersAtShelfPickup(this, planningAfterCompletion) // 2.8 hook: shelf -> active plan skill search
       this.reasoningTriggerSource = 'plan_slice_completed'
       try {
         const unmet = goalEvaluation
@@ -5879,6 +5885,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.recoveryDecisionAbort = null
     this.operationProjectionAbort?.abort()
     this.operationProjectionAbort = null
+    abortSkillChoice(this, reason) // 2.8 hook
     if (/terminate|new_task|cancel_current|user_cancel/i.test(String(reason))) this.clearLoadedSkillContext()
     this.reasoningTriggerSource = null
     void this.traceEvent('request.cancelled', { reason, usage: this.traceRequest?.usage })
@@ -6885,6 +6892,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           revision: loadedSkill.revision,
           loaded_skill_count: this.loadedSkillContext.size,
         })
+        await traceSkillLoaded(this, loadedSkill) // 2.8 hook
       }
       if (admittedCached[index]) results[index].content = DUPLICATE_OBSERVATION_MESSAGE
       const output = String(results[index].content ?? '')
@@ -7411,6 +7419,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       ...(plan.checkpoint ? { checkpoint: plan.checkpoint } : {}),
       ...(plan.semanticCompletion ? { semantic_completion: plan.semanticCompletion } : {}),
     })
+    await traceSkillsFollowed(this, plan) // 2.8 hook
 
     const before = await this.assertCurrent()
     const persistentRuntime = commands.length === 0 && plan.plan.length > 0

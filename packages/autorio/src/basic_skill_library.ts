@@ -30,13 +30,14 @@ function confidence() {
 export const BASIC_SKILL_DEFINITIONS: any[] = [
   {
     schema_version: 1,
-    revision: 1,
+    revision: 2,
     id: 'missing-item-bootstrap',
     name: 'Missing Item Bootstrap',
     kind: 'utility',
     stage: 'pattern',
     status: 'candidate',
     summary: 'When a required building or item is absent, resolve the dependency before declaring a blocker: check held inventory, reusable nearby infrastructure, current recipe/craftability, required ingredients, then obtain or craft only what the next executable step needs. Missing does not mean unavailable.',
+    goal_tags: ['missing', 'craft', 'bootstrap', 'dependency', 'blocked'],
     source: SOURCE,
     preconditions: [
       { kind: 'bootstrap', subject: 'required-item-missing', description: 'The current goal needs an item or building that AIRI does not already have ready to use.' },
@@ -77,16 +78,17 @@ export const BASIC_SKILL_DEFINITIONS: any[] = [
   },
   {
     schema_version: 1,
-    revision: 1,
+    revision: 2,
     id: 'burner-coal-loop',
     name: 'Burner Coal Loop',
     kind: 'production',
     stage: 'pattern',
     status: 'candidate',
     summary: 'Bootstrap early coal production with a small amount of starter fuel, then arrange fuel-burning miners so mined coal feeds the fuel demand of the loop and surplus coal can be taken away. This is the common coal-snake / 煤蛇 idea; exact miner count, orientation, and geometry must come from the live world.',
+    goal_tags: ['coal', 'coal-snake', 'burner', 'fuel', 'mining', '煤蛇'],
     source: SOURCE,
     preconditions: [
-      { kind: 'entity_available', subject: 'fuel-burning-miner', description: 'A placed or placeable mining machine can mine coal and consumes fuel.' },
+      { kind: 'entity_available', subject: 'burner-mining-drill', description: 'A placed or placeable fuel-burning mining machine (burner-mining-drill in the base game) can mine coal.' },
       { kind: 'custom', subject: 'coal-resource', description: 'A suitable fuel resource patch is available.' },
       { kind: 'bootstrap', subject: 'starter-fuel', description: 'Enough initial fuel exists to start at least part of the loop.' },
     ],
@@ -94,8 +96,8 @@ export const BASIC_SKILL_DEFINITIONS: any[] = [
     outputs: [{ item: 'coal', role: 'self-sustaining fuel plus surplus' }],
     topology: {
       nodes: [
-        { id: 'miner-a', role: 'Coal miner and fuel consumer' },
-        { id: 'miner-b', role: 'Next coal miner and fuel consumer' },
+        { id: 'miner-a', role: 'Coal miner and fuel consumer', entity_name: 'burner-mining-drill' },
+        { id: 'miner-b', role: 'Next coal miner and fuel consumer', entity_name: 'burner-mining-drill' },
         { id: 'surplus', role: 'Optional coal takeoff after the loop is stable' },
       ],
       relations: [
@@ -127,25 +129,26 @@ export const BASIC_SKILL_DEFINITIONS: any[] = [
   },
   {
     schema_version: 1,
-    revision: 1,
+    revision: 3,
     id: 'direct-miner-smelting',
     name: 'Direct Miner Smelting',
     kind: 'production',
     stage: 'pattern',
     status: 'candidate',
     summary: 'For very early plate production, consider placing a mining drill so its output feeds a furnace directly, eliminating a belt and input inserter when live geometry permits. Fuel remains a separate dependency unless the selected machines do not require it.',
+    goal_tags: ['smelting', 'smelt', 'iron', 'copper', 'ore', 'furnace', 'mining'],
     source: SOURCE,
     preconditions: [
       { kind: 'custom', subject: 'smeltable-resource', description: 'The target resource can be mined at the selected location.' },
-      { kind: 'entity_available', subject: 'mining-machine', description: 'A compatible mining machine is available or can be made.' },
+      { kind: 'entity_available', subject: 'mining-drill', description: 'A compatible mining machine (entity type mining-drill) is available or can be made.' },
       { kind: 'entity_available', subject: 'furnace', description: 'A compatible smelting machine is available or can be made.' },
     ],
     inputs: [{ item: 'ore', role: 'mined input' }, { item: 'fuel', role: 'optional machine fuel when required' }],
     outputs: [{ item: 'plate', role: 'smelted output' }],
     topology: {
       nodes: [
-        { id: 'miner', role: 'Mine the target resource' },
-        { id: 'furnace', role: 'Receive miner output and smelt it' },
+        { id: 'miner', role: 'Mine the target resource', entity_name: 'burner-mining-drill' },
+        { id: 'furnace', role: 'Receive miner output and smelt it', entity_name: 'stone-furnace' },
       ],
       relations: [
         { kind: 'direct_item_output', from: 'miner', to: 'furnace', description: 'Align the actual miner output with the furnace input footprint.' },
@@ -171,17 +174,19 @@ export const BASIC_SKILL_DEFINITIONS: any[] = [
     confidence: confidence(),
     examples: [
       { summary: 'Bootstrap a few iron plates with existing early infrastructure.', notes: 'Prefer an already placed compatible miner/furnace pair when available; otherwise validate exact placement before building.' },
+      { summary: 'To grow beyond the first pair, or to meet a rate or deadline, follow skill scale-out-production-line.', notes: 'It sizes the pair count from the rate tools and covers the early snowball.' },
     ],
   },
   {
     schema_version: 1,
-    revision: 1,
+    revision: 3,
     id: 'starter-smelting-row',
     name: 'Starter Smelting Row',
     kind: 'production',
     stage: 'pattern',
     status: 'candidate',
     summary: 'Scale early smelting by arranging multiple furnaces along repeatable ore/fuel input and plate output paths. Start with the smallest row that satisfies the immediate goal, preserve room to extend it, and validate belt/inserter capacity rather than assuming a remembered ratio.',
+    goal_tags: ['smelting', 'smelting-row', 'smelt', 'furnace-row', 'row', 'iron', 'copper', 'furnace'],
     source: SOURCE,
     preconditions: [
       { kind: 'entity_available', subject: 'furnace', description: 'One or more compatible furnaces are available or craftable.' },
@@ -192,7 +197,7 @@ export const BASIC_SKILL_DEFINITIONS: any[] = [
     topology: {
       nodes: [
         { id: 'input-path', role: 'Deliver ore and optional fuel' },
-        { id: 'furnace-row', role: 'Repeatable furnace cells' },
+        { id: 'furnace-row', role: 'Repeatable furnace cells', entity_name: 'stone-furnace' },
         { id: 'output-path', role: 'Collect finished plates' },
       ],
       relations: [
@@ -219,17 +224,19 @@ export const BASIC_SKILL_DEFINITIONS: any[] = [
     confidence: confidence(),
     examples: [
       { summary: 'Build a small iron or copper smelting row that can be extended later.', notes: 'For tiny goals, direct manual supply may be cheaper than building the full transport pattern.' },
+      { summary: 'To size the row for a rate or deadline, or to extend it, follow skill scale-out-production-line.', notes: 'It sizes the furnace count from the rate tools instead of a remembered ratio.' },
     ],
   },
   {
     schema_version: 1,
-    revision: 1,
+    revision: 2,
     id: 'two-item-half-belt',
     name: 'Two Item Half-Belt',
     kind: 'logistics',
     stage: 'pattern',
     status: 'candidate',
     summary: 'Carry two low-throughput item streams on opposite lanes of one belt so a shared consumer row can access both without two full belts. Common early uses include ore plus fuel or two assembler ingredients; validate actual lane occupancy and consumer pickup geometry.',
+    goal_tags: ['half-belt', 'lane', 'belt', 'logistics', '半带'],
     source: SOURCE,
     preconditions: [
       { kind: 'entity_available', subject: 'transport-belt', description: 'A belt or equivalent two-lane transport is available.' },
@@ -241,7 +248,7 @@ export const BASIC_SKILL_DEFINITIONS: any[] = [
       nodes: [
         { id: 'stream-a', role: 'First item source' },
         { id: 'stream-b', role: 'Second item source' },
-        { id: 'shared-belt', role: 'Two-lane shared belt' },
+        { id: 'shared-belt', role: 'Two-lane shared belt', entity_name: 'transport-belt' },
         { id: 'consumers', role: 'Machines or inserters reading both required streams' },
       ],
       relations: [
@@ -271,13 +278,14 @@ export const BASIC_SKILL_DEFINITIONS: any[] = [
   },
   {
     schema_version: 1,
-    revision: 1,
+    revision: 2,
     id: 'belt-side-load-merge',
     name: 'Belt Side-Load Merge',
     kind: 'logistics',
     stage: 'pattern',
     status: 'candidate',
     summary: 'Merge or compress belt streams by side-loading one belt into another when the resulting lane semantics and throughput are useful. Use this for compact early merges or to combine two partial same-item streams, but verify belt direction and lane occupancy instead of copying a remembered layout.',
+    goal_tags: ['side-load', 'merge', 'belt', 'logistics', '并线'],
     source: SOURCE,
     preconditions: [
       { kind: 'entity_available', subject: 'transport-belt', description: 'At least two belt segments or streams need to be joined.' },
@@ -286,7 +294,7 @@ export const BASIC_SKILL_DEFINITIONS: any[] = [
     outputs: [{ item: 'merged-belt-stream', role: 'combined transport path' }],
     topology: {
       nodes: [
-        { id: 'main-belt', role: 'Receiving belt that continues toward consumers' },
+        { id: 'main-belt', role: 'Receiving belt that continues toward consumers', entity_name: 'transport-belt' },
         { id: 'side-belt', role: 'Belt entering from the side' },
         { id: 'merge', role: 'Side-load junction' },
       ],
@@ -316,13 +324,14 @@ export const BASIC_SKILL_DEFINITIONS: any[] = [
   },
   {
     schema_version: 1,
-    revision: 1,
+    revision: 2,
     id: 'direct-insertion-chain',
     name: 'Direct Insertion Chain',
     kind: 'logistics',
     stage: 'pattern',
     status: 'candidate',
     summary: 'When one producer mainly feeds one nearby consumer, prefer a short direct-insertion relationship over unnecessary belts if live recipe flow, geometry, and inserter reach support it. This reduces early material handling and can make compact intermediate chains.',
+    goal_tags: ['direct-insertion', 'inserter', 'intermediate', 'chain'],
     source: SOURCE,
     preconditions: [
       { kind: 'entity_available', subject: 'producer-machine', description: 'A producer machine or furnace creates the intermediate item.' },
@@ -334,7 +343,7 @@ export const BASIC_SKILL_DEFINITIONS: any[] = [
     topology: {
       nodes: [
         { id: 'producer', role: 'Produce the intermediate item' },
-        { id: 'transfer', role: 'Short direct item transfer' },
+        { id: 'transfer', role: 'Short direct item transfer', entity_name: 'inserter' },
         { id: 'consumer', role: 'Consume the intermediate item' },
       ],
       relations: [
@@ -362,27 +371,29 @@ export const BASIC_SKILL_DEFINITIONS: any[] = [
   },
   {
     schema_version: 1,
-    revision: 1,
+    revision: 2,
     id: 'steam-power-bootstrap',
     name: 'Steam Power Bootstrap',
     kind: 'construction',
     stage: 'pattern',
     status: 'candidate',
     summary: 'Bring up the first reliable electric power with the smallest live-compatible water-to-steam-to-generator chain, then connect the electrical network and fuel the heat source. Verify fluidbox geometry, connection direction, fuel state, and generated power instead of relying on a memorized blueprint.',
+    goal_tags: ['power', 'electricity', 'electric', 'steam', 'steam-power', 'electric-network'],
     source: SOURCE,
     preconditions: [
-      { kind: 'entity_available', subject: 'water-source-machine', description: 'A live-compatible water source entity can be placed on reachable water.' },
-      { kind: 'entity_available', subject: 'steam-generator-chain', description: 'Compatible heating and generation entities are available or craftable.' },
+      { kind: 'entity_available', subject: 'offshore-pump', description: 'A live-compatible water source entity (offshore-pump in the base game) can be placed on reachable water.' },
+      { kind: 'entity_available', subject: 'boiler', description: 'A compatible heating entity (entity type boiler) is available or craftable.' },
+      { kind: 'entity_available', subject: 'generator', description: 'A compatible generation entity (entity type generator, e.g. steam-engine) is available or craftable.' },
       { kind: 'bootstrap', subject: 'fuel-or-energy-input', description: 'The heat source can receive its required initial energy input.' },
     ],
     inputs: [{ item: 'water', role: 'fluid input' }, { item: 'fuel', role: 'heat source input when required' }],
     outputs: [{ item: 'electric-power', role: 'starter electrical supply' }],
     topology: {
       nodes: [
-        { id: 'water-source', role: 'Provide water to the steam chain' },
-        { id: 'heater', role: 'Convert water/energy into generator-compatible working fluid' },
-        { id: 'generator', role: 'Generate electric power' },
-        { id: 'grid', role: 'Electrical network used by early machines' },
+        { id: 'water-source', role: 'Provide water to the steam chain', entity_name: 'offshore-pump' },
+        { id: 'heater', role: 'Convert water/energy into generator-compatible working fluid', entity_name: 'boiler' },
+        { id: 'generator', role: 'Generate electric power', entity_name: 'steam-engine' },
+        { id: 'grid', role: 'Electrical network used by early machines', entity_name: 'small-electric-pole' },
       ],
       relations: [
         { kind: 'fluid_connection', from: 'water-source', to: 'heater', description: 'Connect live output/input fluidboxes.' },
@@ -413,25 +424,26 @@ export const BASIC_SKILL_DEFINITIONS: any[] = [
   },
   {
     schema_version: 1,
-    revision: 1,
+    revision: 2,
     id: 'starter-mining-belt-output',
     name: 'Starter Mining Belt Output',
     kind: 'production',
     stage: 'pattern',
     status: 'candidate',
     summary: 'Build an early scalable mining row by placing drills that genuinely cover the resource patch and orienting their outputs onto a shared belt or other collection path. Keep power/fuel coverage and belt capacity explicit, and extend along the patch only after the first cells are verified.',
+    goal_tags: ['mining', 'mining-row', 'ore', 'drill', 'belt'],
     source: SOURCE,
     preconditions: [
       { kind: 'custom', subject: 'resource-patch', description: 'The target resource patch has observed entities in the intended build area.' },
-      { kind: 'entity_available', subject: 'mining-machine', description: 'A compatible mining machine is available or craftable.' },
+      { kind: 'entity_available', subject: 'mining-drill', description: 'A compatible mining machine (entity type mining-drill) is available or craftable.' },
       { kind: 'entity_available', subject: 'collection-path', description: 'A belt or other bounded output collection path is available.' },
     ],
     inputs: [{ item: 'resource-patch', role: 'mining source' }, { item: 'power-or-fuel', role: 'mining energy input' }],
     outputs: [{ item: 'mined-resource', role: 'belted or collected output' }],
     topology: {
       nodes: [
-        { id: 'drill-row', role: 'Mining machines covering the resource patch' },
-        { id: 'output-belt', role: 'Shared collection belt or equivalent path' },
+        { id: 'drill-row', role: 'Mining machines covering the resource patch', entity_name: 'electric-mining-drill' },
+        { id: 'output-belt', role: 'Shared collection belt or equivalent path', entity_name: 'transport-belt' },
         { id: 'power', role: 'Power/fuel coverage for the mining row' },
       ],
       relations: [
@@ -462,16 +474,17 @@ export const BASIC_SKILL_DEFINITIONS: any[] = [
   },
   {
     schema_version: 1,
-    revision: 1,
+    revision: 2,
     id: 'automation-science-bootstrap',
     name: 'Automation Science Bootstrap',
     kind: 'production',
     stage: 'pattern',
     status: 'candidate',
     summary: 'Bootstrap the first science-pack production by resolving the live science recipe into a small dependency chain, producing any simple intermediate locally, feeding the remaining ingredients, and routing finished packs toward labs or storage. Use live recipe knowledge because modded science recipes may differ from vanilla.',
+    goal_tags: ['science', 'red-science', 'automation-science', 'research', 'lab', '红瓶'],
     source: SOURCE,
     preconditions: [
-      { kind: 'technology_researched', subject: 'required-crafting-machines', description: 'The force can place/configure machines compatible with the live science-pack and intermediate recipes.' },
+      { kind: 'technology_researched', subject: 'automation', description: 'The force has researched the technology that unlocks crafting machines for the live science-pack and intermediate recipes (automation in the base game).' },
       { kind: 'bootstrap', subject: 'science-goal', description: 'The task requires early automated research supply rather than one-off manual crafting.' },
     ],
     inputs: [{ item: 'science-ingredients', role: 'live recipe inputs' }],
@@ -479,7 +492,7 @@ export const BASIC_SKILL_DEFINITIONS: any[] = [
     topology: {
       nodes: [
         { id: 'intermediate-producer', role: 'Produce a repeated intermediate when the live recipe requires one' },
-        { id: 'science-assembler', role: 'Craft the target science pack' },
+        { id: 'science-assembler', role: 'Craft the target science pack', entity_name: 'assembling-machine-1', recipe: 'automation-science-pack' },
         { id: 'ingredient-feed', role: 'Supply other recipe ingredients' },
         { id: 'science-output', role: 'Collect or deliver finished science packs' },
       ],
@@ -508,6 +521,64 @@ export const BASIC_SKILL_DEFINITIONS: any[] = [
     confidence: confidence(),
     examples: [
       { summary: 'Red science / 红瓶 bootstrap.', notes: 'In vanilla this often benefits from a compact intermediate-to-science relationship, but the current recipe graph is authoritative.' },
+    ],
+  },
+  {
+    schema_version: 1,
+    revision: 1,
+    id: 'scale-out-production-line',
+    name: 'Scale Out A Production Line',
+    kind: 'production',
+    stage: 'pattern',
+    status: 'candidate',
+    goal_tags: ['scale-out', 'scale', 'throughput', 'rate', 'per-minute', 'per-second', 'more-machines', 'expand', 'snowball', 'parallel', 'faster', 'deadline'],
+    summary: 'Grow a working production cell by copying it, with the machine count sized from measured game rates instead of remembered ratios. Ask the rate tools how long the job takes with N machines, choose the count that meets the rate or deadline and still pays back its own build time, then copy the proven cell using the footprints the placement tools return. Early on, snowball: the first pair\'s plates pay for the next drills and furnaces.',
+    source: SOURCE,
+    preconditions: [
+      { kind: 'bootstrap', subject: 'working-production-cell', description: 'At least one cell of the line (for example one miner feeding one furnace, or one assembler) is built and has been seen producing.' },
+      { kind: 'custom', subject: 'target-rate-or-deadline', description: 'The goal names a rate (items per minute), an amount with a deadline, or the planner judged the current single lane too slow.' },
+    ],
+    inputs: [{ item: 'working-production-cell', role: 'proven cell to copy' }, { item: 'machine-materials', role: 'plates and parts for the added machines' }],
+    outputs: [{ item: 'production-rate', role: 'more output per minute from identical cells' }],
+    topology: {
+      nodes: [
+        { id: 'proven-cell', role: 'The first cell, verified producing' },
+        { id: 'rate-check', role: 'Per-machine rate and whole-job time from the rate tools' },
+        { id: 'added-cells', role: 'Copies of the proven cell, placed from returned footprints' },
+        { id: 'shared-input', role: 'Ore, fuel or ingredient supply shared by the cells' },
+        { id: 'shared-output', role: 'Where finished items from all cells are collected' },
+      ],
+      relations: [
+        { kind: 'custom', from: 'rate-check', to: 'added-cells', description: 'Machine count = target rate / per-machine rate (getRecipeDetails for machines, getMiningDetails for drills); confirm the whole job with estimateProductionTime before building.' },
+        { kind: 'custom', from: 'proven-cell', to: 'added-cells', description: 'Copy the proven relative layout. Place each machine from getPlacementCandidates, using covers_position for output/drop points and the returned footprint to keep cells apart.' },
+        { kind: 'belt_input', from: 'shared-input', to: 'added-cells', description: 'Every added cell receives its inputs and fuel, not only the first one.' },
+        { kind: 'belt_output', from: 'added-cells', to: 'shared-output', description: 'Output from every cell reaches the collection point without blocking.' },
+      ],
+    },
+    constraints: [
+      { kind: 'capacity', description: 'Size machine counts from live rates (getRecipeDetails crafts per second and output per minute; getMiningDetails ore and fuel per minute per drill) and check the result with estimateProductionTime. Never use a remembered ratio.', validation: 'unvalidated', evidence_refs: [] },
+      { kind: 'capacity', description: 'Payback: each added machine costs crafting, materials, walking and placement time. Add it only when estimateProductionTime shows the time saved within the remaining job exceeds that cost; for a small job, fewer machines finish sooner.', validation: 'unvalidated', evidence_refs: [] },
+      { kind: 'capacity', description: 'A shared belt or inserter has its own limit; use getTransportCapacity before feeding many cells from one input. Do not assume lane or inserter throughput.', validation: 'unvalidated', evidence_refs: [] },
+      { kind: 'placement', description: 'Space cells by the footprint each placement candidate returns (tile size and world box); even-sized machines centre on whole tiles. Reserve the extension direction when building the first cell.', validation: 'unvalidated', evidence_refs: [] },
+      { kind: 'resource', description: 'Every added burner machine needs its own fuel supply; fuel burn per minute comes from getMiningDetails.', validation: 'unvalidated', evidence_refs: [] },
+    ],
+    parameters: [
+      { name: 'target_rate', description: 'Items per minute the goal asks for, if it names one.', required: false },
+      { name: 'deadline_minutes', description: 'Time the job should finish within, if it names one.', required: false },
+      { name: 'cell_skill', description: 'Skill id of the cell being copied, for example direct-miner-smelting or starter-smelting-row.', required: false },
+    ],
+    verification: verification(),
+    known_failure_modes: [
+      'Scaling before the first cell was seen producing, so every copy repeats its defect.',
+      'Machine count taken from a remembered ratio instead of the rate tools.',
+      'Adding machines to a small job where building them costs more time than they save.',
+      'New cells overlap or block the extension direction because footprints were not used.',
+      'Output capacity grows but the shared input, fuel or collection path cannot keep up.',
+    ],
+    confidence: confidence(),
+    examples: [
+      { summary: 'Snowball early plates: one burner drill feeding one furnace makes the plates for the next drill and furnace pair; repeat while estimateProductionTime shows the added pair still pays back.', notes: 'Counts come from the rate tools, never from this example.' },
+      { summary: 'Rate goal such as N plates per minute: per-furnace rate from getRecipeDetails, per-drill ore rate from getMiningDetails, pick counts, check with estimateProductionTime, then build.', notes: 'Deadline goals work the same way with a target time instead of a rate.' },
     ],
   },
 ]
