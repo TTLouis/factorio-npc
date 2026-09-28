@@ -4,7 +4,16 @@ import test from 'node:test'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop, normalizedProviderUsage, toolReplySequenceViolation } from './npc-agent-loop.mjs'
 import { providerRequest } from './provider.mjs'
-import { FakeFactorio, planReply, recordingJev } from './task-loop-fixtures.mjs'
+import { recoverInterruptedAgentPlan } from './supervisor.mjs'
+import {
+  STEAM_AUTHORING_OUTPUT_UNITS,
+  STEAM_PLAN,
+  STEAM_ROUNDS,
+  STEAM_SCRIPTED_BLOCKED_ANSWER,
+  STEAM_TAIL_OUTPUT_UNITS,
+  steamReplayHarness,
+} from './steam-run-fixtures.mjs'
+import { FakeFactorio, gather, inventoryCheckpoint, planReply, recordingJev } from './task-loop-fixtures.mjs'
 
 function deployment() {
   return {
@@ -186,9 +195,11 @@ test('cross-layer provider bodies switch high reasoning exhaustion to one no-rea
 
   assert.equal(result.goalStatus, 'active')
   assert.equal(bodies.length, 2)
+  // Round 0 of a new request offers submitPlan and may write the plan, so it
+  // keeps the full plan-writing bracket (item 1.3 review fix).
   assert.equal(bodies[0].reasoning_effort, 'max')
   assert.deepEqual(bodies[0].thinking, { type: 'enabled' })
-  assert.equal(bodies[0].max_tokens, 32000)
+  assert.equal(bodies[0].max_tokens, 40000)
   assert.equal(bodies[1].reasoning_effort, 'none')
   assert.deepEqual(bodies[1].thinking, { type: 'disabled' })
   assert.equal(bodies[1].max_tokens, 3000)
@@ -1078,4 +1089,560 @@ test('a staged amendment cannot push skill context into the middle of a tool exc
   const messages = agent.providerMessages()
   assert.equal(toolReplySequenceViolation(messages), undefined)
   assert.match(messages[2].content, /^\[SKILL_CONTEXT\]/)
+})
+
+// ---------------------------------------------------------------------------
+// Static scenario, item 1.5: the 2026-09-26 steam run replayed from its
+// recorded replies (steam-run-fixtures.mjs), through request()/completed()/
+// failed(). One request carried the whole goal on one budget generation and
+// died at provider_turn_output_cap_exceeded with the plan silently blocked.
+// ---------------------------------------------------------------------------
+
+function sumOutput(rounds) {
+  return rounds.reduce((total, round) => total + round.usage.output, 0)
+}
+
+// Live, step 2 alone spent 64,407 output units over many more cycles than the
+// fixture keeps; the fixture keeps its last 20,941. To make one step overrun
+// its own budget with that slice, the cap drops to 20,000 once step 1 has
+// closed (authoring ran under the live 100,000).
+const STEP_OVERRUN_CAP = 20000
+
+async function replayToCapDuringBlockedPlan(world) {
+  await world.request()
+  await world.closeStep1()
+  world.agent.maxProviderOutputUnits = STEP_OVERRUN_CAP
+  return world.failSupplyBatch()
+}
+
+test('steam replay: a verified step close rolls the output budget generation, so the request survives what killed it live', async () => {
+  // The replay carries the recorded authoring rounds plus the last recorded
+  // cycle: 42,915 + 20,941 = 63,856 output units in one request. Against a
+  // 60,000 cap that is the live failure in miniature (107,322 > 100,000):
+  // one generation for the whole request fails, one per step does not.
+  const cap = 60000
+  assert.equal(sumOutput(STEAM_ROUNDS.filter(round => round.phase === 'authoring')), STEAM_AUTHORING_OUTPUT_UNITS)
+  assert.equal(sumOutput(STEAM_ROUNDS.filter(round => round.phase !== 'authoring')), STEAM_TAIL_OUTPUT_UNITS)
+  assert.ok(STEAM_AUTHORING_OUTPUT_UNITS + STEAM_TAIL_OUTPUT_UNITS > cap)
+
+  const world = steamReplayHarness({ maxProviderOutputUnits: cap, extraRounds: [STEAM_SCRIPTED_BLOCKED_ANSWER] })
+  const first = await world.request()
+  assert.equal(first.goalStatus, 'active')
+  assert.equal(world.calls.length, 4)
+  const requestId = world.trace.find(record => record.event === 'request.received')?.request_id
+  assert.match(requestId, /^req_/)
+  assert.equal(world.agent.providerBudgetGeneration, 1)
+  assert.equal(world.agent.providerBudgetGenerationOutputUnits, STEAM_AUTHORING_OUTPUT_UNITS)
+
+  await world.closeStep1()
+  const rolled = world.events('budget.generation_rolled')
+  assert.equal(rolled.length, 1, JSON.stringify(world.trace.map(record => record.event)))
+  assert.equal(rolled[0].request_id, requestId)
+  assert.equal(rolled[0].data.reason, 'step_closed')
+  assert.equal(rolled[0].data.source, 'deterministic_completion_contract')
+  assert.equal(rolled[0].data.previous_generation, 1)
+  assert.equal(rolled[0].data.generation, 2)
+  assert.equal(rolled[0].data.previous_generation_output_units, STEAM_AUTHORING_OUTPUT_UNITS)
+  assert.equal(rolled[0].data.completed_count, 1)
+  assert.equal(rolled[0].data.output_cap, cap)
+  // The roll is recorded before the next planner round is sent.
+  const stepVerified = world.events('step.verified')[0]
+  const nextRequest = world.events('provider.request').find(record => record.seq > rolled[0].seq)
+  assert.ok(stepVerified.seq < rolled[0].seq)
+  assert.ok(nextRequest, 'the step-2 planner round follows the roll')
+
+  await world.failSupplyBatch()
+  const state = world.memory.currentPlan('npc:airi')
+  assert.equal(world.events('budget.output_units_exceeded').length, 0)
+  assert.equal(world.events('request.failed').length, 0)
+  assert.equal(world.events('budget.cap_reached').length, 0)
+  assert.equal(world.agent.providerBudgetGeneration, 2)
+  assert.equal(
+    world.agent.providerBudgetGenerationOutputUnits,
+    STEAM_TAIL_OUTPUT_UNITS + STEAM_SCRIPTED_BLOCKED_ANSWER.usage.output,
+  )
+  // The request as a whole spent more than the cap; no generation did.
+  const requestOutput = world.events('provider.response')
+    .filter(record => record.request_id === requestId)
+    .reduce((total, record) => total + record.data.usage.output_units, 0)
+  assert.equal(requestOutput, STEAM_AUTHORING_OUTPUT_UNITS + STEAM_TAIL_OUTPUT_UNITS + STEAM_SCRIPTED_BLOCKED_ANSWER.usage.output)
+  assert.ok(requestOutput > cap)
+  assert.equal(Math.max(...world.events('provider.response').map(record => record.data.turn_output_units)) <= cap, true)
+  assert.equal(state.blocker, 'transfer_failed:nothing_moved')
+})
+
+
+const RESUME_LINE = 'Press Resume or say continue to retry from the verified task state.'
+
+test('steam replay: a budget stop on a blocked plan keeps it BLOCKED, names both causes, and Resume gets the blocked reply with no work admitted', async () => {
+  // Step 2 overruns its own generation while the plan is blocked on
+  // transfer_failed:nothing_moved -- where the live run stopped silently.
+  const cap = STEP_OVERRUN_CAP
+  let intent = 'new_goal'
+  const world = steamReplayHarness({ routedIntent: () => intent })
+  const result = await replayToCapDuringBlockedPlan(world)
+  const requestId = world.events('request.received')[0].request_id
+
+  assert.equal(world.calls.length, STEAM_ROUNDS.length)
+  assert.equal(world.events('budget.output_units_exceeded').length, 1)
+  assert.equal(world.events('request.failed').length, 0, 'the cap no longer ends as request.failed recoverable=false')
+
+  // One chat line, naming the blocker and the budget stop, asking for the
+  // same decision the blocked reply asks for (no Resume promise).
+  assert.equal(result.chatMessage, 'I stopped: the model used its whole output budget for this step (20,941 of 20,000 units), and the plan is blocked on transfer_failed:nothing_moved. Continuing unchanged would hit the same blocker. Tell me how to revise it (for example a different route or target), or cancel it.')
+  assert.equal(result.goalStatus, 'blocked')
+  assert.equal(result.budgetCause, 'provider_turn_output_cap_exceeded')
+  const state = world.memory.currentPlan('npc:airi')
+  assert.equal(state.status, 'blocked', 'a blocked plan is never relabelled paused')
+  assert.equal(state.blocker, 'transfer_failed:nothing_moved')
+  assert.equal(state.pause_reason, '')
+  assert.equal(world.memory.planningState('npc:airi').plans.at(-1).status, 'BLOCKED')
+  assert.equal(world.agent.active, false)
+
+  const reached = world.events('budget.cap_reached')
+  assert.equal(reached.length, 1)
+  assert.equal(reached[0].request_id, requestId)
+  assert.equal(reached[0].data.budget_cause, 'provider_turn_output_cap_exceeded')
+  assert.equal(reached[0].data.source, 'plan_not_active')
+  assert.equal(reached[0].data.previous_status, 'blocked')
+  assert.equal(reached[0].data.goal_status, 'blocked')
+  assert.equal(reached[0].data.next_action, 'revise_or_cancel')
+  assert.equal(reached[0].data.blocker, 'transfer_failed:nothing_moved')
+  assert.equal(reached[0].data.generation_output_units, STEAM_TAIL_OUTPUT_UNITS)
+  assert.equal(reached[0].data.output_cap, cap)
+  assert.equal(world.events('goal.paused').length, 0)
+  const completed = world.events('request.completed').at(-1)
+  assert.equal(completed.data.outcome, 'blocked_budget_stop')
+  assert.equal(completed.data.budget_cause, 'provider_turn_output_cap_exceeded')
+  assert.equal(completed.data.chat_message, result.chatMessage)
+
+  // Resume ("continue", routed as continue_current) gets the existing blocked
+  // reply: no planner call, no work admitted, no revise choice recorded.
+  intent = 'continue_current'
+  const callsBefore = world.calls.length
+  const mutationsBefore = world.game.mutations.length
+  const resumed = await world.agent.request('continue', { sender: 'TTLouis' })
+  assert.match(resumed.chatMessage, /^The current plan is blocked.*Continuing unchanged would hit the same blocker\. Tell me how to revise it/)
+  assert.equal(resumed.goalStatus, 'blocked')
+  assert.equal(world.calls.length, callsBefore)
+  assert.equal(world.game.mutations.length, mutationsBefore)
+  assert.equal(world.memory.currentPlan('npc:airi').status, 'blocked')
+  assert.equal(world.memory.planningState('npc:airi').plans.at(-1).blocker?.user_choice, undefined)
+})
+
+test('a budget pause on an ACTIVE plan still resumes normally with Resume', async () => {
+  const canonical = ['Wait for the machine cycle', 'Inspect the result']
+  let resumed = false
+  const rcon = new FakeRcon()
+  const over = () => {
+    const message = planMessage({ chatMessage: 'Thinking long.', plan: canonical, currentStep: 0, operations: [{ name: 'wait', args: { ticks: 1 } }] })
+    Object.defineProperty(message, '_airiProvider', {
+      enumerable: false,
+      value: { diagnostic_code: 'ok', finish_reason: 'stop', usage: { prompt_tokens: 100, completion_tokens: 3500, total_tokens: 3600 } },
+    })
+    return message
+  }
+  let calls = 0
+  const agent = makeAgent({
+    rcon,
+    maxProviderOutputUnits: 3000,
+    maxProviderBudgetHandoffs: 1,
+    provider: async () => {
+      calls++
+      if (calls === 1 || resumed) {
+        return planMessage({ chatMessage: 'Waiting.', plan: canonical, currentStep: 0, operations: [{ name: 'wait', args: { ticks: 1 } }] })
+      }
+      return over()
+    },
+  })
+  const trace = []
+  agent.behaviorTrace = { emit: async record => { trace.push(record) } }
+
+  await agent.request('run the bounded cycle', { sender: 'TTLouis' })
+  const paused = await agent.completed()
+  assert.equal(paused.goalStatus, 'paused')
+  assert.ok(paused.chatMessage.endsWith(RESUME_LINE), paused.chatMessage)
+  assert.equal(agent.memory.currentPlan('npc:airi').status, 'paused')
+  const pausedEvent = trace.filter(record => record.event === 'goal.paused')
+  assert.equal(pausedEvent.length, 1)
+
+  resumed = true
+  const mutationsBefore = rcon.mutations.length
+  const result = await agent.request('continue', { sender: 'TTLouis' })
+  assert.equal(result.goalStatus, 'active')
+  assert.equal(agent.memory.currentPlan('npc:airi').status, 'active')
+  assert.equal(rcon.mutations.length, mutationsBefore + 1, 'Resume admits work again')
+})
+
+// A runaway request: many cheap step closes, each on a fresh step budget, so
+// the per-step cap never trips. The request-wide ceiling (5 x the per-turn
+// cap, no new setting) stops it with a visible pause.
+function runawayHarness() {
+  const ores = ['iron-ore', 'copper-ore', 'coal', 'stone']
+  const steps = Array.from({ length: 16 }, (_, index) => `Mine 10 ${ores[index % ores.length]} (batch ${index + 1})`)
+  const game = new FakeFactorio()
+  const memory = new CanonicalTaskBoardMemory()
+  const world = { game, memory, calls: 0, trace: [] }
+  const withUsage = (message, output) => {
+    Object.defineProperty(message, '_airiProvider', {
+      enumerable: false,
+      value: { diagnostic_code: 'ok', finish_reason: 'stop', usage: { prompt_tokens: 3000, completion_tokens: output, total_tokens: 3000 + output } },
+    })
+    return message
+  }
+  world.agent = new NpcAgentLoop({
+    rcon: game,
+    memory,
+    maxProviderOutputUnits: 1000,
+    provider: async () => {
+      world.calls++
+      assert.ok(world.calls < 40, 'runaway was not stopped')
+      const board = memory.currentPlan('npc:airi')?.task_board
+      if (!board) {
+        return withUsage(planReply({ plan: steps, operations: [gather(ores[0], 10)], checkpoint: inventoryCheckpoint(ores[0], 10) }), 480)
+      }
+      const index = board.active_index
+      const step = board.steps[index]
+      const verified = (board.evidence ?? []).some(item => item?.step_id === step.id && item?.kind === 'deterministic_verification')
+      if (index >= 1 && verified) {
+        return withUsage(planReply({
+          plan: steps,
+          currentStep: index + 1,
+          operations: [gather(ores[(index + 1) % ores.length], 10)],
+          semanticCompletion: { stepId: step.id, rationale: 'The completed batch grounds this prose-only step.' },
+        }), 480)
+      }
+      return withUsage(planReply({ plan: steps, currentStep: index, operations: [gather(ores[index % ores.length], 10)] }), 480)
+    },
+    systemPrompt: 'request output ceiling test',
+    stateFile: null,
+    traceFile: null,
+  })
+  world.agent.behaviorTrace = { emit: async record => { world.trace.push(record) } }
+  world.events = name => world.trace.filter(record => record.event === name)
+  world.finishUntilPaused = async () => {
+    let result
+    for (let batch = 0; batch < 24; batch++) {
+      const board = memory.currentPlan('npc:airi').task_board
+      const resource = ores[board.active_index % ores.length]
+      game.inventory[resource] = (game.inventory[resource] ?? 0) + 10
+      result = await world.agent.completed()
+      if (result?.goalStatus === 'paused') break
+    }
+    return result
+  }
+  return world
+}
+
+function assertCeilingPause(world, result, requestId) {
+  assert.equal(result?.goalStatus, 'paused')
+  assert.equal(world.events('budget.output_units_exceeded').length, 0, 'no single step overran its budget')
+  assert.ok(world.events('budget.generation_rolled').length >= 3, 'the steps closed on fresh budgets')
+  const exceeded = world.events('budget.request_ceiling_exceeded')
+  assert.equal(exceeded.length, 1)
+  assert.equal(exceeded[0].request_id, requestId)
+  assert.equal(exceeded[0].data.request_output_ceiling, 5000)
+  assert.equal(exceeded[0].data.request_output_units, 5280, '11 calls x 480 = 5,280 > 5,000')
+  assert.match(result.chatMessage, /^I paused this goal: this request used its whole output allowance \(5,280 of 5,000 units across \d+ step budgets\)\. /)
+  assert.ok(result.chatMessage.endsWith(RESUME_LINE))
+  const state = world.memory.currentPlan('npc:airi')
+  assert.equal(state.status, 'paused')
+  assert.equal(state.pause_reason, 'request_output_ceiling: 5,280 > 5,000 output units')
+  const paused = world.events('goal.paused')
+  assert.equal(paused.length, 1)
+  assert.equal(paused[0].request_id, requestId)
+  assert.equal(paused[0].data.cause, 'request_output_ceiling')
+  const completed = world.events('request.completed').at(-1)
+  assert.equal(completed.data.outcome, 'paused_request_output_ceiling')
+  assert.equal(completed.data.reason, 'request_output_ceiling')
+  assert.equal(world.events('request.failed').length, 0)
+}
+
+test('a runaway of cheap step closes hits the request-wide output ceiling and pauses visibly', async () => {
+  const world = runawayHarness()
+  await world.agent.request('mine a long list of ore batches', { sender: 'TTLouis' })
+  const requestId = world.events('request.received')[0].request_id
+  const result = await world.finishUntilPaused()
+  assertCeilingPause(world, result, requestId)
+  assert.equal(world.calls, 11)
+})
+
+test('a supervisor recovery run carries a usage summary, so the request ceiling applies to it too', async () => {
+  const world = runawayHarness()
+  await world.agent.request('mine a long list of ore batches', { sender: 'TTLouis' })
+  assert.equal(world.calls, 1)
+
+  // A runtime restart: the supervisor's recovery opens its own trace request
+  // ({ id, seq } only) and runs the planner without request().
+  const recovery = await recoverInterruptedAgentPlan(world.agent, 'runtime_restart', { restart: 1 })
+  assert.equal(recovery.recovered, true)
+  const started = world.events('runtime.recovery_started')
+  assert.equal(started.length, 1)
+  const recoveryId = started[0].request_id
+  assert.match(recoveryId, /^recovery_/)
+  assert.equal(typeof world.agent.traceRequest?.usage?.output_units, 'number')
+
+  const result = await world.finishUntilPaused()
+  // The chat request's first call is not counted: 11 recovery calls reach 5,280.
+  assertCeilingPause(world, result, recoveryId)
+  assert.equal(world.calls, 12)
+})
+
+test('a provider response with no usage is charged its requested output cap, toward the cap and the ceiling', async () => {
+  const canonical = ['Wait for the machine cycle', 'Inspect the result']
+  const noUsage = () => {
+    const message = planMessage({ chatMessage: 'Waiting.', plan: canonical, currentStep: 0, operations: [{ name: 'wait', args: { ticks: 1 } }] })
+    Object.defineProperty(message, '_airiProvider', {
+      enumerable: false,
+      value: { diagnostic_code: 'ok', finish_reason: 'stop', requested_output_cap: 2000 },
+    })
+    return message
+  }
+  const agent = makeAgent({ maxProviderOutputUnits: 3000, provider: async () => noUsage() })
+  const trace = []
+  agent.behaviorTrace = { emit: async record => { trace.push(record) } }
+
+  await agent.request('run the bounded cycle', { sender: 'TTLouis' })
+  const requestId = trace.find(record => record.event === 'request.received').request_id
+  assert.equal(agent.providerBudgetGenerationOutputUnits, 2000)
+  assert.equal(agent.traceRequest.usage.output_units, 2000)
+  assert.equal(agent.traceRequest.usage.usage_complete, false)
+
+  // The second unreported call brings the generation to 4,000 > 3,000.
+  await agent.completed()
+  const estimated = trace.filter(record => record.event === 'budget.usage_estimated')
+  assert.equal(estimated.length, 1, 'traced once per request')
+  assert.equal(estimated[0].request_id, requestId)
+  assert.equal(estimated[0].data.estimated_output_units, 2000)
+  assert.equal(estimated[0].data.estimate_source, 'requested_output_cap')
+  const exceeded = trace.filter(record => record.event === 'budget.output_units_exceeded')
+  assert.equal(exceeded[0]?.data.output_units, 4000)
+})
+
+test('a request ceiling hit with no plan state still ends in a visible pause line and goal.paused', async () => {
+  const agent = makeAgent({ provider: async () => { throw new Error('no provider call in this test') } })
+  const trace = []
+  agent.behaviorTrace = { emit: async record => { trace.push(record) } }
+  agent.traceRequest = { id: 'req_ceiling_no_plan', seq: 0 }
+  agent.active = true
+  agent.runTurn = async () => {
+    const error = new Error('request_output_ceiling: request used 5200 > 5000 output units across 3 budget generation(s)')
+    error.code = 'request_output_ceiling'
+    throw error
+  }
+  assert.equal(agent.memory.currentPlan('npc:airi'), undefined)
+  const result = await agent.runGuarded()
+
+  assert.ok(result.chatMessage.startsWith('I paused this goal: this request used its whole output allowance'))
+  assert.ok(result.chatMessage.endsWith(RESUME_LINE))
+  assert.equal(result.goalStatus, 'paused')
+  const paused = trace.filter(record => record.event === 'goal.paused')
+  assert.equal(paused.length, 1)
+  assert.equal(paused[0].request_id, 'req_ceiling_no_plan')
+  assert.equal(paused[0].data.cause, 'request_output_ceiling')
+  assert.equal(paused[0].data.plan_status, 'none')
+  assert.equal(trace.filter(record => record.event === 'request.completed').at(-1).data.outcome, 'paused_request_output_ceiling')
+  assert.equal(trace.some(record => record.event === 'request.failed'), false)
+})
+
+test('a supervisor recovery run never carries revision authority over a BLOCKED plan', async () => {
+  // A lingering 'revise' choice (recorded earlier, never followed by the
+  // player's revision) must not let recovery's sender=owner, text=objective
+  // commit an unapproved plan version.
+  const agent = makeAgent({
+    provider: async () => planMessage({ chatMessage: '', plan: ['Only step'], currentStep: 0, operations: [{ name: 'wait', args: { ticks: 1 } }] }),
+  })
+  const trace = []
+  agent.behaviorTrace = { emit: async record => { trace.push(record) } }
+  await agent.request('wait for one cycle', { sender: 'TTLouis' })
+  const key = 'npc:airi'
+  agent.memory.blockRemainingPlan(key, {
+    blocker: 'transfer_failed:nothing_moved',
+    reason: 'furnace refused the item',
+    evidenceKind: 'operation_error_receipt',
+  })
+  agent.memory.recordBlockedChoice(key, 'revise', 'TTLouis', { now: Date.now() })
+  const before = agent.memory.planningState(key).plans.at(-1)
+  assert.equal(before.status, 'BLOCKED')
+
+  // What the supervisor's recovery sets up, then a plan submission.
+  agent.requestInfo = { memoryKey: key, turnId: 99, sender: 'TTLouis', text: 'wait for one cycle' }
+  agent.traceRequest = { id: 'recovery_test', seq: 0 }
+  const info = await agent.revisionSafeRequestInfo()
+  assert.equal(info.sender, undefined)
+  assert.equal(info.text, undefined)
+  const withheld = trace.filter(record => record.event === 'planning.revision_authority_withheld')
+  assert.equal(withheld.length, 1)
+  assert.equal(withheld[0].request_id, 'recovery_test')
+  assert.equal(withheld[0].data.user_choice, 'revise')
+
+  // A player chat request keeps its authority.
+  agent.requestInfo = { ...agent.requestInfo, origin: 'chat' }
+  assert.equal((await agent.revisionSafeRequestInfo()).sender, 'TTLouis')
+})
+
+test('a terminal budget failure after the budget handoff recovery also pauses visibly instead of failing silently', async () => {
+  const canonical = ['Wait for the machine cycle', 'Inspect the result']
+  const calls = []
+  const events = []
+  const agent = makeAgent({
+    maxProviderOutputUnits: 3000,
+    onActivity: (event, data) => events.push({ event, data }),
+    provider: async () => {
+      calls.push(calls.length + 1)
+      if (calls.length === 1) {
+        return planMessage({
+          chatMessage: 'Waiting first.',
+          plan: canonical,
+          currentStep: 0,
+          operations: [{ name: 'wait', args: { ticks: 60 } }],
+        })
+      }
+      return exhaustedMessage()
+    },
+  })
+  // The recovery route itself throws a terminal budget error.
+  agent.recoverPlan = async () => {
+    const error = new Error('provider_output_budget_recovery_exhausted: fresh generation also spent its budget')
+    throw error
+  }
+  await agent.request('run the bounded recovery check', { sender: 'TTLouis' })
+  const result = await agent.completed()
+
+  assert.equal(result.goalStatus, 'paused')
+  assert.match(result.chatMessage, /^I paused this goal: the model request ran out of budget \(provider_output_budget_recovery_exhausted\)\. Press Resume/)
+  const paused = events.filter(entry => entry.event === 'budget.cap_reached')
+  assert.equal(paused.length, 1)
+  assert.equal(paused[0].data.source, 'budget_recovery_failed')
+  assert.equal(paused[0].data.previous_status, 'active')
+  assert.equal(events.some(entry => entry.event === 'request.failed'), false)
+  assert.equal(agent.memory.currentPlan('npc:airi').status, 'paused')
+})
+
+// ---------------------------------------------------------------------------
+// 1.9 hook: the working-context compaction ceiling follows the provider
+// profile's declared context window; profiles without one keep 28 / 40,000.
+// ---------------------------------------------------------------------------
+
+function ceilingAgent({ providerConfig, provider, rcon = new FakeRcon() } = {}) {
+  const trace = []
+  const agent = new NpcAgentLoop({
+    rcon,
+    provider: provider ?? (async () => planMessage({
+      chatMessage: 'Waiting.',
+      plan: ['Wait once'],
+      currentStep: 0,
+      operations: [{ name: 'wait', args: { ticks: 1 } }],
+    })),
+    providerConfig,
+    memory: new CanonicalTaskBoardMemory(),
+    systemPrompt: 'compaction ceiling test prompt',
+    stateFile: null,
+    traceFile: null,
+  })
+  agent.behaviorTrace = { emit: async record => { trace.push(record) } }
+  return { agent, trace }
+}
+
+function toolExchange(id, chars) {
+  return [
+    { role: 'assistant', content: '', tool_calls: [{ id, type: 'function', function: { name: 'getActorStatus', arguments: '{}' } }] },
+    { role: 'tool', tool_call_id: id, content: 'x'.repeat(chars) },
+  ]
+}
+
+test('the local profile context window scales the compaction ceiling, and the choice is traced with the request_id', async () => {
+  const local = { profile: 'local', model: 'qwen3-coder-30b-a3b-instruct', base: 'http://host.docker.internal:1234/v1', key: 'fixture-local' }
+  const { agent, trace } = ceilingAgent({ providerConfig: local })
+  assert.equal(agent.maxWorkingChars, 98304)
+  assert.equal(agent.maxWorkingMessages, 64)
+
+  await agent.request('wait once', { sender: 'TTLouis' })
+  const requestId = trace.find(record => record.event === 'request.received').request_id
+  const ceiling = trace.filter(record => record.event === 'compaction.ceiling')
+  assert.equal(ceiling.length, 1, 'one ceiling event per request')
+  assert.equal(ceiling[0].request_id, requestId)
+  assert.deepEqual(ceiling[0].data, {
+    reason: 'provider_call',
+    source: 'provider_profile',
+    context_window: 65536,
+    max_working_chars: 98304,
+    max_working_messages: 64,
+    default_working_chars: 40000,
+    default_working_messages: 28,
+  })
+
+  // Profiles that declare no window keep today's fixed ceiling.
+  for (const providerConfig of [undefined, { profile: 'deepseek', model: 'deepseek-flash', base: 'https://api.deepseek.com/v1' }]) {
+    const plain = ceilingAgent({ providerConfig })
+    assert.equal(plain.agent.maxWorkingChars, 40000)
+    assert.equal(plain.agent.maxWorkingMessages, 28)
+    await plain.agent.request('wait once', { sender: 'TTLouis' })
+    const event = plain.trace.find(record => record.event === 'compaction.ceiling')
+    assert.equal(event.data.source, 'default')
+    assert.equal(event.data.context_window, undefined)
+    assert.equal(event.data.max_working_chars, 40000)
+  }
+})
+
+test('a context window reported by the real provider stack rescales compaction, which then compacts what the default ceiling kept', async () => {
+  // The loop is built without its provider config, as the supervisor builds
+  // it today; provider-base reports the local profile's window per response.
+  const localSmall = {
+    profile: 'local',
+    model: 'qwen3-coder-30b-a3b-instruct',
+    base: 'http://host.docker.internal:1234/v1',
+    key: 'fixture-local',
+    contextWindow: 16384,
+    timeoutMs: 5000,
+  }
+  const provider = (messages, context) => providerRequest(localSmall, messages, {
+    ...context,
+    promptTraceFile: null,
+    fetchImpl: async () => new Response(JSON.stringify({
+      id: 'local-replay',
+      model: localSmall.model,
+      choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: JSON.stringify({
+        chatMessage: '',
+        plan: ['Wait once'],
+        currentStep: 0,
+        operations: [{ name: 'wait', args: { ticks: 1 } }],
+      }) } }],
+      usage: { prompt_tokens: 900, completion_tokens: 60, total_tokens: 960 },
+    }), { status: 200, headers: { 'content-type': 'application/json' } }),
+  })
+  const { agent, trace } = ceilingAgent({ provider })
+  await agent.request('wait once', { sender: 'TTLouis' })
+
+  assert.equal(agent.maxWorkingChars, 24576)
+  assert.equal(agent.maxWorkingMessages, 17)
+  const events = trace.filter(record => record.event === 'compaction.ceiling')
+  assert.deepEqual(events.map(record => [record.data.reason, record.data.source, record.data.max_working_chars]), [
+    ['provider_call', 'default', 40000],
+    ['context_window_reported', 'provider_response', 24576],
+  ])
+  assert.equal(events[1].data.context_window, 16384)
+  assert.equal(events[1].request_id, events[0].request_id)
+
+  // Three 10,000-character read results: under the default ceiling they all
+  // stay; under the 16k-window ceiling the oldest is compacted (never the newest).
+  const working = [
+    { role: 'system', content: 'system' },
+    ...toolExchange('a', 10000),
+    ...toolExchange('b', 10000),
+    ...toolExchange('c', 10000),
+  ]
+  const plain = ceilingAgent().agent
+  plain.baseMessages = [working[0]]
+  plain.messages = working.map(message => ({ ...message }))
+  plain.compactWorkingContext()
+  assert.equal(plain.messages.some(message => String(message.content).startsWith('[OBSERVATIONS COMPACTED]')), false)
+
+  agent.baseMessages = [working[0]]
+  agent.messages = working.map(message => ({ ...message }))
+  agent.compactWorkingContext()
+  const compacted = agent.messages.filter(message => String(message.content).startsWith('[OBSERVATIONS COMPACTED]'))
+  assert.equal(compacted.length, 1)
+  assert.equal(agent.messages.some(message => message.tool_call_id === 'c'), true, 'the newest exchange is kept')
+  assert.equal(agent.messages.reduce((total, message) => total + String(message.content ?? '').length, 0) <= 24576 + 2000, true)
 })

@@ -9,6 +9,7 @@ import {
   setTaskBoardStatus,
   taskBoardProgress,
 } from './common.mjs'
+import { providerCapabilityProfile } from './provider.mjs'
 import { executeAuthorizedBatch } from './supervisor-adapter.mjs'
 import {
   boundarySteeringGate,
@@ -1479,6 +1480,22 @@ function emptyUsageSummary() {
   }
 }
 
+// A provider response with no output usage still spent output. Charge the
+// output cap that call requested, so the per-step cap and the request ceiling
+// keep counting (1.5 review). Input stays unknown and the call stays marked
+// usage-incomplete.
+function estimatedOutputUsage(usage, metadata) {
+  if (Number.isSafeInteger(usage?.output_units)) return usage
+  const requested = metadata?.requested_output_cap
+  if (!Number.isSafeInteger(requested) || requested <= 0) return usage
+  return {
+    ...(usage ?? {}),
+    output_units: requested,
+    output_units_estimated: true,
+    usage_complete: false,
+  }
+}
+
 function accumulateProviderUsage(summary, usage) {
   if (!summary) return
   summary.provider_calls++
@@ -2047,6 +2064,82 @@ function terminalProviderBudgetFailure(value) {
   return /provider_context_window_exceeded|provider_output_budget_recovery_(?:exhausted|budget_unavailable)|provider_turn_output_cap_exceeded/i.test(message)
 }
 
+function providerBudgetStepMark(state) {
+  const board = state?.task_board
+  if (!Number.isSafeInteger(board?.completed_count)) return null
+  return { goal_id: String(state?.goal_id ?? board?.goal_id ?? ''), completed_count: board.completed_count }
+}
+
+function terminalProviderBudgetCode(value) {
+  const message = value instanceof Error ? value.message : String(value ?? '')
+  return /provider_context_window_exceeded|provider_output_budget_recovery_(?:exhausted|budget_unavailable)|provider_turn_output_cap_exceeded/i.exec(message)?.[0]?.toLowerCase()
+    ?? 'provider_budget'
+}
+
+// Provider conditions that clear by waiting. The supervisor pauses these and
+// resumes automatically, so the loop leaves them to it (same set as
+// supervisor.mjs transientProviderFailure).
+const TRANSIENT_PROVIDER_FAILURE = /Hourly provider request budget reached|\bHTTP 429\b|\bHTTP 5\d\d\b|Provider timed out|\btimed out after \d+ ?ms|fetch failed|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|socket hang up|network error/i
+
+// The pause-reason code for a provider failure that ends a request. The codes
+// match the supervisor's stranded-plan pause, so the in-game board shows the
+// same summary for them.
+function providerFailurePauseCause(message) {
+  const text = String(message ?? '')
+  if (!/provider/i.test(text) || /cancelled|superseded|epoch changed/i.test(text)) return undefined
+  const budget = /provider_context_window_exceeded|provider_output_budget|finish=length/i.test(text)
+  if (!budget && TRANSIENT_PROVIDER_FAILURE.test(text)) return undefined
+  if (/provider_output_budget_exhausted|finish=length|output budget/i.test(text)) return 'provider_output_budget_exhausted'
+  if (/^Provider response recovery exhausted after \d+ attempts/i.test(text)) return 'provider_recovery_exhausted'
+  if (/provider_action_omission_repair_failed/i.test(text)) return 'provider_action_omission_repair_failed'
+  if (/provider_semantic_alignment_failed/i.test(text)) return 'provider_semantic_alignment_failed'
+  return 'request_failed'
+}
+
+const PROVIDER_PAUSE_TEXT = {
+  provider_output_budget_exhausted: 'the model ran out of its response budget before giving a usable answer',
+  provider_recovery_exhausted: 'I could not get a usable model response after retrying',
+  provider_action_omission_repair_failed: 'the model kept planning without starting the next action',
+  provider_semantic_alignment_failed: 'the model proposed work that did not match the current step',
+  request_failed: 'the model request failed',
+}
+
+const RESUME_HINT = 'Press Resume or say continue to retry from the verified task state.'
+
+// Triggers whose requests continue an active committed plan instead of
+// authoring or revising one; only their tools-on rounds may be `gather` (1.3).
+const CONTINUATION_TRIGGERS = new Set([
+  'completion',
+  'continue_current',
+  'post_step_continue',
+  'post_step_observe',
+  'post_step_reanchor',
+  'recovery_continue_low',
+])
+
+// A request's total output across budget generations may not exceed this many
+// per-turn caps (1.5 review): the per-step roll bounds each step, this bounds
+// the request. Before per-step rolls a request was bounded by about 5 caps.
+const REQUEST_OUTPUT_CEILING_CAPS = 5
+
+// Pause-reason prefix of a budget pause (matches the supervisor's board
+// summary for an exhausted response budget).
+const BUDGET_PAUSE_PREFIX = 'provider_output_budget_exhausted'
+
+
+function isRequestOutputCeiling(value) {
+  const message = value instanceof Error ? value.message : String(value ?? '')
+  return value?.code === 'request_output_ceiling' || /request_output_ceiling/.test(message)
+}
+
+const RECOVERABLE_PLANNER_FAILURE = /provider_action_omission_repair_failed|provider_output_budget_exhausted|provider_jev_recovery_route_failed|Provider strict recovery could not safely resolve remaining canonical work/i
+
+function idleRuntimeStatus(status) {
+  if (!status || typeof status !== 'object' || Array.isArray(status) || status.status_error) return false
+  if (!Number.isSafeInteger(status.queue_length) || typeof status.task_state !== 'string') return false
+  return status.queue_length === 0 && status.task_state.trim().toLowerCase() === 'idle'
+}
+
 function canonicalWorkRemains(state) {
   if (state?.status !== 'active') return false
   const board = state?.task_board
@@ -2240,6 +2333,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (this.maxProviderBudgetHandoffs < 1 || this.maxProviderBudgetHandoffs > 16) {
       throw new AgentLoopError('maxProviderBudgetHandoffs must be an integer from 1 to 16')
     }
+    // Compaction ceiling (1.9 hook). Explicit maxWorking* options win; else a
+    // provider profile that declares a context window scales the ceiling
+    // (the local profile declares 65,536); else today's fixed defaults.
+    this.explicitWorkingCeiling = options.maxWorkingMessages !== undefined || options.maxWorkingChars !== undefined
+    this.defaultWorkingCeiling = { messages: this.maxWorkingMessages, chars: this.maxWorkingChars }
+    this.workingCeiling = { ...this.defaultWorkingCeiling, source: this.explicitWorkingCeiling ? 'explicit_option' : 'default', context_window: undefined }
+    this.workingCeilingTracedFor = null
+    let profileWindow
+    if (options.providerConfig && typeof options.providerConfig === 'object') {
+      try { profileWindow = providerCapabilityProfile(options.providerConfig).context_window }
+      catch { profileWindow = undefined }
+    }
+    this.applyContextWindowCeiling(profileWindow, 'provider_profile')
     this.interactionProvider = typeof options.interactionProvider === 'function' ? options.interactionProvider : null
     this.interactionDecisionProvider = this.recordedDecisionProvider(options.interactionDecisionProvider)
     this.steeringDecisionProvider = this.recordedDecisionProvider(options.steeringDecisionProvider)
@@ -2284,6 +2390,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.providerBudgetGeneration = 0
     this.providerBudgetGenerationOutputUnits = 0
     this.providerBudgetHandoffCount = 0
+    // The goal and completed-step count the current budget generation started
+    // at; a step close past it rolls the generation (1.5).
+    this.providerBudgetStepMark = null
     this.actionOmissionRepairActive = false
     this.actionOmissionObservationUsed = false
     this.actionOmissionForceNoTools = false
@@ -2385,6 +2494,42 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   //    an 800-char summary before the planner had read them once.
   // Compaction now waits until this class has consumed the batch, and never
   // takes the newest exchange; older exchanges still compact as before.
+  // Scales the working-context ceiling from a declared context window. Half
+  // the window goes to the working messages at a conservative 3 characters
+  // per token (JSON-heavy tool results); the rest stays for tool schemas, the
+  // output cap and a margin. Message count scales with the character ceiling.
+  // No window, or explicit maxWorking* options: the ceiling is unchanged.
+  // Returns true when the ceiling changed.
+  applyContextWindowCeiling(contextWindow, source) {
+    if (this.explicitWorkingCeiling) return false
+    if (!Number.isSafeInteger(contextWindow) || contextWindow <= 0) return false
+    if (this.workingCeiling?.context_window === contextWindow) return false
+    const chars = Math.max(8000, Math.floor(contextWindow * 1.5))
+    const messages = Math.max(8, Math.min(64, Math.round(this.defaultWorkingCeiling.messages * chars / this.defaultWorkingCeiling.chars)))
+    this.maxWorkingChars = chars
+    this.maxWorkingMessages = messages
+    this.workingCeiling = { messages, chars, source, context_window: contextWindow }
+    this.workingCeilingTracedFor = null
+    return true
+  }
+
+  // One compaction.ceiling event per request (and again whenever it changes),
+  // so a run's compaction behavior can be read from the trace alone.
+  async traceWorkingCeiling(reason) {
+    const key = `${this.traceRequest?.id ?? ''}|${this.workingCeiling.chars}|${this.workingCeiling.messages}`
+    if (!this.traceRequest || this.workingCeilingTracedFor === key) return
+    this.workingCeilingTracedFor = key
+    await this.traceEvent('compaction.ceiling', {
+      reason,
+      source: this.workingCeiling.source,
+      context_window: this.workingCeiling.context_window,
+      max_working_chars: this.workingCeiling.chars,
+      max_working_messages: this.workingCeiling.messages,
+      default_working_chars: this.defaultWorkingCeiling.chars,
+      default_working_messages: this.defaultWorkingCeiling.messages,
+    })
+  }
+
   compactWorkingContext() {
     if (this.compactionDeferred) return
     const overBudget = () => this.messages.length > this.maxWorkingMessages
@@ -2960,6 +3105,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           wait_id: identity.wait_id,
           task_board: visibleTaskBoard(reduced?.state?.task_board),
         })
+        await this.rollProviderBudgetAtStepClose('condition_wait', reduced?.state)
         return { action: 'verified', wait_id: identity.wait_id, state: reduced?.state, observation: normalizedObservation }
       }
 
@@ -3564,6 +3710,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       contract,
       task_board: visibleTaskBoard(reduced?.state?.task_board),
     })
+    await this.rollProviderBudgetAtStepClose(source ?? trigger, reduced.state)
     return { closed: true, state: reduced.state }
   }
 
@@ -4538,6 +4685,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       ? planBefore.provider_recovery.budget_generation
       : 1
     this.providerBudgetGenerationOutputUnits = 0
+    this.providerBudgetStepMark = providerBudgetStepMark(planBefore)
     this.providerBudgetHandoffCount = Number.isSafeInteger(planBefore?.provider_recovery?.handoff_count)
       ? planBefore.provider_recovery.handoff_count
       : 0
@@ -4571,6 +4719,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       id: `req_${Date.now().toString(36)}_${(++this.traceRequestSequence).toString(36)}`,
       seq: 0,
       usage: emptyUsageSummary(),
+      // A request that starts on a paused goal and leaves it paused for the
+      // same reason did not pause it (goal.paused is for new pauses).
+      start_status: planBefore?.status,
+      start_pause_reason: planBefore?.pause_reason,
     }
     await this.traceEvent('request.received', {
       sender,
@@ -4617,6 +4769,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
     await ensureSkillOffers(this, { memoryKey, intent, text }) // 2.8 hook: skill-offers.mjs
     try {
+      this.chatRequestPending = true
       const result = await super.request(text, options)
       if (this.requestInfo?.memoryKey) this.lastMemoryKey = this.requestInfo.memoryKey
       if (resumeProviderBudgetHandoff) {
@@ -4631,6 +4784,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return { ...result, interactionIntent: intent, routedOnly: false }
     }
     catch (error) {
+      this.chatRequestPending = false
       if (this.traceRequest) {
         const message = error instanceof Error ? error.message : String(error)
         await this.traceEvent('request.failed', {
@@ -4657,6 +4811,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const key = this.activePlanKey()
     const state = this.memory.pausePlan?.(key, reason)
     await this.persistState()
+    // Outside a request (the supervisor pausing a plan a failed request left
+    // stranded, or a user stop) no terminal event follows, so name the pause
+    // here, keyed by the request that just ended. Inside a request the
+    // terminal event carries it.
+    if (!this.traceRequest) {
+      const paused = this.goalPausedTrace('pause_persistent_plan')
+      if (paused) await this.traceEvent('goal.paused', paused, { requestId: paused.request_id })
+    }
     super.cancel()
     return state
   }
@@ -5017,10 +5179,80 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return summary
   }
 
-  traceEvent(event, data = {}) {
+  // Every pause is named in the trace (1.5, widened 2026-09-28): a goal that
+  // ends a request paused gets one goal.paused event with the cause, keyed by
+  // the request that paused it, whichever path paused it. Pauses applied after
+  // the request unwound (the supervisor's stranded-plan pause, a user stop)
+  // are traced from pausePersistentPlan with the last request's id.
+  // Every request carries a usage summary, whoever opened it. Supervisor
+  // recovery runs (condition_satisfied, runtime_restart, actor_replaced,
+  // auto-resume) assign `traceRequest = { id, seq }` directly; without a
+  // usage summary their output was never counted, so the request-wide output
+  // ceiling could not apply to them (1.5 review).
+  get traceRequest() {
+    return this.currentTraceRequest ?? null
+  }
+
+  set traceRequest(value) {
+    if (value && typeof value === 'object') {
+      if (!value.usage || typeof value.usage !== 'object') value.usage = emptyUsageSummary()
+      if (!Number.isSafeInteger(value.seq)) value.seq = 0
+    }
+    this.currentTraceRequest = value ?? null
+  }
+
+  // Reads the durable plan state for tracing and budget bookkeeping without
+  // currentPlan's side effects (it retires a completed plan on read).
+  peekPlanState(key) {
+    try {
+      const state = this.memory?.planByNpc?.get?.(key)
+      return state && typeof state === 'object' ? state : undefined
+    }
+    catch {
+      return undefined
+    }
+  }
+
+  goalPausedTrace(source, extra = {}) {
+    const state = this.peekPlanState(this.activePlanKey())
+    if (state?.status !== 'paused') return undefined
+    const request = this.traceRequest
+    if (request?.goal_paused_traced === state.pause_reason) return undefined
+    if (request && request.start_status === 'paused' && request.start_pause_reason === state.pause_reason) return undefined
+    if (request) request.goal_paused_traced = state.pause_reason
+    const pauseReason = String(state.pause_reason ?? '')
+    return {
+      request_id: request?.id ?? this.lastTerminalRequestId,
+      cause: cleanMemoryText(pauseReason.split(':')[0], 120) || 'paused',
+      pause_reason: cleanMemoryText(pauseReason, 300),
+      provider_failure: /provider|request_failed/i.test(pauseReason),
+      source,
+      goal_id: state.goal_id,
+      active_step_id: state.task_board?.active_step_id,
+      resume: 'Resume or say continue',
+      ...extra,
+    }
+  }
+
+  traceEvent(event, data = {}, { requestId } = {}) {
     if (event === 'request.completed' || event === 'request.failed') {
       data = { ...(data ?? {}), jev_health: this.takeJevHealthSummary() }
+      if (this.traceRequest?.id) this.lastTerminalRequestId = this.traceRequest.id
+      const paused = this.goalPausedTrace(event, {
+        chat_message: typeof data.chat_message === 'string' ? data.chat_message : undefined,
+        outcome: data.outcome,
+        message: typeof data.message === 'string' ? cleanMemoryText(data.message, 300) : undefined,
+      })
+      if (paused) {
+        const pausedWrite = this.traceEvent('goal.paused', paused)
+        const terminalWrite = this.writeTraceEvent(event, data, requestId)
+        return Promise.all([pausedWrite, terminalWrite]).then(() => undefined)
+      }
     }
+    return this.writeTraceEvent(event, data, requestId)
+  }
+
+  writeTraceEvent(event, data = {}, requestId) {
     if (this.onActivity) {
       try { this.onActivity(event, data) }
       catch (error) { this.log(`[trace] activity listener failed: ${error instanceof Error ? error.message : String(error)}`) }
@@ -5031,7 +5263,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // available to the live UI via onActivity above, but do not write it into
     // the main planner behavior trace before a canonical request_id exists.
     if (event === 'interaction.routed' && !request) return Promise.resolve()
-    if (['request.received', 'provider.error', 'plan.accepted', 'operations.ack', 'request.completed', 'request.failed'].includes(event)) {
+    if (['request.received', 'provider.error', 'plan.accepted', 'operations.ack', 'request.completed', 'request.failed', 'goal.paused'].includes(event)) {
       this.log(`[trace ${request?.id ?? '-'}] ${event}`)
     }
     return this.behaviorTrace.emit({
@@ -5039,7 +5271,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       ts: new Date().toISOString(),
       seq: request ? ++request.seq : 0,
       event,
-      request_id: request?.id,
+      request_id: request?.id ?? (typeof requestId === 'string' ? requestId : undefined),
       turn: request ? this.continuations + 1 : undefined,
       actor_id: this.epoch?.actor_id,
       epoch: this.epoch?.epoch,
@@ -5049,22 +5281,78 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   async runGuarded() {
     const generation = this.generation
+    // super.request() has just built requestInfo for a player chat request;
+    // supervisor recovery runs build their own and enter here directly.
+    if (this.chatRequestPending && this.requestInfo) this.requestInfo.origin = 'chat'
+    this.chatRequestPending = false
     try {
-      return await this.runTurn()
+      return this.withPauseNotice(await this.runTurn())
     }
     catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       const planState = this.memory.currentPlan?.(this.activePlanKey())
+      // The request-wide output ceiling (5 per-turn caps) is final for this
+      // request: no fresh generation, no recovery call. The goal ends
+      // visibly and Resume starts a new request with a new allowance.
+      if (isRequestOutputCeiling(error)
+        && generation === this.generation
+        && this.traceRequest) {
+        return this.pauseAtProviderBudgetCap(error, planState, 'request_output_ceiling')
+      }
       const terminalBudgetFailure = planState?.status === 'active' && terminalProviderBudgetFailure(error)
       if (terminalBudgetFailure && generation === this.generation && this.active) {
         // callProvider can surface the terminal exactly-once budget condition
         // before runTurn reaches its ordinary parse/recovery boundary. Reuse
         // the existing Outcome Authority path instead of leaking the provider
         // exception or spending another provider call.
-        return this.recoverPlan(generation, error, 0)
+        try {
+          return this.withPauseNotice(await this.recoverPlan(generation, error, 0))
+        }
+        catch (recoveryError) {
+          // The fresh generations were spent too: pause visibly instead of
+          // leaving the request to fail with no message.
+          if (!(terminalProviderBudgetFailure(recoveryError) || isRequestOutputCeiling(recoveryError)) || generation !== this.generation || !this.traceRequest) throw recoveryError
+          return this.pauseAtProviderBudgetCap(recoveryError, this.memory.currentPlan?.(this.activePlanKey()), 'budget_recovery_failed')
+        }
       }
-      const recoverablePlannerFailure = planState?.status === 'active'
-        && /provider_action_omission_repair_failed|provider_output_budget_exhausted|provider_jev_recovery_route_failed|Provider strict recovery could not safely resolve remaining canonical work/i.test(message)
+      // A budget failure on a plan that is not active (the steam run: blocked
+      // on a failed transfer while the planner reasoned about it) used to end
+      // here as request.failed with recoverable=false and nothing visible.
+      if (terminalProviderBudgetFailure(error)
+        && generation === this.generation
+        && this.traceRequest
+        && ['blocked', 'paused'].includes(planState?.status)) {
+        return this.pauseAtProviderBudgetCap(error, planState, 'plan_not_active')
+      }
+      // Any other provider failure on an active goal with Autorio idle pauses
+      // the goal here, with a chat line and a Resume, instead of leaving the
+      // supervisor to pause it after the request unwound (the old silent
+      // auto-pause). Transient conditions stay with the supervisor, which
+      // resumes them automatically; live world work is never paused.
+      // The recoverable planner failures keep failing upward: they leave the
+      // plan active in a resumable repair state (admission_status
+      // action_omission_repair, the compact recovery capsule) that a pause
+      // would lose. The supervisor pauses them when Autorio is idle, and
+      // pausePersistentPlan traces that pause as goal.paused.
+      const failsUpward = RECOVERABLE_PLANNER_FAILURE.test(message)
+        || planState?.admission_status === 'action_omission_repair'
+      const pauseCause = failsUpward ? undefined : providerFailurePauseCause(message)
+      if (pauseCause
+        && planState?.status === 'active'
+        && planState.condition_wait?.state !== 'active'
+        && generation === this.generation
+        && this.traceRequest) {
+        const runtime = await this.readInteractionTaskStatus()
+        if (idleRuntimeStatus(runtime)) return this.pauseAfterProviderFailure(pauseCause, message)
+        await this.traceEvent('goal.pause_skipped', {
+          cause: pauseCause,
+          reason: 'autorio_runtime_not_idle',
+          task_state: runtime?.task_state,
+          queue_length: runtime?.queue_length,
+          status_error: runtime?.status_error,
+        })
+      }
+      const recoverablePlannerFailure = planState?.status === 'active' && RECOVERABLE_PLANNER_FAILURE.test(message)
       if (!recoverablePlannerFailure && generation === this.generation) this.reset()
       if (this.traceRequest) {
         await this.traceEvent('request.failed', {
@@ -5078,6 +5366,46 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       throw error
     }
+  }
+
+  async pauseAfterProviderFailure(cause, message) {
+    const key = this.activePlanKey()
+    const pauseReason = cleanMemoryText(`${cause}: ${cleanMemoryText(message, 240)}`, 300)
+    const state = this.memory.pausePlan?.(key, pauseReason)
+    await this.persistState()
+    this.active = false
+    const chatMessage = `I paused this goal: ${PROVIDER_PAUSE_TEXT[cause] ?? PROVIDER_PAUSE_TEXT.request_failed}. ${RESUME_HINT}`
+    const taskBoard = visibleTaskBoard(state?.task_board)
+    await this.traceEvent('request.completed', {
+      chat_message: chatMessage,
+      outcome: 'paused_provider_failure',
+      reason: cause,
+      message: cleanMemoryText(message, 600),
+      task_board: taskBoard,
+      usage: this.traceRequest?.usage,
+    })
+    this.traceRequest = null
+    return {
+      chatMessage,
+      plan: state?.plan ?? [],
+      currentStep: state?.current_step ?? 0,
+      operations: [],
+      epoch: this.epoch?.epoch,
+      actorId: this.epoch?.actor_id,
+      goalId: state?.goal_id,
+      goalStatus: state?.status,
+      taskBoard,
+    }
+  }
+
+  // A turn that ends with the goal paused always tells the player how to go
+  // on: one line, ending with the Resume hint. Paths that already say it are
+  // left alone.
+  withPauseNotice(result) {
+    if (!result || typeof result !== 'object' || result.goalStatus !== 'paused') return result
+    const text = String(result.chatMessage ?? '').replace(/[\r\n]+/g, ' ').trim()
+    if (/\bResume\b|say continue/i.test(text)) return text === result.chatMessage ? result : { ...result, chatMessage: text }
+    return { ...result, chatMessage: `${text || 'I paused this goal.'} ${RESUME_HINT}` }
   }
 
   async captureEpoch() {
@@ -5572,6 +5900,211 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return super.cancel()
   }
 
+  // A fresh output budget per step (1.5, first slice of delegation). The
+  // output cap is per budget generation, and a generation used to roll only
+  // on an output-budget handoff, so one request carried a whole goal: the
+  // 2026-09-26 steam run spent 42,915 units authoring the plan and step 1,
+  // then died at 107,322 > 100,000 two steps later. A verified step close is a
+  // safe boundary (the world state, not the conversation, carries the
+  // progress), so every close starts a new generation. Called at each step
+  // close and, as a catch-all for any other path that advances the board,
+  // before every provider call.
+  async rollProviderBudgetAtStepClose(source, stateOverride) {
+    const key = this.activePlanKey()
+    const current = providerBudgetStepMark(stateOverride ?? this.peekPlanState(key))
+    if (!current) return false
+    const mark = this.providerBudgetStepMark
+    // A goal first seen in this request (no mark, or the mark belongs to an
+    // earlier goal) started from zero closed steps.
+    const baseline = mark && mark.goal_id === current.goal_id ? mark.completed_count : 0
+    if (current.completed_count <= baseline) {
+      // No close since the mark (or a board rebuilt by a revision): re-anchor
+      // without spending a generation.
+      this.providerBudgetStepMark = current
+      return false
+    }
+    const previousGeneration = Math.max(1, this.providerBudgetGeneration)
+    const previousOutputUnits = this.providerBudgetGenerationOutputUnits
+    this.providerBudgetGeneration = previousGeneration + 1
+    this.providerBudgetGenerationOutputUnits = 0
+    // The compact output-budget retry is allowed once per generation.
+    this.outputBudgetRecoveryUsed = false
+    this.providerBudgetStepMark = current
+    const board = (stateOverride ?? this.peekPlanState(key))?.task_board
+    await this.traceEvent('budget.generation_rolled', {
+      reason: 'step_closed',
+      source,
+      goal_id: current.goal_id || undefined,
+      completed_count: current.completed_count,
+      closed_steps: current.completed_count - baseline,
+      active_step_id: board?.active_step_id,
+      previous_generation: previousGeneration,
+      previous_generation_output_units: previousOutputUnits,
+      generation: this.providerBudgetGeneration,
+      output_cap: this.maxProviderOutputUnits,
+      request_output_units: this.traceRequest?.usage?.output_units,
+    })
+    return true
+  }
+
+  // A revised version of a BLOCKED plan needs the player's own revision
+  // (AGENTS.md; planning-state: a recorded 'revise' choice authorizes only the
+  // next user-supplied revision). recordPlan treats any requestInfo with a
+  // sender and text as that revision. A run that is not a player chat request
+  // (supervisor recovery, which sets sender=owner and text=objective) must
+  // never carry that authority, so a lingering 'revise' choice cannot turn it
+  // into an unapproved plan version.
+  async revisionSafeRequestInfo() {
+    const info = this.requestInfo
+    if (!info || info.origin === 'chat') return info
+    const planning = this.memory.planningState?.(info.memoryKey)
+    const active = planning ? getActivePlanningPlan(planning) : undefined
+    if (active?.status !== PLAN_STATUS.BLOCKED) return info
+    await this.traceEvent('planning.revision_authority_withheld', {
+      reason: 'not_a_player_chat_request',
+      plan_id: active.plan_id,
+      blocker: active.blocker?.reason_code,
+      user_choice: active.blocker?.user_choice?.choice,
+    })
+    return { ...info, sender: undefined, text: undefined }
+  }
+
+  requestOutputCeiling() {
+    return REQUEST_OUTPUT_CEILING_CAPS * this.maxProviderOutputUnits
+  }
+
+  // A request that runs out of output budget (the per-step cap, the context
+  // window, an exhausted budget recovery, or the request-wide ceiling) ends
+  // visibly with one chat line (1.5); it never ends as a silent `blocked` plan
+  // with no message, which is where the steam run stopped.
+  //  - A plan that is not blocked is paused, and the line ends with
+  //    RESUME_HINT; Resume starts a fresh request from the verified state.
+  //  - A plan already blocked on a world blocker STAYS blocked (AGENTS.md: a
+  //    structural blocker freezes the plan until the user approves a revision;
+  //    the board keeps its Revise / Keep paused / Cancel controls and the
+  //    supervisor's blocked guard). The budget stop is recorded as its own
+  //    cause (budget_cause in the trace and the result), and the line names
+  //    the blocker and the budget stop and asks for the same decision the
+  //    blocked reply asks for. Resume on it gets that blocked reply.
+  async pauseAtProviderBudgetCap(error, previousState, source) {
+    const key = this.activePlanKey()
+    const ceiling = isRequestOutputCeiling(error)
+    const code = ceiling ? 'request_output_ceiling' : terminalProviderBudgetCode(error)
+    const previousStatus = previousState?.status
+    const blocked = previousStatus === 'blocked'
+    const blocker = blocked ? cleanMemoryText(previousState?.blocker, 160) : ''
+    const generation = this.providerBudgetGeneration
+    const generationOutputUnits = this.providerBudgetGenerationOutputUnits
+    const requestOutputUnits = this.traceRequest?.usage?.output_units
+    const units = value => Number(value ?? 0).toLocaleString('en-US')
+    const spent = ceiling
+      ? `this request used its whole output allowance (${units(requestOutputUnits)} of ${units(this.requestOutputCeiling())} units across ${generation} step budget${generation === 1 ? '' : 's'})`
+      : code === 'provider_turn_output_cap_exceeded'
+        ? `the model used its whole output budget for this step (${units(generationOutputUnits)} of ${units(this.maxProviderOutputUnits)} units)`
+        : `the model request ran out of budget (${code})`
+    this.memory.setProviderRecovery?.(key, undefined)
+    let state
+    let pauseReason
+    let chatMessage
+    if (blocked) {
+      await this.persistState()
+      state = this.peekPlanState(key)
+      chatMessage = `I stopped: ${spent}, and the plan is blocked on ${blocker || 'a world blocker'}. Continuing unchanged would hit the same blocker. Tell me how to revise it (for example a different route or target), or cancel it.`
+    }
+    else {
+      pauseReason = cleanMemoryText(ceiling
+        ? `request_output_ceiling: ${units(requestOutputUnits)} > ${units(this.requestOutputCeiling())} output units`
+        : `${BUDGET_PAUSE_PREFIX}: ${code}`, 300)
+      // Only a live goal is paused; a completed or missing plan is left as it
+      // is, but the request still stops visibly and says so.
+      state = ['active', 'paused'].includes(previousStatus)
+        ? this.memory.pausePlan?.(key, pauseReason)
+        : this.peekPlanState(key)
+      await this.persistState()
+      chatMessage = `I paused this goal: ${spent}. ${RESUME_HINT}`
+      if (state?.status !== 'paused') {
+        // The terminal-event hook names pauses of a plan state; with none to
+        // pause, name this stop here so every budget stop has its goal.paused.
+        await this.traceEvent('goal.paused', {
+          request_id: this.traceRequest?.id,
+          cause: code,
+          pause_reason: pauseReason,
+          provider_failure: false,
+          source: 'budget_stop_without_live_plan',
+          plan_status: state?.status ?? 'none',
+          resume: 'Resume or say continue',
+          chat_message: chatMessage,
+        })
+      }
+    }
+    this.active = false
+    const taskBoard = visibleTaskBoard(state?.task_board)
+    await this.traceEvent('budget.cap_reached', {
+      reason: code,
+      budget_cause: code,
+      source,
+      previous_status: previousStatus,
+      blocker: blocker || undefined,
+      goal_status: state?.status,
+      next_action: blocked ? 'revise_or_cancel' : 'resume',
+      pause_reason: pauseReason,
+      generation,
+      generation_output_units: generationOutputUnits,
+      output_cap: this.maxProviderOutputUnits,
+      request_output_units: requestOutputUnits,
+      request_output_ceiling: this.requestOutputCeiling(),
+      chat_message: chatMessage,
+    })
+    await this.traceEvent('request.completed', {
+      chat_message: chatMessage,
+      outcome: blocked
+        ? 'blocked_budget_stop'
+        : ceiling ? 'paused_request_output_ceiling' : 'paused_output_cap',
+      reason: code,
+      budget_cause: code,
+      task_board: taskBoard,
+      usage: this.traceRequest?.usage,
+    })
+    this.traceRequest = null
+    return {
+      chatMessage,
+      plan: state?.plan ?? [],
+      currentStep: state?.current_step ?? 0,
+      operations: [],
+      epoch: this.epoch?.epoch,
+      actorId: this.epoch?.actor_id,
+      goalId: state?.goal_id,
+      goalStatus: blocked ? 'blocked' : state?.status === 'paused' ? 'paused' : (state?.status ?? 'paused'),
+      budgetCause: code,
+      taskBoard,
+    }
+  }
+
+
+  // What this round has to do (1.3). Every tools-on round offers submitPlan,
+  // so in a request that authors or revises a plan (a new goal, an amendment,
+  // a replan, a failure, a fresh slice) any round may write the plan: it is
+  // `decide` and keeps the full bracket. Only a continuation round of an
+  // active committed plan, with the observation phase open, is `gather`: it
+  // executes the plan and cannot rewrite it. Once the harness closes or
+  // narrows the observation phase (tools off, decision pressure, the
+  // observation budget spent) the round is `decide` too. The provider maps
+  // the phase onto effort and output cap; the reason is traced with it.
+  providerRoundPhase(allowTools, triggerSource) {
+    if (allowTools === false) return { phase: 'decide', reason: 'tools_off' }
+    if (!CONTINUATION_TRIGGERS.has(triggerSource)) return { phase: 'decide', reason: 'plan_may_be_written' }
+    const state = this.peekPlanState(this.activePlanKey())
+    if (state?.status !== 'active' || !Array.isArray(state?.task_board?.steps) || state.task_board.steps.length === 0) {
+      return { phase: 'decide', reason: 'no_active_committed_plan' }
+    }
+    if (this.observationDecisionForced === true) return { phase: 'decide', reason: 'observation_phase_closed' }
+    if (this.observationDecisionPressure === true) return { phase: 'decide', reason: 'observation_decision_pressure' }
+    if (Number.isSafeInteger(this.observationBudgetRemaining) && this.observationBudgetRemaining <= 0) {
+      return { phase: 'decide', reason: 'observation_budget_spent' }
+    }
+    return { phase: 'gather', reason: 'observation_phase_open' }
+  }
+
   async callProvider(current, generation, {
     round,
     allowTools = true,
@@ -5602,6 +6135,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     if (generation !== this.generation || !this.active || !this.epoch) throw new AgentLoopError('Model turn was cancelled or superseded')
     await this.assertCurrent()
+    await this.rollProviderBudgetAtStepClose('provider_call_boundary')
+    await this.traceWorkingCeiling('provider_call')
 
     const controller = new AbortController()
     this.providerAbort = controller
@@ -5640,9 +6175,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         ...(traceRecoveryKind ? { kind: traceRecoveryKind } : {}),
       }
     }
+    const roundPhase = this.providerRoundPhase(effectiveAllowTools, triggerSource)
     await this.traceEvent('provider.request', {
       round,
       trigger_source: triggerSource,
+      round_phase: roundPhase.phase,
+      round_phase_reason: roundPhase.reason,
       reasoning_budget: this.reasoningBudgetOverride ?? undefined,
       planning_horizon: this.planningHorizonOverride ?? undefined,
       observation_budget: this.observationBudgetOverride ?? undefined,
@@ -5669,9 +6207,37 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         lifecycle: this.requestLifecycle,
         actionOmissionRepair: omissionRepair,
         requestBodyPatch: omissionRepair ? { max_tokens: ACTION_OMISSION_MAX_TOKENS } : undefined,
+        roundPhase: roundPhase.phase,
+        // The prompt trace keys every provider row by this id (1.3); without
+        // it requests had to be rebuilt from round-0 boundaries.
+        requestId: this.traceRequest?.id,
+        onReasoningPolicy: decision => this.traceEvent('provider.round_policy', {
+          round,
+          trigger_source: triggerSource,
+          round_phase: roundPhase.phase,
+          round_phase_reason: roundPhase.reason,
+          effort: decision?.effort,
+          reason: decision?.reason,
+          output_cap: decision?.output_cap,
+          output_cap_source: decision?.output_cap_source,
+          capability_profile: decision?.capability_profile,
+          recovery_attempt: effectiveRecoveryAttempt,
+          recovery_kind: traceRecoveryKind,
+        }),
         signal: controller.signal,
       })
-      const usage = normalizedProviderUsage(message?._airiProvider?.usage)
+      const usage = estimatedOutputUsage(normalizedProviderUsage(message?._airiProvider?.usage), message?._airiProvider)
+      if (usage?.output_units_estimated === true) {
+        if (this.traceRequest && this.traceRequest.usage_estimated_traced !== true) {
+          this.traceRequest.usage_estimated_traced = true
+          await this.traceEvent('budget.usage_estimated', {
+            reason: 'provider_reported_no_output_usage',
+            round,
+            estimated_output_units: usage.output_units,
+            estimate_source: 'requested_output_cap',
+          })
+        }
+      }
       accumulateProviderUsage(this.traceRequest?.usage, usage)
       if (Number.isSafeInteger(usage?.output_units)) this.providerBudgetGenerationOutputUnits += usage.output_units
       const aggregateOutputUnits = this.traceRequest?.usage?.output_units
@@ -5696,6 +6262,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (responseTrace.provider) responseTrace.provider.usage_complete = usage?.usage_complete === true
       if (this.traceRequest) this.traceRequest.last_provider_event = responseTrace
       await this.traceEvent('provider.response', responseTrace)
+      // provider-base reports the profile's context window on every response,
+      // so the ceiling follows the configured profile even when the loop was
+      // built without its provider config.
+      if (this.applyContextWindowCeiling(message?._airiProvider?.provider_context_window, 'provider_response')) {
+        await this.traceWorkingCeiling('context_window_reported')
+      }
       if (turnOutputCapExceeded) {
         await this.traceEvent('budget.output_units_exceeded', {
           output_units: generationOutputUnits,
@@ -5708,6 +6280,20 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         capError.failureClass = 'provider_budget'
         capError.code = 'provider_turn_output_cap_exceeded'
         throw capError
+      }
+      const requestCeiling = this.requestOutputCeiling()
+      if (Number.isSafeInteger(aggregateOutputUnits) && aggregateOutputUnits > requestCeiling) {
+        await this.traceEvent('budget.request_ceiling_exceeded', {
+          reason: 'request_output_ceiling',
+          request_output_units: aggregateOutputUnits,
+          request_output_ceiling: requestCeiling,
+          output_cap: this.maxProviderOutputUnits,
+          budget_generation: this.providerBudgetGeneration,
+          provider_calls: this.traceRequest?.usage?.provider_calls,
+        })
+        const ceilingError = new AgentLoopError(`request_output_ceiling: request used ${aggregateOutputUnits} > ${requestCeiling} output units across ${this.providerBudgetGeneration} budget generation(s)`)
+        ceilingError.code = 'request_output_ceiling'
+        throw ceilingError
       }
     }
     catch (error) {
@@ -6805,6 +7391,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       rationale: cleanMemoryText(claim.rationale, 600),
       task_board: visibleTaskBoard(reduced?.state?.task_board),
     })
+    await this.rollProviderBudgetAtStepClose('main_planner_semantic', reduced.state)
     return { applied: true, state: reduced.state }
   }
 
@@ -7026,7 +7613,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
               : []),
           ].slice(0, 2)
         : []
-      stateResult = this.memory.recordPlan?.(this.requestInfo.memoryKey, this.requestInfo, durablePlan, {
+      stateResult = this.memory.recordPlan?.(this.requestInfo.memoryKey, await this.revisionSafeRequestInfo(), durablePlan, {
         continuation: this.continuations > 0,
         persistentRuntime,
         durableOperations,
