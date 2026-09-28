@@ -12,7 +12,101 @@ const COMPLETION_MAX_TOKENS = 3000
 const FALLBACK_CONTINUATION_MAX_TOKENS = 8000
 const DEFAULT_MAX_TOKENS = 4000
 const MAX_PROVIDER_OUTPUT_CAP = 65536
-const PROVIDER_PROFILE_IDS = new Set(['auto', 'generic', 'deepseek', 'openai-reasoning'])
+const PROVIDER_PROFILE_IDS = new Set(['auto', 'generic', 'deepseek', 'openai-reasoning', 'openrouter', 'local'])
+// LM Studio's declared context window default (plan 1.9): the runtime has no
+// other way to learn it, so a conservative floor lets compaction stay ahead
+// of an overflow until a model config states its own value.
+const LOCAL_DEFAULT_CONTEXT_WINDOW = 65536
+// OpenRouter model ids carry a vendor prefix ("anthropic/claude-opus-4.5",
+// "deepseek/deepseek-chat-v3.1"); resolving capability from that prefix, per
+// call, is what lets one shared OpenRouter profile behave correctly for many
+// upstream families without a process-wide assumption. Verified against
+// OpenRouter's docs (reasoning-tokens, prompt-caching, provider-routing);
+// no API calls were made to confirm behavior beyond what those docs state.
+const OPENROUTER_MODEL_FAMILY_PATTERNS = [
+  [/^deepseek(?:[-_./:]|$)/i, 'deepseek'],
+  [/^anthropic\//i, 'anthropic'],
+  [/^openai\//i, 'openai'],
+  [/^(?:x-ai|xai)\//i, 'grok'],
+  [/^google\//i, 'google'],
+]
+export function openRouterModelFamily(model) {
+  const value = String(model ?? '')
+  for (const [pattern, family] of OPENROUTER_MODEL_FAMILY_PATTERNS) {
+    if (pattern.test(value)) return family
+  }
+  return 'generic'
+}
+// Local models currently in rotation (plan 1.9 "Local models") are all
+// non-thinking coder/instruct builds; none is documented to accept an
+// OpenAI-style reasoning_effort/thinking field through LM Studio's
+// OpenAI-compatible server, and no live call was made to check one that
+// might. The family table stays explicit and empty by default rather than
+// guessing a request shape LM Studio may reject.
+const LOCAL_REASONING_FAMILIES = new Set()
+export function localModelFamily(model) {
+  const value = String(model ?? '').toLowerCase()
+  if (/qwen3-coder/.test(value)) return 'qwen3-coder'
+  if (/qwen3\.5/.test(value)) return 'qwen3.5'
+  if (/gemma/.test(value)) return 'gemma'
+  if (/deepseek-r1|(?:^|[-_])r1(?:[-_]|$)|reasoning/.test(value)) return 'reasoning-distill'
+  return 'generic'
+}
+function openRouterCapability(config, requested) {
+  const family = openRouterModelFamily(config.model)
+  const pin = config.upstreamProvider
+  const upstreamProvider = typeof pin === 'string' && pin.trim()
+    ? [pin.trim()]
+    : Array.isArray(pin) && pin.length > 0 && pin.every(entry => typeof entry === 'string' && entry.trim())
+      ? pin.map(entry => entry.trim())
+      : undefined
+  return {
+    id: 'openrouter',
+    token_field: 'max_tokens',
+    reasoning_effort: true,
+    // OpenRouter normalizes reasoning control through the `reasoning` body
+    // field for every upstream family; the vendor-native `thinking` field
+    // (DeepSeek's own API) is never sent through OpenRouter.
+    reasoning_field: 'reasoning',
+    thinking_control: 'none',
+    tool_support: true,
+    structured_output: 'tools_or_json',
+    model_family: family,
+    // DeepSeek narrates by default wherever it runs, including behind
+    // OpenRouter, so the same output-style block applies by model family
+    // rather than by transport profile id.
+    style_profile: family === 'deepseek' ? 'deepseek' : undefined,
+    // cache_control breakpoints only do anything for Anthropic models
+    // (https://openrouter.ai/docs/features/prompt-caching); sending them
+    // elsewhere would be inert at best.
+    cache_control: family === 'anthropic',
+    cached_input_pricing: family === 'anthropic',
+    upstream_provider: upstreamProvider,
+    requested_profile: requested,
+    auto_resolved: requested === 'auto',
+  }
+}
+function localCapability(config, requested) {
+  const family = localModelFamily(config.model)
+  const contextWindow = Number.isSafeInteger(config.contextWindow) && config.contextWindow > 0
+    ? config.contextWindow
+    : LOCAL_DEFAULT_CONTEXT_WINDOW
+  return {
+    id: 'local',
+    token_field: 'max_tokens',
+    reasoning_effort: LOCAL_REASONING_FAMILIES.has(family),
+    thinking_control: 'none',
+    tool_support: true,
+    structured_output: 'tools_or_json',
+    model_family: family,
+    // LM Studio's OpenAI-compatible server reports no cache-hit breakdown;
+    // there is no cached-input rate to apply.
+    cached_input_pricing: false,
+    context_window: contextWindow,
+    requested_profile: requested,
+    auto_resolved: requested === 'auto',
+  }
+}
 const PROVIDER_PROFILES = Object.freeze({
   generic: Object.freeze({
     id: 'generic',
@@ -66,6 +160,27 @@ export function applyProviderStylePrompt(messages, profileId) {
 
 ${style}` }
   return output
+}
+
+// Anthropic models bill and reuse a cached prompt prefix only where the
+// request marks a `cache_control` breakpoint on a content block
+// (https://openrouter.ai/docs/features/prompt-caching, up to 4 explicit
+// breakpoints; no caching happens without one). The system message carries
+// the stable prefix (tool rules, style block), so a single breakpoint at
+// its end is the useful placement; converting its content from a plain
+// string to a content-block array must happen last, after the style block
+// has already been appended as a string. Returns the breakpoint count
+// placed, so the caller can trace it.
+export function applyAnthropicCacheBreakpoints(messages, capability) {
+  if (!capability?.cache_control) return { messages, breakpoints: 0 }
+  const index = messages.findIndex(message => message?.role === 'system' && typeof message.content === 'string' && message.content.trim())
+  if (index < 0) return { messages, breakpoints: 0 }
+  const output = messages.slice()
+  output[index] = {
+    ...output[index],
+    content: [{ type: 'text', text: output[index].content, cache_control: { type: 'ephemeral' } }],
+  }
+  return { messages: output, breakpoints: 1 }
 }
 
 const REQUEST_BODY_PATCH_KEYS = new Set(['max_tokens', 'max_completion_tokens', 'reasoning_effort', 'thinking', 'response_format'])
@@ -223,6 +338,10 @@ function promptTraceIdentity(options = {}) {
     reasoning_effort: typeof providerPolicy?.effort === 'string' ? providerPolicy.effort : undefined,
     reasoning_policy_reason: typeof providerPolicy?.reason === 'string' ? providerPolicy.reason : undefined,
     capability_profile: typeof capabilities?.id === 'string' ? capabilities.id : undefined,
+    provider_model_family: typeof capabilities?.model_family === 'string' ? capabilities.model_family : undefined,
+    provider_context_window: Number.isSafeInteger(capabilities?.context_window) ? capabilities.context_window : undefined,
+    upstream_provider_pin: Array.isArray(capabilities?.upstream_provider) ? capabilities.upstream_provider : undefined,
+    cache_control_breakpoints: Number.isSafeInteger(options.cacheControlBreakpoints) ? options.cacheControlBreakpoints : undefined,
   }
 }
 
@@ -243,7 +362,7 @@ async function traceProviderPayload(body, options = {}) {
       trigger_source: promptTraceTrigger(body?.messages, options.recoveryAttempt),
       requested_token_field: tokenField,
       requested_output_cap: tokenField ? body?.[tokenField] : undefined,
-      requested_reasoning_effort: typeof body?.reasoning_effort === 'string' ? body.reasoning_effort : undefined,
+      requested_reasoning_effort: requestedReasoningEffort(body),
       requested_thinking_mode: typeof body?.thinking?.type === 'string' ? body.thinking.type : 'not_sent',
       payload: body,
       stats: {
@@ -364,10 +483,18 @@ export function providerCapabilityProfile(config = {}) {
     // The official endpoint is a trustworthy capability signal even when the
     // configured model uses an alias. Unknown compatible gateways remain
     // generic unless the operator explicitly selects a provider profile.
-    resolved = providerHostname(config.base) === 'api.deepseek.com'
+    const hostname = providerHostname(config.base)
+    resolved = hostname === 'api.deepseek.com'
       ? 'deepseek'
-      : 'generic'
+      : hostname === 'openrouter.ai'
+        ? 'openrouter'
+        : 'generic'
   }
+  // openrouter/local are resolved per call from the model config (model
+  // family, explicit overrides), not from a single process-wide profile, so
+  // several role configs in the same process can each resolve correctly.
+  if (resolved === 'openrouter') return openRouterCapability(config, requested)
+  if (resolved === 'local') return localCapability(config, requested)
   const profile = PROVIDER_PROFILES[resolved]
   return {
     ...profile,
@@ -407,7 +534,17 @@ function applyRequestBodyPatch(body, patch, capability) {
   if (patch.reasoning_effort !== undefined) {
     check(capability.reasoning_effort === true, 'Provider profile does not allow reasoning_effort')
     check(['none', 'minimal', 'low', 'medium', 'high', 'max'].includes(patch.reasoning_effort), 'Invalid reasoning_effort override')
-    body.reasoning_effort = patch.reasoning_effort
+    // OpenRouter's wire shape nests effort under `reasoning` instead of the
+    // flat `reasoning_effort` key every other profile here uses
+    // (https://openrouter.ai/docs/use-cases/reasoning-tokens); the caller
+    // (provider.mjs) stays profile-agnostic and always hands us the flat
+    // key, so the destination shape is decided here from the capability.
+    if (capability.reasoning_field === 'reasoning') {
+      body.reasoning = { effort: patch.reasoning_effort }
+    }
+    else {
+      body.reasoning_effort = patch.reasoning_effort
+    }
   }
   if (patch.thinking !== undefined) {
     check(capability.thinking_control === 'deepseek', 'Provider profile does not allow thinking control')
@@ -422,6 +559,15 @@ function usageSafeInteger(value) {
   return Number.isSafeInteger(value) && value >= 0 ? value : undefined
 }
 
+// Every profile but OpenRouter sends effort as the flat `reasoning_effort`
+// key; OpenRouter nests it under `reasoning.effort`. Trace fields read
+// whichever shape the body actually carries.
+function requestedReasoningEffort(body) {
+  if (typeof body?.reasoning_effort === 'string') return body.reasoning_effort
+  if (typeof body?.reasoning?.effort === 'string') return body.reasoning.effort
+  return undefined
+}
+
 function providerUsageNumbers(usage) {
   if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return {}
   const input = usageSafeInteger(usage.prompt_tokens) ?? usageSafeInteger(usage.input_tokens)
@@ -430,7 +576,14 @@ function providerUsageNumbers(usage) {
   const reasoning = usageSafeInteger(usage.completion_tokens_details?.reasoning_tokens)
     ?? usageSafeInteger(usage.output_tokens_details?.reasoning_tokens)
     ?? usageSafeInteger(usage.reasoning_tokens)
-  return { input, output, total, reasoning }
+  // OpenRouter reports cache hits under prompt_tokens_details.cached_tokens
+  // (https://openrouter.ai/docs/features/prompt-caching); DeepSeek's native
+  // API instead uses prompt_cache_hit_tokens. LM Studio's plain OpenAI-shape
+  // usage carries none of these, so this stays undefined there.
+  const cached = usageSafeInteger(usage.prompt_tokens_details?.cached_tokens)
+    ?? usageSafeInteger(usage.input_tokens_details?.cached_tokens)
+    ?? usageSafeInteger(usage.prompt_cache_hit_tokens)
+  return { input, output, total, reasoning, cached }
 }
 
 function safeProviderErrorText(value, max = 800) {
@@ -1046,10 +1199,23 @@ export async function providerRequest(config, messages, {
   const disableThinking = compactContinuation && capability.thinking_control === 'deepseek'
   const compactReasoningDisabled = outputBudgetRecovery && capability.reasoning_effort === true
   const steeredMessages = applySteeringMessages(compactedMessages, messages)
+  // The interaction router answers in JSON content, so it keeps its own
+  // prompt untouched by either the style block or a cache breakpoint.
+  const styledMessages = interactionRouter
+    ? steeredMessages
+    : applyProviderStylePrompt(steeredMessages, capability.style_profile ?? capability.id)
+  const cacheBreakpoints = interactionRouter
+    ? { messages: styledMessages, breakpoints: 0 }
+    : applyAnthropicCacheBreakpoints(styledMessages, capability)
   const body = {
     model: config.model,
-    // The interaction router answers in JSON content, so it keeps its own prompt.
-    messages: interactionRouter ? steeredMessages : applyProviderStylePrompt(steeredMessages, capability.id),
+    messages: cacheBreakpoints.messages,
+  }
+  if (Array.isArray(capability.upstream_provider) && capability.upstream_provider.length > 0) {
+    // Pins the request to one upstream so repeated runs compare and cache
+    // hits stay stable instead of drifting across OpenRouter's backends
+    // (https://openrouter.ai/docs/features/provider-routing).
+    body.provider = { order: capability.upstream_provider, allow_fallbacks: false }
   }
   body[capability.token_field] = compactContinuation
     ? ((disableThinking || compactReasoningDisabled) ? COMPLETION_MAX_TOKENS : FALLBACK_CONTINUATION_MAX_TOKENS)
@@ -1072,6 +1238,7 @@ export async function providerRequest(config, messages, {
     promptTraceFile: traceFile,
     providerPolicy,
     providerCapabilities: capability,
+    cacheControlBreakpoints: cacheBreakpoints.breakpoints,
   }
   await traceProviderPayload(body, traceOptions)
 
@@ -1235,10 +1402,15 @@ export async function providerRequest(config, messages, {
       requested_profile: capability.requested_profile,
       requested_token_field: capability.token_field,
       requested_output_cap: requestedOutputCap,
-      requested_reasoning_effort: typeof body.reasoning_effort === 'string' ? body.reasoning_effort : undefined,
+      requested_reasoning_effort: requestedReasoningEffort(body),
       requested_thinking_mode: typeof body.thinking?.type === 'string' ? body.thinking.type : 'not_sent',
+      provider_model_family: typeof capability.model_family === 'string' ? capability.model_family : undefined,
+      upstream_provider_pin: Array.isArray(capability.upstream_provider) ? capability.upstream_provider : undefined,
+      cache_control_breakpoints: cacheBreakpoints.breakpoints,
+      provider_context_window: Number.isSafeInteger(capability.context_window) ? capability.context_window : undefined,
       reported_reasoning_tokens: usageNumbers.reasoning,
       reported_output_tokens: usageNumbers.output,
+      reported_cached_tokens: usageNumbers.cached,
       usage_complete: usageComplete,
       cap_enforcement_anomaly: capEnforcementAnomaly,
     }
