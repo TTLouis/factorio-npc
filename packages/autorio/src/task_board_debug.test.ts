@@ -312,4 +312,31 @@ describe('current task conversation regression', () => {
     expect(task_conversation_messages(fresh).map(message => message.text)).toEqual(['fresh request', 'fresh answer'])
     expect(task_conversation_messages(fresh).map(message => message.text)).toEqual(['fresh request', 'fresh answer'])
   })
+
+  it('Jev status sanitizes to jev_off when measurement is jev_off', () => {
+    const debug = sanitize_debug_snapshot({
+      jev_measurement: 'jev_off',
+      jev_request_calls: 0,
+      jev_request_fallbacks: 0,
+    })
+    expect(debug.jev_measurement).toBe('jev_off')
+  })
+
+  it('Jev status sanitizes to valid when measurement is valid', () => {
+    const debug = sanitize_debug_snapshot({
+      jev_measurement: 'valid',
+      jev_request_calls: 5,
+      jev_request_fallbacks: 1,
+    })
+    expect(debug.jev_measurement).toBe('valid')
+  })
+
+  it('Jev status sanitizes to degraded when measurement is degraded', () => {
+    const debug = sanitize_debug_snapshot({
+      jev_measurement: 'degraded',
+      jev_request_calls: 5,
+      jev_request_fallbacks: 4,
+    })
+    expect(debug.jev_measurement).toBe('degraded')
+  })
 })
