@@ -3,17 +3,24 @@ import {
   assert_safe_skill_id,
   canonicalize_skill_definition,
   create_skill_candidate,
+  derive_skill_tags,
   ensure_basic_skill_definitions,
   export_skill,
   find_skill_definitions,
   generate_skill_markdown,
   get_skill_definition,
+  goal_search_terms,
   handle_skill_export_click,
   list_skill_definitions,
   MAX_DYNAMIC_SKILL_DEFINITIONS,
+  put_skill_definition,
   serialize_skill_json,
+  skill_cards_for_goal,
   skill_export_relative_directory,
+  skill_precondition_check,
+  utf8_safe_prefix,
 } from './skills'
+import type { SkillWorldView } from './skills'
 import { edited_skill_revision, skill_detail_rows } from './skills_window'
 
 const writes: Array<{ filename: string, data: string, append: boolean }> = []
@@ -88,16 +95,16 @@ beforeEach(() => {
 })
 
 describe('curated basic skill library', () => {
-  it('seeds exactly ten manual candidate patterns idempotently', () => {
-    expect(ensure_basic_skill_definitions()).toEqual({ added: 10, total: 10 })
+  it('seeds exactly eleven manual candidate patterns idempotently', () => {
+    expect(ensure_basic_skill_definitions()).toEqual({ added: 11, upgraded: 0, total: 11 })
     const skills = list_skill_definitions()
-    expect(skills).toHaveLength(10)
+    expect(skills).toHaveLength(11)
     expect(skills.every(skill => skill.source.kind === 'manual')).toBe(true)
     expect(skills.every(skill => skill.status === 'candidate')).toBe(true)
     expect(skills.every(skill => skill.stage === 'pattern')).toBe(true)
     expect(skills.every(skill => skill.verification.production_output === 'not_tested')).toBe(true)
-    expect(ensure_basic_skill_definitions()).toEqual({ added: 0, total: 10 })
-    expect(list_skill_definitions()).toHaveLength(10)
+    expect(ensure_basic_skill_definitions()).toEqual({ added: 0, upgraded: 0, total: 11 })
+    expect(list_skill_definitions()).toHaveLength(11)
   })
 
   it('finds early patterns from English goals and Chinese player shorthand', () => {
@@ -126,9 +133,230 @@ describe('curated basic skill library', () => {
       },
     }))
 
-    expect(ensure_basic_skill_definitions()).toEqual({ added: 9, total: 10 })
+    expect(ensure_basic_skill_definitions()).toEqual({ added: 10, upgraded: 0, total: 11 })
     expect(get_skill_definition('burner-coal-loop')?.name).toBe('Player Authored Coal Pattern')
     expect(get_skill_definition('burner-coal-loop')?.source.kind).toBe('completed_goal')
+  })
+})
+
+// A fresh base-game 2.0 save: nothing held or placed; steam power and
+// automation not researched, so the steam entities are locked behind
+// steam-power; burner drills, stone furnaces and belts can be hand-crafted.
+// Abstract subjects (coal-resource, fuel-or-energy-input) stay unknown.
+function fresh_world(overrides: Partial<{ researched: string[], have: string[] }> = {}): SkillWorldView {
+  const researched = overrides.researched ?? []
+  const have = overrides.have ?? []
+  const entity_recipes: Record<string, { via: string, technology?: string }> = {
+    'offshore-pump': { via: 'offshore-pump', technology: 'steam-power' },
+    'boiler': { via: 'boiler', technology: 'steam-power' },
+    'generator': { via: 'steam-engine', technology: 'steam-power' },
+    'mining-drill': { via: 'burner-mining-drill' },
+    'burner-mining-drill': { via: 'burner-mining-drill' },
+    'furnace': { via: 'stone-furnace' },
+    'transport-belt': { via: 'transport-belt' },
+  }
+  return {
+    check_technology: name => ['automation', 'steam-power', 'logistics'].includes(name)
+      ? (researched.includes(name) ? { state: 'have' } : { state: 'locked', technology: name })
+      : undefined,
+    check_item: () => undefined,
+    check_entity: (subject) => {
+      const entry = entity_recipes[subject]
+      if (entry === undefined) return undefined
+      if (have.includes(entry.via)) return { state: 'have', via: entry.via }
+      if (entry.technology !== undefined && !researched.includes(entry.technology)) return { state: 'locked', via: entry.via, technology: entry.technology }
+      return { state: 'can_craft', via: entry.via }
+    },
+  }
+}
+
+describe('skill lookup: tags, scoring, preconditions and cards (plan 2.8)', () => {
+  it('derives tags from outputs, topology entities and recipes, and technology preconditions, plus the short goal_tags list', () => {
+    ensure_basic_skill_definitions()
+    const steam = derive_skill_tags(get_skill_definition('steam-power-bootstrap')!)
+    expect(steam.filter(tag => tag.source === 'goal').map(tag => tag.tag)).toEqual(['power', 'electricity', 'electric', 'steam', 'steam-power', 'electric-network'])
+    expect(steam.filter(tag => tag.source === 'output').map(tag => tag.tag)).toEqual(['electric-power'])
+    expect(steam.filter(tag => tag.source === 'entity').map(tag => tag.tag)).toEqual(['offshore-pump', 'boiler', 'steam-engine', 'small-electric-pole'])
+
+    const science = derive_skill_tags(get_skill_definition('automation-science-bootstrap')!)
+    expect(science).toContainEqual({ tag: 'automation', source: 'technology' })
+    expect(science).toContainEqual({ tag: 'automation-science-pack', source: 'output' })
+    expect(science).toContainEqual({ tag: 'assembling-machine-1', source: 'entity' })
+    // A tag is listed once, under its first (strongest) source.
+    expect(science.filter(tag => tag.tag === 'automation-science-pack')).toHaveLength(1)
+
+    // A learned skill without goal_tags still gets derived tags.
+    const learned = derive_skill_tags(canonicalize_skill_definition(candidate()))
+    expect(learned.map(tag => tag.tag)).toEqual(['transport-belt', 'assembling-machine-1', 'iron-gear-wheel'])
+  })
+
+  it('normalizes goal_tags and omits the field when a skill has none, so older canonical JSON is unchanged', () => {
+    const tagged = canonicalize_skill_definition(candidate({ goal_tags: ['Belt Line', 'belt_line', ' logistics '] }))
+    expect(tagged.goal_tags).toEqual(['belt-line', 'logistics'])
+    const untagged = canonicalize_skill_definition(candidate())
+    expect('goal_tags' in untagged).toBe(false)
+    expect(() => canonicalize_skill_definition(candidate({ goal_tags: Array.from({ length: 17 }, (_, index) => `tag-${index}`) }))).toThrow(/goal_tags exceeds/)
+  })
+
+  it('reads goal text into words, singulars and adjacent phrases', () => {
+    const goal = goal_search_terms('Automate red science packs, please!')
+    expect(goal.terms).toContain('red-science')
+    expect(goal.terms).toContain('science-pack')
+    expect(goal.terms).toContain('red-science-pack')
+    expect(goal.terms).not.toContain('please')
+  })
+
+  // Eval (plan 2.8 d): fixed goal texts must put the expected skill in the top 3.
+  const eval_goals: Array<[string, string]> = [
+    ['Get steam power running so we have electricity', 'steam-power-bootstrap'],
+    ['Automate red science packs', 'automation-science-bootstrap'],
+    ['Set up a burner coal loop to fuel the drills', 'burner-coal-loop'],
+    ['Build a smelting row for iron plates', 'starter-smelting-row'],
+  ]
+  for (const [goal, expected] of eval_goals) {
+    it(`eval: "${goal}" offers ${expected} in the top 3`, () => {
+      ensure_basic_skill_definitions()
+      const offered = skill_cards_for_goal(goal, 5, fresh_world()).map(card => card.id)
+      expect(offered.slice(0, 3)).toContain(expected)
+      expect(offered[0]).toBe(expected)
+    })
+  }
+
+  it('reports each need as have, can_craft, locked (naming the technology) or unknown; only locked lowers the score', () => {
+    ensure_basic_skill_definitions()
+    const science = get_skill_definition('automation-science-bootstrap')!
+    const automation = science.preconditions.find(condition => condition.subject === 'automation')!
+    expect(skill_precondition_check(automation, fresh_world())).toEqual({ state: 'locked', technology: 'automation' })
+    expect(skill_precondition_check(automation, fresh_world({ researched: ['automation'] }))).toEqual({ state: 'have' })
+    expect(skill_precondition_check(automation, undefined)).toEqual({ state: 'unknown' })
+    const coal = get_skill_definition('burner-coal-loop')!.preconditions.find(condition => condition.subject === 'coal-resource')!
+    expect(skill_precondition_check(coal, fresh_world())).toEqual({ state: 'unknown' })
+
+    const before = skill_cards_for_goal('Automate red science packs', 5, fresh_world())[0]
+    const after = skill_cards_for_goal('Automate red science packs', 5, fresh_world({ researched: ['automation'] }))[0]
+    expect(before.needs).toEqual([
+      { subject: 'automation', state: 'locked', technology: 'automation' },
+      { subject: 'science-goal', state: 'unknown' },
+    ])
+    expect(after.needs[0]).toEqual({ subject: 'automation', state: 'have' })
+    expect(after.score).toBe(before.score + 0.25)
+
+    // Researching the unlock flips locked to can_craft; placing one makes it have.
+    const steam_goal = 'Get steam power running so we have electricity'
+    const locked = skill_cards_for_goal(steam_goal, 1, fresh_world())[0]
+    const craftable = skill_cards_for_goal(steam_goal, 1, fresh_world({ researched: ['steam-power'] }))[0]
+    const held = skill_cards_for_goal(steam_goal, 1, fresh_world({ researched: ['steam-power'], have: ['offshore-pump', 'boiler', 'steam-engine'] }))[0]
+    expect(locked.needs[0]).toEqual({ subject: 'offshore-pump', state: 'locked', technology: 'steam-power' })
+    expect(craftable.needs.slice(0, 3).map(need => need.state)).toEqual(['can_craft', 'can_craft', 'can_craft'])
+    expect(held.needs.slice(0, 3).map(need => need.state)).toEqual(['have', 'have', 'have'])
+    // have and can_craft carry no penalty; three locked needs cost 0.75.
+    expect(craftable.score).toBe(held.score)
+    expect(craftable.score).toBe(locked.score + 0.75)
+
+    // A burner coal loop on a fresh save: the drill is hand-craftable, so nothing is penalized.
+    const coal_card = skill_cards_for_goal('Set up a burner coal loop', 1, fresh_world())[0]
+    expect(coal_card.needs[0]).toEqual({ subject: 'burner-mining-drill', state: 'can_craft' })
+    expect(coal_card.score).toBe(skill_cards_for_goal('Set up a burner coal loop', 1)[0].score)
+  })
+
+  it('needs at least one tag match, or two text hits, before a skill is offered', () => {
+    put_skill_definition(candidate({ id: 'belt-line-a', name: 'A Belt Line' }))
+    // candidate() has tags transport-belt, assembling-machine-1, iron-gear-wheel;
+    // "preserving" and "relationship" appear only in its text.
+    expect(skill_cards_for_goal('preserving things', 5)).toEqual([])
+    expect(skill_cards_for_goal('preserving relationship', 5).map(card => card.id)).toEqual(['belt-line-a'])
+    expect(skill_cards_for_goal('gear', 5)).toEqual([])
+    expect(skill_cards_for_goal('iron-gear-wheel', 5).map(card => card.id)).toEqual(['belt-line-a'])
+  })
+
+  it('cuts long goals by UTF-8 bytes instead of refusing them, never splitting a character', () => {
+    ensure_basic_skill_definitions()
+    const long_chinese = `${'我们需要尽快建一个煤蛇'.repeat(60)}`
+    expect(() => skill_cards_for_goal(long_chinese, 5)).not.toThrow()
+    expect(skill_cards_for_goal(long_chinese, 5)[0].id).toBe('burner-coal-loop')
+    expect(() => find_skill_definitions(long_chinese, 3)).not.toThrow()
+
+    // In Lua a string is bytes; simulate that with one char per UTF-8 byte.
+    const as_lua_bytes = (value: string) => Buffer.from(value, 'utf8').toString('latin1')
+    const from_lua_bytes = (value: string) => Buffer.from(value, 'latin1').toString('utf8')
+    expect(from_lua_bytes(utf8_safe_prefix(as_lua_bytes('煤蛇'), 4))).toBe('煤')
+    expect(from_lua_bytes(utf8_safe_prefix(as_lua_bytes('煤蛇'), 6))).toBe('煤蛇')
+    expect(from_lua_bytes(utf8_safe_prefix(as_lua_bytes('ab煤'), 3))).toBe('ab')
+  })
+
+  it('ranks a verified skill above a candidate with the same match', () => {
+    const verified_fields = {
+      status: 'verified',
+      stage: 'verified_skill',
+      verification: {
+        structural: 'passed', recipe_flow: 'passed', placement_rebuild: 'passed', production_output: 'passed', belt_capacity: 'passed',
+        inserter_sustained_throughput: 'unvalidated',
+        acceptance_conditions: [{ id: 'rebuild', description: 'Rebuilt layout produced the expected item.', status: 'passed', evidence_refs: ['result:run-7'] }],
+      },
+    }
+    put_skill_definition(candidate({ id: 'belt-line-a', name: 'A Belt Line' }))
+    put_skill_definition(candidate({ id: 'belt-line-b', name: 'B Belt Line', ...verified_fields }))
+    const offered = skill_cards_for_goal('make transport belts', 5, fresh_world())
+    expect(offered.map(card => card.id)).toEqual(['belt-line-b', 'belt-line-a'])
+    expect(offered[0].status).toBe('verified')
+  })
+
+  it('builds one bounded card: id, name, one-line summary, produces, needs, status and why it matched', () => {
+    ensure_basic_skill_definitions()
+    const [card] = skill_cards_for_goal('Get steam power running so we have electricity', 1, fresh_world())
+    expect(card).toEqual({
+      id: 'steam-power-bootstrap',
+      name: 'Steam Power Bootstrap',
+      status: 'candidate',
+      summary: 'Bring up the first reliable electric power with the smallest live-compatible water-to-steam-to-generator chain, then connect the electrical network and fuel ...',
+      produces: ['electric-power'],
+      needs: [
+        { subject: 'offshore-pump', state: 'locked', technology: 'steam-power' },
+        { subject: 'boiler', state: 'locked', technology: 'steam-power' },
+        { subject: 'generator', state: 'locked', technology: 'steam-power', via: 'steam-engine' },
+        { subject: 'fuel-or-energy-input', state: 'unknown' },
+      ],
+      matched: ['power', 'electricity', 'steam', 'steam-power', 'text:running'],
+      score: 16.25,
+    })
+    expect(JSON.stringify(card).length).toBeLessThan(900)
+    expect(skill_cards_for_goal('coal', 5).length).toBeLessThanOrEqual(5)
+    expect(() => skill_cards_for_goal('coal', 6)).toThrow(/at most 5/)
+    expect(skill_cards_for_goal('zzzz unrelated words', 5)).toEqual([])
+  })
+
+  it('offers the scale-out pattern for rate, deadline and scale-out goals, and the smelting cells point to it (plan 2.1)', () => {
+    ensure_basic_skill_definitions()
+    for (const goal of ['Produce 60 iron plates per minute', 'Scale out iron smelting to more furnaces', 'Make 400 copper plates faster, before the deadline']) {
+      expect(skill_cards_for_goal(goal, 5, fresh_world()).slice(0, 3).map(card => card.id), goal).toContain('scale-out-production-line')
+    }
+    // It does not crowd out the eval goals' own skills.
+    expect(skill_cards_for_goal('Build a smelting row for iron plates', 5, fresh_world())[0].id).toBe('starter-smelting-row')
+
+    const scale = get_skill_definition('scale-out-production-line')!
+    expect(scale.stage).toBe('pattern')
+    expect(scale.status).toBe('candidate')
+    const guidance = JSON.stringify(scale)
+    for (const tool of ['getRecipeDetails', 'getMiningDetails', 'estimateProductionTime', 'getPlacementCandidates', 'covers_position', 'getTransportCapacity']) expect(guidance).toContain(tool)
+    for (const id of ['direct-miner-smelting', 'starter-smelting-row']) {
+      expect(JSON.stringify(get_skill_definition(id)!.examples)).toContain('scale-out-production-line')
+    }
+  })
+
+  it('never offers a deprecated skill', () => {
+    put_skill_definition(candidate({ id: 'old-belt-line', name: 'Old Belt Line', status: 'deprecated', stage: 'pattern' }))
+    expect(skill_cards_for_goal('transport belt', 5).map(card => card.id)).not.toContain('old-belt-line')
+  })
+
+  it('upgrades an unedited curated copy to a newer curated revision and keeps edited or learned copies', () => {
+    ensure_basic_skill_definitions()
+    const registry = (globalThis as any).storage.airi_skill_definitions
+    registry['steam-power-bootstrap'] = { ...registry['steam-power-bootstrap'], revision: 1, goal_tags: undefined }
+    const edited = edited_skill_revision({ ...registry['burner-coal-loop'], revision: 0 }, { name: 'House Coal Loop', summary: 'Ours.', status: 'candidate' }, 'owner', 906)
+    expect(edited.revision).toBe(1)
+    expect(ensure_basic_skill_definitions()).toEqual({ added: 0, upgraded: 1, total: 11 })
+    expect(get_skill_definition('steam-power-bootstrap')?.goal_tags).toContain('power')
+    expect(get_skill_definition('burner-coal-loop')?.name).toBe('House Coal Loop')
   })
 })
 
@@ -165,8 +393,8 @@ describe('learned skill record and export', () => {
     expect(updated.name).toBe('Updated Dynamic Skill 0')
     expect(get_skill_definition('dynamic-skill-0')?.revision).toBe(2)
 
-    expect(ensure_basic_skill_definitions()).toEqual({ added: 10, total: 10 })
-    expect(list_skill_definitions()).toHaveLength(MAX_DYNAMIC_SKILL_DEFINITIONS + 10)
+    expect(ensure_basic_skill_definitions()).toEqual({ added: 11, upgraded: 0, total: 11 })
+    expect(list_skill_definitions()).toHaveLength(MAX_DYNAMIC_SKILL_DEFINITIONS + 11)
   })
   it('creates a versioned candidate without promoting observation to verification', () => {
     const skill = create_skill_candidate(candidate({ status: 'observed', stage: 'example' }))
