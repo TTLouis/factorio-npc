@@ -299,6 +299,52 @@ test('leaked DSML submitPlan becomes plan content when tools are disabled', asyn
   assert.equal(JSON.parse(message.content).currentStep, 1)
 })
 
+// 2026-09-26 local qwen rounds (plan 1.9): after Jev closed the observation
+// phase, the runtime correctly left tools out of the request, but qwen wrote
+// a leaked observation-tool DSML invoke into content anyway. Recovering that
+// back into tool_calls made the runtime see "provider returned observation
+// tools after the runtime closed the observation phase" and retry four times
+// before blocked_before_mutation. Only a sole submitPlan may be recovered
+// when tools are off; anything else must be dropped, not resurrected, and
+// the drop must be visible in the trace. The raw reply was not logged
+// verbatim (data/logs/sgluna-{prompts,behavior}.jsonl only record request
+// payloads and diagnostics), so this replays a synthetic sample in the
+// recorded DSML shape.
+test('a leaked non-submitPlan DSML call is dropped when tools are disabled', async () => {
+  const content = [
+    'Let me check the inventory first.',
+    '<｜｜DSML｜｜ calls>',
+    '<｜｜DSML｜｜ invoke name="getInventory">',
+    '</｜｜DSML｜｜ invoke>',
+    '</｜｜DSML｜｜ calls>',
+  ].join('\n')
+  const message = await providerRequest(config, messages, {
+    fetchImpl: contentFetch(content),
+    allowTools: false,
+  })
+  assert.equal(message.tool_calls, undefined)
+  assert.equal(message._airiProvider.dsml_recovery, 'dropped_tools_off')
+  assert.equal(message.content, 'Let me check the inventory first.')
+})
+
+test('a leaked DSML block mixing submitPlan with another call is dropped when tools are disabled', async () => {
+  const content = [
+    '<｜｜DSML｜｜ calls>',
+    '<｜｜DSML｜｜ invoke name="submitPlan">',
+    '<｜｜DSML｜｜ parameter name="plan" string="false">["mine ore"]</｜｜DSML｜｜ parameter>',
+    '</｜｜DSML｜｜ invoke>',
+    '<｜｜DSML｜｜ invoke name="getInventory">',
+    '</｜｜DSML｜｜ invoke>',
+    '</｜｜DSML｜｜ calls>',
+  ].join('\n')
+  const message = await providerRequest(config, messages, {
+    fetchImpl: contentFetch(content),
+    allowTools: false,
+  })
+  assert.equal(message.tool_calls, undefined)
+  assert.equal(message._airiProvider.dsml_recovery, 'dropped_tools_off')
+})
+
 test('several leaked DSML invokes become several tool calls', async () => {
   const content = [
     '<｜｜DSML｜｜ calls>',
