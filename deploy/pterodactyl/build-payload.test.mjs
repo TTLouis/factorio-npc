@@ -67,7 +67,14 @@ test('generated egg variable contract keeps safe provider defaults and 300 reque
     assert.equal(egg.meta.version, 'PTDL_v2')
     assert.equal(egg.variables.find(entry => entry.env_variable === 'OPENAI_MODEL')?.default_value, 'replace-me')
     assert.equal(egg.variables.find(entry => entry.env_variable === 'OPENAI_API_BASEURL')?.default_value, 'https://provider.invalid/v1')
-    assert.equal(egg.variables.find(entry => entry.env_variable === 'PROVIDER_PROFILE')?.default_value, 'auto')
+    // Empty/nullable default: an egg update must not silently change an
+    // existing server's provider wiring. Unset AI_API_METHOD keeps whatever
+    // legacy PROVIDER_PROFILE behaviour (env or saved config) that server
+    // already had.
+    assert.equal(egg.variables.find(entry => entry.env_variable === 'AI_API_METHOD')?.default_value, '')
+    assert.match(egg.variables.find(entry => entry.env_variable === 'AI_API_METHOD')?.rules ?? '', /nullable/)
+    assert.match(egg.variables.find(entry => entry.env_variable === 'AI_API_METHOD')?.rules ?? '', /in:direct,router,local/)
+    assert.equal(egg.variables.some(entry => entry.env_variable === 'PROVIDER_PROFILE'), false)
     assert.equal(egg.variables.find(entry => entry.env_variable === 'PROVIDER_TIMEOUT_MS')?.default_value, '300000')
     assert.equal(egg.variables.find(entry => entry.env_variable === 'MAX_PROVIDER_REQUESTS_PER_HOUR')?.default_value, '300')
     assert.equal(egg.variables.find(entry => entry.env_variable === 'MAX_PROVIDER_OUTPUT_TOKENS_PER_TURN')?.default_value, '100000')
@@ -81,6 +88,33 @@ test('generated egg variable contract keeps safe provider defaults and 300 reque
     assert.ok(!egg.variables.some(entry => entry.env_variable === 'AIRI_PLAYER'))
     assert.ok(!egg.variables.some(entry => entry.env_variable === 'AIRI_CHAT_PLAYER'))
   }
+})
+
+test('egg exposes exactly the five plan-1.10 AI settings, never a key value', () => {
+  const { mainEggJson, e2eEggJson } = buildArtifacts(source)
+  for (const text of [mainEggJson, e2eEggJson]) {
+    const egg = JSON.parse(text)
+    const method = egg.variables.find(entry => entry.env_variable === 'AI_API_METHOD')
+    const url = egg.variables.find(entry => entry.env_variable === 'OPENAI_API_BASEURL')
+    const models = egg.variables.find(entry => entry.env_variable === 'OPENAI_MODEL')
+    const key = egg.variables.find(entry => entry.env_variable === 'OPENAI_API_KEY')
+    assert.ok(method, '1. AI API method variable is present')
+    assert.ok(url, '2. Provider Base URL variable is present')
+    assert.ok(models, '3. AI Model (list) variable is present')
+    assert.ok(key, '4. OpenAI API Key variable is present')
+    assert.equal(key.user_viewable, false)
+    assert.equal(key.default_value, '')
+    assert.match(models.description, /[Cc]omma-separated/)
+    assert.match(models.description, /main agent/)
+    assert.match(models.description, /subagent/)
+  }
+  // 5. Jev key stays scoped to the NPC E2E experiment egg only (unchanged
+  // from before this item; asserted together with the other four here so a
+  // reviewer sees the whole five-field contract in one place).
+  const e2eEgg = JSON.parse(e2eEggJson)
+  const jevKey = e2eEgg.variables.find(entry => entry.env_variable === 'TYPESAFE_API_KEY')
+  assert.ok(jevKey, '5. TypeSafe (Jev) API key variable is present on the NPC E2E egg')
+  assert.equal(jevKey.user_viewable, false)
 })
 
 test('Docker Compose mirrors the egg provider budget defaults', () => {

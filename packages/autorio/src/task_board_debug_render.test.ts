@@ -14,6 +14,7 @@ describe('SGLuna debug layout', () => {
     expect(source).toContain("add_compact_row(provider_table, 'Think time · this request'")
     expect(source).toContain("add_compact_row(provider_table, 'Tokens · request cumulative'")
     expect(source).toContain('add_debug_decision_rows(decision_table, debug)')
+    expect(source).toContain("add_compact_row(table, 'AI', `AI: method=")
     expect(source).toContain("add_compact_row(table, 'Jev status'")
     expect(source).toContain("add_compact_row(table, 'Jev health'")
     expect(source).toContain("add_compact_row(table, 'Jev last fallback'")
