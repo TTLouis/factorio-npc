@@ -50,6 +50,7 @@ const playerStatusSchema = z.object({
 const recipeDetailsSchema = z.object({
   item_or_recipe: factorioNameSchema,
   requested_count: z.number().int().min(1).max(1000).default(1),
+  fuel_name: factorioNameSchema.optional().describe('Fuel item; adds its burn per minute on burner machines'),
 }).strict()
 
 const prototypeDetailsSchema = z.object({
@@ -142,11 +143,12 @@ export const tools: ToolFunction[] = [
   },
   {
     name: 'getRecipeDetails',
-    description: 'Get bounded deterministic recipe knowledge for an item/fluid or recipe name, including categories, ingredients/products, relevant current inventory counts, bootstrap dependency status, hand-crafting compatibility, and compatible crafting-machine prototypes. requested_count scopes required ingredient quantities without dumping unrelated inventory.',
+    description: 'Get bounded deterministic recipe knowledge for an item/fluid or recipe name, including categories, ingredients/products, relevant current inventory counts, bootstrap dependency status, hand-crafting compatibility, and compatible crafting-machine prototypes. requested_count scopes required ingredient quantities without dumping unrelated inventory. Name fuel_name to also get that fuel\'s burn per minute on burner machines.',
     schema: recipeDetailsSchema,
     fn: async ({ parameters }) => {
       const parsed = recipeDetailsSchema.parse(parameters)
-      const input = `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_knowledge", "recipe_details", ${renderLuaString(parsed.item_or_recipe)}, ${parsed.requested_count})))`
+      const fuel = parsed.fuel_name !== undefined ? `, ${renderLuaString(parsed.fuel_name)}` : ''
+      const input = `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_knowledge", "recipe_details", ${renderLuaString(parsed.item_or_recipe)}, ${parsed.requested_count}${fuel})))`
       const response = await v2FactorioConsoleCommandRawPost({ body: { input } })
       logger.withFields({ output: response.data.output, parameters: parsed }).debug('Detailed recipe knowledge')
       return response.data.output

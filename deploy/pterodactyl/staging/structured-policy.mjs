@@ -752,8 +752,8 @@ export const toolDefinitions = [
   functionTool('getRecipe', 'Read one exact recipe for AIRI force.', {
     type: 'object', properties: { item: nameStringSchema }, required: ['item'], additionalProperties: false,
   }),
-  functionTool('getRecipeDetails', 'Read bounded deterministic recipe knowledge, including relevant current inventory counts, bootstrap dependency status, categories, ingredients/products and compatible crafting-machine prototypes. requested_count scopes required quantities without dumping unrelated inventory.', {
-    type: 'object', properties: { item_or_recipe: nameStringSchema, requested_count: { type: 'integer', minimum: 1, maximum: 1000, default: 1 } }, required: ['item_or_recipe'], additionalProperties: false,
+  functionTool('getRecipeDetails', 'Read bounded deterministic recipe knowledge, including relevant current inventory counts, bootstrap dependency status, categories, ingredients/products and compatible crafting-machine prototypes. requested_count scopes required quantities without dumping unrelated inventory. Name fuel_name to also get that fuel\'s burn per minute on burner machines.', {
+    type: 'object', properties: { item_or_recipe: nameStringSchema, requested_count: { type: 'integer', minimum: 1, maximum: 1000, default: 1 }, fuel_name: nameStringSchema }, required: ['item_or_recipe'], additionalProperties: false,
   }),
   functionTool('discoverPrototypes', 'Discover a small canonical set of current-game entity prototype identities by engine-backed capability/type instead of guessing names. Harvest discovery groups non-resource mineable entities by item product and returns bounded engine-derived candidates.', {
     type: 'object',
@@ -923,9 +923,10 @@ export function toolCommand(name, rawArgs = {}) {
       noExtra(args, ['item'])
       return `/silent-command remote.call("autorio_tools","get_recipe",${luaString(factorioName(args.item))})`
     case 'getRecipeDetails': {
-      noExtra(args, ['item_or_recipe', 'requested_count'])
+      noExtra(args, ['item_or_recipe', 'requested_count', 'fuel_name'])
       const requestedCount = integer(args.requested_count ?? 1, 'requested_count', 1, 1000)
-      return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_knowledge","recipe_details",${luaString(factorioName(args.item_or_recipe))},${requestedCount})))`
+      const fuel = args.fuel_name !== undefined ? `,${luaString(factorioName(args.fuel_name))}` : ''
+      return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_knowledge","recipe_details",${luaString(factorioName(args.item_or_recipe))},${requestedCount}${fuel})))`
     }
     case 'discoverPrototypes': {
       noExtra(args, ['capability', 'resource_name', 'resource_category', 'crafting_category', 'entity_type', 'product_name', 'energy_source', 'availability', 'limit'])

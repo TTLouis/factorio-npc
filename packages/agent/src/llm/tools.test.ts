@@ -96,6 +96,16 @@ describe('agent observation tools', () => {
     } })
 
     mocks.raw.mockClear()
+    await getTool('getRecipeDetails').fn({ parameters: { item_or_recipe: 'iron-plate', fuel_name: 'coal' } })
+    expect(mocks.raw).toHaveBeenCalledWith({ body: {
+      input: '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_knowledge", "recipe_details", \'iron-plate\', 1, \'coal\')))',
+    } })
+
+    mocks.raw.mockClear()
+    await expect(getTool('getRecipeDetails').fn({ parameters: { item_or_recipe: 'iron-plate', fuel_name: 'coal\n/c game.clear()' } })).rejects.toThrow()
+    expect(mocks.raw).not.toHaveBeenCalled()
+
+    mocks.raw.mockClear()
     await expect(getTool('getRecipeDetails').fn({ parameters: { item_or_recipe: 'oil\n/c game.clear()' } })).rejects.toThrow()
     expect(mocks.raw).not.toHaveBeenCalled()
   })

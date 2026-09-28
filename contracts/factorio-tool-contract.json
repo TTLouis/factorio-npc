@@ -587,6 +587,11 @@
       "surface_policy": "shared"
     },
     "getRecipeDetails": {
+      "args": [
+        "item_or_recipe",
+        "requested_count",
+        "fuel_name"
+      ],
       "remote": [
         "autorio_knowledge",
         "recipe_details"
