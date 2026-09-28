@@ -2058,6 +2058,44 @@ function terminalProviderBudgetCode(value) {
     ?? 'provider_budget'
 }
 
+// Provider conditions that clear by waiting. The supervisor pauses these and
+// resumes automatically, so the loop leaves them to it (same set as
+// supervisor.mjs transientProviderFailure).
+const TRANSIENT_PROVIDER_FAILURE = /Hourly provider request budget reached|\bHTTP 429\b|\bHTTP 5\d\d\b|Provider timed out|\btimed out after \d+ ?ms|fetch failed|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|socket hang up|network error/i
+
+// The pause-reason code for a provider failure that ends a request. The codes
+// match the supervisor's stranded-plan pause, so the in-game board shows the
+// same summary for them.
+function providerFailurePauseCause(message) {
+  const text = String(message ?? '')
+  if (!/provider/i.test(text) || /cancelled|superseded|epoch changed/i.test(text)) return undefined
+  const budget = /provider_context_window_exceeded|provider_output_budget|finish=length/i.test(text)
+  if (!budget && TRANSIENT_PROVIDER_FAILURE.test(text)) return undefined
+  if (/provider_output_budget_exhausted|finish=length|output budget/i.test(text)) return 'provider_output_budget_exhausted'
+  if (/^Provider response recovery exhausted after \d+ attempts/i.test(text)) return 'provider_recovery_exhausted'
+  if (/provider_action_omission_repair_failed/i.test(text)) return 'provider_action_omission_repair_failed'
+  if (/provider_semantic_alignment_failed/i.test(text)) return 'provider_semantic_alignment_failed'
+  return 'request_failed'
+}
+
+const PROVIDER_PAUSE_TEXT = {
+  provider_output_budget_exhausted: 'the model ran out of its response budget before giving a usable answer',
+  provider_recovery_exhausted: 'I could not get a usable model response after retrying',
+  provider_action_omission_repair_failed: 'the model kept planning without starting the next action',
+  provider_semantic_alignment_failed: 'the model proposed work that did not match the current step',
+  request_failed: 'the model request failed',
+}
+
+const RESUME_HINT = 'Press Resume or say continue to retry from the verified task state.'
+
+const RECOVERABLE_PLANNER_FAILURE = /provider_action_omission_repair_failed|provider_output_budget_exhausted|provider_jev_recovery_route_failed|Provider strict recovery could not safely resolve remaining canonical work/i
+
+function idleRuntimeStatus(status) {
+  if (!status || typeof status !== 'object' || Array.isArray(status) || status.status_error) return false
+  if (!Number.isSafeInteger(status.queue_length) || typeof status.task_state !== 'string') return false
+  return status.queue_length === 0 && status.task_state.trim().toLowerCase() === 'idle'
+}
+
 function canonicalWorkRemains(state) {
   if (state?.status !== 'active') return false
   const board = state?.task_board
@@ -4587,6 +4625,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       id: `req_${Date.now().toString(36)}_${(++this.traceRequestSequence).toString(36)}`,
       seq: 0,
       usage: emptyUsageSummary(),
+      // A request that starts on a paused goal and leaves it paused for the
+      // same reason did not pause it (goal.paused is for new pauses).
+      start_status: planBefore?.status,
+      start_pause_reason: planBefore?.pause_reason,
     }
     await this.traceEvent('request.received', {
       sender,
@@ -4672,6 +4714,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const key = this.activePlanKey()
     const state = this.memory.pausePlan?.(key, reason)
     await this.persistState()
+    // Outside a request (the supervisor pausing a plan a failed request left
+    // stranded, or a user stop) no terminal event follows, so name the pause
+    // here, keyed by the request that just ended. Inside a request the
+    // terminal event carries it.
+    if (!this.traceRequest) {
+      const paused = this.goalPausedTrace('pause_persistent_plan')
+      if (paused) await this.traceEvent('goal.paused', paused, { requestId: paused.request_id })
+    }
     super.cancel()
     return state
   }
@@ -5031,10 +5081,63 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return summary
   }
 
-  traceEvent(event, data = {}) {
+  // Every pause is named in the trace (1.5, widened 2026-09-28): a goal that
+  // ends a request paused gets one goal.paused event with the cause, keyed by
+  // the request that paused it, whichever path paused it. Pauses applied after
+  // the request unwound (the supervisor's stranded-plan pause, a user stop)
+  // are traced from pausePersistentPlan with the last request's id.
+  // Reads the durable plan state for tracing and budget bookkeeping without
+  // currentPlan's side effects (it retires a completed plan on read).
+  peekPlanState(key) {
+    try {
+      const state = this.memory?.planByNpc?.get?.(key)
+      return state && typeof state === 'object' ? state : undefined
+    }
+    catch {
+      return undefined
+    }
+  }
+
+  goalPausedTrace(source, extra = {}) {
+    const state = this.peekPlanState(this.activePlanKey())
+    if (state?.status !== 'paused') return undefined
+    const request = this.traceRequest
+    if (request?.goal_paused_traced === state.pause_reason) return undefined
+    if (request && request.start_status === 'paused' && request.start_pause_reason === state.pause_reason) return undefined
+    if (request) request.goal_paused_traced = state.pause_reason
+    const pauseReason = String(state.pause_reason ?? '')
+    return {
+      request_id: request?.id ?? this.lastTerminalRequestId,
+      cause: cleanMemoryText(pauseReason.split(':')[0], 120) || 'paused',
+      pause_reason: cleanMemoryText(pauseReason, 300),
+      provider_failure: /provider|request_failed/i.test(pauseReason),
+      source,
+      goal_id: state.goal_id,
+      active_step_id: state.task_board?.active_step_id,
+      resume: 'Resume or say continue',
+      ...extra,
+    }
+  }
+
+  traceEvent(event, data = {}, { requestId } = {}) {
     if (event === 'request.completed' || event === 'request.failed') {
       data = { ...(data ?? {}), jev_health: this.takeJevHealthSummary() }
+      if (this.traceRequest?.id) this.lastTerminalRequestId = this.traceRequest.id
+      const paused = this.goalPausedTrace(event, {
+        chat_message: typeof data.chat_message === 'string' ? data.chat_message : undefined,
+        outcome: data.outcome,
+        message: typeof data.message === 'string' ? cleanMemoryText(data.message, 300) : undefined,
+      })
+      if (paused) {
+        const pausedWrite = this.traceEvent('goal.paused', paused)
+        const terminalWrite = this.writeTraceEvent(event, data, requestId)
+        return Promise.all([pausedWrite, terminalWrite]).then(() => undefined)
+      }
     }
+    return this.writeTraceEvent(event, data, requestId)
+  }
+
+  writeTraceEvent(event, data = {}, requestId) {
     if (this.onActivity) {
       try { this.onActivity(event, data) }
       catch (error) { this.log(`[trace] activity listener failed: ${error instanceof Error ? error.message : String(error)}`) }
@@ -5045,7 +5148,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // available to the live UI via onActivity above, but do not write it into
     // the main planner behavior trace before a canonical request_id exists.
     if (event === 'interaction.routed' && !request) return Promise.resolve()
-    if (['request.received', 'provider.error', 'plan.accepted', 'operations.ack', 'request.completed', 'request.failed'].includes(event)) {
+    if (['request.received', 'provider.error', 'plan.accepted', 'operations.ack', 'request.completed', 'request.failed', 'goal.paused'].includes(event)) {
       this.log(`[trace ${request?.id ?? '-'}] ${event}`)
     }
     return this.behaviorTrace.emit({
@@ -5053,7 +5156,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       ts: new Date().toISOString(),
       seq: request ? ++request.seq : 0,
       event,
-      request_id: request?.id,
+      request_id: request?.id ?? (typeof requestId === 'string' ? requestId : undefined),
       turn: request ? this.continuations + 1 : undefined,
       actor_id: this.epoch?.actor_id,
       epoch: this.epoch?.epoch,
@@ -5064,7 +5167,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async runGuarded() {
     const generation = this.generation
     try {
-      return await this.runTurn()
+      return this.withPauseNotice(await this.runTurn())
     }
     catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -5076,7 +5179,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         // the existing Outcome Authority path instead of leaking the provider
         // exception or spending another provider call.
         try {
-          return await this.recoverPlan(generation, error, 0)
+          return this.withPauseNotice(await this.recoverPlan(generation, error, 0))
         }
         catch (recoveryError) {
           // The fresh generations were spent too: pause visibly instead of
@@ -5094,8 +5197,35 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         && ['blocked', 'paused'].includes(planState?.status)) {
         return this.pauseAtProviderBudgetCap(error, planState, 'plan_not_active')
       }
-      const recoverablePlannerFailure = planState?.status === 'active'
-        && /provider_action_omission_repair_failed|provider_output_budget_exhausted|provider_jev_recovery_route_failed|Provider strict recovery could not safely resolve remaining canonical work/i.test(message)
+      // Any other provider failure on an active goal with Autorio idle pauses
+      // the goal here, with a chat line and a Resume, instead of leaving the
+      // supervisor to pause it after the request unwound (the old silent
+      // auto-pause). Transient conditions stay with the supervisor, which
+      // resumes them automatically; live world work is never paused.
+      // The recoverable planner failures keep failing upward: they leave the
+      // plan active in a resumable repair state (admission_status
+      // action_omission_repair, the compact recovery capsule) that a pause
+      // would lose. The supervisor pauses them when Autorio is idle, and
+      // pausePersistentPlan traces that pause as goal.paused.
+      const failsUpward = RECOVERABLE_PLANNER_FAILURE.test(message)
+        || planState?.admission_status === 'action_omission_repair'
+      const pauseCause = failsUpward ? undefined : providerFailurePauseCause(message)
+      if (pauseCause
+        && planState?.status === 'active'
+        && planState.condition_wait?.state !== 'active'
+        && generation === this.generation
+        && this.traceRequest) {
+        const runtime = await this.readInteractionTaskStatus()
+        if (idleRuntimeStatus(runtime)) return this.pauseAfterProviderFailure(pauseCause, message)
+        await this.traceEvent('goal.pause_skipped', {
+          cause: pauseCause,
+          reason: 'autorio_runtime_not_idle',
+          task_state: runtime?.task_state,
+          queue_length: runtime?.queue_length,
+          status_error: runtime?.status_error,
+        })
+      }
+      const recoverablePlannerFailure = planState?.status === 'active' && RECOVERABLE_PLANNER_FAILURE.test(message)
       if (!recoverablePlannerFailure && generation === this.generation) this.reset()
       if (this.traceRequest) {
         await this.traceEvent('request.failed', {
@@ -5109,6 +5239,46 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       throw error
     }
+  }
+
+  async pauseAfterProviderFailure(cause, message) {
+    const key = this.activePlanKey()
+    const pauseReason = cleanMemoryText(`${cause}: ${cleanMemoryText(message, 240)}`, 300)
+    const state = this.memory.pausePlan?.(key, pauseReason)
+    await this.persistState()
+    this.active = false
+    const chatMessage = `I paused this goal: ${PROVIDER_PAUSE_TEXT[cause] ?? PROVIDER_PAUSE_TEXT.request_failed}. ${RESUME_HINT}`
+    const taskBoard = visibleTaskBoard(state?.task_board)
+    await this.traceEvent('request.completed', {
+      chat_message: chatMessage,
+      outcome: 'paused_provider_failure',
+      reason: cause,
+      message: cleanMemoryText(message, 600),
+      task_board: taskBoard,
+      usage: this.traceRequest?.usage,
+    })
+    this.traceRequest = null
+    return {
+      chatMessage,
+      plan: state?.plan ?? [],
+      currentStep: state?.current_step ?? 0,
+      operations: [],
+      epoch: this.epoch?.epoch,
+      actorId: this.epoch?.actor_id,
+      goalId: state?.goal_id,
+      goalStatus: state?.status,
+      taskBoard,
+    }
+  }
+
+  // A turn that ends with the goal paused always tells the player how to go
+  // on: one line, ending with the Resume hint. Paths that already say it are
+  // left alone.
+  withPauseNotice(result) {
+    if (!result || typeof result !== 'object' || result.goalStatus !== 'paused') return result
+    const text = String(result.chatMessage ?? '').replace(/[\r\n]+/g, ' ').trim()
+    if (/\bResume\b|say continue/i.test(text)) return text === result.chatMessage ? result : { ...result, chatMessage: text }
+    return { ...result, chatMessage: `${text || 'I paused this goal.'} ${RESUME_HINT}` }
   }
 
   async captureEpoch() {
@@ -5614,7 +5784,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // before every provider call.
   async rollProviderBudgetAtStepClose(source, stateOverride) {
     const key = this.activePlanKey()
-    const current = providerBudgetStepMark(stateOverride ?? this.memory.currentPlan?.(key))
+    const current = providerBudgetStepMark(stateOverride ?? this.peekPlanState(key))
     if (!current) return false
     const mark = this.providerBudgetStepMark
     // A goal first seen in this request (no mark, or the mark belongs to an
@@ -5633,7 +5803,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // The compact output-budget retry is allowed once per generation.
     this.outputBudgetRecoveryUsed = false
     this.providerBudgetStepMark = current
-    const board = (stateOverride ?? this.memory.currentPlan?.(key))?.task_board
+    const board = (stateOverride ?? this.peekPlanState(key))?.task_board
     await this.traceEvent('budget.generation_rolled', {
       reason: 'step_closed',
       source,
