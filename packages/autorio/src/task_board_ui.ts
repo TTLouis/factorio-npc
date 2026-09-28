@@ -40,6 +40,8 @@ export interface TaskBoardUiStep {
    */
   contract_kind?: 'grounded' | 'prose'
   reduced_confidence?: boolean
+  /** Harness time estimate for the step (2.6), e.g. "~13.0 min · NPC lane". */
+  time?: string
 }
 export interface TaskBoardUiActivity { id?: string, kind: TaskBoardUiActivityKind, text: string, timestamp?: string }
 export interface TaskBoardUiWantedItem { name: string, count: number, reason: string }
@@ -259,6 +261,8 @@ export function sanitize_task_board_ui_snapshot(value: any): TaskBoardUiSnapshot
     const kind = contract_kind(step?.contract_kind)
     if (kind !== undefined) next_step.contract_kind = kind
     if (step?.reduced_confidence === true) next_step.reduced_confidence = true
+    const time = text(step?.time, 120)
+    if (time.length > 0) next_step.time = time
     steps.push(next_step)
   }
 
@@ -1088,7 +1092,7 @@ function refresh_steps(plan: LuaGuiElement, board: TaskBoardUiSnapshot, max_heig
   const visible = board.steps.slice(0, ui_constants.MAX_STEPS)
   let signature = `${board.goal_id}#${board.steps.length}`; let active_index = -1
   for (let index = 0; index < visible.length; index++) {
-    const step = visible[index]; signature = `${signature}#${step.status}:${step.description}`
+    const step = visible[index]; signature = `${signature}#${step.status}:${step.description}:${step.time ?? ''}`
     if (step.status === 'active' || step.status === 'blocked' || step.status === 'paused') active_index = index
   }
   if (steps_table.tags.signature !== signature) {
@@ -1097,7 +1101,8 @@ function refresh_steps(plan: LuaGuiElement, board: TaskBoardUiSnapshot, max_heig
     for (let index = 0; index < visible.length; index++) {
       const step = visible[index]; const tone = step_tone(step)
       steps_table.add({ type: 'sprite', sprite: TONE_SPRITES[tone], style: 'status_image', tooltip: step.status }); steps_table.add({ type: 'label', caption: `${index + 1}.`, style: 'semibold_label' })
-      const description = gui_text.literal_gui_text(steps_table.add({ type: 'label', caption: step_caption(step.description), style: step.status === 'active' ? 'bold_label' : 'label' })); description.style.single_line = false; description.style.maximal_width = ui_constants.CONSOLE_LAYOUT.tracker_plan_width - 2 * ui_constants.SECTION_PADDING - 140
+      const caption = step.time !== undefined && step.time.length > 0 ? `${step_caption(step.description)} (${step.time})` : step_caption(step.description)
+      const description = gui_text.literal_gui_text(steps_table.add({ type: 'label', caption, style: step.status === 'active' ? 'bold_label' : 'label' })); description.style.single_line = false; description.style.maximal_width = ui_constants.CONSOLE_LAYOUT.tracker_plan_width - 2 * ui_constants.SECTION_PADDING - 140
       if (step.status === 'completed' || step.status === 'pending') description.style.font_color = TONE_COLORS.muted
       const state = steps_table.add({ type: 'label', caption: step.status.toUpperCase(), style: 'semibold_label' }); state.style.font_color = TONE_COLORS[tone]; state.style.minimal_width = 72
       if (index === active_index) active_label = description

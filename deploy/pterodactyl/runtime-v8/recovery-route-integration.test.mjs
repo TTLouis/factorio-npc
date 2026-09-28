@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
+import { productionEstimateAnswer } from './steam-run-fixtures.mjs'
 import { contractCheckedJev } from './task-loop-fixtures.mjs'
 
 function deployment() {
@@ -137,13 +138,14 @@ function makeAgent({
   finalProof = false,
   decisionProvider,
   provider,
+  rcon,
 } = {}) {
   const memory = new CanonicalTaskBoardMemory()
   memory.planByNpc.set('npc:airi', activeState({ finalProof }))
   const mainCalls = []
   const decisionCalls = []
   const agent = new NpcAgentLoop({
-    rcon: new RecoveryRcon({ taskState, queueLength }),
+    rcon: rcon ?? new RecoveryRcon({ taskState, queueLength }),
     memory,
     npcId: 'airi',
     systemPrompt: 'recovery router test',
@@ -254,3 +256,45 @@ test('ambiguous recovery Jev cancellation cannot apply a stale decision', async 
   await assert.rejects(routing, /cancelled|superseded/i)
 })
 
+
+// 2.6 review fix: a Jev wake_planner recovery that returns a long hand-mining
+// draft commits it; the time review never holds a draft inside a recovery.
+test('a wake_planner recovery with a long hand-mining draft commits without a time review hold', async () => {
+  class TimedRecoveryRcon extends RecoveryRcon {
+    async command(text) {
+      if (text.includes('"autorio_knowledge","production_estimate"')) return JSON.stringify(productionEstimateAnswer(text))
+      return super.command(text)
+    }
+  }
+  const rcon = new TimedRecoveryRcon()
+  const longDraft = {
+    content: JSON.stringify({
+      chatMessage: '',
+      plan: ['Perform the step', 'Verify the result'],
+      currentStep: 0,
+      operations: [
+        { name: 'gather_resource', args: { resource_name: 'iron-ore', count: 180, search_radius: 64 } },
+        { name: 'gather_resource', args: { resource_name: 'coal', count: 80, search_radius: 64 } },
+      ],
+    }),
+  }
+  const { agent, mainCalls, decisionCalls } = makeAgent({ semantic: 'semantic_replan', rcon, provider: async (_messages, options) => {
+    mainCalls.push(options)
+    return longDraft
+  } })
+  const trace = []
+  agent.behaviorTrace = { emit: async record => { trace.push(record) } }
+  agent.traceRequest = { id: 'req_recovery', seq: 0, usage: {} }
+  const result = await agent.recoverPlan(agent.generation, new Error('strategy invalidated by fresh evidence'), 1)
+  assert.equal(decisionCalls.length, 1)
+  assert.equal(mainCalls.length, 1, 'no extra planner turn for a review')
+  assert.equal(mainCalls[0].triggerSource, 'recovery_replan_high')
+  assert.equal(result.operations.length, 2)
+  assert.equal(rcon.mutations.length, 1)
+  assert.equal(trace.filter(record => record.event === 'plan.time_review_requested').length, 0)
+  const estimate = trace.find(record => record.event === 'plan.time_estimate')
+  assert.equal(estimate.data.step_expected_seconds, 520)
+  assert.equal(estimate.data.long, true)
+  assert.equal(estimate.data.review, 'skipped_recovery_round')
+  assert.equal(agent.recoveryCommitDepth, 0)
+})

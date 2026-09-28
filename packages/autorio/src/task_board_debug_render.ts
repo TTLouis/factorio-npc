@@ -177,6 +177,11 @@ function add_debug_step_rows(table: LuaGuiElement, debug: TaskBoardUiDebugSnapsh
 
   add_compact_row(table, 'Completion proof', step_completion_contract.length > 0 || step_completion_status.length > 0 ? `${step_completion_contract.length > 0 ? step_completion_contract : 'semantic'} · ${step_completion_status.length > 0 ? step_completion_status : 'unknown'}${step_completion_evidence.length > 0 ? ` · ${step_completion_evidence}` : ''}` : '—')
   add_compact_row(table, 'Runtime wait', runtime_condition.length > 0 || runtime_condition_state.length > 0 ? `${runtime_condition_state.length > 0 ? runtime_condition_state : 'unknown'} · ${runtime_condition.length > 0 ? runtime_condition : '—'}` : '—')
+  // Harness time estimate from game rates, next to the elapsed time (2.6).
+  const time_estimate = clean_text(debug.time_estimate, 300)
+  const time_split = clean_text(debug.time_split, 300)
+  add_compact_row(table, 'Step time estimate', time_estimate.length > 0 ? time_estimate : '—')
+  add_compact_row(table, 'Time · this request', time_split.length > 0 ? time_split : '—')
 }
 
 const DEBUG_SYNC = { columns: 'airi_debug_columns', runtime_column: 'airi_debug_runtime_column', runtime_table: 'airi_debug_runtime_table', value: 'airi_debug_sync_value' }
@@ -260,6 +265,9 @@ function fill_debug_body(body: LuaGuiElement, board: any, runtime: any, synced_t
     : '—')
   add_compact_row(provider_table, 'Tokens · request cumulative', tokens)
   add_compact_row(provider_table, 'Latest completed round', latest_round_tokens)
+  // Model usage of the current goal across its requests, units only (2.7).
+  const goal_spend = clean_text(debug.goal_spend, 300)
+  add_compact_row(provider_table, 'Spend · this goal', goal_spend.length > 0 ? goal_spend : '—')
   const decision_column = columns.add({ type: 'flow', direction: 'vertical' }); decision_column.style.width = DEBUG_COLUMN_WIDTH; decision_column.style.vertical_spacing = 4
   decision_column.add({ type: 'label', caption: 'Jev / Planning', style: 'semibold_label' })
   const decision_table = decision_column.add({ type: 'table', column_count: 2 }); decision_table.style.width = DEBUG_COLUMN_WIDTH; decision_table.style.horizontal_spacing = 12; decision_table.style.vertical_spacing = 5

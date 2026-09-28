@@ -117,6 +117,18 @@ describe('console Goal and Now cards', () => {
 describe('goal block of the UI snapshot', () => {
   const base = { steps: [], activity: [] }
 
+  it('keeps the harness time estimate on a step and drops an empty one (2.6)', () => {
+    const snapshot = sanitize_task_board_ui_snapshot({
+      ...base,
+      steps: [
+        { id: 'step_1', description: 'Hand-mine ore', status: 'active', time: '~13.0 min · NPC lane · long, one lane · idle 3%' },
+        { id: 'step_2', description: 'Smelt', status: 'pending', time: '' },
+      ],
+    })
+    expect(snapshot?.steps[0].time).toBe('~13.0 min · NPC lane · long, one lane · idle 3%')
+    expect(snapshot?.steps[1].time).toBeUndefined()
+  })
+
   it('keeps at most six checks and recounts met itself', () => {
     const checks = Array.from({ length: 9 }, (_, index) => ({ text: `check ${index}`, met: index < 3, progress: 'x' }))
     const snapshot = sanitize_task_board_ui_snapshot({ ...base, goal: { summary: 'Launch a rocket.', defined: true, read: true, met: 99, total: 99, checks } })

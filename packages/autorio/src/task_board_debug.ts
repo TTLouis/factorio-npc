@@ -144,6 +144,9 @@ export interface TaskBoardUiDebugSnapshot {
   jev_request_fallbacks: number
   jev_request_fallback_percent: number
   jev_last_fallback: string
+  time_estimate: string
+  time_split: string
+  goal_spend: string
   step_completion_contract: string
   step_completion_status: string
   step_completion_evidence: string
@@ -291,6 +294,9 @@ export function sanitize_debug_snapshot(value: any): TaskBoardUiDebugSnapshot {
     jev_request_fallbacks: integer(debug.jev_request_fallbacks),
     jev_request_fallback_percent: math.min(100, integer(debug.jev_request_fallback_percent)),
     jev_last_fallback: clean_text(debug.jev_last_fallback, 300),
+    time_estimate: clean_text(debug.time_estimate, 300),
+    time_split: clean_text(debug.time_split, 300),
+    goal_spend: clean_text(debug.goal_spend, 300),
     step_completion_contract: clean_text(debug.step_completion_contract, 200),
     step_completion_status: clean_text(debug.step_completion_status, 120),
     step_completion_evidence: clean_text(debug.step_completion_evidence, 300),

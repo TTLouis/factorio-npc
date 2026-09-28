@@ -793,6 +793,14 @@ function emptyAgentDebug(fallback = {}) {
     jev_request_fallbacks: 0,
     jev_request_fallback_percent: 0,
     jev_last_fallback: '',
+    // 2.6: the harness time estimate for the active step and this request's
+    // think / actor-busy / idle split, as ready-to-show text.
+    time_estimate: '',
+    time_split: '',
+    step_time_step: 0,
+    step_time_caption: '',
+    // 2.7: model usage of the current goal across its requests (units only).
+    goal_spend: '',
     step_completion_contract: '',
     step_completion_status: '',
     step_completion_evidence: '',
@@ -976,6 +984,13 @@ export function liveAgentDebugEvent(event, data = {}, previous = {}, fallback = 
   // shadow (or overwrite) it.
   const cumulativeUsage = failure?.usage ?? fallback.usage
   debug = applyDebugUsage(debug, cumulativeUsage)
+  if (fallback.time && typeof fallback.time === 'object') {
+    debug.time_estimate = uiText(fallback.time.time_estimate, 300)
+    debug.time_split = uiText(fallback.time.time_split, 300)
+    debug.step_time_step = Number.isSafeInteger(fallback.time.step_time_index) && fallback.time.step_time_index >= 0 ? fallback.time.step_time_index + 1 : 0
+    debug.step_time_caption = uiText(fallback.time.step_time_caption, 120)
+  }
+  if (fallback.spend && typeof fallback.spend === 'object') debug.goal_spend = uiText(fallback.spend.goal_spend, 300)
   if (event === 'provider.response') {
     debug = applyLatestRoundDebugUsage(debug, data?.usage ?? providerEvent?.usage, providerEvent?.round ?? data?.round)
     // Think time accumulates per completed round of the current planner
@@ -1381,11 +1396,17 @@ export function taskBoardUiSnapshot(state, live, tracker) {
   }
   const blocker = formatTaskCondition(board?.blocker, 'blocker')
   const pauseReason = formatTaskCondition(board?.pause_reason, 'pause')
-  const steps = trackerSteps ?? board.steps.slice(0, 30).map(step => ({
+  const baseSteps = trackerSteps ?? board.steps.slice(0, 30).map(step => ({
     id: String(step?.id ?? '').slice(0, 80),
     description: String(step?.description ?? '').slice(0, 500),
     status: step?.status,
   }))
+  // 2.6: the harness estimate on the step it belongs to (1-based in debug).
+  const timedStep = debugInteger(debug.step_time_step) - 1
+  const stepTime = uiText(debug.step_time_caption, 120)
+  const steps = timedStep >= 0 && stepTime
+    ? baseSteps.map((step, index) => index === timedStep && step.status !== 'completed' ? { ...step, time: stepTime } : step)
+    : baseSteps
   const completedCount = trackerSteps
     ? trackerSteps.filter(step => step.status === 'completed').length
     : board.completed_count
@@ -1967,6 +1988,7 @@ export class Session {
 
   onAgentActivity(event, data) {
     if (event === 'goal.defined') this.announceGoalUnderstanding(data)
+    if (event === 'budget.goal_warning') this.announceGoalBudgetWarning(data)
     if (event === 'goal.evaluated') {
       this.announceSliceProgress(data)
       // A slice boundary just read the game; let the Goal card show it now.
@@ -1992,6 +2014,8 @@ export class Session {
       actor_id: this.agent?.epoch?.actor_id ?? this.lastStatus?.actor_id,
       actor_epoch: this.agent?.epoch?.epoch ?? this.lastStatus?.epoch,
       usage: this.agent?.traceRequest?.usage,
+      time: this.agentTimeDebugFields(),
+      spend: this.agentSpendDebugFields(),
     }
     this.agentLive.debug = liveAgentDebugEvent(event, data, this.agentLive.debug, fallback)
     const update = liveAgentEvent(event, data)
@@ -2002,6 +2026,40 @@ export class Session {
       this.agentLive.activity = [...this.agentLive.activity, activity].slice(-UI_LIVE_ACTIVITY_LIMIT)
     }
     if (update || event === 'provider.response' || event === 'tool.result' || event === 'actor.bound') this.requestTaskBoardUiSync()
+  }
+
+  agentSpendDebugFields() {
+    try {
+      const agent = this.agent
+      if (!agent?.usageLedger || typeof agent.peekPlanState !== 'function') return undefined
+      return agent.usageLedger.debugFields(agent.peekPlanState(agent.activePlanKey())?.goal_id)
+    }
+    catch {
+      return undefined
+    }
+  }
+
+  // 2.7: the goal budget warning reaches the player once per goal.
+  announceGoalBudgetWarning(data) {
+    const line = uiText(data?.chat_message, 400)
+    const key = `${data?.goal_id ?? ''}|${data?.threshold_output_units ?? ''}`
+    if (!line || this.lastGoalBudgetWarning === key) return
+    this.lastGoalBudgetWarning = key
+    this.printChat(line).catch(error => this.log(`Unable to announce the goal budget warning: ${error instanceof Error ? error.message : String(error)}`))
+  }
+
+  agentTimeDebugFields() {
+    try {
+      const agent = this.agent
+      if (!agent?.planTiming || typeof agent.peekPlanState !== 'function') return undefined
+      return agent.planTiming.debugFields(agent.peekPlanState(agent.activePlanKey()), {
+        actorId: agent.epoch?.actor_id,
+        epoch: agent.epoch?.epoch,
+      })
+    }
+    catch {
+      return undefined
+    }
   }
 
   liveAgentStatus() {
