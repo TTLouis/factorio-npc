@@ -439,10 +439,35 @@ agent or run one after another; the rest run in parallel worktrees.
 | F: skills | 2.1, 2.8 | `packages/autorio/src/skills.ts`, `basic_skill_library.ts`, the skill prompt |
 | G: facts | 2.2–2.5 | contract JSON and both tool sides, engine lanes |
 
+**This week's working rules (owner, 2026-09-27).**
+
+- **Branch:** only the fusion branch `experiment/jev-agent-architecture` (Main LLM plus
+  Jev). `experiment/jev-only-agent` (10 commits from `cfd65091`: Jev picks from a finite
+  list of complete candidates) stays a separate experiment. Don't merge it this week;
+  it is input for the Monday discussion, question 6.
+- **No real-API e2e until the end of the week.** Every item is gated by static
+  scenarios with static tests:
+  - a fixed world or fixture;
+  - scripted or recorded model and Jev replies, with no provider calls;
+  - deterministic assertions;
+  - running as unit tests or `tests/factorio` engine lanes.
+
+  Recorded replies may be taken from `data/logs` (read-only) and trimmed into fixtures
+  of realistic size (see `task-loop-fixtures.mjs`).
+- **Strong logs.** Every item makes its decisions visible in the behavior trace:
+  - a named event with `request_id` and a reason, for anything it decides, refuses,
+    rolls over or pauses;
+  - a test that asserts the event is emitted.
+
+  The end-of-week run should be diagnosable from `sgluna-behavior.jsonl` alone.
+- **At the end, test everything together**, one live run per scenario, each with the
+  owner's go.
+
 **First session of the week (checklist).**
 
-- [ ] Fetch, read the peers' commits since `cfafed8f`, and run `scripts/test-local.sh all`
-  on HEAD; record that SHA here as the week's baseline.
+- [x] Fetch, read the peers' commits since `cfafed8f`, and run `scripts/test-local.sh all`
+  on HEAD; record that SHA here as the week's baseline. **Baseline `b6a37f0f`**
+  (2026-09-27).
 - [ ] **Owner + Claude: discuss the context-isolated delegation / Jev-first proposal
   below before fixing the Wave 3 implementation order.** This is a design discussion,
   not an already-approved architecture change.
@@ -554,8 +579,8 @@ Small gaps from the steam run, added to existing items:
 | 1.5 | New output budget per step, visible failure | Steam run regressions 3 and 4. The budget generation only rolls on an output-budget handoff (`npc-agent-loop.mjs`, `providerBudgetGeneration`), so one request carried the goal until `provider_turn_output_cap_exceeded` (non-recoverable). Roll the generation at every step close, and when a request still fails at the cap, leave the goal visibly paused with one chat line and a Resume, never a silent `blocked` plan. First slice of delegation: a fresh budget per plan | Opus |
 | 1.6 | One refused move must not cancel its siblings; `nothing_moved` gets a cause | Steam run regressions 1 and 2. Narrowed from the code (`basic_operation_runtime.ts` entity move): the NPC held the ore (else `item_missing`) and `insert` accepts partial counts, so "held fewer than 95" is ruled out; the furnace accepted zero, so its source slot held another item or `entity_inventories` chose the wrong inventory. Receipt carries held count and target slot contents; independent moves in a batch are not cancelled by one refusal. Engine lane case with three furnaces, one with a foreign item in its source slot | Opus |
 | 1.7 | OpenRouter provider profile | Today `openrouter.ai` falls back to `generic`: no effort is sent, no style block, cached/reasoning usage may not parse. Add an `openrouter` profile whose behaviour is resolved from the model family, not once per process (today `providerCapabilityProfile` in `provider-base.mjs` runs once from the single `OPENAI_*` config): effort in OpenRouter's `reasoning` field (check against their docs in a unit test), the DeepSeek style block for DeepSeek models, `cache_control` breakpoints for Anthropic models (no caching without them), usage fields parsed. Written as a function of a model config so 3.1's per-role configs reuse it. Pin the upstream provider per role, so runs compare and cache hits stay stable | Sonnet |
-| 1.8 | Jev on in local runs | `scripts/build-docker-local.ps1 -Jev` adds `compose.e2e.yml` (which maps `JEV_TYPESAFE_API_KEY`); the Debug window shows `jev_off` clearly when it is not set. No key printed or persisted | Haiku |
-| 1.9 | Local provider (LM Studio) | Owner, 2026-09-26: use the models already downloaded in LM Studio on the owner's machine (RTX 4080 Laptop 12 GB, 64 GB DDR5); see "Local models" below. `providerEndpoint` (`provider-base.mjs`) accepts plain `http` only for `localhost`, `127.0.0.1` and `[::1]`, but the runtime runs in Docker and reaches the host as `host.docker.internal`: allow exactly that host name over `http`, nothing wider. Add a `local` capability profile (reasoning control per model family, no cached-input pricing, usage parsed from LM Studio's OpenAI-compatible responses) and a declared context window (start at 64k) so the runtime compacts before it overflows. Unconfirmed: whether LM Studio must serve on the local network for the container to reach it | Sonnet |
+| 1.8 | Jev on in local runs | Half done: since `cfd65091`, `compose.yml` maps `JEV_TYPESAFE_API_KEY` itself (optional), so no `-Jev` flag or e2e overlay is needed. Remaining: the Debug window shows `jev_off` clearly when the key is not set, and the startup log says once whether Jev is on. No key printed or persisted | Haiku |
+| 1.9 | Local provider (LM Studio) | Owner, 2026-09-26: use the models already downloaded in LM Studio on the owner's machine (RTX 4080 Laptop 12 GB, 64 GB DDR5); see "Local models" below. `providerEndpoint` (`provider-base.mjs`) accepts plain `http` only for `localhost`, `127.0.0.1` and `[::1]`, but the runtime runs in Docker and reaches the host as `host.docker.internal`: allow exactly that host name over `http`, nothing wider. Add a `local` capability profile (reasoning control per model family, no cached-input pricing, usage parsed from LM Studio's OpenAI-compatible responses) and a declared context window (start at 64k) so the runtime compacts before it overflows. First slice **done** (`0d62dbaf`, http to `host.docker.internal`). Confirmed 2026-09-26: the container reaches LM Studio without "serve on local network". **Added from the 2026-09-26 local rounds** (2 of 2 reproduced): after Jev closes the observation phase, tools are correctly left out of the request. qwen then writes DSML tool-call text into `content`, and `provider-base.mjs` (`else if (dsml)`, ~line 1173) turns that text back into `tool_calls` even with `allowTools` false. The result is 4× `observation_phase_closed`, then `blocked_before_mutation`. Fix: when tools are off, only a lone `submitPlan` is recovered (as today); any other recovered call is dropped, with a trace event. Static replay test from the recorded qwen reply | Sonnet |
 
 ### Wave 2: facts, time, cost and skills the planner needs
 
