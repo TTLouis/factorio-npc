@@ -178,12 +178,20 @@ function resolve_step(actor: ControlledActor, step: LiveEstimateStep, warnings: 
     const categories = character.prototype.crafting_categories
     if (step.resource === undefined) {
       const hand_speed = rates.hand_crafting_speed(actor)
-      const choice = choose_recipe(actor, step, recipe => crafting_categories_support_recipe(categories, recipe)
-        && recipe.prototype?.hidden_from_player_crafting !== true, 'hand crafting')
+      const hand_craftable = (recipe: any) => crafting_categories_support_recipe(categories, recipe)
+        && recipe.prototype?.hidden_from_player_crafting !== true
+      // An unnamed choice looks at researched recipes first: a locked recipe
+      // that also yields the item (Space Age scrap-recycling makes gears) made
+      // every hand estimate for it ambiguous. Only when no researched recipe
+      // fits does a locked one count, for planning ahead (with a warning).
+      let choice = choose_recipe(actor, step, recipe => hand_craftable(recipe)
+        && (step.recipe !== undefined || recipe.enabled === true), 'hand crafting')
+      if (step.recipe === undefined && choice.none === true) choice = choose_recipe(actor, step, hand_craftable, 'hand crafting')
       const recipe = choice.recipe
       if (recipe !== undefined) {
         if (hand_speed === undefined || !(hand_speed > 0)) return `step ${step.item}: the actor cannot hand craft`
         if (!(recipe.energy > 0)) return `step ${step.item}: recipe ${recipe.name} has no crafting time`
+        if (recipe.enabled !== true) warnings.push(`recipe ${recipe.name} is not researched yet`)
         return {
           item: step.item,
           kind: 'hand_craft',
@@ -226,7 +234,10 @@ function resolve_step(actor: ControlledActor, step: LiveEstimateStep, warnings: 
   const crafting_speed = machine.get_crafting_speed()
   if (!(crafting_speed > 0)) return `step ${step.item}: ${machine_name} has no crafting speed`
   const categories = machine.crafting_categories
-  const choice = choose_recipe(actor, step, recipe => crafting_categories_support_recipe(categories, recipe), machine_name)
+  // Researched recipes first, as for hand crafting; a locked one only when none fits.
+  let choice = choose_recipe(actor, step, recipe => crafting_categories_support_recipe(categories, recipe)
+    && (step.recipe !== undefined || recipe.enabled === true), machine_name)
+  if (step.recipe === undefined && choice.none === true) choice = choose_recipe(actor, step, recipe => crafting_categories_support_recipe(categories, recipe), machine_name)
   const recipe = choice.recipe
   if (recipe === undefined) return choice.error ?? `step ${step.item}: no recipe`
   if (!(recipe.energy > 0)) return `step ${step.item}: recipe ${recipe.name} has no crafting time`
