@@ -171,8 +171,10 @@ WORLD_LUA = r"""
 local s=game.surfaces[1]; local a=nil
 for _,e in pairs(s.find_entities_filtered{name='character'}) do if e.unit_number==__ACTOR__ then a=e end end
 assert(a)
+local furnaces={}
+for _,e in pairs(s.find_entities_filtered{name='stone-furnace',position=a.position,radius=12}) do furnaces[e.unit_number]=e end
 local function furnace(unit)
-  local e=game.get_entity_by_unit_number(unit); assert(e and e.valid)
+  local e=furnaces[unit]; assert(e and e.valid)
   local rows={}
   for i=1,e.get_max_inventory_index() do
     local x=e.get_inventory(i)
@@ -234,6 +236,19 @@ def run(client: Rcon, results: Path) -> None:
     require(fixture.get('foreign') == FOREIGN_COUNT, fixture)
     require(fixture.get('iron') == SEED_IRON_ORE and fixture.get('coal') == SEED_COAL, fixture)
     unit_c, unit_a, unit_b = fixture['c'], fixture['a'], fixture['b']
+
+    # Observe the furnaces through the mod's observation tool first, as the
+    # planner does: exact-unit transfers resolve identities it has observed
+    # (stone furnaces are not indexed by game.get_entity_by_unit_number).
+    observed = json_command(
+        "/silent-command rcon.print(helpers.table_to_json("
+        "remote.call('autorio_tools','get_nearby_entities',12,'stone-furnace')))",
+        'observe fixture furnaces',
+    )
+    observed_units = {entity.get('unit_number') for entity in observed.get('entities') or []}
+    record['observed_units'] = sorted(unit for unit in observed_units if isinstance(unit, int))
+    save()
+    require({unit_c, unit_a, unit_b}.issubset(observed_units), observed)
 
     def world(context: str) -> dict:
         return json_command(lua(WORLD_LUA, ACTOR=actor_id, C=unit_c, A=unit_a, B=unit_b), context)
