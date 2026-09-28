@@ -564,17 +564,19 @@ test('the interaction router keeps its JSON-reply prompt without the provider st
 // Item 1.3: effort per round, output cap sized with the effort.
 // ---------------------------------------------------------------------------
 
-test('a gather round steps the harness planning brackets down one level; the decide round keeps them', async () => {
+test('only the continuation bracket steps down for a gather round; authoring and replan brackets never do', async () => {
   const chat = [
     { role: 'system', content: 'system' },
     { role: 'user', content: '[CHAT] tester: get steam power going' },
   ]
   const afterFailure = [...chat, { role: 'user', content: '[HARNESS] Tool-validation failure (1/3; invalid_tool_call): bad args.' }]
+  // Even if a caller marked an authoring or replan round `gather`, the round
+  // may write the plan, so it keeps the full bracket.
   const cases = [
-    { messages: chat, options: { triggerSource: 'new_goal' }, gather: ['high', 'plan_authoring_gather', 16000], decide: ['max', 'plan_authoring', 40000] },
-    { messages: chat, options: { triggerSource: 'recovery_replan_high' }, gather: ['high', 'plan_authoring_gather', 16000], decide: ['max', 'plan_authoring', 40000] },
+    { messages: chat, options: { triggerSource: 'new_goal' }, gather: ['max', 'plan_authoring', 40000], decide: ['max', 'plan_authoring', 40000] },
+    { messages: chat, options: { triggerSource: 'recovery_replan_high' }, gather: ['max', 'plan_authoring', 40000], decide: ['max', 'plan_authoring', 40000] },
     { messages: chat, options: {}, gather: ['low', 'ordinary_planning_gather', 6000], decide: ['high', 'ordinary_planning', 12000] },
-    { messages: afterFailure, options: {}, gather: ['low', 'ordinary_replan_gather', 6000], decide: ['high', 'ordinary_replan', 16000] },
+    { messages: afterFailure, options: {}, gather: ['high', 'ordinary_replan', 16000], decide: ['high', 'ordinary_replan', 16000] },
   ]
   for (const { messages, options, gather, decide } of cases) {
     for (const [roundPhase, [effort, reason, cap]] of [['gather', gather], ['decide', decide]]) {
@@ -636,7 +638,7 @@ test('the reasoning-policy report is observability only and never fails the requ
     triggerSource: 'new_goal',
     onReasoningPolicy: () => { throw new Error('trace sink down') },
   })
-  assert.equal(seen.body.reasoning_effort, 'high')
+  assert.equal(seen.body.reasoning_effort, 'max')
 
   const decisions = []
   await captureRequest([
@@ -657,17 +659,23 @@ test('the reasoning-policy report is observability only and never fails the requ
   }])
 })
 
-// Static scenario: the recorded 2026-09-26 steam-run authoring request and the
-// step-2 cycle that followed, sent through the real loop, provider.mjs and
-// provider-base.mjs against a replay fetch (no provider is called).
-test('steam replay: gather rounds run below the plan-writing bracket, the decide round gets max, and every call is traced with its request_id', async () => {
-  const { steamReplayHarness, STEAM_ROUNDS } = await import('./steam-run-fixtures.mjs')
+// Static scenario: the recorded 2026-09-26 steam run, sent through the real
+// loop, provider.mjs and provider-base.mjs against a replay fetch (no
+// provider is called).
+test('steam replay: authoring and replan rounds keep the full bracket, continuation read rounds step down, and every call is traced with its request_id', async () => {
+  const { steamReplayHarness, STEAM_ROUNDS, STEAM_SCRIPTED_BLOCKED_ANSWER } = await import('./steam-run-fixtures.mjs')
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'airi-steam-replay-'))
   const promptTraceFile = path.join(dir, 'prompts.jsonl')
   try {
-    const world = steamReplayHarness({ transport: 'http', promptTraceFile, maxProviderOutputUnits: 100000 })
+    const world = steamReplayHarness({
+      transport: 'http',
+      promptTraceFile,
+      maxProviderOutputUnits: 100000,
+      extraRounds: [STEAM_SCRIPTED_BLOCKED_ANSWER],
+    })
     await world.request()
     await world.closeStep1()
+    await world.failSupplyBatch()
     const requestId = world.events('request.received')[0].request_id
     assert.match(requestId, /^req_/)
 
@@ -677,27 +685,30 @@ test('steam replay: gather rounds run below the plan-writing bracket, the decide
       cap: call.body.max_tokens,
       phase: call.context.roundPhase,
     }))
-    // Authoring: three read rounds, then decision pressure (after three
-    // observation-only rounds) makes round 3 the one that writes the plan.
-    // Live, all four ran at max with a 32,000 cap; round 1 alone spent
-    // 9,432 units reading.
+    // Authoring (new_goal): every round offers submitPlan and the model may
+    // write the plan in any of them, so all keep max / 40,000. The recorded
+    // plan-writing round (28,881 units) has headroom under that cap.
     assert.deepEqual(sent.slice(0, 4), [
-      { id: 'authoring_0', effort: 'high', cap: 16000, phase: 'gather' },
-      { id: 'authoring_1', effort: 'high', cap: 16000, phase: 'gather' },
-      { id: 'authoring_2', effort: 'high', cap: 16000, phase: 'gather' },
+      { id: 'authoring_0', effort: 'max', cap: 40000, phase: 'decide' },
+      { id: 'authoring_1', effort: 'max', cap: 40000, phase: 'decide' },
+      { id: 'authoring_2', effort: 'max', cap: 40000, phase: 'decide' },
       { id: 'authoring_3', effort: 'max', cap: 40000, phase: 'decide' },
     ])
-    // The recorded plan-writing round (28,881 units) now has headroom.
     assert.ok(STEAM_ROUNDS[3].usage.output < sent[3].cap * 0.75)
-    // Step 2: the compact completion round, then read rounds at low instead of
-    // re-thinking at high, then the decide round under decision pressure.
+    // Step 2 continues the committed plan: the compact completion round, then
+    // a read round at low instead of re-thinking at high, then the decide
+    // round under decision pressure.
     assert.deepEqual(sent.slice(4, 8).map(entry => [entry.id, entry.phase, entry.effort]), [
       ['tail_0', 'gather', 'low'],
       ['tail_1', 'gather', 'low'],
       ['tail_2', 'gather', 'low'],
       ['tail_3', 'decide', 'high'],
     ])
-    assert.equal(sent.some(entry => entry.phase === 'gather' && entry.effort === 'max'), false)
+    // The failure replan (round 0 may write the revised plan) keeps high / 16,000.
+    assert.deepEqual(sent.slice(8, 10).map(entry => [entry.id, entry.phase, entry.effort, entry.cap]), [
+      ['failure_0', 'decide', 'high', 16000],
+      ['failure_1', 'decide', 'high', 16000],
+    ])
 
     // Strong logs: one provider.round_policy per call, keyed by request_id,
     // naming the phase, its reason, the effort, the policy reason and the cap.
@@ -710,27 +721,94 @@ test('steam replay: gather rounds run below the plan-writing bracket, the decide
       assert.equal(typeof record.data.reason, 'string')
       assert.equal(typeof record.data.round_phase_reason, 'string')
     }
-    assert.deepEqual(policies.slice(0, 4).map(record => [record.data.reason, record.data.round_phase_reason, record.data.output_cap]), [
-      ['plan_authoring_gather', 'observation_phase_open', 16000],
-      ['plan_authoring_gather', 'observation_phase_open', 16000],
-      ['plan_authoring_gather', 'observation_phase_open', 16000],
-      ['plan_authoring', 'observation_decision_pressure', 40000],
-    ])
-    const providerRequests = world.events('provider.request')
-    assert.equal(providerRequests[3].data.round_phase, 'decide')
-    assert.equal(providerRequests[3].data.round_phase_reason, 'observation_decision_pressure')
+    assert.deepEqual(policies.slice(0, 4).map(record => [record.data.reason, record.data.round_phase_reason, record.data.output_cap]),
+      Array.from({ length: 4 }, () => ['plan_authoring', 'plan_may_be_written', 40000]))
+    assert.deepEqual([policies[6].data.reason, policies[6].data.round_phase_reason, policies[6].data.output_cap],
+      ['ordinary_planning_gather', 'observation_phase_open', 6000])
+    assert.deepEqual([policies[8].data.reason, policies[8].data.round_phase_reason, policies[8].data.output_cap],
+      ['ordinary_replan', 'plan_may_be_written', 16000])
 
-    // The prompt trace now carries the request_id on every provider row.
+    // The prompt trace carries the request_id on every provider row.
     const rows = (await fsp.readFile(promptTraceFile, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
     const providerRows = rows.filter(row => row.event === 'provider.request' || row.event === 'provider.response')
     assert.equal(providerRows.length, world.calls.length * 2)
     assert.equal(providerRows.every(row => row.request_id === requestId), true)
-    assert.deepEqual(
-      rows.filter(row => row.event === 'provider.request').slice(0, 4).map(row => row.reasoning_policy_reason),
-      ['plan_authoring_gather', 'plan_authoring_gather', 'plan_authoring_gather', 'plan_authoring'],
-    )
   }
   finally {
     await fsp.rm(dir, { recursive: true, force: true })
   }
 })
+
+// Review fix (1.3): a round-0 submitPlan is possible under every trigger that
+// authors or revises a plan, so round 0 of each keeps the full bracket; only a
+// continuation round of an active committed plan steps down.
+test('round 0 of every authoring or replan trigger keeps the full effort and cap through the real loop', async () => {
+  const { NpcAgentLoop } = await import('./npc-agent-loop.mjs')
+  const { CanonicalTaskBoardMemory } = await import('./canonical-task-board-memory.mjs')
+  const { FakeFactorio } = await import('./task-loop-fixtures.mjs')
+  const bodies = []
+  const submitPlan = {
+    id: 'submit-round-0',
+    model: 'deepseek-flash',
+    choices: [{ finish_reason: 'tool_calls', message: { role: 'assistant', content: '', tool_calls: [{
+      id: 'call_submit',
+      type: 'function',
+      function: { name: 'submitPlan', arguments: JSON.stringify({ plan: ['Wait once', 'Inspect'], currentStep: 0, operations: [{ name: 'wait', args: { ticks: 1 } }] }) },
+    }] } }],
+    usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 },
+  }
+  const provider = (messages, context) => providerRequest(config(), messages, {
+    ...context,
+    promptTraceFile: null,
+    fetchImpl: async (_url, init) => {
+      bodies.push(JSON.parse(init.body))
+      return new Response(JSON.stringify(submitPlan), { status: 200, headers: { 'content-type': 'application/json' } })
+    },
+  })
+  const agent = new NpcAgentLoop({
+    rcon: new FakeFactorio(),
+    provider,
+    memory: new CanonicalTaskBoardMemory(),
+    systemPrompt: 'round phase test',
+    stateFile: null,
+    traceFile: null,
+    decisionTraceFile: null,
+  })
+  const trace = []
+  agent.behaviorTrace = { emit: async record => { trace.push(record) } }
+  // A real request commits an active plan (round 0 of a new request: full bracket).
+  await agent.request('wait once and inspect', { sender: 'TTLouis' })
+  assert.equal(bodies[0].reasoning_effort, 'max')
+  assert.equal(bodies[0].max_tokens, 40000)
+  assert.equal(agent.memory.currentPlan('npc:airi').status, 'active')
+
+  const expectations = [
+    ['new_goal', 'max', 40000],
+    ['amend_current', 'max', 40000],
+    ['plan_slice_completed', 'max', 40000],
+    ['post_step_replan', 'max', 40000],
+    ['recovery_replan_high', 'max', 40000],
+    ['failure', 'high', 16000],
+    // A continuation round of the committed plan: it cannot rewrite the plan.
+    ['completion', 'low', 6000],
+  ]
+  for (const [trigger, effort, cap] of expectations) {
+    agent.active = true
+    agent.reasoningTriggerSource = trigger === 'failure' || trigger === 'completion' ? null : trigger
+    agent.planUpdateReason = trigger === 'failure' || trigger === 'completion' ? trigger : 'request'
+    agent.resetObservationDecisionState()
+    agent.messages = [
+      { role: 'system', content: 'round phase test' },
+      { role: 'user', content: '[CHAT] TTLouis: keep going' },
+    ]
+    const before = bodies.length
+    await agent.callProvider(await agent.assertCurrent(), agent.generation, { round: 0, allowTools: true })
+    const body = bodies[before]
+    assert.ok(body.tools.some(tool => tool.function?.name === 'submitPlan'), `${trigger}: submitPlan is offered`)
+    assert.equal(body.reasoning_effort, effort, `${trigger} effort`)
+    assert.equal(body.max_tokens, cap, `${trigger} cap`)
+    const policy = trace.filter(record => record.event === 'provider.round_policy').at(-1)
+    assert.equal(policy.data.round_phase, trigger === 'completion' ? 'gather' : 'decide', trigger)
+  }
+})
+

@@ -54,21 +54,19 @@ function currentDifficultySignals(messages) {
 }
 
 // Effort per round (plan item 1.3). The loop tells the provider what the round
-// has to do: `gather` while tools are on and the observation phase is open,
-// `decide` once the harness has closed or narrowed it (tools off, decision
-// pressure, observation budget spent). A gather round reads facts and does not
-// need the bracket of the round that writes the plan, so the harness-derived
-// planning brackets step down one level for it. Jev's explicit budget ratings
+// has to do. `gather` is a round that cannot write or revise the plan: a
+// continuation round of a committed plan with the observation phase open.
+// Every round that offers submitPlan in a request that authors or revises a
+// plan is `decide`, because the model may write the plan in any of them (the
+// steam run's plan-writing round used 28,881 output units). So only the
+// continuation bracket (ordinary_planning) steps down for a gather round; the
+// authoring and replan brackets never do, and Jev's explicit budget ratings
 // and the recovery brackets are left alone.
-// Measured on the 2026-09-26 steam run (req_muhsihjg_1): the authoring request
-// spent every round at max, and a pure read round (11 observation calls) cost
-// 9,432 output units in 51 s; completion requests re-thought at high in every
-// read round after round 0.
+// Measured on the 2026-09-26 steam run (req_muhsihjg_1): completion requests
+// re-thought at high in every read round after round 0.
 export const ROUND_PHASES = Object.freeze(['gather', 'decide'])
 const GATHER_ROUND_POLICIES = Object.freeze({
-  plan_authoring: { effort: 'high', reason: 'plan_authoring_gather' },
   ordinary_planning: { effort: 'low', reason: 'ordinary_planning_gather' },
-  ordinary_replan: { effort: 'low', reason: 'ordinary_replan_gather' },
 })
 
 function roundPhasePolicy(policy, options) {
@@ -165,10 +163,7 @@ function baseReasoningPolicy(config, messages, options = {}) {
 function reasoningOutputBudget(policy) {
   switch (policy?.reason) {
     case 'plan_authoring': return 40000
-    case 'plan_authoring_gather': return 16000
-    case 'ordinary_planning_gather':
-    case 'ordinary_replan_gather':
-      return 6000
+    case 'ordinary_planning_gather': return 6000
     case 'jev_budget_strategic': return 24000
     case 'jev_budget_deep': return 16000
     case 'ordinary_replan':

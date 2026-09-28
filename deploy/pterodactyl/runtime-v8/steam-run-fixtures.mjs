@@ -317,6 +317,9 @@ export function steamReplayHarness({
   maxProviderOutputUnits = 100000,
   promptTraceFile = null,
   extraRounds = [],
+  // When set, chat is routed like the live stack (the router answers with
+  // this intent) instead of bypassing the interaction router.
+  routedIntent,
 } = {}) {
   const game = new RecordedSteamFactorio()
   const memory = new CanonicalTaskBoardMemory()
@@ -353,6 +356,7 @@ export function steamReplayHarness({
     memory,
     provider,
     maxProviderOutputUnits,
+    ...(routedIntent ? { interactionProvider: async () => ({ content: JSON.stringify({ intent: routedIntent(), queue_conflict: false, reply: '' }) }) } : {}),
     systemPrompt: REPLAY_SYSTEM_PROMPT,
     stateFile: null,
     traceFile: null,
