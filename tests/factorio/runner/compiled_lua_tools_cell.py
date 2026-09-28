@@ -30,6 +30,9 @@ Gates:
     NEARBY      capped nearby observation keeps unit-numbered entities first,
                 nearest first, and counts the resource tiles it dropped
     SCOPE       scope_context reaches its depth limit and reports the truncation
+    SOLVE       solveProduction with assembler and furnace selections sizes
+                machines from the engine's 2.0 get_crafting_speed(); an
+                incompatible selection is refused
     CAPACITY    inserter capacity reads the prototype movement speeds
     FACTORY     factory-area analysis of two joined pipes and a filled chest
                 returns the engine fluid connection
@@ -37,6 +40,7 @@ Gates:
 
 import argparse
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -202,6 +206,53 @@ def run(client: Rcon, results: Path) -> None:
         require(coverage.get('complete') is False, {'message': 'scope claimed complete coverage at the depth limit', 'coverage': coverage})
         print(f"PASS: SCOPE - depth-limited scope reports {coverage['truncation_reasons']}", flush=True)
 
+    # ---- SOLVE: machine selections read the 2.0 crafting speed method -------
+    # LuaEntityPrototype has no crafting_speed key in 2.0 and reading it raises;
+    # solveProduction with a machine selection read it until 6476fdc4. Sizes
+    # must follow the engine's get_crafting_speed() for an assembler and a furnace.
+    def solve_gate() -> None:
+        rate = 2.5
+        speeds = engine(
+            'solve engine speeds',
+            "local am=prototypes.entity['assembling-machine-1']; local sf=prototypes.entity['stone-furnace']; "
+            "local legacy_ok=pcall(function() return am.crafting_speed end); "
+            "rcon.print(helpers.table_to_json({am=am.get_crafting_speed(),sf=sf.get_crafting_speed(),"
+            "gear=prototypes.recipe['iron-gear-wheel'].energy,plate=prototypes.recipe['iron-plate'].energy,"
+            "legacy_crafting_speed_key_readable=legacy_ok}))",
+        )
+        evidence['solve_engine_speeds'] = speeds
+        solved = tool(
+            'solve',
+            'autorio_planning', 'solve',
+            f"{{calculation_id='compiled-lua-solve',target={{type='item',name='iron-gear-wheel',rate_per_second={rate}}},"
+            "machine_selections={{recipe_name='iron-gear-wheel',machine_name='assembling-machine-1'},"
+            "{recipe_name='iron-plate',machine_name='stone-furnace'}}}",
+        )
+        require(solved.get('ok') is True, {'context': 'solve', 'result': solved})
+        by_recipe = {entry.get('recipe_name'): entry for entry in solved.get('recipe_rates') or []}
+        # One gear takes two plates; each machine does crafting_speed / energy crafts per second.
+        expected = {
+            'iron-gear-wheel': ('assembling-machine-1', speeds['am'], math.ceil(rate / (speeds['am'] / speeds['gear']) - 1e-9)),
+            'iron-plate': ('stone-furnace', speeds['sf'], math.ceil(2 * rate / (speeds['sf'] / speeds['plate']) - 1e-9)),
+        }
+        for recipe, (machine_name, speed, count) in expected.items():
+            machine = (by_recipe.get(recipe) or {}).get('machine') or {}
+            require(machine.get('name') == machine_name and abs((machine.get('crafting_speed') or 0) - speed) < 1e-9
+                    and machine.get('machine_count') == count,
+                    {'message': f'{recipe} machine sizing differs from the engine speed', 'machine': machine, 'expected': [machine_name, speed, count]})
+        require(solved.get('fully_sized') is True, {'message': 'selected machines left a recipe unsized', 'result': solved})
+        wrong = tool(
+            'solve_incompatible',
+            'autorio_planning', 'solve',
+            "{calculation_id='compiled-lua-solve-bad',target={type='item',name='iron-gear-wheel',rate_per_second=1},"
+            "included_recipe_names={'iron-gear-wheel'},machine_selections={{recipe_name='iron-gear-wheel',machine_name='stone-furnace'}}}",
+        )
+        require(wrong.get('ok') is False and 'incompatible' in ((wrong.get('error') or {}).get('message') or ''),
+                {'message': 'an incompatible machine selection must be refused, not sized', 'result': wrong})
+        print(f"PASS: SOLVE - {rate} gears/s: {expected['iron-gear-wheel'][2]} x assembling-machine-1 (speed {speeds['am']}), "
+              f"{expected['iron-plate'][2]} x stone-furnace (speed {speeds['sf']}); incompatible selection refused "
+              f"(legacy crafting_speed key readable: {speeds['legacy_crafting_speed_key_readable']})", flush=True)
+
     # ---- CAPACITY: prototype speed getters were called with the prototype as quality
     def capacity_gate() -> None:
         capacity = tool('capacity', 'autorio_planning', 'capacity', "{kind='inserter',prototype_name='inserter'}")
@@ -227,7 +278,7 @@ def run(client: Rcon, results: Path) -> None:
     # Each gate is independent after the fixture; run them all so one crash
     # does not hide the others, then fail listing every failed gate.
     failures: dict[str, str] = {}
-    for gate in (map_ref_gate, force_gate, nearby_gate, scope_gate, capacity_gate, factory_gate):
+    for gate in (map_ref_gate, force_gate, nearby_gate, scope_gate, solve_gate, capacity_gate, factory_gate):
         try:
             gate()
         except Exception as exc:  # noqa: BLE001 - report every gate, fail below
