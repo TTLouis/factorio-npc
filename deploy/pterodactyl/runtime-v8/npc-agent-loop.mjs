@@ -73,6 +73,7 @@ import {
   typedProjectionQuestions,
 } from './jev-typed-projection.mjs'
 import { activeStepOf, parseTimeReview, PlanTiming } from './plan-time-estimate.mjs'
+import { UsageLedger } from './usage-ledger.mjs'
 
 export { AgentLoopError }
 
@@ -2421,6 +2422,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       : null
     // 2.6: harness time estimates, the time review and the request time split.
     this.planTiming = new PlanTiming()
+    // 2.7: usage per goal and the goal budget warning.
+    this.usageLedger = new UsageLedger({ outputCap: this.maxProviderOutputUnits })
   }
 
   async loadPersistentState() {
@@ -5270,10 +5273,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return this.writeTraceEvent(event, data, requestId)
   }
 
-  // Every event also passes through the time accounting (2.6), which may add
-  // derived events (request.time_split before a terminal event,
-  // plan.time_estimate after an admitted batch, step.time_measured after a
-  // step closes). Derived events skip that pass.
+  // Every event also passes through the time accounting (2.6) and the goal
+  // usage ledger (2.7), which may add derived events (request.time_split
+  // before a terminal event, plan.time_estimate after an admitted batch,
+  // step.time_measured after a step closes, budget.goal_warning once per
+  // goal). Derived events skip that pass.
   writeTraceEvent(event, data = {}, requestId) {
     const timing = this.observePlanTiming(event, data)
     if (!timing) return this.emitTraceRecord(event, data, requestId)
@@ -5284,14 +5288,20 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   observePlanTiming(event, data) {
-    if (!this.planTiming) return undefined
+    if (!this.planTiming && !this.usageLedger) return undefined
     try {
-      const result = this.planTiming.observe(event, data, {
+      const state = this.peekPlanState(this.activePlanKey())
+      const context = {
         requestId: this.traceRequest?.id,
-        state: event === 'operations.ack' ? this.peekPlanState(this.activePlanKey()) : undefined,
+        state: event === 'operations.ack' ? state : undefined,
         actorId: this.epoch?.actor_id,
         epoch: this.epoch?.epoch,
-      })
+        goalId: state?.goal_id && state.status !== 'completed' ? state.goal_id : undefined,
+        stepGoalId: state?.goal_id,
+      }
+      const timing = this.planTiming?.observe(event, data, context) ?? { before: [], after: [] }
+      const usage = this.usageLedger?.observe(event, data, context) ?? { before: [], after: [] }
+      const result = { before: [...timing.before, ...usage.before], after: [...timing.after, ...usage.after] }
       return result.before.length > 0 || result.after.length > 0 ? result : undefined
     }
     catch (error) {

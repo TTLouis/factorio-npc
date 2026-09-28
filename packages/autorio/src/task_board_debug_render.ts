@@ -265,6 +265,9 @@ function fill_debug_body(body: LuaGuiElement, board: any, runtime: any, synced_t
     : '—')
   add_compact_row(provider_table, 'Tokens · request cumulative', tokens)
   add_compact_row(provider_table, 'Latest completed round', latest_round_tokens)
+  // Model usage of the current goal across its requests, units only (2.7).
+  const goal_spend = clean_text(debug.goal_spend, 300)
+  add_compact_row(provider_table, 'Spend · this goal', goal_spend.length > 0 ? goal_spend : '—')
   const decision_column = columns.add({ type: 'flow', direction: 'vertical' }); decision_column.style.width = DEBUG_COLUMN_WIDTH; decision_column.style.vertical_spacing = 4
   decision_column.add({ type: 'label', caption: 'Jev / Planning', style: 'semibold_label' })
   const decision_table = decision_column.add({ type: 'table', column_count: 2 }); decision_table.style.width = DEBUG_COLUMN_WIDTH; decision_table.style.horizontal_spacing = 12; decision_table.style.vertical_spacing = 5
