@@ -4,6 +4,14 @@ import test from 'node:test'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop, normalizedProviderUsage, toolReplySequenceViolation } from './npc-agent-loop.mjs'
 import { providerRequest } from './provider.mjs'
+import { formatTaskCondition } from './supervisor.mjs'
+import {
+  STEAM_AUTHORING_OUTPUT_UNITS,
+  STEAM_ROUNDS,
+  STEAM_SCRIPTED_BLOCKED_ANSWER,
+  STEAM_TAIL_OUTPUT_UNITS,
+  steamReplayHarness,
+} from './steam-run-fixtures.mjs'
 import { FakeFactorio, planReply, recordingJev } from './task-loop-fixtures.mjs'
 
 function deployment() {
@@ -186,9 +194,11 @@ test('cross-layer provider bodies switch high reasoning exhaustion to one no-rea
 
   assert.equal(result.goalStatus, 'active')
   assert.equal(bodies.length, 2)
-  assert.equal(bodies[0].reasoning_effort, 'max')
+  // Round 0 of a new goal has tools on and an open observation phase: a
+  // gather round, one step below the plan-writing bracket (item 1.3).
+  assert.equal(bodies[0].reasoning_effort, 'high')
   assert.deepEqual(bodies[0].thinking, { type: 'enabled' })
-  assert.equal(bodies[0].max_tokens, 32000)
+  assert.equal(bodies[0].max_tokens, 16000)
   assert.equal(bodies[1].reasoning_effort, 'none')
   assert.deepEqual(bodies[1].thinking, { type: 'disabled' })
   assert.equal(bodies[1].max_tokens, 3000)
@@ -1078,4 +1088,188 @@ test('a staged amendment cannot push skill context into the middle of a tool exc
   const messages = agent.providerMessages()
   assert.equal(toolReplySequenceViolation(messages), undefined)
   assert.match(messages[2].content, /^\[SKILL_CONTEXT\]/)
+})
+
+// ---------------------------------------------------------------------------
+// Static scenario, item 1.5: the 2026-09-26 steam run replayed from its
+// recorded replies (steam-run-fixtures.mjs), through request()/completed()/
+// failed(). One request carried the whole goal on one budget generation and
+// died at provider_turn_output_cap_exceeded with the plan silently blocked.
+// ---------------------------------------------------------------------------
+
+function sumOutput(rounds) {
+  return rounds.reduce((total, round) => total + round.usage.output, 0)
+}
+
+// Live, step 2 alone spent 64,407 output units over many more cycles than the
+// fixture keeps; the fixture keeps its last 20,941. To make one step overrun
+// its own budget with that slice, the cap drops to 20,000 once step 1 has
+// closed (authoring ran under the live 100,000).
+const STEP_OVERRUN_CAP = 20000
+
+async function replayToCapDuringBlockedPlan(world) {
+  await world.request()
+  await world.closeStep1()
+  world.agent.maxProviderOutputUnits = STEP_OVERRUN_CAP
+  return world.failSupplyBatch()
+}
+
+test('steam replay: a verified step close rolls the output budget generation, so the request survives what killed it live', async () => {
+  // The replay carries the recorded authoring rounds plus the last recorded
+  // cycle: 42,915 + 20,941 = 63,856 output units in one request. Against a
+  // 60,000 cap that is the live failure in miniature (107,322 > 100,000):
+  // one generation for the whole request fails, one per step does not.
+  const cap = 60000
+  assert.equal(sumOutput(STEAM_ROUNDS.filter(round => round.phase === 'authoring')), STEAM_AUTHORING_OUTPUT_UNITS)
+  assert.equal(sumOutput(STEAM_ROUNDS.filter(round => round.phase !== 'authoring')), STEAM_TAIL_OUTPUT_UNITS)
+  assert.ok(STEAM_AUTHORING_OUTPUT_UNITS + STEAM_TAIL_OUTPUT_UNITS > cap)
+
+  const world = steamReplayHarness({ maxProviderOutputUnits: cap, extraRounds: [STEAM_SCRIPTED_BLOCKED_ANSWER] })
+  const first = await world.request()
+  assert.equal(first.goalStatus, 'active')
+  assert.equal(world.calls.length, 4)
+  const requestId = world.trace.find(record => record.event === 'request.received')?.request_id
+  assert.match(requestId, /^req_/)
+  assert.equal(world.agent.providerBudgetGeneration, 1)
+  assert.equal(world.agent.providerBudgetGenerationOutputUnits, STEAM_AUTHORING_OUTPUT_UNITS)
+
+  await world.closeStep1()
+  const rolled = world.events('budget.generation_rolled')
+  assert.equal(rolled.length, 1, JSON.stringify(world.trace.map(record => record.event)))
+  assert.equal(rolled[0].request_id, requestId)
+  assert.equal(rolled[0].data.reason, 'step_closed')
+  assert.equal(rolled[0].data.source, 'deterministic_completion_contract')
+  assert.equal(rolled[0].data.previous_generation, 1)
+  assert.equal(rolled[0].data.generation, 2)
+  assert.equal(rolled[0].data.previous_generation_output_units, STEAM_AUTHORING_OUTPUT_UNITS)
+  assert.equal(rolled[0].data.completed_count, 1)
+  assert.equal(rolled[0].data.output_cap, cap)
+  // The roll is recorded before the next planner round is sent.
+  const stepVerified = world.events('step.verified')[0]
+  const nextRequest = world.events('provider.request').find(record => record.seq > rolled[0].seq)
+  assert.ok(stepVerified.seq < rolled[0].seq)
+  assert.ok(nextRequest, 'the step-2 planner round follows the roll')
+
+  await world.failSupplyBatch()
+  const state = world.memory.currentPlan('npc:airi')
+  assert.equal(world.events('budget.output_units_exceeded').length, 0)
+  assert.equal(world.events('request.failed').length, 0)
+  assert.equal(world.events('budget.cap_paused').length, 0)
+  assert.equal(world.agent.providerBudgetGeneration, 2)
+  assert.equal(
+    world.agent.providerBudgetGenerationOutputUnits,
+    STEAM_TAIL_OUTPUT_UNITS + STEAM_SCRIPTED_BLOCKED_ANSWER.usage.output,
+  )
+  // The request as a whole spent more than the cap; no generation did.
+  const requestOutput = world.events('provider.response')
+    .filter(record => record.request_id === requestId)
+    .reduce((total, record) => total + record.data.usage.output_units, 0)
+  assert.equal(requestOutput, STEAM_AUTHORING_OUTPUT_UNITS + STEAM_TAIL_OUTPUT_UNITS + STEAM_SCRIPTED_BLOCKED_ANSWER.usage.output)
+  assert.ok(requestOutput > cap)
+  assert.equal(Math.max(...world.events('provider.response').map(record => record.data.turn_output_units)) <= cap, true)
+  assert.equal(state.blocker, 'transfer_failed:nothing_moved')
+})
+
+test('steam replay: a request that still hits the cap while the plan is blocked leaves the goal visibly paused with one chat line and a Resume', async () => {
+  // Step 2 overruns its own generation: the per-step roll cannot save it,
+  // and the cap lands where the live run stopped, with the plan blocked on
+  // transfer_failed:nothing_moved.
+  const cap = STEP_OVERRUN_CAP
+  const world = steamReplayHarness()
+  const result = await replayToCapDuringBlockedPlan(world)
+
+  assert.equal(world.calls.length, STEAM_ROUNDS.length)
+  assert.equal(world.events('budget.output_units_exceeded').length, 1)
+  assert.equal(world.events('request.failed').length, 0, 'the cap no longer ends as request.failed recoverable=false')
+
+  // One chat line, naming the cap and the blocker, and how to resume.
+  assert.equal(typeof result?.chatMessage, 'string')
+  assert.equal(result.chatMessage.includes('\n'), false)
+  assert.match(result.chatMessage, /^I paused this goal: the model used its whole output budget for this step \(20,941 of 20,000 units\)/)
+  assert.match(result.chatMessage, /blocked on transfer_failed:nothing_moved/)
+  assert.match(result.chatMessage, /Press Resume or say continue/)
+  assert.equal(result.goalStatus, 'paused')
+
+  // The goal is paused, not silently blocked, and the pause reason keeps the blocker.
+  const state = world.memory.currentPlan('npc:airi')
+  assert.equal(state.status, 'paused')
+  assert.equal(state.task_board.status, 'paused')
+  assert.equal(state.pause_reason, 'provider_output_budget_exhausted: provider_turn_output_cap_exceeded; plan was blocked on transfer_failed:nothing_moved')
+  assert.equal(world.agent.active, false)
+  // The in-game board shows the budget summary (and its Resume) for this reason.
+  assert.match(formatTaskCondition(state.pause_reason, 'pause').summary, /exhausted its response budget.*Continue to retry/)
+  // The planning state still records the structural blocker; nothing replanned it.
+  const planning = world.memory.planningState('npc:airi')
+  assert.equal(planning.plans.length, 1)
+
+  const paused = world.events('budget.cap_paused')
+  assert.equal(paused.length, 1)
+  const requestId = world.trace.find(record => record.event === 'request.received')?.request_id
+  assert.equal(paused[0].request_id, requestId)
+  assert.equal(paused[0].data.reason, 'provider_turn_output_cap_exceeded')
+  assert.equal(paused[0].data.source, 'plan_not_active')
+  assert.equal(paused[0].data.previous_status, 'blocked')
+  assert.equal(paused[0].data.blocker, 'transfer_failed:nothing_moved')
+  assert.equal(paused[0].data.goal_status, 'paused')
+  assert.equal(paused[0].data.generation, 2)
+  assert.equal(paused[0].data.generation_output_units, STEAM_TAIL_OUTPUT_UNITS)
+  assert.equal(paused[0].data.output_cap, cap)
+  const completed = world.events('request.completed').at(-1)
+  assert.equal(completed.request_id, requestId)
+  assert.equal(completed.data.outcome, 'paused_output_cap')
+  assert.equal(completed.data.reason, 'provider_turn_output_cap_exceeded')
+  assert.equal(completed.data.chat_message, result.chatMessage)
+})
+
+test('steam replay: Resume after the cap pause starts a new request with a fresh budget generation', async () => {
+  const world = steamReplayHarness({ extraRounds: [STEAM_SCRIPTED_BLOCKED_ANSWER] })
+  await replayToCapDuringBlockedPlan(world)
+  assert.equal(world.memory.currentPlan('npc:airi').status, 'paused')
+  const pausedRequest = world.events('budget.cap_paused')[0].request_id
+
+  await world.agent.request('continue', { sender: 'TTLouis' })
+  const resumed = world.events('request.received').at(-1)
+  assert.notEqual(resumed.request_id, pausedRequest)
+  assert.equal(resumed.data.interaction_intent, 'continue_current')
+  assert.equal(world.calls.length, STEAM_ROUNDS.length + 1, 'Resume reaches the planner again')
+  assert.equal(world.agent.providerBudgetGeneration, 1)
+  assert.equal(world.agent.providerBudgetGenerationOutputUnits, STEAM_SCRIPTED_BLOCKED_ANSWER.usage.output)
+})
+
+test('a terminal budget failure after the budget handoff recovery also pauses visibly instead of failing silently', async () => {
+  const canonical = ['Wait for the machine cycle', 'Inspect the result']
+  const calls = []
+  const events = []
+  const agent = makeAgent({
+    maxProviderOutputUnits: 3000,
+    onActivity: (event, data) => events.push({ event, data }),
+    provider: async () => {
+      calls.push(calls.length + 1)
+      if (calls.length === 1) {
+        return planMessage({
+          chatMessage: 'Waiting first.',
+          plan: canonical,
+          currentStep: 0,
+          operations: [{ name: 'wait', args: { ticks: 60 } }],
+        })
+      }
+      return exhaustedMessage()
+    },
+  })
+  // The recovery route itself throws a terminal budget error.
+  agent.recoverPlan = async () => {
+    const error = new Error('provider_output_budget_recovery_exhausted: fresh generation also spent its budget')
+    throw error
+  }
+  await agent.request('run the bounded recovery check', { sender: 'TTLouis' })
+  const result = await agent.completed()
+
+  assert.equal(result.goalStatus, 'paused')
+  assert.match(result.chatMessage, /^I paused this goal: the model request ran out of budget \(provider_output_budget_recovery_exhausted\)\. Press Resume/)
+  const paused = events.filter(entry => entry.event === 'budget.cap_paused')
+  assert.equal(paused.length, 1)
+  assert.equal(paused[0].data.source, 'budget_recovery_failed')
+  assert.equal(paused[0].data.previous_status, 'active')
+  assert.equal(events.some(entry => entry.event === 'request.failed'), false)
+  assert.equal(agent.memory.currentPlan('npc:airi').status, 'paused')
 })

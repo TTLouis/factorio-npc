@@ -157,6 +157,31 @@ test('multi-step task completes without any Jev correctness question family', as
   }
 })
 
+test('every step close rolls the provider budget generation, whichever path closed it (1.5)', async () => {
+  const world = harness()
+  const rolled = []
+  world.agent.onActivity = (event, data) => {
+    if (event === 'budget.generation_rolled') rolled.push(data)
+  }
+  await world.say('mine 10 iron, copper, and coal', 'new_goal')
+  await world.finish('iron-ore')
+  await world.finish('copper-ore')
+  await world.finish('coal')
+
+  // Step 1 closes on its inventory checkpoint, steps 2 and 3 on the planner's
+  // grounded semantic claim; each close starts a fresh generation.
+  assert.deepEqual(rolled.map(data => [data.reason, data.source, data.completed_count, data.generation]), [
+    ['step_closed', 'deterministic_completion_contract', 1, 2],
+    ['step_closed', 'main_planner_semantic', 2, 3],
+    ['step_closed', 'main_planner_semantic', 3, 4],
+  ])
+  for (const data of rolled) {
+    assert.equal(data.closed_steps, 1)
+    assert.equal(data.previous_generation, data.generation - 1)
+    assert.equal(Number.isSafeInteger(data.previous_generation_output_units), true)
+  }
+})
+
 test('a first-draft deterministic checkpoint commits without creating throwaway plan revisions', async () => {
   const game = new FakeFactorio()
   const memory = new CanonicalTaskBoardMemory()
