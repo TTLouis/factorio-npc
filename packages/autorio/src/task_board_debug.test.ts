@@ -154,6 +154,8 @@ describe('task board debug and UI freshness helpers', () => {
     expect(missing.think_slowest_round_effort).toBe('')
     expect(missing.time_estimate).toBe('')
     expect(missing.time_split).toBe('')
+    expect(missing.responsiveness).toBe('')
+    expect(sanitize_debug_snapshot({ responsiveness: 'first chat 2.1 s (acknowledged) · first action 96.4 s' }).responsiveness).toBe('first chat 2.1 s (acknowledged) · first action 96.4 s')
     const timed = sanitize_debug_snapshot({
       time_estimate: 'step 1: ~13.0 min hand mining on the NPC lane\n· running 4.0 min',
       time_split: 'think 4.0 min · actor busy 4.0 min · idle 6 s (1%)',

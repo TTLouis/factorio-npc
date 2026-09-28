@@ -73,6 +73,7 @@ import {
   typedProjectionQuestions,
 } from './jev-typed-projection.mjs'
 import { activeStepOf, parseTimeReview, PlanTiming } from './plan-time-estimate.mjs'
+import { ChatAcknowledger } from './responsiveness.mjs'
 import { UsageLedger } from './usage-ledger.mjs'
 import { abortSkillChoice, ensureSkillOffers, injectedSkillChars, refreshSkillOffersAtShelfPickup, SKILL_OFFERS_PREFIX, skillOffersContext, traceSkillLoaded, traceSkillsFollowed } from './skill-offers.mjs'
 
@@ -2426,6 +2427,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.planTiming = new PlanTiming()
     // 2.7: usage per goal and the goal budget warning.
     this.usageLedger = new UsageLedger({ outputCap: this.maxProviderOutputUnits })
+    this.chatAcknowledger = new ChatAcknowledger() // 2.10
   }
 
   async loadPersistentState() {
@@ -4477,6 +4479,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async request(text, options = {}) {
+    const requestStartedAt = Date.now() // 2.10: time zero for reply-latency metrics
     await this.loadPersistentState()
     const sender = options.sender ?? 'unknown'
     this.lastMemoryKey = `npc:${this.npcId}`
@@ -4755,7 +4758,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       interaction_intent: intent,
       action_omission_recovery: resumeActionOmission,
       provider_budget_handoff_resume: resumeProviderBudgetHandoff,
+      intake_ms: Date.now() - requestStartedAt,
     })
+    // 2.10: one acknowledgement, from the goal text and route, before any
+    // planner round. A player request only: recovery runs never enter here.
+    const acknowledgement = this.chatAcknowledger.acknowledge({ requestId: this.traceRequest.id, text, intent, origin: 'chat', startedAt: requestStartedAt })
+    if (acknowledgement) await this.traceEvent('chat.acknowledged', acknowledgement)
 
     if (intent === 'new_goal'
       && this.steeringDecisionProvider
