@@ -119,6 +119,9 @@ function add_debug_decision_rows(table: LuaGuiElement, debug: TaskBoardUiDebugSn
   const jev_request_fallback_percent = math.min(100, integer(debug.jev_request_fallback_percent))
   const jev_last_fallback = clean_text(debug.jev_last_fallback, 300)
   const decision_fallbacks_total = integer(debug.decision_fallbacks_total)
+  // Show clear Jev on/off status based on measurement
+  const jev_status = jev_measurement === 'jev_off' ? 'Jev: off (no key)' : 'Jev: on'
+  add_compact_row(table, 'Jev status', jev_status)
   // A degraded measurement means Jev mostly fell back: this request is not
   // evidence about Jev's judgments.
   add_compact_row(table, 'Jev health', jev_measurement.length > 0

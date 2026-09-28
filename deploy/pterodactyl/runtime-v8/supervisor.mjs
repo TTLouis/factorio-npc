@@ -2750,6 +2750,7 @@ async function main() {
   log(`User Factorio mod directory: ${path.join(root, 'mods')}`)
   log(`Managed runtime mod directory: ${path.join(root, '.airi', 'run-*', 'mods')} (internal; do not edit)`)
   log(`Operator help: ${path.join(root, 'README-SGLUNA.txt')}`)
+  log(`Jev: ${config.decisionProvider ? 'on' : 'off (no key)'}`)
 
   const handleSignal = () => {
     requestedStop = true
