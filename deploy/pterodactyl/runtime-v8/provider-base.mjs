@@ -1321,6 +1321,19 @@ export async function providerRequest(config, messages, {
     }
     check(message && typeof message === 'object', 'Provider response has no assistant message')
 
+    // LM Studio's OpenAI-compatible server returns `tool_calls: []` (or
+    // null) on a plain content reply instead of omitting the key. Every
+    // guard here and in npc-agent-loop.mjs tests `!== undefined` to detect
+    // an actual tool call, so a plain reply after tools were closed was
+    // read as "provider returned observation tools" and retried into
+    // blocked_before_mutation, even though the content was a valid decision
+    // and no DSML markup was involved. Normalize before anything below
+    // (including DSML recovery, which itself requires tool_calls to already
+    // be undefined) inspects tool_calls.
+    const emptyToolCallsNormalized = message.tool_calls === null
+      || (Array.isArray(message.tool_calls) && message.tool_calls.length === 0)
+    if (emptyToolCallsNormalized) delete message.tool_calls
+
     const rawContent = typeof message.content === 'string' ? message.content : ''
     const rawShape = contentShape(rawContent)
     const reasoningContentChars = providerReasoningChars(message)
@@ -1391,6 +1404,7 @@ export async function providerRequest(config, messages, {
       choice_keys: choice && typeof choice === 'object' ? Object.keys(choice) : [],
       message_keys: Object.keys(message),
       tool_call_count: toolCallCount,
+      empty_tool_calls_normalized: emptyToolCallsNormalized,
       dsml_recovery: dsmlRecovered,
       reasoning_content_chars: reasoningContentChars,
       ...rawShape,
