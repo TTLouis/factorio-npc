@@ -157,6 +157,31 @@ test('multi-step task completes without any Jev correctness question family', as
   }
 })
 
+test('every step close rolls the provider budget generation, whichever path closed it (1.5)', async () => {
+  const world = harness()
+  const rolled = []
+  world.agent.onActivity = (event, data) => {
+    if (event === 'budget.generation_rolled') rolled.push(data)
+  }
+  await world.say('mine 10 iron, copper, and coal', 'new_goal')
+  await world.finish('iron-ore')
+  await world.finish('copper-ore')
+  await world.finish('coal')
+
+  // Step 1 closes on its inventory checkpoint, steps 2 and 3 on the planner's
+  // grounded semantic claim; each close starts a fresh generation.
+  assert.deepEqual(rolled.map(data => [data.reason, data.source, data.completed_count, data.generation]), [
+    ['step_closed', 'deterministic_completion_contract', 1, 2],
+    ['step_closed', 'main_planner_semantic', 2, 3],
+    ['step_closed', 'main_planner_semantic', 3, 4],
+  ])
+  for (const data of rolled) {
+    assert.equal(data.closed_steps, 1)
+    assert.equal(data.previous_generation, data.generation - 1)
+    assert.equal(Number.isSafeInteger(data.previous_generation_output_units), true)
+  }
+})
+
 test('a first-draft deterministic checkpoint commits without creating throwaway plan revisions', async () => {
   const game = new FakeFactorio()
   const memory = new CanonicalTaskBoardMemory()
@@ -438,15 +463,11 @@ test('a semantic claim in a resume turn of a paused goal is sent back to the pla
   assert.equal(world.game.mutations.length, 1)
 
   // The coal batch completes; the planner call that follows fails and the
-  // supervisor pauses the goal, as the live 400 did.
+  // goal is paused, as the live 400 did (now by the loop, visibly).
   failNext = true
-  const failure = await world.finish('coal').then(() => undefined, error => error)
-  assert.match(failure?.message ?? '', /Provider HTTP 400/)
-  const paused = await pauseStrandedPlanAfterRequestError(
-    { agent: world.agent, currentPlanState: () => world.memory.currentPlan(KEY) },
-    failure.message,
-  )
-  assert.equal(paused?.status, 'paused')
+  const failure = await world.finish('coal')
+  assert.equal(failure.goalStatus, 'paused')
+  assert.match(world.memory.currentPlan(KEY).pause_reason, /^request_failed: Provider HTTP 400/)
   const openStep = world.memory.currentPlan(KEY).task_board.active_step_id
 
   const resumed = await world.say('continue', 'continue_current')
@@ -583,4 +604,144 @@ test('a refused placement with a dependent transfer goes back to the planner wit
   assert.equal(state.task_board.active_step_id, stepId)
   assert.equal(world.reducerPlan().plan_id, committed.plan_id)
   assert.equal(world.game.mutations.length, 3)
+})
+
+// ---------------------------------------------------------------------------
+// Item 1.5, widened (owner, 2026-09-28): any provider failure that pauses a
+// goal leaves it visibly paused -- one chat line, a Resume, and a goal.paused
+// trace event with the cause and request_id. Scripted provider failures only.
+// ---------------------------------------------------------------------------
+
+function tracedHarness(provider) {
+  const world = harness({ provider })
+  world.trace = []
+  world.agent.behaviorTrace = { emit: async record => { world.trace.push(record) } }
+  world.events = name => world.trace.filter(record => record.event === name)
+  return world
+}
+
+function assertOneResumeLine(chatMessage) {
+  assert.equal(typeof chatMessage, 'string')
+  assert.equal(/[\r\n]/.test(chatMessage), false)
+  assert.match(chatMessage, /Press Resume or say continue/)
+}
+
+test('a scripted provider failure after a step pauses the goal with one chat line, a Resume and a traced goal.paused', async () => {
+  let failures = 0
+  const cases = [
+    ['Provider HTTP 400; request will not be retried automatically', 'request_failed', /the model request failed/],
+    ['Provider response recovery exhausted after 2 attempts: Invalid provider content JSON', 'provider_recovery_exhausted', /could not get a usable model response/],
+    ['provider_semantic_alignment_failed: proposed operations still do not align with the active step', 'provider_semantic_alignment_failed', /did not match the current step/],
+  ]
+  for (const [message, cause, text] of cases) {
+    let failNext = false
+    const world = tracedHarness(async () => {
+      if (failNext) {
+        failNext = false
+        failures++
+        throw new Error(message)
+      }
+      return planReply({ plan: STEPS, operations: [gather('iron-ore', 10)], checkpoint: inventoryCheckpoint('iron-ore', 10) })
+    })
+    await world.say('mine 10 iron, copper, and coal', 'new_goal')
+    const requestId = world.events('request.received')[0].request_id
+
+    failNext = true
+    const result = await world.finish('iron-ore')
+
+    assert.equal(result.goalStatus, 'paused', cause)
+    assertOneResumeLine(result.chatMessage)
+    assert.match(result.chatMessage, text)
+    const state = world.memory.currentPlan(KEY)
+    assert.equal(state.status, 'paused')
+    assert.equal(state.pause_reason.startsWith(`${cause}: `), true)
+    assert.equal(world.agent.active, false)
+    // No silent request.failed: the request ends as a named pause.
+    assert.equal(world.events('request.failed').length, 0)
+    const completed = world.events('request.completed').at(-1)
+    assert.equal(completed.data.outcome, 'paused_provider_failure')
+    assert.equal(completed.data.reason, cause)
+
+    const paused = world.events('goal.paused')
+    assert.equal(paused.length, 1, cause)
+    assert.equal(paused[0].request_id, requestId)
+    assert.equal(paused[0].data.request_id, requestId)
+    assert.equal(paused[0].data.cause, cause)
+    assert.equal(paused[0].data.provider_failure, true)
+    assert.equal(paused[0].data.source, 'request.completed')
+    assert.equal(paused[0].data.chat_message, result.chatMessage)
+    assert.ok(paused[0].seq < completed.seq, 'goal.paused precedes the terminal event')
+    // The Resume path works: "continue" reaches the planner and resumes the goal.
+    const resumed = await world.say('continue', 'continue_current')
+    assert.equal(resumed.goalStatus, 'active')
+    assert.equal(world.events('goal.paused').length, 1, 'resuming is not a new pause')
+  }
+  assert.equal(failures, cases.length)
+})
+
+test('failures that fail upward (transient, action-omission repair) are paused by the supervisor and still traced as goal.paused with the failed request id', async () => {
+  const cases = [
+    // Transient: the supervisor pauses and schedules the automatic resume.
+    ['Provider timed out after 5000 ms', 'provider_transient'],
+    // The old silent auto-pause: the loop keeps its resumable repair state.
+    ['provider_action_omission_repair_failed: bounded act-or-block repair returned no executable operation and no explicit BLOCKED: reason', 'provider_action_omission_repair_failed'],
+  ]
+  for (const [message, cause] of cases) {
+    let failNext = false
+    const world = tracedHarness(async () => {
+      if (failNext) {
+        failNext = false
+        throw new Error(message)
+      }
+      return planReply({ plan: STEPS, operations: [gather('iron-ore', 10)], checkpoint: inventoryCheckpoint('iron-ore', 10) })
+    })
+    await world.say('mine 10 iron, copper, and coal', 'new_goal')
+    const requestId = world.events('request.received')[0].request_id
+
+    failNext = true
+    const failure = await world.finish('iron-ore').then(() => undefined, error => error)
+    assert.equal(failure?.message, message)
+    assert.equal(world.events('request.failed').length, 1)
+    assert.equal(world.events('goal.paused').length, 0)
+
+    // The supervisor's stranded-plan pause after the request unwound.
+    const paused = await pauseStrandedPlanAfterRequestError(
+      { agent: world.agent, currentPlanState: () => world.memory.currentPlan(KEY) },
+      failure.message,
+    )
+    assert.equal(paused?.status, 'paused')
+    const events = world.events('goal.paused')
+    assert.equal(events.length, 1, cause)
+    assert.equal(events[0].request_id, requestId)
+    assert.equal(events[0].data.request_id, requestId)
+    assert.equal(events[0].data.cause, cause)
+    assert.equal(events[0].data.provider_failure, true)
+    assert.equal(events[0].data.source, 'pause_persistent_plan')
+  }
+})
+
+test('a provider failure while Autorio still runs work does not pause the goal and names why', async () => {
+  let failNext = false
+  const world = tracedHarness(async () => {
+    if (failNext) {
+      failNext = false
+      throw new Error('Provider HTTP 400; request will not be retried automatically')
+    }
+    return planReply({ plan: STEPS, operations: [gather('iron-ore', 10)], checkpoint: inventoryCheckpoint('iron-ore', 10) })
+  })
+  await world.say('mine 10 iron, copper, and coal', 'new_goal')
+  failNext = true
+  world.game.inventory['iron-ore'] = 10
+  // The completion arrives while another Autorio task is still queued.
+  world.game.taskState = 'mining'
+  world.game.queueLength = 1
+  const failure = await world.agent.completed().then(() => undefined, error => error)
+  assert.match(failure?.message ?? '', /Provider HTTP 400/)
+  assert.equal(world.memory.currentPlan(KEY).status, 'active')
+  assert.equal(world.events('goal.paused').length, 0)
+  const skipped = world.events('goal.pause_skipped')
+  assert.equal(skipped.length, 1)
+  assert.equal(skipped[0].data.cause, 'request_failed')
+  assert.equal(skipped[0].data.reason, 'autorio_runtime_not_idle')
+  assert.equal(typeof skipped[0].request_id, 'string')
 })

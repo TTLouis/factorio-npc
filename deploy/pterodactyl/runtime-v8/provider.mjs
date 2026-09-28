@@ -53,6 +53,27 @@ function currentDifficultySignals(messages) {
   return failures
 }
 
+// Effort per round (plan item 1.3). The loop tells the provider what the round
+// has to do. `gather` is a round that cannot write or revise the plan: a
+// continuation round of a committed plan with the observation phase open.
+// Every round that offers submitPlan in a request that authors or revises a
+// plan is `decide`, because the model may write the plan in any of them (the
+// steam run's plan-writing round used 28,881 output units). So only the
+// continuation bracket (ordinary_planning) steps down for a gather round; the
+// authoring and replan brackets never do, and Jev's explicit budget ratings
+// and the recovery brackets are left alone.
+// Measured on the 2026-09-26 steam run (req_muhsihjg_1): completion requests
+// re-thought at high in every read round after round 0.
+export const ROUND_PHASES = Object.freeze(['gather', 'decide'])
+const GATHER_ROUND_POLICIES = Object.freeze({
+  ordinary_planning: { effort: 'low', reason: 'ordinary_planning_gather' },
+})
+
+function roundPhasePolicy(policy, options) {
+  if (!policy || options.roundPhase !== 'gather') return policy
+  return GATHER_ROUND_POLICIES[policy.reason] ?? policy
+}
+
 function semanticBudgetPolicy(value) {
   if (value === 'micro') return { effort: 'low', reason: 'jev_budget_micro' }
   if (value === 'normal') return { effort: 'high', reason: 'jev_budget_normal' }
@@ -62,6 +83,10 @@ function semanticBudgetPolicy(value) {
 }
 
 export function selectReasoningPolicy(config, messages, options = {}) {
+  return roundPhasePolicy(baseReasoningPolicy(config, messages, options), options)
+}
+
+function baseReasoningPolicy(config, messages, options = {}) {
   const capabilities = providerCapabilityProfile(config)
   if (!capabilities.reasoning_effort) return undefined
   // Auto may infer wire capabilities from the official endpoint, but dynamic
@@ -131,9 +156,14 @@ export function selectReasoningPolicy(config, messages, options = {}) {
 // Output caps are ceilings, not spend: a turn stops when it is done. A cap
 // that is too small costs twice, because the exhausted call is discarded and
 // retried, so every bracket leaves room for reasoning plus the plan itself.
+// The cap follows the effort (1.3): the one recorded max round that wrote a
+// plan (steam run, round 3) used 28,881 of a 32,000 cap, 90% of it
+// reasoning, so the writing bracket gets headroom; gather rounds run at a
+// lower effort and get that effort's bracket.
 function reasoningOutputBudget(policy) {
   switch (policy?.reason) {
-    case 'plan_authoring': return 32000
+    case 'plan_authoring': return 40000
+    case 'ordinary_planning_gather': return 6000
     case 'jev_budget_strategic': return 24000
     case 'jev_budget_deep': return 16000
     case 'ordinary_replan':
@@ -176,10 +206,31 @@ function reasoningBodyPatch(policy, capabilities) {
  * provider profile. Auto mode recognizes only the official DeepSeek endpoint;
  * unknown OpenAI-compatible gateways fail closed to generic fields.
  */
+// Reports the effort and output cap chosen for one call to the caller, so the
+// behavior trace can name the decision. Observability only: a failing
+// listener never changes or fails the provider request.
+async function reportReasoningPolicy(options, decision) {
+  if (typeof options.onReasoningPolicy !== 'function') return
+  try { await options.onReasoningPolicy(decision) }
+  catch { /* never let tracing fail a provider call */ }
+}
+
 export async function providerRequest(config, messages, options = {}) {
   const capabilities = providerCapabilityProfile(config)
   const policy = selectReasoningPolicy(config, messages, options)
-  if (!policy) return baseProviderRequest(config, messages, options)
+  const roundPhase = ROUND_PHASES.includes(options.roundPhase) ? options.roundPhase : undefined
+  if (!policy) {
+    const callerCap = options.requestBodyPatch?.max_tokens ?? options.requestBodyPatch?.max_completion_tokens
+    await reportReasoningPolicy(options, {
+      effort: undefined,
+      reason: capabilities.reasoning_effort ? 'reasoning_policy_not_applicable' : 'provider_has_no_reasoning_control',
+      round_phase: roundPhase,
+      output_cap: Number.isSafeInteger(callerCap) ? callerCap : undefined,
+      output_cap_source: Number.isSafeInteger(callerCap) ? 'caller' : 'provider_default',
+      capability_profile: capabilities.id,
+    })
+    return baseProviderRequest(config, messages, options)
+  }
 
   const semanticBudgetNeedsFullPlanner = ['normal', 'deep', 'strategic'].includes(options.reasoningBudget)
   const isCompletionContinuation = completionContinuation(messages, options)
@@ -210,6 +261,17 @@ export async function providerRequest(config, messages, options = {}) {
     },
   }
 
+  const requestedCap = requestOptions.requestBodyPatch.max_tokens ?? requestOptions.requestBodyPatch.max_completion_tokens
+  await reportReasoningPolicy(options, {
+    effort: policy.effort,
+    reason: policy.reason,
+    round_phase: roundPhase,
+    output_cap: Number.isSafeInteger(requestedCap) ? requestedCap : undefined,
+    output_cap_source: policyBudget !== undefined
+      ? 'effort_bracket'
+      : Number.isSafeInteger(requestedCap) ? 'caller' : (compactPath ? 'compact_path' : 'provider_default'),
+    capability_profile: capabilities.id,
+  })
   return baseProviderRequest(config, messages, requestOptions)
 }
 
