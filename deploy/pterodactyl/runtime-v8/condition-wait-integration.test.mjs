@@ -778,3 +778,100 @@ test('read-only observation batches above the four-call turn cap execute the bou
   assert.match(agent.messages.at(-1)?.content ?? '', /partially admitted/i)
   assert.match(agent.messages.at(-1)?.content ?? '', /deferred 1/i)
 })
+
+// Plan 2.5: waits from game data.
+function machineOutputObservation({ current, satisfied = false, working = true, eta } = {}) {
+  return JSON.stringify({
+    ok: true,
+    kind: 'entity_inventory_count',
+    satisfied,
+    current,
+    minimum: 10,
+    unit_number: 582,
+    progressing: working,
+    progress_known: true,
+    entity_status: working ? 1 : 0,
+    ...(eta ? { eta } : {}),
+  })
+}
+
+test('a working machine checkpoint becomes a completion wait instead of a guessed wait', async () => {
+  const { agent, memory, mainCalls } = makeAgent()
+  memory.planByNpc.get('npc:airi').task_board.steps[0].completion_contract = {
+    mode: 'all',
+    requirements: [{ id: 'plates', kind: 'entity_inventory_count', unit_number: 582, item_name: 'iron-plate', minimum: 10 }],
+  }
+  agent.recordLiveEntityObservation({
+    name: 'stone-furnace',
+    type: 'furnace',
+    unit_number: 582,
+    position: { x: 4, y: 0 },
+    working: true,
+    status: 1,
+  }, { x: 0, y: 0 }, 'getEntityStatus')
+
+  const result = await agent.commitPlan({
+    chatMessage: 'The furnace is smelting the plates.',
+    plan: ['Smelt required material', 'Craft requested item'],
+    currentStep: 1,
+    operations: [],
+  })
+
+  const wait = memory.planByNpc.get('npc:airi').condition_wait
+  assert.equal(result.goalStatus, 'active')
+  assert.equal(wait?.mode, 'completion')
+  assert.deepEqual(wait?.condition, { kind: 'entity_inventory_count', unit_number: 582, item_name: 'iron-plate', minimum: 10 })
+  assert.equal(mainCalls(), 0)
+})
+
+test('the machine expectation sets the wake deadline and is traced once', async () => {
+  const { agent, memory, rcon } = makeAgent()
+  const durable = memory.planByNpc.get('npc:airi')
+  durable.condition_wait = makeConditionWait(
+    { kind: 'entity_inventory_count', unit_number: 582, item_name: 'iron-plate', minimum: 10 },
+    { goalId: durable.goal_id, stepId: durable.task_board.active_step_id, actorId: agent.epoch.actor_id, actorEpoch: agent.epoch.epoch },
+  )
+  const events = []
+  agent.traceEvent = async (event, data) => { events.push({ event, data }) }
+
+  rcon.pendingCondition = machineOutputObservation({ current: 2, eta: { recipe: 'iron-plate', seconds_per_craft: 3.2, crafts_needed: 8, seconds_to_target: 24.8, seconds_until_idle: 40 } })
+  const first = await agent.pollConditionWait()
+  assert.equal(first.action, 'waiting')
+  const scheduled = memory.planByNpc.get('npc:airi').condition_wait
+  assert.equal(scheduled.expected_seconds, 24.8)
+  assert.ok(scheduled.timeout_ms >= Math.ceil((24.8 * 1.5 + 30) * 1000) && scheduled.timeout_ms < 70_000, String(scheduled.timeout_ms))
+  assert.ok(Number.isFinite(scheduled.expected_finish_at))
+
+  rcon.pendingCondition = machineOutputObservation({ current: 5, eta: { seconds_to_target: 16 } })
+  await agent.pollConditionWait()
+  assert.equal(memory.planByNpc.get('npc:airi').condition_wait.timeout_ms, scheduled.timeout_ms)
+  assert.equal(memory.planByNpc.get('npc:airi').condition_wait.expected_seconds, 16)
+  assert.equal(events.filter(entry => entry.event === 'runtime.condition_scheduled').length, 1)
+
+  // The checkpoint holding closes the step; elapsed time never does.
+  rcon.pendingCondition = machineOutputObservation({ current: 10, satisfied: true })
+  const verified = await agent.pollConditionWait()
+  assert.equal(verified.action, 'verified')
+  assert.equal(verified.state.task_board.completed_count, 1)
+})
+
+test('an overrun wakes the planner with expected and elapsed seconds, never a completion', async () => {
+  const { agent, memory, rcon } = makeAgent()
+  const durable = memory.planByNpc.get('npc:airi')
+  durable.condition_wait = makeConditionWait(
+    { kind: 'entity_inventory_count', unit_number: 582, item_name: 'iron-plate', minimum: 10 },
+    { goalId: durable.goal_id, stepId: durable.task_board.active_step_id, actorId: agent.epoch.actor_id, actorEpoch: agent.epoch.epoch },
+  )
+  rcon.pendingCondition = machineOutputObservation({ current: 3, eta: { seconds_to_target: 20 } })
+  const first = await agent.pollConditionWait()
+  assert.equal(first.action, 'waiting')
+
+  // Move the registration back past the derived deadline (20 s x 1.5 + 30 s).
+  const wait = memory.planByNpc.get('npc:airi').condition_wait
+  wait.registered_at -= wait.timeout_ms
+  const overrun = await agent.pollConditionWait()
+  assert.equal(overrun.action, 'timeout')
+  assert.equal(overrun.expected_seconds, 20)
+  assert.ok(overrun.elapsed_seconds >= 60, String(overrun.elapsed_seconds))
+  assert.equal(memory.planByNpc.get('npc:airi').task_board.completed_count, 0)
+})

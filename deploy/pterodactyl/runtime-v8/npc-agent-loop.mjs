@@ -72,6 +72,7 @@ import {
   typedProjectionOperationPolicy,
   typedProjectionQuestions,
 } from './jev-typed-projection.mjs'
+import { checkpointWaitRequirement, conditionEta, safeWaitSchedule, scheduleWait, WAIT_BASIS } from './production-wait.mjs'
 import { abortSkillChoice, ensureSkillOffers, injectedSkillChars, refreshSkillOffersAtShelfPickup, SKILL_OFFERS_PREFIX, skillOffersContext, traceSkillLoaded, traceSkillsFollowed } from './skill-offers.mjs'
 
 export { AgentLoopError }
@@ -202,6 +203,8 @@ Write chatMessage and plan steps in the language of the player's message.
 Plan entries must represent goal-bearing Factorio work or verification. Do not add terminal lifecycle/meta steps such as "Stop", "Done", "Finish", or "Report completion"; stopping after the verified goal is represented by returning plan: [], currentStep: 0, operations: [].
 
 An empty operations array normally means no new Autorio world action will happen after your reply. Never claim that a finite action is continuing when neither a new operation nor a live persistent runtime mode exists. Persistent controllers such as follow are different: if a read-only status tool proves the controller is active, healthy, and live, operations: [] may accurately describe that background mode without submitting a duplicate operation. When the whole requested goal is actually verified complete, return plan: [], currentStep: 0, operations: [], and say it is complete.
+
+To wait for a furnace or assembler, do not guess wait ticks: when you start it, give the step a checkpoint on that machine's output (entity_inventory_count); once an observation shows it working, return operations: []. The harness keeps you asleep until the checkpoint holds and wakes you if the machine stops or overruns the finish it derives from the recipe time and the machine's live crafting speed.
 
 When finite canonical work remains but execution is truthfully impossible, keep the remaining plan and start chatMessage with "BLOCKED: " followed by the exact missing fact or blocker. This is the explicit no-mutation blocker contract. Future-tense prose such as "I will take the items" is not a blocker and does not authorize the harness to invent an operation.
 
@@ -472,6 +475,7 @@ function safeConditionWait(value) {
     timeout_ms: Number.isSafeInteger(value.timeout_ms) ? Math.max(1000, Math.min(value.timeout_ms, 2 * 60 * 60 * 1000)) : 30 * 60 * 1000,
     registered_at: Number.isFinite(value.registered_at) ? value.registered_at : Date.now(),
     updated_at: Number.isFinite(value.updated_at) ? value.updated_at : Date.now(),
+    ...safeWaitSchedule(value),
   }
 }
 
@@ -539,11 +543,13 @@ function conditionWaitLifecycleMatches(wait, deployment) {
 }
 
 function normalizedConditionObservation(observation) {
+  const eta = observation?.ok === true ? conditionEta(observation) : undefined
   return observation?.ok === true
     ? {
         satisfied: observation.satisfied === true,
         progressing: observation.progressing === true,
         progress_known: observation.progress_known === true,
+        ...(eta ? { eta } : {}),
         summary: cleanMemoryText(JSON.stringify({
           kind: observation.kind,
           current: observation.current,
@@ -2890,6 +2896,23 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  // A completion wait on the active step's own checkpoint when it is one
+  // output count on a machine last seen working (plan 2.5): the planner sleeps
+  // until the checkpoint holds, the machine stops, or the game-data deadline.
+  checkpointWaitCandidate(state = this.memory.currentPlan?.(this.activePlanKey())) {
+    if (!state || state.status !== 'active' || !state.task_board?.active_step_id) return undefined
+    const checkpoint = persistedStepCheckpoint(state.task_board, state.task_board.active_step_id)
+    const requirement = checkpointWaitRequirement(checkpoint?.contract, unitNumber => this.liveObservedExactTarget(unitNumber)?.working === true)
+    if (!requirement) return undefined
+    return makeConditionWait(requirement, {
+      goalId: state.goal_id,
+      stepId: state.task_board.active_step_id,
+      mode: 'completion',
+      actorId: this.epoch?.actor_id,
+      actorEpoch: this.epoch?.epoch,
+    })
+  }
+
   passiveProgressWaitCandidate(state = this.memory.currentPlan?.(this.activePlanKey())) {
     if (!state || state.status !== 'active' || !state.task_board?.active_step_id) return undefined
     const observations = [...(this.liveEntityObservations?.values?.() ?? [])].reverse()
@@ -3023,15 +3046,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
 
     const normalizedObservation = normalizedConditionObservation(observation)
-    const result = applyConditionObservation(wait, normalizedObservation)
+    // Plan 2.5: the machine's expected finish from game data sets the wake
+    // deadline and the expected finish the planner sees.
+    const schedule = scheduleWait(wait, normalizedObservation.eta)
+    const result = applyConditionObservation(schedule.wait, normalizedObservation)
     return {
       action: result.action,
       healthy: result.action === 'waiting',
       state: current,
-      wait,
+      wait: schedule.wait,
       identity,
       observation: normalizedObservation,
       result,
+      scheduled: schedule.scheduled,
     }
   }
 
@@ -3068,6 +3095,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (result.action === 'waiting') {
         const updated = this.memory.updateConditionWait?.(key, result.wait)
         await this.persistState()
+        if (inspected.scheduled) {
+          await this.traceEvent('runtime.condition_scheduled', {
+            wait_id: identity.wait_id,
+            mode: result.wait?.mode,
+            expected_seconds: result.wait?.expected_seconds,
+            timeout_ms: result.wait?.timeout_ms,
+            max_checks: result.wait?.max_checks,
+            limited_by: result.wait?.eta_limited_by,
+            eta: normalizedObservation?.eta,
+            basis: WAIT_BASIS,
+          })
+        }
         await this.traceEvent('runtime.condition_waiting', {
           wait_id: identity.wait_id,
           condition: wait.condition,
@@ -3118,13 +3157,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         : result.action === 'wake'
           ? 'runtime.condition_progress_stopped'
           : 'runtime.condition_failed'
+      // Expected vs elapsed is a fact for the woken planner, not a guess.
+      const timing = Number.isFinite(wait?.expected_seconds)
+        ? { expected_seconds: wait.expected_seconds, elapsed_seconds: Math.round((Date.now() - wait.registered_at) / 100) / 10 }
+        : {}
       await this.traceEvent(event, {
         wait_id: identity.wait_id,
         condition: wait?.condition,
         reason: result.reason,
         observation: normalizedObservation,
+        ...timing,
       })
-      return { action: result.action, wait_id: identity.wait_id, state: updated, reason: result.reason, observation: normalizedObservation }
+      return { action: result.action, wait_id: identity.wait_id, state: updated, reason: result.reason, observation: normalizedObservation, ...timing }
     })()
     try {
       return await this.conditionPollPromise
@@ -7486,7 +7530,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       ? previousState.condition_wait
       : undefined
     if (!conditionWait && commands.length === 0 && remainingCanonicalWork && !runtimeHealthy) {
-      const candidate = this.passiveProgressWaitCandidate(previousState)
+      const candidate = this.checkpointWaitCandidate(previousState) ?? this.passiveProgressWaitCandidate(previousState)
       if (candidate && this.requestInfo) {
         const waiting = this.memory.registerConditionWait?.(this.requestInfo.memoryKey, candidate)
         if (waiting?.condition_wait) {

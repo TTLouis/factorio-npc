@@ -2429,6 +2429,7 @@ export class Session {
             condition_wait_id: result.wait_id,
             reason: result.reason,
             source: 'runtime_condition',
+            ...(Number.isFinite(result.expected_seconds) ? { expected_seconds: result.expected_seconds, elapsed_seconds: result.elapsed_seconds } : {}),
           })
           if (!resumed) await this.syncTaskBoardUi(result.state)
         }
