@@ -152,6 +152,16 @@ describe('task board debug and UI freshness helpers', () => {
     expect(missing.think_total_ms).toBe(0)
     expect(missing.think_slowest_round_ms).toBe(0)
     expect(missing.think_slowest_round_effort).toBe('')
+    expect(missing.time_estimate).toBe('')
+    expect(missing.time_split).toBe('')
+    const timed = sanitize_debug_snapshot({
+      time_estimate: 'step 1: ~13.0 min hand mining on the NPC lane\n· running 4.0 min',
+      time_split: 'think 4.0 min · actor busy 4.0 min · idle 6 s (1%)',
+    })
+    expect(timed.time_estimate).toBe('step 1: ~13.0 min hand mining on the NPC lane · running 4.0 min')
+    expect(timed.time_split).toBe('think 4.0 min · actor busy 4.0 min · idle 6 s (1%)')
+    expect(missing.goal_spend).toBe('')
+    expect(sanitize_debug_snapshot({ goal_spend: 'out 107k · in 905k (68% cached) · 37 calls · 1 verified' }).goal_spend).toBe('out 107k · in 905k (68% cached) · 37 calls · 1 verified')
 
     const malformed = sanitize_debug_snapshot({
       response_id: { secret: 'do not stringify arbitrary objects into the debug UI' },

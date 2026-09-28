@@ -72,6 +72,8 @@ import {
   typedProjectionOperationPolicy,
   typedProjectionQuestions,
 } from './jev-typed-projection.mjs'
+import { activeStepOf, parseTimeReview, PlanTiming } from './plan-time-estimate.mjs'
+import { UsageLedger } from './usage-ledger.mjs'
 import { abortSkillChoice, ensureSkillOffers, injectedSkillChars, refreshSkillOffersAtShelfPickup, SKILL_OFFERS_PREFIX, skillOffersContext, traceSkillLoaded, traceSkillsFollowed } from './skill-offers.mjs'
 
 export { AgentLoopError }
@@ -2420,6 +2422,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.decisionTrace = this.interactionDecisionProvider && decisionTraceFile
       ? new BehaviorTraceWriter(decisionTraceFile, message => this.log(`[decision-trace] ${message}`))
       : null
+    // 2.6: harness time estimates, the time review and the request time split.
+    this.planTiming = new PlanTiming()
+    // 2.7: usage per goal and the goal budget warning.
+    this.usageLedger = new UsageLedger({ outputCap: this.maxProviderOutputUnits })
   }
 
   async loadPersistentState() {
@@ -2614,6 +2620,25 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       super.prepareContinuationContext()
       const planContext = this.memory.planContext?.(this.activePlanKey())
       if (planContext) this.messages.push({ role: 'user', content: planContext })
+    }
+    this.pushTimeEstimateContext()
+  }
+
+  // 2.6: while a timed step runs, the planner sees its estimate against the
+  // elapsed time, and a parallelization prompt when it is long on one lane or
+  // has overrun (overrun traced once per step).
+  pushTimeEstimateContext() {
+    try {
+      const context = this.planTiming?.continuationContext(this.peekPlanState(this.activePlanKey()), {
+        actorId: this.epoch?.actor_id,
+        epoch: this.epoch?.epoch,
+      })
+      if (!context) return
+      this.messages.push({ role: 'user', content: context.text })
+      if (context.event) void this.traceEvent(context.event[0], context.event[1])
+    }
+    catch (error) {
+      this.log(`[time] continuation estimate failed: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -5251,7 +5276,44 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return this.writeTraceEvent(event, data, requestId)
   }
 
+  // Every event also passes through the time accounting (2.6) and the goal
+  // usage ledger (2.7), which may add derived events (request.time_split
+  // before a terminal event, plan.time_estimate after an admitted batch,
+  // step.time_measured after a step closes, budget.goal_warning once per
+  // goal). Derived events skip that pass.
   writeTraceEvent(event, data = {}, requestId) {
+    const timing = this.observePlanTiming(event, data)
+    if (!timing) return this.emitTraceRecord(event, data, requestId)
+    const writes = timing.before.map(([name, payload]) => this.emitTraceRecord(name, payload))
+    writes.push(this.emitTraceRecord(event, data, requestId))
+    for (const [name, payload] of timing.after) writes.push(this.emitTraceRecord(name, payload))
+    return Promise.all(writes).then(() => undefined)
+  }
+
+  observePlanTiming(event, data) {
+    if (!this.planTiming && !this.usageLedger) return undefined
+    try {
+      const state = this.peekPlanState(this.activePlanKey())
+      const context = {
+        requestId: this.traceRequest?.id,
+        state: event === 'operations.ack' ? state : undefined,
+        actorId: this.epoch?.actor_id,
+        epoch: this.epoch?.epoch,
+        goalId: state?.goal_id && state.status !== 'completed' ? state.goal_id : undefined,
+        stepGoalId: state?.goal_id,
+      }
+      const timing = this.planTiming?.observe(event, data, context) ?? { before: [], after: [] }
+      const usage = this.usageLedger?.observe(event, data, context) ?? { before: [], after: [] }
+      const result = { before: [...timing.before, ...usage.before], after: [...timing.after, ...usage.after] }
+      return result.before.length > 0 || result.after.length > 0 ? result : undefined
+    }
+    catch (error) {
+      this.log(`[trace] time accounting failed: ${error instanceof Error ? error.message : String(error)}`)
+      return undefined
+    }
+  }
+
+  emitTraceRecord(event, data = {}, requestId) {
     if (this.onActivity) {
       try { this.onActivity(event, data) }
       catch (error) { this.log(`[trace] activity listener failed: ${error instanceof Error ? error.message : String(error)}`) }
@@ -6489,6 +6551,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let roadmapNodeIds
     let developmentMode
     let semanticCompletion
+    let timeReview
     let baseMessage = message
     if (typeof message?.content === 'string') {
       let raw
@@ -6546,7 +6609,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           }
           checkpoint = { ...checkpoint, source: 'planner_semantic_checkpoint' }
         }
+        // 2.6: the model's answer to a time review; traced, never executed.
+        if (Object.prototype.hasOwnProperty.call(raw, 'timeReview')) timeReview = parseTimeReview(raw.timeReview)
         if (checkpoint || semanticCompletion || roadmap || roadmapNodeIds || developmentMode || goalDefinition
+          || Object.prototype.hasOwnProperty.call(raw, 'timeReview')
           || Object.prototype.hasOwnProperty.call(raw, 'goal')
           || Object.prototype.hasOwnProperty.call(raw, 'roadmap')
           || Object.prototype.hasOwnProperty.call(raw, 'roadmapNodeIds')
@@ -6559,6 +6625,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             roadmapNodeIds: _roadmapNodeIds,
             developmentMode: _developmentMode,
             goal: _goal,
+            timeReview: _timeReview,
             ...base
           } = raw
           baseMessage = { ...message, content: JSON.stringify(base) }
@@ -6572,6 +6639,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (roadmapNodeIds) plan.roadmapNodeIds = roadmapNodeIds
     if (developmentMode) plan.developmentMode = developmentMode
     if (goalDefinition) plan.goalDefinition = goalDefinition
+    if (timeReview) plan.timeReview = timeReview
     if (semanticCompletion) {
       // Refused here, the claim reaches the planner as a correction it can act
       // on; refused in commitPlan, it failed the request (live, 2026-09-25).
@@ -7396,7 +7464,43 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return { applied: true, state: reduced.state }
   }
 
+  // 2.6 (W2c): the harness estimates the draft batch from game rates before
+  // anything is recorded. A draft that runs long on the NPC's one lane, from a
+  // request with no estimate tool call, is held for one review round: the
+  // draft is not committed, so no committed plan changes, and the model may
+  // resubmit it unchanged with a traced reason.
+  async reviewPlanTime(plan) {
+    if (!this.planTiming || !this.traceRequest || !Array.isArray(plan?.operations) || plan.operations.length === 0) return undefined
+    let result
+    try {
+      const state = this.peekPlanState(this.activePlanKey())
+      result = await this.planTiming.reviewDraft(this.rcon, plan, {
+        actorId: this.epoch?.actor_id,
+        epoch: this.epoch?.epoch,
+        requestId: this.traceRequest.id,
+        currentStep: plan.currentStep,
+        activeStep: activeStepOf(state),
+        estimateToolCalled: this.planTiming.estimateToolCalledThisRequest(),
+        // Recovery rounds run without tools, and a blocked plan waits for the
+        // player: neither gets a review round.
+        recoveryMode: Boolean((this.recoveryCommitDepth ?? 0) > 0 || this.genericRecoveryDecisionActive
+          || this.outputBudgetRecoveryGuard || this.actionOmissionRepairActive || state?.status === 'blocked'),
+      })
+    }
+    catch (error) {
+      this.log(`[time] plan estimate failed: ${error instanceof Error ? error.message : String(error)}`)
+      return undefined
+    }
+    for (const [name, payload] of result.events) await this.traceEvent(name, payload)
+    if (!result.hold) return undefined
+    this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
+    this.messages.push({ role: 'user', content: result.message })
+    return { held: true, result: await this.runTurn() }
+  }
+
   async commitPlan(plan) {
+    const timeReview = await this.reviewPlanTime(plan)
+    if (timeReview?.held === true) return timeReview.result
     plan = await this.applyLowRiskTypedProjection(plan)
     const triggerSource = this.reasoningTriggerSource ?? this.planUpdateReason
     const commands = plan.operations.map(renderOperation)
@@ -8230,7 +8334,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  // Every commit reached through recovery (Jev recovery routes, the budget
+  // handoff's fresh generation, format recovery) runs with the 2.6 time
+  // review off: a held draft there would run a full planner turn inside the
+  // recovery and could turn a recovery that commits into a failed one.
   async recoverPlan(generation, reason, roundBase) {
+    this.recoveryCommitDepth = (this.recoveryCommitDepth ?? 0) + 1
+    try {
+      return await this.recoverPlanRoute(generation, reason, roundBase)
+    }
+    finally {
+      this.recoveryCommitDepth--
+    }
+  }
+
+  async recoverPlanRoute(generation, reason, roundBase) {
     const reasonText = reason instanceof Error ? reason.message : String(reason)
     const recovery = {
       reason: reasonText,

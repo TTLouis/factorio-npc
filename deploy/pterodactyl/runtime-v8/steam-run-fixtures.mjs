@@ -291,6 +291,80 @@ export class RecordedSteamFactorio extends FakeFactorio {
   }
 }
 
+// Base-game 2.0 prototype facts the mod's production_estimate reads for hand
+// work (item 2.6): each ore's mining_time, the character's mining speed and
+// hand crafting speed, and a few recipes' energy. The answer below is the
+// mod's own arithmetic (production_estimate_live.ts: hand mining =
+// mining_time / mining speed per cycle; hand crafting = energy / crafting
+// speed), so the harness estimate is tested against what the game would say.
+export const STEAM_PROTOTYPES = Object.freeze({
+  character_mining_speed: 0.5,
+  hand_crafting_speed: 1,
+  mining_time: Object.freeze({ 'iron-ore': 1, 'copper-ore': 1, coal: 1, stone: 1 }),
+  recipes: Object.freeze({
+    'stone-furnace': { energy: 0.5, output: 1 },
+    'iron-gear-wheel': { energy: 0.5, output: 1 },
+  }),
+})
+
+export function productionEstimateAnswer(text, prototypes = STEAM_PROTOTYPES) {
+  const field = name => new RegExp(`${name}='([^']+)'`).exec(text)?.[1]
+  const target = field('target')
+  const resource = field('resource')
+  const count = Number(/count=(\d+)/.exec(text)?.[1] ?? 1)
+  let step
+  if (resource !== undefined) {
+    const miningTime = prototypes.mining_time[resource]
+    if (!miningTime) return { ok: false, error: `step ${target}: no resource hand mining can mine yields ${target}` }
+    step = { item: target, kind: 'hand_mine', source: resource, seconds_per_cycle: miningTime / prototypes.character_mining_speed, output_per_cycle: 1 }
+  }
+  else {
+    const recipe = prototypes.recipes[target]
+    if (!recipe) return { ok: false, error: `step ${target}: nothing the actor can hand craft or hand mine makes ${target}` }
+    step = { item: target, kind: 'hand_craft', source: target, seconds_per_cycle: recipe.energy / prototypes.hand_crafting_speed, output_per_cycle: recipe.output }
+  }
+  const cycles = Math.ceil(count / step.output_per_cycle)
+  const busy = cycles * step.seconds_per_cycle
+  return {
+    ok: true,
+    target,
+    count,
+    total_seconds: busy,
+    hand_lane_seconds: busy,
+    bottleneck: { lane: 'hand', finish_seconds: busy },
+    steps: [{
+      item: step.item,
+      kind: step.kind,
+      source: step.source,
+      machine_count: 1,
+      cycles,
+      amount: cycles * step.output_per_cycle,
+      seconds_per_cycle: step.seconds_per_cycle,
+      output_per_minute: step.output_per_cycle / step.seconds_per_cycle * 60,
+      busy_seconds: busy,
+      finish_seconds: busy,
+    }],
+  }
+}
+
+// The recorded steam world that also answers the production estimate, as the
+// live mod does. RecordedSteamFactorio alone answers '{}' there, which the
+// harness reads as "no game rate".
+export class TimedSteamFactorio extends RecordedSteamFactorio {
+  constructor(options = {}) {
+    super(options)
+    this.estimateReads = 0
+  }
+
+  async command(text) {
+    if (text.includes('"autorio_knowledge","production_estimate"')) {
+      this.estimateReads++
+      return JSON.stringify(productionEstimateAnswer(text))
+    }
+    return super.command(text)
+  }
+}
+
 // The live system prompt is tens of kilobytes; the first recorded request
 // carried 53,992 message characters. A toy prompt would hide working-context
 // and compaction behavior, so the replay uses one of comparable size.
@@ -317,13 +391,18 @@ export function steamReplayHarness({
   maxProviderOutputUnits = 100000,
   promptTraceFile = null,
   extraRounds = [],
+  // Replaces the recorded round order (extraRounds still follow it), for a
+  // scenario that inserts scripted rounds mid-run.
+  rounds: roundsOverride,
+  // A game subclass for scenarios that need more of the world answered.
+  game: gameOverride,
   // When set, chat is routed like the live stack (the router answers with
   // this intent) instead of bypassing the interaction router.
   routedIntent,
 } = {}) {
-  const game = new RecordedSteamFactorio()
+  const game = gameOverride ?? new RecordedSteamFactorio()
   const memory = new CanonicalTaskBoardMemory()
-  const rounds = [...STEAM_ROUNDS, ...extraRounds]
+  const rounds = [...(roundsOverride ?? STEAM_ROUNDS), ...extraRounds]
   const calls = []
   const trace = []
 
