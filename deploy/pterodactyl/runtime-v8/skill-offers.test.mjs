@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
+import { emptyJevHealth, recordJevHealth, summarizeJevHealth } from './jev-health.mjs'
 import { DECISION_PROVIDER_DEFAULTS, normalizeDecisionProviderRequest } from './provider.mjs'
 import {
   ensureSkillOffers,
@@ -20,6 +21,7 @@ import {
   parseSkillOffers,
   refreshSkillOffersAtShelfPickup,
   renderSkillCard,
+  sanitizeSkillCard,
   SKILL_CARD_MAX_CHARS,
   SKILL_CHOICE_MODE,
   SKILL_OFFERS_PREFIX,
@@ -489,8 +491,9 @@ function fakeLoop(game, jev) {
     skillDecisionProvider: jev,
     epoch: { epoch: 3, actor_id: 18 },
     activePlanKey: () => 'npc:airi',
+    decisions: [],
     traceEvent: async (event, data) => { traced.push({ event, data }) },
-    decisionTraceEvent: async () => {},
+    async decisionTraceEvent(event, data) { this.decisions.push({ event, data }) },
     log: () => {},
   }
 }
@@ -609,4 +612,117 @@ test('no match or a failed lookup offers nothing, traces why, and never blocks p
   const oldMod = await scenario({ game: new SkillFactorio({ offer: { ok: false, error: 'Unknown interface: offer' } }) })
   assert.equal(oldMod.events('skill.offer_skipped')[0].data.reason, 'lookup_failed')
   assert.equal(oldMod.events('skill.ranked').length, 0)
+})
+
+test('shadow skill_choice stays out of the Jev health window, so a cancelled shadow call cannot mark a request degraded', async () => {
+  const health = emptyJevHealth()
+  recordJevHealth(health, 'decision.request', { contract: 'interaction_planner_shape' })
+  recordJevHealth(health, 'decision.response', { contract: 'interaction_planner_shape' })
+  recordJevHealth(health, 'decision.request', { contract: 'skill_choice', shadow: true })
+  recordJevHealth(health, 'decision.fallback', { contract: 'skill_choice', shadow: true, reason: 'skill_choice cancelled: superseded_by_newer_offer' })
+  const summary = summarizeJevHealth(health)
+  assert.equal(summary.measurement, 'valid')
+  assert.equal(summary.requests, 1)
+  assert.equal(summary.fallbacks, 0)
+  assert.equal(summary.by_contract.skill_choice, undefined)
+
+  // Every decision event the shadow skill_choice emits carries shadow: true.
+  const answered = fakeLoop(new SkillFactorio(), recordingJev(async (_state, questions) => questions.skill_choice
+    ? { overrides: { skill_choice: { choice: 'steam-power-bootstrap', confidence: 0.9 } } }
+    : undefined))
+  await ensureSkillOffers(answered, { memoryKey: 'npc:airi', intent: 'new_goal', text: STEAM_GOAL })
+  await answered.skillChoicePending
+  const failing = fakeLoop(new SkillFactorio(), recordingJev(async (_state, questions) => {
+    if (questions.skill_choice) throw new Error('Decision provider HTTP 503')
+    return undefined
+  }))
+  await ensureSkillOffers(failing, { memoryKey: 'npc:airi', intent: 'new_goal', text: STEAM_GOAL })
+  await failing.skillChoicePending
+  const events = [...answered.decisions, ...failing.decisions]
+  assert.deepEqual(events.map(entry => entry.event).sort(), ['decision.fallback', 'decision.request', 'decision.request', 'decision.response'])
+  assert.ok(events.every(entry => entry.data.shadow === true))
+
+  // Through the real loop: a shadow call cancelled by the user adds nothing to the window.
+  const jev = recordingJev(async (_state, questions, _call, context) => {
+    if (!questions.skill_choice) return undefined
+    await new Promise((_resolve, reject) => context.signal.addEventListener('abort', () => reject(context.signal.reason)))
+    return undefined
+  })
+  const agent = new NpcAgentLoop({
+    rcon: new SkillFactorio(),
+    memory: new CanonicalTaskBoardMemory(),
+    systemPrompt: 'skill health scenario',
+    npcId: 'airi',
+    stateFile: null,
+    traceFile: null,
+    decisionTraceFile: null,
+    skillDecisionProvider: jev,
+    provider: async () => planReply({ plan: ['Build steam power', 'Check it'], operations: [{ name: 'wait', args: { ticks: 1 } }] }),
+  })
+  await agent.request(STEAM_GOAL, { sender: 'Louis' })
+  agent.cancel('user_stop_immediate')
+  await agent.skillChoicePending
+  assert.equal(agent.jevHealth.requests, 0)
+  assert.equal(agent.jevHealth.fallbacks, 0)
+})
+
+test('card text is cut by code points and never splits an emoji', () => {
+  const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
+  const card = sanitizeSkillCard({
+    id: 'emoji-card',
+    name: `${'a'.repeat(76)}${'😀'.repeat(5)}`,
+    summary: `${'x'.repeat(166)}${'😀'.repeat(5)}`,
+    produces: [`${'p'.repeat(58)}😀😀`],
+    needs: [],
+    matched: [],
+    score: 1,
+  })
+  assert.doesNotMatch(card.name, lone)
+  assert.doesNotMatch(card.summary, lone)
+  assert.equal(card.summary, `${'x'.repeat(166)}😀...`)
+  assert.equal(card.name, `${'a'.repeat(76)}😀...`)
+  assert.equal(card.produces[0], `${'p'.repeat(58)}😀😀`, 'within the limit in code points, so kept whole')
+  assert.doesNotMatch(renderSkillCard(card), lone)
+  // Short text is untouched.
+  assert.equal(sanitizeSkillCard({ id: 'short', name: 'Steam 😀' }).name, 'Steam 😀')
+})
+
+test('two overlapping decisions pair each decision.exchange with its own decision_id and contract', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-decision-pairing-'))
+  const decisionTraceFile = path.join(dir, 'sgluna-decision.jsonl')
+  const answer = { answers: {}, provider: 'fixture-jev', model: 'fixture' }
+  const agent = new NpcAgentLoop({
+    rcon: new SkillFactorio(),
+    memory: new CanonicalTaskBoardMemory(),
+    systemPrompt: 'decision pairing',
+    provider: async () => planReply({ plan: ['unused'], operations: [] }),
+    npcId: 'airi',
+    stateFile: null,
+    traceFile: null,
+    decisionTraceFile,
+    interactionDecisionProvider: async () => answer,
+    skillDecisionProvider: async () => answer,
+  })
+  // The shadow skill_choice announces its request, then a routing decision
+  // announces its own before either provider call starts.
+  await agent.decisionTraceEvent('decision.request', { decision_id: 'decision_skill', contract: 'skill_choice', shadow: true })
+  await agent.decisionTraceEvent('decision.request', { decision_id: 'decision_route', contract: 'interaction_planner_shape' })
+  // The routing call runs first; the skill call names its decision.
+  await agent.interactionDecisionProvider({ contract: 'interaction_planner_shape' }, { intent: { type: 'noul' } })
+  await agent.skillDecisionProvider({ contract: 'skill_choice' }, { skill_choice: { type: 'noul' } }, { decisionId: 'decision_skill' })
+  // A third pair without any hint still pairs by contract.
+  await agent.decisionTraceEvent('decision.request', { decision_id: 'decision_skill_2', contract: 'skill_choice', shadow: true })
+  await agent.decisionTraceEvent('decision.request', { decision_id: 'decision_route_2', contract: 'interaction_planner_shape' })
+  await agent.skillDecisionProvider({ contract: 'skill_choice' }, { skill_choice: { type: 'noul' } })
+  await agent.interactionDecisionProvider({ contract: 'interaction_planner_shape' }, { intent: { type: 'noul' } })
+
+  const rows = (await fsp.readFile(decisionTraceFile, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+  const exchanges = rows.filter(row => row.event === 'decision.exchange').map(row => [row.decision_id, row.data.contract])
+  assert.deepEqual(exchanges, [
+    ['decision_route', 'interaction_planner_shape'],
+    ['decision_skill', 'skill_choice'],
+    ['decision_skill_2', 'skill_choice'],
+    ['decision_route_2', 'interaction_planner_shape'],
+  ])
+  assert.equal(agent.pendingDecisionRequests.size, 0)
 })

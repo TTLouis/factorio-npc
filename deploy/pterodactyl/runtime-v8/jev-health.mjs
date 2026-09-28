@@ -63,7 +63,11 @@ function contractBucket(health, contract) {
 }
 
 // Returns the classified fallback for 'decision.fallback', otherwise undefined.
+// Shadow decisions (data.shadow === true, e.g. the skill_choice shadow) steer
+// nothing and may settle after their request ended, so they stay out of the
+// per-request window; the decision trace and skill.ranked record them.
 export function recordJevHealth(health, event, data = {}) {
+  if (data?.shadow === true) return undefined
   if (event === 'decision.request') {
     health.requests += 1
     contractBucket(health, data.contract).requests += 1
@@ -109,4 +113,36 @@ export function summarizeJevHealth(health, { configured = true } = {}) {
     by_kind: { ...health.by_kind },
     last_fallback: health.last_fallback ? { ...health.last_fallback } : null,
   }
+}
+
+// Pairs each decision.request with the provider call it announced, so two
+// overlapping decisions (a shadow skill_choice next to a routing decision)
+// never swap decision_id/contract in the decision.exchange rows. A caller may
+// name its decision in the provider context (decisionId); otherwise the
+// oldest pending request of the same contract is taken, then the oldest.
+const MAX_PENDING_DECISIONS = 16
+
+export function recordPendingDecisionRequest(owner, data = {}) {
+  if (!(owner.pendingDecisionRequests instanceof Map)) owner.pendingDecisionRequests = new Map()
+  const pending = owner.pendingDecisionRequests
+  const key = data?.decision_id ?? `anonymous_${pending.size}_${Date.now()}`
+  pending.set(key, { decision_id: data?.decision_id, contract: data?.contract })
+  while (pending.size > MAX_PENDING_DECISIONS) pending.delete(pending.keys().next().value)
+}
+
+export function takePendingDecisionRequest(owner, state, context = {}) {
+  const pending = owner.pendingDecisionRequests
+  if (!(pending instanceof Map) || pending.size === 0) return undefined
+  const contract = typeof state?.contract === 'string' ? state.contract : state?.reason
+  let key
+  if (context?.decisionId !== undefined && pending.has(context.decisionId)) key = context.decisionId
+  if (key === undefined) {
+    for (const [candidate, entry] of pending) {
+      if (entry.contract === contract) { key = candidate; break }
+    }
+  }
+  if (key === undefined) key = pending.keys().next().value
+  const entry = pending.get(key)
+  pending.delete(key)
+  return entry
 }

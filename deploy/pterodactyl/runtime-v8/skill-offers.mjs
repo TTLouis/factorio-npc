@@ -42,10 +42,14 @@ const SKILL_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const NAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,99}$/
 const STATUSES = new Set(['observed', 'candidate', 'verified', 'deprecated'])
 
+// Bounded single-line text, cut by code points so an emoji (a UTF-16
+// surrogate pair) is never split.
 function text(value, max) {
   if (typeof value !== 'string') return ''
   const clean = value.replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim()
-  return clean.length <= max ? clean : `${clean.slice(0, max - 3)}...`
+  if (clean.length <= max) return clean
+  const points = Array.from(clean)
+  return points.length <= max ? clean : `${points.slice(0, max - 3).join('')}...`
 }
 
 // The longest prefix of `value` that fits in `maxBytes` UTF-8 bytes, cut on a
@@ -235,10 +239,12 @@ async function runSkillChoice(loop, offer, trigger, base) {
     loop.skillChoiceAbort = controller
     const epoch = { epoch: loop.epoch?.epoch, actor_id: loop.epoch?.actor_id }
     const correlation = { decision_id: decisionId, offer_seq: offer.seq, offer_request_id: offer.request_id }
+    const shadow = SKILL_CHOICE_MODE === SKILL_CHOICE_MODES.SHADOW
     await loop.decisionTraceEvent('decision.request', {
       decision_id: decisionId,
       contract: SKILL_CHOICE_CONTRACT,
       mode: SKILL_CHOICE_MODE,
+      shadow,
       question_ids: Object.keys(questions),
     })
     const startedAt = Date.now()
@@ -248,6 +254,7 @@ async function runSkillChoice(loop, offer, trigger, base) {
         contract: SKILL_CHOICE_CONTRACT,
         reason,
         fallback: 'deterministic_skill_order',
+        shadow,
       })
       await loop.traceEvent('skill.ranked', {
         ...base,
@@ -261,7 +268,7 @@ async function runSkillChoice(loop, offer, trigger, base) {
     }
     let response
     try {
-      response = await loop.skillDecisionProvider(state, questions, { epoch: epoch.epoch, actorId: epoch.actor_id, signal: controller.signal })
+      response = await loop.skillDecisionProvider(state, questions, { epoch: epoch.epoch, actorId: epoch.actor_id, signal: controller.signal, decisionId })
     }
     catch (error) {
       await failed(jevFailureOutcome(error, controller), text(error instanceof Error ? error.message : String(error), 300))
@@ -294,6 +301,7 @@ async function runSkillChoice(loop, offer, trigger, base) {
       pick: choice.pick,
       confidence: choice.confidence,
       latency_ms: latency,
+      shadow,
     })
     const confident = choice.pick !== 'none' && choice.confidence >= SKILL_CHOICE_MIN_CONFIDENCE
     const applied = confident && SKILL_CHOICE_MODE === SKILL_CHOICE_MODES.ADVISORY
