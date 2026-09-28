@@ -1169,6 +1169,16 @@ export async function providerRequest(config, messages, {
         message.content = dsml.tool_calls[0].function.arguments
         dsmlRecovered = 'submit_plan_content'
       }
+      else {
+        // Tools are off, so any other recovered call (an observation tool,
+        // several invokes, a non-submitPlan single call) is not usable.
+        // Drop it: keep the cleaned leading text (the markup stripped out)
+        // and never reintroduce tool_calls, or the runtime will see a
+        // "provider returned tools after tools were closed" failure and
+        // retry into blocked_before_mutation. Traced so it is visible.
+        message.content = dsml.content
+        dsmlRecovered = 'dropped_tools_off'
+      }
     }
     else if (dsml) {
       message.content = dsml.content
