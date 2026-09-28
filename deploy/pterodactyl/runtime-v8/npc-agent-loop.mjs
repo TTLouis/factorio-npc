@@ -72,7 +72,7 @@ import {
   typedProjectionOperationPolicy,
   typedProjectionQuestions,
 } from './jev-typed-projection.mjs'
-import { ensureSkillOffers, injectedSkillChars, refreshSkillOffersAtShelfPickup, SKILL_OFFERS_PREFIX, skillOffersContext, traceSkillLoaded, traceSkillsFollowed } from './skill-offers.mjs'
+import { abortSkillChoice, ensureSkillOffers, injectedSkillChars, refreshSkillOffersAtShelfPickup, SKILL_OFFERS_PREFIX, skillOffersContext, traceSkillLoaded, traceSkillsFollowed } from './skill-offers.mjs'
 
 export { AgentLoopError }
 
@@ -4819,6 +4819,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const paused = this.goalPausedTrace('pause_persistent_plan')
       if (paused) await this.traceEvent('goal.paused', paused, { requestId: paused.request_id })
     }
+    abortSkillChoice(this, reason) // 2.8 hook: stop, identity/actor change
     super.cancel()
     return state
   }
@@ -5884,6 +5885,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.recoveryDecisionAbort = null
     this.operationProjectionAbort?.abort()
     this.operationProjectionAbort = null
+    abortSkillChoice(this, reason) // 2.8 hook
     if (/terminate|new_task|cancel_current|user_cancel/i.test(String(reason))) this.clearLoadedSkillContext()
     this.reasoningTriggerSource = null
     void this.traceEvent('request.cancelled', { reason, usage: this.traceRequest?.usage })

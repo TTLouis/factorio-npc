@@ -14,7 +14,8 @@
 //   The block is shown only in plan-authoring and revision rounds, never in
 //   rounds that carry out a committed step. No per-step re-offers.
 // - Jev's `skill_choice` runs in SHADOW mode (owner, 2026-09-28): its pick is
-//   traced but never reaches the prompt. The path is shadow -> advisory ->
+//   traced but never reaches the prompt, and the call is not awaited, so it
+//   adds no planning latency. The path is shadow -> advisory ->
 //   part of the decision loop; flip SKILL_CHOICE_MODE, not a user setting.
 // - Loading full details stays explicit through getSkillDetails.
 //
@@ -201,84 +202,143 @@ function planningGoal(loop, memoryKey) {
   return planning?.goal?.status === 'active' ? planning : undefined
 }
 
-async function rankWithJev(loop, offer, trigger) {
-  const deterministic = offer.cards.map(card => card.id)
-  const base = { trigger, deterministic_order: deterministic, mode: SKILL_CHOICE_MODE }
-  if (typeof loop.skillDecisionProvider !== 'function') {
-    await loop.traceEvent('skill.ranked', { ...base, source: 'deterministic', reason: 'jev_unavailable' })
-    return
-  }
-  const questions = skillChoiceQuestions(offer.cards)
-  const decisionId = `decision_${Date.now().toString(36)}_skill_${(++loop.decisionRequestSequence).toString(36)}`
-  const state = {
-    contract: SKILL_CHOICE_CONTRACT,
-    goal: offer.goal,
-    trigger,
-    candidate_count: offer.cards.length,
-  }
-  // A newer search, or a cancelled request, aborts the older Jev call.
-  loop.skillChoiceAbort?.abort()
-  const controller = new AbortController()
-  loop.skillChoiceAbort = controller
-  await loop.decisionTraceEvent('decision.request', {
-    decision_id: decisionId,
-    contract: SKILL_CHOICE_CONTRACT,
-    mode: SKILL_CHOICE_MODE,
-    question_ids: Object.keys(questions),
-  })
-  const startedAt = Date.now()
-  let choice
+function jevFailureOutcome(error, controller) {
+  if (controller.signal.aborted) return 'aborted'
+  const message = error instanceof Error ? error.message : String(error)
+  if (/timed out|timeout/i.test(message)) return 'timeout'
+  if (/abort|cancel/i.test(message)) return 'aborted'
+  return 'error'
+}
+
+// Aborts the in-flight Jev skill_choice call, if any. Hooked into loop
+// cancel/stop; a newer search calls it too.
+export function abortSkillChoice(loop, reason = 'cancelled') {
+  const controller = loop?.skillChoiceAbort
+  if (!controller) return
+  loop.skillChoiceAbort = null
+  controller.abort(new Error(`skill_choice cancelled: ${reason}`))
+}
+
+// One Jev skill_choice call over the offer's cards. Resolves to nothing and
+// never rejects: every outcome is traced as skill.ranked. The result is kept
+// only when the offer is still the current one for the same actor epoch; a
+// late answer for a replaced offer or a replaced actor is traced and dropped.
+async function runSkillChoice(loop, offer, trigger, base) {
+  let controller
   try {
-    const response = await loop.skillDecisionProvider(state, questions, {
-      epoch: loop.epoch?.epoch,
-      actorId: loop.epoch?.actor_id,
-      signal: controller.signal,
+    const questions = skillChoiceQuestions(offer.cards)
+    const decisionId = `decision_${Date.now().toString(36)}_skill_${(++loop.decisionRequestSequence).toString(36)}`
+    const state = { contract: SKILL_CHOICE_CONTRACT, goal: offer.goal, trigger, candidate_count: offer.cards.length }
+    // A newer search aborts the older Jev call.
+    abortSkillChoice(loop, 'superseded_by_newer_offer')
+    controller = new AbortController()
+    loop.skillChoiceAbort = controller
+    const epoch = { epoch: loop.epoch?.epoch, actor_id: loop.epoch?.actor_id }
+    const correlation = { decision_id: decisionId, offer_seq: offer.seq, offer_request_id: offer.request_id }
+    await loop.decisionTraceEvent('decision.request', {
+      decision_id: decisionId,
+      contract: SKILL_CHOICE_CONTRACT,
+      mode: SKILL_CHOICE_MODE,
+      question_ids: Object.keys(questions),
     })
-    if (controller.signal.aborted) throw new Error('skill_choice cancelled: superseded')
-    choice = parseSkillChoice(response, offer.cards)
-    if (!choice) throw new Error('skill_choice answer missing or not one of the offered ids')
+    const startedAt = Date.now()
+    const failed = async (outcome, reason) => {
+      await loop.decisionTraceEvent('decision.fallback', {
+        decision_id: decisionId,
+        contract: SKILL_CHOICE_CONTRACT,
+        reason,
+        fallback: 'deterministic_skill_order',
+      })
+      await loop.traceEvent('skill.ranked', {
+        ...base,
+        ...correlation,
+        source: 'deterministic',
+        outcome,
+        reason: outcome === 'error' ? 'jev_error' : `jev_${outcome}`,
+        error: reason,
+        latency_ms: Date.now() - startedAt,
+      })
+    }
+    let response
+    try {
+      response = await loop.skillDecisionProvider(state, questions, { epoch: epoch.epoch, actorId: epoch.actor_id, signal: controller.signal })
+    }
+    catch (error) {
+      await failed(jevFailureOutcome(error, controller), text(error instanceof Error ? error.message : String(error), 300))
+      return
+    }
+    // A late answer: the call was aborted, the offer was replaced, or the actor changed.
+    const stale = controller.signal.aborted
+      ? text(controller.signal.reason instanceof Error ? controller.signal.reason.message : String(controller.signal.reason ?? 'skill_choice cancelled'), 200)
+      : loop.skillOffers !== offer
+        ? 'skill_choice cancelled: superseded_by_newer_offer'
+        // The offer can be made before the request captures its epoch; only
+        // a known epoch that later changed counts as a replaced actor.
+        : (epoch.epoch !== undefined && (loop.epoch?.epoch !== epoch.epoch || loop.epoch?.actor_id !== epoch.actor_id))
+            ? 'skill_choice cancelled: actor epoch changed'
+            : ''
+    if (stale) {
+      await failed('aborted', stale)
+      return
+    }
+    const choice = parseSkillChoice(response, offer.cards)
+    if (!choice) {
+      await failed('error', 'skill_choice answer missing or not one of the offered ids')
+      return
+    }
+    const latency = Date.now() - startedAt
     await loop.decisionTraceEvent('decision.response', {
       decision_id: decisionId,
       contract: SKILL_CHOICE_CONTRACT,
       mode: SKILL_CHOICE_MODE,
       pick: choice.pick,
       confidence: choice.confidence,
-      latency_ms: Date.now() - startedAt,
+      latency_ms: latency,
+    })
+    const confident = choice.pick !== 'none' && choice.confidence >= SKILL_CHOICE_MIN_CONFIDENCE
+    const applied = confident && SKILL_CHOICE_MODE === SKILL_CHOICE_MODES.ADVISORY
+    offer.jev = { pick: choice.pick, confidence: choice.confidence, order: choice.order }
+    offer.advisor = applied ? { applied: true, pick: choice.pick, confidence: choice.confidence } : null
+    await loop.traceEvent('skill.ranked', {
+      ...base,
+      ...correlation,
+      source: 'jev',
+      outcome: 'ranked',
+      reason: confident ? 'jev_confident_pick' : choice.pick === 'none' ? 'jev_none_fits' : 'jev_low_confidence',
+      jev_order: choice.order,
+      jev_pick: choice.pick,
+      confidence: choice.confidence,
+      agrees_with_top: choice.pick === base.deterministic_order[0],
+      prompt_applied: applied,
+      latency_ms: latency,
     })
   }
   catch (error) {
-    const reason = text(error instanceof Error ? error.message : String(error), 300)
-    await loop.decisionTraceEvent('decision.fallback', {
-      decision_id: decisionId,
-      contract: SKILL_CHOICE_CONTRACT,
-      reason,
-      fallback: 'deterministic_skill_order',
-    })
-    await loop.traceEvent('skill.ranked', { ...base, source: 'deterministic', reason: 'jev_error', decision_id: decisionId, error: reason })
-    return
+    loop.log?.(`[skills] skill_choice failed: ${error instanceof Error ? error.message : String(error)}`)
   }
   finally {
-    if (loop.skillChoiceAbort === controller) loop.skillChoiceAbort = null
+    if (controller && loop.skillChoiceAbort === controller) loop.skillChoiceAbort = null
   }
-  const confident = choice.pick !== 'none' && choice.confidence >= SKILL_CHOICE_MIN_CONFIDENCE
-  const applied = confident && SKILL_CHOICE_MODE === SKILL_CHOICE_MODES.ADVISORY
-  offer.advisor = applied ? { applied: true, pick: choice.pick, confidence: choice.confidence } : null
-  await loop.traceEvent('skill.ranked', {
-    ...base,
-    source: 'jev',
-    reason: confident ? 'jev_confident_pick' : choice.pick === 'none' ? 'jev_none_fits' : 'jev_low_confidence',
-    decision_id: decisionId,
-    jev_order: choice.order,
-    jev_pick: choice.pick,
-    confidence: choice.confidence,
-    agrees_with_top: choice.pick === deterministic[0],
-    prompt_applied: applied,
-  })
+}
+
+// Shadow mode: nothing uses Jev's answer, so the call starts and the planner
+// goes on without waiting (plan 2.10, responsiveness). Advisory mode awaits,
+// because its answer would go into the prompt.
+async function rankWithJev(loop, offer, trigger) {
+  const base = { trigger, deterministic_order: offer.cards.map(card => card.id), mode: SKILL_CHOICE_MODE }
+  if (typeof loop.skillDecisionProvider !== 'function') {
+    await loop.traceEvent('skill.ranked', { ...base, offer_seq: offer.seq, source: 'deterministic', outcome: 'skipped', reason: 'jev_unavailable' })
+    return
+  }
+  const job = runSkillChoice(loop, offer, trigger, base)
+  loop.skillChoicePending = job
+  if (SKILL_CHOICE_MODE === SKILL_CHOICE_MODES.ADVISORY) await job
 }
 
 // One complete search: ask the mod, keep the cards, trace, then Jev's shadow
 // pick. Never throws; a failure leaves no offer and says why.
 async function searchSkills(loop, { memoryKey, goal, trigger, intent }) {
+  abortSkillChoice(loop, 'superseded_by_newer_search')
   const query = utf8Prefix(goal, SKILL_OFFER_MAX_GOAL_BYTES)
   if (!query) {
     loop.skillOffers = null
@@ -303,10 +363,12 @@ async function searchSkills(loop, { memoryKey, goal, trigger, intent }) {
     })
     return null
   }
-  const offer = { memoryKey, goal: query, trigger, cards: parsed.cards, advisor: null, authoring: true }
+  loop.skillOfferSequence = (loop.skillOfferSequence ?? 0) + 1
+  const offer = { seq: loop.skillOfferSequence, request_id: loop.traceRequest?.id, memoryKey, goal: query, trigger, cards: parsed.cards, advisor: null, jev: null, authoring: true }
   loop.skillOffers = offer
   loop.lastFollowedSkillKey = null
   await loop.traceEvent('skill.offered', {
+    offer_seq: offer.seq,
     trigger,
     reason: trigger,
     intent,

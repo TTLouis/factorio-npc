@@ -14,6 +14,7 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { DECISION_PROVIDER_DEFAULTS, normalizeDecisionProviderRequest } from './provider.mjs'
 import {
+  ensureSkillOffers,
   injectedSkillChars,
   parseSkillChoice,
   parseSkillOffers,
@@ -116,6 +117,8 @@ async function scenario({ game = new SkillFactorio(), jev, planner, intents, req
     await agent.request(requests[index], { sender: 'Louis' })
     if (index === 0 && afterFirst) await afterFirst(agent)
   }
+  // Shadow Jev is not awaited by the loop; let it settle before reading the trace.
+  await agent.skillChoicePending
   const rows = (await fsp.readFile(traceFile, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
   return { agent, game, calls, rows, events: name => rows.filter(row => row.event === name) }
 }
@@ -263,6 +266,8 @@ test('Jev runs in shadow mode: its pick is traced with a cancel signal but never
   assert.equal(ranked.data.source, 'jev')
   assert.equal(ranked.data.mode, 'shadow')
   assert.equal(ranked.data.reason, 'jev_confident_pick')
+  assert.equal(ranked.data.outcome, 'ranked')
+  assert.ok(Number.isFinite(ranked.data.latency_ms))
   assert.equal(ranked.data.jev_pick, 'starter-mining-belt-output')
   assert.equal(ranked.data.agrees_with_top, false)
   assert.equal(ranked.data.prompt_applied, false)
@@ -278,6 +283,7 @@ test('a failing or unsure Jev falls back to the deterministic order and says why
   const [fallback] = failed.events('skill.ranked')
   assert.equal(fallback.data.source, 'deterministic')
   assert.equal(fallback.data.reason, 'jev_error')
+  assert.equal(fallback.data.outcome, 'error')
   assert.match(fallback.data.error, /HTTP 503/)
   assert.ok(offersIn(failed.calls[0]))
 
@@ -369,6 +375,7 @@ test('shelf pickup runs a complete search for the next shelf node and logs Jev\'
     },
   }
   const offer = await refreshSkillOffersAtShelfPickup(loop, planning)
+  await loop.skillChoicePending
   assert.equal(game.offerRequests.length, 1)
   assert.equal(game.offerRequests[0].goal, 'Steam power for electricity. Electric drills and assemblers need power')
   assert.equal(offer.shelf_node_id, 'node_power')
@@ -401,6 +408,192 @@ test('the working-character ceiling counts the injected skill text', async () =>
   const expected = skillOffersContext(agent).length + agent.skillContext().length
   assert.ok(expected > 0)
   assert.equal(injectedSkillChars(agent), expected)
+})
+
+function deferred() {
+  let resolve
+  const promise = new Promise(done => { resolve = done })
+  return { promise, resolve }
+}
+
+const PICK_STEAM = {
+  answers: {
+    skill_choice: {
+      type: 'choice',
+      choice: 'steam-power-bootstrap',
+      confidence: 0.9,
+      probabilities: { 'steam-power-bootstrap': 0.9, 'starter-mining-belt-output': 0.05, 'none': 0.05 },
+    },
+  },
+  provider: 'fixture-jev',
+  model: 'fixture',
+}
+
+test('shadow Jev adds no planning latency: the planner runs and the request ends before a slow Jev answers', async () => {
+  const order = []
+  const gate = deferred()
+  const jev = recordingJev(async (_state, questions) => {
+    if (!questions.skill_choice) return undefined
+    order.push('jev_started')
+    await gate.promise
+    order.push('jev_answered')
+    return PICK_STEAM
+  })
+  const game = new SkillFactorio()
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-skill-latency-'))
+  const traceFile = path.join(dir, 'sgluna-behavior.jsonl')
+  const agent = new NpcAgentLoop({
+    rcon: game,
+    memory: new CanonicalTaskBoardMemory(),
+    systemPrompt: 'skill latency scenario',
+    npcId: 'airi',
+    stateFile: null,
+    traceFile,
+    decisionTraceFile: null,
+    skillDecisionProvider: jev,
+    provider: async () => {
+      order.push('planner')
+      return planReply({ plan: ['Build steam power', 'Check it'], operations: [{ name: 'wait', args: { ticks: 1 } }] })
+    },
+  })
+  await agent.request(STEAM_GOAL, { sender: 'Louis' })
+  order.push('request_done')
+  assert.ok(order.includes('jev_started'), 'Jev was asked')
+  assert.deepEqual(order.filter(step => step !== 'jev_started'), ['planner', 'request_done'], 'the planner did not wait for Jev')
+  const before = (await fsp.readFile(traceFile, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+  assert.equal(before.filter(row => row.event === 'skill.ranked').length, 0, 'nothing is ranked while Jev is still thinking')
+
+  gate.resolve()
+  await agent.skillChoicePending
+  assert.deepEqual(order.slice(-1), ['jev_answered'])
+  const rows = (await fsp.readFile(traceFile, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+  const ranked = rows.filter(row => row.event === 'skill.ranked')
+  assert.equal(ranked.length, 1)
+  assert.equal(ranked[0].data.outcome, 'ranked')
+  assert.equal(ranked[0].data.mode, 'shadow')
+  assert.equal(ranked[0].data.jev_pick, 'steam-power-bootstrap')
+  assert.ok(Number.isFinite(ranked[0].data.latency_ms))
+  const offered = rows.find(row => row.event === 'skill.offered')
+  assert.equal(ranked[0].data.offer_request_id, offered.request_id, 'a late event still names the request that made the offer')
+  assert.equal(ranked[0].data.offer_seq, offered.data.offer_seq)
+  assert.equal(agent.skillOffers.jev.pick, 'steam-power-bootstrap')
+})
+
+function fakeLoop(game, jev) {
+  const traced = []
+  return {
+    traced,
+    rcon: game,
+    skillOffers: null,
+    decisionRequestSequence: 0,
+    skillDecisionProvider: jev,
+    epoch: { epoch: 3, actor_id: 18 },
+    activePlanKey: () => 'npc:airi',
+    traceEvent: async (event, data) => { traced.push({ event, data }) },
+    decisionTraceEvent: async () => {},
+    log: () => {},
+  }
+}
+
+test('a late Jev answer for a replaced offer is traced as aborted and never written into any offer', async () => {
+  const gates = []
+  // This Jev ignores the abort signal, so the late answer really arrives.
+  const jev = recordingJev(async (_state, questions) => {
+    if (!questions.skill_choice) return undefined
+    const gate = deferred()
+    gates.push(gate)
+    await gate.promise
+    return PICK_STEAM
+  })
+  const loop = fakeLoop(new SkillFactorio(), jev)
+  const first = await ensureSkillOffers(loop, { memoryKey: 'npc:airi', intent: 'new_goal', text: STEAM_GOAL })
+  const firstJob = loop.skillChoicePending
+  const second = await ensureSkillOffers(loop, { memoryKey: 'npc:airi', intent: 'new_goal', text: `${STEAM_GOAL} now` })
+  const secondJob = loop.skillChoicePending
+  assert.notEqual(first, second)
+  assert.equal(loop.skillOffers, second)
+
+  gates[0].resolve()
+  await firstJob
+  const stale = loop.traced.filter(entry => entry.event === 'skill.ranked')
+  assert.equal(stale.length, 1)
+  assert.equal(stale[0].data.outcome, 'aborted')
+  assert.equal(stale[0].data.offer_seq, first.seq)
+  assert.match(stale[0].data.error, /superseded/)
+  assert.equal(first.jev, null)
+  assert.equal(second.jev, null, 'the late answer is not written into the newer offer')
+
+  gates[1].resolve()
+  await secondJob
+  const fresh = loop.traced.filter(entry => entry.event === 'skill.ranked')[1]
+  assert.equal(fresh.data.outcome, 'ranked')
+  assert.equal(fresh.data.offer_seq, second.seq)
+  assert.equal(second.jev.pick, 'steam-power-bootstrap')
+})
+
+test('a late Jev answer after the actor changed is dropped, and a timeout is traced as timeout', async () => {
+  const gate = deferred()
+  const jev = recordingJev(async (_state, questions) => {
+    if (!questions.skill_choice) return undefined
+    await gate.promise
+    return PICK_STEAM
+  })
+  const loop = fakeLoop(new SkillFactorio(), jev)
+  const offer = await ensureSkillOffers(loop, { memoryKey: 'npc:airi', intent: 'new_goal', text: STEAM_GOAL })
+  loop.epoch = { epoch: 4, actor_id: 19 }
+  gate.resolve()
+  await loop.skillChoicePending
+  const [replaced] = loop.traced.filter(entry => entry.event === 'skill.ranked')
+  assert.equal(replaced.data.outcome, 'aborted')
+  assert.match(replaced.data.error, /actor epoch changed/)
+  assert.equal(offer.jev, null)
+
+  const slow = recordingJev(async (_state, questions) => {
+    if (questions.skill_choice) throw new Error('Decision provider request timed out after 5000 ms')
+    return undefined
+  })
+  const timed = fakeLoop(new SkillFactorio(), slow)
+  await ensureSkillOffers(timed, { memoryKey: 'npc:airi', intent: 'new_goal', text: STEAM_GOAL })
+  await timed.skillChoicePending
+  const [timeout] = timed.traced.filter(entry => entry.event === 'skill.ranked')
+  assert.equal(timeout.data.outcome, 'timeout')
+  assert.equal(timeout.data.reason, 'jev_timeout')
+})
+
+test('loop cancel and stop abort an in-flight Jev skill call', async () => {
+  const signals = []
+  const jev = recordingJev(async (_state, questions, _call, context) => {
+    if (!questions.skill_choice) return undefined
+    signals.push(context.signal)
+    await new Promise((_resolve, reject) => context.signal.addEventListener('abort', () => reject(context.signal.reason)))
+    return undefined
+  })
+  const run = async (stop) => {
+    const game = new SkillFactorio()
+    const agent = new NpcAgentLoop({
+      rcon: game,
+      memory: new CanonicalTaskBoardMemory(),
+      systemPrompt: 'skill cancel scenario',
+      npcId: 'airi',
+      stateFile: null,
+      traceFile: null,
+      decisionTraceFile: null,
+      skillDecisionProvider: jev,
+      provider: async () => planReply({ plan: ['Build steam power', 'Check it'], operations: [{ name: 'wait', args: { ticks: 1 } }] }),
+    })
+    const events = []
+    agent.onActivity = (event, data) => events.push({ event, data })
+    await agent.request(STEAM_GOAL, { sender: 'Louis' })
+    const signal = signals.at(-1)
+    assert.equal(signal.aborted, false, 'still thinking after the request')
+    await stop(agent)
+    await agent.skillChoicePending
+    assert.equal(signal.aborted, true)
+    const ranked = events.filter(entry => entry.event === 'skill.ranked')
+    assert.equal(ranked.at(-1).data.outcome, 'aborted')
+  }
+  await run(agent => agent.cancel('user_stop_immediate'))
+  await run(agent => agent.pausePersistentPlan('npc_identity_or_session_changed'))
 })
 
 test('no match or a failed lookup offers nothing, traces why, and never blocks planning', async () => {
