@@ -1273,3 +1273,131 @@ test('a terminal budget failure after the budget handoff recovery also pauses vi
   assert.equal(events.some(entry => entry.event === 'request.failed'), false)
   assert.equal(agent.memory.currentPlan('npc:airi').status, 'paused')
 })
+
+// ---------------------------------------------------------------------------
+// 1.9 hook: the working-context compaction ceiling follows the provider
+// profile's declared context window; profiles without one keep 28 / 40,000.
+// ---------------------------------------------------------------------------
+
+function ceilingAgent({ providerConfig, provider, rcon = new FakeRcon() } = {}) {
+  const trace = []
+  const agent = new NpcAgentLoop({
+    rcon,
+    provider: provider ?? (async () => planMessage({
+      chatMessage: 'Waiting.',
+      plan: ['Wait once'],
+      currentStep: 0,
+      operations: [{ name: 'wait', args: { ticks: 1 } }],
+    })),
+    providerConfig,
+    memory: new CanonicalTaskBoardMemory(),
+    systemPrompt: 'compaction ceiling test prompt',
+    stateFile: null,
+    traceFile: null,
+  })
+  agent.behaviorTrace = { emit: async record => { trace.push(record) } }
+  return { agent, trace }
+}
+
+function toolExchange(id, chars) {
+  return [
+    { role: 'assistant', content: '', tool_calls: [{ id, type: 'function', function: { name: 'getActorStatus', arguments: '{}' } }] },
+    { role: 'tool', tool_call_id: id, content: 'x'.repeat(chars) },
+  ]
+}
+
+test('the local profile context window scales the compaction ceiling, and the choice is traced with the request_id', async () => {
+  const local = { profile: 'local', model: 'qwen3-coder-30b-a3b-instruct', base: 'http://host.docker.internal:1234/v1', key: 'fixture-local' }
+  const { agent, trace } = ceilingAgent({ providerConfig: local })
+  assert.equal(agent.maxWorkingChars, 98304)
+  assert.equal(agent.maxWorkingMessages, 64)
+
+  await agent.request('wait once', { sender: 'TTLouis' })
+  const requestId = trace.find(record => record.event === 'request.received').request_id
+  const ceiling = trace.filter(record => record.event === 'compaction.ceiling')
+  assert.equal(ceiling.length, 1, 'one ceiling event per request')
+  assert.equal(ceiling[0].request_id, requestId)
+  assert.deepEqual(ceiling[0].data, {
+    reason: 'provider_call',
+    source: 'provider_profile',
+    context_window: 65536,
+    max_working_chars: 98304,
+    max_working_messages: 64,
+    default_working_chars: 40000,
+    default_working_messages: 28,
+  })
+
+  // Profiles that declare no window keep today's fixed ceiling.
+  for (const providerConfig of [undefined, { profile: 'deepseek', model: 'deepseek-flash', base: 'https://api.deepseek.com/v1' }]) {
+    const plain = ceilingAgent({ providerConfig })
+    assert.equal(plain.agent.maxWorkingChars, 40000)
+    assert.equal(plain.agent.maxWorkingMessages, 28)
+    await plain.agent.request('wait once', { sender: 'TTLouis' })
+    const event = plain.trace.find(record => record.event === 'compaction.ceiling')
+    assert.equal(event.data.source, 'default')
+    assert.equal(event.data.context_window, undefined)
+    assert.equal(event.data.max_working_chars, 40000)
+  }
+})
+
+test('a context window reported by the real provider stack rescales compaction, which then compacts what the default ceiling kept', async () => {
+  // The loop is built without its provider config, as the supervisor builds
+  // it today; provider-base reports the local profile's window per response.
+  const localSmall = {
+    profile: 'local',
+    model: 'qwen3-coder-30b-a3b-instruct',
+    base: 'http://host.docker.internal:1234/v1',
+    key: 'fixture-local',
+    contextWindow: 16384,
+    timeoutMs: 5000,
+  }
+  const provider = (messages, context) => providerRequest(localSmall, messages, {
+    ...context,
+    promptTraceFile: null,
+    fetchImpl: async () => new Response(JSON.stringify({
+      id: 'local-replay',
+      model: localSmall.model,
+      choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: JSON.stringify({
+        chatMessage: '',
+        plan: ['Wait once'],
+        currentStep: 0,
+        operations: [{ name: 'wait', args: { ticks: 1 } }],
+      }) } }],
+      usage: { prompt_tokens: 900, completion_tokens: 60, total_tokens: 960 },
+    }), { status: 200, headers: { 'content-type': 'application/json' } }),
+  })
+  const { agent, trace } = ceilingAgent({ provider })
+  await agent.request('wait once', { sender: 'TTLouis' })
+
+  assert.equal(agent.maxWorkingChars, 24576)
+  assert.equal(agent.maxWorkingMessages, 17)
+  const events = trace.filter(record => record.event === 'compaction.ceiling')
+  assert.deepEqual(events.map(record => [record.data.reason, record.data.source, record.data.max_working_chars]), [
+    ['provider_call', 'default', 40000],
+    ['context_window_reported', 'provider_response', 24576],
+  ])
+  assert.equal(events[1].data.context_window, 16384)
+  assert.equal(events[1].request_id, events[0].request_id)
+
+  // Three 10,000-character read results: under the default ceiling they all
+  // stay; under the 16k-window ceiling the oldest is compacted (never the newest).
+  const working = [
+    { role: 'system', content: 'system' },
+    ...toolExchange('a', 10000),
+    ...toolExchange('b', 10000),
+    ...toolExchange('c', 10000),
+  ]
+  const plain = ceilingAgent().agent
+  plain.baseMessages = [working[0]]
+  plain.messages = working.map(message => ({ ...message }))
+  plain.compactWorkingContext()
+  assert.equal(plain.messages.some(message => String(message.content).startsWith('[OBSERVATIONS COMPACTED]')), false)
+
+  agent.baseMessages = [working[0]]
+  agent.messages = working.map(message => ({ ...message }))
+  agent.compactWorkingContext()
+  const compacted = agent.messages.filter(message => String(message.content).startsWith('[OBSERVATIONS COMPACTED]'))
+  assert.equal(compacted.length, 1)
+  assert.equal(agent.messages.some(message => message.tool_call_id === 'c'), true, 'the newest exchange is kept')
+  assert.equal(agent.messages.reduce((total, message) => total + String(message.content ?? '').length, 0) <= 24576 + 2000, true)
+})

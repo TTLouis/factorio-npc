@@ -9,6 +9,7 @@ import {
   setTaskBoardStatus,
   taskBoardProgress,
 } from './common.mjs'
+import { providerCapabilityProfile } from './provider.mjs'
 import { executeAuthorizedBatch } from './supervisor-adapter.mjs'
 import {
   boundarySteeringGate,
@@ -2289,6 +2290,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (this.maxProviderBudgetHandoffs < 1 || this.maxProviderBudgetHandoffs > 16) {
       throw new AgentLoopError('maxProviderBudgetHandoffs must be an integer from 1 to 16')
     }
+    // Compaction ceiling (1.9 hook). Explicit maxWorking* options win; else a
+    // provider profile that declares a context window scales the ceiling
+    // (the local profile declares 65,536); else today's fixed defaults.
+    this.explicitWorkingCeiling = options.maxWorkingMessages !== undefined || options.maxWorkingChars !== undefined
+    this.defaultWorkingCeiling = { messages: this.maxWorkingMessages, chars: this.maxWorkingChars }
+    this.workingCeiling = { ...this.defaultWorkingCeiling, source: this.explicitWorkingCeiling ? 'explicit_option' : 'default', context_window: undefined }
+    this.workingCeilingTracedFor = null
+    let profileWindow
+    if (options.providerConfig && typeof options.providerConfig === 'object') {
+      try { profileWindow = providerCapabilityProfile(options.providerConfig).context_window }
+      catch { profileWindow = undefined }
+    }
+    this.applyContextWindowCeiling(profileWindow, 'provider_profile')
     this.interactionProvider = typeof options.interactionProvider === 'function' ? options.interactionProvider : null
     this.interactionDecisionProvider = this.recordedDecisionProvider(options.interactionDecisionProvider)
     this.steeringDecisionProvider = this.recordedDecisionProvider(options.steeringDecisionProvider)
@@ -2436,6 +2450,42 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   //    an 800-char summary before the planner had read them once.
   // Compaction now waits until this class has consumed the batch, and never
   // takes the newest exchange; older exchanges still compact as before.
+  // Scales the working-context ceiling from a declared context window. Half
+  // the window goes to the working messages at a conservative 3 characters
+  // per token (JSON-heavy tool results); the rest stays for tool schemas, the
+  // output cap and a margin. Message count scales with the character ceiling.
+  // No window, or explicit maxWorking* options: the ceiling is unchanged.
+  // Returns true when the ceiling changed.
+  applyContextWindowCeiling(contextWindow, source) {
+    if (this.explicitWorkingCeiling) return false
+    if (!Number.isSafeInteger(contextWindow) || contextWindow <= 0) return false
+    if (this.workingCeiling?.context_window === contextWindow) return false
+    const chars = Math.max(8000, Math.floor(contextWindow * 1.5))
+    const messages = Math.max(8, Math.min(64, Math.round(this.defaultWorkingCeiling.messages * chars / this.defaultWorkingCeiling.chars)))
+    this.maxWorkingChars = chars
+    this.maxWorkingMessages = messages
+    this.workingCeiling = { messages, chars, source, context_window: contextWindow }
+    this.workingCeilingTracedFor = null
+    return true
+  }
+
+  // One compaction.ceiling event per request (and again whenever it changes),
+  // so a run's compaction behavior can be read from the trace alone.
+  async traceWorkingCeiling(reason) {
+    const key = `${this.traceRequest?.id ?? ''}|${this.workingCeiling.chars}|${this.workingCeiling.messages}`
+    if (!this.traceRequest || this.workingCeilingTracedFor === key) return
+    this.workingCeilingTracedFor = key
+    await this.traceEvent('compaction.ceiling', {
+      reason,
+      source: this.workingCeiling.source,
+      context_window: this.workingCeiling.context_window,
+      max_working_chars: this.workingCeiling.chars,
+      max_working_messages: this.workingCeiling.messages,
+      default_working_chars: this.defaultWorkingCeiling.chars,
+      default_working_messages: this.defaultWorkingCeiling.messages,
+    })
+  }
+
   compactWorkingContext() {
     if (this.compactionDeferred) return
     const overBudget = () => this.messages.length > this.maxWorkingMessages
@@ -5926,6 +5976,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (generation !== this.generation || !this.active || !this.epoch) throw new AgentLoopError('Model turn was cancelled or superseded')
     await this.assertCurrent()
     await this.rollProviderBudgetAtStepClose('provider_call_boundary')
+    await this.traceWorkingCeiling('provider_call')
 
     const controller = new AbortController()
     this.providerAbort = controller
@@ -6040,6 +6091,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (responseTrace.provider) responseTrace.provider.usage_complete = usage?.usage_complete === true
       if (this.traceRequest) this.traceRequest.last_provider_event = responseTrace
       await this.traceEvent('provider.response', responseTrace)
+      // provider-base reports the profile's context window on every response,
+      // so the ceiling follows the configured profile even when the loop was
+      // built without its provider config.
+      if (this.applyContextWindowCeiling(message?._airiProvider?.provider_context_window, 'provider_response')) {
+        await this.traceWorkingCeiling('context_window_reported')
+      }
       if (turnOutputCapExceeded) {
         await this.traceEvent('budget.output_units_exceeded', {
           output_units: generationOutputUnits,
