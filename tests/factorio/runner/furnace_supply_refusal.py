@@ -40,6 +40,8 @@ SEED_IRON_ORE = 160
 SEED_COAL = 15
 OVERSUPPLY_ORE = 95
 OUTPUT_INVENTORY_NAMES = {'furnace_result', 'crafter_output', 'assembling_machine_output'}
+# Factorio 2.0 names a furnace's source slot crafter_input (1.1: furnace_source).
+INPUT_INVENTORY_NAMES = {'furnace_source', 'crafter_input'}
 
 
 def require(condition: bool, message: object) -> None:
@@ -60,6 +62,10 @@ def inventory_count(furnace: dict, inventory_name: str, item_name: str) -> int:
 
 def output_count(furnace: dict, item_name: str) -> int:
     return sum(inventory_count(furnace, name, item_name) for name in OUTPUT_INVENTORY_NAMES)
+
+
+def input_count(furnace: dict, item_name: str) -> int:
+    return sum(inventory_count(furnace, name, item_name) for name in INPUT_INVENTORY_NAMES)
 
 
 def refused_batch_problems(status: dict, *, refused_unit: int, sibling_units: list[int], held_before: int) -> list[str]:
@@ -276,7 +282,7 @@ def run(client: Rcon, results: Path) -> None:
     # Over-supply the clean furnace A: only the free source capacity may move,
     # and nothing may land in the result (output) slot.
     source_free = next(
-        (inv.get('insertable_iron') for inv in after_batch['a']['inventories'] if inv.get('name') == 'furnace_source'),
+        (inv.get('insertable_iron') for inv in after_batch['a']['inventories'] if inv.get('name') in INPUT_INVENTORY_NAMES),
         None,
     )
     oversupply_admission = json_command(
@@ -302,14 +308,14 @@ def run(client: Rcon, results: Path) -> None:
     )
     for name, unit in (('a', unit_a), ('b', unit_b)):
         furnace = after_batch[name]
-        if inventory_count(furnace, 'furnace_source', 'iron-ore') != ORE_PER_FURNACE:
+        if input_count(furnace, 'iron-ore') != ORE_PER_FURNACE:
             problems.append(f'sibling furnace {unit} did not receive its {ORE_PER_FURNACE} iron ore: {furnace!r}')
         if inventory_count(furnace, 'fuel', 'coal') != COAL_PER_FURNACE:
             problems.append(f'sibling furnace {unit} did not receive its {COAL_PER_FURNACE} coal: {furnace!r}')
     furnace_c = after_batch['c']
-    if inventory_count(furnace_c, 'furnace_source', FOREIGN_ITEM) != FOREIGN_COUNT:
+    if input_count(furnace_c, FOREIGN_ITEM) != FOREIGN_COUNT:
         problems.append(f'refused furnace lost its foreign item: {furnace_c!r}')
-    if inventory_count(furnace_c, 'furnace_source', 'iron-ore') != 0:
+    if input_count(furnace_c, 'iron-ore') != 0:
         problems.append(f'refused furnace has iron ore in its source: {furnace_c!r}')
     if inventory_count(furnace_c, 'fuel', 'coal') != COAL_PER_FURNACE:
         problems.append(f'refused furnace did not receive its independent coal move: {furnace_c!r}')
