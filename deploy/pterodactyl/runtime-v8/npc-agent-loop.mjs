@@ -71,6 +71,7 @@ import {
   typedProjectionOperationPolicy,
   typedProjectionQuestions,
 } from './jev-typed-projection.mjs'
+import { ensureSkillOffers, SKILL_OFFERS_PREFIX, skillOffersContext, traceSkillLoaded, traceSkillsFollowed } from './skill-offers.mjs'
 
 export { AgentLoopError }
 
@@ -2243,6 +2244,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.interactionDecisionProvider = this.recordedDecisionProvider(options.interactionDecisionProvider)
     this.steeringDecisionProvider = this.recordedDecisionProvider(options.steeringDecisionProvider)
     this.operationProjectionDecisionProvider = this.recordedDecisionProvider(options.operationProjectionDecisionProvider)
+    this.skillDecisionProvider = this.recordedDecisionProvider(options.skillDecisionProvider) // 2.8: skill-offers.mjs
     this.interactionAbort = null
     this.postStepDecisionAbort = null
     this.recoveryDecisionAbort = null
@@ -2411,8 +2413,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   providerMessages() {
     const messages = super.providerMessages().filter(message => !(message?.role === 'user'
       && typeof message.content === 'string'
-      && message.content.startsWith('[SKILL_CONTEXT]')))
-    const skillContext = this.skillContext()
+      && (message.content.startsWith('[SKILL_CONTEXT]') || message.content.startsWith(SKILL_OFFERS_PREFIX))))
+    const skillContext = [skillOffersContext(this), this.skillContext()].filter(Boolean).join('\n\n') // 2.8 hook
     if (!skillContext) return messages
     // Skill context belongs to the fixed prefix, which ends before the first
     // model turn. `baseMessages` alone is not that prefix: a budget handoff
@@ -4613,6 +4615,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
 
+    await ensureSkillOffers(this, { memoryKey, intent, text }) // 2.8 hook: skill-offers.mjs
     try {
       const result = await super.request(text, options)
       if (this.requestInfo?.memoryKey) this.lastMemoryKey = this.requestInfo.memoryKey
@@ -4663,6 +4666,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const key = this.requestInfo?.memoryKey ?? this.lastMemoryKey ?? `npc:${this.npcId}`
     this.memory.clearTaskContext?.(key)
     this.clearLoadedSkillContext()
+    this.skillOffers = null // 2.8 hook
     await this.persistState()
 
     // Completion is a hard planner boundary. Do not carry the completed task's
@@ -6299,6 +6303,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           revision: loadedSkill.revision,
           loaded_skill_count: this.loadedSkillContext.size,
         })
+        await traceSkillLoaded(this, loadedSkill) // 2.8 hook
       }
       if (admittedCached[index]) results[index].content = DUPLICATE_OBSERVATION_MESSAGE
       const output = String(results[index].content ?? '')
@@ -6824,6 +6829,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       ...(plan.checkpoint ? { checkpoint: plan.checkpoint } : {}),
       ...(plan.semanticCompletion ? { semantic_completion: plan.semanticCompletion } : {}),
     })
+    await traceSkillsFollowed(this, plan) // 2.8 hook
 
     const before = await this.assertCurrent()
     const persistentRuntime = commands.length === 0 && plan.plan.length > 0

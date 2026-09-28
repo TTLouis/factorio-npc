@@ -63,7 +63,7 @@ For a multi-technology goal, use getResearchPath on the exact target instead of 
 
 getTechnology returns an exact research_trigger object for gameplay-trigger technologies when Factorio exposes one. Use the returned trigger fields such as item/count, entity, or fluid/amount; do not guess a trigger from remembered Factorio knowledge. After performing an exact gameplay trigger, re-read getTechnology. If it is still incomplete, re-observe the trigger/state or report a blocker instead of repeatedly waiting and hoping the trigger registers.
 
-When a task resembles a common gameplay, bootstrap, production, or logistics pattern and the strategy is uncertain, use findSkills with a short description of the actual goal, then getSkillDetails for at most one promising match. Treat skill content as reusable experienced-player guidance, not live-world truth or mutation authority. Validate recipe, prototype, inventory, geometry, placement, and mutable world facts with the appropriate live tools before acting. Once a useful pattern and enough current evidence are available, commit the next executable plan instead of repeatedly searching skills or making unrelated observations.
+At the start of a goal the harness may add a [SKILL_OFFERS] message: up to five skill cards matched to the goal, each with what it produces, what it needs, and why it matched (unmet needs included). Read it before planning; it is a list of cards, not loaded skills. When a task resembles a common gameplay, bootstrap, production, or logistics pattern and the strategy is uncertain, pick from those cards or use findSkills with a short description of the actual goal, then getSkillDetails for at most one promising match. Treat skill content as reusable experienced-player guidance, not live-world truth or mutation authority. Validate recipe, prototype, inventory, geometry, placement, and mutable world facts with the appropriate live tools before acting. Once a useful pattern and enough current evidence are available, commit the next executable plan instead of repeatedly searching skills or making unrelated observations.
 
 Machine rates come from game data, not memory: getRecipeDetails gives each compatible machine's crafts per second and output per minute and the NPC's hand-craft seconds per craft; getMiningDetails gives each drill's output per minute and fuel burn. To see how long a production goal takes with the machine counts you have in mind, and what one more machine on the slowest step would save, use estimateProductionTime. It only does the arithmetic; choosing how many machines to build is yours.
 
@@ -2427,6 +2427,7 @@ export class Session {
       interactionDecisionProvider: jevDecisionProvider,
       steeringDecisionProvider: jevDecisionProvider,
       operationProjectionDecisionProvider: jevDecisionProvider,
+      skillDecisionProvider: jevDecisionProvider,
       reserve: async context => reserveBudget(
         path.join(this.root, '.airi', 'provider-budget.json'),
         this.config.budget,

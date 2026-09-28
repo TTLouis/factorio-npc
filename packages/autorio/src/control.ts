@@ -577,7 +577,7 @@ script.on_event(defines.events.on_player_mined_entity, (event: OnPlayerMinedEnti
 function setup() {
   const seeded = ensure_basic_skill_definitions()
   setup_complete = true
-  if (seeded.added > 0) log(`[AUTORIO] Seeded ${seeded.added}/${seeded.total} curated basic skill patterns`)
+  if (seeded.added > 0 || seeded.upgraded > 0) log(`[AUTORIO] Seeded ${seeded.added}/${seeded.total} curated basic skill patterns (${seeded.upgraded} upgraded)`)
   log('[AUTORIO] Setup complete')
 }
 

@@ -1,4 +1,4 @@
-import type { LuaGuiElement, LuaPlayer } from 'factorio:runtime'
+import type { LuaGuiElement, LuaInventory, LuaPlayer } from 'factorio:runtime'
 import { BASIC_SKILL_DEFINITIONS } from './basic_skill_library'
 import { get_controlled_actor } from './actors/actor_controller'
 import {
@@ -130,6 +130,11 @@ export interface SkillDefinition {
     basis: string[]
   }
   examples: SkillExample[]
+  // Hand-set search tags for goals that the derived tags (outputs, topology
+  // entities and recipes, technology preconditions) cannot reach, e.g. power,
+  // smelting, science. Kept short; omitted when empty so older records keep
+  // their canonical JSON.
+  goal_tags?: string[]
 }
 
 export interface SkillUiSummary {
@@ -435,6 +440,33 @@ function canonical_examples(value: unknown): SkillExample[] {
   return result
 }
 
+export const MAX_GOAL_TAGS = 16
+
+// Tags are lowercase words joined by hyphens ("steam-power"); spaces and
+// underscores become hyphens. Non-ASCII tags (player shorthand such as 煤蛇)
+// are kept as written.
+export function normalize_skill_tag(value: string) {
+  let tag = value.toLowerCase().trim()
+  for (const separator of [' ', '_', '\t']) tag = tag.split(separator).join('-')
+  while (tag.includes('--')) tag = tag.split('--').join('-')
+  if (tag.startsWith('-')) tag = tag.slice(1)
+  if (tag.endsWith('-')) tag = tag.slice(0, tag.length - 1)
+  return tag
+}
+
+function canonical_goal_tags(value: unknown) {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) throw new Error('goal_tags must be an array')
+  if (value.length > MAX_GOAL_TAGS) throw new Error(`goal_tags exceeds ${MAX_GOAL_TAGS} entries`)
+  const result: string[] = []
+  for (let index = 0; index < value.length; index++) {
+    const tag = normalize_skill_tag(clean_text(value[index], `goal_tags[${index}]`, 40))
+    if (tag.length === 0) throw new Error(`goal_tags[${index}] must not be empty`)
+    if (!result.includes(tag)) result.push(tag)
+  }
+  return result
+}
+
 function assert_verified_evidence(skill: SkillDefinition) {
   if (skill.status !== 'verified') return
   if (skill.stage !== 'verified_skill') throw new Error('verified status requires stage=verified_skill')
@@ -482,6 +514,8 @@ export function canonicalize_skill_definition(value: any): SkillDefinition {
     },
     examples: canonical_examples(value.examples),
   }
+  const goal_tags = canonical_goal_tags(value.goal_tags)
+  if (goal_tags.length > 0) skill.goal_tags = goal_tags
   assert_verified_evidence(skill)
   return skill
 }
@@ -522,17 +556,32 @@ function store_dynamic_skill_definition(skill: SkillDefinition) {
   return skill
 }
 
+// A stored copy of a curated skill that nobody edited: every evidence ref is
+// still a curated ref. Player edits add a `player-edit:` ref and learned or
+// player-authored skills carry their own refs, so those are never replaced.
+function is_unedited_curated_copy(stored: SkillDefinition) {
+  if (stored.source.kind !== 'manual' || stored.source.evidence_refs.length === 0) return false
+  for (const ref of stored.source.evidence_refs) if (!ref.startsWith('curated:')) return false
+  return true
+}
+
 export function ensure_basic_skill_definitions() {
   const registry = ensure_definitions()
   let added = 0
+  let upgraded = 0
   for (const raw of BASIC_SKILL_DEFINITIONS) {
     const skill = canonicalize_skill_definition(raw)
-    if (registry[skill.id] === undefined) {
+    const stored = registry[skill.id]
+    if (stored === undefined) {
       registry[skill.id] = skill
       added++
     }
+    else if (stored.revision < skill.revision && is_unedited_curated_copy(stored)) {
+      registry[skill.id] = skill
+      upgraded++
+    }
   }
-  return { added, total: BASIC_SKILL_DEFINITIONS.length }
+  return { added, upgraded, total: BASIC_SKILL_DEFINITIONS.length }
 }
 
 function skill_search_text(skill: SkillDefinition) {
@@ -552,36 +601,330 @@ function skill_search_text(skill: SkillDefinition) {
     ...skill.parameters.map(value => `${value.name} ${value.description}`),
     ...skill.known_failure_modes,
     ...skill.examples.map(value => `${value.summary} ${value.notes ?? ''}`),
+    ...(skill.goal_tags ?? []),
   ]
   return values.join(' ').toLowerCase()
 }
 
-export function find_skill_definitions(query: unknown, limit: unknown = 3) {
-  const normalized = clean_text(query, 'skill search query', 240).toLowerCase()
+// ---------------------------------------------------------------------------
+// Skill lookup (plan item 2.8): tags, goal scoring, preconditions, cards.
+//
+// Tags come mostly from fields a skill already has: output items, topology
+// entities and recipes, and technologies named by preconditions. `goal_tags`
+// covers only what derivation cannot (power, smelting, science). A goal is
+// matched against tags first; the old full-text match stays as a weak signal
+// so learned skills without tags are still found. Preconditions are checked
+// against live world state (research, items held) and reported, never used as
+// a gate. The same bounded card goes to the Main LLM's planning context and to
+// Jev's candidate choice.
+//
+// Seam for plan item 2.8 (e): a meaning-based scorer (local embedding model)
+// would add a relevance term in `score_skill_for_goal`; keyword scoring below
+// always stays the fallback, since a Pterodactyl deployment has no LM Studio.
+// ---------------------------------------------------------------------------
+
+export type SkillTagSource = 'goal' | 'output' | 'entity' | 'recipe' | 'technology'
+export interface SkillTag { tag: string, source: SkillTagSource }
+
+const TAG_WEIGHTS: Record<SkillTagSource, number> = { goal: 4, output: 4, entity: 3, recipe: 3, technology: 3 }
+const TEXT_TERM_WEIGHT = 1
+const MAX_TEXT_TERM_HITS = 3
+const WHOLE_QUERY_TEXT_WEIGHT = 2
+const VERIFIED_BONUS = 3
+const OBSERVED_PENALTY = 1
+const UNMET_PRECONDITION_PENALTY = 0.25
+const MAX_UNMET_PENALTY = 1
+export const MAX_SKILL_CARDS = 5
+const CARD_SUMMARY_MAX = 160
+const CARD_LIST_MAX = 5
+
+const GOAL_SEPARATORS = [',', '.', ';', ':', '!', '?', '(', ')', '[', ']', '{', '}', '/', '\\', '"', '\'', '_', '\t', '\n', '\r', '+', '&', '*', '=', '<', '>', '|', '`']
+const GOAL_STOPWORDS = [
+  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'build', 'but', 'by', 'can', 'do', 'for', 'from', 'get', 'go', 'have', 'i', 'in', 'into', 'is', 'it', 'let', 'lets',
+  'make', 'me', 'my', 'need', 'of', 'on', 'or', 'our', 'please', 'set', 'so', 'some', 'that', 'the', 'then', 'this', 'to', 'up', 'us', 'want', 'we', 'with', 'you', 'your',
+]
+const TAG_CHARS = 'abcdefghijklmnopqrstuvwxyz0123456789-'
+
+function is_ascii_tag(tag: string) {
+  for (const character of tag.split('')) if (!TAG_CHARS.includes(character)) return false
+  return true
+}
+
+export function derive_skill_tags(skill: SkillDefinition): SkillTag[] {
+  const result: SkillTag[] = []
+  const seen: Record<string, boolean> = {}
+  const add = (value: string | undefined, source: SkillTagSource) => {
+    if (value === undefined) return
+    const tag = normalize_skill_tag(value)
+    if (tag.length < 2 || seen[tag] === true) return
+    seen[tag] = true
+    result.push({ tag, source })
+  }
+  for (const tag of skill.goal_tags ?? []) add(tag, 'goal')
+  for (const flow of skill.outputs) add(flow.item, 'output')
+  for (const node of skill.topology.nodes) {
+    add(node.entity_name, 'entity')
+    add(node.recipe, 'recipe')
+  }
+  for (const condition of skill.preconditions) if (condition.kind === 'technology_researched') add(condition.subject, 'technology')
+  return result
+}
+
+function singular(word: string) {
+  if (word.length > 3 && word.endsWith('s') && !word.endsWith('ss')) return word.slice(0, word.length - 1)
+  return word
+}
+
+export interface GoalTerms {
+  normalized: string
+  terms: string[]
+  words: string[]
+}
+
+// Words, singulars, hyphen parts, and two- and three-word phrases joined by
+// hyphens ("red science packs" -> red-science, science-pack, red-science-pack).
+export function goal_search_terms(text: string): GoalTerms {
+  let normalized = text.toLowerCase()
+  for (const separator of GOAL_SEPARATORS) normalized = normalized.split(separator).join(' ')
+  while (normalized.includes('  ')) normalized = normalized.split('  ').join(' ')
+  normalized = normalized.trim()
+  const terms: string[] = []
+  const add = (term: string) => {
+    if (term.length >= 2 && !terms.includes(term)) terms.push(term)
+  }
+  const words: string[] = []
+  for (const raw of normalized.split(' ')) {
+    if (raw.length === 0 || GOAL_STOPWORDS.includes(raw)) continue
+    add(raw)
+    add(singular(raw))
+    words.push(singular(raw))
+    if (raw.includes('-')) for (const part of raw.split('-')) if (!GOAL_STOPWORDS.includes(part)) add(singular(part))
+  }
+  for (let index = 0; index < words.length; index++) {
+    if (index + 1 < words.length) add(`${words[index]}-${words[index + 1]}`)
+    if (index + 2 < words.length) add(`${words[index]}-${words[index + 1]}-${words[index + 2]}`)
+  }
+  return { normalized, terms, words }
+}
+
+// A tag matches when the goal names it exactly. A tag of three or more parts
+// also matches (one point weaker) when the goal names two adjacent parts of it
+// ("science packs" -> automation-science-pack). Non-ASCII tags match as
+// substrings, since such player shorthand is not space-separated.
+function tag_match_weight(tag: SkillTag, goal: GoalTerms) {
+  const weight = TAG_WEIGHTS[tag.source]
+  if (goal.terms.includes(tag.tag)) return weight
+  if (!is_ascii_tag(tag.tag)) return goal.normalized.includes(tag.tag) ? weight : 0
+  const parts = tag.tag.split('-')
+  if (parts.length >= 3) {
+    for (let index = 0; index + 1 < parts.length; index++) {
+      if (goal.terms.includes(`${parts[index]}-${parts[index + 1]}`)) return weight - 1
+    }
+  }
+  return 0
+}
+
+export type SkillPreconditionState = 'met' | 'unmet' | 'unknown'
+
+// Read-only world facts for precondition checks. Each answers undefined when
+// the subject is not something the game can check (an abstract subject such as
+// "coal-resource"), which reports the precondition as unknown, not unmet.
+export interface SkillWorldView {
+  tech_state: (this: void, technology: string) => boolean | undefined
+  held_count: (this: void, item: string) => number | undefined
+  held_entity: (this: void, entity_or_type: string) => boolean | undefined
+}
+
+export function skill_precondition_state(condition: SkillPrecondition, world: SkillWorldView | undefined): SkillPreconditionState {
+  if (world === undefined) return 'unknown'
+  let met: boolean | undefined
+  if (condition.kind === 'technology_researched') met = world.tech_state(condition.subject)
+  else if (condition.kind === 'item_available') {
+    const count = world.held_count(condition.subject)
+    met = count === undefined ? undefined : count >= (condition.minimum ?? 1)
+  }
+  else if (condition.kind === 'entity_available') met = world.held_entity(condition.subject)
+  if (met === undefined) return 'unknown'
+  return met ? 'met' : 'unmet'
+}
+
+export interface SkillGoalMatch {
+  skill: SkillDefinition
+  score: number
+  relevance: number
+  matched: string[]
+  unmet: string[]
+}
+
+export function score_skill_for_goal(skill: SkillDefinition, goal: GoalTerms, world?: SkillWorldView): SkillGoalMatch {
+  const matched: string[] = []
+  let relevance = 0
+  for (const tag of derive_skill_tags(skill)) {
+    const weight = tag_match_weight(tag, goal)
+    if (weight <= 0) continue
+    relevance += weight
+    matched.push(tag.tag)
+  }
+  // Weak full-text signal for words no tag covered, so a learned skill with no
+  // tags can still be found.
+  const haystack = skill_search_text(skill)
+  // Word-start matching, so "red" does not hit "required".
+  let words_text = haystack
+  for (const separator of GOAL_SEPARATORS) words_text = words_text.split(separator).join(' ')
+  words_text = ` ${words_text.split('-').join(' ')}`
+  let text_hits = 0
+  for (const word of goal.words) {
+    if (text_hits >= MAX_TEXT_TERM_HITS) break
+    if (word.length < 3 || word.includes('-')) continue
+    let covered = false
+    for (const tag of matched) if (tag === word || tag.split('-').includes(word)) covered = true
+    if (covered || !words_text.includes(` ${word}`)) continue
+    text_hits++
+    matched.push(`text:${word}`)
+  }
+  relevance += text_hits * TEXT_TERM_WEIGHT
+  if (goal.normalized.length >= 2 && haystack.includes(goal.normalized)) relevance += WHOLE_QUERY_TEXT_WEIGHT
+
+  const unmet: string[] = []
+  for (const condition of skill.preconditions) {
+    if (skill_precondition_state(condition, world) === 'unmet' && !unmet.includes(condition.subject)) unmet.push(condition.subject)
+  }
+  let score = relevance
+  if (relevance > 0) {
+    if (skill.status === 'verified') score += VERIFIED_BONUS
+    else if (skill.status === 'observed') score -= OBSERVED_PENALTY
+    score -= Math.min(MAX_UNMET_PENALTY, unmet.length * UNMET_PRECONDITION_PENALTY)
+  }
+  return { skill, score: Math.floor(score * 100 + 0.5) / 100, relevance, matched, unmet }
+}
+
+function status_rank(status: SkillStatus) {
+  return status === 'verified' ? 0 : status === 'candidate' ? 1 : status === 'observed' ? 2 : 3
+}
+
+export function rank_skills_for_goal(goal_text: string, world?: SkillWorldView, include_deprecated = false) {
+  const goal = goal_search_terms(goal_text)
+  const ranked: SkillGoalMatch[] = []
+  for (const skill of list_skill_definitions()) {
+    if (!include_deprecated && skill.status === 'deprecated') continue
+    const match = score_skill_for_goal(skill, goal, world)
+    if (match.relevance > 0) ranked.push(match)
+  }
+  ranked.sort((left, right) => right.score - left.score
+    || status_rank(left.skill.status) - status_rank(right.skill.status)
+    || (left.skill.name < right.skill.name ? -1 : left.skill.name > right.skill.name ? 1 : 0))
+  return ranked
+}
+
+function one_line_summary(summary: string) {
+  const end = summary.indexOf('. ')
+  const sentence = end >= 0 ? summary.slice(0, end + 1) : summary
+  return sentence.length <= CARD_SUMMARY_MAX ? sentence : `${sentence.slice(0, CARD_SUMMARY_MAX - 3)}...`
+}
+
+// One compact card per skill. The runtime renders it the same way for the
+// Main LLM's planning context and for Jev's candidate choice.
+export interface SkillCard {
+  id: string
+  name: string
+  status: SkillStatus
+  summary: string
+  produces: string[]
+  needs: string[]
+  matched: string[]
+  unmet: string[]
+  score: number
+}
+
+export function skill_card(match: SkillGoalMatch): SkillCard {
+  const needs: string[] = []
+  for (const condition of match.skill.preconditions) if (!needs.includes(condition.subject)) needs.push(condition.subject)
+  return {
+    id: match.skill.id,
+    name: match.skill.name,
+    status: match.skill.status,
+    summary: one_line_summary(match.skill.summary),
+    produces: match.skill.outputs.map(flow => flow.item).slice(0, CARD_LIST_MAX),
+    needs: needs.slice(0, CARD_LIST_MAX),
+    matched: match.matched.slice(0, CARD_LIST_MAX),
+    unmet: match.unmet.slice(0, CARD_LIST_MAX),
+    score: match.score,
+  }
+}
+
+export function skill_cards_for_goal(goal_text: unknown, limit: unknown = MAX_SKILL_CARDS, world?: SkillWorldView) {
+  const text = clean_text(goal_text, 'skill offer goal', 500)
+  const bounded_limit = positive_integer(limit, 'skill offer limit')
+  if (bounded_limit > MAX_SKILL_CARDS) throw new Error(`skill offer limit must be at most ${MAX_SKILL_CARDS}`)
+  return rank_skills_for_goal(text, world).slice(0, bounded_limit).map(skill_card)
+}
+
+export function find_skill_definitions(query: unknown, limit: unknown = 3, world?: SkillWorldView) {
+  const normalized = clean_text(query, 'skill search query', 240)
   const bounded_limit = positive_integer(limit, 'skill search limit')
   if (bounded_limit > 5) throw new Error('skill search limit must be at most 5')
-  const terms = normalized.split(' ').filter(term => term.length >= 2)
-  const scored: Array<{ score: number, skill: SkillDefinition }> = []
-  for (const skill of list_skill_definitions()) {
-    const haystack = skill_search_text(skill)
-    let score = haystack.includes(normalized) ? 10 : 0
-    for (const term of terms) if (haystack.includes(term)) score++
-    if (score > 0) scored.push({ score, skill })
-  }
-  scored.sort((left, right) => right.score - left.score
-    || (left.skill.name < right.skill.name ? -1 : left.skill.name > right.skill.name ? 1 : 0))
-  return scored.slice(0, bounded_limit).map(({ score, skill }) => ({
-    score,
-    id: skill.id,
-    name: skill.name,
-    kind: skill.kind,
-    stage: skill.stage,
-    status: skill.status,
-    summary: skill.summary,
-    inputs: skill.inputs.map(value => value.item),
-    outputs: skill.outputs.map(value => value.item),
-    warnings: skill_ui_summary(skill).warnings,
+  return rank_skills_for_goal(normalized, world, true).slice(0, bounded_limit).map(match => ({
+    score: match.score,
+    id: match.skill.id,
+    name: match.skill.name,
+    kind: match.skill.kind,
+    stage: match.skill.stage,
+    status: match.skill.status,
+    summary: match.skill.summary,
+    inputs: match.skill.inputs.map(value => value.item),
+    outputs: match.skill.outputs.map(value => value.item),
+    matched: match.matched.slice(0, CARD_LIST_MAX),
+    unmet: match.unmet.slice(0, CARD_LIST_MAX),
+    warnings: skill_ui_summary(match.skill).warnings,
   }))
+}
+
+function is_entity_type(subject: string) {
+  try {
+    const matches = prototypes.get_entity_filtered([{ filter: 'type', type: subject as any }])
+    for (const [name] of matches) if (name !== undefined) return true
+    return false
+  }
+  catch {
+    return false
+  }
+}
+
+function held_entity(inventory: LuaInventory | undefined, subject: string): boolean | undefined {
+  const known_entity = prototypes.entity[subject] !== undefined
+  if (!known_entity && !is_entity_type(subject)) return undefined
+  if (inventory === undefined) return undefined
+  for (const item of inventory.get_contents()) {
+    const placed = prototypes.item[item.name]?.place_result
+    if (placed === undefined) continue
+    if (placed.name === subject || placed.type === subject) return true
+  }
+  return false
+}
+
+// The controlled actor's force and main inventory, read-only.
+export function live_skill_world_view(): SkillWorldView | undefined {
+  const actor = get_controlled_actor()
+  if (!actor || !actor.is_valid) return undefined
+  const force = actor.force
+  const inventory = actor.get_main_inventory()
+  return {
+    tech_state: (technology: string) => {
+      const tech = force.technologies[technology]
+      return tech === undefined ? undefined : tech.researched
+    },
+    held_count: (item: string) => {
+      if (inventory === undefined || prototypes.item[item] === undefined) return undefined
+      return inventory.get_item_count(item)
+    },
+    held_entity: (entity_or_type: string) => held_entity(inventory, entity_or_type),
+  }
+}
+
+export function offer_skill_cards(request: unknown) {
+  const raw: any = plain_object(request) ? request : {}
+  const cards = skill_cards_for_goal(raw.goal, raw.limit ?? MAX_SKILL_CARDS, live_skill_world_view())
+  return { ok: true, cards }
 }
 
 function exports_state() {
@@ -828,8 +1171,14 @@ export function create_skill_remote_interface() {
       catch { return undefined }
     },
     find: (query: unknown, limit: unknown = 3) => {
-      try { return { ok: true, results: find_skill_definitions(query, limit) } }
+      try { return { ok: true, results: find_skill_definitions(query, limit, live_skill_world_view()) } }
       catch (error) { return { ok: false, error: error_message(error), results: [] } }
+    },
+    // Bounded skill cards for a goal, offered by the harness in plan-authoring
+    // context without the model asking (plan item 2.8a). Read-only.
+    offer: (request: unknown) => {
+      try { return offer_skill_cards(request) }
+      catch (error) { return { ok: false, error: error_message(error), cards: [] } }
     },
     list: () => list_skill_definitions(),
     analyze_area: (request: unknown = {}) => {

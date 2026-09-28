@@ -145,6 +145,18 @@ def run(client: Rcon, results: Path) -> None:
     require(len(coal_skills.get('results') or []) > 0, coal_skills)
     require(coal_skills['results'][0].get('id') == 'burner-coal-loop', coal_skills)
 
+    # Plan 2.8: the harness-offered cards run the precondition checks against
+    # the real force/inventory (technology lookup, held items, entity types).
+    steam_offer = json_command(
+        lua_json(remote_call('autorio_skills', 'offer', "{goal='get steam power running for electricity',limit=5}")),
+        'curated skill offer',
+    )
+    require(steam_offer.get('ok') is True, steam_offer)
+    steam_cards = steam_offer.get('cards') or []
+    require(isinstance(steam_cards, list) and 0 < len(steam_cards) <= 5, steam_offer)
+    require(steam_cards[0].get('id') == 'steam-power-bootstrap', steam_offer)
+    require(isinstance(steam_cards[0].get('unmet'), (list, dict)), steam_offer)
+
     coal_skill = json_command(
         lua_json(remote_call('autorio_skills', 'get', repr('burner-coal-loop'))),
         'curated skill details',
