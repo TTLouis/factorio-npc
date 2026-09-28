@@ -25,6 +25,9 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY in .env}
       OPENAI_API_BASEURL: ${OPENAI_API_BASEURL:?Set OPENAI_API_BASEURL in .env}
       OPENAI_MODEL: ${OPENAI_MODEL:?Set OPENAI_MODEL in .env}
+      # Empty keeps the legacy PROVIDER_PROFILE-driven behaviour; set to
+      # direct/router/local to pick a wire contract explicitly (plan 1.10).
+      AI_API_METHOD: ${AI_API_METHOD:-}
       PROVIDER_TIMEOUT_MS: ${PROVIDER_TIMEOUT_MS:-300000}
       # Optional Jev critic; empty leaves it off. Same dedicated key as compose.e2e.yml.
       TYPESAFE_API_KEY: ${JEV_TYPESAFE_API_KEY:-}

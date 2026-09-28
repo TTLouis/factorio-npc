@@ -113,6 +113,12 @@ function add_debug_decision_rows(table: LuaGuiElement, debug: TaskBoardUiDebugSn
   const decision_planner_high = integer(debug.decision_planner_replan_high_wakes_total)
   const decision_planner_fallback = integer(debug.decision_planner_fallback_wakes_total)
 
+  const ai_method = clean_text(debug.ai_method, 32)
+  const ai_host = clean_text(debug.ai_host, 200)
+  const ai_main_model = clean_text(debug.ai_main_model, 200)
+  const ai_subagent_model = clean_text(debug.ai_subagent_model, 200)
+  add_compact_row(table, 'AI', `AI: method=${ai_method || 'unset'} host=${ai_host || '—'} main=${ai_main_model || '—'} subagent=${ai_subagent_model || 'none'}`)
+
   const jev_measurement = clean_text(debug.jev_measurement, 32)
   const jev_request_calls = integer(debug.jev_request_calls)
   const jev_request_fallbacks = integer(debug.jev_request_fallbacks)
