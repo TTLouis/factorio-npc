@@ -758,6 +758,16 @@ export const plannerControlToolDefinitions = [{
           enum: ['vertical', 'horizontal', 'maintain', 'recover'],
           description: 'Dominant development direction of this authored slice relative to the current critical path. This describes the draft and does not override runtime truth or user priorities.',
         },
+        timeReview: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['decision'],
+          description: 'Only in answer to a harness time review: whether this resubmitted draft keeps the long serial work or was changed to run work in parallel, and why. It is traced; it never changes what runs.',
+          properties: {
+            decision: { type: 'string', enum: ['keep_serial', 'parallelize'] },
+            reason: { type: 'string', maxLength: 400 },
+          },
+        },
         goal: {
           type: 'object',
           additionalProperties: false,
@@ -844,7 +854,7 @@ export function plannerControlPayloadFromMessage(message) {
   let args
   try { args = JSON.parse(rawArgs) }
   catch { throw new base.PolicyError('submitPlan arguments must be valid JSON') }
-  exactKeys(args, ['chatMessage', 'plan', 'currentStep', 'operations', 'checkpoint', 'semanticCompletion', 'roadmapNodeIds', 'developmentMode', 'roadmap', 'goal'])
+  exactKeys(args, ['chatMessage', 'plan', 'currentStep', 'operations', 'checkpoint', 'semanticCompletion', 'roadmapNodeIds', 'developmentMode', 'roadmap', 'goal', 'timeReview'])
   check(Array.isArray(args.plan), 'submitPlan.plan must be an array')
   check(Number.isSafeInteger(args.currentStep), 'submitPlan.currentStep must be an integer')
   check(Array.isArray(args.operations), 'submitPlan.operations must be an array')
@@ -868,6 +878,7 @@ export function plannerControlPayloadFromMessage(message) {
     ...(args.developmentMode !== undefined ? { developmentMode: args.developmentMode } : {}),
     ...(args.roadmap !== undefined ? { roadmap: args.roadmap } : {}),
     ...(args.goal !== undefined ? { goal: args.goal } : {}),
+    ...(args.timeReview !== undefined ? { timeReview: args.timeReview } : {}),
   }
 }
 
