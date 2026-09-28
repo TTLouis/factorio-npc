@@ -72,7 +72,7 @@ import {
   typedProjectionOperationPolicy,
   typedProjectionQuestions,
 } from './jev-typed-projection.mjs'
-import { ensureSkillOffers, SKILL_OFFERS_PREFIX, skillOffersContext, traceSkillLoaded, traceSkillsFollowed } from './skill-offers.mjs'
+import { ensureSkillOffers, injectedSkillChars, refreshSkillOffersAtShelfPickup, SKILL_OFFERS_PREFIX, skillOffersContext, traceSkillLoaded, traceSkillsFollowed } from './skill-offers.mjs'
 
 export { AgentLoopError }
 
@@ -2533,7 +2533,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   compactWorkingContext() {
     if (this.compactionDeferred) return
     const overBudget = () => this.messages.length > this.maxWorkingMessages
-      || this.messages.reduce((total, message) => total + messageChars(message), 0) > this.maxWorkingChars
+      || this.messages.reduce((total, message) => total + messageChars(message), 0) > this.maxWorkingChars - injectedSkillChars(this) // 2.8 hook: injected skill text counts
     while (overBudget()) {
       const newest = this.messages.findLastIndex(message => message.role === 'assistant' && Array.isArray(message.tool_calls))
       const start = this.messages.findIndex((message, index) => index >= this.baseMessages.length
@@ -5545,6 +5545,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         route: 'next_shelf_slice',
         steering_mode: planningAfterCompletion.steering?.current_mode,
       })
+      await refreshSkillOffersAtShelfPickup(this, planningAfterCompletion) // 2.8 hook: shelf -> active plan skill search
       this.reasoningTriggerSource = 'plan_slice_completed'
       try {
         const unmet = goalEvaluation

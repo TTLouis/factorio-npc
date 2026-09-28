@@ -146,17 +146,53 @@ def run(client: Rcon, results: Path) -> None:
     require(len(coal_skills.get('results') or []) > 0, coal_skills)
     require(coal_skills['results'][0].get('id') == 'burner-coal-loop', coal_skills)
 
-    # Plan 2.8: the harness-offered cards run the precondition checks against
-    # the real force/inventory (technology lookup, held items, entity types).
-    steam_offer = json_command(
-        lua_json(remote_call('autorio_skills', 'offer', "{goal='get steam power running for electricity',limit=5}")),
-        'curated skill offer',
+    # Plan 2.8: harness-offered skill cards check each need against the real
+    # force and inventory. Known state on a fresh base-game 2.0 force: the
+    # offshore pump recipe is locked behind the steam-power trigger technology,
+    # so the steam card reports it locked and names steam-power. Researching
+    # steam-power flips it to can_craft. The fixture restores the force after.
+    def steam_offer_needs(context: str) -> dict:
+        offer = json_command(
+            lua_json(remote_call('autorio_skills', 'offer', "{goal='get steam power running for electricity',limit=5}")),
+            context,
+        )
+        require(offer.get('ok') is True, offer)
+        cards = offer.get('cards') or []
+        require(isinstance(cards, list) and 0 < len(cards) <= 5, offer)
+        require(cards[0].get('id') == 'steam-power-bootstrap', offer)
+        needs = {need.get('subject'): need for need in cards[0].get('needs') or [] if isinstance(need, dict)}
+        require('offshore-pump' in needs, offer)
+        return needs
+
+    steam_fixture = json_command(
+        "/silent-command local a=nil; for _,e in pairs(game.surfaces[1].find_entities_filtered{name='character'}) do "
+        f"if e.unit_number=={actor_id} then a=e end end; assert(a); local f=a.force; "
+        "local inv=a.get_main_inventory(); local held=inv.get_item_count('offshore-pump'); "
+        "if held>0 then inv.remove({name='offshore-pump',count=held}) end; "
+        "rcon.print(helpers.table_to_json({held=inv.get_item_count('offshore-pump'),placed=f.get_entity_count('offshore-pump'),"
+        "enabled=f.recipes['offshore-pump'].enabled,steam_power=f.technologies['steam-power'].researched}))",
+        'skill need fixture',
     )
-    require(steam_offer.get('ok') is True, steam_offer)
-    steam_cards = steam_offer.get('cards') or []
-    require(isinstance(steam_cards, list) and 0 < len(steam_cards) <= 5, steam_offer)
-    require(steam_cards[0].get('id') == 'steam-power-bootstrap', steam_offer)
-    require(isinstance(steam_cards[0].get('unmet'), (list, dict)), steam_offer)
+    require(steam_fixture == {'held': 0, 'placed': 0, 'enabled': False, 'steam_power': False}, steam_fixture)
+    locked_needs = steam_offer_needs('skill offer on a fresh force')
+    require(locked_needs['offshore-pump'].get('state') == 'locked', locked_needs)
+    require(locked_needs['offshore-pump'].get('technology') == 'steam-power', locked_needs)
+
+    researched = json_command(
+        "/silent-command local f=game.forces.player; f.technologies['steam-power'].researched=true; "
+        "rcon.print(helpers.table_to_json({enabled=f.recipes['offshore-pump'].enabled}))",
+        'research steam-power for the skill need check',
+    )
+    require(researched == {'enabled': True}, researched)
+    craftable_needs = steam_offer_needs('skill offer after steam-power')
+    require(craftable_needs['offshore-pump'].get('state') == 'can_craft', craftable_needs)
+    restored = json_command(
+        "/silent-command local f=game.forces.player; local t=f.technologies['steam-power']; t.researched=false; "
+        "for _,e in pairs(t.prototype.effects) do if e.type=='unlock-recipe' then f.recipes[e.recipe].enabled=false end end; "
+        "rcon.print(helpers.table_to_json({researched=t.researched,enabled=f.recipes['offshore-pump'].enabled}))",
+        'restore steam-power after the skill need check',
+    )
+    require(restored == {'researched': False, 'enabled': False}, restored)
 
     coal_skill = json_command(
         lua_json(remote_call('autorio_skills', 'get', repr('burner-coal-loop'))),

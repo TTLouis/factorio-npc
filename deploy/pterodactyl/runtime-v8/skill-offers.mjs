@@ -3,15 +3,19 @@
 //
 // - The mod scores the skill library against the goal (tags derived from
 //   outputs, topology entities and technology preconditions, plus a short
-//   hand-set goal_tags list) and checks preconditions against the live world
-//   (`autorio_skills.offer`). This module never scores skills itself.
+//   hand-set goal_tags list) and checks each need against the live world
+//   (`autorio_skills.offer`): have, can_craft, locked (naming the technology)
+//   or unknown. This module never scores skills itself.
 // - Each card is rendered ONCE by `renderSkillCard`. The same text goes into
 //   the Main LLM's [SKILL_OFFERS] block and into Jev's candidate criteria, so
-//   Jev ranks exactly what the model sees.
-// - Jev's ranking is advisory: the card order stays deterministic, and a
-//   confident Jev pick adds one "advisor" line. No Jev key, a Jev error or a
-//   low-confidence answer leaves the deterministic order alone. Every outcome
-//   is traced.
+//   Jev judges exactly what the model sees.
+// - When: a complete search runs for a new goal and whenever the next shelved
+//   goal is picked up into the active plan (shelf -> active plan boundary).
+//   The block is shown only in plan-authoring and revision rounds, never in
+//   rounds that carry out a committed step. No per-step re-offers.
+// - Jev's `skill_choice` runs in SHADOW mode (owner, 2026-09-28): its pick is
+//   traced but never reaches the prompt. The path is shadow -> advisory ->
+//   part of the decision loop; flip SKILL_CHOICE_MODE, not a user setting.
 // - Loading full details stays explicit through getSkillDetails.
 //
 // Seam for 2.8 (e), meaning-based scoring with a local embedding model: it
@@ -19,14 +23,22 @@
 // falling back to keywords. Nothing here depends on LM Studio.
 
 import { luaString } from '../staging/structured-policy.mjs'
+import { getActivePlan, nearestShelfRefinementTarget, PLAN_STATUS } from './planning-state.mjs'
 
 export const SKILL_OFFERS_PREFIX = '[SKILL_OFFERS]'
 export const SKILL_OFFER_LIMIT = 5
-export const SKILL_CARD_MAX_CHARS = 520
-export const SKILL_OFFER_MAX_GOAL_CHARS = 500
+export const SKILL_CARD_MAX_CHARS = 600
+// The mod measures the goal in UTF-8 bytes (Lua strings are bytes).
+export const SKILL_OFFER_MAX_GOAL_BYTES = 500
 export const SKILL_CHOICE_MIN_CONFIDENCE = 0.6
 export const SKILL_CHOICE_CONTRACT = 'skill_choice'
+// 'shadow': trace Jev's pick only. 'advisory': also add one advisor line to
+// the block. Owner decision 2026-09-28: shadow first.
+export const SKILL_CHOICE_MODES = Object.freeze({ SHADOW: 'shadow', ADVISORY: 'advisory' })
+export const SKILL_CHOICE_MODE = SKILL_CHOICE_MODES.SHADOW
+export const SKILL_NEED_STATES = Object.freeze(['have', 'can_craft', 'locked', 'unknown'])
 const SKILL_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+const NAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,99}$/
 const STATUSES = new Set(['observed', 'candidate', 'verified', 'deprecated'])
 
 function text(value, max) {
@@ -35,29 +47,62 @@ function text(value, max) {
   return clean.length <= max ? clean : `${clean.slice(0, max - 3)}...`
 }
 
+// The longest prefix of `value` that fits in `maxBytes` UTF-8 bytes, cut on a
+// code point boundary (never half a character).
+export function utf8Prefix(value, maxBytes) {
+  const clean = text(value, Number.MAX_SAFE_INTEGER)
+  if (Buffer.byteLength(clean, 'utf8') <= maxBytes) return clean
+  let bytes = 0
+  let end = 0
+  for (const character of clean) {
+    const size = Buffer.byteLength(character, 'utf8')
+    if (bytes + size > maxBytes) break
+    bytes += size
+    end += character.length
+  }
+  return clean.slice(0, end)
+}
+
 function list(value, maxItems = 5, maxChars = 60) {
   if (!Array.isArray(value)) return []
   return value.map(entry => text(entry, maxChars)).filter(Boolean).slice(0, maxItems)
 }
 
+function name(value) {
+  return typeof value === 'string' && NAME_PATTERN.test(value) ? value : undefined
+}
+
+function sanitizeNeed(raw) {
+  if (typeof raw === 'string') return raw ? { subject: text(raw, 60), state: 'unknown' } : undefined
+  if (!raw || typeof raw !== 'object') return undefined
+  const subject = text(raw.subject, 60)
+  if (!subject) return undefined
+  const need = { subject, state: SKILL_NEED_STATES.includes(raw.state) ? raw.state : 'unknown' }
+  const technology = name(raw.technology)
+  const via = name(raw.via)
+  if (technology && need.state === 'locked') need.technology = technology
+  if (via && via !== subject) need.via = via
+  return need
+}
+
 export function skillOfferCommand(goal, limit = SKILL_OFFER_LIMIT) {
-  const request = JSON.stringify({ goal: text(goal, SKILL_OFFER_MAX_GOAL_CHARS), limit })
+  const request = JSON.stringify({ goal: utf8Prefix(goal, SKILL_OFFER_MAX_GOAL_BYTES), limit })
   return `/silent-command local request=helpers.json_to_table(${luaString(request)}); rcon.print(helpers.table_to_json(remote.call("autorio_skills","offer",request)))`
 }
 
 export function sanitizeSkillCard(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
   const id = typeof raw.id === 'string' ? raw.id : ''
-  if (!SKILL_ID_PATTERN.test(id) || id.length > 80) return undefined
+  if (!SKILL_ID_PATTERN.test(id) || id.length > 80 || id === 'none') return undefined
   return {
     id,
     name: text(raw.name, 80) || id,
     status: STATUSES.has(raw.status) ? raw.status : 'candidate',
     summary: text(raw.summary, 170),
     produces: list(raw.produces),
-    needs: list(raw.needs),
+    // table_to_json renders an empty Lua table as {}.
+    needs: (Array.isArray(raw.needs) ? raw.needs : []).map(sanitizeNeed).filter(Boolean).slice(0, 5),
     matched: list(raw.matched),
-    unmet: list(raw.unmet),
     score: Number.isFinite(raw.score) ? Math.round(raw.score * 100) / 100 : 0,
   }
 }
@@ -70,7 +115,6 @@ export function parseSkillOffers(raw) {
   if (!parsed || typeof parsed !== 'object' || parsed.ok !== true) {
     return { ok: false, reason: 'lookup_failed', error: text(parsed?.error, 200) || undefined }
   }
-  // table_to_json renders an empty Lua table as {} or [].
   const rawCards = Array.isArray(parsed.cards) ? parsed.cards : []
   const cards = []
   for (const card of rawCards) {
@@ -81,27 +125,42 @@ export function parseSkillOffers(raw) {
   return { ok: true, cards }
 }
 
+function renderNeed(need) {
+  if (need.state === 'have') return `${need.subject} (have)`
+  if (need.state === 'can_craft') return `${need.subject} (can craft${need.via ? ` ${need.via}` : ''})`
+  if (need.state === 'locked') {
+    const what = need.via ?? need.subject
+    return need.technology
+      ? `${need.subject} (locked: ${what === need.technology ? `needs research ${what}` : `${what} needs ${need.technology}`})`
+      : `${need.subject} (locked)`
+  }
+  return need.subject
+}
+
 // The one card format, shared by the planner block and Jev's criteria.
 export function renderSkillCard(card) {
-  const why = []
-  if (card.matched.length > 0) why.push(`matched ${card.matched.join(', ')}`)
-  if (card.unmet.length > 0) why.push(`unmet ${card.unmet.join(', ')}`)
   const parts = [
     `${card.id} "${card.name}" [${card.status}]: ${card.summary}`,
     `Produces: ${card.produces.join(', ') || 'none recorded'}.`,
-    `Needs: ${card.needs.join(', ') || 'none recorded'}.`,
-    `Why: ${why.join('; ') || 'text match'}.`,
+    `Needs: ${card.needs.map(renderNeed).join(', ') || 'none recorded'}.`,
+    `Matched: ${card.matched.join(', ') || 'text'}.`,
   ]
   return text(parts.join(' '), SKILL_CARD_MAX_CHARS)
+}
+
+export function needCounts(cards) {
+  const counts = { have: 0, can_craft: 0, locked: 0, unknown: 0 }
+  for (const card of cards) for (const need of card.needs) counts[need.state]++
+  return counts
 }
 
 export function skillOfferBlock(offer) {
   if (!offer?.cards?.length) return ''
   const lines = [
-    `${SKILL_OFFERS_PREFIX} Skills matched to this goal by the harness (tags and live preconditions), best first. These are cards, not loaded skills: call getSkillDetails with an id before following one. Guidance only; revalidate live state. You may still use findSkills for a different sub-problem.`,
+    `${SKILL_OFFERS_PREFIX} Skills matched to this goal by the harness (tags and live needs), best first. Needs: have = held or already placed; can craft = recipe enabled; locked = research first. These are cards, not loaded skills: call getSkillDetails with an id before following one. Guidance only; revalidate live state. You may still use findSkills for a different sub-problem.`,
     ...offer.cards.map((card, index) => `${index + 1}. ${renderSkillCard(card)}`),
   ]
-  if (offer.advisor?.applied) {
+  if (SKILL_CHOICE_MODE === SKILL_CHOICE_MODES.ADVISORY && offer.advisor?.applied) {
     lines.push(`Advisor: Jev ranked ${offer.advisor.pick} first (confidence ${offer.advisor.confidence.toFixed(2)}). Advisory only.`)
   }
   return lines.join('\n')
@@ -109,12 +168,12 @@ export function skillOfferBlock(offer) {
 
 export function skillChoiceQuestions(cards) {
   const criteria = {}
-  for (const card of cards) if (card.id !== 'none') criteria[card.id] = renderSkillCard(card)
+  for (const card of cards) criteria[card.id] = renderSkillCard(card)
   criteria.none = 'None of these skills fits the goal.'
   return {
     skill_choice: {
       type: 'choice',
-      instructions: 'Judge from the goal text only. Which skill card is the best starting pattern for this goal? Each card lists what it produces, what it needs, and why the harness matched it; unmet needs are fine if the skill is still the right pattern to follow.',
+      instructions: 'Judge from the goal text only. Which skill card is the best starting pattern for this goal? Each card lists what it produces, what it needs (have, can craft, or locked behind research), and which tags matched; locked needs are fine if the skill is still the right pattern to follow.',
       criteria,
     },
   }
@@ -137,17 +196,14 @@ export function parseSkillChoice(response, cards) {
   return { pick: answer.choice, confidence, order }
 }
 
-function goalObjective(loop, memoryKey) {
+function planningGoal(loop, memoryKey) {
   const planning = loop.memory?.planningState?.(memoryKey)
-  if (planning?.goal?.status === 'active' && typeof planning.goal.objective === 'string') return planning.goal.objective
-  const legacy = loop.memory?.currentPlan?.(memoryKey)
-  if (legacy?.status === 'active' && typeof legacy.objective === 'string') return legacy.objective
-  return ''
+  return planning?.goal?.status === 'active' ? planning : undefined
 }
 
-async function rankWithJev(loop, offer, goal) {
+async function rankWithJev(loop, offer, trigger) {
   const deterministic = offer.cards.map(card => card.id)
-  const base = { deterministic_order: deterministic, mode: 'advisory' }
+  const base = { trigger, deterministic_order: deterministic, mode: SKILL_CHOICE_MODE }
   if (typeof loop.skillDecisionProvider !== 'function') {
     await loop.traceEvent('skill.ranked', { ...base, source: 'deterministic', reason: 'jev_unavailable' })
     return
@@ -156,13 +212,18 @@ async function rankWithJev(loop, offer, goal) {
   const decisionId = `decision_${Date.now().toString(36)}_skill_${(++loop.decisionRequestSequence).toString(36)}`
   const state = {
     contract: SKILL_CHOICE_CONTRACT,
-    goal: text(goal, SKILL_OFFER_MAX_GOAL_CHARS),
+    goal: offer.goal,
+    trigger,
     candidate_count: offer.cards.length,
   }
+  // A newer search, or a cancelled request, aborts the older Jev call.
+  loop.skillChoiceAbort?.abort()
+  const controller = new AbortController()
+  loop.skillChoiceAbort = controller
   await loop.decisionTraceEvent('decision.request', {
     decision_id: decisionId,
     contract: SKILL_CHOICE_CONTRACT,
-    mode: 'advisory',
+    mode: SKILL_CHOICE_MODE,
     question_ids: Object.keys(questions),
   })
   const startedAt = Date.now()
@@ -171,13 +232,15 @@ async function rankWithJev(loop, offer, goal) {
     const response = await loop.skillDecisionProvider(state, questions, {
       epoch: loop.epoch?.epoch,
       actorId: loop.epoch?.actor_id,
+      signal: controller.signal,
     })
+    if (controller.signal.aborted) throw new Error('skill_choice cancelled: superseded')
     choice = parseSkillChoice(response, offer.cards)
     if (!choice) throw new Error('skill_choice answer missing or not one of the offered ids')
     await loop.decisionTraceEvent('decision.response', {
       decision_id: decisionId,
       contract: SKILL_CHOICE_CONTRACT,
-      mode: 'advisory',
+      mode: SKILL_CHOICE_MODE,
       pick: choice.pick,
       confidence: choice.confidence,
       latency_ms: Date.now() - startedAt,
@@ -194,10 +257,12 @@ async function rankWithJev(loop, offer, goal) {
     await loop.traceEvent('skill.ranked', { ...base, source: 'deterministic', reason: 'jev_error', decision_id: decisionId, error: reason })
     return
   }
+  finally {
+    if (loop.skillChoiceAbort === controller) loop.skillChoiceAbort = null
+  }
   const confident = choice.pick !== 'none' && choice.confidence >= SKILL_CHOICE_MIN_CONFIDENCE
-  // Advisory only when Jev is confident and disagrees with nothing it could
-  // not see: it can only pick among the offered cards.
-  offer.advisor = confident ? { applied: true, pick: choice.pick, confidence: choice.confidence } : null
+  const applied = confident && SKILL_CHOICE_MODE === SKILL_CHOICE_MODES.ADVISORY
+  offer.advisor = applied ? { applied: true, pick: choice.pick, confidence: choice.confidence } : null
   await loop.traceEvent('skill.ranked', {
     ...base,
     source: 'jev',
@@ -207,52 +272,84 @@ async function rankWithJev(loop, offer, goal) {
     jev_pick: choice.pick,
     confidence: choice.confidence,
     agrees_with_top: choice.pick === deterministic[0],
-    advisory_applied: confident,
+    prompt_applied: applied,
   })
 }
 
-// One-line hook at the start of a planning request. A new goal always gets a
-// fresh offer; any other planning request keeps the goal's offer, or builds
-// one for the active goal when none exists (after a restart). Never throws.
+// One complete search: ask the mod, keep the cards, trace, then Jev's shadow
+// pick. Never throws; a failure leaves no offer and says why.
+async function searchSkills(loop, { memoryKey, goal, trigger, intent }) {
+  const query = utf8Prefix(goal, SKILL_OFFER_MAX_GOAL_BYTES)
+  if (!query) {
+    loop.skillOffers = null
+    await loop.traceEvent('skill.offer_skipped', { trigger, reason: 'no_goal_text', intent })
+    return null
+  }
+  let raw
+  try { raw = await loop.rcon.command(skillOfferCommand(query)) }
+  catch (error) {
+    loop.skillOffers = null
+    await loop.traceEvent('skill.offer_skipped', { trigger, reason: 'lookup_failed', intent, error: text(error instanceof Error ? error.message : String(error), 200) })
+    return null
+  }
+  const parsed = parseSkillOffers(raw)
+  if (!parsed.ok || parsed.cards.length === 0) {
+    loop.skillOffers = null
+    await loop.traceEvent('skill.offer_skipped', {
+      trigger,
+      reason: parsed.ok ? 'no_matching_skill' : parsed.reason,
+      intent,
+      ...(parsed.error ? { error: parsed.error } : {}),
+    })
+    return null
+  }
+  const offer = { memoryKey, goal: query, trigger, cards: parsed.cards, advisor: null, authoring: true }
+  loop.skillOffers = offer
+  loop.lastFollowedSkillKey = null
+  await loop.traceEvent('skill.offered', {
+    trigger,
+    reason: trigger,
+    intent,
+    offered_ids: offer.cards.map(card => card.id),
+    need_counts: needCounts(offer.cards),
+    cards: offer.cards.map(card => ({
+      id: card.id,
+      status: card.status,
+      score: card.score,
+      matched: card.matched,
+      need_counts: needCounts([card]),
+      locked: card.needs.filter(need => need.state === 'locked').map(need => ({ subject: need.subject, technology: need.technology })),
+    })),
+  })
+  await rankWithJev(loop, offer, trigger)
+  return offer
+}
+
+function isRevisionRound(loop, memoryKey, intent) {
+  if (intent === 'amend_current') return true
+  const planning = loop.memory?.planningState?.(memoryKey)
+  const plan = planning ? getActivePlan(planning) : undefined
+  return plan?.status === PLAN_STATUS.BLOCKED && plan.blocker?.user_choice?.choice === 'revise'
+}
+
+// One-line hook at the start of a planning request. A new goal runs a complete
+// search. A revision round (amendment, or a blocked plan the user chose to
+// revise) shows the goal's cards again, searching if there are none. Any other
+// request leaves offers alone. Never throws.
 export async function ensureSkillOffers(loop, { memoryKey, intent, text: requestText }) {
   try {
+    if (intent === 'new_goal') {
+      return await searchSkills(loop, { memoryKey, goal: requestText, trigger: 'new_goal', intent })
+    }
+    if (!isRevisionRound(loop, memoryKey, intent)) return loop.skillOffers ?? null
     const current = loop.skillOffers
-    if (intent !== 'new_goal' && current?.memoryKey === memoryKey) return current
-    const goal = intent === 'new_goal' ? requestText : goalObjective(loop, memoryKey)
-    const reason = intent === 'new_goal' ? 'new_goal' : 'active_goal_without_offer'
-    if (!text(goal, SKILL_OFFER_MAX_GOAL_CHARS)) {
-      loop.skillOffers = null
-      await loop.traceEvent('skill.offer_skipped', { reason: 'no_goal_text', intent })
-      return null
+    if (current?.memoryKey === memoryKey) {
+      current.authoring = true
+      await loop.traceEvent('skill.offer_reshown', { trigger: 'revision', reason: 'revision_round', intent, offered_ids: current.cards.map(card => card.id) })
+      return current
     }
-    let raw
-    try { raw = await loop.rcon.command(skillOfferCommand(goal)) }
-    catch (error) {
-      loop.skillOffers = null
-      await loop.traceEvent('skill.offer_skipped', { reason: 'lookup_failed', intent, error: text(error instanceof Error ? error.message : String(error), 200) })
-      return null
-    }
-    const parsed = parseSkillOffers(raw)
-    if (!parsed.ok || parsed.cards.length === 0) {
-      loop.skillOffers = null
-      await loop.traceEvent('skill.offer_skipped', {
-        reason: parsed.ok ? 'no_matching_skill' : parsed.reason,
-        intent,
-        ...(parsed.error ? { error: parsed.error } : {}),
-      })
-      return null
-    }
-    const offer = { memoryKey, goal: text(goal, SKILL_OFFER_MAX_GOAL_CHARS), cards: parsed.cards, advisor: null }
-    loop.skillOffers = offer
-    loop.lastFollowedSkillKey = null
-    await loop.traceEvent('skill.offered', {
-      reason,
-      intent,
-      offered_ids: offer.cards.map(card => card.id),
-      cards: offer.cards.map(card => ({ id: card.id, status: card.status, score: card.score, matched: card.matched, unmet: card.unmet })),
-    })
-    await rankWithJev(loop, offer, goal)
-    return offer
+    const objective = planningGoal(loop, memoryKey)?.goal?.objective ?? requestText
+    return await searchSkills(loop, { memoryKey, goal: objective, trigger: 'revision', intent })
   }
   catch (error) {
     loop.log?.(`[skills] offer failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -260,10 +357,39 @@ export async function ensureSkillOffers(loop, { memoryKey, intent, text: request
   }
 }
 
+// One-line hook at the LOD shelf -> active plan boundary (a verified plan
+// slice completed and the planner is woken to refine the next shelf node).
+// Runs a complete search for that node. Never throws.
+export async function refreshSkillOffersAtShelfPickup(loop, planning) {
+  try {
+    const memoryKey = loop.activePlanKey()
+    const node = nearestShelfRefinementTarget(planning)
+    const goal = node
+      ? [node.intent, node.why_it_matters].filter(value => typeof value === 'string' && value).join('. ')
+      : planning?.goal?.objective
+    const offer = await searchSkills(loop, { memoryKey, goal, trigger: 'shelf_pickup', intent: 'shelf_pickup' })
+    if (offer && node?.node_id) offer.shelf_node_id = node.node_id
+    return offer
+  }
+  catch (error) {
+    loop.log?.(`[skills] shelf pickup offer failed: ${error instanceof Error ? error.message : String(error)}`)
+    return null
+  }
+}
+
+// The block, only while the planner is authoring or revising a plan.
 export function skillOffersContext(loop) {
   const offer = loop.skillOffers
-  if (!offer || offer.memoryKey !== loop.activePlanKey?.()) return ''
+  if (!offer || !offer.authoring || offer.memoryKey !== loop.activePlanKey?.()) return ''
   return skillOfferBlock(offer)
+}
+
+// Characters the harness injects as skill text (offers plus loaded skill
+// context), so the working-context ceiling can count them.
+export function injectedSkillChars(loop) {
+  const offers = skillOffersContext(loop)
+  const loaded = typeof loop.skillContext === 'function' ? loop.skillContext() : ''
+  return offers.length + loaded.length
 }
 
 function offerRank(loop, id) {
@@ -283,10 +409,16 @@ export async function traceSkillLoaded(loop, skill) {
   })
 }
 
-// "Followed" is the harness's evidence, not the model's claim: a plan was
-// committed while these skills were loaded into [SKILL_CONTEXT]. Emitted once
-// per distinct loaded set per goal offer.
+// Hook in commitPlan. A committed plan ends the authoring round, so the block
+// leaves the prompt for the rounds that carry out its steps. "Followed" is the
+// harness's evidence, not the model's claim: a plan was committed while these
+// skills were loaded into [SKILL_CONTEXT]. Emitted once per distinct loaded set
+// per offer.
 export async function traceSkillsFollowed(loop, plan) {
+  if (loop.skillOffers?.authoring && Array.isArray(plan?.plan) && plan.plan.length > 0) {
+    loop.skillOffers.authoring = false
+    await loop.traceEvent('skill.offer_retired', { reason: 'plan_committed', trigger: loop.skillOffers.trigger })
+  }
   const loaded = loop.loadedSkillContext instanceof Map ? [...loop.loadedSkillContext.keys()] : []
   if (loaded.length === 0) return
   const key = loaded.slice().sort().join(',')

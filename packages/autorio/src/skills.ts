@@ -1,12 +1,13 @@
-import type { LuaGuiElement, LuaInventory, LuaPlayer } from 'factorio:runtime'
+import type { LuaForce, LuaGuiElement, LuaPlayer } from 'factorio:runtime'
 import { BASIC_SKILL_DEFINITIONS } from './basic_skill_library'
-import { get_controlled_actor } from './actors/actor_controller'
+import { get_controlled_actor, peek_controlled_actor } from './actors/actor_controller'
 import {
   analyze_factory_area,
   latest_factory_area_analysis,
   list_analyzed_blocks,
   skill_candidate_definition_from_block,
 } from './factory_area_learning'
+import { crafting_categories_support_recipe } from './recipe_categories'
 import {
   canonicalize_skill_constraint_predicate,
   skill_constraint_predicate_signature,
@@ -632,8 +633,8 @@ const MAX_TEXT_TERM_HITS = 3
 const WHOLE_QUERY_TEXT_WEIGHT = 2
 const VERIFIED_BONUS = 3
 const OBSERVED_PENALTY = 1
-const UNMET_PRECONDITION_PENALTY = 0.25
-const MAX_UNMET_PENALTY = 1
+const LOCKED_NEED_PENALTY = 0.25
+const MAX_LOCKED_PENALTY = 1
 export const MAX_SKILL_CARDS = 5
 const CARD_SUMMARY_MAX = 160
 const CARD_LIST_MAX = 5
@@ -724,45 +725,70 @@ function tag_match_weight(tag: SkillTag, goal: GoalTerms) {
   return 0
 }
 
-export type SkillPreconditionState = 'met' | 'unmet' | 'unknown'
-
-// Read-only world facts for precondition checks. Each answers undefined when
-// the subject is not something the game can check (an abstract subject such as
-// "coal-resource"), which reports the precondition as unknown, not unmet.
-export interface SkillWorldView {
-  tech_state: (this: void, technology: string) => boolean | undefined
-  held_count: (this: void, item: string) => number | undefined
-  held_entity: (this: void, entity_or_type: string) => boolean | undefined
+// Owner decision 2026-09-28: a need is one of
+//   have      - in the actor's main inventory, or already placed by the force;
+//   can_craft - its recipe is enabled for the force and the actor can hand-craft it;
+//   locked    - its recipe (or the technology itself) is not researched yet; the
+//               card names the technology that unlocks it;
+//   unknown   - not something the game can check (e.g. "coal-resource"), or an
+//               enabled recipe the actor cannot hand-craft (plates). Staged
+//               building handles those, so they carry no extra state.
+// Only locked lowers the score.
+export type SkillNeedState = 'have' | 'can_craft' | 'locked' | 'unknown'
+export interface SkillNeedCheck {
+  state: SkillNeedState
+  technology?: string
+  via?: string
 }
 
-export function skill_precondition_state(condition: SkillPrecondition, world: SkillWorldView | undefined): SkillPreconditionState {
-  if (world === undefined) return 'unknown'
-  let met: boolean | undefined
-  if (condition.kind === 'technology_researched') met = world.tech_state(condition.subject)
-  else if (condition.kind === 'item_available') {
-    const count = world.held_count(condition.subject)
-    met = count === undefined ? undefined : count >= (condition.minimum ?? 1)
-  }
-  else if (condition.kind === 'entity_available') met = world.held_entity(condition.subject)
-  if (met === undefined) return 'unknown'
-  return met ? 'met' : 'unmet'
+// Read-only world facts for need checks. Each answers undefined when the
+// subject is not something the game knows, which reports the need as unknown.
+export interface SkillWorldView {
+  check_technology: (this: void, technology: string) => SkillNeedCheck | undefined
+  check_item: (this: void, item: string, minimum: number) => SkillNeedCheck | undefined
+  check_entity: (this: void, entity_or_type: string) => SkillNeedCheck | undefined
+}
+
+const UNKNOWN_NEED: SkillNeedCheck = { state: 'unknown' }
+
+export function skill_precondition_check(condition: SkillPrecondition, world: SkillWorldView | undefined): SkillNeedCheck {
+  if (world === undefined) return UNKNOWN_NEED
+  let check: SkillNeedCheck | undefined
+  if (condition.kind === 'technology_researched') check = world.check_technology(condition.subject)
+  else if (condition.kind === 'item_available') check = world.check_item(condition.subject, condition.minimum ?? 1)
+  else if (condition.kind === 'entity_available') check = world.check_entity(condition.subject)
+  return check ?? UNKNOWN_NEED
+}
+
+export interface SkillCardNeed {
+  subject: string
+  state: SkillNeedState
+  technology?: string
+  via?: string
 }
 
 export interface SkillGoalMatch {
   skill: SkillDefinition
   score: number
   relevance: number
+  tag_hits: number
   matched: string[]
-  unmet: string[]
+  needs: SkillCardNeed[]
 }
+
+// A skill is offered only with at least one tag match, or a relevance of 2 or
+// more from text (a single text word hit is not enough).
+const MIN_TEXT_ONLY_RELEVANCE = 2
 
 export function score_skill_for_goal(skill: SkillDefinition, goal: GoalTerms, world?: SkillWorldView): SkillGoalMatch {
   const matched: string[] = []
   let relevance = 0
+  let tag_hits = 0
   for (const tag of derive_skill_tags(skill)) {
     const weight = tag_match_weight(tag, goal)
     if (weight <= 0) continue
     relevance += weight
+    tag_hits++
     matched.push(tag.tag)
   }
   // Weak full-text signal for words no tag covered, so a learned skill with no
@@ -783,19 +809,31 @@ export function score_skill_for_goal(skill: SkillDefinition, goal: GoalTerms, wo
     matched.push(`text:${word}`)
   }
   relevance += text_hits * TEXT_TERM_WEIGHT
-  if (goal.normalized.length >= 2 && haystack.includes(goal.normalized)) relevance += WHOLE_QUERY_TEXT_WEIGHT
+  // Whole-query bonus for a phrase or non-ASCII shorthand; a single ASCII word
+  // is already counted as a text hit above.
+  const phrase = goal.normalized.includes(' ') || !is_ascii_tag(goal.normalized)
+  if (phrase && goal.normalized.length >= 2 && haystack.includes(goal.normalized)) relevance += WHOLE_QUERY_TEXT_WEIGHT
 
-  const unmet: string[] = []
+  const needs: SkillCardNeed[] = []
+  let locked = 0
   for (const condition of skill.preconditions) {
-    if (skill_precondition_state(condition, world) === 'unmet' && !unmet.includes(condition.subject)) unmet.push(condition.subject)
+    let seen = false
+    for (const need of needs) if (need.subject === condition.subject) seen = true
+    if (seen) continue
+    const check = skill_precondition_check(condition, world)
+    const need: SkillCardNeed = { subject: condition.subject, state: check.state }
+    if (check.technology !== undefined) need.technology = check.technology
+    if (check.via !== undefined && check.via !== condition.subject) need.via = check.via
+    if (check.state === 'locked') locked++
+    needs.push(need)
   }
   let score = relevance
   if (relevance > 0) {
     if (skill.status === 'verified') score += VERIFIED_BONUS
     else if (skill.status === 'observed') score -= OBSERVED_PENALTY
-    score -= Math.min(MAX_UNMET_PENALTY, unmet.length * UNMET_PRECONDITION_PENALTY)
+    score -= Math.min(MAX_LOCKED_PENALTY, locked * LOCKED_NEED_PENALTY)
   }
-  return { skill, score: Math.floor(score * 100 + 0.5) / 100, relevance, matched, unmet }
+  return { skill, score: Math.floor(score * 100 + 0.5) / 100, relevance, tag_hits, matched, needs }
 }
 
 function status_rank(status: SkillStatus) {
@@ -808,7 +846,7 @@ export function rank_skills_for_goal(goal_text: string, world?: SkillWorldView, 
   for (const skill of list_skill_definitions()) {
     if (!include_deprecated && skill.status === 'deprecated') continue
     const match = score_skill_for_goal(skill, goal, world)
-    if (match.relevance > 0) ranked.push(match)
+    if (match.tag_hits > 0 || match.relevance >= MIN_TEXT_ONLY_RELEVANCE) ranked.push(match)
   }
   ranked.sort((left, right) => right.score - left.score
     || status_rank(left.skill.status) - status_rank(right.skill.status)
@@ -816,10 +854,26 @@ export function rank_skills_for_goal(goal_text: string, world?: SkillWorldView, 
   return ranked
 }
 
+// In Lua a string's length and indexes count bytes, so a plain slice can cut a
+// multi-byte UTF-8 character (Chinese goals) in half. Step back off UTF-8
+// continuation bytes (0b10xxxxxx) before cutting. In JavaScript (unit tests)
+// lengths count UTF-16 units and CJK units are never in that range, so the
+// same code is a plain prefix there.
+export function utf8_safe_prefix(value: string, max_bytes: number) {
+  if (value.length <= max_bytes) return value
+  let end = max_bytes
+  while (end > 0) {
+    const code = value.charCodeAt(end)
+    if (code < 0x80 || code >= 0xC0) break
+    end--
+  }
+  return value.slice(0, end)
+}
+
 function one_line_summary(summary: string) {
   const end = summary.indexOf('. ')
   const sentence = end >= 0 ? summary.slice(0, end + 1) : summary
-  return sentence.length <= CARD_SUMMARY_MAX ? sentence : `${sentence.slice(0, CARD_SUMMARY_MAX - 3)}...`
+  return sentence.length <= CARD_SUMMARY_MAX ? sentence : `${utf8_safe_prefix(sentence, CARD_SUMMARY_MAX - 3)}...`
 }
 
 // One compact card per skill. The runtime renders it the same way for the
@@ -830,37 +884,38 @@ export interface SkillCard {
   status: SkillStatus
   summary: string
   produces: string[]
-  needs: string[]
+  needs: SkillCardNeed[]
   matched: string[]
-  unmet: string[]
   score: number
 }
 
 export function skill_card(match: SkillGoalMatch): SkillCard {
-  const needs: string[] = []
-  for (const condition of match.skill.preconditions) if (!needs.includes(condition.subject)) needs.push(condition.subject)
   return {
     id: match.skill.id,
     name: match.skill.name,
     status: match.skill.status,
     summary: one_line_summary(match.skill.summary),
     produces: match.skill.outputs.map(flow => flow.item).slice(0, CARD_LIST_MAX),
-    needs: needs.slice(0, CARD_LIST_MAX),
+    needs: match.needs.slice(0, CARD_LIST_MAX),
     matched: match.matched.slice(0, CARD_LIST_MAX),
-    unmet: match.unmet.slice(0, CARD_LIST_MAX),
     score: match.score,
   }
 }
 
+const MAX_OFFER_GOAL_BYTES = 500
+const MAX_FIND_QUERY_BYTES = 240
+// Input bound before truncation; anything under it is cut to size, not refused.
+const MAX_RAW_QUERY_CHARS = 8000
+
 export function skill_cards_for_goal(goal_text: unknown, limit: unknown = MAX_SKILL_CARDS, world?: SkillWorldView) {
-  const text = clean_text(goal_text, 'skill offer goal', 500)
+  const text = utf8_safe_prefix(clean_text(goal_text, 'skill offer goal', MAX_RAW_QUERY_CHARS), MAX_OFFER_GOAL_BYTES)
   const bounded_limit = positive_integer(limit, 'skill offer limit')
   if (bounded_limit > MAX_SKILL_CARDS) throw new Error(`skill offer limit must be at most ${MAX_SKILL_CARDS}`)
   return rank_skills_for_goal(text, world).slice(0, bounded_limit).map(skill_card)
 }
 
 export function find_skill_definitions(query: unknown, limit: unknown = 3, world?: SkillWorldView) {
-  const normalized = clean_text(query, 'skill search query', 240)
+  const normalized = utf8_safe_prefix(clean_text(query, 'skill search query', MAX_RAW_QUERY_CHARS), MAX_FIND_QUERY_BYTES)
   const bounded_limit = positive_integer(limit, 'skill search limit')
   if (bounded_limit > 5) throw new Error('skill search limit must be at most 5')
   return rank_skills_for_goal(normalized, world, true).slice(0, bounded_limit).map(match => ({
@@ -874,50 +929,101 @@ export function find_skill_definitions(query: unknown, limit: unknown = 3, world
     inputs: match.skill.inputs.map(value => value.item),
     outputs: match.skill.outputs.map(value => value.item),
     matched: match.matched.slice(0, CARD_LIST_MAX),
-    unmet: match.unmet.slice(0, CARD_LIST_MAX),
+    needs: match.needs.slice(0, CARD_LIST_MAX),
     warnings: skill_ui_summary(match.skill).warnings,
   }))
 }
 
-function is_entity_type(subject: string) {
+function sorted_names(names: string[]) {
+  names.sort((left, right) => left < right ? -1 : left > right ? 1 : 0)
+  return names
+}
+
+// Entity names for a subject that is an entity name or an entity type
+// ("generator"). Empty when the game knows neither.
+function entities_for_subject(subject: string) {
+  if (prototypes.entity[subject] !== undefined) return [subject]
+  const names: string[] = []
   try {
     const matches = prototypes.get_entity_filtered([{ filter: 'type', type: subject as any }])
-    for (const [name] of matches) if (name !== undefined) return true
-    return false
+    for (const [name] of matches) names.push(name)
   }
   catch {
-    return false
+    return []
   }
+  return sorted_names(names)
 }
 
-function held_entity(inventory: LuaInventory | undefined, subject: string): boolean | undefined {
-  const known_entity = prototypes.entity[subject] !== undefined
-  if (!known_entity && !is_entity_type(subject)) return undefined
-  if (inventory === undefined) return undefined
-  for (const item of inventory.get_contents()) {
-    const placed = prototypes.item[item.name]?.place_result
-    if (placed === undefined) continue
-    if (placed.name === subject || placed.type === subject) return true
+// Recipe name -> the technology that unlocks it. When several do, the one with
+// the fewest unresearched prerequisites wins (then the name), so a card names
+// the nearest unlock.
+function recipe_unlock_technologies(force: LuaForce) {
+  const best: Record<string, { technology: string, distance: number }> = {}
+  for (const [name, technology] of force.technologies) {
+    let distance = 0
+    for (const [, prerequisite] of pairs(technology.prerequisites)) if (!prerequisite.researched) distance++
+    for (const effect of technology.prototype.effects) {
+      if (effect.type !== 'unlock-recipe') continue
+      const recipe = (effect as any).recipe
+      if (typeof recipe !== 'string') continue
+      const current = best[recipe]
+      if (current === undefined || distance < current.distance || (distance === current.distance && name < current.technology)) {
+        best[recipe] = { technology: name, distance }
+      }
+    }
   }
-  return false
+  const result: Record<string, string> = {}
+  for (const recipe in best) result[recipe] = best[recipe].technology
+  return result
 }
 
-// The controlled actor's force and main inventory, read-only.
+const NEED_RANK: Record<SkillNeedState, number> = { have: 0, can_craft: 1, locked: 2, unknown: 3 }
+
+// The controlled actor's force and main inventory, read-only. Uses the peek
+// lookup: a skill lookup must never create or reconcile the NPC body.
 export function live_skill_world_view(): SkillWorldView | undefined {
-  const actor = get_controlled_actor()
+  const actor = peek_controlled_actor()
   if (!actor || !actor.is_valid) return undefined
   const force = actor.force
   const inventory = actor.get_main_inventory()
+  const hand_categories = actor.character?.prototype.crafting_categories
+  let unlocks: Record<string, string> | undefined
+  const unlocking_technology = (recipe: string) => {
+    if (unlocks === undefined) unlocks = recipe_unlock_technologies(force)
+    return unlocks[recipe]
+  }
+  const check_item = function (this: void, item: string, minimum: number): SkillNeedCheck | undefined {
+    if (prototypes.item[item] === undefined) return undefined
+    if (inventory !== undefined && inventory.get_item_count(item) >= minimum) return { state: 'have', via: item }
+    const recipe = force.recipes[item]
+    if (recipe === undefined) return undefined
+    if (!recipe.enabled) {
+      const technology = unlocking_technology(item)
+      return technology !== undefined ? { state: 'locked', via: item, technology } : { state: 'locked', via: item }
+    }
+    return crafting_categories_support_recipe(hand_categories, recipe) ? { state: 'can_craft', via: item } : undefined
+  }
   return {
-    tech_state: (technology: string) => {
-      const tech = force.technologies[technology]
-      return tech === undefined ? undefined : tech.researched
+    check_technology: (name: string) => {
+      const technology = force.technologies[name]
+      if (technology === undefined) return undefined
+      return technology.researched ? { state: 'have', via: name } : { state: 'locked', via: name, technology: name }
     },
-    held_count: (item: string) => {
-      if (inventory === undefined || prototypes.item[item] === undefined) return undefined
-      return inventory.get_item_count(item)
+    check_item,
+    check_entity: (entity_or_type: string) => {
+      let best: SkillNeedCheck | undefined
+      for (const name of entities_for_subject(entity_or_type)) {
+        if (force.get_entity_count(name) > 0) return { state: 'have', via: name }
+        const place = prototypes.entity[name]?.items_to_place_this
+        if (place === undefined || place.length === 0) continue
+        const check = check_item(place[0].name, 1)
+        if (check === undefined) continue
+        const candidate: SkillNeedCheck = { ...check, via: name }
+        if (best === undefined || NEED_RANK[candidate.state] < NEED_RANK[best.state]) best = candidate
+        if (best.state === 'have') return best
+      }
+      return best
     },
-    held_entity: (entity_or_type: string) => held_entity(inventory, entity_or_type),
   }
 }
 
