@@ -141,6 +141,8 @@ case "$LANE" in
     run_py placement_transfer.py
     printf '[npc-test][core] Running full furnace supply/retrieval transfer gate...\n'
     run_py smelting_transfer.py
+    printf '[npc-test][core] Running three-furnace supply refusal gate (one refused move, independent siblings)...\n'
+    run_py furnace_supply_refusal.py
     run_py control_lifecycle.py
     printf '[npc-test][core] Running owned basic-operation outcome/failure gates...\n'
     run_py basic_outcomes.py
