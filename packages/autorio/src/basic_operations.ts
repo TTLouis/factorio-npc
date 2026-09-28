@@ -64,6 +64,64 @@ export interface BasicOperationResult {
   rocket_parts?: number
   rocket_parts_required?: number
   rockets_launched?: number
+  /** Item moves: how many of the item the NPC held when the move ran. */
+  held_count?: number
+  /** Refused item moves: the concrete reason the target took none. */
+  refusal_cause?: TransferRefusalCause
+  /** Refused item moves: the target's inventories and what occupies them. */
+  target_inventories?: TransferInventorySnapshot[]
+  /** A refused move's receipt is republished when its batch closes; this is the tick it was refused. */
+  refusal_tick?: number
+  /** Present on a republished refusal: how many operations of its batch were refused. */
+  batch_refused_count?: number
+}
+
+/**
+ * Why a to-entity item move moved nothing although the NPC held the item.
+ * - target_full: an inventory that takes the item already holds it and has no room left.
+ * - input_slot_holds_other_item: the inventory that would take the item is filled by another item
+ *   (for example copper ore in a furnace source slot when iron ore is supplied).
+ * - no_input_inventory_for_item: the entity has no input inventory for this item at all
+ *   (for example ore into a boiler, whose only input is fuel).
+ * - target_rejects_item: an input inventory has free slots but still rejects the item.
+ */
+export type TransferRefusalCause = 'target_full' | 'input_slot_holds_other_item' | 'no_input_inventory_for_item' | 'target_rejects_item'
+
+export interface TransferInventorySnapshot {
+  unit_number?: number
+  index?: number
+  name?: string
+  /** input and fuel inventories are insert targets; output and burnt_result never are. */
+  role: 'input' | 'fuel' | 'output' | 'burnt_result'
+  slot_count: number
+  empty_slots: number
+  can_insert: boolean
+  contents: Array<{ name: string, quality?: string, count: number }>
+}
+
+/**
+ * One-line cause of a refused item move for logs and the runtime's error
+ * text: cause, item, target, held and requested counts, and what occupies the
+ * target's input/fuel slots.
+ */
+export function transfer_refusal_summary(result: BasicOperationResult) {
+  const parts = [
+    `cause=${result.refusal_cause ?? 'unknown'}`,
+    `item=${result.item_name ?? 'unknown'}`,
+    `target=${result.target_unit_number ?? result.entity_name ?? 'unknown'}`,
+    `held=${result.held_count ?? 'unknown'}`,
+    `requested=${result.requested_count ?? 'unknown'}`,
+  ]
+  const slots: string[] = []
+  for (const inventory of result.target_inventories ?? []) {
+    if ((inventory.role !== 'input' && inventory.role !== 'fuel') || inventory.slot_count <= 0) continue
+    const contents = inventory.contents.length > 0
+      ? inventory.contents.map(item => `${item.name} x${item.count}`).join(',')
+      : 'empty'
+    slots.push(`${inventory.name ?? `inventory_${inventory.index ?? 'unknown'}`}[${contents}]`)
+  }
+  if (slots.length > 0) parts.push(`slots=${slots.join(' ')}`)
+  return parts.join(' ')
 }
 
 declare const storage: {
@@ -403,7 +461,54 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     manager.next_task()
   }
 
+  // Full receipts of refused operations in the active batch, keyed by
+  // operation_id, republished when the batch closes.
+  let refusal_results: Record<number, BasicOperationResult> = {}
+
+  /**
+   * A to-entity item move the target refused: nothing moved and the items are
+   * still held, so no later operation lost anything it needed. Record the
+   * receipt and advance to the next queued operation instead of cancelling
+   * the batch; the batch closes as refused once it drains.
+   */
+  function refuse(actor: ControlledActor, task: PlayerParametersMoveItems, code: BasicOperationCode, details: Partial<BasicOperationResult> = {}) {
+    const result = result_for(actor, task, false, false, code, details)
+    const recorded = manager.record_refusal({
+      operation_id: task.operation_id,
+      type: task.type,
+      code,
+      cause: details.refusal_cause,
+      item_name: task.item_name,
+      target_unit_number: task.target_unit_number,
+      held_count: details.held_count,
+      tick: result.tick,
+    })
+    if (!recorded) {
+      fail(actor, task, code, details)
+      return
+    }
+    if (task.operation_id !== undefined) refusal_results[task.operation_id] = result
+    log(`[AUTORIO] ${task.type} refused: ${code}; ${transfer_refusal_summary(result)}; independent operations in the batch continue`)
+    manager.reset_task_state()
+    manager.next_task()
+  }
+
+  manager.register_refused_batch_handler((refusals, receipt) => {
+    const first = refusals[0]
+    const original = first.operation_id !== undefined ? refusal_results[first.operation_id] : undefined
+    refusal_results = {}
+    // The batch receipt closes on this tick; republish the first refusal so
+    // the runtime correlates it with the batch (task type, tick, actor).
+    const published: BasicOperationResult | undefined = original
+      ? { ...original, tick: game.tick, refusal_tick: original.tick, batch_refused_count: refusals.length }
+      : undefined
+    if (published) storage.airi_last_basic_operation_result = published
+    const summary = published ? transfer_refusal_summary(published) : `cause=${first.cause ?? 'unknown'}`
+    log(`[AUTORIO] [ERROR] ${first.type} refused: ${first.code}; ${summary}; ${refusals.length} of ${receipt.task_count} operations refused, ${receipt.completed_count ?? 0} completed; independent operations were not cancelled`)
+  })
+
   function fail(actor: ControlledActor | undefined, task: BasicTask, code: BasicOperationCode, details: Partial<BasicOperationResult> = {}) {
+    refusal_results = {}
     suppress_cancel_receipt = true
     manager.cancel_all_tasks(`${task.type}:${code}`)
     suppress_cancel_receipt = false
@@ -450,6 +555,7 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     submit_wait,
     complete,
     fail,
+    refuse,
     status,
     identity_matches: basic_identity_matches,
   }

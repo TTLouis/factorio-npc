@@ -10,12 +10,35 @@ export interface TaskBatchIdentity {
   batch_ref: string
 }
 
+/**
+ * One operation the target refused without changing the world (an item move
+ * the entity would not take). The batch keeps running its independent
+ * operations; the refusal is reported when the batch closes.
+ */
+export interface TaskBatchRefusal {
+  operation_id?: number
+  type: TaskStates
+  code: string
+  cause?: string
+  item_name?: string
+  target_unit_number?: number
+  held_count?: number
+  tick: number
+}
+
 interface TaskBatchReceipt extends TaskBatchIdentity {
   task_count: number
   task_types: TaskStates[]
   tick: number
   reason?: string
+  /** Present only when an operation in the batch was refused. */
+  outcome?: 'refused' | 'cancelled'
+  refused_count?: number
+  completed_count?: number
+  refusals?: TaskBatchRefusal[]
 }
+
+const MAX_RECEIPT_REFUSALS = 8
 
 declare const storage: {
   airi_task_batch_sequence?: number
@@ -37,6 +60,8 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
   let active_batch_console_quiet = false
   let last_completed_batch: TaskBatchReceipt | undefined
   let last_cancelled_batch: TaskBatchReceipt | undefined
+  let active_batch_refusals: TaskBatchRefusal[] = []
+  let refused_batch_handler: ((refusals: TaskBatchRefusal[], receipt: TaskBatchReceipt) => void) | undefined
 
   function is_routine_follow_task(task: PlayerParameters) {
     return task.type === TaskStates.WALKING_TO_ENTITY && task.persistent_follow === true
@@ -80,6 +105,7 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
       active_batch_id = next_batch_id()
       active_batch_task_types = []
       active_batch_console_quiet = quiet_task
+      active_batch_refusals = []
     }
     else if (!quiet_task) {
       active_batch_console_quiet = false
@@ -88,7 +114,7 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
     return created
   }
 
-  function close_batch(kind: 'completed' | 'cancelled', reason?: string) {
+  function close_batch(kind: 'completed' | 'cancelled' | 'refused', reason?: string) {
     if (active_batch_id === undefined) return undefined
     const receipt: TaskBatchReceipt = {
       batch_id: active_batch_id,
@@ -99,17 +125,63 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
       tick: game.tick,
       reason,
     }
+    // Refusals ride on whichever receipt closes the batch, so a later hard
+    // failure that cancels the rest does not hide an earlier refusal.
+    if (active_batch_refusals.length > 0) {
+      receipt.outcome = kind === 'refused' ? 'refused' : 'cancelled'
+      receipt.refused_count = active_batch_refusals.length
+      // Every other operation ran to completion only when the batch drained;
+      // a cancellation stops the rest, so no completed count is claimed then.
+      if (kind === 'refused') receipt.completed_count = receipt.task_count - active_batch_refusals.length
+      receipt.refusals = active_batch_refusals.slice(0, MAX_RECEIPT_REFUSALS)
+    }
+    // A batch with a refused operation is not a clean completion: it is
+    // published where failed batches go, so the runtime's failure path (not
+    // its completion verifier) reads it.
     if (kind === 'completed') last_completed_batch = receipt
     else last_cancelled_batch = receipt
     active_batch_id = undefined
     active_batch_task_types = []
     active_batch_console_quiet = false
+    active_batch_refusals = []
     return receipt
   }
 
   function receipt_details(receipt: TaskBatchReceipt) {
     const reason = receipt.reason ? `, reason=${receipt.reason}` : ''
-    return `batch=${receipt.batch_id}, task_count=${receipt.task_count}, tasks=${receipt.task_types.join(',') || 'none'}, tick=${receipt.tick}${reason}`
+    const refused = receipt.refused_count === undefined
+      ? ''
+      : receipt.completed_count === undefined
+        ? `, refused=${receipt.refused_count}`
+        : `, refused=${receipt.refused_count}, completed=${receipt.completed_count}`
+    return `batch=${receipt.batch_id}, task_count=${receipt.task_count}, tasks=${receipt.task_types.join(',') || 'none'}, tick=${receipt.tick}${reason}${refused}`
+  }
+
+  /**
+   * Record an operation the target refused without changing the world. The
+   * caller then advances to the next queued task instead of cancelling the
+   * batch; the batch closes as refused once its queue drains.
+   */
+  function record_refusal(refusal: TaskBatchRefusal) {
+    if (active_batch_id === undefined) return false
+    active_batch_refusals.push(refusal)
+    return true
+  }
+
+  function register_refused_batch_handler(handler: (refusals: TaskBatchRefusal[], receipt: TaskBatchReceipt) => void) {
+    refused_batch_handler = handler
+  }
+
+  function close_refused_batch() {
+    const refusals = [...active_batch_refusals]
+    const first = refusals[0]
+    const cause = first.cause ? `:${first.cause}` : ''
+    const receipt = close_batch('refused', `${first.type}:${first.code}${cause}`)
+    if (!receipt) return
+    const details = receipt_details(receipt)
+    game.print(`[AUTORIO] Operation batch refused: ${details}`)
+    log(`[AUTORIO] Operation batch refused: ${details}`)
+    if (refused_batch_handler) refused_batch_handler(refusals, receipt)
   }
 
   function add_task(task: PlayerParameters) {
@@ -215,6 +287,10 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
     const task = task_queue.shift()
     if (!task) {
       player_state.task_state = TaskStates.IDLE
+      if (active_batch_id !== undefined && active_batch_refusals.length > 0) {
+        close_refused_batch()
+        return
+      }
       const quiet_completion = active_batch_id !== undefined && active_batch_console_quiet
       const receipt = close_batch('completed')
       const details = receipt
@@ -524,5 +600,7 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
     fail_unsupported_task_state,
     discard_all_tasks_after_actor_loss,
     register_cancel_handler,
+    record_refusal,
+    register_refused_batch_handler,
   }
 }
