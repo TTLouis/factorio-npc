@@ -328,14 +328,22 @@ def run(client: Rcon, results: Path) -> None:
     if actor.get('coal') != SEED_COAL - 3 * COAL_PER_FURNACE:
         problems.append(f'actor coal after batch is {actor!r}')
 
+    # Measured on Factorio 2.0.77: a script insert into a furnace's
+    # crafter_input may overfill the slot past one stack (20 + 50 -> 70 iron
+    # ore) although get_insertable_count reported 30. So the moved count is
+    # checked against what actually changed hands, not a stack-size estimate.
     oversupply_result = (oversupply_status.get('basic_operation') or {}).get('last_result') or {}
-    if not isinstance(source_free, int) or source_free <= 0:
-        problems.append(f'furnace A source free capacity not measured: {source_free!r}')
-    else:
-        if oversupply_result.get('code') != 'completed' or oversupply_result.get('moved_count') != source_free:
-            problems.append(f'over-supply moved {oversupply_result.get("moved_count")!r}, expected the free source capacity {source_free}: {oversupply_result!r}')
-        if oversupply_result.get('held_count') != SEED_IRON_ORE - 2 * ORE_PER_FURNACE:
-            problems.append(f'over-supply receipt held_count is {oversupply_result.get("held_count")!r}')
+    held_before_oversupply = SEED_IRON_ORE - 2 * ORE_PER_FURNACE
+    moved = oversupply_result.get('moved_count')
+    input_gain = input_count(after_oversupply['a'], 'iron-ore') - input_count(after_batch['a'], 'iron-ore')
+    actor_loss = held_before_oversupply - int(after_oversupply['actor'].get('iron_ore') or 0)
+    record['oversupply']['measured'] = {'moved_count': moved, 'input_gain': input_gain, 'actor_loss': actor_loss}
+    if oversupply_result.get('code') != 'completed' or not isinstance(moved, int) or moved <= 0:
+        problems.append(f'over-supply did not complete with a positive move: {oversupply_result!r}')
+    elif moved != input_gain or moved != actor_loss:
+        problems.append(f'over-supply moved_count {moved} does not match the input slot gain {input_gain} and NPC loss {actor_loss}')
+    if oversupply_result.get('held_count') != held_before_oversupply:
+        problems.append(f'over-supply receipt held_count is {oversupply_result.get("held_count")!r}')
     if output_count(after_oversupply['a'], 'iron-ore') != 0:
         problems.append(f'over-supply put iron ore into the furnace result slot: {after_oversupply["a"]!r}')
 
