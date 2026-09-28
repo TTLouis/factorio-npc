@@ -256,8 +256,8 @@ export function new_crafting_controller(get_actor: () => ControlledActor | undef
   }
 
   function tick(actor: ControlledActor) {
-    const task = manager.player_state.parameters_craft_item
-    if (!task || manager.player_state.task_state !== TaskStates.CRAFTING) {
+    const task = manager.player_state().parameters_craft_item
+    if (!task || manager.player_state().task_state !== TaskStates.CRAFTING) {
       return
     }
     if (!identity_matches(actor, task)) {
@@ -295,9 +295,9 @@ export function new_crafting_controller(get_actor: () => ControlledActor | undef
 
   function status() {
     const actor = get_actor()
-    const task = manager.player_state.parameters_craft_item
+    const task = manager.player_state().parameters_craft_item
     return {
-      task_active: manager.player_state.task_state === TaskStates.CRAFTING,
+      task_active: manager.player_state().task_state === TaskStates.CRAFTING,
       actor: actor?.status_snapshot(),
       native_queue: actor?.get_crafting_queue().slice(0, 16),
       persisted_owner: storage.airi_owned_crafting,
@@ -306,7 +306,7 @@ export function new_crafting_controller(get_actor: () => ControlledActor | undef
   }
 
   manager.register_cancel_handler(TaskStates.CRAFTING, () => {
-    const task = manager.player_state.parameters_craft_item
+    const task = manager.player_state().parameters_craft_item
     if (!task || task.owner_actor_id === undefined || task.owner_actor_kind === undefined || task.owner_force_index === undefined) {
       return
     }

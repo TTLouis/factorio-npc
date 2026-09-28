@@ -112,7 +112,7 @@ describe('bounded crafting controller', () => {
     controller.tick(actor)
 
     expect(actor.begin_crafting).toHaveBeenCalledWith({ count: 2, recipe: 'iron-gear-wheel' })
-    expect(manager.player_state.parameters_craft_item).toMatchObject({
+    expect(manager.player_state().parameters_craft_item).toMatchObject({
       owner_actor_id: 1,
       owner_actor_kind: 'standalone_character',
       owner_force_index: 1,
@@ -133,7 +133,7 @@ describe('bounded crafting controller', () => {
     ;(globalThis as any).game.tick = 30
     context.controller.tick(context.actor)
 
-    expect(context.manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(context.manager.player_state().task_state).toBe(TaskStates.IDLE)
     expect(context.controller.status().last_result).toMatchObject({
       accepted: true,
       completed: true,
@@ -199,6 +199,6 @@ describe('bounded crafting controller', () => {
 
     expect(context.actor.cancel_crafting).not.toHaveBeenCalled()
     expect(context.controller.status().last_result?.code).toBe('actor_changed')
-    expect(context.manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(context.manager.player_state().task_state).toBe(TaskStates.IDLE)
   })
 })

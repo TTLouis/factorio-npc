@@ -13,7 +13,7 @@ function squared_distance(a: { x: number, y: number }, b: { x: number, y: number
 
 export function new_orientation_runtime(manager: Manager, controller: BasicController) {
   function state_rotating(actor: ControlledActor) {
-    const task = manager.player_state.parameters_rotate_entity
+    const task = manager.player_state().parameters_rotate_entity
     if (!task) {
       log('[AUTORIO] No parameters found when rotating')
       return [false, 'No rotation parameters'] as const

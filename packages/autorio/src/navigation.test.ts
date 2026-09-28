@@ -81,7 +81,7 @@ describe('bounded navigation controller', () => {
     expect(controller.submit('steel-chest', 40)).toBe(true)
     controller.tick(actor)
 
-    const task = manager.player_state.parameters_walk_to_entity!
+    const task = manager.player_state().parameters_walk_to_entity!
     expect(task.owner_actor_id).toBe(1)
     expect(task.owner_actor_kind).toBe('standalone_character')
     expect(task.owner_force_index).toBe(1)
@@ -100,7 +100,7 @@ describe('bounded navigation controller', () => {
     const { actor, controller, manager } = make_context()
     controller.submit('steel-chest', 40)
     controller.tick(actor)
-    const task = manager.player_state.parameters_walk_to_entity!
+    const task = manager.player_state().parameters_walk_to_entity!
     const active_id = task.path_request_id!
 
     controller.on_path_finished({ id: active_id - 1, path: [waypoint(5)], try_again_later: false } as any)
@@ -121,12 +121,12 @@ describe('bounded navigation controller', () => {
     controller.tick(actor)
 
     for (let attempt = 1; attempt <= 4; attempt++) {
-      const task = manager.player_state.parameters_walk_to_entity
+      const task = manager.player_state().parameters_walk_to_entity
       expect(task).toBeDefined()
       const request_id = task!.path_request_id!
       controller.on_path_finished({ id: request_id, path: undefined, try_again_later: false } as any)
       if (attempt < 4) {
-        expect(manager.player_state.task_state).toBe(TaskStates.WALKING_TO_ENTITY)
+        expect(manager.player_state().task_state).toBe(TaskStates.WALKING_TO_ENTITY)
         expect(manager.get_status_snapshot().queue_length).toBe(1)
         ;(globalThis as any).game.tick += 30
         controller.tick(actor)
@@ -148,7 +148,7 @@ describe('bounded navigation controller', () => {
     controller.tick(actor)
 
     for (let attempt = 1; attempt <= 4; attempt++) {
-      const task = manager.player_state.parameters_walk_to_entity
+      const task = manager.player_state().parameters_walk_to_entity
       expect(task).toBeDefined()
       const request_id = task!.path_request_id!
       controller.on_path_finished({ id: request_id, path: undefined, try_again_later: true } as any)
@@ -158,7 +158,7 @@ describe('bounded navigation controller', () => {
       }
     }
 
-    expect(manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(manager.player_state().task_state).toBe(TaskStates.IDLE)
     expect(controller.status().last_result?.code).toBe('path_busy')
   })
 
@@ -166,7 +166,7 @@ describe('bounded navigation controller', () => {
     const { actor, controller, manager, surface } = make_context()
     controller.submit('steel-chest', 40)
     controller.tick(actor)
-    const task = manager.player_state.parameters_walk_to_entity!
+    const task = manager.player_state().parameters_walk_to_entity!
     const first_id = task.path_request_id!
 
     ;(globalThis as any).game.tick = 901
@@ -187,7 +187,7 @@ describe('bounded navigation controller', () => {
     const { actor, controller, manager, target, surface } = make_context()
     controller.submit('steel-chest', 40)
     controller.tick(actor)
-    const task = manager.player_state.parameters_walk_to_entity!
+    const task = manager.player_state().parameters_walk_to_entity!
     const first_id = task.path_request_id!
     controller.on_path_finished({ id: first_id, path: [waypoint(18)], try_again_later: false } as any)
 
@@ -205,18 +205,18 @@ describe('bounded navigation controller', () => {
     controller.tick(actor)
 
     for (let attempt = 1; attempt <= 4; attempt++) {
-      const task = manager.player_state.parameters_walk_to_entity
+      const task = manager.player_state().parameters_walk_to_entity
       expect(task).toBeDefined()
       const request_id = task!.path_request_id!
       controller.on_path_finished({ id: request_id, path: [waypoint(18)], try_again_later: false } as any)
       ;(globalThis as any).game.tick += 601
       controller.tick(actor)
       if (attempt < 4) {
-        expect(manager.player_state.task_state).toBe(TaskStates.WALKING_TO_ENTITY)
+        expect(manager.player_state().task_state).toBe(TaskStates.WALKING_TO_ENTITY)
       }
     }
 
-    expect(manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(manager.player_state().task_state).toBe(TaskStates.IDLE)
     expect(controller.status().last_result?.code).toBe('stuck')
   })
 
@@ -224,7 +224,7 @@ describe('bounded navigation controller', () => {
     const { actor, controller, manager, position, surface } = make_context()
     controller.submit('steel-chest', 40)
     controller.tick(actor)
-    const task = manager.player_state.parameters_walk_to_entity!
+    const task = manager.player_state().parameters_walk_to_entity!
     const request_id = task.path_request_id!
     controller.on_path_finished({ id: request_id, path: [waypoint(18)], try_again_later: false } as any)
 
@@ -243,7 +243,7 @@ describe('bounded navigation controller', () => {
     const { actor, controller, manager, position, surface } = make_context()
     controller.submit('steel-chest', 40)
     controller.tick(actor)
-    const task = manager.player_state.parameters_walk_to_entity!
+    const task = manager.player_state().parameters_walk_to_entity!
     const request_id = task.path_request_id!
     controller.on_path_finished({ id: request_id, path: [waypoint(18)], try_again_later: false } as any)
 
@@ -262,7 +262,7 @@ describe('bounded navigation controller', () => {
     const { actor, controller, manager } = make_context()
     controller.submit('steel-chest', 40)
     controller.tick(actor)
-    const request_id = manager.player_state.parameters_walk_to_entity!.path_request_id!
+    const request_id = manager.player_state().parameters_walk_to_entity!.path_request_id!
     controller.on_path_finished({ id: request_id, path: undefined, try_again_later: false } as any)
 
     expect(controller.status().path).toMatchObject({
@@ -276,14 +276,14 @@ describe('bounded navigation controller', () => {
     const { actor, controller, manager, position } = make_context()
     controller.submit('steel-chest', 40)
     controller.tick(actor)
-    const request_id = manager.player_state.parameters_walk_to_entity!.path_request_id!
+    const request_id = manager.player_state().parameters_walk_to_entity!.path_request_id!
     controller.on_path_finished({ id: request_id, path: [waypoint(18)], try_again_later: false } as any)
 
     position.x = 18
     ;(globalThis as any).game.tick = 20
     controller.tick(actor)
 
-    expect(manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(manager.player_state().task_state).toBe(TaskStates.IDLE)
     expect(controller.status().last_result).toMatchObject({ accepted: true, completed: true, code: 'reached' })
   })
 })

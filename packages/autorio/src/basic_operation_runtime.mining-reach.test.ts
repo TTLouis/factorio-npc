@@ -67,8 +67,8 @@ describe('mining reach recovery', () => {
 
     f.runtime.state_mining(f.actor)
 
-    expect(f.manager.player_state.task_state).toBe(TaskStates.WALKING_TO_ENTITY)
-    expect(f.manager.player_state.parameters_walk_to_entity).toMatchObject({
+    expect(f.manager.player_state().task_state).toBe(TaskStates.WALKING_TO_ENTITY)
+    expect(f.manager.player_state().parameters_walk_to_entity).toMatchObject({
       entity_name: 'iron-ore',
       target: f.resource,
       target_position: { x: 3, y: 0 },
@@ -92,8 +92,8 @@ describe('mining reach recovery', () => {
 
     f.runtime.state_mining(f.actor)
 
-    expect(f.manager.player_state.task_state).toBe(TaskStates.MINING)
-    expect(f.manager.player_state.parameters_mine_entity).toMatchObject({
+    expect(f.manager.player_state().task_state).toBe(TaskStates.MINING)
+    expect(f.manager.player_state().parameters_mine_entity).toMatchObject({
       count: 20,
       position: { x: 2, y: 0 },
       last_target_amount: 100,

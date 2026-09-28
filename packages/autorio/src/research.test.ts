@@ -62,7 +62,7 @@ describe('serialized asynchronous research requests', () => {
     manager.next_task()
     controller.tick(actor)
     expect(force.add_research).toHaveBeenCalledTimes(1)
-    expect(manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(manager.player_state().task_state).toBe(TaskStates.IDLE)
   })
 
   it('allocates monotonic request ids and exposes exact rejected results', () => {
@@ -91,7 +91,7 @@ describe('serialized asynchronous research requests', () => {
     manager.add_task({ type: TaskStates.WAITING, remaining_ticks: 120 })
     controller.tick(actor)
     expect(tech.researched).toBe(false)
-    expect(manager.player_state.task_state).toBe(TaskStates.WAITING)
+    expect(manager.player_state().task_state).toBe(TaskStates.WAITING)
     expect(controller.status()).toMatchObject({
       current: { name: 'automation' },
       last_request_result: { request_id: request[2], accepted: true, completed: false, code: 'started' },

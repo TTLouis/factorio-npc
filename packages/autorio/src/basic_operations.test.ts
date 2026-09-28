@@ -45,7 +45,7 @@ describe('basic operation ownership and receipts', () => {
     const c = context()
 
     expect(c.controller.submit_mining('iron-ore', 3)).toBe(true)
-    expect(c.manager.player_state.parameters_mine_entity).toMatchObject({
+    expect(c.manager.player_state().parameters_mine_entity).toMatchObject({
       operation_id: 1,
       owner_actor_id: 18,
       owner_actor_kind: 'standalone_character',
@@ -64,14 +64,14 @@ describe('basic operation ownership and receipts', () => {
 
     c.manager.cancel_all_tasks()
     expect(c.controller.submit_wait(60)[0]).toBe(true)
-    expect(c.manager.player_state.parameters_waiting?.operation_id).toBe(2)
+    expect(c.manager.player_state().parameters_waiting?.operation_id).toBe(2)
   })
 
   it('queues precise placement position and direction with an auditable receipt', () => {
     const c = context()
 
     expect(c.controller.submit_placement('assembling-machine-1', 4.5, -2, 6)).toBe(true)
-    expect(c.manager.player_state.parameters_place_entity).toMatchObject({
+    expect(c.manager.player_state().parameters_place_entity).toMatchObject({
       operation_id: 1,
       owner_actor_id: 18,
       owner_actor_kind: 'standalone_character',
@@ -92,7 +92,7 @@ describe('basic operation ownership and receipts', () => {
     const c = context()
 
     expect(c.controller.submit_move_exact('firearm-magazine', 4242, 25, true)).toEqual([true, 'Task started'])
-    expect(c.manager.player_state.parameters_move_items).toMatchObject({
+    expect(c.manager.player_state().parameters_move_items).toMatchObject({
       operation_id: 1,
       owner_actor_id: 18,
       owner_actor_kind: 'standalone_character',
@@ -115,7 +115,7 @@ describe('basic operation ownership and receipts', () => {
     const c = context()
 
     expect(c.controller.submit_set_recipe_exact(4242, 'iron-gear-wheel')).toEqual([true, 'Task started'])
-    expect(c.manager.player_state.parameters_set_recipe).toMatchObject({
+    expect(c.manager.player_state().parameters_set_recipe).toMatchObject({
       operation_id: 1,
       owner_actor_id: 18,
       owner_actor_kind: 'standalone_character',
@@ -163,7 +163,7 @@ describe('basic operation ownership and receipts', () => {
   it('detects actor replacement before deferred work can execute', () => {
     const c = context()
     c.controller.submit_placement('steel-chest')
-    const task = c.manager.player_state.parameters_place_entity
+    const task = c.manager.player_state().parameters_place_entity
     expect(task).toBeDefined()
     if (!task) throw new Error('placement task missing')
 
@@ -176,7 +176,7 @@ describe('basic operation ownership and receipts', () => {
     const c = context()
     c.controller.submit_wait(60)
     c.manager.add_task({ type: TaskStates.WAITING, remaining_ticks: 30 })
-    const first = c.manager.player_state.parameters_waiting
+    const first = c.manager.player_state().parameters_waiting
     expect(first).toBeDefined()
     if (!first) throw new Error('wait task missing')
 
@@ -192,14 +192,14 @@ describe('basic operation ownership and receipts', () => {
       actor_id: 18,
       requested_ticks: 60,
     })
-    expect(c.manager.player_state.task_state).toBe(TaskStates.WAITING)
+    expect(c.manager.player_state().task_state).toBe(TaskStates.WAITING)
   })
 
   it('explicit failure cancels dependent work and keeps the failure receipt authoritative', () => {
     const c = context()
     c.controller.submit_mining('iron-ore', 2)
     c.manager.add_task({ type: TaskStates.WAITING, remaining_ticks: 300 })
-    const task = c.manager.player_state.parameters_mine_entity
+    const task = c.manager.player_state().parameters_mine_entity
     expect(task).toBeDefined()
     if (!task) throw new Error('mining task missing')
 

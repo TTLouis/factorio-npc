@@ -489,13 +489,13 @@ export function new_navigation_controller(get_actor: () => ControlledActor | und
   }
 
   function on_path_finished(event: OnScriptPathRequestFinishedEvent) {
-    const raw_task = manager.player_state.parameters_walk_to_entity
-    if (!raw_task || manager.player_state.task_state !== TaskStates.WALKING_TO_ENTITY) return
+    const raw_task = manager.player_state().parameters_walk_to_entity
+    if (!raw_task || manager.player_state().task_state !== TaskStates.WALKING_TO_ENTITY) return
     const task = raw_task as NavigationTask
     if (task.path_request_id === undefined || event.id !== task.path_request_id) return
 
     const actor = get_actor()
-    if (!actor || manager.player_state.parameters_walk_to_entity !== task) return
+    if (!actor || manager.player_state().parameters_walk_to_entity !== task) return
     if (!identity_matches(actor, task)) {
       fail(actor, task, 'actor_changed')
       return
@@ -617,8 +617,8 @@ export function new_navigation_controller(get_actor: () => ControlledActor | und
   }
 
   function tick(actor: ControlledActor) {
-    const raw_task = manager.player_state.parameters_walk_to_entity
-    if (!raw_task || manager.player_state.task_state !== TaskStates.WALKING_TO_ENTITY) return
+    const raw_task = manager.player_state().parameters_walk_to_entity
+    if (!raw_task || manager.player_state().task_state !== TaskStates.WALKING_TO_ENTITY) return
     const task = raw_task as NavigationTask
     if (!identity_matches(actor, task)) {
       fail(actor, task, 'actor_changed')
@@ -694,11 +694,11 @@ export function new_navigation_controller(get_actor: () => ControlledActor | und
 
   function status() {
     const actor = get_actor()
-    const raw_task = manager.player_state.parameters_walk_to_entity
+    const raw_task = manager.player_state().parameters_walk_to_entity
     const task = raw_task as NavigationTask | undefined
     const target = task?.target
     const destination = task ? navigation_destination(task) : undefined
-    const active = manager.player_state.task_state === TaskStates.WALKING_TO_ENTITY
+    const active = manager.player_state().task_state === TaskStates.WALKING_TO_ENTITY
     const last = storage.airi_last_navigation_result
     const blocked = !active && last !== undefined && ['unreachable', 'path_timeout', 'stuck', 'path_busy'].indexOf(last.code) >= 0
     return {

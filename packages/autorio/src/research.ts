@@ -317,8 +317,8 @@ export function new_research_controller(get_actor: () => ControlledActor | undef
   }
 
   function tick(actor: ControlledActor) {
-    const task = manager.player_state.parameters_research_technology
-    if (!task || manager.player_state.task_state !== TaskStates.RESEARCHING) return
+    const task = manager.player_state().parameters_research_technology
+    if (!task || manager.player_state().task_state !== TaskStates.RESEARCHING) return
     const result = execute_research_request(actor, task)
     if (!result.accepted) {
       manager.cancel_all_tasks()

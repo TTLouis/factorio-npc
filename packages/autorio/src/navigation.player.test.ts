@@ -65,8 +65,8 @@ describe('finite navigation to an exact player', () => {
     expect(c.controller.submit_player('TTLouis')[0]).toBe(true)
     c.controller.tick(c.actor)
 
-    expect(c.manager.player_state.task_state).toBe(TaskStates.WALKING_TO_ENTITY)
-    expect(c.manager.player_state.parameters_walk_to_entity).toMatchObject({
+    expect(c.manager.player_state().task_state).toBe(TaskStates.WALKING_TO_ENTITY)
+    expect(c.manager.player_state().parameters_walk_to_entity).toMatchObject({
       target_player_name: 'TTLouis',
       target_unit_number: 99,
       target_position: { x: 30, y: 5 },

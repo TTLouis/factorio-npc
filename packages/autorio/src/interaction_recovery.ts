@@ -127,8 +127,8 @@ export function new_interaction_recovery(manager: Manager) {
   function tick(actor: ControlledActor) {
     if (!actor.is_valid || !actor.character) return false
 
-    if (manager.player_state.task_state === TaskStates.PLACING) {
-      const task = manager.player_state.parameters_place_entity
+    if (manager.player_state().task_state === TaskStates.PLACING) {
+      const task = manager.player_state().parameters_place_entity
       if (!task?.position) return false
       const reach = build_interaction_reach(actor)
       const distance_to_placement = squared_distance(actor.position, task.position)
@@ -160,8 +160,8 @@ export function new_interaction_recovery(manager: Manager) {
       )
     }
 
-    if (manager.player_state.task_state === TaskStates.ROTATING) {
-      const task = manager.player_state.parameters_rotate_entity
+    if (manager.player_state().task_state === TaskStates.ROTATING) {
+      const task = manager.player_state().parameters_rotate_entity
       if (!task) return false
       const target = resolve_exact_entity(actor, task.target_unit_number)
       if (!target || !target.valid || target.surface.index !== actor.surface.index || target.force.index !== actor.force.index) return false
@@ -170,8 +170,8 @@ export function new_interaction_recovery(manager: Manager) {
       return interrupt(manager, entity_navigation(actor, target, reach), task, `rotation approach to <=${reach} tiles`)
     }
 
-    if (manager.player_state.task_state === TaskStates.SETTING_RECIPE) {
-      const task = manager.player_state.parameters_set_recipe
+    if (manager.player_state().task_state === TaskStates.SETTING_RECIPE) {
+      const task = manager.player_state().parameters_set_recipe
       if (!task) return false
       const target = resolve_exact_entity(actor, task.target_unit_number)
       if (!target || !target.valid || target.surface.index !== actor.surface.index || target.force.index !== actor.force.index) return false
@@ -180,8 +180,8 @@ export function new_interaction_recovery(manager: Manager) {
       return interrupt(manager, entity_navigation(actor, target, reach), task, `recipe-machine approach to <=${reach} tiles`)
     }
 
-    if (manager.player_state.task_state !== TaskStates.MOVING_ITEMS) return false
-    const task = manager.player_state.parameters_move_items
+    if (manager.player_state().task_state !== TaskStates.MOVING_ITEMS) return false
+    const task = manager.player_state().parameters_move_items
     if (!task) return false
     const reach = entity_interaction_reach(actor)
 

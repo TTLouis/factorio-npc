@@ -1,3 +1,4 @@
+import { beforeEach } from 'vitest'
 import { event_handlers, set_load_handler } from './test-event-registry'
 
 // Minimal stand-ins for the Factorio/Lua globals that control.ts touches at module
@@ -131,3 +132,11 @@ import { event_handlers, set_load_handler } from './test-event-registry'
   ceil: Math.ceil,
   random: (min: number, _max: number) => min,
 }
+
+// Task manager state lives in `storage` (see task_manager.ts) so that it is
+// synchronized in multiplayer. Give every test a fresh task manager state, the
+// way each test previously got fresh closure state from new_task_manager().
+beforeEach(() => {
+  const storage = (globalThis as any).storage
+  if (storage) delete storage.autorio_task_manager
+})

@@ -136,7 +136,7 @@ describe('Player-sourced completion events are gated by actor identity', () => {
     const on_player_crafted_item = get_handler('on_player_crafted_item')
     on_player_crafted_item({ player_index: 2, item_stack: { name: 'iron-gear-wheel', count: 1 } })
 
-    expect(task_manager.player_state.parameters_craft_item?.crafted).toBe(0)
+    expect(task_manager.player_state().parameters_craft_item?.crafted).toBe(0)
   })
 
   it('does not let a controlled-player craft event bypass native queue/output verification', () => {
@@ -152,8 +152,8 @@ describe('Player-sourced completion events are gated by actor identity', () => {
     const on_player_crafted_item = get_handler('on_player_crafted_item')
     on_player_crafted_item({ player_index: 1, item_stack: { name: 'iron-gear-wheel', count: 1 } })
 
-    expect(task_manager.player_state.parameters_craft_item?.crafted).toBe(0)
-    expect(task_manager.player_state.task_state).toBe(TaskStates.CRAFTING)
+    expect(task_manager.player_state().parameters_craft_item?.crafted).toBe(0)
+    expect(task_manager.player_state().task_state).toBe(TaskStates.CRAFTING)
   })
 
   it('ignores a mined-entity event from another player', () => {
@@ -163,7 +163,7 @@ describe('Player-sourced completion events are gated by actor identity', () => {
     const on_player_mined_entity = get_handler('on_player_mined_entity')
     on_player_mined_entity({ player_index: 2 })
 
-    expect(task_manager.player_state.parameters_mine_entity?.count).toBe(3)
+    expect(task_manager.player_state().parameters_mine_entity?.count).toBe(3)
   })
 
   it('counts a mined-entity event from the controlled player', () => {
@@ -173,7 +173,7 @@ describe('Player-sourced completion events are gated by actor identity', () => {
     const on_player_mined_entity = get_handler('on_player_mined_entity')
     on_player_mined_entity({ player_index: 1 })
 
-    expect(task_manager.player_state.parameters_mine_entity?.count).toBe(2)
+    expect(task_manager.player_state().parameters_mine_entity?.count).toBe(2)
   })
 
   it('does not let any LuaPlayer mining event advance an NPC task', () => {
@@ -224,7 +224,7 @@ describe('Player-sourced completion events are gated by actor identity', () => {
     const on_player_mined_entity = get_handler('on_player_mined_entity')
     on_player_mined_entity({ player_index: 1 })
 
-    expect(task_manager.player_state.parameters_mine_entity?.count).toBe(3)
+    expect(task_manager.player_state().parameters_mine_entity?.count).toBe(3)
   })
 })
 
@@ -280,11 +280,11 @@ describe('Bug 4 (fixed): ATTACKING is dispatched through the bounded combat cont
     const on_tick = get_handler('on_tick')
     connect_player_seeing([])
     add_owned_attack(50)
-    expect(task_manager.player_state.task_state).toBe(TaskStates.ATTACKING)
+    expect(task_manager.player_state().task_state).toBe(TaskStates.ATTACKING)
 
     on_tick({})
 
-    expect(task_manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(task_manager.player_state().task_state).toBe(TaskStates.IDLE)
   })
 
   it('shoots the bound enemy while moving instead of freezing in melee range', () => {
@@ -295,7 +295,7 @@ describe('Bug 4 (fixed): ATTACKING is dispatched through the bounded combat cont
 
     on_tick({})
 
-    expect(task_manager.player_state.task_state).toBe(TaskStates.ATTACKING)
+    expect(task_manager.player_state().task_state).toBe(TaskStates.ATTACKING)
     expect(fake_player.character.can_shoot).toHaveBeenCalledWith(target, target.position)
     expect(fake_player.shooting_state).toEqual({ state: 'shooting_selected', position: target.position })
     expect(fake_player.walking_state).toEqual({ walking: true, direction: 'west' })
@@ -310,7 +310,7 @@ describe('Bug 4 (fixed): ATTACKING is dispatched through the bounded combat cont
 
     on_tick({})
 
-    expect(task_manager.player_state.task_state).toBe(TaskStates.ATTACKING)
+    expect(task_manager.player_state().task_state).toBe(TaskStates.ATTACKING)
     expect(fake_player.character.can_shoot).toHaveBeenCalledWith(target, target.position)
     expect(fake_player.walking_state).toEqual({ walking: true, direction: 'east' })
     expect(fake_player.shooting_state).toEqual({ state: 'not_shooting', position: fake_player.position })
@@ -326,7 +326,7 @@ describe('Bug 4 (fixed): ATTACKING is dispatched through the bounded combat cont
 
     on_tick({})
 
-    expect(task_manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(task_manager.player_state().task_state).toBe(TaskStates.IDLE)
     expect(fake_player.surface.find_entities_filtered).not.toHaveBeenCalled()
   })
 })

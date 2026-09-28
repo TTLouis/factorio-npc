@@ -309,7 +309,7 @@ export function state_moving_items(actor: ControlledActor) {
 }
 
 function state_walking_direct(actor: ControlledActor) {
-  const task = task_manager.player_state.parameters_walking_direct
+  const task = task_manager.player_state().parameters_walking_direct
   if (!task) {
     log('[AUTORIO] No parameters found when walking directly')
     return
@@ -366,10 +366,10 @@ script.on_event(defines.events.on_tick, (unused_event) => {
   no_actor_found = false
   awareness_controller.tick(actor)
 
-  if (task_manager.player_state.task_state === TaskStates.IDLE) {
+  if (task_manager.player_state().task_state === TaskStates.IDLE) {
     navigation_obstacle_recovery.suspend(actor)
     follow_controller.tick(actor)
-    if (task_manager.player_state.task_state !== TaskStates.IDLE) {
+    if (task_manager.player_state().task_state !== TaskStates.IDLE) {
       defense_controller.suspend(actor)
       return
     }
@@ -383,40 +383,40 @@ script.on_event(defines.events.on_tick, (unused_event) => {
 
   if (interaction_recovery.tick(actor)) return
 
-  if (task_manager.player_state.task_state === TaskStates.WALKING_TO_ENTITY) {
-    const handled = navigation_obstacle_recovery.tick(actor, task_manager.player_state.parameters_walk_to_entity)
+  if (task_manager.player_state().task_state === TaskStates.WALKING_TO_ENTITY) {
+    const handled = navigation_obstacle_recovery.tick(actor, task_manager.player_state().parameters_walk_to_entity)
     if (!handled) navigation_controller.tick(actor)
   }
   else {
     navigation_obstacle_recovery.suspend(actor)
-    if (task_manager.player_state.task_state === TaskStates.MINING) {
+    if (task_manager.player_state().task_state === TaskStates.MINING) {
       basic_operation_runtime.state_mining(actor)
     }
-    else if (task_manager.player_state.task_state === TaskStates.PLACING) {
+    else if (task_manager.player_state().task_state === TaskStates.PLACING) {
       basic_operation_runtime.state_placing(actor)
     }
-    else if (task_manager.player_state.task_state === TaskStates.ROTATING) {
+    else if (task_manager.player_state().task_state === TaskStates.ROTATING) {
       orientation_runtime.state_rotating(actor)
     }
-    else if (task_manager.player_state.task_state === TaskStates.MOVING_ITEMS) {
+    else if (task_manager.player_state().task_state === TaskStates.MOVING_ITEMS) {
       basic_operation_runtime.state_moving_items(actor)
     }
-    else if (task_manager.player_state.task_state === TaskStates.SETTING_RECIPE) {
+    else if (task_manager.player_state().task_state === TaskStates.SETTING_RECIPE) {
       recipe_configuration_runtime.state_setting_recipe(actor)
     }
-    else if (task_manager.player_state.task_state === TaskStates.CRAFTING) {
+    else if (task_manager.player_state().task_state === TaskStates.CRAFTING) {
       crafting_controller.tick(actor)
     }
-    else if (task_manager.player_state.task_state === TaskStates.RESEARCHING) {
+    else if (task_manager.player_state().task_state === TaskStates.RESEARCHING) {
       research_controller.tick(actor)
     }
-    else if (task_manager.player_state.task_state === TaskStates.WALKING_DIRECT) {
+    else if (task_manager.player_state().task_state === TaskStates.WALKING_DIRECT) {
       state_walking_direct(actor)
     }
-    else if (task_manager.player_state.task_state === TaskStates.ATTACKING) {
+    else if (task_manager.player_state().task_state === TaskStates.ATTACKING) {
       combat_controller.tick(actor)
     }
-    else if (task_manager.player_state.task_state === TaskStates.WAITING) {
+    else if (task_manager.player_state().task_state === TaskStates.WAITING) {
       basic_operation_runtime.state_waiting(actor)
     }
   }

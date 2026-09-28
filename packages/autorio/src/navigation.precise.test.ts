@@ -90,7 +90,7 @@ describe('precise navigation primitives', () => {
 
     expect(f.surface.find_entities_filtered).not.toHaveBeenCalled()
     expect(f.surface.request_path).toHaveBeenCalledWith(expect.objectContaining({ goal: { x: 20, y: 0 } }))
-    expect(f.manager.player_state.parameters_walk_to_entity?.target_unit_number).toBe(88)
+    expect(f.manager.player_state().parameters_walk_to_entity?.target_unit_number).toBe(88)
     expect(f.controller.status()).toMatchObject({
       target_kind: 'exact_entity',
       target: { unit_number: 88, name: 'steel-chest' },
@@ -102,7 +102,7 @@ describe('precise navigation primitives', () => {
     ;(globalThis as any).game.get_entity_by_unit_number = vi.fn()
 
     expect(f.controller.submit_exact(88, 2)).toEqual([false, 'Entity unit 88 not found'])
-    expect(f.manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(f.manager.player_state().task_state).toBe(TaskStates.IDLE)
     expect(f.surface.request_path).not.toHaveBeenCalled()
   })
 
@@ -110,14 +110,14 @@ describe('precise navigation primitives', () => {
     const f = fixture()
     expect(f.controller.submit_position(4, 0, 0.75)[0]).toBe(true)
     f.controller.tick(f.actor)
-    const requestId = f.manager.player_state.parameters_walk_to_entity!.path_request_id!
+    const requestId = f.manager.player_state().parameters_walk_to_entity!.path_request_id!
     f.controller.on_path_finished({ id: requestId, path: [{ position: { x: 4, y: 0 }, needs_destroy_to_reach: false }], try_again_later: false } as any)
 
     f.position.x = 3.5
     ;(globalThis as any).game.tick = 20
     f.controller.tick(f.actor)
 
-    expect(f.manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(f.manager.player_state().task_state).toBe(TaskStates.IDLE)
     expect(f.controller.status().last_result).toMatchObject({ code: 'reached', completed: true })
   })
 })

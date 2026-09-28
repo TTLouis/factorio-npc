@@ -43,8 +43,8 @@ describe('composite resource gathering', () => {
     const f = fixture()
 
     expect(f.composite.gather_resource('iron-ore', 20, 512)).toEqual([true, 'Resource gathering task started'])
-    expect(f.manager.player_state.task_state).toBe(TaskStates.WALKING_TO_ENTITY)
-    expect(f.manager.player_state.parameters_walk_to_entity).toMatchObject({
+    expect(f.manager.player_state().task_state).toBe(TaskStates.WALKING_TO_ENTITY)
+    expect(f.manager.player_state().parameters_walk_to_entity).toMatchObject({
       entity_name: 'iron-ore',
       search_radius: 512,
       owner_actor_id: 42,
@@ -103,8 +103,8 @@ describe('composite exact entity supply', () => {
       { item_name: 'iron-ore', count: 10 },
     ])).toEqual([true, 'Exact entity supply task started'])
 
-    expect(f.manager.player_state.task_state).toBe(TaskStates.MOVING_ITEMS)
-    expect(f.manager.player_state.parameters_move_items).toMatchObject({
+    expect(f.manager.player_state().task_state).toBe(TaskStates.MOVING_ITEMS)
+    expect(f.manager.player_state().parameters_move_items).toMatchObject({
       item_name: 'coal',
       target_unit_number: 104,
       max_count: 10,
