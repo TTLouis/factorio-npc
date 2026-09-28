@@ -130,6 +130,13 @@ export function recordPendingDecisionRequest(owner, data = {}) {
   while (pending.size > MAX_PENDING_DECISIONS) pending.delete(pending.keys().next().value)
 }
 
+// A decision that settles without a provider call (no key, cached, skipped)
+// must not leave its entry behind for a later same-contract call to take.
+export function settlePendingDecisionRequest(owner, data = {}) {
+  const pending = owner.pendingDecisionRequests
+  if (pending instanceof Map && data?.decision_id !== undefined) pending.delete(data.decision_id)
+}
+
 export function takePendingDecisionRequest(owner, state, context = {}) {
   const pending = owner.pendingDecisionRequests
   if (!(pending instanceof Map) || pending.size === 0) return undefined

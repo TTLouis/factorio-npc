@@ -37,7 +37,7 @@ import {
   askableSteeringPressures,
   steeringPressureDefinitions,
 } from './planning-state.mjs'
-import { emptyJevHealth, recordJevHealth, recordPendingDecisionRequest, summarizeJevHealth, takePendingDecisionRequest } from './jev-health.mjs'
+import { emptyJevHealth, recordJevHealth, recordPendingDecisionRequest, settlePendingDecisionRequest, summarizeJevHealth, takePendingDecisionRequest } from './jev-health.mjs'
 import { describeUnmetGoalResult, evaluateGoalDefinition, formatGoalProgress, GOAL_SCOPE, needsGoalBaseline, sanitizeGoalDefinition } from './goal-definition.mjs'
 import {
   compareGoalReading,
@@ -4897,6 +4897,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   decisionTraceEvent(event, data = {}) {
     if (event === 'decision.request') recordPendingDecisionRequest(this, data)
+    else if (event === 'decision.response' || event === 'decision.fallback') settlePendingDecisionRequest(this, data)
     this.recordJevHealthEvent(event, data)
     if (!this.decisionTrace) return Promise.resolve()
     const { decision_id, ...details } = data ?? {}

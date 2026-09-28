@@ -158,3 +158,16 @@ test('a run with no decision provider reports Jev as off, not as a failed measur
   assert.ok(terminal)
   assert.equal(terminal.data.jev_health.measurement, JEV_MEASUREMENT.JEV_OFF)
 })
+
+test('a decision settled without a provider call leaves no pending entry for a later same-contract call', async () => {
+  const { recordPendingDecisionRequest, settlePendingDecisionRequest, takePendingDecisionRequest } = await import('./jev-health.mjs')
+  const owner = {}
+  recordPendingDecisionRequest(owner, { decision_id: 'd_stale', contract: 'interaction_route' })
+  settlePendingDecisionRequest(owner, { decision_id: 'd_stale' })
+  recordPendingDecisionRequest(owner, { decision_id: 'd_live', contract: 'interaction_route' })
+  const taken = takePendingDecisionRequest(owner, { contract: 'interaction_route' }, {})
+  assert.equal(taken.decision_id, 'd_live')
+  assert.equal(owner.pendingDecisionRequests.size, 0)
+  settlePendingDecisionRequest(owner, { decision_id: 'd_live' })
+  assert.equal(owner.pendingDecisionRequests.size, 0)
+})
