@@ -37,7 +37,7 @@ import {
   askableSteeringPressures,
   steeringPressureDefinitions,
 } from './planning-state.mjs'
-import { emptyJevHealth, recordJevHealth, summarizeJevHealth } from './jev-health.mjs'
+import { emptyJevHealth, recordJevHealth, recordPendingDecisionRequest, summarizeJevHealth, takePendingDecisionRequest } from './jev-health.mjs'
 import { describeUnmetGoalResult, evaluateGoalDefinition, formatGoalProgress, GOAL_SCOPE, needsGoalBaseline, sanitizeGoalDefinition } from './goal-definition.mjs'
 import {
   compareGoalReading,
@@ -4860,8 +4860,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   recordedDecisionProvider(provider) {
     if (typeof provider !== 'function') return null
     return async (state, questions, context = {}) => {
-      const pending = this.pendingDecisionRequest
-      this.pendingDecisionRequest = undefined
+      const pending = takePendingDecisionRequest(this, state, context)
       // The decision trace never copies the player's message; the behavior
       // trace already holds it for the same request.
       const tracedState = state && typeof state === 'object' && typeof state.message === 'string'
@@ -4897,9 +4896,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   decisionTraceEvent(event, data = {}) {
-    if (event === 'decision.request') {
-      this.pendingDecisionRequest = { decision_id: data?.decision_id, contract: data?.contract }
-    }
+    if (event === 'decision.request') recordPendingDecisionRequest(this, data)
     this.recordJevHealthEvent(event, data)
     if (!this.decisionTrace) return Promise.resolve()
     const { decision_id, ...details } = data ?? {}
