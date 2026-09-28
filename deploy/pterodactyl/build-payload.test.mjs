@@ -67,7 +67,12 @@ test('generated egg variable contract keeps safe provider defaults and 300 reque
     assert.equal(egg.meta.version, 'PTDL_v2')
     assert.equal(egg.variables.find(entry => entry.env_variable === 'OPENAI_MODEL')?.default_value, 'replace-me')
     assert.equal(egg.variables.find(entry => entry.env_variable === 'OPENAI_API_BASEURL')?.default_value, 'https://provider.invalid/v1')
-    assert.equal(egg.variables.find(entry => entry.env_variable === 'AI_API_METHOD')?.default_value, 'direct')
+    // Empty/nullable default: an egg update must not silently change an
+    // existing server's provider wiring. Unset AI_API_METHOD keeps whatever
+    // legacy PROVIDER_PROFILE behaviour (env or saved config) that server
+    // already had.
+    assert.equal(egg.variables.find(entry => entry.env_variable === 'AI_API_METHOD')?.default_value, '')
+    assert.match(egg.variables.find(entry => entry.env_variable === 'AI_API_METHOD')?.rules ?? '', /nullable/)
     assert.match(egg.variables.find(entry => entry.env_variable === 'AI_API_METHOD')?.rules ?? '', /in:direct,router,local/)
     assert.equal(egg.variables.some(entry => entry.env_variable === 'PROVIDER_PROFILE'), false)
     assert.equal(egg.variables.find(entry => entry.env_variable === 'PROVIDER_TIMEOUT_MS')?.default_value, '300000')

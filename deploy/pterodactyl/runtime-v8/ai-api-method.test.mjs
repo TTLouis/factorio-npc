@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { checkApiMethodUrlRule, profileForApiMethod } from './provider-base.mjs'
-import { aiApiMethodLine, configuration } from './supervisor.mjs'
+import { aiApiMethodLine, configuration, migrateConfig } from './supervisor.mjs'
 
 // Plan 1.10: AI_API_METHOD (direct/router/local) replaces hand-picking a
 // PROVIDER_PROFILE, adds a comma-separated OPENAI_MODEL list (main +
@@ -106,9 +106,9 @@ test('OPENAI_MODEL is a comma-separated list: [0] is the main model, [1] is the 
 })
 
 test('OPENAI_MODEL rejects empty entries from stray or trailing commas', () => {
-  assert.throws(() => configuration({}, baseEnv({ OPENAI_MODEL: 'main-model,' })), /OPENAI_MODEL must be a comma-separated list of non-empty model identifiers/)
-  assert.throws(() => configuration({}, baseEnv({ OPENAI_MODEL: 'main-model,,sub-model' })), /OPENAI_MODEL must be a comma-separated list of non-empty model identifiers/)
-  assert.throws(() => configuration({}, baseEnv({ OPENAI_MODEL: ' , ' })), /OPENAI_MODEL must be a comma-separated list of non-empty model identifiers/)
+  assert.throws(() => configuration({}, baseEnv({ OPENAI_MODEL: 'main-model,' })), /OPENAI_MODEL must be a comma-separated list of valid, non-empty model identifiers/)
+  assert.throws(() => configuration({}, baseEnv({ OPENAI_MODEL: 'main-model,,sub-model' })), /OPENAI_MODEL must be a comma-separated list of valid, non-empty model identifiers/)
+  assert.throws(() => configuration({}, baseEnv({ OPENAI_MODEL: ' , ' })), /OPENAI_MODEL must be a comma-separated list of valid, non-empty model identifiers/)
 })
 
 test('legacy path is unchanged: AI_API_METHOD unset keeps PROVIDER_PROFILE-driven resolution, including an explicit PROVIDER_PROFILE', () => {
@@ -160,4 +160,64 @@ test('the AI status line names the method, host, and models, and never the API k
   const soloLine = aiApiMethodLine(soloConfig)
   assert.match(soloLine, /^AI: method=unset\(profile=auto\) host=provider\.example\.test main=main-model subagent=none$/)
   assert.equal(soloLine.includes(soloConfig.key), false)
+})
+
+test('an egg-shaped config with no method and a saved PROVIDER_PROFILE=openai-reasoning keeps openai-reasoning', () => {
+  // sgluna-config.json shape: providerProfile persisted by migrateConfig on
+  // an earlier run, no AI_API_METHOD anywhere (env or file).
+  const savedConfig = migrateConfig({}, baseEnv({ PROVIDER_PROFILE: 'openai-reasoning' }))
+  assert.equal(savedConfig.providerProfile, 'openai-reasoning')
+
+  const effective = configuration(savedConfig, baseEnv())
+  assert.equal(effective.aiApiMethod, undefined)
+  assert.equal(effective.profile, 'openai-reasoning')
+  assert.equal(effective.aiApiMethodOverridesProfile, false)
+})
+
+test('migrateConfig stops validating PROVIDER_PROFILE once a method is set, so a stale value on disk cannot block startup', () => {
+  assert.throws(
+    () => migrateConfig({}, baseEnv({ PROVIDER_PROFILE: 'not-a-real-profile' })),
+    /PROVIDER_PROFILE must be auto, generic, deepseek, or openai-reasoning/,
+  )
+  assert.doesNotThrow(() => migrateConfig({}, baseEnv({
+    AI_API_METHOD: 'router',
+    OPENAI_API_BASEURL: 'https://openrouter.ai/api/v1',
+    PROVIDER_PROFILE: 'not-a-real-profile',
+  })))
+})
+
+test('a method overrides a profile saved in sgluna-config.json (not only an env PROVIDER_PROFILE) and logs it', () => {
+  // Simulates an existing server: sgluna-config.json already has
+  // providerProfile from before this item, and the operator now also sets
+  // AI_API_METHOD without removing the old saved value or env var.
+  const savedConfig = { providerProfile: 'deepseek' }
+  const config = configuration(savedConfig, baseEnv({
+    AI_API_METHOD: 'router',
+    OPENAI_API_BASEURL: 'https://openrouter.ai/api/v1',
+  }))
+  assert.equal(config.aiApiMethod, 'router')
+  assert.equal(config.profile, 'openrouter')
+  assert.equal(config.aiApiMethodOverridesProfile, true)
+  assert.equal(config.overriddenProviderProfile, 'deepseek')
+
+  // An env PROVIDER_PROFILE is reported the same way, and env wins over a
+  // saved value when both are present.
+  const withEnvAndSaved = configuration(savedConfig, baseEnv({
+    AI_API_METHOD: 'router',
+    OPENAI_API_BASEURL: 'https://openrouter.ai/api/v1',
+    PROVIDER_PROFILE: 'generic',
+  }))
+  assert.equal(withEnvAndSaved.overriddenProviderProfile, 'generic')
+})
+
+test('OPENAI_MODEL validates every entry, not only [0]: an invalid subagent model is rejected', () => {
+  assert.throws(
+    () => configuration({}, baseEnv({ OPENAI_MODEL: 'main-model,not a valid model id' })),
+    /OPENAI_MODEL must be a comma-separated list of valid, non-empty model identifiers/,
+  )
+  assert.throws(
+    () => configuration({}, baseEnv({ OPENAI_MODEL: 'main-model,sub-model,bad model#3' })),
+    /OPENAI_MODEL must be a comma-separated list of valid, non-empty model identifiers/,
+  )
+  assert.doesNotThrow(() => configuration({}, baseEnv({ OPENAI_MODEL: 'main-model,anthropic/claude-opus-5.5' })))
 })

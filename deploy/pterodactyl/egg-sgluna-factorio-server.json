@@ -90,12 +90,12 @@
         },
         {
             "name": "AI API Method",
-            "description": "Wire contract for the AI Model endpoint: direct detects the format from the URL and model, the same as today’s default behaviour; router uses the OpenRouter capability profile; local uses the LM Studio-style local capability profile and allows plain http to localhost/host.docker.internal only. direct and router require HTTPS.",
+            "description": "Wire contract for the AI Model endpoint: direct detects the format from the URL and model; router uses the OpenRouter capability profile; local uses the LM Studio-style local capability profile and allows plain http to localhost/host.docker.internal only. direct and router require HTTPS. Leave blank to keep this server’s existing behaviour unchanged (the legacy Provider Capability Profile, if any was set, keeps working exactly as before).",
             "env_variable": "AI_API_METHOD",
-            "default_value": "direct",
+            "default_value": "",
             "user_viewable": true,
             "user_editable": true,
-            "rules": "required|string|in:direct,router,local",
+            "rules": "nullable|string|in:direct,router,local",
             "field_type": "text"
         },
         {

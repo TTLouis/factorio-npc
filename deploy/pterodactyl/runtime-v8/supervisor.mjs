@@ -96,9 +96,13 @@ function chatPlayersValue(env, raw = {}, fallback = '') {
   return raw.chatPlayers ?? raw.chatPlayer ?? raw.player ?? fallback
 }
 
-function providerProfileValue(env, raw = {}, fallback = 'auto') {
+// `validate: false` (used once a method has already won, see migrateConfig
+// below) skips the enum check: the value is being carried through/persisted
+// only, not used to pick a capability, so a stale or unrelated legacy value
+// already on disk must never block startup.
+function providerProfileValue(env, raw = {}, fallback = 'auto', { validate = true } = {}) {
   const value = cleanString(env.PROVIDER_PROFILE ?? raw.providerProfile ?? fallback, 'PROVIDER_PROFILE', 40).toLowerCase()
-  check(['auto', 'generic', 'deepseek', 'openai-reasoning'].includes(value), 'PROVIDER_PROFILE must be auto, generic, deepseek, or openai-reasoning')
+  if (validate) check(['auto', 'generic', 'deepseek', 'openai-reasoning'].includes(value), 'PROVIDER_PROFILE must be auto, generic, deepseek, or openai-reasoning')
   return value
 }
 
@@ -114,6 +118,10 @@ function aiApiMethodValue(env) {
   return raw
 }
 
+// Same identifier shape providerRequest (provider.mjs) already requires of
+// a single model, applied to every entry of the list below.
+const MODEL_IDENTIFIER = /^[a-zA-Z0-9._:/-]{1,200}$/
+
 // OPENAI_MODEL is a comma-separated list (plan 1.10): [0] is the main agent
 // model, used exactly as the single OPENAI_MODEL value always was; [1] is
 // the subagent/plan-agent model reserved for 3.1. Extra entries are
@@ -122,7 +130,7 @@ function aiApiMethodValue(env) {
 function modelListValue(env, raw = {}, fallback = 'replace-me') {
   const source = cleanString(env.OPENAI_MODEL ?? raw.model ?? fallback, 'OPENAI_MODEL', 200)
   const entries = source.split(',').map(entry => entry.trim())
-  check(entries.every(entry => entry.length > 0), 'OPENAI_MODEL must be a comma-separated list of non-empty model identifiers')
+  check(entries.every(entry => MODEL_IDENTIFIER.test(entry)), 'OPENAI_MODEL must be a comma-separated list of valid, non-empty model identifiers')
   return entries
 }
 
@@ -166,11 +174,20 @@ export function configuration(raw = {}, env = process.env) {
   const modelList = modelListValue(env, raw, 'replace-me')
   const base = env.OPENAI_API_BASEURL ?? raw.providerUrl ?? 'https://provider.invalid/v1'
   const aiApiMethod = aiApiMethodValue(env)
+  // A profile worth overriding can come from either the env var or a value
+  // already saved in sgluna-config.json (raw.providerProfile) by an earlier
+  // run or egg version; either one is reported to the operator when a
+  // method wins over it.
+  const overriddenProviderProfile = hasEnv(env, 'PROVIDER_PROFILE')
+    ? String(env.PROVIDER_PROFILE)
+    : (typeof raw.providerProfile === 'string' && raw.providerProfile.trim() !== '' ? raw.providerProfile : undefined)
+  const aiApiMethodOverridesProfile = Boolean(aiApiMethod) && overriddenProviderProfile !== undefined
   // With AI_API_METHOD unset, resolution stays exactly the legacy
-  // PROVIDER_PROFILE path (including an explicit PROVIDER_PROFILE); when
-  // set, it wins outright and an invalid/irrelevant PROVIDER_PROFILE value
-  // is never even looked at.
-  const aiApiMethodOverridesProfile = Boolean(aiApiMethod) && hasEnv(env, 'PROVIDER_PROFILE')
+  // PROVIDER_PROFILE path (including an explicit PROVIDER_PROFILE, from env
+  // or from sgluna-config.json); when set, it wins outright and an
+  // invalid/irrelevant PROVIDER_PROFILE value is never even looked at here.
+  // migrateConfig separately stops validating it once a method is set (see
+  // there), so a stale invalid value already on disk cannot block startup.
   const profile = aiApiMethod ? profileForApiMethod(aiApiMethod) : providerProfileValue(env, raw, 'auto')
   checkApiMethodUrlRule(aiApiMethod, base)
 
@@ -185,6 +202,7 @@ export function configuration(raw = {}, env = process.env) {
     profile,
     aiApiMethod,
     aiApiMethodOverridesProfile,
+    overriddenProviderProfile: aiApiMethodOverridesProfile ? overriddenProviderProfile : undefined,
     key: env.OPENAI_API_KEY ?? '',
     decisionProvider: decisionProviderConfiguration(env),
     providerTimeoutMs: safeInteger(env.PROVIDER_TIMEOUT_MS ?? raw.providerTimeoutMs ?? 300000, 'PROVIDER_TIMEOUT_MS', 1000, 600000),
@@ -259,11 +277,16 @@ export function migrateConfig(raw = {}, env = process.env) {
   )
   check(actorMode === 'npc', 'This v8 egg currently supports SGLUNA_ACTOR_MODE=npc only')
   const chatPlayers = cleanString(chatPlayersValue(env, raw, SGLUNA_CONFIG_DEFAULTS.chatPlayers), 'SGLUNA_CHAT_PLAYERS', 512)
+  // Once AI_API_METHOD is set it wins outright (see configuration() above),
+  // so a stored/legacy PROVIDER_PROFILE is carried through unvalidated here
+  // rather than rejected: an old or unrelated value on disk must never block
+  // startup for a server that has already moved to the method setting.
+  const aiApiMethod = aiApiMethodValue(env)
   const next = {
     actorMode,
     chatPlayers,
     providerUrl: env.OPENAI_API_BASEURL ?? raw.providerUrl ?? SGLUNA_CONFIG_DEFAULTS.providerUrl,
-    providerProfile: providerProfileValue(env, raw, SGLUNA_CONFIG_DEFAULTS.providerProfile),
+    providerProfile: providerProfileValue(env, raw, SGLUNA_CONFIG_DEFAULTS.providerProfile, { validate: !aiApiMethod }),
     model: cleanString(env.OPENAI_MODEL ?? raw.model ?? SGLUNA_CONFIG_DEFAULTS.model, 'OPENAI_MODEL', 200),
     save: cleanString(env.SAVE_NAME ?? raw.save ?? SGLUNA_CONFIG_DEFAULTS.save, 'SAVE_NAME', 160),
     providerTimeoutMs: safeInteger(
@@ -2834,7 +2857,7 @@ async function main() {
   log(`Operator help: ${path.join(root, 'README-SGLUNA.txt')}`)
   log(jevStatusLine(config))
   log(aiApiMethodLine(config))
-  if (config.aiApiMethodOverridesProfile) log(`AI_API_METHOD=${config.aiApiMethod} overrides PROVIDER_PROFILE=${process.env.PROVIDER_PROFILE ?? ''}; the method wins`)
+  if (config.aiApiMethodOverridesProfile) log(`AI_API_METHOD=${config.aiApiMethod} overrides PROVIDER_PROFILE=${config.overriddenProviderProfile ?? ''}; the method wins`)
 
   const handleSignal = () => {
     requestedStop = true
