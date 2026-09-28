@@ -106,6 +106,24 @@ def run(client: Rcon, results: Path) -> None:
     trigger = technology('steam-power')
     require(trigger['found'] is True and trigger['trigger_type'] == 'craft-item', trigger)
     require(trigger['request_error'] == 'trigger_research', trigger)
+    # Factorio 2.0 gives a craft-item trigger's item as an ItemIDFilter table
+    # {name=...}. The summary must name that item, or the model reads a bare
+    # {type='craft-item',count=50} as lab research (tool audit bug #4).
+    raw_trigger = json_command(
+        "/silent-command local t=prototypes.technology['steam-power'].research_trigger; "
+        "rcon.print(helpers.table_to_json({type=t.type,item_kind=type(t.item),"
+        "item_name=type(t.item)=='table' and t.item.name or t.item,count=t.count}))",
+        'steam-power raw research trigger',
+    )
+    require(raw_trigger.get('type') == 'craft-item' and isinstance(raw_trigger.get('item_name'), str), raw_trigger)
+    expected_trigger = {'type': 'craft-item', 'item': raw_trigger['item_name'], 'count': raw_trigger['count']}
+    require(trigger.get('research_trigger') == expected_trigger, {'expected': expected_trigger, 'technology': trigger, 'engine': raw_trigger})
+    require(trigger_preflight.get('research_trigger') == expected_trigger, {'expected': expected_trigger, 'preflight': trigger_preflight})
+    path = json_command(lua_json(remote_call('autorio_planning', 'research_path', repr('steam-power'))), 'steam-power research path')
+    path_nodes = [node for node in path.get('pending_path') or [] if node.get('name') == 'steam-power']
+    require(len(path_nodes) == 1 and path_nodes[0].get('research_trigger') == expected_trigger
+            and path_nodes[0].get('mode') == 'trigger', {'expected': expected_trigger, 'path': path})
+    print(f"PASS: steam-power trigger names its item: {expected_trigger} (engine item field is a {raw_trigger['item_kind']})", flush=True)
     locked = technology('automation')
     require(locked['researched'] is False and locked['request_error'] == 'missing_prerequisites', locked)
 
