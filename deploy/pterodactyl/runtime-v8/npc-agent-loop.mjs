@@ -5701,7 +5701,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
-  async continueFromModMessage(modMessage, traceEventName) {
+  // `withinTurn` is for a caller that is already inside a planner turn (for
+  // example commitPlan): the next turn is then returned to that caller the way
+  // every other in-turn correction is, not started as a second guarded run.
+  async continueFromModMessage(modMessage, traceEventName, { withinTurn = false } = {}) {
     if (!this.active || !this.epoch) return null
     const currentPlan = this.memory.currentPlan?.(this.activePlanKey())
     const continuationLimit = currentPlan?.status === 'active' ? 64 : this.maxContinuations
@@ -5733,15 +5736,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.researchPreflightRetries = 0
     this.messages.push({ role: 'user', content: cleanMemoryText(modMessage, 18000) })
     await this.traceEvent(traceEventName)
-    return this.runGuarded()
+    return withinTurn ? this.runTurn() : this.runGuarded()
   }
 
   // What a step closing on its verified contract means for the plan and goal:
   // the next Shelf slice, a verified finite goal, or an active goal to
   // reconcile. Returns undefined when the loop should carry on as normal.
-  // Callers already inside a planner turn pass allowContinuation: false so
-  // this never starts a nested planner run.
-  async settleCompletedStepState(completionState, { pendingAmendment, allowContinuation = true } = {}) {
+  // A caller already inside a planner turn passes withinTurn: true so the
+  // continuation is returned to it as that turn's next turn rather than being
+  // started as a separate guarded run; allowContinuation: false suppresses the
+  // continuation altogether. `droppedOperationsNote` tells the planner why the
+  // operations in the reply that closed the slice were not run.
+  async settleCompletedStepState(completionState, { pendingAmendment, allowContinuation = true, withinTurn = false, droppedOperationsNote = '' } = {}) {
     let planningAfterCompletion = this.memory.planningState?.(this.activePlanKey())
     const reducerPlanAfterCompletion = planningAfterCompletion
       ? getActivePlanningPlan(planningAfterCompletion)
@@ -5791,8 +5797,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           ? 'Refine the next useful Roadmap Shelf node using [PLANNING_STATE]'
           : 'Author the next plan slice that moves the world toward the unmet goal conditions'
         return await this.continueFromModMessage(
-          `[MOD] The current immutable plan slice is verified complete. The user goal remains active.${unmet} ${next}; do not treat plan completion as goal completion. Completed plan_id=${reducerPlanAfterCompletion.plan_id}.`,
+          `[MOD] The current immutable plan slice is verified complete. The user goal remains active.${unmet} ${next}; do not treat plan completion as goal completion. Completed plan_id=${reducerPlanAfterCompletion.plan_id}.${droppedOperationsNote ? ` ${droppedOperationsNote}` : ''}`,
           'planning.slice_completion_continuation',
+          { withinTurn },
         )
       }
       finally {
@@ -5881,8 +5888,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       this.reasoningTriggerSource = 'plan_slice_completed'
       try {
         return await this.continueFromModMessage(
-          '[MOD] The current bounded work is complete, but the reducer-owned user goal is still active. Reconcile [PLANNING_STATE] and choose the next bounded action or explicitly surface why the goal cannot yet advance. Do not infer GOAL_SATISFIED from Task Board completion.',
+          `[MOD] The current bounded work is complete, but the reducer-owned user goal is still active. Reconcile [PLANNING_STATE] and choose the next bounded action or explicitly surface why the goal cannot yet advance. Do not infer GOAL_SATISFIED from Task Board completion.${droppedOperationsNote ? ` ${droppedOperationsNote}` : ''}`,
           'planning.active_goal_continuation',
+          { withinTurn },
         )
       }
       finally {
@@ -7696,8 +7704,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (timeReview?.held === true) return timeReview.result
     plan = await this.applyLowRiskTypedProjection(plan)
     const triggerSource = this.reasoningTriggerSource ?? this.planUpdateReason
-    const commands = plan.operations.map(renderOperation)
-    const operations = plan.operations.map((operation, index) => ({
+    let commands = plan.operations.map(renderOperation)
+    let operations = plan.operations.map((operation, index) => ({
       trace_operation_id: `${this.traceRequest?.id ?? 'request'}/op_${index + 1}`,
       name: operation.name,
       args: operation.args,
@@ -7740,20 +7748,46 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         })
       }
     }
+    let assistantReplyRecorded = false
     if (plan.semanticCompletion) {
       const semantic = await this.applySemanticCompletionClaim(plan, previousState)
       previousState = semantic.state ?? previousState
       // A closed step is progress: the next step gets a fresh act-or-block
       // repair instead of failing on the one this claim just resolved.
       if (semantic.applied === true) this.resetRepairAfterClosedStep()
+      // The claim closed the last step of the committed slice. Operations in
+      // the same reply belong to no committed plan, so they never run, and
+      // dropping them must not fail the request (live 2026-09-29: the request
+      // failed after the claim was applied, the slice-boundary settle never
+      // ran, and the goal sat idle until the player typed "continue"). The
+      // slice settles through the normal path instead: the game evaluates the
+      // goal, and an unmet goal plans its next slice in this same request.
+      let droppedOperationsNote = ''
       if (previousState?.status === 'completed' && commands.length > 0) {
-        const error = new AgentLoopError('semantic_completion_final_step_cannot_have_followup_operations')
-        error.failureClass = 'plan_category'
-        error.code = 'semantic_completion_after_final_step'
-        throw error
+        if (semantic.applied !== true) {
+          const error = new AgentLoopError('semantic_completion_final_step_cannot_have_followup_operations')
+          error.failureClass = 'plan_category'
+          error.code = 'semantic_completion_after_final_step'
+          throw error
+        }
+        const dropped = plan.operations.length
+        await this.traceEvent('plan.followup_operations_dropped', {
+          reason: 'final_step_closed_by_claim',
+          count: dropped,
+          operations: plan.operations.slice(0, 8).map(operation => cleanMemoryText(operation.name, 80)),
+          step_id: plan.semanticCompletion?.stepId,
+        })
+        droppedOperationsNote = `Your reply that closed the final step also carried ${dropped} operation${dropped === 1 ? '' : 's'}; the harness did not run ${dropped === 1 ? 'it' : 'them'} because operations outside the committed plan are never executed. Put any further work into the next plan slice.`
+        plan = { ...plan, operations: [] }
+        commands = []
+        operations = []
       }
       if (previousState?.status === 'completed' && commands.length === 0) {
-        const settled = await this.settleCompletedStepState(previousState, { allowContinuation: false })
+        // Inside a planner turn: an unmet goal continues into its next slice
+        // as this turn's next turn, so the request does not end idle.
+        this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
+        assistantReplyRecorded = true
+        const settled = await this.settleCompletedStepState(previousState, { withinTurn: true, droppedOperationsNote })
         if (settled) return settled
       }
     }
@@ -7863,7 +7897,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
 
     if (runtimeHealthy || conditionWaitActive) this.clearActionOmissionRecovery()
-    this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
+    if (!assistantReplyRecorded) this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
     let stateResult
     let durablePlan = plan
     if (this.requestInfo) {
