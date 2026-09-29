@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
+import { NpcDialogueMemory } from './npc-agent-loop.mjs'
 import {
   applyPlanningEvent,
   buildContextRestagedEvent,
@@ -322,4 +323,164 @@ test('the restage log is bounded to the last entries and survives snapshot and r
   const old = JSON.parse(JSON.stringify(serializePlanningState(state)))
   delete old.context_restages
   assert.deepEqual(getContextRestages(restorePlanningState(old)), [])
+})
+
+// --- review follow-ups ---------------------------------------------------------
+
+function boardEvidenceRefs(memory) {
+  return memory.currentPlan(KEY).task_board.evidence.map(item => item.ref)
+}
+
+test('facade fallback: when the reducer refuses a receipt the legacy board write still happens', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  startCommitted(memory)
+  const epoch = memory.planningState(KEY).reasoning_epoch
+  memory.recordBoardEvidence(KEY, { kind: 'operation_receipt', ref: 'batch_unknown_plan', summary: 'x', plan_id: 'plan_missing', step_id: 'step_x' })
+  const activePlanId = getActivePlan(memory.planningState(KEY)).plan_id
+  memory.recordBoardEvidence(KEY, { kind: 'operation_receipt', ref: 'batch_stale_epoch', summary: 'y', plan_id: activePlanId, reasoning_epoch: epoch + 1 })
+  assert.deepEqual(reducerLedger(memory), [], 'the reducer recorded neither')
+  assert.deepEqual(boardEvidenceRefs(memory), ['batch_unknown_plan', 'batch_stale_epoch'], 'the board recorded both')
+  memory.recordBoardEvidence(KEY, { kind: 'operation_receipt', ref: 'batch_ok', summary: 'z', plan_id: activePlanId, reasoning_epoch: epoch })
+  assert.deepEqual(reducerLedger(memory).map(entry => entry.ref), ['batch_ok'], 'a matching stamp is recorded')
+})
+
+test('the board mirror is identical to what the base class writes, including a 240-character ref', () => {
+  const build = (Memory) => {
+    const memory = new Memory()
+    const plan = { chatMessage: 'Working.', plan: ['Gather stone', 'Craft furnace'], currentStep: 0, operations: [{ name: 'wait', args: { ticks: 1 } }] }
+    const recorded = memory.recordPlan(KEY, { sender: 'Louis', text: 'Build early automation' }, plan)
+    memory.reconcileTaskBoard(KEY, undefined, plan, recorded, { allowReplan: false })
+    return memory
+  }
+  const inputs = [
+    { kind: 'operation_receipt', ref: `batch_${'r'.repeat(240)}`, summary: 's'.repeat(1500), now: 4242 },
+    { kind: 'k'.repeat(120), ref: 'batch_2', summary: 'line\none\ttab  spaced', now: 4243 },
+    { kind: 'operation_receipt', ref: '', summary: '', now: 4244 },
+  ]
+  const base = build(NpcDialogueMemory)
+  const facade = build(CanonicalTaskBoardMemory)
+  facade.commitPlanningPlan(KEY, { now: 100, runtime_validation: { passed: true } })
+  for (const input of inputs) {
+    base.recordBoardEvidence(KEY, { ...input })
+    facade.recordBoardEvidence(KEY, { ...input })
+  }
+  assert.deepEqual(facade.currentPlan(KEY).task_board.evidence, base.currentPlan(KEY).task_board.evidence)
+  assert.ok(facade.currentPlan(KEY).task_board.evidence[0].ref.endsWith('…'), 'the base truncation mark is preserved')
+  assert.ok(reducerLedger(facade).length > 0, 'and the ledger did record')
+})
+
+test('a late receipt stamped at admission is refused by the ledger after supersession but still lands on the board', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  startCommitted(memory)
+  memory.setAdmissionState(KEY, 'admitted')
+  const stamp = memory.admissionStamp(KEY)
+  assert.ok(stamp?.plan_id && stamp.step_id, 'admission recorded the plan and step')
+  memory.recordBoardEvidence(KEY, { kind: 'operation_receipt', ref: 'batch_early', summary: 'a', ...stamp })
+  const v1 = getActivePlan(memory.planningState(KEY))
+  assert.equal(v1.plan_id, stamp.plan_id)
+
+  const planning = memory.planningState(KEY)
+  const now = Date.now()
+  let next = applyPlanningEvent(planning, { type: PLANNING_EVENT.DRAFT_CREATED, now, origin: 'user_replan', steps: [{ description: 'Something else' }] })
+  const successor = getActivePlan(next)
+  next = applyPlanningEvent(next, { type: PLANNING_EVENT.PLAN_SUPERSEDED, now, source: 'user', plan_id: v1.plan_id, successor_plan_id: successor.plan_id, reason: 'user_replanned' })
+  assert.equal(next.plans.find(plan => plan.plan_id === v1.plan_id).status, PLAN_STATUS.SUPERSEDED)
+  memory.planningByNpc.set(KEY, next)
+
+  memory.recordBoardEvidence(KEY, { kind: 'operation_receipt', ref: 'batch_late', summary: 'b', ...stamp })
+  const after = memory.planningState(KEY)
+  const v1After = after.plans.find(plan => plan.plan_id === v1.plan_id)
+  assert.deepEqual(v1After.execution.receipts[stamp.step_id].map(entry => entry.ref), ['batch_early'], 'the superseded plan takes no late receipt')
+  const successorAfter = getActivePlan(after)
+  assert.deepEqual(Object.values(successorAfter.execution.receipts).flat(), [], "and it does not leak into the successor's ledger")
+  assert.ok(boardEvidenceRefs(memory).includes('batch_late'), 'the legacy board still records it')
+})
+
+test('the admission stamp is dropped with the task context', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  startCommitted(memory)
+  memory.setAdmissionState(KEY, 'admitted')
+  assert.ok(memory.admissionStamp(KEY))
+  memory.clearTaskContext(KEY)
+  assert.equal(memory.admissionStamp(KEY), undefined)
+})
+
+test('closed plans keep only the last few receipts per step when persisted', () => {
+  let state = committed()
+  const planId = getActivePlan(state).plan_id
+  for (let i = 0; i < 10; i++) state = receipt(state, { ref: `batch_${i}`, now: 100 + i })
+  assert.equal(ledger(state).length, 10)
+  const stepId = getActivePlan(state).steps[0].step_id
+  const live = JSON.parse(JSON.stringify(serializePlanningState(state)))
+  assert.equal(live.plans[0].execution.receipts[stepId].length, 10, 'an open plan keeps them all')
+  const cancelled = applyPlanningEvent(state, { type: PLANNING_EVENT.PLAN_CANCELLED, now: 200, source: 'user', plan_id: planId, reason: 'test' })
+  const persisted = JSON.parse(JSON.stringify(serializePlanningState(cancelled)))
+  assert.equal(persisted.plans[0].execution.receipts[stepId].length, RECEIPT_LEDGER_LIMITS.closedPlanPerStep)
+  assert.equal(persisted.plans[0].execution.receipts[stepId].at(-1).ref, 'batch_9')
+  const restored = restorePlanningState(persisted)
+  assert.equal(restored.plans[0].execution.receipts[stepId].length, RECEIPT_LEDGER_LIMITS.closedPlanPerStep)
+})
+
+test('seeding a revised plan with a carried prefix adopts only the steps the plan holds', () => {
+  const steps = [
+    { id: 'step_1', description: 'Gather iron ore near base (~40).', status: 'completed' },
+    { id: 'step_2', description: 'Smelt iron ore into iron plates.', status: 'active' },
+    { id: 'step_3', description: 'Craft an electric mining drill.', status: 'pending' },
+  ]
+  const board = {
+    kind: 'task_board_lite', goal_id: 'goal_1', status: 'active', blocker: '', pause_reason: '', revision: 3, event_sequence: 0,
+    evidence_sequence: 1, active_index: 1, active_step_id: 'step_2', completed_count: 1, total_steps: 3, steps,
+    evidence: [{ id: 'evidence_1', kind: 'operation_receipt', ref: 'batch_carried', summary: 'old', at: 5, step_id: 'step_1' }],
+    events: [], created_at: 1, updated_at: 1,
+  }
+  const memory = new CanonicalTaskBoardMemory()
+  memory.planByNpc.set(KEY, {
+    goal_id: 'goal_1', owner: 'Louis', objective: 'Get power', status: 'active', blocker: '', pause_reason: '',
+    plan: steps.map(step => step.description), current_step: 1, revision: 3, last_chat_message: '', last_operations: [],
+    updated_at: 1, history: [], task_board: board,
+  })
+  memory.ensurePlanningDraft(KEY, memory.planByNpc.get(KEY), { now: 100, migrated: true })
+  memory.commitPlanningPlan(KEY, { now: 110, migrated: true, runtime_validation: { passed: true } })
+  memory.replayLegacyVerifiedPrefix(KEY, memory.planByNpc.get(KEY), memory.planningState(KEY), { now: 115 })
+  // A structural blocker, the user picks Revise, the planner restates the
+  // verified first step and adds a new one: the successor carries step 1.
+  memory.applyOutcomeAuthority(KEY, {
+    kind: 'world_blocked',
+    source: 'deterministic_runtime',
+    reason_code: 'transfer_failed:item_missing',
+    candidate_blocker: 'transfer_failed:item_missing',
+    evidence: [{ kind: 'fresh_world_observation', ref: 'block_1', summary: 'no coal' }],
+  })
+  memory.recordBlockedChoice(KEY, 'revise', 'Louis', { now: 120 })
+  const blockedBoard = memory.currentPlan(KEY).task_board
+  const proposed = {
+    chatMessage: 'Revised.',
+    plan: [steps[0].description, 'Gather 40 coal (ran out of coal).', steps[1].description, steps[2].description],
+    currentStep: blockedBoard.completed_count,
+    operations: [{ name: 'wait', args: { ticks: 1 } }],
+  }
+  const recorded = memory.recordPlan(KEY, { sender: 'Louis', text: 'revise the plan' }, proposed)
+  memory.reconcileTaskBoard(KEY, blockedBoard, proposed, recorded, { previousState: memory.currentPlan(KEY) })
+  assert.equal(recorded.userRevisionApproved, true)
+  memory.commitPlanningPlan(KEY, { now: 140, runtime_validation: { passed: true } })
+  const revised = getActivePlan(memory.planningState(KEY))
+  assert.equal(revised.plan_version, 2)
+  assert.equal(revised.carried_forward_evidence.length, 1, 'step 1 is carried, not repeated')
+  assert.equal(revised.steps.length, 3)
+  memory.recordBoardEvidence(KEY, { kind: 'operation_receipt', ref: 'batch_current', summary: 'now' })
+
+  const snapshot = JSON.parse(JSON.stringify(memory.snapshot()))
+  for (const entry of snapshot.planning_states) {
+    for (const plan of entry.state.plans) {
+      delete plan.execution.receipts
+      delete plan.execution.receipts_seeded
+    }
+  }
+  const restored = new CanonicalTaskBoardMemory()
+  restored.restore(snapshot)
+  const plan = getActivePlan(restored.planningState(KEY))
+  const adopted = Object.values(plan.execution.receipts).flat().map(entry => entry.ref)
+  assert.ok(adopted.includes('batch_current'), 'the current step receipt is adopted')
+  assert.ok(!adopted.includes('batch_carried'), 'a receipt of a carried predecessor step is not adopted into a step it does not belong to')
+  assert.equal(plan.execution.receipts_seeded, true)
 })

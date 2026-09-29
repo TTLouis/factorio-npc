@@ -378,6 +378,7 @@ export const RUN_STATE_LIMITS = Object.freeze({
 // digests: the full receipt text stays in the board mirror, never here.
 export const RECEIPT_LEDGER_LIMITS = Object.freeze({
   perStep: 24,
+  closedPlanPerStep: 4,
   summary: 240,
   kind: 64,
   ref: 160,
@@ -2877,7 +2878,7 @@ export function serializePlanningState(state) {
     goal: clone(current.goal) ?? null,
     roadmap: clone(current.roadmap) ?? null,
     roadmap_history: clone(current.roadmap_history) ?? [],
-    plans: clone(current.plans) ?? [],
+    plans: (clone(current.plans) ?? []).map(trimClosedPlanReceipts),
     active_plan_id: current.active_plan_id ?? null,
     steering: clone(current.steering) ?? null,
     updated_at: finiteNumber(current.updated_at) ?? 0,
@@ -2889,13 +2890,28 @@ export function serializePlanningState(state) {
   }
 }
 
-function restoreReceiptLedger(raw, stepIds) {
+const CLOSED_PLAN_STATUSES = Object.freeze([PLAN_STATUS.COMPLETED, PLAN_STATUS.SUPERSEDED, PLAN_STATUS.CANCELLED])
+
+// A plan that can no longer execute keeps only the last few receipts per step:
+// the packet builder reads the active plan's ledger, and the snapshot must not
+// grow with every finished slice. Runs when the state is persisted or restored.
+function trimClosedPlanReceipts(plan) {
+  if (!plan || !CLOSED_PLAN_STATUSES.includes(plan.status) || !plan.execution?.receipts) return plan
+  const receipts = {}
+  for (const [stepId, entries] of Object.entries(plan.execution.receipts)) {
+    if (Array.isArray(entries) && entries.length > 0) receipts[stepId] = entries.slice(-RECEIPT_LEDGER_LIMITS.closedPlanPerStep)
+  }
+  return { ...plan, execution: { ...plan.execution, receipts } }
+}
+
+function restoreReceiptLedger(raw, stepIds, { closed = false } = {}) {
   const ledger = {}
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return ledger
+  const cap = closed ? RECEIPT_LEDGER_LIMITS.closedPlanPerStep : RECEIPT_LEDGER_LIMITS.perStep
   for (const stepId of stepIds) {
     const items = Array.isArray(raw[stepId]) ? raw[stepId] : []
     let seq = 0
-    const entries = items.slice(-RECEIPT_LEDGER_LIMITS.perStep).flatMap((item) => {
+    const entries = items.slice(-cap).flatMap((item) => {
       const entry = sanitizeReceiptEntry(item, { source: text(item?.source, 60) || 'runtime', now: 0 })
       return entry ? [{ ...entry, seq: Number.isSafeInteger(item.seq) && item.seq > 0 ? item.seq : ++seq }] : []
     })
@@ -2982,7 +2998,7 @@ function restorePlan(raw) {
     execution: {
       step_progress: progress,
       batches_attempted: Number.isSafeInteger(raw.execution?.batches_attempted) ? raw.execution.batches_attempted : 0,
-      receipts: restoreReceiptLedger(raw.execution?.receipts, steps.map(step => step.step_id)),
+      receipts: restoreReceiptLedger(raw.execution?.receipts, steps.map(step => step.step_id), { closed: CLOSED_PLAN_STATUSES.includes(status) }),
       // Absent in a snapshot that predates the ledger: the memory facade seeds
       // it once from the legacy board evidence.
       receipts_seeded: raw.execution?.receipts_seeded === true,

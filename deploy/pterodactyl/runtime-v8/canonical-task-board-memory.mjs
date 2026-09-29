@@ -443,6 +443,9 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     this.restoreDiagnostics = []
     // Consecutive plan/board disagreements per NPC: { step_id, count }.
     this.disagreementStrikes = new Map()
+    // Plan/step/epoch stamp taken when a batch was admitted, per NPC. Receipts
+    // carry it so a receipt that outlives its plan is refused by the ledger.
+    this.admissionStampByNpc = new Map()
   }
 
   planningState(key) {
@@ -683,25 +686,62 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       return super.appendBoardEvidence(key, state, board, item)
     }
     const before = this.planningByNpc.get(key)
-    const plan = getActivePlan(before)
-    const stepId = plan ? this.#ledgerStepFor(before, plan, board) : undefined
-    if (!plan || !stepId) return super.appendBoardEvidence(key, state, board, item)
-    const seqBefore = Math.max(0, ...(plan.execution.receipts?.[stepId] ?? []).map(entry => entry.seq ?? 0))
+    // An item stamped at batch admission is checked against THAT plan and
+    // epoch (the reducer refuses it once superseded). An unstamped item keeps
+    // the earlier behaviour: the active plan and the board's active step.
+    const stamped = typeof item.plan_id === 'string' && item.plan_id.length > 0
+    const plan = stamped ? before.plans.find(candidate => candidate.plan_id === item.plan_id) : getActivePlan(before)
+    let stepId
+    if (stamped) stepId = typeof item.step_id === 'string' && item.step_id ? item.step_id : undefined
+    else stepId = plan ? this.#ledgerStepFor(before, plan, board) : undefined
+    if (!stamped && (!plan || !stepId)) return super.appendBoardEvidence(key, state, board, item)
+    const ledgerStep = stepId ?? plan?.steps?.[plan.active_step_index]?.step_id
+    const seqBefore = Math.max(0, ...(plan?.execution.receipts?.[ledgerStep] ?? []).map(entry => entry.seq ?? 0))
     const after = this.#applyRunEvent(key, {
       type: PLANNING_EVENT.OPERATION_RECEIPT_RECORDED,
       goal_id: state.goal_id,
-      plan_id: plan.plan_id,
+      plan_id: stamped ? item.plan_id : plan.plan_id,
       step_id: stepId,
+      ...(stamped && Number.isSafeInteger(item.reasoning_epoch) ? { reasoning_epoch: item.reasoning_epoch } : {}),
       kind: item.kind,
       ref: item.ref,
       summary: item.summary,
       at: item.now,
     })
-    const recorded = (after?.plans.find(candidate => candidate.plan_id === plan.plan_id)?.execution.receipts?.[stepId] ?? [])
+    const recorded = (after?.plans.find(candidate => candidate.plan_id === plan?.plan_id)?.execution.receipts?.[ledgerStep] ?? [])
       .filter(entry => (entry.seq ?? 0) > seqBefore)
       .at(-1)
-    if (!recorded) return super.appendBoardEvidence(key, state, board, item)
-    return super.appendBoardEvidence(key, state, board, { ...item, kind: recorded.kind, ref: recorded.ref, now: recorded.at })
+    // Refused: the legacy board write still happens, exactly as before. Either
+    // way the board gets the ORIGINAL item, so the mirror is identical to what
+    // the base class writes (its own bounds and truncation marks apply).
+    return super.appendBoardEvidence(key, state, board, recorded ? { ...item, now: recorded.at } : item)
+  }
+
+  // The plan/step/epoch the reducer held when the last batch was admitted.
+  // A receipt that carries it is checked against the plan it belongs to, not
+  // the plan that happens to be active when it arrives.
+  setAdmissionState(key, admissionStatus, options) {
+    const result = super.setAdmissionState(key, admissionStatus, options)
+    if (admissionStatus === 'admitted' && key) {
+      const planning = this.planningByNpc.get(key)
+      const state = this.planByNpc.get(key)
+      const plan = getActivePlan(planning)
+      if (plan && state && this.#reducerHoldsGoal(key, state)) {
+        this.admissionStampByNpc.set(key, {
+          goal_id: planning.goal.goal_id,
+          plan_id: plan.plan_id,
+          step_id: this.#ledgerStepFor(planning, plan, state.task_board),
+          reasoning_epoch: reasoningEpochOf(planning),
+        })
+      }
+    }
+    return result
+  }
+
+  admissionStamp(key) {
+    const stamp = key ? this.admissionStampByNpc.get(key) : undefined
+    if (!stamp || this.planningByNpc.get(key)?.goal?.goal_id !== stamp.goal_id) return undefined
+    return { plan_id: stamp.plan_id, step_id: stamp.step_id, reasoning_epoch: stamp.reasoning_epoch }
   }
 
   /**
@@ -1307,6 +1347,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     if (key) {
       this.planningByNpc.delete(key)
       this.steeringAdviceByNpc?.delete(key)
+      this.admissionStampByNpc.delete(key)
     }
     return result
   }

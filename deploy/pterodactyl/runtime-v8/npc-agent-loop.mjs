@@ -5731,7 +5731,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         actor_id: this.epoch?.actor_id,
         actor_epoch: this.epoch?.epoch,
       })
-      const taskBoard = this.memory.recordBoardEvidence?.(this.activePlanKey(), evidence)
+      // The plan/step/epoch this batch was admitted under, when the memory
+      // recorded one: lets the receipt ledger refuse a receipt whose plan has
+      // since been superseded. Without a stamp the receipt binds as before.
+      const admission = this.memory.admissionStamp?.(this.activePlanKey())
+      const taskBoard = this.memory.recordBoardEvidence?.(this.activePlanKey(), admission ? { ...evidence, ...admission } : evidence)
       if (taskBoard) await this.persistState()
       const view = taskStatusDecisionView(raw)
       const providerStatus = taskStatusDelta(this.lastTaskStatusView, view)
