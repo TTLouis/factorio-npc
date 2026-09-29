@@ -522,8 +522,9 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     const footprint = placement_footprint(prototype, position, task.direction)
     const grid = placement_grid_rule(prototype, task.direction)
 
-    // Keep the default (manual) build check: create_entity itself does not test
-    // collisions, and the script check accepted a chest on top of a chest.
+    // create_entity itself does not test collisions, so every placement is
+    // gated here. placement_check_args adds the manual build check where the
+    // default (script) check is too loose, e.g. offshore pumps off the shore.
     if (!surface.can_place_entity({
       name: task.entity_name,
       position,

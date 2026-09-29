@@ -2,6 +2,7 @@ import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import { resolve_exact_entity } from './entity_reference'
 import { build_interaction_reach, entity_interaction_reach } from './interaction_range'
+import { placement_check_args } from './placement_geometry'
 import type { new_task_manager } from './task_manager'
 import type {
   PlayerParameters,
@@ -146,6 +147,7 @@ export function new_interaction_recovery(manager: Manager) {
         position: task.position,
         direction: task.direction,
         force: actor.force,
+        ...placement_check_args(task.entity_name),
       })) return false
 
       const clearance = placement_clearance(task.entity_name)
