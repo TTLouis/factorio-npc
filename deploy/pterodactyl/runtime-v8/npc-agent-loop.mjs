@@ -5731,7 +5731,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         actor_id: this.epoch?.actor_id,
         actor_epoch: this.epoch?.epoch,
       })
-      // The plan/step/epoch this batch was admitted under, when the memory
+      // The plan and step this batch was admitted under, when the memory
       // recorded one: lets the receipt ledger refuse a receipt whose plan has
       // since been superseded. Without a stamp the receipt binds as before.
       const admission = this.memory.admissionStamp?.(this.activePlanKey())

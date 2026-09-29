@@ -334,14 +334,38 @@ function boardEvidenceRefs(memory) {
 test('facade fallback: when the reducer refuses a receipt the legacy board write still happens', () => {
   const memory = new CanonicalTaskBoardMemory()
   startCommitted(memory)
-  const epoch = memory.planningState(KEY).reasoning_epoch
   memory.recordBoardEvidence(KEY, { kind: 'operation_receipt', ref: 'batch_unknown_plan', summary: 'x', plan_id: 'plan_missing', step_id: 'step_x' })
   const activePlanId = getActivePlan(memory.planningState(KEY)).plan_id
-  memory.recordBoardEvidence(KEY, { kind: 'operation_receipt', ref: 'batch_stale_epoch', summary: 'y', plan_id: activePlanId, reasoning_epoch: epoch + 1 })
+  memory.recordBoardEvidence(KEY, { kind: 'operation_receipt', ref: 'batch_unknown_step', summary: 'y', plan_id: activePlanId, step_id: 'step_gone' })
   assert.deepEqual(reducerLedger(memory), [], 'the reducer recorded neither')
-  assert.deepEqual(boardEvidenceRefs(memory), ['batch_unknown_plan', 'batch_stale_epoch'], 'the board recorded both')
-  memory.recordBoardEvidence(KEY, { kind: 'operation_receipt', ref: 'batch_ok', summary: 'z', plan_id: activePlanId, reasoning_epoch: epoch })
-  assert.deepEqual(reducerLedger(memory).map(entry => entry.ref), ['batch_ok'], 'a matching stamp is recorded')
+  assert.deepEqual(boardEvidenceRefs(memory), ['batch_unknown_plan', 'batch_unknown_step'], 'the board recorded both')
+  memory.recordBoardEvidence(KEY, { kind: 'operation_receipt', ref: 'batch_ok', summary: 'z', plan_id: activePlanId })
+  assert.deepEqual(reducerLedger(memory).map(entry => entry.ref), ['batch_ok'], 'a matching plan stamp is recorded')
+})
+
+test('a receipt admitted before a roadmap revision and arriving after it is still recorded when plan and step are unchanged', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  startCommitted(memory)
+  memory.setAdmissionState(KEY, 'admitted')
+  const stamp = memory.admissionStamp(KEY)
+  assert.equal(stamp.reasoning_epoch, undefined, 'the admission stamp carries no epoch')
+  const epochBefore = memory.planningState(KEY).reasoning_epoch
+
+  const revised = applyPlanningEvent(memory.planningState(KEY), {
+    type: PLANNING_EVENT.ROADMAP_REVISED,
+    source: 'user',
+    now: Date.now(),
+    reason: 'roadmap moved while a batch was in flight',
+    nodes: [{ id: 'roadmap_automation', intent: 'automation and red science', development_hint: 'vertical' }],
+  })
+  assert.ok(revised.reasoning_epoch > epochBefore, 'the roadmap revision bumped the reasoning epoch')
+  memory.planningByNpc.set(KEY, revised)
+  const plan = getActivePlan(memory.planningState(KEY))
+  assert.equal(plan.plan_id, stamp.plan_id)
+
+  memory.recordBoardEvidence(KEY, { kind: 'operation_receipt', ref: 'batch_across_revision', summary: 'done', ...stamp })
+  assert.deepEqual(reducerLedger(memory).map(entry => entry.ref), ['batch_across_revision'], 'real work is not dropped by an epoch bump')
+  assert.ok(boardEvidenceRefs(memory).includes('batch_across_revision'))
 })
 
 test('the board mirror is identical to what the base class writes, including a 240-character ref', () => {

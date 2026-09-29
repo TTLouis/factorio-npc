@@ -443,7 +443,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     this.restoreDiagnostics = []
     // Consecutive plan/board disagreements per NPC: { step_id, count }.
     this.disagreementStrikes = new Map()
-    // Plan/step/epoch stamp taken when a batch was admitted, per NPC. Receipts
+    // Plan/step stamp taken when a batch was admitted, per NPC. Receipts
     // carry it so a receipt that outlives its plan is refused by the ledger.
     this.admissionStampByNpc = new Map()
   }
@@ -702,7 +702,10 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       goal_id: state.goal_id,
       plan_id: stamped ? item.plan_id : plan.plan_id,
       step_id: stepId,
-      ...(stamped && Number.isSafeInteger(item.reasoning_epoch) ? { reasoning_epoch: item.reasoning_epoch } : {}),
+      // No reasoning_epoch: the epoch is a reasoning-context signal (a roadmap
+      // revision bumps it while the plan and step stay valid), not a work
+      // validity signal. Staleness is decided by plan_id, step_id and the
+      // plan's status.
       kind: item.kind,
       ref: item.ref,
       summary: item.summary,
@@ -717,7 +720,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return super.appendBoardEvidence(key, state, board, recorded ? { ...item, now: recorded.at } : item)
   }
 
-  // The plan/step/epoch the reducer held when the last batch was admitted.
+  // The plan and step the reducer held when the last batch was admitted.
   // A receipt that carries it is checked against the plan it belongs to, not
   // the plan that happens to be active when it arrives.
   setAdmissionState(key, admissionStatus, options) {
@@ -731,7 +734,6 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
           goal_id: planning.goal.goal_id,
           plan_id: plan.plan_id,
           step_id: this.#ledgerStepFor(planning, plan, state.task_board),
-          reasoning_epoch: reasoningEpochOf(planning),
         })
       }
     }
@@ -741,7 +743,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   admissionStamp(key) {
     const stamp = key ? this.admissionStampByNpc.get(key) : undefined
     if (!stamp || this.planningByNpc.get(key)?.goal?.goal_id !== stamp.goal_id) return undefined
-    return { plan_id: stamp.plan_id, step_id: stamp.step_id, reasoning_epoch: stamp.reasoning_epoch }
+    return { plan_id: stamp.plan_id, step_id: stamp.step_id }
   }
 
   /**
