@@ -1,4 +1,5 @@
 import { check, DeploymentError } from './common.mjs'
+import { lastUserOutsideTail } from './prompt-prefix.mjs'
 import { providerCapabilityProfile, providerRequest as baseProviderRequest } from './provider-base.mjs'
 
 export * from './provider-base.mjs'
@@ -16,7 +17,7 @@ function deepSeekModel(config) {
 
 function lastUserContent(messages) {
   if (!Array.isArray(messages)) return ''
-  const lastUser = [...messages].reverse().find(message => message?.role === 'user')
+  const lastUser = lastUserOutsideTail(messages)
   return typeof lastUser?.content === 'string' ? lastUser.content : ''
 }
 

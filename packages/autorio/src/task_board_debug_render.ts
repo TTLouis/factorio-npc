@@ -180,8 +180,10 @@ function add_debug_step_rows(table: LuaGuiElement, debug: TaskBoardUiDebugSnapsh
   // Harness time estimate from game rates, next to the elapsed time (2.6).
   const time_estimate = clean_text(debug.time_estimate, 300)
   const time_split = clean_text(debug.time_split, 300)
+  const responsiveness = clean_text(debug.responsiveness, 200)
   add_compact_row(table, 'Step time estimate', time_estimate.length > 0 ? time_estimate : '—')
   add_compact_row(table, 'Time · this request', time_split.length > 0 ? time_split : '—')
+  add_compact_row(table, 'Reply time · this request', responsiveness.length > 0 ? responsiveness : '—')
 }
 
 const DEBUG_SYNC = { columns: 'airi_debug_columns', runtime_column: 'airi_debug_runtime_column', runtime_table: 'airi_debug_runtime_table', value: 'airi_debug_sync_value' }

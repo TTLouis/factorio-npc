@@ -32,6 +32,7 @@ import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { evaluateGoalDefinition, formatGoalStatus, formatGoalUnderstanding, formatSliceProgressNote, goalUiView } from './goal-definition.mjs'
 import { formatGoalReadingNote } from './goal-reading.mjs'
 import { GOAL_STATUS } from './planning-state.mjs'
+import { ACK_EVENT, ResponsivenessTracker } from './responsiveness.mjs'
 import {
   AI_API_METHOD_IDS,
   checkApiMethodUrlRule,
@@ -797,6 +798,8 @@ function emptyAgentDebug(fallback = {}) {
     // think / actor-busy / idle split, as ready-to-show text.
     time_estimate: '',
     time_split: '',
+    // 2.10: time to the first chat line and to the first admitted action.
+    responsiveness: '',
     step_time_step: 0,
     step_time_caption: '',
     // 2.7: model usage of the current goal across its requests (units only).
@@ -990,6 +993,7 @@ export function liveAgentDebugEvent(event, data = {}, previous = {}, fallback = 
     debug.step_time_step = Number.isSafeInteger(fallback.time.step_time_index) && fallback.time.step_time_index >= 0 ? fallback.time.step_time_index + 1 : 0
     debug.step_time_caption = uiText(fallback.time.step_time_caption, 120)
   }
+  debug.responsiveness = uiText(fallback.responsiveness, 200)
   if (fallback.spend && typeof fallback.spend === 'object') debug.goal_spend = uiText(fallback.spend.goal_spend, 300)
   if (event === 'provider.response') {
     debug = applyLatestRoundDebugUsage(debug, data?.usage ?? providerEvent?.usage, providerEvent?.round ?? data?.round)
@@ -1989,6 +1993,8 @@ export class Session {
   onAgentActivity(event, data) {
     if (event === 'goal.defined') this.announceGoalUnderstanding(data)
     if (event === 'budget.goal_warning') this.announceGoalBudgetWarning(data)
+    if (event === ACK_EVENT) this.announceAcknowledgement(data)
+    this.responsivenessTracker().observe(event, data, { requestId: this.agent?.traceRequest?.id, ts: Date.now() })
     if (event === 'goal.evaluated') {
       this.announceSliceProgress(data)
       // A slice boundary just read the game; let the Goal card show it now.
@@ -2016,6 +2022,7 @@ export class Session {
       usage: this.agent?.traceRequest?.usage,
       time: this.agentTimeDebugFields(),
       spend: this.agentSpendDebugFields(),
+      responsiveness: this.responsivenessTracker().debugText(this.agent?.traceRequest?.id),
     }
     this.agentLive.debug = liveAgentDebugEvent(event, data, this.agentLive.debug, fallback)
     const update = liveAgentEvent(event, data)
@@ -2026,6 +2033,20 @@ export class Session {
       this.agentLive.activity = [...this.agentLive.activity, activity].slice(-UI_LIVE_ACTIVITY_LIMIT)
     }
     if (update || event === 'provider.response' || event === 'tool.result' || event === 'actor.bound') this.requestTaskBoardUiSync()
+  }
+
+  responsivenessTracker() {
+    this.responsiveness ??= new ResponsivenessTracker() // 2.10
+    return this.responsiveness
+  }
+
+  // 2.10: the one quick acknowledgement of a player request. It is printed at
+  // once and kept in the Console conversation like any assistant line.
+  announceAcknowledgement(data) {
+    const line = uiText(data?.chat_message, 400)
+    if (!line) return
+    this.appendUiConversation?.('assistant', this.npcName || 'AIRI', line)
+    this.printChat(line).catch(error => this.log(`Unable to acknowledge the request: ${error instanceof Error ? error.message : String(error)}`))
   }
 
   agentSpendDebugFields() {

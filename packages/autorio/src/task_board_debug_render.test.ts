@@ -22,6 +22,7 @@ describe('SGLuna debug layout', () => {
     expect(source).toContain("add_compact_row(table, 'Scope review packet'")
     expect(source).toContain("add_compact_row(table, 'Scope review failure'")
     expect(source).toContain('add_debug_step_rows(runtime_table, debug)')
+    expect(source).toContain("add_compact_row(table, 'Reply time · this request'")
     expect(source).toContain("add_compact_row(runtime_table, 'Response id'")
     expect(source).toContain("add_compact_row(runtime_table, 'Response bytes · tools'")
     expect(source).toContain("add_compact_row(runtime_table, 'Content shape'")

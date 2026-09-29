@@ -2,6 +2,8 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { parseJsonl } from './debug-report.mjs'
+import { buildPrefixReport, formatPrefixReport } from './prefix-report.mjs'
+import { responsivenessByRequest } from './responsiveness.mjs'
 
 // Groups the prompt trace (provider.request / provider.response /
 // provider.response_error) into per-round latency and reasoning-policy
@@ -260,6 +262,8 @@ function spendView(spend, { priced }) {
     reasoning_output_units: spend.reasoning_output_units,
     visible_output_units: spend.visible_output_units,
     output_units_per_round: spend.rounds > 0 ? Math.round(spend.output_units / spend.rounds) : undefined,
+    input_units_per_round: spend.rounds > 0 ? Math.round(spend.input_units / spend.rounds) : undefined,
+    cache_miss_input_units_per_round: spend.rounds > 0 ? Math.round(spend.cache_miss_input_units / spend.rounds) : undefined,
   }
   if (priced) {
     view.cost = Math.round(spend.cost * 1_000_000) / 1_000_000
@@ -476,6 +480,9 @@ export function buildRunRecord(behaviorRows, { prices } = {}) {
     ? { output_units_per_verified_step: Math.round(spend.output_units / count), total_units_per_verified_step: Math.round((spend.input_units + spend.output_units) / count), ...(priced ? { cost_per_verified_step: Math.round(spend.cost / count * 1_000_000) / 1_000_000 } : {}) }
     : {}
 
+  const responsiveness = responsivenessByRequest(rows)
+  const firstChat = [...responsiveness.values()].map(item => item.first_chat_ms).filter(Number.isFinite).sort((a, b) => a - b)
+  const firstAction = [...responsiveness.values()].map(item => item.first_action_ms).filter(Number.isFinite).sort((a, b) => a - b)
   const record = {
     schema: 1,
     requests: requests.size,
@@ -515,6 +522,9 @@ export function buildRunRecord(behaviorRows, { prices } = {}) {
           idle_share: Number.isFinite(wall) && wall > 0 ? Math.round(Math.max(0, wall - think - busy) / wall * 1000) / 1000 : undefined,
           walking: 'inside_actor_busy',
         },
+        // 2.10: what the player felt, from the player's request to the first
+        // chat line and to the first admitted action.
+        responsiveness: responsiveness.get(request.request_id),
       }
     }),
     by_goal: [...byGoal.entries()].map(([goalId, spend]) => ({
@@ -546,6 +556,14 @@ export function buildRunRecord(behaviorRows, { prices } = {}) {
     },
     verbosity,
     time: { estimates, measured, reviews, goal_warnings: goalWarnings },
+    responsiveness: {
+      requests: responsiveness.size,
+      acknowledged: [...responsiveness.values()].filter(item => Number.isFinite(item.acknowledged_ms)).length,
+      p50_first_chat_ms: median(firstChat),
+      max_first_chat_ms: firstChat.length > 0 ? firstChat[firstChat.length - 1] : undefined,
+      p50_first_action_ms: median(firstAction),
+      max_first_action_ms: firstAction.length > 0 ? firstAction[firstAction.length - 1] : undefined,
+    },
     prices: priced ? { currency: prices.currency, models: Object.keys(prices.models) } : undefined,
   }
   return record
@@ -585,7 +603,7 @@ export function formatRunRecord(record) {
     'Spend by round type (reasoning_policy_reason):',
   ]
   for (const row of record.by_round_type) {
-    lines.push(`- ${row.reasoning_policy_reason}: ${spendLine(record, row)} · ${thousands(row.output_units_per_round)} out/round · ${percent(row.output_share)} of output · cache miss ${percent(row.cache_miss_input_share)} · p50 ${seconds(row.p50_latency_ms)} · max ${seconds(row.max_latency_ms)}`)
+    lines.push(`- ${row.reasoning_policy_reason}: ${spendLine(record, row)} · ${thousands(row.output_units_per_round)} out/round · ${percent(row.output_share)} of output · ${thousands(row.input_units_per_round)} in/round · cache miss ${percent(row.cache_miss_input_share)} · p50 ${seconds(row.p50_latency_ms)} · max ${seconds(row.max_latency_ms)}`)
   }
   lines.push('', 'Output by effort:')
   for (const row of record.by_effort) lines.push(`- ${row.reasoning_effort}: ${row.rounds} rounds · ${thousands(row.output_units)} (${percent(row.output_share)})`)
@@ -608,6 +626,13 @@ export function formatRunRecord(record) {
       ? ` · estimate ${duration(row.expected_seconds)} · took ${duration(row.elapsed_wall_seconds)}`
       : ''
     lines.push(`- ${row.goal_id}/${row.step_id}${row.verified ? ' (verified)' : ''}: ${spendLine(record, row)}${time}`)
+  }
+  const reply = record.responsiveness
+  lines.push('', 'Player-felt responsiveness (2.10): first chat line and first admitted action, from the player request:')
+  lines.push(`- requests: ${reply.requests} · acknowledged: ${reply.acknowledged} · first chat p50 ${seconds(reply.p50_first_chat_ms)} max ${seconds(reply.max_first_chat_ms)} · first action p50 ${seconds(reply.p50_first_action_ms)} max ${seconds(reply.max_first_action_ms)}`)
+  for (const row of record.by_request) {
+    const item = row.responsiveness
+    if (item) lines.push(`- ${row.request_id}: first chat ${seconds(item.first_chat_ms)} (${printable(item.first_chat_source)}) · first planner chat ${seconds(item.first_planner_chat_ms)} · first action ${seconds(item.first_action_ms)}`)
   }
   lines.push('', 'By request (time: think / actor busy incl. walking / idle):')
   for (const row of record.by_request) {
@@ -655,6 +680,7 @@ export async function generateThinkTimeReport({ promptFile, behaviorFile, prices
   const behaviorFound = !behaviorTrace.errors.some(error => error.error === 'not found')
   return {
     report: buildThinkTimeReport(rows),
+    prefix_report: buildPrefixReport(rows),
     run_record: behaviorFound ? buildRunRecord(behaviorTrace.rows, { prices }) : undefined,
     parse_errors: errors,
     behavior_parse_errors: behaviorFound ? behaviorTrace.errors : [],
@@ -680,6 +706,8 @@ async function main() {
   if (json) console.log(JSON.stringify(result, null, 2))
   else {
     console.log(formatThinkTimeReport(result.report))
+    console.log(`
+${formatPrefixReport(result.prefix_report)}`)
     if (result.parse_errors.length > 0) console.log(`\nJSONL parse warnings: ${result.parse_errors.length}`)
     if (result.run_record) {
       console.log(`\n${formatRunRecord(result.run_record)}`)

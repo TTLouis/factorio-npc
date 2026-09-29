@@ -73,6 +73,8 @@ import {
   typedProjectionQuestions,
 } from './jev-typed-projection.mjs'
 import { activeStepOf, parseTimeReview, PlanTiming } from './plan-time-estimate.mjs'
+import { insertTailBlock } from './prompt-prefix.mjs'
+import { ChatAcknowledger } from './responsiveness.mjs'
 import { UsageLedger } from './usage-ledger.mjs'
 import { checkpointWaitRequirement, conditionEta, safeWaitSchedule, scheduleWait, WAIT_BASIS } from './production-wait.mjs'
 import { abortSkillChoice, ensureSkillOffers, injectedSkillChars, refreshSkillOffersAtShelfPickup, SKILL_OFFERS_PREFIX, skillOffersContext, traceSkillLoaded, traceSkillsFollowed } from './skill-offers.mjs'
@@ -1633,6 +1635,9 @@ const POST_STEP_ROUTES = new Set([
 ])
 const SKILL_CONTEXT_MAX_SKILLS = 3
 const SKILL_CONTEXT_MAX_CHARS = 16000
+// 2.9: a compaction that starts (the working context passed its ceiling) folds
+// older tool exchanges until the context is under this share of the ceiling.
+const COMPACTION_LOW_WATERMARK = 0.75
 
 function boundedSkillValue(value, depth = 0) {
   if (depth > 4) return undefined
@@ -2432,6 +2437,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.planTiming = new PlanTiming()
     // 2.7: usage per goal and the goal budget warning.
     this.usageLedger = new UsageLedger({ outputCap: this.maxProviderOutputUnits })
+    this.chatAcknowledger = new ChatAcknowledger() // 2.10
   }
 
   async loadPersistentState() {
@@ -2546,7 +2552,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (this.compactionDeferred) return
     const overBudget = () => this.messages.length > this.maxWorkingMessages
       || this.messages.reduce((total, message) => total + messageChars(message), 0) > this.maxWorkingChars - injectedSkillChars(this) // 2.8 hook: injected skill text counts
-    while (overBudget()) {
+    // 2.9: every fold rewrites the digest and so breaks the provider's cached
+    // prefix from the digest onward. Folding only down to the ceiling would
+    // fold on every round once the working context is full; folding to a low
+    // watermark makes the rounds in between pure appends.
+    const overLowWater = () => this.messages.length > this.maxWorkingMessages * COMPACTION_LOW_WATERMARK
+      || this.messages.reduce((total, message) => total + messageChars(message), 0) > (this.maxWorkingChars - injectedSkillChars(this)) * COMPACTION_LOW_WATERMARK
+    if (!overBudget()) return
+    while (overLowWater()) {
       const newest = this.messages.findLastIndex(message => message.role === 'assistant' && Array.isArray(message.tool_calls))
       const start = this.messages.findIndex((message, index) => index >= this.baseMessages.length
         && index !== newest
@@ -2571,20 +2584,24 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const messages = super.providerMessages().filter(message => !(message?.role === 'user'
       && typeof message.content === 'string'
       && (message.content.startsWith('[SKILL_CONTEXT]') || message.content.startsWith(SKILL_OFFERS_PREFIX))))
-    const skillContext = [skillOffersContext(this), this.skillContext()].filter(Boolean).join('\n\n') // 2.8 hook
-    if (!skillContext) return messages
+    // 2.9: the skill offers are recomputed per round (shown only while a plan
+    // is authored), so they are tail, like steering. Loaded skill context lives
+    // for a whole logical task, so it stays in the fixed prefix.
+    const tailed = insertTailBlock(messages, skillOffersContext(this) ? { role: 'user', content: skillOffersContext(this) } : undefined) // 2.8 hook
+    const skillContext = this.skillContext()
+    if (!skillContext) return tailed
     // Skill context belongs to the fixed prefix, which ends before the first
     // model turn. `baseMessages` alone is not that prefix: a budget handoff
     // swaps the working messages for a shorter capsule prefix, and a staged
     // amendment grows `baseMessages` for the next continuation only. Indexing
     // by it put the skill context between an assistant `tool_calls` message
     // and its tool replies (live HTTP 400, 2026-09-25).
-    const firstTurn = messages.findIndex(message => message?.role === 'assistant' || message?.role === 'tool')
-    const insertAt = Math.min(this.baseMessages.length, firstTurn < 0 ? messages.length : firstTurn)
+    const firstTurn = tailed.findIndex(message => message?.role === 'assistant' || message?.role === 'tool')
+    const insertAt = Math.min(this.baseMessages.length, firstTurn < 0 ? tailed.length : firstTurn)
     return [
-      ...messages.slice(0, insertAt),
+      ...tailed.slice(0, insertAt),
       { role: 'user', content: skillContext },
-      ...messages.slice(insertAt),
+      ...tailed.slice(insertAt),
     ]
   }
 
@@ -4523,6 +4540,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async request(text, options = {}) {
+    const requestStartedAt = Date.now() // 2.10: time zero for reply-latency metrics
     await this.loadPersistentState()
     const sender = options.sender ?? 'unknown'
     this.lastMemoryKey = `npc:${this.npcId}`
@@ -4801,7 +4819,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       interaction_intent: intent,
       action_omission_recovery: resumeActionOmission,
       provider_budget_handoff_resume: resumeProviderBudgetHandoff,
+      intake_ms: Date.now() - requestStartedAt,
     })
+    // 2.10: one acknowledgement, from the goal text and route, before any
+    // planner round. A player request only: recovery runs never enter here.
+    const acknowledgement = this.chatAcknowledger.acknowledge({ requestId: this.traceRequest.id, text, intent, origin: 'chat', startedAt: requestStartedAt })
+    if (acknowledgement) await this.traceEvent('chat.acknowledged', acknowledgement)
 
     if (intent === 'new_goal'
       && this.steeringDecisionProvider
