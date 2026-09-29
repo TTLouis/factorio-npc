@@ -2,6 +2,7 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 
 import { check, DeploymentError } from './common.mjs'
+import { parseDsmlToolCalls } from './dsml-tool-calls.mjs'
 import { cacheBreakpointIndexes, insertTailBlock, lastUserOutsideTail, promptLayout } from './prompt-prefix.mjs'
 import { approvedOperationListText, parsePlan, providerToolDefinitions as toolDefinitions } from './structured-policy.mjs'
 
@@ -136,9 +137,11 @@ const PROVIDER_PROFILES = Object.freeze({
     reasoning_effort: true,
     thinking_control: 'deepseek',
     tool_support: true,
-    // 2.9: OFF until a live check (see providerCapabilityProfile). When on, the
-    // tool block stays in closed rounds (tool_choice "none").
-    tools_kept_when_closed: false,
+    // 2.9: the tool block stays in closed rounds (tool_choice "none"). Keeps the
+    // prefix cache flat, and live finding 3 showed that removing the list makes
+    // flash write its calls as DSML text instead. Calls made anyway are salvaged
+    // by the loop (closed_round.calls_salvaged).
+    tools_kept_when_closed: true,
     structured_output: 'tools_or_json',
   }),
   'openai-reasoning': Object.freeze({
@@ -740,42 +743,25 @@ function validPlanCandidate(candidate) {
 // Parse it back into ordinary tool calls so they take the same admission path
 // as a native call. `string="false"` parameters carry JSON values. Anything
 // that does not parse completely is left as content for the format recovery.
-// The optional group captures the closing slash with its leading space, so
-// it never competes with the following \s* (no super-linear backtracking).
-const DSML_TAG = String.raw`<(\s*/)?\s*[｜|]+\s*DSML\s*[｜|]+\s*`
-const opening = group => group === undefined
-const closing = group => group !== undefined
-const DSML_CALLS = new RegExp(`${DSML_TAG}calls\\s*>([\\s\\S]*?)${DSML_TAG}calls\\s*>`)
-const DSML_INVOKE = new RegExp(`${DSML_TAG}invoke\\s+name="([^"]+)"\\s*>([\\s\\S]*?)${DSML_TAG}invoke\\s*>`, 'g')
-const DSML_PARAMETER = new RegExp(`${DSML_TAG}parameter\\s+name="([^"]+)"(?:\\s+string="(true|false)")?\\s*>([\\s\\S]*?)${DSML_TAG}parameter\\s*>`, 'g')
-
+// The strict, bounded parser lives in dsml-tool-calls.mjs.
 export function recoverDsmlToolCalls(content) {
-  const text = String(content ?? '')
-  const block = DSML_CALLS.exec(text)
-  if (!block || !opening(block[1]) || !closing(block[3])) return undefined
-  const calls = []
-  for (const invoke of block[2].matchAll(DSML_INVOKE)) {
-    if (!opening(invoke[1]) || !closing(invoke[4])) return undefined
-    const args = {}
-    for (const parameter of invoke[3].matchAll(DSML_PARAMETER)) {
-      if (!opening(parameter[1]) || !closing(parameter[5])) return undefined
-      const [, , key, isString, raw] = parameter
-      if (isString === 'false') {
-        try { args[key] = JSON.parse(raw) }
-        catch { return undefined }
-      }
-      else {
-        args[key] = raw
-      }
-    }
-    calls.push({
-      id: `call_dsml_${calls.length + 1}`,
+  const parsed = parseDsmlToolCalls(content)
+  if (!parsed) return undefined
+  return {
+    content: parsed.content,
+    tool_calls: parsed.calls.map((call, index) => ({
+      id: `call_dsml_${index + 1}`,
       type: 'function',
-      function: { name: invoke[2], arguments: JSON.stringify(args) },
-    })
+      function: { name: call.name, arguments: JSON.stringify(call.args) },
+    })),
   }
-  if (calls.length === 0) return undefined
-  return { content: text.slice(0, block.index).trim(), tool_calls: calls }
+}
+
+function closedRoundCall(call) {
+  return {
+    name: typeof call?.function?.name === 'string' ? call.function.name : '',
+    arguments: typeof call?.function?.arguments === 'string' ? call.function.arguments : '',
+  }
 }
 
 export function normalizeProviderPlanContent(content) {
@@ -1395,6 +1381,10 @@ export async function providerRequest(config, messages, {
     // supposed to hold, anything else is dropped, and the loop never sees a
     // tool call on a closed round.
     let structuredToolsDropped
+    // Calls a closed round made anyway, kept so the loop can salvage them
+    // (2.9 follow-up): operations become plan operations, observations get one
+    // bounded look. Names and argument strings only; nothing here executes.
+    let closedRoundCalls
     if (!allowTools && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
       const calls = message.tool_calls
       const sole = calls.length === 1 && calls[0]?.function?.name === 'submitPlan' && typeof calls[0].function.arguments === 'string'
@@ -1402,7 +1392,10 @@ export async function providerRequest(config, messages, {
         message.content = calls[0].function.arguments
         structuredToolsDropped = 'submit_plan_content'
       }
-      else structuredToolsDropped = 'dropped_tools_off'
+      else {
+        structuredToolsDropped = 'dropped_tools_off'
+        closedRoundCalls = calls.map(closedRoundCall)
+      }
       delete message.tool_calls
     }
 
@@ -1430,6 +1423,7 @@ export async function providerRequest(config, messages, {
         // retry into blocked_before_mutation. Traced so it is visible.
         message.content = dsml.content
         dsmlRecovered = 'dropped_tools_off'
+        if (closedRoundCalls === undefined) closedRoundCalls = dsml.tool_calls.map(closedRoundCall)
       }
     }
     else if (dsml) {
@@ -1503,6 +1497,13 @@ export async function providerRequest(config, messages, {
     }
 
     await traceProviderResult('provider.response', providerDiagnostics, traceOptions)
+    if (closedRoundCalls !== undefined) {
+      Object.defineProperty(message, '_airiClosedRoundCalls', {
+        configurable: true,
+        enumerable: false,
+        value: closedRoundCalls,
+      })
+    }
     Object.defineProperty(message, '_airiProvider', {
       configurable: true,
       enumerable: false,
