@@ -1135,7 +1135,9 @@ export function compactCompletionReceipt(content) {
         ? { last_result: status.basic_operation.last_result }
         : undefined,
     }
-    return `${COMPLETION_MARKER} Compact task receipt: ${JSON.stringify(lean)}`
+    // Harness lines placed between the marker and the receipt survive compaction.
+    const lead = text.slice(COMPLETION_MARKER.length, receiptAt).trim()
+    return `${COMPLETION_MARKER}${lead ? ` ${lead}` : ''} Compact task receipt: ${JSON.stringify(lean)}`
   }
   catch {
     return text

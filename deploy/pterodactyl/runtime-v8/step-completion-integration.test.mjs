@@ -4,6 +4,7 @@ import test from 'node:test'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
+import { compactCompletionReceipt } from './provider-base.mjs'
 
 function deployment() {
   return {
@@ -350,4 +351,46 @@ test('committed prose-only step cannot acquire a new deterministic meaning after
   assert.equal(result.ignored, true)
   assert.equal(memory.currentPlan(key).task_board.steps[0].completion_contract, undefined)
   assert.match(String(agent.messages.at(-1)?.content), /completion contract cannot change/)
+})
+
+// "What the model is told", finding 2: a finished batch on a step with no
+// completion contract used to reach the model as a bare receipt.
+function completionAgent(options) {
+  const setup = agentWithState(options)
+  const providerStatus = { observation_mode: 'full', task_state: 'idle', queue_empty: true, queue_length: 0, last_completed_batch: { batch_id: 7 } }
+  setup.agent.taskStatusReceipt = async () => ({ raw: '{}', view: providerStatus, providerStatus })
+  setup.agent.routePostStepDecision = async () => ({ route: 'continue_current', decision_called: false })
+  setup.sent = []
+  setup.agent.continueFromModMessage = async (message) => { setup.sent.push(message); return {} }
+  return setup
+}
+
+test('a finished batch on a prose-only step names the missing contract and both ways to close it', async () => {
+  const { agent, memory, key, sent } = completionAgent({ state: activeState({ withContract: false }), stone: 10 })
+  const trackerId = getActivePlan(memory.planningState(key)).steps[0].step_id
+
+  await agent.completed()
+
+  assert.equal(sent.length, 1)
+  assert.match(sent[0], /^\[MOD\] Autorio operation batch completed\. \[HARNESS\] Step "Gather enough stone" stays open: it has no completion contract/)
+  assert.match(sent[0], /checkpoint \{mode,requirements\}/)
+  // The id [PLANNING_STATE] shows, with the Task Board alias also accepted.
+  assert.ok(sent[0].includes(`semanticCompletion {"stepId":"${trackerId}"} (also accepted: step_1)`), sent[0])
+  assert.match(sent[0], /Detailed task receipt: \{/)
+})
+
+test('compact continuation rounds keep the stays-open line ahead of the compact receipt', () => {
+  const content = '[MOD] Autorio operation batch completed. [HARNESS] Step "x" stays open. Detailed task receipt: {"task_state":"idle","queue_empty":true,"queue_length":0}'
+  const compact = compactCompletionReceipt(content)
+  assert.match(compact, /^\[MOD\] Autorio operation batch completed\. \[HARNESS\] Step "x" stays open\. Compact task receipt: \{/)
+  // A plain receipt is unchanged in shape.
+  assert.match(compactCompletionReceipt('[MOD] Autorio operation batch completed. Detailed task receipt: {"task_state":"idle"}'), /^\[MOD\] Autorio operation batch completed\. Compact task receipt: \{/)
+})
+
+test('a step with a contract gets no stays-open line', async () => {
+  const { agent, sent } = completionAgent({ stone: 10 })
+
+  await agent.completed()
+
+  assert.ok(sent.every(message => !message.includes('stays open')), sent.join('\n'))
 })

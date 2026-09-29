@@ -4022,6 +4022,22 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  // One line for the model when a finished batch left a prose-only step open:
+  // it names the missing contract and both ways to close the step. The Plan
+  // Tracker id is the one [PLANNING_STATE] shows; the Task Board alias (step_N,
+  // shown in [RUNTIME_COMPAT_STATE]) is accepted for the same step.
+  stepStaysOpenHint(state) {
+    const board = state?.task_board
+    const index = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
+    const step = index === undefined ? undefined : board?.steps?.[index]
+    if (!step) return ''
+    const tracker = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
+    const trackerId = tracker?.active_step_index === index ? tracker?.steps?.[index]?.step_id : undefined
+    const stepId = trackerId ?? step.id
+    const alias = trackerId && trackerId !== step.id ? ` (also accepted: ${step.id})` : ''
+    return `[HARNESS] Step ${JSON.stringify(cleanMemoryText(step.description, 100))} stays open: it has no completion contract, so a finished batch cannot close it. In your next submitPlan add checkpoint {mode,requirements} for the world state that proves it, or semanticCompletion {"stepId":"${stepId}"}${alias} if your evidence already shows it is done.`
+  }
+
   async routeStepCompletionDecision(receipt) {
     const key = this.activePlanKey()
     const planState = this.memory.planByNpc?.get?.(key) ?? this.memory.currentPlan?.(key)
@@ -5888,6 +5904,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const stepCompletion = pendingAmendment
       ? { verified: false, reason: 'pending_amendment' }
       : await this.routeStepCompletionDecision(receipt)
+    // The reason a step did not close used to be trace-only: the model saw a
+    // finished batch and nothing about why the step stayed open.
+    const stepOpenHint = stepCompletion?.reason === 'semantic_completion_requires_planner'
+      ? this.stepStaysOpenHint(stepCompletion.state)
+      : ''
     const completionState = stepCompletion?.state
     const settled = await this.settleCompletedStepState(completionState, { pendingAmendment })
     if (settled) return settled
@@ -5922,7 +5943,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.planningHorizonOverride = routed.steering?.planning_horizon ?? null
     try {
       const result = await this.continueFromModMessage(
-        `[MOD] Autorio operation batch completed. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}`,
+        `[MOD] Autorio operation batch completed. ${stepOpenHint ? `${stepOpenHint} ` : ''}Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}`,
         'factorio.completion_continuation',
       )
       if (pendingAmendment) this.pendingInteractionAmendment = null
