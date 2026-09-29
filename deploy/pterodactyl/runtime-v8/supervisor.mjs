@@ -2251,7 +2251,8 @@ export class Session {
 
   // The console's Goal card. The checks are re-read from the game at most every
   // GOAL_UI_REFRESH_MS (read-only: this never records a baseline), so a sync
-  // every second costs a few RCON calls per half minute.
+  // every second costs a few RCON calls per half minute. Running checks are
+  // read once here; only the completion check samples them (goal-definition.mjs).
   async goalUiView(now = Date.now()) {
     const key = this.agent?.activePlanKey?.()
     const goal = this.agent?.memory?.planningState?.(key)?.goal
@@ -2262,7 +2263,7 @@ export class Session {
     const fresh = cached?.key === cacheKey && now - cached.at < GOAL_UI_REFRESH_MS
     if (definition && !fresh) {
       let evaluation
-      try { evaluation = await evaluateGoalDefinition(definition, command => this.rcon.command(command)) }
+      try { evaluation = await evaluateGoalDefinition(definition, command => this.rcon.command(command), { samples: 1 }) }
       catch { evaluation = undefined }
       this.goalUiCache = { key: cacheKey, at: now, evaluation }
     }
@@ -2278,7 +2279,7 @@ export class Session {
     const goal = planning?.goal
     let evaluation
     if (goal?.status === GOAL_STATUS.ACTIVE && goal.definition) {
-      try { evaluation = await evaluateGoalDefinition(goal.definition, command => this.rcon.command(command)) }
+      try { evaluation = await evaluateGoalDefinition(goal.definition, command => this.rcon.command(command), { samples: 1 }) }
       catch { evaluation = undefined }
     }
     const lines = formatGoalStatus({

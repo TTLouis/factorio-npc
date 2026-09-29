@@ -2,7 +2,10 @@ import type { LuaEntity, LuaInventory, SurfaceCreateEntity } from 'factorio:runt
 import type { ControlledActor } from './actors/types'
 import type { new_basic_operation_controller, TransferInventorySnapshot, TransferRefusalCause } from './basic_operations'
 import { remember_entity_reference, resolve_exact_entity } from './entity_reference'
+import { record_hand_insert } from './hand_work'
 import { build_interaction_reach, entity_interaction_reach } from './interaction_range'
+import { entity_role_inventories } from './inventory_roles'
+import type { InventoryRole } from './inventory_roles'
 import { MAX_MINING_START_REJECTIONS, mining_navigation_reach, mining_navigation_requires_movement, select_exact_mining_target, within_mining_reach } from './mining_reach'
 import { resolve_entity_placement_item } from './placement_item'
 import { placement_check_args, placement_footprint, placement_grid_rule, snap_placement_center } from './placement_geometry'
@@ -76,65 +79,8 @@ function mining_reposition_task(actor: ControlledActor, entity: LuaEntity, rejec
   }
 }
 
-type InventoryRole = TransferInventorySnapshot['role']
-
-interface RoledInventory {
-  inventory: LuaInventory
-  role: InventoryRole
-}
-
-// Entities whose output inventory is a separate result slot. For a container
-// the engine reports the chest inventory itself as the output inventory, so
-// output identity is only trusted for these types.
-const SEPARATE_OUTPUT_ENTITY_TYPES: Record<string, boolean> = {
-  'furnace': true,
-  'assembling-machine': true,
-  'rocket-silo': true,
-}
-
-// Inventory names (keys of defines.inventory) that hold products or waste.
-// Factorio 2.0 names a furnace's slots crafter_input / crafter_output, and a
-// script insert into crafter_output succeeds (engine lane, 2.0.77), so these
-// are excluded by role, never by can_insert.
-const OUTPUT_INVENTORY_NAMES: Record<string, InventoryRole> = {
-  furnace_result: 'output',
-  crafter_output: 'output',
-  crafter_trash: 'output',
-  assembling_machine_output: 'output',
-  assembling_machine_dump: 'output',
-  rocket_silo_output: 'output',
-  rocket_silo_result: 'output',
-  rocket_silo_trash: 'output',
-  logistic_container_trash: 'output',
-  burnt_result: 'burnt_result',
-}
-
 const MAX_SNAPSHOT_TARGETS = 3
 const MAX_SNAPSHOT_ITEMS = 4
-
-function entity_role_inventories(entity: LuaEntity) {
-  const output = SEPARATE_OUTPUT_ENTITY_TYPES[entity.type] ? entity.get_output_inventory() : undefined
-  const fuel = entity.get_fuel_inventory()
-  const burnt = entity.get_burnt_result_inventory()
-  const output_index = output ? output.index : undefined
-  const fuel_index = fuel ? fuel.index : undefined
-  const burnt_index = burnt ? burnt.index : undefined
-  const inventories: RoledInventory[] = []
-  const max_index = entity.get_max_inventory_index()
-  for (let i = 1; i <= max_index; i++) {
-    const inventory = entity.get_inventory(i)
-    if (!inventory) continue
-    const index = inventory.index ?? i
-    const named_role = inventory.name !== undefined ? OUTPUT_INVENTORY_NAMES[inventory.name] : undefined
-    let role: InventoryRole = 'input'
-    if (burnt_index !== undefined && index === burnt_index) role = 'burnt_result'
-    else if (output_index !== undefined && index === output_index) role = 'output'
-    else if (named_role !== undefined) role = named_role
-    else if (fuel_index !== undefined && index === fuel_index) role = 'fuel'
-    inventories.push({ inventory, role })
-  }
-  return inventories
-}
 
 function is_insert_role(role: InventoryRole) {
   return role === 'input' || role === 'fuel'
@@ -729,19 +675,22 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
         return 0
       }
 
-      targets
-        .map(entity => entity_inventories(entity, task.item_name, true))
-        .flat()
-        .forEach((inventory) => {
-          if (moved_total >= task.max_count) return
+      for (const entity of targets) {
+        const fuel_inventory = entity.get_fuel_inventory()
+        for (const inventory of entity_inventories(entity, task.item_name, true)) {
+          if (moved_total >= task.max_count) break
           const to_move = math.min(available - moved_total, task.max_count - moved_total)
-          if (to_move <= 0) return
+          if (to_move <= 0) break
           const moved = inventory.insert({ name: task.item_name, count: to_move })
           if (moved > 0) {
             actor_inventory.remove({ name: task.item_name, count: moved })
             moved_total += moved
+            // Hand feeding voids a production_rate window; refuelling does not.
+            const into_fuel = fuel_inventory !== undefined && fuel_inventory.index === inventory.index
+            record_hand_insert(actor.force.index, task.item_name, entity.name, entity.type, into_fuel, entity)
           }
-        })
+        }
+      }
     }
     else {
       targets

@@ -3,12 +3,14 @@ import type {
   LuaEntity,
   OnPlayerCraftedItemEvent,
   OnPlayerMinedEntityEvent,
+  OnPlayerMinedItemEvent,
   OnScriptPathRequestFinishedEvent,
   OnSelectedEntityChangedEvent,
 } from 'factorio:runtime'
 
 import type { ControlledActor } from './actors/types'
 import { get_controlled_actor } from './actors/actor_controller'
+import { record_hand_crafted_tick, record_hand_mined_item } from './hand_work'
 import { new_awareness_controller } from './awareness'
 import { new_area_clearing_controller } from './area_clearing'
 import { craft_bootstrap_preflight_for_actor } from './bootstrap_planning'
@@ -627,7 +629,16 @@ script.on_event(defines.events.on_tick, (_event) => {
   runtime_task_dispatchers[task_state](actor)
 })
 
+// A connected player's hand mining and crafting on the NPC's force is hand
+// work too: a production_rate window that contains it is not automated output.
+script.on_event(defines.events.on_player_mined_item, (event: OnPlayerMinedItemEvent) => {
+  const player = game.get_player(event.player_index)
+  if (player) record_hand_mined_item(player.force.index, event.item_stack.name)
+})
+
 script.on_event(defines.events.on_player_crafted_item, (event: OnPlayerCraftedItemEvent) => {
+  const crafter = game.get_player(event.player_index)
+  if (crafter) record_hand_crafted_tick(crafter.force.index, event.item_stack.name)
   const actor = get_controlled_actor()
   if (!actor || !actor.owns_player_index(event.player_index)) {
     return

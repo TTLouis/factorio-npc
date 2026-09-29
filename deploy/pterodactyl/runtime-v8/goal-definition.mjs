@@ -23,7 +23,21 @@ export const GOAL_CONDITION_KINDS = Object.freeze([
   'items_produced',
   'inventory_count',
   'space_location_unlocked',
+  'entity_working',
+  'electric_network_satisfied',
+  'production_rate',
 ])
+
+// World-state kinds (plan 3.7): what is running now, not what was ever made.
+// "Get power going and run a drill" is proven by the drill working on a
+// powered network, never by a crafted steam engine and drill (live run
+// 2026-09-29). These read an instantaneous engine status, so the harness
+// samples them a few times, a second apart, and a majority decides.
+export const GOAL_RUNNING_KINDS = Object.freeze(['entity_working', 'electric_network_satisfied'])
+export const GOAL_RATE_WINDOW_MINUTES = Object.freeze([1, 10])
+export const GOAL_SAMPLING = Object.freeze({ samples: 3, intervalMs: 1000 })
+const MAX_RUNNING_MINIMUM = 1000
+const MAX_PER_MINUTE = 1_000_000
 
 // Kinds that read a cumulative force counter. "Launch a rocket" on a save
 // that already launched one, or "make 100 gears" on a save that made thousands,
@@ -69,6 +83,29 @@ function minimum(value, kind) {
   return value
 }
 
+function runningMinimum(value, kind) {
+  if (value === undefined) return 1
+  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_RUNNING_MINIMUM) {
+    fail('invalid_goal_condition', `goal.doneWhen ${kind}.minimum must be a whole number of entities from 1 to ${MAX_RUNNING_MINIMUM} (default 1)`)
+  }
+  return value
+}
+
+function perMinute(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > MAX_PER_MINUTE) {
+    fail('invalid_goal_condition', 'goal.doneWhen production_rate.per_minute must be a positive number of items per minute')
+  }
+  return Math.round(value * 100) / 100 || 0.01
+}
+
+function windowMinutes(value) {
+  if (value === undefined) return 1
+  if (!GOAL_RATE_WINDOW_MINUTES.includes(value)) {
+    fail('invalid_goal_condition', `goal.doneWhen production_rate.window_minutes must be ${GOAL_RATE_WINDOW_MINUTES.join(' or ')} (default 1)`)
+  }
+  return value
+}
+
 function countFrom(raw, kind) {
   const value = raw.countFrom ?? raw.count_from ?? GOAL_COUNT_FROM.GOAL_START
   if (!Object.values(GOAL_COUNT_FROM).includes(value)) {
@@ -98,6 +135,18 @@ function sanitizeCondition(raw, index, options = {}) {
   if (kind === 'research_completed') return { id, kind, technology: prototypeName(raw.technology, 'technology', kind, raw) }
   if (kind === 'rockets_launched') return withCounter({ id, kind, minimum: minimum(raw.minimum, kind) }, raw, options)
   if (kind === 'space_location_unlocked') return { id, kind, name: prototypeName(raw.name, 'name', kind, raw) }
+  if (GOAL_RUNNING_KINDS.includes(kind)) {
+    return { id, kind, entity_name: prototypeName(raw.entity_name, 'entity_name', kind, raw), minimum: runningMinimum(raw.minimum, kind) }
+  }
+  if (kind === 'production_rate') {
+    return {
+      id,
+      kind,
+      item_name: prototypeName(raw.item_name, 'item_name', kind, raw),
+      per_minute: perMinute(raw.per_minute),
+      window_minutes: windowMinutes(raw.window_minutes),
+    }
+  }
   const condition = { id, kind, item_name: prototypeName(raw.item_name, 'item_name', kind, raw), minimum: minimum(raw.minimum, kind) }
   return kind === 'items_produced' ? withCounter(condition, raw, options) : condition
 }
@@ -174,8 +223,45 @@ export function describeGoalCondition(condition) {
       : `${condition.minimum} × ${condition.item_name} produced from now on (all surfaces)`
     case 'inventory_count': return `AIRI holds at least ${condition.minimum} × ${condition.item_name}`
     case 'space_location_unlocked': return `space location "${condition.name}" is unlocked`
+    case 'entity_working': return `${condition.minimum} × ${condition.entity_name} working now`
+    case 'electric_network_satisfied': return `${condition.minimum} × ${condition.entity_name} powered by a running electric network`
+    case 'production_rate': return `machines produce ${condition.per_minute} × ${condition.item_name} per minute (last ${condition.window_minutes} min, hand work excluded)`
     default: return 'unknown condition'
   }
+}
+
+function defaultSleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+async function readGoalCondition(condition, command) {
+  try { return JSON.parse(String(await command(goalConditionCommand(condition))).trim()) }
+  catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) } }
+}
+
+// Reads a running condition again until a majority of `samples` reads agree.
+// Returns the last reading, the per-read votes, and whether the game tick
+// failed to advance between two reads.
+async function sampleRunningCondition(condition, command, first, { samples, intervalMs, sleep }) {
+  const needed = Math.floor(samples / 2) + 1
+  const vote = observation => observation?.ok === true && observation.satisfied === true
+  const votes = [vote(first)]
+  let last = first
+  let stalled = false
+  while (votes.length < samples
+    && votes.filter(Boolean).length < needed
+    && votes.filter(value => !value).length < needed) {
+    await sleep(intervalMs)
+    const next = await readGoalCondition(condition, command)
+    if (Number.isFinite(last?.tick) && Number.isFinite(next?.tick) && next.tick <= last.tick) {
+      stalled = true
+      last = next
+      break
+    }
+    votes.push(vote(next))
+    last = next
+  }
+  return { observation: last, votes, stalled }
 }
 
 // Evaluates every condition through the game. `command` sends one RCON
@@ -185,13 +271,22 @@ export function describeGoalCondition(condition) {
 // A goal_start counter is judged as current - baseline >= minimum. A counter
 // with no baseline yet is unsatisfied; its current reading is returned in
 // `baselines` for the caller to record.
-export async function evaluateGoalDefinition(definition, command) {
+//
+// A running kind (entity_working, electric_network_satisfied) is read up to
+// `samples` times, `intervalMs` apart, until a majority agrees; the game tick
+// must advance between reads, so a paused game never proves "running". A
+// production_rate is already a window measured by the engine and is read once.
+// `samples: 1` gives a single read (the status views use it).
+export async function evaluateGoalDefinition(definition, command, { samples = GOAL_SAMPLING.samples, intervalMs = GOAL_SAMPLING.intervalMs, sleep = defaultSleep } = {}) {
   const results = []
   const baselines = {}
   for (const condition of definition?.done_when ?? []) {
-    let observation
-    try { observation = JSON.parse(String(await command(goalConditionCommand(condition))).trim()) }
-    catch (error) { observation = { ok: false, error: error instanceof Error ? error.message : String(error) } }
+    let observation = await readGoalCondition(condition, command)
+    let votes
+    let stalled = false
+    if (GOAL_RUNNING_KINDS.includes(condition.kind) && samples > 1) {
+      ({ observation, votes, stalled } = await sampleRunningCondition(condition, command, observation, { samples, intervalMs, sleep }))
+    }
     const ok = observation?.ok === true
     const current = Number.isFinite(observation?.current) ? observation.current : undefined
     const result = {
@@ -200,6 +295,15 @@ export async function evaluateGoalDefinition(definition, command) {
       satisfied: ok && observation.satisfied === true,
       current,
       error: ok ? undefined : String(observation?.error ?? 'unreadable_condition').slice(0, 120),
+    }
+    if (votes) {
+      const needed = Math.floor(samples / 2) + 1
+      result.samples = votes
+      result.satisfied = ok && !stalled && votes.filter(Boolean).length >= needed
+      if (stalled) result.error = 'game_not_advancing'
+    }
+    if (condition.kind === 'production_rate' && ok && typeof observation.void_reason === 'string') {
+      result.void_reason = observation.void_reason.slice(0, 40)
     }
     if (GOAL_COUNTER_KINDS.includes(condition.kind) && condition.count_from !== GOAL_COUNT_FROM.SAVE_START) {
       if (Number.isSafeInteger(condition.baseline)) {
@@ -237,10 +341,24 @@ export function formatGoalUnderstanding(definition, { objective = '', roadmap = 
   return lines
 }
 
+const RATE_VOID_TEXT = Object.freeze({
+  hand_mined: 'hand mining of this item',
+  hand_crafted: 'hand crafting of this item',
+  hand_inserted: 'something other than fuel put into a machine or chest by hand',
+})
+
+const RATE_VOID_SHORT = Object.freeze({ hand_mined: 'hand mining', hand_crafted: 'hand crafting', hand_inserted: 'hand feeding' })
+
+function describeRate(result) {
+  const reason = RATE_VOID_TEXT[result.void_reason]
+  return `currently ${result.current}/min${reason ? `; window void: ${reason} in the last window` : ''}`
+}
+
 // One unmet condition for the planner. A goal_start counter reports progress
 // since the goal began, not the save total, so the numbers match doneWhen.
 export function describeUnmetGoalResult(result) {
   if (result.needs_baseline) return `${result.id} (starting count not read yet)`
+  if (result.kind === 'production_rate' && result.current !== undefined) return `${result.id} (${describeRate(result)})`
   if (result.current === undefined) return result.id
   if (Number.isSafeInteger(result.baseline)) return `${result.id} (currently ${result.current - result.baseline} since the goal started)`
   return `${result.id} (currently ${result.current})`
@@ -266,6 +384,10 @@ function conditionProgress(condition, result) {
   if (result.needs_baseline) return 'starting count not read yet'
   if (condition.kind === 'research_completed' || condition.kind === 'space_location_unlocked') return result.satisfied ? 'done' : 'not yet'
   if (!Number.isFinite(result.current)) return result.satisfied ? 'done' : 'not yet'
+  if (condition.kind === 'production_rate') {
+    const reason = RATE_VOID_SHORT[result.void_reason]
+    return `${result.current}/${condition.per_minute} per min${reason ? ` (void: ${reason})` : ''}`
+  }
   const counted = Number.isSafeInteger(result.baseline) ? result.current - result.baseline : result.current
   return `${Math.min(counted, condition.minimum)}/${condition.minimum}`
 }

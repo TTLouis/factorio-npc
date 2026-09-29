@@ -229,3 +229,46 @@ describe('StandaloneCharacterActor as a ControlledActor', () => {
     })
   })
 })
+
+describe('StandaloneCharacterActor hand-mining target', () => {
+  function ore(name: string, x: number, y: number) {
+    return { valid: true, name, type: 'resource', position: { x, y } }
+  }
+
+  function mining_actor(selected: unknown, entities: unknown[]) {
+    const surface = { find_entities_filtered: vi.fn(() => entities) }
+    const character = fake_character({ selected, surface, force: { index: 1 } })
+    const actor = new StandaloneCharacterActor(character as any)
+    return { actor, surface }
+  }
+
+  beforeEach(() => {
+    ;(globalThis as any).prototypes = {
+      entity: {
+        'iron-ore': { mineable_properties: { minable: true, products: [{ type: 'item', name: 'iron-ore' }] } },
+        'copper-ore': { mineable_properties: { minable: true, products: [{ type: 'item', name: 'copper-ore' }] } },
+        'character': { mineable_properties: { minable: false } },
+      },
+    }
+  })
+
+  it('takes the mined items from the entity at the mining position, not from `selected`', () => {
+    const { actor, surface } = mining_actor(ore('copper-ore', 50, 50), [ore('iron-ore', 10.5, 20.5)])
+    actor.set_mining_state({ mining: true, position: { x: 10.5, y: 20.5 } })
+
+    expect(surface.find_entities_filtered).toHaveBeenCalledWith({ area: { left_top: { x: 10, y: 20 }, right_bottom: { x: 11, y: 21 } } })
+    expect(Object.keys((globalThis as any).storage.airi_hand_work[1].mining_active)).toEqual(['iron-ore'])
+  })
+
+  it('works when `selected` is unset', () => {
+    const { actor } = mining_actor(undefined, [ore('iron-ore', 10.5, 20.5)])
+    actor.set_mining_state({ mining: true, position: { x: 10.5, y: 20.5 } })
+    expect(Object.keys((globalThis as any).storage.airi_hand_work[1].mining_active)).toEqual(['iron-ore'])
+  })
+
+  it('ignores the body and entities away from the position, and voids every item when none is found', () => {
+    const { actor } = mining_actor(ore('copper-ore', 10.5, 20.5), [{ valid: true, name: 'character', type: 'character', position: { x: 10.5, y: 20.5 } }, ore('iron-ore', 11.5, 20.5)])
+    actor.set_mining_state({ mining: true, position: { x: 10.5, y: 20.5 } })
+    expect(Object.keys((globalThis as any).storage.airi_hand_work[1].mining_active)).toEqual(['*'])
+  })
+})
