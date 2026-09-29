@@ -12,10 +12,38 @@
 // of this hand work falls inside it: the goal can only be met by a window in
 // which the factory ran on its own.
 //
-// Only ticks are kept, per force and per item, so storage stays bounded by the
-// number of distinct items the NPC ever handled.
+// A hand-fed machine keeps producing long after the insert: a stone furnace
+// given 50 ore smelts for about 160 s. The 1.1x window rule alone would then
+// read that output as automated after a minute or so. So the machine that was
+// hand-fed is remembered too (unit number, per force, bounded), and every rate
+// window stays void while it still holds an item that was hand-inserted into
+// it, checked when the goal is evaluated. Chests are not machines: stocking one
+// only voids the window after the insert.
+//
+// Ticks are kept per force and per item, plus at most MAX_FED_ENTITIES fed
+// machines per force, so storage stays bounded and save/load safe (plain
+// numbers and strings only).
 
-import type { LuaEntity } from 'factorio:runtime'
+import type { LuaEntity, LuaSurface, UnitNumber } from 'factorio:runtime'
+import { entity_role_inventories, has_separate_output } from './inventory_roles'
+
+/** Fed machines remembered per force; more than this voids every window for a long while. */
+export const MAX_FED_ENTITIES = 64
+/** Items remembered per fed machine; beyond it any input item counts. */
+const MAX_FED_ITEMS = 8
+/** After the fed list overflowed, windows stay void at least this long (20 min). */
+const FED_OVERFLOW_HOLD_TICKS = 20 * 3600
+
+interface FedEntity {
+  unit_number: number
+  surface_index: number
+  entity_name: string
+  /** Hand-inserted items still to be found in the machine's input. */
+  items: string[]
+  /** More items than MAX_FED_ITEMS were inserted: any input item counts. */
+  any_item?: boolean
+  tick: number
+}
 
 interface ForceHandWork {
   /** Last tick the NPC put a non-fuel item into an entity. */
@@ -28,6 +56,19 @@ interface ForceHandWork {
   mining_active?: Record<string, number>
   /** Last tick a hand craft of the item finished. */
   crafted_tick?: Record<string, number>
+  /** Machines hand-fed with non-fuel items whose input may still hold them. */
+  fed?: FedEntity[]
+  /** Tick the fed list could not take another machine. */
+  fed_overflow_tick?: number
+  /**
+   * Last tick a fed machine was found emptied of hand-fed input (or gone). What
+   * it smelted until then is still in the rate windows that follow, so they stay
+   * void for a window after it. Found lazily, so it is never earlier than the
+   * true drain.
+   */
+  fed_end_tick?: number
+  fed_end_item?: string
+  fed_end_entity?: string
 }
 
 export interface HandWorkStorage {
@@ -60,12 +101,74 @@ function force_work(force_index: number): ForceHandWork {
  * inventory is refuelling (allowed); a move into a turret or lab feeds nothing
  * that produces items. Everything else is hand feeding.
  */
-export function record_hand_insert(force_index: number, item_name: string, entity_name: string, entity_type: string, into_fuel: boolean) {
+export function record_hand_insert(force_index: number, item_name: string, entity_name: string, entity_type: string, into_fuel: boolean, entity?: LuaEntity) {
   if (into_fuel || NON_PRODUCING_TYPES[entity_type]) return
   const work = force_work(force_index)
   work.insert_tick = game.tick
   work.insert_item = item_name
   work.insert_entity = entity_name
+  if (has_separate_output(entity_type) && entity !== undefined && entity.valid) remember_fed_entity(work, entity, item_name)
+}
+
+function remember_fed_entity(work: ForceHandWork, entity: LuaEntity, item_name: string) {
+  const unit_number = entity.unit_number
+  const fed = work.fed ?? []
+  work.fed = fed
+  // A machine without a unit number cannot be looked up again; the insert
+  // window still applies to it.
+  if (unit_number === undefined) return
+  for (const entry of fed) {
+    if (entry.unit_number !== unit_number) continue
+    entry.tick = game.tick
+    if (!entry.any_item && !entry.items.includes(item_name)) {
+      if (entry.items.length >= MAX_FED_ITEMS) entry.any_item = true
+      else entry.items.push(item_name)
+    }
+    return
+  }
+  if (fed.length >= MAX_FED_ENTITIES) prune_fed(work)
+  const remaining = work.fed ?? []
+  if (remaining.length >= MAX_FED_ENTITIES) {
+    work.fed_overflow_tick = game.tick
+    return
+  }
+  remaining.push({ unit_number, surface_index: entity.surface.index, entity_name: entity.name, items: [item_name], tick: game.tick })
+}
+
+/** Whether the machine's input inventories still hold a hand-inserted item. */
+function holds_hand_fed_input(entity: LuaEntity, entry: FedEntity) {
+  for (const { inventory, role } of entity_role_inventories(entity)) {
+    if (role !== 'input') continue
+    for (const item of inventory.get_contents()) {
+      if (item.count > 0 && (entry.any_item || entry.items.includes(item.name))) return true
+    }
+  }
+  return false
+}
+
+/**
+ * Drops machines that are gone or whose hand-fed input is used up; returns the
+ * most recently fed one that still holds hand-inserted input.
+ */
+function prune_fed(work: ForceHandWork) {
+  const kept: FedEntity[] = []
+  let still_fed: FedEntity | undefined
+  for (const entry of work.fed ?? []) {
+    const entity = game.get_entity_by_unit_number(entry.unit_number as UnitNumber)
+    if (entity === undefined || !entity.valid || !holds_hand_fed_input(entity, entry)) {
+      work.fed_end_tick = game.tick
+      work.fed_end_item = entry.items[0]
+      work.fed_end_entity = entry.entity_name
+      continue
+    }
+    kept.push(entry)
+    if (still_fed === undefined || entry.tick > still_fed.tick) still_fed = entry
+  }
+  work.fed = kept
+  if (work.fed_overflow_tick !== undefined && kept.length === 0 && game.tick - work.fed_overflow_tick > FED_OVERFLOW_HOLD_TICKS) {
+    work.fed_overflow_tick = undefined
+  }
+  return still_fed
 }
 
 export function record_hand_crafted_tick(force_index: number, item_name: string) {
@@ -83,8 +186,38 @@ export function record_hand_mined_item(force_index: number, item_name: string) {
   mined[item_name] = game.tick
 }
 
-/** Item names mining `entity` can yield; ANY_ITEM when that is unknown. */
-export function mined_item_names(entity: LuaEntity | undefined): string[] {
+/**
+ * Entities the body is mining at `position`: minable entities whose position
+ * is within half a tile of it, excluding the body itself. The mining state
+ * carries a position, while `selected` may be unset or be a human's cursor
+ * entity, so the target is resolved from the position. Empty when none is found.
+ */
+export function mining_targets_at(surface: LuaSurface, position: { x: number, y: number } | undefined, exclude?: LuaEntity): LuaEntity[] {
+  if (!position) return []
+  const found = surface.find_entities_filtered({
+    area: { left_top: { x: position.x - 0.5, y: position.y - 0.5 }, right_bottom: { x: position.x + 0.5, y: position.y + 0.5 } },
+  })
+  const targets: LuaEntity[] = []
+  for (const entity of found) {
+    if (!entity.valid || entity === exclude || entity.type === 'character') continue
+    if ((entity.position.x - position.x) ** 2 + (entity.position.y - position.y) ** 2 > 0.25) continue
+    if (prototypes.entity[entity.name]?.mineable_properties?.minable !== true) continue
+    targets.push(entity)
+    if (targets.length >= 8) break
+  }
+  return targets
+}
+
+/** Item names mining `entity` (or any of a list) can yield; ANY_ITEM when that is unknown. */
+export function mined_item_names(entity: LuaEntity | LuaEntity[] | undefined): string[] {
+  if (Array.isArray(entity)) {
+    if (entity.length === 0) return [ANY_ITEM]
+    const names: string[] = []
+    for (const one of entity) {
+      for (const name of mined_item_names(one)) if (!names.includes(name)) names.push(name)
+    }
+    return names
+  }
   if (!entity || !entity.valid) return [ANY_ITEM]
   const properties = prototypes.entity[entity.name]?.mineable_properties
   if (!properties) return [ANY_ITEM]
@@ -101,7 +234,7 @@ export function mined_item_names(entity: LuaEntity | undefined): string[] {
  * target can yield as being hand-mined; mining that stops closes all of them
  * at this tick.
  */
-export function note_hand_mining(force_index: number, mining: boolean, target: LuaEntity | undefined) {
+export function note_hand_mining(force_index: number, mining: boolean, target: LuaEntity | LuaEntity[] | undefined) {
   const work = force_work(force_index)
   const active = work.mining_active ?? {}
   work.mining_active = active
@@ -148,6 +281,19 @@ export function hand_work_since(force_index: number, item_name: string, since_ti
   if (crafted !== undefined && crafted >= since_tick) return { reason: 'hand_crafted', tick: crafted, item_name }
   if (work.insert_tick !== undefined && work.insert_tick >= since_tick) {
     return { reason: 'hand_inserted', tick: work.insert_tick, item_name: work.insert_item, entity_name: work.insert_entity }
+  }
+  // Machines hand-fed earlier that still hold hand-inserted input keep the
+  // window void, however long ago the insert was.
+  if (work.fed !== undefined && work.fed.length > 0) {
+    const still_fed = prune_fed(work)
+    if (still_fed !== undefined) return { reason: 'hand_inserted', tick: still_fed.tick, item_name: still_fed.items[0], entity_name: still_fed.entity_name }
+  }
+  if (work.fed_end_tick !== undefined && work.fed_end_tick >= since_tick) {
+    return { reason: 'hand_inserted', tick: work.fed_end_tick, item_name: work.fed_end_item, entity_name: work.fed_end_entity }
+  }
+  if (work.fed_overflow_tick !== undefined) {
+    prune_fed(work)
+    if (work.fed_overflow_tick !== undefined) return { reason: 'hand_inserted', tick: work.fed_overflow_tick, item_name: ANY_ITEM }
   }
   return undefined
 }

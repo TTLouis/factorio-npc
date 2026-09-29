@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { evaluate_world_condition } from './goal_world_conditions'
-import { note_hand_mining, record_hand_crafted_tick, record_hand_insert, record_hand_mined_item } from './hand_work'
+import { MAX_FED_ENTITIES, mining_targets_at, note_hand_mining, record_hand_crafted_tick, record_hand_insert, record_hand_mined_item } from './hand_work'
 
 const STATUS = { working: 1, no_power: 2, low_power: 3, no_minable_resources: 4, waiting_for_space_in_destination: 5, not_plugged_in_electric_network: 6 }
 const PRECISION = { five_seconds: 0, one_minute: 1, ten_minutes: 2 }
@@ -83,6 +83,7 @@ beforeEach(() => {
       'solar-panel': { type: 'solar-panel' },
       'electric-energy-interface': { type: 'electric-energy-interface' },
       'accumulator': { type: 'accumulator' },
+      'stone-furnace': { type: 'furnace', mineable_properties: { minable: true, products: [{ type: 'item', name: 'stone-furnace' }] } },
       'iron-ore': { type: 'resource', mineable_properties: { minable: true, products: [{ type: 'item', name: 'iron-ore' }] } },
     },
     item: { 'iron-ore': {}, 'iron-plate': {} },
@@ -213,6 +214,130 @@ describe('production_rate', () => {
     record_hand_mined_item(2, 'iron-plate') // another force
     ;(globalThis as any).game.tick += 4000
     expect(evaluate({ kind: 'production_rate', item_name: 'iron-plate', per_minute: 5 })).toMatchObject({ satisfied: true })
+  })
+})
+
+describe('production_rate with a hand-fed machine', () => {
+  interface FakeMachine { valid: boolean, unit_number: number, name: string, type: string, surface: { index: number }, input: Record<string, number> }
+  let machines: Record<number, FakeMachine> = {}
+
+  function inventory(index: number, name: string, contents: () => Record<string, number>) {
+    return { index, name, get_contents: () => Object.entries(contents()).map(([item, count]) => ({ name: item, count, quality: 'normal' })) }
+  }
+
+  // Slots as the engine names them for a furnace: fuel, input, output.
+  function furnace(unit_number: number, input: Record<string, number>): any {
+    const machine: FakeMachine = { valid: true, unit_number, name: 'stone-furnace', type: 'furnace', surface: SURFACES[1], input }
+    const fuel = inventory(1, 'fuel', () => ({ coal: 5 }))
+    const source = inventory(2, 'crafter_input', () => machine.input)
+    const output = inventory(3, 'crafter_output', () => ({ 'iron-plate': 9 }))
+    machines[unit_number] = machine
+    return Object.assign(machine, {
+      get_max_inventory_index: () => 3,
+      get_inventory: (index: number) => [undefined, fuel, source, output][index],
+      get_fuel_inventory: () => fuel,
+      get_output_inventory: () => output,
+      get_burnt_result_inventory: () => undefined,
+    })
+  }
+
+  beforeEach(() => {
+    machines = {}
+    ;(globalThis as any).game.get_entity_by_unit_number = (unit: number) => machines[unit]
+  })
+
+  it('stays void past 1.1x the window while the machine still holds hand-fed ore, and clears when it is used up', () => {
+    flows = { 'iron-plate': { [PRECISION.one_minute]: 20 } }
+    const stone = furnace(7, { 'iron-ore': 50 })
+    record_hand_insert(1, 'iron-ore', 'stone-furnace', 'furnace', false, stone)
+    ;(globalThis as any).game.tick += 4000 // past 60 s * 1.1 = 3960 ticks
+    expect(evaluate({ kind: 'production_rate', item_name: 'iron-plate', per_minute: 20 }))
+      .toMatchObject({ satisfied: false, void_reason: 'hand_inserted', void_item: 'iron-ore', void_entity: 'stone-furnace' })
+    ;(globalThis as any).game.tick += 6000
+    expect(evaluate({ kind: 'production_rate', item_name: 'iron-plate', per_minute: 20 })).toMatchObject({ satisfied: false, void_reason: 'hand_inserted' })
+    machines[7].input = {}
+    // What it smelted until it emptied is still in the window that follows.
+    expect(evaluate({ kind: 'production_rate', item_name: 'iron-plate', per_minute: 20 })).toMatchObject({ satisfied: false, void_reason: 'hand_inserted', void_entity: 'stone-furnace' })
+    expect((globalThis as any).storage.airi_hand_work[1].fed).toEqual([])
+    ;(globalThis as any).game.tick += 4000
+    expect(evaluate({ kind: 'production_rate', item_name: 'iron-plate', per_minute: 20 })).toMatchObject({ satisfied: true, void_reason: undefined })
+  })
+
+  it('does not track fuel inserts or chests beyond the insert window', () => {
+    flows = { 'iron-plate': { [PRECISION.one_minute]: 20 } }
+    const stone = furnace(8, { 'iron-ore': 50 })
+    record_hand_insert(1, 'coal', 'stone-furnace', 'furnace', true, stone)
+    const chest = { valid: true, unit_number: 9, name: 'wooden-chest', type: 'container', surface: SURFACES[1] }
+    machines[9] = chest as any
+    record_hand_insert(1, 'iron-ore', 'wooden-chest', 'container', false, chest as any)
+    ;(globalThis as any).game.tick += 4000
+    expect(evaluate({ kind: 'production_rate', item_name: 'iron-plate', per_minute: 20 })).toMatchObject({ satisfied: true })
+    expect((globalThis as any).storage.airi_hand_work[1].fed ?? []).toEqual([])
+  })
+
+  it('ignores hand-fed input the machine no longer holds, and machines that vanished', () => {
+    flows = { 'iron-plate': { [PRECISION.one_minute]: 20 } }
+    const a = furnace(10, { 'iron-ore': 1 })
+    const b = furnace(11, { 'iron-ore': 1 })
+    record_hand_insert(1, 'iron-ore', 'stone-furnace', 'furnace', false, a)
+    record_hand_insert(1, 'iron-ore', 'stone-furnace', 'furnace', false, b)
+    ;(globalThis as any).game.tick += 4000
+    machines[10].input = { 'copper-ore': 4 } // holds something, but not what was hand-fed
+    delete machines[11]
+    expect(evaluate({ kind: 'production_rate', item_name: 'iron-plate', per_minute: 20 })).toMatchObject({ satisfied: false, void_reason: 'hand_inserted' })
+    ;(globalThis as any).game.tick += 4000
+    expect(evaluate({ kind: 'production_rate', item_name: 'iron-plate', per_minute: 20 })).toMatchObject({ satisfied: true })
+  })
+
+  it('keeps a bounded list and voids everything once it overflows, until it drains and a long hold passes', () => {
+    flows = { 'iron-plate': { [PRECISION.one_minute]: 20 } }
+    for (let unit = 100; unit <= 100 + MAX_FED_ENTITIES; unit++) {
+      record_hand_insert(1, 'iron-ore', 'stone-furnace', 'furnace', false, furnace(unit, { 'iron-ore': 5 }))
+    }
+    expect((globalThis as any).storage.airi_hand_work[1].fed).toHaveLength(MAX_FED_ENTITIES)
+    ;(globalThis as any).game.tick += 4000
+    for (const machine of Object.values(machines)) machine.input = {}
+    // Every tracked machine is empty, but one was not tracked: still void.
+    expect(evaluate({ kind: 'production_rate', item_name: 'iron-plate', per_minute: 20 })).toMatchObject({ satisfied: false, void_reason: 'hand_inserted' })
+    ;(globalThis as any).game.tick += 20 * 3600
+    expect(evaluate({ kind: 'production_rate', item_name: 'iron-plate', per_minute: 20 })).toMatchObject({ satisfied: true })
+  })
+
+  it('makes room when tracked machines have drained', () => {
+    for (let unit = 200; unit < 200 + MAX_FED_ENTITIES; unit++) record_hand_insert(1, 'iron-ore', 'stone-furnace', 'furnace', false, furnace(unit, { 'iron-ore': 5 }))
+    for (const machine of Object.values(machines)) machine.input = {}
+    record_hand_insert(1, 'iron-ore', 'stone-furnace', 'furnace', false, furnace(999, { 'iron-ore': 5 }))
+    const store = (globalThis as any).storage.airi_hand_work[1]
+    expect(store.fed).toHaveLength(1)
+    expect(store.fed_overflow_tick).toBeUndefined()
+  })
+})
+
+describe('mining_targets_at', () => {
+  const at = (entities: unknown[]) => ({ find_entities_filtered: () => entities }) as any
+
+  it('finds minable entities at the position, whatever is selected, and none when nothing is there', () => {
+    const ore = { valid: true, name: 'iron-ore', type: 'resource', position: { x: 4.5, y: 6.5 } }
+    const neighbour = { valid: true, name: 'iron-ore', type: 'resource', position: { x: 5.5, y: 6.5 } }
+    const body = { valid: true, name: 'character', type: 'character', position: { x: 4.5, y: 6.5 } }
+    expect(mining_targets_at(at([neighbour, ore, body]), { x: 4.5, y: 6.5 })).toEqual([ore])
+    expect(mining_targets_at(at([neighbour]), { x: 4.5, y: 6.5 })).toEqual([])
+    expect(mining_targets_at(at([ore]), undefined)).toEqual([])
+  })
+
+  it('voids every item when no target is found at the position', () => {
+    flows = { 'iron-plate': { [PRECISION.one_minute]: 20 } }
+    note_hand_mining(1, true, mining_targets_at(at([]), { x: 4.5, y: 6.5 }))
+    expect(evaluate({ kind: 'production_rate', item_name: 'iron-plate', per_minute: 5 }, true)).toMatchObject({ void_reason: 'hand_mined', void_item: '*' })
+  })
+
+  it('a hand-mined iron-ore target voids an iron-ore rate but not a copper-ore one', () => {
+    flows = { 'iron-ore': { [PRECISION.one_minute]: 20 }, 'copper-ore': { [PRECISION.one_minute]: 20 } }
+    ;(globalThis as any).prototypes.item['copper-ore'] = {}
+    const ore = { valid: true, name: 'iron-ore', type: 'resource', position: { x: 4.5, y: 6.5 } }
+    note_hand_mining(1, true, mining_targets_at(at([ore]), { x: 4.5, y: 6.5 }))
+    expect(evaluate({ kind: 'production_rate', item_name: 'iron-ore', per_minute: 5 }, true)).toMatchObject({ void_reason: 'hand_mined', void_item: 'iron-ore' })
+    expect(evaluate({ kind: 'production_rate', item_name: 'copper-ore', per_minute: 5 }, true)).toMatchObject({ satisfied: true })
   })
 })
 
