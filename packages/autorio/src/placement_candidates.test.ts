@@ -401,4 +401,56 @@ describe('placement candidates', () => {
     const result = placement_candidates_for_actor(actor, { entity_name: 'modded-drill', radius: 1, limit: 1 }) as any
     expect(result.candidates[0].item_output_position).toEqual({ x: -0.5, y: -1.3 })
   })
+
+  it('asks the manual build check for an offshore pump, so only shoreline spots are candidates', () => {
+    // The default (script) check accepts a pump on dry land (probed on 2.0.77);
+    // the manual check applies the shoreline and facing rules.
+    ;(globalThis as any).prototypes.entity = {
+      'offshore-pump': {
+        name: 'offshore-pump',
+        type: 'offshore-pump',
+        tile_width: 1,
+        tile_height: 1,
+        supports_direction: true,
+        flags: {},
+      },
+    }
+    const manual = (globalThis as any).defines.build_check_type.manual
+    const asked: any[] = []
+    const actor = {
+      position: { x: 0, y: 0 },
+      force: { index: 1 },
+      surface: {
+        can_place_entity: (args: any) => {
+          asked.push(args)
+          return args.build_check_type === manual && args.position.x === 0.5 && args.direction === 12
+        },
+        find_entities_filtered: () => [],
+      },
+    } as any
+
+    const result = placement_candidates_for_actor(actor, { entity_name: 'offshore-pump', radius: 2, limit: 4 }) as any
+
+    expect(asked.length).toBeGreaterThan(0)
+    expect(asked.every(args => args.build_check_type === manual)).toBe(true)
+    expect(result.candidates.length).toBeGreaterThan(0)
+    expect(result.candidates.every((candidate: any) => candidate.position.x === 0.5 && candidate.direction === 12)).toBe(true)
+  })
+
+  it('leaves the default build check alone for entities without tile rules', () => {
+    ;(globalThis as any).prototypes.entity = {
+      'stone-furnace': { name: 'stone-furnace', type: 'furnace', tile_width: 2, tile_height: 2, flags: {} },
+    }
+    const asked: any[] = []
+    const actor = {
+      position: { x: 0, y: 0 },
+      force: { index: 1 },
+      surface: { can_place_entity: (args: any) => { asked.push(args); return true }, find_entities_filtered: () => [] },
+    } as any
+
+    placement_candidates_for_actor(actor, { entity_name: 'stone-furnace', radius: 1, limit: 1 })
+
+    expect(asked.length).toBeGreaterThan(0)
+    expect(asked.every(args => !('build_check_type' in args))).toBe(true)
+  })
 })

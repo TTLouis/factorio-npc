@@ -84,6 +84,11 @@ import { event_handlers, set_load_handler } from './test-event-registry'
 ;(globalThis as any).storage = {}
 
 ;(globalThis as any).defines = {
+  build_check_type: {
+    script: 'script',
+    manual: 'manual',
+    ghost_place: 'ghost_place',
+  },
   events: {
     on_selected_entity_changed: 'on_selected_entity_changed',
     on_script_path_request_finished: 'on_script_path_request_finished',

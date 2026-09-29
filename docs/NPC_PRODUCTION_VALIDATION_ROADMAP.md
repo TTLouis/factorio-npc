@@ -355,6 +355,18 @@ Keep deterministic regression coverage for:
 
 This is already preparation, not an E2E success claim.
 
+### C1a — minimal steam lane (plan 4.1)
+
+**Engine-proven (2026-09-29, Factorio 2.0.77, `tests/factorio/runner/steam_power_cell.py`, production lane).** Offshore pump on a shoreline, boiler with coal, steam engine, three small poles and an electric mining drill on iron ore, all placed through the NPC's own operations (`place_candidate` / `place_entity`, `supply_entity` for coal). Verified in game state: pump, boiler and engine connect (read back through `get_entity_status` spatial data), the boiler holds water, the engine holds steam, one electric network spans engine, poles and drill, engine output equals the drill's 90 kW demand, the drill is `working` in every sample, and the chest gains ore at the computed 30 per minute. The lake and the ore patch are scripted terrain; the layout is a test fixture and is not exposed to the model.
+
+What it settled, for the model's tools rather than as a build order:
+
+- A fluid port reported by `getPlacementCandidates` / `getEntityStatus` sits on the entity's own edge tile and faces a side; it connects to the tile one step along that side, and two entities connect when each port's target tile is the other port's own tile. An offshore pump's `direction` is the side the water is on (its output faces the other way). A boiler's `direction` is the side the steam leaves; its two water ports are at the ends of the long axis. A steam engine's steam ports are the two ends of its long axis.
+- `covers_position` on a connection tile returns footprints that contain the tile, most of them not aligned (1 of 8 boiler candidates, 1 of 8 returned engine candidates out of 12 legal). The planner has to choose by `fluid_ports`; a misaligned boiler builds and simply does not connect.
+- Water edge: the default (script) build check accepts an offshore pump on dry land and facing away from the water, and `create_entity` builds it there, so the pump candidate query returned every tile as legal. The runtime now asks the manual build check for offshore pumps (placement, candidates, construction execution and planning); the candidate query is then the water-edge fact (only shoreline spots, facing the water), and the operation refuses dry land and a wrong facing as `not_placeable`. No separate water-edge query is needed for a pump.
+
+Not covered: pipes, storage tanks and fluid consumers (C1, C2), a natural (unscripted) shoreline, and sustained power under a growing load.
+
 ### C1 — source -> pipes -> storage
 
 Use the smallest live fluid fixture possible.

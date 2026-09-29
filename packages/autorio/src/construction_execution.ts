@@ -2,6 +2,7 @@ import type { ControlledActor } from './actors/types'
 import type { new_basic_operation_controller } from './basic_operations'
 import { local_spatial_observation, prototype_spatial_geometry } from './construction_planning'
 import { execute_prepared_remote_construction_plan } from './map_construction'
+import { placement_check_args } from './placement_geometry'
 import { resolve_entity_placement_item } from './placement_item'
 import type { new_task_manager } from './task_manager'
 
@@ -233,6 +234,7 @@ function evaluate_plan(actor: ControlledActor, placements: ConstructionExecution
       position,
       direction: placement.direction,
       force: actor.force,
+      ...placement_check_args(placement.entity_name),
     })) {
       return {
         ok: false,

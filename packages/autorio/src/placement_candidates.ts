@@ -1,7 +1,7 @@
 import type { ControlledActor } from './actors/types'
 import type { CandidateFluidPort } from './placement_spatial_features'
 import { candidate_fluid_ports } from './placement_spatial_features'
-import { placement_footprint, placement_footprint_covers_point, snap_placement_center, type PlacementFootprint } from './placement_geometry'
+import { placement_check_args, placement_footprint, placement_footprint_covers_point, snap_placement_center, type PlacementFootprint } from './placement_geometry'
 
 const MAX_RADIUS = 24
 const MAX_LIMIT = 8
@@ -317,6 +317,7 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
   const radius = math.max(1, math.min(MAX_RADIUS, math.floor(request.radius ?? (covers !== undefined ? COVERS_POSITION_DEFAULT_RADIUS : 8))))
   const limit = math.max(1, math.min(MAX_LIMIT, math.floor(request.limit ?? 5)))
   const directions = directions_for(prototype)
+  const check_args = placement_check_args(request.entity_name)
   const candidates: PlacementCandidate[] = []
   let scanned = 0
 
@@ -332,6 +333,7 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
           position,
           direction,
           force: actor.force,
+          ...check_args,
         })) continue
         if (covers !== undefined && !placement_footprint_covers_point(prototype, position, direction, covers)) continue
 
@@ -429,6 +431,7 @@ export function execute_placement_candidate(
     position: candidate.position,
     direction: candidate.direction,
     force: actor.force,
+    ...placement_check_args(set.entity_name),
   })) return [false, 'placement candidate is no longer placeable']
 
   if (set.target_resource !== undefined) {

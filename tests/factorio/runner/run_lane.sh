@@ -205,6 +205,8 @@ case "$LANE" in
     run_py hand_work_rates_cell.py
     printf '[npc-test][production] Running machine expected-finish gate (waits from game data)...\n'
     run_py machine_eta_cell.py
+    printf '[npc-test][production] Running minimal steam power gate (offshore pump -> boiler -> engine -> electric drill)...\n'
+    run_py steam_power_cell.py
     printf '[npc-test][production] Running compiled-Lua scope/capacity/fluid tool gate...\n'
     run_py compiled_lua_tools_cell.py
     printf '[npc-test][production] Running A1 belt/inserter transport gate...\n'
