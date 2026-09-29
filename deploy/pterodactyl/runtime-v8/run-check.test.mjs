@@ -187,3 +187,11 @@ test('runCheck throws UsageError for a missing file (maps to exit code 2 in the 
     UsageError,
   )
 })
+
+test('no_chat_reply: a request.failed answered by chat.request_failed_reported is not flagged, a silent one is', () => {
+  const failed = { ts: '2026-09-29T10:00:00.000Z', seq: 5, event: 'request.failed', request_id: 'req_a_1', data: { message: 'boom' } }
+  const reported = { ts: '2026-09-29T10:00:01.000Z', seq: 6, event: 'chat.request_failed_reported', request_id: 'req_a_1', data: { chat_line_length: 20, resume_hint_included: false } }
+  assert.equal(findingsFor(analyzeBehaviorTrace([failed, reported]), 'no_chat_reply').length, 0)
+  assert.equal(findingsFor(analyzeBehaviorTrace([failed]), 'no_chat_reply').length, 1)
+  assert.equal(findingsFor(analyzeBehaviorTrace([failed, { ...reported, request_id: 'req_b_1' }]), 'no_chat_reply').length, 1)
+})
