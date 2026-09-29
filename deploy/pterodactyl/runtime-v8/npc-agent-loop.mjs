@@ -2085,7 +2085,7 @@ function blockedPlanReply(plan) {
   return `The current plan is blocked${where}: ${reason}. Continuing unchanged would hit the same blocker. Tell me how to revise it (for example a different route or target), or cancel it.`
 }
 
-function planProgress(plan, stateResult) {
+export function planProgress(plan, stateResult) {
   const progress = taskBoardProgress(stateResult?.state?.task_board)
   if (stateResult?.blockedByHarness || stateResult?.state?.status === 'blocked') {
     const modelLine = cleanMemoryText(plan?.chatMessage, 600)
