@@ -82,7 +82,10 @@ describe('project activity filters', () => {
     expect(window_source).toContain("tags: { airi_activity_filter: flag, airi_activity_surface: 'projects' }")
     expect(window_source).toContain("activity_state.activity_filter_mask(player_index, 'projects')")
     expect(window_source).toContain('activity_state.activity_matches_mask(entry.kind as TaskBoardUiActivity[\'kind\'], mask)')
-    expect(window_source).toContain('(force_activity_latest || mask_changed)')
+    // Both panes scroll only under the shared LIVE follow state, and only for new rows.
+    expect(window_source).toContain('const follow = activity_state.activity_view(player_index).follow')
+    expect(window_source).toContain('if (follow && (force_activity_latest || mask_changed || appended > 0)')
+    expect(window_source).toContain('if (follow && conversation_lines.length > 0 && (force_activity_latest || conversation_lines.length > previous_conversation_count)) (conversation_scroll as ScrollPaneGuiElement).scroll_to_bottom()')
     expect(console_source).toContain("element.tags?.airi_activity_surface === 'projects') { activity_state.toggle_activity_filter(player.index, filter_flag, 'projects'); project_ui.render_projects_popout(player, true, storage.airi_task_board_ui?.goal_id ?? ''); return }")
   })
 })

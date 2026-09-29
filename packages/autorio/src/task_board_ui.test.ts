@@ -14,9 +14,9 @@ import {
   toggle_task_board_ui_open,
   create_task_board_ui_remote_interface,
 } from './task_board_ui'
-import { ACTIONS_NAME, BUTTON_NAME, MORE_BUTTON_NAME, MORE_MENU_NAME, PROMPT_FIELD_NAME, ROOT_NAME, SKILLS_BUTTON_NAME, SKILLS_ROOT_NAME } from './task_board_ui_constants'
+import { ACTIONS_NAME, BUTTON_NAME, COLUMNS_NAME, CONSOLE_TABS, LEFT_COLUMN_NAME, MORE_BUTTON_NAME, MORE_MENU_NAME, PROMPT_FIELD_NAME, PROMPT_SECTION_NAME, ROOT_NAME, SKILLS_BUTTON_NAME, SKILLS_ROOT_NAME, TRACKER } from './task_board_ui_constants'
 import { get_handler } from './test-event-registry'
-import { DEBUG_BUTTON_NAME } from './task_board_debug'
+import { DEBUG_ACTIVITY_SCROLL_NAME, DEBUG_BUTTON_NAME } from './task_board_debug'
 import { PROJECTS_BUTTON_NAME } from './projects/project_window'
 import { SKILLS_WINDOW } from './skills_window'
 import { ensure_basic_skill_definitions, get_skill_definition } from './skills'
@@ -356,7 +356,7 @@ describe('in-game task board UI projection', () => {
     expect(source).not.toContain("create_section(parent, 'Controls'")
     expect(source).not.toContain('HALF_SECTION_WIDTH')
     expect(source).toContain('right.style.vertically_stretchable = true')
-    expect(source).toMatch(/build_left_dynamic\(banner, dynamic, plan_dynamic,[\s\S]*render_prompt\(left, player\)[\s\S]*console_ui\.render_action_row\(left,[\s\S]*render_world_preview\(right, runtime, player\)/)
+    expect(source).toMatch(/build_left_dynamic\(banner, dynamic, plan_dynamic,[\s\S]*console_ui\.render_action_row\(left,[\s\S]*render_prompt\(left, player\)[\s\S]*render_world_preview\(right, runtime, player\)/)
   })
 
   it('puts a native Factorio camera preview in the right column with an interactive zoom slider', () => {
@@ -583,7 +583,7 @@ it('uses SGLuna for normal console branding while retaining AIRI actor identity 
 // (add, clear, destroy) so a test can prove that a refresh with nothing new to
 // show leaves the console alone. Rebuilding while the player drags a window or
 // types in the prompt is what made the console feel laggy and drop keystrokes.
-interface GuiCounter { add: number, clear: number, destroy: number, log: string[] }
+interface GuiCounter { add: number, clear: number, destroy: number, log: string[], scrolls: string[] }
 function fake_gui_element(counter: GuiCounter, player_index: number, spec: Record<string, any>, parent?: any): any {
   const children: any[] = []
   const props: Record<string, any> = { ...spec, tags: spec.tags ?? {} }
@@ -613,14 +613,19 @@ function fake_gui_element(counter: GuiCounter, player_index: number, spec: Recor
         case '__remove': return (child: any) => { const index = children.indexOf(child); if (index >= 0) children.splice(index, 1) }
         case 'add': return (child_spec: Record<string, any>) => {
           counter.add++; counter.log.push(`add ${child_spec.type}:${child_spec.name ?? ''}`)
-          const child = fake_gui_element(counter, player_index, child_spec, self); children.push(child); return child
+          const child = fake_gui_element(counter, player_index, child_spec, self)
+          // Factorio's optional 1-based `index` slots the child in ahead of what follows it.
+          if (typeof child_spec.index === 'number') children.splice(child_spec.index - 1, 0, child)
+          else children.push(child)
+          return child
         }
         case 'clear': return () => { counter.clear++; counter.log.push(`clear ${props.name ?? props.type}`); for (const child of children.splice(0)) invalidate(child) }
         case 'destroy': return () => {
           counter.destroy++; counter.log.push(`destroy ${props.name ?? props.type}`); invalidate(self)
           if (parent !== undefined) parent.__remove(self)
         }
-        case 'bring_to_front': case 'focus': case 'scroll_to_bottom': case 'scroll_to_top': case 'scroll_to_element': case 'select': case 'select_all': case 'force_auto_center': return () => {}
+        case 'scroll_to_bottom': return () => { counter.scrolls.push(String(props.name ?? props.type)) }
+        case 'bring_to_front': case 'focus': case 'scroll_to_top': case 'scroll_to_element': case 'select': case 'select_all': case 'force_auto_center': return () => {}
       }
       if (key in props) return props[key]
       return children.find(child => child.name === key)
@@ -632,7 +637,7 @@ function fake_gui_element(counter: GuiCounter, player_index: number, spec: Recor
 
 describe('console refresh leaves unchanged sections alone', () => {
   function open_console() {
-    const counter: GuiCounter = { add: 0, clear: 0, destroy: 0, log: [] }
+    const counter: GuiCounter = { add: 0, clear: 0, destroy: 0, log: [], scrolls: [] }
     const root = (kind: string) => fake_gui_element(counter, 1, { type: 'flow', name: kind })
     const player: any = { index: 1, name: 'owner', valid: true, surface: { index: 1, valid: true }, position: { x: 0, y: 0 }, gui: { screen: root('screen'), top: root('top'), left: root('left') }, print: () => {}, set_controller: () => {}, get_main_inventory: () => ({ get_contents: () => [] }), get_inventory: () => ({ get_contents: () => [] }) }
     const g = globalThis as any
@@ -646,7 +651,7 @@ describe('console refresh leaves unchanged sections alone', () => {
     create_task_board_ui_remote_interface()
     const restore = () => { g.remote.add_interface = saved.add_interface; g.script.on_nth_tick = saved.on_nth_tick; g.game.connected_players = saved.players; g.game.get_player = saved.get_player }
     const click = (name: string) => get_handler(g.defines.events.on_gui_click)({ player_index: 1, element: { valid: true, player_index: 1, name, tags: {} } })
-    const reset = () => { counter.add = 0; counter.clear = 0; counter.destroy = 0; counter.log = [] }
+    const reset = () => { counter.add = 0; counter.clear = 0; counter.destroy = 0; counter.log = []; counter.scrolls = [] }
     return { counter, player, board: interfaces.autorio_task_board, tick: () => tick_handler?.(), click, reset, restore }
   }
   const snapshot = (overrides: Record<string, unknown> = {}) => ({
@@ -754,6 +759,68 @@ describe('console refresh leaves unchanged sections alone', () => {
       expect(saved.revision).toBe(second.revision + 1)
       expect(find(skills_root, SKILLS_WINDOW.edit_name)).toBeUndefined()
       expect(skills_root.valid).toBe(true)
+    }
+    finally { ui.restore() }
+  })
+
+  it('history panes scroll to the newest line only while follow (LIVE) is on and lines are appended, never on a refresh that adds nothing', () => {
+    const ui = open_console()
+    try {
+      ui.click(BUTTON_NAME); ui.click(SKILLS_BUTTON_NAME); ui.click(PROJECTS_BUTTON_NAME); ui.click(DEBUG_BUTTON_NAME)
+      ui.reset()
+      ui.board.set_snapshot(snapshot()); ui.tick()
+      // Follow is on by default: the feed opens at its newest row.
+      expect(ui.counter.scrolls).toContain(TRACKER.activity_scroll)
+      ui.tick()
+      ui.reset()
+      // Nothing new: a reader of older lines is not pulled down every second.
+      ui.tick(); ui.tick(); ui.board.set_snapshot(snapshot()); ui.tick()
+      expect(ui.counter.scrolls).toEqual([])
+      const more = [{ kind: 'action', text: 'mine iron-ore x10' }, { kind: 'action', text: 'craft furnace' }, { kind: 'decision', text: 'AIRI: furnace next' }]
+      // A new line lands while following: the feeds move once.
+      ui.board.set_snapshot(snapshot({ activity: more })); ui.tick()
+      expect(ui.counter.scrolls).toContain(TRACKER.activity_scroll)
+      expect(ui.counter.scrolls).toContain(DEBUG_ACTIVITY_SCROLL_NAME)
+      ui.reset()
+      ui.tick(); ui.tick()
+      expect(ui.counter.scrolls).toEqual([])
+      // LIVE off: new lines arrive but the console's feed and conversation are not moved. (The
+      // debug window's Execution Activity has its own existing toggle, so it is left out here.)
+      ui.click(TRACKER.live)
+      ui.reset()
+      ui.board.set_snapshot(snapshot({ activity: [...more, { kind: 'action', text: 'place furnace' }] })); ui.tick(); ui.tick()
+      expect(ui.counter.scrolls.filter(name => name !== DEBUG_ACTIVITY_SCROLL_NAME)).toEqual([])
+      // LIVE back on: one catch-up scroll to the newest line, then quiet again.
+      ui.click(TRACKER.live); ui.tick()
+      expect(ui.counter.scrolls).toContain(TRACKER.activity_scroll)
+      ui.tick()
+      ui.reset()
+      ui.tick(); ui.tick()
+      expect(ui.counter.scrolls).toEqual([])
+    }
+    finally { ui.restore() }
+  })
+
+  it('pins the prompt to the bottom of the console: last in a stretching column, above which the page and action row sit', () => {
+    const ui = open_console()
+    try {
+      ui.click(BUTTON_NAME); ui.board.set_snapshot(snapshot()); ui.tick()
+      const columns = find(ui.player.gui.screen[ROOT_NAME], COLUMNS_NAME)
+      const left = find(columns, LEFT_COLUMN_NAME)
+      const names = () => left.children.map((child: any) => child.name)
+      expect(names().at(-1)).toBe(PROMPT_SECTION_NAME)
+      expect(left.style.vertically_stretchable).toBe(true)
+      for (const tab of CONSOLE_TABS.order) expect(find(left, CONSOLE_TABS.pages[tab]).style.vertically_stretchable).toBe(true)
+      expect(names().indexOf(ACTIONS_NAME)).toBe(names().length - 2)
+      // The action row is rebuilt when its state changes; it lands above the prompt, not after it.
+      const prompt = find(left, PROMPT_FIELD_NAME)
+      ui.click(MORE_BUTTON_NAME); ui.tick()
+      expect(names().at(-1)).toBe(PROMPT_SECTION_NAME)
+      expect(names().indexOf(ACTIONS_NAME)).toBe(names().length - 2)
+      expect(find(left, MORE_MENU_NAME)?.valid).toBe(true)
+      ui.click(MORE_BUTTON_NAME); ui.tick()
+      expect(names().at(-1)).toBe(PROMPT_SECTION_NAME)
+      expect(prompt.valid).toBe(true)
     }
     finally { ui.restore() }
   })
