@@ -722,6 +722,43 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
     this.nextContextOverride = new Map()
   }
 
+  // The goal id comes from the planning reducer (GOAL_ACCEPTED) through
+  // `resolveGoalId`, which the canonical memory facade always supplies. The
+  // local mint below is only the standalone-base fallback: it is reached when
+  // no facade is in front of this class, or when the reducer refused the goal
+  // (an empty objective). It must never be the id source under the facade.
+  newGoalId(resolveGoalId, now) {
+    const resolved = typeof resolveGoalId === 'function' ? resolveGoalId() : undefined
+    return typeof resolved === 'string' && resolved ? resolved : `goal_${now.toString(36)}`
+  }
+
+  // Run-state write hooks. Every legacy write of pause_reason, condition_wait,
+  // provider_recovery and persistent_runtime goes through these three, so the
+  // canonical memory facade can make the planning reducer the writer
+  // (RUN_PAUSED / RUN_RESUMED / *_RECORDED) and leave the legacy field as a
+  // mirror of the reducer result. The base implementations are the standalone
+  // behaviour: write the legacy field directly.
+  writeRunField(_key, state, field, value) {
+    state[field] = value
+  }
+
+  recordRunPause(_key, state, reason) {
+    state.pause_reason = reason
+    state.persistent_runtime = undefined
+    state.condition_wait = undefined
+  }
+
+  recordRunResume(_key, state, _reason) {
+    state.pause_reason = ''
+  }
+
+  // Locators recorded by recordPlan. The state literal already carries the
+  // legacy values, so the base hook is a no-op; the canonical facade routes them
+  // through the reducer (LOCATORS_RECORDED) and mirrors the result back.
+  // `previousExactTargetAudit` is the audit before this call, `exactTargetAudit`
+  // only the entries this call adds.
+  recordLocators(_key, _state, _locators) {}
+
   ensureTaskBoard(state) {
     if (!state) return undefined
     if (!state.task_board) {
@@ -841,17 +878,17 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
     const state = key ? this.planByNpc.get(key) : undefined
     if (!state) return state
     if (!recovery) {
-      state.provider_recovery = undefined
+      this.writeRunField(key, state, 'provider_recovery', undefined)
     }
     else {
-      state.provider_recovery = safeProviderRecovery({
+      this.writeRunField(key, state, 'provider_recovery', safeProviderRecovery({
         ...recovery,
         kind: recovery.kind === 'budget_handoff' ? 'budget_handoff' : 'output_budget_exhaustion',
         phase: recovery.kind === 'budget_handoff' ? 'planner_pending' : 'in_flight',
         goal_id: recovery.goal_id ?? state.goal_id,
         step_id: recovery.step_id ?? state.task_board?.active_step_id,
         started_at: Number.isFinite(recovery.started_at) ? recovery.started_at : Date.now(),
-      })
+      }))
     }
     state.updated_at = Date.now()
     this.planByNpc.set(key, state)
@@ -894,17 +931,15 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
       state.status = 'blocked'
       if (state.admission_status !== 'admission_failed') state.admission_status = undefined
       state.blocker = cleanMemoryText(decision.blocker || candidate?.candidate_blocker || decision.reason_code, 500)
-      state.pause_reason = ''
-      state.persistent_runtime = undefined
-      state.condition_wait = undefined
+      this.recordRunResume(key, state, 'blocked')
+      this.writeRunField(key, state, 'persistent_runtime', undefined)
+      this.writeRunField(key, state, 'condition_wait', undefined)
       board = setTaskBoardStatus(board, 'blocked', { blocker: state.blocker, now })
     }
     else if (decision.durable_status === 'paused') {
       state.status = 'paused'
       state.blocker = ''
-      state.pause_reason = cleanMemoryText(decision.pause_reason || decision.reason_code, 300)
-      state.persistent_runtime = undefined
-      state.condition_wait = undefined
+      this.recordRunPause(key, state, cleanMemoryText(decision.pause_reason || decision.reason_code, 300))
       board = setTaskBoardStatus(board, 'paused', { pauseReason: state.pause_reason, now })
     }
     else if (decision.durable_status === 'completed') {
@@ -922,8 +957,8 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
         state.status = 'active'
         state.admission_status = undefined
         state.blocker = ''
-        state.pause_reason = ''
-        state.condition_wait = undefined
+        this.recordRunResume(key, state, 'step_advanced')
+        this.writeRunField(key, state, 'condition_wait', undefined)
         state.plan = board.steps.map(step => step.description)
         state.current_step = board.active_index
       }
@@ -931,9 +966,9 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
         state.status = 'completed'
         state.admission_status = undefined
         state.blocker = ''
-        state.pause_reason = ''
-        state.persistent_runtime = undefined
-        state.condition_wait = undefined
+        this.recordRunResume(key, state, 'completed')
+        this.writeRunField(key, state, 'persistent_runtime', undefined)
+        this.writeRunField(key, state, 'condition_wait', undefined)
         board = setTaskBoardStatus(board, 'completed', { now })
         state.plan = []
         state.current_step = 0
@@ -941,7 +976,7 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
     }
     else if (decision.durable_status === 'active' && state.status === 'active') {
       state.blocker = ''
-      state.pause_reason = ''
+      this.recordRunResume(key, state, 'active')
       board = setTaskBoardStatus(board, 'active', { now })
     }
 
@@ -966,7 +1001,7 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
     const state = key ? this.planByNpc.get(key) : undefined
     const safe = safeConditionWait(wait)
     if (!state || !safe || state.status !== 'active' || safe.goal_id !== state.goal_id || safe.step_id !== state.task_board?.active_step_id) return undefined
-    state.condition_wait = safe
+    this.writeRunField(key, state, 'condition_wait', safe)
     state.revision += 1
     state.updated_at = Date.now()
     this.planByNpc.set(key, state)
@@ -976,8 +1011,8 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
   updateConditionWait(key, wait) {
     const state = key ? this.planByNpc.get(key) : undefined
     if (!state || !wait || state.condition_wait?.id !== wait.id) return undefined
-    if (wait.state === 'active') state.condition_wait = safeConditionWait(wait)
-    else state.condition_wait = undefined
+    if (wait.state === 'active') this.writeRunField(key, state, 'condition_wait', safeConditionWait(wait))
+    else this.writeRunField(key, state, 'condition_wait', undefined)
     state.revision += 1
     state.updated_at = Date.now()
     this.planByNpc.set(key, state)
@@ -987,21 +1022,20 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
   clearConditionWait(key, id) {
     const state = key ? this.planByNpc.get(key) : undefined
     if (!state || !state.condition_wait || (id && state.condition_wait.id !== id)) return state
-    state.condition_wait = undefined
+    this.writeRunField(key, state, 'condition_wait', undefined)
     state.revision += 1
     state.updated_at = Date.now()
     this.planByNpc.set(key, state)
     return state
   }
 
-  recordPlan(key, requestInfo, plan, { continuation = false, persistentRuntime, durableOperations = [], exactTargetAudit = [], verifiedCompletion = false, completionEvidence = [] } = {}) {
+  recordPlan(key, requestInfo, plan, { continuation = false, persistentRuntime, durableOperations = [], exactTargetAudit = [], verifiedCompletion = false, completionEvidence = [], resolveGoalId } = {}) {
     const previous = this.planByNpc.get(key)
     const hasOperations = plan.operations.length > 0
     const incomingDurableOperations = (Array.isArray(durableOperations) ? durableOperations : []).slice(0, 16).map(operation => sanitizeDurableModelValue(operation))
-    const mergedExactTargetAudit = [
-      ...(Array.isArray(previous?.exact_target_audit) ? previous.exact_target_audit : []),
-      ...(Array.isArray(exactTargetAudit) ? exactTargetAudit : []),
-    ].slice(-32)
+    const previousExactTargetAudit = Array.isArray(previous?.exact_target_audit) ? previous.exact_target_audit : []
+    const incomingExactTargetAudit = Array.isArray(exactTargetAudit) ? exactTargetAudit : []
+    const mergedExactTargetAudit = [...previousExactTargetAudit, ...incomingExactTargetAudit].slice(-32)
     const normalized = normalizeCanonicalPlan(plan.plan, plan.currentStep)
     const incomingPlan = normalized.plan
     const now = Date.now()
@@ -1024,7 +1058,7 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
 
     if (hasOperations) {
       const state = {
-        goal_id: previous?.goal_id ?? `goal_${now.toString(36)}`,
+        goal_id: previous?.goal_id ?? this.newGoalId(resolveGoalId, now),
         owner: cleanMemoryText(requestInfo?.sender ?? previous?.owner ?? 'unknown', 128),
         objective: cleanMemoryText(previous?.objective ?? requestInfo?.text ?? '', 1000),
         status: 'active',
@@ -1046,13 +1080,23 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
         history,
       }
       this.planByNpc.set(key, state)
+      this.recordLocators(key, state, {
+        durableOperations: incomingDurableOperations,
+        exactTargetAudit: incomingExactTargetAudit,
+        previousExactTargetAudit: previousExactTargetAudit,
+      })
+      // A batch of operations resumes a paused run, drops any condition wait
+      // and any provider recovery (both were for the previous request).
+      this.recordRunResume(key, state, 'plan_recorded')
+      this.writeRunField(key, state, 'condition_wait', undefined)
+      this.writeRunField(key, state, 'provider_recovery', undefined)
       return { state, blockedByHarness: false, changed: true }
     }
 
     if (runtimeHealthy && incomingPlan.length > 0) {
       const state = {
         ...(previous ?? {}),
-        goal_id: previous?.goal_id ?? `goal_${now.toString(36)}`,
+        goal_id: previous?.goal_id ?? this.newGoalId(resolveGoalId, now),
         owner: cleanMemoryText(requestInfo?.sender ?? previous?.owner ?? 'unknown', 128),
         objective: cleanMemoryText(previous?.objective ?? requestInfo?.text ?? '', 1000),
         status: 'active',
@@ -1072,6 +1116,13 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
         history,
       }
       this.planByNpc.set(key, state)
+      this.recordLocators(key, state, {
+        durableOperations: [],
+        exactTargetAudit: incomingExactTargetAudit,
+        previousExactTargetAudit: previousExactTargetAudit,
+      })
+      this.recordRunResume(key, state, 'plan_recorded')
+      this.writeRunField(key, state, 'persistent_runtime', runtime)
       return { state, blockedByHarness: false, persistentRuntimeActive: true, changed: true }
     }
 
@@ -1088,6 +1139,11 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
       history,
     }
     this.planByNpc.set(key, state)
+    this.recordLocators(key, state, {
+      durableOperations: [],
+      exactTargetAudit: incomingExactTargetAudit,
+      previousExactTargetAudit: previousExactTargetAudit,
+    })
 
     if (verifiedCompletion) {
       const reduced = this.applyOutcomeAuthority(key, {
@@ -1160,7 +1216,7 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
     }).state
   }
 
-  beginActionOmissionRecovery(key, requestInfo, plan) {
+  beginActionOmissionRecovery(key, requestInfo, plan, { resolveGoalId } = {}) {
     const previous = key ? this.planByNpc.get(key) : undefined
     const now = Date.now()
     if (!previous) {
@@ -1168,7 +1224,7 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
       if (incomingPlan.length === 0) return undefined
       const incomingStep = 0
       const state = {
-        goal_id: `goal_${now.toString(36)}`,
+        goal_id: this.newGoalId(resolveGoalId, now),
         owner: cleanMemoryText(requestInfo?.sender ?? 'unknown', 128),
         objective: cleanMemoryText(requestInfo?.text ?? '', 1000),
         status: 'active',
@@ -1202,7 +1258,7 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
     if (previous.status !== 'active') return previous
     previous.admission_status = 'action_omission_repair'
     previous.blocker = ''
-    previous.pause_reason = ''
+    this.recordRunResume(key, previous, 'action_omission_repair')
     previous.task_board = setTaskBoardStatus(this.ensureTaskBoard(previous), 'active', { now })
     previous.revision += 1
     previous.updated_at = now
@@ -4849,16 +4905,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const acknowledgement = this.chatAcknowledger.acknowledge({ requestId: this.traceRequest.id, text, intent, origin: 'chat', startedAt: requestStartedAt })
     if (acknowledgement) await this.traceEvent('chat.acknowledged', acknowledgement)
 
-    if (intent === 'new_goal'
-      && this.steeringDecisionProvider
-      && typeof this.memory.admitPlanningGoal === 'function'
-      && typeof this.memory.evaluateSteeringAtBoundary === 'function') {
+    // Goal admission is the reducer's (GOAL_ACCEPTED), and it happens at
+    // `new_goal` whether or not a steering provider is configured. Steering
+    // advice is the only part that needs a provider.
+    if (intent === 'new_goal' && typeof this.memory.admitPlanningGoal === 'function') {
       const admitted = this.memory.admitPlanningGoal(memoryKey, {
         owner: sender,
         objective: text,
         now: Date.now(),
       })
-      if (admitted?.goal) {
+      if (admitted?.goal && this.steeringDecisionProvider
+        && typeof this.memory.evaluateSteeringAtBoundary === 'function') {
         const recommendation = await this.requestBoundarySteeringRecommendation(memoryKey, {
           boundary: STEERING_BOUNDARY.GOAL_ADMISSION,
           world: taskStatus,
@@ -4881,6 +4938,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           steering_mode: steered.steering?.current_mode,
           recommended_mode: steered.steering?.recommendation?.recommended_mode,
         })
+      }
+      else if (admitted?.goal) {
+        // No steering provider: the reducer's default (maintain) steering is
+        // recorded by ensurePlanningDraft at the first draft, as before.
+        await this.persistState()
+        await this.traceEvent('planning.goal_admitted', { goal_id: admitted.goal.goal_id })
       }
     }
 

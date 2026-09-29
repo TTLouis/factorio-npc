@@ -17,6 +17,18 @@ import {
   steeringContextForDraft,
 } from './planning-state.mjs'
 
+// Which reducer event carries each legacy run field.
+const RUN_FIELD_EVENTS = Object.freeze({
+  condition_wait: { type: PLANNING_EVENT.CONDITION_WAIT_RECORDED, prop: 'wait' },
+  provider_recovery: { type: PLANNING_EVENT.PROVIDER_RECOVERY_RECORDED, prop: 'recovery' },
+  persistent_runtime: { type: PLANNING_EVENT.PERSISTENT_RUNTIME_RECORDED, prop: 'runtime' },
+})
+
+// The mirror must not share objects with the reducer state.
+function cloneRunRecord(value) {
+  return value ? JSON.parse(JSON.stringify(value)) : undefined
+}
+
 // Outcome kinds that represent an ATTEMPT on the active step. `verified_complete`
 // is excluded: it carries evidence, and evidence is progress, not an attempt to
 // make progress. `world_blocked` and `cancelled` are terminal and route
@@ -371,18 +383,182 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     if (!key || typeof objective !== 'string' || !objective.trim()) return this.planningState(key)
     const current = this.planningState(key)
     if (current?.goal?.status === GOAL_STATUS.ACTIVE) return current
-    const resolvedGoalId = typeof goalId === 'string' && goalId.trim()
-      ? goalId.trim().slice(0, 120)
-      : `goal_${Math.max(0, Math.trunc(now)).toString(36)}`
+    // The reducer mints the goal id (GOAL_ACCEPTED). A caller-supplied id is
+    // only honoured for tests/migration that must pin one.
     const next = applyPlanningEvent(current ?? createEmptyPlanningState(), {
       type: PLANNING_EVENT.GOAL_ACCEPTED,
       now,
-      goal_id: resolvedGoalId,
+      ...(typeof goalId === 'string' && goalId.trim() ? { goal_id: goalId.trim().slice(0, 120) } : {}),
       owner: String(owner ?? 'unknown').slice(0, 128),
       objective: objective.slice(0, 1000),
     })
     this.planningByNpc.set(key, next)
     return next
+  }
+
+  /**
+   * Goal id for a legacy state that is about to be created. Reuses the
+   * reducer's active goal (its plan not cancelled), otherwise admits a fresh
+   * goal through GOAL_ACCEPTED and returns the id the reducer minted. Legacy
+   * record paths call this instead of minting their own id.
+   */
+  resolveReducerGoalId(key, requestInfo, { now = Date.now() } = {}) {
+    if (!key) return undefined
+    const planning = this.planningByNpc.get(key)
+    if (planning?.goal?.status === GOAL_STATUS.ACTIVE
+      && getActivePlan(planning)?.status !== PLAN_STATUS.CANCELLED) {
+      return planning.goal.goal_id
+    }
+    const objective = typeof requestInfo?.text === 'string' ? requestInfo.text.trim() : ''
+    if (!objective) return undefined
+    const next = applyPlanningEvent(planning ?? createEmptyPlanningState(), {
+      type: PLANNING_EVENT.GOAL_ACCEPTED,
+      now,
+      owner: String(requestInfo?.sender ?? 'unknown').slice(0, 128),
+      objective: objective.slice(0, 1000),
+    })
+    if (!next?.goal || next === planning) return undefined
+    this.planningByNpc.set(key, next)
+    return next.goal.goal_id
+  }
+
+  // --- run state (3.3 move 3) ----------------------------------------------
+  //
+  // pause / resume, condition wait, provider recovery and the follow runtime
+  // are written by the reducer (RUN_PAUSED, RUN_RESUMED, *_RECORDED). The
+  // legacy record keeps the same fields as a MIRROR of the reducer result, so
+  // every existing reader keeps working until Phase 8 removes the board. The
+  // base class calls these hooks at each place it used to write the field.
+
+  #reducerHoldsGoal(key, legacyState) {
+    const planning = key ? this.planningByNpc.get(key) : undefined
+    return planning?.goal?.status === GOAL_STATUS.ACTIVE
+      && typeof legacyState?.goal_id === 'string'
+      && planning.goal.goal_id === legacyState.goal_id
+  }
+
+  #applyRunEvent(key, event) {
+    const before = this.planningByNpc.get(key)
+    if (!before) return undefined
+    const after = applyPlanningEvent(before, { source: 'runtime', ...event, now: Date.now() })
+    if (after !== before) this.planningByNpc.set(key, after)
+    return after
+  }
+
+  writeRunField(key, state, field, value) {
+    const spec = RUN_FIELD_EVENTS[field]
+    if (!spec || !this.#reducerHoldsGoal(key, state)) return super.writeRunField(key, state, field, value)
+    const after = this.#applyRunEvent(key, {
+      type: spec.type,
+      goal_id: state.goal_id,
+      [spec.prop]: value ?? null,
+    })
+    state[field] = cloneRunRecord(after?.run?.[field])
+    return undefined
+  }
+
+  recordRunPause(key, state, reason) {
+    if (!this.#reducerHoldsGoal(key, state)) return super.recordRunPause(key, state, reason)
+    const after = this.#applyRunEvent(key, { type: PLANNING_EVENT.RUN_PAUSED, goal_id: state.goal_id, reason })
+    // The reducer refused (goal not active): fall back to the legacy write so
+    // the record still pauses.
+    if (!after?.run?.paused) return super.recordRunPause(key, state, reason)
+    state.pause_reason = after.run.pause_reason
+    state.persistent_runtime = undefined
+    state.condition_wait = undefined
+    return undefined
+  }
+
+  recordRunResume(key, state, reason) {
+    if (this.#reducerHoldsGoal(key, state)) {
+      this.#applyRunEvent(key, { type: PLANNING_EVENT.RUN_RESUMED, goal_id: state.goal_id, reason })
+    }
+    return super.recordRunResume(key, state, reason)
+  }
+
+  recordLocators(key, state, { durableOperations, exactTargetAudit, previousExactTargetAudit } = {}) {
+    if (!this.#reducerHoldsGoal(key, state)) return super.recordLocators(key, state, { durableOperations, exactTargetAudit, previousExactTargetAudit })
+    const held = this.planningByNpc.get(key)?.run?.locators?.exact_target_audit ?? []
+    const previous = Array.isArray(previousExactTargetAudit) ? previousExactTargetAudit : []
+    const incoming = Array.isArray(exactTargetAudit) ? exactTargetAudit : []
+    // The reducer holds no audit yet but the legacy record does (a record that
+    // predates the reducer field): carry the legacy entries over once.
+    const carryOver = held.length === 0 && previous.length > 0
+    const after = this.#applyRunEvent(key, {
+      type: PLANNING_EVENT.LOCATORS_RECORDED,
+      goal_id: state.goal_id,
+      durable_last_operations: Array.isArray(durableOperations) ? durableOperations : [],
+      exact_target_audit: carryOver ? [...previous, ...incoming] : incoming,
+      ...(carryOver ? { exact_target_audit_mode: 'replace' } : {}),
+    })
+    const locators = after?.run?.locators
+    if (locators) {
+      state.durable_last_operations = cloneRunRecord(locators.durable_last_operations) ?? []
+      state.exact_target_audit = cloneRunRecord(locators.exact_target_audit) ?? []
+    }
+    return undefined
+  }
+
+  /**
+   * Bring a legacy record's run fields in line with the reducer run (the
+   * reducer wins). Used after the legacy record was rebuilt wholesale.
+   * Locators are mirrored only when asked: recordPlan mirrors them itself, and
+   * a legacy record must not lose entries because the reducer never saw them.
+   */
+  mirrorRunToLegacy(key, legacyState = key ? this.planByNpc.get(key) : undefined, { locators = false } = {}) {
+    const run = key ? this.planningByNpc.get(key)?.run : undefined
+    if (!run || !this.#reducerHoldsGoal(key, legacyState)) return legacyState
+    if (locators) {
+      legacyState.durable_last_operations = cloneRunRecord(run.locators.durable_last_operations) ?? []
+      legacyState.exact_target_audit = cloneRunRecord(run.locators.exact_target_audit) ?? []
+    }
+    legacyState.condition_wait = cloneRunRecord(run.condition_wait)
+    legacyState.provider_recovery = cloneRunRecord(run.provider_recovery)
+    legacyState.persistent_runtime = cloneRunRecord(run.persistent_runtime)
+    if (legacyState.status === 'paused' && run.paused) legacyState.pause_reason = run.pause_reason
+    return legacyState
+  }
+
+  /**
+   * Seed the reducer run ONCE from a legacy record when the reducer has none:
+   * an old snapshot (pre-run), a migrated legacy state, or a legacy record
+   * that predates its reducer goal. After this the reducer is the writer.
+   */
+  seedRunFromLegacy(key, legacyState = key ? this.planByNpc.get(key) : undefined) {
+    const planning = key ? this.planningByNpc.get(key) : undefined
+    if (!planning || planning.run || !this.#reducerHoldsGoal(key, legacyState)) return planning
+    const base = { source: 'legacy_adopted', goal_id: legacyState.goal_id }
+    if (legacyState.status === 'paused') {
+      this.#applyRunEvent(key, { ...base, type: PLANNING_EVENT.RUN_PAUSED, reason: legacyState.pause_reason })
+    }
+    if (legacyState.condition_wait) {
+      this.#applyRunEvent(key, { ...base, type: PLANNING_EVENT.CONDITION_WAIT_RECORDED, wait: legacyState.condition_wait })
+    }
+    if (legacyState.provider_recovery) {
+      this.#applyRunEvent(key, { ...base, type: PLANNING_EVENT.PROVIDER_RECOVERY_RECORDED, recovery: legacyState.provider_recovery })
+    }
+    if (legacyState.persistent_runtime) {
+      this.#applyRunEvent(key, { ...base, type: PLANNING_EVENT.PERSISTENT_RUNTIME_RECORDED, runtime: legacyState.persistent_runtime })
+    }
+    const durable = Array.isArray(legacyState.durable_last_operations) ? legacyState.durable_last_operations : []
+    const audit = Array.isArray(legacyState.exact_target_audit) ? legacyState.exact_target_audit : []
+    if (durable.length > 0 || audit.length > 0) {
+      this.#applyRunEvent(key, {
+        ...base,
+        type: PLANNING_EVENT.LOCATORS_RECORDED,
+        durable_last_operations: durable,
+        exact_target_audit: audit,
+        exact_target_audit_mode: 'replace',
+      })
+    }
+    return this.planningByNpc.get(key)
+  }
+
+  beginActionOmissionRecovery(key, requestInfo, plan, options = {}) {
+    return super.beginActionOmissionRecovery(key, requestInfo, plan, {
+      ...options,
+      resolveGoalId: () => this.resolveReducerGoalId(key, requestInfo),
+    })
   }
 
   syncPlanningState(key, legacyState = key ? this.planByNpc.get(key) : undefined) {
@@ -621,7 +797,9 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     if (Array.isArray(roadmap) && roadmap.length > 0) {
       planning = this.reviseRoadmap(key, roadmap, {
         now,
-        reason: goalAdmitted ? 'goal_decomposed_to_shelf' : 'verified_world_change',
+        reason: planning.roadmap?.goal_id !== planning.goal?.goal_id
+          ? 'goal_decomposed_to_shelf'
+          : 'verified_world_change',
       }) ?? planning
     }
     // Goal admission is a semantic boundary that exists BEFORE the first
@@ -629,7 +807,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     // but before DRAFT_CREATED snapshots steering_at_draft. Production may
     // pre-admit the goal to obtain Jev advice; adapter/direct lanes still need
     // the same ordering with the reducer's default maintain recommendation.
-    if (goalAdmitted) {
+    if (goalAdmitted || !planning.steering) {
       planning = this.evaluateSteeringAtBoundary(key, {
         boundary: STEERING_BOUNDARY.GOAL_ADMISSION,
         now,
@@ -820,12 +998,18 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
    */
   recordStaleExactIdentity(key, unitNumber, { now = Date.now(), proofRef } = {}) {
     if (!key || !Number.isSafeInteger(unitNumber) || unitNumber <= 0) return undefined
-    this.staleExactIdentitiesByNpc ??= new Map()
-    const stale = this.staleExactIdentitiesByNpc.get(key) ?? new Set()
-    stale.add(unitNumber)
-    this.staleExactIdentitiesByNpc.set(key, stale)
-
+    // The stale-identity set lives in reducer state (run.stale_exact_identities)
+    // so it survives a restart with the snapshot.
     let planning = this.planningByNpc.get(key)
+    const recorded = planning?.goal
+      ? this.#applyRunEvent(key, {
+          type: PLANNING_EVENT.LOCATORS_RECORDED,
+          goal_id: planning.goal.goal_id,
+          stale_unit_numbers: [unitNumber],
+        })
+      : undefined
+    const stale = new Set([...(recorded?.run?.stale_exact_identities ?? planning?.run?.stale_exact_identities ?? []), unitNumber])
+    planning = this.planningByNpc.get(key)
     const plan = getActivePlan(planning)
     if (!plan || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan.status)) return planning
     const step = plan.steps?.[plan.active_step_index]
@@ -1036,7 +1220,10 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       ? undefined
       : this.#supersedeInFlightPlan(key, requestInfo, plan, options)
 
-    const result = super.recordPlan(key, requestInfo, plan, options)
+    const result = super.recordPlan(key, requestInfo, plan, {
+      ...options,
+      resolveGoalId: () => this.resolveReducerGoalId(key, requestInfo),
+    })
     const priorReducerPlan = getActivePlan(priorPlanning)
     const reuseReducerGoal = priorPlanning?.goal?.status === GOAL_STATUS.ACTIVE
       && priorReducerPlan?.status !== PLAN_STATUS.CANCELLED
@@ -1054,6 +1241,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         roadmapNodeIds: plan?.roadmapNodeIds,
         developmentMode: plan?.developmentMode,
       })
+      this.seedRunFromLegacy(key, result.state)
+      this.mirrorRunToLegacy(key, result.state)
     }
     const activeAfterDraft = getActivePlan(this.planningByNpc.get(key))
     // Once an immutable bounded slice is COMPLETED, the reducer is allowed to
@@ -1218,7 +1407,14 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     // step, so this only removes the path that manufactured the exception.
     // A blocker may be recorded against a pre-commit plan; progress may not.
     const admitted = [PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan.status)
-    if (!admitted && result.decision.durable_status !== 'blocked') return result
+    if (!admitted && result.decision.durable_status !== 'blocked') {
+      // A pause never unfreezes a BLOCKED plan: the reducer keeps it BLOCKED,
+      // so the legacy record must not drift to plain `paused` and lose it.
+      if (result.decision.durable_status === 'paused' && plan.status === PLAN_STATUS.BLOCKED) {
+        this.syncPlanningState(key, result.state)
+      }
+      return result
+    }
 
     // Every attempt to move the active step forward is counted, including the
     // ones that fail. The deadlock signals are all progress measurements -- an
@@ -1428,6 +1624,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
           this.planningByNpc.set(key, planning)
         }
       }
+      if (this.planningByNpc.get(key)?.run) this.mirrorRunToLegacy(key, state, { locators: true })
+      else this.seedRunFromLegacy(key, state)
       this.syncPlanningState(key, state)
     }
   }
