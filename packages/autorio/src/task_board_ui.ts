@@ -1260,7 +1260,7 @@ function build_left_dynamic(banner: LuaGuiElement, now: LuaGuiElement, plan: Lua
 }
 function build_columns(columns: LuaGuiElement, player: LuaPlayer) {
   const board = storage.airi_task_board_ui; const runtime = runtime_snapshot()
-  const left = columns.add({ type: 'flow', name: ui_constants.LEFT_COLUMN_NAME, direction: 'vertical' }); left.style.width = ui_constants.LEFT_COLUMN_WIDTH; left.style.vertical_spacing = ui_constants.COLUMN_SPACING
+  const left = columns.add({ type: 'flow', name: ui_constants.LEFT_COLUMN_NAME, direction: 'vertical' }); left.style.width = ui_constants.LEFT_COLUMN_WIDTH; left.style.vertical_spacing = ui_constants.COLUMN_SPACING; left.style.vertically_stretchable = true
   // The blocked banner sits above the tabs so a plan waiting on the player is seen whichever tab is open.
   const banner = left.add({ type: 'flow', name: ui_constants.CONSOLE_TABS.banner, direction: 'vertical' }); banner.style.width = ui_constants.LEFT_COLUMN_WIDTH
   const pages = console_ui.render_console_tabs(left, selected_console_tab(player))
@@ -1270,9 +1270,11 @@ function build_columns(columns: LuaGuiElement, player: LuaPlayer) {
   // The conversation hosts itself beside dynamic (in the NOW page), outside the flow that is cleared.
   debug_ui.render_ai_reply(dynamic, board?.response ?? '', ui_constants.LEFT_COLUMN_WIDTH)
   render_tracker(pages.plan, board, player); render_activity_section(pages.activity, board, player)
-  render_prompt(left, player)
+  // The action row sits above the prompt, and the prompt is always the last child of the left
+  // column, which stretches to the window's height so the prompt rests on the bottom edge.
   const action_state = console_action_state(player, board, runtime)
   console_ui.render_action_row(left, action_state)
+  render_prompt(left, player)
   const actions = left[ui_constants.ACTIONS_NAME]; if (actions?.valid) actions.tags = { signature: helpers.table_to_json(action_state) }
   const right = columns.add({ type: 'flow', name: ui_constants.RIGHT_COLUMN_NAME, direction: 'vertical' }); right.style.width = ui_constants.PREVIEW_COLUMN_WIDTH; right.style.vertical_spacing = ui_constants.COLUMN_SPACING; right.style.vertically_stretchable = true; render_world_preview(right, runtime, player)
   const resources = right.add({ type: 'flow', name: ui_constants.RIGHT_RESOURCES_NAME, direction: 'horizontal' }); resources.style.horizontal_spacing = ui_constants.COLUMN_SPACING; resources.style.vertical_align = 'top'; render_inventory(resources, runtime, player); render_resource_sidebar(resources, board, runtime, player); resources.tags = { signature: resources_signature(player, board, runtime) }
@@ -1297,7 +1299,10 @@ function refresh_columns(columns: LuaGuiElement, player: LuaPlayer) {
   const actions = left[ui_constants.ACTIONS_NAME]
   const action_state = console_action_state(player, board, runtime)
   const action_signature = helpers.table_to_json(action_state)
-  if (!actions?.valid || actions.tags.signature !== action_signature) { if (actions?.valid) actions.destroy(); console_ui.render_action_row(left, action_state); const rebuilt_actions = left[ui_constants.ACTIONS_NAME]; if (rebuilt_actions?.valid) rebuilt_actions.tags = { signature: action_signature } }
+  // The prompt stays last: a rebuilt action row is slotted in just above it. A console built
+  // with the prompt elsewhere is rebuilt.
+  if (left.children[left.children.length - 1]?.name !== ui_constants.PROMPT_SECTION_NAME) return false
+  if (!actions?.valid || actions.tags.signature !== action_signature) { if (actions?.valid) actions.destroy(); console_ui.render_action_row(left, action_state, left.children.length); const rebuilt_actions = left[ui_constants.ACTIONS_NAME]; if (rebuilt_actions?.valid) rebuilt_actions.tags = { signature: action_signature } }
   // Never clear the preview column on a routine refresh: it owns the zoom slider.
   const resources = right[ui_constants.RIGHT_RESOURCES_NAME]
   if (!refresh_world_preview(right, runtime, player) || !resources?.valid) {

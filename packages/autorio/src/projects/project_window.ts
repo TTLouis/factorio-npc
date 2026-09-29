@@ -705,6 +705,11 @@ function refresh_project_detail(frame: LuaGuiElement, project: ProjectHistoryRec
     }
   }
   const conversation_signature = helpers.table_to_json(conversation_lines)
+  // Scrolling is decided by the console's LIVE/PAUSED follow state, never by guessing a scroll
+  // position (Factorio cannot report one): with follow on, new lines move the pane to the
+  // bottom; with follow off it stays where the reader left it.
+  const follow = activity_state.activity_view(player_index).follow
+  const previous_conversation_count = Number(conversation_flow.tags.count ?? 0)
   if (conversation_flow.tags.signature !== conversation_signature || conversation_flow.children.length === 0) {
     conversation_flow.clear()
     for (const caption of conversation_lines) {
@@ -713,8 +718,9 @@ function refresh_project_detail(frame: LuaGuiElement, project: ProjectHistoryRec
       line.style.maximal_width = PROJECT_DETAIL_WIDTH - 60
     }
     if (conversation_lines.length === 0) conversation_flow.add({ type: 'label', caption: 'No player/agent conversation retained for this project.' })
-    conversation_flow.tags = { signature: conversation_signature }
+    conversation_flow.tags = { signature: conversation_signature, count: conversation_lines.length }
   }
+  if (follow && conversation_lines.length > 0 && (force_activity_latest || conversation_lines.length > previous_conversation_count)) (conversation_scroll as ScrollPaneGuiElement).scroll_to_bottom()
 
   const signature = step_signature(project)
   if (step_flow.tags.signature !== signature) {
@@ -744,9 +750,11 @@ function refresh_project_detail(frame: LuaGuiElement, project: ProjectHistoryRec
   const diff = activity_rows_diff(shown, keys)
   // Nothing shown can still mean the placeholder label is there; rebuild so it
   // does not stay above the first real rows.
+  let appended = 0
   if (diff === undefined || shown.length === 0) {
     activity_flow.clear()
     for (const entry of entries) add_activity_line(activity_flow, entry)
+    appended = entries.length
   }
   else {
     for (let index = 0; index < diff.drop; index++) {
@@ -754,6 +762,7 @@ function refresh_project_detail(frame: LuaGuiElement, project: ProjectHistoryRec
       if (first?.valid) first.destroy()
     }
     for (let index = entries.length - diff.append; index < entries.length; index++) add_activity_line(activity_flow, entries[index])
+    appended = diff.append
   }
   activity_flow.tags = { keys, mask }
   if (entries.length === 0 && activity_flow.children.length === 0) {
@@ -761,7 +770,7 @@ function refresh_project_detail(frame: LuaGuiElement, project: ProjectHistoryRec
     activity_flow.add({ type: 'label', caption })
   }
   if (count?.valid) count.caption = mask === activity_state.ACTIVITY_FILTER_ALL ? `${project.activity.length} events` : `${matching.length}/${project.activity.length}`
-  if ((force_activity_latest || mask_changed) && entries.length > 0) (activity_scroll as ScrollPaneGuiElement).scroll_to_bottom()
+  if (follow && (force_activity_latest || mask_changed || appended > 0) && entries.length > 0) (activity_scroll as ScrollPaneGuiElement).scroll_to_bottom()
   return true
 }
 

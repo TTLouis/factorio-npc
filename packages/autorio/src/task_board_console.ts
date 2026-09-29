@@ -180,8 +180,8 @@ function action_button(element: LuaGuiElement, width: number) {
  * with a line saying what it discards, so neither sits one misclick from PAUSE.
  * Rebuilt on every refresh; it holds no player-owned state of its own.
  */
-export function render_action_row(parent: LuaGuiElement, state: ConsoleActionState) {
-  const actions = parent.add({ type: 'flow', name: ui_constants.ACTIONS_NAME, direction: 'vertical' })
+export function render_action_row(parent: LuaGuiElement, state: ConsoleActionState, index?: number) {
+  const actions = parent.add({ type: 'flow', name: ui_constants.ACTIONS_NAME, direction: 'vertical', index })
   actions.style.width = ui_constants.LEFT_COLUMN_WIDTH
   actions.style.vertical_spacing = 6
   if (state.more_open) {
@@ -324,6 +324,9 @@ export function render_console_tabs(parent: LuaGuiElement, selected: ui_constant
     const page = parent.add({ type: 'flow', name: tabs.pages[tab], direction: 'vertical' })
     page.style.width = ui_constants.LEFT_COLUMN_WIDTH
     page.style.vertical_spacing = ui_constants.COLUMN_SPACING
+    // The visible page takes the height the window has beyond its content, which keeps the
+    // action row and the prompt below it on the bottom edge.
+    page.style.vertically_stretchable = true
     pages[tab] = page
   }
   apply_console_tab(parent, selected)
