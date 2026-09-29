@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
+import { COMPACT_CONTINUATION_PROMPT } from './provider-base.mjs'
 import {
   observationToolTier,
   parseOperation,
@@ -75,7 +76,7 @@ test('placement candidates can require covering a drill output and are fact read
 
 test('construction area clearing contract stays advertised by full and compact provider prompts', () => {
   const prompt = readFileSync(deployedPromptSource, 'utf8')
-  const compactPrompt = readFileSync(new URL('./provider-base.mjs', import.meta.url), 'utf8')
+  const compactPrompt = COMPACT_CONTINUATION_PROMPT
   assert.match(prompt, /^- clear_construction_area$/m)
   assert.match(prompt, /Completion is area clearance, not entity count or inventory gain/)
   assert.match(compactPrompt, /clear_construction_area \{x,y,width,height\}/)

@@ -56,6 +56,7 @@ import {
   sanitizeStepCompletionContract,
 } from './step-completion.mjs'
 import {
+  approvedOperationListText,
   isObservationToolName,
   observationToolFamily,
   observationToolTier,
@@ -190,7 +191,7 @@ Once a plan is COMMITTED its steps, their order and their completion meaning are
 
 Within [PLANNING_STATE], Shelf nodes are storage: they record intent and lineage, never operations and never plan steps. Do not compile a shelf node into steps on your own initiative.
 
-Every goal starts with a goal definition. On the FIRST plan of a goal, add goal to submitPlan: {scope, summary, doneWhen}. summary restates in one sentence what the player asked for; the player sees it in game as your understanding. doneWhen lists the game-checkable conditions that together prove the goal is complete, each with exactly these fields and exact Factorio internal names: {"kind":"inventory_count","item_name":"stone-furnace","minimum":1}, {"kind":"items_produced","item_name":"iron-plate","minimum":100}, {"kind":"research_completed","technology":"automation"}, {"kind":"rockets_launched","minimum":1}, {"kind":"space_location_unlocked","name":"vulcanus"}. inventory_count is what AIRI holds when the goal ends, after crafting consumed its ingredients. rockets_launched and items_produced count from when the goal starts (countFrom "goal_start", the default), so "launch a rocket" needs a new launch; use countFrom "save_start" only when the player means the save's lifetime total. The harness, not you, decides completion: it reads doneWhen from the game at the end of every plan slice, so finishing a plan's steps never completes a goal by itself, and you never need to claim the goal is done. Use scope "finite" only when one plan of at most 30 steps completes the goal; otherwise use "long_horizon" and send the roadmap shelf on that same first plan. Omit goal on later plans of the same goal.
+Every goal starts with a goal definition. On the FIRST plan of a goal, add goal to submitPlan: {scope, summary, doneWhen}. summary restates in one sentence what the player asked for; the player sees it in game as your understanding. doneWhen lists the game-checkable conditions that together prove the goal is complete, each with exactly these fields and exact Factorio internal names: {"kind":"inventory_count","item_name":"stone-furnace","minimum":1}, {"kind":"items_produced","item_name":"iron-plate","minimum":100}, {"kind":"research_completed","technology":"automation"}, {"kind":"rockets_launched","minimum":1}, {"kind":"space_location_unlocked","name":"vulcanus"}. inventory_count is what SGLuna holds when the goal ends, after crafting consumed its ingredients. rockets_launched and items_produced count from when the goal starts (countFrom "goal_start", the default), so "launch a rocket" needs a new launch; use countFrom "save_start" only when the player means the save's lifetime total. The harness, not you, decides completion: it reads doneWhen from the game at the end of every plan slice, so finishing a plan's steps never completes a goal by itself, and you never need to claim the goal is done. Use scope "finite" only when one plan of at most 30 steps completes the goal; otherwise use "long_horizon" and send the roadmap shelf on that same first plan. Omit goal on later plans of the same goal.
 
 You author the shelf through the optional roadmap field on submitPlan: a short list of coarse nodes, each stating what should eventually be true for the goal and why it matters. Keep them at that altitude — a node is not a step, carries no operations, and never claims its own progress; the harness derives realization from verified results and strips anything executable. For a long-horizon goal, send the shelf on the first plan of that goal. Afterwards it only moves when verified world state has actually invalidated the guidance, so restate the nodes that still apply with their original ids (omitting a node marks it invalidated and keeps its lineage), and do not re-send an unchanged shelf just to restate a preference.
 
@@ -212,9 +213,14 @@ To wait for a furnace or assembler, do not guess wait ticks: when you start it, 
 
 When finite canonical work remains but execution is truthfully impossible, keep the remaining plan and start chatMessage with "BLOCKED: " followed by the exact missing fact or blocker. This is the explicit no-mutation blocker contract. Future-tense prose such as "I will take the items" is not a blocker and does not authorize the harness to invent an operation.
 
-Before a non-empty operation batch, chatMessage should tell the human what concrete current plan step AIRI is about to attempt. Do not say mining, construction, transfer, crafting, or any other mutation has started unless that mutation is in the admitted/running operation batch or authoritative runtime evidence proves it. Navigation completion proves arrival only; it never proves that a later mining or construction action started. [MOD] completion/error messages may include a detailed getTaskStatus snapshot. Use that receipt plus any needed read-only verification to advance, replan, complete, or report a blocker.
+Before a non-empty operation batch, chatMessage should tell the human what concrete current plan step SGLuna is about to attempt. Do not say mining, construction, transfer, crafting, or any other mutation has started unless that mutation is in the admitted/running operation batch or authoritative runtime evidence proves it. Navigation completion proves arrival only; it never proves that a later mining or construction action started. [MOD] completion/error messages may include a detailed getTaskStatus snapshot. Use that receipt plus any needed read-only verification to advance, replan, complete, or report a blocker.
 
 Skill lifecycle is explicit. findSkills is discovery only: a search result is not a loaded skill and must not be relied on as the full pattern. Before following a discovered skill, call getSkillDetails for that exact id. A [SKILL_CONTEXT] message contains only skills explicitly opened with getSkillDetails for the current logical task. Reuse their structure and constraints, but revalidate mutable world state, recipes, inventory, geometry, and placement with live deterministic tools before acting.
+
+### Complete operation list
+
+Every operation you may emit, with its argument keys ("?" marks an optional key). The operation prose earlier in this prompt may omit some of them; any name not on this list is rejected. place_candidate takes ids from getPlacementCandidates, execute_construction_plan takes the validation_id from validateConstructionPlan, and launch_rocket needs a live rocket-silo unit_number.
+${approvedOperationListText()}.
 `.trim()
 
 function cleanMemoryText(value, max) {
@@ -2117,7 +2123,7 @@ const PROVIDER_PAUSE_TEXT = {
   request_failed: 'the model request failed',
 }
 
-const RESUME_HINT = 'Press Resume or say continue to retry from the verified task state.'
+export const RESUME_HINT = 'Press Resume or say continue to retry from the verified task state.'
 
 // Triggers whose requests continue an active committed plan instead of
 // authoring or revising one; only their tools-on rounds may be `gather` (1.3).
@@ -4016,6 +4022,22 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  // One line for the model when a finished batch left a prose-only step open:
+  // it names the missing contract and both ways to close the step. The Plan
+  // Tracker id is the one [PLANNING_STATE] shows; the Task Board alias (step_N,
+  // shown in [RUNTIME_COMPAT_STATE]) is accepted for the same step.
+  stepStaysOpenHint(state) {
+    const board = state?.task_board
+    const index = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
+    const step = index === undefined ? undefined : board?.steps?.[index]
+    if (!step) return ''
+    const tracker = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
+    const trackerId = tracker?.active_step_index === index ? tracker?.steps?.[index]?.step_id : undefined
+    const stepId = trackerId ?? step.id
+    const alias = trackerId && trackerId !== step.id ? ` (also accepted: ${step.id})` : ''
+    return `[HARNESS] Step ${JSON.stringify(cleanMemoryText(step.description, 100))} stays open: it has no completion contract, so a finished batch cannot close it. In your next submitPlan add checkpoint {mode,requirements} for the world state that proves it, or semanticCompletion {"stepId":"${stepId}"}${alias} if your evidence already shows it is done.`
+  }
+
   async routeStepCompletionDecision(receipt) {
     const key = this.activePlanKey()
     const planState = this.memory.planByNpc?.get?.(key) ?? this.memory.currentPlan?.(key)
@@ -5882,6 +5904,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const stepCompletion = pendingAmendment
       ? { verified: false, reason: 'pending_amendment' }
       : await this.routeStepCompletionDecision(receipt)
+    // The reason a step did not close used to be trace-only: the model saw a
+    // finished batch and nothing about why the step stayed open.
+    const stepOpenHint = stepCompletion?.reason === 'semantic_completion_requires_planner'
+      ? this.stepStaysOpenHint(stepCompletion.state)
+      : ''
     const completionState = stepCompletion?.state
     const settled = await this.settleCompletedStepState(completionState, { pendingAmendment })
     if (settled) return settled
@@ -5916,7 +5943,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.planningHorizonOverride = routed.steering?.planning_horizon ?? null
     try {
       const result = await this.continueFromModMessage(
-        `[MOD] Autorio operation batch completed. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}`,
+        `[MOD] Autorio operation batch completed. ${stepOpenHint ? `${stepOpenHint} ` : ''}Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}`,
         'factorio.completion_continuation',
       )
       if (pendingAmendment) this.pendingInteractionAmendment = null
@@ -5992,7 +6019,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       : ''
     try {
       return await this.continueFromModMessage(
-        `[MOD] Autorio operation error: ${cleanError}. Dependent queued operations may have been cancelled. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}${recoverableGuidance}`,
+        `[MOD] Autorio operation error: ${cleanError}. A failure cancels the operations queued behind it; a refused item move (nothing moved, items still held) does not, so read the receipt for which operations completed. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}${recoverableGuidance}`,
         'factorio.error_continuation',
       )
     }
@@ -6851,6 +6878,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  // With tools open the planner reply is a submitPlan call; without tools
+  // (a closed observation phase, bounded recovery) it is the strict-JSON
+  // content fallback, since no tool is offered to call.
+  validReplyShape({ toolsEnabled }) {
+    return toolsEnabled
+      ? 'Valid next reply: approved observation tool call(s) with strict JSON arguments, or one submitPlan call (strict-JSON plan content with no tool_calls field also works).'
+      : super.validReplyShape({ toolsEnabled })
+  }
+
+  planReplyName() {
+    return 'one submitPlan call'
+  }
+
   observationDecisionPressureBudget() {
     if (Number.isSafeInteger(this.observationBudgetRemaining)) return Math.max(0, Math.min(8, this.observationBudgetRemaining))
     return super.observationDecisionPressureBudget()
@@ -7005,7 +7045,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     else if (totalDeferredCount > 0) {
       this.messages.push({
         role: 'user',
-        content: `[HARNESS] Observation batch partially admitted: executed ${admittedPrepared.length} read-only call(s) and deferred ${totalDeferredCount} due to the per-turn observation cap. Reuse the returned evidence first; request only still-needed deferred facts on a later observation turn.`,
+        content: `[HARNESS] Observation batch partially admitted: executed ${admittedPrepared.length} read-only call(s) and deferred ${totalDeferredCount} (${[...new Set([...deferredPrepared.map(entry => entry.tool.function.name), ...rawDeferredTools.map(tool => tool?.function?.name).filter(Boolean)])].slice(0, 8).join(', ')}) due to the per-turn observation cap. Reuse the returned evidence first; request only still-needed deferred facts on a later observation turn.`,
       })
     }
     const freshResultObserved = results.some((_, index) => admittedCached[index] !== true && admittedStaticCached[index] !== true)

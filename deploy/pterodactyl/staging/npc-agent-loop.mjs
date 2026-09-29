@@ -47,6 +47,43 @@ function cleanMemoryText(value, max) {
   return `${text.slice(0, Math.max(0, max - 1))}…`
 }
 
+// The harness tells a model that a reply was rejected, but the rejected turn
+// is not kept in the transcript (a tool_calls turn cannot be replayed without
+// its tool replies). This short echo says what the harness actually received,
+// so the correction message describes the real mistake.
+export function describeRejectedReply(message) {
+  const parts = []
+  const content = typeof message?.content === 'string' ? message.content.trim() : ''
+  if (content) {
+    let kind = `text content (${content.length} chars)`
+    try {
+      const raw = JSON.parse(content)
+      if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        kind = Array.isArray(raw.operations)
+          ? `plan in content (${raw.operations.length} operation${raw.operations.length === 1 ? '' : 's'})`
+          : 'JSON object in content'
+      }
+    }
+    catch {}
+    parts.push(kind)
+  }
+  else {
+    parts.push('empty content')
+  }
+  if (message?.tool_calls !== undefined) {
+    const calls = Array.isArray(message.tool_calls) ? message.tool_calls : []
+    const names = calls.map(call => call?.function?.name).filter(name => typeof name === 'string' && name).slice(0, 6)
+    parts.push(Array.isArray(message.tool_calls)
+      ? `tool_calls=[${names.join(', ')}${calls.length > names.length ? ', …' : ''}]`
+      : 'tool_calls is not an array')
+  }
+  return cleanMemoryText(`Received: ${parts.join('; ')}.`, 300)
+}
+
+// Once the observation phase closes, a model with no resource location has
+// nothing to fall back on unless it is told these operations search for it.
+const OBSERVATION_LOCATE_HINT = 'gather_resource, harvest_product and walk_to_entity find their own target within the search radius, so the plan can start without another lookup.'
+
 function stableValue(value) {
   if (Array.isArray(value)) return value.map(stableValue)
   if (!value || typeof value !== 'object') return value
@@ -436,8 +473,21 @@ export class NpcAgentLoop {
     })
     this.messages.push({
       role: 'user',
-      content: `[HARNESS] ${reason} The observation phase for this decision is now closed. Reuse the grounded evidence already collected and return the required strict-JSON plan/action or a truthful blocker. Do not request another read-only observation.`,
+      content: `[HARNESS] ${reason} The observation phase for this decision is now closed. Reuse the grounded evidence already collected and return the required strict-JSON plan/action or a truthful blocker. Do not request another read-only observation; ${OBSERVATION_LOCATE_HINT}`,
     })
+  }
+
+  // The one reply shape that is valid right now, for correction messages.
+  // Subclasses that add a planner control tool name it here.
+  validReplyShape({ toolsEnabled }) {
+    return toolsEnabled
+      ? 'Valid next reply: approved observation tool call(s) with strict JSON arguments, or the strict-JSON plan as content with no tool_calls field.'
+      : 'Valid next reply: the strict-JSON plan (or a truthful blocker) as content, with no tool_calls field.'
+  }
+
+  // How the model should name its plan reply in pressure messages.
+  planReplyName() {
+    return 'one strict-JSON plan'
   }
 
   prepareContinuationContext() {
@@ -554,7 +604,7 @@ export class NpcAgentLoop {
       : undefined
     if (misplaced) {
       throw new PlanCategoryError(
-        `${misplaced.name} is an observation/planning tool, not an approved world-mutation operation. Call it as a tool instead of placing it in the strict-JSON operations array.`,
+        `${misplaced.name} is an observation/planning tool, not an approved world-mutation operation. Do not place it in the operations array; operations are world mutations only.`,
         'observation_tool_as_operation',
         { tool_name: misplaced.name },
       )
@@ -627,7 +677,10 @@ export class NpcAgentLoop {
 
   prepareToolBatch(message) {
     if (!Array.isArray(message.tool_calls) || message.tool_calls.length < 1) {
-      throw new ToolValidationError('Invalid tool call batch', 'invalid_tool_batch')
+      throw new ToolValidationError(
+        `Invalid tool call batch: tool_calls ${Array.isArray(message.tool_calls) ? 'is empty' : 'is not an array'}, so there is no observation call to run`,
+        'invalid_tool_batch',
+      )
     }
     if (message.tool_calls.length > MAX_TOOL_CALLS_PER_BATCH) {
       throw new ToolValidationError(
@@ -828,7 +881,7 @@ export class NpcAgentLoop {
         }
         this.messages.push({
           role: 'user',
-          content: `[HARNESS] Observation phase is closed for this decision (${this.toolValidationRetries}/${this.maxToolValidationRetries}). Tools are disabled. Reuse the grounded evidence already collected and return strict JSON with the next executable action or a truthful blocker.`,
+          content: `[HARNESS] Observation phase is closed for this decision (${this.toolValidationRetries}/${this.maxToolValidationRetries}; observation_phase_closed). ${describeRejectedReply(message)} Tools are disabled, so no tool call is valid now. ${this.validReplyShape({ toolsEnabled: false })} Reuse the grounded evidence already collected; ${OBSERVATION_LOCATE_HINT}`,
         })
         continue
       }
@@ -859,10 +912,10 @@ export class NpcAgentLoop {
           }
           const instruction = code === 'tool_batch_too_large'
             ? `The runtime allows at most ${MAX_TOOL_CALLS_PER_BATCH} observation tool calls in one provider turn. Keep the observations already collected, choose the smallest necessary subset, and retry with no more than ${MAX_TOOL_CALLS_PER_BATCH} tool calls. Tools remain enabled; do not emit a world mutation merely to recover from this formatting error.`
-            : 'Retry using only an approved observation tool name and strict JSON arguments matching its schema. Tools remain enabled; do not repeat the rejected payload.'
+            : `${this.validReplyShape({ toolsEnabled: true })} Tools remain enabled; fix the problem named above and do not resend the same call.`
           this.messages.push({
             role: 'user',
-            content: `[HARNESS] Tool-validation failure (${this.toolValidationRetries}/${this.maxToolValidationRetries}; ${code}): ${reason}. ${instruction}`,
+            content: `[HARNESS] Tool-validation failure (${this.toolValidationRetries}/${this.maxToolValidationRetries}; ${code}): ${reason}. ${describeRejectedReply(message)} ${instruction}`,
           })
           continue
         }
@@ -934,7 +987,7 @@ export class NpcAgentLoop {
           }
           this.messages.push({
             role: 'user',
-            content: `[HARNESS] Decision pressure after ${this.observationOnlyRounds} consecutive observation-only rounds. If the live evidence already parameterizes a safe executable next action, return one strict-JSON plan now. Otherwise you may spend up to ${allowance} additional targeted observation call(s), only on facts still required for this decision. Do not switch among unrelated read-only tools merely to defer the decision.`,
+            content: `[HARNESS] Decision pressure after ${this.observationOnlyRounds} consecutive observation-only rounds. If the live evidence already parameterizes a safe executable next action, return ${this.planReplyName()} now. Otherwise you may spend up to ${allowance} additional targeted observation call(s), only on facts still required for this decision. Do not switch among unrelated read-only tools merely to defer the decision.`,
           })
         }
         continue

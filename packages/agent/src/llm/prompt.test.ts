@@ -27,8 +27,8 @@ const documentedOperations = [
 ]
 
 describe('production Factorio prompt contract', () => {
-  it('identifies AIRI as a standalone NPC rather than a human-controlled player', () => {
-    expect(prompt).toContain('You are AIRI, an autonomous in-world NPC')
+  it('identifies SGLuna as a standalone NPC rather than a human-controlled player', () => {
+    expect(prompt).toContain('You are SGLuna, an autonomous in-world NPC')
     expect(prompt).toContain('You do not control a connected human player')
     expect(prompt).toContain('Human players may send you requests through chat')
     expect(prompt).not.toContain('You are a game player')
@@ -50,7 +50,7 @@ describe('production Factorio prompt contract', () => {
     expect(prompt).toContain('getCombatStatus()')
     expect(prompt).toContain('Radius is limited to 64 tiles')
     expect(prompt).toContain('Radius is limited to 32 tiles')
-    expect(prompt).toContain("AIRI's controlled actor main inventory")
+    expect(prompt).toContain("SGLuna's controlled actor main inventory")
     expect(prompt).toContain('Equipped guns, ammo and armor are separate from the main inventory')
   })
 
@@ -68,9 +68,9 @@ describe('production Factorio prompt contract', () => {
     expect(prompt).toContain('verify the relevant state before depending on the result')
   })
 
-  it('distinguishes passive transport-belt displacement from AIRI walking', () => {
-    expect(prompt).toContain('Transport belts can passively move AIRI')
-    expect(prompt).toContain('Coordinate change alone therefore does not prove AIRI is still walking')
+  it('distinguishes passive transport-belt displacement from SGLuna walking', () => {
+    expect(prompt).toContain('Transport belts can passively move SGLuna')
+    expect(prompt).toContain('Coordinate change alone therefore does not prove SGLuna is still walking')
     expect(prompt).toContain('sideways/backward belt motion does not keep a stuck task alive')
     expect(prompt).toContain('inspect nearby transport belts')
   })

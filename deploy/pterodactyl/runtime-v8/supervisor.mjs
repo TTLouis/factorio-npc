@@ -28,7 +28,7 @@ import {
 } from './common.mjs'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { createSave, prepareGameConfig, prepareMods, prepareServerSettings, selectSave } from './game-files.mjs'
-import { NpcAgentLoop } from './npc-agent-loop.mjs'
+import { NpcAgentLoop, RESUME_HINT } from './npc-agent-loop.mjs'
 import { evaluateGoalDefinition, formatGoalStatus, formatGoalUnderstanding, formatSliceProgressNote, goalUiView } from './goal-definition.mjs'
 import { formatGoalReadingNote } from './goal-reading.mjs'
 import { GOAL_STATUS } from './planning-state.mjs'
@@ -65,7 +65,7 @@ const UI_CONVERSATION_LIMIT = 64
 const UI_SYNC_BATCH_MS = 50
 const UI_STALE_THINKING_MS = 5000
 
-const RUNTIME_RELIABILITY_GUIDANCE = `
+export const RUNTIME_RELIABILITY_GUIDANCE = `
 ## Runtime reliability additions
 
 For a multi-technology goal, use getResearchPath on the exact target instead of reconstructing the prerequisite graph from remembered Factorio knowledge. Follow its dependency-first pending_path and next_actionable entry. Trigger technologies require the exact returned research_trigger; science technologies use research_technology and still require verification after submission.
@@ -76,7 +76,9 @@ At the start of a goal the harness may add a [SKILL_OFFERS] message: up to five 
 
 Machine rates come from game data, not memory: getRecipeDetails gives each compatible machine's crafts per second and output per minute and the NPC's hand-craft seconds per craft; getMiningDetails gives each drill's output per minute and fuel burn. To see how long a production goal takes with the machine counts you have in mind, and what one more machine on the slowest step would save, use estimateProductionTime. It only does the arithmetic; choosing how many machines to build is yours.
 
-Natural navigation obstacle clearing is controlled deterministically by the runtime. It is enabled by default for trees and natural rocks only, and is disabled for a request when the human explicitly asks AIRI not to cut trees, mine rocks, or auto-clear obstacles. Never reinterpret this as permission to remove player-built structures.
+Observation budget: a decision allows only about 3 rounds of fresh read-only calls, at most 4 calls per turn; a repeat of a cached result is free, and [DECISION_ENVELOPE] observation_budget_remaining shows what is left. When it runs out the harness closes tools and you must answer with submitPlan or a BLOCKED plan, so request the reads you need together in one turn. gather_resource, harvest_product and walk_to_entity find their own target within search_radius: on a cold start, do not spend observations locating a resource before using them.
+
+Natural navigation obstacle clearing is controlled deterministically by the runtime. It is enabled by default for trees and natural rocks only, and is disabled for a request when the human explicitly asks SGLuna not to cut trees, mine rocks, or auto-clear obstacles. Never reinterpret this as permission to remove player-built structures.
 `.trim()
 
 function hasEnv(env, key) {
@@ -2671,7 +2673,10 @@ export class Session {
         }
       }
       if (reportError && !expectedCancellation(error)) {
-        try { await this.printChat(`Request failed: ${message}`) }
+        // A goal this failure left paused gets the same Resume line every other
+        // pause carries; without one the player has no way to know it is paused.
+        const resume = this.currentPlanState()?.status === 'paused' ? ` ${RESUME_HINT}` : ''
+        try { await this.printChat(`Request failed: ${message}${resume}`) }
         catch (printError) { this.log(`Unable to report AIRI error in chat: ${printError instanceof Error ? printError.message : printError}`) }
       }
     })
