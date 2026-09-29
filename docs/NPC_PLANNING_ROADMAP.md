@@ -67,7 +67,14 @@ The conditions are force-level facts on purpose, so the same contract carries to
 - If that first read fails, the next evaluation records it, and the condition stays unmet until then.
 - `countFrom: "save_start"` is for a player who explicitly means the save's lifetime total.
 
-#### Production goals are rate goals (owner decision, 2026-09-25; not implemented yet)
+#### Production goals are rate goals (owner decision, 2026-09-25; implemented 2026-09-29, plan 3.7)
+
+Implemented as `production_rate {item_name, per_minute, window_minutes}` (1 or 10
+minutes, the engine's flow count), with `entity_working` and
+`electric_network_satisfied` for "running" goals. Two differences from the text
+below: the void rule applies to any non-fuel hand insert on the force (the
+"measured chain" is not traced), and hand mining of the item voids the window too,
+because the engine counts what the NPC mines by hand as production.
 
 `items_produced` counts items no matter how they were made. In burner canary
 attempts 4 and 5, plates the NPC smelted by hand-feeding a furnace satisfied "build a
