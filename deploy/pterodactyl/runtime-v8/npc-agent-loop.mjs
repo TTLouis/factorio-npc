@@ -2123,7 +2123,7 @@ const PROVIDER_PAUSE_TEXT = {
   request_failed: 'the model request failed',
 }
 
-const RESUME_HINT = 'Press Resume or say continue to retry from the verified task state.'
+export const RESUME_HINT = 'Press Resume or say continue to retry from the verified task state.'
 
 // Triggers whose requests continue an active committed plan instead of
 // authoring or revising one; only their tools-on rounds may be `gather` (1.3).

@@ -28,7 +28,7 @@ import {
 } from './common.mjs'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { createSave, prepareGameConfig, prepareMods, prepareServerSettings, selectSave } from './game-files.mjs'
-import { NpcAgentLoop } from './npc-agent-loop.mjs'
+import { NpcAgentLoop, RESUME_HINT } from './npc-agent-loop.mjs'
 import { evaluateGoalDefinition, formatGoalStatus, formatGoalUnderstanding, formatSliceProgressNote, goalUiView } from './goal-definition.mjs'
 import { formatGoalReadingNote } from './goal-reading.mjs'
 import { GOAL_STATUS } from './planning-state.mjs'
@@ -2673,7 +2673,10 @@ export class Session {
         }
       }
       if (reportError && !expectedCancellation(error)) {
-        try { await this.printChat(`Request failed: ${message}`) }
+        // A goal this failure left paused gets the same Resume line every other
+        // pause carries; without one the player has no way to know it is paused.
+        const resume = this.currentPlanState()?.status === 'paused' ? ` ${RESUME_HINT}` : ''
+        try { await this.printChat(`Request failed: ${message}${resume}`) }
         catch (printError) { this.log(`Unable to report AIRI error in chat: ${printError instanceof Error ? printError.message : printError}`) }
       }
     })
