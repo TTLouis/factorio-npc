@@ -9,6 +9,7 @@ function make_context() {
   const inventory_counts: Record<string, number> = { 'iron-gear-wheel': 0, 'iron-plate': 100 }
   let queue: Array<{ index: number, recipe: string, count: number, prerequisite: boolean }> = []
   let actor_id = 1
+  let actor_kind = 'standalone_character'
   let begin_count: number | undefined
 
   const actor = {
@@ -55,7 +56,7 @@ function make_context() {
     entity_build_args: vi.fn(() => ({ force: { index: 1 } })),
     status_snapshot: vi.fn(() => ({
       actor_id,
-      kind: 'standalone_character',
+      kind: actor_kind,
       valid: true,
       name: 'AIRI',
       position: { x: 0, y: 0 },
@@ -75,6 +76,7 @@ function make_context() {
     get queue() { return queue },
     set queue(value) { queue = value },
     set actor_id(value: number) { actor_id = value },
+    set actor_kind(value: string) { actor_kind = value },
     set begin_count(value: number | undefined) { begin_count = value },
   }
 }
@@ -260,6 +262,50 @@ describe('bounded crafting controller', () => {
       expect(crafted_item_count(1, 'iron-gear-wheel')).toBe(2)
       context.controller.tick(context.actor)
       expect(crafted_item_count(1, 'iron-gear-wheel')).toBe(2)
+    })
+
+    it('credits nothing when a partial native start is cancelled through fail()', () => {
+      const context = make_context()
+      context.begin_count = 1
+      context.controller.submit('iron-gear-wheel', 2)
+      context.manager.add_task({ type: TaskStates.WAITING, remaining_ticks: 120 })
+
+      context.controller.tick(context.actor)
+
+      expect(context.controller.status().last_result?.code).toBe('partial_start')
+      expect(context.queue).toHaveLength(0)
+      expect(crafted_item_count(1, 'iron-gear-wheel')).toBe(0)
+    })
+
+    it('credits nothing when a timeout cancels the queue through fail(), and keeps crafts finished before it', () => {
+      const context = make_context()
+      context.controller.submit('iron-gear-wheel', 5)
+      context.manager.add_task({ type: TaskStates.WAITING, remaining_ticks: 120 })
+      context.controller.tick(context.actor)
+      context.queue = [{ index: 1, recipe: 'iron-gear-wheel', count: 4, prerequisite: false }]
+      context.controller.tick(context.actor)
+      expect(crafted_item_count(1, 'iron-gear-wheel')).toBe(1)
+
+      ;(globalThis as any).game.tick = 100000
+      context.controller.tick(context.actor)
+
+      expect(context.controller.status().last_result?.code).toBe('timeout')
+      expect(context.queue).toHaveLength(0)
+      expect(crafted_item_count(1, 'iron-gear-wheel')).toBe(1)
+      expect(context.manager.player_state.parameters_craft_item?.queue_snapshot).toBeUndefined()
+    })
+
+    it('does not credit a connected player\'s crafts, which the engine already counts', () => {
+      const context = make_context()
+      context.actor_kind = 'connected_player'
+      context.controller.submit('iron-gear-wheel', 2)
+      context.controller.tick(context.actor)
+      context.queue = []
+      context.inventory_counts['iron-gear-wheel'] = 2
+      context.controller.tick(context.actor)
+
+      expect(context.controller.status().last_result?.code).toBe('completed')
+      expect(crafted_item_count(1, 'iron-gear-wheel')).toBe(0)
     })
 
     it('credits nothing for a craft that never started', () => {

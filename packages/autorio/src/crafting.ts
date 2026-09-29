@@ -116,8 +116,16 @@ export function new_crafting_controller(get_actor: () => ControlledActor | undef
   // Credit the crafts the engine finished since the last look. Runs every tick
   // and again just before this request cancels its own queue, so crafts that
   // finished before the cancellation count and the cancelled ones never do.
+  //
+  // Only while this request still owns a live native queue: once it has cancelled
+  // that queue (or never had one) an empty queue means "cancelled", not
+  // "finished". Only the standalone character is credited; a connected player's
+  // hand crafting is already in the force production statistics.
   function credit_finished(actor: ControlledActor, task: PlayerParametersCraftItem) {
-    if (task.queue_snapshot === undefined || task.owner_force_index === undefined) {
+    if (task.owns_native_queue !== true || task.queue_snapshot === undefined || task.owner_force_index === undefined) {
+      return
+    }
+    if (task.owner_actor_kind !== 'standalone_character') {
       return
     }
     const current = craft_queue_totals(actor.get_crafting_queue())
@@ -146,6 +154,8 @@ export function new_crafting_controller(get_actor: () => ControlledActor | undef
       cancelled += item.count
     }
     task.owns_native_queue = false
+    // The queue is gone by our hand: nothing left to compare against.
+    task.queue_snapshot = undefined
     return cancelled
   }
 
