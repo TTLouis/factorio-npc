@@ -145,6 +145,11 @@ const MODEL_CORRECTABLE_PREFLIGHT_RETRY_BUDGET = 1
 // retries for the step run out.
 export const OPERATION_FAILURE_RECOVERABLE_KIND = 'operation_failure_recoverable'
 const RESEARCH_PREFLIGHT_RETRY_BUDGET = 2
+// Chained in-turn slice continuations (a claim that closes a slice, whose
+// unmet goal plans the next slice inside the same planner turn) allowed per
+// run. A model that keeps authoring claim-only slices ends the run visibly
+// instead of spending the whole continuation limit.
+const MAX_IN_TURN_SLICE_CONTINUATIONS = 3
 const LOW_RISK_NAVIGATION_PROJECTION_MAX_CANDIDATES = 8
 // Once the system commits a plan, its semantic content is immutable; later batches fulfil it rather than rewriting it.
 const FROZEN_PLAN_STATUSES = new Set([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING])
@@ -4883,6 +4888,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.actionOmissionForceNoTools = false
     this.pendingFiniteNoOperationPlan = null
     this.unmetGoalContinuationUsed = false
+    this.inTurnSliceContinuations = 0
+    this.pendingDroppedOperationsNote = ''
     this.lastGoalEvaluation = null
     this.freshObservationSinceContinuation = false
     this.genericRecoveryDecisionActive = false
@@ -5712,6 +5719,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       await this.pausePersistentPlan(`continuation_limit_${continuationLimit}`)
       throw new AgentLoopError(`Continuation limit reached (${continuationLimit}); durable plan paused`)
     }
+    if (withinTurn) {
+      if (this.inTurnSliceContinuations >= MAX_IN_TURN_SLICE_CONTINUATIONS) {
+        await this.traceEvent('plan.slice_continuation_chain_limit', { limit: MAX_IN_TURN_SLICE_CONTINUATIONS })
+        await this.pausePersistentPlan(`slice_continuation_chain_limit_${MAX_IN_TURN_SLICE_CONTINUATIONS}`)
+        throw new AgentLoopError(`Slice continuation chain limit reached (${MAX_IN_TURN_SLICE_CONTINUATIONS}); durable plan paused`)
+      }
+      this.inTurnSliceContinuations++
+    }
+    else {
+      this.inTurnSliceContinuations = 0
+    }
     await this.assertCurrent()
     this.continuations++
     this.prepareContinuationContext()
@@ -5918,11 +5936,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     })
     if (this.unmetGoalContinuationUsed !== true) {
       this.unmetGoalContinuationUsed = true
-      this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
+      // commitPlan may already have recorded this reply (a claim that closed
+      // the slice); two consecutive assistant messages are invalid.
+      if (this.messages.at(-1)?.role !== 'assistant') this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
       this.messages.push({
         role: 'user',
-        content: `[HARNESS] The plan is finished, but the game reports ${formatGoalProgress(evaluation)}; still unmet: ${unmet}. The user goal remains active. Author the next plan slice that moves the world toward the unmet conditions; do not report the goal as complete.`,
+        content: `[HARNESS] The plan is finished, but the game reports ${formatGoalProgress(evaluation)}; still unmet: ${unmet}. The user goal remains active. Author the next plan slice that moves the world toward the unmet conditions; do not report the goal as complete.${this.pendingDroppedOperationsNote ? ` ${this.pendingDroppedOperationsNote}` : ''}`,
       })
+      this.pendingDroppedOperationsNote = ''
       return this.runTurn()
     }
     this.active = false
@@ -7789,6 +7810,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         assistantReplyRecorded = true
         const settled = await this.settleCompletedStepState(previousState, { withinTurn: true, droppedOperationsNote })
         if (settled) return settled
+        // Nothing settled the slice, so this reply is not a plan to persist:
+        // the committed slice is immutable and the restated plan, checkpoint,
+        // roadmap or goal never replace it. The request ends on the committed
+        // state, and the player hears why the operations did not run.
+        this.pendingDroppedOperationsNote = droppedOperationsNote
+        const { roadmap, roadmapNodeIds, checkpoint, developmentMode, goalDefinition, ...kept } = plan
+        plan = {
+          ...kept,
+          plan: Array.isArray(previousState.plan) ? previousState.plan : plan.plan,
+          currentStep: Number.isSafeInteger(previousState.current_step) ? previousState.current_step : plan.currentStep,
+          ...(droppedOperationsNote ? { chatMessage: `${plan.chatMessage ?? ''} ${droppedOperationsNote}`.trim() } : {}),
+        }
       }
     }
     // The active step's own checkpoint as it stood BEFORE this batch; the

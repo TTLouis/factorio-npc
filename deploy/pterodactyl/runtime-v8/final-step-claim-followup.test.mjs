@@ -153,3 +153,105 @@ test('a claim that fails its checks is not a closed step: nothing is dropped and
   assert.equal(game.mutations.length, 2)
   assert.doesNotMatch(game.mutations[1], /coal/)
 })
+
+test('a no-operations final-step claim on an unmet defined goal plans the next slice instead of ending the request idle', async () => {
+  const game = new FakeFactorio()
+  const { agent, events, prompts, calls } = harness(game, (call, memory) => {
+    if (call === 1) return planReply({ plan: STEP, operations: [gather('iron-ore', 10)], goal: LONG_GOAL, roadmap: SHELF })
+    if (call === 2) {
+      return planReply({
+        chatMessage: 'Iron is mined.',
+        plan: [],
+        currentStep: 0,
+        operations: [],
+        semanticCompletion: { stepId: activeStepId(memory), rationale: 'The completed gather batch grounds this prose-only step.' },
+      })
+    }
+    return planReply({ chatMessage: 'Next slice.', plan: ['Gather 20 copper ore'], operations: [gather('copper-ore', 20)] })
+  })
+
+  await agent.request('mine iron', { sender: 'Louis' })
+  game.inventory['iron-ore'] = 10
+  await agent.completed()
+
+  assert.equal(calls(), 3)
+  assert.equal(game.mutations.length, 2)
+  assert.match(game.mutations[1], /copper-ore/)
+  assert.equal(events.some(entry => entry.event === 'plan.followup_operations_dropped'), false)
+  assert.doesNotMatch(prompts[2], /also carried/)
+  assert.ok(events.some(entry => entry.event === 'planning.slice_completion_continuation'))
+})
+
+test('a final-step claim with follow-up operations on a finite goal the game reports unmet plans the next slice', async () => {
+  const game = new FakeFactorio()
+  const { agent, memory, events, prompts, calls } = harness(game, (call, mem) => {
+    if (call === 1) return planReply({ plan: STEP, operations: [gather('iron-ore', 10)], goal: FINITE_GOAL })
+    if (call === 2) {
+      return planReply({
+        plan: [...STEP, 'Smelt plates'],
+        currentStep: 0,
+        operations: [gather('coal', 10)],
+        semanticCompletion: { stepId: activeStepId(mem), rationale: 'The completed gather batch grounds this prose-only step.' },
+      })
+    }
+    return planReply({ plan: ['Gather 20 copper ore'], operations: [gather('copper-ore', 20)] })
+  })
+
+  await agent.request('have 5 iron plates', { sender: 'Louis' })
+  game.inventory['iron-ore'] = 10
+  await agent.completed()
+
+  assert.equal(calls(), 3)
+  assert.equal(game.mutations.length, 2)
+  assert.doesNotMatch(game.mutations[1], /coal/)
+  assert.equal(events.find(entry => entry.event === 'plan.followup_operations_dropped')?.data.count, 1)
+  assert.match(prompts[2], /still unmet/)
+  assert.equal(memory.planningState(KEY).goal.status, GOAL_STATUS.ACTIVE)
+})
+
+test('when nothing settles the slice after a drop, the restated plan and roadmap are not persisted and the player is told why', async () => {
+  const game = new FakeFactorio()
+  const { agent, memory, calls } = harness(game, (call, mem) => {
+    if (call === 1) return planReply({ plan: STEP, operations: [gather('iron-ore', 10)], goal: LONG_GOAL, roadmap: SHELF })
+    return planReply({
+      chatMessage: 'Restating.',
+      plan: [...STEP, 'Build a boiler', 'Build a steam engine'],
+      currentStep: 0,
+      operations: [gather('coal', 10)],
+      roadmap: [{ id: 'node_other', intent: 'something else entirely' }],
+      semanticCompletion: { stepId: activeStepId(mem), rationale: 'The completed gather batch grounds this prose-only step.' },
+    })
+  })
+
+  await agent.request('mine iron', { sender: 'Louis' })
+  const rosterBefore = memory.planningState(KEY).roadmap.nodes.map(node => node.id)
+  agent.settleCompletedStepState = async () => undefined
+  game.inventory['iron-ore'] = 10
+  const result = await agent.completed()
+
+  assert.equal(calls(), 2)
+  assert.equal(game.mutations.length, 1, 'the dropped operation never reached the game')
+  assert.deepEqual(memory.currentPlan(KEY).task_board.steps.map(step => step.description), STEP, 'the committed slice was not replaced by the restated plan')
+  assert.notEqual(memory.currentPlan(KEY).plan?.length, 3)
+  assert.deepEqual(memory.planningState(KEY).roadmap.nodes.map(node => node.id), rosterBefore)
+  assert.match(result.chatMessage, /the harness did not run it/)
+})
+
+test('chained in-turn slice continuations are capped per run and the goal pauses visibly', async () => {
+  const game = new FakeFactorio()
+  const { agent, memory, events } = harness(game, (call) => {
+    if (call === 1) return planReply({ plan: STEP, operations: [gather('iron-ore', 10)], goal: LONG_GOAL, roadmap: SHELF })
+    return planReply({ plan: ['Gather 20 copper ore'], operations: [gather('copper-ore', 20)] })
+  })
+
+  await agent.request('mine iron', { sender: 'Louis' })
+  for (let i = 0; i < 3; i++) await agent.continueFromModMessage('[MOD] chained', 'test.chain', { withinTurn: true })
+  await assert.rejects(
+    agent.continueFromModMessage('[MOD] chained', 'test.chain', { withinTurn: true }),
+    /Slice continuation chain limit reached \(3\)/,
+  )
+
+  assert.ok(events.some(entry => entry.event === 'plan.slice_continuation_chain_limit'))
+  assert.equal(memory.currentPlan(KEY).status, 'paused')
+  assert.match(memory.currentPlan(KEY).pause_reason, /slice_continuation_chain_limit_3/)
+})
