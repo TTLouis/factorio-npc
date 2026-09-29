@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
+import { makeConditionWait } from './step-completion.mjs'
 import {
   applyPlanningEvent,
   createEmptyPlanningState,
@@ -10,6 +11,9 @@ import {
   GOAL_STATUS,
   PLAN_STATUS,
   PLANNING_EVENT,
+  restorePlanningState,
+  RUN_STATE_LIMITS,
+  serializePlanningState,
 } from './planning-state.mjs'
 
 const KEY = 'npc:airi'
@@ -148,4 +152,375 @@ test('GOAL_ACCEPTED without a supplied id mints a deterministic id', () => {
   const a = applyPlanningEvent(createEmptyPlanningState(), event)
   const b = applyPlanningEvent(createEmptyPlanningState(), event)
   assert.equal(a.goal.goal_id, b.goal.goal_id)
+})
+
+// --- move 3: run-state events ----------------------------------------------
+
+function startCommittedPlan(memory, key = KEY, text = 'Build early automation') {
+  const request = { sender: 'Louis', text }
+  const plan = proposedPlan(['Gather stone', 'Craft furnace', 'Build power'])
+  const recorded = memory.recordPlan(key, request, plan)
+  memory.reconcileTaskBoard(key, undefined, plan, recorded, { allowReplan: false })
+  memory.commitPlanningPlan(key, { now: 100, runtime_validation: { passed: true } })
+  return { request, plan, state: memory.currentPlan(key) }
+}
+
+function block(memory, key = KEY) {
+  return memory.applyOutcomeAuthority(key, {
+    kind: 'world_blocked',
+    source: 'deterministic_runtime',
+    reason_code: 'operation_preflight_failed:missing_dependency',
+    candidate_blocker: 'operation_preflight_failed:missing_dependency',
+    evidence: [{
+      kind: 'operation_preflight_blocker',
+      ref: 'preflight_missing_dependency',
+      summary: 'Required dependency cannot be satisfied by the committed route.',
+    }],
+  }).state
+}
+
+function goalState(objective = 'Make iron plates') {
+  return applyPlanningEvent(createEmptyPlanningState(), {
+    type: PLANNING_EVENT.GOAL_ACCEPTED,
+    now: 10,
+    goal_id: 'goal_run',
+    owner: 'Louis',
+    objective,
+  })
+}
+
+function withDraftCommitted(state) {
+  const drafted = applyPlanningEvent(state, {
+    type: PLANNING_EVENT.DRAFT_CREATED,
+    now: 20,
+    steps: [{ description: 'Mine ore' }, { description: 'Smelt ore' }],
+  })
+  return applyPlanningEvent(drafted, {
+    type: PLANNING_EVENT.PLAN_COMMITTED,
+    now: 30,
+    plan_id: getActivePlan(drafted).plan_id,
+    runtime_validation: { passed: true },
+  })
+}
+
+function planShape(state) {
+  const plan = getActivePlan(state)
+  return JSON.stringify({
+    plans: state.plans,
+    active_plan_id: state.active_plan_id,
+    active_step_index: plan.active_step_index,
+    status: plan.status,
+    blocker: plan.blocker,
+    goal: state.goal,
+    roadmap: state.roadmap,
+  })
+}
+
+function waitFor(goalId, overrides = {}) {
+  return makeConditionWait(
+    { kind: 'entity_state', unit_number: 582, expected: 'working' },
+    { goalId, stepId: 'step_1', actorId: 18, actorEpoch: 3, mode: 'passive_progress', ...overrides },
+  )
+}
+
+test('RUN_PAUSED then RUN_RESUMED leaves plan, step, blocker and approval state untouched', () => {
+  const committed = withDraftCommitted(goalState())
+  const before = planShape(committed)
+  const paused = applyPlanningEvent(committed, { type: PLANNING_EVENT.RUN_PAUSED, now: 40, source: 'runtime', reason: 'user_stop' })
+  assert.equal(paused.run.paused, true)
+  assert.equal(planShape(paused), before, 'pausing does not touch plans')
+  const resumed = applyPlanningEvent(paused, { type: PLANNING_EVENT.RUN_RESUMED, now: 50, source: 'runtime', reason: 'plan_recorded' })
+  assert.equal(resumed.run.paused, false)
+  assert.equal(resumed.run.pause_reason, '')
+  assert.equal(resumed.run.pause_count, 1)
+  assert.equal(planShape(resumed), before, 'a pause -> resume round trip changes no plan semantics')
+})
+
+test('a BLOCKED plan stays BLOCKED, with the same blocker, across pause and resume', () => {
+  const committed = withDraftCommitted(goalState())
+  const plan = getActivePlan(committed)
+  const blocked = applyPlanningEvent(committed, {
+    type: PLANNING_EVENT.STRUCTURAL_BLOCKER_CONFIRMED,
+    now: 40,
+    source: 'runtime',
+    plan_id: plan.plan_id,
+    reason_code: 'missing_dependency',
+    evidence_refs: ['ref_a'],
+    detail: 'no route',
+  })
+  assert.equal(getActivePlan(blocked).status, PLAN_STATUS.BLOCKED)
+  const before = planShape(blocked)
+  const paused = applyPlanningEvent(blocked, { type: PLANNING_EVENT.RUN_PAUSED, now: 50, source: 'user', reason: 'user_stop' })
+  const resumed = applyPlanningEvent(paused, { type: PLANNING_EVENT.RUN_RESUMED, now: 60, source: 'user' })
+  assert.equal(planShape(paused), before)
+  assert.equal(planShape(resumed), before)
+  assert.equal(getActivePlan(resumed).status, PLAN_STATUS.BLOCKED)
+})
+
+test('pause keeps the reason text and its provider_transient prefix, and derives a bounded reason code', () => {
+  const state = goalState()
+  const reason = 'provider_transient: Hourly provider request budget reached'
+  const paused = applyPlanningEvent(state, { type: PLANNING_EVENT.RUN_PAUSED, now: 20, source: 'runtime', reason })
+  assert.equal(paused.run.pause_reason, reason)
+  assert.equal(paused.run.pause_code, 'provider_transient')
+  assert.ok(paused.run.pause_reason.startsWith('provider_transient:'))
+  const long = applyPlanningEvent(state, { type: PLANNING_EVENT.RUN_PAUSED, now: 20, source: 'runtime', reason: `request_failed: ${'x'.repeat(2000)}` })
+  assert.equal(long.run.pause_reason.length, 300)
+  assert.equal(long.run.pause_code, 'request_failed')
+  const explicit = applyPlanningEvent(state, { type: PLANNING_EVENT.RUN_PAUSED, now: 20, source: 'runtime', reason: 'anything', reason_code: 'budget_cap' })
+  assert.equal(explicit.run.pause_code, 'budget_cap')
+})
+
+test('run events are refused from the planner, Jev, another goal, or without an active goal', () => {
+  const state = goalState()
+  for (const source of ['main_planner', 'jev', 'planner', '', undefined]) {
+    const next = applyPlanningEvent(state, { type: PLANNING_EVENT.RUN_PAUSED, now: 20, source, reason: 'x' })
+    assert.equal(next, state, `source ${String(source)} must not pause the run`)
+  }
+  assert.equal(applyPlanningEvent(state, { type: PLANNING_EVENT.RUN_PAUSED, now: 20, source: 'runtime', goal_id: 'goal_other', reason: 'x' }), state, 'stale goal id fails closed')
+  const empty = createEmptyPlanningState()
+  assert.equal(applyPlanningEvent(empty, { type: PLANNING_EVENT.RUN_PAUSED, now: 20, source: 'runtime', reason: 'x' }), empty)
+  const satisfied = applyPlanningEvent(state, { type: PLANNING_EVENT.GOAL_SATISFIED, now: 25, source: 'user', evidence_refs: ['e1'] })
+  assert.equal(applyPlanningEvent(satisfied, { type: PLANNING_EVENT.RUN_PAUSED, now: 30, source: 'runtime', reason: 'x' }), satisfied)
+})
+
+test('RUN_RESUMED is a no-op when the run is not paused', () => {
+  const state = goalState()
+  assert.equal(applyPlanningEvent(state, { type: PLANNING_EVENT.RUN_RESUMED, now: 20, source: 'runtime' }), state)
+})
+
+test('pause clears condition_wait and persistent_runtime but keeps provider_recovery', () => {
+  let state = goalState()
+  state = applyPlanningEvent(state, { type: PLANNING_EVENT.CONDITION_WAIT_RECORDED, now: 20, source: 'runtime', wait: waitFor('goal_run') })
+  state = applyPlanningEvent(state, { type: PLANNING_EVENT.PERSISTENT_RUNTIME_RECORDED, now: 21, source: 'runtime', runtime: { kind: 'follow', active: true } })
+  state = applyPlanningEvent(state, { type: PLANNING_EVENT.PROVIDER_RECOVERY_RECORDED, now: 22, source: 'runtime', recovery: { kind: 'budget_handoff', phase: 'planner_pending' } })
+  assert.ok(state.run.condition_wait && state.run.persistent_runtime && state.run.provider_recovery)
+  const paused = applyPlanningEvent(state, { type: PLANNING_EVENT.RUN_PAUSED, now: 30, source: 'runtime', reason: 'user_stop' })
+  assert.equal(paused.run.condition_wait, null)
+  assert.equal(paused.run.persistent_runtime, null)
+  assert.equal(paused.run.provider_recovery?.kind, 'budget_handoff')
+})
+
+test('a paused run refuses a new condition wait or follow runtime; a wait for another goal is stale', () => {
+  const paused = applyPlanningEvent(goalState(), { type: PLANNING_EVENT.RUN_PAUSED, now: 20, source: 'runtime', reason: 'user_stop' })
+  assert.equal(applyPlanningEvent(paused, { type: PLANNING_EVENT.CONDITION_WAIT_RECORDED, now: 21, source: 'runtime', wait: waitFor('goal_run') }), paused)
+  assert.equal(applyPlanningEvent(paused, { type: PLANNING_EVENT.PERSISTENT_RUNTIME_RECORDED, now: 21, source: 'runtime', runtime: { kind: 'follow' } }), paused)
+  const running = goalState()
+  assert.equal(applyPlanningEvent(running, { type: PLANNING_EVENT.CONDITION_WAIT_RECORDED, now: 21, source: 'runtime', wait: waitFor('goal_other') }), running)
+})
+
+test('null clears a run record; a clear naming another wait id is ignored', () => {
+  let state = applyPlanningEvent(goalState(), { type: PLANNING_EVENT.CONDITION_WAIT_RECORDED, now: 20, source: 'runtime', wait: waitFor('goal_run', { id: 'wait_a' }) })
+  assert.equal(state.run.condition_wait.id, 'wait_a')
+  assert.equal(applyPlanningEvent(state, { type: PLANNING_EVENT.CONDITION_WAIT_RECORDED, now: 21, source: 'runtime', wait: null, wait_id: 'wait_b' }), state)
+  state = applyPlanningEvent(state, { type: PLANNING_EVENT.CONDITION_WAIT_RECORDED, now: 22, source: 'runtime', wait: null, wait_id: 'wait_a' })
+  assert.equal(state.run.condition_wait, null)
+})
+
+test('run records are bounded: long strings, deep nesting and huge lists are capped', () => {
+  const huge = {
+    kind: 'follow',
+    note: 'y'.repeat(50_000),
+    many: Array.from({ length: 500 }, (_, index) => index),
+    keys: Object.fromEntries(Array.from({ length: 500 }, (_, index) => [`k${index}`, index])),
+    deep: { a: { b: { c: { d: { e: { f: { g: { h: 1 } } } } } } } },
+    nan: Number.NaN,
+    drop: undefined,
+  }
+  const state = applyPlanningEvent(goalState(), { type: PLANNING_EVENT.PERSISTENT_RUNTIME_RECORDED, now: 20, source: 'runtime', runtime: huge })
+  const stored = state.run.persistent_runtime
+  assert.equal(stored.note.length, RUN_STATE_LIMITS.valueString)
+  assert.equal(stored.many.length, RUN_STATE_LIMITS.valueItems)
+  assert.equal(Object.keys(stored.keys).length, RUN_STATE_LIMITS.valueKeys)
+  assert.ok(!('drop' in stored))
+  assert.equal(JSON.stringify(stored).includes('"h"'), false, 'depth is capped')
+  assert.equal(JSON.parse(JSON.stringify(stored)).nan, null)
+})
+
+test('run state persists in the snapshot and an old snapshot without it restores to null', () => {
+  let state = goalState()
+  state = applyPlanningEvent(state, { type: PLANNING_EVENT.RUN_PAUSED, now: 20, source: 'runtime', reason: 'provider_transient: budget' })
+  state = applyPlanningEvent(state, { type: PLANNING_EVENT.PROVIDER_RECOVERY_RECORDED, now: 21, source: 'runtime', recovery: { kind: 'budget_handoff', phase: 'planner_pending' } })
+  const serialized = JSON.parse(JSON.stringify(serializePlanningState(state)))
+  const restored = restorePlanningState(serialized)
+  assert.deepEqual(restored.run, state.run)
+  assert.equal(restored.run.paused, true)
+  assert.deepEqual(serializePlanningState(restored), serializePlanningState(state))
+
+  const { run: _run, ...old } = serialized
+  assert.equal(restorePlanningState(old).run, null, 'a pre-run snapshot restores to no run rather than a fabricated empty one')
+})
+
+// --- move 3: memory facade (reducer writes, legacy mirrors) -----------------
+
+test('facade pause: reducer records the run, legacy mirrors it with the transient prefix, plan is unchanged', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  startCommittedPlan(memory)
+  const reducerBefore = planShape(memory.planningState(KEY))
+  const legacyBefore = memory.currentPlan(KEY)
+  const stepBefore = legacyBefore.task_board.active_index
+
+  const reason = 'provider_transient: Hourly provider request budget reached'
+  const paused = memory.pausePlan(KEY, reason)
+  assert.equal(paused.status, 'paused')
+  assert.equal(paused.pause_reason, reason, 'the legacy mirror keeps the exact text, prefix included')
+  const run = memory.planningState(KEY).run
+  assert.equal(run.paused, true)
+  assert.equal(run.pause_reason, reason)
+  assert.equal(run.pause_code, 'provider_transient')
+  assert.equal(planShape(memory.planningState(KEY)), reducerBefore)
+  assert.equal(paused.task_board.active_index, stepBefore)
+})
+
+test('facade resume: recording a plan with operations resumes the run and mirrors it back', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const { request, plan } = startCommittedPlan(memory)
+  memory.pausePlan(KEY, 'user_stop')
+  assert.equal(memory.planningState(KEY).run.paused, true)
+  const shapeWhilePaused = planShape(memory.planningState(KEY))
+
+  const recorded = memory.recordPlan(KEY, request, plan, { continuation: true })
+  assert.equal(recorded.state.status, 'active')
+  assert.equal(recorded.state.pause_reason, '')
+  const run = memory.planningState(KEY).run
+  assert.equal(run.paused, false)
+  assert.equal(run.pause_count, 1)
+  assert.equal(run.pause_reason, '')
+  assert.equal(planShape(memory.planningState(KEY)), shapeWhilePaused, 'resume does not change plan semantics')
+})
+
+test('facade pause on a BLOCKED plan: reducer and legacy both stay blocked, the pause is recorded', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  startCommittedPlan(memory)
+  block(memory)
+  const planBefore = getActivePlan(memory.planningState(KEY))
+  assert.equal(planBefore.status, PLAN_STATUS.BLOCKED)
+  const shapeBefore = planShape(memory.planningState(KEY))
+
+  const after = memory.pausePlan(KEY, 'user_stop')
+  assert.equal(after.status, 'blocked', 'the legacy record must not drift from BLOCKED to paused')
+  assert.match(after.blocker, /missing_dependency/)
+  assert.equal(memory.planningState(KEY).run.paused, true)
+  assert.equal(planShape(memory.planningState(KEY)), shapeBefore)
+  assert.equal(getActivePlan(memory.planningState(KEY)).status, PLAN_STATUS.BLOCKED)
+})
+
+test('facade condition wait: register, update and clear go through the reducer and mirror to legacy', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const { state } = startCommittedPlan(memory)
+  const stepId = state.task_board.active_step_id
+  const wait = waitFor(state.goal_id, { stepId })
+  const registered = memory.registerConditionWait(KEY, wait)
+  assert.equal(registered.condition_wait.id, wait.id)
+  const reducerWait = memory.planningState(KEY).run.condition_wait
+  assert.equal(reducerWait.id, wait.id)
+  assert.deepEqual(registered.condition_wait, reducerWait, 'legacy mirrors the reducer value')
+  assert.notEqual(registered.condition_wait, reducerWait, 'the mirror is a copy, not shared state')
+
+  const polled = { ...wait, checks: 3, updated_at: wait.updated_at + 5 }
+  memory.updateConditionWait(KEY, polled)
+  assert.equal(memory.planningState(KEY).run.condition_wait.checks, 3)
+  assert.equal(memory.currentPlan(KEY).condition_wait.checks, 3)
+
+  memory.updateConditionWait(KEY, { ...polled, state: 'verified' })
+  assert.equal(memory.planningState(KEY).run.condition_wait, null)
+  assert.equal(memory.currentPlan(KEY).condition_wait, undefined)
+
+  memory.registerConditionWait(KEY, wait)
+  memory.clearConditionWait(KEY, 'wrong_id')
+  assert.ok(memory.planningState(KEY).run.condition_wait, 'a clear naming another wait is ignored')
+  memory.clearConditionWait(KEY, wait.id)
+  assert.equal(memory.planningState(KEY).run.condition_wait, null)
+})
+
+test('facade pause clears the wait in both stores', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const { state } = startCommittedPlan(memory)
+  memory.registerConditionWait(KEY, waitFor(state.goal_id, { stepId: state.task_board.active_step_id }))
+  assert.ok(memory.planningState(KEY).run.condition_wait)
+  memory.pausePlan(KEY, 'user_stop')
+  assert.equal(memory.planningState(KEY).run.condition_wait, null)
+  assert.equal(memory.currentPlan(KEY).condition_wait, undefined)
+})
+
+test('facade provider recovery: budget handoff is reducer-owned and survives pause', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  startCommittedPlan(memory)
+  const set = memory.setProviderRecovery(KEY, { kind: 'budget_handoff', semantic_scope: 'keep_target', route: 'wake_planner', reason: 'cap' })
+  assert.equal(set.provider_recovery.kind, 'budget_handoff')
+  assert.equal(memory.planningState(KEY).run.provider_recovery.kind, 'budget_handoff')
+  memory.pausePlan(KEY, 'provider_transient: cap')
+  assert.equal(memory.planningState(KEY).run.provider_recovery.kind, 'budget_handoff')
+  assert.equal(memory.currentPlan(KEY).provider_recovery.kind, 'budget_handoff')
+  memory.setProviderRecovery(KEY, undefined)
+  assert.equal(memory.planningState(KEY).run.provider_recovery, null)
+  assert.equal(memory.currentPlan(KEY).provider_recovery, undefined)
+})
+
+test('facade persistent runtime: a healthy follow runtime is recorded through the reducer', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const request = { sender: 'Louis', text: 'follow me' }
+  const runtime = { kind: 'follow', active: true, healthy: true, controller_live: true, state: 'following', target_player: 'Louis' }
+  const result = memory.recordPlan(KEY, request, { chatMessage: 'Following.', plan: ['Follow Louis'], currentStep: 0, operations: [] }, { persistentRuntime: runtime })
+  assert.equal(result.persistentRuntimeActive, true)
+  assert.equal(memory.planningState(KEY).run.persistent_runtime.target_player, 'Louis')
+  assert.deepEqual(result.state.persistent_runtime, memory.planningState(KEY).run.persistent_runtime)
+})
+
+test('a run record for another goal is refused: stale work after a replacement fails safely', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const { state } = startCommittedPlan(memory)
+  const staleWait = waitFor('goal_from_a_replaced_goal', { stepId: state.task_board.active_step_id })
+  assert.equal(memory.registerConditionWait(KEY, staleWait), undefined, 'the legacy goal check rejects it')
+  assert.equal(memory.planningState(KEY).run, null)
+})
+
+test('old snapshot without run state: the run is derived once from the legacy record', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const { state } = startCommittedPlan(memory)
+  memory.registerConditionWait(KEY, waitFor(state.goal_id, { stepId: state.task_board.active_step_id }))
+  memory.setProviderRecovery(KEY, { kind: 'budget_handoff', semantic_scope: 'keep_target', route: 'wake_planner', reason: 'cap' })
+  const snapshot = JSON.parse(JSON.stringify(memory.snapshot()))
+  assert.ok(snapshot.planning_states[0].state.run, 'a new snapshot carries the run')
+  delete snapshot.planning_states[0].state.run
+
+  const restored = new CanonicalTaskBoardMemory()
+  restored.restore(snapshot)
+  const run = restored.planningState(KEY).run
+  assert.ok(run, 'derived from the legacy fields')
+  assert.equal(run.condition_wait.id, restored.currentPlan(KEY).condition_wait.id)
+  assert.equal(run.provider_recovery.kind, 'budget_handoff')
+  assert.equal(run.paused, false)
+  assert.equal(restored.currentPlan(KEY).condition_wait.state, 'active', 'legacy readers still see the wait')
+})
+
+test('old snapshot of a paused goal: the pause and its transient prefix are seeded from legacy', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  startCommittedPlan(memory)
+  const reason = 'provider_transient: Hourly provider request budget reached'
+  memory.pausePlan(KEY, reason)
+  const snapshot = JSON.parse(JSON.stringify(memory.snapshot()))
+  delete snapshot.planning_states[0].state.run
+
+  const restored = new CanonicalTaskBoardMemory()
+  restored.restore(snapshot)
+  const run = restored.planningState(KEY).run
+  assert.equal(run.paused, true)
+  assert.equal(run.pause_reason, reason)
+  assert.equal(run.pause_code, 'provider_transient')
+  assert.equal(restored.currentPlan(KEY).status, 'paused')
+  assert.equal(restored.currentPlan(KEY).pause_reason, reason)
+})
+
+test('new snapshot: the run round-trips and the reducer wins over the legacy fields', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const { state } = startCommittedPlan(memory)
+  memory.registerConditionWait(KEY, waitFor(state.goal_id, { stepId: state.task_board.active_step_id }))
+  const before = memory.planningState(KEY).run
+  const snapshot = JSON.parse(JSON.stringify(memory.snapshot()))
+
+  const restored = new CanonicalTaskBoardMemory()
+  restored.restore(snapshot)
+  assert.deepEqual(restored.planningState(KEY).run, before)
+  assert.deepEqual(restored.currentPlan(KEY).condition_wait, before.condition_wait)
 })

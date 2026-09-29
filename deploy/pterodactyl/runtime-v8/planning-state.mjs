@@ -327,6 +327,14 @@ export const PLANNING_EVENT = Object.freeze({
   // when the goal started, read from the game by the runtime. Fills missing
   // baselines only; a recorded baseline never moves.
   GOAL_BASELINES_RECORDED: 'GOAL_BASELINES_RECORDED',
+  // Run state (3.3 move 3). The goal's run is paused or running; a pause never
+  // touches plan semantics, the active step or approval state.
+  RUN_PAUSED: 'RUN_PAUSED',
+  RUN_RESUMED: 'RUN_RESUMED',
+  // Single-writer runtime fields. null clears the field.
+  CONDITION_WAIT_RECORDED: 'CONDITION_WAIT_RECORDED',
+  PROVIDER_RECOVERY_RECORDED: 'PROVIDER_RECOVERY_RECORDED',
+  PERSISTENT_RUNTIME_RECORDED: 'PERSISTENT_RUNTIME_RECORDED',
 })
 
 const PLANNING_EVENT_TYPES = Object.freeze(Object.values(PLANNING_EVENT))
@@ -337,6 +345,22 @@ const PLANNING_EVENT_TYPES = Object.freeze(Object.values(PLANNING_EVENT))
 const EVIDENCE_AUTHORITIES = Object.freeze(['runtime', 'autorio', 'runtime_receipt'])
 const SEMANTIC_COMPLETION_AUTHORITIES = Object.freeze(['main_planner'])
 const USER_AUTHORITIES = Object.freeze(['user', 'human', 'user_steering'])
+// Who may write run state. Not the Main LLM and not Jev: pausing, waiting and
+// provider recovery are harness/operator facts. `legacy_adopted` marks a
+// value seeded once from a pre-reducer snapshot or legacy record.
+const RUN_EVENT_SOURCES = Object.freeze([...EVIDENCE_AUTHORITIES, ...USER_AUTHORITIES, 'server_lifecycle', 'legacy_adopted'])
+
+export const RUN_STATE_LIMITS = Object.freeze({
+  pauseReason: 300,
+  pauseCode: 80,
+  valueDepth: 6,
+  valueString: 1200,
+  valueKeys: 64,
+  valueItems: 32,
+  durableOperations: 16,
+  exactTargetAudit: 32,
+  staleIdentities: 256,
+})
 
 // --- reasoning epoch (owner decision, 2026-09-19) ---------------------------
 //
@@ -450,6 +474,56 @@ function boundedList(value, max) {
 // the newest (active) plan of any goal that ran past the plan cap.
 function recentList(value, max) {
   return Array.isArray(value) ? value.slice(-max) : []
+}
+
+/**
+ * JSON-safe, size-bounded copy of an opaque runtime record (condition wait,
+ * provider recovery, follow status, locators). The reducer stores what the
+ * runtime hands it, but never more than these limits, and never anything that
+ * would not survive a JSON round trip.
+ */
+function boundedJson(value, depth = RUN_STATE_LIMITS.valueDepth) {
+  if (value === null || value === undefined) return null
+  if (typeof value === 'string') return value.slice(0, RUN_STATE_LIMITS.valueString)
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (depth <= 0) return null
+  if (Array.isArray(value)) return value.slice(0, RUN_STATE_LIMITS.valueItems).map(item => boundedJson(item, depth - 1))
+  if (typeof value !== 'object') return null
+  const out = {}
+  for (const [key, inner] of Object.entries(value).slice(0, RUN_STATE_LIMITS.valueKeys)) {
+    if (inner === undefined || typeof inner === 'function' || typeof inner === 'symbol') continue
+    out[String(key).slice(0, 80)] = boundedJson(inner, depth - 1)
+  }
+  return out
+}
+
+function boundedRecord(value) {
+  const bounded = value && typeof value === 'object' && !Array.isArray(value) ? boundedJson(value) : null
+  return bounded && Object.keys(bounded).length > 0 ? bounded : null
+}
+
+function pauseCodeOf(reason) {
+  return text(String(reason ?? '').split(':')[0], RUN_STATE_LIMITS.pauseCode)
+}
+
+export function createEmptyRunState() {
+  return {
+    paused: false,
+    pause_reason: '',
+    pause_code: '',
+    paused_at: null,
+    resumed_at: null,
+    pause_count: 0,
+    condition_wait: null,
+    provider_recovery: null,
+    persistent_runtime: null,
+    // Entity locators and exact-identity proofs the runtime needs for
+    // recovery (3.3 move 4).
+    locators: { durable_last_operations: [], exact_target_audit: [] },
+    stale_exact_identities: [],
+    updated_at: 0,
+  }
 }
 
 // A long goal (e.g. a rocket launch) commits many plan slices. Keep a bounded
@@ -680,6 +754,10 @@ export function createEmptyPlanningState() {
     // Reasoning continuity marker. See REASONING_RESET_EVENTS above.
     reasoning_epoch: 0,
     last_reasoning_reset: null,
+    // Run state (pause, condition wait, provider recovery, follow runtime,
+    // locators). null until the first run event: an old snapshot restores to
+    // null and the memory facade seeds it once from the legacy record.
+    run: null,
     log: [],
   }
 }
@@ -2434,7 +2512,105 @@ Object.assign(HANDLERS, {
       log: logEntry(state, { type: PLANNING_EVENT.GOAL_SATISFIED, at: now, goal_id: state.goal.goal_id }),
     }
   },
+
+  /**
+   * Run-state events (3.3 move 3). The run is the goal's operating state, not
+   * the plan's: none of these handlers can appear to touch `plans`, so a
+   * pause/resume round trip leaves plan content, active step, blocker and
+   * approval state exactly as they were. A BLOCKED plan stays BLOCKED.
+   */
+  [PLANNING_EVENT.RUN_PAUSED](state, event, now) {
+    if (!runEventAllowed(state, event)) return state
+    const run = state.run ?? createEmptyRunState()
+    const reason = text(event.reason, RUN_STATE_LIMITS.pauseReason)
+    return {
+      ...state,
+      // A paused run holds no wait and no follow controller. Provider recovery
+      // is deliberately kept: it is what a budget-cap pause resumes from.
+      run: {
+        ...run,
+        paused: true,
+        pause_reason: reason,
+        pause_code: text(event.reason_code, RUN_STATE_LIMITS.pauseCode) || pauseCodeOf(reason),
+        paused_at: run.paused ? run.paused_at : now,
+        pause_count: run.paused ? run.pause_count : run.pause_count + 1,
+        condition_wait: null,
+        persistent_runtime: null,
+        updated_at: now,
+      },
+      updated_at: now,
+      log: logEntry(state, {
+        type: PLANNING_EVENT.RUN_PAUSED,
+        at: now,
+        reason_code: text(event.reason_code, RUN_STATE_LIMITS.pauseCode) || pauseCodeOf(reason),
+      }),
+    }
+  },
+
+  [PLANNING_EVENT.RUN_RESUMED](state, event, now) {
+    if (!runEventAllowed(state, event)) return state
+    const run = state.run
+    if (!run?.paused) return state
+    return {
+      ...state,
+      run: { ...run, paused: false, pause_reason: '', pause_code: '', resumed_at: now, updated_at: now },
+      updated_at: now,
+      log: logEntry(state, {
+        type: PLANNING_EVENT.RUN_RESUMED,
+        at: now,
+        reason_code: text(event.reason_code ?? event.reason, RUN_STATE_LIMITS.pauseCode) || null,
+      }),
+    }
+  },
+
+  [PLANNING_EVENT.CONDITION_WAIT_RECORDED](state, event, now) {
+    if (!runEventAllowed(state, event)) return state
+    return recordRunRecord(state, now, 'condition_wait', event.wait, {
+      // A paused run holds no wait; a wait for another goal is stale work.
+      refuse: (run, record) => run.paused || (text(record.goal_id, 120) && text(record.goal_id, 120) !== state.goal.goal_id),
+      clearId: event.wait_id,
+    })
+  },
+
+  [PLANNING_EVENT.PROVIDER_RECOVERY_RECORDED](state, event, now) {
+    if (!runEventAllowed(state, event)) return state
+    return recordRunRecord(state, now, 'provider_recovery', event.recovery, {
+      refuse: (_run, record) => text(record.goal_id, 120) && text(record.goal_id, 120) !== state.goal.goal_id,
+    })
+  },
+
+  [PLANNING_EVENT.PERSISTENT_RUNTIME_RECORDED](state, event, now) {
+    if (!runEventAllowed(state, event)) return state
+    return recordRunRecord(state, now, 'persistent_runtime', event.runtime, {
+      refuse: run => run.paused,
+    })
+  },
 })
+
+function runEventAllowed(state, event) {
+  if (!state.goal || state.goal.status !== GOAL_STATUS.ACTIVE) return false
+  const goalId = text(event.goal_id, 120)
+  // An event stamped for another goal is stale work from before a replacement,
+  // restart or cancel. It fails closed.
+  if (goalId && goalId !== state.goal.goal_id) return false
+  return RUN_EVENT_SOURCES.includes(text(event.source, 60))
+}
+
+// Set (record is an object) or clear (record is null/undefined) one runtime
+// record on the run. `refuse` may veto a set; a clear is vetoed only by an id
+// mismatch. Returns the state unchanged when nothing would change.
+function recordRunRecord(state, now, field, raw, { refuse, clearId } = {}) {
+  const run = state.run ?? createEmptyRunState()
+  if (raw === null || raw === undefined) {
+    if (!run[field]) return state
+    const id = text(clearId, 100)
+    if (id && run[field].id !== id) return state
+    return { ...state, run: { ...run, [field]: null, updated_at: now }, updated_at: now }
+  }
+  const record = boundedRecord(raw)
+  if (!record || refuse?.(run, record)) return state
+  return { ...state, run: { ...run, [field]: record, updated_at: now }, updated_at: now }
+}
 
 // --- persistence -----------------------------------------------------------
 
@@ -2452,6 +2628,7 @@ export function serializePlanningState(state) {
     updated_at: finiteNumber(current.updated_at) ?? 0,
     reasoning_epoch: currentReasoningEpoch(current),
     last_reasoning_reset: clone(current.last_reasoning_reset) ?? null,
+    run: clone(current.run) ?? null,
     log: clone(current.log) ?? [],
   }
 }
@@ -2613,6 +2790,67 @@ function restoreSteering(raw) {
   }
 }
 
+/**
+ * Restore the run state. Returns null when the snapshot predates it, so the
+ * caller can seed it once from the legacy record instead of pretending the run
+ * was recorded as empty.
+ */
+function restoreRun(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const paused = raw.paused === true
+  const reason = paused ? text(raw.pause_reason, RUN_STATE_LIMITS.pauseReason) : ''
+  const locators = raw.locators && typeof raw.locators === 'object' && !Array.isArray(raw.locators) ? raw.locators : {}
+  return {
+    paused,
+    pause_reason: reason,
+    pause_code: paused ? (text(raw.pause_code, RUN_STATE_LIMITS.pauseCode) || pauseCodeOf(reason)) : '',
+    paused_at: finiteNumber(raw.paused_at) ?? null,
+    resumed_at: finiteNumber(raw.resumed_at) ?? null,
+    pause_count: Number.isSafeInteger(raw.pause_count) && raw.pause_count >= 0 ? raw.pause_count : 0,
+    condition_wait: paused ? null : boundedRecord(raw.condition_wait),
+    provider_recovery: boundedRecord(raw.provider_recovery),
+    persistent_runtime: paused ? null : boundedRecord(raw.persistent_runtime),
+    locators: {
+      durable_last_operations: sanitizeDurableOperations(locators.durable_last_operations),
+      exact_target_audit: sanitizeExactTargetAudit(locators.exact_target_audit),
+    },
+    stale_exact_identities: sanitizeStaleIdentities(raw.stale_exact_identities),
+    updated_at: finiteNumber(raw.updated_at) ?? 0,
+  }
+}
+
+function sanitizeDurableOperations(value) {
+  return (Array.isArray(value) ? value : [])
+    .slice(-RUN_STATE_LIMITS.durableOperations)
+    .map(item => (typeof item === 'string' ? item.slice(0, 800) : boundedRecord(item)))
+    .filter(item => item !== null && item !== '')
+}
+
+function sanitizeExactTargetAudit(value) {
+  return (Array.isArray(value) ? value : [])
+    .flatMap((entry) => {
+      if (!Number.isSafeInteger(entry?.unit_number)) return []
+      return [{
+        unit_number: entry.unit_number,
+        operation_name: text(entry.operation_name, 100),
+        locator: boundedJson(entry.locator),
+        recorded_at: finiteNumber(entry.recorded_at) ?? null,
+      }]
+    })
+    .slice(-RUN_STATE_LIMITS.exactTargetAudit)
+}
+
+function sanitizeStaleIdentities(value) {
+  const seen = new Set()
+  const out = []
+  for (const item of Array.isArray(value) ? value : []) {
+    if (!Number.isSafeInteger(item) || item <= 0 || seen.has(item)) continue
+    seen.add(item)
+    out.push(item)
+  }
+  return out.slice(-RUN_STATE_LIMITS.staleIdentities)
+}
+
 export function restorePlanningState(raw) {
   const empty = createEmptyPlanningState()
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return empty
@@ -2641,6 +2879,7 @@ export function restorePlanningState(raw) {
           reason: text(raw.last_reasoning_reset.reason, 200) || null,
         }
       : null,
+    run: restoreRun(raw.run),
     log: recentList(raw.log, 256).map(item => clone(item)),
   }
 }
