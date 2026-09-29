@@ -6878,6 +6878,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  // With tools open the planner reply is a submitPlan call; without tools
+  // (a closed observation phase, bounded recovery) it is the strict-JSON
+  // content fallback, since no tool is offered to call.
+  validReplyShape({ toolsEnabled }) {
+    return toolsEnabled
+      ? 'Valid next reply: approved observation tool call(s) with strict JSON arguments, or one submitPlan call (strict-JSON plan content with no tool_calls field also works).'
+      : super.validReplyShape({ toolsEnabled })
+  }
+
+  planReplyName() {
+    return 'one submitPlan call'
+  }
+
   observationDecisionPressureBudget() {
     if (Number.isSafeInteger(this.observationBudgetRemaining)) return Math.max(0, Math.min(8, this.observationBudgetRemaining))
     return super.observationDecisionPressureBudget()
@@ -7032,7 +7045,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     else if (totalDeferredCount > 0) {
       this.messages.push({
         role: 'user',
-        content: `[HARNESS] Observation batch partially admitted: executed ${admittedPrepared.length} read-only call(s) and deferred ${totalDeferredCount} due to the per-turn observation cap. Reuse the returned evidence first; request only still-needed deferred facts on a later observation turn.`,
+        content: `[HARNESS] Observation batch partially admitted: executed ${admittedPrepared.length} read-only call(s) and deferred ${totalDeferredCount} (${[...new Set([...deferredPrepared.map(entry => entry.tool.function.name), ...rawDeferredTools.map(tool => tool?.function?.name).filter(Boolean)])].slice(0, 8).join(', ')}) due to the per-turn observation cap. Reuse the returned evidence first; request only still-needed deferred facts on a later observation turn.`,
       })
     }
     const freshResultObserved = results.some((_, index) => admittedCached[index] !== true && admittedStaticCached[index] !== true)
