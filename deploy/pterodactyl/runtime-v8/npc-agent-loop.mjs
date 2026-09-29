@@ -61,6 +61,7 @@ import {
   observationToolFamily,
   observationToolTier,
   isPlannerControlToolName,
+  parsePlan as parseRuntimePlan,
   plannerControlPayloadFromMessage,
   renderOperation,
   renderOperationPreflight,
@@ -6739,6 +6740,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
     return message
+  }
+
+  // The prompt advertises this runtime's operation catalog, so the plan must be
+  // admitted against the same catalog; the staging parser does not know
+  // place_candidate and refused it live (2026-09-29, "Unapproved operation").
+  parsePlanValue(raw) {
+    return parseRuntimePlan(raw)
   }
 
   parsePlanMessage(message) {

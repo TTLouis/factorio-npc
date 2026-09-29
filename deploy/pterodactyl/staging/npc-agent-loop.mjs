@@ -609,6 +609,12 @@ export class NpcAgentLoop {
         { tool_name: misplaced.name },
       )
     }
+    return this.parsePlanValue(raw)
+  }
+
+  // The policy that admits the plan's operations. A runtime whose policy
+  // approves more operations (runtime-v8: place_candidate) overrides this.
+  parsePlanValue(raw) {
     return parsePlan(raw)
   }
 

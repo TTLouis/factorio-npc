@@ -1083,6 +1083,31 @@ test('ordinary short-task responses remain backward compatible without project h
 })
 
 
+test('the agent loop admits place_candidate, the operation its prompt advertises (live 2026-09-29)', () => {
+  const agent = new NpcAgentLoop({
+    rcon: new FakeRcon(),
+    memory: new CanonicalTaskBoardMemory(),
+    npcId: 'airi',
+    systemPrompt: 'place candidate admission test',
+    stateFile: null,
+    traceFile: null,
+    decisionTraceFile: null,
+    provider: async () => { throw new Error('unused') },
+  })
+  const parsed = agent.parsePlanMessage(planMessage({
+    plan: ['Place the offshore pump at the shoreline'],
+    currentStep: 0,
+    operations: [{ name: 'place_candidate', args: { candidate_set_id: 'placement-4', candidate_id: 'candidate-2' } }],
+  }))
+  assert.deepEqual(parsed.operations, [{ name: 'place_candidate', args: { candidate_set_id: 'placement-4', candidate_id: 'candidate-2' } }])
+  assert.throws(() => agent.parsePlanMessage(planMessage({
+    plan: ['x'],
+    currentStep: 0,
+    operations: [{ name: 'place_candidate', args: { candidate_set_id: 'placement-4', candidate_id: 'candidate-2', x: 1 } }],
+  })), /Unexpected argument/)
+  assert.throws(() => agent.parsePlanMessage(planMessage({ plan: ['x'], currentStep: 0, operations: [{ name: 'run_lua', args: {} }] })), /Unapproved operation/)
+})
+
 test('retired hierarchy trigger labels do not reintroduce a project payload requirement', () => {
   const agent = new NpcAgentLoop({
     rcon: new FakeRcon(),
