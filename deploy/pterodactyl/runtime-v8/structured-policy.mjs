@@ -809,13 +809,16 @@ export const plannerControlToolDefinitions = [{
                   id: { type: 'string', maxLength: 60 },
                   kind: {
                     type: 'string',
-                    enum: ['research_completed', 'rockets_launched', 'items_produced', 'inventory_count', 'space_location_unlocked'],
-                    description: 'research_completed {technology}; rockets_launched {minimum}; items_produced {item_name, minimum} (force-wide total across all surfaces); inventory_count {item_name, minimum} (AIRI\'s own inventory); space_location_unlocked {name} (Space Age planets/locations).',
+                    enum: ['research_completed', 'rockets_launched', 'items_produced', 'inventory_count', 'space_location_unlocked', 'entity_working', 'electric_network_satisfied', 'production_rate'],
+                    description: 'research_completed {technology}; rockets_launched {minimum}; items_produced {item_name, minimum} (force-wide total across all surfaces); inventory_count {item_name, minimum} (AIRI\'s own inventory); space_location_unlocked {name} (Space Age planets/locations); entity_working {entity_name, minimum} (that many entities of the prototype working now); electric_network_satisfied {entity_name, minimum} (that many powered by a running producer, not short of power); production_rate {item_name, per_minute, window_minutes} (machine output per minute over the last 1 or 10 minutes, hand work excluded). Prove build/power/run goals with the running kinds or production_rate, never with items_produced.',
                   },
                   technology: { type: 'string', maxLength: 100 },
                   item_name: { type: 'string', maxLength: 100 },
                   name: { type: 'string', maxLength: 100 },
                   minimum: { type: 'integer', minimum: 1 },
+                  entity_name: { type: 'string', maxLength: 100 },
+                  per_minute: { type: 'number', exclusiveMinimum: 0, description: 'production_rate only: items per minute.' },
+                  window_minutes: { type: 'integer', enum: [1, 10], description: 'production_rate only: the measured window, default 1.' },
                   countFrom: {
                     type: 'string',
                     enum: ['goal_start', 'save_start'],

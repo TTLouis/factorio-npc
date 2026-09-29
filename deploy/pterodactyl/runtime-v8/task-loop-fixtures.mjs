@@ -86,6 +86,11 @@ export class FakeFactorio {
     this.rocketsLaunched = 0
     this.researched = new Set()
     this.produced = {}
+    // World-state goal readings (plan 3.7), keyed "kind:name": each read takes
+    // the next reading and the last one repeats, so sampling can be scripted.
+    // Every read advances the fake game tick.
+    this.worldReadings = {}
+    this.gameTick = 1000
     this.knownTechnologies = new Set(['automation', 'logistics', 'rocket-silo', 'electronics'])
     this.progressFactsAvailable = true
     // Optional hook run on every admitted batch, for scenarios whose world
@@ -140,6 +145,13 @@ export class FakeFactorio {
     if (request.kind === 'research_completed') {
       if (!this.knownTechnologies.has(request.technology)) return { ok: false, error: 'unknown_technology', technology: request.technology }
       return { ok: true, kind: request.kind, satisfied: this.researched.has(request.technology), technology: request.technology }
+    }
+    if (['entity_working', 'electric_network_satisfied', 'production_rate'].includes(request.kind)) {
+      const queue = this.worldReadings[`${request.kind}:${request.entity_name ?? request.item_name}`]
+      this.gameTick += 60
+      if (!queue || queue.length === 0) return { ok: true, kind: request.kind, satisfied: false, current: 0, tick: this.gameTick }
+      const reading = queue.length > 1 ? queue.shift() : queue[0]
+      return { ok: true, kind: request.kind, tick: this.gameTick, ...reading }
     }
     if (request.kind === 'items_produced') {
       const current = this.produced[request.item_name] ?? 0
