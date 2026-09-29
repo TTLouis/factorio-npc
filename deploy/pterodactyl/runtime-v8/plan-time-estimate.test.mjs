@@ -466,9 +466,15 @@ test('a machine wait on a timed step adds its game-data expectation instead of r
     caption: 'hand mining', long: { long: false }, overrun_traced: false, closed: false,
   })
   timing.activeStepKey = 'goal|step_1'
-  const scheduled = { wait_id: 'condition_1', goal_id: 'goal', step_id: 'step_1', mode: 'completion', expected_seconds: 40 }
+  // The hand work is done at 20 s; the furnace then needs 40 s more.
+  clock = 20_000
+  const scheduled = { wait_id: 'condition_1', goal_id: 'goal', step_id: 'step_1', unit_number: 582, mode: 'completion', expected_seconds: 40 }
   timing.observe('runtime.condition_scheduled', scheduled)
   timing.observe('runtime.condition_scheduled', scheduled)
+  // A second wait on the same furnace reports what remains; it replaces the
+  // first finish instead of adding to it.
+  clock = 45_000
+  timing.observe('runtime.condition_scheduled', { ...scheduled, wait_id: 'condition_4', expected_seconds: 15 })
   // Passive waits and other steps do not count.
   timing.observe('runtime.condition_scheduled', { ...scheduled, wait_id: 'condition_2', mode: 'passive_progress' })
   timing.observe('runtime.condition_scheduled', { ...scheduled, wait_id: 'condition_3', step_id: 'step_2' })
@@ -487,5 +493,23 @@ test('a machine wait on a timed step adds its game-data expectation instead of r
   assert.equal(measured.machine_wait_seconds, 40)
   assert.equal(measured.unexplained_seconds, -10)
   assert.equal(measured.measured_seconds_per_hand_mined_item, 1)
+})
+
+test('seconds per hand-mined item never go negative when machine time exceeds the elapsed time', () => {
+  let clock = 0
+  const timing = new PlanTiming({ now: () => clock })
+  timing.steps.set('goal|step_1', {
+    goal_id: 'goal', step_id: 'step_1', step_index: 0, started_at: 0, actor_id: 18, epoch: 3,
+    expected_seconds: 5, timed: true, lower_bound: false, batches: 1, hand_mined_items: 10,
+    caption: 'hand mining', long: { long: false }, overrun_traced: false, closed: false,
+  })
+  timing.activeStepKey = 'goal|step_1'
+  clock = 5_000
+  timing.observe('runtime.condition_scheduled', { wait_id: 'w', goal_id: 'goal', step_id: 'step_1', unit_number: 7, mode: 'completion', expected_seconds: 95 })
+  clock = 30_000
+  const measured = timing.observe('step.verified', { active_step_id: 'step_1' }, { actorId: 18, epoch: 3 }).after
+    .find(([name]) => name === 'step.time_measured')?.[1]
+  assert.equal(measured.machine_wait_seconds, 95)
+  assert.equal(measured.measured_seconds_per_hand_mined_item, 0)
 })
 

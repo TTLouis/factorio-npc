@@ -299,6 +299,14 @@ export function activeStepOf(state) {
   return { goal_id: state.goal_id, step_id: step.id, step_index: index, status: state.status }
 }
 
+// Machine work beyond the step's hand work: the latest machine finish past the
+// hand estimate (plan 2.5). Zero when no machine wait was scheduled.
+export function machineWaitSeconds(record) {
+  const finishes = Object.values(record?.machine_finish_offsets ?? {}).filter(Number.isFinite)
+  if (finishes.length === 0) return 0
+  return round1(Math.max(0, Math.max(...finishes) - (record.expected_seconds ?? 0)))
+}
+
 // Per-loop timing state: the draft estimate at commit, one record per step
 // that admitted batches, and the current request's time split. Records live
 // in memory only; after a restart an active step has no elapsed time, and the
@@ -422,7 +430,7 @@ export class PlanTiming {
       request.think_ms += data.latency_ms
     }
     if (event === 'tool.call' && request && ESTIMATE_TOOL_NAMES.has(data?.name)) request.estimate_tool_calls++
-    if (event === 'runtime.condition_scheduled') this.noteMachineWait(data)
+    if (event === 'runtime.condition_scheduled') this.noteMachineWait(data, now)
     if (event === 'operations.ack') {
       if (request) {
         if (request.busy_since === undefined) request.busy_since = now
@@ -449,16 +457,17 @@ export class PlanTiming {
   }
 
   // Plan 2.5: a completion wait on a machine checkpoint of a timed step adds
-  // the machine's game-data expectation to that step, so elapsed is compared
-  // with hand work plus machine work, not hand work alone. Counted once per wait.
-  noteMachineWait(data) {
+  // the machine's game-data finish to that step, so elapsed is compared with
+  // hand work plus machine work, not hand work alone. Each machine keeps only
+  // its latest expected finish (time since the step started + remaining), so a
+  // second wait on the same machine replaces, never adds to, the first.
+  noteMachineWait(data, now = this.now()) {
     if (data?.mode !== 'completion' || !Number.isFinite(data?.expected_seconds) || data.expected_seconds < 0) return
     const record = this.steps.get(`${data.goal_id}|${data.step_id}`)
     if (!record || record.closed || !record.timed) return
-    record.machine_wait_ids ??= []
-    if (record.machine_wait_ids.includes(data.wait_id)) return
-    record.machine_wait_ids.push(data.wait_id)
-    record.machine_wait_seconds = round1((record.machine_wait_seconds ?? 0) + data.expected_seconds)
+    const machine = Number.isSafeInteger(data.unit_number) ? `unit:${data.unit_number}` : `wait:${data.wait_id}`
+    record.machine_finish_offsets ??= {}
+    record.machine_finish_offsets[machine] = round1(Math.max(0, (now - record.started_at) / 1000) + data.expected_seconds)
   }
 
   estimateToolCalledThisRequest() {
@@ -538,7 +547,7 @@ export class PlanTiming {
     const elapsed = (now - record.started_at) / 1000
     const expected = record.timed ? record.expected_seconds : undefined
     // Machine work the step waited on (plan 2.5) is expected time too.
-    const machine = record.machine_wait_seconds ?? 0
+    const machine = machineWaitSeconds(record)
     const total = expected !== undefined ? expected + machine : undefined
     return ['step.time_measured', {
       goal_id: record.goal_id,
@@ -554,7 +563,7 @@ export class PlanTiming {
       unexplained_seconds: sameBody && total !== undefined ? round1(elapsed - total) : undefined,
       hand_mined_items: record.hand_mined_items || undefined,
       measured_seconds_per_hand_mined_item: sameBody && record.hand_mined_items > 0 && record.caption === 'hand mining'
-        ? Math.round((elapsed - machine) / record.hand_mined_items * 100) / 100
+        ? Math.round(Math.max(0, elapsed - machine) / record.hand_mined_items * 100) / 100
         : undefined,
       lower_bound: record.lower_bound,
       batches: record.batches,
@@ -578,7 +587,7 @@ export class PlanTiming {
     const record = this.activeRecord(state, identity)
     if (!record) return undefined
     const elapsed = (this.now() - record.started_at) / 1000
-    const machine = record.machine_wait_seconds ?? 0
+    const machine = machineWaitSeconds(record)
     const total = record.expected_seconds + machine
     const ratio = total > 0 ? elapsed / total : undefined
     const overrun = Number.isFinite(ratio) && ratio > OVERRUN_FACTOR
@@ -632,7 +641,7 @@ export class PlanTiming {
     const record = this.activeRecord(state, identity)
     if (record) {
       const elapsed = (this.now() - record.started_at) / 1000
-      const total = record.expected_seconds + (record.machine_wait_seconds ?? 0)
+      const total = record.expected_seconds + machineWaitSeconds(record)
       const ratio = total > 0 ? elapsed / total : undefined
       fields.time_estimate = `step ${record.step_index + 1}: ~${formatDuration(record.expected_seconds)} ${record.caption} on the NPC lane${record.lower_bound ? ' (lower bound)' : ''} · running ${formatDuration(elapsed)}${Number.isFinite(ratio) && ratio > OVERRUN_FACTOR ? ' · OVERRUN' : ''} · walking excluded`
       fields.step_time_index = record.step_index

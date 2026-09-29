@@ -18,7 +18,8 @@ The ore sits inside reach, so no walking is measured. Two numbers per run:
 Measured on 2.0.77 (2026-09-28): iron ore 121 ticks per ore at the base speed
 (formula 120) and 60 at +100% (formula 60); iron gear wheel 31 ticks per craft
 (formula 30) and 16 at +100% (formula 15). The engine adds at most one tick per
-cycle, so the tolerance is one tick per cycle, not a percentage.
+cycle, so the tolerance is that tick plus half a tick of sampling slack per
+cycle (1.5 ticks), not a percentage.
 
 The unnamed hand-craft estimate request is exactly the one the plan-time
 estimate sends; with Space Age loaded it was refused as ambiguous for gears
@@ -50,6 +51,9 @@ CRAFT_COUNT = 8
 MODIFIERS = (0, 1)
 # One game tick per cycle is the engine's time resolution.
 TICK = 1 / 60
+# The engine's one-tick overhead per cycle plus sampling slack; exactly one
+# tick would fail on float rounding when the overhead is exactly one tick.
+CYCLE_TOLERANCE = 1.5 * TICK
 
 
 def require(condition: bool, message: object) -> None:
@@ -239,8 +243,8 @@ def run(client: Rcon, results: Path) -> None:
         require(isinstance(step_seconds, (int, float)) and abs(step_seconds - formula) <= 1e-3
                 and abs((record['estimate_total_seconds'] or 0) - formula * count) <= 1e-3,
                 {'context': context, 'message': 'production_estimate differs from the formula', 'record': record})
-        # The engine must do the work at that rate: within one tick per cycle.
-        require(per_cycle is not None and abs(per_cycle - formula) <= TICK,
+        # The engine must do the work at that rate: within CYCLE_TOLERANCE per cycle.
+        require(per_cycle is not None and abs(per_cycle - formula) <= CYCLE_TOLERANCE,
                 {'context': context, 'message': 'measured per-cycle time differs from the formula', 'record': record})
         # End to end: the start of the operation and one polling step (a few ticks) on top.
         require(abs(record['end_to_end_seconds_per_item'] - formula) <= formula * 0.1 + 10 * TICK / count,
