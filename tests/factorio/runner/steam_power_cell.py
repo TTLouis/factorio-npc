@@ -906,7 +906,8 @@ def run(client: Rcon, results: Path) -> None:
 
         def furnace_state(context: str) -> dict:
             return json_command(
-                "/silent-command local f=game.get_entity_by_unit_number(" + str(furnace_unit) + "); "
+                "/silent-command local f=nil; for _,e in pairs(game.surfaces[1].find_entities_filtered{name='stone-furnace'}) do "
+                f"if e.unit_number=={furnace_unit} then f=e end end; assert(f); "
                 "rcon.print(helpers.table_to_json({tick=game.tick,ore=f.get_inventory(defines.inventory.furnace_source).get_item_count('iron-ore'),"
                 "plates=f.get_inventory(defines.inventory.furnace_result).get_item_count('iron-plate')}))",
                 context, record=False)

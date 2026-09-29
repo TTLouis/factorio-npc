@@ -218,7 +218,7 @@ describe('production_rate', () => {
 })
 
 describe('production_rate with a hand-fed machine', () => {
-  interface FakeMachine { valid: boolean, unit_number: number, name: string, type: string, surface: { index: number }, input: Record<string, number> }
+  interface FakeMachine { valid: boolean, unit_number: number, name: string, type: string, position: { x: number, y: number }, surface: { index: number }, input: Record<string, number> }
   let machines: Record<number, FakeMachine> = {}
 
   function inventory(index: number, name: string, contents: () => Record<string, number>) {
@@ -227,7 +227,7 @@ describe('production_rate with a hand-fed machine', () => {
 
   // Slots as the engine names them for a furnace: fuel, input, output.
   function furnace(unit_number: number, input: Record<string, number>): any {
-    const machine: FakeMachine = { valid: true, unit_number, name: 'stone-furnace', type: 'furnace', surface: SURFACES[1], input }
+    const machine: FakeMachine = { valid: true, unit_number, name: 'stone-furnace', type: 'furnace', position: { x: unit_number * 3, y: 4 }, surface: SURFACES[1], input }
     const fuel = inventory(1, 'fuel', () => ({ coal: 5 }))
     const source = inventory(2, 'crafter_input', () => machine.input)
     const output = inventory(3, 'crafter_output', () => ({ 'iron-plate': 9 }))
@@ -243,7 +243,14 @@ describe('production_rate with a hand-fed machine', () => {
 
   beforeEach(() => {
     machines = {}
-    ;(globalThis as any).game.get_entity_by_unit_number = (unit: number) => machines[unit]
+    // Furnaces are not indexed by game.get_entity_by_unit_number (engine 2.0.77),
+    // so the fake game does not answer it; they are found on their surface.
+    ;(globalThis as any).game.get_entity_by_unit_number = () => undefined
+    ;(globalThis as any).game.get_surface = () => ({
+      valid: true,
+      find_entities_filtered: (filter: { name: string, position: { x: number, y: number }, radius: number }) => Object.values(machines)
+        .filter(machine => machine.name === filter.name && Math.hypot(machine.position.x - filter.position.x, machine.position.y - filter.position.y) <= filter.radius),
+    })
   })
 
   it('stays void past 1.1x the window while the machine still holds hand-fed ore, and clears when it is used up', () => {
@@ -267,7 +274,7 @@ describe('production_rate with a hand-fed machine', () => {
     flows = { 'iron-plate': { [PRECISION.one_minute]: 20 } }
     const stone = furnace(8, { 'iron-ore': 50 })
     record_hand_insert(1, 'coal', 'stone-furnace', 'furnace', true, stone)
-    const chest = { valid: true, unit_number: 9, name: 'wooden-chest', type: 'container', surface: SURFACES[1] }
+    const chest = { valid: true, unit_number: 9, name: 'wooden-chest', type: 'container', position: { x: 1, y: 1 }, surface: SURFACES[1] }
     machines[9] = chest as any
     record_hand_insert(1, 'iron-ore', 'wooden-chest', 'container', false, chest as any)
     ;(globalThis as any).game.tick += 4000

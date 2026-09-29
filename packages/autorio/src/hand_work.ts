@@ -24,7 +24,7 @@
 // machines per force, so storage stays bounded and save/load safe (plain
 // numbers and strings only).
 
-import type { LuaEntity, LuaSurface, UnitNumber } from 'factorio:runtime'
+import type { LuaEntity, LuaSurface, SurfaceIndex } from 'factorio:runtime'
 import { entity_role_inventories, has_separate_output } from './inventory_roles'
 
 /** Fed machines remembered per force; more than this voids every window for a long while. */
@@ -37,6 +37,9 @@ const FED_OVERFLOW_HOLD_TICKS = 20 * 3600
 interface FedEntity {
   unit_number: number
   surface_index: number
+  /** Where the machine stands; it is looked up again by this, see resolve_fed_entity. */
+  x: number
+  y: number
   entity_name: string
   /** Hand-inserted items still to be found in the machine's input. */
   items: string[]
@@ -132,7 +135,22 @@ function remember_fed_entity(work: ForceHandWork, entity: LuaEntity, item_name: 
     work.fed_overflow_tick = game.tick
     return
   }
-  remaining.push({ unit_number, surface_index: entity.surface.index, entity_name: entity.name, items: [item_name], tick: game.tick })
+  remaining.push({ unit_number, surface_index: entity.surface.index, x: entity.position.x, y: entity.position.y, entity_name: entity.name, items: [item_name], tick: game.tick })
+}
+
+/**
+ * The fed machine, or undefined when it is gone. game.get_entity_by_unit_number
+ * only indexes prototypes flagged for it (furnaces and assemblers are not, engine
+ * 2.0.77), so the machine is found again by position, name and unit number, the
+ * way entity_reference.ts does.
+ */
+function resolve_fed_entity(entry: FedEntity): LuaEntity | undefined {
+  const surface = game.get_surface(entry.surface_index as SurfaceIndex)
+  if (!surface || !surface.valid) return undefined
+  for (const candidate of surface.find_entities_filtered({ position: { x: entry.x, y: entry.y }, radius: 0.25, name: entry.entity_name })) {
+    if (candidate.valid && candidate.unit_number === entry.unit_number) return candidate
+  }
+  return undefined
 }
 
 /** Whether the machine's input inventories still hold a hand-inserted item. */
@@ -154,7 +172,7 @@ function prune_fed(work: ForceHandWork) {
   const kept: FedEntity[] = []
   let still_fed: FedEntity | undefined
   for (const entry of work.fed ?? []) {
-    const entity = game.get_entity_by_unit_number(entry.unit_number as UnitNumber)
+    const entity = resolve_fed_entity(entry)
     if (entity === undefined || !entity.valid || !holds_hand_fed_input(entity, entry)) {
       work.fed_end_tick = game.tick
       work.fed_end_item = entry.items[0]
