@@ -106,6 +106,21 @@ const OUTPUT_BUDGET_RECOVERY_MESSAGE = '[HARNESS] The immediately preceding prov
 // but leave room for reasoning plus a complete submitPlan argument object.
 const ACTION_OMISSION_MAX_TOKENS = 2048
 const ACTION_OMISSION_BLOCKER_PREFIX = 'BLOCKED:'
+// A shelf node's required field is `intent`. Models answering in plain JSON
+// (no tool schema on a closed round) have written `text` or `description`
+// instead, and the sanitizer then dropped every node without a word. Map those
+// names onto intent; everything else still goes through sanitizeShelfNode.
+export function normalizeRoadmapNodes(nodes) {
+  return nodes.slice(0, 64).map(node => {
+    if (!node || typeof node !== 'object' || Array.isArray(node)) return node
+    if (typeof node.intent === 'string' && node.intent.trim()) return node
+    const alias = ['text', 'description', 'title'].find(key => typeof node[key] === 'string' && node[key].trim())
+    if (!alias) return node
+    const { [alias]: value, ...rest } = node
+    return { ...rest, intent: value }
+  })
+}
+
 const ACTION_OMISSION_REPAIR_MESSAGE = 'Finite canonical work remains, but no executable operation was submitted. Reuse the authoritative evidence already collected and do not repeat completed observations. If that evidence already parameterizes the next action, submit the next executable operation now. If exactly one mutable fact is genuinely missing, use exactly one targeted observation for that fact; after it, no more observation turns are allowed. Do not stop and wait for a human "continue" message. Otherwise keep the remaining plan and start chatMessage with "BLOCKED: " followed by the exact missing fact or truthful blocker.'
 // The act-or-block repair also has to offer the Slice C close: a planner that
 // judges a prose-only step already done has no operation to submit, and live
@@ -193,7 +208,7 @@ Within [PLANNING_STATE], Shelf nodes are storage: they record intent and lineage
 
 Every goal starts with a goal definition. On the FIRST plan of a goal, add goal to submitPlan: {scope, summary, doneWhen}. summary restates in one sentence what the player asked for; the player sees it in game as your understanding. doneWhen lists the game-checkable conditions that together prove the goal is complete, each with exactly these fields and exact Factorio internal names: {"kind":"inventory_count","item_name":"stone-furnace","minimum":1}, {"kind":"items_produced","item_name":"iron-plate","minimum":100}, {"kind":"research_completed","technology":"automation"}, {"kind":"rockets_launched","minimum":1}, {"kind":"space_location_unlocked","name":"vulcanus"}. inventory_count is what SGLuna holds when the goal ends, after crafting consumed its ingredients. rockets_launched and items_produced count from when the goal starts (countFrom "goal_start", the default), so "launch a rocket" needs a new launch; use countFrom "save_start" only when the player means the save's lifetime total. The harness, not you, decides completion: it reads doneWhen from the game at the end of every plan slice, so finishing a plan's steps never completes a goal by itself, and you never need to claim the goal is done. Use scope "finite" only when one plan of at most 30 steps completes the goal; otherwise use "long_horizon" and send the roadmap shelf on that same first plan. Omit goal on later plans of the same goal.
 
-You author the shelf through the optional roadmap field on submitPlan: a short list of coarse nodes, each stating what should eventually be true for the goal and why it matters. Keep them at that altitude — a node is not a step, carries no operations, and never claims its own progress; the harness derives realization from verified results and strips anything executable. For a long-horizon goal, send the shelf on the first plan of that goal. Afterwards it only moves when verified world state has actually invalidated the guidance, so restate the nodes that still apply with their original ids (omitting a node marks it invalidated and keeps its lineage), and do not re-send an unchanged shelf just to restate a preference.
+You author the shelf through the optional roadmap field on submitPlan: a short list of coarse nodes, each stating what should eventually be true for the goal and why it matters, shaped {"id":"n1","intent":"...","why_it_matters":"...","depends_on":["n0"]} (intent is required). Keep them at that altitude — a node is not a step, carries no operations, and never claims its own progress; the harness derives realization from verified results and strips anything executable. For a long-horizon goal, send the shelf on the first plan of that goal. Afterwards it only moves when verified world state has actually invalidated the guidance, so restate the nodes that still apply with their original ids (omitting a node marks it invalidated and keeps its lineage), and do not re-send an unchanged shelf just to restate a preference.
 
 When a draft intentionally refines one or more existing Shelf nodes, add roadmapNodeIds beside plan/currentStep/operations and choose stable ids from [PLANNING_STATE].steering.refinement_candidates or the current shelf. On the first long-horizon submission you may create the shelf with roadmap and select ids from those same nodes in roadmapNodeIds. This is lineage, not execution authority; never invent an id for a node that is not on the admitted shelf.
 
@@ -5114,10 +5129,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       )
     }
     const hasShelf = continuing && (planning.roadmap?.nodes?.length ?? 0) > 0
-    if (plan.goalDefinition.scope === GOAL_SCOPE.LONG_HORIZON && !(plan.roadmap?.length > 0) && !hasShelf) {
+    // A node without an intent is dropped by the shelf sanitizer, so count only
+    // usable nodes: the live 2026-09-29 run sent {id, text} and got an empty shelf.
+    const usableRoadmap = Array.isArray(plan.roadmap) && plan.roadmap.some(node => typeof node?.intent === 'string' && node.intent.trim())
+    if (plan.goalDefinition.scope === GOAL_SCOPE.LONG_HORIZON && !usableRoadmap && !hasShelf) {
       throw this.goalDefinitionError(
         'long_horizon_goal_requires_roadmap',
-        'goal.scope is long_horizon, so this first plan must also send roadmap: the coarse Roadmap Shelf nodes (what must eventually be true, in dependency order) that later plan slices will refine.',
+        'goal.scope is long_horizon, so this first plan must also send roadmap: the coarse Roadmap Shelf nodes (what must eventually be true, in dependency order) that later plan slices will refine. Each node is {"id":"n1","intent":"what must eventually be true","why_it_matters":"...","depends_on":[]}; intent is required.',
       )
     }
     this.goalDefinitionRetries = 0
@@ -6724,7 +6742,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         // anything that is not a step/operation has to be lifted off here or the
         // whole submission is rejected as an unexpected argument. `project` used
         // to be parsed by submitPlan and then die exactly here.
-        if (Array.isArray(raw.roadmap)) roadmap = raw.roadmap
+        if (Array.isArray(raw.roadmap)) roadmap = normalizeRoadmapNodes(raw.roadmap)
         if (Object.prototype.hasOwnProperty.call(raw, 'goal')) {
           try { goalDefinition = sanitizeGoalDefinition(raw.goal) }
           catch (error) {

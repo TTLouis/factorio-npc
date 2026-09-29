@@ -264,6 +264,32 @@ test('a valid interaction-router reply is not traced as an invalid plan', async 
   assert.equal(planner._airiProvider.diagnostic_code, 'provider_content_schema_invalid')
 })
 
+test('a plan carrying goal and roadmap extensions is not traced as an invalid plan (live 2026-09-29)', async () => {
+  const content = JSON.stringify({
+    chatMessage: '',
+    goal: { scope: 'long_horizon', summary: 'Steam power', doneWhen: [{ kind: 'research_completed', technology: 'steam-power' }] },
+    roadmap: [{ id: 'n1', intent: 'Raw supply near start.' }],
+    roadmapNodeIds: ['n1'],
+    developmentMode: 'vertical',
+    plan: ['Gather 10 iron ore'],
+    currentStep: 0,
+    operations: [{ name: 'gather_resource', args: { resource_name: 'iron-ore', count: 10 } }],
+  })
+  const planner = await providerRequest(config(), [
+    { role: 'system', content: 'system' },
+    { role: 'user', content: '[CHAT] tester: get steam power going' },
+  ], {
+    allowTools: false,
+    fetchImpl: async () => new Response(JSON.stringify({
+      id: 'plan-response',
+      model: 'deepseek-flash',
+      choices: [{ finish_reason: 'stop', message: { role: 'assistant', content } }],
+      usage: { prompt_tokens: 580, completion_tokens: 17, total_tokens: 597 },
+    }), { status: 200, headers: { 'content-type': 'application/json' } }),
+  })
+  assert.equal(planner._airiProvider.diagnostic_code, 'ok', JSON.stringify(planner._airiProvider.structured_content))
+})
+
 test('explicit caller max_tokens remains authoritative over reasoning policy budget', async () => {
   const { seen } = await captureRequest([
     { role: 'system', content: 'system' },

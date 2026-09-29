@@ -458,6 +458,12 @@ function structuredContentDiagnostics(content, { planContract = true } = {}) {
   // plan; checking it against the plan schema marked every router reply as
   // provider_content_schema_invalid in the trace. Its caller validates it.
   if (!planContract) return { json_valid: true }
+  // The agent loop lifts these plan-surface extensions off before parsePlan;
+  // checking them here flagged every goal/roadmap plan as schema-invalid.
+  const PLAN_EXTENSION_KEYS = ['checkpoint', 'semanticCompletion', 'roadmap', 'roadmapNodeIds', 'developmentMode', 'goal', 'timeReview']
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    parsed = Object.fromEntries(Object.entries(parsed).filter(([key]) => !PLAN_EXTENSION_KEYS.includes(key)))
+  }
   try {
     parsePlan(parsed)
     return { json_valid: true, plan_valid: true }

@@ -238,6 +238,36 @@ test('a long-horizon definition without a Roadmap Shelf is asked again', async (
   assert.equal(memory.planningState(KEY).roadmap.nodes.length, 3)
 })
 
+test('a shelf written with text instead of intent is kept, and a shelf with no usable node is asked again (live 2026-09-29)', async () => {
+  const game = new FakeFactorio()
+  const memory = new CanonicalTaskBoardMemory()
+  const prompts = []
+  let calls = 0
+  const agent = agentWith(game, memory, async messages => {
+    calls++
+    prompts.push(lastConversationMessage(messages))
+    const base = { plan: ['Gather 10 iron ore'], operations: [gather('iron-ore', 10)], checkpoint: inventoryCheckpoint('iron-ore', 10), goal: ROCKET_GOAL }
+    if (calls === 1) return planReply({ ...base, roadmap: [{ id: 'n1', note: 'no intent here' }] })
+    return planReply({ ...base, roadmap: [
+      { id: 'n1', text: 'Raw supply near start is available.' },
+      { id: 'n2', description: 'Steam power feeds a connected grid.' },
+      { id: 'n3', intent: 'An electric drill mines iron ore.', text: 'ignored alias' },
+    ] })
+  })
+
+  await agent.request('launch a rocket', { sender: 'Louis' })
+
+  assert.equal(calls, 2)
+  assert.match(prompts[1], /long_horizon_goal_requires_roadmap/)
+  assert.match(prompts[1], /intent is required/)
+  const nodes = memory.planningState(KEY).roadmap.nodes
+  assert.deepEqual(nodes.map(node => [node.id, node.intent]), [
+    ['n1', 'Raw supply near start is available.'],
+    ['n2', 'Steam power feeds a connected grid.'],
+    ['n3', 'An electric drill mines iron ore.'],
+  ])
+})
+
 test('finishing a slice does not finish the goal: the game decides, then the goal completes', async () => {
   const game = new FakeFactorio()
   const memory = new CanonicalTaskBoardMemory()
