@@ -6019,7 +6019,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       : ''
     try {
       return await this.continueFromModMessage(
-        `[MOD] Autorio operation error: ${cleanError}. Dependent queued operations may have been cancelled. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}${recoverableGuidance}`,
+        `[MOD] Autorio operation error: ${cleanError}. A failure cancels the operations queued behind it; a refused item move (nothing moved, items still held) does not, so read the receipt for which operations completed. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}${recoverableGuidance}`,
         'factorio.error_continuation',
       )
     }

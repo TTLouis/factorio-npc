@@ -4,7 +4,7 @@ import test from 'node:test'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
-import { compactCompletionReceipt } from './provider-base.mjs'
+import { COMPACT_CONTINUATION_PROMPT, compactCompletionReceipt } from './provider-base.mjs'
 
 function deployment() {
   return {
@@ -385,6 +385,19 @@ test('compact continuation rounds keep the stays-open line ahead of the compact 
   assert.match(compact, /^\[MOD\] Autorio operation batch completed\. \[HARNESS\] Step "x" stays open\. Compact task receipt: \{/)
   // A plain receipt is unchanged in shape.
   assert.match(compactCompletionReceipt('[MOD] Autorio operation batch completed. Detailed task receipt: {"task_state":"idle"}'), /^\[MOD\] Autorio operation batch completed\. Compact task receipt: \{/)
+})
+
+// 1.6: one refused item move no longer cancels its independent siblings, so
+// the failure line must not claim that dependents were cancelled.
+test('the operation-error line matches the 1.6 refusal behaviour instead of claiming dependents were cancelled', async () => {
+  const { agent, sent } = completionAgent({ stone: 10 })
+  await agent.failed('move_items_exact failed: nothing_moved')
+
+  assert.equal(sent.length, 1)
+  assert.match(sent[0], /^\[MOD\] Autorio operation error: move_items_exact failed: nothing_moved\./)
+  assert.match(sent[0], /A failure cancels the operations queued behind it; a refused item move \(nothing moved, items still held\) does not/)
+  assert.doesNotMatch(sent[0], /Dependent queued operations may have been cancelled/)
+  assert.match(COMPACT_CONTINUATION_PROMPT, /a refused item move into an entity \(nothing moved, items still held\) does not/)
 })
 
 test('a step with a contract gets no stays-open line', async () => {
