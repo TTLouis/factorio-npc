@@ -16,7 +16,7 @@ test('compact continuation prompt batches deterministic work at observation boun
   assert.match(prompt, /known targets in the current area/)
   assert.match(prompt, /Do not invent targets or reorder user constraints, prerequisites, or observation-dependent work/)
   assert.match(prompt, /Do not insert wait between finite Autorio operations/)
-  assert.match(prompt, /do not walk AIRI onto an exact future build coordinate/i)
+  assert.match(prompt, /do not walk SGLuna onto an exact future build coordinate/i)
   assert.match(prompt, /placing:not_placeable/)
   assert.match(prompt, /walk_to_entity_exact/)
   assert.match(prompt, /walk_to_position/)

@@ -132,6 +132,22 @@ export function operationTypeCatalogForScope(scope) {
   return operationTypeCatalog().filter(entry => allowed.has(entry.name))
 }
 
+// Nested argument shapes the flat metadata cannot express; keyed "name.arg".
+const OPERATION_ARGUMENT_SHAPES = Object.freeze({
+  'supply_entity.items': 'items:[{item_name,count}]',
+})
+
+// One line naming every approved operation with its argument keys ("?" marks
+// an optional key), rendered from the catalog so the full and compact model
+// prompts cannot drift from the runtime. Deterministic for a given catalog,
+// which keeps the prompt prefix byte-stable.
+export function approvedOperationListText() {
+  return operationTypeCatalog().map((entry) => {
+    const args = Object.entries(entry.arguments).map(([key, meta]) => `${OPERATION_ARGUMENT_SHAPES[`${entry.name}.${key}`] ?? key}${meta.required === false ? '?' : ''}`)
+    return `${entry.name} {${args.join(',')}}`
+  }).join('; ')
+}
+
 export function parseOperation(value) {
   if (value?.name !== 'place_candidate') return base.parseOperation(value)
   check(value && typeof value === 'object' && !Array.isArray(value), 'Operation must be an object')
@@ -701,7 +717,7 @@ export const plannerControlToolDefinitions = [{
             additionalProperties: false,
             required: ['name', 'args'],
             properties: {
-              name: { type: 'string', minLength: 1, maxLength: 100 },
+              name: { type: 'string', enum: approvedOperationNames() },
               args: { type: 'object' },
             },
           },

@@ -56,6 +56,7 @@ import {
   sanitizeStepCompletionContract,
 } from './step-completion.mjs'
 import {
+  approvedOperationListText,
   isObservationToolName,
   observationToolFamily,
   observationToolTier,
@@ -215,6 +216,11 @@ When finite canonical work remains but execution is truthfully impossible, keep 
 Before a non-empty operation batch, chatMessage should tell the human what concrete current plan step AIRI is about to attempt. Do not say mining, construction, transfer, crafting, or any other mutation has started unless that mutation is in the admitted/running operation batch or authoritative runtime evidence proves it. Navigation completion proves arrival only; it never proves that a later mining or construction action started. [MOD] completion/error messages may include a detailed getTaskStatus snapshot. Use that receipt plus any needed read-only verification to advance, replan, complete, or report a blocker.
 
 Skill lifecycle is explicit. findSkills is discovery only: a search result is not a loaded skill and must not be relied on as the full pattern. Before following a discovered skill, call getSkillDetails for that exact id. A [SKILL_CONTEXT] message contains only skills explicitly opened with getSkillDetails for the current logical task. Reuse their structure and constraints, but revalidate mutable world state, recipes, inventory, geometry, and placement with live deterministic tools before acting.
+
+### Complete operation list
+
+Every operation you may emit, with its argument keys ("?" marks an optional key). The operation prose earlier in this prompt may omit some of them; any name not on this list is rejected. place_candidate takes ids from getPlacementCandidates, execute_construction_plan takes the validation_id from validateConstructionPlan, and launch_rocket needs a live rocket-silo unit_number.
+${approvedOperationListText()}.
 `.trim()
 
 function cleanMemoryText(value, max) {

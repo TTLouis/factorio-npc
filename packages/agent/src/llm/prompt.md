@@ -205,7 +205,7 @@ Do not infer orientation from sprites or remembered yellow-arrow graphics. For p
 - wait
   args: { "ticks": integer }
 
-Never emit arbitrary Lua, `game.*` calls, console commands, shell commands, or operation names outside this list.
+Never emit arbitrary Lua, `game.*` calls, console commands, shell commands, or operation names outside the approved operation list. The runtime appends the complete list at the end of this prompt; use it if an operation is not described above.
 
 ## Runtime messages and memory
 
