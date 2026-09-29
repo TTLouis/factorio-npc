@@ -379,10 +379,27 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return planTrackerView(this.planningState(key))
   }
 
+  /**
+   * An ACTIVE reducer goal that never got a plan or a legacy record: its
+   * request failed before recordPlan. It must not capture a later, different
+   * request (which would be rewritten to the old objective); that request is
+   * admitted as a new goal instead.
+   */
+  #isOrphanGoalForObjective(key, planning, objective) {
+    if (planning?.goal?.status !== GOAL_STATUS.ACTIVE) return false
+    // A shelf on the goal means work was already built on it (the planner
+    // decomposed the goal); only a bare goal, admitted and then abandoned, is
+    // an orphan.
+    if (getActivePlan(planning) || this.planByNpc.get(key) || planning.roadmap) return false
+    const normalize = value => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, 1000)
+    const incoming = normalize(objective)
+    return incoming.length > 0 && incoming !== normalize(planning.goal.objective)
+  }
+
   admitPlanningGoal(key, { owner = 'unknown', objective = '', goalId, now = Date.now() } = {}) {
     if (!key || typeof objective !== 'string' || !objective.trim()) return this.planningState(key)
     const current = this.planningState(key)
-    if (current?.goal?.status === GOAL_STATUS.ACTIVE) return current
+    if (current?.goal?.status === GOAL_STATUS.ACTIVE && !this.#isOrphanGoalForObjective(key, current, objective)) return current
     // The reducer mints the goal id (GOAL_ACCEPTED). A caller-supplied id is
     // only honoured for tests/migration that must pin one.
     const next = applyPlanningEvent(current ?? createEmptyPlanningState(), {
@@ -406,7 +423,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     if (!key) return undefined
     const planning = this.planningByNpc.get(key)
     if (planning?.goal?.status === GOAL_STATUS.ACTIVE
-      && getActivePlan(planning)?.status !== PLAN_STATUS.CANCELLED) {
+      && getActivePlan(planning)?.status !== PLAN_STATUS.CANCELLED
+      && !this.#isOrphanGoalForObjective(key, planning, requestInfo?.text)) {
       return planning.goal.goal_id
     }
     const objective = typeof requestInfo?.text === 'string' ? requestInfo.text.trim() : ''
@@ -846,6 +864,10 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       })
     }
     this.planningByNpc.set(key, planning)
+    // Whenever a goal is admitted for a record that already carries run state
+    // (pause, wait, recovery, follow runtime, locators), seed the reducer run
+    // now, so a later mirrorRunToLegacy cannot null those legacy fields.
+    this.seedRunFromLegacy(key, state)
     this.syncPlanningState(key, state)
     return planning
   }
@@ -1177,6 +1199,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
 
     const priorLegacy = key ? this.planByNpc.get(key) : undefined
     const priorPlanning = key ? this.planningByNpc.get(key) : undefined
+    const orphanedGoal = this.#isOrphanGoalForObjective(key, priorPlanning, requestInfo?.text)
     const blockedPlan = getActivePlan(priorPlanning)
     const explicitRevision = blockedPlan?.status === PLAN_STATUS.BLOCKED
       && blockedPlan.blocker?.user_choice?.choice === 'revise'
@@ -1227,6 +1250,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const priorReducerPlan = getActivePlan(priorPlanning)
     const reuseReducerGoal = priorPlanning?.goal?.status === GOAL_STATUS.ACTIVE
       && priorReducerPlan?.status !== PLAN_STATUS.CANCELLED
+      && !orphanedGoal
     if (result?.state && reuseReducerGoal) {
       result.state.goal_id = priorPlanning.goal.goal_id
       result.state.owner = priorPlanning.goal.owner
