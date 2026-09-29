@@ -7877,7 +7877,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
         this.messages.push({
           role: 'user',
-          content: `[HARNESS] Your semanticCompletion for step ${JSON.stringify(cleanMemoryText(plan.semanticCompletion.stepId, 100))} was not applied (${reason}); the step stays open. Do not repeat the claim. Continue the step's work, or add a checkpoint {mode,requirements} whose world state the runtime can verify.`,
+          content: `[HARNESS] Your semanticCompletion for step ${JSON.stringify(cleanMemoryText(plan.semanticCompletion.stepId, 100))} was not applied (${reason}); the step stays open. ${reason.startsWith('plan_not_committed')
+            ? 'The plan is not committed yet, so no step can close; the claim can be made again once the plan has been committed by submitting its operations.'
+            : 'Do not repeat the claim. Continue the step\'s work, or add a checkpoint {mode,requirements} whose world state the runtime can verify.'}`,
         })
         return this.runTurn()
       }
@@ -7962,7 +7964,23 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!conditionWait && commands.length === 0 && remainingCanonicalWork && !runtimeHealthy && !explicitBlocker) {
       const candidate = this.checkpointWaitCandidate(previousState) ?? this.passiveProgressWaitCandidate(previousState)
       if (candidate && this.requestInfo) {
-        const waiting = this.memory.registerConditionWait?.(this.requestInfo.memoryKey, candidate)
+        // A wait closes its step through the reducer, which only closes
+        // admitted work. On a zero-operation turn no preflight commit has run,
+        // so a still-uncommitted draft is committed here as runtime-admitted
+        // work (the zero-operation counterpart of the preflight commit: there
+        // are no operations to preflight). If the reducer will not admit it,
+        // no wait is registered and the turn takes the ordinary no-action path
+        // instead of waiting on a step that can never close.
+        const key = this.requestInfo.memoryKey
+        const draft = getActivePlanningPlan(this.memory.planningState?.(key))
+        if (draft && [PLAN_STATUS.DRAFT, PLAN_STATUS.RUNTIME_VALIDATION, PLAN_STATUS.READY].includes(draft.status)
+          && typeof this.memory.commitPlanningPlan === 'function') {
+          this.memory.commitPlanningPlan(key, { now: Date.now(), runtime_validation: { passed: true } })
+          await this.persistState()
+        }
+        const planAfter = getActivePlanningPlan(this.memory.planningState?.(key))
+        const admitted = !planAfter || FROZEN_PLAN_STATUSES.has(planAfter.status)
+        const waiting = admitted ? this.memory.registerConditionWait?.(key, candidate) : undefined
         if (waiting?.condition_wait) {
           conditionWait = waiting.condition_wait
           await this.persistState()

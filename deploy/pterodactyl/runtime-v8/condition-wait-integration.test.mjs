@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
+import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 import { makeConditionWait } from './step-completion.mjs'
 
 function deployment() {
@@ -160,13 +161,17 @@ function decisionResponse(route = 'wait_runtime') {
   }
 }
 
-function makeAgent({ decisionProvider, provider } = {}) {
+function makeAgent({ decisionProvider, provider, committed = false } = {}) {
   const memory = new CanonicalTaskBoardMemory()
   memory.planByNpc.set('npc:airi', state())
-  // A condition wait only exists on admitted work, and a step close is decided
-  // in the reducer first (3.3 move 5): the fixture's plan is committed.
-  memory.ensurePlanningDraft('npc:airi', memory.planByNpc.get('npc:airi'), { now: 1 })
-  memory.commitPlanningPlan('npc:airi', { now: 2, runtime_validation: { passed: true } })
+  // A step close is decided in the reducer first (3.3 move 5), which only
+  // closes admitted work. Tests that place a wait directly (bypassing
+  // registration) ask for a committed plan; the registration path itself is
+  // tested from an uncommitted draft.
+  if (committed) {
+    memory.ensurePlanningDraft('npc:airi', memory.planByNpc.get('npc:airi'), { now: 1 })
+    memory.commitPlanningPlan('npc:airi', { now: 2, runtime_validation: { passed: true } })
+  }
   const rcon = new ConditionRcon()
   let mainCalls = 0
   const agent = new NpcAgentLoop({
@@ -243,8 +248,57 @@ test('unchanged passive progress polls without waking the main planner', async (
   assert.equal(mainCalls(), 0)
 })
 
-test('grounded inventory condition advances exactly one canonical step once satisfied', async () => {
+test('a wait on a still-uncommitted draft is never registered as a wait the reducer cannot close: registration commits the draft, and the wait then closes its step', async () => {
   const { agent, memory, rcon } = makeAgent()
+  memory.ensurePlanningDraft('npc:airi', memory.planByNpc.get('npc:airi'), { now: 1 })
+  assert.equal(getActivePlan(memory.planningState('npc:airi')).status, PLAN_STATUS.DRAFT, 'a zero-operation draft that no preflight ever committed')
+  agent.recordLiveEntityObservation({
+    name: 'stone-furnace', type: 'furnace', unit_number: 582, position: { x: 4, y: 0 }, working: true, status: 1,
+  }, { x: 0, y: 0 }, 'getEntityStatus')
+
+  await agent.commitPlan({
+    chatMessage: 'The machine is still making progress.',
+    plan: ['Smelt required material', 'Craft requested item'],
+    currentStep: 0,
+    operations: [],
+  })
+
+  const durable = memory.planByNpc.get('npc:airi')
+  assert.equal(durable.condition_wait?.state, 'active')
+  assert.equal(getActivePlan(memory.planningState('npc:airi')).status, PLAN_STATUS.COMMITTED, 'the wait registered on admitted work')
+
+  durable.condition_wait = makeConditionWait(
+    { kind: 'inventory_count', item_name: 'iron-plate', minimum: 9 },
+    { goalId: durable.goal_id, stepId: durable.task_board.active_step_id, actorId: agent.epoch.actor_id, actorEpoch: agent.epoch.epoch, maxChecks: 10 },
+  )
+  rcon.inventoryCount = 9
+  const verified = await agent.pollConditionWait()
+  assert.equal(verified.action, 'verified')
+  assert.equal(verified.state.task_board.completed_count, 1)
+  assert.equal(getActivePlan(memory.planningState('npc:airi')).active_step_index, 1)
+})
+
+test('a wait that reaches the close on an uncommitted draft is cleared and handed back once, not re-polled forever', async () => {
+  const { agent, memory, rcon } = makeAgent()
+  memory.ensurePlanningDraft('npc:airi', memory.planByNpc.get('npc:airi'), { now: 1 })
+  const durable = memory.planByNpc.get('npc:airi')
+  durable.condition_wait = makeConditionWait(
+    { kind: 'inventory_count', item_name: 'iron-plate', minimum: 9 },
+    { goalId: durable.goal_id, stepId: durable.task_board.active_step_id, actorId: agent.epoch.actor_id, actorEpoch: agent.epoch.epoch, maxChecks: 10 },
+  )
+  rcon.inventoryCount = 9
+
+  const handedBack = await agent.pollConditionWait()
+
+  assert.equal(handedBack.action, 'wake')
+  assert.equal(handedBack.reason, 'plan_not_committed')
+  assert.equal(memory.planByNpc.get('npc:airi').condition_wait, undefined, 'the wait is gone, so nothing polls it again')
+  assert.equal(memory.planByNpc.get('npc:airi').task_board.completed_count, 0)
+  assert.equal(await agent.pollConditionWait(), null)
+})
+
+test('grounded inventory condition advances exactly one canonical step once satisfied', async () => {
+  const { agent, memory, rcon } = makeAgent({ committed: true })
   const durable = memory.planByNpc.get('npc:airi')
   durable.condition_wait = makeConditionWait(
     { kind: 'inventory_count', item_name: 'iron-plate', minimum: 9 },
@@ -863,7 +917,7 @@ test('a BLOCKED reply is recorded as a blocker even while the machine works towa
 })
 
 test('the machine expectation sets the wake deadline and is traced once', async () => {
-  const { agent, memory, rcon } = makeAgent()
+  const { agent, memory, rcon } = makeAgent({ committed: true })
   const durable = memory.planByNpc.get('npc:airi')
   durable.condition_wait = makeConditionWait(
     { kind: 'entity_inventory_count', unit_number: 582, item_name: 'iron-plate', minimum: 10 },

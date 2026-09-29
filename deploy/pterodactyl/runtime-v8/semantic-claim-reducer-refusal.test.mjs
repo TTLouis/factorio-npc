@@ -39,14 +39,14 @@ function harness(game, provider) {
 
 // The reducer declines every semantic claim (the memory's own decision is
 // replaced so the loop's handling is what is under test).
-function declineClaims(memory, { pause = false } = {}) {
+function declineClaims(memory, { pause = false, reason = 'reducer_declined_step_close' } = {}) {
   const original = memory.applyOutcomeAuthority.bind(memory)
   memory.applyOutcomeAuthority = (key, candidate, options) => {
     if (candidate?.kind !== 'semantic_complete') return original(key, candidate, options)
     const state = pause ? memory.pausePlan(key, 'plan_board_disagreement:plan_behind_board') : memory.currentPlan(key)
     return {
       state,
-      decision: { accepted: false, rejection_reason: pause ? 'plan_board_disagreement' : 'reducer_declined_step_close', ...(pause ? { paused: true } : {}) },
+      decision: { accepted: false, rejection_reason: pause ? 'plan_board_disagreement' : reason, ...(pause ? { paused: true } : {}) },
       changed: pause,
       ...(pause ? { progressDisagreement: { code: 'plan_behind_board', plan_id: 'p', board_step_id: 'step_1' } } : {}),
     }
@@ -102,4 +102,22 @@ test('a plan/board disagreement that pauses the goal ends the request with a vis
   assert.equal(memory.currentPlan(KEY).status, 'paused')
   assert.ok(events.some(entry => entry.event === 'step.progress_disagreement_paused'))
   assert.equal(events.some(entry => entry.event === 'request.failed'), false)
+})
+
+test('after plan_not_committed the message does not say the claim can never be repeated', async () => {
+  const game = new FakeFactorio()
+  const { agent, memory, prompts } = harness(game, (call, mem) => {
+    if (call === 1) return planReply({ plan: STEPS, operations: [gather('iron-ore', 10)] })
+    if (call === 2) return planReply(claim(mem))
+    return planReply({ chatMessage: 'Still mining.', plan: STEPS, currentStep: 0, operations: [gather('iron-ore', 10)] })
+  })
+  await agent.request('mine iron then build a boiler', { sender: 'Louis' })
+  declineClaims(memory, { reason: 'plan_not_committed' })
+  game.inventory['iron-ore'] = 10
+
+  await agent.completed()
+
+  assert.match(prompts[2], /plan_not_committed/)
+  assert.match(prompts[2], /can be made again once the plan has been committed/)
+  assert.doesNotMatch(prompts[2], /Do not repeat the claim/)
 })
