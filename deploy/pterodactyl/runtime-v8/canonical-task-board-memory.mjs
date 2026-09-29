@@ -371,18 +371,50 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     if (!key || typeof objective !== 'string' || !objective.trim()) return this.planningState(key)
     const current = this.planningState(key)
     if (current?.goal?.status === GOAL_STATUS.ACTIVE) return current
-    const resolvedGoalId = typeof goalId === 'string' && goalId.trim()
-      ? goalId.trim().slice(0, 120)
-      : `goal_${Math.max(0, Math.trunc(now)).toString(36)}`
+    // The reducer mints the goal id (GOAL_ACCEPTED). A caller-supplied id is
+    // only honoured for tests/migration that must pin one.
     const next = applyPlanningEvent(current ?? createEmptyPlanningState(), {
       type: PLANNING_EVENT.GOAL_ACCEPTED,
       now,
-      goal_id: resolvedGoalId,
+      ...(typeof goalId === 'string' && goalId.trim() ? { goal_id: goalId.trim().slice(0, 120) } : {}),
       owner: String(owner ?? 'unknown').slice(0, 128),
       objective: objective.slice(0, 1000),
     })
     this.planningByNpc.set(key, next)
     return next
+  }
+
+  /**
+   * Goal id for a legacy state that is about to be created. Reuses the
+   * reducer's active goal (its plan not cancelled), otherwise admits a fresh
+   * goal through GOAL_ACCEPTED and returns the id the reducer minted. Legacy
+   * record paths call this instead of minting their own id.
+   */
+  resolveReducerGoalId(key, requestInfo, { now = Date.now() } = {}) {
+    if (!key) return undefined
+    const planning = this.planningByNpc.get(key)
+    if (planning?.goal?.status === GOAL_STATUS.ACTIVE
+      && getActivePlan(planning)?.status !== PLAN_STATUS.CANCELLED) {
+      return planning.goal.goal_id
+    }
+    const objective = typeof requestInfo?.text === 'string' ? requestInfo.text.trim() : ''
+    if (!objective) return undefined
+    const next = applyPlanningEvent(planning ?? createEmptyPlanningState(), {
+      type: PLANNING_EVENT.GOAL_ACCEPTED,
+      now,
+      owner: String(requestInfo?.sender ?? 'unknown').slice(0, 128),
+      objective: objective.slice(0, 1000),
+    })
+    if (!next?.goal || next === planning) return undefined
+    this.planningByNpc.set(key, next)
+    return next.goal.goal_id
+  }
+
+  beginActionOmissionRecovery(key, requestInfo, plan, options = {}) {
+    return super.beginActionOmissionRecovery(key, requestInfo, plan, {
+      ...options,
+      resolveGoalId: () => this.resolveReducerGoalId(key, requestInfo),
+    })
   }
 
   syncPlanningState(key, legacyState = key ? this.planByNpc.get(key) : undefined) {
@@ -621,7 +653,9 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     if (Array.isArray(roadmap) && roadmap.length > 0) {
       planning = this.reviseRoadmap(key, roadmap, {
         now,
-        reason: goalAdmitted ? 'goal_decomposed_to_shelf' : 'verified_world_change',
+        reason: planning.roadmap?.goal_id !== planning.goal?.goal_id
+          ? 'goal_decomposed_to_shelf'
+          : 'verified_world_change',
       }) ?? planning
     }
     // Goal admission is a semantic boundary that exists BEFORE the first
@@ -629,7 +663,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     // but before DRAFT_CREATED snapshots steering_at_draft. Production may
     // pre-admit the goal to obtain Jev advice; adapter/direct lanes still need
     // the same ordering with the reducer's default maintain recommendation.
-    if (goalAdmitted) {
+    if (goalAdmitted || !planning.steering) {
       planning = this.evaluateSteeringAtBoundary(key, {
         boundary: STEERING_BOUNDARY.GOAL_ADMISSION,
         now,
@@ -1036,7 +1070,10 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       ? undefined
       : this.#supersedeInFlightPlan(key, requestInfo, plan, options)
 
-    const result = super.recordPlan(key, requestInfo, plan, options)
+    const result = super.recordPlan(key, requestInfo, plan, {
+      ...options,
+      resolveGoalId: () => this.resolveReducerGoalId(key, requestInfo),
+    })
     const priorReducerPlan = getActivePlan(priorPlanning)
     const reuseReducerGoal = priorPlanning?.goal?.status === GOAL_STATUS.ACTIVE
       && priorReducerPlan?.status !== PLAN_STATUS.CANCELLED

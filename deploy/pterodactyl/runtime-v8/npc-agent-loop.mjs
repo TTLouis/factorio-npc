@@ -722,6 +722,16 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
     this.nextContextOverride = new Map()
   }
 
+  // The goal id comes from the planning reducer (GOAL_ACCEPTED) through
+  // `resolveGoalId`, which the canonical memory facade always supplies. The
+  // local mint below is only the standalone-base fallback: it is reached when
+  // no facade is in front of this class, or when the reducer refused the goal
+  // (an empty objective). It must never be the id source under the facade.
+  newGoalId(resolveGoalId, now) {
+    const resolved = typeof resolveGoalId === 'function' ? resolveGoalId() : undefined
+    return typeof resolved === 'string' && resolved ? resolved : `goal_${now.toString(36)}`
+  }
+
   ensureTaskBoard(state) {
     if (!state) return undefined
     if (!state.task_board) {
@@ -994,7 +1004,7 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
     return state
   }
 
-  recordPlan(key, requestInfo, plan, { continuation = false, persistentRuntime, durableOperations = [], exactTargetAudit = [], verifiedCompletion = false, completionEvidence = [] } = {}) {
+  recordPlan(key, requestInfo, plan, { continuation = false, persistentRuntime, durableOperations = [], exactTargetAudit = [], verifiedCompletion = false, completionEvidence = [], resolveGoalId } = {}) {
     const previous = this.planByNpc.get(key)
     const hasOperations = plan.operations.length > 0
     const incomingDurableOperations = (Array.isArray(durableOperations) ? durableOperations : []).slice(0, 16).map(operation => sanitizeDurableModelValue(operation))
@@ -1024,7 +1034,7 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
 
     if (hasOperations) {
       const state = {
-        goal_id: previous?.goal_id ?? `goal_${now.toString(36)}`,
+        goal_id: previous?.goal_id ?? this.newGoalId(resolveGoalId, now),
         owner: cleanMemoryText(requestInfo?.sender ?? previous?.owner ?? 'unknown', 128),
         objective: cleanMemoryText(previous?.objective ?? requestInfo?.text ?? '', 1000),
         status: 'active',
@@ -1052,7 +1062,7 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
     if (runtimeHealthy && incomingPlan.length > 0) {
       const state = {
         ...(previous ?? {}),
-        goal_id: previous?.goal_id ?? `goal_${now.toString(36)}`,
+        goal_id: previous?.goal_id ?? this.newGoalId(resolveGoalId, now),
         owner: cleanMemoryText(requestInfo?.sender ?? previous?.owner ?? 'unknown', 128),
         objective: cleanMemoryText(previous?.objective ?? requestInfo?.text ?? '', 1000),
         status: 'active',
@@ -1160,7 +1170,7 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
     }).state
   }
 
-  beginActionOmissionRecovery(key, requestInfo, plan) {
+  beginActionOmissionRecovery(key, requestInfo, plan, { resolveGoalId } = {}) {
     const previous = key ? this.planByNpc.get(key) : undefined
     const now = Date.now()
     if (!previous) {
@@ -1168,7 +1178,7 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
       if (incomingPlan.length === 0) return undefined
       const incomingStep = 0
       const state = {
-        goal_id: `goal_${now.toString(36)}`,
+        goal_id: this.newGoalId(resolveGoalId, now),
         owner: cleanMemoryText(requestInfo?.sender ?? 'unknown', 128),
         objective: cleanMemoryText(requestInfo?.text ?? '', 1000),
         status: 'active',
@@ -4849,16 +4859,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const acknowledgement = this.chatAcknowledger.acknowledge({ requestId: this.traceRequest.id, text, intent, origin: 'chat', startedAt: requestStartedAt })
     if (acknowledgement) await this.traceEvent('chat.acknowledged', acknowledgement)
 
-    if (intent === 'new_goal'
-      && this.steeringDecisionProvider
-      && typeof this.memory.admitPlanningGoal === 'function'
-      && typeof this.memory.evaluateSteeringAtBoundary === 'function') {
+    // Goal admission is the reducer's (GOAL_ACCEPTED), and it happens at
+    // `new_goal` whether or not a steering provider is configured. Steering
+    // advice is the only part that needs a provider.
+    if (intent === 'new_goal' && typeof this.memory.admitPlanningGoal === 'function') {
       const admitted = this.memory.admitPlanningGoal(memoryKey, {
         owner: sender,
         objective: text,
         now: Date.now(),
       })
-      if (admitted?.goal) {
+      if (admitted?.goal && this.steeringDecisionProvider
+        && typeof this.memory.evaluateSteeringAtBoundary === 'function') {
         const recommendation = await this.requestBoundarySteeringRecommendation(memoryKey, {
           boundary: STEERING_BOUNDARY.GOAL_ADMISSION,
           world: taskStatus,
@@ -4881,6 +4892,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           steering_mode: steered.steering?.current_mode,
           recommended_mode: steered.steering?.recommendation?.recommended_mode,
         })
+      }
+      else if (admitted?.goal) {
+        // No steering provider: the reducer's default (maintain) steering is
+        // recorded by ensurePlanningDraft at the first draft, as before.
+        await this.persistState()
+        await this.traceEvent('planning.goal_admitted', { goal_id: admitted.goal.goal_id })
       }
     }
 
