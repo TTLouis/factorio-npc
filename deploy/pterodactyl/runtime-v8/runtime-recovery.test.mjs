@@ -108,7 +108,7 @@ test('!airi stop cancels an in-flight model turn immediately and reports that th
   releaseQueue()
   await session.eventQueue
   assert.ok(commands.some(command => command.includes('airi_deployment')))
-  assert.ok(commands.some(command => command.includes('Paused the current AIRI plan')))
+  assert.ok(commands.some(command => command.includes('Paused the current SGLuna plan')))
 })
 
 test('only active or infrastructure-interrupted plans are eligible for automatic recovery', () => {

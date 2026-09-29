@@ -2394,6 +2394,11 @@ Object.assign(HANDLERS, {
       sequence,
       plans: retainPlans([...plans, successor], successor.plan_id),
       active_plan_id: successor.plan_id,
+      // The user's revision takes the goal out of its pause: a blocked plan
+      // that was also paused must not leave the successor's run paused.
+      run: state.run?.paused
+        ? { ...state.run, paused: false, pause_reason: '', pause_code: '', resumed_at: now, updated_at: now }
+        : state.run,
       updated_at: now,
       log: logEntry(state, {
         type: PLANNING_EVENT.USER_REVISION_APPROVED,

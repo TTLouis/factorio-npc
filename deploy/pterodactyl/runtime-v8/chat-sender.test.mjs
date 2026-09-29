@@ -100,7 +100,7 @@ test('stop pauses durable plan state before cancelling Autorio work', async () =
 
   assert.equal(pausedReason, 'user_stop')
   assert.ok(commands.some(command => command.includes('remote.call("airi_deployment","cancel")')))
-  assert.ok(commands.some(command => command.includes('Paused the current AIRI plan')))
+  assert.ok(commands.some(command => command.includes('Paused the current SGLuna plan')))
 })
 
 test('Autorio errors are returned to the active goal for replanning instead of cancelling it blindly', async () => {

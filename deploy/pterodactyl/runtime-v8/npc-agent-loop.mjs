@@ -4722,9 +4722,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       await this.persistState()
       this.clearLoadedSkillContext()
       super.cancel()
-      const reply = state
-        ? 'Cancelled the remaining Autorio work and paused the current goal.'
-        : 'There is no active goal to cancel.'
+      const reply = !state
+        ? 'There is no active goal to cancel.'
+        : state.status === 'blocked'
+          ? 'Cancelled the remaining Autorio work. The plan is still blocked and waiting for your Revise or Cancel choice.'
+          : 'Cancelled the remaining Autorio work and paused the current goal.'
       await this.rememberRoutedInteraction(memoryKey, sender, text, reply)
       return { chatMessage: reply, plan: [], currentStep: 0, operations: [], interactionIntent: intent, routedOnly: true }
     }

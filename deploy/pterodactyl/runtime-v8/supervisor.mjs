@@ -1489,6 +1489,19 @@ async function stopWorldWork(session) {
   await session.rcon.command('/silent-command remote.call("airi_deployment","cancel")')
 }
 
+// A pause never unfreezes a BLOCKED plan (the reducer keeps it BLOCKED), so
+// the player is told the plan is still waiting for their Revise/Cancel choice
+// instead of being told it was paused.
+export function pauseChatLine(state, { cancelledWork = false } = {}) {
+  const work = cancelledWork ? 'cancelled active Autorio work' : 'stopped active work'
+  if (state?.status === 'blocked') {
+    return `The SGLuna plan is blocked and waiting for your Revise or Cancel choice in the Task Board; I ${work}.`
+  }
+  return cancelledWork
+    ? `Paused the current SGLuna plan and ${work}. Say continue/resume when you want me to pick it back up.`
+    : `Paused the current SGLuna plan and ${work}. Use continue/resume when you want it to continue.`
+}
+
 async function pausePlanIfPresent(session, reason) {
   const state = session.currentPlanState?.()
   if (!state || state.status === 'completed' || state.status === 'paused') return state
@@ -1593,7 +1606,7 @@ export async function executeUiControl(session, event) {
     await stopWorldWork(session)
     state = await recordBlockedChoice('keep_paused') ?? state
     await session.syncTaskBoardUi(state)
-    await session.printChat('Kept the blocked AIRI plan frozen. No replanning or world work will start until you explicitly revise it or cancel it.')
+    await session.printChat('Kept the blocked SGLuna plan frozen. No replanning or world work will start until you explicitly revise it or cancel it.')
     return true
   }
 
@@ -1605,7 +1618,7 @@ export async function executeUiControl(session, event) {
     await stopWorldWork(session)
     state = await recordBlockedChoice('revise') ?? state
     await session.syncTaskBoardUi(state)
-    await session.printChat('The blocked plan remains frozen. Enter the revised goal or constraints in the Task Board prompt; AIRI will not replace this plan until you explicitly provide that revision.')
+    await session.printChat('The blocked plan remains frozen. Enter the revised goal or constraints in the Task Board prompt; SGLuna will not replace this plan until you explicitly provide that revision.')
     return true
   }
 
@@ -1626,13 +1639,13 @@ export async function executeUiControl(session, event) {
     const state = await pausePlanIfPresent(session, 'ui_pause')
     await stopWorldWork(session)
     if (state) await session.syncTaskBoardUi(state)
-    await session.printChat('Paused the current AIRI plan and stopped active work. Use continue/resume when you want it to continue.')
+    await session.printChat(pauseChatLine(state))
     return true
   }
 
   if (event.action === 'terminate') {
     await discardTaskContext(session, 'ui_terminate')
-    await session.printChat('Terminated the current AIRI goal. Its durable plan was discarded and will not resume.')
+    await session.printChat('Terminated the current SGLuna goal. Its durable plan was discarded and will not resume.')
     return true
   }
 
@@ -2743,7 +2756,7 @@ export class Session {
           if (state) await this.syncTaskBoardUi(state)
           await this.ensureAuthorization()
           await this.rcon.command('/silent-command remote.call("airi_deployment","cancel")')
-          await this.printChat('Paused the current AIRI plan and cancelled active Autorio work. Say continue/resume when you want me to pick it back up.')
+          await this.printChat(pauseChatLine(state, { cancelledWork: true }))
           return
         }
         await this.ensureAuthorization()

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { makeConditionWait } from './step-completion.mjs'
+import { pauseChatLine } from './supervisor.mjs'
 import {
   applyPlanningEvent,
   createEmptyPlanningState,
@@ -718,6 +719,136 @@ test('a fresh goal starts with no stale identities', () => {
   memory.clearTaskContext(KEY)
   memory.admitPlanningGoal(KEY, { owner: 'Louis', objective: 'Something else', now: 5000 })
   assert.equal(memory.planningState(KEY).run, null)
+})
+
+// --- review follow-ups -------------------------------------------------------
+
+test('pause chat line: a blocked plan is not announced as paused, and text says SGLuna', () => {
+  const blockedLine = pauseChatLine({ status: 'blocked' })
+  assert.match(blockedLine, /blocked and waiting for your Revise or Cancel/)
+  assert.doesNotMatch(blockedLine, /Paused the current/)
+  const blockedCancel = pauseChatLine({ status: 'blocked' }, { cancelledWork: true })
+  assert.match(blockedCancel, /Revise or Cancel/)
+  assert.match(blockedCancel, /cancelled active Autorio work/)
+  assert.match(pauseChatLine({ status: 'paused' }), /^Paused the current SGLuna plan and stopped active work\./)
+  assert.match(pauseChatLine(undefined, { cancelledWork: true }), /^Paused the current SGLuna plan and cancelled active Autorio work\./)
+  for (const line of [blockedLine, blockedCancel, pauseChatLine({ status: 'paused' })]) assert.doesNotMatch(line, /AIRI/)
+})
+
+test('pausing a blocked plan traces no goal.paused: the legacy record stays blocked', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const agent = new NpcAgentLoop({
+    rcon: new PlanningRcon(),
+    memory,
+    provider: async () => ({ content: '{}' }),
+    systemPrompt: 'blocked pause trace',
+    stateFile: null,
+    traceFile: null,
+    decisionTraceFile: null,
+    npcId: 'airi',
+  })
+  startCommittedPlan(memory)
+  block(memory)
+  assert.equal(memory.pausePlan(KEY, 'ui_pause').status, 'blocked')
+  assert.equal(agent.goalPausedTrace('ui_pause'), undefined)
+})
+
+test('USER_REVISION_APPROVED clears run.paused; plan semantics come only from the revision', () => {
+  const committed = withDraftCommitted(goalState())
+  const plan = getActivePlan(committed)
+  const blocked = applyPlanningEvent(committed, {
+    type: PLANNING_EVENT.STRUCTURAL_BLOCKER_CONFIRMED,
+    now: 40,
+    source: 'runtime',
+    plan_id: plan.plan_id,
+    reason_code: 'missing_dependency',
+    evidence_refs: ['ref_a'],
+    detail: 'no route',
+  })
+  const paused = applyPlanningEvent(blocked, { type: PLANNING_EVENT.RUN_PAUSED, now: 50, source: 'user', reason: 'ui_pause' })
+  assert.equal(paused.run.paused, true)
+  const revised = applyPlanningEvent(paused, {
+    type: PLANNING_EVENT.USER_REVISION_APPROVED,
+    now: 60,
+    source: 'user',
+    approved_by: 'Louis',
+    plan_id: plan.plan_id,
+    steps: [{ description: 'Mine ore' }, { description: 'Craft plates' }],
+  })
+  assert.notEqual(getActivePlan(revised).plan_id, plan.plan_id, 'a successor plan exists')
+  assert.equal(revised.run.paused, false)
+  assert.equal(revised.run.pause_reason, '')
+  assert.equal(revised.run.pause_count, 1)
+})
+
+test('facade: block, pause, then a no-operations Revise leaves the run running', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  startCommittedPlan(memory)
+  block(memory)
+  memory.pausePlan(KEY, 'ui_pause')
+  assert.equal(memory.planningState(KEY).run.paused, true)
+  memory.recordBlockedChoice(KEY, 'revise', 'Louis')
+  const revision = memory.recordPlan(KEY, { sender: 'Louis', text: 'Mine ore instead' }, { chatMessage: 'Revised.', plan: ['Mine ore', 'Craft plates'], currentStep: 0, operations: [] })
+  assert.equal(revision.userRevisionApproved, true)
+  assert.equal(memory.planningState(KEY).run.paused, false)
+})
+
+test('a goal admitted for a legacy record with run state seeds the run, so a later mirror cannot null it', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const request = { sender: 'Louis', text: 'Keep watching the furnace' }
+  const first = memory.recordPlan(KEY, request, proposedPlan(['Watch furnace']))
+  const goalId = first.state.goal_id
+  // A record that carries run state the reducer has never seen.
+  const legacy = memory.currentPlan(KEY)
+  legacy.provider_recovery = { kind: 'budget_handoff', phase: 'planner_pending', goal_id: goalId, step_id: 'step_1', semantic_scope: 'keep_target', route: 'wake_planner', reason: 'cap', budget_generation: 2, handoff_count: 1 }
+  legacy.condition_wait = waitFor(goalId, { stepId: 'step_1' })
+  memory.planningByNpc.delete(KEY)
+
+  memory.ensurePlanningDraft(KEY, legacy, { now: 50 })
+  const run = memory.planningState(KEY).run
+  assert.equal(run.provider_recovery.kind, 'budget_handoff')
+  assert.equal(run.condition_wait.id, legacy.condition_wait.id)
+
+  // A chat-only continuation (no operations) keeps run state, and its locators
+  // write is what used to create the run before it was seeded.
+  const after = memory.recordPlan(KEY, request, proposedPlan(['Watch furnace'], 0, []), { continuation: true, exactTargetAudit: [locatorEntry(9)] })
+  assert.equal(after.state.provider_recovery?.kind, 'budget_handoff', 'the mirror keeps the legacy recovery')
+  assert.ok(after.state.condition_wait, 'the mirror keeps the legacy wait')
+  assert.equal(memory.planningState(KEY).run.provider_recovery.kind, 'budget_handoff')
+})
+
+test('an orphan goal from a failed request does not capture a later, different request', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const orphan = memory.admitPlanningGoal(KEY, { owner: 'Louis', objective: 'Build X', now: 1000 })
+  assert.equal(orphan.goal.objective, 'Build X')
+  assert.equal(memory.currentPlan(KEY), undefined, 'the request failed before recordPlan: no legacy record, no plan')
+
+  const recorded = memory.recordPlan(KEY, { sender: 'Louis', text: 'Mine iron' }, proposedPlan(['Mine iron ore']))
+  const goal = memory.planningState(KEY).goal
+  assert.equal(goal.objective, 'Mine iron', 'the reducer goal is the new request, not Build X')
+  assert.notEqual(goal.goal_id, orphan.goal.goal_id)
+  assert.equal(recorded.state.objective, 'Mine iron')
+  assert.equal(recorded.state.goal_id, goal.goal_id)
+})
+
+test('admitPlanningGoal re-admits over an orphan with another objective, and reuses it for the same one', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const first = memory.admitPlanningGoal(KEY, { owner: 'Louis', objective: 'Build X', now: 1000 })
+  const same = memory.admitPlanningGoal(KEY, { owner: 'Louis', objective: '  Build   X ', now: 2000 })
+  assert.equal(same.goal.goal_id, first.goal.goal_id, 'the same objective keeps the goal')
+  const other = memory.admitPlanningGoal(KEY, { owner: 'Louis', objective: 'Mine iron', now: 3000 })
+  assert.notEqual(other.goal.goal_id, first.goal.goal_id)
+  assert.equal(other.goal.objective, 'Mine iron')
+})
+
+test('a goal with a legacy record or a plan is never treated as an orphan', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const { request } = startCommittedPlan(memory)
+  const goalId = memory.planningState(KEY).goal.goal_id
+  assert.equal(memory.admitPlanningGoal(KEY, { owner: 'Louis', objective: 'Something unrelated', now: 5000 }).goal.goal_id, goalId)
+  const amended = memory.recordPlan(KEY, { ...request, text: 'Also build power' }, proposedPlan(['Gather stone', 'Craft furnace', 'Build power']), { continuation: true })
+  assert.equal(amended.state.goal_id, goalId)
+  assert.equal(memory.planningState(KEY).goal.objective, request.text)
 })
 
 test('new snapshot: the run round-trips and the reducer wins over the legacy fields', () => {
