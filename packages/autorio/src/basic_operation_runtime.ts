@@ -5,7 +5,7 @@ import { remember_entity_reference, resolve_exact_entity } from './entity_refere
 import { build_interaction_reach, entity_interaction_reach } from './interaction_range'
 import { MAX_MINING_START_REJECTIONS, mining_navigation_reach, mining_navigation_requires_movement, select_exact_mining_target, within_mining_reach } from './mining_reach'
 import { resolve_entity_placement_item } from './placement_item'
-import { placement_footprint, placement_grid_rule, snap_placement_center } from './placement_geometry'
+import { placement_check_args, placement_footprint, placement_grid_rule, snap_placement_center } from './placement_geometry'
 import type { new_task_manager } from './task_manager'
 import type { PlayerParametersMineEntity, PlayerParametersWalkToEntity } from './types'
 import { TaskStates } from './types'
@@ -529,6 +529,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       position,
       direction: task.direction,
       force: actor.force,
+      ...placement_check_args(task.entity_name),
     })) {
       const blockers = placement_blocker_summaries(actor, footprint.world_box)
       controller.fail(actor, task, 'not_placeable', {

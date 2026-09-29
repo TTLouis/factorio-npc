@@ -1,7 +1,7 @@
 import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import { resolve_entity_reference } from './entity_reference'
-import { placement_footprint, placement_tile_size, snap_placement_center, type PlacementWorldBox } from './placement_geometry'
+import { placement_check_args, placement_footprint, placement_tile_size, snap_placement_center, type PlacementWorldBox } from './placement_geometry'
 
 const DEFAULT_HALF_SIZE = 12
 const MIN_HALF_SIZE = 4
@@ -421,7 +421,7 @@ export function plan_placement(actor: ControlledActor, request: PlacementPlanReq
       continue
     }
     const footprint = placement_footprint(prototype, position, direction)
-    const placeable = actor.surface.can_place_entity({ name: request.entity_name, position, direction, force: actor.force })
+    const placeable = actor.surface.can_place_entity({ name: request.entity_name, position, direction, force: actor.force, ...placement_check_args(request.entity_name) })
     if (!placeable) {
       if (rejected.length < MAX_REJECTIONS) rejected.push({ position, reason: 'collision', footprint, blockers: nearby_blockers(actor, position, footprint.world_box) })
       continue

@@ -67,6 +67,20 @@ export function placement_tile_size(prototype: any, direction: number | undefine
     : { tile_width: base_width, tile_height: base_height }
 }
 
+/**
+ * Extra LuaSurface.can_place_entity arguments for entities whose legal spot is
+ * decided by tile rules. The default (script) build check accepts an offshore
+ * pump anywhere, on dry land and facing away from the water, and create_entity
+ * then builds it there (probed on 2.0.77); only the manual check, the one a
+ * player's build goes through, applies the shoreline and facing rules. The
+ * water edge is game data the engine already answers, so ask it that way.
+ */
+export function placement_check_args(entity_name: string): { build_check_type?: any } {
+  const prototype = prototypes.entity[entity_name]
+  if (prototype?.type === 'offshore-pump') return { build_check_type: defines.build_check_type.manual }
+  return {}
+}
+
 export function placement_grid_rule(prototype: any, direction: number | undefined = 0): PlacementGridRule {
   const size = placement_tile_size(prototype, direction)
   return {
