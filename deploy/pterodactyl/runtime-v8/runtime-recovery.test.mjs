@@ -91,6 +91,30 @@ test('a request failure that leaves the goal paused ends the chat line with the 
   }
 })
 
+test('a request failure traces the chat line the player got (length and hint flag, not the error text)', async () => {
+  const { session, commands } = sessionFixture()
+  const traced = []
+  session.agent = {
+    active: false,
+    request: async () => { throw new Error('Provider returned HTTP 500 secret-ish') },
+    completed: async () => null,
+    cancel: () => {},
+    lastTerminalRequestId: 'req_x_1',
+    traceEvent: async (event, data, options) => { traced.push({ event, data, options }) },
+    memory: { currentPlan: () => ({ status: 'paused', pause_reason: 'request_failed' }) },
+  }
+
+  session.onGameLine('2026-09-14 20:00:00 [CHAT] Louis: !airi first')
+  await session.eventQueue
+  assert.ok(commands.some(command => command.includes('Request failed:')))
+  const reported = traced.filter(entry => entry.event === 'chat.request_failed_reported')
+  assert.equal(reported.length, 1)
+  assert.equal(reported[0].data.resume_hint_included, true)
+  assert.ok(reported[0].data.chat_line_length > 20)
+  assert.equal(reported[0].options.requestId, 'req_x_1')
+  assert.ok(!JSON.stringify(reported[0].data).includes('secret-ish'))
+})
+
 test('!airi stop cancels an in-flight model turn immediately and reports that the plan is paused', async () => {
   const { session, commands } = sessionFixture()
   let cancelled = 0

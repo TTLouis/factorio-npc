@@ -2699,7 +2699,22 @@ export class Session {
         const planState = this.currentPlanState()
         const transientPause = String(planState?.pause_reason ?? '').startsWith(`${TRANSIENT_PAUSE_PREFIX}:`)
         const resume = planState?.status === 'paused' && !transientPause ? ` ${RESUME_HINT}` : ''
-        try { await this.printChat(`Request failed: ${message}${resume}`) }
+        try {
+          const line = `Request failed: ${message}${resume}`
+          await this.printChat(line)
+          // Trace what the player actually got so run-check does not flag the
+          // failed request as chat-silent. Length + hint flag only: the raw
+          // error text is not repeated here.
+          if (typeof this.agent?.traceEvent === 'function') {
+            try {
+              await this.agent.traceEvent('chat.request_failed_reported', {
+                chat_line_length: line.length,
+                resume_hint_included: resume !== '',
+              }, { requestId: this.agent.lastTerminalRequestId })
+            }
+            catch (traceError) { this.log(`Unable to trace request-failed chat line: ${traceError instanceof Error ? traceError.message : traceError}`) }
+          }
+        }
         catch (printError) { this.log(`Unable to report AIRI error in chat: ${printError instanceof Error ? printError.message : printError}`) }
       }
     })

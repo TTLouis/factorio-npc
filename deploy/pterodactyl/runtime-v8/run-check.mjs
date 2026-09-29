@@ -186,6 +186,10 @@ function detectNoChatReply(rows) {
   const terminal = terminalEvent(rows)
   if (!terminal) return undefined
   if (terminal.event === 'request.failed') {
+    // The supervisor traces the "Request failed: ..." line it printed to the
+    // player after the failure; that counts as the chat reply.
+    const failedAt = rows.lastIndexOf(terminal)
+    if (rows.slice(failedAt + 1).some(row => row?.event === 'chat.request_failed_reported')) return undefined
     return {
       count: 1,
       first_ts: nonEmptyString(terminal?.ts),
