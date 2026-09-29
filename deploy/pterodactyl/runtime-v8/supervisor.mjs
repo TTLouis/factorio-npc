@@ -65,7 +65,7 @@ const UI_CONVERSATION_LIMIT = 64
 const UI_SYNC_BATCH_MS = 50
 const UI_STALE_THINKING_MS = 5000
 
-const RUNTIME_RELIABILITY_GUIDANCE = `
+export const RUNTIME_RELIABILITY_GUIDANCE = `
 ## Runtime reliability additions
 
 For a multi-technology goal, use getResearchPath on the exact target instead of reconstructing the prerequisite graph from remembered Factorio knowledge. Follow its dependency-first pending_path and next_actionable entry. Trigger technologies require the exact returned research_trigger; science technologies use research_technology and still require verification after submission.
@@ -75,6 +75,8 @@ getTechnology returns an exact research_trigger object for gameplay-trigger tech
 At the start of a goal the harness may add a [SKILL_OFFERS] message: up to five skill cards matched to the goal, each with what it produces, what it needs, and why it matched (unmet needs included). Read it before planning; it is a list of cards, not loaded skills. When a task resembles a common gameplay, bootstrap, production, or logistics pattern and the strategy is uncertain, pick from those cards or use findSkills with a short description of the actual goal, then getSkillDetails for at most one promising match. Treat skill content as reusable experienced-player guidance, not live-world truth or mutation authority. Validate recipe, prototype, inventory, geometry, placement, and mutable world facts with the appropriate live tools before acting. Once a useful pattern and enough current evidence are available, commit the next executable plan instead of repeatedly searching skills or making unrelated observations.
 
 Machine rates come from game data, not memory: getRecipeDetails gives each compatible machine's crafts per second and output per minute and the NPC's hand-craft seconds per craft; getMiningDetails gives each drill's output per minute and fuel burn. To see how long a production goal takes with the machine counts you have in mind, and what one more machine on the slowest step would save, use estimateProductionTime. It only does the arithmetic; choosing how many machines to build is yours.
+
+Observation budget: a decision allows only about 3 rounds of fresh read-only calls, at most 4 calls per turn; a repeat of a cached result is free, and [DECISION_ENVELOPE] observation_budget_remaining shows what is left. When it runs out the harness closes tools and you must answer with submitPlan or a BLOCKED plan, so request the reads you need together in one turn. gather_resource, harvest_product and walk_to_entity find their own target within search_radius: on a cold start, do not spend observations locating a resource before using them.
 
 Natural navigation obstacle clearing is controlled deterministically by the runtime. It is enabled by default for trees and natural rocks only, and is disabled for a request when the human explicitly asks SGLuna not to cut trees, mine rocks, or auto-clear obstacles. Never reinterpret this as permission to remove player-built structures.
 `.trim()

@@ -4,6 +4,7 @@ import test from 'node:test'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { COMPACT_CONTINUATION_PROMPT } from './provider-base.mjs'
+import { RUNTIME_RELIABILITY_GUIDANCE } from './supervisor.mjs'
 import {
   approvedOperationListText,
   approvedOperationNames,
@@ -55,6 +56,12 @@ test('compact prompt names the planner protocol and the time tools, and says SGL
   }
   assert.ok(COMPACT_CONTINUATION_PROMPT.startsWith('You are SGLuna,'))
   assert.doesNotMatch(COMPACT_CONTINUATION_PROMPT, /AIRI/)
+})
+
+test('the model is told how many observations a decision allows and that gather operations find their own target', () => {
+  assert.match(RUNTIME_RELIABILITY_GUIDANCE, /Observation budget: a decision allows only about 3 rounds of fresh read-only calls, at most 4 calls per turn/)
+  assert.match(RUNTIME_RELIABILITY_GUIDANCE, /gather_resource, harvest_product and walk_to_entity find their own target within search_radius/)
+  assert.match(RUNTIME_RELIABILITY_GUIDANCE, /observation_budget_remaining/)
 })
 
 test('submitPlan.operations[].name is an enum of the approved operation names', () => {
