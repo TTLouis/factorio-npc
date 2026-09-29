@@ -476,13 +476,42 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return super.recordRunResume(key, state, reason)
   }
 
+  recordLocators(key, state, { durableOperations, exactTargetAudit, previousExactTargetAudit } = {}) {
+    if (!this.#reducerHoldsGoal(key, state)) return super.recordLocators(key, state, { durableOperations, exactTargetAudit, previousExactTargetAudit })
+    const held = this.planningByNpc.get(key)?.run?.locators?.exact_target_audit ?? []
+    const previous = Array.isArray(previousExactTargetAudit) ? previousExactTargetAudit : []
+    const incoming = Array.isArray(exactTargetAudit) ? exactTargetAudit : []
+    // The reducer holds no audit yet but the legacy record does (a record that
+    // predates the reducer field): carry the legacy entries over once.
+    const carryOver = held.length === 0 && previous.length > 0
+    const after = this.#applyRunEvent(key, {
+      type: PLANNING_EVENT.LOCATORS_RECORDED,
+      goal_id: state.goal_id,
+      durable_last_operations: Array.isArray(durableOperations) ? durableOperations : [],
+      exact_target_audit: carryOver ? [...previous, ...incoming] : incoming,
+      ...(carryOver ? { exact_target_audit_mode: 'replace' } : {}),
+    })
+    const locators = after?.run?.locators
+    if (locators) {
+      state.durable_last_operations = cloneRunRecord(locators.durable_last_operations) ?? []
+      state.exact_target_audit = cloneRunRecord(locators.exact_target_audit) ?? []
+    }
+    return undefined
+  }
+
   /**
    * Bring a legacy record's run fields in line with the reducer run (the
    * reducer wins). Used after the legacy record was rebuilt wholesale.
+   * Locators are mirrored only when asked: recordPlan mirrors them itself, and
+   * a legacy record must not lose entries because the reducer never saw them.
    */
-  mirrorRunToLegacy(key, legacyState = key ? this.planByNpc.get(key) : undefined) {
+  mirrorRunToLegacy(key, legacyState = key ? this.planByNpc.get(key) : undefined, { locators = false } = {}) {
     const run = key ? this.planningByNpc.get(key)?.run : undefined
     if (!run || !this.#reducerHoldsGoal(key, legacyState)) return legacyState
+    if (locators) {
+      legacyState.durable_last_operations = cloneRunRecord(run.locators.durable_last_operations) ?? []
+      legacyState.exact_target_audit = cloneRunRecord(run.locators.exact_target_audit) ?? []
+    }
     legacyState.condition_wait = cloneRunRecord(run.condition_wait)
     legacyState.provider_recovery = cloneRunRecord(run.provider_recovery)
     legacyState.persistent_runtime = cloneRunRecord(run.persistent_runtime)
@@ -510,6 +539,17 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     }
     if (legacyState.persistent_runtime) {
       this.#applyRunEvent(key, { ...base, type: PLANNING_EVENT.PERSISTENT_RUNTIME_RECORDED, runtime: legacyState.persistent_runtime })
+    }
+    const durable = Array.isArray(legacyState.durable_last_operations) ? legacyState.durable_last_operations : []
+    const audit = Array.isArray(legacyState.exact_target_audit) ? legacyState.exact_target_audit : []
+    if (durable.length > 0 || audit.length > 0) {
+      this.#applyRunEvent(key, {
+        ...base,
+        type: PLANNING_EVENT.LOCATORS_RECORDED,
+        durable_last_operations: durable,
+        exact_target_audit: audit,
+        exact_target_audit_mode: 'replace',
+      })
     }
     return this.planningByNpc.get(key)
   }
@@ -958,12 +998,18 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
    */
   recordStaleExactIdentity(key, unitNumber, { now = Date.now(), proofRef } = {}) {
     if (!key || !Number.isSafeInteger(unitNumber) || unitNumber <= 0) return undefined
-    this.staleExactIdentitiesByNpc ??= new Map()
-    const stale = this.staleExactIdentitiesByNpc.get(key) ?? new Set()
-    stale.add(unitNumber)
-    this.staleExactIdentitiesByNpc.set(key, stale)
-
+    // The stale-identity set lives in reducer state (run.stale_exact_identities)
+    // so it survives a restart with the snapshot.
     let planning = this.planningByNpc.get(key)
+    const recorded = planning?.goal
+      ? this.#applyRunEvent(key, {
+          type: PLANNING_EVENT.LOCATORS_RECORDED,
+          goal_id: planning.goal.goal_id,
+          stale_unit_numbers: [unitNumber],
+        })
+      : undefined
+    const stale = new Set([...(recorded?.run?.stale_exact_identities ?? planning?.run?.stale_exact_identities ?? []), unitNumber])
+    planning = this.planningByNpc.get(key)
     const plan = getActivePlan(planning)
     if (!plan || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan.status)) return planning
     const step = plan.steps?.[plan.active_step_index]
@@ -1578,7 +1624,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
           this.planningByNpc.set(key, planning)
         }
       }
-      if (this.planningByNpc.get(key)?.run) this.mirrorRunToLegacy(key, state)
+      if (this.planningByNpc.get(key)?.run) this.mirrorRunToLegacy(key, state, { locators: true })
       else this.seedRunFromLegacy(key, state)
       this.syncPlanningState(key, state)
     }

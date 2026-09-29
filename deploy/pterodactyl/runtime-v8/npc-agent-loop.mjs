@@ -752,6 +752,13 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
     state.pause_reason = ''
   }
 
+  // Locators recorded by recordPlan. The state literal already carries the
+  // legacy values, so the base hook is a no-op; the canonical facade routes them
+  // through the reducer (LOCATORS_RECORDED) and mirrors the result back.
+  // `previousExactTargetAudit` is the audit before this call, `exactTargetAudit`
+  // only the entries this call adds.
+  recordLocators(_key, _state, _locators) {}
+
   ensureTaskBoard(state) {
     if (!state) return undefined
     if (!state.task_board) {
@@ -1026,10 +1033,9 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
     const previous = this.planByNpc.get(key)
     const hasOperations = plan.operations.length > 0
     const incomingDurableOperations = (Array.isArray(durableOperations) ? durableOperations : []).slice(0, 16).map(operation => sanitizeDurableModelValue(operation))
-    const mergedExactTargetAudit = [
-      ...(Array.isArray(previous?.exact_target_audit) ? previous.exact_target_audit : []),
-      ...(Array.isArray(exactTargetAudit) ? exactTargetAudit : []),
-    ].slice(-32)
+    const previousExactTargetAudit = Array.isArray(previous?.exact_target_audit) ? previous.exact_target_audit : []
+    const incomingExactTargetAudit = Array.isArray(exactTargetAudit) ? exactTargetAudit : []
+    const mergedExactTargetAudit = [...previousExactTargetAudit, ...incomingExactTargetAudit].slice(-32)
     const normalized = normalizeCanonicalPlan(plan.plan, plan.currentStep)
     const incomingPlan = normalized.plan
     const now = Date.now()
@@ -1074,6 +1080,11 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
         history,
       }
       this.planByNpc.set(key, state)
+      this.recordLocators(key, state, {
+        durableOperations: incomingDurableOperations,
+        exactTargetAudit: incomingExactTargetAudit,
+        previousExactTargetAudit: previousExactTargetAudit,
+      })
       // A batch of operations resumes a paused run, drops any condition wait
       // and any provider recovery (both were for the previous request).
       this.recordRunResume(key, state, 'plan_recorded')
@@ -1105,6 +1116,11 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
         history,
       }
       this.planByNpc.set(key, state)
+      this.recordLocators(key, state, {
+        durableOperations: [],
+        exactTargetAudit: incomingExactTargetAudit,
+        previousExactTargetAudit: previousExactTargetAudit,
+      })
       this.recordRunResume(key, state, 'plan_recorded')
       this.writeRunField(key, state, 'persistent_runtime', runtime)
       return { state, blockedByHarness: false, persistentRuntimeActive: true, changed: true }
@@ -1123,6 +1139,11 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
       history,
     }
     this.planByNpc.set(key, state)
+    this.recordLocators(key, state, {
+      durableOperations: [],
+      exactTargetAudit: incomingExactTargetAudit,
+      previousExactTargetAudit: previousExactTargetAudit,
+    })
 
     if (verifiedCompletion) {
       const reduced = this.applyOutcomeAuthority(key, {

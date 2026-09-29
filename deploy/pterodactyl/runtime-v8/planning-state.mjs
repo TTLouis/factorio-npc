@@ -335,6 +335,10 @@ export const PLANNING_EVENT = Object.freeze({
   CONDITION_WAIT_RECORDED: 'CONDITION_WAIT_RECORDED',
   PROVIDER_RECOVERY_RECORDED: 'PROVIDER_RECOVERY_RECORDED',
   PERSISTENT_RUNTIME_RECORDED: 'PERSISTENT_RUNTIME_RECORDED',
+  // Entity locators and exact-identity proofs the runtime needs for recovery
+  // (3.3 move 4): durable last operations, the exact-target audit, and the set
+  // of unit_numbers the world proved gone.
+  LOCATORS_RECORDED: 'LOCATORS_RECORDED',
 })
 
 const PLANNING_EVENT_TYPES = Object.freeze(Object.values(PLANNING_EVENT))
@@ -2584,6 +2588,44 @@ Object.assign(HANDLERS, {
     return recordRunRecord(state, now, 'persistent_runtime', event.runtime, {
       refuse: run => run.paused,
     })
+  },
+
+  /**
+   * Locators and stale identities (3.3 move 4).
+   *
+   *   durable_last_operations  replaces the list (the last batch's locators)
+   *   exact_target_audit       appends (or replaces with `exact_target_audit_mode: 'replace'`)
+   *   stale_unit_numbers       unions into the stale-identity set
+   *
+   * unit_numbers are never reused, so a stale identity stays stale for the
+   * goal: the set only grows (bounded, oldest dropped). It lives in reducer
+   * state so it survives a restart with the snapshot.
+   */
+  [PLANNING_EVENT.LOCATORS_RECORDED](state, event, now) {
+    if (!runEventAllowed(state, event)) return state
+    const run = state.run ?? createEmptyRunState()
+    let locators = run.locators
+    let stale = run.stale_exact_identities
+    if (Array.isArray(event.durable_last_operations)) {
+      locators = { ...locators, durable_last_operations: sanitizeDurableOperations(event.durable_last_operations) }
+    }
+    if (Array.isArray(event.exact_target_audit)) {
+      const incoming = sanitizeExactTargetAudit(event.exact_target_audit)
+      locators = {
+        ...locators,
+        exact_target_audit: (event.exact_target_audit_mode === 'replace' ? incoming : [...locators.exact_target_audit, ...incoming])
+          .slice(-RUN_STATE_LIMITS.exactTargetAudit),
+      }
+    }
+    if (Array.isArray(event.stale_unit_numbers)) {
+      stale = sanitizeStaleIdentities([...stale, ...event.stale_unit_numbers])
+    }
+    if (locators === run.locators && stale === run.stale_exact_identities) return state
+    return {
+      ...state,
+      run: { ...run, locators, stale_exact_identities: stale, updated_at: now },
+      updated_at: now,
+    }
   },
 })
 

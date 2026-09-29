@@ -472,7 +472,7 @@ test('a run record for another goal is refused: stale work after a replacement f
   const { state } = startCommittedPlan(memory)
   const staleWait = waitFor('goal_from_a_replaced_goal', { stepId: state.task_board.active_step_id })
   assert.equal(memory.registerConditionWait(KEY, staleWait), undefined, 'the legacy goal check rejects it')
-  assert.equal(memory.planningState(KEY).run, null)
+  assert.equal(memory.planningState(KEY).run?.condition_wait ?? null, null)
 })
 
 test('old snapshot without run state: the run is derived once from the legacy record', () => {
@@ -510,6 +510,214 @@ test('old snapshot of a paused goal: the pause and its transient prefix are seed
   assert.equal(run.pause_code, 'provider_transient')
   assert.equal(restored.currentPlan(KEY).status, 'paused')
   assert.equal(restored.currentPlan(KEY).pause_reason, reason)
+})
+
+// --- move 4: locators and stale identities ---------------------------------
+
+function locatorEntry(unit, name = 'steel-chest', at = 1) {
+  return { unit_number: unit, operation_name: 'move_items_exact', locator: { name, position: { x: unit, y: 0 }, role: 'Perform current action' }, recorded_at: at }
+}
+
+test('LOCATORS_RECORDED: durable operations replace, audit appends and is capped, stale identities union', () => {
+  let state = goalState()
+  state = applyPlanningEvent(state, {
+    type: PLANNING_EVENT.LOCATORS_RECORDED,
+    now: 20,
+    source: 'runtime',
+    durable_last_operations: [{ name: 'move_items_exact', target_locator: { name: 'steel-chest' } }],
+    exact_target_audit: [locatorEntry(1)],
+    stale_unit_numbers: [7, 8],
+  })
+  assert.equal(state.run.locators.durable_last_operations.length, 1)
+  assert.deepEqual(state.run.stale_exact_identities, [7, 8])
+
+  state = applyPlanningEvent(state, {
+    type: PLANNING_EVENT.LOCATORS_RECORDED,
+    now: 21,
+    source: 'runtime',
+    durable_last_operations: [],
+    exact_target_audit: [locatorEntry(2)],
+    stale_unit_numbers: [8, 9, -1, 1.5, 'x'],
+  })
+  assert.deepEqual(state.run.locators.durable_last_operations, [], 'durable operations are replaced, not appended')
+  assert.deepEqual(state.run.locators.exact_target_audit.map(entry => entry.unit_number), [1, 2], 'the audit appends')
+  assert.deepEqual(state.run.stale_exact_identities, [7, 8, 9], 'a set: deduped, invalid ids dropped')
+
+  const many = Array.from({ length: 80 }, (_, index) => locatorEntry(100 + index))
+  state = applyPlanningEvent(state, { type: PLANNING_EVENT.LOCATORS_RECORDED, now: 22, source: 'runtime', exact_target_audit: many })
+  assert.equal(state.run.locators.exact_target_audit.length, RUN_STATE_LIMITS.exactTargetAudit)
+  assert.equal(state.run.locators.exact_target_audit.at(-1).unit_number, 179, 'the newest entries are kept')
+
+  state = applyPlanningEvent(state, {
+    type: PLANNING_EVENT.LOCATORS_RECORDED,
+    now: 23,
+    source: 'runtime',
+    exact_target_audit: [locatorEntry(5)],
+    exact_target_audit_mode: 'replace',
+  })
+  assert.deepEqual(state.run.locators.exact_target_audit.map(entry => entry.unit_number), [5])
+})
+
+test('LOCATORS_RECORDED is bounded, drops malformed entries, and is refused from the planner or for another goal', () => {
+  const state = goalState()
+  const huge = applyPlanningEvent(state, {
+    type: PLANNING_EVENT.LOCATORS_RECORDED,
+    now: 20,
+    source: 'runtime',
+    exact_target_audit: [
+      { unit_number: 'nope', locator: {} },
+      null,
+      { unit_number: 3, operation_name: 'o'.repeat(500), locator: { name: 'n'.repeat(9000) } },
+    ],
+    durable_last_operations: Array.from({ length: 100 }, (_, index) => ({ name: `op${index}` })),
+    stale_unit_numbers: Array.from({ length: 400 }, (_, index) => index + 1),
+  })
+  assert.equal(huge.run.locators.exact_target_audit.length, 1)
+  assert.equal(huge.run.locators.exact_target_audit[0].operation_name.length, 100)
+  assert.equal(huge.run.locators.exact_target_audit[0].locator.name.length, RUN_STATE_LIMITS.valueString)
+  assert.equal(huge.run.locators.durable_last_operations.length, RUN_STATE_LIMITS.durableOperations)
+  assert.equal(huge.run.stale_exact_identities.length, RUN_STATE_LIMITS.staleIdentities)
+  assert.equal(huge.run.stale_exact_identities.at(-1), 400)
+
+  const event = { type: PLANNING_EVENT.LOCATORS_RECORDED, now: 20, exact_target_audit: [locatorEntry(1)], stale_unit_numbers: [1] }
+  assert.equal(applyPlanningEvent(state, { ...event, source: 'main_planner' }), state)
+  assert.equal(applyPlanningEvent(state, { ...event, source: 'jev' }), state)
+  assert.equal(applyPlanningEvent(state, { ...event, source: 'runtime', goal_id: 'goal_other' }), state)
+  assert.equal(applyPlanningEvent(state, { type: PLANNING_EVENT.LOCATORS_RECORDED, now: 20, source: 'runtime' }), state, 'an empty event changes nothing')
+})
+
+test('locators and stale identities survive snapshot and restore in the reducer', () => {
+  let state = goalState()
+  state = applyPlanningEvent(state, {
+    type: PLANNING_EVENT.LOCATORS_RECORDED,
+    now: 20,
+    source: 'runtime',
+    durable_last_operations: [{ name: 'move_items_exact', target_locator: { name: 'steel-chest', position: { x: 3, y: 0 } } }],
+    exact_target_audit: [locatorEntry(11)],
+    stale_unit_numbers: [4412, 4413],
+  })
+  const restored = restorePlanningState(JSON.parse(JSON.stringify(serializePlanningState(state))))
+  assert.deepEqual(restored.run.locators, state.run.locators)
+  assert.deepEqual(restored.run.stale_exact_identities, [4412, 4413])
+})
+
+test('facade recordPlan routes locators through the reducer and mirrors them to legacy', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const request = { sender: 'Louis', text: 'Move plates into the chest' }
+  const durable = [{ name: 'move_items_exact', target_locator: { name: 'steel-chest', position: { x: 3, y: 0 } } }]
+  const first = memory.recordPlan(KEY, request, proposedPlan(['Move plates']), {
+    durableOperations: durable,
+    exactTargetAudit: [locatorEntry(11)],
+  })
+  const locators = memory.planningState(KEY).run.locators
+  assert.equal(locators.durable_last_operations[0].name, 'move_items_exact')
+  assert.deepEqual(locators.exact_target_audit.map(entry => entry.unit_number), [11])
+  assert.deepEqual(first.state.durable_last_operations, locators.durable_last_operations, 'legacy mirrors the reducer')
+  assert.deepEqual(first.state.exact_target_audit, locators.exact_target_audit)
+  assert.notEqual(first.state.exact_target_audit, locators.exact_target_audit, 'a copy, not shared')
+
+  const second = memory.recordPlan(KEY, request, proposedPlan(['Move plates']), {
+    continuation: true,
+    exactTargetAudit: [locatorEntry(12)],
+  })
+  assert.deepEqual(memory.planningState(KEY).run.locators.exact_target_audit.map(entry => entry.unit_number), [11, 12])
+  assert.deepEqual(second.state.exact_target_audit.map(entry => entry.unit_number), [11, 12])
+  assert.deepEqual(second.state.durable_last_operations, [], 'a batch with no operations clears the durable list, as before')
+  assert.match(memory.planContext(KEY), /steel-chest/, 'the model-facing entity references still come from the mirrored record')
+})
+
+test('facade carries a pre-reducer legacy audit over once instead of dropping it', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  const request = { sender: 'Louis', text: 'Move plates into the chest' }
+  memory.recordPlan(KEY, request, proposedPlan(['Move plates']))
+  memory.currentPlan(KEY).exact_target_audit = [locatorEntry(21)]
+  memory.recordPlan(KEY, request, proposedPlan(['Move plates']), { continuation: true, exactTargetAudit: [locatorEntry(22)] })
+  assert.deepEqual(memory.planningState(KEY).run.locators.exact_target_audit.map(entry => entry.unit_number), [21, 22])
+})
+
+test('old snapshot: locators are derived once from the legacy record', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  memory.recordPlan(KEY, { sender: 'Louis', text: 'Move plates' }, proposedPlan(['Move plates']), {
+    durableOperations: [{ name: 'move_items_exact', target_locator: { name: 'steel-chest' } }],
+    exactTargetAudit: [locatorEntry(31)],
+  })
+  const snapshot = JSON.parse(JSON.stringify(memory.snapshot()))
+  delete snapshot.planning_states[0].state.run
+
+  const restored = new CanonicalTaskBoardMemory()
+  restored.restore(snapshot)
+  const locators = restored.planningState(KEY).run.locators
+  assert.deepEqual(locators.exact_target_audit.map(entry => entry.unit_number), [31])
+  assert.equal(locators.durable_last_operations[0].name, 'move_items_exact')
+  assert.equal(restored.currentPlan(KEY).exact_target_audit[0].unit_number, 31, 'legacy readers still see it')
+})
+
+test('locators survive a snapshot round trip through the reducer', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  memory.recordPlan(KEY, { sender: 'Louis', text: 'Move plates' }, proposedPlan(['Move plates']), {
+    durableOperations: [{ name: 'move_items_exact', target_locator: { name: 'steel-chest' } }],
+    exactTargetAudit: [locatorEntry(41)],
+  })
+  const snapshot = JSON.parse(JSON.stringify(memory.snapshot()))
+  const restored = new CanonicalTaskBoardMemory()
+  restored.restore(snapshot)
+  assert.deepEqual(restored.planningState(KEY).run.locators, memory.planningState(KEY).run.locators)
+  assert.deepEqual(restored.currentPlan(KEY).exact_target_audit.map(entry => entry.unit_number), [41])
+})
+
+function staleEvidence(unitNumber, ref) {
+  return {
+    kind: 'operation_preflight_recoverable',
+    ref,
+    summary: JSON.stringify({ code: 'stale_exact_target', operation_index: 0, operation: 'move_items_exact', identity: unitNumber, last_observed: { name: 'stone-furnace', position: { x: 12, y: -4 } } }),
+  }
+}
+
+function committedAnyContract(memory) {
+  const plan = proposedPlan(['Refuel the stone furnace', 'Craft gears', 'Build power'])
+  const recorded = memory.recordPlan(KEY, { sender: 'Louis', text: 'Keep the furnace fed' }, plan)
+  const reconciled = memory.reconcileTaskBoard(KEY, undefined, plan, recorded, { allowReplan: false })
+  memory.setStepCompletionContract(KEY, reconciled.state.task_board.steps[0].id, {
+    mode: 'any',
+    confidence: 0.9,
+    requirements: [
+      { id: 'furnace_fuel', kind: 'entity_inventory_count', unit_number: 4412, item_name: 'coal', minimum: 5 },
+      { id: 'furnace_alive', kind: 'entity_exists', unit_number: 4413 },
+    ],
+  }, { now: 90 })
+  memory.commitPlanningPlan(KEY, { now: 100, runtime_validation: { passed: true } })
+}
+
+test('the stale-identity set lives in reducer state and survives a restart mid-proof', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  committedAnyContract(memory)
+  const stepId = getActivePlan(memory.planningState(KEY)).steps[0].step_id
+
+  memory.recordBoardEvidence(KEY, staleEvidence(4412, 'request/stale_a'))
+  assert.deepEqual(memory.planningState(KEY).run.stale_exact_identities, [4412])
+  assert.equal(getActivePlan(memory.planningState(KEY)).execution.step_progress[stepId].unsatisfiable ?? null, null, 'one dead branch leaves the contract live')
+  assert.equal(memory.staleExactIdentitiesByNpc, undefined, 'the side map no longer exists')
+
+  // Restart between the two proofs.
+  const restored = new CanonicalTaskBoardMemory()
+  restored.restore(JSON.parse(JSON.stringify(memory.snapshot())))
+  assert.deepEqual(restored.planningState(KEY).run.stale_exact_identities, [4412], 'the set survives the snapshot')
+
+  restored.recordBoardEvidence(KEY, staleEvidence(4413, 'request/stale_b'))
+  const after = getActivePlan(restored.planningState(KEY))
+  assert.ok(after.execution.step_progress[stepId].unsatisfiable, 'the second proof combines with the first across the restart')
+  assert.equal(after.status, PLAN_STATUS.BLOCKED)
+  assert.deepEqual(restored.planningState(KEY).run.stale_exact_identities, [4412, 4413])
+})
+
+test('a fresh goal starts with no stale identities', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  committedAnyContract(memory)
+  memory.recordBoardEvidence(KEY, staleEvidence(4412, 'request/stale_a'))
+  assert.equal(memory.planningState(KEY).run.stale_exact_identities.length, 1)
+  memory.clearTaskContext(KEY)
+  memory.admitPlanningGoal(KEY, { owner: 'Louis', objective: 'Something else', now: 5000 })
+  assert.equal(memory.planningState(KEY).run, null)
 })
 
 test('new snapshot: the run round-trips and the reducer wins over the legacy fields', () => {
