@@ -76,6 +76,7 @@ import { event_handlers, set_load_handler } from './test-event-registry'
     pipe: {},
     'assembling-machine-1': {},
   },
+  recipe: {},
 }
 
 // Factorio 2.0's per-save persistence table. Real shape is declared locally

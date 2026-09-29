@@ -1,6 +1,7 @@
 import type { ControlledActor } from './actors/types'
 import type { new_task_manager } from './task_manager'
 import type { PlayerParametersCraftItem } from './types'
+import { craft_queue_totals, credit_finished_crafts } from './crafted_items'
 import { TaskStates } from './types'
 
 const MAX_CRAFT_COUNT = 1000
@@ -112,10 +113,23 @@ function clear_owned_marker(task: PlayerParametersCraftItem) {
 }
 
 export function new_crafting_controller(get_actor: () => ControlledActor | undefined, manager: ReturnType<typeof new_task_manager>) {
+  // Credit the crafts the engine finished since the last look. Runs every tick
+  // and again just before this request cancels its own queue, so crafts that
+  // finished before the cancellation count and the cancelled ones never do.
+  function credit_finished(actor: ControlledActor, task: PlayerParametersCraftItem) {
+    if (task.queue_snapshot === undefined || task.owner_force_index === undefined) {
+      return
+    }
+    const current = craft_queue_totals(actor.get_crafting_queue())
+    credit_finished_crafts(task.owner_force_index, task.queue_snapshot, current)
+    task.queue_snapshot = current
+  }
+
   function cancel_owned_native_queue(actor: ControlledActor, task: PlayerParametersCraftItem) {
     if (!task.owns_native_queue) {
       return 0
     }
+    credit_finished(actor, task)
 
     // Admission requires an empty native queue. Therefore every queue entry
     // created by begin_crafting for this request (including prerequisites) is
@@ -238,6 +252,7 @@ export function new_crafting_controller(get_actor: () => ControlledActor | undef
     task.started_tick = game.tick
     task.expected_output_delta = task.started
     task.owns_native_queue = task.started > 0 && actor.get_crafting_queue().length > 0
+    task.queue_snapshot = craft_queue_totals(actor.get_crafting_queue())
 
     if (task.started <= 0) {
       fail(actor, task, 'could_not_start', false)
@@ -270,6 +285,8 @@ export function new_crafting_controller(get_actor: () => ControlledActor | undef
         return
       }
     }
+
+    credit_finished(actor, task)
 
     const before = task.output_count_before ?? 0
     const expected = task.expected_output_delta ?? task.started ?? task.count
@@ -314,6 +331,8 @@ export function new_crafting_controller(get_actor: () => ControlledActor | undef
     if (!actor || !identity_matches(actor, task)) {
       return
     }
+
+    credit_finished(actor, task)
 
     const before = task.output_count_before ?? output_count(actor, task.item_name)
     const expected = task.expected_output_delta ?? task.started ?? task.count
