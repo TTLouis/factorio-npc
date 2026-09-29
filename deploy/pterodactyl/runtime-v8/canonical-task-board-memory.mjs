@@ -441,6 +441,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     this.planningByNpc = new Map()
     // Board progress the reducer could not be brought up to on restore.
     this.restoreDiagnostics = []
+    // Consecutive plan/board disagreements per NPC: { step_id, count }.
+    this.disagreementStrikes = new Map()
   }
 
   planningState(key) {
@@ -1563,11 +1565,11 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
    * The board and the plan must describe the same active step: the reducer
    * checks evidence against ITS step, so closing on evidence gathered for a
    * different one (a board that drifted from the plan) is exactly the bug that
-   * lost progress on a revised plan. Such a drift is traced and, because the
-   * reducer cannot vouch for it, left to the legacy path; restore converges it.
+   * lost progress on a revised plan. Such a drift refuses the close
+   * (`#refuseDisagreement`); it is never closed on the board alone.
    *
-   * Returns `{ refused }` to stop, `{ events, disagreement }` otherwise, or
-   * undefined when this is not a step close the reducer governs.
+   * Returns `{ refused }` to stop, `{ events }` to proceed, or undefined when
+   * this is not a step close the reducer governs.
    */
   #decideStepClose(key, candidate, options) {
     if (!key || candidate?.metadata?.scope !== 'step') return undefined
@@ -1586,25 +1588,25 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     })
     // A blocked plan is frozen until the user revises it; no outcome unfreezes it.
     if (plan.status === PLAN_STATUS.BLOCKED) return refuse('plan_blocked')
+    // Nothing is admitted on a pre-commit draft, so the board may not run ahead
+    // of a reducer that will record none of it.
+    if (PRE_COMMIT_REPLACEABLE_STATUSES.includes(plan.status)) return refuse('plan_not_committed')
     if (![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan.status)) return undefined
 
     const board = state.task_board
     const offset = boardPlanAlignment(board, plan)
     const boardActive = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
-    if (offset === undefined || boardActive === undefined) {
-      return { events: [], disagreement: { code: 'board_plan_unaligned', plan_id: plan.plan_id } }
-    }
-    const reducerIndex = boardActive - offset
+    const reducerIndex = offset === undefined || boardActive === undefined ? undefined : boardActive - offset
     if (reducerIndex !== plan.active_step_index) {
-      return {
-        events: [],
-        disagreement: {
-          code: reducerIndex < plan.active_step_index ? 'board_behind_plan' : 'plan_behind_board',
-          plan_id: plan.plan_id,
-          board_step_id: board.active_step_id,
-          plan_step_id: plan.steps[plan.active_step_index]?.step_id,
-        },
-      }
+      const code = reducerIndex === undefined
+        ? 'board_plan_unaligned'
+        : reducerIndex < plan.active_step_index ? 'board_behind_plan' : 'plan_behind_board'
+      return this.#refuseDisagreement(key, state, plan, decision, {
+        code,
+        plan_id: plan.plan_id,
+        board_step_id: board?.active_step_id,
+        plan_step_id: plan.steps[plan.active_step_index]?.step_id,
+      })
     }
 
     const step = plan.steps[plan.active_step_index]
@@ -1616,6 +1618,45 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return closed ? { events } : refuse('reducer_declined_step_close')
   }
 
+  /**
+   * The board and the plan disagree about the active step, so this close is
+   * refused: the board never closes past the reducer silently. The planner is
+   * handed the reason (the refusal), and the goal PAUSES visibly when the
+   * disagreement repeats on the same step or sits on the final step, where a
+   * drifted board would otherwise declare the goal finished while the plan is
+   * still executing.
+   *
+   * A board that merely trails the reducer is lifted to it first; the retry
+   * then finds them aligned and is not counted.
+   */
+  #refuseDisagreement(key, state, plan, decision, disagreement) {
+    const board = state.task_board
+    let current = state
+    let paused = false
+    if (disagreement.code === 'board_behind_plan') {
+      current = this.syncPlanningState(key, state) ?? state
+    }
+    else {
+      const stepId = board?.active_step_id
+      const previous = this.disagreementStrikes.get(key)
+      const count = previous?.step_id === stepId ? previous.count + 1 : 1
+      this.disagreementStrikes.set(key, { step_id: stepId, count })
+      const finalStep = Array.isArray(board?.steps) && board.active_index === board.steps.length - 1
+      if (finalStep || count >= 2) {
+        current = this.pausePlan(key, `plan_board_disagreement:${disagreement.code}`) ?? state
+        paused = true
+      }
+    }
+    return {
+      refused: {
+        state: current,
+        decision: { ...decision, accepted: false, rejection_reason: 'plan_board_disagreement', ...(paused ? { paused: true } : {}) },
+        changed: paused,
+        progressDisagreement: disagreement,
+      },
+    }
+  }
+
   applyOutcomeAuthority(key, candidate, options = {}) {
     const beforeLegacy = key ? this.planByNpc.get(key) : undefined
     if (beforeLegacy) this.ensurePlanningDraft(key, beforeLegacy, { now: beforeLegacy.updated_at })
@@ -1623,7 +1664,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     if (stepClose?.refused) return stepClose.refused
     const result = super.applyOutcomeAuthority(key, candidate, options)
     if (!result?.decision?.accepted || !result?.state) return result
-    const progressDisagreement = stepClose?.disagreement
+    if (stepClose?.events?.length) this.disagreementStrikes.delete(key)
 
     let planning = this.planningByNpc.get(key)
     let plan = getActivePlan(planning)
@@ -1738,7 +1779,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
 
     this.planningByNpc.set(key, planning)
     this.syncPlanningState(key, result.state)
-    return { ...result, state: result.state, ...(progressDisagreement ? { progressDisagreement } : {}) }
+    return { ...result, state: result.state }
   }
 
   snapshot() {
@@ -1772,6 +1813,17 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     let planning = this.planningByNpc.get(key)
     const first = getActivePlan(planning)
     if (!first || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(first.status)) return
+    // Board evidence belongs to the goal it was recorded for.
+    if (planning.goal?.goal_id !== state.goal_id) {
+      this.restoreDiagnostics.push({
+        key,
+        code: 'board_goal_mismatch',
+        plan_id: first.plan_id,
+        board_goal_id: state.goal_id,
+        plan_goal_id: planning.goal?.goal_id,
+      })
+      return
+    }
     const offset = boardPlanAlignment(board, first)
     if (offset === undefined) {
       if ((board?.completed_count ?? 0) > 0) this.restoreDiagnostics.push({ key, code: 'board_plan_unaligned', plan_id: first.plan_id })
@@ -1828,6 +1880,23 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       planning = next
     }
     this.planningByNpc.set(key, planning)
+    // Every step proven: the slice is done, through the normal PLAN_COMPLETED
+    // rules (all steps completed, runtime authority) and its boundary steering.
+    const last = getActivePlan(planning)
+    if (last && last.steps.every(step => last.execution.step_progress[step.step_id]?.status === 'completed')) {
+      const now = state.updated_at ?? Date.now()
+      const completed = applyPlanningEvent(planning, {
+        type: PLANNING_EVENT.PLAN_COMPLETED,
+        now,
+        source: 'runtime',
+        plan_id: last.plan_id,
+        verified_results: [],
+      })
+      if (getActivePlan(completed)?.status === PLAN_STATUS.COMPLETED) {
+        this.planningByNpc.set(key, completed)
+        this.evaluateSteeringAtBoundary(key, { boundary: STEERING_BOUNDARY.PLAN_COMPLETED, now, planId: last.plan_id })
+      }
+    }
   }
 
   restore(snapshot) {
@@ -1879,6 +1948,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     // Upgrade legacy snapshots in place. Active/blocked state in Task Board Lite
     // represents already-admitted work, so migration may commit it immediately.
     this.restoreDiagnostics = []
+    this.disagreementStrikes.clear()
     for (const [key, state] of this.planByNpc.entries()) {
       let planning = this.planningByNpc.get(key)
       // A reducer state that came with the snapshot may lag the board (a run

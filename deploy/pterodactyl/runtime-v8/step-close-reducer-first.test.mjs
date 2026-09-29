@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 
 import { boardPlanAlignment, CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
-import { applyPlanningEvent, getActivePlan, PLAN_STATUS, PLANNING_EVENT } from './planning-state.mjs'
+import { applyPlanningEvent, getActivePlan, GOAL_STATUS, PLAN_STATUS, PLANNING_EVENT } from './planning-state.mjs'
 
 // 3.3 move 5 / 3.8: a step close is decided in the reducer first and the legacy
 // board is mirrored from it. These tests are built from the live run of
@@ -110,6 +110,22 @@ function reviseAfterBlocker() {
   planning = memory.commitPlanningPlan(KEY, { now: 110, migrated: true, runtime_validation: RUNTIME_VALIDATED })
   planning = memory.replayLegacyVerifiedPrefix(KEY, memory.planByNpc.get(KEY), planning, { now: 115 })
   memory.planningByNpc.set(KEY, planning)
+  blockAndRevise(memory, [
+    'Gather iron ore near base (~40).',
+    'Gather 40 coal (ran out of coal).',
+    'Fuel the stone furnace and smelt iron plates.',
+    'Verify steam-power research is completed.',
+    'Craft and place boiler + steam engine.',
+    'Craft an electric mining drill.',
+  ], COAL_CONTRACT)
+  return memory
+}
+
+// A structural blocker freezes the committed plan, the user picks "revise", the
+// planner restates the plan (its verified prefix included), and the checkpoint
+// contract for the new active step arrives while the successor is still a
+// draft: the write that used to rebuild the reducer draft from the whole board.
+function blockAndRevise(memory, steps, contract) {
   memory.applyOutcomeAuthority(KEY, {
     kind: 'world_blocked',
     source: 'deterministic_runtime',
@@ -119,31 +135,18 @@ function reviseAfterBlocker() {
   })
   memory.recordBlockedChoice(KEY, 'revise', 'Louis', { now: 120 })
   const blockedBoard = memory.currentPlan(KEY).task_board
-
   const proposed = {
-    chatMessage: 'Coal first.',
-    plan: [
-      'Gather iron ore near base (~40).',
-      'Gather 40 coal (ran out of coal).',
-      'Fuel the stone furnace and smelt iron plates.',
-      'Verify steam-power research is completed.',
-      'Craft and place boiler + steam engine.',
-      'Craft an electric mining drill.',
-    ],
-    currentStep: 1,
+    chatMessage: 'Revised.',
+    plan: steps,
+    currentStep: blockedBoard.completed_count,
     operations: [{ name: 'wait', args: { ticks: 1 } }],
   }
-  const recorded = memory.recordPlan(KEY, { sender: 'Louis', text: 'gather 40 coal first' }, proposed)
+  const recorded = memory.recordPlan(KEY, { sender: 'Louis', text: 'revise the plan' }, proposed)
   memory.reconcileTaskBoard(KEY, blockedBoard, proposed, recorded, { previousState: memory.currentPlan(KEY) })
   assert.equal(recorded.userRevisionApproved, true)
-
-  // The checkpoint contract for the coal step arrives while the successor is
-  // still a draft: this is the write that rebuilt the reducer draft from the
-  // whole board.
-  const coalStepId = memory.currentPlan(KEY).task_board.active_step_id
-  memory.setStepCompletionContract(KEY, coalStepId, COAL_CONTRACT, { now: 130 })
+  const activeStepId = memory.currentPlan(KEY).task_board.active_step_id
+  memory.setStepCompletionContract(KEY, activeStepId, contract, { now: 130 })
   memory.commitPlanningPlan(KEY, { now: 140, runtime_validation: RUNTIME_VALIDATED })
-  return memory
 }
 
 function trackerProgress(memory) {
@@ -361,7 +364,7 @@ test('live snapshot: a step the board closed without provable evidence is left a
   assert.equal(memory.restoreDiagnostics[0].board_step_id, 'step_3_r10')
 })
 
-test('live snapshot: the disagreement does not let a close on the wrong step through', () => {
+test('live snapshot: an unprovable drift refuses the close, hands back to the planner, and pauses on repeat', () => {
   const memory = new CanonicalTaskBoardMemory()
   memory.restore(liveSnapshot((snapshot) => {
     snapshot.plans[0].state.task_board.evidence = []
@@ -369,18 +372,153 @@ test('live snapshot: the disagreement does not let a close on the wrong step thr
   const plan = getActivePlan(memory.planningState(KEY))
   assert.equal(plan.active_step_index, 1)
   // Board is on step_4 while the plan is on its coal step: the reducer cannot
-  // vouch for a close made on the board's own step, so it records nothing and
-  // the disagreement is returned for tracing.
-  const result = memory.applyOutcomeAuthority(KEY, {
+  // vouch for a close made on the board's own step, so the board does not close
+  // past it either.
+  const close = () => memory.applyOutcomeAuthority(KEY, {
     kind: 'verified_complete',
     source: 'deterministic_runtime',
     reason_code: 'deterministic_completion_contract',
     evidence: [{ kind: 'verified_world_state', ref: 'checkpoint/step_4', summary: '{}' }],
     metadata: { scope: 'step' },
   })
-  assert.equal(result.decision.accepted, true)
-  assert.equal(result.progressDisagreement.code, 'plan_behind_board')
-  assert.equal(getActivePlan(memory.planningState(KEY)).active_step_index, 1, 'the reducer did not close a step for evidence gathered elsewhere')
+  const first = close()
+  assert.equal(first.decision.accepted, false)
+  assert.equal(first.decision.rejection_reason, 'plan_board_disagreement')
+  assert.equal(first.decision.paused, undefined, 'the first refusal goes back to the planner')
+  assert.equal(first.progressDisagreement.code, 'plan_behind_board')
+  assert.equal(memory.currentPlan(KEY).task_board.active_index, 4, 'the board did not close past the reducer')
+  assert.equal(memory.currentPlan(KEY).task_board.completed_count, 4)
+  assert.equal(getActivePlan(memory.planningState(KEY)).active_step_index, 1)
+
+  const second = close()
+  assert.equal(second.decision.accepted, false)
+  assert.equal(second.decision.paused, true, 'a repeat on the same step pauses visibly')
+  assert.equal(memory.currentPlan(KEY).status, 'paused')
+  assert.match(memory.currentPlan(KEY).pause_reason, /plan_board_disagreement/)
+})
+
+test('a disagreement on the final board step pauses at once instead of completing the goal', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  memory.planByNpc.set(KEY, legacyState(boardOf([
+    { id: 'step_1', description: 'Gather coal', status: 'completed' },
+    { id: 'step_2', description: 'Build furnace', status: 'active' },
+  ], 1)))
+  memory.ensurePlanningDraft(KEY, memory.planByNpc.get(KEY), { now: 100 })
+  memory.commitPlanningPlan(KEY, { now: 110, runtime_validation: RUNTIME_VALIDATED })
+  // The board claims a completed first step the reducer never recorded.
+  assert.equal(getActivePlan(memory.planningState(KEY)).active_step_index, 0)
+
+  const closed = closeSemantically(memory, 'step_2')
+
+  assert.equal(closed.decision.accepted, false)
+  assert.equal(closed.decision.paused, true)
+  assert.equal(memory.currentPlan(KEY).status, 'paused')
+  assert.notEqual(memory.currentPlan(KEY).status, 'completed')
+  assert.equal(getActivePlan(memory.planningState(KEY)).status, PLAN_STATUS.COMMITTED)
+})
+
+test('a step close on an uncommitted draft is refused: the board never runs ahead of the reducer', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  memory.planByNpc.set(KEY, legacyState(boardOf([
+    { id: 'step_1', description: 'Gather coal', status: 'active' },
+    { id: 'step_2', description: 'Build furnace', status: 'pending' },
+  ], 0)))
+  memory.ensurePlanningDraft(KEY, memory.planByNpc.get(KEY), { now: 100 })
+  const closed = closeSemantically(memory, 'step_1')
+  assert.equal(closed.decision.accepted, false)
+  assert.equal(closed.decision.rejection_reason, 'plan_not_committed')
+  assert.equal(memory.currentPlan(KEY).task_board.active_index, 0)
+})
+
+test('a second revision keeps the whole verified prefix: closing every step completes the plan, and survives a restart', () => {
+  const memory = reviseAfterBlocker()
+  const board = () => memory.currentPlan(KEY).task_board
+  assert.equal(closeWithContract(memory, board().active_step_id).decision.accepted, true)
+  assert.equal(closeSemantically(memory, board().active_step_id).decision.accepted, true)
+  assert.equal(board().completed_count, 3)
+
+  const BOILER_CONTRACT = {
+    mode: 'all',
+    requirements: [{ id: 'boiler_crafted', kind: 'inventory_count', item_name: 'boiler', minimum: 1 }],
+    confidence: 0,
+    source: 'planner_semantic_checkpoint',
+  }
+  blockAndRevise(memory, [
+    'Gather iron ore near base (~40).',
+    'Gather 40 coal (ran out of coal).',
+    'Fuel the stone furnace and smelt iron plates.',
+    'Craft a boiler.',
+    'Craft and place a steam engine.',
+    'Craft an electric mining drill.',
+  ], BOILER_CONTRACT)
+
+  let plan = getActivePlan(memory.planningState(KEY))
+  assert.equal(plan.plan_version, 3)
+  assert.equal(plan.carried_forward_evidence.length, 3, 'the first revision\'s carried step is not dropped')
+  assert.equal(plan.steps.length, 3, 'only the unverified suffix is the successor\'s own')
+  assert.equal(boardPlanAlignment(board(), plan), 3)
+  assert.equal(plan.active_step_index, 0)
+  assert.equal(board().active_index, 3)
+
+  assert.equal(closeWithContract(memory, board().active_step_id, BOILER_CONTRACT).decision.accepted, true)
+
+  // Restart in the middle of the third plan.
+  const restored = new CanonicalTaskBoardMemory()
+  restored.restore(JSON.parse(JSON.stringify(memory.snapshot())))
+  assert.deepEqual(restored.restoreDiagnostics, [])
+  assert.equal(restored.currentPlan(KEY).task_board.completed_count, 4)
+  assert.equal(getActivePlan(restored.planningState(KEY)).active_step_index, 1)
+
+  for (const target of [memory, restored]) {
+    const state = () => target.currentPlan(KEY).task_board
+    assert.equal(closeSemantically(target, state().active_step_id).decision.accepted, true)
+    const last = closeSemantically(target, state().active_step_id)
+    assert.equal(last.decision.accepted, true)
+    // Read the reducer first: reading the completed legacy plan retires it.
+    plan = getActivePlan(target.planningState(KEY))
+    assert.equal(plan.status, PLAN_STATUS.COMPLETED, 'the final board close completes the reducer plan too')
+    assert.equal(target.planByNpc.get(KEY).status, 'completed')
+    assert.equal(target.planningState(KEY).goal.status, GOAL_STATUS.ACTIVE, 'plan completion is not goal completion')
+  }
+})
+
+test('restore skips board evidence recorded for another goal', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  memory.restore(liveSnapshot((snapshot) => {
+    snapshot.plans[0].state.goal_id = 'goal_someone_else'
+  }))
+  const plan = getActivePlan(memory.planningState(KEY))
+  assert.equal(plan.active_step_index, 1, 'nothing was replayed')
+  assert.equal(memory.restoreDiagnostics[0].code, 'board_goal_mismatch')
+})
+
+test('restore completes the plan when the board proves every step', () => {
+  const memory = new CanonicalTaskBoardMemory()
+  memory.restore(liveSnapshot((snapshot) => {
+    const state = snapshot.plans[0].state
+    const board = state.task_board
+    // Steps 5 and 6 closed on the board too, each with a fresh-observation
+    // claim and a runtime receipt for that step. (The board keeps a bounded
+    // evidence window, so the unrelated older records make room.)
+    board.evidence = board.evidence.filter(item => ['step_2_r10', 'step_3_r10', 'step_3'].includes(item.step_id))
+    for (const index of [4, 5]) {
+      const step = board.steps[index]
+      step.status = 'completed'
+      board.evidence.push(
+        { id: `e_${index}a`, kind: 'deterministic_verification', ref: `batch_${index}`, step_id: step.id, at: 1, summary: '{}' },
+        { id: `e_${index}b`, kind: 'verified_world_state', ref: `req/semantic_fresh_observation/${step.id}`, step_id: step.id, at: 1, summary: 'claim' },
+      )
+    }
+    board.completed_count = 6
+    board.active_index = 5
+    board.active_step_id = board.steps[5].id
+    // The board's last step reads completed only once the board itself is.
+    state.status = 'completed'
+    board.status = 'completed'
+  }))
+  const plan = getActivePlan(memory.planningState(KEY))
+  assert.equal(plan.status, PLAN_STATUS.COMPLETED)
+  assert.equal(memory.planningState(KEY).goal.status, GOAL_STATUS.ACTIVE)
 })
 
 // The reducer state exactly as persisted: restore without the board, so no

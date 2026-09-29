@@ -163,6 +163,10 @@ function decisionResponse(route = 'wait_runtime') {
 function makeAgent({ decisionProvider, provider } = {}) {
   const memory = new CanonicalTaskBoardMemory()
   memory.planByNpc.set('npc:airi', state())
+  // A condition wait only exists on admitted work, and a step close is decided
+  // in the reducer first (3.3 move 5): the fixture's plan is committed.
+  memory.ensurePlanningDraft('npc:airi', memory.planByNpc.get('npc:airi'), { now: 1 })
+  memory.commitPlanningPlan('npc:airi', { now: 2, runtime_validation: { passed: true } })
   const rcon = new ConditionRcon()
   let mainCalls = 0
   const agent = new NpcAgentLoop({
