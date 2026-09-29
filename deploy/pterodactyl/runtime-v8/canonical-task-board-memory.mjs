@@ -660,6 +660,81 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return this.planningByNpc.get(key)
   }
 
+  // --- receipt ledger (3.3 move 2) -----------------------------------------
+  //
+  // Every board evidence item is recorded in the reducer's per-step receipt
+  // ledger FIRST (OPERATION_RECEIPT_RECORDED); `task_board.evidence` is then
+  // written as a MIRROR: the reducer's accepted identity (kind, ref, at) drives
+  // it, while the full `summary` text comes from the receipt itself. The
+  // ledger keeps only a short digest, and existing readers JSON.parse board
+  // summaries (legacyStepCloseProof, the completion gate), so the board must
+  // never be rebuilt from the digest. When the reducer refuses (no admitted
+  // goal or plan, step outside the plan) the legacy write proceeds unchanged.
+
+  #ledgerStepFor(planning, plan, board) {
+    const offset = boardPlanAlignment(board, plan)
+    if (offset === undefined) return plan?.steps?.[plan.active_step_index]?.step_id
+    const index = (Number.isSafeInteger(board?.active_index) ? board.active_index : 0) - offset
+    return plan.steps[index]?.step_id
+  }
+
+  appendBoardEvidence(key, state, board, item) {
+    if (!this.#reducerHoldsGoal(key, state) || !item || typeof item !== 'object') {
+      return super.appendBoardEvidence(key, state, board, item)
+    }
+    const before = this.planningByNpc.get(key)
+    const plan = getActivePlan(before)
+    const stepId = plan ? this.#ledgerStepFor(before, plan, board) : undefined
+    if (!plan || !stepId) return super.appendBoardEvidence(key, state, board, item)
+    const seqBefore = Math.max(0, ...(plan.execution.receipts?.[stepId] ?? []).map(entry => entry.seq ?? 0))
+    const after = this.#applyRunEvent(key, {
+      type: PLANNING_EVENT.OPERATION_RECEIPT_RECORDED,
+      goal_id: state.goal_id,
+      plan_id: plan.plan_id,
+      step_id: stepId,
+      kind: item.kind,
+      ref: item.ref,
+      summary: item.summary,
+      at: item.now,
+    })
+    const recorded = (after?.plans.find(candidate => candidate.plan_id === plan.plan_id)?.execution.receipts?.[stepId] ?? [])
+      .filter(entry => (entry.seq ?? 0) > seqBefore)
+      .at(-1)
+    if (!recorded) return super.appendBoardEvidence(key, state, board, item)
+    return super.appendBoardEvidence(key, state, board, { ...item, kind: recorded.kind, ref: recorded.ref, now: recorded.at })
+  }
+
+  /**
+   * Seed the active plan's receipt ledger ONCE from the legacy board evidence
+   * when the snapshot predates the ledger. Board evidence for steps of the
+   * plan (found through the board/plan alignment) is adopted per step; the
+   * marker is set even when there is nothing to adopt, so it never runs twice.
+   */
+  seedReceiptLedgerFromLegacy(key, legacyState = key ? this.planByNpc.get(key) : undefined) {
+    const planning = key ? this.planningByNpc.get(key) : undefined
+    const plan = getActivePlan(planning)
+    if (!plan || plan.execution.receipts_seeded === true || !this.#reducerHoldsGoal(key, legacyState)) return planning
+    const board = legacyState.task_board
+    const offset = boardPlanAlignment(board, plan)
+    const base = { source: 'legacy_adopted', goal_id: legacyState.goal_id, plan_id: plan.plan_id }
+    let seededAny = false
+    if (offset !== undefined) {
+      for (const [index, step] of plan.steps.entries()) {
+        const boardStepId = board.steps[offset + index]?.id
+        const receipts = (Array.isArray(board.evidence) ? board.evidence : [])
+          .filter(item => item?.step_id === boardStepId)
+          .map(item => ({ kind: item.kind, ref: item.ref, summary: item.summary, at: item.at }))
+        if (receipts.length === 0) continue
+        this.#applyRunEvent(key, { ...base, type: PLANNING_EVENT.OPERATION_RECEIPT_RECORDED, step_id: step.step_id, receipts })
+        seededAny = true
+      }
+    }
+    if (!seededAny) {
+      this.#applyRunEvent(key, { ...base, type: PLANNING_EVENT.OPERATION_RECEIPT_RECORDED, receipts: [] })
+    }
+    return this.planningByNpc.get(key)
+  }
+
   beginActionOmissionRecovery(key, requestInfo, plan, options = {}) {
     return super.beginActionOmissionRecovery(key, requestInfo, plan, {
       ...options,
@@ -963,6 +1038,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     // (pause, wait, recovery, follow runtime, locators), seed the reducer run
     // now, so a later mirrorRunToLegacy cannot null those legacy fields.
     this.seedRunFromLegacy(key, state)
+    this.seedReceiptLedgerFromLegacy(key, state)
     this.syncPlanningState(key, state)
     return planning
   }
@@ -1360,6 +1436,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         developmentMode: plan?.developmentMode,
       })
       this.seedRunFromLegacy(key, result.state)
+      this.seedReceiptLedgerFromLegacy(key, result.state)
       this.mirrorRunToLegacy(key, result.state)
     }
     const activeAfterDraft = getActivePlan(this.planningByNpc.get(key))
@@ -1981,6 +2058,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       }
       if (this.planningByNpc.get(key)?.run) this.mirrorRunToLegacy(key, state, { locators: true })
       else this.seedRunFromLegacy(key, state)
+      this.seedReceiptLedgerFromLegacy(key, state)
       this.syncPlanningState(key, state)
     }
   }

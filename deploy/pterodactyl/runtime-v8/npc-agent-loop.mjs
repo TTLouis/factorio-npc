@@ -952,7 +952,7 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
     for (const item of evidence) {
       if (!item || typeof item !== 'object') continue
       const duplicate = (board?.evidence ?? []).some(existing => existing?.kind === item.kind && item.ref && existing?.ref === item.ref)
-      if (!duplicate) board = addTaskBoardEvidence(board, { ...item, now: Number.isFinite(item.now) ? item.now : now })
+      if (!duplicate) board = this.appendBoardEvidence(key, state, board, { ...item, now: Number.isFinite(item.now) ? item.now : now })
     }
     if (decision.durable_status === 'completed' && candidate?.metadata?.scope === 'step') {
       const activeStepId = board?.active_step_id
@@ -1232,11 +1232,18 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
     return { ...stateResult, state }
   }
 
+  // The one place a board evidence item is written. The canonical facade
+  // overrides it to record the receipt in the reducer ledger first and mirror
+  // the result here (3.3 move 2).
+  appendBoardEvidence(_key, _state, board, item) {
+    return addTaskBoardEvidence(board, item)
+  }
+
   recordBoardEvidence(key, evidence) {
     const state = key ? this.planByNpc.get(key) : undefined
     if (!state) return undefined
     const board = this.ensureTaskBoard(state)
-    state.task_board = addTaskBoardEvidence(board, evidence)
+    state.task_board = this.appendBoardEvidence(key, state, board, { ...evidence, now: Number.isFinite(evidence?.now) ? evidence.now : Date.now() })
     state.revision += 1
     state.updated_at = Date.now()
     this.planByNpc.set(key, state)
