@@ -422,6 +422,7 @@ export class PlanTiming {
       request.think_ms += data.latency_ms
     }
     if (event === 'tool.call' && request && ESTIMATE_TOOL_NAMES.has(data?.name)) request.estimate_tool_calls++
+    if (event === 'runtime.condition_scheduled') this.noteMachineWait(data)
     if (event === 'operations.ack') {
       if (request) {
         if (request.busy_since === undefined) request.busy_since = now
@@ -445,6 +446,19 @@ export class PlanTiming {
       this.request = null
     }
     return { before, after }
+  }
+
+  // Plan 2.5: a completion wait on a machine checkpoint of a timed step adds
+  // the machine's game-data expectation to that step, so elapsed is compared
+  // with hand work plus machine work, not hand work alone. Counted once per wait.
+  noteMachineWait(data) {
+    if (data?.mode !== 'completion' || !Number.isFinite(data?.expected_seconds) || data.expected_seconds < 0) return
+    const record = this.steps.get(`${data.goal_id}|${data.step_id}`)
+    if (!record || record.closed || !record.timed) return
+    record.machine_wait_ids ??= []
+    if (record.machine_wait_ids.includes(data.wait_id)) return
+    record.machine_wait_ids.push(data.wait_id)
+    record.machine_wait_seconds = round1((record.machine_wait_seconds ?? 0) + data.expected_seconds)
   }
 
   estimateToolCalledThisRequest() {
@@ -523,20 +537,24 @@ export class PlanTiming {
     const sameBody = record.actor_id === context.actorId && record.epoch === context.epoch
     const elapsed = (now - record.started_at) / 1000
     const expected = record.timed ? record.expected_seconds : undefined
+    // Machine work the step waited on (plan 2.5) is expected time too.
+    const machine = record.machine_wait_seconds ?? 0
+    const total = expected !== undefined ? expected + machine : undefined
     return ['step.time_measured', {
       goal_id: record.goal_id,
       step_id: record.step_id,
       step_index: record.step_index,
       expected_seconds: expected,
+      ...(machine > 0 ? { machine_wait_seconds: machine } : {}),
       elapsed_wall_seconds: sameBody ? round1(elapsed) : undefined,
-      ratio: sameBody && expected > 0 ? Math.round(elapsed / expected * 100) / 100 : undefined,
+      ratio: sameBody && total > 0 ? Math.round(elapsed / total * 100) / 100 : undefined,
       // What the estimate leaves out (walking, placement, transfer) plus
       // harness overhead, not separated. Recorded so later estimates can be
       // checked against it; never passed to the model as a rate.
-      unexplained_seconds: sameBody && expected !== undefined ? round1(elapsed - expected) : undefined,
+      unexplained_seconds: sameBody && total !== undefined ? round1(elapsed - total) : undefined,
       hand_mined_items: record.hand_mined_items || undefined,
       measured_seconds_per_hand_mined_item: sameBody && record.hand_mined_items > 0 && record.caption === 'hand mining'
-        ? Math.round(elapsed / record.hand_mined_items * 100) / 100
+        ? Math.round((elapsed - machine) / record.hand_mined_items * 100) / 100
         : undefined,
       lower_bound: record.lower_bound,
       batches: record.batches,
@@ -560,10 +578,12 @@ export class PlanTiming {
     const record = this.activeRecord(state, identity)
     if (!record) return undefined
     const elapsed = (this.now() - record.started_at) / 1000
-    const ratio = record.expected_seconds > 0 ? elapsed / record.expected_seconds : undefined
+    const machine = record.machine_wait_seconds ?? 0
+    const total = record.expected_seconds + machine
+    const ratio = total > 0 ? elapsed / total : undefined
     const overrun = Number.isFinite(ratio) && ratio > OVERRUN_FACTOR
     const lines = [
-      `[TIME_ESTIMATE] Harness-computed from game rates, not a model guess. Active step ${record.step_index + 1}: about ${formatDuration(record.expected_seconds)} of serial ${record.caption} on the NPC's own lane${record.lower_bound ? ' (lower bound)' : ''}; ${EXCLUDED_TIME.join(', ')} excluded. Running for ${formatDuration(elapsed)}${Number.isFinite(ratio) ? ` (${Math.round(ratio * 100) / 100}x the estimate)` : ''}.`,
+      `[TIME_ESTIMATE] Harness-computed from game rates, not a model guess. Active step ${record.step_index + 1}: about ${formatDuration(record.expected_seconds)} of serial ${record.caption} on the NPC's own lane${record.lower_bound ? ' (lower bound)' : ''}${machine > 0 ? `, then about ${formatDuration(machine)} of machine work (recipe time over live crafting speed)` : ''}; ${EXCLUDED_TIME.join(', ')} excluded. Running for ${formatDuration(elapsed)}${Number.isFinite(ratio) ? ` (${Math.round(ratio * 100) / 100}x the estimate)` : ''}.`,
     ]
     if (overrun) lines.push(`Overrun: elapsed is above ${OVERRUN_FACTOR}x the estimate.`)
     if (overrun || record.long?.long === true) lines.push(PARALLEL_MECHANICS)
@@ -575,6 +595,7 @@ export class PlanTiming {
         step_id: record.step_id,
         step_index: record.step_index,
         expected_seconds: record.expected_seconds,
+        ...(machine > 0 ? { machine_wait_seconds: machine } : {}),
         elapsed_wall_seconds: round1(elapsed),
         ratio: Math.round(ratio * 100) / 100,
         overrun_factor: OVERRUN_FACTOR,
@@ -611,7 +632,8 @@ export class PlanTiming {
     const record = this.activeRecord(state, identity)
     if (record) {
       const elapsed = (this.now() - record.started_at) / 1000
-      const ratio = record.expected_seconds > 0 ? elapsed / record.expected_seconds : undefined
+      const total = record.expected_seconds + (record.machine_wait_seconds ?? 0)
+      const ratio = total > 0 ? elapsed / total : undefined
       fields.time_estimate = `step ${record.step_index + 1}: ~${formatDuration(record.expected_seconds)} ${record.caption} on the NPC lane${record.lower_bound ? ' (lower bound)' : ''} · running ${formatDuration(elapsed)}${Number.isFinite(ratio) && ratio > OVERRUN_FACTOR ? ' · OVERRUN' : ''} · walking excluded`
       fields.step_time_index = record.step_index
       fields.step_time_caption = `~${formatDuration(record.expected_seconds)} · NPC lane${record.long?.long ? ' · long, one lane' : ''}`

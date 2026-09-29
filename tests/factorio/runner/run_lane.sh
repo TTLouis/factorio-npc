@@ -201,6 +201,10 @@ case "$LANE" in
     # defect documented in powered_assembler_cell.py), so it must run last.
     printf '[npc-test][production] Running candidate drill -> furnace placement gate...\n'
     run_py burner_drill_placement_cell.py
+    printf '[npc-test][production] Running hand mining/crafting rate gate (force manual modifiers)...\n'
+    run_py hand_work_rates_cell.py
+    printf '[npc-test][production] Running machine expected-finish gate (waits from game data)...\n'
+    run_py machine_eta_cell.py
     printf '[npc-test][production] Running compiled-Lua scope/capacity/fluid tool gate...\n'
     run_py compiled_lua_tools_cell.py
     printf '[npc-test][production] Running A1 belt/inserter transport gate...\n'

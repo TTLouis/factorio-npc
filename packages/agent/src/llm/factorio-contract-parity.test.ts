@@ -49,6 +49,16 @@ describe('canonical Factorio provider contract parity', () => {
     expect(agentTools.map(tool => tool.name).sort()).toEqual(namesForSurface(toolContract, 'ordinary-agent'))
   })
 
+  it('keeps ordinary-agent tool arguments aligned with the contract where it lists them', () => {
+    const withArgs = Object.entries(contract.tools as Record<string, ToolContract & { args?: string[] }>)
+      .filter(([, definition]) => Array.isArray(definition.args) && definition.surfaces.includes('ordinary-agent'))
+    expect(withArgs.map(([name]) => name)).toContain('getRecipeDetails')
+    for (const [name, definition] of withArgs) {
+      const tool = agentTools.find(entry => entry.name === name) as { schema: { shape: Record<string, unknown> } } | undefined
+      expect(Object.keys(tool?.schema.shape ?? {}).sort(), `${name} arguments drifted`).toEqual([...definition.args!].sort())
+    }
+  })
+
   it('records current runtime-v8-only tools as intentional surface differences', () => {
     expect(toolsWithPolicy('runtime-v8-only')).toEqual([
       'estimateProductionTime',

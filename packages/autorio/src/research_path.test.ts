@@ -46,9 +46,10 @@ beforeEach(() => {
   ;(globalThis as any).pairs = (value: Record<string, unknown>) => Object.entries(value)
   ;(globalThis as any).prototypes.technology = {
     'steam-power': {
+      // Factorio 2.0 shape: the craft-item item is an ItemIDFilter table.
       research_trigger: {
         type: 'craft-item',
-        item: 'iron-plate',
+        item: { name: 'iron-plate' },
         count: 50,
       },
     },

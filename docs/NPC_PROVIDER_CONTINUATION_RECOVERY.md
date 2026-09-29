@@ -79,19 +79,19 @@ The request should fail upward. When authoritative Autorio state is `idle` with 
 
 Normal planner turns may still report a truthful explicit blocker when grounded evidence establishes a real world/human/capability condition.
 
-## Deferred: calculated / condition-based waits
+## Calculated / condition-based waits (machine steps: plan 2.5)
 
-Current `wait {ticks}` duration is selected by the planner and then executed deterministically by Autorio. It is not yet calculated by runtime from live recipe/machine timing.
+Machine waits are now calculated by the runtime from game data
+(`deploy/pterodactyl/runtime-v8/production-wait.mjs`,
+`packages/autorio/src/production_eta.ts`):
 
-Future work should move mechanical timing out of the main LLM:
+- each condition answer for a crafting machine carries its expectation: seconds per craft (recipe energy / live crafting speed, modules and beacons included), crafts still needed, seconds to the checkpoint, seconds until the loaded inputs or fuel run out, and what limits it (`inputs`, `fuel`, `power`, `output_full`);
+- the condition wait takes its wake deadline from that expectation (expected x 1.5 + 30 s, at most 2 h) and a check budget that cannot end it first; later answers only refresh the expected finish. A passive wait may be lengthened, never shortened, since a fed machine outlives its loaded inputs;
+- when the planner returns no operations while the active step's single checkpoint is an output count on a machine observed working, the runtime holds a completion wait on that checkpoint instead of a guessed `wait {ticks}`; the step closes only when the checkpoint holds;
+- the planner wakes early when the machine stops, and on overrun with `expected_seconds` and `elapsed_seconds` in the recovery details;
+- elapsed time is never proof of production. Engine lane: `tests/factorio/runner/machine_eta_cell.py`.
 
-- derive an expected bounded wait from live recipe energy, machine crafting speed, requested remaining output, and other authoritative modifiers when available;
-- prefer condition-based polling so the wait can end early once the target condition is satisfied;
-- keep a bounded timeout/failure path instead of waiting indefinitely;
-- treat `wait` as elapsed-time control only, never as proof that production actually completed;
-- keep final success verification authoritative (inventory/entity/production observation), not inferred from elapsed ticks.
-
-This is intentionally documented but not implemented in the current recovery fix.
+Still planner-selected: a `wait {ticks}` operation in a batch, and waits with no machine expectation (hand work, research, several requirements); those keep the bounded defaults.
 
 ## Budget strategy
 

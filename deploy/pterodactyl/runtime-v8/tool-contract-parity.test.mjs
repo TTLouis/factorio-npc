@@ -96,6 +96,18 @@ test('runtime-v8 tool commands target the canonical Factorio remote interface/fu
   }
 })
 
+test('runtime-v8 tool arguments match the contract where the contract lists them', () => {
+  const withArgs = Object.entries(contract.tools).filter(([, definition]) => Array.isArray(definition.args))
+  assert.ok(withArgs.some(([name]) => name === 'getRecipeDetails'))
+  for (const [name, definition] of withArgs) {
+    if (!definition.surfaces.includes('pterodactyl-runtime-v8')) continue
+    const tool = runtime.toolDefinitions.find(entry => entry.function.name === name)
+    assert.deepEqual(Object.keys(tool.function.parameters.properties).sort(), [...definition.args].sort(), `${name} arguments drifted`)
+  }
+  // The optional fuel reaches the mod as recipe_details' third argument.
+  assert.match(runtime.toolCommand('getRecipeDetails', { item_or_recipe: 'iron-plate', fuel_name: 'coal' }), /"recipe_details",'iron-plate',1,'coal'\)/)
+})
+
 test('intentional runtime-only tools stay explicit without requiring symmetry adapters', () => {
   const runtimeOnly = Object.entries(contract.tools)
     .filter(([, definition]) => definition.surface_policy === 'runtime-v8-only')

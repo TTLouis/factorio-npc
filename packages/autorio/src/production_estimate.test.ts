@@ -275,4 +275,26 @@ describe('production time estimate from live prototypes', () => {
     expect(run({ machine: 'assembler', recipe: 'gear-alt', fuel: 'coal' }).error).toBe('step iron-gear-wheel: assembler does not burn fuel')
     expect(run({ recipe: 'gear-alt' }).error).toBe('step iron-gear-wheel: hand crafting cannot craft recipe gear-alt')
   })
+
+  it('picks the researched recipe over a locked one that also yields the item (Space Age scrap-recycling)', () => {
+    const withScrap = () => {
+      const npc = actor()
+      npc.character.prototype.crafting_categories['recycling-or-hand-crafting'] = true
+      npc.force.recipes['scrap-recycling'] = {
+        ...recipe('scrap-recycling', 'recycling-or-hand-crafting', 0.2, [{ type: 'item', name: 'scrap', amount: 1 }], [{ type: 'item', name: 'iron-gear-wheel', amount: 1, probability: 0.2 }]),
+        enabled: false,
+      }
+      return npc
+    }
+    const hand = estimate_production_for_actor(withScrap(), { target: 'iron-gear-wheel', count: 8, steps: [{ item: 'iron-gear-wheel' }] }) as any
+    expect(hand).toMatchObject({ ok: true, total_seconds: 4, steps: [{ kind: 'hand_craft', source: 'iron-gear-wheel', seconds_per_cycle: 0.5 }] })
+    expect(hand.warnings).toBeUndefined()
+
+    // With nothing researched that fits, the locked recipe still estimates, flagged.
+    const locked = withScrap()
+    locked.force.recipes['iron-gear-wheel'].enabled = false
+    delete locked.force.recipes['scrap-recycling']
+    const ahead = estimate_production_for_actor(locked, { target: 'iron-gear-wheel', count: 2, steps: [{ item: 'iron-gear-wheel' }] }) as any
+    expect(ahead).toMatchObject({ ok: true, steps: [{ kind: 'hand_craft', source: 'iron-gear-wheel' }], warnings: ['recipe iron-gear-wheel is not researched yet'] })
+  })
 })

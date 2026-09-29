@@ -2,6 +2,7 @@ import type { LuaEntity, LuaForce } from 'factorio:runtime'
 import { create_actor_remote_interface, get_controlled_actor } from './actors/actor_controller'
 import type { ControlledActor } from './actors/types'
 import { remember_entity_reference, resolve_exact_entity } from './entity_reference'
+import { machine_eta } from './production_eta'
 import { create_placement_candidate_set, type PlacementCandidateRequest } from './placement_candidates'
 import { compact_spatial_summary } from './spatial_semantics'
 import { get_actor_inventory_items } from './utils/inventory'
@@ -129,7 +130,10 @@ function evaluate_runtime_condition(request: Record<string, unknown>) {
         : expected === 'working'
           ? progressing
           : !progressing
-      return { ok: true, kind, satisfied, unit_number, progressing, progress_known, entity_status: status }
+      // A working crafting machine carries its expected time to run dry, so
+      // the harness can bound a passive wait from game data.
+      const eta = progressing ? machine_eta(entity) : undefined
+      return { ok: true, kind, satisfied, unit_number, progressing, progress_known, entity_status: status, eta }
     }
 
     const item_name = request.item_name
@@ -137,16 +141,19 @@ function evaluate_runtime_condition(request: Record<string, unknown>) {
     if (typeof item_name !== 'string' || !positive_integer(minimum)) return { ok: false, error: 'invalid_entity_inventory_count_condition' }
     if (!prototypes.item[item_name]) return { ok: false, error: 'unknown_item', item_name }
     const current = entity_item_count(entity, item_name)
+    const satisfied = current >= (minimum as number)
     return {
       ok: true,
       kind,
-      satisfied: current >= (minimum as number),
+      satisfied,
       current,
       minimum,
       unit_number,
       progressing,
       progress_known,
       entity_status: status,
+      // Expected time to the checkpoint for a crafting machine (plan 2.5).
+      eta: satisfied ? undefined : machine_eta(entity, item_name, minimum as number, current),
     }
   }
 

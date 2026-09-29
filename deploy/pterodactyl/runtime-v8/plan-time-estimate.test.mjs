@@ -455,3 +455,37 @@ test('a request paused at the output budget ends with its time split before requ
   assert.equal(split.data.batches, 1, 'the step 1 batch was admitted in this request')
   assert.ok(split.data.actor_busy_ms >= 0)
 })
+
+test('a machine wait on a timed step adds its game-data expectation instead of reading as a hand-work overrun (plan 2.5)', () => {
+  let clock = 0
+  const timing = new PlanTiming({ now: () => clock })
+  const state = { goal_id: 'goal', status: 'active', task_board: { active_index: 0, steps: [{ id: 'step_1' }] } }
+  timing.steps.set('goal|step_1', {
+    goal_id: 'goal', step_id: 'step_1', step_index: 0, started_at: 0, actor_id: 18, epoch: 3,
+    expected_seconds: 20, timed: true, lower_bound: false, batches: 1, hand_mined_items: 10,
+    caption: 'hand mining', long: { long: false }, overrun_traced: false, closed: false,
+  })
+  timing.activeStepKey = 'goal|step_1'
+  const scheduled = { wait_id: 'condition_1', goal_id: 'goal', step_id: 'step_1', mode: 'completion', expected_seconds: 40 }
+  timing.observe('runtime.condition_scheduled', scheduled)
+  timing.observe('runtime.condition_scheduled', scheduled)
+  // Passive waits and other steps do not count.
+  timing.observe('runtime.condition_scheduled', { ...scheduled, wait_id: 'condition_2', mode: 'passive_progress' })
+  timing.observe('runtime.condition_scheduled', { ...scheduled, wait_id: 'condition_3', step_id: 'step_2' })
+
+  // 50 s in: 20 s hand work + 40 s machine work expected, so no overrun.
+  clock = 50_000
+  const context = timing.continuationContext(state, { actorId: 18, epoch: 3 })
+  assert.match(context.text, /about 20 s of serial hand mining on the NPC's own lane, then about 40 s of machine work/)
+  assert.match(context.text, /\(0\.83x the estimate\)/)
+  assert.doesNotMatch(context.text, /Overrun/)
+  assert.equal(context.event, undefined)
+
+  const measured = timing.observe('step.verified', { active_step_id: 'step_1' }, { actorId: 18, epoch: 3 }).after
+    .find(([name]) => name === 'step.time_measured')?.[1]
+  assert.equal(measured.expected_seconds, 20)
+  assert.equal(measured.machine_wait_seconds, 40)
+  assert.equal(measured.unexplained_seconds, -10)
+  assert.equal(measured.measured_seconds_per_hand_mined_item, 1)
+})
+
