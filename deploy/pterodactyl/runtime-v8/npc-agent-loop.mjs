@@ -2532,6 +2532,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       this.memory.restore(parsed)
       this.turnSequence = Math.max(this.turnSequence, this.memory.maxTurnId?.() ?? 0)
       this.log(`[memory] restored durable NPC state from ${this.stateFile}`)
+      for (const item of this.memory.restoreDiagnostics ?? []) {
+        this.log(`[memory] plan progress disagrees with the task board after restore: ${JSON.stringify(item)}`)
+      }
     }
     catch (error) {
       if (error?.code === 'ENOENT') return
@@ -3261,6 +3264,23 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           evidence: [evidence],
           metadata: { scope: 'step' },
         })
+        if (reduced?.decision?.accepted !== true) {
+          // The reducer would not close the step (3.3 move 5), so the board did
+          // not move and the wait must not keep re-verifying it: hand the
+          // decision back to the planner instead.
+          const state = this.memory.clearConditionWait?.(key, identity.wait_id) ?? reduced?.state
+          await this.persistState()
+          if (reduced?.progressDisagreement) await this.traceEvent('step.progress_disagreement', { trigger: 'condition_wait', ...reduced.progressDisagreement })
+          if (reduced?.decision?.paused === true) {
+            const chatMessage = `I paused this goal: my plan tracker and my task board disagree about which step is active, so I stopped instead of guessing. ${RESUME_HINT}`
+            await this.traceEvent('step.progress_disagreement_paused', { trigger: 'condition_wait', ...(reduced.progressDisagreement ?? {}) })
+            return { action: 'paused', wait_id: identity.wait_id, state, chat_message: chatMessage }
+          }
+          await this.declineStepClose('condition_wait', reduced?.decision?.rejection_reason || 'outcome_authority_rejected_completion', {
+            wait_id: identity.wait_id,
+          })
+          return { action: 'wake', wait_id: identity.wait_id, reason: reduced?.decision?.rejection_reason || 'step_close_declined', state }
+        }
         await this.persistState()
         await this.traceEvent('runtime.condition_satisfied', {
           wait_id: identity.wait_id,
@@ -3869,12 +3889,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       metadata: { scope: 'step' },
     }, { steeringRecommendation })
     await this.persistState()
+    if (reduced?.progressDisagreement) await this.traceEvent('step.progress_disagreement', { trigger, ...reduced.progressDisagreement })
     if (reduced?.decision?.accepted !== true) {
       const declined = await this.declineStepClose(trigger, reduced?.decision?.rejection_reason || 'outcome_authority_rejected_completion', {
         active_step_id: step.id,
         contract,
       })
-      return { ...declined, state: reduced?.state }
+      return {
+        ...declined,
+        state: reduced?.state,
+        ...(reduced?.decision?.paused === true ? { paused: true, disagreement: reduced.progressDisagreement } : {}),
+      }
     }
     await this.traceEvent('step.verified', {
       active_step_id: step.id,
@@ -4208,6 +4233,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         reason: closed.reason,
         state: closed.state ?? planState,
         contract: checkpoint.contract,
+        ...(closed.paused ? { paused: true, disagreement: closed.disagreement } : {}),
       }
     }
     return { verified: true, state: closed.state, contract: checkpoint.contract }
@@ -5994,6 +6020,38 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  // The plan tracker and the task board disagree about the active step and the
+  // close was refused twice (or on the final step): stop visibly instead of
+  // letting the board drift from the plan. The player resumes with the usual
+  // hint.
+  async pauseForPlanBoardDisagreement(disagreement) {
+    const key = this.activePlanKey()
+    const state = this.peekPlanState(key)
+    const chatMessage = `I paused this goal: my plan tracker and my task board disagree about which step is active, so I stopped instead of guessing. ${RESUME_HINT}`
+    await this.persistState()
+    await this.traceEvent('step.progress_disagreement_paused', { ...(disagreement ?? {}) })
+    const taskBoard = visibleTaskBoard(state?.task_board)
+    await this.traceEvent('request.completed', {
+      chat_message: chatMessage,
+      outcome: 'paused_plan_board_disagreement',
+      task_board: taskBoard,
+      usage: this.traceRequest?.usage,
+    })
+    this.traceRequest = null
+    this.active = false
+    return {
+      chatMessage,
+      plan: state?.plan ?? [],
+      currentStep: state?.current_step ?? 0,
+      operations: [],
+      epoch: this.epoch?.epoch,
+      actorId: this.epoch?.actor_id,
+      goalId: state?.goal_id,
+      goalStatus: 'paused',
+      taskBoard,
+    }
+  }
+
   async completed() {
     await this.loadPersistentState()
     if (!this.active) return null
@@ -6017,6 +6075,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const stepCompletion = pendingAmendment
       ? { verified: false, reason: 'pending_amendment' }
       : await this.routeStepCompletionDecision(receipt)
+    if (stepCompletion?.paused) return this.pauseForPlanBoardDisagreement(stepCompletion.disagreement)
     // The reason a step did not close used to be trace-only: the model saw a
     // finished batch and nothing about why the step stayed open.
     const stepOpenHint = stepCompletion?.reason === 'semantic_completion_requires_planner'
@@ -7604,8 +7663,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // [PLANNING_STATE]; the Task Board projection names the same step
     // step_N. Accept the tracker id only while both point at the same step.
     const trackerPlan = getActivePlanningPlan(this.memory.planningState?.(this.requestInfo.memoryKey))
-    const trackerStepId = trackerPlan?.active_step_index === activeIndex
-      ? trackerPlan?.steps?.[activeIndex]?.step_id
+    // A revised plan's board leads with its predecessor's verified steps, so
+    // the board index is mapped onto the tracker's step list, not compared
+    // with the tracker's own index.
+    const boardStepTrackerId = typeof this.memory.trackerStepIdForBoardIndex === 'function'
+      ? this.memory.trackerStepIdForBoardIndex(this.requestInfo.memoryKey, activeIndex)
+      : trackerPlan?.steps?.[activeIndex]?.step_id
+    const trackerStepId = boardStepTrackerId !== undefined
+      && trackerPlan?.steps?.[trackerPlan.active_step_index]?.step_id === boardStepTrackerId
+      ? boardStepTrackerId
       : undefined
     if (!step || (claim.stepId !== step.id && claim.stepId !== trackerStepId)) {
       const error = new AgentLoopError(
@@ -7680,9 +7746,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       )
       error.failureClass = 'plan_category'
       error.code = 'semantic_completion_rejected'
+      error.rejectionReason = reduced?.decision?.rejection_reason
+      if (reduced?.progressDisagreement) {
+        await this.traceEvent('step.progress_disagreement', { trigger: 'semantic_completion', ...reduced.progressDisagreement })
+      }
+      if (reduced?.decision?.paused === true) {
+        error.pausedForDisagreement = true
+        error.disagreement = reduced.progressDisagreement
+        await this.persistState()
+      }
       throw error
     }
     await this.persistState()
+    if (reduced?.progressDisagreement) await this.traceEvent('step.progress_disagreement', { trigger: 'semantic_completion', ...reduced.progressDisagreement })
     await this.traceEvent('step.semantic_completed', {
       active_step_id: step.id,
       source: 'main_planner',
@@ -7779,7 +7855,34 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     let assistantReplyRecorded = false
     if (plan.semanticCompletion) {
-      const semantic = await this.applySemanticCompletionClaim(plan, previousState)
+      let semantic
+      try {
+        semantic = await this.applySemanticCompletionClaim(plan, previousState)
+      }
+      catch (error) {
+        // The reducer (or the plan/board agreement) declined an explicit claim.
+        // That is a correctable planner message, not a failed request: the step
+        // stays open and the reason goes back to the model. A repeat is not
+        // retried again; it fails as before.
+        if (error?.code !== 'semantic_completion_rejected') throw error
+        if (error.pausedForDisagreement) return this.pauseForPlanBoardDisagreement(error.disagreement)
+        const request = this.traceRequest
+        if (!request || (request.semantic_claim_declines ?? 0) >= 2) throw error
+        request.semantic_claim_declines = (request.semantic_claim_declines ?? 0) + 1
+        const reason = cleanMemoryText(error.rejectionReason ?? error.message, 200)
+        await this.traceEvent('step.semantic_completion_declined', {
+          active_step_id: plan.semanticCompletion.stepId,
+          reason,
+        })
+        this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
+        this.messages.push({
+          role: 'user',
+          content: `[HARNESS] Your semanticCompletion for step ${JSON.stringify(cleanMemoryText(plan.semanticCompletion.stepId, 100))} was not applied (${reason}); the step stays open. ${reason.startsWith('plan_not_committed')
+            ? 'The plan is not committed yet, so no step can close; the claim can be made again once the plan has been committed by submitting its operations.'
+            : 'Do not repeat the claim. Continue the step\'s work, or add a checkpoint {mode,requirements} whose world state the runtime can verify.'}`,
+        })
+        return this.runTurn()
+      }
       previousState = semantic.state ?? previousState
       // A closed step is progress: the next step gets a fresh act-or-block
       // repair instead of failing on the one this claim just resolved.
@@ -7861,7 +7964,23 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!conditionWait && commands.length === 0 && remainingCanonicalWork && !runtimeHealthy && !explicitBlocker) {
       const candidate = this.checkpointWaitCandidate(previousState) ?? this.passiveProgressWaitCandidate(previousState)
       if (candidate && this.requestInfo) {
-        const waiting = this.memory.registerConditionWait?.(this.requestInfo.memoryKey, candidate)
+        // A wait closes its step through the reducer, which only closes
+        // admitted work. On a zero-operation turn no preflight commit has run,
+        // so a still-uncommitted draft is committed here as runtime-admitted
+        // work (the zero-operation counterpart of the preflight commit: there
+        // are no operations to preflight). If the reducer will not admit it,
+        // no wait is registered and the turn takes the ordinary no-action path
+        // instead of waiting on a step that can never close.
+        const key = this.requestInfo.memoryKey
+        const draft = getActivePlanningPlan(this.memory.planningState?.(key))
+        if (draft && [PLAN_STATUS.DRAFT, PLAN_STATUS.RUNTIME_VALIDATION, PLAN_STATUS.READY].includes(draft.status)
+          && typeof this.memory.commitPlanningPlan === 'function') {
+          this.memory.commitPlanningPlan(key, { now: Date.now(), runtime_validation: { passed: true } })
+          await this.persistState()
+        }
+        const planAfter = getActivePlanningPlan(this.memory.planningState?.(key))
+        const admitted = !planAfter || FROZEN_PLAN_STATUSES.has(planAfter.status)
+        const waiting = admitted ? this.memory.registerConditionWait?.(key, candidate) : undefined
         if (waiting?.condition_wait) {
           conditionWait = waiting.condition_wait
           await this.persistState()

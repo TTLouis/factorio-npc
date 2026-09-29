@@ -2497,6 +2497,13 @@ export class Session {
           return
         }
 
+        if (result.action === 'paused') {
+          // The plan tracker and the task board disagreed: the goal is paused
+          // and the player is told so, never left silent.
+          if (result.chat_message) await this.printChat(result.chat_message)
+          return
+        }
+
         if (result.action === 'verified') {
           if (result.state?.status === 'completed') {
             const completed = {

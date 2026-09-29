@@ -2365,9 +2365,15 @@ Object.assign(HANDLERS, {
     if (!isUserAuthority(event.source) || !text(event.approved_by, 128)) return state
 
     const sequence = nextSequence(state)
-    const carried = predecessor.steps
-      .filter(step => predecessor.execution.step_progress[step.step_id]?.status === 'completed')
-      .map(step => `${predecessor.plan_id}:${step.step_id}`)
+    // The verified prefix is cumulative: what the predecessor itself carried
+    // forward, then what it completed. A second revision must not shrink it
+    // (the board's verified prefix keeps every earlier step).
+    const carried = [
+      ...(predecessor.carried_forward_evidence ?? []),
+      ...predecessor.steps
+        .filter(step => predecessor.execution.step_progress[step.step_id]?.status === 'completed')
+        .map(step => `${predecessor.plan_id}:${step.step_id}`),
+    ]
     const successor = createPlan(state, {
       now,
       sequence,
