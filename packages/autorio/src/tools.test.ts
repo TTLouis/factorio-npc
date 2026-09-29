@@ -58,6 +58,35 @@ describe('goal conditions while the NPC body is dead', () => {
     expect(tools.evaluate_condition({ kind: 'items_produced', item_name: 'iron-gear-wheel', minimum: 5 })).toMatchObject({ ok: true, current: 7 })
   })
 
+  it('adds the crafts the NPC finished to the production statistics for items_produced', async () => {
+    ;(globalThis as any).game.forces = { player: force(0) }
+    ;(globalThis as any).game.surfaces = new Map([[1, {}]])
+    ;(globalThis as any).storage = { airi_crafted_items: { 1: { 'iron-gear-wheel': 3, 'pipe': 9 } } }
+    const tools = await tools_interface()
+
+    // 7 from machine statistics + 3 hand-crafted; another item's count is not mixed in.
+    expect(tools.evaluate_condition({ kind: 'items_produced', item_name: 'iron-gear-wheel', minimum: 10 }))
+      .toMatchObject({ ok: true, satisfied: true, current: 10, production_statistics: 7, hand_crafted: 3 })
+    expect(tools.evaluate_condition({ kind: 'items_produced', item_name: 'iron-gear-wheel', minimum: 11 }))
+      .toMatchObject({ satisfied: false, current: 10 })
+    ;(globalThis as any).storage = {}
+  })
+
+  it('counts hand crafting alone when the machine statistics are empty (goal baseline still reads the same evaluator)', async () => {
+    const empty_force = { ...force(0), get_item_production_statistics: () => ({ get_input_count: () => 0 }) }
+    ;(globalThis as any).game.forces = { player: empty_force }
+    ;(globalThis as any).game.surfaces = new Map([[1, {}]])
+    ;(globalThis as any).storage = { airi_crafted_items: { 1: { 'iron-gear-wheel': 1 } } }
+    const tools = await tools_interface()
+
+    const baseline = tools.evaluate_condition({ kind: 'items_produced', item_name: 'iron-gear-wheel', minimum: 1 })
+    expect(baseline).toMatchObject({ satisfied: true, current: 1, hand_crafted: 1, production_statistics: 0 })
+    ;(globalThis as any).storage = { airi_crafted_items: { 1: { 'iron-gear-wheel': 4 } } }
+    expect(tools.evaluate_condition({ kind: 'items_produced', item_name: 'iron-gear-wheel', minimum: 1 }))
+      .toMatchObject({ current: 4 })
+    ;(globalThis as any).storage = {}
+  })
+
   it('still needs a body for conditions about the NPC itself', async () => {
     ;(globalThis as any).game.forces = { player: force(0) }
     const tools = await tools_interface()

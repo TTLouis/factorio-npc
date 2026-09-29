@@ -1,6 +1,7 @@
 import type { LuaEntity, LuaForce } from 'factorio:runtime'
 import { create_actor_remote_interface, get_controlled_actor } from './actors/actor_controller'
 import type { ControlledActor } from './actors/types'
+import { crafted_item_count } from './crafted_items'
 import { remember_entity_reference, resolve_exact_entity } from './entity_reference'
 import { machine_eta } from './production_eta'
 import { create_placement_candidate_set, type PlacementCandidateRequest } from './placement_candidates'
@@ -67,11 +68,16 @@ function evaluate_force_condition(force: LuaForce | undefined, kind: unknown, re
     if (!prototypes.item[item_name]) return { ok: false, error: 'unknown_item', item_name }
     // Production statistics are per surface in 2.0; sum every surface so the
     // count includes other planets and space platforms.
-    let current = 0
+    let production_statistics = 0
     for (const [, surface] of game.surfaces) {
-      current += force.get_item_production_statistics(surface).get_input_count(item_name) as number
+      production_statistics += force.get_item_production_statistics(surface).get_input_count(item_name) as number
     }
-    return { ok: true, kind, satisfied: current >= (minimum as number), current, minimum, progress_known: false }
+    // The engine does not record a character's hand-crafted products in those
+    // statistics (see crafted_items.ts), so the crafts the NPC's own native
+    // queue really finished are added. The two sources do not overlap.
+    const hand_crafted = crafted_item_count(force.index, item_name)
+    const current = production_statistics + hand_crafted
+    return { ok: true, kind, satisfied: current >= (minimum as number), current, production_statistics, hand_crafted, minimum, progress_known: false }
   }
 
   if (kind === 'space_location_unlocked') {

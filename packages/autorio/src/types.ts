@@ -205,6 +205,9 @@ export interface PlayerParametersCraftItem {
   output_count_before?: number
   expected_output_delta?: number
   owns_native_queue?: boolean
+  // Remaining crafts per recipe at the last reconciliation; the difference to
+  // the live queue is what the engine finished since (see crafted_items.ts).
+  queue_snapshot?: Record<string, number>
 }
 
 export interface PlayerParametersAttackNearestEnemy {

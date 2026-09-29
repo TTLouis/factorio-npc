@@ -203,6 +203,8 @@ case "$LANE" in
     run_py burner_drill_placement_cell.py
     printf '[npc-test][production] Running hand mining/crafting rate gate (force manual modifiers)...\n'
     run_py hand_work_rates_cell.py
+    printf '[npc-test][production] Running hand-crafted item statistics gate (items_produced counts what the NPC crafts)...\n'
+    run_py hand_craft_statistics_cell.py
     printf '[npc-test][production] Running machine expected-finish gate (waits from game data)...\n'
     run_py machine_eta_cell.py
     printf '[npc-test][production] Running minimal steam power gate (offshore pump -> boiler -> engine -> electric drill)...\n'

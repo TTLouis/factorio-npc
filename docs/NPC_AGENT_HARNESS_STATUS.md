@@ -63,6 +63,7 @@ A second offline round, again without E2E. Each item has a regression test.
   - It completes only when the force's `rockets_launched` rises.
   - `rocket_not_ready` reports the silo's `rocket_parts`, and `getEntityStatus` on a silo reports parts and readiness.
 - **Counter goals:** `rockets_launched` and `items_produced` count from goal start, with a game-read baseline. A save that had already launched a rocket completed "launch a rocket" instantly.
+- **Hand-crafted items in `items_produced`:** Factorio 2.0.77 does not record a player-less character's hand-crafted products in the force production statistics (ingredients only), and no craft event fires for it. The mod keeps a per-force counter (`storage.airi_crafted_items`), credited only when the native crafting queue finishes a craft, and `items_produced` adds it to the statistics (`production_statistics` + `hand_crafted` in the result). Engine proof: `tests/factorio/runner/hand_craft_statistics_cell.py` (production lane), whose first gate fails if the engine ever starts recording these products, because the two sources would then double count. Found live in `docs/validation/LIVE_DEEPSEEK_FLASH_2026-09-29.md` finding 8.
 - **Dead body:** force-level goal checks now work with no body.
   - A body that died on a space platform respawns on Nauvis.
   - A failed respawn create falls back to Nauvis instead of retrying every tick.
