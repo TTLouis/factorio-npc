@@ -98,7 +98,7 @@ const deepseek = { key: 'k', model: 'deepseek-flash', base: 'https://provider.in
 const okResponse = () => new Response(JSON.stringify({ id: 'r', model: 'm', choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: '{"chatMessage":"","plan":[],"currentStep":0,"operations":[]}' } }], usage: { prompt_tokens: 10, completion_tokens: 1 } }), { status: 200, headers: { 'content-type': 'application/json' } })
 const history = [system, user('[CHAT] a: go'), { role: 'assistant', content: 'plan' }, user('[MOD] Autorio operation error: x')]
 
-test('closed rounds drop the tool block by default on every profile (the wire change is off until a live check)', async () => {
+test('closed rounds keep the tool block on the deepseek profile (tool_choice none) and drop it on every other profile', async () => {
   for (const profile of ['deepseek', 'openai-reasoning', 'openrouter', 'generic', 'local']) {
     const bodies = []
     await providerRequest({ ...deepseek, profile }, history, {
@@ -106,8 +106,14 @@ test('closed rounds drop the tool block by default on every profile (the wire ch
       allowTools: false,
       triggerSource: 'failure',
     })
-    assert.equal(bodies[0].tools, undefined, profile)
-    assert.equal(bodies[0].tool_choice, undefined, profile)
+    if (profile === 'deepseek') {
+      assert.ok(Array.isArray(bodies[0].tools) && bodies[0].tools.length > 0, profile)
+      assert.equal(bodies[0].tool_choice, 'none', profile)
+    }
+    else {
+      assert.equal(bodies[0].tools, undefined, profile)
+      assert.equal(bodies[0].tool_choice, undefined, profile)
+    }
   }
 })
 

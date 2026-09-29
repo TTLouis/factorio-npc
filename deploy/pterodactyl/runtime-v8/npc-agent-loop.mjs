@@ -9,7 +9,7 @@ import {
   setTaskBoardStatus,
   taskBoardProgress,
 } from './common.mjs'
-import { providerCapabilityProfile } from './provider.mjs'
+import { normalizeProviderPlanContent, providerCapabilityProfile } from './provider.mjs'
 import { executeAuthorizedBatch } from './supervisor-adapter.mjs'
 import {
   boundarySteeringGate,
@@ -57,6 +57,7 @@ import {
 } from './step-completion.mjs'
 import {
   approvedOperationListText,
+  approvedOperationNames,
   isObservationToolName,
   observationToolFamily,
   observationToolTier,
@@ -154,6 +155,29 @@ const MAX_IN_TURN_SLICE_CONTINUATIONS = 3
 const LOW_RISK_NAVIGATION_PROJECTION_MAX_CANDIDATES = 8
 // Once the system commits a plan, its semantic content is immutable; later batches fulfil it rather than rewriting it.
 const FROZEN_PLAN_STATUSES = new Set([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING])
+// Decisions whose job is to author or revise a plan; closed-round operation
+// calls are never turned into operations of the old plan for these.
+const CLOSED_ROUND_AUTHORING_TRIGGERS = new Set(['new_goal', 'amend_current', 'plan_slice_completed', 'post_step_replan', 'recovery_replan_high', 'reanchor_plan'])
+
+// True when the content holds a plan object the normal path would parse
+// (bare, fenced, or embedded in prose).
+function contentCarriesPlan(content) {
+  const text = String(content ?? '').trim()
+  if (!text) return false
+  const normalized = normalizeProviderPlanContent(text)
+  const candidates = [text, normalized]
+  const first = text.indexOf('{')
+  const last = text.lastIndexOf('}')
+  if (first >= 0 && last > first) candidates.push(text.slice(first, last + 1))
+  for (const candidate of candidates) {
+    try {
+      const own = JSON.parse(candidate)
+      if (own && typeof own === 'object' && Array.isArray(own.plan)) return true
+    }
+    catch {}
+  }
+  return false
+}
 const WORLD_STATE_REQUIREMENT_KINDS = new Set(['inventory_count', 'entity_inventory_count', 'entity_exists', 'entity_state'])
 const EXACT_ENTITY_TARGET_OPERATIONS = new Set([
   'walk_to_entity_exact',
@@ -6442,6 +6466,135 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return { phase: 'gather', reason: 'observation_phase_open' }
   }
 
+  resetObservationDecisionState() {
+    super.resetObservationDecisionState()
+    this.closedRoundObservationUsed = false
+  }
+
+  // A round that closed tool use can still name calls: operations the model
+  // meant for the plan, or a read it wanted. The tool list stays visible on
+  // closed rounds, but nothing executes from them directly.
+  //  - Operations (names from the runtime-v8 catalog) become the operations of
+  //    a plan reply for the CURRENT committed plan and step; the normal
+  //    parsePlanMessage/commitPlan path admits or refuses them.
+  //  - Observation-only calls get one bounded extra read per decision when the
+  //    Jev observation budget allows, then the round closes again.
+  //  - Anything else falls through to the existing format recovery.
+  // Returns the message to use, or undefined to keep today's behaviour.
+  async salvageClosedRoundCalls(message, calls, { current, generation, round, recoveryAttempt, recoveryKind, omissionRepair }) {
+    // Content that already is a plan reply wins over stray calls, including a
+    // plan in code fences or with prose around it (the normal path accepts
+    // those and would otherwise lose its checkpoint/semanticCompletion).
+    if (contentCarriesPlan(message.content)) return undefined
+    const operationNames = new Set(approvedOperationNames())
+    const operations = []
+    const observations = []
+    for (const call of calls) {
+      if (operationNames.has(call.name)) operations.push(call)
+      else if (isObservationToolName(call.name)) observations.push(call)
+      else return undefined // unknown or planner-control names: not salvageable
+    }
+    const names = list => [...new Set(list.map(call => call.name))].slice(0, 16)
+
+    if (operations.length > 0) {
+      const state = this.memory.currentPlan?.(this.activePlanKey())
+      if (!Array.isArray(state?.plan) || state.plan.length === 0 || operations.length > 16) return undefined
+      // The harness may only supply plan intent that already exists: a
+      // committed/executing plan, not a decision that authors a new or revised
+      // one (blocked plan awaiting revise, user amendment, next slice, ...).
+      const key = this.activePlanKey()
+      const planning = this.memory.planningState?.(key)
+      const reducerPlan = planning ? getActivePlanningPlan(planning) : undefined
+      const step = Number.isSafeInteger(state.current_step) ? state.current_step : 0
+      const trigger = this.reasoningTriggerSource ?? this.planUpdateReason
+      const skipReason = !FROZEN_PLAN_STATUSES.has(reducerPlan?.status)
+        ? `plan_status_${reducerPlan?.status ?? 'none'}`
+        : this.pendingInteractionAmendment
+          ? 'pending_amendment'
+          : (CLOSED_ROUND_AUTHORING_TRIGGERS.has(trigger))
+              ? `authoring_${trigger}`
+              : step < 0 || step >= state.plan.length
+                ? 'current_step_out_of_range'
+                : undefined
+      if (skipReason) {
+        await this.traceEvent('closed_round.salvage_skipped', { round, reason: skipReason, operation_count: operations.length })
+        return undefined
+      }
+      const parsed = []
+      for (const call of operations) {
+        let args
+        try { args = call.arguments.trim() === '' ? {} : JSON.parse(call.arguments) }
+        catch { return undefined }
+        if (!args || typeof args !== 'object' || Array.isArray(args)) return undefined
+        parsed.push({ name: call.name, args })
+      }
+      const currentStep = Number.isSafeInteger(state.current_step) ? state.current_step : 0
+      await this.traceEvent('closed_round.calls_salvaged', {
+        round,
+        operation_count: parsed.length,
+        operations: names(operations),
+        observation_calls_dropped: observations.length,
+        observations_dropped: names(observations),
+        plan_steps: state.plan.length,
+        current_step: currentStep,
+      })
+      return {
+        ...message,
+        tool_calls: undefined,
+        content: JSON.stringify({ chatMessage: '', plan: state.plan, currentStep, operations: parsed }),
+      }
+    }
+
+    // Observation-only.
+    const budgetAllows = this.observationBudgetRemaining === null
+      || this.observationBudgetRemaining === undefined
+      || (Number.isSafeInteger(this.observationBudgetRemaining) && this.observationBudgetRemaining > 0)
+    if (!omissionRepair && this.closedRoundObservationUsed !== true && budgetAllows) {
+      let prepared
+      try {
+        prepared = this.prepareToolBatch({
+          ...message,
+          tool_calls: observations.map((call, index) => ({
+            id: `call_closed_${round}_${index + 1}`,
+            type: 'function',
+            function: { name: call.name, arguments: call.arguments },
+          })),
+        })
+      }
+      catch { prepared = undefined }
+      if (prepared) {
+        this.closedRoundObservationUsed = true
+        const before = this.messages.length
+        await this.handleToolBatch({ ...message, tool_calls: prepared.map(entry => entry.tool) }, prepared)
+        if (this.messages.length > before) {
+          await this.traceEvent('closed_round.observation_granted', {
+            round,
+            observations: names(observations),
+            budget_remaining: Number.isSafeInteger(this.observationBudgetRemaining) ? this.observationBudgetRemaining : undefined,
+          })
+          this.messages.push({
+            role: 'user',
+            content: '[HARNESS] One extra read-only observation was run for you on this closed round; its result is above. The observation phase is closed again: do not call any tool. Answer with the strict-JSON plan (or a truthful blocker) as content only.',
+          })
+          return this.callProvider(current, generation, { round, allowTools: false, recoveryAttempt, recoveryKind })
+        }
+      }
+    }
+    await this.traceEvent('closed_round.observation_dropped', {
+      round,
+      observations: names(observations),
+      reason: this.closedRoundObservationUsed === true ? 'extra_observation_already_used' : (budgetAllows ? 'not_admitted' : 'observation_budget_spent'),
+    })
+    const content = typeof message.content === 'string' ? message.content.trim() : ''
+    if (!content.startsWith('{')) {
+      this.messages.push({
+        role: 'user',
+        content: '[HARNESS] Tools are closed for this decision, so the tool call you wrote was not executed. Answer with the strict-JSON plan (or a truthful blocker) as content only, using the evidence already collected.',
+      })
+    }
+    return undefined
+  }
+
   async callProvider(current, generation, {
     round,
     allowTools = true,
@@ -6656,6 +6809,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (generation !== this.generation || !this.active) throw new AgentLoopError('Model turn was cancelled or superseded')
     await this.assertCurrent()
     if (!message || typeof message !== 'object') throw new AgentLoopError('Provider returned no message')
+    // Calls a closed round made anyway (structured or leaked DSML text); provider-base
+    // dropped them from the message and left them here for salvage.
+    const closedRoundCalls = !effectiveAllowTools ? message._airiClosedRoundCalls : undefined
 
     let plannerSubmission
     try {
@@ -6713,6 +6869,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         tool_calls: undefined,
         content: JSON.stringify(plannerSubmission),
       }
+    }
+
+    if (Array.isArray(closedRoundCalls) && closedRoundCalls.length > 0) {
+      const salvaged = await this.salvageClosedRoundCalls(message, closedRoundCalls, {
+        current, generation, round, recoveryAttempt, recoveryKind, omissionRepair,
+      })
+      if (salvaged) return salvaged
     }
 
     if (omissionRepair && !effectiveAllowTools && message.tool_calls !== undefined) {
