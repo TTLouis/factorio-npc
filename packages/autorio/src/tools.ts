@@ -3,6 +3,7 @@ import { create_actor_remote_interface, get_controlled_actor } from './actors/ac
 import type { ControlledActor } from './actors/types'
 import { crafted_item_count } from './crafted_items'
 import { remember_entity_reference, resolve_exact_entity } from './entity_reference'
+import { evaluate_world_condition, WORLD_CONDITION_KINDS } from './goal_world_conditions'
 import { machine_eta } from './production_eta'
 import { create_placement_candidate_set, type PlacementCandidateRequest } from './placement_candidates'
 import { compact_spatial_summary } from './spatial_semantics'
@@ -105,6 +106,14 @@ function evaluate_runtime_condition(request: Record<string, unknown>) {
   const kind = request.kind
   const force_result = evaluate_force_condition(goal_force(actor), kind, request)
   if (force_result !== undefined) return force_result
+  // World-state goal conditions (plan 3.7): is the factory running, powered,
+  // producing at a rate. Force-level, so they are read without a live body.
+  if (typeof kind === 'string' && WORLD_CONDITION_KINDS[kind]) {
+    const force = goal_force(actor)
+    if (!force) return { ok: false, error: 'no_force' }
+    const actor_mining = actor !== undefined && actor.is_valid && actor.get_mining_state().mining === true
+    return evaluate_world_condition(force, kind, request, actor_mining)
+  }
   if (!actor) return { ok: false, error: 'no_actor' }
   if (kind === 'inventory_count') {
     const item_name = request.item_name

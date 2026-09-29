@@ -87,6 +87,25 @@ describe('goal conditions while the NPC body is dead', () => {
     ;(globalThis as any).storage = {}
   })
 
+  it('reads world-state goal conditions (plan 3.7) without a body, and passes whether the body is mining', async () => {
+    const rate_force = { ...force(0), get_item_production_statistics: () => ({ get_flow_count: () => 12 }) }
+    ;(globalThis as any).game.forces = { player: rate_force }
+    ;(globalThis as any).game.surfaces = new Map([[1, {}]])
+    ;(globalThis as any).defines.flow_precision_index = { one_minute: 1, ten_minutes: 2 }
+    ;(globalThis as any).storage = {}
+    const tools = await tools_interface()
+
+    expect(tools.evaluate_condition({ kind: 'production_rate', item_name: 'iron-gear-wheel', per_minute: 10 }))
+      .toMatchObject({ ok: true, kind: 'production_rate', satisfied: true, current: 12 })
+
+    // Hand mining in progress on the live body voids the window.
+    ;(globalThis as any).storage = { airi_hand_work: { 1: { mining_active: { 'iron-gear-wheel': 0 } } } }
+    actor_state.actor = { force: rate_force, is_valid: true, get_mining_state: () => ({ mining: true }) }
+    expect(tools.evaluate_condition({ kind: 'production_rate', item_name: 'iron-gear-wheel', per_minute: 10 }))
+      .toMatchObject({ satisfied: false, void_reason: 'hand_mined' })
+    ;(globalThis as any).storage = {}
+  })
+
   it('still needs a body for conditions about the NPC itself', async () => {
     ;(globalThis as any).game.forces = { player: force(0) }
     const tools = await tools_interface()

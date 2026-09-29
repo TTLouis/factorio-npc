@@ -2,6 +2,7 @@ import type { LuaEntity, LuaInventory, SurfaceCreateEntity } from 'factorio:runt
 import type { ControlledActor } from './actors/types'
 import type { new_basic_operation_controller, TransferInventorySnapshot, TransferRefusalCause } from './basic_operations'
 import { remember_entity_reference, resolve_exact_entity } from './entity_reference'
+import { record_hand_insert } from './hand_work'
 import { build_interaction_reach, entity_interaction_reach } from './interaction_range'
 import { MAX_MINING_START_REJECTIONS, mining_navigation_reach, mining_navigation_requires_movement, select_exact_mining_target, within_mining_reach } from './mining_reach'
 import { resolve_entity_placement_item } from './placement_item'
@@ -729,19 +730,22 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
         return 0
       }
 
-      targets
-        .map(entity => entity_inventories(entity, task.item_name, true))
-        .flat()
-        .forEach((inventory) => {
-          if (moved_total >= task.max_count) return
+      for (const entity of targets) {
+        const fuel_inventory = entity.get_fuel_inventory()
+        for (const inventory of entity_inventories(entity, task.item_name, true)) {
+          if (moved_total >= task.max_count) break
           const to_move = math.min(available - moved_total, task.max_count - moved_total)
-          if (to_move <= 0) return
+          if (to_move <= 0) break
           const moved = inventory.insert({ name: task.item_name, count: to_move })
           if (moved > 0) {
             actor_inventory.remove({ name: task.item_name, count: moved })
             moved_total += moved
+            // Hand feeding voids a production_rate window; refuelling does not.
+            const into_fuel = fuel_inventory !== undefined && fuel_inventory.index === inventory.index
+            record_hand_insert(actor.force.index, task.item_name, entity.name, entity.type, into_fuel)
           }
-        })
+        }
+      }
     }
     else {
       targets

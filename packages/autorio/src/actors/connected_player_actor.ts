@@ -1,4 +1,5 @@
 import type { LuaPlayer } from 'factorio:runtime'
+import { note_hand_mining } from '../hand_work'
 import type { ActorCraftingQueueItem, ActorEntityBuildArgs, ActorMiningState, ActorShootingState, ActorStatusSnapshot, ActorWalkingState, ControlledActor } from './types'
 
 /**
@@ -43,6 +44,7 @@ export class ConnectedPlayerActor implements ControlledActor {
 
   set_mining_state(state: ActorMiningState) {
     this.player.mining_state = state
+    note_hand_mining(this.player.force.index, state.mining === true, state.mining ? this.player.selected : undefined)
   }
 
   set_walking_state(state: ActorWalkingState) {

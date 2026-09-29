@@ -1,5 +1,6 @@
 import type { MapPositionStruct } from 'factorio:prototype'
 import type { LuaEntity, LuaForce, LuaSurface } from 'factorio:runtime'
+import { note_hand_mining } from '../hand_work'
 import type { ActorCraftingQueueItem, ActorEntityBuildArgs, ActorMiningState, ActorShootingState, ActorStatusSnapshot, ActorWalkingState, ControlledActor } from './types'
 
 export interface StandaloneNpcIdentity {
@@ -184,6 +185,9 @@ export class StandaloneCharacterActor implements ControlledActor {
 
   set_mining_state(state: ActorMiningState) {
     this.character_entity.mining_state = state
+    // The engine counts what the character mines as force production, so a
+    // production_rate window must not contain it (hand_work.ts).
+    note_hand_mining(this.character_entity.force.index, state.mining === true, state.mining ? this.character_entity.selected : undefined)
   }
 
   set_walking_state(state: ActorWalkingState) {
