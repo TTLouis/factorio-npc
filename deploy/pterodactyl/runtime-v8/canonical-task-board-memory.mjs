@@ -443,6 +443,9 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     this.restoreDiagnostics = []
     // Consecutive plan/board disagreements per NPC: { step_id, count }.
     this.disagreementStrikes = new Map()
+    // Plan/step stamp taken when a batch was admitted, per NPC. Receipts
+    // carry it so a receipt that outlives its plan is refused by the ledger.
+    this.admissionStampByNpc = new Map()
   }
 
   planningState(key) {
@@ -656,6 +659,120 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         exact_target_audit: audit,
         exact_target_audit_mode: 'replace',
       })
+    }
+    return this.planningByNpc.get(key)
+  }
+
+  // --- receipt ledger (3.3 move 2) -----------------------------------------
+  //
+  // Every board evidence item is recorded in the reducer's per-step receipt
+  // ledger FIRST (OPERATION_RECEIPT_RECORDED); `task_board.evidence` is then
+  // written as a MIRROR: the reducer's accepted identity (kind, ref, at) drives
+  // it, while the full `summary` text comes from the receipt itself. The
+  // ledger keeps only a short digest, and existing readers JSON.parse board
+  // summaries (legacyStepCloseProof, the completion gate), so the board must
+  // never be rebuilt from the digest. When the reducer refuses (no admitted
+  // goal or plan, step outside the plan) the legacy write proceeds unchanged.
+
+  #ledgerStepFor(planning, plan, board) {
+    const offset = boardPlanAlignment(board, plan)
+    if (offset === undefined) return plan?.steps?.[plan.active_step_index]?.step_id
+    const index = (Number.isSafeInteger(board?.active_index) ? board.active_index : 0) - offset
+    return plan.steps[index]?.step_id
+  }
+
+  appendBoardEvidence(key, state, board, item) {
+    if (!this.#reducerHoldsGoal(key, state) || !item || typeof item !== 'object') {
+      return super.appendBoardEvidence(key, state, board, item)
+    }
+    const before = this.planningByNpc.get(key)
+    // An item stamped at batch admission is checked against THAT plan and
+    // epoch (the reducer refuses it once superseded). An unstamped item keeps
+    // the earlier behaviour: the active plan and the board's active step.
+    const stamped = typeof item.plan_id === 'string' && item.plan_id.length > 0
+    const plan = stamped ? before.plans.find(candidate => candidate.plan_id === item.plan_id) : getActivePlan(before)
+    let stepId
+    if (stamped) stepId = typeof item.step_id === 'string' && item.step_id ? item.step_id : undefined
+    else stepId = plan ? this.#ledgerStepFor(before, plan, board) : undefined
+    if (!stamped && (!plan || !stepId)) return super.appendBoardEvidence(key, state, board, item)
+    const ledgerStep = stepId ?? plan?.steps?.[plan.active_step_index]?.step_id
+    const seqBefore = Math.max(0, ...(plan?.execution.receipts?.[ledgerStep] ?? []).map(entry => entry.seq ?? 0))
+    const after = this.#applyRunEvent(key, {
+      type: PLANNING_EVENT.OPERATION_RECEIPT_RECORDED,
+      goal_id: state.goal_id,
+      plan_id: stamped ? item.plan_id : plan.plan_id,
+      step_id: stepId,
+      // No reasoning_epoch: the epoch is a reasoning-context signal (a roadmap
+      // revision bumps it while the plan and step stay valid), not a work
+      // validity signal. Staleness is decided by plan_id, step_id and the
+      // plan's status.
+      kind: item.kind,
+      ref: item.ref,
+      summary: item.summary,
+      at: item.now,
+    })
+    const recorded = (after?.plans.find(candidate => candidate.plan_id === plan?.plan_id)?.execution.receipts?.[ledgerStep] ?? [])
+      .filter(entry => (entry.seq ?? 0) > seqBefore)
+      .at(-1)
+    // Refused: the legacy board write still happens, exactly as before. Either
+    // way the board gets the ORIGINAL item, so the mirror is identical to what
+    // the base class writes (its own bounds and truncation marks apply).
+    return super.appendBoardEvidence(key, state, board, recorded ? { ...item, now: recorded.at } : item)
+  }
+
+  // The plan and step the reducer held when the last batch was admitted.
+  // A receipt that carries it is checked against the plan it belongs to, not
+  // the plan that happens to be active when it arrives.
+  setAdmissionState(key, admissionStatus, options) {
+    const result = super.setAdmissionState(key, admissionStatus, options)
+    if (admissionStatus === 'admitted' && key) {
+      const planning = this.planningByNpc.get(key)
+      const state = this.planByNpc.get(key)
+      const plan = getActivePlan(planning)
+      if (plan && state && this.#reducerHoldsGoal(key, state)) {
+        this.admissionStampByNpc.set(key, {
+          goal_id: planning.goal.goal_id,
+          plan_id: plan.plan_id,
+          step_id: this.#ledgerStepFor(planning, plan, state.task_board),
+        })
+      }
+    }
+    return result
+  }
+
+  admissionStamp(key) {
+    const stamp = key ? this.admissionStampByNpc.get(key) : undefined
+    if (!stamp || this.planningByNpc.get(key)?.goal?.goal_id !== stamp.goal_id) return undefined
+    return { plan_id: stamp.plan_id, step_id: stamp.step_id }
+  }
+
+  /**
+   * Seed the active plan's receipt ledger ONCE from the legacy board evidence
+   * when the snapshot predates the ledger. Board evidence for steps of the
+   * plan (found through the board/plan alignment) is adopted per step; the
+   * marker is set even when there is nothing to adopt, so it never runs twice.
+   */
+  seedReceiptLedgerFromLegacy(key, legacyState = key ? this.planByNpc.get(key) : undefined) {
+    const planning = key ? this.planningByNpc.get(key) : undefined
+    const plan = getActivePlan(planning)
+    if (!plan || plan.execution.receipts_seeded === true || !this.#reducerHoldsGoal(key, legacyState)) return planning
+    const board = legacyState.task_board
+    const offset = boardPlanAlignment(board, plan)
+    const base = { source: 'legacy_adopted', goal_id: legacyState.goal_id, plan_id: plan.plan_id }
+    let seededAny = false
+    if (offset !== undefined) {
+      for (const [index, step] of plan.steps.entries()) {
+        const boardStepId = board.steps[offset + index]?.id
+        const receipts = (Array.isArray(board.evidence) ? board.evidence : [])
+          .filter(item => item?.step_id === boardStepId)
+          .map(item => ({ kind: item.kind, ref: item.ref, summary: item.summary, at: item.at }))
+        if (receipts.length === 0) continue
+        this.#applyRunEvent(key, { ...base, type: PLANNING_EVENT.OPERATION_RECEIPT_RECORDED, step_id: step.step_id, receipts })
+        seededAny = true
+      }
+    }
+    if (!seededAny) {
+      this.#applyRunEvent(key, { ...base, type: PLANNING_EVENT.OPERATION_RECEIPT_RECORDED, receipts: [] })
     }
     return this.planningByNpc.get(key)
   }
@@ -963,6 +1080,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     // (pause, wait, recovery, follow runtime, locators), seed the reducer run
     // now, so a later mirrorRunToLegacy cannot null those legacy fields.
     this.seedRunFromLegacy(key, state)
+    this.seedReceiptLedgerFromLegacy(key, state)
     this.syncPlanningState(key, state)
     return planning
   }
@@ -1231,6 +1349,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     if (key) {
       this.planningByNpc.delete(key)
       this.steeringAdviceByNpc?.delete(key)
+      this.admissionStampByNpc.delete(key)
     }
     return result
   }
@@ -1360,6 +1479,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         developmentMode: plan?.developmentMode,
       })
       this.seedRunFromLegacy(key, result.state)
+      this.seedReceiptLedgerFromLegacy(key, result.state)
       this.mirrorRunToLegacy(key, result.state)
     }
     const activeAfterDraft = getActivePlan(this.planningByNpc.get(key))
@@ -1981,6 +2101,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       }
       if (this.planningByNpc.get(key)?.run) this.mirrorRunToLegacy(key, state, { locators: true })
       else this.seedRunFromLegacy(key, state)
+      this.seedReceiptLedgerFromLegacy(key, state)
       this.syncPlanningState(key, state)
     }
   }
