@@ -34,6 +34,23 @@ Gates (semantic output, never placement alone):
                   measurement window
     ORE          ore in the chest rises at the drill's computed rate
 
+Goal conditions (plan 3.7), read through autorio_tools.evaluate_condition, the
+call the harness uses for goal checks:
+    GOAL_UNPOWERED  with everything built but the boiler unfuelled,
+                     entity_working and electric_network_satisfied for the
+                     drill are false and production_rate iron-ore is unmet
+    GOAL_RUNNING    once the engine powers the drill, both are true in every
+                     sample of the measurement window, with the steam engine
+                     named as the network's producer
+    GOAL_RATE       production_rate iron-ore over the last minute equals the
+                     ore the chest gained over that minute and the drill's
+                     computed rate; refuelling the boiler did not void it
+    GOAL_HAND_MINED the engine counts ore the NPC mines by hand as force
+                     production (sentinel); while it mines, and for the window
+                     after, the rate is void, and once the window has passed
+                     the rate is the drill's alone again
+    GOAL_HAND_FED   one non-fuel item put into the chest by the NPC voids the rate
+
 Orientation rules found on Factorio 2.0.77 (entity `direction` in the receipt
 is the game's 0 north, 4 east, 8 south, 12 west):
     * A fluid port reported by get_placement_candidates / get_entity_status has
@@ -85,6 +102,19 @@ SAMPLES = 15
 # Electric mining drill on iron ore: speed 0.5, mining time 1 s, no bonus.
 DRILL_WATTS_FALLBACK = 90000
 POWER_TOLERANCE = 0.05
+# Goal conditions (plan 3.7).
+WORKING = "{kind='entity_working',entity_name='electric-mining-drill',minimum=1}"
+POWERED = "{kind='electric_network_satisfied',entity_name='electric-mining-drill',minimum=1}"
+RATE_PER_MINUTE = 25
+RATE = f"{{kind='production_rate',item_name='iron-ore',per_minute={RATE_PER_MINUTE}}}"
+RATE_WINDOW_TICKS = 3600
+# The void span is the window plus 10 % (goal_world_conditions.ts), plus slack.
+RATE_VOID_TICKS = 3960 + 120
+# Items per minute: the engine's flow buckets do not end exactly on the tick
+# the chest was read, and one ore can be between the drill and the chest.
+RATE_TOLERANCE = 2.0
+HAND_MINE = 2
+WAIT_CHUNK_TICKS = 600
 
 ITEMS = [
     ('offshore-pump', 1),
@@ -254,6 +284,19 @@ def run(client: Rcon, results: Path) -> None:
         f"if e.unit_number=={actor_id} then a=e end end; assert(a); "
     )
 
+    def evaluate(request: str, context: str) -> dict:
+        """One goal condition, through the exact remote call the harness makes."""
+        result = json_command(lua_json(remote_call('autorio_tools', 'evaluate_condition', request)), context)
+        require(result.get('ok') is True, {'context': context, 'result': result})
+        return result
+
+    def wait_ticks(ticks: int, context: str) -> None:
+        remaining = ticks
+        while remaining > 0:
+            chunk = min(WAIT_CHUNK_TICKS, remaining)
+            run_operation(remote_call('autorio_operations', 'wait', str(chunk)), context, 40.0)
+            remaining -= chunk
+
     # ---- fixture (setup only): lake, land, ore patch, the actor's items ----
     # Layout (tile offsets from the actor's tile): water for x <= -7, land
     # east of it, iron ore at x 6..12. The actor stands mid-way so every
@@ -271,6 +314,9 @@ def run(client: Rcon, results: Path) -> None:
         's.set_tiles(tiles,true,false,true); s.always_day=true; '
         'for x=ox+6,ox+12 do for y=oy-6,oy+2 do '
         f"s.create_entity{{name='iron-ore',position={{x+0.5,y+0.5}},amount={ORE_AMOUNT}}} end end; "
+        # One ore tile inside the actor's reach and outside the drill's area,
+        # for the NPC's own hand mining (GOAL_HAND_MINED).
+        "s.create_entity{name='iron-ore',position={ox+2.5,oy+2.5},amount=50}; "
         'local inv=a.get_main_inventory(); inv.clear(); ' + inserts + ' '
         'a.teleport({ox+2.5,oy+0.5}); '
         'local previous_speed=game.speed; game.speed=4; '
@@ -561,6 +607,25 @@ def run(client: Rcon, results: Path) -> None:
         }
         flush()
 
+        # ---- GOAL_UNPOWERED: built, not running --------------------------
+        # Every entity of the chain exists; the boiler has no fuel yet. This is
+        # the state the live run's items_produced definition already called done.
+        unpowered = {
+            'working': evaluate(WORKING, 'entity_working before power'),
+            'powered': evaluate(POWERED, 'electric_network_satisfied before power'),
+            'rate': evaluate(RATE, 'production_rate before power'),
+        }
+        evidence['goal_unpowered'] = unpowered
+        flush()
+        require(unpowered['working']['satisfied'] is False and unpowered['working']['current'] == 0 and unpowered['working']['found'] == 1,
+                {'message': 'entity_working holds before the drill has power', 'result': unpowered['working']})
+        require(unpowered['powered']['satisfied'] is False and unpowered['powered']['current'] == 0 and unpowered['powered']['found'] == 1,
+                {'message': 'electric_network_satisfied holds before the engine runs', 'result': unpowered['powered']})
+        require(unpowered['rate']['satisfied'] is False, {'message': 'production_rate holds before the drill runs', 'result': unpowered['rate']})
+        print(f"PASS: GOAL_UNPOWERED - drill built, boiler unfuelled: entity_working {unpowered['working']['current']}/1 "
+              f"(statuses {unpowered['working']['statuses']}), electric_network_satisfied {unpowered['powered']['current']}/1, "
+              f"production_rate iron-ore {unpowered['rate']['current']}/min (needs {RATE_PER_MINUTE})", flush=True)
+
         # ---- fuel through the NPC's own supply operation ----------------
         run_operation(
             remote_call('autorio_operations', 'supply_entity', str(boiler_unit), f"{{{{item_name='coal',count={COAL}}}}}"),
@@ -626,9 +691,14 @@ def run(client: Rcon, results: Path) -> None:
         # ---- DRILL + ORE: a measured window ------------------------------
         window_start = sample('window start')
         samples = [window_start]
+        goal_samples = []
         for index in range(SAMPLES):
             run_operation(remote_call('autorio_operations', 'wait', str(SAMPLE_TICKS)), f'window {index + 1}', 40.0)
             samples.append(sample(f'window sample {index + 1}'))
+            goal_samples.append({
+                'working': evaluate(WORKING, f'entity_working window {index + 1}'),
+                'powered': evaluate(POWERED, f'electric_network_satisfied window {index + 1}'),
+            })
         window_end = samples[-1]
         evidence['window'] = samples
         flush()
@@ -668,6 +738,110 @@ def run(client: Rcon, results: Path) -> None:
         })
         print(f"PASS: ORE - {chest_gain} ore in the chest over {seconds:.1f} s of game time "
               f"({chest_gain / seconds * 60:.1f} per minute; computed {expected_rate * 60:g} per minute, statistics counted {stats_gain})", flush=True)
+
+        # ---- GOAL_RUNNING ------------------------------------------------
+        evidence['goal_running'] = goal_samples
+        flush()
+        for entry in goal_samples:
+            require(entry['working']['satisfied'] is True and entry['working']['current'] == 1,
+                    {'message': 'entity_working is not true while the drill works', 'result': entry['working']})
+            require(entry['powered']['satisfied'] is True and entry['powered']['current'] == 1 and 'steam-engine' in entry['powered']['producers'],
+                    {'message': 'electric_network_satisfied is not true while the engine powers the drill', 'result': entry['powered']})
+        print(f"PASS: GOAL_RUNNING - entity_working and electric_network_satisfied true in all {len(goal_samples)} window samples "
+              f"(producers {goal_samples[-1]['powered']['producers']})", flush=True)
+
+        # ---- GOAL_RATE: the rate over the last minute is the drill's -------
+        def chest_and_rate(context: str) -> dict:
+            observed = sample(context, record=True)
+            observed['rate'] = evaluate(RATE, f'{context} production_rate')
+            return observed
+
+        def rate_matches_chest(start: dict, end: dict, context: str) -> dict:
+            ticks = end['tick'] - start['tick']
+            chest_per_minute = ((end['entities']['chest']['ore'] or 0) - (start['entities']['chest']['ore'] or 0)) * RATE_WINDOW_TICKS / ticks
+            rate = end['rate']
+            summary = {'ticks': ticks, 'chest_per_minute': chest_per_minute, 'rate': rate, 'computed_per_minute': expected_rate * 60}
+            require(ticks >= RATE_WINDOW_TICKS, {'context': context, 'message': 'the measured span is shorter than the window', **summary})
+            require(rate['satisfied'] is True and rate.get('void_reason') is None, {'context': context, 'message': 'production_rate is not met while only the drill produces ore', **summary})
+            require(abs(rate['current'] - chest_per_minute) <= RATE_TOLERANCE and abs(rate['current'] - expected_rate * 60) <= RATE_TOLERANCE,
+                    {'context': context, 'message': 'production_rate differs from the ore the drill delivered', **summary})
+            return summary
+
+        rate_start = chest_and_rate('rate window start')
+        wait_ticks(RATE_WINDOW_TICKS, 'rate window')
+        rate_end = chest_and_rate('rate window end')
+        evidence['goal_rate'] = rate_matches_chest(rate_start, rate_end, 'GOAL_RATE')
+        flush()
+        print(f"PASS: GOAL_RATE - production_rate iron-ore {rate_end['rate']['current']}/min over the last minute "
+              f"(flow count {rate_end['rate']['produced']}); the chest gained {evidence['goal_rate']['chest_per_minute']:.1f}/min; "
+              f"computed {expected_rate * 60:g}/min; the boiler refuel did not void the window", flush=True)
+
+        # ---- GOAL_HAND_MINED ---------------------------------------------
+        hand_before = chest_and_rate('before hand mining')
+        inventory_before = json_command('/silent-command ' + find_actor +
+                                        "rcon.print(helpers.table_to_json({ore=a.get_main_inventory().get_item_count('iron-ore')}))", 'inventory before hand mining')['ore']
+        result = admission(remote_call('autorio_operations', 'mine_resource_at', repr('iron-ore'), str(ox + 2.5), str(oy + 2.5), str(HAND_MINE)), 'hand mining')
+        require(result.get('accepted') is True, {'context': 'hand mining', 'admission': result})
+        while_mining = None
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            probe_mining = json_command(
+                '/silent-command ' + find_actor +
+                'local mining=a.mining_state.mining; local r=' + remote_call('autorio_tools', 'evaluate_condition', RATE) +
+                '; rcon.print(helpers.table_to_json({mining=mining,rate=r}))',
+                'rate while hand mining', record=False)
+            if probe_mining['mining']:
+                while_mining = probe_mining['rate']
+                break
+            time.sleep(0.02)
+        require(while_mining is not None, 'the NPC never started hand mining')
+        wait_until_idle(operation_status, 'hand mining', 60)
+        hand_after = chest_and_rate('after hand mining')
+        inventory_after = json_command('/silent-command ' + find_actor +
+                                       "rcon.print(helpers.table_to_json({ore=a.get_main_inventory().get_item_count('iron-ore')}))", 'inventory after hand mining')['ore']
+        chest_gain = (hand_after['entities']['chest']['ore'] or 0) - (hand_before['entities']['chest']['ore'] or 0)
+        statistics_gain = hand_after['ore_mined'] - hand_before['ore_mined']
+        mined = {
+            'inventory_gain': inventory_after - inventory_before, 'chest_gain': chest_gain, 'statistics_gain': statistics_gain,
+            'rate_while_mining': while_mining, 'rate_after_mining': hand_after['rate'],
+        }
+        evidence['goal_hand_mined'] = mined
+        flush()
+        require(mined['inventory_gain'] == HAND_MINE, {'message': 'the NPC did not mine the ore by hand', **mined})
+        # Sentinel: the engine records hand-mined ore as force production. If a
+        # future engine stops doing so, the void rule is still safe but this
+        # measurement no longer explains why it exists.
+        require(statistics_gain - chest_gain == HAND_MINE, {'message': 'the engine no longer counts hand-mined ore as production', **mined})
+        for key in ('rate_while_mining', 'rate_after_mining'):
+            require(mined[key]['satisfied'] is False and mined[key].get('void_reason') == 'hand_mined',
+                    {'message': f'{key}: hand-mined ore was not excluded from production_rate', **mined})
+        # A fresh window that starts after the void span: the rate is the
+        # drill's alone again, measured against the chest over that window.
+        wait_ticks(RATE_VOID_TICKS - RATE_WINDOW_TICKS, 'void span after hand mining')
+        clean_start = chest_and_rate('clean window start')
+        wait_ticks(RATE_WINDOW_TICKS, 'clean window')
+        clean_end = chest_and_rate('clean window end')
+        clean = rate_matches_chest(clean_start, clean_end, 'GOAL_HAND_MINED clean window')
+        evidence['goal_hand_mined']['clean'] = clean
+        flush()
+        print(f"PASS: GOAL_HAND_MINED - the NPC mined {HAND_MINE} ore by hand; the statistics counted {statistics_gain} "
+              f"(chest {chest_gain} + hand {statistics_gain - chest_gain}); production_rate void (hand_mined) while mining "
+              f"and after, then {clean_end['rate']['current']}/min once the window passed", flush=True)
+
+        # ---- GOAL_HAND_FED -----------------------------------------------
+        chest_unit = chest_receipt.get('placed_unit_number')
+        require(isinstance(chest_unit, int), chest_receipt)
+        run_operation(
+            remote_call('autorio_operations', 'supply_entity', str(chest_unit), "{{item_name='coal',count=1}}"),
+            'hand-feed the chest', 30.0,
+        )
+        fed = evaluate(RATE, 'production_rate after hand feeding')
+        evidence['goal_hand_fed'] = fed
+        flush()
+        require(fed['satisfied'] is False and fed.get('void_reason') == 'hand_inserted' and fed.get('void_item') == 'coal',
+                {'message': 'a non-fuel hand insert did not void the rate window', 'result': fed})
+        print(f"PASS: GOAL_HAND_FED - one coal put into the chest by hand voids production_rate ({fed['current']}/min measured, "
+              f"void {fed['void_reason']} into {fed.get('void_entity')})", flush=True)
 
         evidence['final'] = {
             'boiler_coal': window_end['entities']['boiler']['coal'],
