@@ -310,6 +310,14 @@ test('loading an offered skill and committing a plan with it traces skill.loaded
   })
   // Still authoring after the tool round, so the block stays in the prompt.
   assert.ok(offersIn(calls[1]))
+  // 2.9: the block is recomputed per round, so it sits in the tail, after the
+  // stored tool exchange, and the prompt up to it matches the previous round.
+  const offerAt = calls[1].findIndex(message => typeof message.content === 'string' && message.content.startsWith(SKILL_OFFERS_PREFIX))
+  const lastTurn = calls[1].findLastIndex(message => message.role === 'assistant' || message.role === 'tool')
+  assert.ok(offerAt > lastTurn, 'offers come after the stored history')
+  const tailOnly = messages => messages.every(message => /^\[(SKILL_OFFERS|PLANNING_LOD|DECISION_ENVELOPE)\]/.test(message.content))
+  assert.ok(tailOnly(calls[1].slice(lastTurn + 1)), 'only tail blocks follow the stored history')
+  assert.ok(tailOnly(calls[0].slice(3)), 'in the first round too, only tail blocks follow the request context')
   const [loaded] = events('skill.loaded')
   assert.ok(loaded.request_id)
   assert.deepEqual(

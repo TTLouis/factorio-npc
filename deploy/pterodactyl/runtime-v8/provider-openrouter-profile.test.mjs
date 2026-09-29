@@ -124,14 +124,17 @@ test('a non-DeepSeek model routed through OpenRouter gets no output style block'
   assert.equal(body.messages[0].content, 'You are AIRI.')
 })
 
-test('cache_control breakpoints are placed on the system message for an Anthropic model, and nowhere else', () => {
+test('cache_control breakpoints go where the stable prefix ends for an Anthropic model, and nowhere else', () => {
   const anthropic = providerCapabilityProfile({ base: 'https://openrouter.ai/api/v1', key: 'k', model: 'anthropic/claude-opus-4.5' })
   const { messages: withBreakpoint, breakpoints } = applyAnthropicCacheBreakpoints(messages, anthropic)
-  assert.equal(breakpoints, 1)
+  // The end of the system message and the end of the request context.
+  assert.equal(breakpoints, 2)
   assert.deepEqual(withBreakpoint[0].content, [
     { type: 'text', text: 'You are AIRI.', cache_control: { type: 'ephemeral' } },
   ])
-  assert.equal(withBreakpoint[1].content, 'hello')
+  assert.deepEqual(withBreakpoint[1].content, [
+    { type: 'text', text: 'hello', cache_control: { type: 'ephemeral' } },
+  ])
 
   const openai = providerCapabilityProfile({ base: 'https://openrouter.ai/api/v1', key: 'k', model: 'openai/gpt-5.1' })
   const unbroken = applyAnthropicCacheBreakpoints(messages, openai)
@@ -149,7 +152,9 @@ test('cache_control breakpoints reach the request body and the response trace fo
   const [body] = captured
   assert.equal(Array.isArray(body.messages[0].content), true)
   assert.equal(body.messages[0].content[0].cache_control.type, 'ephemeral')
-  assert.equal(message._airiProvider.cache_control_breakpoints, 1)
+  assert.equal(message._airiProvider.cache_control_breakpoints, 2)
+  // Steering is tail: it carries no breakpoint.
+  assert.equal(typeof body.messages.at(-1).content, 'string')
 })
 
 test('the upstream provider can be pinned per role/config so cache hits and comparisons stay stable', async () => {

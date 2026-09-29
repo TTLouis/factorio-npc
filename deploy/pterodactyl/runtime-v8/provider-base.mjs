@@ -2,6 +2,7 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 
 import { check, DeploymentError } from './common.mjs'
+import { cacheBreakpointIndexes, insertTailBlock, lastUserOutsideTail, promptLayout } from './prompt-prefix.mjs'
 import { parsePlan, providerToolDefinitions as toolDefinitions } from './structured-policy.mjs'
 
 const COMPLETION_MARKER = '[MOD] Autorio operation batch completed.'
@@ -91,6 +92,8 @@ function openRouterCapability(config, requested) {
     // (https://openrouter.ai/docs/features/prompt-caching); sending them
     // elsewhere would be inert at best.
     cache_control: family === 'anthropic',
+    // 2.9: OpenRouter documents tool_choice "none" for every upstream.
+    tools_kept_when_closed: true,
     cached_input_pricing: family === 'anthropic',
     upstream_provider: upstreamProvider,
     requested_profile: requested,
@@ -133,6 +136,9 @@ const PROVIDER_PROFILES = Object.freeze({
     reasoning_effort: true,
     thinking_control: 'deepseek',
     tool_support: true,
+    // 2.9: the tool block stays in the request on rounds that close tool use
+    // (tool_choice "none"), so the prompt prefix is unchanged.
+    tools_kept_when_closed: true,
     structured_output: 'tools_or_json',
   }),
   'openai-reasoning': Object.freeze({
@@ -141,6 +147,7 @@ const PROVIDER_PROFILES = Object.freeze({
     reasoning_effort: true,
     thinking_control: 'none',
     tool_support: true,
+    tools_kept_when_closed: true,
     structured_output: 'tools_or_json',
   }),
 })
@@ -176,22 +183,27 @@ ${style}` }
 // Anthropic models bill and reuse a cached prompt prefix only where the
 // request marks a `cache_control` breakpoint on a content block
 // (https://openrouter.ai/docs/features/prompt-caching, up to 4 explicit
-// breakpoints; no caching happens without one). The system message carries
-// the stable prefix (tool rules, style block), so a single breakpoint at
-// its end is the useful placement; converting its content from a plain
-// string to a content-block array must happen last, after the style block
-// has already been appended as a string. Returns the breakpoint count
-// placed, so the caller can trace it.
+// breakpoints; no caching happens without one). Breakpoints go where the
+// stable prefix ends (prompt-prefix.mjs): the end of the system message (the
+// tool block and system message are identical for every round of a role) and
+// the end of the request context (identical for every round of a request).
+// The tail after that (steering, skill offers, the newest exchange) is never
+// marked. Converting a message's content from a plain string to a
+// content-block array must happen last, after the style block has already
+// been appended as a string. Returns the breakpoint count placed, so the
+// caller can trace it.
 export function applyAnthropicCacheBreakpoints(messages, capability) {
   if (!capability?.cache_control) return { messages, breakpoints: 0 }
-  const index = messages.findIndex(message => message?.role === 'system' && typeof message.content === 'string' && message.content.trim())
-  if (index < 0) return { messages, breakpoints: 0 }
+  const indexes = cacheBreakpointIndexes(messages)
+  if (indexes.length === 0) return { messages, breakpoints: 0 }
   const output = messages.slice()
-  output[index] = {
-    ...output[index],
-    content: [{ type: 'text', text: output[index].content, cache_control: { type: 'ephemeral' } }],
+  for (const index of indexes) {
+    output[index] = {
+      ...output[index],
+      content: [{ type: 'text', text: output[index].content, cache_control: { type: 'ephemeral' } }],
+    }
   }
-  return { messages: output, breakpoints: 1 }
+  return { messages: output, breakpoints: indexes.length }
 }
 
 const REQUEST_BODY_PATCH_KEYS = new Set(['max_tokens', 'max_completion_tokens', 'reasoning_effort', 'thinking', 'response_format'])
@@ -382,6 +394,9 @@ async function traceProviderPayload(body, options = {}) {
         message_chars: Array.isArray(body?.messages) ? body.messages.reduce((total, message) => total + promptTraceMessageChars(message), 0) : 0,
         tool_count: tools.length,
         tool_schema_chars: tools.length > 0 ? JSON.stringify(tools).length : 0,
+        // 2.9: where the stable prefix ends and a short hash of each region,
+        // so a cache miss can be read against what changed.
+        prefix: options.promptLayout,
       },
     })
     return true
@@ -477,7 +492,7 @@ function contentShape(content) {
 
 function isSuccessfulCompletionContinuation(messages, { allowTools, recoveryAttempt }) {
   if (!allowTools || recoveryAttempt > 0 || !Array.isArray(messages)) return false
-  const lastUser = [...messages].reverse().find(message => message?.role === 'user')
+  const lastUser = lastUserOutsideTail(messages)
   return typeof lastUser?.content === 'string' && lastUser.content.startsWith(COMPLETION_MARKER)
 }
 
@@ -993,18 +1008,10 @@ export function applySteeringMessages(messages, sourceMessages = messages) {
   const output = Array.isArray(messages) ? messages.map(message => ({ ...message })) : []
   const steering = buildSteeringContext(sourceMessages)
   if (!steering) return output
-  const steeringMessage = { role: 'user', content: steering }
-  const last = output.at(-1)
-  const terminalInstruction = last?.role === 'user'
-    && typeof last.content === 'string'
-    && (last.content.startsWith('[MOD]') || last.content.startsWith('[HARNESS]'))
-  if (terminalInstruction) {
-    output.splice(Math.max(0, output.length - 1), 0, steeringMessage)
-  }
-  else {
-    output.push(steeringMessage)
-  }
-  return output
+  // Tail placement (prompt-prefix.mjs): steering is recomputed every round
+  // and never stored, so it goes after the stored history, in front of a
+  // trailing terminal instruction.
+  return insertTailBlock(output, { role: 'user', content: steering })
 }
 
 function compactRuntimeCompatState(state) {
@@ -1246,9 +1253,13 @@ export async function providerRequest(config, messages, {
     ? ((disableThinking || compactReasoningDisabled) ? COMPLETION_MAX_TOKENS : FALLBACK_CONTINUATION_MAX_TOKENS)
     : DEFAULT_MAX_TOKENS
   if (disableThinking) body.thinking = { type: 'disabled' }
-  if (allowTools) {
+  // A round that closes tool use keeps the tool block where the profile
+  // honours tool_choice "none" (2.9): removing it changes the prompt prefix
+  // from its first token, so the whole cached history is lost.
+  const keepClosedTools = !allowTools && !interactionRouter && capability.tools_kept_when_closed === true && capability.tool_support === true
+  if (allowTools || keepClosedTools) {
     body.tools = compactContinuation ? compactCompletionTools(toolDefinitions) : toolDefinitions
-    body.tool_choice = 'auto'
+    body.tool_choice = allowTools ? 'auto' : 'none'
   }
   applyRequestBodyPatch(body, requestBodyPatch, capability)
   const requestedOutputCap = body[capability.token_field]
@@ -1264,6 +1275,7 @@ export async function providerRequest(config, messages, {
     providerPolicy,
     providerCapabilities: capability,
     cacheControlBreakpoints: cacheBreakpoints.breakpoints,
+    promptLayout: promptLayout(styledMessages, { tools: body.tools }),
   }
   await traceProviderPayload(body, traceOptions)
 
