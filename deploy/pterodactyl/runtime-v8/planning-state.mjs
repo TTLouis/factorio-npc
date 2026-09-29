@@ -339,6 +339,14 @@ export const PLANNING_EVENT = Object.freeze({
   // (3.3 move 4): durable last operations, the exact-target audit, and the set
   // of unit_numbers the world proved gone.
   LOCATORS_RECORDED: 'LOCATORS_RECORDED',
+  // Per-plan, per-step ledger of operation receipts (3.3 move 2). The reducer
+  // is the writer; `task_board.evidence` is a mirror of it until Phase 8.
+  OPERATION_RECEIPT_RECORDED: 'OPERATION_RECEIPT_RECORDED',
+  // Ledger record that a role's conversation was restaged from a handoff
+  // packet (3.3 move 6). It has NO plan effect and is separate from
+  // `reasoning_epoch`: the planning agent's context is meant to stay long
+  // lived, and restaging mostly targets executor subagents.
+  CONTEXT_RESTAGED: 'CONTEXT_RESTAGED',
 })
 
 const PLANNING_EVENT_TYPES = Object.freeze(Object.values(PLANNING_EVENT))
@@ -365,6 +373,28 @@ export const RUN_STATE_LIMITS = Object.freeze({
   exactTargetAudit: 32,
   staleIdentities: 256,
 })
+
+// Receipt ledger bounds (3.3 move 2). Summaries are short, machine-derived
+// digests: the full receipt text stays in the board mirror, never here.
+export const RECEIPT_LEDGER_LIMITS = Object.freeze({
+  perStep: 24,
+  summary: 240,
+  kind: 64,
+  ref: 160,
+  batchId: 80,
+})
+
+// Context restage log (3.3 move 6).
+export const CONTEXT_RESTAGE_LIMITS = Object.freeze({
+  entries: 32,
+  reason: 200,
+})
+export const CONTEXT_RESTAGE_ROLES = Object.freeze(['planner', 'executor'])
+export const CONTEXT_RESTAGE_CHECKPOINTS = Object.freeze(['C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7', 'C8'])
+
+// Harness sources only. The Main LLM and Jev never write receipts or restages.
+const RECEIPT_EVENT_SOURCES = Object.freeze([...EVIDENCE_AUTHORITIES, 'legacy_adopted'])
+const RESTAGE_EVENT_SOURCES = Object.freeze([...EVIDENCE_AUTHORITIES, 'server_lifecycle'])
 
 // --- reasoning epoch (owner decision, 2026-09-19) ---------------------------
 //
@@ -762,6 +792,9 @@ export function createEmptyPlanningState() {
     // locators). null until the first run event: an old snapshot restores to
     // null and the memory facade seeds it once from the legacy record.
     run: null,
+    // Bounded log of context restages (3.3 move 6). Ledger only: nothing here
+    // is read by plan, step or epoch logic.
+    context_restages: [],
     log: [],
   }
 }
@@ -1274,7 +1307,9 @@ function createPlan(state, {
     committed_at: null,
     completed_at: null,
     blocker: null,
-    execution: { step_progress: progress, batches_attempted: 0 },
+    // `receipts`: bounded per-step ledger (3.3 move 2). A new plan has nothing
+    // to adopt from a legacy board, so it starts seeded.
+    execution: { step_progress: progress, batches_attempted: 0, receipts: {}, receipts_seeded: true },
     advisory: { planner_focus_step_id: null, planner_focus_at: null, steering_note: null },
     carried_forward_evidence: stringList(carriedForwardEvidence, { max: 64, maxLength: 200 }),
     lifecycle: [{ status: PLAN_STATUS.DRAFT, at: now, reason: text(origin, 80) || 'draft_created' }],
@@ -2638,7 +2673,174 @@ Object.assign(HANDLERS, {
       updated_at: now,
     }
   },
+
+  /**
+   * Operation receipt ledger (3.3 move 2).
+   *
+   * One event carries one receipt (`kind`, `ref`, `summary`, `batch_id`, `at`)
+   * or a `receipts` array. Each is appended to the ledger of ONE step of ONE
+   * plan (`plan_id`/`step_id`, defaulting to the active plan's active step),
+   * keeping only the most recent entries per step.
+   *
+   * Fails closed: harness sources only, the goal must be active and match the
+   * event's `goal_id`, a stamped `plan_id`/`reasoning_epoch` must still be the
+   * live one, and the step must exist in that plan. It changes no plan
+   * content, step status, evidence acceptance, blocker or epoch.
+   *
+   * `source: 'legacy_adopted'` with an empty `receipts` list marks an old
+   * snapshot's ledger as seeded without adding anything.
+   */
+  [PLANNING_EVENT.OPERATION_RECEIPT_RECORDED](state, event, now) {
+    if (!state.goal || state.goal.status !== GOAL_STATUS.ACTIVE) return state
+    const goalId = text(event.goal_id, 120)
+    if (goalId && goalId !== state.goal.goal_id) return state
+    const source = text(event.source, 60)
+    if (!RECEIPT_EVENT_SOURCES.includes(source)) return state
+    if (event.reasoning_epoch !== undefined && event.reasoning_epoch !== currentReasoningEpoch(state)) return state
+    const planId = text(event.plan_id, 200) || state.active_plan_id
+    const plan = planId ? findPlan(state, planId) : undefined
+    if (!plan || plan.goal_id !== state.goal.goal_id) return state
+    if (plan.status === PLAN_STATUS.CANCELLED || plan.status === PLAN_STATUS.SUPERSEDED) return state
+    const stepId = text(event.step_id, 200) || plan.steps[plan.active_step_index]?.step_id
+    if (!stepId || !plan.steps.some(step => step.step_id === stepId)) return state
+
+    const raw = Array.isArray(event.receipts) ? event.receipts : [event]
+    const incoming = raw.flatMap((item) => {
+      const entry = sanitizeReceiptEntry(item, { source, now })
+      return entry ? [entry] : []
+    })
+    const seeding = source === 'legacy_adopted' && Array.isArray(event.receipts)
+    if (incoming.length === 0 && !(seeding && plan.execution.receipts_seeded !== true)) return state
+
+    const ledger = plan.execution.receipts && typeof plan.execution.receipts === 'object' ? plan.execution.receipts : {}
+    const held = Array.isArray(ledger[stepId]) ? ledger[stepId] : []
+    let seq = held.reduce((max, item) => Math.max(max, item.seq ?? 0), 0)
+    const appended = incoming.map(entry => ({ ...entry, seq: ++seq }))
+    const nextLedger = appended.length === 0
+      ? ledger
+      : { ...ledger, [stepId]: [...held, ...appended].slice(-RECEIPT_LEDGER_LIMITS.perStep) }
+    const seeded = plan.execution.receipts_seeded === true || seeding
+    return {
+      ...withPlan(state, plan.plan_id, current => ({
+        ...current,
+        execution: { ...current.execution, receipts: nextLedger, receipts_seeded: seeded },
+      })),
+      updated_at: now,
+    }
+  },
+
+  /**
+   * Context restage record (3.3 move 6). Pure ledger: it never touches plans,
+   * the active step, `sequence`, `updated_at`, `reasoning_epoch` or
+   * `last_reasoning_reset`. Harness sources only; stale goal fails closed.
+   */
+  [PLANNING_EVENT.CONTEXT_RESTAGED](state, event) {
+    if (!state.goal || state.goal.status !== GOAL_STATUS.ACTIVE) return state
+    const goalId = text(event.goal_id, 120)
+    if (!goalId || goalId !== state.goal.goal_id) return state
+    if (!RESTAGE_EVENT_SOURCES.includes(text(event.source, 60))) return state
+    const role = text(event.role, 24)
+    const checkpoint = text(event.checkpoint, 8)
+    if (!CONTEXT_RESTAGE_ROLES.includes(role) || !CONTEXT_RESTAGE_CHECKPOINTS.includes(checkpoint)) return state
+    const planId = text(event.plan_id, 200)
+    if (planId && !findPlan(state, planId)) return state
+    const size = (value) => {
+      const n = finiteNumber(value)
+      return n !== undefined && n >= 0 ? Math.floor(n) : null
+    }
+    const entry = {
+      goal_id: goalId,
+      plan_id: planId || null,
+      role,
+      checkpoint,
+      reason: text(event.reason, CONTEXT_RESTAGE_LIMITS.reason),
+      packet_chars: size(event.packet_chars),
+      previous_context_chars: size(event.previous_context_chars),
+      at: finiteNumber(event.now) ?? 0,
+    }
+    return { ...state, context_restages: [...recentList(state.context_restages, CONTEXT_RESTAGE_LIMITS.entries - 1), entry] }
+  },
 })
+
+/**
+ * Build a CONTEXT_RESTAGED event for `state` (goal and plan ids come from the
+ * reducer state, so the stamp cannot be wrong). The future handoff packet
+ * builder calls this and applies the result; nothing else emits it yet.
+ */
+export function buildContextRestagedEvent(state, { role, checkpoint, reason, packetChars, previousContextChars, now, planId, source = 'runtime' } = {}) {
+  return {
+    type: PLANNING_EVENT.CONTEXT_RESTAGED,
+    now,
+    source,
+    goal_id: state?.goal?.goal_id,
+    plan_id: planId ?? state?.active_plan_id ?? undefined,
+    role,
+    checkpoint,
+    reason,
+    packet_chars: packetChars,
+    previous_context_chars: previousContextChars,
+  }
+}
+
+export function getContextRestages(state) {
+  return Array.isArray(state?.context_restages) ? state.context_restages : []
+}
+
+// A compact, machine-derived digest of a receipt: JSON receipts keep only the
+// fields a later reader needs, anything else is truncated text.
+function shortReceiptSummary(summary) {
+  const raw = typeof summary === 'string' ? summary : ''
+  const trimmed = raw.trim()
+  if (trimmed.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(trimmed)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        const parts = []
+        for (const key of ['outcome', 'verdict', 'failure_class', 'task_state', 'task_count', 'reason']) {
+          const value = parsed[key]
+          if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') parts.push(`${key}=${value}`)
+        }
+        const types = Array.isArray(parsed.task_types) ? parsed.task_types : Array.isArray(parsed.operations) ? parsed.operations : []
+        if (types.length > 0) parts.push(`types=${types.slice(0, 8).map(item => String(item).slice(0, 40)).join(',')}`)
+        if (parts.length > 0) return text(parts.join('; '), RECEIPT_LEDGER_LIMITS.summary)
+      }
+    }
+    catch {}
+  }
+  return text(trimmed, RECEIPT_LEDGER_LIMITS.summary)
+}
+
+function receiptBatchId(item) {
+  const explicit = item.batch_id
+  if (typeof explicit === 'string' || Number.isSafeInteger(explicit)) return text(String(explicit), RECEIPT_LEDGER_LIMITS.batchId)
+  const ref = text(item.ref, RECEIPT_LEDGER_LIMITS.ref)
+  const fromRef = /^batch_(.+)$/.exec(ref)
+  if (fromRef) return text(fromRef[1], RECEIPT_LEDGER_LIMITS.batchId)
+  const summary = typeof item.summary === 'string' ? item.summary.trim() : ''
+  if (summary.startsWith('{') && summary.length <= 8000) {
+    try {
+      const parsed = JSON.parse(summary)
+      const id = parsed?.batch_id ?? parsed?.batch_ref
+      if (typeof id === 'string' || Number.isSafeInteger(id)) return text(String(id), RECEIPT_LEDGER_LIMITS.batchId)
+    }
+    catch {}
+  }
+  return ''
+}
+
+function sanitizeReceiptEntry(item, { source, now }) {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return undefined
+  const kind = text(item.kind, RECEIPT_LEDGER_LIMITS.kind)
+  if (!kind) return undefined
+  return {
+    batch_id: receiptBatchId(item),
+    kind,
+    ref: text(item.ref, RECEIPT_LEDGER_LIMITS.ref),
+    summary: shortReceiptSummary(item.summary),
+    at: finiteNumber(item.at) ?? finiteNumber(item.now) ?? now,
+    source,
+  }
+}
 
 function runEventAllowed(state, event) {
   if (!state.goal || state.goal.status !== GOAL_STATUS.ACTIVE) return false
@@ -2682,8 +2884,43 @@ export function serializePlanningState(state) {
     reasoning_epoch: currentReasoningEpoch(current),
     last_reasoning_reset: clone(current.last_reasoning_reset) ?? null,
     run: clone(current.run) ?? null,
+    context_restages: clone(getContextRestages(current)),
     log: clone(current.log) ?? [],
   }
+}
+
+function restoreReceiptLedger(raw, stepIds) {
+  const ledger = {}
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return ledger
+  for (const stepId of stepIds) {
+    const items = Array.isArray(raw[stepId]) ? raw[stepId] : []
+    let seq = 0
+    const entries = items.slice(-RECEIPT_LEDGER_LIMITS.perStep).flatMap((item) => {
+      const entry = sanitizeReceiptEntry(item, { source: text(item?.source, 60) || 'runtime', now: 0 })
+      return entry ? [{ ...entry, seq: Number.isSafeInteger(item.seq) && item.seq > 0 ? item.seq : ++seq }] : []
+    })
+    if (entries.length > 0) ledger[stepId] = entries
+  }
+  return ledger
+}
+
+function restoreContextRestages(raw) {
+  return recentList(raw, CONTEXT_RESTAGE_LIMITS.entries).flatMap((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return []
+    const goalId = text(item.goal_id, 120)
+    if (!goalId || !CONTEXT_RESTAGE_ROLES.includes(item.role) || !CONTEXT_RESTAGE_CHECKPOINTS.includes(item.checkpoint)) return []
+    const size = value => (Number.isFinite(value) && value >= 0 ? Math.floor(value) : null)
+    return [{
+      goal_id: goalId,
+      plan_id: text(item.plan_id, 200) || null,
+      role: item.role,
+      checkpoint: item.checkpoint,
+      reason: text(item.reason, CONTEXT_RESTAGE_LIMITS.reason),
+      packet_chars: size(item.packet_chars),
+      previous_context_chars: size(item.previous_context_chars),
+      at: finiteNumber(item.at) ?? 0,
+    }]
+  })
 }
 
 function restorePlan(raw) {
@@ -2745,6 +2982,10 @@ function restorePlan(raw) {
     execution: {
       step_progress: progress,
       batches_attempted: Number.isSafeInteger(raw.execution?.batches_attempted) ? raw.execution.batches_attempted : 0,
+      receipts: restoreReceiptLedger(raw.execution?.receipts, steps.map(step => step.step_id)),
+      // Absent in a snapshot that predates the ledger: the memory facade seeds
+      // it once from the legacy board evidence.
+      receipts_seeded: raw.execution?.receipts_seeded === true,
     },
     advisory: clone(raw.advisory) ?? { planner_focus_step_id: null, planner_focus_at: null, steering_note: null },
     carried_forward_evidence: stringList(raw.carried_forward_evidence, { max: 64, maxLength: 200 }),
@@ -2933,6 +3174,7 @@ export function restorePlanningState(raw) {
         }
       : null,
     run: restoreRun(raw.run),
+    context_restages: restoreContextRestages(raw.context_restages),
     log: recentList(raw.log, 256).map(item => clone(item)),
   }
 }
