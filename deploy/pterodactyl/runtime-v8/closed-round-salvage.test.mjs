@@ -191,3 +191,54 @@ test('with the observation budget spent the closed-round observation is dropped,
   assert.equal(result, undefined)
   assert.equal(ran, false)
 })
+
+// Decision-scope guard: the harness must not supply plan intent when the
+// decision is meant to author a new or revised plan.
+function agentWithPlan({ status = 'EXECUTING', currentStep = 0, trigger, pendingAmendment } = {}) {
+  const agent = bareAgent()
+  const events = []
+  agent.traceEvent = async (name, data) => { events.push([name, data]) }
+  agent.memory.currentPlan = () => ({ plan: ['Mine fuel', 'Load the furnace'], current_step: currentStep })
+  agent.memory.planningState = () => ({ active_plan_id: 'p1', plans: [{ plan_id: 'p1', status }] })
+  if (trigger) agent.reasoningTriggerSource = trigger
+  if (pendingAmendment) agent.pendingInteractionAmendment = pendingAmendment
+  return { agent, events }
+}
+const OP = [{ name: 'mine_entity', arguments: JSON.stringify({ entity_name: 'coal', count: 5 }) }]
+
+test('salvage applies to an executing committed plan (control for the guard tests)', async () => {
+  const { agent } = agentWithPlan()
+  const salvaged = await agent.salvageClosedRoundCalls({ content: '' }, OP, ctx)
+  assert.ok(salvaged)
+  assert.deepEqual(JSON.parse(salvaged.content).plan, ['Mine fuel', 'Load the furnace'])
+})
+
+test('a blocked plan awaiting revision is never resubmitted with the model calls', async () => {
+  const { agent, events } = agentWithPlan({ status: 'BLOCKED' })
+  assert.equal(await agent.salvageClosedRoundCalls({ content: '' }, OP, ctx), undefined)
+  assert.equal(events.find(([name]) => name === 'closed_round.salvage_skipped')[1].reason, 'plan_status_BLOCKED')
+})
+
+test('next-slice, replan and new-goal authoring decisions are not salvaged', async () => {
+  for (const trigger of ['plan_slice_completed', 'post_step_replan', 'new_goal', 'amend_current']) {
+    const { agent } = agentWithPlan({ trigger })
+    assert.equal(await agent.salvageClosedRoundCalls({ content: '' }, OP, ctx), undefined, trigger)
+  }
+  const done = agentWithPlan({ status: 'COMPLETED' })
+  assert.equal(await done.agent.salvageClosedRoundCalls({ content: '' }, OP, ctx), undefined)
+})
+
+test('a pending amendment and an out-of-range current step are not salvaged', async () => {
+  const amended = agentWithPlan({ pendingAmendment: { text: 'change it' } })
+  assert.equal(await amended.agent.salvageClosedRoundCalls({ content: '' }, OP, ctx), undefined)
+  const past = agentWithPlan({ currentStep: 2 })
+  assert.equal(await past.agent.salvageClosedRoundCalls({ content: '' }, OP, ctx), undefined)
+})
+
+test('a real plan in code fences or with prose around it beats a stray call', async () => {
+  const plan = { chatMessage: '', plan: ['Mine fuel'], currentStep: 0, operations: [], checkpoint: { mode: 'all', requirements: [] } }
+  for (const content of ['```json\n' + JSON.stringify(plan) + '\n```', 'Here is my plan: ' + JSON.stringify(plan) + ' done']) {
+    const { agent } = agentWithPlan()
+    assert.equal(await agent.salvageClosedRoundCalls({ content }, OP, ctx), undefined, content.slice(0, 20))
+  }
+})

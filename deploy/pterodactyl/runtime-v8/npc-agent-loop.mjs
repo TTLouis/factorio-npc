@@ -9,7 +9,7 @@ import {
   setTaskBoardStatus,
   taskBoardProgress,
 } from './common.mjs'
-import { providerCapabilityProfile } from './provider.mjs'
+import { normalizeProviderPlanContent, providerCapabilityProfile } from './provider.mjs'
 import { executeAuthorizedBatch } from './supervisor-adapter.mjs'
 import {
   boundarySteeringGate,
@@ -155,6 +155,29 @@ const MAX_IN_TURN_SLICE_CONTINUATIONS = 3
 const LOW_RISK_NAVIGATION_PROJECTION_MAX_CANDIDATES = 8
 // Once the system commits a plan, its semantic content is immutable; later batches fulfil it rather than rewriting it.
 const FROZEN_PLAN_STATUSES = new Set([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING])
+// Decisions whose job is to author or revise a plan; closed-round operation
+// calls are never turned into operations of the old plan for these.
+const CLOSED_ROUND_AUTHORING_TRIGGERS = new Set(['new_goal', 'amend_current', 'plan_slice_completed', 'post_step_replan', 'recovery_replan_high', 'reanchor_plan'])
+
+// True when the content holds a plan object the normal path would parse
+// (bare, fenced, or embedded in prose).
+function contentCarriesPlan(content) {
+  const text = String(content ?? '').trim()
+  if (!text) return false
+  const normalized = normalizeProviderPlanContent(text)
+  const candidates = [text, normalized]
+  const first = text.indexOf('{')
+  const last = text.lastIndexOf('}')
+  if (first >= 0 && last > first) candidates.push(text.slice(first, last + 1))
+  for (const candidate of candidates) {
+    try {
+      const own = JSON.parse(candidate)
+      if (own && typeof own === 'object' && Array.isArray(own.plan)) return true
+    }
+    catch {}
+  }
+  return false
+}
 const WORLD_STATE_REQUIREMENT_KINDS = new Set(['inventory_count', 'entity_inventory_count', 'entity_exists', 'entity_state'])
 const EXACT_ENTITY_TARGET_OPERATIONS = new Set([
   'walk_to_entity_exact',
@@ -6459,12 +6482,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   //  - Anything else falls through to the existing format recovery.
   // Returns the message to use, or undefined to keep today's behaviour.
   async salvageClosedRoundCalls(message, calls, { current, generation, round, recoveryAttempt, recoveryKind, omissionRepair }) {
-    // Content that already is a plan reply wins over stray calls.
-    try {
-      const own = JSON.parse(String(message.content ?? '').trim())
-      if (own && typeof own === 'object' && Array.isArray(own.plan)) return undefined
-    }
-    catch {}
+    // Content that already is a plan reply wins over stray calls, including a
+    // plan in code fences or with prose around it (the normal path accepts
+    // those and would otherwise lose its checkpoint/semanticCompletion).
+    if (contentCarriesPlan(message.content)) return undefined
     const operationNames = new Set(approvedOperationNames())
     const operations = []
     const observations = []
@@ -6478,6 +6499,27 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (operations.length > 0) {
       const state = this.memory.currentPlan?.(this.activePlanKey())
       if (!Array.isArray(state?.plan) || state.plan.length === 0 || operations.length > 16) return undefined
+      // The harness may only supply plan intent that already exists: a
+      // committed/executing plan, not a decision that authors a new or revised
+      // one (blocked plan awaiting revise, user amendment, next slice, ...).
+      const key = this.activePlanKey()
+      const planning = this.memory.planningState?.(key)
+      const reducerPlan = planning ? getActivePlanningPlan(planning) : undefined
+      const step = Number.isSafeInteger(state.current_step) ? state.current_step : 0
+      const trigger = this.reasoningTriggerSource ?? this.planUpdateReason
+      const skipReason = !FROZEN_PLAN_STATUSES.has(reducerPlan?.status)
+        ? `plan_status_${reducerPlan?.status ?? 'none'}`
+        : this.pendingInteractionAmendment
+          ? 'pending_amendment'
+          : (CLOSED_ROUND_AUTHORING_TRIGGERS.has(trigger))
+              ? `authoring_${trigger}`
+              : step < 0 || step >= state.plan.length
+                ? 'current_step_out_of_range'
+                : undefined
+      if (skipReason) {
+        await this.traceEvent('closed_round.salvage_skipped', { round, reason: skipReason, operation_count: operations.length })
+        return undefined
+      }
       const parsed = []
       for (const call of operations) {
         let args

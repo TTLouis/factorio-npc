@@ -89,6 +89,7 @@ export function parseDsmlToolCalls(content, limits = {}) {
       if (!isBlank(between)) return undefined
       if (closing) {
         if (kind !== 'calls' || !isBlank(tag[3])) return undefined
+        // Anything after the closing calls tag is deliberately discarded.
         state = 'done'
         end = tagEnd
         break
