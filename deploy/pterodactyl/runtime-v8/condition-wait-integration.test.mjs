@@ -824,6 +824,40 @@ test('a working machine checkpoint becomes a completion wait instead of a guesse
   assert.equal(mainCalls(), 0)
 })
 
+test('a BLOCKED reply is recorded as a blocker even while the machine works toward the checkpoint', async () => {
+  const { agent, memory } = makeAgent()
+  const events = []
+  const traceEvent = agent.traceEvent.bind(agent)
+  agent.traceEvent = async (event, data) => { events.push({ event, data }); return traceEvent(event, data) }
+  memory.planByNpc.get('npc:airi').task_board.steps[0].completion_contract = {
+    mode: 'all',
+    requirements: [{ id: 'plates', kind: 'entity_inventory_count', unit_number: 582, item_name: 'iron-plate', minimum: 10 }],
+  }
+  agent.recordLiveEntityObservation({
+    name: 'stone-furnace',
+    type: 'furnace',
+    unit_number: 582,
+    position: { x: 4, y: 0 },
+    working: true,
+    status: 1,
+  }, { x: 0, y: 0 }, 'getEntityStatus')
+
+  const result = await agent.commitPlan({
+    chatMessage: 'BLOCKED: the plates are needed elsewhere and no other iron ore is reachable.',
+    plan: ['Smelt required material', 'Craft requested item'],
+    currentStep: 1,
+    operations: [],
+  })
+
+  // The reply takes the blocker path (outcome authority decides blocked or
+  // paused on its evidence); it is never parked as a wait on the furnace.
+  const durable = memory.planByNpc.get('npc:airi')
+  assert.equal(durable.condition_wait, undefined)
+  assert.ok(['blocked', 'paused'].includes(result.goalStatus), result.goalStatus)
+  assert.equal(durable.status, result.goalStatus)
+  assert.ok(events.some(entry => entry.event === 'outcome.candidate' && entry.data.kind === 'world_blocked'))
+})
+
 test('the machine expectation sets the wake deadline and is traced once', async () => {
   const { agent, memory, rcon } = makeAgent()
   const durable = memory.planByNpc.get('npc:airi')

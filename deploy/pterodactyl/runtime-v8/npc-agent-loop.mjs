@@ -3125,6 +3125,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             wait_id: identity.wait_id,
             goal_id: identity.goal_id,
             step_id: identity.step_id,
+            unit_number: result.wait?.condition?.unit_number,
             mode: result.wait?.mode,
             expected_seconds: result.wait?.expected_seconds,
             timeout_ms: result.wait?.timeout_ms,
@@ -7635,7 +7636,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let conditionWait = previousState?.condition_wait?.state === 'active'
       ? previousState.condition_wait
       : undefined
-    if (!conditionWait && commands.length === 0 && remainingCanonicalWork && !runtimeHealthy) {
+    // An explicit BLOCKED reply is recorded as a blocker; it never becomes a wait.
+    if (!conditionWait && commands.length === 0 && remainingCanonicalWork && !runtimeHealthy && !explicitBlocker) {
       const candidate = this.checkpointWaitCandidate(previousState) ?? this.passiveProgressWaitCandidate(previousState)
       if (candidate && this.requestInfo) {
         const waiting = this.memory.registerConditionWait?.(this.requestInfo.memoryKey, candidate)

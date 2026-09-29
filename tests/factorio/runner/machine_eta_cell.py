@@ -85,96 +85,98 @@ def run(client: Rcon, results: Path) -> None:
     ox, oy = fixture['ox'], fixture['oy']
     evidence['fixture'] = fixture
 
-    # The NPC observes the furnace, as a planner would before it waits on it.
-    status = json_command(lua_json(remote_call('autorio_tools', 'get_entity_status', repr('stone-furnace'), '8')), 'observe furnace')
-    require(status.get('found') is not False, status)
+    try:
+        # The NPC observes the furnace, as a planner would before it waits on it.
+        status = json_command(lua_json(remote_call('autorio_tools', 'get_entity_status', repr('stone-furnace'), '8')), 'observe furnace')
+        require(status.get('found') is not False, status)
 
-    furnace = f"local f=nil; for _,e in pairs(s.find_entities_filtered{{name='stone-furnace'}}) do if e.unit_number=={unit} then f=e end end; assert(f); "
+        furnace = f"local f=nil; for _,e in pairs(s.find_entities_filtered{{name='stone-furnace'}}) do if e.unit_number=={unit} then f=e end end; assert(f); "
 
-    def condition(request: str, context: str, record: bool = True) -> dict:
-        return json_command(
+        def condition(request: str, context: str, record: bool = True) -> dict:
+            return json_command(
+                '/silent-command ' + find_actor + furnace +
+                f"local r=remote.call('autorio_tools','evaluate_condition',{request}); "
+                "rcon.print(helpers.table_to_json({tick=game.tick,plates=f.get_output_inventory().get_item_count('iron-plate'),"
+                "crafting=f.is_crafting(),result=r}))",
+                context,
+                record,
+            )
+
+        to_target = f"{{kind='entity_inventory_count',unit_number={unit},item_name='iron-plate',minimum={TARGET}}}"
+        working = f"{{kind='entity_state',unit_number={unit},expected='working'}}"
+        beyond = f"{{kind='entity_inventory_count',unit_number={unit},item_name='iron-plate',minimum={ORE + 10}}}"
+
+        json_command(
             '/silent-command ' + find_actor + furnace +
-            f"local r=remote.call('autorio_tools','evaluate_condition',{request}); "
-            "rcon.print(helpers.table_to_json({tick=game.tick,plates=f.get_output_inventory().get_item_count('iron-plate'),"
-            "crafting=f.is_crafting(),result=r}))",
-            context,
-            record,
+            f"f.get_fuel_inventory().insert{{name='coal',count=2}}; f.get_inventory(defines.inventory.crafter_input).insert{{name='iron-ore',count={ORE}}}; "
+            'rcon.print(helpers.table_to_json({tick=game.tick}))',
+            'load furnace',
         )
+        # First answer once the furnace is crafting, as a condition poll would see it.
+        first_target = first_idle = None
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            sample = condition(to_target, 'first target answer', record=False)
+            if sample['crafting'] and (sample['result'].get('eta') or {}).get('seconds_to_target') is not None:
+                idle = condition(working, 'first working answer', record=False)
+                if (idle['result'].get('eta') or {}).get('seconds_until_idle') is not None:
+                    first_target, first_idle = sample, idle
+                    break
+            time.sleep(0.02)
+        require(first_target is not None and first_idle is not None, {'message': 'furnace never started crafting', 'last': sample})
+        evidence['first_target'] = first_target
+        evidence['first_idle'] = first_idle
+        limit = condition(beyond, 'beyond loaded ore')
+        evidence['limit'] = limit
+        eta_target = first_target['result']['eta']
+        eta_idle = (first_idle['result'].get('eta') or {})
+        require(isinstance(eta_idle.get('seconds_until_idle'), (int, float)), {'message': 'working furnace answered without seconds_until_idle', 'answer': first_idle})
 
-    to_target = f"{{kind='entity_inventory_count',unit_number={unit},item_name='iron-plate',minimum={TARGET}}}"
-    working = f"{{kind='entity_state',unit_number={unit},expected='working'}}"
-    beyond = f"{{kind='entity_inventory_count',unit_number={unit},item_name='iron-plate',minimum={ORE + 10}}}"
-
-    json_command(
-        '/silent-command ' + find_actor + furnace +
-        f"f.get_fuel_inventory().insert{{name='coal',count=2}}; f.get_inventory(defines.inventory.crafter_input).insert{{name='iron-ore',count={ORE}}}; "
-        'rcon.print(helpers.table_to_json({tick=game.tick}))',
-        'load furnace',
-    )
-    # First answer once the furnace is crafting, as a condition poll would see it.
-    first_target = first_idle = None
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        sample = condition(to_target, 'first target answer', record=False)
-        if sample['crafting'] and (sample['result'].get('eta') or {}).get('seconds_to_target') is not None:
-            idle = condition(working, 'first working answer', record=False)
-            if (idle['result'].get('eta') or {}).get('seconds_until_idle') is not None:
-                first_target, first_idle = sample, idle
+        fifth_tick = sixth_tick = None
+        deadline = time.monotonic() + 40
+        while time.monotonic() < deadline:
+            sample = condition(to_target, 'plate progress', record=False)
+            if fifth_tick is None and sample['plates'] >= TARGET:
+                fifth_tick = sample['tick']
+                evidence['met'] = sample
+            if sample['plates'] >= ORE:
+                sixth_tick = sample['tick']
                 break
-        time.sleep(0.02)
-    require(first_target is not None and first_idle is not None, {'message': 'furnace never started crafting', 'last': sample})
-    evidence['first_target'] = first_target
-    evidence['first_idle'] = first_idle
-    limit = condition(beyond, 'beyond loaded ore')
-    evidence['limit'] = limit
-    eta_target = first_target['result']['eta']
-    eta_idle = (first_idle['result'].get('eta') or {})
-    require(isinstance(eta_idle.get('seconds_until_idle'), (int, float)), {'message': 'working furnace answered without seconds_until_idle', 'answer': first_idle})
+            time.sleep(0.02)
+        require(fifth_tick is not None and sixth_tick is not None, {'message': 'furnace did not smelt the loaded ore', 'last': sample})
 
-    fifth_tick = sixth_tick = None
-    deadline = time.monotonic() + 40
-    while time.monotonic() < deadline:
-        sample = condition(to_target, 'plate progress', record=False)
-        if fifth_tick is None and sample['plates'] >= TARGET:
-            fifth_tick = sample['tick']
-            evidence['met'] = sample
-        if sample['plates'] >= ORE:
-            sixth_tick = sample['tick']
-            break
-        time.sleep(0.02)
-    require(fifth_tick is not None and sixth_tick is not None, {'message': 'furnace did not smelt the loaded ore', 'last': sample})
+        measured_target = (fifth_tick - first_target['tick']) / 60
+        measured_idle = (sixth_tick - first_idle['tick']) / 60
+        crafts = eta_target.get('crafts_needed') or TARGET
+        evidence['measured'] = {'to_target_seconds': measured_target, 'until_idle_seconds': measured_idle}
+        flush()
 
-    measured_target = (fifth_tick - first_target['tick']) / 60
-    measured_idle = (sixth_tick - first_idle['tick']) / 60
-    crafts = eta_target.get('crafts_needed') or TARGET
-    evidence['measured'] = {'to_target_seconds': measured_target, 'until_idle_seconds': measured_idle}
-    flush()
+        tolerance_target = (crafts + POLL_TICKS) * TICK + 0.05
+        require(abs(measured_target - eta_target['seconds_to_target']) <= tolerance_target, {
+            'message': 'expected time to the checkpoint differs from the engine', 'eta': eta_target, 'measured': measured_target,
+        })
+        print(f"PASS: TO_TARGET - {TARGET} plates expected in {eta_target['seconds_to_target']} s "
+              f"({eta_target.get('crafts_needed')} crafts at {eta_target.get('seconds_per_craft')} s), measured {measured_target:.3f} s", flush=True)
 
-    tolerance_target = (crafts + POLL_TICKS) * TICK + 0.05
-    require(abs(measured_target - eta_target['seconds_to_target']) <= tolerance_target, {
-        'message': 'expected time to the checkpoint differs from the engine', 'eta': eta_target, 'measured': measured_target,
-    })
-    print(f"PASS: TO_TARGET - {TARGET} plates expected in {eta_target['seconds_to_target']} s "
-          f"({eta_target.get('crafts_needed')} crafts at {eta_target.get('seconds_per_craft')} s), measured {measured_target:.3f} s", flush=True)
+        tolerance_idle = (ORE + POLL_TICKS) * TICK + 0.05
+        require(abs(measured_idle - eta_idle['seconds_until_idle']) <= tolerance_idle, {
+            'message': 'expected time until the loaded ore runs out differs from the engine', 'eta': eta_idle, 'measured': measured_idle,
+        })
+        print(f"PASS: UNTIL_IDLE - loaded ore expected to run out in {eta_idle['seconds_until_idle']} s, measured {measured_idle:.3f} s", flush=True)
 
-    tolerance_idle = (ORE + POLL_TICKS) * TICK + 0.05
-    require(abs(measured_idle - eta_idle['seconds_until_idle']) <= tolerance_idle, {
-        'message': 'expected time until the loaded ore runs out differs from the engine', 'eta': eta_idle, 'measured': measured_idle,
-    })
-    print(f"PASS: UNTIL_IDLE - loaded ore expected to run out in {eta_idle['seconds_until_idle']} s, measured {measured_idle:.3f} s", flush=True)
-
-    require((limit['result'].get('eta') or {}).get('limited_by') == 'inputs', {'message': 'a checkpoint beyond the loaded ore must name inputs', 'answer': limit})
-    met = condition(to_target, 'met checkpoint')
-    require(met['result'].get('satisfied') is True and met['result'].get('eta') is None, {'message': 'a met checkpoint carries no expectation', 'answer': met})
-    print('PASS: LIMIT - beyond the loaded ore reports limited_by inputs; a met checkpoint carries no expectation', flush=True)
-
-    json_command(
-        '/silent-command ' + find_actor +
-        f"game.speed={fixture.get('previous_speed') or 1}; "
-        f"for _,e in pairs(s.find_entities_filtered{{area={{{{{ox - 6},{oy - 6}}},{{{ox + 6},{oy + 6}}}}}}}) do "
-        "if e.type~='character' then e.destroy() end end; rcon.print(helpers.table_to_json({cleaned=true}))",
-        'machine eta cleanup',
-    )
+        require((limit['result'].get('eta') or {}).get('limited_by') == 'inputs', {'message': 'a checkpoint beyond the loaded ore must name inputs', 'answer': limit})
+        met = condition(to_target, 'met checkpoint')
+        require(met['result'].get('satisfied') is True and met['result'].get('eta') is None, {'message': 'a met checkpoint carries no expectation', 'answer': met})
+        print('PASS: LIMIT - beyond the loaded ore reports limited_by inputs; a met checkpoint carries no expectation', flush=True)
+    finally:
+        # Restore game speed and clear the fixture even when a gate fails.
+        json_command(
+            '/silent-command ' + find_actor +
+            f"game.speed={fixture.get('previous_speed') or 1}; "
+            f"for _,e in pairs(s.find_entities_filtered{{area={{{{{ox - 6},{oy - 6}}},{{{ox + 6},{oy + 6}}}}}}}) do "
+            "if e.type~='character' then e.destroy() end end; rcon.print(helpers.table_to_json({cleaned=true}))",
+            'machine eta cleanup',
+        )
     evidence['status'] = 'pass'
     flush()
 
