@@ -44,12 +44,21 @@ call the harness uses for goal checks:
                      named as the network's producer
     GOAL_RATE       production_rate iron-ore over the last minute equals the
                      ore the chest gained over that minute and the drill's
-                     computed rate; refuelling the boiler did not void it
+                     computed rate; a boiler refuel INSIDE that window (a fuel
+                     insert, timed and checked to lie within the void span)
+                     did not void it
     GOAL_HAND_MINED the engine counts ore the NPC mines by hand as force
                      production (sentinel); while it mines, and for the window
-                     after, the rate is void, and once the window has passed
-                     the rate is the drill's alone again
+                     after, the rate is void for the mined item (iron-ore), and
+                     once the window has passed the rate is the drill's alone
+                     again
     GOAL_HAND_FED   one non-fuel item put into the chest by the NPC voids the rate
+    GOAL_HAND_FED_MACHINE
+                     a furnace hand-fed a stack of ore keeps smelting long after
+                     1.1x a one-minute window: the engine's iron-plate rate shows
+                     the hand-fed output (would-be false positive) yet the rate
+                     is void while the furnace still holds the hand-fed ore, and
+                     for one window after it is used up
 
 Orientation rules found on Factorio 2.0.77 (entity `direction` in the receipt
 is the game's 0 north, 4 east, 8 south, 12 west):
@@ -115,6 +124,12 @@ RATE_VOID_TICKS = 3960 + 120
 RATE_TOLERANCE = 2.0
 HAND_MINE = 2
 WAIT_CHUNK_TICKS = 600
+# GOAL_HAND_FED_MACHINE: a stone furnace smelts iron ore at 3.2 s per plate, so
+# this stack keeps it busy for 7680 ticks, well past the 3960-tick void span.
+FED_ORE = 40
+FED_COAL = 3
+FED_WAIT_TICKS = RATE_VOID_TICKS + 300
+PLATE_RATE = "{kind='production_rate',item_name='iron-plate',per_minute=5}"
 
 ITEMS = [
     ('offshore-pump', 1),
@@ -123,7 +138,7 @@ ITEMS = [
     ('small-electric-pole', 3),
     ('electric-mining-drill', 1),
     ('wooden-chest', 1),
-    ('coal', COAL + 2),
+    ('coal', COAL + 4),
 ]
 
 
@@ -289,6 +304,9 @@ def run(client: Rcon, results: Path) -> None:
         result = json_command(lua_json(remote_call('autorio_tools', 'evaluate_condition', request)), context)
         require(result.get('ok') is True, {'context': context, 'result': result})
         return result
+
+    def game_tick() -> int:
+        return json_command('/silent-command rcon.print(helpers.table_to_json({tick=game.tick}))', 'game tick', record=False)['tick']
 
     def wait_ticks(ticks: int, context: str) -> None:
         remaining = ticks
@@ -767,14 +785,30 @@ def run(client: Rcon, results: Path) -> None:
                     {'context': context, 'message': 'production_rate differs from the ore the drill delivered', **summary})
             return summary
 
+        # The boiler is refuelled (a fuel insert, allowed) half-way through the
+        # measured window, so the read at the end is inside the void span of
+        # that insert and must still not be void.
         rate_start = chest_and_rate('rate window start')
-        wait_ticks(RATE_WINDOW_TICKS, 'rate window')
+        wait_ticks(RATE_WINDOW_TICKS // 2, 'first half of the rate window')
+        refuel_start = game_tick()
+        run_operation(
+            remote_call('autorio_operations', 'supply_entity', str(boiler_unit), "{{item_name='coal',count=2}}"),
+            'refuel the boiler inside the rate window',
+            30.0,
+        )
+        refuel_end = game_tick()
+        wait_ticks(RATE_WINDOW_TICKS // 2, 'second half of the rate window')
         rate_end = chest_and_rate('rate window end')
         evidence['goal_rate'] = rate_matches_chest(rate_start, rate_end, 'GOAL_RATE')
+        evidence['goal_rate']['refuel'] = {'start_tick': refuel_start, 'end_tick': refuel_end, 'read_tick': rate_end['tick'],
+                                           'ticks_before_read': rate_end['tick'] - refuel_end}
         flush()
+        require(0 < rate_end['tick'] - refuel_end < 3960 and refuel_start > rate_start['tick'],
+                {'message': 'the boiler refuel is not inside the rate window', **evidence['goal_rate']})
         print(f"PASS: GOAL_RATE - production_rate iron-ore {rate_end['rate']['current']}/min over the last minute "
               f"(flow count {rate_end['rate']['produced']}); the chest gained {evidence['goal_rate']['chest_per_minute']:.1f}/min; "
-              f"computed {expected_rate * 60:g}/min; the boiler refuel did not void the window", flush=True)
+              f"computed {expected_rate * 60:g}/min; the boiler was refuelled {rate_end['tick'] - refuel_end} ticks before the read "
+              f"and the window was not void", flush=True)
 
         # ---- GOAL_HAND_MINED ---------------------------------------------
         hand_before = chest_and_rate('before hand mining')
@@ -815,6 +849,10 @@ def run(client: Rcon, results: Path) -> None:
         for key in ('rate_while_mining', 'rate_after_mining'):
             require(mined[key]['satisfied'] is False and mined[key].get('void_reason') == 'hand_mined',
                     {'message': f'{key}: hand-mined ore was not excluded from production_rate', **mined})
+            # The target is resolved from the mining position, so the recorded
+            # item is the ore itself, not the catch-all that voids everything.
+            require(mined[key].get('void_item') == 'iron-ore',
+                    {'message': f'{key}: the hand-mining void did not name iron-ore', **mined})
         # A fresh window that starts after the void span: the rate is the
         # drill's alone again, measured against the chest over that window.
         wait_ticks(RATE_VOID_TICKS - RATE_WINDOW_TICKS, 'void span after hand mining')
@@ -842,6 +880,74 @@ def run(client: Rcon, results: Path) -> None:
                 {'message': 'a non-fuel hand insert did not void the rate window', 'result': fed})
         print(f"PASS: GOAL_HAND_FED - one coal put into the chest by hand voids production_rate ({fed['current']}/min measured, "
               f"void {fed['void_reason']} into {fed.get('void_entity')})", flush=True)
+
+        # ---- GOAL_HAND_FED_MACHINE ----------------------------------------
+        # The chest insert above voids for one window; let that pass, then hand
+        # feed a furnace a stack of ore and read the plate rate past 1.1x the
+        # window while the furnace is still smelting it.
+        wait_ticks(RATE_VOID_TICKS, 'void span after the chest insert')
+        quiet = evaluate(PLATE_RATE, 'iron-plate rate before the furnace')
+        require(quiet.get('void_reason') is None, {'message': 'the iron-plate window was still void before the furnace was fed', 'result': quiet})
+        json_command(
+            '/silent-command ' + find_actor +
+            "local inv=a.get_main_inventory(); inv.insert{name='stone-furnace',count=1}; "
+            f"inv.insert{{name='coal',count={FED_COAL}}}; inv.insert{{name='iron-ore',count={FED_ORE}}}; "
+            'rcon.print(helpers.table_to_json({ok=true}))',
+            'furnace items (setup)',
+        )
+        furnace_receipt = run_operation(remote_call('autorio_operations', 'place_entity', repr('stone-furnace')), 'place the furnace', 30.0)
+        furnace_unit = furnace_receipt.get('placed_unit_number')
+        require(isinstance(furnace_unit, int), furnace_receipt)
+        run_operation(remote_call('autorio_operations', 'supply_entity', str(furnace_unit), f"{{{{item_name='coal',count={FED_COAL}}}}}"), 'fuel the furnace', 30.0)
+        fueled = evaluate(PLATE_RATE, 'iron-plate rate after fuelling the furnace')
+        require(fueled.get('void_reason') is None, {'message': 'fuelling the furnace voided the rate window', 'result': fueled})
+        run_operation(remote_call('autorio_operations', 'supply_entity', str(furnace_unit), f"{{{{item_name='iron-ore',count={FED_ORE}}}}}"), 'hand-feed the furnace', 30.0)
+        fed_tick = game_tick()
+
+        def furnace_state(context: str) -> dict:
+            return json_command(
+                "/silent-command local f=game.get_entity_by_unit_number(" + str(furnace_unit) + "); "
+                "rcon.print(helpers.table_to_json({tick=game.tick,ore=f.get_inventory(defines.inventory.furnace_source).get_item_count('iron-ore'),"
+                "plates=f.get_inventory(defines.inventory.furnace_result).get_item_count('iron-plate')}))",
+                context, record=False)
+
+        wait_ticks(FED_WAIT_TICKS, 'furnace smelts the hand-fed ore')
+        smelting = furnace_state('furnace after 1.1x the window')
+        machine_rate = evaluate(PLATE_RATE, 'iron-plate rate while the hand-fed furnace still smelts')
+        evidence['goal_hand_fed_machine'] = {'fed_tick': fed_tick, 'furnace': smelting, 'rate': machine_rate}
+        flush()
+        require(smelting['tick'] - fed_tick > 3960 and smelting['ore'] > 0 and smelting['plates'] > 0,
+                {'message': 'the furnace is not still smelting past 1.1x the window', **evidence['goal_hand_fed_machine']})
+        # Load-bearing: the engine's own flow shows the hand-fed output, so
+        # without the machine rule this window would read as automated output.
+        require(machine_rate['current'] >= 5, {'message': 'the statistics do not show the furnace output', **evidence['goal_hand_fed_machine']})
+        require(machine_rate['satisfied'] is False and machine_rate.get('void_reason') == 'hand_inserted' and machine_rate.get('void_entity') == 'stone-furnace'
+                and machine_rate.get('void_item') == 'iron-ore' and machine_rate['void_tick'] <= fed_tick + 60,
+                {'message': 'a machine still smelting hand-fed ore did not void the rate window', **evidence['goal_hand_fed_machine']})
+        print(f"PASS: GOAL_HAND_FED_MACHINE - {smelting['tick'] - fed_tick} ticks after the hand feed (window x1.1 = 3960) the furnace still holds "
+              f"{smelting['ore']} ore and the iron-plate rate reads {machine_rate['current']}/min, yet it is void ({machine_rate['void_reason']}, {machine_rate['void_entity']})", flush=True)
+
+        # Once the hand-fed ore is used up the void holds for one more window
+        # (the last plates are still in it), then clears.
+        drained = None
+        deadline_tick = fed_tick + FED_ORE * 200 + 1200
+        while game_tick() < deadline_tick:
+            state = furnace_state('furnace input')
+            if state['ore'] == 0:
+                drained = state
+                break
+            wait_ticks(WAIT_CHUNK_TICKS // 2, 'furnace drains')
+        require(drained is not None, {'message': 'the furnace never used up the hand-fed ore', 'fed_tick': fed_tick})
+        after_drain = evaluate(PLATE_RATE, 'iron-plate rate just after the furnace emptied')
+        require(after_drain['satisfied'] is False and after_drain.get('void_reason') == 'hand_inserted',
+                {'message': 'the window that still holds the hand-fed output was not void', 'result': after_drain})
+        wait_ticks(RATE_VOID_TICKS, 'window after the furnace emptied')
+        cleared = evaluate(PLATE_RATE, 'iron-plate rate after the void span')
+        require(cleared.get('void_reason') is None, {'message': 'the void did not clear once the furnace was empty and the window passed', 'result': cleared})
+        evidence['goal_hand_fed_machine'].update({'drained': drained, 'after_drain': after_drain, 'cleared': cleared})
+        flush()
+        print(f"PASS: GOAL_HAND_FED_MACHINE - void held until the ore was used up ({after_drain['void_reason']}), then one window later cleared "
+              f"(iron-plate rate {cleared['current']}/min, void_reason {cleared.get('void_reason')})", flush=True)
 
         evidence['final'] = {
             'boiler_coal': window_end['entities']['boiler']['coal'],
