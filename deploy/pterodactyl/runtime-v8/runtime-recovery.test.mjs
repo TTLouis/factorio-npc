@@ -72,22 +72,22 @@ test('chat provider failure is reported in game and the event queue remains usab
   assert.ok(commands.some(command => command.includes('Recovered.')))
 })
 
-test('a request failure that leaves the goal paused ends the chat line with the Resume hint, and only then', async () => {
-  for (const [status, expectHint] of [['paused', true], ['active', false]]) {
+test('a request failure that leaves the goal paused ends the chat line with the Resume hint, but not for a transient pause that resumes itself', async () => {
+  for (const [status, expectHint, pauseReason] of [['paused', true, 'request_failed'], ['active', false, undefined], ['paused', false, 'provider_transient: Provider returned HTTP 500']]) {
     const { session, commands } = sessionFixture()
     session.agent = {
       active: false,
       request: async () => { throw new Error('Provider returned HTTP 500') },
       completed: async () => null,
       cancel: () => {},
-      memory: { currentPlan: () => ({ status }) },
+      memory: { currentPlan: () => ({ status, pause_reason: pauseReason }) },
     }
 
     session.onGameLine('2026-09-14 20:00:00 [CHAT] Louis: !airi first')
     await session.eventQueue
     const line = commands.find(command => command.includes('Request failed: Provider returned HTTP 500'))
     assert.ok(line, 'the failure is still reported in chat')
-    assert.equal(line.includes('Press Resume or say continue to retry from the verified task state.'), expectHint, status)
+    assert.equal(line.includes('Press Resume or say continue to retry from the verified task state.'), expectHint, `${status} ${pauseReason}`)
   }
 })
 

@@ -273,7 +273,7 @@ export class NpcDialogueMemory {
       lines.push('Recent dialogue:')
       for (const turn of bucket.recent) {
         lines.push(`[CHAT] ${turn.sender}: ${turn.user}`)
-        lines.push(`[AIRI] ${turn.assistant}`)
+        lines.push(`[SGLUNA] ${turn.assistant}`)
         if (turn.actions) lines.push(`[ACTIONS] ${turn.actions}`)
       }
     }

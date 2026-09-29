@@ -2675,7 +2675,10 @@ export class Session {
       if (reportError && !expectedCancellation(error)) {
         // A goal this failure left paused gets the same Resume line every other
         // pause carries; without one the player has no way to know it is paused.
-        const resume = this.currentPlanState()?.status === 'paused' ? ` ${RESUME_HINT}` : ''
+        // A transient provider pause resumes on its own, so it gets no hint.
+        const planState = this.currentPlanState()
+        const transientPause = String(planState?.pause_reason ?? '').startsWith(`${TRANSIENT_PAUSE_PREFIX}:`)
+        const resume = planState?.status === 'paused' && !transientPause ? ` ${RESUME_HINT}` : ''
         try { await this.printChat(`Request failed: ${message}${resume}`) }
         catch (printError) { this.log(`Unable to report AIRI error in chat: ${printError instanceof Error ? printError.message : printError}`) }
       }

@@ -775,7 +775,7 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
       lines.push('Recent dialogue:')
       for (const turn of bucket.recent) {
         lines.push(`[CHAT] ${sanitizeDurableModelText(turn.sender, 128)}: ${sanitizeDurableModelText(turn.user, this.maxFieldChars)}`)
-        lines.push(`[AIRI] ${sanitizeDurableModelText(turn.assistant, this.maxFieldChars)}`)
+        lines.push(`[SGLUNA] ${sanitizeDurableModelText(turn.assistant, this.maxFieldChars)}`)
         if (turn.actions) lines.push(`[ACTIONS] ${sanitizeDurableModelText(turn.actions, this.maxFieldChars)}`)
       }
     }
@@ -2508,7 +2508,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     while (skills.length > 1 && JSON.stringify(skills).length > SKILL_CONTEXT_MAX_CHARS) skills.shift()
     const payload = JSON.stringify(skills)
     if (payload.length > SKILL_CONTEXT_MAX_CHARS) return ''
-    return `[SKILL_CONTEXT] Explicitly loaded AIRI skills for this logical task. They are reusable strategy/constraint context, not authoritative live world state. Revalidate mutable facts before acting.\n${payload}`
+    return `[SKILL_CONTEXT] Explicitly loaded SGLuna skills for this logical task. They are reusable strategy/constraint context, not authoritative live world state. Revalidate mutable facts before acting.\n${payload}`
   }
 
   // Two defects lived in the inherited compaction:
