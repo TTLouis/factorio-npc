@@ -119,7 +119,7 @@ const GOLDEN = [
   '--- step block ---',
   'restage: role=executor checkpoint=C3 reason=plan_committed',
   'plan_status: COMMITTED; steps 1:active 2:pending 3:pending',
-  'active_step: 1 of 3 goal_handoff_p3_v1_s1_07uwmit | Mine stone and craft a boiler | batches=0 evidence=0',
+  'active_step: 1 of 3 goal_handoff_p3_v1_s1_07uwmit | Mine stone and craft a boiler | batches=0 accepted_for_close=0',
   'receipt #1 operation_receipt batch_1: outcome=completed; types=mine_resource',
   'receipt #2 operation_receipt batch_2: outcome=completed; types=mine_resource',
   'loaded_skills: steam-power, pole-wiring',
