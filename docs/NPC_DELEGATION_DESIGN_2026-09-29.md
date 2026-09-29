@@ -246,3 +246,28 @@ run's 904k input units; other thresholds set from the first run **(unsure)**.
    shadow to advisory?
 6. **Reasoning epoch.** Keep `CONTEXT_RESTAGED` separate from the plan-lineage
    `reasoning_epoch` (this note), or extend the epoch to bump at every checkpoint?
+
+### 12a. Owner answers (2026-09-29, Q&A before the weekly reset)
+
+1. **When to restage: size plus slice.** Once the context passes a soft size limit, the
+   harness restages at the next slice close. A hard limit, about 2× the soft one,
+   restages at the next step close, so one long slice can't grow without bound.
+   Restaging at every step close (C4) is not the default.
+2. **Roles.** `[0]` drafts the roadmap and plan slices; `[1]` executes steps and falls back
+   to `[0]`. This is the same as the note.
+3. **Ceiling.** The request ceiling resets per slice.
+4. **Handoff note.** Allowed: at most 500 characters, marked unverified in the packet.
+5. **Jev promotion.** Shadow, then advisory, then decision loop. Each stage needs at least
+   30 judgments with at least 90% agreement.
+6. **Reasoning epoch.** `CONTEXT_RESTAGED` stays a separate event. The owner's reason: the
+   point of delegation is to keep the **planning agent's** context long-lived and
+   uncluttered, while disposable work goes to executor subagents that are thrown away.
+   So restaging targets the executor side mostly, and it is not a plan-level reasoning
+   reset.
+
+Related decisions from the same session:
+- **Tools-off rounds (live finding 3).** Keep tools visible on closed rounds and salvage
+  calls made there. A world-mutation call, whether structured or DSML text, becomes
+  validated plan operations for the committed step. An observation call gets one extra
+  bounded look if Jev's observation budget allows.
+- **Next live model.** The wave 5 "reach electricity" run uses `deepseek-v4-pro`, off-peak.
