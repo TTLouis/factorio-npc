@@ -270,4 +270,7 @@ Related decisions from the same session:
   calls made there. A world-mutation call, whether structured or DSML text, becomes
   validated plan operations for the committed step. An observation call gets one extra
   bounded look if Jev's observation budget allows.
-- **Next live model.** The wave 5 "reach electricity" run uses `deepseek-v4-pro`, off-peak.
+- **Live models (owner, 09-29, replaces the earlier `deepseek-v4-pro` choice).** DeepSeek
+  flash only, for both the roadmap/planner agent and the plan/executor subagents. There
+  is no pro drafting model and no mixed-model run. The `[0]`/`[1]` role mapping stays as
+  a mechanism; the live config sets one model, so both roles resolve to flash.
