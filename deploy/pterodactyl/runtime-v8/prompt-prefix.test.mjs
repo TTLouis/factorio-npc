@@ -98,18 +98,32 @@ const deepseek = { key: 'k', model: 'deepseek-flash', base: 'https://provider.in
 const okResponse = () => new Response(JSON.stringify({ id: 'r', model: 'm', choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: '{"chatMessage":"","plan":[],"currentStep":0,"operations":[]}' } }], usage: { prompt_tokens: 10, completion_tokens: 1 } }), { status: 200, headers: { 'content-type': 'application/json' } })
 const history = [system, user('[CHAT] a: go'), { role: 'assistant', content: 'plan' }, user('[MOD] Autorio operation error: x')]
 
-test('a round that closes tool use keeps the same tool block (tool_choice none), so the prefix is not broken', async () => {
+test('closed rounds drop the tool block by default on every profile (the wire change is off until a live check)', async () => {
+  for (const profile of ['deepseek', 'openai-reasoning', 'openrouter', 'generic', 'local']) {
+    const bodies = []
+    await providerRequest({ ...deepseek, profile }, history, {
+      fetchImpl: async (_url, init) => { bodies.push(JSON.parse(init.body)); return okResponse() },
+      allowTools: false,
+      triggerSource: 'failure',
+    })
+    assert.equal(bodies[0].tools, undefined, profile)
+    assert.equal(bodies[0].tool_choice, undefined, profile)
+  }
+})
+
+test('with the switch on, a round that closes tool use keeps the same tool block (tool_choice none), so the prefix is not broken', async () => {
   const bodies = []
   const fetchImpl = async (_url, init) => { bodies.push(JSON.parse(init.body)); return okResponse() }
-  await providerRequest(deepseek, history, { fetchImpl, allowTools: true, triggerSource: 'failure' })
-  await providerRequest(deepseek, history, { fetchImpl, allowTools: false, triggerSource: 'failure' })
+  const on = { ...deepseek, toolsKeptWhenClosed: true }
+  await providerRequest(on, history, { fetchImpl, allowTools: true, triggerSource: 'failure' })
+  await providerRequest(on, history, { fetchImpl, allowTools: false, triggerSource: 'failure' })
   const [open, closed] = bodies
   assert.equal(open.tool_choice, 'auto')
   assert.equal(closed.tool_choice, 'none')
   assert.equal(JSON.stringify(closed.tools), JSON.stringify(open.tools))
   assert.equal(classifyPrefixBreak(open, closed).reason, 'tail_only')
 
-  // A profile whose tool_choice "none" is unverified (generic, local) still drops them.
+  // Generic and local drop them even with the switch on for a profile that supports it only.
   const generic = []
   await providerRequest({ ...deepseek, profile: 'generic' }, history, {
     fetchImpl: async (_url, init) => { generic.push(JSON.parse(init.body)); return okResponse() },
@@ -119,7 +133,7 @@ test('a round that closes tool use keeps the same tool block (tool_choice none),
   assert.equal(generic[0].tools, undefined)
   // The interaction router never gets tools.
   const router = []
-  await providerRequest(deepseek, history, {
+  await providerRequest({ ...deepseek, toolsKeptWhenClosed: true }, history, {
     fetchImpl: async (_url, init) => { router.push(JSON.parse(init.body)); return okResponse() },
     allowTools: false,
     interactionRouter: true,

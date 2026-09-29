@@ -92,8 +92,8 @@ function openRouterCapability(config, requested) {
     // (https://openrouter.ai/docs/features/prompt-caching); sending them
     // elsewhere would be inert at best.
     cache_control: family === 'anthropic',
-    // 2.9: OpenRouter documents tool_choice "none" for every upstream.
-    tools_kept_when_closed: true,
+    // 2.9: OFF until a live check (see providerCapabilityProfile).
+    tools_kept_when_closed: false,
     cached_input_pricing: family === 'anthropic',
     upstream_provider: upstreamProvider,
     requested_profile: requested,
@@ -136,9 +136,9 @@ const PROVIDER_PROFILES = Object.freeze({
     reasoning_effort: true,
     thinking_control: 'deepseek',
     tool_support: true,
-    // 2.9: the tool block stays in the request on rounds that close tool use
-    // (tool_choice "none"), so the prompt prefix is unchanged.
-    tools_kept_when_closed: true,
+    // 2.9: OFF until a live check (see providerCapabilityProfile). When on, the
+    // tool block stays in closed rounds (tool_choice "none").
+    tools_kept_when_closed: false,
     structured_output: 'tools_or_json',
   }),
   'openai-reasoning': Object.freeze({
@@ -147,7 +147,7 @@ const PROVIDER_PROFILES = Object.freeze({
     reasoning_effort: true,
     thinking_control: 'none',
     tool_support: true,
-    tools_kept_when_closed: true,
+    tools_kept_when_closed: false,
     structured_output: 'tools_or_json',
   }),
 })
@@ -501,7 +501,18 @@ function providerHostname(base) {
   catch { return '' }
 }
 
+// 2.9: closed rounds keep the tool block only after a live check has shown the
+// provider honours tool_choice "none". Until then every profile drops the tools
+// as before; `toolsKeptWhenClosed` is an in-code switch (static tests), not a
+// setting, and nothing maps an env variable to it.
 export function providerCapabilityProfile(config = {}) {
+  const capability = resolveProviderCapability(config)
+  return config.toolsKeptWhenClosed === true && capability.tool_support === true
+    ? { ...capability, tools_kept_when_closed: true }
+    : capability
+}
+
+function resolveProviderCapability(config = {}) {
   const requested = String(config.profile ?? config.providerProfile ?? 'auto').trim().toLowerCase()
   check(PROVIDER_PROFILE_IDS.has(requested), 'Invalid provider capability profile')
   let resolved = requested
@@ -1371,6 +1382,23 @@ export async function providerRequest(config, messages, {
       || (Array.isArray(message.tool_calls) && message.tool_calls.length === 0)
     if (emptyToolCallsNormalized) delete message.tool_calls
 
+    // A round that closed tool use (tool_choice "none", or no tool block) can
+    // still get structured tool_calls from a model that ignores it. Treat them
+    // like the DSML branch below: a sole submitPlan is the plan the content was
+    // supposed to hold, anything else is dropped, and the loop never sees a
+    // tool call on a closed round.
+    let structuredToolsDropped
+    if (!allowTools && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+      const calls = message.tool_calls
+      const sole = calls.length === 1 && calls[0]?.function?.name === 'submitPlan' && typeof calls[0].function.arguments === 'string'
+      if (sole) {
+        message.content = calls[0].function.arguments
+        structuredToolsDropped = 'submit_plan_content'
+      }
+      else structuredToolsDropped = 'dropped_tools_off'
+      delete message.tool_calls
+    }
+
     const rawContent = typeof message.content === 'string' ? message.content : ''
     const rawShape = contentShape(rawContent)
     const reasoningContentChars = providerReasoningChars(message)
@@ -1443,6 +1471,7 @@ export async function providerRequest(config, messages, {
       tool_call_count: toolCallCount,
       empty_tool_calls_normalized: emptyToolCallsNormalized,
       dsml_recovery: dsmlRecovered,
+      structured_tool_calls_dropped: structuredToolsDropped,
       reasoning_content_chars: reasoningContentChars,
       ...rawShape,
       normalized_content_chars: normalizedContent.length,

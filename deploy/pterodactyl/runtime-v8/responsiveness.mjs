@@ -28,7 +28,8 @@ function excerpt(text, max = ACK_EXCERPT_CHARS) {
   if (typeof text !== 'string') return ''
   const clean = text
     .replace(/\[\/?[a-z-]+(?:=[^\]]*)?\]/gi, ' ')
-    .replace(/[\r\n\t]+/g, ' ')
+    // Controls (C0/C1), bidi and zero-width format characters never reach chat.
+    .replace(/[\p{Cc}\p{Cf}]+/gu, ' ')
     .replace(/\s+/g, ' ')
     .replace(/"/g, '\'')
     .trim()

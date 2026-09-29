@@ -46,6 +46,10 @@ test('acknowledgementLine: from the goal text and route only, no world or comple
   assert.doesNotMatch(rich, /\[|"a"/)
   assert.ok(rich.length < 240, `bounded line, got ${rich.length}`)
   assert.match(rich, /\.\.\."\. I will share/)
+  // Control, bidi and zero-width characters are removed.
+  const hostile = acknowledgementLine({ text: 'mine\u0000 iron‮plates​ now\u0085\u0007 ⁦x⁩­', intent: 'new_goal' })
+  assert.doesNotMatch(hostile, /[\p{Cc}\p{Cf}]/u)
+  assert.match(hostile, /"mine iron plates now x"/)
 })
 
 test('ChatAcknowledger: at most one per request, player origin only, no planner-less route', () => {
