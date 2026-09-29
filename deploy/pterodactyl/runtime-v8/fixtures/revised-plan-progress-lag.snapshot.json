@@ -1,0 +1,1560 @@
+{
+ "version": 1,
+ "dialogue": [],
+ "plans": [
+  {
+   "key": "npc:npc-1",
+   "state": {
+    "goal_id": "goal_0n9g864_1",
+    "owner": "<server>",
+    "objective": "get steam power going and run an electric mining drill on iron ore",
+    "status": "paused",
+    "admission_status": "admitted",
+    "blocker": "",
+    "pause_reason": "user_stop",
+    "plan": [
+     "Gather iron ore near base (~40).",
+     "Gather 40 coal (ran out of coal).",
+     "Fuel the stone furnace with coal and smelt iron ore into iron plates until the steam-power trigger (50 iron plates crafted) is met.",
+     "Verify steam-power research is completed.",
+     "Craft and place boiler + steam engine, supply water and coal, and verify power generation.",
+     "Craft an electric mining drill and place it on the iron ore patch, then verify it runs."
+    ],
+    "current_step": 4,
+    "revision": 136,
+    "last_chat_message": "",
+    "last_operations": [
+     "gather_resource {\"resource_name\":\"coal\",\"count\":10,\"search_radius\":24}"
+    ],
+    "durable_last_operations": [
+     {
+      "name": "gather_resource",
+      "args": {
+       "resource_name": "coal",
+       "count": 10,
+       "search_radius": 24
+      },
+      "role": "Gather coal for boiler fuel (≥10 in inventory)"
+     }
+    ],
+    "exact_target_audit": [
+     {
+      "unit_number": 21,
+      "operation_name": "supply_entity",
+      "locator": {
+       "name": "stone-furnace",
+       "type": "furnace",
+       "position": {
+        "x": -28,
+        "y": -82
+       },
+       "role": "Feed iron ore and coal to the stone furnace, smelt iron plates, verify plates into inventory."
+      },
+      "recorded_at": 1790676529583
+     },
+     {
+      "unit_number": 21,
+      "operation_name": "move_items_exact",
+      "locator": {
+       "name": "stone-furnace",
+       "type": "furnace",
+       "position": {
+        "x": -28,
+        "y": -82
+       },
+       "role": "Craft stone furnace(s), smelt iron ore into iron plates, collect plates into inventory and verify."
+      },
+      "recorded_at": 1790676640976
+     },
+     {
+      "unit_number": 23,
+      "operation_name": "supply_entity",
+      "locator": {
+       "name": "burner-mining-drill",
+       "type": "mining-drill",
+       "position": {
+        "x": -26,
+        "y": -91
+       },
+       "role": "Fuel the placed burner mining drill (historical exact identity [omitted], x-26 y-91) with coal and verify coal output."
+      },
+      "recorded_at": 1790676686039
+     },
+     {
+      "unit_number": 22,
+      "operation_name": "supply_entity",
+      "locator": {
+       "name": "stone-furnace",
+       "type": "furnace",
+       "position": {
+        "x": -25,
+        "y": -82
+       },
+       "role": "Smelt iron ore into iron plates at the stone furnace until the steam-power trigger (50 iron plates crafted) is met."
+      },
+      "recorded_at": 1790677007481
+     },
+     {
+      "unit_number": 23,
+      "operation_name": "supply_entity",
+      "locator": {
+       "name": "burner-mining-drill",
+       "type": "mining-drill",
+       "position": {
+        "x": -26,
+        "y": -91
+       },
+       "role": "Smelt iron ore into iron plates at the stone furnace until the steam-power trigger (50 iron plates crafted) is met."
+      },
+      "recorded_at": 1790677007481
+     },
+     {
+      "unit_number": 22,
+      "operation_name": "supply_entity",
+      "locator": {
+       "name": "stone-furnace",
+       "type": "furnace",
+       "position": {
+        "x": -25,
+        "y": -82
+       },
+       "role": "Feed the stone furnace: smelt 40 iron ore into 50 iron plates to trigger steam-power."
+      },
+      "recorded_at": 1790677029547
+     },
+     {
+      "unit_number": 22,
+      "operation_name": "supply_entity",
+      "locator": {
+       "name": "stone-furnace",
+       "type": "furnace",
+       "position": {
+        "x": -25,
+        "y": -82
+       },
+       "role": "Fuel the stone furnace with coal and smelt iron ore into iron plates until the steam-power trigger (50 iron plates crafted) is met."
+      },
+      "recorded_at": 1790677768199
+     },
+     {
+      "unit_number": 22,
+      "operation_name": "move_items_exact",
+      "locator": {
+       "name": "stone-furnace",
+       "type": "furnace",
+       "position": {
+        "x": -25,
+        "y": -82
+       },
+       "role": "Craft and place boiler + steam engine, supply water and coal, and verify power generation."
+      },
+      "recorded_at": 1790677975388
+     },
+     {
+      "unit_number": 21,
+      "operation_name": "mine_entity_exact",
+      "locator": {
+       "name": "stone-furnace",
+       "type": "furnace",
+       "position": {
+        "x": -28,
+        "y": -82
+       },
+       "role": "Craft and place boiler + steam engine, supply water and coal, verify power generation."
+      },
+      "recorded_at": 1790678325353
+     }
+    ],
+    "last_mutation_verified": true,
+    "last_verified_batch_id": 24,
+    "updated_at": 1790679210146,
+    "history": [],
+    "task_board": {
+     "kind": "task_board_lite",
+     "goal_id": "goal_0n9g864_1",
+     "status": "paused",
+     "blocker": "",
+     "pause_reason": "user_stop",
+     "revision": 73,
+     "event_sequence": 71,
+     "active_index": 4,
+     "active_step_id": "step_4",
+     "proposed_focus_index": 1,
+     "proposed_focus_step_id": "step_2_r10",
+     "completed_count": 4,
+     "total_steps": 6,
+     "steps": [
+      {
+       "id": "step_1",
+       "description": "Gather iron ore near base (~40).",
+       "status": "completed",
+       "revision": 2,
+       "completion_contract": {
+        "mode": "all",
+        "requirements": [
+         {
+          "id": "requirement_1",
+          "kind": "inventory_count",
+          "item_name": "iron-ore",
+          "minimum": 40
+         }
+        ],
+        "confidence": 0,
+        "source": "planner_semantic_checkpoint"
+       },
+       "completion_contract_at": 1790676896688
+      },
+      {
+       "id": "step_2_r10",
+       "description": "Gather 40 coal (ran out of coal).",
+       "status": "completed",
+       "revision": 2,
+       "completion_contract": {
+        "mode": "all",
+        "requirements": [
+         {
+          "id": "coal_gathered",
+          "kind": "inventory_count",
+          "item_name": "coal",
+          "minimum": 40
+         }
+        ],
+        "confidence": 0,
+        "source": "planner_semantic_checkpoint"
+       },
+       "completion_contract_at": 1790677674522
+      },
+      {
+       "id": "step_3_r10",
+       "description": "Fuel the stone furnace with coal and smelt iron ore into iron plates until the steam-power trigger (50 iron plates crafted) is met.",
+       "status": "completed",
+       "revision": 1
+      },
+      {
+       "id": "step_3",
+       "description": "Verify steam-power research is completed.",
+       "status": "completed",
+       "revision": 1
+      },
+      {
+       "id": "step_4",
+       "description": "Craft and place boiler + steam engine, supply water and coal, and verify power generation.",
+       "status": "paused",
+       "revision": 1
+      },
+      {
+       "id": "step_5",
+       "description": "Craft an electric mining drill and place it on the iron ore patch, then verify it runs.",
+       "status": "pending",
+       "revision": 1
+      }
+     ],
+     "evidence": [
+      {
+       "id": "evidence_2",
+       "kind": "operation_receipt",
+       "summary": "{\"outcome\":\"completed\",\"task_state\":\"idle\",\"queue_length\":0,\"batch_id\":10,\"batch",
+       "ref": "batch-g1-10",
+       "at": 1790676979749,
+       "step_id": "step_1"
+      },
+      {
+       "id": "evidence_3",
+       "kind": "deterministic_verification",
+       "summary": "{\"verdict\":\"verified_complete\",\"semantics\":\"Every operation in this batch has strict runtime completion semantics; the completed batch receipt therefore proves the current step action finished without a model guess.\",\"batch_id\":10,\"operations\":[\"gather_resource\"],\"task_types\":[\"walking_to_entity\",\"mining\"]}",
+       "ref": "batch_10",
+       "at": 1790676979749,
+       "step_id": "step_1"
+      },
+      {
+       "id": "evidence_4",
+       "kind": "verified_world_state",
+       "summary": "{\"contract\":{\"mode\":\"all\",\"requirements\":[{\"id\":\"requirement_1\",\"kind\":\"inventory_count\",\"item_name\":\"iron-ore\",\"minimum\":40}],\"confidence\":0,\"source\":\"planner_semantic_checkpoint\"},\"results\":[{\"id\":\"requirement_1\",\"kind\":\"inventory_count\",\"satisfied\":true,\"progressing\":false,\"summary\":\"{\\\"kind\\\":\\\"inventory_count\\\",\\\"current\\\":40,\\\"minimum\\\":40}\"}]}",
+       "ref": "checkpoint/step_1",
+       "at": 1790676979786,
+       "step_id": "step_1"
+      },
+      {
+       "id": "evidence_5",
+       "kind": "operation_error_receipt",
+       "summary": "{\"outcome\":\"failed\",\"task_state\":\"idle\",\"queue_length\":0,\"batch_id\":11,\"batch_ge",
+       "ref": "batch-g1-11",
+       "at": 1790677009948,
+       "step_id": "step_2"
+      },
+      {
+       "id": "evidence_6",
+       "kind": "step_completion_contract_validated",
+       "summary": "{\"source\":\"main_planner\",\"validation\":\"deterministic_runtime\",\"contract\":{\"mode\":\"all\",\"requirements\":[{\"id\":\"coal_gathered\",\"kind\":\"inventory_count\",\"item_name\":\"coal\",\"minimum\":40}],\"confidence\":0,\"source\":\"planner_semantic_checkpoint\"}}",
+       "ref": "checkpoint/step_2_r10",
+       "at": 1790677674522,
+       "step_id": "step_2_r10"
+      },
+      {
+       "id": "evidence_7",
+       "kind": "operation_receipt",
+       "summary": "{\"outcome\":\"completed\",\"task_state\":\"idle\",\"queue_length\":0,\"batch_id\":12,\"batch",
+       "ref": "batch-g1-12",
+       "at": 1790677755317,
+       "step_id": "step_2_r10"
+      },
+      {
+       "id": "evidence_8",
+       "kind": "deterministic_verification",
+       "summary": "{\"verdict\":\"verified_complete\",\"semantics\":\"Every operation in this batch has strict runtime completion semantics; the completed batch receipt therefore proves the current step action finished without a model guess.\",\"batch_id\":12,\"operations\":[\"gather_resource\"],\"task_types\":[\"walking_to_entity\",\"mining\"]}",
+       "ref": "batch_12",
+       "at": 1790677755317,
+       "step_id": "step_2_r10"
+      },
+      {
+       "id": "evidence_9",
+       "kind": "verified_world_state",
+       "summary": "{\"contract\":{\"mode\":\"all\",\"requirements\":[{\"id\":\"coal_gathered\",\"kind\":\"inventory_count\",\"item_name\":\"coal\",\"minimum\":40}],\"confidence\":0,\"source\":\"planner_semantic_checkpoint\"},\"results\":[{\"id\":\"coal_gathered\",\"kind\":\"inventory_count\",\"satisfied\":true,\"progressing\":false,\"summary\":\"{\\\"kind\\\":\\\"inventory_count\\\",\\\"current\\\":40,\\\"minimum\\\":40}\"}]}",
+       "ref": "checkpoint/step_2_r10",
+       "at": 1790677755335,
+       "step_id": "step_2_r10"
+      },
+      {
+       "id": "evidence_10",
+       "kind": "operation_receipt",
+       "summary": "{\"outcome\":\"completed\",\"task_state\":\"idle\",\"queue_length\":0,\"batch_id\":13,\"batch",
+       "ref": "batch-g1-13",
+       "at": 1790677768367,
+       "step_id": "step_3_r10"
+      },
+      {
+       "id": "evidence_11",
+       "kind": "deterministic_verification",
+       "summary": "{\"verdict\":\"verified_complete\",\"semantics\":\"Every operation in this batch has strict runtime completion semantics; the completed batch receipt therefore proves the current step action finished without a model guess.\",\"batch_id\":13,\"operations\":[\"supply_entity\"],\"task_types\":[\"moving_items\"]}",
+       "ref": "batch_13",
+       "at": 1790677768367,
+       "step_id": "step_3_r10"
+      },
+      {
+       "id": "evidence_12",
+       "kind": "operation_receipt",
+       "summary": "{\"outcome\":\"completed\",\"task_state\":\"idle\",\"queue_length\":0,\"batch_id\":14,\"batch",
+       "ref": "batch-g1-14",
+       "at": 1790677839963,
+       "step_id": "step_3_r10"
+      },
+      {
+       "id": "evidence_13",
+       "kind": "deterministic_verification",
+       "summary": "{\"verdict\":\"verified_complete\",\"semantics\":\"Every operation in this batch has strict runtime completion semantics; the completed batch receipt therefore proves the current step action finished without a model guess.\",\"batch_id\":14,\"operations\":[\"gather_resource\"],\"task_types\":[\"walking_to_entity\",\"mining\"]}",
+       "ref": "batch_14",
+       "at": 1790677839964,
+       "step_id": "step_3_r10"
+      },
+      {
+       "id": "evidence_14",
+       "kind": "verified_world_state",
+       "summary": "The Main LLM made this semantic completion judgment after a fresh authoritative read-only world observation in the active request.",
+       "ref": "req_mumj5hot_3/semantic_fresh_observation/step_3_r10",
+       "at": 1790677860578,
+       "step_id": "step_3_r10"
+      },
+      {
+       "id": "evidence_15",
+       "kind": "operation_receipt",
+       "summary": "{\"outcome\":\"completed\",\"task_state\":\"idle\",\"queue_length\":0,\"batch_id\":15,\"batch",
+       "ref": "batch-g1-15",
+       "at": 1790677903359,
+       "step_id": "step_3"
+      },
+      {
+       "id": "evidence_16",
+       "kind": "deterministic_verification",
+       "summary": "{\"verdict\":\"verified_complete\",\"semantics\":\"Every operation in this batch has strict runtime completion semantics; the completed batch receipt therefore proves the current step action finished without a model guess.\",\"batch_id\":15,\"operations\":[\"gather_resource\"],\"task_types\":[\"walking_to_entity\",\"mining\"]}",
+       "ref": "batch_15",
+       "at": 1790677903359,
+       "step_id": "step_3"
+      },
+      {
+       "id": "evidence_17",
+       "kind": "verified_world_state",
+       "summary": "The Main LLM made this semantic completion judgment after a fresh authoritative read-only world observation in the active request.",
+       "ref": "req_mumj5hot_3/semantic_fresh_observation/step_3",
+       "at": 1790677911228,
+       "step_id": "step_3"
+      },
+      {
+       "id": "evidence_18",
+       "kind": "operation_preflight_recoverable",
+       "summary": "{\"code\":\"bootstrap_dependency_unresolved\",\"operation_index\":1,\"operation\":\"craft",
+       "ref": "req_mumj5hot_3/bootstrap_dependency_unresolved",
+       "at": 1790677911375,
+       "step_id": "step_4"
+      },
+      {
+       "id": "evidence_19",
+       "kind": "operation_receipt",
+       "summary": "{\"outcome\":\"completed\",\"task_state\":\"idle\",\"queue_length\":0,\"batch_id\":16,\"batch",
+       "ref": "batch-g1-16",
+       "at": 1790677932507,
+       "step_id": "step_4"
+      },
+      {
+       "id": "evidence_20",
+       "kind": "deterministic_verification",
+       "summary": "{\"verdict\":\"verified_complete\",\"semantics\":\"Every operation in this batch has strict runtime completion semantics; the completed batch receipt therefore proves the current step action finished without a model guess.\",\"batch_id\":16,\"operations\":[\"craft_item\",\"craft_item\"],\"task_types\":[\"crafting\",\"crafting\"]}",
+       "ref": "batch_16",
+       "at": 1790677932507,
+       "step_id": "step_4"
+      },
+      {
+       "id": "evidence_21",
+       "kind": "operation_receipt",
+       "summary": "{\"outcome\":\"completed\",\"task_state\":\"idle\",\"queue_length\":0,\"batch_id\":17,\"batch",
+       "ref": "batch-g1-17",
+       "at": 1790677976088,
+       "step_id": "step_4"
+      },
+      {
+       "id": "evidence_22",
+       "kind": "operation_receipt",
+       "summary": "{\"outcome\":\"completed\",\"task_state\":\"idle\",\"queue_length\":0,\"batch_id\":18,\"batch",
+       "ref": "batch-g1-18",
+       "at": 1790677991737,
+       "step_id": "step_4"
+      },
+      {
+       "id": "evidence_23",
+       "kind": "deterministic_verification",
+       "summary": "{\"verdict\":\"verified_complete\",\"semantics\":\"Every operation in this batch has strict runtime completion semantics; the completed batch receipt therefore proves the current step action finished without a model guess.\",\"batch_id\":18,\"operations\":[\"craft_item\",\"craft_item\"],\"task_types\":[\"crafting\",\"crafting\"]}",
+       "ref": "batch_18",
+       "at": 1790677991737,
+       "step_id": "step_4"
+      },
+      {
+       "id": "evidence_24",
+       "kind": "operation_receipt",
+       "summary": "{\"outcome\":\"completed\",\"task_state\":\"idle\",\"queue_length\":0,\"batch_id\":19,\"batch",
+       "ref": "batch-g1-19",
+       "at": 1790678089049,
+       "step_id": "step_4"
+      },
+      {
+       "id": "evidence_25",
+       "kind": "deterministic_verification",
+       "summary": "{\"verdict\":\"verified_complete\",\"semantics\":\"Every operation in this batch has strict runtime completion semantics; the completed batch receipt therefore proves the current step action finished without a model guess.\",\"batch_id\":19,\"operations\":[\"place_entity\"],\"task_types\":[\"placing\"]}",
+       "ref": "batch_19",
+       "at": 1790678089049,
+       "step_id": "step_4"
+      },
+      {
+       "id": "evidence_26",
+       "kind": "operation_error_receipt",
+       "summary": "{\"outcome\":\"failed\",\"task_state\":\"idle\",\"queue_length\":0,\"batch_id\":20,\"batch_ge",
+       "ref": "batch-g1-20",
+       "at": 1790678116881,
+       "step_id": "step_4"
+      },
+      {
+       "id": "evidence_27",
+       "kind": "operation_error_receipt",
+       "summary": "{\"outcome\":\"failed\",\"task_state\":\"idle\",\"queue_length\":0,\"batch_id\":21,\"batch_ge",
+       "ref": "batch-g1-21",
+       "at": 1790678208860,
+       "step_id": "step_4"
+      },
+      {
+       "id": "evidence_28",
+       "kind": "operation_failure_recoverable",
+       "summary": "{\"failure_class\":\"model_correctable_placing_not_placeable\",\"task_type\":\"placing\"",
+       "ref": "batch-g1-21",
+       "at": 1790678208860,
+       "step_id": "step_4"
+      },
+      {
+       "id": "evidence_29",
+       "kind": "operation_receipt",
+       "summary": "{\"outcome\":\"completed\",\"task_state\":\"idle\",\"queue_length\":0,\"batch_id\":22,\"batch",
+       "ref": "batch-g1-22",
+       "at": 1790678336687,
+       "step_id": "step_4"
+      },
+      {
+       "id": "evidence_30",
+       "kind": "operation_receipt",
+       "summary": "{\"outcome\":\"completed\",\"task_state\":\"idle\",\"queue_length\":0,\"batch_id\":23,\"batch",
+       "ref": "batch-g2-23",
+       "at": 1790678967953,
+       "step_id": "step_4"
+      },
+      {
+       "id": "evidence_31",
+       "kind": "deterministic_verification",
+       "summary": "{\"verdict\":\"verified_complete\",\"semantics\":\"Every operation in this batch has strict runtime completion semantics; the completed batch receipt therefore proves the current step action finished without a model guess.\",\"batch_id\":23,\"operations\":[\"gather_resource\"],\"task_types\":[\"walking_to_entity\",\"mining\"]}",
+       "ref": "batch_23",
+       "at": 1790678967954,
+       "step_id": "step_4"
+      },
+      {
+       "id": "evidence_32",
+       "kind": "operation_receipt",
+       "summary": "{\"outcome\":\"completed\",\"task_state\":\"idle\",\"queue_length\":0,\"batch_id\":24,\"batch",
+       "ref": "batch-g2-24",
+       "at": 1790679153276,
+       "step_id": "step_4"
+      },
+      {
+       "id": "evidence_33",
+       "kind": "deterministic_verification",
+       "summary": "{\"verdict\":\"verified_complete\",\"semantics\":\"Every operation in this batch has strict runtime completion semantics; the completed batch receipt therefore proves the current step action finished without a model guess.\",\"batch_id\":24,\"operations\":[\"gather_resource\"],\"task_types\":[\"walking_to_entity\",\"mining\"]}",
+       "ref": "batch_24",
+       "at": 1790679153276,
+       "step_id": "step_4"
+      }
+     ],
+     "events": [],
+     "created_at": 1790676702253,
+     "updated_at": 1790679210146,
+     "evidence_sequence": 33
+    },
+    "planning": {
+     "reasoning_epoch": 3,
+     "plan": {
+      "plan_id": "goal_0n9g864_1_p5",
+      "plan_version": 2,
+      "derived_from": "goal_0n9g864_1_p4"
+     }
+    }
+   }
+  }
+ ],
+ "planning_states": [
+  {
+   "key": "npc:npc-1",
+   "state": {
+    "version": 1,
+    "sequence": 5,
+    "goal": {
+     "goal_id": "goal_0n9g864_1",
+     "definition": {
+      "scope": "long_horizon",
+      "summary": "From an empty start, bootstrap raw materials and burner-era mining/smelting, get steam power running, and place a powered electric mining drill on the iron ore patch.",
+      "done_when": [
+       {
+        "id": "done_1",
+        "kind": "research_completed",
+        "technology": "steam-power"
+       },
+       {
+        "id": "done_2",
+        "kind": "items_produced",
+        "item_name": "steam-engine",
+        "minimum": 1,
+        "count_from": "goal_start",
+        "baseline": 0
+       },
+       {
+        "id": "done_3",
+        "kind": "items_produced",
+        "item_name": "electric-mining-drill",
+        "minimum": 1,
+        "count_from": "goal_start",
+        "baseline": 0
+       }
+      ],
+      "source": "main_planner",
+      "defined_at": 1790676292317
+     },
+     "owner": "<server>",
+     "objective": "get steam power going and run an electric mining drill on iron ore",
+     "constraints": [],
+     "status": "active",
+     "created_at": 1790676193585,
+     "updated_at": 1790676292427
+    },
+    "roadmap": {
+     "roadmap_revision_id": "goal_0n9g864_1_r2",
+     "goal_id": "goal_0n9g864_1",
+     "revision_index": 1,
+     "derived_from_revision_id": null,
+     "reason": "goal_decomposed_to_shelf",
+     "authority": "user",
+     "evidence_refs": [],
+     "created_at": 1790676292311,
+     "nodes": []
+    },
+    "roadmap_history": [],
+    "plans": [
+     {
+      "plan_id": "goal_0n9g864_1_p3",
+      "plan_version": 1,
+      "goal_id": "goal_0n9g864_1",
+      "roadmap_revision_id": "goal_0n9g864_1_r2",
+      "roadmap_node_ids": [],
+      "development_mode": "vertical",
+      "refinement_grounding": {
+       "ready_node_ids": [],
+       "not_ready": []
+      },
+      "steering_at_draft": {
+       "mode": "vertical",
+       "steering_sequence": 1,
+       "critical_path": null,
+       "diverges_from_steering": false
+      },
+      "status": "COMPLETED",
+      "steps": [
+       {
+        "step_id": "goal_0n9g864_1_p3_v1_s1_045088k",
+        "description": "Gather starter supplies near origin: 30 wood, 40 stone, 40 iron ore, 30 coal.",
+        "completion_contract": {
+         "mode": "all",
+         "requirements": [
+          {
+           "id": "requirement_1",
+           "kind": "inventory_count",
+           "item_name": "wood",
+           "minimum": 30
+          },
+          {
+           "id": "requirement_2",
+           "kind": "inventory_count",
+           "item_name": "stone",
+           "minimum": 40
+          },
+          {
+           "id": "requirement_3",
+           "kind": "inventory_count",
+           "item_name": "iron-ore",
+           "minimum": 40
+          },
+          {
+           "id": "requirement_4",
+           "kind": "inventory_count",
+           "item_name": "coal",
+           "minimum": 30
+          }
+         ],
+         "confidence": 0,
+         "source": "planner_semantic_checkpoint"
+        },
+        "completion_confidence": "grounded",
+        "reduced_confidence": false
+       },
+       {
+        "step_id": "goal_0n9g864_1_p3_v1_s2_1qsymnh",
+        "description": "Craft stone furnace(s), smelt iron ore into iron plates with wood/coal fuel, verify plates.",
+        "completion_contract": null,
+        "completion_confidence": "reduced",
+        "reduced_confidence": true
+       },
+       {
+        "step_id": "goal_0n9g864_1_p3_v1_s3_11nkheu",
+        "description": "Craft a burner mining drill from the smelted iron, verify it in inventory.",
+        "completion_contract": null,
+        "completion_confidence": "reduced",
+        "reduced_confidence": true
+       },
+       {
+        "step_id": "goal_0n9g864_1_p3_v1_s4_1eg7afy",
+        "description": "Place the burner drill on the coal patch, fuel it, and verify coal output.",
+        "completion_contract": null,
+        "completion_confidence": "reduced",
+        "reduced_confidence": true
+       }
+      ],
+      "active_step_index": 3,
+      "derived_from_plan_id": null,
+      "superseded_by_plan_id": null,
+      "origin": "live_task_board",
+      "created_at": 1790676292311,
+      "updated_at": 1790676702253,
+      "committed_at": 1790676292810,
+      "completed_at": 1790676702253,
+      "blocker": null,
+      "execution": {
+       "step_progress": {
+        "goal_0n9g864_1_p3_v1_s1_045088k": {
+         "status": "completed",
+         "accepted_evidence": [
+          {
+           "ref": "batch_1",
+           "kind": "outcome_authority",
+           "source": "runtime",
+           "batch_id": null,
+           "satisfied_requirement_ids": [],
+           "at": 1790676488388
+          }
+         ],
+         "batches_attempted": 0,
+         "batches_since_evidence": 0,
+         "operations_attempted": 0,
+         "failure_counts": {},
+         "contract_satisfied": true,
+         "unsatisfiable": null,
+         "completed_at": 1790676488388
+        },
+        "goal_0n9g864_1_p3_v1_s2_1qsymnh": {
+         "status": "completed",
+         "accepted_evidence": [
+          {
+           "ref": "batch-g1-4",
+           "kind": "semantic_completion_grounding",
+           "source": "main_planner",
+           "batch_id": null,
+           "satisfied_requirement_ids": [],
+           "at": 1790676654626
+          }
+         ],
+         "batches_attempted": 0,
+         "batches_since_evidence": 0,
+         "operations_attempted": 0,
+         "failure_counts": {},
+         "contract_satisfied": false,
+         "unsatisfiable": null,
+         "completed_at": 1790676654626
+        },
+        "goal_0n9g864_1_p3_v1_s3_11nkheu": {
+         "status": "completed",
+         "accepted_evidence": [
+          {
+           "ref": "batch-g1-6",
+           "kind": "semantic_completion_grounding",
+           "source": "main_planner",
+           "batch_id": null,
+           "satisfied_requirement_ids": [],
+           "at": 1790676664259
+          }
+         ],
+         "batches_attempted": 0,
+         "batches_since_evidence": 0,
+         "operations_attempted": 0,
+         "failure_counts": {},
+         "contract_satisfied": false,
+         "unsatisfiable": null,
+         "completed_at": 1790676664259
+        },
+        "goal_0n9g864_1_p3_v1_s4_1eg7afy": {
+         "status": "completed",
+         "accepted_evidence": [
+          {
+           "ref": "batch_8",
+           "kind": "semantic_completion_grounding",
+           "source": "main_planner",
+           "batch_id": null,
+           "satisfied_requirement_ids": [],
+           "at": 1790676702253
+          }
+         ],
+         "batches_attempted": 0,
+         "batches_since_evidence": 0,
+         "operations_attempted": 0,
+         "failure_counts": {},
+         "contract_satisfied": false,
+         "unsatisfiable": null,
+         "completed_at": 1790676702253
+        }
+       },
+       "batches_attempted": 0
+      },
+      "advisory": {
+       "planner_focus_step_id": "goal_0n9g864_1_p3_v1_s4_1eg7afy",
+       "planner_focus_at": 1790676664292,
+       "steering_note": null
+      },
+      "carried_forward_evidence": [],
+      "lifecycle": [
+       {
+        "status": "DRAFT",
+        "at": 1790676292594,
+        "reason": "live_task_board"
+       },
+       {
+        "status": "COMMITTED",
+        "at": 1790676292810,
+        "reason": "auto_commit_runtime_validated"
+       },
+       {
+        "status": "EXECUTING",
+        "at": 1790676488388,
+        "reason": "first_accepted_evidence"
+       },
+       {
+        "status": "COMPLETED",
+        "at": 1790676702253,
+        "reason": "all_steps_completed"
+       }
+      ],
+      "runtime_validation": {
+       "passed": true,
+       "validated_at": 1790676292810,
+       "unsupported_step_ids": []
+      }
+     },
+     {
+      "plan_id": "goal_0n9g864_1_p4",
+      "plan_version": 1,
+      "goal_id": "goal_0n9g864_1",
+      "roadmap_revision_id": "goal_0n9g864_1_r2",
+      "roadmap_node_ids": [],
+      "development_mode": "maintain",
+      "refinement_grounding": {
+       "ready_node_ids": [],
+       "not_ready": []
+      },
+      "steering_at_draft": {
+       "mode": "maintain",
+       "steering_sequence": 2,
+       "critical_path": null,
+       "diverges_from_steering": false
+      },
+      "status": "BLOCKED",
+      "steps": [
+       {
+        "step_id": "goal_0n9g864_1_p4_v1_s1_1dnryxm",
+        "description": "Gather iron ore near base (~40).",
+        "completion_contract": {
+         "mode": "all",
+         "requirements": [
+          {
+           "id": "requirement_1",
+           "kind": "inventory_count",
+           "item_name": "iron-ore",
+           "minimum": 40
+          }
+         ],
+         "confidence": 0,
+         "source": "planner_semantic_checkpoint"
+        },
+        "completion_confidence": "grounded",
+        "reduced_confidence": false
+       },
+       {
+        "step_id": "goal_0n9g864_1_p4_v1_s2_0cqevoc",
+        "description": "Smelt iron ore into iron plates at the stone furnace until the steam-power trigger (50 iron plates crafted) is met.",
+        "completion_contract": null,
+        "completion_confidence": "reduced",
+        "reduced_confidence": true
+       },
+       {
+        "step_id": "goal_0n9g864_1_p4_v1_s3_1iei7io",
+        "description": "Verify steam-power research is completed.",
+        "completion_contract": null,
+        "completion_confidence": "reduced",
+        "reduced_confidence": true
+       },
+       {
+        "step_id": "goal_0n9g864_1_p4_v1_s4_1eq3hr3",
+        "description": "Craft and place boiler + steam engine, supply water and coal, and verify power generation.",
+        "completion_contract": null,
+        "completion_confidence": "reduced",
+        "reduced_confidence": true
+       },
+       {
+        "step_id": "goal_0n9g864_1_p4_v1_s5_1ns1pzy",
+        "description": "Craft an electric mining drill and place it on the iron ore patch, then verify it runs.",
+        "completion_contract": null,
+        "completion_confidence": "reduced",
+        "reduced_confidence": true
+       }
+      ],
+      "active_step_index": 1,
+      "derived_from_plan_id": null,
+      "superseded_by_plan_id": "goal_0n9g864_1_p5",
+      "origin": "live_task_board",
+      "created_at": 1790676896658,
+      "updated_at": 1790677674506,
+      "committed_at": 1790676896738,
+      "completed_at": null,
+      "blocker": {
+       "kind": "structural",
+       "reason_code": "transfer_failed:item_missing",
+       "detected_at": 1790677009948,
+       "evidence_refs": [
+        "batch-g1-11"
+       ],
+       "detail": "transfer_failed:item_missing",
+       "requires_user_decision": true,
+       "user_choice": {
+        "choice": "revise",
+        "approved_by": "<server>",
+        "at": 1790677504768
+       }
+      },
+      "execution": {
+       "step_progress": {
+        "goal_0n9g864_1_p4_v1_s1_1dnryxm": {
+         "status": "completed",
+         "accepted_evidence": [
+          {
+           "ref": "batch_10",
+           "kind": "outcome_authority",
+           "source": "runtime",
+           "batch_id": null,
+           "satisfied_requirement_ids": [],
+           "at": 1790676979786
+          }
+         ],
+         "batches_attempted": 0,
+         "batches_since_evidence": 0,
+         "operations_attempted": 0,
+         "failure_counts": {},
+         "contract_satisfied": true,
+         "unsatisfiable": null,
+         "completed_at": 1790676979786
+        },
+        "goal_0n9g864_1_p4_v1_s2_0cqevoc": {
+         "status": "active",
+         "accepted_evidence": [],
+         "batches_attempted": 0,
+         "batches_since_evidence": 0,
+         "operations_attempted": 0,
+         "failure_counts": {},
+         "contract_satisfied": false,
+         "unsatisfiable": null,
+         "completed_at": null
+        },
+        "goal_0n9g864_1_p4_v1_s3_1iei7io": {
+         "status": "pending",
+         "accepted_evidence": [],
+         "batches_attempted": 0,
+         "batches_since_evidence": 0,
+         "operations_attempted": 0,
+         "failure_counts": {},
+         "contract_satisfied": false,
+         "unsatisfiable": null,
+         "completed_at": null
+        },
+        "goal_0n9g864_1_p4_v1_s4_1eq3hr3": {
+         "status": "pending",
+         "accepted_evidence": [],
+         "batches_attempted": 0,
+         "batches_since_evidence": 0,
+         "operations_attempted": 0,
+         "failure_counts": {},
+         "contract_satisfied": false,
+         "unsatisfiable": null,
+         "completed_at": null
+        },
+        "goal_0n9g864_1_p4_v1_s5_1ns1pzy": {
+         "status": "pending",
+         "accepted_evidence": [],
+         "batches_attempted": 0,
+         "batches_since_evidence": 0,
+         "operations_attempted": 0,
+         "failure_counts": {},
+         "contract_satisfied": false,
+         "unsatisfiable": null,
+         "completed_at": null
+        }
+       },
+       "batches_attempted": 0
+      },
+      "advisory": {
+       "planner_focus_step_id": "goal_0n9g864_1_p4_v1_s2_0cqevoc",
+       "planner_focus_at": 1790677007481,
+       "steering_note": null
+      },
+      "carried_forward_evidence": [],
+      "lifecycle": [
+       {
+        "status": "DRAFT",
+        "at": 1790676896688,
+        "reason": "live_task_board"
+       },
+       {
+        "status": "COMMITTED",
+        "at": 1790676896738,
+        "reason": "auto_commit_runtime_validated"
+       },
+       {
+        "status": "EXECUTING",
+        "at": 1790676979786,
+        "reason": "first_accepted_evidence"
+       },
+       {
+        "status": "BLOCKED",
+        "at": 1790677009948,
+        "reason": "transfer_failed:item_missing"
+       }
+      ],
+      "runtime_validation": {
+       "passed": true,
+       "validated_at": 1790676896738,
+       "unsupported_step_ids": []
+      }
+     },
+     {
+      "plan_id": "goal_0n9g864_1_p5",
+      "plan_version": 2,
+      "goal_id": "goal_0n9g864_1",
+      "roadmap_revision_id": "goal_0n9g864_1_r2",
+      "roadmap_node_ids": [],
+      "development_mode": "vertical",
+      "refinement_grounding": {
+       "ready_node_ids": [],
+       "not_ready": []
+      },
+      "steering_at_draft": {
+       "mode": "maintain",
+       "steering_sequence": 2,
+       "critical_path": null,
+       "diverges_from_steering": true
+      },
+      "status": "EXECUTING",
+      "steps": [
+       {
+        "step_id": "goal_0n9g864_1_p5_v2_s1_0x3sud3",
+        "description": "Gather iron ore near base (~40).",
+        "completion_contract": {
+         "mode": "all",
+         "requirements": [
+          {
+           "id": "requirement_1",
+           "kind": "inventory_count",
+           "item_name": "iron-ore",
+           "minimum": 40
+          }
+         ],
+         "confidence": 0,
+         "source": "planner_semantic_checkpoint"
+        },
+        "completion_confidence": "grounded",
+        "reduced_confidence": false
+       },
+       {
+        "step_id": "goal_0n9g864_1_p5_v2_s2_1i68qzx",
+        "description": "Gather 40 coal (ran out of coal).",
+        "completion_contract": {
+         "mode": "all",
+         "requirements": [
+          {
+           "id": "coal_gathered",
+           "kind": "inventory_count",
+           "item_name": "coal",
+           "minimum": 40
+          }
+         ],
+         "confidence": 0,
+         "source": "planner_semantic_checkpoint"
+        },
+        "completion_confidence": "grounded",
+        "reduced_confidence": false
+       },
+       {
+        "step_id": "goal_0n9g864_1_p5_v2_s3_1rp7wrt",
+        "description": "Fuel the stone furnace with coal and smelt iron ore into iron plates until the steam-power trigger (50 iron plates crafted) is met.",
+        "completion_contract": null,
+        "completion_confidence": "reduced",
+        "reduced_confidence": true
+       },
+       {
+        "step_id": "goal_0n9g864_1_p5_v2_s4_052lj32",
+        "description": "Verify steam-power research is completed.",
+        "completion_contract": null,
+        "completion_confidence": "reduced",
+        "reduced_confidence": true
+       },
+       {
+        "step_id": "goal_0n9g864_1_p5_v2_s5_0yqmm6n",
+        "description": "Craft and place boiler + steam engine, supply water and coal, and verify power generation.",
+        "completion_contract": null,
+        "completion_confidence": "reduced",
+        "reduced_confidence": true
+       },
+       {
+        "step_id": "goal_0n9g864_1_p5_v2_s6_0952lfw",
+        "description": "Craft an electric mining drill and place it on the iron ore patch, then verify it runs.",
+        "completion_contract": null,
+        "completion_confidence": "reduced",
+        "reduced_confidence": true
+       }
+      ],
+      "active_step_index": 1,
+      "derived_from_plan_id": "goal_0n9g864_1_p4",
+      "superseded_by_plan_id": null,
+      "origin": "user_approved_revision",
+      "created_at": 1790677674506,
+      "updated_at": 1790677755335,
+      "committed_at": 1790677674572,
+      "completed_at": null,
+      "blocker": null,
+      "execution": {
+       "step_progress": {
+        "goal_0n9g864_1_p5_v2_s1_0x3sud3": {
+         "status": "completed",
+         "accepted_evidence": [
+          {
+           "ref": "batch_12",
+           "kind": "outcome_authority",
+           "source": "runtime",
+           "batch_id": null,
+           "satisfied_requirement_ids": [],
+           "at": 1790677755335
+          }
+         ],
+         "batches_attempted": 0,
+         "batches_since_evidence": 0,
+         "operations_attempted": 0,
+         "failure_counts": {},
+         "contract_satisfied": true,
+         "unsatisfiable": null,
+         "completed_at": 1790677755335
+        },
+        "goal_0n9g864_1_p5_v2_s2_1i68qzx": {
+         "status": "active",
+         "accepted_evidence": [],
+         "batches_attempted": 0,
+         "batches_since_evidence": 0,
+         "operations_attempted": 0,
+         "failure_counts": {},
+         "contract_satisfied": false,
+         "unsatisfiable": null,
+         "completed_at": null
+        },
+        "goal_0n9g864_1_p5_v2_s3_1rp7wrt": {
+         "status": "pending",
+         "accepted_evidence": [],
+         "batches_attempted": 0,
+         "batches_since_evidence": 0,
+         "operations_attempted": 0,
+         "failure_counts": {},
+         "contract_satisfied": false,
+         "unsatisfiable": null,
+         "completed_at": null
+        },
+        "goal_0n9g864_1_p5_v2_s4_052lj32": {
+         "status": "pending",
+         "accepted_evidence": [],
+         "batches_attempted": 0,
+         "batches_since_evidence": 0,
+         "operations_attempted": 0,
+         "failure_counts": {},
+         "contract_satisfied": false,
+         "unsatisfiable": null,
+         "completed_at": null
+        },
+        "goal_0n9g864_1_p5_v2_s5_0yqmm6n": {
+         "status": "pending",
+         "accepted_evidence": [],
+         "batches_attempted": 0,
+         "batches_since_evidence": 0,
+         "operations_attempted": 0,
+         "failure_counts": {},
+         "contract_satisfied": false,
+         "unsatisfiable": null,
+         "completed_at": null
+        },
+        "goal_0n9g864_1_p5_v2_s6_0952lfw": {
+         "status": "pending",
+         "accepted_evidence": [],
+         "batches_attempted": 0,
+         "batches_since_evidence": 0,
+         "operations_attempted": 0,
+         "failure_counts": {},
+         "contract_satisfied": false,
+         "unsatisfiable": null,
+         "completed_at": null
+        }
+       },
+       "batches_attempted": 0
+      },
+      "advisory": {
+       "planner_focus_step_id": "goal_0n9g864_1_p5_v2_s1_0x3sud3",
+       "planner_focus_at": 1790677768199,
+       "steering_note": null
+      },
+      "carried_forward_evidence": [
+       "goal_0n9g864_1_p4:goal_0n9g864_1_p4_v1_s1_1dnryxm"
+      ],
+      "lifecycle": [
+       {
+        "status": "DRAFT",
+        "at": 1790677674522,
+        "reason": "user_approved_revision"
+       },
+       {
+        "status": "COMMITTED",
+        "at": 1790677674572,
+        "reason": "auto_commit_runtime_validated"
+       },
+       {
+        "status": "EXECUTING",
+        "at": 1790677755335,
+        "reason": "first_accepted_evidence"
+       }
+      ],
+      "runtime_validation": {
+       "passed": true,
+       "validated_at": 1790677674572,
+       "unsupported_step_ids": []
+      }
+     }
+    ],
+    "active_plan_id": "goal_0n9g864_1_p5",
+    "steering": {
+     "current_mode": "maintain",
+     "previous_mode": "vertical",
+     "reason": null,
+     "critical_path": null,
+     "pressure": {
+      "vertical": [],
+      "horizontal": []
+     },
+     "dropped_pressure": [],
+     "last_plan_id": "goal_0n9g864_1_p3",
+     "last_directional_mode": "vertical",
+     "consecutive_mode_slices": 1,
+     "hysteresis_applied": false,
+     "hold_reasons": [],
+     "proposed_mode": "maintain",
+     "forced_by_user": false,
+     "recommendation": {
+      "recommended_by": null,
+      "recommended_mode": null,
+      "confidence": 0,
+      "reason_codes": [],
+      "candidate_shelf_nodes": []
+     },
+     "user_priority": null,
+     "boundary": "plan_completed",
+     "authority": "runtime",
+     "sequence": 2,
+     "updated_at": 1790676702253,
+     "history": [
+      {
+       "mode": "vertical",
+       "boundary": "goal_admission",
+       "at": 1790676193768,
+       "plan_id": null,
+       "changed": true,
+       "hysteresis_applied": false,
+       "hold_reasons": []
+      },
+      {
+       "mode": "maintain",
+       "boundary": "plan_completed",
+       "at": 1790676702253,
+       "plan_id": "goal_0n9g864_1_p3",
+       "changed": true,
+       "hysteresis_applied": false,
+       "hold_reasons": []
+      }
+     ]
+    },
+    "updated_at": 1790679210146,
+    "reasoning_epoch": 3,
+    "last_reasoning_reset": {
+     "epoch": 3,
+     "at": 1790677674506,
+     "event_type": "USER_REVISION_APPROVED",
+     "reason": "successor_plan_approved"
+    },
+    "run": {
+     "paused": true,
+     "pause_reason": "user_stop",
+     "pause_code": "user_stop",
+     "paused_at": 1790679210146,
+     "resumed_at": 1790678887143,
+     "pause_count": 2,
+     "condition_wait": null,
+     "provider_recovery": null,
+     "persistent_runtime": null,
+     "locators": {
+      "durable_last_operations": [
+       {
+        "name": "gather_resource",
+        "args": {
+         "resource_name": "coal",
+         "count": 10,
+         "search_radius": 24
+        },
+        "role": "Gather coal for boiler fuel (≥10 in inventory)"
+       }
+      ],
+      "exact_target_audit": [
+       {
+        "unit_number": 21,
+        "operation_name": "supply_entity",
+        "locator": {
+         "name": "stone-furnace",
+         "type": "furnace",
+         "position": {
+          "x": -28,
+          "y": -82
+         },
+         "role": "Feed iron ore and coal to the stone furnace, smelt iron plates, verify plates into inventory."
+        },
+        "recorded_at": 1790676529583
+       },
+       {
+        "unit_number": 21,
+        "operation_name": "move_items_exact",
+        "locator": {
+         "name": "stone-furnace",
+         "type": "furnace",
+         "position": {
+          "x": -28,
+          "y": -82
+         },
+         "role": "Craft stone furnace(s), smelt iron ore into iron plates, collect plates into inventory and verify."
+        },
+        "recorded_at": 1790676640976
+       },
+       {
+        "unit_number": 23,
+        "operation_name": "supply_entity",
+        "locator": {
+         "name": "burner-mining-drill",
+         "type": "mining-drill",
+         "position": {
+          "x": -26,
+          "y": -91
+         },
+         "role": "Fuel the placed burner mining drill (historical exact identity [omitted], x-26 y-91) with coal and verify coal output."
+        },
+        "recorded_at": 1790676686039
+       },
+       {
+        "unit_number": 22,
+        "operation_name": "supply_entity",
+        "locator": {
+         "name": "stone-furnace",
+         "type": "furnace",
+         "position": {
+          "x": -25,
+          "y": -82
+         },
+         "role": "Smelt iron ore into iron plates at the stone furnace until the steam-power trigger (50 iron plates crafted) is met."
+        },
+        "recorded_at": 1790677007481
+       },
+       {
+        "unit_number": 23,
+        "operation_name": "supply_entity",
+        "locator": {
+         "name": "burner-mining-drill",
+         "type": "mining-drill",
+         "position": {
+          "x": -26,
+          "y": -91
+         },
+         "role": "Smelt iron ore into iron plates at the stone furnace until the steam-power trigger (50 iron plates crafted) is met."
+        },
+        "recorded_at": 1790677007481
+       },
+       {
+        "unit_number": 22,
+        "operation_name": "supply_entity",
+        "locator": {
+         "name": "stone-furnace",
+         "type": "furnace",
+         "position": {
+          "x": -25,
+          "y": -82
+         },
+         "role": "Feed the stone furnace: smelt 40 iron ore into 50 iron plates to trigger steam-power."
+        },
+        "recorded_at": 1790677029547
+       },
+       {
+        "unit_number": 22,
+        "operation_name": "supply_entity",
+        "locator": {
+         "name": "stone-furnace",
+         "type": "furnace",
+         "position": {
+          "x": -25,
+          "y": -82
+         },
+         "role": "Fuel the stone furnace with coal and smelt iron ore into iron plates until the steam-power trigger (50 iron plates crafted) is met."
+        },
+        "recorded_at": 1790677768199
+       },
+       {
+        "unit_number": 22,
+        "operation_name": "move_items_exact",
+        "locator": {
+         "name": "stone-furnace",
+         "type": "furnace",
+         "position": {
+          "x": -25,
+          "y": -82
+         },
+         "role": "Craft and place boiler + steam engine, supply water and coal, and verify power generation."
+        },
+        "recorded_at": 1790677975388
+       },
+       {
+        "unit_number": 21,
+        "operation_name": "mine_entity_exact",
+        "locator": {
+         "name": "stone-furnace",
+         "type": "furnace",
+         "position": {
+          "x": -28,
+          "y": -82
+         },
+         "role": "Craft and place boiler + steam engine, supply water and coal, verify power generation."
+        },
+        "recorded_at": 1790678325353
+       }
+      ]
+     },
+     "stale_exact_identities": [],
+     "updated_at": 1790679210146
+    },
+    "log": [
+     {
+      "type": "GOAL_ACCEPTED",
+      "at": 1790676193585,
+      "goal_id": "goal_0n9g864_1"
+     },
+     {
+      "type": "STEERING_EVALUATED",
+      "at": 1790676193768,
+      "boundary": "goal_admission",
+      "mode": "vertical",
+      "hysteresis_applied": false
+     },
+     {
+      "type": "ROADMAP_REVISED",
+      "at": 1790676292311,
+      "roadmap_revision_id": "goal_0n9g864_1_r2",
+      "reason": "goal_decomposed_to_shelf"
+     },
+     {
+      "type": "DRAFT_CREATED",
+      "at": 1790676292311,
+      "plan_id": "goal_0n9g864_1_p3"
+     },
+     {
+      "type": "GOAL_DEFINED",
+      "at": 1790676292317,
+      "goal_id": "goal_0n9g864_1"
+     },
+     {
+      "type": "GOAL_BASELINES_RECORDED",
+      "at": 1790676292427,
+      "goal_id": "goal_0n9g864_1"
+     },
+     {
+      "type": "DRAFT_CREATED",
+      "at": 1790676292594,
+      "plan_id": "goal_0n9g864_1_p3",
+      "in_place": true
+     },
+     {
+      "type": "PLAN_COMMITTED",
+      "at": 1790676292810,
+      "plan_id": "goal_0n9g864_1_p3"
+     },
+     {
+      "type": "STEP_COMPLETED",
+      "at": 1790676488388,
+      "plan_id": "goal_0n9g864_1_p3",
+      "step_id": "goal_0n9g864_1_p3_v1_s1_045088k"
+     },
+     {
+      "type": "STEP_COMPLETED",
+      "at": 1790676654626,
+      "plan_id": "goal_0n9g864_1_p3",
+      "step_id": "goal_0n9g864_1_p3_v1_s2_1qsymnh"
+     },
+     {
+      "type": "STEP_COMPLETED",
+      "at": 1790676664259,
+      "plan_id": "goal_0n9g864_1_p3",
+      "step_id": "goal_0n9g864_1_p3_v1_s3_11nkheu"
+     },
+     {
+      "type": "STEP_COMPLETED",
+      "at": 1790676702253,
+      "plan_id": "goal_0n9g864_1_p3",
+      "step_id": "goal_0n9g864_1_p3_v1_s4_1eg7afy"
+     },
+     {
+      "type": "PLAN_COMPLETED",
+      "at": 1790676702253,
+      "plan_id": "goal_0n9g864_1_p3"
+     },
+     {
+      "type": "STEERING_EVALUATED",
+      "at": 1790676702253,
+      "boundary": "plan_completed",
+      "mode": "maintain",
+      "hysteresis_applied": false
+     },
+     {
+      "type": "DRAFT_CREATED",
+      "at": 1790676896658,
+      "plan_id": "goal_0n9g864_1_p4"
+     },
+     {
+      "type": "DRAFT_CREATED",
+      "at": 1790676896688,
+      "plan_id": "goal_0n9g864_1_p4",
+      "in_place": true
+     },
+     {
+      "type": "PLAN_COMMITTED",
+      "at": 1790676896738,
+      "plan_id": "goal_0n9g864_1_p4"
+     },
+     {
+      "type": "STEP_COMPLETED",
+      "at": 1790676979786,
+      "plan_id": "goal_0n9g864_1_p4",
+      "step_id": "goal_0n9g864_1_p4_v1_s1_1dnryxm"
+     },
+     {
+      "type": "STRUCTURAL_BLOCKER_CONFIRMED",
+      "at": 1790677009948,
+      "plan_id": "goal_0n9g864_1_p4"
+     },
+     {
+      "type": "BLOCKED_CHOICE_RECORDED",
+      "at": 1790677504768,
+      "plan_id": "goal_0n9g864_1_p4",
+      "choice": "revise",
+      "approved_by": "<server>"
+     },
+     {
+      "type": "USER_REVISION_APPROVED",
+      "at": 1790677674506,
+      "plan_id": "goal_0n9g864_1_p5",
+      "derived_from_plan_id": "goal_0n9g864_1_p4",
+      "approved_by": "<server>"
+     },
+     {
+      "type": "DRAFT_CREATED",
+      "at": 1790677674522,
+      "plan_id": "goal_0n9g864_1_p5",
+      "in_place": true
+     },
+     {
+      "type": "PLAN_COMMITTED",
+      "at": 1790677674572,
+      "plan_id": "goal_0n9g864_1_p5"
+     },
+     {
+      "type": "STEP_COMPLETED",
+      "at": 1790677755335,
+      "plan_id": "goal_0n9g864_1_p5",
+      "step_id": "goal_0n9g864_1_p5_v2_s1_0x3sud3"
+     },
+     {
+      "type": "RUN_PAUSED",
+      "at": 1790678707901,
+      "reason_code": "provider_output_budget_exhausted"
+     },
+     {
+      "type": "RUN_RESUMED",
+      "at": 1790678887143,
+      "reason_code": "plan_recorded"
+     },
+     {
+      "type": "RUN_PAUSED",
+      "at": 1790679210146,
+      "reason_code": "user_stop"
+     }
+    ]
+   }
+  }
+ ]
+}

@@ -2532,6 +2532,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       this.memory.restore(parsed)
       this.turnSequence = Math.max(this.turnSequence, this.memory.maxTurnId?.() ?? 0)
       this.log(`[memory] restored durable NPC state from ${this.stateFile}`)
+      for (const item of this.memory.restoreDiagnostics ?? []) {
+        this.log(`[memory] plan progress disagrees with the task board after restore: ${JSON.stringify(item)}`)
+      }
     }
     catch (error) {
       if (error?.code === 'ENOENT') return
@@ -3261,6 +3264,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           evidence: [evidence],
           metadata: { scope: 'step' },
         })
+        if (reduced?.decision?.accepted !== true) {
+          // The reducer would not close the step (3.3 move 5), so the board did
+          // not move and the wait must not keep re-verifying it: hand the
+          // decision back to the planner instead.
+          const state = this.memory.clearConditionWait?.(key, identity.wait_id) ?? reduced?.state
+          await this.persistState()
+          await this.declineStepClose('condition_wait', reduced?.decision?.rejection_reason || 'outcome_authority_rejected_completion', {
+            wait_id: identity.wait_id,
+          })
+          return { action: 'wake', wait_id: identity.wait_id, reason: reduced?.decision?.rejection_reason || 'step_close_declined', state }
+        }
         await this.persistState()
         await this.traceEvent('runtime.condition_satisfied', {
           wait_id: identity.wait_id,
@@ -3869,6 +3883,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       metadata: { scope: 'step' },
     }, { steeringRecommendation })
     await this.persistState()
+    if (reduced?.progressDisagreement) await this.traceEvent('step.progress_disagreement', { trigger, ...reduced.progressDisagreement })
     if (reduced?.decision?.accepted !== true) {
       const declined = await this.declineStepClose(trigger, reduced?.decision?.rejection_reason || 'outcome_authority_rejected_completion', {
         active_step_id: step.id,
@@ -7604,8 +7619,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // [PLANNING_STATE]; the Task Board projection names the same step
     // step_N. Accept the tracker id only while both point at the same step.
     const trackerPlan = getActivePlanningPlan(this.memory.planningState?.(this.requestInfo.memoryKey))
-    const trackerStepId = trackerPlan?.active_step_index === activeIndex
-      ? trackerPlan?.steps?.[activeIndex]?.step_id
+    // A revised plan's board leads with its predecessor's verified steps, so
+    // the board index is mapped onto the tracker's step list, not compared
+    // with the tracker's own index.
+    const boardStepTrackerId = typeof this.memory.trackerStepIdForBoardIndex === 'function'
+      ? this.memory.trackerStepIdForBoardIndex(this.requestInfo.memoryKey, activeIndex)
+      : trackerPlan?.steps?.[activeIndex]?.step_id
+    const trackerStepId = boardStepTrackerId !== undefined
+      && trackerPlan?.steps?.[trackerPlan.active_step_index]?.step_id === boardStepTrackerId
+      ? boardStepTrackerId
       : undefined
     if (!step || (claim.stepId !== step.id && claim.stepId !== trackerStepId)) {
       const error = new AgentLoopError(
@@ -7683,6 +7705,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw error
     }
     await this.persistState()
+    if (reduced?.progressDisagreement) await this.traceEvent('step.progress_disagreement', { trigger: 'semantic_completion', ...reduced.progressDisagreement })
     await this.traceEvent('step.semantic_completed', {
       active_step_id: step.id,
       source: 'main_planner',

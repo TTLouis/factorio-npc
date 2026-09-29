@@ -1,5 +1,6 @@
 import { NpcDialogueMemory, OPERATION_FAILURE_RECOVERABLE_KIND } from './npc-agent-loop.mjs'
 import { createTaskBoard, reconcileTaskBoard, setTaskBoardStatus } from './common.mjs'
+import { validateOutcomeCandidate } from './outcome-authority.mjs'
 import { completionContractSupported, provePermanentlyUnsatisfiable, sanitizeStepCompletionContract } from './step-completion.mjs'
 import {
   applyPlanningEvent,
@@ -85,6 +86,75 @@ function revisionSuffix(previousBoard, incomingPlan) {
   const includesVerifiedPrefix = Array.from({ length: completed }, (_, index) =>
     clean(incoming[index]) === clean(previousBoard.steps?.[index]?.description)).every(Boolean)
   return includesVerifiedPrefix ? incoming.slice(completed) : incoming
+}
+
+// Two step lists describe the same slice when their normalized descriptions
+// match one for one. Long descriptions are compared on a bounded prefix so a
+// truncation on either side cannot split them.
+function stepKey(description) {
+  return clean(description).slice(0, 200)
+}
+
+function carriedPrefixLength(plan) {
+  return Array.isArray(plan?.carried_forward_evidence) ? plan.carried_forward_evidence.length : 0
+}
+
+/**
+ * How the legacy board and the reducer plan line up: the board index of the
+ * reducer plan's first step. A revised plan carries its verified predecessor
+ * steps on the board only (offset = carried prefix); every other plan starts
+ * at 0. `undefined` when the two do not describe the same steps.
+ */
+export function boardPlanAlignment(board, plan) {
+  if (!Array.isArray(board?.steps) || !Array.isArray(plan?.steps) || plan.steps.length === 0) return undefined
+  const aligned = offset => board.steps.length === offset + plan.steps.length
+    && plan.steps.every((step, index) => stepKey(step?.description) === stepKey(board.steps[offset + index]?.description))
+  const carried = carriedPrefixLength(plan)
+  if (carried > 0 && aligned(carried)) return carried
+  return aligned(0) ? 0 : undefined
+}
+
+/**
+ * The steps a reducer DRAFT is built from. The legacy board of a revised plan
+ * begins with the predecessor's verified steps; those live in the predecessor
+ * and in `carried_forward_evidence`, never in the successor's own step list.
+ * Copying the whole board into the draft gave the reducer a step the board had
+ * already completed, and every later close landed one step off (live run
+ * 2026-09-29, finding 7).
+ */
+function draftStepsFromBoard(board, draftPlan) {
+  const steps = Array.isArray(board?.steps) ? board.steps : []
+  const carried = carriedPrefixLength(draftPlan)
+  const prefixVerified = carried > 0
+    && steps.length > carried
+    && steps.slice(0, carried).every(step => step?.status === 'completed')
+  return (prefixVerified ? steps.slice(carried) : steps).map(step => ({
+    description: step.description,
+    completion_contract: safeDurableStepCompletionContract(step.completion_contract),
+  }))
+}
+
+// Real evidence the legacy board holds for a step it closed. Only kinds the
+// runtime itself recorded count: a checkpoint contract verified against the
+// world, or a fresh-observation semantic judgment with a runtime receipt bound
+// to the same step. Anything else is not proof.
+function legacyStepCloseProof(board, legacyStep, reducerStep) {
+  const forStep = (Array.isArray(board?.evidence) ? board.evidence : [])
+    .filter(item => item?.step_id === legacyStep?.id && typeof item.ref === 'string' && item.ref)
+  if (reducerStep?.completion_contract) {
+    const proof = forStep.find(item => item.kind === 'verified_world_state' && item.ref === `checkpoint/${legacyStep.id}`)
+    if (!proof) return undefined
+    let parsed
+    try { parsed = JSON.parse(proof.summary) }
+    catch { return undefined }
+    const satisfied = (Array.isArray(parsed?.results) ? parsed.results : [])
+      .filter(result => result?.satisfied === true && typeof result.id === 'string')
+      .map(result => result.id)
+    return satisfied.length > 0 ? { kind: 'contract', ref: proof.ref, satisfied } : undefined
+  }
+  const semantic = forStep.find(item => item.kind === 'verified_world_state' && item.ref.includes('/semantic_fresh_observation/'))
+  const receipted = forStep.some(item => item.kind === 'deterministic_verification' || item.kind === 'operation_receipt')
+  return semantic && receipted ? { kind: 'semantic', ref: semantic.ref } : undefined
 }
 
 function sameSemanticSteps(planSteps, incomingSteps) {
@@ -369,6 +439,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   constructor(options = {}) {
     super(options)
     this.planningByNpc = new Map()
+    // Board progress the reducer could not be brought up to on restore.
+    this.restoreDiagnostics = []
   }
 
   planningState(key) {
@@ -377,6 +449,20 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
 
   planningTrackerView(key) {
     return planTrackerView(this.planningState(key))
+  }
+
+  /**
+   * The Plan Tracker step id for a legacy board step index, or undefined when
+   * the board and the plan do not describe the same steps. A revised plan's
+   * board starts with its predecessor's verified steps, so the two indexes
+   * differ by the carried prefix.
+   */
+  trackerStepIdForBoardIndex(key, boardIndex) {
+    const plan = getActivePlan(this.planningState(key))
+    const state = key ? this.planByNpc.get(key) : undefined
+    if (!plan || !state?.task_board || !Number.isSafeInteger(boardIndex)) return undefined
+    const offset = boardPlanAlignment(state.task_board, plan)
+    return offset === undefined ? undefined : plan.steps[boardIndex - offset]?.step_id
   }
 
   /**
@@ -599,12 +685,20 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       const semanticPlan = suffixAligned
         ? boardBefore.steps.map(step => String(step?.description ?? '')).filter(Boolean)
         : reducerSteps
-      legacyState.task_board = reconcileTaskBoard(
+      const projected = reconcileTaskBoard(
         boardBefore,
         semanticPlan,
         authoritativeIndex,
         { now: planning.updated_at || legacyState.updated_at || Date.now(), authoritativeAdvance: true, allowReplan: false },
       )
+      // The projection only ever moves forward. A board that already shows
+      // more verified progress than the reducer (a snapshot written before the
+      // reducer caught up) is never regressed by a sync: restore converges the
+      // reducer up to it where the board holds real evidence, and traces the
+      // rest.
+      legacyState.task_board = (projected?.completed_count ?? 0) < (boardBefore.completed_count ?? 0)
+        ? boardBefore
+        : projected
       // The reducer owns verified progress, not planner focus. On an unchanged
       // semantic plan, preserve the provider's advisory focus exactly.
       if (sameSemanticPlan && Number.isSafeInteger(proposedFocusIndex)) {
@@ -857,10 +951,9 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         origin: migrated ? 'legacy_task_board_migration' : 'live_task_board',
         roadmap_node_ids: linkedNodeIds,
         ...(developmentMode ? { development_mode: developmentMode } : {}),
-        steps: state.task_board.steps.map(step => ({
-          description: step.description,
-          completion_contract: safeDurableStepCompletionContract(step.completion_contract),
-        })),
+        // A replaced draft keeps its lineage (including a carried verified
+        // prefix), so its steps exclude what the predecessor already holds.
+        steps: draftStepsFromBoard(state.task_board, replaceableDraft ? draftBefore : undefined),
       })
     }
     this.planningByNpc.set(key, planning)
@@ -992,10 +1085,9 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         origin: 'checkpoint_contract_refresh',
         roadmap_node_ids: [...(active.roadmap_node_ids ?? [])],
         development_mode: active.development_mode,
-        steps: state.task_board.steps.map(step => ({
-          description: step.description,
-          completion_contract: safeDurableStepCompletionContract(step.completion_contract),
-        })),
+        // The draft keeps its lineage. On a revised plan the board leads with
+        // the predecessor's verified steps, which are not this plan's steps.
+        steps: draftStepsFromBoard(state.task_board, active),
       })
       this.planningByNpc.set(key, refreshed)
       this.syncPlanningState(key, state)
@@ -1413,11 +1505,125 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return key ? this.planningByNpc.get(key)?.goal?.definition : undefined
   }
 
+  /**
+   * The reducer events that close the plan's active step for this outcome.
+   * `main_planner` semantic claims are only ever a semantic claim; every other
+   * completed outcome is runtime evidence followed by the runtime closing it.
+   */
+  #stepCloseEvents({ plan, step, candidate, decision, now }) {
+    const evidence = Array.isArray(candidate?.evidence) ? candidate.evidence : []
+    const ref = evidence.find(item => typeof item?.ref === 'string' && item.ref)?.ref
+      ?? `outcome/${plan.plan_id}/${step.step_id}/${now}`
+    if (decision.kind === 'semantic_complete') {
+      return [{
+        type: PLANNING_EVENT.STEP_COMPLETED,
+        now,
+        source: 'main_planner',
+        semantic_claim: true,
+        grounding_refs: Array.isArray(candidate?.metadata?.grounding_refs)
+          ? candidate.metadata.grounding_refs
+          : [ref],
+        plan_id: plan.plan_id,
+        step_id: step.step_id,
+      }]
+    }
+    return [
+      {
+        type: PLANNING_EVENT.STEP_EVIDENCE_ACCEPTED,
+        now,
+        plan_id: plan.plan_id,
+        step_id: step.step_id,
+        evidence: {
+          source: 'runtime',
+          kind: 'outcome_authority',
+          ref,
+          contract_satisfied: true,
+        },
+      },
+      {
+        type: PLANNING_EVENT.STEP_COMPLETED,
+        now,
+        source: 'runtime',
+        plan_id: plan.plan_id,
+        step_id: step.step_id,
+      },
+    ]
+  }
+
+  /**
+   * Step close is decided in the REDUCER first (3.3 move 5 / 3.8).
+   *
+   * Before the legacy board is touched, a step-scope completion is run through
+   * the reducer's own STEP_EVIDENCE_ACCEPTED / STEP_COMPLETED rules against the
+   * step the reducer holds active. If the reducer will not close it the
+   * outcome is refused and the board does not move, so the two can no longer
+   * disagree about a close. Only after the reducer agrees does the legacy base
+   * record the evidence, and the board is then re-projected from the reducer.
+   *
+   * The board and the plan must describe the same active step: the reducer
+   * checks evidence against ITS step, so closing on evidence gathered for a
+   * different one (a board that drifted from the plan) is exactly the bug that
+   * lost progress on a revised plan. Such a drift is traced and, because the
+   * reducer cannot vouch for it, left to the legacy path; restore converges it.
+   *
+   * Returns `{ refused }` to stop, `{ events, disagreement }` otherwise, or
+   * undefined when this is not a step close the reducer governs.
+   */
+  #decideStepClose(key, candidate, options) {
+    if (!key || candidate?.metadata?.scope !== 'step') return undefined
+    const decision = validateOutcomeCandidate(candidate, { world: options?.world ?? {} })
+    if (!decision.accepted || decision.durable_status !== 'completed') return undefined
+    const state = this.planByNpc.get(key)
+    const planning = this.planningByNpc.get(key)
+    const plan = getActivePlan(planning)
+    if (!state || !plan) return undefined
+    const refuse = reason => ({
+      refused: {
+        state,
+        decision: { ...decision, accepted: false, rejection_reason: reason },
+        changed: false,
+      },
+    })
+    // A blocked plan is frozen until the user revises it; no outcome unfreezes it.
+    if (plan.status === PLAN_STATUS.BLOCKED) return refuse('plan_blocked')
+    if (![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan.status)) return undefined
+
+    const board = state.task_board
+    const offset = boardPlanAlignment(board, plan)
+    const boardActive = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
+    if (offset === undefined || boardActive === undefined) {
+      return { events: [], disagreement: { code: 'board_plan_unaligned', plan_id: plan.plan_id } }
+    }
+    const reducerIndex = boardActive - offset
+    if (reducerIndex !== plan.active_step_index) {
+      return {
+        events: [],
+        disagreement: {
+          code: reducerIndex < plan.active_step_index ? 'board_behind_plan' : 'plan_behind_board',
+          plan_id: plan.plan_id,
+          board_step_id: board.active_step_id,
+          plan_step_id: plan.steps[plan.active_step_index]?.step_id,
+        },
+      }
+    }
+
+    const step = plan.steps[plan.active_step_index]
+    const now = state.updated_at ?? Date.now()
+    const events = this.#stepCloseEvents({ plan, step, candidate, decision, now })
+    let simulated = planning
+    for (const event of events) simulated = applyPlanningEvent(simulated, event)
+    const closed = getActivePlan(simulated)?.execution?.step_progress?.[step.step_id]?.status === 'completed'
+    return closed ? { events } : refuse('reducer_declined_step_close')
+  }
+
   applyOutcomeAuthority(key, candidate, options = {}) {
     const beforeLegacy = key ? this.planByNpc.get(key) : undefined
     if (beforeLegacy) this.ensurePlanningDraft(key, beforeLegacy, { now: beforeLegacy.updated_at })
+    const stepClose = this.#decideStepClose(key, candidate, options)
+    if (stepClose?.refused) return stepClose.refused
     const result = super.applyOutcomeAuthority(key, candidate, options)
     if (!result?.decision?.accepted || !result?.state) return result
+    const progressDisagreement = stepClose?.disagreement
 
     let planning = this.planningByNpc.get(key)
     let plan = getActivePlan(planning)
@@ -1478,42 +1684,14 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       const step = plan?.steps?.[plan.active_step_index]
       if (step) {
         const evidence = Array.isArray(candidate?.evidence) ? candidate.evidence : []
-        const ref = evidence.find(item => typeof item?.ref === 'string' && item.ref)?.ref
-          ?? `outcome/${plan.plan_id}/${step.step_id}/${now}`
-        if (result.decision.kind === 'semantic_complete') {
-          planning = applyPlanningEvent(planning, {
-            type: PLANNING_EVENT.STEP_COMPLETED,
-            now,
-            source: 'main_planner',
-            semantic_claim: true,
-            grounding_refs: Array.isArray(candidate?.metadata?.grounding_refs)
-              ? candidate.metadata.grounding_refs
-              : [ref],
-            plan_id: plan.plan_id,
-            step_id: step.step_id,
-          })
-        }
-        else {
-          planning = applyPlanningEvent(planning, {
-            type: PLANNING_EVENT.STEP_EVIDENCE_ACCEPTED,
-            now,
-            plan_id: plan.plan_id,
-            step_id: step.step_id,
-            evidence: {
-              source: 'runtime',
-              kind: 'outcome_authority',
-              ref,
-              contract_satisfied: true,
-            },
-          })
-          planning = applyPlanningEvent(planning, {
-            type: PLANNING_EVENT.STEP_COMPLETED,
-            now,
-            source: 'runtime',
-            plan_id: plan.plan_id,
-            step_id: step.step_id,
-          })
-        }
+        // A step-scope close was already decided against the reducer before the
+        // board moved (`#decideStepClose`); replay exactly those events. Any
+        // other completion (a whole-goal verdict) still closes the active step
+        // the reducer holds, as before.
+        const closeEvents = stepClose
+          ? stepClose.events
+          : this.#stepCloseEvents({ plan, step, candidate, decision: result.decision, now })
+        for (const event of closeEvents) planning = applyPlanningEvent(planning, event)
         if (result.state.status === 'completed') {
           planning = applyPlanningEvent(planning, {
             type: PLANNING_EVENT.PLAN_COMPLETED,
@@ -1560,7 +1738,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
 
     this.planningByNpc.set(key, planning)
     this.syncPlanningState(key, result.state)
-    return { ...result, state: result.state }
+    return { ...result, state: result.state, ...(progressDisagreement ? { progressDisagreement } : {}) }
   }
 
   snapshot() {
@@ -1572,6 +1750,84 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         state: serializePlanningState(state),
       })),
     }
+  }
+
+  /**
+   * Catch the reducer up to steps the legacy board closed. Older runs closed
+   * steps on the board that the reducer never recorded (a revised plan's step
+   * ids never lined up), so a restart showed the reducer's smaller progress and
+   * the NPC would redo finished work.
+   *
+   * Forward only, and only on real evidence: each step the board completed is
+   * replayed into the reducer as its own STEP_EVIDENCE_ACCEPTED /
+   * STEP_COMPLETED, using the board's recorded deterministic checkpoint
+   * verification (or a fresh-observation semantic claim backed by a runtime
+   * receipt for the same step). The reducer applies its normal rules, so a
+   * proof its contract does not accept stops the replay. Whatever cannot be
+   * proven is left as it is and recorded in `restoreDiagnostics`; the board is
+   * not regressed to match.
+   */
+  #convergeReducerToBoardEvidence(key, state) {
+    const board = state?.task_board
+    let planning = this.planningByNpc.get(key)
+    const first = getActivePlan(planning)
+    if (!first || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(first.status)) return
+    const offset = boardPlanAlignment(board, first)
+    if (offset === undefined) {
+      if ((board?.completed_count ?? 0) > 0) this.restoreDiagnostics.push({ key, code: 'board_plan_unaligned', plan_id: first.plan_id })
+      return
+    }
+    for (;;) {
+      const plan = getActivePlan(planning)
+      const step = plan?.steps?.[plan.active_step_index]
+      if (!step || plan.execution.step_progress[step.step_id]?.status === 'completed') break
+      const boardStep = board.steps[offset + plan.active_step_index]
+      if (boardStep?.status !== 'completed') break
+      const proof = legacyStepCloseProof(board, boardStep, step)
+      const now = state.updated_at ?? Date.now()
+      const events = proof?.kind === 'contract'
+        ? [
+            {
+              type: PLANNING_EVENT.STEP_EVIDENCE_ACCEPTED,
+              now,
+              plan_id: plan.plan_id,
+              step_id: step.step_id,
+              evidence: {
+                source: 'runtime_receipt',
+                kind: 'legacy_board_verified_evidence',
+                ref: proof.ref,
+                satisfied_requirement_ids: proof.satisfied,
+              },
+            },
+            { type: PLANNING_EVENT.STEP_COMPLETED, now, source: 'runtime', plan_id: plan.plan_id, step_id: step.step_id },
+          ]
+        : proof?.kind === 'semantic'
+          ? [{
+              type: PLANNING_EVENT.STEP_COMPLETED,
+              now,
+              source: 'main_planner',
+              semantic_claim: true,
+              grounding_refs: [proof.ref],
+              plan_id: plan.plan_id,
+              step_id: step.step_id,
+            }]
+          : []
+      let next = planning
+      for (const event of events) next = applyPlanningEvent(next, event)
+      const closed = getActivePlan(next)?.execution?.step_progress?.[step.step_id]?.status === 'completed'
+      if (!closed) {
+        this.restoreDiagnostics.push({
+          key,
+          code: 'board_completed_step_unverified',
+          plan_id: plan.plan_id,
+          plan_step_id: step.step_id,
+          board_step_id: boardStep.id,
+        })
+        break
+      }
+      planning = next
+    }
+    this.planningByNpc.set(key, planning)
   }
 
   restore(snapshot) {
@@ -1622,8 +1878,13 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
 
     // Upgrade legacy snapshots in place. Active/blocked state in Task Board Lite
     // represents already-admitted work, so migration may commit it immediately.
+    this.restoreDiagnostics = []
     for (const [key, state] of this.planByNpc.entries()) {
       let planning = this.planningByNpc.get(key)
+      // A reducer state that came with the snapshot may lag the board (a run
+      // that closed steps only on the board). Bring the reducer up to what the
+      // board can prove; never the other way round.
+      if (planning) this.#convergeReducerToBoardEvidence(key, state)
       if (!planning) {
         planning = this.ensurePlanningDraft(key, state, { now: state.updated_at, migrated: true })
         // Not a fresh admission: this plan was admitted by a previous run and
