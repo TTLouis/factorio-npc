@@ -224,7 +224,7 @@ For the active Plan Tracker step, you may add one optional root field named chec
 
 For a prose-only active step that intentionally has no deterministic checkpoint, you may explicitly close that semantic step with semanticCompletion: {"stepId":"<exact active step id>","rationale":"..."}. Use the stable active step id from [PLANNING_STATE]. The harness accepts this only when the id is still current, the step has no deterministic completion contract, and recent authoritative runtime evidence or a fresh live observation grounds your judgment. Never use semanticCompletion to bypass an unmet deterministic checkpoint. You may pair a valid semanticCompletion with operations for the newly-active next step; the harness advances the semantic step first, then validates those operations normally. Keeping the same plan and moving currentStep exactly one step forward with operations for that next step is read as the same claim for the active step, under the same checks.
 
-Write chatMessage and plan steps in the language of the player's message.
+Write chatMessage and plan steps in the language of the player's most recent chat message (default English). Harness messages, tool results, memory and skill text do not change the reply language.
 
 Plan entries must represent goal-bearing Factorio work or verification. Do not add terminal lifecycle/meta steps such as "Stop", "Done", "Finish", or "Report completion"; stopping after the verified goal is represented by returning plan: [], currentStep: 0, operations: [].
 
@@ -2088,8 +2088,13 @@ function blockedPlanReply(plan) {
 function planProgress(plan, stateResult) {
   const progress = taskBoardProgress(stateResult?.state?.task_board)
   if (stateResult?.blockedByHarness || stateResult?.state?.status === 'blocked') {
-    const blocker = stateResult?.state?.blocker ? ` (${cleanMemoryText(stateResult.state.blocker, 200)})` : ''
-    return `[Plan blocked] ${progress?.step || 'Remaining work'}${blocker}: no Autorio operation was submitted. Tell me how to revise the plan, or cancel it.`
+    const modelLine = cleanMemoryText(plan?.chatMessage, 600)
+    // The model already told the player: keep its words, tagged, and add no
+    // second explanation. Only an empty reply gets the harness explanation.
+    if (modelLine) return `[Plan blocked] ${modelLine}`
+    const reason = cleanMemoryText(stateResult?.state?.blocker, 200).replace(/[_:]+/g, ' ').trim()
+    const because = reason ? ` because of: ${reason}` : ''
+    return `[Plan blocked] ${progress?.step || 'Remaining work'} cannot continue${because}. Nothing was started, and continuing unchanged would hit the same blocker. Choose Revise or Cancel in the Task Board, or say in chat what to change (for example a different route or target).`
   }
   if (stateResult?.persistentRuntimeActive) return plan.chatMessage
   if (plan.operations.length > 0 && progress?.total > 0) {
@@ -8172,7 +8177,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         task_board: visibleTaskBoard(stateResult?.state?.task_board),
       })
       await this.traceEvent('request.completed', {
-        chat_message: plan.chatMessage,
+        chat_message: planProgress(plan, stateResult),
         outcome: 'blocked_no_operation',
         task_board: visibleTaskBoard(stateResult?.state?.task_board),
         usage: this.traceRequest?.usage,
@@ -8351,7 +8356,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         })
         this.active = false
         await this.traceEvent('request.completed', {
-          chat_message: plan.chatMessage,
+          chat_message: planProgress(plan, stateResult),
           outcome: 'blocked_preflight',
           task_board: visibleTaskBoard(stateResult?.state?.task_board),
           usage: this.traceRequest?.usage,
@@ -8426,7 +8431,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             ? 'persistent_runtime_active'
             : 'no_operations'
       await this.traceEvent('request.completed', {
-        chat_message: plan.chatMessage,
+        chat_message: stateResult?.blockedByHarness ? planProgress(plan, stateResult) : plan.chatMessage,
         outcome,
         persistent_runtime: persistentRuntime,
         condition_wait: conditionWait,

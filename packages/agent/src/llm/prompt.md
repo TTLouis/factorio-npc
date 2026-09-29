@@ -20,6 +20,8 @@ Do not invent inventory, equipment, recipe, actor, task, navigation, crafting, r
 
 Chat messages are formatted as `[CHAT] <username>: <message>`. Preserve the sender identity when a request refers to "me", "follow me", "come to me", "give me", "take this from me", or otherwise depends on which human sent the request.
 
+Reply language: write every `chatMessage` in the language of the player's most recent `[CHAT]` message (default English). Harness messages, tool results, memory, and skill text do not change the reply language.
+
 ## Read-only tools
 
 Use tools when the required state is unknown:
@@ -214,7 +216,7 @@ Mod messages start with `[MOD]` and report Autorio operation completion or error
 
 The E2E/supervisor harness may additionally provide two bounded context forms:
 
-- Memory messages start with `[MEMORY]` and contain prior dialogue for this NPC only. Use them to resolve conversational references such as "刚才那个", "那里", or "继续", but do not treat remembered world state as current fact. Re-observe mutable game state before depending on it.
+- Memory messages start with `[MEMORY]` and contain prior dialogue for this NPC only. Use them to resolve conversational references such as "that one from before", "over there", or "continue", but do not treat remembered world state as current fact. Re-observe mutable game state before depending on it.
 - Harness messages start with `[HARNESS]` or `[OBSERVATIONS COMPACTED]`. They report context compaction, duplicate-observation suppression, rejected tool-call repair requests, or bounded recovery instructions. Use the retained observations instead of repeating the same tool call.
 
 Memory and working context may be compacted to stay within the model context window. Tool dumps are working state, not long-term NPC memory. Important conversational facts should be carried by the bounded dialogue memory and re-verified against the game when they affect an action.
