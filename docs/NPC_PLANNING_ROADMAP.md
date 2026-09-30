@@ -1,4 +1,4 @@
-# AIRI Factorio — Planning Architecture Roadmap
+# SGLuna Factorio — Planning Architecture Roadmap
 
 Status: **canonical planning direction**
 Branch of origin: `experiment/jev-agent-architecture`
@@ -18,7 +18,7 @@ Once a plan enters `COMMITTED` / `EXECUTING`, its semantic steps, ordering, and 
 
 Normal execution, local recovery, new observations, planner preference, Jev output, or a later model turn must not rewrite the active plan.
 
-If execution reaches a **real structural blocker**, the current plan becomes `BLOCKED`; it still does not mutate. AIRI must surface the blocker to the user and ask what to do.
+If execution reaches a **real structural blocker**, the current plan becomes `BLOCKED`; it still does not mutate. SGLuna must surface the blocker to the user and ask what to do.
 
 If the user approves a change, create a **new plan version**:
 
@@ -967,7 +967,7 @@ For typed operation projection:
 - every other operation currently has `automatic_projection=false` and
   `calibration_status=pending_phase9_e2e`;
 - moderate/high/combat operations therefore wake the Main LLM even at confidence 1.0
-  until Phase 9 supplies real AIRI E2E evidence;
+  until Phase 9 supplies real SGLuna E2E evidence;
 - confidence never bypasses normal parse/preflight/freshness validation.
 
 For routing and observation:

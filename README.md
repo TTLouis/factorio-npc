@@ -80,7 +80,7 @@ Two PTDL_v2 eggs keep stable deployments separate from active E2E work:
 | [`deploy/pterodactyl/egg-sgluna-factorio-server.json`](./deploy/pterodactyl/egg-sgluna-factorio-server.json) | `main` | Stable/main deployment |
 | [`deploy/pterodactyl/egg-sgluna-factorio-npc-e2e.json`](./deploy/pterodactyl/egg-sgluna-factorio-npc-e2e.json) | `feat/npc-transition-work` | Active NPC/E2E testing |
 
-Fresh deployments use **SGLuna** end to end: `SGLUNA_*` deployment variables, `sgluna-config.json`, `start-sgluna.sh`, `rollback-sgluna.sh`, and `!luna`. Legacy `AIRI_*` variables, `airi-config.json`, `start-airi.sh`, `rollback-sgluna.sh`, and `!airi` remain compatibility aliases. The internal `.airi/` state directory plus actor/protocol/save identifiers remain intentionally unchanged.
+Fresh deployments use **SGLuna** end to end: `SGLUNA_*` deployment variables, `sgluna-config.json`, `start-sgluna.sh`, `rollback-sgluna.sh`, and `!luna`. Legacy `AIRI_*` variables, `airi-config.json`, `start-airi.sh`, `rollback-airi.sh`, and `!airi` remain compatibility aliases for settings and input only. The internal `.sgluna/` state directory, actor id, protocol markers, and save keys all use SGLuna naming, with no migration from the former names (worlds are disposable test worlds).
 
 **Restart does not update application code.** A normal server restart keeps the already installed managed release.
 

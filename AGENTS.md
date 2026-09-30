@@ -4,9 +4,9 @@ These repository notes are for coding agents working on this fork. They describe
 
 ## Project direction
 
-AIRI is an autonomous in-world Factorio NPC. The core runtime must not depend on owning or impersonating a connected human player.
+SGLuna is an autonomous in-world Factorio NPC. The core runtime must not depend on owning or impersonating a connected human player.
 
-The intended actor is a real standalone Factorio `character` controlled through bounded mod/runtime APIs. Human players are requesters and observers, not AIRI's body.
+The intended actor is a real standalone Factorio `character` controlled through bounded mod/runtime APIs. Human players are requesters and observers, not SGLuna's body.
 
 ## Architecture invariants
 

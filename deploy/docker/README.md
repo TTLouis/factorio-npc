@@ -79,7 +79,7 @@ Stable local builds default to:
 SGLUNA_SOURCE_REF=main
 ```
 
-The Docker build resolves that ref to an exact SHA and bakes that exact AIRI runtime into the image. Restarting the container does not update code. Rebuilding resolves the configured ref again.
+The Docker build resolves that ref to an exact SHA and bakes that exact SGLuna runtime into the image. Restarting the container does not update code. Rebuilding resolves the configured ref again.
 
 To test ongoing NPC development instead, set `SGLUNA_SOURCE_REF=feat/npc-transition-work` explicitly. An exact 40-character commit SHA can be used for fully reproducible builds.
 
@@ -99,7 +99,7 @@ Changing `FACTORIO_VERSION` requires rebuilding the image. A published release i
 
 ## Shutdown
 
-`docker stop` sends `SIGTERM` to the SGLuna supervisor. The supervisor shutdown path cancels AIRI work, saves Factorio, and stops the child process. Compose gives it a 90-second grace period by default.
+`docker stop` sends `SIGTERM` to the SGLuna supervisor. The supervisor shutdown path cancels SGLuna work, saves Factorio, and stops the child process. Compose gives it a 90-second grace period by default.
 
 ## Notes
 

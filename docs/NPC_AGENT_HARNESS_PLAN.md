@@ -1,4 +1,4 @@
-# AIRI Factorio — NPC Agent Harness Roadmap
+# SGLuna Factorio — NPC Agent Harness Roadmap
 
 This is the current single-NPC roadmap. Historical pass-by-pass plans are retained under `docs/validation/` and should not be treated as current release gates.
 
@@ -38,7 +38,7 @@ Promote a **validated standalone-NPC baseline** to `main` without claiming that 
 
 A promotion checkpoint must preserve these baseline properties:
 
-- AIRI owns a standalone Factorio `character`, not a connected human body;
+- SGLuna owns a standalone Factorio `character`, not a connected human body;
 - zero-player simulation and NPC operation remain supported;
 - model mutations use bounded structured operations;
 - real inventory/crafting/mining/research/combat/navigation semantics remain engine-backed;

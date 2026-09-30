@@ -1,10 +1,10 @@
-# AIRI Factorio — Production Capability Validation Roadmap
+# SGLuna Factorio — Production Capability Validation Roadmap
 
 Status: **canonical production E2E validation direction**
 Branch of origin: `experiment/jev-agent-architecture`
 Adopted: 2026-09-19
 
-This document defines how AIRI production-building capability is staged, tested, promoted, and diagnosed.
+This document defines how SGLuna production-building capability is staged, tested, promoted, and diagnosed.
 
 It is intentionally separate from:
 
@@ -70,7 +70,7 @@ Do not skip A1 merely because a similar production pattern once worked.
 
 The production-validation harness must not become a hidden factory designer.
 
-For provider-driven design tests, AIRI / the Main LLM owns the **spatial production design**. The deterministic side may provide grounded engineering facts and bounded constraints such as:
+For provider-driven design tests, SGLuna / the Main LLM owns the **spatial production design**. The deterministic side may provide grounded engineering facts and bounded constraints such as:
 
 - recipe inputs/outputs and machine compatibility;
 - required machine counts and target rates;
@@ -106,7 +106,7 @@ The Main LLM remains responsible for choices such as:
 - spacing and expansion room;
 - how the selected topology is realized geometrically.
 
-Do **not** provide a library of known-good production blueprints, internet-derived layouts, hidden canonical factory designs, or deterministic layout generators to A2/A3 and then claim that AIRI designed the factory.
+Do **not** provide a library of known-good production blueprints, internet-derived layouts, hidden canonical factory designs, or deterministic layout generators to A2/A3 and then claim that SGLuna designed the factory.
 
 The intended relationship is:
 
@@ -136,7 +136,7 @@ That A1 layout must remain **test-only and hidden from the model**. It must not 
 
 Therefore:
 
-> **The harness may validate factory designs and provide grounded engineering constraints, but model-facing spatial production designs are authored by the LLM. Test-only exact layouts may validate harness mechanics, but they are never production solutions supplied to AIRI.**
+> **The harness may validate factory designs and provide grounded engineering constraints, but model-facing spatial production designs are authored by the LLM. Test-only exact layouts may validate harness mechanics, but they are never production solutions supplied to SGLuna.**
 
 
 ## 3. Production lifecycle states
@@ -315,7 +315,7 @@ Give a bounded target rate rather than an exact layout:
 "Produce automation science at X/s."
 ```
 
-AIRI may use deterministic production solving and bounded topology candidates, then choose the layout.
+SGLuna may use deterministic production solving and bounded topology candidates, then choose the layout.
 
 ### B7 — natural-language autonomous production
 
@@ -341,7 +341,7 @@ Do not bundle fluid behavior into B1-B4.
 
 Fluid geometry, connection semantics, network identity, and flow are different enough to deserve independent gates.
 
-The current code can expose bounded Factorio-native prototype fluidbox / pipe-connection geometry. That does **not** prove that AIRI can build a connected live network.
+The current code can expose bounded Factorio-native prototype fluidbox / pipe-connection geometry. That does **not** prove that SGLuna can build a connected live network.
 
 ### C0 — prototype geometry contract
 
@@ -499,7 +499,7 @@ It should not automatically choose the strategic repair when several valid desig
 
 ## 8. Failure-injection regression track
 
-Once a scenario passes, deliberately break one thing at a time and verify that AIRI/runtime localizes the defect.
+Once a scenario passes, deliberately break one thing at a time and verify that SGLuna/runtime localizes the defect.
 
 Examples:
 
@@ -552,7 +552,7 @@ Each fixture should define:
 
 Avoid test-only mechanics that bypass real production behavior. Fixtures may control initial conditions, but construction, transport, crafting, power, fluids, and verification must use real game semantics.
 
-Fixtures may contain exact test-only coordinates for A1 harness verification. Those coordinates are not reusable AIRI blueprints and must not be exposed as candidate designs during A2/A3.
+Fixtures may contain exact test-only coordinates for A1 harness verification. Those coordinates are not reusable SGLuna blueprints and must not be exposed as candidate designs during A2/A3.
 
 ## 10. Evidence required for a production E2E claim
 
@@ -685,4 +685,4 @@ The production-validation strategy is:
 
 > Convert each real failure into a deterministic regression before increasing autonomy or complexity.
 
-> Leave SPM/megabase-style optimization for the later maturity phase, after AIRI has proven it can physically build and verify ordinary production systems.
+> Leave SPM/megabase-style optimization for the later maturity phase, after SGLuna has proven it can physically build and verify ordinary production systems.

@@ -1,4 +1,4 @@
-# AIRI runtime observability
+# SGLuna runtime observability
 
 This document describes the public, structured diagnostics used to debug the standalone Factorio NPC runtime. It intentionally excludes hidden chain-of-thought, credentials, authorization headers, API keys, and other secrets.
 
@@ -11,7 +11,7 @@ The runtime writes two rotating JSONL traces under `logs/` by default:
 
 Both writers sanitize common credentials before writing. Provider reasoning text is not persisted; only bounded metadata such as `reasoning_content_chars` is recorded.
 
-The in-game AIRI Debug window is a bounded projection of the current/latest live diagnostics. It is not the canonical trace store.
+The in-game SGLuna Debug window is a bounded projection of the current/latest live diagnostics. It is not the canonical trace store.
 
 ## Correlation
 
@@ -96,7 +96,7 @@ If a report shows all of the following:
 
 then the evidence points to the provider exhausting output budget before emitting visible structured content. Chinese text itself is not invalid JSON. Treat language as a possible verbosity/budget amplifier only if controlled A/B runs support that conclusion.
 
-If `content_replacement_chars > 0`, investigate UTF-8 decoding or byte-based slicing. If content is non-empty with `structured_content.json_valid=false`, inspect the bounded final content preview for malformed/truncated JSON. If JSON is valid but `plan_valid=false`, investigate the AIRI structured-response schema instead.
+If `content_replacement_chars > 0`, investigate UTF-8 decoding or byte-based slicing. If content is non-empty with `structured_content.json_valid=false`, inspect the bounded final content preview for malformed/truncated JSON. If JSON is valid but `plan_valid=false`, investigate the SGLuna structured-response schema instead.
 
 ## Current implementation checkpoint
 

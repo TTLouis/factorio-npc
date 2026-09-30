@@ -10,7 +10,7 @@ The goal is to preserve useful Git history and MIT attribution while removing to
 - Preserve upstream MIT attribution and explicitly document the original AIRI/`autorio` lineage.
 - Keep cleanup isolated from NPC behavior changes.
 - Prove old components unused before deleting them.
-- Do not bulk-rename established deployment protocol identifiers such as `AIRI_*` until compatibility aliases/tests exist.
+- Internal protocol, save, and runtime identifiers were renamed to SGLuna naming on 2026-09-29 with no aliases and no save migration (worlds are disposable test worlds). AIRI names remain accepted only as settings and input aliases, listed in the inventory below.
 - Factorio simulation state and deterministic helpers are authoritative; vision is optional research infrastructure, not a core runtime dependency.
 - Treat the current learning/skill stack as project-owned NPC functionality unless a future audit proves a specific piece is obsolete.
 
@@ -75,11 +75,11 @@ These names are compatibility surface and should be migrated separately with ali
 | Category | Remaining / migrated AIRI surfaces | Decision |
 | --- | --- | --- |
 | Safe to migrate now | Pterodactyl variables/labels, config filename, startup/rollback helpers, `!luna`, trace defaults, Docker/Compose examples, console/debug branding | Canonical SGLuna names are now used. |
-| Compatibility aliases | `AIRI_SOURCE_REF`, `AIRI_ACTOR_MODE`, `AIRI_CHAT_PLAYERS`, older chat-player aliases, `airi-config.json`, `start-airi.sh`, `rollback-airi.sh`, `!airi`, legacy trace env/file inputs, Docker AIRI build args | Accepted temporarily; equivalent SGLuna values win on conflict. |
-| Protocol/save/runtime identity | actor name/id `AIRI`/`airi`, `npc:airi`, `airi_deployment`, `AIRI_RESULT_*`, `AIRI_CONFIG_*`, `AIRI_UI_*`, `.airi/`, Factorio `storage.airi_*`, GUI/sprite/prototype ids, Autorio id/interfaces, TSTL package namespace | Intentionally unchanged because they can affect saves, durable task state, protocol contracts, or lockfile/build identity. |
+| Compatibility aliases (settings and input only) | `AIRI_SOURCE_REF`, `AIRI_ACTOR_MODE`, `AIRI_CHAT_PLAYERS`, older chat-player aliases, `airi-config.json`, `start-airi.sh`, `rollback-airi.sh`, `!airi`, legacy trace env/file inputs, Docker AIRI build args | Accepted; equivalent SGLuna values win on conflict. |
+| Protocol/save/runtime identity | actor name/id `SGLuna`/`sgluna`, `npc:sgluna`, `sgluna_deployment`, `SGLUNA_RESULT_*`, `SGLUNA_CONFIG_*`, `SGLUNA_UI_*`, `.sgluna/`, Factorio `storage.sgluna_*`, GUI/sprite/prototype ids, all user-facing and model-facing strings | **Migrated 2026-09-29** with no aliases and no save migration. Still unchanged: the Autorio mod id and `autorio_*` interfaces (upstream naming), the `-airi/*` TSTL plugin namespace, and our own workspace package names and lockfile (build identity). |
 | Historical/upstream attribution | `moeru-ai/airi-factorio`, original Autorio/AIRI lineage, dated validation records and historical repo notes | Must remain for provenance and MIT attribution. |
 
-The internal `.airi/` directory remains authoritative for managed releases, operation locking, provider budget, durable NPC state, rollback metadata, and runtime temp directories. Renaming it in this pass would require a broader transactional state migration and is intentionally deferred.
+The internal `.sgluna/` directory is authoritative for managed releases, operation locking, provider budget, durable NPC state, rollback metadata, and runtime temp directories. It replaced `.airi/` on 2026-09-29; nothing reads or migrates the old directory, so a deployment that still has `.airi/` starts from a fresh state store.
 
 ## Phase 4 — Repository detach
 
@@ -120,6 +120,14 @@ pnpm test:npc
 Heavy Factorio/Pterodactyl smoke remains authoritative for runtime packaging behavior.
 
 ## Decision log
+
+### 2026-09-29
+
+- Owner decision: there is no deployment and every world is a disposable test world, so the AIRI to SGLuna rename covers internal identifiers too, with no save migration and no aliases for internal ids.
+- Renamed: actor name/id (`SGLuna`/`sgluna`), `npc:sgluna` memory keys, the `sgluna_deployment` remote interface and guard, `SGLUNA_RESULT_*`/`SGLUNA_CONFIG_*`/`SGLUNA_UI_*` protocol markers (mod and runtime together), Factorio `storage.sgluna_*` keys, GUI element names, sprite/prototype ids, the `.sgluna/` runtime state directory, temp/cache paths, and every user-facing and model-facing string. The LIVE/PAUSED activity-feed state is now `live` (previously `follow`); the FOLLOW button that makes the NPC follow the player is unrelated and unchanged.
+- Kept as compatibility aliases for settings and input only: the `AIRI_*` deployment and trace environment variables, `airi-config.json`, `start-airi.sh` / `rollback-airi.sh`, the `!airi` chat command, and the Docker AIRI build args.
+- Kept as attribution/lineage: `moeru-ai/airi-factorio`, the original Autorio/AIRI lineage, dated validation records, third-party `@proj-airi/*` packages.
+- Deferred (build identity): our own workspace package names and `pnpm-lock.yaml`; the TSTL plugin namespace; the `autorio` mod id and `autorio_*` interfaces.
 
 ### 2026-09-17
 

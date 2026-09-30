@@ -10,7 +10,7 @@ The remaining work here is deployment integration: replacing the old v7 connecte
 
 - `npc-session.mjs` — deployment configuration, NPC readiness validation, chat-authorization separation and actor epoch helpers.
 - `npc-session.test.mjs` — zero-player, multi-human, replacement-body and load-reconciliation unit cases.
-- `guard.ts` — Factorio-side `airi_deployment` v8 guard. It captures actor mode/ID/kind and performs actor-epoch authorization without wrapping the native actor-aware Autorio interfaces.
+- `guard.ts` — Factorio-side `sgluna_deployment` v8 guard. It captures actor mode/ID/kind and performs actor-epoch authorization without wrapping the native actor-aware Autorio interfaces.
 - `guard.test.mjs` — VM fixture for zero-player authorization, body replacement, cancellation and legacy player-mode compatibility.
 - `source-preparer.mjs` — promotion bridge for the pinned Autorio source. It requires the native actor-aware controllers/interfaces, refuses v7 connected-player guard markers, injects only the v8 deployment guard import, and does not rewrite gameplay semantics.
 - `source-preparer.test.mjs` — copies the repository's real Autorio source into a temporary tree and verifies guard-only, idempotent source preparation plus fail-closed legacy/non-NPC detection.
@@ -59,7 +59,7 @@ The validated runtime baseline is now on `main`, while `feat/npc-transition-work
 1. keep all new deployment work on `feat/npc-transition-work`;
 2. pin the payload to a validated NPC source SHA instead of the old connected-player source pin;
 3. use `source-preparer.mjs` to build the native actor-aware Autorio source — do **not** reapply the v7 connected-player control patch set;
-4. compile/inject the v8 `airi_deployment` guard alongside the native NPC interfaces;
+4. compile/inject the v8 `sgluna_deployment` guard alongside the native NPC interfaces;
 5. configure `npc` mode at startup and capture the standalone actor ID/kind/epoch;
 6. keep `SGLUNA_CHAT_PLAYERS` (who may issue `!luna`) separate from NPC ownership; legacy `AIRI_CHAT_PLAYERS` / `!airi` remain compatibility aliases;
 7. replace `operationCommands` with the structured `operations` contract;

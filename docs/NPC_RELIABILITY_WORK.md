@@ -16,7 +16,7 @@ The last fully successful combined Docker run reports:
 - an actively walking NPC plus queued work survived a real save/process restart as a world entity, while volatile Autorio work was deliberately discarded and serialized controls were reconciled;
 - the restarted process reacquired the same `actor_id=1`, preserved force/inventory/world state, and completed fresh work;
 - killing that body invalidated stale active/queued work, created empty replacement `actor_id=18` on the same force, and the replacement completed fresh movement;
-- bounded navigation on replacement `actor_id=18` routed around an obstacle, repathed to a moved target, explicitly failed an unreachable water-island target while cancelling dependent work, and distinguished passive transport-belt displacement from AIRI-controlled walking;
+- bounded navigation on replacement `actor_id=18` routed around an obstacle, repathed to a moved target, explicitly failed an unreachable water-island target while cancelling dependent work, and distinguished passive transport-belt displacement from SGLuna-controlled walking;
 - zero connected players were maintained throughout;
 - the runtime smoke completed successfully.
 
@@ -34,7 +34,7 @@ The user-verified gate supplied prerequisites, labs, power and exact science as 
 
 The bounded combat controller binds combat to actor/force identity and one target, uses the selected weapon's real `can_shoot` result, stops walking before firing, limits no-progress/total duration, reports explicit failure codes, cancels dependent queued work on failure, and completes only after the bound target is actually gone. Production setup no longer deletes enemies.
 
-The real-engine gate verified target destruction, real ammunition consumption (including rounds from a partially used magazine), stable NPC identity, no-target failure, no-ammo failure without target damage, dependent-queue cancellation, and stopping an out-of-range approach without target damage. A stopped control state is the ownership guarantee; world mechanics such as transport belts can still passively displace a character and must not be confused with AIRI continuing to walk.
+The real-engine gate verified target destruction, real ammunition consumption (including rounds from a partially used magazine), stable NPC identity, no-target failure, no-ammo failure without target damage, dependent-queue cancellation, and stopping an out-of-range approach without target damage. A stopped control state is the ownership guarantee; world mechanics such as transport belts can still passively displace a character and must not be confused with SGLuna continuing to walk.
 
 ## Real save/restart persistence — user verified
 
@@ -93,10 +93,10 @@ The verified navigation controller now:
 
 The real engine gate on replacement `actor_id=18` passed all four cases:
 
-1. **Obstacle route** — AIRI routed around a solid stone-wall barrier to the exact steel chest.
-2. **Moving target** — after an initial real path was accepted, the exact wooden chest moved eight tiles; AIRI issued another path and reached the relocated entity.
+1. **Obstacle route** — SGLuna routed around a solid stone-wall barrier to the exact steel chest.
+2. **Moving target** — after an initial real path was accepted, the exact wooden chest moved eight tiles; SGLuna issued another path and reached the relocated entity.
 3. **Unreachable target** — an iron chest isolated by a water moat returned explicit `unreachable`, dependent work was cancelled, the target remained alive, controls stopped, and the belt-free fixture did not drift afterward.
-4. **Passive belt displacement** — an idle NPC with walking/mining/shooting controls released was physically moved by a live transport-belt line. The harness correctly treated this as environment-driven displacement rather than stale AIRI movement.
+4. **Passive belt displacement** — an idle NPC with walking/mining/shooting controls released was physically moved by a live transport-belt line. The harness correctly treated this as environment-driven displacement rather than stale SGLuna movement.
 
 User-reported success:
 

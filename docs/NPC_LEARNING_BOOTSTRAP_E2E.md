@@ -1,4 +1,4 @@
-# AIRI Factorio — Learning + Bootstrap E2E Handoff
+# SGLuna Factorio — Learning + Bootstrap E2E Handoff
 
 This document captures the remaining end-to-end validation work discussed during the learning/skill design thread so that the conversation itself can be archived without losing the roadmap.
 
@@ -6,7 +6,7 @@ The active integration branch is `feat/npc-transition-work`. At the time this ha
 
 ## Why the next E2E focus is bootstrap, not more skill UI
 
-The skill infrastructure is now ahead of AIRI's proven early-game autonomy. A realistic learning benchmark is difficult to interpret while AIRI still cannot reliably progress from an early-game state to the first automation technology and an actually automated science line.
+The skill infrastructure is now ahead of SGLuna's proven early-game autonomy. A realistic learning benchmark is difficult to interpret while SGLuna still cannot reliably progress from an early-game state to the first automation technology and an actually automated science line.
 
 The main gameplay validation order should therefore be:
 
@@ -28,7 +28,7 @@ Novel skill discovery (Coal Snake benchmark)
 Skill refinement / composition
 ```
 
-Do not treat fixture-level skill verification as proof that AIRI can autonomously play Factorio.
+Do not treat fixture-level skill verification as proof that SGLuna can autonomously play Factorio.
 
 ---
 
@@ -100,7 +100,7 @@ Semantic failures should remain useful as future refinement counterexamples.
 
 ### Purpose
 
-This is the first major gameplay E2E milestone. AIRI should be able to make early-game progress without a prebuilt factory and research `Automation` by itself.
+This is the first major gameplay E2E milestone. SGLuna should be able to make early-game progress without a prebuilt factory and research `Automation` by itself.
 
 ### Suggested user goal
 
@@ -114,7 +114,7 @@ Do not provide the detailed solution sequence to the model during the actual ben
 
 ### Expected capability chain
 
-AIRI must autonomously handle the necessary subset of:
+SGLuna must autonomously handle the necessary subset of:
 
 ```text
 resource discovery
@@ -162,7 +162,7 @@ Any failure discovered here should become a reproducible regression when possibl
 
 ### Purpose
 
-After `Automation` is available, prove AIRI can create its first genuinely automated production loop instead of merely hand-crafting science packs.
+After `Automation` is available, prove SGLuna can create its first genuinely automated production loop instead of merely hand-crafting science packs.
 
 ### Suggested user goal
 
@@ -200,7 +200,7 @@ Develop until you can automatically produce logistics science packs.
 
 ### Must prove
 
-AIRI can:
+SGLuna can:
 
 - inspect current technologies and prerequisites;
 - identify missing research;
@@ -319,7 +319,7 @@ no known verified skill
 
 ### Success criteria
 
-- AIRI independently discovers a self-sustaining burner-miner relationship;
+- SGLuna independently discovers a self-sustaining burner-miner relationship;
 - the arrangement remains operational for a bounded period;
 - success is determined by engine evidence, not model narration;
 - the learned skill can be reconstructed on a different coal patch;
@@ -372,7 +372,7 @@ unit / type / contract
 → real provider E2E for autonomous planning/learning claims
 ```
 
-Fixture tests can prove `SkillVerification` logic. They cannot prove that AIRI autonomously progresses through the game.
+Fixture tests can prove `SkillVerification` logic. They cannot prove that SGLuna autonomously progresses through the game.
 
 ## E2E evidence policy
 

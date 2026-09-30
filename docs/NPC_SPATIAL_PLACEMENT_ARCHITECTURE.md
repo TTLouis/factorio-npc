@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This document records the design agreed after observing AIRI make semantically invalid but mechanically legal Factorio placements, including mining drills placed on weak resource coverage and downstream containers placed near, but not actually on, a mining-drill output.
+This document records the design agreed after observing SGLuna make semantically invalid but mechanically legal Factorio placements, including mining drills placed on weak resource coverage and downstream containers placed near, but not actually on, a mining-drill output.
 
 The goal is to move deterministic Factorio geometry and placement legality out of LLM reasoning and into the local Autorio/harness runtime while preserving the LLM's role in strategic choice.
 
@@ -16,7 +16,7 @@ The architecture must remain mod-aware. It must derive capabilities and geometry
 4. **LLM chooses among bounded candidates.** The harness finds valid candidates and exposes a compact set of materially different choices. The LLM chooses according to the current production/layout goal.
 5. **Placement is revalidated at execution time.** Candidate selection never bypasses live `can_place_entity` or capability-specific validation because the world can change between candidate generation and execution.
 6. **Token cost is bounded.** Spatial semantics are attached only when useful, null/empty fields are omitted, and candidate lists are small and diverse.
-7. **Relationships require evidence.** Nearby does not imply connected. AIRI may claim a miner feeds a chest, an inserter links two entities, or a pipe is connected only when runtime spatial/topology evidence supports that relationship.
+7. **Relationships require evidence.** Nearby does not imply connected. SGLuna may claim a miner feeds a chest, an inserter links two entities, or a pipe is connected only when runtime spatial/topology evidence supports that relationship.
 
 ## Capability-driven spatial enrichment
 
@@ -253,11 +253,11 @@ Before creation, runtime revalidates:
 - live `can_place_entity`
 - all capability-specific hard constraints
 
-If revalidation fails, the operation returns a bounded reason and AIRI replans.
+If revalidation fails, the operation returns a bounded reason and SGLuna replans.
 
 ## Relationship verification
 
-AIRI must not infer a logistics relationship from proximity alone.
+SGLuna must not infer a logistics relationship from proximity alone.
 
 Examples:
 
@@ -328,7 +328,7 @@ The work is complete when all of the following are true:
 5. Shoreline/terrain-constrained placement is locally validated by Factorio/runtime data rather than inferred by the LLM.
 6. The LLM selects a candidate by ID and runtime revalidates it before placement.
 7. Modded entities with equivalent capabilities automatically participate without adding prototype-name special cases.
-8. AIRI cannot truthfully claim a downstream logistics connection from proximity alone; verification uses output/transfer/fluid topology evidence.
+8. SGLuna cannot truthfully claim a downstream logistics connection from proximity alone; verification uses output/transfer/fluid topology evidence.
 
 ## Implementation checkpoint (2026-09-16)
 
