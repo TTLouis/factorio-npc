@@ -2679,6 +2679,7 @@ export class Session {
       stateFile: path.join(this.root, '.sgluna', 'npc-state.json'),
       provider: (messages, context) => this.roleProvider(messages, context),
       interactionProvider: (messages, context) => this.roleProvider(messages, context),
+      agentRoleConfig: this.config, // names the planner/executor models for the loop's role tagging (agent-roles.mjs)
       // Production contract: every goal starts from a game-checkable goal
       // definition that the player sees in game.
       goalDefinitionPolicy: 'required',

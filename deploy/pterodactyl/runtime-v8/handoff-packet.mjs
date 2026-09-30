@@ -24,7 +24,8 @@
 // mid-way. Mandatory records are never dropped (the result reports
 // `over_limit: true` if they alone exceed the limit).
 //
-// Wired by U8: the C5 budget handoff and the C7 recovery restage build one.
+// Wired: the C5 budget handoff and the C7 recovery restage (U8) and the planner slice-close
+// restage at C1/C2 (U7) build one through NpcAgentLoop.buildRestagePacket.
 
 import { createHash } from 'node:crypto'
 
@@ -50,6 +51,8 @@ export const HANDOFF_PACKET_LIMITS = Object.freeze({
   budgetChars: 200,
   skillIds: 16,
   reasonChars: 200,
+  shelfCandidates: 5,
+  candidateChars: 260,
   contractChars: 300,
   runtimeChars: 200,
 })
@@ -63,8 +66,9 @@ export const HANDOFF_DROP_ORDER = Object.freeze([
   'skills',
   'runtime',
   'budget',
-  'roadmap_node',
+  'shelf_candidates',
   'contract',
+  'roadmap_node',
   'step_completed',
   'step_pending',
 ])
@@ -152,6 +156,26 @@ function planRecords(plan, activeIndex, limits) {
     records.push(record)
   })
   return records
+}
+
+// Shelf candidates (a C1/C2 restage of the planner): the nodes the planner may
+// refine next, from shelfRefinementCandidates. Intent and lineage only, never
+// operations. Last candidate drops first.
+function shelfCandidateRecords(candidates, limits) {
+  const list = (Array.isArray(candidates) ? candidates : []).slice(0, limits.shelfCandidates)
+  return list.map((candidate, index) => {
+    const parts = [`${candidate.node_id} [${candidate.status}]: ${oneLine(candidate.intent, 200)}`]
+    if (candidate.why_it_matters) parts.push(`why: ${oneLine(candidate.why_it_matters, 120)}`)
+    if (Array.isArray(candidate.depends_on) && candidate.depends_on.length > 0) parts.push(`depends_on: ${candidate.depends_on.join(',')}`)
+    if (Array.isArray(candidate.verified_results) && candidate.verified_results.length > 0) parts.push(`verified: ${candidate.verified_results.slice(0, 3).join(',')}`)
+    return {
+      key: `shelf_candidate_${index}`,
+      block: 'step',
+      drop: 'shelf_candidates',
+      rank: index,
+      text: `shelf_candidate ${index + 1}: ${oneLine(parts.join(' | '), limits.candidateChars)}`,
+    }
+  })
 }
 
 // Whitelisted scalar fields only: a snapshot object from the runtime (deployment
@@ -269,10 +293,11 @@ export function estimateTokens(chars) {
  * @param {number} [args.now] timestamp for the event (never enters `text`)
  * @param {object} [args.limits] overrides for HANDOFF_PACKET_LIMITS
  * @param {string} [args.budget] optional budget line (harness-computed)
+ * @param {object[]} [args.shelfCandidates] shelfRefinementCandidates(state) for a planner restage at a shelf pickup
  * @param {object} [args.actor] fresh actor snapshot (actor_id, actor_kind, epoch, connected_players); never dropped
  * @param {object} [args.runtime] compact runtime state (task_state, queue_length, idle)
  */
-export function buildHandoffPacket({ planningState, role, checkpoint, reason = '', note = '', budget = '', actor, runtime, previousContextChars, now, limits: limitOverrides } = {}) {
+export function buildHandoffPacket({ planningState, role, checkpoint, reason = '', note = '', budget = '', actor, runtime, shelfCandidates, previousContextChars, now, limits: limitOverrides } = {}) {
   if (!CONTEXT_RESTAGE_ROLES.includes(role)) throw new RangeError(`handoff role must be one of ${CONTEXT_RESTAGE_ROLES.join(', ')}`)
   if (!CONTEXT_RESTAGE_CHECKPOINTS.includes(checkpoint)) throw new RangeError(`handoff checkpoint must be one of ${CONTEXT_RESTAGE_CHECKPOINTS.join(', ')}`)
   if (!planningState?.goal?.goal_id) throw new RangeError('handoff packet needs a planning state with a goal')
@@ -286,6 +311,7 @@ export function buildHandoffPacket({ planningState, role, checkpoint, reason = '
     ...(roadmap ? [roadmap] : []),
     ...planRecords(plan, activeIndex, limits),
     ...stepRecords(planningState, plan, activeIndex, limits, { role, checkpoint, reason, budget, note, actor, runtime }),
+    ...shelfCandidateRecords(shelfCandidates, limits),
   ]
 
   // Drop whole records, lowest priority first, until the packet fits.

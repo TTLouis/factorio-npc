@@ -549,6 +549,9 @@ export class PlanTiming {
     // Machine work the step waited on (plan 2.5) is expected time too.
     const machine = machineWaitSeconds(record)
     const total = expected !== undefined ? expected + machine : undefined
+    // Kept on the record (U7) so the planner's slice-close message can show
+    // estimated against measured time without re-deriving either.
+    record.elapsed_wall_seconds = sameBody ? round1(elapsed) : undefined
     return ['step.time_measured', {
       goal_id: record.goal_id,
       step_id: record.step_id,
@@ -569,6 +572,31 @@ export class PlanTiming {
       batches: record.batches,
       stale: sameBody ? undefined : 'actor_or_epoch_changed',
     }]
+  }
+
+  // Time records of one plan's steps (U7): the harness estimate and the wall
+  // clock measured at each step's close. Records are keyed by the legacy board's
+  // step id (`step_N`), which repeats across plans and goals, so a record counts
+  // only when it is the SAME goal (`goalId`), the same step position, and
+  // started at or after `sinceMs` (the plan's commit time): a step of this slice
+  // with no admitted hand work must not read an earlier slice's time. Without a
+  // goal id nothing matches. A step with no matching record reads as `{ step_id }`.
+  closedStepTimes(stepIds, { goalId, sinceMs = 0 } = {}) {
+    return (Array.isArray(stepIds) ? stepIds : []).map((stepId, index) => {
+      const record = goalId === undefined || goalId === null
+        ? undefined
+        : [...this.steps.values()]
+            .filter(item => item.closed && item.goal_id === goalId && item.step_index === index && item.started_at >= (Number.isFinite(sinceMs) ? sinceMs : 0))
+            .sort((left, right) => right.started_at - left.started_at)[0]
+      if (!record) return { step_id: stepId }
+      const machine = machineWaitSeconds(record)
+      return {
+        step_id: stepId,
+        expected_seconds: record.timed ? record.expected_seconds : undefined,
+        machine_wait_seconds: machine > 0 ? machine : undefined,
+        elapsed_wall_seconds: record.elapsed_wall_seconds,
+      }
+    })
   }
 
   // The active step's record, only while it belongs to the same body.

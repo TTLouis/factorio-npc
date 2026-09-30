@@ -364,12 +364,12 @@ test('golden step block with the actor snapshot, runtime state and active step c
   assert.doesNotMatch(packet.stableText, /actor|runtime|contract|epoch/, 'nothing volatile in the stable block')
 })
 
-test('the actor line is mandatory when supplied, the runtime and contract lines drop whole before roadmap and steps', () => {
+test('the actor line is mandatory when supplied, the runtime and contract lines drop whole before steps (the contract goes before the roadmap node)', () => {
   const state = contractState()
   const run = maxChars => buildHandoffPacket({ planningState: state, role: 'planner', checkpoint: 'C7', now: 1, actor: ACTOR, runtime: RUNTIME, budget: 'effort low', limits: { maxChars } })
   const full = run(100000)
   assert.deepEqual(full.dropped, [])
   const tiny = run(1)
-  assert.deepEqual(tiny.dropped, ['runtime', 'budget', 'roadmap_node', 'contract', 'step_1'], 'fixed order; the pending step drops last, the active step never')
+  assert.deepEqual(tiny.dropped, ['runtime', 'budget', 'contract', 'roadmap_node', 'step_1'], 'fixed order; the pending step drops last, the active step never')
   assert.ok(tiny.text.includes('actor: actor_id=19'), 'the actor snapshot is never dropped')
 })

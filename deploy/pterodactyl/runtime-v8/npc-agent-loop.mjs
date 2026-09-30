@@ -10,7 +10,9 @@ import {
   taskBoardProgress,
 } from './common.mjs'
 import { AgentContext, contextRestagedRow, conversationChars, STALE_REDRIVE_LIMIT, STALE_REPLY_ERROR_CODE, STALE_REPLY_MESSAGE } from './agent-context.mjs'
+import { PLANNER_ROLE } from './agent-roles.mjs'
 import { buildHandoffPacket } from './handoff-packet.mjs'
+import { buildVerifiedResults } from './verified-results.mjs'
 import { cleanMemoryText, sanitizeDurableModelText, sanitizeDurableModelValue } from './durable-text.mjs'
 import { normalizeProviderPlanContent, providerCapabilityProfile } from './provider.mjs'
 import { executeAuthorizedBatch } from './supervisor-adapter.mjs'
@@ -38,9 +40,10 @@ import {
   STEERING_BOUNDARY,
   STEERING_PRESSURE_VOCABULARY,
   askableSteeringPressures,
+  shelfRefinementCandidates,
   steeringPressureDefinitions,
 } from './planning-state.mjs'
-import { markRequestSliceClosed, requestSliceCeiling } from './restage-policy.mjs'
+import { decideRestage, estimateTokensFromChars, markRequestSliceClosed, requestSliceCeiling, RESTAGE_BOUNDARY } from './restage-policy.mjs'
 import { emptyJevHealth, recordJevHealth, recordPendingDecisionRequest, settlePendingDecisionRequest, summarizeJevHealth, takePendingDecisionRequest } from './jev-health.mjs'
 import { describeUnmetGoalResult, evaluateGoalDefinition, formatGoalProgress, GOAL_SCOPE, needsGoalBaseline, sanitizeGoalDefinition } from './goal-definition.mjs'
 import {
@@ -2529,7 +2532,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // 2.7: usage per goal and the goal budget warning.
     this.usageLedger = new UsageLedger({ outputCap: this.maxProviderOutputUnits })
     this.chatAcknowledger = new ChatAcknowledger() // 2.10
-    this.agentContext.config = options.providerConfig // names the role's model only (agent-roles.mjs)
+    this.agentContext.config = options.agentRoleConfig ?? options.providerConfig // names the role's model only (agent-roles.mjs)
+    this.restageSoftLimitOption = options.restageSoftLimitTokens // U7: a number, or { planner, executor }; default is prefix-aware (restageSoftLimitTokens)
     this.providerCallsInFlight = 0 // provider rounds between request start and the end of their reply processing
     this.providerCallsByLineage = new Map() // the same count per conversation lineage: restageContext refuses while the CURRENT lineage has a round in flight
     this.turnConversation = null // attribution of the conversation the running turn last read; null between turns
@@ -2615,21 +2619,25 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return { restaged: true, ...result }
   }
 
-  // --- packet-driven restages (U8: C5 budget handoff, C7 recovery) -----------------------
+  // --- packet-driven restages (U8: C5 budget handoff, C7 recovery; U7: planner slice close) ---
 
-  // The handoff packet for the CURRENT reducer state, or undefined when no goal
-  // has been admitted (a reducer-less memory, a goal that never started).
-  buildRestagePacket({ checkpoint, role, reason, budget, actor, runtime }) {
-    const state = this.memory.planningState?.(this.activePlanKey())
+  // The ONE packet builder. `planningState` overrides the current reducer state
+  // (the slice-close wake passes the state it just settled); `shelfCandidates`
+  // rides a planner restage at a shelf pickup. Undefined when no goal has been
+  // admitted (a reducer-less memory, a goal that never started).
+  buildRestagePacket({ checkpoint, role, reason, budget, note, actor, runtime, shelfCandidates, planningState } = {}) {
+    const state = planningState ?? this.memory.planningState?.(this.activePlanKey())
     if (!state?.goal?.goal_id) return undefined
     return buildHandoffPacket({
       planningState: state,
-      role,
+      role: role ?? this.agentContext.role,
       checkpoint,
       reason,
       budget,
+      note,
       actor,
       runtime,
+      shelfCandidates,
       previousContextChars: conversationChars(this.messages),
       now: Date.now(),
     })
@@ -2642,19 +2650,127 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // turn is open the token is null and NOTHING is passed (a null/true safePoint
   // is refused as round_open). Never call it from the supervisor, chat or a
   // timer: those use restageBetweenTurns.
-  async restageInTurn(args) {
-    const packet = this.buildRestagePacket(args)
-    if (!packet) return { restaged: false, reason: 'no_admitted_goal' }
-    return this.restageContext({ ...args, packet, safePoint: this.turnToken ?? undefined })
+  // Accepts a prebuilt `packet` or the builder arguments of buildRestagePacket.
+  async restageInTurn(args = {}) {
+    return this.restageThrough(args, this.turnToken ?? undefined)
   }
 
   // Restage where no turn holds the conversation: supervisor-level recovery
-  // (C7) and a request's start (a Resume). Passes no safePoint; a refusal
-  // ('round_in_flight' | 'round_open') means "retry at the next boundary".
-  async restageBetweenTurns(args) {
-    const packet = this.buildRestagePacket(args)
-    if (!packet) return { restaged: false, reason: 'no_admitted_goal' }
-    return this.restageContext({ ...args, packet })
+  // (C7), a request's start (a Resume) and a slice-close wake that runs from the
+  // completion signal. Passes no safePoint; a refusal ('round_in_flight' |
+  // 'round_open') means "retry at the next boundary", never an error.
+  async restageBetweenTurns(args = {}) {
+    return this.restageThrough(args, undefined)
+  }
+
+  // Shared body of the two helpers. Never throws: a refusal is a typed result, a
+  // failure (a packet that does not fit, a memory that cannot restage) is
+  // `{ restaged: false, reason: 'restage_error' }` with a `context.restage_error`
+  // row, so a C5 budget handoff falls back to its capsule. A frozen (BLOCKED)
+  // plan and a goal that is not active are never restaged (the plan waits for the
+  // user; there is nothing healthy to re-brief).
+  async restageThrough(args, safePoint) {
+    const requestId = args.requestId ?? this.traceRequest?.id
+    const role = args.role ?? this.agentContext.role
+    const checkpoint = args.checkpoint ?? args.packet?.event?.checkpoint
+    try {
+      const state = args.planningState ?? this.memory.planningState?.(this.activePlanKey())
+      if (!state?.goal?.goal_id) return { restaged: false, reason: 'no_admitted_goal' }
+      const refusal = state.goal.status !== GOAL_STATUS.ACTIVE
+        ? 'goal_not_active'
+        : getActivePlanningPlan(state)?.status === PLAN_STATUS.BLOCKED ? 'plan_blocked' : undefined
+      if (refusal) {
+        await this.traceEvent('context.restage_refused', { role, checkpoint, handoff_id: args.packet?.handoff_id, reason: refusal }, { requestId })
+        return { restaged: false, reason: refusal }
+      }
+      const packet = args.packet ?? this.buildRestagePacket({ ...args, role, planningState: state })
+      if (!packet) return { restaged: false, reason: 'no_admitted_goal' }
+      return await this.restageContext({ checkpoint, reason: args.reason, packet, role, softLimitTokens: args.softLimitTokens, requestId, safePoint })
+    }
+    catch (error) {
+      const message = cleanMemoryText(error instanceof Error ? error.message : String(error), 300)
+      await this.traceEvent('context.restage_error', { role, checkpoint, message }, { requestId })
+      return { restaged: false, reason: 'restage_error' }
+    }
+  }
+
+  // Soft limit of a role's context, in tokens. An explicit `restageSoftLimitTokens`
+  // option (a number, or { planner, executor }) wins. The default is
+  // prefix-aware: the fixed prefix (system prompt and tool schemas: measured from
+  // the first reply that reports input tokens, else chars/4 of the system
+  // prompt) plus the working-context ceiling in tokens (maxWorkingChars / 4).
+  // The size counter includes the prefix, so the limit measures what the
+  // conversation grew beyond it; without the prefix a real ~58k-character
+  // system prompt alone would sit past a 40,000-character ceiling and every
+  // slice close would restage. maxWorkingChars scales with a profile's
+  // context window only for profiles that declare one (local); the others keep
+  // the 40,000-character default. The hard limit is 2x this (decideRestage).
+  // Per role today because the roles can run on different models.
+  restageSoftLimitTokens(role = PLANNER_ROLE) {
+    const option = this.restageSoftLimitOption
+    const explicit = typeof option === 'number' ? option : option?.[role]
+    if (Number.isFinite(explicit) && explicit > 0) return explicit
+    return Math.max(1, this.agentContext.prefixTokens + estimateTokensFromChars(this.maxWorkingChars))
+  }
+
+  // The provider call context's role field. Unrestaged single-model runs send
+  // exactly what they always did; naming the role only matters (and is only
+  // sent) once delegation is active or the config runs the roles on
+  // different models, where roleProvider needs it to pick the planner model.
+  providerRoleFields(attribution) {
+    const fields = this.agentContext.providerContextFields(attribution)
+    if (fields.role === undefined && attribution?.role === PLANNER_ROLE && this.agentContext.rolesDiffer) return { role: PLANNER_ROLE }
+    return fields
+  }
+
+  // The slice-close wake of the planner (next to closeOutputSlice, before
+  // planner.wake). Two things, both harness-owned:
+  //  1. the verified-results message text: reducer evidence and receipts, goal
+  //     progress per doneWhen, estimated vs measured time (verified-results.mjs);
+  //  2. the size decision (restage-policy.mjs decideRestage, boundary
+  //     slice_close): past the soft limit, the planner conversation is replaced
+  //     by a packet plus the shelf candidates (C2 when the wake picks up a shelf
+  //     node, else C1). Below it nothing is discarded.
+  // `withinTurn` says the wake runs inside the running turn's own call chain (it
+  // uses restageInTurn); otherwise restageBetweenTurns. A restage that cannot
+  // happen now (a round or turn is open) or fails is never an error: the wake
+  // proceeds on the existing conversation and the next slice close retries.
+  async planSliceCloseWake({ route, planningState, goalEvaluation, withinTurn = false }) {
+    const plan = planningState ? getActivePlanningPlan(planningState) : undefined
+    const verified = buildVerifiedResults({
+      planningState,
+      goalEvaluation,
+      stepTimes: this.planTiming?.closedStepTimes((plan?.steps ?? []).map(step => step.step_id), {
+        goalId: this.peekPlanState(this.activePlanKey())?.goal_id, // the board's goal id, the key PlanTiming records carry
+        sinceMs: plan?.committed_at ?? 0,
+      }) ?? [],
+    })
+    const wake = { verifiedResults: verified.text, restaged: false }
+    if (!planningState?.goal || this.agentContext.role !== PLANNER_ROLE) return wake
+    // Never restage a planner that has nothing healthy to be re-briefed on: a
+    // frozen (BLOCKED) plan waits for the user, and a goal that is met or no
+    // longer active is not woken for another slice.
+    if (planningState.goal.status !== GOAL_STATUS.ACTIVE || goalEvaluation?.satisfied === true || plan?.status === PLAN_STATUS.BLOCKED) return wake
+    const softLimitTokens = this.restageSoftLimitTokens(PLANNER_ROLE)
+    const decision = decideRestage({
+      role: PLANNER_ROLE,
+      boundary: RESTAGE_BOUNDARY.SLICE_CLOSE,
+      contextTokens: this.agentContext.sizeTokens,
+      softLimitTokens,
+    })
+    if (!decision.restage) return wake
+    const candidates = shelfRefinementCandidates(planningState, { limit: 5 })
+    const checkpoint = route === 'next_shelf_slice' && candidates.length > 0 ? 'C2' : decision.checkpoint
+    const restage = withinTurn ? this.restageInTurn : this.restageBetweenTurns
+    const result = await restage.call(this, {
+      checkpoint,
+      role: PLANNER_ROLE,
+      reason: decision.reason,
+      shelfCandidates: candidates,
+      planningState,
+      softLimitTokens,
+    })
+    return { ...wake, restaged: result.restaged === true, checkpoint, result }
   }
 
   // C5: a provider-budget boundary. The fresh conversation runs in the SAME
@@ -6093,6 +6209,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         task_board: completedBoard,
       })
       await this.closeOutputSlice('next_shelf_slice')
+      const sliceClose = await this.planSliceCloseWake({ route: 'next_shelf_slice', planningState: planningAfterCompletion, goalEvaluation, withinTurn })
       await this.traceEvent('planner.wake', {
         source: 'planning_boundary',
         route: 'next_shelf_slice',
@@ -6108,7 +6225,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           ? 'Refine the next useful Roadmap Shelf node using [PLANNING_STATE]'
           : 'Author the next plan slice that moves the world toward the unmet goal conditions'
         return await this.continueFromModMessage(
-          `[MOD] The current immutable plan slice is verified complete. The user goal remains active.${unmet} ${next}; do not treat plan completion as goal completion. Completed plan_id=${reducerPlanAfterCompletion.plan_id}.${droppedOperationsNote ? ` ${droppedOperationsNote}` : ''}`,
+          `[MOD] The current immutable plan slice is verified complete. The user goal remains active.${unmet} ${next}; do not treat plan completion as goal completion. Completed plan_id=${reducerPlanAfterCompletion.plan_id}. ${sliceClose.verifiedResults}${droppedOperationsNote ? ` ${droppedOperationsNote}` : ''}`,
           'planning.slice_completion_continuation',
           { withinTurn },
         )
@@ -6192,6 +6309,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       && allowContinuation
       && planningAfterCompletion?.goal?.status === GOAL_STATUS.ACTIVE) {
       await this.closeOutputSlice('active_goal_after_plan_completion')
+      const sliceClose = await this.planSliceCloseWake({ route: 'active_goal_after_plan_completion', planningState: planningAfterCompletion, goalEvaluation, withinTurn })
       await this.traceEvent('planner.wake', {
         source: 'planning_boundary',
         route: 'active_goal_after_plan_completion',
@@ -6200,7 +6318,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       this.reasoningTriggerSource = 'plan_slice_completed'
       try {
         return await this.continueFromModMessage(
-          `[MOD] The current bounded work is complete, but the reducer-owned user goal is still active. Reconcile [PLANNING_STATE] and choose the next bounded action or explicitly surface why the goal cannot yet advance. Do not infer GOAL_SATISFIED from Task Board completion.${droppedOperationsNote ? ` ${droppedOperationsNote}` : ''}`,
+          `[MOD] The current bounded work is complete, but the reducer-owned user goal is still active. Reconcile [PLANNING_STATE] and choose the next bounded action or explicitly surface why the goal cannot yet advance. Do not infer GOAL_SATISFIED from Task Board completion. ${sliceClose.verifiedResults}${droppedOperationsNote ? ` ${droppedOperationsNote}` : ''}`,
           'planning.active_goal_continuation',
           { withinTurn },
         )
@@ -6966,7 +7084,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     const roundPhase = this.providerRoundPhase(effectiveAllowTools, triggerSource)
     const requestChars = providerMessages.reduce((total, message) => total + messageChars(message), 0)
-    const attribution = this.agentContext.beginRequest(requestChars) // U4: which conversation this round belongs to
+    const prefixChars = providerMessages.filter((message, index) => message?.role === 'system' && providerMessages.slice(0, index).every(before => before?.role === 'system')).reduce((total, message) => total + messageChars(message), 0)
+    const attribution = this.agentContext.beginRequest(requestChars, { prefixChars }) // U4: which conversation this round belongs to
     this.turnConversation = attribution
     await this.traceEvent('provider.request', {
       round,
@@ -6989,7 +7108,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let message
     try {
       message = await this.provider(providerMessages, {
-        ...this.agentContext.providerContextFields(attribution),
+        ...this.providerRoleFields(attribution),
         epoch: current.epoch,
         actorId: current.actor_id,
         round,

@@ -1930,6 +1930,39 @@ test('C5: a refused restage falls back to the legacy capsule and says so, so the
   assert.equal(trace.filter(record => record.event === 'context.restaged').length, 0)
 })
 
+test('C5: a restage that THROWS is a restage_error, traced, and the budget handoff falls back to the capsule', async () => {
+  const canonical = ['Inspect machine state', 'Continue the build']
+  const calls = []
+  const trace = []
+  const agent = makeAgent({
+    interactionDecisionProvider: rolloverDecisionProvider({ count: 0 }),
+    provider: async (messages) => {
+      calls.push(messages)
+      if (calls.length === 1) return planMessage({ chatMessage: 'One action.', plan: canonical, currentStep: 0, operations: [{ name: 'wait', args: { ticks: 1 } }] })
+      if (calls.length === 2) throw contextWindowError()
+      return planMessage({ chatMessage: 'Continued.', plan: canonical, currentStep: 0, operations: [{ name: 'wait', args: { ticks: 1 } }] })
+    },
+  })
+  agent.behaviorTrace = { emit: async (record) => { trace.push(record) } }
+  // The seam itself fails (a packet that does not fit, a memory that cannot restage): the helper must not throw.
+  agent.restageContext = async () => { throw new RangeError('restage packet does not fit') }
+
+  await agent.request('exercise the throw', { sender: 'TTLouis' })
+  await agent.completed()
+
+  assert.equal(calls.length, 3, 'the fresh generation still ran')
+  assert.ok(calls[2].some(message => String(message.content ?? '').startsWith('[PROVIDER_BUDGET_HANDOFF]')), 'on the capsule')
+  assert.ok(!calls[2].some(message => message.role === 'assistant' || message.role === 'tool'), 'none of the exhausted thread')
+  const fallback = trace.filter(record => record.event === 'budget.handoff_restage_fallback')
+  assert.equal(fallback.length, 1)
+  assert.equal(fallback[0].data.reason, 'restage_error')
+  const errors = trace.filter(record => record.event === 'context.restage_error')
+  assert.equal(errors.length, 1)
+  assert.equal(errors[0].data.checkpoint, 'C5')
+  assert.match(errors[0].data.message, /does not fit/)
+  assert.equal(trace.filter(record => record.event === 'context.restaged').length, 0)
+})
+
 test('C5: Resume after the request ceiling restages from a packet, the ceiling pause itself stays visible, and the restage never advances the plan', async () => {
   const canonical = ['Wait for the machine cycle', 'Inspect the result']
   const over = () => {
