@@ -28,6 +28,7 @@
 
 import { createHash } from 'node:crypto'
 
+import { sanitizeDurableModelText } from './durable-text.mjs'
 import { describeGoalCondition } from './goal-definition.mjs'
 import {
   buildContextRestagedEvent,
@@ -72,18 +73,12 @@ function oneLine(value, max) {
   return `${flat.slice(0, Math.max(0, max - 1))}…`
 }
 
-// Same redaction rules as sanitizeDurableModelText in npc-agent-loop.mjs
-// (historical unit numbers must not steer a fresh conversation to stale
-// entities). Duplicated because that helper is private to the agent loop and
-// this module must stay importable without it.
+// The note is the ending conversation's own prose. It goes through the same
+// durable-text sanitizer as the agent loop's memory (historical unit numbers
+// must not steer a fresh conversation to stale entities), after the packet's
+// one-line/control-character normalization.
 export function sanitizeHandoffNote(value, max = HANDOFF_PACKET_LIMITS.noteChars) {
-  const text = oneLine(value, Math.max(2000, String(value ?? '').length))
-    .replace(/(["']?(?:target_)?unit_number["']?\s*[:=]\s*)\d+/gi, '$1[historical-id-omitted]')
-    .replace(/(["']?observed_unit_numbers["']?\s*[:=]\s*)\[[^\]]*\]/gi, '$1[historical-ids-omitted]')
-    .replace(/\b(?:unit_number|target_unit_number)[_:#-]?\d+\b/gi, 'historical-exact-identity-[omitted]')
-    .replace(/\bunit[_:#-]\d+\b/gi, 'historical-exact-identity-[omitted]')
-    .replace(/\b(?:exact\s+entity\s+target\s+|target\s+)?unit\s+#?\d+\b/gi, 'historical exact identity [omitted]')
-  return oneLine(text, max)
+  return sanitizeDurableModelText(oneLine(value, Math.max(2000, String(value ?? '').length)), max)
 }
 
 function sha256(text) {

@@ -9,6 +9,8 @@ import {
   setTaskBoardStatus,
   taskBoardProgress,
 } from './common.mjs'
+import { AgentContext, contextRestagedRow, STALE_REPLY_ERROR_CODE, STALE_REPLY_MESSAGE } from './agent-context.mjs'
+import { cleanMemoryText, sanitizeDurableModelText, sanitizeDurableModelValue } from './durable-text.mjs'
 import { normalizeProviderPlanContent, providerCapabilityProfile } from './provider.mjs'
 import { executeAuthorizedBatch } from './supervisor-adapter.mjs'
 import {
@@ -267,46 +269,6 @@ Skill lifecycle is explicit. findSkills is discovery only: a search result is no
 Every operation you may emit, with its argument keys ("?" marks an optional key). The operation prose earlier in this prompt may omit some of them; any name not on this list is rejected. place_candidate takes ids from getPlacementCandidates, execute_construction_plan takes the validation_id from validateConstructionPlan, and launch_rocket needs a live rocket-silo unit_number.
 ${approvedOperationListText()}.
 `.trim()
-
-function cleanMemoryText(value, max) {
-  const text = String(value ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim()
-  if (text.length <= max) return text
-  return `${text.slice(0, Math.max(0, max - 1))}…`
-}
-
-function sanitizeDurableModelText(value, max = 2000) {
-  let text = cleanMemoryText(value, max)
-  const trimmed = text.trim()
-  if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
-    try {
-      return cleanMemoryText(JSON.stringify(sanitizeDurableModelValue(JSON.parse(trimmed))), max)
-    }
-    catch {}
-  }
-  text = text
-    .replace(/(["']?(?:target_)?unit_number["']?\s*[:=]\s*)\d+/gi, '$1[historical-id-omitted]')
-    .replace(/(["']?observed_unit_numbers["']?\s*[:=]\s*)\[[^\]]*\]/gi, '$1[historical-ids-omitted]')
-    .replace(/\b(?:unit_number|target_unit_number)[_:#-]?\d+\b/gi, 'historical-exact-identity-[omitted]')
-    .replace(/\bunit[_:#-]\d+\b/gi, 'historical-exact-identity-[omitted]')
-    .replace(/\b(?:exact\s+entity\s+target\s+|target\s+)?unit\s+#?\d+\b/gi, 'historical exact identity [omitted]')
-  return cleanMemoryText(text, max)
-}
-
-function sanitizeDurableModelValue(value) {
-  if (Array.isArray(value)) return value.map(item => sanitizeDurableModelValue(item))
-  if (!value || typeof value !== 'object') {
-    return typeof value === 'string' ? sanitizeDurableModelText(value, Math.max(2000, value.length)) : value
-  }
-  const staleExact = value.code === 'stale_exact_target' || value.reason_code === 'stale_exact_target'
-  const result = {}
-  for (const [key, child] of Object.entries(value)) {
-    if (/(?:^|_)unit_number$/i.test(key) || /(?:^|_)unit_numbers$/i.test(key)) continue
-    if (key === 'unit' && Number.isSafeInteger(child)) continue
-    if (staleExact && key === 'identity' && Number.isSafeInteger(child)) continue
-    result[key] = sanitizeDurableModelValue(child)
-  }
-  return result
-}
 
 function durableEntityLocator(observation, semanticRole = '') {
   if (!observation || typeof observation !== 'object') return undefined
@@ -2560,6 +2522,60 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // 2.7: usage per goal and the goal budget warning.
     this.usageLedger = new UsageLedger({ outputCap: this.maxProviderOutputUnits })
     this.chatAcknowledger = new ChatAcknowledger() // 2.10
+    this.agentContext.config = options.providerConfig // names the role's model only (agent-roles.mjs)
+  }
+
+  // Delegation U4 (agent-context.mjs): the running conversation lives in one
+  // AgentContext, so a restage swaps exactly one thing. Created lazily because
+  // the base constructor assigns `messages` (via reset) before this class runs.
+  get agentContext() { return this._agentContext ??= new AgentContext() }
+  get messages() { return this.agentContext.messages }
+  set messages(value) { this.agentContext.messages = value }
+  get baseMessages() { return this.agentContext.baseMessages }
+  set baseMessages(value) { this.agentContext.baseMessages = value }
+
+  reset() {
+    this.agentContext.beginLineage()
+    super.reset()
+  }
+
+  // The restage seam (U4). Swaps the running conversation for a fresh one built
+  // from a handoff packet (handoff-packet.mjs), records CONTEXT_RESTAGED in the
+  // reducer and writes the `context.restaged` trace row. Nothing calls this
+  // yet: U5-U8 wire the checkpoints. It never changes plan semantics; a packet
+  // the reducer refuses (stale goal, wrong source) restages nothing.
+  async restageContext({ checkpoint, reason, packet, role, softLimitTokens, requestId } = {}) {
+    const key = this.activePlanKey()
+    const prepared = this.agentContext.prepareRestage({
+      checkpoint,
+      reason,
+      packet,
+      role,
+      prefixMessages: [{ role: 'system', content: this.systemPrompt }],
+    })
+    const before = this.memory.planningState?.(key)
+    if (typeof this.memory.dispatchPlanningEvent !== 'function' || !before) throw new AgentLoopError('context restage needs reducer-backed memory with an admitted goal')
+    const event = Number.isFinite(packet.event?.now) ? packet.event : { ...packet.event, now: Date.now() }
+    if (this.memory.dispatchPlanningEvent(key, event) === before) {
+      await this.traceEvent('context.restage_refused', { checkpoint, role: prepared.role, handoff_id: packet.handoff_id, reason: 'reducer_rejected_context_restaged' }, { requestId })
+      return { restaged: false, reason: 'reducer_rejected_context_restaged' }
+    }
+    const result = this.agentContext.commitRestage(prepared)
+    // A fresh conversation carries none of the old exchanges (same resets as a reasoning-epoch rebuild).
+    this.toolCache.clear()
+    this.duplicateToolRounds = 0
+    this.observationRecoveryRounds = 0
+    this.observationOnlyRounds = 0
+    this.resetObservationDecisionState()
+    const state = this.memory.planningState(key)
+    const plan = getActivePlanningPlan(state)
+    await this.traceEvent('context.restaged', contextRestagedRow(result, {
+      planId: packet.event?.plan_id ?? plan?.plan_id,
+      stepId: plan?.steps?.[plan.active_step_index]?.step_id,
+      softLimitTokens,
+    }), { requestId })
+    await this.persistState()
+    return { restaged: true, ...result }
   }
 
   async loadPersistentState() {
@@ -6609,6 +6625,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return undefined
   }
 
+  // A reply for a conversation a restage has replaced (U4): traced, then the
+  // turn is cancelled like any superseded one. Nothing from it is appended to
+  // the active conversation and nothing from it reaches admission.
+  async dropStaleReply(attribution) {
+    await this.traceEvent('context.stale_reply_dropped', this.agentContext.staleReplyRow(attribution))
+    const error = new AgentLoopError(STALE_REPLY_MESSAGE)
+    error.code = STALE_REPLY_ERROR_CODE
+    throw error
+  }
+
   async callProvider(current, generation, {
     round,
     allowTools = true,
@@ -6680,6 +6706,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
     const roundPhase = this.providerRoundPhase(effectiveAllowTools, triggerSource)
+    const requestChars = providerMessages.reduce((total, message) => total + messageChars(message), 0)
+    const attribution = this.agentContext.beginRequest(requestChars) // U4: which conversation this round belongs to
     await this.traceEvent('provider.request', {
       round,
       trigger_source: triggerSource,
@@ -6695,11 +6723,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       recovery_attempt: effectiveRecoveryAttempt,
       recovery_kind: traceRecoveryKind,
       message_count: providerMessages.length,
-      message_chars: providerMessages.reduce((total, message) => total + messageChars(message), 0),
+      message_chars: requestChars,
+      ...this.agentContext.traceFields(attribution),
     })
     let message
     try {
       message = await this.provider(providerMessages, {
+        ...this.agentContext.providerContextFields(attribution),
         epoch: current.epoch,
         actorId: current.actor_id,
         round,
@@ -6743,7 +6773,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
       }
       accumulateProviderUsage(this.traceRequest?.usage, usage)
-      if (Number.isSafeInteger(usage?.output_units)) this.providerBudgetGenerationOutputUnits += usage.output_units
+      // U4: a reply for a discarded conversation still cost real usage (counted
+      // request-wide above) but is not the active conversation's spend.
+      const staleReply = this.agentContext.isStale(attribution)
+      this.agentContext.observeReply(attribution, usage)
+      if (Number.isSafeInteger(usage?.output_units) && !staleReply) this.providerBudgetGenerationOutputUnits += usage.output_units
       const aggregateOutputUnits = this.traceRequest?.usage?.output_units
       const generationOutputUnits = this.providerBudgetGenerationOutputUnits
       const turnOutputCapExceeded = Number.isSafeInteger(generationOutputUnits) && generationOutputUnits > this.maxProviderOutputUnits
@@ -6762,10 +6796,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         turn_output_units: Number.isSafeInteger(generationOutputUnits) ? generationOutputUnits : undefined,
         budget_generation: this.providerBudgetGeneration,
         request_output_units: Number.isSafeInteger(aggregateOutputUnits) ? aggregateOutputUnits : undefined,
+        ...this.agentContext.traceFields(attribution),
       }
       if (responseTrace.provider) responseTrace.provider.usage_complete = usage?.usage_complete === true
-      if (this.traceRequest) this.traceRequest.last_provider_event = responseTrace
+      if (this.traceRequest && !staleReply) this.traceRequest.last_provider_event = responseTrace
       await this.traceEvent('provider.response', responseTrace)
+      if (staleReply) await this.dropStaleReply(attribution)
       // provider-base reports the profile's context window on every response,
       // so the ceiling follows the configured profile even when the loop was
       // built without its provider config.
@@ -6801,7 +6837,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
     catch (error) {
+      if (error?.code === STALE_REPLY_ERROR_CODE) throw error // already traced and dropped above
       const messageText = error instanceof Error ? error.message : String(error)
+      const staleReply = this.agentContext.isStale(attribution)
       const errorTrace = {
         kind: 'error',
         round,
@@ -6812,9 +6850,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         message: messageText,
         timeout: /timed out/i.test(messageText),
         cancelled: /cancelled/i.test(messageText),
+        ...this.agentContext.traceFields(attribution),
       }
-      if (this.traceRequest) this.traceRequest.last_provider_event = errorTrace
+      if (this.traceRequest && !staleReply) this.traceRequest.last_provider_event = errorTrace
       await this.traceEvent('provider.error', errorTrace)
+      // A failure that belongs to a discarded conversation must not fail the active one.
+      if (staleReply) await this.dropStaleReply(attribution)
       throw error
     }
     finally {
