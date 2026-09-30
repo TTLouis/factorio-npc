@@ -28,7 +28,7 @@
 
 import { AGENT_ROLES, EXECUTOR_ROLE, PLANNER_ROLE, resolveAgentRole } from './agent-roles.mjs'
 import { CONTEXT_RESTAGE_CHECKPOINTS } from './planning-state.mjs'
-import { contextSizeState, observeContextSize } from './restage-policy.mjs'
+import { contextSizeState, estimateTokensFromChars, observeContextSize } from './restage-policy.mjs'
 
 export const INITIAL_HANDOFF_PREFIX = 'ho_initial_'
 // Same message the loop's other cancellation paths use, so the existing
@@ -143,13 +143,22 @@ export class AgentContext {
    * about to be sent. Returns the attribution to hold for that request; hand it
    * back to isStale / traceFields / observeReply.
    */
-  beginRequest(requestChars) {
+  beginRequest(requestChars, { prefixChars } = {}) {
     const chars = finiteNonNegative(requestChars)
+    const prefix = finiteNonNegative(prefixChars)
+    if (prefix > 0) this.lastPrefixChars = prefix
     const grown = Math.max(0, chars - this.requestCharsHighWater)
     this.requestCharsHighWater = Math.max(this.requestCharsHighWater, chars)
     this.size = observeContextSize(this.size, { appendedChars: grown })
     this.counters.requests += 1
-    return Object.freeze({ role: this.role, handoffId: this.handoffId, lineage: this.lineageSequence, seq: this.conversationSeq, delegated: this.delegationActive })
+    return Object.freeze({
+      role: this.role,
+      handoffId: this.handoffId,
+      lineage: this.lineageSequence,
+      seq: this.conversationSeq,
+      delegated: this.delegationActive,
+      ...(prefix > 0 ? { prefixChars: prefix, requestChars: chars } : {}),
+    })
   }
 
   /**
@@ -175,7 +184,30 @@ export class AgentContext {
     this.counters.input_tokens += input
     this.counters.output_units += finiteNonNegative(usage?.output_units)
     if (input > 0) this.counters.last_input_tokens = input
+    // The first reply that reports input tokens measures the fixed prefix: what
+    // the provider counted beyond the (chars/4) messages after the system prompt
+    // is the tool schemas, so prefix = input - estimate(messages), never below
+    // the system prompt's own estimate. The prefix is the same for every
+    // conversation of this loop (same system prompt and tools), so it is kept
+    // across restages and lineages.
+    if (input > 0 && this.measuredPrefixTokens === undefined && attribution.prefixChars > 0) {
+      const messageChars = Math.max(0, (attribution.requestChars ?? 0) - attribution.prefixChars)
+      this.measuredPrefixTokens = Math.max(estimateTokensFromChars(attribution.prefixChars), input - estimateTokensFromChars(messageChars))
+    }
     return true
+  }
+
+  /**
+   * Tokens of the fixed prefix (system prompt and tool schemas): measured from
+   * the first reply that reported input tokens, else chars/4 of the system
+   * prompt (the latest request's, or the base messages'). The prefix limits are
+   * added on top of it (NpcAgentLoop.restageSoftLimitTokens), so a limit
+   * measures what the conversation grew beyond its prefix.
+   */
+  get prefixTokens() {
+    if (this.measuredPrefixTokens !== undefined) return this.measuredPrefixTokens
+    const chars = this.lastPrefixChars ?? conversationChars(leadingSystemMessages(this.baseMessages.length > 0 ? this.baseMessages : this.messages))
+    return estimateTokensFromChars(chars)
   }
 
   /**

@@ -2632,16 +2632,22 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   // Soft limit of a role's context, in tokens. An explicit `restageSoftLimitTokens`
-  // option (a number, or { planner, executor }) wins. The default is the current
-  // working-context ceiling in tokens (maxWorkingChars / 4), which follows the
-  // profile's context window as the provider reports it. The hard limit is 2x
-  // this (decideRestage). Per role today because the roles can run on
-  // different models.
+  // option (a number, or { planner, executor }) wins. The default is
+  // prefix-aware: the fixed prefix (system prompt and tool schemas: measured from
+  // the first reply that reports input tokens, else chars/4 of the system
+  // prompt) plus the working-context ceiling in tokens (maxWorkingChars / 4).
+  // The size counter includes the prefix, so the limit measures what the
+  // conversation grew beyond it; without the prefix a real ~58k-character
+  // system prompt alone would sit past a 40,000-character ceiling and every
+  // slice close would restage. maxWorkingChars scales with a profile's
+  // context window only for profiles that declare one (local); the others keep
+  // the 40,000-character default. The hard limit is 2x this (decideRestage).
+  // Per role today because the roles can run on different models.
   restageSoftLimitTokens(role = PLANNER_ROLE) {
     const option = this.restageSoftLimitOption
     const explicit = typeof option === 'number' ? option : option?.[role]
     if (Number.isFinite(explicit) && explicit > 0) return explicit
-    return Math.max(1, estimateTokensFromChars(this.maxWorkingChars))
+    return Math.max(1, this.agentContext.prefixTokens + estimateTokensFromChars(this.maxWorkingChars))
   }
 
   // The provider call context's role field. Unrestaged single-model runs send
@@ -2670,10 +2676,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const verified = buildVerifiedResults({
       planningState,
       goalEvaluation,
-      stepTimes: this.planTiming?.closedStepTimes((plan?.steps ?? []).map(step => step.step_id)) ?? [],
+      stepTimes: this.planTiming?.closedStepTimes((plan?.steps ?? []).map(step => step.step_id), {
+        goalId: this.peekPlanState(this.activePlanKey())?.goal_id, // the board's goal id, the key PlanTiming records carry
+        sinceMs: plan?.committed_at ?? 0,
+      }) ?? [],
     })
     const wake = { verifiedResults: verified.text, restaged: false }
     if (!planningState?.goal || this.agentContext.role !== PLANNER_ROLE) return wake
+    // Never restage a planner that has nothing healthy to be re-briefed on: a
+    // frozen (BLOCKED) plan waits for the user, and a goal that is met or no
+    // longer active is not woken for another slice.
+    if (planningState.goal.status !== GOAL_STATUS.ACTIVE || goalEvaluation?.satisfied === true || plan?.status === PLAN_STATUS.BLOCKED) return wake
     const softLimitTokens = this.restageSoftLimitTokens(PLANNER_ROLE)
     const decision = decideRestage({
       role: PLANNER_ROLE,
@@ -6936,7 +6949,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     const roundPhase = this.providerRoundPhase(effectiveAllowTools, triggerSource)
     const requestChars = providerMessages.reduce((total, message) => total + messageChars(message), 0)
-    const attribution = this.agentContext.beginRequest(requestChars) // U4: which conversation this round belongs to
+    const prefixChars = providerMessages.filter((message, index) => message?.role === 'system' && providerMessages.slice(0, index).every(before => before?.role === 'system')).reduce((total, message) => total + messageChars(message), 0)
+    const attribution = this.agentContext.beginRequest(requestChars, { prefixChars }) // U4: which conversation this round belongs to
     this.turnConversation = attribution
     await this.traceEvent('provider.request', {
       round,

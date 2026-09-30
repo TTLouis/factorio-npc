@@ -17,7 +17,10 @@
 //
 // The text is one paragraph (the loop's durable-text cleaner folds newlines);
 // records are separated by ` || `. Whole records only: over the limit the
-// lowest-priority records drop in a fixed order, never cut mid-record.
+// optional records (receipts, evidence refs, per-step time) drop in a fixed
+// order, then step and doneWhen lines collapse into a "...N more" line, so
+// maxChars is a hard cap. Model-authored text cannot carry the separator or a
+// bracketed harness marker.
 
 import { sanitizeDurableModelText } from './durable-text.mjs'
 import { goalUiView } from './goal-definition.mjs'
@@ -40,8 +43,14 @@ export const VERIFIED_RESULTS_DROP_ORDER = Object.freeze(['receipt', 'evidence',
 
 export const VERIFIED_RESULTS_HEADER = '[VERIFIED_RESULTS] Built by the harness from the reducer ledger and the game, not from the conversation. It is evidence for this plan slice only: the game decides the goal from doneWhen at every slice close, and this message never claims the goal is done.'
 
+// Model-authored text (step descriptions, receipt summaries, condition text)
+// must not be able to imitate a harness record: the record separator and the
+// bracketed harness markers ([MOD], [VERIFIED_RESULTS], ...) are neutralized.
+// Unit numbers are redacted by the durable-text sanitizer.
 function clip(value, max) {
   return sanitizeDurableModelText(value, max)
+    .replace(/\|{2,}/g, '|')
+    .replace(/\[([A-Za-z][A-Za-z0-9_]{2,})\]/g, '($1)')
 }
 
 function seconds(value) {
@@ -141,6 +150,24 @@ export function buildVerifiedResults({ planningState, goalEvaluation, stepTimes 
     kept = kept.filter(item => item !== record)
     dropped.push(record.key)
     text = render(kept)
+  }
+  // Still over: the step lines and doneWhen lines are capped too. From the last
+  // one back, they collapse into one "...N more" line, so the limit is a hard
+  // cap (header, plan line, goal progress and time lines are bounded by
+  // construction). Whole lines only.
+  for (const { prefix, label } of [{ prefix: 'step_', label: 'steps' }, { prefix: 'done_', label: 'doneWhen conditions' }]) {
+    const lines = kept.filter(record => record.key.startsWith(prefix))
+    let collapsed = 0
+    while (text.length > limits.maxChars && collapsed < lines.length) {
+      const victim = lines[lines.length - 1 - collapsed]
+      kept = kept.filter(item => item !== victim && item.key !== `${prefix}more`)
+      collapsed += 1
+      dropped.push(victim.key)
+      const summary = { key: `${prefix}more`, text: `... ${collapsed} more ${label} not shown (bounded message)` }
+      const lastKept = kept.map(item => item.key.startsWith(prefix)).lastIndexOf(true)
+      kept = lastKept >= 0 ? [...kept.slice(0, lastKept + 1), summary, ...kept.slice(lastKept + 1)] : [...kept, summary]
+      text = render(kept)
+    }
   }
   return { text, chars: text.length, dropped, over_limit: text.length > limits.maxChars, plan_id: plan?.plan_id }
 }

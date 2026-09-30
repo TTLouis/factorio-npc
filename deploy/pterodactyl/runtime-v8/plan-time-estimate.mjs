@@ -574,14 +574,21 @@ export class PlanTiming {
     }]
   }
 
-  // Time records of the given steps (U7): the harness estimate and the wall
-  // clock measured at each step's close. A step with no admitted hand work has
-  // no record and reads as `{ step_id }` only.
-  closedStepTimes(stepIds) {
-    const byStep = new Map([...this.steps.values()].map(record => [record.step_id, record]))
-    return (Array.isArray(stepIds) ? stepIds : []).map((stepId) => {
-      const record = byStep.get(stepId)
-      if (!record?.closed) return { step_id: stepId }
+  // Time records of one plan's steps (U7): the harness estimate and the wall
+  // clock measured at each step's close. Records are keyed by the legacy board's
+  // step id (`step_N`), which repeats across plans and goals, so a record counts
+  // only when it is the SAME goal (`goalId`), the same step position, and
+  // started at or after `sinceMs` (the plan's commit time): a step of this slice
+  // with no admitted hand work must not read an earlier slice's time. Without a
+  // goal id nothing matches. A step with no matching record reads as `{ step_id }`.
+  closedStepTimes(stepIds, { goalId, sinceMs = 0 } = {}) {
+    return (Array.isArray(stepIds) ? stepIds : []).map((stepId, index) => {
+      const record = goalId === undefined || goalId === null
+        ? undefined
+        : [...this.steps.values()]
+            .filter(item => item.closed && item.goal_id === goalId && item.step_index === index && item.started_at >= (Number.isFinite(sinceMs) ? sinceMs : 0))
+            .sort((left, right) => right.started_at - left.started_at)[0]
+      if (!record) return { step_id: stepId }
       const machine = machineWaitSeconds(record)
       return {
         step_id: stepId,
