@@ -39,6 +39,7 @@ import {
   askableSteeringPressures,
   steeringPressureDefinitions,
 } from './planning-state.mjs'
+import { markRequestSliceClosed, requestSliceCeiling } from './restage-policy.mjs'
 import { emptyJevHealth, recordJevHealth, recordPendingDecisionRequest, settlePendingDecisionRequest, summarizeJevHealth, takePendingDecisionRequest } from './jev-health.mjs'
 import { describeUnmetGoalResult, evaluateGoalDefinition, formatGoalProgress, GOAL_SCOPE, needsGoalBaseline, sanitizeGoalDefinition } from './goal-definition.mjs'
 import {
@@ -5950,6 +5951,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         plan_id: reducerPlanAfterCompletion.plan_id,
         task_board: completedBoard,
       })
+      await this.closeOutputSlice('next_shelf_slice')
       await this.traceEvent('planner.wake', {
         source: 'planning_boundary',
         route: 'next_shelf_slice',
@@ -6048,6 +6050,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       && (hasLongHorizonRoadmap || goalDefinition)
       && allowContinuation
       && planningAfterCompletion?.goal?.status === GOAL_STATUS.ACTIVE) {
+      await this.closeOutputSlice('active_goal_after_plan_completion')
       await this.traceEvent('planner.wake', {
         source: 'planning_boundary',
         route: 'active_goal_after_plan_completion',
@@ -6428,6 +6431,28 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return REQUEST_OUTPUT_CEILING_CAPS * this.maxProviderOutputUnits
   }
 
+  // U5: the ceiling applies to one plan slice (aggregate - slice baseline).
+  sliceOutputCeiling() {
+    return requestSliceCeiling(this.traceRequest, this.requestOutputCeiling())
+  }
+
+  // The plan-slice-completed boundary (settleCompletedStepState, before the next
+  // slice's planner wake): the next slice starts counting from here. A step
+  // close inside a slice never resets it.
+  async closeOutputSlice(route) {
+    const before = this.sliceOutputCeiling()
+    const baseline = markRequestSliceClosed(this.traceRequest)
+    if (baseline === undefined) return
+    await this.traceEvent('budget.slice_baseline_reset', {
+      route,
+      previous_slice_output_baseline: before.baseline,
+      slice_output_units: before.used,
+      slice_output_baseline: baseline,
+      aggregate_output_units: before.aggregate,
+      request_output_ceiling: this.requestOutputCeiling(),
+    })
+  }
+
   // A request that runs out of output budget (the per-step cap, the context
   // window, an exhausted budget recovery, or the request-wide ceiling) ends
   // visibly with one chat line (1.5); it never ends as a silent `blocked` plan
@@ -6450,10 +6475,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const blocker = blocked ? cleanMemoryText(previousState?.blocker, 160) : ''
     const generation = this.providerBudgetGeneration
     const generationOutputUnits = this.providerBudgetGenerationOutputUnits
-    const requestOutputUnits = this.traceRequest?.usage?.output_units
+    // U5: the ceiling figures are the current slice's (the aggregate when no
+    // slice has closed yet, so a single-slice request reads exactly as before).
+    const sliceView = this.sliceOutputCeiling()
+    const requestOutputUnits = sliceView.used
     const units = value => Number(value ?? 0).toLocaleString('en-US')
     const spent = ceiling
-      ? `this request used its whole output allowance (${units(requestOutputUnits)} of ${units(this.requestOutputCeiling())} units across ${generation} step budget${generation === 1 ? '' : 's'})`
+      ? sliceView.baseline > 0
+        ? `this request used its whole output allowance for the current plan slice (${units(requestOutputUnits)} of ${units(this.requestOutputCeiling())} units across ${generation} step budget${generation === 1 ? '' : 's'}; ${units(sliceView.aggregate)} in all)`
+        : `this request used its whole output allowance (${units(requestOutputUnits)} of ${units(this.requestOutputCeiling())} units across ${generation} step budget${generation === 1 ? '' : 's'})`
       : code === 'provider_turn_output_cap_exceeded'
         ? `the model used its whole output budget for this step (${units(generationOutputUnits)} of ${units(this.maxProviderOutputUnits)} units)`
         : `the model request ran out of budget (${code})`
@@ -6508,6 +6538,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       output_cap: this.maxProviderOutputUnits,
       request_output_units: requestOutputUnits,
       request_output_ceiling: this.requestOutputCeiling(),
+      aggregate_output_units: sliceView.aggregate,
+      slice_output_baseline: sliceView.baseline,
       chat_message: chatMessage,
     })
     await this.traceEvent('request.completed', {
@@ -6899,16 +6931,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         throw capError
       }
       const requestCeiling = this.requestOutputCeiling()
-      if (Number.isSafeInteger(aggregateOutputUnits) && aggregateOutputUnits > requestCeiling) {
+      const sliceCeiling = this.sliceOutputCeiling()
+      if (sliceCeiling.exceeded) {
         await this.traceEvent('budget.request_ceiling_exceeded', {
           reason: 'request_output_ceiling',
-          request_output_units: aggregateOutputUnits,
+          request_output_units: sliceCeiling.used,
           request_output_ceiling: requestCeiling,
+          aggregate_output_units: sliceCeiling.aggregate,
+          slice_output_baseline: sliceCeiling.baseline,
           output_cap: this.maxProviderOutputUnits,
           budget_generation: this.providerBudgetGeneration,
           provider_calls: this.traceRequest?.usage?.provider_calls,
         })
-        const ceilingError = new AgentLoopError(`request_output_ceiling: request used ${aggregateOutputUnits} > ${requestCeiling} output units across ${this.providerBudgetGeneration} budget generation(s)`)
+        const ceilingError = new AgentLoopError(`request_output_ceiling: request used ${sliceCeiling.used} > ${requestCeiling} output units across ${this.providerBudgetGeneration} budget generation(s)`)
         ceilingError.code = 'request_output_ceiling'
         throw ceilingError
       }

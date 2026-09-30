@@ -154,3 +154,29 @@ export function sliceCeilingState({ aggregateOutputUnits, baseline = 0, ceiling 
     exceeded: used !== undefined && hasCeiling && used > ceiling,
   }
 }
+
+/**
+ * The slice-ceiling view of one trace request, for the loop's call sites: the
+ * slice state plus the aggregate and the baseline actually applied (the
+ * baseline is clamped to 0 when the aggregate restarted below it, so it is
+ * never negative or stale). The baseline lives on the trace request as
+ * `slice_output_baseline`, so it starts at 0 with every new request, exactly
+ * where the aggregate starts.
+ */
+export function requestSliceCeiling(traceRequest, ceiling) {
+  const aggregate = traceRequest?.usage?.output_units
+  const recorded = resetSliceBaseline(traceRequest?.slice_output_baseline)
+  const baseline = Number.isSafeInteger(aggregate) && aggregate < recorded ? 0 : recorded
+  return {
+    ...sliceCeilingState({ aggregateOutputUnits: aggregate, baseline, ceiling }),
+    aggregate: Number.isSafeInteger(aggregate) ? aggregate : undefined,
+    baseline,
+  }
+}
+
+/** Record a slice close on the trace request: the baseline becomes the current aggregate. Returns it. */
+export function markRequestSliceClosed(traceRequest) {
+  if (!traceRequest || typeof traceRequest !== 'object') return undefined
+  traceRequest.slice_output_baseline = resetSliceBaseline(traceRequest.usage?.output_units)
+  return traceRequest.slice_output_baseline
+}
