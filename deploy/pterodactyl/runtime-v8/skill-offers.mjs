@@ -307,6 +307,8 @@ async function runSkillChoice(loop, offer, trigger, base) {
     const applied = confident && SKILL_CHOICE_MODE === SKILL_CHOICE_MODES.ADVISORY
     offer.jev = { pick: choice.pick, confidence: choice.confidence, order: choice.order }
     offer.advisor = applied ? { applied: true, pick: choice.pick, confidence: choice.confidence } : null
+    // U11: the pick goes through the judgment ledger so it is scored against what the fresh agent then loads.
+    await loop.jev?.recordSkillOrder({ offer, choice, deterministicOrder: base.deterministic_order, latencyMs: latency })
     await loop.traceEvent('skill.ranked', {
       ...base,
       ...correlation,
@@ -485,11 +487,14 @@ export async function traceSkillLoaded(loop, skill) {
 // skills were loaded into [SKILL_CONTEXT]. Emitted once per distinct loaded set
 // per offer.
 export async function traceSkillsFollowed(loop, plan) {
+  const loaded = loop.loadedSkillContext instanceof Map ? [...loop.loadedSkillContext.keys()] : []
   if (loop.skillOffers?.authoring && Array.isArray(plan?.plan) && plan.plan.length > 0) {
     loop.skillOffers.authoring = false
+    // What the fresh agent had loaded when it committed: a late Jev answer is still scored against it (U11).
+    loop.skillOffers.retired_loaded = loaded
     await loop.traceEvent('skill.offer_retired', { reason: 'plan_committed', trigger: loop.skillOffers.trigger })
+    await loop.jev?.scoreSkillOrderAtCommit({ offer: loop.skillOffers, loaded })
   }
-  const loaded = loop.loadedSkillContext instanceof Map ? [...loop.loadedSkillContext.keys()] : []
   if (loaded.length === 0) return
   const key = loaded.slice().sort().join(',')
   if (loop.lastFollowedSkillKey === key) return

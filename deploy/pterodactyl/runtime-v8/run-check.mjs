@@ -62,7 +62,45 @@ import { estimateTokensFromChars } from './restage-policy.mjs'
 //   write; see DELEGATION_TRACE_ROWS below for the exact shapes. Nothing emits
 //   them yet, so on every current trace these three signatures find nothing.
 
+// - jev_family_demoted, jev_deciding_skip_unverified: Jev at the delegation checkpoints (unit U11, design
+//   note sections 7 and 12f). They read the judgment-ledger rows (JEV_TRACE_ROWS below): a judgment family whose
+//   rolling agreement fell under 90% and was demoted to shadow, and a judgment that ACTED (a deciding route
+//   that skipped a wake) whose outcome disagreed, meaning the step it skipped the wake for did not verify on
+//   its first batch.
+
 const LOOP_MIN_COUNT = 2
+
+/**
+ * Trace rows the U11 judgment ledger writes (jev-checkpoints.mjs). Every one carries `request_id` (envelope and
+ * `data.request_id`) and a `reason`, except jev.stage_clamped_on_restore, which is written at restore with no
+ * request open.
+ *
+ * - `jev.judgment_recorded`: family, judgment_id, stage (shadow | advisory | deciding), acted (the judgment changed
+ *   behavior), jev_choice, jev_confidence, alternative (what the deterministic code or the LLM does instead),
+ *   goal_id, plan_id, step_id, checkpoint, saving_estimate.
+ * - `jev.judgment_scored`: the outcome scored it. agreed, acted, realized (a saving that really happened, not a
+ *   would-have), saving {wakes, tokens, calls}, outcome {...bounded facts}, stage (the family's stage after this
+ *   judgment), scored_total, rolling_agreement, ledger {scored, agreement, stage, would_save, saved,
+ *   removal_candidate}.
+ * - `jev.stage_changed`: family, from, to, direction (promoted | demoted), reason, agreement, evidence.
+ * - `jev.judgment_skipped` (Jev unavailable, fell back, or degraded: never counted as agreement) and
+ *   `jev.judgment_unscored` (abandoned before an outcome).
+ * - `c4.next_step_clear`, `c4.route_applied` (mode shadow | deciding), `c4.wake_measured` (tokens of the wake that ran).
+ */
+export const JEV_TRACE_ROWS = Object.freeze({
+  events: Object.freeze({
+    recorded: 'jev.judgment_recorded',
+    scored: 'jev.judgment_scored',
+    stageChanged: 'jev.stage_changed',
+    skipped: 'jev.judgment_skipped',
+    unscored: 'jev.judgment_unscored',
+    clamped: 'jev.stage_clamped_on_restore',
+    c4Clear: 'c4.next_step_clear',
+    c4Route: 'c4.route_applied',
+    c4Wake: 'c4.wake_measured',
+  }),
+  c4Family: 'c4_next_step',
+})
 
 /**
  * Trace rows the delegation emitter (U4) must write so run-check and the run
@@ -511,6 +549,33 @@ function detectStaleRepliesNotDropped(all, inScope) {
   }))
 }
 
+// A judgment family whose rolling agreement dropped under 90% and was demoted to shadow.
+function detectJevFamilyDemoted(rows) {
+  const matches = rows.filter(row => row?.event === JEV_TRACE_ROWS.events.stageChanged && row?.data?.direction === 'demoted')
+  if (matches.length === 0) return undefined
+  const first = matches[0].data
+  return {
+    count: matches.length,
+    first_ts: firstTsOf(matches),
+    detail: `${first.family} demoted ${first.from} -> ${first.to}: ${nonEmptyString(first.reason) ?? 'rolling agreement below threshold'}${matches.length > 1 ? ` (+${matches.length - 1} more)` : ''}`,
+  }
+}
+
+// A deciding C4 judgment skipped a wake and its outcome disagreed: the step did not verify on its first batch.
+function detectJevDecidingSkipUnverified(rows) {
+  const matches = rows.filter(row => row?.event === JEV_TRACE_ROWS.events.scored
+    && row?.data?.family === JEV_TRACE_ROWS.c4Family
+    && row?.data?.acted === true
+    && row?.data?.agreed === false)
+  if (matches.length === 0) return undefined
+  const outcome = matches[0].data.outcome ?? {}
+  return {
+    count: matches.length,
+    first_ts: firstTsOf(matches),
+    detail: `deciding route skipped the wake for ${nonEmptyString(matches[0].data.judgment_id) ?? 'a judgment'} but the step did not verify on its first batch (verified=${outcome.step_verified}, failure_boundary=${outcome.had_failure_boundary})${matches.length > 1 ? ` (+${matches.length - 1} more)` : ''}`,
+  }
+}
+
 const SIGNATURES = [
   {
     id: 'observation_phase_closed_loop',
@@ -556,6 +621,16 @@ const SIGNATURES = [
     id: 'restage_packet_oversize',
     label: 'restage packet over the size limit',
     detect: detectOversizePacket,
+  },
+  {
+    id: 'jev_family_demoted',
+    label: 'Jev judgment family demoted (rolling agreement under 90%)',
+    detect: detectJevFamilyDemoted,
+  },
+  {
+    id: 'jev_deciding_skip_unverified',
+    label: 'Jev deciding route skipped a wake and the step did not verify on its first batch',
+    detect: detectJevDecidingSkipUnverified,
   },
 ]
 

@@ -57,12 +57,17 @@ export const HANDOFF_PACKET_LIMITS = Object.freeze({
   contractChars: 300,
   runtimeChars: 200,
   amendmentChars: 500,
+  // U11 advisory: what Jev's observation families may ADD. Bounded by count and length, and the first records dropped
+  // when the packet is over its limit (they are never mandatory).
+  jevFacts: 4,
+  jevFactChars: 300,
 })
 
 // Drop order when over the limit: first entry is dropped first. Receipts go
 // oldest first inside their group. Steps drop completed (earliest first) before
 // pending (last first). Anything not listed is mandatory.
 export const HANDOFF_DROP_ORDER = Object.freeze([
+  'jev_facts',
   'note',
   'receipt',
   'skills',
@@ -217,7 +222,35 @@ function contractText(step, max) {
   return oneLine(`${contract.mode}: ${parts.join('; ')}`, max)
 }
 
-function stepRecords(state, plan, activeIndex, limits, { role, checkpoint, reason, budget, note, actor, runtime, amendment }) {
+// Jev's advisory additions (U11): deterministic facts the harness read for the families Jev selected, and one hint
+// line naming families that have no parameterless fact read. They only ADD; nothing mandatory is replaced or
+// removed, and they are the first records dropped when the packet is over its size limit.
+function jevFactRecords(jevFacts, jevHints, limits) {
+  const records = []
+  const facts = (Array.isArray(jevFacts) ? jevFacts : []).filter(fact => fact && typeof fact.family === 'string' && typeof fact.text === 'string' && fact.text).slice(0, limits.jevFacts)
+  facts.forEach((fact, index) => {
+    records.push({
+      key: `jev_fact_${index}`,
+      block: 'step',
+      drop: 'jev_facts',
+      rank: index,
+      text: `jev_fact[${oneLine(fact.family, 40)}] (harness read at this restage, selected by Jev; advisory, verify before acting): ${oneLine(sanitizeDurableModelText(fact.text, limits.jevFactChars), limits.jevFactChars)}`,
+    })
+  })
+  const hints = (Array.isArray(jevHints) ? jevHints : []).filter(family => typeof family === 'string' && family).slice(0, limits.jevFacts)
+  if (hints.length > 0) {
+    records.push({
+      key: 'jev_fact_hint',
+      block: 'step',
+      drop: 'jev_facts',
+      rank: -1,
+      text: `jev_fact_hint (Jev, advisory): lookups likely useful here: ${oneLine(hints.join(', '), limits.jevFactChars)}`,
+    })
+  }
+  return records
+}
+
+function stepRecords(state, plan, activeIndex, limits, { role, checkpoint, reason, budget, note, actor, runtime, amendment, jevFacts, jevHints }) {
   const records = [
     { key: 'restage', block: 'step', text: `restage: role=${role} checkpoint=${checkpoint}${reason ? ` reason=${oneLine(reason, limits.reasonChars)}` : ''}` },
   ]
@@ -268,6 +301,7 @@ function stepRecords(state, plan, activeIndex, limits, { role, checkpoint, reaso
   if (skills.length > 0) records.push({ key: 'skills', block: 'step', drop: 'skills', text: `loaded_skills: ${skills.join(', ')}` })
   const runtimeLine = scalarLine(runtime, RUNTIME_KEYS, limits.runtimeChars)
   if (runtimeLine) records.push({ key: 'runtime', block: 'step', drop: 'runtime', text: `runtime: ${runtimeLine}` })
+  records.push(...jevFactRecords(jevFacts, jevHints, limits))
   const budgetLine = oneLine(budget, limits.budgetChars)
   if (budgetLine) records.push({ key: 'budget', block: 'step', drop: 'budget', text: `budget: ${budgetLine}` })
   const noteText = sanitizeHandoffNote(note, limits.noteChars)
@@ -311,8 +345,10 @@ export function estimateTokens(chars) {
  * @param {object} [args.actor] fresh actor snapshot (actor_id, actor_kind, epoch, connected_players); never dropped
  * @param {object} [args.runtime] compact runtime state (task_state, queue_length, idle)
  * @param {{sender:string,text:string}} [args.amendment] a staged user amendment not yet applied (mandatory, never dropped by size)
+ * @param {{family:string,text:string}[]} [args.jevFacts] U11 advisory: bounded deterministic facts for the families Jev selected (dropped first when over size)
+ * @param {string[]} [args.jevHints] U11 advisory: families Jev selected that have no parameterless fact read (one hint line)
  */
-export function buildHandoffPacket({ planningState, role, checkpoint, reason = '', note = '', budget = '', actor, runtime, shelfCandidates, amendment, previousContextChars, now, limits: limitOverrides } = {}) {
+export function buildHandoffPacket({ planningState, role, checkpoint, reason = '', note = '', budget = '', actor, runtime, shelfCandidates, amendment, jevFacts, jevHints, previousContextChars, now, limits: limitOverrides } = {}) {
   if (!CONTEXT_RESTAGE_ROLES.includes(role)) throw new RangeError(`handoff role must be one of ${CONTEXT_RESTAGE_ROLES.join(', ')}`)
   if (!CONTEXT_RESTAGE_CHECKPOINTS.includes(checkpoint)) throw new RangeError(`handoff checkpoint must be one of ${CONTEXT_RESTAGE_CHECKPOINTS.join(', ')}`)
   if (!planningState?.goal?.goal_id) throw new RangeError('handoff packet needs a planning state with a goal')
@@ -325,7 +361,7 @@ export function buildHandoffPacket({ planningState, role, checkpoint, reason = '
     ...goalRecords(planningState, limits),
     ...(roadmap ? [roadmap] : []),
     ...planRecords(plan, activeIndex, limits),
-    ...stepRecords(planningState, plan, activeIndex, limits, { role, checkpoint, reason, budget, note, actor, runtime, amendment }),
+    ...stepRecords(planningState, plan, activeIndex, limits, { role, checkpoint, reason, budget, note, actor, runtime, amendment, jevFacts, jevHints }),
     ...shelfCandidateRecords(shelfCandidates, limits),
   ]
 

@@ -13,6 +13,7 @@ import {
 import { AgentContext, contextRestagedRow, conversationChars, STALE_REDRIVE_LIMIT, STALE_REPLY_ERROR_CODE, STALE_REPLY_MESSAGE } from './agent-context.mjs'
 import { EXECUTOR_ROLE, PLANNER_ROLE, roleSystemPrompt } from './agent-roles.mjs'
 import { buildHandoffPacket } from './handoff-packet.mjs'
+import { JevCheckpoints } from './jev-checkpoints.mjs'
 import { buildVerifiedResults } from './verified-results.mjs'
 import { cleanMemoryText, sanitizeDurableModelText, sanitizeDurableModelValue } from './durable-text.mjs'
 import { normalizeProviderPlanContent, providerCapabilityProfile } from './provider.mjs'
@@ -2572,6 +2573,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.planTiming = new PlanTiming()
     // 2.7: usage per goal and the goal budget warning.
     this.usageLedger = new UsageLedger({ outputCap: this.maxProviderOutputUnits })
+    // U11: Jev at the delegation checkpoints (jev-checkpoints.mjs). Every family starts in shadow and is promoted or
+    // demoted from its scored judgments; there is no setting. `jevCheckpoints: false` is a construction option for the
+    // tests that compare a run with and without these judgments (never an env setting).
+    this.jev = new JevCheckpoints(this, { enabled: options.jevCheckpoints !== false })
     this.chatAcknowledger = new ChatAcknowledger() // 2.10
     this.agentContext.config = options.agentRoleConfig ?? options.providerConfig // names the role's model only (agent-roles.mjs)
     // U6: a committed plan slice is executed by a fresh executor conversation (C3). On by default
@@ -2730,7 +2735,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // (the slice-close wake passes the state it just settled); `shelfCandidates`
   // rides a planner restage at a shelf pickup. Undefined when no goal has been
   // admitted (a reducer-less memory, a goal that never started).
-  buildRestagePacket({ checkpoint, role, reason, budget, note, actor, runtime, shelfCandidates, planningState } = {}) {
+  buildRestagePacket({ checkpoint, role, reason, budget, note, actor, runtime, shelfCandidates, planningState, jevFacts, jevHints } = {}) {
     const packetRole = role ?? this.agentContext.role
     const held = planningState ?? this.memory.planningState?.(this.activePlanKey())
     if (!held?.goal?.goal_id) return undefined
@@ -2747,6 +2752,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       actor,
       runtime,
       shelfCandidates,
+      jevFacts, // U11 advisory: bounded facts Jev's observation families add (never replacing a mandatory record)
+      jevHints,
       // A staged user amendment belongs to the planner: it rides the packet of a planner restage (C5,
       // C1/C2) so the restage that replaces the conversation holding its text does not drop it. The
       // executor never gets it.
@@ -2787,18 +2794,49 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const role = args.role ?? args.packet?.event?.role ?? this.agentContext.role
     const checkpoint = args.checkpoint ?? args.packet?.event?.checkpoint
     try {
-      const state = args.planningState ?? this.memory.planningState?.(this.activePlanKey())
+      let state = args.planningState ?? this.memory.planningState?.(this.activePlanKey())
       if (!state?.goal?.goal_id) return { restaged: false, reason: 'no_admitted_goal' }
-      const refusal = state.goal.status !== GOAL_STATUS.ACTIVE
+      const stateRefusal = (held) => (held.goal.status !== GOAL_STATUS.ACTIVE
         ? 'goal_not_active'
-        : getActivePlanningPlan(state)?.status === PLAN_STATUS.BLOCKED ? 'plan_blocked' : undefined
+        : getActivePlanningPlan(held)?.status === PLAN_STATUS.BLOCKED ? 'plan_blocked' : undefined)
+      let refusal = stateRefusal(state)
       if (refusal) {
         await this.traceEvent('context.restage_refused', { role, checkpoint, handoff_id: args.packet?.handoff_id, reason: refusal }, { requestId })
         return { restaged: false, reason: refusal }
       }
-      const packet = args.packet ?? this.buildRestagePacket({ ...args, role, planningState: state })
-      if (!packet) return { restaged: false, reason: 'no_admitted_goal' }
-      return await this.restageContext({ checkpoint, reason: args.reason, packet, role, softLimitTokens: args.softLimitTokens, requestId, safePoint, parkPlanner: args.parkPlanner })
+      // U11: Jev's observation families for this restage. Shadow asks nothing here and awaits nothing (the call starts
+      // after the restage has landed). Advisory needs the answer for the packet: it asks only when the guard that could
+      // refuse this restage passes NOW (never burn a call on a restage that will be refused), waits a bounded time, then
+      // state is read again and the restage's own guard (restageContext) runs after the await.
+      let prepared
+      if (!args.packet && this.jev.available()) {
+        const needsAnswer = this.jev.stage('observation_families') !== 'shadow'
+        if (!needsAnswer || !this.restageGuardRefusal(safePoint)) {
+          prepared = await this.jev.prepareRestage({ checkpoint, role, planningState: state, reason: args.reason, requestId })
+          if (needsAnswer) {
+            // The reducer is read again after the wait, for a caller-supplied state too (the slice-close wake passes the state it
+            // settled): a goal that stopped being active or a plan that became BLOCKED refuses the restage, and a plan that is no
+            // longer the one the caller settled means the state moved on. The caller's state is kept only while the plan is the same.
+            const fresh = this.memory.planningState?.(this.activePlanKey()) ?? state
+            refusal = stateRefusal(fresh)
+            if (!refusal && args.planningState && (fresh.active_plan_id ?? null) !== (args.planningState.active_plan_id ?? null)) refusal = 'state_moved_on_during_jev_wait'
+            if (refusal) {
+              await this.jev.afterRestage(prepared, { restaged: false, reason: refusal })
+              await this.traceEvent('context.restage_refused', { role, checkpoint, reason: refusal }, { requestId })
+              return { restaged: false, reason: refusal }
+            }
+            if (!args.planningState) state = fresh
+          }
+        }
+      }
+      const packet = args.packet ?? this.buildRestagePacket({ ...args, role, planningState: state, jevFacts: prepared?.facts, jevHints: prepared?.hints })
+      if (!packet) {
+        await this.jev.afterRestage(prepared, { restaged: false, reason: 'no_admitted_goal' })
+        return { restaged: false, reason: 'no_admitted_goal' }
+      }
+      const restaged = await this.restageContext({ checkpoint, reason: args.reason, packet, role, softLimitTokens: args.softLimitTokens, requestId, safePoint, parkPlanner: args.parkPlanner })
+      await this.jev.afterRestage(prepared, restaged)
+      return restaged
     }
     catch (error) {
       const message = cleanMemoryText(error instanceof Error ? error.message : String(error), 300)
@@ -2869,15 +2907,22 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // frozen (BLOCKED) plan waits for the user, and a goal that is met or no
     // longer active is not woken for another slice.
     if (planningState.goal.status !== GOAL_STATUS.ACTIVE || goalEvaluation?.satisfied === true || plan?.status === PLAN_STATUS.BLOCKED) return wake
+    // U11: a verified slice scores the shelf ranking whose picked node it refined; then Jev ranks the complete
+    // candidate set for this pickup (shadow: recorded and scored; advisory: orders the packet's candidates only).
+    await this.jev.onSliceClosed()
+    const { candidates: shelfCandidates, ranking } = await this.shelfCandidatesForPickup({ route, planningState, withinTurn })
     // U6: the slice is closed, so the executor's work is done. Control returns to the
     // planner conversation (parked at the plan commit, untouched by executor traffic),
     // which the wake below then briefs with the verified results.
     // When it cannot happen the executor is NEVER woken to author the next slice: the caller ends the
     // request visibly (endSliceWithoutPlanner) and no model runs.
     if (this.agentContext.role === EXECUTOR_ROLE) {
-      const returned = await this.returnControlToPlannerWithRetry({ route, planningState, withinTurn, reason: 'slice_close', requestId })
+      const returned = await this.returnControlToPlannerWithRetry({ route, planningState, withinTurn, reason: 'slice_close', requestId, shelfCandidates })
       if (!returned.returned) return { ...wake, unavailable: { route, reason: returned.reason ?? 'planner_unavailable' } }
-      if (!returned.resumed) return { ...wake, restaged: true, checkpoint: returned.checkpoint, result: returned.result }
+      if (!returned.resumed) {
+        await this.jev.markShelfApplied(ranking) // the ordered candidates reached the fresh planner's packet
+        return { ...wake, restaged: true, checkpoint: returned.checkpoint, result: returned.result }
+      }
     }
     if (this.agentContext.role !== PLANNER_ROLE) return wake
     const softLimitTokens = this.restageSoftLimitTokens(PLANNER_ROLE)
@@ -2888,7 +2933,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       softLimitTokens,
     })
     if (!decision.restage) return wake
-    const candidates = shelfRefinementCandidates(planningState, { limit: 5 })
+    const candidates = shelfCandidates
     const checkpoint = route === 'next_shelf_slice' && candidates.length > 0 ? 'C2' : decision.checkpoint
     // An actor replacement or a reset during the awaits above must fail safe:
     // the conversation is not swapped for a turn that no longer exists.
@@ -2909,7 +2954,45 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       softLimitTokens,
       requestId,
     })
+    if (result.restaged === true) await this.jev.markShelfApplied(ranking) // the ordered candidates reached the packet
     return { ...wake, restaged: result.restaged === true, checkpoint, result }
+  }
+
+  // The shelf candidates a planner wake shows (at most 5). The deterministic order is the default; Jev's ranking of
+  // the COMPLETE ready set (U11) reorders it only once the family has earned advisory, and never adds or drops one.
+  async shelfCandidatesForPickup({ route, planningState, withinTurn = false }) {
+    const all = shelfRefinementCandidates(planningState, { limit: 32 })
+    if (route !== 'next_shelf_slice') return { candidates: all.slice(0, 5), ranking: undefined }
+    // Jev's answer is waited for (bounded) only when the ordering can reach a packet that is about to be built; shadow, and
+    // an advisory pickup with no packet, are fire-and-forget.
+    const needsAnswer = this.jev.available() && this.jev.stage('shelf_ranking') !== 'shadow' && this.shelfRestageExpected({ withinTurn })
+    const ranking = await this.jev.rankShelf({ route, planningState, candidates: all, needsAnswer })
+    return { candidates: ranking.ordered.slice(0, 5), ranking }
+  }
+
+  // Will this slice close build a planner packet (so a shelf ordering has somewhere to go)? An executor with a parked planner
+  // resumes it (no packet); one without, and a planner past its soft limit, restage; a restage the guard refuses now is not
+  // expected (and no Jev call is spent on it).
+  shelfRestageExpected({ withinTurn = false } = {}) {
+    if (this.restageGuardRefusal(withinTurn ? (this.turnToken ?? undefined) : undefined)) return false
+    if (this.agentContext.role === EXECUTOR_ROLE) {
+      // Without a parked planner a fresh one is built from a packet. With one, it is resumed as it was: a packet only
+      // happens if the resumed planner's own size is past its soft limit (the wake then restages it in the same step).
+      if (!this.agentContext.hasParkedPlanner) return true
+      return decideRestage({
+        role: PLANNER_ROLE,
+        boundary: RESTAGE_BOUNDARY.SLICE_CLOSE,
+        contextTokens: this.agentContext.parkedPlanner?.size?.tokens ?? 0,
+        softLimitTokens: this.restageSoftLimitTokens(PLANNER_ROLE),
+      }).restage
+    }
+    if (this.agentContext.role !== PLANNER_ROLE) return false
+    return decideRestage({
+      role: PLANNER_ROLE,
+      boundary: RESTAGE_BOUNDARY.SLICE_CLOSE,
+      contextTokens: this.agentContext.sizeTokens,
+      softLimitTokens: this.restageSoftLimitTokens(PLANNER_ROLE),
+    }).restage
   }
 
   // --- executor handoff (U6, plan items 3.4b/3.4d) ---------------------------------------------
@@ -3001,7 +3084,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // when a shelf node is picked up), exactly as a soft-limit restage would. A round
   // or turn that is open refuses it (the wake then proceeds on the existing
   // conversation and the next slice close retries).
-  async returnControlToPlanner({ route, planningState, withinTurn = false, reason = 'slice_close', requestId } = {}) {
+  async returnControlToPlanner({ route, planningState, withinTurn = false, reason = 'slice_close', requestId, shelfCandidates } = {}) {
     const rid = requestId ?? this.traceRequest?.id ?? this.turnScope.getStore()?.requestId
     const fromHandoffId = this.agentContext.handoffId
     const refusal = this.restageGuardRefusal(withinTurn ? (this.turnToken ?? undefined) : undefined)
@@ -3041,7 +3124,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }, { requestId: rid })
       return { returned: true, resumed: true }
     }
-    const candidates = planningState ? shelfRefinementCandidates(planningState, { limit: 5 }) : []
+    const candidates = shelfCandidates ?? (planningState ? shelfRefinementCandidates(planningState, { limit: 5 }) : [])
     const checkpoint = route === 'next_shelf_slice' && candidates.length > 0 ? 'C2' : 'C1'
     const restage = withinTurn ? this.restageInTurn : this.restageBetweenTurns
     const result = await restage.call(this, {
@@ -3341,6 +3424,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       this.memory.restore(parsed)
       this.turnSequence = Math.max(this.turnSequence, this.memory.maxTurnId?.() ?? 0)
       this.log(`[memory] restored durable NPC state from ${this.stateFile}`)
+      // U11: a persisted judgment stage the recorded evidence does not support was clamped down on restore.
+      for (const clamp of this.memory.jevLedgerClamped ?? []) {
+        await this.traceEvent('jev.stage_clamped_on_restore', { ...clamp, reason: 'persisted_stage_not_supported_by_the_recorded_evidence' })
+      }
       for (const item of this.memory.restoreDiagnostics ?? []) {
         this.log(`[memory] plan progress disagrees with the task board after restore: ${JSON.stringify(item)}`)
       }
@@ -5147,9 +5234,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
-  async routePostStepDecision(receipt, { boundary = 'completion', failure = '' } = {}) {
-    const generation = this.generation
-    const current = await this.assertCurrent()
+  // The deterministic checks for work the RUNTIME already owns at a step boundary: queued or running Autorio work, a
+  // healthy persistent controller, an active condition wait. ONE implementation, shared by the post-step gate below and
+  // by the C4 judgment (jev-checkpoints.mjs): a boundary where any of them holds is never handed to a judgment, so a
+  // deciding C4 route can never wake the executor over work the runtime owns. It also keeps latestCompletedBatchId
+  // current, which the gate did as a side effect.
+  async inspectAuthoritativeRuntime(receipt) {
     const persistentRuntime = await this.persistentRuntimeStatus()
     const autorioStatus = receipt?.view && typeof receipt.view === 'object'
       ? receipt.view
@@ -5159,17 +5249,27 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     const autorioRuntimeHealthy = interactionRuntimeHealthy(autorioStatus)
     const persistentControllerHealthy = persistentRuntimeHealthy(persistentRuntime)
-    const planState = this.memory.planByNpc?.get?.(this.activePlanKey()) ?? this.memory.currentPlan?.(this.activePlanKey())
-    let conditionValidation = await this.validateConditionWaitHealth()
-    let conditionWaitHealthy = conditionValidation.healthy === true
-    let runtimeHealthy = autorioRuntimeHealthy || persistentControllerHealthy || conditionWaitHealthy
-    let runtimeReason = autorioRuntimeHealthy
+    const conditionValidation = await this.validateConditionWaitHealth()
+    const conditionWaitHealthy = conditionValidation.healthy === true
+    const runtimeHealthy = autorioRuntimeHealthy || persistentControllerHealthy || conditionWaitHealthy
+    const runtimeReason = autorioRuntimeHealthy
       ? 'autorio_active_work'
       : persistentControllerHealthy
         ? 'persistent_controller_active'
         : conditionWaitHealthy
           ? 'condition_wait_active'
           : ''
+    return { persistentRuntime, autorioStatus, autorioRuntimeHealthy, persistentControllerHealthy, conditionValidation, conditionWaitHealthy, runtimeHealthy, runtimeReason }
+  }
+
+  // `inspected`: the runtime inspection C4 already made for this very receipt (one read per step close).
+  async routePostStepDecision(receipt, { boundary = 'completion', failure = '', inspected: shared } = {}) {
+    const generation = this.generation
+    const current = await this.assertCurrent()
+    const inspected = shared ?? await this.inspectAuthoritativeRuntime(receipt)
+    const { persistentRuntime, autorioStatus, autorioRuntimeHealthy, persistentControllerHealthy } = inspected
+    const planState = this.memory.planByNpc?.get?.(this.activePlanKey()) ?? this.memory.currentPlan?.(this.activePlanKey())
+    let { conditionValidation, conditionWaitHealthy, runtimeHealthy, runtimeReason } = inspected
 
     if (!this.interactionDecisionProvider) {
       if (conditionWaitHealthy) {
@@ -6433,11 +6533,27 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // goal). Derived events skip that pass.
   writeTraceEvent(event, data = {}, requestId) {
     const timing = this.observePlanTiming(event, data)
-    if (!timing) return this.emitTraceRecord(event, data, requestId)
-    const writes = timing.before.map(([name, payload]) => this.emitTraceRecord(name, payload))
+    const judged = this.observeJudgments(event, data, requestId)
+    if (!timing && judged.length === 0) return this.emitTraceRecord(event, data, requestId)
+    const writes = (timing?.before ?? []).map(([name, payload]) => this.emitTraceRecord(name, payload))
     writes.push(this.emitTraceRecord(event, data, requestId))
-    for (const [name, payload] of timing.after) writes.push(this.emitTraceRecord(name, payload))
+    for (const [name, payload] of timing?.after ?? []) writes.push(this.emitTraceRecord(name, payload))
+    for (const [name, payload, rowRequestId] of judged) writes.push(this.emitTraceRecord(name, payload, rowRequestId))
     return Promise.all(writes).then(() => undefined)
+  }
+
+  // U11: the outcomes that score Jev's judgments arrive as ordinary trace rows (a step verified, an operation
+  // batch admitted, a request ended). The ledger scores them and hands back the derived rows (jev.judgment_scored,
+  // jev.stage_changed) to write right after. Never throws into a trace write.
+  observeJudgments(event, data, requestId) {
+    if (!this.jev) return []
+    try {
+      return this.jev.observe(event, data, requestId)
+    }
+    catch (error) {
+      this.log(`[trace] jev judgment scoring failed: ${error instanceof Error ? error.message : String(error)}`)
+      return []
+    }
   }
 
   observePlanTiming(event, data) {
@@ -7092,6 +7208,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       ? { verified: false, reason: 'pending_amendment' }
       : await this.routeStepCompletionDecision(receipt)
     if (stepCompletion?.paused) return this.pauseForPlanBoardDisagreement(stepCompletion.disagreement)
+
     // The reason a step did not close used to be trace-only: the model saw a
     // finished batch and nothing about why the step stayed open.
     const stepOpenHint = stepCompletion?.reason === 'semantic_completion_requires_planner'
@@ -7103,10 +7220,25 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // U6: a step verified inside the slice may put the executor past its hard limit (C8).
     await this.executorStepCloseBoundary({ withinTurn: false })
 
-    const routed = pendingAmendment
-      ? { route: 'fallback_planner', decision_called: false }
-      : await this.routePostStepDecision(receipt)
-    if (routed.route === 'wait_runtime') return null
+    // U11 (C4): is the next committed step clear? In shadow this only records Jev's judgment next to the gate below
+    // (nothing changes); once the family has earned `deciding` and Jev confidently says direct_to_executor, the
+    // gate, the planner-shape call and the observation budget are skipped. The completion gate above already owned
+    // the step close; nothing here advances the tracker.
+    const c4 = pendingAmendment ? undefined : await this.jev.c4Boundary({ stepCompletion, receipt, pendingAmendment })
+    let routed
+    if (c4?.acted) routed = await this.routeDirectToExecutor(c4)
+    else {
+      routed = pendingAmendment
+        ? { route: 'fallback_planner', decision_called: false }
+        : await this.routePostStepDecision(receipt, { inspected: this.jev.takeRuntimeInspection(receipt) })
+      // The Jev decision calls the gate really made here (the gate call, and the planner-shape call when it woke): what a direct
+      // route would not have made. Not LLM wakes.
+      if (c4) await this.jev.noteGateRoute(c4, routed.route, routed.decision_called === true ? (routed.steering?.typed_state_mode ? 2 : 1) : 0)
+    }
+    if (routed.route === 'wait_runtime') {
+      if (c4) await this.jev.discardHandle(c4, 'gate_waits_for_active_runtime')
+      return null
+    }
 
     this.reasoningTriggerSource = routed.route === 'continue_current'
       ? 'post_step_continue'
@@ -7131,15 +7263,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       ? routed.steering.observation_relevance.selected_families
       : null
     this.planningHorizonOverride = routed.steering?.planning_horizon ?? null
+    this.jev.beginWake(c4)
+    let wakeFailed = true
     try {
       const result = await this.continueFromModMessage(
         `[MOD] Autorio operation batch completed. ${stepOpenHint ? `${stepOpenHint} ` : ''}Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}`,
         'factorio.completion_continuation',
       )
+      wakeFailed = false
       if (pendingAmendment) { this.pendingInteractionAmendment = null; this.pendingAmendmentConversationSeq = undefined }
       return result
     }
     finally {
+      // U11: what the wake that ran cost and did (scored when the step verifies). Never masks the wake's own result.
+      try { await this.jev.endWake(c4, { error: wakeFailed }) }
+      catch (error) { this.log(`[jev] wake measurement failed: ${error instanceof Error ? error.message : String(error)}`) }
       this.reasoningTriggerSource = null
       this.reasoningBudgetOverride = previousReasoningBudget
       this.observationBudgetOverride = previousObservationBudget
@@ -7149,9 +7287,34 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  // U11 (C4, deciding stage only): the next committed step is clear, so the executor continues on it directly.
+  // The post-step gate, the planner-shape call and the observation budget are skipped; the route is the existing
+  // `continue_current` (low reasoning). It cannot close or advance a step.
+  async routeDirectToExecutor(c4) {
+    const requestId = this.traceRequest?.id
+    await this.traceEvent('c4.route_applied', {
+      request_id: requestId,
+      judgment_id: c4.judgment_id,
+      mode: 'deciding',
+      jev_choice: 'direct_to_executor',
+      jev_confidence: c4.confidence,
+      applied_route: 'continue_current',
+      skipped: ['post_step_gate', 'planner_shape', 'targeted_observation'],
+      reason: 'family_deciding_and_next_step_clear',
+    })
+    await this.traceEvent('planner.wake', { source: 'c4_next_step_clear', route: 'continue_current', reasoning_policy: 'low' })
+    return {
+      route: 'continue_current',
+      decision_called: false,
+      steering: { observation_budget: 0, observation_relevance: { source: 'typed_relevance', selected_families: [], budget: 0 } },
+      c4: true,
+    }
+  }
+
   async failed(errorText) {
     await this.loadPersistentState()
     if (!this.active) return null
+    await this.jev?.noteFailureBoundary() // U11: a C4 judgment whose step now fails did not verify on its first batch (scored now, whatever the request does next)
     this.planUpdateReason = 'failure'
     this.reasoningTriggerSource = null
     const cleanError = cleanMemoryText(errorText, 4000)
@@ -7224,6 +7387,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   cancel(reason = 'cancelled') {
+    this.jev?.abortAll(reason)
     this.interactionAbort?.abort()
     this.interactionAbort = null
     this.postStepDecisionAbort?.abort()
@@ -8297,6 +8461,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   recordJevObservations(names) {
     if (names.length === 0) return
+    this.jev?.noteObservations(names) // U11: the lookups a fresh agent (or a C4 wake) actually makes
     this.jevObservationLog = [
       ...(this.jevObservationLog ?? []),
       ...names.map(tool => ({ tool, family: observationToolFamily(tool), after_batch: this.latestCompletedBatchId ?? 0 })),
