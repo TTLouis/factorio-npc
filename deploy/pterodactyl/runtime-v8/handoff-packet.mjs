@@ -24,7 +24,7 @@
 // mid-way. Mandatory records are never dropped (the result reports
 // `over_limit: true` if they alone exceed the limit).
 //
-// Unwired: nothing calls this yet.
+// Wired by U8: the C5 budget handoff and the C7 recovery restage build one.
 
 import { createHash } from 'node:crypto'
 
@@ -50,6 +50,8 @@ export const HANDOFF_PACKET_LIMITS = Object.freeze({
   budgetChars: 200,
   skillIds: 16,
   reasonChars: 200,
+  contractChars: 300,
+  runtimeChars: 200,
 })
 
 // Drop order when over the limit: first entry is dropped first. Receipts go
@@ -59,8 +61,10 @@ export const HANDOFF_DROP_ORDER = Object.freeze([
   'note',
   'receipt',
   'skills',
+  'runtime',
   'budget',
   'roadmap_node',
+  'contract',
   'step_completed',
   'step_pending',
 ])
@@ -150,10 +154,45 @@ function planRecords(plan, activeIndex, limits) {
   return records
 }
 
-function stepRecords(state, plan, activeIndex, limits, { role, checkpoint, reason, budget, note }) {
+// Whitelisted scalar fields only: a snapshot object from the runtime (deployment
+// status, task status) never dumps whole into the packet, and no entity unit
+// number can ride in through it.
+function scalarLine(source, keys, max) {
+  if (!source || typeof source !== 'object' || Array.isArray(source)) return ''
+  const parts = []
+  for (const key of keys) {
+    const value = source[key]
+    if (typeof value === 'string' && value) parts.push(`${key}=${oneLine(value, 60)}`)
+    else if (typeof value === 'number' && Number.isFinite(value)) parts.push(`${key}=${value}`)
+    else if (typeof value === 'boolean') parts.push(`${key}=${value}`)
+  }
+  return oneLine(parts.join(' '), max)
+}
+
+const ACTOR_KEYS = Object.freeze(['actor_id', 'actor_kind', 'epoch', 'connected_players'])
+const RUNTIME_KEYS = Object.freeze(['task_state', 'queue_length', 'idle'])
+
+// The active step's completion contract, described without any entity identity
+// (a historical unit number must never steer a fresh conversation).
+function contractText(step, max) {
+  const contract = step?.completion_contract
+  if (!contract || !Array.isArray(contract.requirements) || contract.requirements.length === 0) return ''
+  const parts = contract.requirements.map((requirement) => {
+    const subject = requirement.item_name ?? requirement.entity_name ?? requirement.operation_name ?? ''
+    const minimum = Number.isFinite(requirement.minimum) ? `>=${requirement.minimum}` : ''
+    return `${requirement.kind}${subject ? ` ${subject}` : ''}${minimum}`
+  })
+  return oneLine(`${contract.mode}: ${parts.join('; ')}`, max)
+}
+
+function stepRecords(state, plan, activeIndex, limits, { role, checkpoint, reason, budget, note, actor, runtime }) {
   const records = [
     { key: 'restage', block: 'step', text: `restage: role=${role} checkpoint=${checkpoint}${reason ? ` reason=${oneLine(reason, limits.reasonChars)}` : ''}` },
   ]
+  // The actor snapshot the runtime captured for this restage (C7 carries the
+  // new epoch). Volatile: it moves with every actor replacement.
+  const actorLine = scalarLine(actor, ACTOR_KEYS, limits.runtimeChars)
+  if (actorLine) records.push({ key: 'actor', block: 'step', text: `actor: ${actorLine}` })
   if (!plan) {
     records.push({ key: 'active_step', block: 'step', text: 'active_step: none (no committed plan)' })
   }
@@ -169,6 +208,8 @@ function stepRecords(state, plan, activeIndex, limits, { role, checkpoint, reaso
         block: 'step',
         text: `active_step: ${activeIndex + 1} of ${plan.steps.length} ${step.step_id} | ${oneLine(step.description, limits.stepChars)} | batches=${progress?.batches_attempted ?? 0} accepted_for_close=${evidence}`,
       })
+      const contract = contractText(step, limits.contractChars)
+      if (contract) records.push({ key: 'contract', block: 'step', drop: 'contract', text: `active_step_contract: ${contract}` })
       const held = plan.execution?.receipts?.[step.step_id]
       const tail = (Array.isArray(held) ? held : []).slice(-limits.receiptTail)
       tail.forEach((entry, index) => {
@@ -187,6 +228,8 @@ function stepRecords(state, plan, activeIndex, limits, { role, checkpoint, reaso
   }
   const skills = skillIdsOf(state, plan)
   if (skills.length > 0) records.push({ key: 'skills', block: 'step', drop: 'skills', text: `loaded_skills: ${skills.join(', ')}` })
+  const runtimeLine = scalarLine(runtime, RUNTIME_KEYS, limits.runtimeChars)
+  if (runtimeLine) records.push({ key: 'runtime', block: 'step', drop: 'runtime', text: `runtime: ${runtimeLine}` })
   const budgetLine = oneLine(budget, limits.budgetChars)
   if (budgetLine) records.push({ key: 'budget', block: 'step', drop: 'budget', text: `budget: ${budgetLine}` })
   const noteText = sanitizeHandoffNote(note, limits.noteChars)
@@ -226,8 +269,10 @@ export function estimateTokens(chars) {
  * @param {number} [args.now] timestamp for the event (never enters `text`)
  * @param {object} [args.limits] overrides for HANDOFF_PACKET_LIMITS
  * @param {string} [args.budget] optional budget line (harness-computed)
+ * @param {object} [args.actor] fresh actor snapshot (actor_id, actor_kind, epoch, connected_players); never dropped
+ * @param {object} [args.runtime] compact runtime state (task_state, queue_length, idle)
  */
-export function buildHandoffPacket({ planningState, role, checkpoint, reason = '', note = '', budget = '', previousContextChars, now, limits: limitOverrides } = {}) {
+export function buildHandoffPacket({ planningState, role, checkpoint, reason = '', note = '', budget = '', actor, runtime, previousContextChars, now, limits: limitOverrides } = {}) {
   if (!CONTEXT_RESTAGE_ROLES.includes(role)) throw new RangeError(`handoff role must be one of ${CONTEXT_RESTAGE_ROLES.join(', ')}`)
   if (!CONTEXT_RESTAGE_CHECKPOINTS.includes(checkpoint)) throw new RangeError(`handoff checkpoint must be one of ${CONTEXT_RESTAGE_CHECKPOINTS.join(', ')}`)
   if (!planningState?.goal?.goal_id) throw new RangeError('handoff packet needs a planning state with a goal')
@@ -240,7 +285,7 @@ export function buildHandoffPacket({ planningState, role, checkpoint, reason = '
     ...goalRecords(planningState, limits),
     ...(roadmap ? [roadmap] : []),
     ...planRecords(plan, activeIndex, limits),
-    ...stepRecords(planningState, plan, activeIndex, limits, { role, checkpoint, reason, budget, note }),
+    ...stepRecords(planningState, plan, activeIndex, limits, { role, checkpoint, reason, budget, note, actor, runtime }),
   ]
 
   // Drop whole records, lowest priority first, until the packet fits.

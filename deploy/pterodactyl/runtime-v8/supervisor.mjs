@@ -32,7 +32,7 @@ import { resolveAgentRole } from './agent-roles.mjs'
 import { NpcAgentLoop, RESUME_HINT } from './npc-agent-loop.mjs'
 import { evaluateGoalDefinition, formatGoalStatus, formatGoalUnderstanding, formatSliceProgressNote, goalUiView } from './goal-definition.mjs'
 import { formatGoalReadingNote } from './goal-reading.mjs'
-import { GOAL_STATUS } from './planning-state.mjs'
+import { getActivePlan, GOAL_STATUS } from './planning-state.mjs'
 import { ACK_EVENT, ResponsivenessTracker } from './responsiveness.mjs'
 import {
   AI_API_METHOD_IDS,
@@ -1781,6 +1781,47 @@ export async function pauseStrandedPlanAfterRequestError(session, message) {
   return paused
 }
 
+// C7 (delegation design section 4): after a restart, an actor replacement or a
+// death the conversation is REBUILT from a handoff packet, not continued from
+// any earlier transcript: the persisted reducer plan state, the fresh actor
+// snapshot (new epoch) and the runtime's task state. The [HARNESS] recovery
+// instruction follows the packet as the step-level tail. No turn is open here
+// (the supervisor cancelled the old one), so no safePoint is passed
+// (restageBetweenTurns); a refusal ('round_in_flight' | 'round_open') means the
+// conversation the loop already built stays, and the refusal is on the trace.
+// TODO(U6/U7): restage as the executor role once it has its own prompt and
+// tool block; today the recovery runs in the role the loop has.
+async function restageRecoveryConversation(agent, { reason, recoveryMessage }) {
+  if (typeof agent.restageBetweenTurns !== 'function') return { restaged: false, reason: 'agent_cannot_restage' }
+  let runtime
+  try {
+    runtime = await agent.readInteractionTaskStatus?.()
+  }
+  catch {
+    runtime = undefined
+  }
+  let result
+  try {
+    result = await agent.restageBetweenTurns({
+      checkpoint: 'C7',
+      role: agent.agentContext?.role ?? 'planner',
+      reason: `recovery:${uiText(reason, 80)}`,
+      actor: agent.epoch,
+      runtime,
+      requestId: agent.traceRequest?.id,
+    })
+  }
+  catch (error) {
+    result = { restaged: false, reason: 'restage_error' }
+    await agent.traceEvent?.('runtime.recovery_restage_error', { message: uiText(error instanceof Error ? error.message : String(error), 300) })
+  }
+  if (!result.restaged) return result
+  const harness = { role: 'user', content: recoveryMessage }
+  agent.baseMessages = [...agent.baseMessages, harness]
+  agent.messages = [...agent.messages, { ...harness }]
+  return result
+}
+
 export async function recoverInterruptedAgentPlan(agent, reason, details = {}) {
   if (!agent) return { recovered: false, reason: 'agent_unavailable' }
   await agent.loadPersistentState?.()
@@ -1810,6 +1851,13 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}) {
 
   agent.cancel?.(`runtime_recovery_prepare:${reason}`)
   const epoch = await agent.captureEpoch()
+  // C7: a plan is resumed only when the reducer holds an active plan to carry.
+  // Otherwise the goal is paused (a chat line follows) instead of waking a
+  // model with nothing to execute.
+  if (!awaitingNextSlice && typeof agent.memory?.planningState === 'function' && !getActivePlan(agent.memory.planningState(key))) {
+    const paused = await agent.pausePersistentPlan?.(`runtime_recovery_no_active_plan:${uiText(reason, 80)}`)
+    return { recovered: false, reason: 'no_active_plan', paused: paused !== undefined, state: paused ?? state }
+  }
   const memoryContext = agent.memory?.context?.(key) ?? ''
   const recoveryDetails = JSON.stringify(details ?? {}).slice(0, 2000)
   if (awaitingNextSlice) {
@@ -1871,6 +1919,7 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}) {
     agent.traceRequest = { id: `recovery_${Date.now().toString(36)}`, seq: 0 }
     await agent.traceEvent('runtime.recovery_started', { reason, details })
   }
+  await restageRecoveryConversation(agent, { reason, recoveryMessage })
   try {
     const result = await agent.runGuarded()
     return { recovered: true, result, state: agent.memory?.currentPlan?.(key) }
@@ -2361,7 +2410,17 @@ export class Session {
     this.log(`Recovering interrupted SGLuna plan after ${reason}; mutable world state will be re-observed before resuming`)
     try {
       const recovery = await recoverInterruptedAgentPlan(this.agent, reason, details)
-      if (!recovery.recovered) return null
+      if (!recovery.recovered) {
+        if (recovery.reason === 'no_active_plan') {
+          // C7 with no plan to carry: the goal is paused, never a model woken with nothing to run.
+          if (recovery.paused && recovery.state) await this.syncTaskBoardUi(recovery.state)
+          // An actor replacement prints its own line for every unrecovered case.
+          if (reason !== 'actor_replaced') {
+            await this.printChat(`I came back after ${reason} but there is no committed plan to resume, so I paused the goal instead of guessing. Say continue or give me a new instruction.`)
+          }
+        }
+        return null
+      }
       await this.syncTaskBoardUi(recovery.state)
       if (recovery.result?.chatMessage) await this.printChat(recovery.result.chatMessage)
       return recovery.result
@@ -2656,6 +2715,12 @@ export class Session {
     if (startupState?.condition_wait?.state !== 'active' && this.recoverablePlan(startupState)) {
       this.queueEvent(async () => {
         await this.recoverInterruptedPlan('runtime_restart', { actor_id: this.lastStatus?.actor_id, epoch: this.lastStatus?.epoch })
+      })
+    }
+    else if (!startupState && this.agent.memory?.planningState?.(`npc:${this.npcId}`)?.goal?.status === GOAL_STATUS.ACTIVE) {
+      // C7: a live goal but no plan to carry (interrupted before its first plan): say so, wake no model.
+      this.queueEvent(async () => {
+        await this.printChat('I restarted and there is no committed plan to resume, so the goal waits. Say continue or give me a new instruction.')
       })
     }
     this.log(`SGLuna Factorio ready; npc=${this.npcName} (${this.npcId}), actor_id=${this.lastStatus.actor_id}, chat=${describeChatPlayers(this.config.chatPlayers)}`)

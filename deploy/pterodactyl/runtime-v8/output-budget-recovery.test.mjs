@@ -89,6 +89,18 @@ function exhaustedMessage() {
   return message
 }
 
+// U8: the budget handoff (checkpoint C5) restages from a handoff packet. The fresh
+// generation reads the system prompt, the packet's plan block and its step block,
+// and nothing from the exhausted thread: no assistant or tool message, no [CHAT].
+function assertC5Packet(messages, { scope = 'keep_target', kind = 'handoff' } = {}) {
+  assert.equal(messages[0].role, 'system')
+  assert.match(String(messages[1].content), /^\[HANDOFF\] Rebuilt from durable harness state/)
+  assert.match(String(messages[2].content), new RegExp(`^--- step block ---\nrestage: role=planner checkpoint=C5 reason=provider_budget_${kind} scope=${scope}`))
+  assert.deepEqual(messages.filter(message => message.role === 'assistant' || message.role === 'tool'), [], 'no exchange of the exhausted thread')
+  assert.ok(!messages.some(message => String(message.content ?? '').startsWith('[CHAT]')), 'no request text from the exhausted thread')
+  assert.ok(!messages.some(message => String(message.content ?? '').startsWith('[PROVIDER_BUDGET_HANDOFF]')), 'the ad-hoc capsule is gone')
+}
+
 function makeAgent({
   provider,
   rcon = new FakeRcon(),
@@ -591,9 +603,11 @@ test('terminal provider budget becomes a deterministic fresh planner generation 
 
       assert.equal(context.triggerSource, 'recovery_continue_low')
       assert.equal(context.recoveryKind, undefined)
-      assert.match(messages.at(-1).content, /\[PROVIDER_BUDGET_HANDOFF\]/)
-      assert.match(messages.at(-1).content, /keep_target/)
-      assert.doesNotMatch(messages.at(-1).content, /reanchor_target/)
+      assertC5Packet(messages, { scope: 'keep_target' })
+      assert.doesNotMatch(messages[2].content, /reanchor_target/)
+      assert.match(messages[2].content, /budget: provider budget generation 2; handoff 1 of 4;/)
+      assert.match(messages[2].content, /cause=provider_turn_output_cap_exceeded/)
+      assert.match(messages[2].content, /active_step: 1 of 2 .*Wait for the machine cycle/, 'the active step is in the packet')
       const message = planMessage({
         chatMessage: 'Re-anchored the same target with a fresh planner budget.',
         plan: canonical,
@@ -726,9 +740,9 @@ test('budget handoff survives memory restore and resumes from the compact handof
     provider: async (messages, context) => {
       resumed = true
       assert.equal(context.triggerSource, 'post_step_reanchor')
-      const joined = messages.map(message => message.content ?? '').join('\n')
-      assert.match(joined, /\[PROVIDER_BUDGET_HANDOFF\]/)
-      assert.match(joined, /reanchor_target/)
+      assertC5Packet(messages, { scope: 'reanchor_target', kind: 'resume' })
+      assert.match(messages[2].content, /cause=provider_turn_output_cap_exceeded: generation 1 used 4001 > 4000/, 'the reason code the pause recorded')
+      assert.match(messages[2].content, /handoff 1 of 4/)
       return planMessage({
         chatMessage: 'Resumed the same durable target after restart.',
         plan: ['Inspect the result'],
@@ -802,7 +816,8 @@ test('context-window exhaustion enters the same deterministic planner-budget han
         throw error
       }
       assert.equal(context.triggerSource, 'recovery_continue_low')
-      assert.match(messages.map(message => message.content ?? '').join('\n'), /\[PROVIDER_BUDGET_HANDOFF\]/)
+      assertC5Packet(messages)
+      assert.match(messages[2].content, /cause=provider_context_window_exceeded/)
       return planMessage({
         chatMessage: 'Continued from the same canonical target with a fresh context budget.',
         plan: canonical,
@@ -884,7 +899,8 @@ test('fresh planner generations can roll over provider budget more than once in 
       }
       if (calls.length === 2 || calls.length === 3) throw contextWindowError()
       assert.equal(context.triggerSource, 'recovery_continue_low')
-      assert.match(messages.map(message => message.content ?? '').join('\n'), /\[PROVIDER_BUDGET_HANDOFF\]/)
+      assertC5Packet(messages)
+      assert.match(messages[2].content, /handoff 2 of 4/)
       return planMessage({
         chatMessage: 'Continued after the second planner budget rollover.',
         plan: canonical,
@@ -982,11 +998,13 @@ test('a budget handoff on the first turn of a new goal keeps the player request'
   await agent.request(request, { sender: 'TTLouis' })
 
   assert.equal(calls[1].context.allowTools, false)
-  const handoff = calls.at(-1).messages.map(message => String(message.content ?? ''))
-    .find(content => content.startsWith('[PROVIDER_BUDGET_HANDOFF]'))
-  assert.ok(handoff, 'the fresh generation receives the handoff capsule')
-  const capsule = JSON.parse(handoff.slice(handoff.indexOf('{')))
-  assert.deepEqual(capsule.player_request, { sender: 'TTLouis', text: request })
+  // The first plan of a new goal has no committed plan yet: the packet carries
+  // the admitted goal (the player's request) and says no plan is committed.
+  const fresh = calls.at(-1).messages
+  assertC5Packet(fresh)
+  assert.match(String(fresh[1].content), new RegExp(`^goal: ${request}$`, 'm'), 'the player request survives in the packet goal')
+  assert.match(String(fresh[1].content), /^plan: none committed yet$/m)
+  assert.match(String(fresh[2].content), /^active_step: none \(no committed plan\)$/m)
   // The capsule has none of the earlier reads, so the fresh generation can
   // observe again (attempt 2 of the canary inherited a closed phase).
   assert.equal(calls.at(-1).context.allowTools, true)
@@ -1016,7 +1034,7 @@ test('a budget handoff after loaded skills keeps every tool exchange whole for t
     verification: { mode: 'deterministic' },
   }
   const call = (id, index, name, args = {}) => ({ index, id, type: 'function', function: { name, arguments: JSON.stringify(args) } })
-  const isHandoff = message => String(message.content ?? '').startsWith('[PROVIDER_BUDGET_HANDOFF]')
+  const isHandoff = message => String(message.content ?? '').startsWith('[HANDOFF]')
   const calls = []
   const agent = makeAgent({
     rcon: factorio,
@@ -1834,4 +1852,148 @@ test('a context window reported by the real provider stack rescales compaction, 
   assert.equal(compacted.length, 1)
   assert.equal(agent.messages.some(message => message.tool_call_id === 'c'), true, 'the newest exchange is kept')
   assert.equal(agent.messages.reduce((total, message) => total + String(message.content ?? '').length, 0) <= 24576 + 2000, true)
+})
+
+// --- U8: the budget handoff (C5) is a restage from a handoff packet -------------------
+
+test('C5: the default handoff limit of 4 holds, every handoff is a restage row, and the fifth failure pauses visibly', async () => {
+  const canonical = ['Inspect machine state', 'Continue the build']
+  const calls = []
+  const trace = []
+  const agent = makeAgent({
+    interactionDecisionProvider: rolloverDecisionProvider({ count: 0 }),
+    provider: async (messages) => {
+      calls.push(messages)
+      if (calls.length === 1) {
+        return planMessage({ chatMessage: 'Start one bounded runtime action.', plan: canonical, currentStep: 0, operations: [{ name: 'wait', args: { ticks: 1 } }] })
+      }
+      throw contextWindowError()
+    },
+  })
+  agent.behaviorTrace = { emit: async (record) => { trace.push(record) } }
+
+  await agent.request('exercise the handoff limit', { sender: 'TTLouis' })
+  const result = await agent.completed()
+
+  assert.equal(agent.maxProviderBudgetHandoffs, 4)
+  assert.equal(agent.providerBudgetHandoffCount, 4)
+  assert.equal(calls.length, 6, 'the plan, the failure that started the handoffs, then one round per handoff: no fifth handoff')
+  assert.equal(result.goalStatus, 'paused', 'the goal pauses visibly after the limit, it is not blocked')
+  assert.equal(agent.memory.currentPlan('npc:sgluna').status, 'paused')
+  assert.equal(trace.filter(record => record.event === 'budget.handoff_limit_reached').length, 1)
+
+  const restaged = trace.filter(record => record.event === 'context.restaged')
+  assert.equal(restaged.length, 4, 'one restage per handoff')
+  const ids = new Set()
+  for (const [index, row] of restaged.entries()) {
+    assert.equal(row.data.checkpoint, 'C5')
+    assert.equal(row.data.role, 'planner', 'the same role as the exhausted conversation')
+    assert.match(row.data.handoff_id, /^ho_[0-9a-f]{12}$/)
+    assert.ok(row.request_id, 'the row carries the request id')
+    assert.match(row.data.reason, /^provider_budget_handoff scope=keep_target cause=/)
+    ids.add(row.data.handoff_id)
+    assertC5Packet(calls[index + 2])
+    assert.match(calls[index + 2][2].content, new RegExp(`handoff ${index + 1} of 4`))
+  }
+  assert.equal(ids.size, 4, 'each handoff is its own conversation')
+  // The reducer's ledger is the durable record; plan semantics did not move.
+  const planning = agent.memory.planningState('npc:sgluna')
+  assert.deepEqual(planning.context_restages.filter(item => item.checkpoint === 'C5').map(item => item.handoff_id), [...ids])
+  assert.equal(planning.reasoning_epoch, 1, 'restage never touches the reasoning epoch (goal acceptance set it)')
+})
+
+test('C5: a refused restage falls back to the legacy capsule and says so, so the fresh generation never runs on the exhausted thread', async () => {
+  const canonical = ['Inspect machine state', 'Continue the build']
+  const calls = []
+  const trace = []
+  const agent = makeAgent({
+    interactionDecisionProvider: rolloverDecisionProvider({ count: 0 }),
+    provider: async (messages) => {
+      calls.push(messages)
+      if (calls.length === 1) return planMessage({ chatMessage: 'One action.', plan: canonical, currentStep: 0, operations: [{ name: 'wait', args: { ticks: 1 } }] })
+      if (calls.length === 2) throw contextWindowError()
+      return planMessage({ chatMessage: 'Continued.', plan: canonical, currentStep: 0, operations: [{ name: 'wait', args: { ticks: 1 } }] })
+    },
+  })
+  agent.behaviorTrace = { emit: async (record) => { trace.push(record) } }
+  agent.restageInTurn = async () => ({ restaged: false, reason: 'reducer_rejected_context_restaged' })
+
+  await agent.request('exercise the fallback', { sender: 'TTLouis' })
+  await agent.completed()
+
+  assert.equal(calls.length, 3)
+  assert.ok(calls[2].some(message => String(message.content ?? '').startsWith('[PROVIDER_BUDGET_HANDOFF]')))
+  assert.ok(!calls[2].some(message => message.role === 'assistant' || message.role === 'tool'), 'still none of the exhausted thread')
+  const fallback = trace.filter(record => record.event === 'budget.handoff_restage_fallback')
+  assert.equal(fallback.length, 1)
+  assert.equal(fallback[0].data.reason, 'reducer_rejected_context_restaged')
+  assert.equal(trace.filter(record => record.event === 'context.restaged').length, 0)
+})
+
+test('C5: Resume after the request ceiling restages from a packet, the ceiling pause itself stays visible, and the restage never advances the plan', async () => {
+  const canonical = ['Wait for the machine cycle', 'Inspect the result']
+  const over = () => {
+    const message = planMessage({ chatMessage: 'Thinking long.', plan: canonical, currentStep: 0, operations: [{ name: 'wait', args: { ticks: 1 } }] })
+    Object.defineProperty(message, '_sglunaProvider', {
+      enumerable: false,
+      value: { diagnostic_code: 'ok', finish_reason: 'stop', usage: { prompt_tokens: 100, completion_tokens: 3500, total_tokens: 3600 } },
+    })
+    return message
+  }
+  let resumed = false
+  const resumeMessages = []
+  let calls = 0
+  const agent = makeAgent({
+    maxProviderOutputUnits: 3000,
+    maxProviderBudgetHandoffs: 1,
+    provider: async (messages) => {
+      calls++
+      if (resumed) {
+        resumeMessages.push(messages)
+        return planMessage({ chatMessage: 'Waiting.', plan: canonical, currentStep: 0, operations: [{ name: 'wait', args: { ticks: 1 } }] })
+      }
+      return calls === 1 ? planMessage({ chatMessage: 'Waiting first.', plan: canonical, currentStep: 0, operations: [{ name: 'wait', args: { ticks: 1 } }] }) : over()
+    },
+  })
+  const trace = []
+  agent.behaviorTrace = { emit: async record => { trace.push(record) } }
+
+  await agent.request('run the bounded cycle', { sender: 'TTLouis' })
+  const paused = await agent.completed()
+  assert.equal(paused.goalStatus, 'paused')
+  assert.equal(trace.filter(record => record.event === 'goal.paused').length, 1, 'the pause is visible')
+  const before = agent.memory.planningState('npc:sgluna')
+  const tracker = before.plans.at(-1).active_step_index
+
+  resumed = true
+  const result = await agent.request('continue', { sender: 'TTLouis' })
+  assert.equal(result.goalStatus, 'active')
+  const restaged = trace.filter(record => record.event === 'context.restaged')
+  const resume = restaged.at(-1)
+  assert.equal(resume.data.checkpoint, 'C5')
+  assert.equal(resume.data.role, 'planner')
+  assert.match(resume.data.handoff_id, /^ho_/)
+  assert.match(resume.data.reason, /^provider_budget_resume scope=keep_target cause=recoverable_provider_failure:provider_budget/)
+  assertC5Packet(resumeMessages[0], { kind: 'resume' })
+  assert.match(resumeMessages[0][2].content, /active_step: 1 of 2 .*Wait for the machine cycle/)
+  assert.equal(agent.memory.planningState('npc:sgluna').plans.at(-1).active_step_index, tracker, 'the restage did not advance the tracker')
+})
+
+test('C5: the request output ceiling still pauses visibly, and Resume after it restages from a packet with the ceiling as the reason code', async () => {
+  const world = runawayHarness()
+  await world.agent.request('mine a long list of ore batches', { sender: 'TTLouis' })
+  const requestId = world.events('request.received')[0].request_id
+  const paused = await world.finishUntilPaused()
+  assertCeilingPause(world, paused, requestId)
+  assert.equal(world.events('context.restaged').length, 0, 'the ceiling pause itself restages nothing: no fresh generation')
+
+  // (The runaway fixture's scripted provider reacts to the resumed board and may pause again; only the restage is asserted.)
+  await world.agent.request('continue', { sender: 'TTLouis' })
+  const [row] = world.events('context.restaged')
+  assert.equal(row.data.checkpoint, 'C5')
+  assert.equal(row.data.role, 'planner')
+  assert.match(row.data.handoff_id, /^ho_/)
+  assert.match(row.data.reason, /^provider_budget_resume scope=keep_target cause=request_output_ceiling/)
+  assert.notEqual(row.request_id, requestId, 'the Resume is a new request with a new allowance')
+  assert.equal(world.memory.planningState('npc:sgluna').context_restages.at(-1).handoff_id, row.data.handoff_id)
 })
