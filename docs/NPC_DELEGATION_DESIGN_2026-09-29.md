@@ -152,9 +152,23 @@ facts, mutates a committed plan, advances the tracker or declares completion.
 | Next shelf node at C2 | deterministic nearest target plus advisory steering | Jev ranks the complete `shelfRefinementCandidates` set, advisory |
 | Scope critique of drafts | existing authority | unchanged |
 
-Promotion needs traced agreement with later outcomes over a stated sample **(number to be
-set by the owner)**. A judgment that saves no context, calls, time or recovery cost is
+Promotion needs traced agreement with later outcomes over a stated sample. A judgment that saves no context, calls, time or recovery cost is
 removed. Checkpoint triggers, mandatory fields and size limits stay deterministic code.
+
+**Owner decisions, 2026-09-30 (build unit U11, after U6):**
+
+- **Why Jev comes back.** In the live flash run of 2026-09-29, Jev was healthy (31 requests, no fallbacks, 150–280 ms) but saved no LLM wake. The C4 gate chose `targeted_observation` 24 times out of 24, because `continue`/`wait` are allowed only while authoritative runtime work is already running, and an ordinary step close has none. U11 fixes that with a new route, `next committed step is clear -> straight to the executor, no planner wake`, which starts in shadow.
+- **Also in U11:**
+  - shadow observation families per restage packet (they may only add to the mandatory facts);
+  - advisory ranking of the next shelf node at C2;
+  - skill card order stays in shadow.
+- **Promotion thresholds:**
+  - A judgment that acts on its own (for example skipping the planner) needs at least 60 judgments at 90% agreement or better before it may decide.
+  - An advisory judgment needs at least 30.
+- **How agreement is scored.** Against the outcome, not only against the LLM: did the planner choose the same next step, did the step verify, did the fresh agent actually need the facts Jev chose.
+- **After promotion.** Tracing continues, and a judgment that falls below 90% is demoted automatically. A judgment that turns out to be fully predictable from state may become deterministic code.
+- **Success metric.** The LLM input and output tokens and the wakes saved per run, reported in the run record.
+- **Unchanged.** Fact reads stay ungated (`a22cb415`). Jev never authors plans, advances the tracker or declares completion.
 
 ## 8. Sequential first; before concurrency is allowed
 
@@ -295,3 +309,24 @@ Built in `agent-context.mjs` and `NpcAgentLoop.restageContext`; nothing calls th
 - **In-flight rounds are per lineage.** `restageContext` refuses `round_in_flight` only while a round of the CURRENT conversation lineage is open. A round that outlives a reset (a cancelled turn whose provider call has not returned) belongs to a discarded lineage: its reply is dropped by the generation check, and it can never touch the new conversation, so it no longer blocks the C7 restage that follows the cancel.
 - **The one safePoint helper** is `NpcAgentLoop.restageInTurn` (it presents `this.turnToken ?? undefined`); supervisor and request-start restages use `restageBetweenTurns` and pass none.
 - **Packet additions (step block only).** `actor:` (whitelisted actor_id, actor_kind, epoch, connected_players), `active_step_contract:` (kinds, names and minimums, never entity identities), `runtime:` (task_state, queue_length, idle). `stableText` is byte-identical with or without them.
+
+## 13. Build status (2026-09-30, fusion branch `experiment/jev-agent-architecture`)
+
+Unit and integration evidence only: static scenarios with scripted model replies. There has been no live run since the delegation build started. Each merge ran `scripts/test-local.sh all` (Docker) green and was pushed.
+
+| Unit | What | State |
+|---|---|---|
+| U1 | Role config: planner = `OPENAI_MODEL[0]`, executor = `[1] ?? [0]` (`agent-roles.mjs`, `Session.roleProvider`) | merged `1b07e210` |
+| U2 | Pure handoff packet (`handoff-packet.mjs`, `stableText`/`volatileText`, ≤500-char unverified note) | merged `d6f75e6e` |
+| U3 | Pure restage and slice-ceiling policy (`restage-policy.mjs`, token-counted limits) | merged `d6f75e6e` |
+| U9 | Run record and run-check rows: role, `handoff_id`, restage loop, oversize packet, stale reply | merged `a8bf6004` |
+| U4 | Restage seam: `AgentContext`, `restageContext`, `CONTEXT_RESTAGED`, stale-reply drop and bounded re-drive, turn-token safe point, shared `durable-text.mjs` (§12b) | merged `0d790092`, follow-ups `df81b21d` |
+| U5 | Per-slice output ceiling (aggregate minus the slice baseline, reset at the slice-close wake) | merged `19194cf5` |
+| U8 | C5 budget handoff and Resume, and C7 restart/actor replacement, through the packet; C6 blocked plan wakes no model (§12c) | merged `ebfcec43` (repin `aa4b30bd`) |
+| U7 | Planner wiring: verified-results `[MOD]` at slice close, C1/C2 soft-limit restage with a prefix-aware default limit, planner role tagging | built and review fixes done; merges next, after folding its restage helper into U8's |
+| U8 follow-ups | Generation/lineage staleness at the admission points, the `startRestage` leak, the startup no-plan branch, test gaps | queued after U7 |
+| U6 | Executor at C3, the hard-limit restage at step close, `executor.plan_semantics_ignored`; C6/C7 bounded recovery becomes executor-shaped | not started |
+| U11 | Jev at the checkpoints (§7 owner decisions) | not started, after U6 |
+| U10 | Docs: plan rows 3.4–3.6, status doc, this note | this section; final pass after U11 |
+
+After U11: the flash-only live test (both roles on DeepSeek flash, ≤2 CAD; ask the owner about a harness-enforced spend cap first). It also collects the first Jev agreement samples.
