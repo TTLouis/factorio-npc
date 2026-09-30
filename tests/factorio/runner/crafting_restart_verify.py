@@ -1,4 +1,4 @@
-"""Verify save/load cancels only persisted Autorio-owned native crafting and leaves AIRI usable."""
+"""Verify save/load cancels only persisted Autorio-owned native crafting and leaves SGLuna usable."""
 import argparse
 import json
 import sys
@@ -54,10 +54,10 @@ def run(client: Rcon, results: Path) -> None:
     def observe(context: str) -> dict:
         return json_command(observation_command, context)
 
-    probe = command('/silent-command rcon.print("AIRI_CRAFT_RESTART_READY")')
-    if probe != 'AIRI_CRAFT_RESTART_READY':
-        probe = command('/silent-command rcon.print("AIRI_CRAFT_RESTART_READY")')
-    require(probe == 'AIRI_CRAFT_RESTART_READY', probe)
+    probe = command('/silent-command rcon.print("SGLUNA_CRAFT_RESTART_READY")')
+    if probe != 'SGLUNA_CRAFT_RESTART_READY':
+        probe = command('/silent-command rcon.print("SGLUNA_CRAFT_RESTART_READY")')
+    require(probe == 'SGLUNA_CRAFT_RESTART_READY', probe)
 
     # Production intentionally leaves post-load mutation pending in multiplayer
     # until the supervisor has RCON and calls this replicated repair boundary.

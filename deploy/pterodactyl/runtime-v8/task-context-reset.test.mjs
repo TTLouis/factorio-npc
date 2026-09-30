@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 
 import { NpcDialogueMemory } from './npc-agent-loop.mjs'
 
-function seed(memory, key = 'npc:airi') {
+function seed(memory, key = 'npc:sgluna') {
   memory.remember(key, 1, {
     sender: 'TTLouis',
     user: 'build a steam power block',

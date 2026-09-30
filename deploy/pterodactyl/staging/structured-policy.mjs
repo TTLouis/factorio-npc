@@ -745,11 +745,11 @@ function renderThroughputMeasurement(args) {
 }
 
 export const toolDefinitions = [
-  functionTool('getActorStatus', 'Read AIRI actor mode, identity, validity, position and connected-human count.', emptyObjectSchema),
+  functionTool('getActorStatus', 'Read SGLuna actor mode, identity, validity, position and connected-human count.', emptyObjectSchema),
   functionTool('getTaskStatus', 'Read current Autorio task and bounded queue state.', emptyObjectSchema),
-  functionTool('getInventoryItems', 'Read AIRI standalone actor main inventory; equipment slots are separate.', emptyObjectSchema),
-  functionTool('getEquipmentStatus', 'Read AIRI health, selected gun slot, equipped guns/ammo/armor, and cursor stack.', emptyObjectSchema),
-  functionTool('getRecipe', 'Read one exact recipe for AIRI force.', {
+  functionTool('getInventoryItems', 'Read SGLuna standalone actor main inventory; equipment slots are separate.', emptyObjectSchema),
+  functionTool('getEquipmentStatus', 'Read SGLuna health, selected gun slot, equipped guns/ammo/armor, and cursor stack.', emptyObjectSchema),
+  functionTool('getRecipe', 'Read one exact recipe for SGLuna force.', {
     type: 'object', properties: { item: nameStringSchema }, required: ['item'], additionalProperties: false,
   }),
   functionTool('getRecipeDetails', 'Read bounded deterministic recipe knowledge, including relevant current inventory counts, bootstrap dependency status, categories, ingredients/products and compatible crafting-machine prototypes. requested_count scopes required quantities without dumping unrelated inventory. Name fuel_name to also get that fuel\'s burn per minute on burner machines.', {
@@ -774,7 +774,7 @@ export const toolDefinitions = [
   functionTool('getPrototypeDetails', 'Read bounded static prototype/build knowledge for an item, fluid, or entity, including mineable products for harvestable entities plus build/crafting/transport metadata.', {
     type: 'object', properties: { name: nameStringSchema }, required: ['name'], additionalProperties: false,
   }),
-  functionTool('findSkills', 'Search AIRI\'s bounded local skill/pattern library for reusable gameplay experience relevant to a task. Skill matches are guidance, not live world truth or mutation authority; validate recipes, prototypes, inventory, geometry, and placement before acting.', {
+  functionTool('findSkills', 'Search SGLuna\'s bounded local skill/pattern library for reusable gameplay experience relevant to a task. Skill matches are guidance, not live world truth or mutation authority; validate recipes, prototypes, inventory, geometry, and placement before acting.', {
     type: 'object',
     properties: {
       query: { type: 'string', minLength: 1, maxLength: 240 },
@@ -783,7 +783,7 @@ export const toolDefinitions = [
     required: ['query'],
     additionalProperties: false,
   }),
-  functionTool('getSkillDetails', 'Open one exact AIRI skill/pattern by id after discovery. Treat candidate/manual skills as experienced-player heuristics: reuse the decision pattern, but revalidate all mutable and game-version-specific facts before execution.', {
+  functionTool('getSkillDetails', 'Open one exact SGLuna skill/pattern by id after discovery. Treat candidate/manual skills as experienced-player heuristics: reuse the decision pattern, but revalidate all mutable and game-version-specific facts before execution.', {
     type: 'object',
     properties: {
       id: { type: 'string', minLength: 1, maxLength: 80, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' },
@@ -791,10 +791,10 @@ export const toolDefinitions = [
     required: ['id'],
     additionalProperties: false,
   }),
-  functionTool('getPlayerStatus', 'Read one exact human player by name, including availability, surface, position, and distance from AIRI when comparable.', {
+  functionTool('getPlayerStatus', 'Read one exact human player by name, including availability, surface, position, and distance from SGLuna when comparable.', {
     type: 'object', properties: { player_name: nameStringSchema }, required: ['player_name'], additionalProperties: false,
   }),
-  functionTool('getNearbyEntities', 'Inspect a bounded local area around AIRI.', {
+  functionTool('getNearbyEntities', 'Inspect a bounded local area around SGLuna.', {
     type: 'object',
     properties: {
       radius: { type: 'integer', minimum: 1, maximum: 64, default: 20 },

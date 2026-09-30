@@ -58,7 +58,7 @@ function make_context() {
       actor_id,
       kind: actor_kind,
       valid: true,
-      name: 'AIRI',
+      name: 'SGLuna',
       position: { x: 0, y: 0 },
       has_character: true,
     })),

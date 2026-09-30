@@ -15,7 +15,7 @@ const LEGACY_SOURCE_PIN = '78ef2acf788189981d82aa9e15e9c33b3dedb29c'
 // changes, repin this in a follow-up commit to a commit that already contains the exact
 // payload bytes; otherwise the bootstrap checksum and immutable source can diverge.
 // Channel eggs keep this bootstrap immutable, then resolve SGLUNA_SOURCE_REF to an exact
-// commit at reinstall time and patch only the payload's AIRI_REF/revision assignments.
+// commit at reinstall time and patch only the payload's SGLUNA_REF/revision assignments.
 const PAYLOAD_REF = 'c909da6e0fedeff7dbd0f0b8eba2527b28770833'
 const CHANNELS = Object.freeze({
   main: {
@@ -39,13 +39,13 @@ function sha256(bytes) {
 function assertNpcV8Source(source) {
   const text = source.toString('utf8')
   const failures = []
-  if (!text.includes('airi-deploy-v8')) failures.push('missing v8 deployment revision')
+  if (!text.includes('sgluna-deploy-v8')) failures.push('missing v8 deployment revision')
   if (!text.includes('SGLUNA_ACTOR_MODE')) failures.push('missing SGLUNA_ACTOR_MODE')
   if (!text.includes('SGLUNA_CHAT_PLAYERS')) failures.push('missing SGLUNA_CHAT_PLAYERS')
-  if (!/AIRI_REF="[a-f0-9]{40}"/.test(text)) failures.push('missing immutable AIRI_REF pin')
+  if (!/SGLUNA_REF="[a-f0-9]{40}"/.test(text)) failures.push('missing immutable SGLUNA_REF pin')
   if (text.includes('airi-deploy-v7')) failures.push('contains v7 deployment guard')
   if (text.includes('explicit-authorized-single-connected-player')) failures.push('contains connected-player patch contract')
-  if (text.includes(`AIRI_REF="${LEGACY_SOURCE_PIN}"`)) failures.push('pins the legacy connected-player source')
+  if (text.includes(`SGLUNA_REF="${LEGACY_SOURCE_PIN}"`)) failures.push('pins the legacy connected-player source')
   if (text.includes('operationCommands')) failures.push('contains legacy operationCommands model contract')
   if (failures.length) throw new Error(`Refusing to generate v8 artifacts: ${failures.join('; ')}`)
 }
@@ -130,15 +130,15 @@ log "Resolved $SOURCE_REF -> $RESOLVED_SHA"
 URL="https://raw.githubusercontent.com/TTLouis/factorio-npc/$RESOLVED_SHA/deploy/pterodactyl/payload-src/installer.sh"
 curl --fail --location --retry 3 --connect-timeout 20 --max-time 900 --proto '=https' --proto-redir '=https' "$URL" --output "$BASE" \\
   || fail 'Unable to download SGLuna installer payload from resolved source commit'
-[[ "$(grep -Ec '^AIRI_REF="[a-f0-9]{40}"$' "$BASE")" == 1 && "$(grep -c '^AIRI_REF=' "$BASE")" == 1 ]] || fail 'Unexpected AIRI_REF assignment contract in resolved installer payload'
+[[ "$(grep -Ec '^SGLUNA_REF="[a-f0-9]{40}"$' "$BASE")" == 1 && "$(grep -c '^SGLUNA_REF=' "$BASE")" == 1 ]] || fail 'Unexpected SGLUNA_REF assignment contract in resolved installer payload'
 [[ "$(grep -Ec '^REVISION="[A-Za-z0-9._-]+"$' "$BASE")" == 1 && "$(grep -c '^REVISION=' "$BASE")" == 1 ]] || fail 'Unexpected REVISION assignment contract in resolved installer payload'
 SHORT_SHA="\${RESOLVED_SHA:0:12}"
 awk -v ref="$RESOLVED_SHA" -v revision="$CHANNEL-$SHORT_SHA" '
-  /^AIRI_REF=/ { print "AIRI_REF=\\\"" ref "\\\""; next }
+  /^SGLUNA_REF=/ { print "SGLUNA_REF=\\\"" ref "\\\""; next }
   /^REVISION=/ { print "REVISION=\\\"" revision "\\\""; next }
   { print }
 ' "$BASE" > "$PATCHED"
-grep -Fxq "AIRI_REF=\\\"$RESOLVED_SHA\\\"" "$PATCHED" || fail 'Failed to apply resolved source SHA'
+grep -Fxq "SGLUNA_REF=\\\"$RESOLVED_SHA\\\"" "$PATCHED" || fail 'Failed to apply resolved source SHA'
 grep -Fxq "REVISION=\\\"$CHANNEL-$SHORT_SHA\\\"" "$PATCHED" || fail 'Failed to apply channel release revision'
 log "Installing exact source $RESOLVED_SHA from $SOURCE_REF"
 bash "$PATCHED"

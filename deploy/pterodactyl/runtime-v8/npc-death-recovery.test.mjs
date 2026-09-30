@@ -15,7 +15,7 @@ function fixture() {
   const logs = []
   const commands = []
   const session = new Session({
-    root: '/tmp/airi-root',
+    root: '/tmp/sgluna-root',
     app: '/tmp/app',
     game: '/tmp/game',
     config: configuration({}, baseEnv),
@@ -53,7 +53,7 @@ test('NPC body recovery cancels stale model work, reauthorizes, and notifies cha
 
   assert.equal(cancelled, 1)
   assert.equal(ensured, 1)
-  assert.ok(commands.some(command => command.includes('[AIRI] I was killed or lost my body and respawned.')))
+  assert.ok(commands.some(command => command.includes('[SGLuna] I was killed or lost my body and respawned.')))
   assert.ok(commands.some(command => command.includes('Previous actor 18, replacement actor 42')))
 })
 

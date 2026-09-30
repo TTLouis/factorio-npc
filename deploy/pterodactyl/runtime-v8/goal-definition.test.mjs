@@ -19,7 +19,7 @@ import { getActivePlan, GOAL_STATUS, PLAN_STATUS } from './planning-state.mjs'
 import { Session } from './supervisor.mjs'
 import { FakeFactorio, gather, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
 
-const KEY = 'npc:airi'
+const KEY = 'npc:sgluna'
 const ROCKET_GOAL = {
   scope: 'long_horizon',
   summary: 'Launch one rocket from this save.',
@@ -129,7 +129,7 @@ function agentWith(game, memory, provider, extra = {}) {
     stateFile: null,
     traceFile: null,
     decisionTraceFile: null,
-    npcId: 'airi',
+    npcId: 'sgluna',
     goalDefinitionPolicy: 'required',
     ...extra,
   })
@@ -355,7 +355,7 @@ test('the supervisor prints the goal understanding in game', async () => {
   const conversation = []
   const session = Object.create(Session.prototype)
   Object.assign(session, {
-    npcName: 'AIRI',
+    npcName: 'SGLuna',
     printChat: async line => { printed.push(line) },
     appendUiConversation: (role, sender, text) => conversation.push({ role, text }),
     log: () => {},
@@ -573,7 +573,7 @@ test('"status" answers from durable state and the game without a model call or c
   const session = Object.create(Session.prototype)
   const pendingResume = { timer: 1 }
   Object.assign(session, {
-    npcName: 'AIRI',
+    npcName: 'SGLuna',
     agent,
     rcon: game,
     autoResume: pendingResume,
@@ -598,7 +598,7 @@ test('"status" answers from durable state and the game without a model call or c
 })
 
 test('status with no goal tells the player how to start one', () => {
-  assert.deepEqual(formatGoalStatus({}), ['No goal yet. Tell me what to do with !airi <goal>.'])
+  assert.deepEqual(formatGoalStatus({}), ['No goal yet. Tell me what to do with !luna <goal>.'])
   const lines = formatGoalStatus({
     goal: { status: 'active', objective: 'launch a rocket', definition: sanitizeGoalDefinition(ROCKET_GOAL) },
     legacyStatus: 'paused',

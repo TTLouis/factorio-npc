@@ -126,7 +126,7 @@ export async function selectSave(root, requested = '') {
 
 export async function createSave(filename, game, modDir, configFile, root, log = () => {}) {
   check(!(await stat(filename)), 'Refusing to overwrite an existing save')
-  const tempDir = await fsp.mkdtemp(path.join(root, '.airi', 'create-'))
+  const tempDir = await fsp.mkdtemp(path.join(root, '.sgluna', 'create-'))
   try {
     const temp = path.join(tempDir, 'world.zip')
     await runProcess(path.join(game, 'bin', 'x64', 'factorio'), [

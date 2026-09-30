@@ -56,7 +56,7 @@ function world(kind = 'standalone_character') {
     is_valid: true,
     character,
     get_main_inventory: () => main,
-    status_snapshot: () => ({ kind, actor_id: 42, valid: true, name: 'AIRI', position: { x: 0, y: 0 }, has_character: true }),
+    status_snapshot: () => ({ kind, actor_id: 42, valid: true, name: 'SGLuna', position: { x: 0, y: 0 }, has_character: true }),
   }
   const get_actor = vi.fn<() => ControlledActor | undefined>(() => actor)
   return { actor, character, main, guns, ammo, armor, rocket, bombs, armorItem, get_actor, controller: new_equipment_controller(get_actor) }

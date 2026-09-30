@@ -8,7 +8,7 @@ import { contractCheckedJev } from './task-loop-fixtures.mjs'
 
 function deployment() {
   return {
-    revision: 'airi-deploy-v8-npc-staging',
+    revision: 'sgluna-deploy-v8-npc-staging',
     session: '0123456789abcdef0123456789abcdef',
     mode: 'npc',
     actor_id: 18,
@@ -84,7 +84,7 @@ class RecoveryRcon {
   }
 
   async command(text) {
-    if (text.includes('remote.call("airi_deployment","status")')) return JSON.stringify(deployment())
+    if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(deployment())
     if (text.includes('remote.call("autorio_operations","status")')) {
       return JSON.stringify({
         task_state: this.taskState,
@@ -97,7 +97,7 @@ class RecoveryRcon {
     }
     if (text.includes('remote.call("autorio_preflight","operation"')) return JSON.stringify({ ok: true })
     if (text.includes('local ok,result=pcall')) {
-      const marker = text.match(/AIRI_RESULT_[a-f0-9]{24}:/)?.[0]
+      const marker = text.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)?.[0]
       assert.ok(marker)
       this.mutations.push(text)
       const count = [...text.matchAll(/return remote\.call\('autorio_operations'/g)].length
@@ -141,13 +141,13 @@ function makeAgent({
   rcon,
 } = {}) {
   const memory = new CanonicalTaskBoardMemory()
-  memory.planByNpc.set('npc:airi', activeState({ finalProof }))
+  memory.planByNpc.set('npc:sgluna', activeState({ finalProof }))
   const mainCalls = []
   const decisionCalls = []
   const agent = new NpcAgentLoop({
     rcon: rcon ?? new RecoveryRcon({ taskState, queueLength }),
     memory,
-    npcId: 'airi',
+    npcId: 'sgluna',
     systemPrompt: 'recovery router test',
     stateFile: null,
     traceFile: null,
@@ -163,9 +163,9 @@ function makeAgent({
   })
   agent.active = true
   agent.epoch = deployment()
-  agent.lastMemoryKey = 'npc:airi'
+  agent.lastMemoryKey = 'npc:sgluna'
   agent.requestInfo = {
-    memoryKey: 'npc:airi',
+    memoryKey: 'npc:sgluna',
     turnId: 1,
     sender: 'tester',
     text: 'perform a bounded recovery test',

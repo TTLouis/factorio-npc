@@ -98,7 +98,7 @@ test('a request whose Jev calls all fall back is logged, surfaced live, and mark
     stateFile: null,
     traceFile: null,
     decisionTraceFile: null,
-    npcId: 'airi',
+    npcId: 'sgluna',
     log: message => logs.push(message),
     onActivity: (event, data) => activity.push({ event, data }),
   })
@@ -145,7 +145,7 @@ test('a run with no decision provider reports Jev as off, not as a failed measur
     stateFile: null,
     traceFile: null,
     decisionTraceFile: null,
-    npcId: 'airi',
+    npcId: 'sgluna',
     onActivity: (event, data) => activity.push({ event, data }),
   })
 

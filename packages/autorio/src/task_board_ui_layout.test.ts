@@ -143,7 +143,7 @@ describe('SGLuna NPC console compact tracker layout', () => {
     expect(source).toContain('pause_enabled: pending === undefined')
     expect(source).toContain('terminate_enabled: pending === undefined')
     // An armed TERMINATE keeps the menu open for its confirming click.
-    expect(source).toContain('more_open: storage.airi_task_board_more_open?.[player.index] === true || armed')
+    expect(source).toContain('more_open: storage.sgluna_task_board_more_open?.[player.index] === true || armed')
 
     expect(source).toContain('follow_caption: debug_ui.follow_button_caption(follow?.active === true)')
     expect(source).toContain("return follow?.active ? 'Click to stop following. A goal paused by Follow will automatically resume.'")
@@ -200,7 +200,7 @@ describe('SGLuna NPC console compact tracker layout', () => {
     expect(source).toContain('function render_tracker(')
     expect(source).toMatch(/render_tracker\([\w.]+, board[,)]/)
     expect(source).toContain("create_section(parent, 'Activity'")
-    expect(source).toContain('const previous = storage.airi_task_board_ui')
+    expect(source).toContain('const previous = storage.sgluna_task_board_ui')
     expect(source).toContain('const changed_task = activity_state.bind_activity_context(next.conversation_id, next.goal_id)')
     expect(source).toContain('stamp_activity_times(next, changed_task ? undefined : previous, game.tick)')
     expect(source).toContain("caption: entry.timestamp ?? '--:--:--'")

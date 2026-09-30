@@ -10,9 +10,9 @@ const here = dirname(fileURLToPath(import.meta.url))
 const PAYLOAD_REF = 'c909da6e0fedeff7dbd0f0b8eba2527b28770833'
 const PAYLOAD_SHA256 = '179e6b3ff31c77aba52372fc820963e871f88abe7f4dd0f05d41d29ab68c3468'
 const source = Buffer.from(`#!/usr/bin/env bash
-AIRI_REF="0123456789abcdef0123456789abcdef01234567"
+SGLUNA_REF="0123456789abcdef0123456789abcdef01234567"
 REVISION="test"
-DEPLOYMENT_REVISION="airi-deploy-v8-test"
+DEPLOYMENT_REVISION="sgluna-deploy-v8-test"
 SGLUNA_ACTOR_MODE="\${SGLUNA_ACTOR_MODE:-npc}"
 SGLUNA_CHAT_PLAYERS="\${SGLUNA_CHAT_PLAYERS:-}"
 AIRI_ACTOR_MODE="\${AIRI_ACTOR_MODE:-$SGLUNA_ACTOR_MODE}"
@@ -51,9 +51,9 @@ test('channel installer resolves to an exact SHA and loads deployment payload fr
   assert.match(script, /api\.github\.com\/repos\/TTLouis\/factorio-npc\/commits/)
   assert.match(script, /raw\.githubusercontent\.com\/TTLouis\/factorio-npc\/\$RESOLVED_SHA\/deploy\/pterodactyl\/payload-src\/installer\.sh/)
   assert.match(script, /RESOLVED_SHA/)
-  assert.match(script, /Unexpected AIRI_REF assignment contract/)
+  assert.match(script, /Unexpected SGLUNA_REF assignment contract/)
   assert.match(script, /Unexpected REVISION assignment contract/)
-  assert.match(script, /AIRI_REF=.*RESOLVED_SHA/)
+  assert.match(script, /SGLUNA_REF=.*RESOLVED_SHA/)
   assert.match(script, /REVISION=.*CHANNEL.*SHORT_SHA/)
   assert.doesNotMatch(script, /PAYLOAD_REF/)
   assert.doesNotMatch(script, /EXPECTED_PAYLOAD_SHA256/)
@@ -84,7 +84,7 @@ test('generated egg variable contract keeps safe provider defaults and 300 reque
     assert.ok(egg.variables.some(entry => entry.env_variable === 'SGLUNA_ACTOR_MODE'))
     assert.ok(egg.variables.some(entry => entry.env_variable === 'SGLUNA_CHAT_PLAYERS'))
     assert.ok(!egg.variables.some(entry => entry.env_variable === 'PRIVATE_SERVER'))
-    assert.ok(!egg.variables.some(entry => entry.env_variable.startsWith('AIRI_')))
+    assert.ok(!egg.variables.some(entry => entry.env_variable.startsWith('SGLUNA_')))
     assert.ok(!egg.variables.some(entry => entry.env_variable === 'AIRI_PLAYER'))
     assert.ok(!egg.variables.some(entry => entry.env_variable === 'AIRI_CHAT_PLAYER'))
   }
@@ -190,8 +190,8 @@ test('committed Pterodactyl artifacts are internally valid and reinstall stays d
   assert.match(sourceText, /jev-health\.mjs/)
   assert.match(sourceText, /goal-definition\.mjs/)
   assert.match(sourceText, /goal-reading\.mjs/)
-  assert.match(sourceText, /AIRI_SUPERVISOR_VERIFY=/)
-  assert.match(sourceText, /await import\(pathToFileURL\(process\.env\.AIRI_SUPERVISOR_VERIFY\)\.href\)/)
+  assert.match(sourceText, /SGLUNA_SUPERVISOR_VERIFY=/)
+  assert.match(sourceText, /await import\(pathToFileURL\(process\.env\.SGLUNA_SUPERVISOR_VERIFY\)\.href\)/)
   assert.match(sourceText, /src\/runtime-v8\/canonical-task-board-memory\.mjs/)
   assert.match(sourceText, /src\/runtime-v8\/provider-base\.mjs/)
   assert.match(sourceText, /README-SGLUNA\.txt/)

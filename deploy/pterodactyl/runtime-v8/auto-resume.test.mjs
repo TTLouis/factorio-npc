@@ -69,7 +69,7 @@ test('a goal paused on the hourly budget resumes the committed plan once the pro
     stateFile: null,
     traceFile: null,
     decisionTraceFile: null,
-    npcId: 'airi',
+    npcId: 'sgluna',
   })
 
   await agent.request('gather iron then coal', { sender: 'Louis' })
@@ -82,7 +82,7 @@ test('a goal paused on the hourly budget resumes the committed plan once the pro
   assert.match(failure?.message ?? '', /Hourly provider request budget reached/)
 
   // What the supervisor's event queue does with that failure.
-  const session = { agent, currentPlanState: () => memory.currentPlan('npc:airi') }
+  const session = { agent, currentPlanState: () => memory.currentPlan('npc:sgluna') }
   const paused = await pauseStrandedPlanAfterRequestError(session, failure.message)
   assert.equal(paused?.status, 'paused')
   assert.match(paused.pause_reason, /^provider_transient: /)
@@ -95,7 +95,7 @@ test('a goal paused on the hourly budget resumes the committed plan once the pro
   assert.equal(recovery.recovered, true)
   assert.equal(game.mutations.length, 2, 'the next committed step was admitted without a human')
   assert.match(game.mutations[1], /coal/)
-  assert.notEqual(memory.currentPlan('npc:airi').status, 'paused')
+  assert.notEqual(memory.currentPlan('npc:sgluna').status, 'paused')
 })
 
 function stubSession() {

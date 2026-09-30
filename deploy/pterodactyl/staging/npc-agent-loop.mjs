@@ -216,7 +216,7 @@ export class NpcDialogueMemory {
 
   compactLine(turn) {
     const action = turn.actions ? ` | actions: ${turn.actions}` : ''
-    return `${turn.sender}: ${turn.user} | AIRI: ${turn.assistant}${action}`
+    return `${turn.sender}: ${turn.user} | SGLuna: ${turn.assistant}${action}`
   }
 
   appendSummary(bucket, turn) {
@@ -313,7 +313,7 @@ export class NpcAgentLoop {
     maxWorkingMessages = 28,
     maxWorkingChars = 40000,
     memory = new NpcDialogueMemory(),
-    npcId = 'airi',
+    npcId = 'sgluna',
     memoryKeyForStatus,
   }) {
     check(rcon && typeof rcon.command === 'function', 'RCON transport required')

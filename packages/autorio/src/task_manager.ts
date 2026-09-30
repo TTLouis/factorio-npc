@@ -41,8 +41,8 @@ interface TaskBatchReceipt extends TaskBatchIdentity {
 const MAX_RECEIPT_REFUSALS = 8
 
 declare const storage: {
-  airi_task_batch_sequence?: number
-  airi_task_batch_generation?: number
+  sgluna_task_batch_sequence?: number
+  sgluna_task_batch_generation?: number
 }
 
 const MAX_SAFE_COUNTER = 9007199254740990
@@ -76,11 +76,11 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
 
   function ensure_batch_generation() {
     if (batch_generation !== undefined) return batch_generation
-    const previous = valid_persisted_counter(storage.airi_task_batch_generation)
-      ? storage.airi_task_batch_generation
+    const previous = valid_persisted_counter(storage.sgluna_task_batch_generation)
+      ? storage.sgluna_task_batch_generation
       : 0
     batch_generation = previous + 1
-    storage.airi_task_batch_generation = batch_generation
+    storage.sgluna_task_batch_generation = batch_generation
     return batch_generation
   }
 
@@ -89,11 +89,11 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
   }
 
   function next_batch_id() {
-    const previous = valid_persisted_counter(storage.airi_task_batch_sequence)
-      ? storage.airi_task_batch_sequence
+    const previous = valid_persisted_counter(storage.sgluna_task_batch_sequence)
+      ? storage.sgluna_task_batch_sequence
       : 0
     const next = previous + 1
-    storage.airi_task_batch_sequence = next
+    storage.sgluna_task_batch_sequence = next
     return next
   }
 

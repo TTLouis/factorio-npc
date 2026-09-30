@@ -8,7 +8,7 @@ test('operation batch preserves Factorio error and failing operation index witho
   const rcon = {
     async command(text) {
       calls++
-      const marker = text.match(/AIRI_RESULT_[a-f0-9]{24}:/)?.[0]
+      const marker = text.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)?.[0]
       assert.ok(marker)
       return `${marker}${JSON.stringify({
         ok: false,

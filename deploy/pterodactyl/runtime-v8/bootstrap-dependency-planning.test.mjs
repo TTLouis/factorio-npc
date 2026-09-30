@@ -5,7 +5,7 @@ import { NpcAgentLoop, NpcDialogueMemory } from './npc-agent-loop.mjs'
 
 function deployment() {
   return {
-    revision: 'airi-deploy-v8-npc-staging',
+    revision: 'sgluna-deploy-v8-npc-staging',
     session: '0123456789abcdef0123456789abcdef',
     mode: 'npc',
     actor_id: 18,
@@ -40,7 +40,7 @@ class BootstrapRcon {
 
   async command(text) {
     this.commands.push(text)
-    if (text.includes('remote.call("airi_deployment","status")')) return JSON.stringify(deployment())
+    if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(deployment())
     if (text.includes('remote.call("autorio_follow","status")')) return JSON.stringify({ active: false })
     if (text.includes('remote.call("autorio_preflight","operation"')) {
       this.preflightCalls++
@@ -97,9 +97,9 @@ class BootstrapRcon {
       }
       return JSON.stringify({ ok: true, operation: 'supply_entity' })
     }
-    if (text.includes('AIRI_RESULT_') && text.includes('autorio_operations')) {
+    if (text.includes('SGLUNA_RESULT_') && text.includes('autorio_operations')) {
       this.mutations.push(text)
-      const marker = text.match(/AIRI_RESULT_[a-f0-9]{24}:/)?.[0]
+      const marker = text.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)?.[0]
       assert.ok(marker)
       return `${marker}${JSON.stringify({ ok: true, result: [[true, 'Task started']] })}`
     }

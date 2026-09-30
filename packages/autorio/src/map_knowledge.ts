@@ -23,7 +23,7 @@ interface MapKnowledge {
 }
 
 declare const storage: {
-  airi_map_knowledge?: MapKnowledge
+  sgluna_map_knowledge?: MapKnowledge
 }
 
 function chunk_key(surface_index: number, x: number, y: number) {
@@ -31,7 +31,7 @@ function chunk_key(surface_index: number, x: number, y: number) {
 }
 
 function knowledge_for(force: LuaForce): MapKnowledge | undefined {
-  const knowledge = storage.airi_map_knowledge
+  const knowledge = storage.sgluna_map_knowledge
   if (!knowledge || knowledge.force_index !== force.index) return undefined
   return knowledge
 }
@@ -66,10 +66,10 @@ function chunk_area(x: number, y: number) {
 // chart it for the force so players see it (the chart has no effect while no
 // player is connected; the join sync pushes it again then).
 export function observe_window(force: LuaForce, surface: LuaSurface, center_x: number, center_y: number) {
-  let knowledge = storage.airi_map_knowledge
+  let knowledge = storage.sgluna_map_knowledge
   if (!knowledge || knowledge.force_index !== force.index) {
     knowledge = { force_index: force.index, explored: {}, push_queue: [] }
-    storage.airi_map_knowledge = knowledge
+    storage.sgluna_map_knowledge = knowledge
   }
   knowledge.visible_surface_index = surface.index
   knowledge.visible_chunk_x = center_x
@@ -88,7 +88,7 @@ export function observe_window(force: LuaForce, surface: LuaSurface, center_x: n
 // Push: queue every explored chunk to be charted for the force, for example
 // when a player joins and can now receive the chart.
 export function queue_full_push() {
-  const knowledge = storage.airi_map_knowledge
+  const knowledge = storage.sgluna_map_knowledge
   if (!knowledge) return
   const queue: KnownChunk[] = []
   for (const [, chunk] of pairs(knowledge.explored)) queue.push(chunk)
@@ -112,10 +112,10 @@ export function drain_push_queue(force: LuaForce) {
 // Pull: add chunks the engine has charted for the force (for example by a
 // player exploring) to the NPC's explored record.
 export function pull_engine_chart(force: LuaForce, surface: LuaSurface) {
-  let knowledge = storage.airi_map_knowledge
+  let knowledge = storage.sgluna_map_knowledge
   if (!knowledge || knowledge.force_index !== force.index) {
     knowledge = { force_index: force.index, explored: {}, push_queue: [] }
-    storage.airi_map_knowledge = knowledge
+    storage.sgluna_map_knowledge = knowledge
   }
   let added = 0
   for (const chunk of surface.get_chunks()) {

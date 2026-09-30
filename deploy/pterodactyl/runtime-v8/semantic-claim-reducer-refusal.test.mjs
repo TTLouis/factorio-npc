@@ -9,7 +9,7 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { FakeFactorio, gather, planReply } from './task-loop-fixtures.mjs'
 
-const KEY = 'npc:airi'
+const KEY = 'npc:sgluna'
 const STEPS = ['Gather 10 iron ore', 'Build a boiler']
 
 function harness(game, provider) {
@@ -31,7 +31,7 @@ function harness(game, provider) {
     stateFile: null,
     traceFile: null,
     decisionTraceFile: null,
-    npcId: 'airi',
+    npcId: 'sgluna',
     onActivity: (event, data) => events.push({ event, data }),
   })
   return { agent, memory, events, prompts, calls: () => calls }

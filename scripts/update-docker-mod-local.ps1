@@ -18,7 +18,7 @@ try {
     if ($LASTEXITCODE -ne 0 -or $sha -notmatch '^[a-f0-9]{40}$') { throw 'Cannot identify HEAD commit.' }
     if (@(& git status --porcelain).Count -ne 0) { throw 'Commit or discard working-tree changes before a mod-only update.' }
 
-    $baseSha = (& docker run --rm --entrypoint cat factorio-npc:local /opt/airi/SOURCE_SHA).Trim()
+    $baseSha = (& docker run --rm --entrypoint cat factorio-npc:local /opt/sgluna/SOURCE_SHA).Trim()
     if ($LASTEXITCODE -ne 0 -or $baseSha -notmatch '^[a-f0-9]{40}$') { throw 'Cannot identify the base image source commit.' }
     & git merge-base --is-ancestor $baseSha HEAD
     if ($LASTEXITCODE -ne 0) { throw 'The image source is not an ancestor of HEAD; use the full local build.' }

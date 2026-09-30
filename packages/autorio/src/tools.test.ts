@@ -61,7 +61,7 @@ describe('goal conditions while the NPC body is dead', () => {
   it('adds the crafts the NPC finished to the production statistics for items_produced', async () => {
     ;(globalThis as any).game.forces = { player: force(0) }
     ;(globalThis as any).game.surfaces = new Map([[1, {}]])
-    ;(globalThis as any).storage = { airi_crafted_items: { 1: { 'iron-gear-wheel': 3, 'pipe': 9 } } }
+    ;(globalThis as any).storage = { sgluna_crafted_items: { 1: { 'iron-gear-wheel': 3, 'pipe': 9 } } }
     const tools = await tools_interface()
 
     // 7 from machine statistics + 3 hand-crafted; another item's count is not mixed in.
@@ -76,12 +76,12 @@ describe('goal conditions while the NPC body is dead', () => {
     const empty_force = { ...force(0), get_item_production_statistics: () => ({ get_input_count: () => 0 }) }
     ;(globalThis as any).game.forces = { player: empty_force }
     ;(globalThis as any).game.surfaces = new Map([[1, {}]])
-    ;(globalThis as any).storage = { airi_crafted_items: { 1: { 'iron-gear-wheel': 1 } } }
+    ;(globalThis as any).storage = { sgluna_crafted_items: { 1: { 'iron-gear-wheel': 1 } } }
     const tools = await tools_interface()
 
     const baseline = tools.evaluate_condition({ kind: 'items_produced', item_name: 'iron-gear-wheel', minimum: 1 })
     expect(baseline).toMatchObject({ satisfied: true, current: 1, hand_crafted: 1, production_statistics: 0 })
-    ;(globalThis as any).storage = { airi_crafted_items: { 1: { 'iron-gear-wheel': 4 } } }
+    ;(globalThis as any).storage = { sgluna_crafted_items: { 1: { 'iron-gear-wheel': 4 } } }
     expect(tools.evaluate_condition({ kind: 'items_produced', item_name: 'iron-gear-wheel', minimum: 1 }))
       .toMatchObject({ current: 4 })
     ;(globalThis as any).storage = {}
@@ -99,7 +99,7 @@ describe('goal conditions while the NPC body is dead', () => {
       .toMatchObject({ ok: true, kind: 'production_rate', satisfied: true, current: 12 })
 
     // Hand mining in progress on the live body voids the window.
-    ;(globalThis as any).storage = { airi_hand_work: { 1: { mining_active: { 'iron-gear-wheel': 0 } } } }
+    ;(globalThis as any).storage = { sgluna_hand_work: { 1: { mining_active: { 'iron-gear-wheel': 0 } } } }
     actor_state.actor = { force: rate_force, is_valid: true, get_mining_state: () => ({ mining: true }) }
     expect(tools.evaluate_condition({ kind: 'production_rate', item_name: 'iron-gear-wheel', per_minute: 10 }))
       .toMatchObject({ satisfied: false, void_reason: 'hand_mined' })
@@ -162,6 +162,6 @@ describe('nearby entity observation', () => {
     expect(result.entities[2].position).toEqual({ x: 1, y: 0 })
     expect(result).toMatchObject({ matched_count: 5, returned_count: 3, truncated: true })
     expect(result.type_counts).toEqual({ 'resource': 3, 'furnace': 1, 'mining-drill': 1 })
-    expect((globalThis as any).storage.airi_entity_reference_hints[41]).toMatchObject({ name: 'burner-mining-drill' })
+    expect((globalThis as any).storage.sgluna_entity_reference_hints[41]).toMatchObject({ name: 'burner-mining-drill' })
   })
 })

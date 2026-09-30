@@ -34,7 +34,7 @@ export interface ConsoleActionState {
   muted_color: Color
 }
 
-// What AIRI is doing, in the title bar: the live phase and its detail, with
+// What SGLuna is doing, in the title bar: the live phase and its detail, with
 // the NPC, the world task and the sync age in the tooltip.
 export interface ConsoleTitleStatus { caption: string, tone: ui_constants.Tone, tooltip: string }
 
@@ -71,7 +71,7 @@ export interface ConsoleBlockedState {
 }
 
 function icon_sprite(icon: ConsoleWindowButton['icon'], variant: 'white' | 'black'): SpritePath {
-  return `airi-console-${icon}-${variant}` as SpritePath
+  return `sgluna-console-${icon}-${variant}` as SpritePath
 }
 
 /**
@@ -158,7 +158,7 @@ export function render_blocked_banner(parent: LuaGuiElement, state: ConsoleBlock
   const tip = state.choice_pending ? 'Waiting for SGLuna runtime to acknowledge your blocked-plan decision.' : ''
   const keep = action_button(choices.add({ type: 'button', name: ui_constants.BLOCKED_KEEP_PAUSED_BUTTON_NAME, caption: state.choice_pending ? 'SAVING...' : 'KEEP PAUSED', style: 'dialog_button', tooltip: tip || 'Keep this committed plan frozen. No work or replanning will start.' }), ui_constants.COMPACT_BUTTON_WIDTH)
   keep.enabled = !state.choice_pending
-  const revise = action_button(choices.add({ type: 'button', name: ui_constants.BLOCKED_REVISE_BUTTON_NAME, caption: 'REVISE…', style: 'confirm_button', tooltip: tip || 'Keep the plan frozen, then describe the revised goal or constraints in the prompt below. AIRI will not invent a replacement plan.' }), ui_constants.COMPACT_BUTTON_WIDTH)
+  const revise = action_button(choices.add({ type: 'button', name: ui_constants.BLOCKED_REVISE_BUTTON_NAME, caption: 'REVISE…', style: 'confirm_button', tooltip: tip || 'Keep the plan frozen, then describe the revised goal or constraints in the prompt below. SGLuna will not invent a replacement plan.' }), ui_constants.COMPACT_BUTTON_WIDTH)
   revise.enabled = !state.choice_pending
   const cancel = action_button(choices.add({ type: 'button', name: ui_constants.BLOCKED_CANCEL_BUTTON_NAME, caption: 'CANCEL…', style: 'red_button', tooltip: tip || 'Request cancellation, then use the TERMINATE confirmation under … to discard this blocked goal permanently.' }), ui_constants.COMPACT_BUTTON_WIDTH)
   cancel.enabled = !state.choice_pending

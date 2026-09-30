@@ -45,7 +45,7 @@ function world(options: { kind?: string, enemy?: any, canShoot?: boolean, armed?
       kind: options.kind ?? 'standalone_character',
       valid: true,
       actor_id: 42,
-      name: 'AIRI',
+      name: 'SGLuna',
       position: { x: 0, y: 0 },
       has_character: true,
     }),

@@ -22,8 +22,8 @@ interface StoredRemoteConstructionPlan {
 }
 
 declare const storage: {
-  airi_validated_remote_construction_plan?: StoredRemoteConstructionPlan
-  airi_next_construction_validation_id?: number
+  sgluna_validated_remote_construction_plan?: StoredRemoteConstructionPlan
+  sgluna_next_construction_validation_id?: number
 }
 
 const VALIDATION_MAX_AGE_TICKS = 60 * 60
@@ -271,9 +271,9 @@ export function construction_intent(
     }
   }
 
-  const validation_id = (storage.airi_next_construction_validation_id ?? 0) + 1
-  storage.airi_next_construction_validation_id = validation_id
-  storage.airi_validated_remote_construction_plan = {
+  const validation_id = (storage.sgluna_next_construction_validation_id ?? 0) + 1
+  storage.sgluna_next_construction_validation_id = validation_id
+  storage.sgluna_validated_remote_construction_plan = {
     validation_id,
     actor_id: identity.actor_id,
     force_index: actor.force.index,
@@ -302,10 +302,10 @@ export function execute_prepared_remote_construction_plan(
   validation_id: number,
   placement_count: number,
 ): [boolean, string] | undefined {
-  const plan = storage.airi_validated_remote_construction_plan
+  const plan = storage.sgluna_validated_remote_construction_plan
   if (!plan || plan.validation_id !== validation_id) return undefined
 
-  storage.airi_validated_remote_construction_plan = undefined
+  storage.sgluna_validated_remote_construction_plan = undefined
   if (placement_count !== 1) return [false, 'remote construction placement count must be 1']
 
   const identity = actor.status_snapshot()

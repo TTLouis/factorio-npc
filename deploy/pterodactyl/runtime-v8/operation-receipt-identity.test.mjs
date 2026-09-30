@@ -171,7 +171,7 @@ test('refusal cause is read only from a batch reason that names the same failing
 })
 
 test('a refused furnace supply reaches the behavior trace and the plan blocker with its cause, held count and slot contents', async (t) => {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'airi-refusal-trace-'))
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-refusal-trace-'))
   t.after(() => fsp.rm(dir, { recursive: true, force: true }))
   const traceFile = path.join(dir, 'behavior.jsonl')
   const game = new FakeFactorio()
@@ -196,7 +196,7 @@ test('a refused furnace supply reaches the behavior trace and the plan blocker w
     stateFile: null,
     traceFile,
     decisionTraceFile: null,
-    npcId: 'airi',
+    npcId: 'sgluna',
   })
 
   await agent.request('load the furnaces', { sender: 'Louis' })
@@ -218,7 +218,7 @@ test('a refused furnace supply reaches the behavior trace and the plan blocker w
   )
   assert.equal(status.data.task_status.last_cancelled_batch.reason, 'moving_items:nothing_moved:input_slot_holds_other_item')
 
-  const state = memory.currentPlan('npc:airi')
+  const state = memory.currentPlan('npc:sgluna')
   assert.equal(state.status, 'blocked')
   assert.equal(state.blocker, 'transfer_failed:nothing_moved:input_slot_holds_other_item')
 })

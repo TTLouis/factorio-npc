@@ -80,14 +80,14 @@ interface StoredSkillRevision {
 }
 
 declare const storage: {
-  airi_learning_opportunities?: Record<string, LearningOpportunity>
-  airi_learning_opportunity_order?: string[]
-  airi_learning_next_id?: number
-  airi_learning_verification_queue?: LearningVerificationQueueItem[]
-  airi_learning_policy?: LearningPolicy
-  airi_skill_verification_runs?: Record<string, VerificationEvidenceSnapshot>
-  airi_skill_definitions?: Record<string, StoredSkillRevision>
-  airi_learning_terminal_evidence_processed?: Record<string, string>
+  sgluna_learning_opportunities?: Record<string, LearningOpportunity>
+  sgluna_learning_opportunity_order?: string[]
+  sgluna_learning_next_id?: number
+  sgluna_learning_verification_queue?: LearningVerificationQueueItem[]
+  sgluna_learning_policy?: LearningPolicy
+  sgluna_skill_verification_runs?: Record<string, VerificationEvidenceSnapshot>
+  sgluna_skill_definitions?: Record<string, StoredSkillRevision>
+  sgluna_learning_terminal_evidence_processed?: Record<string, string>
 }
 
 export const MAX_LEARNING_OPPORTUNITIES = 32
@@ -125,27 +125,27 @@ function unique_predicates(values: SkillConstraintPredicate[]) {
 }
 
 function records_readonly(): Record<string, LearningOpportunity> {
-  return storage.airi_learning_opportunities ?? {}
+  return storage.sgluna_learning_opportunities ?? {}
 }
 
 function order_readonly() {
-  return storage.airi_learning_opportunity_order ?? []
+  return storage.sgluna_learning_opportunity_order ?? []
 }
 
 function ensure_records() {
-  if (storage.airi_learning_opportunities === undefined) storage.airi_learning_opportunities = {}
-  if (storage.airi_learning_opportunity_order === undefined) storage.airi_learning_opportunity_order = []
-  return storage.airi_learning_opportunities
+  if (storage.sgluna_learning_opportunities === undefined) storage.sgluna_learning_opportunities = {}
+  if (storage.sgluna_learning_opportunity_order === undefined) storage.sgluna_learning_opportunity_order = []
+  return storage.sgluna_learning_opportunities
 }
 
 function ensure_queue() {
-  if (storage.airi_learning_verification_queue === undefined) storage.airi_learning_verification_queue = []
-  return storage.airi_learning_verification_queue
+  if (storage.sgluna_learning_verification_queue === undefined) storage.sgluna_learning_verification_queue = []
+  return storage.sgluna_learning_verification_queue
 }
 
 function terminal_evidence_processed() {
-  storage.airi_learning_terminal_evidence_processed ??= {}
-  return storage.airi_learning_terminal_evidence_processed
+  storage.sgluna_learning_terminal_evidence_processed ??= {}
+  return storage.sgluna_learning_terminal_evidence_processed
 }
 
 export function semantic_counterexample_from_failure(skill: SkillDefinition, run: VerificationEvidenceSnapshot, evidence_refs: string[] = []): SkillSemanticCounterexample | undefined {
@@ -248,7 +248,7 @@ export function revise_skill_from_semantic_counterexample(skill: SkillDefinition
  */
 function bridge_terminal_verification_evidence(opportunity: LearningOpportunity) {
   if ((opportunity.state !== 'failed' && opportunity.state !== 'verified') || opportunity.verification_run_id === undefined) return
-  const run = storage.airi_skill_verification_runs?.[opportunity.verification_run_id]
+  const run = storage.sgluna_skill_verification_runs?.[opportunity.verification_run_id]
   if (!run || (run.state !== 'failed' && run.state !== 'verified')) return
 
   const terminal_key = `${run.id}:${run.state}`
@@ -287,7 +287,7 @@ function bridge_terminal_verification_evidence(opportunity: LearningOpportunity)
     return
   }
 
-  const promoted = storage.airi_skill_definitions?.[run.skill_id]
+  const promoted = storage.sgluna_skill_definitions?.[run.skill_id]
   if (!promoted || promoted.status !== 'verified' || promoted.revision <= run.skill_revision) return
   record_skill_evidence(
     promoted.id,
@@ -301,24 +301,24 @@ function bridge_terminal_verification_evidence(opportunity: LearningOpportunity)
 }
 
 export function get_learning_policy(): LearningPolicy {
-  return storage.airi_learning_policy ?? 'assisted'
+  return storage.sgluna_learning_policy ?? 'assisted'
 }
 
 export function set_learning_policy(value: unknown): LearningPolicy {
   if (value !== 'manual' && value !== 'assisted' && value !== 'autonomous_bounded') throw new Error('learning policy must be manual, assisted, or autonomous_bounded')
-  storage.airi_learning_policy = value
+  storage.sgluna_learning_policy = value
   return value
 }
 
 function next_opportunity_id() {
-  const next = storage.airi_learning_next_id ?? 1
-  storage.airi_learning_next_id = next + 1
+  const next = storage.sgluna_learning_next_id ?? 1
+  storage.sgluna_learning_next_id = next + 1
   return `learning-${next}`
 }
 
 export function create_learning_opportunity(value: Omit<LearningOpportunity, 'id' | 'created_tick' | 'state'> & { state?: LearningOpportunityState }) {
   const records = ensure_records()
-  const order = storage.airi_learning_opportunity_order as string[]
+  const order = storage.sgluna_learning_opportunity_order as string[]
   const id = next_opportunity_id()
   const opportunity: LearningOpportunity = {
     id,
@@ -371,7 +371,7 @@ export function list_learning_opportunities(limit = MAX_LEARNING_OPPORTUNITIES) 
 }
 
 export function list_learning_verification_queue() {
-  return (storage.airi_learning_verification_queue ?? []).slice()
+  return (storage.sgluna_learning_verification_queue ?? []).slice()
 }
 
 export function queue_learning_verification(opportunity_id: string, skill_id: string, estimated_cost: LearningCost, risk: LearningRisk, reason: string) {

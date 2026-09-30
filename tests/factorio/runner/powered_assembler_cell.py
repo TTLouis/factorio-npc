@@ -56,7 +56,7 @@ PRODUCTION_ROUNDS = 12
 WEST = 12
 
 # A1 harness fixture layout. Tile offsets from the cleared build origin.
-# Test-only coordinates; never a reusable AIRI blueprint (roadmap section 9).
+# Test-only coordinates; never a reusable SGLuna blueprint (roadmap section 9).
 #
 #        chest -> inserter -> assembling-machine-1 -> inserter -> chest
 #        powered by solar panels through one medium electric pole

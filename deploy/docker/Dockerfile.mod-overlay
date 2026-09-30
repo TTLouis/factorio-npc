@@ -16,7 +16,7 @@ RUN --mount=type=cache,id=npc-test-pnpm-store,target=/pnpm/store \
 RUN pnpm --filter @proj-airi/tstl-plugin-reload-factorio-mod run build
 RUN pnpm --filter autorio.ts run test
 RUN node deploy/pterodactyl/staging/source-preparer.mjs . deploy/pterodactyl/staging/guard.ts \
-  && grep -q "^import './airi_deployment_guard'" packages/autorio/src/control.ts
+  && grep -q "^import './sgluna_deployment_guard'" packages/autorio/src/control.ts
 RUN pnpm --filter autorio.ts run typecheck
 RUN pnpm --filter autorio.ts run build
 RUN cd packages/autorio && node scripts/check-generated-lua.mjs
@@ -30,13 +30,13 @@ COPY deploy/docker/update-mod-overlay.mjs /tmp/update-mod-overlay.mjs
 
 RUN set -eux; \
   printf '%s' "$MOD_SOURCE_SHA" | grep -Eq '^[a-f0-9]{40}$'; \
-  app="$(dirname "$(readlink -f /opt/airi/start-sgluna.sh)")"; \
-  case "$app" in /opt/airi/.airi/releases/*) ;; *) exit 1;; esac; \
+  app="$(dirname "$(readlink -f /opt/sgluna/start-sgluna.sh)")"; \
+  case "$app" in /opt/sgluna/.sgluna/releases/*) ;; *) exit 1;; esac; \
   test -f "$app/manifest.json"; \
   test -s /tmp/new-autorio/control.lua; \
   test -s /tmp/new-autorio/data.lua; \
   test -s /tmp/new-autorio/info.json; \
-  grep -q 'airi-deploy-v8-npc-staging' /tmp/new-autorio/control.lua; \
+  grep -q 'sgluna-deploy-v8-npc-staging' /tmp/new-autorio/control.lua; \
   rm -rf "$app/autorio"; \
   mkdir -p "$app/autorio"; \
   cp -a /tmp/new-autorio/. "$app/autorio/"; \
@@ -44,8 +44,8 @@ RUN set -eux; \
   cp -a "$app/autorio/." /tmp/client-mod/autorio_0.1.0/; \
   rm -f "$app/client-mod/autorio_0.1.0.zip"; \
   (cd /tmp/client-mod && zip -qr "$app/client-mod/autorio_0.1.0.zip" autorio_0.1.0); \
-  cp "$app/client-mod/autorio_0.1.0.zip" /opt/airi/client-mods/autorio_0.1.0.zip; \
+  cp "$app/client-mod/autorio_0.1.0.zip" /opt/sgluna/client-mods/autorio_0.1.0.zip; \
   (cd "$app/client-mod" && sha256sum autorio_0.1.0.zip > SHA256SUMS); \
-  cp "$app/client-mod/SHA256SUMS" /opt/airi/client-mods/SHA256SUMS; \
+  cp "$app/client-mod/SHA256SUMS" /opt/sgluna/client-mods/SHA256SUMS; \
   "$app/node/bin/node" /tmp/update-mod-overlay.mjs "$app" "$MOD_SOURCE_SHA"; \
   rm -rf /tmp/new-autorio /tmp/client-mod /tmp/update-mod-overlay.mjs

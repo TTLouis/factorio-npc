@@ -79,14 +79,14 @@ describe('project activity filters', () => {
     const { readFileSync } = await import('node:fs')
     const window_source = readFileSync(new URL('./project_window.ts', import.meta.url), 'utf8')
     const console_source = readFileSync(new URL('../task_board_ui.ts', import.meta.url), 'utf8')
-    expect(window_source).toContain("tags: { airi_activity_filter: flag, airi_activity_surface: 'projects' }")
+    expect(window_source).toContain("tags: { sgluna_activity_filter: flag, sgluna_activity_surface: 'projects' }")
     expect(window_source).toContain("activity_state.activity_filter_mask(player_index, 'projects')")
     expect(window_source).toContain('activity_state.activity_matches_mask(entry.kind as TaskBoardUiActivity[\'kind\'], mask)')
-    // Both panes scroll only under the shared LIVE follow state, and only for new rows.
-    expect(window_source).toContain('const follow = activity_state.activity_view(player_index).follow')
-    expect(window_source).toContain('if (follow && (force_activity_latest || mask_changed || appended > 0)')
-    expect(window_source).toContain('if (follow && conversation_lines.length > 0 && (force_activity_latest || conversation_lines.length > previous_conversation_count)) (conversation_scroll as ScrollPaneGuiElement).scroll_to_bottom()')
-    expect(console_source).toContain("element.tags?.airi_activity_surface === 'projects') { activity_state.toggle_activity_filter(player.index, filter_flag, 'projects'); project_ui.render_projects_popout(player, true, storage.airi_task_board_ui?.goal_id ?? ''); return }")
+    // Both panes scroll only under the shared LIVE state, and only for new rows.
+    expect(window_source).toContain('const live = activity_state.activity_view(player_index).live')
+    expect(window_source).toContain('if (live && (force_activity_latest || mask_changed || appended > 0)')
+    expect(window_source).toContain('if (live && conversation_lines.length > 0 && (force_activity_latest || conversation_lines.length > previous_conversation_count)) (conversation_scroll as ScrollPaneGuiElement).scroll_to_bottom()')
+    expect(console_source).toContain("element.tags?.sgluna_activity_surface === 'projects') { activity_state.toggle_activity_filter(player.index, filter_flag, 'projects'); project_ui.render_projects_popout(player, true, storage.sgluna_task_board_ui?.goal_id ?? ''); return }")
   })
 })
 
@@ -160,7 +160,7 @@ describe('old task export', () => {
   it('exports the selected archived task as structured JSON plus an agent-readable markdown companion', () => {
     const conversation = [
       { id: 'u1', role: 'user', sender: 'TTLouis', text: 'Build power and smelting' },
-      { id: 'a1', role: 'assistant', sender: 'AIRI', text: 'I will build power first.' },
+      { id: 'a1', role: 'assistant', sender: 'SGLuna', text: 'I will build power first.' },
     ]
     const activity = [
       { id: 'receipt-1', kind: 'result', text: 'Autorio batch 1 completed', timestamp: '00:01:00' },
@@ -175,7 +175,7 @@ describe('old task export', () => {
     const project = project_by_id('goal-export')!
     const payload = project_export_payload(project)
     expect(payload.schema_version).toBe(1)
-    expect(payload.kind).toBe('airi_old_task_export')
+    expect(payload.kind).toBe('sgluna_old_task_export')
     expect(payload.goal.id).toBe('goal-export')
     expect(payload.goal.objective).toBe('Build power and smelting')
     expect(payload.conversation.map(message => message.text)).toEqual([
@@ -208,7 +208,7 @@ describe('old task export', () => {
     const player = { index: 1, print: (message: string) => messages.push(message) } as any
 
     expect(handle_project_export_click(player, 'not-export')).toBe(false)
-    expect(handle_project_export_click(player, 'airi_task_board_project_export')).toBe(true)
+    expect(handle_project_export_click(player, 'sgluna_task_board_project_export')).toBe(true)
     expect(writes).toEqual([
       'sgluna-old-tasks/goal-a/task.json',
       'sgluna-old-tasks/goal-a/TASK.md',
@@ -229,7 +229,7 @@ describe('project conversation archive', () => {
     const conversation = Array.from({ length: 8 }, (_, index) => ({
       id: `message_${index + 1}`,
       role: index % 2 === 0 ? 'user' : 'assistant',
-      sender: index % 2 === 0 ? 'TTLouis' : 'AIRI',
+      sender: index % 2 === 0 ? 'TTLouis' : 'SGLuna',
       text: `message ${index + 1}`,
     }))
     record_project_snapshot({ ...snapshot('goal-a', 'Build power'), conversation }, 60)

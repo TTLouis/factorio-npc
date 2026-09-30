@@ -13,7 +13,7 @@ function declaredControlActions(source) {
 }
 
 function uiControlLine(action) {
-  return `[AIRI_UI_CONTROL] ${JSON.stringify({
+  return `[SGLUNA_UI_CONTROL] ${JSON.stringify({
     version: 1,
     action,
     player_index: 1,

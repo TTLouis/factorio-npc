@@ -10,7 +10,7 @@ import { providerRequest } from './provider.mjs'
 
 function deployment(actorId = 18, epoch = 3) {
   return {
-    revision: 'airi-deploy-v8-npc-staging',
+    revision: 'sgluna-deploy-v8-npc-staging',
     session: '0123456789abcdef0123456789abcdef',
     mode: 'npc',
     actor_id: actorId,
@@ -33,7 +33,7 @@ class FakeRcon {
   }
 
   async command(text) {
-    if (text.includes('remote.call("airi_deployment","status")')) return JSON.stringify(this.status)
+    if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(this.status)
     if (text.includes('remote.call("autorio_actor","status")')) return JSON.stringify({ actor: { actor_id: 18, kind: 'standalone_character' } })
     if (text.includes('remote.call("autorio_preflight","operation"')) return JSON.stringify({ ok: true })
     if (text.includes('remote.call("autorio_operations","status")')) {
@@ -51,7 +51,7 @@ class FakeRcon {
       })
     }
     if (text.includes('local ok,result=pcall')) {
-      const marker = text.match(/AIRI_RESULT_[a-f0-9]{24}:/)?.[0]
+      const marker = text.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)?.[0]
       assert.ok(marker)
       this.mutations.push(text)
       const admissions = [...text.matchAll(/return remote\.call\('autorio_operations'/g)].length
@@ -92,7 +92,7 @@ function withProviderUsage(message, usage = {
   total_tokens: 120,
   prompt_tokens_details: { cached_tokens: 80 },
 }) {
-  Object.defineProperty(message, '_airiProvider', {
+  Object.defineProperty(message, '_sglunaProvider', {
     configurable: true,
     enumerable: false,
     value: {
@@ -142,7 +142,7 @@ function completionAndContinueDecision(state) {
 
 function truncatedProviderMessage(responseId) {
   const message = { content: '' }
-  Object.defineProperty(message, '_airiProvider', {
+  Object.defineProperty(message, '_sglunaProvider', {
     configurable: true,
     enumerable: false,
     value: {
@@ -167,7 +167,7 @@ function truncatedProviderMessage(responseId) {
 }
 
 test('behavior trace correlates request through verification, records usage, and redacts secrets', async t => {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'airi-behavior-trace-'))
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-behavior-trace-'))
   t.after(() => fsp.rm(dir, { recursive: true, force: true }))
   const traceFile = path.join(dir, 'airi-behavior.jsonl')
   const replies = [
@@ -325,27 +325,27 @@ test('provider response metadata is available to tracing without changing assist
     model: 'test-model',
   }, [{ role: 'user', content: 'hello' }], { fetchImpl, allowTools: false })
 
-  assert.equal(message._airiProvider.response_id, 'resp_123')
-  assert.equal(message._airiProvider.model, 'test-model-v2')
-  assert.equal(message._airiProvider.finish_reason, 'stop')
-  assert.deepEqual(message._airiProvider.usage, { prompt_tokens: 12, completion_tokens: 4 })
-  assert.equal(message._airiProvider.diagnostic_code, 'provider_content_schema_invalid')
-  assert.equal(message._airiProvider.content_chars, 2)
-  assert.equal(message._airiProvider.content_utf8_bytes, 2)
-  assert.equal(message._airiProvider.reasoning_content_chars, 0)
-  assert.equal(message._airiProvider.tool_call_count, 0)
-  assert.deepEqual(message._airiProvider.message_keys, ['content'])
-  assert.deepEqual(message._airiProvider.structured_content, {
+  assert.equal(message._sglunaProvider.response_id, 'resp_123')
+  assert.equal(message._sglunaProvider.model, 'test-model-v2')
+  assert.equal(message._sglunaProvider.finish_reason, 'stop')
+  assert.deepEqual(message._sglunaProvider.usage, { prompt_tokens: 12, completion_tokens: 4 })
+  assert.equal(message._sglunaProvider.diagnostic_code, 'provider_content_schema_invalid')
+  assert.equal(message._sglunaProvider.content_chars, 2)
+  assert.equal(message._sglunaProvider.content_utf8_bytes, 2)
+  assert.equal(message._sglunaProvider.reasoning_content_chars, 0)
+  assert.equal(message._sglunaProvider.tool_call_count, 0)
+  assert.deepEqual(message._sglunaProvider.message_keys, ['content'])
+  assert.deepEqual(message._sglunaProvider.structured_content, {
     json_valid: true,
     plan_valid: false,
     error: 'Invalid chatMessage',
   })
-  assert.equal(Object.keys(message).includes('_airiProvider'), false)
+  assert.equal(Object.keys(message).includes('_sglunaProvider'), false)
   assert.equal(JSON.stringify(message), '{"content":"{}"}')
 })
 
 test('request failure freezes the final provider diagnostics and last tool into one snapshot', async t => {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'airi-failure-snapshot-'))
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-failure-snapshot-'))
   t.after(() => fsp.rm(dir, { recursive: true, force: true }))
   const traceFile = path.join(dir, 'airi-behavior.jsonl')
   let providerCalls = 0

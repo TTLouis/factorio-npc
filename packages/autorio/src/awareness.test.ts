@@ -27,7 +27,7 @@ function make_actor(kind = 'standalone_character') {
     status_snapshot: vi.fn(() => ({
       kind,
       valid: true,
-      name: 'AIRI',
+      name: 'SGLuna',
       position: actor.position,
       has_character: true,
       actor_id: 9,
@@ -102,10 +102,10 @@ describe('standalone NPC map knowledge', () => {
   it('retires the companion radar a pre-change save still holds', () => {
     const { actor } = make_actor()
     const radar = { valid: true, destroy: vi.fn() }
-    ;(globalThis as any).storage.airi_awareness_radar = radar
+    ;(globalThis as any).storage.sgluna_awareness_radar = radar
     new_awareness_controller().tick(actor)
     expect(radar.destroy).toHaveBeenCalledTimes(1)
-    expect((globalThis as any).storage.airi_awareness_radar).toBeUndefined()
+    expect((globalThis as any).storage.sgluna_awareness_radar).toBeUndefined()
   })
 
   it('pushes the explored map when a player joins and pulls what players charted', () => {

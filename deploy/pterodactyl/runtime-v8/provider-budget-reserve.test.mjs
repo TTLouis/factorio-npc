@@ -6,7 +6,7 @@ import test from 'node:test'
 import { reserveBudget } from './common.mjs'
 
 test('hourly cap preserves one slot for exactly-once output-budget recovery without raising the cap', async t => {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'airi-provider-budget-'))
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-provider-budget-'))
   t.after(() => fsp.rm(dir, { recursive: true, force: true }))
   const file = path.join(dir, 'provider-budget.json')
   const now = 1000
@@ -18,7 +18,7 @@ test('hourly cap preserves one slot for exactly-once output-budget recovery with
 })
 
 test('a one-request hourly cap remains usable instead of reserving its only slot', async t => {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'airi-provider-budget-one-'))
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-provider-budget-one-'))
   t.after(() => fsp.rm(dir, { recursive: true, force: true }))
   assert.equal(await reserveBudget(path.join(dir, 'provider-budget.json'), 1, 1000, { reservedSlots: 1 }), 1)
 })

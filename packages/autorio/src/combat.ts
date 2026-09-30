@@ -124,8 +124,8 @@ interface CombatResult {
 }
 
 declare const storage: {
-  airi_last_combat_result?: CombatResult
-  airi_owned_combat_support?: PersistentCombatSupportRegistry
+  sgluna_last_combat_result?: CombatResult
+  sgluna_owned_combat_support?: PersistentCombatSupportRegistry
 }
 
 function copy_position(position: { x: number, y: number }) {
@@ -134,7 +134,7 @@ function copy_position(position: { x: number, y: number }) {
 
 function support_registry_matches(owner_actor_id?: number, owner_actor_kind?: string, owner_force_index?: number) {
   if (owner_actor_id === undefined || owner_actor_kind === undefined || owner_force_index === undefined) return false
-  const registry = storage.airi_owned_combat_support
+  const registry = storage.sgluna_owned_combat_support
   return registry !== undefined
     && registry.actor_id === owner_actor_id
     && registry.actor_kind === owner_actor_kind
@@ -142,10 +142,10 @@ function support_registry_matches(owner_actor_id?: number, owner_actor_kind?: st
 }
 
 function registered_support_turrets(owner_actor_id?: number, owner_actor_kind?: string, owner_force_index?: number) {
-  const registry = storage.airi_owned_combat_support
+  const registry = storage.sgluna_owned_combat_support
   if (!registry || !support_registry_matches(owner_actor_id, owner_actor_kind, owner_force_index)) return []
   const live = registry.turrets.filter(entity => entity.valid)
-  if (live.length === 0) storage.airi_owned_combat_support = undefined
+  if (live.length === 0) storage.sgluna_owned_combat_support = undefined
   else registry.turrets = live
   return live
 }
@@ -158,11 +158,11 @@ function sync_support_registry(task: CombatTask, turrets: LuaEntity[]) {
   const live = turrets.filter(entity => entity.valid)
   if (live.length === 0) {
     if (support_registry_matches(task.owner_actor_id, task.owner_actor_kind, task.owner_force_index)) {
-      storage.airi_owned_combat_support = undefined
+      storage.sgluna_owned_combat_support = undefined
     }
     return
   }
-  storage.airi_owned_combat_support = {
+  storage.sgluna_owned_combat_support = {
     actor_id: task.owner_actor_id,
     actor_kind: task.owner_actor_kind,
     force_index: task.owner_force_index,
@@ -411,7 +411,7 @@ function record(actor: ControlledActor | undefined, raw_task: PlayerParametersAt
     recovery_stage: task?.combat_recovery_stage,
     spatial_observation: task?.combat_last_spatial_observation,
   }
-  storage.airi_last_combat_result = result
+  storage.sgluna_last_combat_result = result
   return result
 }
 
@@ -1514,7 +1514,7 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
         const staging_goal = support_staging_goal(actor, target)
         const staging_distance = distance(staging_goal, target.position)
         if (current_distance > staging_distance + COMBAT.DISTANCE_PROGRESS_EPSILON) {
-          // Old support must not pin AIRI in the rear when it no longer reaches
+          // Old support must not pin SGLuna in the rear when it no longer reaches
           // the active static target. Advance only far enough to make a new
           // frontline placement feasible, then retry support on the next tick.
           // Use the tighter retreat-path tolerance for this precise staging
@@ -1599,7 +1599,7 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
             distance: actor ? distance(actor.position, target.position) : undefined,
           }
         : undefined,
-      last_result: storage.airi_last_combat_result,
+      last_result: storage.sgluna_last_combat_result,
     }
   }
 

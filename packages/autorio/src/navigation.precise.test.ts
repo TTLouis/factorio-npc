@@ -43,7 +43,7 @@ function fixture() {
       actor_id: 1,
       kind: 'standalone_character',
       valid: true,
-      name: 'AIRI',
+      name: 'SGLuna',
       position,
       has_character: true,
     })),

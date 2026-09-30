@@ -11,12 +11,12 @@ export interface EntityReferenceHint {
 }
 
 declare const storage: {
-  airi_entity_reference_hints?: Record<number, EntityReferenceHint>
+  sgluna_entity_reference_hints?: Record<number, EntityReferenceHint>
 }
 
 function hints() {
-  storage.airi_entity_reference_hints ??= {}
-  return storage.airi_entity_reference_hints
+  storage.sgluna_entity_reference_hints ??= {}
+  return storage.sgluna_entity_reference_hints
 }
 
 export function remember_entity_reference(entity: LuaEntity | undefined) {

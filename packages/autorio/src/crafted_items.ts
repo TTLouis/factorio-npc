@@ -15,7 +15,7 @@
 import { record_hand_crafted_tick } from './hand_work'
 
 export interface CraftedItemsStorage {
-  airi_crafted_items?: Record<number, Record<string, number>>
+  sgluna_crafted_items?: Record<number, Record<string, number>>
 }
 
 declare const storage: CraftedItemsStorage
@@ -36,15 +36,15 @@ interface RecipeProduct {
 }
 
 export function crafted_item_count(force_index: number, item_name: string): number {
-  return storage.airi_crafted_items?.[force_index]?.[item_name] ?? 0
+  return storage.sgluna_crafted_items?.[force_index]?.[item_name] ?? 0
 }
 
 export function record_crafted_items(force_index: number, item_name: string, count: number) {
   if (!(count > 0)) return
   // A rate goal's window must not contain the NPC crafting the measured item.
   record_hand_crafted_tick(force_index, item_name)
-  const all = storage.airi_crafted_items ?? {}
-  storage.airi_crafted_items = all
+  const all = storage.sgluna_crafted_items ?? {}
+  storage.sgluna_crafted_items = all
   const per_force = all[force_index] ?? {}
   all[force_index] = per_force
   per_force[item_name] = (per_force[item_name] ?? 0) + count

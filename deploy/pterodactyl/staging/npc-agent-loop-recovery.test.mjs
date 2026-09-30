@@ -4,7 +4,7 @@ import test from 'node:test'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 
 const status = {
-  revision: 'airi-deploy-v8-npc-staging',
+  revision: 'sgluna-deploy-v8-npc-staging',
   session: '0123456789abcdef0123456789abcdef',
   mode: 'npc',
   actor_id: 18,
@@ -21,7 +21,7 @@ const status = {
 function rcon() {
   return {
     async command(text) {
-      if (text.includes('remote.call("airi_deployment","status")')) return JSON.stringify(status)
+      if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(status)
       return 'ok'
     },
   }

@@ -155,7 +155,7 @@ function tick(c: ReturnType<typeof world>, count = 1) {
 }
 
 describe('sacrificial combat support frontline', () => {
-  it('places a support turret between AIRI and a static nest', () => {
+  it('places a support turret between SGLuna and a static nest', () => {
     const nest = enemy(10, 'biter-spawner', 'unit-spawner', 30)
     const c = world([nest], 1)
 
@@ -308,7 +308,7 @@ describe('sacrificial combat support frontline', () => {
     })
   })
 
-  it('advances only to the protected rear point when ranged pressure is outside AIRI weapon range, then resumes shooting', () => {
+  it('advances only to the protected rear point when ranged pressure is outside SGLuna weapon range, then resumes shooting', () => {
     const spitter = enemy(46, 'medium-spitter', 'unit', 20)
     const c = world([spitter], 1)
     c.character.can_shoot.mockImplementation((_target: any, position: { x: number, y: number }) =>

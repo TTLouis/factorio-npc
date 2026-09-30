@@ -40,7 +40,7 @@ export const BASIC_SKILL_DEFINITIONS: any[] = [
     goal_tags: ['missing', 'craft', 'bootstrap', 'dependency', 'blocked'],
     source: SOURCE,
     preconditions: [
-      { kind: 'bootstrap', subject: 'required-item-missing', description: 'The current goal needs an item or building that AIRI does not already have ready to use.' },
+      { kind: 'bootstrap', subject: 'required-item-missing', description: 'The current goal needs an item or building that SGLuna does not already have ready to use.' },
     ],
     inputs: [{ item: 'missing-required-item', role: 'dependency to resolve' }],
     outputs: [{ item: 'usable-required-item', role: 'dependency made available for the next action' }],
@@ -53,13 +53,13 @@ export const BASIC_SKILL_DEFINITIONS: any[] = [
       ],
       relations: [
         { kind: 'custom', from: 'goal', to: 'required-item', description: 'Identify only the dependency that blocks the next executable step.' },
-        { kind: 'custom', from: 'recipe', to: 'required-item', description: 'Use live recipe knowledge to decide whether AIRI can make the dependency.' },
+        { kind: 'custom', from: 'recipe', to: 'required-item', description: 'Use live recipe knowledge to decide whether SGLuna can make the dependency.' },
         { kind: 'custom', from: 'ingredients', to: 'recipe', description: 'Acquire only ingredients actually required by the live recipe.' },
       ],
     },
     constraints: [
       { kind: 'safety', description: 'Do not guess recipe availability, ingredient counts, or hand-craftability from memory; query live recipe/prototype knowledge.', validation: 'unvalidated', evidence_refs: [] },
-      { kind: 'resource', description: 'Do not search the world broadly for a missing building before checking whether AIRI can craft it from held or obtainable ingredients.', validation: 'unvalidated', evidence_refs: [] },
+      { kind: 'resource', description: 'Do not search the world broadly for a missing building before checking whether SGLuna can craft it from held or obtainable ingredients.', validation: 'unvalidated', evidence_refs: [] },
       { kind: 'custom', description: 'Stop observing and commit the next action once the missing dependency is grounded well enough to act.', validation: 'unvalidated', evidence_refs: [] },
     ],
     parameters: [
@@ -162,7 +162,7 @@ export const BASIC_SKILL_DEFINITIONS: any[] = [
     ],
     parameters: [
       { name: 'resource', description: 'Resource to mine and smelt.', required: true },
-      { name: 'furnace_output_plan', description: 'How AIRI will collect or route finished plates.', required: false },
+      { name: 'furnace_output_plan', description: 'How SGLuna will collect or route finished plates.', required: false },
     ],
     verification: verification(),
     known_failure_modes: [

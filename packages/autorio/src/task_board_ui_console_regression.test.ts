@@ -73,13 +73,13 @@ describe('SGLuna NPC console layout regressions', () => {
     expect(fill_debug).not.toContain('Execution Activity')
     const refresh = debug_source.split('function refresh_debug_activity(')[1]?.split('function build_debug_popout(')[0] ?? ''
     expect(refresh).toContain('activity_state.activity_rows_diff(shown, keys)')
-    expect(refresh).toContain('if (force || view.follow)')
+    expect(refresh).toContain('if (force || view.live)')
     expect(refresh).not.toContain('view.hover')
     expect(refresh).toContain('(scroll as ScrollPaneGuiElement).scroll_to_bottom()')
     expect(refresh).not.toContain('scroll.clear()')
     expect(debug_source).toContain("name: DEBUG_ACTIVITY_SCROLL_NAME")
     expect(debug_source).toContain("vertical_scroll_policy: 'auto-and-reserve-space'")
-    expect(source).toContain('debug_ui.toggle_debug_activity_follow(player.index)')
+    expect(source).toContain('debug_ui.toggle_debug_activity_live(player.index)')
     expect(source).not.toContain('debug_ui.set_debug_activity_hover')
     expect(debug_source).not.toContain('set_debug_activity_hover')
   })
@@ -88,10 +88,10 @@ describe('SGLuna NPC console layout regressions', () => {
     expect(debug_source).toContain("vertical_scroll_policy: 'auto-and-reserve-space'")
     expect(debug_source).toContain('scroll.style.maximal_height = CONVERSATION_HEIGHT')
     expect(debug_source).toContain("name: CONVERSATION.scroll")
-    expect(debug_source).toContain('if (created || !previous_follow || appended > 0) (scroll as ScrollPaneGuiElement).scroll_to_bottom()')
-    expect(debug_source).toContain('if (view.follow) {')
-    expect(debug_source).toContain('if (view.follow || created) {')
-    expect(debug_source).toContain('const displayed_keys = view.follow || created ? keys : shown')
+    expect(debug_source).toContain('if (created || !previous_live || appended > 0) (scroll as ScrollPaneGuiElement).scroll_to_bottom()')
+    expect(debug_source).toContain('if (view.live) {')
+    expect(debug_source).toContain('if (view.live || created) {')
+    expect(debug_source).toContain('const displayed_keys = view.live || created ? keys : shown')
   })
 
   it('makes the top-left SGLuna mod-GUI button easier to see without changing its standard slot style', () => {
@@ -113,7 +113,7 @@ describe('SGLuna NPC console layout regressions', () => {
 
   it('turns pause into a resumable unpause control without discarding the prompt draft', () => {
     expect(source).toContain("pending?.action === 'resume' ? 'RESUMING...' : paused ? 'RESUME' : 'PAUSE'")
-    expect(source).toContain("const action: TaskBoardUiLifecycleAction = storage.airi_task_board_ui?.status === 'paused' ? 'resume' : 'pause'")
+    expect(source).toContain("const action: TaskBoardUiLifecycleAction = storage.sgluna_task_board_ui?.status === 'paused' ? 'resume' : 'pause'")
     expect(source).toContain("if (action === 'resume') emit_resume(player)")
     expect(source).toContain('pause_enabled: pending === undefined')
     expect(source).toContain('terminate_enabled: pending === undefined')
@@ -127,8 +127,8 @@ describe('SGLuna NPC console layout regressions', () => {
     // The console owns the one list-box selection handler (Old tasks and Skills);
     // the activity filters never go through it.
     expect(source).toContain('if (!project_ui.handle_project_selection(player, element)) skills_ui.handle_skills_window_selection(player, element)')
-    expect(source).toContain("tags: { airi_activity_filter: activity_state.ACTIVITY_FILTER_ALL }")
-    expect(source).toContain('tags: { airi_activity_filter: filter.flag }')
+    expect(source).toContain("tags: { sgluna_activity_filter: activity_state.ACTIVITY_FILTER_ALL }")
+    expect(source).toContain('tags: { sgluna_activity_filter: filter.flag }')
     expect(source).toContain('(button as ButtonGuiElement).toggled = activity_state.activity_filter_selected(mask, flag)')
     expect(source).toContain('activity_state.toggle_activity_filter(player.index, filter_flag)')
     expect(source).not.toContain("'bottom-third'")
@@ -177,22 +177,22 @@ describe('SGLuna NPC console layout regressions', () => {
     // Factorio gives Lua no scroll offset and no scroll event, so the wheel is
     // the signal, declared as listen-only inputs in the data stage.
     const data = readFileSync(new URL('../data.lua', import.meta.url), 'utf8')
-    expect(data).toContain('name = "airi-task-board-activity-scroll-up"')
+    expect(data).toContain('name = "sgluna-task-board-activity-scroll-up"')
     expect(data).toContain('key_sequence = "mouse-wheel-up"')
-    expect(data).toContain('name = "airi-task-board-activity-scroll-down"')
+    expect(data).toContain('name = "sgluna-task-board-activity-scroll-down"')
     expect(data).toContain('key_sequence = "mouse-wheel-down"')
     // Listen-only: the wheel must still scroll the feed and zoom the map.
     expect(data.split('    consuming = "none",').length).toBe(3)
-    expect(source).toContain("scroll_up_input: 'airi-task-board-activity-scroll-up'")
-    expect(source).toContain("scroll_down_input: 'airi-task-board-activity-scroll-down'")
+    expect(source).toContain("scroll_up_input: 'sgluna-task-board-activity-scroll-up'")
+    expect(source).toContain("scroll_down_input: 'sgluna-task-board-activity-scroll-down'")
     expect(source).toContain('script.on_event(TRACKER.scroll_up_input, on_activity_wheel)')
     expect(source).not.toContain('script.on_event(TRACKER.scroll_down_input, on_activity_wheel)')
     expect(source).toContain('element.name !== debug_ui.CONVERSATION_SCROLL_NAME')
-    expect(source).toContain('activity_state.stop_activity_follow(player.index, last_shown_activity_key(activity_scroll_of(player)))')
+    expect(source).toContain('activity_state.stop_activity_live(player.index, last_shown_activity_key(activity_scroll_of(player)))')
     expect(source).toContain('element.name === TRACKER.live || element.name === debug_ui.CONVERSATION_STATE_NAME')
-    expect(debug_source).toContain("CONVERSATION_STATE_NAME = 'airi_task_board_conversation_live'")
-    expect(debug_source).toContain("CONVERSATION_SCROLL_NAME = 'airi_task_board_conversation_scroll'")
-    expect(source).toContain('if (activity_state.activity_view(player.index).follow) activity_state.reset_activity_view(player.index)')
+    expect(debug_source).toContain("CONVERSATION_STATE_NAME = 'sgluna_task_board_conversation_live'")
+    expect(debug_source).toContain("CONVERSATION_SCROLL_NAME = 'sgluna_task_board_conversation_scroll'")
+    expect(source).toContain('if (activity_state.activity_view(player.index).live) activity_state.reset_activity_view(player.index)')
     const build_panel = source.split('function build_panel(')[1]?.split('function render_panel(')[0] ?? ''
     expect(build_panel).not.toContain('reset_activity_view')
 
@@ -205,8 +205,8 @@ describe('SGLuna NPC console layout regressions', () => {
     expect(source).toContain("column_count: 3, ignored_by_interaction: true")
 
     // One indicator doubles as the follow switch.
-    expect(source).toContain("const state = view.follow ? 'LIVE' : unseen.count > 0 ? `${unseen.count}${unseen.overflow ? '+' : ''} NEW` : 'PAUSED'")
-    expect(source).toContain('activity_state.resume_activity_follow(player.index, last_shown_activity_key(scroll))')
+    expect(source).toContain("const state = view.live ? 'LIVE' : unseen.count > 0 ? `${unseen.count}${unseen.overflow ? '+' : ''} NEW` : 'PAUSED'")
+    expect(source).toContain('activity_state.resume_activity_live(player.index, last_shown_activity_key(scroll))')
     // A brand-new console starts out following.
     expect(source).toContain('activity_state.reset_activity_view(player.index)')
   })
@@ -217,13 +217,13 @@ describe('old tasks and New Task conversation integration', () => {
 
   it('renders an independent old-task history button and explicit lifecycle acknowledgement route', () => {
     expect(source).toContain("{ name: project_ui.PROJECTS_BUTTON_NAME, icon: 'history'")
-    expect(projects).toContain("PROJECTS_BUTTON_NAME = 'airi_task_board_projects'")
-    expect(projects).toContain("PROJECTS_CLOSE_BUTTON_NAME = 'airi_task_board_projects_close'")
+    expect(projects).toContain("PROJECTS_BUTTON_NAME = 'sgluna_task_board_projects'")
+    expect(projects).toContain("PROJECTS_CLOSE_BUTTON_NAME = 'sgluna_task_board_projects_close'")
     expect(source).toContain("ack_lifecycle: (player_index: unknown, action: unknown)")
   })
 
   it('tombstones and clears the current conversation binding before queueing New Task', () => {
     const handler = source.split('function handle_control_click(')[1]?.split('\n}\n\nexport function create_task_board_ui_remote_interface')[0] ?? ''
-    expect(handler).toContain("debug_ui.suppress_snapshot(storage.airi_task_board_ui); debug_ui.reset_task_conversation(); activity_state.clear_activity_history(); emit_control(player, 'new_task')")
+    expect(handler).toContain("debug_ui.suppress_snapshot(storage.sgluna_task_board_ui); debug_ui.reset_task_conversation(); activity_state.clear_activity_history(); emit_control(player, 'new_task')")
   })
 })

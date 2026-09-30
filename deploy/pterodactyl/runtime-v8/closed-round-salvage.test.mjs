@@ -27,7 +27,7 @@ function rawFetch(rawMessage) {
 
 function deployment() {
   return {
-    revision: 'airi-deploy-v8-npc-staging',
+    revision: 'sgluna-deploy-v8-npc-staging',
     session: '0123456789abcdef0123456789abcdef',
     mode: 'npc',
     actor_id: 18,
@@ -50,7 +50,7 @@ class FakeRcon {
   }
 
   async command(text) {
-    if (text.includes('remote.call("airi_deployment","status")')) return JSON.stringify(this.status)
+    if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(this.status)
     if (text.includes('remote.call("autorio_preflight","operation"')) return JSON.stringify({ ok: true })
     if (text.includes('remote.call("autorio_tools","get_nearby_entities"')) {
       return JSON.stringify({
@@ -68,7 +68,7 @@ class FakeRcon {
       })
     }
     if (text.includes('local ok,result=pcall')) {
-      const marker = text.match(/AIRI_RESULT_[a-f0-9]{24}:/)?.[0]
+      const marker = text.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)?.[0]
       assert.ok(marker)
       this.mutations.push(text)
       this.batchId++
@@ -84,7 +84,7 @@ function planMessage({ chatMessage = 'Working.', plan = [], currentStep = 0, ope
 }
 
 async function runRepairScenario(closedRoundMessage) {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'airi-closed-salvage-'))
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-closed-salvage-'))
   const traceFile = path.join(dir, 'airi-behavior.jsonl')
   const plan = ['Mine fuel', 'Load the furnace']
   let call = 0

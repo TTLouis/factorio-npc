@@ -32,7 +32,7 @@ function capturingFetch(captured, usage) {
 }
 
 const messages = [
-  { role: 'system', content: 'You are AIRI.' },
+  { role: 'system', content: 'You are SGLuna.' },
   { role: 'user', content: 'hello' },
 ]
 
@@ -97,11 +97,11 @@ test('usage is parsed from LM Studio\'s plain OpenAI-compatible usage shape', as
     allowTools: false,
     triggerSource: 'new_goal',
   })
-  assert.equal(message._airiProvider.usage_complete, true)
-  assert.equal(message._airiProvider.reported_output_tokens, 512)
+  assert.equal(message._sglunaProvider.usage_complete, true)
+  assert.equal(message._sglunaProvider.reported_output_tokens, 512)
   // LM Studio's plain usage carries no cache/reasoning breakdown.
-  assert.equal(message._airiProvider.reported_cached_tokens, undefined)
-  assert.equal(message._airiProvider.reported_reasoning_tokens, undefined)
+  assert.equal(message._sglunaProvider.reported_cached_tokens, undefined)
+  assert.equal(message._sglunaProvider.reported_reasoning_tokens, undefined)
 })
 
 test('capability_profile, model family and the declared context window are traced on every local response', async () => {
@@ -110,9 +110,9 @@ test('capability_profile, model family and the declared context window are trace
     allowTools: false,
     triggerSource: 'new_goal',
   })
-  assert.equal(message._airiProvider.capability_profile, 'local')
-  assert.equal(message._airiProvider.provider_model_family, 'qwen3-coder')
-  assert.equal(message._airiProvider.provider_context_window, 65536)
+  assert.equal(message._sglunaProvider.capability_profile, 'local')
+  assert.equal(message._sglunaProvider.provider_model_family, 'qwen3-coder')
+  assert.equal(message._sglunaProvider.provider_context_window, 65536)
 })
 
 test('an http provider URL is accepted for host.docker.internal, the container\'s route to LM Studio on the host', async () => {
@@ -121,5 +121,5 @@ test('an http provider URL is accepted for host.docker.internal, the container\'
     allowTools: false,
     triggerSource: 'new_goal',
   })
-  assert.equal(message._airiProvider.diagnostic_code !== 'provider_http_error', true)
+  assert.equal(message._sglunaProvider.diagnostic_code !== 'provider_http_error', true)
 })

@@ -106,10 +106,10 @@ test('empty length response with zero tool calls is output-budget exhaustion', a
   const message = await providerRequest(config, completionMessages, {
     fetchImpl: contentFetch('', 'length'),
   })
-  assert.equal(message._airiProvider.diagnostic_code, 'provider_output_budget_exhausted')
-  assert.equal(message._airiProvider.output_budget_exhausted, true)
-  assert.equal(message._airiProvider.content_chars, 0)
-  assert.equal(message._airiProvider.tool_call_count, 0)
+  assert.equal(message._sglunaProvider.diagnostic_code, 'provider_output_budget_exhausted')
+  assert.equal(message._sglunaProvider.output_budget_exhausted, true)
+  assert.equal(message._sglunaProvider.content_chars, 0)
+  assert.equal(message._sglunaProvider.tool_call_count, 0)
 })
 
 test('explicit output-budget recovery retains compact tools and fallback budget', async () => {
@@ -202,17 +202,17 @@ test('provider diagnostics distinguish invalid content JSON from plan-schema fai
     allowTools: false,
     recoveryAttempt: 1,
   })
-  assert.equal(invalidJson._airiProvider.diagnostic_code, 'provider_content_invalid_json')
-  assert.equal(invalidJson._airiProvider.structured_content.json_valid, false)
+  assert.equal(invalidJson._sglunaProvider.diagnostic_code, 'provider_content_invalid_json')
+  assert.equal(invalidJson._sglunaProvider.structured_content.json_valid, false)
 
   const invalidPlan = await providerRequest(config, messages, {
     fetchImpl: contentFetch('{"foo":"bar"}'),
     allowTools: false,
     recoveryAttempt: 1,
   })
-  assert.equal(invalidPlan._airiProvider.diagnostic_code, 'provider_content_schema_invalid')
-  assert.equal(invalidPlan._airiProvider.structured_content.json_valid, true)
-  assert.equal(invalidPlan._airiProvider.structured_content.plan_valid, false)
+  assert.equal(invalidPlan._sglunaProvider.diagnostic_code, 'provider_content_schema_invalid')
+  assert.equal(invalidPlan._sglunaProvider.structured_content.json_valid, true)
+  assert.equal(invalidPlan._sglunaProvider.structured_content.plan_valid, false)
 })
 
 
@@ -275,8 +275,8 @@ const DSML_SUBMIT_PLAN = [
 
 test('leaked DSML tool-call markup is recovered as native tool calls', async () => {
   const message = await providerRequest(config, messages, { fetchImpl: contentFetch(DSML_SUBMIT_PLAN), allowTools: true })
-  assert.equal(message._airiProvider.diagnostic_code, 'ok')
-  assert.equal(message._airiProvider.dsml_recovery, 'tool_calls')
+  assert.equal(message._sglunaProvider.diagnostic_code, 'ok')
+  assert.equal(message._sglunaProvider.dsml_recovery, 'tool_calls')
   assert.equal(message.content, '')
   assert.equal(message.tool_calls.length, 1)
   assert.equal(message.tool_calls[0].function.name, 'submitPlan')
@@ -294,8 +294,8 @@ test('leaked DSML submitPlan becomes plan content when tools are disabled', asyn
     recoveryAttempt: 1,
   })
   assert.equal(message.tool_calls, undefined)
-  assert.equal(message._airiProvider.dsml_recovery, 'submit_plan_content')
-  assert.equal(message._airiProvider.diagnostic_code, 'ok')
+  assert.equal(message._sglunaProvider.dsml_recovery, 'submit_plan_content')
+  assert.equal(message._sglunaProvider.diagnostic_code, 'ok')
   assert.equal(JSON.parse(message.content).currentStep, 1)
 })
 
@@ -323,7 +323,7 @@ test('a leaked non-submitPlan DSML call is dropped when tools are disabled', asy
     allowTools: false,
   })
   assert.equal(message.tool_calls, undefined)
-  assert.equal(message._airiProvider.dsml_recovery, 'dropped_tools_off')
+  assert.equal(message._sglunaProvider.dsml_recovery, 'dropped_tools_off')
   assert.equal(message.content, 'Let me check the inventory first.')
 })
 
@@ -342,7 +342,7 @@ test('a leaked DSML block mixing submitPlan with another call is dropped when to
     allowTools: false,
   })
   assert.equal(message.tool_calls, undefined)
-  assert.equal(message._airiProvider.dsml_recovery, 'dropped_tools_off')
+  assert.equal(message._sglunaProvider.dsml_recovery, 'dropped_tools_off')
 })
 
 test('several leaked DSML invokes become several tool calls', async () => {
@@ -367,6 +367,6 @@ test('malformed DSML markup is left for the ordinary format recovery', async () 
   const content = '<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="submitPlan">\n<｜｜DSML｜｜ parameter name="plan" string="false">[broken</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>'
   const message = await providerRequest(config, messages, { fetchImpl: contentFetch(content), allowTools: true })
   assert.equal(message.tool_calls, undefined)
-  assert.equal(message._airiProvider.diagnostic_code, 'provider_content_invalid_json')
-  assert.equal(message._airiProvider.dsml_recovery, undefined)
+  assert.equal(message._sglunaProvider.diagnostic_code, 'provider_content_invalid_json')
+  assert.equal(message._sglunaProvider.dsml_recovery, undefined)
 })

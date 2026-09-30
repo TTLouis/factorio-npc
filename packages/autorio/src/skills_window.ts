@@ -16,24 +16,24 @@ export const SKILLS_WINDOW = {
   root: ui_constants.SKILLS_ROOT_NAME,
   body: ui_constants.SKILLS_BODY_NAME,
   close: ui_constants.SKILLS_CLOSE_BUTTON_NAME,
-  learning: 'airi_skills_learning',
-  columns: 'airi_skills_columns',
-  list_frame: 'airi_skills_list_frame',
-  list_count: 'airi_skills_list_count',
-  list: 'airi_skills_list',
-  detail_frame: 'airi_skills_detail_frame',
-  detail_header: 'airi_skills_detail_header',
-  detail_title: 'airi_skills_detail_title',
-  detail_scroll: 'airi_skills_detail_scroll',
-  detail_flow: 'airi_skills_detail_flow',
-  edit: 'airi_skills_edit',
-  export: 'airi_skills_export',
-  edit_name: 'airi_skills_edit_name',
-  edit_summary: 'airi_skills_edit_summary',
-  edit_status: 'airi_skills_edit_status',
-  save: 'airi_skills_save',
-  cancel: 'airi_skills_cancel',
-  edit_error: 'airi_skills_edit_error',
+  learning: 'sgluna_skills_learning',
+  columns: 'sgluna_skills_columns',
+  list_frame: 'sgluna_skills_list_frame',
+  list_count: 'sgluna_skills_list_count',
+  list: 'sgluna_skills_list',
+  detail_frame: 'sgluna_skills_detail_frame',
+  detail_header: 'sgluna_skills_detail_header',
+  detail_title: 'sgluna_skills_detail_title',
+  detail_scroll: 'sgluna_skills_detail_scroll',
+  detail_flow: 'sgluna_skills_detail_flow',
+  edit: 'sgluna_skills_edit',
+  export: 'sgluna_skills_export',
+  edit_name: 'sgluna_skills_edit_name',
+  edit_summary: 'sgluna_skills_edit_summary',
+  edit_status: 'sgluna_skills_edit_status',
+  save: 'sgluna_skills_save',
+  cancel: 'sgluna_skills_cancel',
+  edit_error: 'sgluna_skills_edit_error',
   title: ui_constants.SKILLS_POPOUT_TITLE,
   list_width: 260,
   detail_width: 560,
@@ -43,12 +43,12 @@ export const SKILLS_WINDOW = {
 }
 
 interface SkillsWindowState { selected: Record<number, string>, editing: Record<number, string>, errors: Record<number, string> }
-declare const storage: { airi_skills_window?: SkillsWindowState }
+declare const storage: { sgluna_skills_window?: SkillsWindowState }
 
-function window_state(): SkillsWindowState | undefined { return storage.airi_skills_window }
+function window_state(): SkillsWindowState | undefined { return storage.sgluna_skills_window }
 function ensure_window_state() {
-  if (storage.airi_skills_window === undefined) storage.airi_skills_window = { selected: {}, editing: {}, errors: {} }
-  return storage.airi_skills_window
+  if (storage.sgluna_skills_window === undefined) storage.sgluna_skills_window = { selected: {}, editing: {}, errors: {} }
+  return storage.sgluna_skills_window
 }
 
 /** The selected skill id, falling back to the first skill. Read-only. */

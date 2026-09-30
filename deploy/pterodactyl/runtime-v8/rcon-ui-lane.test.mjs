@@ -55,13 +55,13 @@ test('Task Board commands use a dedicated RCON connection and bypass a blocked p
           continue
         }
 
-        if (text.includes('AIRI_UI_RCON_READY')) {
+        if (text.includes('SGLUNA_UI_RCON_READY')) {
           if (!uiLuaPrimed) {
             uiLuaPrimed = true
             socket.write(packet(id, 0, 'Please repeat the command to proceed.'))
           }
           else {
-            socket.write(packet(id, 0, 'AIRI_UI_RCON_READY'))
+            socket.write(packet(id, 0, 'SGLUNA_UI_RCON_READY'))
           }
           continue
         }

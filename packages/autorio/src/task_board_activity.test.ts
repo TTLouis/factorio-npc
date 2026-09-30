@@ -14,8 +14,8 @@ import {
   activity_view,
   merge_activity_history,
   reset_activity_view,
-  resume_activity_follow,
-  stop_activity_follow,
+  resume_activity_live,
+  stop_activity_live,
   toggle_activity_filter,
 } from './task_board_activity'
 
@@ -23,13 +23,13 @@ const store = (globalThis as any).storage as Record<string, any>
 
 describe('recent activity filters', () => {
   beforeEach(() => {
-    delete store.airi_task_board_activity_filter
-    delete store.airi_task_board_activity_filters
-    delete store.airi_task_board_project_activity_filters
+    delete store.sgluna_task_board_activity_filter
+    delete store.sgluna_task_board_activity_filters
+    delete store.sgluna_task_board_project_activity_filters
   })
 
   it('keeps the Projects window selection apart from the console', () => {
-    store.airi_task_board_activity_filter = { 1: 2 }
+    store.sgluna_task_board_activity_filter = { 1: 2 }
     expect(activity_filter_mask(1)).toBe(1)
     // The legacy drop-down only ever belonged to the console.
     expect(activity_filter_mask(1, 'projects')).toBe(ACTIVITY_FILTER_ALL)
@@ -67,7 +67,7 @@ describe('recent activity filters', () => {
   })
 
   it('carries a single-select choice from an older save over as that one category', () => {
-    store.airi_task_board_activity_filter = { 1: 1, 2: 2, 3: 3, 4: 6, 5: 99 }
+    store.sgluna_task_board_activity_filter = { 1: 1, 2: 2, 3: 3, 4: 6, 5: 99 }
     expect(activity_filter_mask(1)).toBe(ACTIVITY_FILTER_ALL)
     expect(activity_filter_mask(2)).toBe(1)
     expect(activity_filter_mask(3)).toBe(2)
@@ -86,9 +86,9 @@ describe('recent activity filters', () => {
 
 describe('recent activity rows', () => {
   beforeEach(() => {
-    delete store.airi_task_board_activity_history
-    delete store.airi_task_board_activity_history_context
-    delete store.airi_task_board_activity_view
+    delete store.sgluna_task_board_activity_history
+    delete store.sgluna_task_board_activity_history_context
+    delete store.sgluna_task_board_activity_view
   })
 
   it('identifies runtime events by id and derived ones by content', () => {
@@ -154,11 +154,11 @@ describe('recent activity rows', () => {
 })
 
 describe('recent activity follow', () => {
-  beforeEach(() => { delete store.airi_task_board_activity_view })
+  beforeEach(() => { delete store.sgluna_task_board_activity_view })
 
   it('follows by default and scrolls to each new event', () => {
     const view = activity_view(7)
-    expect(view.follow).toBe(true)
+    expect(view.live).toBe(true)
     expect(activity_should_scroll(view, 1, 'a')).toBe(true)
     // A refresh with nothing new never moves the feed.
     expect(activity_should_scroll(view, 0, 'a')).toBe(false)
@@ -166,24 +166,24 @@ describe('recent activity follow', () => {
 
   it('stops following as soon as the player scrolls, and stays put after that', () => {
     const view = activity_view(7)
-    expect(stop_activity_follow(7, 'b')).toBe(true)
-    expect(stop_activity_follow(7, 'c')).toBe(false)
+    expect(stop_activity_live(7, 'b')).toBe(true)
+    expect(stop_activity_live(7, 'c')).toBe(false)
     expect(view.seen_key).toBe('b')
     expect(activity_should_scroll(view, 3, 'e')).toBe(false)
     expect(activity_unseen(['a', 'b', 'c', 'd', 'e'], view.seen_key)).toEqual({ count: 3, overflow: false })
   })
 
   it('jumps back to the newest event when follow is turned back on', () => {
-    stop_activity_follow(7, 'a')
-    const view = resume_activity_follow(7, 'c')
-    expect(view.follow).toBe(true)
+    stop_activity_live(7, 'a')
+    const view = resume_activity_live(7, 'c')
+    expect(view.live).toBe(true)
     expect(activity_should_scroll(view, 0, 'c')).toBe(true)
   })
 
   it('starts a freshly opened console following again', () => {
-    stop_activity_follow(7, 'a')
+    stop_activity_live(7, 'a')
     const view = reset_activity_view(7)
-    expect(view).toEqual({ follow: true, behind: false, seen_key: undefined })
+    expect(view).toEqual({ live: true, behind: false, seen_key: undefined })
   })
 })
 describe('merged repeat rows', () => {

@@ -7,27 +7,27 @@ import * as gui_text from '../task_board_gui_text'
 // Projects owns stable, independent button ids. It must never borrow Debug's
 // close route: doing so made the old-task entry disappear or toggle unexpectedly
 // whenever the main console/debug window was rebuilt.
-export const PROJECTS_BUTTON_NAME = 'airi_task_board_projects'
-export const PROJECTS_CLOSE_BUTTON_NAME = 'airi_task_board_projects_close'
-export const PROJECT_EXPORT_BUTTON_NAME = 'airi_task_board_project_export'
-export const PROJECT_LIST_NAME = 'airi_task_board_project_list'
+export const PROJECTS_BUTTON_NAME = 'sgluna_task_board_projects'
+export const PROJECTS_CLOSE_BUTTON_NAME = 'sgluna_task_board_projects_close'
+export const PROJECT_EXPORT_BUTTON_NAME = 'sgluna_task_board_project_export'
+export const PROJECT_LIST_NAME = 'sgluna_task_board_project_list'
 
-const ROOT_NAME = 'airi_task_board_projects_panel'
-const BODY_NAME = 'airi_task_board_projects_body'
-const COLUMNS_NAME = 'airi_task_board_projects_columns'
-const LIST_FRAME_NAME = 'airi_task_board_projects_list_frame'
-const DETAIL_FRAME_NAME = 'airi_task_board_projects_detail_frame'
-const DETAIL_BODY_NAME = 'airi_task_board_projects_detail_body'
-const DETAIL_META_NAME = 'airi_task_board_projects_detail_meta'
-const DETAIL_STEPS_SCROLL_NAME = 'airi_task_board_projects_steps_scroll'
-const DETAIL_STEPS_FLOW_NAME = 'airi_task_board_projects_steps_flow'
-const DETAIL_CONVERSATION_SCROLL_NAME = 'airi_task_board_projects_conversation_scroll'
-const DETAIL_CONVERSATION_FLOW_NAME = 'airi_task_board_projects_conversation_flow'
-const DETAIL_ACTIVITY_HEADER_NAME = 'airi_task_board_projects_activity_header'
-const DETAIL_ACTIVITY_FILTERS_NAME = 'airi_task_board_projects_activity_filters'
-const DETAIL_ACTIVITY_COUNT_NAME = 'airi_task_board_projects_activity_count'
-const DETAIL_ACTIVITY_SCROLL_NAME = 'airi_task_board_projects_activity_scroll'
-const DETAIL_ACTIVITY_FLOW_NAME = 'airi_task_board_projects_activity_flow'
+const ROOT_NAME = 'sgluna_task_board_projects_panel'
+const BODY_NAME = 'sgluna_task_board_projects_body'
+const COLUMNS_NAME = 'sgluna_task_board_projects_columns'
+const LIST_FRAME_NAME = 'sgluna_task_board_projects_list_frame'
+const DETAIL_FRAME_NAME = 'sgluna_task_board_projects_detail_frame'
+const DETAIL_BODY_NAME = 'sgluna_task_board_projects_detail_body'
+const DETAIL_META_NAME = 'sgluna_task_board_projects_detail_meta'
+const DETAIL_STEPS_SCROLL_NAME = 'sgluna_task_board_projects_steps_scroll'
+const DETAIL_STEPS_FLOW_NAME = 'sgluna_task_board_projects_steps_flow'
+const DETAIL_CONVERSATION_SCROLL_NAME = 'sgluna_task_board_projects_conversation_scroll'
+const DETAIL_CONVERSATION_FLOW_NAME = 'sgluna_task_board_projects_conversation_flow'
+const DETAIL_ACTIVITY_HEADER_NAME = 'sgluna_task_board_projects_activity_header'
+const DETAIL_ACTIVITY_FILTERS_NAME = 'sgluna_task_board_projects_activity_filters'
+const DETAIL_ACTIVITY_COUNT_NAME = 'sgluna_task_board_projects_activity_count'
+const DETAIL_ACTIVITY_SCROLL_NAME = 'sgluna_task_board_projects_activity_scroll'
+const DETAIL_ACTIVITY_FLOW_NAME = 'sgluna_task_board_projects_activity_flow'
 const PROJECTS_WIDTH = 900
 const PROJECTS_HEIGHT = 780
 const PROJECT_LIST_WIDTH = 250
@@ -78,7 +78,7 @@ export interface ProjectHistoryRecord {
 
 export interface ProjectExportPayload {
   schema_version: 1
-  kind: 'airi_old_task_export'
+  kind: 'sgluna_old_task_export'
   goal: {
     id: string
     name: string
@@ -104,10 +104,10 @@ export interface ProjectExportResult {
 }
 
 declare const storage: {
-  airi_task_board_projects?: Record<string, ProjectHistoryRecord>
-  airi_task_board_project_order?: string[]
-  airi_task_board_projects_open?: Record<number, boolean>
-  airi_task_board_project_selected?: Record<number, string>
+  sgluna_task_board_projects?: Record<string, ProjectHistoryRecord>
+  sgluna_task_board_project_order?: string[]
+  sgluna_task_board_projects_open?: Record<number, boolean>
+  sgluna_task_board_project_selected?: Record<number, string>
 }
 
 function clean_text(value: unknown, max = MAX_TEXT) {
@@ -121,23 +121,23 @@ function integer(value: unknown) {
 }
 
 function ensure_records() {
-  if (storage.airi_task_board_projects === undefined) storage.airi_task_board_projects = {}
-  return storage.airi_task_board_projects
+  if (storage.sgluna_task_board_projects === undefined) storage.sgluna_task_board_projects = {}
+  return storage.sgluna_task_board_projects
 }
 
 function ensure_order() {
-  if (storage.airi_task_board_project_order === undefined) storage.airi_task_board_project_order = []
-  return storage.airi_task_board_project_order
+  if (storage.sgluna_task_board_project_order === undefined) storage.sgluna_task_board_project_order = []
+  return storage.sgluna_task_board_project_order
 }
 
 function ensure_open() {
-  if (storage.airi_task_board_projects_open === undefined) storage.airi_task_board_projects_open = {}
-  return storage.airi_task_board_projects_open
+  if (storage.sgluna_task_board_projects_open === undefined) storage.sgluna_task_board_projects_open = {}
+  return storage.sgluna_task_board_projects_open
 }
 
 function ensure_selected() {
-  if (storage.airi_task_board_project_selected === undefined) storage.airi_task_board_project_selected = {}
-  return storage.airi_task_board_project_selected
+  if (storage.sgluna_task_board_project_selected === undefined) storage.sgluna_task_board_project_selected = {}
+  return storage.sgluna_task_board_project_selected
 }
 
 function activity_key(entry: ProjectHistoryActivity) {
@@ -170,7 +170,7 @@ function sanitize_conversation(value: any): ProjectHistoryConversationMessage[] 
     messages.push({
       id: clean_text(raw[index]?.id || `message_${index + 1}`, 120),
       role,
-      sender: clean_text(raw[index]?.sender || (role === 'assistant' ? 'AIRI' : 'Player'), 128),
+      sender: clean_text(raw[index]?.sender || (role === 'assistant' ? 'SGLuna' : 'Player'), 128),
       text,
     })
   }
@@ -308,7 +308,7 @@ export function project_by_id(project_id: string) {
 }
 
 export function projects_ui_is_open(player_index: number) {
-  return storage.airi_task_board_projects_open?.[player_index] === true
+  return storage.sgluna_task_board_projects_open?.[player_index] === true
 }
 
 export function toggle_projects_ui(player_index: number) {
@@ -328,7 +328,7 @@ export function select_project(player_index: number, project_id: string) {
 }
 
 export function selected_project_id(player_index: number, current_goal_id = '') {
-  const selected = storage.airi_task_board_project_selected?.[player_index]
+  const selected = storage.sgluna_task_board_project_selected?.[player_index]
   if (selected !== undefined && project_by_id(selected) !== undefined) return selected
   if (current_goal_id.length > 0 && project_by_id(current_goal_id) !== undefined) return current_goal_id
   const history = project_history()
@@ -345,7 +345,7 @@ function project_export_path_component(value: string) {
 export function project_export_payload(project: ProjectHistoryRecord): ProjectExportPayload {
   return {
     schema_version: 1,
-    kind: 'airi_old_task_export',
+    kind: 'sgluna_old_task_export',
     goal: {
       id: project.id,
       name: project.name,
@@ -505,7 +505,7 @@ function render_project_list(parent: LuaGuiElement, selected_id: string) {
     name: PROJECT_LIST_NAME,
     items: values.items,
     selected_index: values.selected_index,
-    tags: { airi_project_ids: values.ids },
+    tags: { sgluna_project_ids: values.ids },
   }) as any
   // Stretch into the frame instead of reserving the old 20 px strip on the
   // right. The selected-row highlight now reaches the usable panel edge.
@@ -520,7 +520,7 @@ function refresh_project_list(frame: LuaGuiElement, selected_id: string) {
   if (!list?.valid) return false
   const values = project_list_values(selected_id)
   list.items = values.items
-  list.tags = { airi_project_ids: values.ids }
+  list.tags = { sgluna_project_ids: values.ids }
   list.selected_index = values.selected_index
   return true
 }
@@ -561,7 +561,7 @@ function add_activity_line(parent: LuaGuiElement, entry: ProjectHistoryActivity)
 }
 
 function add_filter_button(parent: LuaGuiElement, caption: string, tooltip: string, flag: number) {
-  activity_state.style_feed_button(parent.add({ type: 'button', caption, tooltip, tags: { airi_activity_filter: flag, airi_activity_surface: 'projects' } }))
+  activity_state.style_feed_button(parent.add({ type: 'button', caption, tooltip, tags: { sgluna_activity_filter: flag, sgluna_activity_surface: 'projects' } }))
 }
 
 function render_project_detail_skeleton(parent: LuaGuiElement, project: ProjectHistoryRecord | undefined) {
@@ -651,7 +651,7 @@ function refresh_project_detail(frame: LuaGuiElement, project: ProjectHistoryRec
   const filters = activity_header[DETAIL_ACTIVITY_FILTERS_NAME]
   if (filters?.valid) {
     for (const button of filters.children) {
-      const flag = button.tags.airi_activity_filter
+      const flag = button.tags.sgluna_activity_filter
       if (typeof flag === 'number') (button as ButtonGuiElement).toggled = activity_state.activity_filter_selected(mask, flag)
     }
   }
@@ -686,14 +686,14 @@ function refresh_project_detail(frame: LuaGuiElement, project: ProjectHistoryRec
     for (const message of project.conversation) {
       const text = clean_text(message.text, 2000)
       if (text.length === 0) continue
-      const sender = clean_text(message.sender || (message.role === 'assistant' ? 'AIRI' : 'Player'), 128)
+      const sender = clean_text(message.sender || (message.role === 'assistant' ? 'SGLuna' : 'Player'), 128)
       conversation_lines.push(`${sender} · ${text}`)
     }
   }
   else {
     for (const entry of project.activity) {
       const text = clean_text(entry.text, 1200)
-      if (entry.kind === 'decision' && text.length > 0) { conversation_lines.push(`AIRI · ${text}`); continue }
+      if (entry.kind === 'decision' && text.length > 0) { conversation_lines.push(`SGLuna · ${text}`); continue }
       if (entry.kind !== 'observation' || !String(entry.id ?? '').startsWith('live_')) continue
       const separator = text.indexOf(': ')
       if (separator < 1 || text.startsWith('Tool ')) continue
@@ -701,14 +701,14 @@ function refresh_project_detail(frame: LuaGuiElement, project: ProjectHistoryRec
     }
     if (project.response.length > 0) {
       const duplicate = project.activity.some(entry => entry.kind === 'decision' && clean_text(entry.text, 1200) === project.response)
-      if (!duplicate) conversation_lines.push(`AIRI · ${project.response}`)
+      if (!duplicate) conversation_lines.push(`SGLuna · ${project.response}`)
     }
   }
   const conversation_signature = helpers.table_to_json(conversation_lines)
-  // Scrolling is decided by the console's LIVE/PAUSED follow state, never by guessing a scroll
-  // position (Factorio cannot report one): with follow on, new lines move the pane to the
-  // bottom; with follow off it stays where the reader left it.
-  const follow = activity_state.activity_view(player_index).follow
+  // Scrolling is decided by the console's LIVE/PAUSED state, never by guessing a scroll
+  // position (Factorio cannot report one): with LIVE on, new lines move the pane to the
+  // bottom; with LIVE off (PAUSED) it stays where the reader left it.
+  const live = activity_state.activity_view(player_index).live
   const previous_conversation_count = Number(conversation_flow.tags.count ?? 0)
   if (conversation_flow.tags.signature !== conversation_signature || conversation_flow.children.length === 0) {
     conversation_flow.clear()
@@ -720,7 +720,7 @@ function refresh_project_detail(frame: LuaGuiElement, project: ProjectHistoryRec
     if (conversation_lines.length === 0) conversation_flow.add({ type: 'label', caption: 'No player/agent conversation retained for this project.' })
     conversation_flow.tags = { signature: conversation_signature, count: conversation_lines.length }
   }
-  if (follow && conversation_lines.length > 0 && (force_activity_latest || conversation_lines.length > previous_conversation_count)) (conversation_scroll as ScrollPaneGuiElement).scroll_to_bottom()
+  if (live && conversation_lines.length > 0 && (force_activity_latest || conversation_lines.length > previous_conversation_count)) (conversation_scroll as ScrollPaneGuiElement).scroll_to_bottom()
 
   const signature = step_signature(project)
   if (step_flow.tags.signature !== signature) {
@@ -770,7 +770,7 @@ function refresh_project_detail(frame: LuaGuiElement, project: ProjectHistoryRec
     activity_flow.add({ type: 'label', caption })
   }
   if (count?.valid) count.caption = mask === activity_state.ACTIVITY_FILTER_ALL ? `${project.activity.length} events` : `${matching.length}/${project.activity.length}`
-  if (follow && (force_activity_latest || mask_changed || appended > 0) && entries.length > 0) (activity_scroll as ScrollPaneGuiElement).scroll_to_bottom()
+  if (live && (force_activity_latest || mask_changed || appended > 0) && entries.length > 0) (activity_scroll as ScrollPaneGuiElement).scroll_to_bottom()
   return true
 }
 
@@ -833,7 +833,7 @@ export function render_projects_popout(player: LuaPlayer, task_board_open: boole
 
 export function handle_project_selection(player: LuaPlayer, element: any) {
   if (element.name !== PROJECT_LIST_NAME) return false
-  const ids = element.tags?.airi_project_ids as string[] | undefined
+  const ids = element.tags?.sgluna_project_ids as string[] | undefined
   const index = typeof element.selected_index === 'number' ? element.selected_index - 1 : -1
   if (ids === undefined || index < 0 || index >= ids.length) return true
   select_project(player.index, ids[index])

@@ -4,7 +4,7 @@ import { NpcAgentLoop, NpcDialogueMemory } from './npc-agent-loop.mjs'
 
 function deployment(actorId = 18, epoch = 3) {
   return {
-    revision: 'airi-deploy-v8-npc-staging',
+    revision: 'sgluna-deploy-v8-npc-staging',
     session: '0123456789abcdef0123456789abcdef',
     mode: 'npc',
     actor_id: actorId,
@@ -30,7 +30,7 @@ class FakeRcon {
   async command(text) {
     this.commands.push(text)
     if (this.onCommand) await this.onCommand(text, this)
-    if (text.includes('remote.call("airi_deployment","status")')) return JSON.stringify(this.status)
+    if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(this.status)
     if (text.includes('remote.call("autorio_actor","status")')) {
       return JSON.stringify({
         mode: 'npc',
@@ -40,7 +40,7 @@ class FakeRcon {
       })
     }
     if (text.includes('local ok,result=pcall')) {
-      const marker = text.match(/AIRI_RESULT_[a-f0-9]{24}:/)?.[0]
+      const marker = text.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)?.[0]
       assert.ok(marker)
       this.mutations.push(text)
       const admissions = [...text.matchAll(/return remote\.call\('autorio_operations'/g)].length
@@ -105,7 +105,7 @@ test('scripted provider can observe actor then submit an epoch-authorized struct
   assert.equal(result.epoch, 3)
   assert.equal(result.operations[0].name, 'wait')
   assert.equal(rcon.mutations.length, 1)
-  assert.match(rcon.mutations[0], /airi_deployment","authorize",3/)
+  assert.match(rcon.mutations[0], /sgluna_deployment","authorize",3/)
   assert.match(rcon.mutations[0], /autorio_operations','wait',60/)
   assert.equal(reservations.length, 2)
   assert.ok(agent.messages.some(message => message.role === 'tool'))
@@ -218,7 +218,7 @@ test('dialogue memory belongs to the logical NPC and survives body replacement',
   const observed = []
   const agent = new NpcAgentLoop({
     rcon,
-    npcId: 'airi-primary',
+    npcId: 'sgluna-primary',
     provider: async messages => {
       observed.push(messages)
       return planMessage([], 'Acknowledged.')
@@ -242,7 +242,7 @@ test('shared dialogue memory remains isolated by logical NPC id', async () => {
   const first = new NpcAgentLoop({
     rcon: new FakeRcon(),
     memory,
-    npcId: 'airi-one',
+    npcId: 'sgluna-one',
     provider: async messages => {
       firstObserved.push(messages)
       return planMessage([], 'First NPC.')
@@ -252,7 +252,7 @@ test('shared dialogue memory remains isolated by logical NPC id', async () => {
   const second = new NpcAgentLoop({
     rcon: new FakeRcon(),
     memory,
-    npcId: 'airi-two',
+    npcId: 'sgluna-two',
     provider: async messages => {
       secondObserved.push(messages)
       return planMessage([], 'Second NPC.')
@@ -337,7 +337,7 @@ test('dependent operations are admitted in one mutation with no inter-operation 
   assert.equal(result.operations.length, 2)
   assert.equal(rcon.mutations.length, 1)
   const command = rcon.mutations[0]
-  assert.equal((command.match(/airi_deployment","authorize",3/g) ?? []).length, 1)
+  assert.equal((command.match(/sgluna_deployment","authorize",3/g) ?? []).length, 1)
   const first = command.indexOf("autorio_operations','mine_entity'")
   const second = command.indexOf("autorio_operations','wait'")
   assert.ok(first >= 0 && second > first)

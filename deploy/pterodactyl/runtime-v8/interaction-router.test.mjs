@@ -9,7 +9,7 @@ import { NpcAgentLoop, interactionRuntimeHealthy, parseInteractionRoute } from '
 
 function deployment() {
   return {
-    revision: 'airi-deploy-v8-npc-staging',
+    revision: 'sgluna-deploy-v8-npc-staging',
     session: '0123456789abcdef0123456789abcdef',
     mode: 'npc',
     actor_id: 18,
@@ -67,7 +67,7 @@ class RouterRcon {
 
   async command(text) {
     this.commands.push(text)
-    if (text.includes('remote.call("airi_deployment","status")')) return JSON.stringify(deployment())
+    if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(deployment())
     if (text.includes('remote.call("autorio_operations","status")')) {
       return JSON.stringify(this.running
         ? { task_state: 'placing', queue_empty: false, queue_length: 4, current_task: { type: 'placing', entity_name: 'machine-x' } }
@@ -76,12 +76,12 @@ class RouterRcon {
     if (text.includes('remote.call("autorio_follow","status")')) return JSON.stringify({ active: false })
     if (text.includes('cancel_all_tasks')) {
       this.cancelCount++
-      const marker = text.match(/AIRI_RESULT_[a-f0-9]{24}:/)?.[0]
+      const marker = text.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)?.[0]
       assert.ok(marker)
       return `${marker}${JSON.stringify({ ok: true, result: [[true]] })}`
     }
-    if (text.includes('AIRI_RESULT_') && text.includes('autorio_operations')) {
-      const marker = text.match(/AIRI_RESULT_[a-f0-9]{24}:/)?.[0]
+    if (text.includes('SGLUNA_RESULT_') && text.includes('autorio_operations')) {
+      const marker = text.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)?.[0]
       assert.ok(marker)
       return `${marker}${JSON.stringify({ ok: true, result: [[true, 'Task started']] })}`
     }
@@ -105,7 +105,7 @@ function agentFor(intent, {
   routerError,
 } = {}) {
   const memory = new CanonicalTaskBoardMemory()
-  if (withPlan) memory.planByNpc.set('npc:airi', activePlan())
+  if (withPlan) memory.planByNpc.set('npc:sgluna', activePlan())
   const rcon = new RouterRcon({ running })
   const calls = []
   const decisionCalls = []
@@ -185,7 +185,7 @@ function agentFor(intent, {
     rcon,
     memory,
     systemPrompt: 'main planner',
-    npcId: 'airi',
+    npcId: 'sgluna',
     provider: mockProvider,
     interactionProvider: mockProvider,
     interactionDecisionProvider,
@@ -195,14 +195,14 @@ function agentFor(intent, {
   if (running && withPlan) {
     agent.active = true
     agent.epoch = deployment()
-    agent.lastMemoryKey = 'npc:airi'
+    agent.lastMemoryKey = 'npc:sgluna'
     agent.baseMessages = [
       { role: 'system', content: agent.systemPrompt },
-      { role: 'user', content: memory.planContext('npc:airi') },
+      { role: 'user', content: memory.planContext('npc:sgluna') },
       { role: 'user', content: '[CHAT] tester: build a continuous early iron production line' },
     ]
     agent.messages = agent.baseMessages.map(message => ({ ...message }))
-    agent.requestInfo = { memoryKey: 'npc:airi', turnId: 1, sender: 'tester', text: 'build a continuous early iron production line' }
+    agent.requestInfo = { memoryKey: 'npc:sgluna', turnId: 1, sender: 'tester', text: 'build a continuous early iron production line' }
   }
   return { agent, memory, rcon, calls, decisionCalls }
 }
@@ -225,7 +225,7 @@ test('constructor initializes routed lifecycle without requiring an intent varia
     rcon: new RouterRcon({ running: false }),
     memory,
     systemPrompt: 'constructor regression',
-    npcId: 'airi',
+    npcId: 'sgluna',
     provider: mockProvider,
     interactionProvider: mockProvider,
     traceFile: null,
@@ -326,7 +326,7 @@ test('idle no-plan status query is classified, reaches Jev shadow, and skips the
   assert.equal(decisionCalls[0].state.runtime.task_state, 'idle')
   assert.equal(decisionCalls[0].state.runtime.queue_length, 0)
   assert.equal(rcon.cancelCount, 0)
-  assert.equal(Boolean(memory.currentPlan('npc:airi')), false)
+  assert.equal(Boolean(memory.currentPlan('npc:sgluna')), false)
 })
 
 test('M11C high-confidence status intent uses Jev directly without a routing-only Main-LLM call', async () => {
@@ -359,7 +359,7 @@ test('idle no-plan chat_only is routed without the main planner and reaches Jev 
   assert.equal(result.chatMessage, 'Hello from the side router.')
   assert.equal(calls.length, 1)
   assert.equal(decisionCalls.length, 1)
-  assert.equal(Boolean(memory.currentPlan('npc:airi')), false)
+  assert.equal(Boolean(memory.currentPlan('npc:sgluna')), false)
 })
 
 test('idle no-plan real new goal is classified before the main planner runs once', async () => {
@@ -423,7 +423,7 @@ test('idle no-plan Jev shadow failure does not alter the active routed interacti
   assert.equal(calls.length, 1)
   assert.equal(decisionCalls.length, 1)
   assert.equal(rcon.cancelCount, 0)
-  assert.equal(Boolean(memory.currentPlan('npc:airi')), false)
+  assert.equal(Boolean(memory.currentPlan('npc:sgluna')), false)
 })
 
 test('idle no-plan interaction-router failure keeps the conservative new_goal fallback', async () => {
@@ -445,7 +445,7 @@ test('idle no-plan interaction-router failure keeps the conservative new_goal fa
 
 test('M11C cancellation aborts an in-flight Jev decision before any language-router fallback', async () => {
   const memory = new CanonicalTaskBoardMemory()
-  memory.planByNpc.set('npc:airi', activePlan())
+  memory.planByNpc.set('npc:sgluna', activePlan())
   const rcon = new RouterRcon({ running: true })
 
   let decisionSignal
@@ -455,7 +455,7 @@ test('M11C cancellation aborts an in-flight Jev decision before any language-rou
     rcon,
     memory,
     systemPrompt: 'interaction cancellation test',
-    npcId: 'airi',
+    npcId: 'sgluna',
     provider: async () => {
       throw new Error('main planner should not run')
     },
@@ -498,7 +498,7 @@ test('continue_current while Autorio is healthy does not restart the main planne
   assert.equal(result.routedOnly, true)
   assert.equal(calls.length, 1)
   assert.equal(rcon.cancelCount, 0)
-  assert.equal(memory.currentPlan('npc:airi')?.goal_id, 'goal_existing')
+  assert.equal(memory.currentPlan('npc:sgluna')?.goal_id, 'goal_existing')
 })
 
 test('status_query answers from authoritative task state without a planning cycle', async () => {
@@ -521,7 +521,7 @@ test('chat_only does not alter current task state and uses only the side-router 
   assert.equal(result.chatMessage, 'Hello from the side router.')
   assert.equal(calls.length, 1)
   assert.equal(rcon.cancelCount, 0)
-  assert.equal(memory.currentPlan('npc:airi')?.status, 'active')
+  assert.equal(memory.currentPlan('npc:sgluna')?.status, 'active')
 })
 
 test('amend_current cancels remaining Autorio work once, preserves the canonical goal, then replans', async () => {
@@ -533,7 +533,7 @@ test('amend_current cancels remaining Autorio work once, preserves the canonical
   assert.equal(rcon.cancelCount, 1)
   assert.equal(calls.length, 2)
   assert.equal(calls[1].triggerSource, 'amend_current')
-  assert.equal(memory.currentPlan('npc:airi')?.goal_id, 'goal_existing')
+  assert.equal(memory.currentPlan('npc:sgluna')?.goal_id, 'goal_existing')
 })
 
 test('compatible same-goal amendment does not cancel an active queue and is deferred to the next main-planner boundary', async () => {
@@ -545,7 +545,7 @@ test('compatible same-goal amendment does not cancel an active queue and is defe
   assert.equal(result.amendmentDeferred, true)
   assert.equal(rcon.cancelCount, 0)
   assert.equal(calls.length, 1)
-  assert.equal(memory.currentPlan('npc:airi')?.goal_id, 'goal_existing')
+  assert.equal(memory.currentPlan('npc:sgluna')?.goal_id, 'goal_existing')
 
   const completion = await agent.completed()
   assert.equal(calls.length, 2)
@@ -561,7 +561,7 @@ test('cancel_current uses authoritative cancellation without launching the main 
   assert.equal(result.routedOnly, true)
   assert.equal(rcon.cancelCount, 1)
   assert.equal(calls.length, 1)
-  assert.equal(memory.currentPlan('npc:airi')?.status, 'paused')
+  assert.equal(memory.currentPlan('npc:sgluna')?.status, 'paused')
 })
 
 test('true new_goal clears the previous canonical task context and starts main planning with new_goal routing', async () => {
@@ -573,7 +573,7 @@ test('true new_goal clears the previous canonical task context and starts main p
   assert.equal(rcon.cancelCount, 1)
   assert.equal(calls.length, 2)
   assert.equal(calls[1].triggerSource, 'new_goal')
-  assert.notEqual(memory.currentPlan('npc:airi')?.goal_id, 'goal_existing')
+  assert.notEqual(memory.currentPlan('npc:sgluna')?.goal_id, 'goal_existing')
 })
 
 
@@ -582,7 +582,7 @@ test('interaction router does not receive historical exact ids from durable goal
   const state = activePlan()
   state.objective = 'return to unit 331 and finish the furnace'
   state.task_board.steps[1].description = 'load unit_number=331 at the remembered furnace'
-  memory.planByNpc.set('npc:airi', state)
+  memory.planByNpc.set('npc:sgluna', state)
 
   let routedMessages
   const interactionProvider = async (messages, context) => {
@@ -594,7 +594,7 @@ test('interaction router does not receive historical exact ids from durable goal
     rcon: new RouterRcon({ running: true }),
     memory,
     systemPrompt: 'interaction durable identity boundary test',
-    npcId: 'airi',
+    npcId: 'sgluna',
     provider: async () => {
       throw new Error('main planner should not run for status_query')
     },

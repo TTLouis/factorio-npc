@@ -6,7 +6,7 @@ const ENTITY_STATUS_CONTEXT_CHARS = 12000
 const NEARBY_ENTITIES_TOOL = 'getNearbyEntities'
 const NEARBY_ENTITIES_BASELINE_LIMIT = 4
 const NEARBY_ENTITIES_CONTEXT_CHARS = 18000
-const INSTALL_MARK = Symbol.for('airi.runtime-v8.entity-status-diff')
+const INSTALL_MARK = Symbol.for('sgluna.runtime-v8.entity-status-diff')
 
 function sameJson(left, right) {
   return JSON.stringify(left) === JSON.stringify(right)

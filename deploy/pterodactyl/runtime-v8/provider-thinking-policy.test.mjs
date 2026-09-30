@@ -53,8 +53,8 @@ test('successful deterministic completion continuation uses low effort with thin
   assert.equal(seen.body.reasoning_effort, 'low')
   assert.deepEqual(seen.body.thinking, { type: 'enabled' })
   assert.equal(seen.body.max_tokens, 3000)
-  assert.equal(message._airiProvider.reasoning_effort, 'low')
-  assert.equal(message._airiProvider.reasoning_policy_reason, 'deterministic_completion')
+  assert.equal(message._sglunaProvider.reasoning_effort, 'low')
+  assert.equal(message._sglunaProvider.reasoning_policy_reason, 'deterministic_completion')
 })
 
 test('Jev post-step reanchor stays compact and uses low reasoning', async () => {
@@ -67,7 +67,7 @@ test('Jev post-step reanchor stays compact and uses low reasoning', async () => 
   assert.equal(seen.body.reasoning_effort, 'low')
   assert.deepEqual(seen.body.thinking, { type: 'enabled' })
   assert.equal(seen.body.max_tokens, 3000)
-  assert.equal(message._airiProvider.reasoning_policy_reason, 'jev_post_step_reanchor')
+  assert.equal(message._sglunaProvider.reasoning_policy_reason, 'jev_post_step_reanchor')
 })
 
 test('Jev post-step replan overrides the compact completion path and uses high effort', async () => {
@@ -81,7 +81,7 @@ test('Jev post-step replan overrides the compact completion path and uses high e
   assert.equal(seen.body.reasoning_effort, 'max')
   assert.deepEqual(seen.body.thinking, { type: 'enabled' })
   assert.equal(seen.body.max_tokens, 40000)
-  assert.equal(message._airiProvider.reasoning_policy_reason, 'plan_authoring')
+  assert.equal(message._sglunaProvider.reasoning_policy_reason, 'plan_authoring')
 })
 
 test('Jev post-step continue overrides an error boundary to low reasoning', async () => {
@@ -93,7 +93,7 @@ test('Jev post-step continue overrides an error boundary to low reasoning', asyn
 
   assert.equal(seen.body.reasoning_effort, 'low')
   assert.deepEqual(seen.body.thinking, { type: 'enabled' })
-  assert.equal(message._airiProvider.reasoning_policy_reason, 'jev_post_step_continue')
+  assert.equal(message._sglunaProvider.reasoning_policy_reason, 'jev_post_step_continue')
 })
 
 test('new ordinary DeepSeek goal uses the plan-authoring bracket only when lifecycle routing marks it new_goal', async () => {
@@ -253,15 +253,15 @@ test('a valid interaction-router reply is not traced as an invalid plan', async 
     { role: 'system', content: 'classify only' },
     { role: 'user', content: '{"text":"continue"}' },
   ], { ...options, interactionRouter: true })
-  assert.equal(routed._airiProvider.diagnostic_code, 'ok')
-  assert.deepEqual(routed._airiProvider.structured_content, { json_valid: true })
+  assert.equal(routed._sglunaProvider.diagnostic_code, 'ok')
+  assert.deepEqual(routed._sglunaProvider.structured_content, { json_valid: true })
 
   // The same content from a planner call is still an invalid plan.
   const planner = await providerRequest(config(), [
     { role: 'system', content: 'system' },
     { role: 'user', content: '[CHAT] tester: continue' },
   ], options)
-  assert.equal(planner._airiProvider.diagnostic_code, 'provider_content_schema_invalid')
+  assert.equal(planner._sglunaProvider.diagnostic_code, 'provider_content_schema_invalid')
 })
 
 test('a plan carrying goal and roadmap extensions is not traced as an invalid plan (live 2026-09-29)', async () => {
@@ -287,7 +287,7 @@ test('a plan carrying goal and roadmap extensions is not traced as an invalid pl
       usage: { prompt_tokens: 580, completion_tokens: 17, total_tokens: 597 },
     }), { status: 200, headers: { 'content-type': 'application/json' } }),
   })
-  assert.equal(planner._airiProvider.diagnostic_code, 'ok', JSON.stringify(planner._airiProvider.structured_content))
+  assert.equal(planner._sglunaProvider.diagnostic_code, 'ok', JSON.stringify(planner._sglunaProvider.structured_content))
 })
 
 test('explicit caller max_tokens remains authoritative over reasoning policy budget', async () => {
@@ -398,8 +398,8 @@ test('content-filter finish is classified separately from ordinary parse/budget 
       usage: { prompt_tokens: 20, completion_tokens: 0, total_tokens: 20 },
     }), { status: 200, headers: { 'content-type': 'application/json' } }),
   })
-  assert.equal(message._airiProvider.diagnostic_code, 'provider_safety_blocked')
-  assert.equal(message._airiProvider.output_budget_exhausted, false)
+  assert.equal(message._sglunaProvider.diagnostic_code, 'provider_safety_blocked')
+  assert.equal(message._sglunaProvider.output_budget_exhausted, false)
 })
 
 test('provider diagnostics flag a gateway that reports completion usage above the requested cap', async () => {
@@ -417,16 +417,16 @@ test('provider diagnostics flag a gateway that reports completion usage above th
       usage: { prompt_tokens: 20, completion_tokens: 11, total_tokens: 31, completion_tokens_details: { reasoning_tokens: 9 } },
     }), { status: 200, headers: { 'content-type': 'application/json' } }),
   })
-  assert.equal(message._airiProvider.requested_token_field, 'max_tokens')
-  assert.equal(message._airiProvider.requested_output_cap, 10)
-  assert.equal(message._airiProvider.reported_reasoning_tokens, 9)
-  assert.equal(message._airiProvider.usage_complete, true)
-  assert.equal(message._airiProvider.cap_enforcement_anomaly, true)
-  assert.equal(message._airiProvider.diagnostic_code, 'provider_output_cap_ignored')
+  assert.equal(message._sglunaProvider.requested_token_field, 'max_tokens')
+  assert.equal(message._sglunaProvider.requested_output_cap, 10)
+  assert.equal(message._sglunaProvider.reported_reasoning_tokens, 9)
+  assert.equal(message._sglunaProvider.usage_complete, true)
+  assert.equal(message._sglunaProvider.cap_enforcement_anomaly, true)
+  assert.equal(message._sglunaProvider.diagnostic_code, 'provider_output_cap_ignored')
 })
 
 test('provider prompt trace records selected effort and policy reason per call', async () => {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'airi-reasoning-policy-'))
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-reasoning-policy-'))
   const traceFile = path.join(dir, 'prompts.jsonl')
   try {
     await captureRequest([
@@ -615,7 +615,7 @@ test('only the continuation bracket steps down for a gather round; authoring and
       })
       assert.equal(seen.body.reasoning_effort, effort, `${reason} effort`)
       assert.equal(seen.body.max_tokens, cap, `${reason} cap`)
-      assert.equal(message._airiProvider.reasoning_policy_reason, reason)
+      assert.equal(message._sglunaProvider.reasoning_policy_reason, reason)
       assert.deepEqual(decisions, [{
         effort,
         reason,
@@ -690,7 +690,7 @@ test('the reasoning-policy report is observability only and never fails the requ
 // provider is called).
 test('steam replay: authoring and replan rounds keep the full bracket, continuation read rounds step down, and every call is traced with its request_id', async () => {
   const { steamReplayHarness, STEAM_ROUNDS, STEAM_SCRIPTED_BLOCKED_ANSWER } = await import('./steam-run-fixtures.mjs')
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'airi-steam-replay-'))
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-steam-replay-'))
   const promptTraceFile = path.join(dir, 'prompts.jsonl')
   try {
     const world = steamReplayHarness({
@@ -806,7 +806,7 @@ test('round 0 of every authoring or replan trigger keeps the full effort and cap
   await agent.request('wait once and inspect', { sender: 'TTLouis' })
   assert.equal(bodies[0].reasoning_effort, 'max')
   assert.equal(bodies[0].max_tokens, 40000)
-  assert.equal(agent.memory.currentPlan('npc:airi').status, 'active')
+  assert.equal(agent.memory.currentPlan('npc:sgluna').status, 'active')
 
   const expectations = [
     ['new_goal', 'max', 40000],

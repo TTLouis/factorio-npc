@@ -17,7 +17,7 @@ import {
   serializePlanningState,
 } from './planning-state.mjs'
 
-const KEY = 'npc:airi'
+const KEY = 'npc:sgluna'
 
 function goalState() {
   return applyPlanningEvent(createEmptyPlanningState(), {

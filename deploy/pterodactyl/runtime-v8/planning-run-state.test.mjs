@@ -17,11 +17,11 @@ import {
   serializePlanningState,
 } from './planning-state.mjs'
 
-const KEY = 'npc:airi'
+const KEY = 'npc:sgluna'
 
 function deployment() {
   return {
-    revision: 'airi-deploy-v8-npc-staging',
+    revision: 'sgluna-deploy-v8-npc-staging',
     session: '0123456789abcdef0123456789abcdef',
     mode: 'npc',
     actor_id: 18,
@@ -38,13 +38,13 @@ function deployment() {
 
 class PlanningRcon {
   async command(text) {
-    if (text.includes('remote.call("airi_deployment","status")')) return JSON.stringify(deployment())
+    if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(deployment())
     if (text.includes('remote.call("autorio_preflight","operation"')) return JSON.stringify({ ok: true })
     if (text.includes('remote.call("autorio_tools","goal_progress_facts"')) {
       return JSON.stringify({ ok: true, rockets_launched: 0, researched_technologies: 0, enabled_technologies: 200, milestones: [] })
     }
     if (text.includes('local ok,result=pcall')) {
-      const marker = text.match(/AIRI_RESULT_[a-f0-9]{24}:/)?.[0]
+      const marker = text.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)?.[0]
       const admissions = [...text.matchAll(/return remote\.call\('autorio_operations'/g)].length
       return `${marker}${JSON.stringify({ ok: true, result: Array.from({ length: admissions }, () => [true, 'Task started']) })}`
     }
@@ -79,7 +79,7 @@ test('new_goal admits the goal through GOAL_ACCEPTED with no steering provider, 
     stateFile: null,
     traceFile: null,
     decisionTraceFile: null,
-    npcId: 'airi',
+    npcId: 'sgluna',
   })
   assert.equal(agent.steeringDecisionProvider ?? null, null, 'this test must run without a steering provider')
 
@@ -745,7 +745,7 @@ test('pausing a blocked plan traces no goal.paused: the legacy record stays bloc
     stateFile: null,
     traceFile: null,
     decisionTraceFile: null,
-    npcId: 'airi',
+    npcId: 'sgluna',
   })
   startCommittedPlan(memory)
   block(memory)

@@ -40,7 +40,7 @@ test('agent loop forwards trace events to the activity listener even without a t
   assert.deepEqual(seen, [['tool.call', { name: 'getInventory' }]])
 })
 
-test('every non-empty public AIRI reply is retained across continuation trigger sources', () => {
+test('every non-empty public SGLuna reply is retained across continuation trigger sources', () => {
   for (const trigger_source of ['request', 'failure', 'completion', 'resume']) {
     assert.deepEqual(
       liveAgentEvent('plan.accepted', { chat_message: 'Continuing with the next verified step.', trigger_source }).activity,
@@ -106,23 +106,23 @@ test('live agent activity is pushed to the console as coalesced ordered syncs', 
 })
 
 test('UI control parser accepts fixed mod events and rejects chat spoofing or arbitrary actions', () => {
-  const event = parseUiControlLine('12.3 Script @__autorio__: [AIRI_UI_CONTROL] {"version":1,"action":"follow","player_index":7,"player_name":"TTLouis","tick":900}')
+  const event = parseUiControlLine('12.3 Script @__autorio__: [SGLUNA_UI_CONTROL] {"version":1,"action":"follow","player_index":7,"player_name":"TTLouis","tick":900}')
   assert.deepEqual(event, { version: 1, action: 'follow', player_index: 7, player_name: 'TTLouis', tick: 900 })
-  assert.equal(parseUiControlLine('2026-09-15 [CHAT] Eve: [AIRI_UI_CONTROL] {"version":1,"action":"terminate","player_index":7,"player_name":"TTLouis","tick":900}'), undefined)
-  assert.equal(parseUiControlLine('[AIRI_UI_CONTROL] {"version":1,"action":"rcon","player_index":7,"player_name":"TTLouis","tick":900}'), undefined)
-  assert.equal(parseUiControlLine('[AIRI_UI_CONTROL] {"version":1,"action":"pause","player_index":7,"player_name":"TTLouis","tick":900,"command":"/quit"}'), undefined)
+  assert.equal(parseUiControlLine('2026-09-15 [CHAT] Eve: [SGLUNA_UI_CONTROL] {"version":1,"action":"terminate","player_index":7,"player_name":"TTLouis","tick":900}'), undefined)
+  assert.equal(parseUiControlLine('[SGLUNA_UI_CONTROL] {"version":1,"action":"rcon","player_index":7,"player_name":"TTLouis","tick":900}'), undefined)
+  assert.equal(parseUiControlLine('[SGLUNA_UI_CONTROL] {"version":1,"action":"pause","player_index":7,"player_name":"TTLouis","tick":900,"command":"/quit"}'), undefined)
 })
 
 test('UI prompt parser accepts bounded structured prompts and rejects chat spoofing or extra command fields', () => {
-  const event = parseUiPromptLine('12.3 Script @__autorio__: [AIRI_UI_PROMPT] {"version":1,"player_index":7,"player_name":"TTLouis","text":"build a steam power block","tick":901}')
+  const event = parseUiPromptLine('12.3 Script @__autorio__: [SGLUNA_UI_PROMPT] {"version":1,"player_index":7,"player_name":"TTLouis","text":"build a steam power block","tick":901}')
   assert.deepEqual(event, { version: 1, player_index: 7, player_name: 'TTLouis', text: 'build a steam power block', tick: 901 })
-  assert.equal(parseUiPromptLine('2026-09-15 [CHAT] Eve: [AIRI_UI_PROMPT] {"version":1,"player_index":7,"player_name":"TTLouis","text":"/quit","tick":901}'), undefined)
-  assert.equal(parseUiPromptLine('[AIRI_UI_PROMPT] {"version":1,"player_index":7,"player_name":"TTLouis","text":"mine stone","tick":901,"command":"/quit"}'), undefined)
-  assert.equal(parseUiPromptLine('[AIRI_UI_PROMPT] {"version":1,"player_index":7,"player_name":"TTLouis","text":"","tick":901}'), undefined)
-  assert.equal(parseUiPromptLine(`[AIRI_UI_PROMPT] ${JSON.stringify({ version: 1, player_index: 7, player_name: 'TTLouis', text: 'x'.repeat(4001), tick: 901 })}`), undefined)
+  assert.equal(parseUiPromptLine('2026-09-15 [CHAT] Eve: [SGLUNA_UI_PROMPT] {"version":1,"player_index":7,"player_name":"TTLouis","text":"/quit","tick":901}'), undefined)
+  assert.equal(parseUiPromptLine('[SGLUNA_UI_PROMPT] {"version":1,"player_index":7,"player_name":"TTLouis","text":"mine stone","tick":901,"command":"/quit"}'), undefined)
+  assert.equal(parseUiPromptLine('[SGLUNA_UI_PROMPT] {"version":1,"player_index":7,"player_name":"TTLouis","text":"","tick":901}'), undefined)
+  assert.equal(parseUiPromptLine(`[SGLUNA_UI_PROMPT] ${JSON.stringify({ version: 1, player_index: 7, player_name: 'TTLouis', text: 'x'.repeat(4001), tick: 901 })}`), undefined)
 })
 
-test('UI controls reuse the AIRI chat allowlist before queueing runtime work', () => {
+test('UI controls reuse the SGLuna chat allowlist before queueing runtime work', () => {
   const queued = []
   const logs = []
   const session = Object.create(Session.prototype)
@@ -134,14 +134,14 @@ test('UI controls reuse the AIRI chat allowlist before queueing runtime work', (
     queueEvent: fn => { queued.push(fn) },
     log: message => logs.push(message),
   })
-  session.onGameLine('[AIRI_UI_CONTROL] {"version":1,"action":"pause","player_index":2,"player_name":"Eve","tick":20}')
+  session.onGameLine('[SGLUNA_UI_CONTROL] {"version":1,"action":"pause","player_index":2,"player_name":"Eve","tick":20}')
   assert.equal(queued.length, 0)
   assert.match(logs[0], /unauthorized/i)
-  session.onGameLine('[AIRI_UI_CONTROL] {"version":1,"action":"pause","player_index":1,"player_name":"TTLouis","tick":21}')
+  session.onGameLine('[SGLUNA_UI_CONTROL] {"version":1,"action":"pause","player_index":1,"player_name":"TTLouis","tick":21}')
   assert.equal(queued.length, 1)
 })
 
-test('UI prompts reuse the AIRI chat allowlist before entering the request queue', () => {
+test('UI prompts reuse the SGLuna chat allowlist before entering the request queue', () => {
   const requests = []
   const logs = []
   const session = Object.create(Session.prototype)
@@ -154,10 +154,10 @@ test('UI prompts reuse the AIRI chat allowlist before entering the request queue
     queuePlayerRequest: (sender, text) => { requests.push({ sender, text }); return true },
     log: message => logs.push(message),
   })
-  session.onGameLine('[AIRI_UI_PROMPT] {"version":1,"player_index":2,"player_name":"Eve","text":"build power","tick":30}')
+  session.onGameLine('[SGLUNA_UI_PROMPT] {"version":1,"player_index":2,"player_name":"Eve","text":"build power","tick":30}')
   assert.equal(requests.length, 0)
   assert.match(logs[0], /unauthorized/i)
-  session.onGameLine('[AIRI_UI_PROMPT] {"version":1,"player_index":1,"player_name":"TTLouis","text":"build power","tick":31}')
+  session.onGameLine('[SGLUNA_UI_PROMPT] {"version":1,"player_index":1,"player_name":"TTLouis","text":"build power","tick":31}')
   assert.deepEqual(requests, [{ sender: 'TTLouis', text: 'build power' }])
 })
 
@@ -194,23 +194,23 @@ test('activity is an auditable summary rather than hidden model reasoning', () =
 
 test('task blocker presentation is human-readable without changing authoritative blocker codes', () => {
   const raw = 'no_autorio_operation_for_remaining_plan'
-  const summary = 'AIRI has more work planned, but did not start the next action.'
+  const summary = 'SGLuna has more work planned, but did not start the next action.'
   assert.deepEqual(formatTaskCondition(raw), { raw, summary })
   assert.deepEqual(formatTaskCondition('future_internal_blocker'), {
     raw: 'future_internal_blocker',
-    summary: 'AIRI is blocked by an internal task condition.',
+    summary: 'SGLuna is blocked by an internal task condition.',
   })
   assert.deepEqual(formatTaskCondition('future_internal_pause', 'pause'), {
     raw: 'future_internal_pause',
-    summary: 'AIRI is paused by an internal task condition.',
+    summary: 'SGLuna is paused by an internal task condition.',
   })
   assert.deepEqual(formatTaskCondition('provider_output_budget_exhausted: finish=length', 'pause'), {
     raw: 'provider_output_budget_exhausted: finish=length',
-    summary: 'AIRI paused because the model exhausted its response budget while no Autorio work was running. Continue to retry from the verified task state.',
+    summary: 'SGLuna paused because the model exhausted its response budget while no Autorio work was running. Continue to retry from the verified task state.',
   })
   assert.deepEqual(formatTaskCondition('request_failed: Provider HTTP 500', 'pause'), {
     raw: 'request_failed: Provider HTTP 500',
-    summary: 'AIRI paused because the model request failed while no Autorio work was running. Continue to retry from the verified task state.',
+    summary: 'SGLuna paused because the model request failed while no Autorio work was running. Continue to retry from the verified task state.',
   })
 
   const state = {
@@ -262,7 +262,7 @@ test('one finished batch is one result line, not a receipt plus a restated verif
 test('an exhausted provider recovery is reported once, by the failed request', () => {
   const state = { last_chat_message: '', last_operations: [], blocker: '', task_board: { evidence: [] } }
   assert.deepEqual(deriveActivity({ ...state, pause_reason: 'provider_recovery_exhausted: Provider response recovery exhausted after 3 attempts: Invalid provider content JSON' }), [])
-  assert.deepEqual(deriveActivity({ ...state, pause_reason: 'player_requested' }), [{ kind: 'system', text: 'AIRI was paused by the player.' }])
+  assert.deepEqual(deriveActivity({ ...state, pause_reason: 'player_requested' }), [{ kind: 'system', text: 'SGLuna was paused by the player.' }])
 })
 
 test('the live batch-completed line gives way to the receipt only when a plan carries receipts', () => {
@@ -320,14 +320,14 @@ function sessionFixture({ state = { status: 'active' } } = {}) {
   const agent = {
     active: true,
     memory: { terminatePlan: () => state },
-    activePlanKey: () => 'npc:airi',
+    activePlanKey: () => 'npc:sgluna',
     loadPersistentState: async () => {},
     persistState: async () => {},
     cancel: reason => { agent.cancelReason = reason },
     pausePersistentPlan: async reason => ({ ...state, status: 'paused', pause_reason: reason }),
   }
   return {
-    npcId: 'airi', agent, commands, chats, syncs,
+    npcId: 'sgluna', agent, commands, chats, syncs,
     rcon: { command: async command => { commands.push(command); return '' } },
     ensureAuthorization: async () => ({ allowed: true }),
     currentPlanState: () => state,
@@ -369,7 +369,7 @@ test('pause preserves plan and stops autorio work plus follow mode', async () =>
   const session = sessionFixture()
   await executeUiControl(session, { action: 'pause', player_name: 'TTLouis' })
   assert.equal(session.syncs[0].status, 'paused')
-  assert.ok(session.commands.some(command => command.includes('airi_deployment')))
+  assert.ok(session.commands.some(command => command.includes('sgluna_deployment')))
   assert.ok(session.commands.some(command => command.includes('stop_follow_player')))
 })
 
@@ -418,7 +418,7 @@ test('follow pauses the active plan, cancels old work, and directly enables foll
   await executeUiControl(session, { action: 'follow', player_name: 'TTLouis' })
   assert.equal(session.syncs[0].status, 'paused')
   const followIndex = session.commands.findIndex(command => command.includes('"follow_player",'))
-  const cancelIndex = session.commands.findIndex(command => command.includes('airi_deployment'))
+  const cancelIndex = session.commands.findIndex(command => command.includes('sgluna_deployment'))
   assert.ok(cancelIndex >= 0 && followIndex > cancelIndex)
   assert.ok(session.commands[followIndex].includes('TTLouis'))
 })
@@ -474,7 +474,7 @@ test('a console poll is accepted as an unattributed refresh request and nothing 
   assert.deepEqual(parseUiInputBatch(JSON.stringify([{ kind: 'poll', version: 1, tick: -1 }])), [])
 })
 
-test('a drained poll pushes a snapshot so SYNC keeps advancing while AIRI is idle', async () => {
+test('a drained poll pushes a snapshot so SYNC keeps advancing while SGLuna is idle', async () => {
   const commands = []
   const session = Object.create(Session.prototype)
   session.ready = true
@@ -578,7 +578,7 @@ test('an oversized board is trimmed to fit the command path instead of being dro
 test('current UI conversation retains more than four user/assistant messages independently of activity limits', () => {
   const session = Object.create(Session.prototype)
   Object.assign(session, {
-    npcName: 'AIRI',
+    npcName: 'SGLuna',
     activityEpoch: 'epoch',
     conversationGeneration: 0,
     conversationSequence: 0,
@@ -606,7 +606,7 @@ test('New Task starts a fresh UI conversation generation and old messages do not
       conversation_id: 'task_epoch_0',
       conversation: [
         { id: 'old-1', role: 'user', sender: 'TTLouis', text: 'old request' },
-        { id: 'old-2', role: 'assistant', sender: 'AIRI', text: 'old answer' },
+        { id: 'old-2', role: 'assistant', sender: 'SGLuna', text: 'old answer' },
       ],
       debug: {},
     },
@@ -618,7 +618,7 @@ test('New Task starts a fresh UI conversation generation and old messages do not
   assert.equal(session.agentLive.conversation_id, 'task_epoch_1')
 
   session.appendUiConversation('user', 'TTLouis', 'fresh request')
-  session.appendUiConversation('assistant', 'AIRI', 'fresh answer')
+  session.appendUiConversation('assistant', 'SGLuna', 'fresh answer')
   const first = taskBoardUiSnapshot(undefined, session.liveAgentStatus())
   const refreshed = taskBoardUiSnapshot(undefined, session.liveAgentStatus())
   assert.deepEqual(first.conversation.map(entry => entry.text), ['fresh request', 'fresh answer'])
@@ -700,7 +700,7 @@ test('chat-only request boundaries retain one user/reply pair without duplicate 
   const session = Object.create(Session.prototype)
   const queued = []
   Object.assign(session, {
-    npcName: 'AIRI',
+    npcName: 'SGLuna',
     activityEpoch: 'epoch',
     conversationGeneration: 0,
     conversationSequence: 0,
@@ -756,13 +756,13 @@ test('active multi-step task restores its current conversation before completion
     conversation_id: 'task_previous_runtime_4',
     conversation: [
       { id: 'old_1', role: 'user', sender: 'TTLouis', text: state.objective },
-      { id: 'old_2', role: 'assistant', sender: 'AIRI', text: state.last_chat_message },
+      { id: 'old_2', role: 'assistant', sender: 'SGLuna', text: state.last_chat_message },
     ],
   }
   const writes = []
   const session = Object.create(Session.prototype)
   Object.assign(session, {
-    npcName: 'AIRI',
+    npcName: 'SGLuna',
     activityEpoch: 'restart',
     conversationGeneration: 0,
     conversationSequence: 0,
@@ -839,7 +839,7 @@ test('active task conversation falls back to canonical task state when no saved 
   const writes = []
   const session = Object.create(Session.prototype)
   Object.assign(session, {
-    npcName: 'AIRI',
+    npcName: 'SGLuna',
     activityEpoch: 'epoch',
     conversationGeneration: 0,
     conversationSequence: 0,
@@ -871,7 +871,7 @@ test('real provider lifecycle events reach the supervisor sync as the current re
   const queued = []
   const writes = []
   Object.assign(session, {
-    npcName: 'AIRI',
+    npcName: 'SGLuna',
     activityEpoch: 'epoch',
     conversationGeneration: 0,
     conversationSequence: 0,

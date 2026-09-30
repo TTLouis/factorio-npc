@@ -7,7 +7,7 @@ import test from 'node:test'
 import { prepareServerSettings, selectSave } from './game-files.mjs'
 
 async function temp(t) {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'airi-game-files-'))
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-game-files-'))
   t.after(() => fsp.rm(dir, { recursive: true, force: true }))
   return dir
 }

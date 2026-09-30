@@ -289,7 +289,7 @@ test('while the long step runs, the planner sees estimate vs elapsed; an overrun
   // Twenty-two minutes later the batch reports done but the contract is not
   // met yet (1.69x the 13 min estimate).
   clock += 1320 * 1000
-  const debug = world.agent.planTiming.debugFields(world.agent.peekPlanState('npc:airi'), { actorId: world.agent.epoch.actor_id, epoch: world.agent.epoch.epoch })
+  const debug = world.agent.planTiming.debugFields(world.agent.peekPlanState('npc:sgluna'), { actorId: world.agent.epoch.actor_id, epoch: world.agent.epoch.epoch })
   assert.match(debug.time_estimate, /^step 1: ~13\.0 min hand mining on the NPC lane · running 22\.0 min · OVERRUN · walking excluded$/)
   assert.equal(debug.step_time_index, 0)
   assert.match(debug.step_time_caption, /^~13\.0 min · NPC lane · long, one lane · idle \d+%$/)
@@ -417,7 +417,7 @@ test('a failed request ends with its time split before request.failed', async ()
     stateFile: null,
     traceFile: null,
     decisionTraceFile: null,
-    npcId: 'airi',
+    npcId: 'sgluna',
   })
   const trace = []
   agent.behaviorTrace = { emit: async record => { trace.push(record) } }
@@ -445,7 +445,7 @@ test('a request paused at the output budget ends with its time split before requ
   world.agent.maxProviderOutputUnits = 1000
   const result = await world.closeStep1()
   assert.equal(result.goalStatus, 'paused')
-  assert.equal(world.memory.currentPlan('npc:airi').status, 'paused')
+  assert.equal(world.memory.currentPlan('npc:sgluna').status, 'paused')
   const completed = world.events('request.completed').at(-1)
   assert.match(completed.data.outcome, /^paused_/)
   const split = assertSplitPrecedes(world.trace, 'request.completed')

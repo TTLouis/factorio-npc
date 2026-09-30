@@ -63,10 +63,10 @@ def run(client: Rcon, results: Path) -> None:
 
     # The save already has Lua commands enabled, but keep the restart handshake
     # explicit so an unexpectedly unavailable mod/runtime fails with a useful log.
-    probe = command('/silent-command rcon.print("AIRI_RESTART_READY")')
-    if probe != 'AIRI_RESTART_READY':
-        probe = command('/silent-command rcon.print("AIRI_RESTART_READY")')
-    require(probe == 'AIRI_RESTART_READY', probe)
+    probe = command('/silent-command rcon.print("SGLUNA_RESTART_READY")')
+    if probe != 'SGLUNA_RESTART_READY':
+        probe = command('/silent-command rcon.print("SGLUNA_RESTART_READY")')
+    require(probe == 'SGLUNA_RESTART_READY', probe)
 
     original_id = before['actor_id']
     target_id = before['target_id']

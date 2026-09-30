@@ -5,7 +5,7 @@ import { NpcAgentLoop, NpcDialogueMemory } from './npc-agent-loop.mjs'
 
 function deployment(epoch = 3, actorId = 18) {
   return {
-    revision: 'airi-deploy-v8-npc-staging',
+    revision: 'sgluna-deploy-v8-npc-staging',
     session: '0123456789abcdef0123456789abcdef',
     mode: 'npc',
     actor_id: actorId,
@@ -49,7 +49,7 @@ class ResearchRcon {
 
   async command(text) {
     this.commands.push(text)
-    if (text.includes('remote.call("airi_deployment","status")')) {
+    if (text.includes('remote.call("sgluna_deployment","status")')) {
       return JSON.stringify(deployment(this.epoch, this.actorId))
     }
     if (text.includes('remote.call("autorio_operations","status")')) {
@@ -63,9 +63,9 @@ class ResearchRcon {
       if (this.changeEpochOnPreflight) this.epoch++
       return JSON.stringify(result)
     }
-    if (text.includes('AIRI_RESULT_') && text.includes('autorio_operations')) {
+    if (text.includes('SGLUNA_RESULT_') && text.includes('autorio_operations')) {
       this.mutations.push(text)
-      const marker = text.match(/AIRI_RESULT_[a-f0-9]{24}:/)?.[0]
+      const marker = text.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)?.[0]
       assert.ok(marker)
       const count = (text.match(/remote\.call\('autorio_operations'/g) ?? []).length
       return marker + JSON.stringify({
@@ -140,10 +140,10 @@ test('missing prerequisite recovery preserves goal and active semantic step and 
       assert.match(text, /"name":"steam-power"/)
       assert.match(text, /"mode":"science"/)
       assert.match(text, /Tools remain enabled/)
-      rejectedState = agent.memory.currentPlan('npc:airi')
+      rejectedState = agent.memory.currentPlan('npc:sgluna')
       const restored = new NpcDialogueMemory()
       restored.restore(agent.memory.snapshot())
-      restoredState = restored.currentPlan('npc:airi')
+      restoredState = restored.currentPlan('npc:sgluna')
       return planMessage([
         { name: 'research_technology', args: { technology_name: 'steam-power' } },
       ])
@@ -151,7 +151,7 @@ test('missing prerequisite recovery preserves goal and active semantic step and 
   })
 
   const result = await agent.request('research automation', { sender: 'tester' })
-  const finalState = agent.memory.currentPlan('npc:airi')
+  const finalState = agent.memory.currentPlan('npc:sgluna')
   const evidence = finalState.task_board.evidence.find(item => item.kind === 'operation_preflight_recoverable')
 
   assert.equal(calls, 2)
@@ -258,7 +258,7 @@ test('force_busy remains recoverable and preserves the existing research identit
   })
 
   const result = await agent.request('research automation after current force research', { sender: 'tester' })
-  const state = agent.memory.currentPlan('npc:airi')
+  const state = agent.memory.currentPlan('npc:sgluna')
   assert.equal(calls, 2)
   assert.equal(result.operations[0].name, 'wait')
   assert.equal(rcon.mutations.length, 1)
@@ -283,7 +283,7 @@ test('permanent deterministic research errors remain real blockers without mutat
   })
 
   const result = await agent.request('research an unavailable technology', { sender: 'tester' })
-  const state = agent.memory.currentPlan('npc:airi')
+  const state = agent.memory.currentPlan('npc:sgluna')
   assert.equal(rcon.mutations.length, 0)
   assert.equal(result.goalStatus, 'blocked')
   assert.equal(state.status, 'blocked')
@@ -306,7 +306,7 @@ test('repeated refusal to follow deterministic next_actionable is bounded and pa
   })
 
   const result = await agent.request('research automation', { sender: 'tester' })
-  const state = agent.memory.currentPlan('npc:airi')
+  const state = agent.memory.currentPlan('npc:sgluna')
   const recoverable = state.task_board.evidence.filter(item => item.kind === 'operation_preflight_recoverable')
 
   assert.equal(calls, 3)
@@ -345,7 +345,7 @@ test('actor epoch replacement during preflight cancels the stale turn without ma
     agent.request('research automation', { sender: 'tester' }),
     /NPC actor epoch changed; stale model turn cancelled/,
   )
-  const state = memory.currentPlan('npc:airi')
+  const state = memory.currentPlan('npc:sgluna')
   assert.equal(rcon.mutations.length, 0)
   assert.equal(state.status, 'active')
   assert.equal(state.admission_status, 'preflight_rejected')

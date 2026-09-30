@@ -18,19 +18,19 @@ interface DefenseState {
 }
 
 declare const storage: {
-  airi_defense_state?: DefenseState
+  sgluna_defense_state?: DefenseState
 }
 
 function current_state(): DefenseState {
-  if (!storage.airi_defense_state) {
-    storage.airi_defense_state = {
+  if (!storage.sgluna_defense_state) {
+    storage.sgluna_defense_state = {
       enabled: true,
       radius: DEFAULT_DEFENSE_RADIUS,
       code: 'armed',
       updated_tick: game.tick,
     }
   }
-  return storage.airi_defense_state
+  return storage.sgluna_defense_state
 }
 
 function clear_target(state: DefenseState) {

@@ -13,7 +13,7 @@ import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 import { pauseStrandedPlanAfterRequestError } from './supervisor.mjs'
 import { FakeFactorio, gather, inventoryCheckpoint, planReply, recordingJev } from './task-loop-fixtures.mjs'
 
-const KEY = 'npc:airi'
+const KEY = 'npc:sgluna'
 const RESOURCES = ['iron-ore', 'copper-ore', 'coal']
 const STEPS = ['Mine 10 iron ore', 'Mine 10 copper ore', 'Mine 10 coal']
 
@@ -106,7 +106,7 @@ function harness({ game = new FakeFactorio(), systemPrompt = 'task loop matrix',
     stateFile: null,
     traceFile: null,
     decisionTraceFile: null,
-    npcId: 'airi',
+    npcId: 'sgluna',
   })
 
   world.say = (text, intent) => {
@@ -202,7 +202,7 @@ test('a first-draft deterministic checkpoint commits without creating throwaway 
     stateFile: null,
     traceFile: null,
     decisionTraceFile: null,
-    npcId: 'airi',
+    npcId: 'sgluna',
   })
 
   await agent.request('gather 10 iron ore', { sender: 'Louis' })
@@ -321,7 +321,7 @@ test('a malformed submitPlan tool call is recovered rather than becoming a fatal
     stateFile: null,
     traceFile: null,
     decisionTraceFile: null,
-    npcId: 'airi',
+    npcId: 'sgluna',
     onActivity: event => events.push(event),
   })
 
@@ -353,7 +353,7 @@ test('a submitPlan cut off inside its optional checkpoint keeps the complete ope
     stateFile: null,
     traceFile: null,
     decisionTraceFile: null,
-    npcId: 'airi',
+    npcId: 'sgluna',
     onActivity: event => events.push(event),
   })
 
@@ -401,7 +401,7 @@ test('an unmet deterministic checkpoint cannot be replaced by a semantic complet
     stateFile: null,
     traceFile: null,
     decisionTraceFile: null,
-    npcId: 'airi',
+    npcId: 'sgluna',
   })
 
   await agent.request('gather 10 iron ore', { sender: 'Louis' })

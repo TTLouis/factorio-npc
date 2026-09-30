@@ -35,7 +35,7 @@ async function readTrace(filename) {
 }
 
 test('prompt trace records the exact final provider body after continuation compaction and steering', async t => {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'airi-prompt-trace-'))
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-prompt-trace-'))
   t.after(() => fsp.rm(dir, { recursive: true, force: true }))
   const promptTraceFile = path.join(dir, 'airi-prompts.jsonl')
   let sentBody
@@ -88,7 +88,7 @@ test('prompt trace records the exact final provider body after continuation comp
 })
 
 test('prompt trace redacts common secrets without redacting max_tokens', async t => {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'airi-prompt-redaction-'))
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-prompt-redaction-'))
   t.after(() => fsp.rm(dir, { recursive: true, force: true }))
   const promptTraceFile = path.join(dir, 'airi-prompts.jsonl')
   const fetchImpl = async () => fakeProviderResponse()
@@ -117,7 +117,7 @@ test('prompt trace redacts common secrets without redacting max_tokens', async t
 })
 
 test('response trace distinguishes output-budget exhaustion from language or UTF-8 damage', async t => {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'airi-provider-diagnostics-'))
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-provider-diagnostics-'))
   t.after(() => fsp.rm(dir, { recursive: true, force: true }))
   const promptTraceFile = path.join(dir, 'airi-prompts.jsonl')
   const reasoning = '先分析发电布局，再输出严格 JSON。'.repeat(20)
@@ -150,11 +150,11 @@ test('response trace distinguishes output-budget exhaustion from language or UTF
   })
 
   assert.equal(message.content, '')
-  assert.equal(message._airiProvider.diagnostic_code, 'provider_output_budget_exhausted')
-  assert.equal(message._airiProvider.output_budget_exhausted, true)
-  assert.equal(message._airiProvider.reasoning_content_chars, reasoning.length)
-  assert.equal(message._airiProvider.content_chars, 0)
-  assert.equal(message._airiProvider.content_replacement_chars, 0)
+  assert.equal(message._sglunaProvider.diagnostic_code, 'provider_output_budget_exhausted')
+  assert.equal(message._sglunaProvider.output_budget_exhausted, true)
+  assert.equal(message._sglunaProvider.reasoning_content_chars, reasoning.length)
+  assert.equal(message._sglunaProvider.content_chars, 0)
+  assert.equal(message._sglunaProvider.content_replacement_chars, 0)
 
   const rows = await readTrace(promptTraceFile)
   const responseRow = rows.find(row => row.event === 'provider.response')
@@ -169,7 +169,7 @@ test('response trace distinguishes output-budget exhaustion from language or UTF
 })
 
 test('response trace reports malformed provider HTTP JSON without recording its raw body', async t => {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'airi-provider-invalid-json-'))
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-provider-invalid-json-'))
   t.after(() => fsp.rm(dir, { recursive: true, force: true }))
   const promptTraceFile = path.join(dir, 'airi-prompts.jsonl')
   const fetchImpl = async () => new Response('{"choices":[', {
@@ -202,7 +202,7 @@ test('response trace reports malformed provider HTTP JSON without recording its 
 
 
 test('response trace reports a missing provider response body explicitly', async t => {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'airi-provider-missing-body-'))
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-provider-missing-body-'))
   t.after(() => fsp.rm(dir, { recursive: true, force: true }))
   const promptTraceFile = path.join(dir, 'airi-prompts.jsonl')
   const fetchImpl = async () => new Response(null, { status: 200 })
@@ -229,7 +229,7 @@ test('response trace reports a missing provider response body explicitly', async
 })
 
 test('prompt tracing recovers after a failed write instead of staying off for the process', async t => {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'airi-prompt-trace-'))
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-prompt-trace-'))
   t.after(() => fsp.rm(dir, { recursive: true, force: true }))
   // The trace directory is blocked by a plain file, so the first write fails.
   const blocked = path.join(dir, 'logs')

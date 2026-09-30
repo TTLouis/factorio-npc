@@ -35,7 +35,7 @@ test('same-goal routed follow-ups stay in one Current Task Conversation while tr
     activitySequence: 0,
     conversationGeneration: 3,
     conversationSequence: 1,
-    npcName: 'AIRI',
+    npcName: 'SGLuna',
     config: { model: 'test' },
     lastStatus: {},
     agent: { traceRequest: null, epoch: null, continuations: 0 },

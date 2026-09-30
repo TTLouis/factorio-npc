@@ -89,7 +89,7 @@ docker run --rm \
     [[ -d /mnt/server/mods && -d /mnt/server/saves ]] || { echo "[pterodactyl-smoke] operator mod/save directories are missing" >&2; exit 1; }
     ! grep -q "smoke-secret" /mnt/server/sgluna-config.json || { echo "[pterodactyl-smoke] provider secret leaked to airi-config.json" >&2; exit 1; }
     target="$(readlink -- /mnt/server/start-sgluna.sh)"
-    [[ "$target" == .airi/releases/*/start-sgluna.sh ]] || { echo "[pterodactyl-smoke] unexpected startup target: $target" >&2; exit 1; }
+    [[ "$target" == .sgluna/releases/*/start-sgluna.sh ]] || { echo "[pterodactyl-smoke] unexpected startup target: $target" >&2; exit 1; }
     [[ -s "/mnt/server/${target%/start-sgluna.sh}/manifest.json" ]] || { echo "[pterodactyl-smoke] release manifest is missing" >&2; exit 1; }
   '
 

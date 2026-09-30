@@ -5,7 +5,7 @@ import { NpcAgentLoop } from './npc-agent-loop.mjs'
 
 function status(overrides = {}) {
   return {
-    revision: 'airi-deploy-v8-npc-staging',
+    revision: 'sgluna-deploy-v8-npc-staging',
     session: '0123456789abcdef0123456789abcdef',
     mode: 'npc',
     actor_id: 18,
@@ -29,7 +29,7 @@ class StatusRcon {
 
   async command(text) {
     this.commands.push(text)
-    if (text.includes('remote.call("airi_deployment","status")')) return JSON.stringify(this.status)
+    if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(this.status)
     throw new Error(`unexpected RCON command: ${text}`)
   }
 }

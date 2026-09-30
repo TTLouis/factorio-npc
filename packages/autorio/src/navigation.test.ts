@@ -42,7 +42,7 @@ function make_context() {
       actor_id: 1,
       kind: 'standalone_character',
       valid: true,
-      name: 'AIRI',
+      name: 'SGLuna',
       position,
       has_character: true,
     })),
@@ -228,7 +228,7 @@ describe('bounded navigation controller', () => {
     const request_id = task.path_request_id!
     controller.on_path_finished({ id: request_id, path: [waypoint(18)], try_again_later: false } as any)
 
-    // Model passive world motion: AIRI has changed coordinates substantially,
+    // Model passive world motion: SGLuna has changed coordinates substantially,
     // but is farther from the current waypoint rather than closer to it.
     position.y = 4
     ;(globalThis as any).game.tick = 601

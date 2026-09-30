@@ -39,7 +39,7 @@ function context(actorCount = 10, playerCount = 0) {
       kind: 'standalone_character',
       valid: true,
       has_character: true,
-      name: 'AIRI',
+      name: 'SGLuna',
       position: { x: 0, y: 0 },
     })),
   } as unknown as ControlledActor
@@ -78,7 +78,7 @@ describe('standalone NPC player item interaction', () => {
     })
   })
 
-  it('moves items from AIRI to a nearby connected player and completes the queued task', () => {
+  it('moves items from SGLuna to a nearby connected player and completes the queued task', () => {
     const c = context(10, 0)
     c.controller.submit_player_move('stone', 'TTLouis', 10, true)
 
@@ -95,7 +95,7 @@ describe('standalone NPC player item interaction', () => {
     })
   })
 
-  it('moves items from a nearby player into AIRI inventory', () => {
+  it('moves items from a nearby player into SGLuna inventory', () => {
     const c = context(0, 7)
     c.controller.submit_player_move('iron-plate', 'TTLouis', 5, false)
 

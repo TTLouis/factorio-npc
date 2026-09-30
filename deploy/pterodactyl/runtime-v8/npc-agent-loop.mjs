@@ -2068,9 +2068,9 @@ function runtimeReceiptKey(kind, view, detail = '', epoch) {
 function stateFileFromOptions(options) {
   if (options.stateFile === null) return null
   if (typeof options.stateFile === 'string' && options.stateFile.length > 0) return path.resolve(options.stateFile)
-  if (typeof process.env.AIRI_NPC_STATE_FILE === 'string' && process.env.AIRI_NPC_STATE_FILE.trim()) return path.resolve(process.env.AIRI_NPC_STATE_FILE)
+  if (typeof process.env.SGLUNA_NPC_STATE_FILE === 'string' && process.env.SGLUNA_NPC_STATE_FILE.trim()) return path.resolve(process.env.SGLUNA_NPC_STATE_FILE)
   if (process.env.NODE_TEST_CONTEXT) return null
-  return path.join(path.resolve(process.env.CONTAINER_ROOT || '/home/container'), '.airi', 'npc-state.json')
+  return path.join(path.resolve(process.env.CONTAINER_ROOT || '/home/container'), '.sgluna', 'npc-state.json')
 }
 
 // Cut a truncated JSON object back to its last complete top-level member.
@@ -2138,8 +2138,8 @@ export function planProgress(plan, stateResult) {
 }
 
 function providerOutputBudgetExhausted(message) {
-  return message?._airiProvider?.output_budget_exhausted === true
-    || message?._airiProvider?.diagnostic_code === 'provider_output_budget_exhausted'
+  return message?._sglunaProvider?.output_budget_exhausted === true
+    || message?._sglunaProvider?.diagnostic_code === 'provider_output_budget_exhausted'
 }
 
 function operationSignature(operation) {
@@ -6730,7 +6730,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }),
         signal: controller.signal,
       })
-      const usage = estimatedOutputUsage(normalizedProviderUsage(message?._airiProvider?.usage), message?._airiProvider)
+      const usage = estimatedOutputUsage(normalizedProviderUsage(message?._sglunaProvider?.usage), message?._sglunaProvider)
       if (usage?.output_units_estimated === true) {
         if (this.traceRequest && this.traceRequest.usage_estimated_traced !== true) {
           this.traceRequest.usage_estimated_traced = true
@@ -6757,7 +6757,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         has_tool_calls: message?.tool_calls !== undefined,
         content_chars: typeof message?.content === 'string' ? message.content.length : 0,
         usage,
-        provider: compactProviderMetadata(message?._airiProvider),
+        provider: compactProviderMetadata(message?._sglunaProvider),
         turn_output_cap: this.maxProviderOutputUnits,
         turn_output_units: Number.isSafeInteger(generationOutputUnits) ? generationOutputUnits : undefined,
         budget_generation: this.providerBudgetGeneration,
@@ -6769,7 +6769,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // provider-base reports the profile's context window on every response,
       // so the ceiling follows the configured profile even when the loop was
       // built without its provider config.
-      if (this.applyContextWindowCeiling(message?._airiProvider?.provider_context_window, 'provider_response')) {
+      if (this.applyContextWindowCeiling(message?._sglunaProvider?.provider_context_window, 'provider_response')) {
         await this.traceWorkingCeiling('context_window_reported')
       }
       if (turnOutputCapExceeded) {
@@ -6825,7 +6825,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!message || typeof message !== 'object') throw new AgentLoopError('Provider returned no message')
     // Calls a closed round made anyway (structured or leaked DSML text); provider-base
     // dropped them from the message and left them here for salvage.
-    const closedRoundCalls = !effectiveAllowTools ? message._airiClosedRoundCalls : undefined
+    const closedRoundCalls = !effectiveAllowTools ? message._sglunaClosedRoundCalls : undefined
 
     let plannerSubmission
     try {
@@ -6846,7 +6846,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         arguments_chars: rawArgs.length,
         arguments_head: cleanMemoryText(rawArgs.slice(0, 300), 300),
         arguments_tail: cleanMemoryText(rawArgs.slice(-200), 200),
-        finish_reason: message._airiProvider?.finish_reason,
+        finish_reason: message._sglunaProvider?.finish_reason,
       })
       // Live, deepseek reproducibly stops a submitPlan mid-way through an
       // optional trailing member (`..."operations":[...], "checkpoint"::`)
@@ -6997,7 +6997,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       error.code = 'provider_output_budget_exhausted'
       throw error
     }
-    if (message?._airiProvider?.diagnostic_code === 'provider_safety_blocked') {
+    if (message?._sglunaProvider?.diagnostic_code === 'provider_safety_blocked') {
       const error = new AgentLoopError('provider_safety_blocked: provider refused the response through a safety/content filter')
       error.failureClass = 'provider_safety'
       error.code = 'provider_safety_blocked'
@@ -7190,7 +7190,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         : message
       const prepared = super.prepareToolBatch(admittedMessage)
       if (partialBatchEligible) {
-        Object.defineProperty(prepared, '_airiObservationAdmission', {
+        Object.defineProperty(prepared, '_sglunaObservationAdmission', {
           configurable: true,
           enumerable: false,
           value: {
@@ -7278,7 +7278,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return
     }
 
-    const admission = prepared._airiObservationAdmission
+    const admission = prepared._sglunaObservationAdmission
     const cachedPrepared = prepared.map(entry => this.toolCache.has(entry.signature))
     const staticCachedPrepared = prepared.map(entry => entry.tool.function.name === 'getPrototypeDetails' && this.staticPrototypeCache.has(entry.signature))
     const admittedPrepared = []

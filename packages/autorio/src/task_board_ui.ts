@@ -141,25 +141,25 @@ interface TaskBoardUiRuntimeSnapshot {
 }
 
 declare const storage: {
-  airi_task_board_ui?: TaskBoardUiSnapshot
-  airi_task_board_ui_synced_tick?: number
-  airi_task_board_ui_open?: Record<number, boolean>
-  airi_task_board_skills_open?: Record<number, boolean>
-  airi_task_board_terminate_confirm_until?: Record<number, number>
-  airi_task_board_prompt_draft?: Record<number, string>
+  sgluna_task_board_ui?: TaskBoardUiSnapshot
+  sgluna_task_board_ui_synced_tick?: number
+  sgluna_task_board_ui_open?: Record<number, boolean>
+  sgluna_task_board_skills_open?: Record<number, boolean>
+  sgluna_task_board_terminate_confirm_until?: Record<number, number>
+  sgluna_task_board_prompt_draft?: Record<number, string>
   // Tick a prompt was submitted at, keyed by player. Not goal/status-keyed like
   // LIFECYCLE - see task_board_ui_prompt_send_pending.
-  airi_task_board_prompt_pending?: Record<number, number>
+  sgluna_task_board_prompt_pending?: Record<number, number>
   // A blocked plan deliberately has no automatic state transition. This is a
   // visual debounce only; it never changes the durable blocked plan.
-  airi_task_board_blocked_choice_pending?: Record<number, number>
-  airi_task_board_ui_inputs?: TaskBoardUiInput[]
-  airi_task_board_preview_zoom?: Record<number, number>
-  airi_task_board_lifecycle_pending?: Record<number, TaskBoardUiLifecyclePending>
+  sgluna_task_board_blocked_choice_pending?: Record<number, number>
+  sgluna_task_board_ui_inputs?: TaskBoardUiInput[]
+  sgluna_task_board_preview_zoom?: Record<number, number>
+  sgluna_task_board_lifecycle_pending?: Record<number, TaskBoardUiLifecyclePending>
   // Whether a player has the … menu (NEW TASK, TERMINATE) open. Written only
   // by the click handler.
-  airi_task_board_more_open?: Record<number, boolean>
-  airi_task_board_tab?: Record<number, ui_constants.ConsoleTab>
+  sgluna_task_board_more_open?: Record<number, boolean>
+  sgluna_task_board_tab?: Record<number, ui_constants.ConsoleTab>
 }
 
 let world_task_provider: ((this: void) => unknown) | undefined
@@ -329,7 +329,7 @@ export function sanitize_task_board_ui_snapshot(value: any): TaskBoardUiSnapshot
     conversation.push({
       id: text(entry?.id || `message_${index + 1}`, 120),
       role,
-      sender: text(entry?.sender || (role === 'assistant' ? 'AIRI' : 'Player'), 128),
+      sender: text(entry?.sender || (role === 'assistant' ? 'SGLuna' : 'Player'), 128),
       text: line,
     })
   }
@@ -387,7 +387,7 @@ export function stamp_activity_times(next: TaskBoardUiSnapshot, previous: TaskBo
   }) }
 }
 
-function ensure_open_state() { if (storage.airi_task_board_ui_open === undefined) storage.airi_task_board_ui_open = {}; return storage.airi_task_board_ui_open }
+function ensure_open_state() { if (storage.sgluna_task_board_ui_open === undefined) storage.sgluna_task_board_ui_open = {}; return storage.sgluna_task_board_ui_open }
 export function task_board_lifecycle_pending_expired(started_tick: number | undefined, tick: number) {
   // Missing timestamps are legacy persisted pending records from before the
   // timeout existed. Treat them as expired so upgrading an old save repairs the
@@ -396,11 +396,11 @@ export function task_board_lifecycle_pending_expired(started_tick: number | unde
   return math.max(0, tick - started_tick) >= ui_constants.LIFECYCLE_PENDING_TICKS
 }
 const LIFECYCLE = {
-  ensure: () => { if (storage.airi_task_board_lifecycle_pending === undefined) storage.airi_task_board_lifecycle_pending = {}; return storage.airi_task_board_lifecycle_pending },
+  ensure: () => { if (storage.sgluna_task_board_lifecycle_pending === undefined) storage.sgluna_task_board_lifecycle_pending = {}; return storage.sgluna_task_board_lifecycle_pending },
   current: (player_index: number) => {
-    const pending = storage.airi_task_board_lifecycle_pending?.[player_index]
+    const pending = storage.sgluna_task_board_lifecycle_pending?.[player_index]
     if (pending === undefined) return undefined
-    const board = storage.airi_task_board_ui
+    const board = storage.sgluna_task_board_ui
     const goal_changed = pending.goal_id.length > 0 && board?.goal_id !== pending.goal_id
     const expired = task_board_lifecycle_pending_expired(pending.started_tick, game.tick)
     const done = expired || goal_changed
@@ -413,19 +413,19 @@ const LIFECYCLE = {
   },
   begin: (player_index: number, action: TaskBoardUiLifecycleAction) => {
     if (LIFECYCLE.current(player_index) !== undefined) return false
-    LIFECYCLE.ensure()[player_index] = { action, goal_id: storage.airi_task_board_ui?.goal_id ?? '', started_tick: game.tick }
+    LIFECYCLE.ensure()[player_index] = { action, goal_id: storage.sgluna_task_board_ui?.goal_id ?? '', started_tick: game.tick }
     return true
   },
   ack: (player_index: number, action: TaskBoardUiLifecycleAction) => {
-    const pending = storage.airi_task_board_lifecycle_pending?.[player_index]
+    const pending = storage.sgluna_task_board_lifecycle_pending?.[player_index]
     if (pending === undefined || pending.action !== action) return false
     delete LIFECYCLE.ensure()[player_index]
     return true
   },
 }
-function ensure_terminate_confirm_state() { if (storage.airi_task_board_terminate_confirm_until === undefined) storage.airi_task_board_terminate_confirm_until = {}; return storage.airi_task_board_terminate_confirm_until }
-function ensure_prompt_pending_state() { if (storage.airi_task_board_prompt_pending === undefined) storage.airi_task_board_prompt_pending = {}; return storage.airi_task_board_prompt_pending }
-function ensure_blocked_choice_pending_state() { if (storage.airi_task_board_blocked_choice_pending === undefined) storage.airi_task_board_blocked_choice_pending = {}; return storage.airi_task_board_blocked_choice_pending }
+function ensure_terminate_confirm_state() { if (storage.sgluna_task_board_terminate_confirm_until === undefined) storage.sgluna_task_board_terminate_confirm_until = {}; return storage.sgluna_task_board_terminate_confirm_until }
+function ensure_prompt_pending_state() { if (storage.sgluna_task_board_prompt_pending === undefined) storage.sgluna_task_board_prompt_pending = {}; return storage.sgluna_task_board_prompt_pending }
+function ensure_blocked_choice_pending_state() { if (storage.sgluna_task_board_blocked_choice_pending === undefined) storage.sgluna_task_board_blocked_choice_pending = {}; return storage.sgluna_task_board_blocked_choice_pending }
 // Sending a free-text prompt is not goal/status-keyed the way pause/resume/
 // terminate are, so this does not reuse LIFECYCLE: LIFECYCLE.current()'s "done"
 // check is built entirely from board?.status and goal_id transitions specific
@@ -437,9 +437,9 @@ function ensure_blocked_choice_pending_state() { if (storage.airi_task_board_blo
 // the tick bound is only the fallback for a lost round-trip, so it can stay
 // short - this is visual reassurance, not a durable cross-save lock.
 function task_board_ui_prompt_send_pending(player_index: number, tick: number) {
-  const started = storage.airi_task_board_prompt_pending?.[player_index]
+  const started = storage.sgluna_task_board_prompt_pending?.[player_index]
   if (started === undefined) return false
-  const synced_tick = storage.airi_task_board_ui_synced_tick
+  const synced_tick = storage.sgluna_task_board_ui_synced_tick
   const picked_up = synced_tick !== undefined && synced_tick > started
   const expired = math.max(0, tick - started) >= ui_constants.PROMPT_SEND_PENDING_TICKS
   if (picked_up || expired) { delete ensure_prompt_pending_state()[player_index]; return false }
@@ -447,25 +447,25 @@ function task_board_ui_prompt_send_pending(player_index: number, tick: number) {
 }
 function mark_prompt_sent(player_index: number) { ensure_prompt_pending_state()[player_index] = game.tick }
 function task_board_ui_blocked_choice_pending(player_index: number, tick: number) {
-  const started = storage.airi_task_board_blocked_choice_pending?.[player_index]
+  const started = storage.sgluna_task_board_blocked_choice_pending?.[player_index]
   if (started === undefined) return false
-  const synced_tick = storage.airi_task_board_ui_synced_tick
+  const synced_tick = storage.sgluna_task_board_ui_synced_tick
   const picked_up = synced_tick !== undefined && synced_tick > started
   const expired = math.max(0, tick - started) >= ui_constants.BLOCKED_CHOICE_PENDING_TICKS
   if (picked_up || expired) { delete ensure_blocked_choice_pending_state()[player_index]; return false }
   return true
 }
 function mark_blocked_choice_sent(player_index: number) { ensure_blocked_choice_pending_state()[player_index] = game.tick }
-function ensure_prompt_draft_state() { if (storage.airi_task_board_prompt_draft === undefined) storage.airi_task_board_prompt_draft = {}; return storage.airi_task_board_prompt_draft }
-function ensure_ui_input_queue() { if (storage.airi_task_board_ui_inputs === undefined) storage.airi_task_board_ui_inputs = []; return storage.airi_task_board_ui_inputs }
-function ensure_preview_zoom_state() { if (storage.airi_task_board_preview_zoom === undefined) storage.airi_task_board_preview_zoom = {}; return storage.airi_task_board_preview_zoom }
+function ensure_prompt_draft_state() { if (storage.sgluna_task_board_prompt_draft === undefined) storage.sgluna_task_board_prompt_draft = {}; return storage.sgluna_task_board_prompt_draft }
+function ensure_ui_input_queue() { if (storage.sgluna_task_board_ui_inputs === undefined) storage.sgluna_task_board_ui_inputs = []; return storage.sgluna_task_board_ui_inputs }
+function ensure_preview_zoom_state() { if (storage.sgluna_task_board_preview_zoom === undefined) storage.sgluna_task_board_preview_zoom = {}; return storage.sgluna_task_board_preview_zoom }
 function normalize_preview_zoom(value: unknown) {
   if (typeof value !== 'number') return ui_constants.PREVIEW_ZOOM_DEFAULT
   const clamped = math.max(ui_constants.PREVIEW_ZOOM_MIN, math.min(ui_constants.PREVIEW_ZOOM_MAX, value))
   const steps = math.floor((clamped - ui_constants.PREVIEW_ZOOM_MIN) / ui_constants.PREVIEW_ZOOM_STEP + 0.5)
   return math.floor((ui_constants.PREVIEW_ZOOM_MIN + steps * ui_constants.PREVIEW_ZOOM_STEP) * 100 + 0.5) / 100
 }
-export function task_board_preview_zoom(player_index: number) { return normalize_preview_zoom(storage.airi_task_board_preview_zoom?.[player_index] ?? ui_constants.PREVIEW_ZOOM_DEFAULT) }
+export function task_board_preview_zoom(player_index: number) { return normalize_preview_zoom(storage.sgluna_task_board_preview_zoom?.[player_index] ?? ui_constants.PREVIEW_ZOOM_DEFAULT) }
 function set_preview_zoom(player_index: number, value: unknown) { const zoom = normalize_preview_zoom(value); ensure_preview_zoom_state()[player_index] = zoom; return zoom }
 function preview_zoom_caption(zoom: number) { return `${zoom}×` }
 function enqueue_ui_input(input: TaskBoardUiInput) { const queue = ensure_ui_input_queue(); queue.push(input); while (queue.length > ui_constants.UI_INPUT_QUEUE_LIMIT) queue.shift() }
@@ -476,37 +476,37 @@ function any_console_open() { for (const player of game.connected_players) { if 
 // status panel degrades on its own.
 function poll_request(): TaskBoardUiPollInput | undefined {
   if (!any_console_open()) return undefined
-  const synced = storage.airi_task_board_ui_synced_tick
+  const synced = storage.sgluna_task_board_ui_synced_tick
   if (synced !== undefined && math.max(0, game.tick - synced) < ui_constants.POLL_REQUEST_TICKS) return undefined
   return { kind: 'poll', version: 1, tick: game.tick, debug: debug_ui.any_debug_ui_open() }
 }
 
 function drain_ui_inputs() {
-  const queued = storage.airi_task_board_ui_inputs ?? []
-  storage.airi_task_board_ui_inputs = []
+  const queued = storage.sgluna_task_board_ui_inputs ?? []
+  storage.sgluna_task_board_ui_inputs = []
   const drained: TaskBoardUiDrainedInput[] = queued
   const poll = poll_request()
   if (poll !== undefined) drained.push(poll)
   return drained
 }
-export function task_board_ui_prompt_draft(player_index: number) { return storage.airi_task_board_prompt_draft?.[player_index] ?? '' }
+export function task_board_ui_prompt_draft(player_index: number) { return storage.sgluna_task_board_prompt_draft?.[player_index] ?? '' }
 function set_prompt_draft(player_index: number, value: unknown) { ensure_prompt_draft_state()[player_index] = text(value, ui_constants.MAX_PROMPT_TEXT) }
-export function task_board_ui_is_open(player_index: number) { return storage.airi_task_board_ui_open?.[player_index] === true }
+export function task_board_ui_is_open(player_index: number) { return storage.sgluna_task_board_ui_open?.[player_index] === true }
 export function toggle_task_board_ui_open(player_index: number) { const next = !task_board_ui_is_open(player_index); ensure_open_state()[player_index] = next; return next }
 function close_task_board_ui(player_index: number) { ensure_open_state()[player_index] = false }
 /** Plain chat text standing in for the console during the first few seconds after joining. */
 function join_status_line() {
-  const board = storage.airi_task_board_ui
+  const board = storage.sgluna_task_board_ui
   if (board === undefined) return '[SGLuna] No active task yet. Click the SGLuna button to open the console.'
   return `[SGLuna] ${board.status.toUpperCase()} - ${board.objective || 'no objective set'}. Click the SGLuna button to open the console.`
 }
-function ensure_skills_open_state() { if (storage.airi_task_board_skills_open === undefined) storage.airi_task_board_skills_open = {}; return storage.airi_task_board_skills_open }
-export function task_board_skills_ui_is_open(player_index: number) { return storage.airi_task_board_skills_open?.[player_index] === true }
+function ensure_skills_open_state() { if (storage.sgluna_task_board_skills_open === undefined) storage.sgluna_task_board_skills_open = {}; return storage.sgluna_task_board_skills_open }
+export function task_board_skills_ui_is_open(player_index: number) { return storage.sgluna_task_board_skills_open?.[player_index] === true }
 export function toggle_task_board_skills_ui_open(player_index: number) { const next = !task_board_skills_ui_is_open(player_index); ensure_skills_open_state()[player_index] = next; return next }
 function close_task_board_skills_ui(player_index: number) { ensure_skills_open_state()[player_index] = false }
-export function task_board_ui_terminate_is_armed(player_index: number, tick: number) { return (storage.airi_task_board_terminate_confirm_until?.[player_index] ?? 0) >= tick }
+export function task_board_ui_terminate_is_armed(player_index: number, tick: number) { return (storage.sgluna_task_board_terminate_confirm_until?.[player_index] ?? 0) >= tick }
 function clear_terminate_confirmation(player_index: number) { ensure_terminate_confirm_state()[player_index] = 0 }
-function close_more_menu(player_index: number) { if (storage.airi_task_board_more_open !== undefined) storage.airi_task_board_more_open[player_index] = false }
+function close_more_menu(player_index: number) { if (storage.sgluna_task_board_more_open !== undefined) storage.sgluna_task_board_more_open[player_index] = false }
 function arm_terminate(player_index: number) { ensure_terminate_confirm_state()[player_index] = game.tick + ui_constants.TERMINATE_CONFIRM_TICKS }
 
 function mod_gui_button_flow(player: LuaPlayer): LuaGuiElement {
@@ -526,7 +526,7 @@ function ensure_button(player: LuaPlayer) {
   button.tooltip = provider_ui.provider_button_tooltip('SGLuna NPC Console')
   button.toggled = task_board_ui_is_open(player.index)
   // Factorio's stock mod-GUI slot is easy to miss at 1080p. A conservative
-  // 48px square keeps the standard slot-button styling while making AIRI's
+  // 48px square keeps the standard slot-button styling while making SGLuna's
   // provider avatar materially easier to see and click.
   button.style.width = 48
   button.style.height = 48
@@ -597,7 +597,7 @@ function runtime_snapshot(): TaskBoardUiRuntimeSnapshot {
   const guns = character?.valid ? inventory_items(character.get_inventory(defines.inventory.character_guns)) : []
   const ammo = character?.valid ? inventory_items(character.get_inventory(defines.inventory.character_ammo)) : []
   const preview: TaskBoardUiWorldPreview | undefined = actor?.is_valid ? { position: actor.position, surface_index: actor.surface.index, entity: character?.valid ? character : undefined } : undefined
-  return { actor_name: text(identity?.name ?? 'AIRI', 128), actor_kind: text(identity?.kind ?? '', 64), inventory: inventory.slice(0, ui_constants.MAX_INVENTORY_ITEMS), guns, ammo, follow: read_follow_status(), preview, world_task: read_world_task() }
+  return { actor_name: text(identity?.name ?? 'SGLuna', 128), actor_kind: text(identity?.kind ?? '', 64), inventory: inventory.slice(0, ui_constants.MAX_INVENTORY_ITEMS), guns, ammo, follow: read_follow_status(), preview, world_task: read_world_task() }
 }
 function emit_control(player: LuaPlayer, action: TaskBoardUiControlAction) { enqueue_ui_input({ kind: 'control', version: 1, action, player_index: player.index, player_name: player.name, tick: game.tick }) }
 function emit_resume(player: LuaPlayer) { enqueue_ui_input({ kind: 'prompt', version: 1, player_index: player.index, player_name: player.name, text: 'continue', tick: game.tick }) }
@@ -648,18 +648,18 @@ function overall_state(board: TaskBoardUiSnapshot | undefined, synced_tick: numb
   const freshness = task_board_sync_freshness(synced_tick, game.tick)
   if (freshness === 'offline') return { tone: 'muted', caption: 'OFFLINE' }
   // A snapshot only ever describes the tick it was pushed at. Once the runtime
-  // stops answering polls, repeating its last phase would claim AIRI is still
+  // stops answering polls, repeating its last phase would claim SGLuna is still
   // doing work that nothing is driving any more.
   if (freshness === 'stale') return { tone: 'bad', caption: 'STALE' }
   if (board === undefined) return { tone: 'muted', caption: 'IDLE' }
-  // The header answers "what is AIRI doing right now?". The durable plan state
+  // The header answers "what is SGLuna doing right now?". The durable plan state
   // remains visible in Plan Tracker, so a live phase must not be hidden behind
   // the generic ACTIVE badge while the model is thinking/observing/executing.
   if (board.agent.phase !== 'idle') return { tone: agent_tone(board.agent.phase), caption: agent_caption(board.agent.phase) }
   return { tone: board_tone(board.status), caption: board.status.toUpperCase() }
 }
 
-// The title bar's status line: what AIRI is doing right now, and whether that
+// The title bar's status line: what SGLuna is doing right now, and whether that
 // is still current. The NPC, world task and sync age are in its tooltip.
 function console_title_status(board: TaskBoardUiSnapshot | undefined, runtime: TaskBoardUiRuntimeSnapshot, synced_tick: number | undefined): console_ui.ConsoleTitleStatus {
   const overall = overall_state(board, synced_tick)
@@ -670,7 +670,7 @@ function console_title_status(board: TaskBoardUiSnapshot | undefined, runtime: T
     : freshness === 'stale'
       ? `NO ANSWER — last seen ${agent_caption(phase)}`
       : detail.length > 0 ? `${overall.caption} · ${text(detail, 90)}` : overall.caption
-  const tooltip = `NPC: ${runtime.actor_name || 'AIRI'}\nWorld task: ${world_task_summary(runtime.world_task)}\nLast sync: ${sync_summary(synced_tick)}\nThe console polls the SGLuna runtime; this line reports its answer, not a guess.`
+  const tooltip = `NPC: ${runtime.actor_name || 'SGLuna'}\nWorld task: ${world_task_summary(runtime.world_task)}\nLast sync: ${sync_summary(synced_tick)}\nThe console polls the SGLuna runtime; this line reports its answer, not a guess.`
   return { caption, tone: overall.tone, tooltip }
 }
 function console_goal_card(board: TaskBoardUiSnapshot | undefined): console_ui.ConsoleGoalCard {
@@ -678,7 +678,7 @@ function console_goal_card(board: TaskBoardUiSnapshot | undefined): console_ui.C
   if (goal !== undefined) {
     return {
       summary: goal.summary,
-      note: goal.defined ? '' : 'AIRI has not defined how the game will check this goal yet.',
+      note: goal.defined ? '' : 'SGLuna has not defined how the game will check this goal yet.',
       read: goal.read,
       met: goal.met,
       total: goal.total,
@@ -686,7 +686,7 @@ function console_goal_card(board: TaskBoardUiSnapshot | undefined): console_ui.C
     }
   }
   const summary = board === undefined ? 'No active goal.' : board_goal(board)
-  const note = board === undefined || board.status === 'idle' ? 'Tell AIRI what to do in the prompt below.' : ''
+  const note = board === undefined || board.status === 'idle' ? 'Tell SGLuna what to do in the prompt below.' : ''
   return { summary, note, read: false, met: 0, total: 0, checks: [] }
 }
 // The last meaningful result: a result or blocker, else the latest action.
@@ -764,7 +764,7 @@ function console_action_state(player: LuaPlayer, board: TaskBoardUiSnapshot | un
     // with no message. Only report a failure there is something to read about.
     follow_issue: text(follow?.last_failure ?? '', 100),
     // Armed TERMINATE keeps the menu open so the confirming click is there.
-    more_open: storage.airi_task_board_more_open?.[player.index] === true || armed,
+    more_open: storage.sgluna_task_board_more_open?.[player.index] === true || armed,
     new_task_tooltip: pending === undefined ? "Stop current work and clear this NPC's conversation and durable plan. Learned skills and Factorio world state are kept." : pending_tip,
     new_task_enabled: pending === undefined,
     terminate_caption: pending?.action === 'terminate' ? 'TERMINATING...' : armed ? 'CONFIRM' : 'TERMINATE',
@@ -779,7 +779,7 @@ function console_action_state(player: LuaPlayer, board: TaskBoardUiSnapshot | un
 function render_blocked(parent: LuaGuiElement, player: LuaPlayer, board: TaskBoardUiSnapshot | undefined) {
   if (board?.status !== 'blocked') return
   const blocked = board.blocked
-  const summary = blocked?.summary ?? task_condition_text(board.blocker_summary, board.blocker, 'AIRI stopped because the committed plan needs your decision.')
+  const summary = blocked?.summary ?? task_condition_text(board.blocker_summary, board.blocker, 'SGLuna stopped because the committed plan needs your decision.')
   const deadlock = blocked?.deadlock === undefined ? '' : `Deadlock: ${blocked.deadlock.signal.replace('_', ' ')} (${blocked.deadlock.count})${typeof blocked.deadlock.detail === 'string' && blocked.deadlock.detail !== '' ? ` — ${blocked.deadlock.detail}` : ''}`
   console_ui.render_blocked_banner(parent, {
     summary,
@@ -832,7 +832,7 @@ export function task_board_resource_rows(gui_height: number) {
 export function task_board_wanted_rows(gui_height: number) { return math.max(1, task_board_resource_rows(gui_height) - 4) }
 
 /**
- * The camera's floor, which is what keeps the console tall while AIRI has no
+ * The camera's floor, which is what keeps the console tall while SGLuna has no
  * plan to show and the left column is therefore short.
  */
 export function task_board_preview_min_height(gui_height: number) {
@@ -1018,11 +1018,11 @@ function refresh_tracker(parent: LuaGuiElement, board: TaskBoardUiSnapshot | und
  */
 function render_activity_section(parent: LuaGuiElement, board: TaskBoardUiSnapshot | undefined, player: LuaPlayer) {
   const names = ui_constants.CONSOLE_TABS
-  const { header, body } = create_section(parent, 'Activity', ui_constants.LEFT_COLUMN_WIDTH, 'What AIRI observed, decided and did. Messages already in the conversation on NOW are not repeated here.', false, { section: names.activity_section, header: names.activity_section_header, body: names.activity_section_body })
+  const { header, body } = create_section(parent, 'Activity', ui_constants.LEFT_COLUMN_WIDTH, 'What SGLuna observed, decided and did. Messages already in the conversation on NOW are not repeated here.', false, { section: names.activity_section, header: names.activity_section_header, body: names.activity_section_body })
   const activity_header = header.add({ type: 'flow', name: ui_constants.TRACKER.activity_header, direction: 'horizontal' }); activity_header.style.vertical_align = 'center'; activity_header.style.horizontal_spacing = 6
   const filters = activity_header.add({ type: 'flow', name: ui_constants.TRACKER.filters, direction: 'horizontal' }); filters.style.horizontal_spacing = 2
-  activity_state.style_feed_button(filters.add({ type: 'button', caption: 'ALL', tooltip: 'Show every kind of activity', tags: { airi_activity_filter: activity_state.ACTIVITY_FILTER_ALL } }))
-  for (const filter of activity_state.ACTIVITY_FILTERS) activity_state.style_feed_button(filters.add({ type: 'button', caption: filter.caption, tooltip: `${filter.tooltip}. Click to show or hide; several can be on at once.`, tags: { airi_activity_filter: filter.flag } }))
+  activity_state.style_feed_button(filters.add({ type: 'button', caption: 'ALL', tooltip: 'Show every kind of activity', tags: { sgluna_activity_filter: activity_state.ACTIVITY_FILTER_ALL } }))
+  for (const filter of activity_state.ACTIVITY_FILTERS) activity_state.style_feed_button(filters.add({ type: 'button', caption: filter.caption, tooltip: `${filter.tooltip}. Click to show or hide; several can be on at once.`, tags: { sgluna_activity_filter: filter.flag } }))
   activity_state.style_feed_button(activity_header.add({ type: 'button', name: ui_constants.TRACKER.live, caption: '' }), activity_state.FEED_STATE_BUTTON_WIDTH)
   const count = activity_header.add({ type: 'label', name: ui_constants.TRACKER.count, caption: '', style: 'semibold_label' }); count.style.right_padding = 4
   const activity_empty = body.add({ type: 'label', name: ui_constants.TRACKER.activity_empty, caption: 'No activity yet.' }); activity_empty.style.font_color = TONE_COLORS.muted
@@ -1130,9 +1130,9 @@ function refresh_steps(plan: LuaGuiElement, board: TaskBoardUiSnapshot, max_heig
  */
 function refresh_activity(header: LuaGuiElement, empty: LuaGuiElement, scroll: LuaGuiElement, table: LuaGuiElement, all_activity: TaskBoardUiActivity[], max_height: number, player: LuaPlayer) {
   const mask = activity_state.activity_filter_mask(player.index)
-  // Player messages and AIRI replies already read in full in the conversation
+  // Player messages and SGLuna replies already read in full in the conversation
   // panel above; only what that panel does not show is listed here.
-  const in_conversation = debug_ui.conversation_activity_keys(storage.airi_task_board_ui)
+  const in_conversation = debug_ui.conversation_activity_keys(storage.sgluna_task_board_ui)
   const entries: TaskBoardUiActivity[] = []; const keys: string[] = []; let total = 0
   for (const entry of all_activity) { const key = activity_state.activity_key(entry); if (in_conversation[key]) continue; total++; if (!activity_state.activity_matches_mask(entry.kind, mask)) continue; entries.push(entry); keys.push(key) }
   scroll.style.maximal_height = max_height
@@ -1175,14 +1175,14 @@ function refresh_activity(header: LuaGuiElement, empty: LuaGuiElement, scroll: L
   if (activity_state.activity_should_scroll(view, appended, last_key)) (scroll as ScrollPaneGuiElement).scroll_to_bottom()
 
   const filters = header[ui_constants.TRACKER.filters]
-  if (filters?.valid) { for (const button of filters.children) { const flag = button.tags.airi_activity_filter; if (typeof flag === 'number') (button as ButtonGuiElement).toggled = activity_state.activity_filter_selected(mask, flag) } }
+  if (filters?.valid) { for (const button of filters.children) { const flag = button.tags.sgluna_activity_filter; if (typeof flag === 'number') (button as ButtonGuiElement).toggled = activity_state.activity_filter_selected(mask, flag) } }
   const live = header[ui_constants.TRACKER.live]
   if (live?.valid) {
-    const unseen = view.follow ? { count: 0, overflow: false } : activity_state.activity_unseen(keys, view.seen_key)
-    const tone: Tone = view.follow ? 'good' : unseen.count > 0 ? 'warn' : 'muted'
-    const state = view.follow ? 'LIVE' : unseen.count > 0 ? `${unseen.count}${unseen.overflow ? '+' : ''} NEW` : 'PAUSED'
+    const unseen = view.live ? { count: 0, overflow: false } : activity_state.activity_unseen(keys, view.seen_key)
+    const tone: Tone = view.live ? 'good' : unseen.count > 0 ? 'warn' : 'muted'
+    const state = view.live ? 'LIVE' : unseen.count > 0 ? `${unseen.count}${unseen.overflow ? '+' : ''} NEW` : 'PAUSED'
     live.caption = gui_text.trusted_rich_text(`[img=${TONE_SPRITES[tone]}] ${state}`)
-    live.tooltip = view.follow ? 'Following the newest activity. Scrolling the feed stops following; so does clicking here.' : 'Not following, so the feed stays where you left it. Click to jump to the newest activity and follow it again.'
+    live.tooltip = view.live ? 'Following the newest activity. Scrolling the feed stops following; so does clicking here.' : 'Not following, so the feed stays where you left it. Click to jump to the newest activity and follow it again.'
   }
   const count = header[ui_constants.TRACKER.count]
   if (count?.valid) count.caption = mask === activity_state.ACTIVITY_FILTER_ALL ? `${total} event${total === 1 ? '' : 's'}` : `${entries.length}/${total}`
@@ -1237,7 +1237,7 @@ function render_prompt(parent: LuaGuiElement, player: LuaPlayer) {
   const send = row.add({ type: 'button', name: ui_constants.PROMPT_SEND_BUTTON_NAME, caption: send_pending ? 'SENDING...' : 'SEND', style: 'confirm_button', tooltip: send_pending ? 'Waiting for SGLuna runtime to pick up this prompt.' : 'Send this prompt directly to SGLuna' }) as ButtonGuiElement; send.style.width = ui_constants.PROMPT_SEND_WIDTH; send.style.minimal_width = ui_constants.PROMPT_SEND_WIDTH; send.style.maximal_width = ui_constants.PROMPT_SEND_WIDTH; send.style.height = ui_constants.COMPACT_BUTTON_HEIGHT
   send.enabled = !send_pending
 }
-function selected_console_tab(player: LuaPlayer): ui_constants.ConsoleTab { return console_ui.console_tab_of(storage.airi_task_board_tab?.[player.index]) ?? 'now' }
+function selected_console_tab(player: LuaPlayer): ui_constants.ConsoleTab { return console_ui.console_tab_of(storage.sgluna_task_board_tab?.[player.index]) ?? 'now' }
 function resources_signature(player: LuaPlayer, board: TaskBoardUiSnapshot | undefined, runtime: TaskBoardUiRuntimeSnapshot) {
   return helpers.table_to_json({ inventory: runtime.inventory, guns: runtime.guns, ammo: runtime.ammo, wanted: board?.wanted_items, height: player_gui_height(player) })
 }
@@ -1259,7 +1259,7 @@ function build_left_dynamic(banner: LuaGuiElement, now: LuaGuiElement, plan: Lua
   refresh_slot(plan, goal_signature, slot => console_ui.render_goal_card(slot, goal))
 }
 function build_columns(columns: LuaGuiElement, player: LuaPlayer) {
-  const board = storage.airi_task_board_ui; const runtime = runtime_snapshot()
+  const board = storage.sgluna_task_board_ui; const runtime = runtime_snapshot()
   const left = columns.add({ type: 'flow', name: ui_constants.LEFT_COLUMN_NAME, direction: 'vertical' }); left.style.width = ui_constants.LEFT_COLUMN_WIDTH; left.style.vertical_spacing = ui_constants.COLUMN_SPACING; left.style.vertically_stretchable = true
   // The blocked banner sits above the tabs so a plan waiting on the player is seen whichever tab is open.
   const banner = left.add({ type: 'flow', name: ui_constants.CONSOLE_TABS.banner, direction: 'vertical' }); banner.style.width = ui_constants.LEFT_COLUMN_WIDTH
@@ -1286,7 +1286,7 @@ function refresh_columns(columns: LuaGuiElement, player: LuaPlayer) {
   const banner = left[ui_constants.CONSOLE_TABS.banner]; const now = console_ui.console_tab_page(left, 'now'); const plan = console_ui.console_tab_page(left, 'plan'); const activity = console_ui.console_tab_page(left, 'activity')
   const dynamic = now?.[ui_constants.LEFT_DYNAMIC_NAME]; const plan_dynamic = plan?.[ui_constants.CONSOLE_TABS.plan_dynamic]
   if (!banner?.valid || now === undefined || plan === undefined || activity === undefined || !dynamic?.valid || !plan_dynamic?.valid) return false
-  const board = storage.airi_task_board_ui; const runtime = runtime_snapshot()
+  const board = storage.sgluna_task_board_ui; const runtime = runtime_snapshot()
   // The tracker and the feed are never cleared on a routine refresh: they own scroll-panes.
   if (!refresh_tracker(plan, board, player) || !refresh_activity_section(activity, board, player)) return false
   build_left_dynamic(banner, dynamic, plan_dynamic, player, board)
@@ -1320,20 +1320,20 @@ function build_panel(player: LuaPlayer) {
   const root = player.gui.screen.add({ type: 'frame', name: ui_constants.ROOT_NAME, direction: 'vertical' }) as FrameGuiElement
   if (previous_location !== undefined) root.location = previous_location
   else root.auto_center = true
-  console_ui.render_console_titlebar(root, 'SGLuna NPC Console', console_window_buttons(player), console_title_status(storage.airi_task_board_ui, runtime_snapshot(), storage.airi_task_board_ui_synced_tick))
+  console_ui.render_console_titlebar(root, 'SGLuna NPC Console', console_window_buttons(player), console_title_status(storage.sgluna_task_board_ui, runtime_snapshot(), storage.sgluna_task_board_ui_synced_tick))
   const columns = root.add({ type: 'flow', name: ui_constants.COLUMNS_NAME, direction: 'horizontal' }); columns.style.horizontal_spacing = ui_constants.COLUMN_SPACING; build_columns(columns, player); root.bring_to_front()
 }
 function render_panel(player: LuaPlayer) {
   if (!task_board_ui_is_open(player.index)) { destroy_panel(player); return }
   const root = player.gui.screen[ui_constants.ROOT_NAME]; const columns = root?.valid ? root[ui_constants.COLUMNS_NAME] : undefined
-  if (columns?.valid && refresh_columns(columns, player) && root !== undefined && console_ui.refresh_console_titlebar(root as FrameGuiElement, console_window_buttons(player), console_title_status(storage.airi_task_board_ui, runtime_snapshot(), storage.airi_task_board_ui_synced_tick))) return
+  if (columns?.valid && refresh_columns(columns, player) && root !== undefined && console_ui.refresh_console_titlebar(root as FrameGuiElement, console_window_buttons(player), console_title_status(storage.sgluna_task_board_ui, runtime_snapshot(), storage.sgluna_task_board_ui_synced_tick))) return
   build_panel(player)
 }
 // The skills window owns its own refresh; it redraws only what changed.
 function render_skills_popout(player: LuaPlayer) { skills_ui.render_skills_window(player, task_board_ui_is_open(player.index) && task_board_skills_ui_is_open(player.index)) }
-function render_debug_popout(player: LuaPlayer) { render_task_board_debug_popout(player, task_board_ui_is_open(player.index), storage.airi_task_board_ui, runtime_snapshot(), storage.airi_task_board_ui_synced_tick) }
-function render(player: LuaPlayer) { ensure_button(player); render_panel(player); render_skills_popout(player); project_ui.render_projects_popout(player, task_board_ui_is_open(player.index), storage.airi_task_board_ui?.goal_id ?? ''); render_debug_popout(player) }
-function render_all() { for (const player of game.connected_players) { ensure_button(player); render_panel(player); render_skills_popout(player); project_ui.render_projects_popout(player, task_board_ui_is_open(player.index), storage.airi_task_board_ui?.goal_id ?? ''); render_debug_popout(player) } }
+function render_debug_popout(player: LuaPlayer) { render_task_board_debug_popout(player, task_board_ui_is_open(player.index), storage.sgluna_task_board_ui, runtime_snapshot(), storage.sgluna_task_board_ui_synced_tick) }
+function render(player: LuaPlayer) { ensure_button(player); render_panel(player); render_skills_popout(player); project_ui.render_projects_popout(player, task_board_ui_is_open(player.index), storage.sgluna_task_board_ui?.goal_id ?? ''); render_debug_popout(player) }
+function render_all() { for (const player of game.connected_players) { ensure_button(player); render_panel(player); render_skills_popout(player); project_ui.render_projects_popout(player, task_board_ui_is_open(player.index), storage.sgluna_task_board_ui?.goal_id ?? ''); render_debug_popout(player) } }
 function prompt_field(player: LuaPlayer) { const root = player.gui.screen[ui_constants.ROOT_NAME]; const columns = root?.valid ? root[ui_constants.COLUMNS_NAME] : undefined; const left = columns?.valid ? columns[ui_constants.LEFT_COLUMN_NAME] : undefined; const section = left?.valid ? left[ui_constants.PROMPT_SECTION_NAME] : undefined; const row = section?.valid ? section[ui_constants.PROMPT_FLOW_NAME] : undefined; const field = row?.valid ? row[ui_constants.PROMPT_FIELD_NAME] : undefined; return field?.valid ? field as TextFieldGuiElement : undefined }
 function submit_prompt(player: LuaPlayer, raw: unknown) { if (!emit_prompt(player, raw)) return false; mark_prompt_sent(player.index); const field = prompt_field(player); if (field !== undefined) field.text = ''; render_panel(player); return true }
 function handle_control_click(player: LuaPlayer, element_name: string) {
@@ -1347,7 +1347,7 @@ function handle_control_click(player: LuaPlayer, element_name: string) {
   if (blocked_action !== undefined) {
     // The names are only rendered for a blocked plan, but verify the current
     // snapshot again so an old GUI click cannot race a fresh state transition.
-    if (storage.airi_task_board_ui?.status !== 'blocked' || task_board_ui_blocked_choice_pending(player.index, game.tick)) return true
+    if (storage.sgluna_task_board_ui?.status !== 'blocked' || task_board_ui_blocked_choice_pending(player.index, game.tick)) return true
     clear_terminate_confirmation(player.index)
     mark_blocked_choice_sent(player.index)
     emit_control(player, blocked_action)
@@ -1357,7 +1357,7 @@ function handle_control_click(player: LuaPlayer, element_name: string) {
   if (element_name === ui_constants.PAUSE_BUTTON_NAME) {
     if (LIFECYCLE.current(player.index) !== undefined) return true
     clear_terminate_confirmation(player.index)
-    const action: TaskBoardUiLifecycleAction = storage.airi_task_board_ui?.status === 'paused' ? 'resume' : 'pause'
+    const action: TaskBoardUiLifecycleAction = storage.sgluna_task_board_ui?.status === 'paused' ? 'resume' : 'pause'
     if (LIFECYCLE.begin(player.index, action)) {
       if (action === 'resume') emit_resume(player)
       else emit_control(player, 'pause')
@@ -1370,7 +1370,7 @@ function handle_control_click(player: LuaPlayer, element_name: string) {
     if (task_board_ui_terminate_is_armed(player.index, game.tick)) {
       clear_terminate_confirmation(player.index)
       if (LIFECYCLE.begin(player.index, 'terminate')) {
-        debug_ui.suppress_snapshot(storage.airi_task_board_ui)
+        debug_ui.suppress_snapshot(storage.sgluna_task_board_ui)
         debug_ui.reset_task_conversation()
         activity_state.clear_activity_history()
         emit_control(player, 'terminate')
@@ -1381,16 +1381,16 @@ function handle_control_click(player: LuaPlayer, element_name: string) {
     return true
   }
   if (element_name === ui_constants.MORE_BUTTON_NAME) {
-    const open = storage.airi_task_board_more_open ?? {}
+    const open = storage.sgluna_task_board_more_open ?? {}
     open[player.index] = open[player.index] !== true
-    storage.airi_task_board_more_open = open
+    storage.sgluna_task_board_more_open = open
     // Closing the menu also disarms a pending TERMINATE confirmation.
     if (open[player.index] !== true) clear_terminate_confirmation(player.index)
     render_panel(player)
     return true
   }
   if (element_name === ui_constants.FOLLOW_BUTTON_NAME) { clear_terminate_confirmation(player.index); const follow = read_follow_status(); emit_control(player, follow?.active ? 'stop_follow' : 'follow'); return true }
-  if (element_name === ui_constants.NEW_TASK_BUTTON_NAME) { if (LIFECYCLE.current(player.index) !== undefined) return true; clear_terminate_confirmation(player.index); debug_ui.suppress_snapshot(storage.airi_task_board_ui); debug_ui.reset_task_conversation(); activity_state.clear_activity_history(); emit_control(player, 'new_task'); close_more_menu(player.index); render_panel(player); return true }
+  if (element_name === ui_constants.NEW_TASK_BUTTON_NAME) { if (LIFECYCLE.current(player.index) !== undefined) return true; clear_terminate_confirmation(player.index); debug_ui.suppress_snapshot(storage.sgluna_task_board_ui); debug_ui.reset_task_conversation(); activity_state.clear_activity_history(); emit_control(player, 'new_task'); close_more_menu(player.index); render_panel(player); return true }
   if (element_name === ui_constants.PROMPT_SEND_BUTTON_NAME) { if (task_board_ui_prompt_send_pending(player.index, game.tick)) return true; submit_prompt(player, task_board_ui_prompt_draft(player.index)); return true }
   return false
 }
@@ -1402,12 +1402,12 @@ export function create_task_board_ui_remote_interface() {
       if (!debug_ui.accept_sync_version(generation, revision)) return true
       const next = sanitize_task_board_ui_snapshot(value)
       if (next === undefined) return false
-      const previous = storage.airi_task_board_ui
+      const previous = storage.sgluna_task_board_ui
       const changed_task = activity_state.bind_activity_context(next.conversation_id, next.goal_id)
       const stamped = stamp_activity_times(next, changed_task ? undefined : previous, game.tick)
       activity_state.merge_activity_history(stamped.activity)
-      storage.airi_task_board_ui = stamped
-      storage.airi_task_board_ui_synced_tick = game.tick
+      storage.sgluna_task_board_ui = stamped
+      storage.sgluna_task_board_ui_synced_tick = game.tick
       provider_ui.remember_provider_model(stamped.debug?.provider_model)
       project_ui.record_project_snapshot(stamped, game.tick)
       try { handle_task_board_learning_transition(previous, stamped) }
@@ -1418,13 +1418,13 @@ export function create_task_board_ui_remote_interface() {
     clear: (generation?: unknown, revision?: unknown) => {
       if (!debug_ui.accept_sync_version(generation, revision)) return true
       activity_state.clear_activity_history()
-      storage.airi_task_board_ui = undefined
-      storage.airi_task_board_ui_synced_tick = game.tick
+      storage.sgluna_task_board_ui = undefined
+      storage.sgluna_task_board_ui_synced_tick = game.tick
       render_all()
       return true
     },
     ack_lifecycle: (player_index: unknown, action: unknown) => { const index = integer(player_index); const kind: TaskBoardUiLifecycleAction | undefined = action === 'pause' || action === 'resume' || action === 'terminate' ? action : undefined; if (index < 1 || kind === undefined) return false; LIFECYCLE.ack(index, kind); render_all(); return true },
-    status: () => storage.airi_task_board_ui,
+    status: () => storage.sgluna_task_board_ui,
     sync_version: () => debug_ui.current_sync_version(),
     drain_inputs: () => drain_ui_inputs(),
   })
@@ -1439,7 +1439,7 @@ export function create_task_board_ui_remote_interface() {
   // settling into the game reproduced a real multiplayer desync. Requiring an
   // explicit click keeps that rebuild off every join transition, not just the
   // exact join tick. A short chat line stands in for the first few seconds so
-  // the player still has an immediate read on AIRI without needing to open
+  // the player still has an immediate read on SGLuna without needing to open
   // anything - plain player-local text, no GUI or camera involved.
   script.on_event(defines.events.on_player_joined_game, (event: any) => {
     const player = game.get_player(event.player_index)
@@ -1456,17 +1456,17 @@ export function create_task_board_ui_remote_interface() {
     if (!task_board_ui_is_open(player.index)) return
     if (element.name === ui_constants.PREVIEW_LOCATE_NAME) { focus_npc_preview(player); return }
     if (element.name === ui_constants.CLOSE_BUTTON_NAME) { clear_terminate_confirmation(player.index); close_task_board_ui(player.index); close_task_board_skills_ui(player.index); project_ui.close_projects_ui(player.index); debug_ui.close_debug_ui(player.index); skills_ui.close_skills_window(player); project_ui.render_projects_popout(player, false); render_debug_popout(player); destroy_panel(player); ensure_button(player); return }
-    if (element.name === project_ui.PROJECTS_BUTTON_NAME) { project_ui.toggle_projects_ui(player.index); render_panel(player); project_ui.render_projects_popout(player, true, storage.airi_task_board_ui?.goal_id ?? ''); return }
-    if (element.name === project_ui.PROJECTS_CLOSE_BUTTON_NAME) { project_ui.close_projects_ui(player.index); project_ui.render_projects_popout(player, true, storage.airi_task_board_ui?.goal_id ?? ''); render_panel(player); return }
-    if (project_ui.handle_project_export_click(player, element.name, storage.airi_task_board_ui?.goal_id ?? '')) return
+    if (element.name === project_ui.PROJECTS_BUTTON_NAME) { project_ui.toggle_projects_ui(player.index); render_panel(player); project_ui.render_projects_popout(player, true, storage.sgluna_task_board_ui?.goal_id ?? ''); return }
+    if (element.name === project_ui.PROJECTS_CLOSE_BUTTON_NAME) { project_ui.close_projects_ui(player.index); project_ui.render_projects_popout(player, true, storage.sgluna_task_board_ui?.goal_id ?? ''); render_panel(player); return }
+    if (project_ui.handle_project_export_click(player, element.name, storage.sgluna_task_board_ui?.goal_id ?? '')) return
     if (element.name === ui_constants.SKILLS_BUTTON_NAME) { toggle_task_board_skills_ui_open(player.index); render_panel(player); render_skills_popout(player); return }
     if (element.name === ui_constants.SKILLS_CLOSE_BUTTON_NAME) { close_task_board_skills_ui(player.index); skills_ui.close_skills_window(player); render_panel(player); return }
     if (element.name === debug_ui.DEBUG_BUTTON_NAME) { debug_ui.toggle_debug_ui(player.index); render_panel(player); render_debug_popout(player); return }
     if (element.name === debug_ui.DEBUG_CLOSE_BUTTON_NAME) { debug_ui.close_debug_ui(player.index); render_debug_popout(player); render_panel(player); return }
-    if (element.name === debug_ui.DEBUG_ACTIVITY_STATE_NAME) { debug_ui.toggle_debug_activity_follow(player.index); render_debug_popout(player); return }
+    if (element.name === debug_ui.DEBUG_ACTIVITY_STATE_NAME) { debug_ui.toggle_debug_activity_live(player.index); render_debug_popout(player); return }
     const tab = console_ui.console_tab_of(element.tags?.[ui_constants.CONSOLE_TABS.tag])
     if (tab !== undefined) {
-      const selected = storage.airi_task_board_tab ?? {}; selected[player.index] = tab; storage.airi_task_board_tab = selected
+      const selected = storage.sgluna_task_board_tab ?? {}; selected[player.index] = tab; storage.sgluna_task_board_tab = selected
       // Only visibility changes, so nothing is rebuilt and no scroll position is lost.
       const root = player.gui.screen[ui_constants.ROOT_NAME]; const columns = root?.valid ? root[ui_constants.COLUMNS_NAME] : undefined; const left = columns?.valid ? columns[ui_constants.LEFT_COLUMN_NAME] : undefined
       if (!left?.valid || !console_ui.apply_console_tab(left, tab)) render_panel(player)
@@ -1474,13 +1474,13 @@ export function create_task_board_ui_remote_interface() {
     }
     if (element.name === ui_constants.TRACKER.live || element.name === debug_ui.CONVERSATION_STATE_NAME) {
       const scroll = activity_scroll_of(player); const view = activity_state.activity_view(player.index)
-      if (view.follow) activity_state.stop_activity_follow(player.index, last_shown_activity_key(scroll))
-      else activity_state.resume_activity_follow(player.index, last_shown_activity_key(scroll))
+      if (view.live) activity_state.stop_activity_live(player.index, last_shown_activity_key(scroll))
+      else activity_state.resume_activity_live(player.index, last_shown_activity_key(scroll))
       render_panel(player); return
     }
-    const filter_flag = element.tags?.airi_activity_filter
-    if (typeof filter_flag === 'number' && element.tags?.airi_activity_surface === 'projects') { activity_state.toggle_activity_filter(player.index, filter_flag, 'projects'); project_ui.render_projects_popout(player, true, storage.airi_task_board_ui?.goal_id ?? ''); return }
-    if (typeof filter_flag === 'number') { activity_state.toggle_activity_filter(player.index, filter_flag); if (activity_state.activity_view(player.index).follow) activity_state.reset_activity_view(player.index); render_panel(player); return }
+    const filter_flag = element.tags?.sgluna_activity_filter
+    if (typeof filter_flag === 'number' && element.tags?.sgluna_activity_surface === 'projects') { activity_state.toggle_activity_filter(player.index, filter_flag, 'projects'); project_ui.render_projects_popout(player, true, storage.sgluna_task_board_ui?.goal_id ?? ''); return }
+    if (typeof filter_flag === 'number') { activity_state.toggle_activity_filter(player.index, filter_flag); if (activity_state.activity_view(player.index).live) activity_state.reset_activity_view(player.index); render_panel(player); return }
     if (skills_ui.handle_skills_window_click(player, element.name)) return
     if (handle_learning_ui_click(player, element.name)) { render_skills_popout(player); return }
     if (handle_skill_export_click(player, element.name)) { render_skills_popout(player); return }
@@ -1503,7 +1503,7 @@ export function create_task_board_ui_remote_interface() {
     while (element?.valid && element.name !== ui_constants.TRACKER.activity_scroll && element.name !== debug_ui.CONVERSATION_SCROLL_NAME && depth < 6) { element = element.parent; depth++ }
     if (!element?.valid || element.player_index !== event.player_index || (element.name !== ui_constants.TRACKER.activity_scroll && element.name !== debug_ui.CONVERSATION_SCROLL_NAME)) return
     const player = game.get_player(event.player_index); if (!player?.valid) return
-    if (activity_state.stop_activity_follow(player.index, last_shown_activity_key(activity_scroll_of(player)))) render_panel(player)
+    if (activity_state.stop_activity_live(player.index, last_shown_activity_key(activity_scroll_of(player)))) render_panel(player)
   }
   script.on_event(ui_constants.TRACKER.scroll_up_input, on_activity_wheel)
   script.on_event(defines.events.on_gui_value_changed, (event: any) => {

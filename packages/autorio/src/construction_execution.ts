@@ -35,8 +35,8 @@ interface StoredConstructionPlan {
 }
 
 declare const storage: {
-  airi_validated_construction_plan?: StoredConstructionPlan
-  airi_next_construction_validation_id?: number
+  sgluna_validated_construction_plan?: StoredConstructionPlan
+  sgluna_next_construction_validation_id?: number
 }
 
 const MAX_PLACEMENTS = 16
@@ -313,9 +313,9 @@ export function validate_construction_execution_plan(actor: ControlledActor, req
   const evaluation = evaluate_plan(actor, placements)
   if (!evaluation.ok) return evaluation
 
-  const validation_id = (storage.airi_next_construction_validation_id ?? 0) + 1
-  storage.airi_next_construction_validation_id = validation_id
-  storage.airi_validated_construction_plan = {
+  const validation_id = (storage.sgluna_next_construction_validation_id ?? 0) + 1
+  storage.sgluna_next_construction_validation_id = validation_id
+  storage.sgluna_validated_construction_plan = {
     validation_id,
     plan_id: request.plan_id,
     actor_id: identity.actor_id,
@@ -349,23 +349,23 @@ export function execute_validated_construction_plan(
   }
   const remote = execute_prepared_remote_construction_plan(actor, validation_id, placement_count)
   if (remote) return remote
-  const plan = storage.airi_validated_construction_plan
+  const plan = storage.sgluna_validated_construction_plan
   if (!plan || plan.validation_id !== validation_id) return [false, 'validated construction plan is unavailable or superseded']
   if (plan.placements.length !== placement_count) return [false, 'construction placement count does not match validated plan']
 
   const identity = actor.status_snapshot()
   if (identity.actor_id !== plan.actor_id || actor.surface.index !== plan.surface_index || actor.force.index !== plan.force_index) {
-    storage.airi_validated_construction_plan = undefined
+    storage.sgluna_validated_construction_plan = undefined
     return [false, 'validated construction plan belongs to a different actor, surface, or force']
   }
   if (game.tick - plan.created_tick > VALIDATION_MAX_AGE_TICKS) {
-    storage.airi_validated_construction_plan = undefined
+    storage.sgluna_validated_construction_plan = undefined
     return [false, 'validated construction plan expired; validate the live world again']
   }
 
   const evaluation = evaluate_plan(actor, plan.placements)
   if (!evaluation.ok) {
-    storage.airi_validated_construction_plan = undefined
+    storage.sgluna_validated_construction_plan = undefined
     return [false, `validated construction plan became stale: ${evaluation.error?.code ?? 'UNKNOWN'}`]
   }
 
@@ -373,12 +373,12 @@ export function execute_validated_construction_plan(
   for (const placement of plan.placements) {
     if (!basic.submit_placement(placement.entity_name, placement.x, placement.y, placement.direction)) {
       if (queued > 0) manager.cancel_all_tasks('construction_plan_admission_failed')
-      storage.airi_validated_construction_plan = undefined
+      storage.sgluna_validated_construction_plan = undefined
       return [false, `unable to queue placement ${queued + 1}`]
     }
     queued += 1
   }
 
-  storage.airi_validated_construction_plan = undefined
+  storage.sgluna_validated_construction_plan = undefined
   return [true, 'Validated construction plan started']
 }

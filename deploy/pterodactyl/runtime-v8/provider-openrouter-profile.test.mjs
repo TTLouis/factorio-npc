@@ -45,7 +45,7 @@ function capturingFetch(captured, usage) {
 }
 
 const messages = [
-  { role: 'system', content: 'You are AIRI.' },
+  { role: 'system', content: 'You are SGLuna.' },
   { role: 'user', content: 'hello' },
 ]
 
@@ -121,7 +121,7 @@ test('a non-DeepSeek model routed through OpenRouter gets no output style block'
     triggerSource: 'new_goal',
   })
   const [body] = captured
-  assert.equal(body.messages[0].content, 'You are AIRI.')
+  assert.equal(body.messages[0].content, 'You are SGLuna.')
 })
 
 test('cache_control breakpoints go where the stable prefix ends for an Anthropic model, and nowhere else', () => {
@@ -130,7 +130,7 @@ test('cache_control breakpoints go where the stable prefix ends for an Anthropic
   // The end of the system message and the end of the request context.
   assert.equal(breakpoints, 2)
   assert.deepEqual(withBreakpoint[0].content, [
-    { type: 'text', text: 'You are AIRI.', cache_control: { type: 'ephemeral' } },
+    { type: 'text', text: 'You are SGLuna.', cache_control: { type: 'ephemeral' } },
   ])
   assert.deepEqual(withBreakpoint[1].content, [
     { type: 'text', text: 'hello', cache_control: { type: 'ephemeral' } },
@@ -152,7 +152,7 @@ test('cache_control breakpoints reach the request body and the response trace fo
   const [body] = captured
   assert.equal(Array.isArray(body.messages[0].content), true)
   assert.equal(body.messages[0].content[0].cache_control.type, 'ephemeral')
-  assert.equal(message._airiProvider.cache_control_breakpoints, 2)
+  assert.equal(message._sglunaProvider.cache_control_breakpoints, 2)
   // Steering is tail: it carries no breakpoint.
   assert.equal(typeof body.messages.at(-1).content, 'string')
 })
@@ -166,7 +166,7 @@ test('the upstream provider can be pinned per role/config so cache hits and comp
   })
   const [body] = captured
   assert.deepEqual(body.provider, { order: ['anthropic'], allow_fallbacks: false })
-  assert.deepEqual(message._airiProvider.upstream_provider_pin, ['anthropic'])
+  assert.deepEqual(message._sglunaProvider.upstream_provider_pin, ['anthropic'])
 })
 
 test('without an explicit pin, no provider routing override is sent', async () => {
@@ -192,9 +192,9 @@ test('cached and reasoning usage are parsed from OpenRouter-shaped usage into th
     allowTools: false,
     triggerSource: 'new_goal',
   })
-  assert.equal(message._airiProvider.reported_cached_tokens, 900)
-  assert.equal(message._airiProvider.reported_reasoning_tokens, 200)
-  assert.equal(message._airiProvider.usage_complete, true)
+  assert.equal(message._sglunaProvider.reported_cached_tokens, 900)
+  assert.equal(message._sglunaProvider.reported_reasoning_tokens, 200)
+  assert.equal(message._sglunaProvider.usage_complete, true)
 })
 
 test('capability_profile and model family are traced on every openrouter response', async () => {
@@ -203,6 +203,6 @@ test('capability_profile and model family are traced on every openrouter respons
     allowTools: false,
     triggerSource: 'new_goal',
   })
-  assert.equal(message._airiProvider.capability_profile, 'openrouter')
-  assert.equal(message._airiProvider.provider_model_family, 'deepseek')
+  assert.equal(message._sglunaProvider.capability_profile, 'openrouter')
+  assert.equal(message._sglunaProvider.provider_model_family, 'deepseek')
 })

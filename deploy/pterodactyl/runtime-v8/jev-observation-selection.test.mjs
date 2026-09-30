@@ -98,9 +98,9 @@ class ObservationSelectionRcon {
 
   async command(text) {
     this.commands.push(text)
-    if (text.includes('remote.call("airi_deployment","status")')) {
+    if (text.includes('remote.call("sgluna_deployment","status")')) {
       return JSON.stringify({
-        revision: 'airi-deploy-v8-npc-staging',
+        revision: 'sgluna-deploy-v8-npc-staging',
         session: '0123456789abcdef0123456789abcdef',
         mode: 'npc',
         actor_id: 18,
@@ -132,7 +132,7 @@ test('M7 live admission executes selected fresh observation families and defers 
   })
   agent.active = true
   agent.epoch = {
-    revision: 'airi-deploy-v8-npc-staging',
+    revision: 'sgluna-deploy-v8-npc-staging',
     session: '0123456789abcdef0123456789abcdef',
     mode: 'npc',
     actor_id: 18,
@@ -184,7 +184,7 @@ test('M7 cached observations remain reusable even when their family is not curre
   })
   agent.active = true
   agent.epoch = {
-    revision: 'airi-deploy-v8-npc-staging',
+    revision: 'sgluna-deploy-v8-npc-staging',
     session: '0123456789abcdef0123456789abcdef',
     mode: 'npc',
     actor_id: 18,
@@ -238,7 +238,7 @@ test('Jev cannot defer fact reads, admits one discovery read, and still bounds r
     stateFile: null,
   })
   agent.active = true
-  agent.epoch = await rcon.command('remote.call("airi_deployment","status")').then(JSON.parse)
+  agent.epoch = await rcon.command('remote.call("sgluna_deployment","status")').then(JSON.parse)
   agent.messages = [{ role: 'system', content: 'test' }]
   agent.observationBudgetOverride = 0
   agent.observationBudgetRemaining = 0

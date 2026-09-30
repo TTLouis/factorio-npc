@@ -44,7 +44,7 @@ function persistentAgent(stateFile, memory = new CanonicalTaskBoardMemory()) {
     stateFile,
     traceFile: null,
     memory,
-    npcId: 'airi',
+    npcId: 'sgluna',
   })
 }
 
@@ -64,8 +64,8 @@ function controlSession(agent, order = []) {
   const syncs = []
   const session = Object.create(Session.prototype)
   Object.assign(session, {
-    npcId: 'airi',
-    npcName: 'AIRI',
+    npcId: 'sgluna',
+    npcName: 'SGLuna',
     activityEpoch: 'test',
     conversationGeneration: 2,
     conversationSequence: 2,
@@ -82,17 +82,17 @@ function controlSession(agent, order = []) {
       conversation_id: 'task_test_2',
       conversation: [
         { id: 'message_test_2_1', role: 'user', sender: 'TTLouis', text: 'old task' },
-        { id: 'message_test_2_2', role: 'assistant', sender: 'AIRI', text: 'Working.' },
+        { id: 'message_test_2_2', role: 'assistant', sender: 'SGLuna', text: 'Working.' },
       ],
       debug: {},
     },
     ensureAuthorization: async () => ({ allowed: true }),
-    currentPlanState: () => agent.memory?.currentPlan?.('npc:airi'),
+    currentPlanState: () => agent.memory?.currentPlan?.('npc:sgluna'),
     rcon: {
       command: async command => {
         commands.push(command)
         if (command.includes('stop_follow_player')) order.push('world:stop_follow')
-        if (command.includes('airi_deployment')) order.push('world:cancel')
+        if (command.includes('sgluna_deployment')) order.push('world:cancel')
         return ''
       },
     },
@@ -104,14 +104,14 @@ function controlSession(agent, order = []) {
 }
 
 test('verified completion archives the completed stages before resetting the live prompt pipeline', async t => {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'airi-ui-completion-boundary-'))
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-ui-completion-boundary-'))
   t.after(() => fsp.rm(dir, { recursive: true, force: true }))
   const stateFile = path.join(dir, 'npc-state.json')
   const memory = new CanonicalTaskBoardMemory()
-  seedContext(memory, 'npc:airi', 'goal_complete', 'completed task')
+  seedContext(memory, 'npc:sgluna', 'goal_complete', 'completed task')
   const agent = persistentAgent(stateFile, memory)
   agent.active = true
-  agent.requestInfo = { memoryKey: 'npc:airi', sender: 'TTLouis', text: 'completed task', turnId: 1 }
+  agent.requestInfo = { memoryKey: 'npc:sgluna', sender: 'TTLouis', text: 'completed task', turnId: 1 }
   agent.messages = [{ role: 'user', content: 'old provider context' }]
   agent.baseMessages = [{ role: 'system', content: 'old system context' }]
   await agent.persistState()
@@ -150,11 +150,11 @@ test('verified completion archives the completed stages before resetting the liv
   assert.equal(session.syncs.length, 1)
   assert.equal(session.syncs[0].task_board.status, 'completed')
   assert.deepEqual(session.syncs[0].task_board.steps.map(step => step.status), ['completed', 'completed'])
-  const resetContext = memory.context('npc:airi')
+  const resetContext = memory.context('npc:sgluna')
   assert.match(resetContext, /\[RUNTIME_COMPAT_STATE\] No active compatibility task/)
   assert.doesNotMatch(resetContext, /\[PLANNING_STATE\]/)
   assert.doesNotMatch(resetContext, /completed task|I remember this task/i)
-  assert.equal(memory.currentPlan('npc:airi'), undefined)
+  assert.equal(memory.currentPlan('npc:sgluna'), undefined)
   assert.equal(agent.active, false)
   assert.deepEqual(agent.messages, [])
   assert.deepEqual(agent.baseMessages, [])
@@ -164,17 +164,17 @@ test('verified completion archives the completed stages before resetting the liv
 })
 
 test('UI control parser accepts server-authoritative new_task and still rejects arbitrary actions', () => {
-  const event = parseUiControlLine('[AIRI_UI_CONTROL] {"version":1,"action":"new_task","player_index":7,"player_name":"TTLouis","tick":900}')
+  const event = parseUiControlLine('[SGLUNA_UI_CONTROL] {"version":1,"action":"new_task","player_index":7,"player_name":"TTLouis","tick":900}')
   assert.deepEqual(event, { version: 1, action: 'new_task', player_index: 7, player_name: 'TTLouis', tick: 900 })
-  assert.equal(parseUiControlLine('[AIRI_UI_CONTROL] {"version":1,"action":"clear_memory","player_index":7,"player_name":"TTLouis","tick":900}'), undefined)
+  assert.equal(parseUiControlLine('[SGLUNA_UI_CONTROL] {"version":1,"action":"clear_memory","player_index":7,"player_name":"TTLouis","tick":900}'), undefined)
 })
 
 test('terminate aborts world work and durable goal while clearing the Current Task Conversation', async t => {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'airi-ui-terminate-'))
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-ui-terminate-'))
   t.after(() => fsp.rm(dir, { recursive: true, force: true }))
   const stateFile = path.join(dir, 'npc-state.json')
   const memory = new CanonicalTaskBoardMemory()
-  seedContext(memory, 'npc:airi', 'goal_terminate', 'old terminate task')
+  seedContext(memory, 'npc:sgluna', 'goal_terminate', 'old terminate task')
   const agent = persistentAgent(stateFile, memory)
   await agent.persistState()
 
@@ -192,12 +192,12 @@ test('terminate aborts world work and durable goal while clearing the Current Ta
     'abort:ui_terminate',
     'world:stop_follow',
     'world:cancel',
-    'memory:terminate:npc:airi',
+    'memory:terminate:npc:sgluna',
     'persist',
     'ui:clear',
   ])
-  assert.equal(memory.currentPlan('npc:airi'), undefined)
-  assert.match(memory.context('npc:airi'), /remember old terminate task/)
+  assert.equal(memory.currentPlan('npc:sgluna'), undefined)
+  assert.match(memory.context('npc:sgluna'), /remember old terminate task/)
   assert.equal(session.agentLive.phase, 'idle')
   assert.equal(session.agentLive.objective, '')
   assert.deepEqual(session.agentLive.activity, [])
@@ -208,16 +208,16 @@ test('terminate aborts world work and durable goal while clearing the Current Ta
 
   const restarted = persistentAgent(stateFile)
   await restarted.loadPersistentState()
-  assert.equal(restarted.memory.currentPlan('npc:airi'), undefined, 'terminated goal must not recover after server restart')
-  assert.match(restarted.memory.context('npc:airi'), /remember old terminate task/, 'terminate preserves bounded dialogue memory')
+  assert.equal(restarted.memory.currentPlan('npc:sgluna'), undefined, 'terminated goal must not recover after server restart')
+  assert.match(restarted.memory.context('npc:sgluna'), /remember old terminate task/, 'terminate preserves bounded dialogue memory')
 })
 
 test('new task clears only the target NPC dialogue and durable plan after cancelling active work', async t => {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'airi-ui-new-task-'))
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-ui-new-task-'))
   t.after(() => fsp.rm(dir, { recursive: true, force: true }))
   const stateFile = path.join(dir, 'npc-state.json')
   const memory = new CanonicalTaskBoardMemory()
-  seedContext(memory, 'npc:airi', 'goal_airi', 'AIRI old context')
+  seedContext(memory, 'npc:sgluna', 'goal_sgluna', 'SGLuna old context')
   seedContext(memory, 'npc:other', 'goal_other', 'other NPC context')
   const agent = persistentAgent(stateFile, memory)
   await agent.persistState()
@@ -236,13 +236,13 @@ test('new task clears only the target NPC dialogue and durable plan after cancel
     'abort:ui_new_task',
     'world:stop_follow',
     'world:cancel',
-    'memory:clear:npc:airi',
+    'memory:clear:npc:sgluna',
     'persist',
     'ui:clear',
   ])
-  assert.equal(memory.currentPlan('npc:airi'), undefined)
-  assert.equal(memory.byNpc.has('npc:airi'), false)
-  assert.doesNotMatch(memory.context('npc:airi'), /remember AIRI old context/)
+  assert.equal(memory.currentPlan('npc:sgluna'), undefined)
+  assert.equal(memory.byNpc.has('npc:sgluna'), false)
+  assert.doesNotMatch(memory.context('npc:sgluna'), /remember SGLuna old context/)
   assert.equal(memory.currentPlan('npc:other')?.goal_id, 'goal_other')
   assert.match(memory.context('npc:other'), /remember other NPC context/)
   assert.equal(session.agentLive.conversation_id, 'task_test_3')
@@ -250,9 +250,9 @@ test('new task clears only the target NPC dialogue and durable plan after cancel
 
   const restarted = persistentAgent(stateFile)
   await restarted.loadPersistentState()
-  assert.equal(restarted.memory.currentPlan('npc:airi'), undefined)
-  assert.equal(restarted.memory.byNpc.has('npc:airi'), false)
-  assert.doesNotMatch(restarted.memory.context('npc:airi'), /remember AIRI old context/)
+  assert.equal(restarted.memory.currentPlan('npc:sgluna'), undefined)
+  assert.equal(restarted.memory.byNpc.has('npc:sgluna'), false)
+  assert.doesNotMatch(restarted.memory.context('npc:sgluna'), /remember SGLuna old context/)
   assert.equal(restarted.memory.currentPlan('npc:other')?.goal_id, 'goal_other')
   assert.match(restarted.memory.context('npc:other'), /remember other NPC context/)
 })

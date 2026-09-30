@@ -71,7 +71,7 @@ test('run record: spend by round type, per goal and per verified step, from the 
   assert.equal(record.no_world_change.observation_only_rounds.output_units, sum(reads, round => round.usage.output))
   // In this replay the plan is blocked only by the final BLOCKED answer (the
   // board is first traced as blocked with it), so no round ran after it.
-  assert.equal(world.memory.currentPlan('npc:airi').status, 'blocked')
+  assert.equal(world.memory.currentPlan('npc:sgluna').status, 'blocked')
   assert.equal(record.no_world_change.rounds_after_plan_blocked.rounds, 0)
   assert.equal(record.no_world_change.invalid_plan_submissions.count, 0)
 
@@ -117,7 +117,7 @@ test('run record with a price file: cached input at its own rate, cost per verif
 })
 
 test('one command: the report reads the prompt trace and the behavior trace next to it', async () => {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'airi-run-record-'))
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-run-record-'))
   try {
     const promptTraceFile = path.join(dir, 'sgluna-prompts.jsonl')
     const world = await steamRunTrace({ promptTraceFile })
@@ -180,7 +180,7 @@ test('goal ledger: authoring rounds join the goal, a verified step counts, the w
   const ledger = new UsageLedger({ warningOutputUnits: 50000 })
   const world = await steamRunTrace({ ledger })
   const played = world.calls.map(call => call.round)
-  const goalId = world.memory.currentPlan('npc:airi').goal_id
+  const goalId = world.memory.currentPlan('npc:sgluna').goal_id
   const summary = ledger.goalSummary(goalId)
   assert.equal(summary.output_units, sum(played, round => round.usage.output), 'authoring rounds joined the goal when it was persisted')
   assert.equal(summary.provider_calls, played.length)

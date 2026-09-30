@@ -8,7 +8,7 @@ import { prepareServerSettings } from './game-files.mjs'
 import { configuration, factorioVisibilityDiagnostics, migrateCanonicalConfig, rconConfiguration, Session } from './supervisor.mjs'
 
 async function temp(t) {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'airi-config-authority-'))
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-config-authority-'))
   t.after(() => fsp.rm(dir, { recursive: true, force: true }))
   return dir
 }

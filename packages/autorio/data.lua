@@ -14,7 +14,7 @@
 data:extend({
   {
     type = "custom-input",
-    name = "airi-task-board-activity-scroll-up",
+    name = "sgluna-task-board-activity-scroll-up",
     localised_name = "SGLuna console: scroll activity up",
     key_sequence = "mouse-wheel-up",
     consuming = "none",
@@ -23,7 +23,7 @@ data:extend({
   },
   {
     type = "custom-input",
-    name = "airi-task-board-activity-scroll-down",
+    name = "sgluna-task-board-activity-scroll-down",
     localised_name = "SGLuna console: scroll activity down",
     key_sequence = "mouse-wheel-down",
     consuming = "none",
@@ -69,7 +69,7 @@ for _, entry in ipairs(provider_variants) do
     local id = provider .. "-" .. variant
     provider_avatars[#provider_avatars + 1] = {
       type = "sprite",
-      name = "airi-provider-" .. id,
+      name = "sgluna-provider-" .. id,
       filename = "__autorio__/graphics/icons/provider/" .. id .. ".png",
       -- Keep one prototype scale for the entire set. Per-avatar visual
       -- corrections belong to the asset import metadata, not the runtime UI.
@@ -92,7 +92,7 @@ for _, name in ipairs({"learn", "history", "debug"}) do
   for _, variant in ipairs({"white", "black"}) do
     console_icons[#console_icons + 1] = {
       type = "sprite",
-      name = "airi-console-" .. name .. "-" .. variant,
+      name = "sgluna-console-" .. name .. "-" .. variant,
       filename = "__autorio__/graphics/icons/console/" .. name .. "-" .. variant .. ".png",
       size = 32,
       flags = {"gui-icon"},

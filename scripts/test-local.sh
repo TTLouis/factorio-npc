@@ -36,11 +36,16 @@ run_runtime() {
   # deploy/pterodactyl: the suites under test.
   # contracts: without this, the runtime-v8 tool-contract parity tests fail
   #   even though nothing is actually wrong (they can't find their fixture).
+  # packages/autorio/src + packages/agent/src: read by the mod/runtime contract
+  #   tests (task-board-control-contract, deployed-operation-contract); the
+  #   image copy goes stale as soon as those sources change.
   # .devcontainer + the repo-root compose/.env/.gitignore/.dockerignore files:
   #   read directly by local-compose-secret-boundary.test.mjs.
   MSYS_NO_PATHCONV=1 docker run --rm \
     -v "$(pwd -W)/deploy/pterodactyl:/src/deploy/pterodactyl" \
     -v "$(pwd -W)/contracts:/src/contracts:ro" \
+    -v "$(pwd -W)/packages/autorio/src:/src/packages/autorio/src:ro" \
+    -v "$(pwd -W)/packages/agent/src:/src/packages/agent/src:ro" \
     -v "$(pwd -W)/.devcontainer:/src/.devcontainer:ro" \
     -v "$(pwd -W)/compose.devcontainer.yml:/src/compose.devcontainer.yml:ro" \
     -v "$(pwd -W)/compose.yml:/src/compose.yml:ro" \
@@ -56,6 +61,7 @@ run_mod() {
   echo "== mod: autorio vitest + tsc --noEmit + Lua build + check-generated-lua =="
   MSYS_NO_PATHCONV=1 docker run --rm \
     -v "$(pwd -W)/packages/autorio/src:/src/packages/autorio/src:ro" \
+    -v "$(pwd -W)/packages/autorio/data.lua:/src/packages/autorio/data.lua:ro" \
     npc-dev sh -c "cd packages/autorio && npx vitest run && npx tsc --noEmit -p . && pnpm --filter @proj-airi/tstl-plugin-reload-factorio-mod run build >/dev/null && pnpm run build && node scripts/check-generated-lua.mjs"
 }
 

@@ -37,7 +37,7 @@ export function renderConstructionSiteRequest(raw: unknown) {
 
 export const findConstructionSitesTool = {
   name: 'findConstructionSites',
-  description: 'Find a small bounded set of clear rectangular construction envelopes on AIRI\'s current surface. The model chooses width/height and anchor; the tool only reports deterministic free-site candidates and aggregate rejection counts. A site is not a machine layout or construction approval: choose exact placements separately and validateConstructionPlan before execution.',
+  description: 'Find a small bounded set of clear rectangular construction envelopes on SGLuna\'s current surface. The model chooses width/height and anchor; the tool only reports deterministic free-site candidates and aggregate rejection counts. A site is not a machine layout or construction approval: choose exact placements separately and validateConstructionPlan before execution.',
   schema: constructionSiteSchema,
   fn: async ({ parameters }: { parameters: unknown }) => {
     const request = constructionSiteSchema.parse(parameters)

@@ -130,7 +130,7 @@ def run(client: Rcon, results: Path) -> None:
     assert_reached(obstacle_before, obstacle_after, obstacle_nav, actor_id, obstacle_fixture['target_id'])
 
     # Case 2: once a real path is accepted, move the same bound entity far
-    # enough to invalidate the planned goal. AIRI must repath to that exact
+    # enough to invalidate the planned goal. SGLuna must repath to that exact
     # entity rather than finish at the stale coordinate or silently retarget.
     moving_fixture = json_command(
         "/silent-command local s=game.surfaces[1]; local a=nil; "
@@ -196,7 +196,7 @@ def run(client: Rcon, results: Path) -> None:
 
     # Case 3: put a target on a small island inside a wide water moat. The
     # pathfinder must report no route. Queue a dependent wait to prove failure
-    # cancels the batch and, unlike the historical fallback, AIRI never switches
+    # cancels the batch and, unlike the historical fallback, SGLuna never switches
     # to blind direct walking into the water.
     unreachable_fixture = json_command(
         "/silent-command local s=game.surfaces[1]; local a=nil; "
@@ -228,7 +228,7 @@ def run(client: Rcon, results: Path) -> None:
     require(squared_distance(quiet_position, quiet['position']) < 0.01, (quiet_position, quiet['position']))
 
     # Case 4: prove stopped controls are not synonymous with a stationary
-    # coordinate. A live transport belt can move the character while AIRI's
+    # coordinate. A live transport belt can move the character while SGLuna's
     # walking/mining/shooting inputs remain fully released.
     belt_fixture = json_command(
         "/silent-command local s=game.surfaces[1]; local a=nil; "

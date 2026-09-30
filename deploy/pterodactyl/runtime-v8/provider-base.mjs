@@ -1498,13 +1498,13 @@ export async function providerRequest(config, messages, {
 
     await traceProviderResult('provider.response', providerDiagnostics, traceOptions)
     if (closedRoundCalls !== undefined) {
-      Object.defineProperty(message, '_airiClosedRoundCalls', {
+      Object.defineProperty(message, '_sglunaClosedRoundCalls', {
         configurable: true,
         enumerable: false,
         value: closedRoundCalls,
       })
     }
-    Object.defineProperty(message, '_airiProvider', {
+    Object.defineProperty(message, '_sglunaProvider', {
       configurable: true,
       enumerable: false,
       value: providerDiagnostics,

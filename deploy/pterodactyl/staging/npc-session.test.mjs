@@ -20,7 +20,7 @@ function status(overrides = {}) {
     actor: {
       kind: 'standalone_character',
       valid: true,
-      name: 'AIRI',
+      name: 'SGLuna',
       position: { x: 0, y: 0 },
       has_character: true,
       actor_id: 18,

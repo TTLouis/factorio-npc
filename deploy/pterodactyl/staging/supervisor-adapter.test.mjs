@@ -10,11 +10,11 @@ import {
 } from './supervisor-adapter.mjs'
 
 const SESSION = '0123456789abcdef0123456789abcdef'
-const CONFIG_MARKER = 'AIRI_CONFIG_0123456789abcdef01234567:'
+const CONFIG_MARKER = 'SGLUNA_CONFIG_0123456789abcdef01234567:'
 
 function readyStatus(overrides = {}) {
   return {
-    revision: 'airi-deploy-v8-npc-staging',
+    revision: 'sgluna-deploy-v8-npc-staging',
     session: SESSION,
     mode: 'npc',
     actor_id: 18,
@@ -56,8 +56,8 @@ test('configure handshake selects npc and verifies the native deployment status'
   const status = await configureNpcSession(rcon, SESSION, CONFIG_MARKER)
   assert.equal(status.actor_id, 18)
   assert.match(rcon.commands[0], /"configure","npc"/)
-  assert.match(rcon.commands[0], /AIRI_CONFIG_0123456789abcdef01234567:/)
-  assert.match(rcon.commands[1], /"airi_deployment","status"/)
+  assert.match(rcon.commands[0], /SGLUNA_CONFIG_0123456789abcdef01234567:/)
+  assert.match(rcon.commands[1], /"sgluna_deployment","status"/)
 })
 
 test('configure handshake rebinds once when the actor changes immediately after configure', async () => {
@@ -74,8 +74,8 @@ test('configure handshake rebinds once when the actor changes immediately after 
   assert.equal(status.epoch, 5)
   assert.equal(rcon.commands.length, 4)
   assert.equal(rcon.commands[0], rcon.commands[2])
-  assert.match(rcon.commands[1], /"airi_deployment","status"/)
-  assert.match(rcon.commands[3], /"airi_deployment","status"/)
+  assert.match(rcon.commands[1], /"sgluna_deployment","status"/)
+  assert.match(rcon.commands[3], /"sgluna_deployment","status"/)
 })
 
 test('configure handshake bounds repeated unauthorized rebinds and still fails closed', async () => {
@@ -139,7 +139,7 @@ test('deployment status requires native npc identity and interfaces', async () =
 })
 
 test('authorized operation wraps the mutation with an atomic actor-epoch check', async () => {
-  const marker = 'AIRI_RESULT_0123456789abcdef01234567:'
+  const marker = 'SGLUNA_RESULT_0123456789abcdef01234567:'
   const rcon = new FakeRcon([
     `tool output\n${marker}${JSON.stringify({ ok: true, result: [true, 'Task started'] })}`,
   ])
@@ -151,12 +151,12 @@ test('authorized operation wraps the mutation with an atomic actor-epoch check',
   )
   assert.deepEqual(result.result, [true, 'Task started'])
   assert.equal(result.output, 'tool output')
-  assert.match(rcon.commands[0], /airi_deployment","authorize",3/)
+  assert.match(rcon.commands[0], /sgluna_deployment","authorize",3/)
   assert.match(rcon.commands[0], /autorio_operations","wait",60/)
 })
 
 test('authorized dependency batch admits every operation in one RCON/Lua transaction', async () => {
-  const marker = 'AIRI_RESULT_0123456789abcdef01234567:'
+  const marker = 'SGLUNA_RESULT_0123456789abcdef01234567:'
   const rcon = new FakeRcon([
     `${marker}${JSON.stringify({ ok: true, result: [true, [true, 'second']] })}`,
   ])
@@ -167,7 +167,7 @@ test('authorized dependency batch admits every operation in one RCON/Lua transac
 
   assert.equal(rcon.commands.length, 1)
   assert.deepEqual(result.results, [true, [true, 'second']])
-  assert.equal((rcon.commands[0].match(/airi_deployment","authorize",3/g) ?? []).length, 1)
+  assert.equal((rcon.commands[0].match(/sgluna_deployment","authorize",3/g) ?? []).length, 1)
   const first = rcon.commands[0].indexOf('autorio_operations","mine_entity"')
   const second = rcon.commands[0].indexOf('autorio_operations","wait"')
   assert.ok(first >= 0 && second > first)
@@ -177,7 +177,7 @@ test('authorized dependency batch admits every operation in one RCON/Lua transac
 })
 
 test('mutation rejection, missing acknowledgement, and stale authorization fail closed without retries', async () => {
-  const marker = 'AIRI_RESULT_0123456789abcdef01234567:'
+  const marker = 'SGLUNA_RESULT_0123456789abcdef01234567:'
   for (const raw of [
     `${marker}${JSON.stringify({ ok: false, result: 'stale npc actor epoch' })}`,
     `${marker}${JSON.stringify({ ok: true, result: false })}`,
@@ -191,7 +191,7 @@ test('mutation rejection, missing acknowledgement, and stale authorization fail 
 })
 
 test('batch rejection or missing acknowledgement fails closed without replaying admissions', async () => {
-  const marker = 'AIRI_RESULT_0123456789abcdef01234567:'
+  const marker = 'SGLUNA_RESULT_0123456789abcdef01234567:'
   for (const raw of [
     `${marker}${JSON.stringify({ ok: false, result: 'autorio rejected operation 1' })}`,
     'no acknowledgement here',

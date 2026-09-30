@@ -6,7 +6,7 @@ import { TaskStates } from './types'
 
 beforeEach(() => {
   ;(globalThis as any).game.connected_players = []
-  ;(globalThis as any).storage.airi_actor_mode = 'player'
+  ;(globalThis as any).storage.sgluna_actor_mode = 'player'
   task_manager.cancel_all_tasks()
 })
 
@@ -99,7 +99,7 @@ describe('Player-sourced completion events are gated by actor identity', () => {
       {
         valid: true,
         index,
-        name: 'AIRI',
+        name: 'SGLuna',
         character: {},
         position: { x: 0, y: 0 },
         surface: { find_entities_filtered: () => [] },
@@ -202,7 +202,7 @@ describe('Player-sourced completion events are gated by actor identity', () => {
   })
 
   it('does not let any LuaPlayer mining event advance an NPC task', () => {
-    ;(globalThis as any).storage.airi_actor_mode = 'npc'
+    ;(globalThis as any).storage.sgluna_actor_mode = 'npc'
     const force = {
       name: 'player',
       index: 1,
@@ -279,7 +279,7 @@ describe('Bug 4 (fixed): ATTACKING is dispatched through the bounded combat cont
     const fake_player = {
       valid: true,
       index: 1,
-      name: 'AIRI',
+      name: 'SGLuna',
       character,
       position: { x: 0, y: 0 },
       surface,

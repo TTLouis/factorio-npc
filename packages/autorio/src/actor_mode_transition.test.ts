@@ -19,14 +19,14 @@ function fake_actor(kind: 'connected_player' | 'standalone_character', id: numbe
       kind,
       valid: true,
       has_character: true,
-      name: kind === 'connected_player' ? 'Louis' : 'AIRI',
+      name: kind === 'connected_player' ? 'Louis' : 'SGLuna',
       position: { x: 0, y: 0 },
     })),
   } as unknown as ControlledActor
 }
 
 beforeEach(() => {
-  ;(globalThis as any).storage = { airi_actor_mode: 'player' }
+  ;(globalThis as any).storage = { sgluna_actor_mode: 'player' }
   ;(globalThis as any).game = { print: vi.fn() }
   register_actor_mode_transition_handler(undefined)
 })
@@ -60,7 +60,7 @@ describe('actor mode transitions are ownership boundaries', () => {
   })
 
   it('stops and discards npc-owned work before selecting a connected player', () => {
-    ;(globalThis as any).storage.airi_actor_mode = 'npc'
+    ;(globalThis as any).storage.sgluna_actor_mode = 'npc'
     const player = fake_actor('connected_player', 1)
     const npc = fake_actor('standalone_character', 42)
     const resolve = vi.fn(() => get_actor_mode() === 'npc' ? npc : player)

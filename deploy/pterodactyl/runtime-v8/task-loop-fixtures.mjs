@@ -42,7 +42,7 @@ export function contractCheckedJev(provider) {
 
 export function deployment(overrides = {}) {
   return {
-    revision: 'airi-deploy-v8-npc-staging',
+    revision: 'sgluna-deploy-v8-npc-staging',
     session: '0123456789abcdef0123456789abcdef',
     mode: 'npc',
     actor_id: 18,
@@ -161,7 +161,7 @@ export class FakeFactorio {
   }
 
   async command(text) {
-    if (text.includes('remote.call("airi_deployment","status")')) return JSON.stringify(this.status)
+    if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(this.status)
     if (text.includes('remote.call("autorio_operations","status")')) {
       return JSON.stringify({
         task_state: this.taskState,
@@ -203,7 +203,7 @@ export class FakeFactorio {
       return JSON.stringify({ ok: true, satisfied: current >= minimum, current, minimum, item_name: item })
     }
     if (text.includes('local ok,result=pcall') && text.includes('"authorize"')) {
-      const marker = text.match(/AIRI_RESULT_[a-f0-9]{24}:/)?.[0]
+      const marker = text.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)?.[0]
       this.mutations.push(text)
       this.batchId++
       this.lastBasicResult = undefined

@@ -16,7 +16,7 @@ import { FakeFactorio, gather, inventoryCheckpoint, planReply } from './task-loo
 // provider failure at a slice boundary, the player's status check, research
 // completing, and the launch itself. Unit/integration evidence only.
 
-const KEY = 'npc:airi'
+const KEY = 'npc:sgluna'
 const SILO = 301
 const ROCKET_GOAL = {
   scope: 'long_horizon',
@@ -42,7 +42,7 @@ function agentWith(game, memory, provider, file) {
     stateFile: file,
     traceFile: null,
     decisionTraceFile: null,
-    npcId: 'airi',
+    npcId: 'sgluna',
     goalDefinitionPolicy: 'required',
   })
 }
@@ -50,7 +50,7 @@ function agentWith(game, memory, provider, file) {
 function statusSession(agent, game, printed) {
   const session = Object.create(Session.prototype)
   Object.assign(session, {
-    npcName: 'AIRI',
+    npcName: 'SGLuna',
     agent,
     rcon: game,
     printChat: async (line) => { printed.push(line) },
@@ -70,7 +70,7 @@ test('dry run: a Nauvis rocket goal from definition to launch, through a restart
   game.onMutation = (text) => {
     if (text.includes(`'launch_rocket',${SILO}`)) game.rocketsLaunched += 1
   }
-  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'airi-rocket-dry-run-')), 'state.json')
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sgluna-rocket-dry-run-')), 'state.json')
 
   const slices = [
     planReply({ plan: ['Gather 10 iron ore'], operations: [gather('iron-ore', 10)], checkpoint: inventoryCheckpoint('iron-ore', 10), goal: ROCKET_GOAL, roadmap: SHELF }),

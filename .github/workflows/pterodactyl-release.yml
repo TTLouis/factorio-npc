@@ -49,10 +49,10 @@ jobs:
         run: |
           set -Eeuo pipefail
           for attempt in 1 2 3; do
-            if docker build -f tests/factorio/Dockerfile -t airi-factorio-npc-test .; then
+            if docker build -f tests/factorio/Dockerfile -t sgluna-factorio-npc-test .; then
               break
             fi
             [[ "$attempt" -lt 3 ]] || exit 1
             sleep $((attempt * 10))
           done
-          docker run --rm airi-factorio-npc-test
+          docker run --rm sgluna-factorio-npc-test
