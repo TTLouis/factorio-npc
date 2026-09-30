@@ -152,6 +152,8 @@ function makeAgent({
     stateFile: null,
     traceFile: null,
     decisionTraceFile: null,
+    // These tests count the recovery router's own Jev calls; U11's restage judgments (jev-checkpoints.mjs) have their own tests.
+    jevCheckpoints: false,
     interactionDecisionProvider: contractCheckedJev(decisionProvider ?? (async (state, questions) => {
       decisionCalls.push({ state, questions })
       return decisionResponse(semantic, observationProbability)

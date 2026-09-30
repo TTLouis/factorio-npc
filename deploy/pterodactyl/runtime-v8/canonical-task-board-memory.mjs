@@ -1,4 +1,5 @@
 import { NpcDialogueMemory, OPERATION_FAILURE_RECOVERABLE_KIND } from './npc-agent-loop.mjs'
+import { restoreLedger as restoreJevLedger, serializeLedger as serializeJevLedger } from './jev-judgments.mjs'
 import { createTaskBoard, reconcileTaskBoard, setTaskBoardStatus } from './common.mjs'
 import { validateOutcomeCandidate } from './outcome-authority.mjs'
 import { completionContractSupported, provePermanentlyUnsatisfiable, sanitizeStepCompletionContract } from './step-completion.mjs'
@@ -1910,6 +1911,9 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         key,
         state: serializePlanningState(state),
       })),
+      // U11: Jev's judgment ledger is the runtime's own durable state, NOT part of the planning reducer. Bounded and
+      // sanitized (jev-judgments.mjs); pending judgments are never persisted.
+      ...(this.jevLedger ? { jev_judgment_ledger: serializeJevLedger(this.jevLedger) } : {}),
     }
   }
 
@@ -2039,6 +2043,11 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         : [],
     )
     super.restore(snapshot)
+    if (snapshot?.jev_judgment_ledger) {
+      const restoredLedger = restoreJevLedger(snapshot.jev_judgment_ledger)
+      this.jevLedger = restoredLedger.ledger
+      this.jevLedgerClamped = restoredLedger.clamped
+    }
     for (const [key, state] of this.planByNpc.entries()) {
       const stepContracts = persistedStepContracts.get(key)
       if (state.task_board && Array.isArray(state.task_board.steps) && stepContracts) {
