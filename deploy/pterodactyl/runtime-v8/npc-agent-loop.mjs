@@ -39,6 +39,7 @@ import {
   askableSteeringPressures,
   steeringPressureDefinitions,
 } from './planning-state.mjs'
+import { markRequestSliceClosed, requestSliceCeiling } from './restage-policy.mjs'
 import { emptyJevHealth, recordJevHealth, recordPendingDecisionRequest, settlePendingDecisionRequest, summarizeJevHealth, takePendingDecisionRequest } from './jev-health.mjs'
 import { describeUnmetGoalResult, evaluateGoalDefinition, formatGoalProgress, GOAL_SCOPE, needsGoalBaseline, sanitizeGoalDefinition } from './goal-definition.mjs'
 import {
@@ -2542,24 +2543,32 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     super.reset()
   }
 
+  // The running turn's token for restageContext({ safePoint }); null between turns.
+  get turnToken() { return this.turnConversation }
+
   // The restage seam (U4). Swaps the running conversation for a fresh one built
   // from a handoff packet (handoff-packet.mjs), records CONTEXT_RESTAGED in the
   // reducer and writes the `context.restaged` trace row. Nothing calls this
   // yet: U5-U8 wire the checkpoints. It never changes plan semantics.
   //
   // Restage is SEQUENTIAL. It refuses (typed result + `context.restage_refused`)
-  // while a provider round is in flight, and while a turn still holds the
-  // current conversation (`turnConversation`: a reply may be awaiting
-  // admission) unless the caller says `safePoint: true`, meaning "between
-  // rounds, no reply from the current conversation is waiting to be admitted"
-  // (a step close after admission, a plan commit after validation). It also
-  // refuses a packet whose plan is not the active plan and one the reducer
-  // rejects (stale goal, wrong source). Refusals change nothing.
+  // while a provider round is in flight, and while a turn holds the current
+  // conversation (`turnConversation`: a reply may be awaiting admission) unless
+  // the caller presents that turn's own token, `safePoint: this.turnToken`, read
+  // in the running turn's call chain. The token must be the current open turn's
+  // (identity) and not stale; `true`, a copy, an older round's token, or any
+  // token when no turn is open is refused as `round_open`. The contract for
+  // U5-U8: call only from the running turn's own call chain, after the last
+  // model reply has been fully admitted and appended (after commitPlan /
+  // executeAuthorizedBatch and its messages.push) and before the next
+  // callProvider. It also refuses a packet whose plan is not the active plan
+  // and one the reducer rejects (stale goal, wrong source). Refusals change
+  // nothing.
   //
   // Trace rows carry the current request id when a request is open. Between
   // requests there is none: pass `requestId` (the request the restage belongs
   // to) or the row is ignored by every run-check detector.
-  async restageContext({ checkpoint, reason, packet, role, softLimitTokens, requestId, safePoint = false } = {}) {
+  async restageContext({ checkpoint, reason, packet, role, softLimitTokens, requestId, safePoint } = {}) {
     const key = this.activePlanKey()
     const prepared = this.agentContext.prepareRestage({
       checkpoint,
@@ -2573,7 +2582,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return { restaged: false, reason: why }
     }
     if (this.providerCallsInFlight > 0) return refuse('round_in_flight')
-    if (this.turnConversation && !safePoint) return refuse('round_open')
+    const token = this.turnConversation
+    if (token ? (safePoint !== token || this.agentContext.isStale(token)) : (safePoint !== undefined && safePoint !== false)) return refuse('round_open')
     const before = this.memory.planningState?.(key)
     if (typeof this.memory.dispatchPlanningEvent !== 'function' || !before) throw new AgentLoopError('context restage needs reducer-backed memory with an admitted goal')
     if ((packet.event?.plan_id ?? null) !== (before.active_plan_id ?? null)) return refuse('packet_plan_not_active')
@@ -2603,6 +2613,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // now in place, at most STALE_REDRIVE_LIMIT times; after that the failure is
   // visible (a provider failure the normal pause/failed path reports), never a
   // silent cancellation.
+  // Depth-counted: a turn entered without runGuarded (a direct runTurn, the
+  // supervisor's slice-boundary recovery) still releases the conversation marker
+  // when its outermost turn ends, and a nested turn (withinTurn) keeps it.
+  async runTurn() {
+    this.turnDepth = (this.turnDepth ?? 0) + 1
+    try {
+      return await super.runTurn()
+    }
+    finally {
+      if (--this.turnDepth === 0) this.turnConversation = null
+    }
+  }
+
   async runTurnRedriving(generation) {
     for (let redrive = 0; ; redrive++) {
       try {
@@ -2612,7 +2635,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         if (error?.code !== STALE_REPLY_ERROR_CODE || generation !== this.generation || !this.active) throw error
         this.turnConversation = null
         if (redrive >= STALE_REDRIVE_LIMIT) {
-          throw new AgentLoopError('provider_stale_reply_after_restage: replies for discarded conversations kept arriving; the restaged conversation was left intact')
+          // The request ends here: the normal failure path may pause the goal or reset the loop, so
+          // this text promises only what always holds (the durable plan state is untouched).
+          throw new AgentLoopError('provider_stale_reply_after_restage: replies for discarded conversations kept arriving after a restage, so this request was stopped; the goal and plan state are unchanged and Resume restarts from them')
         }
         await this.traceEvent('context.stale_reply_redriven', { attempt: redrive + 1, limit: STALE_REDRIVE_LIMIT })
       }
@@ -5950,6 +5975,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         plan_id: reducerPlanAfterCompletion.plan_id,
         task_board: completedBoard,
       })
+      await this.closeOutputSlice('next_shelf_slice')
       await this.traceEvent('planner.wake', {
         source: 'planning_boundary',
         route: 'next_shelf_slice',
@@ -6048,6 +6074,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       && (hasLongHorizonRoadmap || goalDefinition)
       && allowContinuation
       && planningAfterCompletion?.goal?.status === GOAL_STATUS.ACTIVE) {
+      await this.closeOutputSlice('active_goal_after_plan_completion')
       await this.traceEvent('planner.wake', {
         source: 'planning_boundary',
         route: 'active_goal_after_plan_completion',
@@ -6428,6 +6455,28 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return REQUEST_OUTPUT_CEILING_CAPS * this.maxProviderOutputUnits
   }
 
+  // U5: the ceiling applies to one plan slice (aggregate - slice baseline).
+  sliceOutputCeiling() {
+    return requestSliceCeiling(this.traceRequest, this.requestOutputCeiling())
+  }
+
+  // The plan-slice-completed boundary (settleCompletedStepState, before the next
+  // slice's planner wake): the next slice starts counting from here. A step
+  // close inside a slice never resets it.
+  async closeOutputSlice(route) {
+    const before = this.sliceOutputCeiling()
+    const baseline = markRequestSliceClosed(this.traceRequest)
+    if (baseline === undefined) return
+    await this.traceEvent('budget.slice_baseline_reset', {
+      route,
+      previous_slice_output_baseline: before.baseline,
+      slice_output_units: before.used,
+      slice_output_baseline: baseline,
+      aggregate_output_units: before.aggregate,
+      request_output_ceiling: this.requestOutputCeiling(),
+    })
+  }
+
   // A request that runs out of output budget (the per-step cap, the context
   // window, an exhausted budget recovery, or the request-wide ceiling) ends
   // visibly with one chat line (1.5); it never ends as a silent `blocked` plan
@@ -6450,10 +6499,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const blocker = blocked ? cleanMemoryText(previousState?.blocker, 160) : ''
     const generation = this.providerBudgetGeneration
     const generationOutputUnits = this.providerBudgetGenerationOutputUnits
-    const requestOutputUnits = this.traceRequest?.usage?.output_units
+    // U5: the ceiling figures are the current slice's (the aggregate when no
+    // slice has closed yet, so a single-slice request reads exactly as before).
+    const sliceView = this.sliceOutputCeiling()
+    const requestOutputUnits = sliceView.used
     const units = value => Number(value ?? 0).toLocaleString('en-US')
     const spent = ceiling
-      ? `this request used its whole output allowance (${units(requestOutputUnits)} of ${units(this.requestOutputCeiling())} units across ${generation} step budget${generation === 1 ? '' : 's'})`
+      ? sliceView.baseline > 0
+        ? `this request used its whole output allowance for the current plan slice (${units(requestOutputUnits)} of ${units(this.requestOutputCeiling())} units across ${generation} step budget${generation === 1 ? '' : 's'}; ${units(sliceView.aggregate)} in all)`
+        : `this request used its whole output allowance (${units(requestOutputUnits)} of ${units(this.requestOutputCeiling())} units across ${generation} step budget${generation === 1 ? '' : 's'})`
       : code === 'provider_turn_output_cap_exceeded'
         ? `the model used its whole output budget for this step (${units(generationOutputUnits)} of ${units(this.maxProviderOutputUnits)} units)`
         : `the model request ran out of budget (${code})`
@@ -6508,6 +6562,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       output_cap: this.maxProviderOutputUnits,
       request_output_units: requestOutputUnits,
       request_output_ceiling: this.requestOutputCeiling(),
+      aggregate_output_units: sliceView.aggregate,
+      slice_output_baseline: sliceView.baseline,
       chat_message: chatMessage,
     })
     await this.traceEvent('request.completed', {
@@ -6899,16 +6955,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         throw capError
       }
       const requestCeiling = this.requestOutputCeiling()
-      if (Number.isSafeInteger(aggregateOutputUnits) && aggregateOutputUnits > requestCeiling) {
+      const sliceCeiling = this.sliceOutputCeiling()
+      if (sliceCeiling.exceeded) {
         await this.traceEvent('budget.request_ceiling_exceeded', {
           reason: 'request_output_ceiling',
-          request_output_units: aggregateOutputUnits,
+          request_output_units: sliceCeiling.used,
           request_output_ceiling: requestCeiling,
+          aggregate_output_units: sliceCeiling.aggregate,
+          slice_output_baseline: sliceCeiling.baseline,
           output_cap: this.maxProviderOutputUnits,
           budget_generation: this.providerBudgetGeneration,
           provider_calls: this.traceRequest?.usage?.provider_calls,
         })
-        const ceilingError = new AgentLoopError(`request_output_ceiling: request used ${aggregateOutputUnits} > ${requestCeiling} output units across ${this.providerBudgetGeneration} budget generation(s)`)
+        const ceilingError = new AgentLoopError(`request_output_ceiling: request used ${sliceCeiling.used} > ${requestCeiling} output units across ${this.providerBudgetGeneration} budget generation(s)`)
         ceilingError.code = 'request_output_ceiling'
         throw ceilingError
       }
@@ -7096,6 +7155,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         return recovered
       }
       catch (error) {
+        if (error?.code === STALE_REPLY_ERROR_CODE) {
+          // The retry never ran for the active conversation: drop the in-flight marker so a
+          // later restart does not take the fail-closed pause for a recovery that did not happen.
+          this.memory.setProviderRecovery?.(this.activePlanKey(), undefined)
+          await this.persistState()
+          throw error
+        }
         if (error?.code !== 'provider_output_budget_recovery_exhausted') {
           await this.traceEvent('provider.output_budget_recovery_failed', { round, recovery_attempt: 1, recovery_kind: 'output_budget_exhaustion', message: error instanceof Error ? error.message : String(error) })
         }
@@ -7502,6 +7568,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     const beforeCount = this.messages.length
     const admittedMessage = { ...message, tool_calls: admittedPrepared.map(entry => entry.tool) }
+    // The base pushes the assistant tool-call message before its first assertCurrent.
+    await this.dropIfStale(this.turnConversation)
     this.compactionDeferred = true
     try {
       await super.handleToolBatch(admittedMessage, admittedPrepared)
@@ -8677,6 +8745,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
 
       await this.traceEvent('operations.admit', { operations })
+      // A restage that landed during that await must not let this reply's batch through
+      // (outside the try below: a stale drop is not an admission failure).
+      await this.assertCurrent()
       try {
         const acknowledgement = await executeAuthorizedBatch(this.rcon, before.epoch, commands)
         await this.traceEvent('operations.ack', {

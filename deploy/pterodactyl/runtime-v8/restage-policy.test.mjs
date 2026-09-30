@@ -9,6 +9,8 @@ import {
   RESTAGE_BOUNDARY,
   RESTAGE_CHECKPOINT,
   RESTAGE_REASON,
+  markRequestSliceClosed,
+  requestSliceCeiling,
   resetSliceBaseline,
   sliceCeilingState,
   sliceOutputUsed,
@@ -126,4 +128,36 @@ test('slice ceiling helpers tolerate a missing or restarted counter', () => {
   assert.equal(sliceOutputUsed(500, 10_000), 500, 'aggregate below baseline means the counter restarted')
   assert.deepEqual(sliceCeilingState({ aggregateOutputUnits: undefined, baseline: 0, ceiling: 100 }), { used: undefined, ceiling: 100, remaining: undefined, exceeded: false })
   assert.equal(sliceCeilingState({ aggregateOutputUnits: 10, baseline: 0 }).exceeded, false)
+})
+
+test('requestSliceCeiling reads the baseline off the trace request and marks a slice close', () => {
+  const ceiling = 5000
+  const request = { usage: { output_units: 0 } }
+  assert.deepEqual(requestSliceCeiling(request, ceiling), { used: 0, ceiling, remaining: 5000, exceeded: false, aggregate: 0, baseline: 0 })
+  request.usage.output_units = 4800
+  assert.equal(requestSliceCeiling(request, ceiling).exceeded, false)
+  // Slice close: the next slice starts counting from the aggregate.
+  assert.equal(markRequestSliceClosed(request), 4800)
+  assert.equal(requestSliceCeiling(request, ceiling).used, 0)
+  request.usage.output_units = 4800 + 5000
+  assert.equal(requestSliceCeiling(request, ceiling).exceeded, false, 'exactly the ceiling is not over it')
+  request.usage.output_units = 4800 + 5001
+  const over = requestSliceCeiling(request, ceiling)
+  assert.deepEqual({ used: over.used, exceeded: over.exceeded, aggregate: over.aggregate, baseline: over.baseline }, { used: 5001, exceeded: true, aggregate: 9801, baseline: 4800 })
+})
+
+test('requestSliceCeiling clamps a stale or invalid baseline to 0 and never goes negative', () => {
+  // A restored/restarted counter below the recorded baseline re-baselines to 0.
+  const restarted = requestSliceCeiling({ usage: { output_units: 300 }, slice_output_baseline: 9000 }, 5000)
+  assert.deepEqual({ used: restarted.used, baseline: restarted.baseline, exceeded: restarted.exceeded }, { used: 300, baseline: 0, exceeded: false })
+  for (const junk of [-40, 1.5, Number.NaN, '12', null, undefined]) {
+    const view = requestSliceCeiling({ usage: { output_units: 700 }, slice_output_baseline: junk }, 5000)
+    assert.equal(view.baseline, 0, `baseline ${String(junk)}`)
+    assert.equal(view.used, 700)
+  }
+  // A request with no usage summary or no request at all is not a usable counter.
+  assert.equal(requestSliceCeiling({}, 5000).used, undefined)
+  assert.equal(requestSliceCeiling(undefined, 5000).exceeded, false)
+  assert.equal(markRequestSliceClosed(undefined), undefined)
+  assert.equal(markRequestSliceClosed({}), 0)
 })
