@@ -709,7 +709,8 @@ test('an advisory packet over its size limit drops Jev\'s additions first and ne
   const plan = getActivePlan(state)
   state = applyPlanningEvent(state, { type: PLANNING_EVENT.RUNTIME_VALIDATED, now: 1_700_000_000_000, plan_id: plan.plan_id, runtime_validation: { passed: true } })
   state = applyPlanningEvent(state, { type: PLANNING_EVENT.PLAN_COMMITTED, now: 1_700_000_000_000, plan_id: plan.plan_id })
-  const args = { planningState: state, role: 'executor', checkpoint: 'C3', reason: 'executor_fresh_at_plan_commit', actor: { actor_id: 18, actor_kind: 'standalone_character', epoch: 3, connected_players: 0 }, now: 1_700_000_000_000 }
+  // A note, a budget line and a runtime line are droppable records too: Jev's additions must go before any of them.
+  const args = { planningState: state, role: 'executor', checkpoint: 'C3', reason: 'executor_fresh_at_plan_commit', note: 'the ending conversation left this note', budget: 'effort low', runtime: { task_state: 'idle', queue_length: 0, idle: true }, actor: { actor_id: 18, actor_kind: 'standalone_character', epoch: 3, connected_players: 0 }, now: 1_700_000_000_000 }
   const plain = buildHandoffPacket(args)
   const facts = [{ family: 'inventory_equipment', text: 'x'.repeat(900) }, { family: 'research_state', text: '{"completed":["automation"]}' }]
   const withFacts = buildHandoffPacket({ ...args, jevFacts: facts, jevHints: ['nearby_world'] })
@@ -723,6 +724,8 @@ test('an advisory packet over its size limit drops Jev\'s additions first and ne
   assert.equal(tight.over_limit, false)
   assert.deepEqual(tight.dropped.sort(), ['jev_fact_0', 'jev_fact_1', 'jev_fact_hint'].sort())
   assert.equal(tight.text, plain.text, 'with the additions dropped the packet is byte-identical to the plain one')
+  assert.match(tight.text, /note \(UNVERIFIED/, 'the note outlived the additions')
+  assert.match(tight.text, /budget: effort low/)
   // More facts than the bound are never admitted.
   const many = buildHandoffPacket({ ...args, jevFacts: Array.from({ length: 9 }, (_, index) => ({ family: `f${index}`, text: 'ok' })) })
   assert.equal(many.text.split('\n').filter(line => line.startsWith('jev_fact[')).length, HANDOFF_PACKET_LIMITS.jevFacts)
