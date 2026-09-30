@@ -8,6 +8,7 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { buildHandoffPacket, HANDOFF_PACKET_LIMITS } from './handoff-packet.mjs'
 import {
   applyShelfRanking,
+  ADVISORY_WAIT_MS,
   c4Questions,
   C4_MIN_CONFIDENCE,
   nextStepClarity,
@@ -1435,7 +1436,14 @@ test('a shadow Jev that never answers in time leaves provider-call order, messag
   const off = harness({ script: script(), tokens: PLANNER_TOKENS, agentOptions: { jevCheckpoints: false, ...plannerRestage } })
   await runSliceWithContractedStep2(off)
   const on = harness({ script: script(), jev: slow, tokens: PLANNER_TOKENS, settle: false, agentOptions: plannerRestage })
+  let closeStartedAt
+  let wakeStartedAt
+  const completed = on.agent.completed.bind(on.agent)
+  on.agent.completed = async (...args) => { closeStartedAt ??= Date.now(); return completed(...args) }
+  const observed = on.script[1]
+  on.script[1] = async () => { wakeStartedAt = Date.now(); return observed }
   await runSliceWithContractedStep2(on) // every U11 call is still waiting: nothing on the critical path waited for it
+  assert.ok(wakeStartedAt - closeStartedAt < ADVISORY_WAIT_MS / 2, `the executor's wake began ${wakeStartedAt - closeStartedAt} ms after the step close: it did not wait for Jev`)
 
   assert.ok(slow.calls.filter(call => U11_CONTRACTS.has(call.state?.contract)).length >= 3, 'the shadow calls were started')
   assert.equal(on.rows('jev.judgment_recorded').length, 0, `none has answered: ${JSON.stringify(on.rows('jev.judgment_recorded').map(row => row.data.family))}`)
@@ -1696,4 +1704,44 @@ test('a judged step whose FIRST batch completes without the gate closing it is a
   assert.equal(scored.data.outcome.observation_needed, true)
   assert.equal(scored.data.outcome.had_failure_boundary, false)
   assert.equal(world.rows('step.verified').length, 1, 'step 2 never verified, and the judgment did not wait for it')
+})
+
+test('a shadow answer that arrives after the fresh agent already acted (same conversation, window closed) is discarded and traced, never recorded', async () => {
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const slow = scriptedJev({ next_step_route: directAnswer }, { onCall: async (state) => { if (state?.contract === 'restage_observation_families') await gate } })
+  const world = harness({ script: [plannerSlice(), executorStep(), plannerNextSlice()], jev: slow, tokens: SLICE_TOKENS, settle: false })
+  await world.say() // C3: the executor starts; Jev's observation call is pending
+  contractSecondStep(world)
+  world.give('iron-ore')
+  await world.agent.completed() // the executor acts: its first operation is admitted and the window closes (no restage happened)
+  release()
+  await world.settle()
+  assert.equal(world.rows('jev.judgment_recorded').some(row => row.data.family === 'observation_families'), false)
+  const discarded = world.rows('jev.judgment_skipped').find(row => row.data.family === 'observation_families')
+  assert.equal(discarded.data.reason, 'answer_discarded_stale')
+  assert.match(discarded.data.detail, /window closed|already acted/)
+})
+
+test('advisory observation families: state is read again after the wait, so a plan that became BLOCKED during Jev\'s answer refuses the restage instead of restaging a stale packet', async () => {
+  let world
+  const jev = scriptedJev({ next_step_route: directAnswer, ...Object.fromEntries(Object.entries(FAMILY_ANSWERS).map(([id, answer]) => [id, restageOnly(answer)])) }, {
+    onCall: (state) => {
+      if (state?.contract !== 'restage_observation_families' || !world?.armed) return
+      const blocked = structuredClone(world.memory.planningState(KEY))
+      getActivePlan(blocked).status = PLAN_STATUS.BLOCKED
+      world.memory.planningByNpc.set(KEY, blocked)
+    },
+  })
+  world = harness({ script: [plannerSlice(), executorStep(), plannerNextSlice()], jev, tokens: SLICE_TOKENS, game: new FactsFactorio() })
+  await world.say()
+  forceStage(world, 'observation_families', 'advisory')
+  const before = world.agent.agentContext.handoffId
+  world.armed = true
+  const result = await world.agent.restageBetweenTurns({ checkpoint: 'C8', role: 'executor', reason: 'test', actor: world.agent.epoch })
+  assert.equal(result.restaged, false)
+  assert.equal(result.reason, 'plan_blocked', 'state was read again after the await')
+  assert.equal(world.rows('context.restage_refused').at(-1).data.reason, 'plan_blocked')
+  assert.equal(world.agent.agentContext.handoffId, before, 'the conversation was not swapped')
+  assert.match(world.rows('jev.judgment_unscored').at(-1).data.reason, /restage_not_applied: plan_blocked/)
 })
