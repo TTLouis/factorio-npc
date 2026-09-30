@@ -6,6 +6,12 @@ Adopted: 2026-09-19
 
 This document is the authority for Goal / Roadmap Shelf / immutable-plan lifecycle. Jev's current authority model is defined by `NPC_JEV_COPROCESSOR_ARCHITECTURE.md`; where older Jev planning-review text in this file conflicts with that document, the coprocessor architecture wins.
 
+**Owner amendment, 2026-09-30:** [NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md](NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md)
+defines Week 1 authorization, durable interrupted tasks, task-local questions and the
+shared campaign allowance. Those accepted requirements supersede older blanket
+user-approval and request-only budget rules. Implementation and integrated proof
+remain pending; a document amendment does not establish runtime capability.
+
 The redesign is intentionally simpler than the earlier experimental hierarchy/checkpoint stack:
 
 > The user owns the goal. The Main LLM authors semantic plans and intent. The deterministic runtime validates structured operations and owns world truth. Jev is a cognitive coprocessor for observation selection, state compression, routing, recovery, reasoning effort, and advisory steering; Jev is not a correctness gate for the Main LLM. A committed plan is immutable. Future intent lives on a non-executable shelf and is progressively refined like level of detail (LOD).
@@ -18,14 +24,14 @@ Once a plan enters `COMMITTED` / `EXECUTING`, its semantic steps, ordering, and 
 
 Normal execution, local recovery, new observations, planner preference, Jev output, or a later model turn must not rewrite the active plan.
 
-If execution reaches a **real structural blocker**, the current plan becomes `BLOCKED`; it still does not mutate. SGLuna must surface the blocker to the user and ask what to do.
+If execution reaches a **real structural blocker**, the current plan becomes `BLOCKED`; it still does not mutate. Surface what happened and check the current task's authorization before choosing a replacement route.
 
-If the user approves a change, create a **new plan version**:
+Auto's standing mandate and an accepted temporary request may authorize necessary supporting work and another route to the same requested result. The harness must verify that scope; the planner authors a **new plan version**. Ask before changing the result or destination, consuming reserved supplies, removing/substantially redesigning player-built structures, or crossing another player constraint. Explain meaningful route changes even when another approval is unnecessary.
 
 ```text
 Plan v3 -- BLOCKED / SUPERSEDED
         |
-        +--> user approves revision
+        +--> harness verifies mandate or explicit user approval
                  |
                  v
               Plan v4
@@ -45,6 +51,14 @@ The durable planning model has three semantic layers:
 
 The shelf is not abandoned work. It is the guide for subsequent planning rounds.
 
+Accepted but interrupted work belongs to a separate durable task ledger, not the
+future Roadmap Shelf. Preserve its original completion predicate, destination,
+plan/step, receipts and pending question. A new temporary request suspends the old
+task; after verified completion, resume the most recent interrupted runnable task
+after reconciling outstanding operations and current world state. Explicit cancellation
+ends the selected task. Pending questions block only affected work; independent,
+authorized tasks may run without changing or forgetting the blocked task.
+
 ### 1.2.1 Goal definition: the harness owns goal completion
 
 In project-management terms the three layers are rolling-wave planning: the goal is decomposed into work packages (committed plan slices), near-term work is detailed while later work stays coarse on the shelf, and each slice is progressively elaborated from verified results.
@@ -58,6 +72,15 @@ The rolling wave needs a fixed end condition. On the first plan of every goal, t
 The harness validates the definition (one corrective retry, then it stops and asks the player), stores it on the reducer goal (`GOAL_DEFINED`; the planner defines once, only the user may redefine), and prints it in game as the system's understanding of the goal.
 
 Completion then belongs to the harness: at the end of every plan slice it reads each `doneWhen` condition from the game through `autorio_tools.evaluate_condition`. All met → `GOAL_SATISFIED` with runtime evidence. Any unmet → the next slice, with the unmet conditions named to the planner. Finishing a plan's steps never completes a defined goal by itself, and a goal with unmet conditions is not retired when a plan completes. A condition the game cannot recognise (unknown technology/item/location) pauses the goal and asks the player rather than rolling slices forever.
+
+**Week 1 target contract:** the harness supplies the accepted task predicate and
+keeps it through recovery, interruption, replacement plans and restart. Quantity
+requests identify item, delivered amount and destination; rate requests identify
+measurement boundary and sustained window; Auto identifies the save-specific win
+trigger. The earlier planner-definition and force-wide-counter descriptions record
+the existing path; aggregate statistics alone do not prove destination-specific
+delivery or a particular production line's output. See the macro design and weekly
+plan for the required upgrade, not a claim that it is already implemented.
 
 The conditions are force-level facts on purpose, so the same contract carries to Space Age (other planets, space platforms) without base-game assumptions. They are read from the NPC's force even while its body is dead, so a goal met during a respawn gap is not missed.
 
@@ -361,14 +384,14 @@ Normal steering points are:
 
 - initial goal admission;
 - completion of an immutable Active Plan;
-- explicit user-approved revision after a structural blocker;
+- a revision after a structural blocker, authorized by a current standing mandate or explicit user approval;
 - explicit user change of goal/priority.
 
 Do **not** switch vertical/horizontal mode halfway through a healthy committed plan.
 
 If new evidence merely changes low-level execution details, use local recovery.
 
-If new evidence destroys a committed semantic assumption, freeze the plan as `BLOCKED`; do not use "steering" as a loophole for silent replanning.
+If new evidence destroys a committed semantic assumption, freeze the plan as `BLOCKED`; a replacement needs recorded authorization, a new version and an explanation. Steering cannot mutate the old plan or expand its permission.
 
 ### 4.4 Tick-tock is a bias, not a hard alternation rule
 
@@ -687,12 +710,12 @@ A **structural plan blocker** is different. Examples include:
 
 On a structural blocker:
 
-1. record deterministic evidence;
-2. mark the immutable plan `BLOCKED`;
-3. stop automatic semantic replanning;
-4. explain the blocker to the user;
-5. ask whether to keep it paused, revise, or cancel;
-6. if revision is approved, create a new version with lineage to the blocked plan.
+1. Record deterministic evidence and freeze the immutable plan as `BLOCKED`.
+2. Check the task's current authorization and recovery history in the harness.
+3. If a new route preserves the accepted result and stays within the grant, let the planner draft a replacement version through ordinary validation and commit.
+4. Tell the user what happened, what is changing and why; preserve still-valid evidence and lineage.
+5. If the result must change or the route crosses a protected boundary, persist a task-correlated question and keep that work frozen until an authorized, current answer arrives.
+6. If bounded recovery or the campaign allowance is exhausted, pause visibly rather than looping through fresh contexts. Independent authorized work may continue only where it neither conflicts nor bypasses the exhausted allowance.
 
 ## 8. Plan Tracker becomes a view of one immutable plan
 
@@ -791,14 +814,27 @@ For the complete provider-grounded contract, see:
 
 Ask the user when the semantic contract truly needs user authority, especially:
 
-- a committed plan hits a structural blocker requiring a different route;
+- a replacement route would change the requested result or exceed the accepted Auto/player-task mandate;
+- removal or substantial redesign of player-built structures, or use of reserved supplies, is required;
 - the user's constraints conflict;
 - there are materially different goal interpretations and choosing one would change the requested outcome;
 - the user explicitly asks to alter/cancel the plan.
 
 Do not interrupt the user for ordinary runtime recovery that stays within the committed semantics.
 
-When blocked, present the verified reason and bounded choices without silently selecting a new strategy.
+When user authority is needed, present the verified reason and bounded choices.
+Otherwise, recover within the existing mandate and report the meaningful change.
+Questions belong to a task and revision; answering one must not affect another task
+that is currently executing. After all temporary tasks verify complete, return to
+Maintain and offer Resume Auto if Auto was suspended. A failed or uncertain task
+is not completion. Mode, question and task state survive restart.
+
+Planner, executor and Jev share the campaign's durable provider-usage allowance.
+Per-slice ceilings may reset at their defined boundary; campaign usage and recovery
+stagnation do not reset on a new slice, request, plan, context, actor or restart.
+Exhaustion pauses provider-dependent work visibly and requires explicit allowance
+extension/renewal. Amount, accounting unit and warning threshold remain undecided;
+no numeric cap or full-game cost estimate is approved. See the macro design §4.
 
 ## 13. Updated implementation roadmap
 
@@ -1121,7 +1157,17 @@ Constraints any design has to keep:
   (no unvalidated inserter or belt figures) and fits the production-rate goals
   above.
 
-## Agent split: a roadmap agent and one agent per active plan (owner idea, 2026-09-26; for discussion, not designed)
+## Agent split: sequential planner and executor (design updated 2026-09-30)
+
+Current authority is [NPC_DELEGATION_DESIGN_2026-09-29.md](NPC_DELEGATION_DESIGN_2026-09-29.md),
+especially owner answers §12a, Jev policy §7 and checkpoint-specific build status §13.
+The planner stays long-lived and uncluttered; disposable execution contexts receive
+harness-built packets. Planner is model `[0]`, executor `[1] ?? [0]`; the selected
+live configuration is Flash for both. Size limits determine restages, not every step.
+One body has one acting context. Per-slice limits do not reset the shared campaign
+allowance. September 30 mandate, task-ledger and question requirements extend that
+design through [the Week 1 macro design](NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md).
+The following trigger and proposal are historical context, not unanswered role decisions.
 
 **Owner decision, 2026-09-26 (later the same day):** do delegation inside one NPC first
 (several minds, one body), before several NPC bodies. Build it on the swarm design's
@@ -1155,7 +1201,7 @@ Why it might help, from the run: the cap and the growing context are per request
 plan-scoped agent resets both at a natural boundary; a cheaper or faster model can run
 plan agents while a stronger one authors the roadmap.
 
-Questions to settle before any design (for the discussion elsewhere):
+Historical questions from the September 26 proposal (answers and remaining implementation work are in the linked design):
 
 - What the interface between the roadmap agent and a plan agent is. It must stay the
   structured, bounded plan/step contract (§1.1, §6), not free text, and the harness

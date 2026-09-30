@@ -1,0 +1,158 @@
+# NPC macro execution: Week 1 design
+
+Status: **owner-approved behavior; implementation and integrated proof pending**.
+Owner Q&A: 2026-09-30. Week 1 is September 28–October 4; Week 2 is October 5–11.
+
+This is the authority for the September 30 macro decisions. It refines the lifecycle
+in [NPC_PLANNING_ROADMAP.md](NPC_PLANNING_ROADMAP.md) and the sequential context split
+in [NPC_DELEGATION_DESIGN_2026-09-29.md](NPC_DELEGATION_DESIGN_2026-09-29.md).
+The [weekly plan](NPC_USER_EXPERIENCE_WEEKLY_PLAN_2026-09-28.md) preserves the Q&A and
+Week 2 UX follow-up. These requirements are not evidence that the runtime implements
+them, and do not authorize a provider run or deployment.
+
+## 1. A continuing campaign, bounded executable slices
+
+Auto pursues the active save's harness-supplied victory predicate. Resource discovery
+and expansion continue throughout the campaign: develop deposits, connect transport,
+extend power and processing, replace depleted sources, and prepare defenses. The
+mandate is not limited to an initial resource area. Player constraints and validated
+action capabilities still bound concrete operations; unknown capability is not permission.
+
+The Main LLM authors the roadmap and plan drafts. The harness owns authorization,
+state transitions, admission and evidence. Jev selects or ranks bounded candidates;
+it cannot grant permission, write plans, advance progress or declare completion.
+No-Jev operation retains the same authority and completion contracts.
+
+The Roadmap Shelf holds non-executable future intent. Each committed slice remains
+immutable. Replanning creates a new version, preserving the old plan, its reason,
+lineage and still-valid verified evidence. A context restage changes neither plan
+semantics nor permission. An executor proposes a recovery need; the planner authors
+a semantic replacement through the normal draft/validate/commit path.
+
+## 2. Authorization and explanations
+
+Auto's standing mandate can authorize new infrastructure and semantic route changes
+toward the same victory condition. A temporary player request likewise authorizes
+necessary supporting work and recovery toward the same requested result. For example,
+a destroyed NPC furnace or depleted deposit need not require approval before finding
+another source or building replacement infrastructure to deliver 100 plates.
+
+Ask before changing the requested outcome or destination, removing or substantially
+redesigning player-built structures, consuming explicitly reserved supplies, or crossing
+another player constraint. Do not change the old committed plan while awaiting an answer.
+New infrastructure must still be admitted without unapproved changes to protected assets.
+
+Shared factory storage is available by default; player inventories and explicitly
+reserved supplies are excluded. Re-observe before spending. A withdrawal invalidates
+old availability assumptions. How players mark protected assets and reserved supplies
+is still an implementation-design question, not a reason to invent permissions.
+
+Tell the player what happened, what approach changed, and why. Base explanations on
+observed failures, shortages or capacity needs; report material disruption and revise
+an estimate only when grounded. Ordinary expansion and in-scope recovery notifications
+do not create approval gates. Avoid a notification for every low-level retry.
+
+Proposed authorization records identify the mandate and its revision, task/goal,
+permitted action scope, constraints, protected assets/materials, and the reason for
+each replacement plan. The harness checks the current grant before committing and
+again at admission. Exact schema/event names remain to be implemented.
+
+## 3. Durable tasks, interruption and questions
+
+The future Roadmap Shelf is separate from the durable ledger of accepted tasks.
+Interruption preserves a task; explicit cancellation ends the selected task. After
+the interrupting temporary task verifies complete, automatically resume the most
+recent interrupted runnable temporary task after world and operation reconciliation.
+Example: deliver coal, then resume the 100-plate request. No blind replay of a command
+whose acknowledgement was lost, and no uncertain operation counted as successful.
+
+Proposed task records include task/campaign/goal identity, original completion predicate
+and destination, authorization revision, plan version and active step, verified evidence,
+material claims, pending operation/receipt identities, question revision, suspension
+reason and resume order. Preserve these across restage, save/restart and actor replacement.
+Only one execution context may act on the body at a time. Stop or settle conflicting
+physical work before changing tasks; reject stale responses and receipts by lineage.
+
+A pending question blocks the affected work, not the whole NPC. Other runnable work
+must be independently authorized and unable to interfere with that question or its
+protected targets/materials. Apply deterministic priority and emergency rules; Jev
+may rank eligible candidates but cannot make a blocked task eligible. Questions and
+answers remain attached to the affected task and revision while another task runs.
+Use bounded checkpoints/aging so suspended and blocked tasks are not forgotten.
+
+After all temporary tasks finish, retain the established mode rule: Maintain, with
+an offer to resume Auto if Auto was suspended. Failure, exhausted recovery and pending
+approval are not completion and do not trigger that return rule. Background upkeep
+does not silently authorize restarting a suspended victory campaign.
+
+## 4. Campaign allowance and recovery accounting
+
+Owner selected a shared campaign provider-usage allowance across planner, executor
+and Jev. Attribute supporting work, recovery and interrupting tasks to the campaign
+that pays for them; switching task, role, goal, plan version, context, actor or budget
+generation must not mint a new allowance. Preserve the ledger through restart.
+Per-turn, per-slice and hourly limits remain additional constraints.
+
+Proposed allowance records include campaign/allowance identity and revision, accounting
+unit, limit, consumed usage, pending reservations, and per-provider request attribution.
+Account for input, cached input, output, failed/late requests and Jev usage as reported;
+settle each call once. Preserve separate provider meters rather than pretending unlike
+usage units are interchangeable. A cost allowance needs known billing data; do not
+invent prices or treat missing usage as zero. The amount, accounting unit and warning
+threshold have not been selected by the owner.
+
+Before a call, reserve a conservative upper bound in the chosen unit. Unknown or
+unreconciled usage must not create available allowance. If a call cannot fit safely,
+pause provider-dependent work visibly and notify the player. No planner or Jev retry
+may bypass that pause. Already-admitted physical work and authorized deterministic
+defense/upkeep may continue where safe, with receipts reconciled. Resume requires an
+explicit allowance extension or renewal; lifetime accounting remains intact.
+
+Keep a separate per-task recovery history: cause, attempts, elapsed time and verified
+progress. A fresh context, replacement plan or new slice must not erase stagnation.
+When bounded recovery cannot progress, preserve the task and ask or pause visibly;
+independent work remains subject to its own authorization and the shared allowance.
+Exact recovery thresholds remain an implementation-design question.
+
+## 5. Week 1 build sequence and acceptance
+
+These are proposed implementation units, not completion claims. The integrator owns
+sequencing and verification; no additional worker or background run is created here.
+
+| Unit | Responsible area | Dependency | Completion evidence |
+| --- | --- | --- | --- |
+| MW1 | Runtime/reducer: authorization records and replacement-plan lineage | Existing immutable-plan commit/admission checks | Expansion and player-task recovery preserve the goal; protected redesign and changed outcomes ask; stale grants are refused. |
+| MW2 | Runtime/supervisor: durable task ledger and operation reconciliation | MW1; receipt correlation | Interrupt/resume and restart preserve progress and destinations; lost acknowledgements cannot duplicate delivery. |
+| MW3 | Scheduler/question handling: task-local blocking and resume order | MW2; current priority rules | Pending approval permits only independent authorized work; stale answers do nothing; older temporary tasks resume and do not starve. |
+| MW4 | Provider accounting: shared campaign allowance | Durable campaign identity and provider usage | Planner/executor/Jev share one ledger; restages/restarts do not replenish it; exhaustion visibly prevents further provider calls. |
+| MW5 | Planner/executor integration and notifications | MW1–MW4; delegation C3/C4/C7 wiring | Reasoned recovery runs through planner and executor roles; harness events explain meaningful changes; Jev absent/failing preserves the same result. |
+| MW6 | Integration/validation | MW5 | One correlated trace demonstrates the integrated scenario below; relevant engine assertions prove actual output. |
+
+Use a bounded multi-slice production request with a named delivery or output boundary.
+Introduce source depletion or loss of an NPC-owned machine; recover with an explained,
+authorized replacement plan. Interrupt with another player task, verify it, then resume
+the earlier task. Introduce a separate protected redesign question and show independent
+authorized work continuing. Restart with an outstanding operation; reconcile before
+resuming and reject old-context results. Verify the original output predicate.
+
+Run scripted variants for no Jev, Jev failure, stale answers, reserved-material changes,
+and campaign exhaustion across a handoff and restart. Use Docker regression gates and
+the relevant real-Factorio lane under repository rules. Record exact SHA, commands,
+trace, usage and unresolved limits. Component tests are not integrated proof; scripted
+models do not prove live autonomous gameplay. Any unfinished requirement is explicit
+carryover, not silently relabeled future work.
+
+A complete victory playthrough is not Week 1's acceptance test. Existing production
+and release gates, including autonomous electricity evidence, remain in their own
+roadmaps. The UI feedback request is saved for follow-up; layout discussion is deferred.
+
+## 6. Remaining design choices
+
+- Campaign allowance amount, measurable accounting unit and warning threshold.
+- Exact stagnation/recovery stopping thresholds and task aging bounds.
+- How protected player assets and explicitly reserved supplies are registered and
+  how provenance is preserved when players rebuild or change them.
+- Concrete reducer event/schema names and integration with the existing task-board mirror.
+
+Resolve these before the relevant build unit is declared complete. None of them reopens
+the accepted authority, interruption, explanation or shared-allowance decisions.

@@ -2,6 +2,20 @@
 
 This file is the current status summary for the single-NPC integration line. Historical detailed checkpoints are retained under `docs/validation/`.
 
+## September 30 macro design update — requirements, not verified capability
+
+Owner decisions now define [Week 1 macro execution](NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md):
+ongoing Auto expansion, same-result recovery of player requests with explanations,
+protection of player-built structures/reserved supplies, durable interrupted tasks,
+task-local questions while independent work continues, and one persisted campaign
+allowance across planner/executor/Jev. Week 1 is September 28–October 4; Week 2 is
+October 5–11. No campaign amount or accounting unit has been selected.
+
+The updated delegation document attributes Claude's newer partial build to its
+integration checkpoint. This documentation update does not merge that runtime,
+prove MW1–MW6, authorize live runs, or change any promotion result below. Record
+implementing commits and integrated/engine evidence before claiming these behaviors.
+
 ## Promotion status
 
 As of 2026-09-16, `feat/npc-transition-work` is the active promotion-candidate/integration branch. During the documentation cleanup the branch HEAD was `02167ac690c46b056ba2f0a62db056438c702419` (`fix(autorio): preserve skills close handler`) and ordinary repository CI was green.

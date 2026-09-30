@@ -1,21 +1,31 @@
 # Delegation inside one NPC: design note (plan item 3.1)
 
-Status: **design for owner review, 2026-09-29. Nothing here is built or approved.** It
-answers `NPC_PLANNING_ROADMAP.md` "Agent split" and the "Monday discussion proposal" in
-`PARALLEL_PRODUCTION_WORK_PLAN.md`. Where the older row 3.1 text (per-role env settings)
-disagrees, the owner's 1.10 settings win. Claims marked **(unsure)** were not verified.
+Status: **owner decisions recorded; partial build with scripted evidence, 2026-09-30**.
+The owner answers in §12a and September 30 Jev decisions in §7 supersede the original
+proposal. §13 records Claude's integration build on `experiment/jev-agent-architecture`
+(through `9c350e3b`, 2026-09-30, U11 in review); importing this document does not
+merge those runtime commits or verify them on another checkout. No live delegation
+run is recorded. The [Week 1 macro design](NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md)
+extends authorization, tasks, questions and campaign allowance; those additions are
+not implemented by the older unit table. Settings follow owner 1.10, with no new
+per-role env overrides. Claims marked **(unsure)** were not verified.
 
 ## 1. The decision in one paragraph
 
-A long goal runs as **many short conversations over one durable state**. At defined
-checkpoints the harness discards the running conversation and starts a fresh one from a
-**handoff packet** it builds from reducer state (not the transcript, not a model summary).
-Two conversation roles share one body, one at a time: a **roadmap agent** on the main model
-(`OPENAI_MODEL[0]`) that authors goal, shelf and plan drafts, and a **plan agent** on the
-subagent model (`[1]`, falling back to `[0]`) that carries one committed plan. Jev takes
-routing, ranking and observation selection where TypeSafe judgment fits. No concurrency yet.
+A long goal uses **durable harness state, an uncluttered long-lived planner, and
+disposable execution contexts**. The roadmap/planner role (`OPENAI_MODEL[0]`) authors
+the shelf and plan drafts; the plan/executor role (`[1]`, falling back to `[0]`) executes
+one committed slice from a harness-built packet, not the old transcript or a model
+summary. A fresh executor starts at plan commit. Restage at slice close past the soft
+limit, or step close past the hard limit; not every step by default. Both roles use
+Flash in the selected live configuration. Jev supplies bounded routing/ranking hints;
+the harness retains permission, truth and completion. One acting context, no concurrency.
+Campaign usage survives all these context and per-slice budget changes.
 
-## 2. What exists today (the seams)
+## 2. Original September 29 seam inspection (historical baseline)
+
+The implementation notes and §13 supersede this original inspection; line numbers
+refer to its inspected baseline, not necessarily the current checkout.
 
 - **One conversation carries the goal.** `continueFromModMessage` appends a `[MOD]` user
   message to the same `this.messages` after a slice closes (`npc-agent-loop.mjs:5598`,
@@ -52,10 +62,10 @@ routing, ranking and observation selection where TypeSafe judgment fits. No conc
  packet| |                              packet| |
      v |                                   v |
  ROADMAP AGENT  model[0]              PLAN AGENT  model[1] (else [0])
- fresh per node pickup:               fresh per committed slice / step:
+ long-lived; size-bounded:            fresh per committed slice; size-bounded:
  pick node, draft slice               observe + operate one committed
      \____ validate, time review, commit ____/   plan; never authors plan
- Jev (TypeSafe): route, observation families, skill rank, scope critique
+ Jev (TypeSafe): route, observation families, skill rank, advisory steering
  one body: one actor_id + epoch; exactly one conversation may act at a time
 ```
 
@@ -76,17 +86,22 @@ dropped by `handoff_id` plus actor epoch and traced.
 | # | Checkpoint | Trigger seam | Packet adds beyond the common core (section 5) | Who wakes next |
 |---|---|---|---|---|
 | C1 | Slice/plan closed | `settleCompletedStepState`, after `evaluateGoalCompletion` (`:5638`) | closed plan's verified evidence refs, goal progress per `doneWhen`, time estimate vs measured, usage of the slice | harness: goal met -> done; unmet -> C2 |
-| C2 | Shelf node picked up | `next_shelf_slice` wake (`:5675`), plus goal admission | candidates from `shelfRefinementCandidates` (`planning-state.mjs:1067`), steering context, node verified results, shelf-pickup skill cards (2.8) | roadmap agent drafts a slice |
+| C2 | Shelf node picked up | `next_shelf_slice` wake (`:5675`), plus goal admission | candidates from `shelfRefinementCandidates` (`planning-state.mjs:1067`), steering context, node verified results, shelf-pickup skill cards (2.8) | planner receives verified results and drafts; restage only when policy requires |
 | C3 | Slice committed | after `commitPlan` validation and time review (`:7570`) | the immutable plan, step 1 contract, loaded-skill refs | plan agent |
-| C4 | Step closed | step verified by the completion gate | next step and contract, evidence of the closed step, refreshed facts; the plan-level block is byte-identical (cache) | Jev route first: `continue`/`wait` -> no LLM wake; `observe`/`replan` -> fresh plan agent |
+| C4 | Step closed | step verified by the completion gate | next step and contract, evidence of the closed step, refreshed facts; same plan meaning | next committed step uses executor; hard-limit restage only when needed; U11's skip-planner route begins in shadow, not as an approved active gate |
 | C5 | Budget or ceiling pause | `pauseAtProviderBudgetCap` (`:6121`), handoff (`:8681`) | active step, what the reducer recorded during the exhausted thread, reason code | generation cap: same role, fresh thread, up to `maxProviderBudgetHandoffs` (default 4); ceiling: visible pause, Resume restages |
-| C6 | Blocker | structural blocker confirmed | blocker reason code, verified prefix, carried-forward evidence | **the user** (Revise / Keep / Cancel). Approved revision -> roadmap agent (C2 shape). Ordinary bounded recovery keeps the semantic step: fresh plan agent, no user interruption |
+| C6 | Blocker | structural blocker confirmed | reason, verified prefix, authorization and recovery history, carried-forward evidence | freeze old plan; in-scope mandate permits planner-authored replacement; outside grant asks the user. Question blocks this task only; ordinary bounded recovery preserves the step |
 | C7 | Restart, actor replaced, death | `recoverInterruptedPlan` (`supervisor.mjs:2344`) | fresh actor snapshot with new epoch, persisted plan state | plan agent if a plan is active, else pause with chat line |
 | C8 | Size/turn safety net | after one compaction fold, or N rounds in one thread | same as the last checkpoint kind, current step | same role as before |
 
-C8 numbers are **(unsure)**: start at "second fold needed" or 24 rounds, and set both from
-the first live run. `context_window` from the `local` profile is not yet read by compaction
-(plan row 1.9), so C8 must read it.
+The original C8 "second fold or 24 rounds" suggestion was unverified. Owner §12a
+uses size plus safe slice/step boundaries instead. Do not treat a round-count guess
+as an approved restage trigger. Local `context_window` support still needs its own
+implementation evidence.
+
+The C6 permission and independent-task behavior above is the September 30 target;
+§12c records the older implemented blocked-plan behavior. A restage cannot turn a
+blocked plan into an executable plan or mint new campaign allowance.
 
 The reducer's `reasoning_epoch` keeps its meaning (plan lineage). Restage is recorded as its
 own ledger event (`CONTEXT_RESTAGED`, no plan effect), so 2026-09-19 decision 6 stands.
@@ -103,6 +118,10 @@ dropped by a fixed priority order, never truncated mid-record).
   contract; last N verified evidence refs and receipts; blocker and failure reason codes;
   runtime/task state; inventory and position summary; the role's budget line (effort, cap,
   remaining ceiling).
+- **Week 1 additions (pending):** task/campaign identity, authorization and question
+  revisions, suspension/resume state, outstanding operation reconciliation, remaining
+  campaign allowance and persisted recovery history. These must not be dropped or
+  treated as a fresh grant when a packet is rebuilt.
 - **Selected facts:** deterministic fact families the step needs (recipes, nearby
   entities, entity status, research). Deterministic default first; Jev picks families
   later (section 7).
@@ -136,6 +155,11 @@ model-family-dependent profile resolve per role from the role config; on the `di
 method, a `deepseek` profile chosen from the host would also apply to a `[1]` of another
 family **(unsure)**.
 
+Per-role/per-slice budgets are nested inside the shared campaign allowance described
+in the macro design §4. A slice baseline reset grants no campaign spending. Exhaustion
+pauses provider-dependent work visibly, including Jev calls, until explicit extension
+or renewal. No amount or accounting unit is selected by the design.
+
 A plan agent's input is roughly packet plus rounds since the last restage, not the whole
 goal; the steam run's 904k input units in one request is the case to beat.
 
@@ -150,7 +174,7 @@ facts, mutates a committed plan, advances the tracker or declares completion.
 | Observation families for the packet (11 families, threshold 0.5, cap 4: `jev-decision-taxonomy.mjs:15-40`) | exists for observation budgets | shadow: compute at each restage, compare with the lookups the agent then actually makes; advisory: add Jev families to the mandatory set; never remove mandatory ones |
 | Skill card order | shadow (`skill-offers.mjs:38`) | advisory ordering inside the packet |
 | Next shelf node at C2 | deterministic nearest target plus advisory steering | Jev ranks the complete `shelfRefinementCandidates` set, advisory |
-| Scope critique of drafts | existing authority | unchanged |
+| Scope/strategy hints about drafts | advisory semantic hints only | no correctness gate or mandatory approval from Jev |
 
 Promotion needs traced agreement with later outcomes over a stated sample. A judgment that saves no context, calls, time or recovery cost is
 removed. Checkpoint triggers, mandatory fields and size limits stay deterministic code.
@@ -202,17 +226,19 @@ the next provider request contains the packet and none of the earlier messages; 
 is byte-equal to the golden built from the same reducer state; committed plan and tracker
 are unchanged by the restage.
 
-- C1/C2: a slice completes with unmet `doneWhen`; the roadmap agent starts fresh with the
-  candidate set.
-- C3/C4: commit then step close; a `continue` route makes zero provider calls; `replan`
-  yields a fresh plan agent with a byte-identical plan-level block.
+- C1/C2: a slice completes with unmet `doneWhen`; the planner receives verified results
+  and candidates, retaining its context unless the size policy requires a restage.
+- C3/C4: commit starts a fresh executor; step close does not automatically restage.
+  The hard size limit restages at a safe step boundary without changing plan meaning.
+  U11's skip-planner recommendation is shadow first; test both no-Jev and fallback.
 - C5: cap overflow restages the same step up to the handoff limit; the ceiling gives a
   visible pause plus Resume, then a restage.
-- C6: a blocker wakes no model until a user choice; approved revision starts a roadmap
-  agent; bounded recovery restages the plan agent silently.
+- C6: a blocker freezes the old plan; a current mandate can authorize a planner-authored
+  same-result replacement. Outside that grant, the affected task wakes no model until
+  a current authorized answer; independent work must remain non-interfering.
 - C7: restart and actor replacement; a late reply from the old conversation is dropped and
   traced; zero connected humans stays valid.
-- C8: a fixture at the size threshold restages instead of a second fold.
+- C8: size thresholds and safe boundaries, including the fixed prompt prefix, govern restage.
 - Model list: `[1]` absent falls back to `[0]`; each role's request carries its own model.
 - Packet: mandatory fields always present; over-size drops by priority.
 
@@ -271,8 +297,10 @@ run's 904k input units; other thresholds set from the first run **(unsure)**.
    to `[0]`. This is the same as the note.
 3. **Ceiling.** The request ceiling resets per slice.
 4. **Handoff note.** Allowed: at most 500 characters, marked unverified in the packet.
-5. **Jev promotion.** Shadow, then advisory, then decision loop. Each stage needs at least
-   30 judgments with at least 90% agreement.
+5. **Jev promotion (September 29 answer; superseded by September 30 §7).** Shadow,
+   then advisory, then decision loop. The original answer was 30 judgments per stage;
+   the newer policy requires 60 for an autonomous decision and 30 for advisory,
+   scored against outcomes, with at least 90% agreement.
 6. **Reasoning epoch.** `CONTEXT_RESTAGED` stays a separate event. The owner's reason: the
    point of delegation is to keep the **planning agent's** context long-lived and
    uncluttered, while disposable work goes to executor subagents that are thrown away.
@@ -363,10 +391,25 @@ Unit and integration evidence only: static scenarios with scripted model replies
 | U4 | Restage seam: `AgentContext`, `restageContext`, `CONTEXT_RESTAGED`, stale-reply drop and bounded re-drive, turn-token safe point, shared `durable-text.mjs` (§12b) | merged `0d790092`, follow-ups `df81b21d` |
 | U5 | Per-slice output ceiling (aggregate minus the slice baseline, reset at the slice-close wake) | merged `19194cf5` |
 | U8 | C5 budget handoff and Resume, and C7 restart/actor replacement, through the packet; C6 blocked plan wakes no model (§12d) | merged `ebfcec43` (repin `aa4b30bd`) |
-| U7 | Planner wiring: verified-results `[MOD]` at slice close, C1/C2 soft-limit restage with a prefix-aware default limit, planner role tagging | built and review fixes done; merges next, after folding its restage helper into U8's |
-| U8 follow-ups | Generation/lineage staleness at the admission points, the `startRestage` leak, the startup no-plan branch, test gaps | queued after U7 |
-| U6 | Executor at C3, the hard-limit restage at step close, `executor.plan_semantics_ignored`; C6/C7 bounded recovery becomes executor-shaped; U8 review carry-overs (§12e) | done, pending merge |
-| U11 | Jev at the checkpoints (§7 owner decisions) | not started, after U6 |
-| U10 | Docs: plan rows 3.4–3.6, status doc, this note | this section; final pass after U11 |
+| U7 | Planner wiring: verified-results `[MOD]` at slice close, C1/C2 soft-limit restage with a prefix-aware default limit, planner role tagging | merged `d8e369fa` with the unified restage helpers (repin `8a86c758`) |
+| U8 follow-ups | Generation/lineage staleness at the admission points, the `startRestage` leak, the startup no-plan branch, test gaps | merged `8537a8f1` |
+| U6 | Executor at C3, the hard-limit restage at step close, `executor.plan_semantics_ignored`; C6/C7 bounded recovery becomes executor-shaped; U8 review carry-overs (§12e) | merged `9c350e3b` after two Opus review rounds |
+| U11 | Jev at the checkpoints (§7 owner decisions) | built on `u11-jev-checkpoints`; Opus review found two blockers (deciding route skipped the runtime wait gates; C4 agreement scoring not outcome-honest) and shadow timing; fixes in progress |
+| U10 | Docs: plan rows 3.4–3.6, status doc, this note | this section; final pass folded into macro MW6 docs (owner order pending) |
 
-After U11: the flash-only live test (both roles on DeepSeek flash, ≤2 CAD; ask the owner about a harness-enforced spend cap first). It also collects the first Jev agreement samples.
+After U11: a proposed flash-only live test (both roles on DeepSeek flash, trial ceiling ≤2 CAD). That trial amount is not the campaign allowance and is not authorization to run it. The owner selected a shared campaign allowance but has not selected its amount/accounting unit. A live trial still needs its own explicit go and collects the first Jev agreement samples.
+
+## 14. Week 1 macro extensions (owner Q&A, 2026-09-30; not built)
+
+Use [NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md](NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md)
+for MW1–MW6 and integrated acceptance. Add standing Auto/player-task authorization,
+new-version recovery with player explanations, shared-material/protected-asset checks,
+a durable interrupted-task ledger, task-correlated questions while independent work
+continues, and the persistent planner/executor/Jev allowance. Restart must reconcile
+uncertain operations and preserve both remaining allowance and recovery history.
+
+The §13 implementation record does not prove these extensions. Extend C3/C4/C5/C6/C7
+scripted cases with stale grants/answers, interrupted-task resumption, lost acknowledgements,
+Jev absent/failing, and campaign exhaustion across restage/restart. Validate actual
+delivery/output with a relevant engine lane. Week 1 is September 28–October 4;
+Week 2 is October 5–11. UI feedback is recorded separately; layout discussion is deferred.

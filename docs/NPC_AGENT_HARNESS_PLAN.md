@@ -23,14 +23,32 @@ Its core direction is:
 - evaluate strategic steering at plan boundaries using `vertical | horizontal | maintain | recover`, relative to the current critical path rather than action type;
 - treat Factorio's common vertical -> horizontal -> vertical cadence as an evidence-driven bias, not a mandatory alternation;
 - let the Main LLM author plan drafts;
-- use Jev as a bounded **pre-commit scope critic**, not a co-planner or Plan Tracker writer;
+- use Jev for bounded selection, ranking and routing; never as a correctness gate, plan author or Plan Tracker writer;
 - make committed plans immutable;
-- freeze on structural blockers and ask the user before creating a revised plan version;
+- freeze the old plan on structural blockers; a new version needs harness-verified standing Auto/player-task authority or explicit user approval for an out-of-scope change;
 - fix semantic completion contracts before commit;
 - make Plan Tracker a read-only view of the one committed plan and its accepted evidence;
 - consolidate plan advancement/replacement behind one transition authority.
 
 Where older Task Board, Project Board, hierarchy, checkpoint, or Jev planning experiments conflict with that roadmap, `NPC_PLANNING_ROADMAP.md` is authoritative.
+
+## Week 1 macro build requirements (2026-09-28 through 2026-10-04)
+
+The owner-approved [September 30 macro design](NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md)
+defines this week's integration requirements, not completed capabilities:
+
+- Ongoing Auto resource expansion and recovery of temporary requests toward the same accepted result, using recorded authorization and new immutable plan versions.
+- Shared storage access excluding player inventories/reserved supplies; ask before removing or substantially redesigning player-built structures. Explain what happened and why meaningful changes are needed.
+- A durable ledger separate from the future Roadmap Shelf: preserve interrupted tasks, reconcile uncertain operations, resume older temporary tasks automatically, and isolate pending questions from independent authorized work.
+- Sequential planner/executor handoffs and restart recovery from authoritative packets, with no-Jev fallback and world-verified delivery/rate/win predicates.
+- One persistent campaign provider allowance across planner, executor and Jev, including recovery and handoffs; visibly pause provider-dependent work on exhaustion. The allowance amount and accounting unit remain undecided.
+
+The macro design's MW1–MW6 table specifies dependency order and acceptance evidence.
+Prove the integrated lifecycle with scripted provider replies plus relevant real-engine
+assertions; component tests and existing live traces do not establish this new checkpoint.
+Week 2 is October 5–11. Per-request visual feedback is recorded in the
+[weekly plan](NPC_USER_EXPERIENCE_WEEKLY_PLAN_2026-09-28.md); UI layout discussion is deferred.
+Existing production and promotion gates remain in force. No paid run is authorized here.
 
 ## Promotion goal
 
