@@ -264,7 +264,8 @@ test('bad role, checkpoint or missing goal throw', () => {
 
 test('the event passes CONTEXT_RESTAGED validation and does not change the reasoning epoch', () => {
   const state = withReceipts(committedState(), 2)
-  const { event, chars } = buildHandoffPacket({ planningState: state, ...ARGS })
+  const { event, chars, handoff_id } = buildHandoffPacket({ planningState: state, ...ARGS })
+  assert.equal(event.handoff_id, handoff_id, 'the ledger links to the trace id')
   assert.equal(event.type, PLANNING_EVENT.CONTEXT_RESTAGED)
   assert.equal(event.role, 'executor')
   assert.equal(event.checkpoint, 'C3')
@@ -280,6 +281,7 @@ test('the event passes CONTEXT_RESTAGED validation and does not change the reaso
     role: 'executor',
     checkpoint: 'C3',
     reason: 'plan_committed',
+    handoff_id,
     packet_chars: chars,
     previous_context_chars: 41000,
     at: 500,

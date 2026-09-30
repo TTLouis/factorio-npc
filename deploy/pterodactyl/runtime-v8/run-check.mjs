@@ -88,6 +88,12 @@ const LOOP_MIN_COUNT = 2
  *   stale reply's; `active_handoff_id` is the current one for that role.
  *   It may be written before or after the stale provider.response row, but in
  *   the same request_id.
+ * - `context.restage_refused`: written when restageContext declines (a provider
+ *   round is in flight or open, the packet's plan is not the active plan, the
+ *   reducer refused the event). `reason` is the machine code; no detector
+ *   reads it yet, it is for the record. Like `context.restaged`, a row written
+ *   while no request is open has no request_id unless the caller passes one,
+ *   and every detector here ignores such a row.
  * - Step progress rows that reset the restage-loop count are the existing
  *   `step.verified` and `step.semantic_completed`.
  */
@@ -95,6 +101,7 @@ export const DELEGATION_TRACE_ROWS = Object.freeze({
   events: Object.freeze({
     restaged: 'context.restaged',
     staleReplyDropped: 'context.stale_reply_dropped',
+    restageRefused: 'context.restage_refused',
     replyEvents: Object.freeze(['provider.response', 'provider.error']),
     progressEvents: Object.freeze(['step.verified', 'step.semantic_completed']),
   }),
@@ -115,6 +122,11 @@ export const DELEGATION_TRACE_ROWS = Object.freeze({
         step_id: 'step_1',
         soft_limit_tokens: 100000,
       }),
+    }),
+    restageRefused: Object.freeze({
+      event: 'context.restage_refused',
+      request_id: 'req_x_1',
+      data: Object.freeze({ role: 'executor', checkpoint: 'C3', handoff_id: 'ho_0123456789ab', reason: 'round_in_flight' }),
     }),
     providerReply: Object.freeze({
       event: 'provider.response',

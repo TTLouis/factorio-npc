@@ -284,6 +284,7 @@ test('CONTEXT_RESTAGED is recorded as a ledger entry with no plan, step, sequenc
     role: 'executor',
     checkpoint: 'C4',
     reason: 'step_closed',
+    handoff_id: null,
     packet_chars: 4200,
     previous_context_chars: 31000,
     at: 500,

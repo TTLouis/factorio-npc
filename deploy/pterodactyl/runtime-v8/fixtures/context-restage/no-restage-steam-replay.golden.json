@@ -1,0 +1,577 @@
+{
+  "calls": [
+    {
+      "body": "d69be72ea87549c5",
+      "context": "d1cd83efd9119c14",
+      "messages": 5
+    },
+    {
+      "body": "9df810392d69326e",
+      "context": "fc692382fd4fbd9e",
+      "messages": 9
+    },
+    {
+      "body": "8de1b40e7844d8f2",
+      "context": "c51081091f8bad92",
+      "messages": 11
+    },
+    {
+      "body": "0562b1269b1bdf15",
+      "context": "da8f379fd5fb1353",
+      "messages": 12
+    },
+    {
+      "body": "d4b7717fdbd1ee15",
+      "context": "4357955560255795",
+      "messages": 8
+    },
+    {
+      "body": "1758c6009c16003b",
+      "context": "2f6995293af92ca5",
+      "messages": 11
+    },
+    {
+      "body": "f50ddf8f1c2bda8a",
+      "context": "4e21d90ef4cb5b39",
+      "messages": 14
+    },
+    {
+      "body": "97c95a64d54f8a68",
+      "context": "b94658aadb52ffc8",
+      "messages": 14
+    },
+    {
+      "body": "0ae40b5575e10031",
+      "context": "762450d8ff62934a",
+      "messages": 9
+    },
+    {
+      "body": "bcaaa19981d90833",
+      "context": "7217558eeb84fb0c",
+      "messages": 12
+    },
+    {
+      "body": "25398aa5312930d4",
+      "context": "69e185a12395f799",
+      "messages": 13
+    }
+  ],
+  "trace": [
+    {
+      "event": "request.received",
+      "sha": "b5dd1a8b19815f11"
+    },
+    {
+      "event": "chat.acknowledged",
+      "sha": "d89ab869f6132e90"
+    },
+    {
+      "event": "planning.goal_admitted",
+      "sha": "ab4dac93519c5aa5"
+    },
+    {
+      "event": "skill.offer_skipped",
+      "sha": "7e79e60ef5c4b2f5"
+    },
+    {
+      "event": "actor.bound",
+      "sha": "11ec7f3db7713603"
+    },
+    {
+      "event": "budget.reserved",
+      "sha": "108ece81afaf2612"
+    },
+    {
+      "event": "compaction.ceiling",
+      "sha": "3690a03e5ff9b068"
+    },
+    {
+      "event": "provider.request",
+      "sha": "7078fb0c3ef51d50"
+    },
+    {
+      "event": "provider.round_policy",
+      "sha": "42ad507cae393ba8"
+    },
+    {
+      "event": "provider.response",
+      "sha": "211bd47cfa8b6aaf"
+    },
+    {
+      "event": "tool.call",
+      "sha": "9ca006de7b7772ed"
+    },
+    {
+      "event": "tool.call",
+      "sha": "714ad3bba179baf9"
+    },
+    {
+      "event": "tool.call",
+      "sha": "57fa3f39b75170e9"
+    },
+    {
+      "event": "tool.result",
+      "sha": "cdf1194a421af553"
+    },
+    {
+      "event": "tool.result",
+      "sha": "c3a7fa2f312a2457"
+    },
+    {
+      "event": "tool.result",
+      "sha": "bea6215797c9dcb9"
+    },
+    {
+      "event": "budget.reserved",
+      "sha": "7a9136d7cd22b9e6"
+    },
+    {
+      "event": "provider.request",
+      "sha": "d1b6dcd44b3701f8"
+    },
+    {
+      "event": "provider.round_policy",
+      "sha": "67679ffd73e39b59"
+    },
+    {
+      "event": "provider.response",
+      "sha": "c63126e9dcd22e4b"
+    },
+    {
+      "event": "tool.call",
+      "sha": "f526476853e33f51"
+    },
+    {
+      "event": "tool.call",
+      "sha": "b5906dd2de8b0122"
+    },
+    {
+      "event": "tool.call",
+      "sha": "849b45f560a91003"
+    },
+    {
+      "event": "tool.call",
+      "sha": "91ce13824b96aa05"
+    },
+    {
+      "event": "tool.result",
+      "sha": "b3b903d674044cce"
+    },
+    {
+      "event": "tool.result",
+      "sha": "5cfc9cb43f55766b"
+    },
+    {
+      "event": "tool.result",
+      "sha": "ae796ba4a16970d2"
+    },
+    {
+      "event": "tool.result",
+      "sha": "3dfde3889d29ac5c"
+    },
+    {
+      "event": "budget.reserved",
+      "sha": "725d4da0a7e8c2e8"
+    },
+    {
+      "event": "provider.request",
+      "sha": "8483f757d4e567d1"
+    },
+    {
+      "event": "provider.round_policy",
+      "sha": "131c360b9d84d87f"
+    },
+    {
+      "event": "provider.response",
+      "sha": "1acc028b07ecda72"
+    },
+    {
+      "event": "tool.call",
+      "sha": "0ad87b15c6fff6ab"
+    },
+    {
+      "event": "tool.call",
+      "sha": "7749b72877c09076"
+    },
+    {
+      "event": "tool.call",
+      "sha": "1fc02fc2b9e0908b"
+    },
+    {
+      "event": "tool.call",
+      "sha": "518a302268691d66"
+    },
+    {
+      "event": "tool.result",
+      "sha": "80ef44b8bb6448f9"
+    },
+    {
+      "event": "tool.result",
+      "sha": "0e5a8af29e51e189"
+    },
+    {
+      "event": "tool.result",
+      "sha": "3790ba10fbdf3eb4"
+    },
+    {
+      "event": "tool.result",
+      "sha": "d372d505edeaa692"
+    },
+    {
+      "event": "recovery.classified",
+      "sha": "2583905449d62bc9"
+    },
+    {
+      "event": "budget.reserved",
+      "sha": "38a2c27757c9c6c9"
+    },
+    {
+      "event": "provider.request",
+      "sha": "2bcde1cb08c96deb"
+    },
+    {
+      "event": "provider.round_policy",
+      "sha": "2b464bc6b1a69591"
+    },
+    {
+      "event": "provider.response",
+      "sha": "383d2b23ec5e2b1b"
+    },
+    {
+      "event": "provider.plan_submission",
+      "sha": "38f0214b9c859fe9"
+    },
+    {
+      "event": "plan.accepted",
+      "sha": "a8ad67ea6f6d2ac1"
+    },
+    {
+      "event": "plan.persisted",
+      "sha": "6680c5f3d0c62eea"
+    },
+    {
+      "event": "step.checkpoint_validated",
+      "sha": "e9870e00a81be6d6"
+    },
+    {
+      "event": "operations.preflight_ok",
+      "sha": "0f7110fe2bc32879"
+    },
+    {
+      "event": "operations.admit",
+      "sha": "09f8fe6c50c195fc"
+    },
+    {
+      "event": "operations.ack",
+      "sha": "21cfa4cb0e22d7e2"
+    },
+    {
+      "event": "plan.time_estimate",
+      "sha": "ffb7cabdd6931bf3"
+    },
+    {
+      "event": "request.waiting",
+      "sha": "ae68206ae3e3ec5b"
+    },
+    {
+      "event": "factorio.completed_signal",
+      "sha": "73226a7f4ea9838f"
+    },
+    {
+      "event": "factorio.status",
+      "sha": "ca8bb0e727e5f979"
+    },
+    {
+      "event": "step.completion_checked",
+      "sha": "ad5ecb6a66dda11b"
+    },
+    {
+      "event": "step.verified",
+      "sha": "dba955651c8d813a"
+    },
+    {
+      "event": "step.time_measured",
+      "sha": "5e7d6f53f4c6fa27"
+    },
+    {
+      "event": "budget.generation_rolled",
+      "sha": "1dd501e7305b87fe"
+    },
+    {
+      "event": "factorio.completion_continuation",
+      "sha": "fc67255274618de2"
+    },
+    {
+      "event": "budget.reserved",
+      "sha": "b059d10e007acea0"
+    },
+    {
+      "event": "provider.request",
+      "sha": "0266642c6d918a17"
+    },
+    {
+      "event": "provider.round_policy",
+      "sha": "8f75c5eb1d37e0f8"
+    },
+    {
+      "event": "provider.response",
+      "sha": "4a107c693745b8e3"
+    },
+    {
+      "event": "tool.call",
+      "sha": "1d7cf04f89d195f2"
+    },
+    {
+      "event": "tool.call",
+      "sha": "c65c4b79915a6862"
+    },
+    {
+      "event": "tool.result",
+      "sha": "8094ea03cb42728a"
+    },
+    {
+      "event": "tool.result",
+      "sha": "563f234958240621"
+    },
+    {
+      "event": "budget.reserved",
+      "sha": "d7e352c0985a78e3"
+    },
+    {
+      "event": "provider.request",
+      "sha": "a412c7b155f32eff"
+    },
+    {
+      "event": "provider.round_policy",
+      "sha": "d6ba07a01590e8a1"
+    },
+    {
+      "event": "provider.response",
+      "sha": "fe2530e47c0d158c"
+    },
+    {
+      "event": "tool.call",
+      "sha": "e745c71c874a0446"
+    },
+    {
+      "event": "tool.call",
+      "sha": "64748be1b23c71bb"
+    },
+    {
+      "event": "tool.call",
+      "sha": "786973a0e9191484"
+    },
+    {
+      "event": "tool.call",
+      "sha": "24697d8aa922e696"
+    },
+    {
+      "event": "tool.result",
+      "sha": "c68cfa040c0a3f5f"
+    },
+    {
+      "event": "tool.result",
+      "sha": "23b3a7c9c0236ead"
+    },
+    {
+      "event": "tool.result",
+      "sha": "7aab0f4c10a9d89a"
+    },
+    {
+      "event": "tool.result",
+      "sha": "db6daa23dbb912bb"
+    },
+    {
+      "event": "budget.reserved",
+      "sha": "7ed3040577871521"
+    },
+    {
+      "event": "provider.request",
+      "sha": "efced9fb98c7cb1b"
+    },
+    {
+      "event": "provider.round_policy",
+      "sha": "470b4b8da3e8850a"
+    },
+    {
+      "event": "provider.response",
+      "sha": "8c6f7203468d02de"
+    },
+    {
+      "event": "tool.call",
+      "sha": "1d2bed7263e4f22e"
+    },
+    {
+      "event": "tool.call",
+      "sha": "bf1e38bb28244ac5"
+    },
+    {
+      "event": "tool.call",
+      "sha": "6c3ab5aebfd577f5"
+    },
+    {
+      "event": "tool.result",
+      "sha": "5e97935a60db2209"
+    },
+    {
+      "event": "tool.result",
+      "sha": "9f8c629024520054"
+    },
+    {
+      "event": "tool.result",
+      "sha": "f608b7c43f54e675"
+    },
+    {
+      "event": "recovery.classified",
+      "sha": "150e4d88f932c8cc"
+    },
+    {
+      "event": "budget.reserved",
+      "sha": "52dab5904320d76a"
+    },
+    {
+      "event": "provider.request",
+      "sha": "48a4875b1db9d5fe"
+    },
+    {
+      "event": "provider.round_policy",
+      "sha": "5278fc40819c9b2f"
+    },
+    {
+      "event": "provider.response",
+      "sha": "0359e63de6452a69"
+    },
+    {
+      "event": "provider.plan_submission",
+      "sha": "62075f784dcba8d8"
+    },
+    {
+      "event": "plan.accepted",
+      "sha": "9001d4907ca61cbf"
+    },
+    {
+      "event": "plan.persisted",
+      "sha": "b25d7bc4a601611a"
+    },
+    {
+      "event": "operations.preflight_ok",
+      "sha": "19d07f973e990014"
+    },
+    {
+      "event": "operations.admit",
+      "sha": "a4aa74abcc203186"
+    },
+    {
+      "event": "operations.ack",
+      "sha": "bd3fb9423854755a"
+    },
+    {
+      "event": "request.waiting",
+      "sha": "e0b4c4a055627ca8"
+    },
+    {
+      "event": "factorio.status",
+      "sha": "95a460c55e708beb"
+    },
+    {
+      "event": "factorio.error_continuation",
+      "sha": "e645b70821387852"
+    },
+    {
+      "event": "budget.reserved",
+      "sha": "c37689ca936a3977"
+    },
+    {
+      "event": "provider.request",
+      "sha": "9ab06ef24a9bc4ff"
+    },
+    {
+      "event": "provider.round_policy",
+      "sha": "84d9a420f3d7021a"
+    },
+    {
+      "event": "provider.response",
+      "sha": "a969c6f8db37800b"
+    },
+    {
+      "event": "tool.call",
+      "sha": "854f73422c0cd978"
+    },
+    {
+      "event": "tool.call",
+      "sha": "588fe183ff29e587"
+    },
+    {
+      "event": "tool.result",
+      "sha": "701a9dff8e14c6a1"
+    },
+    {
+      "event": "tool.result",
+      "sha": "6e40b7903143c3bc"
+    },
+    {
+      "event": "budget.reserved",
+      "sha": "90986065d37abd15"
+    },
+    {
+      "event": "provider.request",
+      "sha": "d3c264c9759e6933"
+    },
+    {
+      "event": "provider.round_policy",
+      "sha": "c6740ce53b1d4ef1"
+    },
+    {
+      "event": "provider.response",
+      "sha": "0ae630f5ec0be00f"
+    },
+    {
+      "event": "tool.call",
+      "sha": "ab9f7ec6007d7ffe"
+    },
+    {
+      "event": "tool.call",
+      "sha": "a3ba9dcbb2192bf0"
+    },
+    {
+      "event": "tool.result",
+      "sha": "f6602ca35a58e67e"
+    },
+    {
+      "event": "tool.result",
+      "sha": "7b8cd094a65e1ee8"
+    },
+    {
+      "event": "budget.reserved",
+      "sha": "c1f118599053ff87"
+    },
+    {
+      "event": "provider.request",
+      "sha": "1f8e73122e308fe7"
+    },
+    {
+      "event": "provider.round_policy",
+      "sha": "3a99a9111e62317e"
+    },
+    {
+      "event": "provider.response",
+      "sha": "10224d503bda8105"
+    },
+    {
+      "event": "plan.accepted",
+      "sha": "4ecece6bf6b61f7d"
+    },
+    {
+      "event": "plan.persisted",
+      "sha": "27145238a3d67fe8"
+    },
+    {
+      "event": "request.time_split",
+      "sha": "91c45ad82d73d9af"
+    },
+    {
+      "event": "request.completed",
+      "sha": "1a0f68db8e51f14f"
+    }
+  ]
+}

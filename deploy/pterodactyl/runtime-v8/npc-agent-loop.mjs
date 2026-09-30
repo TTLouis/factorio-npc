@@ -9,6 +9,8 @@ import {
   setTaskBoardStatus,
   taskBoardProgress,
 } from './common.mjs'
+import { AgentContext, contextRestagedRow, STALE_REDRIVE_LIMIT, STALE_REPLY_ERROR_CODE, STALE_REPLY_MESSAGE } from './agent-context.mjs'
+import { cleanMemoryText, sanitizeDurableModelText, sanitizeDurableModelValue } from './durable-text.mjs'
 import { normalizeProviderPlanContent, providerCapabilityProfile } from './provider.mjs'
 import { executeAuthorizedBatch } from './supervisor-adapter.mjs'
 import {
@@ -267,46 +269,6 @@ Skill lifecycle is explicit. findSkills is discovery only: a search result is no
 Every operation you may emit, with its argument keys ("?" marks an optional key). The operation prose earlier in this prompt may omit some of them; any name not on this list is rejected. place_candidate takes ids from getPlacementCandidates, execute_construction_plan takes the validation_id from validateConstructionPlan, and launch_rocket needs a live rocket-silo unit_number.
 ${approvedOperationListText()}.
 `.trim()
-
-function cleanMemoryText(value, max) {
-  const text = String(value ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim()
-  if (text.length <= max) return text
-  return `${text.slice(0, Math.max(0, max - 1))}…`
-}
-
-function sanitizeDurableModelText(value, max = 2000) {
-  let text = cleanMemoryText(value, max)
-  const trimmed = text.trim()
-  if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
-    try {
-      return cleanMemoryText(JSON.stringify(sanitizeDurableModelValue(JSON.parse(trimmed))), max)
-    }
-    catch {}
-  }
-  text = text
-    .replace(/(["']?(?:target_)?unit_number["']?\s*[:=]\s*)\d+/gi, '$1[historical-id-omitted]')
-    .replace(/(["']?observed_unit_numbers["']?\s*[:=]\s*)\[[^\]]*\]/gi, '$1[historical-ids-omitted]')
-    .replace(/\b(?:unit_number|target_unit_number)[_:#-]?\d+\b/gi, 'historical-exact-identity-[omitted]')
-    .replace(/\bunit[_:#-]\d+\b/gi, 'historical-exact-identity-[omitted]')
-    .replace(/\b(?:exact\s+entity\s+target\s+|target\s+)?unit\s+#?\d+\b/gi, 'historical exact identity [omitted]')
-  return cleanMemoryText(text, max)
-}
-
-function sanitizeDurableModelValue(value) {
-  if (Array.isArray(value)) return value.map(item => sanitizeDurableModelValue(item))
-  if (!value || typeof value !== 'object') {
-    return typeof value === 'string' ? sanitizeDurableModelText(value, Math.max(2000, value.length)) : value
-  }
-  const staleExact = value.code === 'stale_exact_target' || value.reason_code === 'stale_exact_target'
-  const result = {}
-  for (const [key, child] of Object.entries(value)) {
-    if (/(?:^|_)unit_number$/i.test(key) || /(?:^|_)unit_numbers$/i.test(key)) continue
-    if (key === 'unit' && Number.isSafeInteger(child)) continue
-    if (staleExact && key === 'identity' && Number.isSafeInteger(child)) continue
-    result[key] = sanitizeDurableModelValue(child)
-  }
-  return result
-}
 
 function durableEntityLocator(observation, semanticRole = '') {
   if (!observation || typeof observation !== 'object') return undefined
@@ -2560,6 +2522,114 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // 2.7: usage per goal and the goal budget warning.
     this.usageLedger = new UsageLedger({ outputCap: this.maxProviderOutputUnits })
     this.chatAcknowledger = new ChatAcknowledger() // 2.10
+    this.agentContext.config = options.providerConfig // names the role's model only (agent-roles.mjs)
+    this.providerCallsInFlight = 0 // provider rounds between request start and the end of their reply processing (restageContext refuses while > 0)
+    this.turnConversation = null // attribution of the conversation the running turn last read; null between turns
+  }
+
+  // Delegation U4 (agent-context.mjs): the running conversation lives in one
+  // AgentContext, so a restage swaps exactly one thing. Created lazily because
+  // the base constructor assigns `messages` (via reset) before this class runs.
+  get agentContext() { return this._agentContext ??= new AgentContext() }
+  get messages() { return this.agentContext.messages }
+  set messages(value) { this.agentContext.messages = value }
+  get baseMessages() { return this.agentContext.baseMessages }
+  set baseMessages(value) { this.agentContext.baseMessages = value }
+
+  reset() {
+    this.turnConversation = null
+    this.agentContext.beginLineage() // planner role: an executor role never leaks into the next chat
+    super.reset()
+  }
+
+  // The restage seam (U4). Swaps the running conversation for a fresh one built
+  // from a handoff packet (handoff-packet.mjs), records CONTEXT_RESTAGED in the
+  // reducer and writes the `context.restaged` trace row. Nothing calls this
+  // yet: U5-U8 wire the checkpoints. It never changes plan semantics.
+  //
+  // Restage is SEQUENTIAL. It refuses (typed result + `context.restage_refused`)
+  // while a provider round is in flight, and while a turn still holds the
+  // current conversation (`turnConversation`: a reply may be awaiting
+  // admission) unless the caller says `safePoint: true`, meaning "between
+  // rounds, no reply from the current conversation is waiting to be admitted"
+  // (a step close after admission, a plan commit after validation). It also
+  // refuses a packet whose plan is not the active plan and one the reducer
+  // rejects (stale goal, wrong source). Refusals change nothing.
+  //
+  // Trace rows carry the current request id when a request is open. Between
+  // requests there is none: pass `requestId` (the request the restage belongs
+  // to) or the row is ignored by every run-check detector.
+  async restageContext({ checkpoint, reason, packet, role, softLimitTokens, requestId, safePoint = false } = {}) {
+    const key = this.activePlanKey()
+    const prepared = this.agentContext.prepareRestage({
+      checkpoint,
+      reason,
+      packet,
+      role,
+      prefixMessages: [{ role: 'system', content: this.systemPrompt }],
+    })
+    const refuse = async (why) => {
+      await this.traceEvent('context.restage_refused', { role: prepared.role, checkpoint, handoff_id: packet.handoff_id, reason: why }, { requestId })
+      return { restaged: false, reason: why }
+    }
+    if (this.providerCallsInFlight > 0) return refuse('round_in_flight')
+    if (this.turnConversation && !safePoint) return refuse('round_open')
+    const before = this.memory.planningState?.(key)
+    if (typeof this.memory.dispatchPlanningEvent !== 'function' || !before) throw new AgentLoopError('context restage needs reducer-backed memory with an admitted goal')
+    if ((packet.event?.plan_id ?? null) !== (before.active_plan_id ?? null)) return refuse('packet_plan_not_active')
+    const event = Number.isFinite(packet.event?.now) ? packet.event : { ...packet.event, now: Date.now() }
+    if (this.memory.dispatchPlanningEvent(key, event) === before) return refuse('reducer_rejected_context_restaged')
+    const result = this.agentContext.commitRestage(prepared)
+    this.turnConversation = null // the flow that restaged reads the new conversation from its next round on
+    // A fresh conversation carries none of the old exchanges (same resets as a reasoning-epoch rebuild).
+    this.toolCache.clear()
+    this.duplicateToolRounds = 0
+    this.observationRecoveryRounds = 0
+    this.observationOnlyRounds = 0
+    this.resetObservationDecisionState()
+    const state = this.memory.planningState(key)
+    const plan = getActivePlanningPlan(state)
+    await this.traceEvent('context.restaged', contextRestagedRow(result, {
+      planId: packet.event?.plan_id ?? plan?.plan_id,
+      stepId: plan?.steps?.[plan.active_step_index]?.step_id,
+      softLimitTokens,
+    }), { requestId })
+    await this.persistState()
+    return { restaged: true, ...result }
+  }
+
+  // A reply for a discarded conversation never resets the active one. The round
+  // that produced it is dropped and the turn is re-driven on the conversation
+  // now in place, at most STALE_REDRIVE_LIMIT times; after that the failure is
+  // visible (a provider failure the normal pause/failed path reports), never a
+  // silent cancellation.
+  async runTurnRedriving(generation) {
+    for (let redrive = 0; ; redrive++) {
+      try {
+        return await this.runTurn()
+      }
+      catch (error) {
+        if (error?.code !== STALE_REPLY_ERROR_CODE || generation !== this.generation || !this.active) throw error
+        this.turnConversation = null
+        if (redrive >= STALE_REDRIVE_LIMIT) {
+          throw new AgentLoopError('provider_stale_reply_after_restage: replies for discarded conversations kept arriving; the restaged conversation was left intact')
+        }
+        await this.traceEvent('context.stale_reply_redriven', { attempt: redrive + 1, limit: STALE_REDRIVE_LIMIT })
+      }
+    }
+  }
+
+  // Every admission point calls assertCurrent (an RCON round trip) before it
+  // acts on a model reply; a restage that landed during that await must not let
+  // the reply through.
+  async assertCurrent() {
+    const current = await super.assertCurrent()
+    await this.dropIfStale(this.turnConversation)
+    return current
+  }
+
+  async dropIfStale(attribution) {
+    if (this.agentContext.isStale(attribution)) await this.dropStaleReply(attribution)
   }
 
   async loadPersistentState() {
@@ -5588,14 +5658,24 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     })
   }
 
+  // The turn marks the conversation it reads (turnConversation) for as long as it runs; see restageContext.
   async runGuarded() {
+    try {
+      return await this.runGuardedTurn()
+    }
+    finally {
+      this.turnConversation = null
+    }
+  }
+
+  async runGuardedTurn() {
     const generation = this.generation
     // super.request() has just built requestInfo for a player chat request;
     // supervisor recovery runs build their own and enter here directly.
     if (this.chatRequestPending && this.requestInfo) this.requestInfo.origin = 'chat'
     this.chatRequestPending = false
     try {
-      return this.withPauseNotice(await this.runTurn())
+      return this.withPauseNotice(await this.runTurnRedriving(generation))
     }
     catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -6609,7 +6689,29 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return undefined
   }
 
-  async callProvider(current, generation, {
+  // A reply for a conversation a restage has replaced (U4): traced, then the
+  // turn is cancelled like any superseded one. Nothing from it is appended to
+  // the active conversation and nothing from it reaches admission.
+  async dropStaleReply(attribution) {
+    await this.traceEvent('context.stale_reply_dropped', this.agentContext.staleReplyRow(attribution))
+    const error = new AgentLoopError(STALE_REPLY_MESSAGE)
+    error.code = STALE_REPLY_ERROR_CODE
+    throw error
+  }
+
+  // Counts provider rounds in flight (the request await and the reply processing
+  // inside it) so restageContext can refuse while one is open.
+  async callProvider(current, generation, options) {
+    this.providerCallsInFlight++
+    try {
+      return await this.callProviderRound(current, generation, options)
+    }
+    finally {
+      this.providerCallsInFlight--
+    }
+  }
+
+  async callProviderRound(current, generation, {
     round,
     allowTools = true,
     recoveryAttempt = 0,
@@ -6680,6 +6782,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
     const roundPhase = this.providerRoundPhase(effectiveAllowTools, triggerSource)
+    const requestChars = providerMessages.reduce((total, message) => total + messageChars(message), 0)
+    const attribution = this.agentContext.beginRequest(requestChars) // U4: which conversation this round belongs to
+    this.turnConversation = attribution
     await this.traceEvent('provider.request', {
       round,
       trigger_source: triggerSource,
@@ -6695,11 +6800,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       recovery_attempt: effectiveRecoveryAttempt,
       recovery_kind: traceRecoveryKind,
       message_count: providerMessages.length,
-      message_chars: providerMessages.reduce((total, message) => total + messageChars(message), 0),
+      message_chars: requestChars,
+      ...this.agentContext.traceFields(attribution),
     })
     let message
     try {
       message = await this.provider(providerMessages, {
+        ...this.agentContext.providerContextFields(attribution),
         epoch: current.epoch,
         actorId: current.actor_id,
         round,
@@ -6743,7 +6850,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
       }
       accumulateProviderUsage(this.traceRequest?.usage, usage)
-      if (Number.isSafeInteger(usage?.output_units)) this.providerBudgetGenerationOutputUnits += usage.output_units
+      // U4: a reply for a discarded conversation still cost real usage (counted
+      // request-wide above) but is not the active conversation's spend.
+      const staleReply = this.agentContext.isStale(attribution)
+      this.agentContext.observeReply(attribution, usage)
+      if (Number.isSafeInteger(usage?.output_units) && !staleReply) this.providerBudgetGenerationOutputUnits += usage.output_units
       const aggregateOutputUnits = this.traceRequest?.usage?.output_units
       const generationOutputUnits = this.providerBudgetGenerationOutputUnits
       const turnOutputCapExceeded = Number.isSafeInteger(generationOutputUnits) && generationOutputUnits > this.maxProviderOutputUnits
@@ -6762,10 +6873,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         turn_output_units: Number.isSafeInteger(generationOutputUnits) ? generationOutputUnits : undefined,
         budget_generation: this.providerBudgetGeneration,
         request_output_units: Number.isSafeInteger(aggregateOutputUnits) ? aggregateOutputUnits : undefined,
+        ...this.agentContext.traceFields(attribution),
       }
       if (responseTrace.provider) responseTrace.provider.usage_complete = usage?.usage_complete === true
-      if (this.traceRequest) this.traceRequest.last_provider_event = responseTrace
+      if (this.traceRequest && !staleReply) this.traceRequest.last_provider_event = responseTrace
       await this.traceEvent('provider.response', responseTrace)
+      if (staleReply) await this.dropStaleReply(attribution)
       // provider-base reports the profile's context window on every response,
       // so the ceiling follows the configured profile even when the loop was
       // built without its provider config.
@@ -6801,7 +6914,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
     catch (error) {
+      if (error?.code === STALE_REPLY_ERROR_CODE) throw error // already traced and dropped above
       const messageText = error instanceof Error ? error.message : String(error)
+      const staleReply = this.agentContext.isStale(attribution)
       const errorTrace = {
         kind: 'error',
         round,
@@ -6812,9 +6927,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         message: messageText,
         timeout: /timed out/i.test(messageText),
         cancelled: /cancelled/i.test(messageText),
+        ...this.agentContext.traceFields(attribution),
       }
-      if (this.traceRequest) this.traceRequest.last_provider_event = errorTrace
+      if (this.traceRequest && !staleReply) this.traceRequest.last_provider_event = errorTrace
       await this.traceEvent('provider.error', errorTrace)
+      // A failure that belongs to a discarded conversation must not fail the active one.
+      if (staleReply) await this.dropStaleReply(attribution)
       throw error
     }
     finally {
@@ -6822,6 +6940,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     if (generation !== this.generation || !this.active) throw new AgentLoopError('Model turn was cancelled or superseded')
     await this.assertCurrent()
+    await this.dropIfStale(attribution)
     if (!message || typeof message !== 'object') throw new AgentLoopError('Provider returned no message')
     // Calls a closed round made anyway (structured or leaked DSML text); provider-base
     // dropped them from the message and left them here for salvage.
@@ -6915,6 +7034,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // cannot re-enter here; a later independent planner decision still gets
     // its own single bounded recovery.
     if (effectiveAllowTools && !omissionRepair && effectiveRecoveryAttempt === 0 && providerOutputBudgetExhausted(message)) {
+      await this.dropIfStale(attribution)
       this.outputBudgetRecoveryUsed = true
       const state = this.memory.currentPlan?.(this.activePlanKey())
       this.outputBudgetRecoveryGuard = {
@@ -6951,6 +7071,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       })
       await this.persistState()
       try {
+        // The retry rebuilds the request from this round's messages: never under another conversation's attribution.
+        await this.dropIfStale(attribution)
         const recovered = await this.callProvider(current, generation, {
           round,
           allowTools: true,
