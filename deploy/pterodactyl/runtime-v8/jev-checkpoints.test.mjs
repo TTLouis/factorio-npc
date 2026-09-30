@@ -17,8 +17,9 @@ import {
   parseShelfRanking,
   shelfRankingQuestions,
 } from './jev-checkpoints.mjs'
-import { effectiveStage, emptyLedger, restoreLedger, serializeLedger, summarizeLedger } from './jev-judgments.mjs'
+import { effectiveStage, emptyLedger, recordJudgment, restoreLedger, scoreC4Judgment, scoreJudgment, serializeLedger, summarizeLedger } from './jev-judgments.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
+import { recoverInterruptedAgentPlan } from './supervisor.mjs'
 import { DECISION_PROVIDER_DEFAULTS, normalizeDecisionProviderRequest } from './provider.mjs'
 import { applyPlanningEvent, createEmptyPlanningState, getActivePlan, PLAN_STATUS, PLANNING_EVENT } from './planning-state.mjs'
 import { analyzeBehaviorTrace, formatCheckReport, JEV_TRACE_ROWS } from './run-check.mjs'
@@ -76,7 +77,7 @@ function usageOf(promptTokens, completionTokens = 450) {
 // recordingJev, exactly as the other Jev fixtures are.
 function scriptedJev(answers = {}, { onCall, throwFor } = {}) {
   return recordingJev(async (state, questions, call, context) => {
-    onCall?.(state, questions, call, context)
+    await onCall?.(state, questions, call, context)
     if (throwFor?.(state, questions)) throw new Error('Decision provider timed out after 5000 ms')
     const overrides = {}
     for (const [id, answer] of Object.entries(answers)) {
@@ -95,7 +96,7 @@ const restageOnly = answer => (state) => (state?.contract === 'restage_observati
 const u11Calls = jev => jev.calls.filter(call => U11_CONTRACTS.has(call.state?.contract))
 const otherCalls = jev => jev.calls.filter(call => !U11_CONTRACTS.has(call.state?.contract))
 
-function harness({ script, jev = scriptedJev({ next_step_route: directAnswer }), tokens, agentOptions = {}, game: sharedGame, stateFile = null, memory: sharedMemory, noJev = false } = {}) {
+function harness({ script, jev = scriptedJev({ next_step_route: directAnswer }), tokens, agentOptions = {}, game: sharedGame, stateFile = null, memory: sharedMemory, noJev = false, settle = true } = {}) {
   const game = sharedGame ?? new FakeFactorio()
   const memory = sharedMemory ?? new CanonicalTaskBoardMemory()
   const world = { game, memory, calls: [], trace: [], script, jev }
@@ -125,6 +126,18 @@ function harness({ script, jev = scriptedJev({ next_step_route: directAnswer }),
     ...agentOptions,
   })
   world.agent.behaviorTrace = { emit: async (record) => { world.trace.push(record) } }
+  // Shadow judgments are never awaited by the loop. A test that reads their rows lets them settle after each entry point
+  // (`settle: false` leaves the agent exactly as the loop runs it, for the timing tests).
+  world.settle = () => world.agent.jev.idle()
+  if (settle) {
+    for (const name of ['request', 'completed', 'failed']) {
+      const original = world.agent[name].bind(world.agent)
+      world.agent[name] = async (...args) => {
+        try { return await original(...args) }
+        finally { await world.agent.jev.idle() }
+      }
+    }
+  }
   world.rows = event => world.trace.filter(record => record.event === event)
   world.say = () => world.agent.request(REQUEST_TEXT, { sender: 'TTLouis' })
   world.give = (item, count = 10) => { game.inventory[item] = (game.inventory[item] ?? 0) + count }
@@ -224,7 +237,7 @@ test('nextStepClarity: clear only when every deterministic check holds (contract
   const clear = nextStepClarity({ planningState: planningWithTwoSteps(), receipt: RECEIPT })
   assert.equal(clear.clear, true, clear.failed_checks.join(','))
   assert.deepEqual(clear.failed_checks, [])
-  assert.deepEqual(clear.evidence, { contract_specified: true, facts_in_receipts: true, no_blocker: true, no_pending_amendment: true, entities_named: 0 })
+  assert.deepEqual(clear.evidence, { contract_specified: true, facts_in_receipts: true, no_blocker: true, no_pending_amendment: true, no_runtime_work: true, entities_named: 0 })
   assert.equal(clear.next_step.index, 1)
   assert.equal(clear.next_step.contract, 'all: inventory_count copper-ore>=10')
   assert.deepEqual(clear.next_step.requirement_kinds, ['inventory_count'])
@@ -240,6 +253,7 @@ test('nextStepClarity: clear only when every deterministic check holds (contract
   failing({ pendingAmendment: true }, 'pending_amendment')
   failing({ receipt: { view: {}, providerStatus: {} } }, 'no_completion_receipt')
   failing({ boundary: 'failure' }, 'not_a_completion_boundary')
+  failing({ runtime: { runtimeHealthy: true, runtimeReason: 'condition_wait_active' } }, 'authoritative_runtime_active')
   failing({ board: { blocker: 'no water in reach' } }, 'blocker_or_pause_on_board')
   failing({ board: { pause_reason: 'user_pause' } }, 'blocker_or_pause_on_board')
   assert.ok(nextStepClarity({ planningState: planningWithTwoSteps({ goalStatus: 'paused' }), receipt: RECEIPT }).failed_checks.includes('goal_not_active'))
@@ -369,20 +383,53 @@ test('shadow C4: the judgment is recorded with its request id, ids, choice, conf
   const scored = world.rows('jev.judgment_scored').find(row => row.data.family === 'c4_next_step')
   assert.equal(scored.request_id, requestId)
   assert.equal(scored.data.judgment_id, recorded.data.judgment_id)
-  assert.equal(scored.data.agreed, true, 'the step verified on its first batch')
-  assert.equal(scored.data.outcome.step_verified, true)
-  assert.equal(scored.data.outcome.verified_first_try, true)
-  assert.equal(scored.data.realized, false, 'shadow: a would-have-saved figure, not a realized one')
-  assert.equal(scored.data.reason, 'outcome_matches_the_judgment')
-  assert.deepEqual(scored.data.saving, { wakes: 1, tokens: 2450 })
-  assert.equal(scored.data.ledger.would_save.tokens, 2450)
-  assert.equal(scored.data.ledger.saved.tokens, 0)
+  // ONE outcome label: the wake looked something up, so observation WAS needed and `direct_to_executor` disagrees. The
+  // label is final as soon as a lookup happened, so it is scored at the wake's end, whatever the step does next.
+  assert.equal(scored.data.agreed, false, 'the wake made a lookup: observation was needed')
+  assert.equal(scored.data.reason, 'outcome_differs_from_the_judgment')
+  assert.equal(scored.data.outcome.observation_needed, true)
+  assert.equal(scored.data.outcome.fresh_lookups, 1)
+  assert.equal(scored.data.realized, false)
+  assert.equal(scored.data.saving, undefined, 'a disagreement saves nothing')
+  assert.equal(scored.data.ledger.would_save.tokens, 0)
   assert.equal(scored.data.stage, 'shadow')
-  // Scored only after the completion gate closed the step: the row follows step.verified.
   const order = world.trace.map(record => record.event)
-  assert.ok(order.lastIndexOf('step.verified') < order.indexOf('jev.judgment_scored', order.indexOf('c4.wake_measured')))
-  // The ledger keeps the shadow baseline for the tokens a direct route would save.
+  assert.ok(order.indexOf('jev.judgment_scored', order.indexOf('c4.wake_measured')) < order.lastIndexOf('step.verified'), 'scored at the wake, before the step verified')
+  // The ledger keeps the shadow baseline for the tokens a direct route could skip, for the deciding stage.
   assert.deepEqual(world.ledger().families.c4_next_step.samples, [2450])
+})
+
+test('shadow C4: a wake that made no lookup and verified on its first batch is the one case where direct_to_executor agrees', async () => {
+  const world = harness({ script: [plannerSlice(), executorStep(), plannerNextSlice()], tokens: SLICE_TOKENS })
+  await runSliceWithContractedStep2(world)
+  const scored = world.rows('jev.judgment_scored').find(row => row.data.family === 'c4_next_step')
+  assert.equal(scored.data.agreed, true)
+  assert.equal(scored.data.outcome.observation_needed, false)
+  assert.equal(scored.data.outcome.fresh_lookups, 0)
+  assert.equal(scored.data.outcome.verified_first_try, true)
+  const order = world.trace.map(record => record.event)
+  assert.ok(order.lastIndexOf('step.verified') < order.indexOf('jev.judgment_scored'), 'a clean first batch is scored only once the gate verified the step')
+})
+
+test('an always-direct Jev cannot reach deciding on wakes that looked things up, and a ground_first Jev is right on the same wakes', async () => {
+  // 30 wakes that each made a lookup: direct disagrees every time, ground_first agrees every time.
+  const scoreAll = (choice) => {
+    let ledger = emptyLedger()
+    for (let index = 0; index < 60; index++) {
+      const recorded = recordJudgment(ledger, { family: 'c4_next_step', request_id: 'req_a', jev_choice: choice })
+      const result = scoreC4Judgment({ choice, fresh_lookups: 1, verified: true, first_try: true })
+      ledger = scoreJudgment(recorded.ledger, recorded.judgment.judgment_id, { ...result, outcome: {} }).ledger
+    }
+    return ledger
+  }
+  const direct = scoreAll('direct_to_executor')
+  assert.equal(effectiveStage(direct, 'c4_next_step'), 'shadow')
+  assert.equal(summarizeLedger(direct).find(family => family.family === 'c4_next_step').agreed, 0)
+  assert.equal(effectiveStage(scoreAll('ground_first'), 'c4_next_step'), 'deciding', 'the same wakes promote a Jev that was right')
+  // And through the loop: one wake with a lookup scores the always-direct answer as a disagreement.
+  const world = harness({ script: [plannerSlice(), observation(), executorStep(), plannerNextSlice()], tokens: SLICE_TOKENS })
+  await runSliceWithContractedStep2(world)
+  assert.equal(world.ledger().families.c4_next_step.agreed, 0)
 })
 
 test('shadow C4: when the next step is not clear (no contract yet) Jev is not asked, nothing is recorded and the route is exactly the gate\'s', async () => {
@@ -412,7 +459,7 @@ test('deciding C4: the post-step gate, the planner-shape call and the observatio
   let atWake
   world.script[1] = async () => {
     // The provider call of the skipped wake: the tracker still points at the step the gate just activated.
-    atWake = { active: world.plan().active_step_index, closed: world.trace.filter(record => record.event === 'step.verified').length, closes: closes.length }
+    atWake = { active: world.plan().active_step_index, closed: world.trace.filter(record => record.event === 'step.verified').length, closes: closes.length, latestBatch: world.agent.latestCompletedBatchId, admittedBatch: world.game.batchId }
     return executorStep()
   }
 
@@ -420,7 +467,8 @@ test('deciding C4: the post-step gate, the planner-shape call and the observatio
   const requestId = world.rows('request.received')[0].request_id
 
   assert.equal(world.calls.length, 3, 'planner, executor (no observation round), planner: one fewer model call than the shadow run')
-  assert.deepEqual(atWake, { active: 1, closed: 1, closes: 1 }, 'the gate had closed step 1 before the wake; nothing else advanced the tracker')
+  assert.deepEqual({ active: atWake.active, closed: atWake.closed, closes: atWake.closes }, { active: 1, closed: 1, closes: 1 }, 'the gate had closed step 1 before the wake; nothing else advanced the tracker')
+  assert.equal(atWake.latestBatch, atWake.admittedBatch, 'the direct path keeps latestCompletedBatchId current, as the post-step gate does')
   assert.equal(world.jev.calls.filter(call => call.keys.includes('route')).length, 0, 'the post-step gate was not called')
   assert.equal(world.jev.calls.filter(call => call.keys.includes('state_bottleneck')).length, 0, 'the planner-shape call was not made')
   assert.equal(world.jev.calls.filter(call => call.keys.includes('next_step_route')).length, 1)
@@ -503,10 +551,50 @@ test('deciding C4: a step that fails after the skipped wake is scored as a disag
   assert.equal(scored.data.agreed, false)
   assert.equal(scored.data.reason, 'outcome_differs_from_the_judgment')
   assert.equal(scored.data.outcome.had_failure_boundary, true)
-  assert.equal(scored.data.outcome.step_verified, true)
+  assert.equal(scored.data.outcome.step_verified, undefined, 'scored at the failure itself, before the step verified')
   assert.equal(scored.data.outcome.verified_first_try, false)
+  assert.equal(scored.data.outcome.observation_needed, true)
   assert.equal(scored.data.saving, undefined, 'a failed outcome saves nothing')
   assert.equal(scored.data.ledger.saved.tokens, 0)
+  const order = world.trace.map(record => record.event)
+  assert.ok(order.indexOf('jev.judgment_scored') < order.lastIndexOf('step.verified'), 'the disagreement does not wait for what the request does next')
+})
+
+test('deciding C4: a direct step that fails and then REPLANS (or whose request completes or fails) is still scored as a disagreement, and the family demotes', async () => {
+  const world = harness({ script: [plannerSlice(), executorStep(), executorStep(), plannerNextSlice()], tokens: SLICE_TOKENS })
+  const saved = serializeLedger(emptyLedger())
+  saved.families.c4_next_step = { ...saved.families.c4_next_step, stage: 'deciding', scored: 60, agreed: 54, evidence: 60, window: [...Array.from({ length: 54 }, () => 1), ...Array.from({ length: 6 }, () => 0)], samples: [2500] }
+  world.memory.jevLedger = restoreLedger(saved).ledger
+  await world.say()
+  contractSecondStep(world)
+  world.give('iron-ore')
+  await world.agent.completed() // the route goes direct
+  assert.equal(world.rows('c4.route_applied')[0].data.mode, 'deciding')
+  // The batch fails and the recovery is a replan (Jev's gate answers wake_planner -> replan); the step never verifies.
+  world.jev.calls.length = 0
+  await world.agent.failed(world.game.failLastBatch({ type: 'mining', code: 'no_resource' }))
+  const scored = world.rows('jev.judgment_scored').find(row => row.data.family === 'c4_next_step')
+  assert.equal(scored.data.agreed, false, 'scored at the failure: not abandoned by the replan that follows')
+  assert.equal(world.rows('jev.judgment_unscored').filter(row => row.data.family === 'c4_next_step').length, 0)
+  const [change] = world.rows('jev.stage_changed')
+  assert.equal(change.data.direction, 'demoted')
+  assert.equal(effectiveStage(world.ledger(), 'c4_next_step'), 'shadow')
+  // A request that ends with the step unverified (complete, fail, pause) is a disagreement too, never an abandoned judgment.
+  for (const ended of ['request.completed', 'request.failed']) {
+    const direct = harness({ script: [plannerSlice(), executorStep(), plannerNextSlice()], tokens: SLICE_TOKENS })
+    await direct.say()
+    contractSecondStep(direct)
+    direct.give('iron-ore')
+    await direct.agent.completed() // direct answer, no lookup: the label waits for the step
+    assert.equal(direct.rows('jev.judgment_scored').filter(row => row.data.family === 'c4_next_step').length, 0)
+    const row = { event: ended, data: { outcome: 'x' } }
+    await direct.agent.writeTraceEvent(row.event, row.data)
+    await direct.settle()
+    const after = direct.rows('jev.judgment_scored').find(item => item.data.family === 'c4_next_step')
+    assert.equal(after.data.agreed, false, `${ended} with the step unverified`)
+    assert.equal(after.data.outcome.first_batch_unverified, true)
+  }
+  // Only a real cancel abandons (covered by the cancellation test).
 })
 
 test('a family demoted by its own outcomes is traced with the request id and the reason, and stops acting', async () => {
@@ -736,27 +824,44 @@ test('observation families are judged at C1, C2, C3, C4, C6 and C8 and at no oth
   const world = harness({ script: [plannerSlice()], jev: familyJev() })
   await world.say()
   const before = world.jev.calls.length
-  for (const checkpoint of ['C5', 'C7']) assert.equal(await world.agent.jev.prepareRestage({ checkpoint, role: 'executor', planningState: world.memory.planningState(KEY), reason: 'x' }), undefined)
-  assert.equal(world.jev.calls.length, before)
+  const planningState = world.memory.planningState(KEY)
+  for (const checkpoint of ['C5', 'C7']) assert.equal(await world.agent.jev.prepareRestage({ checkpoint, role: 'executor', planningState, reason: 'x' }), undefined)
+  // Shadow: preparing asks nothing and waits for nothing; the call starts once the restage has landed.
   for (const checkpoint of OBSERVATION_RESTAGE_CHECKPOINTS) {
-    const prepared = await world.agent.jev.prepareRestage({ checkpoint, role: 'executor', planningState: world.memory.planningState(KEY), reason: 'x', requestId: 'req_x' })
-    assert.ok(prepared?.judgment_id, checkpoint)
-    assert.deepEqual(prepared.selected, ['inventory_equipment', 'research_state', 'nearby_world'])
+    const beforeThis = world.jev.calls.length
+    const prepared = await world.agent.jev.prepareRestage({ checkpoint, role: 'executor', planningState, reason: 'x', requestId: 'req_x' })
+    assert.equal(prepared.shadow, true, checkpoint)
+    assert.equal(world.jev.calls.length, beforeThis, `${checkpoint}: nothing asked before the restage landed`)
+    await world.agent.jev.afterRestage(prepared, { restaged: true, handoff_id: `ho_${checkpoint}` })
+    await world.settle()
   }
   assert.equal(world.jev.calls.length, before + OBSERVATION_RESTAGE_CHECKPOINTS.length)
+  const recorded = world.rows('jev.judgment_recorded').filter(row => row.data.family === 'observation_families' && /^C[1-8]$/.test(row.data.checkpoint ?? ''))
+  assert.deepEqual(recorded.map(row => row.data.checkpoint).slice(-OBSERVATION_RESTAGE_CHECKPOINTS.length), [...OBSERVATION_RESTAGE_CHECKPOINTS])
 })
 
-test('a restage that is refused abandons its judgment instead of scoring it', async () => {
+test('a restage that is refused never burns a Jev call in shadow, and abandons the judgment of an advisory one instead of scoring it', async () => {
   const world = harness({ script: [plannerSlice()], jev: familyJev() })
   await world.say()
-  const prepared = await world.agent.jev.prepareRestage({ checkpoint: 'C4', role: 'executor', planningState: world.memory.planningState(KEY), reason: 'x', requestId: 'req_x' })
-  await world.agent.jev.afterRestage(prepared, { restaged: false, reason: 'round_in_flight' })
+  const planningState = world.memory.planningState(KEY)
+  const before = world.jev.calls.length
+  const shadow = await world.agent.jev.prepareRestage({ checkpoint: 'C4', role: 'executor', planningState, reason: 'x', requestId: 'req_x' })
+  await world.agent.jev.afterRestage(shadow, { restaged: false, reason: 'round_in_flight' })
+  await world.settle()
+  assert.equal(world.jev.calls.length, before, 'a refused restage costs no call')
+  assert.equal(world.rows('jev.judgment_recorded').filter(row => row.data.family === 'observation_families' && row.data.checkpoint === 'C4').length, 0)
+
+  forceStage(world, 'observation_families', 'advisory')
+  const scoredBefore = summarizeLedger(world.ledger()).find(family => family.family === 'observation_families').scored
+  const advisory = await world.agent.jev.prepareRestage({ checkpoint: 'C4', role: 'executor', planningState, reason: 'x', requestId: 'req_x' })
+  assert.ok(advisory.judgment_id)
+  await world.agent.jev.afterRestage(advisory, { restaged: false, reason: 'round_in_flight' })
   const unscored = world.rows('jev.judgment_unscored').at(-1)
-  assert.equal(unscored.data.judgment_id, prepared.judgment_id)
+  assert.equal(unscored.data.judgment_id, advisory.judgment_id)
   assert.match(unscored.data.reason, /restage_not_applied: round_in_flight/)
   assert.equal(unscored.data.recorded_as_agreement, false)
   assert.equal(unscored.data.request_id, 'req_x')
-  assert.equal(summarizeLedger(world.ledger()).find(family => family.family === 'observation_families').scored, 0)
+  assert.equal(summarizeLedger(world.ledger()).find(family => family.family === 'observation_families').scored, scoredBefore, 'nothing was scored')
 })
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -837,7 +942,12 @@ test('advisory shelf ranking orders the packet\'s candidates from the ranked com
   assert.equal(applied.data.request_id, applied.request_id)
   assert.equal(applied.data.deterministic_first, 'n1')
   assert.match(applied.data.reason, /only_the_planner_still_chooses/)
-  assert.equal(world.rows('jev.judgment_recorded').find(row => row.data.family === 'shelf_ranking').data.acted, true)
+  // Recorded before anything reached the packet (acted false); acted only once the ordering did.
+  const recorded = world.rows('jev.judgment_recorded').find(row => row.data.family === 'shelf_ranking')
+  assert.equal(recorded.data.acted, false)
+  assert.equal(recorded.data.reason, 'advisory_ranking_ready_for_the_packet')
+  const order = world.trace.map(record => record.event)
+  assert.ok(order.indexOf('jev.judgment_recorded') < order.indexOf('jev.shelf_ranking_applied'))
   // The planner chose n1, not Jev's first: Jev never picks for it, and the plan it committed names its own node.
   const accepted = world.rows('plan.accepted').find(row => Array.isArray(row.data.roadmap_node_ids))
   assert.deepEqual(accepted.data.roadmap_node_ids, ['n1'])
@@ -1005,8 +1115,9 @@ test('run record: a shadow run reports judgments per family, agreement, stage an
   const world = await shadowRun()
   const record = buildRunRecord(world.trace)
   const c4 = familyOf(record, 'c4_next_step')
-  assert.deepEqual({ stage: c4.stage, recorded: c4.recorded, scored: c4.scored, agreed: c4.agreed, agreement: c4.agreement, acted: c4.acted }, { stage: 'shadow', recorded: 1, scored: 1, agreed: 1, agreement: 1, acted: 0 })
-  assert.deepEqual(c4.would_save, { wakes: 1, tokens: 2450, calls: 0 })
+  // The wake looked something up, so observation was needed and the direct answer disagrees (and would save nothing).
+  assert.deepEqual({ stage: c4.stage, recorded: c4.recorded, scored: c4.scored, agreed: c4.agreed, agreement: c4.agreement, acted: c4.acted }, { stage: 'shadow', recorded: 1, scored: 1, agreed: 0, agreement: 0, acted: 0 })
+  assert.deepEqual(c4.would_save, { wakes: 0, tokens: 0, calls: 0 })
   assert.deepEqual(c4.saved, { wakes: 0, tokens: 0, calls: 0 })
   assert.equal(c4.ledger.scored, 1)
   assert.equal(c4.removal_candidate, false)
@@ -1014,8 +1125,9 @@ test('run record: a shadow run reports judgments per family, agreement, stage an
   assert.deepEqual(record.jev.by_family.map(row => row.family), ['c4_next_step', 'observation_families', 'shelf_ranking'])
   assert.equal(familyOf(record, 'observation_families').recorded, 2, 'two restages (the two committed slices)')
   assert.deepEqual(record.jev.savings.saved, { wakes: 0, tokens: 0, calls: 0 })
-  assert.equal(record.jev.savings.would_save.tokens, 2450)
-  assert.equal(record.jev.savings.would_save.wakes, 1)
+  assert.equal(record.jev.savings.would_save.tokens, 0)
+  assert.equal(record.jev.savings.would_save.wakes, 0)
+  assert.equal(record.jev.c4.observation_round_tokens, 2450, 'what the shadow wakes spent on observation rounds: the baseline a deciding route would skip')
   assert.equal(record.jev.llm.provider_calls, record.totals.rounds, 'the success metric sits next to what the run spent')
   assert.equal(record.jev.llm.input_units, record.totals.input_units)
   assert.equal(record.jev.llm.output_units, record.totals.output_units)
@@ -1025,8 +1137,9 @@ test('run record: a shadow run reports judgments per family, agreement, stage an
   assert.deepEqual(record.jev.stage_changes, [])
   const text = formatRunRecord(record)
   assert.match(text, /Jev judgments at the delegation checkpoints \(U11\):/)
-  assert.match(text, /- c4_next_step: stage shadow · 1 judged, 1 scored, 1 agreed \(100%\), 0 unscored · promoted 0, demoted 0 · saved 0 wakes, 0 tokens, 0 calls · would have saved 1 wakes, 2,450 tokens, 0 calls/)
-  assert.match(text, /- saved this run: 0 wakes, 0 tokens, 0 calls \(LLM spend: .* in, .* out, 4 calls\) · would have saved: 1 wakes, 2,450 tokens/)
+  assert.match(text, /- c4_next_step: stage shadow · 1 judged, 1 scored, 0 agreed \(0%\), 0 unscored · promoted 0, demoted 0 · saved 0 wakes, 0 tokens, 0 calls · would have saved 0 wakes, 0 tokens, 0 calls/)
+  assert.match(text, /- saved this run: 0 wakes, 0 tokens, 0 calls \(LLM spend: .* in, .* out, 4 calls\) · would have saved: 0 wakes, 0 tokens/)
+  assert.match(text, /- C4 wakes measured: 1 \(observation rounds cost 2,450 tokens; shadow routes 1, deciding routes 0\)/)
 })
 
 test('run record: a deciding run reports the realized saving; a trace without judgment rows has no Jev section and formats as before', async () => {
@@ -1099,7 +1212,7 @@ test('run-check: a demoted family and a deciding route whose skipped step failed
   assert.equal(skipped.length, 1)
   assert.equal(skipped[0].request_id, requestId)
   assert.equal(skipped[0].count, 1)
-  assert.match(skipped[0].detail, /deciding route skipped the wake for jdg_.* but the step did not verify on its first batch \(verified=true, failure_boundary=true\)/)
+  assert.match(skipped[0].detail, /deciding route skipped the wake for jdg_.* but the step did not verify on its first batch \(verified=undefined, failure_boundary=true\)/)
   const demoted = result.findings.filter(finding => finding.signature === 'jev_family_demoted')
   assert.equal(demoted.length, 1)
   assert.equal(demoted[0].request_id, requestId)
@@ -1145,14 +1258,18 @@ test('deciding C4 keeps fact reads ungated: a read the executor asks for in the 
   const measured = world.rows('c4.wake_measured')[0]
   assert.equal(measured.data.fresh_lookups, 1)
   assert.equal(measured.data.estimated_saving_tokens, 50, 'the baseline 2500 minus the 2450 tokens the read round actually cost')
-  // Jev's own state (the baseline) is honest: the skip saved the gate and shape calls and a budget, not the read the agent still chose to make.
-  assert.equal(world.rows('jev.judgment_scored').find(row => row.data.family === 'c4_next_step').data.saving.tokens, 50)
+  // The agent still chose to look something up, so observation WAS needed: the direct answer disagrees and saves nothing.
+  const scored = world.rows('jev.judgment_scored').find(row => row.data.family === 'c4_next_step')
+  assert.equal(scored.data.agreed, false)
+  assert.equal(scored.data.saving, undefined)
 })
 
 test('cancelling a request aborts an in-flight U11 Jev call and abandons the judgments still waiting for an outcome; nothing counts as agreement', async () => {
   const world = harness({ script: [plannerSlice(), observation(), executorStep(), plannerNextSlice()], tokens: SLICE_TOKENS })
   await world.say()
   contractSecondStep(world)
+  forceStage(world, 'observation_families', 'advisory') // the stage that waits for Jev's answer
+  const scoredBefore = summarizeLedger(world.ledger()).find(family => family.family === 'observation_families').scored
 
   // 1. A call in flight when the request is cancelled: the provider that never answers is aborted and nothing is recorded.
   let inFlight
@@ -1165,15 +1282,15 @@ test('cancelling a request aborts an in-flight U11 Jev call and abandons the jud
   await reachedJev // the call is now in flight
   world.agent.cancel('test_cancel')
   assert.equal(await pending, undefined)
-  assert.equal(summarizeLedger(world.ledger()).find(family => family.family === 'observation_families').scored, 0)
+  assert.equal(summarizeLedger(world.ledger()).find(family => family.family === 'observation_families').scored, scoredBefore)
   assert.ok(world.rows('jev.judgment_skipped').some(row => row.data.family === 'observation_families' && row.data.reason === 'jev_fallback'))
 
   // 2. A judgment waiting for its outcome when the request is cancelled is abandoned, never scored.
-  const second = harness({ script: [plannerSlice(), observation(), executorStep(), plannerNextSlice()], tokens: SLICE_TOKENS })
+  const second = harness({ script: [plannerSlice(), executorStep(), plannerNextSlice()], tokens: SLICE_TOKENS })
   await second.say()
   contractSecondStep(second)
   second.give('iron-ore')
-  await second.agent.completed() // step 1 closed, the wake ran: the C4 judgment waits for step 2 to verify
+  await second.agent.completed() // step 1 closed, the direct wake ran with no lookup: the C4 judgment waits for step 2 to verify
   assert.equal(second.rows('jev.judgment_scored').filter(row => row.data.family === 'c4_next_step').length, 0)
   second.agent.cancel('user_stop')
   const unscored = second.rows('jev.judgment_unscored').find(row => row.data.family === 'c4_next_step')
@@ -1189,10 +1306,394 @@ test('a step that verified while the wake was still running is scored the moment
   const jev = world.agent.jev
   const judgment = await jev.record({ family: 'c4_next_step', request_id: 'req_w', step_id: 'step_x', plan_id: 'plan_x', jev_choice: 'direct_to_executor', jev_confidence: 0.9, alternative: { kind: 'test' }, reason: 'test' })
   jev.track({ kind: 'c4', judgment_id: judgment.judgment_id, request_id: 'req_w', plan_id: 'plan_x', step_id: 'step_x', choice: 'direct_to_executor', acted: false, baseline_tokens: 0, had_failure: false, verified: true })
-  jev.beginWake({ judgment_id: judgment.judgment_id })
+  jev.beginWake({ key: judgment.judgment_id })
   assert.equal(world.rows('jev.judgment_scored').length, 0, 'not scoreable before the wake is measured')
-  await jev.endWake({ judgment_id: judgment.judgment_id })
+  await jev.endWake({ key: judgment.judgment_id })
   const [scored] = world.rows('jev.judgment_scored')
   assert.equal(scored.data.judgment_id, judgment.judgment_id)
   assert.equal(scored.data.agreed, true)
+})
+
+// ---------------------------------------------------------------------------------------------------------------
+// Review fixes: the runtime's own wait checks come before any judgment (blocker 1)
+// ---------------------------------------------------------------------------------------------------------------
+
+class FollowFactorio extends FakeFactorio {
+  async command(text) {
+    if (this.follow && text.includes('remote.call("autorio_follow","status")')) return JSON.stringify(this.follow)
+    return super.command(text)
+  }
+}
+
+const GATE_WAITS = {
+  route: { choice: 'continue_runtime', confidence: 0.9 },
+  development: { choice: 'maintain', confidence: 0.9 },
+  next_step_route: directAnswer,
+}
+
+// Step 1 closes while the runtime already owns work; the family is deciding and Jev says direct. The route must be exactly
+// the one a run with U11 off takes: the post-step gate's own wait checks decide.
+async function decidingWithRuntimeWork({ prepare, deciding = true }) {
+  const run = async (agentOptions) => {
+    const world = harness({ script: [plannerSlice(), executorStep(), plannerNextSlice()], jev: scriptedJev(GATE_WAITS), tokens: SLICE_TOKENS, game: new FollowFactorio(), agentOptions })
+    if (deciding && agentOptions?.jevCheckpoints !== false) forceStage(world, 'c4_next_step', 'deciding', { samples: [2500] })
+    await world.say()
+    contractSecondStep(world)
+    await prepare(world)
+    world.give('iron-ore')
+    world.result = await world.agent.completed()
+    return world
+  }
+  return { on: await run({}), off: await run({ jevCheckpoints: false }) }
+}
+
+for (const [label, reason, prepare] of [
+  ['an active condition wait', 'condition_wait_active', (world) => {
+    world.agent.validateConditionWaitHealth = async () => ({ healthy: true, action: 'wait', wait: { wait_id: 'wait_research_x', condition: { kind: 'research' } } })
+  }],
+  ['persistent runtime work (a healthy follow controller)', 'persistent_controller_active', (world) => {
+    world.game.follow = { active: true, healthy: true, controller_live: true, state: 'following', target_player: 'tester', current_distance: 4, desired_distance: 4 }
+  }],
+  ['autorio queued work', 'autorio_active_work', (world) => {
+    // The gate verifies the step from the batch receipt the runtime recorded (an idle read); the status the boundary then
+    // carries shows more work queued behind it.
+    const receipt = world.agent.taskStatusReceipt.bind(world.agent)
+    world.agent.taskStatusReceipt = async () => {
+      const result = await receipt()
+      return { ...result, view: { ...result.view, task_state: 'crafting', queue_length: 2 }, providerStatus: { ...result.providerStatus, task_state: 'crafting', queue_length: 2 } }
+    }
+  }],
+]) {
+  test(`deciding C4 with ${label}: no judgment is asked or applied, the step is not clear, and the route is wait_runtime exactly as with U11 off`, async () => {
+    const { on, off } = await decidingWithRuntimeWork({ prepare })
+    assert.equal(off.rows('step.verified').length, 1, 'the step really closed: this is a C4 boundary')
+    assert.equal(on.rows('step.verified').length, 1)
+    const [clear] = on.rows('c4.next_step_clear')
+    assert.equal(clear.data.clear, false)
+    assert.ok(clear.data.failed_checks.includes('authoritative_runtime_active'))
+    assert.equal(clear.data.runtime_reason, reason)
+    assert.match(clear.data.reason, /^not_clear: .*authoritative_runtime_active/)
+    assert.equal(clear.data.evidence.no_runtime_work, false)
+    assert.equal(clear.request_id, on.rows('request.received')[0].request_id)
+    assert.equal(on.jev.calls.some(call => call.state?.contract === 'c4_next_step_route'), false, 'no Jev call')
+    assert.equal(on.rows('jev.judgment_recorded').some(row => row.data.family === 'c4_next_step'), false)
+    assert.equal(on.rows('c4.route_applied').length, 0)
+    // The route is the gate's, identical to a run without these judgments: wait_runtime, no model woken.
+    assert.equal(off.result, null)
+    assert.equal(on.result, null)
+    assert.equal(on.calls.length, off.calls.length)
+    assert.deepEqual(on.rows('post_step.routed').map(row => [row.data.route, row.data.applied_route]), off.rows('post_step.routed').map(row => [row.data.route, row.data.applied_route]))
+    assert.equal(on.rows('planner.skipped').length, off.rows('planner.skipped').length)
+    assert.equal(on.agent.latestCompletedBatchId, off.agent.latestCompletedBatchId)
+    assert.equal(on.agent.latestCompletedBatchId, on.game.batchId)
+  })
+}
+
+test('with no decision provider an active condition wait is wait_runtime and U11 writes nothing (the behaviour the deciding path must not bypass)', async () => {
+  const world = harness({ script: [plannerSlice(), executorStep()], tokens: SLICE_TOKENS, noJev: true })
+  await world.say()
+  contractSecondStep(world)
+  world.agent.validateConditionWaitHealth = async () => ({ healthy: true, action: 'wait', wait: { wait_id: 'w' } })
+  world.give('iron-ore')
+  assert.equal(await world.agent.completed(), null)
+  assert.equal(world.trace.some(isU11Row), false)
+  assert.equal(world.calls.length, 1)
+})
+
+test('deciding C4: work the runtime takes on DURING Jev\'s answer, or an amendment staged during it, keeps the route the gate\'s (the late checks only make it more cautious)', async () => {
+  for (const [label, hook, reason] of [
+    ['runtime work', (world) => { world.game.taskState = 'mining'; world.game.queueLength = 1 }, 'authoritative_runtime_active'],
+    ['an amendment', (world) => { world.agent.pendingInteractionAmendment = { sender: 'TTLouis', text: 'use the lake to the north' }; world.agent.pendingAmendmentConversationSeq = world.agent.agentContext.conversationSeq }, 'amendment_staged_during_the_jev_call'],
+  ]) {
+    let world
+    const jev = scriptedJev({ next_step_route: directAnswer }, { onCall: (state) => { if (state?.contract === 'c4_next_step_route') hook(world) } })
+    world = harness({ script: [plannerSlice(), observation(), executorStep(), plannerNextSlice()], jev, tokens: SLICE_TOKENS })
+    forceStage(world, 'c4_next_step', 'deciding', { samples: [2500] })
+    await world.say()
+    contractSecondStep(world)
+    world.give('iron-ore')
+    await world.agent.completed()
+    const recorded = world.rows('jev.judgment_recorded').find(row => row.data.family === 'c4_next_step')
+    assert.equal(recorded.data.acted, false, label)
+    assert.equal(recorded.data.reason, `route_unchanged_${reason}`, label)
+    assert.equal(recorded.data.detail.late_check.startsWith(reason), true)
+    assert.equal(world.rows('c4.route_applied').some(row => row.data.mode === 'deciding'), false, `${label}: no direct route`)
+    assert.equal(world.rows('planner.wake').some(row => row.data.source === 'c4_next_step_clear'), false, label)
+    assert.equal(world.rows('c4.route_applied').find(row => row.data.mode === 'route_unchanged').data.reason, 'route_unchanged_low_confidence_or_ground_first_or_late_check')
+  }
+})
+
+// ---------------------------------------------------------------------------------------------------------------
+// Review fixes: shadow is a timing no-op; stages that need the answer ask after the guard and wait a bounded time
+// ---------------------------------------------------------------------------------------------------------------
+
+test('a shadow Jev that never answers in time leaves provider-call order, messages, restage outcomes and the trace sequence identical to Jev off; late answers are discarded, not recorded', async () => {
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const slow = scriptedJev({ next_step_route: directAnswer, shelf_ranking: rankingAnswer }, { onCall: async (state) => { if (U11_CONTRACTS.has(state?.contract)) await gate } })
+  const script = () => [oneStepSlice({ plan: TWO_STEPS, roadmap: SHELF_SEVEN }), observation(), executorStep(), plannerNextSlice({ roadmapNodeIds: ['n7'] })]
+  const off = harness({ script: script(), tokens: PLANNER_TOKENS, agentOptions: { jevCheckpoints: false, ...plannerRestage } })
+  await runSliceWithContractedStep2(off)
+  const on = harness({ script: script(), jev: slow, tokens: PLANNER_TOKENS, settle: false, agentOptions: plannerRestage })
+  await runSliceWithContractedStep2(on) // every U11 call is still waiting: nothing on the critical path waited for it
+
+  assert.ok(slow.calls.filter(call => U11_CONTRACTS.has(call.state?.contract)).length >= 3, 'the shadow calls were started')
+  assert.equal(on.rows('jev.judgment_recorded').length, 0, `none has answered: ${JSON.stringify(on.rows('jev.judgment_recorded').map(row => row.data.family))}`)
+  assert.deepEqual(on.calls.map(call => normalize(call.messages)), off.calls.map(call => normalize(call.messages)), 'identical provider requests in identical order')
+  assert.deepEqual(on.trace.filter(record => !isU11Row(record)).map(record => record.event), off.trace.map(record => record.event), 'identical behavior rows')
+  assert.deepEqual(on.rows('context.restaged').map(row => `${row.data.role}:${row.data.checkpoint}`), off.rows('context.restaged').map(row => `${row.data.role}:${row.data.checkpoint}`), 'identical restage outcomes')
+  assert.equal(on.rows('context.restage_refused').length, off.rows('context.restage_refused').length)
+
+  release()
+  await on.settle()
+  // The turn, the conversation and the step moved on while Jev thought: every answer is discarded and traced, none recorded.
+  // Only the restage still in force (the last executor, whose window is open and whose conversation is current) may record.
+  assert.deepEqual(on.rows('jev.judgment_recorded').map(row => [row.data.family, row.data.checkpoint]), [['observation_families', 'C3']])
+  assert.equal(on.rows('jev.judgment_recorded').some(row => ['c4_next_step', 'shelf_ranking'].includes(row.data.family)), false)
+  const discarded = on.rows('jev.judgment_skipped').filter(row => row.data.reason === 'answer_discarded_stale')
+  assert.ok(discarded.length >= 2, `late answers discarded: ${discarded.length}`)
+  assert.ok(discarded.every(row => row.data.recorded_as_agreement === false && typeof row.request_id === 'string'))
+  assert.ok(summarizeLedger(on.ledger()).every(family => family.scored === 0 && family.agreed === 0))
+})
+
+
+test('advisory observation families: a round that starts during the wait is caught by the guard after it (the restage is refused, nothing is swapped, the judgment is abandoned); a guard that refuses beforehand spends no call', async () => {
+  let world
+  world = harness({ script: [plannerSlice(), executorStep(), plannerNextSlice()], jev: scriptedJev({ next_step_route: directAnswer, ...Object.fromEntries(Object.entries(FAMILY_ANSWERS).map(([id, answer]) => [id, restageOnly(answer)])) }, { onCall: (state) => { if (state?.contract === 'restage_observation_families' && world?.armed) world.agent.providerCallsByGeneration.set(world.agent.generation, 1) } }), tokens: SLICE_TOKENS, game: new FactsFactorio() })
+  await world.say() // C3 happens here (shadow stage: nothing waits)
+  forceStage(world, 'observation_families', 'advisory')
+  const planning = world.memory.planningState(KEY)
+  const callsBefore = world.jev.calls.length
+
+  // A chat turn starts a provider round while the restage waits for Jev.
+  world.armed = true
+  const refused = await world.agent.restageBetweenTurns({ checkpoint: 'C8', role: 'executor', reason: 'test', actor: world.agent.epoch, planningState: planning })
+  world.agent.providerCallsByGeneration.delete(world.agent.generation)
+  world.armed = false
+  assert.equal(refused.restaged, false)
+  assert.equal(refused.reason, 'round_in_flight', 'the guard ran after the await')
+  assert.equal(world.jev.calls.length, callsBefore + 1, 'the call was made once the guard had passed')
+  const row = world.rows('context.restage_refused').at(-1)
+  assert.equal(row.data.reason, 'round_in_flight')
+  assert.equal(world.agent.agentContext.role, 'executor')
+  const unscored = world.rows('jev.judgment_unscored').at(-1)
+  assert.match(unscored.data.reason, /restage_not_applied: round_in_flight/)
+
+  // A round already in flight BEFORE the wait: the restage would be refused, so no call is spent on it.
+  world.agent.providerCallsByGeneration.set(world.agent.generation, 1)
+  const callsNow = world.jev.calls.length
+  const early = await world.agent.restageBetweenTurns({ checkpoint: 'C8', role: 'executor', reason: 'test', actor: world.agent.epoch, planningState: planning })
+  world.agent.providerCallsByGeneration.delete(world.agent.generation)
+  assert.equal(early.restaged, false)
+  assert.equal(world.jev.calls.length, callsNow, 'never burn a call on a restage that will be refused')
+})
+
+test('an advisory wait is bounded: a Jev that does not answer in time leaves the packet as it was and the restage proceeds', async () => {
+  const hang = scriptedJev({ next_step_route: directAnswer }, { onCall: async (state) => { if (state?.contract === 'restage_observation_families') await new Promise(() => {}) } })
+  const world = harness({ script: [plannerSlice(), executorStep(), plannerNextSlice()], jev: hang, tokens: SLICE_TOKENS, settle: false })
+  await world.say()
+  forceStage(world, 'observation_families', 'advisory')
+  world.agent.jev.waitMs = 25
+  const started = Date.now()
+  const result = await world.agent.restageBetweenTurns({ checkpoint: 'C8', role: 'executor', reason: 'test', actor: world.agent.epoch })
+  assert.equal(result.restaged, true, 'the restage did not wait for Jev')
+  assert.ok(Date.now() - started < 2000)
+  assert.equal(JSON.stringify(world.agent.messages).includes('jev_fact'), false)
+  const skipped = world.rows('jev.judgment_skipped').find(row => row.data.family === 'observation_families')
+  assert.equal(skipped.data.reason, 'jev_fallback')
+  assert.match(skipped.data.error, /bounded wait/)
+})
+
+// ---------------------------------------------------------------------------------------------------------------
+// Review nits
+// ---------------------------------------------------------------------------------------------------------------
+
+test('nit a: the ledger persist is deferred past the trace write, coalesced, and a failed write is caught (no unhandled rejection, no delay for callers)', async () => {
+  const world = harness({ script: [plannerSlice()] })
+  await world.say()
+  let writes = 0
+  world.agent.persistState = () => { writes++; return Promise.reject(new Error('disk full')) }
+  const jev = world.agent.jev
+  jev.persist()
+  jev.persist()
+  jev.persist()
+  assert.equal(writes, 0, 'nothing is snapshotted synchronously inside the trace write')
+  await jev.flushPersist()
+  assert.equal(writes, 1, 'one write for the burst')
+  await new Promise(resolve => setImmediate(resolve)) // a rejection nobody handles would fail the run here
+  // scoreNow inside observe() only schedules the write.
+  writes = 0
+  const recorded = await jev.record({ family: 'skill_order', request_id: 'req_p', jev_choice: 'none', reason: 'test' })
+  jev.scoreNow(recorded.judgment_id, { agreed: true, outcome: {} })
+  assert.equal(writes, 0)
+  await jev.idle()
+  assert.equal(writes, 1)
+})
+
+test('nit b: U11 decision.response rows carry the same usage and cost fields as the gate\'s rows', async () => {
+  const base = scriptedJev({ next_step_route: directAnswer })
+  const withUsage = Object.assign(async (...args) => ({ ...(await base(...args)), usage: { input_tokens: 120, output_tokens: 9, cost: 0.0000042 } }), { calls: base.calls, callsWith: base.callsWith })
+  const world = harness({ script: [plannerSlice(), observation(), executorStep(), plannerNextSlice()], jev: withUsage, tokens: SLICE_TOKENS })
+  const decisions = []
+  const original = world.agent.decisionTraceEvent.bind(world.agent)
+  world.agent.decisionTraceEvent = (event, data) => { decisions.push({ event, data }); return original(event, data) }
+  await runSliceWithContractedStep2(world)
+  const responses = decisions.filter(item => item.event === 'decision.response')
+  const u11 = responses.filter(item => U11_CONTRACTS.has(item.data.contract))
+  const gate = responses.find(item => item.data.contract === 'post_step_planner_gate')
+  assert.ok(u11.length >= 3 && gate)
+  for (const item of u11) {
+    assert.deepEqual({ input_units: item.data.input_units, output_units: item.data.output_units, cost_usd: item.data.cost_usd }, { input_units: 120, output_units: 9, cost_usd: 0.0000042 }, item.data.contract)
+    for (const key of ['input_units', 'output_units', 'cost_usd', 'latency_ms', 'provider', 'model']) assert.ok(key in gate.data && key in item.data, `${key} is on both the gate row and the U11 row`)
+  }
+})
+
+test('nit c: a shelf ranking whose picked slice FAILS (blocked, superseded or cancelled) is scored as a disagreement, not left waiting', async () => {
+  const world = harness({
+    script: [oneStepSlice({ roadmap: SHELF_SEVEN }), plannerNextSlice({ roadmapNodeIds: ['n7'] })],
+    jev: scriptedJev({ shelf_ranking: rankingAnswer }),
+    tokens: PLANNER_TOKENS,
+    agentOptions: plannerRestage,
+  })
+  await world.say()
+  world.give('iron-ore')
+  await world.agent.completed() // the planner picks n7
+  assert.equal(world.rows('jev.judgment_scored').filter(row => row.data.family === 'shelf_ranking').length, 0, 'the slice has not finished')
+  const state = structuredClone(world.memory.planningState(KEY))
+  getActivePlan(state).status = PLAN_STATUS.BLOCKED
+  world.memory.planningByNpc.set(KEY, state)
+  await world.agent.writeTraceEvent('request.failed', { message: 'blocked' })
+  await world.settle()
+  const scored = world.rows('jev.judgment_scored').find(row => row.data.family === 'shelf_ranking')
+  assert.equal(scored.data.agreed, false)
+  assert.equal(scored.data.outcome.slice_verified, false)
+  assert.equal(scored.data.outcome.slice_status, 'BLOCKED')
+  assert.equal(scored.data.outcome.picked, 'n7')
+})
+
+test('nit d: a fresh agent that looked nothing up is not agreement; the judgment is left unscored with the reason', async () => {
+  const world = harness({ script: [plannerSlice(), executorStep(), plannerNextSlice()], jev: familyJev({}), tokens: SLICE_TOKENS })
+  await runSliceWithContractedStep2(world)
+  const obs = summarizeLedger(world.ledger()).find(family => family.family === 'observation_families')
+  assert.equal(obs.agreed, 0)
+  assert.equal(obs.scored, 0, 'never counted')
+  assert.ok(obs.unscored >= 1)
+  const unscored = world.rows('jev.judgment_unscored').find(row => row.data.family === 'observation_families')
+  assert.equal(unscored.data.reason, 'no_lookups_made_nothing_to_compare')
+  assert.equal(unscored.data.recorded_as_agreement, false)
+})
+
+test('nit e: an advisory shelf ranking is acted only when the ordering reached a packet; a pickup with no restage records it without acting', async () => {
+  const world = await shelfSlices({ jev: scriptedJev({ shelf_ranking: rankingAnswer }), picked: 'n7', stage: 'advisory', options: { restageSoftLimitTokens: { planner: 1_000_000, executor: 1_000_000 } } })
+  assert.equal(world.rows('context.restaged').filter(row => row.data.role === 'planner').length, 0, 'no planner packet was built')
+  assert.equal(world.rows('jev.shelf_ranking_applied').length, 0)
+  const recorded = world.rows('jev.judgment_recorded').find(row => row.data.family === 'shelf_ranking')
+  assert.equal(recorded.data.acted, false)
+  const scored = world.rows('jev.judgment_scored').find(row => row.data.family === 'shelf_ranking')
+  assert.equal(scored.data.acted, false, 'it never reached the planner')
+  assert.equal(scored.data.realized, false)
+  // No packet to order, so the wait was never spent: the answer was not awaited on the critical path.
+  assert.equal(world.jev.calls.filter(call => call.state?.contract === 'shelf_ranking').length, 2, 'asked at both pickups')
+})
+
+// ---------------------------------------------------------------------------------------------------------------
+// Review nit f: C6 and C7 with U11 ON
+// ---------------------------------------------------------------------------------------------------------------
+
+function c6Jev() {
+  return recordingJev(async (state, questions) => {
+    if (questions.recovery_semantics) {
+      return {
+        model: 'jev-latest',
+        provider: 'TypeSafe',
+        answers: {
+          recovery_semantics: { type: 'choice', choice: 'semantic_replan', confidence: 0.95 },
+          one_observation_can_resolve: { type: 'noul', noul: 0.1 },
+        },
+        usage: { input_tokens: 60, output_tokens: 6, cost: 0 },
+      }
+    }
+    return questions.intent ? { overrides: { intent: { choice: 'new_goal', confidence: 0.9 } } } : undefined
+  })
+}
+
+async function c6Run(agentOptions) {
+  const jev = c6Jev()
+  const world = harness({
+    script: [
+      plannerSlice(),
+      () => observation(),
+      () => planReply({ plan: TWO_STEPS, currentStep: 0, operations: [gather('iron-ore', 4)] }),
+      () => planReply({ plan: TWO_STEPS, currentStep: 0, operations: [gather('iron-ore', 4)] }),
+    ],
+    jev,
+    agentOptions,
+  })
+  await world.say()
+  world.give('iron-ore', 2)
+  await world.agent.completed()
+  const result = await world.agent.recoverPlan(world.agent.generation, new Error('strategy invalidated by fresh evidence'), 1)
+  await world.settle()
+  world.result = result
+  return world
+}
+
+test('C6 with U11 on: bounded recovery still restages a fresh executor silently, its packet is identical to a run with U11 off, and the restage is judged (shadow) without changing it', async () => {
+  const on = await c6Run({})
+  const off = await c6Run({ jevCheckpoints: false })
+  assert.equal(on.result.goalStatus, 'active')
+  const row = on.rows('context.restaged').find(item => item.data.checkpoint === 'C6')
+  assert.ok(row, 'a C6 restage')
+  assert.equal(row.data.role, 'executor')
+  assert.equal(on.rows('request.completed').filter(item => item.data.outcome === 'asked_user').length, 0, 'no user interruption')
+  assert.equal(normalize(on.calls.at(-1).messages), normalize(off.calls.at(-1).messages), 'the recovery round receives the same packet')
+  assert.deepEqual(on.calls.map(call => normalize(call.messages)), off.calls.map(call => normalize(call.messages)))
+  // The C6 restage was judged: one call with its checkpoint, recorded after the restage landed.
+  const asked = on.jev.calls.filter(call => call.state?.contract === 'restage_observation_families' && call.state.checkpoint === 'C6')
+  assert.equal(asked.length, 1)
+  const judged = on.rows('jev.judgment_recorded').find(item => item.data.family === 'observation_families' && item.data.checkpoint === 'C6')
+  assert.ok(judged)
+  assert.equal(judged.data.stage, 'shadow')
+  assert.equal(judged.data.acted, false)
+  assert.equal(off.jev.calls.some(call => call.state?.contract === 'restage_observation_families'), false)
+})
+
+test('C7 with U11 on: recovery after a restart restages from the packet as before and Jev is never asked about it (C7 is not a judged checkpoint)', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-jev-c7-'))
+  const run = async (agentOptions, file) => {
+    const game = new FakeFactorio()
+    const first = harness({ script: [plannerSlice()], game, stateFile: file, agentOptions })
+    await first.say()
+    await first.agent.persistQueue
+    const jev = scriptedJev({ next_step_route: directAnswer })
+    const second = harness({ script: [() => planReply({ plan: TWO_STEPS, currentStep: 0, operations: [gather('iron-ore', 4)] })], game, stateFile: file, jev, agentOptions, memory: new CanonicalTaskBoardMemory() })
+    await second.agent.loadPersistentState()
+    const recovery = await recoverInterruptedAgentPlan(second.agent, 'runtime_restart', {})
+    await second.settle()
+    return { second, recovery, jev }
+  }
+  const on = await run({}, path.join(dir, 'on.json'))
+  const off = await run({ jevCheckpoints: false }, path.join(dir, 'off.json'))
+  assert.equal(on.recovery.recovered, true)
+  const row = on.second.rows('context.restaged').find(item => item.data.checkpoint === 'C7')
+  assert.ok(row)
+  assert.equal(on.jev.calls.some(call => call.state?.contract === 'restage_observation_families'), false, 'no Jev call for C7')
+  assert.equal(on.second.trace.some(record => record.event === 'jev.judgment_recorded' && record.data.checkpoint === 'C7'), false)
+  assert.equal(normalize(on.second.calls[0].messages), normalize(off.second.calls[0].messages), 'the recovery packet is identical')
+})
+
+test('a judged step whose FIRST batch completes without the gate closing it is a disagreement at that moment (observation was needed), whatever the request does next', async () => {
+  const world = harness({ script: [plannerSlice(), executorStep(), executorStep(), plannerNextSlice()], tokens: SLICE_TOKENS })
+  await world.say()
+  contractSecondStep(world)
+  world.give('iron-ore')
+  await world.agent.completed() // step 1 closes; the wake makes no lookup and submits step 2
+  assert.equal(world.rows('jev.judgment_scored').filter(row => row.data.family === 'c4_next_step').length, 0, 'waiting for the first batch')
+  await world.agent.completed() // the batch completes but the copper is not there: the gate does not close step 2
+  const scored = world.rows('jev.judgment_scored').find(row => row.data.family === 'c4_next_step')
+  assert.equal(scored.data.agreed, false)
+  assert.equal(scored.data.outcome.first_batch_unverified, true)
+  assert.equal(scored.data.outcome.observation_needed, true)
+  assert.equal(scored.data.outcome.had_failure_boundary, false)
+  assert.equal(world.rows('step.verified').length, 1, 'step 2 never verified, and the judgment did not wait for it')
 })

@@ -204,6 +204,15 @@ export function recordJudgment(ledger, input, { salt = '' } = {}) {
   return { ledger: next, judgment }
 }
 
+/** A judgment's effect reached its consumer (e.g. an advisory order reached a packet): it is `acted` from now on. */
+export function markJudgmentActed(ledger, judgmentId) {
+  const pending = ledger?.pending?.[judgmentId]
+  if (!pending || pending.stage === 'shadow' || pending.acted === true) return undefined
+  const next = structuredClone(ledger)
+  next.pending[judgmentId].acted = true
+  return next
+}
+
 export function pendingJudgment(ledger, judgmentId) {
   return ledger?.pending?.[judgmentId]
 }
@@ -409,22 +418,28 @@ export function restoreLedger(raw) {
 // --- scorers: pure outcome rules, one per family ---------------------------------------------------------------
 
 /**
- * C4. Jev said `direct_to_executor` (the executor acts on the next committed step with no targeted-observation
- * wake) or `ground_first`. The outcome is whether the step then verified, and whether it did so on the first
- * batch (no failure boundary in between), plus what the wake that ran did.
- *  - direct_to_executor agrees when the step verified on its first batch: the next step really was clear, so
- *    any observation rounds the wake spent were not needed. (A shadow wake that did observe is counted as
- *    `would_save`, an upper bound; a deciding wake that skipped them measured the real thing.)
- *  - ground_first agrees when the wake made at least one fresh lookup (grounding was needed), or when the step
- *    did not verify on its first batch (caution was justified).
- * `verified` is true, false, or undefined while unknown (the judgment is then not scoreable yet).
+ * C4. ONE outcome label, `observation_needed`, scores both answers (mutually exclusive):
+ *   observation_needed = the wake made fresh lookups before its first admitted operation
+ *                        OR the step did not verify on its first batch (a failure boundary, or the first batch
+ *                        completing without the contract satisfied).
+ * `direct_to_executor` agrees iff observation was NOT needed; `ground_first` agrees iff it WAS. This errs against
+ * `direct`, the safe direction: an always-direct Jev is wrong every time the wake looked anything up or the step
+ * needed more than one batch, so it cannot earn promotion on wakes that did observe.
+ * A lookup or a failed first batch is final (whatever the request does next); "not needed" needs the step to have
+ * verified on its first batch. Undefined while the label is not yet known.
  */
-export function scoreC4Judgment({ choice, fresh_lookups: freshLookups, verified, first_try: firstTry }) {
-  if (verified === undefined || !Number.isFinite(freshLookups)) return undefined
-  const verifiedFirstTry = verified === true && firstTry === true
-  if (choice === 'direct_to_executor') return { agreed: verifiedFirstTry }
-  if (choice === 'ground_first') return { agreed: freshLookups >= 1 || !verifiedFirstTry }
+export function c4ObservationNeeded({ fresh_lookups: freshLookups, verified, first_try: firstTry }) {
+  if (!Number.isFinite(freshLookups)) return undefined
+  if (freshLookups >= 1 || firstTry === false || verified === false) return true
+  if (verified === true && firstTry === true) return false
   return undefined
+}
+
+export function scoreC4Judgment({ choice, fresh_lookups: freshLookups, verified, first_try: firstTry }) {
+  if (choice !== 'direct_to_executor' && choice !== 'ground_first') return undefined
+  const needed = c4ObservationNeeded({ fresh_lookups: freshLookups, verified, first_try: firstTry })
+  if (needed === undefined) return undefined
+  return { agreed: choice === 'direct_to_executor' ? !needed : needed, observation_needed: needed }
 }
 
 function unique(list) {
@@ -433,23 +448,28 @@ function unique(list) {
 
 /**
  * Observation families. `selected` is what Jev picked (taxonomy threshold 0.5, cap 4); `looked` is the set of
- * families the fresh agent then actually looked up (fresh reads, before its first admitted operation).
- * Shadow (mode two_sided): at least half of what the agent looked up was predicted (recall) and at least half
- * of what Jev picked was used (precision); an empty pair agrees.
- * Advisory (mode recall_only: facts were added to the packet): recall only, because a family Jev supplied is
- * never looked up, so precision cannot be measured.
+ * families the fresh agent then actually looked up (fresh reads, before its first admitted operation); `provided`
+ * is what the packet already supplied (advisory facts), which an agent never looks up.
+ *   recall    = share of what the agent looked up that Jev predicted
+ *   precision = share of the UNSUPPLIED picks the agent used (a supplied pick cannot be measured); all picks supplied
+ *               leaves it neutral
+ * agreed = recall >= 0.5 and precision >= 0.5.
+ * An agent that looked nothing up is not agreement: with nothing picked either, or with every pick supplied, there is
+ * nothing to compare and the result is `neutral` (the caller leaves it unscored); an unsupplied pick the agent never
+ * used is a disagreement (Jev over-predicted).
  */
-export function scoreObservationFamilies({ selected, looked, provided = [], mode = 'two_sided' }) {
+export function scoreObservationFamilies({ selected, looked, provided = [], mode }) {
   const picked = unique(Array.isArray(selected) ? selected : [])
   const used = unique(Array.isArray(looked) ? looked : [])
   const supplied = new Set(Array.isArray(provided) ? provided : [])
+  const unsupplied = picked.filter(family => !supplied.has(family))
+  const scoring = mode ?? (supplied.size > 0 ? 'with_supplied_facts' : 'two_sided')
+  if (used.length === 0 && unsupplied.length === 0) return { agreed: undefined, neutral: true, recall: undefined, precision: undefined, mode: scoring }
   const hits = used.filter(family => picked.includes(family))
   const recall = used.length === 0 ? 1 : hits.length / used.length
-  const precision = picked.length === 0 ? 1 : picked.filter(family => used.includes(family) || supplied.has(family)).length / picked.length
-  const agreed = mode === 'recall_only'
-    ? recall >= 0.5
-    : recall >= 0.5 && precision >= 0.5
-  return { agreed, recall: Math.round(recall * 1000) / 1000, precision: Math.round(precision * 1000) / 1000, mode }
+  const precision = unsupplied.length === 0 ? 1 : unsupplied.filter(family => used.includes(family)).length / unsupplied.length
+  const agreed = recall >= 0.5 && precision >= 0.5
+  return { agreed, neutral: false, recall: Math.round(recall * 1000) / 1000, precision: Math.round(precision * 1000) / 1000, mode: scoring }
 }
 
 /**

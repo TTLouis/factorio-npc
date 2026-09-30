@@ -12,6 +12,7 @@ import {
   pendingJudgment,
   recordJudgment,
   restoreLedger,
+  c4ObservationNeeded,
   scoreC4Judgment,
   scoreJudgment,
   scoreObservationFamilies,
@@ -242,28 +243,52 @@ test('savings: a saving counts only when the outcome agreed, in the shadow or th
   assert.equal(summarizeFamily(saving, 'shelf_ranking').removal_candidate, false, 'any measured saving clears the flag')
 })
 
-test('scoreC4Judgment scores against the outcome: direct needs a step verified on its first batch; ground_first is right when grounding happened or the first batch failed', () => {
-  assert.deepEqual(scoreC4Judgment({ choice: 'direct_to_executor', fresh_lookups: 0, verified: true, first_try: true }), { agreed: true })
-  assert.deepEqual(scoreC4Judgment({ choice: 'direct_to_executor', fresh_lookups: 3, verified: true, first_try: true }), { agreed: true }, 'the observation rounds were spent for nothing')
-  assert.deepEqual(scoreC4Judgment({ choice: 'direct_to_executor', fresh_lookups: 0, verified: true, first_try: false }), { agreed: false }, 'a failure boundary came first')
-  assert.deepEqual(scoreC4Judgment({ choice: 'direct_to_executor', fresh_lookups: 0, verified: false, first_try: false }), { agreed: false })
-  assert.deepEqual(scoreC4Judgment({ choice: 'ground_first', fresh_lookups: 2, verified: true, first_try: true }), { agreed: true })
-  assert.deepEqual(scoreC4Judgment({ choice: 'ground_first', fresh_lookups: 0, verified: true, first_try: true }), { agreed: false }, 'over-cautious')
-  assert.deepEqual(scoreC4Judgment({ choice: 'ground_first', fresh_lookups: 0, verified: false, first_try: false }), { agreed: true })
-  assert.equal(scoreC4Judgment({ choice: 'direct_to_executor', fresh_lookups: 0, verified: undefined, first_try: true }), undefined, 'not scoreable until the step resolved')
-  assert.equal(scoreC4Judgment({ choice: 'maybe', fresh_lookups: 0, verified: true, first_try: true }), undefined)
+test('scoreC4Judgment: ONE outcome label (observation needed = the wake looked something up OR the step did not verify on its first batch); direct agrees iff not needed, ground_first iff needed', () => {
+  const clean = { fresh_lookups: 0, verified: true, first_try: true }
+  assert.deepEqual(scoreC4Judgment({ choice: 'direct_to_executor', ...clean }), { agreed: true, observation_needed: false })
+  assert.deepEqual(scoreC4Judgment({ choice: 'ground_first', ...clean }), { agreed: false, observation_needed: false }, 'over-cautious')
+  // A lookup makes observation needed, whatever happened to the step: the two answers can never both agree.
+  assert.deepEqual(scoreC4Judgment({ choice: 'direct_to_executor', fresh_lookups: 3, verified: true, first_try: true }), { agreed: false, observation_needed: true })
+  assert.deepEqual(scoreC4Judgment({ choice: 'ground_first', fresh_lookups: 3, verified: true, first_try: true }), { agreed: true, observation_needed: true })
+  // A step that did not verify on its first batch needs observation, with or without lookups.
+  assert.deepEqual(scoreC4Judgment({ choice: 'direct_to_executor', fresh_lookups: 0, verified: true, first_try: false }), { agreed: false, observation_needed: true })
+  assert.deepEqual(scoreC4Judgment({ choice: 'direct_to_executor', fresh_lookups: 0, verified: false, first_try: false }), { agreed: false, observation_needed: true })
+  assert.deepEqual(scoreC4Judgment({ choice: 'ground_first', fresh_lookups: 0, verified: false, first_try: false }), { agreed: true, observation_needed: true })
+  assert.deepEqual(scoreC4Judgment({ choice: 'direct_to_executor', fresh_lookups: 0, verified: undefined, first_try: false }), { agreed: false, observation_needed: true }, 'a failed first batch is final: no need to wait for the step')
+  // Only "not needed" has to wait for the step to verify.
+  assert.equal(scoreC4Judgment({ choice: 'direct_to_executor', fresh_lookups: 0, verified: undefined, first_try: true }), undefined)
+  assert.equal(c4ObservationNeeded({ fresh_lookups: 0, verified: undefined, first_try: true }), undefined)
+  assert.equal(scoreC4Judgment({ choice: 'maybe', ...clean }), undefined)
+  assert.equal(scoreC4Judgment({ choice: 'direct_to_executor', fresh_lookups: undefined, verified: true, first_try: true }), undefined)
+  // Mutually exclusive over every outcome.
+  for (const fresh_lookups of [0, 1, 4]) for (const verified of [true, false, undefined]) for (const first_try of [true, false]) {
+    const direct = scoreC4Judgment({ choice: 'direct_to_executor', fresh_lookups, verified, first_try })
+    const ground = scoreC4Judgment({ choice: 'ground_first', fresh_lookups, verified, first_try })
+    assert.equal(direct === undefined, ground === undefined)
+    if (direct) assert.notEqual(direct.agreed, ground.agreed)
+  }
 })
 
-test('scoreObservationFamilies: two-sided in shadow (half of what was looked up was predicted, half of what was predicted was used), recall only once facts were supplied', () => {
-  assert.equal(scoreObservationFamilies({ selected: [], looked: [] }).agreed, true, 'both empty agrees')
+test('scoreObservationFamilies: two-sided in shadow; with facts supplied precision is scored over the UNSUPPLIED picks; no lookup at all is never agreement', () => {
   assert.equal(scoreObservationFamilies({ selected: ['inventory_equipment'], looked: ['inventory_equipment'] }).agreed, true)
   assert.equal(scoreObservationFamilies({ selected: ['inventory_equipment', 'nearby_world'], looked: ['inventory_equipment'] }).agreed, true, 'precision 0.5')
   assert.equal(scoreObservationFamilies({ selected: ['a', 'b', 'c'], looked: ['a'] }).agreed, false, 'precision 1/3')
   assert.equal(scoreObservationFamilies({ selected: ['nearby_world'], looked: ['inventory_equipment', 'entity_status'] }).agreed, false, 'recall 0')
   assert.equal(scoreObservationFamilies({ selected: [], looked: ['nearby_world'] }).agreed, false, 'Jev predicted nothing and the agent looked something up')
-  const advisory = scoreObservationFamilies({ selected: ['inventory_equipment', 'research_state', 'runtime_status'], looked: [], provided: ['inventory_equipment', 'research_state', 'runtime_status'], mode: 'recall_only' })
-  assert.equal(advisory.agreed, true, 'supplied families are never looked up, so precision is not measured')
-  assert.equal(scoreObservationFamilies({ selected: ['inventory_equipment'], looked: ['nearby_world', 'entity_status'], provided: ['inventory_equipment'], mode: 'recall_only' }).agreed, false, 'the agent still needed lookups Jev missed')
+  // Nothing looked up and nothing picked: there is nothing to compare, so it is NOT agreement (neutral, left unscored).
+  const nothing = scoreObservationFamilies({ selected: [], looked: [] })
+  assert.equal(nothing.neutral, true)
+  assert.equal(nothing.agreed, undefined)
+  // Something picked, nothing looked up, nothing supplied: Jev over-predicted.
+  assert.deepEqual({ agreed: scoreObservationFamilies({ selected: ['nearby_world'], looked: [] }).agreed, neutral: scoreObservationFamilies({ selected: ['nearby_world'], looked: [] }).neutral }, { agreed: false, neutral: false })
+  // Facts supplied: a supplied family is never looked up, so every pick supplied and no lookup is neutral, not agreement.
+  const supplied = scoreObservationFamilies({ selected: ['inventory_equipment', 'research_state'], looked: [], provided: ['inventory_equipment', 'research_state'] })
+  assert.equal(supplied.neutral, true)
+  assert.equal(supplied.agreed, undefined)
+  // Precision over what was NOT supplied: Jev picked nearby_world too and the agent never looked there: disagree.
+  assert.equal(scoreObservationFamilies({ selected: ['inventory_equipment', 'nearby_world'], looked: [], provided: ['inventory_equipment'] }).agreed, false)
+  assert.equal(scoreObservationFamilies({ selected: ['inventory_equipment', 'nearby_world'], looked: ['nearby_world'], provided: ['inventory_equipment'] }).agreed, true)
+  assert.equal(scoreObservationFamilies({ selected: ['inventory_equipment'], looked: ['nearby_world', 'entity_status'], provided: ['inventory_equipment'] }).agreed, false, 'the agent still needed lookups Jev missed')
   assert.equal(scoreObservationFamilies({ selected: ['a', 'a', 'b'], looked: ['a', 'a'] }).precision, 0.5, 'duplicates are counted once')
 })
 

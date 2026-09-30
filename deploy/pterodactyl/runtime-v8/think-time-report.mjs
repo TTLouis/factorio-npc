@@ -634,7 +634,7 @@ function newJevTally() {
     }
     return families.get(name)
   }
-  return { family, families, stageChanges: [], skipped: {}, c4: { wakes_measured: 0, deciding_routes: 0, shadow_routes: 0 }, any: false }
+  return { family, families, stageChanges: [], skipped: {}, c4: { wakes_measured: 0, observation_round_tokens: 0, deciding_routes: 0, shadow_routes: 0 }, any: false }
 }
 
 function observeJevRow(tally, event, data, requestId) {
@@ -680,6 +680,7 @@ function observeJevRow(tally, event, data, requestId) {
   else if (event === events.c4Wake) {
     tally.any = true
     tally.c4.wakes_measured++
+    tally.c4.observation_round_tokens += safeInteger(data.observation_round_tokens) ?? 0
   }
   else if (event === events.c4Route) {
     tally.any = true
@@ -852,6 +853,7 @@ export function formatRunRecord(record) {
       lines.push(`- ${row.family}: stage ${row.stage}${row.earned_stage && row.earned_stage !== row.stage ? ` (earned ${row.earned_stage}, capped)` : ''} · ${row.recorded} judged, ${row.scored} scored, ${row.agreed} agreed (${percent(row.agreement)}), ${row.unscored} unscored · promoted ${row.promotions}, demoted ${row.demotions} · saved ${saving(row.saved)} · would have saved ${saving(row.would_save)}${row.removal_candidate ? ' · FLAGGED FOR REMOVAL: no measured saving (the owner decides)' : ''}`)
     }
     lines.push(`- saved this run: ${saving(jev.savings.saved)} (LLM spend: ${thousands(jev.llm.input_units)} in, ${thousands(jev.llm.output_units)} out, ${jev.llm.provider_calls} calls) · would have saved: ${saving(jev.savings.would_save)}`)
+    if (jev.c4.wakes_measured > 0 || jev.c4.shadow_routes > 0 || jev.c4.deciding_routes > 0) lines.push(`- C4 wakes measured: ${jev.c4.wakes_measured} (observation rounds cost ${thousands(jev.c4.observation_round_tokens)} tokens; shadow routes ${jev.c4.shadow_routes}, deciding routes ${jev.c4.deciding_routes})`)
     for (const change of jev.stage_changes) lines.push(`- stage change: ${change.family} ${change.direction} ${change.from} -> ${change.to} (${change.request_id ?? 'no request'}): ${change.reason ?? ''}`)
     const skipped = Object.entries(jev.skipped)
     if (skipped.length > 0) lines.push(`- judgments skipped (never counted as agreement): ${skipped.map(([reason, count]) => `${reason} ${count}`).join(', ')}`)
