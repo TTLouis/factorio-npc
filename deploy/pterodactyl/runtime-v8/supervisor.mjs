@@ -2750,27 +2750,42 @@ export class Session {
         await this.recoverInterruptedPlan('runtime_restart', { actor_id: this.lastStatus?.actor_id, epoch: this.lastStatus?.epoch })
       })
     }
-    else if (!startupState && goalInterruptedBeforeFirstPlan(this.agent.memory?.planningState?.(`npc:${this.npcId}`))) {
-      // C7, the goal never got a first plan (or was waiting for the player's answer): the
-      // owner's known silent stall. Pause it visibly, say Resume re-drives it, and wake no model.
-      this.queueEvent(async () => {
-        const requestId = `recovery_${Date.now().toString(36)}`
-        const paused = await this.agent.pauseGoalWithoutPlan?.(RESTART_BEFORE_FIRST_PLAN_PAUSE, { requestId })
-        await this.agent.traceEvent?.('runtime.goal_without_plan', { reason: RESTART_BEFORE_FIRST_PLAN_PAUSE, request_id: requestId, goal_id: paused?.goal_id, paused: paused?.paused === true, model_woken: false }, { requestId })
-        await this.printChat(`I restarted before this goal had a plan (or while I was waiting for your answer), so I paused it and did not wake the planner. ${RESUME_HINT} If I had asked you something, answer that instead.`)
-      })
-    }
-    else if (!startupState && goalInterruptedWithoutPlan(this.agent.memory?.planningState?.(`npc:${this.npcId}`))) {
-      // C7: an active goal that HAD plans but holds none to carry now: say so and
-      // wake no model. A goal still waiting for its first plan, or for a
-      // clarification, has no plan history and stays silent.
-      this.queueEvent(async () => {
-        await this.agent.traceEvent?.('runtime.goal_without_plan', { reason: 'runtime_restart_no_active_plan', goal_id: this.agent.memory?.planningState?.(`npc:${this.npcId}`)?.goal?.goal_id }, { requestId: `recovery_${Date.now().toString(36)}` })
-        await this.printChat('I restarted and this goal has no active plan to resume, so I am not waking the planner. Say continue or give me a new instruction.')
-      })
+    else if (!startupState) {
+      this.queueStartupGoalNotice()
     }
     this.log(`SGLuna Factorio ready; npc=${this.npcName} (${this.npcId}), actor_id=${this.lastStatus.actor_id}, chat=${describeChatPlayers(this.config.chatPlayers)}`)
     return this.lastStatus
+  }
+
+  // Which startup notice an active goal with no plan to carry needs, if any. Both wake no model.
+  //  - 'before_first_plan': it never got a first plan (or was waiting for the player's answer): the
+  //    owner's known silent stall. It is paused visibly and the line says Resume re-drives it.
+  //  - 'no_active_plan': it HAD plans but holds none to carry now.
+  startupGoalNoticeKind() {
+    const planning = this.agent?.memory?.planningState?.(`npc:${this.npcId}`)
+    if (goalInterruptedBeforeFirstPlan(planning)) return 'before_first_plan'
+    if (goalInterruptedWithoutPlan(planning)) return 'no_active_plan'
+    return undefined
+  }
+
+  queueStartupGoalNotice() {
+    const kind = this.startupGoalNoticeKind()
+    if (!kind) return false
+    this.queueEvent(() => this.announceStartupGoal(kind))
+    return true
+  }
+
+  async announceStartupGoal(kind) {
+    const requestId = `recovery_${Date.now().toString(36)}`
+    const goalId = this.agent.memory?.planningState?.(`npc:${this.npcId}`)?.goal?.goal_id
+    if (kind === 'before_first_plan') {
+      const paused = await this.agent.pauseGoalWithoutPlan?.(RESTART_BEFORE_FIRST_PLAN_PAUSE, { requestId })
+      await this.agent.traceEvent?.('runtime.goal_without_plan', { reason: RESTART_BEFORE_FIRST_PLAN_PAUSE, request_id: requestId, goal_id: paused?.goal_id ?? goalId, paused: paused?.paused === true, model_woken: false }, { requestId })
+      await this.printChat(`I restarted before this goal had a plan (or while I was waiting for your answer), so I paused it and did not wake the planner. ${RESUME_HINT} If I had asked you something, answer that instead.`)
+      return
+    }
+    await this.agent.traceEvent?.('runtime.goal_without_plan', { reason: 'runtime_restart_no_active_plan', request_id: requestId, goal_id: goalId, model_woken: false }, { requestId })
+    await this.printChat('I restarted and this goal has no active plan to resume, so I am not waking the planner. Say continue or give me a new instruction.')
   }
 
   queueEvent(fn, { reportError = false } = {}) {

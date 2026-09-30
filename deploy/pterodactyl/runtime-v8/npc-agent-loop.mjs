@@ -5535,7 +5535,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // Same goal, same objective: the request below plans it from the goal text (the first plan
       // of the goal still carries the goal definition); the run is no longer paused.
       text = redriveGoal.objective
-      this.memory.dispatchPlanningEvent?.(memoryKey, { type: PLANNING_EVENT.RUN_RESUMED, source: 'runtime', goal_id: redriveGoal.goal_id, reason: 'resume_before_first_plan' })
+      this.memory.dispatchPlanningEvent?.(memoryKey, { type: PLANNING_EVENT.RUN_RESUMED, source: 'runtime', goal_id: redriveGoal.goal_id, reason: 'resume_before_first_plan', now: Date.now() })
       await this.persistState()
       await this.traceEvent('goal.redriven_after_restart', { goal_id: redriveGoal.goal_id, reason: RESTART_BEFORE_FIRST_PLAN_PAUSE, model_woken: true }, { requestId: this.traceRequest?.id ?? `redrive_${Date.now().toString(36)}` })
     }
@@ -5771,7 +5771,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const key = this.activePlanKey()
     const before = this.memory.planningState?.(key)
     if (!before?.goal || before.goal.status !== GOAL_STATUS.ACTIVE || getActivePlanningPlan(before)) return { goal_id: before?.goal?.goal_id, paused: false }
-    const after = this.memory.dispatchPlanningEvent?.(key, { type: PLANNING_EVENT.RUN_PAUSED, source: 'runtime', goal_id: before.goal.goal_id, reason })
+    const after = this.memory.dispatchPlanningEvent?.(key, { type: PLANNING_EVENT.RUN_PAUSED, source: 'runtime', goal_id: before.goal.goal_id, reason, now: Date.now() })
     await this.persistState()
     return { goal_id: before.goal.goal_id, paused: after?.run?.paused === true, requestId }
   }
@@ -7855,12 +7855,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             // A reset outlived this turn: the durable state belongs to the new lineage now, so a
             // stale turn writes nothing. The marker stays for the restart path's fail-closed
             // handling (recoverInterruptedAgentPlan), exactly as for any other superseded turn.
+            // The reset that superseded the turn may have cleared the request: the turn's own scope still names it.
+            const keptRequestId = this.traceRequest?.id ?? this.turnScope.getStore()?.requestId
             await this.traceEvent('provider.output_budget_recovery_marker_kept', {
-              request_id: this.traceRequest?.id,
+              request_id: keptRequestId,
               reason: 'turn_superseded_by_reset',
               stale_kind: error.staleKind,
               round,
-            }, { requestId: this.traceRequest?.id })
+            }, { requestId: keptRequestId })
           }
           throw error
         }
