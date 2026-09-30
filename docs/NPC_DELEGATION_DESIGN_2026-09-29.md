@@ -274,3 +274,13 @@ Related decisions from the same session:
   flash only, for both the roadmap/planner agent and the plan/executor subagents. There
   is no pro drafting model and no mixed-model run. The `[0]`/`[1]` role mapping stays as
   a mechanism; the live config sets one model, so both roles resolve to flash.
+
+### 12b. Implementation notes: U4 restage seam (2026-09-29)
+
+Built in `agent-context.mjs` and `NpcAgentLoop.restageContext`; nothing calls the seam yet (U5-U8 wire the checkpoints).
+
+- **One active conversation.** The loop's `messages`/`baseMessages` now live in one `AgentContext` (role, model, handoff id, per-conversation counters, monotonic size counter). A restage swaps that conversation in place: system prefix, then the packet stable block, then its volatile block.
+- **Attribution gate (byte-identical default).** `role` and `handoff_id` appear on provider request/response/error rows, and `role` on the provider call context, only after the current conversation lineage has restaged once. A run that never restages writes the rows and sends the requests it did before U4 (pinned by `fixtures/context-restage/no-restage-steam-replay.golden.json`). A new chat request starts a new lineage, unrestaged again.
+- **Stale replies.** A reply (or error) for a conversation a restage replaced is traced (`context.stale_reply_dropped`), then the turn is cancelled with the existing "cancelled or superseded" error; it is never appended or admitted, and its output units count request-wide but not against the active generation. A reply that outlives a reset is left to the existing generation check.
+- **Restage order.** Validate the packet, dispatch `CONTEXT_RESTAGED` (the reducer refuses a stale goal; a refusal restages nothing and writes `context.restage_refused`), swap the conversation, reset the loop counters, write `context.restaged`. Loaded skill context is kept (it belongs to the logical task, not the conversation); the generation/request budget counters are not reset here (that is the per-slice ceiling unit).
+- **One sanitizer.** `durable-text.mjs` holds `sanitizeDurableModelText` (and `cleanMemoryText`, `sanitizeDurableModelValue`); the loop's durable memory and the handoff note both use it.
