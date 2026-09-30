@@ -1253,6 +1253,12 @@ export function liveAgentEvent(event, data = {}) {
       return { phase: 'waiting', detail: `Autorio is running ${data.operation_count ?? 0} operation(s)` }
     case 'request.completed':
       return { phase: 'idle', detail: 'Finished the last request' }
+    case 'executor.slice_wake_deferred':
+      return {
+        phase: 'waiting',
+        detail: `Slice verified; waiting for Resume (planner unavailable: ${uiText(data.reason, 80)})`,
+        activity: { kind: 'blocker', text: `Slice verified but I could not hand the goal back to the planner (${uiText(data.reason, 80)}). Resume to continue.` },
+      }
     case 'factorio.completed_signal':
       // With a durable plan the batch receipt says the same thing with detail, so
       // the snapshot drops this line; without one it is the only record.
@@ -2088,6 +2094,7 @@ export class Session {
   onAgentActivity(event, data) {
     if (event === 'goal.defined') this.announceGoalUnderstanding(data)
     if (event === 'budget.goal_warning') this.announceGoalBudgetWarning(data)
+    if (event === 'amendment.dropped') this.announceAmendmentDropped(data)
     if (event === ACK_EVENT) this.announceAcknowledgement(data)
     this.responsivenessTracker().observe(event, data, { requestId: this.agent?.traceRequest?.id, ts: Date.now() })
     if (event === 'goal.evaluated') {
@@ -2156,6 +2163,12 @@ export class Session {
   }
 
   // 2.7: the goal budget warning reaches the player once per goal.
+  announceAmendmentDropped(data) {
+    const line = uiText(data?.chat_message, 400)
+    if (!line) return
+    this.printChat(line).catch(error => this.log(`Unable to announce a dropped amendment: ${error instanceof Error ? error.message : String(error)}`))
+  }
+
   announceGoalBudgetWarning(data) {
     const line = uiText(data?.chat_message, 400)
     const key = `${data?.goal_id ?? ''}|${data?.threshold_output_units ?? ''}`

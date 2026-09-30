@@ -10,9 +10,10 @@ import { AgentContext } from './agent-context.mjs'
 import { EXECUTOR_ROLE_PROMPT, roleSystemPrompt } from './agent-roles.mjs'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { isBareContinuation, NpcAgentLoop, restatedPlanVerdict } from './npc-agent-loop.mjs'
-import { getActivePlan, getContextRestages, PLAN_STATUS } from './planning-state.mjs'
+import { buildHandoffPacket } from './handoff-packet.mjs'
+import { applyPlanningEvent, createEmptyPlanningState, getActivePlan, getContextRestages, PLAN_STATUS, PLANNING_EVENT } from './planning-state.mjs'
 import { analyzeBehaviorTrace } from './run-check.mjs'
-import { configuration, RUNTIME_RELIABILITY_GUIDANCE, recoverInterruptedAgentPlan, Session } from './supervisor.mjs'
+import { configuration, liveAgentEvent, RUNTIME_RELIABILITY_GUIDANCE, recoverInterruptedAgentPlan, Session } from './supervisor.mjs'
 import { FakeFactorio, gather, inventoryCheckpoint, planReply, recordingJev } from './task-loop-fixtures.mjs'
 
 // Delegation U6: the executor. A committed plan slice is executed by a FRESH executor
@@ -1229,7 +1230,7 @@ test('issue 2: a refusal that clears at the retry hands the slice to the planner
   const real = agent.returnControlToPlanner.bind(agent)
   let first = true
   agent.returnControlToPlanner = async (args) => {
-    if (first) { first = false; return { returned: false, reason: 'round_open' } }
+    if (first) { first = false; return { returned: false, reason: 'round_in_flight' } }
     return real(args)
   }
   world.give('iron-ore')
@@ -1363,19 +1364,24 @@ test('issue 3: the amendment flag dies with the conversation that holds its text
   assert.equal(await agent.stageCompatibleAmendment('TTLouis', 'also make it fast'), true)
   assert.ok(agent.currentPendingAmendment())
 
-  const restaged = await agent.restageBetweenTurns({ checkpoint: 'C8', role: 'planner', reason: 'test', actor: agent.epoch }) // any restage drops the staged text
+  const restaged = await agent.restageBetweenTurns({ checkpoint: 'C8', role: 'executor', reason: 'test', actor: agent.epoch }) // an executor restage drops the staged text (the executor never holds it)
   assert.equal(restaged.restaged, true)
   assert.equal(agent.currentPendingAmendment(), null, 'the flag went with the text')
   assert.equal(agent.pendingInteractionAmendment, null)
   const [cleared] = world.rows('amendment.flag_cleared')
   assert.equal(cleared.data.reason, 'conversation_holding_the_amendment_text_was_replaced')
   assert.ok(cleared.request_id)
+  const [dropped] = world.rows('amendment.dropped')
+  assert.match(dropped.data.chat_message, /also make it fast.*not applied.*send it again/)
+  assert.equal(dropped.data.reason, 'conversation_holding_the_amendment_text_was_replaced')
+  assert.equal(dropped.data.request_id, cleared.request_id)
 
   // A flag from an older conversation, then a reset.
   agent.pendingInteractionAmendment = { sender: 'TTLouis', text: 'stale' }
   agent.pendingAmendmentConversationSeq = agent.agentContext.conversationSeq
   agent.reset()
   assert.equal(agent.pendingInteractionAmendment, null, 'a new request cannot inherit it')
+  assert.equal(world.rows('amendment.dropped').at(-1).data.reason, 'reset_discarded_the_conversation_holding_the_text', 'and the player is told it was dropped')
 
   // The executor never gets the bypass: with a flag set while the executor acts, a changed plan is still ignored.
   const exec = harness({ script: [() => oneStepSlice(), () => planReply({ plan: ['Something else'], currentStep: 0, operations: [gather('iron-ore', 4)] })] })
@@ -1505,16 +1511,195 @@ test('issue 2: an unmet goal after the executor final claim with no way back to 
     ],
   })
   await world.say()
-  world.agent.returnControlToPlanner = async () => ({ returned: false, reason: 'round_open' })
+  world.agent.returnControlToPlanner = async () => ({ returned: false, reason: 'round_in_flight' })
   world.give('iron-ore')
   const result = await world.agent.completed()
 
   assert.equal(world.calls.length, 2, 'the executor final claim was the last model call')
   const [deferred] = world.rows('executor.slice_wake_deferred')
   assert.equal(deferred.data.route, 'unmet_goal_after_plan')
-  assert.equal(deferred.data.reason, 'round_open')
+  assert.equal(deferred.data.reason, 'round_in_flight')
   assert.equal(deferred.request_id, world.rows('request.received')[0].request_id)
   assert.equal(world.rows('context.planner_resume_retried').length, 1)
   assert.match(result.chatMessage, /Resume/)
   assert.equal(JSON.stringify(world.agent.messages).includes('Author the next plan slice'), false, 'the executor was never asked to author the next slice')
+})
+
+// =====================================================================================================
+// U6 last round: a staged amendment is never dropped with only a trace
+// =====================================================================================================
+
+function amendmentRecoveryWorld(script) {
+  const jev = recordingJev(async (_state, questions) => {
+    if (questions.recovery_semantics) {
+      return { model: 'jev-latest', provider: 'TypeSafe', answers: { recovery_semantics: { type: 'choice', choice: 'semantic_replan', confidence: 0.95 }, one_observation_can_resolve: { type: 'noul', noul: 0.1 } }, usage: { input_tokens: 1, output_tokens: 1, cost: 0 } }
+    }
+    return questions.intent ? { overrides: { intent: { choice: 'amend_current', confidence: 0.95 } } } : undefined
+  })
+  const world = harness({
+    script,
+    agentOptions: {
+      interactionProvider: async () => ({ content: JSON.stringify({ intent: 'amend_current', queue_conflict: false, reply: '' }) }),
+      interactionDecisionProvider: jev,
+      steeringDecisionProvider: jev,
+    },
+  })
+  world.game.taskState = 'mining'
+  world.game.queueLength = 1
+  return world
+}
+
+test('amendment (a): C6 bounded recovery does not hand off to an executor while an amendment is pending on the planner; it stays on the planner that holds the text', async () => {
+  const world = amendmentRecoveryWorld([() => oneStepSlice(), () => executorResubmit()])
+  await world.say()
+  const { agent } = world
+  await agent.request('also make it fast', { sender: 'TTLouis' })
+  assert.equal(agent.agentContext.role, 'planner')
+  world.game.taskState = 'idle'
+  world.game.queueLength = 0
+
+  const result = await agent.recoverPlan(agent.generation, new Error('strategy invalidated by fresh evidence'), 1)
+
+  assert.equal(result.goalStatus, 'active')
+  assert.equal(world.rows('context.restaged').filter(row => row.data.checkpoint === 'C6').length, 0, 'no C6 executor restage')
+  assert.equal(agent.agentContext.role, 'planner')
+  const [skipped] = world.rows('executor.recovery_handoff_skipped')
+  assert.equal(skipped.data.reason, 'user_amendment_pending_on_planner')
+  assert.equal(skipped.data.request_id, skipped.request_id)
+  assert.ok(skipped.request_id)
+  assert.ok(agent.currentPendingAmendment(), 'the flag is alive')
+  assert.equal(agent.baseMessages.some(message => textOf(message) === '[CHAT] TTLouis: also make it fast'), true, 'and the planner conversation still holds the text')
+  assert.equal(world.calls.at(-1).context.role, 'planner', 'the recovery round ran on the planner')
+  assert.equal(world.rows('amendment.dropped').length, 0)
+})
+
+test('amendment (b): a planner restage carries the pending amendment in its packet (mandatory, bounded, sanitized, labelled) and keeps the flag alive', async () => {
+  const world = amendmentWorld([() => oneStepSlice()])
+  await world.say()
+  const { agent } = world
+  const text = `also make it fast ${'very '.repeat(300)}unit_number 4711`
+  assert.equal(await agent.stageCompatibleAmendment('TTLouis', text), true)
+
+  const restaged = await agent.restageBetweenTurns({ checkpoint: 'C5', role: 'planner', reason: 'provider_budget_handoff', actor: agent.epoch })
+
+  assert.equal(restaged.restaged, true)
+  const packet = textOf(agent.baseMessages[2])
+  assert.match(packet, /^user_amendment \(from TTLouis; user steering, NOT yet applied; apply it at this planner boundary, never as the executor\): also make it fast/m)
+  const line = packet.split('\n').find(item => item.startsWith('user_amendment'))
+  assert.ok(line.length < 700, `bounded (${line.length})`)
+  assert.equal(packet.includes('4711'), false, 'sanitized like every durable text: no unit number')
+  assert.ok(agent.currentPendingAmendment(), 'the flag followed the text into the new conversation')
+  assert.equal(world.rows('amendment.dropped').length, 0)
+  const [carried] = world.rows('amendment.carried_in_packet')
+  assert.equal(carried.data.checkpoint, 'C5')
+  assert.ok(carried.request_id)
+})
+
+test('amendment (b): the packet never drops the amendment record for size, and without one says so', () => {
+  let state = applyPlanningEvent(createEmptyPlanningState(), { type: PLANNING_EVENT.GOAL_ACCEPTED, now: 10, goal_id: 'goal_am', owner: 'louis', objective: 'Run a drill' })
+  state = applyPlanningEvent(state, { type: PLANNING_EVENT.GOAL_DEFINED, now: 11, source: 'main_planner', goal_id: 'goal_am', definition: { scope: 'long_horizon', summary: 'Run a drill.', doneWhen: [{ id: 'p', kind: 'items_produced', item_name: 'iron-plate', minimum: 100 }] } })
+  const amendment = { sender: 'TTLouis', text: 'make it fast' }
+  const small = buildHandoffPacket({ planningState: state, role: 'planner', checkpoint: 'C5', amendment, limits: { maxChars: 10 } })
+  assert.equal(small.amendment_included, true)
+  assert.match(small.text, /user_amendment/)
+  assert.equal(small.dropped.includes('user_amendment'), false)
+  assert.equal(small.over_limit, true, 'the mandatory records alone are over the tiny limit: reported, not dropped')
+  assert.equal(buildHandoffPacket({ planningState: state, role: 'planner', checkpoint: 'C5' }).amendment_included, false)
+})
+
+test('amendment (b): a C5 budget handoff in the planner role keeps the amendment (through the real recovery path)', async () => {
+  const budget = budgetJev()
+  const amendJev = recordingJev(async (state, questions, call, context) => {
+    if (state?.contract === 'recovery_route') return budget(state, questions, context)
+    return questions.intent ? { overrides: { intent: { choice: 'amend_current', confidence: 0.95 } } } : undefined
+  })
+  const world = harness({
+    script: [() => plannerSlice(), () => { throw contextWindowError() }, () => planReply({ plan: TWO_STEPS, currentStep: 0, operations: [gather('iron-ore', 4)] })],
+    agentOptions: {
+      interactionProvider: async () => ({ content: JSON.stringify({ intent: 'amend_current', queue_conflict: false, reply: '' }) }),
+      interactionDecisionProvider: amendJev,
+      steeringDecisionProvider: amendJev,
+    },
+  })
+  world.game.taskState = 'mining'
+  world.game.queueLength = 1
+  await world.say()
+  await world.agent.request('also make it fast', { sender: 'TTLouis' })
+  world.game.taskState = 'idle'
+  world.game.queueLength = 0
+  world.give('iron-ore', 2)
+  await world.agent.completed() // the planner round hits the context window: the C5 handoff restages the planner
+
+  const c5 = world.rows('context.restaged').find(row => row.data.checkpoint === 'C5')
+  assert.ok(c5)
+  assert.equal(c5.data.role, 'planner')
+  const last = world.calls.at(-1).messages
+  assert.ok(last.some(message => textOf(message).includes('user_amendment (from TTLouis')), 'the fresh generation holds the amendment')
+  assert.equal(world.rows('amendment.dropped').length, 0)
+})
+
+test('amendment (c): the supervisor prints the drop notice, and only when there is a line', async () => {
+  const { session, chat } = chatSession({ memory: { planningState: () => undefined }, traceRequest: null })
+  session.announceAmendmentDropped({ chat_message: 'Your change "x" was not applied. Please send it again.' })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(chat, ['Your change "x" was not applied. Please send it again.'])
+  session.announceAmendmentDropped({})
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(chat.length, 1, 'nothing to say without a line')
+})
+
+test('amendment (c): the supervisor activity hook routes amendment.dropped to the chat line', () => {
+  const printed = []
+  const session = Object.create(Session.prototype)
+  Object.assign(session, {
+    announceAmendmentDropped: data => printed.push(data.chat_message),
+    responsivenessTracker: () => ({ observe() {}, debugText: () => '' }),
+    agentLive: { debug: {}, activity: [], conversation: [] },
+    config: {},
+    agentTimeDebugFields: () => ({}),
+    agentSpendDebugFields: () => ({}),
+    requestTaskBoardUiSync() {},
+    agent: { traceRequest: null, epoch: null },
+    lastStatus: {},
+  })
+  try { session.onAgentActivity('amendment.dropped', { chat_message: 'Please send it again.' }) }
+  catch {} // the rest of the hook is UI bookkeeping this stub does not model
+  assert.deepEqual(printed, ['Please send it again.'])
+})
+
+// --- nits ------------------------------------------------------------------------------------------------------
+
+test('nit: round_open inside a turn is not retried (the token cannot change); it goes straight to the deferred path', async () => {
+  const world = harness({ script: [() => oneStepSlice()] })
+  await world.say()
+  const attempts = []
+  world.agent.returnControlToPlanner = async () => { attempts.push(1); return { returned: false, reason: 'round_open' } }
+  world.give('iron-ore')
+  await world.agent.completed()
+  assert.equal(attempts.length, 1)
+  assert.equal(world.rows('context.planner_resume_retried').length, 0)
+  assert.equal(world.rows('executor.slice_wake_deferred')[0].data.reason, 'round_open')
+})
+
+test('nit: a deferred slice wake persists the state and tells the UI the goal is waiting (not only a completed slice)', async () => {
+  const world = harness({ script: [() => oneStepSlice()] })
+  await world.say()
+  let persisted = 0
+  const persist = world.agent.persistState.bind(world.agent)
+  world.agent.persistState = async () => { persisted++; return persist() }
+  const end = world.agent.endSliceWithoutPlanner.bind(world.agent)
+  let persistedInEnd = 0
+  world.agent.endSliceWithoutPlanner = async (args) => { const before = persisted; const result = await end(args); persistedInEnd = persisted - before; return result }
+  const activity = []
+  world.agent.onActivity = (event, data) => activity.push({ event, data })
+  world.agent.returnControlToPlanner = async () => ({ returned: false, reason: 'round_in_flight' })
+  world.give('iron-ore')
+  await world.agent.completed()
+
+  assert.ok(persistedInEnd >= 1, 'endSliceWithoutPlanner persisted the state')
+  const events = activity.map(item => item.event)
+  assert.ok(events.indexOf('executor.slice_wake_deferred') > events.indexOf('request.completed'), 'the waiting marker is the last word, after the idle of request.completed')
+  const update = liveAgentEvent('executor.slice_wake_deferred', activity.find(item => item.event === 'executor.slice_wake_deferred').data)
+  assert.equal(update.phase, 'waiting')
+  assert.match(update.detail, /waiting for Resume/)
 })

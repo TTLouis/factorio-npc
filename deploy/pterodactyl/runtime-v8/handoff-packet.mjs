@@ -56,6 +56,7 @@ export const HANDOFF_PACKET_LIMITS = Object.freeze({
   candidateChars: 260,
   contractChars: 300,
   runtimeChars: 200,
+  amendmentChars: 500,
 })
 
 // Drop order when over the limit: first entry is dropped first. Receipts go
@@ -87,6 +88,12 @@ function oneLine(value, max) {
 // must not steer a fresh conversation to stale entities), after the packet's
 // one-line/control-character normalization.
 export function sanitizeHandoffNote(value, max = HANDOFF_PACKET_LIMITS.noteChars) {
+  return sanitizeDurableModelText(oneLine(value, Math.max(2000, String(value ?? '').length)), max)
+}
+
+// A user amendment staged for the planner (not yet applied). It is the USER's wording, bounded
+// and sanitized like every other text that can carry entity identities.
+export function sanitizeAmendmentText(value, max = HANDOFF_PACKET_LIMITS.amendmentChars) {
   return sanitizeDurableModelText(oneLine(value, Math.max(2000, String(value ?? '').length)), max)
 }
 
@@ -210,10 +217,16 @@ function contractText(step, max) {
   return oneLine(`${contract.mode}: ${parts.join('; ')}`, max)
 }
 
-function stepRecords(state, plan, activeIndex, limits, { role, checkpoint, reason, budget, note, actor, runtime }) {
+function stepRecords(state, plan, activeIndex, limits, { role, checkpoint, reason, budget, note, actor, runtime, amendment }) {
   const records = [
     { key: 'restage', block: 'step', text: `restage: role=${role} checkpoint=${checkpoint}${reason ? ` reason=${oneLine(reason, limits.reasonChars)}` : ''}` },
   ]
+  // Mandatory (no `drop` key): a pending user amendment must survive the restage that replaces the
+  // conversation holding its text; size never drops it.
+  const amendmentText = amendment ? sanitizeAmendmentText(amendment.text, limits.amendmentChars) : ''
+  if (amendmentText) {
+    records.push({ key: 'user_amendment', block: 'step', text: `user_amendment (from ${oneLine(amendment.sender, 60) || 'the player'}; user steering, NOT yet applied; apply it at this planner boundary, never as the executor): ${amendmentText}` })
+  }
   // The actor snapshot the runtime captured for this restage (C7 carries the
   // new epoch). Volatile: it moves with every actor replacement.
   const actorLine = scalarLine(actor, ACTOR_KEYS, limits.runtimeChars)
@@ -297,8 +310,9 @@ export function estimateTokens(chars) {
  * @param {object[]} [args.shelfCandidates] shelfRefinementCandidates(state) for a planner restage at a shelf pickup
  * @param {object} [args.actor] fresh actor snapshot (actor_id, actor_kind, epoch, connected_players); never dropped
  * @param {object} [args.runtime] compact runtime state (task_state, queue_length, idle)
+ * @param {{sender:string,text:string}} [args.amendment] a staged user amendment not yet applied (mandatory, never dropped by size)
  */
-export function buildHandoffPacket({ planningState, role, checkpoint, reason = '', note = '', budget = '', actor, runtime, shelfCandidates, previousContextChars, now, limits: limitOverrides } = {}) {
+export function buildHandoffPacket({ planningState, role, checkpoint, reason = '', note = '', budget = '', actor, runtime, shelfCandidates, amendment, previousContextChars, now, limits: limitOverrides } = {}) {
   if (!CONTEXT_RESTAGE_ROLES.includes(role)) throw new RangeError(`handoff role must be one of ${CONTEXT_RESTAGE_ROLES.join(', ')}`)
   if (!CONTEXT_RESTAGE_CHECKPOINTS.includes(checkpoint)) throw new RangeError(`handoff checkpoint must be one of ${CONTEXT_RESTAGE_CHECKPOINTS.join(', ')}`)
   if (!planningState?.goal?.goal_id) throw new RangeError('handoff packet needs a planning state with a goal')
@@ -311,7 +325,7 @@ export function buildHandoffPacket({ planningState, role, checkpoint, reason = '
     ...goalRecords(planningState, limits),
     ...(roadmap ? [roadmap] : []),
     ...planRecords(plan, activeIndex, limits),
-    ...stepRecords(planningState, plan, activeIndex, limits, { role, checkpoint, reason, budget, note, actor, runtime }),
+    ...stepRecords(planningState, plan, activeIndex, limits, { role, checkpoint, reason, budget, note, actor, runtime, amendment }),
     ...shelfCandidateRecords(shelfCandidates, limits),
   ]
 
@@ -354,6 +368,7 @@ export function buildHandoffPacket({ planningState, role, checkpoint, reason = '
     handoff_id: handoffId,
     event,
     dropped,
+    amendment_included: records.some(record => record.key === 'user_amendment'),
     over_limit: text.length > limits.maxChars,
   }
 }

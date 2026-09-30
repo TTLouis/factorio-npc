@@ -2597,7 +2597,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   reset() {
     this.turnConversation = null
     this.executorStepMark = null
-    this.pendingInteractionAmendment = null // its staged text lived in the conversation this reset discards
+    if (this.pendingInteractionAmendment) this.dropPendingAmendment('reset_discarded_the_conversation_holding_the_text') // its staged text lived in the conversation this reset discards
+    this.pendingInteractionAmendment = null
     this.pendingAmendmentConversationSeq = undefined
     this.agentContext.beginLineage() // planner role: an executor role never leaks into the next chat
     super.reset()
@@ -2691,6 +2692,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // A packet restage is a rebuild from durable state, so the reasoning epoch it was built at is the
     // one this loop has seen: refreshPlanningReasoningEpoch must not rebuild it a second time.
     this.markReasoningEpochSeen(key)
+    // The packet carries the staged amendment text, so the flag follows it into the new conversation.
+    if (packet.amendment_included === true && this.pendingInteractionAmendment) {
+      this.pendingAmendmentConversationSeq = this.agentContext.conversationSeq
+      try {
+        await this.traceEvent('amendment.carried_in_packet', { request_id: requestId, role: result.role, checkpoint, handoff_id: result.handoff_id, reason: 'restage_would_drop_the_staged_text' }, { requestId })
+      }
+      catch {}
+    }
     // The in-flight turn scope names the conversation now in place, so a later stale drop is attributed to it.
     const scope = this.turnScope.getStore()
     if (scope) { scope.role = this.agentContext.role; scope.handoffId = this.agentContext.handoffId }
@@ -2722,6 +2731,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // rides a planner restage at a shelf pickup. Undefined when no goal has been
   // admitted (a reducer-less memory, a goal that never started).
   buildRestagePacket({ checkpoint, role, reason, budget, note, actor, runtime, shelfCandidates, planningState } = {}) {
+    const packetRole = role ?? this.agentContext.role
     const held = planningState ?? this.memory.planningState?.(this.activePlanKey())
     if (!held?.goal?.goal_id) return undefined
     // Loaded-skill refs ride the step block (ids only; the text loads through getSkillDetails).
@@ -2729,7 +2739,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const state = skillIds.length > 0 && held.loaded_skill_ids === undefined ? { ...held, loaded_skill_ids: skillIds } : held
     return buildHandoffPacket({
       planningState: state,
-      role: role ?? this.agentContext.role,
+      role: packetRole,
       checkpoint,
       reason,
       budget,
@@ -2737,6 +2747,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       actor,
       runtime,
       shelfCandidates,
+      // A staged user amendment belongs to the planner: it rides the packet of a planner restage (C5,
+      // C1/C2) so the restage that replaces the conversation holding its text does not drop it. The
+      // executor never gets it.
+      amendment: packetRole === PLANNER_ROLE ? this.currentPendingAmendment() ?? undefined : undefined,
       previousContextChars: conversationChars(this.messages),
       now: Date.now(),
     })
@@ -2960,6 +2974,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const state = this.memory.planningState?.(this.activePlanKey())
     const plan = state ? getActivePlanningPlan(state) : undefined
     if (!plan || !FROZEN_PLAN_STATUSES.has(plan.status)) return { restaged: false, reason: 'no_committed_plan' }
+    // A user amendment is pending on the planner conversation: parking it would drop the text, and the
+    // executor never gets user steering. The recovery stays on the planner, which holds it.
+    if (this.agentContext.role === PLANNER_ROLE && this.currentPendingAmendment()) {
+      await this.traceEvent('executor.recovery_handoff_skipped', { request_id: requestId, role: EXECUTOR_ROLE, reason: 'user_amendment_pending_on_planner', route }, { requestId })
+      return { restaged: false, reason: 'user_amendment_pending_on_planner' }
+    }
     const cause = cleanMemoryText(sanitizeDurableModelText(reason, 200), 150)
     const result = await this.restageInTurn({
       checkpoint: 'C6',
@@ -3042,7 +3062,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // round boundary); any other refusal, or a second one, is final.
   async returnControlToPlannerWithRetry(args) {
     const first = await this.returnControlToPlanner(args)
-    if (first.returned || !['round_in_flight', 'round_open'].includes(first.reason)) return first
+    // Only an in-flight round can finish and clear. `round_open` inside a turn never does (the token is
+    // the same on a retry), so it goes straight to the deferred path.
+    if (first.returned || first.reason !== 'round_in_flight') return first
     await new Promise(resolve => setImmediate(resolve))
     const rid = args.requestId ?? this.traceRequest?.id ?? this.turnScope.getStore()?.requestId
     await this.traceEvent('context.planner_resume_retried', { request_id: rid, role: PLANNER_ROLE, reason: first.reason, route: args.route }, { requestId: rid })
@@ -3054,14 +3076,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // no model is woken, and in particular the executor does not author the next slice.
   async endSliceWithoutPlanner({ route, reason }) {
     const requestId = this.traceRequest?.id ?? this.turnScope.getStore()?.requestId
-    await this.traceEvent('executor.slice_wake_deferred', {
-      request_id: requestId,
-      role: EXECUTOR_ROLE,
-      handoff_id: this.agentContext.handoffId,
-      reason,
-      route,
-      model_woken: false,
-    }, { requestId })
+    await this.persistState()
     const state = this.peekPlanState(this.activePlanKey())
     this.active = false
     const chatMessage = `The plan slice is verified complete, but I could not hand the goal back to the planner (${reason}), so I stopped without waking a model. The goal stays active between slices. ${RESUME_HINT}`
@@ -3073,6 +3088,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       usage: this.traceRequest?.usage,
     })
     this.traceRequest = null
+    // After request.completed (which reads as idle), so the UI shows a waiting marker for the goal and
+    // the supervisor's activity hook syncs the task board; the row also carries the request id.
+    await this.traceEvent('executor.slice_wake_deferred', {
+      request_id: requestId,
+      role: EXECUTOR_ROLE,
+      handoff_id: this.agentContext.handoffId,
+      reason,
+      route,
+      model_woken: false,
+      chat_message: chatMessage,
+    }, { requestId })
     return {
       chatMessage,
       plan: [],
@@ -5499,16 +5525,32 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!pending) return null
     const seq = this.pendingAmendmentConversationSeq
     if (seq === undefined || seq === this.agentContext.conversationSeq) return pending
+    this.dropPendingAmendment('conversation_holding_the_amendment_text_was_replaced')
+    return null
+  }
+
+  // The staged amendment is being dropped. The player was told it would be applied, so they are told it
+  // was not: a chat line (the supervisor prints `amendment.dropped`'s chat_message) asks them to send it
+  // again. Both rows carry the request id and the reason.
+  dropPendingAmendment(reason) {
+    const pending = this.pendingInteractionAmendment
     this.pendingInteractionAmendment = null
     this.pendingAmendmentConversationSeq = undefined
-    const requestId = this.traceRequest?.id ?? this.turnScope.getStore()?.requestId
+    if (!pending || typeof this.traceEvent !== 'function') return
+    const requestId = this.traceRequest?.id ?? this.turnScope?.getStore?.()?.requestId
+    const preview = cleanMemoryText(pending.text, 120)
     void this.traceEvent('amendment.flag_cleared', {
       request_id: requestId,
-      reason: 'conversation_holding_the_amendment_text_was_replaced',
+      reason,
       role: this.agentContext.role,
       handoff_id: this.agentContext.handoffId,
     }, { requestId })
-    return null
+    void this.traceEvent('amendment.dropped', {
+      request_id: requestId,
+      reason,
+      sender: pending.sender,
+      chat_message: `Your change "${preview}" was not applied: the conversation that held it was replaced before I could use it (${reason}). Please send it again.`,
+    }, { requestId })
   }
 
   async request(text, options = {}) {
@@ -10258,6 +10300,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           ...this.rolePrefixMessages(this.agentContext.role),
           { role: 'user', content: capsule },
         ]
+        // The capsule fallback replaces the conversation too: a staged amendment rides it.
+        const held = this.currentPendingAmendment()
+        if (held) this.messages.push({ role: 'user', content: `[CHAT] ${held.sender}: ${held.text}` })
       }
       // The fresh conversation carries none of the earlier reads, so the fresh
       // generation gets a fresh observation phase with the new-goal bootstrap
