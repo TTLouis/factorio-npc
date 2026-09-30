@@ -322,3 +322,54 @@ test('the packet reports an estimated token count of ceil(chars / 4)', () => {
   assert.equal(estimateTokens(0), 0)
   assert.equal(estimateTokens(9), 3)
 })
+
+// --- U8: actor snapshot, runtime state and the active step contract (step block only) ---
+
+function contractState() {
+  const drafted = applyPlanningEvent(goalState(), {
+    type: PLANNING_EVENT.DRAFT_CREATED,
+    now: 20,
+    roadmap_node_ids: ['node_power'],
+    steps: [
+      { description: 'Mine stone and craft a boiler', completion_contract: { mode: 'all', requirements: [{ id: 'boiler', kind: 'inventory_count', item_name: 'boiler', minimum: 1 }] } },
+      { description: 'Place the steam engine and offshore pump' },
+    ],
+  })
+  return applyPlanningEvent(drafted, {
+    type: PLANNING_EVENT.PLAN_COMMITTED,
+    now: 30,
+    plan_id: getActivePlan(drafted).plan_id,
+    runtime_validation: { passed: true },
+  })
+}
+
+const ACTOR = { actor_id: 19, actor_kind: 'standalone_character', epoch: 4, connected_players: 0, position: { x: 1, y: 2 }, secret: 'not-whitelisted' }
+const RUNTIME = { task_state: 'idle', queue_length: 0, idle: true, last_operations: [{ unit_number: 4242 }] }
+
+test('golden step block with the actor snapshot, runtime state and active step contract; the plan block is untouched', () => {
+  const state = contractState()
+  const plain = buildHandoffPacket({ planningState: state, role: 'planner', checkpoint: 'C7', reason: 'recovery:actor_replaced', now: 500 })
+  const packet = buildHandoffPacket({ planningState: state, role: 'planner', checkpoint: 'C7', reason: 'recovery:actor_replaced', actor: ACTOR, runtime: RUNTIME, now: 500 })
+  assert.equal(packet.stableText, plain.stableText, 'stableText is byte-identical with or without the new fields')
+  assert.equal(packet.volatileText, [
+    '--- step block ---',
+    'restage: role=planner checkpoint=C7 reason=recovery:actor_replaced',
+    'actor: actor_id=19 actor_kind=standalone_character epoch=4 connected_players=0',
+    'plan_status: COMMITTED; steps 1:active 2:pending',
+    `active_step: 1 of 2 ${getActivePlan(state).steps[0].step_id} | Mine stone and craft a boiler | batches=0 accepted_for_close=0`,
+    'active_step_contract: all: inventory_count boiler>=1',
+    'runtime: task_state=idle queue_length=0 idle=true',
+  ].join('\n'))
+  assert.ok(!packet.text.includes('4242') && !packet.text.includes('not-whitelisted') && !packet.text.includes('position'), 'only whitelisted scalar fields enter')
+  assert.doesNotMatch(packet.stableText, /actor|runtime|contract|epoch/, 'nothing volatile in the stable block')
+})
+
+test('the actor line is mandatory when supplied, the runtime and contract lines drop whole before steps (the contract goes before the roadmap node)', () => {
+  const state = contractState()
+  const run = maxChars => buildHandoffPacket({ planningState: state, role: 'planner', checkpoint: 'C7', now: 1, actor: ACTOR, runtime: RUNTIME, budget: 'effort low', limits: { maxChars } })
+  const full = run(100000)
+  assert.deepEqual(full.dropped, [])
+  const tiny = run(1)
+  assert.deepEqual(tiny.dropped, ['runtime', 'budget', 'contract', 'roadmap_node', 'step_1'], 'fixed order; the pending step drops last, the active step never')
+  assert.ok(tiny.text.includes('actor: actor_id=19'), 'the actor snapshot is never dropped')
+})

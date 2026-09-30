@@ -72,6 +72,78 @@ Secrets such as `OPENAI_API_KEY` and Factorio credentials must not be committed 
 
 Do not update a historical validation record in place to describe a newer commit. Create a new checkpoint or update the current status document instead.
 
+## Local test gates (Windows host)
+
+- Never run `pnpm`, `vitest`, `eslint`, `tstl` or `pnpm install` on the Windows host. The checkout's `node_modules` are WSL symlinks that Windows Node cannot follow, and a host install can delete links that other worktrees are using. All tests run in Docker.
+- The ordinary gate is `bash scripts/test-local.sh all`, run from Git Bash inside the `npc-dev` image. It never installs packages or touches the network. `runtime` runs `node --test` over `deploy/pterodactyl/staging` and `runtime-v8`, with the mounts those suites need. `mod` runs autorio vitest, `tsc --noEmit`, the Lua build and the generated-Lua check. Do not invent ad hoc mounts; missing `contracts/` or repo-root compose files cause false failures.
+- The full build gate is `docker build -f tests/factorio/Dockerfile --target build .`. Real-engine lanes run with `docker build -f tests/factorio/Dockerfile -t factorio-npc-test . && docker run --rm -e NPC_TEST_LANES=<lane> factorio-npc-test`, or `scripts/e2e-cloud.sh` in a cloud sandbox. Run the real-engine lanes at milestones, not before every push.
+- Redirect long test output to a log file and report the real exit code. Piping into `tail` or `head` hides failures.
+- Batch edits and verify once at the end instead of rerunning the suite after every small change.
+- Installer payload pin. Whenever `deploy/pterodactyl/installer.sh` or the files it ships change, repin the payload:
+  1. Set `PAYLOAD_REF` in `deploy/pterodactyl/build-payload.mjs` and `build-payload.test.mjs` to the new commit.
+  2. Run `node deploy/pterodactyl/build-payload.mjs`. It prints the sha256.
+  3. Set `PAYLOAD_SHA256` in the test to that sha256.
+  4. Run `node deploy/pterodactyl/build-payload.mjs --check`, then `node --test deploy/pterodactyl/build-payload.test.mjs`.
+  5. Commit the repin as its own commit.
+- Line endings: `core.autocrlf=true`. When scripting file edits, keep each file's existing newline style.
+
+## Live E2E procedure (local Docker stack)
+
+Live runs call real providers and cost money. Do not start one (RCON rounds, the e2e overlay, subagent e2e sessions, or anything that calls a real model or Jev) until the owner says so for that run. Before an owner-approved live run, stop after the static gates and report that the build is ready. Static scenarios with scripted or recorded model replies are the default harness gate. Turn every live finding into one of those fixtures, using realistic output sizes and live Jev shapes.
+
+- **Secrets.** Secrets live only in the gitignored `.env`. Agents never read, print or echo it, and never copy its values into commands, logs, commits or docs. The stack fails fast without `FACTORIO_RCON_PASSWORD`, `OPENAI_API_KEY`, `OPENAI_API_BASEURL`, `OPENAI_MODEL` and `JEV_TYPESAFE_API_KEY`.
+- **Build what you test.**
+  - Build the local server image only with `scripts/build-docker-local.ps1` (full: pins `SGLUNA_SOURCE_REF` to the committed, pushed HEAD) or `scripts/update-docker-mod-local.ps1` (mod-only changes). Both need a clean tree. Do not pass `--no-cache` or `--pull`.
+  - The e2e overlay's `SGLUNA_LOCAL_RUNTIME_OVERRIDE` copies only `supervisor.mjs`, so a container can be a mixed deploy.
+  - Verify what is deployed by diffing the container's release files against `git show HEAD:<path>`, with CR stripped from both. Do not trust the release directory name or `/opt/airi/SOURCE_SHA`.
+- **Preflight.**
+  - `docker ps` for the container name; do not assume it.
+  - Confirm the `/data` bind-mount source still exists on the host. A deleted mount leaves RCON answering while every file write fails with ENOENT.
+  - RCON is port 27015 inside the container and is published on host loopback only (127.0.0.1:27016). Never publish it on the LAN.
+  - A hang on connect usually means a wrong RCON password.
+  - Use one `Rcon` instance (from `runtime-v8/common.mjs`) per run and always `close()` it.
+  - Do not touch Docker Desktop itself. If the engine is down, report it and let the owner restart it.
+- **Cold start.** Every test starts cold:
+  1. Run `docker compose -f compose.yml -f compose.e2e.yml down`.
+  2. Remove `data/.airi/npc-state.json`.
+  3. Move every `data/saves/*.zip`, including autosaves, to a backup outside the repo. The entrypoint regenerates the world only when the save is absent.
+  4. Bring the stack back up with `up -d --force-recreate`.
+  5. Confirm: a freshly generated world, a new actor_id, an empty inventory, and `NULL_BOARD` from the task-board status call.
+  - The first objective must get a new `goal_id`, or the run does not count. There is no working in-game reset (`autorio_task_board.clear` is re-pushed by the supervisor).
+  - `data/sgluna-config.json` persists across cold starts. Check it when a provider limit looks wrong.
+- **Drive and observe.**
+  - Send objectives as raw chat (`!luna <objective>`), not `/silent-command`.
+  - Read the board through a nil-safe `remote.call("autorio_task_board","status")`.
+  - Flush `storage.airi_task_board_ui_inputs` before a round.
+  - Use a different objective each round, and test one input channel at a time.
+  - Poll windows of at least ~90 s; shorter ones miss transitions.
+  - In Git Bash, prefix `docker exec` and node argv containing `/...` paths or `/silent-command` with `MSYS_NO_PATHCONV=1`.
+  - With zero connected players the NPC force charts nothing, so map ops return `area_uncharted`.
+- **Evidence.**
+  - The structured logs are the evidence, not the board: `<SGLUNA_DATA_DIR>/logs/sgluna-behavior.jsonl`, `sgluna-decision.jsonl` and `sgluna-prompts.jsonl`, read from the host. `docker logs --since <ISO>` is a fallback.
+  - Filter each run to its start timestamp and check it with `node deploy/pterodactyl/runtime-v8/run-check.mjs <behavior.jsonl> [since] [--json]`.
+  - Record results in `docs/NPC_AGENT_HARNESS_STATUS.md` or a new `docs/validation/` checkpoint, never by editing an old checkpoint.
+- **Never deploy.** Never deploy to the live Pterodactyl server, and never retry providers on your own. A local container being up is not permission to run against it.
+
+## Agent build workflow (worktrees and merges)
+
+- **Integration worktree.** Work lands on the active integration branch (currently `experiment/jev-agent-architecture`) from one integration worktree.
+  - Create each unit's worktree yourself with `git worktree add -b <branch> ../<name> HEAD`. Brief subagents with the absolute worktree path and a `cd` into it on every command. Do not rely on auto-created isolation worktrees: a resumed agent whose worktree was removed runs in the integration worktree.
+  - Reviewers read diffs with `git -C <path>` or `git diff` and never `git checkout` inside another worktree.
+  - Never use a bare `git stash` (the stack is shared across worktrees). Use a temporary WIP commit instead.
+- **Merge protocol, per unit:**
+  1. The agent commits on its unit branch and does not push.
+  2. A separate reviewer checks the diff for merge-blocking issues. Invariant-heavy diffs (planning ownership, actor/epoch correlation, admission, budget) get the strongest reviewer. Uncorroborated findings are marked as such.
+  3. The integrator confirms the tests the agent reported actually exist in the diff.
+  4. `git merge --no-ff <branch>` into the integration worktree.
+  5. Repin the installer payload if the installer or the files it ships changed.
+  6. `bash scripts/test-local.sh all` must pass.
+  7. `git push origin HEAD:<integration branch>`.
+- **Commits.** Small conventional commits per logical unit, pushed once green. No co-author or tool-attribution trailers. No force-push or history rewrite.
+- **Traceability.** Every behavior change adds a named trace event carrying `request_id` and a reason, asserted by a test, so a later live run can be diagnosed from the logs.
+- **Progress tracking.** Track long builds in a checklist (unit, commit, status), not in chat scrollback. Update the design note's build-status section and the status doc as units merge.
+- **Scope.** When a genuine product decision comes up, flag it to the owner and keep working on everything that does not depend on the answer.
+
 ## Claude Opus 5.5 guidance
 
 - [Getting the most out of Opus 5.5](https://claude.dev/blog/getting-the-most-out-of-opus-5-5/): prompting and long-run guidance for Claude Opus 5.5. Key points for this repo:

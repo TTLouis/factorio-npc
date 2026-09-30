@@ -569,7 +569,7 @@ test('a slice that closes from the completion signal (outside any turn) restages
   assert.equal(world.rows('context.restage_refused').length, 0)
 })
 
-test('an in-turn slice close presents the turn token through restageAtTurnBoundary, and the completion-signal wake passes none', async () => {
+test('an in-turn slice close presents the turn token through restageInTurn, and the completion-signal wake passes none', async () => {
   const world = plannerHarness({ shelf: false, softLimit: 5000 })
   const seen = []
   const original = world.agent.restageContext.bind(world.agent)
@@ -595,7 +595,7 @@ test('an in-turn slice close presents the turn token through restageAtTurnBounda
   outside.agent.restageContext = async (call) => { args.push(call); return spy(call) }
   const state = outside.memory.planningState(KEY)
   const packet = buildHandoffPacket({ planningState: state, role: 'planner', checkpoint: 'C1', reason: 'r', now: 5000 })
-  const result = await outside.agent.restageAtTurnBoundary({ checkpoint: 'C1', reason: 'r', packet })
+  const result = await outside.agent.restageBetweenTurns({ checkpoint: 'C1', reason: 'r', packet })
   assert.equal(args[0].safePoint, undefined)
   assert.equal(result.restaged, true)
 })

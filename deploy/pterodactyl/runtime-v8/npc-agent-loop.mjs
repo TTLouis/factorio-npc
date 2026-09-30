@@ -2370,6 +2370,11 @@ function providerBudgetTriggerSource(semanticScope, route) {
   return route === 'replan_high' ? 'recovery_replan_high' : 'recovery_continue_low'
 }
 
+// FALLBACK ONLY (U8). The budget handoff (checkpoint C5) restages from a handoff
+// packet (restageBudgetHandoff). This capsule is used only when that restage is
+// refused (no admitted reducer goal, the reducer rejected the event), so the
+// fresh generation is never left on the exhausted thread. It is traced as
+// budget.handoff_restage_fallback.
 function providerBudgetHandoffCapsule(state, runtimeStatus, reason, semanticScope = 'keep_target', { admittedGoal, request } = {}) {
   const board = state?.task_board
   const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : state?.current_step ?? 0
@@ -2528,8 +2533,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.usageLedger = new UsageLedger({ outputCap: this.maxProviderOutputUnits })
     this.chatAcknowledger = new ChatAcknowledger() // 2.10
     this.agentContext.config = options.agentRoleConfig ?? options.providerConfig // names the role's model only (agent-roles.mjs)
-    this.restageSoftLimitOption = options.restageSoftLimitTokens // U7: a number, or { planner, executor }; default follows the working-context ceiling
-    this.providerCallsInFlight = 0 // provider rounds between request start and the end of their reply processing (restageContext refuses while > 0)
+    this.restageSoftLimitOption = options.restageSoftLimitTokens // U7: a number, or { planner, executor }; default is prefix-aware (restageSoftLimitTokens)
+    this.providerCallsInFlight = 0 // provider rounds between request start and the end of their reply processing
+    this.providerCallsByLineage = new Map() // the same count per conversation lineage: restageContext refuses while the CURRENT lineage has a round in flight
     this.turnConversation = null // attribution of the conversation the running turn last read; null between turns
   }
 
@@ -2586,7 +2592,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       await this.traceEvent('context.restage_refused', { role: prepared.role, checkpoint, handoff_id: packet.handoff_id, reason: why }, { requestId })
       return { restaged: false, reason: why }
     }
-    if (this.providerCallsInFlight > 0) return refuse('round_in_flight')
+    if ((this.providerCallsByLineage.get(this.agentContext.lineageSequence) ?? 0) > 0) return refuse('round_in_flight')
     const token = this.turnConversation
     if (token ? (safePoint !== token || this.agentContext.isStale(token)) : (safePoint !== undefined && safePoint !== false)) return refuse('round_open')
     const before = this.memory.planningState?.(key)
@@ -2613,22 +2619,79 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return { restaged: true, ...result }
   }
 
-  // --- U7: planner wiring (design note section 12c) ------------------------------------
+  // --- packet-driven restages (U8: C5 budget handoff, C7 recovery; U7: planner slice close) ---
 
-  // THE one place a restage names a safePoint. `withinTurn: true` is for a caller
-  // that runs inside the running turn's own call chain, after the last model
-  // reply was fully admitted and appended and before the next callProvider (the
-  // in-turn slice close in commitPlan's semantic-claim path); it presents the
-  // turn's token. Every other flow (the supervisor's completion signal, chat, a
-  // timer) passes nothing: a `{ restaged: false, reason: 'round_in_flight' |
-  // 'round_open' }` result there means "retry at the next boundary", not an error.
-  async restageAtTurnBoundary({ withinTurn = false, role = PLANNER_ROLE, ...args } = {}) {
-    return this.restageContext({
-      ...args,
-      role,
-      requestId: args.requestId ?? this.traceRequest?.id,
-      safePoint: withinTurn ? this.turnToken : undefined,
+  // The ONE packet builder. `planningState` overrides the current reducer state
+  // (the slice-close wake passes the state it just settled); `shelfCandidates`
+  // rides a planner restage at a shelf pickup. Undefined when no goal has been
+  // admitted (a reducer-less memory, a goal that never started).
+  buildRestagePacket({ checkpoint, role, reason, budget, note, actor, runtime, shelfCandidates, planningState } = {}) {
+    const state = planningState ?? this.memory.planningState?.(this.activePlanKey())
+    if (!state?.goal?.goal_id) return undefined
+    return buildHandoffPacket({
+      planningState: state,
+      role: role ?? this.agentContext.role,
+      checkpoint,
+      reason,
+      budget,
+      note,
+      actor,
+      runtime,
+      shelfCandidates,
+      previousContextChars: conversationChars(this.messages),
+      now: Date.now(),
     })
+  }
+
+  // THE ONE PLACE a running turn presents its token to restageContext (the U4
+  // seam contract). Call it only from the running turn's own call chain, after
+  // the last reply of the current conversation is fully handled (or failed, as
+  // the exhausted budget round did) and before the next callProvider. When no
+  // turn is open the token is null and NOTHING is passed (a null/true safePoint
+  // is refused as round_open). Never call it from the supervisor, chat or a
+  // timer: those use restageBetweenTurns.
+  // Accepts a prebuilt `packet` or the builder arguments of buildRestagePacket.
+  async restageInTurn(args = {}) {
+    return this.restageThrough(args, this.turnToken ?? undefined)
+  }
+
+  // Restage where no turn holds the conversation: supervisor-level recovery
+  // (C7), a request's start (a Resume) and a slice-close wake that runs from the
+  // completion signal. Passes no safePoint; a refusal ('round_in_flight' |
+  // 'round_open') means "retry at the next boundary", never an error.
+  async restageBetweenTurns(args = {}) {
+    return this.restageThrough(args, undefined)
+  }
+
+  // Shared body of the two helpers. Never throws: a refusal is a typed result, a
+  // failure (a packet that does not fit, a memory that cannot restage) is
+  // `{ restaged: false, reason: 'restage_error' }` with a `context.restage_error`
+  // row, so a C5 budget handoff falls back to its capsule. A frozen (BLOCKED)
+  // plan and a goal that is not active are never restaged (the plan waits for the
+  // user; there is nothing healthy to re-brief).
+  async restageThrough(args, safePoint) {
+    const requestId = args.requestId ?? this.traceRequest?.id
+    const role = args.role ?? this.agentContext.role
+    const checkpoint = args.checkpoint ?? args.packet?.event?.checkpoint
+    try {
+      const state = args.planningState ?? this.memory.planningState?.(this.activePlanKey())
+      if (!state?.goal?.goal_id) return { restaged: false, reason: 'no_admitted_goal' }
+      const refusal = state.goal.status !== GOAL_STATUS.ACTIVE
+        ? 'goal_not_active'
+        : getActivePlanningPlan(state)?.status === PLAN_STATUS.BLOCKED ? 'plan_blocked' : undefined
+      if (refusal) {
+        await this.traceEvent('context.restage_refused', { role, checkpoint, handoff_id: args.packet?.handoff_id, reason: refusal }, { requestId })
+        return { restaged: false, reason: refusal }
+      }
+      const packet = args.packet ?? this.buildRestagePacket({ ...args, role, planningState: state })
+      if (!packet) return { restaged: false, reason: 'no_admitted_goal' }
+      return await this.restageContext({ checkpoint, reason: args.reason, packet, role, softLimitTokens: args.softLimitTokens, requestId, safePoint })
+    }
+    catch (error) {
+      const message = cleanMemoryText(error instanceof Error ? error.message : String(error), 300)
+      await this.traceEvent('context.restage_error', { role, checkpoint, message }, { requestId })
+      return { restaged: false, reason: 'restage_error' }
+    }
   }
 
   // Soft limit of a role's context, in tokens. An explicit `restageSoftLimitTokens`
@@ -2668,9 +2731,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   //     slice_close): past the soft limit, the planner conversation is replaced
   //     by a packet plus the shelf candidates (C2 when the wake picks up a shelf
   //     node, else C1). Below it nothing is discarded.
-  // A restage that cannot happen now (a round or turn is open) or fails is never
-  // an error: the wake proceeds on the existing conversation and the next slice
-  // close retries.
+  // `withinTurn` says the wake runs inside the running turn's own call chain (it
+  // uses restageInTurn); otherwise restageBetweenTurns. A restage that cannot
+  // happen now (a round or turn is open) or fails is never an error: the wake
+  // proceeds on the existing conversation and the next slice close retries.
   async planSliceCloseWake({ route, planningState, goalEvaluation, withinTurn = false }) {
     const plan = planningState ? getActivePlanningPlan(planningState) : undefined
     const verified = buildVerifiedResults({
@@ -2695,24 +2759,36 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       softLimitTokens,
     })
     if (!decision.restage) return wake
-    try {
-      const candidates = shelfRefinementCandidates(planningState, { limit: 5 })
-      const checkpoint = route === 'next_shelf_slice' && candidates.length > 0 ? 'C2' : decision.checkpoint
-      const packet = buildHandoffPacket({
-        planningState,
-        role: PLANNER_ROLE,
-        checkpoint,
-        reason: decision.reason,
-        shelfCandidates: candidates,
-        previousContextChars: conversationChars(this.messages),
-        now: Date.now(),
-      })
-      const result = await this.restageAtTurnBoundary({ checkpoint, reason: decision.reason, packet, softLimitTokens, withinTurn })
-      return { ...wake, restaged: result.restaged === true, checkpoint, result }
-    }
-    catch (error) {
-      this.log(`[restage] planner restage at the slice close was skipped: ${error instanceof Error ? error.message : String(error)}`)
-      return wake
+    const candidates = shelfRefinementCandidates(planningState, { limit: 5 })
+    const checkpoint = route === 'next_shelf_slice' && candidates.length > 0 ? 'C2' : decision.checkpoint
+    const restage = withinTurn ? this.restageInTurn : this.restageBetweenTurns
+    const result = await restage.call(this, {
+      checkpoint,
+      role: PLANNER_ROLE,
+      reason: decision.reason,
+      shelfCandidates: candidates,
+      planningState,
+      softLimitTokens,
+    })
+    return { ...wake, restaged: result.restaged === true, checkpoint, result }
+  }
+
+  // C5: a provider-budget boundary. The fresh conversation runs in the SAME
+  // role as the exhausted one and starts from the packet alone: the reducer's
+  // goal, plan, active step and receipts, the reason code (with the semantic
+  // scope) and a budget line (generation, handoff n of the limit). None of the
+  // exhausted thread's messages, and never a model summary of them.
+  // TODO(U6/U7): when the executor role has its own tool block and prompt, a
+  // budget handoff during step execution restages as the executor.
+  budgetHandoffPacketArgs({ reason, semanticScope, runtime }) {
+    const cause = cleanMemoryText(sanitizeDurableModelText(reason, 200), 150)
+    return {
+      checkpoint: 'C5',
+      role: this.agentContext.role,
+      reason: `provider_budget_handoff scope=${semanticScope} cause=${cause}`,
+      budget: `provider budget generation ${this.providerBudgetGeneration}; handoff ${this.providerBudgetHandoffCount} of ${this.maxProviderBudgetHandoffs}; output cap ${this.maxProviderOutputUnits} per generation`,
+      actor: this.epoch,
+      runtime,
     }
   }
 
@@ -5162,15 +5238,35 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.lastGoalEvaluation = null
     this.freshObservationSinceContinuation = false
     this.genericRecoveryDecisionActive = false
-    if (resumeProviderBudgetHandoff) {
-      const budgetCapsule = providerBudgetHandoffCapsule(
-        planBefore,
-        taskStatus,
-        planBefore.provider_recovery.reason || 'provider_budget_handoff_resume',
-        planBefore.provider_recovery.semantic_scope,
-      )
-      const repairCapsule = resumeActionOmission ? `\n${actionOmissionRecoveryCapsule(planBefore, taskStatus)}` : ''
-      this.memory.setNextContextOverride?.(memoryKey, `${budgetCapsule}${repairCapsule}`)
+    // C5 on Resume: a resumed budget handoff, or a Resume after the request
+    // output ceiling / a generation-cap pause, restages from a handoff packet as
+    // soon as the request's turn starts (applyStartRestage). The legacy capsule
+    // is staged only as the fallback for a refused restage.
+    const resumeAfterBudgetPause = intent === 'continue_current'
+      && planBefore?.status === 'paused'
+      && /^(request_output_ceiling|provider_output_budget_exhausted|recoverable_provider_failure:provider_budget)\b/.test(String(planBefore.pause_reason ?? ''))
+    this.startRestage = undefined
+    if (resumeProviderBudgetHandoff || resumeAfterBudgetPause) {
+      const recovery = planBefore.provider_recovery
+      const semanticScope = resumeProviderBudgetHandoff ? (recovery.semantic_scope ?? 'keep_target') : 'keep_target'
+      const reason = resumeProviderBudgetHandoff
+        ? (recovery.reason || 'provider_budget_handoff_resume')
+        : String(planBefore.pause_reason)
+      this.startRestage = {
+        reason,
+        semanticScope,
+        // The recovery capsule of an action-omission repair rides on top of the packet.
+        extraMessage: resumeActionOmission ? actionOmissionRecoveryCapsule(planBefore, taskStatus) : undefined,
+        runtime: taskStatus,
+      }
+      if (resumeProviderBudgetHandoff) {
+        const budgetCapsule = providerBudgetHandoffCapsule(planBefore, taskStatus, reason, semanticScope)
+        const repairCapsule = resumeActionOmission ? `\n${actionOmissionRecoveryCapsule(planBefore, taskStatus)}` : ''
+        this.memory.setNextContextOverride?.(memoryKey, `${budgetCapsule}${repairCapsule}`)
+      }
+      else if (resumeActionOmission) {
+        this.memory.setNextContextOverride?.(memoryKey, actionOmissionRecoveryCapsule(planBefore, taskStatus))
+      }
     }
     else if (resumeActionOmission) {
       this.memory.setNextContextOverride?.(memoryKey, actionOmissionRecoveryCapsule(planBefore, taskStatus))
@@ -5258,6 +5354,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     catch (error) {
       this.chatRequestPending = false
+      this.startRestage = undefined
       if (this.traceRequest) {
         const message = error instanceof Error ? error.message : String(error)
         await this.traceEvent('request.failed', {
@@ -5801,6 +5898,33 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  // C5 on Resume: restage from the packet before the request's first round.
+  // No turn is open here, so no safePoint is passed. A refusal keeps the
+  // conversation the request built (the fallback capsule where one was staged).
+  async applyStartRestage() {
+    const pending = this.startRestage
+    this.startRestage = undefined
+    if (!pending) return
+    const restaged = await this.restageBetweenTurns({
+      checkpoint: 'C5',
+      role: this.agentContext.role,
+      reason: `provider_budget_resume scope=${pending.semanticScope} cause=${cleanMemoryText(sanitizeDurableModelText(pending.reason, 200), 150)}`,
+      budget: `provider budget generation ${this.providerBudgetGeneration}; handoff ${this.providerBudgetHandoffCount} of ${this.maxProviderBudgetHandoffs}; output cap ${this.maxProviderOutputUnits} per generation`,
+      actor: this.epoch,
+      runtime: pending.runtime,
+      requestId: this.traceRequest?.id,
+    })
+    if (!restaged.restaged) {
+      await this.traceEvent('budget.handoff_restage_fallback', { reason: restaged.reason, budget_generation: this.providerBudgetGeneration, source: 'resume' })
+      return
+    }
+    if (pending.extraMessage) {
+      const extra = { role: 'user', content: pending.extraMessage }
+      this.baseMessages = [...this.baseMessages, extra]
+      this.messages = [...this.messages, { ...extra }]
+    }
+  }
+
   async runGuardedTurn() {
     const generation = this.generation
     // super.request() has just built requestInfo for a player chat request;
@@ -5808,6 +5932,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (this.chatRequestPending && this.requestInfo) this.requestInfo.origin = 'chat'
     this.chatRequestPending = false
     try {
+      await this.applyStartRestage()
       return this.withPauseNotice(await this.runTurnRedriving(generation))
     }
     catch (error) {
@@ -6866,14 +6991,24 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   // Counts provider rounds in flight (the request await and the reply processing
-  // inside it) so restageContext can refuse while one is open.
+  // inside it) so restageContext can refuse while one is open. Rounds are also
+  // counted per conversation lineage (U8): a round that outlives a reset (an
+  // aborted turn, a stale provider) belongs to a discarded lineage, its reply is
+  // dropped by the generation check, and it can never touch the new
+  // conversation, so it must not block that lineage's restage (C7 recovery runs
+  // right after the supervisor cancelled the old turn).
   async callProvider(current, generation, options) {
+    const lineage = this.agentContext.lineageSequence
     this.providerCallsInFlight++
+    this.providerCallsByLineage.set(lineage, (this.providerCallsByLineage.get(lineage) ?? 0) + 1)
     try {
       return await this.callProviderRound(current, generation, options)
     }
     finally {
       this.providerCallsInFlight--
+      const remaining = (this.providerCallsByLineage.get(lineage) ?? 1) - 1
+      if (remaining > 0) this.providerCallsByLineage.set(lineage, remaining)
+      else this.providerCallsByLineage.delete(lineage)
     }
   }
 
@@ -9472,25 +9607,36 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const previousReasoningBudget = this.reasoningBudgetOverride
       this.reasoningTriggerSource = providerBudgetTriggerSource(semanticScope, routed.route)
       this.reasoningBudgetOverride = null
-      const state = this.memory.currentPlan?.(key)
-      const admittedGoal = this.memory.planningState?.(key)?.goal
-      const capsule = providerBudgetHandoffCapsule(
-        state,
-        routed.runtime ?? routed.persistentRuntime,
-        reasonText,
+      // C5: the fresh generation is a restage from a handoff packet (same
+      // role, fresh conversation, none of the exhausted thread's messages).
+      const restaged = await this.restageInTurn(this.budgetHandoffPacketArgs({
+        reason: reasonText,
         semanticScope,
-        {
-          admittedGoal: admittedGoal?.status === GOAL_STATUS.ACTIVE ? admittedGoal : undefined,
-          request: this.requestInfo,
-        },
-      )
-      this.messages = [
-        { role: 'system', content: this.systemPrompt },
-        { role: 'user', content: capsule },
-      ]
-      // The capsule carries none of the earlier reads, so the fresh generation
-      // gets a fresh observation phase with the new-goal bootstrap minimum;
-      // inheriting a closed phase left it unable to re-observe anything.
+        runtime: routed.runtime,
+      }))
+      if (!restaged.restaged) {
+        // Refused (no admitted reducer goal, the reducer rejected the event): the
+        // fresh generation must still not run on the exhausted thread.
+        await this.traceEvent('budget.handoff_restage_fallback', { reason: restaged.reason, budget_generation: this.providerBudgetGeneration })
+        const admittedGoal = this.memory.planningState?.(key)?.goal
+        const capsule = providerBudgetHandoffCapsule(
+          this.memory.currentPlan?.(key),
+          routed.runtime ?? routed.persistentRuntime,
+          reasonText,
+          semanticScope,
+          {
+            admittedGoal: admittedGoal?.status === GOAL_STATUS.ACTIVE ? admittedGoal : undefined,
+            request: this.requestInfo,
+          },
+        )
+        this.messages = [
+          { role: 'system', content: this.systemPrompt },
+          { role: 'user', content: capsule },
+        ]
+      }
+      // The fresh conversation carries none of the earlier reads, so the fresh
+      // generation gets a fresh observation phase with the new-goal bootstrap
+      // minimum; inheriting a closed phase left it unable to re-observe anything.
       this.resetObservationDecisionState()
       if (Number.isSafeInteger(this.observationBudgetOverride)) {
         this.observationBudgetRemaining = Math.max(3, this.observationBudgetOverride)
@@ -9537,6 +9683,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
 
     if (plannerRecoveryRoutes.includes(routed.route)) {
+      // TODO(U6/U7, C6): ordinary bounded recovery keeps the committed semantic
+      // step and should get a FRESH executor-shaped context (a C6 packet, no user
+      // interruption). That needs the executor role's own prompt and tool block,
+      // which do not exist yet, so the recovery route still continues the current
+      // conversation in today's role. An approved Revise (a user-approved plan
+      // revision wakes the planner for a new draft) is the C2-shaped restage of
+      // U5/U6 and is not wired here either.
       const previousTrigger = this.reasoningTriggerSource
       const previousReasoningBudget = this.reasoningBudgetOverride
       const highRecoveryReasoning = routed.failure_class === 'semantic_replan'

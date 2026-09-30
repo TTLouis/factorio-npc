@@ -170,6 +170,20 @@ The compatibility projection should not be deleted merely for cosmetic cleanup w
 features still consume it. Future removal should be driven by eliminating those consumers, not by creating
 another planning source of truth.
 
+### 2026-09-30 context delegation build (unit/integration evidence only, no live run yet)
+
+The design is in `docs/NPC_DELEGATION_DESIGN_2026-09-29.md`, and its §13 has the per-unit table. The goal is to keep the planning agent's context long-lived and uncluttered, and to give disposable execution work fresh contexts built from a harness handoff packet instead of the old transcript. The steam run's single request of about 904k input tokens is the case to beat.
+
+Merged on `experiment/jev-agent-architecture` (head `aa4b30bd`; runtime 1292 tests, autorio 113 files / 892 tests, installer payload repinned):
+
+- **Roles.** Planner on `OPENAI_MODEL[0]`, executor on `[1]`, falling back to `[0]`. The live config is DeepSeek flash for both.
+- **Handoff packet.** The pure handoff packet has a byte-stable plan block for the provider cache, and restage limits are counted in provider tokens.
+- **Restage seam.** Restage is sequential: it is refused while a round is in flight or a turn is open, unless that turn presents its own token. Late replies from a discarded context are dropped and the turn is re-driven at most twice, then it fails visibly. `CONTEXT_RESTAGED` is recorded with its `handoff_id`. A run that never restages is byte-identical to before (a golden replay test).
+- **Output ceiling.** The request output ceiling is now per plan slice.
+- **Recovery.** Budget handoff, Resume after a budget pause, restart and actor replacement rebuild the conversation from the packet. A blocked plan wakes no model.
+
+Not done: the planner wiring (U7, built and reviewed, merge pending), the executor at plan commit (U6), Jev at the checkpoints (U11), and the flash-only live test, which is the first real evidence for any of this.
+
 ## Verified standalone-NPC foundation
 
 User-reported real-Factorio acceptance work has covered the bounded single-NPC foundation at its stated scopes, including:
