@@ -1830,16 +1830,23 @@ test('live shape (submitPlan tool calls): the round that authors operations is N
 })
 
 test('observation rounds after the first admitted operation are not counted', async () => {
-  const world = harness({ script: [plannerSlice(), asSubmitPlan(executorStep()), plannerNextSlice()], tokens: SLICE_TOKENS })
+  const world = harness({ script: [plannerSlice()] })
   await world.say()
-  contractSecondStep(world)
-  world.give('iron-ore')
-  await world.agent.completed()
-  const tracker = [...world.agent.jev.trackers.values()].find(item => item.kind === 'c4')
-  // A lookup round that happens after operations were admitted (a later turn) is not part of the wake's measurement.
-  world.agent.jev.observe('provider.response', { usage: { input_units: 10, output_units: 1 } }, 'req')
-  world.agent.jev.observe('tool.call', { name: 'getNearbyEntities' }, 'req')
-  assert.equal(tracker.measured.observation_rounds, 0)
+  const jev = world.agent.jev
+  const tracker = jev.track({ kind: 'c4', judgment_id: undefined, request_id: 'req_o', plan_id: 'plan_o', step_id: 'step_o', acted: false, had_failure: false, followup_lookups: 0 })
+  jev.beginWake({ key: tracker.key })
+  const round = (tokens, tool) => {
+    jev.observe('provider.response', { usage: { input_units: tokens, output_units: 0 }, has_tool_calls: true }, 'req_o')
+    if (tool) jev.observe('tool.call', { name: tool }, 'req_o')
+  }
+  round(100, 'getNearbyEntities') // an observation round before the first operation
+  round(200, undefined) // a submitPlan round: a tool call, but not a tool.call row
+  jev.observe('operations.ack', { operations: [] }, 'req_o') // the first operation is admitted
+  round(400, 'getInventoryItems') // a later round of the same wake: not part of the measurement
+  await jev.endWake({ key: tracker.key })
+  assert.equal(tracker.measured.observation_rounds, 1)
+  assert.equal(tracker.measured.observation_round_tokens, 100)
+  assert.equal(tracker.measured.rounds, 3)
 })
 
 test('the removal flag does not fire by construction: 30 correct direct judgments that saved the gate calls are not flagged, while a family that really saved nothing is', () => {
