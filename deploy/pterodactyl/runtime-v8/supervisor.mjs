@@ -28,6 +28,7 @@ import {
 } from './common.mjs'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { createSave, prepareGameConfig, prepareMods, prepareServerSettings, selectSave } from './game-files.mjs'
+import { resolveAgentRole } from './agent-roles.mjs'
 import { NpcAgentLoop, RESUME_HINT } from './npc-agent-loop.mjs'
 import { evaluateGoalDefinition, formatGoalStatus, formatGoalUnderstanding, formatSliceProgressNote, goalUiView } from './goal-definition.mjs'
 import { formatGoalReadingNote } from './goal-reading.mjs'
@@ -2556,6 +2557,14 @@ export class Session {
     }
   }
 
+  // Role-aware provider call (delegation U1). `context.role` picks the model via
+  // agent-roles.mjs (planner when absent); the request is the pre-roles shape, so
+  // a single-model config is unchanged.
+  roleProvider(messages, context) {
+    const { role, ...request } = resolveAgentRole(this.config, context?.role)
+    return this.provider(request, messages, context)
+  }
+
   async start() {
     const rconPort = this.rconPort ?? await freeTcpPort([this.config.gamePort])
     const secrets = [this.config.key, this.rconPassword, this.session, this.config.factorio.token]
@@ -2611,20 +2620,8 @@ export class Session {
       npcId: this.npcId,
       memory: new CanonicalTaskBoardMemory(),
       stateFile: path.join(this.root, '.airi', 'npc-state.json'),
-      provider: (messages, context) => this.provider({
-        base: this.config.base,
-        key: this.config.key,
-        model: this.config.model,
-        profile: this.config.profile,
-        timeoutMs: this.config.providerTimeoutMs,
-      }, messages, context),
-      interactionProvider: (messages, context) => this.provider({
-        base: this.config.base,
-        key: this.config.key,
-        model: this.config.model,
-        profile: this.config.profile,
-        timeoutMs: this.config.providerTimeoutMs,
-      }, messages, context),
+      provider: (messages, context) => this.roleProvider(messages, context),
+      interactionProvider: (messages, context) => this.roleProvider(messages, context),
       // Production contract: every goal starts from a game-checkable goal
       // definition that the player sees in game.
       goalDefinitionPolicy: 'required',
