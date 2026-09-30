@@ -29,7 +29,7 @@ import {
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { createSave, prepareGameConfig, prepareMods, prepareServerSettings, selectSave } from './game-files.mjs'
 import { resolveAgentRole } from './agent-roles.mjs'
-import { NpcAgentLoop, RESTART_BEFORE_FIRST_PLAN_PAUSE, RESUME_HINT } from './npc-agent-loop.mjs'
+import { CONTINUATION_WORDS, NpcAgentLoop, RESTART_BEFORE_FIRST_PLAN_PAUSE, RESUME_HINT } from './npc-agent-loop.mjs'
 import { evaluateGoalDefinition, formatGoalStatus, formatGoalUnderstanding, formatSliceProgressNote, goalUiView } from './goal-definition.mjs'
 import { formatGoalReadingNote } from './goal-reading.mjs'
 import { getActivePlan, GOAL_STATUS, PLAN_STATUS } from './planning-state.mjs'
@@ -390,7 +390,7 @@ export function navigationObstaclePolicy(text) {
   const denied = denyPhrases.some(phrase => normalized.includes(phrase))
   if (denied) return { shouldUpdate: true, clearObstacles: false }
 
-  const continuation = ['continue', 'resume', '继续', '继续吧', '继续做', '接着', '接着做']
+  const continuation = CONTINUATION_WORDS
     .some(prefix => normalized === prefix || normalized.startsWith(`${prefix} `) || normalized.startsWith(`${prefix}，`) || normalized.startsWith(`${prefix},`))
   if (continuation) return { shouldUpdate: false, clearObstacles: true }
   return { shouldUpdate: true, clearObstacles: true }
@@ -2768,10 +2768,13 @@ export class Session {
     return undefined
   }
 
+  // The kind is decided when the notice RUNS, not when it is queued: the goal may have moved on in between.
   queueStartupGoalNotice() {
-    const kind = this.startupGoalNoticeKind()
-    if (!kind) return false
-    this.queueEvent(() => this.announceStartupGoal(kind))
+    if (!this.startupGoalNoticeKind()) return false
+    this.queueEvent(async () => {
+      const kind = this.startupGoalNoticeKind()
+      if (kind) await this.announceStartupGoal(kind)
+    })
     return true
   }
 
@@ -2780,8 +2783,12 @@ export class Session {
     const goalId = this.agent.memory?.planningState?.(`npc:${this.npcId}`)?.goal?.goal_id
     if (kind === 'before_first_plan') {
       const paused = await this.agent.pauseGoalWithoutPlan?.(RESTART_BEFORE_FIRST_PLAN_PAUSE, { requestId })
-      await this.agent.traceEvent?.('runtime.goal_without_plan', { reason: RESTART_BEFORE_FIRST_PLAN_PAUSE, request_id: requestId, goal_id: paused?.goal_id ?? goalId, paused: paused?.paused === true, model_woken: false }, { requestId })
-      await this.printChat(`I restarted before this goal had a plan (or while I was waiting for your answer), so I paused it and did not wake the planner. ${RESUME_HINT} If I had asked you something, answer that instead.`)
+      const didPause = paused?.paused === true
+      await this.agent.traceEvent?.('runtime.goal_without_plan', { reason: didPause ? RESTART_BEFORE_FIRST_PLAN_PAUSE : 'pause_not_applied', request_id: requestId, goal_id: paused?.goal_id ?? goalId, paused: didPause, model_woken: false }, { requestId })
+      // Say only what happened: a pause that did not apply is not announced as one.
+      await this.printChat(didPause
+        ? `I restarted before this goal had a plan (or while I was waiting for your answer), so I paused it and did not wake the planner. ${RESUME_HINT} If I had asked you something, answer that instead.`
+        : `I restarted before this goal had a plan and did not wake the planner, but I could not record a pause. Give me a new instruction.`)
       return
     }
     await this.agent.traceEvent?.('runtime.goal_without_plan', { reason: 'runtime_restart_no_active_plan', request_id: requestId, goal_id: goalId, model_woken: false }, { requestId })

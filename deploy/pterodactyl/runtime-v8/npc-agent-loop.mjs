@@ -2206,6 +2206,13 @@ const PROVIDER_PAUSE_TEXT = {
 }
 
 export const RESUME_HINT = 'Press Resume or say continue to retry from the verified task state.'
+// The words that mean "go on with what you were doing" (English and Chinese). One list: the
+// supervisor's navigation policy and the Resume re-drive of a goal with no plan both read it.
+export const CONTINUATION_WORDS = Object.freeze(['continue', 'resume', '继续', '继续吧', '继续做', '接着', '接着做'])
+export function isBareContinuation(text) {
+  const normalized = String(text ?? '').trim().toLocaleLowerCase().replace(/[\s.!?,，。！？、~]+$/u, '')
+  return CONTINUATION_WORDS.includes(normalized)
+}
 // Pause reason of an active goal a restart found with no plan at all (never past its first plan).
 export const RESTART_BEFORE_FIRST_PLAN_PAUSE = 'runtime_restart_before_first_plan'
 
@@ -2437,14 +2444,19 @@ function normalizedStepText(value) {
 // Does an executor's restated step list change the committed one? 'unchanged' when it is
 // the whole list or a contiguous run of it (a restated remaining suffix); 'order_changed'
 // when every step is a committed step but the order differs; otherwise 'steps_changed'.
-export function restatedPlanVerdict(incoming, committed) {
+// A run that starts before the active step and does not cover the whole list (a completed prefix)
+// is not one: it would put the advisory focus on a closed step.
+export function restatedPlanVerdict(incoming, committed, activeIndex = 0) {
   if (incoming.length <= committed.length) {
     for (let start = 0; start + incoming.length <= committed.length; start++) {
-      if (incoming.every((step, offset) => committed[start + offset] === step)) return 'unchanged'
+      if (!incoming.every((step, offset) => committed[start + offset] === step)) continue
+      const whole = start === 0 && incoming.length === committed.length
+      if (whole || start >= activeIndex) return 'unchanged'
     }
   }
   const positions = incoming.map(step => committed.indexOf(step))
-  if (positions.every(position => position >= 0) && new Set(positions).size === positions.length) return 'order_changed'
+  const reordered = positions.some((position, index) => index > 0 && position < positions[index - 1])
+  if (positions.every(position => position >= 0) && new Set(positions).size === positions.length && reordered) return 'order_changed'
   return 'steps_changed'
 }
 
@@ -2585,6 +2597,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   reset() {
     this.turnConversation = null
     this.executorStepMark = null
+    this.pendingInteractionAmendment = null // its staged text lived in the conversation this reset discards
+    this.pendingAmendmentConversationSeq = undefined
     this.agentContext.beginLineage() // planner role: an executor role never leaks into the next chat
     super.reset()
   }
@@ -2674,6 +2688,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       catch {}
     }
+    // A packet restage is a rebuild from durable state, so the reasoning epoch it was built at is the
+    // one this loop has seen: refreshPlanningReasoningEpoch must not rebuild it a second time.
+    this.markReasoningEpochSeen(key)
     // The in-flight turn scope names the conversation now in place, so a later stale drop is attributed to it.
     const scope = this.turnScope.getStore()
     if (scope) { scope.role = this.agentContext.role; scope.handoffId = this.agentContext.handoffId }
@@ -2841,9 +2858,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // U6: the slice is closed, so the executor's work is done. Control returns to the
     // planner conversation (parked at the plan commit, untouched by executor traffic),
     // which the wake below then briefs with the verified results.
+    // When it cannot happen the executor is NEVER woken to author the next slice: the caller ends the
+    // request visibly (endSliceWithoutPlanner) and no model runs.
     if (this.agentContext.role === EXECUTOR_ROLE) {
-      const returned = await this.returnControlToPlanner({ route, planningState, withinTurn, reason: 'slice_close', requestId })
-      if (!returned.returned) return wake
+      const returned = await this.returnControlToPlannerWithRetry({ route, planningState, withinTurn, reason: 'slice_close', requestId })
+      if (!returned.returned) return { ...wake, unavailable: { route, reason: returned.reason ?? 'planner_unavailable' } }
       if (!returned.resumed) return { ...wake, restaged: true, checkpoint: returned.checkpoint, result: returned.result }
     }
     if (this.agentContext.role !== PLANNER_ROLE) return wake
@@ -3016,7 +3035,55 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!result.restaged) {
       await this.traceEvent('context.planner_resume_failed', { request_id: rid, role: PLANNER_ROLE, from_role: EXECUTOR_ROLE, from_handoff_id: fromHandoffId, reason: result.reason, route }, { requestId: rid })
     }
-    return { returned: result.restaged === true, resumed: false, checkpoint, result }
+    return { returned: result.restaged === true, resumed: false, checkpoint, result, reason: result.restaged === true ? undefined : result.reason }
+  }
+
+  // A refusal because a round or the turn is open is tried once more after the loop yields (the
+  // round boundary); any other refusal, or a second one, is final.
+  async returnControlToPlannerWithRetry(args) {
+    const first = await this.returnControlToPlanner(args)
+    if (first.returned || !['round_in_flight', 'round_open'].includes(first.reason)) return first
+    await new Promise(resolve => setImmediate(resolve))
+    const rid = args.requestId ?? this.traceRequest?.id ?? this.turnScope.getStore()?.requestId
+    await this.traceEvent('context.planner_resume_retried', { request_id: rid, role: PLANNER_ROLE, reason: first.reason, route: args.route }, { requestId: rid })
+    return this.returnControlToPlanner(args)
+  }
+
+  // The slice is verified complete but the planner cannot take the goal back. The request ends
+  // visibly with the goal still active between slices (Resume re-drives it from the verified state);
+  // no model is woken, and in particular the executor does not author the next slice.
+  async endSliceWithoutPlanner({ route, reason }) {
+    const requestId = this.traceRequest?.id ?? this.turnScope.getStore()?.requestId
+    await this.traceEvent('executor.slice_wake_deferred', {
+      request_id: requestId,
+      role: EXECUTOR_ROLE,
+      handoff_id: this.agentContext.handoffId,
+      reason,
+      route,
+      model_woken: false,
+    }, { requestId })
+    const state = this.peekPlanState(this.activePlanKey())
+    this.active = false
+    const chatMessage = `The plan slice is verified complete, but I could not hand the goal back to the planner (${reason}), so I stopped without waking a model. The goal stays active between slices. ${RESUME_HINT}`
+    await this.traceEvent('request.completed', {
+      chat_message: chatMessage,
+      outcome: 'slice_close_planner_unavailable',
+      reason,
+      task_board: visibleTaskBoard(state?.task_board),
+      usage: this.traceRequest?.usage,
+    })
+    this.traceRequest = null
+    return {
+      chatMessage,
+      plan: [],
+      currentStep: 0,
+      operations: [],
+      epoch: this.epoch?.epoch,
+      actorId: this.epoch?.actor_id,
+      goalId: state?.goal_id,
+      goalStatus: 'active',
+      taskBoard: visibleTaskBoard(state?.task_board),
+    }
   }
 
   // Hard-limit step-close restage (design note 12a rule 1, restage-policy C8). Called at
@@ -3082,12 +3149,30 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // unchanged admission, which has never let a continuation change them), and the
   // drop is traced (executor.plan_semantics_ignored). Operations, observations, a
   // checkpoint and a semantic completion claim for the committed active step go
-  // through the unchanged admission. A user amendment in flight has user authority
-  // and is left to the existing amendment path.
+  // through the unchanged admission. The contract is about the ROLE, not the plan status: an
+  // executor reply while no plan is committed (the slice is COMPLETED, nothing is drafted) would
+  // author or commit a new plan, so it is ignored, traced and ends the request visibly without
+  // waking a model (executorCannotAuthor). User amendments never reach the executor: they are staged
+  // in the planner conversation (stageCompatibleAmendment), so there is no bypass here.
   async enforceExecutorContract(plan) {
-    if (this.agentContext.role !== EXECUTOR_ROLE || this.pendingInteractionAmendment) return plan
+    if (this.agentContext.role !== EXECUTOR_ROLE) return plan
     const state = this.memory.planningState?.(this.activePlanKey())
     const committed = state ? getActivePlanningPlan(state) : undefined
+    const authorable = !committed || [PLAN_STATUS.DRAFT, PLAN_STATUS.RUNTIME_VALIDATION, PLAN_STATUS.READY, PLAN_STATUS.COMPLETED, PLAN_STATUS.SUPERSEDED, PLAN_STATUS.CANCELLED].includes(committed.status)
+    if (authorable) {
+      const requestId = this.traceRequest?.id
+      await this.traceEvent('executor.plan_semantics_ignored', {
+        request_id: requestId,
+        role: EXECUTOR_ROLE,
+        handoff_id: this.agentContext.handoffId,
+        plan_id: committed?.plan_id,
+        reason: `executor_cannot_author_plan:plan_status_${committed?.status ?? 'none'}`,
+        ignored_fields: ['plan', 'operations'],
+        incoming_steps: Array.isArray(plan.plan) ? plan.plan.length : 0,
+        committed_steps: committed?.steps?.length ?? 0,
+      }, { requestId })
+      return { ...plan, executorCannotAuthor: true }
+    }
     const ignored = []
     const reasons = []
     let next = plan
@@ -3098,9 +3183,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (committed && FROZEN_PLAN_STATUSES.has(committed.status) && Array.isArray(plan.plan) && plan.plan.length > 0) {
       const board = this.memory.currentPlan?.(this.activePlanKey())?.task_board
       const incoming = plan.plan.map(normalizedStepText)
-      const lists = [committed.steps.map(step => normalizedStepText(step.description)), (Array.isArray(board?.steps) ? board.steps : []).map(step => normalizedStepText(step?.description))]
-        .filter(list => list.length > 0)
-      const verdicts = lists.map(list => restatedPlanVerdict(incoming, list))
+      const lists = [
+        { steps: committed.steps.map(step => normalizedStepText(step.description)), active: committed.active_step_index },
+        { steps: (Array.isArray(board?.steps) ? board.steps : []).map(step => normalizedStepText(step?.description)), active: Number.isSafeInteger(board?.active_index) ? board.active_index : 0 },
+      ].filter(entry => entry.steps.length > 0)
+      const verdicts = lists.map(entry => restatedPlanVerdict(incoming, entry.steps, entry.active))
       if (verdicts.length > 0 && !verdicts.includes('unchanged')) {
         ignored.push('plan')
         reasons.push(verdicts.includes('order_changed') ? 'order_changed' : 'steps_changed')
@@ -3387,6 +3474,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     ]
   }
 
+  markReasoningEpochSeen(key) {
+    const epoch = this.memory.planningReasoningEpoch?.(key)
+    if (Number.isSafeInteger(epoch) && epoch >= 0) this.planningReasoningEpochSeen.set(key, epoch)
+  }
+
   refreshPlanningReasoningEpoch() {
     const key = this.activePlanKey()
     const epoch = this.memory.planningReasoningEpoch?.(key)
@@ -3395,13 +3487,32 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.planningReasoningEpochSeen.set(key, epoch)
     if (previous === undefined || previous === epoch || !this.requestInfo) return false
 
+    // U6: the executor's conversation IS a rebuild from durable state (its packet), and its prefix carries
+    // the executor role suffix: a planner-shaped rebuild here would wipe the packet and the role. It keeps
+    // its conversation. A planner parked across the bump went stale with it and is dropped, so the slice
+    // close builds a fresh planner from a packet.
+    if (this.agentContext.role === EXECUTOR_ROLE) {
+      const droppedPlanner = this.agentContext.dropParkedPlanner()
+      const requestId = this.traceRequest?.id ?? this.turnScope.getStore()?.requestId
+      void this.traceEvent('executor.reasoning_epoch_moved', {
+        request_id: requestId,
+        role: EXECUTOR_ROLE,
+        handoff_id: this.agentContext.handoffId,
+        reason: 'executor_keeps_packet_across_reasoning_epoch_bump',
+        previous_epoch: previous,
+        reasoning_epoch: epoch,
+        parked_planner_dropped: droppedPlanner,
+      }, { requestId })
+      return false
+    }
+
     // A reducer epoch bump is an explicit invalidation boundary. Rebuild the
     // working provider context from durable memory and the current user request;
     // never carry tool/scratch exchanges that argued for the predecessor plan.
     this.clearLoadedSkillContext()
     const memoryContext = this.memory.context?.(key) ?? ''
     this.baseMessages = [
-      { role: 'system', content: this.systemPrompt },
+      ...this.rolePrefixMessages(this.agentContext.role),
       ...(memoryContext ? [{ role: 'user', content: memoryContext }] : []),
       { role: 'user', content: `[CHAT] ${this.requestInfo.sender}: ${this.requestInfo.text}` },
     ]
@@ -5352,13 +5463,52 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     await this.persistState()
   }
 
-  stageCompatibleAmendment(sender, text) {
+  // A deferred user amendment is user steering: it belongs to the planner, never to the executor (whose
+  // prompt forbids revising the plan). During an executor slice control returns to the planner first and
+  // the text is staged in ITS conversation; when that cannot happen (a round is open) the amendment is not
+  // deferred and takes the cancelling amend route instead. The flag is tied to the conversation that holds
+  // the text (currentPendingAmendment) and dies with it.
+  async stageCompatibleAmendment(sender, text) {
     if (!this.active || !this.epoch || !Array.isArray(this.baseMessages)) return false
+    if (this.agentContext.role === EXECUTOR_ROLE) {
+      const requestId = this.traceRequest?.id
+      const returned = await this.returnControlToPlanner({
+        route: 'amend_current',
+        planningState: this.memory.planningState?.(this.activePlanKey()),
+        withinTurn: false,
+        reason: 'user_amendment',
+        requestId,
+      })
+      if (!returned.returned) {
+        await this.traceEvent('amendment.not_deferred', { request_id: requestId, reason: `planner_not_reachable:${returned.reason ?? 'restage_failed'}`, role: EXECUTOR_ROLE }, { requestId })
+        return false
+      }
+    }
     const content = `[CHAT] ${cleanMemoryText(sender, 128)}: ${cleanMemoryText(text, 4000)}`
     const alreadyPresent = this.baseMessages.some(message => message?.role === 'user' && message?.content === content)
     if (!alreadyPresent) this.baseMessages.push({ role: 'user', content })
     this.pendingInteractionAmendment = { sender: cleanMemoryText(sender, 128), text: cleanMemoryText(text, 4000) }
+    this.pendingAmendmentConversationSeq = this.agentContext.conversationSeq
     return true
+  }
+
+  // The staged amendment, if the conversation that holds its text is still the one acting. A restage, a
+  // return to the planner or a reset drops that text; the flag must not outlive it.
+  currentPendingAmendment() {
+    const pending = this.pendingInteractionAmendment
+    if (!pending) return null
+    const seq = this.pendingAmendmentConversationSeq
+    if (seq === undefined || seq === this.agentContext.conversationSeq) return pending
+    this.pendingInteractionAmendment = null
+    this.pendingAmendmentConversationSeq = undefined
+    const requestId = this.traceRequest?.id ?? this.turnScope.getStore()?.requestId
+    void this.traceEvent('amendment.flag_cleared', {
+      request_id: requestId,
+      reason: 'conversation_holding_the_amendment_text_was_replaced',
+      role: this.agentContext.role,
+      handoff_id: this.agentContext.handoffId,
+    }, { requestId })
+    return null
   }
 
   async request(text, options = {}) {
@@ -5411,7 +5561,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
 
     // A bare Resume/continue on the goal a restart paused before its first plan re-drives that goal.
-    const redriveGoal = /^\s*(?:continue|resume)[.!\s]*$/i.test(text) ? this.redrivableGoalWithoutPlan(memoryKey) : undefined
+    const redriveGoal = isBareContinuation(text) ? this.redrivableGoalWithoutPlan(memoryKey) : undefined
     if (redriveGoal) routed.route = { ...routed.route, intent: 'continue_current', queue_conflict: false, reply: '' }
     const intent = routed.route.intent
     const jevNewGoalAligned = intent === 'new_goal' && routed.decision_shadow?.intent === 'new_goal'
@@ -5512,7 +5662,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
 
     if (!routed.router_bypassed && intent === 'amend_current' && healthyRuntime && routed.route.queue_conflict !== true) {
-      if (this.stageCompatibleAmendment(sender, text)) {
+      if (await this.stageCompatibleAmendment(sender, text)) {
         const reply = `The amendment is compatible with the Autorio work already running (queue ${taskStatus.queue_length ?? 0}), so I will not cancel that batch. I will apply the amendment at the next main-planner boundary.`
         await this.rememberRoutedInteraction(memoryKey, sender, text, reply)
         return { chatMessage: reply, plan: [], currentStep: 0, operations: [], interactionIntent: intent, routedOnly: true, amendmentDeferred: true }
@@ -6637,6 +6787,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       })
       await this.closeOutputSlice('next_shelf_slice')
       const sliceClose = await this.planSliceCloseWake({ route: 'next_shelf_slice', planningState: planningAfterCompletion, goalEvaluation, withinTurn })
+      if (sliceClose.unavailable) return this.endSliceWithoutPlanner(sliceClose.unavailable)
       await this.traceEvent('planner.wake', {
         source: 'planning_boundary',
         route: 'next_shelf_slice',
@@ -6737,6 +6888,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       && planningAfterCompletion?.goal?.status === GOAL_STATUS.ACTIVE) {
       await this.closeOutputSlice('active_goal_after_plan_completion')
       const sliceClose = await this.planSliceCloseWake({ route: 'active_goal_after_plan_completion', planningState: planningAfterCompletion, goalEvaluation, withinTurn })
+      if (sliceClose.unavailable) return this.endSliceWithoutPlanner(sliceClose.unavailable)
       await this.traceEvent('planner.wake', {
         source: 'planning_boundary',
         route: 'active_goal_after_plan_completion',
@@ -6780,8 +6932,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // final reply is not appended to it.
       let handedToPlanner = false
       if (this.agentContext.role === EXECUTOR_ROLE) {
-        const returned = await this.returnControlToPlanner({ route: 'unmet_goal_after_plan', planningState: planning, withinTurn: true, reason: 'slice_close_unmet_goal' })
+        const returned = await this.returnControlToPlannerWithRetry({ route: 'unmet_goal_after_plan', planningState: planning, withinTurn: true, reason: 'slice_close_unmet_goal' })
         handedToPlanner = returned.returned === true
+        // Never ask the executor to author the next slice.
+        if (!handedToPlanner) return this.endSliceWithoutPlanner({ route: 'unmet_goal_after_plan', reason: returned.reason ?? 'planner_unavailable' })
       }
       // commitPlan may already have recorded this reply (a claim that closed
       // the slice); two consecutive assistant messages are invalid.
@@ -6875,7 +7029,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async completed() {
     await this.loadPersistentState()
     if (!this.active) return null
-    const pendingAmendment = this.pendingInteractionAmendment
+    const pendingAmendment = this.currentPendingAmendment()
     this.planUpdateReason = pendingAmendment ? 'amend_current' : 'completion'
     if (pendingAmendment) this.requestLifecycle = 'amend_current'
     await this.traceEvent('factorio.completed_signal', pendingAmendment ? { pending_amendment: true } : {})
@@ -6940,7 +7094,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         `[MOD] Autorio operation batch completed. ${stepOpenHint ? `${stepOpenHint} ` : ''}Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}`,
         'factorio.completion_continuation',
       )
-      if (pendingAmendment) this.pendingInteractionAmendment = null
+      if (pendingAmendment) { this.pendingInteractionAmendment = null; this.pendingAmendmentConversationSeq = undefined }
       return result
     }
     finally {
@@ -7331,7 +7485,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const trigger = this.reasoningTriggerSource ?? this.planUpdateReason
       const skipReason = !FROZEN_PLAN_STATUSES.has(reducerPlan?.status)
         ? `plan_status_${reducerPlan?.status ?? 'none'}`
-        : this.pendingInteractionAmendment
+        : this.currentPendingAmendment()
           ? 'pending_amendment'
           : (CLOSED_ROUND_AUTHORING_TRIGGERS.has(trigger))
               ? `authoring_${trigger}`
@@ -8882,6 +9036,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   async commitPlan(plan) {
     plan = await this.enforceExecutorContract(plan) // U6: an executor reply never changes plan semantics
+    if (plan.executorCannotAuthor) return this.endSliceWithoutPlanner({ route: 'executor_reply_without_committed_plan', reason: 'executor_cannot_author_plan' })
     const timeReview = await this.reviewPlanTime(plan)
     if (timeReview?.held === true) return timeReview.result
     plan = await this.applyLowRiskTypedProjection(plan)
@@ -10100,7 +10255,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           },
         )
         this.messages = [
-          { role: 'system', content: this.systemPrompt },
+          ...this.rolePrefixMessages(this.agentContext.role),
           { role: 'user', content: capsule },
         ]
       }

@@ -345,6 +345,13 @@ export class AgentContext {
     return this.parkedPlanner !== null && this.parkedPlanner !== undefined
   }
 
+  /** Discard the parked planner (its context went stale while it was parked). Returns whether one was dropped. */
+  dropParkedPlanner() {
+    const had = this.hasParkedPlanner
+    this.parkedPlanner = null
+    return had
+  }
+
   /**
    * Control returns to the planner (the slice close): the parked planner
    * conversation becomes the active one again and the executor conversation is

@@ -510,7 +510,7 @@ test('stale reply: a reply that returns after a restage mid-request is dropped a
   const settled = world.say()
   await world.waitForProviderCall(1)
   const staleId = world.agent.agentContext.handoffId // the conversation the in-flight request belongs to
-  const packet = world.packet()
+  const packet = world.packet({ role: 'planner' })
   forceRestage(world, packet)
 
   gate.resolve(staleReply()) // the reply of the discarded conversation arrives now
@@ -540,7 +540,7 @@ test('stale error: a provider failure that belongs to a discarded conversation d
   const settled = world.say()
   await world.waitForProviderCall(1)
   const staleId = world.agent.agentContext.handoffId
-  const packet = world.packet()
+  const packet = world.packet({ role: 'planner' })
   forceRestage(world, packet)
 
   gate.reject(new Error('HTTP 503 upstream unavailable'))
@@ -558,7 +558,7 @@ test('stale error: a provider failure that belongs to a discarded conversation d
 test('stale drops are bounded: after the re-drive limit the failure is visible, not a silent cancellation', async () => {
   let world
   const swapping = n => () => {
-    forceRestage(world, world.packet({ now: 6000 + n }))
+    forceRestage(world, world.packet({ role: 'planner', now: 6000 + n }))
     return staleReply()
   }
   world = loopHarness([swapping(1), swapping(2), swapping(3), firstPlan()])
@@ -586,7 +586,7 @@ test('a restage that lands during the post-reply admission check does not let th
   world.game.command = async (text) => {
     if (armed && text.includes('sgluna_deployment","status"')) {
       armed = false // the first status read after the reply is the post-reply assertCurrent
-      packet = world.packet()
+      packet = world.packet({ role: 'planner' })
       forceRestage(world, packet)
     }
     return original(text)
@@ -621,7 +621,7 @@ test('a restage that lands during output-budget recovery never sends the old mes
     emit: async (record) => {
       await emit(record)
       if (record.event === 'provider.output_budget_recovery_started' && !packet) {
-        packet = world.packet()
+        packet = world.packet({ role: 'planner' })
         forceRestage(world, packet)
       }
     },
@@ -648,7 +648,7 @@ test('a restage that lands during the operations.admit await does not let the ol
     emit: async (record) => {
       await emit(record)
       if (record.event === 'operations.admit' && !packet) {
-        packet = world.packet()
+        packet = world.packet({ role: 'planner' })
         forceRestage(world, packet)
       }
     },
@@ -673,7 +673,7 @@ test('a restage that lands before the tool batch is appended keeps the old assis
     emit: async (record) => {
       await emit(record)
       if (record.event === 'tool.call' && !packet) {
-        packet = world.packet()
+        packet = world.packet({ role: 'planner' })
         forceRestage(world, packet)
       }
     },

@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { AgentContext } from './agent-context.mjs'
 import { EXECUTOR_ROLE_PROMPT, roleSystemPrompt } from './agent-roles.mjs'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
-import { NpcAgentLoop, restatedPlanVerdict } from './npc-agent-loop.mjs'
+import { isBareContinuation, NpcAgentLoop, restatedPlanVerdict } from './npc-agent-loop.mjs'
 import { getActivePlan, getContextRestages, PLAN_STATUS } from './planning-state.mjs'
 import { analyzeBehaviorTrace } from './run-check.mjs'
 import { configuration, RUNTIME_RELIABILITY_GUIDANCE, recoverInterruptedAgentPlan, Session } from './supervisor.mjs'
@@ -1110,4 +1110,411 @@ test('an unmet goal after the executor\'s final claim hands the next slice to th
   assert.equal(resumed.data.route, 'unmet_goal_after_plan')
   assert.equal(resumed.data.reason, 'slice_close_unmet_goal')
   assert.equal(resumed.request_id, world.rows('request.received')[0].request_id)
+})
+
+// =====================================================================================================
+// U6 review fixes: reasoning epoch, the executor never authors, amendments belong to the planner, nits
+// =====================================================================================================
+
+const oneStepSlice = (overrides = {}) => plannerSlice({ plan: ['Gather 10 iron ore'], ...overrides })
+const executorResubmit = () => planReply({ plan: ['Gather 10 iron ore'], currentStep: 0, operations: [gather('iron-ore', 4)] })
+
+// --- blocker: a reasoning-epoch rebuild must not wipe the executor's packet ---------------------------------
+
+test('blocker: a second goal in the same process keeps its executor packet and role suffix across the first continuation', async () => {
+  const world = harness({
+    script: [
+      () => oneStepSlice({ goal: { ...GOAL, scope: 'finite' }, roadmap: undefined }), // goal A: no shelf, so its epoch is lower than B's
+      () => plannerSlice({ plan: ['Gather 10 coal'], operations: [gather('coal', 10)], checkpoint: inventoryCheckpoint('coal', 10), goal: { ...GOAL, summary: 'Goal B.' }, roadmap: [{ id: 'b1', intent: 'goal B first node' }] }), // goal B, a revised shelf
+      () => planReply({ plan: ['Gather 10 coal'], currentStep: 0, operations: [gather('coal', 4)] }), // the executor of B, after its first continuation
+    ],
+  })
+  await world.say()
+  const epochA = world.memory.planningReasoningEpoch(KEY)
+  assert.equal(world.agent.planningReasoningEpochSeen.get(KEY), epochA, 'the C3 restage recorded the epoch it was built at')
+
+  await world.agent.request('build a coal supply instead', { sender: 'TTLouis' }) // goal B: GOAL_ACCEPTED and ROADMAP_REVISED bump the epoch
+  const epochB = world.memory.planningReasoningEpoch(KEY)
+  assert.notEqual(epochB, epochA, 'the reducer epoch moved')
+  assert.equal(world.agent.agentContext.role, 'executor')
+  const packetBase = world.agent.baseMessages.map(message => ({ ...message }))
+  assert.equal(world.agent.planningReasoningEpochSeen.get(KEY), epochB, 'and the loop has seen it')
+
+  world.give('coal', 2)
+  await world.agent.completed() // the first continuation of B's executor
+
+  const call = world.calls.at(-1)
+  assert.equal(call.context.role, 'executor')
+  assert.equal(textOf(call.messages[0]), roleSystemPrompt(textOf(world.calls[0].messages[0]), 'executor'), 'the executor role suffix survived')
+  assert.equal(textOf(stableBlock(call.messages)), textOf(packetBase[1]), 'and so did the C3 packet')
+  assert.equal(call.messages.some(message => textOf(message).startsWith('[CHAT]')), false, 'no planner-shaped rebuild')
+  assert.equal(world.rows('planning.reasoning_epoch_reset').length, 0)
+})
+
+test('blocker: an epoch bump in the middle of a slice keeps the executor, drops the parked planner, and the slice close builds a fresh planner from a packet', async () => {
+  const world = harness({ script: [() => oneStepSlice(), () => executorResubmit(), () => plannerNextSlice()] })
+  await world.say()
+  assert.equal(world.agent.agentContext.hasParkedPlanner, true)
+  const executorHandoff = world.agent.agentContext.handoffId
+  const epoch = world.memory.planningReasoningEpoch(KEY)
+  // A reasoning-epoch bump from outside the executor (the shelf moved, a plan was set aside): the reducer signal itself.
+  world.memory.planningByNpc.set(KEY, { ...world.memory.planningState(KEY), reasoning_epoch: epoch + 1 })
+  assert.notEqual(world.memory.planningReasoningEpoch(KEY), epoch)
+
+  world.give('iron-ore', 2)
+  await world.agent.completed() // continuation while the executor acts: the epoch check runs
+
+  const [moved] = world.rows('executor.reasoning_epoch_moved')
+  assert.ok(moved, 'the decision is traced')
+  assert.equal(moved.request_id, world.rows('request.received')[0].request_id)
+  assert.equal(moved.data.request_id, moved.request_id)
+  assert.equal(moved.data.role, 'executor')
+  assert.equal(moved.data.handoff_id, executorHandoff)
+  assert.equal(moved.data.parked_planner_dropped, true)
+  assert.equal(moved.data.reason, 'executor_keeps_packet_across_reasoning_epoch_bump')
+  assert.equal(world.agent.agentContext.role, 'executor')
+  assert.equal(world.agent.agentContext.handoffId, executorHandoff, 'the same executor conversation')
+  assert.equal(world.agent.agentContext.hasParkedPlanner, false)
+  const executorCall = world.calls.at(-1)
+  assert.ok(stableBlock(executorCall.messages), 'the packet is intact')
+  assert.ok(textOf(executorCall.messages[0]).endsWith(EXECUTOR_ROLE_PROMPT))
+
+  world.give('iron-ore', 8)
+  await world.agent.completed() // the slice closes
+  const restages = world.rows('context.restaged').map(row => `${row.data.role}:${row.data.checkpoint}`)
+  assert.deepEqual(restages.slice(0, 2), ['executor:C3', 'planner:C2'], 'nothing was parked, so a fresh planner was built from a packet')
+  assert.equal(world.rows('context.planner_resumed').length, 0)
+  const wake = world.calls.at(-1).messages
+  assert.ok(stableBlock(wake), 'and the planner packet survived its first continuation (the restage recorded the epoch)')
+  assert.equal(wake.some(message => textOf(message).startsWith('[CHAT]')), false)
+})
+
+// --- issue 2: the executor never authors a slice --------------------------------------------------------------
+
+test('issue 2: a refused return to the planner is retried once at the boundary, and a second refusal ends the request visibly without waking the executor', async () => {
+  const world = harness({ script: [() => oneStepSlice()] })
+  await world.say()
+  const { agent } = world
+  const real = agent.returnControlToPlanner.bind(agent)
+  const attempts = []
+  agent.returnControlToPlanner = async (args) => { attempts.push(args.reason); return { returned: false, reason: 'round_in_flight' } }
+  const callsBefore = world.calls.length
+
+  world.give('iron-ore')
+  const result = await agent.completed() // the slice closes from the completion signal
+
+  assert.deepEqual(attempts, ['slice_close', 'slice_close'], 'one try and one retry')
+  assert.equal(world.calls.length, callsBefore, 'no model was woken: the executor did not author the next slice')
+  const requestId = world.rows('request.received')[0].request_id
+  const [retried] = world.rows('context.planner_resume_retried')
+  assert.equal(retried.request_id, requestId)
+  assert.equal(retried.data.reason, 'round_in_flight')
+  const [deferred] = world.rows('executor.slice_wake_deferred')
+  assert.equal(deferred.request_id, requestId)
+  assert.equal(deferred.data.request_id, requestId)
+  assert.equal(deferred.data.reason, 'round_in_flight')
+  assert.equal(deferred.data.model_woken, false)
+  assert.equal(deferred.data.route, 'next_shelf_slice')
+  assert.match(result.chatMessage, /could not hand the goal back to the planner \(round_in_flight\).*Resume/)
+  assert.equal(result.goalStatus, 'active')
+  assert.equal(world.rows('request.completed').at(-1).data.outcome, 'slice_close_planner_unavailable')
+  assert.equal(agent.active, false)
+  agent.returnControlToPlanner = real
+})
+
+test('issue 2: a refusal that clears at the retry hands the slice to the planner as usual', async () => {
+  const world = harness({ script: [() => oneStepSlice(), () => plannerNextSlice()] })
+  await world.say()
+  const { agent } = world
+  const real = agent.returnControlToPlanner.bind(agent)
+  let first = true
+  agent.returnControlToPlanner = async (args) => {
+    if (first) { first = false; return { returned: false, reason: 'round_open' } }
+    return real(args)
+  }
+  world.give('iron-ore')
+  await agent.completed()
+  assert.equal(world.rows('context.planner_resume_retried').length, 1)
+  assert.equal(world.rows('context.planner_resumed').length, 1)
+  assert.equal(world.rows('executor.slice_wake_deferred').length, 0)
+  assert.equal(world.calls.at(-1).context.role, 'planner')
+})
+
+test('issue 2: a failed fresh-planner restage (nothing parked after a restart) wakes no model either', async () => {
+  const file = stateFile()
+  const game = new FakeFactorio()
+  const first = harness({ game, script: [() => oneStepSlice()], agentOptions: { stateFile: file } })
+  await first.say()
+  await first.agent.persistQueue
+  const second = harness({ game, script: [executorResubmit], agentOptions: { stateFile: file } })
+  await second.agent.loadPersistentState()
+  await recoverInterruptedAgentPlan(second.agent, 'runtime_restart', {})
+  assert.equal(second.calls.length, 1)
+  second.agent.buildRestagePacket = () => { throw new Error('packet builder failed') } // the planner cannot be rebuilt
+
+  second.give('iron-ore')
+  const result = await second.agent.completed()
+
+  assert.equal(second.calls.length, 1, 'no executor round authored a slice')
+  const [failed] = second.rows('context.planner_resume_failed')
+  assert.equal(failed.data.reason, 'restage_error')
+  assert.ok(failed.request_id)
+  const [deferred] = second.rows('executor.slice_wake_deferred')
+  assert.equal(deferred.data.reason, 'restage_error')
+  assert.ok(deferred.request_id)
+  assert.match(result.chatMessage, /Resume/)
+  assert.equal(second.memory.planningState(KEY).goal.status, 'active', 'the goal stays active between slices')
+})
+
+test('issue 2: an executor reply while no plan is committed is ignored whatever the plan status: nothing is drafted, committed or admitted, and no model is woken', async () => {
+  const world = harness({ script: [() => oneStepSlice()] })
+  await world.say()
+  const { agent } = world
+  agent.returnControlToPlanner = async () => ({ returned: false, reason: 'round_in_flight' })
+  world.give('iron-ore')
+  await agent.completed() // the slice is COMPLETED and the executor is still the active conversation
+  assert.equal(world.plan().status, PLAN_STATUS.COMPLETED)
+  assert.equal(agent.agentContext.role, 'executor')
+  agent.active = true
+  agent.traceRequest = { id: 'req_executor_authoring', seq: 0, usage: {} }
+  const plansBefore = world.memory.planningState(KEY).plans.length
+  const mutationsBefore = world.game.mutations.length
+
+  const result = await agent.commitPlan({ chatMessage: '', plan: ['Author my own slice'], currentStep: 0, operations: [gather('coal', 9)], roadmapNodeIds: ['node_power'] })
+
+  const [ignored] = world.rows('executor.plan_semantics_ignored')
+  assert.ok(ignored)
+  assert.equal(ignored.data.reason, 'executor_cannot_author_plan:plan_status_COMPLETED')
+  assert.equal(ignored.data.role, 'executor')
+  assert.ok(ignored.request_id)
+  assert.equal(world.memory.planningState(KEY).plans.length, plansBefore, 'no draft was created')
+  assert.equal(world.game.mutations.length, mutationsBefore, 'no operation was admitted')
+  assert.match(result.chatMessage, /executor_cannot_author_plan/)
+  assert.equal(world.rows('executor.slice_wake_deferred').at(-1).data.reason, 'executor_cannot_author_plan')
+})
+
+// --- issue 3: a deferred user amendment belongs to the planner ------------------------------------------------
+
+function amendmentWorld(script) {
+  const jev = recordingJev(async (_state, questions) => (questions.intent ? { overrides: { intent: { choice: 'amend_current', confidence: 0.95 } } } : undefined))
+  const world = harness({
+    script,
+    agentOptions: {
+      interactionProvider: async () => ({ content: JSON.stringify({ intent: 'amend_current', queue_conflict: false, reply: '' }) }),
+      interactionDecisionProvider: jev,
+      steeringDecisionProvider: jev,
+    },
+  })
+  world.game.taskState = 'mining' // Autorio is working: the amendment is compatible with the running batch
+  world.game.queueLength = 1
+  return world
+}
+
+test('issue 3: an amendment during an executor slice returns control to the planner and is staged in the planner conversation, never the executor\'s', async () => {
+  const world = amendmentWorld([() => oneStepSlice(), () => executorResubmit(), () => executorResubmit()])
+  await world.say()
+  const { agent } = world
+  const plannerHandoff = agent.agentContext.parkedPlanner.handoffId
+  const executorHandoff = agent.agentContext.handoffId
+
+  const result = await agent.request('also make it fast', { sender: 'TTLouis' })
+
+  assert.equal(result.amendmentDeferred, true)
+  assert.equal(agent.agentContext.role, 'planner', 'the executor was dropped')
+  assert.equal(agent.agentContext.handoffId, plannerHandoff)
+  const [resumed] = world.rows('context.planner_resumed')
+  assert.equal(resumed.data.reason, 'user_amendment')
+  assert.equal(resumed.data.route, 'amend_current')
+  assert.equal(resumed.data.from_handoff_id, executorHandoff)
+  assert.ok(resumed.request_id)
+  assert.equal(agent.baseMessages.some(message => textOf(message) === '[CHAT] TTLouis: also make it fast'), true, 'the text is in the planner conversation')
+  assert.ok(agent.pendingInteractionAmendment)
+  assert.equal(agent.pendingAmendmentConversationSeq, agent.agentContext.conversationSeq)
+
+  // The next boundary wakes the planner with the amendment; the executor never sees it.
+  world.game.taskState = 'idle'
+  world.game.queueLength = 0
+  world.give('iron-ore', 2)
+  await agent.completed()
+  const call = world.calls.at(-1)
+  assert.equal(call.context.role, 'planner')
+  assert.equal(call.messages.some(message => textOf(message) === '[CHAT] TTLouis: also make it fast'), true)
+  assert.equal(world.calls.some(item => item.context.role === 'executor' && JSON.stringify(item.messages).includes('also make it fast')), false)
+})
+
+test('issue 3: when the planner cannot be reached the amendment is not deferred to the executor', async () => {
+  const world = amendmentWorld([() => oneStepSlice()])
+  await world.say()
+  const { agent } = world
+  agent.returnControlToPlanner = async () => ({ returned: false, reason: 'round_in_flight' })
+  const staged = await agent.stageCompatibleAmendment('TTLouis', 'also make it fast')
+  assert.equal(staged, false)
+  assert.equal(agent.pendingInteractionAmendment, null)
+  assert.equal(agent.baseMessages.some(message => textOf(message).includes('also make it fast')), false, 'not in the executor conversation')
+  const [row] = world.rows('amendment.not_deferred')
+  assert.equal(row.data.reason, 'planner_not_reachable:round_in_flight')
+  assert.ok(row.request_id)
+})
+
+test('issue 3: the amendment flag dies with the conversation that holds its text (restage, reset), and the executor contract has no bypass', async () => {
+  const world = amendmentWorld([() => oneStepSlice()])
+  await world.say()
+  const { agent } = world
+  assert.equal(await agent.stageCompatibleAmendment('TTLouis', 'also make it fast'), true)
+  assert.ok(agent.currentPendingAmendment())
+
+  const restaged = await agent.restageBetweenTurns({ checkpoint: 'C8', role: 'planner', reason: 'test', actor: agent.epoch }) // any restage drops the staged text
+  assert.equal(restaged.restaged, true)
+  assert.equal(agent.currentPendingAmendment(), null, 'the flag went with the text')
+  assert.equal(agent.pendingInteractionAmendment, null)
+  const [cleared] = world.rows('amendment.flag_cleared')
+  assert.equal(cleared.data.reason, 'conversation_holding_the_amendment_text_was_replaced')
+  assert.ok(cleared.request_id)
+
+  // A flag from an older conversation, then a reset.
+  agent.pendingInteractionAmendment = { sender: 'TTLouis', text: 'stale' }
+  agent.pendingAmendmentConversationSeq = agent.agentContext.conversationSeq
+  agent.reset()
+  assert.equal(agent.pendingInteractionAmendment, null, 'a new request cannot inherit it')
+
+  // The executor never gets the bypass: with a flag set while the executor acts, a changed plan is still ignored.
+  const exec = harness({ script: [() => oneStepSlice(), () => planReply({ plan: ['Something else'], currentStep: 0, operations: [gather('iron-ore', 4)] })] })
+  await exec.say()
+  exec.agent.pendingInteractionAmendment = { sender: 'TTLouis', text: 'go' }
+  exec.give('iron-ore', 2)
+  await exec.agent.completed()
+  assert.match(exec.rows('executor.plan_semantics_ignored')[0].data.reason, /steps_changed/)
+})
+
+// --- nits ------------------------------------------------------------------------------------------------------
+
+test('nit a: a rebuild while the role is executor uses the executor system prompt (the C5 capsule fallback and the epoch rebuild)', async () => {
+  const world = harness({ script: [() => oneStepSlice()] })
+  await world.say()
+  assert.equal(textOf(world.agent.rolePrefixMessages('executor')[0]), roleSystemPrompt(world.agent.systemPrompt, 'executor'))
+  const source = fs.readFileSync(fileURLToPath(new URL('./npc-agent-loop.mjs', import.meta.url)), 'utf8')
+  assert.equal(source.includes("{ role: 'system', content: this.systemPrompt }"), false, 'no rebuild hard-codes the planner system prompt')
+})
+
+test('nit c: the startup notice decides at run time and prints only what happened', async () => {
+  const { file, game, goalId } = await goalAdmittedNoPlan()
+  const second = harness({ game, script: [], agentOptions: { stateFile: file } })
+  await second.agent.loadPersistentState()
+  const { session, chat } = chatSession(second.agent)
+  second.agent.pauseGoalWithoutPlan = async () => ({ goal_id: goalId, paused: false })
+  await session.announceStartupGoal('before_first_plan')
+  assert.equal(chat.length, 1)
+  assert.doesNotMatch(chat[0], /paused it/)
+  assert.match(chat[0], /could not record a pause/)
+  const [row] = second.rows('runtime.goal_without_plan')
+  assert.equal(row.data.paused, false)
+  assert.equal(row.data.reason, 'pause_not_applied')
+  assert.match(row.request_id, /^recovery_/)
+
+  // The kind is read when the queued event RUNS: a goal that moved on in between is not announced.
+  const third = harness({ game, script: [], agentOptions: { stateFile: file } })
+  await third.agent.loadPersistentState()
+  const later = chatSession(third.agent)
+  let release
+  later.session.eventQueue = new Promise((resolve) => { release = resolve })
+  assert.equal(later.session.queueStartupGoalNotice(), true)
+  await third.agent.pauseGoalWithoutPlan('runtime_restart_before_first_plan') // paused by something else meanwhile
+  release()
+  await later.session.eventQueue
+  assert.deepEqual(later.chat, [], 'nothing announced for a state that no longer holds')
+})
+
+test('nit d: the Resume re-drive accepts the supervisor continuation words in both languages, and only bare ones', async () => {
+  for (const text of ['continue', 'Resume.', '继续', '继续吧', '接着做！']) assert.equal(isBareContinuation(text), true, text)
+  for (const text of ['continue building a base', '继续造电', 'please continue', '']) assert.equal(isBareContinuation(text), false, text)
+  const { file, game, goalId, objective } = await goalAdmittedNoPlan()
+  const second = harness({ game, script: [() => plannerSlice()], agentOptions: { stateFile: file } })
+  await second.agent.loadPersistentState()
+  await chatSession(second.agent).session.announceStartupGoal('before_first_plan')
+  await second.agent.request('继续', { sender: 'TTLouis' })
+  assert.ok(second.calls[0].messages.some(message => textOf(message) === `[CHAT] TTLouis: ${objective}`))
+  assert.equal(second.memory.planningState(KEY).goal.goal_id, goalId)
+})
+
+test('nit e: a completed prefix is not a restatement of the remaining steps', async () => {
+  const committed = ['a', 'b', 'c']
+  assert.equal(restatedPlanVerdict(['a', 'b', 'c'], committed, 2), 'unchanged', 'the whole list')
+  assert.equal(restatedPlanVerdict(['c'], committed, 2), 'unchanged', 'the active step')
+  assert.equal(restatedPlanVerdict(['b', 'c'], committed, 1), 'unchanged', 'the remaining suffix')
+  assert.equal(restatedPlanVerdict(['a'], committed, 2), 'steps_changed', 'a completed prefix')
+  assert.equal(restatedPlanVerdict(['a', 'b'], committed, 2), 'steps_changed')
+  assert.equal(restatedPlanVerdict(['b'], committed, 2), 'steps_changed')
+  const world = harness({ script: [() => plannerSlice(), () => planReply({ plan: ['Gather 10 iron ore'], currentStep: 0, operations: [gather('iron-ore', 4)] })] })
+  await world.say()
+  world.give('iron-ore', 2)
+  await world.agent.completed()
+  assert.equal(world.rows('executor.plan_semantics_ignored').length, 0, 'the active step on its own is a restatement at step 1')
+})
+
+test('nit f: the contract is what keeps the roadmap and the development mode: a roadmap revise and a steering change from an executor change nothing', async () => {
+  const world = harness({
+    script: [
+      () => plannerSlice(),
+      () => planReply({
+        plan: TWO_STEPS,
+        currentStep: 0,
+        operations: [gather('iron-ore', 4)],
+        roadmap: [{ id: 'node_power', intent: 'steam power running' }], // omitting node_drill would invalidate it
+        developmentMode: 'horizontal',
+      }),
+    ],
+  })
+  await world.say()
+  const before = world.memory.planningState(KEY)
+  world.give('iron-ore', 2)
+  await world.agent.completed()
+  const after = world.memory.planningState(KEY)
+  assert.deepEqual(after.roadmap, before.roadmap, 'the shelf')
+  assert.equal(after.roadmap.nodes.find(node => node.id === 'node_drill').status, before.roadmap.nodes.find(node => node.id === 'node_drill').status)
+  assert.equal(after.reasoning_epoch, before.reasoning_epoch, 'no epoch bump from an executor roadmap')
+  assert.equal(getActivePlan(after).development_mode, getActivePlan(before).development_mode)
+  assert.match(world.rows('executor.plan_semantics_ignored')[0].data.reason, /roadmap_is_planner_authority.*development_mode_is_planner_authority/)
+})
+
+test('nit f: the U7 soft-limit rule runs on the planner after a resume with the handoff ON: past the soft limit the wake restages the planner (C2 at a shelf pickup)', async () => {
+  const world = harness({
+    script: [() => oneStepSlice(), () => plannerNextSlice()],
+    tokens: (_call, context) => (context.role === 'executor' ? 500 : 6000), // the planner's first round names no role yet
+    agentOptions: { restageSoftLimitTokens: { planner: 5000, executor: 1_000_000 } },
+  })
+  await world.say() // the planner's own round reports 6000 tokens: past its soft limit
+  assert.equal(world.agent.agentContext.parkedPlanner.size.tokens >= 6000, true)
+  world.give('iron-ore')
+  await world.agent.completed() // the only step is verified: the slice closes, the planner resumes, and its own size is past the soft limit
+
+  const restages = world.rows('context.restaged').map(row => `${row.data.role}:${row.data.checkpoint}`)
+  assert.deepEqual(restages.slice(0, 2), ['executor:C3', 'planner:C2'], 'resume, then the soft-limit restage of the planner in the same wake')
+  assert.equal(world.rows('context.planner_resumed').length, 1)
+  const planner = world.rows('context.restaged')[1]
+  assert.equal(planner.data.reason, 'context_over_soft_limit_at_slice_close')
+  const wake = world.calls.at(-1).messages
+  assert.match(textOf(stepBlock(wake)), /^restage: role=planner checkpoint=C2 reason=context_over_soft_limit_at_slice_close$/m)
+  assert.ok(wake.some(message => textOf(message).startsWith('[MOD] The current immutable plan slice is verified complete')))
+})
+
+test('issue 2: an unmet goal after the executor final claim with no way back to the planner wakes no model, and the executor reply is not turned into a slice', async () => {
+  const world = harness({
+    script: [
+      plannerSlice({ plan: ['Gather 10 iron ore'], checkpoint: undefined }),
+      () => planReply({ chatMessage: 'EXECUTOR-FINAL-REPLY', plan: [], currentStep: 0, operations: [] }),
+    ],
+  })
+  await world.say()
+  world.agent.returnControlToPlanner = async () => ({ returned: false, reason: 'round_open' })
+  world.give('iron-ore')
+  const result = await world.agent.completed()
+
+  assert.equal(world.calls.length, 2, 'the executor final claim was the last model call')
+  const [deferred] = world.rows('executor.slice_wake_deferred')
+  assert.equal(deferred.data.route, 'unmet_goal_after_plan')
+  assert.equal(deferred.data.reason, 'round_open')
+  assert.equal(deferred.request_id, world.rows('request.received')[0].request_id)
+  assert.equal(world.rows('context.planner_resume_retried').length, 1)
+  assert.match(result.chatMessage, /Resume/)
+  assert.equal(JSON.stringify(world.agent.messages).includes('Author the next plan slice'), false, 'the executor was never asked to author the next slice')
 })
