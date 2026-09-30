@@ -2542,24 +2542,32 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     super.reset()
   }
 
+  // The running turn's token for restageContext({ safePoint }); null between turns.
+  get turnToken() { return this.turnConversation }
+
   // The restage seam (U4). Swaps the running conversation for a fresh one built
   // from a handoff packet (handoff-packet.mjs), records CONTEXT_RESTAGED in the
   // reducer and writes the `context.restaged` trace row. Nothing calls this
   // yet: U5-U8 wire the checkpoints. It never changes plan semantics.
   //
   // Restage is SEQUENTIAL. It refuses (typed result + `context.restage_refused`)
-  // while a provider round is in flight, and while a turn still holds the
-  // current conversation (`turnConversation`: a reply may be awaiting
-  // admission) unless the caller says `safePoint: true`, meaning "between
-  // rounds, no reply from the current conversation is waiting to be admitted"
-  // (a step close after admission, a plan commit after validation). It also
-  // refuses a packet whose plan is not the active plan and one the reducer
-  // rejects (stale goal, wrong source). Refusals change nothing.
+  // while a provider round is in flight, and while a turn holds the current
+  // conversation (`turnConversation`: a reply may be awaiting admission) unless
+  // the caller presents that turn's own token, `safePoint: this.turnToken`, read
+  // in the running turn's call chain. The token must be the current open turn's
+  // (identity) and not stale; `true`, a copy, an older round's token, or any
+  // token when no turn is open is refused as `round_open`. The contract for
+  // U5-U8: call only from the running turn's own call chain, after the last
+  // model reply has been fully admitted and appended (after commitPlan /
+  // executeAuthorizedBatch and its messages.push) and before the next
+  // callProvider. It also refuses a packet whose plan is not the active plan
+  // and one the reducer rejects (stale goal, wrong source). Refusals change
+  // nothing.
   //
   // Trace rows carry the current request id when a request is open. Between
   // requests there is none: pass `requestId` (the request the restage belongs
   // to) or the row is ignored by every run-check detector.
-  async restageContext({ checkpoint, reason, packet, role, softLimitTokens, requestId, safePoint = false } = {}) {
+  async restageContext({ checkpoint, reason, packet, role, softLimitTokens, requestId, safePoint } = {}) {
     const key = this.activePlanKey()
     const prepared = this.agentContext.prepareRestage({
       checkpoint,
@@ -2573,7 +2581,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return { restaged: false, reason: why }
     }
     if (this.providerCallsInFlight > 0) return refuse('round_in_flight')
-    if (this.turnConversation && !safePoint) return refuse('round_open')
+    const token = this.turnConversation
+    if (token ? (safePoint !== token || this.agentContext.isStale(token)) : (safePoint !== undefined && safePoint !== false)) return refuse('round_open')
     const before = this.memory.planningState?.(key)
     if (typeof this.memory.dispatchPlanningEvent !== 'function' || !before) throw new AgentLoopError('context restage needs reducer-backed memory with an admitted goal')
     if ((packet.event?.plan_id ?? null) !== (before.active_plan_id ?? null)) return refuse('packet_plan_not_active')
@@ -2603,6 +2612,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // now in place, at most STALE_REDRIVE_LIMIT times; after that the failure is
   // visible (a provider failure the normal pause/failed path reports), never a
   // silent cancellation.
+  // Depth-counted: a turn entered without runGuarded (a direct runTurn, the
+  // supervisor's slice-boundary recovery) still releases the conversation marker
+  // when its outermost turn ends, and a nested turn (withinTurn) keeps it.
+  async runTurn() {
+    this.turnDepth = (this.turnDepth ?? 0) + 1
+    try {
+      return await super.runTurn()
+    }
+    finally {
+      if (--this.turnDepth === 0) this.turnConversation = null
+    }
+  }
+
   async runTurnRedriving(generation) {
     for (let redrive = 0; ; redrive++) {
       try {
@@ -2612,7 +2634,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         if (error?.code !== STALE_REPLY_ERROR_CODE || generation !== this.generation || !this.active) throw error
         this.turnConversation = null
         if (redrive >= STALE_REDRIVE_LIMIT) {
-          throw new AgentLoopError('provider_stale_reply_after_restage: replies for discarded conversations kept arriving; the restaged conversation was left intact')
+          // The request ends here: the normal failure path may pause the goal or reset the loop, so
+          // this text promises only what always holds (the durable plan state is untouched).
+          throw new AgentLoopError('provider_stale_reply_after_restage: replies for discarded conversations kept arriving after a restage, so this request was stopped; the goal and plan state are unchanged and Resume restarts from them')
         }
         await this.traceEvent('context.stale_reply_redriven', { attempt: redrive + 1, limit: STALE_REDRIVE_LIMIT })
       }
@@ -7096,6 +7120,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         return recovered
       }
       catch (error) {
+        if (error?.code === STALE_REPLY_ERROR_CODE) {
+          // The retry never ran for the active conversation: drop the in-flight marker so a
+          // later restart does not take the fail-closed pause for a recovery that did not happen.
+          this.memory.setProviderRecovery?.(this.activePlanKey(), undefined)
+          await this.persistState()
+          throw error
+        }
         if (error?.code !== 'provider_output_budget_recovery_exhausted') {
           await this.traceEvent('provider.output_budget_recovery_failed', { round, recovery_attempt: 1, recovery_kind: 'output_budget_exhaustion', message: error instanceof Error ? error.message : String(error) })
         }
@@ -7502,6 +7533,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     const beforeCount = this.messages.length
     const admittedMessage = { ...message, tool_calls: admittedPrepared.map(entry => entry.tool) }
+    // The base pushes the assistant tool-call message before its first assertCurrent.
+    await this.dropIfStale(this.turnConversation)
     this.compactionDeferred = true
     try {
       await super.handleToolBatch(admittedMessage, admittedPrepared)
@@ -8677,6 +8710,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
 
       await this.traceEvent('operations.admit', { operations })
+      // A restage that landed during that await must not let this reply's batch through
+      // (outside the try below: a stale drop is not an admission failure).
+      await this.assertCurrent()
       try {
         const acknowledgement = await executeAuthorizedBatch(this.rcon, before.epoch, commands)
         await this.traceEvent('operations.ack', {

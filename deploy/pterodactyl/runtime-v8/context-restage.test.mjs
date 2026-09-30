@@ -259,6 +259,12 @@ const firstPlan = () => planReply({
   checkpoint: inventoryCheckpoint('iron-ore', 10),
 })
 const secondPlan = () => planReply({ plan: PLAN, currentStep: 1, operations: [gather('copper-ore', 10)] })
+// An observation round: the model asks for a read, the loop runs it and appends the exchange.
+const TOOL_CALL_REPLY = {
+  role: 'assistant',
+  content: '',
+  tool_calls: [{ id: 'call_boundary_1', type: 'function', function: { name: 'getActorStatus', arguments: '{}' } }],
+}
 
 // The real loop against a fake Factorio, with scripted planner replies.
 // `replies[n]` answers provider call n: a reply, or a function (messages, context) returning a promise.
@@ -556,6 +562,8 @@ test('stale drops are bounded: after the re-drive limit the failure is visible, 
   await assert.rejects(world.say(), (error) => {
     assert.match(error.message, /provider_stale_reply_after_restage/)
     assert.doesNotMatch(error.message, /cancelled|superseded/, 'the supervisor must not read it as an expected cancellation')
+    assert.doesNotMatch(error.message, /intact/, 'the text promises only what always holds: the normal failure path may reset the loop')
+    assert.match(error.message, /goal and plan state are unchanged/)
     return true
   })
 
@@ -598,6 +606,12 @@ test('a restage that lands during output-budget recovery never sends the old mes
   })
   const world = loopHarness([exhausted, firstPlan()])
   let packet
+  const recoveryWrites = []
+  const setProviderRecovery = world.memory.setProviderRecovery.bind(world.memory)
+  world.memory.setProviderRecovery = (key, recovery) => {
+    recoveryWrites.push(recovery?.phase ?? null)
+    return setProviderRecovery(key, recovery)
+  }
   const emit = world.agent.behaviorTrace.emit
   world.agent.behaviorTrace = {
     emit: async (record) => {
@@ -618,6 +632,126 @@ test('a restage that lands during output-budget recovery never sends the old mes
   assert.ok(!JSON.stringify(world.calls[1].messages).includes('OUTPUT_BUDGET') && world.calls[1].messages[1].content === packet.stableText)
   assert.equal(world.rows(DELEGATION_TRACE_ROWS.events.staleReplyDropped).length, 1)
   assert.equal(world.game.mutations.length, 1)
+  assert.deepEqual(recoveryWrites.slice(0, 2), ['in_flight', null], 'the in-flight recovery marker is cleared when the retry is dropped')
+  assert.equal(world.memory.currentPlan(KEY)?.provider_recovery, undefined, 'and nothing is left for a restart to take the fail-closed pause on')
+})
+
+test('a restage that lands during the operations.admit await does not let the old reply\'s batch through', async () => {
+  const world = loopHarness([staleReply(), firstPlan()])
+  let packet
+  const emit = world.agent.behaviorTrace.emit
+  world.agent.behaviorTrace = {
+    emit: async (record) => {
+      await emit(record)
+      if (record.event === 'operations.admit' && !packet) {
+        packet = world.packet()
+        forceRestage(world, packet)
+      }
+    },
+  }
+
+  const result = await world.say()
+
+  assert.ok(packet, 'the restage landed between the admit trace and the batch')
+  assert.equal(result.goalStatus, 'active')
+  assert.equal(world.game.mutations.length, 1, 'only the re-driven reply was admitted')
+  assert.ok(!world.game.mutations[0].includes('coal'), 'the stale reply\'s batch never reached Factorio')
+  assert.equal(world.rows(DELEGATION_TRACE_ROWS.events.staleReplyDropped).length, 1)
+  assert.equal(world.rows('operations.admission_failed').length, 0, 'a stale drop is not an admission failure')
+  assertRestagedConversationIntact(world, packet, 1)
+})
+
+test('a restage that lands before the tool batch is appended keeps the old assistant tool-call message out of the new conversation', async () => {
+  const world = loopHarness([TOOL_CALL_REPLY, firstPlan()])
+  let packet
+  const emit = world.agent.behaviorTrace.emit
+  world.agent.behaviorTrace = {
+    emit: async (record) => {
+      await emit(record)
+      if (record.event === 'tool.call' && !packet) {
+        packet = world.packet()
+        forceRestage(world, packet)
+      }
+    },
+  }
+
+  const result = await world.say()
+
+  assert.ok(packet)
+  assert.equal(result.goalStatus, 'active')
+  assert.equal(world.rows(DELEGATION_TRACE_ROWS.events.staleReplyDropped).length, 1)
+  assert.ok(!JSON.stringify(world.calls[1].messages).includes('call_boundary_1'), 'no tool-call message or result from the discarded conversation')
+  assert.ok(!JSON.stringify(world.agent.messages).includes('call_boundary_1'))
+  assertRestagedConversationIntact(world, packet, 1)
+})
+
+test('a turn restages at a real boundary with its own token: the next request holds only the packet conversation, admission and the plan stand; wrong or stale tokens are refused', async () => {
+  let world
+  let staleToken
+  world = loopHarness([() => { staleToken = world.agent.turnToken; return firstPlan() }, TOOL_CALL_REPLY, secondPlan()]) // eslint-disable-line prefer-const
+  const attempts = []
+  let restaged
+  let planBefore
+  let planRightAfter
+  let packet
+  const original = world.game.command.bind(world.game)
+  world.game.command = async (text) => {
+    // With the tool exchange appended and no round in flight, the next status read is the
+    // following round's assertCurrent, right before callProvider: the boundary U7/U8 restage at.
+    const boundary = !restaged && world.calls.length === 2 && world.agent.providerCallsInFlight === 0
+      && world.agent.messages.some(message => message.role === 'tool') && text.includes('sgluna_deployment","status"')
+    if (boundary) {
+      packet = world.packet()
+      const args = { checkpoint: 'C3', reason: 'r', packet }
+      const token = world.agent.turnToken
+      assert.ok(token, 'the running turn exposes its token')
+      planBefore = world.memory.planningState(KEY)
+      attempts.push(
+        (await world.agent.restageContext(args)).reason, // no token
+        (await world.agent.restageContext({ ...args, safePoint: true })).reason, // the old boolean no longer works
+        (await world.agent.restageContext({ ...args, safePoint: { ...token } })).reason, // a copy of the token
+        (await world.agent.restageContext({ ...args, safePoint: staleToken })).reason, // the previous turn's token
+      )
+      restaged = await world.agent.restageContext({ ...args, safePoint: token })
+      planRightAfter = world.memory.planningState(KEY)
+    }
+    return original(text)
+  }
+
+  await world.say() // turn 1
+  assert.equal(world.agent.turnToken, null, 'no turn is open between turns')
+  assert.equal((await world.agent.restageContext({ checkpoint: 'C3', reason: 'r', packet: world.packet(), safePoint: staleToken })).reason, 'round_open', 'a token when no turn is open is refused')
+  assert.equal(getContextRestages(world.memory.planningState(KEY)).length, 0)
+  const mutationsBefore = world.game.mutations.length
+
+  await world.finish('iron-ore') // turn 2: tool exchange, boundary, then the next plan
+
+  assert.deepEqual(attempts, ['round_open', 'round_open', 'round_open', 'round_open'])
+  assert.equal(restaged?.restaged, true, 'the correct token is accepted at the boundary')
+  assert.deepEqual({ ...planRightAfter, context_restages: planBefore.context_restages }, planBefore, 'the restage itself changed no plan state')
+  assert.equal(world.calls.length, 3)
+  const { messages, context } = world.calls[2]
+  assert.deepEqual(messages.slice(0, 3).map(message => message.content), [world.calls[0].messages[0].content, packet.stableText, packet.volatileText])
+  assert.ok(!JSON.stringify(messages).includes('call_boundary_1'), 'the tool exchange of the ended conversation is gone')
+  assert.ok(!messages.some(message => typeof message.content === 'string' && message.content.startsWith('[CHAT]')))
+  assert.equal(context.role, 'executor')
+  assert.equal(world.game.mutations.length, mutationsBefore + 1, 'the plan after the boundary was admitted exactly once')
+  assert.equal(world.rows('context.stale_reply_dropped').length, 0)
+  assert.equal(getContextRestages(world.memory.planningState(KEY)).length, 1)
+  assert.equal(world.memory.currentPlan(KEY).task_board.completed_count, 1, 'the verified step stands')
+  assert.equal(world.agent.turnToken, null)
+})
+
+test('a turn entered without runGuarded still releases its conversation marker when it ends', async () => {
+  const world = loopHarness([firstPlan(), firstPlan()])
+  await world.say()
+  world.agent.messages.push({ role: 'user', content: '[HARNESS] direct entry, as the supervisor\'s slice-boundary recovery does' })
+
+  await world.agent.runTurn().catch(() => undefined)
+
+  assert.equal(world.calls.length, 2, 'the direct turn asked the provider')
+  assert.equal(world.agent.turnToken, null, 'the marker did not outlive the turn')
+  assert.equal((await world.agent.restageContext({ checkpoint: 'C3', reason: 'r', packet: world.packet() })).restaged, true, 'so a restage between turns still goes through')
 })
 
 test('a restage refuses a packet whose plan is not the active plan, and the refusal is on the record', async () => {
