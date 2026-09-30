@@ -26,7 +26,7 @@
 // for such a stale reply. A reply that outlives a reset (a new lineage) is left
 // to the loop's generation check, as before.
 
-import { AGENT_ROLES, PLANNER_ROLE, resolveAgentRole } from './agent-roles.mjs'
+import { AGENT_ROLES, EXECUTOR_ROLE, PLANNER_ROLE, resolveAgentRole } from './agent-roles.mjs'
 import { CONTEXT_RESTAGE_CHECKPOINTS } from './planning-state.mjs'
 import { contextSizeState, observeContextSize } from './restage-policy.mjs'
 
@@ -114,6 +114,17 @@ export class AgentContext {
 
   get delegationActive() {
     return this.restageCount > 0
+  }
+
+  /**
+   * True when the config runs the planner and the executor on different models
+   * (a two-model OPENAI_MODEL list). With one model both roles resolve to it,
+   * so naming the role on a provider call changes nothing.
+   */
+  get rolesDiffer() {
+    return this.config
+      ? resolveAgentRole(this.config, PLANNER_ROLE).model !== resolveAgentRole(this.config, EXECUTOR_ROLE).model
+      : false
   }
 
   /**

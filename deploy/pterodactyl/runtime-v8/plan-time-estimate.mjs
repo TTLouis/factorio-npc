@@ -549,6 +549,9 @@ export class PlanTiming {
     // Machine work the step waited on (plan 2.5) is expected time too.
     const machine = machineWaitSeconds(record)
     const total = expected !== undefined ? expected + machine : undefined
+    // Kept on the record (U7) so the planner's slice-close message can show
+    // estimated against measured time without re-deriving either.
+    record.elapsed_wall_seconds = sameBody ? round1(elapsed) : undefined
     return ['step.time_measured', {
       goal_id: record.goal_id,
       step_id: record.step_id,
@@ -569,6 +572,24 @@ export class PlanTiming {
       batches: record.batches,
       stale: sameBody ? undefined : 'actor_or_epoch_changed',
     }]
+  }
+
+  // Time records of the given steps (U7): the harness estimate and the wall
+  // clock measured at each step's close. A step with no admitted hand work has
+  // no record and reads as `{ step_id }` only.
+  closedStepTimes(stepIds) {
+    const byStep = new Map([...this.steps.values()].map(record => [record.step_id, record]))
+    return (Array.isArray(stepIds) ? stepIds : []).map((stepId) => {
+      const record = byStep.get(stepId)
+      if (!record?.closed) return { step_id: stepId }
+      const machine = machineWaitSeconds(record)
+      return {
+        step_id: stepId,
+        expected_seconds: record.timed ? record.expected_seconds : undefined,
+        machine_wait_seconds: machine > 0 ? machine : undefined,
+        elapsed_wall_seconds: record.elapsed_wall_seconds,
+      }
+    })
   }
 
   // The active step's record, only while it belongs to the same body.
