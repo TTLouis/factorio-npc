@@ -7,8 +7,8 @@ import { fileURLToPath } from 'node:url'
 import { buildArtifacts, channelInstaller, installerLoader, verifyGeneratedArtifacts } from './build-payload.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const PAYLOAD_REF = 'c909da6e0fedeff7dbd0f0b8eba2527b28770833'
-const PAYLOAD_SHA256 = '179e6b3ff31c77aba52372fc820963e871f88abe7f4dd0f05d41d29ab68c3468'
+const PAYLOAD_REF = 'fc71a54622252accacdf145f4a88cf5f0e56343f'
+const PAYLOAD_SHA256 = '6dfe0a0db0fb61d345f5f3c3988bf044499357a1b9d13c8962fce711eabbbd08'
 const source = Buffer.from(`#!/usr/bin/env bash
 SGLUNA_REF="0123456789abcdef0123456789abcdef01234567"
 REVISION="test"
@@ -84,7 +84,7 @@ test('generated egg variable contract keeps safe provider defaults and 300 reque
     assert.ok(egg.variables.some(entry => entry.env_variable === 'SGLUNA_ACTOR_MODE'))
     assert.ok(egg.variables.some(entry => entry.env_variable === 'SGLUNA_CHAT_PLAYERS'))
     assert.ok(!egg.variables.some(entry => entry.env_variable === 'PRIVATE_SERVER'))
-    assert.ok(!egg.variables.some(entry => entry.env_variable.startsWith('SGLUNA_')))
+    assert.ok(!egg.variables.some(entry => entry.env_variable.startsWith('AIRI_')))
     assert.ok(!egg.variables.some(entry => entry.env_variable === 'AIRI_PLAYER'))
     assert.ok(!egg.variables.some(entry => entry.env_variable === 'AIRI_CHAT_PLAYER'))
   }
