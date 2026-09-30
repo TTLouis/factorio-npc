@@ -33,10 +33,9 @@ import {
   scoreSkillOrder,
   summarizeFamily,
   summarizeLedger,
-  tokenBaseline,
 } from './jev-judgments.mjs'
 import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
-import { observationToolFamily, toolCommand } from './structured-policy.mjs'
+import { isObservationToolName, observationToolFamily, toolCommand } from './structured-policy.mjs'
 
 // Restage checkpoints the observation-family judgment covers (owner: C3/C4/C6/C8 and the planner C1/C2).
 export const OBSERVATION_RESTAGE_CHECKPOINTS = Object.freeze(['C1', 'C2', 'C3', 'C4', 'C6', 'C8'])
@@ -56,6 +55,9 @@ export const PACKET_FACT_READERS = Object.freeze({
   runtime_status: 'getTaskStatus',
 })
 export const PACKET_FACT_CHARS = 300
+
+// A direct route does not make the post-step gate call and the planner-shape call: two Jev decision calls (not LLM wakes).
+export const C4_GATE_JEV_CALLS = 2
 export const PACKET_FACT_MAX_FAMILIES = 4
 
 const SHELF_RANKING_LIMIT = 32
@@ -638,6 +640,9 @@ export class JevCheckpoints {
     const loop = this.loop
     const requestId = loop.traceRequest?.id
     const runtime = await loop.inspectAuthoritativeRuntime(receipt)
+    // Read once per step close: the post-step gate takes this inspection instead of reading the runtime again
+    // (takeRuntimeInspection). Not shared once a wait for Jev has made it old (deciding).
+    this.sharedRuntime = { receipt, inspected: runtime }
     const planning = loop.memory.planningState?.(loop.activePlanKey())
     const clarity = nextStepClarity({
       planningState: planning,
@@ -687,11 +692,11 @@ export class JevCheckpoints {
       conversation_seq: loop.agentContext.conversationSeq,
       choice: undefined,
       acted: false,
-      baseline_tokens: tokenBaseline(this.ledger, 'c4_next_step'),
+      followup_lookups: 0,
+      gate_jev_calls: undefined,
       harness_checks: clarity.evidence,
       wake: undefined,
       had_failure: false,
-      first_batch_unverified: false,
       verified: undefined,
     })
     const handle = { key: tracker.key, acted: false, direct: undefined, stage, confidence: undefined }
@@ -706,6 +711,7 @@ export class JevCheckpoints {
     }
 
     const asked = await this.ask({ contract: 'c4_next_step_route', state, questions: c4Questions(), stage, waitMs: this.waitMs })
+    this.sharedRuntime = undefined // the inspection is older than the wait: the gate reads again
     // The wait is over: what may have changed while it ran is read again before the answer can act.
     const late = await this.c4LateChecks(tracker, receipt)
     const answered = await this.answerC4(tracker, asked, { stage, late })
@@ -715,6 +721,13 @@ export class JevCheckpoints {
     handle.confidence = answered.confidence
     handle.judgment_id = this.trackers.get(handle.key)?.judgment_id
     return handle
+  }
+
+  // The inspection c4Boundary made for this receipt, once (the gate then needs no second RCON read).
+  takeRuntimeInspection(receipt) {
+    const shared = this.sharedRuntime
+    this.sharedRuntime = undefined
+    return shared && shared.receipt === receipt ? shared.inspected : undefined
   }
 
   // The runtime, the amendment flag and the plan position read again after a Jev await (deciding only).
@@ -771,7 +784,7 @@ export class JevCheckpoints {
         : stale ? `route_unchanged_${stale.split(':')[0]}`
           : stage === 'shadow' ? 'shadow_no_behavior_change' : 'route_unchanged_low_confidence_or_ground_first',
       detail: { harness_checks: tracker.harness_checks, latency_ms: asked.latency_ms, closed_step_id: tracker.closed_step_id, ...(stale ? { late_check: stale } : {}) },
-      saving_estimate: acted ? { wakes: tracker.baseline_tokens > 0 ? 1 : 0, tokens: tracker.baseline_tokens } : undefined,
+      saving_estimate: acted ? { jev_calls: C4_GATE_JEV_CALLS } : undefined,
     })
     if (!judgment) {
       this.dropUnanswered(tracker)
@@ -802,14 +815,15 @@ export class JevCheckpoints {
       would_route: direct ? 'continue_current_without_observation_wake' : 'unchanged',
       applied_route: tracker.gate_route,
       reason: tracker.stage === 'shadow' ? 'shadow_no_behavior_change' : 'route_unchanged_low_confidence_or_ground_first_or_late_check',
-      estimated_saving_basis: 'observation_round_tokens_of_the_wake_that_runs',
+      saving_basis: 'jev_gate_and_shape_calls_a_direct_route_does_not_make',
     }, { requestId: tracker.request_id })
   }
 
-  async noteGateRoute(handle, route) {
+  async noteGateRoute(handle, route, gateJevCalls) {
     const tracker = handle ? this.trackers.get(handle.key) : undefined
     if (!tracker) return
     tracker.gate_route = route
+    tracker.gate_jev_calls = Number.isSafeInteger(gateJevCalls) ? gateJevCalls : undefined
     await this.emitUnchangedRoute(tracker)
   }
 
@@ -824,7 +838,7 @@ export class JevCheckpoints {
       reason: tracker.acted ? 'executor_continued_directly' : 'the_wake_that_ran_under_the_current_gate_route',
       gate_route: tracker.gate_route,
       ...measured,
-      estimated_saving_tokens: tracker.acted ? Math.max(0, tracker.baseline_tokens - measured.observation_round_tokens) : measured.observation_round_tokens,
+      gate_jev_calls: tracker.gate_jev_calls,
       failed: tracker.wake_failed === true,
     }, { requestId: tracker.request_id })
   }
@@ -840,14 +854,17 @@ export class JevCheckpoints {
     if (!tracker?.wake) return
     const wake = tracker.wake
     wake.open = false
-    const observationTokens = wake.rounds.filter(round => round.tools).reduce((total, round) => total + round.tokens, 0)
+    // Only rounds whose tool calls were observation or fact tools, before the first admitted operation, are observation
+    // rounds. The round that submits the plan (a submitPlan tool call) is the round that authors operations: never one.
+    const observationRounds = wake.rounds.filter(round => round.observation)
     const wakeTokens = wake.rounds.reduce((total, round) => total + round.tokens, 0)
     tracker.measured = {
       fresh_lookups: wake.fresh,
       lookup_families: [...wake.families],
       rounds: wake.rounds.length,
       wake_tokens: wakeTokens,
-      observation_round_tokens: observationTokens,
+      observation_rounds: observationRounds.length,
+      observation_round_tokens: observationRounds.reduce((total, round) => total + round.tokens, 0),
     }
     tracker.wake_failed = error
     await this.emitWakeMeasured(tracker)
@@ -860,38 +877,43 @@ export class JevCheckpoints {
   }
 
   // What "observation was needed" means, ONE label for both answers (jev-judgments.mjs c4ObservationNeeded):
-  // the wake made fresh lookups, or the step did not verify on its first batch (a failure boundary, or the first
-  // batch completing without the contract satisfied). direct_to_executor agrees iff it was not needed; ground_first
-  // agrees iff it was. It is scored as soon as the label is known: lookups and a failed first batch are final
-  // (whatever the request does next), a clean first batch waits for the step to verify.
+  // the wake (or a later wake of the same step) made fresh lookups, or the step's batch failed or was rejected.
+  // direct_to_executor agrees iff it was not needed; ground_first agrees iff it was. It is scored as soon as the label
+  // is known: lookups and a failed or rejected batch are final (whatever the request does next). A batch that completes
+  // cleanly without closing a multi-batch step is no evidence either way: the judgment waits until the step verifies or
+  // fails.
   tryScoreC4(tracker) {
     if (!tracker.judgment_id || !tracker.choice || !tracker.measured) return []
     const measured = tracker.measured
-    const firstTryFailed = tracker.had_failure || tracker.first_batch_unverified
+    const firstTryFailed = tracker.had_failure
     const result = scoreC4Judgment({
       choice: tracker.choice,
-      fresh_lookups: measured.fresh_lookups,
+      fresh_lookups: measured.fresh_lookups + (tracker.followup_lookups ?? 0),
       verified: tracker.verified,
       first_try: !firstTryFailed,
     })
     if (!result) return []
-    // Saving counts only when Jev said direct and it held (observation was not needed). A judgment that did not act
-    // saved nothing real: its figure is what skipping the observation rounds WOULD have saved.
+    // The saving of a CORRECT direct judgment (it counts only when direct agreed: observation was not needed):
+    //  - shadow, would-have-saved: the post-step gate and planner-shape calls the gate's route really made (Jev calls, not
+    //    LLM wakes), plus any observation-tool rounds that wake spent before its first operation (normally none: a lookup
+    //    would have made the judgment disagree). The round that authors operations is never counted: a direct route still
+    //    spends it.
+    //  - deciding, realized: exactly what was provably not done, the gate and planner-shape calls. The executor still wakes
+    //    and the skipped observation rounds cannot be measured (they did not run), so no LLM rounds or tokens are claimed.
     const saving = tracker.choice === 'direct_to_executor'
       ? (tracker.acted
-          ? { wakes: tracker.baseline_tokens > 0 ? 1 : 0, tokens: Math.max(0, tracker.baseline_tokens - measured.observation_round_tokens) }
-          : { wakes: measured.observation_round_tokens > 0 ? 1 : 0, tokens: measured.observation_round_tokens })
+          ? { jev_calls: C4_GATE_JEV_CALLS }
+          : { jev_calls: tracker.gate_jev_calls ?? 0, rounds: measured.observation_rounds, tokens: measured.observation_round_tokens })
       : undefined
     return this.scoreNow(tracker.judgment_id, {
       ...result,
       saving,
-      token_sample: tracker.acted ? undefined : measured.observation_round_tokens,
       outcome: {
         observation_needed: result.observation_needed,
         step_verified: tracker.verified,
         verified_first_try: tracker.verified === true && !firstTryFailed,
         had_failure_boundary: tracker.had_failure,
-        first_batch_unverified: tracker.first_batch_unverified,
+        followup_lookups: tracker.followup_lookups,
         gate_route: tracker.gate_route,
         ...measured,
       },
@@ -905,20 +927,6 @@ export class JevCheckpoints {
     for (const tracker of [...this.trackers.values()]) {
       if (tracker.kind !== 'c4') continue
       tracker.had_failure = true
-      rows.push(...this.tryScoreC4(tracker))
-    }
-    await this.emit(rows)
-  }
-
-  // A batch completed and the completion gate did NOT close the step: for a judged step whose wake has run, that is
-  // its first batch failing to verify. Transient or non-outcome gate results never count.
-  async onCompletionBoundary(stepCompletion) {
-    if (this.trackers.size === 0 || stepCompletion?.verified === true) return
-    if (['pending_amendment', 'no_authoritative_operation_receipt'].includes(stepCompletion?.reason)) return
-    const rows = []
-    for (const tracker of [...this.trackers.values()]) {
-      if (tracker.kind !== 'c4' || !tracker.measured || tracker.first_batch_unverified) continue
-      tracker.first_batch_unverified = true
       rows.push(...this.tryScoreC4(tracker))
     }
     await this.emit(rows)
@@ -1305,6 +1313,11 @@ export class JevCheckpoints {
           tracker.wake.fresh++
           if (family) tracker.wake.families.add(family)
         }
+        else if (tracker.kind === 'c4' && tracker.measured && tracker.verified === undefined) {
+          // A later wake of the same step looked something up: observation was needed after all.
+          tracker.followup_lookups++
+          this.fire(async () => { await this.emit(this.tryScoreC4(tracker)) })
+        }
       }
     }
   }
@@ -1324,7 +1337,27 @@ export class JevCheckpoints {
     if (event === 'provider.response') {
       const tokens = finiteTokens(data?.usage)
       for (const tracker of this.trackers.values()) {
-        if (tracker.kind === 'c4' && tracker.wake?.open) tracker.wake.rounds.push({ tokens, tools: data?.has_tool_calls === true })
+        if (tracker.kind === 'c4' && tracker.wake?.open) tracker.wake.rounds.push({ tokens, observation: false })
+      }
+      return rows
+    }
+    // A round is an observation round when it called an observation or fact tool (tool.call rows), before the first admitted
+    // operation. A submitPlan call is not a tool.call row: the round that authors operations is never counted.
+    if (event === 'tool.call') {
+      if (isObservationToolName(data?.name)) {
+        for (const tracker of this.trackers.values()) {
+          const wake = tracker.kind === 'c4' ? tracker.wake : undefined
+          if (wake?.open && !wake.ops_admitted && wake.rounds.length > 0) wake.rounds.at(-1).observation = true
+        }
+      }
+      return rows
+    }
+    // A rejected or failed admission is a failed batch: the first try did not work.
+    if (event === 'operations.preflight_rejected' || event === 'operations.admission_failed') {
+      for (const tracker of this.trackers.values()) {
+        if (tracker.kind !== 'c4' || !tracker.wake) continue
+        tracker.had_failure = true
+        rows.push(...this.tryScoreC4(tracker))
       }
       return rows
     }
@@ -1338,6 +1371,9 @@ export class JevCheckpoints {
         else this.dropTracker(tracker)
       }
       return rows
+    }
+    if (event === 'operations.ack') {
+      for (const tracker of this.trackers.values()) if (tracker.kind === 'c4' && tracker.wake?.open) tracker.wake.ops_admitted = true
     }
     if (event === 'operations.ack' || event === 'context.restaged') {
       for (const tracker of [...this.trackers.values()]) if (tracker.kind === 'observation' && !tracker.closed) rows.push(...this.closeObservationWindow(tracker))
@@ -1368,12 +1404,14 @@ export class JevCheckpoints {
         }
         else if (tracker.kind === 'c4') {
           if (!tracker.judgment_id) { this.dropUnanswered(tracker); continue }
-          // A real cancel or supersede abandons. Anything else the request does next (complete, fail, pause, replan)
-          // is an outcome: a step that did not verify on its first batch is a disagreement.
+          // A real cancel or supersede abandons. A request that FAILS or pauses with the step still unverified is a step that
+          // failed to verify: a disagreement. A request that merely completes with the step unresolved leaves nothing to
+          // score: abandoned (a multi-batch step continues in the next request).
           if (ended === 'cancelled' || !tracker.measured) { rows.push(...this.abandonNow(tracker.judgment_id, `request_${ended}_before_an_outcome`)); continue }
-          if (tracker.verified === undefined) tracker.verified = stepClosed(tracker)
-          if (tracker.verified !== true) tracker.first_batch_unverified = true
-          rows.push(...this.tryScoreC4(tracker))
+          if (tracker.verified === undefined && stepClosed(tracker)) tracker.verified = true
+          if (tracker.verified !== true && ended === 'failed') tracker.had_failure = true
+          if (tracker.verified === true || tracker.had_failure) rows.push(...this.tryScoreC4(tracker))
+          else rows.push(...this.abandonNow(tracker.judgment_id, 'request_completed_before_the_step_resolved'))
         }
         else if (tracker.kind === 'shelf' && tracker.judgment_id && tracker.picked) rows.push(...this.tryScoreShelf(tracker))
       }

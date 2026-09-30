@@ -28,7 +28,7 @@ export const JUDGMENT_STAGES = Object.freeze(['shadow', 'advisory', 'deciding'])
 export const JUDGMENT_FAMILIES = Object.freeze({
   // Step close inside a slice: the next committed step is clear, so the executor
   // continues directly (no targeted-observation wake). Acts on its own when deciding.
-  c4_next_step: Object.freeze({ cap: 'deciding', acts_alone: true, channels: Object.freeze(['wakes', 'tokens']) }),
+  c4_next_step: Object.freeze({ cap: 'deciding', acts_alone: true, channels: Object.freeze(['jev_calls', 'rounds', 'tokens']) }),
   // Observation families Jev thinks a fresh conversation needs. Advisory only adds facts to the packet.
   observation_families: Object.freeze({ cap: 'advisory', acts_alone: false, channels: Object.freeze(['calls']) }),
   // Ranking of the complete shelf-candidate set at a shelf pickup. Advisory only orders the packet's candidates.
@@ -44,7 +44,14 @@ export const JUDGMENT_PROMOTION = Object.freeze({
   window: 60,
 })
 
-// A family that has this many scored judgments and has saved no tokens, calls or wakes is flagged in the
+// The channels a saving is counted in. `rounds` and `tokens` are LLM provider rounds and their input+output units
+// (observation-tool rounds before the first admitted operation: never the round that authors operations); `calls` are
+// fact/lookup calls a packet replaced; `jev_calls` are Jev decision calls that were not made (the post-step gate and
+// the planner-shape call: not LLM wakes). `wakes` is kept for old ledgers and is never written by C4: the executor
+// still wakes on every route.
+export const SAVING_CHANNELS = Object.freeze(['wakes', 'rounds', 'tokens', 'calls', 'jev_calls'])
+
+// A family that has this many scored judgments and has saved nothing in any channel is flagged in the
 // report for removal. Removal is the owner's call; nothing here removes anything.
 export const REMOVAL_REVIEW_MIN_SCORED = 30
 
@@ -62,7 +69,7 @@ function stageRank(stage) {
 }
 
 function emptySaving() {
-  return { wakes: 0, tokens: 0, calls: 0 }
+  return Object.fromEntries(SAVING_CHANNELS.map(channel => [channel, 0]))
 }
 
 function emptyFamily() {
@@ -159,7 +166,7 @@ function supportedStage(state) {
 }
 
 function addSaving(target, saving) {
-  for (const channel of ['wakes', 'tokens', 'calls']) {
+  for (const channel of SAVING_CHANNELS) {
     target[channel] = Math.min(COUNTER_MAX, target[channel] + clampCount(saving?.[channel]))
   }
 }
@@ -168,7 +175,7 @@ function addSaving(target, saving) {
  * Record a judgment as pending. Returns { ledger, judgment } or undefined when the family is unknown.
  * `input`: family, request_id, goal_id, plan_id, step_id, handoff_id, checkpoint, jev_choice, jev_confidence,
  * alternative (what the deterministic code or the LLM would do/did), detail (bounded facts), acted (true when
- * the judgment changed behavior), saving_estimate ({wakes,tokens,calls}). `salt` keeps ids distinct across restarts.
+ * the judgment changed behavior), saving_estimate ({rounds,tokens,calls,jev_calls}). `salt` keeps ids distinct across restarts.
  */
 export function recordJudgment(ledger, input, { salt = '' } = {}) {
   if (!isJudgmentFamily(input?.family)) return undefined
@@ -219,7 +226,7 @@ export function pendingJudgment(ledger, judgmentId) {
 
 /**
  * Score a pending judgment against its outcome.
- * `result`: { agreed: boolean, outcome: object (bounded facts), saving?: {wakes,tokens,calls}, token_sample?: number }
+ * `result`: { agreed: boolean, outcome: object (bounded facts), saving?: {rounds,tokens,calls,jev_calls}, token_sample?: number }
  * Returns { ledger, scored, transitions } (transitions: zero or more stage changes, each with from/to, direction,
  * reason, agreement, evidence and the effective stages before and after).
  */
@@ -315,7 +322,7 @@ export function summarizeFamily(ledger, family) {
   const state = ledger?.families?.[family]
   if (!state) return undefined
   const stats = windowStats(state)
-  const savedAny = ['wakes', 'tokens', 'calls'].some(channel => state.saved[channel] > 0 || state.would_save[channel] > 0)
+  const savedAny = SAVING_CHANNELS.some(channel => state.saved[channel] > 0 || state.would_save[channel] > 0)
   const removal = state.scored >= REMOVAL_REVIEW_MIN_SCORED && !savedAny
   return {
     family,
@@ -334,7 +341,7 @@ export function summarizeFamily(ledger, family) {
     would_save: { ...state.would_save },
     saved: { ...state.saved },
     removal_candidate: removal,
-    ...(removal ? { removal_reason: `no measured saving (tokens, calls or wakes) after ${state.scored} scored judgments; removal is the owner's call` } : {}),
+    ...(removal ? { removal_reason: `no measured saving (LLM rounds or tokens, lookup calls or Jev calls) after ${state.scored} scored judgments; removal is the owner's call` } : {}),
   }
 }
 
@@ -368,7 +375,7 @@ export function serializeLedger(ledger) {
 
 function restoreSaving(raw) {
   const saving = emptySaving()
-  if (raw && typeof raw === 'object') for (const channel of ['wakes', 'tokens', 'calls']) saving[channel] = clampCount(raw[channel])
+  if (raw && typeof raw === 'object') for (const channel of SAVING_CHANNELS) saving[channel] = clampCount(raw[channel])
   return saving
 }
 

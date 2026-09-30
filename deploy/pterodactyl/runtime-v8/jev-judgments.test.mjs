@@ -218,22 +218,21 @@ test('a persisted stage the recorded evidence does not support is clamped down o
 
 test('savings: a saving counts only when the outcome agreed, in the shadow or the realized column by whether the judgment acted; a family with no saving after 30 scored is flagged for removal', () => {
   let ledger = emptyLedger()
-  ledger = judge(ledger, 'c4_next_step', true, { saving: { wakes: 1, tokens: 900 }, tokenSample: 900 }).ledger
-  ledger = judge(ledger, 'c4_next_step', false, { saving: { wakes: 1, tokens: 5000 }, tokenSample: 5000 }).ledger
+  ledger = judge(ledger, 'c4_next_step', true, { saving: { jev_calls: 2, rounds: 1, tokens: 900 } }).ledger
+  ledger = judge(ledger, 'c4_next_step', false, { saving: { jev_calls: 2, rounds: 3, tokens: 5000 } }).ledger
   let summary = summarizeFamily(ledger, 'c4_next_step')
-  assert.deepEqual(summary.would_save, { wakes: 1, tokens: 900, calls: 0 }, 'the disagreeing judgment saved nothing')
-  assert.deepEqual(summary.saved, { wakes: 0, tokens: 0, calls: 0 })
+  assert.deepEqual(summary.would_save, { wakes: 0, rounds: 1, tokens: 900, calls: 0, jev_calls: 2 }, 'the disagreeing judgment saved nothing')
+  assert.deepEqual(summary.saved, { wakes: 0, rounds: 0, tokens: 0, calls: 0, jev_calls: 0 })
   assert.equal(summary.removal_candidate, false, 'too few scored judgments to call')
-  assert.equal(tokenBaseline(ledger, 'c4_next_step'), 2950, 'the median of the samples')
 
   // A judgment that acted: its saving is the realized column.
   const promoted = feed(emptyLedger(), 'c4_next_step', agreeing(60)).ledger
   const acted = recordJudgment(promoted, { family: 'c4_next_step', request_id: 'req_1', acted: true })
-  const scored = scoreJudgment(acted.ledger, acted.judgment.judgment_id, { agreed: true, saving: { wakes: 1, tokens: 700 } })
+  const scored = scoreJudgment(acted.ledger, acted.judgment.judgment_id, { agreed: true, saving: { jev_calls: 2 } })
   summary = summarizeFamily(scored.ledger, 'c4_next_step')
-  assert.deepEqual(summary.saved, { wakes: 1, tokens: 700, calls: 0 })
+  assert.deepEqual(summary.saved, { wakes: 0, rounds: 0, tokens: 0, calls: 0, jev_calls: 2 })
 
-  // 30 scored judgments and nothing saved: flagged, never removed.
+  // 30 scored judgments and nothing saved in ANY channel: flagged, never removed.
   const barren = feed(emptyLedger(), 'shelf_ranking', agreeing(30)).ledger
   const flagged = summarizeFamily(barren, 'shelf_ranking')
   assert.equal(flagged.removal_candidate, true)
@@ -241,6 +240,8 @@ test('savings: a saving counts only when the outcome agreed, in the shadow or th
   assert.equal(summarizeFamily(feed(emptyLedger(), 'shelf_ranking', agreeing(29)).ledger, 'shelf_ranking').removal_candidate, false)
   const saving = judge(barren, 'shelf_ranking', true, { saving: { calls: 1 } }).ledger
   assert.equal(summarizeFamily(saving, 'shelf_ranking').removal_candidate, false, 'any measured saving clears the flag')
+  const jevCalls = judge(barren, 'shelf_ranking', true, { saving: { jev_calls: 1 } }).ledger
+  assert.equal(summarizeFamily(jevCalls, 'shelf_ranking').removal_candidate, false, 'Jev calls not made count')
 })
 
 test('scoreC4Judgment: ONE outcome label (observation needed = the wake looked something up OR the step did not verify on its first batch); direct agrees iff not needed, ground_first iff needed', () => {

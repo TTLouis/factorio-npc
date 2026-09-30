@@ -622,8 +622,13 @@ export function buildRunRecord(behaviorRows, { prices } = {}) {
 
 const JEV_FAMILIES = ['c4_next_step', 'observation_families', 'shelf_ranking', 'skill_order']
 
+// Channels (jev-judgments.mjs SAVING_CHANNELS): `rounds` and `tokens` are LLM observation-tool rounds before the first
+// admitted operation (never the round that authors operations); `calls` are lookups a packet replaced; `jev_calls` are
+// Jev decision calls not made (gate and planner-shape: not LLM wakes). `wakes` is legacy and stays 0.
+const JEV_SAVING_CHANNELS = ['wakes', 'rounds', 'tokens', 'calls', 'jev_calls']
+
 function emptyJevSaving() {
-  return { wakes: 0, tokens: 0, calls: 0 }
+  return Object.fromEntries(JEV_SAVING_CHANNELS.map(channel => [channel, 0]))
 }
 
 function newJevTally() {
@@ -634,7 +639,7 @@ function newJevTally() {
     }
     return families.get(name)
   }
-  return { family, families, stageChanges: [], skipped: {}, c4: { wakes_measured: 0, observation_round_tokens: 0, deciding_routes: 0, shadow_routes: 0 }, any: false }
+  return { family, families, stageChanges: [], skipped: {}, c4: { wakes_measured: 0, observation_rounds: 0, observation_round_tokens: 0, gate_jev_calls: 0, deciding_routes: 0, shadow_routes: 0 }, any: false }
 }
 
 function observeJevRow(tally, event, data, requestId) {
@@ -657,7 +662,7 @@ function observeJevRow(tally, event, data, requestId) {
     const saving = data.saving && typeof data.saving === 'object' ? data.saving : undefined
     if (saving && data.agreed === true) {
       const target = data.realized === true ? family.saved : family.would_save
-      for (const channel of ['wakes', 'tokens', 'calls']) target[channel] += safeInteger(saving[channel]) ?? 0
+      for (const channel of JEV_SAVING_CHANNELS) target[channel] += safeInteger(saving[channel]) ?? 0
     }
   }
   else if (event === events.stageChanged) {
@@ -681,6 +686,8 @@ function observeJevRow(tally, event, data, requestId) {
     tally.any = true
     tally.c4.wakes_measured++
     tally.c4.observation_round_tokens += safeInteger(data.observation_round_tokens) ?? 0
+    tally.c4.observation_rounds += safeInteger(data.observation_rounds) ?? 0
+    tally.c4.gate_jev_calls += safeInteger(data.gate_jev_calls) ?? 0
   }
   else if (event === events.c4Route) {
     tally.any = true
@@ -713,7 +720,7 @@ function summarizeJev(tally, totals) {
     }))
   const sumSaving = (pick) => {
     const total = emptyJevSaving()
-    for (const family of tally.families.values()) for (const channel of ['wakes', 'tokens', 'calls']) total[channel] += pick(family)[channel]
+    for (const family of tally.families.values()) for (const channel of JEV_SAVING_CHANNELS) total[channel] += pick(family)[channel]
     return total
   }
   const saved = sumSaving(family => family.saved)
@@ -847,13 +854,13 @@ export function formatRunRecord(record) {
   }
   const jev = record.jev
   if (jev) {
-    const saving = value => `${value.wakes} wakes, ${thousands(value.tokens)} tokens, ${value.calls} calls`
+    const saving = value => `${value.rounds} LLM rounds (${thousands(value.tokens)} tokens), ${value.calls} lookup calls, ${value.jev_calls} Jev calls`
     lines.push('', 'Jev judgments at the delegation checkpoints (U11):')
     for (const row of jev.by_family) {
       lines.push(`- ${row.family}: stage ${row.stage}${row.earned_stage && row.earned_stage !== row.stage ? ` (earned ${row.earned_stage}, capped)` : ''} · ${row.recorded} judged, ${row.scored} scored, ${row.agreed} agreed (${percent(row.agreement)}), ${row.unscored} unscored · promoted ${row.promotions}, demoted ${row.demotions} · saved ${saving(row.saved)} · would have saved ${saving(row.would_save)}${row.removal_candidate ? ' · FLAGGED FOR REMOVAL: no measured saving (the owner decides)' : ''}`)
     }
     lines.push(`- saved this run: ${saving(jev.savings.saved)} (LLM spend: ${thousands(jev.llm.input_units)} in, ${thousands(jev.llm.output_units)} out, ${jev.llm.provider_calls} calls) · would have saved: ${saving(jev.savings.would_save)}`)
-    if (jev.c4.wakes_measured > 0 || jev.c4.shadow_routes > 0 || jev.c4.deciding_routes > 0) lines.push(`- C4 wakes measured: ${jev.c4.wakes_measured} (observation rounds cost ${thousands(jev.c4.observation_round_tokens)} tokens; shadow routes ${jev.c4.shadow_routes}, deciding routes ${jev.c4.deciding_routes})`)
+    if (jev.c4.wakes_measured > 0 || jev.c4.shadow_routes > 0 || jev.c4.deciding_routes > 0) lines.push(`- C4 wakes measured: ${jev.c4.wakes_measured} (observation rounds ${jev.c4.observation_rounds}, ${thousands(jev.c4.observation_round_tokens)} tokens, not a saving; the gate's Jev calls ${jev.c4.gate_jev_calls}; shadow routes ${jev.c4.shadow_routes}, deciding routes ${jev.c4.deciding_routes})`)
     for (const change of jev.stage_changes) lines.push(`- stage change: ${change.family} ${change.direction} ${change.from} -> ${change.to} (${change.request_id ?? 'no request'}): ${change.reason ?? ''}`)
     const skipped = Object.entries(jev.skipped)
     if (skipped.length > 0) lines.push(`- judgments skipped (never counted as agreement): ${skipped.map(([reason, count]) => `${reason} ${count}`).join(', ')}`)

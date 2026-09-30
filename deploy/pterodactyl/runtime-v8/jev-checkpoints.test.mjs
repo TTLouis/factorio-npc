@@ -379,7 +379,8 @@ test('shadow C4: the judgment is recorded with its request id, ids, choice, conf
   // Tokens are the provider-reported input plus output of each round: call 2 (the observation) and call 3.
   assert.equal(measured.data.wake_tokens, (2000 + 450) + (3000 + 450))
   assert.equal(measured.data.observation_round_tokens, 2000 + 450, 'only the round that ran a lookup is observation spend')
-  assert.equal(measured.data.estimated_saving_tokens, 2450)
+  assert.equal(measured.data.observation_rounds, 1, 'only the round that called an observation tool')
+  assert.equal(measured.data.gate_jev_calls, 2, 'the gate and the planner-shape call the gate route really made')
 
   const scored = world.rows('jev.judgment_scored').find(row => row.data.family === 'c4_next_step')
   assert.equal(scored.request_id, requestId)
@@ -397,7 +398,7 @@ test('shadow C4: the judgment is recorded with its request id, ids, choice, conf
   const order = world.trace.map(record => record.event)
   assert.ok(order.indexOf('jev.judgment_scored', order.indexOf('c4.wake_measured')) < order.lastIndexOf('step.verified'), 'scored at the wake, before the step verified')
   // The ledger keeps the shadow baseline for the tokens a direct route could skip, for the deciding stage.
-  assert.deepEqual(world.ledger().families.c4_next_step.samples, [2450])
+  assert.deepEqual(world.ledger().families.c4_next_step.samples, [], 'no median baseline any more: nothing books a saving from wakes that needed observation')
 })
 
 test('shadow C4: a wake that made no lookup and verified on its first batch is the one case where direct_to_executor agrees', async () => {
@@ -493,16 +494,18 @@ test('deciding C4: the post-step gate, the planner-shape call and the observatio
   assert.ok(order.indexOf('step.verified') < order.indexOf('c4.route_applied') && order.indexOf('c4.route_applied') < order.lastIndexOf('step.verified'))
   assert.equal(world.rows('outcome.validated')[0].data.kind, 'plan_slice_completed', 'the slice closed through the normal gate')
 
-  // Scored like any judgment, and the saving is REALIZED: the shadow baseline (median 2500) that no longer ran.
+  // Scored like any judgment. The realized saving is what was provably not done: the post-step gate call and the planner-shape call.
   const scored = world.rows('jev.judgment_scored').find(row => row.data.family === 'c4_next_step')
   assert.equal(scored.data.acted, true)
   assert.equal(scored.data.realized, true)
   assert.equal(scored.data.reason, 'outcome_matches_the_judgment')
   assert.equal(scored.data.agreed, true)
   assert.equal(scored.data.recorded_stage, 'deciding')
-  assert.deepEqual(scored.data.saving, { wakes: 1, tokens: 2500 })
-  assert.equal(scored.data.ledger.saved.tokens, 2500)
-  assert.equal(scored.data.ledger.saved.wakes, 1)
+  assert.deepEqual(scored.data.saving, { jev_calls: 2 })
+  assert.equal(scored.data.ledger.saved.jev_calls, 2)
+  assert.equal(scored.data.ledger.saved.tokens, 0, 'no LLM tokens are claimed: the executor still wakes and the skipped rounds did not run')
+  assert.equal(scored.data.ledger.saved.rounds, 0)
+  assert.equal(scored.data.ledger.saved.wakes, 0, 'the executor still wakes: not a saved wake')
   assert.equal(world.rows('c4.wake_measured')[0].data.mode, 'deciding')
   assert.equal(world.rows('c4.wake_measured')[0].data.reason, 'executor_continued_directly')
   // A deciding judgment is recorded as acting and as not shadow.
@@ -510,7 +513,7 @@ test('deciding C4: the post-step gate, the planner-shape call and the observatio
   assert.equal(recorded.data.acted, true)
   assert.equal(recorded.data.shadow, false)
   assert.equal(recorded.data.reason, 'deciding_stage_direct_to_executor')
-  assert.deepEqual(recorded.data.saving_estimate, { wakes: 1, tokens: 2500 })
+  assert.deepEqual(recorded.data.saving_estimate, { jev_calls: 2 })
 })
 
 test('deciding C4 keeps today\'s route when Jev says ground_first, answers below the confidence floor, or the next step is not clear (Jev can only be more cautious than the checks)', async () => {
@@ -580,22 +583,28 @@ test('deciding C4: a direct step that fails and then REPLANS (or whose request c
   const [change] = world.rows('jev.stage_changed')
   assert.equal(change.data.direction, 'demoted')
   assert.equal(effectiveStage(world.ledger(), 'c4_next_step'), 'shadow')
-  // A request that ends with the step unverified (complete, fail, pause) is a disagreement too, never an abandoned judgment.
-  for (const ended of ['request.completed', 'request.failed']) {
+  // A request that FAILS or pauses with the step still unverified is a step that failed: a disagreement. One that merely
+  // completes leaves nothing to score (a multi-batch step continues in the next request): abandoned, never agreement.
+  for (const [ended, agreed] of [['request.failed', false], ['goal.paused', false], ['request.completed', undefined]]) {
     const direct = harness({ script: [plannerSlice(), executorStep(), plannerNextSlice()], tokens: SLICE_TOKENS })
     await direct.say()
     contractSecondStep(direct)
     direct.give('iron-ore')
     await direct.agent.completed() // direct answer, no lookup: the label waits for the step
     assert.equal(direct.rows('jev.judgment_scored').filter(row => row.data.family === 'c4_next_step').length, 0)
-    const row = { event: ended, data: { outcome: 'x' } }
-    await direct.agent.writeTraceEvent(row.event, row.data)
+    await direct.agent.writeTraceEvent(ended, { outcome: 'x' })
     await direct.settle()
     const after = direct.rows('jev.judgment_scored').find(item => item.data.family === 'c4_next_step')
-    assert.equal(after.data.agreed, false, `${ended} with the step unverified`)
-    assert.equal(after.data.outcome.first_batch_unverified, true)
+    if (agreed === undefined) {
+      assert.equal(after, undefined, `${ended}: not scored`)
+      assert.equal(direct.rows('jev.judgment_unscored').find(item => item.data.family === 'c4_next_step').data.reason, 'request_completed_before_the_step_resolved')
+    }
+    else {
+      assert.equal(after.data.agreed, false, `${ended} with the step unverified`)
+      assert.equal(after.data.outcome.had_failure_boundary, true)
+    }
   }
-  // Only a real cancel abandons (covered by the cancellation test).
+  // Only a real cancel abandons outright (covered by the cancellation test).
 })
 
 test('a family demoted by its own outcomes is traced with the request id and the reason, and stops acting', async () => {
@@ -1118,17 +1127,20 @@ test('run record: a shadow run reports judgments per family, agreement, stage an
   const c4 = familyOf(record, 'c4_next_step')
   // The wake looked something up, so observation was needed and the direct answer disagrees (and would save nothing).
   assert.deepEqual({ stage: c4.stage, recorded: c4.recorded, scored: c4.scored, agreed: c4.agreed, agreement: c4.agreement, acted: c4.acted }, { stage: 'shadow', recorded: 1, scored: 1, agreed: 0, agreement: 0, acted: 0 })
-  assert.deepEqual(c4.would_save, { wakes: 0, tokens: 0, calls: 0 })
-  assert.deepEqual(c4.saved, { wakes: 0, tokens: 0, calls: 0 })
+  const none = { wakes: 0, rounds: 0, tokens: 0, calls: 0, jev_calls: 0 }
+  assert.deepEqual(c4.would_save, none)
+  assert.deepEqual(c4.saved, none)
   assert.equal(c4.ledger.scored, 1)
   assert.equal(c4.removal_candidate, false)
   // Every family that judged appears, in the ledger's order, with its own counts.
   assert.deepEqual(record.jev.by_family.map(row => row.family), ['c4_next_step', 'observation_families', 'shelf_ranking'])
   assert.equal(familyOf(record, 'observation_families').recorded, 2, 'two restages (the two committed slices)')
-  assert.deepEqual(record.jev.savings.saved, { wakes: 0, tokens: 0, calls: 0 })
+  assert.deepEqual(record.jev.savings.saved, none)
   assert.equal(record.jev.savings.would_save.tokens, 0)
-  assert.equal(record.jev.savings.would_save.wakes, 0)
-  assert.equal(record.jev.c4.observation_round_tokens, 2450, 'what the shadow wakes spent on observation rounds: the baseline a deciding route would skip')
+  assert.equal(record.jev.savings.would_save.jev_calls, 0)
+  assert.equal(record.jev.c4.observation_round_tokens, 2450, 'what the shadow wake spent on its observation round: information, not a saving')
+  assert.equal(record.jev.c4.observation_rounds, 1)
+  assert.equal(record.jev.c4.gate_jev_calls, 2)
   assert.equal(record.jev.llm.provider_calls, record.totals.rounds, 'the success metric sits next to what the run spent')
   assert.equal(record.jev.llm.input_units, record.totals.input_units)
   assert.equal(record.jev.llm.output_units, record.totals.output_units)
@@ -1138,9 +1150,9 @@ test('run record: a shadow run reports judgments per family, agreement, stage an
   assert.deepEqual(record.jev.stage_changes, [])
   const text = formatRunRecord(record)
   assert.match(text, /Jev judgments at the delegation checkpoints \(U11\):/)
-  assert.match(text, /- c4_next_step: stage shadow · 1 judged, 1 scored, 0 agreed \(0%\), 0 unscored · promoted 0, demoted 0 · saved 0 wakes, 0 tokens, 0 calls · would have saved 0 wakes, 0 tokens, 0 calls/)
-  assert.match(text, /- saved this run: 0 wakes, 0 tokens, 0 calls \(LLM spend: .* in, .* out, 4 calls\) · would have saved: 0 wakes, 0 tokens/)
-  assert.match(text, /- C4 wakes measured: 1 \(observation rounds cost 2,450 tokens; shadow routes 1, deciding routes 0\)/)
+  assert.match(text, /- c4_next_step: stage shadow · 1 judged, 1 scored, 0 agreed \(0%\), 0 unscored · promoted 0, demoted 0 · saved 0 LLM rounds \(0 tokens\), 0 lookup calls, 0 Jev calls · would have saved 0 LLM rounds \(0 tokens\), 0 lookup calls, 0 Jev calls/)
+  assert.match(text, /- saved this run: 0 LLM rounds \(0 tokens\), 0 lookup calls, 0 Jev calls \(LLM spend: .* in, .* out, 4 calls\) · would have saved: 0 LLM rounds \(0 tokens\), 0 lookup calls, 0 Jev calls/)
+  assert.match(text, /- C4 wakes measured: 1 \(observation rounds 1, 2,450 tokens, not a saving; the gate's Jev calls 2; shadow routes 1, deciding routes 0\)/)
 })
 
 test('run record: a deciding run reports the realized saving; a trace without judgment rows has no Jev section and formats as before', async () => {
@@ -1149,11 +1161,11 @@ test('run record: a deciding run reports the realized saving; a trace without ju
   const c4 = familyOf(record, 'c4_next_step')
   assert.equal(c4.stage, 'deciding')
   assert.equal(c4.acted, 1)
-  assert.deepEqual(c4.saved, { wakes: 1, tokens: 2500, calls: 0 })
-  assert.deepEqual(c4.would_save, { wakes: 0, tokens: 0, calls: 0 })
-  assert.deepEqual(record.jev.savings.saved, { wakes: 1, tokens: 2500, calls: 0 })
+  assert.deepEqual(c4.saved, { wakes: 0, rounds: 0, tokens: 0, calls: 0, jev_calls: 2 })
+  assert.deepEqual(c4.would_save, { wakes: 0, rounds: 0, tokens: 0, calls: 0, jev_calls: 0 })
+  assert.deepEqual(record.jev.savings.saved, { wakes: 0, rounds: 0, tokens: 0, calls: 0, jev_calls: 2 })
   assert.equal(record.jev.c4.deciding_routes, 1)
-  assert.match(formatRunRecord(record), /- saved this run: 1 wakes, 2,500 tokens, 0 calls/)
+  assert.match(formatRunRecord(record), /- saved this run: 0 LLM rounds \(0 tokens\), 0 lookup calls, 2 Jev calls/)
 
   const off = harness({ script: [plannerSlice(), observation(), executorStep(), plannerNextSlice()], tokens: SLICE_TOKENS, agentOptions: { jevCheckpoints: false } })
   await runSliceWithContractedStep2(off)
@@ -1258,7 +1270,7 @@ test('deciding C4 keeps fact reads ungated: a read the executor asks for in the 
   assert.deepEqual(world.rows('observation.tier_admitted')[0].data.tools, [{ tool: 'getInventoryItems', tier: 'fact' }])
   const measured = world.rows('c4.wake_measured')[0]
   assert.equal(measured.data.fresh_lookups, 1)
-  assert.equal(measured.data.estimated_saving_tokens, 50, 'the baseline 2500 minus the 2450 tokens the read round actually cost')
+  assert.equal(measured.data.observation_rounds, 1, 'the fact read is an observation round')
   // The agent still chose to look something up, so observation WAS needed: the direct answer disagrees and saves nothing.
   const scored = world.rows('jev.judgment_scored').find(row => row.data.family === 'c4_next_step')
   assert.equal(scored.data.agreed, false)
@@ -1306,7 +1318,7 @@ test('a step that verified while the wake was still running is scored the moment
   await world.say()
   const jev = world.agent.jev
   const judgment = await jev.record({ family: 'c4_next_step', request_id: 'req_w', step_id: 'step_x', plan_id: 'plan_x', jev_choice: 'direct_to_executor', jev_confidence: 0.9, alternative: { kind: 'test' }, reason: 'test' })
-  jev.track({ kind: 'c4', judgment_id: judgment.judgment_id, request_id: 'req_w', plan_id: 'plan_x', step_id: 'step_x', choice: 'direct_to_executor', acted: false, baseline_tokens: 0, had_failure: false, verified: true })
+  jev.track({ kind: 'c4', judgment_id: judgment.judgment_id, request_id: 'req_w', plan_id: 'plan_x', step_id: 'step_x', choice: 'direct_to_executor', acted: false, had_failure: false, verified: true })
   jev.beginWake({ key: judgment.judgment_id })
   assert.equal(world.rows('jev.judgment_scored').length, 0, 'not scoreable before the wake is measured')
   await jev.endWake({ key: judgment.judgment_id })
@@ -1690,20 +1702,44 @@ test('C7 with U11 on: recovery after a restart restages from the packet as befor
   assert.equal(normalize(on.second.calls[0].messages), normalize(off.second.calls[0].messages), 'the recovery packet is identical')
 })
 
-test('a judged step whose FIRST batch completes without the gate closing it is a disagreement at that moment (observation was needed), whatever the request does next', async () => {
-  const world = harness({ script: [plannerSlice(), executorStep(), executorStep(), plannerNextSlice()], tokens: SLICE_TOKENS })
+// A step that needs several batches: a batch that completes cleanly without closing it is no evidence either way.
+async function multiBatchWorld(script) {
+  const world = harness({ script, tokens: SLICE_TOKENS })
   await world.say()
   contractSecondStep(world)
   world.give('iron-ore')
-  await world.agent.completed() // step 1 closes; the wake makes no lookup and submits step 2
-  assert.equal(world.rows('jev.judgment_scored').filter(row => row.data.family === 'c4_next_step').length, 0, 'waiting for the first batch')
-  await world.agent.completed() // the batch completes but the copper is not there: the gate does not close step 2
+  await world.agent.completed() // step 1 closes; the wake makes no lookup and submits step 2's first batch
+  return world
+}
+
+test('nit a: a first batch that completes cleanly without closing a multi-batch step leaves the judgment pending until the step verifies', async () => {
+  const world = await multiBatchWorld([plannerSlice(), executorStep(), executorStep(), plannerNextSlice()])
+  await world.agent.completed() // the batch completes but only part of the copper is there: the gate does not close step 2
+  assert.equal(world.rows('jev.judgment_scored').filter(row => row.data.family === 'c4_next_step').length, 0, 'no evidence either way yet')
+  assert.equal(world.rows('jev.judgment_unscored').filter(row => row.data.family === 'c4_next_step').length, 0)
+  world.give('copper-ore')
+  await world.agent.completed() // the second batch closes it
   const scored = world.rows('jev.judgment_scored').find(row => row.data.family === 'c4_next_step')
-  assert.equal(scored.data.agreed, false)
-  assert.equal(scored.data.outcome.first_batch_unverified, true)
-  assert.equal(scored.data.outcome.observation_needed, true)
-  assert.equal(scored.data.outcome.had_failure_boundary, false)
-  assert.equal(world.rows('step.verified').length, 1, 'step 2 never verified, and the judgment did not wait for it')
+  assert.equal(scored.data.agreed, true, 'a step that simply needed two batches still agrees with direct')
+  assert.equal(scored.data.outcome.observation_needed, false)
+  assert.equal(scored.data.outcome.followup_lookups, 0)
+})
+
+test('nit a: a rejected or failed batch, or observation lookups in a later wake of the step, make it needed', async () => {
+  // A rejected admission.
+  const rejected = await multiBatchWorld([plannerSlice(), executorStep(), executorStep(), plannerNextSlice()])
+  await rejected.agent.writeTraceEvent('operations.preflight_rejected', { reason: 'exact target stale' })
+  await rejected.settle()
+  const first = rejected.rows('jev.judgment_scored').find(row => row.data.family === 'c4_next_step')
+  assert.equal(first.data.agreed, false)
+  assert.equal(first.data.outcome.had_failure_boundary, true)
+  // Lookups in the next wake of the same unfinished step.
+  const looked = await multiBatchWorld([plannerSlice(), executorStep(), observation(), executorStep(), plannerNextSlice()])
+  await looked.agent.completed() // partial: the gate continues the step with a new wake, which looks something up
+  const second = looked.rows('jev.judgment_scored').find(row => row.data.family === 'c4_next_step')
+  assert.equal(second.data.agreed, false)
+  assert.equal(second.data.outcome.followup_lookups, 1)
+  assert.equal(second.data.outcome.observation_needed, true)
 })
 
 test('a shadow answer that arrives after the fresh agent already acted (same conversation, window closed) is discarded and traced, never recorded', async () => {
@@ -1744,4 +1780,129 @@ test('advisory observation families: state is read again after the wait, so a pl
   assert.equal(world.rows('context.restage_refused').at(-1).data.reason, 'plan_blocked')
   assert.equal(world.agent.agentContext.handoffId, before, 'the conversation was not swapped')
   assert.match(world.rows('jev.judgment_unscored').at(-1).data.reason, /restage_not_applied: plan_blocked/)
+})
+
+// ---------------------------------------------------------------------------------------------------------------
+// The saving metric: only observation-tool rounds before the first operation, and Jev calls as their own channel
+// ---------------------------------------------------------------------------------------------------------------
+
+// The shape a live provider answers with: the plan arrives as a submitPlan TOOL CALL (has_tool_calls is true on the round
+// that authors operations), not as content.
+const asSubmitPlan = reply => ({ content: 'Working on it.', tool_calls: [{ id: `call_submit_${Math.random().toString(36).slice(2, 8)}`, type: 'function', function: { name: 'submitPlan', arguments: JSON.parse(reply.content) && reply.content } }] })
+
+test('a correct direct judgment (no lookup, first batch clean) has a NON-zero would-have-saved exactly where a saving exists: the gate and planner-shape Jev calls; no LLM rounds or tokens', async () => {
+  const world = harness({ script: [plannerSlice(), executorStep(), plannerNextSlice()], tokens: SLICE_TOKENS })
+  await runSliceWithContractedStep2(world)
+  const scored = world.rows('jev.judgment_scored').find(row => row.data.family === 'c4_next_step')
+  assert.equal(scored.data.agreed, true)
+  assert.deepEqual(scored.data.saving, { jev_calls: 2, rounds: 0, tokens: 0 }, 'the two Jev calls the gate route made; the round that authors operations is not a saving')
+  assert.equal(scored.data.realized, false)
+  assert.equal(scored.data.ledger.would_save.jev_calls, 2)
+  assert.equal(scored.data.ledger.removal_candidate, false)
+  assert.equal(world.rows('c4.wake_measured')[0].data.gate_jev_calls, 2)
+  assert.equal(world.rows('c4.wake_measured')[0].data.observation_rounds, 0)
+})
+
+test('live shape (submitPlan tool calls): the round that authors operations is NOT an observation round; only rounds that called an observation tool before the first operation are counted, with their tokens and number', async () => {
+  // A wake with one observation round and then the submitPlan round.
+  // (the gate's observation budget is wide enough that the observation round does not close the phase before submitPlan)
+  const wide = scriptedJev({ next_step_route: directAnswer, need_nearby_world: { noul: 0.9 }, need_entity_status: { noul: 0.9 }, need_inventory_equipment: { noul: 0.9 } })
+  const looked = harness({ script: [plannerSlice(), observation(), asSubmitPlan(executorStep()), plannerNextSlice()], jev: wide, tokens: SLICE_TOKENS })
+  await runSliceWithContractedStep2(looked)
+  const wake = looked.rows('c4.wake_measured')[0].data
+  assert.equal(wake.rounds, 2)
+  assert.equal(wake.observation_rounds, 1, 'the submitPlan round is not one')
+  assert.equal(wake.observation_round_tokens, 2000 + 450, 'only the observation round: not the operation round')
+  assert.equal(wake.wake_tokens, (2000 + 450) + (3000 + 450))
+
+  // A wake that only submits the plan: no observation round at all, so nothing is claimed for LLM rounds or tokens.
+  const direct = harness({ script: [plannerSlice(), asSubmitPlan(executorStep()), plannerNextSlice()], tokens: SLICE_TOKENS })
+  await runSliceWithContractedStep2(direct)
+  const measured = direct.rows('c4.wake_measured')[0].data
+  assert.equal(measured.rounds, 1)
+  assert.equal(measured.observation_rounds, 0, 'a tool-call reply that is submitPlan is the round that authors operations')
+  assert.equal(measured.observation_round_tokens, 0)
+  const scored = direct.rows('jev.judgment_scored').find(row => row.data.family === 'c4_next_step')
+  assert.equal(scored.data.agreed, true)
+  assert.equal(scored.data.saving.rounds, 0)
+  assert.equal(scored.data.saving.tokens, 0, 'the operation round is not counted as saved')
+  assert.equal(scored.data.saving.jev_calls, 2)
+})
+
+test('observation rounds after the first admitted operation are not counted', async () => {
+  const world = harness({ script: [plannerSlice(), asSubmitPlan(executorStep()), plannerNextSlice()], tokens: SLICE_TOKENS })
+  await world.say()
+  contractSecondStep(world)
+  world.give('iron-ore')
+  await world.agent.completed()
+  const tracker = [...world.agent.jev.trackers.values()].find(item => item.kind === 'c4')
+  // A lookup round that happens after operations were admitted (a later turn) is not part of the wake's measurement.
+  world.agent.jev.observe('provider.response', { usage: { input_units: 10, output_units: 1 } }, 'req')
+  world.agent.jev.observe('tool.call', { name: 'getNearbyEntities' }, 'req')
+  assert.equal(tracker.measured.observation_rounds, 0)
+})
+
+test('the removal flag does not fire by construction: 30 correct direct judgments that saved the gate calls are not flagged, while a family that really saved nothing is', () => {
+  let saving = emptyLedger()
+  for (let index = 0; index < 30; index++) {
+    const recorded = recordJudgment(saving, { family: 'c4_next_step', request_id: 'req_r', jev_choice: 'direct_to_executor' })
+    saving = scoreJudgment(recorded.ledger, recorded.judgment.judgment_id, { agreed: true, saving: { jev_calls: 2, rounds: 0, tokens: 0 }, outcome: {} }).ledger
+  }
+  const summary = summarizeLedger(saving).find(family => family.family === 'c4_next_step')
+  assert.equal(summary.scored, 30)
+  assert.deepEqual(summary.would_save, { wakes: 0, rounds: 0, tokens: 0, calls: 0, jev_calls: 60 })
+  assert.equal(summary.removal_candidate, false)
+  let barren = emptyLedger()
+  for (let index = 0; index < 30; index++) {
+    const recorded = recordJudgment(barren, { family: 'c4_next_step', request_id: 'req_r', jev_choice: 'direct_to_executor' })
+    barren = scoreJudgment(recorded.ledger, recorded.judgment.judgment_id, { agreed: true, saving: { jev_calls: 0, rounds: 0, tokens: 0 }, outcome: {} }).ledger
+  }
+  assert.equal(summarizeLedger(barren).find(family => family.family === 'c4_next_step').removal_candidate, true, 'only when the correctly defined saving is really zero')
+})
+
+// ---------------------------------------------------------------------------------------------------------------
+// Nits b and c
+// ---------------------------------------------------------------------------------------------------------------
+
+class CountingFollowFactorio extends FakeFactorio {
+  async command(text) {
+    if (text.includes('remote.call("autorio_follow","status")')) this.followReads = (this.followReads ?? 0) + 1
+    return super.command(text)
+  }
+}
+
+test('nit b: the runtime is inspected once per step close; the post-step gate takes C4\'s inspection instead of reading again', async () => {
+  const run = async (agentOptions) => {
+    const world = harness({ script: [plannerSlice(), observation(), executorStep(), plannerNextSlice()], tokens: SLICE_TOKENS, game: new CountingFollowFactorio(), agentOptions })
+    await world.say()
+    contractSecondStep(world)
+    world.give('iron-ore')
+    const before = world.game.followReads ?? 0
+    await world.agent.completed()
+    return (world.game.followReads ?? 0) - before
+  }
+  const off = await run({ jevCheckpoints: false })
+  const on = await run({})
+  assert.ok(off >= 1)
+  assert.equal(on, off, 'no extra RCON read before the gate')
+})
+
+test('nit c: the reducer is read again after the advisory wait even when the caller passed its own state: a blocked plan refuses, and a plan that is no longer the one the caller settled means the state moved on', async () => {
+  for (const [label, mutate, expected] of [
+    ['blocked', (world) => { const next = structuredClone(world.memory.planningState(KEY)); getActivePlan(next).status = PLAN_STATUS.BLOCKED; world.memory.planningByNpc.set(KEY, next) }, 'plan_blocked'],
+    ['another plan', (world) => { const next = structuredClone(world.memory.planningState(KEY)); next.active_plan_id = 'plan_someone_else'; world.memory.planningByNpc.set(KEY, next) }, 'state_moved_on_during_jev_wait'],
+  ]) {
+    let world
+    const jev = scriptedJev({ next_step_route: directAnswer }, { onCall: (state) => { if (state?.contract === 'restage_observation_families' && world?.armed) mutate(world) } })
+    world = harness({ script: [plannerSlice(), executorStep(), plannerNextSlice()], jev, tokens: SLICE_TOKENS })
+    await world.say()
+    forceStage(world, 'observation_families', 'advisory')
+    const before = world.agent.agentContext.handoffId
+    world.armed = true
+    const result = await world.agent.restageBetweenTurns({ checkpoint: 'C8', role: 'executor', reason: 'test', actor: world.agent.epoch, planningState: world.memory.planningState(KEY) })
+    assert.equal(result.restaged, false, label)
+    assert.equal(result.reason, expected, label)
+    assert.equal(world.agent.agentContext.handoffId, before, `${label}: the conversation was not swapped`)
+    assert.match(world.rows('jev.judgment_unscored').at(-1).data.reason, new RegExp(`restage_not_applied: ${expected}`))
+  }
 })

@@ -2813,14 +2813,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         const needsAnswer = this.jev.stage('observation_families') !== 'shadow'
         if (!needsAnswer || !this.restageGuardRefusal(safePoint)) {
           prepared = await this.jev.prepareRestage({ checkpoint, role, planningState: state, reason: args.reason, requestId })
-          if (needsAnswer && !args.planningState) {
-            state = this.memory.planningState?.(this.activePlanKey()) ?? state
-            refusal = stateRefusal(state)
+          if (needsAnswer) {
+            // The reducer is read again after the wait, for a caller-supplied state too (the slice-close wake passes the state it
+            // settled): a goal that stopped being active or a plan that became BLOCKED refuses the restage, and a plan that is no
+            // longer the one the caller settled means the state moved on. The caller's state is kept only while the plan is the same.
+            const fresh = this.memory.planningState?.(this.activePlanKey()) ?? state
+            refusal = stateRefusal(fresh)
+            if (!refusal && args.planningState && (fresh.active_plan_id ?? null) !== (args.planningState.active_plan_id ?? null)) refusal = 'state_moved_on_during_jev_wait'
             if (refusal) {
               await this.jev.afterRestage(prepared, { restaged: false, reason: refusal })
               await this.traceEvent('context.restage_refused', { role, checkpoint, reason: refusal }, { requestId })
               return { restaged: false, reason: refusal }
             }
+            if (!args.planningState) state = fresh
           }
         }
       }
@@ -5257,10 +5262,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return { persistentRuntime, autorioStatus, autorioRuntimeHealthy, persistentControllerHealthy, conditionValidation, conditionWaitHealthy, runtimeHealthy, runtimeReason }
   }
 
-  async routePostStepDecision(receipt, { boundary = 'completion', failure = '' } = {}) {
+  // `inspected`: the runtime inspection C4 already made for this very receipt (one read per step close).
+  async routePostStepDecision(receipt, { boundary = 'completion', failure = '', inspected: shared } = {}) {
     const generation = this.generation
     const current = await this.assertCurrent()
-    const inspected = await this.inspectAuthoritativeRuntime(receipt)
+    const inspected = shared ?? await this.inspectAuthoritativeRuntime(receipt)
     const { persistentRuntime, autorioStatus, autorioRuntimeHealthy, persistentControllerHealthy } = inspected
     const planState = this.memory.planByNpc?.get?.(this.activePlanKey()) ?? this.memory.currentPlan?.(this.activePlanKey())
     let { conditionValidation, conditionWaitHealthy, runtimeHealthy, runtimeReason } = inspected
@@ -7202,8 +7208,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       ? { verified: false, reason: 'pending_amendment' }
       : await this.routeStepCompletionDecision(receipt)
     if (stepCompletion?.paused) return this.pauseForPlanBoardDisagreement(stepCompletion.disagreement)
-    // U11: a judged step whose first batch completed without the gate closing it did not verify on its first batch.
-    await this.jev.onCompletionBoundary(stepCompletion)
+
     // The reason a step did not close used to be trace-only: the model saw a
     // finished batch and nothing about why the step stayed open.
     const stepOpenHint = stepCompletion?.reason === 'semantic_completion_requires_planner'
@@ -7225,8 +7230,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     else {
       routed = pendingAmendment
         ? { route: 'fallback_planner', decision_called: false }
-        : await this.routePostStepDecision(receipt)
-      if (c4) await this.jev.noteGateRoute(c4, routed.route)
+        : await this.routePostStepDecision(receipt, { inspected: this.jev.takeRuntimeInspection(receipt) })
+      // The Jev decision calls the gate really made here (the gate call, and the planner-shape call when it woke): what a direct
+      // route would not have made. Not LLM wakes.
+      if (c4) await this.jev.noteGateRoute(c4, routed.route, routed.decision_called === true ? (routed.steering?.typed_state_mode ? 2 : 1) : 0)
     }
     if (routed.route === 'wait_runtime') {
       if (c4) await this.jev.discardHandle(c4, 'gate_waits_for_active_runtime')
