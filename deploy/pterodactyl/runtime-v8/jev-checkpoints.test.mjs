@@ -1182,3 +1182,17 @@ test('cancelling a request aborts an in-flight U11 Jev call and abandons the jud
   assert.equal(summarizeLedger(second.ledger()).find(family => family.family === 'c4_next_step').scored, 0)
   assert.equal(summarizeLedger(second.ledger()).find(family => family.family === 'c4_next_step').unscored, 1)
 })
+
+test('a step that verified while the wake was still running is scored the moment the wake ends', async () => {
+  const world = harness({ script: [plannerSlice()] })
+  await world.say()
+  const jev = world.agent.jev
+  const judgment = await jev.record({ family: 'c4_next_step', request_id: 'req_w', step_id: 'step_x', plan_id: 'plan_x', jev_choice: 'direct_to_executor', jev_confidence: 0.9, alternative: { kind: 'test' }, reason: 'test' })
+  jev.track({ kind: 'c4', judgment_id: judgment.judgment_id, request_id: 'req_w', plan_id: 'plan_x', step_id: 'step_x', choice: 'direct_to_executor', acted: false, baseline_tokens: 0, had_failure: false, verified: true })
+  jev.beginWake({ judgment_id: judgment.judgment_id })
+  assert.equal(world.rows('jev.judgment_scored').length, 0, 'not scoreable before the wake is measured')
+  await jev.endWake({ judgment_id: judgment.judgment_id })
+  const [scored] = world.rows('jev.judgment_scored')
+  assert.equal(scored.data.judgment_id, judgment.judgment_id)
+  assert.equal(scored.data.agreed, true)
+})

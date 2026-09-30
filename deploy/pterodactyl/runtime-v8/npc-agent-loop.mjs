@@ -7216,7 +7216,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return result
     }
     finally {
-      await this.jev.endWake(c4, { error: wakeFailed }) // U11: what the wake that ran cost and did (scored when the step verifies)
+      // U11: what the wake that ran cost and did (scored when the step verifies). Never masks the wake's own result.
+      try { await this.jev.endWake(c4, { error: wakeFailed }) }
+      catch (error) { this.log(`[jev] wake measurement failed: ${error instanceof Error ? error.message : String(error)}`) }
       this.reasoningTriggerSource = null
       this.reasoningBudgetOverride = previousReasoningBudget
       this.observationBudgetOverride = previousObservationBudget
