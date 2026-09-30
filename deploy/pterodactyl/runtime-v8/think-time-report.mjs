@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { parseJsonl } from './debug-report.mjs'
 import { buildPrefixReport, formatPrefixReport } from './prefix-report.mjs'
 import { responsivenessByRequest } from './responsiveness.mjs'
-import { DELEGATION_TRACE_ROWS } from './run-check.mjs'
+import { DELEGATION_TRACE_ROWS, JEV_TRACE_ROWS } from './run-check.mjs'
 
 // Groups the prompt trace (provider.request / provider.response /
 // provider.response_error) into per-round latency and reasoning-policy
@@ -339,6 +339,7 @@ export function buildRunRecord(behaviorRows, { prices } = {}) {
   const goalWarnings = []
   const restages = []
   let staleRepliesDropped = 0
+  const jevTally = newJevTally()
 
   // Role and handoff id are the delegation trace fields (DELEGATION_TRACE_ROWS
   // in run-check.mjs). Rows from before delegation carry neither, so a request
@@ -429,6 +430,7 @@ export function buildRunRecord(behaviorRows, { prices } = {}) {
       })
     }
     if (event === DELEGATION_TRACE_ROWS.events.staleReplyDropped) staleRepliesDropped++
+    observeJevRow(jevTally, event, data, id)
     if (event === 'tool.call') {
       if (request.last_round) request.last_round.tools++
       if (data.cached === true) duplicateToolCalls.count++
@@ -606,7 +608,125 @@ export function buildRunRecord(behaviorRows, { prices } = {}) {
   }
   const restageSummary = summarizeRestages(restages, staleRepliesDropped)
   if (restageSummary) record.restages = restageSummary
+  // Jev at the delegation checkpoints (U11): only present when the trace carries judgment rows.
+  const jevSummary = summarizeJev(jevTally, record.totals)
+  if (jevSummary) record.jev = jevSummary
   return record
+}
+
+// --- Jev judgments (U11) ---------------------------------------------------------------------------------
+// Everything here is read from the judgment rows (JEV_TRACE_ROWS in run-check.mjs). The success metric the owner
+// asked for is LLM input + output tokens and wakes saved per run: "saved" is what a judgment that ACTED really
+// saved (deciding stage); "would_save" is what shadow and advisory judgments would have saved (their figures are
+// an upper bound: the work they did not skip really ran).
+
+const JEV_FAMILIES = ['c4_next_step', 'observation_families', 'shelf_ranking', 'skill_order']
+
+function emptyJevSaving() {
+  return { wakes: 0, tokens: 0, calls: 0 }
+}
+
+function newJevTally() {
+  const families = new Map()
+  const family = (name) => {
+    if (!families.has(name)) {
+      families.set(name, { family: name, recorded: 0, acted: 0, scored: 0, agreed: 0, unscored: 0, promotions: 0, demotions: 0, stage: undefined, earned_stage: undefined, would_save: emptyJevSaving(), saved: emptyJevSaving(), ledger: undefined })
+    }
+    return families.get(name)
+  }
+  return { family, families, stageChanges: [], skipped: {}, c4: { wakes_measured: 0, deciding_routes: 0, shadow_routes: 0 }, any: false }
+}
+
+function observeJevRow(tally, event, data, requestId) {
+  const events = JEV_TRACE_ROWS.events
+  if (event === events.recorded) {
+    tally.any = true
+    const family = tally.family(safeText(data.family) ?? 'unknown')
+    family.recorded++
+    if (data.acted === true) family.acted++
+    family.stage = safeText(data.stage) ?? family.stage
+  }
+  else if (event === events.scored) {
+    tally.any = true
+    const family = tally.family(safeText(data.family) ?? 'unknown')
+    family.scored++
+    if (data.agreed === true) family.agreed++
+    family.stage = safeText(data.stage) ?? family.stage
+    family.earned_stage = safeText(data.earned_stage) ?? family.earned_stage
+    if (data.ledger && typeof data.ledger === 'object') family.ledger = data.ledger
+    const saving = data.saving && typeof data.saving === 'object' ? data.saving : undefined
+    if (saving && data.agreed === true) {
+      const target = data.realized === true ? family.saved : family.would_save
+      for (const channel of ['wakes', 'tokens', 'calls']) target[channel] += safeInteger(saving[channel]) ?? 0
+    }
+  }
+  else if (event === events.stageChanged) {
+    tally.any = true
+    const family = tally.family(safeText(data.family) ?? 'unknown')
+    if (data.direction === 'promoted') family.promotions++
+    else if (data.direction === 'demoted') family.demotions++
+    family.stage = safeText(data.effective_to) ?? family.stage
+    tally.stageChanges.push({ request_id: requestId, family: family.family, direction: safeText(data.direction), from: safeText(data.from), to: safeText(data.to), reason: safeText(data.reason) })
+  }
+  else if (event === events.unscored) {
+    tally.any = true
+    tally.family(safeText(data.family) ?? 'unknown').unscored++
+  }
+  else if (event === events.skipped) {
+    tally.any = true
+    const reason = safeText(data.reason) ?? 'unknown'
+    tally.skipped[reason] = (tally.skipped[reason] ?? 0) + 1
+  }
+  else if (event === events.c4Wake) {
+    tally.any = true
+    tally.c4.wakes_measured++
+  }
+  else if (event === events.c4Route) {
+    tally.any = true
+    if (data.mode === 'deciding') tally.c4.deciding_routes++
+    else tally.c4.shadow_routes++
+  }
+}
+
+function summarizeJev(tally, totals) {
+  if (!tally.any) return undefined
+  const order = name => (JEV_FAMILIES.includes(name) ? JEV_FAMILIES.indexOf(name) : JEV_FAMILIES.length)
+  const byFamily = [...tally.families.values()]
+    .sort((a, b) => order(a.family) - order(b.family) || (a.family < b.family ? -1 : 1))
+    .map(family => ({
+      family: family.family,
+      stage: family.stage ?? 'shadow',
+      earned_stage: family.earned_stage,
+      recorded: family.recorded,
+      acted: family.acted,
+      scored: family.scored,
+      agreed: family.agreed,
+      agreement: family.scored > 0 ? Math.round(family.agreed / family.scored * 1000) / 1000 : undefined,
+      unscored: family.unscored,
+      promotions: family.promotions,
+      demotions: family.demotions,
+      would_save: family.would_save,
+      saved: family.saved,
+      ...(family.ledger ? { ledger: family.ledger } : {}),
+      removal_candidate: family.ledger?.removal_candidate === true,
+    }))
+  const sumSaving = (pick) => {
+    const total = emptyJevSaving()
+    for (const family of tally.families.values()) for (const channel of ['wakes', 'tokens', 'calls']) total[channel] += pick(family)[channel]
+    return total
+  }
+  const saved = sumSaving(family => family.saved)
+  const wouldSave = sumSaving(family => family.would_save)
+  return {
+    by_family: byFamily,
+    stage_changes: tally.stageChanges,
+    skipped: tally.skipped,
+    c4: { ...tally.c4 },
+    // The success metric: LLM tokens and wakes saved per run (next to what the run spent).
+    savings: { saved, would_save: wouldSave },
+    llm: { input_units: totals.input_units, output_units: totals.output_units, provider_calls: totals.rounds },
+    removal_candidates: byFamily.filter(family => family.removal_candidate).map(family => family.family),
+  }
 }
 
 function tally(values) {
@@ -723,6 +843,18 @@ export function formatRunRecord(record) {
     lines.push(`- restages: ${restaged.count} · by checkpoint: ${list(restaged.by_checkpoint)} · by role: ${list(restaged.by_role)} · stale replies dropped: ${restaged.stale_replies_dropped}`)
     lines.push(`- packet ${size(restaged.packet_chars, 'chars')}`)
     lines.push(`- packet ${size(restaged.packet_estimated_tokens, 'est. tokens')}`)
+  }
+  const jev = record.jev
+  if (jev) {
+    const saving = value => `${value.wakes} wakes, ${thousands(value.tokens)} tokens, ${value.calls} calls`
+    lines.push('', 'Jev judgments at the delegation checkpoints (U11):')
+    for (const row of jev.by_family) {
+      lines.push(`- ${row.family}: stage ${row.stage}${row.earned_stage && row.earned_stage !== row.stage ? ` (earned ${row.earned_stage}, capped)` : ''} · ${row.recorded} judged, ${row.scored} scored, ${row.agreed} agreed (${percent(row.agreement)}), ${row.unscored} unscored · promoted ${row.promotions}, demoted ${row.demotions} · saved ${saving(row.saved)} · would have saved ${saving(row.would_save)}${row.removal_candidate ? ' · FLAGGED FOR REMOVAL: no measured saving (the owner decides)' : ''}`)
+    }
+    lines.push(`- saved this run: ${saving(jev.savings.saved)} (LLM spend: ${thousands(jev.llm.input_units)} in, ${thousands(jev.llm.output_units)} out, ${jev.llm.provider_calls} calls) · would have saved: ${saving(jev.savings.would_save)}`)
+    for (const change of jev.stage_changes) lines.push(`- stage change: ${change.family} ${change.direction} ${change.from} -> ${change.to} (${change.request_id ?? 'no request'}): ${change.reason ?? ''}`)
+    const skipped = Object.entries(jev.skipped)
+    if (skipped.length > 0) lines.push(`- judgments skipped (never counted as agreement): ${skipped.map(([reason, count]) => `${reason} ${count}`).join(', ')}`)
   }
   const v = record.verbosity
   lines.push('', 'Chat verbosity:')
