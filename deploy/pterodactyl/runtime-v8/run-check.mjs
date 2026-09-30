@@ -2,6 +2,9 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { parseJsonl } from './debug-report.mjs'
+import { HANDOFF_PACKET_LIMITS } from './handoff-packet.mjs'
+import { CONTEXT_RESTAGE_CHECKPOINTS, CONTEXT_RESTAGE_ROLES } from './planning-state.mjs'
+import { estimateTokensFromChars } from './restage-policy.mjs'
 
 // Scans a sgluna-behavior.jsonl trace for known failure signatures and lists
 // them per request_id with a count and first-seen timestamp. This never
@@ -53,7 +56,101 @@ import { parseJsonl } from './debug-report.mjs'
 //   ("leave Plan Tracker one step behind"); the check re-detects it if it
 //   ever comes back.
 
+// - restage_loop, restage_packet_oversize, stale_reply_not_dropped: delegation
+//   (plan item U9, design note NPC_DELEGATION_DESIGN_2026-09-29.md sections 4
+//   and 10). They read the trace rows the restage emitter (U4) is expected to
+//   write; see DELEGATION_TRACE_ROWS below for the exact shapes. Nothing emits
+//   them yet, so on every current trace these three signatures find nothing.
+
 const LOOP_MIN_COUNT = 2
+
+/**
+ * Trace rows the delegation emitter (U4) must write so run-check and the run
+ * record (think-time-report.mjs) can read them. `row` is the envelope every
+ * behavior row already has: { schema, ts, seq, event, request_id, turn,
+ * actor_id, epoch, data }. A row without a request_id is ignored by every
+ * detector here, like every other detector in this file.
+ *
+ * - `context.restaged`: one row per restage, written when the fresh
+ *   conversation is created. `role`/`checkpoint` are the reducer's
+ *   (CONTEXT_RESTAGE_ROLES / CONTEXT_RESTAGE_CHECKPOINTS). `handoff_id`,
+ *   `packet_hash`, `packet_chars` come straight from buildHandoffPacket().
+ *   `packet_estimated_tokens` is the packet's estimated_tokens.
+ *   `plan_id`/`step_id` are the active plan and step at the restage (step_id
+ *   may be absent when no step is active). `soft_limit_tokens` is the optional
+ *   restage-policy soft limit that applied to this role.
+ * - `provider.request`, `provider.response`, `provider.error` (existing
+ *   events): gain `data.role` and `data.handoff_id` naming the conversation
+ *   that issued the round. Both fields, or neither (today's rows).
+ * - `context.stale_reply_dropped`: written when a reply from a discarded
+ *   conversation (handoff_id no longer active for its role, or actor epoch
+ *   changed) is dropped instead of applied. `handoff_id` and `role` are the
+ *   stale reply's; `active_handoff_id` is the current one for that role.
+ *   It may be written before or after the stale provider.response row, but in
+ *   the same request_id.
+ * - Step progress rows that reset the restage-loop count are the existing
+ *   `step.verified` and `step.semantic_completed`.
+ */
+export const DELEGATION_TRACE_ROWS = Object.freeze({
+  events: Object.freeze({
+    restaged: 'context.restaged',
+    staleReplyDropped: 'context.stale_reply_dropped',
+    replyEvents: Object.freeze(['provider.response', 'provider.error']),
+    progressEvents: Object.freeze(['step.verified', 'step.semantic_completed']),
+  }),
+  examples: Object.freeze({
+    restaged: Object.freeze({
+      event: 'context.restaged',
+      request_id: 'req_x_1',
+      data: Object.freeze({
+        role: 'executor',
+        checkpoint: 'C3',
+        handoff_id: 'ho_0123456789ab',
+        packet_hash: '9f2c41d07a3be518',
+        packet_chars: 3412,
+        packet_estimated_tokens: 853,
+        previous_context_chars: 88120,
+        reason: 'executor_fresh_at_plan_commit',
+        plan_id: 'plan_1',
+        step_id: 'step_1',
+        soft_limit_tokens: 100000,
+      }),
+    }),
+    providerReply: Object.freeze({
+      event: 'provider.response',
+      request_id: 'req_x_1',
+      data: Object.freeze({ role: 'executor', handoff_id: 'ho_0123456789ab' }),
+    }),
+    staleReplyDropped: Object.freeze({
+      event: 'context.stale_reply_dropped',
+      request_id: 'req_x_1',
+      data: Object.freeze({ role: 'executor', handoff_id: 'ho_stale00000ab', active_handoff_id: 'ho_0123456789ab', reason: 'handoff_superseded' }),
+    }),
+  }),
+})
+
+/**
+ * Restage loop: this many `context.restaged` rows for the same role, plan and
+ * step with no step.verified / step.semantic_completed between them. Three,
+ * not two: C5 legitimately restages the same step once after a generation-cap
+ * pause and a Resume can add one more; a third with nothing verified is a loop.
+ */
+export const RESTAGE_LOOP_MIN_COUNT = 3
+
+/**
+ * Oversize packet. restage-policy.mjs exports the size counter helpers but no
+ * default soft limit (the limit is a parameter of decideRestage), and it
+ * measures context growth in provider tokens while the packet reports
+ * characters. So a packet is oversize when either (a) its characters exceed
+ * HANDOFF_PACKET_LIMITS.maxChars (the builder's own bound; mandatory records
+ * alone can push past it), or (b) the row names the role's `soft_limit_tokens`
+ * and the packet's tokens exceed it, where packet tokens are
+ * `packet_estimated_tokens`, else estimateTokensFromChars(packet_chars) (the
+ * same ceil(chars / 4) the size counter uses). A packet larger than the soft
+ * limit makes the fresh conversation start over the limit and restage again at
+ * the next boundary.
+ */
+export const PACKET_OVERSIZE_MAX_CHARS = HANDOFF_PACKET_LIMITS.maxChars
 
 function safeInteger(value) {
   return Number.isSafeInteger(value) ? value : undefined
@@ -287,6 +384,121 @@ function detectStaleStepTrackerBehindBatch(rows) {
   }
 }
 
+// --- delegation detectors (U9) -----------------------------------------------
+
+function finiteNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function isRestageRow(row) {
+  return row?.event === DELEGATION_TRACE_ROWS.events.restaged
+    && CONTEXT_RESTAGE_ROLES.includes(row?.data?.role)
+    && CONTEXT_RESTAGE_CHECKPOINTS.includes(row?.data?.checkpoint)
+}
+
+function detectOversizePacket(rows) {
+  const over = []
+  for (const row of rows) {
+    if (!isRestageRow(row)) continue
+    const chars = finiteNumber(row.data.packet_chars)
+    const tokens = finiteNumber(row.data.packet_estimated_tokens) ?? (chars !== undefined ? estimateTokensFromChars(chars) : undefined)
+    const softLimit = finiteNumber(row.data.soft_limit_tokens)
+    if (chars !== undefined && chars > PACKET_OVERSIZE_MAX_CHARS) {
+      over.push({ row, why: `${chars} chars > ${PACKET_OVERSIZE_MAX_CHARS} char packet limit` })
+    }
+    else if (tokens !== undefined && softLimit !== undefined && softLimit > 0 && tokens > softLimit) {
+      over.push({ row, why: `~${tokens} tokens > ${softLimit} token soft limit` })
+    }
+  }
+  if (over.length === 0) return undefined
+  const first = over[0].row.data
+  return {
+    count: over.length,
+    first_ts: firstTsOf(over.map(item => item.row)),
+    detail: `${first.role} ${first.checkpoint} packet ${first.handoff_id ?? '(no handoff_id)'}: ${over[0].why}${over.length > 1 ? ` (+${over.length - 1} more)` : ''}`,
+  }
+}
+
+// Trace-scoped detectors see every request at once: a restage loop and a
+// stale reply both cross request boundaries (a plan step outlives a request;
+// a discarded conversation's reply can land in the next one). They return an
+// array of findings, each carrying its own request_id.
+
+function detectRestageLoops(rows) {
+  const progress = new Set(DELEGATION_TRACE_ROWS.events.progressEvents)
+  const runs = new Map()
+  const findings = []
+  const flush = () => {
+    for (const run of runs.values()) {
+      if (run.count < RESTAGE_LOOP_MIN_COUNT) continue
+      findings.push({
+        request_id: run.request_id,
+        count: run.count,
+        first_ts: run.first_ts,
+        detail: `${run.role} restaged ${run.count} times for plan ${run.plan_id || '(none)'} step ${run.step_id || '(none)'} with no step verified in between (checkpoints ${run.checkpoints.join(',')}; loop threshold ${RESTAGE_LOOP_MIN_COUNT})`,
+      })
+    }
+    runs.clear()
+  }
+  for (const row of rows) {
+    if (progress.has(row?.event)) {
+      flush()
+      continue
+    }
+    if (!isRestageRow(row)) continue
+    const { role, plan_id: planId, step_id: stepId, checkpoint } = row.data
+    const key = `${role}|${planId ?? ''}|${stepId ?? ''}`
+    const run = runs.get(key) ?? { request_id: row.request_id, first_ts: nonEmptyString(row.ts), role, plan_id: planId, step_id: stepId, count: 0, checkpoints: [] }
+    run.count++
+    run.checkpoints.push(checkpoint)
+    runs.set(key, run)
+  }
+  flush()
+  return findings
+}
+
+// `all` is every request-bearing row (the active handoff per role is state
+// carried across the whole trace); `inScope` is the subset a `since` cutoff
+// keeps. A reply is stale when its role already has a restage on record and
+// the reply's handoff_id is not the latest one. It is fine only when a
+// context.stale_reply_dropped row in the same request names that handoff_id
+// and role. A role with no restage yet, or a reply carrying no role or
+// handoff_id (today's rows), is never judged.
+function detectStaleRepliesNotDropped(all, inScope) {
+  const events = DELEGATION_TRACE_ROWS.events
+  const inScopeSet = new Set(inScope)
+  const dropped = new Set()
+  for (const row of all) {
+    if (row?.event === events.staleReplyDropped) dropped.add(`${row.request_id}|${row.data?.role}|${row.data?.handoff_id}`)
+  }
+  const active = new Map()
+  const stale = []
+  for (const row of all) {
+    if (isRestageRow(row)) {
+      if (nonEmptyString(row.data.handoff_id)) active.set(row.data.role, row.data.handoff_id)
+      continue
+    }
+    if (!events.replyEvents.includes(row?.event)) continue
+    const role = row.data?.role
+    const handoffId = nonEmptyString(row.data?.handoff_id)
+    const current = active.get(role)
+    if (!handoffId || !current || handoffId === current) continue
+    if (dropped.has(`${row.request_id}|${role}|${handoffId}`)) continue
+    if (inScopeSet.has(row)) stale.push({ row, role, handoffId, current })
+  }
+  const byRequest = new Map()
+  for (const item of stale) {
+    if (!byRequest.has(item.row.request_id)) byRequest.set(item.row.request_id, [])
+    byRequest.get(item.row.request_id).push(item)
+  }
+  return [...byRequest.entries()].map(([requestId, items]) => ({
+    request_id: requestId,
+    count: items.length,
+    first_ts: firstTsOf(items.map(item => item.row)),
+    detail: `${items[0].role} reply ${items[0].row.event} carries handoff_id=${items[0].handoffId} but the active ${items[0].role} handoff is ${items[0].current}, and no ${DELEGATION_TRACE_ROWS.events.staleReplyDropped} row followed`,
+  }))
+}
+
 const SIGNATURES = [
   {
     id: 'observation_phase_closed_loop',
@@ -328,6 +540,25 @@ const SIGNATURES = [
     label: 'stale step (tracker behind the batch)',
     detect: detectStaleStepTrackerBehindBatch,
   },
+  {
+    id: 'restage_packet_oversize',
+    label: 'restage packet over the size limit',
+    detect: detectOversizePacket,
+  },
+]
+
+// Trace-scoped signatures (see the delegation detectors above).
+const TRACE_SIGNATURES = [
+  {
+    id: 'restage_loop',
+    label: 'restage loop (no step progress)',
+    detect: (all, inScope) => detectRestageLoops(inScope),
+  },
+  {
+    id: 'stale_reply_not_dropped',
+    label: 'stale reply from a discarded conversation was not dropped',
+    detect: detectStaleRepliesNotDropped,
+  },
 ]
 
 export function analyzeBehaviorTrace(rows, { since } = {}) {
@@ -348,6 +579,21 @@ export function analyzeBehaviorTrace(rows, { since } = {}) {
         signature: signature.id,
         label: signature.label,
         request_id: requestId,
+        count: finding.count,
+        first_ts: finding.first_ts,
+        detail: finding.detail,
+      })
+    }
+  }
+  const withRequest = row => nonEmptyString(row?.request_id) !== undefined
+  const allWithRequest = sorted.filter(withRequest)
+  const scopedWithRequest = scoped.filter(withRequest)
+  for (const signature of TRACE_SIGNATURES) {
+    for (const finding of signature.detect(allWithRequest, scopedWithRequest)) {
+      findings.push({
+        signature: signature.id,
+        label: signature.label,
+        request_id: finding.request_id,
         count: finding.count,
         first_ts: finding.first_ts,
         detail: finding.detail,
