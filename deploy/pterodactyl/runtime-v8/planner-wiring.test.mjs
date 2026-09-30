@@ -611,6 +611,78 @@ test('a restaged planner lineage restages again at a later slice close and never
   assert.equal(getContextRestages(world.memory.planningState(KEY)).length, 2)
 })
 
+// --- the two restage helpers ---
+
+test('buildRestagePacket takes shelf candidates and a planning-state override; the helpers accept a prebuilt packet or builder args and default the request id', async () => {
+  const world = plannerHarness({ softLimit: 1_000_000 })
+  await world.say()
+  const state = world.memory.planningState(KEY)
+  const candidates = shelfRefinementCandidates(state, { limit: 5 })
+  assert.ok(candidates.length > 0)
+  const override = { ...state, goal: { ...state.goal, objective: 'OVERRIDDEN OBJECTIVE' } }
+  const packet = world.agent.buildRestagePacket({ checkpoint: 'C2', role: 'planner', reason: 'r', shelfCandidates: candidates, planningState: override })
+  assert.ok(packet.stableText.includes('OVERRIDDEN OBJECTIVE'), 'the override state was used')
+  assert.ok(packet.volatileText.includes('shelf_candidate 1: '), 'the candidates ride the packet')
+  assert.ok(!world.agent.buildRestagePacket({ checkpoint: 'C2', role: 'planner', reason: 'r' }).volatileText.includes('shelf_candidate'))
+  assert.equal(world.agent.buildRestagePacket({ checkpoint: 'C2', reason: 'r', planningState: { ...state, goal: undefined } }), undefined, 'no goal, no packet')
+
+  // Builder args: the helper builds the packet, and the row carries the open request id by default.
+  const built = await world.agent.restageBetweenTurns({ checkpoint: 'C1', role: 'planner', reason: 'r', shelfCandidates: candidates })
+  assert.equal(built.restaged, true)
+  assert.equal(world.rows('context.restaged').at(-1).request_id, world.agent.traceRequest.id)
+  // A prebuilt packet.
+  const prebuilt = world.agent.buildRestagePacket({ checkpoint: 'C1', role: 'planner', reason: 'r2' })
+  const again = await world.agent.restageInTurn({ checkpoint: 'C1', reason: 'r2', packet: prebuilt })
+  assert.equal(again.restaged, true)
+  assert.equal(again.handoff_id, prebuilt.handoff_id)
+})
+
+test('both restage helpers refuse a BLOCKED plan and a goal that is not active, and trace the refusal', async () => {
+  const world = plannerHarness({ softLimit: 1_000_000 })
+  await world.say()
+  const healthy = world.memory.planningState(KEY)
+  const blocked = { ...healthy, plans: healthy.plans.map(plan => (plan.plan_id === healthy.active_plan_id ? { ...plan, status: PLAN_STATUS.BLOCKED } : plan)) }
+  const cases = [
+    ['plan_blocked', blocked],
+    ['goal_not_active', { ...healthy, goal: { ...healthy.goal, status: GOAL_STATUS.COMPLETED } }],
+    ['goal_not_active', { ...healthy, goal: { ...healthy.goal, status: GOAL_STATUS.CANCELLED } }],
+  ]
+  for (const helper of ['restageInTurn', 'restageBetweenTurns']) {
+    for (const [reason, planningState] of cases) {
+      const result = await world.agent[helper]({ checkpoint: 'C1', role: 'planner', reason: 'r', planningState })
+      assert.deepEqual(result, { restaged: false, reason }, `${helper} ${reason}`)
+    }
+  }
+  assert.equal(world.rows('context.restaged').length, 0)
+  assert.equal(world.rows('context.restage_refused').length, 6)
+  assert.deepEqual([...new Set(world.rows('context.restage_refused').map(row => row.data.reason))].sort(), ['goal_not_active', 'plan_blocked'])
+  // The same helpers restage the healthy state.
+  assert.equal((await world.agent.restageBetweenTurns({ checkpoint: 'C1', role: 'planner', reason: 'r' })).restaged, true)
+})
+
+test('a helper never throws: a packet that does not fit or a failing seam is restage_error, traced, and changes nothing', async () => {
+  const world = plannerHarness({ softLimit: 1_000_000 })
+  await world.say()
+  const messages = world.agent.messages
+  const handoffId = world.agent.agentContext.handoffId
+  // A packet the context rejects (no stable text).
+  const broken = await world.agent.restageBetweenTurns({ checkpoint: 'C1', role: 'planner', reason: 'r', packet: { handoff_id: 'ho_broken', volatileText: 'x' } })
+  assert.deepEqual(broken, { restaged: false, reason: 'restage_error' })
+  // A seam that throws for any reason.
+  const original = world.agent.restageContext.bind(world.agent)
+  world.agent.restageContext = async () => { throw new Error('seam failed') }
+  assert.deepEqual(await world.agent.restageInTurn({ checkpoint: 'C1', role: 'planner', reason: 'r' }), { restaged: false, reason: 'restage_error' })
+  world.agent.restageContext = original
+  const errors = world.rows('context.restage_error')
+  assert.equal(errors.length, 2)
+  assert.match(errors[0].data.message, /stableText/)
+  assert.match(errors[1].data.message, /seam failed/)
+  assert.ok(errors.every(row => row.request_id), 'rows carry the request id')
+  assert.strictEqual(world.agent.messages, messages)
+  assert.equal(world.agent.agentContext.handoffId, handoffId)
+  assert.equal(world.rows('context.restaged').length, 0)
+})
+
 // --- roles ----------------------------------------------------------------------------------
 
 function baseEnv(overrides = {}) {
