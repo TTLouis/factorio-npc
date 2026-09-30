@@ -148,10 +148,36 @@ roadmaps. The UI feedback request is saved for follow-up; layout discussion is d
 
 ## 6. Remaining design choices
 
-- Campaign allowance amount, measurable accounting unit and warning threshold.
-- Exact stagnation/recovery stopping thresholds and task aging bounds.
-- How protected player assets and explicitly reserved supplies are registered and
-  how provenance is preserved when players rebuild or change them.
+### Owner answers, 2026-09-30 evening Q&A
+
+- **Build order.** Finish U11 (review fixes), then MW1 -> MW2 -> MW4 -> MW3 -> MW5,
+  then the flash-only live test (owner still sets its spend cap before it runs), then
+  MW6 with the delegation U10 docs pass folded in.
+- **Allowance unit.** Reported provider tokens, one meter per provider and kind
+  (DeepSeek input, cached input and output; Jev input). No price guessing: a CAD
+  figure is reported beside the meters only when a price table is supplied.
+- **First allowance size.** About 2 CAD equivalent at the 2026-09-29 Flash token mix,
+  converted once into per-meter token limits and recorded with the conversion; a
+  warning chat line at 75%, a visible pause at 100% until explicitly extended.
+- **Player-built structures (MW1).** Use Factorio's per-entity last-user record
+  (`LuaEntity.last_user`, the last player who built or changed the entity): a human
+  `last_user` marks the entity player-built and protected. The NPC is not a `LuaPlayer`,
+  so its own placements are identified by its placement receipts. The engine lane
+  must confirm how `last_user` behaves for script/character placement and for
+  pre-existing map entities before the rule is relied on.
+- **Reserved supplies (MW1).** A chat command (and map tag) marks a container as
+  reserved; its contents are never spent. Player inventories are always excluded;
+  other shared storage stays available by default.
+- **Stagnation (MW2/MW3).** Per task: 3 recovery attempts or 15 game-minutes with no
+  newly verified progress, then preserve the task and ask or pause visibly. The
+  count survives restages, new plan versions and restarts.
+- **C4 route (U11).** Keep the narrow "next step is clear" rule; measure where the
+  observation wakes happen in the first live run before widening it.
+
+### Still open
+
+- Task aging bounds (how long a suspended or blocked task may wait before it is resurfaced).
+- The exact reserve chat-command syntax, and how a reservation is released.
 - Concrete reducer event/schema names and integration with the existing task-board mirror.
 
 Resolve these before the relevant build unit is declared complete. None of them reopens
