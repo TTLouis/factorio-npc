@@ -80,6 +80,7 @@ function plannerHarness({ shelf = true, tokens = call => call * 3000, softLimit,
     interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
     systemPrompt,
     goalDefinitionPolicy: 'required',
+    executorHandoff: false, // U7 tests: the planner conversation alone; the executor has executor-wiring.test.mjs
     stateFile: null,
     traceFile: null,
     decisionTraceFile: null,

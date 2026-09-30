@@ -29,10 +29,10 @@ import {
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { createSave, prepareGameConfig, prepareMods, prepareServerSettings, selectSave } from './game-files.mjs'
 import { resolveAgentRole } from './agent-roles.mjs'
-import { NpcAgentLoop, RESUME_HINT } from './npc-agent-loop.mjs'
+import { CONTINUATION_WORDS, NpcAgentLoop, RESTART_BEFORE_FIRST_PLAN_PAUSE, RESUME_HINT } from './npc-agent-loop.mjs'
 import { evaluateGoalDefinition, formatGoalStatus, formatGoalUnderstanding, formatSliceProgressNote, goalUiView } from './goal-definition.mjs'
 import { formatGoalReadingNote } from './goal-reading.mjs'
-import { getActivePlan, GOAL_STATUS } from './planning-state.mjs'
+import { getActivePlan, GOAL_STATUS, PLAN_STATUS } from './planning-state.mjs'
 import { ACK_EVENT, ResponsivenessTracker } from './responsiveness.mjs'
 import {
   AI_API_METHOD_IDS,
@@ -390,7 +390,7 @@ export function navigationObstaclePolicy(text) {
   const denied = denyPhrases.some(phrase => normalized.includes(phrase))
   if (denied) return { shouldUpdate: true, clearObstacles: false }
 
-  const continuation = ['continue', 'resume', '继续', '继续吧', '继续做', '接着', '接着做']
+  const continuation = CONTINUATION_WORDS
     .some(prefix => normalized === prefix || normalized.startsWith(`${prefix} `) || normalized.startsWith(`${prefix}，`) || normalized.startsWith(`${prefix},`))
   if (continuation) return { shouldUpdate: false, clearObstacles: true }
   return { shouldUpdate: true, clearObstacles: true }
@@ -1253,6 +1253,12 @@ export function liveAgentEvent(event, data = {}) {
       return { phase: 'waiting', detail: `Autorio is running ${data.operation_count ?? 0} operation(s)` }
     case 'request.completed':
       return { phase: 'idle', detail: 'Finished the last request' }
+    case 'executor.slice_wake_deferred':
+      return {
+        phase: 'waiting',
+        detail: `Slice verified; waiting for Resume (planner unavailable: ${uiText(data.reason, 80)})`,
+        activity: { kind: 'blocker', text: `Slice verified but I could not hand the goal back to the planner (${uiText(data.reason, 80)}). Resume to continue.` },
+      }
     case 'factorio.completed_signal':
       // With a durable plan the batch receipt says the same thing with detail, so
       // the snapshot drops this line; without one it is the only record.
@@ -1791,8 +1797,12 @@ export async function pauseStrandedPlanAfterRequestError(session, message) {
 // restage_error means the conversation the loop already built stays, and the
 // helper traces the reason (context.restage_refused / context.restage_error);
 // this function adds runtime.recovery_restage_fallback naming it.
-// TODO(U6/U7): restage as the executor role once it has its own prompt and
-// tool block; today the recovery runs in the role the loop has.
+// The role is the EXECUTOR's when the reducer holds a committed plan (a restart, an actor
+// replacement or a death interrupts the slice that plan is): the fresh actor snapshot
+// carries the new epoch and the executor re-observes and continues the committed step.
+// A plan that is still a draft has not been handed to an executor yet; its recovery keeps
+// the planner's role. No planner conversation is parked: the one this restart rebuilt is
+// only the recovery scaffolding, so the slice close builds a fresh planner from a packet.
 async function restageRecoveryConversation(agent, { reason, recoveryMessage }) {
   if (typeof agent.restageBetweenTurns !== 'function') return { restaged: false, reason: 'agent_cannot_restage' }
   let runtime
@@ -1802,16 +1812,27 @@ async function restageRecoveryConversation(agent, { reason, recoveryMessage }) {
   catch {
     runtime = undefined
   }
+  let role = agent.agentContext?.role ?? 'planner'
+  try {
+    const active = getActivePlan(agent.memory?.planningState?.(`npc:${agent.npcId ?? 'sgluna'}`))
+    if (active && [PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(active.status) && agent.executorHandoffEnabled !== false) role = 'executor'
+  }
+  catch {}
   const result = await agent.restageBetweenTurns({
     checkpoint: 'C7',
-    role: agent.agentContext?.role ?? 'planner',
+    role,
     reason: `recovery:${uiText(reason, 80)}`,
     actor: agent.epoch,
     runtime,
     requestId: agent.traceRequest?.id,
   })
   if (!result.restaged) {
-    await agent.traceEvent?.('runtime.recovery_restage_fallback', { reason: result.reason, recovery_reason: uiText(reason, 80) }, { requestId: agent.traceRequest?.id })
+    // try/await, not a promise chain: a trace writer that throws before it returns a promise
+    // would otherwise abort the recovery instead of leaving it on the conversation it has.
+    try {
+      await agent.traceEvent?.('runtime.recovery_restage_fallback', { reason: result.reason, recovery_reason: uiText(reason, 80) }, { requestId: agent.traceRequest?.id })
+    }
+    catch {}
     return result
   }
   const harness = { role: 'user', content: recoveryMessage }
@@ -1826,6 +1847,16 @@ export function goalInterruptedWithoutPlan(planning) {
   return planning?.goal?.status === GOAL_STATUS.ACTIVE
     && Array.isArray(planning.plans) && planning.plans.length > 0
     && !getActivePlan(planning)
+}
+
+// An active goal admitted but interrupted BEFORE its first plan (nothing ever committed, no
+// plan history) and not already paused: a restart leaves it with no plan to carry, so it is
+// paused visibly instead of stalling in silence.
+export function goalInterruptedBeforeFirstPlan(planning) {
+  return planning?.goal?.status === GOAL_STATUS.ACTIVE
+    && (!Array.isArray(planning.plans) || planning.plans.length === 0)
+    && !getActivePlan(planning)
+    && planning.run?.paused !== true
 }
 
 export async function recoverInterruptedAgentPlan(agent, reason, details = {}) {
@@ -2063,6 +2094,7 @@ export class Session {
   onAgentActivity(event, data) {
     if (event === 'goal.defined') this.announceGoalUnderstanding(data)
     if (event === 'budget.goal_warning') this.announceGoalBudgetWarning(data)
+    if (event === 'amendment.dropped') this.announceAmendmentDropped(data)
     if (event === ACK_EVENT) this.announceAcknowledgement(data)
     this.responsivenessTracker().observe(event, data, { requestId: this.agent?.traceRequest?.id, ts: Date.now() })
     if (event === 'goal.evaluated') {
@@ -2131,6 +2163,12 @@ export class Session {
   }
 
   // 2.7: the goal budget warning reaches the player once per goal.
+  announceAmendmentDropped(data) {
+    const line = uiText(data?.chat_message, 400)
+    if (!line) return
+    this.printChat(line).catch(error => this.log(`Unable to announce a dropped amendment: ${error instanceof Error ? error.message : String(error)}`))
+  }
+
   announceGoalBudgetWarning(data) {
     const line = uiText(data?.chat_message, 400)
     const key = `${data?.goal_id ?? ''}|${data?.threshold_output_units ?? ''}`
@@ -2725,17 +2763,49 @@ export class Session {
         await this.recoverInterruptedPlan('runtime_restart', { actor_id: this.lastStatus?.actor_id, epoch: this.lastStatus?.epoch })
       })
     }
-    else if (!startupState && goalInterruptedWithoutPlan(this.agent.memory?.planningState?.(`npc:${this.npcId}`))) {
-      // C7: an active goal that HAD plans but holds none to carry now: say so and
-      // wake no model. A goal still waiting for its first plan, or for a
-      // clarification, has no plan history and stays silent.
-      this.queueEvent(async () => {
-        await this.agent.traceEvent?.('runtime.goal_without_plan', { reason: 'runtime_restart_no_active_plan', goal_id: this.agent.memory?.planningState?.(`npc:${this.npcId}`)?.goal?.goal_id }, { requestId: `recovery_${Date.now().toString(36)}` })
-        await this.printChat('I restarted and this goal has no active plan to resume, so I am not waking the planner. Say continue or give me a new instruction.')
-      })
+    else if (!startupState) {
+      this.queueStartupGoalNotice()
     }
     this.log(`SGLuna Factorio ready; npc=${this.npcName} (${this.npcId}), actor_id=${this.lastStatus.actor_id}, chat=${describeChatPlayers(this.config.chatPlayers)}`)
     return this.lastStatus
+  }
+
+  // Which startup notice an active goal with no plan to carry needs, if any. Both wake no model.
+  //  - 'before_first_plan': it never got a first plan (or was waiting for the player's answer): the
+  //    owner's known silent stall. It is paused visibly and the line says Resume re-drives it.
+  //  - 'no_active_plan': it HAD plans but holds none to carry now.
+  startupGoalNoticeKind() {
+    const planning = this.agent?.memory?.planningState?.(`npc:${this.npcId}`)
+    if (goalInterruptedBeforeFirstPlan(planning)) return 'before_first_plan'
+    if (goalInterruptedWithoutPlan(planning)) return 'no_active_plan'
+    return undefined
+  }
+
+  // The kind is decided when the notice RUNS, not when it is queued: the goal may have moved on in between.
+  queueStartupGoalNotice() {
+    if (!this.startupGoalNoticeKind()) return false
+    this.queueEvent(async () => {
+      const kind = this.startupGoalNoticeKind()
+      if (kind) await this.announceStartupGoal(kind)
+    })
+    return true
+  }
+
+  async announceStartupGoal(kind) {
+    const requestId = `recovery_${Date.now().toString(36)}`
+    const goalId = this.agent.memory?.planningState?.(`npc:${this.npcId}`)?.goal?.goal_id
+    if (kind === 'before_first_plan') {
+      const paused = await this.agent.pauseGoalWithoutPlan?.(RESTART_BEFORE_FIRST_PLAN_PAUSE, { requestId })
+      const didPause = paused?.paused === true
+      await this.agent.traceEvent?.('runtime.goal_without_plan', { reason: didPause ? RESTART_BEFORE_FIRST_PLAN_PAUSE : 'pause_not_applied', request_id: requestId, goal_id: paused?.goal_id ?? goalId, paused: didPause, model_woken: false }, { requestId })
+      // Say only what happened: a pause that did not apply is not announced as one.
+      await this.printChat(didPause
+        ? `I restarted before this goal had a plan (or while I was waiting for your answer), so I paused it and did not wake the planner. ${RESUME_HINT} If I had asked you something, answer that instead.`
+        : `I restarted before this goal had a plan and did not wake the planner, but I could not record a pause. Give me a new instruction.`)
+      return
+    }
+    await this.agent.traceEvent?.('runtime.goal_without_plan', { reason: 'runtime_restart_no_active_plan', request_id: requestId, goal_id: goalId, model_woken: false }, { requestId })
+    await this.printChat('I restarted and this goal has no active plan to resume, so I am not waking the planner. Say continue or give me a new instruction.')
   }
 
   queueEvent(fn, { reportError = false } = {}) {

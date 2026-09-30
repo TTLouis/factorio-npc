@@ -34,3 +34,18 @@ export function resolveAgentRole(config, role = PLANNER_ROLE) {
     role,
   }
 }
+
+// The executor's role suffix (delegation U6, design note section 6). The
+// executor carries one committed plan slice: the planner authored it, the harness
+// committed it, and it is immutable. There is ONE submitPlan tool for both roles;
+// only this suffix and the loop's plan-semantics validator differ.
+export const EXECUTOR_ROLE_PROMPT = [
+  '[ROLE: EXECUTOR] You are the executor for one committed plan slice. The planner authored the slice and the harness committed it; the committed plan is in the [HANDOFF] block and is immutable.',
+  'Execute the committed ACTIVE step only. Return approved observation tool calls, or submitPlan carrying the operations that advance the active step (plus semanticCompletion or a checkpoint for that step only). Do not author or revise the plan: do not change, reorder, reword, add or drop steps, and do not send a goal definition (scope, doneWhen), a roadmap or a development mode. In submitPlan send plan as the committed steps unchanged (or an empty list) and currentStep as the active step index. The harness ignores plan changes from you and records that it did.',
+  'If the active step cannot be completed, say so with an explicit BLOCKED reason and do not improvise a different plan; the harness decides what happens next. Goal completion is decided by the harness from the game, never by you.',
+].join('\n')
+
+/** The system prefix text of a role's conversation: the shared system prompt, plus the executor suffix for the executor. */
+export function roleSystemPrompt(systemPrompt, role = PLANNER_ROLE) {
+  return role === EXECUTOR_ROLE ? `${systemPrompt}\n\n${EXECUTOR_ROLE_PROMPT}` : systemPrompt
+}

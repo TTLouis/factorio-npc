@@ -1,7 +1,8 @@
 // Restage policy (delegation plan 3.5, owner answers 12a, 2026-09-29).
 //
 // Pure decisions about WHEN a conversation is discarded and rebuilt from a
-// handoff packet. Unwired: nothing calls this yet.
+// handoff packet. Called by NpcAgentLoop: the planner slice-close wake (U7), the
+// executor's plan-commit handoff (C3) and its hard-limit step-close restage (C8) (U6).
 //
 // Owner rules:
 //  - The planner's context is long-lived. It restages only under the size rule.
