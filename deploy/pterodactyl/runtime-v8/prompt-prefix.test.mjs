@@ -68,6 +68,25 @@ async function steamBodies() {
   return world.calls.map(call => call.body)
 }
 
+test('layout: a handoff packet (delegation U6) is the whole request context; what a continuation adds after it is working context', () => {
+  const messages = [
+    system,
+    user('[HANDOFF] Rebuilt from durable harness state.\n--- plan block (stable while this plan runs) ---\ngoal: x'),
+    user('--- step block ---\nrestage: role=executor checkpoint=C3'),
+    user('[NEARBY_ENTITIES_BASELINE] snapshot'),
+    user('[RUNTIME_COMPAT_STATE] projection'),
+    user('[MOD] Autorio operation batch completed.'),
+  ]
+  const layout = promptLayout(messages, { tools: [{ type: 'function' }] })
+  assert.equal(layout.request_context_end, 2, 'the context ends after the packet step block')
+  assert.deepEqual(cacheBreakpointIndexes(messages), [0, 2], 'the cache breakpoints sit at the system message and the end of the packet')
+  // The next continuation restarts from the packet: that is a continuation reset, not a rewrite of stored history.
+  const next = [system, messages[1], messages[2], { role: 'assistant', content: '{"plan":[]}' }, user('[NEARBY_ENTITIES_BASELINE] snapshot'), user('[MOD] Autorio operation error')]
+  assert.equal(classifyPrefixBreak({ messages, tools: [{ type: 'function' }] }, { messages: next, tools: [{ type: 'function' }] }).reason, 'continuation_reset')
+  // Without a packet the rule is unchanged.
+  assert.equal(promptLayout([system, user('[CHAT] a: go'), user('[NEARBY_ENTITIES_BASELINE] s')]).request_context_end, 2)
+})
+
 test('two consecutive rounds of one request share an identical prefix up to the declared breakpoint', async () => {
   const bodies = await steamBodies()
   assert.ok(bodies.length >= 4)

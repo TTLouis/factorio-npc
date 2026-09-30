@@ -1059,3 +1059,55 @@ test('5g: a stale drop names the conversation the reply came from (its own attri
   assert.equal(scope.role, 'executor')
   assert.equal(scope.handoffId, restaged.handoff_id)
 })
+
+// --- the slice close from the completion signal, and the unmet-goal continuation ------------------------------
+
+test('a slice that closes from the completion signal (outside any turn) resumes the parked planner between turns, with the verified results', async () => {
+  const world = harness({
+    script: [
+      plannerSlice({ plan: ['Gather 10 iron ore'] }),
+      () => plannerNextSlice(),
+    ],
+  })
+  await world.say()
+  const plannerHandoff = world.agent.agentContext.parkedPlanner.handoffId
+  world.give('iron-ore') // the game satisfies the only step's contract: the harness closes the slice, no model turn involved
+  assert.equal(world.agent.turnConversation, null, 'no turn holds the conversation')
+  await world.agent.completed()
+
+  assert.equal(world.calls.length, 2, 'one planner wake, no executor round in between')
+  const [resumed] = world.rows('context.planner_resumed')
+  assert.equal(resumed.data.handoff_id, plannerHandoff)
+  assert.equal(resumed.data.route, 'next_shelf_slice')
+  assert.equal(world.calls[1].context.role, 'planner')
+  const wake = world.calls[1].messages
+  assert.ok(wake.some(message => textOf(message).startsWith('[MOD] The current immutable plan slice is verified complete') && textOf(message).includes('[VERIFIED_RESULTS]')))
+  assert.equal(wake.some(message => textOf(message).startsWith('[HANDOFF]')), false, 'the planner conversation, not a packet')
+  assert.equal(world.rows('context.restage_refused').length, 0)
+  assert.equal(world.agent.agentContext.role, 'executor', 'and the slice it authored is executed by a fresh executor')
+})
+
+test('an unmet goal after the executor\'s final claim hands the next slice to the planner conversation, which never sees the executor\'s reply', async () => {
+  const world = harness({
+    script: [
+      // No checkpoint: the only step is prose-only, closed by the executor's claim.
+      plannerSlice({ plan: ['Gather 10 iron ore'], checkpoint: undefined }),
+      () => planReply({ chatMessage: 'EXECUTOR-FINAL-REPLY', plan: [], currentStep: 0, operations: [] }),
+      () => plannerNextSlice(),
+    ],
+  })
+  await world.say()
+  world.give('iron-ore')
+  await world.agent.completed()
+
+  assert.equal(world.calls.length, 3)
+  const wake = world.calls[2]
+  assert.equal(wake.context.role, 'planner', 'the next slice is authored by the planner')
+  assert.ok(wake.messages.some(message => textOf(message).startsWith('[CHAT]')), 'the planner conversation')
+  assert.equal(JSON.stringify(wake.messages).includes('EXECUTOR-FINAL-REPLY'), false, 'without the executor\'s reply')
+  assert.ok(wake.messages.some(message => textOf(message).startsWith('[HARNESS] The plan is finished, but the game reports')))
+  const [resumed] = world.rows('context.planner_resumed')
+  assert.equal(resumed.data.route, 'unmet_goal_after_plan')
+  assert.equal(resumed.data.reason, 'slice_close_unmet_goal')
+  assert.equal(resumed.request_id, world.rows('request.received')[0].request_id)
+})
