@@ -751,3 +751,22 @@ test('rolesDiffer is false with one model and true with two', () => {
   assert.equal(new AgentContext({ config: configuration({}, baseEnv({ OPENAI_MODEL: 'a,a' })) }).rolesDiffer, false)
   assert.equal(new AgentContext().rolesDiffer, false)
 })
+test('an actor replacement during the goal evaluation of a slice close fails safe: nothing is restaged and the refusal is traced', async () => {
+  const world = plannerHarness({ shelf: true, softLimit: 5000, deterministic: true, tokens: () => 6000 })
+  await world.say()
+  const original = world.agent.evaluateGoalCompletion.bind(world.agent)
+  world.agent.evaluateGoalCompletion = async (options) => {
+    const result = await original(options)
+    world.game.status = { ...world.game.status, actor_id: 19, epoch: 4 } // the body was replaced during that await
+    return result
+  }
+  await assert.rejects(world.closeSlice(), /actor epoch changed|cancelled|superseded/)
+  assert.equal(world.rows('context.restaged').length, 0, 'the conversation was not swapped')
+  assert.equal(getContextRestages(world.memory.planningState(KEY)).length, 0)
+  assert.equal(world.calls.length, 1, 'no planner wake on the dead turn')
+  const [refused] = world.rows('context.restage_refused')
+  assert.ok(refused, 'the refusal is traced')
+  assert.equal(refused.data.reason, 'turn_superseded')
+  assert.ok(refused.request_id)
+  assert.match(refused.data.checkpoint, /^C[12]$/)
+})

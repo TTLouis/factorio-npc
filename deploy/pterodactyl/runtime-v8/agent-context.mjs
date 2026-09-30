@@ -23,8 +23,8 @@
 // a new lineage on every reset, so a new request is unrestaged again. The
 // initial conversation's handoff id (`ho_initial_<n>`) exists so a reply that
 // outlives a restage can be recognised and dropped; it is written to a row only
-// for such a stale reply. A reply that outlives a reset (a new lineage) is left
-// to the loop's generation check, as before.
+// for such a stale reply. A reply that outlives a reset (a new lineage) is stale
+// too (the conversation sequence is monotonic across lineages).
 
 import { AGENT_ROLES, EXECUTOR_ROLE, PLANNER_ROLE, resolveAgentRole } from './agent-roles.mjs'
 import { CONTEXT_RESTAGE_CHECKPOINTS } from './planning-state.mjs'
@@ -162,13 +162,14 @@ export class AgentContext {
   }
 
   /**
-   * True when a restage has replaced the request's conversation since it was
-   * sent. A reply that outlives a whole lineage (the loop was reset for a new
-   * request) is not judged here: the loop's generation check already fails it,
-   * exactly as before restaging existed.
+   * True when a restage or a reset has replaced the request's conversation
+   * since it was sent. The sequence is monotonic across lineages (every
+   * lineage start and every restage takes the next value), so a reply that
+   * outlives a whole lineage (the loop was reset for a new request or an actor
+   * replacement) is stale too, not only a reply that outlives a restage.
    */
   isStale(attribution) {
-    return !!attribution && attribution.lineage === this.lineageSequence && attribution.seq !== this.conversationSeq
+    return !!attribution && attribution.seq !== this.conversationSeq
   }
 
   /**
