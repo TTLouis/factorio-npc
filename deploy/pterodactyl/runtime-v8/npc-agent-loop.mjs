@@ -1,4 +1,5 @@
 import fsp from 'node:fs/promises'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import path from 'node:path'
 
 import { AgentLoopError, NpcAgentLoop as BaseNpcAgentLoop, NpcDialogueMemory as BaseNpcDialogueMemory } from '../staging/npc-agent-loop.mjs'
@@ -2371,7 +2372,7 @@ function providerBudgetTriggerSource(semanticScope, route) {
 }
 
 // FALLBACK ONLY (U8). The budget handoff (checkpoint C5) restages from a handoff
-// packet (restageBudgetHandoff). This capsule is used only when that restage is
+// packet (restageInTurn with budgetHandoffPacketArgs). This capsule is used only when that restage is
 // refused (no admitted reducer goal, the reducer rejected the event), so the
 // fresh generation is never left on the exhausted thread. It is traced as
 // budget.handoff_restage_fallback.
@@ -2535,7 +2536,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.agentContext.config = options.agentRoleConfig ?? options.providerConfig // names the role's model only (agent-roles.mjs)
     this.restageSoftLimitOption = options.restageSoftLimitTokens // U7: a number, or { planner, executor }; default is prefix-aware (restageSoftLimitTokens)
     this.providerCallsInFlight = 0 // provider rounds between request start and the end of their reply processing
-    this.providerCallsByLineage = new Map() // the same count per conversation lineage: restageContext refuses while the CURRENT lineage has a round in flight
+    this.providerCallsByGeneration = new Map() // the same count per loop generation: restageContext refuses only while a round of the CURRENT generation is in flight
+    this.turnScope = new AsyncLocalStorage() // the running turn identity (lineage, generation, request id): every admission point of that turn judges staleness against it
     this.turnConversation = null // attribution of the conversation the running turn last read; null between turns
   }
 
@@ -2592,7 +2594,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       await this.traceEvent('context.restage_refused', { role: prepared.role, checkpoint, handoff_id: packet.handoff_id, reason: why }, { requestId })
       return { restaged: false, reason: why }
     }
-    if ((this.providerCallsByLineage.get(this.agentContext.lineageSequence) ?? 0) > 0) return refuse('round_in_flight')
+    if ((this.providerCallsByGeneration.get(this.generation) ?? 0) > 0) return refuse('round_in_flight')
     const token = this.turnConversation
     if (token ? (safePoint !== token || this.agentContext.isStale(token)) : (safePoint !== undefined && safePoint !== false)) return refuse('round_open')
     const before = this.memory.planningState?.(key)
@@ -2608,14 +2610,23 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.observationRecoveryRounds = 0
     this.observationOnlyRounds = 0
     this.resetObservationDecisionState()
-    const state = this.memory.planningState(key)
-    const plan = getActivePlanningPlan(state)
-    await this.traceEvent('context.restaged', contextRestagedRow(result, {
-      planId: packet.event?.plan_id ?? plan?.plan_id,
-      stepId: plan?.steps?.[plan.active_step_index]?.step_id,
-      softLimitTokens,
-    }), { requestId })
-    await this.persistState()
+    // The conversation is swapped from here on: whatever follows is reported
+    // separately and can never turn this restage into a failure (a C5 caller
+    // would then overwrite the fresh messages with the capsule).
+    try {
+      const state = this.memory.planningState(key)
+      const plan = getActivePlanningPlan(state)
+      await this.traceEvent('context.restaged', contextRestagedRow(result, {
+        planId: packet.event?.plan_id ?? plan?.plan_id,
+        stepId: plan?.steps?.[plan.active_step_index]?.step_id,
+        softLimitTokens,
+      }), { requestId })
+      await this.persistState()
+    }
+    catch (error) {
+      const message = cleanMemoryText(error instanceof Error ? error.message : String(error), 300)
+      await Promise.resolve(this.traceEvent('context.restage_persist_failed', { role: result.role, checkpoint, handoff_id: result.handoff_id, message }, { requestId })).catch(() => {})
+    }
     return { restaged: true, ...result }
   }
 
@@ -2671,7 +2682,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // user; there is nothing healthy to re-brief).
   async restageThrough(args, safePoint) {
     const requestId = args.requestId ?? this.traceRequest?.id
-    const role = args.role ?? this.agentContext.role
+    const role = args.role ?? args.packet?.event?.role ?? this.agentContext.role
     const checkpoint = args.checkpoint ?? args.packet?.event?.checkpoint
     try {
       const state = args.planningState ?? this.memory.planningState?.(this.activePlanKey())
@@ -2761,6 +2772,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!decision.restage) return wake
     const candidates = shelfRefinementCandidates(planningState, { limit: 5 })
     const checkpoint = route === 'next_shelf_slice' && candidates.length > 0 ? 'C2' : decision.checkpoint
+    // An actor replacement or a reset during the awaits above must fail safe:
+    // the conversation is not swapped for a turn that no longer exists.
+    try {
+      await this.assertCurrent()
+    }
+    catch (error) {
+      await this.traceEvent('context.restage_refused', { role: PLANNER_ROLE, checkpoint, reason: 'turn_superseded', message: cleanMemoryText(error instanceof Error ? error.message : String(error), 200) })
+      throw error
+    }
     const restage = withinTurn ? this.restageInTurn : this.restageBetweenTurns
     const result = await restage.call(this, {
       checkpoint,
@@ -2803,7 +2823,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async runTurn() {
     this.turnDepth = (this.turnDepth ?? 0) + 1
     try {
-      return await super.runTurn()
+      // The outermost turn fixes the identity every nested admission is judged
+      // against (see dropIfStale); a nested turn keeps it.
+      const scope = this.turnScope.getStore() ?? {
+        lineage: this.agentContext.lineageSequence,
+        generation: this.generation,
+        role: this.agentContext.role,
+        handoffId: this.agentContext.handoffId,
+        requestId: this.traceRequest?.id,
+      }
+      return await this.turnScope.run(scope, () => super.runTurn())
     }
     finally {
       if (--this.turnDepth === 0) this.turnConversation = null
@@ -2837,7 +2866,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return current
   }
 
+  // Two judgements. (1) The reply of a round of a conversation a restage or a
+  // reset replaced (AgentContext.isStale, by conversation sequence). (2) Any flow
+  // of a turn that a reset outlived: this.turnConversation belongs to whichever
+  // turn runs now, so the running turn identity (turnScope) is compared to the
+  // live lineage and generation. A reply of a cancelled or replaced-actor turn
+  // must not reach admission even after a new turn has started.
   async dropIfStale(attribution) {
+    const scope = this.turnScope.getStore()
+    if (scope && (scope.lineage !== this.agentContext.lineageSequence || scope.generation !== this.generation)) {
+      await this.dropStaleReply({ role: scope.role, handoffId: scope.handoffId }, scope.requestId)
+    }
     if (this.agentContext.isStale(attribution)) await this.dropStaleReply(attribution)
   }
 
@@ -5245,14 +5284,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const resumeAfterBudgetPause = intent === 'continue_current'
       && planBefore?.status === 'paused'
       && /^(request_output_ceiling|provider_output_budget_exhausted|recoverable_provider_failure:provider_budget)\b/.test(String(planBefore.pause_reason ?? ''))
-    this.startRestage = undefined
+    let pendingStartRestage
     if (resumeProviderBudgetHandoff || resumeAfterBudgetPause) {
       const recovery = planBefore.provider_recovery
       const semanticScope = resumeProviderBudgetHandoff ? (recovery.semantic_scope ?? 'keep_target') : 'keep_target'
       const reason = resumeProviderBudgetHandoff
         ? (recovery.reason || 'provider_budget_handoff_resume')
         : String(planBefore.pause_reason)
-      this.startRestage = {
+      pendingStartRestage = {
         reason,
         semanticScope,
         // The recovery capsule of an action-omission repair rides on top of the packet.
@@ -5263,9 +5302,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         const budgetCapsule = providerBudgetHandoffCapsule(planBefore, taskStatus, reason, semanticScope)
         const repairCapsule = resumeActionOmission ? `\n${actionOmissionRecoveryCapsule(planBefore, taskStatus)}` : ''
         this.memory.setNextContextOverride?.(memoryKey, `${budgetCapsule}${repairCapsule}`)
-      }
-      else if (resumeActionOmission) {
-        this.memory.setNextContextOverride?.(memoryKey, actionOmissionRecoveryCapsule(planBefore, taskStatus))
       }
     }
     else if (resumeActionOmission) {
@@ -5339,6 +5375,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     await ensureSkillOffers(this, { memoryKey, intent, text }) // 2.8 hook: skill-offers.mjs
     try {
       this.chatRequestPending = true
+      this.startRestage = pendingStartRestage // consumed by the first turn (applyStartRestage); cleared in the finally below whatever happens
       const result = await super.request(text, options)
       if (this.requestInfo?.memoryKey) this.lastMemoryKey = this.requestInfo.memoryKey
       if (resumeProviderBudgetHandoff) {
@@ -5354,7 +5391,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     catch (error) {
       this.chatRequestPending = false
-      this.startRestage = undefined
       if (this.traceRequest) {
         const message = error instanceof Error ? error.message : String(error)
         await this.traceEvent('request.failed', {
@@ -5368,6 +5404,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw error
     }
     finally {
+      this.startRestage = undefined
       this.reasoningBudgetOverride = previousReasoningBudget
       this.observationBudgetOverride = previousObservationBudget
       this.observationBudgetRemaining = previousObservationBudgetRemaining
@@ -6983,8 +7020,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // A reply for a conversation a restage has replaced (U4): traced, then the
   // turn is cancelled like any superseded one. Nothing from it is appended to
   // the active conversation and nothing from it reaches admission.
-  async dropStaleReply(attribution) {
-    await this.traceEvent('context.stale_reply_dropped', this.agentContext.staleReplyRow(attribution))
+  async dropStaleReply(attribution, requestId) {
+    await this.traceEvent('context.stale_reply_dropped', this.agentContext.staleReplyRow(attribution), { requestId })
     const error = new AgentLoopError(STALE_REPLY_MESSAGE)
     error.code = STALE_REPLY_ERROR_CODE
     throw error
@@ -6992,23 +7029,22 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   // Counts provider rounds in flight (the request await and the reply processing
   // inside it) so restageContext can refuse while one is open. Rounds are also
-  // counted per conversation lineage (U8): a round that outlives a reset (an
-  // aborted turn, a stale provider) belongs to a discarded lineage, its reply is
-  // dropped by the generation check, and it can never touch the new
-  // conversation, so it must not block that lineage's restage (C7 recovery runs
-  // right after the supervisor cancelled the old turn).
+  // counted per loop generation (U8): a round that outlives a reset (an aborted
+  // turn, a stale provider) belongs to a discarded generation, its reply is
+  // dropped as stale, and it can never touch the new conversation, so it must
+  // not block the restage of the current generation (C7 recovery runs right
+  // after the supervisor cancelled the old turn).
   async callProvider(current, generation, options) {
-    const lineage = this.agentContext.lineageSequence
     this.providerCallsInFlight++
-    this.providerCallsByLineage.set(lineage, (this.providerCallsByLineage.get(lineage) ?? 0) + 1)
+    this.providerCallsByGeneration.set(generation, (this.providerCallsByGeneration.get(generation) ?? 0) + 1)
     try {
       return await this.callProviderRound(current, generation, options)
     }
     finally {
       this.providerCallsInFlight--
-      const remaining = (this.providerCallsByLineage.get(lineage) ?? 1) - 1
-      if (remaining > 0) this.providerCallsByLineage.set(lineage, remaining)
-      else this.providerCallsByLineage.delete(lineage)
+      const remaining = (this.providerCallsByGeneration.get(generation) ?? 1) - 1
+      if (remaining > 0) this.providerCallsByGeneration.set(generation, remaining)
+      else this.providerCallsByGeneration.delete(generation)
     }
   }
 

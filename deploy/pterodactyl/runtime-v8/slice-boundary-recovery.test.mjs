@@ -8,7 +8,7 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { GOAL_STATUS } from './planning-state.mjs'
 import { analyzeBehaviorTrace, DELEGATION_TRACE_ROWS } from './run-check.mjs'
-import { recoverInterruptedAgentPlan, Session, shouldRecoverInterruptedPlan } from './supervisor.mjs'
+import { goalInterruptedWithoutPlan, recoverInterruptedAgentPlan, Session, shouldRecoverInterruptedPlan } from './supervisor.mjs'
 import { FakeFactorio, gather, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
 
 // Hand-trace regressions for a long goal interrupted mid-slice or between
@@ -492,4 +492,95 @@ test('C6: a structural blocker wakes no model: a chat continue, every supervisor
     assert.equal(rows.rows('context.restaged').length, 0, 'and nothing restaged')
   }
   assert.equal(memory.currentPlan(KEY).status, 'blocked')
+})
+
+test('C6: through the real Session.recoverInterruptedPlan, every recovery reason (restart, actor replaced, auto resume, all condition_* wakes) leaves a blocked plan frozen: no model, no chat, no recovery request', async () => {
+  const game = new FakeFactorio()
+  let calls = 0
+  const provider = async () => { calls++; return twoStepReply() }
+  const memory = new CanonicalTaskBoardMemory()
+  const agent = agentWith(game, memory, provider, {})
+  const trace = traced(agent)
+  await agent.request('launch a rocket', { sender: 'Louis' })
+  memory.applyOutcomeAuthority(KEY, {
+    kind: 'world_blocked',
+    source: 'deterministic_runtime',
+    reason_code: 'operation_preflight_failed:missing_dependency',
+    candidate_blocker: 'operation_preflight_failed:missing_dependency',
+    evidence: [{ kind: 'operation_preflight_blocker', ref: 'preflight_1', summary: 'missing dependency' }],
+  })
+  const callsWhenBlocked = calls
+  const { session, chat } = stubSession(agent)
+  for (const reason of ['runtime_restart', 'actor_replaced', 'auto_resume_after_transient_provider_failure', 'condition_satisfied', 'condition_wake', 'condition_timeout', 'condition_failed']) {
+    assert.equal(await session.recoverInterruptedPlan(reason, { source: 'runtime_condition' }), null, reason)
+  }
+  assert.equal(calls, callsWhenBlocked, 'no provider call')
+  assert.deepEqual(chat, [], 'the session says nothing: the player already got the blocker and chooses')
+  assert.equal(trace.rows('runtime.recovery_started').length, 0, 'no recovery request was even opened')
+  assert.equal(trace.rows('context.restaged').length, 0)
+  assert.equal(memory.currentPlan(KEY).status, 'blocked')
+})
+
+test('C7: the reducer holding no active plan is traced with a reason and a recovery request id before the goal is paused', async () => {
+  const game = new FakeFactorio()
+  const file = stateFile()
+  const provider = async () => twoStepReply()
+  await firstRun(game, file, provider)
+  const { agent, memory } = await restart(game, file, provider)
+  memory.planningByNpc.set(KEY, { ...memory.planningState(KEY), active_plan_id: null })
+  const trace = traced(agent)
+  const recovery = await recoverInterruptedAgentPlan(agent, 'actor_replaced', {})
+  assert.equal(recovery.reason, 'no_active_plan')
+  const [row] = trace.rows('runtime.recovery_no_active_plan')
+  assert.ok(row)
+  assert.match(row.request_id, /^recovery_/)
+  assert.equal(row.data.reason, 'reducer_holds_no_active_plan')
+  assert.equal(row.data.recovery_reason, 'actor_replaced')
+})
+
+test('C7: a restage that fails (restage_error) leaves the recovery on the conversation the loop built, and both the helper and the supervisor trace it', async () => {
+  const game = new FakeFactorio()
+  const file = stateFile()
+  const seen = []
+  let calls = 0
+  const provider = async (messages) => {
+    calls++
+    seen.push(messages.map(message => ({ ...message })))
+    return calls === 1 ? twoStepReply() : planReply({ plan: twoStep, currentStep: 0, operations: [gather('iron-ore', 10)] })
+  }
+  await firstRun(game, file, provider)
+  const { agent } = await restart(game, file, provider)
+  agent.buildRestagePacket = () => { throw new Error('packet builder failed') }
+  const trace = traced(agent)
+
+  const recovery = await recoverInterruptedAgentPlan(agent, 'runtime_restart', {})
+
+  assert.equal(recovery.recovered, true, 'the recovery still runs')
+  assert.equal(calls, 2)
+  assert.ok(!String(seen[1][1]?.content ?? '').startsWith('[HANDOFF]'), 'on the legacy conversation, not a packet')
+  const [error] = trace.rows('context.restage_error')
+  assert.ok(error)
+  assert.match(error.request_id, /^recovery_/)
+  assert.match(error.data.message, /packet builder failed/)
+  const [fallback] = trace.rows('runtime.recovery_restage_fallback')
+  assert.ok(fallback)
+  assert.equal(fallback.request_id, error.request_id)
+  assert.equal(fallback.data.reason, 'restage_error')
+  assert.equal(fallback.data.recovery_reason, 'runtime_restart')
+  assert.equal(trace.rows('context.restaged').length, 0)
+})
+
+test('the startup no-plan notice only fits an active goal that had plans: a goal on its first plan or a clarification has no plan history', async () => {
+  const empty = new CanonicalTaskBoardMemory()
+  assert.equal(goalInterruptedWithoutPlan(empty.planningState(KEY)), false, 'no goal')
+  assert.ok(empty.admitPlanningGoal(KEY, { owner: 'Louis', objective: 'launch a rocket', now: 1 })?.goal)
+  assert.equal(goalInterruptedWithoutPlan(empty.planningState(KEY)), false, 'waiting on its first plan or a clarification: silent')
+
+  const file = stateFile()
+  const provider = async () => twoStepReply()
+  await firstRun(new FakeFactorio(), file, provider)
+  const { memory } = await restart(new FakeFactorio(), file, provider)
+  assert.equal(goalInterruptedWithoutPlan(memory.planningState(KEY)), false, 'a healthy active plan')
+  const torn = { ...memory.planningState(KEY), active_plan_id: null }
+  assert.equal(goalInterruptedWithoutPlan(torn), true, 'plans existed, none is active')
 })

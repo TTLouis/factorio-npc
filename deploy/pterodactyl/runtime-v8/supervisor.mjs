@@ -1787,8 +1787,10 @@ export async function pauseStrandedPlanAfterRequestError(session, message) {
 // snapshot (new epoch) and the runtime's task state. The [HARNESS] recovery
 // instruction follows the packet as the step-level tail. No turn is open here
 // (the supervisor cancelled the old one), so no safePoint is passed
-// (restageBetweenTurns); a refusal ('round_in_flight' | 'round_open') means the
-// conversation the loop already built stays, and the refusal is on the trace.
+// (restageBetweenTurns); a refusal ('round_in_flight' | 'round_open' | ...) or a
+// restage_error means the conversation the loop already built stays, and the
+// helper traces the reason (context.restage_refused / context.restage_error);
+// this function adds runtime.recovery_restage_fallback naming it.
 // TODO(U6/U7): restage as the executor role once it has its own prompt and
 // tool block; today the recovery runs in the role the loop has.
 async function restageRecoveryConversation(agent, { reason, recoveryMessage }) {
@@ -1800,26 +1802,30 @@ async function restageRecoveryConversation(agent, { reason, recoveryMessage }) {
   catch {
     runtime = undefined
   }
-  let result
-  try {
-    result = await agent.restageBetweenTurns({
-      checkpoint: 'C7',
-      role: agent.agentContext?.role ?? 'planner',
-      reason: `recovery:${uiText(reason, 80)}`,
-      actor: agent.epoch,
-      runtime,
-      requestId: agent.traceRequest?.id,
-    })
+  const result = await agent.restageBetweenTurns({
+    checkpoint: 'C7',
+    role: agent.agentContext?.role ?? 'planner',
+    reason: `recovery:${uiText(reason, 80)}`,
+    actor: agent.epoch,
+    runtime,
+    requestId: agent.traceRequest?.id,
+  })
+  if (!result.restaged) {
+    await agent.traceEvent?.('runtime.recovery_restage_fallback', { reason: result.reason, recovery_reason: uiText(reason, 80) }, { requestId: agent.traceRequest?.id })
+    return result
   }
-  catch (error) {
-    result = { restaged: false, reason: 'restage_error' }
-    await agent.traceEvent?.('runtime.recovery_restage_error', { message: uiText(error instanceof Error ? error.message : String(error), 300) })
-  }
-  if (!result.restaged) return result
   const harness = { role: 'user', content: recoveryMessage }
   agent.baseMessages = [...agent.baseMessages, harness]
   agent.messages = [...agent.messages, { ...harness }]
   return result
+}
+
+// An active goal that had plans (so it is past its first plan and past any
+// clarification) but has no active plan to carry.
+export function goalInterruptedWithoutPlan(planning) {
+  return planning?.goal?.status === GOAL_STATUS.ACTIVE
+    && Array.isArray(planning.plans) && planning.plans.length > 0
+    && !getActivePlan(planning)
 }
 
 export async function recoverInterruptedAgentPlan(agent, reason, details = {}) {
@@ -1855,6 +1861,7 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}) {
   // Otherwise the goal is paused (a chat line follows) instead of waking a
   // model with nothing to execute.
   if (!awaitingNextSlice && typeof agent.memory?.planningState === 'function' && !getActivePlan(agent.memory.planningState(key))) {
+    await agent.traceEvent?.('runtime.recovery_no_active_plan', { reason: 'reducer_holds_no_active_plan', recovery_reason: uiText(reason, 80) }, { requestId: `recovery_${Date.now().toString(36)}` })
     const paused = await agent.pausePersistentPlan?.(`runtime_recovery_no_active_plan:${uiText(reason, 80)}`)
     return { recovered: false, reason: 'no_active_plan', paused: paused !== undefined, state: paused ?? state }
   }
@@ -2718,10 +2725,13 @@ export class Session {
         await this.recoverInterruptedPlan('runtime_restart', { actor_id: this.lastStatus?.actor_id, epoch: this.lastStatus?.epoch })
       })
     }
-    else if (!startupState && this.agent.memory?.planningState?.(`npc:${this.npcId}`)?.goal?.status === GOAL_STATUS.ACTIVE) {
-      // C7: a live goal but no plan to carry (interrupted before its first plan): say so, wake no model.
+    else if (!startupState && goalInterruptedWithoutPlan(this.agent.memory?.planningState?.(`npc:${this.npcId}`))) {
+      // C7: an active goal that HAD plans but holds none to carry now: say so and
+      // wake no model. A goal still waiting for its first plan, or for a
+      // clarification, has no plan history and stays silent.
       this.queueEvent(async () => {
-        await this.printChat('I restarted and there is no committed plan to resume, so the goal waits. Say continue or give me a new instruction.')
+        await this.agent.traceEvent?.('runtime.goal_without_plan', { reason: 'runtime_restart_no_active_plan', goal_id: this.agent.memory?.planningState?.(`npc:${this.npcId}`)?.goal?.goal_id }, { requestId: `recovery_${Date.now().toString(36)}` })
+        await this.printChat('I restarted and this goal has no active plan to resume, so I am not waking the planner. Say continue or give me a new instruction.')
       })
     }
     this.log(`SGLuna Factorio ready; npc=${this.npcName} (${this.npcId}), actor_id=${this.lastStatus.actor_id}, chat=${describeChatPlayers(this.config.chatPlayers)}`)

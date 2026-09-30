@@ -2030,3 +2030,80 @@ test('C5: the request output ceiling still pauses visibly, and Resume after it r
   assert.notEqual(row.request_id, requestId, 'the Resume is a new request with a new allowance')
   assert.equal(world.memory.planningState('npc:sgluna').context_restages.at(-1).handoff_id, row.data.handoff_id)
 })
+
+test('C5: the capsule fallback runs through a REAL refusal (the reducer goal is no longer active), traced with the request id and the reason', async () => {
+  const canonical = ['Inspect machine state', 'Continue the build']
+  const calls = []
+  const trace = []
+  const agent = makeAgent({
+    interactionDecisionProvider: rolloverDecisionProvider({ count: 0 }),
+    provider: async (messages) => {
+      calls.push(messages)
+      if (calls.length === 1) return planMessage({ chatMessage: 'One action.', plan: canonical, currentStep: 0, operations: [{ name: 'wait', args: { ticks: 1 } }] })
+      if (calls.length === 2) {
+        // The reducer goal stops being active while the legacy plan still is: the
+        // seam refuses (goal_not_active) exactly as it would in production.
+        const state = agent.memory.planningState('npc:sgluna')
+        agent.memory.planningByNpc.set('npc:sgluna', { ...state, goal: { ...state.goal, status: 'paused' } })
+        throw contextWindowError()
+      }
+      return planMessage({ chatMessage: 'Continued.', plan: canonical, currentStep: 0, operations: [{ name: 'wait', args: { ticks: 1 } }] })
+    },
+  })
+  agent.behaviorTrace = { emit: async (record) => { trace.push(record) } }
+
+  await agent.request('exercise a real refusal', { sender: 'TTLouis' })
+  await agent.completed()
+
+  assert.equal(calls.length, 3)
+  const refused = trace.filter(record => record.event === 'context.restage_refused')
+  assert.equal(refused.length, 1)
+  assert.equal(refused[0].data.reason, 'goal_not_active')
+  assert.equal(refused[0].data.checkpoint, 'C5')
+  assert.ok(refused[0].request_id)
+  const fallback = trace.filter(record => record.event === 'budget.handoff_restage_fallback')
+  assert.equal(fallback.length, 1)
+  assert.equal(fallback[0].data.reason, 'goal_not_active')
+  assert.equal(fallback[0].request_id, refused[0].request_id)
+  assert.equal(trace.filter(record => record.event === 'context.restaged').length, 0)
+  assert.ok(calls[2].some(message => String(message.content ?? '').startsWith('[PROVIDER_BUDGET_HANDOFF]')), 'the capsule carried the fresh generation')
+  assert.ok(!calls[2].some(message => message.role === 'assistant' || message.role === 'tool'), 'still none of the exhausted thread')
+})
+
+test('a Resume request that fails before its turn leaves no pending start restage behind for the next flow', async () => {
+  const canonical = ['Wait for the machine cycle', 'Inspect the result']
+  const over = () => {
+    const message = planMessage({ chatMessage: 'Thinking long.', plan: canonical, currentStep: 0, operations: [{ name: 'wait', args: { ticks: 1 } }] })
+    Object.defineProperty(message, '_sglunaProvider', {
+      enumerable: false,
+      value: { diagnostic_code: 'ok', finish_reason: 'stop', usage: { prompt_tokens: 100, completion_tokens: 3500, total_tokens: 3600 } },
+    })
+    return message
+  }
+  let calls = 0
+  const agent = makeAgent({
+    maxProviderOutputUnits: 3000,
+    maxProviderBudgetHandoffs: 1,
+    provider: async () => {
+      calls++
+      return calls === 1 ? planMessage({ chatMessage: 'Waiting first.', plan: canonical, currentStep: 0, operations: [{ name: 'wait', args: { ticks: 1 } }] }) : over()
+    },
+  })
+  const trace = []
+  agent.behaviorTrace = { emit: async record => { trace.push(record) } }
+  await agent.request('run the bounded cycle', { sender: 'TTLouis' })
+  assert.equal((await agent.completed()).goalStatus, 'paused')
+  const restagedBefore = trace.filter(record => record.event === 'context.restaged').length
+
+  // The Resume dies while the base request binds its epoch: before any turn.
+  agent.captureEpoch = async () => { throw new Error('epoch capture failed') }
+  await assert.rejects(agent.request('continue', { sender: 'TTLouis' }), /epoch capture failed/)
+  assert.equal(agent.startRestage, undefined, 'nothing pending after the failed request')
+  delete agent.captureEpoch
+
+  // A later flow that enters a turn directly (a supervisor recovery) never inherits a C5 restage.
+  const recovery = await recoverInterruptedAgentPlan(agent, 'runtime_restart', {})
+  const rows = trace.filter(record => record.event === 'context.restaged').slice(restagedBefore)
+  assert.ok(rows.every(row => row.data.checkpoint === 'C7'), JSON.stringify(rows.map(row => row.data.checkpoint)))
+  assert.equal(recovery.recovered === true || recovery.reason === 'plan_not_recoverable', true)
+})

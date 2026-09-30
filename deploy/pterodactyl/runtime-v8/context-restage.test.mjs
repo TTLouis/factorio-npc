@@ -181,7 +181,7 @@ test('role and handoff_id attribution is off until the first restage, then both 
   context.beginLineage()
   assert.equal(context.delegationActive, false)
   assert.deepEqual(context.traceFields(context.beginRequest(1)), {})
-  assert.equal(context.isStale(after), false, 'a reply that outlives a reset is left to the generation check')
+  assert.equal(context.isStale(after), true, 'a reply that outlives a reset is stale too (the conversation sequence is monotonic across lineages)')
   assert.equal(context.observeReply(after, { input_units: 5 }), false, 'and is never counted into the new lineage')
 })
 
@@ -826,4 +826,124 @@ test('redaction runs before truncation: a unit-number list that straddles the no
   assert.doesNotMatch(sanitizeDurableModelText(long, 420), /123|765/)
   // Text within the cap is unchanged by the ordering.
   assert.equal(sanitizeDurableModelText('mine at unit_number: 55 now', 100), 'mine at unit_number: [historical-id-omitted] now')
+})
+
+// --- U8 follow-ups: cross-lineage replies, per-generation in-flight, post-commit failures ---
+
+// A reset plus a fresh turn mid-flight: what a supervisor cancel followed by the
+// recovery (or a new chat request) leaves behind while an old flow is still awaiting.
+async function supersedeTurn(world) {
+  world.agent.reset()
+  world.agent.active = true
+  world.agent.epoch = await world.agent.captureEpoch()
+  world.agent.requestInfo = { memoryKey: KEY, turnId: 99, sender: 'Louis', text: 'new request' }
+}
+
+test('a reply that outlives a reset is stale: dropped and traced against its own request, even after a new turn started', async () => {
+  const gate = deferred()
+  const world = loopHarness([() => gate.promise, firstPlan()])
+  const settled = world.say().then(() => 'admitted', error => `dropped: ${error.message}`)
+  await world.waitForProviderCall(1)
+  world.agent.reset() // the supervisor cancelled the turn (actor replaced)
+  const second = world.agent.request('mine 10 iron then 10 copper', { sender: 'Louis' }) // a new request begins under a new lineage
+  await second
+  gate.resolve(staleReply())
+  assert.match(await settled, /^dropped: .*(cancelled|superseded)/)
+  const [dropped] = world.rows(DELEGATION_TRACE_ROWS.events.staleReplyDropped)
+  assert.ok(dropped, 'the old reply was traced as dropped')
+  assert.ok(dropped.request_id, 'the row carries a request id')
+  assert.equal(dropped.data.reason, 'handoff_superseded')
+  assert.ok(!world.game.mutations.some(text => text.includes('coal')), 'nothing from the old reply was admitted')
+  assert.ok(!JSON.stringify(world.agent.messages).includes(STALE_MARKER))
+  assert.equal(analyzeBehaviorTrace(world.trace).findings.filter(finding => finding.signature === 'stale_reply_not_dropped').length, 0)
+})
+
+test('commitPlan pre-batch: a turn a reset outlived never reaches admission, whatever turn runs now', async () => {
+  const world = loopHarness([firstPlan()])
+  const emit = world.agent.behaviorTrace.emit
+  let armed = true
+  world.agent.behaviorTrace = {
+    emit: async (record) => {
+      await emit(record)
+      if (armed && record.event === 'plan.accepted') { armed = false; await supersedeTurn(world) } // the awaits between the reply and the batch
+    },
+  }
+  await assert.rejects(world.say(), /cancelled|superseded/)
+  assert.equal(world.game.mutations.length, 0, 'the batch was never admitted')
+  const [dropped] = world.rows(DELEGATION_TRACE_ROWS.events.staleReplyDropped)
+  assert.ok(dropped)
+  assert.ok(dropped.request_id, 'the row carries a request id')
+})
+
+test('handleToolBatch pre-push: a turn a reset outlived pushes nothing and runs no tool', async () => {
+  const read = { tool_calls: [{ id: 'call_00_inventory0000000000001', index: 0, type: 'function', function: { name: 'getInventoryItems', arguments: '{}' } }] }
+  const world = loopHarness([read, firstPlan()])
+  const commands = []
+  const original = world.game.command.bind(world.game)
+  world.game.command = async (text) => { commands.push(text); return original(text) }
+  const emit = world.agent.behaviorTrace.emit
+  let armed = true
+  let atTrigger = -1
+  world.agent.behaviorTrace = {
+    emit: async (record) => {
+      await emit(record)
+      if (armed && record.event === 'tool.call') { armed = false; atTrigger = commands.length; await supersedeTurn(world) }
+    },
+  }
+  await assert.rejects(world.say(), /cancelled|superseded/)
+  const [dropped] = world.rows(DELEGATION_TRACE_ROWS.events.staleReplyDropped)
+  assert.ok(dropped, 'the drop is traced')
+  assert.ok(dropped.request_id)
+  assert.ok(!world.agent.messages.some(message => message.role === 'tool'), 'no tool reply was pushed into the new conversation')
+  assert.ok(atTrigger >= 0 && !commands.slice(atTrigger).some(text => /inventory/i.test(text)), 'the read never ran after the reset')
+})
+
+test('a round of a reset generation does not refuse a restage; a round of the current generation still does', async () => {
+  const gate = deferred()
+  const world = loopHarness([() => gate.promise, firstPlan()])
+  const settled = world.say().then(() => 'admitted', error => `dropped: ${error.message}`)
+  await world.waitForProviderCall(1)
+  assert.equal(world.agent.providerCallsInFlight, 1)
+  // Same generation: refused (a round is open).
+  const packet = world.packet()
+  assert.deepEqual(await world.agent.restageContext({ checkpoint: 'C3', reason: 'r', packet }), { restaged: false, reason: 'round_in_flight' })
+  // The turn is cancelled: its round is the discarded generation now.
+  world.agent.reset()
+  world.agent.active = true
+  world.agent.epoch = await world.agent.captureEpoch()
+  assert.equal(world.agent.providerCallsInFlight, 1, 'the old round is still open')
+  const result = await world.agent.restageBetweenTurns({ checkpoint: 'C7', role: 'planner', reason: 'recovery:test', requestId: 'recovery_test' })
+  assert.equal(result.restaged, true, JSON.stringify(result))
+  gate.resolve(staleReply())
+  assert.match(await settled, /^dropped:/)
+  assert.equal(world.agent.providerCallsByGeneration.size, 0, 'the counters drain')
+})
+
+test('a persist failure after the swap is reported separately: the restage stands and is not a restage_error', async () => {
+  const world = loopHarness([firstPlan()])
+  await world.say()
+  world.agent.persistState = async () => { throw new Error('disk full') }
+  const packet = world.packet()
+  const result = await world.agent.restageBetweenTurns({ checkpoint: 'C3', reason: 'r', packet, requestId: 'req_persist' })
+  assert.equal(result.restaged, true)
+  assert.equal(world.agent.agentContext.handoffId, packet.handoff_id, 'the conversation was swapped')
+  assert.equal(world.agent.messages[1].content, packet.stableText)
+  const [failed] = world.rows('context.restage_persist_failed')
+  assert.ok(failed)
+  assert.ok(failed.request_id)
+  assert.equal(failed.data.checkpoint, 'C3')
+  assert.equal(failed.data.handoff_id, packet.handoff_id)
+  assert.match(failed.data.message, /disk full/)
+  assert.equal(world.rows('context.restage_error').length, 0)
+})
+
+test('a prebuilt packet restages in the role the packet names, not the loop role', async () => {
+  const world = loopHarness([firstPlan()])
+  await world.say()
+  assert.equal(world.agent.agentContext.role, 'planner')
+  const packet = world.packet({ role: 'executor' })
+  const result = await world.agent.restageBetweenTurns({ checkpoint: 'C3', reason: 'r', packet })
+  assert.equal(result.restaged, true)
+  assert.equal(world.agent.agentContext.role, 'executor')
+  assert.equal(world.rows('context.restaged')[0].data.role, 'executor')
 })
