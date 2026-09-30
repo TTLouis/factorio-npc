@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { parseJsonl } from './debug-report.mjs'
 import { buildPrefixReport, formatPrefixReport } from './prefix-report.mjs'
 import { responsivenessByRequest } from './responsiveness.mjs'
+import { DELEGATION_TRACE_ROWS } from './run-check.mjs'
 
 // Groups the prompt trace (provider.request / provider.response /
 // provider.response_error) into per-round latency and reasoning-policy
@@ -336,10 +337,20 @@ export function buildRunRecord(behaviorRows, { prices } = {}) {
   const measured = []
   const reviews = []
   const goalWarnings = []
+  const restages = []
+  let staleRepliesDropped = 0
+
+  // Role and handoff id are the delegation trace fields (DELEGATION_TRACE_ROWS
+  // in run-check.mjs). Rows from before delegation carry neither, so a request
+  // without them gets no role or handoff key anywhere in the record.
+  const noteConversation = (request, role, handoffId) => {
+    if (role && !request.roles.includes(role)) request.roles.push(role)
+    if (handoffId && !request.handoff_ids.includes(handoffId)) request.handoff_ids.push(handoffId)
+  }
 
   const requestState = id => {
     if (!requests.has(id)) {
-      requests.set(id, { request_id: id, started_ts: undefined, ended_ts: undefined, outcome: undefined, goal_id: undefined, step_id: undefined, blocked: false, last_round: undefined, busy_since: undefined, busy_ms: 0, think_ms: 0, time_split: undefined, verified_steps: 0, unattributed: [], new_goal: false })
+      requests.set(id, { request_id: id, started_ts: undefined, ended_ts: undefined, outcome: undefined, goal_id: undefined, step_id: undefined, blocked: false, last_round: undefined, busy_since: undefined, busy_ms: 0, think_ms: 0, time_split: undefined, verified_steps: 0, unattributed: [], new_goal: false, roles: [], handoff_ids: [], restages: 0 })
     }
     return requests.get(id)
   }
@@ -380,6 +391,8 @@ export function buildRunRecord(behaviorRows, { prices } = {}) {
         reasoning_policy_reason: safeText(data.provider?.reasoning_policy_reason) ?? 'unknown',
         reasoning_effort: safeText(data.provider?.reasoning_effort) ?? 'unknown',
         model,
+        role: safeText(data.role),
+        handoff_id: safeText(data.handoff_id),
         latency_ms: Number.isFinite(data.latency_ms) ? data.latency_ms : undefined,
         recovery: (safeInteger(data.recovery_attempt) ?? 0) > 0 || /recovery/.test(safeText(data.provider?.reasoning_policy_reason) ?? ''),
         after_blocked: request.blocked,
@@ -390,6 +403,7 @@ export function buildRunRecord(behaviorRows, { prices } = {}) {
         cost: roundCost(prices, model ?? '', usage),
       }
       rounds.push(round)
+      noteConversation(request, round.role, round.handoff_id)
       if (!round.goal_id) request.unattributed.push(round)
       request.last_round = round
       if (Number.isFinite(round.latency_ms)) request.think_ms += round.latency_ms
@@ -402,6 +416,19 @@ export function buildRunRecord(behaviorRows, { prices } = {}) {
       }
       continue
     }
+    if (event === DELEGATION_TRACE_ROWS.events.restaged) {
+      const role = safeText(data.role)
+      noteConversation(request, role, safeText(data.handoff_id))
+      request.restages++
+      restages.push({
+        request_id: id,
+        role,
+        checkpoint: safeText(data.checkpoint),
+        packet_chars: Number.isFinite(data.packet_chars) ? data.packet_chars : undefined,
+        packet_estimated_tokens: Number.isFinite(data.packet_estimated_tokens) ? data.packet_estimated_tokens : undefined,
+      })
+    }
+    if (event === DELEGATION_TRACE_ROWS.events.staleReplyDropped) staleRepliesDropped++
     if (event === 'tool.call') {
       if (request.last_round) request.last_round.tools++
       if (data.cached === true) duplicateToolCalls.count++
@@ -447,6 +474,7 @@ export function buildRunRecord(behaviorRows, { prices } = {}) {
   const byGoal = new Map()
   const byStep = new Map()
   const byRequest = new Map()
+  const byRole = new Map()
   const waste = { observation_only: emptySpend(), recovery: emptySpend(), invalid_plan_submission: emptySpend(), after_blocked: emptySpend() }
   const latencies = new Map()
   const bucket = (map, key) => {
@@ -458,6 +486,7 @@ export function buildRunRecord(behaviorRows, { prices } = {}) {
     addSpend(bucket(byType, round.reasoning_policy_reason), round)
     addSpend(bucket(byEffort, round.reasoning_effort), round)
     addSpend(bucket(byRequest, round.request_id), round)
+    if (round.role) addSpend(bucket(byRole, round.role), round)
     if (round.goal_id) addSpend(bucket(byGoal, round.goal_id), round)
     if (round.goal_id && round.step_id) addSpend(bucket(byStep, `${round.goal_id}|${round.step_id}`), round)
     if (round.tools > 0 && !round.plan && !round.invalid) addSpend(waste.observation_only, round)
@@ -512,6 +541,9 @@ export function buildRunRecord(behaviorRows, { prices } = {}) {
         outcome: request.outcome ?? 'open',
         goal_id: request.goal_id,
         verified_steps: request.verified_steps,
+        ...(request.roles.length > 0 ? { roles: request.roles } : {}),
+        ...(request.handoff_ids.length > 0 ? { handoff_ids: request.handoff_ids } : {}),
+        ...(request.restages > 0 ? { restages: request.restages } : {}),
         ...spendView(spend, { priced }),
         time: {
           source: request.time_split ? 'request.time_split' : 'reconstructed',
@@ -566,7 +598,42 @@ export function buildRunRecord(behaviorRows, { prices } = {}) {
     },
     prices: priced ? { currency: prices.currency, models: Object.keys(prices.models) } : undefined,
   }
+  // Delegation (U9): only present when the trace carries role or restage rows.
+  if (byRole.size > 0) {
+    record.by_role = [...byRole.entries()]
+      .map(([role, spend]) => ({ role, ...spendView(spend, { priced }), output_share: share(spend.output_units, totals.output_units) }))
+      .sort((a, b) => b.output_units - a.output_units || (a.role < b.role ? -1 : 1))
+  }
+  const restageSummary = summarizeRestages(restages, staleRepliesDropped)
+  if (restageSummary) record.restages = restageSummary
   return record
+}
+
+function tally(values) {
+  const counts = {}
+  for (const value of values) counts[value ?? 'unknown'] = (counts[value ?? 'unknown'] ?? 0) + 1
+  return Object.fromEntries(Object.entries(counts).sort(([a], [b]) => (a < b ? -1 : 1)))
+}
+
+function sizeStats(values) {
+  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b)
+  if (sorted.length === 0) return undefined
+  return { count: sorted.length, min: sorted[0], p50: median(sorted), max: sorted[sorted.length - 1], total: sorted.reduce((sum, value) => sum + value, 0) }
+}
+
+// Count per checkpoint kind and per role, and the packet sizes (characters and
+// estimated tokens) of every context.restaged row; dropped stale replies are
+// counted next to them.
+function summarizeRestages(items, staleRepliesDropped) {
+  if (items.length === 0 && staleRepliesDropped === 0) return undefined
+  return {
+    count: items.length,
+    by_checkpoint: tally(items.map(item => item.checkpoint)),
+    by_role: tally(items.map(item => item.role)),
+    packet_chars: sizeStats(items.map(item => item.packet_chars)),
+    packet_estimated_tokens: sizeStats(items.map(item => item.packet_estimated_tokens)),
+    stale_replies_dropped: staleRepliesDropped,
+  }
 }
 
 // Step durations: seconds below 90 s, minutes above (as the harness shows them).
@@ -636,7 +703,26 @@ export function formatRunRecord(record) {
   }
   lines.push('', 'By request (time: think / actor busy incl. walking / idle):')
   for (const row of record.by_request) {
-    lines.push(`- ${row.request_id} @ ${printable(row.started_ts)} · ${row.outcome} · ${row.verified_steps} verified · ${spendLine(record, row)} · wall ${seconds(row.time.wall_ms)} = think ${seconds(row.time.think_ms)} + busy ${seconds(row.time.actor_busy_ms)} + idle ${seconds(row.time.idle_ms)} (${percent(row.time.idle_share)} idle, ${row.time.source})`)
+    const conversation = [
+      row.roles ? `role ${row.roles.join('+')}` : undefined,
+      row.handoff_ids ? `handoff ${row.handoff_ids.join(', ')}` : undefined,
+      row.restages ? `${row.restages} restage${row.restages === 1 ? '' : 's'}` : undefined,
+    ].filter(Boolean)
+    const conversationText = conversation.length > 0 ? ` · ${conversation.join(' · ')}` : ''
+    lines.push(`- ${row.request_id} @ ${printable(row.started_ts)} · ${row.outcome}${conversationText} · ${row.verified_steps} verified · ${spendLine(record, row)} · wall ${seconds(row.time.wall_ms)} = think ${seconds(row.time.think_ms)} + busy ${seconds(row.time.actor_busy_ms)} + idle ${seconds(row.time.idle_ms)} (${percent(row.time.idle_share)} idle, ${row.time.source})`)
+  }
+  if (record.by_role) {
+    lines.push('', 'Spend by conversation role (delegation):')
+    for (const row of record.by_role) lines.push(`- ${row.role}: ${spendLine(record, row)} · ${percent(row.output_share)} of output · cache miss ${percent(row.cache_miss_input_share)}`)
+  }
+  const restaged = record.restages
+  if (restaged) {
+    const list = tallied => Object.entries(tallied).map(([key, count]) => `${key} ${count}`).join(', ') || 'none'
+    const size = (stats, unit) => (stats ? `${unit} min ${thousands(stats.min)} · p50 ${thousands(stats.p50)} · max ${thousands(stats.max)} · total ${thousands(stats.total)}` : `${unit} —`)
+    lines.push('', 'Restages (delegation):')
+    lines.push(`- restages: ${restaged.count} · by checkpoint: ${list(restaged.by_checkpoint)} · by role: ${list(restaged.by_role)} · stale replies dropped: ${restaged.stale_replies_dropped}`)
+    lines.push(`- packet ${size(restaged.packet_chars, 'chars')}`)
+    lines.push(`- packet ${size(restaged.packet_estimated_tokens, 'est. tokens')}`)
   }
   const v = record.verbosity
   lines.push('', 'Chat verbosity:')

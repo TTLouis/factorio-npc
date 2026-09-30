@@ -255,3 +255,164 @@ test('a new-goal request charges its authoring rounds to the new goal, never to 
   ])
   assert.deepEqual(record.by_goal.map(row => [row.goal_id, row.output_units]), [['goal_new', 750]])
 })
+
+// --- delegation observability (U9): role, handoff_id and restage summary ------------------
+//
+// Two requests from the middle of a long goal at realistic sizes (input in
+// the tens of thousands of units, cache hits above 90 percent once the prefix
+// is warm). `delegationRows({ delegated: true })` adds the U4 fields
+// (DELEGATION_TRACE_ROWS in run-check.mjs) to the very same rows.
+
+const T0 = Date.parse('2026-09-29T10:00:00Z')
+const stamp = seconds => new Date(T0 + seconds * 1000).toISOString()
+
+function delegationRows({ delegated }) {
+  const response = (ts, requestId, usage, { latency, reason, effort, tools = false, who }) => ({
+    ts: stamp(ts),
+    request_id: requestId,
+    event: 'provider.response',
+    data: {
+      latency_ms: latency,
+      has_tool_calls: tools,
+      content_chars: tools ? 0 : 240,
+      usage: { input_units: usage[0], cached_input_units: usage[1], output_units: usage[2], reasoning_output_units: usage[3], usage_complete: true },
+      provider: { reasoning_policy_reason: reason, reasoning_effort: effort, model: 'deepseek-flash' },
+      ...(delegated ? { role: who[0], handoff_id: who[1] } : {}),
+    },
+  })
+  const restaged = (ts, requestId, data) => (delegated
+    ? [{ ts: stamp(ts), request_id: requestId, event: 'context.restaged', data }]
+    : [])
+  const board = (goalId, stepId) => ({ goal_id: goalId, active_step_id: stepId, status: 'active' })
+  return [
+    { ts: stamp(0), request_id: 'req_a_1', event: 'request.received', data: { interaction_intent: 'new_goal' } },
+    response(20, 'req_a_1', [21_408, 18_944, 9_120, 8_400], { latency: 20_000, reason: 'plan_authoring', effort: 'max', who: ['planner', 'ho_plan_1'] }),
+    { ts: stamp(21), request_id: 'req_a_1', event: 'plan.accepted', data: { chat_message: 'Plan: mine ore, smelt plates, craft drills.' } },
+    { ts: stamp(21), request_id: 'req_a_1', event: 'plan.persisted', data: { goal_id: 'goal_1', task_board: board('goal_1', 'step_1') } },
+    ...restaged(21, 'req_a_1', { role: 'executor', checkpoint: 'C3', handoff_id: 'ho_exec_1', packet_hash: '9f2c41d07a3be518', packet_chars: 3412, packet_estimated_tokens: 853, previous_context_chars: 88_120, reason: 'executor_fresh_at_plan_commit', plan_id: 'plan_1', step_id: 'step_1' }),
+    { ts: stamp(22), request_id: 'req_a_1', event: 'operations.ack', data: {} },
+    response(34, 'req_a_1', [23_871, 22_016, 1204, 800], { latency: 6000, reason: 'same_goal_continue', effort: 'low', tools: true, who: ['executor', 'ho_exec_1'] }),
+    { ts: stamp(34), request_id: 'req_a_1', event: 'tool.call', data: { name: 'getInventoryItems', cached: false } },
+    { ts: stamp(82), request_id: 'req_a_1', event: 'factorio.completed_signal', data: {} },
+    { ts: stamp(83), request_id: 'req_a_1', event: 'step.verified', data: { active_step_id: 'step_1' } },
+    response(95, 'req_a_1', [25_112, 23_808, 2016, 1100], { latency: 9000, reason: 'same_goal_continue', effort: 'low', who: ['executor', 'ho_exec_1'] }),
+    { ts: stamp(96), request_id: 'req_a_1', event: 'request.completed', data: { chat_message: 'Ore mined.', outcome: 'no_operations' } },
+    { ts: stamp(200), request_id: 'req_b_1', event: 'request.received', data: { interaction_intent: 'continue_current' } },
+    { ts: stamp(201), request_id: 'req_b_1', event: 'factorio.status', data: { task_board: board('goal_1', 'step_2') } },
+    ...restaged(202, 'req_b_1', { role: 'planner', checkpoint: 'C1', handoff_id: 'ho_plan_2', packet_hash: 'c40de17b95a2f6e8', packet_chars: 5704, packet_estimated_tokens: 1426, previous_context_chars: 412_880, reason: 'context_over_soft_limit_at_slice_close', plan_id: 'plan_1' }),
+    ...restaged(203, 'req_b_1', { role: 'executor', checkpoint: 'C3', handoff_id: 'ho_exec_2', packet_hash: '1b77e0a9c6d24f03', packet_chars: 3968, packet_estimated_tokens: 992, previous_context_chars: 104_552, reason: 'executor_fresh_at_plan_commit', plan_id: 'plan_2', step_id: 'step_2' }),
+    response(215, 'req_b_1', [26_540, 25_088, 1890, 900], { latency: 14_000, reason: 'same_goal_continue', effort: 'low', tools: true, who: ['executor', 'ho_exec_2'] }),
+    { ts: stamp(216), request_id: 'req_b_1', event: 'request.completed', data: { chat_message: 'Smelting started.', outcome: 'no_operations' } },
+  ]
+}
+
+test('run record: rows without role, handoff_id or restage rows format exactly as before delegation', () => {
+  const record = buildRunRecord(delegationRows({ delegated: false }))
+  for (const key of ['by_role', 'restages']) assert.equal(key in record, false, `${key} must not appear without delegation fields`)
+  for (const row of record.by_request) for (const key of ['roles', 'handoff_ids', 'restages']) assert.equal(key in row, false, `by_request.${key}`)
+  // Golden text captured from the formatter before U9 touched it.
+  assert.equal(formatRunRecord(record), [
+    'SGLuna run record',
+    'requests: 2 · provider calls: 4 · verified steps: 1',
+    'input 96,931 (89,856 cached, 93%; 7,075 miss) · output 14,230 (11,200 reasoning, 79%)',
+    'per verified step: 14,230 output, 111,161 total units',
+    'prices: none given (units only; pass --prices <file> for money)',
+    '',
+    'Spend by round type (reasoning_policy_reason):',
+    '- plan_authoring: 1 rounds · in 21,408 (89% cached) · out 9,120 · 9,120 out/round · 64% of output · 21,408 in/round · cache miss 12% · p50 20s · max 20s',
+    '- same_goal_continue: 3 rounds · in 75,523 (94% cached) · out 5,110 · 1,703 out/round · 36% of output · 25,174 in/round · cache miss 6% · p50 9s · max 14s',
+    '',
+    'Output by effort:',
+    '- max: 1 rounds · 9,120 (64%)',
+    '- low: 3 rounds · 5,110 (36%)',
+    '',
+    'Spend with no world change:',
+    '- observation-only rounds: 1 rounds · in 23,871 (92% cached) · out 1,204',
+    '- recovery rounds: 0 rounds · in 0 (— cached) · out 0',
+    '- invalid plan submissions: 0 · 0 rounds · in 0 (— cached) · out 0',
+    '- rounds after the plan was blocked: 0 rounds · in 0 (— cached) · out 0',
+    '- duplicate tool calls: 0',
+    '',
+    'By goal:',
+    '- goal_1: 2 requests · 1 verified · 4 rounds · in 96,931 (93% cached) · out 14,230 · 14,230 out per verified step',
+    '',
+    'By step (rounds attributed to the step active when they ran):',
+    '- goal_1/step_1 (verified): 2 rounds · in 48,983 (94% cached) · out 3,220',
+    '- goal_1/step_2: 1 rounds · in 26,540 (95% cached) · out 1,890',
+    '',
+    'Player-felt responsiveness (2.10): first chat line and first admitted action, from the player request:',
+    '- requests: 2 · acknowledged: 0 · first chat p50 16s max 21s · first action p50 22s max 22s',
+    '- req_a_1: first chat 21s (plan.accepted) · first planner chat 21s · first action 22s',
+    '- req_b_1: first chat 16s (request.completed) · first planner chat 16s · first action —',
+    '',
+    'By request (time: think / actor busy incl. walking / idle):',
+    '- req_a_1 @ 2026-09-29T10:00:00.000Z · no_operations · 1 verified · 3 rounds · in 70,391 (92% cached) · out 12,340 · wall 96s = think 35s + busy 60s + idle 1s (1% idle, reconstructed)',
+    '- req_b_1 @ 2026-09-29T10:03:20.000Z · no_operations · 0 verified · 1 rounds · in 26,540 (95% cached) · out 1,890 · wall 16s = think 14s + busy 0s + idle 2s (13% idle, reconstructed)',
+    '',
+    'Chat verbosity:',
+    '- plans with a chat message: 1 of 1',
+    '- tool-call responses with assistant content: 0 of 2',
+    '- responses with any content: 2 of 4',
+    '- request.completed with chat: 2 of 2',
+    '',
+    'Time estimates (2.6):',
+    '- batches estimated: 0 (0 long) · reviews asked: 0 · answered: none',
+  ].join('\n'))
+})
+
+test('run record: role and handoff_id ride each request, spend splits by role, restages are summarised', () => {
+  const legacy = buildRunRecord(delegationRows({ delegated: false }))
+  const record = buildRunRecord(delegationRows({ delegated: true }))
+
+  // The extra fields change nothing that was already counted.
+  assert.deepEqual(record.totals, legacy.totals)
+  assert.deepEqual(record.by_goal, legacy.by_goal)
+  assert.deepEqual(record.by_step, legacy.by_step)
+
+  const [first, second] = record.by_request
+  assert.deepEqual(first.roles, ['planner', 'executor'])
+  assert.deepEqual(first.handoff_ids, ['ho_plan_1', 'ho_exec_1'])
+  assert.equal(first.restages, 1)
+  assert.deepEqual(second.roles, ['planner', 'executor'])
+  assert.deepEqual(second.handoff_ids, ['ho_plan_2', 'ho_exec_2'])
+  assert.equal(second.restages, 2)
+
+  assert.deepEqual(record.by_role.map(row => [row.role, row.rounds, row.input_units, row.output_units]), [
+    ['planner', 1, 21_408, 9120],
+    ['executor', 3, 75_523, 5110],
+  ])
+  assert.equal(record.by_role[0].output_share, 0.641)
+
+  assert.equal(record.restages.count, 3)
+  assert.deepEqual(record.restages.by_checkpoint, { C1: 1, C3: 2 })
+  assert.deepEqual(record.restages.by_role, { executor: 2, planner: 1 })
+  assert.deepEqual(record.restages.packet_chars, { count: 3, min: 3412, p50: 3968, max: 5704, total: 13_084 })
+  assert.deepEqual(record.restages.packet_estimated_tokens, { count: 3, min: 853, p50: 992, max: 1426, total: 3271 })
+  assert.equal(record.restages.stale_replies_dropped, 0)
+
+  const text = formatRunRecord(record)
+  assert.match(text, /- req_a_1 @ 2026-09-29T10:00:00\.000Z · no_operations · role planner\+executor · handoff ho_plan_1, ho_exec_1 · 1 restage · 1 verified · 3 rounds/)
+  assert.match(text, /- req_b_1 @ 2026-09-29T10:03:20\.000Z · no_operations · role planner\+executor · handoff ho_plan_2, ho_exec_2 · 2 restages · 0 verified · 1 rounds/)
+  assert.match(text, /Spend by conversation role \(delegation\):\n- planner: 1 rounds · in 21,408 \(89% cached\) · out 9,120 · 64% of output · cache miss 12%\n- executor: 3 rounds/)
+  assert.match(text, /Restages \(delegation\):\n- restages: 3 · by checkpoint: C1 1, C3 2 · by role: executor 2, planner 1 · stale replies dropped: 0\n- packet chars min 3,412 · p50 3,968 · max 5,704 · total 13,084\n- packet est\. tokens min 853 · p50 992 · max 1,426 · total 3,271/)
+})
+
+test('run record: a trace that mixes old rows and delegation rows only annotates the delegated ones; drops are counted', () => {
+  const rows = delegationRows({ delegated: true })
+  // The first request predates delegation (strip its fields), the second stays delegated.
+  const mixed = rows.map((row) => {
+    if (row.request_id !== 'req_a_1') return row
+    if (row.event === 'context.restaged') return undefined
+    if (row.event === 'provider.response') return { ...row, data: { ...row.data, role: undefined, handoff_id: undefined } }
+    return row
+  }).filter(Boolean)
+  mixed.push({ ts: stamp(212), request_id: 'req_b_1', event: 'context.stale_reply_dropped', data: { role: 'executor', handoff_id: 'ho_exec_1', active_handoff_id: 'ho_exec_2', reason: 'handoff_superseded' } })
+  const record = buildRunRecord(mixed)
+  const [first, second] = record.by_request
+  for (const key of ['roles', 'handoff_ids', 'restages']) assert.equal(key in first, false, key)
+  assert.deepEqual(second.handoff_ids, ['ho_plan_2', 'ho_exec_2'])
+  assert.deepEqual(record.by_role.map(row => [row.role, row.rounds]), [['executor', 1]])
+  assert.equal(record.restages.count, 2)
+  assert.equal(record.restages.stale_replies_dropped, 1)
+  assert.match(formatRunRecord(record), /stale replies dropped: 1/)
+})

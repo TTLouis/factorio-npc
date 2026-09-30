@@ -5,7 +5,15 @@ import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 import { parseJsonl } from './debug-report.mjs'
-import { analyzeBehaviorTrace, formatCheckReport, runCheck, UsageError } from './run-check.mjs'
+import {
+  analyzeBehaviorTrace,
+  DELEGATION_TRACE_ROWS,
+  formatCheckReport,
+  PACKET_OVERSIZE_MAX_CHARS,
+  RESTAGE_LOOP_MIN_COUNT,
+  runCheck,
+  UsageError,
+} from './run-check.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const fixturesDir = path.join(here, 'fixtures', 'run-check')
@@ -194,4 +202,222 @@ test('no_chat_reply: a request.failed answered by chat.request_failed_reported i
   assert.equal(findingsFor(analyzeBehaviorTrace([failed, reported]), 'no_chat_reply').length, 0)
   assert.equal(findingsFor(analyzeBehaviorTrace([failed]), 'no_chat_reply').length, 1)
   assert.equal(findingsFor(analyzeBehaviorTrace([failed, { ...reported, request_id: 'req_b_1' }]), 'no_chat_reply').length, 1)
+})
+
+// --- delegation signatures (U9): restage loop, oversize packet, stale reply -----------------
+//
+// Row shapes are DELEGATION_TRACE_ROWS (run-check.mjs); nothing emits them
+// yet, so these fixtures are built from that contract. The base trace is a
+// mid-run slice at realistic sizes: two requests, a planner and executors
+// restaged at a slice close and at plan commit, replies tagged with the
+// handoff that issued them, step progress between the restages.
+
+const D0 = Date.parse('2026-09-29T11:00:00Z')
+let deltaSeq = 0
+
+function drow(seconds, event, requestId, data = {}) {
+  deltaSeq += 1
+  return { schema: 1, ts: new Date(D0 + seconds * 1000).toISOString(), seq: deltaSeq, event, request_id: requestId, turn: 1, actor_id: 15, epoch: 1, data }
+}
+
+function restaged(seconds, requestId, { role = 'executor', checkpoint = 'C3', handoffId, planId = 'plan_1', stepId = 'step_1', chars = 3412, tokens, reason = 'executor_fresh_at_plan_commit', softLimitTokens } = {}) {
+  return drow(seconds, 'context.restaged', requestId, {
+    role,
+    checkpoint,
+    handoff_id: handoffId,
+    packet_hash: '9f2c41d07a3be518',
+    packet_chars: chars,
+    packet_estimated_tokens: tokens ?? Math.ceil(chars / 4),
+    previous_context_chars: 88_120,
+    reason,
+    plan_id: planId,
+    ...(stepId ? { step_id: stepId } : {}),
+    ...(softLimitTokens ? { soft_limit_tokens: softLimitTokens } : {}),
+  })
+}
+
+function reply(seconds, requestId, { role, handoffId, event = 'provider.response' }) {
+  return drow(seconds, event, requestId, {
+    round: 1,
+    latency_ms: 9000,
+    has_tool_calls: true,
+    usage: { input_units: 24_871, cached_input_units: 23_040, output_units: 1204, usage_complete: true },
+    provider: { reasoning_policy_reason: 'same_goal_continue', reasoning_effort: 'low', model: 'deepseek-flash' },
+    ...(role ? { role, handoff_id: handoffId } : {}),
+  })
+}
+
+const verified = (seconds, requestId, stepId) => drow(seconds, 'step.verified', requestId, { active_step_id: stepId })
+
+function cleanDelegatedTrace() {
+  return [
+    drow(0, 'request.received', 'req_d_1', { interaction_intent: 'new_goal' }),
+    restaged(1, 'req_d_1', { role: 'planner', checkpoint: 'C1', handoffId: 'ho_plan_a', chars: 5704, reason: 'context_over_soft_limit_at_slice_close', stepId: undefined, softLimitTokens: 100_000 }),
+    reply(20, 'req_d_1', { role: 'planner', handoffId: 'ho_plan_a' }),
+    restaged(22, 'req_d_1', { handoffId: 'ho_exec_a', stepId: 'step_1', softLimitTokens: 100_000 }),
+    reply(30, 'req_d_1', { role: 'executor', handoffId: 'ho_exec_a' }),
+    verified(80, 'req_d_1', 'step_1'),
+    reply(90, 'req_d_1', { role: 'executor', handoffId: 'ho_exec_a' }),
+    drow(95, 'request.completed', 'req_d_1', { outcome: 'no_operations', chat_message: 'Step 1 done.' }),
+    drow(200, 'request.received', 'req_d_2', { interaction_intent: 'continue_current' }),
+    restaged(201, 'req_d_2', { handoffId: 'ho_exec_b', stepId: 'step_2', softLimitTokens: 100_000 }),
+    reply(215, 'req_d_2', { role: 'executor', handoffId: 'ho_exec_b' }),
+    verified(260, 'req_d_2', 'step_2'),
+    drow(262, 'request.completed', 'req_d_2', { outcome: 'no_operations', chat_message: 'Step 2 done.' }),
+  ]
+}
+
+const DELEGATION_SIGNATURES = ['restage_loop', 'restage_packet_oversize', 'stale_reply_not_dropped']
+const delegationFindings = result => result.findings.filter(f => DELEGATION_SIGNATURES.includes(f.signature))
+
+test('delegation: a healthy restaged run raises none of the three delegation signatures', () => {
+  const result = analyzeBehaviorTrace(cleanDelegatedTrace())
+  assert.deepEqual(delegationFindings(result), [])
+  assert.equal(result.request_count, 2)
+})
+
+test('delegation: rows from before delegation (no role, handoff_id or restage rows) raise none of them', async () => {
+  for (const name of ['steam-run-clean-step-progress.jsonl', 'qwen-observation-phase-closed-loop.jsonl', 'steam-run-provider-output-cap.jsonl']) {
+    assert.deepEqual(delegationFindings(analyzeBehaviorTrace(await loadFixtureRows(name))), [], name)
+  }
+})
+
+test('delegation: restage_loop fires on the third restage of one role and step with nothing verified between', () => {
+  const rows = [
+    ...cleanDelegatedTrace().slice(0, 4),
+    drow(30, 'provider.error', 'req_d_1', { message: 'provider_turn_output_cap_exceeded', role: 'executor', handoff_id: 'ho_exec_a' }),
+    restaged(31, 'req_d_1', { checkpoint: 'C5', handoffId: 'ho_exec_a2', stepId: 'step_1', reason: 'generation_cap' }),
+    restaged(60, 'req_d_1', { checkpoint: 'C5', handoffId: 'ho_exec_a3', stepId: 'step_1', reason: 'generation_cap' }),
+    // The loop straddles two requests, like a Resume after a ceiling pause would.
+    drow(70, 'request.completed', 'req_d_1', { outcome: 'paused', chat_message: 'Paused.' }),
+    drow(100, 'request.received', 'req_d_2', { interaction_intent: 'continue_current' }),
+    restaged(101, 'req_d_2', { checkpoint: 'C5', handoffId: 'ho_exec_a4', stepId: 'step_1', reason: 'generation_cap' }),
+  ]
+  const loops = findingsFor(analyzeBehaviorTrace(rows), 'restage_loop')
+  assert.equal(loops.length, 1)
+  assert.equal(loops[0].request_id, 'req_d_1')
+  assert.equal(loops[0].count, 4)
+  assert.equal(loops[0].first_ts, '2026-09-29T11:00:22.000Z')
+  assert.match(loops[0].detail, /executor restaged 4 times for plan plan_1 step step_1 with no step verified in between \(checkpoints C3,C5,C5,C5; loop threshold 3\)/)
+  assert.equal(RESTAGE_LOOP_MIN_COUNT, 3)
+})
+
+test('delegation: restage_loop does not fire below the threshold, after progress, or across different steps or roles', () => {
+  const loopRows = (extra = []) => [
+    restaged(22, 'req_d_1', { handoffId: 'ho_e1', stepId: 'step_1' }),
+    restaged(31, 'req_d_1', { checkpoint: 'C5', handoffId: 'ho_e2', stepId: 'step_1' }),
+    ...extra,
+  ]
+  // Two restages: below the threshold of three.
+  assert.deepEqual(findingsFor(analyzeBehaviorTrace(loopRows()), 'restage_loop'), [])
+  // A third restage after a step was verified starts a new count.
+  assert.deepEqual(findingsFor(analyzeBehaviorTrace(loopRows([
+    verified(40, 'req_d_1', 'step_1'),
+    restaged(50, 'req_d_1', { checkpoint: 'C5', handoffId: 'ho_e3', stepId: 'step_1' }),
+  ])), 'restage_loop'), [])
+  // step.semantic_completed is progress too.
+  assert.deepEqual(findingsFor(analyzeBehaviorTrace(loopRows([
+    drow(40, 'step.semantic_completed', 'req_d_1', { active_step_id: 'step_1' }),
+    restaged(50, 'req_d_1', { checkpoint: 'C5', handoffId: 'ho_e3', stepId: 'step_1' }),
+  ])), 'restage_loop'), [])
+  // The third restage is for another step, or another role: not the same loop.
+  assert.deepEqual(findingsFor(analyzeBehaviorTrace(loopRows([restaged(50, 'req_d_1', { checkpoint: 'C5', handoffId: 'ho_e3', stepId: 'step_2' })])), 'restage_loop'), [])
+  assert.deepEqual(findingsFor(analyzeBehaviorTrace(loopRows([restaged(50, 'req_d_1', { role: 'planner', checkpoint: 'C1', handoffId: 'ho_p1', stepId: 'step_1' })])), 'restage_loop'), [])
+})
+
+test('delegation: restage_packet_oversize fires past the packet character limit and past a named soft limit', () => {
+  assert.equal(PACKET_OVERSIZE_MAX_CHARS, 6000)
+  const bigPlanner = restaged(1, 'req_d_1', { role: 'planner', checkpoint: 'C1', handoffId: 'ho_plan_big', chars: 7912, reason: 'context_over_soft_limit_at_slice_close' })
+  const chars = findingsFor(analyzeBehaviorTrace([bigPlanner]), 'restage_packet_oversize')
+  assert.equal(chars.length, 1)
+  assert.equal(chars[0].request_id, 'req_d_1')
+  assert.match(chars[0].detail, /planner C1 packet ho_plan_big: 7912 chars > 6000 char packet limit/)
+
+  // Under the character bound but over the soft limit the row names: 1,200 chars is ~300 tokens.
+  const overSoft = restaged(2, 'req_d_1', { handoffId: 'ho_exec_small', chars: 1200, softLimitTokens: 250 })
+  const soft = findingsFor(analyzeBehaviorTrace([overSoft]), 'restage_packet_oversize')
+  assert.equal(soft.length, 1)
+  assert.match(soft[0].detail, /executor C3 packet ho_exec_small: ~300 tokens > 250 token soft limit/)
+  // The token count falls back to ceil(chars / 4) when the row has no estimate.
+  const noEstimate = { ...overSoft, data: { ...overSoft.data, packet_estimated_tokens: undefined } }
+  assert.equal(findingsFor(analyzeBehaviorTrace([noEstimate]), 'restage_packet_oversize').length, 1)
+
+  // Exactly at either limit is not over it.
+  const exact = [
+    restaged(3, 'req_d_1', { role: 'planner', checkpoint: 'C1', handoffId: 'ho_plan_exact', chars: 6000 }),
+    restaged(4, 'req_d_1', { handoffId: 'ho_exec_exact', chars: 1000, softLimitTokens: 250 }),
+  ]
+  assert.deepEqual(findingsFor(analyzeBehaviorTrace(exact), 'restage_packet_oversize'), [])
+})
+
+test('delegation: stale_reply_not_dropped fires on a reply from a discarded handoff with no drop row', () => {
+  const rows = [
+    ...cleanDelegatedTrace().slice(0, 5),
+    // ho_exec_a was replaced at C5 by ho_exec_a2; its late reply arrives and is applied.
+    restaged(31, 'req_d_1', { checkpoint: 'C5', handoffId: 'ho_exec_a2', stepId: 'step_1', reason: 'generation_cap' }),
+    reply(40, 'req_d_1', { role: 'executor', handoffId: 'ho_exec_a' }),
+    reply(41, 'req_d_1', { role: 'executor', handoffId: 'ho_exec_a2' }),
+    // A stale reply for another handoff shows up in the next request.
+    drow(200, 'request.received', 'req_d_2', { interaction_intent: 'continue_current' }),
+    reply(210, 'req_d_2', { role: 'executor', handoffId: 'ho_exec_a', event: 'provider.error' }),
+  ]
+  const stale = findingsFor(analyzeBehaviorTrace(rows), 'stale_reply_not_dropped')
+  assert.deepEqual(stale.map(f => [f.request_id, f.count]), [['req_d_1', 1], ['req_d_2', 1]])
+  assert.match(stale[0].detail, /executor reply provider\.response carries handoff_id=ho_exec_a but the active executor handoff is ho_exec_a2, and no context\.stale_reply_dropped row followed/)
+  assert.equal(stale[0].first_ts, '2026-09-29T11:00:40.000Z')
+})
+
+test('delegation: stale_reply_not_dropped stays quiet for dropped, current, untagged and pre-restage replies', () => {
+  const restagedAgain = [
+    ...cleanDelegatedTrace().slice(0, 5),
+    restaged(31, 'req_d_1', { checkpoint: 'C5', handoffId: 'ho_exec_a2', stepId: 'step_1', reason: 'generation_cap' }),
+  ]
+  const stale = reply(40, 'req_d_1', { role: 'executor', handoffId: 'ho_exec_a' })
+  const drop = drow(40, 'context.stale_reply_dropped', 'req_d_1', { role: 'executor', handoff_id: 'ho_exec_a', active_handoff_id: 'ho_exec_a2', reason: 'handoff_superseded' })
+  // The stale reply was dropped and traced (drop row before or after the reply row).
+  assert.deepEqual(findingsFor(analyzeBehaviorTrace([...restagedAgain, stale, drop]), 'stale_reply_not_dropped'), [])
+  assert.deepEqual(findingsFor(analyzeBehaviorTrace([...restagedAgain, drop, stale]), 'stale_reply_not_dropped'), [])
+  // A drop row for a different handoff does not excuse this one.
+  const other = { ...drop, data: { ...drop.data, handoff_id: 'ho_other' } }
+  assert.equal(findingsFor(analyzeBehaviorTrace([...restagedAgain, stale, other]), 'stale_reply_not_dropped').length, 1)
+  // The current handoff, an untagged reply and the planner's own live handoff are fine.
+  assert.deepEqual(findingsFor(analyzeBehaviorTrace([...restagedAgain, reply(40, 'req_d_1', { role: 'executor', handoffId: 'ho_exec_a2' })]), 'stale_reply_not_dropped'), [])
+  assert.deepEqual(findingsFor(analyzeBehaviorTrace([...restagedAgain, reply(40, 'req_d_1', {})]), 'stale_reply_not_dropped'), [])
+  assert.deepEqual(findingsFor(analyzeBehaviorTrace([...restagedAgain, reply(40, 'req_d_1', { role: 'planner', handoffId: 'ho_plan_a' })]), 'stale_reply_not_dropped'), [])
+  // A reply tagged before the role's first restage is on record cannot be judged.
+  assert.deepEqual(findingsFor(analyzeBehaviorTrace([reply(1, 'req_d_1', { role: 'executor', handoffId: 'ho_exec_first' })]), 'stale_reply_not_dropped'), [])
+})
+
+test('delegation: the since cutoff hides earlier findings but keeps the active handoff state', () => {
+  const rows = [
+    ...cleanDelegatedTrace().slice(0, 5),
+    restaged(31, 'req_d_1', { checkpoint: 'C5', handoffId: 'ho_exec_a2', stepId: 'step_1', reason: 'generation_cap' }),
+    reply(40, 'req_d_1', { role: 'executor', handoffId: 'ho_exec_a' }),
+    reply(120, 'req_d_1', { role: 'executor', handoffId: 'ho_exec_a' }),
+  ]
+  assert.equal(findingsFor(analyzeBehaviorTrace(rows), 'stale_reply_not_dropped')[0].count, 2)
+  // Cutoff after the restage row: the second reply is still judged against ho_exec_a2.
+  const since = analyzeBehaviorTrace(rows, { since: '2026-09-29T11:01:00.000Z' })
+  assert.equal(findingsFor(since, 'stale_reply_not_dropped')[0].count, 1)
+})
+
+test('delegation: the expected row shapes are exported for the emitter and validate against the reducer vocabulary', () => {
+  const { restaged: example } = DELEGATION_TRACE_ROWS.examples
+  assert.equal(example.event, DELEGATION_TRACE_ROWS.events.restaged)
+  assert.ok(['planner', 'executor'].includes(example.data.role))
+  assert.match(example.data.checkpoint, /^C[1-8]$/)
+  assert.deepEqual(Object.keys(example.data).sort(), ['checkpoint', 'handoff_id', 'packet_chars', 'packet_estimated_tokens', 'packet_hash', 'plan_id', 'previous_context_chars', 'reason', 'role', 'soft_limit_tokens', 'step_id'])
+  // The examples are themselves clean under the detectors.
+  const rows = [
+    { ...example, ts: '2026-09-29T11:00:00.000Z', data: { ...example.data } },
+    { ...DELEGATION_TRACE_ROWS.examples.providerReply, ts: '2026-09-29T11:00:05.000Z' },
+  ]
+  assert.deepEqual(delegationFindings(analyzeBehaviorTrace(rows)), [])
+  assert.equal(DELEGATION_TRACE_ROWS.examples.staleReplyDropped.event, DELEGATION_TRACE_ROWS.events.staleReplyDropped)
+})
+
+test('delegation: findings print through formatCheckReport like every other signature', () => {
+  const rows = [restaged(1, 'req_d_1', { role: 'planner', checkpoint: 'C1', handoffId: 'ho_plan_big', chars: 7912 })]
+  const text = formatCheckReport(analyzeBehaviorTrace(rows))
+  assert.match(text, /\[restage_packet_oversize\] request_id=req_d_1 count=1 first_ts=2026-09-29T11:00:01\.000Z :: planner C1 packet ho_plan_big/)
 })
