@@ -1388,6 +1388,195 @@ test('a supervisor recovery run carries a usage summary, so the request ceiling 
   assert.equal(world.calls, 12)
 })
 
+// U5: the ceiling is per plan slice. A long goal that keeps closing small
+// slices (author a slice, verify it, claim it, plan the next) accumulates a
+// request-wide total far past 5 x the per-turn cap without any slice being big.
+const SLICE_GOAL = {
+  scope: 'long_horizon',
+  summary: 'Launch one rocket from this save.',
+  doneWhen: [{ id: 'rocket', kind: 'rockets_launched', minimum: 1 }],
+}
+const SLICE_SHELF = [
+  { id: 'node_power', intent: 'steam power running' },
+  { id: 'node_drill', intent: 'an electric mining drill on iron ore', depends_on: ['node_power'] },
+]
+const SLICE_CALL_UNITS = 450
+
+// Two provider calls per slice (author, then the claim that closes it), each
+// charged SLICE_CALL_UNITS against a 1,000-unit per-turn cap (ceiling 5,000).
+function sliceHarness() {
+  const game = new FakeFactorio()
+  const memory = new CanonicalTaskBoardMemory()
+  const world = { game, memory, calls: 0, trace: [], slicesAuthored: 0 }
+  const withUsage = (message) => {
+    Object.defineProperty(message, '_sglunaProvider', {
+      enumerable: false,
+      value: { diagnostic_code: 'ok', finish_reason: 'stop', usage: { prompt_tokens: 3000, completion_tokens: SLICE_CALL_UNITS, total_tokens: 3000 + SLICE_CALL_UNITS } },
+    })
+    return message
+  }
+  world.agent = new NpcAgentLoop({
+    rcon: game,
+    memory,
+    maxProviderOutputUnits: 1000,
+    maxContinuations: 64, // one continuation per closed slice; the default 10 is unrelated to the ceiling
+    provider: async () => {
+      world.calls++
+      assert.ok(world.calls < 60, 'slice loop did not terminate')
+      if (world.calls % 2 === 1) {
+        world.slicesAuthored++
+        return withUsage(planReply({
+          plan: [`Gather 10 iron ore (slice ${world.slicesAuthored})`],
+          operations: [gather('iron-ore', 10)],
+          ...(world.slicesAuthored === 1 ? { goal: SLICE_GOAL, roadmap: SLICE_SHELF } : {}),
+        }))
+      }
+      return withUsage(planReply({
+        chatMessage: 'Slice mined.',
+        plan: [],
+        currentStep: 0,
+        operations: [],
+        semanticCompletion: { stepId: memory.currentPlan('npc:sgluna')?.task_board?.active_step_id, rationale: 'The completed gather batch grounds this prose-only step.' },
+      }))
+    },
+    interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
+    systemPrompt: 'slice ceiling test',
+    goalDefinitionPolicy: 'required',
+    stateFile: null,
+    traceFile: null,
+    decisionTraceFile: null,
+    npcId: 'sgluna',
+  })
+  world.agent.behaviorTrace = { emit: async record => { world.trace.push(record) } }
+  world.events = name => world.trace.filter(record => record.event === name)
+  // Mine one more batch; verification closes the slice and the planner is
+  // woken for the next one inside the same request.
+  world.closeSlice = async () => {
+    game.inventory['iron-ore'] = (game.inventory['iron-ore'] ?? 0) + 10
+    return world.agent.completed()
+  }
+  return world
+}
+
+test('a long goal whose total output crosses 5x the cap over several slices never pauses while every slice stays under it', async () => {
+  const world = sliceHarness()
+  await world.agent.request('get steam power going and run an electric mining drill on iron ore', { sender: 'TTLouis' })
+  let result
+  for (let slice = 0; slice < 6; slice++) result = await world.closeSlice()
+
+  const aggregate = world.agent.traceRequest.usage.output_units
+  const ceiling = world.agent.requestOutputCeiling()
+  assert.equal(ceiling, 5000)
+  assert.ok(aggregate > ceiling, `the aggregate ${aggregate} is past the ceiling ${ceiling}, where the old request-wide check paused`)
+  assert.notEqual(result?.goalStatus, 'paused')
+  assert.equal(world.events('budget.request_ceiling_exceeded').length, 0)
+  assert.equal(world.events('goal.paused').length, 0)
+  assert.equal(world.events('request.failed').length, 0)
+  assert.equal(world.memory.currentPlan('npc:sgluna').status, 'active')
+
+  // Each slice close reset the baseline to the aggregate of that moment.
+  const resets = world.events('budget.slice_baseline_reset')
+  assert.equal(resets.length, world.events('planning.slice_completion_continuation').length)
+  assert.equal(resets.length, 6)
+  let expectedBaseline = 0
+  for (const reset of resets) {
+    assert.equal(reset.data.previous_slice_output_baseline, expectedBaseline)
+    assert.ok(reset.data.slice_output_units <= 2 * SLICE_CALL_UNITS, 'a slice is an author call and a claim call')
+    assert.equal(reset.data.aggregate_output_units, reset.data.slice_output_baseline)
+    assert.ok(reset.data.slice_output_baseline > expectedBaseline || expectedBaseline === 0)
+    expectedBaseline = reset.data.slice_output_baseline
+  }
+  assert.equal(world.agent.traceRequest.slice_output_baseline, expectedBaseline)
+  // The provider.response row keeps its shape: request_output_units stays the aggregate.
+  const responses = world.events('provider.response')
+  assert.equal(responses.at(-1).data.request_output_units, aggregate)
+  assert.equal(responses.some(record => 'slice_output_baseline' in record.data), false)
+})
+
+test('the baseline moves at a slice close only, never at a step close inside a slice', async () => {
+  // The runaway request is one 16-step plan: every step close rolls the step
+  // budget generation, but no slice ever closes, so the baseline never moves.
+  const world = runawayHarness()
+  await world.agent.request('mine a long list of ore batches', { sender: 'TTLouis' })
+  await world.finishUntilPaused()
+  assert.ok(world.events('budget.generation_rolled').length >= 3, 'steps closed inside the slice')
+  assert.equal(world.events('budget.slice_baseline_reset').length, 0)
+  assert.ok(world.events('provider.response').length >= 11)
+  assert.equal(world.agent.traceRequest?.slice_output_baseline ?? 0, 0)
+
+  // Slice harness: the baseline changes once per slice close and by nothing else.
+  const slices = sliceHarness()
+  await slices.agent.request('get steam power going and run an electric mining drill on iron ore', { sender: 'TTLouis' })
+  assert.equal(slices.agent.traceRequest.slice_output_baseline ?? 0, 0, 'authoring the first slice moves nothing')
+  const seen = []
+  for (let close = 1; close <= 3; close++) {
+    await slices.closeSlice()
+    seen.push(slices.agent.traceRequest.slice_output_baseline)
+    assert.equal(slices.events('budget.slice_baseline_reset').length, close)
+  }
+  assert.deepEqual(seen, [...seen].sort((a, b) => a - b))
+  assert.equal(new Set(seen).size, 3, 'each slice close moved the baseline')
+})
+
+test('a single slice that goes over the ceiling still pauses visibly after earlier slices closed, and reports its slice figures', async () => {
+  const world = runawayHarness()
+  await world.agent.request('mine a long list of ore batches', { sender: 'TTLouis' })
+  // An earlier slice of this request closed at 480 units (the request's first call).
+  assert.equal(world.agent.traceRequest.usage.output_units, 480)
+  world.agent.traceRequest.slice_output_baseline = 480
+  const result = await world.finishUntilPaused()
+
+  assert.equal(result?.goalStatus, 'paused')
+  const exceeded = world.events('budget.request_ceiling_exceeded')
+  assert.equal(exceeded.length, 1)
+  assert.equal(exceeded[0].data.request_output_ceiling, 5000, 'the ceiling value is unchanged')
+  assert.equal(exceeded[0].data.request_output_units, 5280, 'the slice used 11 calls x 480 = 5,280 > 5,000')
+  assert.equal(exceeded[0].data.aggregate_output_units, 5760)
+  assert.equal(exceeded[0].data.slice_output_baseline, 480)
+  assert.equal(world.calls, 12, 'the request-wide check would have paused a call earlier, at 11')
+  assert.match(result.chatMessage, /^I paused this goal: this request used its whole output allowance for the current plan slice \(5,280 of 5,000 units across \d+ step budgets; 5,760 in all\)\. /)
+  assert.ok(result.chatMessage.endsWith(RESUME_LINE))
+  const state = world.memory.currentPlan('npc:sgluna')
+  assert.equal(state.status, 'paused')
+  assert.equal(state.pause_reason, 'request_output_ceiling: 5,280 > 5,000 output units')
+  const capReached = world.events('budget.cap_reached').at(-1)
+  assert.equal(capReached.data.request_output_units, 5280)
+  assert.equal(capReached.data.aggregate_output_units, 5760)
+  assert.equal(capReached.data.slice_output_baseline, 480)
+  assert.equal(world.events('goal.paused')[0].data.cause, 'request_output_ceiling')
+  assert.equal(world.events('request.completed').at(-1).data.outcome, 'paused_request_output_ceiling')
+})
+
+test('a restart, restore or recovery run never inherits a stale or negative slice baseline', async () => {
+  const agent = makeAgent({ provider: async () => { throw new Error('no provider call in this test') } })
+  // A supervisor recovery request has no baseline at all: it starts at 0.
+  agent.traceRequest = { id: 'recovery_1', seq: 0 }
+  assert.equal(agent.sliceOutputCeiling().baseline, 0)
+  assert.equal(agent.sliceOutputCeiling().used, 0)
+
+  // A baseline left over from a longer counter, with the aggregate now lower
+  // (restart/restore): re-baselined to 0, never negative.
+  agent.traceRequest = { id: 'recovery_2', seq: 0, usage: { output_units: 700 }, slice_output_baseline: 9000 }
+  const view = agent.sliceOutputCeiling()
+  assert.equal(view.baseline, 0)
+  assert.equal(view.used, 700)
+  assert.equal(view.exceeded, false)
+
+  // A junk baseline is treated as 0.
+  agent.traceRequest = { id: 'recovery_3', seq: 0, usage: { output_units: 700 }, slice_output_baseline: -25 }
+  assert.equal(agent.sliceOutputCeiling().used, 700)
+
+  // A slice close records the aggregate, never a negative, and restarts the count.
+  await agent.closeOutputSlice('next_shelf_slice')
+  assert.equal(agent.traceRequest.slice_output_baseline, 700)
+  assert.equal(agent.sliceOutputCeiling().used, 0)
+  // With no request there is nothing to reset and nothing throws.
+  agent.traceRequest = null
+  await agent.closeOutputSlice('next_shelf_slice')
+  assert.equal(agent.sliceOutputCeiling().used, undefined)
+
+})
+
 test('a provider response with no usage is charged its requested output cap, toward the cap and the ceiling', async () => {
   const canonical = ['Wait for the machine cycle', 'Inspect the result']
   const noUsage = () => {
