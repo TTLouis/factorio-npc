@@ -342,4 +342,4 @@ Unit and integration evidence only: static scenarios with scripted model replies
 | U11 | Jev at the checkpoints (§7 owner decisions) | not started, after U6 |
 | U10 | Docs: plan rows 3.4–3.6, status doc, this note | this section; final pass after U11 |
 
-After U11: the flash-only live test (both roles on DeepSeek flash, ≤2 CAD; ask the owner about a harness-enforced spend cap first). It also collects the first Jev agreement samples.
+After U11: the flash-only live test (both roles on DeepSeek flash, ≤2 CAD; ask the owner about a harness-enforced spend cap first). It also collects the first Jev agreement samples.
