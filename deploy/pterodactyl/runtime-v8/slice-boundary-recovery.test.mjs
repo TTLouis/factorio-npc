@@ -387,7 +387,8 @@ test('C7: an actor replacement rebuilds from a packet with the replacement actor
   await agent.request('launch a rocket', { sender: 'Louis' })
   game.inventory['iron-ore'] = 10
   const oldTurn = agent.completed().then(() => 'admitted', error => `dropped: ${error.message}`) // step 1 done: the planner is asked what is next (call 3, held)
-  for (let spin = 0; spin < 500 && calls < 3; spin++) await new Promise(resolve => setImmediate(resolve))
+  // Wait on the clock, not on a spin count: the step close persists the state file, and real file I/O lags under load.
+  for (const deadline = Date.now() + 5000; calls < 3 && Date.now() < deadline;) await new Promise(resolve => setTimeout(resolve, 1))
   assert.equal(calls, 3, 'the old turn has a provider call in flight')
   assert.equal(agent.providerCallsInFlight, 1, 'and it is still open when the recovery restages')
   const mutationsBefore = game.mutations.length
