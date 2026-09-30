@@ -79,7 +79,7 @@ These names are compatibility surface and should be migrated separately with ali
 | Protocol/save/runtime identity | actor name/id `SGLuna`/`sgluna`, `npc:sgluna`, `sgluna_deployment`, `SGLUNA_RESULT_*`, `SGLUNA_CONFIG_*`, `SGLUNA_UI_*`, `.sgluna/`, Factorio `storage.sgluna_*`, GUI/sprite/prototype ids, all user-facing and model-facing strings | **Migrated 2026-09-29** with no aliases and no save migration. Still unchanged: the Autorio mod id and `autorio_*` interfaces (upstream naming), the `-airi/*` TSTL plugin namespace, and our own workspace package names and lockfile (build identity). |
 | Historical/upstream attribution | `moeru-ai/airi-factorio`, original Autorio/AIRI lineage, dated validation records and historical repo notes | Must remain for provenance and MIT attribution. |
 
-The internal `.sgluna/` directory is authoritative for managed releases, operation locking, provider budget, durable NPC state, rollback metadata, and runtime temp directories. It replaced `.airi/` on 2026-09-29; nothing reads or migrates the old directory, so a deployment that still has `.airi/` starts from a fresh state store.
+The internal `.sgluna/` directory is authoritative for managed releases, operation locking, provider budget, durable NPC state, rollback metadata, and runtime temp directories. It replaced `.airi/` on 2026-09-29; nothing reads or migrates the old directory. There is no deployment and every world is disposable, so the installer simply refuses a volume whose start/rollback helper still points into `.airi/releases/` ("unexpected target"); reinstall on a fresh volume.
 
 ## Phase 4 — Repository detach
 

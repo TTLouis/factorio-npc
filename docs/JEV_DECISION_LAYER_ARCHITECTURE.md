@@ -852,7 +852,7 @@ DECISION_PROVIDER_MAX_INPUT_CHARS=48000
 DECISION_PROVIDER_MAX_QUESTIONS=24
 ```
 
-The API key is runtime-only. The URL/model/limits are also intentionally environment-owned during the experiment rather than being written into the compatibility `airi-config.json`.
+The API key is runtime-only. The URL/model/limits are also intentionally environment-owned during the experiment rather than being written into `sgluna-config.json`.
 
 Do not add these to the stable Main egg until the experimental branch has a working end-to-end path.
 

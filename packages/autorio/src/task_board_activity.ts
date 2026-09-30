@@ -64,7 +64,6 @@ export interface ActivityView {
 }
 
 declare const storage: {
-  sgluna_task_board_activity_filter?: Record<number, number>
   sgluna_task_board_activity_filters?: Record<number, number>
   sgluna_task_board_project_activity_filters?: Record<number, number>
   sgluna_task_board_activity_view?: Record<number, ActivityView>
@@ -102,20 +101,12 @@ function filter_store(surface: ActivityFilterSurface) {
 }
 
 /**
- * The categories this player currently shows. A save from the single-select
- * drop-down stored an index into ALL, PLAN, OBS, ACTIONS, RESULTS, ISSUES; that
- * selection carries over as the equivalent single category on the console.
+ * The categories this player currently shows; every category until the
+ * player chooses otherwise.
  */
 export function activity_filter_mask(player_index: number, surface: ActivityFilterSurface = 'console') {
   const current = normalize_mask(filter_store(surface)[player_index])
   if (current !== undefined) return current
-  if (surface !== 'console') return ACTIVITY_FILTER_ALL
-  const legacy = storage.sgluna_task_board_activity_filter?.[player_index]
-  if (legacy === 2) return 1
-  if (legacy === 3) return 2
-  if (legacy === 4) return 4
-  if (legacy === 5) return 8
-  if (legacy === 6) return 16
   return ACTIVITY_FILTER_ALL
 }
 
@@ -282,7 +273,7 @@ export function stop_activity_live(player_index: number, last_shown_key: string 
 }
 
 /**
- * Jump back to the newest event and keep following from there. The feed is
+ * Jump back to the newest event and stay live from there. The feed is
  * marked behind so the next refresh scrolls even though nothing new arrived.
  */
 export function resume_activity_live(player_index: number, last_shown_key: string | undefined) {

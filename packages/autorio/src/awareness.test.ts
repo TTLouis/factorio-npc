@@ -99,15 +99,6 @@ describe('standalone NPC map knowledge', () => {
     expect(is_chunk_known_visible(force, surface, { x: 1, y: -1 })).toBe(false)
   })
 
-  it('retires the companion radar a pre-change save still holds', () => {
-    const { actor } = make_actor()
-    const radar = { valid: true, destroy: vi.fn() }
-    ;(globalThis as any).storage.sgluna_awareness_radar = radar
-    new_awareness_controller().tick(actor)
-    expect(radar.destroy).toHaveBeenCalledTimes(1)
-    expect((globalThis as any).storage.sgluna_awareness_radar).toBeUndefined()
-  })
-
   it('pushes the explored map when a player joins and pulls what players charted', () => {
     const { actor, surface, force } = make_actor()
     const controller = new_awareness_controller()

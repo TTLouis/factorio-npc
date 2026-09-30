@@ -14,21 +14,12 @@ interface AwarenessChunkState {
 
 declare const storage: {
   sgluna_awareness_chunk?: AwarenessChunkState
-  // Saves from before the map-knowledge change hold the companion radar.
-  sgluna_awareness_radar?: LuaEntity
   sgluna_map_sync_players?: number
   sgluna_map_sync_pulled_tick?: number
 }
 
 function chunk_coordinate(value: number) {
   return math.floor(value / 32)
-}
-
-function retire_legacy_radar() {
-  const radar = storage.sgluna_awareness_radar
-  if (radar === undefined) return
-  if (radar.valid) radar.destroy()
-  storage.sgluna_awareness_radar = undefined
 }
 
 // Sync the NPC's map knowledge with the force chart players see. Nothing is
@@ -52,7 +43,6 @@ function sync_with_players(actor: ControlledActor) {
 
 export function new_awareness_controller() {
   function tick(actor: ControlledActor) {
-    retire_legacy_radar()
     const identity = actor.status_snapshot()
     if (identity.kind !== 'standalone_character') {
       storage.sgluna_awareness_chunk = undefined

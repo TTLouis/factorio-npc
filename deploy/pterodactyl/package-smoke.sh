@@ -84,10 +84,10 @@ docker run --rm \
     [[ -s /mnt/server/client-mods/autorio_0.1.0.zip ]] || { echo "[pterodactyl-smoke] managed client mod is missing from client-mods/" >&2; exit 1; }
     [[ -s /mnt/server/client-mods/SHA256SUMS ]] || { echo "[pterodactyl-smoke] managed client mod checksum is missing" >&2; exit 1; }
     [[ ! -e /mnt/server/autorio_0.1.0.zip ]] || { echo "[pterodactyl-smoke] legacy root client mod should have been removed" >&2; exit 1; }
-    [[ -s /mnt/server/sgluna-config.json ]] || { echo "[pterodactyl-smoke] airi-config.json is missing" >&2; exit 1; }
+    [[ -s /mnt/server/sgluna-config.json ]] || { echo "[pterodactyl-smoke] sgluna-config.json is missing" >&2; exit 1; }
     [[ -s /mnt/server/README-SGLUNA.txt ]] || { echo "[pterodactyl-smoke] README-SGLUNA.txt is missing" >&2; exit 1; }
     [[ -d /mnt/server/mods && -d /mnt/server/saves ]] || { echo "[pterodactyl-smoke] operator mod/save directories are missing" >&2; exit 1; }
-    ! grep -q "smoke-secret" /mnt/server/sgluna-config.json || { echo "[pterodactyl-smoke] provider secret leaked to airi-config.json" >&2; exit 1; }
+    ! grep -q "smoke-secret" /mnt/server/sgluna-config.json || { echo "[pterodactyl-smoke] provider secret leaked to sgluna-config.json" >&2; exit 1; }
     target="$(readlink -- /mnt/server/start-sgluna.sh)"
     [[ "$target" == .sgluna/releases/*/start-sgluna.sh ]] || { echo "[pterodactyl-smoke] unexpected startup target: $target" >&2; exit 1; }
     [[ -s "/mnt/server/${target%/start-sgluna.sh}/manifest.json" ]] || { echo "[pterodactyl-smoke] release manifest is missing" >&2; exit 1; }

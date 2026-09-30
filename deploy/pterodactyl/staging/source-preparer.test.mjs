@@ -88,7 +88,7 @@ test('preparer fails closed if the bounded map-knowledge contract is missing, wi
 
   const radar = await fixture(t)
   const radarPath = path.join(radar.autorio, 'data.lua')
-  await fs.appendFile(radarPath, '\nlocal radar = {name = "sgluna-npc-awareness-radar"}\n')
+  await fs.appendFile(radarPath, '\nlocal radar = {name = "airi-npc-awareness-radar"}\n')
   await assert.rejects(() => prepareNativeNpcSource(radar.root, radar.guard), /removed NPC awareness radar prototype is present/)
 })
 

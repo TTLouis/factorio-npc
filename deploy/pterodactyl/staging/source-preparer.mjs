@@ -49,7 +49,7 @@ export async function prepareNativeNpcSource(sourceRoot, guardSource) {
   // hidden radar, which charted nothing with zero connected players
   // (docs/NPC_CHARACTER_ARCHITECTURE.md, "Map knowledge"). Keep the contract
   // explicit so a stale package cannot reintroduce the radar or grow the window.
-  check(!dataLua.includes('sgluna-npc-awareness-radar'), 'The removed NPC awareness radar prototype is present')
+  check(!dataLua.includes('airi-npc-awareness-radar'), 'The removed NPC awareness radar prototype is present')
   check(mapKnowledge.includes('export function is_chunk_known_visible'), 'NPC map knowledge is missing')
   check(/^export const KNOWLEDGE_CHUNK_RADIUS = 2\r?$/m.test(mapKnowledge), 'NPC map knowledge must stay bounded to a 5x5 chunk window')
 

@@ -23,19 +23,17 @@ const store = (globalThis as any).storage as Record<string, any>
 
 describe('recent activity filters', () => {
   beforeEach(() => {
-    delete store.sgluna_task_board_activity_filter
     delete store.sgluna_task_board_activity_filters
     delete store.sgluna_task_board_project_activity_filters
   })
 
   it('keeps the Projects window selection apart from the console', () => {
-    store.sgluna_task_board_activity_filter = { 1: 2 }
-    expect(activity_filter_mask(1)).toBe(1)
-    // The legacy drop-down only ever belonged to the console.
+    toggle_activity_filter(1, 2)
+    expect(activity_filter_mask(1)).toBe(ACTIVITY_FILTER_ALL - 2)
     expect(activity_filter_mask(1, 'projects')).toBe(ACTIVITY_FILTER_ALL)
     toggle_activity_filter(1, 4, 'projects')
     expect(activity_filter_mask(1, 'projects')).toBe(ACTIVITY_FILTER_ALL - 4)
-    expect(activity_filter_mask(1)).toBe(1)
+    expect(activity_filter_mask(1)).toBe(ACTIVITY_FILTER_ALL - 2)
   })
 
   it('shows everything until the player chooses otherwise', () => {
@@ -64,18 +62,6 @@ describe('recent activity filters', () => {
     toggle_activity_filter(1, ACTIVITY_FILTER_ALL)
     expect(activity_filter_mask(1)).toBe(ACTIVITY_FILTER_ALL)
     expect(activity_filter_selected(ACTIVITY_FILTER_ALL, ACTIVITY_FILTER_ALL)).toBe(true)
-  })
-
-  it('carries a single-select choice from an older save over as that one category', () => {
-    store.sgluna_task_board_activity_filter = { 1: 1, 2: 2, 3: 3, 4: 6, 5: 99 }
-    expect(activity_filter_mask(1)).toBe(ACTIVITY_FILTER_ALL)
-    expect(activity_filter_mask(2)).toBe(1)
-    expect(activity_filter_mask(3)).toBe(2)
-    expect(activity_filter_mask(4)).toBe(16)
-    expect(activity_filter_mask(5)).toBe(ACTIVITY_FILTER_ALL)
-    // Once the player touches the new filter, the new state wins.
-    toggle_activity_filter(2, 4)
-    expect(activity_filter_mask(2)).toBe(5)
   })
 
   it('keeps players independent', () => {

@@ -45,7 +45,7 @@ A promotion checkpoint must preserve these baseline properties:
 - task completion/cancellation releases physical controls safely;
 - restart/death/replacement invalidate stale logical work rather than silently continuing it;
 - Pterodactyl install/update/rollback remains transactional;
-- environment/Egg configuration remains authoritative over `airi-config.json`;
+- environment/Egg configuration remains authoritative over `sgluna-config.json` (and its legacy `airi-config.json` fallback);
 - ordinary CI is green on the candidate;
 - package smoke and real Factorio integration pass for the frozen promotion candidate.
 

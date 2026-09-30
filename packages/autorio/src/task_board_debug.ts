@@ -679,7 +679,7 @@ export function render_ai_reply(parent: LuaGuiElement, response: string, width: 
   if (state?.valid) {
     if (view.live && unseen_count === 0) {
       state.caption = gui_text.trusted_rich_text('[img=utility/status_working] LIVE')
-      state.tooltip = 'Following the newest conversation. Click to pause both Conversation and Activity at their current positions.'
+      state.tooltip = 'Live: showing the newest conversation. Click to pause both Conversation and Activity at their current positions.'
     } else if (unseen_count > 0) {
       state.caption = gui_text.trusted_rich_text(`[img=utility/status_yellow] ${unseen_count}${overflow ? '+' : ''} NEW`)
       state.tooltip = 'New conversation messages are waiting. Click to show them and jump both feeds back to live.'

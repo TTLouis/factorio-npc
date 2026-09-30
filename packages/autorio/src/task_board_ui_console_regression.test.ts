@@ -151,7 +151,7 @@ describe('SGLuna NPC console layout regressions', () => {
     // Rows are appended and trimmed; the pane itself is never cleared...
     expect(refresh_activity).toContain('activity_state.activity_row_diff(shown_heads, shown_tails, rows)')
     expect(refresh_activity).not.toContain('scroll.clear()')
-    // ...and it only moves when the follow state says so.
+    // ...and it only moves when the LIVE state says so.
     expect(refresh_activity).toContain('if (activity_state.activity_should_scroll(view, appended, last_key)) (scroll as ScrollPaneGuiElement).scroll_to_bottom()')
     expect(refresh_activity.split('scroll_to_bottom()').length).toBe(2)
 
@@ -173,7 +173,7 @@ describe('SGLuna NPC console layout regressions', () => {
     expect(preview).toContain('camera.entity !== preview.entity')
   })
 
-  it('pauses live follow when the reader scrolls up in Activity or Conversation', () => {
+  it('pauses LIVE when the reader scrolls up in Activity or Conversation', () => {
     // Factorio gives Lua no scroll offset and no scroll event, so the wheel is
     // the signal, declared as listen-only inputs in the data stage.
     const data = readFileSync(new URL('../data.lua', import.meta.url), 'utf8')
@@ -197,17 +197,17 @@ describe('SGLuna NPC console layout regressions', () => {
     expect(build_panel).not.toContain('reset_activity_view')
 
     // Hover is deliberately not state. Rows still ignore interaction so the
-    // ordinary wheel reaches the pane, while only synchronized wheel input pauses follow.
+    // ordinary wheel reaches the pane, while only synchronized wheel input pauses LIVE.
     expect(source).not.toContain('raise_hover_events')
     expect(source).not.toContain('defines.events.on_gui_hover')
     expect(source).not.toContain('defines.events.on_gui_leave')
     expect(source).not.toContain('set_activity_hover')
     expect(source).toContain("column_count: 3, ignored_by_interaction: true")
 
-    // One indicator doubles as the follow switch.
+    // One indicator doubles as the LIVE/PAUSED switch.
     expect(source).toContain("const state = view.live ? 'LIVE' : unseen.count > 0 ? `${unseen.count}${unseen.overflow ? '+' : ''} NEW` : 'PAUSED'")
     expect(source).toContain('activity_state.resume_activity_live(player.index, last_shown_activity_key(scroll))')
-    // A brand-new console starts out following.
+    // A brand-new console starts out live.
     expect(source).toContain('activity_state.reset_activity_view(player.index)')
   })
 })

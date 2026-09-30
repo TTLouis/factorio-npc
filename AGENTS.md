@@ -55,7 +55,7 @@ The intended actor is a real standalone Factorio `character` controlled through 
 
 ## Pterodactyl configuration authority
 
-Deployment environment/Egg variables are the source of truth. Runtime-visible non-secret values may be mirrored into `airi-config.json`, but that file must not override environment values.
+Deployment environment/Egg variables are the source of truth. Runtime-visible non-secret values may be mirrored into `sgluna-config.json` (the legacy `airi-config.json` is still read as a fallback), but that file must not override environment values.
 
 Secrets such as `OPENAI_API_KEY` and Factorio credentials must not be committed or persisted into non-secret config files.
 

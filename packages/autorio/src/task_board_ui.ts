@@ -1125,7 +1125,7 @@ function refresh_steps(plan: LuaGuiElement, board: TaskBoardUiSnapshot, max_heig
 /**
  * Bring the feed up to date by appending new rows and dropping trimmed ones, so
  * the scroll-pane and the player's position in it survive every refresh. The
- * feed only moves when it is following, something new arrived, and the cursor
+ * feed only moves when it is live, something new arrived, and the cursor
  * is not over it.
  */
 function refresh_activity(header: LuaGuiElement, empty: LuaGuiElement, scroll: LuaGuiElement, table: LuaGuiElement, all_activity: TaskBoardUiActivity[], max_height: number, player: LuaPlayer) {
@@ -1182,7 +1182,7 @@ function refresh_activity(header: LuaGuiElement, empty: LuaGuiElement, scroll: L
     const tone: Tone = view.live ? 'good' : unseen.count > 0 ? 'warn' : 'muted'
     const state = view.live ? 'LIVE' : unseen.count > 0 ? `${unseen.count}${unseen.overflow ? '+' : ''} NEW` : 'PAUSED'
     live.caption = gui_text.trusted_rich_text(`[img=${TONE_SPRITES[tone]}] ${state}`)
-    live.tooltip = view.live ? 'Following the newest activity. Scrolling the feed stops following; so does clicking here.' : 'Not following, so the feed stays where you left it. Click to jump to the newest activity and follow it again.'
+    live.tooltip = view.live ? 'Live: showing the newest activity. Scrolling the feed pauses it; so does clicking here.' : 'Paused: the feed stays where you left it. Click to jump to the newest activity and go live again.'
   }
   const count = header[ui_constants.TRACKER.count]
   if (count?.valid) count.caption = mask === activity_state.ACTIVITY_FILTER_ALL ? `${total} event${total === 1 ? '' : 's'}` : `${entries.length}/${total}`
@@ -1494,7 +1494,7 @@ export function create_task_board_ui_remote_interface() {
   })
   script.on_event(defines.events.on_gui_text_changed, (event: any) => { const element = event.element; if (!element?.valid || element.player_index !== event.player_index || element.name !== ui_constants.PROMPT_FIELD_NAME || !task_board_ui_is_open(event.player_index)) return; set_prompt_draft(event.player_index, element.text) })
   script.on_event(defines.events.on_gui_confirmed, (event: any) => { const element = event.element; if (!element?.valid || element.player_index !== event.player_index || element.name !== ui_constants.PROMPT_FIELD_NAME || !task_board_ui_is_open(event.player_index)) return; const player = game.get_player(event.player_index); if (!player?.valid) return; submit_prompt(player, element.text) })
-  // Scrolling up to read either feed ends follow. Scrolling down does not
+  // Scrolling up to read either feed pauses LIVE. Scrolling down does not
   // implicitly resume it; the reader uses LIVE to jump back to the newest row.
   // The inputs listen without consuming, so the pane still scrolls normally.
   const on_activity_wheel = (event: any) => {

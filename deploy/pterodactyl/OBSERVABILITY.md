@@ -6,8 +6,8 @@ This document describes the public, structured diagnostics used to debug the sta
 
 The runtime writes two rotating JSONL traces under `logs/` by default:
 
-- `airi-behavior.jsonl` — request/actor/provider/tool/plan/runtime event timeline.
-- `airi-prompts.jsonl` — final provider request payload metadata plus provider response diagnostics.
+- `sgluna-behavior.jsonl` — request/actor/provider/tool/plan/runtime event timeline.
+- `sgluna-prompts.jsonl` — final provider request payload metadata plus provider response diagnostics.
 
 Both writers sanitize common credentials before writing. Provider reasoning text is not persisted; only bounded metadata such as `reasoning_content_chars` is recorded.
 
@@ -80,7 +80,7 @@ node deploy/pterodactyl/runtime-v8/debug-report.mjs --json
 Explicit JSONL paths may be passed as the first and second positional arguments:
 
 ```sh
-node deploy/pterodactyl/runtime-v8/debug-report.mjs /path/to/airi-behavior.jsonl /path/to/airi-prompts.jsonl
+node deploy/pterodactyl/runtime-v8/debug-report.mjs /path/to/sgluna-behavior.jsonl /path/to/sgluna-prompts.jsonl
 ```
 
 The report includes the final failure, actor/epoch, provider round/recovery attempt, finish reason, diagnostic code, content/UTF-8/reasoning sizes, structured JSON/schema status, last tool, usage, prompt-size metadata, a short correlated event timeline, and bounded diagnosis hints.

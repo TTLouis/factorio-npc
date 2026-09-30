@@ -389,15 +389,15 @@ function refresh_debug_activity(root: LuaGuiElement, player: LuaPlayer, force = 
   if (state?.valid) {
     if (view.live && unseen.count === 0) {
       state.caption = gui_text.trusted_rich_text('[img=utility/status_working] LIVE')
-      state.tooltip = 'Following the newest execution activity. Click to pause it.'
+      state.tooltip = 'Live: showing the newest execution activity. Click to pause it.'
     }
     else if (unseen.count > 0) {
       state.caption = gui_text.trusted_rich_text(`[img=utility/status_yellow] ${unseen.count}${unseen.overflow ? '+' : ''} NEW`)
-      state.tooltip = 'New execution activity arrived without moving your reading position. Click to catch up and resume live follow.'
+      state.tooltip = 'New execution activity arrived without moving your reading position. Click to catch up and go live again.'
     }
     else {
       state.caption = gui_text.trusted_rich_text('[img=utility/status_inactive] PAUSED')
-      state.tooltip = 'Execution activity is paused at your reading position. Click to jump to the newest event and follow again.'
+      state.tooltip = 'Execution activity is paused at your reading position. Click to jump to the newest event and go live again.'
     }
   }
   return true
