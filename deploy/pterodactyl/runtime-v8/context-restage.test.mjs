@@ -6,6 +6,7 @@ import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 import { AgentContext, conversationChars } from './agent-context.mjs'
+import { roleSystemPrompt } from './agent-roles.mjs'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { sanitizeDurableModelText } from './durable-text.mjs'
 import { buildHandoffPacket, sanitizeHandoffNote } from './handoff-packet.mjs'
@@ -46,7 +47,9 @@ function normalizeRow(record, ids) {
 // Captured: the exact HTTP body of every provider call, the context object the
 // provider received, and every behavior-trace row.
 async function steamReplayFingerprint() {
-  const world = steamReplayHarness({ transport: 'http', extraRounds: [STEAM_SCRIPTED_BLOCKED_ANSWER] })
+  // The golden is the run with no executor (delegation U6 hands every committed slice to one; that
+  // run has its own tests in executor-wiring.test.mjs): the seam itself must stay byte-identical.
+  const world = steamReplayHarness({ transport: 'http', extraRounds: [STEAM_SCRIPTED_BLOCKED_ANSWER], agentOptions: { executorHandoff: false } })
   await world.request()
   await world.closeStep1()
   await world.failSupplyBatch()
@@ -287,6 +290,7 @@ function loopHarness(replies) {
     interactionDecisionProvider: jev,
     steeringDecisionProvider: jev,
     systemPrompt: 'restage loop system prompt',
+    executorHandoff: false, // these tests drive the U4 restage seam by hand, on one conversation
     stateFile: null,
     traceFile: null,
     decisionTraceFile: null,
@@ -338,7 +342,7 @@ test('restageContext dispatches CONTEXT_RESTAGED, the reducer log records it, an
   assert.equal(after.reasoning_epoch, before.reasoning_epoch)
   assert.equal(world.agent.agentContext.handoffId, packet.handoff_id)
   assert.deepEqual(world.agent.messages.map(message => message.role), ['system', 'user', 'user'])
-  assert.equal(world.agent.messages[0].content, world.calls[0].messages[0].content, 'the system prefix is unchanged')
+  assert.equal(world.agent.messages[0].content, roleSystemPrompt(world.calls[0].messages[0].content, 'executor'), 'the system prefix is the planner system prompt plus the executor role suffix')
   assert.equal(world.agent.messages[1].content, packet.stableText)
   assert.equal(world.agent.messages[2].content, packet.volatileText)
 })
@@ -352,7 +356,7 @@ test('the next provider request after a restage starts with the system prefix, t
 
   assert.equal(world.calls.length, 2)
   const { messages, context } = world.calls[1]
-  assert.equal(messages[0].content, world.calls[0].messages[0].content)
+  assert.equal(messages[0].content, roleSystemPrompt(world.calls[0].messages[0].content, 'executor'))
   assert.equal(messages[1].content, packet.stableText)
   assert.equal(messages[2].content, packet.volatileText)
   assert.ok(!messages.some(message => typeof message.content === 'string' && message.content.startsWith('[CHAT]')), 'the old request text is gone')
@@ -731,7 +735,7 @@ test('a turn restages at a real boundary with its own token: the next request ho
   assert.deepEqual({ ...planRightAfter, context_restages: planBefore.context_restages }, planBefore, 'the restage itself changed no plan state')
   assert.equal(world.calls.length, 3)
   const { messages, context } = world.calls[2]
-  assert.deepEqual(messages.slice(0, 3).map(message => message.content), [world.calls[0].messages[0].content, packet.stableText, packet.volatileText])
+  assert.deepEqual(messages.slice(0, 3).map(message => message.content), [roleSystemPrompt(world.calls[0].messages[0].content, 'executor'), packet.stableText, packet.volatileText])
   assert.ok(!JSON.stringify(messages).includes('call_boundary_1'), 'the tool exchange of the ended conversation is gone')
   assert.ok(!messages.some(message => typeof message.content === 'string' && message.content.startsWith('[CHAT]')))
   assert.equal(context.role, 'executor')

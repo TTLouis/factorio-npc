@@ -98,6 +98,7 @@ export class AgentContext {
     this.conversationSeq += 1
     this.usedHandoffIds = new Set([this.handoffId])
     this.restageCount = 0
+    this.parkedPlanner = null // U6: the planner conversation set aside while an executor conversation acts; a new lineage starts with none
     this.resetCounters()
   }
 
@@ -244,7 +245,7 @@ export class AgentContext {
    * arguments for commitRestage; throws RangeError/TypeError on a packet that
    * does not fit (so the loop can refuse before it touches the reducer).
    */
-  prepareRestage({ checkpoint, reason, packet, role, prefixMessages } = {}) {
+  prepareRestage({ checkpoint, reason, packet, role, prefixMessages, parkPlanner = false } = {}) {
     if (!CONTEXT_RESTAGE_CHECKPOINTS.includes(checkpoint)) throw new RangeError(`restage checkpoint must be one of ${CONTEXT_RESTAGE_CHECKPOINTS.join(', ')}`)
     if (!packet || typeof packet !== 'object') throw new TypeError('restage needs a handoff packet')
     for (const field of ['stableText', 'volatileText', 'handoff_id']) {
@@ -260,7 +261,7 @@ export class AgentContext {
     if (this.usedHandoffIds.has(packet.handoff_id)) throw new RangeError('restage packet handoff id was already used in this conversation lineage')
     const prefix = prefixMessages ?? leadingSystemMessages(this.baseMessages.length > 0 ? this.baseMessages : this.messages)
     if (!Array.isArray(prefix)) throw new TypeError('restage prefixMessages must be an array')
-    return { checkpoint, reason: typeof reason === 'string' ? reason : (packet.event?.reason ?? ''), packet, role: nextRole, prefix }
+    return { checkpoint, reason: typeof reason === 'string' ? reason : (packet.event?.reason ?? ''), packet, role: nextRole, prefix, parkPlanner: parkPlanner === true }
   }
 
   /**
@@ -270,10 +271,27 @@ export class AgentContext {
    * packet's role. Anything in flight for the previous conversation is stale
    * from this call on.
    *
+   * Planner parking (U6). `parkPlanner` is set by the caller that hands a live
+   * planner conversation to an executor (C3): the planner's conversation is set
+   * aside whole (messages, base messages, handoff id, counters, size) and comes
+   * back with resumePlanner() at the slice close. The executor conversation never
+   * writes into it. An executor-to-executor restage leaves the parked planner
+   * alone; a restage as the planner replaces it (a fresh planner from a packet).
+   *
    * @returns {object} what changed, for the caller's trace row
    */
   commitRestage(prepared) {
-    const { checkpoint, reason, packet, role, prefix } = prepared
+    const { checkpoint, reason, packet, role, prefix, parkPlanner } = prepared
+    const parked = parkPlanner === true && this.role === PLANNER_ROLE && role === EXECUTOR_ROLE
+      ? {
+          messages: this.messages,
+          baseMessages: this.baseMessages,
+          handoffId: this.handoffId,
+          counters: this.counters,
+          size: this.size,
+          requestCharsHighWater: this.requestCharsHighWater,
+        }
+      : undefined
     const previous = {
       role: this.role,
       handoff_id: this.handoffId,
@@ -283,6 +301,8 @@ export class AgentContext {
       size_tokens: this.sizeTokens,
       counters: { ...this.counters },
     }
+    if (parked) this.parkedPlanner = parked
+    else if (role === PLANNER_ROLE) this.parkedPlanner = null
     this.baseMessages = [
       ...copyMessages(prefix),
       { role: 'user', content: packet.stableText },
@@ -311,6 +331,47 @@ export class AgentContext {
   /** prepareRestage + commitRestage. */
   restage(args) {
     return this.commitRestage(this.prepareRestage(args))
+  }
+
+  // --- planner parking (U6) -------------------------------------------------------------
+
+  get hasParkedPlanner() {
+    return this.parkedPlanner !== null && this.parkedPlanner !== undefined
+  }
+
+  /**
+   * Control returns to the planner (the slice close): the parked planner
+   * conversation becomes the active one again and the executor conversation is
+   * dropped. The conversation sequence advances, so any reply still in flight
+   * for the executor (or for the planner from before it was parked) is stale.
+   * The planner's own size counter comes back with it: executor traffic never
+   * counted against it. Returns undefined when nothing is parked.
+   */
+  resumePlanner() {
+    const parked = this.parkedPlanner
+    if (!parked || this.role !== EXECUTOR_ROLE) return undefined
+    const dropped = {
+      role: this.role,
+      handoff_id: this.handoffId,
+      message_count: this.messages.length,
+      chars: conversationChars(this.messages),
+      size_tokens: this.sizeTokens,
+    }
+    this.messages = parked.messages
+    this.baseMessages = parked.baseMessages
+    this.role = PLANNER_ROLE
+    this.handoffId = parked.handoffId
+    this.counters = parked.counters
+    this.size = parked.size
+    this.requestCharsHighWater = parked.requestCharsHighWater
+    this.parkedPlanner = null
+    this.conversationSeq += 1
+    return {
+      role: PLANNER_ROLE,
+      handoff_id: this.handoffId,
+      message_count: this.messages.length,
+      dropped_executor: dropped,
+    }
   }
 }
 

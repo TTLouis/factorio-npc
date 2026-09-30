@@ -89,9 +89,17 @@ export function tailStart(messages) {
   return isTerminalInstruction(messages.at(-1)) ? messages.length - 1 : messages.length
 }
 
+// A restaged conversation (a handoff packet, delegation U6) is briefed by two user
+// blocks, the plan block ([HANDOFF] ...) and the step block. They are the whole request
+// context: whatever a continuation adds after them is working context, not stable prefix.
+const HANDOFF_MARKER = '[HANDOFF]'
+const STEP_BLOCK_MARKER = '--- step block ---'
+
 // The request-stable region: the system message and the user context that
 // precedes the first model turn or working marker.
 function requestContextEnd(messages, end) {
+  const packet = messages.findIndex((message, index) => index < end && message?.role === 'user' && textOf(message).startsWith(HANDOFF_MARKER))
+  if (packet >= 0) return textOf(messages[packet + 1]).startsWith(STEP_BLOCK_MARKER) && packet + 1 < end ? packet + 1 : packet
   let last = -1
   for (let index = 0; index < end; index++) {
     const message = messages[index]

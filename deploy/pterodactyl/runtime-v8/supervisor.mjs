@@ -29,10 +29,10 @@ import {
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { createSave, prepareGameConfig, prepareMods, prepareServerSettings, selectSave } from './game-files.mjs'
 import { resolveAgentRole } from './agent-roles.mjs'
-import { NpcAgentLoop, RESUME_HINT } from './npc-agent-loop.mjs'
+import { NpcAgentLoop, RESTART_BEFORE_FIRST_PLAN_PAUSE, RESUME_HINT } from './npc-agent-loop.mjs'
 import { evaluateGoalDefinition, formatGoalStatus, formatGoalUnderstanding, formatSliceProgressNote, goalUiView } from './goal-definition.mjs'
 import { formatGoalReadingNote } from './goal-reading.mjs'
-import { getActivePlan, GOAL_STATUS } from './planning-state.mjs'
+import { getActivePlan, GOAL_STATUS, PLAN_STATUS } from './planning-state.mjs'
 import { ACK_EVENT, ResponsivenessTracker } from './responsiveness.mjs'
 import {
   AI_API_METHOD_IDS,
@@ -1791,8 +1791,12 @@ export async function pauseStrandedPlanAfterRequestError(session, message) {
 // restage_error means the conversation the loop already built stays, and the
 // helper traces the reason (context.restage_refused / context.restage_error);
 // this function adds runtime.recovery_restage_fallback naming it.
-// TODO(U6/U7): restage as the executor role once it has its own prompt and
-// tool block; today the recovery runs in the role the loop has.
+// The role is the EXECUTOR's when the reducer holds a committed plan (a restart, an actor
+// replacement or a death interrupts the slice that plan is): the fresh actor snapshot
+// carries the new epoch and the executor re-observes and continues the committed step.
+// A plan that is still a draft has not been handed to an executor yet; its recovery keeps
+// the planner's role. No planner conversation is parked: the one this restart rebuilt is
+// only the recovery scaffolding, so the slice close builds a fresh planner from a packet.
 async function restageRecoveryConversation(agent, { reason, recoveryMessage }) {
   if (typeof agent.restageBetweenTurns !== 'function') return { restaged: false, reason: 'agent_cannot_restage' }
   let runtime
@@ -1802,16 +1806,27 @@ async function restageRecoveryConversation(agent, { reason, recoveryMessage }) {
   catch {
     runtime = undefined
   }
+  let role = agent.agentContext?.role ?? 'planner'
+  try {
+    const active = getActivePlan(agent.memory?.planningState?.(`npc:${agent.npcId ?? 'sgluna'}`))
+    if (active && [PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(active.status) && agent.executorHandoffEnabled !== false) role = 'executor'
+  }
+  catch {}
   const result = await agent.restageBetweenTurns({
     checkpoint: 'C7',
-    role: agent.agentContext?.role ?? 'planner',
+    role,
     reason: `recovery:${uiText(reason, 80)}`,
     actor: agent.epoch,
     runtime,
     requestId: agent.traceRequest?.id,
   })
   if (!result.restaged) {
-    await agent.traceEvent?.('runtime.recovery_restage_fallback', { reason: result.reason, recovery_reason: uiText(reason, 80) }, { requestId: agent.traceRequest?.id })
+    // try/await, not a promise chain: a trace writer that throws before it returns a promise
+    // would otherwise abort the recovery instead of leaving it on the conversation it has.
+    try {
+      await agent.traceEvent?.('runtime.recovery_restage_fallback', { reason: result.reason, recovery_reason: uiText(reason, 80) }, { requestId: agent.traceRequest?.id })
+    }
+    catch {}
     return result
   }
   const harness = { role: 'user', content: recoveryMessage }
@@ -1826,6 +1841,16 @@ export function goalInterruptedWithoutPlan(planning) {
   return planning?.goal?.status === GOAL_STATUS.ACTIVE
     && Array.isArray(planning.plans) && planning.plans.length > 0
     && !getActivePlan(planning)
+}
+
+// An active goal admitted but interrupted BEFORE its first plan (nothing ever committed, no
+// plan history) and not already paused: a restart leaves it with no plan to carry, so it is
+// paused visibly instead of stalling in silence.
+export function goalInterruptedBeforeFirstPlan(planning) {
+  return planning?.goal?.status === GOAL_STATUS.ACTIVE
+    && (!Array.isArray(planning.plans) || planning.plans.length === 0)
+    && !getActivePlan(planning)
+    && planning.run?.paused !== true
 }
 
 export async function recoverInterruptedAgentPlan(agent, reason, details = {}) {
@@ -2723,6 +2748,16 @@ export class Session {
     if (startupState?.condition_wait?.state !== 'active' && this.recoverablePlan(startupState)) {
       this.queueEvent(async () => {
         await this.recoverInterruptedPlan('runtime_restart', { actor_id: this.lastStatus?.actor_id, epoch: this.lastStatus?.epoch })
+      })
+    }
+    else if (!startupState && goalInterruptedBeforeFirstPlan(this.agent.memory?.planningState?.(`npc:${this.npcId}`))) {
+      // C7, the goal never got a first plan (or was waiting for the player's answer): the
+      // owner's known silent stall. Pause it visibly, say Resume re-drives it, and wake no model.
+      this.queueEvent(async () => {
+        const requestId = `recovery_${Date.now().toString(36)}`
+        const paused = await this.agent.pauseGoalWithoutPlan?.(RESTART_BEFORE_FIRST_PLAN_PAUSE, { requestId })
+        await this.agent.traceEvent?.('runtime.goal_without_plan', { reason: RESTART_BEFORE_FIRST_PLAN_PAUSE, request_id: requestId, goal_id: paused?.goal_id, paused: paused?.paused === true, model_woken: false }, { requestId })
+        await this.printChat(`I restarted before this goal had a plan (or while I was waiting for your answer), so I paused it and did not wake the planner. ${RESUME_HINT} If I had asked you something, answer that instead.`)
       })
     }
     else if (!startupState && goalInterruptedWithoutPlan(this.agent.memory?.planningState?.(`npc:${this.npcId}`))) {

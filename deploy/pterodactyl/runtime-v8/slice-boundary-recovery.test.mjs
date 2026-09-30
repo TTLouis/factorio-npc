@@ -274,10 +274,11 @@ function conversationText(messages) {
   return messages.map(message => String(message.content ?? '')).join('\n')
 }
 
-function assertPacketOnly(messages, { checkpoint = 'C7' } = {}) {
+// A recovery of a committed plan is the executor's: the plan is what it carries (delegation U6, C7).
+function assertPacketOnly(messages, { checkpoint = 'C7', role = 'executor' } = {}) {
   assert.equal(messages[0].role, 'system')
   assert.match(String(messages[1].content), /^\[HANDOFF\] Rebuilt from durable harness state/)
-  assert.match(String(messages[2].content), new RegExp(`^--- step block ---\nrestage: role=planner checkpoint=${checkpoint} reason=recovery:`))
+  assert.match(String(messages[2].content), new RegExp(`^--- step block ---\nrestage: role=${role} checkpoint=${checkpoint} reason=recovery:`))
   assert.deepEqual(messages.filter(message => message.role === 'assistant' || message.role === 'tool'), [], 'no exchange of the earlier conversation')
   assert.ok(!messages.some(message => /^\[(CHAT|MEMORY|PLAN_STATE)\]/.test(String(message.content ?? ''))), 'no earlier transcript, dialogue memory or legacy plan dump')
 }
@@ -296,7 +297,8 @@ test('C7: a restart rebuilds the conversation from a packet (persisted plan, fre
   }
   const first = await firstRun(game, file, provider)
   const systemChars = String(first.messages[0].content).length
-  const before = conversationText(first.messages).length - systemChars
+  // The transcript of the lineage: the planner conversation (parked at the plan commit) holds the big nearby read.
+  const before = conversationText(first.agentContext.parkedPlanner.messages).length - systemChars
   assert.ok(before > 8000, `the earlier conversation is realistically large (${before} chars)`)
 
   game.status = { ...game.status, epoch: 4 } // the server came back under a new epoch
@@ -320,11 +322,11 @@ test('C7: a restart rebuilds the conversation from a packet (persisted plan, fre
   const rebuilt = packet.length - systemChars
   assert.ok(rebuilt < before / 3, `the rebuilt conversation (${rebuilt}) is far smaller than the old one (${before}), system prompt excluded`)
 
-  const [row] = trace.rows('context.restaged')
+  const [row] = trace.rows('context.restaged') // a restarted agent has no C3 row: the executor of its plan is this C7 restage
   assert.ok(row, 'one context.restaged row')
   assert.equal(trace.rows('context.restaged').length, 1)
   assert.equal(row.data.checkpoint, 'C7')
-  assert.equal(row.data.role, 'planner')
+  assert.equal(row.data.role, 'executor')
   assert.match(row.data.handoff_id, /^ho_[0-9a-f]{12}$/)
   assert.match(row.request_id, /^recovery_/, 'the row belongs to the recovery request')
   assert.equal(row.data.reason, 'recovery:runtime_restart')
@@ -401,7 +403,7 @@ test('C7: an actor replacement rebuilds from a packet with the replacement actor
   assert.match(packet, /^actor: actor_id=19 actor_kind=standalone_character epoch=4 connected_players=1$/m, 'the replacement actor and the new epoch')
   assert.doesNotMatch(packet, /^actor: actor_id=18/m, 'not the dead body')
   assert.match(packet, /previous_actor_id":18,"replacement_actor_id":19/, 'the recovery instruction names the replacement')
-  const [row] = trace.rows('context.restaged')
+  const [row] = trace.rows('context.restaged').filter(item => item.data.checkpoint === 'C7') // the request before it wrote its own C3 row
   assert.equal(row.data.checkpoint, 'C7')
   assert.equal(row.data.reason, 'recovery:actor_replaced')
   assert.equal(trace.rows('context.restage_refused').length, 0, 'a round of the discarded lineage does not block the restage')
@@ -517,7 +519,7 @@ test('C6: through the real Session.recoverInterruptedPlan, every recovery reason
   assert.equal(calls, callsWhenBlocked, 'no provider call')
   assert.deepEqual(chat, [], 'the session says nothing: the player already got the blocker and chooses')
   assert.equal(trace.rows('runtime.recovery_started').length, 0, 'no recovery request was even opened')
-  assert.equal(trace.rows('context.restaged').length, 0)
+  assert.equal(trace.rows('context.restaged').filter(row => row.data.checkpoint !== 'C3').length, 0, 'nothing restaged after the plan commit')
   assert.equal(memory.currentPlan(KEY).status, 'blocked')
 })
 

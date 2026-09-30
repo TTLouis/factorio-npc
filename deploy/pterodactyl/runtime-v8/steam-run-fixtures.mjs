@@ -399,6 +399,8 @@ export function steamReplayHarness({
   // When set, chat is routed like the live stack (the router answers with
   // this intent) instead of bypassing the interaction router.
   routedIntent,
+  // Extra NpcAgentLoop options (for example { executorHandoff: false } for the run with no executor).
+  agentOptions = {},
 } = {}) {
   const game = gameOverride ?? new RecordedSteamFactorio()
   const memory = new CanonicalTaskBoardMemory()
@@ -441,6 +443,7 @@ export function steamReplayHarness({
     traceFile: null,
     decisionTraceFile: null,
     npcId: 'sgluna',
+    ...agentOptions,
   })
   // Capture the behavior trace records (request_id, seq, event, data) exactly
   // as the JSONL writer would receive them.
