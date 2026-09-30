@@ -204,7 +204,7 @@ test('a restage that does not fit its packet is refused before anything changes'
 // The loop seam
 // ---------------------------------------------------------------------------------------
 
-const KEY = 'npc:airi'
+const KEY = 'npc:sgluna'
 const PLAN = ['Mine 10 iron ore', 'Mine 10 copper ore']
 
 function deferred() {
@@ -248,7 +248,7 @@ function loopHarness(replies) {
     stateFile: null,
     traceFile: null,
     decisionTraceFile: null,
-    npcId: 'airi',
+    npcId: 'sgluna',
   })
   agent.behaviorTrace = { emit: async (record) => { trace.push(record) } }
   const world = { game, memory, agent, calls, trace }
