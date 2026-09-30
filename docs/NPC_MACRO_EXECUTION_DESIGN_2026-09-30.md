@@ -171,12 +171,14 @@ roadmaps. The UI feedback request is saved for follow-up; layout discussion is d
 - **Stagnation (MW2/MW3).** Per task: 3 recovery attempts or 15 game-minutes with no
   newly verified progress, then preserve the task and ask or pause visibly. The
   count survives restages, new plan versions and restarts.
+- **Task aging (MW3).** A suspended or blocked task that has waited 15 game-minutes
+  is resurfaced: reconsidered for resume, or its pending question is repeated to the
+  player, so background work cannot starve it.
 - **C4 route (U11).** Keep the narrow "next step is clear" rule; measure where the
   observation wakes happen in the first live run before widening it.
 
 ### Still open
 
-- Task aging bounds (how long a suspended or blocked task may wait before it is resurfaced).
 - The exact reserve chat-command syntax, and how a reservation is released.
 - Concrete reducer event/schema names and integration with the existing task-board mirror.
 
