@@ -24,8 +24,9 @@
 // mid-way. Mandatory records are never dropped (the result reports
 // `over_limit: true` if they alone exceed the limit).
 //
-// Wired: the C5 budget handoff and the C7 recovery restage (U8) and the planner slice-close
-// restage at C1/C2 (U7) build one through NpcAgentLoop.buildRestagePacket.
+// Wired: the C5 budget handoff and the C7 recovery restage (U8), the planner slice-close
+// restage at C1/C2 (U7) and the executor's C3, C6 and C8 restages (U6) build one through
+// NpcAgentLoop.buildRestagePacket.
 
 import { createHash } from 'node:crypto'
 

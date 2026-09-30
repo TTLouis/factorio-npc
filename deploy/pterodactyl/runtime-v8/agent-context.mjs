@@ -12,6 +12,12 @@
 // pattern cannot make an old A reply look current, and an id already used in the
 // lineage is refused). The `handoff_id` is the name traces and the reducer log use.
 //
+// Planner parking (delegation U6). When a live planner conversation hands a committed plan
+// slice to an executor (C3), the planner conversation is parked whole and the executor
+// conversation becomes the active one; resumePlanner() brings the planner back at the slice
+// close and drops the executor. Parking and resuming both take the next conversation
+// sequence, so a reply still in flight for the other conversation is stale.
+//
 // Pure: no I/O, no clock. The loop owns the effects (reducer dispatch, trace
 // rows, counter resets outside this object); see NpcAgentLoop.restageContext.
 //
