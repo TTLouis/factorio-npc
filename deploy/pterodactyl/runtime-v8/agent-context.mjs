@@ -6,7 +6,11 @@
 // `handoff_id` that names it, per-conversation counters and the size counter the
 // restage policy reads. Exactly one conversation is active at a time. A restage
 // swaps that conversation for a fresh one built from a handoff packet and gives
-// it a new `handoff_id`; anything still in flight for the old id is stale.
+// it a new `handoff_id` and the next value of a monotonic conversation sequence.
+// Staleness is decided by that sequence, never by the id: a request is stale when
+// the sequence it was sent under is no longer current (so an A, B, A restage
+// pattern cannot make an old A reply look current, and an id already used in the
+// lineage is refused). The `handoff_id` is the name traces and the reducer log use.
 //
 // Pure: no I/O, no clock. The loop owns the effects (reducer dispatch, trace
 // rows, counter resets outside this object); see NpcAgentLoop.restageContext.
@@ -33,6 +37,8 @@ export const INITIAL_HANDOFF_PREFIX = 'ho_initial_'
 export const STALE_REPLY_MESSAGE = 'Model turn was cancelled or superseded'
 export const STALE_REPLY_ERROR_CODE = 'stale_handoff_reply'
 export const STALE_REPLY_REASON = 'handoff_superseded'
+// How many times a turn is re-driven on the active conversation after a stale drop.
+export const STALE_REDRIVE_LIMIT = 2
 
 function finiteNonNegative(value) {
   return Number.isFinite(value) && value > 0 ? value : 0
@@ -75,19 +81,22 @@ export class AgentContext {
     this.messages = []
     this.baseMessages = []
     this.lineageSequence = 0
+    this.conversationSeq = 0 // monotonic for the life of this object: every lineage start and every restage is a new conversation
     this.beginLineage(role)
   }
 
   /**
    * Start a fresh conversation lineage (a chat request begins from scratch).
    * Nothing has restaged; delegation attribution is off until the first
-   * restage. The handoff id changes so a reply still in flight for the
-   * previous lineage is stale.
+   * restage. The conversation sequence advances, so a reply still in flight
+   * for the previous lineage no longer matches.
    */
-  beginLineage(role = this.role ?? PLANNER_ROLE) {
+  beginLineage(role = PLANNER_ROLE) {
     if (!AGENT_ROLES.includes(role)) throw new RangeError(`agent role must be one of ${AGENT_ROLES.join(', ')}`)
     this.role = role
     this.handoffId = `${INITIAL_HANDOFF_PREFIX}${++this.lineageSequence}`
+    this.conversationSeq += 1
+    this.usedHandoffIds = new Set([this.handoffId])
     this.restageCount = 0
     this.resetCounters()
   }
@@ -129,7 +138,7 @@ export class AgentContext {
     this.requestCharsHighWater = Math.max(this.requestCharsHighWater, chars)
     this.size = observeContextSize(this.size, { appendedChars: grown })
     this.counters.requests += 1
-    return Object.freeze({ role: this.role, handoffId: this.handoffId, lineage: this.lineageSequence, delegated: this.delegationActive })
+    return Object.freeze({ role: this.role, handoffId: this.handoffId, lineage: this.lineageSequence, seq: this.conversationSeq, delegated: this.delegationActive })
   }
 
   /**
@@ -139,7 +148,7 @@ export class AgentContext {
    * exactly as before restaging existed.
    */
   isStale(attribution) {
-    return !!attribution && attribution.lineage === this.lineageSequence && attribution.handoffId !== this.handoffId
+    return !!attribution && attribution.lineage === this.lineageSequence && attribution.seq !== this.conversationSeq
   }
 
   /**
@@ -148,7 +157,7 @@ export class AgentContext {
    * @returns {boolean} whether the reply was counted
    */
   observeReply(attribution, usage) {
-    if (!attribution || attribution.lineage !== this.lineageSequence || attribution.handoffId !== this.handoffId) return false
+    if (!attribution || attribution.lineage !== this.lineageSequence || attribution.seq !== this.conversationSeq) return false
     const input = finiteNonNegative(usage?.input_units)
     this.size = observeContextSize(this.size, { providerInputTokens: input })
     this.counters.replies += 1
@@ -204,7 +213,7 @@ export class AgentContext {
     if (packet.event?.checkpoint && packet.event.checkpoint !== checkpoint) {
       throw new RangeError(`restage checkpoint ${checkpoint} does not match the packet's checkpoint ${packet.event.checkpoint}`)
     }
-    if (packet.handoff_id === this.handoffId) throw new RangeError('restage packet is already the active conversation')
+    if (this.usedHandoffIds.has(packet.handoff_id)) throw new RangeError('restage packet handoff id was already used in this conversation lineage')
     const prefix = prefixMessages ?? leadingSystemMessages(this.baseMessages.length > 0 ? this.baseMessages : this.messages)
     if (!Array.isArray(prefix)) throw new TypeError('restage prefixMessages must be an array')
     return { checkpoint, reason: typeof reason === 'string' ? reason : (packet.event?.reason ?? ''), packet, role: nextRole, prefix }
@@ -238,6 +247,8 @@ export class AgentContext {
     this.messages = copyMessages(this.baseMessages)
     this.role = role
     this.handoffId = packet.handoff_id
+    this.usedHandoffIds.add(packet.handoff_id)
+    this.conversationSeq += 1
     this.restageCount += 1
     this.resetCounters()
     return {

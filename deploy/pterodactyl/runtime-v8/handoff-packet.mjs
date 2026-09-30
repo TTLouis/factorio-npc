@@ -268,6 +268,7 @@ export function buildHandoffPacket({ planningState, role, checkpoint, reason = '
     checkpoint,
     reason: oneLine(reason, limits.reasonChars),
     packetChars: text.length,
+    handoffId,
     previousContextChars,
     now,
   })

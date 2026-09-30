@@ -14,10 +14,16 @@ export function cleanMemoryText(value, max) {
   return `${text.slice(0, Math.max(0, max - 1))}…`
 }
 
+// Redaction runs on the whole normalized text and only then is the result cut to
+// `max`: cutting first could leave a partial identity list (`[424`) that no rule
+// recognises. (Before this rule, text over `max` was cut, then redacted; the
+// only output that changes is that edge.) Text longer than `max` is never
+// treated as JSON, as before: its cut form was not parseable.
 export function sanitizeDurableModelText(value, max = 2000) {
-  let text = cleanMemoryText(value, max)
+  const full = cleanMemoryText(value, Number.POSITIVE_INFINITY)
+  let text = full
   const trimmed = text.trim()
-  if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+  if (full.length <= max && ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']')))) {
     try {
       return cleanMemoryText(JSON.stringify(sanitizeDurableModelValue(JSON.parse(trimmed))), max)
     }

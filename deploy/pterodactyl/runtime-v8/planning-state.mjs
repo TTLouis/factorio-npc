@@ -2755,6 +2755,7 @@ Object.assign(HANDLERS, {
       role,
       checkpoint,
       reason: text(event.reason, CONTEXT_RESTAGE_LIMITS.reason),
+      handoff_id: text(event.handoff_id, 60) || null,
       packet_chars: size(event.packet_chars),
       previous_context_chars: size(event.previous_context_chars),
       at: finiteNumber(event.now) ?? 0,
@@ -2768,7 +2769,7 @@ Object.assign(HANDLERS, {
  * reducer state, so the stamp cannot be wrong). The future handoff packet
  * builder calls this and applies the result; nothing else emits it yet.
  */
-export function buildContextRestagedEvent(state, { role, checkpoint, reason, packetChars, previousContextChars, now, planId, source = 'runtime' } = {}) {
+export function buildContextRestagedEvent(state, { role, checkpoint, reason, packetChars, previousContextChars, now, planId, handoffId, source = 'runtime' } = {}) {
   return {
     type: PLANNING_EVENT.CONTEXT_RESTAGED,
     now,
@@ -2778,6 +2779,7 @@ export function buildContextRestagedEvent(state, { role, checkpoint, reason, pac
     role,
     checkpoint,
     reason,
+    handoff_id: handoffId,
     packet_chars: packetChars,
     previous_context_chars: previousContextChars,
   }
@@ -2932,6 +2934,7 @@ function restoreContextRestages(raw) {
       role: item.role,
       checkpoint: item.checkpoint,
       reason: text(item.reason, CONTEXT_RESTAGE_LIMITS.reason),
+      handoff_id: text(item.handoff_id, 60) || null,
       packet_chars: size(item.packet_chars),
       previous_context_chars: size(item.previous_context_chars),
       at: finiteNumber(item.at) ?? 0,
