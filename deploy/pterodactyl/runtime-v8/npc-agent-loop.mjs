@@ -2530,7 +2530,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.usageLedger = new UsageLedger({ outputCap: this.maxProviderOutputUnits })
     this.chatAcknowledger = new ChatAcknowledger() // 2.10
     this.agentContext.config = options.providerConfig // names the role's model only (agent-roles.mjs)
-    this.providerCallsInFlight = 0 // provider rounds between request start and the end of their reply processing (restageContext refuses while > 0)
+    this.providerCallsInFlight = 0 // provider rounds between request start and the end of their reply processing
+    this.providerCallsByLineage = new Map() // the same count per conversation lineage: restageContext refuses while the CURRENT lineage has a round in flight
     this.turnConversation = null // attribution of the conversation the running turn last read; null between turns
   }
 
@@ -2587,7 +2588,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       await this.traceEvent('context.restage_refused', { role: prepared.role, checkpoint, handoff_id: packet.handoff_id, reason: why }, { requestId })
       return { restaged: false, reason: why }
     }
-    if (this.providerCallsInFlight > 0) return refuse('round_in_flight')
+    if ((this.providerCallsByLineage.get(this.agentContext.lineageSequence) ?? 0) > 0) return refuse('round_in_flight')
     const token = this.turnConversation
     if (token ? (safePoint !== token || this.agentContext.isStale(token)) : (safePoint !== undefined && safePoint !== false)) return refuse('round_open')
     const before = this.memory.planningState?.(key)
@@ -6872,14 +6873,24 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   // Counts provider rounds in flight (the request await and the reply processing
-  // inside it) so restageContext can refuse while one is open.
+  // inside it) so restageContext can refuse while one is open. Rounds are also
+  // counted per conversation lineage (U8): a round that outlives a reset (an
+  // aborted turn, a stale provider) belongs to a discarded lineage, its reply is
+  // dropped by the generation check, and it can never touch the new
+  // conversation, so it must not block that lineage's restage (C7 recovery runs
+  // right after the supervisor cancelled the old turn).
   async callProvider(current, generation, options) {
+    const lineage = this.agentContext.lineageSequence
     this.providerCallsInFlight++
+    this.providerCallsByLineage.set(lineage, (this.providerCallsByLineage.get(lineage) ?? 0) + 1)
     try {
       return await this.callProviderRound(current, generation, options)
     }
     finally {
       this.providerCallsInFlight--
+      const remaining = (this.providerCallsByLineage.get(lineage) ?? 1) - 1
+      if (remaining > 0) this.providerCallsByLineage.set(lineage, remaining)
+      else this.providerCallsByLineage.delete(lineage)
     }
   }
 
@@ -9553,6 +9564,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
 
     if (plannerRecoveryRoutes.includes(routed.route)) {
+      // TODO(U6/U7, C6): ordinary bounded recovery keeps the committed semantic
+      // step and should get a FRESH executor-shaped context (a C6 packet, no user
+      // interruption). That needs the executor role's own prompt and tool block,
+      // which do not exist yet, so the recovery route still continues the current
+      // conversation in today's role. An approved Revise (a user-approved plan
+      // revision wakes the planner for a new draft) is the C2-shaped restage of
+      // U5/U6 and is not wired here either.
       const previousTrigger = this.reasoningTriggerSource
       const previousReasoningBudget = this.reasoningBudgetOverride
       const highRecoveryReasoning = routed.failure_class === 'semantic_replan'
