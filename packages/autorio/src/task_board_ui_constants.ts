@@ -18,110 +18,110 @@ export const TONE_SPRITES: Record<Tone, SpritePath> = {
   muted: 'utility/status_inactive',
 }
 
-export const BUTTON_NAME = 'airi_task_board_button'
+export const BUTTON_NAME = 'sgluna_task_board_button'
 export const MOD_GUI_LEGACY_FLOW_NAME = 'mod_gui_button_flow'
 export const MOD_GUI_TOP_FRAME_NAME = 'mod_gui_top_frame'
 export const MOD_GUI_INNER_FRAME_NAME = 'mod_gui_inner_frame'
-export const ROOT_NAME = 'airi_task_board_panel'
-export const COLUMNS_NAME = 'airi_task_board_columns'
-export const LEFT_COLUMN_NAME = 'airi_task_board_left_column'
-export const LEFT_DYNAMIC_NAME = 'airi_task_board_left_dynamic'
-export const NOW_GOAL_SLOT_NAME = 'airi_task_board_now_goal'
-export const NOW_CARD_SLOT_NAME = 'airi_task_board_now_card'
-export const RIGHT_COLUMN_NAME = 'airi_task_board_right_column'
-export const RIGHT_RESOURCES_NAME = 'airi_task_board_right_resources'
-export const PROMPT_SECTION_NAME = 'airi_task_board_prompt_section'
-export const PROMPT_FLOW_NAME = 'airi_task_board_prompt_flow'
+export const ROOT_NAME = 'sgluna_task_board_panel'
+export const COLUMNS_NAME = 'sgluna_task_board_columns'
+export const LEFT_COLUMN_NAME = 'sgluna_task_board_left_column'
+export const LEFT_DYNAMIC_NAME = 'sgluna_task_board_left_dynamic'
+export const NOW_GOAL_SLOT_NAME = 'sgluna_task_board_now_goal'
+export const NOW_CARD_SLOT_NAME = 'sgluna_task_board_now_card'
+export const RIGHT_COLUMN_NAME = 'sgluna_task_board_right_column'
+export const RIGHT_RESOURCES_NAME = 'sgluna_task_board_right_resources'
+export const PROMPT_SECTION_NAME = 'sgluna_task_board_prompt_section'
+export const PROMPT_FLOW_NAME = 'sgluna_task_board_prompt_flow'
 // The tracker is built once and then refreshed in place. Rebuilding a
 // scroll-pane resets its scroll, and Factorio gives Lua no way to read a scroll
 // offset back (it is per-client state, so reading it would desync), which makes
 // keeping the element alive the only way to keep the player's position. One
 // table for every name keeps this to a single Lua local.
 export const TRACKER = {
-  section: 'airi_task_board_tracker_section',
-  header: 'airi_task_board_tracker_header',
-  body: 'airi_task_board_tracker_body',
-  summary: 'airi_task_board_tracker_summary',
-  empty: 'airi_task_board_tracker_empty',
-  workspace: 'airi_task_board_tracker_workspace',
-  shelf: 'airi_task_board_tracker_shelf',
-  shelf_header: 'airi_task_board_tracker_shelf_header',
-  shelf_count: 'airi_task_board_tracker_shelf_count',
-  shelf_body: 'airi_task_board_tracker_shelf_body',
-  shelf_scroll: 'airi_task_board_tracker_shelf_scroll',
-  shelf_table: 'airi_task_board_tracker_shelf_table',
-  plan_column: 'airi_task_board_tracker_plan_column',
-  plan_header: 'airi_task_board_tracker_plan_header',
-  plan_summary: 'airi_task_board_tracker_plan_summary',
-  plan_body: 'airi_task_board_tracker_plan_body',
-  plan: 'airi_task_board_tracker_plan',
-  progress: 'airi_task_board_tracker_progress',
-  steps_scroll: 'airi_task_board_tracker_steps',
-  steps_table: 'airi_task_board_tracker_steps_table',
-  attention: 'airi_task_board_tracker_attention',
-  divider: 'airi_task_board_tracker_divider',
-  activity_header: 'airi_task_board_activity_header',
-  filters: 'airi_task_board_activity_filters',
-  live: 'airi_task_board_activity_live',
-  count: 'airi_task_board_activity_count',
-  activity_empty: 'airi_task_board_activity_empty',
-  activity_scroll: 'airi_task_board_activity_scroll',
-  activity_table: 'airi_task_board_activity_table',
+  section: 'sgluna_task_board_tracker_section',
+  header: 'sgluna_task_board_tracker_header',
+  body: 'sgluna_task_board_tracker_body',
+  summary: 'sgluna_task_board_tracker_summary',
+  empty: 'sgluna_task_board_tracker_empty',
+  workspace: 'sgluna_task_board_tracker_workspace',
+  shelf: 'sgluna_task_board_tracker_shelf',
+  shelf_header: 'sgluna_task_board_tracker_shelf_header',
+  shelf_count: 'sgluna_task_board_tracker_shelf_count',
+  shelf_body: 'sgluna_task_board_tracker_shelf_body',
+  shelf_scroll: 'sgluna_task_board_tracker_shelf_scroll',
+  shelf_table: 'sgluna_task_board_tracker_shelf_table',
+  plan_column: 'sgluna_task_board_tracker_plan_column',
+  plan_header: 'sgluna_task_board_tracker_plan_header',
+  plan_summary: 'sgluna_task_board_tracker_plan_summary',
+  plan_body: 'sgluna_task_board_tracker_plan_body',
+  plan: 'sgluna_task_board_tracker_plan',
+  progress: 'sgluna_task_board_tracker_progress',
+  steps_scroll: 'sgluna_task_board_tracker_steps',
+  steps_table: 'sgluna_task_board_tracker_steps_table',
+  attention: 'sgluna_task_board_tracker_attention',
+  divider: 'sgluna_task_board_tracker_divider',
+  activity_header: 'sgluna_task_board_activity_header',
+  filters: 'sgluna_task_board_activity_filters',
+  live: 'sgluna_task_board_activity_live',
+  count: 'sgluna_task_board_activity_count',
+  activity_empty: 'sgluna_task_board_activity_empty',
+  activity_scroll: 'sgluna_task_board_activity_scroll',
+  activity_table: 'sgluna_task_board_activity_table',
   // Declared in data.lua. Both listen to the wheel without consuming it.
-  scroll_up_input: 'airi-task-board-activity-scroll-up',
-  scroll_down_input: 'airi-task-board-activity-scroll-down',
+  scroll_up_input: 'sgluna-task-board-activity-scroll-up',
+  scroll_down_input: 'sgluna-task-board-activity-scroll-down',
 }
 // The preview is refreshed in place rather than rebuilt, so every element the
 // refresh has to find needs a stable name.
-export const PREVIEW_SECTION_NAME = 'airi_task_board_preview_section'
-export const PREVIEW_HEADER_NAME = 'airi_task_board_preview_header'
-export const PREVIEW_BODY_NAME = 'airi_task_board_preview_body'
-export const PREVIEW_POSITION_NAME = 'airi_task_board_preview_position'
-export const PREVIEW_LOCATE_NAME = 'airi_task_board_preview_locate'
-export const PREVIEW_CAMERA_FRAME_NAME = 'airi_task_board_preview_camera_frame'
-export const PREVIEW_CAMERA_NAME = 'airi_task_board_preview_camera'
-export const PREVIEW_ZOOM_SLIDER_NAME = 'airi_task_board_preview_zoom'
-export const PREVIEW_ZOOM_VALUE_NAME = 'airi_task_board_preview_zoom_value'
-export const SKILLS_ROOT_NAME = 'airi_task_board_skills_panel'
-export const SKILLS_BODY_NAME = 'airi_task_board_skills_body'
-export const SKILLS_BUTTON_NAME = 'airi_task_board_skills'
-export const SKILLS_CLOSE_BUTTON_NAME = 'airi_task_board_skills_close'
+export const PREVIEW_SECTION_NAME = 'sgluna_task_board_preview_section'
+export const PREVIEW_HEADER_NAME = 'sgluna_task_board_preview_header'
+export const PREVIEW_BODY_NAME = 'sgluna_task_board_preview_body'
+export const PREVIEW_POSITION_NAME = 'sgluna_task_board_preview_position'
+export const PREVIEW_LOCATE_NAME = 'sgluna_task_board_preview_locate'
+export const PREVIEW_CAMERA_FRAME_NAME = 'sgluna_task_board_preview_camera_frame'
+export const PREVIEW_CAMERA_NAME = 'sgluna_task_board_preview_camera'
+export const PREVIEW_ZOOM_SLIDER_NAME = 'sgluna_task_board_preview_zoom'
+export const PREVIEW_ZOOM_VALUE_NAME = 'sgluna_task_board_preview_zoom_value'
+export const SKILLS_ROOT_NAME = 'sgluna_task_board_skills_panel'
+export const SKILLS_BODY_NAME = 'sgluna_task_board_skills_body'
+export const SKILLS_BUTTON_NAME = 'sgluna_task_board_skills'
+export const SKILLS_CLOSE_BUTTON_NAME = 'sgluna_task_board_skills_close'
 export const SKILLS_POPOUT_TITLE = 'Skills & Area Learning'
 // Only the fallback the button is created with. What it wears is the avatar of
-// whichever provider AIRI is currently talking to, which task_board_provider
+// whichever provider SGLuna is currently talking to, which task_board_provider
 // resolves from the reported model identifier on every render.
 export const BUTTON_SPRITE: SpritePath = 'entity/character'
-export const CLOSE_BUTTON_NAME = 'airi_task_board_close'
-export const TITLEBAR_NAME = 'airi_task_board_titlebar'
+export const CLOSE_BUTTON_NAME = 'sgluna_task_board_close'
+export const TITLEBAR_NAME = 'sgluna_task_board_titlebar'
 // PAUSE / FOLLOW / … under the prompt, and the … menu holding NEW TASK and
 // TERMINATE. Rebuilt on every refresh like the old Controls grid was.
-export const ACTIONS_NAME = 'airi_task_board_actions'
-export const MORE_BUTTON_NAME = 'airi_task_board_more'
-export const MORE_MENU_NAME = 'airi_task_board_more_menu'
-export const PAUSE_BUTTON_NAME = 'airi_task_board_pause'
-export const TERMINATE_BUTTON_NAME = 'airi_task_board_terminate'
-export const NEW_TASK_BUTTON_NAME = 'airi_task_board_new_task'
-export const FOLLOW_BUTTON_NAME = 'airi_task_board_follow'
+export const ACTIONS_NAME = 'sgluna_task_board_actions'
+export const MORE_BUTTON_NAME = 'sgluna_task_board_more'
+export const MORE_MENU_NAME = 'sgluna_task_board_more_menu'
+export const PAUSE_BUTTON_NAME = 'sgluna_task_board_pause'
+export const TERMINATE_BUTTON_NAME = 'sgluna_task_board_terminate'
+export const NEW_TASK_BUTTON_NAME = 'sgluna_task_board_new_task'
+export const FOLLOW_BUTTON_NAME = 'sgluna_task_board_follow'
 // A blocked plan must be answerable, not just visible. These three buttons are
 // the bounded choices roadmap §7/§12 requires; they ride the same control queue
 // as PAUSE / TERMINATE / NEW TASK.
-export const BLOCKED_SECTION_NAME = 'airi_task_board_blocked_section'
-export const BLOCKED_KEEP_PAUSED_BUTTON_NAME = 'airi_task_board_blocked_keep_paused'
-export const BLOCKED_REVISE_BUTTON_NAME = 'airi_task_board_blocked_revise'
-export const BLOCKED_CANCEL_BUTTON_NAME = 'airi_task_board_blocked_cancel'
+export const BLOCKED_SECTION_NAME = 'sgluna_task_board_blocked_section'
+export const BLOCKED_KEEP_PAUSED_BUTTON_NAME = 'sgluna_task_board_blocked_keep_paused'
+export const BLOCKED_REVISE_BUTTON_NAME = 'sgluna_task_board_blocked_revise'
+export const BLOCKED_CANCEL_BUTTON_NAME = 'sgluna_task_board_blocked_cancel'
 // A blocked choice has no guaranteed status transition to key off (the plan is
 // meant to stay frozen when the answer is "keep paused"), so it mirrors the
 // lighter prompt-send pattern: a per-player tick stamp cleared by any fresher
 // runtime snapshot. Purely visual reassurance, not a durable lock.
 export const BLOCKED_CHOICE_PENDING_TICKS = 5 * 60
-export const PROMPT_FIELD_NAME = 'airi_task_board_prompt'
-export const PROMPT_SEND_BUTTON_NAME = 'airi_task_board_prompt_send'
+export const PROMPT_FIELD_NAME = 'sgluna_task_board_prompt'
+export const PROMPT_SEND_BUTTON_NAME = 'sgluna_task_board_prompt_send'
 export const MAX_STEPS = 24
 export const MAX_GOAL_CHECKS = 6
 // The Goal and Now cards at the top of the left column, rebuilt every refresh.
-export const GOAL_CARD_NAME = 'airi_task_board_goal_card'
-export const NOW_CARD_NAME = 'airi_task_board_now_card'
-export const TITLE_STATUS_NAME = 'airi_task_board_title_status'
+export const GOAL_CARD_NAME = 'sgluna_task_board_goal_card'
+export const NOW_CARD_NAME = 'sgluna_task_board_now_card'
+export const TITLE_STATUS_NAME = 'sgluna_task_board_title_status'
 export const TITLE_STATUS_WIDTH = 520
 export const GOAL_PROGRESS_WIDTH = 90
 export const MAX_SHELF_NODES = 12
@@ -132,7 +132,7 @@ export const MAX_TEXT = 500
 export const MAX_PROMPT_TEXT = 4000
 export const UI_INPUT_QUEUE_LIMIT = 32
 // The console asks for a snapshot rather than only waiting to be handed one: a
-// push-only feed leaves `storage.airi_task_board_ui` untouched whether AIRI is
+// push-only feed leaves `storage.sgluna_task_board_ui` untouched whether SGLuna is
 // idle or gone, so the two are indistinguishable. The request rides the input
 // drain the runtime already performs, so it costs no extra round trip.
 export const POLL_REQUEST_TICKS = 60
@@ -246,19 +246,19 @@ export const CONSOLE_TABS = {
   order: ['now', 'plan', 'activity'] as ConsoleTab[],
   captions: { now: 'NOW', plan: 'PLAN', activity: 'ACTIVITY' } as Record<ConsoleTab, string>,
   tooltips: {
-    now: 'The goal, the current step and the conversation with AIRI',
+    now: 'The goal, the current step and the conversation with SGLuna',
     plan: 'The goal, the Roadmap Shelf and the committed plan slice',
-    activity: 'Everything AIRI observed, decided and did, newest last',
+    activity: 'Everything SGLuna observed, decided and did, newest last',
   } as Record<ConsoleTab, string>,
-  pages: { now: 'airi_task_board_tab_now', plan: 'airi_task_board_tab_plan', activity: 'airi_task_board_tab_activity' } as Record<ConsoleTab, string>,
-  bar: 'airi_task_board_tab_bar',
-  banner: 'airi_task_board_banner',
-  plan_dynamic: 'airi_task_board_plan_dynamic',
-  activity_section: 'airi_task_board_activity_section',
-  activity_section_header: 'airi_task_board_activity_section_header',
-  activity_section_body: 'airi_task_board_activity_section_body',
+  pages: { now: 'sgluna_task_board_tab_now', plan: 'sgluna_task_board_tab_plan', activity: 'sgluna_task_board_tab_activity' } as Record<ConsoleTab, string>,
+  bar: 'sgluna_task_board_tab_bar',
+  banner: 'sgluna_task_board_banner',
+  plan_dynamic: 'sgluna_task_board_plan_dynamic',
+  activity_section: 'sgluna_task_board_activity_section',
+  activity_section_header: 'sgluna_task_board_activity_section_header',
+  activity_section_body: 'sgluna_task_board_activity_section_body',
   // Carried in the tab buttons' tags; the click handler reads it back.
-  tag: 'airi_console_tab',
+  tag: 'sgluna_console_tab',
   spacing: 6,
   activity_height: 460,
 }

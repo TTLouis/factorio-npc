@@ -13,9 +13,9 @@ else
 fi
 NODE_VERSION="v24.21.0"
 PNPM_VERSION="10.30.1"
-AIRI_REF="ad3e87523b157880a360e773de68519e49f809f0"
+SGLUNA_REF="ad3e87523b157880a360e773de68519e49f809f0"
 REVISION="2026-09-14.22"
-DEPLOYMENT_REVISION="airi-deploy-v8-npc-staging"
+DEPLOYMENT_REVISION="sgluna-deploy-v8-npc-staging"
 WORK=""
 
 log() { printf '[SGLuna install] %s\n' "$*"; }
@@ -62,16 +62,16 @@ GLIBC="$(getconf GNU_LIBC_VERSION | awk '{print $2}')"
 mkdir -p "$SERVER_DIR"
 SERVER_DIR="$(readlink -f -- "$SERVER_DIR")"
 [[ "$SERVER_DIR" != / ]] || fail 'The server root cannot be /'
-[[ ! -L "$SERVER_DIR/.airi" ]] || fail '.airi cannot be a symlink'
-mkdir -p "$SERVER_DIR/.airi/releases"
-[[ ! -L "$SERVER_DIR/.airi/releases" && ! -L "$SERVER_DIR/.airi/operation.lock" ]] || fail 'Managed SGLuna compatibility-state paths cannot be symlinks'
-exec 9>"$SERVER_DIR/.airi/operation.lock"
+[[ ! -L "$SERVER_DIR/.sgluna" ]] || fail '.sgluna cannot be a symlink'
+mkdir -p "$SERVER_DIR/.sgluna/releases"
+[[ ! -L "$SERVER_DIR/.sgluna/releases" && ! -L "$SERVER_DIR/.sgluna/operation.lock" ]] || fail 'Managed SGLuna state paths cannot be symlinks'
+exec 9>"$SERVER_DIR/.sgluna/operation.lock"
 flock -n 9 || fail 'Another SGLuna installer/runtime owns this server volume'
 
 if [[ ! -e "$SERVER_DIR/start-sgluna.sh" && ! -L "$SERVER_DIR/start-sgluna.sh" ]]; then
   if [[ -L "$SERVER_DIR/start-airi.sh" ]]; then
     LEGACY_START_TARGET="$(readlink -- "$SERVER_DIR/start-airi.sh")"
-    [[ "$LEGACY_START_TARGET" == .airi/releases/*/start-airi.sh || "$LEGACY_START_TARGET" == .airi/releases/*/start-sgluna.sh ]] || fail 'Existing AIRI compatibility startup symlink has an unexpected target'
+    [[ "$LEGACY_START_TARGET" == .sgluna/releases/*/start-sgluna.sh ]] || fail 'Existing start-airi.sh compatibility symlink has an unexpected target'
     ln -s "$LEGACY_START_TARGET" "$SERVER_DIR/.start-sgluna-compat.new"
     mv -Tf "$SERVER_DIR/.start-sgluna-compat.new" "$SERVER_DIR/start-sgluna.sh"
     log 'Mapped the legacy active startup target onto canonical start-sgluna.sh before reinstall.'
@@ -90,7 +90,7 @@ START_SGLUNA_COMPAT
   fi
 fi
 
-WORK="$(mktemp -d "$SERVER_DIR/.airi/install.XXXXXX")"
+WORK="$(mktemp -d "$SERVER_DIR/.sgluna/install.XXXXXX")"
 APP="$WORK/app"
 mkdir -p "$APP/src/runtime-v8" "$APP/src/staging" "$APP/autorio" "$APP/factorio" "$APP/client-mod" "$WORK/tmp" "$WORK/home" "$WORK/cache" "$WORK/npm-cache"
 export HOME="$WORK/home" TMPDIR="$WORK/tmp" XDG_CACHE_HOME="$WORK/cache" NPM_CONFIG_CACHE="$WORK/npm-cache"
@@ -101,7 +101,7 @@ fetch() {
   curl --fail --location --retry 3 --connect-timeout 20 --max-time 900 --proto '=https' --proto-redir '=https' "$1" --output "$2"
 }
 
-log "Installer revision $REVISION; source $AIRI_REF"
+log "Installer revision $REVISION; source $SGLUNA_REF"
 FREE_KB="$(df -Pk "$SERVER_DIR" | awk 'END {print $4}')"
 [[ "$FREE_KB" =~ ^[0-9]+$ ]] && (( FREE_KB >= 4194304 )) || fail 'At least 4 GiB free space is required for transactional installation'
 
@@ -121,9 +121,9 @@ export PATH="$WORK/build-tools/bin:$PATH"
 [[ "$(pnpm --version)" == "$PNPM_VERSION" ]] || fail 'pnpm verification failed'
 
 log 'Downloading pinned Factorio NPC source'
-fetch "https://codeload.github.com/TTLouis/factorio-npc/tar.gz/$AIRI_REF" "$WORK/airi-source.tar.gz"
+fetch "https://codeload.github.com/TTLouis/factorio-npc/tar.gz/$SGLUNA_REF" "$WORK/sgluna-source.tar.gz"
 mkdir -p "$WORK/source"
-tar -xzf "$WORK/airi-source.tar.gz" --strip-components=1 --no-same-owner -C "$WORK/source"
+tar -xzf "$WORK/sgluna-source.tar.gz" --strip-components=1 --no-same-owner -C "$WORK/source"
 [[ -f "$WORK/source/pnpm-lock.yaml" ]] || fail 'Pinned source lockfile is missing'
 [[ -f "$WORK/source/deploy/pterodactyl/staging/guard.ts" ]] || fail 'Pinned source lacks the v8 NPC guard'
 [[ -f "$WORK/source/deploy/pterodactyl/runtime-v8/supervisor.mjs" ]] || fail 'Pinned source lacks the v8 runtime supervisor'
@@ -165,9 +165,9 @@ done
 cp "$WORK/source/packages/agent/src/llm/prompt.md" "$APP/src/prompt.md"
 cp "$WORK/source/LICENSE" "$APP/UPSTREAM-LICENSE"
 for file in "$APP/src/runtime-v8/"*.mjs "$APP/src/staging/"*.mjs; do node --check "$file"; done
-AIRI_SUPERVISOR_VERIFY="$APP/src/runtime-v8/supervisor.mjs" node --input-type=module <<'VERIFY_RUNTIME_IMPORTS'
+SGLUNA_SUPERVISOR_VERIFY="$APP/src/runtime-v8/supervisor.mjs" node --input-type=module <<'VERIFY_RUNTIME_IMPORTS'
 import { pathToFileURL } from 'node:url'
-await import(pathToFileURL(process.env.AIRI_SUPERVISOR_VERIFY).href)
+await import(pathToFileURL(process.env.SGLUNA_SUPERVISOR_VERIFY).href)
 VERIFY_RUNTIME_IMPORTS
 
 FACTORIO_REQUEST="${FACTORIO_VERSION:-latest}"
@@ -217,14 +217,14 @@ ROOT="${CONTAINER_ROOT:-/home/container}"
 ROOT="$(readlink -f -- "$ROOT")"
 SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
 APP="$(dirname -- "$SELF")"
-[[ -d "$ROOT/.airi" && ! -L "$ROOT/.airi" ]] || { echo '[SGLuna] Missing managed state directory' >&2; exit 78; }
-exec 9>"$ROOT/.airi/operation.lock"
+[[ -d "$ROOT/.sgluna" && ! -L "$ROOT/.sgluna" ]] || { echo '[SGLuna] Missing managed state directory' >&2; exit 78; }
+exec 9>"$ROOT/.sgluna/operation.lock"
 flock -n 9 || { echo '[SGLuna] Another SGLuna install/runtime owns this server volume' >&2; exit 73; }
 unset NODE_OPTIONS NODE_PATH
 export NODE_TLS_REJECT_UNAUTHORIZED=1
 export HOME="$ROOT" CONTAINER_ROOT="$ROOT"
 export PATH="$APP/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-export TMPDIR="$ROOT/.airi/tmp"
+export TMPDIR="$ROOT/.sgluna/tmp"
 mkdir -p "$TMPDIR"
 cd "$ROOT"
 exec "$APP/node/bin/node" "$APP/src/runtime-v8/supervisor.mjs"
@@ -232,7 +232,7 @@ START_SGLUNA
 chmod 755 "$APP/start-sgluna.sh"
 
 log 'Writing checksummed release manifest'
-APP_ROOT="$APP" AIRI_REF_VALUE="$AIRI_REF" RELEASE_REVISION_VALUE="$REVISION" FACTORIO_TARGET_VALUE="$FACTORIO_TARGET" node --input-type=module <<'MANIFEST'
+APP_ROOT="$APP" SGLUNA_REF_VALUE="$SGLUNA_REF" RELEASE_REVISION_VALUE="$REVISION" FACTORIO_TARGET_VALUE="$FACTORIO_TARGET" node --input-type=module <<'MANIFEST'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import crypto from 'node:crypto'
@@ -268,16 +268,16 @@ for (const name of names) {
   files[name] = crypto.createHash('sha256').update(bytes).digest('hex')
 }
 await fs.writeFile(path.join(root, 'manifest.json'), JSON.stringify({
-  revision: 'airi-pterodactyl-v8',
+  revision: 'sgluna-pterodactyl-v8',
   releaseRevision: process.env.RELEASE_REVISION_VALUE,
-  source: process.env.AIRI_REF_VALUE,
+  source: process.env.SGLUNA_REF_VALUE,
   factorio: process.env.FACTORIO_TARGET_VALUE,
   files,
 }, null, 2) + '\n')
 MANIFEST
 
 RELEASE_ID="${REVISION}-$(basename "$WORK" | tr . -)"
-RELEASE="$SERVER_DIR/.airi/releases/$RELEASE_ID"
+RELEASE="$SERVER_DIR/.sgluna/releases/$RELEASE_ID"
 [[ ! -e "$RELEASE" ]] || fail 'Release directory collision'
 mv "$APP" "$RELEASE"
 
@@ -290,32 +290,32 @@ rm -f -- "$SERVER_DIR/autorio_0.1.0.zip"
 PREVIOUS_TARGET=""
 if [[ -L "$SERVER_DIR/start-sgluna.sh" ]]; then
   PREVIOUS_TARGET="$(readlink -- "$SERVER_DIR/start-sgluna.sh")"
-  [[ "$PREVIOUS_TARGET" == .airi/releases/*/start-sgluna.sh || "$PREVIOUS_TARGET" == .airi/releases/*/start-airi.sh ]] || fail 'Existing SGLuna startup symlink has an unexpected target'
+  [[ "$PREVIOUS_TARGET" == .sgluna/releases/*/start-sgluna.sh ]] || fail 'Existing SGLuna startup symlink has an unexpected target'
 elif [[ -L "$SERVER_DIR/start-airi.sh" ]]; then
   PREVIOUS_TARGET="$(readlink -- "$SERVER_DIR/start-airi.sh")"
-  [[ "$PREVIOUS_TARGET" == .airi/releases/*/start-airi.sh || "$PREVIOUS_TARGET" == .airi/releases/*/start-sgluna.sh ]] || fail 'Existing AIRI compatibility startup symlink has an unexpected target'
+  [[ "$PREVIOUS_TARGET" == .sgluna/releases/*/start-sgluna.sh ]] || fail 'Existing start-airi.sh compatibility symlink has an unexpected target'
 elif [[ -e "$SERVER_DIR/start-sgluna.sh" ]]; then
   [[ -f "$SERVER_DIR/start-sgluna.sh" ]] || fail 'Existing SGLuna startup path is not a regular file or managed symlink'
 elif [[ -e "$SERVER_DIR/start-airi.sh" ]]; then
-  [[ -f "$SERVER_DIR/start-airi.sh" ]] || fail 'Existing AIRI compatibility startup path is not a regular file or managed symlink'
+  [[ -f "$SERVER_DIR/start-airi.sh" ]] || fail 'Existing start-airi.sh compatibility path is not a regular file or managed symlink'
 fi
-ln -s ".airi/releases/$RELEASE_ID/start-sgluna.sh" "$SERVER_DIR/.start-sgluna-$RELEASE_ID.new"
+ln -s ".sgluna/releases/$RELEASE_ID/start-sgluna.sh" "$SERVER_DIR/.start-sgluna-$RELEASE_ID.new"
 mv -Tf "$SERVER_DIR/.start-sgluna-$RELEASE_ID.new" "$SERVER_DIR/start-sgluna.sh"
 ln -s "start-sgluna.sh" "$SERVER_DIR/.start-airi-compat.new"
 mv -Tf "$SERVER_DIR/.start-airi-compat.new" "$SERVER_DIR/start-airi.sh"
 if [[ -n "$PREVIOUS_TARGET" ]]; then
-  printf '%s\n' "$PREVIOUS_TARGET" > "$SERVER_DIR/.airi/rollback-$RELEASE_ID.target.tmp"
-  mv -Tf "$SERVER_DIR/.airi/rollback-$RELEASE_ID.target.tmp" "$SERVER_DIR/.airi/rollback-$RELEASE_ID.target"
+  printf '%s\n' "$PREVIOUS_TARGET" > "$SERVER_DIR/.sgluna/rollback-$RELEASE_ID.target.tmp"
+  mv -Tf "$SERVER_DIR/.sgluna/rollback-$RELEASE_ID.target.tmp" "$SERVER_DIR/.sgluna/rollback-$RELEASE_ID.target"
 fi
 cat > "$SERVER_DIR/rollback-sgluna.sh" <<'ROLLBACK_SGLUNA'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 ROOT="${CONTAINER_ROOT:-/home/container}"
 ROOT="$(readlink -f -- "$ROOT")"
-LATEST="$(ls -1t "$ROOT"/.airi/rollback-*.target 2>/dev/null | head -n 1 || true)"
+LATEST="$(ls -1t "$ROOT"/.sgluna/rollback-*.target 2>/dev/null | head -n 1 || true)"
 [[ -n "$LATEST" && -f "$LATEST" ]] || { echo '[SGLuna rollback] No previous completed release is recorded.' >&2; exit 1; }
 TARGET="$(cat "$LATEST")"
-[[ ( "$TARGET" == .airi/releases/*/start-sgluna.sh || "$TARGET" == .airi/releases/*/start-airi.sh ) && -f "$ROOT/$TARGET" ]] || { echo '[SGLuna rollback] Recorded previous release is unavailable.' >&2; exit 1; }
+[[ ( "$TARGET" == .sgluna/releases/*/start-sgluna.sh ) && -f "$ROOT/$TARGET" ]] || { echo '[SGLuna rollback] Recorded previous release is unavailable.' >&2; exit 1; }
 ln -s "$TARGET" "$ROOT/.start-sgluna-rollback.new"
 mv -Tf "$ROOT/.start-sgluna-rollback.new" "$ROOT/start-sgluna.sh"
 ln -s "start-sgluna.sh" "$ROOT/.start-airi-compat.new"
@@ -342,17 +342,17 @@ User Factorio mods:   mods/
 Saves:                saves/
 Effective config:     sgluna-config.json (canonical non-secret runtime config)
 Legacy config input:  airi-config.json (read only when canonical config is absent)
-Managed runtime:      .airi/ (internal compatibility state; do not edit)
+Managed runtime:      .sgluna/ (internal managed state; do not edit)
 Visibility:           automatic from FACTORIO_USERNAME + FACTORIO_TOKEN
                       both blank = private/hidden; both supplied = public
-Installed source:     $AIRI_REF
+Installed source:     $SGLUNA_REF
 Installed release:    $REVISION
 Startup:              bash ./start-sgluna.sh
 EOF_SGLUNA
 chmod 644 "$SERVER_DIR/README-SGLUNA.txt"
 
 log "Installation complete: $DEPLOYMENT_REVISION"
-log "Pinned source: $AIRI_REF"
+log "Pinned source: $SGLUNA_REF"
 log "Factorio: $FACTORIO_TARGET"
 log 'Actor ownership: standalone NPC; zero connected humans is valid.'
 log 'Client mod download: client-mods/autorio_0.1.0.zip'
@@ -360,7 +360,7 @@ log 'Chat command: !luna. Legacy !airi remains accepted as a compatibility alias
 log 'Preferred chat allowlist: SGLUNA_CHAT_PLAYERS (blank/* = everyone, comma list = allowlist, none = disabled). AIRI_CHAT_PLAYERS remains a fallback.'
 log 'Factorio visibility is automatic: set FACTORIO_USERNAME and FACTORIO_TOKEN together for public listing; leave both blank for private/hidden.'
 log 'User Factorio mods: mods/'
-log 'Managed runtime mods: .airi/run-*/mods/ (internal; do not edit)'
+log 'Managed runtime mods: .sgluna/run-*/mods/ (internal; do not edit)'
 log 'Operator help: README-SGLUNA.txt'
 log 'Startup command: bash ./start-sgluna.sh'
 exit 0

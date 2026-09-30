@@ -5,7 +5,7 @@ import { NpcAgentLoop, NpcDialogueMemory } from './npc-agent-loop.mjs'
 
 function deployment() {
   return {
-    revision: 'airi-deploy-v8-npc-staging',
+    revision: 'sgluna-deploy-v8-npc-staging',
     session: '0123456789abcdef0123456789abcdef',
     mode: 'npc',
     actor_id: 18,
@@ -70,7 +70,7 @@ class ExactTargetRcon {
 
   async command(text) {
     this.commands.push(text)
-    if (text.includes('remote.call("airi_deployment","status")')) return JSON.stringify(deployment())
+    if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(deployment())
     if (text.includes('remote.call("autorio_tools","get_nearby_entities"')) return JSON.stringify(this.nearby)
     if (text.includes('remote.call("autorio_operations","status")')) return JSON.stringify(this.operationStatus)
     if (text.includes('remote.call("autorio_follow","status")')) return JSON.stringify({ active: false })
@@ -82,9 +82,9 @@ class ExactTargetRcon {
       }
       return JSON.stringify({ ok: true })
     }
-    if (text.includes('AIRI_RESULT_') && text.includes('autorio_operations')) {
+    if (text.includes('SGLUNA_RESULT_') && text.includes('autorio_operations')) {
       this.mutations.push(text)
-      const marker = text.match(/AIRI_RESULT_[a-f0-9]{24}:/)?.[0]
+      const marker = text.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)?.[0]
       assert.ok(marker)
       const count = (text.match(/remote\.call\('autorio_operations'/g) ?? []).length
       return `${marker}${JSON.stringify({ ok: true, result: Array.from({ length: count }, () => [true, 'Task started']) })}`
@@ -352,8 +352,8 @@ test('restored legacy durable memory sanitizes historical exact ids while preser
   memory.restore({
     version: 1,
     dialogue: [{
-      key: 'npc:airi',
-      summary: 'tester: return to unit 991337 | AIRI: remembered target | actions: mine_entity_exact {"unit_number":991337}',
+      key: 'npc:sgluna',
+      summary: 'tester: return to unit 991337 | SGLuna: remembered target | actions: mine_entity_exact {"unit_number":991337}',
       recent: [{
         id: 7,
         sender: 'tester',
@@ -363,7 +363,7 @@ test('restored legacy durable memory sanitizes historical exact ids while preser
       }],
     }],
     plans: [{
-      key: 'npc:airi',
+      key: 'npc:sgluna',
       state: {
         goal_id: 'goal_legacy',
         owner: 'tester',
@@ -432,12 +432,12 @@ test('restored legacy durable memory sanitizes historical exact ids while preser
     }],
   })
 
-  const raw = memory.currentPlan('npc:airi')
+  const raw = memory.currentPlan('npc:sgluna')
   assert.match(raw.last_operations[0], /991337/)
   assert.match(raw.task_board.evidence[0].summary, /991337/)
   assert.match(memory.snapshot().dialogue[0].summary, /991337/)
 
-  const context = memory.context('npc:airi')
+  const context = memory.context('npc:sgluna')
   assert.match(context, /entity_references/)
   assert.match(context, /stone-furnace/)
   assert.match(context, /120\.5/)
@@ -485,7 +485,7 @@ test('repeating the same stale durable exact id stops after one corrective retry
 
   const first = await agent.request('act on the observed furnace', { sender: 'tester' })
   assert.equal(first.operations[0].args.unit_number, 331)
-  const before = agent.memory.currentPlan('npc:airi')
+  const before = agent.memory.currentPlan('npc:sgluna')
   assert.equal(rcon.mutations.length, 1)
 
   const second = await agent.request('continue at that furnace', { sender: 'tester' })
@@ -495,7 +495,7 @@ test('repeating the same stale durable exact id stops after one corrective retry
   assert.equal(calls, 4)
   assert.equal(rcon.mutations.length, 1)
 
-  const after = agent.memory.currentPlan('npc:airi')
+  const after = agent.memory.currentPlan('npc:sgluna')
   assert.equal(after.goal_id, before.goal_id)
   assert.equal(after.revision, before.revision)
   assert.deepEqual(after.last_operations, before.last_operations)

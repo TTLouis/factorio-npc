@@ -88,7 +88,7 @@ def run(client: Rcon, results: Path) -> None:
     # Rejected requests are also correlated and never need task dispatch to get
     # a durable receipt.
     rejected = json_command(
-        lua_json(remote_call('autorio_operations', 'research_technology', repr('__airi_followthrough_missing__'))),
+        lua_json(remote_call('autorio_operations', 'research_technology', repr('__sgluna_followthrough_missing__'))),
         'rejected correlated research request',
     )
     require(isinstance(rejected, list) and len(rejected) >= 3, rejected)

@@ -1,4 +1,4 @@
-# AIRI Factorio — Jev Cognitive Coprocessor Architecture
+# SGLuna Factorio — Jev Cognitive Coprocessor Architecture
 
 Status: **canonical Jev direction**
 Branch: `experiment/jev-agent-architecture`
@@ -403,7 +403,7 @@ minimum confidence: 0.85
 status: existing M6 live baseline
 ```
 
-All other operations are marked `automatic_projection=false` pending Phase 9 AIRI E2E
+All other operations are marked `automatic_projection=false` pending Phase 9 SGLuna E2E
 measurement. In particular, moderate/high/combat candidates return to the Main LLM even
 at confidence 1.0 rather than receiving guessed thresholds.
 

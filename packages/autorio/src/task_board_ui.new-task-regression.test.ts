@@ -21,7 +21,7 @@ describe('task board New Task control regression', () => {
     const menu = source.split('export function render_action_row(')[1] ?? ''
     const handler = source.split('function handle_control_click(')[1]?.split('\n}\n\nexport function create_task_board_ui_remote_interface')[0] ?? ''
 
-    expect(source).toContain("const NEW_TASK_BUTTON_NAME = 'airi_task_board_new_task'")
+    expect(source).toContain("const NEW_TASK_BUTTON_NAME = 'sgluna_task_board_new_task'")
     expect(source).toContain("type TaskBoardUiControlAction = 'pause' | 'terminate' | 'follow' | 'stop_follow' | 'new_task'")
     expect(prompt).toContain("caption: 'Prompt SGLuna'")
     expect(prompt).not.toContain('NEW_TASK_BUTTON_NAME')
@@ -30,9 +30,9 @@ describe('task board New Task control regression', () => {
     expect(menu).toContain('new_task.enabled = state.new_task_enabled')
     expect(source).toContain('new_task_enabled: pending === undefined')
     expect(handler).toContain('if (element_name === NEW_TASK_BUTTON_NAME)')
-    expect(handler).toMatch(/NEW_TASK_BUTTON_NAME\)[^\n]*LIFECYCLE\.current\(player\.index\) !== undefined[^\n]*return true[^\n]*clear_terminate_confirmation\(player\.index\)[^\n]*debug_ui\.suppress_snapshot\(storage\.airi_task_board_ui\)[^\n]*debug_ui\.reset_task_conversation\(\)[^\n]*activity_state\.clear_activity_history\(\)[^\n]*emit_control\(player, 'new_task'\)/)
+    expect(handler).toMatch(/NEW_TASK_BUTTON_NAME\)[^\n]*LIFECYCLE\.current\(player\.index\) !== undefined[^\n]*return true[^\n]*clear_terminate_confirmation\(player\.index\)[^\n]*debug_ui\.suppress_snapshot\(storage\.sgluna_task_board_ui\)[^\n]*debug_ui\.reset_task_conversation\(\)[^\n]*activity_state\.clear_activity_history\(\)[^\n]*emit_control\(player, 'new_task'\)/)
     expect(handler).toContain("if (element_name === TERMINATE_BUTTON_NAME)")
-    expect(handler).toMatch(/LIFECYCLE\.begin\(player\.index, 'terminate'\)[\s\S]*debug_ui\.suppress_snapshot\(storage\.airi_task_board_ui\)[\s\S]*debug_ui\.reset_task_conversation\(\)[\s\S]*activity_state\.clear_activity_history\(\)[\s\S]*emit_control\(player, 'terminate'\)/)
+    expect(handler).toMatch(/LIFECYCLE\.begin\(player\.index, 'terminate'\)[\s\S]*debug_ui\.suppress_snapshot\(storage\.sgluna_task_board_ui\)[\s\S]*debug_ui\.reset_task_conversation\(\)[\s\S]*activity_state\.clear_activity_history\(\)[\s\S]*emit_control\(player, 'terminate'\)/)
   })
 
   it('refreshes Current Task Conversation while the console stays open', () => {

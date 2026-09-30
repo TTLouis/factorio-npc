@@ -7,7 +7,7 @@ import { NpcAgentLoop } from './npc-agent-loop.mjs'
 
 function deployment() {
   return {
-    revision: 'airi-deploy-v8-npc-staging',
+    revision: 'sgluna-deploy-v8-npc-staging',
     session: '0123456789abcdef0123456789abcdef',
     mode: 'npc',
     actor_id: 18,
@@ -62,7 +62,7 @@ class TestRcon {
   }
 
   async command(text) {
-    if (text.includes('remote.call("airi_deployment","status")')) return JSON.stringify(deployment())
+    if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(deployment())
     if (text.includes('remote.call("autorio_follow","status")')) {
       return JSON.stringify(this.followHealthy
         ? {
@@ -128,13 +128,13 @@ function decisionResponse(route) {
 
 function agentForRoute(route, { followHealthy = false, decisionProvider } = {}) {
   const memory = new CanonicalTaskBoardMemory()
-  memory.planByNpc.set('npc:airi', activePlan())
+  memory.planByNpc.set('npc:sgluna', activePlan())
   const events = []
   const agent = new NpcAgentLoop({
     rcon: new TestRcon({ followHealthy }),
     memory,
     systemPrompt: 'main planner',
-    npcId: 'airi',
+    npcId: 'sgluna',
     provider: async () => { throw new Error('main planner should not run in this focused router test') },
     interactionDecisionProvider: decisionProvider ?? (async () => decisionResponse(route)),
     traceFile: null,
@@ -144,14 +144,14 @@ function agentForRoute(route, { followHealthy = false, decisionProvider } = {}) 
   })
   agent.active = true
   agent.epoch = deployment()
-  agent.lastMemoryKey = 'npc:airi'
+  agent.lastMemoryKey = 'npc:sgluna'
   agent.baseMessages = [
     { role: 'system', content: agent.systemPrompt },
     { role: 'user', content: '[CHAT] tester: build an early burner coal loop' },
   ]
   agent.messages = agent.baseMessages.map(message => ({ ...message }))
   agent.requestInfo = {
-    memoryKey: 'npc:airi',
+    memoryKey: 'npc:sgluna',
     turnId: 1,
     sender: 'tester',
     text: 'build an early burner coal loop',

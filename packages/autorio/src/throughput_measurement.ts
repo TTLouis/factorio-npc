@@ -90,13 +90,13 @@ interface MeasurementRecord {
 }
 
 declare const storage: {
-  airi_next_throughput_measurement_id?: number
-  airi_throughput_measurements?: Record<number, MeasurementRecord>
+  sgluna_next_throughput_measurement_id?: number
+  sgluna_throughput_measurements?: Record<number, MeasurementRecord>
 }
 
 function measurements() {
-  if (!storage.airi_throughput_measurements) storage.airi_throughput_measurements = {}
-  return storage.airi_throughput_measurements
+  if (!storage.sgluna_throughput_measurements) storage.sgluna_throughput_measurements = {}
+  return storage.sgluna_throughput_measurements
 }
 
 function valid_integer(value: unknown, min: number, max: number): value is number {
@@ -517,8 +517,8 @@ export function new_throughput_measurement_controller(get_actor: () => Controlle
     }
 
     prune_measurements()
-    const id = (storage.airi_next_throughput_measurement_id ?? 0) + 1
-    storage.airi_next_throughput_measurement_id = id
+    const id = (storage.sgluna_next_throughput_measurement_id ?? 0) + 1
+    storage.sgluna_next_throughput_measurement_id = id
     const record: MeasurementRecord = {
       id,
       state: 'running',

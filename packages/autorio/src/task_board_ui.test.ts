@@ -45,7 +45,7 @@ describe('in-game task board UI projection', () => {
       objective: 'Climb the technology tree',
       status: 'blocked',
       blocker: 'provider recovery exhausted',
-      blocker_summary: 'AIRI could not get a usable provider response after retrying.',
+      blocker_summary: 'SGLuna could not get a usable provider response after retrying.',
       pause_reason: '',
       pause_summary: '',
       completed_count: 2,
@@ -75,7 +75,7 @@ describe('in-game task board UI projection', () => {
     expect(board).toMatchObject({
       status: 'blocked',
       blocker: 'provider recovery exhausted',
-      blocker_summary: 'AIRI could not get a usable provider response after retrying.',
+      blocker_summary: 'SGLuna could not get a usable provider response after retrying.',
       completed_count: 2,
       total_steps: 5,
       active_index: 2,
@@ -253,7 +253,7 @@ describe('in-game task board UI projection', () => {
   })
 
   it('keeps terminate confirmation scoped to one player and a short tick window', () => {
-    ;(globalThis as any).storage.airi_task_board_terminate_confirm_until = { 1: 600, 2: 0 }
+    ;(globalThis as any).storage.sgluna_task_board_terminate_confirm_until = { 1: 600, 2: 0 }
     expect(task_board_ui_terminate_is_armed(1, 599)).toBe(true)
     expect(task_board_ui_terminate_is_armed(1, 601)).toBe(false)
     expect(task_board_ui_terminate_is_armed(2, 1)).toBe(false)
@@ -270,7 +270,7 @@ describe('in-game task board UI projection', () => {
   })
 
   it('keeps unsent prompt drafts scoped per player', () => {
-    ;(globalThis as any).storage.airi_task_board_prompt_draft = { 1: 'build power', 2: 'follow me' }
+    ;(globalThis as any).storage.sgluna_task_board_prompt_draft = { 1: 'build power', 2: 'follow me' }
     expect(task_board_ui_prompt_draft(1)).toBe('build power')
     expect(task_board_ui_prompt_draft(2)).toBe('follow me')
     expect(task_board_ui_prompt_draft(3)).toBe('')
@@ -279,7 +279,7 @@ describe('in-game task board UI projection', () => {
   it('keeps preview zoom scoped per player without writing from render reads', () => {
     expect(task_board_preview_zoom(1)).toBe(0.75)
     expect((globalThis as any).storage).toEqual({})
-    ;(globalThis as any).storage.airi_task_board_preview_zoom = { 1: 1.25, 2: 0.5 }
+    ;(globalThis as any).storage.sgluna_task_board_preview_zoom = { 1: 1.25, 2: 0.5 }
     expect(task_board_preview_zoom(1)).toBe(1.25)
     expect(task_board_preview_zoom(2)).toBe(0.5)
   })
@@ -320,7 +320,7 @@ describe('in-game task board UI projection', () => {
     expect(source).toContain("const BUTTON_SPRITE: SpritePath = 'entity/character'")
     expect(source).toContain("style: 'slot_button'")
     expect(source).toContain('button.toggled = task_board_ui_is_open(player.index)')
-    expect(source).not.toContain("caption: 'AIRI',")
+    expect(source).not.toContain("caption: 'SGLuna',")
   })
 
   it('uses a movable screen window with native Factorio title, section, and control styles', () => {
@@ -402,7 +402,7 @@ describe('in-game task board UI projection', () => {
   it('shows live mod task state and when SGLuna last synced', () => {
     const source = taskBoardUiSource()
     const control = readFileSync(new URL('./control.ts', import.meta.url), 'utf8')
-    expect(source).toContain('storage.airi_task_board_ui_synced_tick = game.tick')
+    expect(source).toContain('storage.sgluna_task_board_ui_synced_tick = game.tick')
     expect(source).toContain('World task: ${world_task_summary(runtime.world_task)}')
     expect(source).toContain('Last sync: ${sync_summary(synced_tick)}')
     expect(control).toContain('set_task_board_world_task_provider(() => task_manager.get_status_snapshot())')
@@ -452,7 +452,7 @@ describe('in-game task board UI projection', () => {
     expect((globalThis as any).storage).toEqual({})
 
     expect(toggle_task_board_ui_open(1)).toBe(true)
-    expect((globalThis as any).storage.airi_task_board_ui_open).toEqual({ 1: true })
+    expect((globalThis as any).storage.sgluna_task_board_ui_open).toEqual({ 1: true })
   })
 
   it('keeps rendering read-only so drawing the console cannot desync multiplayer', () => {
@@ -464,12 +464,12 @@ describe('in-game task board UI projection', () => {
 
     const skills = readFileSync(new URL('./skills.ts', import.meta.url), 'utf8')
     const learning = readFileSync(new URL('./factory_area_learning.ts', import.meta.url), 'utf8')
-    expect(skills).toContain('return storage.airi_skill_definitions ?? {}')
+    expect(skills).toContain('return storage.sgluna_skill_definitions ?? {}')
     expect(skills).toContain('function store_dynamic_skill_definition')
     expect(skills).toContain('registry[skill.id] = skill')
     expect(skills).toContain('MAX_DYNAMIC_SKILL_DEFINITIONS')
-    expect(learning).toContain('return storage.airi_factory_area_analyses ?? {}')
-    expect(learning).toContain('return storage.airi_factory_area_order ?? []')
+    expect(learning).toContain('return storage.sgluna_factory_area_analyses ?? {}')
+    expect(learning).toContain('return storage.sgluna_factory_area_order ?? []')
   })
 
   it('opens area learning in its own window instead of consuming console space', () => {
@@ -534,8 +534,8 @@ describe('in-game task board UI projection', () => {
     ;(globalThis as any).game.connected_players = []
     const source = taskBoardUiSource()
     const drain = source.split('function drain_ui_inputs() {')[1]?.split('function task_board_ui_prompt_draft')[0] ?? ''
-    expect(drain).toContain('storage.airi_task_board_ui_inputs = []')
-    expect(drain.indexOf('storage.airi_task_board_ui_inputs = []')).toBeLessThan(drain.indexOf('drained.push(poll)'))
+    expect(drain).toContain('storage.sgluna_task_board_ui_inputs = []')
+    expect(drain.indexOf('storage.sgluna_task_board_ui_inputs = []')).toBeLessThan(drain.indexOf('drained.push(poll)'))
   })
 
   it('labels request-cumulative and latest completed round token usage separately', () => {
@@ -557,8 +557,8 @@ describe('in-game task board UI projection', () => {
     expect(debug).not.toContain('set_debug_activity_hover')
     expect(debug).not.toContain('view.hover')
     expect(debug).not.toContain('HOLD')
-    expect(source).toContain('activity_state.stop_activity_follow(player.index, last_shown_activity_key(activity_scroll_of(player)))')
-    expect(source).toContain('activity_state.resume_activity_follow(player.index, last_shown_activity_key(scroll))')
+    expect(source).toContain('activity_state.stop_activity_live(player.index, last_shown_activity_key(activity_scroll_of(player)))')
+    expect(source).toContain('activity_state.resume_activity_live(player.index, last_shown_activity_key(scroll))')
   })
   it('only emits fixed UI control actions instead of arbitrary console commands', () => {
     const source = taskBoardUiSource()
@@ -570,13 +570,13 @@ describe('in-game task board UI projection', () => {
 })
 
 
-it('uses SGLuna for normal console branding while retaining AIRI actor identity internally', () => {
+it('uses SGLuna for console branding and as the default actor identity, with no legacy AIRI naming', () => {
   const source = taskBoardUiSource()
   expect(source).toContain("caption: 'Prompt SGLuna'")
   expect(source).toContain("'SGLuna NPC Console'")
   expect(source).toContain('The console polls the SGLuna runtime')
-  expect(source).toContain("runtime.actor_name || 'AIRI'")
-  expect(source).not.toContain("tooltip: 'Send a prompt directly to AIRI")
+  expect(source).toContain("runtime.actor_name || 'SGLuna'")
+  expect(source).not.toMatch(/\bAIRI\b/i)
 })
 
 // A small stand-in for Factorio's GUI tree. It counts every structural change
@@ -776,7 +776,7 @@ describe('console refresh leaves unchanged sections alone', () => {
       // Nothing new: a reader of older lines is not pulled down every second.
       ui.tick(); ui.tick(); ui.board.set_snapshot(snapshot()); ui.tick()
       expect(ui.counter.scrolls).toEqual([])
-      const more = [{ kind: 'action', text: 'mine iron-ore x10' }, { kind: 'action', text: 'craft furnace' }, { kind: 'decision', text: 'AIRI: furnace next' }]
+      const more = [{ kind: 'action', text: 'mine iron-ore x10' }, { kind: 'action', text: 'craft furnace' }, { kind: 'decision', text: 'SGLuna: furnace next' }]
       // A new line lands while following: the feeds move once.
       ui.board.set_snapshot(snapshot({ activity: more })); ui.tick()
       expect(ui.counter.scrolls).toContain(TRACKER.activity_scroll)

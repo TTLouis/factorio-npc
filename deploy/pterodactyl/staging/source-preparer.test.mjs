@@ -10,7 +10,7 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 const repo = path.resolve(here, '..', '..', '..')
 
 async function fixture(t) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'airi-native-source-'))
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'sgluna-native-source-'))
   t.after(() => fs.rm(root, { recursive: true, force: true }))
 
   const autorio = path.join(root, 'packages', 'autorio')
@@ -38,12 +38,12 @@ test('preparer injects only the v8 deployment guard into the native validated Au
 
   const result = await prepareNativeNpcSource(f.root, f.guard)
   const after = await fs.readFile(controlPath, 'utf8')
-  const installedGuard = await fs.readFile(path.join(f.autorio, 'src', 'airi_deployment_guard.ts'), 'utf8')
+  const installedGuard = await fs.readFile(path.join(f.autorio, 'src', 'sgluna_deployment_guard.ts'), 'utf8')
 
   assert.equal(result.controller, 'native-actor-aware-autorio')
   assert.equal(result.mapKnowledge, 'bounded-5x5')
   assert.equal(result.patchedGameplaySemantics, false)
-  assert.equal(after, `import './airi_deployment_guard'\n${before}`)
+  assert.equal(after, `import './sgluna_deployment_guard'\n${before}`)
   assert.equal(installedGuard, f.guard)
   assert.equal(after.includes('airi_guarded_interface'), false)
   assert.equal(after.includes('airi_guard_ready'), false)
@@ -58,7 +58,7 @@ test('preparer is idempotent and does not stack deployment imports', async t => 
   await prepareNativeNpcSource(f.root, f.guard)
   await prepareNativeNpcSource(f.root, f.guard)
   const control = await fs.readFile(path.join(f.autorio, 'src', 'control.ts'), 'utf8')
-  assert.equal(control.split("import './airi_deployment_guard'").length - 1, 1)
+  assert.equal(control.split("import './sgluna_deployment_guard'").length - 1, 1)
 })
 
 test('preparer refuses legacy connected-player-patched or non-NPC source', async t => {
@@ -73,7 +73,7 @@ test('preparer refuses legacy connected-player-patched or non-NPC source', async
   await fs.writeFile(actorPath, (await fs.readFile(actorPath, 'utf8')).replace("get_actor_mode() === 'npc'", "get_actor_mode() === 'player'"))
   await assert.rejects(() => prepareNativeNpcSource(f.root, f.guard), /Native NPC actor selection is missing/)
 
-  await assert.rejects(() => prepareNativeNpcSource(clean.root, 'remote.add_interface("airi_deployment", {})'), /Unexpected deployment guard revision/)
+  await assert.rejects(() => prepareNativeNpcSource(clean.root, 'remote.add_interface("sgluna_deployment", {})'), /Unexpected deployment guard revision/)
 })
 
 test('preparer fails closed if the bounded map-knowledge contract is missing, widened or the radar returns', async t => {
@@ -88,7 +88,7 @@ test('preparer fails closed if the bounded map-knowledge contract is missing, wi
 
   const radar = await fixture(t)
   const radarPath = path.join(radar.autorio, 'data.lua')
-  await fs.appendFile(radarPath, '\nlocal radar = {name = "airi-npc-awareness-radar"}\n')
+  await fs.appendFile(radarPath, '\nlocal radar = {name = "sgluna-npc-awareness-radar"}\n')
   await assert.rejects(() => prepareNativeNpcSource(radar.root, radar.guard), /removed NPC awareness radar prototype is present/)
 })
 

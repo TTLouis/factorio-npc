@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
-  AIRI_CONFIG_DEFAULTS,
+  SGLUNA_CONFIG_DEFAULTS,
   configuration,
   migrateConfig,
   recoverInterruptedAgentPlan,
@@ -17,7 +17,7 @@ const env = {
 }
 
 test('provider timeout is a migrated non-secret config with a Pterodactyl env override', () => {
-  assert.equal(AIRI_CONFIG_DEFAULTS.providerTimeoutMs, 300000)
+  assert.equal(SGLUNA_CONFIG_DEFAULTS.providerTimeoutMs, 300000)
   assert.equal(migrateConfig({}, {}).providerTimeoutMs, 300000)
   assert.equal(configuration({}, env).providerTimeoutMs, 300000)
   assert.equal(configuration({}, { ...env, PROVIDER_TIMEOUT_MS: '90000' }).providerTimeoutMs, 90000)
@@ -131,7 +131,7 @@ test('!airi stop cancels an in-flight model turn immediately and reports that th
   assert.equal(cancelled, 1)
   releaseQueue()
   await session.eventQueue
-  assert.ok(commands.some(command => command.includes('airi_deployment')))
+  assert.ok(commands.some(command => command.includes('sgluna_deployment')))
   assert.ok(commands.some(command => command.includes('Paused the current SGLuna plan')))
 })
 
@@ -158,13 +158,13 @@ test('interrupted-plan recovery creates a continuation turn that requires live r
   }
   let observed
   const agent = {
-    npcId: 'airi',
+    npcId: 'sgluna',
     systemPrompt: 'NPC recovery prompt',
     active: true,
     turnSequence: 4,
     traceRequest: null,
     memory: {
-      currentPlan: key => key === 'npc:airi' ? state : undefined,
+      currentPlan: key => key === 'npc:sgluna' ? state : undefined,
       context: () => '[PLAN_STATE] {"status":"active","current_step_text":"Place furnace"}',
     },
     loadPersistentState: async () => {},

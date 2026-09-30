@@ -12,7 +12,7 @@ import { NpcAgentLoop as RuntimeNpcAgentLoop } from '../runtime-v8/npc-agent-loo
 
 function deployment() {
   return {
-    revision: 'airi-deploy-v8-npc-staging',
+    revision: 'sgluna-deploy-v8-npc-staging',
     session: '0123456789abcdef0123456789abcdef',
     mode: 'npc',
     actor_id: 18,
@@ -29,7 +29,7 @@ function deployment() {
 
 class FakeRcon {
   async command(text) {
-    if (text.includes('remote.call("airi_deployment","status")')) return JSON.stringify(deployment())
+    if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(deployment())
     if (text.includes('remote.call("autorio_actor","status")')) {
       return JSON.stringify({
         mode: 'npc',
@@ -39,7 +39,7 @@ class FakeRcon {
       })
     }
     if (text.includes('local ok,result=pcall')) {
-      const marker = text.match(/AIRI_RESULT_[a-f0-9]{24}:/)?.[0]
+      const marker = text.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)?.[0]
       const admissions = [...text.matchAll(/return remote\.call\('autorio_operations'/g)].length
       return `${marker}${JSON.stringify({ ok: true, result: Array.from({ length: admissions }, () => [true, 'Task started']) })}`
     }

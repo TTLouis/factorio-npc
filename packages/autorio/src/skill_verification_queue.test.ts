@@ -116,7 +116,7 @@ describe('learning verification queue lifecycle', () => {
   it('removes a running queue item on failed verification', () => {
     const skill = candidate()
     const opportunity = queued(skill.id)
-    ;(globalThis as any).storage.airi_learning_verification_queue[0].state = 'running'
+    ;(globalThis as any).storage.sgluna_learning_verification_queue[0].state = 'running'
 
     const failed = fail_skill_verification_run(terminalRun(skill.id, opportunity.id), 'execution', 'test failure')
     expect(failed.state).toBe('failed')
@@ -127,7 +127,7 @@ describe('learning verification queue lifecycle', () => {
   it('removes a running queue item on verified completion while keeping lifecycle layers distinct', () => {
     const skill = candidate()
     const opportunity = queued(skill.id)
-    ;(globalThis as any).storage.airi_learning_verification_queue[0].state = 'running'
+    ;(globalThis as any).storage.sgluna_learning_verification_queue[0].state = 'running'
 
     const verified = finish_verified(terminalRun(skill.id, opportunity.id))
     expect(verified.state).toBe('verified')

@@ -52,10 +52,10 @@ interface ResearchFollowThrough {
 }
 
 declare const storage: {
-  airi_next_research_request_id?: number
-  airi_last_research_result?: ResearchResult
-  airi_research_results?: ResearchResult[]
-  airi_research_follow_through?: ResearchFollowThrough[]
+  sgluna_next_research_request_id?: number
+  sgluna_last_research_result?: ResearchResult
+  sgluna_research_results?: ResearchResult[]
+  sgluna_research_follow_through?: ResearchFollowThrough[]
 }
 
 function valid_name(name: string) {
@@ -68,19 +68,19 @@ function valid_name(name: string) {
 }
 
 function next_request_id() {
-  const next = (storage.airi_next_research_request_id ?? 0) + 1
-  storage.airi_next_research_request_id = next
+  const next = (storage.sgluna_next_research_request_id ?? 0) + 1
+  storage.sgluna_next_research_request_id = next
   return next
 }
 
 function results() {
-  if (!storage.airi_research_results) storage.airi_research_results = []
-  return storage.airi_research_results
+  if (!storage.sgluna_research_results) storage.sgluna_research_results = []
+  return storage.sgluna_research_results
 }
 
 function follow_records() {
-  if (!storage.airi_research_follow_through) storage.airi_research_follow_through = []
-  return storage.airi_research_follow_through
+  if (!storage.sgluna_research_follow_through) storage.sgluna_research_follow_through = []
+  return storage.sgluna_research_follow_through
 }
 
 function trim<T>(records: T[]) {
@@ -134,9 +134,9 @@ function push_result(result: ResearchResult) {
   // Follow-through for an older asynchronous request may finish after a newer
   // request was submitted. Keep last_request_result pinned to the greatest
   // request id while still updating the older request in correlated history.
-  const last = storage.airi_last_research_result
+  const last = storage.sgluna_last_research_result
   if (!last || result.request_id >= last.request_id) {
-    storage.airi_last_research_result = result
+    storage.sgluna_last_research_result = result
   }
   const history = results()
   let replaced = false
@@ -412,7 +412,7 @@ export function new_research_controller(get_actor: () => ControlledActor | undef
     const force = actor.force
     const queue = force.research_queue ?? []
     const current = force.current_research
-    const result = storage.airi_last_research_result
+    const result = storage.sgluna_last_research_result
     const recent = results()
     const follows = follow_records()
     return {
@@ -424,7 +424,7 @@ export function new_research_controller(get_actor: () => ControlledActor | undef
       queue: queue.slice(0, MAX_RESEARCH_QUEUE).map(tech => ({ name: tech.name, level: tech.level })),
       queue_length: queue.length,
       queue_truncated: queue.length > MAX_RESEARCH_QUEUE,
-      next_request_id: storage.airi_next_research_request_id ?? 0,
+      next_request_id: storage.sgluna_next_research_request_id ?? 0,
       last_request_result: result,
       recent_requests: recent.slice(math.max(0, recent.length - MAX_RESEARCH_QUEUE)),
       follow_through: follows.slice(math.max(0, follows.length - MAX_RESEARCH_QUEUE)),

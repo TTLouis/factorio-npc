@@ -265,7 +265,7 @@ describe('production_rate with a hand-fed machine', () => {
     machines[7].input = {}
     // What it smelted until it emptied is still in the window that follows.
     expect(evaluate({ kind: 'production_rate', item_name: 'iron-plate', per_minute: 20 })).toMatchObject({ satisfied: false, void_reason: 'hand_inserted', void_entity: 'stone-furnace' })
-    expect((globalThis as any).storage.airi_hand_work[1].fed).toEqual([])
+    expect((globalThis as any).storage.sgluna_hand_work[1].fed).toEqual([])
     ;(globalThis as any).game.tick += 4000
     expect(evaluate({ kind: 'production_rate', item_name: 'iron-plate', per_minute: 20 })).toMatchObject({ satisfied: true, void_reason: undefined })
   })
@@ -279,7 +279,7 @@ describe('production_rate with a hand-fed machine', () => {
     record_hand_insert(1, 'iron-ore', 'wooden-chest', 'container', false, chest as any)
     ;(globalThis as any).game.tick += 4000
     expect(evaluate({ kind: 'production_rate', item_name: 'iron-plate', per_minute: 20 })).toMatchObject({ satisfied: true })
-    expect((globalThis as any).storage.airi_hand_work[1].fed ?? []).toEqual([])
+    expect((globalThis as any).storage.sgluna_hand_work[1].fed ?? []).toEqual([])
   })
 
   it('ignores hand-fed input the machine no longer holds, and machines that vanished', () => {
@@ -301,7 +301,7 @@ describe('production_rate with a hand-fed machine', () => {
     for (let unit = 100; unit <= 100 + MAX_FED_ENTITIES; unit++) {
       record_hand_insert(1, 'iron-ore', 'stone-furnace', 'furnace', false, furnace(unit, { 'iron-ore': 5 }))
     }
-    expect((globalThis as any).storage.airi_hand_work[1].fed).toHaveLength(MAX_FED_ENTITIES)
+    expect((globalThis as any).storage.sgluna_hand_work[1].fed).toHaveLength(MAX_FED_ENTITIES)
     ;(globalThis as any).game.tick += 4000
     for (const machine of Object.values(machines)) machine.input = {}
     // Every tracked machine is empty, but one was not tracked: still void.
@@ -314,7 +314,7 @@ describe('production_rate with a hand-fed machine', () => {
     for (let unit = 200; unit < 200 + MAX_FED_ENTITIES; unit++) record_hand_insert(1, 'iron-ore', 'stone-furnace', 'furnace', false, furnace(unit, { 'iron-ore': 5 }))
     for (const machine of Object.values(machines)) machine.input = {}
     record_hand_insert(1, 'iron-ore', 'stone-furnace', 'furnace', false, furnace(999, { 'iron-ore': 5 }))
-    const store = (globalThis as any).storage.airi_hand_work[1]
+    const store = (globalThis as any).storage.sgluna_hand_work[1]
     expect(store.fed).toHaveLength(1)
     expect(store.fed_overflow_tick).toBeUndefined()
   })

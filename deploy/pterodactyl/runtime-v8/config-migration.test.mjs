@@ -4,10 +4,10 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { AIRI_CONFIG_DEFAULTS, SGLUNA_CONFIG_DEFAULTS, migrateCanonicalConfig, migrateConfig, migrateConfigFile } from './supervisor.mjs'
+import { SGLUNA_CONFIG_DEFAULTS, migrateCanonicalConfig, migrateConfig, migrateConfigFile } from './supervisor.mjs'
 
 async function temp(t) {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'airi-config-migration-'))
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-config-migration-'))
   t.after(() => fsp.rm(dir, { recursive: true, force: true }))
   return dir
 }
@@ -138,10 +138,6 @@ test('migrateConfigFile never persists OPENAI_API_KEY to disk', async (t) => {
   assert.equal(text.includes('super-secret-key'), false)
 })
 
-
-test('AIRI_CONFIG_DEFAULTS remains a compatibility alias of SGLUNA_CONFIG_DEFAULTS', () => {
-  assert.equal(AIRI_CONFIG_DEFAULTS, SGLUNA_CONFIG_DEFAULTS)
-})
 
 test('canonical config creation writes sgluna-config.json on a fresh root', async (t) => {
   const root = await temp(t)

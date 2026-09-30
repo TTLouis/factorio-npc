@@ -511,7 +511,7 @@ describe('bounded area-clearing combat', () => {
     expect(c2.controller.status()).toMatchObject({ initial_threat_score: 64, support_turret_budget: 8 })
   })
 
-  it('deploys a threat-sized support batch without restaging merely because AIRI advances', () => {
+  it('deploys a threat-sized support batch without restaging merely because SGLuna advances', () => {
     const c = world()
     c.enemies.length = 0
     for (let i = 0; i < 5; i++) {

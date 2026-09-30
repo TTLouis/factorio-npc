@@ -87,8 +87,8 @@ describe('console Goal and Now cards', () => {
 
   it('shows a note instead of an empty check list before the goal is defined', () => {
     const parent = element()
-    console_ui.render_goal_card(parent as any, { summary: 'No active goal.', note: 'Tell AIRI what to do in the prompt below.', read: false, met: 0, total: 0, checks: [] })
-    expect(captions(parent)).toEqual(['Goal', 'No active goal.', 'Tell AIRI what to do in the prompt below.'])
+    console_ui.render_goal_card(parent as any, { summary: 'No active goal.', note: 'Tell SGLuna what to do in the prompt below.', read: false, met: 0, total: 0, checks: [] })
+    expect(captions(parent)).toEqual(['Goal', 'No active goal.', 'Tell SGLuna what to do in the prompt below.'])
     expect(find(parent, node => node.type === 'progressbar')).toEqual([])
   })
 
@@ -146,8 +146,8 @@ describe('goal block of the UI snapshot', () => {
 })
 
 describe('console tabs', () => {
-  const pages = (parent: FakeElement) => ['now', 'plan', 'activity'].map(tab => parent[`airi_task_board_tab_${tab}`] as FakeElement)
-  const buttons = (parent: FakeElement) => (parent.airi_task_board_tab_bar as FakeElement).children
+  const pages = (parent: FakeElement) => ['now', 'plan', 'activity'].map(tab => parent[`sgluna_task_board_tab_${tab}`] as FakeElement)
+  const buttons = (parent: FakeElement) => (parent.sgluna_task_board_tab_bar as FakeElement).children
 
   it('builds a button and a page per tab and shows only the selected page', () => {
     const parent = element()
@@ -155,7 +155,7 @@ describe('console tabs', () => {
     expect(buttons(parent).map(button => button.caption)).toEqual(['NOW', 'PLAN', 'ACTIVITY'])
     expect(buttons(parent).map(button => button.toggled)).toEqual([false, true, false])
     expect(pages(parent).map(page => page.visible)).toEqual([false, true, false])
-    expect(built.activity).toBe(parent.airi_task_board_tab_activity)
+    expect(built.activity).toBe(parent.sgluna_task_board_tab_activity)
   })
 
   it('switches tabs by visibility alone, so page contents survive', () => {
@@ -166,7 +166,7 @@ describe('console tabs', () => {
     expect(pages(parent).map(page => page.visible)).toEqual([false, false, true])
     expect(buttons(parent).map(button => button.toggled)).toEqual([false, false, true])
     expect(feed.valid).toBe(true)
-    expect(parent.airi_task_board_tab_activity.feed).toBe(feed)
+    expect(parent.sgluna_task_board_tab_activity.feed).toBe(feed)
   })
 
   it('reports a console without tabs so the caller rebuilds it', () => {

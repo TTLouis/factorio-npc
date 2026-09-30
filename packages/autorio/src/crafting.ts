@@ -38,8 +38,8 @@ interface OwnedCraftingMarker {
 }
 
 declare const storage: {
-  airi_last_crafting_result?: CraftingResult
-  airi_owned_crafting?: OwnedCraftingMarker
+  sgluna_last_crafting_result?: CraftingResult
+  sgluna_owned_crafting?: OwnedCraftingMarker
 }
 
 function valid_count(count: number) {
@@ -84,7 +84,7 @@ function record(actor: ControlledActor | undefined, task: PlayerParametersCraftI
     output_count_after: actor && task ? output_count(actor, task.item_name) : undefined,
     native_queue_remaining: actor?.get_crafting_queue().length,
   }
-  storage.airi_last_crafting_result = result
+  storage.sgluna_last_crafting_result = result
   return result
 }
 
@@ -92,7 +92,7 @@ function persist_owned_marker(task: PlayerParametersCraftItem) {
   if (task.owner_actor_id === undefined || task.owner_actor_kind === undefined || task.owner_force_index === undefined || task.started_tick === undefined) {
     return
   }
-  storage.airi_owned_crafting = {
+  storage.sgluna_owned_crafting = {
     actor_id: task.owner_actor_id,
     actor_kind: task.owner_actor_kind,
     force_index: task.owner_force_index,
@@ -103,12 +103,12 @@ function persist_owned_marker(task: PlayerParametersCraftItem) {
 }
 
 function clear_owned_marker(task: PlayerParametersCraftItem) {
-  const marker = storage.airi_owned_crafting
+  const marker = storage.sgluna_owned_crafting
   if (!marker) {
     return
   }
   if (marker.actor_id === task.owner_actor_id && marker.actor_kind === task.owner_actor_kind && marker.force_index === task.owner_force_index) {
-    storage.airi_owned_crafting = undefined
+    storage.sgluna_owned_crafting = undefined
   }
 }
 
@@ -326,8 +326,8 @@ export function new_crafting_controller(get_actor: () => ControlledActor | undef
       task_active: manager.player_state.task_state === TaskStates.CRAFTING,
       actor: actor?.status_snapshot(),
       native_queue: actor?.get_crafting_queue().slice(0, 16),
-      persisted_owner: storage.airi_owned_crafting,
-      last_result: storage.airi_last_crafting_result,
+      persisted_owner: storage.sgluna_owned_crafting,
+      last_result: storage.sgluna_last_crafting_result,
     }
   }
 

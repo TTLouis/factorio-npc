@@ -75,7 +75,7 @@ interface ForceHandWork {
 }
 
 export interface HandWorkStorage {
-  airi_hand_work?: Record<number, ForceHandWork>
+  sgluna_hand_work?: Record<number, ForceHandWork>
 }
 
 declare const storage: HandWorkStorage
@@ -92,8 +92,8 @@ const NON_PRODUCING_TYPES: Record<string, boolean> = {
 }
 
 function force_work(force_index: number): ForceHandWork {
-  const all = storage.airi_hand_work ?? {}
-  storage.airi_hand_work = all
+  const all = storage.sgluna_hand_work ?? {}
+  storage.sgluna_hand_work = all
   const work = all[force_index] ?? {}
   all[force_index] = work
   return work
@@ -285,7 +285,7 @@ export interface HandWorkVoid {
  * that follows it.
  */
 export function hand_work_since(force_index: number, item_name: string, since_tick: number, actor_mining: boolean): HandWorkVoid | undefined {
-  const work = storage.airi_hand_work?.[force_index]
+  const work = storage.sgluna_hand_work?.[force_index]
   if (!work) return undefined
   const active = work.mining_active ?? {}
   if (!actor_mining && Object.keys(active).length > 0) note_hand_mining(force_index, false, undefined)

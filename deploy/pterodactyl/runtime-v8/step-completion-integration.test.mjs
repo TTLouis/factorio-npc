@@ -8,7 +8,7 @@ import { COMPACT_CONTINUATION_PROMPT, compactCompletionReceipt } from './provide
 
 function deployment() {
   return {
-    revision: 'airi-deploy-v8-npc-staging',
+    revision: 'sgluna-deploy-v8-npc-staging',
     session: '0123456789abcdef0123456789abcdef',
     mode: 'npc',
     actor_id: 18,
@@ -105,7 +105,7 @@ class Rcon {
   }
 
   async command(text) {
-    if (text.includes('remote.call("airi_deployment","status")')) return JSON.stringify(deployment())
+    if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(deployment())
     if (text.includes('remote.call("autorio_follow","status")')) return JSON.stringify({ active: false, healthy: false, controller_live: false })
     if (text.includes('remote.call("autorio_operations","status")')) return JSON.stringify({ task_state: 'idle', queue_length: 0, queue_empty: true })
     if (text.includes('remote.call("autorio_tools","evaluate_condition"')) {
@@ -132,7 +132,7 @@ function agentWithState({
   freshObservation = false,
 } = {}) {
   const memory = new CanonicalTaskBoardMemory()
-  const key = 'npc:airi'
+  const key = 'npc:sgluna'
   memory.planByNpc.set(key, state)
   memory.ensurePlanningDraft(key, state, { now: 100, migrated: true })
   if (commit) memory.commitPlanningPlan(key, { now: 110, migrated: true, runtime_validation: { passed: true } })
@@ -141,7 +141,7 @@ function agentWithState({
   const agent = new NpcAgentLoop({
     rcon,
     memory,
-    npcId: 'airi',
+    npcId: 'sgluna',
     systemPrompt: 'deterministic completion integration',
     provider: async () => { throw new Error('main planner not expected') },
     stateFile: null,

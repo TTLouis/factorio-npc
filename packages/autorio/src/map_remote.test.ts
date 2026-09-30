@@ -25,7 +25,7 @@ function make_actor(surface: LuaSurface, charted: Set<string>, visible: Set<stri
     surface,
     force,
     position: { x: 0, y: 0 },
-    status_snapshot: () => ({ kind: 'standalone_character', valid: true, name: 'AIRI', position: { x: 0, y: 0 }, has_character: true }),
+    status_snapshot: () => ({ kind: 'standalone_character', valid: true, name: 'SGLuna', position: { x: 0, y: 0 }, has_character: true }),
   } as unknown as ControlledActor
 }
 

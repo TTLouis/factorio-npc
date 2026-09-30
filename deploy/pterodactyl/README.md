@@ -51,7 +51,7 @@ If both `SGLUNA_SOURCE_REF` and legacy `AIRI_SOURCE_REF` are supplied with diffe
 
 ## Transactional install and rollback
 
-Successful installs stage releases under the internal `.airi/releases/` state store and switch the canonical `start-sgluna.sh` symlink only after the new release is complete.
+Successful installs stage releases under the internal `.sgluna/releases/` state store and switch the canonical `start-sgluna.sh` symlink only after the new release is complete.
 
 Canonical rollback:
 
@@ -83,12 +83,12 @@ Rollback changes the managed startup target only. It does not rewrite Factorio s
 ├── logs/
 │   ├── sgluna-behavior.jsonl
 │   └── sgluna-prompts.jsonl
-└── .airi/                         # internal compatibility state; do not edit manually
+└── .sgluna/                      # internal managed state; do not edit manually
 ```
 
-The internal `.airi/` directory remains authoritative for managed releases, the operation lock, provider budget, durable NPC state, rollback metadata, and runtime temp directories. It is intentionally **not renamed** in this migration because doing so safely requires a broader transactional state migration.
+The internal `.sgluna/` directory is authoritative for managed releases, the operation lock, provider budget, durable NPC state, rollback metadata, and runtime temp directories. Worlds and deployments created before the SGLuna rename are disposable test state; there is no migration from the former state directory, actor id, or save keys.
 
-At runtime, managed Autorio is injected into an isolated `.airi/run-*/mods/` directory. User mods stay under `mods/`; the downloadable exact client package stays under `client-mods/`.
+At runtime, managed Autorio is injected into an isolated `.sgluna/run-*/mods/` directory. User mods stay under `mods/`; the downloadable exact client package stays under `client-mods/`.
 
 ## Egg variables
 
@@ -165,7 +165,7 @@ Examples:
 !luna stop
 ```
 
-The in-game console UI advertises **SGLuna** and **Prompt SGLuna**. The underlying runtime actor identity remains `AIRI` / `airi` for compatibility.
+The in-game console UI advertises **SGLuna** and **Prompt SGLuna**. The runtime actor name and id are `SGLuna` / `sgluna`.
 
 ## Factorio public/private behavior
 
@@ -198,7 +198,7 @@ logs/sgluna-prompts.jsonl
 
 Legacy `AIRI_BEHAVIOR_TRACE_FILE` and `AIRI_PROMPT_TRACE_FILE` environment overrides remain accepted. The debug-report reader can also fall back to legacy `airi-behavior.jsonl` / `airi-prompts.jsonl` when the SGLuna files do not exist.
 
-Trace schemas, provider metadata fields such as `_airiProvider`, and other runtime protocol identifiers are intentionally unchanged.
+Trace schemas and provider metadata fields such as `_sglunaProvider` use SGLuna naming.
 
 ## Generated artifacts
 
@@ -236,17 +236,17 @@ node --test deploy/pterodactyl/build-payload.test.mjs deploy/pterodactyl/staging
 
 Heavy Docker/Factorio smoke remains the authoritative packaging/runtime gate.
 
-## Compatibility surfaces intentionally retained
+## Internal identifiers
 
-These are not normal deployment branding and are deliberately unchanged:
+These internal identifiers use SGLuna naming. There are no aliases for the former AIRI names, and no save migration:
 
-- actor name/id: `AIRI` / `airi`;
-- durable memory keys such as `npc:airi`;
-- `airi_deployment` remote interface;
-- `AIRI_RESULT_*`, `AIRI_CONFIG_*`, and `AIRI_UI_*` protocol markers;
-- Factorio `storage.airi_*` keys, GUI element ids, sprite/prototype ids;
+- actor name/id: `SGLuna` / `sgluna`;
+- durable memory keys such as `npc:sgluna`;
+- `sgluna_deployment` remote interface;
+- `SGLUNA_RESULT_*`, `SGLUNA_CONFIG_*`, and `SGLUNA_UI_*` protocol markers;
+- Factorio `storage.sgluna_*` keys, GUI element ids, sprite/prototype ids;
 - Autorio mod id and remote interfaces;
-- internal `.airi/` managed-state directory;
-- manifest/runtime compatibility revisions that are part of deployed contracts.
+- internal `.sgluna/` managed-state directory;
+- manifest/runtime revisions that are part of deployed contracts.
 
-Historical upstream AIRI lineage and MIT attribution remain documented separately and are not migration targets.
+Only settings and input keep AIRI compatibility aliases: the `AIRI_*` deployment variables listed above, `airi-config.json`, `start-airi.sh` / `rollback-airi.sh`, the `!airi` chat command, the Docker `AIRI_*` build args, and the legacy trace environment/file inputs. Upstream AIRI/Autorio lineage and MIT attribution remain documented separately and are not migration targets.

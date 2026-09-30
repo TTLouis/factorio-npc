@@ -624,7 +624,7 @@ const constructionSiteDefinition = {
   type: 'function',
   function: {
     name: 'findConstructionSites',
-    description: 'Find a small bounded set of clear rectangular construction envelopes on AIRI\'s current surface. The model chooses width/height and anchor; the tool only reports deterministic free-site candidates and aggregate rejection counts. A site is not a machine layout or construction approval: choose exact placements separately and validateConstructionPlan before execution.',
+    description: 'Find a small bounded set of clear rectangular construction envelopes on SGLuna\'s current surface. The model chooses width/height and anchor; the tool only reports deterministic free-site candidates and aggregate rejection counts. A site is not a machine layout or construction approval: choose exact placements separately and validateConstructionPlan before execution.',
     parameters: {
       type: 'object', additionalProperties: false, required: ['width', 'height'],
       properties: {
@@ -643,7 +643,7 @@ const constructionPlanValidationDefinition = {
   type: 'function',
   function: {
     name: 'validateConstructionPlan',
-    description: 'Validate one exact local construction batch against the live world and AIRI inventory before any placement occurs. Checks 1..16 exact placements for current placeability, pairwise planned collision, local reach, required items, actor/surface/force identity, and returns validation_id plus placement_count. After validation, execute exactly that validation_id and placement_count with execute_construction_plan; do not edit coordinates between validation and execution.',
+    description: 'Validate one exact local construction batch against the live world and SGLuna inventory before any placement occurs. Checks 1..16 exact placements for current placeability, pairwise planned collision, local reach, required items, actor/surface/force identity, and returns validation_id plus placement_count. After validation, execute exactly that validation_id and placement_count with execute_construction_plan; do not edit coordinates between validation and execution.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -695,7 +695,7 @@ export const plannerControlToolDefinitions = [{
   type: 'function',
   function: {
     name: PLANNER_CONTROL_TOOL_NAME,
-    description: 'Submit the planner/control-plane decision to the AIRI harness. Prefer this tool over serializing the whole response as JSON content. Normal assistant content may remain natural-language text for the user. The deterministic harness/runtime validates structured plan state, completion contracts, and world mutations before persistence or execution; Jev is not a correctness gate.',
+    description: 'Submit the planner/control-plane decision to the SGLuna harness. Prefer this tool over serializing the whole response as JSON content. Normal assistant content may remain natural-language text for the user. The deterministic harness/runtime validates structured plan state, completion contracts, and world mutations before persistence or execution; Jev is not a correctness gate.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -810,7 +810,7 @@ export const plannerControlToolDefinitions = [{
                   kind: {
                     type: 'string',
                     enum: ['research_completed', 'rockets_launched', 'items_produced', 'inventory_count', 'space_location_unlocked', 'entity_working', 'electric_network_satisfied', 'production_rate'],
-                    description: 'research_completed {technology}; rockets_launched {minimum}; items_produced {item_name, minimum} (force-wide total across all surfaces); inventory_count {item_name, minimum} (AIRI\'s own inventory); space_location_unlocked {name} (Space Age planets/locations); entity_working {entity_name, minimum} (that many entities of the prototype working now); electric_network_satisfied {entity_name, minimum} (that many powered by a running producer, not short of power); production_rate {item_name, per_minute, window_minutes} (machine output per minute over the last 1 or 10 minutes, hand work excluded: any non-fuel hand insert, even into a chest, delays it by a window, and a hand-fed machine keeps it void until its hand-fed input is used up). Prove build/power/run goals with the running kinds or production_rate, never with items_produced.',
+                    description: 'research_completed {technology}; rockets_launched {minimum}; items_produced {item_name, minimum} (force-wide total across all surfaces); inventory_count {item_name, minimum} (SGLuna\'s own inventory); space_location_unlocked {name} (Space Age planets/locations); entity_working {entity_name, minimum} (that many entities of the prototype working now); electric_network_satisfied {entity_name, minimum} (that many powered by a running producer, not short of power); production_rate {item_name, per_minute, window_minutes} (machine output per minute over the last 1 or 10 minutes, hand work excluded: any non-fuel hand insert, even into a chest, delays it by a window, and a hand-fed machine keeps it void until its hand-fed input is used up). Prove build/power/run goals with the running kinds or production_rate, never with items_produced.',
                   },
                   technology: { type: 'string', maxLength: 100 },
                   item_name: { type: 'string', maxLength: 100 },

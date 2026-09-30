@@ -1,10 +1,10 @@
 type ActorMode = 'player' | 'npc'
 type Store = {
-  airi_deployment_session?: string
-  airi_deployment_mode?: ActorMode
-  airi_deployment_actor_id?: number
-  airi_deployment_actor_kind?: string
-  airi_deployment_epoch?: number
+  sgluna_deployment_session?: string
+  sgluna_deployment_mode?: ActorMode
+  sgluna_deployment_actor_id?: number
+  sgluna_deployment_actor_kind?: string
+  sgluna_deployment_epoch?: number
 }
 
 declare const storage: Store
@@ -38,12 +38,12 @@ function operation_status() {
 
 function current_matches_session() {
   const data = state()
-  if (!data.airi_deployment_session || !data.airi_deployment_mode || data.airi_deployment_actor_id === undefined || !data.airi_deployment_actor_kind) return false
+  if (!data.sgluna_deployment_session || !data.sgluna_deployment_mode || data.sgluna_deployment_actor_id === undefined || !data.sgluna_deployment_actor_kind) return false
   const status = actor_status()
   const actor = status.actor
   if (!actor || actor.valid !== true || actor.has_character !== true) return false
-  if (status.mode !== data.airi_deployment_mode || actor.actor_id !== data.airi_deployment_actor_id || actor.kind !== data.airi_deployment_actor_kind) return false
-  if (data.airi_deployment_mode === 'npc') return actor.kind === 'standalone_character'
+  if (status.mode !== data.sgluna_deployment_mode || actor.actor_id !== data.sgluna_deployment_actor_id || actor.kind !== data.sgluna_deployment_actor_kind) return false
+  if (data.sgluna_deployment_mode === 'npc') return actor.kind === 'standalone_character'
   return actor.kind === 'connected_player'
 }
 
@@ -59,7 +59,7 @@ function cancel_tasks() {
   }
 }
 
-remote.add_interface('airi_deployment', {
+remote.add_interface('sgluna_deployment', {
   configure: (mode: ActorMode, session: string) => {
     if ((mode !== 'npc' && mode !== 'player') || session === '') return false
 
@@ -74,20 +74,20 @@ remote.add_interface('airi_deployment', {
     if (mode === 'player' && actor.kind !== 'connected_player') return false
 
     const data = state()
-    data.airi_deployment_mode = mode
-    data.airi_deployment_session = session
-    data.airi_deployment_actor_id = actor.actor_id
-    data.airi_deployment_actor_kind = actor.kind
-    data.airi_deployment_epoch = (data.airi_deployment_epoch ?? 0) + 1
+    data.sgluna_deployment_mode = mode
+    data.sgluna_deployment_session = session
+    data.sgluna_deployment_actor_id = actor.actor_id
+    data.sgluna_deployment_actor_kind = actor.kind
+    data.sgluna_deployment_epoch = (data.sgluna_deployment_epoch ?? 0) + 1
     return session
   },
   status: () => {
     const actor = actor_status()
     const tasks = operation_status()
     return {
-      revision: 'airi-deploy-v8-npc-staging',
-      session: state().airi_deployment_session ?? '',
-      mode: state().airi_deployment_mode,
+      revision: 'sgluna-deploy-v8-npc-staging',
+      session: state().sgluna_deployment_session ?? '',
+      mode: state().sgluna_deployment_mode,
       actor_id: actor.actor?.actor_id,
       actor_kind: actor.actor?.kind,
       actor_name: actor.actor?.name,
@@ -95,22 +95,22 @@ remote.add_interface('airi_deployment', {
       connected_players: actor.connected_players ?? 0,
       allowed: current_matches_session(),
       idle: tasks.task_state === 'idle' && tasks.queue_empty === true && tasks.queue_length === 0,
-      epoch: state().airi_deployment_epoch ?? 0,
+      epoch: state().sgluna_deployment_epoch ?? 0,
       tools: remote.interfaces.autorio_tools !== undefined,
       operations: remote.interfaces.autorio_operations !== undefined,
       actor_interface: remote.interfaces.autorio_actor !== undefined,
     }
   },
-  authorize: (epoch: number) => current_matches_session() && epoch === (state().airi_deployment_epoch ?? 0),
+  authorize: (epoch: number) => current_matches_session() && epoch === (state().sgluna_deployment_epoch ?? 0),
   cancel: () => {
     cancel_tasks()
-    state().airi_deployment_epoch = (state().airi_deployment_epoch ?? 0) + 1
+    state().sgluna_deployment_epoch = (state().sgluna_deployment_epoch ?? 0) + 1
     return true
   },
   disable: () => {
     cancel_tasks()
-    state().airi_deployment_session = ''
-    state().airi_deployment_epoch = (state().airi_deployment_epoch ?? 0) + 1
+    state().sgluna_deployment_session = ''
+    state().sgluna_deployment_epoch = (state().sgluna_deployment_epoch ?? 0) + 1
     return true
   },
 })

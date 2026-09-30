@@ -161,8 +161,8 @@ interface SkillExportRecord {
 }
 
 declare const storage: {
-  airi_skill_definitions?: Record<string, SkillDefinition>
-  airi_skill_exports?: Record<string, SkillExportRecord>
+  sgluna_skill_definitions?: Record<string, SkillDefinition>
+  sgluna_skill_exports?: Record<string, SkillExportRecord>
 }
 
 const MAX_TEXT = 1000
@@ -170,9 +170,9 @@ const MAX_LIST = 64
 const MAX_TOPOLOGY_NODES = 128
 const MAX_TOPOLOGY_RELATIONS = 256
 const SAFE_ID_CHARS = 'abcdefghijklmnopqrstuvwxyz0123456789-'
-const SKILL_EXPORT_BUTTON_PREFIX = 'airi_skill_export__'
-const FACTORY_ANALYZE_BUTTON_NAME = 'airi_skill_learn_area'
-const FACTORY_SAVE_BUTTON_PREFIX = 'airi_skill_save_block__'
+const SKILL_EXPORT_BUTTON_PREFIX = 'sgluna_skill_export__'
+const FACTORY_ANALYZE_BUTTON_NAME = 'sgluna_skill_learn_area'
+const FACTORY_SAVE_BUTTON_PREFIX = 'sgluna_skill_save_block__'
 const FACTORY_DEFAULT_RADIUS = 12
 const SKILL_SECTION_PADDING = 10
 const MAX_UI_SKILLS = 6
@@ -525,12 +525,12 @@ export function canonicalize_skill_definition(value: any): SkillDefinition {
 // and lazily creating this table there would write synchronized game state on
 // one peer only, which desyncs the game.
 function definitions(): Record<string, SkillDefinition> {
-  return storage.airi_skill_definitions ?? {}
+  return storage.sgluna_skill_definitions ?? {}
 }
 
 function ensure_definitions() {
-  if (storage.airi_skill_definitions === undefined) storage.airi_skill_definitions = {}
-  return storage.airi_skill_definitions
+  if (storage.sgluna_skill_definitions === undefined) storage.sgluna_skill_definitions = {}
+  return storage.sgluna_skill_definitions
 }
 
 function is_basic_skill_id(id: string) {
@@ -1034,8 +1034,8 @@ export function offer_skill_cards(request: unknown) {
 }
 
 function exports_state() {
-  if (storage.airi_skill_exports === undefined) storage.airi_skill_exports = {}
-  return storage.airi_skill_exports
+  if (storage.sgluna_skill_exports === undefined) storage.sgluna_skill_exports = {}
+  return storage.sgluna_skill_exports
 }
 
 export function put_skill_definition(value: any) {
@@ -1433,7 +1433,7 @@ export function handle_skill_export_click(player: LuaPlayer, element_name: strin
       return true
     }
     if (actor.surface.index !== player.surface.index) {
-      player.print('[SGLuna] Factory learning failed: player and AIRI actor are on different surfaces.')
+      player.print('[SGLuna] Factory learning failed: player and SGLuna actor are on different surfaces.')
       return true
     }
     const result = analyze_factory_area(actor, {

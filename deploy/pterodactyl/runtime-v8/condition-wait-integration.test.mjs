@@ -8,7 +8,7 @@ import { makeConditionWait } from './step-completion.mjs'
 
 function deployment() {
   return {
-    revision: 'airi-deploy-v8-npc-staging',
+    revision: 'sgluna-deploy-v8-npc-staging',
     session: '0123456789abcdef0123456789abcdef',
     mode: 'npc',
     actor_id: 18,
@@ -85,7 +85,7 @@ class ConditionRcon {
   }
 
   async command(text) {
-    if (text.includes('remote.call("airi_deployment","status")')) {
+    if (text.includes('remote.call("sgluna_deployment","status")')) {
       return JSON.stringify({ ...deployment(), actor_id: this.actorId, epoch: this.actorEpoch })
     }
     if (text.includes('remote.call("autorio_follow","status")')) {
@@ -163,21 +163,21 @@ function decisionResponse(route = 'wait_runtime') {
 
 function makeAgent({ decisionProvider, provider, committed = false } = {}) {
   const memory = new CanonicalTaskBoardMemory()
-  memory.planByNpc.set('npc:airi', state())
+  memory.planByNpc.set('npc:sgluna', state())
   // A step close is decided in the reducer first (3.3 move 5), which only
   // closes admitted work. Tests that place a wait directly (bypassing
   // registration) ask for a committed plan; the registration path itself is
   // tested from an uncommitted draft.
   if (committed) {
-    memory.ensurePlanningDraft('npc:airi', memory.planByNpc.get('npc:airi'), { now: 1 })
-    memory.commitPlanningPlan('npc:airi', { now: 2, runtime_validation: { passed: true } })
+    memory.ensurePlanningDraft('npc:sgluna', memory.planByNpc.get('npc:sgluna'), { now: 1 })
+    memory.commitPlanningPlan('npc:sgluna', { now: 2, runtime_validation: { passed: true } })
   }
   const rcon = new ConditionRcon()
   let mainCalls = 0
   const agent = new NpcAgentLoop({
     rcon,
     memory,
-    npcId: 'airi',
+    npcId: 'sgluna',
     systemPrompt: 'condition wait integration test',
     stateFile: null,
     traceFile: null,
@@ -190,9 +190,9 @@ function makeAgent({ decisionProvider, provider, committed = false } = {}) {
   })
   agent.active = true
   agent.epoch = deployment()
-  agent.lastMemoryKey = 'npc:airi'
+  agent.lastMemoryKey = 'npc:sgluna'
   agent.requestInfo = {
-    memoryKey: 'npc:airi',
+    memoryKey: 'npc:sgluna',
     turnId: 1,
     sender: 'tester',
     text: 'smelt enough material and then craft the requested item',
@@ -220,7 +220,7 @@ test('live exact machine passive progress suppresses action omission without a m
     operations: [],
   })
 
-  const durable = memory.planByNpc.get('npc:airi')
+  const durable = memory.planByNpc.get('npc:sgluna')
   assert.equal(result.goalStatus, 'active')
   assert.equal(durable.task_board.completed_count, 0)
   assert.equal(durable.task_board.active_index, 0)
@@ -235,7 +235,7 @@ test('live exact machine passive progress suppresses action omission without a m
 
 test('unchanged passive progress polls without waking the main planner', async () => {
   const { agent, memory, mainCalls } = makeAgent()
-  const durable = memory.planByNpc.get('npc:airi')
+  const durable = memory.planByNpc.get('npc:sgluna')
   durable.condition_wait = makeConditionWait(
     { kind: 'entity_state', unit_number: 582, expected: 'working' },
     { goalId: durable.goal_id, stepId: durable.task_board.active_step_id, actorId: agent.epoch.actor_id, actorEpoch: agent.epoch.epoch, mode: 'passive_progress', maxChecks: 10 },
@@ -243,15 +243,15 @@ test('unchanged passive progress polls without waking the main planner', async (
 
   const polled = await agent.pollConditionWait()
   assert.equal(polled.action, 'waiting')
-  assert.equal(memory.planByNpc.get('npc:airi').condition_wait?.state, 'active')
-  assert.equal(memory.planByNpc.get('npc:airi').task_board.completed_count, 0)
+  assert.equal(memory.planByNpc.get('npc:sgluna').condition_wait?.state, 'active')
+  assert.equal(memory.planByNpc.get('npc:sgluna').task_board.completed_count, 0)
   assert.equal(mainCalls(), 0)
 })
 
 test('a wait on a still-uncommitted draft is never registered as a wait the reducer cannot close: registration commits the draft, and the wait then closes its step', async () => {
   const { agent, memory, rcon } = makeAgent()
-  memory.ensurePlanningDraft('npc:airi', memory.planByNpc.get('npc:airi'), { now: 1 })
-  assert.equal(getActivePlan(memory.planningState('npc:airi')).status, PLAN_STATUS.DRAFT, 'a zero-operation draft that no preflight ever committed')
+  memory.ensurePlanningDraft('npc:sgluna', memory.planByNpc.get('npc:sgluna'), { now: 1 })
+  assert.equal(getActivePlan(memory.planningState('npc:sgluna')).status, PLAN_STATUS.DRAFT, 'a zero-operation draft that no preflight ever committed')
   agent.recordLiveEntityObservation({
     name: 'stone-furnace', type: 'furnace', unit_number: 582, position: { x: 4, y: 0 }, working: true, status: 1,
   }, { x: 0, y: 0 }, 'getEntityStatus')
@@ -263,9 +263,9 @@ test('a wait on a still-uncommitted draft is never registered as a wait the redu
     operations: [],
   })
 
-  const durable = memory.planByNpc.get('npc:airi')
+  const durable = memory.planByNpc.get('npc:sgluna')
   assert.equal(durable.condition_wait?.state, 'active')
-  assert.equal(getActivePlan(memory.planningState('npc:airi')).status, PLAN_STATUS.COMMITTED, 'the wait registered on admitted work')
+  assert.equal(getActivePlan(memory.planningState('npc:sgluna')).status, PLAN_STATUS.COMMITTED, 'the wait registered on admitted work')
 
   durable.condition_wait = makeConditionWait(
     { kind: 'inventory_count', item_name: 'iron-plate', minimum: 9 },
@@ -275,13 +275,13 @@ test('a wait on a still-uncommitted draft is never registered as a wait the redu
   const verified = await agent.pollConditionWait()
   assert.equal(verified.action, 'verified')
   assert.equal(verified.state.task_board.completed_count, 1)
-  assert.equal(getActivePlan(memory.planningState('npc:airi')).active_step_index, 1)
+  assert.equal(getActivePlan(memory.planningState('npc:sgluna')).active_step_index, 1)
 })
 
 test('a wait that reaches the close on an uncommitted draft is cleared and handed back once, not re-polled forever', async () => {
   const { agent, memory, rcon } = makeAgent()
-  memory.ensurePlanningDraft('npc:airi', memory.planByNpc.get('npc:airi'), { now: 1 })
-  const durable = memory.planByNpc.get('npc:airi')
+  memory.ensurePlanningDraft('npc:sgluna', memory.planByNpc.get('npc:sgluna'), { now: 1 })
+  const durable = memory.planByNpc.get('npc:sgluna')
   durable.condition_wait = makeConditionWait(
     { kind: 'inventory_count', item_name: 'iron-plate', minimum: 9 },
     { goalId: durable.goal_id, stepId: durable.task_board.active_step_id, actorId: agent.epoch.actor_id, actorEpoch: agent.epoch.epoch, maxChecks: 10 },
@@ -292,14 +292,14 @@ test('a wait that reaches the close on an uncommitted draft is cleared and hande
 
   assert.equal(handedBack.action, 'wake')
   assert.equal(handedBack.reason, 'plan_not_committed')
-  assert.equal(memory.planByNpc.get('npc:airi').condition_wait, undefined, 'the wait is gone, so nothing polls it again')
-  assert.equal(memory.planByNpc.get('npc:airi').task_board.completed_count, 0)
+  assert.equal(memory.planByNpc.get('npc:sgluna').condition_wait, undefined, 'the wait is gone, so nothing polls it again')
+  assert.equal(memory.planByNpc.get('npc:sgluna').task_board.completed_count, 0)
   assert.equal(await agent.pollConditionWait(), null)
 })
 
 test('grounded inventory condition advances exactly one canonical step once satisfied', async () => {
   const { agent, memory, rcon } = makeAgent({ committed: true })
-  const durable = memory.planByNpc.get('npc:airi')
+  const durable = memory.planByNpc.get('npc:sgluna')
   durable.condition_wait = makeConditionWait(
     { kind: 'inventory_count', item_name: 'iron-plate', minimum: 9 },
     { goalId: durable.goal_id, stepId: durable.task_board.active_step_id, actorId: agent.epoch.actor_id, actorEpoch: agent.epoch.epoch, maxChecks: 10 },
@@ -308,7 +308,7 @@ test('grounded inventory condition advances exactly one canonical step once sati
   rcon.inventoryCount = 0
   const waiting = await agent.pollConditionWait()
   assert.equal(waiting.action, 'waiting')
-  assert.equal(memory.planByNpc.get('npc:airi').task_board.completed_count, 0)
+  assert.equal(memory.planByNpc.get('npc:sgluna').task_board.completed_count, 0)
 
   rcon.inventoryCount = 9
   const verified = await agent.pollConditionWait()
@@ -320,14 +320,14 @@ test('grounded inventory condition advances exactly one canonical step once sati
 
   const duplicate = await agent.pollConditionWait()
   assert.equal(duplicate, null)
-  assert.equal(memory.planByNpc.get('npc:airi').task_board.completed_count, 1)
+  assert.equal(memory.planByNpc.get('npc:sgluna').task_board.completed_count, 1)
 })
 
 test('Jev wait_runtime remains valid with idle Autorio while a condition watcher is healthy', async () => {
   const { agent, memory, mainCalls } = makeAgent({
     decisionProvider: async () => decisionResponse('wait_runtime'),
   })
-  const durable = memory.planByNpc.get('npc:airi')
+  const durable = memory.planByNpc.get('npc:sgluna')
   durable.condition_wait = makeConditionWait(
     { kind: 'entity_state', unit_number: 582, expected: 'working' },
     { goalId: durable.goal_id, stepId: durable.task_board.active_step_id, actorId: agent.epoch.actor_id, actorEpoch: agent.epoch.epoch, mode: 'passive_progress', maxChecks: 10 },
@@ -335,14 +335,14 @@ test('Jev wait_runtime remains valid with idle Autorio while a condition watcher
 
   const result = await agent.recoverPlan(agent.generation, new Error('invalid provider JSON'), 1)
   assert.equal(result.goalStatus, 'active')
-  assert.equal(memory.planByNpc.get('npc:airi').status, 'active')
-  assert.equal(memory.planByNpc.get('npc:airi').condition_wait?.state, 'active')
+  assert.equal(memory.planByNpc.get('npc:sgluna').status, 'active')
+  assert.equal(memory.planByNpc.get('npc:sgluna').condition_wait?.state, 'active')
   assert.equal(mainCalls(), 0)
 })
 
 test('condition timeout or stopped passive progress never fakes completion', async () => {
   const { agent, memory, rcon } = makeAgent()
-  const durable = memory.planByNpc.get('npc:airi')
+  const durable = memory.planByNpc.get('npc:sgluna')
   durable.condition_wait = makeConditionWait(
     { kind: 'entity_state', unit_number: 582, expected: 'working' },
     { goalId: durable.goal_id, stepId: durable.task_board.active_step_id, actorId: agent.epoch.actor_id, actorEpoch: agent.epoch.epoch, mode: 'passive_progress', maxChecks: 10 },
@@ -351,14 +351,14 @@ test('condition timeout or stopped passive progress never fakes completion', asy
 
   const result = await agent.pollConditionWait()
   assert.equal(result.action, 'wake')
-  assert.equal(memory.planByNpc.get('npc:airi').task_board.completed_count, 0)
-  assert.equal(memory.planByNpc.get('npc:airi').task_board.active_index, 0)
-  assert.equal(memory.planByNpc.get('npc:airi').condition_wait, undefined)
+  assert.equal(memory.planByNpc.get('npc:sgluna').task_board.completed_count, 0)
+  assert.equal(memory.planByNpc.get('npc:sgluna').task_board.active_index, 0)
+  assert.equal(memory.planByNpc.get('npc:sgluna').condition_wait, undefined)
 })
 
 test('stale condition result cannot mutate a replacement task', async () => {
   const { agent, memory, rcon } = makeAgent()
-  const old = memory.planByNpc.get('npc:airi')
+  const old = memory.planByNpc.get('npc:sgluna')
   old.condition_wait = makeConditionWait(
     { kind: 'inventory_count', item_name: 'iron-plate', minimum: 9 },
     { goalId: old.goal_id, stepId: old.task_board.active_step_id, actorId: agent.epoch.actor_id, actorEpoch: agent.epoch.epoch, maxChecks: 10 },
@@ -377,13 +377,13 @@ test('stale condition result cannot mutate a replacement task', async () => {
   })
 
   const polling = agent.pollConditionWait()
-  memory.terminatePlan('npc:airi')
-  memory.planByNpc.set('npc:airi', state('goal_replacement'))
+  memory.terminatePlan('npc:sgluna')
+  memory.planByNpc.set('npc:sgluna', state('goal_replacement'))
   release()
   const result = await polling
 
   assert.equal(result.action, 'stale')
-  const replacement = memory.planByNpc.get('npc:airi')
+  const replacement = memory.planByNpc.get('npc:sgluna')
   assert.equal(replacement.goal_id, 'goal_replacement')
   assert.equal(replacement.task_board.completed_count, 0)
   assert.equal(replacement.task_board.active_index, 0)
@@ -394,7 +394,7 @@ test('post-step Jev wait_runtime accepts idle Autorio only after deterministic w
   const { agent, memory, mainCalls } = makeAgent({
     decisionProvider: async () => postStepDecisionResponse('wait_runtime'),
   })
-  const durable = memory.planByNpc.get('npc:airi')
+  const durable = memory.planByNpc.get('npc:sgluna')
   durable.condition_wait = makeConditionWait(
     { kind: 'entity_state', unit_number: 582, expected: 'working' },
     {
@@ -424,7 +424,7 @@ test('steering maintain converts continue_current into runtime wait with healthy
       observationBudget: 0,
     }),
   })
-  const durable = memory.planByNpc.get('npc:airi')
+  const durable = memory.planByNpc.get('npc:sgluna')
   durable.condition_wait = makeConditionWait(
     { kind: 'entity_state', unit_number: 582, expected: 'working' },
     {
@@ -452,7 +452,7 @@ test('post-step routing accepts canonical continue_runtime vocabulary and preser
       observationBudget: 0,
     }),
   })
-  const durable = memory.planByNpc.get('npc:airi')
+  const durable = memory.planByNpc.get('npc:sgluna')
   durable.condition_wait = makeConditionWait(
     { kind: 'entity_state', unit_number: 582, expected: 'working' },
     {
@@ -477,7 +477,7 @@ test('steering refuses runtime wait when Jev says the direction is not maintain'
       development: 'vertical',
     }),
   })
-  const durable = memory.planByNpc.get('npc:airi')
+  const durable = memory.planByNpc.get('npc:sgluna')
   durable.condition_wait = makeConditionWait(
     { kind: 'entity_state', unit_number: 582, expected: 'working' },
     {
@@ -505,7 +505,7 @@ test('retired granularity split advice cannot create a replan on a completion bo
       development: 'maintain',
     }),
   })
-  const durable = memory.planByNpc.get('npc:airi')
+  const durable = memory.planByNpc.get('npc:sgluna')
   durable.condition_wait = makeConditionWait(
     { kind: 'entity_state', unit_number: 582, expected: 'working' },
     {
@@ -532,7 +532,7 @@ test('M9 idle continue_runtime falls back to planner when no valid watcher exist
   assert.equal(routed.requested_route, 'continue_runtime')
   assert.equal(routed.route, 'wake_planner')
   assert.equal(routed.rejection_reason, 'continue_runtime_without_authoritative_active_runtime')
-  assert.equal(memory.planByNpc.get('npc:airi').condition_wait, undefined)
+  assert.equal(memory.planByNpc.get('npc:sgluna').condition_wait, undefined)
   assert.equal(mainCalls(), 0)
 })
 
@@ -548,7 +548,7 @@ test('provider and recovery failures preserve a healthy watcher and never wake t
         throw new Error('decision provider unavailable')
       },
     })
-    const durable = memory.planByNpc.get('npc:airi')
+    const durable = memory.planByNpc.get('npc:sgluna')
     durable.condition_wait = makeConditionWait(
       { kind: 'entity_state', unit_number: 582, expected: 'working' },
       {
@@ -563,8 +563,8 @@ test('provider and recovery failures preserve a healthy watcher and never wake t
 
     const result = await agent.recoverPlan(agent.generation, new Error(reason), 1)
     assert.equal(result.goalStatus, 'active')
-    assert.equal(memory.planByNpc.get('npc:airi').status, 'active')
-    assert.equal(memory.planByNpc.get('npc:airi').condition_wait?.state, 'active')
+    assert.equal(memory.planByNpc.get('npc:sgluna').status, 'active')
+    assert.equal(memory.planByNpc.get('npc:sgluna').condition_wait?.state, 'active')
     assert.equal(agent.actionOmissionRepairActive, false)
     assert.equal(mainCalls(), 0)
   }
@@ -572,7 +572,7 @@ test('provider and recovery failures preserve a healthy watcher and never wake t
 
 test('stale exact entity identity invalidates the watcher without completion', async () => {
   const { agent, memory, rcon } = makeAgent()
-  const durable = memory.planByNpc.get('npc:airi')
+  const durable = memory.planByNpc.get('npc:sgluna')
   durable.condition_wait = makeConditionWait(
     { kind: 'entity_state', unit_number: 582, expected: 'working' },
     {
@@ -593,13 +593,13 @@ test('stale exact entity identity invalidates the watcher without completion', a
   const result = await agent.pollConditionWait()
   assert.equal(result.action, 'failed')
   assert.equal(result.reason, 'stale_exact_identity')
-  assert.equal(memory.planByNpc.get('npc:airi').condition_wait, undefined)
-  assert.equal(memory.planByNpc.get('npc:airi').task_board.completed_count, 0)
+  assert.equal(memory.planByNpc.get('npc:sgluna').condition_wait, undefined)
+  assert.equal(memory.planByNpc.get('npc:sgluna').task_board.completed_count, 0)
 })
 
 test('healthy passive progress times out at its bounded check limit without fake completion', async () => {
   const { agent, memory } = makeAgent()
-  const durable = memory.planByNpc.get('npc:airi')
+  const durable = memory.planByNpc.get('npc:sgluna')
   durable.condition_wait = makeConditionWait(
     { kind: 'entity_state', unit_number: 582, expected: 'working' },
     {
@@ -614,13 +614,13 @@ test('healthy passive progress times out at its bounded check limit without fake
 
   const result = await agent.pollConditionWait()
   assert.equal(result.action, 'timeout')
-  assert.equal(memory.planByNpc.get('npc:airi').condition_wait, undefined)
-  assert.equal(memory.planByNpc.get('npc:airi').task_board.completed_count, 0)
+  assert.equal(memory.planByNpc.get('npc:sgluna').condition_wait, undefined)
+  assert.equal(memory.planByNpc.get('npc:sgluna').task_board.completed_count, 0)
 })
 
 test('actor epoch change cancels the watcher and a stale poll cannot complete the task', async () => {
   const { agent, memory, rcon } = makeAgent()
-  const durable = memory.planByNpc.get('npc:airi')
+  const durable = memory.planByNpc.get('npc:sgluna')
   durable.condition_wait = makeConditionWait(
     { kind: 'inventory_count', item_name: 'iron-plate', minimum: 9 },
     {
@@ -652,8 +652,8 @@ test('actor epoch change cancels the watcher and a stale poll cannot complete th
 
   assert.equal(result.action, 'failed')
   assert.equal(result.reason, 'condition_lifecycle_changed')
-  assert.equal(memory.planByNpc.get('npc:airi').condition_wait, undefined)
-  assert.equal(memory.planByNpc.get('npc:airi').task_board.completed_count, 0)
+  assert.equal(memory.planByNpc.get('npc:sgluna').condition_wait, undefined)
+  assert.equal(memory.planByNpc.get('npc:sgluna').task_board.completed_count, 0)
 })
 
 
@@ -665,7 +665,7 @@ test('legacy milestone transition data is inert for post-step routing', async ()
       planningHorizon: 'subgoal',
     }),
   })
-  const durable = memory.planByNpc.get('npc:airi')
+  const durable = memory.planByNpc.get('npc:sgluna')
   durable.project_board = {
     kind: 'project_board_v1',
     project_id: durable.goal_id,
@@ -682,7 +682,7 @@ test('legacy milestone transition data is inert for post-step routing', async ()
   const routed = await agent.routePostStepDecision({ view: { task_state: 'idle', queue_length: 0 } })
   assert.equal(routed.route, 'continue_current')
   assert.equal('hierarchy_action' in routed, false)
-  const retained = memory.planByNpc.get('npc:airi')
+  const retained = memory.planByNpc.get('npc:sgluna')
   assert.equal(retained.project_board.transition_state, 'awaiting_next_milestone')
   assert.equal(retained.task_board.total_steps, durable.task_board.total_steps)
 })
@@ -855,7 +855,7 @@ function machineOutputObservation({ current, satisfied = false, working = true, 
 
 test('a working machine checkpoint becomes a completion wait instead of a guessed wait', async () => {
   const { agent, memory, mainCalls } = makeAgent()
-  memory.planByNpc.get('npc:airi').task_board.steps[0].completion_contract = {
+  memory.planByNpc.get('npc:sgluna').task_board.steps[0].completion_contract = {
     mode: 'all',
     requirements: [{ id: 'plates', kind: 'entity_inventory_count', unit_number: 582, item_name: 'iron-plate', minimum: 10 }],
   }
@@ -875,7 +875,7 @@ test('a working machine checkpoint becomes a completion wait instead of a guesse
     operations: [],
   })
 
-  const wait = memory.planByNpc.get('npc:airi').condition_wait
+  const wait = memory.planByNpc.get('npc:sgluna').condition_wait
   assert.equal(result.goalStatus, 'active')
   assert.equal(wait?.mode, 'completion')
   assert.deepEqual(wait?.condition, { kind: 'entity_inventory_count', unit_number: 582, item_name: 'iron-plate', minimum: 10 })
@@ -887,7 +887,7 @@ test('a BLOCKED reply is recorded as a blocker even while the machine works towa
   const events = []
   const traceEvent = agent.traceEvent.bind(agent)
   agent.traceEvent = async (event, data) => { events.push({ event, data }); return traceEvent(event, data) }
-  memory.planByNpc.get('npc:airi').task_board.steps[0].completion_contract = {
+  memory.planByNpc.get('npc:sgluna').task_board.steps[0].completion_contract = {
     mode: 'all',
     requirements: [{ id: 'plates', kind: 'entity_inventory_count', unit_number: 582, item_name: 'iron-plate', minimum: 10 }],
   }
@@ -909,7 +909,7 @@ test('a BLOCKED reply is recorded as a blocker even while the machine works towa
 
   // The reply takes the blocker path (outcome authority decides blocked or
   // paused on its evidence); it is never parked as a wait on the furnace.
-  const durable = memory.planByNpc.get('npc:airi')
+  const durable = memory.planByNpc.get('npc:sgluna')
   assert.equal(durable.condition_wait, undefined)
   assert.ok(['blocked', 'paused'].includes(result.goalStatus), result.goalStatus)
   assert.equal(durable.status, result.goalStatus)
@@ -918,7 +918,7 @@ test('a BLOCKED reply is recorded as a blocker even while the machine works towa
 
 test('the machine expectation sets the wake deadline and is traced once', async () => {
   const { agent, memory, rcon } = makeAgent({ committed: true })
-  const durable = memory.planByNpc.get('npc:airi')
+  const durable = memory.planByNpc.get('npc:sgluna')
   durable.condition_wait = makeConditionWait(
     { kind: 'entity_inventory_count', unit_number: 582, item_name: 'iron-plate', minimum: 10 },
     { goalId: durable.goal_id, stepId: durable.task_board.active_step_id, actorId: agent.epoch.actor_id, actorEpoch: agent.epoch.epoch },
@@ -929,15 +929,15 @@ test('the machine expectation sets the wake deadline and is traced once', async 
   rcon.pendingCondition = machineOutputObservation({ current: 2, eta: { recipe: 'iron-plate', seconds_per_craft: 3.2, crafts_needed: 8, seconds_to_target: 24.8, seconds_until_idle: 40 } })
   const first = await agent.pollConditionWait()
   assert.equal(first.action, 'waiting')
-  const scheduled = memory.planByNpc.get('npc:airi').condition_wait
+  const scheduled = memory.planByNpc.get('npc:sgluna').condition_wait
   assert.equal(scheduled.expected_seconds, 24.8)
   assert.ok(scheduled.timeout_ms >= Math.ceil((24.8 * 1.5 + 30) * 1000) && scheduled.timeout_ms < 70_000, String(scheduled.timeout_ms))
   assert.ok(Number.isFinite(scheduled.expected_finish_at))
 
   rcon.pendingCondition = machineOutputObservation({ current: 5, eta: { seconds_to_target: 16 } })
   await agent.pollConditionWait()
-  assert.equal(memory.planByNpc.get('npc:airi').condition_wait.timeout_ms, scheduled.timeout_ms)
-  assert.equal(memory.planByNpc.get('npc:airi').condition_wait.expected_seconds, 16)
+  assert.equal(memory.planByNpc.get('npc:sgluna').condition_wait.timeout_ms, scheduled.timeout_ms)
+  assert.equal(memory.planByNpc.get('npc:sgluna').condition_wait.expected_seconds, 16)
   assert.equal(events.filter(entry => entry.event === 'runtime.condition_scheduled').length, 1)
 
   // The checkpoint holding closes the step; elapsed time never does.
@@ -949,7 +949,7 @@ test('the machine expectation sets the wake deadline and is traced once', async 
 
 test('an overrun wakes the planner with expected and elapsed seconds, never a completion', async () => {
   const { agent, memory, rcon } = makeAgent()
-  const durable = memory.planByNpc.get('npc:airi')
+  const durable = memory.planByNpc.get('npc:sgluna')
   durable.condition_wait = makeConditionWait(
     { kind: 'entity_inventory_count', unit_number: 582, item_name: 'iron-plate', minimum: 10 },
     { goalId: durable.goal_id, stepId: durable.task_board.active_step_id, actorId: agent.epoch.actor_id, actorEpoch: agent.epoch.epoch },
@@ -959,11 +959,11 @@ test('an overrun wakes the planner with expected and elapsed seconds, never a co
   assert.equal(first.action, 'waiting')
 
   // Move the registration back past the derived deadline (20 s x 1.5 + 30 s).
-  const wait = memory.planByNpc.get('npc:airi').condition_wait
+  const wait = memory.planByNpc.get('npc:sgluna').condition_wait
   wait.registered_at -= wait.timeout_ms
   const overrun = await agent.pollConditionWait()
   assert.equal(overrun.action, 'timeout')
   assert.equal(overrun.expected_seconds, 20)
   assert.ok(overrun.elapsed_seconds >= 60, String(overrun.elapsed_seconds))
-  assert.equal(memory.planByNpc.get('npc:airi').task_board.completed_count, 0)
+  assert.equal(memory.planByNpc.get('npc:sgluna').task_board.completed_count, 0)
 })

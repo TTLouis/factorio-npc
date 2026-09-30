@@ -13,7 +13,7 @@ import { FakeFactorio, gather, inventoryCheckpoint, planReply } from './task-loo
 // Hand-trace regressions for a long goal interrupted mid-slice or between
 // slices: restart, provider failure, and shutdown.
 
-const KEY = 'npc:airi'
+const KEY = 'npc:sgluna'
 const ROCKET_GOAL = {
   scope: 'long_horizon',
   summary: 'Launch one rocket.',
@@ -25,7 +25,7 @@ const SHELF = [
 ]
 
 function stateFile() {
-  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'airi-slice-')), 'state.json')
+  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sgluna-slice-')), 'state.json')
 }
 
 function agentWith(game, memory, provider, { file = null, intent = () => 'new_goal' } = {}) {
@@ -38,7 +38,7 @@ function agentWith(game, memory, provider, { file = null, intent = () => 'new_go
     stateFile: file,
     traceFile: null,
     decisionTraceFile: null,
-    npcId: 'airi',
+    npcId: 'sgluna',
     goalDefinitionPolicy: 'required',
   })
 }

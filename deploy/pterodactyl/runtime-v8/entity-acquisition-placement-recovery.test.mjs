@@ -6,7 +6,7 @@ import { NpcAgentLoop, NpcDialogueMemory } from './npc-agent-loop.mjs'
 
 function deployment() {
   return {
-    revision: 'airi-deploy-v8-npc-staging',
+    revision: 'sgluna-deploy-v8-npc-staging',
     session: '0123456789abcdef0123456789abcdef',
     mode: 'npc',
     actor_id: 18,
@@ -132,7 +132,7 @@ class E2eRcon {
 
   async command(text) {
     this.commands.push(text)
-    if (text.includes('remote.call("airi_deployment","status")')) return JSON.stringify(deployment())
+    if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(deployment())
     if (text.includes('remote.call("autorio_tools","get_inventory_items")')) return JSON.stringify(this.inventory)
     if (text.includes('remote.call("autorio_tools","get_nearby_entities"')) return JSON.stringify(this.nearby)
     if (text.includes('remote.call("autorio_navigation","status")')) return JSON.stringify(this.navigation)
@@ -141,9 +141,9 @@ class E2eRcon {
     if (text.includes('remote.call("autorio_planning","plan_placement"')) return JSON.stringify(this.planPlacement)
     if (text.includes('remote.call("autorio_operations","status")')) return JSON.stringify(this.operationStatus)
     if (text.includes('remote.call("autorio_preflight","operation"')) return JSON.stringify({ ok: true })
-    if (text.includes('AIRI_RESULT_') && text.includes('autorio_operations')) {
+    if (text.includes('SGLUNA_RESULT_') && text.includes('autorio_operations')) {
       this.mutations.push(text)
-      const marker = text.match(/AIRI_RESULT_[a-f0-9]{24}:/)?.[0]
+      const marker = text.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)?.[0]
       assert.ok(marker)
       const count = (text.match(/remote\.call\('autorio_operations'/g) ?? []).length
       return `${marker}${JSON.stringify({ ok: true, result: Array.from({ length: count }, () => [true, 'Task started']) })}`
@@ -348,7 +348,7 @@ test('remote name-only entity requires approach and navigation completion automa
   assert.equal(mining.operations[0].name, 'mine_entity')
   assert.equal(rcon.mutations.length, 2)
   assert.match(rcon.mutations[1], /'mine_entity','tree-05',1/)
-  assert.equal(memory.currentPlan('npc:airi').task_board.completed_count, 1)
+  assert.equal(memory.currentPlan('npc:sgluna').task_board.completed_count, 1)
 })
 
 test('alternating distinct read-only observations trigger generic decision pressure before round twelve', async () => {
@@ -449,7 +449,7 @@ test('wood collection flow uses exact mining, verifies inventory twenty, and com
   assert.equal(calls, 4)
   assert.equal(completed.goalStatus, 'completed')
   assert.equal(completed.operations.length, 0)
-  assert.equal(memory.currentPlan('npc:airi'), undefined)
+  assert.equal(memory.currentPlan('npc:sgluna'), undefined)
   assert.equal(rcon.commands.some(command => command.includes("gather_resource") && command.includes("tree")), false)
 })
 
@@ -475,7 +475,7 @@ test('act-or-block repair lets the planner close a satisfied prose-only step', a
       if (calls === 2) return planMessage([], { chatMessage: 'Done, 10 stone gathered.', plan: [], currentStep: 0 })
       if (calls === 3) {
         repairPrompt = String(messages.at(-1)?.content ?? '')
-        const stepId = memory.currentPlan('npc:airi').task_board.steps[0].id
+        const stepId = memory.currentPlan('npc:sgluna').task_board.steps[0].id
         return {
           content: JSON.stringify({
             chatMessage: '',

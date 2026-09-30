@@ -158,7 +158,7 @@ export function new_interaction_recovery(manager: Manager) {
         manager,
         position_navigation(actor, escape, PLACEMENT_ESCAPE_REACH),
         task,
-        `AIRI occupies the requested build footprint; stepping aside to ${serpent.line(escape)}`,
+        `SGLuna occupies the requested build footprint; stepping aside to ${serpent.line(escape)}`,
       )
     }
 

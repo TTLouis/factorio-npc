@@ -9,7 +9,7 @@ import { NpcAgentLoop } from './npc-agent-loop.mjs'
 
 function deployment() {
   return {
-    revision: 'airi-deploy-v8-npc-staging',
+    revision: 'sgluna-deploy-v8-npc-staging',
     session: '0123456789abcdef0123456789abcdef',
     mode: 'npc',
     actor_id: 18,
@@ -32,7 +32,7 @@ class FakeRcon {
   }
 
   async command(text) {
-    if (text.includes('remote.call("airi_deployment","status")')) return JSON.stringify(this.status)
+    if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(this.status)
     if (text.includes('remote.call("autorio_preflight","operation"')) return JSON.stringify({ ok: true })
     if (text.includes('remote.call("autorio_tools","get_nearby_entities"')) {
       return JSON.stringify({
@@ -50,7 +50,7 @@ class FakeRcon {
       })
     }
     if (text.includes('local ok,result=pcall')) {
-      const marker = text.match(/AIRI_RESULT_[a-f0-9]{24}:/)?.[0]
+      const marker = text.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)?.[0]
       assert.ok(marker)
       this.mutations.push(text)
       this.batchId++
@@ -110,7 +110,7 @@ class RejectingTransferRcon extends FakeRcon {
     if (text.includes('local ok,result=pcall') && text.includes("remote.call('autorio_operations','move_items_exact'")) {
       this.transferAdmissionAttempts++
       if (this.transferAdmissionAttempts === 1) {
-        const marker = text.match(/AIRI_RESULT_[a-f0-9]{24}:/)?.[0]
+        const marker = text.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)?.[0]
         assert.ok(marker)
         return `${marker}${JSON.stringify({ ok: false, result: 'autorio rejected operation 1: [false,"transfer target rejected"]' })}`
       }
@@ -167,7 +167,7 @@ test('rejected transfer cannot advance or complete the canonical plan step', asy
     agent.request('produce 20 iron plates', { sender: 'TTLouis' }),
     /operation batch was not replayed|operation batch|rejected operation/i,
   )
-  const rejectedState = agent.memory.currentPlan('npc:airi')
+  const rejectedState = agent.memory.currentPlan('npc:sgluna')
   assert.equal(rejectedState.status, 'blocked')
   assert.equal(rejectedState.task_board.active_index, 0)
   assert.equal(rejectedState.task_board.completed_count, 0)
@@ -182,11 +182,11 @@ test('rejected transfer cannot advance or complete the canonical plan step', asy
   assert.equal(attemptedSkip.taskBoard.blocker, 'operation_admission_failed')
   assert.equal(attemptedSkip.operations.length, 0)
   assert.equal(agent.rcon.transferAdmissionAttempts, 1)
-  assert.equal(agent.memory.currentPlan('npc:airi').current_step, 0)
+  assert.equal(agent.memory.currentPlan('npc:sgluna').current_step, 0)
 })
 
 test('durable plan survives a new agent instance and empty actions cannot pretend execution continued', async t => {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'airi-durable-plan-'))
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-durable-plan-'))
   t.after(() => fsp.rm(dir, { recursive: true, force: true }))
   const stateFile = path.join(dir, 'npc-state.json')
   const firstReplies = [
@@ -227,7 +227,7 @@ test('durable plan survives a new agent instance and empty actions cannot preten
     first.completed(),
     /provider_action_omission_repair_failed/i,
   )
-  const interrupted = first.memory.currentPlan('npc:airi')
+  const interrupted = first.memory.currentPlan('npc:sgluna')
   assert.equal(interrupted.status, 'active')
   assert.equal(interrupted.admission_status, 'action_omission_repair')
   assert.equal(interrupted.task_board.active_step_id, 'step_1')
@@ -255,7 +255,7 @@ test('durable plan survives a new agent instance and empty actions cannot preten
   })
   await second.loadPersistentState()
 
-  const context = second.memory.planContext('npc:airi')
+  const context = second.memory.planContext('npc:sgluna')
   assert.match(context, /\[RUNTIME_COMPAT_STATE\]/)
   assert.match(context, /\[PLANNING_STATE\]/)
   assert.doesNotMatch(context, /\[PLAN_STATE\]/)
@@ -365,7 +365,7 @@ class ActionOmissionRcon {
   }
 
   async command(text) {
-    if (text.includes('remote.call("airi_deployment","status")')) return JSON.stringify(this.status)
+    if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(this.status)
     if (text.includes('remote.call("autorio_operations","status")')) {
       return JSON.stringify({
         task_state: 'idle',
@@ -390,7 +390,7 @@ class ActionOmissionRcon {
       })
     }
     if (text.includes('local ok,result=pcall')) {
-      const marker = text.match(/AIRI_RESULT_[a-f0-9]{24}:/)?.[0]
+      const marker = text.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)?.[0]
       assert.ok(marker)
       this.mutations.push(text)
       this.batchId++
@@ -483,7 +483,7 @@ test('strict provider recovery cannot turn its no-tools limitation into a durabl
     /strict recovery could not safely resolve remaining canonical work/i,
   )
 
-  const state = agent.memory.currentPlan('npc:airi')
+  const state = agent.memory.currentPlan('npc:sgluna')
   assert.equal(state.status, 'active')
   assert.notEqual(state.blocker, 'provider_reported_blocker')
   assert.notEqual(state.task_board.blocker, 'provider_reported_blocker')
@@ -609,7 +609,7 @@ test('repeated prose-only omission fails upward without inventing a durable worl
   )
   assert.equal(calls, 2)
   assert.equal(rcon.mutations.length, 0)
-  const state = agent.memory.currentPlan('npc:airi')
+  const state = agent.memory.currentPlan('npc:sgluna')
   assert.equal(state.status, 'active')
   assert.equal(state.admission_status, 'action_omission_repair')
   assert.notEqual(state.blocker, 'action_omission_after_repair')
@@ -647,7 +647,7 @@ test('invalid provider JSON during action-omission repair fails upward without a
 
   assert.equal(calls, 5)
   assert.equal(rcon.mutations.length, 0)
-  const state = agent.memory.currentPlan('npc:airi')
+  const state = agent.memory.currentPlan('npc:sgluna')
   assert.equal(state.status, 'active')
   assert.equal(state.admission_status, 'action_omission_repair')
   assert.notEqual(state.blocker, 'action_omission_after_repair')
@@ -723,7 +723,7 @@ test('repair cannot loop on a duplicate or second observation', async () => {
   )
   assert.equal(calls, 3)
   assert.equal(rcon.observationCalls, 1)
-  const state = agent.memory.currentPlan('npc:airi')
+  const state = agent.memory.currentPlan('npc:sgluna')
   assert.equal(state.status, 'active')
   assert.notEqual(state.task_board.blocker, 'action_omission_after_repair')
   assert.equal(rcon.mutations.length, 0)
@@ -773,8 +773,8 @@ test('omission repair preserves goal id, verified prefix, and active canonical s
     ref: 'fixture_verified_step_1',
     summary: 'Fixture proof for the already-verified first canonical step.',
   }
-  memory.recordBoardEvidence?.('npc:airi', proof)
-  const reduced = memory.applyOutcomeAuthority?.('npc:airi', {
+  memory.recordBoardEvidence?.('npc:sgluna', proof)
+  const reduced = memory.applyOutcomeAuthority?.('npc:sgluna', {
     kind: 'verified_complete',
     source: 'deterministic_runtime',
     reason_code: 'fixture_verified_prefix',
@@ -782,7 +782,7 @@ test('omission repair preserves goal id, verified prefix, and active canonical s
     metadata: { scope: 'step' },
   })
   assert.equal(reduced?.decision?.accepted, true)
-  assert.equal(memory.currentPlan('npc:airi').task_board.completed_count, 1)
+  assert.equal(memory.currentPlan('npc:sgluna').task_board.completed_count, 1)
 
   const continued = await agent.request('continue setup', { sender: 'TTLouis' })
   assert.equal(calls, 3)
@@ -797,7 +797,7 @@ test('omission repair preserves goal id, verified prefix, and active canonical s
 test('interrupted omission recovery uses a compact capsule instead of replaying unrelated dialogue', async () => {
   let calls = 0
   const memory = new CanonicalTaskBoardMemory()
-  memory.remember('npc:airi', 99, {
+  memory.remember('npc:sgluna', 99, {
     sender: 'Old chat',
     user: 'unrelated ancient chatter that must not be replayed',
     assistant: 'unrelated old answer',
@@ -828,7 +828,7 @@ test('interrupted omission recovery uses a compact capsule instead of replaying 
     agent.request('perform the current action', { sender: 'TTLouis' }),
     /simulated provider interruption/,
   )
-  const interrupted = memory.currentPlan('npc:airi')
+  const interrupted = memory.currentPlan('npc:sgluna')
   assert.equal(interrupted.status, 'active')
   assert.equal(interrupted.admission_status, 'action_omission_repair')
   const goalId = interrupted.goal_id
@@ -936,7 +936,7 @@ test('verified completion can close before a trailing control-only Stop step', a
   assert.equal(calls, 2)
   assert.equal(finished.goalStatus, 'completed')
   assert.equal(finished.operations.length, 0)
-  assert.equal(agent.memory.currentPlan('npc:airi'), undefined)
+  assert.equal(agent.memory.currentPlan('npc:sgluna'), undefined)
   assert.equal(rcon.mutations.length, 1)
 })
 
@@ -977,7 +977,7 @@ test('verified completion can close before a trailing Report completion control-
   assert.equal(calls, 2)
   assert.equal(finished.goalStatus, 'completed')
   assert.equal(finished.operations.length, 0)
-  assert.equal(agent.memory.currentPlan('npc:airi'), undefined)
+  assert.equal(agent.memory.currentPlan('npc:sgluna'), undefined)
   assert.equal(rcon.mutations.length, 1)
 })
 
@@ -1018,14 +1018,14 @@ test('verified final completion is not mistaken for an action omission', async (
   assert.equal(finished.goalStatus, 'completed')
   assert.equal(rcon.mutations.length, 1)
   assert.equal(finished.operations.length, 0)
-  assert.equal(agent.memory.currentPlan('npc:airi'), undefined)
-  assert.match(agent.memory.context('npc:airi'), /place one furnace|requested furnace/i)
+  assert.equal(agent.memory.currentPlan('npc:sgluna'), undefined)
+  assert.match(agent.memory.context('npc:sgluna'), /place one furnace|requested furnace/i)
 
   await agent.finalizeCompletedTaskContext()
   assert.equal(agent.active, false)
   assert.equal(agent.messages.length, 0)
   assert.equal(agent.baseMessages.length, 0)
-  const resetContext = agent.memory.context('npc:airi')
+  const resetContext = agent.memory.context('npc:sgluna')
   assert.match(resetContext, /\[RUNTIME_COMPAT_STATE\] No active compatibility task/)
   assert.doesNotMatch(resetContext, /\[PLANNING_STATE\]/)
   assert.doesNotMatch(resetContext, /place one furnace|requested furnace/i)
@@ -1036,7 +1036,7 @@ test('strict runtime plan surface rejects retired project hierarchy payloads', (
   const agent = new NpcAgentLoop({
     rcon: new FakeRcon(),
     memory: new CanonicalTaskBoardMemory(),
-    npcId: 'airi',
+    npcId: 'sgluna',
     systemPrompt: 'retired project hierarchy parse test',
     stateFile: null,
     traceFile: null,
@@ -1065,7 +1065,7 @@ test('ordinary short-task responses remain backward compatible without project h
   const agent = new NpcAgentLoop({
     rcon: new FakeRcon(),
     memory: new CanonicalTaskBoardMemory(),
-    npcId: 'airi',
+    npcId: 'sgluna',
     systemPrompt: 'project hierarchy compatibility test',
     stateFile: null,
     traceFile: null,
@@ -1087,7 +1087,7 @@ test('the agent loop admits place_candidate, the operation its prompt advertises
   const agent = new NpcAgentLoop({
     rcon: new FakeRcon(),
     memory: new CanonicalTaskBoardMemory(),
-    npcId: 'airi',
+    npcId: 'sgluna',
     systemPrompt: 'place candidate admission test',
     stateFile: null,
     traceFile: null,
@@ -1112,7 +1112,7 @@ test('retired hierarchy trigger labels do not reintroduce a project payload requ
   const agent = new NpcAgentLoop({
     rcon: new FakeRcon(),
     memory: new CanonicalTaskBoardMemory(),
-    npcId: 'airi',
+    npcId: 'sgluna',
     systemPrompt: 'retired hierarchy trigger compatibility test',
     stateFile: null,
     traceFile: null,
@@ -1136,7 +1136,7 @@ test('runtime accepts a semantic checkpoint proposal beside the strict plan surf
   const agent = new NpcAgentLoop({
     rcon: new FakeRcon(),
     memory: new CanonicalTaskBoardMemory(),
-    npcId: 'airi',
+    npcId: 'sgluna',
     systemPrompt: 'semantic checkpoint parse test',
     stateFile: null,
     traceFile: null,
@@ -1168,7 +1168,7 @@ test('runtime rejects unsupported planner checkpoint semantics instead of trusti
   const agent = new NpcAgentLoop({
     rcon: new FakeRcon(),
     memory: new CanonicalTaskBoardMemory(),
-    npcId: 'airi',
+    npcId: 'sgluna',
     systemPrompt: 'semantic checkpoint rejection test',
     stateFile: null,
     traceFile: null,
@@ -1222,7 +1222,7 @@ test('tool-native submitPlan lets assistant content stay natural language on the
   assert.deepEqual(result.plan, ['Mine one iron ore'])
   assert.equal(result.operations[0].name, 'mine_entity')
   assert.equal(rcon.mutations.length, 1)
-  assert.equal(agent.memory.byNpc.get('npc:airi').recent.at(-1).assistant, 'I am mining one iron ore now.')
+  assert.equal(agent.memory.byNpc.get('npc:sgluna').recent.at(-1).assistant, 'I am mining one iron ore now.')
 })
 
 
@@ -1267,7 +1267,7 @@ test('planner roadmap guidance reaches the Roadmap Shelf through the live path',
 
   await agent.request('build toward a rocket-capable factory', { sender: 'TTLouis' })
 
-  const planning = agent.memory.planningState('npc:airi')
+  const planning = agent.memory.planningState('npc:sgluna')
   assert.ok(planning?.roadmap, 'the live path must actually populate the shelf, not merely be able to')
   assert.deepEqual(planning.roadmap.nodes.map(node => node.id), ['roadmap_early_smelting', 'roadmap_red_science'])
   assert.equal(planning.roadmap.nodes[0].intent, 'establish reliable early iron and copper smelting')
@@ -1291,7 +1291,7 @@ test('shelf nodes stay non-executable across the live path', async () => {
 
   await agent.request('build toward a rocket-capable factory', { sender: 'TTLouis' })
 
-  const node = agent.memory.planningState('npc:airi')?.roadmap?.nodes?.[0]
+  const node = agent.memory.planningState('npc:sgluna')?.roadmap?.nodes?.[0]
   assert.ok(node)
   assert.equal(node.steps, undefined)
   assert.equal(node.operations, undefined)

@@ -12,7 +12,7 @@ import { getActivePlan, PLAN_STATUS } from '../pterodactyl/runtime-v8/planning-s
 import { configureNpcSession } from '../pterodactyl/staging/supervisor-adapter.mjs'
 
 const execFileAsync = promisify(execFile)
-const key = 'npc:airi'
+const key = 'npc:sgluna'
 
 function requiredArg(name) {
   const index = process.argv.indexOf(`--${name}`)
@@ -65,7 +65,7 @@ function makeAgent({ rcon, stateFile, memory, provider }) {
     stateFile,
     traceFile: null,
     decisionTraceFile: null,
-    npcId: 'airi',
+    npcId: 'sgluna',
     memory,
   })
 }

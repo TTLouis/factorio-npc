@@ -12,7 +12,7 @@ import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { GOAL_STATUS } from './planning-state.mjs'
 import { FakeFactorio, gather, planReply } from './task-loop-fixtures.mjs'
 
-const KEY = 'npc:airi'
+const KEY = 'npc:sgluna'
 const STEP = ['Gather 10 iron ore']
 const LONG_GOAL = {
   scope: 'long_horizon',
@@ -53,7 +53,7 @@ function harness(game, provider) {
     stateFile: null,
     traceFile: null,
     decisionTraceFile: null,
-    npcId: 'airi',
+    npcId: 'sgluna',
     goalDefinitionPolicy: 'required',
     onActivity: (event, data) => events.push({ event, data }),
   })

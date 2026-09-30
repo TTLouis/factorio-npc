@@ -240,10 +240,10 @@ test('receipt correlation must belong to the currently active goal and canonical
 
 test('verified mutation receipt records proof without advancing semantic canonical progress', () => {
   const memory = new CanonicalTaskBoardMemory()
-  memory.planByNpc.set('npc:airi', planState())
+  memory.planByNpc.set('npc:sgluna', planState())
 
-  const nextBoard = memory.recordBoardEvidence('npc:airi', completedReceipt())
-  const state = memory.currentPlan('npc:airi')
+  const nextBoard = memory.recordBoardEvidence('npc:sgluna', completedReceipt())
+  const state = memory.currentPlan('npc:sgluna')
 
   assert.equal(nextBoard.active_index, 2)
   assert.equal(nextBoard.active_step_id, 'step_3')
@@ -267,9 +267,9 @@ test('positive transfer receipt marks the mutation verified without completing t
     last_mutation_verified: false,
   })
   const memory = new CanonicalTaskBoardMemory()
-  memory.planByNpc.set('npc:airi', state)
+  memory.planByNpc.set('npc:sgluna', state)
 
-  const nextBoard = memory.recordBoardEvidence('npc:airi', completedReceipt({
+  const nextBoard = memory.recordBoardEvidence('npc:sgluna', completedReceipt({
     taskTypes: ['moving_items'],
     basicOperation: {
       type: 'moving_items',
@@ -283,7 +283,7 @@ test('positive transfer receipt marks the mutation verified without completing t
       to_entity: true,
     },
   }))
-  const nextState = memory.currentPlan('npc:airi')
+  const nextState = memory.currentPlan('npc:sgluna')
 
   assert.equal(nextBoard.active_index, 2)
   assert.equal(nextBoard.completed_count, 2)
@@ -297,14 +297,14 @@ test('failed or zero-effect transfer receipt blocks the active step without comp
   const transferBoard = board()
   transferBoard.steps[2] = { ...transferBoard.steps[2], description: 'Load furnace' }
   const memory = new CanonicalTaskBoardMemory()
-  memory.planByNpc.set('npc:airi', planState({
+  memory.planByNpc.set('npc:sgluna', planState({
     task_board: transferBoard,
     plan: transferBoard.steps.map(step => step.description),
     last_operations: ['move_items_exact {"item_name":"iron-ore","unit_number":582,"max_count":20,"to_entity":true}'],
     last_mutation_verified: false,
   }))
 
-  const blocked = memory.recordBoardEvidence('npc:airi', {
+  const blocked = memory.recordBoardEvidence('npc:sgluna', {
     kind: 'operation_error_receipt',
     ref: 'batch_7',
     summary: JSON.stringify({
@@ -325,7 +325,7 @@ test('failed or zero-effect transfer receipt blocks the active step without comp
       },
     }),
   })
-  const state = memory.currentPlan('npc:airi')
+  const state = memory.currentPlan('npc:sgluna')
 
   assert.equal(blocked.active_index, 2)
   assert.equal(blocked.completed_count, 2)
@@ -391,10 +391,10 @@ function placementRefusedReceipt(batchId, basicOverrides = {}) {
 
 test('a refused placement in a placing + dependent transfer batch goes back to the planner, bounded, without blocking', () => {
   const memory = new CanonicalTaskBoardMemory()
-  memory.planByNpc.set('npc:airi', placeAndSupplyState())
+  memory.planByNpc.set('npc:sgluna', placeAndSupplyState())
 
-  const first = memory.recordBoardEvidence('npc:airi', placementRefusedReceipt(7))
-  let state = memory.currentPlan('npc:airi')
+  const first = memory.recordBoardEvidence('npc:sgluna', placementRefusedReceipt(7))
+  let state = memory.currentPlan('npc:sgluna')
   assert.equal(state.status, 'active')
   assert.equal(state.blocker, '')
   assert.equal(first.status, 'active')
@@ -412,15 +412,15 @@ test('a refused placement in a placing + dependent transfer batch goes back to t
   assert.equal(parsed.attempt, 1)
 
   // The same batch re-reported is not another attempt.
-  memory.recordBoardEvidence('npc:airi', placementRefusedReceipt(7))
-  memory.recordBoardEvidence('npc:airi', placementRefusedReceipt(8))
-  state = memory.currentPlan('npc:airi')
+  memory.recordBoardEvidence('npc:sgluna', placementRefusedReceipt(7))
+  memory.recordBoardEvidence('npc:sgluna', placementRefusedReceipt(8))
+  state = memory.currentPlan('npc:sgluna')
   assert.equal(state.status, 'active')
   assert.equal(state.task_board.evidence.filter(item => item.kind === 'operation_failure_recoverable').length, 2)
 
   // Retries exhausted: the step is now a world blocker, named as a placement failure.
-  const blocked = memory.recordBoardEvidence('npc:airi', placementRefusedReceipt(9))
-  state = memory.currentPlan('npc:airi')
+  const blocked = memory.recordBoardEvidence('npc:sgluna', placementRefusedReceipt(9))
+  state = memory.currentPlan('npc:sgluna')
   assert.equal(state.status, 'blocked')
   assert.equal(state.blocker, 'placement_failed:not_placeable')
   assert.equal(blocked.active_index, 2)
@@ -430,23 +430,23 @@ test('a refused placement in a placing + dependent transfer batch goes back to t
 
 test('a completed batch for the step ends the placement refusal streak', () => {
   const memory = new CanonicalTaskBoardMemory()
-  memory.planByNpc.set('npc:airi', placeAndSupplyState())
+  memory.planByNpc.set('npc:sgluna', placeAndSupplyState())
 
-  memory.recordBoardEvidence('npc:airi', placementRefusedReceipt(7))
-  memory.recordBoardEvidence('npc:airi', placementRefusedReceipt(8))
-  memory.recordBoardEvidence('npc:airi', { kind: 'operation_receipt', ref: 'batch_9', summary: JSON.stringify({ outcome: 'completed', batch_id: 9 }) })
-  memory.recordBoardEvidence('npc:airi', placementRefusedReceipt(10))
+  memory.recordBoardEvidence('npc:sgluna', placementRefusedReceipt(7))
+  memory.recordBoardEvidence('npc:sgluna', placementRefusedReceipt(8))
+  memory.recordBoardEvidence('npc:sgluna', { kind: 'operation_receipt', ref: 'batch_9', summary: JSON.stringify({ outcome: 'completed', batch_id: 9 }) })
+  memory.recordBoardEvidence('npc:sgluna', placementRefusedReceipt(10))
 
-  const state = memory.currentPlan('npc:airi')
+  const state = memory.currentPlan('npc:sgluna')
   assert.equal(state.status, 'active')
   assert.equal(JSON.parse(state.task_board.evidence.at(-1).summary).attempt, 1)
 })
 
 test('the transfer itself failing in a placing + transfer batch still blocks as a transfer failure', () => {
   const memory = new CanonicalTaskBoardMemory()
-  memory.planByNpc.set('npc:airi', placeAndSupplyState())
+  memory.planByNpc.set('npc:sgluna', placeAndSupplyState())
 
-  memory.recordBoardEvidence('npc:airi', placementRefusedReceipt(7, {
+  memory.recordBoardEvidence('npc:sgluna', placementRefusedReceipt(7, {
     type: 'moving_items',
     code: 'nothing_moved',
     entity_name: undefined,
@@ -458,7 +458,7 @@ test('the transfer itself failing in a placing + transfer batch still blocks as 
     moved_count: 0,
     to_entity: true,
   }))
-  const state = memory.currentPlan('npc:airi')
+  const state = memory.currentPlan('npc:sgluna')
 
   assert.equal(state.status, 'blocked')
   assert.equal(state.blocker, 'transfer_failed:nothing_moved')
@@ -477,15 +477,15 @@ test('a blocker names the operation that failed, not the batch transfer intent',
   ]
   for (const [basic, expected] of cases) {
     const memory = new CanonicalTaskBoardMemory()
-    memory.planByNpc.set('npc:airi', placeAndSupplyState())
-    memory.recordBoardEvidence('npc:airi', placementRefusedReceipt(7, {
+    memory.planByNpc.set('npc:sgluna', placeAndSupplyState())
+    memory.recordBoardEvidence('npc:sgluna', placementRefusedReceipt(7, {
       ...basic,
       entity_name: undefined,
       placement_footprint: undefined,
       placement_grid: undefined,
       placement_blockers: undefined,
     }))
-    const state = memory.currentPlan('npc:airi')
+    const state = memory.currentPlan('npc:sgluna')
     assert.equal(state.status, 'blocked', expected)
     assert.equal(state.blocker, expected)
   }
@@ -493,12 +493,12 @@ test('a blocker names the operation that failed, not the batch transfer intent',
 
 test('a failure without a correlated operation is not guessed to be a transfer failure', () => {
   const memory = new CanonicalTaskBoardMemory()
-  memory.planByNpc.set('npc:airi', placeAndSupplyState())
+  memory.planByNpc.set('npc:sgluna', placeAndSupplyState())
   const receipt = placementRefusedReceipt(7)
   const summary = JSON.parse(receipt.summary)
   delete summary.basic_operation
-  memory.recordBoardEvidence('npc:airi', { ...receipt, summary: JSON.stringify(summary) })
-  const state = memory.currentPlan('npc:airi')
+  memory.recordBoardEvidence('npc:sgluna', { ...receipt, summary: JSON.stringify(summary) })
+  const state = memory.currentPlan('npc:sgluna')
 
   assert.equal(state.status, 'blocked')
   assert.equal(state.blocker, 'operation_failed:placing:not_placeable')
@@ -506,12 +506,12 @@ test('a failure without a correlated operation is not guessed to be a transfer f
 
 test('duplicate completed receipt records one deterministic proof but cannot advance semantic progress', () => {
   const memory = new CanonicalTaskBoardMemory()
-  memory.planByNpc.set('npc:airi', planState())
+  memory.planByNpc.set('npc:sgluna', planState())
 
-  memory.recordBoardEvidence('npc:airi', completedReceipt())
-  memory.recordBoardEvidence('npc:airi', completedReceipt())
+  memory.recordBoardEvidence('npc:sgluna', completedReceipt())
+  memory.recordBoardEvidence('npc:sgluna', completedReceipt())
 
-  const state = memory.currentPlan('npc:airi')
+  const state = memory.currentPlan('npc:sgluna')
   assert.equal(state.task_board.active_index, 2)
   assert.equal(state.task_board.completed_count, 2)
   assert.equal(state.current_step, 2)
@@ -525,14 +525,14 @@ test('verified final operation receipt does not close the semantic goal by itsel
   finalBoard.completed_count = 4
   finalBoard.steps = finalBoard.steps.map((step, index) => ({ ...step, status: index < 4 ? 'completed' : 'active' }))
   const memory = new CanonicalTaskBoardMemory()
-  memory.planByNpc.set('npc:airi', planState({
+  memory.planByNpc.set('npc:sgluna', planState({
     task_board: finalBoard,
     current_step: 4,
     last_operations: ['clear_enemy_area {"search_radius":96}'],
   }))
 
-  const nextBoard = memory.recordBoardEvidence('npc:airi', completedReceipt({ taskTypes: ['attacking'] }))
-  const stored = memory.planByNpc.get('npc:airi')
+  const nextBoard = memory.recordBoardEvidence('npc:sgluna', completedReceipt({ taskTypes: ['attacking'] }))
+  const stored = memory.planByNpc.get('npc:sgluna')
 
   assert.equal(nextBoard.active_index, 4)
   assert.equal(nextBoard.status, 'active')
@@ -542,23 +542,23 @@ test('verified final operation receipt does not close the semantic goal by itsel
 
 test('completed durable goals are retired from the current task slot', () => {
   const memory = new CanonicalTaskBoardMemory()
-  memory.planByNpc.set('npc:airi', planState({
+  memory.planByNpc.set('npc:sgluna', planState({
     status: 'completed',
     plan: [],
     current_step: 0,
     task_board: { ...board(), status: 'completed' },
   }))
 
-  assert.equal(memory.currentPlan('npc:airi'), undefined)
-  assert.equal(memory.planByNpc.has('npc:airi'), false)
-  const retiredContext = memory.planContext('npc:airi')
+  assert.equal(memory.currentPlan('npc:sgluna'), undefined)
+  assert.equal(memory.planByNpc.has('npc:sgluna'), false)
+  const retiredContext = memory.planContext('npc:sgluna')
   assert.match(retiredContext, /\[RUNTIME_COMPAT_STATE\] No active compatibility task/)
   assert.doesNotMatch(retiredContext, /\[PLANNING_STATE\]/)
 })
 
 test('whole-goal completion returns the final completed receipt but retires it before the next UI sync', () => {
   const memory = new CanonicalTaskBoardMemory()
-  const key = 'npc:airi'
+  const key = 'npc:sgluna'
   memory.planByNpc.set(key, planState())
   const completion = {
     chatMessage: 'The requested goal is verified complete.',
@@ -582,7 +582,7 @@ test('whole-goal completion returns the final completed receipt but retires it b
 
 test('a new actionable request after an old completed goal gets a fresh goal identity and objective', () => {
   const memory = new CanonicalTaskBoardMemory()
-  const key = 'npc:airi'
+  const key = 'npc:sgluna'
   memory.planByNpc.set(key, planState({
     goal_id: 'goal_old',
     objective: 'Smelt ten iron plates',
@@ -606,7 +606,7 @@ test('a new actionable request after an old completed goal gets a fresh goal ide
 
 test('an unfinished durable goal still keeps its identity when a new prompt steers it', () => {
   const memory = new CanonicalTaskBoardMemory()
-  const key = 'npc:airi'
+  const key = 'npc:sgluna'
   memory.planByNpc.set(key, planState({ goal_id: 'goal_active', objective: 'Build early automation' }))
 
   const steered = memory.recordPlan(key, { sender: 'Louis', text: 'Move the furnace east instead' }, {
@@ -622,7 +622,7 @@ test('an unfinished durable goal still keeps its identity when a new prompt stee
 
 test('terminatePlan removes one durable goal without implying completion', () => {
   const memory = new CanonicalTaskBoardMemory()
-  memory.planByNpc.set('npc:airi', {
+  memory.planByNpc.set('npc:sgluna', {
     goal_id: 'goal_1',
     status: 'active',
     plan: ['Build boiler'],
@@ -630,10 +630,10 @@ test('terminatePlan removes one durable goal without implying completion', () =>
     revision: 1,
     history: [],
   })
-  const previous = memory.terminatePlan('npc:airi')
+  const previous = memory.terminatePlan('npc:sgluna')
   assert.equal(previous.goal_id, 'goal_1')
-  assert.equal(memory.planByNpc.has('npc:airi'), false)
-  assert.equal(memory.currentPlan('npc:airi'), undefined)
+  assert.equal(memory.planByNpc.has('npc:sgluna'), false)
+  assert.equal(memory.currentPlan('npc:sgluna'), undefined)
 })
 
 
@@ -651,7 +651,7 @@ test('completed prefix stays completed when a later placement recovery blocks', 
     ],
   }
   const memory = new CanonicalTaskBoardMemory()
-  const key = 'npc:airi'
+  const key = 'npc:sgluna'
   memory.planByNpc.set(key, planState({
     task_board: placementBoard,
     plan: placementBoard.steps.map(step => step.description),
@@ -682,7 +682,7 @@ test('completed prefix stays completed when a later placement recovery blocks', 
 
 test('provider currentStep proposal alone cannot increase canonical completed_count', () => {
   const memory = new CanonicalTaskBoardMemory()
-  const key = 'npc:airi'
+  const key = 'npc:sgluna'
   const initial = board()
   initial.active_index = 1
   initial.active_step_id = 'step_2'
@@ -737,8 +737,8 @@ test('replan keeps every unverified remaining step even when proposed currentSte
 function shelfMemory() {
   const memory = new CanonicalTaskBoardMemory()
   const state = planState()
-  memory.planByNpc.set('npc:airi', state)
-  memory.ensurePlanningDraft('npc:airi', state, { now: 1000 })
+  memory.planByNpc.set('npc:sgluna', state)
+  memory.ensurePlanningDraft('npc:sgluna', state, { now: 1000 })
   return memory
 }
 
@@ -748,35 +748,35 @@ const SHELF_NODES = Object.freeze([
 
 test('a re-shelved roadmap with no verified world change since the last one is refused', () => {
   const memory = shelfMemory()
-  memory.reviseRoadmap('npc:airi', SHELF_NODES, { now: 1100 })
-  const first = memory.planningState('npc:airi').roadmap
+  memory.reviseRoadmap('npc:sgluna', SHELF_NODES, { now: 1100 })
+  const first = memory.planningState('npc:sgluna').roadmap
   assert.ok(first)
 
-  memory.reviseRoadmap('npc:airi', [
+  memory.reviseRoadmap('npc:sgluna', [
     { id: 'roadmap_rethink', intent: 'skip smelting and go straight to oil' },
   ], { now: 1200 })
 
   // Preferring a different shelf is not a reason for the shelf to move.
-  assert.equal(memory.planningState('npc:airi').roadmap.roadmap_revision_id, first.roadmap_revision_id)
-  assert.deepEqual(memory.planningState('npc:airi').roadmap.nodes.map(node => node.id), ['roadmap_early_smelting'])
+  assert.equal(memory.planningState('npc:sgluna').roadmap.roadmap_revision_id, first.roadmap_revision_id)
+  assert.deepEqual(memory.planningState('npc:sgluna').roadmap.nodes.map(node => node.id), ['roadmap_early_smelting'])
 })
 
 test('a roadmap revision standing on runtime-owned verified evidence moves the shelf', () => {
   const memory = shelfMemory()
-  memory.reviseRoadmap('npc:airi', SHELF_NODES, { now: 1100 })
-  memory.recordBoardEvidence('npc:airi', completedReceipt())
+  memory.reviseRoadmap('npc:sgluna', SHELF_NODES, { now: 1100 })
+  memory.recordBoardEvidence('npc:sgluna', completedReceipt())
 
-  memory.reviseRoadmap('npc:airi', [
+  memory.reviseRoadmap('npc:sgluna', [
     ...SHELF_NODES,
     { id: 'roadmap_red_science', intent: 'sustain red science production' },
   ], { now: 1300, reason: 'smelting proved out' })
 
-  const roadmap = memory.planningState('npc:airi').roadmap
+  const roadmap = memory.planningState('npc:sgluna').roadmap
   assert.equal(roadmap.authority, 'verified_world_change')
   assert.deepEqual(roadmap.evidence_refs, ['batch_7'])
   assert.deepEqual(roadmap.nodes.map(node => node.id), ['roadmap_early_smelting', 'roadmap_red_science'])
   // Lineage survives the revision rather than being replaced.
-  assert.equal(roadmap.derived_from_revision_id, memory.planningState('npc:airi').roadmap_history.at(-1).roadmap_revision_id)
+  assert.equal(roadmap.derived_from_revision_id, memory.planningState('npc:sgluna').roadmap_history.at(-1).roadmap_revision_id)
 })
 
 test('canonical task memory exposes no project or milestone hierarchy control API', () => {
@@ -800,7 +800,7 @@ test('a blocked continuation is frozen even when a caller requests a replan', ()
 
 test('blocked reconciliation cannot create a suffix-replacement or no-op loop', () => {
   const memory = new CanonicalTaskBoardMemory()
-  const key = 'npc:airi'
+  const key = 'npc:sgluna'
   const frozen = { ...board(), status: 'blocked', blocker: 'world_geometry_unresolved' }
   memory.planByNpc.set(key, planState({ status: 'blocked', blocker: frozen.blocker, task_board: frozen }))
   const proposal = { plan: ['Find stone', 'Use a different patch'], currentStep: 1, operations: [{ name: 'wait', args: { ticks: 1 } }] }
@@ -814,7 +814,7 @@ test('blocked reconciliation cannot create a suffix-replacement or no-op loop', 
 
 test('durable step completion contracts survive snapshot restore and only follow stable semantic step ids', () => {
   const memory = new CanonicalTaskBoardMemory()
-  memory.planByNpc.set('npc:airi', {
+  memory.planByNpc.set('npc:sgluna', {
     goal_id: 'goal_contract',
     owner: 'tester',
     objective: 'gather stone then build',
@@ -839,32 +839,32 @@ test('durable step completion contracts survive snapshot restore and only follow
     confidence: 0.95,
     requirements: [{ id: 'stone_total', kind: 'inventory_count', item_name: 'stone', minimum: 100 }],
   }
-  memory.setStepCompletionContract('npc:airi', 'step_1', contract)
+  memory.setStepCompletionContract('npc:sgluna', 'step_1', contract)
   const snapshot = memory.snapshot()
 
   const restored = new CanonicalTaskBoardMemory()
   restored.restore(snapshot)
-  assert.equal(restored.currentPlan('npc:airi').task_board.steps[0].completion_contract.requirements[0].minimum, 100)
+  assert.equal(restored.currentPlan('npc:sgluna').task_board.steps[0].completion_contract.requirements[0].minimum, 100)
 
-  const previous = restored.currentPlan('npc:airi').task_board
-  restored.reconcileTaskBoard('npc:airi', previous, {
+  const previous = restored.currentPlan('npc:sgluna').task_board
+  restored.reconcileTaskBoard('npc:sgluna', previous, {
     plan: ['Gather stone', 'Build furnace'],
     currentStep: 0,
-  }, { state: restored.currentPlan('npc:airi') }, { allowReplan: false })
-  assert.equal(restored.currentPlan('npc:airi').task_board.steps[0].completion_contract.requirements[0].minimum, 100)
+  }, { state: restored.currentPlan('npc:sgluna') }, { allowReplan: false })
+  assert.equal(restored.currentPlan('npc:sgluna').task_board.steps[0].completion_contract.requirements[0].minimum, 100)
 
-  const beforeReplan = restored.currentPlan('npc:airi').task_board
-  restored.reconcileTaskBoard('npc:airi', beforeReplan, {
+  const beforeReplan = restored.currentPlan('npc:sgluna').task_board
+  restored.reconcileTaskBoard('npc:sgluna', beforeReplan, {
     plan: ['Gather iron', 'Build furnace'],
     currentStep: 0,
-  }, { state: restored.currentPlan('npc:airi') }, { allowReplan: true })
-  const replanned = restored.currentPlan('npc:airi').task_board
+  }, { state: restored.currentPlan('npc:sgluna') }, { allowReplan: true })
+  const replanned = restored.currentPlan('npc:sgluna').task_board
   assert.notEqual(replanned.steps[0].id, 'step_1')
   assert.equal(replanned.steps[0].completion_contract, undefined)
 })
 
 test('authoritative planning reducer persists BLOCKED and explicit user choice across restart', () => {
-  const key = 'npc:airi'
+  const key = 'npc:sgluna'
   const memory = new CanonicalTaskBoardMemory()
   memory.planByNpc.set(key, planState({
     task_board: {
@@ -905,7 +905,7 @@ test('authoritative planning reducer persists BLOCKED and explicit user choice a
 })
 
 test('new goal after reducer cancellation gets fresh planning lineage under reused NPC key', () => {
-  const key = 'npc:airi'
+  const key = 'npc:sgluna'
   const memory = new CanonicalTaskBoardMemory()
   memory.planByNpc.set(key, planState({ goal_id: 'goal_old' }))
   memory.ensurePlanningDraft(key, memory.planByNpc.get(key), { now: 100 })
@@ -929,7 +929,7 @@ test('new goal after reducer cancellation gets fresh planning lineage under reus
 })
 
 test('legacy restart migration replays verified Task Board prefix before reducer projection', () => {
-  const key = 'npc:airi'
+  const key = 'npc:sgluna'
   const legacy = new CanonicalTaskBoardMemory()
   const state = planState()
   legacy.planByNpc.set(key, state)
@@ -953,7 +953,7 @@ test('legacy restart migration replays verified Task Board prefix before reducer
 })
 
 test('blocked revise choice plus explicit user prompt creates successor and preserves completed prefix in predecessor', () => {
-  const key = 'npc:airi'
+  const key = 'npc:sgluna'
   const blockedBoard = board()
   blockedBoard.status = 'blocked'
   blockedBoard.blocker = 'path_blocked'
@@ -1045,7 +1045,7 @@ function driveSliceToCompletion(memory, key) {
 }
 
 test('a plan driven to completion through the live outcome path does NOT satisfy the goal', () => {
-  const key = 'npc:airi'
+  const key = 'npc:sgluna'
   const memory = new CanonicalTaskBoardMemory()
   driveSliceToCompletion(memory, key)
 
@@ -1060,7 +1060,7 @@ test('a plan driven to completion through the live outcome path does NOT satisfy
 })
 
 test('an explicit user declaration carrying its own evidence satisfies the goal through the adapter', () => {
-  const key = 'npc:airi'
+  const key = 'npc:sgluna'
   const memory = new CanonicalTaskBoardMemory()
   driveSliceToCompletion(memory, key)
 
@@ -1080,7 +1080,7 @@ test('an explicit user declaration carrying its own evidence satisfies the goal 
 })
 
 test('a goal-satisfaction declaration without its own evidence is refused', () => {
-  const key = 'npc:airi'
+  const key = 'npc:sgluna'
   const memory = new CanonicalTaskBoardMemory()
   driveSliceToCompletion(memory, key)
 
@@ -1092,7 +1092,7 @@ test('a goal-satisfaction declaration without its own evidence is refused', () =
 })
 
 test('a committed slice is frozen: a new instruction cannot replace it', () => {
-  const key = 'npc:airi'
+  const key = 'npc:sgluna'
   const memory = new CanonicalTaskBoardMemory()
   memory.planByNpc.set(key, twoStepState())
   memory.ensurePlanningDraft(key, memory.planByNpc.get(key), { now: 100 })
@@ -1124,7 +1124,7 @@ test('a committed slice is frozen: a new instruction cannot replace it', () => {
 })
 
 test('an unadmitted draft may still be replaced outright', () => {
-  const key = 'npc:airi'
+  const key = 'npc:sgluna'
   const memory = new CanonicalTaskBoardMemory()
   memory.planByNpc.set(key, twoStepState())
   memory.ensurePlanningDraft(key, memory.planByNpc.get(key), { now: 100 })
@@ -1145,7 +1145,7 @@ test('an unadmitted draft may still be replaced outright', () => {
 })
 
 test('harness continuation and an unchanged plan never supersede the in-flight slice', () => {
-  const key = 'npc:airi'
+  const key = 'npc:sgluna'
   const memory = new CanonicalTaskBoardMemory()
   memory.planByNpc.set(key, twoStepState())
   memory.ensurePlanningDraft(key, memory.planByNpc.get(key), { now: 100 })

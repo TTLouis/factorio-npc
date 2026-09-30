@@ -6,8 +6,8 @@ import { TaskStates } from './types'
 
 beforeEach(() => {
   ;(globalThis as any).game.connected_players = []
-  ;(globalThis as any).storage.airi_actor_mode = 'player'
-  ;(globalThis as any).storage.airi_awareness_chunk = undefined
+  ;(globalThis as any).storage.sgluna_actor_mode = 'player'
+  ;(globalThis as any).storage.sgluna_awareness_chunk = undefined
   task_manager.cancel_all_tasks()
   ;(globalThis as any).storage.standalone_character_unit_number = undefined
   ;(globalThis as any).serpent = {
@@ -172,7 +172,7 @@ describe('connected player completion compatibility', () => {
     const player: Record<string, any> = {
       valid: true,
       index: 1,
-      name: 'AIRI',
+      name: 'SGLuna',
       character: {},
       position: { x: 0, y: 0 },
       surface: { find_entities_filtered: () => [] },

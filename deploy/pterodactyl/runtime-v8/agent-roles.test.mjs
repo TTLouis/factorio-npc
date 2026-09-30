@@ -19,7 +19,7 @@ function baseEnv(overrides = {}) {
 function sessionFor(config) {
   const calls = []
   const session = new Session({
-    root: '/tmp/airi-test',
+    root: '/tmp/sgluna-test',
     app: '/tmp/app',
     game: '/tmp/game',
     config,

@@ -5,7 +5,7 @@ import { NpcAgentLoop, NpcDialogueMemory } from './npc-agent-loop.mjs'
 
 function deployment() {
   return {
-    revision: 'airi-deploy-v8-npc-staging',
+    revision: 'sgluna-deploy-v8-npc-staging',
     session: '0123456789abcdef0123456789abcdef',
     mode: 'npc',
     actor_id: 18,
@@ -40,7 +40,7 @@ class RuntimeRcon {
 
   async command(text) {
     this.commands.push(text)
-    if (text.includes('remote.call("airi_deployment","status")')) return JSON.stringify(deployment())
+    if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(deployment())
     if (text.includes('remote.call("autorio_tools","get_inventory_items")')) {
       return JSON.stringify({ items: [{ name: 'iron-ore', count: 5 }, { name: 'coal', count: 5 }] })
     }
@@ -77,9 +77,9 @@ class RuntimeRcon {
       }
       return JSON.stringify({ ok: true })
     }
-    if (text.includes('AIRI_RESULT_') && text.includes('autorio_operations')) {
+    if (text.includes('SGLUNA_RESULT_') && text.includes('autorio_operations')) {
       this.mutations.push(text)
-      const marker = text.match(/AIRI_RESULT_[a-f0-9]{24}:/)?.[0]
+      const marker = text.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)?.[0]
       assert.ok(marker)
       if (this.batchFailure) {
         return `${marker}${JSON.stringify({ ok: false, result: this.batchFailure })}`
@@ -126,12 +126,12 @@ test('tools-disabled recovery cannot turn an unresolved identity into a craft mu
   assert.equal(result.blocker.code, 'unknown_recipe')
   assert.equal(rcon.mutations.length, 0)
 
-  const state = memory.currentPlan('npc:airi')
+  const state = memory.currentPlan('npc:sgluna')
   assert.equal(state.status, 'blocked')
   assert.equal(state.admission_status, 'admission_failed')
   assert.equal(state.task_board.status, 'blocked')
   assert.equal(state.task_board.active_index, 0)
-  assert.equal(memory.byNpc.get('npc:airi').recent.length, 1)
+  assert.equal(memory.byNpc.get('npc:sgluna').recent.length, 1)
 })
 
 test('gather_resource tree identity is rejected deterministically before mutation', async () => {
@@ -151,7 +151,7 @@ test('gather_resource tree identity is rejected deterministically before mutatio
   assert.equal(result.blocker.expected_type, 'resource')
   assert.equal(result.blocker.observed_type, 'tree')
   assert.equal(rcon.mutations.length, 0)
-  assert.equal(memory.currentPlan('npc:airi').status, 'blocked')
+  assert.equal(memory.currentPlan('npc:sgluna').status, 'blocked')
 })
 
 test('first batch admission failure preserves canonical plan, conversation, and Factorio error without replay', async () => {
@@ -171,7 +171,7 @@ test('first batch admission failure preserves canonical plan, conversation, and 
   )
   assert.equal(rcon.mutations.length, 1)
 
-  const state = memory.currentPlan('npc:airi')
+  const state = memory.currentPlan('npc:sgluna')
   assert.ok(state)
   assert.equal(state.status, 'blocked')
   assert.equal(state.admission_status, 'admission_failed')
@@ -180,7 +180,7 @@ test('first batch admission failure preserves canonical plan, conversation, and 
   assert.equal(state.task_board.status, 'blocked')
   assert.equal(state.task_board.completed_count, 0)
   assert.equal(state.task_board.steps[0].status, 'blocked')
-  assert.equal(memory.byNpc.get('npc:airi').recent.length, 1)
+  assert.equal(memory.byNpc.get('npc:sgluna').recent.length, 1)
   const evidence = state.task_board.evidence.find(item => item.kind === 'operation_admission_failure')
   assert.ok(evidence)
   assert.match(evidence.summary, /deterministic Factorio failure/)
@@ -200,8 +200,8 @@ test('normal successful operation admission remains waiting with an active durab
   const result = await agent.request('wait once', { sender: 'tester' })
   assert.equal(rcon.mutations.length, 1)
   assert.equal(result.goalStatus, 'active')
-  assert.equal(memory.currentPlan('npc:airi').admission_status, 'admitted')
-  assert.equal(memory.currentPlan('npc:airi').task_board.completed_count, 0)
+  assert.equal(memory.currentPlan('npc:sgluna').admission_status, 'admitted')
+  assert.equal(memory.currentPlan('npc:sgluna').task_board.completed_count, 0)
 })
 
 
@@ -279,5 +279,5 @@ test('repeated cached and irrelevant observations recover into an executable pla
   assert.deepEqual(result.operations[0].args, { item_name: 'iron-ore', unit_number: 582, max_count: 5, to_entity: true })
   assert.equal(rcon.mutations.length, 1)
   assert.match(rcon.mutations[0], /move_items_exact/)
-  assert.equal(memory.currentPlan('npc:airi').admission_status, 'admitted')
+  assert.equal(memory.currentPlan('npc:sgluna').admission_status, 'admitted')
 })

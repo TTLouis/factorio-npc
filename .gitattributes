@@ -13,4 +13,4 @@
 deploy/pterodactyl/payload-src/installer.sh text eol=lf
 
 # Generated Pterodactyl artifacts are compared deterministically across hosts.
-deploy/pterodactyl/egg-airi-factorio-server.json text eol=lf
+deploy/pterodactyl/egg-sgluna-factorio-*.json text eol=lf

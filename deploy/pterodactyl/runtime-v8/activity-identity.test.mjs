@@ -5,14 +5,14 @@ import { Session } from './supervisor.mjs'
 
 test('repeated identical live activities keep distinct stable identities', () => {
   const session = new Session({
-    root: '/tmp/airi-test',
-    app: '/tmp/airi-test/app',
-    game: '/tmp/airi-test/game',
+    root: '/tmp/sgluna-test',
+    app: '/tmp/sgluna-test/app',
+    game: '/tmp/sgluna-test/game',
     config: {},
-    save: '/tmp/airi-test/save.zip',
-    settingsFile: '/tmp/airi-test/server-settings.json',
-    modDir: '/tmp/airi-test/mods',
-    ini: '/tmp/airi-test/config.ini',
+    save: '/tmp/sgluna-test/save.zip',
+    settingsFile: '/tmp/sgluna-test/server-settings.json',
+    modDir: '/tmp/sgluna-test/mods',
+    ini: '/tmp/sgluna-test/config.ini',
     log: () => {},
   })
   session.requestTaskBoardUiSync = () => undefined
@@ -29,14 +29,14 @@ test('repeated identical live activities keep distinct stable identities', () =>
 
 test('live ids from a restarted supervisor never reuse an earlier id', () => {
   const options = {
-    root: '/tmp/airi-test',
-    app: '/tmp/airi-test/app',
-    game: '/tmp/airi-test/game',
+    root: '/tmp/sgluna-test',
+    app: '/tmp/sgluna-test/app',
+    game: '/tmp/sgluna-test/game',
     config: {},
-    save: '/tmp/airi-test/save.zip',
-    settingsFile: '/tmp/airi-test/server-settings.json',
-    modDir: '/tmp/airi-test/mods',
-    ini: '/tmp/airi-test/config.ini',
+    save: '/tmp/sgluna-test/save.zip',
+    settingsFile: '/tmp/sgluna-test/server-settings.json',
+    modDir: '/tmp/sgluna-test/mods',
+    ini: '/tmp/sgluna-test/config.ini',
     log: () => {},
   }
   const before = new Session(options)

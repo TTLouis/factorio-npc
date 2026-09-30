@@ -19,7 +19,7 @@ export async function prepareNativeNpcSource(sourceRoot, guardSource) {
   const dataPath = path.join(autorio, 'data.lua')
   const mapKnowledgePath = path.join(autorio, 'src', 'map_knowledge.ts')
   const packagePath = path.join(autorio, 'package.json')
-  const guardPath = path.join(autorio, 'src', 'airi_deployment_guard.ts')
+  const guardPath = path.join(autorio, 'src', 'sgluna_deployment_guard.ts')
 
   const [controlOriginal, tools, actorController, tsconfigText, dataLua, packageText, mapKnowledge] = await Promise.all([
     fs.readFile(controlPath, 'utf8'),
@@ -49,7 +49,7 @@ export async function prepareNativeNpcSource(sourceRoot, guardSource) {
   // hidden radar, which charted nothing with zero connected players
   // (docs/NPC_CHARACTER_ARCHITECTURE.md, "Map knowledge"). Keep the contract
   // explicit so a stale package cannot reintroduce the radar or grow the window.
-  check(!dataLua.includes('airi-npc-awareness-radar'), 'The removed NPC awareness radar prototype is present')
+  check(!dataLua.includes('sgluna-npc-awareness-radar'), 'The removed NPC awareness radar prototype is present')
   check(mapKnowledge.includes('export function is_chunk_known_visible'), 'NPC map knowledge is missing')
   check(/^export const KNOWLEDGE_CHUNK_RADIUS = 2\r?$/m.test(mapKnowledge), 'NPC map knowledge must stay bounded to a 5x5 chunk window')
 
@@ -63,11 +63,11 @@ export async function prepareNativeNpcSource(sourceRoot, guardSource) {
   catch { throw new SourcePreparationError('Invalid Autorio tsconfig.json') }
   check(tsconfig?.tstl?.luaBundle === 'control.lua' && tsconfig?.tstl?.luaBundleEntry === 'src/control.ts', 'Unexpected Autorio Lua bundle configuration')
 
-  check(guardSource.includes("revision: 'airi-deploy-v8-npc-staging'"), 'Unexpected deployment guard revision')
+  check(guardSource.includes("revision: 'sgluna-deploy-v8-npc-staging'"), 'Unexpected deployment guard revision')
   check(guardSource.includes("remote.call('autorio_actor', 'set_mode', mode)"), 'Deployment guard does not select native actor mode')
   check(guardSource.includes("actor.kind === 'standalone_character'"), 'Deployment guard does not authorize standalone NPC ownership')
 
-  const importLine = "import './airi_deployment_guard'\n"
+  const importLine = "import './sgluna_deployment_guard'\n"
   const control = controlOriginal.startsWith(importLine)
     ? controlOriginal
     : `${importLine}${controlOriginal}`
@@ -77,7 +77,7 @@ export async function prepareNativeNpcSource(sourceRoot, guardSource) {
 
   return {
     controller: 'native-actor-aware-autorio',
-    deploymentGuard: 'airi-deploy-v8-npc-staging',
+    deploymentGuard: 'sgluna-deploy-v8-npc-staging',
     actorMode: 'npc',
     mapKnowledge: 'bounded-5x5',
     patchedGameplaySemantics: false,

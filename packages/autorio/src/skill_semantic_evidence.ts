@@ -24,9 +24,9 @@ export interface SkillRevisionTrust {
 }
 
 declare const storage: {
-  airi_skill_evidence_events?: SkillEvidenceEvent[]
-  airi_skill_revision_trust?: Record<string, SkillRevisionTrust>
-  airi_skill_evidence_next_id?: number
+  sgluna_skill_evidence_events?: SkillEvidenceEvent[]
+  sgluna_skill_revision_trust?: Record<string, SkillRevisionTrust>
+  sgluna_skill_evidence_next_id?: number
 }
 
 const MAX_EVIDENCE_EVENTS = 128
@@ -51,19 +51,19 @@ function unique_strings(values: string[], limit = MAX_EVIDENCE_REFS) {
 }
 
 function next_event_id() {
-  const next = storage.airi_skill_evidence_next_id ?? 1
-  storage.airi_skill_evidence_next_id = next + 1
+  const next = storage.sgluna_skill_evidence_next_id ?? 1
+  storage.sgluna_skill_evidence_next_id = next + 1
   return `skill-evidence-${next}`
 }
 
 function events() {
-  storage.airi_skill_evidence_events ??= []
-  return storage.airi_skill_evidence_events
+  storage.sgluna_skill_evidence_events ??= []
+  return storage.sgluna_skill_evidence_events
 }
 
 function trust_records() {
-  storage.airi_skill_revision_trust ??= {}
-  return storage.airi_skill_revision_trust
+  storage.sgluna_skill_revision_trust ??= {}
+  return storage.sgluna_skill_revision_trust
 }
 
 function trust_key(skill_id: string, revision: number) {
@@ -156,7 +156,7 @@ export function record_skill_evidence(
 }
 
 export function skill_revision_trust(skill_id: string, revision: number): SkillRevisionTrust {
-  return storage.airi_skill_revision_trust?.[trust_key(skill_id, revision)] ?? {
+  return storage.sgluna_skill_revision_trust?.[trust_key(skill_id, revision)] ?? {
     skill_id,
     revision,
     state: 'active',
@@ -171,7 +171,7 @@ export function mark_skill_revision_reverified(skill_id: string, revision: numbe
 
 export function list_skill_evidence(skill_id?: string, revision?: number) {
   const result: SkillEvidenceEvent[] = []
-  for (const event of storage.airi_skill_evidence_events ?? []) {
+  for (const event of storage.sgluna_skill_evidence_events ?? []) {
     if (skill_id !== undefined && event.skill_id !== skill_id) continue
     if (revision !== undefined && event.revision !== revision) continue
     result.push(event)

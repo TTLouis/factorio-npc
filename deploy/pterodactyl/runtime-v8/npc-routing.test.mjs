@@ -14,7 +14,7 @@ const baseEnv = {
 function fixture() {
   const commands = []
   const session = new Session({
-    root: '/tmp/airi-root',
+    root: '/tmp/sgluna-root',
     app: '/tmp/app',
     game: '/tmp/game',
     config: configuration({}, baseEnv),
@@ -53,7 +53,7 @@ test('named NPC replies keep !airi as the command prefix but label the speaking 
   await session.printChat('Ready.')
 
   assert.equal(commands.length, 1)
-  assert.match(commands[0], /\[AIRI\/Aster-1\] Ready\./)
+  assert.match(commands[0], /\[SGLuna\/Aster-1\] Ready\./)
 })
 
 test('stop and status are recognised with punctuation, case and Chinese forms, but not inside a longer request', () => {

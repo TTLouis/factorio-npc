@@ -13,4 +13,4 @@ for (const name of ['autorio/control.lua', 'autorio/data.lua', 'autorio/info.jso
 }
 manifest.modSource = modSource
 fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
-fs.writeFileSync('/opt/airi/MOD_SOURCE_SHA', `${modSource}\n`)
+fs.writeFileSync('/opt/sgluna/MOD_SOURCE_SHA', `${modSource}\n`)

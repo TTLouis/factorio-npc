@@ -84,7 +84,7 @@ def run(client: Rcon, results: Path) -> None:
     # Check real early-game deterministic preflight before any mutation admission.
     # The same locked target is then submitted directly below to preserve the
     # engine-backed assertion that real Autorio admission still rejects it.
-    unknown_preflight = preflight('__airi_missing_technology__')
+    unknown_preflight = preflight('__sgluna_missing_technology__')
     trigger_preflight = preflight('steam-power')
     locked_preflight = preflight('automation')
     require(unknown_preflight['ok'] is False and unknown_preflight['code'] == 'unknown_technology', unknown_preflight)
@@ -99,10 +99,10 @@ def run(client: Rcon, results: Path) -> None:
 
     # Check real early-game rejection BEFORE setting up this isolated research
     # fixture. The success target (automation) is never directly researched.
-    submit('__airi_missing_technology__', False, 'unknown_technology')
+    submit('__sgluna_missing_technology__', False, 'unknown_technology')
     submit('steam-power', False, 'trigger_research')
     submit('automation', False, 'missing_prerequisites')
-    require(technology('__airi_missing_technology__')['found'] is False, 'unknown technology appeared')
+    require(technology('__sgluna_missing_technology__')['found'] is False, 'unknown technology appeared')
     trigger = technology('steam-power')
     require(trigger['found'] is True and trigger['trigger_type'] == 'craft-item', trigger)
     require(trigger['request_error'] == 'trigger_research', trigger)

@@ -64,7 +64,7 @@ WEST = 12
 BELT_KEYS = ['belt_1', 'belt_2', 'belt_3', 'belt_4']
 
 # A1 harness fixture layout. Tile offsets from the cleared build origin.
-# Test-only coordinates; never a reusable AIRI blueprint (roadmap section 9).
+# Test-only coordinates; never a reusable SGLuna blueprint (roadmap section 9).
 CELL = [
     {'key': 'source_chest', 'name': 'wooden-chest', 'dx': -6, 'dy': 0, 'direction': None},
     {'key': 'source_inserter', 'name': 'inserter', 'dx': -5, 'dy': 0, 'direction': WEST},

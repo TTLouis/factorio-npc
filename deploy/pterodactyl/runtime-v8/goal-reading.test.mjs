@@ -15,7 +15,7 @@ import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { Session } from './supervisor.mjs'
 import { FakeFactorio, gather, inventoryCheckpoint, planReply, recordingJev } from './task-loop-fixtures.mjs'
 
-const KEY = 'npc:airi'
+const KEY = 'npc:sgluna'
 const FINITE_ROCKET = {
   scope: 'finite',
   summary: 'Launch one rocket from this save.',
@@ -92,7 +92,7 @@ function agentWith(game, memory, provider, jev, extra = {}) {
     stateFile: null,
     traceFile: null,
     decisionTraceFile: null,
-    npcId: 'airi',
+    npcId: 'sgluna',
     goalDefinitionPolicy: 'required',
     ...extra,
   })
@@ -223,7 +223,7 @@ test('the supervisor adds the double-check line to the in-game goal message', as
   const printed = []
   const session = Object.create(Session.prototype)
   Object.assign(session, {
-    npcName: 'AIRI',
+    npcName: 'SGLuna',
     printChat: async line => { printed.push(line) },
     appendUiConversation: () => {},
     log: () => {},

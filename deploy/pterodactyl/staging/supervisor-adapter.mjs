@@ -62,9 +62,9 @@ function acknowledgement(raw, marker, context) {
 }
 
 export async function deploymentStatus(rcon, { requireAllowed = false } = {}) {
-  const raw = await rcon.command('/silent-command rcon.print(helpers.table_to_json(remote.call("airi_deployment","status")))')
-  const status = parseJson(raw, 'airi_deployment.status')
-  check(status.revision === 'airi-deploy-v8-npc-staging', 'Unexpected deployment guard revision')
+  const raw = await rcon.command('/silent-command rcon.print(helpers.table_to_json(remote.call("sgluna_deployment","status")))')
+  const status = parseJson(raw, 'sgluna_deployment.status')
+  check(status.revision === 'sgluna-deploy-v8-npc-staging', 'Unexpected deployment guard revision')
   check(status.mode === 'npc', 'Deployment guard is not in npc mode')
   if (requireAllowed) check(status.allowed === true, 'NPC deployment session is not authorized')
   else check(typeof status.allowed === 'boolean', 'Deployment guard has no authorization state')
@@ -76,11 +76,11 @@ export async function deploymentStatus(rcon, { requireAllowed = false } = {}) {
   return status
 }
 
-export async function configureNpcSession(rcon, session, marker = `AIRI_CONFIG_${crypto.randomBytes(12).toString('hex')}:`) {
+export async function configureNpcSession(rcon, session, marker = `SGLUNA_CONFIG_${crypto.randomBytes(12).toString('hex')}:`) {
   check(typeof session === 'string' && session.length >= 16 && session.length <= 256 && !/[\x00-\x1f\x7f]/.test(session), 'Invalid deployment session token')
-  check(/^AIRI_CONFIG_[a-f0-9]{24}:$/.test(marker), 'Invalid configure acknowledgement marker')
+  check(/^SGLUNA_CONFIG_[a-f0-9]{24}:$/.test(marker), 'Invalid configure acknowledgement marker')
 
-  const command = `/silent-command local ok,result=pcall(function() return remote.call("airi_deployment","configure","npc",${luaString(session)}) end); rcon.print(${luaString(marker)}..helpers.table_to_json({ok=ok,result=result}))`
+  const command = `/silent-command local ok,result=pcall(function() return remote.call("sgluna_deployment","configure","npc",${luaString(session)}) end); rcon.print(${luaString(marker)}..helpers.table_to_json({ok=ok,result=result}))`
 
   for (let bindAttempt = 1; bindAttempt <= 2; bindAttempt++) {
     let raw = await rcon.command(command)
@@ -112,12 +112,12 @@ export function validatedOperationCall(command) {
   return command
 }
 
-export async function executeAuthorizedOperation(rcon, epoch, command, marker = `AIRI_RESULT_${crypto.randomBytes(12).toString('hex')}:`) {
+export async function executeAuthorizedOperation(rcon, epoch, command, marker = `SGLUNA_RESULT_${crypto.randomBytes(12).toString('hex')}:`) {
   check(Number.isSafeInteger(epoch) && epoch > 0, 'Invalid deployment epoch')
   validatedOperationCall(command)
-  check(/^AIRI_RESULT_[a-f0-9]{24}:$/.test(marker), 'Invalid operation acknowledgement marker')
+  check(/^SGLUNA_RESULT_[a-f0-9]{24}:$/.test(marker), 'Invalid operation acknowledgement marker')
 
-  const wrapped = `/silent-command local ok,result=pcall(function() if not remote.call("airi_deployment","authorize",${epoch}) then error("stale npc actor epoch") end; return ${command} end); rcon.print(${luaString(marker)}..helpers.table_to_json({ok=ok,result=result}))`
+  const wrapped = `/silent-command local ok,result=pcall(function() if not remote.call("sgluna_deployment","authorize",${epoch}) then error("stale npc actor epoch") end; return ${command} end); rcon.print(${luaString(marker)}..helpers.table_to_json({ok=ok,result=result}))`
   const parsed = acknowledgement(await rcon.command(wrapped), marker, 'operation')
   check(parsed.data.result !== false && !(Array.isArray(parsed.data.result) && parsed.data.result[0] === false), 'Autorio rejected operation')
   return {
@@ -126,17 +126,17 @@ export async function executeAuthorizedOperation(rcon, epoch, command, marker = 
   }
 }
 
-export async function executeAuthorizedBatch(rcon, epoch, commands, marker = `AIRI_RESULT_${crypto.randomBytes(12).toString('hex')}:`) {
+export async function executeAuthorizedBatch(rcon, epoch, commands, marker = `SGLUNA_RESULT_${crypto.randomBytes(12).toString('hex')}:`) {
   check(Number.isSafeInteger(epoch) && epoch > 0, 'Invalid deployment epoch')
   check(Array.isArray(commands) && commands.length >= 1 && commands.length <= 16, 'Invalid operation batch')
   const validated = commands.map(validatedOperationCall)
-  check(/^AIRI_RESULT_[a-f0-9]{24}:$/.test(marker), 'Invalid operation acknowledgement marker')
+  check(/^SGLUNA_RESULT_[a-f0-9]{24}:$/.test(marker), 'Invalid operation acknowledgement marker')
 
   const admissions = validated.map((command, index) => {
     const slot = index + 1
     return `local ok${slot},r${slot}=pcall(function() return ${command} end); if not ok${slot} then error("autorio operation ${slot} failed: "..tostring(r${slot}),0) end; if r${slot}==false or (type(r${slot})=="table" and r${slot}[1]==false) then error("autorio rejected operation ${slot}: "..helpers.table_to_json(r${slot}),0) end; results[${slot}]=r${slot}`
   }).join('; ')
-  const wrapped = `/silent-command local ok,result=pcall(function() if not remote.call("airi_deployment","authorize",${epoch}) then error("stale npc actor epoch",0) end; local results={}; ${admissions}; return results end); rcon.print(${luaString(marker)}..helpers.table_to_json({ok=ok,result=result}))`
+  const wrapped = `/silent-command local ok,result=pcall(function() if not remote.call("sgluna_deployment","authorize",${epoch}) then error("stale npc actor epoch",0) end; local results={}; ${admissions}; return results end); rcon.print(${luaString(marker)}..helpers.table_to_json({ok=ok,result=result}))`
   const parsed = parseAcknowledgement(await rcon.command(wrapped), marker)
   check(parsed, 'Game command acknowledgement missing; operation batch will not be retried')
   if (parsed.data.ok !== true) {

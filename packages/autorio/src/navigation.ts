@@ -68,8 +68,8 @@ type NavigationTask = PlayerParametersWalkToEntity & {
 }
 
 declare const storage: {
-  airi_last_navigation_result?: NavigationResult
-  airi_follow_state?: {
+  sgluna_last_navigation_result?: NavigationResult
+  sgluna_follow_state?: {
     active?: boolean
     player_name?: string
   }
@@ -171,7 +171,7 @@ function record(actor: ControlledActor | undefined, raw_task: PlayerParametersWa
     recovery_stage: task?.recovery_stage,
     spatial_observation: task?.last_spatial_observation,
   }
-  storage.airi_last_navigation_result = result
+  storage.sgluna_last_navigation_result = result
   return result
 }
 
@@ -331,7 +331,7 @@ export function new_navigation_controller(get_actor: () => ControlledActor | und
       return [false, 'Player is on a different surface']
     }
     const task = make_task(resolved.actor, resolved.identity, player.character.name, MAX_SEARCH_RADIUS, player_name, reach_distance, 'player')
-    const follow = storage.airi_follow_state
+    const follow = storage.sgluna_follow_state
     task.persistent_follow = follow?.active === true && follow.player_name === player_name
     manager.add_task(task)
     return [true, 'Task started']
@@ -620,7 +620,7 @@ export function new_navigation_controller(get_actor: () => ControlledActor | und
 
   function persistent_follow_disabled(task: NavigationTask) {
     if (!task.persistent_follow) return false
-    const follow = storage.airi_follow_state
+    const follow = storage.sgluna_follow_state
     return follow?.active !== true || follow.player_name !== task.target_player_name
   }
 
@@ -707,7 +707,7 @@ export function new_navigation_controller(get_actor: () => ControlledActor | und
     const target = task?.target
     const destination = task ? navigation_destination(task) : undefined
     const active = manager.player_state.task_state === TaskStates.WALKING_TO_ENTITY
-    const last = storage.airi_last_navigation_result
+    const last = storage.sgluna_last_navigation_result
     const blocked = !active && last !== undefined && ['unreachable', 'path_timeout', 'stuck', 'path_busy'].indexOf(last.code) >= 0
     return {
       task_active: active,

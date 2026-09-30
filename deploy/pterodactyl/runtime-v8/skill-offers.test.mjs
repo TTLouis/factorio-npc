@@ -101,7 +101,7 @@ async function scenario({ game = new SkillFactorio(), jev, planner, intents, req
     rcon: game,
     memory: new CanonicalTaskBoardMemory(),
     systemPrompt: 'skill offers scenario',
-    npcId: 'airi',
+    npcId: 'sgluna',
     stateFile: null,
     traceFile,
     decisionTraceFile: null,
@@ -367,10 +367,10 @@ test('shelf pickup runs a complete search for the next shelf node and logs Jev\'
     : undefined)
   const loop = {
     rcon: game,
-    skillOffers: { memoryKey: 'npc:airi', cards: [], authoring: false, trigger: 'new_goal' },
+    skillOffers: { memoryKey: 'npc:sgluna', cards: [], authoring: false, trigger: 'new_goal' },
     decisionRequestSequence: 0,
     skillDecisionProvider: jev,
-    activePlanKey: () => 'npc:airi',
+    activePlanKey: () => 'npc:sgluna',
     traceEvent: async (event, data) => { traced.push({ event, data }) },
     decisionTraceEvent: async (event, data) => { decisions.push({ event, data }) },
     log: () => {},
@@ -456,7 +456,7 @@ test('shadow Jev adds no planning latency: the planner runs and the request ends
     rcon: game,
     memory: new CanonicalTaskBoardMemory(),
     systemPrompt: 'skill latency scenario',
-    npcId: 'airi',
+    npcId: 'sgluna',
     stateFile: null,
     traceFile,
     decisionTraceFile: null,
@@ -498,7 +498,7 @@ function fakeLoop(game, jev) {
     decisionRequestSequence: 0,
     skillDecisionProvider: jev,
     epoch: { epoch: 3, actor_id: 18 },
-    activePlanKey: () => 'npc:airi',
+    activePlanKey: () => 'npc:sgluna',
     decisions: [],
     traceEvent: async (event, data) => { traced.push({ event, data }) },
     async decisionTraceEvent(event, data) { this.decisions.push({ event, data }) },
@@ -517,9 +517,9 @@ test('a late Jev answer for a replaced offer is traced as aborted and never writ
     return PICK_STEAM
   })
   const loop = fakeLoop(new SkillFactorio(), jev)
-  const first = await ensureSkillOffers(loop, { memoryKey: 'npc:airi', intent: 'new_goal', text: STEAM_GOAL })
+  const first = await ensureSkillOffers(loop, { memoryKey: 'npc:sgluna', intent: 'new_goal', text: STEAM_GOAL })
   const firstJob = loop.skillChoicePending
-  const second = await ensureSkillOffers(loop, { memoryKey: 'npc:airi', intent: 'new_goal', text: `${STEAM_GOAL} now` })
+  const second = await ensureSkillOffers(loop, { memoryKey: 'npc:sgluna', intent: 'new_goal', text: `${STEAM_GOAL} now` })
   const secondJob = loop.skillChoicePending
   assert.notEqual(first, second)
   assert.equal(loop.skillOffers, second)
@@ -550,7 +550,7 @@ test('a late Jev answer after the actor changed is dropped, and a timeout is tra
     return PICK_STEAM
   })
   const loop = fakeLoop(new SkillFactorio(), jev)
-  const offer = await ensureSkillOffers(loop, { memoryKey: 'npc:airi', intent: 'new_goal', text: STEAM_GOAL })
+  const offer = await ensureSkillOffers(loop, { memoryKey: 'npc:sgluna', intent: 'new_goal', text: STEAM_GOAL })
   loop.epoch = { epoch: 4, actor_id: 19 }
   gate.resolve()
   await loop.skillChoicePending
@@ -564,7 +564,7 @@ test('a late Jev answer after the actor changed is dropped, and a timeout is tra
     return undefined
   })
   const timed = fakeLoop(new SkillFactorio(), slow)
-  await ensureSkillOffers(timed, { memoryKey: 'npc:airi', intent: 'new_goal', text: STEAM_GOAL })
+  await ensureSkillOffers(timed, { memoryKey: 'npc:sgluna', intent: 'new_goal', text: STEAM_GOAL })
   await timed.skillChoicePending
   const [timeout] = timed.traced.filter(entry => entry.event === 'skill.ranked')
   assert.equal(timeout.data.outcome, 'timeout')
@@ -585,7 +585,7 @@ test('loop cancel and stop abort an in-flight Jev skill call', async () => {
       rcon: game,
       memory: new CanonicalTaskBoardMemory(),
       systemPrompt: 'skill cancel scenario',
-      npcId: 'airi',
+      npcId: 'sgluna',
       stateFile: null,
       traceFile: null,
       decisionTraceFile: null,
@@ -638,13 +638,13 @@ test('shadow skill_choice stays out of the Jev health window, so a cancelled sha
   const answered = fakeLoop(new SkillFactorio(), recordingJev(async (_state, questions) => questions.skill_choice
     ? { overrides: { skill_choice: { choice: 'steam-power-bootstrap', confidence: 0.9 } } }
     : undefined))
-  await ensureSkillOffers(answered, { memoryKey: 'npc:airi', intent: 'new_goal', text: STEAM_GOAL })
+  await ensureSkillOffers(answered, { memoryKey: 'npc:sgluna', intent: 'new_goal', text: STEAM_GOAL })
   await answered.skillChoicePending
   const failing = fakeLoop(new SkillFactorio(), recordingJev(async (_state, questions) => {
     if (questions.skill_choice) throw new Error('Decision provider HTTP 503')
     return undefined
   }))
-  await ensureSkillOffers(failing, { memoryKey: 'npc:airi', intent: 'new_goal', text: STEAM_GOAL })
+  await ensureSkillOffers(failing, { memoryKey: 'npc:sgluna', intent: 'new_goal', text: STEAM_GOAL })
   await failing.skillChoicePending
   const events = [...answered.decisions, ...failing.decisions]
   assert.deepEqual(events.map(entry => entry.event).sort(), ['decision.fallback', 'decision.request', 'decision.request', 'decision.response'])
@@ -660,7 +660,7 @@ test('shadow skill_choice stays out of the Jev health window, so a cancelled sha
     rcon: new SkillFactorio(),
     memory: new CanonicalTaskBoardMemory(),
     systemPrompt: 'skill health scenario',
-    npcId: 'airi',
+    npcId: 'sgluna',
     stateFile: null,
     traceFile: null,
     decisionTraceFile: null,
@@ -704,7 +704,7 @@ test('two overlapping decisions pair each decision.exchange with its own decisio
     memory: new CanonicalTaskBoardMemory(),
     systemPrompt: 'decision pairing',
     provider: async () => planReply({ plan: ['unused'], operations: [] }),
-    npcId: 'airi',
+    npcId: 'sgluna',
     stateFile: null,
     traceFile: null,
     decisionTraceFile,

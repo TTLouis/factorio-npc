@@ -14,8 +14,8 @@ const store = (globalThis as any).storage as Record<string, any>
 
 describe('provider avatar selection', () => {
   beforeEach(() => {
-    delete store.airi_task_board_provider_model
-    delete store.airi_task_board_avatar_roll
+    delete store.sgluna_task_board_provider_model
+    delete store.sgluna_task_board_avatar_roll
   })
 
   it('maps the vendor naming each provider actually ships', () => {
@@ -67,7 +67,7 @@ describe('provider avatar selection', () => {
     remember_provider_model(undefined)
     expect(current_provider_model()).toBe('deepseek-chat')
     roll_provider_avatar(1, 0)
-    expect(provider_button_sprite(1, 'item/logistic-robot')).toMatch(/^airi-provider-deepseek-[1-4]$/)
+    expect(provider_button_sprite(1, 'item/logistic-robot')).toMatch(/^sgluna-provider-deepseek-[1-4]$/)
   })
 
   it('names only the UI-owned provider in the button tooltip', () => {
@@ -96,8 +96,8 @@ describe('provider avatar selection', () => {
 
 describe('avatar variant rotation', () => {
   beforeEach(() => {
-    delete store.airi_task_board_provider_model
-    delete store.airi_task_board_avatar_roll
+    delete store.sgluna_task_board_provider_model
+    delete store.sgluna_task_board_avatar_roll
   })
 
   it('stays put for a player until they rejoin', () => {
@@ -121,8 +121,8 @@ describe('avatar variant rotation', () => {
   // rolled still has to get one rather than render nothing.
   it('rolls on demand for a player who predates the roll', () => {
     remember_provider_model('claude-sonnet-4-5')
-    expect(provider_button_sprite(7, 'item/logistic-robot')).toMatch(/^airi-provider-claude-[1-4]$/)
-    expect(store.airi_task_board_avatar_roll[7]).toBeTypeOf('number')
+    expect(provider_button_sprite(7, 'item/logistic-robot')).toMatch(/^sgluna-provider-claude-[1-4]$/)
+    expect(store.sgluna_task_board_avatar_roll[7]).toBeTypeOf('number')
   })
 
   it('reaches every variant across joins, and varies between players', () => {

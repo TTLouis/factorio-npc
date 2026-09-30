@@ -19,7 +19,7 @@ function context() {
       kind: 'standalone_character',
       valid: true,
       has_character: true,
-      name: 'AIRI',
+      name: 'SGLuna',
       position: { x: 0, y: 0 },
     })),
   } as unknown as ControlledActor

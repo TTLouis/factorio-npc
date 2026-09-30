@@ -49,10 +49,10 @@ import { luaString } from './structured-policy.mjs'
 // Pause-reason prefix for temporary provider failures that resume on their own
 // (see transientProviderFailure).
 export const TRANSIENT_PAUSE_PREFIX = 'provider_transient'
-const UI_CONTROL_MARKER = '[AIRI_UI_CONTROL]'
+const UI_CONTROL_MARKER = '[SGLUNA_UI_CONTROL]'
 const GOAL_UI_REFRESH_MS = 30_000
 const UI_CONTROL_ACTIONS = new Set(['pause', 'terminate', 'follow', 'stop_follow', 'new_task', 'keep_paused', 'revise', 'cancel'])
-const UI_PROMPT_MARKER = '[AIRI_UI_PROMPT]'
+const UI_PROMPT_MARKER = '[SGLUNA_UI_PROMPT]'
 const UI_PROMPT_MAX_CHARS = 4000
 const UI_INPUT_POLL_MS = 250
 const UI_HEARTBEAT_MS = 2000
@@ -270,8 +270,6 @@ export const SGLUNA_CONFIG_DEFAULTS = {
   shutdownTimeoutMs: 60000,
 }
 
-export const AIRI_CONFIG_DEFAULTS = SGLUNA_CONFIG_DEFAULTS
-
 export function migrateConfig(raw = {}, env = process.env) {
   check(raw && typeof raw === 'object' && !Array.isArray(raw), 'sgluna-config.json must be an object')
   const actorMode = cleanString(
@@ -404,30 +402,30 @@ function uiText(value, max = 500) {
 }
 
 const UI_TASK_BLOCKER_SUMMARIES = new Map([
-  ['no_autorio_operation_for_remaining_plan', 'AIRI has more work planned, but did not start the next action.'],
-  ['operation_admission_failed', 'The game did not accept AIRI’s next action, so it did not start.'],
-  ['provider_recovery_exhausted', 'AIRI could not get a usable model response after retrying.'],
-  ['unverified_transfer_step', 'AIRI cannot continue until the transfer step is verified.'],
-  ['placement_collision', 'AIRI cannot place the planned entity at the current location.'],
+  ['no_autorio_operation_for_remaining_plan', 'SGLuna has more work planned, but did not start the next action.'],
+  ['operation_admission_failed', 'The game did not accept SGLuna’s next action, so it did not start.'],
+  ['provider_recovery_exhausted', 'SGLuna could not get a usable model response after retrying.'],
+  ['unverified_transfer_step', 'SGLuna cannot continue until the transfer step is verified.'],
+  ['placement_collision', 'SGLuna cannot place the planned entity at the current location.'],
 ])
 const UI_TASK_PAUSE_SUMMARIES = new Map([
-  ['player_requested', 'AIRI was paused by the player.'],
-  ['npc_identity_or_session_changed', 'AIRI paused because the active NPC session changed.'],
-  ['actor_replaced', 'AIRI paused because the controlled NPC was replaced.'],
-  ['follow_mode', 'AIRI paused the current task while following a player.'],
-  ['jev_needs_user_clarification', 'AIRI needs your direction before it can commit a plan. Reply with the clarification, or continue to retry.'],
-  ['jev_refinement_budget_exhausted', 'AIRI could not settle on a plan it could commit. Reply with more specific direction, or continue to retry.'],
+  ['player_requested', 'SGLuna was paused by the player.'],
+  ['npc_identity_or_session_changed', 'SGLuna paused because the active NPC session changed.'],
+  ['actor_replaced', 'SGLuna paused because the controlled NPC was replaced.'],
+  ['follow_mode', 'SGLuna paused the current task while following a player.'],
+  ['jev_needs_user_clarification', 'SGLuna needs your direction before it can commit a plan. Reply with the clarification, or continue to retry.'],
+  ['jev_refinement_budget_exhausted', 'SGLuna could not settle on a plan it could commit. Reply with more specific direction, or continue to retry.'],
 ])
 
 function requestFailurePauseSummary(raw) {
   if (raw.startsWith(`${TRANSIENT_PAUSE_PREFIX}:`)) {
-    return 'AIRI paused on a temporary model-provider problem and will resume automatically from the verified task state.'
+    return 'SGLuna paused on a temporary model-provider problem and will resume automatically from the verified task state.'
   }
   if (raw.startsWith('provider_output_budget_exhausted:')) {
-    return 'AIRI paused because the model exhausted its response budget while no Autorio work was running. Continue to retry from the verified task state.'
+    return 'SGLuna paused because the model exhausted its response budget while no Autorio work was running. Continue to retry from the verified task state.'
   }
   if (raw.startsWith('request_failed:')) {
-    return 'AIRI paused because the model request failed while no Autorio work was running. Continue to retry from the verified task state.'
+    return 'SGLuna paused because the model request failed while no Autorio work was running. Continue to retry from the verified task state.'
   }
   return ''
 }
@@ -438,37 +436,37 @@ export function formatTaskCondition(value, kind = 'blocker') {
 
   if (kind === 'pause') {
     if (raw.startsWith('provider_recovery_exhausted:')) {
-      return { raw, summary: 'AIRI could not get a usable model response after retrying.' }
+      return { raw, summary: 'SGLuna could not get a usable model response after retrying.' }
     }
     if (raw.startsWith('provider_action_omission_repair_failed:')) {
-      return { raw, summary: 'AIRI kept planning without starting the next action, so it paused. Continue to retry, or give more specific direction.' }
+      return { raw, summary: 'SGLuna kept planning without starting the next action, so it paused. Continue to retry, or give more specific direction.' }
     }
     if (raw.startsWith('provider_semantic_alignment_failed:')) {
-      return { raw, summary: 'AIRI proposed work that did not match the current step, so it paused instead of drifting. Continue to retry, or revise the task.' }
+      return { raw, summary: 'SGLuna proposed work that did not match the current step, so it paused instead of drifting. Continue to retry, or revise the task.' }
     }
     if (raw.startsWith('server_stop_')) {
-      return { raw, summary: 'AIRI paused because the server is stopping.' }
+      return { raw, summary: 'SGLuna paused because the server is stopping.' }
     }
     const requestFailure = requestFailurePauseSummary(raw)
     if (requestFailure) return { raw, summary: requestFailure }
     return {
       raw,
-      summary: UI_TASK_PAUSE_SUMMARIES.get(raw) ?? 'AIRI is paused by an internal task condition.',
+      summary: UI_TASK_PAUSE_SUMMARIES.get(raw) ?? 'SGLuna is paused by an internal task condition.',
     }
   }
 
   if (raw === 'operation_preflight_failed:stale_exact_target') {
-    return { raw, summary: 'AIRI’s saved entity target is no longer current and must be observed again.' }
+    return { raw, summary: 'SGLuna’s saved entity target is no longer current and must be observed again.' }
   }
   if (raw === 'operation_preflight_failed:bootstrap_dependency_unresolved') {
-    return { raw, summary: 'AIRI cannot start the next action until a required bootstrap dependency is available.' }
+    return { raw, summary: 'SGLuna cannot start the next action until a required bootstrap dependency is available.' }
   }
   if (raw.startsWith('operation_preflight_failed:')) {
-    return { raw, summary: 'AIRI’s next action failed a preflight check before it could start.' }
+    return { raw, summary: 'SGLuna’s next action failed a preflight check before it could start.' }
   }
   return {
     raw,
-    summary: UI_TASK_BLOCKER_SUMMARIES.get(raw) ?? 'AIRI is blocked by an internal task condition.',
+    summary: UI_TASK_BLOCKER_SUMMARIES.get(raw) ?? 'SGLuna is blocked by an internal task condition.',
   }
 }
 
@@ -1487,7 +1485,7 @@ export function taskBoardUiJson(snapshot) {
 async function stopWorldWork(session) {
   await session.ensureAuthorization()
   await session.rcon.command('/silent-command remote.call("autorio_operations","stop_follow_player")')
-  await session.rcon.command('/silent-command remote.call("airi_deployment","cancel")')
+  await session.rcon.command('/silent-command remote.call("sgluna_deployment","cancel")')
 }
 
 // A pause never unfreezes a BLOCKED plan (the reducer keeps it BLOCKED), so
@@ -1533,7 +1531,7 @@ async function discardTaskContext(session, reason, { clearDialogue = false } = {
   const agent = session.agent
   if (!agent) return undefined
   await agent.loadPersistentState?.()
-  const key = typeof agent.activePlanKey === 'function' ? agent.activePlanKey() : `npc:${session.npcId ?? 'airi'}`
+  const key = typeof agent.activePlanKey === 'function' ? agent.activePlanKey() : `npc:${session.npcId ?? 'sgluna'}`
 
   // Cancellation is deliberately first: an in-flight provider response must not
   // race the destructive context update, and no new Autorio work may be admitted
@@ -1592,7 +1590,7 @@ export async function executeUiControl(session, event) {
 
   const recordBlockedChoice = async (choice) => {
     const agent = session.agent
-    const key = typeof agent.activePlanKey === 'function' ? agent.activePlanKey() : `npc:${session.npcId ?? 'airi'}`
+    const key = typeof agent.activePlanKey === 'function' ? agent.activePlanKey() : `npc:${session.npcId ?? 'sgluna'}`
     const state = agent.memory?.recordBlockedChoice?.(key, choice, event.player_name, { now: Date.now() })
     if (!state) return undefined
     await agent.persistState?.()
@@ -1679,8 +1677,8 @@ export async function executeUiControl(session, event) {
 function parseStatus(text) {
   let value
   try { value = JSON.parse(String(text).trim()) }
-  catch { throw new DeploymentError('Invalid airi_deployment status JSON') }
-  check(value && typeof value === 'object' && !Array.isArray(value), 'Invalid airi_deployment status')
+  catch { throw new DeploymentError('Invalid sgluna_deployment status JSON') }
+  check(value && typeof value === 'object' && !Array.isArray(value), 'Invalid sgluna_deployment status')
   return value
 }
 
@@ -1786,7 +1784,7 @@ export async function pauseStrandedPlanAfterRequestError(session, message) {
 export async function recoverInterruptedAgentPlan(agent, reason, details = {}) {
   if (!agent) return { recovered: false, reason: 'agent_unavailable' }
   await agent.loadPersistentState?.()
-  const key = `npc:${agent.npcId ?? 'airi'}`
+  const key = `npc:${agent.npcId ?? 'sgluna'}`
   const state = agent.memory?.currentPlan?.(key)
   const awaitingNextSlice = agent.goalAwaitingNextSlice?.(key) === true
   if (!shouldRecoverInterruptedPlan(state, { awaitingNextSlice })) return { recovered: false, reason: 'plan_not_recoverable', state }
@@ -1832,7 +1830,7 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}) {
       memoryKey: key,
       turnId: ++agent.turnSequence,
       sender: uiText(state.owner || 'runtime-recovery', 128),
-      text: uiText(state.objective || 'Resume interrupted AIRI goal', 4000),
+      text: uiText(state.objective || 'Resume interrupted SGLuna goal', 4000),
     }
     agent.active = true
     agent.continuations = 1
@@ -1861,7 +1859,7 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}) {
     memoryKey: key,
     turnId: ++agent.turnSequence,
     sender: uiText(state.owner || 'runtime-recovery', 128),
-    text: uiText(state.objective || 'Resume interrupted AIRI goal', 4000),
+    text: uiText(state.objective || 'Resume interrupted SGLuna goal', 4000),
   }
   agent.active = true
   agent.continuations = 1
@@ -1905,8 +1903,8 @@ export class Session {
     this.lastErrorAt = 0
     this.lastStatus = null
     this.authorizationPromise = null
-    this.npcName = 'AIRI'
-    this.npcId = 'airi'
+    this.npcName = 'SGLuna'
+    this.npcId = 'sgluna'
     this.activityEpoch = Date.now().toString(36)
     this.conversationGeneration = 0
     this.conversationSequence = 0
@@ -1951,7 +1949,7 @@ export class Session {
     const message = {
       id: `message_${this.activityEpoch}_${this.conversationGeneration}_${++this.conversationSequence}`,
       role,
-      sender: uiText(sender || (role === 'assistant' ? 'AIRI' : 'Player'), 128),
+      sender: uiText(sender || (role === 'assistant' ? 'SGLuna' : 'Player'), 128),
       text,
     }
     this.agentLive.conversation = [...this.agentLive.conversation, message].slice(-UI_CONVERSATION_LIMIT)
@@ -1980,7 +1978,7 @@ export class Session {
         restored.push({
           id: uiText(entry?.id, 120) || `restored_${index + 1}`,
           role,
-          sender: uiText(entry?.sender, 128) || (role === 'assistant' ? (this.npcName || 'AIRI') : 'Player'),
+          sender: uiText(entry?.sender, 128) || (role === 'assistant' ? (this.npcName || 'SGLuna') : 'Player'),
           text,
         })
       }
@@ -2002,7 +2000,7 @@ export class Session {
     if (Array.isArray(this.agentLive.conversation) && this.agentLive.conversation.length > 0) return false
     const before = Array.isArray(this.agentLive.conversation) ? this.agentLive.conversation.length : 0
     this.appendUiConversation('user', state.owner || 'Player', state.objective)
-    this.appendUiConversation('assistant', this.npcName || 'AIRI', state.last_chat_message)
+    this.appendUiConversation('assistant', this.npcName || 'SGLuna', state.last_chat_message)
     return this.agentLive.conversation.length > before
   }
 
@@ -2026,7 +2024,7 @@ export class Session {
     }
     if (event === 'request.received') this.appendUiConversation('user', data?.sender, data?.text)
     if ((event === 'plan.accepted' || event === 'request.completed') && data?.chat_message) {
-      this.appendUiConversation('assistant', this.npcName || 'AIRI', data.chat_message)
+      this.appendUiConversation('assistant', this.npcName || 'SGLuna', data.chat_message)
     }
     const fallback = {
       request_id: this.agent?.traceRequest?.id,
@@ -2061,7 +2059,7 @@ export class Session {
   announceAcknowledgement(data) {
     const line = uiText(data?.chat_message, 400)
     if (!line) return
-    this.appendUiConversation?.('assistant', this.npcName || 'AIRI', line)
+    this.appendUiConversation?.('assistant', this.npcName || 'SGLuna', line)
     this.printChat(line).catch(error => this.log(`Unable to acknowledge the request: ${error instanceof Error ? error.message : String(error)}`))
   }
 
@@ -2149,7 +2147,7 @@ export class Session {
     const env = { ...process.env }
     for (const key of Object.keys(env)) if (/OPENAI|API_KEY|TOKEN|PASSWORD|RCON/i.test(key)) delete env[key]
     env.HOME = this.root
-    env.TMPDIR = path.join(this.root, '.airi', 'tmp')
+    env.TMPDIR = path.join(this.root, '.sgluna', 'tmp')
     return env
   }
 
@@ -2167,7 +2165,7 @@ export class Session {
 
   async rawStatus() {
     check(this.rcon, 'RCON is not connected')
-    return parseStatus(await this.rcon.command('/silent-command rcon.print(helpers.table_to_json(remote.call("airi_deployment","status")))'))
+    return parseStatus(await this.rcon.command('/silent-command rcon.print(helpers.table_to_json(remote.call("sgluna_deployment","status")))'))
   }
 
   async reconcileNpcAfterLoad() {
@@ -2194,7 +2192,7 @@ export class Session {
     if (this.authorizationPromise) return this.authorizationPromise
     this.authorizationPromise = (async () => {
       const current = await this.rawStatus()
-      const stable = current.revision === 'airi-deploy-v8-npc-staging'
+      const stable = current.revision === 'sgluna-deploy-v8-npc-staging'
         && current.session === this.session
         && current.mode === 'npc'
         && current.allowed === true
@@ -2300,7 +2298,7 @@ export class Session {
     if (lines.length === 0) return
     const readingNote = formatGoalReadingNote(data?.jev_goal_reading)
     if (readingNote) lines.push(readingNote)
-    this.appendUiConversation?.('assistant', this.npcName || 'AIRI', lines.join('\n').replace(/\[\/?color[^\]]*\]/g, ''))
+    this.appendUiConversation?.('assistant', this.npcName || 'SGLuna', lines.join('\n').replace(/\[\/?color[^\]]*\]/g, ''))
     ;(async () => {
       for (const line of lines) await this.printChat(line)
     })().catch(error => this.log(`Unable to announce goal understanding: ${error instanceof Error ? error.message : String(error)}`))
@@ -2360,7 +2358,7 @@ export class Session {
 
   async recoverInterruptedPlan(reason, details = {}) {
     if (!this.agent || !this.recoverablePlan()) return null
-    this.log(`Recovering interrupted AIRI plan after ${reason}; mutable world state will be re-observed before resuming`)
+    this.log(`Recovering interrupted SGLuna plan after ${reason}; mutable world state will be re-observed before resuming`)
     try {
       const recovery = await recoverInterruptedAgentPlan(this.agent, reason, details)
       if (!recovery.recovered) return null
@@ -2608,7 +2606,7 @@ export class Session {
           {
             signal: context.signal,
             reserve: () => reserveBudget(
-              path.join(this.root, '.airi', 'decision-provider-budget.json'),
+              path.join(this.root, '.sgluna', 'decision-provider-budget.json'),
               this.config.decisionProvider.maxRequestsPerHour,
             ),
           },
@@ -2619,7 +2617,7 @@ export class Session {
       systemPrompt: `${prompt}\n\n${RUNTIME_RELIABILITY_GUIDANCE}`,
       npcId: this.npcId,
       memory: new CanonicalTaskBoardMemory(),
-      stateFile: path.join(this.root, '.airi', 'npc-state.json'),
+      stateFile: path.join(this.root, '.sgluna', 'npc-state.json'),
       provider: (messages, context) => this.roleProvider(messages, context),
       interactionProvider: (messages, context) => this.roleProvider(messages, context),
       // Production contract: every goal starts from a game-checkable goal
@@ -2630,7 +2628,7 @@ export class Session {
       operationProjectionDecisionProvider: jevDecisionProvider,
       skillDecisionProvider: jevDecisionProvider,
       reserve: async context => reserveBudget(
-        path.join(this.root, '.airi', 'provider-budget.json'),
+        path.join(this.root, '.sgluna', 'provider-budget.json'),
         this.config.budget,
         Date.now(),
         { reservedSlots: 1, emergency: context?.recoveryKind === 'output_budget_exhaustion' },
@@ -2713,7 +2711,7 @@ export class Session {
             catch (traceError) { this.log(`Unable to trace request-failed chat line: ${traceError instanceof Error ? traceError.message : traceError}`) }
           }
         }
-        catch (printError) { this.log(`Unable to report AIRI error in chat: ${printError instanceof Error ? printError.message : printError}`) }
+        catch (printError) { this.log(`Unable to report SGLuna error in chat: ${printError instanceof Error ? printError.message : printError}`) }
       }
     })
     return this.eventQueue
@@ -2722,7 +2720,7 @@ export class Session {
   async printChat(message) {
     if (!message || !this.rcon || this.stopping) return
     const clean = String(message).replace(/[\r\n]+/g, ' ').slice(0, 2000)
-    const label = this.npcName && this.npcName !== 'AIRI' ? `[AIRI/${this.npcName}]` : '[AIRI]'
+    const label = this.npcName && this.npcName !== 'SGLuna' ? `[SGLuna/${this.npcName}]` : '[SGLuna]'
     await this.rcon.command(`/silent-command game.print(${luaString(`${label} ${clean}`)})`)
   }
 
@@ -2775,7 +2773,7 @@ export class Session {
             : undefined
           if (state) await this.syncTaskBoardUi(state)
           await this.ensureAuthorization()
-          await this.rcon.command('/silent-command remote.call("airi_deployment","cancel")')
+          await this.rcon.command('/silent-command remote.call("sgluna_deployment","cancel")')
           await this.printChat(pauseChatLine(state, { cancelledWork: true }))
           return
         }
@@ -2786,7 +2784,7 @@ export class Session {
         // conversation before re-appending the message.
         this.appendUiConversation('user', sender, text)
         const result = await this.agent.request(text, { sender })
-        if (result?.chatMessage) this.appendUiConversation('assistant', this.npcName || 'AIRI', result.chatMessage)
+        if (result?.chatMessage) this.appendUiConversation('assistant', this.npcName || 'SGLuna', result.chatMessage)
         const finalized = await finalizeCompletedTaskBoundary(this, result)
         if (!finalized) await this.syncTaskBoardUi()
         if (result?.chatMessage) await this.printChat(result.chatMessage)
@@ -2904,7 +2902,7 @@ export class Session {
         }
         catch (error) {
           clean = false
-          this.log(`Unable to persist active AIRI plan before shutdown: ${error instanceof Error ? error.message : error}`)
+          this.log(`Unable to persist active SGLuna plan before shutdown: ${error instanceof Error ? error.message : error}`)
         }
       }
       if (this.rcon && this.gameChild?.alive()) {
@@ -2944,7 +2942,7 @@ export class Session {
 
 export async function verifyManifest(app) {
   const manifest = await readJson(path.join(app, 'manifest.json'))
-  check(manifest?.revision === 'airi-pterodactyl-v8' && manifest.files && typeof manifest.files === 'object', 'Missing v8 release manifest')
+  check(manifest?.revision === 'sgluna-pterodactyl-v8' && manifest.files && typeof manifest.files === 'object', 'Missing v8 release manifest')
   for (const [name, expected] of Object.entries(manifest.files)) {
     check(typeof expected === 'string' && /^[a-f0-9]{64}$/.test(expected), `Invalid manifest digest: ${name}`)
     const filename = path.join(app, name)
@@ -2959,13 +2957,13 @@ async function main() {
   const root = path.resolve(process.env.CONTAINER_ROOT || '/home/container')
   const app = installedAppRoot()
   const manifest = await verifyManifest(app)
-  await directory(path.join(root, '.airi'))
-  await directory(path.join(root, '.airi', 'tmp'))
+  await directory(path.join(root, '.sgluna'))
+  await directory(path.join(root, '.sgluna', 'tmp'))
   const migratedConfig = await migrateCanonicalConfig(root)
   const config = configuration(migratedConfig.config)
   const game = path.join(app, 'factorio')
   await regularFile(path.join(game, 'bin', 'x64', 'factorio'))
-  const work = await fsp.mkdtemp(path.join(root, '.airi', 'run-'))
+  const work = await fsp.mkdtemp(path.join(root, '.sgluna', 'run-'))
   let session
   let requestedStop = false
   const log = message => console.log(`[${new Date().toISOString()}] [SGLuna] ${message}`)
@@ -2975,7 +2973,7 @@ async function main() {
   for (const message of factorioVisibilityDiagnostics(config.factorio, config.chatPlayers)) log(message)
   log(`Client mod download: ${path.join(root, 'client-mods', 'autorio_0.1.0.zip')}`)
   log(`User Factorio mod directory: ${path.join(root, 'mods')}`)
-  log(`Managed runtime mod directory: ${path.join(root, '.airi', 'run-*', 'mods')} (internal; do not edit)`)
+  log(`Managed runtime mod directory: ${path.join(root, '.sgluna', 'run-*', 'mods')} (internal; do not edit)`)
   log(`Operator help: ${path.join(root, 'README-SGLUNA.txt')}`)
   log(jevStatusLine(config))
   log(aiApiMethodLine(config))

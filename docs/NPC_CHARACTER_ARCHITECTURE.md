@@ -1,16 +1,16 @@
-# AIRI Factorio — Autonomous Character Architecture
+# SGLuna Factorio — Autonomous Character Architecture
 
 This note records the body/actor decision for the NPC transition on `feat/npc-transition-work`.
 
 ## Decision
 
-AIRI should be represented in-world as a standalone Factorio `character` entity controlled by the mod, not as:
+SGLuna should be represented in-world as a standalone Factorio `character` entity controlled by the mod, not as:
 
 - a connected human `LuaPlayer`;
 - a generic Factorio `unit`; or
 - a custom fake actor that reimplements character mechanics outside the engine.
 
-This keeps AIRI visually and mechanically consistent with another engineer living in the Factorio world while still allowing zero-player operation and later multi-agent/swarm behavior.
+This keeps SGLuna visually and mechanically consistent with another engineer living in the Factorio world while still allowing zero-player operation and later multi-agent/swarm behavior.
 
 Official API references:
 
@@ -36,13 +36,13 @@ Using a `unit` would make movement simpler but would force this project to recre
 - character-specific speed modifiers;
 - normal character death/corpse behavior.
 
-For AIRI, preserving those mechanics is more important than gaining `LuaCommandable`.
+For SGLuna, preserving those mechanics is more important than gaining `LuaCommandable`.
 
 ## Why a standalone character still works
 
 Factorio exposes many character/player operations through `LuaControl`, which is shared by `LuaPlayer` and character `LuaEntity` objects. The official documentation explicitly notes that player-related `LuaControl` functions accessed through `LuaEntity` work when that entity is a `character`.
 
-That gives the standalone AIRI character real engine-backed mechanics without requiring a connected player.
+That gives the standalone SGLuna character real engine-backed mechanics without requiring a connected player.
 
 Conceptually:
 
@@ -55,14 +55,14 @@ Conceptually:
                                    |
                                character
                                    |
-                                AIRI NPC
+                                SGLuna NPC
 ```
 
 The existing `ControlledActor` / `StandaloneCharacterActor` work on this branch is therefore the correct foundation.
 
 ## Inventory must stay physical
 
-AIRI should use the character's actual inventory through the shared control/inventory API.
+SGLuna should use the character's actual inventory through the shared control/inventory API.
 
 This means each future agent has its own real inventory and resource scarcity remains meaningful.
 
@@ -90,7 +90,7 @@ This becomes important once the swarm/message-board work begins.
 The desired flow is:
 
 ```text
-AIRI inventory
+SGLuna inventory
     |
     v
 begin_crafting(recipe, count)
@@ -99,7 +99,7 @@ begin_crafting(recipe, count)
 Factorio crafting queue
     |
     v
-output returns to AIRI inventory
+output returns to SGLuna inventory
 ```
 
 Do not replace this with:
@@ -130,9 +130,9 @@ A standalone character does not expose every `LuaPlayer` convenience method, so 
 
 A correct build operation should:
 
-1. resolve the AIRI character;
+1. resolve the SGLuna character;
 2. verify the entity/item exists;
-3. verify AIRI owns the required item;
+3. verify SGLuna owns the required item;
 4. verify destination/reach constraints;
 5. verify placement is valid;
 6. create the entity with the correct force and orientation;
@@ -224,7 +224,7 @@ The long-term API should remain semantic and actor-oriented.
 Conceptually:
 
 ```text
-AiriCharacterController
+SglunaCharacterController
 |- walk_to(...)
 |- mine(...)
 |- craft(...)
@@ -245,7 +245,7 @@ The external agent/harness chooses goals and actions. The Factorio mod owns dete
 Once single-character reliability is proven, multiple autonomous characters can be represented independently:
 
 ```text
-                     AIRI coordinator
+                     SGLuna coordinator
                            |
             +--------------+--------------+
             |              |              |
@@ -295,10 +295,10 @@ This is preferable to giving all agents one shared magical inventory.
 
 Unless a real engine limitation forces a fallback:
 
-- do not bind AIRI back to `game.connected_players[0]`;
-- do not require a connected human player for AIRI to exist;
+- do not bind SGLuna back to `game.connected_players[0]`;
+- do not require a connected human player for SGLuna to exist;
 - do not create fake player accounts just to get inventory/crafting behavior;
-- do not replace AIRI with a generic `unit` solely for easier movement;
+- do not replace SGLuna with a generic `unit` solely for easier movement;
 - do not simulate character inventory outside Factorio;
 - do not instant-craft items;
 - do not make the LLM issue tick-level movement commands;
@@ -333,6 +333,6 @@ Only after that foundation is reliable should the project enable multi-character
 
 ## Architectural rule
 
-**AIRI is an autonomous Factorio character first, and an AI agent second.**
+**SGLuna is an autonomous Factorio character first, and an AI agent second.**
 
 The agent may reason at a high level, but actions should continue to respect the physical mechanics, inventory, crafting, movement, reach, and persistence of the in-world character wherever Factorio exposes those mechanics natively.

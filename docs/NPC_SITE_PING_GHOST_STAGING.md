@@ -1,4 +1,4 @@
-# AIRI Factorio — Large-Build Site Proposal, Ping Relocation, and Ghost Staging
+# SGLuna Factorio — Large-Build Site Proposal, Ping Relocation, and Ghost Staging
 
 **Status:** Planned requirements. Not implemented. No engine validation is claimed.
 
@@ -6,7 +6,7 @@
 
 Large production builds should not immediately place real buildings or immediately spray ghosts across the factory.
 
-For sufficiently large projects, AIRI should:
+For sufficiently large projects, SGLuna should:
 
 1. calculate the production requirements;
 2. identify a suitable build site;
@@ -205,12 +205,12 @@ candidate site selected
     ↓
 site layout + routes evaluated
     ↓
-AIRI creates proposal ping / preview
+SGLuna creates proposal ping / preview
     ↓
 AWAITING_SITE_CONFIRMATION
 ```
 
-AIRI should show a compact summary such as:
+SGLuna should show a compact summary such as:
 
 ```text
 Proposed green-circuit block
@@ -270,7 +270,7 @@ Suggested initial behavior:
 - prefer candidates reasonably close to the player's ping;
 - preserve the same production requirements unless the new location makes them infeasible.
 
-This lets AIRI avoid nearby belts, cliffs, water, machines, and protected areas while respecting the player's chosen region.
+This lets SGLuna avoid nearby belts, cliffs, water, machines, and protected areas while respecting the player's chosen region.
 
 The site proposal should report how far the selected anchor moved from the ping.
 

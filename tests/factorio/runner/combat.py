@@ -40,7 +40,7 @@ def assert_kill(before: dict, after: dict, combat: dict, actor_id: int) -> None:
     # This fixture supplies 20 magazines and never changes the selected slot.
     # If the selected pistol/ammo telemetry disappears or switches while the
     # weak target dies, the acceptance evidence is incomplete and must fail
-    # closed rather than inferring that AIRI fired the expected weapon.
+    # closed rather than inferring that SGLuna fired the expected weapon.
     require(after['selected_gun_index'] == before['selected_gun_index'], after)
     require(after['selected_gun'] == before['selected_gun'], after)
     require(after['selected_ammo'] == before['selected_ammo'], after)
@@ -56,7 +56,7 @@ def assert_kill(before: dict, after: dict, combat: dict, actor_id: int) -> None:
         )
     )
     require(consumed_ammo, 'real character weapon must consume magazine rounds or magazine items')
-    require(after['actor_health'] > 0, 'AIRI died during the combat fixture')
+    require(after['actor_health'] > 0, 'SGLuna died during the combat fixture')
     require(after['runtime']['tick'] > before['runtime']['tick'], 'combat consumed no simulation time')
     result = combat.get('last_result') or {}
     require(result.get('completed') is True and result.get('code') == 'target_destroyed', combat)
@@ -226,7 +226,7 @@ def run(client: Rcon, results: Path) -> None:
     require(cancel_target['alive'] is True and cancel_target['health'] == cancel_fixture['health'], cancel_target)
 
     # Real clear-area lifecycle: two nests share one clear_enemy_area operation.
-    # AIRI must keep useful temporary support while any clear-area hostile remains,
+    # SGLuna must keep useful temporary support while any clear-area hostile remains,
     # then recover every surviving owned turret after both nests are gone. Real
     # cleanup mining must still be interruptible by a new pursuer and resume only
     # after a fresh safety window. A pre-existing player turret must never be owned.

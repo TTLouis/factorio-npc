@@ -196,8 +196,8 @@ describe('Autorio task batch receipts', () => {
       reason: 'reload-test',
     })
     expect((globalThis as any).storage).toMatchObject({
-      airi_task_batch_sequence: 2,
-      airi_task_batch_generation: 2,
+      sgluna_task_batch_sequence: 2,
+      sgluna_task_batch_generation: 2,
     })
   })
 

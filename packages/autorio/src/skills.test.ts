@@ -350,7 +350,7 @@ describe('skill lookup: tags, scoring, preconditions and cards (plan 2.8)', () =
 
   it('upgrades an unedited curated copy to a newer curated revision and keeps edited or learned copies', () => {
     ensure_basic_skill_definitions()
-    const registry = (globalThis as any).storage.airi_skill_definitions
+    const registry = (globalThis as any).storage.sgluna_skill_definitions
     registry['steam-power-bootstrap'] = { ...registry['steam-power-bootstrap'], revision: 1, goal_tags: undefined }
     const edited = edited_skill_revision({ ...registry['burner-coal-loop'], revision: 0 }, { name: 'House Coal Loop', summary: 'Ours.', status: 'candidate' }, 'owner', 906)
     expect(edited.revision).toBe(1)
@@ -533,7 +533,7 @@ describe('learned skill record and export', () => {
     create_skill_candidate(candidate())
     const messages: string[] = []
     const player = { print: (message: string) => messages.push(message) } as any
-    expect(handle_skill_export_click(player, 'airi_skill_export__automated-transport-belt-line')).toBe(true)
+    expect(handle_skill_export_click(player, 'sgluna_skill_export__automated-transport-belt-line')).toBe(true)
     expect(writes.map(write => write.filename)).toEqual([
       'sgluna-skills/automated-transport-belt-line/r1/skill.json',
       'sgluna-skills/automated-transport-belt-line/r1/SKILL.md',

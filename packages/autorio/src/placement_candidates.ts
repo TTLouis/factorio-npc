@@ -49,26 +49,26 @@ interface PlacementCandidateSet {
 }
 
 declare const storage: {
-  airi_placement_candidate_sets?: Record<string, PlacementCandidateSet>
-  airi_placement_candidate_set_order?: string[]
-  airi_placement_candidate_next_id?: number
+  sgluna_placement_candidate_sets?: Record<string, PlacementCandidateSet>
+  sgluna_placement_candidate_set_order?: string[]
+  sgluna_placement_candidate_next_id?: number
 }
 
 function candidate_sets() {
-  storage.airi_placement_candidate_sets ??= {}
-  storage.airi_placement_candidate_set_order ??= []
-  return storage.airi_placement_candidate_sets
+  storage.sgluna_placement_candidate_sets ??= {}
+  storage.sgluna_placement_candidate_set_order ??= []
+  return storage.sgluna_placement_candidate_sets
 }
 
 function next_candidate_set_id() {
-  const next = storage.airi_placement_candidate_next_id ?? 1
-  storage.airi_placement_candidate_next_id = next + 1
+  const next = storage.sgluna_placement_candidate_next_id ?? 1
+  storage.sgluna_placement_candidate_next_id = next + 1
   return `placement-${next}`
 }
 
 function store_candidate_set(value: PlacementCandidateSet) {
   const sets = candidate_sets()
-  const order = storage.airi_placement_candidate_set_order as string[]
+  const order = storage.sgluna_placement_candidate_set_order as string[]
   sets[value.id] = value
   order.push(value.id)
   while (order.length > MAX_CANDIDATE_SETS) {

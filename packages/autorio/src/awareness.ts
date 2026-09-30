@@ -13,11 +13,11 @@ interface AwarenessChunkState {
 }
 
 declare const storage: {
-  airi_awareness_chunk?: AwarenessChunkState
+  sgluna_awareness_chunk?: AwarenessChunkState
   // Saves from before the map-knowledge change hold the companion radar.
-  airi_awareness_radar?: LuaEntity
-  airi_map_sync_players?: number
-  airi_map_sync_pulled_tick?: number
+  sgluna_awareness_radar?: LuaEntity
+  sgluna_map_sync_players?: number
+  sgluna_map_sync_pulled_tick?: number
 }
 
 function chunk_coordinate(value: number) {
@@ -25,10 +25,10 @@ function chunk_coordinate(value: number) {
 }
 
 function retire_legacy_radar() {
-  const radar = storage.airi_awareness_radar
+  const radar = storage.sgluna_awareness_radar
   if (radar === undefined) return
   if (radar.valid) radar.destroy()
-  storage.airi_awareness_radar = undefined
+  storage.sgluna_awareness_radar = undefined
 }
 
 // Sync the NPC's map knowledge with the force chart players see. Nothing is
@@ -36,14 +36,14 @@ function retire_legacy_radar() {
 function sync_with_players(actor: ControlledActor) {
   if (game.tick % SYNC_CHECK_INTERVAL === 0) {
     const players = actor.force.connected_players.length
-    const previous = storage.airi_map_sync_players ?? 0
-    storage.airi_map_sync_players = players
+    const previous = storage.sgluna_map_sync_players ?? 0
+    storage.sgluna_map_sync_players = players
     if (players > 0) {
       if (players > previous) queue_full_push()
-      const pulled = storage.airi_map_sync_pulled_tick
+      const pulled = storage.sgluna_map_sync_pulled_tick
       if (players > previous || pulled === undefined || game.tick - pulled >= PULL_INTERVAL) {
         pull_engine_chart(actor.force, actor.surface)
-        storage.airi_map_sync_pulled_tick = game.tick
+        storage.sgluna_map_sync_pulled_tick = game.tick
       }
     }
   }
@@ -55,7 +55,7 @@ export function new_awareness_controller() {
     retire_legacy_radar()
     const identity = actor.status_snapshot()
     if (identity.kind !== 'standalone_character') {
-      storage.airi_awareness_chunk = undefined
+      storage.sgluna_awareness_chunk = undefined
       return false
     }
 
@@ -63,7 +63,7 @@ export function new_awareness_controller() {
 
     const chunk_x = chunk_coordinate(actor.position.x)
     const chunk_y = chunk_coordinate(actor.position.y)
-    const previous = storage.airi_awareness_chunk
+    const previous = storage.sgluna_awareness_chunk
     const changed_chunk = !previous
       || previous.surface_index !== actor.surface.index
       || previous.chunk_x !== chunk_x
@@ -76,7 +76,7 @@ export function new_awareness_controller() {
     actor.surface.request_to_generate_chunks(actor.position, KNOWLEDGE_CHUNK_RADIUS)
     observe_window(actor.force, actor.surface, chunk_x, chunk_y)
 
-    storage.airi_awareness_chunk = {
+    storage.sgluna_awareness_chunk = {
       surface_index: actor.surface.index,
       chunk_x,
       chunk_y,

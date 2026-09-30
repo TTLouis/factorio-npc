@@ -111,12 +111,12 @@ export interface SkillVerificationRun {
 }
 
 declare const storage: {
-  airi_skill_instance_templates?: Record<string, SkillInstanceTemplate>
-  airi_skill_verification_runs?: Record<string, SkillVerificationRun>
-  airi_skill_verification_run_order?: string[]
-  airi_skill_verification_next_id?: number
-  airi_skill_verification_active_run_id?: string
-  airi_learning_verification_queue?: LearningVerificationQueueItem[]
+  sgluna_skill_instance_templates?: Record<string, SkillInstanceTemplate>
+  sgluna_skill_verification_runs?: Record<string, SkillVerificationRun>
+  sgluna_skill_verification_run_order?: string[]
+  sgluna_skill_verification_next_id?: number
+  sgluna_skill_verification_active_run_id?: string
+  sgluna_learning_verification_queue?: LearningVerificationQueueItem[]
 }
 
 const MAX_TEMPLATE_ENTITIES = 16
@@ -132,19 +132,19 @@ const POSITION_EPSILON = 0.2
 let runtime_registered = false
 
 function templates() {
-  if (storage.airi_skill_instance_templates === undefined) storage.airi_skill_instance_templates = {}
-  return storage.airi_skill_instance_templates
+  if (storage.sgluna_skill_instance_templates === undefined) storage.sgluna_skill_instance_templates = {}
+  return storage.sgluna_skill_instance_templates
 }
 
 function runs() {
-  if (storage.airi_skill_verification_runs === undefined) storage.airi_skill_verification_runs = {}
-  if (storage.airi_skill_verification_run_order === undefined) storage.airi_skill_verification_run_order = []
-  return storage.airi_skill_verification_runs
+  if (storage.sgluna_skill_verification_runs === undefined) storage.sgluna_skill_verification_runs = {}
+  if (storage.sgluna_skill_verification_run_order === undefined) storage.sgluna_skill_verification_run_order = []
+  return storage.sgluna_skill_verification_runs
 }
 
 function queue_records() {
-  if (storage.airi_learning_verification_queue === undefined) storage.airi_learning_verification_queue = []
-  return storage.airi_learning_verification_queue
+  if (storage.sgluna_learning_verification_queue === undefined) storage.sgluna_learning_verification_queue = []
+  return storage.sgluna_learning_verification_queue
 }
 
 function unique_strings(values: string[], limit = MAX_EVIDENCE_REFS) {
@@ -158,19 +158,19 @@ function unique_strings(values: string[], limit = MAX_EVIDENCE_REFS) {
 }
 
 function next_run_id() {
-  const next = storage.airi_skill_verification_next_id ?? 1
-  storage.airi_skill_verification_next_id = next + 1
+  const next = storage.sgluna_skill_verification_next_id ?? 1
+  storage.sgluna_skill_verification_next_id = next + 1
   return `skill-verification-${next}`
 }
 
 function store_run(run: SkillVerificationRun) {
   const registry = runs()
-  const order = storage.airi_skill_verification_run_order as string[]
+  const order = storage.sgluna_skill_verification_run_order as string[]
   registry[run.id] = run
   if (!order.includes(run.id)) order.push(run.id)
   while (order.length > MAX_RUN_HISTORY) {
     const removed = order.shift()
-    if (removed !== undefined && removed !== storage.airi_skill_verification_active_run_id) delete registry[removed]
+    if (removed !== undefined && removed !== storage.sgluna_skill_verification_active_run_id) delete registry[removed]
   }
   return run
 }
@@ -191,8 +191,8 @@ function update_run(run: SkillVerificationRun, patch: Partial<SkillVerificationR
 }
 
 function active_run() {
-  const id = storage.airi_skill_verification_active_run_id
-  return id !== undefined ? (storage.airi_skill_verification_runs ?? {})[id] : undefined
+  const id = storage.sgluna_skill_verification_active_run_id
+  return id !== undefined ? (storage.sgluna_skill_verification_runs ?? {})[id] : undefined
 }
 
 function queue_item(opportunity_id: string) {
@@ -222,7 +222,7 @@ function block_run(run: SkillVerificationRun, reason: string, evidence_refs: str
     evidence_refs: refs,
     reason: `Verification blocked: ${reason}`,
   })
-  storage.airi_skill_verification_active_run_id = undefined
+  storage.sgluna_skill_verification_active_run_id = undefined
   return next
 }
 
@@ -236,7 +236,7 @@ export function fail_skill_verification_run(run: SkillVerificationRun, failure_k
     evidence_refs: refs,
     reason: `Verification ${failure_kind} failure: ${reason}`,
   })
-  storage.airi_skill_verification_active_run_id = undefined
+  storage.sgluna_skill_verification_active_run_id = undefined
   return next
 }
 
@@ -316,7 +316,7 @@ export function capture_skill_instance_template_from_block(skill_id: string, ski
 }
 
 export function get_skill_instance_template(skill_id: string) {
-  return (storage.airi_skill_instance_templates ?? {})[skill_id]
+  return (storage.sgluna_skill_instance_templates ?? {})[skill_id]
 }
 
 function source_block_ref(skill: SkillDefinition) {
@@ -784,7 +784,7 @@ export function finish_verified(run: SkillVerificationRun) {
     evidence_refs: refs,
     reason: `Verified by translated rebuild, live topology match, and bounded output delta in ${run.id}.`,
   })
-  storage.airi_skill_verification_active_run_id = undefined
+  storage.sgluna_skill_verification_active_run_id = undefined
   return next
 }
 
@@ -924,7 +924,7 @@ function create_run(item: LearningVerificationQueueItem, skill: SkillDefinition)
     reason: 'Validating a translated candidate instance against the live world.',
   }
   store_run(run)
-  storage.airi_skill_verification_active_run_id = run.id
+  storage.sgluna_skill_verification_active_run_id = run.id
   set_queue_state(item.opportunity_id, 'running', 'Verification run is active.')
   update_learning_opportunity(item.opportunity_id, { verification_run_id: run.id, reason: `Verification running: ${run.id}` })
   return run
@@ -1005,8 +1005,8 @@ export function retry_blocked_skill_verification(opportunity_id: string) {
 }
 
 export function list_skill_verification_runs(limit = MAX_RUN_HISTORY) {
-  const registry = storage.airi_skill_verification_runs ?? {}
-  const order = storage.airi_skill_verification_run_order ?? []
+  const registry = storage.sgluna_skill_verification_runs ?? {}
+  const order = storage.sgluna_skill_verification_run_order ?? []
   const result: SkillVerificationRun[] = []
   for (let index = order.length - 1; index >= 0 && result.length < limit; index--) {
     const run = registry[order[index]]

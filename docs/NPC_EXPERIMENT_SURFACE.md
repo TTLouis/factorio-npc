@@ -1,10 +1,10 @@
-# AIRI Factorio — NPC Experiment Surface / Workshop
+# SGLuna Factorio — NPC Experiment Surface / Workshop
 
 **Status:** Design discussion draft. Not implemented. No engine validation is claimed.
 
 ## 1. Purpose
 
-AIRI should have access to an isolated Factorio experiment environment where it can test gameplay hypotheses against the real game engine instead of relying only on model memory, static reasoning, or risky experimentation in the live factory.
+SGLuna should have access to an isolated Factorio experiment environment where it can test gameplay hypotheses against the real game engine instead of relying only on model memory, static reasoning, or risky experimentation in the live factory.
 
 The experiment surface is not a gameplay automation system and must not contain hard-coded solutions to Factorio problems.
 
@@ -91,7 +91,7 @@ Agent:
 
 A useful test for every Workshop feature is:
 
-> Does this feature tell AIRI what happens, or does it tell AIRI what it should do?
+> Does this feature tell SGLuna what happens, or does it tell SGLuna what it should do?
 
 The former belongs here.
 
@@ -134,7 +134,7 @@ production output
 experiment fixtures
 ```
 
-Items produced in the Workshop must never become normal AIRI inventory.
+Items produced in the Workshop must never become normal SGLuna inventory.
 
 Technologies unlocked only for an experiment must not unlock normal-force technologies.
 
@@ -212,7 +212,7 @@ For experiments not concerned with depletion, resource amounts may be intentiona
 
 ## 7. Item-source fixtures
 
-For experiments where raw material acquisition is not itself under test, AIRI needs controlled item sources.
+For experiments where raw material acquisition is not itself under test, SGLuna needs controlled item sources.
 
 The primary V1 item fixture should be an **Infinity chest** or equivalent engine-supported infinite container.
 
@@ -227,7 +227,7 @@ transport mechanism
 experimental production cell
 ```
 
-This allows AIRI to ask questions such as:
+This allows SGLuna to ask questions such as:
 
 ```text
 Will this assembler arrangement actually run?
@@ -427,11 +427,11 @@ An experiment must record the technology context under which it ran.
 
 Default behavior should be conservative:
 
-> Begin from a snapshot equivalent to AIRI's relevant live-world technology availability.
+> Begin from a snapshot equivalent to SGLuna's relevant live-world technology availability.
 
 This helps answer:
 
-> Does this idea work with what AIRI currently knows and can build?
+> Does this idea work with what SGLuna currently knows and can build?
 
 The Workshop may later support explicit counterfactual technology tests, such as temporarily enabling a technology to answer:
 
@@ -601,7 +601,7 @@ Workshop success proves:
 
 It does not prove:
 
-> AIRI can construct and operate this solution under normal gameplay constraints.
+> SGLuna can construct and operate this solution under normal gameplay constraints.
 
 Those should remain separate evidence classes.
 
@@ -653,7 +653,7 @@ User goal:
 Make our early coal production less dependent on manual refueling.
 ```
 
-AIRI has no applicable verified skill.
+SGLuna has no applicable verified skill.
 
 It may formulate:
 
@@ -686,7 +686,7 @@ drill operating state
 duration of uninterrupted operation
 ```
 
-If the design fails, AIRI may revise orientation or arrangement and run another bounded experiment.
+If the design fails, SGLuna may revise orientation or arrangement and run another bounded experiment.
 
 If it succeeds consistently, that evidence may produce a candidate skill.
 
@@ -796,7 +796,7 @@ The goal of V1 is not to solve factories.
 
 The goal is:
 
-> Give AIRI a safe place to ask the Factorio engine questions.
+> Give SGLuna a safe place to ask the Factorio engine questions.
 
 ---
 

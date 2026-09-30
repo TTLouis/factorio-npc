@@ -152,12 +152,12 @@ def run(client: Rcon, results: Path) -> None:
     # response for the rejected first attempt, which previously looked like a
     # JSON parsing failure. Use a harmless, identical probe twice and require the
     # expected marker before running any test commands.
-    lua_probe = '/silent-command rcon.print("AIRI_RCON_READY")'
+    lua_probe = '/silent-command rcon.print("SGLUNA_RCON_READY")'
     probe_response = command(lua_probe)
-    if probe_response != 'AIRI_RCON_READY':
+    if probe_response != 'SGLUNA_RCON_READY':
         probe_response = command(lua_probe)
     assert_true(
-        probe_response == 'AIRI_RCON_READY',
+        probe_response == 'SGLUNA_RCON_READY',
         f'Factorio Lua console handshake failed over RCON: {probe_response!r}',
     )
 
@@ -251,7 +251,7 @@ def run(client: Rcon, results: Path) -> None:
     )
 
     # NPC-native mining: remove the movement target and place a single resource
-    # entity inside AIRI's reach. Capture its actual engine position: resources
+    # entity inside SGLuna's reach. Capture its actual engine position: resources
     # may snap to tile centers, so the requested position is not a safe lookup.
     mining_fixture = (
         "/silent-command "

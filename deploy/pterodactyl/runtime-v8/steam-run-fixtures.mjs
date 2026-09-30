@@ -200,7 +200,7 @@ export function recordedMessage(round) {
   const message = round.content
     ? { role: 'assistant', content: JSON.stringify(round.content) }
     : { role: 'assistant', content: '', tool_calls: calls }
-  Object.defineProperty(message, '_airiProvider', {
+  Object.defineProperty(message, '_sglunaProvider', {
     enumerable: false,
     value: {
       diagnostic_code: 'ok',
@@ -440,7 +440,7 @@ export function steamReplayHarness({
     stateFile: null,
     traceFile: null,
     decisionTraceFile: null,
-    npcId: 'airi',
+    npcId: 'sgluna',
   })
   // Capture the behavior trace records (request_id, seq, event, data) exactly
   // as the JSONL writer would receive them.

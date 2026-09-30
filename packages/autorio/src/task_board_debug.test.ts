@@ -8,7 +8,7 @@ import {
   snapshot_is_suppressed,
   suppress_snapshot,
   task_conversation_messages,
-  toggle_debug_activity_follow,
+  toggle_debug_activity_live,
   reset_task_conversation,
   sanitize_debug_snapshot,
 } from './task_board_debug'
@@ -189,12 +189,12 @@ describe('task board debug and UI freshness helpers', () => {
   })
 
   it('keeps Debug execution-feed follow state independent and explicitly pausable', () => {
-    expect(debug_activity_view(7)).toEqual({ follow: true, behind: false })
-    expect(toggle_debug_activity_follow(7)).toMatchObject({ follow: false, behind: false })
-    expect(toggle_debug_activity_follow(7)).toMatchObject({ follow: true, behind: true })
+    expect(debug_activity_view(7)).toEqual({ live: true, behind: false })
+    expect(toggle_debug_activity_live(7)).toMatchObject({ live: false, behind: false })
+    expect(toggle_debug_activity_live(7)).toMatchObject({ live: true, behind: true })
   })
 
-  it('shows the explicit AIRI reply or falls back to the newest decision activity', () => {
+  it('shows the explicit SGLuna reply or falls back to the newest decision activity', () => {
     expect(latest_ai_reply({ response: 'Direct answer', activity: [{ kind: 'decision', text: 'Older answer' }] })).toBe('Direct answer')
     expect(latest_ai_reply({ activity: [
       { kind: 'decision', text: 'First answer' },
@@ -206,8 +206,8 @@ describe('task board debug and UI freshness helpers', () => {
     ] })).toBe('')
   })
 
-  it('projects all player and AIRI messages for the current durable goal', () => {
-    store().airi_task_board_activity_history = [
+  it('projects all player and SGLuna messages for the current durable goal', () => {
+    store().sgluna_task_board_activity_history = [
       { id: 'live_1', kind: 'observation', text: 'TTLouis: old task', timestamp: '00:00:01' },
       { kind: 'decision', text: 'Old answer', timestamp: '00:00:02' },
       { id: 'live_2', kind: 'observation', text: 'TTLouis: build power', timestamp: '00:01:00' },
@@ -218,14 +218,14 @@ describe('task board debug and UI freshness helpers', () => {
     ]
     expect(task_conversation_messages({ goal_id: 'goal_power', objective: 'build power' })).toEqual([
       { key: 'id:live_2', role: 'user', sender: 'TTLouis', text: 'build power', timestamp: '00:01:00' },
-      { key: 'decision|00:01:02|I will build the boiler first.', role: 'assistant', sender: 'AIRI', text: 'I will build the boiler first.', timestamp: '00:01:02' },
+      { key: 'decision|00:01:02|I will build the boiler first.', role: 'assistant', sender: 'SGLuna', text: 'I will build the boiler first.', timestamp: '00:01:02' },
       { key: 'id:live_4', role: 'user', sender: 'TTLouis', text: 'continue', timestamp: '00:01:30' },
-      { key: 'decision|00:01:31|The boiler is done; next is steam.', role: 'assistant', sender: 'AIRI', text: 'The boiler is done; next is steam.', timestamp: '00:01:31' },
+      { key: 'decision|00:01:31|The boiler is done; next is steam.', role: 'assistant', sender: 'SGLuna', text: 'The boiler is done; next is steam.', timestamp: '00:01:31' },
     ])
   })
 
   it('names the activity rows the conversation already shows so the feed can skip them', () => {
-    store().airi_task_board_activity_history = [
+    store().sgluna_task_board_activity_history = [
       { id: 'live_1', kind: 'observation', text: 'TTLouis: build power', timestamp: '00:01:00' },
       { id: 'live_2', kind: 'observation', text: 'Tool getInventory', timestamp: '00:01:01' },
       { kind: 'decision', text: 'Boiler first.', timestamp: '00:01:02' },
@@ -239,12 +239,12 @@ describe('task board debug and UI freshness helpers', () => {
   })
 
   it('starts a new conversation cursor when the durable goal changes', () => {
-    store().airi_task_board_activity_history = [
+    store().sgluna_task_board_activity_history = [
       { id: 'live_1', kind: 'observation', text: 'TTLouis: build power', timestamp: '00:01:00' },
       { kind: 'decision', text: 'Power done.', timestamp: '00:01:10' },
     ]
     task_conversation_messages({ goal_id: 'goal_power', objective: 'build power' })
-    store().airi_task_board_activity_history.push(
+    store().sgluna_task_board_activity_history.push(
       { id: 'live_2', kind: 'observation', text: 'TTLouis: mine stone', timestamp: '00:02:00' },
       { kind: 'decision', text: 'Mining stone now.', timestamp: '00:02:01' },
     )
@@ -255,7 +255,7 @@ describe('task board debug and UI freshness helpers', () => {
   })
 
   it('hides retained task messages when there is no current task board', () => {
-    store().airi_task_board_activity_history = [
+    store().sgluna_task_board_activity_history = [
       { id: 'live_1', kind: 'observation', text: 'TTLouis: build power', timestamp: '00:01:00' },
       { kind: 'decision', text: 'Power done.', timestamp: '00:01:10' },
     ]
@@ -269,7 +269,7 @@ describe('task board debug and UI freshness helpers', () => {
       conversation_id: 'task-old',
       conversation: [
         { id: 'm1', role: 'user', sender: 'TTLouis', text: 'old request' },
-        { id: 'm2', role: 'assistant', sender: 'AIRI', text: 'old answer' },
+        { id: 'm2', role: 'assistant', sender: 'SGLuna', text: 'old answer' },
       ],
     }
     expect(task_conversation_messages(old)).toHaveLength(2)
@@ -292,13 +292,13 @@ describe('current task conversation regression', () => {
   it('shows more than four visible user/assistant messages from the explicit task conversation', () => {
     const conversation = [
       { id: '1', role: 'user', sender: 'TTLouis', text: 'one' },
-      { id: '2', role: 'assistant', sender: 'AIRI', text: 'two' },
+      { id: '2', role: 'assistant', sender: 'SGLuna', text: 'two' },
       { id: '3', role: 'user', sender: 'TTLouis', text: 'three' },
-      { id: '4', role: 'assistant', sender: 'AIRI', text: 'four' },
+      { id: '4', role: 'assistant', sender: 'SGLuna', text: 'four' },
       { id: '5', role: 'user', sender: 'TTLouis', text: 'five' },
-      { id: '6', role: 'assistant', sender: 'AIRI', text: 'six' },
+      { id: '6', role: 'assistant', sender: 'SGLuna', text: 'six' },
       { id: '7', role: 'user', sender: 'TTLouis', text: 'seven' },
-      { id: '8', role: 'assistant', sender: 'AIRI', text: 'eight' },
+      { id: '8', role: 'assistant', sender: 'SGLuna', text: 'eight' },
     ]
     expect(task_conversation_messages({ goal_id: 'goal-a', conversation_id: 'task-a', conversation }).map(message => message.text)).toEqual(
       ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight'],
@@ -308,7 +308,7 @@ describe('current task conversation regression', () => {
   it('New Task reset rebinds the view to a fresh conversation generation', () => {
     const old = { goal_id: 'goal-a', conversation_id: 'task-a', conversation: [
       { id: '1', role: 'user', sender: 'TTLouis', text: 'old request' },
-      { id: '2', role: 'assistant', sender: 'AIRI', text: 'old answer' },
+      { id: '2', role: 'assistant', sender: 'SGLuna', text: 'old answer' },
     ] }
     expect(task_conversation_messages(old)).toHaveLength(2)
     reset_task_conversation()
@@ -316,18 +316,18 @@ describe('current task conversation regression', () => {
       { id: '1', role: 'user', sender: 'TTLouis', text: 'fresh request' },
     ] }
     expect(task_conversation_messages(fresh).map(message => message.text)).toEqual(['fresh request'])
-    expect(store().airi_task_board_conversation_id).toBe('task-b')
+    expect(store().sgluna_task_board_conversation_id).toBe('task-b')
   })
 
   it('does not resurrect old activity-history messages after a fresh conversation sync', () => {
-    store().airi_task_board_activity_history = [
+    store().sgluna_task_board_activity_history = [
       { id: 'live_old_1', kind: 'observation', text: 'TTLouis: old request', timestamp: '00:00:01' },
       { kind: 'decision', text: 'old answer', timestamp: '00:00:02' },
     ]
     reset_task_conversation()
     const fresh = { goal_id: 'goal-b', conversation_id: 'task-b', conversation: [
       { id: 'new-1', role: 'user', sender: 'TTLouis', text: 'fresh request' },
-      { id: 'new-2', role: 'assistant', sender: 'AIRI', text: 'fresh answer' },
+      { id: 'new-2', role: 'assistant', sender: 'SGLuna', text: 'fresh answer' },
     ] }
     expect(task_conversation_messages(fresh).map(message => message.text)).toEqual(['fresh request', 'fresh answer'])
     expect(task_conversation_messages(fresh).map(message => message.text)).toEqual(['fresh request', 'fresh answer'])

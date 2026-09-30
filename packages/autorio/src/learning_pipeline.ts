@@ -37,7 +37,7 @@ import {
 
 const AUTO_ANALYSIS_RADIUS = 12
 const MAX_BLOCKS_PER_EVENT = 4
-const FACTORY_SAVE_BUTTON_PREFIX = 'airi_skill_save_block__'
+const FACTORY_SAVE_BUTTON_PREFIX = 'sgluna_skill_save_block__'
 const MAX_UI_OPPORTUNITIES = 4
 
 export interface LearningGoalSnapshot {

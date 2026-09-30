@@ -153,10 +153,10 @@ function analysis(id: string, offset: number, connected = true): FactoryAreaAnal
 
 function store_analysis(value: FactoryAreaAnalysis) {
   const state = (globalThis as any).storage
-  state.airi_factory_area_analyses = state.airi_factory_area_analyses ?? {}
-  state.airi_factory_area_order = state.airi_factory_area_order ?? []
-  state.airi_factory_area_analyses[value.id] = value
-  state.airi_factory_area_order.push(value.id)
+  state.sgluna_factory_area_analyses = state.sgluna_factory_area_analyses ?? {}
+  state.sgluna_factory_area_order = state.sgluna_factory_area_order ?? []
+  state.sgluna_factory_area_analyses[value.id] = value
+  state.sgluna_factory_area_order.push(value.id)
 }
 
 function candidate_from_source() {
@@ -179,9 +179,9 @@ function queued_opportunity(skill_id: string) {
 
 function store_active_verification_run(run: SkillVerificationRun) {
   const state = (globalThis as any).storage
-  state.airi_skill_verification_runs = { [run.id]: run }
-  state.airi_skill_verification_run_order = [run.id]
-  state.airi_skill_verification_active_run_id = run.id
+  state.sgluna_skill_verification_runs = { [run.id]: run }
+  state.sgluna_skill_verification_run_order = [run.id]
+  state.sgluna_skill_verification_active_run_id = run.id
 }
 
 function run_for(skill_id: string, opportunity_id: string, topology_match: boolean, current_output: number): SkillVerificationRun {
@@ -323,7 +323,7 @@ describe('Skill Verification / Instance Layer V1', () => {
 
     tick_skill_verification()
 
-    const blocked = (globalThis as any).storage.airi_skill_verification_runs[run.id]
+    const blocked = (globalThis as any).storage.sgluna_skill_verification_runs[run.id]
     expect(blocked.state).toBe('blocked')
     expect(blocked.failure_kind).toBeUndefined()
     expect(blocked.reason).toMatch(/interrupted by runtime reload/)
@@ -346,7 +346,7 @@ describe('Skill Verification / Instance Layer V1', () => {
 
     tick_skill_verification()
 
-    const blocked = (globalThis as any).storage.airi_skill_verification_runs[run.id]
+    const blocked = (globalThis as any).storage.sgluna_skill_verification_runs[run.id]
     expect(blocked.state).toBe('blocked')
     expect(blocked.failure_kind).toBeUndefined()
     expect(blocked.reason).toMatch(/legacy pending batch 7 has no restart-safe identity/)

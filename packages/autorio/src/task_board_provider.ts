@@ -15,12 +15,12 @@ declare const storage: {
   // The last model identifier SGLuna reported. A cleared board drops its debug
   // block, and the button must not lose the avatar it earned just because the
   // current goal finished.
-  airi_task_board_provider_model?: string
+  sgluna_task_board_provider_model?: string
   // Which avatar variant each player sees, by player index.
-  airi_task_board_avatar_roll?: Record<number, number>
+  sgluna_task_board_avatar_roll?: Record<number, number>
 }
 
-const AVATAR_PREFIX = 'airi-provider-'
+const AVATAR_PREFIX = 'sgluna-provider-'
 // An empty id means no vendor avatar exists for this model, and the button
 // keeps whatever sprite it was created with. There is deliberately no SGLuna
 // house avatar: the button answers "which vendor is answering", and inventing a
@@ -74,18 +74,18 @@ function variants_of(id: string) {
  * land on the same variant.
  */
 export function roll_provider_avatar(player_index: number, tick: number) {
-  if (storage.airi_task_board_avatar_roll === undefined) storage.airi_task_board_avatar_roll = {}
-  storage.airi_task_board_avatar_roll[player_index] = ((tick % 100003) * 131 + player_index * 40503) % 2147483647
+  if (storage.sgluna_task_board_avatar_roll === undefined) storage.sgluna_task_board_avatar_roll = {}
+  storage.sgluna_task_board_avatar_roll[player_index] = ((tick % 100003) * 131 + player_index * 40503) % 2147483647
 }
 
 /** The variant this player sees, 1-based. Rolls one if they never got one. */
 export function provider_avatar_variant(player_index: number, id: string) {
   const variants = variants_of(id)
   if (variants <= 1) return 1
-  let roll = storage.airi_task_board_avatar_roll?.[player_index]
+  let roll = storage.sgluna_task_board_avatar_roll?.[player_index]
   if (roll === undefined) {
     roll_provider_avatar(player_index, game.tick)
-    roll = storage.airi_task_board_avatar_roll![player_index]
+    roll = storage.sgluna_task_board_avatar_roll![player_index]
   }
   return (roll % variants) + 1
 }
@@ -93,10 +93,10 @@ export function provider_avatar_variant(player_index: number, id: string) {
 /** Record the model a snapshot reported. Empty values keep the last known one. */
 export function remember_provider_model(model: unknown) {
   const name = String(model ?? '').trim()
-  if (name.length > 0) storage.airi_task_board_provider_model = name
+  if (name.length > 0) storage.sgluna_task_board_provider_model = name
 }
 
-export function current_provider_model() { return storage.airi_task_board_provider_model ?? '' }
+export function current_provider_model() { return storage.sgluna_task_board_provider_model ?? '' }
 
 /**
  * The avatar for the current provider. The avatars are declared as sprites in

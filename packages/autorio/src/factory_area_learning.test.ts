@@ -196,10 +196,10 @@ describe('Factory Area Learning V1', () => {
     const target = get_factory_area_analysis(result.analysis_id)!.blocks.find(block => block.outputs.includes('transport-belt'))!
     const messages: string[] = []
     const player = { surface, position: { x: 6, y: 4 }, print: (message: string) => messages.push(message) } as any
-    expect(handle_skill_export_click(player, `airi_skill_save_block__${result.analysis_id}__${target.id}`)).toBe(true)
+    expect(handle_skill_export_click(player, `sgluna_skill_save_block__${result.analysis_id}__${target.id}`)).toBe(true)
     const saved = get_skill_definition('transport-belt-production')!
     expect(saved.status).toBe('candidate')
-    expect(handle_skill_export_click(player, `airi_skill_export__${saved.id}`)).toBe(true)
+    expect(handle_skill_export_click(player, `sgluna_skill_export__${saved.id}`)).toBe(true)
     expect(writes.map(write => write.filename)).toEqual([
       `sgluna-skills/${saved.id}/r1/skill.json`,
       `sgluna-skills/${saved.id}/r1/SKILL.md`,

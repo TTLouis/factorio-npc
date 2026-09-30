@@ -15,8 +15,8 @@ import {
 } from './task_board_debug'
 import type { TaskBoardUiDebugSnapshot } from './task_board_debug'
 
-const DEBUG_ROOT_NAME = 'airi_task_board_debug_panel'
-const DEBUG_BODY_NAME = 'airi_task_board_debug_body'
+const DEBUG_ROOT_NAME = 'sgluna_task_board_debug_panel'
+const DEBUG_BODY_NAME = 'sgluna_task_board_debug_body'
 const DEBUG_WIDTH = 1320
 const DEBUG_KEY_WIDTH = 132
 const DEBUG_BODY_INNER_WIDTH = DEBUG_WIDTH - 20
@@ -25,11 +25,11 @@ const DEBUG_COLUMN_WIDTH = math.floor((DEBUG_BODY_INNER_WIDTH - 2 * DEBUG_COLUMN
 const DEBUG_VALUE_WIDTH = DEBUG_WIDTH - DEBUG_KEY_WIDTH - 54
 const DEBUG_COLUMN_VALUE_WIDTH = DEBUG_COLUMN_WIDTH - DEBUG_KEY_WIDTH - 34
 const DEBUG_ACTIVITY = {
-  section: 'airi_task_board_debug_activity_section',
-  header: 'airi_task_board_debug_activity_header',
-  count: 'airi_task_board_debug_activity_count',
-  empty: 'airi_task_board_debug_activity_empty',
-  feed: 'airi_task_board_debug_activity_feed',
+  section: 'sgluna_task_board_debug_activity_section',
+  header: 'sgluna_task_board_debug_activity_header',
+  count: 'sgluna_task_board_debug_activity_count',
+  empty: 'sgluna_task_board_debug_activity_empty',
+  feed: 'sgluna_task_board_debug_activity_feed',
 }
 const DEBUG_ACTIVITY_ROWS = 120
 
@@ -186,7 +186,7 @@ function add_debug_step_rows(table: LuaGuiElement, debug: TaskBoardUiDebugSnapsh
   add_compact_row(table, 'Reply time · this request', responsiveness.length > 0 ? responsiveness : '—')
 }
 
-const DEBUG_SYNC = { columns: 'airi_debug_columns', runtime_column: 'airi_debug_runtime_column', runtime_table: 'airi_debug_runtime_table', value: 'airi_debug_sync_value' }
+const DEBUG_SYNC = { columns: 'sgluna_debug_columns', runtime_column: 'sgluna_debug_runtime_column', runtime_table: 'sgluna_debug_runtime_table', value: 'sgluna_debug_sync_value' }
 function sync_caption(synced_tick: number | undefined) {
   const version = current_sync_version()
   return `gen ${version.generation} · rev ${version.revision} · age ${sync_age(synced_tick)}`
@@ -235,7 +235,7 @@ function fill_debug_body(body: LuaGuiElement, board: any, runtime: any, synced_t
   const latest_round_tokens = integer(debug.latest_round_total_units) > 0
     ? `round ${integer(debug.latest_round_provider_round) + 1} · ${integer(debug.latest_round_input_units)} in / ${integer(debug.latest_round_cached_input_units)} cached / ${integer(debug.latest_round_output_units)} out / ${integer(debug.latest_round_total_units)} total`
     : '—'
-  const actor = integer(debug.actor_id) > 0 ? `${runtime?.actor_name ?? 'AIRI'} · id ${integer(debug.actor_id)} · epoch ${integer(debug.actor_epoch)}` : `${runtime?.actor_name ?? 'AIRI'} · ${runtime?.actor_kind ?? 'unknown'}`
+  const actor = integer(debug.actor_id) > 0 ? `${runtime?.actor_name ?? 'SGLuna'} · id ${integer(debug.actor_id)} · epoch ${integer(debug.actor_epoch)}` : `${runtime?.actor_name ?? 'SGLuna'} · ${runtime?.actor_kind ?? 'unknown'}`
   const world_text = world === undefined ? 'unknown' : `${clean_text(world.task_state, 48) || 'idle'} · queue ${integer(world.queue_length)}`
   const follow_text = follow?.active ? `active · ${clean_text(follow.target_player, 128) || 'target'}${typeof follow.current_distance === 'number' ? ` · ${math.floor(follow.current_distance * 10) / 10} tiles` : ''}` : 'inactive'
   const reply = latest_ai_reply(board)
@@ -356,7 +356,7 @@ function refresh_debug_activity(root: LuaGuiElement, player: LuaPlayer, force = 
   }
 
   let appended = 0
-  if (force || view.follow) {
+  if (force || view.live) {
     const diff = activity_state.activity_rows_diff(shown, keys)
     if (diff === undefined || force) {
       feed.clear()
@@ -387,7 +387,7 @@ function refresh_debug_activity(root: LuaGuiElement, player: LuaPlayer, force = 
   const unseen = activity_state.activity_unseen(keys, view.seen_key)
   const state = header[DEBUG_ACTIVITY_STATE_NAME]
   if (state?.valid) {
-    if (view.follow && unseen.count === 0) {
+    if (view.live && unseen.count === 0) {
       state.caption = gui_text.trusted_rich_text('[img=utility/status_working] LIVE')
       state.tooltip = 'Following the newest execution activity. Click to pause it.'
     }

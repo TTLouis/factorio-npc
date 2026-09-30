@@ -8,7 +8,7 @@ function connect_controlled_player() {
   const player = {
     valid: true,
     index: 1,
-    name: 'AIRI',
+    name: 'SGLuna',
     character: { valid: true },
     position: { x: 0, y: 0 },
     surface: {
@@ -44,7 +44,7 @@ beforeEach(() => {
   ;(globalThis as any).game.tick = 200
   ;(globalThis as any).game.print = vi.fn()
   ;(globalThis as any).log = vi.fn()
-  ;(globalThis as any).storage.airi_actor_mode = 'player'
+  ;(globalThis as any).storage.sgluna_actor_mode = 'player'
   task_manager.cancel_all_tasks()
 })
 

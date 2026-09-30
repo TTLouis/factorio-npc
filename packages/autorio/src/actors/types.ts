@@ -39,7 +39,7 @@ export interface ActorStatusSnapshot {
 }
 
 /**
- * The physical actor AIRI's control logic drives. `ConnectedPlayerActor`
+ * The physical actor SGLuna's control logic drives. `ConnectedPlayerActor`
  * wraps today's single connected LuaPlayer unchanged; a standalone actor
  * wraps an owned `character` entity with no LuaPlayer behind it at all.
  * Nothing in control.ts should depend directly on LuaPlayer once migration

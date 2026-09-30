@@ -49,8 +49,8 @@ test('an empty tool_calls array on a plain content reply is normalized to undefi
     allowTools: false,
   })
   assert.equal(message.tool_calls, undefined)
-  assert.equal(message._airiProvider.empty_tool_calls_normalized, true)
-  assert.equal(message._airiProvider.tool_call_count, 0)
+  assert.equal(message._sglunaProvider.empty_tool_calls_normalized, true)
+  assert.equal(message._sglunaProvider.tool_call_count, 0)
   assert.equal(JSON.parse(message.content).operations.length, 2)
 })
 
@@ -60,7 +60,7 @@ test('a null tool_calls on a plain content reply is normalized to undefined', as
     allowTools: false,
   })
   assert.equal(message.tool_calls, undefined)
-  assert.equal(message._airiProvider.empty_tool_calls_normalized, true)
+  assert.equal(message._sglunaProvider.empty_tool_calls_normalized, true)
 })
 
 test('a real (non-empty) tool_calls array is left untouched and not flagged as normalized', async () => {
@@ -73,7 +73,7 @@ test('a real (non-empty) tool_calls array is left untouched and not flagged as n
   })
   assert.equal(Array.isArray(message.tool_calls), true)
   assert.equal(message.tool_calls.length, 1)
-  assert.equal(message._airiProvider.empty_tool_calls_normalized, false)
+  assert.equal(message._sglunaProvider.empty_tool_calls_normalized, false)
 })
 
 test('an absent tool_calls key is not flagged as normalized (nothing to normalize)', async () => {
@@ -81,7 +81,7 @@ test('an absent tool_calls key is not flagged as normalized (nothing to normaliz
     fetchImpl: rawFetch({ content: '{}' }),
     allowTools: false,
   })
-  assert.equal(message._airiProvider.empty_tool_calls_normalized, false)
+  assert.equal(message._sglunaProvider.empty_tool_calls_normalized, false)
 })
 
 // --- Loop-level replay: the real runTurn, tools-off round, through the
@@ -89,7 +89,7 @@ test('an absent tool_calls key is not flagged as normalized (nothing to normaliz
 
 function deployment() {
   return {
-    revision: 'airi-deploy-v8-npc-staging',
+    revision: 'sgluna-deploy-v8-npc-staging',
     session: '0123456789abcdef0123456789abcdef',
     mode: 'npc',
     actor_id: 18,
@@ -112,7 +112,7 @@ class FakeRcon {
   }
 
   async command(text) {
-    if (text.includes('remote.call("airi_deployment","status")')) return JSON.stringify(this.status)
+    if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(this.status)
     if (text.includes('remote.call("autorio_preflight","operation"')) return JSON.stringify({ ok: true })
     if (text.includes('remote.call("autorio_tools","get_nearby_entities"')) {
       return JSON.stringify({
@@ -135,7 +135,7 @@ class FakeRcon {
       })
     }
     if (text.includes('local ok,result=pcall')) {
-      const marker = text.match(/AIRI_RESULT_[a-f0-9]{24}:/)?.[0]
+      const marker = text.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)?.[0]
       assert.ok(marker)
       this.mutations.push(text)
       this.batchId++

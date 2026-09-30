@@ -225,12 +225,12 @@ def run(client: Rcon, results: Path) -> None:
     # in find_entities_filtered. Factorio treats an unknown name there as a
     # non-recoverable mod error, so this is a process-safety boundary.
     queue_bool_with_dependent(
-        remote_call('autorio_operations', 'mine_entity', repr('__airi_missing_resource__'), '1'),
+        remote_call('autorio_operations', 'mine_entity', repr('__sgluna_missing_resource__'), '1'),
         'invalid mine batch admission',
     )
     invalid_after = wait_until_idle(status, 'invalid mining prototype failure', 5)
     invalid_result = assert_failed_batch(invalid_after, actor_id=actor_id, code='invalid_entity', op_type='mining')
-    require(invalid_result.get('entity_name') == '__airi_missing_resource__', invalid_result)
+    require(invalid_result.get('entity_name') == '__sgluna_missing_resource__', invalid_result)
 
     # 4. Valid place prototype but no item in inventory: fail and cancel the
     # already-queued dependent rather than reporting batch completion.

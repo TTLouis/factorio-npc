@@ -22,7 +22,7 @@ import { GOAL_STATUS } from './planning-state.mjs'
 import { plannerControlToolDefinitions } from './structured-policy.mjs'
 import { FakeFactorio, gather, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
 
-const KEY = 'npc:airi'
+const KEY = 'npc:sgluna'
 const STEAM_GOAL = {
   scope: 'finite',
   summary: 'Get steam power going and run an electric mining drill on iron ore.',
@@ -48,7 +48,7 @@ function agentWith(game, memory, provider, extra = {}) {
     stateFile: null,
     traceFile: null,
     decisionTraceFile: null,
-    npcId: 'airi',
+    npcId: 'sgluna',
     goalDefinitionPolicy: 'required',
     ...extra,
   })

@@ -221,7 +221,7 @@ export function describeGoalCondition(condition) {
     case 'items_produced': return condition.count_from === GOAL_COUNT_FROM.SAVE_START
       ? `at least ${condition.minimum} × ${condition.item_name} produced in this save (all surfaces)`
       : `${condition.minimum} × ${condition.item_name} produced from now on (all surfaces)`
-    case 'inventory_count': return `AIRI holds at least ${condition.minimum} × ${condition.item_name}`
+    case 'inventory_count': return `SGLuna holds at least ${condition.minimum} × ${condition.item_name}`
     case 'space_location_unlocked': return `space location "${condition.name}" is unlocked`
     case 'entity_working': return `${condition.minimum} × ${condition.entity_name} working now`
     case 'electric_network_satisfied': return `${condition.minimum} × ${condition.entity_name} powered by a running electric network`
@@ -394,10 +394,10 @@ function conditionProgress(condition, result) {
 
 const STATUS_STEP_MAX_CHARS = 120
 
-// The deterministic answer to "!airi status": no model call, read from durable
+// The deterministic answer to "!luna status": no model call, read from durable
 // planning state and, for the done-when checks, the game as of now.
 export function formatGoalStatus({ goal, tracker, legacyStatus, evaluation } = {}) {
-  if (!goal) return ['No goal yet. Tell me what to do with !airi <goal>.']
+  if (!goal) return ['No goal yet. Tell me what to do with !luna <goal>.']
   const summary = goal.definition?.summary || goal.objective || 'unnamed goal'
   if (goal.status === 'completed') return [`Last goal completed: ${summary}`]
   if (goal.status === 'cancelled') return [`Last goal was cancelled: ${summary}`]

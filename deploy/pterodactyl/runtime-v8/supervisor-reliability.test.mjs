@@ -189,7 +189,7 @@ test('in-game task board snapshot is a projection of canonical durable state', (
   assert.equal(snapshot.project, undefined)
   assert.equal(snapshot.status, 'blocked')
   assert.equal(snapshot.blocker, 'provider_recovery_exhausted')
-  assert.equal(snapshot.blocker_summary, 'AIRI could not get a usable model response after retrying.')
+  assert.equal(snapshot.blocker_summary, 'SGLuna could not get a usable model response after retrying.')
   assert.equal(snapshot.pause_reason, '')
   assert.equal(snapshot.pause_summary, '')
   assert.equal(snapshot.completed_count, 2)
@@ -286,7 +286,7 @@ test('interrupted plan recovery always uses the plain runtime-recovery path', as
   }
   const seen = {}
   const agent = {
-    npcId: 'airi',
+    npcId: 'sgluna',
     memory,
     systemPrompt: 'system',
     turnSequence: 0,
@@ -366,7 +366,7 @@ test('restart during output-budget recovery fails closed without another planner
     },
   }
   const agent = {
-    npcId: 'airi',
+    npcId: 'sgluna',
     memory,
     loadPersistentState: async () => {},
     readInteractionTaskStatus: async () => ({ task_state: 'idle', queue_length: 0 }),

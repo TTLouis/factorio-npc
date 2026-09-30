@@ -36,7 +36,7 @@ describe('learning verification semantic evidence bridge', () => {
 
   it('quarantines the exact failed revision only for semantic verification failure', () => {
     const created = opportunity('miner-layout')
-    ;(globalThis as any).storage.airi_skill_verification_runs = {
+    ;(globalThis as any).storage.sgluna_skill_verification_runs = {
       'run-semantic': {
         id: 'run-semantic',
         skill_id: 'miner-layout',
@@ -68,7 +68,7 @@ describe('learning verification semantic evidence bridge', () => {
 
   it('records transient execution failure without quarantining the skill revision', () => {
     const created = opportunity('belt-layout')
-    ;(globalThis as any).storage.airi_skill_verification_runs = {
+    ;(globalThis as any).storage.sgluna_skill_verification_runs = {
       'run-execution': {
         id: 'run-execution',
         skill_id: 'belt-layout',
@@ -94,7 +94,7 @@ describe('learning verification semantic evidence bridge', () => {
 
   it('records success on the promoted revision and deduplicates repeated terminal updates', () => {
     const created = opportunity('fluid-layout')
-    ;(globalThis as any).storage.airi_skill_verification_runs = {
+    ;(globalThis as any).storage.sgluna_skill_verification_runs = {
       'run-success': {
         id: 'run-success',
         skill_id: 'fluid-layout',
@@ -104,7 +104,7 @@ describe('learning verification semantic evidence bridge', () => {
         evidence_refs: ['verification:live'],
       },
     }
-    ;(globalThis as any).storage.airi_skill_definitions = {
+    ;(globalThis as any).storage.sgluna_skill_definitions = {
       'fluid-layout': {
         id: 'fluid-layout',
         revision: 8,

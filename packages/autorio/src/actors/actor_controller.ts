@@ -34,19 +34,19 @@ type NpcRecoveryHandler = (event: { previous_actor_id: number }) => void
 type ActorModeTransitionHandler = (event: { previous_mode: ActorMode, next_mode: ActorMode }) => void
 
 declare const storage: {
-  airi_actor_mode?: ActorMode
+  sgluna_actor_mode?: ActorMode
   standalone_character_unit_number?: number
-  airi_last_npc_recovery?: NpcRecoveryReceipt
-  airi_owned_crafting?: OwnedCraftingMarker
+  sgluna_last_npc_recovery?: NpcRecoveryReceipt
+  sgluna_owned_crafting?: OwnedCraftingMarker
   // Surface the NPC body was last seen alive on; a replacement body respawns
   // there, at (0, 0), rather than always on Nauvis.
-  airi_npc_surface_index?: number
+  sgluna_npc_surface_index?: number
 }
 
 const RESPAWN_POSITION = { x: 0, y: 0 }
 
 function npc_home_surface(): LuaSurface | undefined {
-  const index = storage.airi_npc_surface_index
+  const index = storage.sgluna_npc_surface_index
   if (index !== undefined) {
     const surface = game.get_surface(index as LuaSurface['index'])
     if (surface !== undefined && surface.valid) return surface
@@ -82,7 +82,7 @@ function spawn_npc_body(surface: LuaSurface, force: LuaForce) {
 
 function remember_npc_surface(actor: StandaloneCharacterActor) {
   const index = actor.surface.index
-  if (storage.airi_npc_surface_index !== index) storage.airi_npc_surface_index = index
+  if (storage.sgluna_npc_surface_index !== index) storage.sgluna_npc_surface_index = index
 }
 
 let standalone_actor: StandaloneCharacterActor | undefined
@@ -113,7 +113,7 @@ script.on_load(() => {
 })
 
 export function get_actor_mode(): ActorMode {
-  return storage.airi_actor_mode ?? 'player'
+  return storage.sgluna_actor_mode ?? 'player'
 }
 
 export function set_actor_mode(mode: ActorMode): ActorMode {
@@ -124,7 +124,7 @@ export function set_actor_mode(mode: ActorMode): ActorMode {
     // after cleanup do we select the new actor mode.
     actor_mode_transition_handler?.({ previous_mode, next_mode: mode })
   }
-  storage.airi_actor_mode = mode
+  storage.sgluna_actor_mode = mode
   standalone_actor = undefined
   recovery_invalidated_actor_id = undefined
   return mode
@@ -147,7 +147,7 @@ function get_player_actor(): ControlledActor | undefined {
 }
 
 function reconcile_owned_crafting_after_load(actor: StandaloneCharacterActor) {
-  const marker = storage.airi_owned_crafting
+  const marker = storage.sgluna_owned_crafting
   if (!marker) {
     return undefined
   }
@@ -175,7 +175,7 @@ function reconcile_owned_crafting_after_load(actor: StandaloneCharacterActor) {
     cancelled_queue_count += item.count
   }
 
-  storage.airi_owned_crafting = undefined
+  storage.sgluna_owned_crafting = undefined
   const receipt: OwnedCraftingLoadReceipt = {
     actor_id: identity.actor_id,
     item_name: marker.item_name,
@@ -237,10 +237,10 @@ function invalidate_missing_npc(previous_actor_id: number) {
   // invalidation handler for this boundary.
   recovery_invalidated_actor_id = previous_actor_id
   npc_recovery_handler?.({ previous_actor_id })
-  if (storage.airi_owned_crafting?.actor_id === previous_actor_id) {
+  if (storage.sgluna_owned_crafting?.actor_id === previous_actor_id) {
     // The dead/missing body took its native queue with it. Drop the marker so a
     // replacement body can never inherit or cancel work it did not own.
-    storage.airi_owned_crafting = undefined
+    storage.sgluna_owned_crafting = undefined
   }
   rendering.clear()
   log(`[AUTORIO] Invalidated work owned by missing NPC actor_id=${previous_actor_id}`)
@@ -252,7 +252,7 @@ function record_npc_recovery(previous_actor_id: number, actor: StandaloneCharact
     return
   }
 
-  storage.airi_last_npc_recovery = {
+  storage.sgluna_last_npc_recovery = {
     reason: 'missing_persisted_actor',
     previous_actor_id,
     replacement_actor_id: identity.actor_id,
@@ -399,7 +399,7 @@ export function get_npc_recovery_status() {
   return {
     policy: 'discard_autorio_tasks_and_create_empty_replacement',
     pending_from_actor_id: recovery_invalidated_actor_id,
-    last_result: storage.airi_last_npc_recovery,
+    last_result: storage.sgluna_last_npc_recovery,
   }
 }
 

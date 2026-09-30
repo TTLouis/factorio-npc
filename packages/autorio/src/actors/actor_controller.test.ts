@@ -172,12 +172,12 @@ describe('actor mode', () => {
 
     set_actor_mode('npc')
     expect(get_controlled_actor()?.character).toBe(first)
-    expect((globalThis as any).storage.airi_npc_surface_index).toBe(1)
+    expect((globalThis as any).storage.sgluna_npc_surface_index).toBe(1)
 
     // It travels, then dies there.
     first.surface = vulcanus
     get_controlled_actor()
-    expect((globalThis as any).storage.airi_npc_surface_index).toBe(7)
+    expect((globalThis as any).storage.sgluna_npc_surface_index).toBe(7)
     first.valid = false
     const replacement = fake_character(99)
     replacement.surface = vulcanus
@@ -212,7 +212,7 @@ describe('actor mode', () => {
     nauvis.create_entity.mockReturnValueOnce(first)
     set_actor_mode('npc')
     get_controlled_actor()
-    expect((globalThis as any).storage.airi_npc_surface_index).toBe(8)
+    expect((globalThis as any).storage.sgluna_npc_surface_index).toBe(8)
 
     first.valid = false
     const replacement = fake_character(99)
@@ -291,7 +291,7 @@ describe('actor mode', () => {
     expect(actor?.character).toBe(first)
 
     first.valid = false
-    ;(globalThis as any).storage.airi_owned_crafting = {
+    ;(globalThis as any).storage.sgluna_owned_crafting = {
       actor_id: 42,
       actor_kind: 'standalone_character',
       force_index: 1,
@@ -302,7 +302,7 @@ describe('actor mode', () => {
     surface.find_entities_filtered.mockReturnValue([])
     surface.create_entity.mockImplementationOnce(() => {
       expect(recovery_handler).toHaveBeenCalledWith({ previous_actor_id: 42 })
-      expect((globalThis as any).storage.airi_owned_crafting).toBeUndefined()
+      expect((globalThis as any).storage.sgluna_owned_crafting).toBeUndefined()
       return replacement
     })
     const recovered = get_controlled_actor()
@@ -357,7 +357,7 @@ describe('actor mode', () => {
     character.mining_state = { mining: true, position: { x: 5, y: 5 } } as any
     character.shooting_state = { state: 'shooting_selected', position: { x: 6, y: 5 } }
     surface.find_entities_filtered.mockReturnValue([character])
-    ;(globalThis as any).storage.airi_actor_mode = 'npc'
+    ;(globalThis as any).storage.sgluna_actor_mode = 'npc'
     ;(globalThis as any).storage.standalone_character_unit_number = 42
 
     get_load_handler()()
@@ -393,9 +393,9 @@ describe('actor mode', () => {
       { index: 2, recipe: 'electronic-circuit', count: 2, prerequisite: false },
     ]
     surface.find_entities_filtered.mockReturnValue([character])
-    ;(globalThis as any).storage.airi_actor_mode = 'npc'
+    ;(globalThis as any).storage.sgluna_actor_mode = 'npc'
     ;(globalThis as any).storage.standalone_character_unit_number = 42
-    ;(globalThis as any).storage.airi_owned_crafting = {
+    ;(globalThis as any).storage.sgluna_owned_crafting = {
       actor_id: 42,
       actor_kind: 'standalone_character',
       force_index: 1,
@@ -409,7 +409,7 @@ describe('actor mode', () => {
 
     expect(character.cancel_crafting).toHaveBeenCalledWith({ index: 2, count: 2 })
     expect(character.cancel_crafting).toHaveBeenCalledWith({ index: 1, count: 6 })
-    expect((globalThis as any).storage.airi_owned_crafting).toBeUndefined()
+    expect((globalThis as any).storage.sgluna_owned_crafting).toBeUndefined()
     expect(get_load_reconciliation_status().owned_crafting).toEqual({
       actor_id: 42,
       item_name: 'electronic-circuit',
@@ -426,7 +426,7 @@ describe('actor mode', () => {
     character.force = force
     character.crafting_queue = [{ index: 1, recipe: 'copper-cable', count: 20, prerequisite: false }]
     surface.find_entities_filtered.mockReturnValue([character])
-    ;(globalThis as any).storage.airi_actor_mode = 'npc'
+    ;(globalThis as any).storage.sgluna_actor_mode = 'npc'
     ;(globalThis as any).storage.standalone_character_unit_number = 42
 
     get_load_handler()()
@@ -456,7 +456,7 @@ describe('actor mode', () => {
       cancel_crafting: vi.fn(),
     }
     ;(globalThis as any).game.connected_players = [player]
-    ;(globalThis as any).storage.airi_actor_mode = 'player'
+    ;(globalThis as any).storage.sgluna_actor_mode = 'player'
 
     get_load_handler()()
     const actor = get_controlled_actor()
@@ -474,7 +474,7 @@ describe('actor mode', () => {
     character.force = (globalThis as any).game.forces.player
     character.walking_state = { walking: true, direction: 'east' }
     surface.find_entities_filtered.mockReturnValue([character])
-    ;(globalThis as any).storage.airi_actor_mode = 'npc'
+    ;(globalThis as any).storage.sgluna_actor_mode = 'npc'
     ;(globalThis as any).storage.standalone_character_unit_number = 42
     ;(globalThis as any).game.is_multiplayer.mockReturnValue(true)
     return character
@@ -516,7 +516,7 @@ describe('actor mode', () => {
   })
 
   it('keeps a replicated reconcile a no-op instead of spawning a body or touching a player actor', () => {
-    ;(globalThis as any).storage.airi_actor_mode = 'npc'
+    ;(globalThis as any).storage.sgluna_actor_mode = 'npc'
     const surface = (globalThis as any).game.surfaces[1]
 
     expect(reconcile_npc_after_load()).toEqual({
@@ -526,7 +526,7 @@ describe('actor mode', () => {
     })
     expect(surface.create_entity).not.toHaveBeenCalled()
 
-    ;(globalThis as any).storage.airi_actor_mode = 'player'
+    ;(globalThis as any).storage.sgluna_actor_mode = 'player'
     expect(reconcile_npc_after_load()).toEqual({
       reconciled: false,
       reason: 'actor_mode_is_player',

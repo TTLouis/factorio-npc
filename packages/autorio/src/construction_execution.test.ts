@@ -45,7 +45,7 @@ function fixture(
       kind: 'standalone_character',
       valid: true,
       has_character: true,
-      name: 'AIRI',
+      name: 'SGLuna',
       position: actorPosition,
     })),
   } as unknown as ControlledActor

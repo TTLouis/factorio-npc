@@ -19,9 +19,9 @@ $Repo = (Resolve-Path (Join-Path $Here '..\..')).Path
 $InstallScript = (Resolve-Path (Join-Path $Here 'install.sh')).Path
 $EggPath = (Resolve-Path (Join-Path $Here 'egg-sgluna-factorio-server.json')).Path
 $Suffix = ([guid]::NewGuid().ToString('N')).Substring(0, 10)
-$Volume = "airi-ptero-smoke-$PID-$Suffix"
-$Container = "airi-ptero-smoke-$PID-$Suffix"
-$EggInstallScript = Join-Path ([System.IO.Path]::GetTempPath()) "airi-ptero-egg-install-$PID-$Suffix.sh"
+$Volume = "sgluna-ptero-smoke-$PID-$Suffix"
+$Container = "sgluna-ptero-smoke-$PID-$Suffix"
+$EggInstallScript = Join-Path ([System.IO.Path]::GetTempPath()) "sgluna-ptero-egg-install-$PID-$Suffix.sh"
 
 function Invoke-Docker {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
@@ -100,7 +100,7 @@ try {
         '-v', "${Volume}:/mnt/server",
         $Image,
         'bash', '-lc',
-        'set -Eeuo pipefail; test -L /mnt/server/start-sgluna.sh; test "$(readlink /mnt/server/start-airi.sh)" = start-sgluna.sh; test -x /mnt/server/rollback-sgluna.sh; test "$(readlink /mnt/server/rollback-airi.sh)" = rollback-sgluna.sh; test -s /mnt/server/client-mods/autorio_0.1.0.zip; test -s /mnt/server/client-mods/SHA256SUMS; test ! -e /mnt/server/autorio_0.1.0.zip; test -s /mnt/server/sgluna-config.json; test -s /mnt/server/README-SGLUNA.txt; test -d /mnt/server/mods; test -d /mnt/server/saves; ! grep -q smoke-secret /mnt/server/sgluna-config.json; target=$(readlink /mnt/server/start-sgluna.sh); case "$target" in .airi/releases/*/start-sgluna.sh) ;; *) echo "unexpected startup target: $target" >&2; exit 1;; esac; test -s "/mnt/server/${target%/start-sgluna.sh}/manifest.json"'
+        'set -Eeuo pipefail; test -L /mnt/server/start-sgluna.sh; test "$(readlink /mnt/server/start-airi.sh)" = start-sgluna.sh; test -x /mnt/server/rollback-sgluna.sh; test "$(readlink /mnt/server/rollback-airi.sh)" = rollback-sgluna.sh; test -s /mnt/server/client-mods/autorio_0.1.0.zip; test -s /mnt/server/client-mods/SHA256SUMS; test ! -e /mnt/server/autorio_0.1.0.zip; test -s /mnt/server/sgluna-config.json; test -s /mnt/server/README-SGLUNA.txt; test -d /mnt/server/mods; test -d /mnt/server/saves; ! grep -q smoke-secret /mnt/server/sgluna-config.json; target=$(readlink /mnt/server/start-sgluna.sh); case "$target" in .sgluna/releases/*/start-sgluna.sh) ;; *) echo "unexpected startup target: $target" >&2; exit 1;; esac; test -s "/mnt/server/${target%/start-sgluna.sh}/manifest.json"'
     )
 
     Write-Host '[pterodactyl-smoke] Starting packaged runtime with zero connected players.'

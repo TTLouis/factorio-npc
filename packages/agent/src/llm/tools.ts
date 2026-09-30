@@ -91,7 +91,7 @@ const technologySchema = z.object({ name: factorioNameSchema }).strict()
 export const tools: ToolFunction[] = [
   {
     name: 'getActorStatus',
-    description: 'Get AIRI\'s controlled actor mode, identity, position, validity, and connected-human count',
+    description: 'Get SGLuna\'s controlled actor mode, identity, position, validity, and connected-human count',
     schema: z.object({}),
     fn: async () => {
       const output = await readRemoteStatus('autorio_actor')
@@ -101,7 +101,7 @@ export const tools: ToolFunction[] = [
   },
   {
     name: 'getTaskStatus',
-    description: 'Get AIRI\'s current Autorio task state, bounded queue/progress state, and controlled actor snapshot',
+    description: 'Get SGLuna\'s current Autorio task state, bounded queue/progress state, and controlled actor snapshot',
     schema: z.object({}),
     fn: async () => {
       const output = await readRemoteStatus('autorio_operations')
@@ -111,7 +111,7 @@ export const tools: ToolFunction[] = [
   },
   {
     name: 'getInventoryItems',
-    description: 'Get the items in AIRI\'s controlled actor main inventory. Equipment slots are separate; use getEquipmentStatus for guns, ammo, armor, selected gun slot, health, and cursor stack.',
+    description: 'Get the items in SGLuna\'s controlled actor main inventory. Equipment slots are separate; use getEquipmentStatus for guns, ammo, armor, selected gun slot, health, and cursor stack.',
     schema: z.object({}),
     fn: async () => {
       const response = await v2FactorioConsoleCommandRawPost({ body: { input: '/c remote.call("autorio_tools", "get_inventory_items")' } })
@@ -121,13 +121,13 @@ export const tools: ToolFunction[] = [
   },
   {
     name: 'getEquipmentStatus',
-    description: 'Inspect AIRI health and equipment state: selected gun slot, equipped guns, matching ammo slots, armor, and cursor stack. Use this before combat instead of inferring equipment from the main inventory.',
+    description: 'Inspect SGLuna health and equipment state: selected gun slot, equipped guns, matching ammo slots, armor, and cursor stack. Use this before combat instead of inferring equipment from the main inventory.',
     schema: z.object({}).strict(),
     fn: async () => readRemoteStatus('autorio_equipment'),
   },
   {
     name: 'getRecipe',
-    description: 'Get the recipe for a given item for AIRI\'s controlled actor',
+    description: 'Get the recipe for a given item for SGLuna\'s controlled actor',
     schema: z.object({
       item: factorioNameSchema.describe('The item to get the recipe for'),
     }).strict(),
@@ -181,7 +181,7 @@ export const tools: ToolFunction[] = [
   },
   {
     name: 'getPlayerStatus',
-    description: 'Inspect one exact human player by name: connection/character availability, surface, position, and distance from AIRI when comparable.',
+    description: 'Inspect one exact human player by name: connection/character availability, surface, position, and distance from SGLuna when comparable.',
     schema: playerStatusSchema,
     fn: async ({ parameters }) => {
       const parsed = playerStatusSchema.parse(parameters)
@@ -193,7 +193,7 @@ export const tools: ToolFunction[] = [
   },
   {
     name: 'getNearbyEntities',
-    description: 'Inspect a bounded area around AIRI and return compact nearby entity summaries. Entities with runtime item-transfer/output or fluid connection geometry may include a compact spatial field from the current game instance. Use optional exact prototype name/type filters to reduce noise.',
+    description: 'Inspect a bounded area around SGLuna and return compact nearby entity summaries. Entities with runtime item-transfer/output or fluid connection geometry may include a compact spatial field from the current game instance. Use optional exact prototype name/type filters to reduce noise.',
     schema: nearbyEntitiesSchema,
     fn: async ({ parameters }) => {
       const parsed = nearbyEntitiesSchema.parse(parameters ?? {})
@@ -280,25 +280,25 @@ export const tools: ToolFunction[] = [
   },
   {
     name: 'getNavigationStatus',
-    description: 'Read AIRI navigation state, bound target, active path request/attempt count, and last bounded navigation result. Use it to distinguish reached from no-target, unreachable, path timeout, stuck, or ownership failures.',
+    description: 'Read SGLuna navigation state, bound target, active path request/attempt count, and last bounded navigation result. Use it to distinguish reached from no-target, unreachable, path timeout, stuck, or ownership failures.',
     schema: z.object({}).strict(),
     fn: async () => readRemoteStatus('autorio_navigation'),
   },
   {
     name: 'getFollowStatus',
-    description: 'Read AIRI persistent player-follow state, target player, configured distance, current distance, and whether follow movement is active, waiting for player availability, or blocked by surface mismatch.',
+    description: 'Read SGLuna persistent player-follow state, target player, configured distance, current distance, and whether follow movement is active, waiting for player availability, or blocked by surface mismatch.',
     schema: z.object({}).strict(),
     fn: async () => readRemoteStatus('autorio_follow'),
   },
   {
     name: 'getDefenseStatus',
-    description: 'Read AIRI persistent follow auto-defense policy, defensive radius, and any current nearby hostile target. Auto-defense may shoot while following but does not chase.',
+    description: 'Read SGLuna persistent follow auto-defense policy, defensive radius, and any current nearby hostile target. Auto-defense may shoot while following but does not chase.',
     schema: z.object({}).strict(),
     fn: async () => readRemoteStatus('autorio_defense'),
   },
   {
     name: 'getCraftingStatus',
-    description: 'Read AIRI native hand-crafting state and last bounded crafting result. Use it to distinguish verified output completion from a busy native queue, missing ingredients/output, cancellation, timeout, or ownership failure.',
+    description: 'Read SGLuna native hand-crafting state and last bounded crafting result. Use it to distinguish verified output completion from a busy native queue, missing ingredients/output, cancellation, timeout, or ownership failure.',
     schema: z.object({}).strict(),
     fn: async () => readRemoteStatus('autorio_crafting'),
   },
@@ -321,7 +321,7 @@ export const tools: ToolFunction[] = [
   },
   {
     name: 'getCombatStatus',
-    description: 'Read AIRI combat state, the currently bound target when valid, and the last bounded combat result. Use it to distinguish a destroyed target from no-target, no-ammo, stuck, timeout, or ownership failures.',
+    description: 'Read SGLuna combat state, the currently bound target when valid, and the last bounded combat result. Use it to distinguish a destroyed target from no-target, no-ammo, stuck, timeout, or ownership failures.',
     schema: z.object({}).strict(),
     fn: async () => readRemoteStatus('autorio_combat'),
   },

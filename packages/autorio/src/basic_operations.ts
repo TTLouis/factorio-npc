@@ -125,8 +125,8 @@ export function transfer_refusal_summary(result: BasicOperationResult) {
 }
 
 declare const storage: {
-  airi_next_basic_operation_id?: number
-  airi_last_basic_operation_result?: BasicOperationResult
+  sgluna_next_basic_operation_id?: number
+  sgluna_last_basic_operation_result?: BasicOperationResult
 }
 
 function owner(task: BasicTask) {
@@ -150,8 +150,8 @@ function valid_name(value: string) {
 }
 
 function next_operation_id() {
-  const next = (storage.airi_next_basic_operation_id ?? 0) + 1
-  storage.airi_next_basic_operation_id = next
+  const next = (storage.sgluna_next_basic_operation_id ?? 0) + 1
+  storage.sgluna_next_basic_operation_id = next
   return next
 }
 
@@ -212,7 +212,7 @@ function result_for(actor: ControlledActor | undefined, task: BasicTask | undefi
     reverse: task?.type === TaskStates.ROTATING ? task.reverse : undefined,
     ...details,
   }
-  storage.airi_last_basic_operation_result = result
+  storage.sgluna_last_basic_operation_result = result
   return result
 }
 
@@ -502,7 +502,7 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
     const published: BasicOperationResult | undefined = original
       ? { ...original, tick: game.tick, refusal_tick: original.tick, batch_refused_count: refusals.length }
       : undefined
-    if (published) storage.airi_last_basic_operation_result = published
+    if (published) storage.sgluna_last_basic_operation_result = published
     const summary = published ? transfer_refusal_summary(published) : `cause=${first.cause ?? 'unknown'}`
     log(`[AUTORIO] [ERROR] ${first.type} refused: ${first.code}; ${summary}; ${refusals.length} of ${receipt.task_count} operations refused, ${receipt.completed_count ?? 0} completed; independent operations were not cancelled`)
   })
@@ -536,8 +536,8 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
 
   function status() {
     return {
-      last_result: storage.airi_last_basic_operation_result,
-      next_operation_id: storage.airi_next_basic_operation_id ?? 0,
+      last_result: storage.sgluna_last_basic_operation_result,
+      next_operation_id: storage.sgluna_next_basic_operation_id ?? 0,
     }
   }
 

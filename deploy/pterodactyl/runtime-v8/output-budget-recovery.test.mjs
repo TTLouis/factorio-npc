@@ -17,7 +17,7 @@ import { FakeFactorio, gather, inventoryCheckpoint, planReply, recordingJev } fr
 
 function deployment() {
   return {
-    revision: 'airi-deploy-v8-npc-staging',
+    revision: 'sgluna-deploy-v8-npc-staging',
     session: '0123456789abcdef0123456789abcdef',
     mode: 'npc',
     actor_id: 18,
@@ -40,7 +40,7 @@ class FakeRcon {
   }
 
   async command(text) {
-    if (text.includes('remote.call("airi_deployment","status")')) return JSON.stringify(this.status)
+    if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(this.status)
     if (text.includes('remote.call("autorio_preflight","operation"')) return JSON.stringify({ ok: true })
     if (text.includes('remote.call("autorio_operations","status")')) {
       return JSON.stringify({
@@ -57,7 +57,7 @@ class FakeRcon {
       })
     }
     if (text.includes('local ok,result=pcall')) {
-      const marker = text.match(/AIRI_RESULT_[a-f0-9]{24}:/)?.[0]
+      const marker = text.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)?.[0]
       assert.ok(marker)
       this.mutations.push(text)
       this.batchId++
@@ -74,7 +74,7 @@ function planMessage({ chatMessage = '', plan = [], currentStep = 0, operations 
 
 function exhaustedMessage() {
   const message = { content: '' }
-  Object.defineProperty(message, '_airiProvider', {
+  Object.defineProperty(message, '_sglunaProvider', {
     enumerable: false,
     value: {
       diagnostic_code: 'provider_output_budget_exhausted',
@@ -256,13 +256,13 @@ test('output-budget recovery keeps the canonical Task Board at the evidenced ste
 
       assert.equal(context.recoveryKind, 'output_budget_exhaustion')
       assert.equal(context.allowTools, true)
-      const stateDuringRecovery = agent.memory.currentPlan('npc:airi')
+      const stateDuringRecovery = agent.memory.currentPlan('npc:sgluna')
       assert.deepEqual(stateDuringRecovery.plan, canonical)
       assert.equal(stateDuringRecovery.task_board.active_index, 0)
       assert.equal(stateDuringRecovery.task_board.total_steps, 3)
       assert.equal(stateDuringRecovery.task_board.evidence.at(-1).kind, 'operation_receipt')
       assert.equal(stateDuringRecovery.task_board.evidence.some(item => item.kind === 'deterministic_verification'), false)
-      assert.equal(agent.memory.byNpc.get('npc:airi').recent.at(-1).assistant, 'Waiting for one machine cycle.')
+      assert.equal(agent.memory.byNpc.get('npc:sgluna').recent.at(-1).assistant, 'Waiting for one machine cycle.')
 
       return planMessage({
         chatMessage: 'I will mine the ore next.',
@@ -331,7 +331,7 @@ test('output-budget recovery with no fresh evidence does not invent a durable wo
     /provider_output_budget_exhausted: bounded output-budget recovery produced no fresh world evidence/i,
   )
 
-  const state = agent.memory.currentPlan('npc:airi')
+  const state = agent.memory.currentPlan('npc:sgluna')
   assert.equal(state.status, 'active')
   assert.equal(state.task_board.status, 'active')
   assert.equal(state.task_board.active_index, 0)
@@ -392,7 +392,7 @@ test('output-budget recovery rejects replay of a completed mutation before admis
   assert.equal(calls.length, 4)
   assert.equal(rcon.mutations.length, 1)
   assert.equal(rcon.mutations.filter(text => text.includes("'wait'")).length, 1)
-  const state = agent.memory.currentPlan('npc:airi')
+  const state = agent.memory.currentPlan('npc:sgluna')
   assert.equal(state.status, 'active')
   assert.equal(state.task_board.status, 'active')
   assert.equal(state.task_board.active_index, 0)
@@ -426,7 +426,7 @@ test('empty recovery content cannot retire an active canonical Task Board withou
     /provider_output_budget_exhausted: bounded output-budget recovery produced no fresh world evidence/i,
   )
 
-  const durable = agent.memory.currentPlan('npc:airi')
+  const durable = agent.memory.currentPlan('npc:sgluna')
   assert.ok(durable)
   assert.equal(durable.status, 'active')
   assert.deepEqual(durable.plan, canonical.slice(0, 2))
@@ -600,7 +600,7 @@ test('terminal provider budget becomes a deterministic fresh planner generation 
         currentStep: 0,
         operations: [{ name: 'wait', args: { ticks: 1 } }],
       })
-      Object.defineProperty(message, '_airiProvider', {
+      Object.defineProperty(message, '_sglunaProvider', {
         enumerable: false,
         value: {
           diagnostic_code: 'provider_ok',
@@ -624,7 +624,7 @@ test('terminal provider budget becomes a deterministic fresh planner generation 
   assert.equal(agent.providerBudgetGenerationOutputUnits, 200)
   assert.equal(agent.traceRequest.usage.output_units, 4200)
   assert.equal(agent.providerBudgetHandoffCount, 1)
-  assert.equal(agent.memory.currentPlan('npc:airi').provider_recovery, undefined)
+  assert.equal(agent.memory.currentPlan('npc:sgluna').provider_recovery, undefined)
 })
 
 
@@ -659,7 +659,7 @@ test('provider-budget recovery cannot replace the existing committed plan', asyn
       if (calls.length === 2 || calls.length === 3) return exhaustedMessage()
 
       assert.equal(context.triggerSource, 'recovery_continue_low')
-      const duringHandoff = agent.memory.currentPlan('npc:airi')
+      const duringHandoff = agent.memory.currentPlan('npc:sgluna')
       assert.equal(duringHandoff.hierarchy_split_pending, undefined)
       pendingObserved = true
 
@@ -676,7 +676,7 @@ test('provider-budget recovery cannot replace the existing committed plan', asyn
 
   await agent.request('run a long task whose current scope may need splitting', { sender: 'TTLouis' })
   const result = await agent.completed()
-  const state = agent.memory.currentPlan('npc:airi')
+  const state = agent.memory.currentPlan('npc:sgluna')
 
   assert.equal(pendingObserved, true)
   assert.equal(calls.length, 4)
@@ -700,8 +700,8 @@ test('budget handoff survives memory restore and resumes from the compact handof
   })
   await setupAgent.request('establish one durable target', { sender: 'TTLouis' })
 
-  const before = setupMemory.currentPlan('npc:airi')
-  setupMemory.setProviderRecovery('npc:airi', {
+  const before = setupMemory.currentPlan('npc:sgluna')
+  setupMemory.setProviderRecovery('npc:sgluna', {
     kind: 'budget_handoff',
     phase: 'planner_pending',
     goal_id: before.goal_id,
@@ -716,9 +716,9 @@ test('budget handoff survives memory restore and resumes from the compact handof
 
   const restoredMemory = new CanonicalTaskBoardMemory()
   restoredMemory.restore(setupMemory.snapshot())
-  assert.equal(restoredMemory.currentPlan('npc:airi').provider_recovery?.kind, 'budget_handoff')
-  assert.equal(restoredMemory.currentPlan('npc:airi').provider_recovery?.phase, 'planner_pending')
-  assert.equal(restoredMemory.currentPlan('npc:airi').provider_recovery?.semantic_scope, 'reanchor_target')
+  assert.equal(restoredMemory.currentPlan('npc:sgluna').provider_recovery?.kind, 'budget_handoff')
+  assert.equal(restoredMemory.currentPlan('npc:sgluna').provider_recovery?.phase, 'planner_pending')
+  assert.equal(restoredMemory.currentPlan('npc:sgluna').provider_recovery?.semantic_scope, 'reanchor_target')
 
   let resumed = false
   const resumedAgent = makeAgent({
@@ -744,7 +744,7 @@ test('budget handoff survives memory restore and resumes from the compact handof
   assert.equal(result.goalStatus, 'active')
   assert.equal(resumedAgent.providerBudgetGeneration, 2)
   assert.equal(resumedAgent.providerBudgetHandoffCount, 1)
-  assert.equal(restoredMemory.currentPlan('npc:airi').provider_recovery, undefined)
+  assert.equal(restoredMemory.currentPlan('npc:sgluna').provider_recovery, undefined)
 })
 
 
@@ -820,7 +820,7 @@ test('context-window exhaustion enters the same deterministic planner-budget han
   assert.notEqual(result.goalStatus, 'paused')
   assert.equal(agent.providerBudgetGeneration, 2)
   assert.equal(agent.providerBudgetHandoffCount, 1)
-  assert.equal(agent.memory.currentPlan('npc:airi').provider_recovery, undefined)
+  assert.equal(agent.memory.currentPlan('npc:sgluna').provider_recovery, undefined)
 })
 
 
@@ -902,7 +902,7 @@ test('fresh planner generations can roll over provider budget more than once in 
   assert.equal(result.goalStatus, 'active')
   assert.equal(agent.providerBudgetGeneration, 3)
   assert.equal(agent.providerBudgetHandoffCount, 2)
-  assert.equal(agent.memory.currentPlan('npc:airi').provider_recovery, undefined)
+  assert.equal(agent.memory.currentPlan('npc:sgluna').provider_recovery, undefined)
 })
 
 test('provider budget rollover limit stops recursive fresh generations without creating a world blocker', async () => {
@@ -936,7 +936,7 @@ test('provider budget rollover limit stops recursive fresh generations without c
   assert.equal(agent.providerBudgetGeneration, 2)
   assert.equal(agent.providerBudgetHandoffCount, 1)
   assert.equal(result.goalStatus, 'paused')
-  const state = agent.memory.currentPlan('npc:airi')
+  const state = agent.memory.currentPlan('npc:sgluna')
   assert.equal(state.status, 'paused')
   assert.notEqual(state.status, 'blocked')
   assert.equal(state.provider_recovery, undefined)
@@ -1068,7 +1068,7 @@ test('a budget handoff after loaded skills keeps every tool exchange whole for t
     assert.ok(firstTurn < 0 || skillAt < firstTurn, 'skill context precedes the first model turn')
   }
   assert.equal(factorio.mutations.length, 1)
-  assert.equal(agent.memory.currentPlan('npc:airi').status, 'active')
+  assert.equal(agent.memory.currentPlan('npc:sgluna').status, 'active')
 })
 
 test('a staged amendment cannot push skill context into the middle of a tool exchange', () => {
@@ -1152,7 +1152,7 @@ test('steam replay: a verified step close rolls the output budget generation, so
   assert.ok(nextRequest, 'the step-2 planner round follows the roll')
 
   await world.failSupplyBatch()
-  const state = world.memory.currentPlan('npc:airi')
+  const state = world.memory.currentPlan('npc:sgluna')
   assert.equal(world.events('budget.output_units_exceeded').length, 0)
   assert.equal(world.events('request.failed').length, 0)
   assert.equal(world.events('budget.cap_reached').length, 0)
@@ -1192,11 +1192,11 @@ test('steam replay: a budget stop on a blocked plan keeps it BLOCKED, names both
   assert.equal(result.chatMessage, 'I stopped: the model used its whole output budget for this step (20,941 of 20,000 units), and the plan is blocked on transfer_failed:nothing_moved. Continuing unchanged would hit the same blocker. Tell me how to revise it (for example a different route or target), or cancel it.')
   assert.equal(result.goalStatus, 'blocked')
   assert.equal(result.budgetCause, 'provider_turn_output_cap_exceeded')
-  const state = world.memory.currentPlan('npc:airi')
+  const state = world.memory.currentPlan('npc:sgluna')
   assert.equal(state.status, 'blocked', 'a blocked plan is never relabelled paused')
   assert.equal(state.blocker, 'transfer_failed:nothing_moved')
   assert.equal(state.pause_reason, '')
-  assert.equal(world.memory.planningState('npc:airi').plans.at(-1).status, 'BLOCKED')
+  assert.equal(world.memory.planningState('npc:sgluna').plans.at(-1).status, 'BLOCKED')
   assert.equal(world.agent.active, false)
 
   const reached = world.events('budget.cap_reached')
@@ -1226,8 +1226,8 @@ test('steam replay: a budget stop on a blocked plan keeps it BLOCKED, names both
   assert.equal(resumed.goalStatus, 'blocked')
   assert.equal(world.calls.length, callsBefore)
   assert.equal(world.game.mutations.length, mutationsBefore)
-  assert.equal(world.memory.currentPlan('npc:airi').status, 'blocked')
-  assert.equal(world.memory.planningState('npc:airi').plans.at(-1).blocker?.user_choice, undefined)
+  assert.equal(world.memory.currentPlan('npc:sgluna').status, 'blocked')
+  assert.equal(world.memory.planningState('npc:sgluna').plans.at(-1).blocker?.user_choice, undefined)
 })
 
 test('a budget pause on an ACTIVE plan still resumes normally with Resume', async () => {
@@ -1236,7 +1236,7 @@ test('a budget pause on an ACTIVE plan still resumes normally with Resume', asyn
   const rcon = new FakeRcon()
   const over = () => {
     const message = planMessage({ chatMessage: 'Thinking long.', plan: canonical, currentStep: 0, operations: [{ name: 'wait', args: { ticks: 1 } }] })
-    Object.defineProperty(message, '_airiProvider', {
+    Object.defineProperty(message, '_sglunaProvider', {
       enumerable: false,
       value: { diagnostic_code: 'ok', finish_reason: 'stop', usage: { prompt_tokens: 100, completion_tokens: 3500, total_tokens: 3600 } },
     })
@@ -1262,7 +1262,7 @@ test('a budget pause on an ACTIVE plan still resumes normally with Resume', asyn
   const paused = await agent.completed()
   assert.equal(paused.goalStatus, 'paused')
   assert.ok(paused.chatMessage.endsWith(RESUME_LINE), paused.chatMessage)
-  assert.equal(agent.memory.currentPlan('npc:airi').status, 'paused')
+  assert.equal(agent.memory.currentPlan('npc:sgluna').status, 'paused')
   const pausedEvent = trace.filter(record => record.event === 'goal.paused')
   assert.equal(pausedEvent.length, 1)
 
@@ -1270,7 +1270,7 @@ test('a budget pause on an ACTIVE plan still resumes normally with Resume', asyn
   const mutationsBefore = rcon.mutations.length
   const result = await agent.request('continue', { sender: 'TTLouis' })
   assert.equal(result.goalStatus, 'active')
-  assert.equal(agent.memory.currentPlan('npc:airi').status, 'active')
+  assert.equal(agent.memory.currentPlan('npc:sgluna').status, 'active')
   assert.equal(rcon.mutations.length, mutationsBefore + 1, 'Resume admits work again')
 })
 
@@ -1284,7 +1284,7 @@ function runawayHarness() {
   const memory = new CanonicalTaskBoardMemory()
   const world = { game, memory, calls: 0, trace: [] }
   const withUsage = (message, output) => {
-    Object.defineProperty(message, '_airiProvider', {
+    Object.defineProperty(message, '_sglunaProvider', {
       enumerable: false,
       value: { diagnostic_code: 'ok', finish_reason: 'stop', usage: { prompt_tokens: 3000, completion_tokens: output, total_tokens: 3000 + output } },
     })
@@ -1297,7 +1297,7 @@ function runawayHarness() {
     provider: async () => {
       world.calls++
       assert.ok(world.calls < 40, 'runaway was not stopped')
-      const board = memory.currentPlan('npc:airi')?.task_board
+      const board = memory.currentPlan('npc:sgluna')?.task_board
       if (!board) {
         return withUsage(planReply({ plan: steps, operations: [gather(ores[0], 10)], checkpoint: inventoryCheckpoint(ores[0], 10) }), 480)
       }
@@ -1323,7 +1323,7 @@ function runawayHarness() {
   world.finishUntilPaused = async () => {
     let result
     for (let batch = 0; batch < 24; batch++) {
-      const board = memory.currentPlan('npc:airi').task_board
+      const board = memory.currentPlan('npc:sgluna').task_board
       const resource = ores[board.active_index % ores.length]
       game.inventory[resource] = (game.inventory[resource] ?? 0) + 10
       result = await world.agent.completed()
@@ -1345,7 +1345,7 @@ function assertCeilingPause(world, result, requestId) {
   assert.equal(exceeded[0].data.request_output_units, 5280, '11 calls x 480 = 5,280 > 5,000')
   assert.match(result.chatMessage, /^I paused this goal: this request used its whole output allowance \(5,280 of 5,000 units across \d+ step budgets\)\. /)
   assert.ok(result.chatMessage.endsWith(RESUME_LINE))
-  const state = world.memory.currentPlan('npc:airi')
+  const state = world.memory.currentPlan('npc:sgluna')
   assert.equal(state.status, 'paused')
   assert.equal(state.pause_reason, 'request_output_ceiling: 5,280 > 5,000 output units')
   const paused = world.events('goal.paused')
@@ -1392,7 +1392,7 @@ test('a provider response with no usage is charged its requested output cap, tow
   const canonical = ['Wait for the machine cycle', 'Inspect the result']
   const noUsage = () => {
     const message = planMessage({ chatMessage: 'Waiting.', plan: canonical, currentStep: 0, operations: [{ name: 'wait', args: { ticks: 1 } }] })
-    Object.defineProperty(message, '_airiProvider', {
+    Object.defineProperty(message, '_sglunaProvider', {
       enumerable: false,
       value: { diagnostic_code: 'ok', finish_reason: 'stop', requested_output_cap: 2000 },
     })
@@ -1430,7 +1430,7 @@ test('a request ceiling hit with no plan state still ends in a visible pause lin
     error.code = 'request_output_ceiling'
     throw error
   }
-  assert.equal(agent.memory.currentPlan('npc:airi'), undefined)
+  assert.equal(agent.memory.currentPlan('npc:sgluna'), undefined)
   const result = await agent.runGuarded()
 
   assert.ok(result.chatMessage.startsWith('I paused this goal: this request used its whole output allowance'))
@@ -1455,7 +1455,7 @@ test('a supervisor recovery run never carries revision authority over a BLOCKED 
   const trace = []
   agent.behaviorTrace = { emit: async record => { trace.push(record) } }
   await agent.request('wait for one cycle', { sender: 'TTLouis' })
-  const key = 'npc:airi'
+  const key = 'npc:sgluna'
   agent.memory.blockRemainingPlan(key, {
     blocker: 'transfer_failed:nothing_moved',
     reason: 'furnace refused the item',
@@ -1516,7 +1516,7 @@ test('a terminal budget failure after the budget handoff recovery also pauses vi
   assert.equal(paused[0].data.source, 'budget_recovery_failed')
   assert.equal(paused[0].data.previous_status, 'active')
   assert.equal(events.some(entry => entry.event === 'request.failed'), false)
-  assert.equal(agent.memory.currentPlan('npc:airi').status, 'paused')
+  assert.equal(agent.memory.currentPlan('npc:sgluna').status, 'paused')
 })
 
 // ---------------------------------------------------------------------------

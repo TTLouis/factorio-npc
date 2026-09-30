@@ -243,7 +243,7 @@ function taskBoardUiRconCommand(text) {
   return command.includes('remote.call("autorio_task_board"') || command.includes("remote.call('autorio_task_board'")
 }
 
-const UI_RCON_READY_COMMAND = '/silent-command rcon.print("AIRI_UI_RCON_READY")'
+const UI_RCON_READY_COMMAND = '/silent-command rcon.print("SGLUNA_UI_RCON_READY")'
 
 export class Rcon {
   constructor(port, password, timeout = 5000, { auxiliary = false, host = '127.0.0.1' } = {}) {
@@ -357,8 +357,8 @@ export class Rcon {
         // Factorio asks for the first Lua console command to be repeated exactly
         // before enabling it. Prime that confirmation on the dedicated UI socket
         // so a changing set_snapshot payload cannot get stuck behind the prompt.
-        if (ready !== 'AIRI_UI_RCON_READY') ready = String(await lane.command(UI_RCON_READY_COMMAND) ?? '').trim()
-        check(ready === 'AIRI_UI_RCON_READY', 'Task Board RCON handshake failed')
+        if (ready !== 'SGLUNA_UI_RCON_READY') ready = String(await lane.command(UI_RCON_READY_COMMAND) ?? '').trim()
+        check(ready === 'SGLUNA_UI_RCON_READY', 'Task Board RCON handshake failed')
         if (this.closed || !this.socket || this.socket.destroyed) {
           lane.close()
           throw new DeploymentError('RCON is not connected')

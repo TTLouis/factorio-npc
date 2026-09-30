@@ -3,37 +3,37 @@ import type { LuaGuiElement, ScrollPaneGuiElement } from 'factorio:runtime'
 import * as activity_state from './task_board_activity'
 import * as gui_text from './task_board_gui_text'
 
-export const DEBUG_BUTTON_NAME = 'airi_task_board_debug'
-export const DEBUG_CLOSE_BUTTON_NAME = 'airi_task_board_debug_close'
+export const DEBUG_BUTTON_NAME = 'sgluna_task_board_debug'
+export const DEBUG_CLOSE_BUTTON_NAME = 'sgluna_task_board_debug_close'
 const CONVERSATION_HEIGHT = 300
-export const CONVERSATION_STATE_NAME = 'airi_task_board_conversation_live'
-export const CONVERSATION_SCROLL_NAME = 'airi_task_board_conversation_scroll'
+export const CONVERSATION_STATE_NAME = 'sgluna_task_board_conversation_live'
+export const CONVERSATION_SCROLL_NAME = 'sgluna_task_board_conversation_scroll'
 const CONVERSATION = {
-  section: 'airi_task_board_conversation_section',
-  header: 'airi_task_board_conversation_header',
+  section: 'sgluna_task_board_conversation_section',
+  header: 'sgluna_task_board_conversation_header',
   state: CONVERSATION_STATE_NAME,
-  count: 'airi_task_board_conversation_count',
-  body: 'airi_task_board_conversation_body',
-  empty: 'airi_task_board_conversation_empty',
+  count: 'sgluna_task_board_conversation_count',
+  body: 'sgluna_task_board_conversation_body',
+  empty: 'sgluna_task_board_conversation_empty',
   scroll: CONVERSATION_SCROLL_NAME,
-  table: 'airi_task_board_activity_table',
+  table: 'sgluna_task_board_activity_table',
 }
-export const DEBUG_ACTIVITY_STATE_NAME = 'airi_task_board_debug_activity_state'
-export const DEBUG_ACTIVITY_SCROLL_NAME = 'airi_task_board_debug_activity_scroll'
+export const DEBUG_ACTIVITY_STATE_NAME = 'sgluna_task_board_debug_activity_state'
+export const DEBUG_ACTIVITY_SCROLL_NAME = 'sgluna_task_board_debug_activity_scroll'
 
 declare const storage: {
-  airi_task_board_debug_open?: Record<number, boolean>
-  airi_task_board_ui_generation?: number
-  airi_task_board_ui_revision?: number
-  airi_task_board_ui?: any
-  airi_task_board_ui_suppressed?: { goal_id: string, objective: string }
-  airi_task_board_ui_last_seen?: { goal_id: string, objective: string }
-  airi_task_board_ui_inputs?: any[]
-  airi_task_board_activity_history?: any[]
-  airi_task_board_conversation_goal_id?: string
-  airi_task_board_conversation_start_key?: string
-  airi_task_board_conversation_id?: string
-  airi_task_board_debug_activity_view?: Record<number, { follow: boolean, behind: boolean, seen_key?: string }>
+  sgluna_task_board_debug_open?: Record<number, boolean>
+  sgluna_task_board_ui_generation?: number
+  sgluna_task_board_ui_revision?: number
+  sgluna_task_board_ui?: any
+  sgluna_task_board_ui_suppressed?: { goal_id: string, objective: string }
+  sgluna_task_board_ui_last_seen?: { goal_id: string, objective: string }
+  sgluna_task_board_ui_inputs?: any[]
+  sgluna_task_board_activity_history?: any[]
+  sgluna_task_board_conversation_goal_id?: string
+  sgluna_task_board_conversation_start_key?: string
+  sgluna_task_board_conversation_id?: string
+  sgluna_task_board_debug_activity_view?: Record<number, { live: boolean, behind: boolean, seen_key?: string }>
 }
 
 export interface TaskBoardUiStructuredContentDebug {
@@ -318,17 +318,17 @@ export function accept_sync_version(generation: unknown, revision: unknown) {
   if (!valid_version(generation) || !valid_version(revision)) return true
   const incoming_generation = generation as number
   const incoming_revision = revision as number
-  const current_generation = storage.airi_task_board_ui_generation ?? -1
-  const current_revision = storage.airi_task_board_ui_revision ?? -1
+  const current_generation = storage.sgluna_task_board_ui_generation ?? -1
+  const current_revision = storage.sgluna_task_board_ui_revision ?? -1
   if (incoming_generation < current_generation) return false
   if (incoming_generation === current_generation && incoming_revision <= current_revision) return false
-  storage.airi_task_board_ui_generation = incoming_generation
-  storage.airi_task_board_ui_revision = incoming_revision
+  storage.sgluna_task_board_ui_generation = incoming_generation
+  storage.sgluna_task_board_ui_revision = incoming_revision
   return true
 }
 
 export function current_sync_version() {
-  return { generation: storage.airi_task_board_ui_generation ?? 0, revision: storage.airi_task_board_ui_revision ?? 0 }
+  return { generation: storage.sgluna_task_board_ui_generation ?? 0, revision: storage.sgluna_task_board_ui_revision ?? 0 }
 }
 
 function snapshot_identity(board: any) {
@@ -336,11 +336,11 @@ function snapshot_identity(board: any) {
 }
 export function suppress_snapshot(board: any) {
   if (board === undefined || board === null) return
-  storage.airi_task_board_ui_suppressed = snapshot_identity(board)
+  storage.sgluna_task_board_ui_suppressed = snapshot_identity(board)
 }
-export function clear_snapshot_suppression() { storage.airi_task_board_ui_suppressed = undefined }
+export function clear_snapshot_suppression() { storage.sgluna_task_board_ui_suppressed = undefined }
 export function snapshot_is_suppressed(value: any) {
-  const suppressed = storage.airi_task_board_ui_suppressed
+  const suppressed = storage.sgluna_task_board_ui_suppressed
   if (suppressed === undefined || value === undefined || value === null || typeof value !== 'object') return false
   const objective = clean_text(value.objective, 500)
   const goal_id = clean_text(value.goal_id, 100)
@@ -349,7 +349,7 @@ export function snapshot_is_suppressed(value: any) {
 }
 
 function destructive_clear_is_queued() {
-  for (const input of storage.airi_task_board_ui_inputs ?? []) {
+  for (const input of storage.sgluna_task_board_ui_inputs ?? []) {
     if (input?.kind === 'control' && (input?.action === 'terminate' || input?.action === 'new_task')) return true
   }
   return false
@@ -366,25 +366,25 @@ function destructive_clear_is_queued() {
  * different objective is accepted and becomes the new baseline.
  */
 export function reconcile_task_board_freshness() {
-  const current = storage.airi_task_board_ui
+  const current = storage.sgluna_task_board_ui
   if (destructive_clear_is_queued() && current !== undefined) {
     suppress_snapshot(current)
-    storage.airi_task_board_ui_last_seen = snapshot_identity(current)
+    storage.sgluna_task_board_ui_last_seen = snapshot_identity(current)
     return false
   }
   if (current === undefined) {
-    if (storage.airi_task_board_ui_suppressed === undefined && storage.airi_task_board_ui_last_seen !== undefined) {
-      storage.airi_task_board_ui_suppressed = storage.airi_task_board_ui_last_seen
+    if (storage.sgluna_task_board_ui_suppressed === undefined && storage.sgluna_task_board_ui_last_seen !== undefined) {
+      storage.sgluna_task_board_ui_suppressed = storage.sgluna_task_board_ui_last_seen
     }
     return false
   }
   if (snapshot_is_suppressed(current)) {
     if (typeof remote !== 'undefined' && remote.interfaces?.autorio_task_board !== undefined) remote.call('autorio_task_board', 'clear')
-    else storage.airi_task_board_ui = undefined
+    else storage.sgluna_task_board_ui = undefined
     return true
   }
-  storage.airi_task_board_ui_last_seen = snapshot_identity(current)
-  if (storage.airi_task_board_ui_suppressed !== undefined) clear_snapshot_suppression()
+  storage.sgluna_task_board_ui_last_seen = snapshot_identity(current)
+  if (storage.sgluna_task_board_ui_suppressed !== undefined) clear_snapshot_suppression()
   return false
 }
 
@@ -394,8 +394,8 @@ if (typeof script !== 'undefined' && typeof defines !== 'undefined') {
   script.on_event(defines.events.on_tick, () => { reconcile_task_board_freshness() })
 }
 
-function ensure_debug_open_state() { if (storage.airi_task_board_debug_open === undefined) storage.airi_task_board_debug_open = {}; return storage.airi_task_board_debug_open }
-export function debug_ui_is_open(player_index: number) { return storage.airi_task_board_debug_open?.[player_index] === true }
+function ensure_debug_open_state() { if (storage.sgluna_task_board_debug_open === undefined) storage.sgluna_task_board_debug_open = {}; return storage.sgluna_task_board_debug_open }
+export function debug_ui_is_open(player_index: number) { return storage.sgluna_task_board_debug_open?.[player_index] === true }
 // Runtime diagnostics are intentionally bounded and ride the normal snapshot,
 // so the poll schema stays unchanged and remains compatible with older eggs.
 export function any_debug_ui_open(): any { return undefined }
@@ -405,18 +405,18 @@ export function debug_button_caption(player_index: number) { return debug_ui_is_
 export function follow_button_caption(active: boolean) { return active ? 'FOLLOWING' : 'FOLLOW' }
 
 export function debug_activity_view(player_index: number) {
-  if (storage.airi_task_board_debug_activity_view === undefined) storage.airi_task_board_debug_activity_view = {}
-  let view = storage.airi_task_board_debug_activity_view[player_index]
+  if (storage.sgluna_task_board_debug_activity_view === undefined) storage.sgluna_task_board_debug_activity_view = {}
+  let view = storage.sgluna_task_board_debug_activity_view[player_index]
   if (view === undefined) {
-    view = { follow: true, behind: false }
-    storage.airi_task_board_debug_activity_view[player_index] = view
+    view = { live: true, behind: false }
+    storage.sgluna_task_board_debug_activity_view[player_index] = view
   }
   return view
 }
-export function toggle_debug_activity_follow(player_index: number) {
+export function toggle_debug_activity_live(player_index: number) {
   const view = debug_activity_view(player_index)
-  view.follow = !view.follow
-  if (view.follow) view.behind = true
+  view.live = !view.live
+  if (view.live) view.behind = true
   return view
 }
 function task_activity_key(entry: any) {
@@ -431,7 +431,7 @@ function activity_conversation_message(entry: any): TaskConversationMessage | un
   if (line.length === 0) return undefined
   const timestamp = clean_text(entry?.timestamp, 16)
   const key = task_activity_key(entry)
-  if (kind === 'decision') return { key, role: 'assistant', sender: 'AIRI', text: line, timestamp }
+  if (kind === 'decision') return { key, role: 'assistant', sender: 'SGLuna', text: line, timestamp }
   if (kind !== 'observation') return undefined
   const id = clean_text(entry?.id, 120)
   if (!id.startsWith('live_') || line.startsWith('Tool ')) return undefined
@@ -455,12 +455,12 @@ function objective_matches_message(objective: string, message: string) {
 /**
  * Conversation is a player-facing projection of the already-retained activity
  * history, not hidden model reasoning. A new durable goal establishes a new
- * start cursor, while pause/follow/continue keep using the same goal and cursor.
+ * start cursor, while pause/live/continue keep using the same goal and cursor.
  */
 export function reset_task_conversation() {
-  storage.airi_task_board_conversation_goal_id = undefined
-  storage.airi_task_board_conversation_start_key = undefined
-  storage.airi_task_board_conversation_id = undefined
+  storage.sgluna_task_board_conversation_goal_id = undefined
+  storage.sgluna_task_board_conversation_start_key = undefined
+  storage.sgluna_task_board_conversation_id = undefined
 }
 
 export function task_conversation_messages(board: any): TaskConversationMessage[] {
@@ -473,10 +473,10 @@ export function task_conversation_messages(board: any): TaskConversationMessage[
   const explicit = Array.isArray(board.conversation) ? board.conversation as any[] : []
   const conversation_id = clean_text(board.conversation_id, 120)
   if (conversation_id.length > 0) {
-    if (storage.airi_task_board_conversation_id !== conversation_id) {
-      storage.airi_task_board_conversation_id = conversation_id
-      storage.airi_task_board_conversation_goal_id = clean_text(board.goal_id, 100)
-      storage.airi_task_board_conversation_start_key = undefined
+    if (storage.sgluna_task_board_conversation_id !== conversation_id) {
+      storage.sgluna_task_board_conversation_id = conversation_id
+      storage.sgluna_task_board_conversation_goal_id = clean_text(board.goal_id, 100)
+      storage.sgluna_task_board_conversation_start_key = undefined
     }
     const visible: TaskConversationMessage[] = []
     for (let index = 0; index < explicit.length; index++) {
@@ -487,7 +487,7 @@ export function task_conversation_messages(board: any): TaskConversationMessage[
       visible.push({
         key: `conversation:${clean_text(entry?.id || `message_${index + 1}`, 120)}`,
         role,
-        sender: clean_text(entry?.sender || (role === 'assistant' ? 'AIRI' : 'Player'), 128),
+        sender: clean_text(entry?.sender || (role === 'assistant' ? 'SGLuna' : 'Player'), 128),
         text: line,
         timestamp: '',
       })
@@ -495,8 +495,8 @@ export function task_conversation_messages(board: any): TaskConversationMessage[
     return visible
   }
 
-  const raw_history = Array.isArray(storage.airi_task_board_activity_history)
-    ? storage.airi_task_board_activity_history as any[]
+  const raw_history = Array.isArray(storage.sgluna_task_board_activity_history)
+    ? storage.sgluna_task_board_activity_history as any[]
     : Array.isArray(board.activity) ? board.activity as any[] : []
   const messages: TaskConversationMessage[] = []
   for (const entry of raw_history) {
@@ -509,7 +509,7 @@ export function task_conversation_messages(board: any): TaskConversationMessage[
   if (messages.length === 0) return []
 
   const goal_id = clean_text(board.goal_id, 100)
-  const previous_goal = storage.airi_task_board_conversation_goal_id ?? ''
+  const previous_goal = storage.sgluna_task_board_conversation_goal_id ?? ''
   if (goal_id.length > 0 && goal_id !== previous_goal) {
     let start_key = ''
     const objective = clean_text(board.objective, 500)
@@ -526,11 +526,11 @@ export function task_conversation_messages(board: any): TaskConversationMessage[
         break
       }
     }
-    storage.airi_task_board_conversation_goal_id = goal_id
-    storage.airi_task_board_conversation_start_key = start_key
+    storage.sgluna_task_board_conversation_goal_id = goal_id
+    storage.sgluna_task_board_conversation_start_key = start_key
   }
 
-  const start_key = storage.airi_task_board_conversation_start_key ?? ''
+  const start_key = storage.sgluna_task_board_conversation_start_key ?? ''
   if (start_key.length === 0) return messages
   for (let index = 0; index < messages.length; index++) {
     if (messages[index].key === start_key) return messages.slice(index)
@@ -541,7 +541,7 @@ export function task_conversation_messages(board: any): TaskConversationMessage[
 /**
  * Activity keys (task_board_activity's form) of the rows the Current Task
  * Conversation shows right now. Recent activity skips them: the same player
- * message or AIRI reply printed twice, one panel above the other, is noise.
+ * message or SGLuna reply printed twice, one panel above the other, is noise.
  */
 export function conversation_activity_keys(board: any) {
   const hidden: Record<string, boolean> = {}
@@ -549,8 +549,8 @@ export function conversation_activity_keys(board: any) {
   if (messages.length === 0) return hidden
   const shown: Record<string, boolean> = {}
   for (const message of messages) shown[message.key] = true
-  const history = Array.isArray(storage.airi_task_board_activity_history)
-    ? storage.airi_task_board_activity_history as any[]
+  const history = Array.isArray(storage.sgluna_task_board_activity_history)
+    ? storage.sgluna_task_board_activity_history as any[]
     : Array.isArray(board?.activity) ? board.activity as any[] : []
   for (const entry of history) {
     if (shown[task_activity_key(entry)]) hidden[activity_state.activity_key(entry)] = true
@@ -601,7 +601,7 @@ export function render_ai_reply(parent: LuaGuiElement, response: string, width: 
     const scroll = body.add({ type: 'scroll-pane', name: CONVERSATION.scroll, style: 'scroll_pane_in_shallow_frame', horizontal_scroll_policy: 'never', vertical_scroll_policy: 'auto-and-reserve-space' })
     scroll.style.horizontally_stretchable = true
     scroll.style.maximal_height = CONVERSATION_HEIGHT
-    const table = scroll.add({ type: 'table', name: CONVERSATION.table, column_count: 3, tags: { keys: [], chat_seen: '', was_following: true } })
+    const table = scroll.add({ type: 'table', name: CONVERSATION.table, column_count: 3, tags: { keys: [], chat_seen: '', was_live: true } })
     table.style.horizontal_spacing = 8
     table.style.vertical_spacing = 5
   }
@@ -613,20 +613,20 @@ export function render_ai_reply(parent: LuaGuiElement, response: string, width: 
   const table = scroll?.valid ? scroll[CONVERSATION.table] : undefined
   if (!header?.valid || !empty?.valid || !scroll?.valid || !table?.valid) return
 
-  const messages = task_conversation_messages(storage.airi_task_board_ui)
+  const messages = task_conversation_messages(storage.sgluna_task_board_ui)
   const explicit = clean_text(response, 2000)
   const visible = [...messages]
   if (explicit.length > 0 && (visible.length === 0 || visible[visible.length - 1].role !== 'assistant' || visible[visible.length - 1].text !== explicit)) {
-    visible.push({ key: `explicit-response:${explicit}`, role: 'assistant', sender: 'AIRI', text: explicit, timestamp: '' })
+    visible.push({ key: `explicit-response:${explicit}`, role: 'assistant', sender: 'SGLuna', text: explicit, timestamp: '' })
   }
   const keys = visible.map(message => message.key)
-  empty.caption = storage.airi_task_board_ui === undefined ? 'No current task conversation.' : 'No player/AIRI messages recorded for this task yet.'
+  empty.caption = storage.sgluna_task_board_ui === undefined ? 'No current task conversation.' : 'No player/SGLuna messages recorded for this task yet.'
 
   const add_message = (message: TaskConversationMessage) => {
     const timestamp = table.add({ type: 'label', caption: message.timestamp || '--:--:--', ignored_by_interaction: true })
     timestamp.style.minimal_width = 66
     timestamp.style.font_color = { r: 0.68, g: 0.68, b: 0.68 }
-    const speaker = gui_text.literal_gui_text(table.add({ type: 'label', caption: message.role === 'assistant' ? 'AIRI' : message.sender, style: 'semibold_label', ignored_by_interaction: true }))
+    const speaker = gui_text.literal_gui_text(table.add({ type: 'label', caption: message.role === 'assistant' ? 'SGLuna' : message.sender, style: 'semibold_label', ignored_by_interaction: true }))
     speaker.style.minimal_width = 72
     const line = gui_text.literal_gui_text(table.add({ type: 'label', caption: message.text, ignored_by_interaction: true }))
     line.style.single_line = false
@@ -634,13 +634,13 @@ export function render_ai_reply(parent: LuaGuiElement, response: string, width: 
   }
 
   const shown = (table.tags.keys ?? []) as string[]
-  const previous_follow = table.tags.was_following !== false
+  const previous_live = table.tags.was_live !== false
   const view = activity_state.activity_view((parent as any).player_index)
   let seen = String(table.tags.chat_seen ?? '')
   let appended = 0
   // A reader who scrolled up keeps exactly the rows they were reading. New
   // messages stay pending until LIVE is clicked, then append and jump to bottom.
-  if (view.follow || created) {
+  if (view.live || created) {
     const diff = activity_state.activity_rows_diff(shown, keys)
     if (diff === undefined) {
       table.clear()
@@ -654,30 +654,30 @@ export function render_ai_reply(parent: LuaGuiElement, response: string, width: 
     }
   }
 
-  const displayed_keys = view.follow || created ? keys : shown
+  const displayed_keys = view.live || created ? keys : shown
   empty.visible = displayed_keys.length === 0
   scroll.visible = displayed_keys.length > 0
   const last_key = keys.length > 0 ? keys[keys.length - 1] : ''
-  if (!view.follow && previous_follow) seen = shown.length > 0 ? shown[shown.length - 1] : ''
-  if (view.follow) {
-    if (created || !previous_follow || appended > 0) (scroll as ScrollPaneGuiElement).scroll_to_bottom()
+  if (!view.live && previous_live) seen = shown.length > 0 ? shown[shown.length - 1] : ''
+  if (view.live) {
+    if (created || !previous_live || appended > 0) (scroll as ScrollPaneGuiElement).scroll_to_bottom()
     seen = last_key
   } else if (created) {
     (scroll as ScrollPaneGuiElement).scroll_to_bottom()
     seen = last_key
   }
 
-  table.tags = { keys: displayed_keys, chat_seen: seen, was_following: view.follow }
+  table.tags = { keys: displayed_keys, chat_seen: seen, was_live: view.live }
   let unseen_count = 0
   let overflow = false
-  if (!view.follow && keys.length > 0 && seen !== last_key) {
+  if (!view.live && keys.length > 0 && seen !== last_key) {
     const unseen = activity_state.activity_unseen(keys, seen.length > 0 ? seen : undefined)
     unseen_count = unseen.count
     overflow = unseen.overflow
   }
   const state = header[CONVERSATION.state]
   if (state?.valid) {
-    if (view.follow && unseen_count === 0) {
+    if (view.live && unseen_count === 0) {
       state.caption = gui_text.trusted_rich_text('[img=utility/status_working] LIVE')
       state.tooltip = 'Following the newest conversation. Click to pause both Conversation and Activity at their current positions.'
     } else if (unseen_count > 0) {
