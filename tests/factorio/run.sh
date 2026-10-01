@@ -105,6 +105,7 @@ lane_offset() {
     research-combat) printf '1' ;;
     resilience) printf '2' ;;
     production) printf '3' ;;
+    provenance) printf '4' ;;
     *) printf '[npc-test] Unknown lane requested: %s\n' "$1" >&2; return 2 ;;
   esac
 }
