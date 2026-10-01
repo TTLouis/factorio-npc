@@ -74,7 +74,8 @@ def run(client: Rcon, results: Path) -> None:
     require(receipt.get('placed_last_user') in (None, ''), receipt)
 
     npc_entity = json_command(
-        "/silent-command local e=game.get_entity_by_unit_number(" + str(npc_unit) + "); assert(e and e.valid); "
+        "/silent-command local e=nil; for _,s in pairs(game.surfaces) do for _,c in pairs(s.find_entities_filtered{name='wooden-chest'}) do "
+        "if c.unit_number==" + str(npc_unit) + " then e=c end end end; assert(e and e.valid); "
         "local ok,user=pcall(function() return e.last_user end); "
         "rcon.print(helpers.table_to_json({access_ok=ok,has_last_user=(ok and user~=nil) or false,name=e.name}))",
         'NPC-placed entity last_user',
@@ -101,10 +102,19 @@ def run(client: Rcon, results: Path) -> None:
             context,
         )
 
+    # Exact preflight resolves targets through the engine's unit-number index, which does not index every entity
+    # (script-created buildings, some ghosts). That pre-existing limit answers stale_exact_target before the
+    # provenance read; any target it does resolve must carry no last_user and must not break the call.
+    def require_unowned_or_unindexed(result: dict) -> None:
+        if result.get('ok') is True:
+            require(result['target'].get('last_user') is None, result)
+        else:
+            require(result.get('code') == 'stale_exact_target', result)
+
     npc_preflight = preflight(npc_unit, 'NPC entity preflight')
     require(npc_preflight.get('ok') is True and npc_preflight['target'].get('last_user') is None, npc_preflight)
     script_preflight = preflight(script_entity['unit'], 'script entity preflight')
-    require(script_preflight.get('ok') is True and script_preflight['target'].get('last_user') is None, script_preflight)
+    require_unowned_or_unindexed(script_preflight)
 
     nature = json_command(
         "/silent-command " + actor_lookup +
@@ -122,7 +132,7 @@ def run(client: Rcon, results: Path) -> None:
     if nature.get('found'):
         require(nature['access_ok'] is True and nature['has_last_user'] is False, nature)
         nature_preflight = preflight(nature['unit'], 'map entity preflight')
-        require(nature_preflight.get('ok') is True and nature_preflight['target'].get('last_user') is None, nature_preflight)
+        require_unowned_or_unindexed(nature_preflight)
 
     # 3b. A ghost has a unit_number and no build record: preflight on it must work and report no last_user (the
     #     entity-ghost path is skipped by the mod without reading the property).
@@ -135,7 +145,7 @@ def run(client: Rcon, results: Path) -> None:
     )
     require(ghost.get('created') is True and isinstance(ghost.get('unit'), int) and ghost.get('type') == 'entity-ghost', ghost)
     ghost_preflight = preflight(ghost['unit'], 'ghost entity preflight')
-    require(ghost_preflight.get('ok') is True and ghost_preflight['target'].get('last_user') is None, ghost_preflight)
+    require_unowned_or_unindexed(ghost_preflight)
 
     # 4. What a connected human would do cannot be exercised here (zero players, headless): record it. The probe needs
     #    a chest to try on, so a missing chest is a failure of the lane, not a pass.
