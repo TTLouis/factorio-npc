@@ -2,7 +2,7 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 
 import { check, DeploymentError } from './common.mjs'
-import { parseDsmlToolCalls } from './dsml-tool-calls.mjs'
+import { diagnoseDsmlRejection, parseDsmlToolCalls } from './dsml-tool-calls.mjs'
 import { cacheBreakpointIndexes, insertTailBlock, lastUserOutsideTail, promptLayout } from './prompt-prefix.mjs'
 import { approvedOperationListText, parsePlan, providerToolDefinitions as toolDefinitions } from './structured-policy.mjs'
 
@@ -469,7 +469,6 @@ function structuredContentDiagnostics(content, { planContract = true } = {}) {
   if (!planContract) return { json_valid: true }
   // The agent loop lifts these plan-surface extensions off before parsePlan;
   // checking them here flagged every goal/roadmap plan as schema-invalid.
-  const PLAN_EXTENSION_KEYS = ['checkpoint', 'semanticCompletion', 'roadmap', 'roadmapNodeIds', 'developmentMode', 'goal', 'timeReview']
   if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
     parsed = Object.fromEntries(Object.entries(parsed).filter(([key]) => !PLAN_EXTENSION_KEYS.includes(key)))
   }
@@ -735,14 +734,63 @@ function topLevelJsonObjectSpans(text) {
   return depth === 0 && !inString ? spans : []
 }
 
-function validPlanCandidate(candidate) {
+// The agent loop lifts these plan-surface extensions off before parsePlan
+// (parsePlanMessage in npc-agent-loop.mjs), so a plan object that carries them
+// is still a plan. parsePlan itself is strict-exact-keys over the executable
+// surface only.
+const PLAN_EXTENSION_KEYS = ['checkpoint', 'semanticCompletion', 'roadmap', 'roadmapNodeIds', 'developmentMode', 'goal', 'timeReview']
+// Members a model wrapping the submitPlan arguments inside the plan object may
+// carry beside `submitPlan` (live 2026-10-01, deepseek-v4-flash through
+// OpenRouter). Anything else next to the wrapper is ambiguous and is refused.
+const SUBMIT_PLAN_WRAPPER_OUTER_KEYS = new Set(['chatMessage', 'plan', 'currentStep', 'operations', 'submitPlan', ...PLAN_EXTENSION_KEYS])
+const SUBMIT_PLAN_SHARED_MEMBERS = ['plan', 'currentStep', 'operations']
+
+function contentIsJson(text) {
+  try { JSON.parse(text); return true }
+  catch { return false }
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+// Result: { object } with the wrapper removed, { object: parsed } when there is
+// no wrapper, or { refused } with a named reason. The nested submitPlan
+// arguments win (they are the real tool arguments); the outer copy of
+// plan/currentStep/operations may only repeat them, never disagree.
+function unwrapSubmitPlan(parsed) {
+  if (!isPlainObject(parsed) || !Object.hasOwn(parsed, 'submitPlan')) return { object: parsed }
+  const nested = parsed.submitPlan
+  if (!isPlainObject(nested) || !Array.isArray(nested.plan)) return { refused: 'submit_plan_wrapper_not_a_plan' }
+  if (Object.hasOwn(nested, 'submitPlan')) return { refused: 'submit_plan_wrapper_nested_twice' }
+  if (!Object.keys(parsed).every(key => SUBMIT_PLAN_WRAPPER_OUTER_KEYS.has(key))) return { refused: 'submit_plan_wrapper_unknown_members' }
+  for (const key of SUBMIT_PLAN_SHARED_MEMBERS) {
+    if (Object.hasOwn(parsed, key) && Object.hasOwn(nested, key) && JSON.stringify(parsed[key]) !== JSON.stringify(nested[key])) {
+      return { refused: 'submit_plan_wrapper_conflict' }
+    }
+  }
+  const { submitPlan: _submitPlan, ...outer } = parsed
+  return { object: { ...outer, ...nested }, unwrapped: true }
+}
+
+// { text, unwrapped } for a plan object, { refused } when it carries a
+// submitPlan wrapper that cannot be unwrapped safely, undefined when it is not a
+// valid plan.
+function planCandidate(candidate) {
+  let parsed
+  try { parsed = JSON.parse(candidate) }
+  catch { return undefined }
+  const lifted = unwrapSubmitPlan(parsed)
+  if (lifted.refused) return { refused: lifted.refused }
+  const object = lifted.object
+  if (!isPlainObject(object)) return undefined
   try {
-    parsePlan(JSON.parse(candidate))
-    return true
+    parsePlan(Object.fromEntries(Object.entries(object).filter(([key]) => !PLAN_EXTENSION_KEYS.includes(key))))
   }
   catch {
-    return false
+    return undefined
   }
+  return { text: lifted.unwrapped ? JSON.stringify(object) : candidate, unwrapped: lifted.unwrapped === true }
 }
 
 // DeepSeek sometimes leaks its native tool-call markup into `content` instead
@@ -771,23 +819,42 @@ function closedRoundCall(call) {
   }
 }
 
-export function normalizeProviderPlanContent(content) {
+// Finds the plan object a content reply carries: bare, in a code fence, or
+// embedded in prose. `source` says where it was found, `submit_plan_unwrapped`
+// that the object held its plan inside a submitPlan member, and `refused` (with
+// no content change) names why a submitPlan-wrapped object was not accepted.
+export function normalizeProviderPlanContentDetailed(content) {
   const text = String(content ?? '').trim()
-  if (!text) return text
-  if (validPlanCandidate(text)) return text
+  const unchanged = extra => ({ content: text, source: 'none', submit_plan_unwrapped: false, ...extra })
+  if (!text) return unchanged()
+  let refused
+  const take = (candidate, source) => {
+    const found = planCandidate(candidate)
+    if (found?.text) return { content: found.text, source, submit_plan_unwrapped: found.unwrapped }
+    if (found?.refused && refused === undefined) refused = found.refused
+    return undefined
+  }
+
+  const bare = take(text, 'bare')
+  if (bare) return bare
 
   if (text.startsWith('```') && text.endsWith('```') && text.length >= 6) {
     let candidate = text.slice(3, -3).trim()
     if (candidate.slice(0, 4).toLowerCase() === 'json') candidate = candidate.slice(4).trim()
-    if (validPlanCandidate(candidate)) return candidate
+    const fenced = take(candidate, 'fence')
+    if (fenced) return fenced
   }
 
   const spans = topLevelJsonObjectSpans(text)
   for (let index = spans.length - 1; index >= 0; index--) {
-    const candidate = text.slice(spans[index][0], spans[index][1]).trim()
-    if (validPlanCandidate(candidate)) return candidate
+    const embedded = take(text.slice(spans[index][0], spans[index][1]).trim(), 'embedded')
+    if (embedded) return embedded
   }
-  return text
+  return unchanged(refused ? { refused } : {})
+}
+
+export function normalizeProviderPlanContent(content) {
+  return normalizeProviderPlanContentDetailed(content).content
 }
 
 function leanTaskBoard(board) {
@@ -1439,9 +1506,17 @@ export async function providerRequest(config, messages, {
       dsmlRecovered = 'tool_calls'
     }
     const toolCallCount = Array.isArray(message.tool_calls) ? message.tool_calls.length : 0
+    let contentNormalization
     if (message.tool_calls === undefined && typeof message.content === 'string') {
-      message.content = normalizeProviderPlanContent(message.content)
+      contentNormalization = normalizeProviderPlanContentDetailed(message.content)
+      message.content = contentNormalization.content
     }
+    // Why content that carries DSML markup was not turned into tool calls. Only
+    // markup that did not parse is diagnosed (the strict parser never guesses), and
+    // only when the content holds no plan object and is not JSON at all.
+    const dsmlRejectedReason = !dsml && contentNormalization?.source === 'none' && !contentIsJson(message.content)
+      ? diagnoseDsmlRejection(message.content)
+      : undefined
     const normalizedContent = typeof message.content === 'string' ? message.content : ''
     const structured = message.tool_calls === undefined
       ? structuredContentDiagnostics(normalizedContent, { planContract: interactionRouter !== true })
@@ -1478,7 +1553,11 @@ export async function providerRequest(config, messages, {
       message_keys: Object.keys(message),
       tool_call_count: toolCallCount,
       empty_tool_calls_normalized: emptyToolCallsNormalized,
-      dsml_recovery: dsmlRecovered,
+      dsml_recovery: dsmlRecovered ?? (dsmlRejectedReason ? 'rejected_malformed' : undefined),
+      dsml_rejected_reason: dsmlRejectedReason,
+      plan_content_source: contentNormalization && contentNormalization.source !== 'none' ? contentNormalization.source : undefined,
+      plan_content_submit_plan_unwrapped: contentNormalization?.submit_plan_unwrapped === true ? true : undefined,
+      plan_content_refused_reason: contentNormalization?.refused,
       structured_tool_calls_dropped: structuredToolsDropped,
       reasoning_content_chars: reasoningContentChars,
       ...rawShape,
@@ -1504,6 +1583,35 @@ export async function providerRequest(config, messages, {
     }
 
     await traceProviderResult('provider.response', providerDiagnostics, traceOptions)
+    // Named events for each way content was changed or refused, so a later live
+    // run can be read from the trace without diffing raw replies.
+    if (dsmlRejectedReason) {
+      await traceProviderResult('provider.dsml_rejected', {
+        reason: dsmlRejectedReason,
+        round,
+        allow_tools: allowTools,
+        content_chars: rawShape.content_chars,
+        content_preview: rawShape.content_preview,
+      }, traceOptions)
+    }
+    if (contentNormalization?.submit_plan_unwrapped) {
+      await traceProviderResult('provider.plan_content_unwrapped', {
+        reason: 'submit_plan_member_unwrapped',
+        source: contentNormalization.source,
+        round,
+        allow_tools: allowTools,
+        content_chars: rawShape.content_chars,
+      }, traceOptions)
+    }
+    else if (contentNormalization?.refused) {
+      await traceProviderResult('provider.plan_content_refused', {
+        reason: contentNormalization.refused,
+        round,
+        allow_tools: allowTools,
+        content_chars: rawShape.content_chars,
+        content_preview: rawShape.content_preview,
+      }, traceOptions)
+    }
     if (closedRoundCalls !== undefined) {
       Object.defineProperty(message, '_sglunaClosedRoundCalls', {
         configurable: true,

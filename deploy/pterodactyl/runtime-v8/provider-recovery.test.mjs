@@ -368,5 +368,7 @@ test('malformed DSML markup is left for the ordinary format recovery', async () 
   const message = await providerRequest(config, messages, { fetchImpl: contentFetch(content), allowTools: true })
   assert.equal(message.tool_calls, undefined)
   assert.equal(message._sglunaProvider.diagnostic_code, 'provider_content_invalid_json')
-  assert.equal(message._sglunaProvider.dsml_recovery, undefined)
+  // Nothing is recovered from it; the trace names why (a parameter whose JSON value is broken).
+  assert.equal(message._sglunaProvider.dsml_recovery, 'rejected_malformed')
+  assert.equal(message._sglunaProvider.dsml_rejected_reason, 'parameter_value_not_json')
 })
