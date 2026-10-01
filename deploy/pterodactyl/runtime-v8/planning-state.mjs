@@ -46,6 +46,27 @@ import {
   revokeAuthorization,
   serializeAuthorization,
 } from './authorization.mjs'
+import { sanitizePendingOperation } from './operation-reconciliation.mjs'
+import {
+  addTask,
+  carryTaskLedger,
+  closeTask,
+  findTask,
+  mostRecentResumable,
+  restoreTaskLedger,
+  sanitizeTask,
+  serializeTaskLedger,
+  taskIdFor,
+  taskLedgerHasContent,
+  taskLedgerOf,
+  taskRunnable,
+  TASK_CLOSE,
+  TASK_INTERRUPTION,
+  TASK_LEDGER_LIMITS,
+  TASK_LEDGER_REFUSAL,
+  TASK_STATE_AT_INTERRUPTION,
+  TASK_STATUS,
+} from './task-ledger.mjs'
 
 export const PLANNING_STATE_VERSION = 1
 
@@ -386,6 +407,16 @@ export const PLANNING_EVENT = Object.freeze({
   NPC_PLACEMENT_RECORDED: 'NPC_PLACEMENT_RECORDED',
   RESERVATION_RECORDED: 'RESERVATION_RECORDED',
   RESERVATION_RELEASED: 'RESERVATION_RELEASED',
+  // MW2 durable task ledger (task-ledger.mjs). An interruption MOVES the running goal into the ledger (the planning state
+  // becomes goalless, keeping the world facts and the ledger); a resume moves a ledger task back, restoring its committed
+  // plan and verified progress from the checkpoint. Runtime or user authority only: never the planner or Jev.
+  TASK_INTERRUPTED: 'TASK_INTERRUPTED',
+  TASK_QUEUED: 'TASK_QUEUED',
+  TASK_RESUMED: 'TASK_RESUMED',
+  TASK_CANCELLED: 'TASK_CANCELLED',
+  // MW2b: the one operation batch the runtime may have in flight (operation-reconciliation.mjs). Written before a batch is sent,
+  // updated by reconciliation, cleared (operation null) when its receipt settles it. Runtime sources only.
+  PENDING_OPERATION_RECORDED: 'PENDING_OPERATION_RECORDED',
 })
 
 const PLANNING_EVENT_TYPES = Object.freeze(Object.values(PLANNING_EVENT))
@@ -462,6 +493,9 @@ export const REASONING_RESET_EVENTS = Object.freeze([
   PLANNING_EVENT.USER_REVISION_APPROVED,
   PLANNING_EVENT.REPLACEMENT_PLAN_REQUESTED,
   PLANNING_EVENT.PLAN_CANCELLED,
+  // the running task moved into the ledger, or a ledger task came back as the running one
+  PLANNING_EVENT.TASK_INTERRUPTED,
+  PLANNING_EVENT.TASK_RESUMED,
 ])
 
 function currentReasoningEpoch(state) {
@@ -593,6 +627,8 @@ export function createEmptyRunState() {
     condition_wait: null,
     provider_recovery: null,
     persistent_runtime: null,
+    // MW2b: the operation batch sent but not yet settled by a receipt (operation-reconciliation.mjs).
+    pending_operation: null,
     // Entity locators and exact-identity proofs the runtime needs for
     // recovery (3.3 move 4).
     locators: { durable_last_operations: [], exact_target_audit: [] },
@@ -1865,11 +1901,14 @@ Object.assign(HANDLERS, {
     // World facts (NPC placement receipts, reserved containers) outlive a goal;
     // the previous goal's grants, questions and approvals do not.
     const carriedAuthorization = carryAuthorizationAcrossGoals(state.authorization)
+    // MW2: the task ledger is not goal-scoped either; a new goal never drops an interrupted or queued task.
+    const carriedLedger = carryTaskLedger(state.task_ledger)
     // The epoch is monotonic across the process lifetime, so it carries over
     // from the abandoned goal rather than restarting at 0.
     return withReasoningReset({
       ...fresh,
       ...(carriedAuthorization ? { authorization: carriedAuthorization } : {}),
+      ...(carriedLedger ? { task_ledger: carriedLedger } : {}),
       sequence,
       goal,
       reasoning_epoch: currentReasoningEpoch(state),
@@ -2913,6 +2952,23 @@ Object.assign(HANDLERS, {
     })
   },
 
+  // MW2b. A record is stamped for its goal; one for another goal is stale work and fails closed. `operation: null` clears it,
+  // optionally only when its key matches (a late clear for an older batch cannot erase a newer pending one).
+  [PLANNING_EVENT.PENDING_OPERATION_RECORDED](state, event, now) {
+    if (!runEventAllowed(state, event)) return state
+    const run = state.run ?? createEmptyRunState()
+    if (event.operation === null || event.operation === undefined) {
+      if (!run.pending_operation) return state
+      const key = text(event.operation_key, 200)
+      if (key && run.pending_operation.operation_key !== key) return state
+      return { ...state, run: { ...run, pending_operation: null, updated_at: now }, updated_at: now }
+    }
+    const record = sanitizePendingOperation(event.operation)
+    if (!record) return state
+    if (record.goal_id && record.goal_id !== state.goal.goal_id) return state
+    return { ...state, run: { ...run, pending_operation: record, updated_at: now }, updated_at: now }
+  },
+
   [PLANNING_EVENT.PERSISTENT_RUNTIME_RECORDED](state, event, now) {
     if (!runEventAllowed(state, event)) return state
     return recordRunRecord(state, now, 'persistent_runtime', event.runtime, {
@@ -3047,6 +3103,332 @@ Object.assign(HANDLERS, {
   },
 })
 
+// --- MW2 task ledger ---------------------------------------------------------
+//
+// The ledger holds ACCEPTED tasks that are not running: interrupted ones (with a checkpoint of the committed plan and
+// verified progress) and queued ones. See task-ledger.mjs for the record; the transitions live here because only this
+// module may change planning state.
+
+function isLedgerAuthority(source) {
+  return isRuntimeAuthority(source) || isUserAuthority(source)
+}
+
+function taskProgressRecord(plan) {
+  if (!plan) return null
+  const completed = plan.steps
+    .filter(step => plan.execution.step_progress[step.step_id]?.status === 'completed')
+    .map(step => step.step_id)
+  const receiptRefs = []
+  let evidenceCount = 0
+  for (const step of plan.steps) {
+    evidenceCount += plan.execution.step_progress[step.step_id]?.accepted_evidence?.length ?? 0
+    for (const receipt of plan.execution.receipts?.[step.step_id] ?? []) {
+      if (receipt.ref) receiptRefs.push(receipt.ref)
+    }
+  }
+  return {
+    plan_id: plan.plan_id,
+    plan_version: plan.plan_version,
+    plan_status: plan.status,
+    active_step_index: plan.active_step_index,
+    active_step_id: plan.steps[plan.active_step_index]?.step_id ?? null,
+    steps_total: plan.steps.length,
+    steps_completed: completed.length,
+    completed_step_ids: completed,
+    receipt_refs: receiptRefs.slice(-TASK_LEDGER_LIMITS.receiptRefs),
+    progress_marker: fingerprint(`${completed.join(',')}|${evidenceCount}|${receiptRefs.length}`),
+  }
+}
+
+function taskGrantLink(state) {
+  const goalId = state.goal?.goal_id
+  const grant = [...authorizationOf(state).grants].reverse().find(item => item.goal_id === goalId)
+  return grant
+    ? {
+        grant_id: grant.grant_id,
+        grant_revision: grant.revision,
+        mandate_kind: grant.mandate_kind,
+        mandate_id: grant.mandate_id,
+        grant_status: grant.status,
+      }
+    : null
+}
+
+// A bounded copy of the stopped task's planning state for a later resume. Goal-scoped parts only: the world facts
+// (reserved containers, NPC placements) and the ledger itself stay live and are never restored from here.
+function taskCheckpointPlanning(state) {
+  const serialized = serializePlanningState({ ...state, task_ledger: undefined })
+  const activeId = serialized.active_plan_id
+  const plans = Array.isArray(serialized.plans) ? serialized.plans : []
+  let kept = plans.slice(-TASK_LEDGER_LIMITS.checkpointPlans)
+  if (activeId && !kept.some(plan => plan?.plan_id === activeId)) {
+    const active = plans.find(plan => plan?.plan_id === activeId)
+    if (active) kept = [active, ...kept.slice(1)]
+  }
+  return {
+    ...serialized,
+    plans: kept,
+    roadmap_history: [],
+    context_restages: [],
+    log: recentList(serialized.log, TASK_LEDGER_LIMITS.checkpointLog),
+    ...(serialized.authorization
+      ? { authorization: { ...serialized.authorization, world: { npc_placements: [], reservations: [] } } }
+      : {}),
+  }
+}
+
+const TASK_CHECKPOINT_PLAN_STATUSES = Object.freeze([
+  PLAN_STATUS.COMMITTED,
+  PLAN_STATUS.EXECUTING,
+  PLAN_STATUS.BLOCKED,
+  PLAN_STATUS.COMPLETED,
+])
+
+function interruptionReasonFor(state, event) {
+  if (Object.values(TASK_INTERRUPTION).includes(event.reason_code)) return event.reason_code
+  const plan = getActivePlan(state)
+  if (plan?.status === PLAN_STATUS.BLOCKED) return TASK_INTERRUPTION.BLOCKER
+  if (state.run?.paused === true) return TASK_INTERRUPTION.PAUSE
+  return TASK_INTERRUPTION.NEW_GOAL
+}
+
+function stateAtInterruption(state) {
+  if (getActivePlan(state)?.status === PLAN_STATUS.BLOCKED) return TASK_STATE_AT_INTERRUPTION.BLOCKED
+  if (state.run?.paused === true) return TASK_STATE_AT_INTERRUPTION.PAUSED
+  return TASK_STATE_AT_INTERRUPTION.ACTIVE
+}
+
+/**
+ * Decide an interruption of the running task. The same function the TASK_INTERRUPTED handler uses, so a trace and the
+ * state change cannot disagree. `ok` carries the sanitized ledger task that would be recorded.
+ */
+export function classifyTaskInterruption(state, event) {
+  if (!isLedgerAuthority(event?.source)) return { ok: false, reason: TASK_LEDGER_REFUSAL.UNAUTHORIZED_SOURCE }
+  if (!state?.goal || state.goal.status !== GOAL_STATUS.ACTIVE) return { ok: false, reason: TASK_LEDGER_REFUSAL.NO_ACTIVE_TASK }
+  const goalId = text(event.goal_id, 120)
+  // An event stamped for another goal is stale work from before a replacement, restart or cancel.
+  if (goalId && goalId !== state.goal.goal_id) return { ok: false, reason: TASK_LEDGER_REFUSAL.NO_ACTIVE_TASK }
+  const taskId = taskIdFor(state.goal.goal_id)
+  if (findTask(taskLedgerOf(state), taskId)) return { ok: false, reason: TASK_LEDGER_REFUSAL.ALREADY_RECORDED, task_id: taskId }
+  const plan = getActivePlan(state)
+  const started = Boolean(plan) && TASK_CHECKPOINT_PLAN_STATUSES.includes(plan.status)
+  const grant = taskGrantLink(state)
+  const grantRecord = grant ? authorizationOf(state).grants.find(item => item.grant_id === grant.grant_id) : undefined
+  const by = event.interrupted_by && typeof event.interrupted_by === 'object' && !Array.isArray(event.interrupted_by) ? event.interrupted_by : {}
+  const task = sanitizeTask({
+    task_id: taskId,
+    goal_id: state.goal.goal_id,
+    owner: state.goal.owner,
+    objective: state.goal.objective,
+    status: started ? TASK_STATUS.INTERRUPTED : TASK_STATUS.PENDING,
+    mandate_kind: grant?.mandate_kind ?? text(event.mandate_kind, 40),
+    requested_result: {
+      objective: state.goal.objective,
+      result_key: grantRecord?.requested_result?.result_key ?? text(event.result_key, 200),
+      done_when: state.goal.definition?.done_when ?? [],
+      destination: event.destination ?? grantRecord?.requested_result?.destination,
+    },
+    authorization: grant,
+    progress: taskProgressRecord(plan),
+    interruption: {
+      reason_code: interruptionReasonFor(state, event),
+      detail: event.detail,
+      state_at_interruption: stateAtInterruption(state),
+      interrupted_by: { kind: by.kind ?? 'runtime', goal_id: by.goal_id, sender: by.sender },
+      request_id: event.request_id,
+      at: finiteNumber(event.now) ?? 0,
+      game_tick: event.game_tick,
+      actor: event.actor,
+    },
+    checkpoint: started
+      ? { planning: taskCheckpointPlanning(state), legacy: event.legacy_checkpoint && typeof event.legacy_checkpoint === 'object' ? event.legacy_checkpoint : null }
+      : undefined,
+    recorded_at: finiteNumber(event.now) ?? 0,
+  })
+  if (!task) return { ok: false, reason: TASK_LEDGER_REFUSAL.INVALID_TASK }
+  return { ok: true, task }
+}
+
+/**
+ * Decide a resume. Refuses while another task is running (one execution context at a time), for an unknown or
+ * unrunnable task, and when the checkpoint cannot be restored. `ok` carries the restored planning state for the task
+ * (undefined for a queued task, which starts as a fresh goal).
+ */
+export function classifyTaskResume(state, event) {
+  if (!isLedgerAuthority(event?.source)) return { ok: false, reason: TASK_LEDGER_REFUSAL.UNAUTHORIZED_SOURCE }
+  if (state?.goal?.status === GOAL_STATUS.ACTIVE) return { ok: false, reason: TASK_LEDGER_REFUSAL.ANOTHER_TASK_ACTIVE, active_goal_id: state.goal.goal_id }
+  const ledger = taskLedgerOf(state)
+  const explicitId = text(event?.task_id, 130)
+  const task = explicitId ? findTask(ledger, explicitId) : mostRecentResumable(ledger)
+  if (!task) return { ok: false, reason: explicitId ? TASK_LEDGER_REFUSAL.TASK_NOT_FOUND : TASK_LEDGER_REFUSAL.NOTHING_TO_RESUME, task_id: explicitId || undefined }
+  const runnable = taskRunnable(task)
+  // An explicit user resume may continue a paused or blocked task; the harness alone resumes only runnable ones.
+  const explicitUser = Boolean(explicitId) && isUserAuthority(event.source)
+  if (!runnable.runnable && !(explicitUser && runnable.reason !== TASK_LEDGER_REFUSAL.CHECKPOINT_UNRESTORABLE)) {
+    return {
+      ok: false,
+      reason: runnable.reason === TASK_LEDGER_REFUSAL.CHECKPOINT_UNRESTORABLE ? TASK_LEDGER_REFUSAL.CHECKPOINT_UNRESTORABLE : TASK_LEDGER_REFUSAL.TASK_NOT_RESUMABLE,
+      detail: runnable.reason,
+      task_id: task.task_id,
+    }
+  }
+  if (task.status === TASK_STATUS.PENDING) return { ok: true, task, restored: undefined }
+  const restored = restorePlanningState(task.checkpoint?.planning)
+  if (!restored.goal || restored.goal.goal_id !== task.goal_id || restored.goal.status !== GOAL_STATUS.ACTIVE) {
+    return { ok: false, reason: TASK_LEDGER_REFUSAL.CHECKPOINT_UNRESTORABLE, task_id: task.task_id }
+  }
+  return { ok: true, task, restored }
+}
+
+Object.assign(HANDLERS, {
+  /**
+   * Move the running task into the ledger. The planning state becomes goalless, keeping the world facts and the ledger,
+   * so a task is never both running and parked. A refused interruption changes nothing.
+   */
+  [PLANNING_EVENT.TASK_INTERRUPTED](state, event, now) {
+    const verdict = classifyTaskInterruption(state, { ...event, now })
+    if (!verdict.ok) return state
+    const added = addTask(taskLedgerOf(state), verdict.task, { now, requestId: event.request_id })
+    const world = carryAuthorizationAcrossGoals(state.authorization)
+    const fresh = createEmptyPlanningState()
+    return withReasoningReset({
+      ...fresh,
+      ...(world ? { authorization: world } : {}),
+      task_ledger: added.ledger,
+      sequence: nextSequence(state),
+      reasoning_epoch: currentReasoningEpoch(state),
+      updated_at: now,
+      log: logEntry(fresh, {
+        type: PLANNING_EVENT.TASK_INTERRUPTED,
+        at: now,
+        task_id: added.task.task_id,
+        goal_id: added.task.goal_id,
+        reason: added.task.interruption?.reason_code ?? null,
+      }),
+    }, { now, eventType: PLANNING_EVENT.TASK_INTERRUPTED, reason: added.task.interruption?.reason_code ?? 'task_interrupted' })
+  },
+
+  // A task accepted but not started (nothing verified to preserve). Runs beside whatever is running now.
+  [PLANNING_EVENT.TASK_QUEUED](state, event, now) {
+    if (!isLedgerAuthority(event.source)) return state
+    const objective = text(event.objective, TASK_LEDGER_LIMITS.objective)
+    if (!objective) return state
+    const sequence = nextSequence(state)
+    const goalId = text(event.goal_id, 120) || `goal_q${sequence}_${fingerprint(`${now}|${objective}`)}`
+    if (state.goal?.goal_id === goalId) return state
+    const ledger = taskLedgerOf(state)
+    const taskId = taskIdFor(goalId)
+    if (findTask(ledger, taskId)) return state
+    const task = sanitizeTask({
+      task_id: taskId,
+      goal_id: goalId,
+      owner: event.owner,
+      objective,
+      status: TASK_STATUS.PENDING,
+      mandate_kind: event.mandate_kind,
+      requested_result: { objective, result_key: event.result_key, done_when: [], destination: event.destination },
+      authorization: event.authorization,
+      recorded_at: now,
+    })
+    if (!task) return state
+    const added = addTask(ledger, task, { now, requestId: event.request_id })
+    return {
+      ...state,
+      task_ledger: added.ledger,
+      sequence,
+      updated_at: now,
+      log: logEntry(state, { type: PLANNING_EVENT.TASK_QUEUED, at: now, task_id: taskId, goal_id: goalId }),
+    }
+  },
+
+  /**
+   * Move a ledger task back as the running task. An interrupted task comes back exactly as it stopped (its committed plan,
+   * verified step progress, receipts and locators, restored through the reducer's own sanitizers); the live world facts and
+   * the ledger are kept, never replaced by the checkpoint's. Pause, condition wait and provider recovery do not carry over:
+   * they described the world at the time it stopped.
+   */
+  [PLANNING_EVENT.TASK_RESUMED](state, event, now) {
+    const verdict = classifyTaskResume(state, event)
+    if (!verdict.ok) return state
+    const closed = closeTask(taskLedgerOf(state), verdict.task.task_id, {
+      status: TASK_CLOSE.RESUMED,
+      reason: text(event.reason, TASK_LEDGER_LIMITS.detail) || 'resumed',
+      requestId: event.request_id,
+      now,
+    })
+    if (!closed.task) return state
+    const base = { ...state, task_ledger: closed.ledger }
+    if (!verdict.restored) {
+      // A queued task starts as a fresh goal under its own id.
+      return HANDLERS[PLANNING_EVENT.GOAL_ACCEPTED](base, {
+        goal_id: verdict.task.goal_id,
+        owner: verdict.task.owner,
+        objective: verdict.task.objective,
+      }, now)
+    }
+    const restored = verdict.restored
+    const liveAuth = authorizationOf(state)
+    const checkpointAuth = restored.authorization
+    const authorization = checkpointAuth
+      ? { ...checkpointAuth, sequence: Math.max(checkpointAuth.sequence, liveAuth.sequence), world: liveAuth.world }
+      : (liveAuth.world.npc_placements.length > 0 || liveAuth.world.reservations.length > 0
+          ? { ...liveAuth, grants: [], questions: [], approvals: [], refusals: [] }
+          : undefined)
+    const run = restored.run
+      ? { ...restored.run, paused: false, pause_reason: '', pause_code: '', condition_wait: null, provider_recovery: null, persistent_runtime: null, updated_at: now }
+      : restored.run
+    const next = {
+      ...restored,
+      run,
+      ...(authorization ? { authorization } : {}),
+      task_ledger: closed.ledger,
+      sequence: Math.max(nextSequence(state), (restored.sequence ?? 0) + 1),
+      reasoning_epoch: currentReasoningEpoch(state),
+      updated_at: now,
+      log: logEntry(restored, {
+        type: PLANNING_EVENT.TASK_RESUMED,
+        at: now,
+        task_id: verdict.task.task_id,
+        goal_id: verdict.task.goal_id,
+      }),
+    }
+    if (!authorization) delete next.authorization
+    return withReasoningReset(next, { now, eventType: PLANNING_EVENT.TASK_RESUMED, reason: 'task_resumed' })
+  },
+
+  // Explicit cancellation of a parked task: it leaves the ledger for the closed history and is never resumed.
+  [PLANNING_EVENT.TASK_CANCELLED](state, event, now) {
+    if (!isLedgerAuthority(event.source)) return state
+    const closed = closeTask(taskLedgerOf(state), event.task_id, {
+      status: TASK_CLOSE.CANCELLED,
+      reason: event.reason || 'cancelled',
+      requestId: event.request_id,
+      now,
+    })
+    if (!closed.task) return state
+    return {
+      ...state,
+      task_ledger: closed.ledger,
+      sequence: nextSequence(state),
+      updated_at: now,
+      log: logEntry(state, { type: PLANNING_EVENT.TASK_CANCELLED, at: now, task_id: closed.task.task_id, goal_id: closed.task.goal_id }),
+    }
+  },
+})
+
+/**
+ * What survives a goal's teardown (a new goal, a completed task's context clear, a restart with no goal): the MW1 world
+ * facts and the MW2 task ledger. Callers merge the result over a fresh empty state.
+ */
+export function carriedAcrossGoals(state) {
+  const authorization = carryAuthorizationAcrossGoals(state?.authorization)
+  const ledger = carryTaskLedger(state?.task_ledger)
+  return {
+    ...(authorization ? { authorization } : {}),
+    ...(ledger ? { task_ledger: ledger } : {}),
+  }
+}
+
 /**
  * Build a CONTEXT_RESTAGED event for `state` (goal and plan ids come from the
  * reducer state, so the stamp cannot be wrong). The future handoff packet
@@ -3174,6 +3556,10 @@ export function serializePlanningState(state) {
     // MW1: persisted only when present, so a state that never saw authorization serializes exactly as before.
     ...(current.authorization && authorizationHasContent(current.authorization)
       ? { authorization: serializeAuthorization(current.authorization) }
+      : {}),
+    // MW2: persisted only when present, like authorization.
+    ...(current.task_ledger && taskLedgerHasContent(current.task_ledger)
+      ? { task_ledger: serializeTaskLedger(current.task_ledger) }
       : {}),
     log: clone(current.log) ?? [],
   }
@@ -3438,6 +3824,7 @@ function restoreRun(raw) {
     condition_wait: paused ? null : boundedRecord(raw.condition_wait),
     provider_recovery: boundedRecord(raw.provider_recovery),
     persistent_runtime: paused ? null : boundedRecord(raw.persistent_runtime),
+    pending_operation: sanitizePendingOperation(raw.pending_operation),
     locators: {
       durable_last_operations: sanitizeDurableOperations(locators.durable_last_operations),
       exact_target_audit: sanitizeExactTargetAudit(locators.exact_target_audit),
@@ -3486,7 +3873,10 @@ export function restorePlanningState(raw) {
   if (!goal) {
     // No goal, but world facts (reserved containers, NPC placement receipts) outlive goals and must survive a restart.
     const world = restoreAuthorization(raw.authorization)
-    return world ? { ...empty, authorization: world } : empty
+    const ledger = restoreTaskLedger(raw.task_ledger)
+    return world || ledger
+      ? { ...empty, ...(world ? { authorization: world } : {}), ...(ledger ? { task_ledger: ledger } : {}) }
+      : empty
   }
   const activePlanId = text(raw.active_plan_id, 200)
   const plans = retainPlans(Array.isArray(raw.plans) ? raw.plans : [], activePlanId).map(restorePlan).filter(Boolean)
@@ -3516,6 +3906,10 @@ export function restorePlanningState(raw) {
     ...(() => {
       const authorization = restoreAuthorization(raw.authorization)
       return authorization ? { authorization } : {}
+    })(),
+    ...(() => {
+      const ledger = restoreTaskLedger(raw.task_ledger)
+      return ledger ? { task_ledger: ledger } : {}
     })(),
     log: recentList(raw.log, 256).map(item => clone(item)),
   }

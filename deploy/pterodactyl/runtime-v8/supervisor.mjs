@@ -46,6 +46,7 @@ import {
 import { configureNpcSession } from './supervisor-adapter.mjs'
 import { luaString } from './structured-policy.mjs'
 import { executeReserveCommand, parseReserveCommand } from './reserve-command.mjs'
+import { reconciliationGuidance } from './operation-reconciliation.mjs'
 
 // Pause-reason prefix for temporary provider failures that resume on their own
 // (see transientProviderFailure).
@@ -1589,7 +1590,27 @@ export async function finalizeCompletedTaskBoundary(session, result) {
   await session.agent.finalizeCompletedTaskContext?.()
   resetLiveTaskContext(session)
   await session.clearTaskBoardUi()
+  await resumeInterruptedTaskAfterCompletion(session)
   return true
+}
+
+// MW2: when the interrupting temporary task has verified complete, the most recently interrupted runnable temporary task
+// comes back from the durable ledger (design section 3). The task's committed plan and verified progress are restored
+// without a model turn; the ordinary interrupted-plan recovery then re-observes the world before anything is issued.
+// Queued, not awaited: it runs after the current event, like every other recovery.
+export async function resumeInterruptedTaskAfterCompletion(session) {
+  const agent = session?.agent
+  if (typeof agent?.resumeInterruptedTask !== 'function') return undefined
+  const resumed = await agent.resumeInterruptedTask({ reason: 'interrupting_task_completed' })
+  if (!resumed?.ok) return resumed
+  await session.syncTaskBoardUi?.(resumed.state)
+  if (typeof session.queueEvent === 'function') {
+    session.queueEvent(() => session.recoverInterruptedPlan('interrupted_task_resumed', {
+      task_id: resumed.task.task_id,
+      goal_id: resumed.task.goal_id,
+    }), { reportError: true })
+  }
+  return resumed
 }
 
 export async function executeUiControl(session, event) {
@@ -1889,6 +1910,11 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}) {
 
   agent.cancel?.(`runtime_recovery_prepare:${reason}`)
   const epoch = await agent.captureEpoch()
+  // MW2b: before anything is issued again, reconcile any batch that was sent but never settled (a restart, an actor replacement
+  // or a death can lose its acknowledgement and receipt) against the game's own batch records. The model is told what they prove.
+  const recoveryRequestId = `recovery_${Date.now().toString(36)}`
+  const reconciliation = await agent.reconcileOutstandingOperation?.({ trigger: reason, requestId: recoveryRequestId })
+  const reconciliationLine = reconciliation ? ` ${reconciliationGuidance(reconciliation, reconciliation.pending)}` : ''
   // C7: a plan is resumed only when the reducer holds an active plan to carry.
   // Otherwise the goal is paused (a chat line follows) instead of waking a
   // model with nothing to execute.
@@ -1922,13 +1948,13 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}) {
     agent.active = true
     agent.continuations = 1
     if (typeof agent.traceEvent === 'function') {
-      agent.traceRequest = { id: `recovery_${Date.now().toString(36)}`, seq: 0 }
+      agent.traceRequest = { id: recoveryRequestId, seq: 0 }
       await agent.traceEvent('runtime.recovery_started', { reason, details, boundary: 'plan_slice' })
     }
     const result = await agent.settleCompletedStepState(state)
     return { recovered: true, result, state: agent.memory?.currentPlan?.(key) }
   }
-  const recoveryMessage = `[HARNESS] Runtime recovery after ${uiText(reason, 120)}. The previous finite Autorio task queue was discarded and its last operation MUST NOT be assumed complete. Re-observe the mutable Factorio state required for the canonical current Task Board step before choosing any world mutation. Preserve the existing goal and completed Task Board prefix. If the current step is already satisfied, verify it and advance; if work remains, submit only the minimum deterministic operations needed to continue. Never blindly replay last_operations. Recovery details: ${recoveryDetails}`
+  const recoveryMessage = `[HARNESS] Runtime recovery after ${uiText(reason, 120)}. The previous finite Autorio task queue was discarded and its last operation MUST NOT be assumed complete. Re-observe the mutable Factorio state required for the canonical current Task Board step before choosing any world mutation. Preserve the existing goal and completed Task Board prefix. If the current step is already satisfied, verify it and advance; if work remains, submit only the minimum deterministic operations needed to continue. Never blindly replay last_operations.${reconciliationLine} Recovery details: ${recoveryDetails}`
 
   agent.epoch = epoch
   agent.lastMemoryKey = key
@@ -1955,7 +1981,7 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}) {
   const previousObservationBudgetRemaining = agent.observationBudgetRemaining
   const previousPlanningHorizon = agent.planningHorizonOverride
   if (typeof agent.traceEvent === 'function') {
-    agent.traceRequest = { id: `recovery_${Date.now().toString(36)}`, seq: 0 }
+    agent.traceRequest = { id: recoveryRequestId, seq: 0 }
     await agent.traceEvent('runtime.recovery_started', { reason, details })
   }
   await restageRecoveryConversation(agent, { reason, recoveryMessage })
