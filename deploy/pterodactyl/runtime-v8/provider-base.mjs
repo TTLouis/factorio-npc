@@ -93,8 +93,14 @@ function openRouterCapability(config, requested) {
     // (https://openrouter.ai/docs/features/prompt-caching); sending them
     // elsewhere would be inert at best.
     cache_control: family === 'anthropic',
-    // 2.9: OFF until a live check (see providerCapabilityProfile).
-    tools_kept_when_closed: false,
+    // 2.9, live check 2026-10-01: DeepSeek behind OpenRouter reproduced the
+    // direct-profile finding (live finding 3). With the tool list removed on a
+    // closed round, flash wrote a call as malformed DSML text and the round was
+    // lost to provider_content_invalid_json. DeepSeek therefore keeps the list
+    // (tool_choice "none", part of OpenRouter's OpenAI-compatible request
+    // schema), exactly like the direct deepseek profile. Every other family
+    // stays OFF until it has its own live check (see providerCapabilityProfile).
+    tools_kept_when_closed: family === 'deepseek',
     cached_input_pricing: family === 'anthropic',
     upstream_provider: upstreamProvider,
     requested_profile: requested,
@@ -510,8 +516,9 @@ function providerHostname(base) {
 }
 
 // 2.9: closed rounds keep the tool block only after a live check has shown the
-// provider honours tool_choice "none". Until then every profile drops the tools
-// as before; `toolsKeptWhenClosed` is an in-code switch (static tests), not a
+// provider honours tool_choice "none" (done for the direct deepseek profile and,
+// 2026-10-01, for DeepSeek behind OpenRouter). Every other profile drops the
+// tools as before; `toolsKeptWhenClosed` is an in-code switch (static tests), not a
 // setting, and nothing maps an env variable to it.
 export function providerCapabilityProfile(config = {}) {
   const capability = resolveProviderCapability(config)

@@ -117,7 +117,8 @@ const deepseek = { key: 'k', model: 'deepseek-flash', base: 'https://provider.in
 const okResponse = () => new Response(JSON.stringify({ id: 'r', model: 'm', choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: '{"chatMessage":"","plan":[],"currentStep":0,"operations":[]}' } }], usage: { prompt_tokens: 10, completion_tokens: 1 } }), { status: 200, headers: { 'content-type': 'application/json' } })
 const history = [system, user('[CHAT] a: go'), { role: 'assistant', content: 'plan' }, user('[MOD] Autorio operation error: x')]
 
-test('closed rounds keep the tool block on the deepseek profile (tool_choice none) and drop it on every other profile', async () => {
+test('closed rounds keep the tool block on the deepseek profile and on a DeepSeek model behind openrouter (tool_choice none), and drop it on every other profile', async () => {
+  // The openrouter case runs the deepseek-flash model of this fixture, so its family is deepseek (live check 2026-10-01).
   for (const profile of ['deepseek', 'openai-reasoning', 'openrouter', 'generic', 'local']) {
     const bodies = []
     await providerRequest({ ...deepseek, profile }, history, {
@@ -125,7 +126,7 @@ test('closed rounds keep the tool block on the deepseek profile (tool_choice non
       allowTools: false,
       triggerSource: 'failure',
     })
-    if (profile === 'deepseek') {
+    if (profile === 'deepseek' || profile === 'openrouter') {
       assert.ok(Array.isArray(bodies[0].tools) && bodies[0].tools.length > 0, profile)
       assert.equal(bodies[0].tool_choice, 'none', profile)
     }
