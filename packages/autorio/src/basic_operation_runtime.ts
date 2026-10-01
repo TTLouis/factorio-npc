@@ -1,6 +1,7 @@
 import type { LuaEntity, LuaInventory, SurfaceCreateEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import type { new_basic_operation_controller, TransferInventorySnapshot, TransferRefusalCause } from './basic_operations'
+import { entity_last_user } from './entity_provenance'
 import { remember_entity_reference, resolve_exact_entity } from './entity_reference'
 import { record_hand_insert } from './hand_work'
 import { build_interaction_reach, entity_interaction_reach } from './interaction_range'
@@ -531,6 +532,9 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       placed_position: { x: entity.position.x, y: entity.position.y },
       placed_surface_index: entity.surface.index,
       placed_direction: entity.direction,
+      // MW1: the engine's last_user right after placement (nil for the standalone
+      // NPC). A later human last_user on this entity means a player changed it.
+      placed_last_user: entity_last_user(entity)?.name,
     })
     return [true, 'Entity placed successfully', entity]
   }

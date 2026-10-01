@@ -50,6 +50,7 @@ export interface BasicOperationResult {
   placed_position?: { x: number, y: number }
   placed_surface_index?: number
   placed_direction?: number
+  placed_last_user?: string
   placement_footprint?: {
     tile_width: number
     tile_height: number
