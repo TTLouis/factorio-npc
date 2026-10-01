@@ -19,6 +19,7 @@ import {
   REPLACEMENT_REFUSAL,
   reservedContainerUnitNumbers,
 } from './authorization.mjs'
+import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import {
   applyPlanningEvent,
   createEmptyPlanningState,
@@ -35,6 +36,7 @@ import {
 // provider, no Factorio, no Jev.
 
 const GOAL_ID = 'goal_mw1'
+const KEY = 'npc:sgluna'
 const ACTOR = { actor_id: 18, actor_epoch: 3 }
 
 const STONE_CONTRACT = {
@@ -727,4 +729,220 @@ test('MW1: world facts outlive a goal and a goalless restart; the old goal grant
   // ...and the next goal inherits it.
   const adopted = applyPlanningEvent(restored, { type: PLANNING_EVENT.GOAL_ACCEPTED, now: 20, goal_id: 'g', owner: 'louis', objective: 'a goal' })
   assert.equal(authorizationOf(adopted).world.reservations[0].unit_number, 5)
+})
+
+// --- the harness facade: trace events with request_id and a reason -----------------
+
+function facade() {
+  const memory = new CanonicalTaskBoardMemory()
+  const rows = []
+  memory.traceSink = (name, payload) => rows.push({ name, ...payload })
+  const find = name => rows.filter(row => row.name === name)
+  return { memory, rows, find, last: name => find(name).at(-1) }
+}
+
+function seededMemory(grant = STANDING_AUTO) {
+  const world = facade()
+  world.memory.planningByNpc.set(KEY, blockedState(grant))
+  return world
+}
+
+test('MW1 trace: grant, revise and revoke emit named events carrying request_id and a reason', () => {
+  const world = facade()
+  world.memory.planningByNpc.set(KEY, goalState())
+  const granted = world.memory.grantAuthorization(KEY, STANDING_AUTO, { requestId: 'req_1', now: 1100 })
+  assert.equal(granted.ok, true)
+  assert.deepEqual(
+    (({ ok, reason, grant_id, grant_revision, request_id }) => ({ ok, reason, grant_id, grant_revision, request_id }))(world.last('authorization.granted')),
+    { ok: true, reason: 'granted', grant_id: 'standing_auto:goal_mw1', grant_revision: 1, request_id: 'req_1' },
+  )
+  assert.equal(world.memory.grantAuthorization(KEY, STANDING_AUTO, { requestId: 'req_2' }).ok, false, 'an active grant is not granted twice')
+  assert.equal(world.last('authorization.granted').request_id, 'req_2')
+  assert.equal(world.last('authorization.granted').ok, false)
+
+  const revised = world.memory.reviseAuthorization(KEY, granted.grant.grant_id, { constraints: ['x'] }, { requestId: 'req_3', reason: 'player changed it' })
+  assert.equal(revised.grant.revision, 2)
+  assert.equal(world.last('authorization.revised').request_id, 'req_3')
+  assert.equal(world.last('authorization.revised').reason, 'revision_bumped')
+  const revoked = world.memory.revokeAuthorization(KEY, granted.grant.grant_id, { requestId: 'req_4', reason: 'auto cancelled' })
+  assert.equal(revoked.ok, true)
+  assert.equal(world.last('authorization.revoked').reason, 'auto cancelled')
+  assert.equal(world.last('authorization.revoked').request_id, 'req_4')
+
+  // The planner/Jev source is refused through the facade too.
+  const refused = world.memory.grantAuthorization(KEY, PLAYER_TASK, { requestId: 'req_5', source: 'jev' })
+  assert.equal(refused.ok, false)
+  assert.equal(world.last('authorization.granted').ok, false)
+})
+
+test('MW1 trace: an accepted replacement emits plan.replacement_drafted, then plan.replacement_committed with the grant and reason', () => {
+  const world = seededMemory()
+  const grant = grantOf(world.memory.planningState(KEY), STANDING_AUTO)
+  const result = world.memory.requestReplacementPlan(KEY, request(world.memory.planningState(KEY), STANDING_AUTO), { requestId: 'req_10' })
+  assert.equal(result.decision, REPLACEMENT_DECISION.ACCEPT)
+  const drafted = world.last('plan.replacement_drafted')
+  assert.equal(drafted.request_id, 'req_10')
+  assert.equal(drafted.reason, 'within_grant')
+  assert.equal(drafted.grant_id, grant.grant_id)
+  assert.equal(drafted.grant_revision, 1)
+  assert.equal(drafted.reason_code, 'source_depleted')
+  assert.deepEqual(drafted.evidence_refs, ['observation/patch-empty-1'])
+  assert.equal(drafted.successor_plan_id, getActivePlan(world.memory.planningState(KEY)).plan_id)
+
+  const committed = world.memory.commitReplacementPlan(KEY, { current: ACTOR, requestId: 'req_11', now: 2100 })
+  assert.equal(committed.ok, true)
+  assert.equal(getActivePlan(world.memory.planningState(KEY)).status, PLAN_STATUS.COMMITTED)
+  const check = world.find('authorization.grant_checked').at(-1)
+  assert.deepEqual([check.stage, check.ok, check.reason, check.request_id], ['commit', true, 'within_grant', 'req_11'])
+  const row = world.last('plan.replacement_committed')
+  assert.equal(row.request_id, 'req_11')
+  assert.equal(row.reason, 'within_grant')
+  assert.equal(row.grant_revision, 1)
+  assert.equal(row.reason_code, 'source_depleted')
+  assert.equal(row.predecessor_plan_id, drafted.plan_id)
+})
+
+test('MW1 trace: a stale grant is refused at commit and at admission with plan.replacement_refused / authorization.stale_refused', () => {
+  const world = seededMemory()
+  world.memory.requestReplacementPlan(KEY, request(world.memory.planningState(KEY), STANDING_AUTO), { requestId: 'req_20' })
+  // The actor epoch moved after the replacement was authored (death, restart, replacement).
+  const atCommit = world.memory.commitReplacementPlan(KEY, { current: { actor_id: 18, actor_epoch: 4 }, requestId: 'req_21', now: 2100 })
+  assert.equal(atCommit.ok, false)
+  assert.equal(atCommit.reason, GRANT_REFUSAL.ACTOR_EPOCH_CHANGED)
+  assert.equal(getActivePlan(world.memory.planningState(KEY)).status, PLAN_STATUS.DRAFT)
+  assert.deepEqual(
+    (({ ok, reason, stage, request_id }) => ({ ok, reason, stage, request_id }))(world.find('authorization.grant_checked').at(-1)),
+    { ok: false, reason: GRANT_REFUSAL.ACTOR_EPOCH_CHANGED, stage: 'commit', request_id: 'req_21' },
+  )
+  assert.equal(world.last('plan.replacement_refused').reason, GRANT_REFUSAL.ACTOR_EPOCH_CHANGED)
+  assert.equal(world.last('plan.replacement_refused').request_id, 'req_21')
+  assert.equal(world.last('authorization.stale_refused').stage, 'commit')
+  assert.equal(authorizationOf(world.memory.planningState(KEY)).refusals.at(-1).stage, 'commit')
+
+  // The same draft commits once the harness presents the real actor; then admission re-checks the grant.
+  assert.equal(world.memory.commitReplacementPlan(KEY, { current: ACTOR, requestId: 'req_22', now: 2200 }).ok, true)
+  const operations = [{ name: 'gather_resource', args: { resource_name: 'iron-ore', count: 10, search_radius: 32 } }]
+  assert.equal(world.memory.checkOperationAdmission(KEY, { operations, preflight: [{ ok: true }], actor: ACTOR }, { requestId: 'req_23' }).ok, true)
+  assert.deepEqual(
+    (({ stage, ok, reason, request_id }) => ({ stage, ok, reason, request_id }))(world.find('authorization.grant_checked').at(-1)),
+    { stage: 'admission', ok: true, reason: 'within_grant', request_id: 'req_23' },
+  )
+  world.memory.revokeAuthorization(KEY, 'standing_auto:goal_mw1', { requestId: 'req_24', reason: 'player cancelled' })
+  const refused = world.memory.checkOperationAdmission(KEY, { operations, preflight: [{ ok: true }], actor: ACTOR }, { requestId: 'req_25' })
+  assert.equal(refused.ok, false)
+  assert.equal(refused.code, ADMISSION_REFUSAL.AUTHORIZATION_STALE)
+  assert.equal(refused.reason, GRANT_REFUSAL.GRANT_REVOKED)
+  const stale = world.last('authorization.stale_refused')
+  assert.deepEqual([stale.stage, stale.reason, stale.request_id], ['admission', GRANT_REFUSAL.GRANT_REVOKED, 'req_25'])
+  assert.equal(world.find('authorization.grant_checked').at(-1).ok, false)
+
+  // A stale grant at request time is refused too, with the same named events.
+  const early = seededMemory()
+  const authored = request(early.memory.planningState(KEY), STANDING_AUTO)
+  early.memory.revokeAuthorization(KEY, 'standing_auto:goal_mw1', { requestId: 'req_26a', reason: 'player cancelled' })
+  const staleRequest = early.memory.requestReplacementPlan(KEY, authored, { requestId: 'req_26' })
+  assert.equal(staleRequest.decision, REPLACEMENT_DECISION.REFUSE)
+  assert.equal(staleRequest.reason, GRANT_REFUSAL.GRANT_REVOKED)
+  assert.deepEqual(
+    (({ stage, reason, request_id }) => ({ stage, reason, request_id }))(early.last('authorization.stale_refused')),
+    { stage: 'replacement', reason: GRANT_REFUSAL.GRANT_REVOKED, request_id: 'req_26' },
+  )
+  assert.equal(early.last('plan.replacement_refused').request_id, 'req_26')
+  assert.equal(early.memory.planningState(KEY).active_plan_id, early.memory.planningState(KEY).plans[0].plan_id, 'no successor was created')
+})
+
+test('MW1 trace: asks raise plan.replacement_question_raised and leave the old plan frozen', () => {
+  const world = seededMemory(PLAYER_TASK)
+  const before = world.memory.planningState(KEY)
+  const result = world.memory.requestReplacementPlan(KEY, request(before, PLAYER_TASK, { requested_result: { result_key: 'deliver:iron-plate:200', destination: 'chest:buffer-1' } }), { requestId: 'req_30' })
+  assert.equal(result.decision, REPLACEMENT_DECISION.ASK)
+  const row = world.last('plan.replacement_question_raised')
+  assert.equal(row.request_id, 'req_30')
+  assert.equal(row.reason, ASK_REASON.OUTCOME_CHANGED)
+  assert.equal(row.approvable, false)
+  assert.equal(row.old_plan_frozen, true)
+  assert.ok(row.question_id)
+  assert.equal(world.memory.planningState(KEY).active_plan_id, before.active_plan_id)
+  assert.equal(getActivePlan(world.memory.planningState(KEY)).status, PLAN_STATUS.BLOCKED)
+
+  // Redesign of a player-built structure asks, and the user's approval (not the planner's) lets it proceed.
+  const redesign = world.memory.requestReplacementPlan(KEY, request(world.memory.planningState(KEY), PLAYER_TASK, { impacts: { player_built_unit_numbers: [501] } }), { requestId: 'req_31' })
+  assert.equal(redesign.decision, REPLACEMENT_DECISION.ASK)
+  assert.deepEqual(world.last('plan.replacement_question_raised').reason_codes, [ASK_REASON.PROTECTED_REDESIGN])
+  const bySource = world.memory.recordAuthorizationApproval(KEY, { question_id: redesign.question.question_id, decision: 'approve', approved_by: 'louis', reason_codes: [ASK_REASON.PROTECTED_REDESIGN] }, { requestId: 'req_32', source: 'jev' })
+  assert.equal(bySource.ok, false)
+  assert.equal(world.last('authorization.approval_recorded').ok, false)
+  const approved = world.memory.recordAuthorizationApproval(KEY, { question_id: redesign.question.question_id, decision: 'approve', approved_by: 'louis', reason_codes: [ASK_REASON.PROTECTED_REDESIGN] }, { requestId: 'req_33' })
+  assert.equal(approved.ok, true)
+  assert.deepEqual([world.last('authorization.approval_recorded').reason, world.last('authorization.approval_recorded').request_id], ['approve', 'req_33'])
+  const proceed = world.memory.requestReplacementPlan(KEY, request(world.memory.planningState(KEY), PLAYER_TASK, { impacts: { player_built_unit_numbers: [501] }, approval_id: approved.approval.approval_id }), { requestId: 'req_34' })
+  assert.equal(proceed.decision, REPLACEMENT_DECISION.ACCEPT)
+  assert.equal(world.last('plan.replacement_drafted').request_id, 'req_34')
+})
+
+test('MW1 trace: protected, reserved and player-inventory refusals emit admission.* events with request_id and reason', () => {
+  const world = seededMemory()
+  world.memory.recordReservation(KEY, { unit_number: 900, entity_name: 'wooden-chest', reserved_by: 'louis' }, { requestId: 'req_40', now: 1700 })
+  assert.deepEqual([world.last('reservation.recorded').ok, world.last('reservation.recorded').reason, world.last('reservation.recorded').request_id], [true, 'reserved', 'req_40'])
+  assert.equal(world.memory.recordReservation(KEY, { unit_number: 900 }, { requestId: 'req_41' }).ok, false)
+  assert.equal(world.last('reservation.recorded').reason, 'already_reserved')
+
+  const run = (operations, preflight, requestId) => world.memory.checkOperationAdmission(KEY, { operations, preflight: preflight ?? operations.map(() => ({ ok: true })), actor: ACTOR }, { requestId })
+
+  const protectedRefusal = run([{ name: 'mine_entity_exact', args: { unit_number: 501 } }], [{ ok: true, target: { unit_number: 501, last_user: { name: 'louis', index: 1 } } }], 'req_42')
+  assert.equal(protectedRefusal.code, ADMISSION_REFUSAL.PROTECTED_ENTITY)
+  const protectedRow = world.last('admission.protected_refused')
+  assert.deepEqual([protectedRow.reason, protectedRow.unit_number, protectedRow.operation, protectedRow.last_user, protectedRow.request_id], ['human_last_user', 501, 'mine_entity_exact', 'louis', 'req_42'])
+
+  run([{ name: 'move_items_exact', args: { item_name: 'iron-plate', unit_number: 900, max_count: 5, to_entity: false } }], undefined, 'req_43')
+  const reservedRow = world.last('admission.reserved_refused')
+  assert.deepEqual([reservedRow.reason, reservedRow.unit_number, reservedRow.request_id], ['container_is_reserved', 900, 'req_43'])
+
+  run([{ name: 'move_items_with_player', args: { item_name: 'iron-plate', player_name: 'louis', max_count: 5, to_player: false } }], undefined, 'req_44')
+  const playerRow = world.last('admission.player_inventory_refused')
+  assert.deepEqual([playerRow.reason, playerRow.request_id], ['player_inventories_are_never_available', 'req_44'])
+
+  world.memory.releaseReservation(KEY, { unit_number: 900, released_by: 'louis' }, { requestId: 'req_45' })
+  assert.deepEqual([world.last('reservation.released').ok, world.last('reservation.released').reason, world.last('reservation.released').request_id], [true, 'released', 'req_45'])
+  assert.equal(world.memory.releaseReservation(KEY, { unit_number: 900 }, { requestId: 'req_46' }).ok, false)
+  assert.equal(world.last('reservation.released').reason, 'not_reserved')
+  assert.equal(run([{ name: 'move_items_exact', args: { item_name: 'iron-plate', unit_number: 900, max_count: 5, to_entity: false } }], undefined, 'req_47').ok, true)
+})
+
+test('MW1 trace: NPC placement receipts are recorded once per entity and drive protection', () => {
+  const world = facade()
+  world.memory.planningByNpc.set(KEY, granted(goalState(), STANDING_AUTO))
+  world.memory.recordNpcPlacement(KEY, { unit_number: 20, entity_name: 'stone-furnace', actor_id: 18, actor_epoch: 3 }, { requestId: 'req_50' })
+  world.memory.recordNpcPlacement(KEY, { unit_number: 20, entity_name: 'stone-furnace', actor_id: 18, actor_epoch: 3 }, { requestId: 'req_51' })
+  assert.equal(world.find('placement.npc_recorded').length, 1, 'the same receipt read on every status poll is not a new fact')
+  assert.deepEqual([world.last('placement.npc_recorded').request_id, world.last('placement.npc_recorded').reason], ['req_50', 'placement_receipt'])
+  assert.equal(world.memory.protectedEntityStatus(KEY, { unit_number: 20 }).protected, false)
+  assert.equal(world.memory.protectedEntityStatus(KEY, { unit_number: 20, last_user: { name: 'louis' } }).reason, 'human_changed_npc_placement')
+})
+
+test('MW1: the memory snapshot round trip (a server restart) keeps grants, lineage, reservations and placements', () => {
+  const world = seededMemory()
+  world.memory.requestReplacementPlan(KEY, request(world.memory.planningState(KEY), STANDING_AUTO), { requestId: 'req_60' })
+  world.memory.recordReservation(KEY, { unit_number: 900, entity_name: 'wooden-chest', reserved_by: 'louis' }, { now: 2100 })
+  world.memory.recordNpcPlacement(KEY, { unit_number: 20, entity_name: 'stone-furnace', actor_id: 18, actor_epoch: 3 }, { now: 2110 })
+
+  const snapshot = JSON.parse(JSON.stringify(world.memory.snapshot()))
+  const restored = new CanonicalTaskBoardMemory()
+  restored.restore(snapshot)
+  const state = restored.planningState(KEY)
+  assert.equal(grantOf(state, STANDING_AUTO).revision, 1)
+  assert.equal(getActivePlan(state).replacement.grant_id, 'standing_auto:goal_mw1')
+  assert.equal(authorizationOf(state).world.reservations[0].unit_number, 900)
+  assert.equal(authorizationOf(state).world.npc_placements[0].unit_number, 20)
+  // The restored draft still commits only under the restored grant.
+  const stale = restored.commitReplacementPlan(KEY, { current: { actor_id: 18, actor_epoch: 9 }, now: 2200 })
+  assert.equal(stale.ok, false)
+  assert.equal(restored.commitReplacementPlan(KEY, { current: ACTOR, now: 2300 }).ok, true)
+
+  // A reservation made before any goal also survives a restart through the facade.
+  const early = new CanonicalTaskBoardMemory()
+  early.recordReservation(KEY, { unit_number: 5, entity_name: 'iron-chest', reserved_by: 'louis' }, { now: 10 })
+  const reloaded = new CanonicalTaskBoardMemory()
+  reloaded.restore(JSON.parse(JSON.stringify(early.snapshot())))
+  assert.equal(authorizationOf(reloaded.planningState(KEY)).world.reservations[0].unit_number, 5)
 })
