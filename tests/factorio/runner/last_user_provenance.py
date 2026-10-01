@@ -118,18 +118,35 @@ def run(client: Rcon, results: Path) -> None:
         'map entity last_user',
     )
     nature_preflight = None
+    # The map branch is optional only because a generated map may have no tree or rock in range; it is recorded either way.
     if nature.get('found'):
         require(nature['access_ok'] is True and nature['has_last_user'] is False, nature)
         nature_preflight = preflight(nature['unit'], 'map entity preflight')
         require(nature_preflight.get('ok') is True and nature_preflight['target'].get('last_user') is None, nature_preflight)
 
-    # 4. What a connected human would do cannot be exercised here (zero players, headless): record it.
+    # 3b. A ghost has a unit_number and no build record: preflight on it must work and report no last_user (the
+    #     entity-ghost path is skipped by the mod without reading the property).
+    ghost = json_command(
+        "/silent-command " + actor_lookup +
+        "local p=s.find_non_colliding_position('wooden-chest',{x=a.position.x-6,y=a.position.y-3},8,0.5); assert(p); "
+        "local g=s.create_entity{name='entity-ghost',inner_name='wooden-chest',position=p,force=a.force}; "
+        "rcon.print(helpers.table_to_json({created=g~=nil,unit=g and g.unit_number or nil,type=g and g.type or nil}))",
+        'ghost fixture',
+    )
+    require(ghost.get('created') is True and isinstance(ghost.get('unit'), int) and ghost.get('type') == 'entity-ghost', ghost)
+    ghost_preflight = preflight(ghost['unit'], 'ghost entity preflight')
+    require(ghost_preflight.get('ok') is True and ghost_preflight['target'].get('last_user') is None, ghost_preflight)
+
+    # 4. What a connected human would do cannot be exercised here (zero players, headless): record it. The probe needs
+    #    a chest to try on, so a missing chest is a failure of the lane, not a pass.
     human_arm = json_command(
         "/silent-command local c=game.surfaces[1].find_entities_filtered{name='wooden-chest',limit=1}[1]; "
+        "if not c then rcon.print(helpers.table_to_json({found=false})) else "
         "local ok=pcall(function() c.last_user='no-such-player' end); "
-        "rcon.print(helpers.table_to_json({players_known_to_save=#game.players,can_set_without_player=ok}))",
+        "rcon.print(helpers.table_to_json({found=true,players_known_to_save=#game.players,can_set_without_player=ok})) end",
         'human arm probe',
     )
+    require(human_arm.get('found') is True, human_arm)
     require(human_arm['can_set_without_player'] is False, human_arm)
 
     payload = {
@@ -142,6 +159,8 @@ def run(client: Rcon, results: Path) -> None:
         'script_preflight': script_preflight,
         'map_entity': nature,
         'map_preflight': nature_preflight,
+        'ghost': ghost,
+        'ghost_preflight': ghost_preflight,
         'human_arm': human_arm,
         'not_exercised': 'a connected human building or configuring an entity (no LuaPlayer exists in the zero-player headless lane)',
     }
