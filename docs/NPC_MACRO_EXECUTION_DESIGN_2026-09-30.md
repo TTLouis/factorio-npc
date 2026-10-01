@@ -277,3 +277,47 @@ What remains provisional or open:
   harness; and `last_user` is also set by a human who merely configures an NPC-built entity
   (treated as protected, by design). The human arm of the engine rule cannot be exercised in
   the zero-player headless lane; it is recorded as not exercised.
+
+## 8. MW2 build status
+
+Status as of 2026-10-01: **MW2a (durable task ledger) and MW2b (operation reconciliation) are built on branch
+`mw2-task-ledger` with unit and scripted-loop coverage; no real-engine lane was added or run.** Scheduler behavior (what
+resumes when, aging action, question blocking) is MW3; the shared allowance is MW4; planner/executor notifications are MW5.
+
+What is built:
+
+- **Task ledger** (`runtime-v8/task-ledger.mjs`, pure; persisted in the planning state as `task_ledger`, carried across goal
+  teardown, restage, slice changes and restart exactly like the MW1 world facts). It is separate from the Roadmap Shelf. A task
+  is `interrupted` (it was running; holds a bounded checkpoint of its serialized planning state and compatibility board) or
+  `pending` (accepted, never started). Each keeps the requested result (objective, game-checked `done_when`, optional
+  destination from the grant or the caller), verified progress (plan id/version, completed step ids, receipt refs, a progress
+  marker), the MW1 grant link, the interruption reason and state, the actor/epoch and the game tick it stopped at. Open tasks
+  are bounded (8); a full ledger evicts the oldest visibly (`closed` history, `task_ledger.evicted`).
+- **Reducer events** (runtime or user authority only; planner and Jev have no path): `TASK_INTERRUPTED` moves the running goal
+  into the ledger (the planning state becomes goalless, so a task is never both running and parked); `TASK_RESUMED` restores the
+  committed plan, step progress, receipts and locators exactly as they stopped, keeps the live world facts and ledger, and
+  drops what described the stopped world (pause, condition wait, provider recovery); `TASK_QUEUED` and `TASK_CANCELLED`.
+  Resume refuses while another task is running (one execution context), for an unknown task, for a paused/blocked task unless
+  the user names it, and when the checkpoint cannot be restored.
+- **Wiring.** A `new_goal` request that displaces an active goal records it first (`recordInterruptedTask`, before
+  `clearTaskContext`); when a task completes, `finalizeCompletedTaskBoundary` resumes the most recent interrupted runnable
+  temporary task and queues the ordinary interrupted-plan recovery (re-observe, never replay). Aging is recorded data only:
+  15 game-minutes (54000 ticks) using the game tick when both ends are known, else wall-clock.
+- **Operation reconciliation** (`runtime-v8/operation-reconciliation.mjs`, pure; the record lives in `run.pending_operation`).
+  Before a batch is sent the runtime records a pending record (operations, signature, plan/step, actor/epoch, the mod's batch
+  watermark from `autorio_operations.status`). The acknowledgement marks it acknowledged; the receipt settles it. A lost
+  acknowledgement, a restart, an actor replacement or a death is reconciled against the mod's real batch ids, generation and
+  the actor id/epoch: `admitted_in_flight|completed|cancelled`, `not_admitted`, `stale_actor`, `generation_changed`,
+  `unknown`. Admitted: carry on as acknowledged, nothing is re-sent. Not admitted: one harness-told retry. Anything uncertain
+  stays as `effect: unknown` and refuses an IDENTICAL delivery/craft/placement batch for the same plan step
+  (`operation.duplicate_suppressed`); a changed batch, another step or a replaced plan is allowed. Recovery messages carry the
+  reconciliation facts.
+- **Trace events** (each carries `request_id` and a `reason`; asserted in `task-ledger.test.mjs`,
+  `task-ledger-scenario.test.mjs`, `operation-reconciliation.test.mjs`, `operation-reconciliation-scenario.test.mjs`):
+  `task_ledger.interrupted|queued|resumed|cancelled|evicted|refused|restored`, `operation.pending_recorded`,
+  `operation.reconciled`, `operation.duplicate_suppressed`, `operation.stale_refused`.
+
+Open or provisional: the checkpoint (a bounded copy of the planning state and board) is the resume mechanism; a task whose
+checkpoint exceeds the size cap is kept but not runnable. Stagnation counters (3 attempts / 15 game-minutes) are not recorded
+yet. An engine lane asserting that the mod's batch sequence and generation behave as reconciliation assumes across a real
+save/load is not written (the autorio unit tests cover the counters; the harness side is covered by scripted fakes).

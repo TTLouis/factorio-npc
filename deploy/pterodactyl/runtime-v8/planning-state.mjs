@@ -46,6 +46,7 @@ import {
   revokeAuthorization,
   serializeAuthorization,
 } from './authorization.mjs'
+import { sanitizePendingOperation } from './operation-reconciliation.mjs'
 import {
   addTask,
   carryTaskLedger,
@@ -413,6 +414,9 @@ export const PLANNING_EVENT = Object.freeze({
   TASK_QUEUED: 'TASK_QUEUED',
   TASK_RESUMED: 'TASK_RESUMED',
   TASK_CANCELLED: 'TASK_CANCELLED',
+  // MW2b: the one operation batch the runtime may have in flight (operation-reconciliation.mjs). Written before a batch is sent,
+  // updated by reconciliation, cleared (operation null) when its receipt settles it. Runtime sources only.
+  PENDING_OPERATION_RECORDED: 'PENDING_OPERATION_RECORDED',
 })
 
 const PLANNING_EVENT_TYPES = Object.freeze(Object.values(PLANNING_EVENT))
@@ -623,6 +627,8 @@ export function createEmptyRunState() {
     condition_wait: null,
     provider_recovery: null,
     persistent_runtime: null,
+    // MW2b: the operation batch sent but not yet settled by a receipt (operation-reconciliation.mjs).
+    pending_operation: null,
     // Entity locators and exact-identity proofs the runtime needs for
     // recovery (3.3 move 4).
     locators: { durable_last_operations: [], exact_target_audit: [] },
@@ -2946,6 +2952,23 @@ Object.assign(HANDLERS, {
     })
   },
 
+  // MW2b. A record is stamped for its goal; one for another goal is stale work and fails closed. `operation: null` clears it,
+  // optionally only when its key matches (a late clear for an older batch cannot erase a newer pending one).
+  [PLANNING_EVENT.PENDING_OPERATION_RECORDED](state, event, now) {
+    if (!runEventAllowed(state, event)) return state
+    const run = state.run ?? createEmptyRunState()
+    if (event.operation === null || event.operation === undefined) {
+      if (!run.pending_operation) return state
+      const key = text(event.operation_key, 200)
+      if (key && run.pending_operation.operation_key !== key) return state
+      return { ...state, run: { ...run, pending_operation: null, updated_at: now }, updated_at: now }
+    }
+    const record = sanitizePendingOperation(event.operation)
+    if (!record) return state
+    if (record.goal_id && record.goal_id !== state.goal.goal_id) return state
+    return { ...state, run: { ...run, pending_operation: record, updated_at: now }, updated_at: now }
+  },
+
   [PLANNING_EVENT.PERSISTENT_RUNTIME_RECORDED](state, event, now) {
     if (!runEventAllowed(state, event)) return state
     return recordRunRecord(state, now, 'persistent_runtime', event.runtime, {
@@ -3801,6 +3824,7 @@ function restoreRun(raw) {
     condition_wait: paused ? null : boundedRecord(raw.condition_wait),
     provider_recovery: boundedRecord(raw.provider_recovery),
     persistent_runtime: paused ? null : boundedRecord(raw.persistent_runtime),
+    pending_operation: sanitizePendingOperation(raw.pending_operation),
     locators: {
       durable_last_operations: sanitizeDurableOperations(locators.durable_last_operations),
       exact_target_audit: sanitizeExactTargetAudit(locators.exact_target_audit),

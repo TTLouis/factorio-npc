@@ -18,6 +18,7 @@ import {
   classifyTaskInterruption,
   classifyTaskResume,
 } from './planning-state.mjs'
+import { duplicateEffectGuard } from './operation-reconciliation.mjs'
 import {
   mostRecentResumable,
   taskLedgerOf,
@@ -1640,6 +1641,73 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     }
     this.#authTrace('task_ledger.cancelled', { ok: true, reason: String(reason ?? 'cancelled').slice(0, 200), task_id: taskId, goal_id: before.goal_id }, rid)
     return { ok: true, task: before }
+  }
+
+  // --- MW2b operation reconciliation -----------------------------------------------
+  //
+  // The one outstanding operation batch (operation-reconciliation.mjs) lives in the reducer's run state. The runtime records it
+  // BEFORE sending a batch, updates it when reconciliation proves what happened, and clears it when its receipt settles it. An
+  // unsettled record whose effect is not proven absent refuses an IDENTICAL batch for the same plan step (no duplicate delivery).
+
+  pendingOperation(key) {
+    return this.planningState(key)?.run?.pending_operation ?? null
+  }
+
+  recordPendingOperation(key, operation, { requestId } = {}) {
+    const goalId = this.planningState(key)?.goal?.goal_id
+    const after = this.#applyRunEvent(key, { type: PLANNING_EVENT.PENDING_OPERATION_RECORDED, goal_id: goalId, operation })
+    const held = after?.run?.pending_operation
+    const ok = Boolean(held) && held.operation_key === operation?.operation_key
+    this.#authTrace('operation.pending_recorded', {
+      ok,
+      reason: ok ? 'recorded_before_send' : 'refused_no_active_goal_or_invalid',
+      operation_key: operation?.operation_key,
+      signature: operation?.signature,
+      plan_id: operation?.plan_id,
+      step_id: operation?.step_id,
+      effect_classes: [...new Set((operation?.operations ?? []).map(item => item.effect_class))],
+      baseline: operation?.baseline ?? null,
+    }, requestId)
+    return ok ? held : undefined
+  }
+
+  updatePendingOperation(key, patch) {
+    const held = this.pendingOperation(key)
+    if (!held) return undefined
+    const goalId = this.planningState(key)?.goal?.goal_id
+    const after = this.#applyRunEvent(key, { type: PLANNING_EVENT.PENDING_OPERATION_RECORDED, goal_id: goalId, operation: { ...held, ...patch } })
+    return after?.run?.pending_operation ?? undefined
+  }
+
+  clearPendingOperation(key, { operationKey } = {}) {
+    const goalId = this.planningState(key)?.goal?.goal_id
+    const after = this.#applyRunEvent(key, { type: PLANNING_EVENT.PENDING_OPERATION_RECORDED, goal_id: goalId, operation: null, operation_key: operationKey })
+    return !after?.run?.pending_operation
+  }
+
+  /** Would these operations repeat an effect that may already have happened? Traces `operation.duplicate_suppressed` when so. */
+  checkDuplicateEffect(key, { operations } = {}, { requestId } = {}) {
+    const planning = this.planningState(key)
+    const pending = planning?.run?.pending_operation
+    const plan = getActivePlan(planning)
+    const step = plan?.steps?.[plan.active_step_index]
+    const guard = duplicateEffectGuard(pending, { operations, planId: plan?.plan_id, stepId: step?.step_id })
+    if (guard.refuse) {
+      this.#authTrace('operation.duplicate_suppressed', {
+        ok: false,
+        reason: guard.reason,
+        operation_key: guard.operation_key,
+        effect: guard.effect,
+        verdict: guard.verdict,
+        pending_state: guard.state,
+        effect_classes: guard.effect_classes,
+        batch_id: guard.batch_id,
+        signature: pending?.signature,
+        plan_id: plan?.plan_id,
+        step_id: step?.step_id,
+      }, requestId)
+    }
+    return guard
   }
 
   setStepCompletionContract(key, stepId, contract, { now = Date.now() } = {}) {
