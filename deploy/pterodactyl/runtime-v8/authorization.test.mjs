@@ -946,3 +946,155 @@ test('MW1: the memory snapshot round trip (a server restart) keeps grants, linea
   reloaded.restore(JSON.parse(JSON.stringify(early.snapshot())))
   assert.equal(authorizationOf(reloaded.planningState(KEY)).world.reservations[0].unit_number, 5)
 })
+
+// --- review fixes -----------------------------------------------------------------
+
+test('MW1: a replacement can only replace the CURRENT blocked plan - never a superseded one, a healthy plan, or a second pending draft', () => {
+  // p1 BLOCKED -> the user revises it (p3, committed) -> a late replacement request for p1 is history, not a successor.
+  const blocked = blockedState(STANDING_AUTO)
+  const p1 = getActivePlan(blocked)
+  let state = applyPlanningEvent(blocked, { type: PLANNING_EVENT.USER_REVISION_APPROVED, now: 1700, source: 'user', approved_by: 'louis', plan_id: p1.plan_id, steps: [{ description: 'Mine from a patch the player chose' }] })
+  state = applyPlanningEvent(state, { type: PLANNING_EVENT.PLAN_COMMITTED, now: 1800, runtime_validation: { passed: true } })
+  const p3 = getActivePlan(state)
+  assert.equal(p3.status, PLAN_STATUS.COMMITTED)
+  const stale = request(state, STANDING_AUTO, { plan_id: p1.plan_id })
+  const verdict = classifyReplacement(state, stale)
+  assert.equal(verdict.decision, REPLACEMENT_DECISION.REFUSE)
+  assert.equal(verdict.reason, REPLACEMENT_REFUSAL.PREDECESSOR_ALREADY_REPLACED)
+  const after = applyPlanningEvent(state, stale)
+  assert.equal(after.active_plan_id, p3.plan_id, 'the healthy active plan is untouched')
+  assert.equal(getActivePlan(after).status, PLAN_STATUS.COMMITTED)
+  assert.deepEqual(ids(after), ids(state), 'no plan was added')
+  assert.equal(getPlan(after, p1.plan_id).superseded_by_plan_id, p3.plan_id)
+  assert.equal(authorizationOf(after).refusals.at(-1).reason, REPLACEMENT_REFUSAL.PREDECESSOR_ALREADY_REPLACED)
+
+  // A blocked plan that is simply not the active one is refused as not active.
+  const notActive = { ...blocked, active_plan_id: null }
+  assert.equal(classifyReplacement(notActive, request(blocked, STANDING_AUTO)).reason, REPLACEMENT_REFUSAL.PREDECESSOR_NOT_ACTIVE)
+
+  // A second request while a replacement draft is already pending is refused, not stacked.
+  const drafted = applyPlanningEvent(blocked, request(blocked, STANDING_AUTO))
+  const again = classifyReplacement(drafted, request(drafted, STANDING_AUTO, { plan_id: p1.plan_id }))
+  assert.equal(again.decision, REPLACEMENT_DECISION.REFUSE)
+  assert.ok([REPLACEMENT_REFUSAL.PREDECESSOR_ALREADY_REPLACED, REPLACEMENT_REFUSAL.REPLACEMENT_PENDING].includes(again.reason))
+  const pendingOnly = { ...drafted, plans: drafted.plans.map(plan => (plan.plan_id === p1.plan_id ? { ...plan, superseded_by_plan_id: null } : plan)), active_plan_id: p1.plan_id }
+  assert.equal(classifyReplacement(pendingOnly, request(pendingOnly, STANDING_AUTO, { plan_id: p1.plan_id })).reason, REPLACEMENT_REFUSAL.REPLACEMENT_PENDING)
+  assert.equal(applyPlanningEvent(drafted, request(drafted, STANDING_AUTO, { plan_id: p1.plan_id })).plans.length, drafted.plans.length)
+})
+
+test('MW1 interim: protected-entity and player-inventory gates apply only to grant-backed work; reserved exclusion applies to every goal', () => {
+  // An ordinary user-requested goal (no grant, no replacement lineage): the player's own request is their approval.
+  let ordinary = goalState()
+  ordinary = applyPlanningEvent(ordinary, { type: PLANNING_EVENT.RESERVATION_RECORDED, source: 'user', now: 1200, unit_number: 900, entity_name: 'wooden-chest' })
+  const humanBuilt = [{ ok: true, target: { unit_number: 501, last_user: { name: 'louis', index: 1 } } }]
+  const check = (state, operations, preflight) => evaluateOperationAdmission(state, { operations, preflight: preflight ?? operations.map(() => ({ ok: true })), actor: ACTOR })
+  for (const name of ['mine_entity_exact', 'rotate_entity', 'set_machine_recipe']) {
+    assert.deepEqual(check(ordinary, [{ name, args: { unit_number: 501 } }], humanBuilt), { ok: true }, name)
+  }
+  assert.deepEqual(check(ordinary, [{ name: 'move_items_with_player', args: { item_name: 'iron-plate', player_name: 'louis', max_count: 5, to_player: false } }]), { ok: true })
+  // ...but a reserved container is excluded for everyone, grant or not.
+  assert.equal(check(ordinary, [{ name: 'move_items_exact', args: { item_name: 'iron-plate', unit_number: 900, max_count: 5, to_entity: false } }]).code, ADMISSION_REFUSAL.RESERVED_SUPPLY)
+
+  // Grant-backed work is gated: an active grant for the goal, or replacement lineage on the active plan.
+  const withGrant = granted(ordinary, STANDING_AUTO)
+  assert.equal(check(withGrant, [{ name: 'mine_entity_exact', args: { unit_number: 501 } }], humanBuilt).code, ADMISSION_REFUSAL.PROTECTED_ENTITY)
+  assert.equal(check(withGrant, [{ name: 'move_items_with_player', args: { item_name: 'iron-plate', player_name: 'louis', max_count: 5, to_player: false } }]).code, ADMISSION_REFUSAL.PLAYER_INVENTORY)
+  const blocked = blockedState(STANDING_AUTO)
+  const replacement = applyPlanningEvent(applyPlanningEvent(blocked, request(blocked, STANDING_AUTO)), { type: PLANNING_EVENT.PLAN_COMMITTED, now: 2100, runtime_validation: { passed: true }, grant_check: ACTOR })
+  assert.equal(check(replacement, [{ name: 'mine_entity_exact', args: { unit_number: 501 } }], humanBuilt).code, ADMISSION_REFUSAL.PROTECTED_ENTITY)
+  // A revoked grant no longer backs ordinary work.
+  const revoked = applyPlanningEvent(withGrant, { type: PLANNING_EVENT.AUTHORIZATION_REVOKED, source: 'runtime', now: 1500, grant_id: 'standing_auto:goal_mw1' })
+  assert.deepEqual(check(revoked, [{ name: 'mine_entity_exact', args: { unit_number: 501 } }], humanBuilt), { ok: true })
+})
+
+test('MW1: mining by name is refused while a container of that name is reserved; other names are untouched', () => {
+  let state = applyPlanningEvent(goalState(), { type: PLANNING_EVENT.RESERVATION_RECORDED, source: 'user', now: 1200, unit_number: 900, entity_name: 'wooden-chest' })
+  const mine = name => evaluateOperationAdmission(state, { operations: [{ name: 'mine_entity', args: { entity_name: name, count: 1 } }], preflight: [{ ok: true }], actor: ACTOR })
+  const refused = mine('wooden-chest')
+  assert.equal(refused.code, ADMISSION_REFUSAL.RESERVED_AMBIGUOUS)
+  assert.equal(refused.reason, 'name_based_mining_while_a_container_of_that_name_is_reserved')
+  assert.deepEqual(mine('iron-chest'), { ok: true })
+  assert.deepEqual(mine('tree-01'), { ok: true })
+  state = applyPlanningEvent(state, { type: PLANNING_EVENT.RESERVATION_RELEASED, source: 'user', now: 1300, unit_number: 900 })
+  assert.deepEqual(mine('wooden-chest'), { ok: true })
+})
+
+test('MW1: grants, approvals and reservations are consent - user, human or the harness; user_steering is not', () => {
+  const base = goalState()
+  assert.equal(granted(base, STANDING_AUTO, { source: 'user_steering' }), base)
+  assert.notEqual(granted(base, STANDING_AUTO, { source: 'human' }), base)
+  const state = granted(base, STANDING_AUTO)
+  const approval = source => applyPlanningEvent(state, { type: PLANNING_EVENT.AUTHORIZATION_APPROVAL_RECORDED, source, now: 1200, approved_by: 'louis', decision: 'approve', reason_codes: ['protected_redesign'] })
+  assert.equal(approval('user_steering'), state)
+  assert.notEqual(approval('human'), state)
+  assert.equal(applyPlanningEvent(state, { type: PLANNING_EVENT.RESERVATION_RECORDED, source: 'user_steering', now: 1200, unit_number: 9 }), state)
+  assert.equal(applyPlanningEvent(state, { type: PLANNING_EVENT.AUTHORIZATION_REVOKED, source: 'user_steering', now: 1200, grant_id: 'standing_auto:goal_mw1' }), state)
+})
+
+test('MW1: reservations and NPC placements survive a new goal, clearTaskContext, retireCompletedPlan and terminatePlan', () => {
+  const seed = () => {
+    const memory = new CanonicalTaskBoardMemory()
+    memory.planningByNpc.set(KEY, goalState())
+    memory.recordReservation(KEY, { unit_number: 900, entity_name: 'wooden-chest', reserved_by: 'louis' }, { now: 1200 })
+    memory.recordNpcPlacement(KEY, { unit_number: 20, entity_name: 'stone-furnace', actor_id: 18, actor_epoch: 3 }, { now: 1210 })
+    memory.grantAuthorization(KEY, STANDING_AUTO, { now: 1220 })
+    return memory
+  }
+  const worldOf = (memory) => {
+    const state = memory.planningState(KEY)
+    return { reservations: authorizationOf(state).world.reservations.map(item => item.unit_number), placements: authorizationOf(state).world.npc_placements.map(item => item.unit_number), goal: state.goal ?? null, grants: authorizationOf(state).grants.length }
+  }
+
+  const cleared = seed()
+  cleared.planByNpc.set(KEY, { goal_id: GOAL_ID, status: 'active' })
+  cleared.clearTaskContext(KEY)
+  assert.deepEqual(worldOf(cleared), { reservations: [900], placements: [20], goal: null, grants: 0 }, 'the goal and its grants go; the world facts stay')
+  // The kept state is goalless but works as the base of the next goal, which inherits the facts.
+  const next = cleared.admitPlanningGoal(KEY, { owner: 'louis', objective: 'a brand new goal', now: 3000 })
+  assert.equal(authorizationOf(next).world.reservations[0].unit_number, 900)
+  assert.equal(authorizationOf(next).grants.length, 0)
+
+  // Without any world facts the planning state is simply deleted, exactly as before.
+  const plain = new CanonicalTaskBoardMemory()
+  plain.planningByNpc.set(KEY, goalState())
+  plain.clearTaskContext(KEY)
+  assert.equal(plain.planningState(KEY), undefined)
+
+  const retired = seed()
+  retired.planByNpc.set(KEY, { goal_id: GOAL_ID, status: 'completed' })
+  assert.equal(retired.retireCompletedPlan(KEY), undefined)
+  assert.deepEqual(worldOf(retired), { reservations: [900], placements: [20], goal: null, grants: 0 })
+
+  const terminated = seed()
+  terminated.planByNpc.set(KEY, { goal_id: GOAL_ID, status: 'active', task_board: undefined })
+  terminated.terminatePlan(KEY)
+  assert.equal(authorizationOf(terminated.planningState(KEY)).world.reservations[0].unit_number, 900)
+})
+
+test('MW1: restore merges goalless world facts into a goal state a legacy migration created for the same key', () => {
+  const source = new CanonicalTaskBoardMemory()
+  source.planningByNpc.set(KEY, goalState())
+  source.recordReservation(KEY, { unit_number: 900, entity_name: 'wooden-chest', reserved_by: 'louis' }, { now: 1200 })
+  source.recordNpcPlacement(KEY, { unit_number: 20, entity_name: 'stone-furnace' }, { now: 1210 })
+  const snapshot = JSON.parse(JSON.stringify(source.snapshot()))
+  // The reducer state in the snapshot lost its goal (an older snapshot), while the legacy board still holds the plan.
+  snapshot.planning_states[0].state.goal = null
+  snapshot.plans = [{
+    key: KEY,
+    state: {
+      goal_id: GOAL_ID,
+      owner: 'louis',
+      objective: 'deliver 100 iron plates to the buffer chest',
+      status: 'active',
+      plan: ['Mine iron ore'],
+      current_step: 0,
+      updated_at: 1300,
+    },
+  }]
+  const restored = new CanonicalTaskBoardMemory()
+  restored.restore(snapshot)
+  const state = restored.planningState(KEY)
+  assert.ok(state.goal, 'the legacy migration did create a goal state for this key')
+  assert.equal(authorizationOf(state).world.reservations[0].unit_number, 900, 'the world facts were not lost to the migrated goal state')
+  assert.equal(authorizationOf(state).world.npc_placements[0].unit_number, 20)
+})

@@ -1787,6 +1787,12 @@ function isUserAuthority(source) {
   return USER_AUTHORITIES.includes(text(source, 60))
 }
 
+// MW1: grants, approvals and reservations are consent. Only the user (or the harness acting for a verified mandate) gives
+// them; `user_steering` (a steering nudge, not consent) does not.
+function isConsentAuthority(source) {
+  return ['user', 'human'].includes(text(source, 60))
+}
+
 function updateProgress(plan, stepId, updater, { now }) {
   const current = plan.execution.step_progress[stepId] ?? emptyStepProgress()
   return {
@@ -2531,7 +2537,7 @@ Object.assign(HANDLERS, {
 
   [PLANNING_EVENT.AUTHORIZATION_GRANTED](state, event, now) {
     if (!state.goal || state.goal.status !== GOAL_STATUS.ACTIVE) return state
-    if (!isRuntimeAuthority(event.source) && !isUserAuthority(event.source)) return state
+    if (!isRuntimeAuthority(event.source) && !isConsentAuthority(event.source)) return state
     const goalId = text(event.goal_id, 120)
     if (goalId && goalId !== state.goal.goal_id) return state
     const result = grantAuthorization(authorizationOf(state), { ...event.grant, goal_id: state.goal.goal_id }, now)
@@ -2550,7 +2556,7 @@ Object.assign(HANDLERS, {
   },
 
   [PLANNING_EVENT.AUTHORIZATION_REVISED](state, event, now) {
-    if (!isRuntimeAuthority(event.source) && !isUserAuthority(event.source)) return state
+    if (!isRuntimeAuthority(event.source) && !isConsentAuthority(event.source)) return state
     const result = reviseAuthorization(authorizationOf(state), event, now)
     if (!result.auth) return state
     return {
@@ -2567,7 +2573,7 @@ Object.assign(HANDLERS, {
   },
 
   [PLANNING_EVENT.AUTHORIZATION_REVOKED](state, event, now) {
-    if (!isRuntimeAuthority(event.source) && !isUserAuthority(event.source)) return state
+    if (!isRuntimeAuthority(event.source) && !isConsentAuthority(event.source)) return state
     const result = revokeAuthorization(authorizationOf(state), event, now)
     if (!result.auth) return state
     return {
@@ -2679,7 +2685,7 @@ Object.assign(HANDLERS, {
 
   [PLANNING_EVENT.AUTHORIZATION_APPROVAL_RECORDED](state, event, now) {
     // An approval is the player's answer; only user authority can give one.
-    if (!isUserAuthority(event.source)) return state
+    if (!isConsentAuthority(event.source)) return state
     const result = recordApproval(authorizationOf(state), {
       ...event,
       goal_id: event.goal_id ?? state.goal?.goal_id,
@@ -2706,7 +2712,7 @@ Object.assign(HANDLERS, {
   },
 
   [PLANNING_EVENT.RESERVATION_RECORDED](state, event, now) {
-    if (!isRuntimeAuthority(event.source) && !isUserAuthority(event.source)) return state
+    if (!isRuntimeAuthority(event.source) && !isConsentAuthority(event.source)) return state
     const result = recordReservation(authorizationOf(state), event, now)
     if (!result.auth) return state
     return {
@@ -2718,7 +2724,7 @@ Object.assign(HANDLERS, {
   },
 
   [PLANNING_EVENT.RESERVATION_RELEASED](state, event, now) {
-    if (!isRuntimeAuthority(event.source) && !isUserAuthority(event.source)) return state
+    if (!isRuntimeAuthority(event.source) && !isConsentAuthority(event.source)) return state
     const result = releaseReservation(authorizationOf(state), event, now)
     if (!result.auth) return state
     return {

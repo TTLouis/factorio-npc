@@ -6,6 +6,7 @@ import { completionContractSupported, provePermanentlyUnsatisfiable, sanitizeSte
 import {
   ADMISSION_REFUSAL,
   authorizationOf,
+  carryAuthorizationAcrossGoals,
   checkGrant,
   checkReplacementAtCommit,
   classifyReplacement,
@@ -1616,14 +1617,22 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     this.planByNpc.delete(key)
     // The current slot is retired only when there is no active long-horizon
     // reducer goal. Completing one immutable slice must not discard its shelf.
-    this.planningByNpc.delete(key)
+    this.#dropPlanningKeepingWorld(key)
     return undefined
+  }
+
+  // MW1: reserved containers and NPC placement receipts are world facts, not part of one goal. Dropping a goal's planning
+  // state (a new goal, a completed task context, a terminate) keeps them as a goalless state instead of deleting them.
+  #dropPlanningKeepingWorld(key) {
+    const world = carryAuthorizationAcrossGoals(this.planningByNpc.get(key)?.authorization)
+    if (world) this.planningByNpc.set(key, { ...createEmptyPlanningState(), authorization: world })
+    else this.planningByNpc.delete(key)
   }
 
   clearTaskContext(key) {
     const result = super.clearTaskContext(key)
     if (key) {
-      this.planningByNpc.delete(key)
+      this.#dropPlanningKeepingWorld(key)
       this.steeringAdviceByNpc?.delete(key)
       this.admissionStampByNpc.delete(key)
     }
@@ -2395,7 +2404,10 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       this.syncPlanningState(key, state)
     }
     for (const [key, world] of goallessWorld) {
-      if (!this.planningByNpc.has(key)) this.planningByNpc.set(key, world)
+      const held = this.planningByNpc.get(key)
+      if (!held) this.planningByNpc.set(key, world)
+      // A legacy migration created a goal state for this key: it never held the world facts, so they are merged in.
+      else if (!held.authorization) this.planningByNpc.set(key, { ...held, authorization: world.authorization })
     }
   }
 

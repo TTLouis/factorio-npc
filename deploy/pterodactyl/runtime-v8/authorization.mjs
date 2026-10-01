@@ -69,6 +69,10 @@ export const REPLACEMENT_REFUSAL = Object.freeze({
   INVALID_REQUEST: 'invalid_request',
   PREDECESSOR_NOT_FOUND: 'predecessor_not_found',
   PREDECESSOR_NOT_BLOCKED: 'predecessor_not_blocked',
+  // A blocked plan that is no longer the active one (a user revision or another successor replaced it) is history.
+  PREDECESSOR_NOT_ACTIVE: 'predecessor_not_active',
+  PREDECESSOR_ALREADY_REPLACED: 'predecessor_already_replaced',
+  REPLACEMENT_PENDING: 'replacement_pending',
   REASON_NOT_GROUNDED: 'reason_not_grounded',
   STEPS_EMPTY: 'steps_empty',
   STEPS_CHANGED_SINCE_AUTHORIZATION: 'steps_changed_since_authorization',
@@ -622,6 +626,13 @@ export function classifyReplacement(state, request) {
   const predecessor = state?.plans?.find(plan => plan.plan_id === planId)
   if (!planId || !predecessor) return refuse(REPLACEMENT_REFUSAL.PREDECESSOR_NOT_FOUND)
   if (predecessor.status !== 'BLOCKED') return refuse(REPLACEMENT_REFUSAL.PREDECESSOR_NOT_BLOCKED, { plan_id: planId })
+  // Only the CURRENT blocked plan can be replaced: a replacement may never displace a healthy active plan, stack on a
+  // replacement draft that is already pending, or resurrect a plan something else already succeeded.
+  if (predecessor.superseded_by_plan_id) return refuse(REPLACEMENT_REFUSAL.PREDECESSOR_ALREADY_REPLACED, { plan_id: planId })
+  if (state.active_plan_id !== planId) return refuse(REPLACEMENT_REFUSAL.PREDECESSOR_NOT_ACTIVE, { plan_id: planId })
+  if (state.plans.some(plan => plan.replacement && ['DRAFT', 'RUNTIME_VALIDATION', 'READY'].includes(plan.status))) {
+    return refuse(REPLACEMENT_REFUSAL.REPLACEMENT_PENDING, { plan_id: planId })
+  }
 
   const check = checkGrant(auth, goal, {
     grant_id: request.grant.grant_id,
@@ -787,6 +798,11 @@ export function evaluateOperationAdmission(state, { operations, preflight, actor
     }
   }
 
+  // INTERIM (owner decision pending): protected-asset and player-inventory gates apply only to grant-backed work - a plan
+  // that carries replacement lineage, or any goal with an active grant. An ordinary user-requested goal is the player's own
+  // request and behaves as before MW1. Reserved-container exclusion applies to every goal.
+  const grantBacked = Boolean(plan?.replacement) || auth.grants.some(grant => grant.status === GRANT_STATUS.ACTIVE && grant.goal_id === goalId)
+
   const reservations = activeReservations(auth)
   const reservedUnits = new Set(reservations.map(item => item.unit_number))
   const reservedNames = new Set(reservations.map(item => item.entity_name).filter(Boolean))
@@ -797,7 +813,7 @@ export function evaluateOperationAdmission(state, { operations, preflight, actor
     const name = operation?.name
     const target = preflight?.[index]?.target
 
-    if (name === 'move_items_with_player' && args.to_player === false) {
+    if (grantBacked && name === 'move_items_with_player' && args.to_player === false) {
       return { ok: false, code: ADMISSION_REFUSAL.PLAYER_INVENTORY, reason: 'player_inventories_are_never_available', operation: name, operation_index: index, player_name: text(args.player_name, 80) }
     }
 
@@ -811,8 +827,13 @@ export function evaluateOperationAdmission(state, { operations, preflight, actor
     if (name === 'move_items' && args.to_entity === false && reservedNames.has(args.entity_name)) {
       return { ok: false, code: ADMISSION_REFUSAL.RESERVED_AMBIGUOUS, reason: 'name_based_withdrawal_while_a_container_of_that_name_is_reserved', operation: name, operation_index: index, entity_name: text(args.entity_name, 120) }
     }
+    // Name-based mining picks its target inside the mod; while a container of that name is reserved it could pick the
+    // reserved one, so it is refused. (clear_construction_area is a known gap: its targets are chosen in the mod too.)
+    if (name === 'mine_entity' && reservedNames.has(args.entity_name)) {
+      return { ok: false, code: ADMISSION_REFUSAL.RESERVED_AMBIGUOUS, reason: 'name_based_mining_while_a_container_of_that_name_is_reserved', operation: name, operation_index: index, entity_name: text(args.entity_name, 120) }
+    }
 
-    if (PROTECTED_MUTATION_OPERATIONS.includes(name) && unit !== undefined) {
+    if (grantBacked && PROTECTED_MUTATION_OPERATIONS.includes(name) && unit !== undefined) {
       const protection = entityProtection(auth, { unit_number: unit, last_user: target?.last_user }, { goalId })
       if (protection.protected && !hasApproval(auth, { reason: APPROVAL_REASON.PROTECTED_ENTITY, subject: unit, goalId })) {
         return {
