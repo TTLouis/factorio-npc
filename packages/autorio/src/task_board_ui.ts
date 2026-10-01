@@ -803,22 +803,6 @@ export function task_board_gui_height(resolution_height: number, scale: number) 
 }
 
 /**
- * How much vertical room the two tracker lists may take, split between them.
- *
- * The total is clamped at both ends: never shorter than the previous fixed
- * layout, and never so tall that a list stops being a list. The split is not
- * even. The plan list is sized to the plan that actually exists, capped at its
- * share, and everything it does not need goes to the activity feed - a plan has
- * a handful of steps and stops, while activity keeps arriving.
- */
-export function task_board_tracker_heights(gui_height: number, step_count = ui_constants.MAX_STEPS) {
-  const budget = math.max(ui_constants.CONSOLE_LAYOUT.list_min_total, math.min(ui_constants.CONSOLE_LAYOUT.list_max_total, math.floor(gui_height * ui_constants.CONSOLE_LAYOUT.screen_fraction) - ui_constants.CONSOLE_LAYOUT.fixed_height))
-  if (step_count <= 0) return { steps: 0, activity: 0 }
-  const wanted = math.max(ui_constants.CONSOLE_LAYOUT.steps_floor, step_count * ui_constants.CONSOLE_LAYOUT.step_row_height)
-  return { steps: math.min(budget, wanted), activity: 0 }
-}
-
-/**
  * The inventory pane always exposes at least an 8×5 viewport. Taller displays
  * spend some of their extra vertical room on an 8×6 or full 8×8 inventory.
  * Wanted items deliberately consume fewer rows so the narrow sidebar can also
@@ -925,15 +909,32 @@ export function task_board_activity_for_display(board: TaskBoardUiSnapshot | und
   const index = math.min(board.active_index, board.steps.length - 1); const step = board.steps[index]
   return [{ kind: 'system', text: `Current canonical step ${index + 1}/${board.total_steps}: ${step.description} (${step.status}). Waiting for the next auditable observation, action, or result.` }]
 }
+/** A tracker list: fills the height its panel is given, scrolls past it, never asks the window for more than the floor. */
+function size_tracker_list(scroll: LuaGuiElement) {
+  scroll.style.horizontally_stretchable = true
+  scroll.style.vertically_stretchable = true
+  scroll.style.vertically_squashable = true
+  scroll.style.minimal_height = ui_constants.CONSOLE_LAYOUT.tracker_list_floor
+  scroll.style.natural_height = ui_constants.CONSOLE_LAYOUT.tracker_list_floor
+}
+
 /**
  * Build the tracker skeleton once. Everything that changes is written by
  * refresh_tracker, which the once-a-second refresh calls instead of rebuilding.
  */
-function render_tracker(parent: LuaGuiElement, board: TaskBoardUiSnapshot | undefined, player: LuaPlayer) {
+function render_tracker(parent: LuaGuiElement, board: TaskBoardUiSnapshot | undefined) {
   const { header, body } = create_section(parent, 'Plan Tracker', undefined, 'Roadmap Shelf on the left; the immutable executable plan slice on the right. Execution activity has its own tab.', true, { section: ui_constants.TRACKER.section, header: ui_constants.TRACKER.header, body: ui_constants.TRACKER.body })
   const summary = header.add({ type: 'label', name: ui_constants.TRACKER.summary, caption: '', style: 'semibold_label' }); summary.style.right_padding = 4
+  const tracker_section = parent[ui_constants.TRACKER.section]; if (tracker_section?.valid) tracker_section.tags = { [ui_constants.TRACKER.layout_tag]: ui_constants.TRACKER.layout_version }
 
+  // Height. The section and its body already stretch to the bottom of the PLAN page. Every
+  // container between them and the two scroll-panes stretches too, so the sub-panels share one
+  // height (top-aligned, bottoms flush) and each list scrolls inside it. The scroll-panes get a
+  // floor as their natural height (see tracker_list_floor) so they take whatever is left and a
+  // long list never makes the window taller; opening the ... menu makes the action row taller,
+  // and the lists simply get less of the stretch.
   const workspace = body.add({ type: 'flow', name: ui_constants.TRACKER.workspace, direction: 'horizontal' })
+  workspace.style.vertically_stretchable = true
   workspace.style.width = ui_constants.LEFT_COLUMN_WIDTH - 2 * ui_constants.SECTION_PADDING
   workspace.style.horizontal_spacing = ui_constants.CONSOLE_LAYOUT.tracker_column_gap
   workspace.style.vertical_align = 'top'
@@ -943,43 +944,47 @@ function render_tracker(parent: LuaGuiElement, board: TaskBoardUiSnapshot | unde
   // the executing plan read as two distinct trackers sharing one card.
   const shelf = workspace.add({ type: 'frame', name: ui_constants.TRACKER.shelf, direction: 'vertical', style: 'inside_shallow_frame' })
   shelf.style.width = ui_constants.CONSOLE_LAYOUT.tracker_shelf_width
+  shelf.style.vertically_stretchable = true
   const shelf_header = shelf.add({ type: 'frame', name: ui_constants.TRACKER.shelf_header, direction: 'horizontal', style: 'subheader_frame' })
   shelf_header.style.horizontally_stretchable = true
   shelf_header.style.vertical_align = 'center'
   shelf_header.add({ type: 'label', caption: 'Roadmap Shelf', style: 'subheader_caption_label' })
   const shelf_spacer = shelf_header.add({ type: 'empty-widget' }); shelf_spacer.style.horizontally_stretchable = true
   shelf_header.add({ type: 'label', name: ui_constants.TRACKER.shelf_count, caption: '0', style: 'semibold_label' })
-  const shelf_body = shelf.add({ type: 'flow', name: ui_constants.TRACKER.shelf_body, direction: 'vertical' }); shelf_body.style.padding = ui_constants.SECTION_PADDING; shelf_body.style.horizontally_stretchable = true
+  const shelf_body = shelf.add({ type: 'flow', name: ui_constants.TRACKER.shelf_body, direction: 'vertical' }); shelf_body.style.padding = ui_constants.SECTION_PADDING; shelf_body.style.horizontally_stretchable = true; shelf_body.style.vertically_stretchable = true
   const shelf_scroll = shelf_body.add({ type: 'scroll-pane', name: ui_constants.TRACKER.shelf_scroll, style: 'scroll_pane_in_shallow_frame', horizontal_scroll_policy: 'never' })
-  shelf_scroll.style.horizontally_stretchable = true
+  size_tracker_list(shelf_scroll)
   const shelf_table = shelf_scroll.add({ type: 'table', name: ui_constants.TRACKER.shelf_table, column_count: 2, tags: { signature: '' } })
   shelf_table.style.horizontal_spacing = 6
   shelf_table.style.vertical_spacing = 5
 
   const plan_column = workspace.add({ type: 'frame', name: ui_constants.TRACKER.plan_column, direction: 'vertical', style: 'inside_shallow_frame' })
   plan_column.style.width = ui_constants.CONSOLE_LAYOUT.tracker_plan_width
+  plan_column.style.vertically_stretchable = true
   const plan_header = plan_column.add({ type: 'frame', name: ui_constants.TRACKER.plan_header, direction: 'horizontal', style: 'subheader_frame' })
   plan_header.style.horizontally_stretchable = true
   plan_header.style.vertical_align = 'center'
   plan_header.add({ type: 'label', caption: 'Active Plan', style: 'subheader_caption_label' })
   const plan_header_spacer = plan_header.add({ type: 'empty-widget' }); plan_header_spacer.style.horizontally_stretchable = true
   plan_header.add({ type: 'label', name: ui_constants.TRACKER.plan_summary, caption: '', style: 'semibold_label' })
-  const plan_body = plan_column.add({ type: 'flow', name: ui_constants.TRACKER.plan_body, direction: 'vertical' }); plan_body.style.padding = ui_constants.SECTION_PADDING; plan_body.style.horizontally_stretchable = true; plan_body.style.vertical_spacing = 6
+  const plan_body = plan_column.add({ type: 'flow', name: ui_constants.TRACKER.plan_body, direction: 'vertical' }); plan_body.style.padding = ui_constants.SECTION_PADDING; plan_body.style.horizontally_stretchable = true; plan_body.style.vertically_stretchable = true; plan_body.style.vertical_spacing = 6
   const empty = plan_body.add({ type: 'label', name: ui_constants.TRACKER.empty, caption: 'No active plan slice.' }); empty.style.font_color = TONE_COLORS.muted
-  const plan = plan_body.add({ type: 'flow', name: ui_constants.TRACKER.plan, direction: 'vertical' }); plan.style.horizontally_stretchable = true; plan.style.vertical_spacing = 6
+  const plan = plan_body.add({ type: 'flow', name: ui_constants.TRACKER.plan, direction: 'vertical' }); plan.style.horizontally_stretchable = true; plan.style.vertically_stretchable = true; plan.style.vertical_spacing = 6
   const progress = plan.add({ type: 'progressbar', name: ui_constants.TRACKER.progress, value: 0 }); progress.style.horizontally_stretchable = true
-  const steps_scroll = plan.add({ type: 'scroll-pane', name: ui_constants.TRACKER.steps_scroll, style: 'scroll_pane_in_shallow_frame', horizontal_scroll_policy: 'never' }); steps_scroll.style.horizontally_stretchable = true
+  const steps_scroll = plan.add({ type: 'scroll-pane', name: ui_constants.TRACKER.steps_scroll, style: 'scroll_pane_in_shallow_frame', horizontal_scroll_policy: 'never' }); size_tracker_list(steps_scroll)
   const steps_table = steps_scroll.add({ type: 'table', name: ui_constants.TRACKER.steps_table, column_count: 4 }); steps_table.style.horizontal_spacing = 8; steps_table.style.vertical_spacing = 4
   plan.add({ type: 'flow', name: ui_constants.TRACKER.attention, direction: 'vertical' })
 
-  refresh_tracker(parent, board, player)
+  refresh_tracker(parent, board)
 }
 
-function refresh_tracker(parent: LuaGuiElement, board: TaskBoardUiSnapshot | undefined, player: LuaPlayer) {
+function refresh_tracker(parent: LuaGuiElement, board: TaskBoardUiSnapshot | undefined) {
   const section = parent[ui_constants.TRACKER.section]
   const header = section?.valid ? section[ui_constants.TRACKER.header] : undefined
   const body = section?.valid ? section[ui_constants.TRACKER.body] : undefined
   if (!header?.valid || !body?.valid) return false
+  // A tracker built before its lists stretched keeps a stale small maximal_height; rebuild it.
+  if (section?.tags[ui_constants.TRACKER.layout_tag] !== ui_constants.TRACKER.layout_version) return false
   const workspace = body[ui_constants.TRACKER.workspace]
   const shelf = workspace?.valid ? workspace[ui_constants.TRACKER.shelf] : undefined
   const plan_column = workspace?.valid ? workspace[ui_constants.TRACKER.plan_column] : undefined
@@ -993,8 +998,6 @@ function refresh_tracker(parent: LuaGuiElement, board: TaskBoardUiSnapshot | und
   if (!workspace?.valid || !shelf?.valid || !plan_column?.valid || !summary?.valid || !plan_header?.valid || !plan_summary?.valid || !empty?.valid || !plan?.valid) return false
 
   const shelf_nodes = board?.shelf ?? []
-  const row_count = board === undefined ? 0 : math.max(board.steps.length, shelf_nodes.length)
-  const tracker_heights = task_board_tracker_heights(player_gui_height(player), math.min(row_count, ui_constants.MAX_STEPS))
   const has_steps = board !== undefined && board.steps.length > 0
   const has_shelf = shelf_nodes.length > 0
   empty.visible = !has_steps
@@ -1003,9 +1006,9 @@ function refresh_tracker(parent: LuaGuiElement, board: TaskBoardUiSnapshot | und
   summary.caption = ''
   plan_summary.caption = ''
 
-  if (!refresh_shelf(shelf, shelf_nodes, tracker_heights.steps)) return false
+  if (!refresh_shelf(shelf, shelf_nodes)) return false
   if (board !== undefined && has_steps) {
-    if (!refresh_steps(plan, board, tracker_heights.steps)) return false
+    if (!refresh_steps(plan, board)) return false
     const active_number = board.status === 'completed' ? board.total_steps : math.min(board.active_index + 1, board.total_steps)
     plan_summary.caption = `STEP ${active_number}/${board.total_steps} · ${board.completed_count} verified`
   }
@@ -1045,7 +1048,7 @@ function refresh_activity_section(parent: LuaGuiElement, board: TaskBoardUiSnaps
   return true
 }
 
-function refresh_shelf(shelf: LuaGuiElement, nodes: TaskBoardUiShelfNode[], max_height: number) {
+function refresh_shelf(shelf: LuaGuiElement, nodes: TaskBoardUiShelfNode[]) {
   const header = shelf[ui_constants.TRACKER.shelf_header]
   const count = header?.valid ? header[ui_constants.TRACKER.shelf_count] : undefined
   const shelf_body = shelf[ui_constants.TRACKER.shelf_body]
@@ -1053,7 +1056,6 @@ function refresh_shelf(shelf: LuaGuiElement, nodes: TaskBoardUiShelfNode[], max_
   const table = scroll?.valid ? scroll[ui_constants.TRACKER.shelf_table] : undefined
   if (!header?.valid || !count?.valid || !scroll?.valid || !table?.valid) return false
   count.caption = `${nodes.length}`
-  scroll.style.maximal_height = max_height
   const visible = nodes.slice(0, ui_constants.MAX_SHELF_NODES)
   let signature = `${visible.length}`
   for (const node of visible) signature = `${signature}#${node.id}:${node.status}:${node.linked ? '1' : '0'}:${node.intent}`
@@ -1084,11 +1086,10 @@ function refresh_shelf(shelf: LuaGuiElement, nodes: TaskBoardUiShelfNode[], max_
   return true
 }
 
-function refresh_steps(plan: LuaGuiElement, board: TaskBoardUiSnapshot, max_height: number) {
+function refresh_steps(plan: LuaGuiElement, board: TaskBoardUiSnapshot) {
   const progress = plan[ui_constants.TRACKER.progress]; const steps_scroll = plan[ui_constants.TRACKER.steps_scroll]; const steps_table = steps_scroll?.valid ? steps_scroll[ui_constants.TRACKER.steps_table] : undefined; const attention = plan[ui_constants.TRACKER.attention]
   if (!progress?.valid || !steps_scroll?.valid || !steps_table?.valid || !attention?.valid) return false
   ;(progress as ProgressBarGuiElement).value = board.total_steps > 0 ? board.completed_count / board.total_steps : 0
-  steps_scroll.style.maximal_height = max_height
   const visible = board.steps.slice(0, ui_constants.MAX_STEPS)
   let signature = `${board.goal_id}#${board.steps.length}`; let active_index = -1
   for (let index = 0; index < visible.length; index++) {
@@ -1269,7 +1270,7 @@ function build_columns(columns: LuaGuiElement, player: LuaPlayer) {
   build_left_dynamic(banner, dynamic, plan_dynamic, player, board)
   // The conversation hosts itself beside dynamic (in the NOW page), outside the flow that is cleared.
   debug_ui.render_ai_reply(dynamic, board?.response ?? '', ui_constants.LEFT_COLUMN_WIDTH)
-  render_tracker(pages.plan, board, player); render_activity_section(pages.activity, board, player)
+  render_tracker(pages.plan, board); render_activity_section(pages.activity, board, player)
   // The action row sits above the prompt, and the prompt is always the last child of the left
   // column, which stretches to the window's height so the prompt rests on the bottom edge.
   const action_state = console_action_state(player, board, runtime)
@@ -1288,7 +1289,7 @@ function refresh_columns(columns: LuaGuiElement, player: LuaPlayer) {
   if (!banner?.valid || now === undefined || plan === undefined || activity === undefined || !dynamic?.valid || !plan_dynamic?.valid) return false
   const board = storage.sgluna_task_board_ui; const runtime = runtime_snapshot()
   // The tracker and the feed are never cleared on a routine refresh: they own scroll-panes.
-  if (!refresh_tracker(plan, board, player) || !refresh_activity_section(activity, board, player)) return false
+  if (!refresh_tracker(plan, board) || !refresh_activity_section(activity, board, player)) return false
   build_left_dynamic(banner, dynamic, plan_dynamic, player, board)
   // Current Task Conversation intentionally lives outside the dynamic flow so
   // its scroll position survives refreshes. That also means it must be

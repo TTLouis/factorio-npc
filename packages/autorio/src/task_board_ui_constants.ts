@@ -39,6 +39,11 @@ export const PROMPT_FLOW_NAME = 'sgluna_task_board_prompt_flow'
 // table for every name keeps this to a single Lua local.
 export const TRACKER = {
   section: 'sgluna_task_board_tracker_section',
+  // Stored on the section's tags. A console built before the lists stretched
+  // still carries their old maximal_height and is rebuilt (refresh_tracker
+  // reports it as stale) rather than patched.
+  layout_tag: 'sgluna_tracker_layout',
+  layout_version: 2,
   header: 'sgluna_task_board_tracker_header',
   body: 'sgluna_task_board_tracker_body',
   summary: 'sgluna_task_board_tracker_summary',
@@ -191,22 +196,12 @@ export const RESOURCE_LAYOUT = {
 // function.
 export const CONSOLE_LAYOUT = {
   synced_gui_height: 1080,
-  screen_fraction: 0.92,
-  // Everything in the LEFT column that is not a tracker list: titlebar, the
-  // status/controls row, the tracker's own header/progress/divider chrome and
-  // the prompt. The resource row is deliberately not counted here - it sits in
-  // the right column underneath the camera, so it costs the left column no
-  // height at all, and charging the left column for it is what used to starve
-  // the activity feed.
-  fixed_height: 560,
-  list_min_total: 150,
-  list_max_total: 270,
-  // A ceiling on the plan list's share, not its size. A plan shorter than the
-  // ceiling only claims the rows it actually has and the remainder goes to the
-  // activity feed, which is the list that keeps growing.
-  steps_share: 0.36,
-  step_row_height: 30,
-  steps_floor: 120,
+  // The Plan Tracker's two lists (Roadmap Shelf, Active Plan) are stretchable
+  // scroll-panes: their natural and minimal height is this floor, and they grow
+  // to whatever height the window has beyond the rest of the left column. The
+  // floor, not the content, is the natural height, so a long list scrolls inside
+  // the window instead of making it taller.
+  tracker_list_floor: 120,
   preview_min_height: 360,
   preview_max_height: 900,
   preview_screen_fraction: 0.5,

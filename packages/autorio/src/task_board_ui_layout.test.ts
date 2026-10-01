@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { step_caption, task_board_game_time, task_board_gui_height, task_board_preview_min_height, task_board_tracker_heights } from './task_board_ui'
+import { step_caption, task_board_game_time, task_board_gui_height, task_board_preview_min_height } from './task_board_ui'
 
 function taskBoardUiSource() {
   const main = readFileSync(new URL('./task_board_ui.ts', import.meta.url), 'utf8')
@@ -51,37 +51,34 @@ describe('SGLuna NPC console compact tracker layout', () => {
     expect(task_board_gui_height(1080, 1)).toBe(1080)
     expect(task_board_gui_height(1080, 0)).toBe(1080)
 
-    const small = task_board_tracker_heights(720)
-    expect(small).toEqual({ steps: 150, activity: 0 })
-
-    const tall = task_board_tracker_heights(1440)
-    expect(tall).toEqual({ steps: 270, activity: 0 })
-
-    const huge = task_board_tracker_heights(4320)
-    expect(huge).toEqual({ steps: 270, activity: 0 })
-
     expect(task_board_preview_min_height(720)).toBe(360)
     expect(task_board_preview_min_height(1440)).toBe(720)
     expect(task_board_preview_min_height(4320)).toBe(900)
   })
 
-  it('sizes the shared Shelf / plan workspace from the larger visible planning list and leaves execution activity to Debug', () => {
+  it('lets the Shelf / Active Plan workspace fill the PLAN page: stretchable panels, floored scroll-panes, no fixed height budget', () => {
     const source = taskBoardUiSource()
-    expect(source).toContain('fixed_height: 560,')
-    expect(source).not.toContain('const CONSOLE_FIXED_HEIGHT')
-    expect(source).toContain('const row_count = board === undefined ? 0 : math.max(board.steps.length, shelf_nodes.length)')
-    expect(source).toContain('task_board_tracker_heights(player_gui_height(player), math.min(row_count, MAX_STEPS))')
     expect(source).toContain('tracker_shelf_width: 200')
     expect(source).toContain('tracker_plan_width: LEFT_COLUMN_WIDTH - 2 * SECTION_PADDING - 12 - 200')
-
-    const short_plan = task_board_tracker_heights(1286, 6)
-    const long_plan = task_board_tracker_heights(1286, 24)
-    expect(short_plan).toEqual({ steps: 180, activity: 0 })
-    expect(long_plan).toEqual({ steps: 270, activity: 0 })
-    expect(short_plan.steps).toBeLessThan(long_plan.steps)
-
-    expect(task_board_tracker_heights(1286, 1)).toEqual({ steps: 120, activity: 0 })
-    expect(task_board_tracker_heights(1286, 0)).toEqual({ steps: 0, activity: 0 })
+    // The old height budget (sized by row count, clamped to 150..270) is gone.
+    expect(source).not.toContain('task_board_tracker_heights')
+    expect(source).not.toContain('list_max_total')
+    expect(source).not.toContain('list_min_total')
+    expect(source).not.toContain('fixed_height')
+    expect(source).toContain('tracker_list_floor: 120,')
+    const tracker = source.split('function size_tracker_list(')[1]?.split('function refresh_tracker(')[0] ?? ''
+    for (const name of ['workspace', 'shelf', 'plan_column']) expect(tracker).toMatch(new RegExp(`${name}\\.style\\.vertically_stretchable = true`))
+    for (const name of ['shelf_body', 'plan_body', 'plan']) expect(tracker).toMatch(new RegExp(`${name}\\.style\\.vertically_stretchable = true`))
+    expect(tracker).toContain('size_tracker_list(shelf_scroll)')
+    expect(tracker).toContain('size_tracker_list(steps_scroll)')
+    expect(tracker).toContain('scroll.style.natural_height = CONSOLE_LAYOUT.tracker_list_floor')
+    expect(tracker).toContain('scroll.style.vertically_stretchable = true')
+    // Refresh no longer writes a cap, and a console built with the old cap is rebuilt.
+    const refresh_shelf = source.split('function refresh_shelf(')[1]?.split('function refresh_steps(')[0] ?? ''
+    const refresh_steps = source.split('function refresh_steps(')[1]?.split('function refresh_activity(')[0] ?? ''
+    expect(refresh_shelf).not.toContain('maximal_height')
+    expect(refresh_steps).not.toContain('maximal_height')
+    expect(source).toContain('if (section?.tags[TRACKER.layout_tag] !== TRACKER.layout_version) return false')
   })
 
   it('spends the whole left column on the panel that wraps text and moves window buttons to the title bar', () => {

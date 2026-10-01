@@ -138,7 +138,7 @@ describe('SGLuna NPC console layout regressions', () => {
     const refresh_columns = source.split('function refresh_columns(')[1]?.split('function build_panel(')[0] ?? ''
     // The tracker and the feed are refreshed in place before the rest of the
     // left column is rebuilt, and are never inside what gets cleared.
-    expect(refresh_columns).toContain('if (!refresh_tracker(plan, board, player) || !refresh_activity_section(activity, board, player)) return false')
+    expect(refresh_columns).toContain('if (!refresh_tracker(plan, board) || !refresh_activity_section(activity, board, player)) return false')
     expect(refresh_columns.indexOf('refresh_tracker(plan')).toBeLessThan(refresh_columns.indexOf('build_left_dynamic('))
     // Switching tabs only flips visibility; it never rebuilds a page.
     expect(refresh_columns).toContain('console_ui.apply_console_tab(left, selected_console_tab(player))')
