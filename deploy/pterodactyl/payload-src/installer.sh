@@ -156,7 +156,7 @@ cp "$WORK/source/packages/autorio/info.json" "$WORK/source/packages/autorio/dist
 cp -a "$WORK/source/packages/autorio/dist/." "$APP/autorio/"
 
 log 'Copying v8 supervisor, shared policy, and prompt'
-for file in agent-roles.mjs agent-context.mjs handoff-packet.mjs restage-policy.mjs verified-results.mjs durable-text.mjs common.mjs canonical-task-board-memory.mjs planning-state.mjs game-files.mjs provider-base.mjs provider.mjs supervisor.mjs structured-policy.mjs supervisor-adapter.mjs outcome-authority.mjs recovery-route.mjs step-completion.mjs jev-decision-taxonomy.mjs jev-typed-projection.mjs jev-health.mjs jev-judgments.mjs jev-checkpoints.mjs goal-definition.mjs goal-reading.mjs skill-offers.mjs plan-time-estimate.mjs usage-ledger.mjs production-wait.mjs prompt-prefix.mjs dsml-tool-calls.mjs responsiveness.mjs npc-agent-loop.mjs; do
+for file in agent-roles.mjs agent-context.mjs handoff-packet.mjs restage-policy.mjs verified-results.mjs durable-text.mjs common.mjs canonical-task-board-memory.mjs planning-state.mjs authorization.mjs reserve-command.mjs game-files.mjs provider-base.mjs provider.mjs supervisor.mjs structured-policy.mjs supervisor-adapter.mjs outcome-authority.mjs recovery-route.mjs step-completion.mjs jev-decision-taxonomy.mjs jev-typed-projection.mjs jev-health.mjs jev-judgments.mjs jev-checkpoints.mjs goal-definition.mjs goal-reading.mjs skill-offers.mjs plan-time-estimate.mjs usage-ledger.mjs production-wait.mjs prompt-prefix.mjs dsml-tool-calls.mjs responsiveness.mjs npc-agent-loop.mjs; do
   cp "$WORK/source/deploy/pterodactyl/runtime-v8/$file" "$APP/src/runtime-v8/$file"
 done
 for file in structured-policy.mjs supervisor-adapter.mjs npc-agent-loop.mjs; do
