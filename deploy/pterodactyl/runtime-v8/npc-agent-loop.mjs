@@ -5870,6 +5870,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.modelCorrectablePreflightRetries = 0
     this.researchPreflightRetries = 0
     this.bootstrapDependencyPreflightRetries = 0
+    this.authorizationRefusalRetries = 0
     this.planUpdateReason = intent === 'new_goal'
       ? 'new_goal'
       : intent === 'amend_current'
@@ -6146,6 +6147,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.modelCorrectablePreflightRetries = 0
     this.researchPreflightRetries = 0
     this.bootstrapDependencyPreflightRetries = 0
+    this.authorizationRefusalRetries = 0
     return true
   }
 
@@ -9667,6 +9669,32 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         this.modelCorrectablePreflightRetries = 0
         this.researchPreflightRetries = 0
         this.bootstrapDependencyPreflightRetries = 0
+        // MW1 admission gate, run BEFORE the plan is committed so a refusal leaves the plan a DRAFT exactly as every other
+        // deterministic refusal does: a replacement plan's grant is re-checked for this actor and epoch, an exact operation on
+        // a player-built entity (grant-backed work) needs an approval record, reserved containers are never withdrawn from,
+        // and (grant-backed work) a player's inventory is never a source. Commit re-checks the grant again below.
+        if (this.requestInfo && typeof this.memory.checkOperationAdmission === 'function') {
+          const admission = this.memory.checkOperationAdmission(this.requestInfo.memoryKey, {
+            operations: plan.operations,
+            preflight,
+            actor: { actor_id: before.actor_id, actor_epoch: before.epoch },
+          }, { requestId: this.traceRequest?.id })
+          if (admission?.ok === false) {
+            const failure = new AgentLoopError(`Operation admission refused operation ${(admission.operation_index ?? 0) + 1}: ${admission.code}`)
+            failure.preflight = {
+              ok: false,
+              code: admission.code,
+              reason: admission.reason,
+              operation: admission.operation,
+              operation_index: admission.operation_index ?? 0,
+              identity: admission.unit_number,
+              detail: admission.reason,
+              ...(admission.last_user ? { last_user: admission.last_user } : {}),
+            }
+            throw failure
+          }
+          this.authorizationRefusalRetries = 0
+        }
         const planningBeforeCommit = this.requestInfo ? this.memory.planningState?.(this.requestInfo.memoryKey) : undefined
         const reducerPlanBeforeCommit = planningBeforeCommit ? getActivePlanningPlan(planningBeforeCommit) : undefined
         const planFrozen = FROZEN_PLAN_STATUSES.has(reducerPlanBeforeCommit?.status)
@@ -9697,31 +9725,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           const committed = this.memory.currentPlan?.(this.requestInfo.memoryKey)
           if (committed) stateResult = { ...(stateResult ?? {}), state: committed }
           await this.persistState()
-        }
-        // MW1 admission gate: the replacement plan's grant is re-checked for this actor and epoch, an exact operation on a
-        // player-built entity needs an approval record, reserved containers are never withdrawn from, and a player's
-        // inventory is never a source. Same checks as commit, run again because the world and the grant can move between.
-        if (this.requestInfo && typeof this.memory.checkOperationAdmission === 'function') {
-          const admission = this.memory.checkOperationAdmission(this.requestInfo.memoryKey, {
-            operations: plan.operations,
-            preflight,
-            actor: { actor_id: before.actor_id, actor_epoch: before.epoch },
-          }, { requestId: this.traceRequest?.id })
-          if (admission?.ok === false) {
-            const failure = new AgentLoopError(`Operation admission refused operation ${(admission.operation_index ?? 0) + 1}: ${admission.code}`)
-            failure.preflight = {
-              ok: false,
-              code: admission.code,
-              reason: admission.reason,
-              operation: admission.operation,
-              operation_index: admission.operation_index ?? 0,
-              identity: admission.unit_number,
-              detail: admission.reason,
-              ...(admission.last_user ? { last_user: admission.last_user } : {}),
-            }
-            throw failure
-          }
-          this.authorizationRefusalRetries = 0
         }
         await this.traceEvent('operations.preflight_ok', {
           operations: operations.map((operation, index) => ({ ...operation, preflight: preflight[index] })),

@@ -4,7 +4,7 @@ import test from 'node:test'
 import { ACTION_SCOPE, authorizationOf, MANDATE_KIND } from './authorization.mjs'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
-import { applyPlanningEvent, getActivePlan, PLANNING_EVENT } from './planning-state.mjs'
+import { applyPlanningEvent, getActivePlan, PLAN_STATUS, PLANNING_EVENT } from './planning-state.mjs'
 
 // MW1 wiring in the real agent loop: the memory facade's authorization events reach the behavior trace with their
 // request_id, the placement receipt records an NPC placement, and the operation-admission gate refuses a player-built
@@ -124,21 +124,43 @@ test('MW1 wiring: a placement receipt records the entity as the NPC\'s own, once
   assert.equal((row.data ?? row).unit_number, 555)
 })
 
-test('MW1 wiring: admission refuses a player-built exact target before anything reaches the game, tells the model why, and admits the retry', async () => {
-  const rcon = new Rcon()
+function observedAssembler(rcon) {
   rcon.nearby = {
     actor_position: { x: 0, y: 0 },
     entities: [{ name: 'assembling-machine-1', type: 'assembling-machine', unit_number: 289, position: { x: 8, y: 1 }, distance: 8.1 }],
   }
   // The engine's last_user for the target rides in the exact-target preflight.
   rcon.preflightByUnit.set(289, { ok: true, target: { unit_number: 289, name: 'assembling-machine-1', last_user: { name: 'Alice', index: 2 } } })
+}
+
+// A standing Auto mandate for the live goal: what makes the work grant-backed (MW5 will issue these from the mode controller).
+function grantLiveGoal(memory) {
+  const goalId = memory.planningState(KEY).goal.goal_id
+  return memory.grantAuthorization(KEY, {
+    mandate_kind: MANDATE_KIND.STANDING_AUTO,
+    mandate_id: goalId,
+    requested_result: { result_key: 'victory:rocket_launch' },
+    permitted_scope: [ACTION_SCOPE.RECOVERY],
+    actor: { actor_id: 18, actor_epoch: 3 },
+  })
+}
+
+test('MW1 wiring: grant-backed work - admission refuses a player-built exact target before anything reaches the game, the plan stays a DRAFT, and the retry admits', async () => {
+  const rcon = new Rcon()
+  observedAssembler(rcon)
   const calls = []
-  const { agent, rows, named } = makeAgent(rcon, async (messages) => {
+  let statusAtRetry
+  const world = makeAgent(rcon, async (messages) => {
     calls.push(messages.map(message => ({ ...message })))
-    if (calls.length === 1) return { content: null, tool_calls: [toolCall('observe', 'getNearbyEntities', { radius: 64, name: 'assembling-machine-1', limit: 4 })] }
+    if (calls.length === 1) {
+      assert.equal(grantLiveGoal(world.memory).ok, true)
+      return { content: null, tool_calls: [toolCall('observe', 'getNearbyEntities', { radius: 64, name: 'assembling-machine-1', limit: 4 })] }
+    }
     if (calls.length === 2) return planMessage([{ name: 'mine_entity_exact', args: { unit_number: 289 } }])
+    statusAtRetry = getActivePlan(world.memory.planningState(KEY))?.status
     return planMessage([{ name: 'wait', args: { ticks: 60 } }])
   })
+  const { agent, memory, rows, named } = world
 
   const result = await agent.request('tear down that old assembler and rebuild it', { sender: 'tester' })
 
@@ -146,6 +168,9 @@ test('MW1 wiring: admission refuses a player-built exact target before anything 
   assert.equal(rcon.mutations.length, 1)
   assert.ok(!rcon.mutations[0].includes('mine_entity_exact'))
   assert.equal(result.operations[0].name, 'wait')
+  // Refused before the commit: the plan was still an uncommitted draft when the model was asked to retry, as for every other deterministic refusal.
+  assert.equal(statusAtRetry, PLAN_STATUS.DRAFT)
+  assert.ok([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(getActivePlan(memory.planningState(KEY)).status), 'the retry committed and was admitted')
 
   const refusal = named('admission.protected_refused').at(-1)
   assert.ok(refusal, 'admission.protected_refused was traced')
@@ -165,4 +190,78 @@ test('MW1 wiring: admission refuses a player-built exact target before anything 
   assert.match(message, /^\[HARNESS\] Admission refused operation 1 \(mine_entity_exact\) with code protected_entity_refused/)
   assert.match(message, /Do not retry it and do not change the requested result/)
   assert.ok(rows.length > 0)
+})
+
+test('MW1 wiring (interim): an ordinary user-requested goal can still mine a human-built entity and take items from a player', async () => {
+  const rcon = new Rcon()
+  observedAssembler(rcon)
+  let calls = 0
+  const { agent } = makeAgent(rcon, async () => {
+    calls++
+    if (calls === 1) return { content: null, tool_calls: [toolCall('observe', 'getNearbyEntities', { radius: 64, name: 'assembling-machine-1', limit: 4 })] }
+    return planMessage([
+      { name: 'mine_entity_exact', args: { unit_number: 289 } },
+      { name: 'move_items_with_player', args: { item_name: 'iron-plate', player_name: 'Alice', max_count: 5, to_player: false } },
+    ])
+  })
+  const result = await agent.request('take that old assembler apart and grab the plates Alice is holding', { sender: 'Alice' })
+  assert.equal(rcon.mutations.length, 1)
+  assert.ok(rcon.mutations[0].includes('mine_entity_exact'))
+  assert.ok(rcon.mutations[0].includes('move_items_with_player'))
+  assert.deepEqual(result.operations.map(operation => operation.name), ['mine_entity_exact', 'move_items_with_player'])
+})
+
+test('MW1 wiring: a reserved container is refused for an ordinary goal and the reservation survives the new_goal router path and completed-task cleanup', async () => {
+  const rcon = new Rcon()
+  rcon.preflightByUnit.set(900, { ok: true, target: { unit_number: 900, name: 'wooden-chest' } })
+  rcon.nearby = { actor_position: { x: 0, y: 0 }, entities: [{ name: 'wooden-chest', type: 'container', unit_number: 900, position: { x: 4, y: 1 }, distance: 4.1 }] }
+  const script = []
+  const memory = new CanonicalTaskBoardMemory()
+  const rows = []
+  let cleared = 0
+  const clearTaskContext = memory.clearTaskContext.bind(memory)
+  memory.clearTaskContext = (key) => { cleared++; return clearTaskContext(key) }
+  const agent = new NpcAgentLoop({
+    rcon,
+    memory,
+    provider: async (messages, context) => {
+      const next = script.shift()
+      assert.ok(next, 'unscripted provider call')
+      return typeof next === 'function' ? next(messages, context) : next
+    },
+    interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
+    systemPrompt: 'authorization wiring test',
+    npcId: 'sgluna',
+    stateFile: null,
+    traceFile: null,
+    decisionTraceFile: null,
+  })
+  agent.behaviorTrace = { emit: async (record) => { rows.push(record) } }
+
+  // A reservation made by the player (chat command) before any goal.
+  memory.recordReservation(KEY, { unit_number: 900, entity_name: 'wooden-chest', reserved_by: 'louis' }, { now: Date.now() })
+  const reserved = () => authorizationOf(memory.planningState(KEY)).world.reservations.filter(item => item.status === 'active').map(item => item.unit_number)
+
+  // First goal: the model tries to take from the reserved chest and is refused; the retry is admitted.
+  script.push(
+    { content: null, tool_calls: [toolCall('observe', 'getNearbyEntities', { radius: 64, name: 'wooden-chest', limit: 4 })] },
+    planMessage([{ name: 'move_items_exact', args: { item_name: 'iron-plate', unit_number: 900, max_count: 20, to_entity: false } }], { plan: ['Fetch iron plates'] }),
+    planMessage([{ name: 'wait', args: { ticks: 60 } }], { plan: ['Fetch iron plates'] }),
+  )
+  const first = await agent.request('fetch me some iron plates', { sender: 'tester' })
+  assert.equal(first.operations[0].name, 'wait')
+  assert.equal(rows.filter(row => row.event === 'admission.reserved_refused').length, 1)
+  assert.deepEqual(reserved(), [900])
+
+  // A second, unrelated goal: the router sends it down the new_goal path (clearTaskContext). The reservation stays.
+  script.push(planMessage([{ name: 'wait', args: { ticks: 30 } }], { plan: ['Wait a moment'] }))
+  await agent.request('build me a completely different thing somewhere else', { sender: 'tester' })
+  assert.deepEqual(reserved(), [900], 'the new_goal path kept the reserved container')
+  assert.ok(cleared >= 1, 'the new_goal router path cleared the task context')
+
+  // Completed-task cleanup (finalizeCompletedTaskContext): the world facts stay as well.
+  await agent.finalizeCompletedTaskContext()
+  assert.deepEqual(reserved(), [900], 'finalizeCompletedTaskContext kept the reserved container')
+  assert.ok(cleared >= 2)
+  assert.equal(memory.planningState(KEY)?.goal ?? null, null)
 })
