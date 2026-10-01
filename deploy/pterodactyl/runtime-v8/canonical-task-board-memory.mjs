@@ -6,7 +6,6 @@ import { completionContractSupported, provePermanentlyUnsatisfiable, sanitizeSte
 import {
   ADMISSION_REFUSAL,
   authorizationOf,
-  carryAuthorizationAcrossGoals,
   checkGrant,
   checkReplacementAtCommit,
   classifyReplacement,
@@ -14,6 +13,17 @@ import {
   evaluateOperationAdmission,
   REPLACEMENT_DECISION,
 } from './authorization.mjs'
+import {
+  carriedAcrossGoals,
+  classifyTaskInterruption,
+  classifyTaskResume,
+} from './planning-state.mjs'
+import {
+  mostRecentResumable,
+  taskLedgerOf,
+  taskLedgerView,
+  TASK_LEDGER_REFUSAL,
+} from './task-ledger.mjs'
 import {
   applyPlanningEvent,
   createEmptyPlanningState,
@@ -1442,6 +1452,196 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return { ok, state: after }
   }
 
+  // --- MW2 durable task ledger ---------------------------------------------------
+  //
+  // Wrappers over the reducer's TASK_* events (planning-state.mjs, task-ledger.mjs). The decision is computed by the same
+  // pure classifiers the reducer uses, so a trace and the state change cannot disagree. Every call emits one named trace
+  // event carrying request_id and a reason. Interruption moves the running goal into the ledger; the caller still clears
+  // the legacy task context afterwards (the ledger survives that). Resume restores the committed plan, verified progress and
+  // the compatibility board exactly as they stopped; it does not start any model turn or operation.
+
+  taskLedger(key) {
+    return taskLedgerOf(this.planningState(key))
+  }
+
+  taskLedgerView(key, { now = Date.now(), gameTick } = {}) {
+    return taskLedgerView(this.taskLedger(key), { now, gameTick })
+  }
+
+  #ledgerRequestId(requestId, op, now) {
+    return requestId ?? `ledger_${op}_${now.toString(36)}`
+  }
+
+  #ledgerRefused(op, verdict, requestId, extra = {}) {
+    this.#authTrace('task_ledger.refused', {
+      ok: false,
+      op,
+      reason: verdict.reason,
+      detail: verdict.detail,
+      task_id: verdict.task_id,
+      ...extra,
+    }, requestId)
+    return { ok: false, reason: verdict.reason, detail: verdict.detail, task_id: verdict.task_id }
+  }
+
+  interruptActiveTask(key, { reasonCode, detail, interruptedBy, destination, gameTick, actor, now = Date.now(), requestId, source = 'runtime' } = {}) {
+    const rid = this.#ledgerRequestId(requestId, 'interrupt', now)
+    const before = this.planningState(key)
+    const legacy = key ? this.planByNpc.get(key) : undefined
+    const event = {
+      type: PLANNING_EVENT.TASK_INTERRUPTED,
+      source,
+      reason_code: reasonCode,
+      detail,
+      interrupted_by: interruptedBy,
+      destination,
+      game_tick: gameTick,
+      actor,
+      request_id: rid,
+      legacy_checkpoint: legacy ? JSON.parse(JSON.stringify(legacy)) : null,
+    }
+    const verdict = classifyTaskInterruption(before, { ...event, now })
+    if (!verdict.ok) return this.#ledgerRefused('interrupt', verdict, rid)
+    const after = this.dispatchPlanningEvent(key, { ...event, now })
+    const task = taskLedgerOf(after).tasks.find(item => item.task_id === verdict.task.task_id)
+    if (!task) return this.#ledgerRefused('interrupt', { reason: TASK_LEDGER_REFUSAL.INVALID_TASK, task_id: verdict.task.task_id }, rid)
+    const evicted = taskLedgerOf(after).closed.filter(item => item.status === 'evicted' && item.at === now)
+    this.#authTrace('task_ledger.interrupted', {
+      ok: true,
+      reason: task.interruption.reason_code,
+      task_id: task.task_id,
+      goal_id: task.goal_id,
+      status: task.status,
+      state_at_interruption: task.interruption.state_at_interruption,
+      progress: task.progress
+        ? { plan_id: task.progress.plan_id, steps_completed: task.progress.steps_completed, steps_total: task.progress.steps_total, active_step_index: task.progress.active_step_index }
+        : null,
+      destination: task.requested_result.destination,
+      authorization: task.authorization,
+      has_checkpoint: Boolean(task.checkpoint),
+      checkpoint_dropped: task.checkpoint_dropped,
+      ledger_size: taskLedgerOf(after).tasks.length,
+    }, rid)
+    for (const item of evicted) {
+      this.#authTrace('task_ledger.evicted', { ok: true, reason: item.reason, task_id: item.task_id, goal_id: item.goal_id }, rid)
+    }
+    return { ok: true, task, evicted }
+  }
+
+  queueTask(key, { objective, owner, goalId, destination, mandateKind, resultKey, authorization, now = Date.now(), requestId, source = 'runtime' } = {}) {
+    const rid = this.#ledgerRequestId(requestId, 'queue', now)
+    const before = this.planningState(key) ?? createEmptyPlanningState()
+    const after = this.dispatchPlanningEvent(key, {
+      type: PLANNING_EVENT.TASK_QUEUED,
+      source,
+      now,
+      objective,
+      owner,
+      goal_id: goalId,
+      destination,
+      mandate_kind: mandateKind,
+      result_key: resultKey,
+      authorization,
+      request_id: rid,
+    })
+    const added = taskLedgerOf(after).tasks.find(item => !taskLedgerOf(before).tasks.some(old => old.task_id === item.task_id))
+    if (!added) return this.#ledgerRefused('queue', { reason: TASK_LEDGER_REFUSAL.INVALID_TASK }, rid)
+    this.#authTrace('task_ledger.queued', { ok: true, reason: 'accepted_not_started', task_id: added.task_id, goal_id: added.goal_id, destination: added.requested_result.destination }, rid)
+    return { ok: true, task: added }
+  }
+
+  // The compatibility Task Board record is rebuilt through a scratch memory's own restore(), so every existing sanitizer,
+  // board migration and reducer convergence applies to it exactly as after a restart. Anything it cannot restore refuses.
+  #restoreLegacyCheckpoint(key, task) {
+    const checkpoint = task.checkpoint
+    if (!checkpoint?.legacy) return { legacy: undefined }
+    try {
+      const scratch = new CanonicalTaskBoardMemory()
+      scratch.restore({
+        version: super.snapshot().version,
+        dialogue: [],
+        plans: [{ key, state: checkpoint.legacy }],
+        planning_states: [{ key, state: checkpoint.planning }],
+      })
+      const legacy = scratch.planByNpc.get(key)
+      return legacy && legacy.goal_id === task.goal_id ? { legacy, diagnostics: scratch.restoreDiagnostics } : { legacy: undefined, failed: true }
+    }
+    catch {
+      return { legacy: undefined, failed: true }
+    }
+  }
+
+  resumeTask(key, { taskId, now = Date.now(), requestId, source = 'runtime', reason, gameTick } = {}) {
+    const rid = this.#ledgerRequestId(requestId, 'resume', now)
+    const before = this.planningState(key) ?? createEmptyPlanningState()
+    const event = { type: PLANNING_EVENT.TASK_RESUMED, source, task_id: taskId, reason, request_id: rid }
+    const verdict = classifyTaskResume(before, event)
+    if (!verdict.ok) return this.#ledgerRefused('resume', verdict, rid, { active_goal_id: verdict.active_goal_id })
+    const restoredLegacy = this.#restoreLegacyCheckpoint(key, verdict.task)
+    if (restoredLegacy.failed) return this.#ledgerRefused('resume', { reason: TASK_LEDGER_REFUSAL.CHECKPOINT_UNRESTORABLE, detail: 'legacy_board_unrestorable', task_id: verdict.task.task_id }, rid)
+    const after = this.dispatchPlanningEvent(key, { ...event, now })
+    if (!after?.goal || after.goal.goal_id !== verdict.task.goal_id) {
+      return this.#ledgerRefused('resume', { reason: TASK_LEDGER_REFUSAL.INVALID_TASK, task_id: verdict.task.task_id }, rid)
+    }
+    let legacy = restoredLegacy.legacy
+    if (legacy) {
+      // The task resumes as running: what described the world while it was stopped does not carry over.
+      legacy.condition_wait = undefined
+      legacy.persistent_runtime = undefined
+      legacy.provider_recovery = undefined
+      if (legacy.status === 'paused') {
+        legacy.status = 'active'
+        legacy.pause_reason = ''
+        legacy.task_board = setTaskBoardStatus(legacy.task_board, 'active', { now })
+      }
+      this.planByNpc.set(key, legacy)
+      this.mirrorRunToLegacy(key, legacy, { locators: true })
+      this.syncPlanningState(key, legacy)
+      legacy = this.planByNpc.get(key)
+    }
+    const plan = getActivePlan(after)
+    const progress = verdict.task.progress
+    this.#authTrace('task_ledger.resumed', {
+      ok: true,
+      reason: reason || (taskId ? 'explicit_resume' : 'most_recent_interrupted_runnable'),
+      task_id: verdict.task.task_id,
+      goal_id: verdict.task.goal_id,
+      from_status: verdict.task.status,
+      interruption_reason: verdict.task.interruption?.reason_code ?? null,
+      plan_id: plan?.plan_id ?? null,
+      steps_completed: progress?.steps_completed ?? 0,
+      steps_total: progress?.steps_total ?? 0,
+      active_step_index: plan?.active_step_index ?? null,
+      destination: verdict.task.requested_result.destination,
+      waited_ms: Math.max(0, now - (verdict.task.interruption?.at ?? verdict.task.recorded_at ?? now)),
+      interrupted_game_tick: verdict.task.interruption?.game_tick ?? null,
+      resume_game_tick: Number.isSafeInteger(gameTick) ? gameTick : null,
+      legacy_board_restored: Boolean(legacy),
+    }, rid)
+    return { ok: true, task: verdict.task, state: legacy, planning: after }
+  }
+
+  /** Resume the most recently interrupted runnable temporary task (the rule after an interrupting task verifies complete). */
+  resumeNextInterruptedTask(key, options = {}) {
+    return this.resumeTask(key, { ...options, taskId: undefined })
+  }
+
+  nextResumableTask(key) {
+    return mostRecentResumable(this.taskLedger(key))
+  }
+
+  cancelLedgerTask(key, taskId, { reason, now = Date.now(), requestId, source = 'user' } = {}) {
+    const rid = this.#ledgerRequestId(requestId, 'cancel', now)
+    const before = this.taskLedger(key).tasks.find(item => item.task_id === taskId)
+    if (!before) return this.#ledgerRefused('cancel', { reason: TASK_LEDGER_REFUSAL.TASK_NOT_FOUND, task_id: taskId }, rid)
+    const after = this.dispatchPlanningEvent(key, { type: PLANNING_EVENT.TASK_CANCELLED, source, task_id: taskId, reason, request_id: rid, now })
+    if (taskLedgerOf(after).tasks.some(item => item.task_id === taskId)) {
+      return this.#ledgerRefused('cancel', { reason: TASK_LEDGER_REFUSAL.UNAUTHORIZED_SOURCE, task_id: taskId }, rid)
+    }
+    this.#authTrace('task_ledger.cancelled', { ok: true, reason: String(reason ?? 'cancelled').slice(0, 200), task_id: taskId, goal_id: before.goal_id }, rid)
+    return { ok: true, task: before }
+  }
+
   setStepCompletionContract(key, stepId, contract, { now = Date.now() } = {}) {
     const state = key ? this.planByNpc.get(key) : undefined
     const normalized = safeDurableStepCompletionContract(contract)
@@ -1623,9 +1823,10 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
 
   // MW1: reserved containers and NPC placement receipts are world facts, not part of one goal. Dropping a goal's planning
   // state (a new goal, a completed task context, a terminate) keeps them as a goalless state instead of deleting them.
+  // MW2: the task ledger is kept the same way (interrupted and queued tasks are not part of the goal being dropped).
   #dropPlanningKeepingWorld(key) {
-    const world = carryAuthorizationAcrossGoals(this.planningByNpc.get(key)?.authorization)
-    if (world) this.planningByNpc.set(key, { ...createEmptyPlanningState(), authorization: world })
+    const kept = carriedAcrossGoals(this.planningByNpc.get(key))
+    if (Object.keys(kept).length > 0) this.planningByNpc.set(key, { ...createEmptyPlanningState(), ...kept })
     else this.planningByNpc.delete(key)
   }
 
@@ -2358,7 +2559,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       if (!item || typeof item.key !== 'string' || item.key.length < 1 || item.key.length > 200) continue
       const restored = restorePlanningState(item.state)
       if (!restored.goal) {
-        if (restored.authorization) goallessWorld.push([item.key, restored])
+        if (restored.authorization || restored.task_ledger) goallessWorld.push([item.key, restored])
         continue
       }
       this.planningByNpc.set(item.key, restored)
@@ -2407,7 +2608,26 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       const held = this.planningByNpc.get(key)
       if (!held) this.planningByNpc.set(key, world)
       // A legacy migration created a goal state for this key: it never held the world facts, so they are merged in.
-      else if (!held.authorization) this.planningByNpc.set(key, { ...held, authorization: world.authorization })
+      else {
+        const merged = {
+          ...held,
+          ...(!held.authorization && world.authorization ? { authorization: world.authorization } : {}),
+          ...(!held.task_ledger && world.task_ledger ? { task_ledger: world.task_ledger } : {}),
+        }
+        this.planningByNpc.set(key, merged)
+      }
+    }
+    // MW2: say what the restart brought back, so a later live run can tell a restored ledger from an empty one.
+    for (const [key, planning] of this.planningByNpc.entries()) {
+      const ledger = planning.task_ledger
+      if (!ledger || ledger.tasks.length === 0) continue
+      this.#authTrace('task_ledger.restored', {
+        ok: true,
+        reason: 'snapshot_restored',
+        key,
+        task_count: ledger.tasks.length,
+        tasks: ledger.tasks.map(task => ({ task_id: task.task_id, status: task.status, reason_code: task.interruption?.reason_code ?? null, has_checkpoint: Boolean(task.checkpoint) })),
+      }, `ledger_restore_${Date.now().toString(36)}`)
     }
   }
 

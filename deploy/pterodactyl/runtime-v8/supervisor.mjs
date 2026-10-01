@@ -1589,7 +1589,27 @@ export async function finalizeCompletedTaskBoundary(session, result) {
   await session.agent.finalizeCompletedTaskContext?.()
   resetLiveTaskContext(session)
   await session.clearTaskBoardUi()
+  await resumeInterruptedTaskAfterCompletion(session)
   return true
+}
+
+// MW2: when the interrupting temporary task has verified complete, the most recently interrupted runnable temporary task
+// comes back from the durable ledger (design section 3). The task's committed plan and verified progress are restored
+// without a model turn; the ordinary interrupted-plan recovery then re-observes the world before anything is issued.
+// Queued, not awaited: it runs after the current event, like every other recovery.
+export async function resumeInterruptedTaskAfterCompletion(session) {
+  const agent = session?.agent
+  if (typeof agent?.resumeInterruptedTask !== 'function') return undefined
+  const resumed = await agent.resumeInterruptedTask({ reason: 'interrupting_task_completed' })
+  if (!resumed?.ok) return resumed
+  await session.syncTaskBoardUi?.(resumed.state)
+  if (typeof session.queueEvent === 'function') {
+    session.queueEvent(() => session.recoverInterruptedPlan('interrupted_task_resumed', {
+      task_id: resumed.task.task_id,
+      goal_id: resumed.task.goal_id,
+    }), { reportError: true })
+  }
+  return resumed
 }
 
 export async function executeUiControl(session, event) {

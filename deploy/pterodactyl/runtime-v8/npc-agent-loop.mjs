@@ -5270,6 +5270,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (Number.isSafeInteger(autorioStatus?.last_completed_batch?.batch_id)) {
       this.latestCompletedBatchId = autorioStatus.last_completed_batch.batch_id
     }
+    // MW2: the latest game tick a runtime receipt carried; the ledger records it as aging data (15 game-minutes).
+    if (Number.isSafeInteger(autorioStatus?.last_completed_batch?.tick)) {
+      this.latestGameTick = Math.max(this.latestGameTick ?? 0, autorioStatus.last_completed_batch.tick)
+    }
     const autorioRuntimeHealthy = interactionRuntimeHealthy(autorioStatus)
     const persistentControllerHealthy = persistentRuntimeHealthy(persistentRuntime)
     const conditionValidation = await this.validateConditionWaitHealth()
@@ -5676,8 +5680,51 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }, { requestId })
   }
 
+  // MW2: a new player goal displaces the running one. The running task is MOVED into the durable task ledger (its committed
+  // plan, verified progress, requested result and destination) before the context is cleared, so it can be resumed later
+  // instead of being lost. The request id is minted here so the ledger trace and the new request share it. A refusal is
+  // traced by the memory facade (task_ledger.refused) and leaves the previous behaviour untouched.
+  async recordInterruptedTask(memoryKey, { sender, text, epoch } = {}) {
+    if (typeof this.memory.interruptActiveTask !== 'function') return undefined
+    const planning = this.memory.planningState?.(memoryKey)
+    if (planning?.goal?.status !== 'active') return undefined
+    this.preMintedRequestId = `req_${Date.now().toString(36)}_${(++this.traceRequestSequence).toString(36)}`
+    const actor = epoch ?? this.epoch
+    const result = this.memory.interruptActiveTask(memoryKey, {
+      interruptedBy: { kind: 'new_goal', sender: cleanMemoryText(sender, 128) },
+      detail: `Displaced by a new request: ${cleanMemoryText(text, 160)}`,
+      actor: actor ? { actor_id: actor.actor_id, epoch: actor.epoch } : undefined,
+      gameTick: this.latestGameTick,
+      requestId: this.preMintedRequestId,
+    })
+    if (result?.ok) await this.persistState()
+    return result
+  }
+
+  // MW2: bring the most recently interrupted runnable task (or the named one) back as the running task. Pure state: the
+  // committed plan, verified progress and compatibility board come back exactly as they stopped; no model turn and no
+  // operation is started here. The supervisor then runs the ordinary recovery path (re-observe, never replay).
+  async resumeInterruptedTask({ taskId, reason, requestId } = {}) {
+    if (typeof this.memory.resumeTask !== 'function') return undefined
+    await this.loadPersistentState()
+    const memoryKey = this.activePlanKey()
+    const result = this.memory.resumeTask(memoryKey, {
+      taskId,
+      reason,
+      requestId,
+      gameTick: this.latestGameTick,
+      source: 'runtime',
+    })
+    if (result?.ok) {
+      this.planUpdateReason = 'recovery'
+      await this.persistState()
+    }
+    return result
+  }
+
   async request(text, options = {}) {
     const requestStartedAt = Date.now() // 2.10: time zero for reply-latency metrics
+    this.preMintedRequestId = undefined
     await this.loadPersistentState()
     const sender = options.sender ?? 'unknown'
     this.lastMemoryKey = `npc:${this.npcId}`
@@ -5842,6 +5889,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (healthyRuntime) await this.cancelInteractionWorldWork(routed.epoch)
       this.clearLoadedSkillContext()
       super.cancel()
+      await this.recordInterruptedTask(memoryKey, { sender, text, epoch: routed.epoch })
       this.memory.clearTaskContext?.(memoryKey)
       await this.persistState()
     }
@@ -5975,7 +6023,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     if (this.traceRequest) await this.traceEvent('request.superseded', { usage: this.traceRequest.usage })
     this.traceRequest = {
-      id: `req_${Date.now().toString(36)}_${(++this.traceRequestSequence).toString(36)}`,
+      id: this.preMintedRequestId ?? `req_${Date.now().toString(36)}_${(++this.traceRequestSequence).toString(36)}`,
       seq: 0,
       usage: emptyUsageSummary(),
       // A request that starts on a paused goal and leaves it paused for the
@@ -6618,12 +6666,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (['request.received', 'provider.error', 'plan.accepted', 'operations.ack', 'request.completed', 'request.failed', 'goal.paused'].includes(event)) {
       this.log(`[trace ${request?.id ?? '-'}] ${event}`)
     }
+    // MW2: a task-ledger event names the request that caused it (a new goal interrupts the previous request's task before its
+    // own request starts), so it keeps that id instead of the id of whatever request is still open.
+    const exact = event.startsWith('task_ledger.') && typeof requestId === 'string' && requestId !== ''
     return this.behaviorTrace.emit({
       schema: 1,
       ts: new Date().toISOString(),
-      seq: request ? ++request.seq : 0,
+      seq: request && !exact ? ++request.seq : 0,
       event,
-      request_id: request?.id ?? (typeof requestId === 'string' ? requestId : undefined),
+      request_id: exact ? requestId : (request?.id ?? (typeof requestId === 'string' ? requestId : undefined)),
       turn: request ? this.continuations + 1 : undefined,
       actor_id: this.epoch?.actor_id,
       epoch: this.epoch?.epoch,
