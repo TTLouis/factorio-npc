@@ -93,6 +93,14 @@ Do not update a historical validation record in place to describe a newer commit
 
 Live runs call real providers and cost money. Do not start one (RCON rounds, the e2e overlay, subagent e2e sessions, or anything that calls a real model or Jev) until the owner says so for that run. Before an owner-approved live run, stop after the static gates and report that the build is ready. Static scenarios with scripted or recorded model replies are the default harness gate. Turn every live finding into one of those fixtures, using realistic output sizes and live Jev shapes.
 
+- **Which model (owner rule, 2026-10-01).**
+  - Automated e2e is any live run an agent drives. It uses only DeepSeek V4.1 Flash from DeepSeek's own API:
+    - `OPENAI_API_BASEURL=https://api.deepseek.com`
+    - `AI_API_METHOD` set to `direct` or left blank
+    - one model, DeepSeek's name for V4.1 Flash (currently `deepseek-flash`)
+  - Automated runs never use OpenRouter, another model, or a two-model list.
+  - The owner's personal tests run through OpenRouter (`AI_API_METHOD=router`), and the owner alone chooses those models. Agents may recommend models but never pick or change them.
+  - Restore the direct DeepSeek settings before the next automated run.
 - **Secrets.** Secrets live only in the gitignored `.env`. Agents never read, print or echo it, and never copy its values into commands, logs, commits or docs. The stack fails fast without `FACTORIO_RCON_PASSWORD`, `OPENAI_API_KEY`, `OPENAI_API_BASEURL`, `OPENAI_MODEL` and `JEV_TYPESAFE_API_KEY`.
 - **Build what you test.**
   - Build the local server image only with `scripts/build-docker-local.ps1` (full: pins `SGLUNA_SOURCE_REF` to the committed, pushed HEAD) or `scripts/update-docker-mod-local.ps1` (mod-only changes). Both need a clean tree. Do not pass `--no-cache` or `--pull`.
