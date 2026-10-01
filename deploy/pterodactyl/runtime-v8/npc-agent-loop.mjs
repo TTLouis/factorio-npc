@@ -13,6 +13,7 @@ import {
 import { AgentContext, contextRestagedRow, conversationChars, STALE_REDRIVE_LIMIT, STALE_REPLY_ERROR_CODE, STALE_REPLY_MESSAGE } from './agent-context.mjs'
 import { EXECUTOR_ROLE, PLANNER_ROLE, roleSystemPrompt } from './agent-roles.mjs'
 import { buildHandoffPacket } from './handoff-packet.mjs'
+import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CODES } from './authorization.mjs'
 import { JevCheckpoints } from './jev-checkpoints.mjs'
 import { buildVerifiedResults } from './verified-results.mjs'
 import { cleanMemoryText, sanitizeDurableModelText, sanitizeDurableModelValue } from './durable-text.mjs'
@@ -151,6 +152,10 @@ const RESEARCH_PREFLIGHT_RECOVERABLE_CODES = new Set(['missing_prerequisites', '
 // one bounded correction turn before the plan is frozen as BLOCKED.
 const MODEL_CORRECTABLE_PREFLIGHT_CODES = new Set(['unknown_prototype', 'unknown_recipe', 'invalid_unit_number', 'invalid_target_kind', 'invalid_preflight_args'])
 const MODEL_CORRECTABLE_PREFLIGHT_RETRY_BUDGET = 1
+// MW1: operation-level authorization refusals. A protected, reserved or player-inventory target is something the model can
+// route around inside its grant (one retry); a stale grant is not (it ends the request like any other blocker).
+const AUTHORIZATION_RECOVERABLE_CODES = new Set(ADMISSION_REFUSAL_CODES.filter(code => code !== ADMISSION_REFUSAL.AUTHORIZATION_STALE))
+const AUTHORIZATION_REFUSAL_RETRY_BUDGET = 1
 // Board evidence kind for an executed operation the engine refused in a way the
 // planner can correct (a placement refused at its chosen coordinate). The board
 // memory records it instead of freezing the plan and blocks once the bounded
@@ -634,6 +639,7 @@ function compactBasicOperationResult(result) {
       : undefined,
     placed_surface_index: Number.isSafeInteger(result.placed_surface_index) ? result.placed_surface_index : undefined,
     placed_direction: Number.isSafeInteger(result.placed_direction) ? result.placed_direction : undefined,
+    placed_last_user: typeof result.placed_last_user === 'string' ? cleanMemoryText(result.placed_last_user, 80) : undefined,
     placement_footprint: result.placement_footprint && typeof result.placement_footprint === 'object'
       ? sanitizeDurableModelValue(result.placement_footprint)
       : undefined,
@@ -2588,6 +2594,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.providerCallsByGeneration = new Map() // the same count per loop generation: restageContext refuses only while a round of the CURRENT generation is in flight
     this.turnScope = new AsyncLocalStorage() // the running turn identity (lineage, generation, request id): every admission point of that turn judges staleness against it
     this.turnConversation = null // attribution of the conversation the running turn last read; null between turns
+    // MW1: authorization events raised inside the memory facade (grant checks, replacement decisions, protected and
+    // reserved refusals) become behavior-trace rows carrying their request_id.
+    if (this.memory && 'traceSink' in this.memory) {
+      this.memory.traceSink = (name, payload) => {
+        Promise.resolve(this.traceEvent(name, payload, { requestId: payload?.request_id })).catch(() => {})
+      }
+    }
   }
 
   // Delegation U4 (agent-context.mjs): the running conversation lives in one
@@ -3759,6 +3772,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       || !result.placed_position
       || !Number.isFinite(result.placed_position.x)
       || !Number.isFinite(result.placed_position.y)) return
+
+    // MW1: the placement receipt is what identifies an entity as the NPC's own (a player-built entity is one whose
+    // engine last_user is a human the NPC did not stamp). Recorded durably, once per entity.
+    this.memory.recordNpcPlacement?.(this.activePlanKey(), {
+      unit_number: result.placed_unit_number,
+      entity_name: result.entity_name,
+      actor_id: Number.isSafeInteger(result.actor_id) ? result.actor_id : this.epoch?.actor_id,
+      actor_epoch: this.epoch?.epoch,
+      placed_last_user: typeof result.placed_last_user === 'string' ? result.placed_last_user : undefined,
+    }, { requestId: this.traceRequest?.id })
 
     this.recordLiveEntityObservation({
       name: result.entity_name,
@@ -5847,6 +5870,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.modelCorrectablePreflightRetries = 0
     this.researchPreflightRetries = 0
     this.bootstrapDependencyPreflightRetries = 0
+    this.authorizationRefusalRetries = 0
     this.planUpdateReason = intent === 'new_goal'
       ? 'new_goal'
       : intent === 'amend_current'
@@ -6123,6 +6147,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.modelCorrectablePreflightRetries = 0
     this.researchPreflightRetries = 0
     this.bootstrapDependencyPreflightRetries = 0
+    this.authorizationRefusalRetries = 0
     return true
   }
 
@@ -9644,6 +9669,32 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         this.modelCorrectablePreflightRetries = 0
         this.researchPreflightRetries = 0
         this.bootstrapDependencyPreflightRetries = 0
+        // MW1 admission gate, run BEFORE the plan is committed so a refusal leaves the plan a DRAFT exactly as every other
+        // deterministic refusal does: a replacement plan's grant is re-checked for this actor and epoch, an exact operation on
+        // a player-built entity (grant-backed work) needs an approval record, reserved containers are never withdrawn from,
+        // and (grant-backed work) a player's inventory is never a source. Commit re-checks the grant again below.
+        if (this.requestInfo && typeof this.memory.checkOperationAdmission === 'function') {
+          const admission = this.memory.checkOperationAdmission(this.requestInfo.memoryKey, {
+            operations: plan.operations,
+            preflight,
+            actor: { actor_id: before.actor_id, actor_epoch: before.epoch },
+          }, { requestId: this.traceRequest?.id })
+          if (admission?.ok === false) {
+            const failure = new AgentLoopError(`Operation admission refused operation ${(admission.operation_index ?? 0) + 1}: ${admission.code}`)
+            failure.preflight = {
+              ok: false,
+              code: admission.code,
+              reason: admission.reason,
+              operation: admission.operation,
+              operation_index: admission.operation_index ?? 0,
+              identity: admission.unit_number,
+              detail: admission.reason,
+              ...(admission.last_user ? { last_user: admission.last_user } : {}),
+            }
+            throw failure
+          }
+          this.authorizationRefusalRetries = 0
+        }
         const planningBeforeCommit = this.requestInfo ? this.memory.planningState?.(this.requestInfo.memoryKey) : undefined
         const reducerPlanBeforeCommit = planningBeforeCommit ? getActivePlanningPlan(planningBeforeCommit) : undefined
         const planFrozen = FROZEN_PLAN_STATUSES.has(reducerPlanBeforeCommit?.status)
@@ -9652,10 +9703,25 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           // what to observe or when to wake the planner, but it does not review
           // whether the Main LLM's draft is "correct" before execution.
           if ([PLAN_STATUS.DRAFT, PLAN_STATUS.RUNTIME_VALIDATION, PLAN_STATUS.READY].includes(reducerPlanBeforeCommit?.status)) committedPlanId = reducerPlanBeforeCommit.plan_id
-          this.memory.commitPlanningPlan(this.requestInfo.memoryKey, {
-            now: Date.now(),
-            runtime_validation: { passed: true },
-          })
+          if (reducerPlanBeforeCommit?.replacement && typeof this.memory.commitReplacementPlan === 'function') {
+            // MW1: a replacement plan commits only while its grant is current for THIS actor and epoch.
+            const replaced = this.memory.commitReplacementPlan(this.requestInfo.memoryKey, {
+              current: { actor_id: before.actor_id, actor_epoch: before.epoch },
+              now: Date.now(),
+              requestId: this.traceRequest?.id,
+            })
+            if (!replaced.ok) {
+              const failure = new AgentLoopError(`Replacement plan commit refused: ${replaced.reason}`)
+              failure.preflight = { ok: false, code: ADMISSION_REFUSAL.AUTHORIZATION_STALE, reason: replaced.reason, stage: 'commit', operation_index: 0 }
+              throw failure
+            }
+          }
+          else {
+            this.memory.commitPlanningPlan(this.requestInfo.memoryKey, {
+              now: Date.now(),
+              runtime_validation: { passed: true },
+            })
+          }
           const committed = this.memory.currentPlan?.(this.requestInfo.memoryKey)
           if (committed) stateResult = { ...(stateResult ?? {}), state: committed }
           await this.persistState()
@@ -9714,6 +9780,38 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           this.messages.push({
             role: 'user',
             content: `[HARNESS] Deterministic craft preflight rejected the requested craft before Autorio admission because it is not currently craftable. Resolve the first unresolved bootstrap dependency before retrying the downstream craft. Reuse held items/buildings marked already_satisfied; bootstrap only missing quantities. A machine dependency with satisfaction_scope=inventory_acquisition means the machine item is already owned, not that a placed live machine instance exists. If processing requires that machine, first use an existing live observed compatible instance or place one from the held item; after placement, re-observe it and bind its real unit_number before any exact supply/configuration operation. Never invent a unit_number. This bootstrap inventory is for construction/startup only and does not remove steady-state recipe flow from a continuous production topology. Preflight: ${JSON.stringify(error.preflight.bootstrap ?? {})}`,
+          })
+          return this.runTurn()
+        }
+        if (AUTHORIZATION_RECOVERABLE_CODES.has(error?.preflight?.code)
+          && (this.authorizationRefusalRetries ?? 0) < AUTHORIZATION_REFUSAL_RETRY_BUDGET) {
+          this.authorizationRefusalRetries = (this.authorizationRefusalRetries ?? 0) + 1
+          if (this.requestInfo) {
+            const state = this.memory.setAdmissionState?.(this.requestInfo.memoryKey, 'preflight_rejected')
+            if (state) stateResult = { ...(stateResult ?? {}), state }
+            this.memory.recordBoardEvidence?.(this.requestInfo.memoryKey, {
+              kind: 'operation_preflight_recoverable',
+              ref: `${this.traceRequest?.id ?? 'request'}/${error.preflight.code}`,
+              summary: JSON.stringify({
+                code: error.preflight.code,
+                operation_index: error.preflight.operation_index,
+                operation: error.preflight.operation,
+                detail: cleanMemoryText(error.preflight.detail ?? '', 300),
+              }),
+            })
+            await this.persistState()
+          }
+          await this.traceEvent('operations.preflight_recoverable', {
+            failure_class: `authorization_${error.preflight.code}`,
+            preflight: error.preflight,
+            tools_enabled: true,
+            retry: this.authorizationRefusalRetries,
+            retry_budget: AUTHORIZATION_REFUSAL_RETRY_BUDGET,
+          })
+          const index = Number.isSafeInteger(error.preflight.operation_index) ? error.preflight.operation_index : 0
+          this.messages.push({
+            role: 'user',
+            content: `[HARNESS] Admission refused operation ${index + 1} (${cleanMemoryText(plan.operations[index]?.name, 80)}) with code ${error.preflight.code} (${cleanMemoryText(error.preflight.detail ?? '', 120)}); no operation from this batch ran. That target belongs to a player, is a reserved container, or is a player's inventory, and it is not available to you without the player's approval. Do not retry it and do not change the requested result. Choose a different supported approach that leaves protected and reserved assets alone (another source, or new infrastructure elsewhere), or tell the player which approval you need. Facts: ${JSON.stringify({ code: error.preflight.code, operation: error.preflight.operation, unit_number: error.preflight.identity, last_user: error.preflight.last_user })}`,
           })
           return this.runTurn()
         }

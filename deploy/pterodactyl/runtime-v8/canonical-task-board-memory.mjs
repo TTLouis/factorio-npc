@@ -4,6 +4,17 @@ import { createTaskBoard, reconcileTaskBoard, setTaskBoardStatus } from './commo
 import { validateOutcomeCandidate } from './outcome-authority.mjs'
 import { completionContractSupported, provePermanentlyUnsatisfiable, sanitizeStepCompletionContract } from './step-completion.mjs'
 import {
+  ADMISSION_REFUSAL,
+  authorizationOf,
+  carryAuthorizationAcrossGoals,
+  checkGrant,
+  checkReplacementAtCommit,
+  classifyReplacement,
+  entityProtection,
+  evaluateOperationAdmission,
+  REPLACEMENT_DECISION,
+} from './authorization.mjs'
+import {
   applyPlanningEvent,
   createEmptyPlanningState,
   evaluateDeadlockSignals,
@@ -447,6 +458,9 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     // Plan/step stamp taken when a batch was admitted, per NPC. Receipts
     // carry it so a receipt that outlives its plan is refused by the ledger.
     this.admissionStampByNpc = new Map()
+    // MW1: optional (name, payload) sink for the authorization trace events. The agent loop installs one that writes
+    // behavior-trace rows; without it the checks and state changes behave identically and simply emit nothing.
+    this.traceSink = null
   }
 
   planningState(key) {
@@ -1098,6 +1112,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     migrated = false,
     runtime_validation,
     runtimeValidation,
+    grantCheck,
   } = {}) {
     const legacy = key ? this.planByNpc.get(key) : undefined
     let planning = this.ensurePlanningDraft(key, legacy, { now, migrated })
@@ -1113,6 +1128,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       now,
       plan_id: plan.plan_id,
       runtime_validation: validation,
+      // MW1: a replacement plan's grant is re-checked at commit against the actor that will execute it.
+      ...(grantCheck ? { grant_check: grantCheck } : {}),
     })
     this.planningByNpc.set(key, planning)
     this.syncPlanningState(key, legacy)
@@ -1164,6 +1181,265 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       choice,
     })
     return this.syncPlanningState(key, key ? this.planByNpc.get(key) : undefined) ?? planning
+  }
+
+  // --- MW1 authorization -------------------------------------------------------
+  //
+  // Thin harness-facing wrappers over the reducer's authorization events (authorization.mjs, planning-state.mjs).
+  // Each returns a structured result and emits one named trace event carrying request_id and a reason. The planner
+  // and Jev have no path to these: the reducer accepts grants/approvals only from runtime or user authority.
+
+  #authTrace(name, payload, requestId) {
+    if (typeof this.traceSink !== 'function') return
+    try { this.traceSink(name, { ...payload, request_id: requestId ?? payload.request_id }) }
+    catch {}
+  }
+
+  authorizationState(key) {
+    return authorizationOf(this.planningState(key))
+  }
+
+  #dispatchAuthorization(key, event, now) {
+    const planning = this.dispatchPlanningEvent(key, { source: 'runtime', now, ...event })
+    return planning
+  }
+
+  grantAuthorization(key, grant, { now = Date.now(), requestId, source = 'runtime' } = {}) {
+    const before = this.planningState(key)
+    const after = this.#dispatchAuthorization(key, { type: PLANNING_EVENT.AUTHORIZATION_GRANTED, source, grant }, now)
+    const held = authorizationOf(after).grants.find(item => item.mandate_kind === grant?.mandate_kind && item.mandate_id === grant?.mandate_id)
+    const ok = Boolean(held) && authorizationOf(after) !== authorizationOf(before)
+    this.#authTrace('authorization.granted', {
+      ok,
+      reason: ok ? 'granted' : 'refused_invalid_inactive_goal_or_already_active',
+      grant_id: held?.grant_id,
+      grant_revision: held?.revision,
+      mandate_kind: grant?.mandate_kind,
+    }, requestId)
+    return { ok, grant: ok ? held : undefined, state: after }
+  }
+
+  reviseAuthorization(key, grantId, changes, { now = Date.now(), requestId, reason, source = 'runtime' } = {}) {
+    const before = authorizationOf(this.planningState(key))
+    const after = this.#dispatchAuthorization(key, { type: PLANNING_EVENT.AUTHORIZATION_REVISED, source, grant_id: grantId, changes, reason }, now)
+    const held = authorizationOf(after).grants.find(item => item.grant_id === grantId)
+    const ok = Boolean(held) && held.revision !== before.grants.find(item => item.grant_id === grantId)?.revision
+    this.#authTrace('authorization.revised', { ok, reason: ok ? 'revision_bumped' : 'refused', grant_id: grantId, grant_revision: held?.revision }, requestId)
+    return { ok, grant: held, state: after }
+  }
+
+  revokeAuthorization(key, grantId, { now = Date.now(), requestId, reason, source = 'runtime' } = {}) {
+    const before = authorizationOf(this.planningState(key))
+    const after = this.#dispatchAuthorization(key, { type: PLANNING_EVENT.AUTHORIZATION_REVOKED, source, grant_id: grantId, reason }, now)
+    const held = authorizationOf(after).grants.find(item => item.grant_id === grantId)
+    const ok = held?.status === 'revoked' && before.grants.find(item => item.grant_id === grantId)?.status !== 'revoked'
+    this.#authTrace('authorization.revoked', { ok, reason: ok ? String(reason ?? '').slice(0, 200) || 'revoked' : 'refused', grant_id: grantId, grant_revision: held?.revision }, requestId)
+    return { ok, grant: held, state: after }
+  }
+
+  /**
+   * Ask for a replacement of a BLOCKED plan. The decision is computed by the same pure function the reducer uses, so
+   * the trace and the state change cannot disagree:
+   *   accept  a DRAFT successor with lineage (predecessor, grant id + revision, grounded reason) becomes the active
+   *           plan; it still has to pass the commit-time grant check.
+   *   ask     a pending approval question is recorded; the BLOCKED plan is untouched (frozen) until it is answered.
+   *   refuse  nothing changes except a bounded refusal record (stale grant, ungrounded reason, not blocked).
+   */
+  requestReplacementPlan(key, request, { now = Date.now(), requestId } = {}) {
+    const planning = this.planningState(key)
+    const verdict = classifyReplacement(planning, request)
+    this.dispatchPlanningEvent(key, { ...request, type: PLANNING_EVENT.REPLACEMENT_PLAN_REQUESTED, source: 'runtime', now })
+    const after = this.planningState(key)
+    const base = {
+      plan_id: request?.plan_id,
+      grant_id: verdict.grant_id ?? request?.grant?.grant_id,
+      grant_revision: verdict.grant_revision,
+      reason: verdict.reason,
+    }
+    if (verdict.decision === REPLACEMENT_DECISION.ACCEPT) {
+      const successor = getActivePlan(after)
+      this.#authTrace('plan.replacement_drafted', {
+        ...base,
+        successor_plan_id: successor?.plan_id,
+        reason_code: verdict.replacement_reason?.code,
+        evidence_refs: verdict.replacement_reason?.evidence_refs,
+        action_scope: verdict.action_scope,
+      }, requestId)
+      return { ...verdict, plan: successor, state: after }
+    }
+    if (verdict.decision === REPLACEMENT_DECISION.ASK) {
+      const question = authorizationOf(after).questions.find(item => item.status === 'pending'
+        && item.plan_id === request?.plan_id
+        && item.reason_codes.join('|') === verdict.reason_codes.join('|'))
+      this.#authTrace('plan.replacement_question_raised', {
+        ...base,
+        reason_codes: verdict.reason_codes,
+        approvable: verdict.approvable,
+        question_id: question?.question_id,
+        old_plan_frozen: getActivePlan(after)?.plan_id === request?.plan_id,
+      }, requestId)
+      return { ...verdict, question, state: after }
+    }
+    this.#authTrace('plan.replacement_refused', { ...base, stale: verdict.stale === true }, requestId)
+    if (verdict.stale) {
+      this.#authTrace('authorization.stale_refused', { ...base, stage: 'replacement' }, requestId)
+    }
+    return { ...verdict, state: after }
+  }
+
+  /** A user's answer to a pending question (or a standing approval for named subjects). Never the planner or Jev. */
+  recordAuthorizationApproval(key, approval, { now = Date.now(), requestId, source = 'user' } = {}) {
+    const before = authorizationOf(this.planningState(key))
+    const after = this.dispatchPlanningEvent(key, { now, ...approval, type: PLANNING_EVENT.AUTHORIZATION_APPROVAL_RECORDED, source })
+    const held = authorizationOf(after)
+    const recorded = held.approvals.length > before.approvals.length ? held.approvals.at(-1) : undefined
+    this.#authTrace('authorization.approval_recorded', {
+      ok: Boolean(recorded),
+      reason: recorded ? recorded.decision : 'refused',
+      approval_id: recorded?.approval_id,
+      question_id: approval?.question_id,
+    }, requestId)
+    return { ok: Boolean(recorded), approval: recorded, state: after }
+  }
+
+  /**
+   * Commit a replacement draft (and only a replacement draft) with the grant re-checked against the caller's actor.
+   * `current` = { actor_id, actor_epoch } of the actor that will execute. Other plans commit through
+   * commitPlanningPlan exactly as before.
+   */
+  commitReplacementPlan(key, { current, now = Date.now(), requestId, runtime_validation: runtimeValidation = { passed: true } } = {}) {
+    const planning = this.planningState(key)
+    const plan = getActivePlan(planning)
+    if (!plan?.replacement) return { ok: false, reason: 'not_a_replacement', state: planning }
+    const verdict = checkReplacementAtCommit(planning, plan, current)
+    this.#authTrace('authorization.grant_checked', {
+      stage: 'commit',
+      ok: verdict.ok,
+      reason: verdict.reason,
+      grant_id: plan.replacement.grant_id,
+      grant_revision: plan.replacement.grant_revision,
+      plan_id: plan.plan_id,
+    }, requestId)
+    if (!verdict.ok) {
+      // The reducer enforces the same check and records the refusal; the plan stays an uncommitted DRAFT.
+      this.dispatchPlanningEvent(key, { type: PLANNING_EVENT.PLAN_COMMITTED, source: 'runtime', now, plan_id: plan.plan_id, runtime_validation: runtimeValidation, grant_check: current })
+      this.#authTrace('plan.replacement_refused', { plan_id: plan.plan_id, grant_id: plan.replacement.grant_id, grant_revision: plan.replacement.grant_revision, reason: verdict.reason, stage: 'commit' }, requestId)
+      this.#authTrace('authorization.stale_refused', { stage: 'commit', plan_id: plan.plan_id, grant_id: plan.replacement.grant_id, grant_revision: plan.replacement.grant_revision, reason: verdict.reason }, requestId)
+      return { ok: false, reason: verdict.reason, state: this.planningState(key) }
+    }
+    // Dispatched directly (not through commitPlanningPlan): ensurePlanningDraft would let the legacy board redraft over
+    // the replacement draft this commit is about. The reducer re-checks the grant on this same event.
+    const after = this.dispatchPlanningEvent(key, { type: PLANNING_EVENT.PLAN_COMMITTED, source: 'runtime', now, plan_id: plan.plan_id, runtime_validation: runtimeValidation, grant_check: current })
+    const committed = getActivePlan(after)
+    const ok = committed?.plan_id === plan.plan_id && [PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(committed.status)
+    if (ok) {
+      this.#authTrace('plan.replacement_committed', {
+        plan_id: plan.plan_id,
+        predecessor_plan_id: plan.replacement.predecessor_plan_id,
+        grant_id: plan.replacement.grant_id,
+        grant_revision: plan.replacement.grant_revision,
+        reason_code: plan.replacement.reason.code,
+        evidence_refs: plan.replacement.reason.evidence_refs,
+        reason: 'within_grant',
+      }, requestId)
+    }
+    return { ok, reason: ok ? 'within_grant' : 'commit_not_applied', state: after }
+  }
+
+  /**
+   * Operation-admission gate, run by the harness right before a batch is sent to the game. `preflight` is the
+   * per-operation preflight result list (the engine's `target.last_user` rides in it).
+   */
+  checkOperationAdmission(key, { operations, preflight, actor } = {}, { requestId } = {}) {
+    const planning = this.planningState(key)
+    const verdict = evaluateOperationAdmission(planning, { operations, preflight, actor })
+    const plan = getActivePlan(planning)
+    if (plan?.replacement) {
+      this.#authTrace('authorization.grant_checked', {
+        stage: 'admission',
+        ok: verdict.ok || verdict.code !== ADMISSION_REFUSAL.AUTHORIZATION_STALE,
+        reason: verdict.ok || verdict.code !== ADMISSION_REFUSAL.AUTHORIZATION_STALE ? 'within_grant' : verdict.reason,
+        grant_id: plan.replacement.grant_id,
+        grant_revision: plan.replacement.grant_revision,
+        plan_id: plan.plan_id,
+      }, requestId)
+    }
+    if (verdict.ok) return verdict
+    const payload = {
+      stage: 'admission',
+      code: verdict.code,
+      reason: verdict.reason,
+      operation: verdict.operation,
+      operation_index: verdict.operation_index,
+      unit_number: verdict.unit_number,
+      plan_id: plan?.plan_id,
+    }
+    if (verdict.code === ADMISSION_REFUSAL.AUTHORIZATION_STALE) {
+      this.#authTrace('authorization.stale_refused', payload, requestId)
+    }
+    else if (verdict.code === ADMISSION_REFUSAL.PROTECTED_ENTITY) {
+      this.#authTrace('admission.protected_refused', { ...payload, last_user: verdict.last_user }, requestId)
+    }
+    else if (verdict.code === ADMISSION_REFUSAL.PLAYER_INVENTORY) {
+      this.#authTrace('admission.player_inventory_refused', payload, requestId)
+    }
+    else {
+      this.#authTrace('admission.reserved_refused', payload, requestId)
+    }
+    return verdict
+  }
+
+  /** The current-grant check on its own, for callers outside the commit and admission paths. */
+  checkAuthorizationGrant(key, ref, { requestId, stage = 'check' } = {}) {
+    const planning = this.planningState(key)
+    const verdict = checkGrant(authorizationOf(planning), planning?.goal, ref)
+    this.#authTrace('authorization.grant_checked', { stage, ok: verdict.ok, reason: verdict.ok ? 'current' : verdict.reason, grant_id: ref?.grant_id, grant_revision: ref?.grant_revision }, requestId)
+    if (!verdict.ok) this.#authTrace('authorization.stale_refused', { stage, reason: verdict.reason, grant_id: ref?.grant_id, grant_revision: ref?.grant_revision }, requestId)
+    return verdict
+  }
+
+  /** Is this existing entity a player's? (last_user rule + NPC placement receipts + grant-protected units). */
+  protectedEntityStatus(key, target) {
+    const planning = this.planningState(key)
+    return entityProtection(authorizationOf(planning), target, { goalId: planning?.goal?.goal_id })
+  }
+
+  recordNpcPlacement(key, placement, { now = Date.now(), requestId } = {}) {
+    if (!key) return undefined
+    const before = authorizationOf(this.planningState(key))
+    // The same receipt is read on every status poll: an identical record is not a new fact.
+    const held = before.world.npc_placements.find(item => item.unit_number === placement?.unit_number)
+    if (held
+      && held.actor_epoch === (Number.isSafeInteger(placement?.actor_epoch) ? placement.actor_epoch : null)
+      && held.placed_last_user === (placement?.placed_last_user || null)) return this.planningState(key)
+    const after = this.dispatchPlanningEvent(key, { ...placement, type: PLANNING_EVENT.NPC_PLACEMENT_RECORDED, source: 'runtime', now })
+    const changed = authorizationOf(after) !== before
+    if (changed) this.#authTrace('placement.npc_recorded', { unit_number: placement?.unit_number, entity_name: placement?.entity_name, reason: 'placement_receipt' }, requestId)
+    return after
+  }
+
+  recordReservation(key, reservation, { now = Date.now(), requestId, source = 'user' } = {}) {
+    if (!key) return { ok: false, reason: 'no_key' }
+    const before = authorizationOf(this.planningState(key))
+    const after = this.dispatchPlanningEvent(key, { ...reservation, type: PLANNING_EVENT.RESERVATION_RECORDED, source, now })
+    const held = authorizationOf(after).world.reservations.find(item => item.status === 'active' && item.unit_number === reservation?.unit_number)
+    const ok = Boolean(held) && authorizationOf(after) !== before
+    this.#authTrace('reservation.recorded', {
+      ok,
+      reason: ok ? 'reserved' : (held ? 'already_reserved' : 'refused'),
+      reservation_id: held?.reservation_id,
+      unit_number: reservation?.unit_number,
+    }, requestId)
+    return { ok, reservation: held, state: after }
+  }
+
+  releaseReservation(key, release, { now = Date.now(), requestId, source = 'user' } = {}) {
+    if (!key) return { ok: false, reason: 'no_key' }
+    const before = authorizationOf(this.planningState(key))
+    const after = this.dispatchPlanningEvent(key, { ...release, type: PLANNING_EVENT.RESERVATION_RELEASED, source, now })
+    const ok = authorizationOf(after) !== before
+    this.#authTrace('reservation.released', { ok, reason: ok ? 'released' : 'not_reserved', unit_number: release?.unit_number }, requestId)
+    return { ok, state: after }
   }
 
   setStepCompletionContract(key, stepId, contract, { now = Date.now() } = {}) {
@@ -1341,14 +1617,22 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     this.planByNpc.delete(key)
     // The current slot is retired only when there is no active long-horizon
     // reducer goal. Completing one immutable slice must not discard its shelf.
-    this.planningByNpc.delete(key)
+    this.#dropPlanningKeepingWorld(key)
     return undefined
+  }
+
+  // MW1: reserved containers and NPC placement receipts are world facts, not part of one goal. Dropping a goal's planning
+  // state (a new goal, a completed task context, a terminate) keeps them as a goalless state instead of deleting them.
+  #dropPlanningKeepingWorld(key) {
+    const world = carryAuthorizationAcrossGoals(this.planningByNpc.get(key)?.authorization)
+    if (world) this.planningByNpc.set(key, { ...createEmptyPlanningState(), authorization: world })
+    else this.planningByNpc.delete(key)
   }
 
   clearTaskContext(key) {
     const result = super.clearTaskContext(key)
     if (key) {
-      this.planningByNpc.delete(key)
+      this.#dropPlanningKeepingWorld(key)
       this.steeringAdviceByNpc?.delete(key)
       this.admissionStampByNpc.delete(key)
     }
@@ -2067,10 +2351,16 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     }
 
     this.planningByNpc.clear()
+    // MW1: world facts (reserved containers, NPC placement receipts) outlive goals, so a state with no goal but with
+    // such facts is kept, after the migration loop below so it can never be mistaken for a held reducer plan.
+    const goallessWorld = []
     for (const item of Array.isArray(snapshot?.planning_states) ? snapshot.planning_states.slice(0, 128) : []) {
       if (!item || typeof item.key !== 'string' || item.key.length < 1 || item.key.length > 200) continue
       const restored = restorePlanningState(item.state)
-      if (!restored.goal) continue
+      if (!restored.goal) {
+        if (restored.authorization) goallessWorld.push([item.key, restored])
+        continue
+      }
       this.planningByNpc.set(item.key, restored)
     }
 
@@ -2112,6 +2402,12 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       else this.seedRunFromLegacy(key, state)
       this.seedReceiptLedgerFromLegacy(key, state)
       this.syncPlanningState(key, state)
+    }
+    for (const [key, world] of goallessWorld) {
+      const held = this.planningByNpc.get(key)
+      if (!held) this.planningByNpc.set(key, world)
+      // A legacy migration created a goal state for this key: it never held the world facts, so they are merged in.
+      else if (!held.authorization) this.planningByNpc.set(key, { ...held, authorization: world.authorization })
     }
   }
 

@@ -184,3 +184,96 @@ roadmaps. The UI feedback request is saved for follow-up; layout discussion is d
 
 Resolve these before the relevant build unit is declared complete. None of them reopens
 the accepted authority, interruption, explanation or shared-allowance decisions.
+
+## 7. MW1 build status
+
+Status as of 2026-10-01: **MW1 reducer, harness checks and unit coverage are built on branch
+`mw1-authorization`; the real-engine `last_user` lane is written but its run is recorded
+separately (Docker engine permitting); planner/executor recovery wiring is MW5.** This section
+records what exists; the owner text above is unchanged.
+
+What is built:
+
+- **Authorization record** (`runtime-v8/authorization.mjs`, pure; persisted in the planning
+  state as `authorization`, versioned). A *grant* names the mandate kind (`standing_auto` |
+  `player_task`), mandate/goal/task id, a revision, the requested result and destination, the
+  permitted action scopes, constraints, protected materials/assets and the actor it is bound to.
+  Revising or revoking bumps the revision; a revoked grant returns only at a newer revision.
+  Only runtime or user authority can grant, revise, revoke or approve; the planner and Jev
+  have no path (reducer source allowlist).
+- **Replacement lineage.** `REPLACEMENT_PLAN_REQUESTED` (runtime authority only) classifies a
+  request for a BLOCKED plan: *accept* creates a DRAFT successor (`plan_version + 1`,
+  `derived_from_plan_id`, `replacement` = predecessor, grant id + revision, scope, grounded
+  reason code + evidence refs, steps fingerprint) and keeps verified history in
+  `carried_forward_evidence`; *ask* records a pending approval question and leaves the old plan
+  frozen and untouched; *refuse* records a bounded refusal. A changed requested result or
+  destination, a player-built structure to be removed/redesigned, a reserved container or
+  protected material to be consumed, a crossed constraint, or a scope outside the grant all ask.
+  A changed result/destination is not approvable through a grant approval (that is the user's own
+  revision, `USER_REVISION_APPROVED`, unchanged). Every existing guard (`plan_blocked`,
+  `goal_not_active` restage refusals, board/plan disagreement) is untouched.
+- **Grant check twice.** At commit (`PLAN_COMMITTED` for a plan carrying `replacement`) and at
+  operation admission (`evaluateOperationAdmission`, called from the agent loop right after
+  preflight): a revoked grant, a stale revision, an inactive or different goal, a replaced actor,
+  a changed actor epoch or an unverifiable actor is refused with a named reason. A replacement
+  draft whose steps drifted from the classified ones is refused at commit.
+- **Protected assets.** Engine fact (see the lane below): the standalone NPC leaves
+  `LuaEntity.last_user` empty, so a human `last_user` means player-built. Exact-target preflight
+  now reports `target.last_user`; `entityProtection` combines it with NPC placement receipts
+  (`placed_last_user` is recorded at placement) and explicit grant-protected units. Admission
+  refuses `mine_entity_exact`, `rotate_entity` and `set_machine_recipe` on a protected entity
+  without a user approval record for that entity.
+- **Reserved supplies.** A reservation record (world fact: survives goals and restarts, kept
+  even with no goal) and the exclusion check: reserved containers are never withdrawn from
+  (`move_items_exact` taking items) or mined; a name-based withdrawal is refused while a
+  container of that name is reserved; a player's inventory is never a source
+  (`move_items_with_player` with `to_player=false`); other shared storage stays available.
+- **Trace events** (all carry `request_id` and a `reason`; each asserted in
+  `authorization.test.mjs` / `authorization-wiring.test.mjs` / `reserve-command.test.mjs`):
+  `authorization.granted`, `authorization.revised`, `authorization.revoked`,
+  `authorization.approval_recorded`, `authorization.grant_checked` (stage `commit` | `admission`),
+  `authorization.stale_refused`, `plan.replacement_drafted`, `plan.replacement_committed`,
+  `plan.replacement_refused`, `plan.replacement_question_raised`, `admission.protected_refused`,
+  `admission.reserved_refused`, `admission.player_inventory_refused`, `reservation.recorded`,
+  `reservation.released`, `placement.npc_recorded`. Recoverable admission refusals also appear
+  as `operations.preflight_recoverable` with `failure_class` `authorization_<code>`.
+
+Review-round changes (2026-10-01):
+
+- **Interim scope of the protected-asset gates (owner decision pending).** The protected-entity
+  and player-inventory gates apply only to grant-backed work: a plan carrying replacement
+  lineage, or any goal with an active grant. An ordinary user-requested goal behaves as before
+  MW1 (the player's own request is their approval). Reserved-container exclusion applies to
+  every goal. Revisit when the owner decides whether player-built protection should also bind
+  ordinary requests.
+- **Replacement only replaces the current blocked plan** (not a superseded plan, a healthy
+  active plan or a second pending draft): named refusals `predecessor_not_active`,
+  `predecessor_already_replaced`, `replacement_pending`.
+- **World facts survive goal teardown.** `clearTaskContext`, `retireCompletedPlan` and the
+  restore path keep reservations and NPC placement receipts as a goalless state (grants,
+  questions and approvals still end with their goal).
+- **Admission runs before commit**, so a protected/reserved refusal leaves the plan a DRAFT, as
+  every other deterministic refusal does; the commit re-checks the grant again.
+- **Name-based mining** (`mine_entity`) is refused while a container of that name is reserved.
+  `clear_construction_area` remains a known gap (its targets are chosen inside the mod).
+- Grants, approvals and reservations accept only `user`/`human` (or runtime) authority;
+  `user_steering` does not.
+
+What remains provisional or open:
+
+- **Reserve syntax and release rule** are still the owner's to choose. The provisional parser in
+  `runtime-v8/reserve-command.mjs` takes a whole message of `reserve` / `unreserve` (optionally
+  with `this`/`the` and `chest`/`container`/`storage`), resolves the container the sender has
+  selected, else the nearest container within 8 tiles, and releases only on an explicit
+  `unreserve`. The map-tag marker is not implemented.
+- **Concrete reducer names** used above (`authorization`, `REPLACEMENT_PLAN_REQUESTED`, the grant
+  id form `<kind>:<mandate id>`) are proposals for the owner's "event/schema names" question.
+- **MW5 wiring is not done.** Nothing yet issues a grant from Auto/Maintain or a player task,
+  calls `requestReplacementPlan` from the planner/executor recovery flow, relays a pending
+  question to the player, or lets the legacy board accept a replacement (its blocked-board
+  guard still demands a user revision). The checks, events and facade methods are in place for it.
+- **Not covered by the protected rule:** name-based `mine_entity` and `clear_construction_area`
+  choose their targets inside the mod, so they cannot be checked against `last_user` from the
+  harness; and `last_user` is also set by a human who merely configures an NPC-built entity
+  (treated as protected, by design). The human arm of the engine rule cannot be exercised in
+  the zero-player headless lane; it is recorded as not exercised.

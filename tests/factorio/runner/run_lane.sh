@@ -150,6 +150,14 @@ case "$LANE" in
     run_py exact_entity_mining.py
     printf '[npc-test][core] Running construction-area finite blocker clearing gate...\n'
     run_py construction_area_clearing.py
+    printf '[npc-test][core] Running last_user provenance gate (MW1 protected-asset rule)...\n'
+    run_py last_user_provenance.py
+    ;;
+
+  provenance)
+    # MW1: isolated, fast lane for the protected-asset engine facts (LuaEntity.last_user).
+    printf '[npc-test][provenance] Running last_user provenance gate...\n'
+    run_py last_user_provenance.py
     ;;
 
   research-combat)

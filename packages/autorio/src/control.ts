@@ -23,6 +23,7 @@ import { new_crafting_controller } from './crafting'
 import { new_defense_controller } from './defense'
 import { create_discovery_remote_interface } from './discovery'
 import { new_equipment_controller } from './equipment'
+import { entity_last_user } from './entity_provenance'
 import { entity_reference_hint, resolve_exact_entity } from './entity_reference'
 import { new_follow_controller } from './follow'
 import { new_harvest_controller } from './harvest'
@@ -261,6 +262,9 @@ function operation_preflight(name: string, args: Record<string, any>) {
       position: { x: target.position.x, y: target.position.y },
       surface_index: target.surface.index,
       force_index: target.force.index,
+      // MW1: the engine's last-user record, so the harness can tell a player-built
+      // entity (human last_user) from an NPC- or map-built one at admission.
+      last_user: entity_last_user(target),
     }
     if (name !== 'set_machine_recipe') {
       return accept({ field: 'unit_number', identity: unit_number, target: exact_target })

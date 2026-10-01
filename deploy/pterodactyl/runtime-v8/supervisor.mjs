@@ -45,6 +45,7 @@ import {
 } from './provider.mjs'
 import { configureNpcSession } from './supervisor-adapter.mjs'
 import { luaString } from './structured-policy.mjs'
+import { executeReserveCommand, parseReserveCommand } from './reserve-command.mjs'
 
 // Pause-reason prefix for temporary provider failures that resume on their own
 // (see transientProviderFailure).
@@ -2905,6 +2906,18 @@ export class Session {
     const control = controlWord(text)
     if (control === 'status') {
       this.reportGoalStatus().catch(error => this.log(`Unable to report goal status: ${error instanceof Error ? error.message : String(error)}`))
+      return true
+    }
+    // MW1 (provisional syntax, reserve-command.mjs): mark or release a reserved container. Handled here, like a
+    // control word: no model call, and it does not cancel a pending automatic resume or interrupt the running turn.
+    const reserve = parseReserveCommand(text)
+    if (reserve) {
+      this.queueEvent(async () => {
+        const key = typeof this.agent.activePlanKey === 'function' ? this.agent.activePlanKey() : `npc:${this.npcId ?? 'sgluna'}`
+        const result = await executeReserveCommand({ rcon: this.rcon, memory: this.agent.memory, key, sender, command: reserve })
+        if (result.ok) await this.agent.persistState?.()
+        await this.printChat(result.message)
+      }, { reportError: true })
       return true
     }
     // A player turn takes over from any pending automatic resume.
