@@ -238,6 +238,27 @@ What is built:
   `reservation.released`, `placement.npc_recorded`. Recoverable admission refusals also appear
   as `operations.preflight_recoverable` with `failure_class` `authorization_<code>`.
 
+Review-round changes (2026-10-01):
+
+- **Interim scope of the protected-asset gates (owner decision pending).** The protected-entity
+  and player-inventory gates apply only to grant-backed work: a plan carrying replacement
+  lineage, or any goal with an active grant. An ordinary user-requested goal behaves as before
+  MW1 (the player's own request is their approval). Reserved-container exclusion applies to
+  every goal. Revisit when the owner decides whether player-built protection should also bind
+  ordinary requests.
+- **Replacement only replaces the current blocked plan** (not a superseded plan, a healthy
+  active plan or a second pending draft): named refusals `predecessor_not_active`,
+  `predecessor_already_replaced`, `replacement_pending`.
+- **World facts survive goal teardown.** `clearTaskContext`, `retireCompletedPlan` and the
+  restore path keep reservations and NPC placement receipts as a goalless state (grants,
+  questions and approvals still end with their goal).
+- **Admission runs before commit**, so a protected/reserved refusal leaves the plan a DRAFT, as
+  every other deterministic refusal does; the commit re-checks the grant again.
+- **Name-based mining** (`mine_entity`) is refused while a container of that name is reserved.
+  `clear_construction_area` remains a known gap (its targets are chosen inside the mod).
+- Grants, approvals and reservations accept only `user`/`human` (or runtime) authority;
+  `user_steering` does not.
+
 What remains provisional or open:
 
 - **Reserve syntax and release rule** are still the owner's to choose. The provisional parser in
