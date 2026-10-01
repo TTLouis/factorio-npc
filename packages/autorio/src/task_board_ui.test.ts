@@ -14,7 +14,7 @@ import {
   toggle_task_board_ui_open,
   create_task_board_ui_remote_interface,
 } from './task_board_ui'
-import { ACTIONS_NAME, BUTTON_NAME, COLUMNS_NAME, CONSOLE_TABS, LEFT_COLUMN_NAME, MORE_BUTTON_NAME, MORE_MENU_NAME, PROMPT_FIELD_NAME, PROMPT_SECTION_NAME, ROOT_NAME, SKILLS_BUTTON_NAME, SKILLS_ROOT_NAME, TRACKER } from './task_board_ui_constants'
+import { ACTIONS_NAME, BUTTON_NAME, COLUMNS_NAME, CONSOLE_LAYOUT, CONSOLE_TABS, LEFT_COLUMN_NAME, MORE_BUTTON_NAME, MORE_MENU_NAME, PROMPT_FIELD_NAME, PROMPT_SECTION_NAME, ROOT_NAME, SKILLS_BUTTON_NAME, SKILLS_ROOT_NAME, TRACKER } from './task_board_ui_constants'
 import { get_handler } from './test-event-registry'
 import { DEBUG_ACTIVITY_SCROLL_NAME, DEBUG_BUTTON_NAME } from './task_board_debug'
 import { PROJECTS_BUTTON_NAME } from './projects/project_window'
@@ -821,6 +821,79 @@ describe('console refresh leaves unchanged sections alone', () => {
       ui.click(MORE_BUTTON_NAME); ui.tick()
       expect(names().at(-1)).toBe(PROMPT_SECTION_NAME)
       expect(prompt.valid).toBe(true)
+    }
+    finally { ui.restore() }
+  })
+
+  it('the Plan Tracker panels and their lists fill the PLAN page instead of stopping at a capped height', () => {
+    const ui = open_console()
+    try {
+      ui.click(BUTTON_NAME)
+      ui.board.set_snapshot(snapshot({ shelf: [{ id: 'n1', intent: 'Establish smelting', why_it_matters: '', status: 'tentative', depends_on: [], linked: false }] })); ui.tick()
+      const left = find(find(ui.player.gui.screen[ROOT_NAME], COLUMNS_NAME), LEFT_COLUMN_NAME)
+      const plan_page = find(left, CONSOLE_TABS.pages.plan)
+      const section = find(plan_page, TRACKER.section)
+      expect(section.style.vertically_stretchable).toBe(true)
+      expect(find(section, TRACKER.body).style.vertically_stretchable).toBe(true)
+      // Every container between the section and the two lists stretches, so the panels share one height.
+      for (const name of [TRACKER.workspace, TRACKER.shelf, TRACKER.shelf_body, TRACKER.plan_column, TRACKER.plan_body, TRACKER.plan]) expect(find(section, name).style.vertically_stretchable, name).toBe(true)
+      // The lists scroll inside that height: stretchable, floored, never capped and never asking for more than the floor.
+      for (const name of [TRACKER.shelf_scroll, TRACKER.steps_scroll]) {
+        const style = find(section, name).style
+        expect(style.vertically_stretchable, name).toBe(true)
+        expect(style.minimal_height, name).toBe(CONSOLE_LAYOUT.tracker_list_floor)
+        expect(style.natural_height, name).toBe(CONSOLE_LAYOUT.tracker_list_floor)
+        expect(style.maximal_height, name).toBeUndefined()
+      }
+      // A longer plan changes the rows, not the sizes.
+      const steps = Array.from({ length: 24 }, (_, index) => ({ id: `s${index}`, description: `Step ${index}`, status: index === 0 ? 'active' : 'pending' }))
+      ui.board.set_snapshot(snapshot({ steps, total_steps: 24, completed_count: 0, active_index: 0 })); ui.tick()
+      expect(find(section, TRACKER.steps_scroll).style.maximal_height).toBeUndefined()
+      // The feed on the ACTIVITY tab keeps its own cap.
+      expect(find(left, TRACKER.activity_scroll).style.maximal_height).toBe(CONSOLE_TABS.activity_height)
+    }
+    finally { ui.restore() }
+  })
+
+  it('the … menu is built into the action row above PAUSE and FOLLOW, so it takes its height from the tracker and the prompt stays last', () => {
+    const ui = open_console()
+    try {
+      ui.click(BUTTON_NAME); ui.board.set_snapshot(snapshot()); ui.tick()
+      const left = find(find(ui.player.gui.screen[ROOT_NAME], COLUMNS_NAME), LEFT_COLUMN_NAME)
+      const section = find(left, TRACKER.section)
+      const actions_height = () => find(left, ACTIONS_NAME).children.length
+      const closed_rows = actions_height()
+      ui.click(MORE_BUTTON_NAME); ui.tick()
+      const actions = find(left, ACTIONS_NAME)
+      // The menu is the first child of the action row (above the PAUSE / FOLLOW / … row), and the row is a
+      // plain, non-stretching flow; the tracker is the only thing in the column that gives height back.
+      expect(actions.children[0].name).toBe(MORE_MENU_NAME)
+      expect(actions.children.length).toBe(closed_rows + 1)
+      expect(actions.style.vertically_stretchable).toBeUndefined()
+      expect(section.valid).toBe(true)
+      expect(find(section, TRACKER.steps_scroll).style.vertically_stretchable).toBe(true)
+      const names = left.children.map((child: any) => child.name)
+      expect(names.at(-1)).toBe(PROMPT_SECTION_NAME)
+      expect(names.indexOf(ACTIONS_NAME)).toBe(names.length - 2)
+      ui.click(MORE_BUTTON_NAME); ui.tick()
+      expect(find(left, ACTIONS_NAME).children.length).toBe(closed_rows)
+      expect(section.valid).toBe(true)
+    }
+    finally { ui.restore() }
+  })
+
+  it('a console built before the lists stretched is rebuilt, so no stale maximal_height survives', () => {
+    const ui = open_console()
+    try {
+      ui.click(BUTTON_NAME); ui.board.set_snapshot(snapshot()); ui.tick()
+      const old_section = find(ui.player.gui.screen[ROOT_NAME], TRACKER.section)
+      expect(old_section.tags[TRACKER.layout_tag]).toBe(TRACKER.layout_version)
+      old_section.tags = {}
+      ui.tick()
+      expect(old_section.valid).toBe(false)
+      const rebuilt = find(ui.player.gui.screen[ROOT_NAME], TRACKER.section)
+      expect(rebuilt.valid).toBe(true)
+      expect(rebuilt.tags[TRACKER.layout_tag]).toBe(TRACKER.layout_version)
     }
     finally { ui.restore() }
   })

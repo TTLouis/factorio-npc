@@ -31,7 +31,7 @@ describe('NPC console information architecture', () => {
     expect(consoleSource).toContain("create_section(parent, 'Activity'")
     // NOW holds the cards and the conversation, PLAN the tracker, ACTIVITY the
     // feed; the prompt and the action row stay under the tabs.
-    expect(consoleSource).toMatch(/debug_ui\.render_ai_reply\(dynamic,[\s\S]*render_tracker\(pages\.plan, board, player\); render_activity_section\(pages\.activity, board, player\)[\s\S]*render_prompt\(left, player\)[\s\S]*console_ui\.render_action_row\(left,/)
+    expect(consoleSource).toMatch(/debug_ui\.render_ai_reply\(dynamic,[\s\S]*render_tracker\(pages\.plan, board\); render_activity_section\(pages\.activity, board, player\)[\s\S]*render_prompt\(left, player\)[\s\S]*console_ui\.render_action_row\(left,/)
     expect(consoleSource).not.toContain("create_section(parent, 'Controls'")
     expect(consoleSource).toContain("console_ui.render_console_titlebar(root, 'SGLuna NPC Console', console_window_buttons(player), console_title_status(")
     // A blocked plan is a full-width banner above the tabs, so it is seen
@@ -51,14 +51,14 @@ describe('NPC console information architecture', () => {
     expect(consoleSource).toContain("name: TRACKER.workspace, direction: 'horizontal'")
     expect(consoleSource).toContain("name: TRACKER.shelf, direction: 'vertical'")
     expect(consoleSource).toContain("name: TRACKER.plan_column, direction: 'vertical'")
-    expect(consoleSource).toContain('refresh_shelf(shelf, shelf_nodes, tracker_heights.steps)')
+    expect(consoleSource).toContain('refresh_shelf(shelf, shelf_nodes)')
   })
 
   it('keeps Plan Tracker execution after retiring the Project Board renderer', () => {
     expect(consoleSource).not.toContain("create_section(parent, 'Project Board'")
     expect(consoleSource).not.toContain('render_project_board(parent, board)')
     expect(consoleSource).toContain("create_section(parent, 'Plan Tracker'")
-    expect(consoleSource).toMatch(/build_left_dynamic\(banner, dynamic, plan_dynamic,[\s\S]*render_tracker\(pages\.plan, board, player\)/)
+    expect(consoleSource).toMatch(/build_left_dynamic\(banner, dynamic, plan_dynamic,[\s\S]*render_tracker\(pages\.plan, board\)/)
   })
 
   it('shows the goal checks, the current step, what comes next and the last result on the Goal and Now cards', () => {
