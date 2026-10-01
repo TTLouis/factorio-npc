@@ -13,13 +13,39 @@
 //   * Only accepted RUNTIME evidence may advance progress. Planner focus and
 //     Jev output is advisory and cannot advance authoritative progress.
 //   * A deadlock or structural blocker FREEZES the plan as BLOCKED. There is no
-//     code path from BLOCKED to automatic replanning.
-//   * A successor plan (plan_version + 1) exists only via USER_REVISION_APPROVED.
+//     code path from BLOCKED to automatic replanning OUTSIDE a current
+//     authorization grant (MW1, authorization.mjs): inside a grant the harness
+//     may request a replacement that keeps the requested result.
+//   * A successor plan (plan_version + 1) exists only via USER_REVISION_APPROVED
+//     or, within a current grant, REPLACEMENT_PLAN_REQUESTED (runtime authority
+//     only; the grant is checked again at commit and at operation admission).
 //   * The Roadmap Shelf is storage only. No export turns a shelf node into
 //     operations or into plan steps.
 
 import { completionContractSupported, sanitizeStepCompletionContract } from './step-completion.mjs'
 import { needsGoalBaseline, restoreGoalDefinition, sanitizeGoalDefinition } from './goal-definition.mjs'
+import {
+  authorizationHasContent,
+  authorizationOf,
+  carryAuthorizationAcrossGoals,
+  checkReplacementAtCommit,
+  classifyReplacement,
+  consumeApproval,
+  grantAuthorization,
+  raiseQuestion,
+  recordApproval,
+  recordNpcPlacement,
+  recordRefusal,
+  recordReservation,
+  releaseReservation,
+  replacementLineage,
+  replacementStepsFingerprint,
+  REPLACEMENT_DECISION,
+  restoreAuthorization,
+  reviseAuthorization,
+  revokeAuthorization,
+  serializeAuthorization,
+} from './authorization.mjs'
 
 export const PLANNING_STATE_VERSION = 1
 
@@ -347,6 +373,19 @@ export const PLANNING_EVENT = Object.freeze({
   // `reasoning_epoch`: the planning agent's context is meant to stay long
   // lived, and restaging mostly targets executor subagents.
   CONTEXT_RESTAGED: 'CONTEXT_RESTAGED',
+  // MW1 authorization (docs/NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md section 2). Grants and approvals come only
+  // from runtime (harness-verified mandate) or user authority; never from the planner or Jev.
+  AUTHORIZATION_GRANTED: 'AUTHORIZATION_GRANTED',
+  AUTHORIZATION_REVISED: 'AUTHORIZATION_REVISED',
+  AUTHORIZATION_REVOKED: 'AUTHORIZATION_REVOKED',
+  // A replacement for a BLOCKED plan: accepted inside a current grant (creates a DRAFT successor with lineage),
+  // raised as an approval question when it would leave the grant (the old plan stays frozen), or refused.
+  REPLACEMENT_PLAN_REQUESTED: 'REPLACEMENT_PLAN_REQUESTED',
+  AUTHORIZATION_APPROVAL_RECORDED: 'AUTHORIZATION_APPROVAL_RECORDED',
+  // World facts that outlive a goal: NPC placement receipts and reserved containers.
+  NPC_PLACEMENT_RECORDED: 'NPC_PLACEMENT_RECORDED',
+  RESERVATION_RECORDED: 'RESERVATION_RECORDED',
+  RESERVATION_RELEASED: 'RESERVATION_RELEASED',
 })
 
 const PLANNING_EVENT_TYPES = Object.freeze(Object.values(PLANNING_EVENT))
@@ -421,6 +460,7 @@ export const REASONING_RESET_EVENTS = Object.freeze([
   // the plan was set aside, replaced or abandoned
   PLANNING_EVENT.PLAN_SUPERSEDED,
   PLANNING_EVENT.USER_REVISION_APPROVED,
+  PLANNING_EVENT.REPLACEMENT_PLAN_REQUESTED,
   PLANNING_EVENT.PLAN_CANCELLED,
 ])
 
@@ -1764,6 +1804,8 @@ function freezeCommittedPlan(plan) {
   // progress decision about a prose-only step, never a mutation of that content.
   deepFreeze(plan.steps)
   deepFreeze(plan.roadmap_node_ids)
+  // The lineage a replacement committed under is as immutable as its steps.
+  if (plan.replacement) deepFreeze(plan.replacement)
   return plan
 }
 
@@ -1814,10 +1856,14 @@ Object.assign(HANDLERS, {
     // A new goal starts a fresh planning state. Previous goals are history held
     // by the caller's snapshot store, not silently merged here.
     const fresh = createEmptyPlanningState()
+    // World facts (NPC placement receipts, reserved containers) outlive a goal;
+    // the previous goal's grants, questions and approvals do not.
+    const carriedAuthorization = carryAuthorizationAcrossGoals(state.authorization)
     // The epoch is monotonic across the process lifetime, so it carries over
     // from the abandoned goal rather than restarting at 0.
     return withReasoningReset({
       ...fresh,
+      ...(carriedAuthorization ? { authorization: carriedAuthorization } : {}),
       sequence,
       goal,
       reasoning_epoch: currentReasoningEpoch(state),
@@ -2020,7 +2066,13 @@ Object.assign(HANDLERS, {
       return {
         ...state,
         plans: state.plans.map(existing => (existing.plan_id === refreshed.plan_id
-          ? { ...refreshed, created_at: existing.created_at ?? refreshed.created_at }
+          ? {
+              ...refreshed,
+              created_at: existing.created_at ?? refreshed.created_at,
+              // A replacement draft keeps its lineage when its contracts are refreshed in place, so the
+              // commit-time grant check still applies to it.
+              ...(inheritedLineage.replacement ? { replacement: inheritedLineage.replacement } : {}),
+            }
           : existing)),
         updated_at: now,
         log: logEntry(state, { type: PLANNING_EVENT.DRAFT_CREATED, at: now, plan_id: refreshed.plan_id, in_place: true }),
@@ -2038,6 +2090,9 @@ Object.assign(HANDLERS, {
       carriedForwardEvidence: inheritedLineage?.carried_forward_evidence ?? [],
     })
     if (plan.steps.length === 0) return state
+    // Re-authoring a replacement draft must not shed the grant check: lineage is preserved, and the commit
+    // refuses it if the steps drifted from what the grant was classified against.
+    if (inheritedLineage?.replacement) plan.replacement = inheritedLineage.replacement
     // A new draft supersedes any still-uncommitted draft; committed plans are
     // untouched.
     const plans = state.plans.map(existing => (PRE_COMMIT_STATUSES.includes(existing.status)
@@ -2061,6 +2116,26 @@ Object.assign(HANDLERS, {
     // executable.
     if (event.runtime_validation?.passed !== true) return state
     if (plan.steps.length === 0) return state
+    // A replacement plan commits only while its grant is still current (MW1): the revision it was authorized under,
+    // the goal, the actor epoch and the steps that were classified. Refused, it stays an uncommitted DRAFT and the
+    // refusal is recorded for the trace; nothing else about the state moves.
+    if (plan.replacement) {
+      const verdict = checkReplacementAtCommit(state, plan, event.grant_check)
+      if (!verdict.ok) {
+        return {
+          ...state,
+          authorization: recordRefusal(authorizationOf(state), {
+            stage: 'commit',
+            reason: verdict.reason,
+            grant_id: verdict.grant_id ?? plan.replacement.grant_id,
+            grant_revision: verdict.grant_revision ?? plan.replacement.grant_revision,
+            plan_id: plan.plan_id,
+          }, now),
+          updated_at: now,
+          log: logEntry(state, { type: 'REPLACEMENT_COMMIT_REFUSED', at: now, plan_id: plan.plan_id, reason: verdict.reason }),
+        }
+      }
+    }
 
     const committed = freezeCommittedPlan(withStatus({
       ...plan,
@@ -2450,6 +2525,208 @@ Object.assign(HANDLERS, {
         approved_by: text(event.approved_by, 128),
       }),
     }, { now, eventType: PLANNING_EVENT.USER_REVISION_APPROVED, reason: 'successor_plan_approved' })
+  },
+
+  // --- MW1 authorization -----------------------------------------------------
+
+  [PLANNING_EVENT.AUTHORIZATION_GRANTED](state, event, now) {
+    if (!state.goal || state.goal.status !== GOAL_STATUS.ACTIVE) return state
+    if (!isRuntimeAuthority(event.source) && !isUserAuthority(event.source)) return state
+    const goalId = text(event.goal_id, 120)
+    if (goalId && goalId !== state.goal.goal_id) return state
+    const result = grantAuthorization(authorizationOf(state), { ...event.grant, goal_id: state.goal.goal_id }, now)
+    if (!result.auth) return state
+    return {
+      ...state,
+      authorization: result.auth,
+      updated_at: now,
+      log: logEntry(state, {
+        type: PLANNING_EVENT.AUTHORIZATION_GRANTED,
+        at: now,
+        grant_id: result.grant.grant_id,
+        revision: result.grant.revision,
+      }),
+    }
+  },
+
+  [PLANNING_EVENT.AUTHORIZATION_REVISED](state, event, now) {
+    if (!isRuntimeAuthority(event.source) && !isUserAuthority(event.source)) return state
+    const result = reviseAuthorization(authorizationOf(state), event, now)
+    if (!result.auth) return state
+    return {
+      ...state,
+      authorization: result.auth,
+      updated_at: now,
+      log: logEntry(state, {
+        type: PLANNING_EVENT.AUTHORIZATION_REVISED,
+        at: now,
+        grant_id: result.grant.grant_id,
+        revision: result.grant.revision,
+      }),
+    }
+  },
+
+  [PLANNING_EVENT.AUTHORIZATION_REVOKED](state, event, now) {
+    if (!isRuntimeAuthority(event.source) && !isUserAuthority(event.source)) return state
+    const result = revokeAuthorization(authorizationOf(state), event, now)
+    if (!result.auth) return state
+    return {
+      ...state,
+      authorization: result.auth,
+      updated_at: now,
+      log: logEntry(state, {
+        type: PLANNING_EVENT.AUTHORIZATION_REVOKED,
+        at: now,
+        grant_id: result.grant.grant_id,
+        revision: result.grant.revision,
+      }),
+    }
+  },
+
+  [PLANNING_EVENT.REPLACEMENT_PLAN_REQUESTED](state, event, now) {
+    // The harness owns this request. The planner authors the steps; it cannot invoke the transition.
+    if (!isRuntimeAuthority(event.source)) return state
+    const verdict = classifyReplacement(state, event)
+    const auth = authorizationOf(state)
+    const predecessorId = text(event.plan_id, 200)
+
+    if (verdict.decision === REPLACEMENT_DECISION.REFUSE) {
+      return {
+        ...state,
+        authorization: recordRefusal(auth, {
+          stage: 'replacement',
+          reason: verdict.reason,
+          grant_id: verdict.grant_id ?? event.grant?.grant_id,
+          grant_revision: verdict.grant_revision,
+          plan_id: predecessorId,
+        }, now),
+        updated_at: now,
+        log: logEntry(state, { type: PLANNING_EVENT.REPLACEMENT_PLAN_REQUESTED, at: now, plan_id: predecessorId, decision: 'refuse', reason: verdict.reason }),
+      }
+    }
+
+    if (verdict.decision === REPLACEMENT_DECISION.ASK) {
+      // The old committed plan is NOT touched while the question is pending.
+      const subjects = Object.values(verdict.subjects ?? {}).flat()
+      const raised = raiseQuestion(auth, {
+        kind: 'replacement_approval',
+        reason_codes: verdict.reason_codes,
+        plan_id: predecessorId,
+        goal_id: state.goal?.goal_id,
+        grant_id: verdict.grant_id,
+        grant_revision: verdict.grant_revision,
+        subject_key: `${verdict.reason_codes.join('+')}:${subjects.join(',')}`,
+        subjects,
+        detail: text(event.reason?.detail, 400),
+      }, now)
+      return {
+        ...state,
+        authorization: raised.auth,
+        updated_at: now,
+        log: logEntry(state, { type: PLANNING_EVENT.REPLACEMENT_PLAN_REQUESTED, at: now, plan_id: predecessorId, decision: 'ask', reason: verdict.reason }),
+      }
+    }
+
+    const predecessor = getPlan(state, predecessorId)
+    const sequence = nextSequence(state)
+    // The verified prefix is cumulative, exactly as for a user revision: what the predecessor carried forward, then
+    // what it completed. Verified history is preserved, not recomputed or discarded.
+    const carried = [
+      ...(predecessor.carried_forward_evidence ?? []),
+      ...predecessor.steps
+        .filter(step => predecessor.execution.step_progress[step.step_id]?.status === 'completed')
+        .map(step => `${predecessor.plan_id}:${step.step_id}`),
+    ]
+    const successor = createPlan(state, {
+      now,
+      sequence,
+      planVersion: predecessor.plan_version + 1,
+      derivedFrom: predecessor.plan_id,
+      steps: event.steps,
+      roadmapNodeIds: event.roadmap_node_ids ?? predecessor.roadmap_node_ids,
+      developmentMode: event.development_mode ?? predecessor.development_mode,
+      origin: 'authorized_replacement',
+      carriedForwardEvidence: carried,
+    })
+    if (successor.steps.length === 0) return state
+    successor.replacement = replacementLineage(
+      { ...verdict, steps_fingerprint: replacementStepsFingerprint(successor.steps) },
+      { predecessorPlanId: predecessor.plan_id, now },
+    )
+    const plans = state.plans.map(item => (item.plan_id === predecessor.plan_id
+      ? { ...item, superseded_by_plan_id: successor.plan_id, updated_at: now }
+      : item))
+    const nextAuth = verdict.approval_id ? consumeApproval(auth, verdict.approval_id) : auth
+    return withReasoningReset({
+      ...state,
+      sequence,
+      plans: retainPlans([...plans, successor], successor.plan_id),
+      active_plan_id: successor.plan_id,
+      authorization: nextAuth,
+      updated_at: now,
+      log: logEntry(state, {
+        type: PLANNING_EVENT.REPLACEMENT_PLAN_REQUESTED,
+        at: now,
+        plan_id: successor.plan_id,
+        derived_from_plan_id: predecessor.plan_id,
+        decision: 'accept',
+        grant_id: verdict.grant_id,
+        grant_revision: verdict.grant_revision,
+        reason_code: verdict.replacement_reason.code,
+      }),
+    }, { now, eventType: PLANNING_EVENT.REPLACEMENT_PLAN_REQUESTED, reason: verdict.replacement_reason.code })
+  },
+
+  [PLANNING_EVENT.AUTHORIZATION_APPROVAL_RECORDED](state, event, now) {
+    // An approval is the player's answer; only user authority can give one.
+    if (!isUserAuthority(event.source)) return state
+    const result = recordApproval(authorizationOf(state), {
+      ...event,
+      goal_id: event.goal_id ?? state.goal?.goal_id,
+    }, now)
+    if (!result.auth) return state
+    return {
+      ...state,
+      authorization: result.auth,
+      updated_at: now,
+      log: logEntry(state, {
+        type: PLANNING_EVENT.AUTHORIZATION_APPROVAL_RECORDED,
+        at: now,
+        approval_id: result.approval.approval_id,
+        decision: result.approval.decision,
+      }),
+    }
+  },
+
+  [PLANNING_EVENT.NPC_PLACEMENT_RECORDED](state, event, now) {
+    if (!isRuntimeAuthority(event.source)) return state
+    const result = recordNpcPlacement(authorizationOf(state), event, now)
+    if (!result.auth) return state
+    return { ...state, authorization: result.auth, updated_at: now }
+  },
+
+  [PLANNING_EVENT.RESERVATION_RECORDED](state, event, now) {
+    if (!isRuntimeAuthority(event.source) && !isUserAuthority(event.source)) return state
+    const result = recordReservation(authorizationOf(state), event, now)
+    if (!result.auth) return state
+    return {
+      ...state,
+      authorization: result.auth,
+      updated_at: now,
+      log: logEntry(state, { type: PLANNING_EVENT.RESERVATION_RECORDED, at: now, reservation_id: result.reservation.reservation_id }),
+    }
+  },
+
+  [PLANNING_EVENT.RESERVATION_RELEASED](state, event, now) {
+    if (!isRuntimeAuthority(event.source) && !isUserAuthority(event.source)) return state
+    const result = releaseReservation(authorizationOf(state), event, now)
+    if (!result.auth) return state
+    return {
+      ...state,
+      authorization: result.auth,
+      updated_at: now,
+      log: logEntry(state, { type: PLANNING_EVENT.RESERVATION_RELEASED, at: now, reservation_id: result.reservation.reservation_id }),
+    }
   },
 
   [PLANNING_EVENT.PLAN_SUPERSEDED](state, event, now) {
@@ -2888,6 +3165,10 @@ export function serializePlanningState(state) {
     last_reasoning_reset: clone(current.last_reasoning_reset) ?? null,
     run: clone(current.run) ?? null,
     context_restages: clone(getContextRestages(current)),
+    // MW1: persisted only when present, so a state that never saw authorization serializes exactly as before.
+    ...(current.authorization && authorizationHasContent(current.authorization)
+      ? { authorization: serializeAuthorization(current.authorization) }
+      : {}),
     log: clone(current.log) ?? [],
   }
 }
@@ -3011,6 +3292,8 @@ function restorePlan(raw) {
     lifecycle: recentList(raw.lifecycle, 64).map(item => clone(item)),
   }
   if (raw.runtime_validation) plan.runtime_validation = clone(raw.runtime_validation)
+  const replacement = restoreReplacementLineage(raw.replacement)
+  if (replacement) plan.replacement = replacement
   if (stepIds.size !== steps.length) return undefined
   // Restored committed content must be frozen again, or a restart would quietly
   // reopen an immutable plan to mutation.
@@ -3108,6 +3391,32 @@ function restoreSteering(raw) {
  * caller can seed it once from the legacy record instead of pretending the run
  * was recorded as empty.
  */
+function restoreReplacementLineage(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const grantId = text(raw.grant_id, 200)
+  const predecessor = text(raw.predecessor_plan_id, 200)
+  if (!grantId || !predecessor || !Number.isSafeInteger(raw.grant_revision)) return undefined
+  const result = raw.requested_result && typeof raw.requested_result === 'object' && !Array.isArray(raw.requested_result)
+    ? { result_key: text(raw.requested_result.result_key, 200), destination: text(raw.requested_result.destination, 200) }
+    : null
+  return {
+    predecessor_plan_id: predecessor,
+    grant_id: grantId,
+    grant_revision: raw.grant_revision,
+    mandate_kind: text(raw.mandate_kind, 40),
+    action_scope: text(raw.action_scope, 60),
+    requested_result: result,
+    reason: {
+      code: text(raw.reason?.code, 120),
+      detail: text(raw.reason?.detail, 400),
+      evidence_refs: stringList(raw.reason?.evidence_refs, { max: 16, maxLength: 200 }),
+    },
+    approval_id: text(raw.approval_id, 40) || null,
+    steps_fingerprint: text(raw.steps_fingerprint, 20),
+    requested_at: finiteNumber(raw.requested_at) ?? 0,
+  }
+}
+
 function restoreRun(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
   const paused = raw.paused === true
@@ -3168,7 +3477,11 @@ export function restorePlanningState(raw) {
   const empty = createEmptyPlanningState()
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return empty
   const goal = sanitizeGoal(raw.goal)
-  if (!goal) return empty
+  if (!goal) {
+    // No goal, but world facts (reserved containers, NPC placement receipts) outlive goals and must survive a restart.
+    const world = restoreAuthorization(raw.authorization)
+    return world ? { ...empty, authorization: world } : empty
+  }
   const activePlanId = text(raw.active_plan_id, 200)
   const plans = retainPlans(Array.isArray(raw.plans) ? raw.plans : [], activePlanId).map(restorePlan).filter(Boolean)
   return {
@@ -3194,6 +3507,10 @@ export function restorePlanningState(raw) {
       : null,
     run: restoreRun(raw.run),
     context_restages: restoreContextRestages(raw.context_restages),
+    ...(() => {
+      const authorization = restoreAuthorization(raw.authorization)
+      return authorization ? { authorization } : {}
+    })(),
     log: recentList(raw.log, 256).map(item => clone(item)),
   }
 }
