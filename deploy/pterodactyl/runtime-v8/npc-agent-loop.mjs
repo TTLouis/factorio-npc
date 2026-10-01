@@ -8280,6 +8280,22 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       error.code = 'provider_safety_blocked'
       throw error
     }
+    // The provider named why it could not use the content (provider.plan_content_refused and
+    // provider.dsml_rejected carry the same code in the prompt trace). Say the exact expected
+    // shape instead of the generic "Invalid provider content JSON", so the bounded format
+    // recovery tells the model what to change.
+    const planContentRefused = message?._sglunaProvider?.plan_content_refused_reason
+    if (typeof planContentRefused === 'string') {
+      const error = new AgentLoopError(`plan_content_refused: ${planContentRefused}. Reply with ONE JSON object {"chatMessage":"","plan":[...],"currentStep":0,"operations":[...]} (optional members: semanticCompletion, checkpoint, goal, roadmap, roadmapNodeIds, developmentMode). Do not wrap it in a submitPlan member that disagrees with plan, currentStep or operations`)
+      error.code = 'plan_content_refused'
+      throw error
+    }
+    const dsmlRejected = message?._sglunaProvider?.dsml_rejected_reason
+    if (typeof dsmlRejected === 'string') {
+      const error = new AgentLoopError(`dsml_malformed: ${dsmlRejected}. The tool-call markup was not a valid call and tool calls cannot be used for this reply. Reply with ONE JSON object {"chatMessage":"","plan":[...],"currentStep":0,"operations":[...]} and no tool-call markup`)
+      error.code = 'dsml_malformed'
+      throw error
+    }
     let checkpoint
     let goalDefinition
     let roadmap
