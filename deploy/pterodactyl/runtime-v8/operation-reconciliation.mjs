@@ -358,7 +358,7 @@ export function sanitizePendingOperation(raw) {
       actor_id: Number.isSafeInteger(raw.actor?.actor_id) ? raw.actor.actor_id : null,
       epoch: Number.isSafeInteger(raw.actor?.epoch) ? raw.actor.epoch : null,
     },
-    signature: text(raw.signature, 20),
+    signature: text(raw.signature, 64),
     operations: (Array.isArray(raw.operations) ? raw.operations : []).slice(0, PENDING_OPERATION_LIMITS.operations).filter(isRecord).map(operation => ({
       trace_operation_id: text(operation.trace_operation_id, PENDING_OPERATION_LIMITS.ref),
       name: text(operation.name, 80),

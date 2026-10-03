@@ -13,6 +13,8 @@ test('unresolved operations survive new operations, task teardown and restart wi
   for (const key of ['one','two']) state=applyPlanningEvent(state,{type:PLANNING_EVENT.PENDING_OPERATION_RECORDED,source:'runtime',goal_id:'goal',operation:record(key),now:2})
   assert.deepEqual(state.operation_ledger.records.map(item=>item.operation_key),['one','two'])
   state=restorePlanningState(serializePlanningState(state))
+  assert.equal(state.operation_ledger.records[0].signature.length,64)
+  assert.equal(state.operation_ledger.records[0].signature,record('one').signature)
   assert.equal(carriedAcrossGoals(state).operation_ledger.records.length,2)
   state=applyPlanningEvent(state,{type:PLANNING_EVENT.PENDING_OPERATION_RECORDED,source:'runtime',goal_id:'goal',operation:null,operation_key:'one',now:3})
   assert.deepEqual(state.operation_ledger.records.map(item=>item.operation_key),['two'])
