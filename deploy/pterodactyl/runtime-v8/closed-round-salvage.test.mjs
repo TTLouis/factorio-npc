@@ -47,6 +47,8 @@ class FakeRcon {
     this.status = deployment()
     this.mutations = []
     this.batchId = 0
+    this.batchGeneration = 1
+    this.admissions = []
   }
 
   async command(text) {
@@ -59,11 +61,17 @@ class FakeRcon {
       })
     }
     if (text.includes('remote.call("autorio_operations","status")')) {
+      const completedRef = `batch-g${this.batchGeneration}-${this.batchId}`
+      for (const record of this.admissions) {
+        if (record.generation === this.batchGeneration && record.slots.every(slot => slot.batch_refs.every(ref => ref.batch_ref === completedRef))) record.state = 'completed'
+      }
       return JSON.stringify({
         task_state: 'idle',
+        batch_generation: this.batchGeneration,
+        admission_journal: this.admissions,
         queue_empty: true,
         queue_length: 0,
-        last_completed_batch: { batch_id: this.batchId, task_count: 1, task_types: ['mining'], tick: 400 + this.batchId },
+        last_completed_batch: { batch_id: this.batchId, batch_generation: this.batchGeneration, batch_ref: completedRef, task_count: 1, task_types: ['mining'], tick: 400 + this.batchId },
         basic_operation: { last_result: { operation_id: this.batchId, code: 'completed', completed: true } },
       })
     }
@@ -73,7 +81,19 @@ class FakeRcon {
       this.mutations.push(text)
       this.batchId++
       const admissions = [...text.matchAll(/return remote\.call\('autorio_operations'/g)].length
-      return `${marker}${JSON.stringify({ ok: true, result: Array.from({ length: admissions }, () => [true, 'Task started']) })}`
+      const result = Array.from({ length: admissions }, () => [true, 'Task started'])
+      const encoded = /"begin",helpers\.json_to_table\(("(?:\\.|[^"\\])*")\)/.exec(text)?.[1]
+      let admission
+      if (encoded) {
+        const identity = JSON.parse(JSON.parse(encoded))
+        assert.equal(identity.operation_count, admissions)
+        admission = { ...identity, generation: this.batchGeneration, state: 'admitted', slots: result.map((value, index) => ({
+          index: index + 1, ok: true, result: value,
+          batch_refs: [{ batch_id: this.batchId, batch_generation: this.batchGeneration, batch_ref: `batch-g${this.batchGeneration}-${this.batchId}` }],
+        })) }
+        this.admissions.push(admission)
+      }
+      return `${marker}${JSON.stringify({ ok: true, result, prefix: result, admission })}`
     }
     return 'tool-output'
   }
