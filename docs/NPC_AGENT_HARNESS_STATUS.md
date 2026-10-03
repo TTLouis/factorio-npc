@@ -2,6 +2,15 @@
 
 This file is the current status summary for the single-NPC integration line. Historical detailed checkpoints are retained under `docs/validation/`.
 
+## October 3 playable implementation candidates
+
+The owner-approved red-science plan is being implemented in isolated local
+branches. These candidates have not been integrated or promoted. Docker's Linux
+engine is unavailable, so new regression and real-engine acceptance runs remain
+pending. The [implementation checklist](validation/PLAYABLE_BUILD_2026-10-03.md)
+records candidate SHAs, review findings, earlier test evidence and remaining
+dependencies. The three-seed playable checkpoint has **not** passed.
+
 ## October 2 experimental playable-build checkpoint
 
 The integration checkout is synchronized to remote checkpoint `c6f494aa` (MW1,
