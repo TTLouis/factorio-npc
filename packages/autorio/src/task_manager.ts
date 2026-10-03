@@ -3,6 +3,7 @@ import { register_actor_mode_transition_handler, register_npc_recovery_handler }
 import { is_runtime_task_state, unsupported_task_state_reason } from './task_state_runtime'
 import type { PlayerParameters, PlayerState } from './types'
 import { TaskStates } from './types'
+import { pinned_operation_batch_refs } from './operation_admission'
 
 export interface TaskBatchIdentity {
   batch_id: number
@@ -26,7 +27,8 @@ export interface TaskBatchRefusal {
   tick: number
 }
 
-interface TaskBatchReceipt extends TaskBatchIdentity {
+export interface TaskBatchReceipt extends TaskBatchIdentity {
+  state?: 'completed' | 'cancelled' | 'uncertain'
   task_count: number
   task_types: TaskStates[]
   tick: number
@@ -43,6 +45,29 @@ const MAX_RECEIPT_REFUSALS = 8
 declare const storage: {
   sgluna_task_batch_sequence?: number
   sgluna_task_batch_generation?: number
+  sgluna_task_receipt_journal?: TaskBatchReceipt[]
+  sgluna_task_active_batch?: TaskBatchReceipt
+}
+
+const MAX_RECEIPT_HISTORY = 128
+const MAX_PINNED_RECEIPTS = 1024
+
+function receipt_journal() {
+  if (!storage.sgluna_task_receipt_journal) storage.sgluna_task_receipt_journal = []
+  return storage.sgluna_task_receipt_journal
+}
+
+function retain_receipt(receipt: TaskBatchReceipt) {
+  const journal = receipt_journal()
+  const old = journal.findIndex(entry => entry.batch_ref === receipt.batch_ref)
+  if (old >= 0) journal[old] = receipt
+  else journal.push(receipt)
+  const pinned = pinned_operation_batch_refs()
+  let unpinned = journal.filter(entry => !pinned.includes(entry.batch_ref)).length
+  for (let index = 0; index < journal.length && unpinned > MAX_RECEIPT_HISTORY;) {
+    if (!pinned.includes(journal[index].batch_ref)) { journal.splice(index, 1); unpinned-- }
+    else index++
+  }
 }
 
 const MAX_SAFE_COUNTER = 9007199254740990
@@ -81,6 +106,15 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
       : 0
     batch_generation = previous + 1
     storage.sgluna_task_batch_generation = batch_generation
+    const interrupted = storage.sgluna_task_active_batch
+    if (interrupted) {
+      retain_receipt({ ...interrupted, state: 'uncertain', reason: 'save_load_unfinished', tick: game.tick })
+      storage.sgluna_task_active_batch = undefined
+    }
+    for (const receipt of receipt_journal()) {
+      if (receipt.state === 'completed') last_completed_batch = receipt
+      if (receipt.state === 'cancelled') last_cancelled_batch = receipt
+    }
     return batch_generation
   }
 
@@ -102,6 +136,10 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
     const quiet_task = is_routine_follow_task(task)
     if (created) {
       ensure_batch_generation()
+      const pinned = pinned_operation_batch_refs()
+      if (receipt_journal().filter(receipt => pinned.includes(receipt.batch_ref)).length >= MAX_PINNED_RECEIPTS) {
+        error('receipt_journal_full')
+      }
       active_batch_id = next_batch_id()
       active_batch_task_types = []
       active_batch_console_quiet = quiet_task
@@ -111,6 +149,10 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
       active_batch_console_quiet = false
     }
     active_batch_task_types.push(task.type)
+    storage.sgluna_task_active_batch = {
+      batch_id: active_batch_id!, batch_generation: ensure_batch_generation(), batch_ref: batch_ref(active_batch_id!),
+      task_count: active_batch_task_types.length, task_types: active_batch_task_types.slice(0, 64), tick: game.tick,
+    }
     return created
   }
 
@@ -121,7 +163,7 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
       batch_generation: ensure_batch_generation(),
       batch_ref: batch_ref(active_batch_id),
       task_count: active_batch_task_types.length,
-      task_types: [...active_batch_task_types],
+      task_types: active_batch_task_types.slice(0, 64),
       tick: game.tick,
       reason,
     }
@@ -140,6 +182,8 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
     // its completion verifier) reads it.
     if (kind === 'completed') last_completed_batch = receipt
     else last_cancelled_batch = receipt
+    retain_receipt({ ...receipt, state: kind === 'completed' ? 'completed' : 'cancelled' })
+    storage.sgluna_task_active_batch = undefined
     active_batch_id = undefined
     active_batch_task_types = []
     active_batch_console_quiet = false
@@ -545,6 +589,7 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
           },
       last_completed_batch,
       last_cancelled_batch,
+      receipt_journal: receipt_journal(),
     }
   }
 

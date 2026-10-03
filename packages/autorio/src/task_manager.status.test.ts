@@ -12,6 +12,7 @@ describe('task manager status snapshot', () => {
     const manager = new_task_manager(() => undefined)
 
     expect(manager.get_status_snapshot()).toEqual({
+      receipt_journal: [],
       task_state: TaskStates.IDLE,
       queue_empty: true,
       queue_length: 0,
@@ -37,6 +38,7 @@ describe('task manager status snapshot', () => {
     })
 
     expect(manager.get_status_snapshot()).toEqual({
+      receipt_journal: [],
       task_state: TaskStates.WAITING,
       queue_empty: false,
       queue_length: 1,
@@ -87,6 +89,7 @@ describe('task manager status snapshot', () => {
 
     expect(begin_crafting).not.toHaveBeenCalled()
     expect(manager.get_status_snapshot()).toEqual({
+      receipt_journal: [],
       task_state: TaskStates.CRAFTING,
       queue_empty: true,
       queue_length: 0,
@@ -129,6 +132,7 @@ describe('task manager status snapshot', () => {
 
     expect(actor.begin_crafting).not.toHaveBeenCalled()
     expect(manager.get_status_snapshot()).toEqual({
+      receipt_journal: [],
       task_state: TaskStates.CRAFTING,
       queue_empty: true,
       queue_length: 0,
@@ -169,6 +173,11 @@ describe('task manager status snapshot', () => {
     manager.cancel_all_tasks()
 
     expect(manager.get_status_snapshot()).toEqual({
+      receipt_journal: [{
+        batch_id: 1, batch_generation: 1, batch_ref: 'batch-g1-1',
+        task_count: 2, task_types: [TaskStates.WAITING, TaskStates.WAITING],
+        tick: 0, reason: 'cancelled', state: 'cancelled',
+      }],
       task_state: TaskStates.IDLE,
       queue_empty: true,
       queue_length: 0,

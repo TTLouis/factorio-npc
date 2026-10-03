@@ -43,6 +43,7 @@ import { ensure_basic_skill_definitions } from './skills'
 import { with_research_trigger } from './research_trigger'
 import { is_runtime_task_state, type RuntimeTaskState } from './task_state_runtime'
 import { new_task_manager } from './task_manager'
+import { new_operation_admission } from './operation_admission'
 import { create_task_board_ui_remote_interface, set_task_board_world_task_provider } from './task_board_ui'
 import { create_tools_remote_interface } from './tools'
 import { TaskStates } from './types'
@@ -59,6 +60,8 @@ create_task_board_ui_remote_interface()
 let setup_complete = false
 
 export const task_manager = new_task_manager(get_controlled_actor)
+const operation_admission = new_operation_admission(get_controlled_actor, () => task_manager.get_status_snapshot())
+remote.add_interface('autorio_operation_admission', operation_admission)
 set_task_board_world_task_provider(() => task_manager.get_status_snapshot())
 const awareness_controller = new_awareness_controller()
 const area_clearing_controller = new_area_clearing_controller(get_controlled_actor, task_manager)
@@ -503,6 +506,7 @@ remote.add_interface('autorio_operations', {
     const actor = get_controlled_actor()
     return {
       ...task_manager.get_status_snapshot(),
+      admission_journal: operation_admission.status().records,
       actor: actor?.status_snapshot(),
       basic_operation: basic_operation_controller.status(),
       follow: follow_controller.status(),
