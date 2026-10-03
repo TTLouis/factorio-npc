@@ -30,6 +30,15 @@ test('changed count, changed step and replacement plan do not evade unresolved s
   assert.equal(guard.refuse,true)
   assert.equal(conflictingOperation(state,{operations:[{name:'move_items_exact',args:{item_name:'copper-plate',unit_number:99}}]}).refuse,false)
 })
+
+test('exact mining and placement cannot claim material independence from related transfers', () => {
+  for (const operation of [{name:'mine_entity_exact',args:{unit_number:43}},
+    {name:'place_entity',args:{entity_name:'fast-transport-belt',position:{x:1,y:2}}}]) {
+    const pending=buildPendingOperation({operationKey:'unknown_material',ordinal:1,protocolVersion:2,actor,operations:[operation]})
+    const state={operation_ledger:recordOperation(null,pending)}
+    assert.equal(conflictingOperation(state,{operations:[{name:'move_items_exact',args:{unit_number:44,item_name:'wood',max_count:1}}]}).refuse,true)
+  }
+})
 test('unrelated completed batches cannot settle an exact admission, nor can missing identity', () => {
   const pending=record('one')
   const status={task_state:'idle',queue_length:0,batch_generation:2,last_completed_batch:{batch_id:100}}

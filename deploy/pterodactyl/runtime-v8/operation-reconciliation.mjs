@@ -1,14 +1,16 @@
 // MW2b operation reconciliation (docs/NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md section 3: "No blind replay of a command whose
 // acknowledgement was lost, and no uncertain operation counted as successful").
 //
-// Pure helpers for the one outstanding operation batch the runtime may have in flight. The runtime records a PENDING record
+// Pure helpers for each outstanding operation batch. The runtime records a PENDING record
 // before it sends a batch (what was sent, for which plan and step, by which actor and epoch, and where the mod's batch counter
 // stood), and settles it when the batch's receipt arrives. If the acknowledgement is lost, or the process restarts, the record
 // is still there: the runtime asks the mod what really happened, using exactly the correlation the mod already exposes (batch
 // ids and the batch generation in `autorio_operations.status`, plus the actor id and epoch), BEFORE it issues anything again.
 //
-// No I/O and no clock here. The reducer stores the record (planning-state.mjs, run.pending_operation); the agent loop reads the
+// No I/O and no clock here. The reducer stores the campaign ledger; the agent loop reads the
 // status and traces the verdict.
+
+import { createHash } from 'node:crypto'
 
 export const PENDING_OPERATION_LIMITS = Object.freeze({
   operations: 16,
@@ -38,8 +40,10 @@ function effectScopes(operation) {
   for (const key of ['item_name', 'entity_name', 'recipe_name']) if (typeof args[key] === 'string') scopes.push(`item:${args[key]}`)
   const position = args.position ?? args.target_position
   if (Number.isFinite(position?.x) && Number.isFinite(position?.y)) scopes.push(`position:${position.x}:${position.y}`)
-  // Unbounded name searches, ingredient consumption and construction manifests have unknown conflicts.
-  if (scopes.length === 0 || ['craft_item', 'execute_construction_plan', 'clear_area'].includes(operation?.name)) scopes.push('*')
+  // Only item transfers have a grounded material identity in the operation
+  // arguments. Mining/placement/prototype aliases need engine-derived material
+  // scopes; an exact entity ID alone cannot establish inventory independence.
+  if (scopes.length === 0 || !['move_items', 'move_items_exact'].includes(operation?.name)) scopes.push('*')
   return scopes
 }
 
@@ -89,15 +93,10 @@ function canonicalJson(value) {
   return JSON.stringify(value ?? null)
 }
 
-// FNV-1a over the canonical JSON: the same dependency-free scheme the reducer uses for ids.
+// The full canonical batch is bound to its admission with a collision-resistant digest.
 export function operationSignature(operations) {
   const source = canonicalJson((Array.isArray(operations) ? operations : []).map(operation => ({ name: operation?.name, args: operation?.args ?? {} })))
-  let hash = 0x811C9DC5
-  for (let index = 0; index < source.length; index += 1) {
-    hash ^= source.charCodeAt(index)
-    hash = Math.imul(hash, 0x01000193) >>> 0
-  }
-  return hash.toString(36).padStart(7, '0')
+  return createHash('sha256').update(source).digest('hex')
 }
 
 /**
