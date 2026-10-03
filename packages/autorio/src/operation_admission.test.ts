@@ -4,7 +4,7 @@ import { new_operation_admission, pinned_operation_batch_refs } from './operatio
 import { new_task_manager } from './task_manager'
 import { TaskStates } from './types'
 
-const identity = { operation_key: 'request/operation', attempt_id: 'attempt-1', actor_id: 7, epoch: 3, signature: 'hash-1' }
+const identity = { operation_key: 'request/operation', attempt_id: 'attempt-1', actor_id: 7, epoch: 3, signature: 'hash-1', ordinal: 1, operation_count: 1 }
 const ref = { batch_id: 1, batch_generation: 1, batch_ref: 'batch-g1-1' }
 function actor() {
   return { is_valid: true, character: { valid: true }, status_snapshot: () => ({ actor_id: 7 }) } as unknown as ControlledActor
@@ -16,6 +16,32 @@ beforeEach(() => {
   ;(globalThis as any).remote = { interfaces: { sgluna_deployment: { authorize: true } }, call: vi.fn((_name, _method, epoch) => epoch === 3) }
 })
 describe('durable operation admission', () => {
+  it('rejects expired duplicates after history pruning and manager restart', () => {
+    const manager = new_task_manager(() => undefined)
+    let admission = new_operation_admission(actor, manager.get_status_snapshot)
+    admission.begin(identity)
+    admission.slot(identity.operation_key, 1, { ok: true, batch_refs: [] })
+    admission.finish(identity.operation_key, { ok: true })
+    for (let index = 2; index <= 70; index++) {
+      const next = { ...identity, operation_key: `next-${index}`, ordinal: index }
+      admission.begin(next)
+      admission.slot(next.operation_key, 1, { ok: true, batch_refs: [] })
+      admission.finish(next.operation_key, { ok: true })
+    }
+    admission = new_operation_admission(actor, manager.get_status_snapshot)
+    expect(admission.status().records).toHaveLength(64)
+    expect(admission.begin(identity)).toMatchObject({ ok: false, error: 'expired_operation_ordinal' })
+    expect(admission.begin({ ...identity, operation_key: 'changed-key' })).toMatchObject({ ok: false, error: 'expired_operation_ordinal' })
+    expect(admission.status().high_water).toBe(70)
+  })
+  it('cannot mark an incomplete command prefix as complete', () => {
+    const manager = new_task_manager(() => undefined)
+    const admission = new_operation_admission(actor, manager.get_status_snapshot)
+    admission.begin({ ...identity, operation_count: 2 })
+    admission.slot(identity.operation_key, 1, { ok: true, batch_refs: [] })
+    expect(admission.finish(identity.operation_key, { ok: true })).toMatchObject({ ok: false, error: 'incomplete_admission' })
+    expect(admission.status().records[0].state).toBe('admitting')
+  })
   it('rejects stale actor and epoch, and returns exact duplicates without readmission', () => {
     const manager = new_task_manager(() => undefined)
     const admission = new_operation_admission(actor, manager.get_status_snapshot)
@@ -30,7 +56,7 @@ describe('durable operation admission', () => {
   it('retains a successful prefix and failure as uncertain across generation loss', () => {
     let manager = new_task_manager(() => undefined)
     const admission = new_operation_admission(actor, () => manager.get_status_snapshot())
-    admission.begin(identity)
+    admission.begin({ ...identity, operation_count: 2 })
     manager.add_task({ type: TaskStates.WAITING, remaining_ticks: 60 })
     expect(admission.slot(identity.operation_key, 1, { ok: true, batch_refs: [ref], result: true })).toMatchObject({ ok: true })
     expect(admission.slot(identity.operation_key, 2, { ok: false, batch_refs: [], error: 'not reachable' })).toMatchObject({ ok: true })
@@ -81,7 +107,7 @@ describe('durable operation admission', () => {
     manager = new_task_manager(() => undefined)
     expect(admission.status().records[0].state).toBe('completed')
     expect(manager.get_status_snapshot().receipt_journal[0]).toMatchObject({ ...ref, state: 'completed' })
-    const next = { ...identity, operation_key: 'next' }
+    const next = { ...identity, operation_key: 'next', ordinal: 2 }
     admission.begin(next)
     manager = new_task_manager(() => undefined)
     expect(admission.slot('next', 1, { ok: true, batch_refs: [] })).toMatchObject({ ok: false, error: 'invalid_slot' })
@@ -90,8 +116,8 @@ describe('durable operation admission', () => {
   it('rejects the 65th unresolved admission without evicting any accepted work', () => {
     const manager = new_task_manager(() => undefined)
     const admission = new_operation_admission(actor, manager.get_status_snapshot)
-    for (let index = 0; index < 64; index++) expect(admission.begin({ ...identity, operation_key: `op-${index}` }).ok).toBe(true)
-    expect(admission.begin({ ...identity, operation_key: 'overflow' })).toMatchObject({ ok: false, error: 'admission_journal_full' })
+    for (let index = 0; index < 64; index++) expect(admission.begin({ ...identity, operation_key: `op-${index}`, ordinal: index + 1 }).ok).toBe(true)
+    expect(admission.begin({ ...identity, operation_key: 'overflow', ordinal: 65 })).toMatchObject({ ok: false, error: 'admission_journal_full' })
     expect(admission.status().records).toHaveLength(64)
   })
 })

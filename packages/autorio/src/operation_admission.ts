@@ -8,6 +8,8 @@ export interface OperationCorrelation {
   actor_id: number
   epoch: number
   signature: string
+  ordinal: number
+  operation_count: number
 }
 export interface AdmissionSlot {
   index: number
@@ -25,7 +27,7 @@ export interface OperationAdmission extends OperationCorrelation {
   ok?: boolean
   error?: string
 }
-declare const storage: { sgluna_operation_admissions?: OperationAdmission[] }
+declare const storage: { sgluna_operation_admissions?: OperationAdmission[], sgluna_operation_admission_high_water?: number }
 
 export function admission_unresolved(record: OperationAdmission) {
   return record.state === 'admitting' || record.state === 'admitted' || record.state === 'uncertain'
@@ -39,6 +41,7 @@ function text(value: unknown, limit: number): value is string {
 function correlation(raw: OperationCorrelation) {
   return raw && text(raw.operation_key, 192) && text(raw.attempt_id, 128) && text(raw.signature, 256)
     && integer(raw.actor_id) && integer(raw.epoch)
+    && integer(raw.ordinal) && integer(raw.operation_count) && raw.operation_count <= ADMISSION_LIMITS.slots
 }
 function journal() {
   if (!storage.sgluna_operation_admissions) storage.sgluna_operation_admissions = []
@@ -98,17 +101,21 @@ export function new_operation_admission(
     refresh()
     const previous = find(raw.operation_key)
     if (previous) {
-      if (previous.attempt_id !== raw.attempt_id || previous.signature !== raw.signature || previous.actor_id !== raw.actor_id || previous.epoch !== raw.epoch) {
+      if (previous.attempt_id !== raw.attempt_id || previous.signature !== raw.signature || previous.actor_id !== raw.actor_id || previous.epoch !== raw.epoch
+        || previous.ordinal !== raw.ordinal || previous.operation_count !== raw.operation_count) {
         return { ok: false, error: 'operation_key_conflict' }
       }
       return { ok: true, duplicate: true, record: previous }
     }
+    if (raw.ordinal <= (storage.sgluna_operation_admission_high_water ?? 0)) return { ok: false, error: 'expired_operation_ordinal' }
     if (journal().filter(admission_unresolved).length >= ADMISSION_LIMITS.unresolved) return { ok: false, error: 'admission_journal_full' }
     const record: OperationAdmission = {
       operation_key: raw.operation_key, attempt_id: raw.attempt_id, actor_id: raw.actor_id, epoch: raw.epoch, signature: raw.signature,
+      ordinal: raw.ordinal, operation_count: raw.operation_count,
       state: 'admitting', generation: task_status().batch_generation, tick: game.tick, slots: [],
     }
     journal().push(record)
+    storage.sgluna_operation_admission_high_water = raw.ordinal
     log(`[AUTORIO] operation.admission.recorded request_id=${raw.operation_key.split('/')[0]} operation_key=${raw.operation_key} reason=admitting`)
     return { ok: true, record }
   }
@@ -116,7 +123,7 @@ export function new_operation_admission(
     refresh()
     const record = find(key)
     if (!record || !authorized(record)) return { ok: false, error: 'stale_actor_epoch' }
-    if (record.state !== 'admitting' || index !== record.slots.length + 1 || index > ADMISSION_LIMITS.slots
+    if (record.state !== 'admitting' || index !== record.slots.length + 1 || index > record.operation_count
       || !raw || typeof raw.ok !== 'boolean' || !Array.isArray(raw.batch_refs) || raw.batch_refs.length > ADMISSION_LIMITS.refs) {
       return { ok: false, error: 'invalid_slot' }
     }
@@ -140,6 +147,7 @@ export function new_operation_admission(
     const record = find(key)
     if (!record || !authorized(record)) return { ok: false, error: 'stale_actor_epoch' }
     if (record.state !== 'admitting' || record.slots.length === 0 || !raw || typeof raw.ok !== 'boolean') return { ok: false, error: 'invalid_finish' }
+    if (raw.ok && record.slots.length !== record.operation_count) return { ok: false, error: 'incomplete_admission' }
     const refs = record.slots.flatMap(slot => slot.batch_refs)
     record.ok = raw.ok
     record.error = typeof raw.error === 'string' ? raw.error.slice(0, 512) : undefined
@@ -161,5 +169,5 @@ export function new_operation_admission(
     trim_history()
     return { ok: true, record }
   }
-  return { begin, slot, finish, resolve, status: () => { refresh(); return { records: journal(), limits: ADMISSION_LIMITS } } }
+  return { begin, slot, finish, resolve, status: (key?: string) => { refresh(); return { records: key ? journal().filter(record => record.operation_key === key) : journal(), limits: ADMISSION_LIMITS, high_water: storage.sgluna_operation_admission_high_water ?? 0 } } }
 }
