@@ -166,6 +166,7 @@ export class FakeFactorio {
     if (text.includes('remote.call("autorio_operations","status")')) {
       return JSON.stringify({
         task_state: this.taskState,
+        batch_generation: this.generation ?? 1,
         queue_empty: this.queueLength === 0,
         queue_length: this.queueLength,
         admission_journal: this.admissionJournal(),
