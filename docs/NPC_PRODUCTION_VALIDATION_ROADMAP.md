@@ -4,6 +4,24 @@ Status: **canonical production E2E validation direction**
 Branch of origin: `experiment/jev-agent-architecture`
 Adopted: 2026-09-19
 
+**Owner checkpoint amendment, October 3, 2026:** the immediate gameplay target is
+now three consecutive assistant-driven fresh normal maps (seeds 424242–424244),
+zero connected humans, ordinary research and a declared one-time vanilla starter
+kit. Each must automatically deliver at least 10 red packs in each of five
+consecutive game-minute windows into one exact named chest. This bounded red-science
+proof supersedes the older deferral of all sustained-rate testing below; wider SPM
+maturity remains later work. First revalidate the burner canary, natural-water
+steam power and powered assembler/inserter cell. No current gameplay pass is
+claimed. [Implementation and evidence](validation/PLAYABLE_BUILD_2026-10-03.md).
+
+Buffered building/supply stock may use chest-count circuit caps: generally two
+live item stacks for buildings and roughly 400–600 belts per tier, with explicit
+player quantities taking precedence. Science and other continuously consumed flows
+must not receive these stock caps. The direct output monitor currently reports
+`satisfied: false`; its regression gate does not establish authoritative deliveries
+or automated upstream supply. Assistant-driven acceptance is separate from actual
+NPC-provider autonomy.
+
 This document defines how SGLuna production-building capability is staged, tested, promoted, and diagnosed.
 
 It is intentionally separate from:
@@ -26,7 +44,8 @@ The historical validation state must be represented explicitly instead of inferr
 | Belt/inserter production transport | **unproven frontier** | Supporting deterministic tooling exists, but a reliable complete production line has not been established as a current E2E capability. |
 | Multi-stage item production | **unproven frontier** | Solver/topology support exists; real construction + operation + semantic verification remains to be proven. |
 | Fluid construction / connectivity / operation | **known-red historical area** | User-reported prior fluid attempt failed. Current prototype-level fluid geometry support is preparation, not proof that live fluid networks work. |
-| Sustained throughput / SPM-style operation | **later maturity work** | Do not use as the immediate production acceptance gate until basic powered item and fluid systems are proven. |
+| Bounded red-science delivery rate | **current checkpoint, unproven** | After dependency canaries, prove the October 3 five-minute chest-delivery contract on all three normal maps. |
+| Wider sustained throughput / SPM-style operation | **later maturity work** | Broader throughput targets follow validated powered production and the bounded red-science checkpoint. |
 
 When a new real-E2E pass is obtained, record the exact deployed SHA, fixture/save, Factorio/mod versions, model/provider configuration, trace references, and acceptance evidence in a new `docs/validation/` checkpoint.
 

@@ -2,8 +2,23 @@
 
 This is a resumable implementation record, not gameplay acceptance or package
 promotion. Integration is `experiment/jev-agent-architecture`; reviewed native
-receipt fencing, physical corpse retrieval and planner stock guidance have landed
-locally through `9b03a240`. Main and live deployment have not changed. No push is authorized.
+receipt fencing, physical corpse retrieval, planner stock guidance and the output
+candidate monitor have landed locally through **`38bd01c4`**. Its full Docker gate
+passed **1,561 runtime tests and 920 mod tests**, typecheck, Lua build and generated
+Lua checks. Main and live deployment have not changed. No push is authorized.
+
+### Situation at the owner's update request
+
+The reliability foundations are advancing, but **the companion is not yet at the
+playable red-science checkpoint**. No three-seed run, current powered production
+canary or five-minute automatic science proof has passed. The passing code above
+is native infrastructure; runtime orchestration and gameplay validation remain.
+
+New implementation was paused for this status update. The already-started output
+merge was resolved by retaining both corpse and output controllers and both test
+inventory definitions, then checked with the combined gate. Unmerged candidates
+remain isolated. No paid provider call, push, live deployment or package promotion
+was performed.
 
 ## Acceptance contract
 
@@ -28,12 +43,12 @@ All paths below are siblings of the integration checkout under
 | --- | --- | --- | --- |
 | Native exact admission and prefix receipts | mod receipt migration / `playable-mod-receipts` | `8674ed27` | Separate review; original mod gate passed 901 tests plus typecheck/Lua checks |
 | Durable ordinal fence after receipt pruning | parent / `playable-mod-receipt-fence` | `78b90c1a` | Reviewed and integrated by `7f33e26e`; combined gate passed |
-| Campaign operation ledger and exact reconciliation | parent / `playable-durable-operations` | `df416148` | Runtime 1,570/1,570; final semantic review underway |
-| 32-task retention, task-local authority/questions | task migration / `playable-task-retention` | `4ac4b8df` plus review repair underway | Runtime 1,585/1,585; review caught missing clock fence on completion handoff |
+| Campaign operation ledger and exact reconciliation | parent / `playable-durable-operations` | `a85b7c6b` | Runtime 1,570/1,570; semantic review passed at `df416148`; follow-up explicitly tests persisted pre-transport cancellation proof |
+| 32-task retention, task-local authority/questions | task migration / `playable-task-retention` | `4ac4b8df` | Runtime 1,585/1,585; review caught missing clock fence on completion handoff; repair checkpoint paused for update |
 | Physical corpse tracking/retrieval and ammo compatibility | corpse migration / `playable-corpse-recovery` | `de137419` | Reviewed and integrated by `f54d850b`; combined gate passed; native engine pending |
 | Campaign allowance and manual provider bridge | provider migration / `playable-provider-allowance` | `f9c5bcf8` | New bridge/allowance tests passed; two inherited reservation tests require complete task integration |
-| Paid-transport admission and global campaign persistence | provider migration / `playable-campaign-transport` | In progress | Default paid transport disabled; fake transport fixture/shipping closure fixes underway |
-| Exact supplying-line output monitor | production migration / `playable-output-proof` | `10685826` | Reviewed candidate; mod 911/911; satisfaction and upstream automation flags remain false |
+| Paid-transport admission and global campaign persistence | provider migration / `playable-campaign-transport` | Uncommitted work on `f9c5bcf8` | Default paid transport disabled; fixture/shipping closure fixes retained; paused for update |
+| Exact supplying-line output monitor | production migration / `playable-output-proof` | `10685826` | Reviewed candidate, integrated by `38bd01c4`; satisfaction and upstream automation flags remain false |
 | Buffered stock planner guidance | stock migration / `playable-buffer-stock-guidance` | `0ae5e392` | Reviewed and integrated by `9b03a240`; separate mod gate 903/903 |
 | Bounded buffered circuit API | circuit migration / `playable-buffer-circuits` | `29c14eb3` | Mod 920/920, typecheck/Lua passed; separate review pending; stop/restart unverified |
 
@@ -84,7 +99,11 @@ canonical Docker-only script; no host dependency installation or paid calls.
   all gate exit 0: 1,561 runtime and 903 mod tests, typecheck/Lua/generated guard.
 - `logs/playable-integration-corpses-2026-10-03.log`: integration `f54d850b`,
   all gate exit 0: 1,561 runtime and 912 mod tests, typecheck/Lua/generated guard.
-- `logs/playable-operations-runtime-2026-10-03-r6.log`: ledger `df416148`,
+- `logs/playable-integration-stock-2026-10-03.log`: integration `9b03a240`,
+  all gate exit 0: 1,561 runtime and 912 mod tests, typecheck/Lua/generated guard.
+- `logs/playable-integration-output-2026-10-03.log`: integration `38bd01c4`,
+  all gate exit 0: 1,561 runtime and 920 mod tests, typecheck/Lua/generated guard.
+- `logs/playable-operations-runtime-2026-10-03-r7.log`: ledger `a85b7c6b`,
   runtime gate exit 0, 1,570/1,570.
 - `logs/playable-task-maintenance.log`: retention `4ac4b8df`, runtime gate
   exit 0, 1,585/1,585. Separate review repair needs a new gate.
@@ -96,6 +115,39 @@ canonical Docker-only script; no host dependency installation or paid calls.
 No new real-engine acceptance, package promotion or actual provider autonomy
 claim is established by these gates. Candidate branches must be integrated,
 review repairs checked and the shipped payload repinned before promotion checks.
+
+## Review blockers and next dependency boundary
+
+1. **Task resume clock fencing:** `4ac4b8df` can resume an interrupted checkpoint
+   after detected rollback/map change, or start accepted pending work without
+   authoritative clock/start-tick evidence. These are corroborated review findings,
+   not failing regression results. Repair and new handoff scenarios are required
+   before integration. A surface/seed fingerprint cannot detect a same-seed forward
+   save swap; exact save identity remains a harness requirement.
+2. **Campaign transport:** the latest recorded work-in-progress gate is
+   1,609/1,612. One new Jev fixture issue needs a verified correction; two failures are
+   inherited legacy reservation expectations that the complete retention unit
+   retires. New code still requires a committed candidate and separate review.
+   The allowance/bridge modules alone do not prove every transport is metered.
+3. **Gameplay recovery:** native corpse transfer is physical and requires
+   compatible equipped weapon/ammunition. The structured recovery operation and
+   runtime cleanup priority are not wired. Runtime must derive a distinct durable
+   retrieval ordinal for every batch slot; inventory returns and safe-route
+   assessment remain required before recovery gameplay can be claimed.
+4. **Output proof:** the direct assembler/inserter/chest witness remains a
+   candidate. Native delivery attribution, complete upstream automation and proof
+   registry retirement/rebinding need validation before it can satisfy a goal.
+   Manual deposits, unrelated production and surplus returns cannot count.
+5. **Promotion:** integrate passing reviewed runtime foundations, expose native
+   tools through bounded contracts, complete recovery/returns, then revalidate
+   burner/furnace, natural-water power and powered production. Only then freeze
+   the SHA, repin/check the shipped package and run the three normal-map science
+   acceptance scenarios. The source integration SHA is not the shipped payload
+   candidate yet.
+
+The two unfinished workers were stopped at this update boundary; their isolated
+worktrees and logs are retained. Resume from these exact candidates and repairs,
+without repeating earlier completed units or starting paid/live transport.
 
 ## Review findings incorporated
 

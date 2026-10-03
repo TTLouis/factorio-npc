@@ -12,6 +12,24 @@ shared campaign allowance. Those accepted requirements supersede older blanket
 user-approval and request-only budget rules. Implementation and integrated proof
 remain pending; a document amendment does not establish runtime capability.
 
+**October 3 checkpoint requirements:** accept up to **32 open tasks including the
+active task**, reject overflow without eviction, retain task-local questions,
+grants and checkpoints, resume interrupted work only at safe boundaries and process
+ordinary pending work in acceptance order. Resurface neglected tasks after 15
+game-minutes without counting server downtime. A durable operation ledger replaces
+the single pending slot; unresolved effects survive cancellation, death, restart
+and replacement plans. Changed arguments or plans never authorize replay. Preserve
+the existing three-attempt/15-minute recovery limits across those boundaries.
+
+Legacy chest reservations are being retired; shared same-force storage is available
+subject to explicit task constraints and player inventories remain excluded. Same-result
+recovery may use standing authority, while changed destinations and substantial
+player-structure redesign need approval. Campaign allowance is global across every
+role and restart; paid transport stays disabled for this checkpoint. These are
+acceptance requirements, not a claim that all wiring is complete. Current candidate,
+review and integration evidence is in the
+[October 3 implementation checklist](validation/PLAYABLE_BUILD_2026-10-03.md).
+
 The redesign is intentionally simpler than the earlier experimental hierarchy/checkpoint stack:
 
 > The user owns the goal. The Main LLM authors semantic plans and intent. The deterministic runtime validates structured operations and owns world truth. Jev is a cognitive coprocessor for observation selection, state compression, routing, recovery, reasoning effort, and advisory steering; Jev is not a correctness gate for the Main LLM. A committed plan is immutable. Future intent lives on a non-executable shelf and is progressively refined like level of detail (LOD).

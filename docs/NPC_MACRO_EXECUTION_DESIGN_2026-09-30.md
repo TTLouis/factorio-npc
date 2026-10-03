@@ -10,6 +10,26 @@ The [weekly plan](NPC_USER_EXPERIENCE_WEEKLY_PLAN_2026-09-28.md) preserves the Q
 Week 2 UX follow-up. These requirements are not evidence that the runtime implements
 them, and do not authorize a provider run or deployment.
 
+**Current build update, October 3, 2026:** the latest owner-approved playable plan
+supersedes older implementation notes on eight-task eviction, wall-clock aging,
+single pending-operation state and changed-batch replay. The target is 32 accepted
+open tasks without eviction, game-tick aging excluding downtime, durable exact
+operation correlation and task-local uncertainty holds. Legacy chest reservations
+are retired in the task candidate; explicit task constraints and human inventory
+exclusion remain. Shared campaign metering must cover planner, executor, interaction
+and Jev calls; paid transport is disabled for this checkpoint.
+
+Local integration `38bd01c4` contains native admission/prefix receipts with a durable
+ordinal fence, physical own-corpse tracking/retrieval, compatible equipped-ammo
+readiness, stock planner guidance and an unverified output candidate monitor. Its
+combined Docker gate passed 1,561 runtime and 920 mod tests plus typecheck/Lua
+checks. Runtime operation ledger, task scheduler/clock repairs, circuit contracts,
+campaign transport, surplus returns and recovery orchestration still have pending
+integration or implementation work. No three-seed gameplay or package promotion
+pass is established. The
+[current implementation checklist](validation/PLAYABLE_BUILD_2026-10-03.md) is the
+authority for build evidence; dated MW1/MW2 sections below remain historical.
+
 ## 1. A continuing campaign, bounded executable slices
 
 Auto pursues the active save's harness-supplied victory predicate. Resource discovery

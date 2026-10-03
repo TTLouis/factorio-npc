@@ -5,10 +5,23 @@ This file is the current status summary for the single-NPC integration line. His
 ## October 3 playable implementation candidates
 
 The owner-approved red-science plan is being implemented in isolated local
-branches. Native receipt fencing, physical corpse retrieval and planner stock
-guidance have landed locally; their combined regression gates are passing.
-The durable runtime ledger passes 1,570 tests and task retention passes 1,585,
-with final review repairs still pending integration. Docker is available again.
+branches. Native receipt fencing, physical corpse retrieval, planner stock
+guidance and a conservative output candidate monitor have landed locally through
+`38bd01c4`. Its combined gate passes **1,561 runtime and 920 mod tests**, typecheck,
+Lua build and generated-Lua checks. Docker is available again.
+
+The unmerged durable runtime ledger passes 1,570 tests and has passed semantic
+review. Task retention passes 1,585 tests at `4ac4b8df`, but review found missing
+clock/lineage fences on completion handoff and repair is still required. The circuit API
+passes 920 mod tests in its own branch and still needs separate review. Campaign
+transport/global persistence remains a work-in-progress candidate.
+
+The output monitor deliberately reports `satisfied: false` and upstream automation
+unverified until native conformance is established. Corpses can be tracked and
+retrieved natively, but runtime kit selection, recovery priority, surplus returns
+and repeated-death limits still need wiring. A native feature passing unit tests
+does not establish a gameplay recovery or production pass.
+
 The [implementation checklist](validation/PLAYABLE_BUILD_2026-10-03.md) records
 candidate SHAs, evidence and remaining dependencies. Package promotion,
 real-engine acceptance and the three-seed playable checkpoint have **not** passed.
