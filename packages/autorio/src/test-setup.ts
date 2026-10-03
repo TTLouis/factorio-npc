@@ -120,6 +120,7 @@ import { event_handlers, set_load_handler } from './test-event-registry'
     shooting_selected: 'shooting_selected',
   },
   inventory: {
+    chest: 'chest',
     character_guns: 'character_guns',
     character_ammo: 'character_ammo',
     character_armor: 'character_armor',
