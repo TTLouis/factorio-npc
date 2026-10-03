@@ -1,8 +1,8 @@
 # Native output delivery candidate — October 3, 2026
 
 This unit supplies an **engine-unvalidated candidate witness**, not a passing
-playable checkpoint. `satisfied` is always false. Docker/real Factorio validation
-was unavailable when this candidate was written.
+playable checkpoint. `satisfied` is always false. Native Factorio conformance
+remains unverified. Docker became available after the implementation checkpoint.
 
 `autorio_output_delivery_proof.register(spec)` binds one exact named chest, item,
 force and surface to at most eight direct assembler → inserter → chest paths.
@@ -41,4 +41,10 @@ the delivery witness cannot establish the provenance of every upstream input.
 The deterministic cases cover five valid windows, a deficient window after a
 surplus, manual chest growth, hand feeding/crafting, replacement at the same
 coordinates, topology changes, sampling gaps, attached humans and source-free
-hand depletion. These tests were added but **not executed** while Docker was down.
+hand depletion and save-generation changes.
+
+The canonical Docker mod gate passed against implementation commit `275bd5bf`:
+115 test files / 911 tests, TypeScript typecheck, Lua build and generated-Lua
+guard. The log is `logs/output-proof-mod-2026-10-03.log` in the enclosing workspace.
+These gates verify regression behavior and compilation; they do not promote the
+candidate to native delivery proof or establish playable red-science acceptance.
