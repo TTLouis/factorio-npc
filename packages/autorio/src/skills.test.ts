@@ -394,7 +394,7 @@ describe('learned skill record and export', () => {
     expect(get_skill_definition('dynamic-skill-0')?.revision).toBe(2)
 
     expect(ensure_basic_skill_definitions()).toEqual({ added: 12, upgraded: 0, total: 12 })
-    expect(list_skill_definitions()).toHaveLength(MAX_DYNAMIC_SKILL_DEFINITIONS + 11)
+    expect(list_skill_definitions()).toHaveLength(MAX_DYNAMIC_SKILL_DEFINITIONS + 12)
   })
   it('creates a versioned candidate without promoting observation to verification', () => {
     const skill = create_skill_candidate(candidate({ status: 'observed', stage: 'example' }))
