@@ -78,6 +78,7 @@ export class FakeFactorio {
     this.preflight = preflight ?? (() => ({ ok: true }))
     this.mutations = []
     this.batchId = 0
+    this.admissions = []
     this.lastTaskTypes = []
     this.taskState = 'idle'
     this.queueLength = 0
@@ -167,6 +168,7 @@ export class FakeFactorio {
         task_state: this.taskState,
         queue_empty: this.queueLength === 0,
         queue_length: this.queueLength,
+        admission_journal: this.admissionJournal(),
         last_completed_batch: this.batchId > 0 && this.cancelledBatch?.batch_id !== this.batchId
           ? { batch_id: this.batchId, task_count: this.lastTaskTypes.length, task_types: this.lastTaskTypes, tick: 600 + this.batchId }
           : undefined,
@@ -206,6 +208,9 @@ export class FakeFactorio {
       const marker = text.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)?.[0]
       this.mutations.push(text)
       this.batchId++
+      const encoded = /"begin",helpers\.json_to_table\(("(?:\\.|[^"\\])*")\)/.exec(text)?.[1]
+      if (encoded) this.admissions.push({ ...JSON.parse(JSON.parse(encoded)), generation: this.generation ?? 1,
+        batch_id: this.batchId, state: 'admitted', slots: [{ index: 1, ok: true, batch_refs: [{ batch_id: this.batchId, batch_generation: this.generation ?? 1, batch_ref: `batch-g${this.generation ?? 1}-${this.batchId}` }] }] })
       this.lastBasicResult = undefined
       this.lastTaskTypes = [...text.matchAll(/remote\.call\('autorio_operations','([a-z_]+)'/g)]
         .flatMap(([, name]) => TASK_TYPES_BY_OPERATION[name] ?? ['waiting'])
@@ -215,6 +220,12 @@ export class FakeFactorio {
     }
     this.unknown.push(text.slice(0, 160))
     return '{}'
+  }
+
+  admissionJournal() {
+    return this.admissions.map(record => ({ ...record, state: record.state === 'uncertain' ? 'uncertain'
+      : this.cancelledBatch?.batch_id === record.batch_id ? 'uncertain'
+        : this.taskState === 'idle' && record.batch_id <= this.batchId ? 'completed' : 'admitted' }))
   }
 }
 

@@ -4346,7 +4346,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   async readInteractionTaskStatus() {
     try {
-      const raw = String(await this.rcon.command(toolCommand('getTaskStatus', {}))).slice(0, 16000)
+      const raw = String(await this.rcon.command(toolCommand('getTaskStatus', {}))).slice(0, 8_000_000)
       return compactInteractionTaskStatus(raw)
     }
     catch (error) {
@@ -5719,7 +5719,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   async readTaskStatusRaw() {
     try {
-      return String(await this.rcon.command(toolCommand('getTaskStatus', {}))).slice(0, 16000)
+      return String(await this.rcon.command(toolCommand('getTaskStatus', {}))).slice(0, 8_000_000)
     }
     catch {
       return undefined
@@ -5737,6 +5737,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const baseline = batchWatermark(await this.readTaskStatusRaw()) ?? null
     const record = this.memory.recordPendingOperation(key, buildPendingOperation({
       requestId: this.traceRequest?.id,
+      operationKey: `${this.traceRequest?.id ?? 'request'}/batch_${(planning?.operation_ledger?.sequence ?? 0) + 1}`,
+      ordinal: (planning?.operation_ledger?.sequence ?? 0) + 1,
+      protocolVersion: 2,
       operations,
       goalId: planning?.goal?.goal_id,
       planId: plan?.plan_id,
@@ -5745,17 +5748,24 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       baseline,
       now: Date.now(),
     }), { requestId: this.traceRequest?.id })
-    if (record) await this.persistState()
+    if (!record) throw new AgentLoopError('Operation ledger full or record refused; no operation sent')
+    await this.persistState()
     return record
   }
 
   // Reconcile the outstanding batch against the game's own batch records (exact batch id / generation / actor / epoch
   // correlation) and trace the verdict. A batch proven not to have reached the game is cleared (it may be issued again); one
   // proven or possibly admitted stays as the duplicate guard until its receipt settles it or its step is left.
-  async reconcileOutstandingOperation({ trigger, requestId } = {}) {
+  async reconcileOutstandingOperation({ trigger, requestId, operationKey } = {}) {
     if (typeof this.memory.pendingOperation !== 'function') return undefined
     const key = this.activePlanKey()
-    const pending = this.memory.pendingOperation(key)
+    const records = this.memory.pendingOperations?.(key) ?? [this.memory.pendingOperation(key)].filter(Boolean)
+    if (!operationKey && records.length > 1) {
+      let result
+      for (const record of records) result = await this.reconcileOutstandingOperation({ trigger, requestId, operationKey: record.operation_key })
+      return result
+    }
+    const pending = operationKey ? records.find(record => record.operation_key === operationKey) : records.at(-1)
     if (!pending) return undefined
     const rid = requestId ?? this.traceRequest?.id ?? `reconcile_${Date.now().toString(36)}`
     let actor
@@ -5778,7 +5788,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         reason: result.reason,
         batch_id: result.batch_id ?? null,
         reconciled_at: Date.now(),
-      }) ?? pending
+      }, pending.operation_key) ?? pending
     }
     await this.persistState()
     await this.traceEvent('operation.reconciled', {
@@ -5805,11 +5815,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   // An idle receipt settles a batch only when its effect is proven complete or absent. Cancellation may leave a partial
   // effect, and an acknowledgement before a mod reload cannot establish what survived: both keep the duplicate guard.
-  async settleOutstandingOperation(rawStatus) {
+  async settleOutstandingOperation(rawStatus, operationKey) {
     try {
       if (typeof this.memory.pendingOperation !== 'function') return
       const key = this.activePlanKey()
-      const pending = this.memory.pendingOperation(key)
+      const records = this.memory.pendingOperations?.(key) ?? [this.memory.pendingOperation(key)].filter(Boolean)
+      if (!operationKey && records.length > 1) {
+        for (const record of records) await this.settleOutstandingOperation(rawStatus, record.operation_key)
+        return
+      }
+      const pending = operationKey ? records.find(record => record.operation_key === operationKey) : records.at(-1)
       if (!pending) return
       const watermark = batchWatermark(rawStatus)
       if (!watermark || watermark.idle !== true || watermark.queue_length !== 0) return
@@ -5852,7 +5867,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           reason: result.reason,
           batch_id: result.batch_id ?? null,
           reconciled_at: Date.now(),
-        })
+        }, pending.operation_key)
         await this.persistState()
       }
     }
@@ -7036,7 +7051,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   async taskStatusReceipt() {
     try {
-      const raw = String(await this.rcon.command(toolCommand('getTaskStatus', {}))).slice(0, 16000)
+      const raw = String(await this.rcon.command(toolCommand('getTaskStatus', {}))).slice(0, 8_000_000)
       await this.settleOutstandingOperation(raw)
       this.recordPlacementReceipt(raw)
       const currentPlan = this.memory.currentPlan?.(this.activePlanKey())
@@ -7077,7 +7092,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   async persistentRuntimeStatus() {
     try {
-      const raw = String(await this.rcon.command(toolCommand('getFollowStatus', {}))).slice(0, 16000)
+      const raw = String(await this.rcon.command(toolCommand('getFollowStatus', {}))).slice(0, 8_000_000)
       const follow = JSON.parse(raw)
       if (!follow || follow.active !== true) return undefined
       const status = safePersistentRuntime({ kind: 'follow', ...follow })
@@ -9930,7 +9945,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         if (this.requestInfo && typeof this.memory.checkDuplicateEffect === 'function') {
           const duplicate = this.memory.checkDuplicateEffect(this.requestInfo.memoryKey, { operations: plan.operations }, { requestId: this.traceRequest?.id })
           if (duplicate?.refuse) {
-            const failure = new AgentLoopError('Operation admission refused: an identical batch may already have taken effect')
+            const failure = new AgentLoopError('Operation admission refused: conflicting unresolved work may already have taken effect')
             failure.preflight = {
               ok: false,
               code: DUPLICATE_EFFECT_CODE,
@@ -10048,7 +10063,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           const held = error.preflight.duplicate ?? {}
           this.messages.push({
             role: 'user',
-            content: `[HARNESS] Refused before admission: this batch is identical to one that was already sent for this step, and its effect is not proven absent (effect=${held.effect}, reconciliation verdict=${held.verdict ?? 'none'}); nothing from this batch ran. Do not issue the same delivery, craft or placement again. Observe the destination or your inventory first, then submit only what is verifiably still missing, with different arguments. Facts: ${JSON.stringify({ operation_key: held.operation_key, effect_classes: held.effect_classes, batch_id: held.batch_id })}`,
+            content: `[HARNESS] Refused before admission: this batch conflicts with unresolved work whose effect is not proven absent (effect=${held.effect}, reconciliation verdict=${held.verdict ?? 'none'}); nothing from this batch ran. Do not bypass this hold by changing quantities, arguments, steps or plans. Reobserve the affected targets and materials within the recovery limits, then surface the blocker if uncertainty remains. Independently authorized work may continue only with disjoint targets and materials. Facts: ${JSON.stringify({ operation_key: held.operation_key, effect_classes: held.effect_classes, batch_id: held.batch_id })}`,
           })
           return this.runTurn()
         }
@@ -10180,18 +10195,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
       }
 
-      await this.recordPendingOperationBeforeSend(operations, before)
+      const pendingAdmission = await this.recordPendingOperationBeforeSend(operations, before)
       await this.traceEvent('operations.admit', { operations })
       // A restage that landed during that await must not let this reply's batch through
       // (outside the try below: a stale drop is not an admission failure).
       await this.assertCurrent()
       let reconciledAdmitted = false
       try {
-        const acknowledgement = await executeAuthorizedBatch(this.rcon, before.epoch, commands)
+        const acknowledgement = await executeAuthorizedBatch(this.rcon, before.epoch, commands, undefined, pendingAdmission)
         await this.traceEvent('operations.ack', {
           operations: operations.map((operation, index) => ({ ...operation, admission_result: acknowledgement.results[index] })),
         })
-        if (this.requestInfo) this.memory.updatePendingOperation?.(this.requestInfo.memoryKey, { state: PENDING_STATE.ACKNOWLEDGED })
+        if (this.requestInfo) this.memory.updatePendingOperation?.(this.requestInfo.memoryKey, { state: PENDING_STATE.ACKNOWLEDGED }, pendingAdmission?.operation_key)
         if (this.requestInfo && stateResult?.state) {
           const state = this.memory.setAdmissionState?.(this.requestInfo.memoryKey, 'admitted')
           if (state) stateResult = { ...stateResult, state }
@@ -10203,8 +10218,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         // MW2b: the command was sent but no valid acknowledgement came back. Ask the game what really happened (exact batch,
         // actor and epoch correlation) before anything is issued again or the goal is blocked.
         let reconciliation
-        if (isLostAcknowledgement(error) && this.requestInfo && typeof this.memory.pendingOperation === 'function') {
-          reconciliation = await this.reconcileOutstandingOperation({ trigger: 'lost_acknowledgement' })
+        if ((isLostAcknowledgement(error) || error?.admission) && this.requestInfo && typeof this.memory.pendingOperation === 'function') {
+          reconciliation = await this.reconcileOutstandingOperation({ trigger: 'lost_acknowledgement', operationKey: pendingAdmission?.operation_key })
         }
         if (reconciliation?.admitted) {
           // The game took the batch; only its receipt is outstanding. Carry on as acknowledged: nothing is sent again.

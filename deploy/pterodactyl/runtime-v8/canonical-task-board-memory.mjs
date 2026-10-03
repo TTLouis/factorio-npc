@@ -19,6 +19,7 @@ import {
   classifyTaskResume,
 } from './planning-state.mjs'
 import { duplicateEffectGuard } from './operation-reconciliation.mjs'
+import { pendingOperations, conflictingOperation } from './operation-ledger.mjs'
 import {
   mostRecentResumable,
   taskLedgerOf,
@@ -1650,7 +1651,11 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   // unsettled record whose effect is not proven absent refuses an IDENTICAL batch for the same plan step (no duplicate delivery).
 
   pendingOperation(key) {
-    return this.planningState(key)?.run?.pending_operation ?? null
+    return this.pendingOperations(key).at(-1) ?? null
+  }
+
+  pendingOperations(key) {
+    return pendingOperations(this.planningState(key))
   }
 
   recordPendingOperation(key, operation, { requestId } = {}) {
@@ -1671,8 +1676,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return ok ? held : undefined
   }
 
-  updatePendingOperation(key, patch) {
-    const held = this.pendingOperation(key)
+  updatePendingOperation(key, patch, operationKey) {
+    const held = operationKey ? this.pendingOperations(key).find(item => item.operation_key === operationKey) : this.pendingOperation(key)
     if (!held) return undefined
     const goalId = this.planningState(key)?.goal?.goal_id
     const after = this.#applyRunEvent(key, { type: PLANNING_EVENT.PENDING_OPERATION_RECORDED, goal_id: goalId, operation: { ...held, ...patch } })
@@ -1680,19 +1685,20 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   }
 
   clearPendingOperation(key, { operationKey } = {}) {
+    operationKey ??= this.pendingOperation(key)?.operation_key
     const goalId = this.planningState(key)?.goal?.goal_id
     const after = this.#applyRunEvent(key, { type: PLANNING_EVENT.PENDING_OPERATION_RECORDED, goal_id: goalId, operation: null, operation_key: operationKey })
-    return !after?.run?.pending_operation
+    return !pendingOperations(after).some(item => item.operation_key === operationKey)
   }
 
   /** Would these operations repeat an effect that may already have happened? Traces `operation.duplicate_suppressed` when so. */
   checkDuplicateEffect(key, { operations } = {}, { requestId } = {}) {
     const planning = this.planningState(key)
-    const pending = planning?.run?.pending_operation
     const plan = getActivePlan(planning)
     const step = plan?.steps?.[plan.active_step_index]
-    const guard = duplicateEffectGuard(pending, { operations, planId: plan?.plan_id, stepId: step?.step_id })
+    const guard = conflictingOperation(planning, { operations, planId: plan?.plan_id, stepId: step?.step_id })
     if (guard.refuse) {
+      const pending = this.pendingOperations(key).find(record => record.operation_key === guard.operation_key)
       this.#authTrace('operation.duplicate_suppressed', {
         ok: false,
         reason: guard.reason,

@@ -3,12 +3,14 @@ import crypto from 'node:crypto'
 export class StagingSessionError extends Error {}
 
 export class OperationBatchAdmissionError extends StagingSessionError {
-  constructor(message, { operationIndex, factorioError, output } = {}) {
+  constructor(message, { operationIndex, factorioError, output, results, admission } = {}) {
     super(message)
     this.operationIndex = operationIndex
     this.factorioError = factorioError
     this.output = output
     this.noReplay = true
+    this.results = results ?? []
+    this.admission = admission
   }
 }
 
@@ -126,15 +128,39 @@ export async function executeAuthorizedOperation(rcon, epoch, command, marker = 
   }
 }
 
-export async function executeAuthorizedBatch(rcon, epoch, commands, marker = `SGLUNA_RESULT_${crypto.randomBytes(12).toString('hex')}:`) {
+export async function executeAuthorizedBatch(rcon, epoch, commands, marker = `SGLUNA_RESULT_${crypto.randomBytes(12).toString('hex')}:`, correlation) {
   check(Number.isSafeInteger(epoch) && epoch > 0, 'Invalid deployment epoch')
   check(Array.isArray(commands) && commands.length >= 1 && commands.length <= 16, 'Invalid operation batch')
   const validated = commands.map(validatedOperationCall)
   check(/^SGLUNA_RESULT_[a-f0-9]{24}:$/.test(marker), 'Invalid operation acknowledgement marker')
 
+  if (correlation?.protocol_version === 2) {
+    const identity = { operation_key: correlation.operation_key, attempt_id: correlation.attempt_id,
+      signature: correlation.signature, actor_id: correlation.actor?.actor_id, epoch, ordinal: correlation.ordinal, operation_count: validated.length }
+    check(typeof identity.operation_key === 'string' && identity.operation_key.length <= 200 && typeof identity.attempt_id === 'string'
+      && typeof identity.signature === 'string' && Number.isSafeInteger(identity.actor_id) && Number.isSafeInteger(identity.ordinal) && identity.ordinal > 0, 'Invalid operation correlation')
+    const key = luaString(identity.operation_key)
+    const admissions = validated.map((command, index) => {
+      const slot = index + 1
+      return `local ok${slot},r${slot}=pcall(function() return ${command} end); local accepted=ok${slot} and r${slot}~=false and not(type(r${slot})=="table" and (r${slot}[1]==false or r${slot}.accepted==false or r${slot}.ok==false)); local snap=remote.call("autorio_".."operations","status"); local refs={}; if snap.active_batch then refs[1]={batch_id=snap.active_batch.batch_id,batch_generation=snap.active_batch.batch_generation,batch_ref=snap.active_batch.batch_ref} end; local stored=remote.call("autorio_operation_admission","slot",${key},${slot},{ok=accepted,result=ok${slot} and r${slot} or nil,error=not ok${slot} and tostring(r${slot}) or nil,mutation_unknown=not ok${slot},batch_refs=refs}); if not stored.ok then error("admission slot recording failed: "..tostring(stored.error),0) end; if not accepted then local message="autorio rejected operation ${slot}: "..tostring(r${slot}); local final=remote.call("autorio_operation_admission","finish",${key},{ok=false,error=message}); receipt=final.record; error(message,0) end; results[${slot}]=r${slot}`
+    }).join('; ')
+    const wrapped = `/silent-command local prefix={}; local receipt=nil; local ok,result=pcall(function() if not remote.call("sgluna_deployment","authorize",${epoch}) then error("stale npc actor epoch",0) end; local b=remote.call("autorio_operation_admission","begin",helpers.json_to_table(${luaString(JSON.stringify(identity))})); if not b.ok then error(tostring(b.error),0) end; if b.duplicate then receipt=b.record; error("duplicate operation admission; reconcile exact record",0) end; local results={}; prefix=results; ${admissions}; local final=remote.call("autorio_operation_admission","finish",${key},{ok=true}); receipt=final.record; if not final.ok then error(tostring(final.error),0) end; return results end); rcon.print(${luaString(marker)}..helpers.table_to_json({ok=ok,result=result,prefix=prefix,admission=receipt}))`
+    const parsed = parseAcknowledgement(await rcon.command(wrapped), marker)
+    check(parsed, 'Game command acknowledgement missing; operation batch will not be retried')
+    if (parsed.data.ok !== true) {
+      const factorioError = sanitizedAdmissionText(parsed.data.result)
+      const match = /autorio (?:operation|rejected operation) (\d+)/i.exec(factorioError)
+      throw new OperationBatchAdmissionError(`Game command failed; reconcile retained operation prefix: ${factorioError}`, {
+        operationIndex: match ? Number(match[1]) - 1 : undefined, factorioError, results: parsed.data.prefix,
+        admission: parsed.data.admission, output: sanitizedAdmissionText(parsed.output),
+      })
+    }
+    check(Array.isArray(parsed.data.result) && parsed.data.result.length === validated.length, 'Invalid Autorio batch acknowledgement')
+    return { results: parsed.data.result, admission: parsed.data.admission, output: parsed.output }
+  }
   const admissions = validated.map((command, index) => {
     const slot = index + 1
-    return `local ok${slot},r${slot}=pcall(function() return ${command} end); if not ok${slot} then error("autorio operation ${slot} failed: "..tostring(r${slot}),0) end; if r${slot}==false or (type(r${slot})=="table" and r${slot}[1]==false) then error("autorio rejected operation ${slot}: "..helpers.table_to_json(r${slot}),0) end; results[${slot}]=r${slot}`
+    return `local ok${slot},r${slot}=pcall(function() return ${command} end); if not ok${slot} then error("autorio operation ${slot} failed: "..tostring(r${slot}),0) end; if r${slot}==false or (type(r${slot})=="table" and (r${slot}[1]==false or r${slot}.accepted==false or r${slot}.ok==false)) then error("autorio rejected operation ${slot}: "..helpers.table_to_json(r${slot}),0) end; results[${slot}]=r${slot}`
   }).join('; ')
   const wrapped = `/silent-command local ok,result=pcall(function() if not remote.call("sgluna_deployment","authorize",${epoch}) then error("stale npc actor epoch",0) end; local results={}; ${admissions}; return results end); rcon.print(${luaString(marker)}..helpers.table_to_json({ok=ok,result=result}))`
   const parsed = parseAcknowledgement(await rcon.command(wrapped), marker)

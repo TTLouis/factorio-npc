@@ -20,12 +20,27 @@ export const PENDING_OPERATION_LIMITS = Object.freeze({
 const DELIVERY_OPERATIONS = new Set(['move_items', 'move_items_exact', 'move_items_with_player', 'supply_entity'])
 const CRAFT_OPERATIONS = new Set(['craft_item'])
 const PLACE_OPERATIONS = new Set(['place_entity', 'place_candidate', 'execute_construction_plan'])
+const WORLD_OPERATIONS = new Set(['mine_entity', 'mine_entity_exact', 'clear_area', 'rotate_entity', 'rotate_entity_exact', 'set_machine_recipe', 'equip_weapon', 'equip_ammo', 'equip_armor'])
 
 export function effectClassOf(name) {
   if (DELIVERY_OPERATIONS.has(name)) return 'delivery'
   if (CRAFT_OPERATIONS.has(name)) return 'craft'
   if (PLACE_OPERATIONS.has(name)) return 'place'
-  return 'other'
+  if (WORLD_OPERATIONS.has(name)) return 'world'
+  return ['wait', 'walk_to_entity', 'walk_to_position', 'walk_to_player', 'follow_player', 'stop_follow', 'cancel_all_tasks'].includes(name) ? 'other' : 'world'
+}
+
+function effectScopes(operation) {
+  if (effectClassOf(operation?.name) === 'other') return []
+  const args = operation?.args ?? {}
+  const scopes = []
+  for (const key of ['unit_number', 'target_unit_number']) if (Number.isSafeInteger(args[key])) scopes.push(`entity:${args[key]}`)
+  for (const key of ['item_name', 'entity_name', 'recipe_name']) if (typeof args[key] === 'string') scopes.push(`item:${args[key]}`)
+  const position = args.position ?? args.target_position
+  if (Number.isFinite(position?.x) && Number.isFinite(position?.y)) scopes.push(`position:${position.x}:${position.y}`)
+  // Unbounded name searches, ingredient consumption and construction manifests have unknown conflicts.
+  if (scopes.length === 0 || ['craft_item', 'execute_construction_plan', 'clear_area'].includes(operation?.name)) scopes.push('*')
+  return scopes
 }
 
 export const PENDING_STATE = Object.freeze({
@@ -128,10 +143,15 @@ export function batchWatermark(rawStatus) {
 }
 
 /** The durable record written before a batch is sent. `baseline` is `batchWatermark` of the status read just before. */
-export function buildPendingOperation({ requestId, operations, goalId, planId, stepId, actor, baseline, now } = {}) {
+export function buildPendingOperation({ requestId, operationKey, attemptId, ordinal, protocolVersion, operations, goalId, planId, stepId, actor, baseline, now } = {}) {
   const list = (Array.isArray(operations) ? operations : []).slice(0, PENDING_OPERATION_LIMITS.operations)
   return {
-    operation_key: text(`${requestId ?? 'request'}/batch`, PENDING_OPERATION_LIMITS.ref),
+    operation_key: text(operationKey ?? `${requestId ?? 'request'}/batch`, PENDING_OPERATION_LIMITS.ref),
+    request_id: text(requestId, 120),
+    attempt_id: text(attemptId ?? operationKey ?? `${requestId ?? 'request'}/batch`, 200),
+    protocol_version: protocolVersion === 2 ? 2 : 1,
+    ordinal: Number.isSafeInteger(ordinal) && ordinal > 0 ? ordinal : null,
+    scopes: [...new Set(list.flatMap(effectScopes))],
     state: PENDING_STATE.SENT,
     goal_id: text(goalId, 120) || null,
     plan_id: text(planId, PENDING_OPERATION_LIMITS.ref) || null,
@@ -165,12 +185,44 @@ export function buildPendingOperation({ requestId, operations, goalId, planId, s
  *   unknown              the status could not be read or has no baseline to compare with.
  */
 export function reconcilePendingOperation(pending, { status, actor } = {}) {
+  if (typeof status === 'string') { try { status = JSON.parse(status) } catch { status = null } }
   const lineage = pending?.actor ?? {}
+  if (pending?.protocol_version === 2 && (!Number.isSafeInteger(lineage.actor_id) || !Number.isSafeInteger(lineage.epoch)
+    || !Number.isSafeInteger(actor?.actor_id) || !Number.isSafeInteger(actor?.epoch))) {
+    return { verdict: RECONCILE_VERDICT.UNKNOWN, effect: EFFECT.UNKNOWN, reason: 'actor_lineage_missing' }
+  }
   if (Number.isSafeInteger(lineage.actor_id) && Number.isSafeInteger(actor?.actor_id) && lineage.actor_id !== actor.actor_id) {
     return { verdict: RECONCILE_VERDICT.STALE_ACTOR, effect: EFFECT.UNKNOWN, reason: 'actor_replaced', pending_actor_id: lineage.actor_id, actor_id: actor.actor_id }
   }
   if (Number.isSafeInteger(lineage.epoch) && Number.isSafeInteger(actor?.epoch) && lineage.epoch !== actor.epoch) {
     return { verdict: RECONCILE_VERDICT.STALE_ACTOR, effect: EFFECT.UNKNOWN, reason: 'actor_epoch_changed', pending_epoch: lineage.epoch, epoch: actor.epoch }
+  }
+  if (pending?.protocol_version === 2) {
+    const records = status?.admission_journal?.records ?? status?.admission_journal ?? []
+    const admission = Array.isArray(records) ? records.find(record => record.operation_key === pending.operation_key) : undefined
+    if (!admission) return { verdict: RECONCILE_VERDICT.UNKNOWN, effect: EFFECT.UNKNOWN, reason: 'exact_admission_missing' }
+    if (admission.attempt_id !== pending.attempt_id || admission.signature !== pending.signature || admission.actor_id !== lineage.actor_id || admission.epoch !== lineage.epoch) {
+      return { verdict: RECONCILE_VERDICT.UNKNOWN, effect: EFFECT.UNKNOWN, reason: 'admission_lineage_mismatch' }
+    }
+    if (!Number.isSafeInteger(pending.ordinal) || pending.ordinal !== admission.ordinal || admission.operation_count !== pending.operations.length) {
+      return { verdict: RECONCILE_VERDICT.UNKNOWN, effect: EFFECT.UNKNOWN, reason: 'operation_identity_incomplete' }
+    }
+    if (!Number.isSafeInteger(admission.generation) || !Number.isSafeInteger(status?.batch_generation)
+      || admission.generation !== status.batch_generation) {
+      return { verdict: RECONCILE_VERDICT.GENERATION_CHANGED, effect: EFFECT.PARTIAL_UNKNOWN, reason: 'admission_generation_changed' }
+    }
+    const batchId = admission.slots?.[0]?.batch_refs?.[0]?.batch_id
+    if (admission.state === 'completed') return { verdict: RECONCILE_VERDICT.ADMITTED_COMPLETED, effect: EFFECT.HAPPENED, reason: 'exact_receipts_completed', batch_id: batchId }
+    if (admission.state === 'admitted') return { verdict: RECONCILE_VERDICT.ADMITTED_IN_FLIGHT, effect: EFFECT.IN_FLIGHT, reason: 'exact_admission_in_flight', batch_id: batchId }
+    if (admission.state === 'not_admitted') return { verdict: RECONCILE_VERDICT.NOT_ADMITTED, effect: EFFECT.NOT_HAPPENED, reason: 'exact_admission_proven_absent' }
+    const refs = (admission.slots ?? []).flatMap(slot => slot.batch_refs ?? [])
+    if (refs.some(ref => (status?.receipt_journal ?? []).some(receipt => receipt.batch_ref === ref.batch_ref && receipt.state === 'cancelled'))) {
+      return { verdict: RECONCILE_VERDICT.ADMITTED_CANCELLED, effect: EFFECT.PARTIAL_UNKNOWN, reason: 'exact_batch_cancelled' }
+    }
+    if (Number.isSafeInteger(admission.generation) && Number.isSafeInteger(status?.batch_generation) && admission.generation !== status.batch_generation) {
+      return { verdict: RECONCILE_VERDICT.GENERATION_CHANGED, effect: EFFECT.PARTIAL_UNKNOWN, reason: 'mod_reloaded' }
+    }
+    return { verdict: RECONCILE_VERDICT.UNKNOWN, effect: EFFECT.PARTIAL_UNKNOWN, reason: 'exact_admission_unsettled' }
   }
   const now = batchWatermark(status)
   const baseline = pending?.baseline
@@ -210,6 +262,14 @@ export function reconcilePendingOperation(pending, { status, actor } = {}) {
 export function duplicateEffectGuard(pending, { operations, planId, stepId } = {}) {
   if (!isRecord(pending)) return { refuse: false }
   if (pending.effect === EFFECT.NOT_HAPPENED) return { refuse: false }
+  if (pending.protocol_version === 2) {
+    const proposed = (Array.isArray(operations) ? operations : []).flatMap(effectScopes)
+    const held = pending.scopes ?? ['*']
+    if (proposed.length === 0 || !(held.includes('*') || proposed.includes('*') || proposed.some(scope => held.includes(scope)))) return { refuse: false }
+    return { refuse: true, reason: 'unresolved_operation_scope_conflict', operation_key: pending.operation_key,
+      effect: pending.effect, verdict: pending.verdict ?? null, state: pending.state,
+      effect_classes: [...new Set((pending.operations ?? []).map(item => item.effect_class))], batch_id: pending.batch_id ?? null }
+  }
   if (pending.plan_id && planId && pending.plan_id !== planId) return { refuse: false }
   if (pending.step_id && stepId && pending.step_id !== stepId) return { refuse: false }
   if (pending.signature !== operationSignature(operations)) return { refuse: false }
@@ -286,6 +346,11 @@ export function sanitizePendingOperation(raw) {
     : null
   return {
     operation_key: key,
+    request_id: text(raw.request_id, 120),
+    attempt_id: text(raw.attempt_id ?? key, 200),
+    protocol_version: raw.protocol_version === 2 ? 2 : 1,
+    ordinal: Number.isSafeInteger(raw.ordinal) && raw.ordinal > 0 ? raw.ordinal : null,
+    scopes: Array.isArray(raw.scopes) ? raw.scopes.filter(value => typeof value === 'string').slice(0, 96).map(value => text(value, 240)) : ['*'],
     state: states.includes(raw.state) ? raw.state : PENDING_STATE.SENT,
     goal_id: text(raw.goal_id, 120) || null,
     plan_id: text(raw.plan_id, PENDING_OPERATION_LIMITS.ref) || null,
@@ -298,7 +363,7 @@ export function sanitizePendingOperation(raw) {
     operations: (Array.isArray(raw.operations) ? raw.operations : []).slice(0, PENDING_OPERATION_LIMITS.operations).filter(isRecord).map(operation => ({
       trace_operation_id: text(operation.trace_operation_id, PENDING_OPERATION_LIMITS.ref),
       name: text(operation.name, 80),
-      effect_class: ['delivery', 'craft', 'place', 'other'].includes(operation.effect_class) ? operation.effect_class : 'other',
+      effect_class: ['delivery', 'craft', 'place', 'world', 'other'].includes(operation.effect_class) ? operation.effect_class : 'other',
     })),
     baseline,
     effect: effects.includes(raw.effect) ? raw.effect : EFFECT.UNKNOWN,

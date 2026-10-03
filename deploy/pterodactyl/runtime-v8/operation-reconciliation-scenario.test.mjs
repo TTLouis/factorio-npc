@@ -30,6 +30,7 @@ class LossyGame extends FakeFactorio {
     this.activeBatch = undefined
     this.taskState = 'idle'
     this.queueLength = 0
+    for (const record of this.admissions) if (record.batch_id === this.completedBatch?.batch_id) record.state = 'completed'
   }
 
   reloadMod() {
@@ -39,6 +40,7 @@ class LossyGame extends FakeFactorio {
     this.completedBatch = undefined
     this.taskState = 'idle'
     this.queueLength = 0
+    for (const record of this.admissions) if (record.state !== 'completed') record.state = 'uncertain'
   }
 
   async command(text) {
@@ -52,6 +54,8 @@ class LossyGame extends FakeFactorio {
         active_batch: this.activeBatch,
         last_completed_batch: this.completedBatch,
         last_cancelled_batch: this.cancelledBatch,
+        admission_journal: this.admissionJournal(),
+        receipt_journal: this.cancelledBatch ? [{ ...this.cancelledBatch, state: 'cancelled', batch_ref: `batch-g${this.generation}-${this.cancelledBatch.batch_id}` }] : [],
         basic_operation: this.completedBatch ? { last_result: { operation_id: this.batchId, tick: this.completedBatch.tick, actor_id: this.status.actor_id, accepted: true, completed: true, code: 'completed', type: 'moving_items', moved_count: 5, to_entity: true } } : undefined,
       })
     }
@@ -146,19 +150,18 @@ test('lost acknowledgement, effect happened: reconciled as admitted, the deliver
   assert.equal(done.goalStatus, 'completed')
 })
 
-test('lost acknowledgement, batch never reached the game: proven by the batch ids, so exactly one harness-told retry reaches it', async () => {
-  const world = harness({ replies: [deliveryPlan(), deliveryPlan()] })
+test('missing exact admission stays uncertain even when unrelated batch watermarks suggest no delivery', async () => {
+  const world = harness({ replies: [deliveryPlan()] })
   world.game.dropSendOnce = true
-  await world.say('deliver 5 coal to the wooden chest')
+  await assert.rejects(world.say('deliver 5 coal to the wooden chest'))
 
   const reconciled = world.named('operation.reconciled')
-  assert.equal(reconciled[0].verdict, 'not_admitted')
-  assert.equal(reconciled[0].effect, 'not_happened')
-  assert.equal(world.named('operations.preflight_recoverable').at(-1).failure_class, 'lost_acknowledgement_not_admitted')
-  assert.match(world.calls[1], /never reached the game/)
-  assert.equal(world.calls.length, 2)
-  assert.equal(world.game.deliveries.length, 1, 'only the retry ran: the first send never arrived')
-  assert.equal(world.pending().state, 'acknowledged')
+  assert.equal(reconciled[0].verdict, 'unknown')
+  assert.equal(reconciled[0].effect, 'unknown')
+  assert.equal(reconciled[0].reason, 'exact_admission_missing')
+  assert.equal(world.calls.length, 1)
+  assert.equal(world.game.deliveries.length, 0, 'uncertainty never authorizes a replay')
+  assert.equal(world.pending().state, 'unreconciled')
 })
 
 test('lost acknowledgement with an unreadable game status is never counted as success: the effect stays unknown and guards the step', async () => {
@@ -180,7 +183,7 @@ test('lost acknowledgement with an unreadable game status is never counted as su
   assert.equal(world.game.deliveries.length, 1)
 })
 
-test('restart with an outstanding operation: reconciled before resuming, an identical delivery is suppressed, a changed one is not', async () => {
+test('restart with an outstanding operation: both identical and changed deliveries are suppressed', async () => {
   const first = harness({ replies: [deliveryPlan()] })
   await first.say('deliver 5 coal to the wooden chest')
   assert.equal(first.pending().state, 'acknowledged', 'the batch was acknowledged but its receipt never arrived before the restart')
@@ -193,27 +196,25 @@ test('restart with an outstanding operation: reconciled before resuming, an iden
   memory.restore(wire)
   assert.equal(memory.pendingOperation(KEY).operation_key, first.pending().operation_key, 'the outstanding operation survives the restart')
 
-  const second = harness({ memory, game: first.game, replies: [deliveryPlan(), deliveryPlan(3)] })
+  const second = harness({ memory, game: first.game, replies: [deliveryPlan(), deliveryPlan(3), planReply({operations:[]})] })
   await recoverInterruptedAgentPlan(second.agent, 'runtime_restart', {})
 
   const reconciled = second.named('operation.reconciled')
   assert.equal(reconciled.length, 1)
   assert.equal(reconciled[0].trigger, 'runtime_restart')
   assert.equal(reconciled[0].verdict, 'generation_changed')
-  assert.equal(reconciled[0].effect, 'unknown')
+  assert.equal(reconciled[0].effect, 'partial_unknown')
   assert.match(second.calls[0], /Operation reconciliation/)
   assert.match(second.calls[0], /UNKNOWN, not as done and not as absent/)
 
   // The model replays the identical delivery: refused before admission, nothing reaches the game.
   const suppressed = second.named('operation.duplicate_suppressed')
-  assert.equal(suppressed.length, 1)
-  assert.equal(suppressed[0].reason, 'identical_batch_effect_not_proven_absent')
-  assert.equal(suppressed[0].effect, 'unknown')
+  assert.equal(suppressed.length, 2)
+  assert.equal(suppressed[0].reason, 'unresolved_operation_scope_conflict')
+  assert.equal(suppressed[0].effect, 'partial_unknown')
   assert.deepEqual(suppressed[0].effect_classes, ['delivery'])
-  assert.match(second.calls[1], /identical to one that was already sent/)
-  // The retry with a different amount is allowed through: it is not the same effect.
-  assert.equal(first.game.deliveries.length, 2)
-  assert.ok(first.game.deliveries[1].includes('3,true'), 'the changed delivery (3) reached the game, the identical one (5) did not')
+  assert.match(second.calls[1], /conflicts with unresolved work/)
+  assert.equal(first.game.deliveries.length, 1, 'changing the amount cannot bypass uncertainty')
   assert.equal(first.game.deliveries.filter(text => text.includes(',5,true')).length, 1)
 })
 
@@ -235,7 +236,7 @@ test('an idle partial-cancellation receipt keeps the duplicate delivery guard ac
     assert.equal(world.pending().verdict, 'admitted_cancelled')
     const receipt = world.named('operation.reconciled').findLast(row => row.trigger === 'receipt')
     assert.equal(receipt.settled, false)
-    assert.equal(receipt.reason, 'new_batch_cancelled')
+    assert.equal(receipt.reason, 'exact_batch_cancelled')
     assert.ok(receipt.request_id)
     assert.equal(receipt.request_id, operationKey.split('/')[0], 'receipt stays correlated to the originating request after its turn ends')
     assert.equal(world.memory.checkDuplicateEffect(KEY, { operations: [deliver()] }, { requestId: 'req_partial_retry' }).refuse, true)
@@ -249,26 +250,26 @@ test('an idle partial-cancellation receipt keeps the duplicate delivery guard ac
   }
 })
 
-test('an acknowledged delivery keeps its guard when an idle receipt follows a mod reload or loses its baseline', async () => {
-  for (const missingBaseline of [false, true]) {
+test('an acknowledged delivery keeps its guard across reload and missing exact receipts', async () => {
+  for (const missingReceipt of [false, true]) {
     const world = harness({ replies: [deliveryPlan()] })
     await world.say('deliver 5 coal to the wooden chest')
     assert.equal(world.pending().state, 'acknowledged')
-    if (missingBaseline) {
-      world.memory.updatePendingOperation(KEY, { baseline: null })
+    if (missingReceipt) {
       world.game.completeBatch()
+      world.game.admissions = []
     }
     else {
       world.game.reloadMod()
     }
     await world.agent.taskStatusReceipt()
 
-    assert.equal(world.pending()?.effect, 'unknown')
-    assert.equal(world.pending().verdict, missingBaseline ? 'unknown' : 'generation_changed')
+    assert.equal(world.pending()?.effect, missingReceipt ? 'unknown' : 'partial_unknown')
+    assert.equal(world.pending().verdict, missingReceipt ? 'unknown' : 'generation_changed')
     assert.equal(world.pending().state, 'unreconciled')
     const receipt = world.named('operation.reconciled').findLast(row => row.trigger === 'receipt')
     assert.equal(receipt.settled, false)
-    assert.equal(receipt.reason, missingBaseline ? 'no_baseline' : 'mod_reloaded')
+    assert.equal(receipt.reason, missingReceipt ? 'exact_admission_missing' : 'admission_generation_changed')
     assert.ok(receipt.request_id)
     assert.equal(receipt.request_id, world.pending().operation_key.split('/')[0])
     assert.equal(world.memory.checkDuplicateEffect(KEY, { operations: [deliver()] }, { requestId: 'req_reload_retry' }).refuse, true)

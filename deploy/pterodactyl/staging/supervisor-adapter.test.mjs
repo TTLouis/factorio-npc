@@ -176,6 +176,27 @@ test('authorized dependency batch admits every operation in one RCON/Lua transac
   assert.match(rcon.commands[0], /type\(r1\)=="table" and r1\[1\]==false/)
 })
 
+test('correlated admissions persist each slot before continuing and expose a failed prefix without replay', async () => {
+  const marker = 'SGLUNA_RESULT_0123456789abcdef01234567:'
+  const correlation = { protocol_version: 2, operation_key: 'req/batch_1', attempt_id: 'req/batch_1', ordinal: 1,
+    signature: 'hash', actor: { actor_id: 18, epoch: 3 } }
+  const rcon = new FakeRcon([`${marker}${JSON.stringify({ ok: false, result: 'autorio rejected operation 2',
+    prefix: [[true, 'first admitted']], admission: { operation_key: 'req/batch_1', state: 'uncertain' } })}`])
+  await assert.rejects(executeAuthorizedBatch(rcon,3,[
+    'remote.call("autorio_operations","wait",60)', 'remote.call("autorio_operations","wait",60)',
+  ],marker,correlation), error => {
+    assert.equal(error.operationIndex,1)
+    assert.deepEqual(error.results,[[true,'first admitted']])
+    assert.equal(error.admission.state,'uncertain')
+    assert.equal(error.noReplay,true)
+    return true
+  })
+  assert.equal(rcon.commands.length,1)
+  assert.match(rcon.commands[0],/operation_count/)
+  assert.match(rcon.commands[0],/if not stored.ok then error/)
+  assert.ok(rcon.commands[0].indexOf('"slot"') < rcon.commands[0].indexOf('local ok2,r2'))
+})
+
 test('mutation rejection, missing acknowledgement, and stale authorization fail closed without retries', async () => {
   const marker = 'SGLUNA_RESULT_0123456789abcdef01234567:'
   for (const raw of [
