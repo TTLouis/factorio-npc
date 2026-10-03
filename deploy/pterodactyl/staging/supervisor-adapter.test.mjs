@@ -173,7 +173,7 @@ test('authorized dependency batch admits every operation in one RCON/Lua transac
   assert.ok(first >= 0 && second > first)
   assert.match(rcon.commands[0], /local ok1,r1=pcall\(function\(\) return remote\.call/)
   assert.match(rcon.commands[0], /local ok2,r2=pcall\(function\(\) return remote\.call/)
-  assert.match(rcon.commands[0], /type\(r1\)=="table" and r1\[1\]==false/)
+  assert.match(rcon.commands[0], /type\(r1\)=="table" and \(r1\[1\]==false or r1\.accepted==false or r1\.ok==false\)/)
 })
 
 test('correlated admissions persist each slot before continuing and expose a failed prefix without replay', async () => {

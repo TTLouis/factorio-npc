@@ -67,3 +67,18 @@ test('goalless restore preserves uncertainty and upgrades legacy watermark recor
   assert.deepEqual(restored.operation_ledger.records[0].scopes,['*'])
   assert.equal(reconcilePendingOperation(restored.operation_ledger.records[0],{actor,status:{task_state:'idle',queue_length:0,batch_generation:1,last_completed_batch:{batch_id:100}}}).effect,EFFECT.UNKNOWN)
 })
+
+test('runtime can reconcile existing work after goal teardown but cannot admit new work or change its identity', () => {
+  for (const goal of [null, {goal_id:'goal',status:'cancelled'}, {goal_id:'goal',status:'completed'}]) {
+    let state={...createEmptyPlanningState(),goal,operation_ledger:recordOperation(null,record('one'))}
+    state=applyPlanningEvent(state,{type:PLANNING_EVENT.PENDING_OPERATION_RECORDED,source:'runtime',operation:{...record('one'),effect:EFFECT.PARTIAL_UNKNOWN},now:1})
+    assert.equal(state.operation_ledger.records[0].effect,EFFECT.PARTIAL_UNKNOWN)
+    const held=state
+    assert.equal(applyPlanningEvent(state,{type:PLANNING_EVENT.PENDING_OPERATION_RECORDED,source:'runtime',operation:record('new'),now:2}),held)
+    assert.equal(applyPlanningEvent(state,{type:PLANNING_EVENT.PENDING_OPERATION_RECORDED,source:'runtime',operation:{...record('one'),signature:'changed'},now:2}),held)
+    assert.equal(applyPlanningEvent(state,{type:PLANNING_EVENT.PENDING_OPERATION_RECORDED,source:'model',operation:null,operation_key:'one',now:2}),held)
+    state=applyPlanningEvent(state,{type:PLANNING_EVENT.PENDING_OPERATION_RECORDED,source:'runtime',operation:null,operation_key:'one',now:3})
+    assert.equal(state.operation_ledger.records.length,0)
+    assert.equal(state.operation_ledger.closed.at(-1).operation_key,'one')
+  }
+})

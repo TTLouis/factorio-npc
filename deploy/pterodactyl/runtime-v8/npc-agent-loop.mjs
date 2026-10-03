@@ -5831,6 +5831,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const actor = this.epoch ? { actor_id: this.epoch.actor_id, epoch: this.epoch.epoch } : undefined
       const result = reconcilePendingOperation(pending, { status: rawStatus, actor })
       const provable = [RECONCILE_VERDICT.ADMITTED_COMPLETED, RECONCILE_VERDICT.NOT_ADMITTED].includes(result.verdict)
+      const settled = provable && this.memory.clearPendingOperation?.(key, { operationKey: pending.operation_key }) === true
       const rid = this.traceRequest?.id ?? pending.operation_key.split('/')[0]
       // The ordinary case (acknowledged, then its receipt) settles silently; only a batch whose acknowledgement was lost or whose
       // lineage is in doubt is worth a reconciliation row.
@@ -5839,7 +5840,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           request_id: rid,
           trigger: 'receipt',
           ...reconciliationFacts(result, pending),
-          settled: provable,
+          settled,
           signature: pending.signature,
           plan_id: pending.plan_id,
           step_id: pending.step_id,
@@ -5856,7 +5857,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }, { requestId: rid })
       }
       if (provable) {
-        this.memory.clearPendingOperation?.(key, { operationKey: pending.operation_key })
+        if (!settled) throw new AgentLoopError('Exact operation settlement refused; unresolved record retained')
         await this.persistState()
       }
       else {

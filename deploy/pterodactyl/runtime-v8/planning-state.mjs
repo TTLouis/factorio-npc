@@ -2960,22 +2960,24 @@ Object.assign(HANDLERS, {
     })
   },
 
-  // MW2b. A record is stamped for its goal; one for another goal is stale work and fails closed. `operation: null` clears it,
-  // optionally only when its key matches (a late clear for an older batch cannot erase a newer pending one).
+  // Existing campaign work can be reconciled even after its goal stops. New
+  // admissions still require an active goal and that goal's exact identity.
   [PLANNING_EVENT.PENDING_OPERATION_RECORDED](state, event, now) {
-    if (!runEventAllowed(state, event)) return state
+    if (!isRuntimeAuthority(event.source)) return state
     const run = state.run ?? createEmptyRunState()
+    const existing = operationLedger(state.operation_ledger, run.pending_operation)
     if (event.operation === null || event.operation === undefined) {
       const key = text(event.operation_key ?? run.pending_operation?.operation_key, 200)
-      const existing = operationLedger(state.operation_ledger, run.pending_operation)
       if (!existing.records.some(record => record.operation_key === key)) return state
       const ledger = settleOperation(existing, key)
       return { ...state, operation_ledger: ledger, run: { ...run, pending_operation: ledger.records.at(-1) ?? null, updated_at: now }, updated_at: now }
     }
     const record = sanitizePendingOperation(event.operation)
     if (!record) return state
-    const existing = operationLedger(state.operation_ledger, run.pending_operation)
-    if (record.goal_id && record.goal_id !== state.goal.goal_id && !existing.records.some(item => item.operation_key === record.operation_key)) return state
+    const prior = existing.records.find(item => item.operation_key === record.operation_key)
+    if (!prior && (!runEventAllowed(state, event) || record.goal_id !== state.goal?.goal_id)) return state
+    if (prior && (record.signature !== prior.signature || record.attempt_id !== prior.attempt_id
+      || record.ordinal !== prior.ordinal || record.actor.actor_id !== prior.actor.actor_id || record.actor.epoch !== prior.actor.epoch)) return state
     const ledger = recordOperation(existing, record)
     if (!ledger) return state
     return { ...state, operation_ledger: ledger, run: { ...run, pending_operation: record, updated_at: now }, updated_at: now }
