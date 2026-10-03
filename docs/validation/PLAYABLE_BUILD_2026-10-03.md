@@ -1,8 +1,9 @@
 # Playable red-science implementation checklist — October 3, 2026
 
 This is a resumable implementation record, not gameplay acceptance or package
-promotion. Integration remains `experiment/jev-agent-architecture` at
-`4d89ed5d`. Main and live deployment have not been changed. No push is authorized.
+promotion. Integration is `experiment/jev-agent-architecture`; reviewed native
+receipt fencing, physical corpse retrieval and planner stock guidance have landed
+locally through `9b03a240`. Main and live deployment have not changed. No push is authorized.
 
 ## Acceptance contract
 
@@ -26,17 +27,20 @@ All paths below are siblings of the integration checkout under
 | Unit | Owner / worktree | Candidate | Status |
 | --- | --- | --- | --- |
 | Native exact admission and prefix receipts | mod receipt migration / `playable-mod-receipts` | `8674ed27` | Separate review; original mod gate passed 901 tests plus typecheck/Lua checks |
-| Durable ordinal fence after receipt pruning | parent / `playable-mod-receipt-fence` | `78b90c1a` | Reviewed; new tests unexecuted |
-| Campaign operation ledger and exact reconciliation | parent / `playable-durable-operations` | `595009b4` | Separate review in progress; static syntax checks; Docker gate pending |
-| 32-task retention, task-local authority/questions | task migration / `playable-task-retention` | `5959981f` plus follow-up underway | Initial unit committed; scheduler/facade integration underway |
-| Physical corpse tracking/retrieval and ammo compatibility | corpse migration / `playable-corpse-recovery` | `de137419` | Review findings corrected; Docker/native-engine tests pending |
-| Campaign allowance and manual provider bridge | provider migration / `playable-provider-allowance` | `f9c5bcf8` | Reviewed timing fixes; tests written, unexecuted; transport/persistence wiring pending |
-| Exact supplying-line output monitor | production migration / `playable-output-proof` | Pending | Conservative direct assembler/inserter/chest monitor underway; native delivery semantics unverified |
+| Durable ordinal fence after receipt pruning | parent / `playable-mod-receipt-fence` | `78b90c1a` | Reviewed and integrated by `7f33e26e`; combined gate passed |
+| Campaign operation ledger and exact reconciliation | parent / `playable-durable-operations` | `df416148` | Runtime 1,570/1,570; final semantic review underway |
+| 32-task retention, task-local authority/questions | task migration / `playable-task-retention` | `4ac4b8df` plus review repair underway | Runtime 1,585/1,585; review caught missing clock fence on completion handoff |
+| Physical corpse tracking/retrieval and ammo compatibility | corpse migration / `playable-corpse-recovery` | `de137419` | Reviewed and integrated by `f54d850b`; combined gate passed; native engine pending |
+| Campaign allowance and manual provider bridge | provider migration / `playable-provider-allowance` | `f9c5bcf8` | New bridge/allowance tests passed; two inherited reservation tests require complete task integration |
+| Paid-transport admission and global campaign persistence | provider migration / `playable-campaign-transport` | In progress | Default paid transport disabled; fake transport fixture/shipping closure fixes underway |
+| Exact supplying-line output monitor | production migration / `playable-output-proof` | `10685826` | Reviewed candidate; mod 911/911; satisfaction and upstream automation flags remain false |
+| Buffered stock planner guidance | stock migration / `playable-buffer-stock-guidance` | `0ae5e392` | Reviewed and integrated by `9b03a240`; separate mod gate 903/903 |
+| Bounded buffered circuit API | circuit migration / `playable-buffer-circuits` | `29c14eb3` | Mod 920/920, typecheck/Lua passed; separate review pending; stop/restart unverified |
 
 ## Dependency order and remaining work
 
-- [ ] Run native admission/fence regression gates and runtime ledger gates.
-- [ ] Complete separate review and integrate those foundational units.
+- [x] Run native admission/fence regression gates and runtime ledger gates.
+- [ ] Complete final ledger review and integrate runtime foundation (native foundation integrated).
 - [ ] Complete task facade/scheduler wiring, including refusal before physical
   cancellation, preserved queued constraints and pending FIFO resume.
 - [ ] Verify full 32-task queue, isolated questions, checkpoint omission from
@@ -62,7 +66,7 @@ All paths below are siblings of the integration checkout under
   invalidate manual deposits, identity changes, deficient minutes and ambiguity.
 - [ ] Add bounded circuit connection/configuration/readback with existing-wiring,
   identity and reach checks. Validate buffered line stop/restart and overshoot.
-- [ ] Update in-game planner skill cards: buildings at least two live stacks;
+- [x] Update in-game planner skill cards: buildings at least two live stacks;
   belt tiers roughly 400–600, grounded planner target and explicit quantity wins.
   No caps for science or other continuously consumed flows.
 - [ ] Revalidate burner/furnace, natural-water steam, powered assembler/inserters,
@@ -71,19 +75,27 @@ All paths below are siblings of the integration checkout under
   package promotion checks and all three real-engine acceptance runs.
 - [ ] Update playable status and conflicting roadmap notes with actual evidence.
 
-## Validation evidence and current blocker
+## Validation evidence and remaining gates
 
-Docker Desktop's Linux engine is unavailable: `docker version` fails with missing
-`dockerDesktopLinuxEngine` pipe. Repository instructions prohibit agents from
-restarting Docker Desktop. Owner action is needed to restore the engine. Code
-work may continue; tests and real Factorio validation remain pending.
+Docker's Linux engine is available again. All regression runs below use the
+canonical Docker-only script; no host dependency installation or paid calls.
 
-`logs/playable-mod-receipts.log` contains the passing original native receipt gate
-for **8674ed27 only**, before ordinal/corpse changes. An earlier runtime ledger
-attempt in `logs/playable-operations-runtime.log` had **1549/1565 passing, 16
-failing** before subsequent edits. It is not a passing result for current HEAD.
-Task, corpse and allowance gate attempts stopped before executing tests because
-Docker was unavailable. Host checks are syntax/whitespace only, not tests.
+- `logs/playable-integration-receipts-2026-10-03.log`: integration `7f33e26e`,
+  all gate exit 0: 1,561 runtime and 903 mod tests, typecheck/Lua/generated guard.
+- `logs/playable-integration-corpses-2026-10-03.log`: integration `f54d850b`,
+  all gate exit 0: 1,561 runtime and 912 mod tests, typecheck/Lua/generated guard.
+- `logs/playable-operations-runtime-2026-10-03-r6.log`: ledger `df416148`,
+  runtime gate exit 0, 1,570/1,570.
+- `logs/playable-task-maintenance.log`: retention `4ac4b8df`, runtime gate
+  exit 0, 1,585/1,585. Separate review repair needs a new gate.
+- `logs/output-proof-mod-2026-10-03.log`: output candidate `10685826`, mod
+  gate exit 0, 911/911 plus typecheck/Lua/generated guard.
+- `logs/buffer-circuits-mod-2026-10-03-final.log`: circuit `29c14eb3`, mod
+  gate exit 0, 920/920 plus typecheck/Lua/generated guard.
+
+No new real-engine acceptance, package promotion or actual provider autonomy
+claim is established by these gates. Candidate branches must be integrated,
+review repairs checked and the shipped payload repinned before promotion checks.
 
 ## Review findings incorporated
 
@@ -97,6 +109,11 @@ Docker was unavailable. Host checks are syntax/whitespace only, not tests.
 - Persist native ordinal high-water marks so pruned receipts cannot permit late
   replay. Bind the exact canonical batch with SHA-256 and retain successful
   prefixes before subsequent commands.
+- Exact sealed receipts can settle historical work by the original actor;
+  unfinished old-actor work remains uncertain. Local cancellation before the
+  transport call can prove absence; a restart alone cannot.
+- A refused uncertain retry followed by an explicit blocker uses exact harness
+  uncertainty evidence, instead of offering a provider-failure Resume.
 - Corpse deduplication includes full request identity; validate the live corpse's
   surface and force. Runtime must derive distinct retrieval ordinals per slot.
 - Bound bridge tracing, filesystem waits and identity hooks; timeout/close/cancel

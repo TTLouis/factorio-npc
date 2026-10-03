@@ -5,11 +5,13 @@ This file is the current status summary for the single-NPC integration line. His
 ## October 3 playable implementation candidates
 
 The owner-approved red-science plan is being implemented in isolated local
-branches. These candidates have not been integrated or promoted. Docker's Linux
-engine is unavailable, so new regression and real-engine acceptance runs remain
-pending. The [implementation checklist](validation/PLAYABLE_BUILD_2026-10-03.md)
-records candidate SHAs, review findings, earlier test evidence and remaining
-dependencies. The three-seed playable checkpoint has **not** passed.
+branches. Native receipt fencing, physical corpse retrieval and planner stock
+guidance have landed locally; their combined regression gates are passing.
+The durable runtime ledger passes 1,570 tests and task retention passes 1,585,
+with final review repairs still pending integration. Docker is available again.
+The [implementation checklist](validation/PLAYABLE_BUILD_2026-10-03.md) records
+candidate SHAs, evidence and remaining dependencies. Package promotion,
+real-engine acceptance and the three-seed playable checkpoint have **not** passed.
 
 ## October 2 experimental playable-build checkpoint
 
