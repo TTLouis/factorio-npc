@@ -23,6 +23,7 @@ import { new_crafting_controller } from './crafting'
 import { new_defense_controller } from './defense'
 import { create_discovery_remote_interface } from './discovery'
 import { new_equipment_controller } from './equipment'
+import { new_corpse_recovery_controller, note_npc_corpse, note_npc_death } from './corpse_recovery'
 import { entity_last_user } from './entity_provenance'
 import { entity_reference_hint, resolve_exact_entity } from './entity_reference'
 import { new_follow_controller } from './follow'
@@ -79,6 +80,7 @@ const crafting_controller = new_crafting_controller(get_controlled_actor, task_m
 const research_controller = new_research_controller(get_controlled_actor, task_manager)
 const combat_controller = new_combat_controller(get_controlled_actor, task_manager)
 const equipment_controller = new_equipment_controller(get_controlled_actor)
+const corpse_recovery_controller = new_corpse_recovery_controller(get_controlled_actor)
 const follow_controller = new_follow_controller(
   get_controlled_actor,
   (player_name, follow_distance) => navigation_controller.submit_player(player_name, follow_distance),
@@ -129,6 +131,10 @@ remote.add_interface('autorio_defense', {
 
 remote.add_interface('autorio_equipment', {
   status: () => equipment_controller.status(),
+})
+
+remote.add_interface('autorio_corpse_recovery', {
+  status: () => corpse_recovery_controller.status(),
 })
 
 remote.add_interface('autorio_crafting', {
@@ -381,6 +387,7 @@ remote.add_interface('autorio_operations', {
   stop_follow_player: (): [boolean, string] => follow_controller.stop(),
   set_auto_defense: (enabled: boolean): [boolean, string] => defense_controller.set_enabled(enabled),
   equip_weapon: (item_name: string, slot: number = 1): [boolean, string] => equipment_controller.equip_weapon(item_name, slot),
+  recover_corpse: (corpse_ref: string, max_slots: number, max_count: number, expected_actor_id: number, request_id: string) => corpse_recovery_controller.recover(corpse_ref, max_slots, max_count, expected_actor_id, request_id),
   equip_ammo: (item_name: string, slot: number = 1): [boolean, string] => equipment_controller.equip_ammo(item_name, slot),
   equip_armor: (item_name: string): [boolean, string] => equipment_controller.equip_armor(item_name),
   select_weapon_slot: (slot: number): [boolean, string] => equipment_controller.select_weapon_slot(slot),
@@ -563,6 +570,8 @@ function state_walking_direct(actor: ControlledActor) {
   }
 }
 
+script.on_event(defines.events.on_entity_died, event => note_npc_death(event))
+script.on_event(defines.events.on_post_entity_died, event => note_npc_corpse(event))
 script.on_event(defines.events.on_selected_entity_changed, (_event: OnSelectedEntityChangedEvent) => { /* Selection changes are intentionally ignored. */ })
 
 script.on_event(defines.events.on_script_path_request_finished, (event: OnScriptPathRequestFinishedEvent) => {

@@ -91,6 +91,8 @@ import { event_handlers, set_load_handler } from './test-event-registry'
     ghost_place: 'ghost_place',
   },
   events: {
+    on_entity_died: 'on_entity_died',
+    on_post_entity_died: 'on_post_entity_died',
     on_selected_entity_changed: 'on_selected_entity_changed',
     on_script_path_request_finished: 'on_script_path_request_finished',
     on_player_mined_entity: 'on_player_mined_entity',
@@ -120,6 +122,7 @@ import { event_handlers, set_load_handler } from './test-event-registry'
     shooting_selected: 'shooting_selected',
   },
   inventory: {
+    character_corpse: 'character_corpse',
     character_guns: 'character_guns',
     character_ammo: 'character_ammo',
     character_armor: 'character_armor',
