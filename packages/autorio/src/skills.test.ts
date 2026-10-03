@@ -95,16 +95,16 @@ beforeEach(() => {
 })
 
 describe('curated basic skill library', () => {
-  it('seeds exactly eleven manual candidate patterns idempotently', () => {
-    expect(ensure_basic_skill_definitions()).toEqual({ added: 11, upgraded: 0, total: 11 })
+  it('seeds exactly twelve manual candidate patterns idempotently', () => {
+    expect(ensure_basic_skill_definitions()).toEqual({ added: 12, upgraded: 0, total: 12 })
     const skills = list_skill_definitions()
-    expect(skills).toHaveLength(11)
+    expect(skills).toHaveLength(12)
     expect(skills.every(skill => skill.source.kind === 'manual')).toBe(true)
     expect(skills.every(skill => skill.status === 'candidate')).toBe(true)
     expect(skills.every(skill => skill.stage === 'pattern')).toBe(true)
     expect(skills.every(skill => skill.verification.production_output === 'not_tested')).toBe(true)
-    expect(ensure_basic_skill_definitions()).toEqual({ added: 0, upgraded: 0, total: 11 })
-    expect(list_skill_definitions()).toHaveLength(11)
+    expect(ensure_basic_skill_definitions()).toEqual({ added: 0, upgraded: 0, total: 12 })
+    expect(list_skill_definitions()).toHaveLength(12)
   })
 
   it('finds early patterns from English goals and Chinese player shorthand', () => {
@@ -133,7 +133,7 @@ describe('curated basic skill library', () => {
       },
     }))
 
-    expect(ensure_basic_skill_definitions()).toEqual({ added: 10, upgraded: 0, total: 11 })
+    expect(ensure_basic_skill_definitions()).toEqual({ added: 11, upgraded: 0, total: 12 })
     expect(get_skill_definition('burner-coal-loop')?.name).toBe('Player Authored Coal Pattern')
     expect(get_skill_definition('burner-coal-loop')?.source.kind).toBe('completed_goal')
   })
@@ -354,7 +354,7 @@ describe('skill lookup: tags, scoring, preconditions and cards (plan 2.8)', () =
     registry['steam-power-bootstrap'] = { ...registry['steam-power-bootstrap'], revision: 1, goal_tags: undefined }
     const edited = edited_skill_revision({ ...registry['burner-coal-loop'], revision: 0 }, { name: 'House Coal Loop', summary: 'Ours.', status: 'candidate' }, 'owner', 906)
     expect(edited.revision).toBe(1)
-    expect(ensure_basic_skill_definitions()).toEqual({ added: 0, upgraded: 1, total: 11 })
+    expect(ensure_basic_skill_definitions()).toEqual({ added: 0, upgraded: 1, total: 12 })
     expect(get_skill_definition('steam-power-bootstrap')?.goal_tags).toContain('power')
     expect(get_skill_definition('burner-coal-loop')?.name).toBe('House Coal Loop')
   })
@@ -393,8 +393,8 @@ describe('learned skill record and export', () => {
     expect(updated.name).toBe('Updated Dynamic Skill 0')
     expect(get_skill_definition('dynamic-skill-0')?.revision).toBe(2)
 
-    expect(ensure_basic_skill_definitions()).toEqual({ added: 11, upgraded: 0, total: 11 })
-    expect(list_skill_definitions()).toHaveLength(MAX_DYNAMIC_SKILL_DEFINITIONS + 11)
+    expect(ensure_basic_skill_definitions()).toEqual({ added: 12, upgraded: 0, total: 12 })
+    expect(list_skill_definitions()).toHaveLength(MAX_DYNAMIC_SKILL_DEFINITIONS + 12)
   })
   it('creates a versioned candidate without promoting observation to verification', () => {
     const skill = create_skill_candidate(candidate({ status: 'observed', stage: 'example' }))

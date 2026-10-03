@@ -30,6 +30,58 @@ function confidence() {
 export const BASIC_SKILL_DEFINITIONS: any[] = [
   {
     schema_version: 1,
+    revision: 1,
+    id: 'buffered-building-stock',
+    name: 'Buffered Building and Supply Stock',
+    kind: 'production',
+    stage: 'pattern',
+    status: 'candidate',
+    summary: 'Buffered stock: buildings generally ≥2 live stacks, belts ~400–600 each tier; player quantities win; never cap science or continuous flows. Choose a grounded target and control output inserters from the exact destination chest count.',
+    goal_tags: ['buffer', 'stock', 'buildings', 'supplies', 'mall', 'belt'],
+    source: SOURCE,
+    preconditions: [
+      { kind: 'custom', subject: 'buffered-output', description: 'The requested output is reusable stored stock, with a verified item identity and destination chest.' },
+      { kind: 'custom', subject: 'live-stack-size', description: 'Read the current item prototype stack size before choosing a building stock quantity.' },
+    ],
+    inputs: [{ item: 'recipe-inputs', role: 'Automated supply for the grounded buffered recipe' }],
+    outputs: [{ item: 'buffered-stock', role: 'Building or supply stock in the requested chest' }],
+    topology: {
+      nodes: [
+        { id: 'producer', role: 'Machine making the buffered item' },
+        { id: 'output-inserter', role: 'Bounded output transfer into storage' },
+        { id: 'stock-chest', role: 'Exact destination and item-count signal source' },
+      ],
+      relations: [
+        { kind: 'item_transfer', from: 'producer', to: 'output-inserter', description: 'Take only the buffered item from the verified producer output.' },
+        { kind: 'item_transfer', from: 'output-inserter', to: 'stock-chest', description: 'Deliver into the exact storage chest.' },
+        { kind: 'custom', from: 'stock-chest', to: 'output-inserter', description: 'Enable the output inserter while the item-count signal is below the chosen target.' },
+      ],
+    },
+    constraints: [
+      { kind: 'resource', description: 'Use at least two live item stacks as general building-stock guidance and approximately 400–600 items for each belt tier. The planner chooses the target from actual demand, recipe costs, capacity and player quantities.', validation: 'unvalidated', evidence_refs: [] },
+      { kind: 'safety', description: 'Science and other continuously consumed production flows have no stock cap from this pattern. Do not apply a buffered-stock condition to their output inserters.', validation: 'unvalidated', evidence_refs: [] },
+      { kind: 'placement', description: 'Before circuit mutation, verify exact entities, force, surface, reach and existing wiring; preserve unrelated networks and player constraints.', validation: 'unvalidated', evidence_refs: [] },
+      { kind: 'capacity', description: 'Read back the chest signal and inserter condition. Verify production stops at the target with bounded carried-stack overshoot and restarts after withdrawal.', validation: 'unvalidated', evidence_refs: [] },
+    ],
+    parameters: [
+      { name: 'stock_item', description: 'Verified reusable buffered item.', required: true },
+      { name: 'target_count', description: 'Grounded target selected by the planner; an explicit player quantity takes precedence.', required: true },
+      { name: 'output_chest', description: 'Exact authorized destination chest; never a science measurement chest.', required: true },
+    ],
+    verification: verification(),
+    known_failure_modes: [
+      'A guessed stack size creates the wrong building target.',
+      'A science line is capped as if it were a building buffer.',
+      'Other wired storage changes the signal counted by the output inserter.',
+      'Carried inserter stacks cause overshoot that was not bounded or tested.',
+    ],
+    confidence: confidence(),
+    examples: [
+      { summary: 'Maintain a belt buffer around a planner-chosen 400–600 target.', notes: 'The same guidance applies to every live belt tier. If the player requests an exact different quantity, use that quantity.' },
+    ],
+  },
+  {
+    schema_version: 1,
     revision: 2,
     id: 'missing-item-bootstrap',
     name: 'Missing Item Bootstrap',
