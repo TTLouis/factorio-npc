@@ -51,11 +51,14 @@ test('unrelated completed batches cannot settle an exact admission, nor can miss
   assert.equal(reconcilePendingOperation(pending,{status:{...status,admission_journal:[{...admission,signature:'other'}]},actor}).effect,EFFECT.UNKNOWN)
   assert.equal(reconcilePendingOperation(pending,{status:{...status,admission_journal:[{...admission,state:'not_admitted'}]},actor}).effect,EFFECT.NOT_HAPPENED)
   assert.equal(reconcilePendingOperation(pending,{status:{...status,batch_generation:3,admission_journal:[admission]},actor}).effect,EFFECT.PARTIAL_UNKNOWN)
+  assert.equal(reconcilePendingOperation(pending,{status:{...status,admission_journal:[admission]},actor:{actor_id:19,epoch:4}}).effect,EFFECT.HAPPENED)
+  assert.equal(reconcilePendingOperation(pending,{status:{...status,admission_journal:[{...admission,state:'admitted'}]},actor:{actor_id:19,epoch:4}}).verdict,'stale_actor')
 })
 
 test('new goals and historical task checkpoints cannot rewind operation ordinals or forget unresolved work', () => {
   let state=applyPlanningEvent(createEmptyPlanningState(),{type:PLANNING_EVENT.GOAL_ACCEPTED,goal_id:'goal',objective:'deliver',owner:'Louis',now:1})
   state=applyPlanningEvent(state,{type:PLANNING_EVENT.DRAFT_CREATED,now:1,steps:[{description:'Deliver the coal'}]})
+  state=applyPlanningEvent(state,{type:PLANNING_EVENT.PLAN_COMMITTED,now:1,runtime_validation:{passed:true}})
   state=applyPlanningEvent(state,{type:PLANNING_EVENT.PENDING_OPERATION_RECORDED,source:'runtime',goal_id:'goal',operation:record('one'),now:2})
   state=applyPlanningEvent(state,{type:PLANNING_EVENT.TASK_INTERRUPTED,source:'runtime',goal_id:'goal',now:3,game_tick:100})
   assert.equal(state.operation_ledger.records.length,1)

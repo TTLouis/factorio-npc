@@ -22,6 +22,7 @@ import { executeAuthorizedBatch } from './supervisor-adapter.mjs'
 import {
   batchWatermark,
   buildPendingOperation,
+  EFFECT,
   isLostAcknowledgement,
   PENDING_STATE,
   reconcilePendingOperation,
@@ -9941,8 +9942,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           }
           this.authorizationRefusalRetries = 0
         }
-        // MW2b: an IDENTICAL delivery/craft/placement batch for the same step while an earlier one's effect is not proven absent
-        // (lost acknowledgement, restart, replaced actor) is never issued again.
+        // Recover exact receipts even when the notification was lost and this
+        // turn arrived through recovery rather than completed().
+        if (this.memory.pendingOperation?.(this.activePlanKey())) {
+          await this.settleOutstandingOperation(await this.readTaskStatusRaw())
+        }
+        // Uncertain target/material effects remain fenced across plans and goals.
         if (this.requestInfo && typeof this.memory.checkDuplicateEffect === 'function') {
           const duplicate = this.memory.checkDuplicateEffect(this.requestInfo.memoryKey, { operations: plan.operations }, { requestId: this.traceRequest?.id })
           if (duplicate?.refuse) {
@@ -10197,10 +10202,25 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
 
       const pendingAdmission = await this.recordPendingOperationBeforeSend(operations, before)
-      await this.traceEvent('operations.admit', { operations })
+      const operationOwnerKey = this.activePlanKey()
       // A restage that landed during that await must not let this reply's batch through
       // (outside the try below: a stale drop is not an admission failure).
-      await this.assertCurrent()
+      try {
+        await this.traceEvent('operations.admit', { operations })
+        await this.assertCurrent()
+      }
+      catch (error) {
+        // Transport has not been invoked. This local boundary proves this exact
+        // prepared attempt absent; a later restart without this proof stays uncertain.
+        if (pendingAdmission) {
+          this.memory.updatePendingOperation?.(operationOwnerKey, { effect: EFFECT.NOT_HAPPENED, reason: 'cancelled_before_transport' }, pendingAdmission.operation_key)
+          if (this.memory.clearPendingOperation?.(operationOwnerKey, { operationKey: pendingAdmission.operation_key }) !== true) throw new AgentLoopError('Prepared operation settlement refused')
+          await this.persistState()
+          await this.traceEvent('operation.not_sent', { request_id: pendingAdmission.request_id,
+            operation_key: pendingAdmission.operation_key, reason: 'cancelled_before_transport' })
+        }
+        throw error
+      }
       let reconciledAdmitted = false
       try {
         const acknowledgement = await executeAuthorizedBatch(this.rcon, before.epoch, commands, undefined, pendingAdmission)

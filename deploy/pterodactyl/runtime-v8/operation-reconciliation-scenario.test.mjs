@@ -297,7 +297,7 @@ test('restart after an actor replacement: the old body\'s outstanding operation 
   const memory = new CanonicalTaskBoardMemory()
   memory.restore(wire)
 
-  const second = harness({ memory, game: first.game, replies: [deliveryPlan(2)] })
+  const second = harness({ memory, game: first.game, replies: [deliveryPlan(2), planReply({operations:[]})] })
   await recoverInterruptedAgentPlan(second.agent, 'actor_replaced', {})
 
   const stale = second.named('operation.stale_refused')

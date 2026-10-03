@@ -190,16 +190,15 @@ export function reconcilePendingOperation(pending, { status, actor } = {}) {
     || !Number.isSafeInteger(actor?.actor_id) || !Number.isSafeInteger(actor?.epoch))) {
     return { verdict: RECONCILE_VERDICT.UNKNOWN, effect: EFFECT.UNKNOWN, reason: 'actor_lineage_missing' }
   }
-  if (Number.isSafeInteger(lineage.actor_id) && Number.isSafeInteger(actor?.actor_id) && lineage.actor_id !== actor.actor_id) {
-    return { verdict: RECONCILE_VERDICT.STALE_ACTOR, effect: EFFECT.UNKNOWN, reason: 'actor_replaced', pending_actor_id: lineage.actor_id, actor_id: actor.actor_id }
-  }
-  if (Number.isSafeInteger(lineage.epoch) && Number.isSafeInteger(actor?.epoch) && lineage.epoch !== actor.epoch) {
-    return { verdict: RECONCILE_VERDICT.STALE_ACTOR, effect: EFFECT.UNKNOWN, reason: 'actor_epoch_changed', pending_epoch: lineage.epoch, epoch: actor.epoch }
-  }
+  const staleActor = Number.isSafeInteger(lineage.actor_id) && Number.isSafeInteger(actor?.actor_id) && lineage.actor_id !== actor.actor_id
+    ? { verdict: RECONCILE_VERDICT.STALE_ACTOR, effect: EFFECT.UNKNOWN, reason: 'actor_replaced', pending_actor_id: lineage.actor_id, actor_id: actor.actor_id }
+    : Number.isSafeInteger(lineage.epoch) && Number.isSafeInteger(actor?.epoch) && lineage.epoch !== actor.epoch
+      ? { verdict: RECONCILE_VERDICT.STALE_ACTOR, effect: EFFECT.UNKNOWN, reason: 'actor_epoch_changed', pending_epoch: lineage.epoch, epoch: actor.epoch } : null
+  if (staleActor && pending?.protocol_version !== 2) return staleActor
   if (pending?.protocol_version === 2) {
     const records = status?.admission_journal?.records ?? status?.admission_journal ?? []
     const admission = Array.isArray(records) ? records.find(record => record.operation_key === pending.operation_key) : undefined
-    if (!admission) return { verdict: RECONCILE_VERDICT.UNKNOWN, effect: EFFECT.UNKNOWN, reason: 'exact_admission_missing' }
+    if (!admission) return staleActor ?? { verdict: RECONCILE_VERDICT.UNKNOWN, effect: EFFECT.UNKNOWN, reason: 'exact_admission_missing' }
     if (admission.attempt_id !== pending.attempt_id || admission.signature !== pending.signature || admission.actor_id !== lineage.actor_id || admission.epoch !== lineage.epoch) {
       return { verdict: RECONCILE_VERDICT.UNKNOWN, effect: EFFECT.UNKNOWN, reason: 'admission_lineage_mismatch' }
     }
@@ -212,6 +211,9 @@ export function reconcilePendingOperation(pending, { status, actor } = {}) {
     }
     const batchId = admission.slots?.[0]?.batch_refs?.[0]?.batch_id
     if (admission.state === 'completed') return { verdict: RECONCILE_VERDICT.ADMITTED_COMPLETED, effect: EFFECT.HAPPENED, reason: 'exact_receipts_completed', batch_id: batchId }
+    // A sealed exact receipt describes historical work by its original actor.
+    // Unfinished work from an old actor is never resumed or assumed complete.
+    if (staleActor) return staleActor
     if (admission.state === 'admitted') return { verdict: RECONCILE_VERDICT.ADMITTED_IN_FLIGHT, effect: EFFECT.IN_FLIGHT, reason: 'exact_admission_in_flight', batch_id: batchId }
     if (admission.state === 'not_admitted') return { verdict: RECONCILE_VERDICT.NOT_ADMITTED, effect: EFFECT.NOT_HAPPENED, reason: 'exact_admission_proven_absent' }
     const refs = (admission.slots ?? []).flatMap(slot => slot.batch_refs ?? [])
@@ -264,6 +266,7 @@ export function duplicateEffectGuard(pending, { operations, planId, stepId } = {
   if (pending.protocol_version === 2) {
     const proposed = (Array.isArray(operations) ? operations : []).flatMap(effectScopes)
     const held = pending.scopes ?? ['*']
+    if (held.length === 0) return { refuse: false }
     if (proposed.length === 0 || !(held.includes('*') || proposed.includes('*') || proposed.some(scope => held.includes(scope)))) return { refuse: false }
     return { refuse: true, reason: 'unresolved_operation_scope_conflict', operation_key: pending.operation_key,
       effect: pending.effect, verdict: pending.verdict ?? null, state: pending.state,
