@@ -16,8 +16,8 @@ function world(options: { kind?: string, enemy?: any, canShoot?: boolean, armed?
         position: { x: 8, y: 0 },
       }
     : options.enemy
-  const weapon = { valid_for_read: options.armed !== false }
-  const ammo = { valid_for_read: options.armed !== false }
+  const weapon = { valid_for_read: options.armed !== false, prototype: { attack_parameters: { ammo_categories: ['bullet'] } } }
+  const ammo = { valid_for_read: options.armed !== false, prototype: { ammo_category: { name: 'bullet' } } }
   const character: any = {
     valid: true,
     selected_gun_index: 1,

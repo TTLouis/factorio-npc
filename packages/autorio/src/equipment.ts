@@ -1,7 +1,26 @@
-import type { LuaInventory, LuaItemStack } from 'factorio:runtime'
+import type { LuaEntity, LuaInventory, LuaItemStack } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 
 const MAX_EQUIPMENT_SLOTS = 64
+
+/** Read only the selected native slots; main-inventory ammo is not equipped. */
+export function selected_weapon_readiness(character: LuaEntity) {
+  const slot = character.selected_gun_index
+  const gun = slot ? character.get_inventory(defines.inventory.character_guns)?.[slot - 1] : undefined
+  const ammo = slot ? character.get_inventory(defines.inventory.character_ammo)?.[slot - 1] : undefined
+  if (!gun?.valid_for_read || !ammo?.valid_for_read) return { ready: false, reason: 'missing_equipped_weapon_or_ammo' }
+  const categories = gun.prototype?.attack_parameters?.ammo_categories
+  const category = ammo.prototype?.ammo_category?.name
+  const compatible = category !== undefined && categories?.some(value => value === category) === true
+  return {
+    ready: compatible,
+    reason: compatible ? 'compatible_equipped_weapon_and_ammo' : 'incompatible_equipped_ammo',
+    weapon: gun.name,
+    ammunition: ammo.name,
+    ammunition_count: ammo.count,
+    ammo_category: category,
+  }
+}
 
 type EquipmentInventoryKind = 'weapon' | 'ammo' | 'armor'
 
@@ -76,6 +95,7 @@ export function new_equipment_controller(get_actor: () => ControlledActor | unde
       health: character.health,
       max_health: character.max_health,
       selected_gun_slot: character.selected_gun_index,
+      recovery_readiness: selected_weapon_readiness(character),
       guns: inventory_summary(guns),
       ammo: inventory_summary(ammo),
       armor: inventory_summary(armor),
