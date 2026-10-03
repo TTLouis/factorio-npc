@@ -321,3 +321,15 @@ Open or provisional: the checkpoint (a bounded copy of the planning state and bo
 checkpoint exceeds the size cap is kept but not runnable. Stagnation counters (3 attempts / 15 game-minutes) are not recorded
 yet. An engine lane asserting that the mod's batch sequence and generation behave as reconciliation assumes across a real
 save/load is not written (the autorio unit tests cover the counters; the harness side is covered by scripted fakes).
+
+### October 2 receipt hardening
+
+`e4e8238a` (integration `b3a7c701`) retains and persists the pending operation when
+an idle receipt reports a cancelled batch with `partial_unknown`, a changed mod
+generation, or a missing baseline. An earlier acknowledgement does not override
+those unknown effects. Receipt traces carry the originating request ID when the
+turn has already closed; normal correlated completion still clears the record.
+Three additional scripted test groups and a separate review cover these paths.
+No new engine evidence is claimed. Exact acknowledged-batch attribution,
+joined-batch completion, multiple pending effects and verified-observation
+clearance remain open; see the [October 2 checkpoint](validation/PLAYABLE_CHECKPOINT_2026-10-02.md).

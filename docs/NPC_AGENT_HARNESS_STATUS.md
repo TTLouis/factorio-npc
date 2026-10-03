@@ -2,6 +2,29 @@
 
 This file is the current status summary for the single-NPC integration line. Historical detailed checkpoints are retained under `docs/validation/`.
 
+## October 2 experimental playable-build checkpoint
+
+The integration checkout is synchronized to remote checkpoint `c6f494aa` (MW1,
+MW2 and U11 included). Local receipt hardening `e4e8238a`, integrated by `b3a7c701`,
+keeps duplicate-effect guards for partially cancelled batches and uncertain idle
+receipts after a reload or missing baseline. Three new scripted test groups cover
+these paths and persistence; separate review found no blockers. This is runtime
+evidence, not a new engine/provider pass or release promotion.
+
+Final offline gate: 1,561 runtime tests, 895 mod tests, typecheck, Lua build,
+generated-Lua check and all 9 installer tests passed; installer artifacts were
+checked and repinned to `b3a7c701`.
+
+The next build priorities are remaining MW2 correlation gaps, MW4 shared campaign
+accounting, MW3 task-local questions/resume order, and MW5 planner recovery wiring.
+The practical first gameplay target remains autonomous cold-start electricity;
+powered assembler/inserter output is the next production gate. Details and resume
+instructions: [October 2 checkpoint](validation/PLAYABLE_CHECKPOINT_2026-10-02.md).
+
+The September 30 discussion below predates the October 1 implementation merges
+and owner allowance decisions; the canonical macro design and this checkpoint
+take precedence for current implementation status.
+
 ## September 30 macro design update — requirements, not verified capability
 
 Owner decisions now define [Week 1 macro execution](NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md):
