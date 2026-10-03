@@ -5803,8 +5803,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return { ...result, admitted, pending: held ?? pending, request_id: rid }
   }
 
-  // A completion or failure receipt arrived with the game idle: the batch is over. Admitted or never-admitted batches leave the
-  // ledger; one whose lineage cannot be proven (replaced actor, reloaded mod, unreadable status) stays as the duplicate guard.
+  // An idle receipt settles a batch only when its effect is proven complete or absent. Cancellation may leave a partial
+  // effect, and an acknowledgement before a mod reload cannot establish what survived: both keep the duplicate guard.
   async settleOutstandingOperation(rawStatus) {
     try {
       if (typeof this.memory.pendingOperation !== 'function') return
@@ -5815,17 +5815,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (!watermark || watermark.idle !== true || watermark.queue_length !== 0) return
       const actor = this.epoch ? { actor_id: this.epoch.actor_id, epoch: this.epoch.epoch } : undefined
       const result = reconcilePendingOperation(pending, { status: rawStatus, actor })
-      const provable = [RECONCILE_VERDICT.ADMITTED_IN_FLIGHT, RECONCILE_VERDICT.ADMITTED_COMPLETED, RECONCILE_VERDICT.ADMITTED_CANCELLED, RECONCILE_VERDICT.NOT_ADMITTED].includes(result.verdict)
-      const acknowledged = pending.state === PENDING_STATE.ACKNOWLEDGED && result.verdict !== RECONCILE_VERDICT.STALE_ACTOR
-      const rid = this.traceRequest?.id ?? `settle_${Date.now().toString(36)}`
+      const provable = [RECONCILE_VERDICT.ADMITTED_COMPLETED, RECONCILE_VERDICT.NOT_ADMITTED].includes(result.verdict)
+      const rid = this.traceRequest?.id ?? pending.operation_key.split('/')[0]
       // The ordinary case (acknowledged, then its receipt) settles silently; only a batch whose acknowledgement was lost or whose
       // lineage is in doubt is worth a reconciliation row.
-      if (pending.state !== PENDING_STATE.ACKNOWLEDGED || result.verdict === RECONCILE_VERDICT.STALE_ACTOR) {
+      if (pending.state !== PENDING_STATE.ACKNOWLEDGED || !provable) {
         await this.traceEvent('operation.reconciled', {
           request_id: rid,
           trigger: 'receipt',
           ...reconciliationFacts(result, pending),
-          settled: provable || acknowledged,
+          settled: provable,
           signature: pending.signature,
           plan_id: pending.plan_id,
           step_id: pending.step_id,
@@ -5841,8 +5840,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           current_actor: actor ?? null,
         }, { requestId: rid })
       }
-      if (provable || acknowledged) {
+      if (provable) {
         this.memory.clearPendingOperation?.(key, { operationKey: pending.operation_key })
+        await this.persistState()
+      }
+      else {
+        this.memory.updatePendingOperation?.(key, {
+          state: result.verdict === RECONCILE_VERDICT.ADMITTED_CANCELLED ? PENDING_STATE.ADMITTED : PENDING_STATE.UNRECONCILED,
+          effect: result.effect,
+          verdict: result.verdict,
+          reason: result.reason,
+          batch_id: result.batch_id ?? null,
+          reconciled_at: Date.now(),
+        })
         await this.persistState()
       }
     }

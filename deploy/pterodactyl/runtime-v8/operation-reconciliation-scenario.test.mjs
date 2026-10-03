@@ -51,6 +51,7 @@ class LossyGame extends FakeFactorio {
         queue_length: this.queueLength,
         active_batch: this.activeBatch,
         last_completed_batch: this.completedBatch,
+        last_cancelled_batch: this.cancelledBatch,
         basic_operation: this.completedBatch ? { last_result: { operation_id: this.batchId, tick: this.completedBatch.tick, actor_id: this.status.actor_id, accepted: true, completed: true, code: 'completed', type: 'moving_items', moved_count: 5, to_entity: true } } : undefined,
       })
     }
@@ -214,6 +215,75 @@ test('restart with an outstanding operation: reconciled before resuming, an iden
   assert.equal(first.game.deliveries.length, 2)
   assert.ok(first.game.deliveries[1].includes('3,true'), 'the changed delivery (3) reached the game, the identical one (5) did not')
   assert.equal(first.game.deliveries.filter(text => text.includes(',5,true')).length, 1)
+})
+
+test('an idle partial-cancellation receipt keeps the duplicate delivery guard across persistence', async () => {
+  for (const lostAck of [false, true]) {
+    const world = harness({ replies: [deliveryPlan()] })
+    world.game.dropAckOnce = lostAck
+    await world.say('deliver 5 coal to the wooden chest')
+    const operationKey = world.pending().operation_key
+    world.game.cancelledBatch = { ...world.game.activeBatch, tick: 920 }
+    world.game.activeBatch = undefined
+    world.game.taskState = 'idle'
+    world.game.queueLength = 0
+    world.game.inventory.coal = 2 // Cancellation after only part of the delivery.
+    await world.agent.taskStatusReceipt()
+
+    assert.equal(world.pending()?.operation_key, operationKey, 'an idle queue does not prove the delivery is absent or complete')
+    assert.equal(world.pending().effect, 'partial_unknown')
+    assert.equal(world.pending().verdict, 'admitted_cancelled')
+    const receipt = world.named('operation.reconciled').findLast(row => row.trigger === 'receipt')
+    assert.equal(receipt.settled, false)
+    assert.equal(receipt.reason, 'new_batch_cancelled')
+    assert.ok(receipt.request_id)
+    assert.equal(receipt.request_id, operationKey.split('/')[0], 'receipt stays correlated to the originating request after its turn ends')
+    assert.equal(world.memory.checkDuplicateEffect(KEY, { operations: [deliver()] }, { requestId: 'req_partial_retry' }).refuse, true)
+    assert.equal(world.game.deliveries.length, 1)
+    assert.equal(world.calls.length, 1, 'reading a receipt wakes no model')
+
+    const restored = new CanonicalTaskBoardMemory()
+    restored.restore(JSON.parse(JSON.stringify(world.memory.snapshot())))
+    assert.equal(restored.pendingOperation(KEY).effect, 'partial_unknown')
+    assert.equal(restored.checkDuplicateEffect(KEY, { operations: [deliver()] }, { requestId: 'req_restored_retry' }).refuse, true)
+  }
+})
+
+test('an acknowledged delivery keeps its guard when an idle receipt follows a mod reload or loses its baseline', async () => {
+  for (const missingBaseline of [false, true]) {
+    const world = harness({ replies: [deliveryPlan()] })
+    await world.say('deliver 5 coal to the wooden chest')
+    assert.equal(world.pending().state, 'acknowledged')
+    if (missingBaseline) {
+      world.memory.updatePendingOperation(KEY, { baseline: null })
+      world.game.completeBatch()
+    }
+    else {
+      world.game.reloadMod()
+    }
+    await world.agent.taskStatusReceipt()
+
+    assert.equal(world.pending()?.effect, 'unknown')
+    assert.equal(world.pending().verdict, missingBaseline ? 'unknown' : 'generation_changed')
+    assert.equal(world.pending().state, 'unreconciled')
+    const receipt = world.named('operation.reconciled').findLast(row => row.trigger === 'receipt')
+    assert.equal(receipt.settled, false)
+    assert.equal(receipt.reason, missingBaseline ? 'no_baseline' : 'mod_reloaded')
+    assert.ok(receipt.request_id)
+    assert.equal(receipt.request_id, world.pending().operation_key.split('/')[0])
+    assert.equal(world.memory.checkDuplicateEffect(KEY, { operations: [deliver()] }, { requestId: 'req_reload_retry' }).refuse, true)
+    assert.equal(world.game.deliveries.length, 1)
+  }
+})
+
+test('an acknowledged delivery with a correlated completion receipt still settles normally', async () => {
+  const world = harness({ replies: [deliveryPlan()] })
+  await world.say('deliver 5 coal to the wooden chest')
+  world.game.completeBatch()
+  await world.agent.taskStatusReceipt()
+  assert.equal(world.pending(), null)
+  assert.equal(world.game.deliveries.length, 1)
+  assert.equal(world.calls.length, 1)
 })
 
 test('restart after an actor replacement: the old body\'s outstanding operation is refused as stale, never counted as done', async () => {
