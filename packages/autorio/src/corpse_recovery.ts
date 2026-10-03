@@ -9,6 +9,7 @@ interface CorpseRecord {
   previous_actor_id: number
   surface_index: number
   force_index: number
+  corpse_force_index?: number
   position: { x: number, y: number }
   death_tick: number
   entity?: LuaEntity
@@ -19,6 +20,11 @@ interface CorpseRecord {
 interface RecoveryResult {
   request_id: string
   corpse_ref: string
+  operation_ordinal: number
+  expected_actor_id: number
+  max_slots: number
+  max_count: number
+  npc_id?: string
   actor_id?: number
   accepted: boolean
   reason: string
@@ -34,6 +40,7 @@ declare const storage: {
   sgluna_corpses?: CorpseRecord[]
   sgluna_corpse_results?: RecoveryResult[]
   sgluna_corpse_registry_full?: boolean
+  sgluna_corpse_operation_highwater?: Record<string, number>
 }
 
 const MAX_OPEN_CORPSES = 128
@@ -49,6 +56,15 @@ function terminal(record: CorpseRecord) {
   return record.state === 'recovered' || record.state === 'lost'
 }
 
+function bounded_integer(value: unknown, min: number, max: number): value is number {
+  return typeof value === 'number' && value === math.floor(value) && value >= min && value <= max
+}
+
+function native_corpse_matches_record(record: CorpseRecord) {
+  return record.entity?.valid === true && record.entity.surface.index === record.surface_index
+    && record.entity.force.index === record.corpse_force_index
+}
+
 function refresh() {
   for (const record of records()) {
     if (terminal(record)) continue
@@ -61,6 +77,7 @@ function refresh() {
       }
       continue
     }
+    if (!native_corpse_matches_record(record)) continue
     const inventory = record.entity.get_inventory(defines.inventory.character_corpse)
     if (inventory?.is_empty()) {
       record.state = 'recovered'
@@ -115,6 +132,7 @@ export function note_npc_corpse(event: OnPostEntityDiedEvent) {
     return
   }
   record.entity = corpses[0]
+  record.corpse_force_index = corpses[0].force.index
   record.state = 'available'
 }
 
@@ -126,26 +144,24 @@ export function new_corpse_recovery_controller(get_actor: () => ControlledActor 
       corpses: records().map(({ entity, ...record }) => ({
         ...record,
         unit_number: entity?.valid ? entity.unit_number : undefined,
-        items: entity?.valid ? entity.get_inventory(defines.inventory.character_corpse)?.get_contents() : undefined,
+        items: entity?.valid && native_corpse_matches_record({ ...record, entity }) ? entity.get_inventory(defines.inventory.character_corpse)?.get_contents() : undefined,
       })),
       last_result: storage.sgluna_corpse_results?.slice(-1)[0],
     }
   }
 
-  function recover(corpse_ref: string, max_slots: number, max_count: number, expected_actor_id: number, request_id: string): RecoveryResult {
+  function recover(corpse_ref: string, max_slots: number, max_count: number, expected_actor_id: number, request_id: string, operation_ordinal: number): RecoveryResult {
     refresh()
-    const previous = storage.sgluna_corpse_results?.find(result => result.request_id === request_id)
-    if (previous) return { ...previous }
     const actor = get_actor()
     const identity = actor?.status_snapshot()
     const result: RecoveryResult = {
-      request_id, corpse_ref, actor_id: identity?.actor_id, accepted: false,
+      request_id, corpse_ref, operation_ordinal, expected_actor_id, max_slots, max_count,
+      npc_id: identity?.npc_id, actor_id: identity?.actor_id, accepted: false,
       reason: 'invalid_request', moved_count: 0, moved_slots: 0, tick: game.tick,
     }
-    function finish(reason: string) {
+    function finish(reason: string, retain = true) {
       result.reason = reason
-      // Refuse admission before pruning: old keys must not become replayable.
-      if (typeof request_id === 'string' && request_id.length > 0 && request_id.length <= 160) {
+      if (retain && typeof request_id === 'string' && request_id.length > 0 && request_id.length <= 160) {
         storage.sgluna_corpse_results ??= []
         if (storage.sgluna_corpse_results.length < MAX_RESULTS) storage.sgluna_corpse_results.push(result)
       }
@@ -154,11 +170,29 @@ export function new_corpse_recovery_controller(get_actor: () => ControlledActor 
     }
     if (typeof request_id !== 'string' || request_id.length === 0 || request_id.length > 160
       || typeof corpse_ref !== 'string' || corpse_ref.length > 160
-      || !Number.isInteger(max_slots) || max_slots < 1 || max_slots > 16
-      || !Number.isInteger(max_count) || max_count < 1 || max_count > 1000) return finish('invalid_request')
+      || !bounded_integer(operation_ordinal, 1, 9007199254740991)
+      || !bounded_integer(expected_actor_id, 1, 9007199254740991)
+      || !bounded_integer(max_slots, 1, 16)
+      || !bounded_integer(max_count, 1, 1000)) return finish('invalid_request', false)
+    const previous = storage.sgluna_corpse_results?.find(receipt => receipt.request_id === request_id)
+    if (previous) {
+      if (previous.corpse_ref !== corpse_ref || previous.expected_actor_id !== expected_actor_id
+        || previous.npc_id !== identity?.npc_id || previous.max_slots !== max_slots
+        || previous.max_count !== max_count || previous.operation_ordinal !== operation_ordinal) {
+        return finish('duplicate_conflict', false)
+      }
+      return { ...previous }
+    }
     if ((storage.sgluna_corpse_results?.length ?? 0) >= MAX_RESULTS) return finish('receipt_capacity')
     if (!actor?.is_valid || !actor.character || identity?.kind !== 'standalone_character') return finish('no_standalone_actor')
     if (identity.actor_id !== expected_actor_id) return finish('actor_changed')
+    if (!identity.npc_id) return finish('no_npc_identity')
+    storage.sgluna_corpse_operation_highwater ??= {}
+    const highwater = storage.sgluna_corpse_operation_highwater[identity.npc_id] ?? 0
+    // Receipt pruning never permits replay: only the harness's next durable
+    // operation ordinal can perform a new physical transfer for this NPC.
+    if (operation_ordinal <= highwater) return finish('stale_operation_ordinal', false)
+    storage.sgluna_corpse_operation_highwater[identity.npc_id] = operation_ordinal
     if (!selected_weapon_readiness(actor.character).ready) return finish('compatible_weapon_and_ammo_required')
     refresh()
     const record = records().find(entry => entry.corpse_ref === corpse_ref)
@@ -167,6 +201,7 @@ export function new_corpse_recovery_controller(get_actor: () => ControlledActor 
     const corpse = record.entity
     if (!corpse?.valid) return finish('native_corpse_unavailable')
     if (actor.surface.index !== record.surface_index || actor.force.index !== record.force_index) return finish('surface_or_force_changed')
+    if (corpse.surface.index !== record.surface_index || corpse.force.index !== record.corpse_force_index) return finish('corpse_surface_or_force_changed')
     const dx = corpse.position.x - actor.position.x
     const dy = corpse.position.y - actor.position.y
     if (dx * dx + dy * dy > entity_interaction_reach(actor) ** 2) return finish('too_far')

@@ -204,9 +204,11 @@ def run(client: Rcon, results: Path) -> None:
     owned = [entry for entry in corpses['corpses'] if entry['previous_actor_id'] == original_id]
     require(len(owned) == 1 and owned[0]['state'] == 'available', corpses)
     corpse_ref = owned[0]['corpse_ref']
+    recovery_ordinals: dict[str, int] = {}
 
     def retrieve(request_id: str, slots: int = 16, count: int = 1000) -> dict:
-        return json_command(lua_json(remote_call('autorio_operations', 'recover_corpse', repr(corpse_ref), str(slots), str(count), str(replacement_id), repr(request_id))), request_id)
+        recovery_ordinals.setdefault(request_id, len(recovery_ordinals) + 1)
+        return json_command(lua_json(remote_call('autorio_operations', 'recover_corpse', repr(corpse_ref), str(slots), str(count), str(replacement_id), repr(request_id), str(recovery_ordinals[request_id]))), request_id)
 
     unarmed = retrieve('corpse-unarmed')
     require(unarmed['accepted'] is False and unarmed['reason'] == 'compatible_weapon_and_ammo_required', unarmed)

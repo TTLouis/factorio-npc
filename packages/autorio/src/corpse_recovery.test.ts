@@ -35,6 +35,7 @@ function world() {
   const corpseInventory = inventory([recoveredArmor, stack('iron-plate', 23)])
   const corpse: any = {
     valid: true, type: 'character-corpse', unit_number: 77,
+    surface: { index: 1 }, force: { index: 1 },
     position: { x: 0, y: 0 }, get_inventory: () => corpseInventory,
   }
   const main = inventory([stack(), stack()])
@@ -70,7 +71,7 @@ describe('durable native NPC corpse recovery', () => {
     note_npc_death({ ...w.death, entity: { ...w.death.entity, unit_number: 99 } })
     expect(w.controller.status().corpses).toHaveLength(1)
     expect(trace).toHaveBeenCalledWith('[AUTORIO] corpse.recorded request_id=native_death/42 reason=npc_death')
-    expect(w.controller.recover('npc-corpse/99/100', 1, 1, 43, 'foreign')).toMatchObject({ accepted: false, reason: 'corpse_not_owned' })
+    expect(w.controller.recover('npc-corpse/99/100', 1, 1, 43, 'foreign', 1)).toMatchObject({ accepted: false, reason: 'corpse_not_owned' })
     expect(w.corpseInventory[0].count).toBe(1)
   })
 
@@ -78,24 +79,24 @@ describe('durable native NPC corpse recovery', () => {
     const w = world()
     w.ammo[0].prototype.ammo_category.name = 'rocket'
     expect(selected_weapon_readiness(w.character)).toMatchObject({ ready: false, reason: 'incompatible_equipped_ammo' })
-    expect(w.controller.recover('npc-corpse/42/100', 2, 100, 43, 'unarmed').reason).toBe('compatible_weapon_and_ammo_required')
+    expect(w.controller.recover('npc-corpse/42/100', 2, 100, 43, 'unarmed', 2).reason).toBe('compatible_weapon_and_ammo_required')
     w.ammo[0].prototype.ammo_category.name = 'bullet'
-    expect(w.controller.recover('npc-corpse/42/100', 2, 100, 42, 'stale').reason).toBe('actor_changed')
+    expect(w.controller.recover('npc-corpse/42/100', 2, 100, 42, 'stale', 3).reason).toBe('actor_changed')
     w.actor.position = { x: 30, y: 0 }
-    expect(w.controller.recover('npc-corpse/42/100', 2, 100, 43, 'distant').reason).toBe('too_far')
+    expect(w.controller.recover('npc-corpse/42/100', 2, 100, 43, 'distant', 4).reason).toBe('too_far')
     expect(w.corpseInventory[1].count).toBe(23)
   })
 
   it('moves native stacks with metadata intact, retaining partial recovery for another trip', () => {
     const w = world()
-    const partial = w.controller.recover('npc-corpse/42/100', 1, 1, 43, 'trip-1')
+    const partial = w.controller.recover('npc-corpse/42/100', 1, 1, 43, 'trip-1', 5)
     expect(partial).toMatchObject({ accepted: true, reason: 'partial', moved_count: 1, moved_slots: 1 })
     expect(trace).toHaveBeenCalledWith('[AUTORIO] corpse.recovery request_id=trip-1 reason=partial moved_count=1')
     expect(w.main[0]).toMatchObject({ name: 'modular-armor', quality: { name: 'rare' }, durability: 17, grid: { equipment: [{ name: 'battery-equipment' }] } })
     expect(w.controller.status().corpses[0].state).toBe('partial')
-    expect(w.controller.recover('npc-corpse/42/100', 1, 1, 43, 'trip-1')).toEqual(partial)
+    expect(w.controller.recover('npc-corpse/42/100', 1, 1, 43, 'trip-1', 5)).toEqual(partial)
     expect(w.corpseInventory[1].count).toBe(23)
-    expect(w.controller.recover('npc-corpse/42/100', 1, 23, 43, 'trip-2')).toMatchObject({ reason: 'recovered', moved_count: 23 })
+    expect(w.controller.recover('npc-corpse/42/100', 1, 23, 43, 'trip-2', 6)).toMatchObject({ reason: 'recovered', moved_count: 23 })
     expect(w.corpse.valid).toBe(true)
   })
 
@@ -103,7 +104,7 @@ describe('durable native NPC corpse recovery', () => {
     const w = world()
     w.main[0].valid_for_read = true
     w.main[1].valid_for_read = true
-    expect(w.controller.recover('npc-corpse/42/100', 2, 100, 43, 'full')).toMatchObject({ reason: 'inventory_full', moved_count: 0 })
+    expect(w.controller.recover('npc-corpse/42/100', 2, 100, 43, 'full', 7)).toMatchObject({ reason: 'inventory_full', moved_count: 0 })
     expect(w.corpseInventory[1].count).toBe(23)
     w.corpse.valid = false
     expect(w.controller.status().corpses[0]).toMatchObject({ state: 'lost', reason: 'native_corpse_unavailable' })
@@ -111,18 +112,61 @@ describe('durable native NPC corpse recovery', () => {
 
   it('retains partial evidence and duplicate guards when the controller is reconstructed', () => {
     const w = world()
-    const first = w.controller.recover('npc-corpse/42/100', 1, 1, 43, 'restart')
+    const first = w.controller.recover('npc-corpse/42/100', 1, 1, 43, 'restart', 8)
     const restarted = new_corpse_recovery_controller(() => w.actor)
     expect(restarted.status().corpses[0].state).toBe('partial')
-    expect(restarted.recover('npc-corpse/42/100', 1, 1, 43, 'restart')).toEqual(first)
+    expect(restarted.recover('npc-corpse/42/100', 1, 1, 43, 'restart', 8)).toEqual(first)
     expect(w.corpseInventory[1].count).toBe(23)
   })
 
   it('rejects invalid bounds and unrelated NPC identity without moving items', () => {
     const w = world()
-    expect(w.controller.recover('npc-corpse/42/100', 17, 1, 43, 'bounds').reason).toBe('invalid_request')
+    expect(w.controller.recover('npc-corpse/42/100', 17, 1, 43, 'bounds', 9).reason).toBe('invalid_request')
     w.actor.status_snapshot = () => ({ actor_id: 43, kind: 'standalone_character', npc_id: 'other-npc' })
-    expect(w.controller.recover('npc-corpse/42/100', 1, 1, 43, 'identity').reason).toBe('corpse_not_owned')
+    expect(w.controller.recover('npc-corpse/42/100', 1, 1, 43, 'identity', 10).reason).toBe('corpse_not_owned')
+    expect(w.corpseInventory[0].count).toBe(1)
+  })
+
+  it('rejects conflicting reuse of a recovery request without returning old success', () => {
+    const w = world()
+    const receipt = w.controller.recover('npc-corpse/42/100', 1, 1, 43, 'original', 1)
+    expect(receipt.reason).toBe('partial')
+    for (const args of [
+      ['npc-corpse/99/100', 1, 1, 43, 'original', 1],
+      ['npc-corpse/42/100', 2, 1, 43, 'original', 1],
+      ['npc-corpse/42/100', 1, 2, 43, 'original', 1],
+      ['npc-corpse/42/100', 1, 1, 44, 'original', 1],
+      ['npc-corpse/42/100', 1, 1, 43, 'original', 2],
+    ] as const) {
+      expect(w.controller.recover(...args)).toMatchObject({ accepted: false, reason: 'duplicate_conflict', moved_count: 0 })
+    }
+    expect(w.controller.recover('npc-corpse/42/100', 1, 1, 43, 'original', 1)).toEqual(receipt)
+    expect(w.corpseInventory[1].count).toBe(23)
+  })
+
+  it('fences an expired and pruned request ordinal even against a new available corpse', () => {
+    const w = world()
+    w.controller.recover('npc-corpse/42/100', 1, 1, 43, 'expired', 1)
+    w.corpse.valid = false
+    w.controller.status()
+    const persisted = (globalThis as any).storage
+    const closed = persisted.sgluna_corpses[0]
+    for (let i = 0; i < 32; i++) persisted.sgluna_corpses.push({ ...closed, previous_actor_id: 100 + i, corpse_ref: `older-${i}` })
+    w.controller.status()
+    expect(persisted.sgluna_corpse_results).toEqual([])
+    const next = world()
+    expect(next.controller.recover('npc-corpse/42/100', 1, 1, 43, 'expired', 1)).toMatchObject({ accepted: false, reason: 'stale_operation_ordinal', moved_count: 0 })
+    expect(next.corpseInventory[0].count).toBe(1)
+    expect(next.controller.recover('npc-corpse/42/100', 1, 1, 43, 'new-attempt', 2).moved_count).toBe(1)
+  })
+
+  it('rejects a corpse moved to another surface at identical coordinates or changed force', () => {
+    const w = world()
+    w.corpse.surface.index = 2
+    expect(w.controller.recover('npc-corpse/42/100', 1, 1, 43, 'surface', 1).reason).toBe('corpse_surface_or_force_changed')
+    w.corpse.surface.index = 1
+    w.corpse.force.index = 2
+    expect(w.controller.recover('npc-corpse/42/100', 1, 1, 43, 'force', 2).reason).toBe('corpse_surface_or_force_changed')
     expect(w.corpseInventory[0].count).toBe(1)
   })
 })

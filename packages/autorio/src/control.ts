@@ -387,7 +387,7 @@ remote.add_interface('autorio_operations', {
   stop_follow_player: (): [boolean, string] => follow_controller.stop(),
   set_auto_defense: (enabled: boolean): [boolean, string] => defense_controller.set_enabled(enabled),
   equip_weapon: (item_name: string, slot: number = 1): [boolean, string] => equipment_controller.equip_weapon(item_name, slot),
-  recover_corpse: (corpse_ref: string, max_slots: number, max_count: number, expected_actor_id: number, request_id: string) => corpse_recovery_controller.recover(corpse_ref, max_slots, max_count, expected_actor_id, request_id),
+  recover_corpse: (corpse_ref: string, max_slots: number, max_count: number, expected_actor_id: number, request_id: string, operation_ordinal: number) => corpse_recovery_controller.recover(corpse_ref, max_slots, max_count, expected_actor_id, request_id, operation_ordinal),
   equip_ammo: (item_name: string, slot: number = 1): [boolean, string] => equipment_controller.equip_ammo(item_name, slot),
   equip_armor: (item_name: string): [boolean, string] => equipment_controller.equip_armor(item_name),
   select_weapon_slot: (slot: number): [boolean, string] => equipment_controller.select_weapon_slot(slot),
