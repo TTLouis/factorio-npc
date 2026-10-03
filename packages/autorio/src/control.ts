@@ -10,6 +10,7 @@ import type {
 
 import type { ControlledActor } from './actors/types'
 import { get_controlled_actor } from './actors/actor_controller'
+import { new_output_delivery_proof_controller, tick_output_delivery_proofs } from './output_delivery_proof'
 import { record_hand_crafted_tick, record_hand_mined_item } from './hand_work'
 import { new_awareness_controller } from './awareness'
 import { new_area_clearing_controller } from './area_clearing'
@@ -81,6 +82,7 @@ const research_controller = new_research_controller(get_controlled_actor, task_m
 const combat_controller = new_combat_controller(get_controlled_actor, task_manager)
 const equipment_controller = new_equipment_controller(get_controlled_actor)
 const corpse_recovery_controller = new_corpse_recovery_controller(get_controlled_actor)
+const output_delivery_proof_controller = new_output_delivery_proof_controller(get_controlled_actor)
 const follow_controller = new_follow_controller(
   get_controlled_actor,
   (player_name, follow_distance) => navigation_controller.submit_player(player_name, follow_distance),
@@ -136,6 +138,7 @@ remote.add_interface('autorio_equipment', {
 remote.add_interface('autorio_corpse_recovery', {
   status: () => corpse_recovery_controller.status(),
 })
+remote.add_interface('autorio_output_delivery_proof', output_delivery_proof_controller)
 
 remote.add_interface('autorio_crafting', {
   status: () => crafting_controller.status(),
@@ -604,6 +607,7 @@ let no_actor_found = false
 
 script.on_event(defines.events.on_tick, (_event) => {
   if (!setup_complete) setup()
+  tick_output_delivery_proofs()
 
   const actor = get_controlled_actor()
   if (actor === undefined || actor.character === undefined || !actor.is_valid) {

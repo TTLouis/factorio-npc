@@ -123,6 +123,7 @@ import { event_handlers, set_load_handler } from './test-event-registry'
   },
   inventory: {
     character_corpse: 'character_corpse',
+    chest: 'chest',
     character_guns: 'character_guns',
     character_ammo: 'character_ammo',
     character_armor: 'character_armor',

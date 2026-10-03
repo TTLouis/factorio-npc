@@ -25,6 +25,7 @@
 // numbers and strings only).
 
 import type { LuaEntity, LuaSurface, SurfaceIndex } from 'factorio:runtime'
+import { note_output_proof_hand_craft, note_output_proof_manual_mutation } from './output_delivery_proof'
 import { entity_role_inventories, has_separate_output } from './inventory_roles'
 
 /** Fed machines remembered per force; more than this voids every window for a long while. */
@@ -105,6 +106,7 @@ function force_work(force_index: number): ForceHandWork {
  * that produces items. Everything else is hand feeding.
  */
 export function record_hand_insert(force_index: number, item_name: string, entity_name: string, entity_type: string, into_fuel: boolean, entity?: LuaEntity) {
+  note_output_proof_manual_mutation(entity, into_fuel)
   if (into_fuel || NON_PRODUCING_TYPES[entity_type]) return
   const work = force_work(force_index)
   work.insert_tick = game.tick
@@ -190,6 +192,7 @@ function prune_fed(work: ForceHandWork) {
 }
 
 export function record_hand_crafted_tick(force_index: number, item_name: string) {
+  note_output_proof_hand_craft(force_index, item_name)
   const work = force_work(force_index)
   const crafted = work.crafted_tick ?? {}
   work.crafted_tick = crafted
