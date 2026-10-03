@@ -26,9 +26,10 @@ function inventory(stacks: any[]) {
   return value
 }
 
-function world() {
+function world(death_actor_id = 42) {
+  ;(globalThis as any).storage.standalone_character_unit_number = death_actor_id
   const original: any = {
-    valid: true, type: 'character', unit_number: 42, force: { index: 1 },
+    valid: true, type: 'character', unit_number: death_actor_id, force: { index: 1 },
     surface: { index: 1 }, position: { x: 0, y: 0 },
   }
   const recoveredArmor = stack('modular-armor', 1, { quality: { name: 'rare' }, grid: { equipment: [{ name: 'battery-equipment' }] }, durability: 17 })
@@ -52,7 +53,7 @@ function world() {
   }
   const controller = new_corpse_recovery_controller(() => actor)
   const death: any = { entity: original, tick: 100 }
-  const post: any = { unit_number: 42, tick: 100, surface_index: 1, corpses: [corpse] }
+  const post: any = { unit_number: death_actor_id, tick: 100, surface_index: 1, corpses: [corpse] }
   note_npc_death(death)
   note_npc_corpse(post)
   return { actor, character, guns, ammo, main, corpse, corpseInventory, recoveredArmor, controller, death, post }
@@ -154,10 +155,10 @@ describe('durable native NPC corpse recovery', () => {
     for (let i = 0; i < 32; i++) persisted.sgluna_corpses.push({ ...closed, previous_actor_id: 100 + i, corpse_ref: `older-${i}` })
     w.controller.status()
     expect(persisted.sgluna_corpse_results).toEqual([])
-    const next = world()
-    expect(next.controller.recover('npc-corpse/42/100', 1, 1, 43, 'expired', 1)).toMatchObject({ accepted: false, reason: 'stale_operation_ordinal', moved_count: 0 })
+    const next = world(44)
+    expect(next.controller.recover('npc-corpse/44/100', 1, 1, 43, 'expired', 1)).toMatchObject({ accepted: false, reason: 'stale_operation_ordinal', moved_count: 0 })
     expect(next.corpseInventory[0].count).toBe(1)
-    expect(next.controller.recover('npc-corpse/42/100', 1, 1, 43, 'new-attempt', 2).moved_count).toBe(1)
+    expect(next.controller.recover('npc-corpse/44/100', 1, 1, 43, 'new-attempt', 2).moved_count).toBe(1)
   })
 
   it('rejects a corpse moved to another surface at identical coordinates or changed force', () => {
