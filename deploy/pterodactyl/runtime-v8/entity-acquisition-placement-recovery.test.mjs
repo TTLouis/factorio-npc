@@ -212,7 +212,7 @@ test('simple unconstrained placement uses place_entity without planner observati
   assert.equal(rcon.mutations.length, 1)
 })
 
-test('meaningful simple-placement failure can fall back to placement planning and retry', async () => {
+test('placement planning can reobserve a failure but missing exact receipts block a changed-position retry', async () => {
   const rcon = new E2eRcon()
   let calls = 0
   const agent = new NpcAgentLoop({
@@ -230,6 +230,10 @@ test('meaningful simple-placement failure can fall back to placement planning an
       if (calls === 2) {
         return { content: null, tool_calls: [toolCall('placement-plan', 'planPlacement', { entity_name: 'wooden-chest' })] }
       }
+      if (calls >= 4) return planMessage([], {
+        chatMessage: 'BLOCKED: The cancelled chest placement has no exact effect receipt; confirm the affected placement before retrying.',
+        plan: ['Place chest'],
+      })
       return planMessage([{ name: 'place_entity', args: { entity_name: 'wooden-chest', x: 3, y: 0 } }], {
         plan: ['Place chest'],
       })
@@ -240,11 +244,13 @@ test('meaningful simple-placement failure can fall back to placement planning an
   rcon.failedStatus(1, ['placing'], 'not_placeable')
   const retry = await agent.failed('placing:not_placeable')
 
-  assert.equal(calls, 3)
-  assert.equal(retry.operations[0].name, 'place_entity')
-  assert.deepEqual(retry.operations[0].args, { entity_name: 'wooden-chest', x: 3, y: 0 })
+  assert.equal(calls, 4)
+  assert.deepEqual(retry.operations, [])
+  assert.equal(retry.goalStatus, 'blocked')
+  assert.match(retry.chatMessage, /no exact effect receipt/)
   assert.equal(rcon.commands.some(command => command.includes('plan_placement')), true)
-  assert.equal(rcon.mutations.length, 2)
+  assert.equal(rcon.mutations.length, 1, 'changed coordinates cannot bypass the unresolved placement')
+  assert.ok(agent.memory.pendingOperation('npc:sgluna'), 'the interrupted placement survives the blocker')
 })
 
 test('observed exact entity identity rejects legacy name mining and repairs to mine_entity_exact', async () => {

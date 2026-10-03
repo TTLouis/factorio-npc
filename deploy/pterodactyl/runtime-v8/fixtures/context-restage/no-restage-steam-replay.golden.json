@@ -259,7 +259,7 @@
     },
     {
       "event": "operation.pending_recorded",
-      "sha": "799819a42b9190e2"
+      "sha": "4e538d5611113a0b"
     },
     {
       "event": "operations.admit",
@@ -283,7 +283,7 @@
     },
     {
       "event": "factorio.status",
-      "sha": "968e02b35ed51024"
+      "sha": "2e927664285f5753"
     },
     {
       "event": "step.completion_checked",
@@ -463,7 +463,7 @@
     },
     {
       "event": "operation.pending_recorded",
-      "sha": "7110c19e3a64cdb1"
+      "sha": "0d755afa7d3d6521"
     },
     {
       "event": "operations.admit",
@@ -479,11 +479,11 @@
     },
     {
       "event": "operation.reconciled",
-      "sha": "d72923b86ff29e9d"
+      "sha": "cc16ce2e62e449a6"
     },
     {
       "event": "factorio.status",
-      "sha": "ebc40d6c9646e74f"
+      "sha": "ed7c21b7b8bef646"
     },
     {
       "event": "factorio.error_continuation",

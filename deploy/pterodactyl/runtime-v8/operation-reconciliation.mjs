@@ -207,7 +207,7 @@ export function reconcilePendingOperation(pending, { status, actor } = {}) {
     }
     if (!Number.isSafeInteger(admission.generation) || !Number.isSafeInteger(status?.batch_generation)
       || admission.generation !== status.batch_generation) {
-      return { verdict: RECONCILE_VERDICT.GENERATION_CHANGED, effect: EFFECT.PARTIAL_UNKNOWN, reason: 'admission_generation_changed' }
+      return staleActor ?? { verdict: RECONCILE_VERDICT.GENERATION_CHANGED, effect: EFFECT.PARTIAL_UNKNOWN, reason: 'admission_generation_changed' }
     }
     const batchId = admission.slots?.[0]?.batch_refs?.[0]?.batch_id
     if (admission.state === 'completed') return { verdict: RECONCILE_VERDICT.ADMITTED_COMPLETED, effect: EFFECT.HAPPENED, reason: 'exact_receipts_completed', batch_id: batchId }

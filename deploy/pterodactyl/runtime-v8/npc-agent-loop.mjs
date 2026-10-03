@@ -6097,6 +6097,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.bootstrapDependencyPreflightRetries = 0
     this.authorizationRefusalRetries = 0
     this.duplicateEffectRetries = 0
+    this.duplicateEffectHold = null
     this.lostAckRetries = 0
     this.planUpdateReason = intent === 'new_goal'
       ? 'new_goal'
@@ -9269,9 +9270,24 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       operations: [],
     })
 
+    // An uncertain-effect hold is harness truth, rather than the provider's
+    // guess about a world blocker. Only the exact still-open refused operation
+    // may supply that evidence; a later receipt or another task cannot inherit it.
+    const uncertaintyHold = evidenceKind === 'provider_blocker' && this.duplicateEffectHold
+      ? (this.memory.pendingOperations?.(this.requestInfo.memoryKey) ?? []).find(record =>
+        record.operation_key === this.duplicateEffectHold.operation_key
+        && ![EFFECT.NOT_HAPPENED, EFFECT.HAPPENED].includes(record.effect)) : undefined
+    if (uncertaintyHold) {
+      blocker = 'unresolved_operation_effect'
+      evidenceKind = 'deterministic_preflight'
+      await this.traceEvent('operation.uncertainty_blocked', {
+        reason: 'unresolved_operation_scope_conflict', operation_key: uncertaintyHold.operation_key,
+        effect: uncertaintyHold.effect, request_id: this.traceRequest?.id,
+      })
+    }
     const blockerCandidate = {
       kind: 'world_blocked',
-      source: evidenceKind === 'provider_blocker' ? 'main_planner' : 'action_omission_repair',
+      source: uncertaintyHold ? 'operation_reconciliation' : evidenceKind === 'provider_blocker' ? 'main_planner' : 'action_omission_repair',
       reason_code: blocker,
       candidate_blocker: blocker,
       evidence: reason ? [{ kind: evidenceKind, ref: `${state?.goal_id ?? 'goal'}/candidate_blocker`, summary: cleanMemoryText(reason, 1200) }] : [],
@@ -10067,6 +10083,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             retry_budget: DUPLICATE_EFFECT_RETRY_BUDGET,
           })
           const held = error.preflight.duplicate ?? {}
+          this.duplicateEffectHold = { operation_key: held.operation_key }
           this.messages.push({
             role: 'user',
             content: `[HARNESS] Refused before admission: this batch conflicts with unresolved work whose effect is not proven absent (effect=${held.effect}, reconciliation verdict=${held.verdict ?? 'none'}); nothing from this batch ran. Do not bypass this hold by changing quantities, arguments, steps or plans. Reobserve the affected targets and materials within the recovery limits, then surface the blocker if uncertainty remains. Independently authorized work may continue only with disjoint targets and materials. Facts: ${JSON.stringify({ operation_key: held.operation_key, effect_classes: held.effect_classes, batch_id: held.batch_id })}`,

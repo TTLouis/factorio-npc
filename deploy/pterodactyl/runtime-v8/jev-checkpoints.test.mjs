@@ -547,8 +547,6 @@ test('deciding C4: a step that fails after the skipped wake is scored as a disag
   await world.agent.completed() // step 1 closes; the executor continues directly on step 2
   assert.equal(world.rows('c4.route_applied')[0].data.mode, 'deciding')
   await world.agent.failed(world.game.failLastBatch({ type: 'mining', code: 'no_resource' })) // the batch fails: a recovery round runs
-  world.give('copper-ore')
-  await world.agent.completed() // the step verifies, but not on its first batch
 
   const scored = world.rows('jev.judgment_scored').find(row => row.data.family === 'c4_next_step')
   assert.equal(scored.data.acted, true)
@@ -560,8 +558,12 @@ test('deciding C4: a step that fails after the skipped wake is scored as a disag
   assert.equal(scored.data.outcome.observation_needed, true)
   assert.equal(scored.data.saving, undefined, 'a failed outcome saves nothing')
   assert.equal(scored.data.ledger.saved.tokens, 0)
-  const order = world.trace.map(record => record.event)
-  assert.ok(order.indexOf('jev.judgment_scored') < order.lastIndexOf('step.verified'), 'the disagreement does not wait for what the request does next')
+  const scoredCount = world.rows('jev.judgment_scored').length
+  const verifiedCount = world.rows('step.verified').length
+  world.give('copper-ore')
+  await world.agent.completed()
+  assert.equal(world.rows('jev.judgment_scored').length, scoredCount, 'the failure was scored before the later wake')
+  assert.equal(world.rows('step.verified').length, verifiedCount, 'a missing receipt cannot verify the uncertain retry')
 })
 
 test('deciding C4: a direct step that fails and then REPLANS (or whose request completes or fails) is still scored as a disagreement, and the family demotes', async () => {

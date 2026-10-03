@@ -199,7 +199,7 @@ test('restart with an outstanding operation: both identical and changed deliveri
   const second = harness({ memory, game: first.game, replies: [deliveryPlan(), deliveryPlan(3), planReply({operations:[]})] })
   await recoverInterruptedAgentPlan(second.agent, 'runtime_restart', {})
 
-  const reconciled = second.named('operation.reconciled')
+  const reconciled = second.named('operation.reconciled').filter(row => row.trigger === 'runtime_restart')
   assert.equal(reconciled.length, 1)
   assert.equal(reconciled[0].trigger, 'runtime_restart')
   assert.equal(reconciled[0].verdict, 'generation_changed')
@@ -297,14 +297,18 @@ test('restart after an actor replacement: the old body\'s outstanding operation 
   const memory = new CanonicalTaskBoardMemory()
   memory.restore(wire)
 
-  const second = harness({ memory, game: first.game, replies: [deliveryPlan(2), planReply({operations:[]})] })
+  const second = harness({ memory, game: first.game, replies: [deliveryPlan(2), planReply({
+    chatMessage: 'BLOCKED: The old actor delivery is uncertain; confirm the affected coal and chest before retrying.',
+    plan: ['Deliver coal to the chest'], operations: [],
+  })] })
   await recoverInterruptedAgentPlan(second.agent, 'actor_replaced', {})
 
-  const stale = second.named('operation.stale_refused')
+  const stale = second.named('operation.stale_refused').filter(row => row.trigger === 'actor_replaced')
   assert.equal(stale.length, 1)
   assert.equal(stale[0].reason, 'actor_replaced')
   assert.deepEqual(stale[0].pending_actor, { actor_id: 18, epoch: 3 })
   assert.equal(second.named('operation.reconciled')[0].verdict, 'stale_actor')
   assert.equal(memory.pendingOperation(KEY).effect, 'unknown')
   assert.equal(memory.pendingOperation(KEY).state === 'unreconciled' || memory.pendingOperation(KEY).state === 'acknowledged', true)
+  assert.equal(first.game.deliveries.length, 1, 'the replacement body never replays the old delivery')
 })

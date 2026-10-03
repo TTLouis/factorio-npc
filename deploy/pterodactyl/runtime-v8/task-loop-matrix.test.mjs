@@ -530,14 +530,19 @@ test('a new-goal planning turn is told to plan at outline level; a continuation 
 // a coordinate it chose and queued the dependent starter-coal transfer. The
 // engine refused the placement and cancelled the transfer; the board read the
 // cancelled transfer as `transfer_failed:not_placeable` and froze the plan.
-test('a refused placement with a dependent transfer goes back to the planner with the refusal, and blocks only when retries run out', async () => {
+test('a cancelled placement and dependent transfer preserve the plan and block conflicting retries without exact prefix proof', async () => {
   const PLACE_STEPS = ['Place a burner mining drill on iron ore and fuel it', 'Mine 10 iron ore']
   let x = 11
   const prompts = []
+  const trace = []
   const world = harness({
     provider: async messages => {
       prompts.push(messages.map(message => String(message.content ?? '')).join('\n'))
       x++
+      if (prompts.length >= 3) return planReply({
+        chatMessage: 'BLOCKED: The cancelled drill placement and coal transfer have uncertain effects; confirm them before retrying.',
+        plan: PLACE_STEPS, currentStep: 0, operations: [],
+      })
       return planReply({
         plan: PLACE_STEPS,
         currentStep: 0,
@@ -548,6 +553,7 @@ test('a refused placement with a dependent transfer goes back to the planner wit
       })
     },
   })
+  world.agent.behaviorTrace = { emit: async record => { trace.push(record) } }
   const refuse = () => world.game.failLastBatch({
     type: 'placing',
     code: 'not_placeable',
@@ -568,42 +574,30 @@ test('a refused placement with a dependent transfer goes back to the planner wit
   const stepId = world.memory.currentPlan(KEY).task_board.active_step_id
   assert.deepEqual(world.game.lastTaskTypes, ['placing', 'moving_items'])
 
-  const plannerCallsBefore = world.plannerCalls
   await world.agent.failed(refuse())
 
-  let state = world.memory.currentPlan(KEY)
-  assert.equal(state.status, 'active')
-  assert.equal(state.blocker, '')
-  assert.equal(world.plannerCalls, plannerCallsBefore + 1)
-  const retryPrompt = prompts.at(-1)
+  const state = world.memory.currentPlan(KEY)
+  assert.equal(state.status, 'blocked')
+  assert.equal(state.blocker, 'unresolved_operation_effect')
+  const retryPrompt = prompts[1]
   assert.match(retryPrompt, /not_placeable/)
   assert.match(retryPrompt, /"nearest_valid_center":\{"x":12,"y":-7\}/)
   assert.match(retryPrompt, /rock-big/)
   assert.match(retryPrompt, /correctable placement error/)
-  // Same committed plan, same active step; the retry is a new batch for that step.
+  assert.match(prompts.at(-1), /conflicts with unresolved work/)
+  // Same committed plan and active step; no changed-coordinate batch is admitted.
   const afterRetry = world.reducerPlan()
   assert.equal(afterRetry.plan_id, committed.plan_id)
   assert.equal(afterRetry.version, committed.version)
-  assert.equal([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(afterRetry.status), true)
+  assert.equal(afterRetry.status, PLAN_STATUS.BLOCKED)
   assert.deepEqual(afterRetry.steps, committed.steps)
   assert.equal(state.task_board.active_step_id, stepId)
   assert.equal(state.task_board.completed_count, 0)
-  assert.equal(world.game.mutations.length, 2)
-
-  // A second refusal is still within the budget.
-  await world.agent.failed(refuse())
-  state = world.memory.currentPlan(KEY)
-  assert.equal(state.status, 'active')
-  assert.equal(world.game.mutations.length, 3)
-
-  // The third consecutive refusal of the same step exhausts the retries: now it is a world blocker.
-  await world.agent.failed(refuse())
-  state = world.memory.currentPlan(KEY)
-  assert.equal(state.status, 'blocked')
-  assert.equal(state.blocker, 'placement_failed:not_placeable')
-  assert.equal(state.task_board.active_step_id, stepId)
-  assert.equal(world.reducerPlan().plan_id, committed.plan_id)
-  assert.equal(world.game.mutations.length, 3)
+  assert.equal(world.game.mutations.length, 1)
+  assert.ok(world.memory.pendingOperation(KEY), 'the unresolved batch is retained after the question')
+  const held = trace.find(record => record.event === 'operation.uncertainty_blocked')
+  assert.ok(held?.data.request_id)
+  assert.equal(held.data.reason, 'unresolved_operation_scope_conflict')
 })
 
 // ---------------------------------------------------------------------------
