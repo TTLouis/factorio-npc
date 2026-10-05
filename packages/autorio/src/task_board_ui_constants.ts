@@ -43,26 +43,18 @@ export const TRACKER = {
   // still carries their old maximal_height and is rebuilt (refresh_tracker
   // reports it as stale) rather than patched.
   layout_tag: 'sgluna_tracker_layout',
-  layout_version: 2,
+  layout_version: 3,
   header: 'sgluna_task_board_tracker_header',
   body: 'sgluna_task_board_tracker_body',
   summary: 'sgluna_task_board_tracker_summary',
-  empty: 'sgluna_task_board_tracker_empty',
-  workspace: 'sgluna_task_board_tracker_workspace',
-  shelf: 'sgluna_task_board_tracker_shelf',
-  shelf_header: 'sgluna_task_board_tracker_shelf_header',
-  shelf_count: 'sgluna_task_board_tracker_shelf_count',
-  shelf_body: 'sgluna_task_board_tracker_shelf_body',
-  shelf_scroll: 'sgluna_task_board_tracker_shelf_scroll',
-  shelf_table: 'sgluna_task_board_tracker_shelf_table',
-  plan_column: 'sgluna_task_board_tracker_plan_column',
-  plan_header: 'sgluna_task_board_tracker_plan_header',
-  plan_summary: 'sgluna_task_board_tracker_plan_summary',
-  plan_body: 'sgluna_task_board_tracker_plan_body',
-  plan: 'sgluna_task_board_tracker_plan',
+  // One tree: roadmap nodes with the active plan's steps nested under the node they build.
+  tree: 'sgluna_task_board_tracker_tree',
+  tree_header: 'sgluna_task_board_tracker_tree_header',
+  tree_summary: 'sgluna_task_board_tracker_tree_summary',
+  tree_body: 'sgluna_task_board_tracker_tree_body',
   progress: 'sgluna_task_board_tracker_progress',
-  steps_scroll: 'sgluna_task_board_tracker_steps',
-  steps_table: 'sgluna_task_board_tracker_steps_table',
+  tree_scroll: 'sgluna_task_board_tracker_tree_scroll',
+  tree_rows: 'sgluna_task_board_tracker_tree_rows',
   attention: 'sgluna_task_board_tracker_attention',
   divider: 'sgluna_task_board_tracker_divider',
   activity_header: 'sgluna_task_board_activity_header',
@@ -196,20 +188,27 @@ export const RESOURCE_LAYOUT = {
 // function.
 export const CONSOLE_LAYOUT = {
   synced_gui_height: 1080,
-  // The Plan Tracker's two lists (Roadmap Shelf, Active Plan) are stretchable
-  // scroll-panes: their natural and minimal height is this floor, and they grow
-  // to whatever height the window has beyond the rest of the left column. The
-  // floor, not the content, is the natural height, so a long list scrolls inside
-  // the window instead of making it taller.
+  // The Plan Tracker's tree is one stretchable scroll-pane: its natural and minimal
+  // height is this floor, and it grows to whatever height the window has beyond the
+  // rest of the left column. The floor, not the content, is the natural height, so a
+  // long tree scrolls inside the window instead of making it taller.
   tracker_list_floor: 120,
   preview_min_height: 360,
   preview_max_height: 900,
   preview_screen_fraction: 0.5,
-  // The Roadmap Shelf is intentionally the smaller planning context. The
-  // executable immutable slice keeps two thirds of the tracker's inner width.
-  tracker_column_gap: 12,
-  tracker_shelf_width: 200,
-  tracker_plan_width: LEFT_COLUMN_WIDTH - 2 * SECTION_PADDING - 12 - 200,
+  // The tree is built from horizontal row flows, not a table, so step rows can be indented
+  // under their node. Every label has a fixed width derived from these, which keeps the
+  // state column (ACTIVE / DONE / step status) lined up from row to row.
+  tracker_tree_width: LEFT_COLUMN_WIDTH - 2 * SECTION_PADDING,
+  tracker_row_spacing: 6,
+  tracker_sprite_width: 20,
+  tracker_state_width: 72,
+  tracker_step_indent: 24,
+  tracker_step_number_width: 28,
+  // Inner row width = tree width - body padding - scroll-pane frame and scrollbar (28), minus the fixed columns.
+  tracker_node_label_width: LEFT_COLUMN_WIDTH - 4 * SECTION_PADDING - 28 - 20 - 72 - 2 * 6,
+  tracker_step_label_width: LEFT_COLUMN_WIDTH - 4 * SECTION_PADDING - 28 - 24 - 20 - 28 - 72 - 4 * 6,
+  tracker_attention_width: LEFT_COLUMN_WIDTH - 4 * SECTION_PADDING - KEY_COLUMN_WIDTH - 12,
 }
 export const PREVIEW_CAMERA_WIDTH = PREVIEW_COLUMN_WIDTH - 2 * SECTION_PADDING
 export const PREVIEW_ZOOM_DEFAULT = 0.75
@@ -234,7 +233,7 @@ export const MORE_MENU_BUTTON_WIDTH = 140
 export const PROMPT_SEND_WIDTH = 84
 export const PROMPT_FIELD_WIDTH = LEFT_COLUMN_WIDTH - 2 * SECTION_PADDING - 8 - PROMPT_SEND_WIDTH
 // The left column's tabs. The three pages are all built once and switched by
-// toggling .visible, so every scroll-pane inside them (steps, shelf, activity,
+// toggling .visible, so every scroll-pane inside them (roadmap tree, activity,
 // conversation) keeps its position across both tab switches and refreshes.
 export type ConsoleTab = 'now' | 'plan' | 'activity'
 export const CONSOLE_TABS = {
@@ -242,7 +241,7 @@ export const CONSOLE_TABS = {
   captions: { now: 'NOW', plan: 'PLAN', activity: 'ACTIVITY' } as Record<ConsoleTab, string>,
   tooltips: {
     now: 'The goal, the current step and the conversation with SGLuna',
-    plan: 'The goal, the Roadmap Shelf and the committed plan slice',
+    plan: 'The goal, the roadmap and the committed plan steps under their node',
     activity: 'Everything SGLuna observed, decided and did, newest last',
   } as Record<ConsoleTab, string>,
   pages: { now: 'sgluna_task_board_tab_now', plan: 'sgluna_task_board_tab_plan', activity: 'sgluna_task_board_tab_activity' } as Record<ConsoleTab, string>,
