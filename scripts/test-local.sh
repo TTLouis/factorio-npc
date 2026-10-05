@@ -42,6 +42,7 @@ run_runtime() {
   # .devcontainer + the repo-root compose/.env/.gitignore/.dockerignore files:
   #   read directly by local-compose-secret-boundary.test.mjs.
   MSYS_NO_PATHCONV=1 docker run --rm \
+    -e UPDATE_RESTAGE_GOLDEN \
     -v "$(pwd -W)/deploy/pterodactyl:/src/deploy/pterodactyl" \
     -v "$(pwd -W)/contracts:/src/contracts:ro" \
     -v "$(pwd -W)/packages/autorio/src:/src/packages/autorio/src:ro" \

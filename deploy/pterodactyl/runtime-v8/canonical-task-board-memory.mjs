@@ -19,6 +19,7 @@ import {
   classifyTaskResume,
 } from './planning-state.mjs'
 import { duplicateEffectGuard } from './operation-reconciliation.mjs'
+import { pendingOperations, conflictingOperation } from './operation-ledger.mjs'
 import {
   mostRecentResumable,
   taskLedgerOf,
@@ -1310,7 +1311,28 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       approval_id: recorded?.approval_id,
       question_id: approval?.question_id,
     }, requestId)
-    return { ok: Boolean(recorded), approval: recorded, state: after }
+    // The user's approval of an operation-effect question attests that the legacy record's effect is settled. The approval
+    // itself cannot touch campaign state; the harness clears the record with its own authority afterwards.
+    let settled
+    if (recorded?.decision === 'approve' && approval?.question_id) {
+      const question = held.questions.find(item => item.question_id === approval.question_id)
+      if (question?.kind === 'operation_effect') {
+        settled = this.clearPendingOperation(key, { operationKey: question.subject_key })
+        this.#authTrace('operation.legacy_resolved', { ok: settled, reason: settled ? 'user_approved' : 'clear_refused',
+          operation_key: question.subject_key, question_id: question.question_id, approval_id: recorded.approval_id }, requestId)
+      }
+    }
+    return { ok: Boolean(recorded), approval: recorded, state: settled === undefined ? after : this.planningState(key), settled }
+  }
+
+  /** Harness-owned: surface a legacy operation record that no evidence can settle as a question the user can answer. */
+  raiseOperationEffectQuestion(key, record, { reason, requestId } = {}) {
+    const before = authorizationOf(this.planningState(key)).questions.length
+    const after = this.dispatchPlanningEvent(key, { type: PLANNING_EVENT.OPERATION_EFFECT_QUESTION_RAISED, source: 'runtime', now: Date.now(),
+      operation_key: record?.operation_key, reason })
+    const questions = authorizationOf(after).questions
+    const question = questions.find(item => item.kind === 'operation_effect' && item.subject_key === record?.operation_key && item.status === 'pending')
+    return question ? { question, duplicate: questions.length === before } : undefined
   }
 
   /**
@@ -1650,7 +1672,11 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   // unsettled record whose effect is not proven absent refuses an IDENTICAL batch for the same plan step (no duplicate delivery).
 
   pendingOperation(key) {
-    return this.planningState(key)?.run?.pending_operation ?? null
+    return this.pendingOperations(key).at(-1) ?? null
+  }
+
+  pendingOperations(key) {
+    return pendingOperations(this.planningState(key))
   }
 
   recordPendingOperation(key, operation, { requestId } = {}) {
@@ -1671,8 +1697,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return ok ? held : undefined
   }
 
-  updatePendingOperation(key, patch) {
-    const held = this.pendingOperation(key)
+  updatePendingOperation(key, patch, operationKey) {
+    const held = operationKey ? this.pendingOperations(key).find(item => item.operation_key === operationKey) : this.pendingOperation(key)
     if (!held) return undefined
     const goalId = this.planningState(key)?.goal?.goal_id
     const after = this.#applyRunEvent(key, { type: PLANNING_EVENT.PENDING_OPERATION_RECORDED, goal_id: goalId, operation: { ...held, ...patch } })
@@ -1680,19 +1706,20 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   }
 
   clearPendingOperation(key, { operationKey } = {}) {
+    operationKey ??= this.pendingOperation(key)?.operation_key
     const goalId = this.planningState(key)?.goal?.goal_id
     const after = this.#applyRunEvent(key, { type: PLANNING_EVENT.PENDING_OPERATION_RECORDED, goal_id: goalId, operation: null, operation_key: operationKey })
-    return !after?.run?.pending_operation
+    return !pendingOperations(after).some(item => item.operation_key === operationKey)
   }
 
   /** Would these operations repeat an effect that may already have happened? Traces `operation.duplicate_suppressed` when so. */
   checkDuplicateEffect(key, { operations } = {}, { requestId } = {}) {
     const planning = this.planningState(key)
-    const pending = planning?.run?.pending_operation
     const plan = getActivePlan(planning)
     const step = plan?.steps?.[plan.active_step_index]
-    const guard = duplicateEffectGuard(pending, { operations, planId: plan?.plan_id, stepId: step?.step_id })
+    const guard = conflictingOperation(planning, { operations, planId: plan?.plan_id, stepId: step?.step_id })
     if (guard.refuse) {
+      const pending = this.pendingOperations(key).find(record => record.operation_key === guard.operation_key)
       this.#authTrace('operation.duplicate_suppressed', {
         ok: false,
         reason: guard.reason,

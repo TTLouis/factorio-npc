@@ -38,6 +38,21 @@ export interface TaskBatchReceipt extends TaskBatchIdentity {
   refused_count?: number
   completed_count?: number
   refusals?: TaskBatchRefusal[]
+  /**
+   * Tasks of this batch the runtime had activated (taken off the queue) when
+   * the batch closed. Queued tasks beyond this count never began.
+   */
+  started_count?: number
+  /**
+   * Set only on a cancellation whose failing task is known to have changed
+   * nothing in the world (a placement the engine refused before creating it).
+   * With started_count === 1 that proves no task of the batch had any effect.
+   */
+  failed_before_mutation?: boolean
+}
+
+export interface TaskCancelProof {
+  failed_before_mutation: boolean
 }
 
 const MAX_RECEIPT_REFUSALS = 8
@@ -86,6 +101,9 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
   let last_completed_batch: TaskBatchReceipt | undefined
   let last_cancelled_batch: TaskBatchReceipt | undefined
   let active_batch_refusals: TaskBatchRefusal[] = []
+  let active_batch_started = 0
+  /** Monotonic count of tasks queued since this Lua state loaded; a witness that a submission queued nothing. */
+  let tasks_added_total = 0
   let refused_batch_handler: ((refusals: TaskBatchRefusal[], receipt: TaskBatchReceipt) => void) | undefined
 
   function is_routine_follow_task(task: PlayerParameters) {
@@ -144,6 +162,7 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
       active_batch_task_types = []
       active_batch_console_quiet = quiet_task
       active_batch_refusals = []
+      active_batch_started = 0
     }
     else if (!quiet_task) {
       active_batch_console_quiet = false
@@ -156,7 +175,7 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
     return created
   }
 
-  function close_batch(kind: 'completed' | 'cancelled' | 'refused', reason?: string) {
+  function close_batch(kind: 'completed' | 'cancelled' | 'refused', reason?: string, proof?: TaskCancelProof) {
     if (active_batch_id === undefined) return undefined
     const receipt: TaskBatchReceipt = {
       batch_id: active_batch_id,
@@ -166,7 +185,9 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
       task_types: active_batch_task_types.slice(0, 64),
       tick: game.tick,
       reason,
+      started_count: active_batch_started,
     }
+    if (kind === 'cancelled' && proof?.failed_before_mutation === true) receipt.failed_before_mutation = true
     // Refusals ride on whichever receipt closes the batch, so a later hard
     // failure that cancels the rest does not hide an earlier refusal.
     if (active_batch_refusals.length > 0) {
@@ -188,6 +209,7 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
     active_batch_task_types = []
     active_batch_console_quiet = false
     active_batch_refusals = []
+    active_batch_started = 0
     return receipt
   }
 
@@ -230,6 +252,7 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
 
   function add_task(task: PlayerParameters) {
     const new_batch = begin_or_extend_batch(task)
+    tasks_added_total++
     task_queue.push(task)
     log(`[AUTORIO] Task added: ${task.type}, batch=${active_batch_id}, task queue length: ${task_queue.length}`)
     if (new_batch) {
@@ -352,6 +375,7 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
     }
 
     log(`[AUTORIO] Next task: ${task.type}, batch=${active_batch_id}, task queue length: ${task_queue.length}`)
+    if (active_batch_id !== undefined) active_batch_started++
     player_state.task_state = task.type
     switch (task.type) {
       case TaskStates.WALKING_TO_ENTITY:
@@ -574,6 +598,7 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
     return {
       task_state: player_state.task_state,
       batch_generation: ensure_batch_generation(),
+      tasks_added: tasks_added_total,
       queue_empty: task_queue.length === 0,
       queue_length: task_queue.length,
       queued_task_types: task_queue.map(task => task.type),
@@ -598,11 +623,11 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
     reset_task_state()
   }
 
-  function cancel_all_tasks(reason = 'cancelled') {
+  function cancel_all_tasks(reason = 'cancelled', proof?: TaskCancelProof) {
     run_cancel_cleanup()
     reset_task_state()
     task_queue.length = 0
-    const receipt = close_batch('cancelled', reason)
+    const receipt = close_batch('cancelled', reason, proof)
     if (receipt) {
       const details = receipt_details(receipt)
       game.print(`[AUTORIO] Operation batch cancelled: ${details}`)

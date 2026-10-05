@@ -19,9 +19,11 @@ import { buildVerifiedResults } from './verified-results.mjs'
 import { cleanMemoryText, sanitizeDurableModelText, sanitizeDurableModelValue } from './durable-text.mjs'
 import { normalizeProviderPlanContent, providerCapabilityProfile } from './provider.mjs'
 import { executeAuthorizedBatch } from './supervisor-adapter.mjs'
+import { OPERATION_LEDGER_LIMIT } from './operation-ledger.mjs'
 import {
   batchWatermark,
   buildPendingOperation,
+  EFFECT,
   isLostAcknowledgement,
   PENDING_STATE,
   reconcilePendingOperation,
@@ -4346,7 +4348,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   async readInteractionTaskStatus() {
     try {
-      const raw = String(await this.rcon.command(toolCommand('getTaskStatus', {}))).slice(0, 16000)
+      const raw = String(await this.rcon.command(toolCommand('getTaskStatus', {}))).slice(0, 8_000_000)
       return compactInteractionTaskStatus(raw)
     }
     catch (error) {
@@ -5719,7 +5721,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   async readTaskStatusRaw() {
     try {
-      return String(await this.rcon.command(toolCommand('getTaskStatus', {}))).slice(0, 16000)
+      return String(await this.rcon.command(toolCommand('getTaskStatus', {}))).slice(0, 8_000_000)
     }
     catch {
       return undefined
@@ -5737,6 +5739,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const baseline = batchWatermark(await this.readTaskStatusRaw()) ?? null
     const record = this.memory.recordPendingOperation(key, buildPendingOperation({
       requestId: this.traceRequest?.id,
+      operationKey: `${this.traceRequest?.id ?? 'request'}/batch_${(planning?.operation_ledger?.sequence ?? 0) + 1}`,
+      ordinal: (planning?.operation_ledger?.sequence ?? 0) + 1,
+      protocolVersion: 2,
       operations,
       goalId: planning?.goal?.goal_id,
       planId: plan?.plan_id,
@@ -5745,17 +5750,58 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       baseline,
       now: Date.now(),
     }), { requestId: this.traceRequest?.id })
-    if (record) await this.persistState()
+    if (!record) {
+      const held = this.memory.pendingOperations?.(key)?.length ?? 0
+      const full = held >= OPERATION_LEDGER_LIMIT
+      await this.traceEvent(full ? 'operation.ledger_full' : 'operation.record_refused', {
+        request_id: this.traceRequest?.id, reason: full ? 'unresolved_operation_ledger_at_capacity' : 'record_refused_no_active_goal_or_invalid',
+        unresolved: held, limit: OPERATION_LEDGER_LIMIT,
+      })
+      throw new AgentLoopError('Operation ledger full or record refused; no operation sent')
+    }
+    await this.persistState()
     return record
+  }
+
+  // A prepared attempt the game provably never saw (rejected before transport, or the game refused it before recording
+  // anything): settle it as not happened so it leaves no hold.
+  async settleUnsentOperation(pending, ownerKey, reason) {
+    this.memory.updatePendingOperation?.(ownerKey, { effect: EFFECT.NOT_HAPPENED, reason }, pending.operation_key)
+    if (this.memory.clearPendingOperation?.(ownerKey, { operationKey: pending.operation_key }) !== true) {
+      await this.traceEvent('operation.settlement_refused', { request_id: pending.request_id, operation_key: pending.operation_key,
+        reason: 'unsent_settlement_refused', attempted_reason: reason })
+      throw new AgentLoopError('Prepared operation settlement refused')
+    }
+    await this.persistState()
+    await this.traceEvent('operation.not_sent', { request_id: pending.request_id, operation_key: pending.operation_key, reason })
+  }
+
+  // A legacy (pre-journal) record that neither exact nor baseline evidence can settle must not hold silently: raise one
+  // question the user can answer (idempotent per record).
+  async surfaceLegacyOperation(memoryKey, pending, result, requestId) {
+    if (pending?.legacy !== true || typeof this.memory.raiseOperationEffectQuestion !== 'function') return
+    if ([RECONCILE_VERDICT.NOT_ADMITTED, RECONCILE_VERDICT.ADMITTED_COMPLETED, RECONCILE_VERDICT.ADMITTED_IN_FLIGHT, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION].includes(result.verdict)) return
+    const raised = this.memory.raiseOperationEffectQuestion(memoryKey, pending, { reason: result.reason, requestId })
+    await this.persistState()
+    await this.traceEvent('operation.legacy_unresolved', {
+      request_id: requestId, operation_key: pending.operation_key, reason: result.reason,
+      question_id: raised?.question?.question_id ?? null, already_pending: raised?.duplicate === true,
+    }, { requestId })
   }
 
   // Reconcile the outstanding batch against the game's own batch records (exact batch id / generation / actor / epoch
   // correlation) and trace the verdict. A batch proven not to have reached the game is cleared (it may be issued again); one
   // proven or possibly admitted stays as the duplicate guard until its receipt settles it or its step is left.
-  async reconcileOutstandingOperation({ trigger, requestId } = {}) {
+  async reconcileOutstandingOperation({ trigger, requestId, operationKey } = {}) {
     if (typeof this.memory.pendingOperation !== 'function') return undefined
     const key = this.activePlanKey()
-    const pending = this.memory.pendingOperation(key)
+    const records = this.memory.pendingOperations?.(key) ?? [this.memory.pendingOperation(key)].filter(Boolean)
+    if (!operationKey && records.length > 1) {
+      let result
+      for (const record of records) result = await this.reconcileOutstandingOperation({ trigger, requestId, operationKey: record.operation_key })
+      return result
+    }
+    const pending = operationKey ? records.find(record => record.operation_key === operationKey) : records.at(-1)
     if (!pending) return undefined
     const rid = requestId ?? this.traceRequest?.id ?? `reconcile_${Date.now().toString(36)}`
     let actor
@@ -5767,7 +5813,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const result = reconcilePendingOperation(pending, { status: await this.readTaskStatusRaw(), actor })
     const admitted = [RECONCILE_VERDICT.ADMITTED_IN_FLIGHT, RECONCILE_VERDICT.ADMITTED_COMPLETED, RECONCILE_VERDICT.ADMITTED_CANCELLED].includes(result.verdict)
     let held = pending
-    if (result.verdict === RECONCILE_VERDICT.NOT_ADMITTED) {
+    if ([RECONCILE_VERDICT.NOT_ADMITTED, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION].includes(result.verdict)) {
       this.memory.clearPendingOperation?.(key, { operationKey: pending.operation_key })
     }
     else {
@@ -5778,7 +5824,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         reason: result.reason,
         batch_id: result.batch_id ?? null,
         reconciled_at: Date.now(),
-      }) ?? pending
+      }, pending.operation_key) ?? pending
     }
     await this.persistState()
     await this.traceEvent('operation.reconciled', {
@@ -5800,31 +5846,38 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         current_actor: actor ?? null,
       }, { requestId: rid })
     }
+    await this.surfaceLegacyOperation(key, pending, result, rid)
     return { ...result, admitted, pending: held ?? pending, request_id: rid }
   }
 
   // An idle receipt settles a batch only when its effect is proven complete or absent. Cancellation may leave a partial
   // effect, and an acknowledgement before a mod reload cannot establish what survived: both keep the duplicate guard.
-  async settleOutstandingOperation(rawStatus) {
+  async settleOutstandingOperation(rawStatus, operationKey) {
     try {
       if (typeof this.memory.pendingOperation !== 'function') return
       const key = this.activePlanKey()
-      const pending = this.memory.pendingOperation(key)
+      const records = this.memory.pendingOperations?.(key) ?? [this.memory.pendingOperation(key)].filter(Boolean)
+      if (!operationKey && records.length > 1) {
+        for (const record of records) await this.settleOutstandingOperation(rawStatus, record.operation_key)
+        return
+      }
+      const pending = operationKey ? records.find(record => record.operation_key === operationKey) : records.at(-1)
       if (!pending) return
       const watermark = batchWatermark(rawStatus)
       if (!watermark || watermark.idle !== true || watermark.queue_length !== 0) return
       const actor = this.epoch ? { actor_id: this.epoch.actor_id, epoch: this.epoch.epoch } : undefined
       const result = reconcilePendingOperation(pending, { status: rawStatus, actor })
-      const provable = [RECONCILE_VERDICT.ADMITTED_COMPLETED, RECONCILE_VERDICT.NOT_ADMITTED].includes(result.verdict)
+      const provable = [RECONCILE_VERDICT.ADMITTED_COMPLETED, RECONCILE_VERDICT.NOT_ADMITTED, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION].includes(result.verdict)
+      const settled = provable && this.memory.clearPendingOperation?.(key, { operationKey: pending.operation_key }) === true
       const rid = this.traceRequest?.id ?? pending.operation_key.split('/')[0]
       // The ordinary case (acknowledged, then its receipt) settles silently; only a batch whose acknowledgement was lost or whose
       // lineage is in doubt is worth a reconciliation row.
-      if (pending.state !== PENDING_STATE.ACKNOWLEDGED || !provable) {
+      if (pending.state !== PENDING_STATE.ACKNOWLEDGED || !provable || result.verdict === RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION) {
         await this.traceEvent('operation.reconciled', {
           request_id: rid,
           trigger: 'receipt',
           ...reconciliationFacts(result, pending),
-          settled: provable,
+          settled,
           signature: pending.signature,
           plan_id: pending.plan_id,
           step_id: pending.step_id,
@@ -5841,7 +5894,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }, { requestId: rid })
       }
       if (provable) {
-        this.memory.clearPendingOperation?.(key, { operationKey: pending.operation_key })
+        if (!settled) {
+          await this.traceEvent('operation.settlement_refused', { request_id: rid, operation_key: pending.operation_key,
+            reason: 'exact_settlement_refused', verdict: result.verdict }, { requestId: rid })
+          throw new AgentLoopError('Exact operation settlement refused; unresolved record retained')
+        }
         await this.persistState()
       }
       else {
@@ -5852,7 +5909,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           reason: result.reason,
           batch_id: result.batch_id ?? null,
           reconciled_at: Date.now(),
-        })
+        }, pending.operation_key)
         await this.persistState()
       }
     }
@@ -6080,6 +6137,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.bootstrapDependencyPreflightRetries = 0
     this.authorizationRefusalRetries = 0
     this.duplicateEffectRetries = 0
+    this.duplicateEffectHold = null
     this.lostAckRetries = 0
     this.planUpdateReason = intent === 'new_goal'
       ? 'new_goal'
@@ -7036,7 +7094,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   async taskStatusReceipt() {
     try {
-      const raw = String(await this.rcon.command(toolCommand('getTaskStatus', {}))).slice(0, 16000)
+      const raw = String(await this.rcon.command(toolCommand('getTaskStatus', {}))).slice(0, 8_000_000)
       await this.settleOutstandingOperation(raw)
       this.recordPlacementReceipt(raw)
       const currentPlan = this.memory.currentPlan?.(this.activePlanKey())
@@ -7077,7 +7135,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   async persistentRuntimeStatus() {
     try {
-      const raw = String(await this.rcon.command(toolCommand('getFollowStatus', {}))).slice(0, 16000)
+      const raw = String(await this.rcon.command(toolCommand('getFollowStatus', {}))).slice(0, 8_000_000)
       const follow = JSON.parse(raw)
       if (!follow || follow.active !== true) return undefined
       const status = safePersistentRuntime({ kind: 'follow', ...follow })
@@ -9252,9 +9310,24 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       operations: [],
     })
 
+    // An uncertain-effect hold is harness truth, rather than the provider's
+    // guess about a world blocker. Only the exact still-open refused operation
+    // may supply that evidence; a later receipt or another task cannot inherit it.
+    const uncertaintyHold = evidenceKind === 'provider_blocker' && this.duplicateEffectHold
+      ? (this.memory.pendingOperations?.(this.requestInfo.memoryKey) ?? []).find(record =>
+        record.operation_key === this.duplicateEffectHold.operation_key
+        && ![EFFECT.NOT_HAPPENED, EFFECT.HAPPENED].includes(record.effect)) : undefined
+    if (uncertaintyHold) {
+      blocker = 'unresolved_operation_effect'
+      evidenceKind = 'deterministic_preflight'
+      await this.traceEvent('operation.uncertainty_blocked', {
+        reason: 'unresolved_operation_scope_conflict', operation_key: uncertaintyHold.operation_key,
+        effect: uncertaintyHold.effect, request_id: this.traceRequest?.id,
+      })
+    }
     const blockerCandidate = {
       kind: 'world_blocked',
-      source: evidenceKind === 'provider_blocker' ? 'main_planner' : 'action_omission_repair',
+      source: uncertaintyHold ? 'operation_reconciliation' : evidenceKind === 'provider_blocker' ? 'main_planner' : 'action_omission_repair',
       reason_code: blocker,
       candidate_blocker: blocker,
       evidence: reason ? [{ kind: evidenceKind, ref: `${state?.goal_id ?? 'goal'}/candidate_blocker`, summary: cleanMemoryText(reason, 1200) }] : [],
@@ -9925,12 +9998,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           }
           this.authorizationRefusalRetries = 0
         }
-        // MW2b: an IDENTICAL delivery/craft/placement batch for the same step while an earlier one's effect is not proven absent
-        // (lost acknowledgement, restart, replaced actor) is never issued again.
+        // Recover exact receipts even when the notification was lost and this
+        // turn arrived through recovery rather than completed().
+        if (this.memory.pendingOperation?.(this.activePlanKey())) {
+          await this.settleOutstandingOperation(await this.readTaskStatusRaw())
+        }
+        // Uncertain target/material effects remain fenced across plans and goals.
         if (this.requestInfo && typeof this.memory.checkDuplicateEffect === 'function') {
           const duplicate = this.memory.checkDuplicateEffect(this.requestInfo.memoryKey, { operations: plan.operations }, { requestId: this.traceRequest?.id })
           if (duplicate?.refuse) {
-            const failure = new AgentLoopError('Operation admission refused: an identical batch may already have taken effect')
+            const failure = new AgentLoopError('Operation admission refused: conflicting unresolved work may already have taken effect')
             failure.preflight = {
               ok: false,
               code: DUPLICATE_EFFECT_CODE,
@@ -10046,9 +10123,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             retry_budget: DUPLICATE_EFFECT_RETRY_BUDGET,
           })
           const held = error.preflight.duplicate ?? {}
+          this.duplicateEffectHold = { operation_key: held.operation_key }
           this.messages.push({
             role: 'user',
-            content: `[HARNESS] Refused before admission: this batch is identical to one that was already sent for this step, and its effect is not proven absent (effect=${held.effect}, reconciliation verdict=${held.verdict ?? 'none'}); nothing from this batch ran. Do not issue the same delivery, craft or placement again. Observe the destination or your inventory first, then submit only what is verifiably still missing, with different arguments. Facts: ${JSON.stringify({ operation_key: held.operation_key, effect_classes: held.effect_classes, batch_id: held.batch_id })}`,
+            content: `[HARNESS] Refused before admission: this batch conflicts with unresolved work whose effect is not proven absent (effect=${held.effect}, reconciliation verdict=${held.verdict ?? 'none'}); nothing from this batch ran. Do not bypass this hold by changing quantities, arguments, steps or plans. Reobserve the affected targets and materials within the recovery limits, then surface the blocker if uncertainty remains. Independently authorized work may continue only with disjoint targets and materials. Facts: ${JSON.stringify({ operation_key: held.operation_key, effect_classes: held.effect_classes, batch_id: held.batch_id })}`,
           })
           return this.runTurn()
         }
@@ -10180,18 +10258,27 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
       }
 
-      await this.recordPendingOperationBeforeSend(operations, before)
-      await this.traceEvent('operations.admit', { operations })
+      const pendingAdmission = await this.recordPendingOperationBeforeSend(operations, before)
+      const operationOwnerKey = this.activePlanKey()
       // A restage that landed during that await must not let this reply's batch through
       // (outside the try below: a stale drop is not an admission failure).
-      await this.assertCurrent()
+      try {
+        await this.traceEvent('operations.admit', { operations })
+        await this.assertCurrent()
+      }
+      catch (error) {
+        // Transport has not been invoked. This local boundary proves this exact
+        // prepared attempt absent; a later restart without this proof stays uncertain.
+        if (pendingAdmission) await this.settleUnsentOperation(pendingAdmission, operationOwnerKey, 'cancelled_before_transport')
+        throw error
+      }
       let reconciledAdmitted = false
       try {
-        const acknowledgement = await executeAuthorizedBatch(this.rcon, before.epoch, commands)
+        const acknowledgement = await executeAuthorizedBatch(this.rcon, before.epoch, commands, undefined, pendingAdmission)
         await this.traceEvent('operations.ack', {
           operations: operations.map((operation, index) => ({ ...operation, admission_result: acknowledgement.results[index] })),
         })
-        if (this.requestInfo) this.memory.updatePendingOperation?.(this.requestInfo.memoryKey, { state: PENDING_STATE.ACKNOWLEDGED })
+        if (this.requestInfo) this.memory.updatePendingOperation?.(this.requestInfo.memoryKey, { state: PENDING_STATE.ACKNOWLEDGED }, pendingAdmission?.operation_key)
         if (this.requestInfo && stateResult?.state) {
           const state = this.memory.setAdmissionState?.(this.requestInfo.memoryKey, 'admitted')
           if (state) stateResult = { ...stateResult, state }
@@ -10202,9 +10289,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       catch (error) {
         // MW2b: the command was sent but no valid acknowledgement came back. Ask the game what really happened (exact batch,
         // actor and epoch correlation) before anything is issued again or the goal is blocked.
+        // Rejected before the first byte reached RCON, or refused by the game before it recorded anything: provably not sent.
+        if (pendingAdmission && (error?.notSent === true || error?.notAdmitted === true)) {
+          await this.settleUnsentOperation(pendingAdmission, operationOwnerKey, error.notSent === true ? 'rejected_before_transport' : 'admission_refused_before_record')
+        }
         let reconciliation
-        if (isLostAcknowledgement(error) && this.requestInfo && typeof this.memory.pendingOperation === 'function') {
-          reconciliation = await this.reconcileOutstandingOperation({ trigger: 'lost_acknowledgement' })
+        if ((isLostAcknowledgement(error) || error?.admission) && this.requestInfo && typeof this.memory.pendingOperation === 'function') {
+          reconciliation = await this.reconcileOutstandingOperation({ trigger: 'lost_acknowledgement', operationKey: pendingAdmission?.operation_key })
         }
         if (reconciliation?.admitted) {
           // The game took the batch; only its receipt is outstanding. Carry on as acknowledged: nothing is sent again.
@@ -10245,8 +10336,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             operation_index: operationIndex === undefined ? undefined : operationIndex + 1,
             operation: operationIndex !== undefined ? operations[operationIndex] : undefined,
             factorio_error: error?.factorioError,
-            no_replay: true,
-            no_replay_reason: 'Earlier operations in the admitted batch may already have produced side effects.',
+            no_replay: error?.notSent !== true && error?.notAdmitted !== true,
+            no_replay_reason: error?.notSent === true || error?.notAdmitted === true
+              ? 'The game never received or recorded this batch; nothing from it ran.'
+              : 'Earlier operations in the admitted batch may already have produced side effects.',
             reconciliation: reconciliation ? reconciliationFacts(reconciliation, reconciliation.pending) : undefined,
             task_board: visibleTaskBoard(stateResult?.state?.task_board),
           })

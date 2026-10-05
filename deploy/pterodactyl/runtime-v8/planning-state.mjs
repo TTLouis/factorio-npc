@@ -47,6 +47,7 @@ import {
   serializeAuthorization,
 } from './authorization.mjs'
 import { sanitizePendingOperation } from './operation-reconciliation.mjs'
+import { operationLedger, recordOperation, settleOperation } from './operation-ledger.mjs'
 import {
   addTask,
   carryTaskLedger,
@@ -417,6 +418,9 @@ export const PLANNING_EVENT = Object.freeze({
   // MW2b: the one operation batch the runtime may have in flight (operation-reconciliation.mjs). Written before a batch is sent,
   // updated by reconciliation, cleared (operation null) when its receipt settles it. Runtime sources only.
   PENDING_OPERATION_RECORDED: 'PENDING_OPERATION_RECORDED',
+  // A pre-journal (legacy) operation record whose effect no exact or baseline evidence can settle becomes a harness-raised
+  // question the user can answer. Runtime authority raises it; only the user's approval (then a runtime clear) settles it.
+  OPERATION_EFFECT_QUESTION_RAISED: 'OPERATION_EFFECT_QUESTION_RAISED',
 })
 
 const PLANNING_EVENT_TYPES = Object.freeze(Object.values(PLANNING_EVENT))
@@ -1879,6 +1883,13 @@ export function applyPlanningEvent(state, event) {
 
   const handler = HANDLERS[type]
   const next = handler(current, event, now)
+  // Operation identity is campaign state. A fresh goal or historical task checkpoint must never replace it.
+  if (next && next !== current && type !== PLANNING_EVENT.PENDING_OPERATION_RECORDED
+    && (current.operation_ledger || current.run?.pending_operation)) {
+    const ledger = operationLedger(current.operation_ledger, current.run?.pending_operation)
+    return { ...next, operation_ledger: ledger,
+      ...(next.run ? { run: { ...next.run, pending_operation: ledger.records.at(-1) ?? null } } : {}) }
+  }
   return next ?? current
 }
 
@@ -2743,6 +2754,26 @@ Object.assign(HANDLERS, {
     }
   },
 
+  [PLANNING_EVENT.OPERATION_EFFECT_QUESTION_RAISED](state, event, now) {
+    if (!isRuntimeAuthority(event.source)) return state
+    const key = text(event.operation_key, 200)
+    const run = state.run ?? createEmptyRunState()
+    const record = operationLedger(state.operation_ledger, run.pending_operation).records.find(item => item.operation_key === key)
+    if (!record) return state
+    const raised = raiseQuestion(authorizationOf(state), {
+      kind: 'operation_effect',
+      reason_codes: ['legacy_operation_unresolved'],
+      plan_id: record.plan_id,
+      goal_id: state.goal?.goal_id ?? record.goal_id,
+      subject_key: key,
+      subjects: [],
+      detail: text(event.detail, 400) || `An operation batch sent before exact receipts existed has no provable outcome (${text(event.reason, 80) || 'unknown'}).`,
+    }, now)
+    if (raised.duplicate) return state
+    return { ...state, authorization: raised.auth, updated_at: now,
+      log: logEntry(state, { type: PLANNING_EVENT.OPERATION_EFFECT_QUESTION_RAISED, at: now, operation_key: key, question_id: raised.question.question_id }) }
+  },
+
   [PLANNING_EVENT.NPC_PLACEMENT_RECORDED](state, event, now) {
     if (!isRuntimeAuthority(event.source)) return state
     const result = recordNpcPlacement(authorizationOf(state), event, now)
@@ -2952,21 +2983,27 @@ Object.assign(HANDLERS, {
     })
   },
 
-  // MW2b. A record is stamped for its goal; one for another goal is stale work and fails closed. `operation: null` clears it,
-  // optionally only when its key matches (a late clear for an older batch cannot erase a newer pending one).
+  // Existing campaign work can be reconciled even after its goal stops. New
+  // admissions still require an active goal and that goal's exact identity.
   [PLANNING_EVENT.PENDING_OPERATION_RECORDED](state, event, now) {
-    if (!runEventAllowed(state, event)) return state
+    if (!isRuntimeAuthority(event.source)) return state
     const run = state.run ?? createEmptyRunState()
+    const existing = operationLedger(state.operation_ledger, run.pending_operation)
     if (event.operation === null || event.operation === undefined) {
-      if (!run.pending_operation) return state
-      const key = text(event.operation_key, 200)
-      if (key && run.pending_operation.operation_key !== key) return state
-      return { ...state, run: { ...run, pending_operation: null, updated_at: now }, updated_at: now }
+      const key = text(event.operation_key ?? run.pending_operation?.operation_key, 200)
+      if (!existing.records.some(record => record.operation_key === key)) return state
+      const ledger = settleOperation(existing, key)
+      return { ...state, operation_ledger: ledger, run: { ...run, pending_operation: ledger.records.at(-1) ?? null, updated_at: now }, updated_at: now }
     }
     const record = sanitizePendingOperation(event.operation)
     if (!record) return state
-    if (record.goal_id && record.goal_id !== state.goal.goal_id) return state
-    return { ...state, run: { ...run, pending_operation: record, updated_at: now }, updated_at: now }
+    const prior = existing.records.find(item => item.operation_key === record.operation_key)
+    if (!prior && (!runEventAllowed(state, event) || record.goal_id !== state.goal?.goal_id)) return state
+    if (prior && (record.signature !== prior.signature || record.attempt_id !== prior.attempt_id
+      || record.ordinal !== prior.ordinal || record.actor.actor_id !== prior.actor.actor_id || record.actor.epoch !== prior.actor.epoch)) return state
+    const ledger = recordOperation(existing, record)
+    if (!ledger) return state
+    return { ...state, operation_ledger: ledger, run: { ...run, pending_operation: record, updated_at: now }, updated_at: now }
   },
 
   [PLANNING_EVENT.PERSISTENT_RUNTIME_RECORDED](state, event, now) {
@@ -3157,7 +3194,8 @@ function taskGrantLink(state) {
 // A bounded copy of the stopped task's planning state for a later resume. Goal-scoped parts only: the world facts
 // (reserved containers, NPC placements) and the ledger itself stay live and are never restored from here.
 function taskCheckpointPlanning(state) {
-  const serialized = serializePlanningState({ ...state, task_ledger: undefined })
+  const serialized = serializePlanningState({ ...state, task_ledger: undefined, operation_ledger: undefined,
+    run: state.run ? { ...state.run, pending_operation: null } : state.run })
   const activeId = serialized.active_plan_id
   const plans = Array.isArray(serialized.plans) ? serialized.plans : []
   let kept = plans.slice(-TASK_LEDGER_LIMITS.checkpointPlans)
@@ -3426,6 +3464,7 @@ export function carriedAcrossGoals(state) {
   return {
     ...(authorization ? { authorization } : {}),
     ...(ledger ? { task_ledger: ledger } : {}),
+    ...((state?.operation_ledger || state?.run?.pending_operation) ? { operation_ledger: operationLedger(state.operation_ledger, state.run?.pending_operation) } : {}),
   }
 }
 
@@ -3552,6 +3591,7 @@ export function serializePlanningState(state) {
     reasoning_epoch: currentReasoningEpoch(current),
     last_reasoning_reset: clone(current.last_reasoning_reset) ?? null,
     run: clone(current.run) ?? null,
+    ...(current.operation_ledger ? { operation_ledger: clone(current.operation_ledger) } : {}),
     context_restages: clone(getContextRestages(current)),
     // MW1: persisted only when present, so a state that never saw authorization serializes exactly as before.
     ...(current.authorization && authorizationHasContent(current.authorization)
@@ -3874,8 +3914,11 @@ export function restorePlanningState(raw) {
     // No goal, but world facts (reserved containers, NPC placement receipts) outlive goals and must survive a restart.
     const world = restoreAuthorization(raw.authorization)
     const ledger = restoreTaskLedger(raw.task_ledger)
-    return world || ledger
-      ? { ...empty, ...(world ? { authorization: world } : {}), ...(ledger ? { task_ledger: ledger } : {}) }
+    const operations = raw.operation_ledger || raw.run?.pending_operation
+      ? operationLedger(raw.operation_ledger, raw.run?.pending_operation) : null
+    return world || ledger || operations
+      ? { ...empty, ...(world ? { authorization: world } : {}), ...(ledger ? { task_ledger: ledger } : {}),
+          ...(operations ? { operation_ledger: operations, run: { ...empty.run, pending_operation: operations.records.at(-1) ?? null } } : {}) }
       : empty
   }
   const activePlanId = text(raw.active_plan_id, 200)
@@ -3902,6 +3945,7 @@ export function restorePlanningState(raw) {
         }
       : null,
     run: restoreRun(raw.run),
+    ...((raw.operation_ledger || raw.run?.pending_operation) ? { operation_ledger: operationLedger(raw.operation_ledger, raw.run?.pending_operation) } : {}),
     context_restages: restoreContextRestages(raw.context_restages),
     ...(() => {
       const authorization = restoreAuthorization(raw.authorization)

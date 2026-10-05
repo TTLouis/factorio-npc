@@ -548,6 +548,8 @@ test('a refused placement with a dependent transfer goes back to the planner wit
       })
     },
   })
+  const trace = []
+  world.agent.behaviorTrace = { emit: async record => { trace.push(record) } }
   const refuse = () => world.game.failLastBatch({
     type: 'placing',
     code: 'not_placeable',
@@ -589,6 +591,13 @@ test('a refused placement with a dependent transfer goes back to the planner wit
   assert.equal(state.task_board.active_step_id, stepId)
   assert.equal(state.task_board.completed_count, 0)
   assert.equal(world.game.mutations.length, 2)
+  // The mod proved the engine refused the first task before any change, so the unresolved record settled exactly.
+  const reconciled = trace.filter(record => record.event === 'operation.reconciled' && record.data.verdict === 'refused_before_mutation')
+  assert.equal(reconciled.length >= 1, true)
+  assert.ok(reconciled[0].data.request_id)
+  assert.equal(reconciled[0].data.reason, 'exact_refusal_before_mutation')
+  assert.equal(reconciled[0].data.effect, 'not_happened')
+  assert.equal(trace.some(record => record.event === 'operation.uncertainty_blocked'), false)
 
   // A second refusal is still within the budget.
   await world.agent.failed(refuse())
@@ -604,6 +613,82 @@ test('a refused placement with a dependent transfer goes back to the planner wit
   assert.equal(state.task_board.active_step_id, stepId)
   assert.equal(world.reducerPlan().plan_id, committed.plan_id)
   assert.equal(world.game.mutations.length, 3)
+})
+
+test('a cancelled placement WITHOUT the mod first-task proof preserves the plan and blocks conflicting retries', async () => {
+  const PLACE_STEPS = ['Place a burner mining drill on iron ore and fuel it', 'Mine 10 iron ore']
+  let x = 11
+  const prompts = []
+  const trace = []
+  const world = harness({
+    provider: async messages => {
+      prompts.push(messages.map(message => String(message.content ?? '')).join('\n'))
+      x++
+      if (prompts.length >= 3) return planReply({
+        chatMessage: 'BLOCKED: The cancelled drill placement and coal transfer have uncertain effects; confirm them before retrying.',
+        plan: PLACE_STEPS, currentStep: 0, operations: [],
+      })
+      return planReply({
+        plan: PLACE_STEPS,
+        currentStep: 0,
+        operations: [
+          { name: 'place_entity', args: { entity_name: 'burner-mining-drill', x, y: -7 } },
+          { name: 'move_items', args: { item_name: 'coal', entity_name: 'burner-mining-drill', max_count: 5, to_entity: true } },
+        ],
+      })
+    },
+  })
+  world.agent.behaviorTrace = { emit: async record => { trace.push(record) } }
+  // Same refusal, but the receipt carries no failed_before_mutation proof (unknown effect, so it must hold).
+  const refuse = () => {
+    const reason = refuseWithProof()
+    delete world.game.cancelledBatch.failed_before_mutation
+    return reason
+  }
+  const refuseWithProof = () => world.game.failLastBatch({
+    type: 'placing',
+    code: 'not_placeable',
+    entity_name: 'burner-mining-drill',
+    placement_footprint: {
+      tile_width: 2,
+      tile_height: 2,
+      tile_box: { left_top: { x: 11, y: -8 }, right_bottom: { x: 13, y: -6 } },
+      world_box: { left_top: { x: 11, y: -8 }, right_bottom: { x: 13, y: -6 } },
+    },
+    placement_grid: { x_offset: 0, y_offset: 0, nearest_valid_center: { x: 12, y: -7 } },
+    placement_blockers: [{ name: 'rock-big', type: 'simple-entity', position: { x: 12.4, y: -6.6 } }],
+  })
+
+  await world.say('place a burner drill on iron and fuel it', 'new_goal')
+  const committed = world.reducerPlan()
+  assert.equal(committed.status, PLAN_STATUS.COMMITTED)
+  const stepId = world.memory.currentPlan(KEY).task_board.active_step_id
+  assert.deepEqual(world.game.lastTaskTypes, ['placing', 'moving_items'])
+
+  await world.agent.failed(refuse())
+
+  const state = world.memory.currentPlan(KEY)
+  assert.equal(state.status, 'blocked')
+  assert.equal(state.blocker, 'unresolved_operation_effect')
+  const retryPrompt = prompts[1]
+  assert.match(retryPrompt, /not_placeable/)
+  assert.match(retryPrompt, /"nearest_valid_center":\{"x":12,"y":-7\}/)
+  assert.match(retryPrompt, /rock-big/)
+  assert.match(retryPrompt, /correctable placement error/)
+  assert.match(prompts.at(-1), /conflicts with unresolved work/)
+  // Same committed plan and active step; no changed-coordinate batch is admitted.
+  const afterRetry = world.reducerPlan()
+  assert.equal(afterRetry.plan_id, committed.plan_id)
+  assert.equal(afterRetry.version, committed.version)
+  assert.equal(afterRetry.status, PLAN_STATUS.BLOCKED)
+  assert.deepEqual(afterRetry.steps, committed.steps)
+  assert.equal(state.task_board.active_step_id, stepId)
+  assert.equal(state.task_board.completed_count, 0)
+  assert.equal(world.game.mutations.length, 1)
+  assert.ok(world.memory.pendingOperation(KEY), 'the unresolved batch is retained after the question')
+  const held = trace.find(record => record.event === 'operation.uncertainty_blocked')
+  assert.ok(held?.data.request_id)
+  assert.equal(held.data.reason, 'unresolved_operation_scope_conflict')
 })
 
 // ---------------------------------------------------------------------------

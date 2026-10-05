@@ -89,6 +89,23 @@ class E2eRcon {
       queue_empty: true,
       queue_length: 0,
     }
+    // The exact admission journal the mod keeps (operation_admission.ts): one record per correlated batch.
+    this.admissions = []
+    this.batchSequence = 0
+  }
+
+  // Mirrors operation_admission.ts refresh(): a cancelled batch is exact only with the mod's first-task proof.
+  admissionJournal() {
+    for (const record of this.admissions) {
+      if (record.state !== 'admitted') continue
+      const cancelled = this.operationStatus.last_cancelled_batch
+      if (cancelled?.batch_id === record.batch_id) {
+        const proven = cancelled.started_count === 1 && cancelled.failed_before_mutation === true
+        Object.assign(record, proven ? { state: 'failed', ok: false, proven_refusal: true, error: 'refused_before_mutation' } : { state: 'uncertain', error: 'batch_reconciliation_required' })
+      }
+      else if (this.operationStatus.last_completed_batch?.batch_id === record.batch_id) record.state = 'completed'
+    }
+    return this.admissions
   }
 
   completedStatus(batchId, taskTypes, basicOperation) {
@@ -117,6 +134,11 @@ class E2eRcon {
         task_types: taskTypes,
         tick: 200 + batchId,
         reason: `placing:${code}`,
+        batch_generation: 1,
+        batch_ref: `batch-g1-${batchId}`,
+        // basic_operations.ts fail(): a failed placement claims no change, and the receipt records the first task as the one that started.
+        started_count: 1,
+        failed_before_mutation: true,
       },
       basic_operation: {
         last_result: {
@@ -139,13 +161,23 @@ class E2eRcon {
     if (text.includes('remote.call("autorio_follow","status")')) return JSON.stringify(this.follow)
     if (text.includes('remote.call("autorio_actor","status")')) return JSON.stringify({ actor: { actor_id: 18, position: { x: 0, y: 0 } } })
     if (text.includes('remote.call("autorio_planning","plan_placement"')) return JSON.stringify(this.planPlacement)
-    if (text.includes('remote.call("autorio_operations","status")')) return JSON.stringify(this.operationStatus)
+    if (text.includes('remote.call("autorio_operations","status")')) {
+      return JSON.stringify({ ...this.operationStatus, batch_generation: 1, admission_journal: this.admissionJournal(),
+        receipt_journal: this.operationStatus.last_cancelled_batch ? [{ ...this.operationStatus.last_cancelled_batch, state: 'cancelled' }] : [] })
+    }
     if (text.includes('remote.call("autorio_preflight","operation"')) return JSON.stringify({ ok: true })
     if (text.includes('SGLUNA_RESULT_') && text.includes('autorio_operations')) {
       this.mutations.push(text)
       const marker = text.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)?.[0]
       assert.ok(marker)
       const count = (text.match(/remote\.call\('autorio_operations'/g) ?? []).length
+      const batchId = ++this.batchSequence
+      const encoded = /"begin",helpers\.json_to_table\(("(?:\\.|[^"\\])*")\)/.exec(text)?.[1]
+      if (encoded) {
+        const identity = JSON.parse(JSON.parse(encoded))
+        this.admissions.push({ ...identity, generation: 1, batch_id: batchId, state: 'admitted', slots: Array.from({ length: count }, (_, index) => ({
+          index: index + 1, ok: true, batch_refs: [{ batch_id: batchId, batch_generation: 1, batch_ref: `batch-g1-${batchId}` }] })) })
+      }
       return `${marker}${JSON.stringify({ ok: true, result: Array.from({ length: count }, () => [true, 'Task started']) })}`
     }
     return '{}'
