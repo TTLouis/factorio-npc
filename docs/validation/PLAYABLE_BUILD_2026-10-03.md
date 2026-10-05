@@ -112,6 +112,16 @@ canonical Docker-only script; no host dependency installation or paid calls.
 - `logs/buffer-circuits-mod-2026-10-03-final.log`: circuit `29c14eb3`, mod
   gate exit 0, 920/920 plus typecheck/Lua/generated guard.
 
+- `logs/gate-remote-interface-self.log`: fix `ee553918`, merged `876157a5`
+  (2026-10-05), all gate exit 0: 1,592 runtime and 934 mod tests. The owner's
+  first Pterodactyl run of `7aea08a2` blocked on the very first game command with
+  `admission_begin_refused:invalid_correlation`. `autorio_operation_admission`
+  (and `autorio_output_delivery_proof`) were registered as controller objects
+  whose TSTL functions take `self`, so `remote.call` delivered a nil correlation.
+  Both are now arrow-function tables, and the generated-Lua guard rejects bare
+  controller registrations. Unit tests call TypeScript directly and could not
+  see this; it is the first real-engine evidence for the admission seam.
+
 No new real-engine acceptance, package promotion or actual provider autonomy
 claim is established by these gates. Candidate branches must be integrated,
 review repairs checked and the shipped payload repinned before promotion checks.
