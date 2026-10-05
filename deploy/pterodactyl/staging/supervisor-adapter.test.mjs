@@ -270,11 +270,19 @@ test('a failure after the command was sent is never marked not sent, and only a 
   const wait = 'remote.call("autorio_operations","wait",60)'
   const lost = new FakeRcon(['no acknowledgement here'])
   await assert.rejects(executeAuthorizedBatch(lost, 3, [wait], marker, correlation), error => error.notSent !== true && error.notAdmitted !== true)
-  for (const [code, expected] of [['stale_actor_epoch', true], ['expired_operation_ordinal', true], ['admission_journal_full', true], ['stale npc actor epoch', true],
-    ['operation_key_conflict', false], ['admission slot recording failed: invalid_slot', false]]) {
+  for (const [code, expected] of [['admission_begin_refused:stale_actor_epoch', true], ['admission_begin_refused:expired_operation_ordinal', true],
+    ['admission_begin_refused:admission_journal_full', true], ['admission_begin_refused:invalid_correlation', true], ['stale npc actor epoch', true],
+    ['admission_begin_refused:operation_key_conflict', false], ['admission slot recording failed: invalid_slot', false],
+    // finish() or slot() can return the same code after operations queued work: never a begin refusal.
+    ['stale_actor_epoch', false], ['invalid_slot', false]]) {
     const rcon = new FakeRcon([`${marker}${JSON.stringify({ ok: false, result: code, prefix: [] })}`])
     await assert.rejects(executeAuthorizedBatch(rcon, 3, [wait], marker, correlation), error => error.notAdmitted === expected && error.notSent !== true, code)
   }
+  // A begin-looking text after any slot ran (non-empty prefix) is not proof either.
+  const ranSlots = new FakeRcon([`${marker}${JSON.stringify({ ok: false, result: 'admission_begin_refused:stale_actor_epoch', prefix: [[true, 'Task started']] })}`])
+  await assert.rejects(executeAuthorizedBatch(ranSlots, 3, [wait], marker, correlation), error => error.notAdmitted === false)
+  const finishStale = new FakeRcon([`${marker}${JSON.stringify({ ok: false, result: 'stale_actor_epoch', prefix: [[true, 'Task started']] })}`])
+  await assert.rejects(executeAuthorizedBatch(finishStale, 3, [wait], marker, correlation), error => error.notAdmitted === false && error.notSent !== true)
   const recorded = new FakeRcon([`${marker}${JSON.stringify({ ok: false, result: 'stale_actor_epoch', prefix: [], admission: { state: 'uncertain' } })}`])
   await assert.rejects(executeAuthorizedBatch(recorded, 3, [wait], marker, correlation), error => error.notAdmitted === false)
 })

@@ -290,6 +290,11 @@ export function reconcilePendingOperation(pending, { status, actor } = {}) {
       return { verdict: RECONCILE_VERDICT.ADMITTED_CANCELLED, effect: EFFECT.PARTIAL_UNKNOWN, reason: 'new_batch_cancelled', batch_id: now.cancelled.batch_id, tick: now.cancelled.tick, sent_operations: sent }
     }
   }
+  // A legacy record has no exact journal entry. If the batch it joined was already open when it was sent, that batch finishing
+  // moves no watermark, so "nothing newer" is indistinguishable from "joined and completed". Never read that as absent.
+  if (pending.legacy === true && baseline.active !== null) {
+    return { verdict: RECONCILE_VERDICT.UNKNOWN, effect: EFFECT.UNKNOWN, reason: 'legacy_baseline_open_batch' }
+  }
   if (now.idle === true && now.queue_length === 0) {
     return { verdict: RECONCILE_VERDICT.NOT_ADMITTED, effect: EFFECT.NOT_HAPPENED, reason: 'no_batch_since_send' }
   }

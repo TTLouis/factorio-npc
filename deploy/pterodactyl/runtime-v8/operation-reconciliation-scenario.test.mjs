@@ -506,3 +506,58 @@ test('approving the legacy question settles the record and traces who resolved i
   assert.equal(resolved[0].reason, 'user_approved')
   assert.equal(resolved[0].request_id, 'req_answer')
 })
+
+test('a stale_actor_epoch returned by finish after operations ran is not a begin refusal: the hold stays', async () => {
+  const game = new FakeFactorio()
+  const original = game.command.bind(game)
+  game.command = async (text) => {
+    if (text.includes('local ok,result=pcall') && text.includes('"authorize"')) {
+      const marker = text.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)?.[0]
+      game.mutations.push(text)
+      return `${marker}${JSON.stringify({ ok: false, result: 'stale_actor_epoch', prefix: [[true, 'Task started']] })}`
+    }
+    return original(text)
+  }
+  const world = harness({ game, replies: [placePlan()] })
+  await assert.rejects(world.say('place a burner drill'))
+
+  assert.ok(world.pending(), 'the unresolved record is retained')
+  assert.equal(world.named('operation.not_sent').length, 0)
+  assert.equal(world.named('operations.admission_failed').length, 1)
+  assert.equal(world.memory.checkDuplicateEffect(KEY, { operations: [placeOp(12)] }, { requestId: 'req_retry' }).refuse, true)
+})
+
+test('a record the reducer refuses (no active goal) is traced as record_refused with the request id and reason', async () => {
+  const world = harness({ replies: [placePlan()] })
+  world.agent.requestInfo = { memoryKey: KEY, turnId: 1, sender: 'Louis', text: 'place' }
+  world.agent.traceRequest = { id: 'req_nogoal', usage: {} }
+  await assert.rejects(world.agent.recordPendingOperationBeforeSend([placeOp()], { actor_id: 18, epoch: 3 }), /Operation ledger full or record refused/)
+
+  const refused = world.named('operation.record_refused')
+  assert.equal(refused.length, 1)
+  assert.equal(refused[0].request_id, 'req_nogoal')
+  assert.equal(refused[0].reason, 'record_refused_no_active_goal_or_invalid')
+  assert.equal(refused[0].unresolved, 0)
+  assert.equal(world.named('operation.ledger_full').length, 0)
+})
+
+test('a legacy record whose joined batch was already open at send time cannot be read as absent: a question, not clearance', async () => {
+  // Baseline had open batch 1; the legacy operation joined it and the batch then completed. No watermark moved:
+  // max_batch_id is unchanged, nothing is active, and the game is idle. That is also what "never sent" looks like.
+  const world = await legacyWorld({ generation: 1, max_batch_id: 1, active: { batch_id: 1, task_count: 1 } })
+  assert.equal(world.game.batchId, 1)
+  const result = await world.agent.reconcileOutstandingOperation({ trigger: 'runtime_restart', requestId: 'recovery_joined' })
+
+  assert.equal(result.verdict, 'unknown')
+  assert.equal(result.effect, 'unknown')
+  assert.equal(result.reason, 'legacy_baseline_open_batch')
+  assert.ok(world.pending(), 'the record is not cleared')
+  assert.equal(world.memory.checkDuplicateEffect(KEY, { operations: [deliver()] }, { requestId: 'req_replay' }).refuse, true, 'a replay is still fenced')
+  const surfaced = world.named('operation.legacy_unresolved')
+  assert.equal(surfaced.length, 1)
+  assert.equal(surfaced[0].reason, 'legacy_baseline_open_batch')
+  assert.equal(surfaced[0].request_id, 'recovery_joined')
+  const [question] = world.memory.authorizationState(KEY).questions
+  assert.equal(question.kind, 'operation_effect')
+  assert.equal(question.status, 'pending')
+})

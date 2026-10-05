@@ -208,6 +208,20 @@ describe('durable operation admission', () => {
       expect(manager.get_status_snapshot().receipt_journal[0]).toMatchObject({ started_count: 2 })
       expect(admission.status().records[0]).toMatchObject({ state: 'uncertain', error: 'batch_reconciliation_required' })
     })
+    it('keeps an engine-refused batch uncertain when any slot is not a validate-then-queue operation', () => {
+      for (const operation of ['equip_weapon', undefined]) {
+        const { admission, manager } = setup(2)
+        manager.add_task({ type: TaskStates.PLACING, entity_name: 'burner-mining-drill', position: { x: 1, y: 1 } })
+        // A synchronously mutating operation can carry the open batch ref yet have changed the world before the placement was refused.
+        admission.slot(identity.operation_key, 1, { ok: true, operation, batch_refs: [ref] })
+        admission.slot(identity.operation_key, 2, { ok: true, operation: 'place_entity', batch_refs: [ref] })
+        admission.finish(identity.operation_key, { ok: true })
+        manager.cancel_all_tasks('placing:not_placeable', { failed_before_mutation: true })
+        expect(admission.status().records[0]).toMatchObject({ state: 'uncertain', error: 'batch_reconciliation_required' })
+        expect(admission.status().records[0].proven_refusal).toBeUndefined()
+        ;(globalThis as any).storage = {}
+      }
+    })
     it('keeps a cancellation without the failed-before-mutation proof uncertain', () => {
       const { admission, manager } = setup()
       manager.add_task({ type: TaskStates.PLACING, entity_name: 'burner-mining-drill', position: { x: 1, y: 1 } })

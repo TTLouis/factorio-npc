@@ -275,6 +275,15 @@ test('legacy records reconcile by the batch baseline when it applies, and carry 
   assert.equal(reconcilePendingOperation(legacy, { status: { ...idle, last_completed_batch: { batch_id: 8 } } }).verdict, RECONCILE_VERDICT.ADMITTED_COMPLETED)
   assert.equal(reconcilePendingOperation(legacy, { status: { ...idle, batch_generation: 2 } }).verdict, RECONCILE_VERDICT.GENERATION_CHANGED)
   assert.equal(reconcilePendingOperation({ ...legacy, baseline: null }, { status: idle }).reason, 'no_baseline')
+  // A batch that was already open when the record was sent may have been joined and completed with no watermark moving:
+  // absence is not provable. Positive evidence still counts, and a non-legacy baseline record keeps the old verdict.
+  const joined = { ...legacy, baseline: { generation: 1, max_batch_id: 7, active: { batch_id: 7, task_count: 1 } } }
+  const afterJoin = reconcilePendingOperation(joined, { status: { ...idle, last_completed_batch: { batch_id: 7 } } })
+  assert.equal(afterJoin.verdict, RECONCILE_VERDICT.UNKNOWN)
+  assert.equal(afterJoin.effect, EFFECT.UNKNOWN)
+  assert.equal(afterJoin.reason, 'legacy_baseline_open_batch')
+  assert.equal(reconcilePendingOperation({ ...joined, legacy: undefined }, { status: { ...idle, last_completed_batch: { batch_id: 7 } } }).verdict, RECONCILE_VERDICT.NOT_ADMITTED)
+  assert.equal(reconcilePendingOperation(joined, { status: { ...idle, last_completed_batch: { batch_id: 8 } } }).verdict, RECONCILE_VERDICT.ADMITTED_COMPLETED)
   // Until it is settled a legacy record still guards every conflicting effect.
   assert.equal(duplicateEffectGuard({ ...legacy, scopes: ['*'], effect: EFFECT.UNKNOWN }, { operations: [{ name: 'craft_item', args: { item_name: 'iron-plate' } }] }).refuse, true)
 })

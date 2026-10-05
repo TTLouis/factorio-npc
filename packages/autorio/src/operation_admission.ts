@@ -114,7 +114,9 @@ export function new_operation_admission(
       if (record.state === 'admitted' && refs.length > 0 && receipts.every(receipt => receipt?.state === 'completed')) {
         record.state = 'completed'
       }
-      else if (record.state === 'admitted' && refs.length > 0 && record.slots.every(slot => slot.ok && slot.batch_refs.length > 0)
+      else if (record.state === 'admitted' && refs.length > 0
+        // Every slot must be a validate-then-queue operation: a synchronously mutating one (equip_weapon) may carry an open batch ref yet have changed the world.
+        && record.slots.every(slot => slot.ok && slot.batch_refs.length > 0 && slot.operation !== undefined && PURE_SUBMIT_OPERATIONS.includes(slot.operation))
         && receipts.every(receipt => receipt?.state === 'cancelled' && receipt.started_count === 1 && receipt.failed_before_mutation === true)) {
         // The engine refused the batch's first task before it changed anything and
         // discarded the rest unstarted: no task of this admission had any effect.

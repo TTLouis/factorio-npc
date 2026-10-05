@@ -36,7 +36,15 @@ function notSent(error) {
 }
 
 // Mod admission begin() refusals: each is returned before any journal record or operation exists.
-const REFUSED_BEFORE_RECORD = new Set(['invalid_correlation', 'stale_actor_epoch', 'expired_operation_ordinal', 'admission_journal_full', 'stale npc actor epoch'])
+// The wrapper prefixes them (admission_begin_refused:) so finish() or slot() errors with the same code are never mistaken for them.
+const BEGIN_REFUSAL_PREFIX = 'admission_begin_refused:'
+const REFUSED_BEFORE_RECORD = new Set(['invalid_correlation', 'stale_actor_epoch', 'expired_operation_ordinal', 'admission_journal_full']
+  .map(code => `${BEGIN_REFUSAL_PREFIX}${code}`).concat('stale npc actor epoch'))
+
+function emptyPrefix(prefix) {
+  if (prefix === undefined || prefix === null) return true
+  return Array.isArray(prefix) ? prefix.length === 0 : typeof prefix === 'object' && Object.keys(prefix).length === 0
+}
 
 function operationName(command) {
   return /^remote\.call\((?:"|')autorio_operations(?:"|'),\s*(?:"|')([a-z_]+)(?:"|')/.exec(command)?.[1] ?? ''
@@ -171,7 +179,7 @@ function prepareAuthorizedBatch(epoch, commands, marker, correlation) {
       // A refusal is a returned false / false-first tuple; a thrown error is not. Only the mod decides what a refusal proves.
       return `local ok${slot},r${slot}=pcall(function() return ${command} end); local accepted=ok${slot} and r${slot}~=false and not(type(r${slot})=="table" and (r${slot}[1]==false or r${slot}.accepted==false or r${slot}.ok==false)); local refused=ok${slot} and not accepted; local detail=nil; if not ok${slot} then detail=tostring(r${slot}) elseif refused then detail=(type(r${slot})=="table" and r${slot}[2]~=nil) and tostring(r${slot}[2]) or "rejected" end; local snap=remote.call("autorio_".."operations","status"); local refs={}; if snap.active_batch then refs[1]={batch_id=snap.active_batch.batch_id,batch_generation=snap.active_batch.batch_generation,batch_ref=snap.active_batch.batch_ref} end; local stored=remote.call("autorio_operation_admission","slot",${key},${slot},{ok=accepted,result=ok${slot} and r${slot} or nil,error=detail,operation=${luaString(operationName(command))},refused=refused,batch_refs=refs}); if not stored.ok then error("admission slot recording failed: "..tostring(stored.error),0) end; if not accepted then local message="autorio rejected operation ${slot}: "..tostring(detail); local final=remote.call("autorio_operation_admission","finish",${key},{ok=false,error=message}); receipt=final.record; error(message,0) end; results[${slot}]=r${slot}`
     }).join('; ')
-    const wrapped = `/silent-command local prefix={}; local receipt=nil; local ok,result=pcall(function() if not remote.call("sgluna_deployment","authorize",${epoch}) then error("stale npc actor epoch",0) end; local b=remote.call("autorio_operation_admission","begin",helpers.json_to_table(${luaString(JSON.stringify(identity))})); if not b.ok then error(tostring(b.error),0) end; if b.duplicate then receipt=b.record; error("duplicate operation admission; reconcile exact record",0) end; local results={}; prefix=results; ${admissions}; local final=remote.call("autorio_operation_admission","finish",${key},{ok=true}); receipt=final.record; if not final.ok then error(tostring(final.error),0) end; return results end); rcon.print(${luaString(marker)}..helpers.table_to_json({ok=ok,result=result,prefix=prefix,admission=receipt}))`
+    const wrapped = `/silent-command local prefix={}; local receipt=nil; local ok,result=pcall(function() if not remote.call("sgluna_deployment","authorize",${epoch}) then error("stale npc actor epoch",0) end; local b=remote.call("autorio_operation_admission","begin",helpers.json_to_table(${luaString(JSON.stringify(identity))})); if not b.ok then error("admission_begin_refused:"..tostring(b.error),0) end; if b.duplicate then receipt=b.record; error("duplicate operation admission; reconcile exact record",0) end; local results={}; prefix=results; ${admissions}; local final=remote.call("autorio_operation_admission","finish",${key},{ok=true}); receipt=final.record; if not final.ok then error(tostring(final.error),0) end; return results end); rcon.print(${luaString(marker)}..helpers.table_to_json({ok=ok,result=result,prefix=prefix,admission=receipt}))`
     return { wrapped, validated, v2: true }
   }
   const admissions = validated.map((command, index) => {
@@ -192,7 +200,8 @@ async function sendAuthorizedBatch(rcon, epoch, { wrapped, validated, v2 }, mark
       throw new OperationBatchAdmissionError(`Game command failed; reconcile retained operation prefix: ${factorioError}`, {
         operationIndex: match ? Number(match[1]) - 1 : undefined, factorioError, results: parsed.data.prefix,
         admission: parsed.data.admission, output: sanitizedAdmissionText(parsed.output),
-        notAdmitted: !parsed.data.admission && REFUSED_BEFORE_RECORD.has(factorioError),
+        // Unambiguous: begin()'s own prefixed refusal, no recorded admission, and no operation slot ever ran.
+        notAdmitted: !parsed.data.admission && emptyPrefix(parsed.data.prefix) && REFUSED_BEFORE_RECORD.has(factorioError),
       })
     }
     check(Array.isArray(parsed.data.result) && parsed.data.result.length === validated.length, 'Invalid Autorio batch acknowledgement')

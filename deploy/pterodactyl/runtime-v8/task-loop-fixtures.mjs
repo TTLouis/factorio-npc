@@ -230,7 +230,7 @@ export class FakeFactorio {
           const code = this.beginRefusal
           this.beginRefusal = undefined
           this.batchId--
-          return `${marker}${JSON.stringify({ ok: false, result: code, prefix: [] })}`
+          return `${marker}${JSON.stringify({ ok: false, result: `admission_begin_refused:${code}`, prefix: [] })}`
         }
         if (refusal) {
           // The mod's shape for a returned (not thrown) refusal from a validate-then-queue operation: no batch was created.
