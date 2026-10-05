@@ -155,9 +155,10 @@ describe('SGLuna NPC console layout regressions', () => {
     expect(refresh_activity).toContain('if (activity_state.activity_should_scroll(view, appended, last_key)) (scroll as ScrollPaneGuiElement).scroll_to_bottom()')
     expect(refresh_activity.split('scroll_to_bottom()').length).toBe(2)
 
-    const refresh_steps = source.split('function refresh_steps(')[1]?.split('function refresh_activity(')[0] ?? ''
-    expect(refresh_steps).toContain('if (steps_table.tags.signature !== signature)')
-    expect(refresh_steps).toContain('previous_active !== active_index')
+    const refresh_tree = source.split('function refresh_tree(')[1]?.split('function refresh_activity(')[0] ?? ''
+    expect(refresh_tree).toContain('if (tree_rows.tags.signature !== signature)')
+    expect(refresh_tree).toContain('previous_active !== active_index')
+    expect(refresh_tree).toContain('scroll_to_element(active_label')
   })
 
   it('keeps the prompt and resource controls mounted during unchanged refreshes', () => {
