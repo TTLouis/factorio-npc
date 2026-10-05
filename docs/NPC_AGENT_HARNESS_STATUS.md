@@ -26,8 +26,8 @@ generated-Lua check. None of the new Lua has run in a real engine.
     differently: fewest direct prerequisites versus fewest pending path nodes.
   - Items that are mined or pumped may be flagged as locked when no enabled
     recipe makes them. Not confirmed.
-  - The added `DURABLE_PLAN_PROMPT` paragraph still contains an ordering rule.
-    It awaits the owner's wording check.
+  - The `DURABLE_PLAN_PROMPT` paragraph and its ordering rule were approved
+    by the owner on 2026-10-05.
 
 ## October 3 playable implementation candidates
 
