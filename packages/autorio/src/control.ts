@@ -63,7 +63,16 @@ let setup_complete = false
 
 export const task_manager = new_task_manager(get_controlled_actor)
 const operation_admission = new_operation_admission(get_controlled_actor, () => task_manager.get_status_snapshot())
-remote.add_interface('autorio_operation_admission', operation_admission)
+type Admission = typeof operation_admission
+// remote.call passes no self: wrap the controller's methods (compiled with a
+// self parameter) in arrow functions, as every other interface does.
+remote.add_interface('autorio_operation_admission', {
+  begin: (raw: Parameters<Admission['begin']>[0]) => operation_admission.begin(raw),
+  slot: (key: string, index: number, raw: Parameters<Admission['slot']>[2]) => operation_admission.slot(key, index, raw),
+  finish: (key: string, raw: Parameters<Admission['finish']>[1]) => operation_admission.finish(key, raw),
+  resolve: (key: string, raw: Parameters<Admission['resolve']>[1]) => operation_admission.resolve(key, raw),
+  status: (key?: string) => operation_admission.status(key),
+})
 set_task_board_world_task_provider(() => task_manager.get_status_snapshot())
 const awareness_controller = new_awareness_controller()
 const area_clearing_controller = new_area_clearing_controller(get_controlled_actor, task_manager)
@@ -138,7 +147,10 @@ remote.add_interface('autorio_equipment', {
 remote.add_interface('autorio_corpse_recovery', {
   status: () => corpse_recovery_controller.status(),
 })
-remote.add_interface('autorio_output_delivery_proof', output_delivery_proof_controller)
+remote.add_interface('autorio_output_delivery_proof', {
+  register: (spec: Parameters<typeof output_delivery_proof_controller.register>[0]) => output_delivery_proof_controller.register(spec),
+  status: (proof_id: string) => output_delivery_proof_controller.status(proof_id),
+})
 
 remote.add_interface('autorio_crafting', {
   status: () => crafting_controller.status(),

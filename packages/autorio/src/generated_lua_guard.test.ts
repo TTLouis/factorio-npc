@@ -65,4 +65,14 @@ describe('generated Lua guard', () => {
     expect(findings[3]).toContain('JavaScript array method value.evidence_refs:slice()')
     expect(findings[4]).toContain('optional call of Factorio method get_inserter_rotation_speed(prototype) passes the receiver')
   })
+
+  it('rejects a remote interface registered as a controller object whose functions take self', () => {
+    const findings = check_generated_lua(bundle([
+      'remote.add_interface("autorio_operation_admission", operation_admission)',
+      'remote.add_interface("autorio_research", {status = function() return research_controller:status() end})',
+      'remote.add_interface(name, i)',
+    ].join('\n')), factorio_methods)
+    expect(findings).toHaveLength(1)
+    expect(findings[0]).toContain('remote interface autorio_operation_admission registers operation_admission directly')
+  })
 })

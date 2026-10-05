@@ -63,6 +63,7 @@ run_mod() {
   MSYS_NO_PATHCONV=1 docker run --rm \
     -v "$(pwd -W)/packages/autorio/src:/src/packages/autorio/src:ro" \
     -v "$(pwd -W)/packages/autorio/data.lua:/src/packages/autorio/data.lua:ro" \
+    -v "$(pwd -W)/packages/autorio/scripts:/src/packages/autorio/scripts:ro" \
     npc-dev sh -c "cd packages/autorio && npx vitest run && npx tsc --noEmit -p . && pnpm --filter @proj-airi/tstl-plugin-reload-factorio-mod run build >/dev/null && pnpm run build && node scripts/check-generated-lua.mjs"
 }
 

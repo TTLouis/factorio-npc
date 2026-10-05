@@ -76,6 +76,10 @@ export function check_generated_lua(lua, factorio_methods) {
       if (read && factorio_methods.has(read[2])) optional_methods.set(read[1], read[2])
       const call = /^\s*(____opt\w*) = \1\((.+)\)\s*$/.exec(line)
       if (call && optional_methods.has(call[1])) findings.push(`${at}: optional call of Factorio method ${optional_methods.get(call[1])}(${call[2]}) passes the receiver: ${line.trim()}`)
+      // remote.call passes no self, but a controller's own functions take one, so
+      // registering the controller object shifts every argument (raw arrives nil).
+      const registered = /remote\.add_interface\(\s*"([^"]+)",\s*([A-Za-z_][\w.]*)\s*\)/.exec(line)
+      if (registered) findings.push(`${at}: remote interface ${registered[1]} registers ${registered[2]} directly; its functions take self, so remote.call shifts every argument: ${line.trim()}`)
       for (const match of line.matchAll(/(?<![\w.:])([a-z_]\w*)\(nil,/g)) {
         if (factorio_methods.has(match[1]) && !own_functions.has(match[1])) findings.push(`${at}: detached Factorio method ${match[1]}(nil, ...) passes extra arguments: ${line.trim()}`)
       }
