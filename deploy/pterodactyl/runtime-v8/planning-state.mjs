@@ -418,6 +418,9 @@ export const PLANNING_EVENT = Object.freeze({
   // MW2b: the one operation batch the runtime may have in flight (operation-reconciliation.mjs). Written before a batch is sent,
   // updated by reconciliation, cleared (operation null) when its receipt settles it. Runtime sources only.
   PENDING_OPERATION_RECORDED: 'PENDING_OPERATION_RECORDED',
+  // A pre-journal (legacy) operation record whose effect no exact or baseline evidence can settle becomes a harness-raised
+  // question the user can answer. Runtime authority raises it; only the user's approval (then a runtime clear) settles it.
+  OPERATION_EFFECT_QUESTION_RAISED: 'OPERATION_EFFECT_QUESTION_RAISED',
 })
 
 const PLANNING_EVENT_TYPES = Object.freeze(Object.values(PLANNING_EVENT))
@@ -2749,6 +2752,26 @@ Object.assign(HANDLERS, {
         decision: result.approval.decision,
       }),
     }
+  },
+
+  [PLANNING_EVENT.OPERATION_EFFECT_QUESTION_RAISED](state, event, now) {
+    if (!isRuntimeAuthority(event.source)) return state
+    const key = text(event.operation_key, 200)
+    const run = state.run ?? createEmptyRunState()
+    const record = operationLedger(state.operation_ledger, run.pending_operation).records.find(item => item.operation_key === key)
+    if (!record) return state
+    const raised = raiseQuestion(authorizationOf(state), {
+      kind: 'operation_effect',
+      reason_codes: ['legacy_operation_unresolved'],
+      plan_id: record.plan_id,
+      goal_id: state.goal?.goal_id ?? record.goal_id,
+      subject_key: key,
+      subjects: [],
+      detail: text(event.detail, 400) || `An operation batch sent before exact receipts existed has no provable outcome (${text(event.reason, 80) || 'unknown'}).`,
+    }, now)
+    if (raised.duplicate) return state
+    return { ...state, authorization: raised.auth, updated_at: now,
+      log: logEntry(state, { type: PLANNING_EVENT.OPERATION_EFFECT_QUESTION_RAISED, at: now, operation_key: key, question_id: raised.question.question_id }) }
   },
 
   [PLANNING_EVENT.NPC_PLACEMENT_RECORDED](state, event, now) {

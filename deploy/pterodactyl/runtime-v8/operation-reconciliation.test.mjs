@@ -183,3 +183,98 @@ test('the reducer stores the pending record for the active goal, refuses a stale
   assert.equal(cleared.run.pending_operation, null)
   assert.equal(sanitizePendingOperation({ operation_key: '' }), null)
 })
+
+// Exact refusal evidence from the mod's admission journal (packages/autorio/src/operation_admission.ts).
+const PLACE = [{ name: 'place_entity', args: { entity_name: 'burner-mining-drill', x: 11, y: -7 } }]
+const EXACT_ACTOR = { actor_id: 18, epoch: 3 }
+function exactPending(operations = PLACE) {
+  return buildPendingOperation({ requestId: 'req', operationKey: 'req/batch_1', ordinal: 1, protocolVersion: 2, operations, actor: EXACT_ACTOR })
+}
+function journalFor(pending, extra = {}) {
+  return { operation_key: pending.operation_key, attempt_id: pending.attempt_id, signature: pending.signature, actor_id: 18, epoch: 3,
+    ordinal: 1, operation_count: pending.operations.length, generation: 1, state: 'failed', proven_refusal: true, ok: false, slots: [], ...extra }
+}
+const refusedSlot = (index, error = 'Requested placement is not placeable') => ({ index, ok: false, error, mutation_unknown: false, refused_before_mutation: true, refusal_code: error, batch_refs: [] })
+const BATCH_REF = { batch_id: 4, batch_generation: 1, batch_ref: 'batch-g1-4' }
+const queuedSlot = index => ({ index, ok: true, batch_refs: [BATCH_REF] })
+
+test('a mod-proven synchronous refusal settles exactly: the refused operation did not happen and may be corrected and re-issued', () => {
+  const pending = exactPending()
+  const admission = journalFor(pending, { slots: [refusedSlot(1)] })
+  const result = reconcilePendingOperation(pending, { actor: EXACT_ACTOR, status: { batch_generation: 1, admission_journal: [admission] } })
+  assert.equal(result.verdict, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION)
+  assert.equal(result.effect, EFFECT.NOT_HAPPENED)
+  assert.equal(result.reason, 'exact_refusal_before_mutation')
+  assert.deepEqual(result.refused_slots, [1])
+  assert.deepEqual(result.applied_slots, [])
+  assert.match(reconciliationGuidance(result, pending), /refused operations 1 before changing anything/)
+})
+
+test('a synchronous prefix that completed before a proven refusal is exact: it happened, the refusal did not', () => {
+  const pending = exactPending([{ name: 'equip_weapon', args: { item_name: 'pistol' } }, ...PLACE])
+  const admission = journalFor(pending, { slots: [{ index: 1, ok: true, batch_refs: [] }, refusedSlot(2)] })
+  const result = reconcilePendingOperation(pending, { actor: EXACT_ACTOR, status: { batch_generation: 1, admission_journal: [admission] } })
+  assert.equal(result.verdict, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION)
+  assert.equal(result.effect, EFFECT.HAPPENED)
+  assert.deepEqual(result.applied_slots, [1])
+  assert.deepEqual(result.refused_slots, [2])
+  assert.match(reconciliationGuidance(result, pending), /Operations 1 completed before the refusal; do not repeat them/)
+})
+
+test('an engine refusal of the first task before any change, with every dependent task unstarted, is exact', () => {
+  const pending = exactPending([...PLACE, { name: 'move_items', args: { item_name: 'coal', entity_name: 'burner-mining-drill', max_count: 5, to_entity: true } }])
+  const admission = journalFor(pending, { error: 'refused_before_mutation', slots: [queuedSlot(1), queuedSlot(2)] })
+  const receipt = { ...BATCH_REF, state: 'cancelled', started_count: 1, failed_before_mutation: true, reason: 'placing:not_placeable', task_count: 2, task_types: ['placing', 'moving_items'], tick: 10 }
+  const status = { batch_generation: 1, admission_journal: [admission], receipt_journal: [receipt] }
+  const result = reconcilePendingOperation(pending, { actor: EXACT_ACTOR, status })
+  assert.equal(result.verdict, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION)
+  assert.equal(result.effect, EFFECT.NOT_HAPPENED)
+  // Each missing piece of proof falls back to an unknown effect.
+  for (const weaker of [{ started_count: 2 }, { failed_before_mutation: false }, { failed_before_mutation: undefined }, { state: 'uncertain' }, { batch_ref: 'batch-g1-9' }]) {
+    const unproven = reconcilePendingOperation(pending, { actor: EXACT_ACTOR, status: { ...status, receipt_journal: [{ ...receipt, ...weaker }] } })
+    assert.notEqual(unproven.verdict, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION, JSON.stringify(weaker))
+    assert.notEqual(unproven.effect, EFFECT.NOT_HAPPENED)
+  }
+  assert.notEqual(reconcilePendingOperation(pending, { actor: EXACT_ACTOR, status: { ...status, receipt_journal: [] } }).verdict, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION)
+})
+
+test('genuinely unknown effects are never read as a refusal', () => {
+  const pending = exactPending()
+  const two = exactPending([...PLACE, ...PLACE])
+  const status = admission => ({ batch_generation: 1, admission_journal: [admission] })
+  const unknown = [
+    // A thrown error or an unclassified refusal: the mod did not prove it changed nothing.
+    journalFor(pending, { state: 'uncertain', proven_refusal: undefined, slots: [{ index: 1, ok: false, mutation_unknown: true, batch_refs: [] }] }),
+    // The proof flag without the per-slot proof.
+    journalFor(pending, { slots: [{ index: 1, ok: false, mutation_unknown: true, batch_refs: [] }] }),
+    journalFor(pending, { slots: [{ index: 1, ok: false, refused_before_mutation: true, batch_refs: [] }] }),
+    // A refusal next to queued work still in flight.
+    journalFor(two, { slots: [queuedSlot(1), refusedSlot(2)] }),
+    // Not terminal, or the proof flag withheld.
+    journalFor(pending, { state: 'admitted', slots: [refusedSlot(1)] }),
+    journalFor(pending, { proven_refusal: false, slots: [refusedSlot(1)] }),
+    journalFor(pending, { slots: [] }),
+  ]
+  for (const admission of unknown) {
+    const result = reconcilePendingOperation(admission.operation_count === 2 ? two : pending, { actor: EXACT_ACTOR, status: status(admission) })
+    assert.notEqual(result.verdict, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION, JSON.stringify(admission))
+    assert.notEqual(result.effect, EFFECT.NOT_HAPPENED, JSON.stringify(admission))
+  }
+  // A changed mod generation or another attempt's journal entry is still not exact for this record.
+  const changed = reconcilePendingOperation(pending, { actor: EXACT_ACTOR, status: { batch_generation: 2, admission_journal: [journalFor(pending, { slots: [refusedSlot(1)] })] } })
+  assert.notEqual(changed.verdict, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION)
+  const other = reconcilePendingOperation(pending, { actor: EXACT_ACTOR, status: status(journalFor(pending, { signature: 'other', slots: [refusedSlot(1)] })) })
+  assert.equal(other.reason, 'admission_lineage_mismatch')
+})
+
+test('legacy records reconcile by the batch baseline when it applies, and carry no exact proof otherwise', () => {
+  const baseline = { generation: 1, max_batch_id: 7, active: null }
+  const legacy = { ...buildPendingOperation({ requestId: 'old', operationKey: 'old/batch', protocolVersion: 1, operations: DELIVERY, baseline }), legacy: true }
+  const idle = { task_state: 'idle', queue_length: 0, batch_generation: 1 }
+  assert.equal(reconcilePendingOperation(legacy, { status: { ...idle, last_completed_batch: { batch_id: 7 } } }).verdict, RECONCILE_VERDICT.NOT_ADMITTED)
+  assert.equal(reconcilePendingOperation(legacy, { status: { ...idle, last_completed_batch: { batch_id: 8 } } }).verdict, RECONCILE_VERDICT.ADMITTED_COMPLETED)
+  assert.equal(reconcilePendingOperation(legacy, { status: { ...idle, batch_generation: 2 } }).verdict, RECONCILE_VERDICT.GENERATION_CHANGED)
+  assert.equal(reconcilePendingOperation({ ...legacy, baseline: null }, { status: idle }).reason, 'no_baseline')
+  // Until it is settled a legacy record still guards every conflicting effect.
+  assert.equal(duplicateEffectGuard({ ...legacy, scopes: ['*'], effect: EFFECT.UNKNOWN }, { operations: [{ name: 'craft_item', args: { item_name: 'iron-plate' } }] }).refuse, true)
+})

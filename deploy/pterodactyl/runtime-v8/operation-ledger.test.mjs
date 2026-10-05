@@ -74,12 +74,16 @@ test('new goals and historical task checkpoints cannot rewind operation ordinals
   assert.deepEqual(state.operation_ledger.records.map(item=>item.operation_key),['one','two'])
 })
 
-test('goalless restore preserves uncertainty and upgrades legacy watermark records conservatively', () => {
+test('goalless restore preserves uncertainty and keeps legacy watermark records guarded but reconcilable', () => {
   const legacy={...record('legacy'),protocol_version:1,ordinal:null}
   const restored=restorePlanningState({operation_ledger:{sequence:9,records:[legacy]}})
   assert.equal(restored.operation_ledger.sequence,9)
-  assert.equal(restored.operation_ledger.records[0].protocol_version,2)
+  // Not upgraded to an exact record: it has no journal entry, so the batch-baseline algorithm stays its only evidence.
+  assert.equal(restored.operation_ledger.records[0].protocol_version,1)
+  assert.equal(restored.operation_ledger.records[0].legacy,true)
   assert.deepEqual(restored.operation_ledger.records[0].scopes,['*'])
+  assert.equal(conflictingOperation({operation_ledger:restored.operation_ledger},{operations:[{name:'craft_item',args:{item_name:'iron-plate'}}]}).refuse,true)
+  assert.equal(operationLedger(JSON.parse(JSON.stringify(restored.operation_ledger))).records[0].legacy,true,'the flag survives persistence')
   assert.equal(reconcilePendingOperation(restored.operation_ledger.records[0],{actor,status:{task_state:'idle',queue_length:0,batch_generation:1,last_completed_batch:{batch_id:100}}}).effect,EFFECT.UNKNOWN)
 })
 

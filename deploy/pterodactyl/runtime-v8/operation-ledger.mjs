@@ -7,10 +7,12 @@ export function operationLedger(raw, legacy) {
   const unique = new Map()
   for (const value of [...records, ...(legacy ? [legacy] : [])]) {
     const record = sanitizePendingOperation(value)
-    // Pre-journal records have no exact receipt identity. Upgrade conservatively:
-    // a watermark from unrelated work must never authorize a retry after restore.
+    // Pre-journal records have no exact receipt identity. They keep blocking every
+    // conflicting effect (scope '*'), and keep protocol_version 1 so they can still be
+    // reconciled by the batch-baseline algorithm when its evidence applies. Without
+    // that evidence they become an explicit user question, never a silent hold.
     if (record && record.protocol_version !== 2) {
-      record.protocol_version = 2
+      record.legacy = true
       record.scopes = ['*']
     }
     if (record && !unique.has(record.operation_key)) unique.set(record.operation_key, record)

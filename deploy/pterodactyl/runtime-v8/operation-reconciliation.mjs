@@ -14,6 +14,8 @@ import { createHash } from 'node:crypto'
 
 export const PENDING_OPERATION_LIMITS = Object.freeze({
   operations: 16,
+  // The mod admission journal accepts at most 192 characters (operation_admission.ts).
+  operation_key: 192,
   ref: 200,
   reason: 300,
 })
@@ -63,6 +65,9 @@ export const RECONCILE_VERDICT = Object.freeze({
   ADMITTED_COMPLETED: 'admitted_completed',
   ADMITTED_CANCELLED: 'admitted_cancelled',
   NOT_ADMITTED: 'not_admitted',
+  // The mod proved each refused operation changed nothing (a validation refusal, or the engine refusing the batch's
+  // first task before it created anything). Operations that completed synchronously before it did happen.
+  REFUSED_BEFORE_MUTATION: 'refused_before_mutation',
   STALE_ACTOR: 'stale_actor',
   GENERATION_CHANGED: 'generation_changed',
   UNKNOWN: 'unknown',
@@ -145,7 +150,7 @@ export function batchWatermark(rawStatus) {
 export function buildPendingOperation({ requestId, operationKey, attemptId, ordinal, protocolVersion, operations, goalId, planId, stepId, actor, baseline, now } = {}) {
   const list = (Array.isArray(operations) ? operations : []).slice(0, PENDING_OPERATION_LIMITS.operations)
   return {
-    operation_key: text(operationKey ?? `${requestId ?? 'request'}/batch`, PENDING_OPERATION_LIMITS.ref),
+    operation_key: text(operationKey ?? `${requestId ?? 'request'}/batch`, PENDING_OPERATION_LIMITS.operation_key),
     request_id: text(requestId, 120),
     attempt_id: text(attemptId ?? operationKey ?? `${requestId ?? 'request'}/batch`, 200),
     protocol_version: protocolVersion === 2 ? 2 : 1,
@@ -171,6 +176,37 @@ export function buildPendingOperation({ requestId, operationKey, attemptId, ordi
     reason: '',
     sent_at: Number.isFinite(now) ? now : 0,
   }
+}
+
+/**
+ * Exact proof from the mod's journal that an admission's refused operations changed nothing. Two shapes, both set by the mod
+ * (never by the harness):
+ *   - synchronous: state `failed`, no slot carries batch refs, and every non-ok slot is `refused_before_mutation` with
+ *     `mutation_unknown === false`. The ok slots completed synchronously; operations after the refusal never ran.
+ *   - engine-refused: state `failed`, every slot is ok with batch refs, and every referenced receipt is a cancellation whose
+ *     first task refused before any change (`started_count === 1`, `failed_before_mutation`). No task had any effect.
+ * Anything else (a thrown error, an unknown operation, queued work in flight, a reload) is not proof.
+ */
+export function provenRefusal(admission, status) {
+  if (admission?.state !== 'failed' || admission.proven_refusal !== true) return null
+  const slots = Array.isArray(admission.slots) ? admission.slots : []
+  if (slots.length === 0) return null
+  const refs = slots.flatMap(slot => Array.isArray(slot?.batch_refs) ? slot.batch_refs : [])
+  if (refs.length === 0) {
+    if (!slots.every(slot => slot?.ok === true || (slot?.refused_before_mutation === true && slot?.mutation_unknown === false))) return null
+    const refused = slots.filter(slot => slot.ok !== true)
+    if (refused.length === 0) return null
+    return { applied_slots: slots.filter(slot => slot.ok === true).map(slot => slot.index), refused_slots: refused.map(slot => slot.index),
+      refusal_codes: refused.map(slot => text(slot.refusal_code, 80)).filter(Boolean).slice(0, 4), unrun_slots: Math.max(0, (admission.operation_count ?? slots.length) - slots.length) }
+  }
+  const receipts = Array.isArray(status?.receipt_journal) ? status.receipt_journal : []
+  if (!slots.every(slot => slot?.ok === true && Array.isArray(slot.batch_refs) && slot.batch_refs.length > 0)) return null
+  const proven = refs.every(ref => receipts.some(receipt => receipt?.batch_ref === ref.batch_ref && receipt.batch_id === ref.batch_id
+    && receipt.batch_generation === ref.batch_generation && receipt.state === 'cancelled' && receipt.started_count === 1
+    && receipt.failed_before_mutation === true))
+  if (!proven) return null
+  return { applied_slots: [], refused_slots: slots.map(slot => slot.index), refusal_codes: [text(receipts.find(receipt => receipt?.batch_ref === refs[0].batch_ref)?.reason, 80)].filter(Boolean),
+    unrun_slots: 0 }
 }
 
 /**
@@ -210,6 +246,12 @@ export function reconcilePendingOperation(pending, { status, actor } = {}) {
       return staleActor ?? { verdict: RECONCILE_VERDICT.GENERATION_CHANGED, effect: EFFECT.PARTIAL_UNKNOWN, reason: 'admission_generation_changed' }
     }
     const batchId = admission.slots?.[0]?.batch_refs?.[0]?.batch_id
+    // Exact refusal evidence is historical and needs no live actor: nothing refused changed anything.
+    const refusal = provenRefusal(admission, status)
+    if (refusal) {
+      return { verdict: RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION, effect: refusal.applied_slots.length > 0 ? EFFECT.HAPPENED : EFFECT.NOT_HAPPENED,
+        reason: 'exact_refusal_before_mutation', ...refusal }
+    }
     if (admission.state === 'completed') return { verdict: RECONCILE_VERDICT.ADMITTED_COMPLETED, effect: EFFECT.HAPPENED, reason: 'exact_receipts_completed', batch_id: batchId }
     // A sealed exact receipt describes historical work by its original actor.
     // Unfinished work from an old actor is never resumed or assumed complete.
@@ -263,7 +305,7 @@ export function reconcilePendingOperation(pending, { status, actor } = {}) {
 export function duplicateEffectGuard(pending, { operations, planId, stepId } = {}) {
   if (!isRecord(pending)) return { refuse: false }
   if (pending.effect === EFFECT.NOT_HAPPENED) return { refuse: false }
-  if (pending.protocol_version === 2) {
+  if (pending.protocol_version === 2 || pending.legacy === true) {
     const proposed = (Array.isArray(operations) ? operations : []).flatMap(effectScopes)
     const held = pending.scopes ?? ['*']
     if (held.length === 0) return { refuse: false }
@@ -300,12 +342,21 @@ export function reconciliationFacts(result, pending) {
     batch_id: result?.batch_id ?? null,
     operations: (pending?.operations ?? []).map(operation => operation.name),
     effect_classes: [...new Set((pending?.operations ?? []).map(operation => operation.effect_class))],
+    ...(result?.verdict === RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION
+      ? { applied_slots: result.applied_slots ?? [], refused_slots: result.refused_slots ?? [], refusal_codes: result.refusal_codes ?? [], unrun_slots: result.unrun_slots ?? 0 }
+      : {}),
   }
 }
 
 /** One sentence for the model: what the game's batch records prove, and what that allows. Never says "succeeded" for an uncertain effect. */
 export function reconciliationGuidance(result, pending) {
   const facts = JSON.stringify(reconciliationFacts(result, pending))
+  if (result?.verdict === RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION) {
+    const applied = (result.applied_slots ?? []).length > 0
+      ? ` Operations ${result.applied_slots.join(', ')} completed before the refusal; do not repeat them.`
+      : ''
+    return `Operation reconciliation (from the game's own admission record): the game refused operations ${(result.refused_slots ?? []).join(', ')} before changing anything, so those did not run and may be corrected and issued again.${applied} Operations after the refusal never started. Facts: ${facts}`
+  }
   if (result?.effect === EFFECT.NOT_HAPPENED) {
     return `Operation reconciliation (from the game's batch records): the last operation batch never reached the game, so nothing from it ran and it may be issued again. Facts: ${facts}`
   }
@@ -332,7 +383,7 @@ export function isLostAcknowledgement(error) {
 /** The bounded record the reducer persists (every field checked; unknown fields dropped). */
 export function sanitizePendingOperation(raw) {
   if (!isRecord(raw)) return null
-  const key = text(raw.operation_key, PENDING_OPERATION_LIMITS.ref)
+  const key = text(raw.operation_key, PENDING_OPERATION_LIMITS.operation_key)
   if (!key) return null
   const states = Object.values(PENDING_STATE)
   const effects = Object.values(EFFECT)
@@ -351,6 +402,7 @@ export function sanitizePendingOperation(raw) {
     request_id: text(raw.request_id, 120),
     attempt_id: text(raw.attempt_id ?? key, 200),
     protocol_version: raw.protocol_version === 2 ? 2 : 1,
+    ...(raw.legacy === true ? { legacy: true } : {}),
     ordinal: Number.isSafeInteger(raw.ordinal) && raw.ordinal > 0 ? raw.ordinal : null,
     scopes: Array.isArray(raw.scopes) ? raw.scopes.filter(value => typeof value === 'string').slice(0, 96).map(value => text(value, 240)) : ['*'],
     state: states.includes(raw.state) ? raw.state : PENDING_STATE.SENT,

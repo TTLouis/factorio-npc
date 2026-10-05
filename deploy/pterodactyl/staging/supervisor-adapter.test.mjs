@@ -240,3 +240,54 @@ test('actor epoch comparison ignores connected-player count but notices actor/ep
   assert.equal(actorChanged(first, readyStatus({ epoch: 4 })), true)
   assert.equal(actorChanged(first, readyStatus({ mode: 'player' })), true)
 })
+
+test('everything rejected before the first RCON byte is provably not sent', async () => {
+  const marker = 'SGLUNA_RESULT_0123456789abcdef01234567:'
+  const wait = 'remote.call("autorio_operations","wait",60)'
+  const base = { protocol_version: 2, operation_key: 'req/batch_1', attempt_id: 'req/batch_1', ordinal: 1, signature: 'hash', actor: { actor_id: 18, epoch: 3 } }
+  const attempts = [
+    [3, [wait], { ...base, ordinal: undefined }],
+    [3, [wait], { ...base, operation_key: 'k'.repeat(193) }],
+    [3, [wait], { ...base, actor: {} }],
+    [3, [], base],
+    [0, [wait], base],
+    [3, ['game.clear()'], base],
+  ]
+  for (const [epoch, commands, correlation] of attempts) {
+    const rcon = new FakeRcon([`${marker}${JSON.stringify({ ok: true, result: [true] })}`])
+    await assert.rejects(executeAuthorizedBatch(rcon, epoch, commands, marker, correlation), error => error.notSent === true)
+    assert.equal(rcon.commands.length, 0, 'nothing was sent')
+  }
+  // The runtime key limit equals the mod journal limit (192): exactly 192 is sent.
+  const rcon = new FakeRcon([`${marker}${JSON.stringify({ ok: true, result: [true], admission: { state: 'completed' } })}`])
+  await executeAuthorizedBatch(rcon, 3, [wait], marker, { ...base, operation_key: 'k'.repeat(192) })
+  assert.equal(rcon.commands.length, 1)
+})
+
+test('a failure after the command was sent is never marked not sent, and only a begin refusal proves nothing was recorded', async () => {
+  const marker = 'SGLUNA_RESULT_0123456789abcdef01234567:'
+  const correlation = { protocol_version: 2, operation_key: 'req/batch_1', attempt_id: 'req/batch_1', ordinal: 1, signature: 'hash', actor: { actor_id: 18, epoch: 3 } }
+  const wait = 'remote.call("autorio_operations","wait",60)'
+  const lost = new FakeRcon(['no acknowledgement here'])
+  await assert.rejects(executeAuthorizedBatch(lost, 3, [wait], marker, correlation), error => error.notSent !== true && error.notAdmitted !== true)
+  for (const [code, expected] of [['stale_actor_epoch', true], ['expired_operation_ordinal', true], ['admission_journal_full', true], ['stale npc actor epoch', true],
+    ['operation_key_conflict', false], ['admission slot recording failed: invalid_slot', false]]) {
+    const rcon = new FakeRcon([`${marker}${JSON.stringify({ ok: false, result: code, prefix: [] })}`])
+    await assert.rejects(executeAuthorizedBatch(rcon, 3, [wait], marker, correlation), error => error.notAdmitted === expected && error.notSent !== true, code)
+  }
+  const recorded = new FakeRcon([`${marker}${JSON.stringify({ ok: false, result: 'stale_actor_epoch', prefix: [], admission: { state: 'uncertain' } })}`])
+  await assert.rejects(executeAuthorizedBatch(recorded, 3, [wait], marker, correlation), error => error.notAdmitted === false)
+})
+
+test('correlated slots tell the mod the operation name and whether it was refused, never whether the refusal is safe', async () => {
+  const marker = 'SGLUNA_RESULT_0123456789abcdef01234567:'
+  const correlation = { protocol_version: 2, operation_key: 'req/batch_1', attempt_id: 'req/batch_1', ordinal: 1, signature: 'hash', actor: { actor_id: 18, epoch: 3 } }
+  const rcon = new FakeRcon([`${marker}${JSON.stringify({ ok: true, result: [true], admission: { state: 'completed' } })}`])
+  await executeAuthorizedBatch(rcon, 3, ['remote.call("autorio_operations","craft_item","iron-gear-wheel",1)'], marker, correlation)
+  const command = rcon.commands[0]
+  assert.match(command, /operation="craft_item",refused=refused/)
+  assert.match(command, /local refused=ok1 and not accepted/)
+  assert.doesNotMatch(command, /mutation_unknown/)
+  assert.doesNotMatch(command, /refused_before_mutation/)
+  assert.match(command, /"autorio rejected operation 1: "\.\.tostring\(detail\)/)
+})

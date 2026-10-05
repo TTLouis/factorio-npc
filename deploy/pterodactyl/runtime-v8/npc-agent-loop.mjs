@@ -19,6 +19,7 @@ import { buildVerifiedResults } from './verified-results.mjs'
 import { cleanMemoryText, sanitizeDurableModelText, sanitizeDurableModelValue } from './durable-text.mjs'
 import { normalizeProviderPlanContent, providerCapabilityProfile } from './provider.mjs'
 import { executeAuthorizedBatch } from './supervisor-adapter.mjs'
+import { OPERATION_LEDGER_LIMIT } from './operation-ledger.mjs'
 import {
   batchWatermark,
   buildPendingOperation,
@@ -5749,9 +5750,43 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       baseline,
       now: Date.now(),
     }), { requestId: this.traceRequest?.id })
-    if (!record) throw new AgentLoopError('Operation ledger full or record refused; no operation sent')
+    if (!record) {
+      const held = this.memory.pendingOperations?.(key)?.length ?? 0
+      const full = held >= OPERATION_LEDGER_LIMIT
+      await this.traceEvent(full ? 'operation.ledger_full' : 'operation.record_refused', {
+        request_id: this.traceRequest?.id, reason: full ? 'unresolved_operation_ledger_at_capacity' : 'record_refused_no_active_goal_or_invalid',
+        unresolved: held, limit: OPERATION_LEDGER_LIMIT,
+      })
+      throw new AgentLoopError('Operation ledger full or record refused; no operation sent')
+    }
     await this.persistState()
     return record
+  }
+
+  // A prepared attempt the game provably never saw (rejected before transport, or the game refused it before recording
+  // anything): settle it as not happened so it leaves no hold.
+  async settleUnsentOperation(pending, ownerKey, reason) {
+    this.memory.updatePendingOperation?.(ownerKey, { effect: EFFECT.NOT_HAPPENED, reason }, pending.operation_key)
+    if (this.memory.clearPendingOperation?.(ownerKey, { operationKey: pending.operation_key }) !== true) {
+      await this.traceEvent('operation.settlement_refused', { request_id: pending.request_id, operation_key: pending.operation_key,
+        reason: 'unsent_settlement_refused', attempted_reason: reason })
+      throw new AgentLoopError('Prepared operation settlement refused')
+    }
+    await this.persistState()
+    await this.traceEvent('operation.not_sent', { request_id: pending.request_id, operation_key: pending.operation_key, reason })
+  }
+
+  // A legacy (pre-journal) record that neither exact nor baseline evidence can settle must not hold silently: raise one
+  // question the user can answer (idempotent per record).
+  async surfaceLegacyOperation(memoryKey, pending, result, requestId) {
+    if (pending?.legacy !== true || typeof this.memory.raiseOperationEffectQuestion !== 'function') return
+    if ([RECONCILE_VERDICT.NOT_ADMITTED, RECONCILE_VERDICT.ADMITTED_COMPLETED, RECONCILE_VERDICT.ADMITTED_IN_FLIGHT, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION].includes(result.verdict)) return
+    const raised = this.memory.raiseOperationEffectQuestion(memoryKey, pending, { reason: result.reason, requestId })
+    await this.persistState()
+    await this.traceEvent('operation.legacy_unresolved', {
+      request_id: requestId, operation_key: pending.operation_key, reason: result.reason,
+      question_id: raised?.question?.question_id ?? null, already_pending: raised?.duplicate === true,
+    }, { requestId })
   }
 
   // Reconcile the outstanding batch against the game's own batch records (exact batch id / generation / actor / epoch
@@ -5778,7 +5813,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const result = reconcilePendingOperation(pending, { status: await this.readTaskStatusRaw(), actor })
     const admitted = [RECONCILE_VERDICT.ADMITTED_IN_FLIGHT, RECONCILE_VERDICT.ADMITTED_COMPLETED, RECONCILE_VERDICT.ADMITTED_CANCELLED].includes(result.verdict)
     let held = pending
-    if (result.verdict === RECONCILE_VERDICT.NOT_ADMITTED) {
+    if ([RECONCILE_VERDICT.NOT_ADMITTED, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION].includes(result.verdict)) {
       this.memory.clearPendingOperation?.(key, { operationKey: pending.operation_key })
     }
     else {
@@ -5811,6 +5846,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         current_actor: actor ?? null,
       }, { requestId: rid })
     }
+    await this.surfaceLegacyOperation(key, pending, result, rid)
     return { ...result, admitted, pending: held ?? pending, request_id: rid }
   }
 
@@ -5831,12 +5867,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (!watermark || watermark.idle !== true || watermark.queue_length !== 0) return
       const actor = this.epoch ? { actor_id: this.epoch.actor_id, epoch: this.epoch.epoch } : undefined
       const result = reconcilePendingOperation(pending, { status: rawStatus, actor })
-      const provable = [RECONCILE_VERDICT.ADMITTED_COMPLETED, RECONCILE_VERDICT.NOT_ADMITTED].includes(result.verdict)
+      const provable = [RECONCILE_VERDICT.ADMITTED_COMPLETED, RECONCILE_VERDICT.NOT_ADMITTED, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION].includes(result.verdict)
       const settled = provable && this.memory.clearPendingOperation?.(key, { operationKey: pending.operation_key }) === true
       const rid = this.traceRequest?.id ?? pending.operation_key.split('/')[0]
       // The ordinary case (acknowledged, then its receipt) settles silently; only a batch whose acknowledgement was lost or whose
       // lineage is in doubt is worth a reconciliation row.
-      if (pending.state !== PENDING_STATE.ACKNOWLEDGED || !provable) {
+      if (pending.state !== PENDING_STATE.ACKNOWLEDGED || !provable || result.verdict === RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION) {
         await this.traceEvent('operation.reconciled', {
           request_id: rid,
           trigger: 'receipt',
@@ -5858,7 +5894,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }, { requestId: rid })
       }
       if (provable) {
-        if (!settled) throw new AgentLoopError('Exact operation settlement refused; unresolved record retained')
+        if (!settled) {
+          await this.traceEvent('operation.settlement_refused', { request_id: rid, operation_key: pending.operation_key,
+            reason: 'exact_settlement_refused', verdict: result.verdict }, { requestId: rid })
+          throw new AgentLoopError('Exact operation settlement refused; unresolved record retained')
+        }
         await this.persistState()
       }
       else {
@@ -10229,13 +10269,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       catch (error) {
         // Transport has not been invoked. This local boundary proves this exact
         // prepared attempt absent; a later restart without this proof stays uncertain.
-        if (pendingAdmission) {
-          this.memory.updatePendingOperation?.(operationOwnerKey, { effect: EFFECT.NOT_HAPPENED, reason: 'cancelled_before_transport' }, pendingAdmission.operation_key)
-          if (this.memory.clearPendingOperation?.(operationOwnerKey, { operationKey: pendingAdmission.operation_key }) !== true) throw new AgentLoopError('Prepared operation settlement refused')
-          await this.persistState()
-          await this.traceEvent('operation.not_sent', { request_id: pendingAdmission.request_id,
-            operation_key: pendingAdmission.operation_key, reason: 'cancelled_before_transport' })
-        }
+        if (pendingAdmission) await this.settleUnsentOperation(pendingAdmission, operationOwnerKey, 'cancelled_before_transport')
         throw error
       }
       let reconciledAdmitted = false
@@ -10255,6 +10289,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       catch (error) {
         // MW2b: the command was sent but no valid acknowledgement came back. Ask the game what really happened (exact batch,
         // actor and epoch correlation) before anything is issued again or the goal is blocked.
+        // Rejected before the first byte reached RCON, or refused by the game before it recorded anything: provably not sent.
+        if (pendingAdmission && (error?.notSent === true || error?.notAdmitted === true)) {
+          await this.settleUnsentOperation(pendingAdmission, operationOwnerKey, error.notSent === true ? 'rejected_before_transport' : 'admission_refused_before_record')
+        }
         let reconciliation
         if ((isLostAcknowledgement(error) || error?.admission) && this.requestInfo && typeof this.memory.pendingOperation === 'function') {
           reconciliation = await this.reconcileOutstandingOperation({ trigger: 'lost_acknowledgement', operationKey: pendingAdmission?.operation_key })
@@ -10298,8 +10336,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             operation_index: operationIndex === undefined ? undefined : operationIndex + 1,
             operation: operationIndex !== undefined ? operations[operationIndex] : undefined,
             factorio_error: error?.factorioError,
-            no_replay: true,
-            no_replay_reason: 'Earlier operations in the admitted batch may already have produced side effects.',
+            no_replay: error?.notSent !== true && error?.notAdmitted !== true,
+            no_replay_reason: error?.notSent === true || error?.notAdmitted === true
+              ? 'The game never received or recorded this batch; nothing from it ran.'
+              : 'Earlier operations in the admitted batch may already have produced side effects.',
             reconciliation: reconciliation ? reconciliationFacts(reconciliation, reconciliation.pending) : undefined,
             task_board: visibleTaskBoard(stateResult?.state?.task_board),
           })

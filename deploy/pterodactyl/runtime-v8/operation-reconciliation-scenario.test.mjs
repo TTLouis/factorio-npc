@@ -7,6 +7,7 @@ import test from 'node:test'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
+import { buildPendingOperation } from './operation-reconciliation.mjs'
 import { recoverInterruptedAgentPlan } from './supervisor.mjs'
 import { FakeFactorio, inventoryCheckpoint, planReply, recordingJev } from './task-loop-fixtures.mjs'
 
@@ -311,4 +312,197 @@ test('restart after an actor replacement: the old body\'s outstanding operation 
   assert.equal(memory.pendingOperation(KEY).effect, 'unknown')
   assert.equal(memory.pendingOperation(KEY).state === 'unreconciled' || memory.pendingOperation(KEY).state === 'acknowledged', true)
   assert.equal(first.game.deliveries.length, 1, 'the replacement body never replays the old delivery')
+})
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Ordinary rejections are not permanent holds. The mod proves a refusal changed nothing (operation_admission.ts); anything
+// it cannot prove stays held. Fixtures emit the exact shapes the mod emits (task-loop-fixtures.mjs).
+// ---------------------------------------------------------------------------------------------------------------------
+
+const placeOp = (x = 11) => ({ name: 'place_entity', args: { entity_name: 'burner-mining-drill', x, y: -7 } })
+const placePlan = (x = 11) => planReply({ plan: ['Place a burner mining drill'], operations: [placeOp(x)] })
+
+test('a plainly refused placement is exact: the hold clears, the settlement is traced, and a corrected placement is admitted', async () => {
+  const game = new FakeFactorio()
+  game.syncRefusal = { slot: 1, operation: 'place_entity', error: 'Requested placement is not placeable' }
+  const world = harness({ game, replies: [placePlan()] })
+  await assert.rejects(world.say('place a burner drill'))
+
+  assert.equal(world.pending(), null, 'a proven pre-mutation refusal leaves no unresolved record')
+  assert.equal(game.mutations.length, 1)
+  const reconciled = world.named('operation.reconciled')
+  assert.equal(reconciled.length, 1)
+  assert.equal(reconciled[0].verdict, 'refused_before_mutation')
+  assert.equal(reconciled[0].reason, 'exact_refusal_before_mutation')
+  assert.equal(reconciled[0].effect, 'not_happened')
+  assert.deepEqual(reconciled[0].refused_slots, [1])
+  assert.ok(reconciled[0].request_id)
+  // Bounded recovery can run again: a corrected placement is no longer fenced by the refused one.
+  assert.equal(world.memory.checkDuplicateEffect(KEY, { operations: [placeOp(12)] }, { requestId: 'req_retry' }).refuse, false)
+})
+
+test('a refusal the mod could not prove pre-mutation stays held and fences conflicting work', async () => {
+  const game = new FakeFactorio()
+  game.syncRefusal = { slot: 1, operation: 'equip_weapon', error: 'rejected', proven: false }
+  const world = harness({ game, replies: [placePlan()] })
+  await assert.rejects(world.say('place a burner drill'))
+
+  assert.ok(world.pending(), 'unproven: the unresolved record is retained')
+  const reconciled = world.named('operation.reconciled')
+  assert.notEqual(reconciled[0].verdict, 'refused_before_mutation')
+  assert.equal(reconciled[0].reason, 'exact_admission_unsettled')
+  assert.equal(world.memory.checkDuplicateEffect(KEY, { operations: [placeOp(12)] }, { requestId: 'req_retry' }).refuse, true)
+})
+
+test('an attempt rejected before transport leaves no hold and is traced as not sent', async () => {
+  const game = new FakeFactorio()
+  const world = harness({ game, replies: [placePlan()] })
+  // An invalid correlation (no ordinal) is rejected by executeAuthorizedBatch before any RCON byte.
+  const record = world.memory.recordPendingOperation.bind(world.memory)
+  world.memory.recordPendingOperation = (key, operation, options) => record(key, { ...operation, ordinal: null }, options)
+  await assert.rejects(world.say('place a burner drill'), /Invalid operation correlation/)
+
+  assert.equal(game.mutations.length, 0, 'nothing reached the game')
+  assert.equal(world.pending(), null)
+  const unsent = world.named('operation.not_sent')
+  assert.equal(unsent.length, 1)
+  assert.equal(unsent[0].reason, 'rejected_before_transport')
+  assert.ok(unsent[0].request_id)
+  assert.equal(world.memory.checkDuplicateEffect(KEY, { operations: [placeOp(12)] }, { requestId: 'req_retry' }).refuse, false)
+})
+
+test('a begin refusal from the mod admission journal proves nothing was recorded or run', async () => {
+  const game = new FakeFactorio()
+  game.beginRefusal = 'stale_actor_epoch'
+  const world = harness({ game, replies: [placePlan()] })
+  await assert.rejects(world.say('place a burner drill'))
+
+  assert.equal(world.pending(), null)
+  const unsent = world.named('operation.not_sent')
+  assert.equal(unsent.length, 1)
+  assert.equal(unsent[0].reason, 'admission_refused_before_record')
+})
+
+test('a refused unsent settlement is traced before the failure is raised', async () => {
+  const game = new FakeFactorio()
+  const world = harness({ game, replies: [placePlan()] })
+  const record = world.memory.recordPendingOperation.bind(world.memory)
+  world.memory.recordPendingOperation = (key, operation, options) => record(key, { ...operation, ordinal: null }, options)
+  world.memory.clearPendingOperation = () => false
+  await assert.rejects(world.say('place a burner drill'), /Prepared operation settlement refused/)
+
+  const refused = world.named('operation.settlement_refused')
+  assert.equal(refused.length, 1)
+  assert.equal(refused[0].reason, 'unsent_settlement_refused')
+  assert.equal(refused[0].attempted_reason, 'rejected_before_transport')
+  assert.ok(refused[0].request_id && refused[0].operation_key)
+})
+
+test('a refused exact settlement from a receipt is traced', async () => {
+  const world = harness({ replies: [deliveryPlan()] })
+  await world.say('deliver 5 coal to the wooden chest')
+  world.game.completeBatch()
+  world.memory.clearPendingOperation = () => false
+  await world.agent.taskStatusReceipt()
+
+  const refused = world.named('operation.settlement_refused')
+  assert.equal(refused.length, 1)
+  assert.equal(refused[0].reason, 'exact_settlement_refused')
+  assert.equal(refused[0].verdict, 'admitted_completed')
+  assert.ok(refused[0].request_id && refused[0].operation_key)
+  assert.ok(world.pending(), 'the unresolved record is retained')
+})
+
+test('a full unresolved ledger refuses the send with a named trace', async () => {
+  const world = harness({ replies: [deliveryPlan()] })
+  await world.say('deliver 5 coal to the wooden chest')
+  const goalId = world.memory.planningState(KEY).goal.goal_id
+  for (let index = 0; index < 63; index++) {
+    const filler = buildPendingOperation({ requestId: `fill_${index}`, operationKey: `fill_${index}/batch`, ordinal: index + 10, protocolVersion: 2, goalId, actor: { actor_id: 18, epoch: 3 },
+      operations: [{ name: 'move_items_exact', args: { item_name: `filler-${index}`, unit_number: 1000 + index, max_count: 1, to_entity: true } }] })
+    assert.ok(world.memory.recordPendingOperation(KEY, filler))
+  }
+  assert.equal(world.memory.pendingOperations(KEY).length, 64)
+  world.agent.requestInfo = { memoryKey: KEY, turnId: 99, sender: 'Louis', text: 'again' }
+  world.agent.traceRequest = { id: 'req_full', usage: {} }
+  await assert.rejects(world.agent.recordPendingOperationBeforeSend([placeOp()], { actor_id: 18, epoch: 3 }), /Operation ledger full/)
+
+  const full = world.named('operation.ledger_full')
+  assert.equal(full.length, 1)
+  assert.equal(full[0].request_id, 'req_full')
+  assert.equal(full[0].reason, 'unresolved_operation_ledger_at_capacity')
+  assert.equal(full[0].unresolved, 64)
+  assert.equal(full[0].limit, 64)
+})
+
+// Legacy (pre-journal) records: reconcile by the batch baseline when it applies, otherwise a harness-raised question.
+async function legacyWorld(baseline) {
+  const world = harness({ game: new FakeFactorio(), replies: [deliveryPlan()] })
+  await world.say('deliver 5 coal to the wooden chest')
+  const acknowledged = world.pending()
+  world.memory.clearPendingOperation(KEY, { operationKey: acknowledged.operation_key })
+  const goalId = world.memory.planningState(KEY).goal.goal_id
+  const legacy = buildPendingOperation({ requestId: 'old', operationKey: 'old/batch_1', protocolVersion: 1, goalId, actor: { actor_id: world.game.status.actor_id, epoch: world.game.status.epoch }, operations: [deliver()], baseline })
+  assert.ok(world.memory.recordPendingOperation(KEY, legacy))
+  world.questions = []
+  return world
+}
+
+test('a legacy record the batch baseline can prove absent settles without a user question', async () => {
+  const world = await legacyWorld({ generation: 1, max_batch_id: 1, active: null })
+  const result = await world.agent.reconcileOutstandingOperation({ trigger: 'runtime_restart', requestId: 'recovery_legacy' })
+  assert.equal(result.verdict, 'not_admitted')
+  assert.equal(world.pending(), null)
+  assert.equal(world.named('operation.legacy_unresolved').length, 0)
+  assert.equal(world.memory.authorizationState(KEY).questions.length, 0)
+})
+
+test('a legacy record with no evidence becomes one question the user can answer, and only that answer clears it', async () => {
+  const world = await legacyWorld(null)
+  const result = await world.agent.reconcileOutstandingOperation({ trigger: 'runtime_restart', requestId: 'recovery_legacy' })
+  assert.equal(result.reason, 'no_baseline')
+  assert.equal(world.pending().legacy, true)
+  assert.equal(world.memory.checkDuplicateEffect(KEY, { operations: [placeOp()] }, { requestId: 'req_x' }).refuse, true, 'it still fences conflicting work')
+
+  let surfaced = world.named('operation.legacy_unresolved')
+  assert.equal(surfaced.length, 1)
+  assert.equal(surfaced[0].reason, 'no_baseline')
+  assert.equal(surfaced[0].request_id, 'recovery_legacy')
+  assert.equal(surfaced[0].already_pending, false)
+  const [question] = world.memory.authorizationState(KEY).questions
+  assert.equal(question.kind, 'operation_effect')
+  assert.equal(question.status, 'pending')
+  assert.equal(question.subject_key, 'old/batch_1')
+  assert.equal(surfaced[0].question_id, question.question_id)
+
+  // A repeated reconcile does not stack questions.
+  await world.agent.reconcileOutstandingOperation({ trigger: 'runtime_restart', requestId: 'recovery_legacy_2' })
+  assert.equal(world.memory.authorizationState(KEY).questions.length, 1)
+  surfaced = world.named('operation.legacy_unresolved')
+  assert.equal(surfaced.at(-1).already_pending, true)
+
+  // The planner cannot answer it; a denial keeps the record held and the next reconcile asks again.
+  const answer = { question_id: question.question_id, decision: 'approve', approved_by: 'Louis', reason_codes: ['legacy_operation_unresolved'] }
+  assert.equal(world.memory.recordAuthorizationApproval(KEY, answer, { source: 'main_planner' }).ok, false)
+  assert.ok(world.pending())
+  assert.equal(world.memory.recordAuthorizationApproval(KEY, { ...answer, decision: 'deny' }).settled, undefined)
+  assert.ok(world.pending())
+  await world.agent.reconcileOutstandingOperation({ trigger: 'runtime_restart', requestId: 'recovery_legacy_3' })
+  assert.equal(world.memory.authorizationState(KEY).questions.filter(item => item.status === 'pending').length, 1)
+})
+
+test('approving the legacy question settles the record and traces who resolved it', async () => {
+  const world = await legacyWorld(null)
+  await world.agent.reconcileOutstandingOperation({ trigger: 'runtime_restart', requestId: 'recovery_legacy' })
+  const [question] = world.memory.authorizationState(KEY).questions
+  const approved = world.memory.recordAuthorizationApproval(KEY, { question_id: question.question_id, decision: 'approve', approved_by: 'Louis', reason_codes: ['legacy_operation_unresolved'] }, { requestId: 'req_answer' })
+  assert.equal(approved.ok, true)
+  assert.equal(approved.settled, true)
+  assert.equal(world.pending(), null)
+  assert.equal(world.memory.checkDuplicateEffect(KEY, { operations: [placeOp()] }, { requestId: 'req_x' }).refuse, false)
+  assert.equal(world.memory.planningState(KEY).operation_ledger.closed.at(-1).operation_key, 'old/batch_1')
+  const resolved = world.named('operation.legacy_resolved')
+  assert.equal(resolved.length, 1)
+  assert.equal(resolved[0].reason, 'user_approved')
+  assert.equal(resolved[0].request_id, 'req_answer')
 })

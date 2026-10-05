@@ -488,7 +488,7 @@ export function raiseQuestion(auth, raw, now) {
   const kind = text(raw.kind, 40) || 'replacement_approval'
   const duplicate = auth.questions.find(item => item.status === 'pending'
     && item.kind === kind
-    && item.plan_id === planId
+    && item.plan_id === (planId || null)
     && item.reason_codes.join('|') === reasons.join('|')
     && item.subject_key === text(raw.subject_key, 200))
   if (duplicate) return { auth, question: duplicate, duplicate: true }

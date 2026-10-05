@@ -1311,7 +1311,28 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       approval_id: recorded?.approval_id,
       question_id: approval?.question_id,
     }, requestId)
-    return { ok: Boolean(recorded), approval: recorded, state: after }
+    // The user's approval of an operation-effect question attests that the legacy record's effect is settled. The approval
+    // itself cannot touch campaign state; the harness clears the record with its own authority afterwards.
+    let settled
+    if (recorded?.decision === 'approve' && approval?.question_id) {
+      const question = held.questions.find(item => item.question_id === approval.question_id)
+      if (question?.kind === 'operation_effect') {
+        settled = this.clearPendingOperation(key, { operationKey: question.subject_key })
+        this.#authTrace('operation.legacy_resolved', { ok: settled, reason: settled ? 'user_approved' : 'clear_refused',
+          operation_key: question.subject_key, question_id: question.question_id, approval_id: recorded.approval_id }, requestId)
+      }
+    }
+    return { ok: Boolean(recorded), approval: recorded, state: settled === undefined ? after : this.planningState(key), settled }
+  }
+
+  /** Harness-owned: surface a legacy operation record that no evidence can settle as a question the user can answer. */
+  raiseOperationEffectQuestion(key, record, { reason, requestId } = {}) {
+    const before = authorizationOf(this.planningState(key)).questions.length
+    const after = this.dispatchPlanningEvent(key, { type: PLANNING_EVENT.OPERATION_EFFECT_QUESTION_RAISED, source: 'runtime', now: Date.now(),
+      operation_key: record?.operation_key, reason })
+    const questions = authorizationOf(after).questions
+    const question = questions.find(item => item.kind === 'operation_effect' && item.subject_key === record?.operation_key && item.status === 'pending')
+    return question ? { question, duplicate: questions.length === before } : undefined
   }
 
   /**
