@@ -566,10 +566,28 @@ function is_unedited_curated_copy(stored: SkillDefinition) {
   return true
 }
 
+// Curated ids that were removed from BASIC_SKILL_DEFINITIONS. Saves seeded
+// earlier still hold a stored copy; seeding deletes it, but only while it is an
+// unedited curated copy, so a player-edited or learned skill that reuses the id
+// stays. A retired id is not a basic id, so a stored copy that survives (or a
+// new skill created under the same id) counts as an ordinary dynamic skill.
+// automation-science-bootstrap (owner decision 2026-10-05): a straight-line red
+// science pattern does not give stable red science, and its only precondition
+// hid that the science-pack recipe itself is locked behind a technology.
+export const RETIRED_BASIC_SKILL_IDS: string[] = ['automation-science-bootstrap']
+
 export function ensure_basic_skill_definitions() {
   const registry = ensure_definitions()
   let added = 0
   let upgraded = 0
+  let removed = 0
+  for (const id of RETIRED_BASIC_SKILL_IDS) {
+    const stored = registry[id]
+    if (stored !== undefined && is_unedited_curated_copy(stored)) {
+      delete registry[id]
+      removed++
+    }
+  }
   for (const raw of BASIC_SKILL_DEFINITIONS) {
     const skill = canonicalize_skill_definition(raw)
     const stored = registry[skill.id]
@@ -582,7 +600,7 @@ export function ensure_basic_skill_definitions() {
       upgraded++
     }
   }
-  return { added, upgraded, total: BASIC_SKILL_DEFINITIONS.length }
+  return { added, upgraded, removed, total: BASIC_SKILL_DEFINITIONS.length }
 }
 
 function skill_search_text(skill: SkillDefinition) {
@@ -827,6 +845,27 @@ export function score_skill_for_goal(skill: SkillDefinition, goal: GoalTerms, wo
     if (check.state === 'locked') locked++
     needs.push(need)
   }
+  // Hand-written preconditions can miss that the skill's own product is still
+  // locked (the science-pack recipe is behind a technology even when the
+  // machine technology is researched). Check each real output item against the
+  // live recipe unlock state and add a locked need naming the technology. Only
+  // locked adds a need: held and craftable outputs would just be noise, since
+  // a skill is meant to produce its output. Outputs that are abstract names
+  // ("electric-power") or raw resources have no item recipe and stay silent.
+  if (world !== undefined) {
+    for (const flow of skill.outputs) {
+      let seen = false
+      for (const need of needs) if (need.subject === flow.item) seen = true
+      if (seen) continue
+      const check = world.check_item(flow.item, 1)
+      if (check === undefined || check.state !== 'locked') continue
+      const need: SkillCardNeed = { subject: flow.item, state: 'locked' }
+      if (check.technology !== undefined) need.technology = check.technology
+      if (check.via !== undefined && check.via !== flow.item) need.via = check.via
+      locked++
+      needs.push(need)
+    }
+  }
   let score = relevance
   if (relevance > 0) {
     if (skill.status === 'verified') score += VERIFIED_BONUS
@@ -889,6 +928,23 @@ export interface SkillCard {
   score: number
 }
 
+// The needs shown on a card or search result, at most CARD_LIST_MAX. When there
+// are more, unlocked needs are dropped from the end first so a locked need (the
+// one that changes the plan) is never cut; order is otherwise preserved.
+function visible_needs(needs: SkillCardNeed[]): SkillCardNeed[] {
+  if (needs.length <= CARD_LIST_MAX) return needs
+  const dropped: boolean[] = []
+  let excess = needs.length - CARD_LIST_MAX
+  for (let index = needs.length - 1; index >= 0 && excess > 0; index--) {
+    if (needs[index].state === 'locked') continue
+    dropped[index] = true
+    excess--
+  }
+  const kept: SkillCardNeed[] = []
+  for (let index = 0; index < needs.length; index++) if (dropped[index] !== true) kept.push(needs[index])
+  return kept.slice(0, CARD_LIST_MAX)
+}
+
 export function skill_card(match: SkillGoalMatch): SkillCard {
   return {
     id: match.skill.id,
@@ -896,7 +952,7 @@ export function skill_card(match: SkillGoalMatch): SkillCard {
     status: match.skill.status,
     summary: one_line_summary(match.skill.summary),
     produces: match.skill.outputs.map(flow => flow.item).slice(0, CARD_LIST_MAX),
-    needs: match.needs.slice(0, CARD_LIST_MAX),
+    needs: visible_needs(match.needs),
     matched: match.matched.slice(0, CARD_LIST_MAX),
     score: match.score,
   }
@@ -929,7 +985,7 @@ export function find_skill_definitions(query: unknown, limit: unknown = 3, world
     inputs: match.skill.inputs.map(value => value.item),
     outputs: match.skill.outputs.map(value => value.item),
     matched: match.matched.slice(0, CARD_LIST_MAX),
-    needs: match.needs.slice(0, CARD_LIST_MAX),
+    needs: visible_needs(match.needs),
     warnings: skill_ui_summary(match.skill).warnings,
   }))
 }

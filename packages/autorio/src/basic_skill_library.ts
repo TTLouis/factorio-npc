@@ -526,57 +526,6 @@ export const BASIC_SKILL_DEFINITIONS: any[] = [
   },
   {
     schema_version: 1,
-    revision: 2,
-    id: 'automation-science-bootstrap',
-    name: 'Automation Science Bootstrap',
-    kind: 'production',
-    stage: 'pattern',
-    status: 'candidate',
-    summary: 'Bootstrap the first science-pack production by resolving the live science recipe into a small dependency chain, producing any simple intermediate locally, feeding the remaining ingredients, and routing finished packs toward labs or storage. Use live recipe knowledge because modded science recipes may differ from vanilla.',
-    goal_tags: ['science', 'red-science', 'automation-science', 'research', 'lab', '红瓶'],
-    source: SOURCE,
-    preconditions: [
-      { kind: 'technology_researched', subject: 'automation', description: 'The force has researched the technology that unlocks crafting machines for the live science-pack and intermediate recipes (automation in the base game).' },
-      { kind: 'bootstrap', subject: 'science-goal', description: 'The task requires early automated research supply rather than one-off manual crafting.' },
-    ],
-    inputs: [{ item: 'science-ingredients', role: 'live recipe inputs' }],
-    outputs: [{ item: 'automation-science-pack', role: 'first automated science output or current-game equivalent' }],
-    topology: {
-      nodes: [
-        { id: 'intermediate-producer', role: 'Produce a repeated intermediate when the live recipe requires one' },
-        { id: 'science-assembler', role: 'Craft the target science pack', entity_name: 'assembling-machine-1', recipe: 'automation-science-pack' },
-        { id: 'ingredient-feed', role: 'Supply other recipe ingredients' },
-        { id: 'science-output', role: 'Collect or deliver finished science packs' },
-      ],
-      relations: [
-        { kind: 'item_transfer', from: 'intermediate-producer', to: 'science-assembler', description: 'Prefer a short direct insertion when one intermediate mostly serves this assembler and geometry allows it.' },
-        { kind: 'belt_input', from: 'ingredient-feed', to: 'science-assembler', description: 'Feed the remaining live-recipe ingredients.' },
-        { kind: 'belt_output', from: 'science-assembler', to: 'science-output', description: 'Make finished packs available to the intended research path.' },
-      ],
-    },
-    constraints: [
-      { kind: 'custom', description: 'Always query the live science recipe and intermediate recipes; do not assume vanilla ingredient identities or counts.', validation: 'unvalidated', evidence_refs: [] },
-      { kind: 'capacity', description: 'A starter line only needs to meet the current research goal; avoid overbuilding until actual demand/throughput is known.', validation: 'unvalidated', evidence_refs: [] },
-      { kind: 'placement', description: 'Verify machine recipes, inserter targets, and output access after construction.', validation: 'unvalidated', evidence_refs: [] },
-    ],
-    parameters: [
-      { name: 'science_item', description: 'Target early science-pack item in the current game.', required: false, default_value: 'automation-science-pack' },
-      { name: 'target_rate', description: 'Optional desired production rate; if supplied, solve from live recipes instead of remembered ratios.', required: false },
-    ],
-    verification: verification(),
-    known_failure_modes: [
-      'The model assumes the vanilla red-science recipe in a modded game.',
-      'The intermediate producer works but the science assembler is missing its other ingredient.',
-      'Finished science packs accumulate in a machine because no output path exists.',
-      'A memorized assembler ratio is treated as validated throughput.',
-    ],
-    confidence: confidence(),
-    examples: [
-      { summary: 'Red science / 红瓶 bootstrap.', notes: 'In vanilla this often benefits from a compact intermediate-to-science relationship, but the current recipe graph is authoritative.' },
-    ],
-  },
-  {
-    schema_version: 1,
     revision: 1,
     id: 'scale-out-production-line',
     name: 'Scale Out A Production Line',

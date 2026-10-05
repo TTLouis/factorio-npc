@@ -419,7 +419,7 @@ How we get there, in the owner's order:
    closed step. With delegation there are more, smaller conversations, so prefix
    stability per role decides the bill.
 4. **Skill lookup has to work without the model remembering to ask.** The library has
-   `steam-power-bootstrap` and `automation-science-bootstrap`, and `findSkills` is in
+   `steam-power-bootstrap` (the red-science skill `automation-science-bootstrap` was retired 2026-10-05), and `findSkills` is in
    the prompt, yet the steam run never called it. Today's search
    (`packages/autorio/src/skills.ts` `find_skill_definitions`) is substring matching
    over the skill text, top 5, with no weighting by status or preconditions.
