@@ -537,6 +537,14 @@ test('time efficiency is a top-level rule of the real system prompt and applies 
   assert.match(prompt, /a vertical slice is still judged on the game time it takes, so apply the Time efficiency rules to every mode/)
 })
 
+test('a plan slice is scoped to the shelf node it names, and shelf intents are short outline labels', async () => {
+  const prompt = plannerHarness({ systemPrompt: await realSystemPrompt() }).agent.systemPrompt
+  assert.match(prompt, /a plan slice holds only the steps for the node it names in roadmapNodeIds, normally the next one: its steps end when that node's intent is true/)
+  assert.match(prompt, /Do not restate the whole roadmap as steps\. On the first long-horizon submission, send the shelf in roadmap, plan only its first node, and name that node in roadmapNodeIds\./)
+  assert.match(prompt, /Write intent as a short label of about six words or fewer/)
+  assert.doesNotMatch(prompt, /Do not compile a shelf node into steps on your own initiative/, 'the old rule contradicted refining the named node')
+})
+
 // Reported input tokens: the real prefix, about 8k tokens of tool schemas the loop does not see, and the conversation's growth.
 const realTokens = (prefix, growthPerCall) => call => prefix + 8000 + call * growthPerCall
 

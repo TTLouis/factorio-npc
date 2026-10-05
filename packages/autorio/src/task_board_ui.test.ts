@@ -14,7 +14,7 @@ import {
   toggle_task_board_ui_open,
   create_task_board_ui_remote_interface,
 } from './task_board_ui'
-import { ACTIONS_NAME, BUTTON_NAME, COLUMNS_NAME, CONSOLE_LAYOUT, CONSOLE_TABS, LEFT_COLUMN_NAME, MORE_BUTTON_NAME, MORE_MENU_NAME, PROMPT_FIELD_NAME, PROMPT_SECTION_NAME, ROOT_NAME, SKILLS_BUTTON_NAME, SKILLS_ROOT_NAME, TRACKER } from './task_board_ui_constants'
+import { ACTIONS_NAME, BUTTON_NAME, COLUMNS_NAME, CONSOLE_LAYOUT, CONSOLE_TABS, LEFT_COLUMN_NAME, MAX_STEPS, MORE_BUTTON_NAME, MORE_MENU_NAME, PROMPT_FIELD_NAME, PROMPT_SECTION_NAME, ROOT_NAME, SKILLS_BUTTON_NAME, SKILLS_ROOT_NAME, TRACKER } from './task_board_ui_constants'
 import { get_handler } from './test-event-registry'
 import { DEBUG_ACTIVITY_SCROLL_NAME, DEBUG_BUTTON_NAME } from './task_board_debug'
 import { PROJECTS_BUTTON_NAME } from './projects/project_window'
@@ -210,7 +210,7 @@ describe('in-game task board UI projection', () => {
   it('labels canonical evidence as verified and keeps internal task codes diagnostic-only in the main console', () => {
     const source = taskBoardUiSource()
     const statusPanel = source.split('function last_result_line(')[1]?.split('function console_now_card(')[0] ?? ''
-    const refreshSteps = source.split('function refresh_steps(')[1]?.split('function refresh_activity(')[0] ?? ''
+    const refreshSteps = source.split('function refresh_tree(')[1]?.split('function refresh_activity(')[0] ?? ''
 
     expect(source).toContain('${board.completed_count} verified')
     expect(source).not.toContain('${board.completed_count} done')
@@ -825,7 +825,7 @@ describe('console refresh leaves unchanged sections alone', () => {
     finally { ui.restore() }
   })
 
-  it('the Plan Tracker panels and their lists fill the PLAN page instead of stopping at a capped height', () => {
+  it('the Roadmap tree panel and its scroll-pane fill the PLAN page instead of stopping at a capped height', () => {
     const ui = open_console()
     try {
       ui.click(BUTTON_NAME)
@@ -835,24 +835,136 @@ describe('console refresh leaves unchanged sections alone', () => {
       const section = find(plan_page, TRACKER.section)
       expect(section.style.vertically_stretchable).toBe(true)
       expect(find(section, TRACKER.body).style.vertically_stretchable).toBe(true)
-      // Every container between the section and the two lists stretches, so the panels share one height.
-      for (const name of [TRACKER.workspace, TRACKER.shelf, TRACKER.shelf_body, TRACKER.plan_column, TRACKER.plan_body, TRACKER.plan]) expect(find(section, name).style.vertically_stretchable, name).toBe(true)
-      // The lists scroll inside that height: stretchable, floored, never capped and never asking for more than the floor.
-      for (const name of [TRACKER.shelf_scroll, TRACKER.steps_scroll]) {
-        const style = find(section, name).style
-        expect(style.vertically_stretchable, name).toBe(true)
-        expect(style.minimal_height, name).toBe(CONSOLE_LAYOUT.tracker_list_floor)
-        expect(style.natural_height, name).toBe(CONSOLE_LAYOUT.tracker_list_floor)
-        expect(style.maximal_height, name).toBeUndefined()
-      }
+      // Every container between the section and the tree's list stretches, so the tree takes the page's height.
+      for (const name of [TRACKER.tree, TRACKER.tree_body]) expect(find(section, name).style.vertically_stretchable, name).toBe(true)
+      // One panel spanning the tracker's inner width: no second column beside it.
+      expect(find(section, TRACKER.tree).style.width).toBe(CONSOLE_LAYOUT.tracker_tree_width)
+      expect(find(section, TRACKER.body).children.filter((child: any) => child.type === 'frame').map((child: any) => child.name)).toEqual([TRACKER.tree])
+      // The list scrolls inside that height: stretchable, floored, never capped and never asking for more than the floor.
+      const style = find(section, TRACKER.tree_scroll).style
+      expect(style.vertically_stretchable).toBe(true)
+      expect(style.minimal_height).toBe(CONSOLE_LAYOUT.tracker_list_floor)
+      expect(style.natural_height).toBe(CONSOLE_LAYOUT.tracker_list_floor)
+      expect(style.maximal_height).toBeUndefined()
       // A longer plan changes the rows, not the sizes.
       const steps = Array.from({ length: 24 }, (_, index) => ({ id: `s${index}`, description: `Step ${index}`, status: index === 0 ? 'active' : 'pending' }))
       ui.board.set_snapshot(snapshot({ steps, total_steps: 24, completed_count: 0, active_index: 0 })); ui.tick()
-      expect(find(section, TRACKER.steps_scroll).style.maximal_height).toBeUndefined()
+      expect(find(section, TRACKER.tree_scroll).style.maximal_height).toBeUndefined()
       // The feed on the ACTIVITY tab keeps its own cap.
       expect(find(left, TRACKER.activity_scroll).style.maximal_height).toBe(CONSOLE_TABS.activity_height)
     }
     finally { ui.restore() }
+  })
+
+  describe('Roadmap tree: plan steps nested under their node', () => {
+    const node = (id: string, intent: string, status: string, linked: boolean) => ({ id, intent, why_it_matters: '', status, depends_on: [], linked })
+    const shelf = [node('n1', 'Establish smelting', 'realized', false), node('n2', 'Automate gears', 'ready_to_refine', true), node('n3', 'Unlock logistics', 'tentative', false), node('n4', 'Old idea', 'invalidated', false)]
+    const labels = (row: any) => row.children.filter((child: any) => child.type === 'label').map((child: any) => child.caption)
+    const rows_of = (ui: any) => find(ui.player.gui.screen[ROOT_NAME], TRACKER.tree_rows).children as any[]
+    const open_tree = (overrides: Record<string, unknown>) => {
+      const ui = open_console()
+      ui.click(BUTTON_NAME); ui.board.set_snapshot(snapshot(overrides)); ui.tick()
+      return ui
+    }
+    const summary_of = (ui: any) => find(ui.player.gui.screen[ROOT_NAME], TRACKER.tree_summary).caption
+
+    it('puts the steps after the linked node and before the next node, indented', () => {
+      const ui = open_tree({ shelf })
+      try {
+        const rows = rows_of(ui)
+        expect(rows.map(row => row.tags.kind)).toEqual(['node', 'node', 'step', 'step', 'step', 'node', 'node'])
+        expect(labels(rows[0])).toEqual(['Establish smelting', 'DONE'])
+        // The linked node reads ACTIVE; the step rows follow it directly.
+        expect(labels(rows[1])).toEqual(['Automate gears', 'ACTIVE'])
+        expect(labels(rows[2])).toEqual(['1.', 'Mine ore', 'COMPLETED'])
+        expect(labels(rows[3])).toEqual(['2.', 'Build furnace', 'ACTIVE'])
+        expect(labels(rows[4])).toEqual(['3.', 'Smelt', 'PENDING'])
+        expect(labels(rows[5])).toEqual(['Unlock logistics', 'LATER'])
+        expect(labels(rows[6])).toEqual(['Old idea', 'DROPPED'])
+        for (const index of [2, 3, 4]) expect(rows[index].style.left_padding, `step row ${index}`).toBe(CONSOLE_LAYOUT.tracker_step_indent)
+        for (const index of [0, 1, 5, 6]) expect(rows[index].style.left_padding, `node row ${index}`).toBeUndefined()
+      }
+      finally { ui.restore() }
+    })
+
+    it('lists the steps first and flat, under a "not linked" label, when no node is linked', () => {
+      const ui = open_tree({ shelf: shelf.map(entry => ({ ...entry, linked: false })) })
+      try {
+        const tree_rows = find(ui.player.gui.screen[ROOT_NAME], TRACKER.tree_rows)
+        const children = tree_rows.children as any[]
+        expect(children[0].type).toBe('label')
+        expect(children[0].caption).toBe('Current plan (not linked to a roadmap node)')
+        expect(children.slice(1).map(row => row.tags.kind)).toEqual(['step', 'step', 'step', 'node', 'node', 'node', 'node'])
+        for (const row of children.slice(1, 4)) expect(row.style.left_padding).toBeUndefined()
+        expect(labels(children[4])[1]).toBe('DONE')
+        expect(summary_of(ui)).toBe('4 nodes · STEP 2/3 · 1 verified')
+      }
+      finally { ui.restore() }
+    })
+
+    it('renders a finite goal with no shelf as flat steps with a STEP x/y summary and no node rows', () => {
+      const ui = open_tree({})
+      try {
+        const rows = rows_of(ui)
+        expect(rows.map(row => row.tags.kind)).toEqual(['step', 'step', 'step'])
+        for (const row of rows) expect(row.style.left_padding).toBeUndefined()
+        expect(rows.some(row => row.tags.kind === 'node')).toBe(false)
+        expect(find(ui.player.gui.screen[ROOT_NAME], TRACKER.tree_rows).children.some((child: any) => child.type === 'label' && String(child.caption).includes('not linked'))).toBe(false)
+        expect(summary_of(ui)).toBe('STEP 2/3 · 1 verified')
+      }
+      finally { ui.restore() }
+    })
+
+    it('shows only node rows and a node count when there is a shelf but no plan steps, and a muted placeholder when there is neither', () => {
+      const ui = open_tree({ shelf, steps: [], total_steps: 0, completed_count: 0, active_index: 0 })
+      try {
+        expect(rows_of(ui).map(row => row.tags.kind)).toEqual(['node', 'node', 'node', 'node'])
+        expect(summary_of(ui)).toBe('4 nodes')
+        expect(find(ui.player.gui.screen[ROOT_NAME], TRACKER.progress).visible).toBe(false)
+        ui.board.set_snapshot(snapshot({ shelf: [], steps: [], total_steps: 0, completed_count: 0, active_index: 0 })); ui.tick()
+        const children = find(ui.player.gui.screen[ROOT_NAME], TRACKER.tree_rows).children as any[]
+        expect(children.map(child => child.caption)).toEqual(['No plan yet.'])
+        expect(summary_of(ui)).toBe('')
+      }
+      finally { ui.restore() }
+    })
+
+    it('puts NODE k/n in the summary, k being the 1-based place of the first linked node', () => {
+      const ui = open_tree({ shelf })
+      try {
+        expect(summary_of(ui)).toBe('NODE 2/4 · STEP 2/3 · 1 verified')
+        ui.board.set_snapshot(snapshot({ shelf: shelf.map(entry => ({ ...entry, linked: entry.id === 'n1' || entry.id === 'n3' })) })); ui.tick()
+        expect(summary_of(ui)).toBe('NODE 1/4 · STEP 2/3 · 1 verified')
+        // Steps nest under the FIRST linked node only.
+        expect(rows_of(ui).map(row => row.tags.kind)).toEqual(['node', 'step', 'step', 'step', 'node', 'node', 'node'])
+      }
+      finally { ui.restore() }
+    })
+
+    it('keeps the +N more steps row nested with the steps, and rebuilds only when the signature changes', () => {
+      const many = Array.from({ length: 30 }, (_, index) => ({ id: `s${index}`, description: `Step ${index}`, status: index === 0 ? 'active' : 'pending' }))
+      const ui = open_tree({ shelf, steps: many, total_steps: 30, completed_count: 0, active_index: 0 })
+      try {
+        const rows = rows_of(ui)
+        const more = rows.filter(row => row.tags.kind === 'more')
+        expect(more.length).toBe(1)
+        expect(rows.indexOf(more[0])).toBe(2 + MAX_STEPS)
+        expect(more[0].style.left_padding).toBe(CONSOLE_LAYOUT.tracker_step_indent)
+        expect(labels(more[0])).toEqual(['+6 more steps'])
+        // An unchanged snapshot, however it arrives, does not touch the tree.
+        ui.reset()
+        ui.board.set_snapshot(snapshot({ shelf, steps: many, total_steps: 30, completed_count: 0, active_index: 0 })); ui.tick(); ui.tick()
+        expect(ui.counter.log).toEqual([])
+        // A change in a step's status rebuilds the rows (and only the rows of the tree).
+        const advanced = many.map((step, index) => index === 0 ? { ...step, status: 'completed' } : index === 1 ? { ...step, status: 'active' } : step)
+        ui.board.set_snapshot(snapshot({ shelf, steps: advanced, total_steps: 30, completed_count: 1, active_index: 1 })); ui.tick()
+        expect(ui.counter.log.filter(line => line === `clear ${TRACKER.tree_rows}`)).toHaveLength(1)
+        ui.reset()
+        ui.tick()
+        expect(ui.counter.log).toEqual([])
+      }
+      finally { ui.restore() }
+    })
   })
 
   it('the … menu is built into the action row above PAUSE and FOLLOW, so it takes its height from the tracker and the prompt stays last', () => {
@@ -871,7 +983,7 @@ describe('console refresh leaves unchanged sections alone', () => {
       expect(actions.children.length).toBe(closed_rows + 1)
       expect(actions.style.vertically_stretchable).toBeUndefined()
       expect(section.valid).toBe(true)
-      expect(find(section, TRACKER.steps_scroll).style.vertically_stretchable).toBe(true)
+      expect(find(section, TRACKER.tree_scroll).style.vertically_stretchable).toBe(true)
       const names = left.children.map((child: any) => child.name)
       expect(names.at(-1)).toBe(PROMPT_SECTION_NAME)
       expect(names.indexOf(ACTIONS_NAME)).toBe(names.length - 2)

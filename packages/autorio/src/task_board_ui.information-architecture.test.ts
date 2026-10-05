@@ -44,14 +44,15 @@ describe('NPC console information architecture', () => {
     expect(prompt).not.toContain('NEW_TASK_BUTTON_NAME')
   })
 
-  it('keeps the Roadmap Shelf in the left third and executable Plan Tracker slice in the right two thirds', () => {
-    expect(consoleSource).toContain("caption: 'Roadmap Shelf'")
-    expect(consoleSource).toContain('tracker_shelf_width: 200')
-    expect(consoleSource).toContain('tracker_plan_width: LEFT_COLUMN_WIDTH - 2 * SECTION_PADDING - 12 - 200')
-    expect(consoleSource).toContain("name: TRACKER.workspace, direction: 'horizontal'")
-    expect(consoleSource).toContain("name: TRACKER.shelf, direction: 'vertical'")
-    expect(consoleSource).toContain("name: TRACKER.plan_column, direction: 'vertical'")
-    expect(consoleSource).toContain('refresh_shelf(shelf, shelf_nodes)')
+  it('renders one full-width Roadmap tree with the active plan nested under its node, not two side-by-side lists', () => {
+    expect(consoleSource).toContain("caption: 'Roadmap'")
+    expect(consoleSource).toContain('tracker_tree_width: LEFT_COLUMN_WIDTH - 2 * SECTION_PADDING')
+    expect(consoleSource).toContain("name: TRACKER.tree, direction: 'vertical'")
+    expect(consoleSource).toContain("name: TRACKER.tree_rows, direction: 'vertical'")
+    expect(consoleSource).toContain('refresh_tree(tree_body, nodes, board)')
+    // The old competing panels, their widths and their refreshers are gone.
+    for (const retired of ["caption: 'Roadmap Shelf'", "caption: 'Active Plan'", 'tracker_shelf_width', 'tracker_plan_width', 'tracker_column_gap', 'TRACKER.workspace', 'TRACKER.shelf', 'TRACKER.plan_column', 'refresh_shelf(', 'refresh_steps(']) expect(consoleSource, retired).not.toContain(retired)
+    expect(consoleSource).toContain("Roadmap nodes; the active plan's steps sit under the node they build.")
   })
 
   it('keeps Plan Tracker execution after retiring the Project Board renderer', () => {
