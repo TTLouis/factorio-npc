@@ -181,6 +181,29 @@ describe('precise placement runtime', () => {
     })
   })
 
+  it('records on the cancelled batch receipt that a refused placement changed nothing and its dependent tasks never started', () => {
+    const f = fixture()
+    f.surface.can_place_entity.mockReturnValue(false)
+    expect(f.controller.submit_placement('steel-chest', 1.5, 0.5, 4)).toBe(true)
+    expect(f.controller.submit_move('coal', 'steel-chest', 5, true)).toEqual([true, 'Task started'])
+
+    f.runtime.state_placing(f.actor)
+
+    expect(f.manager.get_status_snapshot().last_cancelled_batch).toMatchObject({
+      reason: 'placing:not_placeable', started_count: 1, failed_before_mutation: true,
+    })
+  })
+
+  it('does not claim a pre-mutation proof for a failure of any other task type', () => {
+    const f = fixture()
+    expect(f.controller.submit_wait(10)).toEqual([true, 'Task started'])
+    f.controller.fail(f.actor, f.manager.player_state.parameters_waiting!, 'actor_changed')
+
+    const receipt = f.manager.get_status_snapshot().last_cancelled_batch
+    expect(receipt).toMatchObject({ reason: 'waiting:actor_changed', started_count: 1 })
+    expect(receipt?.failed_before_mutation).toBeUndefined()
+  })
+
   it('fails closed when Factorio reports that the requested position is blocked', () => {
     const f = fixture()
     f.surface.can_place_entity.mockReturnValue(false)

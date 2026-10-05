@@ -113,6 +113,110 @@ describe('durable operation admission', () => {
     expect(admission.slot('next', 1, { ok: true, batch_refs: [] })).toMatchObject({ ok: false, error: 'invalid_slot' })
     expect(admission.status().records[1].state).toBe('uncertain')
   })
+  describe('provable pre-mutation refusal', () => {
+    function setup(operation_count = 1) {
+      const manager = new_task_manager(() => undefined)
+      const admission = new_operation_admission(actor, () => manager.get_status_snapshot())
+      admission.begin({ ...identity, operation_count })
+      return { manager, admission }
+    }
+    const refusal = { ok: false, refused: true, operation: 'craft_item', error: 'Not enough ingredients', batch_refs: [] }
+
+    it('settles a returned refusal from a validate-then-queue operation as failed, not uncertain', () => {
+      const { admission } = setup()
+      expect(admission.slot(identity.operation_key, 1, refusal)).toMatchObject({ ok: true })
+      admission.finish(identity.operation_key, { ok: false, error: 'autorio rejected operation 1' })
+      const record = admission.status().records[0]
+      expect(record).toMatchObject({ state: 'failed', proven_refusal: true })
+      expect(record.slots[0]).toMatchObject({ ok: false, mutation_unknown: false, refused_before_mutation: true, refusal_code: 'Not enough ingredients' })
+      expect(pinned_operation_batch_refs()).toEqual([])
+      expect((globalThis as any).log).toHaveBeenCalledWith('[AUTORIO] operation.admission.refused request_id=request operation_key=request/operation reason=refused_before_mutation')
+    })
+    it('keeps a thrown error uncertain because it may have changed something before throwing', () => {
+      const { admission } = setup()
+      admission.slot(identity.operation_key, 1, { ok: false, operation: 'craft_item', error: 'boom', batch_refs: [] })
+      admission.finish(identity.operation_key, { ok: false })
+      const record = admission.status().records[0]
+      expect(record.state).toBe('uncertain')
+      expect(record.proven_refusal).toBeUndefined()
+      expect(record.slots[0]).toMatchObject({ mutation_unknown: true })
+    })
+    it('keeps a refusal from an operation that is not validate-then-queue uncertain', () => {
+      const { admission } = setup()
+      admission.slot(identity.operation_key, 1, { ...refusal, operation: 'equip_weapon' })
+      admission.finish(identity.operation_key, { ok: false })
+      expect(admission.status().records[0]).toMatchObject({ state: 'uncertain', slots: [{ mutation_unknown: true }] })
+    })
+    it('keeps a refusal uncertain when the task queue grew across the call', () => {
+      const { admission, manager } = setup()
+      manager.add_task({ type: TaskStates.WAITING, remaining_ticks: 60 })
+      admission.slot(identity.operation_key, 1, refusal)
+      admission.finish(identity.operation_key, { ok: false })
+      expect(admission.status().records[0].state).toBe('uncertain')
+    })
+    it('drops an open unrelated batch from a proven refusal so it neither pins a receipt nor blocks settlement', () => {
+      const { admission, manager } = setup()
+      manager.add_task({ type: TaskStates.WAITING, remaining_ticks: 60 })
+      // Work queued before this admission began keeps its batch open; the refused operation added nothing to it.
+      const open = manager.get_status_snapshot().active_batch!
+      admission.begin({ ...identity, operation_key: 'second', ordinal: 2 })
+      admission.slot('second', 1, { ...refusal, batch_refs: [{ batch_id: open.batch_id, batch_generation: open.batch_generation, batch_ref: open.batch_ref }] })
+      admission.finish('second', { ok: false })
+      const record = admission.status('second').records[0]
+      expect(record).toMatchObject({ state: 'failed', proven_refusal: true })
+      expect(record.slots[0].batch_refs).toEqual([])
+    })
+    it('treats synchronously completed ok slots plus a proven refusal as exact evidence', () => {
+      const { admission } = setup(2)
+      admission.slot(identity.operation_key, 1, { ok: true, operation: 'equip_weapon', batch_refs: [], result: true })
+      admission.slot(identity.operation_key, 2, refusal)
+      admission.finish(identity.operation_key, { ok: false })
+      expect(admission.status().records[0]).toMatchObject({ state: 'failed', proven_refusal: true, slots: [{ ok: true }, { refused_before_mutation: true }] })
+    })
+    it('keeps a prefix with queued work in flight plus a refusal uncertain', () => {
+      const { admission, manager } = setup(2)
+      manager.add_task({ type: TaskStates.WAITING, remaining_ticks: 60 })
+      admission.slot(identity.operation_key, 1, { ok: true, operation: 'wait', batch_refs: [ref] })
+      admission.slot(identity.operation_key, 2, refusal)
+      admission.finish(identity.operation_key, { ok: false })
+      const record = admission.status().records[0]
+      expect(record.state).toBe('uncertain')
+      expect(record.proven_refusal).toBeUndefined()
+    })
+    it('settles a batch whose first task the engine refused before any change as failed, with every dependent task unstarted', () => {
+      const { admission, manager } = setup(2)
+      manager.add_task({ type: TaskStates.PLACING, entity_name: 'burner-mining-drill', position: { x: 11, y: -7 } })
+      manager.add_task({ type: TaskStates.MOVING_ITEMS, item_name: 'coal', entity_name: 'burner-mining-drill', max_count: 5, to_entity: true } as any)
+      admission.slot(identity.operation_key, 1, { ok: true, operation: 'place_entity', batch_refs: [ref] })
+      admission.slot(identity.operation_key, 2, { ok: true, operation: 'move_items', batch_refs: [ref] })
+      admission.finish(identity.operation_key, { ok: true })
+      expect(admission.status().records[0].state).toBe('admitted')
+      manager.cancel_all_tasks('placing:not_placeable', { failed_before_mutation: true })
+      expect(manager.get_status_snapshot().receipt_journal[0]).toMatchObject({ ...ref, state: 'cancelled', started_count: 1, failed_before_mutation: true })
+      expect(admission.status().records[0]).toMatchObject({ state: 'failed', proven_refusal: true, error: 'refused_before_mutation' })
+      expect(pinned_operation_batch_refs()).toEqual([])
+    })
+    it('keeps a cancelled batch uncertain when an earlier task started and may have changed the world', () => {
+      const { admission, manager } = setup()
+      manager.add_task({ type: TaskStates.WAITING, remaining_ticks: 60 })
+      manager.add_task({ type: TaskStates.PLACING, entity_name: 'burner-mining-drill', position: { x: 1, y: 1 } })
+      admission.slot(identity.operation_key, 1, { ok: true, operation: 'place_entity', batch_refs: [ref] })
+      admission.finish(identity.operation_key, { ok: true })
+      manager.reset_task_state()
+      manager.next_task()
+      manager.cancel_all_tasks('placing:not_placeable', { failed_before_mutation: true })
+      expect(manager.get_status_snapshot().receipt_journal[0]).toMatchObject({ started_count: 2 })
+      expect(admission.status().records[0]).toMatchObject({ state: 'uncertain', error: 'batch_reconciliation_required' })
+    })
+    it('keeps a cancellation without the failed-before-mutation proof uncertain', () => {
+      const { admission, manager } = setup()
+      manager.add_task({ type: TaskStates.PLACING, entity_name: 'burner-mining-drill', position: { x: 1, y: 1 } })
+      admission.slot(identity.operation_key, 1, { ok: true, operation: 'place_entity', batch_refs: [ref] })
+      admission.finish(identity.operation_key, { ok: true })
+      manager.cancel_all_tasks('operator_cancel')
+      expect(admission.status().records[0].state).toBe('uncertain')
+    })
+  })
   it('rejects the 65th unresolved admission without evicting any accepted work', () => {
     const manager = new_task_manager(() => undefined)
     const admission = new_operation_admission(actor, manager.get_status_snapshot)

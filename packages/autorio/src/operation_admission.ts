@@ -16,8 +16,18 @@ export interface AdmissionSlot {
   ok: boolean
   result?: string | number | boolean
   error?: string
+  /** True unless the mod proved the refusal happened before any change (see PURE_SUBMIT_OPERATIONS). */
   mutation_unknown?: boolean
+  /** The operation returned a refusal from validation that provably changed nothing and queued no task. */
+  refused_before_mutation?: boolean
+  refusal_code?: string
+  operation?: string
   batch_refs: TaskBatchIdentity[]
+}
+/** Fields the harness supplies for a slot; the mod, not the harness, decides what a refusal proves. */
+export type AdmissionSlotInput = Omit<AdmissionSlot, 'index' | 'refused_before_mutation' | 'refusal_code'> & {
+  /** The operation returned a refusal (false or a false-first tuple) instead of throwing. */
+  refused?: boolean
 }
 export interface OperationAdmission extends OperationCorrelation {
   state: 'admitting' | 'admitted' | 'uncertain' | 'completed' | 'failed' | 'not_admitted'
@@ -26,7 +36,23 @@ export interface OperationAdmission extends OperationCorrelation {
   slots: AdmissionSlot[]
   ok?: boolean
   error?: string
+  /** Task-queue witness (task_manager tasks_added) after the last recorded slot. */
+  work_mark?: number
+  /**
+   * Terminal and exact: every non-ok slot was refused before any change and no
+   * slot queued work, or the engine cancelled the batch's first task before it
+   * changed anything. The ok slots (if any) completed synchronously; operations
+   * after the refusal never ran.
+   */
+  proven_refusal?: boolean
 }
+// Operations whose submission validates, then either queues a task or returns a
+// refusal without touching the world. A refusal from any other operation
+// (equip, research, follow, composite plans, ...) may follow a partial change.
+export const PURE_SUBMIT_OPERATIONS = [
+  'place_entity', 'mine_entity', 'mine_entity_exact', 'mine_resource_at', 'rotate_entity', 'move_items', 'move_items_exact',
+  'move_items_with_player', 'set_machine_recipe', 'launch_rocket', 'wait', 'craft_item',
+]
 declare const storage: { sgluna_operation_admissions?: OperationAdmission[], sgluna_operation_admission_high_water?: number }
 
 export function admission_unresolved(record: OperationAdmission) {
@@ -69,7 +95,7 @@ function trim_history() {
 
 export function new_operation_admission(
   actor_provider: () => ControlledActor | undefined,
-  task_status: () => { batch_generation: number, receipt_journal: TaskBatchReceipt[] },
+  task_status: () => { batch_generation: number, receipt_journal: TaskBatchReceipt[], tasks_added?: number },
 ) {
   function authorized(raw: OperationCorrelation) {
     const actor = actor_provider()
@@ -87,6 +113,16 @@ export function new_operation_admission(
         && receipt.batch_id === ref.batch_id && receipt.batch_generation === ref.batch_generation))
       if (record.state === 'admitted' && refs.length > 0 && receipts.every(receipt => receipt?.state === 'completed')) {
         record.state = 'completed'
+      }
+      else if (record.state === 'admitted' && refs.length > 0 && record.slots.every(slot => slot.ok && slot.batch_refs.length > 0)
+        && receipts.every(receipt => receipt?.state === 'cancelled' && receipt.started_count === 1 && receipt.failed_before_mutation === true)) {
+        // The engine refused the batch's first task before it changed anything and
+        // discarded the rest unstarted: no task of this admission had any effect.
+        record.state = 'failed'
+        record.ok = false
+        record.proven_refusal = true
+        record.error = 'refused_before_mutation'
+        log(`[AUTORIO] operation.admission.refused request_id=${record.operation_key.split('/')[0]} operation_key=${record.operation_key} reason=engine_refused_first_task`)
       }
       else if (record.generation !== status.batch_generation || receipts.some(receipt => receipt && receipt.state !== 'completed')) {
         record.state = 'uncertain'
@@ -113,13 +149,14 @@ export function new_operation_admission(
       operation_key: raw.operation_key, attempt_id: raw.attempt_id, actor_id: raw.actor_id, epoch: raw.epoch, signature: raw.signature,
       ordinal: raw.ordinal, operation_count: raw.operation_count,
       state: 'admitting', generation: task_status().batch_generation, tick: game.tick, slots: [],
+      work_mark: task_status().tasks_added,
     }
     journal().push(record)
     storage.sgluna_operation_admission_high_water = raw.ordinal
     log(`[AUTORIO] operation.admission.recorded request_id=${raw.operation_key.split('/')[0]} operation_key=${raw.operation_key} reason=admitting`)
     return { ok: true, record }
   }
-  function slot(key: string, index: number, raw: Omit<AdmissionSlot, 'index'>) {
+  function slot(key: string, index: number, raw: AdmissionSlotInput) {
     refresh()
     const record = find(key)
     if (!record || !authorized(record)) return { ok: false, error: 'stale_actor_epoch' }
@@ -139,7 +176,21 @@ export function new_operation_admission(
     const result = typeof raw.result === 'string' ? raw.result.slice(0, 512)
       : typeof raw.result === 'number' && raw.result === raw.result && Math.abs(raw.result) <= 9007199254740990 ? raw.result
         : typeof raw.result === 'boolean' ? raw.result : undefined
-    record.slots.push({ index, ok: raw.ok, result, mutation_unknown: raw.ok ? undefined : true, error: typeof raw.error === 'string' ? raw.error.slice(0, 512) : undefined, batch_refs: refs })
+    // A refusal is proven pre-mutation only when it was returned (not thrown) by a
+    // validate-then-queue operation and the task queue did not grow across the call.
+    const tasks_added = task_status().tasks_added
+    const refused = !raw.ok && raw.refused === true && typeof raw.operation === 'string'
+      && PURE_SUBMIT_OPERATIONS.includes(raw.operation)
+      && typeof tasks_added === 'number' && tasks_added === record.work_mark
+    record.work_mark = tasks_added
+    const error = typeof raw.error === 'string' ? raw.error.slice(0, 512) : undefined
+    record.slots.push({
+      index, ok: raw.ok, result, operation: typeof raw.operation === 'string' ? raw.operation.slice(0, 64) : undefined,
+      mutation_unknown: raw.ok ? undefined : !refused,
+      // The queue did not grow, so any open batch the harness saw belongs to earlier work.
+      refused_before_mutation: refused ? true : undefined, refusal_code: refused ? (error ?? 'rejected').slice(0, 128) : undefined,
+      error, batch_refs: refused ? [] : refs,
+    })
     return { ok: true, record }
   }
   function finish(key: string, raw: { ok: boolean, error?: string }) {
@@ -151,9 +202,15 @@ export function new_operation_admission(
     const refs = record.slots.flatMap(slot => slot.batch_refs)
     record.ok = raw.ok
     record.error = typeof raw.error === 'string' ? raw.error.slice(0, 512) : undefined
+    const refused_exactly = !raw.ok && refs.length === 0
+      && record.slots.every(slot => slot.ok || (slot.refused_before_mutation === true && slot.mutation_unknown === false))
     record.state = raw.ok && record.slots.every(slot => slot.ok)
       ? refs.length > 0 ? 'admitted' : 'completed'
-      : 'uncertain'
+      : refused_exactly ? 'failed' : 'uncertain'
+    if (refused_exactly) {
+      record.proven_refusal = true
+      log(`[AUTORIO] operation.admission.refused request_id=${key.split('/')[0]} operation_key=${key} reason=refused_before_mutation`)
+    }
     refresh()
     return { ok: true, record }
   }

@@ -511,7 +511,10 @@ export function new_basic_operation_controller(get_actor: () => ControlledActor 
   function fail(actor: ControlledActor | undefined, task: BasicTask, code: BasicOperationCode, details: Partial<BasicOperationResult> = {}) {
     refusal_results = {}
     suppress_cancel_receipt = true
-    manager.cancel_all_tasks(`${task.type}:${code}`)
+    // A placement is only created after every check below passes, so each
+    // placing failure (including create_failed, which creates nothing) changed
+    // nothing in the world. No other task type claims that here.
+    manager.cancel_all_tasks(`${task.type}:${code}`, { failed_before_mutation: task.type === TaskStates.PLACING })
     suppress_cancel_receipt = false
     result_for(actor, task, false, false, code, details)
     log(`[AUTORIO] [ERROR] ${task.type} failed: ${code}; dependent operations cancelled`)
