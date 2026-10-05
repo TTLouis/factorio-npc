@@ -170,7 +170,7 @@ function forcedLedger(family, stage, { samples = [] } = {}) {
 
 const forceStage = (world, family, stage, options) => { world.memory.jevLedger = forcedLedger(family, stage, options) }
 
-// Ids, timestamps and handoff ids are the only nondeterministic parts of a run.
+// Ids, timestamps, handoff ids and the measured NPC time split of a slice (wall-clock milliseconds) are the only nondeterministic parts of a run.
 function normalize(value) {
   return JSON.stringify(value)
     .replace(/(?<!\d)1[6-9]\d{11}(?!\d)/g, '<epoch_ms>')
@@ -179,6 +179,7 @@ function normalize(value) {
     .replace(/(?<=_s\d+_)[a-z0-9]{4,10}(?![a-z0-9])/g, '<sid>')
     .replace(/\bho_[0-9a-f]{12}\b/g, '<ho>')
     .replace(/\bdecision_[a-z0-9_]+/g, '<decision>')
+    .replace(/npc time this slice: [^)]*\)/g, '<npc_time_split>')
 }
 
 const textOf = message => (typeof message?.content === 'string' ? message.content : '')

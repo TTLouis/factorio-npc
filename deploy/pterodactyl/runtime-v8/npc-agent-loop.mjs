@@ -2922,14 +2922,29 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async planSliceCloseWake({ route, planningState, goalEvaluation, withinTurn = false }) {
     const requestId = this.traceRequest?.id ?? this.turnScope.getStore()?.requestId // captured before any await: a superseding reset can clear the request
     const plan = planningState ? getActivePlanningPlan(planningState) : undefined
+    // The NPC time split of the slice just closed: the mark advances here, once per slice close.
+    const timeSplit = this.planTiming?.sliceTimeSplit()
     const verified = buildVerifiedResults({
       planningState,
       goalEvaluation,
+      timeSplit,
       stepTimes: this.planTiming?.closedStepTimes((plan?.steps ?? []).map(step => step.step_id), {
         goalId: this.peekPlanState(this.activePlanKey())?.goal_id, // the board's goal id, the key PlanTiming records carry
         sinceMs: plan?.committed_at ?? 0,
       }) ?? [],
     })
+    if (timeSplit) {
+      await this.traceEvent('slice.time_split', {
+        since: timeSplit.since,
+        wall_ms: timeSplit.wall_ms,
+        think_ms: timeSplit.think_ms,
+        actor_busy_ms: timeSplit.actor_busy_ms,
+        idle_ms: timeSplit.idle_ms,
+        walking: timeSplit.walking,
+        shown_to_model: verified.text.includes('npc time this slice'),
+        reason: 'slice_close',
+      }, { requestId })
+    }
     const wake = { verifiedResults: verified.text, restaged: false }
     if (!planningState?.goal) return wake
     // Never restage a planner that has nothing healthy to be re-briefed on: a

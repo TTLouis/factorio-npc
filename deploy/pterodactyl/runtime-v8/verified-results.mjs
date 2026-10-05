@@ -9,7 +9,8 @@
 //   - goal progress per doneWhen condition, as the game reported it at this
 //     slice close (an explicit runtime reading passed in, not a reducer field);
 //   - estimated versus measured time per step (harness estimate from game
-//     rates versus wall clock; explicit runtime records passed in).
+//     rates versus wall clock; explicit runtime records passed in), and the
+//     NPC time split of the slice (actor busy, model thinking, idle).
 //
 // Pure. Reads reducer state and the explicit records only. It never reads the
 // legacy task board, the message history or any model output, and it never says
@@ -25,7 +26,7 @@
 import { sanitizeDurableModelText } from './durable-text.mjs'
 import { goalUiView } from './goal-definition.mjs'
 import { getActivePlan } from './planning-state.mjs'
-import { formatDuration } from './plan-time-estimate.mjs'
+import { formatDuration, sliceTimeSplitText } from './plan-time-estimate.mjs'
 
 export const VERIFIED_RESULTS_LIMITS = Object.freeze({
   maxChars: 3600,
@@ -39,7 +40,7 @@ export const VERIFIED_RESULTS_LIMITS = Object.freeze({
 
 // First entry drops first; anything not listed is mandatory (header, plan line,
 // step lines, goal progress lines).
-export const VERIFIED_RESULTS_DROP_ORDER = Object.freeze(['receipt', 'evidence', 'time_step'])
+export const VERIFIED_RESULTS_DROP_ORDER = Object.freeze(['receipt', 'evidence', 'time_step', 'time_split'])
 
 export const VERIFIED_RESULTS_HEADER = '[VERIFIED_RESULTS] Built by the harness from the reducer ledger and the game, not from the conversation. It is evidence for this plan slice only: the game decides the goal from doneWhen at every slice close, and this message never claims the goal is done.'
 
@@ -82,10 +83,11 @@ function planTimeLine(stepTimes, planSteps) {
  * @param {object} args.planningState reducer state; the closed plan is its active plan
  * @param {object} [args.goalEvaluation] the game's reading of the doneWhen conditions at this slice close ({satisfied, results})
  * @param {Array<{step_id:string, expected_seconds?:number, machine_wait_seconds?:number, elapsed_wall_seconds?:number}>} [args.stepTimes] runtime time records of the closed plan's steps
+ * @param {object} [args.timeSplit] the NPC time split of this slice (PlanTiming.sliceTimeSplit); the line is omitted without one
  * @param {object} [args.limits] overrides for VERIFIED_RESULTS_LIMITS
  * @returns {{ text: string, chars: number, dropped: string[], over_limit: boolean, plan_id: string|undefined }}
  */
-export function buildVerifiedResults({ planningState, goalEvaluation, stepTimes = [], limits: limitOverrides } = {}) {
+export function buildVerifiedResults({ planningState, goalEvaluation, stepTimes = [], timeSplit, limits: limitOverrides } = {}) {
   const limits = { ...VERIFIED_RESULTS_LIMITS, ...limitOverrides }
   const plan = getActivePlan(planningState)
   const times = Array.isArray(stepTimes) ? stepTimes : []
@@ -135,6 +137,8 @@ export function buildVerifiedResults({ planningState, goalEvaluation, stepTimes 
     records.push({ key: 'goal_progress', text: 'goal progress: no doneWhen conditions are defined for this goal' })
   }
   if (plan) records.push({ key: 'time', text: planTimeLine(times, plan.steps.length) })
+  const splitText = sliceTimeSplitText(timeSplit)
+  if (splitText) records.push({ key: 'time_split', drop: 'time_split', text: splitText })
 
   const render = list => list.map(record => record.text).join(' || ')
   const dropped = []

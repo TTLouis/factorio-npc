@@ -9,6 +9,8 @@ import {
   parseRateAnswer,
   PlanTimeEstimator,
   PlanTiming,
+  requestTimeSplitClause,
+  sliceTimeSplitText,
   STEP_LONG_SECONDS,
 } from './plan-time-estimate.mjs'
 import {
@@ -454,6 +456,78 @@ test('a request paused at the output budget ends with its time split before requ
   assert.equal(split.data.think_ms, latencies)
   assert.equal(split.data.batches, 1, 'the step 1 batch was admitted in this request')
   assert.ok(split.data.actor_busy_ms >= 0)
+})
+
+test('slice time splits are non-overlapping deltas that add up to the request split; a new request resets the mark; no request means no split', () => {
+  let clock = 0
+  const timing = new PlanTiming({ now: () => clock })
+  assert.equal(timing.sliceTimeSplit(), undefined, 'no request, no split')
+  timing.observe('request.received', {}, { requestId: 'req_1' })
+  clock = 20_000
+  timing.observe('provider.response', { latency_ms: 20_000 })
+  clock = 21_000
+  timing.observe('operations.ack', { operations: [] })
+  clock = 301_000 // the batch is still running at the first slice close
+  const first = timing.sliceTimeSplit()
+  assert.equal(first.request_id, 'req_1')
+  assert.equal(first.since, 'request_start')
+  assert.deepEqual([first.wall_ms, first.think_ms, first.actor_busy_ms, first.idle_ms], [301_000, 20_000, 280_000, 1_000])
+  clock = 501_000
+  timing.observe('factorio.completed_signal')
+  clock = 531_000
+  timing.observe('provider.response', { latency_ms: 30_000 })
+  clock = 601_000
+  const second = timing.sliceTimeSplit()
+  assert.equal(second.since, 'previous_slice_close')
+  assert.deepEqual([second.wall_ms, second.think_ms, second.actor_busy_ms, second.idle_ms], [300_000, 30_000, 200_000, 70_000])
+  const total = timing.timeSplit()
+  for (const field of ['wall_ms', 'think_ms', 'actor_busy_ms', 'idle_ms']) {
+    assert.equal(first[field] + second[field], total[field], field + ' adds up')
+  }
+  // A new request starts its own mark at its own start.
+  clock = 700_000
+  timing.observe('request.received', {}, { requestId: 'req_2' })
+  clock = 710_000
+  const next = timing.sliceTimeSplit()
+  assert.equal(next.request_id, 'req_2')
+  assert.equal(next.since, 'request_start')
+  assert.deepEqual([next.wall_ms, next.think_ms, next.actor_busy_ms, next.idle_ms], [10_000, 0, 0, 10_000])
+  // The request ended: nothing to report.
+  timing.observe('request.completed', { outcome: 'done' }, { requestId: 'req_2' })
+  assert.equal(timing.sliceTimeSplit(), undefined)
+})
+
+test('the split texts are measured facts: not-working share, no zeros without a split, no rate wording', () => {
+  const split = { wall_ms: 485_000, think_ms: 110_000, actor_busy_ms: 250_000, idle_ms: 125_000 }
+  assert.equal(sliceTimeSplitText(split), 'npc time this slice: actor busy 4.2 min, model thinking 1.8 min, idle 2.1 min (NPC not working 48%; idle includes waiting on machines, harness and Jev; walking is inside actor busy)')
+  assert.equal(requestTimeSplitClause(split), 'NPC not working 48% of this request so far: thinking 1.8 min, idle 2.1 min.')
+  for (const empty of [undefined, null, { wall_ms: 0, think_ms: 0, actor_busy_ms: 0, idle_ms: 0 }]) {
+    assert.equal(sliceTimeSplitText(empty), undefined)
+    assert.equal(requestTimeSplitClause(empty), undefined)
+  }
+})
+
+test('the continuation [TIME_ESTIMATE] carries the request-to-date NPC time split only while a request exists', () => {
+  let clock = 0
+  const timing = new PlanTiming({ now: () => clock })
+  const state = { goal_id: 'goal', status: 'active', task_board: { active_index: 0, steps: [{ id: 'step_1' }] } }
+  timing.steps.set('goal|step_1', {
+    goal_id: 'goal', step_id: 'step_1', step_index: 0, started_at: 0, actor_id: 18, epoch: 3,
+    expected_seconds: 20, timed: true, lower_bound: false, batches: 1, hand_mined_items: 10,
+    caption: 'hand mining', long: { long: false }, overrun_traced: false, closed: false,
+  })
+  const identity = { actorId: 18, epoch: 3 }
+  assert.doesNotMatch(timing.continuationContext(state, identity).text, /NPC not working/, 'no request, no clause')
+  timing.observe('request.received', {}, { requestId: 'req_1' })
+  clock = 70_000
+  timing.observe('provider.response', { latency_ms: 70_000 })
+  clock = 80_000
+  timing.observe('operations.ack', { operations: [] })
+  clock = 200_000
+  const context = timing.continuationContext(state, identity)
+  assert.match(context.text, /^\[TIME_ESTIMATE\]/)
+  // 200 s wall: 70 s thinking, 120 s actor busy (still running), 10 s idle.
+  assert.match(context.text, / NPC not working 40% of this request so far: thinking 70 s, idle 10 s\./)
 })
 
 test('a machine wait on a timed step adds its game-data expectation instead of reading as a hand-work overrun (plan 2.5)', () => {

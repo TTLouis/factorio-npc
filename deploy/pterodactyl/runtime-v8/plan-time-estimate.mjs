@@ -62,6 +62,30 @@ export function formatDuration(seconds) {
   return `${round1(seconds / 60).toFixed(1)} min`
 }
 
+// Share of a time split in which the NPC was not working: model thinking plus
+// idle over wall time. Undefined when no wall time passed.
+function notWorkingPercent(split) {
+  return split?.wall_ms > 0 ? Math.round((split.think_ms + split.idle_ms) / split.wall_ms * 100) : undefined
+}
+
+// The slice-close line of the planner's verified results: a measured fact
+// about the slice just closed, never a rate or an estimate. Undefined when
+// there is no split (no request) or no wall time passed, so no zeros are shown.
+export function sliceTimeSplitText(split) {
+  const share = notWorkingPercent(split)
+  if (share === undefined) return undefined
+  const text = ms => formatDuration(ms / 1000)
+  return `npc time this slice: actor busy ${text(split.actor_busy_ms)}, model thinking ${text(split.think_ms)}, idle ${text(split.idle_ms)} (NPC not working ${share}%; idle includes waiting on machines, harness and Jev; walking is inside actor busy)`
+}
+
+// The request-to-date clause of the [TIME_ESTIMATE] message.
+export function requestTimeSplitClause(split) {
+  const share = notWorkingPercent(split)
+  if (share === undefined) return undefined
+  const text = ms => formatDuration(ms / 1000)
+  return `NPC not working ${share}% of this request so far: thinking ${text(split.think_ms)}, idle ${text(split.idle_ms)}.`
+}
+
 function cleanName(value) {
   return typeof value === 'string' && value.length > 0 && value.length <= 200 ? value : undefined
 }
@@ -623,6 +647,8 @@ export class PlanTiming {
       `[TIME_ESTIMATE] Harness-computed from game rates, not a model guess. Active step ${record.step_index + 1}: about ${formatDuration(record.expected_seconds)} of serial ${record.caption} on the NPC's own lane${record.lower_bound ? ' (lower bound)' : ''}${machine > 0 ? `, then about ${formatDuration(machine)} of machine work (recipe time over live crafting speed)` : ''}; ${EXCLUDED_TIME.join(', ')} excluded. Running for ${formatDuration(elapsed)}${Number.isFinite(ratio) ? ` (${Math.round(ratio * 100) / 100}x the estimate)` : ''}.`,
     ]
     if (overrun) lines.push(`Overrun: elapsed is above ${OVERRUN_FACTOR}x the estimate.`)
+    const requestSplit = requestTimeSplitClause(this.timeSplit())
+    if (requestSplit) lines.push(requestSplit)
     if (overrun || record.long?.long === true) lines.push(PARALLEL_MECHANICS)
     let event
     if (overrun && !record.overrun_traced) {
@@ -659,6 +685,31 @@ export class PlanTiming {
       estimate_tool_calls: request.estimate_tool_calls,
       // Walking is inside actor_busy (the mod runs walk and work as one
       // batch); idle includes harness, RCON and Jev time.
+      walking: 'inside_actor_busy',
+    }
+  }
+
+  // The split of the time since the request's previous slice close (or since
+  // the request started), then advances the mark so the next slice counts only
+  // its own time. Deltas of one request add up to its timeSplit; a new request
+  // resets the mark. Undefined without a request.
+  sliceTimeSplit(now = this.now()) {
+    const request = this.request
+    if (!request) return undefined
+    const since = request.slice_mark ? 'previous_slice_close' : 'request_start'
+    const mark = request.slice_mark ?? { at: request.started_at, think_ms: 0, busy_ms: 0 }
+    const busyTotal = request.busy_ms + (request.busy_since !== undefined ? Math.max(0, now - request.busy_since) : 0)
+    const wall = Math.max(0, now - mark.at)
+    const busy = Math.max(0, busyTotal - mark.busy_ms)
+    const think = Math.max(0, request.think_ms - mark.think_ms)
+    request.slice_mark = { at: now, think_ms: request.think_ms, busy_ms: busyTotal }
+    return {
+      request_id: request.id,
+      since,
+      wall_ms: wall,
+      think_ms: think,
+      actor_busy_ms: busy,
+      idle_ms: Math.max(0, wall - busy - think),
       walking: 'inside_actor_busy',
     }
   }
