@@ -397,7 +397,7 @@ async function searchSkills(loop, { memoryKey, goal, trigger, intent }) {
   return offer
 }
 
-function isRevisionRound(loop, memoryKey, intent) {
+export function isRevisionRound(loop, memoryKey, intent) {
   if (intent === 'amend_current') return true
   const planning = loop.memory?.planningState?.(memoryKey)
   const plan = planning ? getActivePlan(planning) : undefined

@@ -98,6 +98,10 @@ export class FakeFactorio {
     this.gameTick = 1000
     this.knownTechnologies = new Set(['automation', 'logistics', 'rocket-silo', 'electronics'])
     this.progressFactsAvailable = true
+    // autorio_planning.goal_requirements (goal-requirements.mjs): nothing locked unless a scenario scripts it.
+    // An object or function(request) answers; 'throw' fails the RCON call; every request is recorded.
+    this.requirements = undefined
+    this.requirementsRequests = []
     // Optional hook run on every admitted batch, for scenarios whose world
     // changes because of what was admitted (a launch raising the rocket count).
     this.onMutation = null
@@ -202,6 +206,16 @@ export class FakeFactorio {
     if (text.includes('"goal_progress_facts"')) {
       const encoded = /helpers\.json_to_table\('((?:[^'\\]|\\.)*)'\)/.exec(text)?.[1]
       return JSON.stringify(this.goalProgressFacts(JSON.parse(encoded.replace(/\\(.)/g, '$1'))))
+    }
+    if (text.includes('"goal_requirements"')) {
+      const encoded = /helpers\.json_to_table\('((?:[^'\\]|\\.)*)'\)/.exec(text)?.[1]
+      const request = JSON.parse(encoded.replace(/\\(.)/g, '$1'))
+      this.requirementsRequests.push(request)
+      if (this.requirements === 'throw') throw new Error('Unknown interface function: goal_requirements')
+      const scripted = typeof this.requirements === 'function' ? this.requirements(request) : this.requirements
+      return typeof scripted === 'string'
+        ? scripted
+        : JSON.stringify(scripted ?? { ok: true, tick: this.gameTick, locked: [], research: {}, machines: [], unknown: [], counts: { locked: 0, recipes_walked: 1, unlocked_recipes: 0, raw_items: 0 }, truncated: {} })
     }
     if (text.includes('"evaluate_condition"') || text.includes("'evaluate_condition'")) {
       const encoded = /helpers\.json_to_table\('((?:[^'\\]|\\.)*)'\)/.exec(text)?.[1]
