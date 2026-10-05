@@ -845,6 +845,27 @@ export function score_skill_for_goal(skill: SkillDefinition, goal: GoalTerms, wo
     if (check.state === 'locked') locked++
     needs.push(need)
   }
+  // Hand-written preconditions can miss that the skill's own product is still
+  // locked (the science-pack recipe is behind a technology even when the
+  // machine technology is researched). Check each real output item against the
+  // live recipe unlock state and add a locked need naming the technology. Only
+  // locked adds a need: held and craftable outputs would just be noise, since
+  // a skill is meant to produce its output. Outputs that are abstract names
+  // ("electric-power") or raw resources have no item recipe and stay silent.
+  if (world !== undefined) {
+    for (const flow of skill.outputs) {
+      let seen = false
+      for (const need of needs) if (need.subject === flow.item) seen = true
+      if (seen) continue
+      const check = world.check_item(flow.item, 1)
+      if (check === undefined || check.state !== 'locked') continue
+      const need: SkillCardNeed = { subject: flow.item, state: 'locked' }
+      if (check.technology !== undefined) need.technology = check.technology
+      if (check.via !== undefined && check.via !== flow.item) need.via = check.via
+      locked++
+      needs.push(need)
+    }
+  }
   let score = relevance
   if (relevance > 0) {
     if (skill.status === 'verified') score += VERIFIED_BONUS
@@ -907,6 +928,23 @@ export interface SkillCard {
   score: number
 }
 
+// The needs shown on a card or search result, at most CARD_LIST_MAX. When there
+// are more, unlocked needs are dropped from the end first so a locked need (the
+// one that changes the plan) is never cut; order is otherwise preserved.
+function visible_needs(needs: SkillCardNeed[]): SkillCardNeed[] {
+  if (needs.length <= CARD_LIST_MAX) return needs
+  const dropped: boolean[] = []
+  let excess = needs.length - CARD_LIST_MAX
+  for (let index = needs.length - 1; index >= 0 && excess > 0; index--) {
+    if (needs[index].state === 'locked') continue
+    dropped[index] = true
+    excess--
+  }
+  const kept: SkillCardNeed[] = []
+  for (let index = 0; index < needs.length; index++) if (dropped[index] !== true) kept.push(needs[index])
+  return kept.slice(0, CARD_LIST_MAX)
+}
+
 export function skill_card(match: SkillGoalMatch): SkillCard {
   return {
     id: match.skill.id,
@@ -914,7 +952,7 @@ export function skill_card(match: SkillGoalMatch): SkillCard {
     status: match.skill.status,
     summary: one_line_summary(match.skill.summary),
     produces: match.skill.outputs.map(flow => flow.item).slice(0, CARD_LIST_MAX),
-    needs: match.needs.slice(0, CARD_LIST_MAX),
+    needs: visible_needs(match.needs),
     matched: match.matched.slice(0, CARD_LIST_MAX),
     score: match.score,
   }
@@ -947,7 +985,7 @@ export function find_skill_definitions(query: unknown, limit: unknown = 3, world
     inputs: match.skill.inputs.map(value => value.item),
     outputs: match.skill.outputs.map(value => value.item),
     matched: match.matched.slice(0, CARD_LIST_MAX),
-    needs: match.needs.slice(0, CARD_LIST_MAX),
+    needs: visible_needs(match.needs),
     warnings: skill_ui_summary(match.skill).warnings,
   }))
 }

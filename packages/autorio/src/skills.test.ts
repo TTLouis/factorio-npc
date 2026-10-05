@@ -21,7 +21,7 @@ import {
   skill_precondition_check,
   utf8_safe_prefix,
 } from './skills'
-import type { SkillWorldView } from './skills'
+import type { SkillNeedCheck, SkillWorldView } from './skills'
 import { edited_skill_revision, skill_detail_rows } from './skills_window'
 
 const writes: Array<{ filename: string, data: string, append: boolean }> = []
@@ -240,6 +240,12 @@ function learned_science_candidate(overrides: Record<string, unknown> = {}) {
   })
 }
 
+// fresh_world() whose check_item answers from a table (an item it does not list
+// is not something the game knows, which is how check_item reports it).
+function world_with_items(items: Record<string, SkillNeedCheck>, overrides: Partial<{ researched: string[], have: string[] }> = {}): SkillWorldView {
+  return { ...fresh_world(overrides), check_item: item => items[item] }
+}
+
 describe('skill lookup: tags, scoring, preconditions and cards (plan 2.8)', () => {
   it('derives tags from outputs, topology entities and recipes, and technology preconditions, plus the short goal_tags list', () => {
     ensure_basic_skill_definitions()
@@ -327,6 +333,60 @@ describe('skill lookup: tags, scoring, preconditions and cards (plan 2.8)', () =
     const coal_card = skill_cards_for_goal('Set up a burner coal loop', 1, fresh_world())[0]
     expect(coal_card.needs[0]).toEqual({ subject: 'burner-mining-drill', state: 'can_craft' })
     expect(coal_card.score).toBe(skill_cards_for_goal('Set up a burner coal loop', 1)[0].score)
+  })
+
+  it('adds a locked need naming the technology when the skill\'s own output recipe is locked', () => {
+    put_skill_definition(learned_science_candidate())
+    const goal = 'Automate red science packs'
+    const locked_world = world_with_items({ 'automation-science-pack': { state: 'locked', via: 'automation-science-pack', technology: 'automation-science-pack' } }, { researched: ['automation'] })
+    const unlocked_world = world_with_items({ 'automation-science-pack': { state: 'can_craft', via: 'automation-science-pack' } }, { researched: ['automation'] })
+    const [locked] = skill_cards_for_goal(goal, 5, locked_world)
+    const [unlocked] = skill_cards_for_goal(goal, 5, unlocked_world)
+    // The machine technology is researched, yet the science-pack recipe is still locked: the card says so.
+    expect(locked.needs).toEqual([
+      { subject: 'automation', state: 'have' },
+      { subject: 'science-goal', state: 'unknown' },
+      { subject: 'automation-science-pack', state: 'locked', technology: 'automation-science-pack' },
+    ])
+    expect(locked.score).toBe(unlocked.score - 0.25)
+    // The find results carry the same needs.
+    expect(find_skill_definitions('red science', 3, locked_world)[0].needs).toEqual(locked.needs)
+  })
+
+  it('adds no need for an output that is held, craftable or not something the game knows', () => {
+    put_skill_definition(learned_science_candidate())
+    const goal = 'Automate red science packs'
+    const baseline = skill_cards_for_goal(goal, 5, fresh_world({ researched: ['automation'] }))[0]
+    expect(baseline.needs.map(need => need.subject)).toEqual(['automation', 'science-goal'])
+    for (const check of [{ state: 'have', via: 'automation-science-pack' }, { state: 'can_craft', via: 'automation-science-pack' }, { state: 'unknown' }, undefined] as Array<SkillNeedCheck | undefined>) {
+      const items: Record<string, SkillNeedCheck> = {}
+      if (check !== undefined) items['automation-science-pack'] = check
+      const card = skill_cards_for_goal(goal, 5, world_with_items(items, { researched: ['automation'] }))[0]
+      expect(card.needs).toEqual(baseline.needs)
+      expect(card.score).toBe(baseline.score)
+    }
+    // Without a world view nothing is checked.
+    expect(skill_cards_for_goal(goal, 5)[0].needs.map(need => need.subject)).toEqual(['automation', 'science-goal'])
+    // An abstract curated output (electric-power) is never an item, so it stays silent.
+    ensure_basic_skill_definitions()
+    const steam = skill_cards_for_goal('Get steam power running so we have electricity', 1, world_with_items({}))[0]
+    expect(steam.needs.map(need => need.subject)).not.toContain('electric-power')
+  })
+
+  it('keeps a locked output need visible when the card needs are cut to five', () => {
+    const subjects = ['one', 'two', 'three', 'four', 'five']
+    put_skill_definition(learned_science_candidate({
+      preconditions: subjects.map(subject => ({ kind: 'custom', subject, description: subject })),
+    }))
+    const goal = 'Automate red science packs'
+    const locked_items = { 'automation-science-pack': { state: 'locked', via: 'automation-science-pack', technology: 'research-x' } } as Record<string, SkillNeedCheck>
+    const cards = skill_cards_for_goal(goal, 5, world_with_items(locked_items))
+    expect(cards[0].needs.map(need => need.subject)).toEqual(['one', 'two', 'three', 'four', 'automation-science-pack'])
+    expect(cards[0].needs[4]).toEqual({ subject: 'automation-science-pack', state: 'locked', technology: 'research-x' })
+    const results = find_skill_definitions('red science', 3, world_with_items(locked_items))
+    expect(results[0].needs.map(need => need.subject)).toEqual(['one', 'two', 'three', 'four', 'automation-science-pack'])
+    // Unlocked: the first five preconditions are shown, as before.
+    expect(skill_cards_for_goal(goal, 5, world_with_items({}))[0].needs.map(need => need.subject)).toEqual(subjects)
   })
 
   it('needs at least one tag match, or two text hits, before a skill is offered', () => {
