@@ -63,14 +63,18 @@ export function formatDuration(seconds) {
 }
 
 // Share of a time split in which the NPC was not working: model thinking plus
-// idle over wall time. Undefined when no wall time passed.
+// idle over wall time, capped at 100 (think and busy can overlap at the edges).
+// Undefined only without a split; a measured zero-length split is 0%, so the
+// line's presence depends on the request alone, never on clock resolution.
 function notWorkingPercent(split) {
-  return split?.wall_ms > 0 ? Math.round((split.think_ms + split.idle_ms) / split.wall_ms * 100) : undefined
+  if (!split || !Number.isFinite(split.wall_ms)) return undefined
+  if (split.wall_ms <= 0) return 0
+  return Math.min(100, Math.round((split.think_ms + split.idle_ms) / split.wall_ms * 100))
 }
 
 // The slice-close line of the planner's verified results: a measured fact
 // about the slice just closed, never a rate or an estimate. Undefined when
-// there is no split (no request) or no wall time passed, so no zeros are shown.
+// there is no split (no request).
 export function sliceTimeSplitText(split) {
   const share = notWorkingPercent(split)
   if (share === undefined) return undefined

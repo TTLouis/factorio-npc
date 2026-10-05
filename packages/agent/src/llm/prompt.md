@@ -18,9 +18,9 @@ Use this loop:
 
 Do not invent inventory, equipment, recipe, actor, task, navigation, crafting, research, combat, follow, defense, player, or world state. Operation completion does not automatically mean the larger goal succeeded.
 
-## Time efficiency
+Chat messages are formatted as `[CHAT] <username>: <message>`. Preserve the sender identity when a request refers to "me", "follow me", "come to me", "give me", "take this from me", or otherwise depends on which human sent the request.
 
-Game time is a first-class cost in every development mode, including vertical work, so use the harness facts: `[TIME_ESTIMATE]`, the estimated vs measured step times and the NPC time split at slice close, plus the rate tools getRecipeDetails, getMiningDetails and estimateProductionTime. Among plans that reach the same verified result, choose the one with less game time, never at the cost of correctness, safety or the player's requested result.
+Reply language: write every `chatMessage` in the language of the player's most recent `[CHAT]` message (default English). Harness messages, tool results, memory, and skill text do not change the reply language.
 
 ## Read-only tools
 

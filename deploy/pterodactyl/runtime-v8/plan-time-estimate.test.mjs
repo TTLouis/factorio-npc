@@ -497,14 +497,18 @@ test('slice time splits are non-overlapping deltas that add up to the request sp
   assert.equal(timing.sliceTimeSplit(), undefined)
 })
 
-test('the split texts are measured facts: not-working share, no zeros without a split, no rate wording', () => {
+test('the split texts are measured facts: not-working share, omitted only without a split, capped at 100%, no rate wording', () => {
   const split = { wall_ms: 485_000, think_ms: 110_000, actor_busy_ms: 250_000, idle_ms: 125_000 }
   assert.equal(sliceTimeSplitText(split), 'npc time this slice: actor busy 4.2 min, model thinking 1.8 min, idle 2.1 min (NPC not working 48%; idle includes waiting on machines, harness and Jev; walking is inside actor busy)')
   assert.equal(requestTimeSplitClause(split), 'NPC not working 48% of this request so far: thinking 1.8 min, idle 2.1 min.')
-  for (const empty of [undefined, null, { wall_ms: 0, think_ms: 0, actor_busy_ms: 0, idle_ms: 0 }]) {
+  for (const empty of [undefined, null]) {
     assert.equal(sliceTimeSplitText(empty), undefined)
     assert.equal(requestTimeSplitClause(empty), undefined)
   }
+  // A measured zero-length slice is a fact, shown as 0%, so the line never depends on clock resolution.
+  assert.match(sliceTimeSplitText({ wall_ms: 0, think_ms: 0, actor_busy_ms: 0, idle_ms: 0 }), /NPC not working 0%/)
+  // Think and busy can overlap at the edges; the share never exceeds 100%.
+  assert.match(requestTimeSplitClause({ wall_ms: 1000, think_ms: 900, actor_busy_ms: 300, idle_ms: 200 }), /NPC not working 100%/)
 })
 
 test('the continuation [TIME_ESTIMATE] carries the request-to-date NPC time split only while a request exists', () => {
