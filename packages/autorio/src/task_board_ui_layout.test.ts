@@ -56,10 +56,13 @@ describe('SGLuna NPC console compact tracker layout', () => {
     expect(task_board_preview_min_height(4320)).toBe(900)
   })
 
-  it('lets the Shelf / Active Plan workspace fill the PLAN page: stretchable panels, floored scroll-panes, no fixed height budget', () => {
+  it('lets the Roadmap tree fill the PLAN page: stretchable panel, floored scroll-pane, no fixed height budget', () => {
     const source = taskBoardUiSource()
-    expect(source).toContain('tracker_shelf_width: 200')
-    expect(source).toContain('tracker_plan_width: LEFT_COLUMN_WIDTH - 2 * SECTION_PADDING - 12 - 200')
+    expect(source).toContain('tracker_tree_width: LEFT_COLUMN_WIDTH - 2 * SECTION_PADDING')
+    expect(source).toContain('tracker_step_indent: 24')
+    expect(source).not.toContain('tracker_shelf_width')
+    expect(source).not.toContain('tracker_plan_width')
+    expect(source).not.toContain('tracker_column_gap')
     // The old height budget (sized by row count, clamped to 150..270) is gone.
     expect(source).not.toContain('task_board_tracker_heights')
     expect(source).not.toContain('list_max_total')
@@ -67,17 +70,14 @@ describe('SGLuna NPC console compact tracker layout', () => {
     expect(source).not.toContain('fixed_height')
     expect(source).toContain('tracker_list_floor: 120,')
     const tracker = source.split('function size_tracker_list(')[1]?.split('function refresh_tracker(')[0] ?? ''
-    for (const name of ['workspace', 'shelf', 'plan_column']) expect(tracker).toMatch(new RegExp(`${name}\\.style\\.vertically_stretchable = true`))
-    for (const name of ['shelf_body', 'plan_body', 'plan']) expect(tracker).toMatch(new RegExp(`${name}\\.style\\.vertically_stretchable = true`))
-    expect(tracker).toContain('size_tracker_list(shelf_scroll)')
-    expect(tracker).toContain('size_tracker_list(steps_scroll)')
+    for (const name of ['tree', 'tree_body']) expect(tracker).toMatch(new RegExp(`${name}\\.style\\.vertically_stretchable = true`))
+    expect(tracker).toContain('size_tracker_list(tree_scroll)')
     expect(tracker).toContain('scroll.style.natural_height = CONSOLE_LAYOUT.tracker_list_floor')
     expect(tracker).toContain('scroll.style.vertically_stretchable = true')
     // Refresh no longer writes a cap, and a console built with the old cap is rebuilt.
-    const refresh_shelf = source.split('function refresh_shelf(')[1]?.split('function refresh_steps(')[0] ?? ''
-    const refresh_steps = source.split('function refresh_steps(')[1]?.split('function refresh_activity(')[0] ?? ''
-    expect(refresh_shelf).not.toContain('maximal_height')
-    expect(refresh_steps).not.toContain('maximal_height')
+    const refresh_tree = source.split('function refresh_tree(')[1]?.split('function refresh_activity(')[0] ?? ''
+    expect(refresh_tree).not.toContain('maximal_height')
+    expect(refresh_tree).toContain('layout.tracker_node_label_width')
     expect(source).toContain('if (section?.tags[TRACKER.layout_tag] !== TRACKER.layout_version) return false')
   })
 
@@ -190,7 +190,7 @@ describe('SGLuna NPC console compact tracker layout', () => {
     expect(refresh_body).not.toContain('.clear()')
   })
 
-  it('uses compact controls with a Shelf + active-plan tracker and keeps current-task timestamped activity as retained history', () => {
+  it('uses compact controls with a Roadmap tree tracker (plan steps nested under their node) and keeps current-task timestamped activity as retained history', () => {
     const source = taskBoardUiSource()
     expect(source).toContain('function action_button(')
     expect(source).toContain("'Plan Tracker'")

@@ -923,57 +923,31 @@ function size_tracker_list(scroll: LuaGuiElement) {
  * refresh_tracker, which the once-a-second refresh calls instead of rebuilding.
  */
 function render_tracker(parent: LuaGuiElement, board: TaskBoardUiSnapshot | undefined) {
-  const { header, body } = create_section(parent, 'Plan Tracker', undefined, 'Roadmap Shelf on the left; the immutable executable plan slice on the right. Execution activity has its own tab.', true, { section: ui_constants.TRACKER.section, header: ui_constants.TRACKER.header, body: ui_constants.TRACKER.body })
+  const { header, body } = create_section(parent, 'Plan Tracker', undefined, "Roadmap nodes; the active plan's steps sit under the node they build. Execution activity has its own tab.", true, { section: ui_constants.TRACKER.section, header: ui_constants.TRACKER.header, body: ui_constants.TRACKER.body })
   const summary = header.add({ type: 'label', name: ui_constants.TRACKER.summary, caption: '', style: 'semibold_label' }); summary.style.right_padding = 4
   const tracker_section = parent[ui_constants.TRACKER.section]; if (tracker_section?.valid) tracker_section.tags = { [ui_constants.TRACKER.layout_tag]: ui_constants.TRACKER.layout_version }
 
   // Height. The section and its body already stretch to the bottom of the PLAN page. Every
-  // container between them and the two scroll-panes stretches too, so the sub-panels share one
-  // height (top-aligned, bottoms flush) and each list scrolls inside it. The scroll-panes get a
-  // floor as their natural height (see tracker_list_floor) so they take whatever is left and a
-  // long list never makes the window taller; opening the ... menu makes the action row taller,
-  // and the lists simply get less of the stretch.
-  const workspace = body.add({ type: 'flow', name: ui_constants.TRACKER.workspace, direction: 'horizontal' })
-  workspace.style.vertically_stretchable = true
-  workspace.style.width = ui_constants.LEFT_COLUMN_WIDTH - 2 * ui_constants.SECTION_PADDING
-  workspace.style.horizontal_spacing = ui_constants.CONSOLE_LAYOUT.tracker_column_gap
-  workspace.style.vertical_align = 'top'
-
-  // Each half of the workspace is its own bordered, titled sub-panel - a
-  // standalone list, not a bare flow glued to its neighbour - so the shelf and
-  // the executing plan read as two distinct trackers sharing one card.
-  const shelf = workspace.add({ type: 'frame', name: ui_constants.TRACKER.shelf, direction: 'vertical', style: 'inside_shallow_frame' })
-  shelf.style.width = ui_constants.CONSOLE_LAYOUT.tracker_shelf_width
-  shelf.style.vertically_stretchable = true
-  const shelf_header = shelf.add({ type: 'frame', name: ui_constants.TRACKER.shelf_header, direction: 'horizontal', style: 'subheader_frame' })
-  shelf_header.style.horizontally_stretchable = true
-  shelf_header.style.vertical_align = 'center'
-  shelf_header.add({ type: 'label', caption: 'Roadmap Shelf', style: 'subheader_caption_label' })
-  const shelf_spacer = shelf_header.add({ type: 'empty-widget' }); shelf_spacer.style.horizontally_stretchable = true
-  shelf_header.add({ type: 'label', name: ui_constants.TRACKER.shelf_count, caption: '0', style: 'semibold_label' })
-  const shelf_body = shelf.add({ type: 'flow', name: ui_constants.TRACKER.shelf_body, direction: 'vertical' }); shelf_body.style.padding = ui_constants.SECTION_PADDING; shelf_body.style.horizontally_stretchable = true; shelf_body.style.vertically_stretchable = true
-  const shelf_scroll = shelf_body.add({ type: 'scroll-pane', name: ui_constants.TRACKER.shelf_scroll, style: 'scroll_pane_in_shallow_frame', horizontal_scroll_policy: 'never' })
-  size_tracker_list(shelf_scroll)
-  const shelf_table = shelf_scroll.add({ type: 'table', name: ui_constants.TRACKER.shelf_table, column_count: 2, tags: { signature: '' } })
-  shelf_table.style.horizontal_spacing = 6
-  shelf_table.style.vertical_spacing = 5
-
-  const plan_column = workspace.add({ type: 'frame', name: ui_constants.TRACKER.plan_column, direction: 'vertical', style: 'inside_shallow_frame' })
-  plan_column.style.width = ui_constants.CONSOLE_LAYOUT.tracker_plan_width
-  plan_column.style.vertically_stretchable = true
-  const plan_header = plan_column.add({ type: 'frame', name: ui_constants.TRACKER.plan_header, direction: 'horizontal', style: 'subheader_frame' })
-  plan_header.style.horizontally_stretchable = true
-  plan_header.style.vertical_align = 'center'
-  plan_header.add({ type: 'label', caption: 'Active Plan', style: 'subheader_caption_label' })
-  const plan_header_spacer = plan_header.add({ type: 'empty-widget' }); plan_header_spacer.style.horizontally_stretchable = true
-  plan_header.add({ type: 'label', name: ui_constants.TRACKER.plan_summary, caption: '', style: 'semibold_label' })
-  const plan_body = plan_column.add({ type: 'flow', name: ui_constants.TRACKER.plan_body, direction: 'vertical' }); plan_body.style.padding = ui_constants.SECTION_PADDING; plan_body.style.horizontally_stretchable = true; plan_body.style.vertically_stretchable = true; plan_body.style.vertical_spacing = 6
-  const empty = plan_body.add({ type: 'label', name: ui_constants.TRACKER.empty, caption: 'No active plan slice.' }); empty.style.font_color = TONE_COLORS.muted
-  const plan = plan_body.add({ type: 'flow', name: ui_constants.TRACKER.plan, direction: 'vertical' }); plan.style.horizontally_stretchable = true; plan.style.vertically_stretchable = true; plan.style.vertical_spacing = 6
-  const progress = plan.add({ type: 'progressbar', name: ui_constants.TRACKER.progress, value: 0 }); progress.style.horizontally_stretchable = true
-  const steps_scroll = plan.add({ type: 'scroll-pane', name: ui_constants.TRACKER.steps_scroll, style: 'scroll_pane_in_shallow_frame', horizontal_scroll_policy: 'never' }); size_tracker_list(steps_scroll)
-  const steps_table = steps_scroll.add({ type: 'table', name: ui_constants.TRACKER.steps_table, column_count: 4 }); steps_table.style.horizontal_spacing = 8; steps_table.style.vertical_spacing = 4
-  plan.add({ type: 'flow', name: ui_constants.TRACKER.attention, direction: 'vertical' })
+  // container between them and the tree's scroll-pane stretches too, so the tree takes the
+  // height it is given and scrolls inside it. The scroll-pane gets a floor as its natural
+  // height (see tracker_list_floor) so a long tree never makes the window taller; opening the
+  // ... menu makes the action row taller, and the tree simply gets less of the stretch.
+  // The tree is one bordered, titled panel: roadmap nodes, with the active plan's steps
+  // nested as child rows under the node they build (see refresh_tree).
+  const tree = body.add({ type: 'frame', name: ui_constants.TRACKER.tree, direction: 'vertical', style: 'inside_shallow_frame' })
+  tree.style.width = ui_constants.CONSOLE_LAYOUT.tracker_tree_width
+  tree.style.vertically_stretchable = true
+  const tree_header = tree.add({ type: 'frame', name: ui_constants.TRACKER.tree_header, direction: 'horizontal', style: 'subheader_frame' })
+  tree_header.style.horizontally_stretchable = true
+  tree_header.style.vertical_align = 'center'
+  tree_header.add({ type: 'label', caption: 'Roadmap', style: 'subheader_caption_label' })
+  const tree_spacer = tree_header.add({ type: 'empty-widget' }); tree_spacer.style.horizontally_stretchable = true
+  tree_header.add({ type: 'label', name: ui_constants.TRACKER.tree_summary, caption: '', style: 'semibold_label' })
+  const tree_body = tree.add({ type: 'flow', name: ui_constants.TRACKER.tree_body, direction: 'vertical' }); tree_body.style.padding = ui_constants.SECTION_PADDING; tree_body.style.horizontally_stretchable = true; tree_body.style.vertically_stretchable = true; tree_body.style.vertical_spacing = 6
+  const progress = tree_body.add({ type: 'progressbar', name: ui_constants.TRACKER.progress, value: 0 }); progress.style.horizontally_stretchable = true
+  const tree_scroll = tree_body.add({ type: 'scroll-pane', name: ui_constants.TRACKER.tree_scroll, style: 'scroll_pane_in_shallow_frame', horizontal_scroll_policy: 'never' }); size_tracker_list(tree_scroll)
+  const tree_rows = tree_scroll.add({ type: 'flow', name: ui_constants.TRACKER.tree_rows, direction: 'vertical', tags: { signature: '' } }); tree_rows.style.vertical_spacing = 4; tree_rows.style.horizontally_stretchable = true
+  tree_body.add({ type: 'flow', name: ui_constants.TRACKER.attention, direction: 'vertical' })
 
   refresh_tracker(parent, board)
 }
@@ -983,36 +957,27 @@ function refresh_tracker(parent: LuaGuiElement, board: TaskBoardUiSnapshot | und
   const header = section?.valid ? section[ui_constants.TRACKER.header] : undefined
   const body = section?.valid ? section[ui_constants.TRACKER.body] : undefined
   if (!header?.valid || !body?.valid) return false
-  // A tracker built before its lists stretched keeps a stale small maximal_height; rebuild it.
+  // A tracker built with an older layout is rebuilt rather than patched.
   if (section?.tags[ui_constants.TRACKER.layout_tag] !== ui_constants.TRACKER.layout_version) return false
-  const workspace = body[ui_constants.TRACKER.workspace]
-  const shelf = workspace?.valid ? workspace[ui_constants.TRACKER.shelf] : undefined
-  const plan_column = workspace?.valid ? workspace[ui_constants.TRACKER.plan_column] : undefined
+  // Factorio indexes only direct children by name, so reach each element through its parent.
   const summary = header[ui_constants.TRACKER.summary]
-  const plan_header = plan_column?.valid ? plan_column[ui_constants.TRACKER.plan_header] : undefined
-  const plan_summary = plan_header?.valid ? plan_header[ui_constants.TRACKER.plan_summary] : undefined
-  // Factorio indexes only direct children by name, so reach the list through its body.
-  const plan_body = plan_column?.valid ? plan_column[ui_constants.TRACKER.plan_body] : undefined
-  const empty = plan_body?.valid ? plan_body[ui_constants.TRACKER.empty] : undefined
-  const plan = plan_body?.valid ? plan_body[ui_constants.TRACKER.plan] : undefined
-  if (!workspace?.valid || !shelf?.valid || !plan_column?.valid || !summary?.valid || !plan_header?.valid || !plan_summary?.valid || !empty?.valid || !plan?.valid) return false
+  const tree = body[ui_constants.TRACKER.tree]
+  const tree_header = tree?.valid ? tree[ui_constants.TRACKER.tree_header] : undefined
+  const tree_summary = tree_header?.valid ? tree_header[ui_constants.TRACKER.tree_summary] : undefined
+  const tree_body = tree?.valid ? tree[ui_constants.TRACKER.tree_body] : undefined
+  if (!summary?.valid || !tree?.valid || !tree_header?.valid || !tree_summary?.valid || !tree_body?.valid) return false
 
-  const shelf_nodes = board?.shelf ?? []
+  const nodes = board?.shelf ?? []
   const has_steps = board !== undefined && board.steps.length > 0
-  const has_shelf = shelf_nodes.length > 0
-  empty.visible = !has_steps
-  empty.caption = has_shelf ? 'No active plan slice.' : 'No active plan.'
-  plan.visible = has_steps
   summary.caption = ''
-  plan_summary.caption = ''
-
-  if (!refresh_shelf(shelf, shelf_nodes)) return false
-  if (board !== undefined && has_steps) {
-    if (!refresh_steps(plan, board)) return false
-    const active_number = board.status === 'completed' ? board.total_steps : math.min(board.active_index + 1, board.total_steps)
-    plan_summary.caption = `STEP ${active_number}/${board.total_steps} · ${board.completed_count} verified`
-  }
-  return true
+  // NODE k/n is the first linked node's 1-based place on the shelf; STEP x/y is the active plan.
+  let linked_number = 0; for (let index = 0; index < nodes.length; index++) { if (nodes[index].linked) { linked_number = index + 1; break } }
+  const parts: string[] = []
+  if (nodes.length > 0 && has_steps && linked_number > 0) parts.push(`NODE ${linked_number}/${nodes.length}`)
+  else if (nodes.length > 0) parts.push(nodes.length === 1 ? '1 node' : `${nodes.length} nodes`)
+  if (board !== undefined && has_steps) parts.push(`STEP ${board.status === 'completed' ? board.total_steps : math.min(board.active_index + 1, board.total_steps)}/${board.total_steps} · ${board.completed_count} verified`)
+  tree_summary.caption = parts.join(' · ')
+  return refresh_tree(tree_body, nodes, board)
 }
 
 /**
@@ -1048,76 +1013,88 @@ function refresh_activity_section(parent: LuaGuiElement, board: TaskBoardUiSnaps
   return true
 }
 
-function refresh_shelf(shelf: LuaGuiElement, nodes: TaskBoardUiShelfNode[]) {
-  const header = shelf[ui_constants.TRACKER.shelf_header]
-  const count = header?.valid ? header[ui_constants.TRACKER.shelf_count] : undefined
-  const shelf_body = shelf[ui_constants.TRACKER.shelf_body]
-  const scroll = shelf_body?.valid ? shelf_body[ui_constants.TRACKER.shelf_scroll] : undefined
-  const table = scroll?.valid ? scroll[ui_constants.TRACKER.shelf_table] : undefined
-  if (!header?.valid || !count?.valid || !scroll?.valid || !table?.valid) return false
-  count.caption = `${nodes.length}`
-  const visible = nodes.slice(0, ui_constants.MAX_SHELF_NODES)
-  let signature = `${visible.length}`
-  for (const node of visible) signature = `${signature}#${node.id}:${node.status}:${node.linked ? '1' : '0'}:${node.intent}`
-  if (table.tags.signature === signature) return true
-  table.clear()
-  if (visible.length === 0) {
-    table.add({ type: 'sprite', sprite: TONE_SPRITES.muted, style: 'status_image' })
-    const label = gui_text.literal_gui_text(table.add({ type: 'label', caption: 'No shelved roadmap nodes.' }))
-    label.style.single_line = false
-    label.style.maximal_width = ui_constants.CONSOLE_LAYOUT.tracker_shelf_width - 2 * ui_constants.SECTION_PADDING - 36
+/**
+ * The roadmap tree. Shelf nodes are top-level rows; the active plan's steps are child rows
+ * directly under the first linked node (the node the plan refines). A plan with no linked node
+ * lists its steps first, flat. Rows are rebuilt only when the signature changes, so the
+ * scroll-pane keeps the player's position across refreshes.
+ */
+function refresh_tree(tree_body: LuaGuiElement, nodes: TaskBoardUiShelfNode[], board: TaskBoardUiSnapshot | undefined) {
+  const progress = tree_body[ui_constants.TRACKER.progress]; const tree_scroll = tree_body[ui_constants.TRACKER.tree_scroll]; const tree_rows = tree_scroll?.valid ? tree_scroll[ui_constants.TRACKER.tree_rows] : undefined; const attention = tree_body[ui_constants.TRACKER.attention]
+  if (!progress?.valid || !tree_scroll?.valid || !tree_rows?.valid || !attention?.valid) return false
+  const layout = ui_constants.CONSOLE_LAYOUT
+  const has_steps = board !== undefined && board.steps.length > 0
+  progress.visible = has_steps
+  attention.visible = has_steps
+  if (board !== undefined) (progress as ProgressBarGuiElement).value = board.total_steps > 0 ? board.completed_count / board.total_steps : 0
+  const visible_nodes = nodes.slice(0, ui_constants.MAX_SHELF_NODES)
+  const steps = board?.steps ?? []
+  const visible_steps = steps.slice(0, ui_constants.MAX_STEPS)
+  let linked_index = -1
+  for (let index = 0; index < visible_nodes.length; index++) { if (visible_nodes[index].linked) { linked_index = index; break } }
+  let signature = `${board?.goal_id ?? ''}#${visible_nodes.length}`; let active_index = -1
+  for (const node of visible_nodes) signature = `${signature}#${node.id}:${node.status}:${node.linked ? '1' : '0'}:${node.intent}`
+  signature = `${signature}#${steps.length}`
+  for (let index = 0; index < visible_steps.length; index++) {
+    const step = visible_steps[index]; signature = `${signature}#${step.status}:${step.description}:${step.time ?? ''}`
+    if (step.status === 'active' || step.status === 'blocked' || step.status === 'paused') active_index = index
   }
-  else {
-    for (const node of visible) {
+  if (tree_rows.tags.signature !== signature) {
+    const previous_active = tree_rows.tags.active
+    tree_rows.clear(); let active_label: LuaGuiElement | undefined
+    const add_row = (kind: string, indent: number) => {
+      const row = tree_rows.add({ type: 'flow', direction: 'horizontal', tags: { kind } })
+      row.style.horizontal_spacing = layout.tracker_row_spacing; row.style.vertical_align = 'center'
+      if (indent > 0) row.style.left_padding = indent
+      return row
+    }
+    // Step rows sit `indent` px in; the description takes back the indent it does not use so the state column stays aligned.
+    const add_step_rows = (indent: number) => {
+      for (let index = 0; index < visible_steps.length; index++) {
+        const step = visible_steps[index]; const tone = step_tone(step); const row = add_row('step', indent)
+        row.add({ type: 'sprite', sprite: TONE_SPRITES[tone], style: 'status_image', tooltip: step.status })
+        const number = row.add({ type: 'label', caption: `${index + 1}.`, style: 'semibold_label' }); number.style.width = layout.tracker_step_number_width
+        const caption = step.time !== undefined && step.time.length > 0 ? `${step_caption(step.description)} (${step.time})` : step_caption(step.description)
+        const description = gui_text.literal_gui_text(row.add({ type: 'label', caption, style: step.status === 'active' ? 'bold_label' : 'label' })); description.style.single_line = false; description.style.width = layout.tracker_step_label_width + layout.tracker_step_indent - indent
+        if (step.status === 'completed' || step.status === 'pending') description.style.font_color = TONE_COLORS.muted
+        const state = row.add({ type: 'label', caption: step.status.toUpperCase(), style: 'semibold_label' }); state.style.font_color = TONE_COLORS[tone]; state.style.width = layout.tracker_state_width; state.style.horizontal_align = 'right'
+        if (index === active_index) active_label = description
+      }
+      if (steps.length > visible_steps.length) {
+        const row = add_row('more', indent); const pad = row.add({ type: 'empty-widget' }); pad.style.width = layout.tracker_sprite_width
+        add_empty_state(row, `+${steps.length - visible_steps.length} more steps`)
+      }
+    }
+    if (has_steps && linked_index < 0) {
+      if (visible_nodes.length > 0) add_empty_state(tree_rows, 'Current plan (not linked to a roadmap node)')
+      add_step_rows(0)
+    }
+    if (visible_nodes.length === 0 && !has_steps) add_empty_state(tree_rows, 'No plan yet.')
+    for (let index = 0; index < visible_nodes.length; index++) {
+      const node = visible_nodes[index]
       const tone: Tone = node.status === 'realized' ? 'good' : node.status === 'partially_realized' ? 'info' : node.status === 'ready_to_refine' ? 'warn' : node.status === 'invalidated' ? 'bad' : 'muted'
-      table.add({ type: 'sprite', sprite: TONE_SPRITES[tone], style: 'status_image', tooltip: node.status.split('_').join(' ') })
+      const row = add_row('node', 0)
+      row.add({ type: 'sprite', sprite: TONE_SPRITES[tone], style: 'status_image', tooltip: node.status.split('_').join(' ') })
       let tooltip = node.status.split('_').join(' ').toUpperCase()
       if (node.development_hint) tooltip = `${tooltip} · ${node.development_hint}`
       if (node.depends_on.length > 0) tooltip = `${tooltip} · depends on ${node.depends_on.join(', ')}`
       if (node.why_it_matters.length > 0) tooltip = `${tooltip}\n${node.why_it_matters}`
-      const caption = node.linked ? `→ ${node.intent}` : node.intent
-      const label = gui_text.literal_gui_text(table.add({ type: 'label', caption, style: node.linked ? 'bold_label' : 'label', tooltip }))
-      label.style.single_line = false
-      label.style.maximal_width = ui_constants.CONSOLE_LAYOUT.tracker_shelf_width - 2 * ui_constants.SECTION_PADDING - 36
+      const label = gui_text.literal_gui_text(row.add({ type: 'label', caption: node.intent, style: node.linked ? 'bold_label' : 'label', tooltip })); label.style.single_line = false; label.style.width = layout.tracker_node_label_width
       if (node.status === 'invalidated') label.style.font_color = TONE_COLORS.muted
+      const state_text = node.linked ? 'ACTIVE' : node.status === 'realized' ? 'DONE' : node.status === 'partially_realized' ? 'PARTIAL' : node.status === 'ready_to_refine' ? 'READY' : node.status === 'invalidated' ? 'DROPPED' : 'LATER'
+      const state = row.add({ type: 'label', caption: state_text, style: 'semibold_label', tooltip }); state.style.font_color = node.linked ? TONE_COLORS.info : node.status === 'invalidated' ? TONE_COLORS.muted : TONE_COLORS[tone]; state.style.width = layout.tracker_state_width; state.style.horizontal_align = 'right'
+      if (has_steps && index === linked_index) add_step_rows(layout.tracker_step_indent)
     }
+    tree_rows.tags = { signature, active: active_index }
+    if (active_label !== undefined && previous_active !== active_index) (tree_scroll as ScrollPaneGuiElement).scroll_to_element(active_label, 'top-third')
   }
-  table.tags = { signature }
-  return true
-}
-
-function refresh_steps(plan: LuaGuiElement, board: TaskBoardUiSnapshot) {
-  const progress = plan[ui_constants.TRACKER.progress]; const steps_scroll = plan[ui_constants.TRACKER.steps_scroll]; const steps_table = steps_scroll?.valid ? steps_scroll[ui_constants.TRACKER.steps_table] : undefined; const attention = plan[ui_constants.TRACKER.attention]
-  if (!progress?.valid || !steps_scroll?.valid || !steps_table?.valid || !attention?.valid) return false
-  ;(progress as ProgressBarGuiElement).value = board.total_steps > 0 ? board.completed_count / board.total_steps : 0
-  const visible = board.steps.slice(0, ui_constants.MAX_STEPS)
-  let signature = `${board.goal_id}#${board.steps.length}`; let active_index = -1
-  for (let index = 0; index < visible.length; index++) {
-    const step = visible[index]; signature = `${signature}#${step.status}:${step.description}:${step.time ?? ''}`
-    if (step.status === 'active' || step.status === 'blocked' || step.status === 'paused') active_index = index
-  }
-  if (steps_table.tags.signature !== signature) {
-    const previous_active = steps_table.tags.active
-    steps_table.clear(); let active_label: LuaGuiElement | undefined
-    for (let index = 0; index < visible.length; index++) {
-      const step = visible[index]; const tone = step_tone(step)
-      steps_table.add({ type: 'sprite', sprite: TONE_SPRITES[tone], style: 'status_image', tooltip: step.status }); steps_table.add({ type: 'label', caption: `${index + 1}.`, style: 'semibold_label' })
-      const caption = step.time !== undefined && step.time.length > 0 ? `${step_caption(step.description)} (${step.time})` : step_caption(step.description)
-      const description = gui_text.literal_gui_text(steps_table.add({ type: 'label', caption, style: step.status === 'active' ? 'bold_label' : 'label' })); description.style.single_line = false; description.style.maximal_width = ui_constants.CONSOLE_LAYOUT.tracker_plan_width - 2 * ui_constants.SECTION_PADDING - 140
-      if (step.status === 'completed' || step.status === 'pending') description.style.font_color = TONE_COLORS.muted
-      const state = steps_table.add({ type: 'label', caption: step.status.toUpperCase(), style: 'semibold_label' }); state.style.font_color = TONE_COLORS[tone]; state.style.minimal_width = 72
-      if (index === active_index) active_label = description
-    }
-    if (board.steps.length > visible.length) { steps_table.add({ type: 'empty-widget' }); steps_table.add({ type: 'label', caption: '+', style: 'semibold_label' }); add_empty_state(steps_table, `${board.steps.length - visible.length} more steps`); steps_table.add({ type: 'empty-widget' }) }
-    steps_table.tags = { signature, active: active_index }
-    if (active_label !== undefined && previous_active !== active_index) (steps_scroll as ScrollPaneGuiElement).scroll_to_element(active_label, 'top-third')
-  }
+  if (board === undefined || !has_steps) return true
   const attention_signature = `${board.blocker}|${board.blocker_summary}|${board.pause_reason}|${board.pause_summary}`
   if (attention.tags.signature === attention_signature) return true
   attention.clear(); attention.tags = { signature: attention_signature }
   if (board.blocker.length > 0 || board.pause_reason.length > 0) {
     const table = create_key_value_table(attention)
-    const width = ui_constants.CONSOLE_LAYOUT.tracker_plan_width - ui_constants.KEY_COLUMN_WIDTH - 12
+    const width = layout.tracker_attention_width
     if (board.blocker.length > 0) add_key_value(table, 'BLOCKED', task_condition_text(board.blocker_summary, board.blocker, 'SGLuna is blocked by an internal task condition.'), { tone: 'bad', width })
     if (board.pause_reason.length > 0) add_key_value(table, 'PAUSED', task_condition_text(board.pause_summary, board.pause_reason, 'SGLuna is paused by an internal task condition.'), { tone: 'warn', width })
   }
