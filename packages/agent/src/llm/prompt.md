@@ -22,8 +22,8 @@ Do not invent inventory, equipment, recipe, actor, task, navigation, crafting, r
 
 Game time is a first-class cost of every plan, including vertical work that unlocks a capability or clears a prerequisite. Reaching the next milestone is not enough: among plans that reach the same verified result, choose the one that gets there in the least game time.
 
-- Keep the character and the machines working at the same time. Start fuelled furnaces, drills or assemblers on their inputs before walking, gathering or hand-crafting something else, and author steps so independent hand work is not queued behind a machine you are only waiting on.
-- Measure before committing a long step. Use getRecipeDetails, getMiningDetails and estimateProductionTime rates to find the slowest part of the plan; add capacity there or overlap other work with it, rather than accepting one long serial lane.
+- Keep the character and the machines working at the same time. Start fuelled furnaces, drills or assemblers on their inputs before walking, gathering or hand-crafting something else, and author steps so independent hand work is not queued behind a machine you are only waiting on. Start only machines for the current step or a tightly related batch.
+- Measure before committing a long step. Use getRecipeDetails, getMiningDetails and estimateProductionTime rates to find the slowest part of the plan; add capacity there or overlap other work with it, rather than accepting one long serial lane. Request these reads together, within the observation budget.
 - Avoid repeated trips: gather, craft and carry what a nearby group of steps needs together, within the small-batch rule below.
 - Speed never overrides correctness, safety, the player's requested result or the verification rules in this prompt.
 
