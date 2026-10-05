@@ -489,8 +489,15 @@ async function loadRequirements(loop, { memoryKey, trigger, definition }) {
     await loop.traceEvent('planning.requirements_unavailable', { trigger, reason: 'no_goal_definition' })
     return null
   }
+  const generation = loop.generation
   const result = await queryRequirements(loop, definition, { trigger })
   if (!result.ok) return null
+  // A newer request (a new goal, a cancel) started while the game was read: this
+  // answer belongs to the old one and must not reach its planning rounds.
+  if (loop.generation !== generation || memoryKey !== loop.activePlanKey?.()) {
+    await loop.traceEvent('planning.requirements_unavailable', { trigger, reason: 'superseded' })
+    return null
+  }
   const block = requirementsBlock(result.parsed)
   if (!block) {
     await loop.traceEvent('planning.requirements_loaded', loadedTrace(result, { trigger, reason: 'no_locked_requirements', shown: false }))
@@ -575,9 +582,14 @@ function canAskGroundingRound(loop) {
 // committed or any operation admitted: query the live game once per goal. Returns
 // { code, message, details } for the planner's corrective round, or undefined.
 // The loop turns it into the plan-category error. Never throws.
-export async function groundFirstPlan(loop, plan) {
+export async function groundFirstPlan(loop, plan, { recovery = false } = {}) {
   try {
     if (loop.requirementsGroundingAsked || !isFirstPlanOfGoal(loop, plan)) return undefined
+    if (recovery) {
+      loop.requirementsGroundingAsked = true
+      await loop.traceEvent('planning.requirements_grounding_skipped', { reason: 'recovery_path' })
+      return undefined
+    }
     if (!canAskGroundingRound(loop)) {
       loop.requirementsGroundingAsked = true
       await loop.traceEvent('planning.requirements_grounding_skipped', { reason: 'retry_budget_exhausted', retries: loop.planCategoryRetries })
@@ -618,10 +630,15 @@ export async function groundFirstPlan(loop, plan) {
 // The goal-reading challenge already costs the first plan its one corrective
 // round. When requirements are locked their facts ride in that same round
 // (never a second one). Mutates the challenge error's message. Never throws.
-export async function combineGroundingWithChallenge(loop, challenge) {
+export async function combineGroundingWithChallenge(loop, challenge, { recovery = false } = {}) {
   try {
     const definition = challenge?.goalDefinition
     if (!definition || loop.requirementsGroundingAsked) return
+    if (recovery) {
+      loop.requirementsGroundingAsked = true
+      await loop.traceEvent('planning.requirements_grounding_skipped', { reason: 'recovery_path', combined_with_goal_reading: true })
+      return
+    }
     loop.requirementsGroundingAsked = true
     const result = await queryRequirements(loop, definition, { trigger: 'first_plan' })
     if (!result.ok) {

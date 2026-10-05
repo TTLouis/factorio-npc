@@ -8775,17 +8775,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // Goal requirements (goal-requirements.mjs): after the first plan's goal definition is accepted and before the plan is
   // committed or any operation admitted, the live game is read once for the targets' locked recipes, machines and
   // research. If anything is locked the planner gets ONE corrective round with those facts (combined with the
-  // goal-reading challenge when that also fires). The harness never edits the plan, shelf or steps.
-  async parsePlanMessageChecked(message) {
+  // goal-reading challenge when that also fires). The harness never edits the plan, shelf or steps. A provider-error
+  // recovery attempt never gets the round: it would spend the attempt on a valid plan.
+  async parsePlanMessageChecked(message, options = {}) {
     let plan
     try {
       plan = this.parsePlanMessage(message)
     }
     catch (error) {
-      if (error?.code === 'goal_reading_disagreement') await combineGroundingWithChallenge(this, error)
+      if (error?.code === 'goal_reading_disagreement') await combineGroundingWithChallenge(this, error, options)
       throw error
     }
-    const grounding = await groundFirstPlan(this, plan)
+    const grounding = await groundFirstPlan(this, plan, options)
     if (grounding) {
       const error = new AgentLoopError(grounding.message)
       error.failureClass = 'plan_category'

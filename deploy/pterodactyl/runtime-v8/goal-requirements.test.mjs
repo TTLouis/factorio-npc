@@ -19,10 +19,12 @@ import {
   describeLockedRecipePreflight,
   ensureGoalRequirements,
   goalRequirementsContext,
+  groundFirstPlan,
   hasRequirementTargets,
   lockedRecipeBlocker,
   lockedRecipeSummary,
   parseGoalRequirements,
+  refreshGoalRequirementsAtShelfPickup,
   REQUIREMENTS_MAX_BLOCK_CHARS,
   REQUIREMENTS_PREFIX,
   requirementsBlock,
@@ -495,6 +497,48 @@ test('the grounding round is asked at most once per goal: whatever comes back is
   assert.equal(events('planning.requirements_grounding_round').length, 1)
 })
 
+test('a first plan that arrives during provider-error recovery is never given the round (it would spend a recovery attempt)', async () => {
+  const { calls, game, memory, events } = await scenario({
+    requirements: LIVE_LOCKED,
+    planner: callIndex => callIndex === 1 ? { content: 'not a plan' } : premature(),
+    extra: { maxRecoveryAttempts: 1 },
+  })
+  assert.equal(calls.length, 2, 'the malformed reply, then one recovery attempt')
+  assert.equal(game.requirementsRequests.length, 0)
+  assert.equal(memory.goalDefinition(KEY).done_when[0].item_name, 'automation-science-pack', 'the valid recovery plan is committed, not failed')
+  const skipped = events('planning.requirements_grounding_skipped')
+  assert.equal(skipped.length, 1)
+  assert.equal(skipped[0].data.reason, 'recovery_path')
+  assert.ok(skipped[0].request_id)
+  assert.equal(events('planning.requirements_grounding_round').length, 0)
+})
+
+test('the recovery option skips the round directly, and only for a first plan', async () => {
+  const traced = []
+  const loop = { traceEvent: async (event, data) => traced.push({ event, data }), activePlanKey: () => KEY, memory: { goalDefinition: () => undefined } }
+  const plan = { goalDefinition: RATE_GOAL, plan: ['Craft packs'] }
+  assert.equal(await groundFirstPlan(loop, plan, { recovery: true }), undefined)
+  assert.equal(loop.requirementsGroundingAsked, true)
+  assert.deepEqual(traced, [{ event: 'planning.requirements_grounding_skipped', data: { reason: 'recovery_path' } }])
+  const later = { traceEvent: async (event, data) => traced.push({ event, data }), activePlanKey: () => KEY, memory: { goalDefinition: () => RATE_GOAL } }
+  assert.equal(await groundFirstPlan(later, plan, { recovery: true }), undefined)
+  assert.equal(traced.length, 1, 'not a first plan: nothing traced')
+})
+
+test('a requirements answer that arrives after a newer request started is dropped, not shown to the new goal', async () => {
+  const traced = []
+  const loop = {
+    generation: 1,
+    activePlanKey: () => KEY,
+    traceEvent: async (event, data) => traced.push({ event, data }),
+    rcon: { command: async () => { loop.generation++; return JSON.stringify(LIVE_LOCKED) } },
+  }
+  assert.equal(await refreshGoalRequirementsAtShelfPickup(loop, { goal: { definition: RATE_GOAL } }), null)
+  assert.equal(loop.goalRequirements, null)
+  assert.equal(goalRequirementsContext(loop), '')
+  assert.deepEqual(traced.map(row => [row.event, row.data.reason]), [['planning.requirements_unavailable', 'superseded']])
+})
+
 test('the grounding round cannot turn into a block when the retry allowance is already spent', async () => {
   const { calls, events } = await scenario({
     requirements: LIVE_LOCKED,
@@ -608,9 +652,10 @@ test('the hooks are wired in the live loop (not only implemented)', async () => 
   assert.match(source, /await ensureGoalRequirements\(this, \{ memoryKey, intent \}\)/)
   assert.match(source, /await refreshGoalRequirementsAtShelfPickup\(this, planningAfterCompletion\)/)
   assert.match(source, /await retireGoalRequirements\(this, plan\)/)
-  assert.match(source, /async parsePlanMessageChecked\(message\)/)
+  assert.match(source, /async parsePlanMessageChecked\(message, options = \{\}\)/)
   assert.match(source, /injectedRequirementsChars\(this\)/)
-  assert.equal(staging.match(/await this\.parsePlanMessageChecked\(message\)/g).length, 2, 'both plan-parse sites run the async check')
+  assert.equal(staging.match(/await this\.parsePlanMessageChecked\(message\)/g).length, 1, 'the planning round runs the async check')
+  assert.equal(staging.match(/await this\.parsePlanMessageChecked\(message, \{ recovery: true \}\)/g).length, 1, 'the recovery loop runs it marked as recovery')
   assert.match(source, /authoritative live game data/, 'the planning prompt tells the planner the block is authoritative')
   const installer = await fsp.readFile(path.join(here, '..', 'payload-src', 'installer.sh'), 'utf8')
   assert.match(installer, /goal-reading\.mjs goal-requirements\.mjs skill-offers\.mjs/, 'the module is shipped by the installer')
