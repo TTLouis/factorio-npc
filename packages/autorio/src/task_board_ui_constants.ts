@@ -208,7 +208,7 @@ export const CONSOLE_LAYOUT = {
   // Inner row width = tree width - body padding - scroll-pane frame and scrollbar (28), minus the fixed columns.
   tracker_node_label_width: LEFT_COLUMN_WIDTH - 4 * SECTION_PADDING - 28 - 20 - 72 - 2 * 6,
   tracker_step_label_width: LEFT_COLUMN_WIDTH - 4 * SECTION_PADDING - 28 - 24 - 20 - 28 - 72 - 4 * 6,
-  tracker_attention_width: LEFT_COLUMN_WIDTH - 4 * SECTION_PADDING - 64 - 12,
+  tracker_attention_width: LEFT_COLUMN_WIDTH - 4 * SECTION_PADDING - KEY_COLUMN_WIDTH - 12,
 }
 export const PREVIEW_CAMERA_WIDTH = PREVIEW_COLUMN_WIDTH - 2 * SECTION_PADDING
 export const PREVIEW_ZOOM_DEFAULT = 0.75
