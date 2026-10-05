@@ -14,6 +14,7 @@ import {
   list_skill_definitions,
   MAX_DYNAMIC_SKILL_DEFINITIONS,
   put_skill_definition,
+  RETIRED_BASIC_SKILL_IDS,
   serialize_skill_json,
   skill_cards_for_goal,
   skill_export_relative_directory,
@@ -95,16 +96,16 @@ beforeEach(() => {
 })
 
 describe('curated basic skill library', () => {
-  it('seeds exactly twelve manual candidate patterns idempotently', () => {
-    expect(ensure_basic_skill_definitions()).toEqual({ added: 12, upgraded: 0, total: 12 })
+  it('seeds exactly eleven manual candidate patterns idempotently', () => {
+    expect(ensure_basic_skill_definitions()).toEqual({ added: 11, upgraded: 0, removed: 0, total: 11 })
     const skills = list_skill_definitions()
-    expect(skills).toHaveLength(12)
+    expect(skills).toHaveLength(11)
     expect(skills.every(skill => skill.source.kind === 'manual')).toBe(true)
     expect(skills.every(skill => skill.status === 'candidate')).toBe(true)
     expect(skills.every(skill => skill.stage === 'pattern')).toBe(true)
     expect(skills.every(skill => skill.verification.production_output === 'not_tested')).toBe(true)
-    expect(ensure_basic_skill_definitions()).toEqual({ added: 0, upgraded: 0, total: 12 })
-    expect(list_skill_definitions()).toHaveLength(12)
+    expect(ensure_basic_skill_definitions()).toEqual({ added: 0, upgraded: 0, removed: 0, total: 11 })
+    expect(list_skill_definitions()).toHaveLength(11)
   })
 
   it('finds early patterns from English goals and Chinese player shorthand', () => {
@@ -133,9 +134,53 @@ describe('curated basic skill library', () => {
       },
     }))
 
-    expect(ensure_basic_skill_definitions()).toEqual({ added: 11, upgraded: 0, total: 12 })
+    expect(ensure_basic_skill_definitions()).toEqual({ added: 10, upgraded: 0, removed: 0, total: 11 })
     expect(get_skill_definition('burner-coal-loop')?.name).toBe('Player Authored Coal Pattern')
     expect(get_skill_definition('burner-coal-loop')?.source.kind).toBe('completed_goal')
+  })
+
+  it('does not ship the retired automation-science-bootstrap skill or offer it for red science goals', () => {
+    expect(RETIRED_BASIC_SKILL_IDS).toEqual(['automation-science-bootstrap'])
+    ensure_basic_skill_definitions()
+    expect(get_skill_definition('automation-science-bootstrap')).toBeUndefined()
+    expect(skill_cards_for_goal('Automate red science packs', 5, fresh_world()).map(card => card.id)).not.toContain('automation-science-bootstrap')
+    expect(find_skill_definitions('red science automation-science-pack', 5).map(result => result.id)).not.toContain('automation-science-bootstrap')
+  })
+
+  it('removes a stored unedited copy of a retired curated skill when seeding', () => {
+    ensure_basic_skill_definitions()
+    const registry = (globalThis as any).storage.sgluna_skill_definitions
+    registry['automation-science-bootstrap'] = { ...registry['burner-coal-loop'], id: 'automation-science-bootstrap', name: 'Automation Science Bootstrap', revision: 2 }
+    expect(list_skill_definitions()).toHaveLength(12)
+    expect(ensure_basic_skill_definitions()).toEqual({ added: 0, upgraded: 0, removed: 1, total: 11 })
+    expect(get_skill_definition('automation-science-bootstrap')).toBeUndefined()
+    expect(list_skill_definitions()).toHaveLength(11)
+    expect(ensure_basic_skill_definitions()).toEqual({ added: 0, upgraded: 0, removed: 0, total: 11 })
+  })
+
+  it('keeps a player-edited copy of a retired curated skill', () => {
+    ensure_basic_skill_definitions()
+    const registry = (globalThis as any).storage.sgluna_skill_definitions
+    registry['automation-science-bootstrap'] = { ...registry['burner-coal-loop'], id: 'automation-science-bootstrap', name: 'Automation Science Bootstrap', revision: 2 }
+    const edited = edited_skill_revision(registry['automation-science-bootstrap'], { name: 'House Red Science', summary: 'Ours.', status: 'candidate' }, 'owner', 907)
+    expect(ensure_basic_skill_definitions()).toEqual({ added: 0, upgraded: 0, removed: 0, total: 11 })
+    expect(get_skill_definition('automation-science-bootstrap')).toEqual(edited)
+    expect(get_skill_definition('automation-science-bootstrap')?.name).toBe('House Red Science')
+  })
+
+  it('keeps a learned skill that reuses a retired id and counts it as a dynamic skill', () => {
+    create_skill_candidate(candidate({
+      id: 'automation-science-bootstrap',
+      name: 'Learned Red Science',
+      source: { kind: 'completed_goal', goal_id: 'goal_learned', entity_unit_numbers: [], recipe_ids: [], evidence_refs: ['goal:learned'] },
+    }))
+    expect(ensure_basic_skill_definitions()).toEqual({ added: 11, upgraded: 0, removed: 0, total: 11 })
+    expect(get_skill_definition('automation-science-bootstrap')?.name).toBe('Learned Red Science')
+    // The retired id is not a basic id, so it uses the dynamic capacity like any learned skill.
+    for (let index = 0; index < MAX_DYNAMIC_SKILL_DEFINITIONS - 1; index++) {
+      create_skill_candidate(candidate({ id: `dynamic-skill-${index}`, name: `Dynamic Skill ${index}`, source: { kind: 'completed_goal', goal_id: `goal-${index}`, entity_unit_numbers: [], recipe_ids: [], evidence_refs: [`goal:${index}`] } }))
+    }
+    expect(() => create_skill_candidate(candidate({ id: 'dynamic-skill-overflow', name: 'Overflow' }))).toThrow(/dynamic capacity reached/i)
   })
 })
 
@@ -170,6 +215,31 @@ function fresh_world(overrides: Partial<{ researched: string[], have: string[] }
   }
 }
 
+// A learned (not curated) red-science skill: a technology precondition plus a
+// real item output, for the need and tag tests that used to lean on the retired
+// curated skill.
+function learned_science_candidate(overrides: Record<string, unknown> = {}) {
+  return candidate({
+    id: 'learned-red-science',
+    name: 'Learned Red Science',
+    goal_tags: ['science', 'red-science'],
+    preconditions: [
+      { kind: 'technology_researched', subject: 'automation', description: 'Automation is researched.' },
+      { kind: 'bootstrap', subject: 'science-goal', description: 'The task needs automated research supply.' },
+    ],
+    inputs: [{ item: 'science-ingredients', role: 'live recipe inputs' }],
+    outputs: [{ item: 'automation-science-pack', role: 'science output' }],
+    topology: {
+      nodes: [
+        { id: 'gear-assembler', role: 'Produce gear intermediate', entity_name: 'assembling-machine-1', recipe: 'iron-gear-wheel' },
+        { id: 'belt-assembler', role: 'Craft the science pack', entity_name: 'assembling-machine-1', recipe: 'automation-science-pack' },
+      ],
+      relations: [{ kind: 'direct_item_output', from: 'gear-assembler', to: 'belt-assembler', description: 'Gears feed the science assembler.' }],
+    },
+    ...overrides,
+  })
+}
+
 describe('skill lookup: tags, scoring, preconditions and cards (plan 2.8)', () => {
   it('derives tags from outputs, topology entities and recipes, and technology preconditions, plus the short goal_tags list', () => {
     ensure_basic_skill_definitions()
@@ -178,7 +248,7 @@ describe('skill lookup: tags, scoring, preconditions and cards (plan 2.8)', () =
     expect(steam.filter(tag => tag.source === 'output').map(tag => tag.tag)).toEqual(['electric-power'])
     expect(steam.filter(tag => tag.source === 'entity').map(tag => tag.tag)).toEqual(['offshore-pump', 'boiler', 'steam-engine', 'small-electric-pole'])
 
-    const science = derive_skill_tags(get_skill_definition('automation-science-bootstrap')!)
+    const science = derive_skill_tags(canonicalize_skill_definition(learned_science_candidate()))
     expect(science).toContainEqual({ tag: 'automation', source: 'technology' })
     expect(science).toContainEqual({ tag: 'automation-science-pack', source: 'output' })
     expect(science).toContainEqual({ tag: 'assembling-machine-1', source: 'entity' })
@@ -209,7 +279,6 @@ describe('skill lookup: tags, scoring, preconditions and cards (plan 2.8)', () =
   // Eval (plan 2.8 d): fixed goal texts must put the expected skill in the top 3.
   const eval_goals: Array<[string, string]> = [
     ['Get steam power running so we have electricity', 'steam-power-bootstrap'],
-    ['Automate red science packs', 'automation-science-bootstrap'],
     ['Set up a burner coal loop to fuel the drills', 'burner-coal-loop'],
     ['Build a smelting row for iron plates', 'starter-smelting-row'],
   ]
@@ -224,7 +293,7 @@ describe('skill lookup: tags, scoring, preconditions and cards (plan 2.8)', () =
 
   it('reports each need as have, can_craft, locked (naming the technology) or unknown; only locked lowers the score', () => {
     ensure_basic_skill_definitions()
-    const science = get_skill_definition('automation-science-bootstrap')!
+    const science = canonicalize_skill_definition(learned_science_candidate())
     const automation = science.preconditions.find(condition => condition.subject === 'automation')!
     expect(skill_precondition_check(automation, fresh_world())).toEqual({ state: 'locked', technology: 'automation' })
     expect(skill_precondition_check(automation, fresh_world({ researched: ['automation'] }))).toEqual({ state: 'have' })
@@ -232,6 +301,7 @@ describe('skill lookup: tags, scoring, preconditions and cards (plan 2.8)', () =
     const coal = get_skill_definition('burner-coal-loop')!.preconditions.find(condition => condition.subject === 'coal-resource')!
     expect(skill_precondition_check(coal, fresh_world())).toEqual({ state: 'unknown' })
 
+    put_skill_definition(learned_science_candidate())
     const before = skill_cards_for_goal('Automate red science packs', 5, fresh_world())[0]
     const after = skill_cards_for_goal('Automate red science packs', 5, fresh_world({ researched: ['automation'] }))[0]
     expect(before.needs).toEqual([
@@ -354,7 +424,7 @@ describe('skill lookup: tags, scoring, preconditions and cards (plan 2.8)', () =
     registry['steam-power-bootstrap'] = { ...registry['steam-power-bootstrap'], revision: 1, goal_tags: undefined }
     const edited = edited_skill_revision({ ...registry['burner-coal-loop'], revision: 0 }, { name: 'House Coal Loop', summary: 'Ours.', status: 'candidate' }, 'owner', 906)
     expect(edited.revision).toBe(1)
-    expect(ensure_basic_skill_definitions()).toEqual({ added: 0, upgraded: 1, total: 12 })
+    expect(ensure_basic_skill_definitions()).toEqual({ added: 0, upgraded: 1, removed: 0, total: 11 })
     expect(get_skill_definition('steam-power-bootstrap')?.goal_tags).toContain('power')
     expect(get_skill_definition('burner-coal-loop')?.name).toBe('House Coal Loop')
   })
@@ -393,8 +463,8 @@ describe('learned skill record and export', () => {
     expect(updated.name).toBe('Updated Dynamic Skill 0')
     expect(get_skill_definition('dynamic-skill-0')?.revision).toBe(2)
 
-    expect(ensure_basic_skill_definitions()).toEqual({ added: 12, upgraded: 0, total: 12 })
-    expect(list_skill_definitions()).toHaveLength(MAX_DYNAMIC_SKILL_DEFINITIONS + 12)
+    expect(ensure_basic_skill_definitions()).toEqual({ added: 11, upgraded: 0, removed: 0, total: 11 })
+    expect(list_skill_definitions()).toHaveLength(MAX_DYNAMIC_SKILL_DEFINITIONS + 11)
   })
   it('creates a versioned candidate without promoting observation to verification', () => {
     const skill = create_skill_candidate(candidate({ status: 'observed', stage: 'example' }))

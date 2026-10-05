@@ -566,10 +566,28 @@ function is_unedited_curated_copy(stored: SkillDefinition) {
   return true
 }
 
+// Curated ids that were removed from BASIC_SKILL_DEFINITIONS. Saves seeded
+// earlier still hold a stored copy; seeding deletes it, but only while it is an
+// unedited curated copy, so a player-edited or learned skill that reuses the id
+// stays. A retired id is not a basic id, so a stored copy that survives (or a
+// new skill created under the same id) counts as an ordinary dynamic skill.
+// automation-science-bootstrap (owner decision 2026-10-05): a straight-line red
+// science pattern does not give stable red science, and its only precondition
+// hid that the science-pack recipe itself is locked behind a technology.
+export const RETIRED_BASIC_SKILL_IDS: string[] = ['automation-science-bootstrap']
+
 export function ensure_basic_skill_definitions() {
   const registry = ensure_definitions()
   let added = 0
   let upgraded = 0
+  let removed = 0
+  for (const id of RETIRED_BASIC_SKILL_IDS) {
+    const stored = registry[id]
+    if (stored !== undefined && is_unedited_curated_copy(stored)) {
+      delete registry[id]
+      removed++
+    }
+  }
   for (const raw of BASIC_SKILL_DEFINITIONS) {
     const skill = canonicalize_skill_definition(raw)
     const stored = registry[skill.id]
@@ -582,7 +600,7 @@ export function ensure_basic_skill_definitions() {
       upgraded++
     }
   }
-  return { added, upgraded, total: BASIC_SKILL_DEFINITIONS.length }
+  return { added, upgraded, removed, total: BASIC_SKILL_DEFINITIONS.length }
 }
 
 function skill_search_text(skill: SkillDefinition) {
