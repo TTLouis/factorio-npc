@@ -489,6 +489,15 @@ async function realSystemPrompt() {
   return `${await fsp.readFile(REAL_PROMPT_FILE, 'utf8')}\n\n${RUNTIME_RELIABILITY_GUIDANCE}`
 }
 
+test('time efficiency is a top-level rule of the real system prompt and applies to every development mode', async () => {
+  const prompt = plannerHarness({ systemPrompt: await realSystemPrompt() }).agent.systemPrompt
+  const section = prompt.indexOf('## Time efficiency')
+  assert.ok(section > 0 && section < prompt.indexOf('## Read-only tools'), 'the section comes right after the core loop, before the tool reference')
+  assert.match(prompt, /Game time is a first-class cost of every plan, including vertical work/)
+  assert.match(prompt, /Speed never overrides correctness, safety, the player's requested result/)
+  assert.match(prompt, /a vertical slice is still judged on the game time it takes, so apply the Time efficiency rules to every mode/)
+})
+
 // Reported input tokens: the real prefix, about 8k tokens of tool schemas the loop does not see, and the conversation's growth.
 const realTokens = (prefix, growthPerCall) => call => prefix + 8000 + call * growthPerCall
 
