@@ -43,7 +43,7 @@ All paths below are siblings of the integration checkout under
 | --- | --- | --- | --- |
 | Native exact admission and prefix receipts | mod receipt migration / `playable-mod-receipts` | `8674ed27` | Separate review; original mod gate passed 901 tests plus typecheck/Lua checks |
 | Durable ordinal fence after receipt pruning | parent / `playable-mod-receipt-fence` | `78b90c1a` | Reviewed and integrated by `7f33e26e`; combined gate passed |
-| Campaign operation ledger and exact reconciliation | parent / `playable-durable-operations` | `a85b7c6b` | Runtime 1,570/1,570; semantic review passed at `df416148`; follow-up explicitly tests persisted pre-transport cancellation proof |
+| Campaign operation ledger and exact reconciliation | parent / `playable-durable-operations` | `a85b7c6b` | **Integrated 2026-10-05 by `9eda4404`, payload repinned `9e25244a`, pushed.** A review found that ordinary refusals became permanent global holds, so the refused-placement retry canary had been rewritten to block. Fix `fix/ledger-clearance` (`244575c3`, `1976219c`, `1589c7bd`): mod-proven pre-mutation refusals of validate-then-queue ops and pre-transport failures now settle exactly, and bounded placement retry is restored. Genuinely unknown effects stay held. Legacy records settle only with no open baseline batch; otherwise they raise one user question, which no production path can answer yet. Gate: 1,592 runtime / 933 mod tests, exit 0 |
 | 32-task retention, task-local authority/questions | task migration / `playable-task-retention` | `4ac4b8df` | Runtime 1,585/1,585; review caught missing clock fence on completion handoff; repair checkpoint paused for update |
 | Physical corpse tracking/retrieval and ammo compatibility | corpse migration / `playable-corpse-recovery` | `de137419` | Reviewed and integrated by `f54d850b`; combined gate passed; native engine pending |
 | Campaign allowance and manual provider bridge | provider migration / `playable-provider-allowance` | `f9c5bcf8` | New bridge/allowance tests passed; two inherited reservation tests require complete task integration |
@@ -55,7 +55,7 @@ All paths below are siblings of the integration checkout under
 ## Dependency order and remaining work
 
 - [x] Run native admission/fence regression gates and runtime ledger gates.
-- [ ] Complete final ledger review and integrate runtime foundation (native foundation integrated).
+- [x] Complete final ledger review and integrate runtime foundation (`9eda4404`, 2026-10-05).
 - [ ] Complete task facade/scheduler wiring, including refusal before physical
   cancellation, preserved queued constraints and pending FIFO resume.
 - [ ] Verify full 32-task queue, isolated questions, checkpoint omission from
