@@ -211,6 +211,20 @@ Build these on top of validated map and actor primitives. Avoid creating a secon
 
 Swarm work remains a separate layer. Single-NPC ownership, receipts, exact actor identity, map operations, and deterministic planning should be solid before swarm coordination becomes part of the main baseline.
 
+### 7. Game-guide reference artifacts (later, optional)
+
+Owner idea, 2026-10-05: alongside skills, add reference artifacts such as a base-game guide and a Space Age guide that the planner can look up through the skill/knowledge bank.
+
+- Purpose: a crutch for smaller models that lack Factorio knowledge. It is not the main path.
+- The primary goal is beating Factorio under any mod set. Guides written for vanilla or Space Age do not carry over to other mods. That goal depends on live game facts (for example the `[REQUIREMENTS]` block) and skills the NPC learns and verifies itself.
+- Constraints if built:
+  - opt-in;
+  - tagged with the game version and mod set it describes;
+  - retrieved on demand, never inlined into the system prompt;
+  - never authoritative over live game data;
+  - no hard-coded build orders in the harness (the guide lives in the knowledge bank).
+- Not scheduled. It does not block the red-science acceptance week.
+
 ## What is not required for the next main promotion
 
 The next promotion does **not** require:
