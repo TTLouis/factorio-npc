@@ -11,7 +11,7 @@ import { buildHandoffPacket } from './handoff-packet.mjs'
 import { configuration, RUNTIME_RELIABILITY_GUIDANCE, Session } from './supervisor.mjs'
 import { PlanTiming } from './plan-time-estimate.mjs'
 import { FakeFactorio, gather, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
-import { buildVerifiedResults, VERIFIED_RESULTS_HEADER } from './verified-results.mjs'
+import { buildVerifiedResults, VERIFIED_RESULTS_DROP_ORDER, VERIFIED_RESULTS_HEADER } from './verified-results.mjs'
 
 // Delegation U7: planner wiring. The planner conversation is restaged at a slice
 // close (C1) or a shelf pickup (C2) only under the token size rule, and always
@@ -155,6 +155,41 @@ test('the loop\'s own timing record of the closed step (board step id, board goa
   assert.equal(records[0].step_id, 'step_1', 'board step ids are not the reducer step ids')
   await world.closeSlice()
   assert.match(modMessages(world.calls[2].messages)[0].content, /step 1 time: no game-rate estimate, measured \d+(?:\.\d+)? s/)
+})
+
+test('the verified-results text carries the slice NPC time split when given, drops it only after the other optional records, and omits it only without one', async () => {
+  const world = plannerHarness({ softLimit: 1_000_000 })
+  await world.say()
+  await world.closeSlice()
+  const state = world.snapshots[2]
+  const timeSplit = { wall_ms: 485_000, think_ms: 110_000, actor_busy_ms: 250_000, idle_ms: 125_000 }
+  const withSplit = buildVerifiedResults({ planningState: state, timeSplit })
+  assert.match(withSplit.text, / \|\| npc time this slice: actor busy 4\.2 min, model thinking 1\.8 min, idle 2\.1 min \(NPC not working 48%; idle includes waiting on machines, harness and Jev/)
+  assert.equal(buildVerifiedResults({ planningState: state }).text.includes('npc time this slice'), false)
+  assert.match(buildVerifiedResults({ planningState: state, timeSplit: { wall_ms: 0, think_ms: 0, actor_busy_ms: 0, idle_ms: 0 } }).text, /npc time this slice: .*NPC not working 0%/, 'a measured zero-length slice is shown, so the line depends on the request alone')
+  assert.equal(VERIFIED_RESULTS_DROP_ORDER.at(-1), 'time_split', 'the split line is the last optional record to drop')
+  const tight = buildVerifiedResults({ planningState: state, timeSplit, limits: { maxChars: 1 } })
+  const at = key => tight.dropped.indexOf(key)
+  assert.ok(at('time_split') >= 0)
+  for (const key of tight.dropped.filter(key => /^(?:receipt|evidence|time_step)_/.test(key))) assert.ok(at(key) < at('time_split'), `${key} drops before the split line`)
+  assert.equal(tight.text.includes('npc time this slice'), false)
+})
+
+test('a slice close shows the planner its NPC time split, traces slice.time_split with the request id and a reason', async () => {
+  const world = plannerHarness({ softLimit: 1_000_000 })
+  await world.say()
+  const requestId = world.rows('request.received')[0].request_id
+  await world.closeSlice()
+  const rows = world.rows('slice.time_split')
+  assert.ok(rows.length >= 1, 'a slice.time_split row was written at the slice close')
+  const row = rows[0]
+  assert.equal(row.request_id, requestId)
+  assert.equal(row.data.reason, 'slice_close')
+  assert.equal(row.data.since, 'request_start')
+  assert.equal(row.data.shown_to_model, true)
+  assert.equal(row.data.walking, 'inside_actor_busy')
+  for (const field of ['wall_ms', 'think_ms', 'actor_busy_ms', 'idle_ms']) assert.ok(Number.isFinite(row.data[field]) && row.data[field] >= 0, field)
+  assert.match(modMessages(world.calls[2].messages)[0].content, /npc time this slice: actor busy .*, model thinking .*, idle .* \(NPC not working \d+%; idle includes waiting on machines, harness and Jev/)
 })
 
 test('the verified-results builder reads reducer state and the explicit records only, never the task board', () => {
@@ -489,13 +524,13 @@ async function realSystemPrompt() {
   return `${await fsp.readFile(REAL_PROMPT_FILE, 'utf8')}\n\n${RUNTIME_RELIABILITY_GUIDANCE}`
 }
 
-test('time efficiency is a top-level rule of the real system prompt and applies to every development mode', async () => {
+test('time reaches the planner as harness facts only: the system prompt carries no time-advice rules, and the chat and reply-language rules are intact', async () => {
   const prompt = plannerHarness({ systemPrompt: await realSystemPrompt() }).agent.systemPrompt
-  const section = prompt.indexOf('## Time efficiency')
-  assert.ok(section > 0 && section < prompt.indexOf('## Read-only tools'), 'the section comes right after the core loop, before the tool reference')
-  assert.match(prompt, /Game time is a first-class cost of every plan, including vertical work/)
-  assert.match(prompt, /Speed never overrides correctness, safety, the player's requested result/)
-  assert.match(prompt, /a vertical slice is still judged on the game time it takes, so apply the Time efficiency rules to every mode/)
+  assert.doesNotMatch(prompt, /## Time efficiency/)
+  assert.doesNotMatch(prompt, /Game time is a first-class cost/)
+  assert.doesNotMatch(prompt, /a vertical slice is still judged on the game time it takes/)
+  assert.match(prompt, /Chat messages are formatted as `\[CHAT\] <username>: <message>`/)
+  assert.match(prompt, /Reply language: write every `chatMessage` in the language of the player's most recent `\[CHAT\]` message/)
 })
 
 test('a plan slice is scoped to the shelf node it names, and shelf intents are short outline labels', async () => {

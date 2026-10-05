@@ -273,7 +273,7 @@ You author the shelf through the optional roadmap field on submitPlan: a short l
 
 When a draft intentionally refines one or more existing Shelf nodes, add roadmapNodeIds beside plan/currentStep/operations and choose stable ids from [PLANNING_STATE].steering.refinement_candidates or the current shelf. On the first long-horizon submission you may create the shelf with roadmap and select ids from those same nodes in roadmapNodeIds. This is lineage, not execution authority; never invent an id for a node that is not on the admitted shelf. When the goal has a shelf, a plan slice holds only the steps for the node it names in roadmapNodeIds, normally the next one: its steps end when that node's intent is true. Work that belongs to a later node stays on the shelf and gets its own slice later; the harness asks for that slice when this one completes and the goal is not yet met. Do not restate the whole roadmap as steps. On the first long-horizon submission, send the shelf in roadmap, plan only its first node, and name that node in roadmapNodeIds.
 
-For a bounded planning slice, add developmentMode as vertical, horizontal, maintain, or recover to describe the dominant direction YOU authored relative to the current critical path. Follow [PLANNING_STATE].steering when it remains appropriate, but this field describes the draft rather than granting steering authority. Small measured supporting work does not require a second mode; substantial mixed-direction work should be split at a better checkpoint. The mode changes what you advance, not how fast: a vertical slice is still judged on the game time it takes, so apply the Time efficiency rules to every mode.
+For a bounded planning slice, add developmentMode as vertical, horizontal, maintain, or recover to describe the dominant direction YOU authored relative to the current critical path. Follow [PLANNING_STATE].steering when it remains appropriate, but this field describes the draft rather than granting steering authority. Small measured supporting work does not require a second mode; substantial mixed-direction work should be split at a better checkpoint.
 
 For the active Plan Tracker step, you may add one optional root field named checkpoint beside chatMessage/plan/currentStep/operations. checkpoint is your semantic completion proposal for deterministic runtime validation and verification, not a claim that the step is already done. It must use a runtime-supported contract: {"mode":"all|any","requirements":[...]} with requirement kinds inventory_count, entity_inventory_count, entity_exists, entity_state, authoritative_operation_receipt, or runtime_controller_state. Prefer world-state outcomes over action occurrence. Example: if the step means "have 100 stone" and the next operation only gathers 40 more because 62 are already held, checkpoint must say inventory_count stone >= 100, not >= 40. The operation batch describes what to do next; checkpoint describes what would prove the semantic step complete. Runtime remains completion authority for supported deterministic contracts. Omit checkpoint when no safe deterministic predicate represents the step; prose-only semantic steps remain the Main LLM's responsibility rather than being delegated to a second AI judge.
 
@@ -2922,14 +2922,29 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async planSliceCloseWake({ route, planningState, goalEvaluation, withinTurn = false }) {
     const requestId = this.traceRequest?.id ?? this.turnScope.getStore()?.requestId // captured before any await: a superseding reset can clear the request
     const plan = planningState ? getActivePlanningPlan(planningState) : undefined
+    // The NPC time split of the slice just closed: the mark advances here, once per slice close.
+    const timeSplit = this.planTiming?.sliceTimeSplit()
     const verified = buildVerifiedResults({
       planningState,
       goalEvaluation,
+      timeSplit,
       stepTimes: this.planTiming?.closedStepTimes((plan?.steps ?? []).map(step => step.step_id), {
         goalId: this.peekPlanState(this.activePlanKey())?.goal_id, // the board's goal id, the key PlanTiming records carry
         sinceMs: plan?.committed_at ?? 0,
       }) ?? [],
     })
+    if (timeSplit) {
+      await this.traceEvent('slice.time_split', {
+        since: timeSplit.since,
+        wall_ms: timeSplit.wall_ms,
+        think_ms: timeSplit.think_ms,
+        actor_busy_ms: timeSplit.actor_busy_ms,
+        idle_ms: timeSplit.idle_ms,
+        walking: timeSplit.walking,
+        shown_to_model: verified.text.includes('npc time this slice'),
+        reason: 'slice_close',
+      }, { requestId })
+    }
     const wake = { verifiedResults: verified.text, restaged: false }
     if (!planningState?.goal) return wake
     // Never restage a planner that has nothing healthy to be re-briefed on: a
