@@ -1,4 +1,5 @@
 import type { ControlledActor } from './actors/types'
+import { recipe_unlock_summary } from './goal_requirements'
 
 export type BootstrapDependencyStatus = 'already_satisfied' | 'needs_crafting' | 'needs_acquisition/processing'
 
@@ -534,6 +535,8 @@ export function craft_bootstrap_preflight_for_actor(actor: ControlledActor, item
       field: 'item_name',
       identity: item_name,
       recipe_name: recipe.name,
+      // Still a terminal refusal: this only names what unlocks the recipe and what to research next.
+      unlock: recipe_unlock_summary(actor, recipe.name),
     }
   }
 

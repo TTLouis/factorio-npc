@@ -10,6 +10,7 @@ import type { ThroughputMeasurementRequest } from './throughput_measurement'
 import { validate_construction_execution_plan } from './construction_execution'
 import { local_spatial_observation, plan_placement, select_navigation_escape_point } from './construction_planning'
 import { find_construction_sites } from './construction_site_planning'
+import { goal_requirements } from './goal_requirements'
 import { solve_live_production_candidates } from './production_planning_candidates_live'
 import { production_scope_context } from './production_scope'
 import { plan_research_path } from './research_path'
@@ -19,6 +20,9 @@ import { new_throughput_measurement_controller } from './throughput_measurement'
 export function create_production_planning_remote_interface(
   get_actor: () => ControlledActor | undefined,
   injected_throughput_measurement?: ReturnType<typeof new_throughput_measurement_controller>,
+  // Read-only actor lookup for requirement reads: it must never create the NPC body or write storage
+  // (control.ts passes peek_controlled_actor). Defaults to get_actor so a test can inject one actor.
+  peek_actor: () => ControlledActor | undefined = get_actor,
 ) {
   const throughput_measurement = injected_throughput_measurement ?? new_throughput_measurement_controller(get_actor)
   if (!injected_throughput_measurement) script.on_nth_tick(1, () => throughput_measurement.tick())
@@ -76,6 +80,9 @@ export function create_production_planning_remote_interface(
       if (!actor) return { ok: false, error: { code: 'INVALID_REQUEST', message: 'controlled actor is unavailable' } }
       return plan_research_path(actor, name, max_nodes)
     },
+    // Harness-owned planning facts for a goal's targets (recipes, unlocking technologies, research paths,
+    // machines). Peek lookup: a read must not create or reconcile the body.
+    goal_requirements: (request: unknown) => goal_requirements(peek_actor(), request),
     navigation_escape: (target_position: { x: number, y: number }, radius: number = 6) => {
       const actor = get_actor()
       if (!actor) return { ok: false, error: 'controlled actor is unavailable' }

@@ -9,7 +9,7 @@ import type {
 } from 'factorio:runtime'
 
 import type { ControlledActor } from './actors/types'
-import { get_controlled_actor } from './actors/actor_controller'
+import { get_controlled_actor, peek_controlled_actor } from './actors/actor_controller'
 import { new_output_delivery_proof_controller, tick_output_delivery_proofs } from './output_delivery_proof'
 import { record_hand_crafted_tick, record_hand_mined_item } from './hand_work'
 import { new_awareness_controller } from './awareness'
@@ -56,7 +56,7 @@ create_tools_remote_interface()
 create_discovery_remote_interface(get_controlled_actor)
 create_knowledge_remote_interface(get_controlled_actor)
 create_prototype_knowledge_remote_interface(get_controlled_actor)
-create_production_planning_remote_interface(get_controlled_actor)
+create_production_planning_remote_interface(get_controlled_actor, undefined, peek_controlled_actor)
 create_task_board_ui_remote_interface()
 
 let setup_complete = false
