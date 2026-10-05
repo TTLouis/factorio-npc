@@ -103,6 +103,18 @@ import { insertTailBlock } from './prompt-prefix.mjs'
 import { ChatAcknowledger } from './responsiveness.mjs'
 import { UsageLedger } from './usage-ledger.mjs'
 import { checkpointWaitRequirement, conditionEta, safeWaitSchedule, scheduleWait, WAIT_BASIS } from './production-wait.mjs'
+import {
+  combineGroundingWithChallenge,
+  ensureGoalRequirements,
+  goalRequirementsContext,
+  groundFirstPlan,
+  injectedRequirementsChars,
+  lockedRecipeBlocker,
+  describeLockedRecipePreflight,
+  REQUIREMENTS_PREFIX,
+  refreshGoalRequirementsAtShelfPickup,
+  retireGoalRequirements,
+} from './goal-requirements.mjs'
 import { abortSkillChoice, ensureSkillOffers, injectedSkillChars, refreshSkillOffersAtShelfPickup, SKILL_OFFERS_PREFIX, skillOffersContext, traceSkillLoaded, traceSkillsFollowed } from './skill-offers.mjs'
 
 export { AgentLoopError }
@@ -290,6 +302,8 @@ To wait for a furnace or assembler, do not guess wait ticks: when you start it, 
 When finite canonical work remains but execution is truthfully impossible, keep the remaining plan and start chatMessage with "BLOCKED: " followed by the exact missing fact or blocker. This is the explicit no-mutation blocker contract. Future-tense prose such as "I will take the items" is not a blocker and does not authorize the harness to invent an operation.
 
 Before a non-empty operation batch, chatMessage should tell the human what concrete current plan step SGLuna is about to attempt. Do not say mining, construction, transfer, crafting, or any other mutation has started unless that mutation is in the admitted/running operation batch or authoritative runtime evidence proves it. Navigation completion proves arrival only; it never proves that a later mining or construction action started. [MOD] completion/error messages may include a detailed getTaskStatus snapshot. Use that receipt plus any needed read-only verification to advance, replan, complete, or report a blocker.
+
+The harness may add a [REQUIREMENTS] block while you author or revise a plan, and may send it once as a correction right after your first plan. It is authoritative live game data read from the running game: which recipes and machines needed for the goal's targets are still locked, which technology unlocks each, and the dependency-ordered research with each node's exact kind (lab science, or a trigger completed by performing its exact trigger). Your roadmap and plan must order the unlocking research before any node or step that needs a locked recipe or machine; never plan to craft or build something the block lists as locked before that research is done. It supplies facts only: you still write the goal, shelf and plan.
 
 Skill lifecycle is explicit. findSkills is discovery only: a search result is not a loaded skill and must not be relied on as the full pattern. Before following a discovered skill, call getSkillDetails for that exact id. A [SKILL_CONTEXT] message contains only skills explicitly opened with getSkillDetails for the current logical task. Reuse their structure and constraints, but revalidate mutable world state, recipes, inventory, geometry, and placement with live deterministic tools before acting.
 
@@ -2551,6 +2565,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // Jev's blind reading of the current new goal (see goal-reading.mjs).
     this.goalReading = null
     this.pendingGoalReadingTrace = null
+    // Live requirements for the goal's targets (goal-requirements.mjs): the authoring block, and whether the
+    // one first-plan grounding round was already asked for this goal.
+    this.goalRequirements = null
+    this.requirementsGroundingAsked = false
+    this.requirementsSequence = 0
     this.planUpdateReason = 'request'
     this.requestLifecycle = 'new_goal'
     this.pendingInteractionAmendment = null
@@ -3577,13 +3596,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   compactWorkingContext() {
     if (this.compactionDeferred) return
     const overBudget = () => this.messages.length > this.maxWorkingMessages
-      || this.messages.reduce((total, message) => total + messageChars(message), 0) > this.maxWorkingChars - injectedSkillChars(this) // 2.8 hook: injected skill text counts
+      || this.messages.reduce((total, message) => total + messageChars(message), 0) > this.maxWorkingChars - injectedSkillChars(this) - injectedRequirementsChars(this) // 2.8 hook: injected skill and requirements text counts
     // 2.9: every fold rewrites the digest and so breaks the provider's cached
     // prefix from the digest onward. Folding only down to the ceiling would
     // fold on every round once the working context is full; folding to a low
     // watermark makes the rounds in between pure appends.
     const overLowWater = () => this.messages.length > this.maxWorkingMessages * COMPACTION_LOW_WATERMARK
-      || this.messages.reduce((total, message) => total + messageChars(message), 0) > (this.maxWorkingChars - injectedSkillChars(this)) * COMPACTION_LOW_WATERMARK
+      || this.messages.reduce((total, message) => total + messageChars(message), 0) > (this.maxWorkingChars - injectedSkillChars(this) - injectedRequirementsChars(this)) * COMPACTION_LOW_WATERMARK
     if (!overBudget()) return
     while (overLowWater()) {
       const newest = this.messages.findLastIndex(message => message.role === 'assistant' && Array.isArray(message.tool_calls))
@@ -3609,11 +3628,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   providerMessages() {
     const messages = super.providerMessages().filter(message => !(message?.role === 'user'
       && typeof message.content === 'string'
-      && (message.content.startsWith('[SKILL_CONTEXT]') || message.content.startsWith(SKILL_OFFERS_PREFIX))))
+      && (message.content.startsWith('[SKILL_CONTEXT]') || message.content.startsWith(SKILL_OFFERS_PREFIX) || message.content.startsWith(REQUIREMENTS_PREFIX))))
     // 2.9: the skill offers are recomputed per round (shown only while a plan
     // is authored), so they are tail, like steering. Loaded skill context lives
     // for a whole logical task, so it stays in the fixed prefix.
-    const tailed = insertTailBlock(messages, skillOffersContext(this) ? { role: 'user', content: skillOffersContext(this) } : undefined) // 2.8 hook
+    const offered = insertTailBlock(messages, skillOffersContext(this) ? { role: 'user', content: skillOffersContext(this) } : undefined) // 2.8 hook
+    // Live game requirements for the goal's targets: tail too, shown only while a plan is authored or revised.
+    const tailed = insertTailBlock(offered, goalRequirementsContext(this) ? { role: 'user', content: goalRequirementsContext(this) } : undefined)
     const skillContext = this.skillContext()
     if (!skillContext) return tailed
     // Skill context belongs to the fixed prefix, which ends before the first
@@ -6322,6 +6343,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
 
     await ensureSkillOffers(this, { memoryKey, intent, text }) // 2.8 hook: skill-offers.mjs
+    await ensureGoalRequirements(this, { memoryKey, intent }) // goal-requirements.mjs: reset on a new goal, re-read on a revision
     try {
       this.chatRequestPending = true
       this.startRestage = pendingStartRestage // consumed by the first turn (applyStartRestage); cleared in the finally below whatever happens
@@ -6409,6 +6431,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.memory.clearTaskContext?.(key)
     this.clearLoadedSkillContext()
     this.skillOffers = null // 2.8 hook
+    this.goalRequirements = null
     await this.persistState()
 
     // Completion is a hard planner boundary. Do not carry the completed task's
@@ -6552,6 +6575,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     error.failureClass = 'plan_category'
     error.code = 'goal_reading_disagreement'
     error.details = { goal_reading: this.pendingGoalReadingTrace }
+    // Not in details (details are traced): lets the one corrective round also carry the live requirements.
+    Object.defineProperty(error, 'goalDefinition', { value: definition, enumerable: false })
     throw error
   }
 
@@ -7264,6 +7289,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         steering_mode: planningAfterCompletion.steering?.current_mode,
       })
       await refreshSkillOffersAtShelfPickup(this, planningAfterCompletion) // 2.8 hook: shelf -> active plan skill search
+      await refreshGoalRequirementsAtShelfPickup(this, planningAfterCompletion) // live requirements for the next slice
       this.reasoningTriggerSource = 'plan_slice_completed'
       try {
         const unmet = goalEvaluation
@@ -7364,6 +7390,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         route: 'active_goal_after_plan_completion',
         plan_status: reducerPlanAfterCompletion?.status,
       })
+      await refreshGoalRequirementsAtShelfPickup(this, planningAfterCompletion, 'slice_authoring')
       this.reasoningTriggerSource = 'plan_slice_completed'
       try {
         return await this.continueFromModMessage(
@@ -7415,6 +7442,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         content: `[HARNESS] The plan is finished, but the game reports ${formatGoalProgress(evaluation)}; still unmet: ${unmet}. The user goal remains active. Author the next plan slice that moves the world toward the unmet conditions; do not report the goal as complete.${this.pendingDroppedOperationsNote ? ` ${this.pendingDroppedOperationsNote}` : ''}`,
       })
       this.pendingDroppedOperationsNote = ''
+      await refreshGoalRequirementsAtShelfPickup(this, planning, 'unmet_goal_authoring') // the planner authors the next slice: re-read the live game
       return this.runTurn()
     }
     this.active = false
@@ -8759,6 +8787,31 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return plan
   }
 
+  // Goal requirements (goal-requirements.mjs): after the first plan's goal definition is accepted and before the plan is
+  // committed or any operation admitted, the live game is read once for the targets' locked recipes, machines and
+  // research. If anything is locked the planner gets ONE corrective round with those facts (combined with the
+  // goal-reading challenge when that also fires). The harness never edits the plan, shelf or steps. A provider-error
+  // recovery attempt never gets the round: it would spend the attempt on a valid plan.
+  async parsePlanMessageChecked(message, options = {}) {
+    let plan
+    try {
+      plan = this.parsePlanMessage(message)
+    }
+    catch (error) {
+      if (error?.code === 'goal_reading_disagreement') await combineGroundingWithChallenge(this, error, options)
+      throw error
+    }
+    const grounding = await groundFirstPlan(this, plan, options)
+    if (grounding) {
+      const error = new AgentLoopError(grounding.message)
+      error.failureClass = 'plan_category'
+      error.code = grounding.code
+      error.details = grounding.details
+      throw error
+    }
+    return plan
+  }
+
   prepareToolBatch(message) {
     try {
       const rawCalls = Array.isArray(message?.tool_calls) ? message.tool_calls : []
@@ -9287,13 +9340,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         operation_name: operation?.name,
         operation_args: sanitizeTraceValue(operation?.args ?? {}),
         reason_code: failure?.preflight?.code,
+        // A locked recipe names its unlocking technology and the next research node (still a terminal blocker).
+        ...(failure?.preflight?.code === 'recipe_locked' ? { locked_recipe: describeLockedRecipePreflight(failure.preflight).facts } : {}),
         factorio_error: factorioError,
         no_replay: failure?.noReplay === true,
       }),
     }
-    const blocker = failure?.preflight?.code
-      ? `operation_preflight_failed:${failure.preflight.code}`
-      : 'operation_admission_failed'
+    const blocker = failure?.preflight?.code === 'recipe_locked'
+      ? lockedRecipeBlocker(failure.preflight)
+      : failure?.preflight?.code
+        ? `operation_preflight_failed:${failure.preflight.code}`
+        : 'operation_admission_failed'
     const state = this.memory.setAdmissionState?.(this.requestInfo.memoryKey, 'admission_failed', { blocker, evidence })
     await this.persistState()
     return state ? { ...(stateResult ?? {}), state } : stateResult
@@ -9610,6 +9667,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       ...(plan.semanticCompletion ? { semantic_completion: plan.semanticCompletion } : {}),
     })
     await traceSkillsFollowed(this, plan) // 2.8 hook
+    await retireGoalRequirements(this, plan)
 
     const before = await this.assertCurrent()
     const persistentRuntime = commands.length === 0 && plan.plan.length > 0

@@ -612,6 +612,14 @@ export class NpcAgentLoop {
     return this.parsePlanValue(raw)
   }
 
+  // A reply that parsed, checked once more before anything is committed or admitted. The base accepts it as parsed;
+  // runtime-v8 grounds the first plan of a goal against the live game here. An override throws a plan_category error
+  // to ask the planner for one corrective round. options.recovery marks a provider-error recovery attempt, where no
+  // corrective round may be asked (it would spend a recovery attempt on a valid plan).
+  async parsePlanMessageChecked(message, _options = {}) {
+    return this.parsePlanMessage(message)
+  }
+
   // The policy that admits the plan's operations. A runtime whose policy
   // approves more operations (runtime-v8: place_candidate) overrides this.
   parsePlanValue(raw) {
@@ -662,7 +670,7 @@ export class NpcAgentLoop {
       })
       let plan
       try {
-        plan = this.parsePlanMessage(message)
+        plan = await this.parsePlanMessageChecked(message, { recovery: true })
       }
       catch (error) {
         lastError = error
@@ -1001,7 +1009,7 @@ export class NpcAgentLoop {
 
       let plan
       try {
-        plan = this.parsePlanMessage(message)
+        plan = await this.parsePlanMessageChecked(message)
       }
       catch (error) {
         if (error?.failureClass === 'plan_category') {

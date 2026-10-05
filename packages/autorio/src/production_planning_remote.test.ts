@@ -108,6 +108,51 @@ describe('autorio_planning remote contract', () => {
       error: { code: 'INVALID_REQUEST', message: 'controlled actor is unavailable' },
     })
   })
+
+  it('reads goal requirements through the peek lookup and never creates the body', () => {
+    let planning: { goal_requirements: (request: any) => any } | undefined
+    ;(globalThis as any).remote = {
+      add_interface: (_name: string, methods: any) => { planning = methods },
+    }
+    ;(globalThis as any).pairs = (value: Record<string, unknown>) => Object.entries(value)
+    ;(globalThis as any).prototypes = { entity: {}, item: {}, fluid: {}, technology: {} }
+    const created: string[] = []
+    const peeked = {
+      is_valid: true,
+      force: {
+        valid: true,
+        recipes: { 'plain-recipe': { name: 'plain-recipe', enabled: true, hidden: false, category: 'crafting', additional_categories: [], ingredients: [], products: [{ type: 'item', name: 'plain-recipe', amount: 1 }] } },
+        technologies: {},
+      },
+    } as unknown as ControlledActor
+
+    create_production_planning_remote_interface(
+      () => {
+        created.push('get_actor')
+        return undefined
+      },
+      { tick: () => {}, start: () => undefined, status: () => undefined, cancel: () => undefined } as any,
+      () => peeked,
+    )
+
+    const result = planning!.goal_requirements({ items: ['plain-recipe'] })
+    expect(result.ok).toBe(true)
+    expect(result.locked).toEqual([])
+    expect(created).toEqual([])
+  })
+
+  it('reports an unavailable actor from the peek lookup without falling back to get_actor', () => {
+    let planning: { goal_requirements: (request: any) => any } | undefined
+    ;(globalThis as any).remote = {
+      add_interface: (_name: string, methods: any) => { planning = methods },
+    }
+    create_production_planning_remote_interface(
+      () => { throw new Error('a read must not create the body') },
+      { tick: () => {}, start: () => undefined, status: () => undefined, cancel: () => undefined } as any,
+      () => undefined,
+    )
+    expect(planning!.goal_requirements({ items: ['x'] })).toEqual({ ok: false, error: { code: 'NO_ACTOR', message: 'controlled actor is unavailable' } })
+  })
 })
 
 function actor(force: Record<string, unknown>) {

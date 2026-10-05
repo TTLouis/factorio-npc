@@ -32,6 +32,7 @@ import { resolveAgentRole } from './agent-roles.mjs'
 import { CONTINUATION_WORDS, NpcAgentLoop, RESTART_BEFORE_FIRST_PLAN_PAUSE, RESUME_HINT } from './npc-agent-loop.mjs'
 import { evaluateGoalDefinition, formatGoalStatus, formatGoalUnderstanding, formatSliceProgressNote, goalUiView } from './goal-definition.mjs'
 import { formatGoalReadingNote } from './goal-reading.mjs'
+import { lockedRecipeSummary } from './goal-requirements.mjs'
 import { getActivePlan, GOAL_STATUS, PLAN_STATUS } from './planning-state.mjs'
 import { ACK_EVENT, ResponsivenessTracker } from './responsiveness.mjs'
 import {
@@ -432,7 +433,7 @@ function requestFailurePauseSummary(raw) {
   return ''
 }
 
-export function formatTaskCondition(value, kind = 'blocker') {
+export function formatTaskCondition(value, kind = 'blocker', evidence = undefined) {
   const raw = uiText(value, kind === 'pause' ? 300 : 500)
   if (!raw) return { raw: '', summary: '' }
 
@@ -463,6 +464,8 @@ export function formatTaskCondition(value, kind = 'blocker') {
   if (raw === 'operation_preflight_failed:bootstrap_dependency_unresolved') {
     return { raw, summary: 'SGLuna cannot start the next action until a required bootstrap dependency is available.' }
   }
+  const lockedRecipe = lockedRecipeSummary(raw, evidence)
+  if (lockedRecipe) return { raw, summary: lockedRecipe }
   if (raw.startsWith('operation_preflight_failed:')) {
     return { raw, summary: 'SGLuna’s next action failed a preflight check before it could start.' }
   }
@@ -666,7 +669,7 @@ export function deriveActivity(state) {
     const text = uiText(operation, 1000)
     if (text) entries.push({ kind: 'action', text })
   }
-  const blocker = formatTaskCondition(state.blocker, 'blocker')
+  const blocker = formatTaskCondition(state.blocker, 'blocker', state.task_board?.evidence)
   if (blocker.raw) entries.push({ kind: 'blocker', text: blocker.summary })
   const pauseReason = formatTaskCondition(state.pause_reason, 'pause')
   // An exhausted provider recovery already reached the feed as the request's
@@ -1407,7 +1410,7 @@ export function taskBoardUiSnapshot(state, live, tracker) {
       debug,
     }
   }
-  const blocker = formatTaskCondition(board?.blocker, 'blocker')
+  const blocker = formatTaskCondition(board?.blocker, 'blocker', board?.evidence)
   const pauseReason = formatTaskCondition(board?.pause_reason, 'pause')
   const baseSteps = trackerSteps ?? board.steps.slice(0, 30).map(step => ({
     id: String(step?.id ?? '').slice(0, 80),
@@ -1429,7 +1432,8 @@ export function taskBoardUiSnapshot(state, live, tracker) {
   const topStatus = trackerStatus ?? board.status
   const topBlocked = trackerBlocked ?? state?.planning?.blocked
   const blockerRaw = trackerBlocked?.reason ?? blocker.raw
-  const blockerSummary = trackerBlocked?.summary ?? blocker.summary
+  // A locked recipe's own summary names the technology and the next research; the tracker's detail is the bare code.
+  const blockerSummary = lockedRecipeSummary(blockerRaw, board?.evidence) ?? trackerBlocked?.summary ?? blocker.summary
   return {
     goal_id: String(tracker?.goal_id ?? board?.goal_id ?? state?.goal_id ?? '').slice(0, 100),
     objective: String(state?.objective ?? live?.objective ?? '').slice(0, 500),

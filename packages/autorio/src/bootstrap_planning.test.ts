@@ -138,6 +138,42 @@ describe('recipe bootstrap dependency closure', () => {
     expect(result.bootstrap.first_unresolved).toBeUndefined()
   })
 
+  it('names the unlocking technology and the next research node when the recipe is locked (still a terminal refusal)', () => {
+    ;(globalThis as any).prototypes.technology = {
+      'unlock-tech': { research_trigger: { type: 'craft-item', item: { name: 'plate-x' }, count: 10 } },
+    }
+    const locked = { ...recipe('locked-widget', 'locked-widget'), enabled: false }
+    const technology = (name: string, prerequisites: Record<string, any> = {}, unlocks: string[] = []) => ({
+      name,
+      level: 1,
+      researched: false,
+      enabled: true,
+      prerequisites,
+      prototype: { max_level: 1, effects: unlocks.map(recipe_name => ({ type: 'unlock-recipe', recipe: recipe_name })) },
+      research_unit_count: 10,
+      research_unit_energy: 30,
+      research_unit_ingredients: [{ name: 'pack-x', amount: 1 }],
+    })
+    const base = technology('base-tech')
+    const unlock = technology('unlock-tech', { 'base-tech': base }, ['locked-widget'])
+    const actor = actorWith({ 'locked-widget': locked }, { 'plate-x': 5 }, { 'locked-widget': 5 })
+    ;(actor.force as any).research_enabled = true
+    ;(actor.force as any).technologies = { 'base-tech': base, 'unlock-tech': unlock }
+
+    const result = craft_bootstrap_preflight_for_actor(actor, 'locked-widget', 1) as any
+
+    expect(result).toMatchObject({ ok: false, code: 'recipe_locked', identity: 'locked-widget', recipe_name: 'locked-widget' })
+    expect(result.unlock).toMatchObject({
+      unlocked_by: 'unlock-tech',
+      pending_count: 2,
+      next_actionable: { name: 'base-tech', mode: 'science', status: 'ready' },
+    })
+
+    ;(actor.force as any).technologies = {}
+    const orphan = craft_bootstrap_preflight_for_actor(actor, 'locked-widget', 1) as any
+    expect(orphan).toMatchObject({ ok: false, code: 'recipe_locked', unlock: { unlock_unknown: true } })
+  })
+
   it('uses the live place-item count when bootstrapping a missing compatible machine', () => {
     ;(globalThis as any).prototypes.get_entity_filtered = (filters: Array<Record<string, string>>) => {
       if (filters[0]?.crafting_category !== 'processing-x') return {}
