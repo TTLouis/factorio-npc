@@ -2,6 +2,33 @@
 
 This file is the current status summary for the single-NPC integration line. Historical detailed checkpoints are retained under `docs/validation/`.
 
+## October 5 goal requirements grounding (unit evidence only, no live run yet)
+
+Merged at `4f833278` after the live run `goal_052327n_1`, where the planner
+hand-crafted automation science packs before the trigger technology that unlocks
+the recipe. Gate: **1,624 runtime and 965 mod tests**, typecheck, Lua build and
+generated-Lua check. None of the new Lua has run in a real engine.
+
+- `autorio_planning.goal_requirements` reads the goal's `done_when` targets from
+  the live game: locked recipes and ingredients, compatible machines, and the
+  unlocking technology with its dependency-ordered pending research, each node
+  marked lab science or trigger, with the exact trigger. Every list is bounded.
+- The runtime shows this as a `[REQUIREMENTS]` block only while a plan is being
+  authored or revised. The first plan of a goal gets one grounding round, before
+  commit or admission, when anything is locked. That round shares the goal-reading
+  challenge's round when both fire, and is skipped during provider-error recovery.
+- `recipe_locked` is still a terminal blocker. It now carries unlock evidence,
+  and the blocker reads `operation_preflight_failed:recipe_locked:<tech>`.
+- The curated `automation-science-bootstrap` skill is retired. Skill cards flag
+  an output recipe that is still locked and name the technology that unlocks it.
+- Known follow-ups:
+  - The skill cards and the requirements block pick the unlocking technology
+    differently: fewest direct prerequisites versus fewest pending path nodes.
+  - Items that are mined or pumped may be flagged as locked when no enabled
+    recipe makes them. Not confirmed.
+  - The added `DURABLE_PLAN_PROMPT` paragraph still contains an ordering rule.
+    It awaits the owner's wording check.
+
 ## October 3 playable implementation candidates
 
 The owner-approved red-science plan is being implemented in isolated local
