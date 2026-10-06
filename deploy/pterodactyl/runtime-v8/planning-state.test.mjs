@@ -494,7 +494,7 @@ test('PLAN_COMPLETED requires every step complete and attaches results to shelf 
   })
   assert.equal(getActivePlan(state).status, PLAN_STATUS.COMPLETED)
   const node = state.roadmap.nodes.find(item => item.id === 'roadmap_early_smelting')
-  assert.equal(node.status, SHELF_NODE_STATUS.REALIZED)
+  assert.equal(node.status, SHELF_NODE_STATUS.PARTIALLY_REALIZED)
   assert.deepEqual(node.resolved_by, [plan.plan_id])
   assert.deepEqual(node.verified_results, ['two stone furnaces smelting iron'])
 })
@@ -1077,12 +1077,13 @@ function dependentShelf(state, now = 1100) {
     now,
     reason: 'initial shelf',
     nodes: [
-      { id: 'node_smelting', intent: 'establish reliable early iron and copper smelting' },
+      { id: 'node_smelting', intent: 'establish reliable early iron and copper smelting', capability_frontier: { intent: 'reliable smelting', recognition: [{ id: 'smelting_ready', description: 'two furnaces are running' }] } },
       {
         id: 'node_science',
         intent: 'automation and red science',
         depends_on: ['node_smelting'],
         development_hint: 'vertical',
+        capability_frontier: { intent: 'red science', recognition: [{ id: 'science_ready', description: 'red science is available' }] },
         // Deliberate overreach: an author ASSERTING the node is already done.
         status: 'realized',
       },
@@ -1108,7 +1109,7 @@ function completeSlice(state, { nodeIds, now, mode = 'vertical', results = ['ver
     source: 'runtime',
     plan_id: plan.plan_id,
     verified_results: results,
-    satisfied_recognition_ids: recognitionIds,
+    satisfied_recognition_ids: recognitionIds ?? (nodeIds ?? []).flatMap(id => id === 'node_smelting' ? ['smelting_ready'] : id === 'node_science' ? ['science_ready'] : []),
   })
 }
 

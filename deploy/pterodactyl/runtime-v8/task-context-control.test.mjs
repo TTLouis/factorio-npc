@@ -114,6 +114,8 @@ test('verified completion archives the completed stages before resetting the liv
   agent.requestInfo = { memoryKey: 'npc:sgluna', sender: 'TTLouis', text: 'completed task', turnId: 1 }
   agent.messages = [{ role: 'user', content: 'old provider context' }]
   agent.baseMessages = [{ role: 'system', content: 'old system context' }]
+  memory.ensurePlanningDraft('npc:sgluna', memory.planByNpc.get('npc:sgluna'))
+  memory.recordGoalSatisfaction('npc:sgluna', { source: 'runtime', evidenceRefs: ['checkpoint/final'], rationale: 'Final world condition verified.' })
   await agent.persistState()
 
   const order = []

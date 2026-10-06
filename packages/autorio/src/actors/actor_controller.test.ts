@@ -7,6 +7,7 @@ import {
   get_npc_recovery_status,
   reconcile_npc_after_load,
   register_npc_recovery_handler,
+  register_npc_single_player_load_handler,
   set_actor_mode,
 } from './actor_controller'
 
@@ -63,6 +64,7 @@ beforeEach(() => {
   }
   ;(globalThis as any).rendering = { clear: vi.fn() }
   register_npc_recovery_handler(undefined)
+  register_npc_single_player_load_handler(undefined)
   set_actor_mode('player')
 })
 
@@ -359,6 +361,10 @@ describe('actor mode', () => {
     surface.find_entities_filtered.mockReturnValue([character])
     ;(globalThis as any).storage.sgluna_actor_mode = 'npc'
     ;(globalThis as any).storage.standalone_character_unit_number = 42
+    const reconcile_logical = vi.fn(() => {
+      expect(character.walking_state.walking).toBe(true)
+    })
+    register_npc_single_player_load_handler(reconcile_logical)
 
     get_load_handler()()
     expect(get_load_reconciliation_status().pending).toBe(true)
@@ -366,6 +372,7 @@ describe('actor mode', () => {
     const actor = get_controlled_actor()
 
     expect(actor?.character).toBe(character)
+    expect(reconcile_logical).toHaveBeenCalledOnce()
     expect(surface.create_entity).not.toHaveBeenCalled()
     expect(character.walking_state).toEqual({ walking: false, direction: 'north' })
     expect(character.mining_state).toEqual({ mining: false })
@@ -482,6 +489,8 @@ describe('actor mode', () => {
 
   it('never reconciles a loaded NPC from on_load alone in multiplayer', () => {
     const character = loaded_multiplayer_npc()
+    const reconcile_logical = vi.fn()
+    register_npc_single_player_load_handler(reconcile_logical)
 
     get_load_handler()()
     const actor = get_controlled_actor()
@@ -490,6 +499,7 @@ describe('actor mode', () => {
     // flag at its load. Stopping the NPC here would change synchronized state on
     // one peer only while the server keeps walking it, which desyncs the game.
     expect(actor?.character).toBe(character)
+    expect(reconcile_logical).not.toHaveBeenCalled()
     expect(character.walking_state).toEqual({ walking: true, direction: 'east' })
     expect(character.shooting_state).toEqual({ state: 'not_shooting', position: { x: 4, y: 5 } })
     expect((globalThis as any).rendering.clear).not.toHaveBeenCalled()

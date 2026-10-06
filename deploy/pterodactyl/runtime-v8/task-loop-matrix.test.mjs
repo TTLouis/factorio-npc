@@ -44,6 +44,11 @@ function harness({ game = new FakeFactorio(), systemPrompt = 'task loop matrix',
     if (!board) {
       return planReply({
         plan: STEPS,
+        goal: {
+          scope: 'finite',
+          summary: 'Hold 10 iron ore, 10 copper ore, and 10 coal.',
+          doneWhen: RESOURCES.map(item_name => ({ kind: 'inventory_count', item_name, minimum: 10 })),
+        },
         currentStep: 0,
         operations: [gather('iron-ore', 10)],
         checkpoint: inventoryCheckpoint('iron-ore', 10),

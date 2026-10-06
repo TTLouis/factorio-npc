@@ -1,0 +1,161 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+
+import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
+import { NpcAgentLoop } from './npc-agent-loop.mjs'
+import { FakeFactorio, gather, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
+
+const KEY = 'npc:sgluna'
+const copper = inventoryCheckpoint('copper-ore', 10)
+const research = { mode: 'all', requirements: [{ kind: 'research_completed', technology: 'automation' }] }
+const goal = { scope: 'finite', summary: 'Gather ten copper ore.', doneWhen: [{ kind: 'inventory_count', item_name: 'copper-ore', minimum: 10 }] }
+
+function draft(overrides = {}) {
+  return { plan: ['Gather ten copper ore'], currentStep: 0, operations: [gather('copper-ore', 10)], goal,
+    stepCompletions: [{ kind: 'deterministic', checkpoint: copper }], ...overrides }
+}
+
+function harness(provider, game = new FakeFactorio()) {
+  const memory = new CanonicalTaskBoardMemory()
+  const events = []
+  const calls = []
+  const agent = new NpcAgentLoop({
+    rcon: game, memory, completionProtocolVersion: 2,
+    provider: async (messages) => {
+      calls.push(messages.map(message => ({ ...message })))
+      assert.ok(calls.length < 9, 'bounded fixture provider calls')
+      return planReply(await provider(calls.length, memory))
+    },
+    interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
+    systemPrompt: 'Strict Luna controller fixture.', stateFile: null, traceFile: null, decisionTraceFile: null, npcId: 'sgluna',
+    onActivity: (event, data) => events.push({ event, data }),
+  })
+  return { agent, memory, game, calls, events }
+}
+
+test('protocol 2 corrects missing or misaligned draft declarations before admitting any gameplay batch', async () => {
+  for (const stepCompletions of [undefined, []]) {
+    const world = harness(call => draft(call === 1 ? { stepCompletions } : {}))
+    await world.agent.request('Gather ten copper ore.', { sender: 'Louis' })
+    assert.equal(world.calls.length, 2)
+    assert.equal(world.game.mutations.length, 1)
+    assert.match(world.calls[1].map(message => message.content ?? '').join('\n'), /stepCompletions/)
+    assert.equal(world.memory.currentPlan(KEY).status, 'active')
+  }
+})
+
+test('semantic assessments cannot admit world mutations, and a corrected deterministic draft can', async () => {
+  const world = harness(call => draft(call === 1 ? { stepCompletions: [{ kind: 'semantic', rationale: 'Assess the copper patch.' }] } : {}))
+  await world.agent.request('Gather ten copper ore.', { sender: 'Louis' })
+  assert.equal(world.calls.length, 2)
+  assert.equal(world.game.mutations.length, 1)
+  assert.match(world.calls[1].map(message => message.content ?? '').join('\n'), /semantic_step_cannot_mutate|permit observations only/)
+})
+
+test('an initial observation-only draft commits without gameplay and requires grounded completion', async () => {
+  const steps = ['Assess the copper patch', 'Gather ten copper ore']
+  let committedStepId
+  const world = harness((call, memory) => {
+    if (call === 1) return draft({ plan: steps, operations: [], stepCompletions: [
+      { kind: 'semantic', rationale: 'Assess the available copper patch from observations.' },
+      { kind: 'deterministic', checkpoint: copper },
+    ] })
+    const planning = memory.planningState(KEY)
+    const held = planning.plans.find(plan => plan.plan_id === planning.active_plan_id)
+    committedStepId = held.steps[held.active_step_index].step_id
+    assert.equal(held.status, 'committed')
+    assert.equal(world.game.mutations.length, 0)
+    return { plan: steps, currentStep: 0, operations: [], chatMessage: 'BLOCKED: A fresh patch observation is still needed.' }
+  })
+  await world.agent.request('Assess the copper patch and gather ten copper ore.', { sender: 'Louis' })
+  assert.equal(world.calls.length, 2, JSON.stringify({ state: world.memory.planningState(KEY), events: world.events.map(row => row.event) }))
+  assert.equal(world.game.mutations.length, 0)
+  assert.equal(world.events.filter(row => row.event === 'plan.semantic_assessment_committed').length, 1)
+  assert.match(world.calls[1].map(message => message.content ?? '').join('\n'), new RegExp(committedStepId))
+  assert.equal(world.memory.currentPlan(KEY).task_board.completed_count, 0)
+  assert.equal(world.events.filter(row => row.event === 'recovery.action_omission_failed').length, 0)
+})
+
+test('an active legacy checkpoint conflicting with the declared outcome is corrected before admission', async () => {
+  const world = harness(call => draft(call === 1 ? { checkpoint: inventoryCheckpoint('copper-ore', 11) } : {}))
+  await world.agent.request('Gather ten copper ore.', { sender: 'Louis' })
+  assert.equal(world.calls.length, 2)
+  assert.equal(world.game.mutations.length, 1)
+  assert.match(world.calls[1].map(message => message.content ?? '').join('\n'), /checkpoint disagrees with stepCompletions/)
+})
+
+test('a completed gathering batch closes its inventory predicate while unmet research stays active', async () => {
+  const steps = ['Gather ten copper ore', 'Research automation']
+  const world = harness(call => call === 1
+    ? draft({ plan: steps, goal: { scope: 'finite', summary: 'Gather copper and research automation.', doneWhen: [{ kind: 'research_completed', technology: 'automation' }] },
+      stepCompletions: [{ kind: 'deterministic', checkpoint: copper }, { kind: 'deterministic', checkpoint: research }] })
+    : { plan: steps, currentStep: 1, operations: [{ name: 'research_technology', args: { technology_name: 'automation' } }] })
+  await world.agent.request('Gather ten copper ore and research automation.', { sender: 'Louis' })
+  world.game.inventory['copper-ore'] = 10
+  await world.agent.completed()
+  const state = world.memory.currentPlan(KEY)
+  assert.equal(state.task_board.completed_count, 1)
+  assert.equal(state.task_board.active_index, 1)
+  assert.equal(state.status, 'active')
+  assert.equal(world.memory.planningState(KEY).goal.status, 'active')
+  assert.equal(world.game.researched.has('automation'), false)
+  assert.equal(world.game.mutations.length, 2)
+})
+
+test('research checkpoint completion requires authoritative researched state, not request admission', async () => {
+  const world = harness(() => draft())
+  assert.equal((await world.agent.evaluateWorldStateCheckpoint({ contract: research })).satisfied, false)
+  world.game.researched.add('automation')
+  assert.equal((await world.agent.evaluateWorldStateCheckpoint({ contract: research })).satisfied, true)
+  world.game.researched.delete('automation')
+  assert.equal((await world.agent.evaluateWorldStateCheckpoint({ contract: research })).satisfied, false)
+})
+
+test('idle settlement closes an already satisfied committed inventory checkpoint without another provider call', async () => {
+  const world = harness(() => draft())
+  await world.agent.request('Gather ten copper ore.', { sender: 'Louis' })
+  assert.deepEqual(await world.agent.settleIdleStepCheckpoint(), { closed: false }, 'unsettled admission cannot close')
+  world.game.inventory['copper-ore'] = 10
+  await world.agent.taskStatusReceipt()
+  const before = world.calls.length
+  const result = await world.agent.settleIdleStepCheckpoint()
+  assert.equal(result.closed, true)
+  assert.equal(world.memory.currentPlan(KEY).task_board.completed_count, 1)
+  assert.equal(world.calls.length, before)
+  assert.equal(world.game.mutations.length, 1)
+})
+
+test('idle settlement refuses an actor epoch change during its live predicate read', async () => {
+  const world = harness(() => draft())
+  await world.agent.request('Gather ten copper ore.', { sender: 'Louis' })
+  world.game.inventory['copper-ore'] = 10
+  await world.agent.taskStatusReceipt()
+  const command = world.game.command.bind(world.game)
+  world.game.command = async text => {
+    const result = await command(text)
+    if (text.includes('evaluate_condition')) world.game.status.epoch += 1
+    return result
+  }
+  await assert.rejects(world.agent.settleIdleStepCheckpoint(), /actor_changed|epoch changed/i)
+  assert.equal(world.memory.currentPlan(KEY).task_board.completed_count, 0)
+  assert.equal(world.game.mutations.length, 1)
+})
+
+test('ordinary no-action repair gets at most one durable fresh-context recovery before truthful failure', async () => {
+  const steps = ['Gather twenty copper ore']
+  const world = harness(call => call === 1
+    ? draft({ plan: steps, goal: { scope: 'finite', summary: 'Gather twenty copper ore.', doneWhen: [{ kind: 'inventory_count', item_name: 'copper-ore', minimum: 20 }] },
+      stepCompletions: [{ kind: 'deterministic', checkpoint: inventoryCheckpoint('copper-ore', 20) }] })
+    : { plan: steps, currentStep: 0, operations: [], chatMessage: 'Unable to choose the next action.' })
+  await world.agent.request('Gather twenty copper ore.', { sender: 'Louis' })
+  world.game.inventory['copper-ore'] = 10
+  await assert.rejects(world.agent.completed(), /provider_action_omission_repair_failed/)
+  assert.equal(world.events.filter(row => row.event === 'recovery.fresh_context_started').length, 1)
+  assert.equal(world.memory.planningState(KEY).goal.fresh_context_recovery_used, true)
+  assert.equal(world.memory.claimFreshContextRecovery(KEY, { requestId: 'a_later_request' }), false)
+  const before = world.calls.length
+  assert.deepEqual(await world.agent.tryFreshContextActionRecovery(), { attempted: false })
+  assert.equal(world.calls.length, before)
+  assert.equal(world.game.mutations.length, 1)
+  assert.notEqual(world.memory.currentPlan(KEY).status, 'completed')
+})

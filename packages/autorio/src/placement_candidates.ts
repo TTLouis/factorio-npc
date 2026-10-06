@@ -206,15 +206,24 @@ function better(left: PlacementCandidate, right: PlacementCandidate, target_reso
   return left.direction < right.direction
 }
 
-function sort_candidates(values: PlacementCandidate[], target_resource?: string) {
-  for (let i = 0; i < values.length; i++) {
-    for (let j = i + 1; j < values.length; j++) {
-      if (better(values[j], values[i], target_resource)) {
-        const tmp = values[i]
-        values[i] = values[j]
-        values[j] = tmp
+export function sort_candidates(values: PlacementCandidate[], target_resource?: string) {
+  // Bottom-up stable merge sort: a maximum-radius scan can yield ~10k legal
+  // candidates. Quadratic sorting blocked the single simulation thread.
+  const scratch: PlacementCandidate[] = []
+  for (let width = 1; width < values.length; width *= 2) {
+    for (let start = 0; start < values.length; start += width * 2) {
+      const middle = math.min(start + width, values.length)
+      const end = math.min(start + width * 2, values.length)
+      let left = start
+      let right = middle
+      for (let index = start; index < end; index++) {
+        if (left < middle && (right >= end || !better(values[right], values[left], target_resource))) {
+          scratch[index] = values[left++]
+        }
+        else scratch[index] = values[right++]
       }
     }
+    for (let index = 0; index < values.length; index++) values[index] = scratch[index]
   }
 }
 

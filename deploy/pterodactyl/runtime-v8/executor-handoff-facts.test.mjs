@@ -253,7 +253,8 @@ test('D2: an executor that still returns zero operations twice keeps the existin
   for (const request of executorRequests) {
     const step = textOf(stepBlock(request.messages))
     assert.match(step, /^recipe_fact lab /m, 'the recipe facts were in front of the executor when it returned nothing')
-    assert.match(step, /^counts_deferred=batch_in_flight /m, 'the packet says the counts were deferred behind the batch')
+    assert.doesNotMatch(step, /counts_deferred/, 'the completed receipt replaces the deferred-count marker')
+    assert.match(step, /^held_counts .*copper-plate=10/m, 'the current step block carries refreshed live inventory')
     // The receipt landed before this request: the counts the packet could not carry arrive with the continuation, read then.
     const refreshed = request.messages.map(textOf).find(text => text.includes('[HARNESS] Executor facts refreshed after the batch receipt landed'))
     assert.ok(refreshed, 'the continuation carries the refreshed facts')
@@ -409,11 +410,24 @@ test('D2 B1: after the batch receipt lands the executor first continuation carri
     script: [readsRound(), plannerCommit(), executorGather(5), executorGather(5)],
   })
   await world.say()
+  const stablePlan = world.agent.messages.map(textOf).find(text => text.startsWith('[HANDOFF]'))
+  const handoffId = world.agent.agentContext.handoffId
+  const conversationSeq = world.agent.agentContext.conversationSeq
+  assert.ok(stablePlan, 'the committed plan prefix exists before the receipt')
+  assert.match(textOf(stepBlock(world.agent.messages)), /counts_deferred=batch_in_flight/)
   world.give('copper-plate', 10) // the batch gathered ten plates
   await world.agent.completed() // receipt read -> the executor continues (call 3)
   assert.equal(world.calls.length, 3)
   const request = world.calls[2]
   assert.equal(request.context.role, 'executor')
+  const currentStep = textOf(stepBlock(request.messages))
+  assert.doesNotMatch(currentStep, /counts_deferred/, 'the volatile step block no longer claims that the completed batch is in flight')
+  assert.match(currentStep, /^held_counts .*copper-plate=10/m)
+  assert.match(currentStep, /^receipt #[0-9]+ operation_receipt batch_1: outcome=completed; task_state=idle/m)
+  assert.match(currentStep, /^authority: .*latest_receipt=#[0-9]+ deterministic_verification batch_1 \(this step\)/m, 'the current step block names the receipt that just landed')
+  assert.equal(request.messages.map(textOf).find(text => text.startsWith('[HANDOFF]')), stablePlan, 'the stable plan prefix remains byte-identical')
+  assert.equal(world.agent.agentContext.handoffId, handoffId)
+  assert.equal(world.agent.agentContext.conversationSeq, conversationSeq)
   const refreshed = request.messages.map(textOf).filter(text => text.includes('[HARNESS] Executor facts refreshed after the batch receipt landed'))
   assert.equal(refreshed.length, 1)
   assert.match(refreshed[0], /held_counts \(fresh live read of the actor inventory, as_of=tick:601,epoch:3\): .*copper-plate=10/)

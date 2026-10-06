@@ -197,8 +197,10 @@ class WaitRcon {
   }
 }
 
-function makeWorld({ committed = false, draft = false, script = [], rcon = new WaitRcon(), memory = new CanonicalTaskBoardMemory() } = {}) {
-  memory.planByNpc.set(KEY, planState())
+function makeWorld({ committed = false, draft = false, script = [], rcon = new WaitRcon(), memory = new CanonicalTaskBoardMemory(), checkpoint = CHECKPOINT } = {}) {
+  const state = planState()
+  state.task_board.steps[0].completion_contract = checkpoint ? structuredClone(checkpoint) : undefined
+  memory.planByNpc.set(KEY, state)
   if (draft || committed) memory.ensurePlanningDraft(KEY, memory.planByNpc.get(KEY), { now: 1 })
   if (committed) memory.commitPlanningPlan(KEY, { now: 2, runtime_validation: { passed: true } })
   const calls = []
@@ -491,7 +493,7 @@ test('an actor epoch change during the fresh read fails the batch safely: nothin
   observeFurnace(world.agent)
   world.rcon.bumpEpochOnCondition = true
 
-  await assert.rejects(world.agent.commitPlan(waitReply()), /epoch changed/i)
+  await assert.rejects(world.agent.commitPlan(waitReply()), /epoch changed|actor_changed_during_checkpoint_settlement/i)
 
   assert.equal(world.plan().condition_wait, undefined)
   assert.equal(world.rcon.mutations.length, 0)
@@ -545,8 +547,7 @@ test('a wait-only batch whose checkpoint machine is not working runs the timer a
 })
 
 test('a blind wait with no machine to read says so in the trace and adds nothing to the receipt', async () => {
-  const world = makeWorld({ committed: true, script: [sleepingModel()] })
-  world.plan().task_board.steps[0].completion_contract = undefined
+  const world = makeWorld({ committed: true, script: [sleepingModel()], checkpoint: null })
   // No machine observed at all.
 
   await world.agent.commitPlan(waitReply())
@@ -564,7 +565,7 @@ test('a blind wait with no machine to read says so in the trace and adds nothing
   assert.equal(blind.reason, 'no_machine_known')
 })
 
-test('a mixed batch (wait plus another operation) is unchanged: no routing and no extra read', async () => {
+test('a mixed batch keeps its operations and checks the immutable checkpoint before admission without wait routing', async () => {
   const world = makeWorld({ committed: true, script: [sleepingModel()] })
   observeFurnace(world.agent)
   const conditionReadsBefore = world.rcon.commands.filter(command => command.includes('evaluate_condition')).length
@@ -578,7 +579,7 @@ test('a mixed batch (wait plus another operation) is unchanged: no routing and n
   assert.equal(world.plan().condition_wait, undefined)
   assert.equal(world.named('wait.routed_to_condition').length, 0)
   assert.equal(world.agent.pendingBlindWait ?? null, null)
-  assert.equal(world.rcon.commands.filter(command => command.includes('evaluate_condition')).length, conditionReadsBefore)
+  assert.equal(world.rcon.commands.filter(command => command.includes('evaluate_condition')).length, conditionReadsBefore + 1, 'one live checkpoint settlement read before admission')
 
   world.agent.active = true
   world.rcon.completeBatch(['waiting', 'crafting'])
@@ -612,7 +613,7 @@ test('a zero-operation turn still registers its wait exactly as before and route
   assert.equal(world.plan().condition_wait?.mode, 'completion')
   assert.equal(world.named('runtime.condition_registered').length, 1)
   assert.equal(world.named('wait.routed_to_condition').length, 0)
-  assert.equal(world.rcon.commands.filter(command => command.includes('evaluate_condition')).length, 0, 'no extra read on a zero-operation turn')
+  assert.equal(world.rcon.commands.filter(command => command.includes('evaluate_condition')).length, 1, 'one live checkpoint settlement read before registering the condition wait')
 })
 
 test('the passive route needs at least 300 requested ticks: below it the timer runs with the fresh-read receipt, at it the wait is routed', async () => {

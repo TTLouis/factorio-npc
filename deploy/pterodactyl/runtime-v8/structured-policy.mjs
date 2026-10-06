@@ -739,10 +739,11 @@ export const plannerControlToolDefinitions = [{
                   id: { type: 'string', maxLength: 80 },
                   kind: {
                     type: 'string',
-                    enum: ['inventory_count', 'entity_inventory_count', 'entity_exists', 'entity_state', 'authoritative_operation_receipt', 'runtime_controller_state'],
+                    enum: ['inventory_count', 'entity_inventory_count', 'entity_exists', 'entity_state', 'research_completed', 'authoritative_operation_receipt', 'runtime_controller_state'],
                     description: 'inventory_count {item_name, minimum}; entity_inventory_count {unit_number, item_name, minimum}; entity_exists {unit_number}; entity_state {unit_number, expected: working|not_working|exists}; authoritative_operation_receipt {operation_name}; runtime_controller_state {controller: follow, expected: active|idle|healthy}.',
                   },
                   item_name: { type: 'string', maxLength: 160 },
+                  technology: { type: 'string', maxLength: 160 },
                   minimum: { type: 'integer', minimum: 1, description: 'Inclusive lower bound: the step is complete when the count is at least this.' },
                   unit_number: { type: 'integer', minimum: 1 },
                   expected: { type: 'string', maxLength: 80 },
@@ -859,6 +860,20 @@ export const plannerControlToolDefinitions = [{
   },
 }]
 
+plannerControlToolDefinitions[0].function.parameters.properties.stepCompletions = {
+  type: 'array', maxItems: 30,
+  description: 'Required on newly authored plans: one declaration per plan description at the same index. World-changing steps require deterministic checkpoints; semantic mode is for observation/assessment only.',
+  items: { oneOf: [
+    { type: 'object', additionalProperties: false, required: ['kind', 'checkpoint'], properties: {
+      kind: { type: 'string', enum: ['deterministic'] },
+      checkpoint: plannerControlToolDefinitions[0].function.parameters.properties.checkpoint,
+    } },
+    { type: 'object', additionalProperties: false, required: ['kind', 'rationale'], properties: {
+      kind: { type: 'string', enum: ['semantic'] }, rationale: { type: 'string', minLength: 1, maxLength: 600 },
+    } },
+  ] },
+}
+
 export function isPlannerControlToolName(name) {
   return name === PLANNER_CONTROL_TOOL_NAME
 }
@@ -873,7 +888,7 @@ export function plannerControlPayloadFromMessage(message) {
   let args
   try { args = JSON.parse(rawArgs) }
   catch { throw new base.PolicyError('submitPlan arguments must be valid JSON') }
-  exactKeys(args, ['chatMessage', 'plan', 'currentStep', 'operations', 'checkpoint', 'semanticCompletion', 'roadmapNodeIds', 'developmentMode', 'roadmap', 'goal', 'timeReview'])
+  exactKeys(args, ['chatMessage', 'plan', 'currentStep', 'operations', 'checkpoint', 'stepCompletions', 'semanticCompletion', 'roadmapNodeIds', 'developmentMode', 'roadmap', 'goal', 'timeReview'])
   check(Array.isArray(args.plan), 'submitPlan.plan must be an array')
   check(Number.isSafeInteger(args.currentStep), 'submitPlan.currentStep must be an integer')
   check(Array.isArray(args.operations), 'submitPlan.operations must be an array')
@@ -892,6 +907,7 @@ export function plannerControlPayloadFromMessage(message) {
     currentStep: args.currentStep,
     operations: args.operations,
     ...(args.checkpoint !== undefined ? { checkpoint: args.checkpoint } : {}),
+    ...(args.stepCompletions !== undefined ? { stepCompletions: args.stepCompletions } : {}),
     ...(args.semanticCompletion !== undefined ? { semanticCompletion: args.semanticCompletion } : {}),
     ...(args.roadmapNodeIds !== undefined ? { roadmapNodeIds: args.roadmapNodeIds } : {}),
     ...(args.developmentMode !== undefined ? { developmentMode: args.developmentMode } : {}),

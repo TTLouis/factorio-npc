@@ -432,30 +432,86 @@ test('stop follow leaves the durable plan paused', async () => {
   assert.equal(session.syncs.length, 0)
 })
 
-test('post-load NPC reconciliation is issued as a single replicated RCON command', async () => {
+test('post-load reconciliation initializes logical state before actor reconciliation with a stable session', async () => {
   const commands = []
   const session = Object.create(Session.prototype)
   Object.assign(session, {
-    rcon: { command: async (text) => { commands.push(text); return '' } },
+    session: 'test-startup-session',
+    rcon: { command: async (text) => {
+      commands.push(text)
+      return text.includes('"reconcile_startup"') ? JSON.stringify({ ok: true, changed: commands.length === 1 }) : ''
+    } },
     log: () => {},
   })
 
   assert.equal(await session.reconcileNpcAfterLoad(), true)
-  // Factorio replicates this to every peer as one input action, unlike the
-  // per-peer script.on_load path that desynced joining clients.
-  assert.deepEqual(commands, ['/silent-command remote.call("autorio_actor","reconcile_after_load")'])
+  // The logical write occurs as a replicated input action, before actor binding.
+  const logical = `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_operations","reconcile_startup",'test-startup-session')))`
+  const actor = '/silent-command remote.call("autorio_actor","reconcile_after_load")'
+  assert.deepEqual(commands, [logical, actor])
+  // An already-initialized logical state is accepted without inventing another session.
+  assert.equal(await session.reconcileNpcAfterLoad(), true)
+  assert.deepEqual(commands, [logical, actor, logical, actor])
 })
 
 test('a failed post-load reconciliation is reported instead of breaking the NPC bind', async () => {
   const logs = []
   const session = Object.create(Session.prototype)
   Object.assign(session, {
+    session: 'test-startup-session',
     rcon: { command: async () => { throw new Error('rcon closed') } },
     log: line => logs.push(line),
   })
 
   assert.equal(await session.reconcileNpcAfterLoad(), false)
   assert.match(logs.join('\n'), /post-load reconciliation failed/)
+})
+
+test('logical startup refusal or malformed response prevents actor reconciliation', async () => {
+  for (const response of [JSON.stringify({ ok: false }), JSON.stringify({}), 'not-json']) {
+    const commands = []
+    const logs = []
+    const session = Object.create(Session.prototype)
+    Object.assign(session, {
+      session: 'test-startup-session',
+      rcon: { command: async text => { commands.push(text); return response } },
+      log: line => logs.push(line),
+    })
+    assert.equal(await session.reconcileNpcAfterLoad(), false)
+    assert.equal(commands.length, 1)
+    assert.match(commands[0], /"reconcile_startup",'test-startup-session'/)
+    assert.match(logs.join('\n'), /post-load reconciliation failed/)
+  }
+})
+
+test('NPC binding fails when logical startup refuses even after deployment configuration succeeds', async () => {
+  const commands = []
+  const session = Object.create(Session.prototype)
+  const token = '0123456789abcdef0123456789abcdef'
+  Object.assign(session, {
+    session: token,
+    rcon: { command: async text => {
+      commands.push(text)
+      if (text.includes('"configure","npc"')) {
+        const marker = text.match(/SGLUNA_CONFIG_[a-f0-9]{24}:/)?.[0]
+        assert.ok(marker)
+        return marker + JSON.stringify({ ok: true, result: token })
+      }
+      if (text.includes('"sgluna_deployment","status"')) return JSON.stringify({
+        revision: 'sgluna-deploy-v8-npc-staging', session: token, mode: 'npc', allowed: true,
+        actor_kind: 'standalone_character', actor_id: 25, epoch: 1, idle: true,
+        actor_interface: true, operations: true, tools: true,
+      })
+      if (text.includes('"reconcile_startup"')) return JSON.stringify({ ok: false })
+      throw new Error(`Unexpected command: ${text}`)
+    } },
+    updateNpcIdentity: () => {},
+    log: () => {},
+  })
+  await assert.rejects(session.bindNpc(), /NPC startup reconciliation failed; refusing to bind/)
+  assert.equal(commands.length, 3)
+  assert.ok(commands[2].includes('"reconcile_startup"'))
+  assert.equal(commands.some(command => command.includes('"reconcile_after_load"')), false)
 })
 
 test('a console poll is accepted as an unattributed refresh request and nothing else', () => {

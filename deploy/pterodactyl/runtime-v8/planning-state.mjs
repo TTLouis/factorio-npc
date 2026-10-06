@@ -367,6 +367,7 @@ export const PLANNING_EVENT = Object.freeze({
   // Goal satisfaction is its OWN explicit event with its OWN evidence. No
   // amount of completed plans or reached frontiers produces it implicitly.
   GOAL_SATISFIED: 'GOAL_SATISFIED',
+  FRESH_CONTEXT_RECOVERY_CLAIMED: 'FRESH_CONTEXT_RECOVERY_CLAIMED',
   // The system's structured understanding of the goal (scope + game-checkable
   // done_when conditions). Authored once by the Main LLM on the goal's first
   // plan; only the user may replace it afterwards.
@@ -674,6 +675,7 @@ function sanitizeGoal(raw) {
     goal_id: goalId,
     ...(satisfaction ? { satisfaction, satisfied_at: finiteNumber(raw.satisfied_at) ?? satisfaction.at } : {}),
     ...(definition ? { definition } : {}),
+    ...(raw.fresh_context_recovery_used === true ? { fresh_context_recovery_used: true } : {}),
     owner: text(raw.owner, 128) || 'unknown',
     objective: text(raw.objective, 1000),
     constraints: stringList(raw.constraints, { max: 24, maxLength: 300 }),
@@ -819,6 +821,9 @@ function sanitizeStep(raw, { planId, planVersion, sequence }) {
     step_id: stepId,
     description,
     completion_contract: contract ?? null,
+    ...(source.completion_mode === 'deterministic' || source.completion_mode === 'semantic'
+      ? { completion_mode: source.completion_mode, ...(source.completion_mode === 'semantic' ? { semantic_rationale: text(source.semantic_rationale, 600) } : {}) }
+      : {}),
     // Explicit reduced-confidence marker for prose-only steps.
     completion_confidence: contract ? 'grounded' : 'reduced',
     reduced_confidence: !contract,
@@ -1295,9 +1300,8 @@ export function nearestShelfRefinementTarget(state) {
  * Attach a completed plan's verified results back to the shelf nodes it
  * resolved, moving each node along the realization ladder.
  *
- * Nodes that declare no capability frontier keep the original behaviour: the
- * plan that resolved them realizes them, because there is no frontier to
- * measure against.
+ * A slice's verified results establish progress. They cannot establish the
+ * broader shelf intent when that node declares no recognition evidence.
  */
 function attachPlanResultsToShelf(roadmap, { nodeIds, planId, results, satisfiedRecognitionIds, status, now }) {
   if (!roadmap) return roadmap
@@ -1313,7 +1317,7 @@ function attachPlanResultsToShelf(roadmap, { nodeIds, planId, results, satisfied
         resolved_by: Array.from(new Set([...node.resolved_by, planId])),
         verified_results: Array.from(new Set([...node.verified_results, ...cleanResults])).slice(0, 64),
       }
-      if (!node.capability_frontier) return { ...base, status: maxShelfNodeStatus(node.status, status) }
+      if (!node.capability_frontier) return { ...base, status: maxShelfNodeStatus(node.status, SHELF_NODE_STATUS.PARTIALLY_REALIZED) }
       const frontier = advanceFrontier(node.capability_frontier, {
         now,
         planId,
@@ -1559,6 +1563,7 @@ export function planTrackerView(state, { planId } = {}) {
         index,
         description: step.description,
         completion_contract: clone(step.completion_contract),
+        ...(step.completion_mode ? { completion_mode: step.completion_mode, ...(step.completion_mode === 'semantic' ? { semantic_rationale: step.semantic_rationale } : {}) } : {}),
         completion_confidence: step.completion_confidence,
         reduced_confidence: step.reduced_confidence,
         status: progress.status,
@@ -2914,6 +2919,17 @@ Object.assign(HANDLERS, {
       },
       updated_at: now,
       log: logEntry(state, { type: PLANNING_EVENT.GOAL_SATISFIED, at: now, goal_id: state.goal.goal_id }),
+    }
+  },
+
+  [PLANNING_EVENT.FRESH_CONTEXT_RECOVERY_CLAIMED](state, event, now) {
+    if (!isRuntimeAuthority(event.source) || state.goal?.status !== GOAL_STATUS.ACTIVE
+      || event.goal_id !== state.goal.goal_id || state.goal.fresh_context_recovery_used === true) return state
+    return {
+      ...state,
+      goal: { ...state.goal, fresh_context_recovery_used: true, updated_at: now },
+      updated_at: now,
+      log: logEntry(state, { type: PLANNING_EVENT.FRESH_CONTEXT_RECOVERY_CLAIMED, at: now, goal_id: state.goal.goal_id }),
     }
   },
 

@@ -183,7 +183,9 @@ test('C3: the commit hands the slice to a fresh executor built from the packet p
   assert.match(textOf(step), /^restage: role=executor checkpoint=C3 reason=executor_fresh_at_plan_commit$/m)
   assert.match(textOf(stable), /^step 1: .*Gather 10 iron ore$/m, 'the immutable plan')
   assert.match(textOf(stable), /^step 2: .*Gather 10 copper ore$/m)
-  assert.match(textOf(step), /^active_step_contract: all: inventory_count iron-ore>=10$/m, 'the step contract')
+  assert.match(textOf(step), /^plan_status: EXECUTING; steps 1:completed 2:active$/m, 'the receipt closed the first step before this continuation')
+  assert.match(textOf(step), /^active_step: 2 of 2 .*Gather 10 copper ore/m, 'the packet carries the current committed step')
+  assert.doesNotMatch(textOf(step), /^active_step_contract:.*iron-ore/m, 'the previous step contract no longer claims to be active')
   assert.match(textOf(step), /^actor: actor_id=18 actor_kind=standalone_character epoch=3 connected_players=1$/m)
   const plannerOnly = message => textOf(message).startsWith('[CHAT]') || (message.role === 'assistant' && textOf(message).includes('"goal"'))
   assert.equal(observeCall.messages.filter(plannerOnly).length, 0, 'none of the planner earlier messages')
@@ -428,15 +430,15 @@ test('C8: past the hard limit (2x soft) an executor is restaged fresh at the nex
 })
 
 test('C8: below the hard limit there is no restage at a step close, however far past the soft limit', async () => {
-  const world = hardLimitWorld({ executorTokens: 4000 }) // past soft 3500, below hard 7000 (the size is the larger of the reported tokens and chars/4)
+  const world = hardLimitWorld({ executorTokens: 4500, softLimit: { planner: 1_000_000, executor: 4000 } }) // the receipt-refreshed packet stays below hard 8000
   await world.run()
 
   assert.deepEqual(world.rows('context.restaged').map(row => `${row.data.role}:${row.data.checkpoint}`), ['executor:C3', 'executor:C3'], 'only the two plan commits')
   const [decision] = world.rows('context.step_close_decision')
   assert.equal(decision.data.restage, false)
   assert.equal(decision.data.reason, 'no_restage_needed')
-  assert.ok(decision.data.size_tokens > 3500 && decision.data.size_tokens <= 7000, `past soft, not past hard: ${decision.data.size_tokens}`)
-  assert.equal(decision.data.soft_limit_tokens, 3500)
+  assert.ok(decision.data.size_tokens > 4000 && decision.data.size_tokens <= 8000, `past soft, not past hard: ${decision.data.size_tokens}`)
+  assert.equal(decision.data.soft_limit_tokens, 4000)
   // One conversation carried the slice: the executor round after the close still holds its own earlier exchange.
   assert.equal(world.calls[2].messages.some(message => textOf(message).startsWith('[MOD] Autorio operation batch completed')), true)
   assert.match(textOf(stepBlock(world.calls[2].messages)), /checkpoint=C3/, 'still the C3 packet')

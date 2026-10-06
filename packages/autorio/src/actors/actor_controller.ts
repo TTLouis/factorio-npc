@@ -91,14 +91,14 @@ let last_reconciled_actor_id: number | undefined
 let last_reconciled_tick: number | undefined
 let last_reconciled_owned_crafting: OwnedCraftingLoadReceipt | undefined
 let npc_recovery_handler: NpcRecoveryHandler | undefined
+let npc_single_player_load_handler: (() => void) | undefined
 let actor_mode_transition_handler: ActorModeTransitionHandler | undefined
 let recovery_invalidated_actor_id: number | undefined
 
-// Factorio does not persist ordinary Lua module locals across save/load. Autorio's
-// logical task manager is therefore intentionally volatile for now, while the
-// standalone character entity and its engine control states are persisted in the
-// save. on_load cannot access `game` or mutate `storage`, so it only restores
-// module-local caches here.
+// Logical execution and engine controls are persisted so joining peers restore
+// the running server's work. An actual server startup explicitly discards logical
+// work and then reconciles controls through replicated commands. on_load cannot
+// access `game` or mutate `storage`, so it only restores module-local caches here.
 //
 // This handler runs on every peer that loads the map, including a client joining
 // a running server, so the flag it sets is NOT by itself permission to change
@@ -134,6 +134,10 @@ export function register_npc_recovery_handler(handler: NpcRecoveryHandler | unde
   npc_recovery_handler = handler
 }
 
+export function register_npc_single_player_load_handler(handler: (() => void) | undefined) {
+  npc_single_player_load_handler = handler
+}
+
 export function register_actor_mode_transition_handler(handler: ActorModeTransitionHandler | undefined) {
   actor_mode_transition_handler = handler
 }
@@ -160,8 +164,9 @@ function reconcile_owned_crafting_after_load(actor: StandaloneCharacterActor) {
     return undefined
   }
 
-  // The logical task that owned this native queue was module-local and is gone
-  // after load. Admission was allowed only from an empty native queue, so every
+  // Explicit server-startup reconciliation discarded the logical owner. A peer
+  // loading the running server must not take this path. Admission was allowed
+  // only from an empty native queue, so every
   // remaining queue entry belongs to that persisted request. Cancel from the
   // tail to avoid leaving orphaned prerequisite/target crafts running.
   const queue = actor.get_crafting_queue()
@@ -187,7 +192,7 @@ function reconcile_owned_crafting_after_load(actor: StandaloneCharacterActor) {
 }
 
 function reconcile_loaded_npc(actor: StandaloneCharacterActor) {
-  // Logical Autorio tasks are not resumed across a save/load boundary. Clear
+  // Actual server startup explicitly discards logical Autorio tasks. Clear
   // the engine-owned physical inputs that *are* serialized with the character,
   // otherwise a freshly loaded NPC could keep walking/mining/shooting with no
   // task left to own or stop that action. Owned native crafting gets the same
@@ -223,6 +228,7 @@ function maybe_reconcile_loaded_npc(actor: StandaloneCharacterActor) {
   if (game.is_multiplayer()) {
     return
   }
+  npc_single_player_load_handler?.()
   reconcile_loaded_npc(actor)
 }
 

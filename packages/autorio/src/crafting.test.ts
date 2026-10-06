@@ -127,6 +127,29 @@ describe('bounded crafting controller', () => {
     expect(controller.status().last_result?.code).toBe('started')
   })
 
+  it('finishes an in-flight native craft identically after a peer reload with no duplicate admission', () => {
+    const context = make_context()
+    ;(globalThis as any).prototypes.recipe = { 'iron-gear-wheel': { products: [{ type: 'item', name: 'iron-gear-wheel', amount: 1 }] } }
+    context.controller.submit('iron-gear-wheel', 2)
+    context.controller.tick(context.actor)
+    const saved = JSON.parse(JSON.stringify((globalThis as any).storage))
+    const run_completion = (reload: boolean) => {
+      ;(globalThis as any).storage = JSON.parse(JSON.stringify(saved))
+      const manager = reload ? new_task_manager(() => context.actor) : context.manager
+      const controller = reload ? new_crafting_controller(() => context.actor, manager) : context.controller
+      context.queue = []
+      context.inventory_counts['iron-gear-wheel'] = 2
+      ;(globalThis as any).game.tick = 61
+      controller.tick(context.actor)
+      return JSON.parse(JSON.stringify({ storage: (globalThis as any).storage, status: manager.get_status_snapshot() }))
+    }
+    const uninterrupted = run_completion(false)
+    expect(run_completion(true)).toEqual(uninterrupted)
+    expect(context.actor.begin_crafting).toHaveBeenCalledTimes(1)
+    expect(crafted_item_count(1, 'iron-gear-wheel')).toBe(2)
+    expect(uninterrupted.status.last_completed_batch).toMatchObject({ tick: 61, batch_ref: 'batch-g1-1' })
+  })
+
   it('requires real output after the owned native queue drains', () => {
     const context = make_context()
     context.controller.submit('iron-gear-wheel', 2)

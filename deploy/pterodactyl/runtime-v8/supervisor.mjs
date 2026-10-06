@@ -26,7 +26,7 @@ import {
   safeInteger,
   withTimeout,
 } from './common.mjs'
-import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
+import { CanonicalTaskBoardMemory, completionFinalizationDecision } from './canonical-task-board-memory.mjs'
 import { createSave, prepareGameConfig, prepareMods, prepareServerSettings, selectSave } from './game-files.mjs'
 import { resolveAgentRole } from './agent-roles.mjs'
 import { CONTINUATION_WORDS, NpcAgentLoop, RESTART_BEFORE_FIRST_PLAN_PAUSE, RESUME_HINT } from './npc-agent-loop.mjs'
@@ -1571,6 +1571,19 @@ function completedTaskResult(result) {
 
 export async function finalizeCompletedTaskBoundary(session, result) {
   if (!session?.agent || !completedTaskResult(result)) return false
+  await session.agent.loadPersistentState?.()
+  const key = session.agent.activePlanKey?.() ?? session.agent.lastMemoryKey ?? `npc:${session.npcId ?? 'sgluna'}`
+  const decision = completionFinalizationDecision(session.agent.memory, key, result)
+  if (!decision.allowed) {
+    await session.agent.traceEvent?.('goal.finalization_refused', {
+      request_id: session.agent.traceRequest?.id,
+      reason: decision.reason,
+      goal_id: decision.goal_id,
+      result_goal_id: result?.goalId ?? result?.taskBoard?.goal_id,
+      task_board_status: result?.taskBoard?.status,
+    })
+    return false
+  }
 
   // Publish exactly one final completed snapshot before clearing the live slot.
   // This lets Old Tasks and learning consume the completed stages, evidence and
@@ -1593,7 +1606,8 @@ export async function finalizeCompletedTaskBoundary(session, result) {
     await session.syncTaskBoardUi(completedState)
   }
 
-  await session.agent.finalizeCompletedTaskContext?.()
+  const finalized = await session.agent.finalizeCompletedTaskContext?.(result)
+  if (finalized === false || finalized?.finalized === false) return false
   resetLiveTaskContext(session)
   await session.clearTaskBoardUi()
   await resumeInterruptedTaskAfterCompletion(session)
@@ -2298,7 +2312,10 @@ export class Session {
   async reconcileNpcAfterLoad() {
     if (!this.rcon) return false
     try {
+      const logical = JSON.parse(String(await this.rcon.command(`/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_operations","reconcile_startup",${luaString(this.session)})))`)).trim())
+      if (logical?.ok !== true) throw new Error('Logical startup reconciliation refused')
       await this.rcon.command('/silent-command remote.call("autorio_actor","reconcile_after_load")')
+      this.startupReconciledSession = this.session
       return true
     }
     catch (error) {
@@ -2311,7 +2328,7 @@ export class Session {
     const status = await configureNpcSession(this.rcon, this.session)
     this.updateNpcIdentity(status)
     this.lastStatus = status
-    await this.reconcileNpcAfterLoad()
+    check(await this.reconcileNpcAfterLoad(), 'NPC startup reconciliation failed; refusing to bind')
     return status
   }
 
@@ -2328,7 +2345,7 @@ export class Session {
         && current.actor_id > 0
         && Number.isSafeInteger(current.epoch)
         && current.epoch > 0
-      if (stable) {
+      if (stable && this.startupReconciledSession === this.session) {
         this.updateNpcIdentity(current)
         this.lastStatus = current
         return current
@@ -2752,6 +2769,7 @@ export class Session {
         )
       : undefined
     this.agent = new NpcAgentLoop({
+      completionProtocolVersion: 2,
       rcon: this.rcon,
       systemPrompt: `${prompt}\n\n${RUNTIME_RELIABILITY_GUIDANCE}`,
       npcId: this.npcId,

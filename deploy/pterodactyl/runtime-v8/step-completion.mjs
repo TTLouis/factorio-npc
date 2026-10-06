@@ -1,5 +1,6 @@
 const SUPPORTED_REQUIREMENT_KINDS = new Set([
   'inventory_count',
+  'research_completed',
   'entity_inventory_count',
   'entity_exists',
   'entity_state',
@@ -61,6 +62,12 @@ function boundedRequirement(raw, index) {
     const itemName = clean(raw.item_name ?? raw.item, 160)
     if (!minimum || !itemName) return undefined
     return { id, kind, item_name: itemName, minimum }
+  }
+
+  if (kind === 'research_completed') {
+    const technology = clean(raw.technology, 160)
+    if (!/^[a-z0-9][a-z0-9_-]*$/.test(technology)) return undefined
+    return { id, kind, technology }
   }
 
   if (kind === 'entity_inventory_count') {
@@ -132,6 +139,9 @@ function evaluateRequirementFact(requirement, fact) {
   if (fact.kind !== requirement.kind) return { satisfied: false, mismatched: true }
   if (requirement.kind === 'inventory_count') {
     return { satisfied: fact.item_name === requirement.item_name && Number.isFinite(fact.current) && fact.current >= requirement.minimum }
+  }
+  if (requirement.kind === 'research_completed') {
+    return { satisfied: fact.authoritative === true && fact.stale !== true && fact.technology === requirement.technology && fact.satisfied === true }
   }
   if (requirement.kind === 'entity_inventory_count') {
     return { satisfied: fact.stale !== true && fact.unit_number === requirement.unit_number && fact.item_name === requirement.item_name && Number.isFinite(fact.current) && fact.current >= requirement.minimum }

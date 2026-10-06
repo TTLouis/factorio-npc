@@ -982,6 +982,13 @@ test('blocked revise choice plus explicit user prompt creates successor and pres
     plan: ['Find stone', 'Mine stone', 'Use alternate furnace recipe', 'Build power', 'Start research'],
     currentStep: 2,
     operations: [{ name: 'wait', args: { ticks: 1 } }],
+    stepCompletions: [
+      { kind: 'semantic', rationale: 'Historical finding.' },
+      { kind: 'semantic', rationale: 'Historical mining.' },
+      { kind: 'deterministic', checkpoint: { mode: 'all', requirements: [{ kind: 'inventory_count', item_name: 'stone-furnace', minimum: 1 }] } },
+      { kind: 'semantic', rationale: 'Review the chosen topology with current port facts.' },
+      { kind: 'deterministic', checkpoint: { mode: 'all', requirements: [{ kind: 'research_completed', technology: 'logistic-science-pack' }] } },
+    ],
   }
   const recorded = memory.recordPlan(key, { sender: 'Louis', text: 'Use the alternate route instead' }, proposed)
   const reconciled = memory.reconcileTaskBoard(key, blockedBoard, proposed, recorded, { previousState: planState({ task_board: blockedBoard, status: 'blocked', blocker: 'path_blocked' }) })
@@ -1000,6 +1007,11 @@ test('blocked revise choice plus explicit user prompt creates successor and pres
   assert.equal(reconciled.state.task_board.completed_count, 2)
   assert.equal(reconciled.state.task_board.active_index, 2)
   assert.equal(reconciled.state.task_board.steps[2].description, 'Use alternate furnace recipe')
+  assert.equal(successor.steps[0].completion_contract.requirements[0].item_name, 'stone-furnace')
+  assert.equal(successor.steps[1].semantic_rationale, 'Review the chosen topology with current port facts.')
+  assert.equal(successor.steps[2].completion_contract.requirements[0].technology, 'logistic-science-pack')
+  assert.equal(reconciled.state.task_board.steps[2].completion_mode, 'deterministic')
+  assert.equal(predecessor.steps[0].completion_mode, undefined, 'successor policy never rewrites verified predecessor meaning')
 })
 
 // A two-step slice, both steps still pending, so one live adapter sequence can
@@ -1171,4 +1183,3 @@ test('harness continuation and an unchanged plan never supersede the in-flight s
   assert.equal(getActivePlan(memory.planningState(key)).plan_id, inFlight.plan_id)
   assert.equal(getActivePlan(memory.planningState(key)).status, PLAN_STATUS.COMMITTED)
 })
-

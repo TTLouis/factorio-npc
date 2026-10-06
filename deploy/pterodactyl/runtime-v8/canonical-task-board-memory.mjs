@@ -1,4 +1,5 @@
 import { NpcDialogueMemory, OPERATION_FAILURE_RECOVERABLE_KIND, TRANSFER_SUPPLY_RECOVERABLE_KIND, TRANSFER_SUPPLY_RECOVERY_BUDGET, transferSupplyRecoveryCount } from './npc-agent-loop.mjs'
+export { completionFinalizationDecision } from './completion-finalization.mjs'
 import { restoreLedger as restoreJevLedger, serializeLedger as serializeJevLedger } from './jev-judgments.mjs'
 import { createTaskBoard, reconcileTaskBoard, setTaskBoardStatus, taskBoardTransferSupplyRefSeen } from './common.mjs'
 import { validateOutcomeCandidate } from './outcome-authority.mjs'
@@ -155,7 +156,23 @@ function draftStepsFromBoard(board, draftPlan) {
   return (prefixVerified ? steps.slice(carried) : steps).map(step => ({
     description: step.description,
     completion_contract: safeDurableStepCompletionContract(step.completion_contract),
+    ...(step.completion_mode ? { completion_mode: step.completion_mode, semantic_rationale: step.semantic_rationale } : {}),
   }))
+}
+
+function completionPolicyFields(entry) {
+  if (entry?.kind === 'deterministic') {
+    const contract = safeDurableStepCompletionContract(entry.checkpoint)
+    return contract ? { completion_mode: 'deterministic', completion_contract: contract } : undefined
+  }
+  if (entry?.kind === 'semantic' && typeof entry.rationale === 'string' && entry.rationale.trim()) {
+    return { completion_mode: 'semantic', semantic_rationale: entry.rationale.trim().slice(0, 600), completion_contract: null }
+  }
+  return undefined
+}
+
+function proposalSteps(descriptions, entries, offset = 0) {
+  return descriptions.map((description, index) => ({ description, ...completionPolicyFields(entries?.[offset + index]) }))
 }
 
 // Real evidence the legacy board holds for a step it closed. Only kinds the
@@ -871,6 +888,20 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       legacyState.task_board = (projected?.completed_count ?? 0) < (boardBefore.completed_count ?? 0)
         ? boardBefore
         : projected
+      const alignment = boardPlanAlignment(legacyState.task_board, plan)
+      if (alignment !== undefined) {
+        legacyState.task_board.steps = legacyState.task_board.steps.map((step, index) => {
+          const canonical = plan.steps[index - alignment]
+          if (!canonical?.completion_mode && !canonical?.completion_contract) return step
+          const { semantic_rationale: _priorRationale, ...kept } = step
+          return {
+            ...kept,
+            completion_contract: canonical.completion_contract,
+            ...(canonical.completion_mode ? { completion_mode: canonical.completion_mode } : {}),
+            ...(canonical.completion_mode === 'semantic' ? { semantic_rationale: canonical.semantic_rationale } : {}),
+          }
+        })
+      }
       // The reducer owns verified progress, not planner focus. On an unchanged
       // semantic plan, preserve the provider's advisory focus exactly.
       if (sameSemanticPlan && Number.isSafeInteger(proposedFocusIndex)) {
@@ -927,6 +958,18 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     if (after !== before || this.planningByNpc.has(key)) this.planningByNpc.set(key, after)
     this.syncPlanningState(key)
     return after
+  }
+
+  claimFreshContextRecovery(key, { now = Date.now(), requestId } = {}) {
+    const before = this.planningState(key)
+    if (before?.goal?.status !== GOAL_STATUS.ACTIVE || before.goal.fresh_context_recovery_used === true) return false
+    const after = this.dispatchPlanningEvent(key, {
+      type: PLANNING_EVENT.FRESH_CONTEXT_RECOVERY_CLAIMED,
+      source: 'runtime', goal_id: before.goal.goal_id, now,
+    })
+    const claimed = after?.goal?.fresh_context_recovery_used === true
+    if (claimed) this.#authTrace('recovery.fresh_context_claimed', { goal_id: before.goal.goal_id, reason: 'one_fresh_context_recovery_per_goal' }, requestId)
+    return claimed
   }
 
   /**
@@ -1056,7 +1099,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     })
   }
 
-  ensurePlanningDraft(key, state, { now = Date.now(), migrated = false, roadmap, roadmapNodeIds, developmentMode, replacePrecommit = false } = {}) {
+  ensurePlanningDraft(key, state, { now = Date.now(), migrated = false, roadmap, roadmapNodeIds, developmentMode, stepCompletions, replacePrecommit = false } = {}) {
     if (!key || !state) return undefined
     let planning = this.planningByNpc.get(key)
     let goalAdmitted = false
@@ -1117,6 +1160,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
           .map(id => id.trim())
           .filter(id => id && knownNodeIds.has(id)),
       )).slice(0, 16)
+      const draftSteps = draftStepsFromBoard(state.task_board, replaceableDraft ? draftBefore : undefined)
+      const policyOffset = Array.isArray(stepCompletions) ? Math.max(0, stepCompletions.length - draftSteps.length) : 0
       planning = applyPlanningEvent(planning, {
         type: PLANNING_EVENT.DRAFT_CREATED,
         now,
@@ -1125,7 +1170,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         ...(developmentMode ? { development_mode: developmentMode } : {}),
         // A replaced draft keeps its lineage (including a carried verified
         // prefix), so its steps exclude what the predecessor already holds.
-        steps: draftStepsFromBoard(state.task_board, replaceableDraft ? draftBefore : undefined),
+        steps: draftSteps.map((step, index) => ({ ...step, ...completionPolicyFields(stepCompletions?.[policyOffset + index]) })),
       })
     }
     this.planningByNpc.set(key, planning)
@@ -1929,15 +1974,12 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const state = key ? this.planByNpc.get(key) : undefined
     if (!state || state.status !== 'completed') return state
     const planning = this.planningByNpc.get(key)
-    // A goal with a shelf, or with game-checked done_when conditions that are
-    // not yet met, is still live after one of its plans completes.
+    // Slice completion is not canonical goal completion, including saved
+    // legacy goals that have neither a shelf nor a game-checked definition.
     const goalStillActive = planning?.goal?.status === GOAL_STATUS.ACTIVE
-      && ((Array.isArray(planning?.roadmap?.nodes) && planning.roadmap.nodes.length > 0)
-        || Boolean(planning.goal.definition))
     if (goalStillActive) return state
     this.planByNpc.delete(key)
-    // The current slot is retired only when there is no active long-horizon
-    // reducer goal. Completing one immutable slice must not discard its shelf.
+    // Only a canonical terminal goal may retire its compatibility projection.
     this.#dropPlanningKeepingWorld(key)
     return undefined
   }
@@ -2037,7 +2079,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         source: 'user',
         approved_by: requestInfo.sender,
         plan_id: blockedPlan.plan_id,
-        steps: steps.map(description => ({ description })),
+        steps: proposalSteps(steps, plan?.stepCompletions, plan.plan.length - steps.length),
         ...(Array.isArray(plan?.roadmapNodeIds) ? { roadmap_node_ids: plan.roadmapNodeIds } : {}),
         ...(plan?.developmentMode ? { development_mode: plan.developmentMode } : {}),
       })
@@ -2084,6 +2126,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         roadmap: plan?.roadmap,
         roadmapNodeIds: plan?.roadmapNodeIds,
         developmentMode: plan?.developmentMode,
+        stepCompletions: plan?.stepCompletions,
+        replacePrecommit: Array.isArray(plan?.stepCompletions) && !userRevisionApproved && !supersededPlanId,
       })
       this.seedRunFromLegacy(key, result.state)
       this.seedReceiptLedgerFromLegacy(key, result.state)
@@ -2140,7 +2184,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       type: PLANNING_EVENT.DRAFT_CREATED,
       now,
       origin: 'user_replan',
-      steps: steps.map(description => ({ description })),
+      steps: proposalSteps(steps, plan?.stepCompletions),
       ...(Array.isArray(plan?.roadmapNodeIds) ? { roadmap_node_ids: plan.roadmapNodeIds } : {}),
       ...(plan?.developmentMode ? { development_mode: plan.developmentMode } : {}),
     })
@@ -2818,7 +2862,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       ...options,
       allowReplan: semanticReplacementApproved ? true : options.allowReplan,
     })
-    if (result?.state?.task_board && Array.isArray(result.state.task_board.steps) && durableContracts.size > 0) {
+    if (!semanticReplacementApproved && result?.state?.task_board && Array.isArray(result.state.task_board.steps) && durableContracts.size > 0) {
       result.state.task_board.steps = result.state.task_board.steps.map(step => {
         const durable = durableContracts.get(step.id)
         return durable

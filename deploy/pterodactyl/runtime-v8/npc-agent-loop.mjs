@@ -78,7 +78,9 @@ import {
 } from './planning-state.mjs'
 import { decideRestage, estimateTokensFromChars, markRequestSliceClosed, requestSliceCeiling, RESTAGE_BOUNDARY } from './restage-policy.mjs'
 import { emptyJevHealth, recordJevHealth, recordPendingDecisionRequest, settlePendingDecisionRequest, summarizeJevHealth, takePendingDecisionRequest } from './jev-health.mjs'
-import { describeUnmetGoalResult, evaluateGoalDefinition, formatGoalProgress, GOAL_SCOPE, needsGoalBaseline, sanitizeGoalDefinition } from './goal-definition.mjs'
+import { describeUnmetGoalResult, evaluateGoalDefinition, formatGoalProgress, goalConditionCommand, GOAL_SCOPE, needsGoalBaseline, sanitizeGoalDefinition } from './goal-definition.mjs'
+import { completionContractSignature, normalizeStepCompletions } from './luna-step-contracts.mjs'
+import { completionFinalizationDecision } from './completion-finalization.mjs'
 import {
   compareGoalReading,
   goalProgressFactsCommand,
@@ -438,7 +440,7 @@ function contentCarriesPlan(content) {
   }
   return false
 }
-const WORLD_STATE_REQUIREMENT_KINDS = new Set(['inventory_count', 'entity_inventory_count', 'entity_exists', 'entity_state'])
+const WORLD_STATE_REQUIREMENT_KINDS = new Set(['inventory_count', 'entity_inventory_count', 'entity_exists', 'entity_state', 'research_completed'])
 const EXACT_ENTITY_TARGET_OPERATIONS = new Set([
   'walk_to_entity_exact',
   'mine_entity_exact',
@@ -503,6 +505,8 @@ You author the shelf through the optional roadmap field on submitPlan: a short l
 When a draft intentionally refines one or more existing Shelf nodes, add roadmapNodeIds beside plan/currentStep/operations and choose stable ids from [PLANNING_STATE].steering.refinement_candidates or the current shelf. On the first long-horizon submission you may create the shelf with roadmap and select ids from those same nodes in roadmapNodeIds. This is lineage, not execution authority; never invent an id for a node that is not on the admitted shelf. When the goal has a shelf, a plan slice holds only the steps for the node it names in roadmapNodeIds, normally the next one: its steps end when that node's intent is true. Work that belongs to a later node stays on the shelf and gets its own slice later; the harness asks for that slice when this one completes and the goal is not yet met. Do not restate the whole roadmap as steps. On the first long-horizon submission, send the shelf in roadmap, plan only its first node, and name that node in roadmapNodeIds.
 
 For a bounded planning slice, add developmentMode as vertical, horizontal, maintain, or recover to describe the dominant direction YOU authored relative to the current critical path. Follow [PLANNING_STATE].steering when it remains appropriate, but this field describes the draft rather than granting steering authority. Small measured supporting work does not require a second mode; substantial mixed-direction work should be split at a better checkpoint.
+
+On every newly authored plan, include stepCompletions aligned with plan descriptions: {kind:"deterministic",checkpoint:{mode:"all",requirements:[...]}} for world-changing steps or waits, or {kind:"semantic",rationale:"..."} for observation/assessment only. You choose the intended outcome and quantities; the harness checks them. Research steps use research_completed with the exact technology, not an accepted request receipt. A semantic assessment cannot execute gameplay mutations. When tools are closed, return one JSON control object; checkpoint, stepCompletions and semanticCompletion remain permitted.
 
 For the active Plan Tracker step, you may add one optional root field named checkpoint beside chatMessage/plan/currentStep/operations. checkpoint is your semantic completion proposal for deterministic runtime validation and verification, not a claim that the step is already done. It must use a runtime-supported contract: {"mode":"all|any","requirements":[...]} with requirement kinds inventory_count, entity_inventory_count, entity_exists, entity_state, authoritative_operation_receipt, or runtime_controller_state. Prefer world-state outcomes over action occurrence. Example: if the step means "have 100 stone" and the next operation only gathers 40 more because 62 are already held, checkpoint must say inventory_count stone >= 100, not >= 40. The operation batch describes what to do next; checkpoint describes what would prove the semantic step complete. Runtime remains completion authority for supported deterministic contracts. Omit checkpoint when no safe deterministic predicate represents the step; prose-only semantic steps remain the Main LLM's responsibility rather than being delegated to a second AI judge.
 
@@ -2114,7 +2118,7 @@ Intents:
 - continue_current: asks to keep/resume the same goal without changing its constraints.
 - status_query: asks what is happening, progress, blocker, or why it is stuck.
 - amend_current: changes instructions/constraints for the same goal, including "continue but ignore X".
-- new_goal: requests a materially different goal.
+- new_goal: requests a first gameplay goal when current_goal is null, or a materially different goal when one exists.
 - cancel_current: asks to stop/cancel the current goal.
 - chat_only: social/conversational text that should not alter task state.
 
@@ -2134,7 +2138,7 @@ export function interactionDecisionQuestions() {
         continue_current: 'The player asks SGLuna to keep or resume the same goal without changing its constraints.',
         status_query: 'The player asks what is happening, current progress, a blocker, or why the agent is stuck.',
         amend_current: 'The player changes instructions or constraints for the same active goal.',
-        new_goal: 'The player requests a materially different world goal.',
+        new_goal: 'The player requests a first world goal when none exists, or a materially different world goal.',
         cancel_current: 'The player asks to stop or cancel the current goal.',
         chat_only: 'The message is social or conversational and should not change task state.',
       },
@@ -2530,6 +2534,7 @@ function idleRuntimeStatus(status) {
 
 function canonicalWorkRemains(state) {
   if (state?.status !== 'active') return false
+  if (state.goal_id) return true // An active user goal also owns work between completed slices.
   const board = state?.task_board
   if (board?.kind !== 'task_board_lite' || !Array.isArray(board.steps) || board.steps.length === 0) return false
   return board.status === 'active' && (board.completed_count ?? 0) < board.steps.length
@@ -2740,6 +2745,7 @@ export function restatedPlanVerdict(incoming, committed, activeIndex = 0) {
 
 export class NpcAgentLoop extends BaseNpcAgentLoop {
   constructor(options) {
+    // Programmatic v1 callers can replay historical packets; deployed supervisors always select v2.
     const memory = options.memory ?? new NpcDialogueMemory()
     super({
       ...options,
@@ -2747,6 +2753,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       systemPrompt: `${options.systemPrompt}\n\n${DURABLE_PLAN_PROMPT}`,
     })
     this.stateFile = stateFileFromOptions(options)
+    this.completionProtocolVersion = options.completionProtocolVersion ?? 1
     this.stateLoaded = false
     this.maxProviderOutputUnits = Number.isSafeInteger(options.maxProviderOutputUnits) ? options.maxProviderOutputUnits : 100000
     if (this.maxProviderOutputUnits < 1000 || this.maxProviderOutputUnits > 200000) {
@@ -2838,6 +2845,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // inventory observations are world state and reset with the entity observations. The mutation sequence orders them.
     this.handoffRecipeFacts = new Map()
     this.handoffInventoryObservations = new Map()
+    this.handoffTouchedItems = new Set()
     this.handoffRequirementMachines = new Map()
     this.worldMutationSeq = 0
     this.batchInFlight = false // an operation batch was sent and its receipt has not been read yet
@@ -3180,7 +3188,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         await this.traceExecutorFactsCarried({ packet, restaged, checkpoint, requestId, meta: executorFactsMeta })
         // The counts were deferred behind a batch in flight: the first continuation after its receipt carries them (once).
         if (executorFactsMeta?.counts_deferred) {
-          this.pendingExecutorFactsRefresh = { handoff_id: restaged.handoff_id, request_id: requestId, checkpoint, actor_id: this.epoch?.actor_id, epoch: this.epoch?.epoch }
+          this.pendingExecutorFactsRefresh = { handoff_id: restaged.handoff_id, request_id: requestId, checkpoint, actor_id: this.epoch?.actor_id, epoch: this.epoch?.epoch, goal_id: state?.goal?.goal_id, read_items: executorFactsMeta.read_items }
         }
       }
       return restaged
@@ -3657,6 +3665,30 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }, { requestId })
       return { ...plan, executorCannotAuthor: true }
     }
+    const activeBoardStepId = this.memory.currentPlan?.(this.activePlanKey())?.task_board?.active_step_id
+    const explicitNextStepClaim = plan.semanticCompletion?.stepId === activeBoardStepId
+      && plan.currentStep === committed.active_step_index + 1
+    // The downstream semantic transition validator still checks the explicit claim.
+    if (!explicitNextStepClaim && plan.operations?.length > 0 && Array.isArray(plan.plan) && plan.plan.length > 0
+      && Number.isSafeInteger(plan.currentStep) && plan.currentStep !== committed.active_step_index) {
+      const incomingStep = normalizedStepText(plan.plan[plan.currentStep])
+      const expected = committed.steps[committed.active_step_index]
+      // A valid active-tail restatement may use index zero. A full-plan reply
+      // naming an old step must never have its operations reassigned to a new one.
+      const namesCommittedStep = committed.steps.some(step => normalizedStepText(step.description) === incomingStep)
+      // Version 1 preserves historical programmatic callers that supplied arbitrary
+      // advisory plan text. Production version 2 also refuses ambiguous indices.
+      if (incomingStep !== normalizedStepText(expected?.description)
+        && (namesCommittedStep || this.completionProtocolVersion >= 2)) {
+        const error = new AgentLoopError('executor_stale_step: choose new operations for the current committed active step')
+        error.failureClass = 'plan_category'
+        error.code = 'executor_stale_step'
+        error.expectedStep = { index: committed.active_step_index, stepId: expected?.step_id, description: expected?.description }
+        await this.traceEvent('executor.stale_step_rejected', { role: EXECUTOR_ROLE, handoff_id: this.agentContext.handoffId,
+          incoming_step_index: plan.currentStep, expected_step: error.expectedStep, operation_count: plan.operations.length })
+        throw error
+      }
+    }
     const ignored = []
     const reasons = []
     let next = plan
@@ -4066,6 +4098,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.batchInFlight = false
     this.pendingExecutorFactsRefresh = null
     this.handoffInventoryObservations = new Map()
+    this.handoffTouchedItems = new Set()
     this.handoffRequirementMachines = new Map()
   }
 
@@ -4195,7 +4228,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // the executor only sees the packet after the batch finishes: counts, the checkpoint machine and residual needs are then
   // NOT read (`counts_deferred`); recipe facts and history still ride. `mode: 'refresh'` is the later read, taken after
   // the receipt landed: counts, machine and residual only.
-  async gatherExecutorHandoffFacts({ state, actor, runtime, mode = 'packet' }) {
+  async gatherExecutorHandoffFacts({ state, actor, runtime, mode = 'packet', refreshItems = [] }) {
     try {
       const plan = getActivePlanningPlan(state)
       const step = plan?.steps?.[plan.active_step_index]
@@ -4217,15 +4250,22 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       closure.items.forEach(addItem)
       needs.items.forEach(addItem)
+      refreshItems.forEach(addItem)
+      for (const item of this.handoffTouchedItems ?? []) addItem(item)
       for (const recipe of recipes) {
         if (recipe.products.some(product => wanted.includes(product.name))) recipe.ingredients.filter(ingredient => ingredient.type === 'item').forEach(ingredient => addItem(ingredient.name))
       }
+      for (const recipe of cached) {
+        recipe.products?.filter(product => product.type !== 'fluid').forEach(product => addItem(product.name))
+        recipe.ingredients?.filter(ingredient => ingredient.type === 'item').forEach(ingredient => addItem(ingredient.name))
+      }
+      for (const item of this.handoffInventoryObservations.keys()) addItem(item)
       const machineRequirement = checkpointMachineRequirements(step.completion_contract)[0]
       const historical = this.historicalEntityFacts()
 
       const source = actor ?? this.epoch
       const fence = Number.isSafeInteger(source?.actor_id) && Number.isSafeInteger(source?.epoch) && typeof source?.mode === 'string' && typeof source?.actor_kind === 'string' ? source : undefined
-      const meta = { reads_attempted: 0, reads_failed: 0, refresh: 'skipped', residual_omitted: undefined, recipe_cache: cached.length, counts_deferred: undefined }
+      const meta = { reads_attempted: 0, reads_failed: 0, refresh: 'skipped', residual_omitted: undefined, recipe_cache: cached.length, counts_deferred: undefined, read_items: readItems }
       const fresh = new Map()
       let freshMachine
       const inFlight = this.batchInFlight === true || runtime?.idle === false || (Number.isFinite(runtime?.queue_length) && runtime.queue_length > 0)
@@ -4322,7 +4362,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const counts = { items, unavailable, as_of: tag, ...(meta.counts_deferred ? { deferred: meta.counts_deferred } : {}) }
       if (mode === 'refresh') {
         const any = items.length > 0 || unavailable.length > 0 || machine || residual
-        return { facts: any ? { counts, machine, residual } : undefined, meta }
+        return { facts: any ? { recipes, counts, machine, residual, historical_entities: historical } : undefined, meta }
       }
       const hasContent = recipes.length > 0 || items.length > 0 || unavailable.length > 0 || counts.deferred || machine || residual || historical.length > 0
       return { facts: hasContent ? { recipes, counts, machine, residual, historical_entities: historical } : undefined, meta }
@@ -4356,10 +4396,43 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (pending.actor_id !== this.epoch?.actor_id || pending.epoch !== this.epoch?.epoch) return skip('actor_changed_since_handoff')
       const state = this.memory.planningState?.(this.activePlanKey())
       if (!state?.goal?.goal_id) return skip('no_admitted_goal')
-      const gathered = await this.gatherExecutorHandoffFacts({ state, actor: this.epoch, mode: 'refresh' })
+      if (pending.goal_id && pending.goal_id !== state.goal.goal_id) return skip('goal_changed_since_handoff')
+      const planId = getActivePlanningPlan(state)?.plan_id
+      const stepId = getActivePlanningPlan(state)?.steps?.[getActivePlanningPlan(state)?.active_step_index]?.step_id
+      const gathered = await this.gatherExecutorHandoffFacts({ state, actor: this.epoch, mode: 'refresh', refreshItems: pending.read_items ?? [] })
       if (gathered?.refusal) return skip(gathered.refusal)
+      const after = this.memory.planningState?.(this.activePlanKey())
+      const afterPlan = getActivePlanningPlan(after)
+      if (after?.goal?.goal_id !== state.goal.goal_id || afterPlan?.plan_id !== planId || afterPlan?.steps?.[afterPlan.active_step_index]?.step_id !== stepId) return skip('step_changed_during_refresh')
       const text = executorFactsRefreshMessage(gathered?.facts)
       if (!text) return skip('nothing_to_refresh')
+      const priorStep = this.messages.find(message => message?.role === 'user' && String(message.content ?? '').startsWith('--- step block ---'))
+      const priorLines = String(priorStep?.content ?? '').split('\n')
+      // These remain observations taken at the original restage, not fresh reads.
+      // Reuse the packet builder so the retained advisory records keep its usual bounds.
+      const jevFacts = priorLines.flatMap(line => {
+        const match = /^jev_fact\[([^\]]+)\] \(harness read at this restage, selected by Jev; advisory, verify before acting\): (.+)$/.exec(line)
+        return match ? [{ family: match[1], text: match[2] }] : []
+      })
+      const jevHints = priorLines.find(line => line.startsWith('jev_fact_hint (Jev, advisory): lookups likely useful here: '))
+        ?.slice('jev_fact_hint (Jev, advisory): lookups likely useful here: '.length).split(', ')
+      const refreshedPacket = this.buildRestagePacket({
+        checkpoint: pending.checkpoint ?? 'C3', role: EXECUTOR_ROLE,
+        reason: 'correlated_receipt_refresh', planningState: after,
+        actor: this.epoch, runtime: this.lastRuntimeView(), executorFacts: gathered.facts, jevFacts, jevHints,
+      })
+      // Keep the immutable plan prefix and conversation identity. Replace the
+      // volatile snapshot so the next decision cannot read superseded claims.
+      if (refreshedPacket?.volatileText) {
+        const replaceStep = messages => messages.map(message => {
+          if (message?.role !== 'user' || !String(message.content ?? '').startsWith('--- step block ---')) return message
+          const origin = String(message.content).match(/^restage: .*$/m)?.[0]
+          const content = origin ? refreshedPacket.volatileText.replace(/^restage: .*$/m, origin) : refreshedPacket.volatileText
+          return { ...message, content }
+        })
+        this.baseMessages = replaceStep(this.baseMessages)
+        this.messages = replaceStep(this.messages)
+      }
       const counts = gathered.facts.counts?.items ?? []
       await this.traceEvent('context.executor_facts_refreshed_after_batch', {
         request_id: requestId,
@@ -4374,7 +4447,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         reads_failed: gathered.meta?.reads_failed,
         reason: 'batch_receipt_landed_after_deferred_handoff_counts',
       }, { requestId })
-      return text
+      return `[HARNESS] This current-state update supersedes deferred counts and older batch-in-flight assertions in the handoff. Latest authoritative receipt: ${JSON.stringify(this.lastTaskStatusView?.last_completed_batch ?? null)}.\n${text}`
     }
     catch {
       return undefined
@@ -5588,6 +5661,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return { ok: false, reason: 'unsupported_or_malformed_predicate' }
     }
 
+    if (normalized.kind === 'research_completed') {
+      try {
+        const raw = JSON.parse(String(await this.rcon.command(goalConditionCommand(normalized))).trim())
+        return raw?.ok === true ? { ok: true, requirement: normalized, fact: raw } : { ok: false, reason: raw?.error ?? 'research_not_evaluable' }
+      }
+      catch { return { ok: false, reason: 'research_grounding_failed' } }
+    }
     if (['inventory_count', 'entity_inventory_count', 'entity_exists', 'entity_state'].includes(normalized.kind)) {
       const exact = Number.isSafeInteger(normalized.unit_number)
         ? this.liveObservedExactTarget(normalized.unit_number)
@@ -5689,6 +5769,56 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
     return { accepted: true, contract: normalized }
+  }
+
+  async validateStepCompletionDeclarations(plan) {
+    const planning = this.memory.planningState?.(this.activePlanKey())
+    const held = getActivePlanningPlan(planning)
+    if (FROZEN_PLAN_STATUSES.has(held?.status)) {
+      const step = held.steps?.[held.active_step_index]
+      const declaredTransition = plan.semanticCompletion?.stepId === step?.step_id
+        && held.steps?.[held.active_step_index + 1]?.completion_mode === 'deterministic'
+        && plan.currentStep === held.active_step_index + 1
+      if (step?.completion_mode === 'semantic' && plan.operations.length > 0 && !declaredTransition) {
+        const error = new AgentLoopError('semantic assessment steps permit observations only; world changes require a new authorized deterministic step')
+        error.failureClass = 'plan_category'
+        error.code = 'semantic_step_cannot_mutate'
+        throw error
+      }
+      return
+    }
+    if (!this.requestInfo || plan.plan.length === 0 || (this.completionProtocolVersion < 2 && !plan.stepCompletions)) return
+    // A saved legacy draft may be resumed unchanged; newly authored drafts must declare every outcome.
+    const legacyDraft = held?.status === PLAN_STATUS.DRAFT && held.steps?.every(step => !step.completion_mode)
+      && JSON.stringify(held.steps.map(step => step.description)) === JSON.stringify(plan.plan)
+    if (legacyDraft && !plan.stepCompletions) return
+    if (!plan.stepCompletions || plan.stepCompletions.length !== plan.plan.length) {
+      const error = new AgentLoopError('missing_step_completions: supply stepCompletions aligned with every plan description before commit')
+      error.failureClass = 'plan_category'
+      error.code = 'missing_step_completions'
+      throw error
+    }
+    for (const [index, declaration] of plan.stepCompletions.entries()) {
+      if (declaration.kind === 'semantic') {
+        if (index === plan.currentStep && plan.operations.length > 0) {
+          const error = new AgentLoopError('semantic_step_cannot_mutate: observation/assessment steps cannot admit world-changing operations or waits')
+          error.failureClass = 'plan_category'
+          error.code = 'semantic_step_cannot_mutate'
+          throw error
+        }
+        continue
+      }
+      const operations = index === plan.currentStep ? plan.operations : []
+      for (const requirement of declaration.checkpoint.requirements) {
+        const allowedReceiptNames = new Set(index === plan.currentStep ? operations.map(operation => operation.name) : approvedOperationNames())
+        const grounded = await this.authoritativeGroundCheckpointRequirement(requirement, { allowedReceiptNames })
+        if (!grounded.ok) throw await this.checkpointRejectionError({ accepted: false, reason: grounded.reason, requirement_id: requirement.id })
+      }
+      if (index === plan.currentStep) {
+        const validation = await this.validatePlannerCheckpointContract(declaration.checkpoint, operations)
+        if (!validation.accepted) throw await this.checkpointRejectionError(validation)
+      }
+    }
   }
 
   // The model-correctable rejection of a planner checkpoint (plan_category / invalid_semantic_checkpoint). A
@@ -5827,14 +5957,55 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async evaluateWorldStateCheckpoint(checkpoint) {
     const contract = checkpoint?.contract
     if (!worldStateContract(contract)) return undefined
-    const facts = await this.completionFactsForContract(contract, undefined, [])
+    const active = activeStepCheckpointSnapshot(this.memory.currentPlan?.(this.activePlanKey())?.task_board)
+    const committedIdentity = Boolean(active?.checkpoint?.contract
+      && completionContractSignature(active.checkpoint.contract) === completionContractSignature(contract))
+    // Monitoring an immutable checkpoint does not grant mutation authority.
+    // A handoff drops live operation bindings, but the committed predicate still
+    // names the same exact machine; callers retain their actor/epoch fences.
+    const facts = await this.completionFactsForContract(contract, undefined, [], { committedIdentity })
     return evaluateCompletionContract(contract, facts)
   }
 
-  async completionFactsForContract(contract, verification, operationNames) {
+  async settleIdleStepCheckpoint() {
+    const key = this.activePlanKey()
+    const state = this.memory.currentPlan?.(key)
+    const snapshot = activeStepCheckpointSnapshot(state?.task_board)
+    if (state?.status !== 'active' || !worldStateContract(snapshot?.checkpoint?.contract)
+      || this.batchInFlight || this.memory.pendingOperation?.(key)) return { closed: false }
+    const rawRuntime = await this.readTaskStatusRaw()
+    const runtime = typeof rawRuntime === 'string' ? JSON.parse(rawRuntime) : rawRuntime
+    if (!idleRuntimeStatus(runtime)) return { closed: false }
+    const before = await deploymentStatus(this.rcon, { requireAllowed: true })
+    const planning = this.memory.planningState?.(key)
+    const plan = getActivePlanningPlan(planning)
+    const evaluation = await this.evaluateWorldStateCheckpoint(snapshot.checkpoint)
+    const after = await deploymentStatus(this.rcon, { requireAllowed: true })
+    const live = this.memory.currentPlan?.(key)
+    const livePlan = getActivePlanningPlan(this.memory.planningState?.(key))
+    if (actorChanged(before, after) || actorChanged(this.epoch, after)) throw new AgentLoopError('actor_changed_during_checkpoint_settlement')
+    if (planning?.goal?.goal_id !== this.memory.planningState?.(key)?.goal?.goal_id
+      || plan?.plan_id !== livePlan?.plan_id || state.goal_id !== live?.goal_id
+      || snapshot.stepId !== live?.task_board?.active_step_id
+      || this.batchInFlight || this.memory.pendingOperation?.(key)) return { closed: false }
+    if (evaluation?.satisfied !== true) return { closed: false }
+    const step = live.task_board.steps.find(item => item.id === snapshot.stepId)
+    return this.applyStepClose('idle_admission', { key, step, contract: snapshot.checkpoint.contract, results: evaluation.results,
+      reasonCode: 'idle_checkpoint_already_satisfied', source: 'idle_admission' })
+  }
+
+  async completionFactsForContract(contract, verification, operationNames, { committedIdentity = false } = {}) {
     const facts = {}
     const normalized = sanitizeStepCompletionContract(contract)
     for (const requirement of normalized.requirements ?? []) {
+      if (requirement.kind === 'research_completed') {
+        try {
+          const raw = JSON.parse(String(await this.rcon.command(goalConditionCommand(requirement))).trim())
+          facts[requirement.id] = { kind: requirement.kind, technology: requirement.technology, authoritative: raw?.ok === true, satisfied: raw?.ok === true && raw.satisfied === true }
+        }
+        catch { facts[requirement.id] = { kind: requirement.kind, authoritative: false, satisfied: false } }
+        continue
+      }
       if (requirement.kind === 'authoritative_operation_receipt') {
         facts[requirement.id] = {
           kind: requirement.kind,
@@ -5846,7 +6017,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         continue
       }
       if (['inventory_count', 'entity_inventory_count', 'entity_exists', 'entity_state'].includes(requirement.kind)) {
-        if (Number.isSafeInteger(requirement.unit_number) && !this.liveObservedExactTarget(requirement.unit_number)) {
+        if (Number.isSafeInteger(requirement.unit_number) && !committedIdentity && !this.liveObservedExactTarget(requirement.unit_number)) {
           facts[requirement.id] = {
             kind: requirement.kind,
             unit_number: requirement.unit_number,
@@ -7350,9 +7521,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return state
   }
 
-  async finalizeCompletedTaskContext() {
+  async finalizeCompletedTaskContext(result) {
     await this.loadPersistentState()
     const key = this.requestInfo?.memoryKey ?? this.lastMemoryKey ?? `npc:${this.npcId}`
+    const decision = completionFinalizationDecision(this.memory, key, result)
+    if (!decision.allowed) {
+      await this.traceEvent('task.completion_finalization_refused', decision)
+      return { finalized: false, ...decision }
+    }
     this.memory.clearTaskContext?.(key)
     this.clearLoadedSkillContext()
     this.skillOffers = null // 2.8 hook
@@ -8249,28 +8425,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!pendingAmendment
       && completionState?.status === 'completed'
       && (reducerGoalSatisfied || legacyCompatibleCompletion)) {
-      // A finite goal has no Shelf, so no frontier exists that could stand in
-      // for satisfaction; the runtime's own deterministic verification of the
-      // final step is the evidence. Record it, or the reducer keeps the goal
-      // active while the user is told it is done, and nothing else ever
-      // decides it.
-      if (!reducerGoalSatisfied
-        && !hasLongHorizonRoadmap
-        && planningAfterCompletion?.goal?.status === GOAL_STATUS.ACTIVE
-        && typeof this.memory.recordGoalSatisfaction === 'function') {
-        const evidenceRefs = [...(completionState.task_board?.evidence ?? [])]
-          .reverse()
-          .filter(item => item?.kind === 'deterministic_verification' && typeof item?.ref === 'string' && item.ref)
-          .slice(0, 2)
-          .map(item => item.ref)
-        if (evidenceRefs.length > 0) {
-          this.memory.recordGoalSatisfaction(this.activePlanKey(), {
-            source: 'runtime',
-            evidenceRefs,
-            rationale: 'finite_goal_final_step_verified',
-          })
-          await this.persistState()
-        }
+      // A completed legacy slice supplies step evidence only. An admitted
+      // canonical goal still needs its separate goal satisfaction authority.
+      if (planningAfterCompletion?.goal && this.memory.planningState?.(this.activePlanKey())?.goal?.status !== GOAL_STATUS.COMPLETED) {
+        return this.endSliceWithoutPlanner({ route: 'legacy_completion_not_goal_proof', reason: 'canonical_goal_not_completed' })
       }
       this.active = false
       const completedBoard = visibleTaskBoard(completionState.task_board)
@@ -9582,6 +9740,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       error.code = 'dsml_malformed'
       throw error
     }
+    let stepCompletions
     let checkpoint
     let goalDefinition
     let roadmap
@@ -9595,6 +9754,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       try { raw = JSON.parse(message.content) }
       catch {}
       if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        if (Object.prototype.hasOwnProperty.call(raw, 'stepCompletions')) {
+          try { stepCompletions = normalizeStepCompletions(raw.plan ?? [], raw.stepCompletions) }
+          catch (cause) {
+            const error = new AgentLoopError(cause.message)
+            error.failureClass = 'plan_category'
+            error.code = 'invalid_step_completions'
+            throw error
+          }
+        }
         // `parsePlan` is strict-exact-keys over the executable plan surface, so
         // anything that is not a step/operation has to be lifted off here or the
         // whole submission is rejected as an unexpected argument. `project` used
@@ -9648,7 +9816,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
         // 2.6: the model's answer to a time review; traced, never executed.
         if (Object.prototype.hasOwnProperty.call(raw, 'timeReview')) timeReview = parseTimeReview(raw.timeReview)
-        if (checkpoint || semanticCompletion || roadmap || roadmapNodeIds || developmentMode || goalDefinition
+        if (stepCompletions || checkpoint || semanticCompletion || roadmap || roadmapNodeIds || developmentMode || goalDefinition
           || Object.prototype.hasOwnProperty.call(raw, 'timeReview')
           || Object.prototype.hasOwnProperty.call(raw, 'goal')
           || Object.prototype.hasOwnProperty.call(raw, 'roadmap')
@@ -9656,6 +9824,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           || Object.prototype.hasOwnProperty.call(raw, 'developmentMode')
           || Object.prototype.hasOwnProperty.call(raw, 'semanticCompletion')) {
           const {
+            stepCompletions: _stepCompletions,
             checkpoint: _checkpoint,
             semanticCompletion: _semanticCompletion,
             roadmap: _roadmap,
@@ -9670,6 +9839,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
     const plan = super.parsePlanMessage(baseMessage)
+    if (stepCompletions) plan.stepCompletions = stepCompletions
     if (checkpoint) plan.checkpoint = checkpoint
     if (semanticCompletion) plan.semanticCompletion = semanticCompletion
     if (roadmap) plan.roadmap = roadmap
@@ -9687,6 +9857,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     this.enforceGoalDefinition(plan)
     const normalizedPlan = normalizeCanonicalPlan(plan.plan, plan.currentStep)
+    if (plan.stepCompletions) {
+      plan.stepCompletions = plan.stepCompletions.filter((_, index) => !isLifecycleMetaStep(plan.plan[index]))
+      const declared = plan.stepCompletions[normalizedPlan.currentStep]
+      if (declared?.kind === 'deterministic') {
+        if (plan.checkpoint && completionContractSignature(plan.checkpoint) !== completionContractSignature(declared.checkpoint)) {
+          const error = new AgentLoopError('active checkpoint disagrees with stepCompletions')
+          error.failureClass = 'plan_category'
+          error.code = 'invalid_step_completions'
+          throw error
+        }
+        plan.checkpoint = declared.checkpoint
+      }
+    }
     plan.plan = normalizedPlan.plan
     plan.currentStep = normalizedPlan.currentStep
     for (const operation of plan.operations) {
@@ -9783,6 +9966,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // A DRAFT checkpoint its own batch would undo is refused here, on the same plan_category correction path as every
     // other unusable plan, before anything is persisted or admitted. A committed plan keeps its immutable checkpoint
     // (the commit-time stock guard covers its later batches).
+    await this.validateStepCompletionDeclarations(plan)
     const contradiction = this.draftCheckpointContradiction(plan)
     if (contradiction) {
       throw await this.checkpointRejectionError({ accepted: false, reason: CHECKPOINT_CONTRADICTS_BATCH_REASON, ...checkpointConflictFacts(contradiction) })
@@ -10096,6 +10280,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   clearActionOmissionRecovery() {
+    this.freshContextRecoveryInProgress = false
     this.actionOmissionRepairActive = false
     this.actionOmissionObservationUsed = false
     this.actionOmissionForceNoTools = false
@@ -10120,6 +10305,29 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       provider_call_budget: '1 act-or-block call; one targeted observation may require one final no-tools decision call',
     })
     return state
+  }
+
+  async tryFreshContextActionRecovery() {
+    if (this.completionProtocolVersion < 2 || this.freshContextRecoveryInProgress || !this.requestInfo) return { attempted: false }
+    const key = this.activePlanKey()
+    const planning = this.memory.planningState?.(key)
+    if (planning?.goal?.status !== 'ACTIVE' && planning?.goal?.status !== 'active') return { attempted: false }
+    const rawRuntime = await this.readTaskStatusRaw()
+    const runtime = typeof rawRuntime === 'string' ? JSON.parse(rawRuntime) : rawRuntime
+    if (this.batchInFlight || !idleRuntimeStatus(runtime) || this.memory.pendingOperation?.(key)) return { attempted: false }
+    if (!this.memory.claimFreshContextRecovery?.(key, { requestId: this.traceRequest?.id })) return { attempted: false }
+    await this.persistState() // Claim before any await/call that could be interrupted by restart.
+    const held = getActivePlanningPlan(planning)
+    const role = FROZEN_PLAN_STATUSES.has(held?.status) ? EXECUTOR_ROLE : PLANNER_ROLE
+    const restaged = await this.restageInTurn({ checkpoint: 'C5', role, reason: 'action_omission_fresh_context', actor: this.epoch, runtime: this.lastRuntimeView() })
+    await this.traceEvent('recovery.fresh_context_started', { goal_id: planning.goal.goal_id, attempted: 1, restaged: restaged.restaged, role })
+    if (!restaged.restaged) return { attempted: false }
+    this.actionOmissionRepairActive = true
+    this.actionOmissionObservationUsed = true
+    this.actionOmissionForceNoTools = true
+    this.freshContextRecoveryInProgress = true
+    this.messages.push({ role: 'user', content: '[HARNESS] This is the one fresh-context recovery for the current goal. Return one JSON control decision using the current authoritative step and facts. You may close a satisfied semantic assessment or choose a valid operation; if the required fact is unavailable, state BLOCKED: and explain it. No additional retry generation follows this decision.' })
+    return { attempted: true, result: await this.runTurn() }
   }
 
   async recoveryDiagnostic(details) {
@@ -10984,11 +11192,28 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async commitPlan(plan) {
     plan = await this.enforceExecutorContract(plan) // U6: an executor reply never changes plan semantics
     if (plan.executorCannotAuthor) return this.endSliceWithoutPlanner({ route: 'executor_reply_without_committed_plan', reason: 'executor_cannot_author_plan' })
+    await this.validateStepCompletionDeclarations(plan)
+    const settledCheckpoint = await this.settleIdleStepCheckpoint()
+    if (settledCheckpoint.closed) {
+      this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
+      await this.traceEvent('plan.followup_operations_dropped', { reason: 'idle_checkpoint_closed_old_step', count: plan.operations.length })
+      this.resetRepairAfterClosedStep()
+      const settled = await this.settleCompletedStepState(settledCheckpoint.state, { withinTurn: true })
+      if (settled) return settled
+      this.messages.push({ role: 'user', content: '[HARNESS] The previous active step checkpoint was already satisfied and has been verified closed. Operations authored for that old step were discarded. Read the current Plan Tracker and choose the next action; do not replay those operations.' })
+      return this.runTurn()
+    }
     const timeReview = await this.reviewPlanTime(plan)
     if (timeReview?.held === true) return timeReview.result
     plan = await this.applyLowRiskTypedProjection(plan)
     const triggerSource = this.reasoningTriggerSource ?? this.planUpdateReason
     let commands = plan.operations.map(renderOperation)
+    for (const operation of plan.operations) {
+      for (const field of ['item_name', 'resource_name', 'product_name']) {
+        const item = operation.args?.[field]
+        if (typeof item === 'string') this.handoffTouchedItems.add(item)
+      }
+    }
     let operations = plan.operations.map((operation, index) => ({
       trace_operation_id: `${this.traceRequest?.id ?? 'request'}/op_${index + 1}`,
       name: operation.name,
@@ -11067,6 +11292,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // A closed step is progress: the next step gets a fresh act-or-block
       // repair instead of failing on the one this claim just resolved.
       if (semantic.applied === true) this.resetRepairAfterClosedStep()
+      if (semantic.applied === true && commands.length > 0 && previousState?.status !== 'completed') {
+        await this.validateStepCompletionDeclarations(plan)
+      }
       // The claim closed the last step of the committed slice. Operations in
       // the same reply belong to no committed plan, so they never run, and
       // dropping them must not fail the request (live 2026-09-29: the request
@@ -11119,6 +11347,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // checkpoint pass below re-records one shaped by the new batch.
     const checkpointBeforeBatch = activeStepCheckpointSnapshot(previousState?.task_board)
     const runtimeHealthy = persistentRuntimeHealthy(persistentRuntime)
+    const heldForSemanticAdmission = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
+    const initialSemanticAdmission = this.completionProtocolVersion >= 2
+      && this.requestInfo && commands.length === 0 && !plan.semanticCompletion
+      && !FROZEN_PLAN_STATUSES.has(heldForSemanticAdmission?.status)
+      && !heldForSemanticAdmission?.replacement
+      && plan.stepCompletions?.[0]?.kind === 'semantic'
+      && plan.currentStep === 0 && !providerBlockerReason(plan)
     let finalCompletionVerified = verifiedFinalCompletion(plan, previousState, this.planUpdateReason, {
       freshObservation: this.freshObservationSinceContinuation,
     })
@@ -11163,7 +11398,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     const conditionWaitActive = conditionWait?.state === 'active'
 
-    if (commands.length === 0 && this.actionOmissionRepairActive && !runtimeHealthy && !conditionWaitActive && !finalCompletionVerified) {
+    if (!initialSemanticAdmission && commands.length === 0 && this.actionOmissionRepairActive && !runtimeHealthy && !conditionWaitActive && !finalCompletionVerified) {
       if (explicitBlocker) {
         return this.finishNoOperationBlock(plan, before, 'provider_reported_blocker', explicitBlocker, 'provider_blocker')
       }
@@ -11171,12 +11406,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         reason_code: 'repair_no_executable_action',
         detail: 'bounded repair returned no executable operation and no explicit BLOCKED reason',
       })
+      const fresh = await this.tryFreshContextActionRecovery()
+      if (fresh.attempted) return fresh.result
       throw new AgentLoopError(
         'provider_action_omission_repair_failed: bounded act-or-block repair returned no executable operation and no explicit BLOCKED: reason',
       )
     }
 
-    if (commands.length === 0 && remainingCanonicalWork && !runtimeHealthy && !conditionWaitActive) {
+    if (!initialSemanticAdmission && commands.length === 0 && remainingCanonicalWork && !runtimeHealthy && !conditionWaitActive) {
       if (this.genericRecoveryDecisionActive) {
         // Generic strict recovery exists because the provider already failed to
         // produce a valid decision. Tools are intentionally disabled there, so
@@ -11211,6 +11448,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           reason_code: 'repair_no_executable_action',
           detail: 'bounded repair returned no executable operation and no explicit BLOCKED reason',
         })
+        const fresh = await this.tryFreshContextActionRecovery()
+        if (fresh.attempted) return fresh.result
         throw new AgentLoopError(
           'provider_action_omission_repair_failed: bounded act-or-block repair returned no executable operation and no explicit BLOCKED: reason',
         )
@@ -11360,6 +11599,26 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           class: 'plan_blocked_awaiting_user',
           reason: stateResult?.state?.blocker ?? 'plan_blocked_awaiting_user',
         },
+      }
+    }
+
+    if (initialSemanticAdmission && stateResult?.blockedByHarness !== true) {
+      // Observation-only work has an empty gameplay batch. Commit its already
+      // validated semantics without inventing a mutation or claiming completion.
+      await this.assertCurrent()
+      const semanticPlanning = this.memory.commitPlanningPlan(this.requestInfo.memoryKey, {
+        now: Date.now(), runtime_validation: { passed: true },
+      })
+      const semanticPlan = getActivePlanningPlan(semanticPlanning)
+      const semanticStep = semanticPlan?.steps?.[semanticPlan.active_step_index]
+      if (FROZEN_PLAN_STATUSES.has(semanticPlan?.status) && semanticStep?.completion_mode === 'semantic') {
+        await this.persistState()
+        await this.traceEvent('plan.semantic_assessment_committed', {
+          plan_id: semanticPlan.plan_id, step_id: semanticStep.step_id,
+          reason: 'validated_observation_only_empty_batch',
+        })
+        this.messages.push({ role: 'user', content: `[HARNESS] Your observation-only plan is committed. Active semantic assessment stepId=${JSON.stringify(semanticStep.step_id)}. Make a fresh approved observation if needed, then close it with grounded semanticCompletion or state BLOCKED: with the missing fact. No gameplay operation belongs to this assessment step.` })
+        return this.runTurn()
       }
     }
 
@@ -12140,6 +12399,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async recoverPlanRoute(generation, reason, roundBase) {
+    if (this.freshContextRecoveryInProgress) throw new AgentLoopError(`provider_action_omission_repair_failed: fresh_context_recovery_exhausted: ${reason instanceof Error ? reason.message : String(reason)}`)
     const reasonText = reason instanceof Error ? reason.message : String(reason)
     const recovery = {
       reason: reasonText,

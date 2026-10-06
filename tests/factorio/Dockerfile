@@ -1,4 +1,4 @@
-FROM node:22-bookworm AS build
+FROM node:22-bookworm AS deps
 
 ENV CI=true
 RUN corepack enable
@@ -10,6 +10,8 @@ RUN corepack install
 COPY . .
 RUN --mount=type=cache,id=npc-test-pnpm-store,target=/pnpm/store \
   pnpm install --frozen-lockfile --prefer-offline --store-dir /pnpm/store
+
+FROM deps AS build
 RUN pnpm test:prompt
 RUN pnpm --filter @proj-airi/tstl-plugin-reload-factorio-mod run build
 RUN pnpm --filter autorio.ts run test

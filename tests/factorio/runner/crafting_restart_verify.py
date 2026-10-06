@@ -59,10 +59,33 @@ def run(client: Rcon, results: Path) -> None:
         probe = command('/silent-command rcon.print("SGLUNA_CRAFT_RESTART_READY")')
     require(probe == 'SGLUNA_CRAFT_RESTART_READY', probe)
 
+    # A client map load must reconstruct the running server's logical work;
+    # a process restart only discards it at the explicit startup boundary below.
+    loaded = observe('serialized active craft before explicit startup repair')
+    require(loaded['task_state'] == 'crafting' and loaded['queue_length'] == 1, loaded)
+    require(loaded['native_queue_length'] > 0, loaded)
+    require(loaded['active_batch']['batch_ref'] == before['before_save']['active_batch']['batch_ref'], loaded)
+    pure_status = json_command(
+        "/silent-command local before=remote.call('autorio_operations','status'); "
+        "local before_json=helpers.table_to_json(before); "
+        "remote.call('autorio_operations','status'); remote.call('autorio_operations','status'); "
+        "local after=remote.call('autorio_operations','status'); "
+        "rcon.print(helpers.table_to_json({execution_unchanged=before_json==helpers.table_to_json(after),"
+        "generation_unchanged=before.batch_generation==after.batch_generation,"
+        "active_unchanged=helpers.table_to_json(before.active_batch)==helpers.table_to_json(after.active_batch)}))",
+        'repeated status leaves active execution unchanged',
+    )
+    require(all(pure_status.get(key) is True for key in ('execution_unchanged', 'generation_unchanged', 'active_unchanged')), pure_status)
+
     # Production intentionally leaves post-load mutation pending in multiplayer
     # until the supervisor has RCON and calls this replicated repair boundary.
     # Mirror bindNpc() here before asserting that persisted Autorio-owned native
     # crafting was cancelled and its ownership marker was cleared.
+    startup = json_command(
+        lua_json(remote_call('autorio_operations', 'reconcile_startup', repr('crafting-restart-verify'))),
+        'logical crafting post-restart reconciliation',
+    )
+    require(startup.get('ok') is True and startup.get('reconciled') is True, startup)
     reconcile_result = json_command(
         lua_json(remote_call('autorio_actor', 'reconcile_after_load')),
         'owned crafting post-restart reconciliation',
@@ -117,6 +140,9 @@ def run(client: Rcon, results: Path) -> None:
         'status': 'pass',
         'actor_id': actor_id,
         'reconciliation': reconcile_result,
+        'task_startup': startup,
+        'loaded_execution': loaded,
+        'pure_status': pure_status,
         'after_restart': after,
         'quiet': quiet,
         'fresh_before': fresh_before,

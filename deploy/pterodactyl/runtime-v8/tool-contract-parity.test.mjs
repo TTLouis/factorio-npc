@@ -199,10 +199,10 @@ test('submitPlan advertises exactly the fields its parser accepts', () => {
   const definition = runtime.plannerControlToolDefinitions
     .find(tool => tool.function.name === runtime.PLANNER_CONTROL_TOOL_NAME)
   const advertised = Object.keys(definition.function.parameters.properties).sort()
-  assert.deepEqual(advertised, ['chatMessage', 'checkpoint', 'currentStep', 'developmentMode', 'goal', 'operations', 'plan', 'roadmap', 'roadmapNodeIds', 'semanticCompletion', 'timeReview'])
+  assert.deepEqual(advertised, ['chatMessage', 'checkpoint', 'currentStep', 'developmentMode', 'goal', 'operations', 'plan', 'roadmap', 'roadmapNodeIds', 'semanticCompletion', 'stepCompletions', 'timeReview'])
   assert.equal(advertised.includes('project'), false)
 
-  const sample = { chatMessage: 'x', plan: [], currentStep: 0, operations: [], roadmap: [], roadmapNodeIds: [], developmentMode: 'vertical', checkpoint: {}, semanticCompletion: { stepId: 'step_1' }, goal: { scope: 'finite', summary: 'x', doneWhen: [{ kind: 'rockets_launched', minimum: 1 }] }, timeReview: { decision: 'keep_serial', reason: 'x' } }
+  const sample = { chatMessage: 'x', plan: [], currentStep: 0, operations: [], roadmap: [], roadmapNodeIds: [], developmentMode: 'vertical', checkpoint: {}, semanticCompletion: { stepId: 'step_1' }, stepCompletions: [], goal: { scope: 'finite', summary: 'x', doneWhen: [{ kind: 'rockets_launched', minimum: 1 }] }, timeReview: { decision: 'keep_serial', reason: 'x' } }
   for (const field of advertised) {
     assert.ok(Object.hasOwn(sample, field), `no parity sample for advertised field ${field}`)
     assert.doesNotThrow(() => runtime.plannerControlPayloadFromMessage({
@@ -217,6 +217,23 @@ test('submitPlan advertises exactly the fields its parser accepts', () => {
       }],
     }), `submitPlan advertises ${field} but its parser refuses it`)
   }
+})
+
+test('submitPlan preserves aligned deterministic and semantic completion declarations on the control boundary', () => {
+  const declarations = [
+    { kind: 'deterministic', checkpoint: { mode: 'all', requirements: [{ kind: 'research_completed', technology: 'electronics' }] } },
+    { kind: 'semantic', rationale: 'Assess the candidate approach using current observations.' },
+  ]
+  const payload = runtime.plannerControlPayloadFromMessage({ content: '', tool_calls: [{ id: 'control-completion', type: 'function', function: {
+    name: runtime.PLANNER_CONTROL_TOOL_NAME,
+    arguments: JSON.stringify({ chatMessage: 'x', plan: ['Unlock electronics', 'Assess approach'], currentStep: 0, operations: [], stepCompletions: declarations }),
+  } }] })
+  assert.deepEqual(payload.stepCompletions, declarations)
+  const schema = runtime.plannerControlToolDefinitions.find(tool => tool.function.name === runtime.PLANNER_CONTROL_TOOL_NAME).function.parameters.properties.stepCompletions
+  assert.equal(schema.type, 'array')
+  assert.equal(schema.maxItems, 30)
+  assert.deepEqual(schema.items.oneOf.map(branch => branch.required), [['kind', 'checkpoint'], ['kind', 'rationale']])
+  assert.ok(schema.items.oneOf.every(branch => branch.additionalProperties === false))
 })
 
 test('the Roadmap Shelf surface cannot carry executable work', () => {

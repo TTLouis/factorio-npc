@@ -157,7 +157,7 @@ describe('Autorio task batch receipts', () => {
       '[AUTORIO] Operation batch cancelled: batch=1, task_count=1, tasks=waiting, tick=145, reason=actor_loss',
     )
   })
-  it('persists the numeric sequence and rotates generation across manager recreation', () => {
+  it('persists sequence across peer reload and rotates generation only at server startup', () => {
     const first = new_task_manager(() => actor())
     first.add_task({ type: TaskStates.WAITING, remaining_ticks: 1, requested_ticks: 1 })
 
@@ -180,6 +180,8 @@ describe('Autorio task batch receipts', () => {
     })
 
     const second = new_task_manager(() => actor())
+    expect(second.get_status_snapshot()).toMatchObject({ batch_generation: 1 })
+    second.reconcile_startup('server-restarted')
     expect(second.get_status_snapshot()).toMatchObject({ batch_generation: 2 })
     second.add_task({ type: TaskStates.WAITING, remaining_ticks: 1, requested_ticks: 1 })
     expect(second.get_status_snapshot().active_batch).toMatchObject({

@@ -142,13 +142,20 @@ test('lost acknowledgement, effect happened: reconciled as admitted, the deliver
   assert.equal(world.pending().state, 'admitted')
   assert.equal(world.pending().batch_id, world.game.batchId)
 
-  // The completion receipt settles it; the step then closes on the real world state (the chest holds the coal).
+  // The completion receipt settles the operation. This old fixture aliases the
+  // chest quantity to actor inventory, so its step evidence cannot prove the
+  // independently requested delivery goal.
   world.game.completeBatch()
   world.game.inventory.coal = 5
   const done = await world.agent.completed()
   assert.equal(world.game.deliveries.length, 1, 'completing issued nothing again')
   assert.equal(world.pending(), null, 'the receipt settled the pending operation')
-  assert.equal(done.goalStatus, 'completed')
+  assert.equal(world.memory.currentPlan(KEY).task_board.status, 'completed')
+  assert.equal(world.memory.planningState(KEY).goal.status, 'active')
+  const refused = await world.agent.finalizeCompletedTaskContext(done)
+  assert.equal(refused.finalized, false)
+  assert.equal(refused.reason, 'canonical_goal_not_completed')
+  assert.equal(world.memory.planningState(KEY).goal.status, 'active')
 })
 
 test('missing exact admission stays uncertain even when unrelated batch watermarks suggest no delivery', async () => {

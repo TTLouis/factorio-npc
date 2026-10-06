@@ -1,8 +1,12 @@
 import type { ControlledActor } from './actors/types'
 import type { PlayerParameters } from './types'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { new_task_manager } from './task_manager'
 import { TaskStates } from './types'
+
+beforeEach(() => {
+  ;(globalThis as any).storage = {}
+})
 
 function walking_task(): PlayerParameters {
   return {

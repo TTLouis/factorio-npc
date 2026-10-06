@@ -163,10 +163,11 @@ test('normalizer extracts the final strict plan after reasoning JSON', () => {
   assert.equal(normalizeProviderPlanContent(`thinking {"candidate":1}\n${plan}`), plan)
 })
 
-test('normalizer prefers the last valid plan candidate', () => {
+test('normalizer refuses conflicting plan candidates rather than choosing a later proposal', () => {
   const draft = '{"chatMessage":"draft","plan":["draft"],"currentStep":0,"operations":[]}'
   const finalPlan = '{"chatMessage":"final","plan":[],"currentStep":0,"operations":[]}'
-  assert.equal(normalizeProviderPlanContent(`draft ${draft}\nreason {"x":2}\nfinal ${finalPlan}`), finalPlan)
+  const content = `draft ${draft}\nreason {"x":2}\nfinal ${finalPlan}`
+  assert.equal(normalizeProviderPlanContent(content), content)
 })
 
 test('normalizer does not accept plan-like JSON that fails strict schema', () => {

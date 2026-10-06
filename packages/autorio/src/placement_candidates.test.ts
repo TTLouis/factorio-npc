@@ -1,11 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { placement_candidates_for_actor } from './placement_candidates'
+import { placement_candidates_for_actor, sort_candidates, type PlacementCandidate } from './placement_candidates'
 
 function luaPairs(value: Record<string, unknown>) {
   return Object.entries(value)
 }
 
 describe('placement candidates', () => {
+  it('sorts a maximum-size candidate set deterministically with coverage before distance and coordinates', () => {
+    const values = Array.from({ length: 10000 }, (_, index) => ({ id: `${index}`, position: { x: index % 17, y: index % 31 },
+      direction: (index % 4) * 4, distance_from_center: index % 13,
+      resource_coverage: [{ name: 'iron-ore', entities: index % 5, amount: index % 7 }], footprint: {} })) as PlacementCandidate[]
+    const expected = [...values].sort((left, right) => {
+      const l = left.resource_coverage![0]; const r = right.resource_coverage![0]
+      return r.entities - l.entities || r.amount - l.amount || left.distance_from_center - right.distance_from_center
+        || left.position.y - right.position.y || left.position.x - right.position.x || left.direction - right.direction
+    })
+    sort_candidates(values, 'iron-ore')
+    expect(values).toEqual(expected)
+  })
   const originalPairs = (globalThis as any).pairs
   const originalEntityPrototypes = (globalThis as any).prototypes.entity
 

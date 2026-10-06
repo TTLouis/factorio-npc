@@ -259,8 +259,13 @@ test('MW1 wiring: a reserved container is refused for an ordinary goal and the r
   assert.deepEqual(reserved(), [900], 'the new_goal path kept the reserved container')
   assert.ok(cleared >= 1, 'the new_goal router path cleared the task context')
 
-  // Completed-task cleanup (finalizeCompletedTaskContext): the world facts stay as well.
-  await agent.finalizeCompletedTaskContext()
+  // An unverified cleanup request cannot clear the current goal or world facts.
+  const activeGoalId = memory.planningState(KEY).goal.goal_id
+  assert.equal((await agent.finalizeCompletedTaskContext()).finalized, false)
+  assert.equal(memory.planningState(KEY).goal.goal_id, activeGoalId)
+  // Seed authoritative completion for this cleanup-only fixture; no gameplay is inferred from a wait.
+  memory.recordGoalSatisfaction(KEY, { source: 'runtime', evidenceRefs: ['fixture/world-completed'], rationale: 'Scripted authoritative completion fixture.' })
+  assert.equal(await agent.finalizeCompletedTaskContext({ goalId: activeGoalId, goalStatus: 'completed' }), true)
   assert.deepEqual(reserved(), [900], 'finalizeCompletedTaskContext kept the reserved container')
   assert.ok(cleared >= 2)
   assert.equal(memory.planningState(KEY)?.goal ?? null, null)

@@ -56,6 +56,21 @@ test('inventory completion requires grounded count truth', () => {
   }).satisfied, false)
 })
 
+test('research checkpoint needs exact authoritative research evidence, not a craft receipt or model claim', () => {
+  const contract = sanitizeStepCompletionContract({ mode: 'all', requirements: [{ kind: 'research_completed', technology: 'logistic-science-pack' }] })
+  assert.equal(completionContractSupported(contract), true)
+  const check = fact => evaluateCompletionContract(contract, { requirement_1: fact }).satisfied
+  assert.equal(check({ kind: 'research_completed', technology: 'logistic-science-pack', authoritative: true, satisfied: true }), true)
+  for (const fact of [
+    { kind: 'research_completed', technology: 'logistic-science-pack', satisfied: true },
+    { kind: 'research_completed', technology: 'electronics', authoritative: true, satisfied: true },
+    { kind: 'research_completed', technology: 'logistic-science-pack', authoritative: true, satisfied: false },
+    { kind: 'research_completed', technology: 'logistic-science-pack', authoritative: true, stale: true, satisfied: true },
+    { kind: 'authoritative_operation_receipt', authoritative: true, operation_name: 'craft_item' },
+  ]) assert.equal(check(fact), false)
+  assert.equal(completionContractSupported({ mode: 'all', requirements: [{ kind: 'research_completed', technology: 'bad\"technology' }] }), false)
+})
+
 test('entity inventory completion requires exact live identity', () => {
   assert.equal(sanitizeStepCompletionContract({
     mode: 'all',

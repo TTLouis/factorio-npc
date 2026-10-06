@@ -1021,7 +1021,22 @@ test('verified final completion is not mistaken for an action omission', async (
   assert.equal(agent.memory.currentPlan('npc:sgluna'), undefined)
   assert.match(agent.memory.context('npc:sgluna'), /place one furnace|requested furnace/i)
 
-  await agent.finalizeCompletedTaskContext()
+  // The legacy projection completed its slice. That is not separate evidence
+  // that the canonical user goal is satisfied, so cleanup must refuse it.
+  const canonicalGoal = agent.memory.planningState('npc:sgluna').goal
+  assert.equal(canonicalGoal.status, 'active')
+  const refused = await agent.finalizeCompletedTaskContext(finished)
+  assert.equal(refused.finalized, false)
+  assert.equal(refused.reason, 'canonical_goal_not_completed')
+  assert.equal(agent.memory.planningState('npc:sgluna').goal.goal_id, canonicalGoal.goal_id)
+  assert.match(agent.memory.context('npc:sgluna'), /place one furnace|requested furnace/i)
+  // This cleanup fixture now supplies its own authoritative goal evidence,
+  // distinct from the final step receipt or the completed compatibility board.
+  agent.memory.recordGoalSatisfaction('npc:sgluna', {
+    source: 'runtime', evidenceRefs: ['goal/furnace_world_verified'],
+    rationale: 'Separate fixture observation verified the requested furnace outcome.',
+  })
+  assert.equal(await agent.finalizeCompletedTaskContext(finished), true)
   assert.equal(agent.active, false)
   assert.equal(agent.messages.length, 0)
   assert.equal(agent.baseMessages.length, 0)

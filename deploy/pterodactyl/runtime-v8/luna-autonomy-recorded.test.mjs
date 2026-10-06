@@ -533,14 +533,49 @@ test('shape 3: a routed wait that ends on a stopped furnace wakes with the concr
 
 // The retained turn-1 furnace (47 plates, 2 ore, fuel, working) finishes inside the very first 600-tick wait: three
 // more plates make the 50. Every later wait in the retained run was spent on an idle furnace whose checkpoint was met.
-test('shape 3 residual: a wait-only batch on an idle furnace whose checkpoint is already satisfied should not run as another blind timer', { todo: 'runtime gap found by the recorded replay: routeWaitOnlyBatch declines on machine_not_working even when the committed checkpoint is already satisfied; the model only gets the satisfied fact in the receipt' }, async () => {
+test('shape 3 residual: a wait-only batch on an idle furnace whose checkpoint is already satisfied should not run as another blind timer', async () => {
   const world = new RecordedWorld({ furnace: worldReads.furnace47Plates, held: heldPlates(), inProgress: 1 })
-  const run = loop(world, [furnaceReads(), plannerCommit3(), executorWait(), executorWait()])
+  const nextCopper = () => recorded('req_muw0yzan_3.turn2.executor_wait', { currentStep: 1, operations: [{ name: 'gather_resource', args: { resource_name: 'copper-ore', count: 5, search_radius: 256 } }] })
+  const run = loop(world, [furnaceReads(), plannerCommit3(), executorWait(), nextCopper()])
   await run.say(requestText.req_muw0yzan_3)
   world.finishBatch()
   assert.equal(world.totalInFurnace('iron-plate'), 50)
   await run.agent.completed()
-  assert.equal(world.mutations.length, 1, 'the recorded executor wait was not admitted as a second timer')
+  assert.equal(run.named('plan.followup_operations_dropped').length, 1, 'the retained old-step wait was discarded')
+  assert.equal(run.plan().task_board.completed_count, 1, 'the furnace checkpoint closed from world facts')
+  assert.equal(world.mutations.length, 2, 'only the original wait and newly authored copper action were admitted')
+  assert.doesNotMatch(world.mutations[1], /'wait'/)
+  assert.match(world.mutations[1], /gather_resource/)
+})
+
+test('shape 3 residual: repeated retained old-step waits are rejected after world-state closure', async () => {
+  const world = new RecordedWorld({ furnace: worldReads.furnace47Plates, held: heldPlates(), inProgress: 1 })
+  const run = loop(world, [furnaceReads(), plannerCommit3()])
+  await run.say(requestText.req_muw0yzan_3)
+  world.finishBatch()
+  await run.agent.taskStatusReceipt()
+  const settled = await run.agent.settleIdleStepCheckpoint()
+  assert.equal(settled.closed, true)
+  const before = structuredClone(run.reducerPlan())
+  const mutations = world.mutations.length
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const stale = JSON.parse(executorWait().content)
+    await assert.rejects(run.agent.enforceExecutorContract(stale), error => {
+      assert.equal(error.failureClass, 'plan_category')
+      assert.equal(error.code, 'executor_stale_step')
+      assert.equal(error.expectedStep.index, 1)
+      assert.equal(error.expectedStep.stepId, before.steps[1].step_id)
+      return true
+    })
+  }
+  assert.equal(world.mutations.length, mutations, 'neither rejected old-step wait reaches admission')
+  assert.deepEqual(run.reducerPlan(), before, 'rejection preserves committed state')
+  assert.equal(run.named('executor.stale_step_rejected').length, 2)
+  run.agent.completionProtocolVersion = 2
+  const ambiguous = { ...JSON.parse(executorWait().content), plan: ['A different task', 'Something unrelated'], currentStep: 0 }
+  await assert.rejects(run.agent.enforceExecutorContract(ambiguous), error => error.code === 'executor_stale_step')
+  assert.equal(world.mutations.length, mutations, 'strict protocol also refuses ambiguous operation ownership')
+  assert.deepEqual(run.reducerPlan(), before)
 })
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -685,7 +720,7 @@ test('shape 1 (truthful failure): a model that keeps re-sending the recorded col
   assert.equal(data(exhausted).refusals_used, 2)
 })
 
-test('shape 1 residual: with the furnace already holding 50 (the retained state at the turn-12 collection) the committed stock checkpoint should close before the collection empties it', { todo: 'runtime gap found by the recorded replay: an already satisfied committed stock checkpoint is not refused (unit C), but nothing closes the step before the collection, after which the contract can never be satisfied' }, async () => {
+test('shape 1 residual: with the furnace already holding 50 (the retained state at the turn-12 collection) the committed stock checkpoint should close before the collection empties it', async () => {
   const world = new RecordedWorld({ furnace: worldReads.furnace47Plates, held: heldPlates(), inProgress: 1 })
   const run = loop(world, [furnaceReads(), plannerCommit3(), turn12()])
   await run.say(requestText.req_muw0yzan_3)
@@ -949,7 +984,7 @@ async function plannerCollectedTenCopper(script) {
 const textOf = message => (typeof message?.content === 'string' ? message.content : '')
 
 test('shape 4 (handoff): the fresh executor carries the recorded lab recipe and the authoritative step, and its scripted next action after the receipt is admitted', async () => {
-  const run = await plannerCollectedTenCopper([recorded('req_muw17okc_4.turn2.executor_zero_operations', { operations: [GATHER_COPPER_ORE] })])
+  const run = await plannerCollectedTenCopper([recorded('req_muw17okc_4.turn2.executor_zero_operations', { currentStep: 1, operations: [GATHER_COPPER_ORE] })])
   assert.ok(worldReads.recipeLab.length > 5000, 'the recipe read is live-sized')
   const planCalls = run.calls.length
 
@@ -974,10 +1009,12 @@ test('shape 4 (handoff): the fresh executor carries the recorded lab recipe and 
   const step = request.messages.map(textOf).find(text => text.startsWith('--- step block ---'))
   assert.ok(step)
   assert.match(step, /^recipe_fact lab \(stable recipe data, source=getRecipeDetails, as_of=epoch:1\): .*ingredients=10 iron-gear-wheel \+ 10 electronic-circuit \+ 4 transport-belt/m)
-  assert.match(step, /^authority: active_step=\S+ \(committed plan\) contract=all \(committed\)/m)
-  assert.match(step, /^active_step_contract: all: inventory_count copper-plate>=10$/m)
-  assert.match(step, /^counts_deferred=batch_in_flight /m)
-  assert.doesNotMatch(step, /^held_counts/m, 'no count was read while the batch was in flight')
+  assert.match(step, /^authority: active_step=\S+ \(committed plan\) contract=none latest_receipt=none/m)
+  assert.match(step, /^plan_status: EXECUTING; steps 1:completed 2:active 3:pending 4:pending 5:pending$/m)
+  assert.match(step, /^active_step: 2 of 5 .*Gather and smelt any additional copper needed/m)
+  assert.doesNotMatch(step, /^active_step_contract:.*copper-plate>=10/m, 'the completed collection contract no longer claims to be active')
+  assert.doesNotMatch(step, /counts_deferred/, 'the current packet no longer claims the completed batch is in flight')
+  assert.match(step, /^held_counts .*copper-plate=10/m, 'the receipt continuation carries fresh inventory')
 
   // The scripted executor submitted a next action and the harness admitted it: not an omission, not a pause.
   assert.equal(run.world.mutations.length, 2)
@@ -1004,8 +1041,8 @@ test('shape 4 (recovery restage): a fresh executor after a bounded recovery read
   assert.ok(data(row).fresh_items >= 1)
 })
 
-test('shape 4 residual: the step after the collected copper is prose-only, and its executor should still be handed the held counts the lab needs', { todo: 'gap found by the recorded replay: the deferred refresh derives its counts from the active step contract, so once the collection step closes the next prose-only step gets context.executor_facts_refresh_skipped:nothing_to_refresh and no held counts or residual copper' }, async () => {
-  const run = await plannerCollectedTenCopper([recorded('req_muw17okc_4.turn2.executor_zero_operations', { operations: [GATHER_COPPER_ORE] })])
+test('shape 4 residual: the step after the collected copper is prose-only, and its executor should still be handed the held counts the lab needs', async () => {
+  const run = await plannerCollectedTenCopper([recorded('req_muw17okc_4.turn2.executor_zero_operations', { currentStep: 1, operations: [GATHER_COPPER_ORE] })])
   const planCalls = run.calls.length
   await run.agent.completed()
   const request = run.calls.at(planCalls)

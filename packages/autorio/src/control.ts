@@ -395,6 +395,7 @@ remote.add_interface('autorio_preflight', {
 })
 
 remote.add_interface('autorio_operations', {
+  reconcile_startup: (deployment_session: string) => task_manager.reconcile_startup(deployment_session),
   walk_to_entity: (entity_name: string, search_radius: number) => {
     log(`[AUTORIO] New walk_to_entity task: ${entity_name}, radius: ${search_radius}`)
     return navigation_controller.submit(entity_name, search_radius)
@@ -649,6 +650,7 @@ function setup() {
 let no_actor_found = false
 
 script.on_event(defines.events.on_tick, (_event) => {
+  task_manager.initialize()
   if (!setup_complete) setup()
   tick_output_delivery_proofs()
 

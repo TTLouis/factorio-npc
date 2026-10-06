@@ -256,8 +256,12 @@ Token-efficient continuation rules:
 Approved operations and bounded arguments (complete list; "?" marks an optional key):
 ${approvedOperationListText()}.
 
-Answer with one submitPlan call when tools are available: {plan:["observable step"],currentStep,operations:[{name,args}]} plus, when needed, checkpoint {mode,requirements} (the world state that proves the active step done, quantities as lower bounds) or semanticCompletion {stepId} (stepId exactly as in [PLANNING_STATE], only for a prose-only step that has no checkpoint). Do not mix submitPlan with observation tool calls. When tools are off, return exactly one strict JSON object {"chatMessage":"","plan":["observable step"],"currentStep":0,"operations":[{"name":"approved_operation","args":{}}]}.
+Answer with one submitPlan call when tool calls are enabled: {plan:["observable step"],currentStep,operations:[{name,args}]} plus the applicable completion fields. Do not mix submitPlan with observation tool calls. When tool calls are disabled, return the same control decision as exactly one strict JSON object in assistant content; checkpoint, semanticCompletion and stepCompletions remain allowed. Closing observations does not close the control decision. New drafts include stepCompletions aligned to plan: each entry is {kind:"deterministic",checkpoint:{mode,requirements}} or {kind:"semantic",rationale:"..."}. Luna authors the outcome; the harness validates it. Root checkpoint is the active-step compatibility form. semanticCompletion identifies the exact active prose-only step from [PLANNING_STATE], and may have operations:[] when closing the final step of a slice. Do not invent another operation merely to close a completed step.
 plan is the visible canonical checklist proposal, currentStep indexes it, and operations contains only approved structured operations. For time or rate questions use getRecipeDetails, getMiningDetails and estimateProductionTime, not remembered numbers. If the whole goal is verified complete, return plan:[], currentStep:0, operations:[] and a short completion chatMessage.`
+
+export const CLOSED_CONTROL_PROMPT = `[CONTROL_OUTPUT] Tool invocations are disabled for this round (tool_choice none). Observations are closed; the harness still accepts your control decision as ONE strict JSON object in assistant content. Do not call submitPlan or another tool, and do not omit completion fields merely because tools are closed.
+Use chatMessage, plan, currentStep and operations, plus the applicable checkpoint, semanticCompletion, stepCompletions, goal, roadmap, roadmapNodeIds, developmentMode or timeReview. New drafts require stepCompletions aligned to plan, with entries {kind:"deterministic",checkpoint:{mode,requirements}} or {kind:"semantic",rationale:"..."}; keep committed completion specifications unchanged. Root checkpoint remains the active-step compatibility form.
+An executor may close the exact active prose-only step with a grounded semanticCompletion. For the final step of a slice, operations:[] is valid; the harness checks the user goal and returns control to the planner if more work remains. Example shape (replace placeholders and use the actual currentStep): {"chatMessage":"","plan":["<committed step>"],"currentStep":0,"operations":[],"semanticCompletion":{"stepId":"<exact active step id>","rationale":"<grounded judgment>"}}. Never bypass an unmet deterministic checkpoint or invent another gameplay action just to close a completed step. If genuinely blocked, start chatMessage with "BLOCKED: " and state the exact blocker.`
 
 function sanitizePromptTraceValue(value, key = '') {
   if (SENSITIVE_PROMPT_KEY.test(key)) return '[REDACTED]'
@@ -743,7 +747,7 @@ function topLevelJsonObjectSpans(text) {
 // (parsePlanMessage in npc-agent-loop.mjs), so a plan object that carries them
 // is still a plan. parsePlan itself is strict-exact-keys over the executable
 // surface only.
-const PLAN_EXTENSION_KEYS = ['checkpoint', 'semanticCompletion', 'roadmap', 'roadmapNodeIds', 'developmentMode', 'goal', 'timeReview']
+const PLAN_EXTENSION_KEYS = ['checkpoint', 'semanticCompletion', 'stepCompletions', 'roadmap', 'roadmapNodeIds', 'developmentMode', 'goal', 'timeReview']
 // Members a model wrapping the submitPlan arguments inside the plan object may
 // carry beside `submitPlan` (live 2026-10-01, deepseek-v4-flash through
 // OpenRouter). Anything else next to the wrapper is ambiguous and is refused.
@@ -795,7 +799,18 @@ function planCandidate(candidate) {
   catch {
     return undefined
   }
-  return { text: lifted.unwrapped ? JSON.stringify(object) : candidate, unwrapped: lifted.unwrapped === true }
+  return { text: lifted.unwrapped ? JSON.stringify(object) : candidate, object, unwrapped: lifted.unwrapped === true }
+}
+
+function canonicalPlanDecision(value) {
+  if (Array.isArray(value)) return value.map(canonicalPlanDecision)
+  if (!isPlainObject(value)) return value
+  return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalPlanDecision(value[key])]))
+}
+
+function materialPlanDecision(object) {
+  const { chatMessage: _chatMessage, ...decision } = object
+  return JSON.stringify(canonicalPlanDecision(decision))
 }
 
 // DeepSeek sometimes leaks its native tool-call markup into `content` instead
@@ -851,6 +866,10 @@ export function normalizeProviderPlanContentDetailed(content) {
   }
 
   const spans = topLevelJsonObjectSpans(text)
+  const plans = spans.map(([start, end]) => planCandidate(text.slice(start, end).trim())).filter(found => found?.text)
+  if (new Set(plans.map(found => materialPlanDecision(found.object))).size > 1) {
+    return unchanged({ refused: 'multiple_plan_objects_conflict' })
+  }
   for (let index = spans.length - 1; index >= 0; index--) {
     const embedded = take(text.slice(spans[index][0], spans[index][1]).trim(), 'embedded')
     if (embedded) return embedded
@@ -1315,12 +1334,19 @@ export async function providerRequest(config, messages, {
   check(!allowTools || capability.tool_support === true, 'Provider profile does not allow tool calls')
   const disableThinking = compactContinuation && capability.thinking_control === 'deepseek'
   const compactReasoningDisabled = outputBudgetRecovery && capability.reasoning_effort === true
-  const steeredMessages = applySteeringMessages(compactedMessages, messages)
+  const steeredMessages = interactionRouter ? compactedMessages : applySteeringMessages(compactedMessages, messages)
+  // Keep the role-stable prefix and tool schemas unchanged. The closed-round
+  // control contract is dynamic guidance beside steering, before the receipt.
+  const controlledMessages = !interactionRouter && !allowTools
+    ? steeredMessages.map(message => message?.role === 'user' && typeof message.content === 'string' && message.content.startsWith(STEERING_MARKER)
+      ? { ...message, content: `${message.content}\n\n${CLOSED_CONTROL_PROMPT}` }
+      : message)
+    : steeredMessages
   // The interaction router answers in JSON content, so it keeps its own
   // prompt untouched by either the style block or a cache breakpoint.
   const styledMessages = interactionRouter
-    ? steeredMessages
-    : applyProviderStylePrompt(steeredMessages, capability.style_profile ?? capability.id)
+    ? controlledMessages
+    : applyProviderStylePrompt(controlledMessages, capability.style_profile ?? capability.id)
   const cacheBreakpoints = interactionRouter
     ? { messages: styledMessages, breakpoints: 0 }
     : applyAnthropicCacheBreakpoints(styledMessages, capability)
@@ -1363,6 +1389,12 @@ export async function providerRequest(config, messages, {
     promptLayout: promptLayout(styledMessages, { tools: body.tools }),
   }
   await traceProviderPayload(body, traceOptions)
+  if (!interactionRouter && !allowTools) {
+    await traceProviderResult('provider.control_output_contract', {
+      reason: 'observations_closed_control_json_allowed',
+      allowed_completion_fields: ['checkpoint', 'semanticCompletion', 'stepCompletions'],
+    }, traceOptions)
+  }
   if (keepClosedTools && capability.id === 'local' && capability.model_family === 'openai-gpt') {
     await traceProviderResult('provider.closed_tool_contract', {
       reason: 'local_openai_explicit_tool_choice_none',

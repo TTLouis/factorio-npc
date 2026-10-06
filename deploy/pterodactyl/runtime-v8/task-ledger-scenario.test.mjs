@@ -26,8 +26,17 @@ function harness({ memory = new CanonicalTaskBoardMemory(), game = new FakeFacto
     const board = memory.currentPlan(KEY)?.task_board
     const index = Number.isSafeInteger(board?.active_index) ? board.active_index : 0
     world.calls.push({ objective, index })
-    if (/coal to Louis/.test(objective) || (!board && world.nextGoal === 'coal')) {
-      return planReply({ plan: ['Mine 5 coal for Louis'], operations: [gather('coal', 5)], checkpoint: inventoryCheckpoint('coal', 5) })
+    if (/coal for Louis/.test(objective) || (!board && world.nextGoal === 'coal')) {
+      return planReply({
+        plan: ['Mine 5 coal for Louis'],
+        operations: [gather('coal', 5)],
+        checkpoint: inventoryCheckpoint('coal', 5),
+        ...(!board ? { goal: {
+          scope: 'finite',
+          summary: 'Mine and hold 5 coal for Louis.',
+          doneWhen: [{ kind: 'inventory_count', item_name: 'coal', minimum: 5 }],
+        } } : {}),
+      })
     }
     if (!board) {
       return planReply({ plan: STEPS, currentStep: 0, operations: [gather('iron-ore', 10)], checkpoint: inventoryCheckpoint('iron-ore', 10) })
@@ -88,7 +97,7 @@ test('interrupt, run another task to completion, resume at the stopped step with
 
   // A second request displaces it.
   world.nextGoal = 'coal'
-  await world.say('please bring coal to Louis', 'new_goal')
+  await world.say('please mine 5 coal for Louis', 'new_goal')
   const interrupted = world.named('task_ledger.interrupted')
   assert.equal(interrupted.length, 1)
   assert.equal(interrupted[0].reason, 'new_goal')
@@ -114,7 +123,7 @@ test('interrupt, run another task to completion, resume at the stopped step with
   assert.equal(restarted.named('task_ledger.restored').length, 0, 'restore ran before the new loop installed its trace sink')
 
   // The supervisor's completion boundary resumes the interrupted task, then queues the ordinary recovery.
-  await restarted.agent.finalizeCompletedTaskContext()
+  assert.equal(await restarted.agent.finalizeCompletedTaskContext(done), true)
   const queued = []
   const session = {
     agent: restarted.agent,

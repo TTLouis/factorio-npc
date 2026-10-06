@@ -503,6 +503,8 @@ describe('bounded area-clearing combat', () => {
         health: 750,
       })
     }
+    // This is a separate simulated world, not a peer loading c's active task.
+    ;(globalThis as any).storage = {}
     const c2 = world()
     c2.enemies.length = 0
     c2.enemies.push(...c.enemies)

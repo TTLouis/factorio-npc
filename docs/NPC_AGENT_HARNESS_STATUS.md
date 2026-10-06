@@ -8,7 +8,37 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
-## October 6 autonomy repair units A–E (unit and recorded-replay evidence only, no live run)
+## October 6 multiplayer join/desync: confirmed, cause unresolved
+
+During the assisted finish, the owner joined at 05:10:21 Toronto; the server received `playerDesynced` about 71 seconds later. The client's first recorded CRC mismatch was tick 104177, one tick after native red-craft batch completion at 104176. The server continued to green research. This is distinct from the earlier observer selecting the human instead of NPC 25. Join timing and external RCON/polling interactions are recorded as unresolved hypotheses; no new Luna/Jev prompt occurred around the desync. Retained logs do not prove that every join fails. [Incident evidence and pending controlled tests](validation/MULTIPLAYER_JOIN_DESYNC_2026-10-06.md).
+
+## October 6 assisted finish: native red science unlocks green science
+
+After the owner requested help finishing the paused retry, the same actor/world reached green science at unchanged `1eb6172f`: **75 red packs genuinely crafted and 75 consumed**, with normal lab research completed (`by_script=false`) and the green recipe enabled. Native material receipts, six-furnace smelting and an actual steam-powered two-lab layout were verified. The task-board world check reads 1/1 met, while its status remains paused from the earlier continuation failure. [Assisted finish and exact attribution](validation/LUNA_GUIDED_RED_TO_GREEN_2026-10-06.md).
+
+Luna chose and mined only the first ten copper ore. The operator drove the remainder through validated native operations: 65 completions, plus one interrupted admission before checkpoint recovery. Total main-provider and Jev calls remained seven each. This is assisted gameplay proof; autonomous planning remains unproven. All operation/recovery/final audit logs are retained. The one local server remains available on UDP 34201.
+
+## October 6 resumed Luna + Jev test: mining succeeds, semantic completion omitted
+
+Owner-requested fresh retry at unchanged `1eb6172f`: Luna mined ten copper ore, then twice returned no action or semantic step-completion confirmation. The bounded automatic repair failed and the runtime preserved the unfinished goal in a paused state. Seven Luna calls and seven Jev exchanges, no decision fallbacks; its autonomous portion did not reach red science or green research. The offline log checker reports `stale_step_tracker_behind_batch`. [Resumed trial evidence](validation/LUNA_JEV_RESUME_2026-10-06.md).
+
+One new local Docker server is available for owner inspection on UDP 34201 (`127.0.0.1:34201`, or `100.98.209.103:34201` over Tailscale), Factorio 2.0.77. Its matching autorio mod was installed in the owner's requested client folder. A human connected during the trial. The initial observer mistakenly selected that player as the NPC; a corrected authoritative read confirmed standalone NPC actor 25 never changed. Original evidence and the correction are both retained.
+
+## October 6 Luna with Jev: native mining, then unfinished goal cleared
+
+Owner-requested retry at unchanged `1eb6172f`, with the dedicated `.env` Jev token enabled, a separate fresh world, zero humans and speed 1. Jev routed the unchanged goal as `new_goal` (reported confidence 0.98); Luna genuinely gathered ten copper ore. It then confused the completed gathering slice with the still-active green-research goal and returned no next work. The runtime's legacy-board completion boundary cleared the canonical goal although the game had reported 0/1 goal conditions met. Red science and green research remain unachieved.
+
+Eight Luna calls, nine valid Jev exchanges, zero decision fallbacks; no corrective prompts or gameplay takeover after the declared kit. Captured logs are retained; this test world was discarded at the owner's request. All old Factorio test containers, including the temporary viewer, were removed before the later fresh retry above. [Retry evidence and completion-boundary diagnosis](validation/LUNA_JEV_AUTONOMY_2026-10-06.md). A linked electronics shelf node was also marked realized by ore collection alone; slice completion needs to remain separate from goal completion and broader shelf realization.
+
+October 6 cleanup retained 29 captured evidence files at their original log paths and verified unchanged SHA256 hashes. Test-world saves and duplicate server logs were removed. Runtime configuration and the separate Claude worktree's data were left untouched. The ignored cleanup manifest is `test-results/docker-cleanup-2026-10-06/retention-cleanup.json`.
+
+## October 6 Luna trial: task intake failed before gameplay
+
+Fresh-world trial at `1eb6172f`, Factorio 2.0.77, Luna through the owner's CLI proxy, zero humans and speed 1: the router classified the explicit red-to-green task as `chat_only` with no current goal. It replied “I am here.” and admitted no plan. One provider call; no corrective prompts or operator gameplay after the declared starter kit. The isolated container is stopped.
+
+The captured classifier payload also contains an inappropriate final user-role gameplay `[STEERING]` block; its effect on this particular answer is unproven. First-task intake and classifier packet isolation need coverage. See [the fresh trial checkpoint](validation/LUNA_AUTONOMY_INTAKE_2026-10-06.md). Execution repairs A–E remain live-unvalidated because this attempt never reached them.
+
+## October 6 autonomy repair units A–E (unit and recorded-replay evidence only)
 
 Repairs for the four failure shapes in [the October 5 autonomy failure analysis](validation/LUNA_AUTONOMY_FAILURE_ANALYSIS_2026-10-05.md); its closing checklist holds the commits.
 
@@ -27,7 +57,8 @@ The CLI proxy test world reached green science at candidate `d8fa2a1c` on
 Factorio 2.0.77: **75 red packs genuinely hand-crafted and 75 consumed** by two
 native steam-powered labs; green technology researched and its recipe enabled,
 with `by_script=false`, actor 10, zero humans and game speed 1. The successful
-save and native proof are retained; the isolated container is stopped.
+save was discarded during the owner-requested October 6 cleanup; native proof
+logs are retained and the isolated container was removed.
 
 This is a guided finish. Luna completed early mining/smelting but its planning
 and continuation pauses prevented autonomous completion. The operator finished

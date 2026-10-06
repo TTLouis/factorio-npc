@@ -1,5 +1,5 @@
 import type { ControlledActor } from './actors/types'
-import { register_actor_mode_transition_handler, register_npc_recovery_handler } from './actors/actor_controller'
+import { register_actor_mode_transition_handler, register_npc_recovery_handler, register_npc_single_player_load_handler } from './actors/actor_controller'
 import { is_runtime_task_state, unsupported_task_state_reason } from './task_state_runtime'
 import type { PlayerParameters, PlayerState } from './types'
 import { TaskStates } from './types'
@@ -57,11 +57,32 @@ export interface TaskCancelProof {
 
 const MAX_RECEIPT_REFUSALS = 8
 
+interface TaskExecutionState {
+  player_state: PlayerState
+  task_queue: PlayerParameters[]
+  active_batch_id?: number
+  active_batch_task_types: TaskStates[]
+  active_batch_console_quiet: boolean
+  last_completed_batch?: TaskBatchReceipt
+  last_cancelled_batch?: TaskBatchReceipt
+  active_batch_refusals: TaskBatchRefusal[]
+  active_batch_started: number
+  tasks_added_total: number
+}
+
+function empty_execution(): TaskExecutionState {
+  return { player_state: { task_state: TaskStates.IDLE }, task_queue: [],
+    active_batch_task_types: [], active_batch_console_quiet: false,
+    active_batch_refusals: [], active_batch_started: 0, tasks_added_total: 0 }
+}
+
 declare const storage: {
   sgluna_task_batch_sequence?: number
   sgluna_task_batch_generation?: number
   sgluna_task_receipt_journal?: TaskBatchReceipt[]
   sgluna_task_active_batch?: TaskBatchReceipt
+  sgluna_task_execution?: TaskExecutionState
+  sgluna_task_startup_session?: string
 }
 
 const MAX_RECEIPT_HISTORY = 128
@@ -88,22 +109,15 @@ function retain_receipt(receipt: TaskBatchReceipt) {
 const MAX_SAFE_COUNTER = 9007199254740990
 
 export function new_task_manager(get_controlled_actor: () => ControlledActor | undefined) {
-  const player_state: PlayerState = {
-    task_state: TaskStates.IDLE,
+  // A joining peer must resume the exact server execution state. Only handlers
+  // remain local; native queue snapshots and all decisions live in storage.
+  // Do not access storage during module initialization / on_load.
+  const empty_state = empty_execution()
+  function execution() { return storage.sgluna_task_execution ?? empty_state }
+  function initialize() {
+    if (!storage.sgluna_task_execution) storage.sgluna_task_execution = empty_state
   }
-
-  const task_queue: PlayerParameters[] = []
   const cancel_handlers: Partial<Record<TaskStates, () => void>> = {}
-  let batch_generation: number | undefined
-  let active_batch_id: number | undefined
-  let active_batch_task_types: TaskStates[] = []
-  let active_batch_console_quiet = false
-  let last_completed_batch: TaskBatchReceipt | undefined
-  let last_cancelled_batch: TaskBatchReceipt | undefined
-  let active_batch_refusals: TaskBatchRefusal[] = []
-  let active_batch_started = 0
-  /** Monotonic count of tasks queued since this Lua state loaded; a witness that a submission queued nothing. */
-  let tasks_added_total = 0
   let refused_batch_handler: ((refusals: TaskBatchRefusal[], receipt: TaskBatchReceipt) => void) | undefined
 
   function is_routine_follow_task(task: PlayerParameters) {
@@ -118,22 +132,30 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
   }
 
   function ensure_batch_generation() {
-    if (batch_generation !== undefined) return batch_generation
-    const previous = valid_persisted_counter(storage.sgluna_task_batch_generation)
-      ? storage.sgluna_task_batch_generation
-      : 0
-    batch_generation = previous + 1
-    storage.sgluna_task_batch_generation = batch_generation
+    return valid_persisted_counter(storage.sgluna_task_batch_generation)
+      ? storage.sgluna_task_batch_generation : 1
+  }
+
+  // Called once per actual server deployment session through a replicated
+  // command. Loading the map on another client never advances this generation.
+  function reconcile_startup(deployment_session: string) {
+    if (typeof deployment_session !== 'string' || deployment_session.length < 1 || deployment_session.length > 192)
+      return { ok: false, reason: 'invalid_deployment_session' }
+    if (storage.sgluna_task_startup_session === deployment_session)
+      return { ok: true, reconciled: false, batch_generation: ensure_batch_generation() }
     const interrupted = storage.sgluna_task_active_batch
-    if (interrupted) {
-      retain_receipt({ ...interrupted, state: 'uncertain', reason: 'save_load_unfinished', tick: game.tick })
-      storage.sgluna_task_active_batch = undefined
+    if (interrupted) retain_receipt({ ...interrupted, state: 'uncertain', reason: 'save_load_unfinished', tick: game.tick })
+    storage.sgluna_task_active_batch = undefined
+    storage.sgluna_task_execution = empty_execution()
+    const previous = valid_persisted_counter(storage.sgluna_task_batch_generation) ? storage.sgluna_task_batch_generation : 0
+    storage.sgluna_task_batch_generation = previous + 1
+    storage.sgluna_task_startup_session = deployment_session
+    for (const receipt of storage.sgluna_task_receipt_journal ?? []) {
+      if (receipt.state === 'completed') execution().last_completed_batch = receipt
+      if (receipt.state === 'cancelled') execution().last_cancelled_batch = receipt
     }
-    for (const receipt of receipt_journal()) {
-      if (receipt.state === 'completed') last_completed_batch = receipt
-      if (receipt.state === 'cancelled') last_cancelled_batch = receipt
-    }
-    return batch_generation
+    log(`[AUTORIO] task.startup_reconciled request_id=${deployment_session} reason=server_startup batch_generation=${storage.sgluna_task_batch_generation}`)
+    return { ok: true, reconciled: true, batch_generation: storage.sgluna_task_batch_generation }
   }
 
   function batch_ref(batch_id: number) {
@@ -150,66 +172,67 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
   }
 
   function begin_or_extend_batch(task: PlayerParameters) {
-    const created = active_batch_id === undefined
+    const created = execution().active_batch_id === undefined
     const quiet_task = is_routine_follow_task(task)
     if (created) {
-      ensure_batch_generation()
+      initialize()
+      storage.sgluna_task_batch_generation = ensure_batch_generation()
       const pinned = pinned_operation_batch_refs()
       if (receipt_journal().filter(receipt => pinned.includes(receipt.batch_ref)).length >= MAX_PINNED_RECEIPTS) {
         error('receipt_journal_full')
       }
-      active_batch_id = next_batch_id()
-      active_batch_task_types = []
-      active_batch_console_quiet = quiet_task
-      active_batch_refusals = []
-      active_batch_started = 0
+      execution().active_batch_id = next_batch_id()
+      execution().active_batch_task_types = []
+      execution().active_batch_console_quiet = quiet_task
+      execution().active_batch_refusals = []
+      execution().active_batch_started = 0
     }
     else if (!quiet_task) {
-      active_batch_console_quiet = false
+      execution().active_batch_console_quiet = false
     }
-    active_batch_task_types.push(task.type)
+    execution().active_batch_task_types.push(task.type)
     storage.sgluna_task_active_batch = {
-      batch_id: active_batch_id!, batch_generation: ensure_batch_generation(), batch_ref: batch_ref(active_batch_id!),
-      task_count: active_batch_task_types.length, task_types: active_batch_task_types.slice(0, 64), tick: game.tick,
+      batch_id: execution().active_batch_id!, batch_generation: ensure_batch_generation(), batch_ref: batch_ref(execution().active_batch_id!),
+      task_count: execution().active_batch_task_types.length, task_types: execution().active_batch_task_types.slice(0, 64), tick: game.tick,
     }
     return created
   }
 
   function close_batch(kind: 'completed' | 'cancelled' | 'refused', reason?: string, proof?: TaskCancelProof) {
-    if (active_batch_id === undefined) return undefined
+    if (execution().active_batch_id === undefined) return undefined
     const receipt: TaskBatchReceipt = {
-      batch_id: active_batch_id,
+      batch_id: execution().active_batch_id!,
       batch_generation: ensure_batch_generation(),
-      batch_ref: batch_ref(active_batch_id),
-      task_count: active_batch_task_types.length,
-      task_types: active_batch_task_types.slice(0, 64),
+      batch_ref: batch_ref(execution().active_batch_id!),
+      task_count: execution().active_batch_task_types.length,
+      task_types: execution().active_batch_task_types.slice(0, 64),
       tick: game.tick,
       reason,
-      started_count: active_batch_started,
+      started_count: execution().active_batch_started,
     }
     if (kind === 'cancelled' && proof?.failed_before_mutation === true) receipt.failed_before_mutation = true
     // Refusals ride on whichever receipt closes the batch, so a later hard
     // failure that cancels the rest does not hide an earlier refusal.
-    if (active_batch_refusals.length > 0) {
+    if (execution().active_batch_refusals.length > 0) {
       receipt.outcome = kind === 'refused' ? 'refused' : 'cancelled'
-      receipt.refused_count = active_batch_refusals.length
+      receipt.refused_count = execution().active_batch_refusals.length
       // Every other operation ran to completion only when the batch drained;
       // a cancellation stops the rest, so no completed count is claimed then.
-      if (kind === 'refused') receipt.completed_count = receipt.task_count - active_batch_refusals.length
-      receipt.refusals = active_batch_refusals.slice(0, MAX_RECEIPT_REFUSALS)
+      if (kind === 'refused') receipt.completed_count = receipt.task_count - execution().active_batch_refusals.length
+      receipt.refusals = execution().active_batch_refusals.slice(0, MAX_RECEIPT_REFUSALS)
     }
     // A batch with a refused operation is not a clean completion: it is
     // published where failed batches go, so the runtime's failure path (not
     // its completion verifier) reads it.
-    if (kind === 'completed') last_completed_batch = receipt
-    else last_cancelled_batch = receipt
+    if (kind === 'completed') execution().last_completed_batch = receipt
+    else execution().last_cancelled_batch = receipt
     retain_receipt({ ...receipt, state: kind === 'completed' ? 'completed' : 'cancelled' })
     storage.sgluna_task_active_batch = undefined
-    active_batch_id = undefined
-    active_batch_task_types = []
-    active_batch_console_quiet = false
-    active_batch_refusals = []
-    active_batch_started = 0
+    execution().active_batch_id = undefined
+    execution().active_batch_task_types = []
+    execution().active_batch_console_quiet = false
+    execution().active_batch_refusals = []
+    execution().active_batch_started = 0
     return receipt
   }
 
@@ -229,8 +252,9 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
    * batch; the batch closes as refused once its queue drains.
    */
   function record_refusal(refusal: TaskBatchRefusal) {
-    if (active_batch_id === undefined) return false
-    active_batch_refusals.push(refusal)
+    initialize()
+    if (execution().active_batch_id === undefined) return false
+    execution().active_batch_refusals.push(refusal)
     return true
   }
 
@@ -239,7 +263,7 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
   }
 
   function close_refused_batch() {
-    const refusals = [...active_batch_refusals]
+    const refusals = [...execution().active_batch_refusals]
     const first = refusals[0]
     const cause = first.cause ? `:${first.cause}` : ''
     const receipt = close_batch('refused', `${first.type}:${first.code}${cause}`)
@@ -251,17 +275,18 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
   }
 
   function add_task(task: PlayerParameters) {
+    initialize()
     const new_batch = begin_or_extend_batch(task)
-    tasks_added_total++
-    task_queue.push(task)
-    log(`[AUTORIO] Task added: ${task.type}, batch=${active_batch_id}, task queue length: ${task_queue.length}`)
+    execution().tasks_added_total++
+    execution().task_queue.push(task)
+    log(`[AUTORIO] Task added: ${task.type}, batch=${execution().active_batch_id}, task queue length: ${execution().task_queue.length}`)
     if (new_batch) {
-      const details = `batch=${active_batch_id}, first_task=${task.type}, tick=${game.tick}`
-      if (!active_batch_console_quiet) game.print(`[AUTORIO] Operation batch started: ${details}`)
+      const details = `batch=${execution().active_batch_id}, first_task=${task.type}, tick=${game.tick}`
+      if (!execution().active_batch_console_quiet) game.print(`[AUTORIO] Operation batch started: ${details}`)
       log(`[AUTORIO] Operation batch started: ${details}`)
     }
 
-    if (task_queue.length === 1) {
+    if (execution().task_queue.length === 1) {
       next_task()
     }
   }
@@ -271,12 +296,12 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
   }
 
   function run_cancel_cleanup() {
-    const handler = cancel_handlers[player_state.task_state]
+    const handler = cancel_handlers[execution().player_state.task_state]
     if (handler) handler()
   }
 
   function stop_task_controls() {
-    const state = player_state.task_state
+    const state = execution().player_state.task_state
     const stop_walking = state === TaskStates.WALKING_TO_ENTITY
       || state === TaskStates.WALKING_DIRECT
       || state === TaskStates.ATTACKING
@@ -302,38 +327,39 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
   }
 
   function clear_task_state_without_controls() {
-    player_state.task_state = TaskStates.IDLE
-    player_state.parameters_walk_to_entity = undefined
-    player_state.parameters_walking_direct = undefined
-    player_state.parameters_mine_entity = undefined
-    player_state.parameters_harvest_product = undefined
-    player_state.parameters_clear_construction_area = undefined
-    player_state.parameters_place_entity = undefined
-    player_state.parameters_rotate_entity = undefined
-    player_state.parameters_move_items = undefined
-    player_state.parameters_set_recipe = undefined
-    player_state.parameters_launch_rocket = undefined
-    player_state.parameters_craft_item = undefined
-    player_state.parameters_attack_nearest_enemy = undefined
-    player_state.parameters_research_technology = undefined
-    player_state.parameters_waiting = undefined
+    execution().player_state.task_state = TaskStates.IDLE
+    execution().player_state.parameters_walk_to_entity = undefined
+    execution().player_state.parameters_walking_direct = undefined
+    execution().player_state.parameters_mine_entity = undefined
+    execution().player_state.parameters_harvest_product = undefined
+    execution().player_state.parameters_clear_construction_area = undefined
+    execution().player_state.parameters_place_entity = undefined
+    execution().player_state.parameters_rotate_entity = undefined
+    execution().player_state.parameters_move_items = undefined
+    execution().player_state.parameters_set_recipe = undefined
+    execution().player_state.parameters_launch_rocket = undefined
+    execution().player_state.parameters_craft_item = undefined
+    execution().player_state.parameters_attack_nearest_enemy = undefined
+    execution().player_state.parameters_research_technology = undefined
+    execution().player_state.parameters_waiting = undefined
   }
 
   function reset_task_state() {
+    initialize()
     stop_task_controls()
     clear_task_state_without_controls()
   }
 
   function fail_unsupported_task_state(state: unknown) {
     const reason = unsupported_task_state_reason(state)
-    const queued_task_types = task_queue.map(task => task.type)
-    const batch_label = active_batch_id === undefined ? 'none' : `${active_batch_id}`
-    log(`[AUTORIO] ERROR unsupported task state: state=${state}, batch=${batch_label}, queued_task_count=${task_queue.length}, queued_task_types=${queued_task_types.join(',') || 'none'}, active_batch_tasks=${active_batch_task_types.join(',') || 'none'}, reason=${reason}`)
+    const queued_task_types = execution().task_queue.map(task => task.type)
+    const batch_label = execution().active_batch_id === undefined ? 'none' : `${execution().active_batch_id}`
+    log(`[AUTORIO] ERROR unsupported task state: state=${state}, batch=${batch_label}, queued_task_count=${execution().task_queue.length}, queued_task_types=${queued_task_types.join(',') || 'none'}, active_batch_tasks=${execution().active_batch_task_types.join(',') || 'none'}, reason=${reason}`)
 
     run_cancel_cleanup()
     stop_all_task_controls()
     clear_task_state_without_controls()
-    task_queue.length = 0
+    execution().task_queue.length = 0
 
     const receipt = close_batch('cancelled', reason)
     if (receipt) {
@@ -346,19 +372,20 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
   function assert_task_activation_exhaustive(_task: never) {}
 
   function next_task() {
-    if (player_state.task_state !== TaskStates.IDLE) {
+    initialize()
+    if (execution().player_state.task_state !== TaskStates.IDLE) {
       log('[AUTORIO] Task state is not IDLE, wont execute next task')
       return
     }
 
-    const task = task_queue.shift()
+    const task = execution().task_queue.shift()
     if (!task) {
-      player_state.task_state = TaskStates.IDLE
-      if (active_batch_id !== undefined && active_batch_refusals.length > 0) {
+      execution().player_state.task_state = TaskStates.IDLE
+      if (execution().active_batch_id !== undefined && execution().active_batch_refusals.length > 0) {
         close_refused_batch()
         return
       }
-      const quiet_completion = active_batch_id !== undefined && active_batch_console_quiet
+      const quiet_completion = execution().active_batch_id !== undefined && execution().active_batch_console_quiet
       const receipt = close_batch('completed')
       const details = receipt
         ? receipt_details(receipt)
@@ -374,51 +401,51 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
       return
     }
 
-    log(`[AUTORIO] Next task: ${task.type}, batch=${active_batch_id}, task queue length: ${task_queue.length}`)
-    if (active_batch_id !== undefined) active_batch_started++
-    player_state.task_state = task.type
+    log(`[AUTORIO] Next task: ${task.type}, batch=${execution().active_batch_id}, task queue length: ${execution().task_queue.length}`)
+    if (execution().active_batch_id !== undefined) execution().active_batch_started++
+    execution().player_state.task_state = task.type
     switch (task.type) {
       case TaskStates.WALKING_TO_ENTITY:
-        player_state.parameters_walk_to_entity = task
+        execution().player_state.parameters_walk_to_entity = task
         break
       case TaskStates.WALKING_DIRECT:
-        player_state.parameters_walking_direct = task
+        execution().player_state.parameters_walking_direct = task
         break
       case TaskStates.MINING:
-        player_state.parameters_mine_entity = task
+        execution().player_state.parameters_mine_entity = task
         break
       case TaskStates.HARVESTING:
-        player_state.parameters_harvest_product = task
+        execution().player_state.parameters_harvest_product = task
         break
       case TaskStates.CLEARING_AREA:
-        player_state.parameters_clear_construction_area = task
+        execution().player_state.parameters_clear_construction_area = task
         break
       case TaskStates.PLACING:
-        player_state.parameters_place_entity = task
+        execution().player_state.parameters_place_entity = task
         break
       case TaskStates.ROTATING:
-        player_state.parameters_rotate_entity = task
+        execution().player_state.parameters_rotate_entity = task
         break
       case TaskStates.MOVING_ITEMS:
-        player_state.parameters_move_items = task
+        execution().player_state.parameters_move_items = task
         break
       case TaskStates.SETTING_RECIPE:
-        player_state.parameters_set_recipe = task
+        execution().player_state.parameters_set_recipe = task
         break
       case TaskStates.LAUNCHING_ROCKET:
-        player_state.parameters_launch_rocket = task
+        execution().player_state.parameters_launch_rocket = task
         break
       case TaskStates.CRAFTING:
-        player_state.parameters_craft_item = task
+        execution().player_state.parameters_craft_item = task
         break
       case TaskStates.ATTACKING:
-        player_state.parameters_attack_nearest_enemy = task
+        execution().player_state.parameters_attack_nearest_enemy = task
         break
       case TaskStates.RESEARCHING:
-        player_state.parameters_research_technology = task
+        execution().player_state.parameters_research_technology = task
         break
       case TaskStates.WAITING:
-        player_state.parameters_waiting = task
+        execution().player_state.parameters_waiting = task
         break
       default:
         assert_task_activation_exhaustive(task)
@@ -427,27 +454,27 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
   }
 
   function interrupt_current_with(recovery_task: PlayerParameters, resume_task: PlayerParameters) {
-    if (player_state.task_state === TaskStates.IDLE) return false
-    const interrupted_type = player_state.task_state
+    if (execution().player_state.task_state === TaskStates.IDLE) return false
+    const interrupted_type = execution().player_state.task_state
     stop_task_controls()
     clear_task_state_without_controls()
-    task_queue.unshift(resume_task)
-    task_queue.unshift(recovery_task)
+    execution().task_queue.unshift(resume_task)
+    execution().task_queue.unshift(recovery_task)
     log(`[AUTORIO] Temporarily interrupted ${interrupted_type} with ${recovery_task.type}; original task will resume afterward`)
     next_task()
     return true
   }
 
   function is_task_queue_empty() {
-    return task_queue.length === 0
+    return execution().task_queue.length === 0
   }
 
   function get_current_task_snapshot() {
-    switch (player_state.task_state) {
+    switch (execution().player_state.task_state) {
       case TaskStates.IDLE:
         return undefined
       case TaskStates.WALKING_TO_ENTITY: {
-        const task = player_state.parameters_walk_to_entity
+        const task = execution().player_state.parameters_walk_to_entity
         return task
           ? {
               type: task.type,
@@ -462,14 +489,14 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
               calculating_path: task.calculating_path,
               target_position: task.target_position,
             }
-          : { type: player_state.task_state }
+          : { type: execution().player_state.task_state }
       }
       case TaskStates.WALKING_DIRECT: {
-        const task = player_state.parameters_walking_direct
-        return task ? { type: task.type, target_position: task.target_position } : { type: player_state.task_state }
+        const task = execution().player_state.parameters_walking_direct
+        return task ? { type: task.type, target_position: task.target_position } : { type: execution().player_state.task_state }
       }
       case TaskStates.MINING: {
-        const task = player_state.parameters_mine_entity
+        const task = execution().player_state.parameters_mine_entity
         return task
           ? {
               type: task.type,
@@ -480,10 +507,10 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
               position: task.position,
               last_target_amount: task.last_target_amount,
             }
-          : { type: player_state.task_state }
+          : { type: execution().player_state.task_state }
       }
       case TaskStates.HARVESTING: {
-        const task = player_state.parameters_harvest_product
+        const task = execution().player_state.parameters_harvest_product
         return task
           ? {
               type: task.type,
@@ -495,10 +522,10 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
               target_name: task.target_name,
               target_position: task.target_position,
             }
-          : { type: player_state.task_state }
+          : { type: execution().player_state.task_state }
       }
       case TaskStates.CLEARING_AREA: {
-        const task = player_state.parameters_clear_construction_area
+        const task = execution().player_state.parameters_clear_construction_area
         return task
           ? {
               type: task.type,
@@ -509,18 +536,18 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
               target_name: task.target_name,
               target_position: task.target_position,
             }
-          : { type: player_state.task_state }
+          : { type: execution().player_state.task_state }
       }
       case TaskStates.PLACING: {
-        const task = player_state.parameters_place_entity
-        return task ? { type: task.type, entity_name: task.entity_name, position: task.position, direction: task.direction } : { type: player_state.task_state }
+        const task = execution().player_state.parameters_place_entity
+        return task ? { type: task.type, entity_name: task.entity_name, position: task.position, direction: task.direction } : { type: execution().player_state.task_state }
       }
       case TaskStates.ROTATING: {
-        const task = player_state.parameters_rotate_entity
-        return task ? { type: task.type, target_unit_number: task.target_unit_number, reverse: task.reverse } : { type: player_state.task_state }
+        const task = execution().player_state.parameters_rotate_entity
+        return task ? { type: task.type, target_unit_number: task.target_unit_number, reverse: task.reverse } : { type: execution().player_state.task_state }
       }
       case TaskStates.MOVING_ITEMS: {
-        const task = player_state.parameters_move_items
+        const task = execution().player_state.parameters_move_items
         return task
           ? {
               type: task.type,
@@ -532,31 +559,31 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
               to_entity: task.to_entity,
               to_player: task.to_player,
             }
-          : { type: player_state.task_state }
+          : { type: execution().player_state.task_state }
       }
       case TaskStates.SETTING_RECIPE: {
-        const task = player_state.parameters_set_recipe
+        const task = execution().player_state.parameters_set_recipe
         return task
           ? {
               type: task.type,
               target_unit_number: task.target_unit_number,
               recipe_name: task.recipe_name,
             }
-          : { type: player_state.task_state }
+          : { type: execution().player_state.task_state }
       }
       case TaskStates.LAUNCHING_ROCKET: {
-        const task = player_state.parameters_launch_rocket
+        const task = execution().player_state.parameters_launch_rocket
         return task
           ? {
               type: task.type,
               target_unit_number: task.target_unit_number,
               launch_ordered: task.launch_ordered_tick !== undefined,
             }
-          : { type: player_state.task_state }
+          : { type: execution().player_state.task_state }
       }
       case TaskStates.CRAFTING: {
-        const task = player_state.parameters_craft_item
-        if (!task) return { type: player_state.task_state }
+        const task = execution().player_state.parameters_craft_item
+        if (!task) return { type: execution().player_state.task_state }
         const actor = get_controlled_actor()
         return {
           type: task.type,
@@ -569,7 +596,7 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
         }
       }
       case TaskStates.ATTACKING: {
-        const task = player_state.parameters_attack_nearest_enemy
+        const task = execution().player_state.parameters_attack_nearest_enemy
         const target = task?.target
         return task
           ? {
@@ -579,46 +606,47 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
                 ? { name: target.name, position: target.position }
                 : undefined,
             }
-          : { type: player_state.task_state }
+          : { type: execution().player_state.task_state }
       }
       case TaskStates.RESEARCHING: {
-        const task = player_state.parameters_research_technology
-        return task ? { type: task.type, technology_name: task.technology_name } : { type: player_state.task_state }
+        const task = execution().player_state.parameters_research_technology
+        return task ? { type: task.type, technology_name: task.technology_name } : { type: execution().player_state.task_state }
       }
       case TaskStates.WAITING: {
-        const task = player_state.parameters_waiting
-        return task ? { type: task.type, remaining_ticks: task.remaining_ticks } : { type: player_state.task_state }
+        const task = execution().player_state.parameters_waiting
+        return task ? { type: task.type, remaining_ticks: task.remaining_ticks } : { type: execution().player_state.task_state }
       }
       default:
-        return { type: player_state.task_state }
+        return { type: execution().player_state.task_state }
     }
   }
 
   function get_status_snapshot() {
     return {
-      task_state: player_state.task_state,
+      task_state: execution().player_state.task_state,
       batch_generation: ensure_batch_generation(),
-      tasks_added: tasks_added_total,
-      queue_empty: task_queue.length === 0,
-      queue_length: task_queue.length,
-      queued_task_types: task_queue.map(task => task.type),
+      tasks_added: execution().tasks_added_total,
+      queue_empty: execution().task_queue.length === 0,
+      queue_length: execution().task_queue.length,
+      queued_task_types: execution().task_queue.map(task => task.type),
       current_task: get_current_task_snapshot(),
-      active_batch: active_batch_id === undefined
+      active_batch: execution().active_batch_id === undefined
         ? undefined
         : {
-            batch_id: active_batch_id,
+            batch_id: execution().active_batch_id,
             batch_generation: ensure_batch_generation(),
-            batch_ref: batch_ref(active_batch_id),
-            task_count: active_batch_task_types.length,
-            task_types: [...active_batch_task_types],
+            batch_ref: batch_ref(execution().active_batch_id!),
+            task_count: execution().active_batch_task_types.length,
+            task_types: [...execution().active_batch_task_types],
           },
-      last_completed_batch,
-      last_cancelled_batch,
-      receipt_journal: receipt_journal(),
+      last_completed_batch: execution().last_completed_batch,
+      last_cancelled_batch: execution().last_cancelled_batch,
+      receipt_journal: storage.sgluna_task_receipt_journal ?? [],
     }
   }
 
   function cancel_task() {
+    initialize()
     run_cancel_cleanup()
     reset_task_state()
   }
@@ -626,7 +654,7 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
   function cancel_all_tasks(reason = 'cancelled', proof?: TaskCancelProof) {
     run_cancel_cleanup()
     reset_task_state()
-    task_queue.length = 0
+    execution().task_queue.length = 0
     const receipt = close_batch('cancelled', reason, proof)
     if (receipt) {
       const details = receipt_details(receipt)
@@ -636,8 +664,9 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
   }
 
   function discard_all_tasks_after_actor_loss() {
+    initialize()
     clear_task_state_without_controls()
-    task_queue.length = 0
+    execution().task_queue.length = 0
     const receipt = close_batch('cancelled', 'actor_loss')
     if (receipt) {
       const details = receipt_details(receipt)
@@ -646,19 +675,29 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
     }
   }
 
+  register_npc_single_player_load_handler(() => {
+    reconcile_startup(`single-player-load/${ensure_batch_generation() + 1}`)
+  })
+
   register_npc_recovery_handler(({ previous_actor_id }) => {
     discard_all_tasks_after_actor_loss()
     log(`[AUTORIO] Discarded active and queued work after loss of actor_id=${previous_actor_id}`)
   })
 
   register_actor_mode_transition_handler(({ previous_mode, next_mode }) => {
-    if (player_state.task_state === TaskStates.IDLE && task_queue.length === 0) return
+    if (execution().player_state.task_state === TaskStates.IDLE && execution().task_queue.length === 0) return
     cancel_all_tasks('actor_mode_change')
     log(`[AUTORIO] Cancelled active and queued work before actor mode change ${previous_mode} -> ${next_mode}`)
   })
 
-  return {
-    player_state,
+  // TSTL supports class accessors, but not accessors in object literals.
+  // The view is local runtime plumbing; only the plain execution table persists.
+  class ExecutionView {
+    get player_state() { return execution().player_state }
+  }
+  return Object.assign(new ExecutionView(), {
+    initialize,
+    reconcile_startup,
     add_task,
     next_task,
     interrupt_current_with,
@@ -672,5 +711,5 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
     register_cancel_handler,
     record_refusal,
     register_refused_batch_handler,
-  }
+  })
 }

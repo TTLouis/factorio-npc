@@ -16,6 +16,23 @@ beforeEach(() => {
   ;(globalThis as any).remote = { interfaces: { sgluna_deployment: { authorize: true } }, call: vi.fn((_name, _method, epoch) => epoch === 3) }
 })
 describe('durable operation admission', () => {
+  it('derives receipt completion on status without writing admissions, counters or initialization', () => {
+    const manager = new_task_manager(() => undefined)
+    const admission = new_operation_admission(actor, manager.get_status_snapshot)
+    admission.status()
+    expect((globalThis as any).storage).toEqual({})
+    admission.begin(identity)
+    manager.add_task({ type: TaskStates.WAITING, remaining_ticks: 60 })
+    admission.slot(identity.operation_key, 1, { ok: true, batch_refs: [ref] })
+    admission.finish(identity.operation_key, { ok: true })
+    manager.reset_task_state()
+    manager.next_task()
+    const before = JSON.stringify((globalThis as any).storage)
+    expect(admission.status().records[0].state).toBe('completed')
+    expect(admission.status().records[0].state).toBe('completed')
+    expect(JSON.stringify((globalThis as any).storage)).toBe(before)
+    expect((globalThis as any).storage.sgluna_operation_admissions[0].state).toBe('admitted')
+  })
   it('rejects expired duplicates after history pruning and manager restart', () => {
     const manager = new_task_manager(() => undefined)
     let admission = new_operation_admission(actor, manager.get_status_snapshot)
@@ -62,6 +79,7 @@ describe('durable operation admission', () => {
     expect(admission.slot(identity.operation_key, 2, { ok: false, batch_refs: [], error: 'not reachable' })).toMatchObject({ ok: true })
     admission.finish(identity.operation_key, { ok: false, error: 'slot2 failed' })
     manager = new_task_manager(() => undefined)
+    manager.reconcile_startup('server-restarted')
     expect(admission.status().records[0]).toMatchObject({ state: 'uncertain', slots: [{ index: 1, ok: true }, { index: 2, ok: false }] })
     expect(manager.get_status_snapshot().receipt_journal).toMatchObject([{ ...ref, state: 'uncertain', reason: 'save_load_unfinished' }])
     expect(pinned_operation_batch_refs()).toEqual([ref.batch_ref])
@@ -110,6 +128,7 @@ describe('durable operation admission', () => {
     const next = { ...identity, operation_key: 'next', ordinal: 2 }
     admission.begin(next)
     manager = new_task_manager(() => undefined)
+    manager.reconcile_startup('server-restarted')
     expect(admission.slot('next', 1, { ok: true, batch_refs: [] })).toMatchObject({ ok: false, error: 'invalid_slot' })
     expect(admission.status().records[1].state).toBe('uncertain')
   })

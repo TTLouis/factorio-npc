@@ -75,6 +75,11 @@ def run(client: Rcon, results: Path) -> None:
     # The supervisor's bindNpc() issues this replicated RCON repair command once
     # the multiplayer server is ready. Mirror that exact startup boundary here
     # before asserting that stale serialized walking/mining/shooting was cleared.
+    startup = json_command(
+        lua_json(remote_call('autorio_operations', 'reconcile_startup', repr('persistence-restart-verify'))),
+        'logical task post-restart reconciliation',
+    )
+    require(startup.get('ok') is True and startup.get('reconciled') is True, startup)
     reconciliation = json_command(
         lua_json(remote_call('autorio_actor', 'reconcile_after_load')),
         'post-restart reconciliation',
