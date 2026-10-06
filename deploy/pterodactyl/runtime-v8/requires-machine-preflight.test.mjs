@@ -1,7 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { NpcAgentLoop, NpcDialogueMemory, REQUIRES_MACHINE_RETRY_BUDGET, requiresMachineFacts } from './npc-agent-loop.mjs'
+import { NpcAgentLoop, NpcDialogueMemory, REQUIRES_MACHINE_RETRY_BUDGET, RESUME_HINT, requiresMachineFacts } from './npc-agent-loop.mjs'
+import { formatTaskCondition } from './supervisor.mjs'
 
 function deployment() {
   return {
@@ -175,6 +176,22 @@ test('repeated requires_machine retries are bounded and pause the request withou
   assert.equal(state.blocker, '')
   assert.equal(state.task_board.evidence.some(item => item.kind === 'operation_preflight_blocker'), false)
 
+  // The pause names its cause and tells the player how to go on.
+  assert.equal(state.pause_reason, 'recoverable_provider_failure:requires_machine_retry_exhausted')
+  assert.equal(result.goalStatus, 'paused')
+  assert.ok(result.chatMessage.endsWith(RESUME_HINT), `chat carries the Resume hint: ${result.chatMessage}`)
+  assert.match(result.chatMessage, /made in a machine/)
+  const [paused] = named('goal.paused')
+  assert.ok(paused, 'goal.paused traced')
+  assert.ok(paused.request_id)
+  assert.equal(paused.cause, 'recoverable_provider_failure')
+  assert.equal(paused.pause_reason, 'recoverable_provider_failure:requires_machine_retry_exhausted')
+  assert.equal(paused.resume, 'Resume or say continue')
+  assert.equal(named('goal.paused').length, 1)
+  const condition = formatTaskCondition(state.pause_reason, 'pause')
+  assert.equal(condition.raw, 'recoverable_provider_failure:requires_machine_retry_exhausted')
+  assert.equal(condition.summary, 'Paused: the craft needs a machine and the retry limit was reached. Press Resume or say continue.')
+
   assert.equal(named('craft.requires_machine').length, REQUIRES_MACHINE_RETRY_BUDGET)
   const [exhausted] = named('craft.requires_machine_exhausted')
   assert.ok(exhausted, 'craft.requires_machine_exhausted traced')
@@ -200,4 +217,10 @@ test('requiresMachineFacts keeps the facts bounded', () => {
   assert.equal(facts.machines.placed_truncated, true)
   assert.equal('extra' in facts.machines.placed[0], false)
   assert.ok(JSON.stringify(facts).length < 6000)
+})
+
+test('the board and UI name the cause of a retry-exhausted pause instead of the generic internal-condition text', () => {
+  assert.match(formatTaskCondition('recoverable_provider_failure:requires_machine_retry_exhausted', 'pause').summary, /^Paused: the craft needs a machine and the retry limit was reached\./)
+  assert.match(formatTaskCondition('recoverable_provider_failure:research_preflight_retry_exhausted', 'pause').summary, /^Paused: the research request was refused repeatedly and the retry limit was reached\./)
+  assert.match(formatTaskCondition('recoverable_provider_failure:something_else', 'pause').summary, /internal task condition/)
 })
