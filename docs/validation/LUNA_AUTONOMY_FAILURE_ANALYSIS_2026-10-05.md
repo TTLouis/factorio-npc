@@ -186,6 +186,6 @@ system-prompt text; each gives Luna facts or rejects a draft.
 | D2 | Fresh executor context carries active step, contract, latest receipt, bounded recipe summary and refreshed counts | `fix/executor-handoff-context` | `257e019a` | merged; gate 1,735 runtime / 1,030 mod |
 | E | Recorded scripted-reply regression of the retained run's four failure shapes | `test/recorded-autonomy-regression` | `17f4ae59` | merged; gate 1,749 pass + 3 todo / 1,030 mod |
 | F | Live ladder (smelt/collect, red unlock, steam lab, green) | | | owner runs it |
-| G1 | A wait-only batch on an idle machine whose committed checkpoint is already met still runs a blind timer (E todo, shape 3) | | | found by E; needs owner go |
-| G2 | An already-met committed stock checkpoint does not close its step before a later collection empties it (E todo, shape 1) | | | found by E; needs owner go |
+| G1 | A wait-only batch on an idle machine whose committed checkpoint is already met still runs a blind timer (E todo, shape 3) | `fix/met-checkpoint-close` | `af2854e4` | built; awaiting review; gate 1,761 pass + 1 todo runtime / 1,030 mod |
+| G2 | An already-met committed stock checkpoint does not close its step before a later collection empties it (E todo, shape 1) | `fix/met-checkpoint-close` | `af2854e4` | built; awaiting review; gate 1,761 pass + 1 todo runtime / 1,030 mod |
 | G3 | The deferred executor refresh reads nothing for a prose-only step, so the next step gets no held counts (E todo, shape 4) | | | found by E; needs owner go |
