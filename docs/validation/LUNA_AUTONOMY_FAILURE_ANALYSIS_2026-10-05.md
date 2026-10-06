@@ -184,5 +184,8 @@ system-prompt text; each gives Luna facts or rejects a draft.
 | C | Reject drafts whose operations empty the stock their own checkpoint requires (`checkpoint_contradicts_batch`) | `fix/checkpoint-contradiction` | `551d4a5b` | merged; gate 1,705 runtime / 1,018 mod |
 | D1 | `craft_item` on machine-only recipes returns `requires_machine` facts; bootstrap separates held, placed and running machines | `fix/machine-recipe-facts` | `c567d309` | merged; gate 1,709 runtime / 1,030 mod |
 | D2 | Fresh executor context carries active step, contract, latest receipt, bounded recipe summary and refreshed counts | `fix/executor-handoff-context` | `257e019a` | merged; gate 1,735 runtime / 1,030 mod |
-| E | Recorded scripted-reply regression of the retained run's four failure shapes | `test/recorded-autonomy-regression` | | in progress |
+| E | Recorded scripted-reply regression of the retained run's four failure shapes | `test/recorded-autonomy-regression` | `17f4ae59` | merged; gate 1,749 pass + 3 todo / 1,030 mod |
 | F | Live ladder (smelt/collect, red unlock, steam lab, green) | | | owner runs it |
+| G1 | A wait-only batch on an idle machine whose committed checkpoint is already met still runs a blind timer (E todo, shape 3) | | | found by E; needs owner go |
+| G2 | An already-met committed stock checkpoint does not close its step before a later collection empties it (E todo, shape 1) | | | found by E; needs owner go |
+| G3 | The deferred executor refresh reads nothing for a prose-only step, so the next step gets no held counts (E todo, shape 4) | | | found by E; needs owner go |

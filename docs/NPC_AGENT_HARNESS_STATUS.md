@@ -8,6 +8,19 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 6 autonomy repair units A–E (unit and recorded-replay evidence only, no live run)
+
+Repairs for the four failure shapes in [the October 5 autonomy failure analysis](validation/LUNA_AUTONOMY_FAILURE_ANALYSIS_2026-10-05.md); its closing checklist holds the commits.
+
+- A: transfer preflight reports source/destination counts; a proved missing supply is recovered inside the committed step, bounded at 2 per step.
+- B: a wait-only batch on a working checkpoint machine becomes the existing condition wait; blind waits carry a fresh machine read.
+- C: a draft whose own operations empty its checkpoint stock is rejected; after commit, extracting unmet checkpoint stock is refused recoverably, bounded at 2.
+- D1: `craft_item` on a machine-only recipe returns `requires_machine` live facts; bootstrap separates held, placed and running machines.
+- D2: a fresh executor gets recipe facts, fresh or stale-labelled counts and residual needs; counts behind an in-flight batch are deferred and refreshed after its receipt.
+- E: a recorded replay of the retained run drives the real loop through all four shapes. Gate: 1,749 runtime pass + 3 todo, 1,030 mod.
+
+Known gaps (E todo tests, not fixed): an already-met committed checkpoint on an idle machine neither routes a wait nor closes the step before a later collection; the deferred executor refresh reads nothing for a prose-only step. None of this is live-validated; the live ladder is owner-run.
+
 ## October 5 CLI proxy red-to-green guided proof (Toronto)
 
 The CLI proxy test world reached green science at candidate `d8fa2a1c` on
