@@ -104,7 +104,7 @@ import { activeStepOf, parseTimeReview, PlanTiming } from './plan-time-estimate.
 import { insertTailBlock } from './prompt-prefix.mjs'
 import { ChatAcknowledger } from './responsiveness.mjs'
 import { UsageLedger } from './usage-ledger.mjs'
-import { checkpointWaitRequirement, conditionEta, safeWaitSchedule, scheduleWait, WAIT_BASIS } from './production-wait.mjs'
+import { checkpointMachineRequirements, checkpointWaitRequirement, compactMachineFacts, conditionEta, conditionWakeCause, freshReadCondition, isWaitOnlyBatch, mostRecentWorkingUnit, safeWaitSchedule, scheduleWait, waitOnlyTicks, WAIT_BASIS, WAIT_FACT_MAX_MACHINES, WAIT_FACT_RADIUS } from './production-wait.mjs'
 import {
   combineGroundingWithChallenge,
   ensureGoalRequirements,
@@ -127,6 +127,8 @@ const SENSITIVE_TRACE_KEY = /authorization|api.?key|token|password|secret|cookie
 const STATE_SCHEMA = 1
 const PLAN_HISTORY_LIMIT = 24
 const MAX_OBSERVATION_TOOL_CALLS_PER_BATCH = 4
+// A wait-only batch asking for fewer ticks than this (5 s) is never routed to a passive-progress wait.
+export const PASSIVE_ROUTE_MIN_WAIT_TICKS = 300
 const JEV_OBSERVATION_LOG_LIMIT = 12
 const PLANNING_LOD_GUIDANCE = '[PLANNING_LOD] Your reply, including all reasoning, has a fixed output budget. Work at outline level. Before any reads, only decide which reads you need. In a plan, write the goal definition (on the first plan), one short line per step (plus Roadmap Shelf nodes for a long_horizon goal), and concrete operations only for the active step. Do not work out later steps\' operations, counts, or positions now; each step is refined when it becomes active.'
 // Evidence kinds that let a semantic step completion claim through.
@@ -2709,6 +2711,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.observationRelevanceOverride = null
     this.genericRecoveryDecisionActive = false
     this.conditionPollPromise = null
+    this.pendingBlindWait = null
     this.liveEntityObservations = new Map()
     this.rejectedExactTargets = new Set()
     this.staleExactPreflightRetries = 0
@@ -2771,6 +2774,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (this.pendingInteractionAmendment) this.dropPendingAmendment('reset_discarded_the_conversation_holding_the_text') // its staged text lived in the conversation this reset discards
     this.pendingInteractionAmendment = null
     this.pendingAmendmentConversationSeq = undefined
+    this.pendingBlindWait = null
     this.agentContext.beginLineage() // planner role: an executor role never leaks into the next chat
     super.reset()
   }
@@ -4140,10 +4144,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // A completion wait on the active step's own checkpoint when it is one
   // output count on a machine last seen working (plan 2.5): the planner sleeps
   // until the checkpoint holds, the machine stops, or the game-data deadline.
-  checkpointWaitCandidate(state = this.memory.currentPlan?.(this.activePlanKey())) {
+  checkpointWaitCandidate(state = this.memory.currentPlan?.(this.activePlanKey()), isWorking = unitNumber => this.liveObservedExactTarget(unitNumber)?.working === true) {
     if (!state || state.status !== 'active' || !state.task_board?.active_step_id) return undefined
     const checkpoint = persistedStepCheckpoint(state.task_board, state.task_board.active_step_id)
-    const requirement = checkpointWaitRequirement(checkpoint?.contract, unitNumber => this.liveObservedExactTarget(unitNumber)?.working === true)
+    const requirement = checkpointWaitRequirement(checkpoint?.contract, isWorking)
     if (!requirement) return undefined
     return makeConditionWait(requirement, {
       goalId: state.goal_id,
@@ -4154,10 +4158,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     })
   }
 
-  passiveProgressWaitCandidate(state = this.memory.currentPlan?.(this.activePlanKey())) {
+  // `unitNumber` pins the wait to one machine a fresh read has just shown working (repair unit B); without
+  // it the most recently observed working machine is used.
+  passiveProgressWaitCandidate(state = this.memory.currentPlan?.(this.activePlanKey()), { unitNumber } = {}) {
     if (!state || state.status !== 'active' || !state.task_board?.active_step_id) return undefined
     const observations = [...(this.liveEntityObservations?.values?.() ?? [])].reverse()
-    const working = observations.find(observation => Number.isSafeInteger(observation?.unit_number) && observation?.working === true)
+    const working = Number.isSafeInteger(unitNumber)
+      ? { unit_number: unitNumber }
+      : observations.find(observation => Number.isSafeInteger(observation?.unit_number) && observation?.working === true)
     if (!working) return undefined
     return makeConditionWait(
       { kind: 'entity_state', unit_number: working.unit_number, expected: 'working' },
@@ -4170,6 +4178,225 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         actorEpoch: this.epoch?.epoch,
       },
     )
+  }
+
+  // A wait closes its step through the reducer, which only closes admitted work. On a turn with no
+  // preflight commit (a zero-operation turn, or a wait-only batch routed here) a still-uncommitted draft is
+  // committed as runtime-admitted work (there are no operations to preflight). If the reducer will not
+  // admit it, no wait is registered and the caller takes its ordinary path instead of waiting on a step
+  // that can never close. Returns the updated plan state, or undefined when nothing was registered.
+  async registerCandidateConditionWait(candidate) {
+    if (!candidate || !this.requestInfo) return undefined
+    const key = this.requestInfo.memoryKey
+    const draft = getActivePlanningPlan(this.memory.planningState?.(key))
+    if (draft && [PLAN_STATUS.DRAFT, PLAN_STATUS.RUNTIME_VALIDATION, PLAN_STATUS.READY].includes(draft.status)
+      && typeof this.memory.commitPlanningPlan === 'function') {
+      this.memory.commitPlanningPlan(key, { now: Date.now(), runtime_validation: { passed: true } })
+      await this.persistState()
+    }
+    const planAfter = getActivePlanningPlan(this.memory.planningState?.(key))
+    const admitted = !planAfter || FROZEN_PLAN_STATUSES.has(planAfter.status)
+    const waiting = admitted ? this.memory.registerConditionWait?.(key, candidate) : undefined
+    if (!waiting?.condition_wait) return undefined
+    await this.persistState()
+    await this.traceEvent('runtime.condition_registered', {
+      wait_id: waiting.condition_wait.id,
+      goal_id: waiting.goal_id,
+      step_id: waiting.task_board?.active_step_id,
+      mode: waiting.condition_wait.mode,
+      condition: waiting.condition_wait.condition,
+    })
+    return waiting
+  }
+
+  // One fresh, bounded read of one exact machine (repair unit B). The exact condition read answers working
+  // state, the checkpoint's output count against its target, and the game-data expectation; getEntityStatus
+  // adds input/fuel/output counts when the nearest machine of that name is this unit. No model call. The
+  // read replaces any cached observation of the machine. Throws only when the actor epoch changed.
+  async readFreshMachine(unitNumber, requirement, { wait } = {}) {
+    await this.assertMachineReadFence(wait)
+    const known = this.liveObservedExactTarget(unitNumber)
+    let raw
+    try {
+      raw = JSON.parse(String(await this.rcon.command(runtimeConditionCommand(freshReadCondition(unitNumber, requirement)))).trim())
+    }
+    catch (error) {
+      raw = { ok: false, error: `condition_transport_error:${cleanMemoryText(error instanceof Error ? error.message : String(error), 120)}` }
+    }
+    let entity
+    let inventoryRead = 'unavailable'
+    if (raw?.ok === true && known?.name) {
+      try {
+        const text = String(await this.rcon.command(toolCommand('getEntityStatus', { name: known.name, radius: WAIT_FACT_RADIUS }))).slice(0, 200_000)
+        const parsed = JSON.parse(text)
+        if (parsed?.found === true && parsed.entity?.unit_number === unitNumber) {
+          this.recordLiveEntityToolResult('getEntityStatus', text)
+          entity = parsed.entity
+          inventoryRead = 'matched'
+        }
+        else {
+          inventoryRead = parsed?.found === true ? 'nearest_is_other_unit' : 'not_in_radius'
+        }
+      }
+      catch {
+        inventoryRead = 'read_failed'
+      }
+    }
+    if (raw?.ok === true && known && inventoryRead !== 'matched') {
+      this.recordLiveEntityObservation({
+        ...known,
+        working: raw.progressing === true,
+        status: Number.isFinite(raw.entity_status) ? raw.entity_status : known.status,
+      }, undefined, 'fresh_machine_read', { surface: known.surface, surface_index: known.surface_index })
+    }
+    await this.assertMachineReadFence(wait)
+    return compactMachineFacts({ unitNumber, known, raw, entity, inventoryRead, requirement })
+  }
+
+  // A read on behalf of a turn is fenced like any turn work. A read for a condition wait that ended runs with no
+  // turn open (the supervisor polls it), so it is fenced the way the wait's own poll is: by the actor and epoch the
+  // wait was registered under.
+  async assertMachineReadFence(wait) {
+    if (!wait) return this.assertCurrent()
+    const status = await this.captureEpoch()
+    if (!conditionWaitLifecycleMatches(wait, status)) throw new AgentLoopError('NPC actor epoch changed during the condition wake read')
+    return status
+  }
+
+  // The machines a wait receipt reports on: the ones the active step's committed checkpoint names, else the
+  // machine the blind wait was about (the one read when the batch was routed), else the most recently
+  // observed working machine.
+  waitFactTargets(state, preferredUnits = []) {
+    const stepId = state?.task_board?.active_step_id
+    const contract = stepId ? persistedStepCheckpoint(state.task_board, stepId)?.contract : undefined
+    const requirements = checkpointMachineRequirements(contract)
+    if (requirements.length > 0) return requirements.map(requirement => ({ unitNumber: requirement.unit_number, requirement }))
+    const preferred = (preferredUnits ?? []).filter(unit => Number.isSafeInteger(unit)).slice(0, WAIT_FACT_MAX_MACHINES)
+    if (preferred.length > 0) return preferred.map(unitNumber => ({ unitNumber }))
+    const recent = mostRecentWorkingUnit(this.liveEntityObservations?.values?.())
+    return Number.isSafeInteger(recent) ? [{ unitNumber: recent }] : []
+  }
+
+  // Repair unit B: a batch of only `wait` operations. When the active step's machine is working (checkpoint
+  // machine, or the passive-progress machine) the timer never runs; the bounded condition wait is registered
+  // through the zero-operation path's registration, so it carries the same actor/epoch/step fences and wakes the
+  // model when the checkpoint holds, the machine stops or the game-data deadline passes. Waiting alone never
+  // closes a step: only the verified world state does. Otherwise the timer runs as before and its receipt
+  // carries a fresh machine read (completed()).
+  async routeWaitOnlyBatch({ plan, previousState, remainingCanonicalWork, explicitBlocker }) {
+    this.pendingBlindWait = null
+    if (!isWaitOnlyBatch(plan?.operations) || !this.requestInfo) return { routed: false }
+    const requestId = this.traceRequest?.id
+    const stepId = previousState?.task_board?.active_step_id
+    let readUnits = []
+    const decline = reason => {
+      this.pendingBlindWait = { request_id: requestId, step_id: stepId, reason, unit_numbers: readUnits }
+      return { routed: false, reason }
+    }
+    if (!remainingCanonicalWork || explicitBlocker) return decline(explicitBlocker ? 'explicit_blocker' : 'no_remaining_canonical_work')
+    if (previousState?.status !== 'active' || !stepId) return decline('no_active_step')
+
+    const traceRouted = (conditionWait, reason, machine) => this.traceEvent('wait.routed_to_condition', {
+      request_id: requestId,
+      step_id: stepId,
+      wait_id: conditionWait.id,
+      unit_number: conditionWait.condition?.unit_number,
+      reason,
+      mode: conditionWait.mode,
+      requested_ticks: waitOnlyTicks(plan.operations),
+      operation_count: plan.operations.length,
+      ...(machine ? { machine } : {}),
+    })
+    const existing = previousState.condition_wait?.state === 'active' ? previousState.condition_wait : undefined
+    if (existing) {
+      await traceRouted(existing, 'condition_wait_already_active')
+      return { routed: true, conditionWait: existing }
+    }
+
+    const contract = persistedStepCheckpoint(previousState.task_board, stepId)?.contract
+    const requirement = checkpointWaitRequirement(contract, () => true)
+    const unitNumber = requirement?.unit_number ?? mostRecentWorkingUnit(this.liveEntityObservations?.values?.())
+    if (!Number.isSafeInteger(unitNumber)) return decline('no_machine_known')
+    // Only the checkpoint route is tied to the step's own machine. A passive wait sleeps until some machine stops or
+    // its deadline passes, so a short settle wait is not worth it and runs as the timer it is.
+    if (!requirement && waitOnlyTicks(plan.operations) < PASSIVE_ROUTE_MIN_WAIT_TICKS) {
+      readUnits = [unitNumber]
+      return decline('short_wait_below_passive_threshold')
+    }
+    // The cached working flag may be arbitrarily stale (it dates from whenever the model last looked), so the
+    // machine is read once now and that answer decides.
+    const fresh = await this.readFreshMachine(unitNumber, requirement)
+    readUnits = [unitNumber]
+    if (fresh.working !== true) return decline(requirement ? 'checkpoint_machine_not_working' : 'machine_not_working')
+    const candidate = requirement
+      ? this.checkpointWaitCandidate(previousState, unit => unit === unitNumber)
+      : this.passiveProgressWaitCandidate(previousState, { unitNumber })
+    if (!candidate) return decline('no_condition_wait_candidate')
+    const waiting = await this.registerCandidateConditionWait(candidate)
+    if (!waiting?.condition_wait) return decline('condition_wait_not_admitted')
+    await traceRouted(
+      waiting.condition_wait,
+      requirement ? 'checkpoint_machine_working' : 'passive_progress_machine_working',
+      fresh,
+    )
+    return { routed: true, conditionWait: waiting.condition_wait }
+  }
+
+  // The fresh machine read a blind wait's receipt carries (repair unit B). Fact reporting only: the line says
+  // what the machines hold now and that elapsed time proves nothing. Never throws except on an epoch change.
+  async blindWaitReceiptFacts(receipt) {
+    const types = receipt?.view?.last_completed_batch?.task_types
+    const waitOnly = Array.isArray(types) && types.length > 0 && types.every(type => type === 'waiting')
+    const pending = this.pendingBlindWait
+    this.pendingBlindWait = null
+    if (!waitOnly) return undefined
+    const state = this.peekPlanState(this.activePlanKey())
+    let machines = []
+    try {
+      for (const target of this.waitFactTargets(state, pending?.unit_numbers).slice(0, WAIT_FACT_MAX_MACHINES)) {
+        machines.push(await this.readFreshMachine(target.unitNumber, target.requirement))
+      }
+    }
+    catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (/epoch changed|cancelled|superseded/i.test(message)) throw error
+      machines = [{ error: `fresh_read_failed:${cleanMemoryText(message, 120)}` }]
+    }
+    await this.traceEvent('wait.blind_with_fresh_read', {
+      request_id: this.traceRequest?.id ?? pending?.request_id,
+      wait_request_id: pending?.request_id,
+      step_id: state?.task_board?.active_step_id ?? pending?.step_id,
+      unit_numbers: machines.map(machine => machine.unit_number).filter(unit => Number.isSafeInteger(unit)),
+      reason: pending?.reason ?? 'wait_only_batch_receipt',
+      machines,
+    })
+    if (machines.length === 0) return undefined
+    return `[HARNESS] Fresh machine read taken after the wait (facts only; time passing is not evidence that the step is done): ${JSON.stringify({ machines })}`
+  }
+
+  // The concrete state a routed condition wait ended on (repair unit B): the cause, and a fresh read of the
+  // machine for every end except a verified one (whose evidence is the observation itself).
+  async conditionWakeFacts({ action, reason, wait, observation, timing }) {
+    const unitNumber = wait?.condition?.unit_number
+    const lifecycle = typeof reason === 'string' && reason.startsWith('condition_lifecycle')
+    let machine
+    if (action !== 'verified' && !lifecycle && Number.isSafeInteger(unitNumber)) {
+      try {
+        machine = await this.readFreshMachine(unitNumber, wait.mode === 'completion' && wait.condition?.kind === 'entity_inventory_count' ? wait.condition : undefined, { wait })
+      }
+      catch (error) {
+        machine = { unit_number: unitNumber, error: `fresh_read_failed:${cleanMemoryText(error instanceof Error ? error.message : String(error), 120)}` }
+      }
+    }
+    return {
+      cause: conditionWakeCause({ action, reason, machine }),
+      ...(wait?.condition ? { condition: wait.condition } : {}),
+      ...(action === 'verified'
+        ? { evidence: observation }
+        : { observation: { satisfied: observation?.satisfied === true, progressing: observation?.progressing === true } }),
+      ...(machine ? { machine } : {}),
+      ...(timing ?? {}),
+    }
   }
 
   async inspectConditionWait() {
@@ -4406,7 +4633,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           task_board: visibleTaskBoard(reduced?.state?.task_board),
         })
         await this.rollProviderBudgetAtStepClose('condition_wait', reduced?.state)
-        return { action: 'verified', wait_id: identity.wait_id, state: reduced?.state, observation: normalizedObservation }
+        const facts = await this.conditionWakeFacts({ action: 'verified', wait, observation: normalizedObservation })
+        return { action: 'verified', wait_id: identity.wait_id, state: reduced?.state, observation: normalizedObservation, facts }
       }
 
       const updated = result.wait
@@ -4422,14 +4650,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const timing = Number.isFinite(wait?.expected_seconds)
         ? { expected_seconds: wait.expected_seconds, elapsed_seconds: Math.round((Date.now() - wait.registered_at) / 100) / 10 }
         : {}
+      // Repair unit B: the woken model gets the concrete state (cause plus a fresh machine read), not only a reason code.
+      const facts = await this.conditionWakeFacts({ action: result.action, reason: result.reason, wait, observation: normalizedObservation, timing })
       await this.traceEvent(event, {
         wait_id: identity.wait_id,
         condition: wait?.condition,
         reason: result.reason,
         observation: normalizedObservation,
+        facts,
         ...timing,
       })
-      return { action: result.action, wait_id: identity.wait_id, state: updated, reason: result.reason, observation: normalizedObservation, ...timing }
+      return { action: result.action, wait_id: identity.wait_id, state: updated, reason: result.reason, observation: normalizedObservation, facts, ...timing }
     })()
     try {
       return await this.conditionPollPromise
@@ -7698,6 +7929,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return null
     }
 
+    // Repair unit B: a finished wait-only batch carries a fresh read of the step's machine, so the model never
+    // plans its next move from a stale narrative observation.
+    const blindWaitFacts = pendingAmendment ? undefined : await this.blindWaitReceiptFacts(receipt)
+
     this.reasoningTriggerSource = routed.route === 'continue_current'
       ? 'post_step_continue'
       : routed.route === 'targeted_observation'
@@ -7725,7 +7960,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let wakeFailed = true
     try {
       const result = await this.continueFromModMessage(
-        `[MOD] Autorio operation batch completed. ${stepOpenHint ? `${stepOpenHint} ` : ''}Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}`,
+        `[MOD] Autorio operation batch completed. ${stepOpenHint ? `${stepOpenHint} ` : ''}Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}${blindWaitFacts ? ` ${blindWaitFacts}` : ''}`,
         'factorio.completion_continuation',
       )
       wakeFailed = false
@@ -10079,42 +10314,29 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const finished = await this.finishIfGoalMet(plan, previousState)
       if (finished) return finished
     }
-    let conditionWait = previousState?.condition_wait?.state === 'active'
-      ? previousState.condition_wait
+    // A batch of only `wait` operations is a blind timer. When the committed step's machine is working it is
+    // routed to the bounded condition wait instead, through the same registration a zero-operation turn uses.
+    const waitRoute = commands.length > 0
+      ? await this.routeWaitOnlyBatch({ plan, previousState, remainingCanonicalWork, explicitBlocker })
       : undefined
+    if (waitRoute?.routed === true) {
+      // The reply as the model wrote it stays in the conversation; the timer itself never runs.
+      this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
+      assistantReplyRecorded = true
+      plan = { ...plan, operations: [] }
+      commands = []
+      operations = []
+    }
+    let conditionWait = waitRoute?.routed === true
+      ? waitRoute.conditionWait
+      : previousState?.condition_wait?.state === 'active'
+        ? previousState.condition_wait
+        : undefined
     // An explicit BLOCKED reply is recorded as a blocker; it never becomes a wait.
     if (!conditionWait && commands.length === 0 && remainingCanonicalWork && !runtimeHealthy && !explicitBlocker) {
       const candidate = this.checkpointWaitCandidate(previousState) ?? this.passiveProgressWaitCandidate(previousState)
-      if (candidate && this.requestInfo) {
-        // A wait closes its step through the reducer, which only closes
-        // admitted work. On a zero-operation turn no preflight commit has run,
-        // so a still-uncommitted draft is committed here as runtime-admitted
-        // work (the zero-operation counterpart of the preflight commit: there
-        // are no operations to preflight). If the reducer will not admit it,
-        // no wait is registered and the turn takes the ordinary no-action path
-        // instead of waiting on a step that can never close.
-        const key = this.requestInfo.memoryKey
-        const draft = getActivePlanningPlan(this.memory.planningState?.(key))
-        if (draft && [PLAN_STATUS.DRAFT, PLAN_STATUS.RUNTIME_VALIDATION, PLAN_STATUS.READY].includes(draft.status)
-          && typeof this.memory.commitPlanningPlan === 'function') {
-          this.memory.commitPlanningPlan(key, { now: Date.now(), runtime_validation: { passed: true } })
-          await this.persistState()
-        }
-        const planAfter = getActivePlanningPlan(this.memory.planningState?.(key))
-        const admitted = !planAfter || FROZEN_PLAN_STATUSES.has(planAfter.status)
-        const waiting = admitted ? this.memory.registerConditionWait?.(key, candidate) : undefined
-        if (waiting?.condition_wait) {
-          conditionWait = waiting.condition_wait
-          await this.persistState()
-          await this.traceEvent('runtime.condition_registered', {
-            wait_id: conditionWait.id,
-            goal_id: waiting.goal_id,
-            step_id: waiting.task_board?.active_step_id,
-            mode: conditionWait.mode,
-            condition: conditionWait.condition,
-          })
-        }
-      }
+      const waiting = candidate ? await this.registerCandidateConditionWait(candidate) : undefined
+      if (waiting?.condition_wait) conditionWait = waiting.condition_wait
     }
     const conditionWaitActive = conditionWait?.state === 'active'
 

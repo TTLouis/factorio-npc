@@ -2655,6 +2655,7 @@ export class Session {
           const resumed = await this.recoverInterruptedPlan('condition_satisfied', {
             condition_wait_id: result.wait_id,
             source: 'runtime_condition',
+            ...(result.facts ? { facts: result.facts } : {}),
           })
           if (!resumed) await this.syncTaskBoardUi(result.state)
           return
@@ -2666,6 +2667,7 @@ export class Session {
             reason: result.reason,
             source: 'runtime_condition',
             ...(Number.isFinite(result.expected_seconds) ? { expected_seconds: result.expected_seconds, elapsed_seconds: result.elapsed_seconds } : {}),
+            ...(result.facts ? { facts: result.facts } : {}),
           })
           if (!resumed) await this.syncTaskBoardUi(result.state)
         }
