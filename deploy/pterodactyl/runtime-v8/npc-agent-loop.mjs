@@ -5863,6 +5863,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       await this.traceEvent('plan.step_close_skipped_on_fresh_read', { ...base, reason, ...detail })
       return { closed: false, reason }
     }
+    // A staged player amendment holds every close, exactly as the ordinary close in completed() does: the planner's reply to
+    // it must reach the ordinary path whole, and the held amendment must not be consumed by a close it never saw.
+    if (this.currentPendingAmendment()) return skip('pending_amendment')
     // The read is fenced by the request's actor and epoch on both sides: a replaced actor or a restart during it throws
     // (the ordinary stale-turn failure) after the skip is traced, and nothing is closed.
     let actorBefore
@@ -5876,7 +5879,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
     catch (error) {
-      await skip('stale_actor_or_epoch', { actor_id: actorBefore?.actor_id, epoch: actorBefore?.epoch })
+      // Only an actor/epoch/superseded failure is a stale read; anything else (transport, restage drop of the read) is a
+      // failed read. The trace can never mask the error that must propagate.
+      const message = error instanceof Error ? error.message : String(error)
+      const stale = error?.code === STALE_REPLY_ERROR_CODE || /epoch changed|cancelled|superseded/i.test(message)
+      try { await skip(stale ? 'stale_actor_or_epoch' : 'checkpoint_read_failed', { actor_id: actorBefore?.actor_id, epoch: actorBefore?.epoch, ...(stale ? {} : { detail: cleanMemoryText(message, 160) }) }) }
+      catch {}
       throw error
     }
     const evaluation = evaluateCompletionContract(contract, facts)
@@ -11218,15 +11226,44 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (fresh.closed) {
         previousState = fresh.state ?? previousState
         this.resetRepairAfterClosedStep()
-        this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
         const names = plan.operations.slice(0, 8).map(operation => cleanMemoryText(operation?.name, 80)).join(', ')
         const board = previousState?.task_board
         const nextStep = previousState?.status === 'active' && Number.isSafeInteger(board?.active_index) ? board.steps?.[board.active_index] : undefined
         const notRun = `[HARNESS] A fresh world read shows the committed checkpoint of the active step is already met, so the harness closed that step before running anything. The batch you just sent (${names}) was written for the step that closed and did not run.`
         if (previousState?.status === 'completed') {
-          const settled = await this.settleCompletedStepState(previousState, { withinTurn: true, droppedOperationsNote: `${notRun} It was the final step of the committed slice.` })
+          // The final step closed. Nothing is left to author for it: the ordinary slice/goal settlement decides what
+          // follows, and when it settles nothing the request ends on the committed state, as a semantic claim that closes
+          // the last step does (the dropped batch is reported, never run).
+          this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
+          const droppedOperationsNote = `${notRun} It was the final step of the committed slice.`
+          const settled = await this.settleCompletedStepState(previousState, { withinTurn: true, droppedOperationsNote })
           if (settled) return settled
+          this.active = false
+          await this.traceEvent('request.completed', {
+            chat_message: droppedOperationsNote,
+            outcome: 'final_step_closed_on_fresh_read',
+            task_board: visibleTaskBoard(previousState.task_board),
+            usage: this.traceRequest?.usage,
+          })
+          this.traceRequest = null
+          return {
+            chatMessage: droppedOperationsNote,
+            plan: [],
+            currentStep: 0,
+            operations: [],
+            epoch: before.epoch,
+            actorId: before.actor_id,
+            goalId: previousState.goal_id,
+            goalStatus: previousState.status,
+            taskBoard: visibleTaskBoard(previousState.task_board),
+          }
         }
+        // C8: a step closed inside the slice may put the executor past its hard limit. A restage rebuilds the conversation
+        // from a packet that already names the new active step, so the stale reply is then not appended to it.
+        const boundary = this.requestInfo && this.executorHandoffEnabled
+          ? await this.executorStepCloseBoundary({ withinTurn: true, requestId: this.traceRequest?.id })
+          : undefined
+        if (boundary?.restaged !== true) this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
         this.messages.push({
           role: 'user',
           content: nextStep

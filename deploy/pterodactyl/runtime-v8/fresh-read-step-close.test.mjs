@@ -52,6 +52,7 @@ class Rcon {
     this.stock = { '15:iron-plate': 20 }
     this.unreadable = undefined // 'garbage' | 'not_ok' | 'throw'
     this.changeEpochOnCondition = false
+    this.failStatusAfterCondition = false // a transport failure of the actor-status read once a condition was read
     this.nearby = {
       actor_position: { x: 0, y: 0 },
       entities: [{ name: 'stone-furnace', type: 'furnace', unit_number: 15, position: { x: 3, y: 0 }, distance: 3 }],
@@ -73,6 +74,7 @@ class Rcon {
 
   evaluate(text) {
     if (this.changeEpochOnCondition) this.epoch++
+    if (this.failStatusAfterCondition) this.statusDown = true
     const request = JSON.parse(text.match(/json_to_table\('(\{.*\})'\)/)[1])
     if (request.kind === 'entity_inventory_count') {
       const current = this.stock[`${request.unit_number}:${request.item_name}`] ?? 0
@@ -83,7 +85,10 @@ class Rcon {
 
   async command(text) {
     this.commands.push(text)
-    if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(deployment(this.epoch))
+    if (text.includes('remote.call("sgluna_deployment","status")')) {
+      if (this.statusDown) throw new Error('rcon transport closed')
+      return JSON.stringify(deployment(this.epoch))
+    }
     if (text.includes('remote.call("autorio_tools","get_nearby_entities"')) return JSON.stringify(this.nearby)
     if (text.includes('remote.call("autorio_tools","evaluate_condition"')) {
       if (this.unreadable === 'throw') throw new Error('rcon transport error')
@@ -365,4 +370,107 @@ test('a step closes at most once: a stale second attempt and a later batch for t
   const next = await world.agent.closeActiveStepOnFreshRead({ previousState: world.plan(), trigger: 'checkpoint_met_before_batch', operations: [GEAR] })
   assert.equal(next.closed, false)
   assert.equal(world.plan().task_board.completed_count, 1)
+})
+
+test('a staged player amendment holds the fresh-read close, as it holds the ordinary close: the reply proceeds whole and the amendment is kept', async () => {
+  for (const plan of [TWO_STEPS, [TWO_STEPS[0]]]) {
+    const rcon = new Rcon()
+    const one = { plan }
+    const world = harness(rcon, [observe(), planMessage([COAL_SUPPLY], { ...one, checkpoint: furnaceCheckpoint() }), planMessage([GEAR], one)])
+    await committedStep(world, rcon, { stock: 60 })
+    world.agent.pendingInteractionAmendment = { sender: 'tester', text: 'also keep the furnace running' }
+    world.agent.pendingAmendmentConversationSeq = undefined
+
+    await continuation(world)
+
+    const label = `${plan.length} step(s)`
+    assert.equal(world.named('plan.step_closed_on_fresh_read').length, 0, label)
+    assert.equal(world.plan().task_board.completed_count, 0, label)
+    assert.equal(world.plan().status, 'active', label)
+    assert.equal(rcon.mutations.length, 2, `${label}: the amendment reply's batch ran on the ordinary path`)
+    assert.ok(world.agent.pendingInteractionAmendment, `${label}: the amendment is still staged`)
+    assert.equal(world.named('amendment.dropped').length, 0, label)
+    const [skipped] = world.named('plan.step_close_skipped_on_fresh_read')
+    assert.equal(data(skipped).reason, 'pending_amendment', label)
+    assert.ok(data(skipped).request_id, label)
+  }
+})
+
+test('a failed (not stale) read is traced as checkpoint_read_failed and the original error propagates', async () => {
+  const rcon = new Rcon()
+  const world = harness(rcon, firstTwo([planMessage([WAIT])]))
+  await committedStep(world, rcon, { stock: 60 })
+  rcon.failStatusAfterCondition = true
+
+  await assert.rejects(continuation(world), /rcon transport closed/)
+
+  assert.equal(world.named('plan.step_closed_on_fresh_read').length, 0)
+  const [skipped] = world.named('plan.step_close_skipped_on_fresh_read')
+  assert.equal(data(skipped).reason, 'checkpoint_read_failed')
+  assert.match(data(skipped).detail, /rcon transport closed/)
+})
+
+test('a final step closed on a fresh read that settles nothing ends the request without a model turn on a completed plan', async () => {
+  const rcon = new Rcon()
+  const one = { plan: [TWO_STEPS[0]] }
+  const world = harness(rcon, [observe(), planMessage([COAL_SUPPLY], { ...one, checkpoint: furnaceCheckpoint() }), planMessage([TAKE_PLATES], one)])
+  await committedStep(world, rcon, { stock: 60 })
+  world.agent.settleCompletedStepState = async () => undefined
+
+  const result = await continuation(world)
+
+  assert.equal(world.calls.length, 3, 'no model turn on a completed plan')
+  assert.equal(rcon.mutations.length, 1)
+  assert.deepEqual(result.operations, [])
+  assert.match(result.chatMessage, /did not run/)
+  assert.equal(getActivePlan(world.memory.planningState(KEY)).status, PLAN_STATUS.COMPLETED)
+  const [done] = world.named('request.completed')
+  assert.equal(data(done).outcome, 'final_step_closed_on_fresh_read')
+})
+
+test('a close the ordinary evaluator declines falls through: the batch proceeds as before and no close is traced', async () => {
+  const rcon = new Rcon()
+  const world = harness(rcon, firstTwo([planMessage([GEAR])]))
+  await committedStep(world, rcon, { stock: 60 })
+  world.agent.applyStepClose = async () => ({ closed: false, reason: 'outcome_authority_rejected_completion' })
+
+  await continuation(world)
+
+  assert.equal(rcon.mutations.length, 2)
+  assert.match(rcon.mutations[1], /craft_item/)
+  assert.equal(world.named('plan.step_closed_on_fresh_read').length, 0)
+  assert.equal(world.plan().task_board.completed_count, 0)
+  assert.equal(world.calls.length, 3)
+})
+
+test('a plan/board disagreement the reducer pauses on stops the request instead of running the batch', async () => {
+  const rcon = new Rcon()
+  const world = harness(rcon, firstTwo([planMessage([GEAR])]))
+  await committedStep(world, rcon, { stock: 60 })
+  const disagreement = { reason: 'test_disagreement' }
+  world.agent.applyStepClose = async () => ({ closed: false, paused: true, disagreement, reason: 'plan_board_disagreement' })
+  let received
+  world.agent.pauseForPlanBoardDisagreement = async (value) => { received = value; return { paused: true } }
+
+  const result = await continuation(world)
+
+  assert.deepEqual(result, { paused: true })
+  assert.equal(received, disagreement)
+  assert.equal(rcon.mutations.length, 1)
+  assert.equal(world.named('plan.step_closed_on_fresh_read').length, 0)
+})
+
+test('a step closed inside the slice runs the executor step-close boundary before the model is asked again', async () => {
+  const rcon = new Rcon()
+  const world = harness(rcon, firstTwo([planMessage([WAIT]), planMessage([GEAR], { currentStep: 1 })]))
+  await committedStep(world, rcon, { stock: 60 })
+  const calls = []
+  const original = world.agent.executorStepCloseBoundary.bind(world.agent)
+  world.agent.executorStepCloseBoundary = async (options) => { calls.push({ options, closed: world.plan().task_board.completed_count, models: world.calls.length }); return original(options) }
+
+  await continuation(world)
+
+  assert.equal(world.named('plan.step_closed_on_fresh_read').length, 1)
+  const inTurn = calls.filter(call => call.options?.withinTurn === true && call.closed === 1 && call.models === 3)
+  assert.equal(inTurn.length, 1, 'called once, after the close and before the re-authoring round')
 })
