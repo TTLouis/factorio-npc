@@ -10,7 +10,7 @@ must not be used to reset current integration.
 
 ## October 6 controller reconciliation: static gates green
 
-Local Luna repairs preserved in `90fc419c` are reconciled with Claude's shared HEAD `48e2f1f7`. The official Docker gate passes 1,805 runtime tests and 1,036 mod tests, plus typechecks and generated-Lua checks. Shared checkpoint settlement retains pending-amendment and identity fences; canonical goal retirement and semantic admission regressions pass. Full build/payload verification and owner-authorized planning probes are tracked in the [new reconciliation checkpoint](validation/LUNA_CONTROLLER_RECONCILIATION_2026-10-06.md). Autonomous gameplay and multiplayer gates remain open.
+Local Luna repairs preserved in `90fc419c` are reconciled with Claude's shared HEAD `48e2f1f7`. The official Docker gate passes 1,805 runtime tests and 1,036 mod tests, plus typechecks and generated-Lua checks. Shared checkpoint settlement retains pending-amendment and identity fences; canonical goal retirement and semantic admission regressions pass. The full Docker build, nine payload checks, and isolated native trigger-ladder lane also pass; installer repin is `fa0ce8bf`. The opt-in planning/tracker runner passes 4/4 scripted decisions. Live Luna probes received no HTTP/model response because the configured proxy refuses TCP connections; waiting for the owner to restore it. Evidence and open gates are tracked in the [new reconciliation checkpoint](validation/LUNA_CONTROLLER_RECONCILIATION_2026-10-06.md). Autonomous gameplay and multiplayer gates remain open.
 
 ## October 6 multiplayer join/desync: confirmed, cause unresolved
 
