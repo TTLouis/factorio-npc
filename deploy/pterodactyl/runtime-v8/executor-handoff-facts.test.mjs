@@ -95,7 +95,7 @@ const textOf = message => (typeof message?.content === 'string' ? message.conten
 const stepBlock = messages => messages.find(message => textOf(message).startsWith('--- step block ---'))
 const lineOf = (messages, prefix) => textOf(stepBlock(messages)).split('\n').find(line => line.startsWith(prefix))
 
-function harness({ game, script }) {
+function harness({ game, script, agentOptions = {} }) {
   const memory = new CanonicalTaskBoardMemory()
   const world = { game, memory, calls: [], trace: [] }
   const provider = async (messages, context) => {
@@ -133,6 +133,7 @@ function harness({ game, script }) {
     traceFile: null,
     decisionTraceFile: null,
     npcId: 'sgluna',
+    ...agentOptions,
   })
   world.agent.behaviorTrace = { emit: async (record) => { world.trace.push(record) } }
   world.rows = event => world.trace.filter(record => record.event === event)
@@ -486,4 +487,89 @@ test('D2: requiresMachineFacts flags a recipe cut at eight ingredients, and the 
   assert.equal(facts.recipe.ingredients.length, 8)
   assert.equal(facts.recipe.ingredients_truncated, true)
   assert.equal(facts.recipe.products_truncated, false)
+})
+
+test('D2: a send the game provably never saw leaves nothing in flight, and the next executor restage reads counts', async () => {
+  const world = harness({ game: liveGame(), script: [readsRound(), plannerCommit(), plannerCommit()] })
+  world.game.beginRefusal = 'stale_actor_epoch' // the mod admission journal refuses the first batch before recording anything
+  await assert.rejects(world.say())
+  assert.equal(world.rows('operation.not_sent').length, 1, 'the attempt was settled as never sent')
+  assert.equal(world.agent.batchInFlight, false, 'a send that never happened is not in flight')
+  assert.equal(world.agent.batchInFlightBeforeSend, undefined)
+
+  // An earlier batch that really is in flight stays in flight when a later send is refused.
+  world.agent.batchInFlight = true
+  world.agent.batchInFlightBeforeSend = true
+  await world.agent.settleUnsentOperation({ operation_key: 'op_none', request_id: 'req_x' }, KEY, 'rejected_before_transport').catch(() => {})
+  assert.equal(world.agent.batchInFlight, true)
+  world.agent.batchInFlight = false
+
+  // The next executor restage reads counts instead of printing a deferral.
+  const gathered = await world.agent.gatherExecutorHandoffFacts({ state: world.memory.planningState(KEY), actor: world.agent.epoch })
+  if (gathered?.facts) {
+    assert.equal(gathered.meta.counts_deferred, undefined)
+    assert.notEqual(gathered.meta.refresh, 'deferred')
+  }
+})
+
+test('D2: a reset clears the in-flight flag and the pending refresh, and the next executor restage reads counts', async () => {
+  const world = await plannerCollectedTenCopper({ receipt: false })
+  assert.equal(world.agent.batchInFlight, true, 'the planner batch is in flight')
+  assert.ok(world.agent.pendingExecutorFactsRefresh)
+  const actor = world.agent.epoch
+  world.agent.reset() // actor replacement, death and a new request all go through reset()
+  assert.equal(world.agent.batchInFlight, false)
+  assert.equal(world.agent.pendingExecutorFactsRefresh, null)
+  const reads = world.game.conditionReads.length
+  const result = await world.agent.restageBetweenTurns({ checkpoint: 'C7', role: 'executor', reason: 'recovery:after_reset', actor, requestId: world.requestId() })
+  assert.equal(result.restaged, true, JSON.stringify(result))
+  const step = textOf(stepBlock(world.agent.messages))
+  assert.doesNotMatch(step, /counts_deferred/)
+  assert.match(step, /^held_counts \(fresh live read .*copper-plate=10/m)
+  assert.ok(world.game.conditionReads.length > reads, 'counts were read')
+})
+
+test('D2: a deferred refresh whose actor or epoch changed since the handoff is skipped with actor_changed_since_handoff', async () => {
+  const world = await plannerCollectedTenCopper({ receipt: false })
+  assert.equal(world.agent.pendingExecutorFactsRefresh.epoch, 3)
+  await world.agent.taskStatusReceipt() // the batch finished
+  world.agent.epoch = deployment({ epoch: 4 }) // the live read would match this epoch; the handoff was taken under epoch 3
+  const reads = world.game.conditionReads.length
+  const text = await world.agent.executorFactsRefreshText()
+  assert.equal(text, undefined)
+  assert.equal(world.game.conditionReads.length, reads, 'nothing was read for the wrong actor')
+  assert.equal(world.rows('context.executor_facts_refresh_skipped').at(-1).data.reason, 'actor_changed_since_handoff')
+  assert.equal(world.agent.pendingExecutorFactsRefresh, null, 'consumed')
+
+  const otherActor = await plannerCollectedTenCopper({ receipt: false })
+  await otherActor.agent.taskStatusReceipt()
+  otherActor.agent.epoch = deployment({ actor_id: 19 })
+  assert.equal(await otherActor.agent.executorFactsRefreshText(), undefined)
+  assert.equal(otherActor.rows('context.executor_facts_refresh_skipped').at(-1).data.reason, 'actor_changed_since_handoff')
+})
+
+test('D2: the C8 step-close restage passes the runtime the last receipt showed, so the in-flight check does not rest on the flag alone', async () => {
+  const world = await plannerCollectedTenCopper()
+  assert.equal(world.agent.lastRuntimeView().idle, true, 'the receipt showed an idle game')
+  world.agent.lastTaskStatusView = { task_state: 'running', queue_length: 2, queue_empty: false }
+  assert.deepEqual(world.agent.lastRuntimeView(), { task_state: 'running', queue_length: 2, idle: false })
+  world.agent.lastTaskStatusView = null
+  assert.equal(world.agent.lastRuntimeView(), undefined)
+
+  // The boundary hands it to the restage.
+  world.agent.lastTaskStatusView = { task_state: 'running', queue_length: 2, queue_empty: false }
+  const plan = getActivePlan(world.memory.planningState(KEY))
+  world.agent.executorStepMark = { plan_id: plan.plan_id, closed: -1 }
+  let seen
+  world.agent.restageBetweenTurns = async (args) => { seen = args; return { restaged: false, reason: 'test' } }
+  world.agent.restageSoftLimitTokens = () => 1
+  world.agent.agentContext.size = { appendedChars: 0, tokens: 100 } // far past the hard limit
+  await world.agent.executorStepCloseBoundary({ withinTurn: false })
+  assert.equal(seen?.checkpoint, 'C8')
+  assert.deepEqual(seen.runtime, { task_state: 'running', queue_length: 2, idle: false })
+
+  // And the gather defers on that runtime even with the harness flag clear.
+  world.agent.batchInFlight = false
+  const gathered = await world.agent.gatherExecutorHandoffFacts({ state: world.memory.planningState(KEY), actor: world.agent.epoch, runtime: seen.runtime })
+  assert.equal(gathered.meta.counts_deferred, 'batch_in_flight')
 })

@@ -2904,6 +2904,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.pendingInteractionAmendment = null
     this.pendingAmendmentConversationSeq = undefined
     this.pendingBlindWait = null
+    // D2: a reset (actor replacement, death, a new request) ends whatever the deferred handoff facts were waiting for.
+    this.batchInFlight = false
+    this.batchInFlightBeforeSend = undefined
+    this.pendingExecutorFactsRefresh = null
     this.agentContext.beginLineage() // planner role: an executor role never leaks into the next chat
     super.reset()
   }
@@ -3601,9 +3605,22 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       role: EXECUTOR_ROLE,
       reason: decision.reason,
       actor: this.epoch,
+      runtime: this.lastRuntimeView(),
       softLimitTokens,
       requestId: rid,
     })
+  }
+
+  // The runtime state the last batch receipt showed (task_state, queue_length, idle), when one was read: lets the handoff's
+  // in-flight check rest on what the game reported and not only on the harness's own send/receipt flag.
+  lastRuntimeView() {
+    const view = this.lastTaskStatusView
+    if (!view || typeof view !== 'object' || typeof view.task_state !== 'string') return undefined
+    return {
+      task_state: view.task_state,
+      queue_length: Number.isFinite(view.queue_length) ? view.queue_length : undefined,
+      idle: view.task_state === 'idle' && view.queue_empty !== false,
+    }
   }
 
   // The executor's plan contract. There is ONE submitPlan tool for both roles; the
@@ -4336,6 +4353,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     try {
       if (this.agentContext.role !== EXECUTOR_ROLE || this.agentContext.handoffId !== pending.handoff_id) return skip('handoff_replaced')
+      if (pending.actor_id !== this.epoch?.actor_id || pending.epoch !== this.epoch?.epoch) return skip('actor_changed_since_handoff')
       const state = this.memory.planningState?.(this.activePlanKey())
       if (!state?.goal?.goal_id) return skip('no_admitted_goal')
       const gathered = await this.gatherExecutorHandoffFacts({ state, actor: this.epoch, mode: 'refresh' })
@@ -6702,6 +6720,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // A prepared attempt the game provably never saw (rejected before transport, or the game refused it before recording
   // anything): settle it as not happened so it leaves no hold.
   async settleUnsentOperation(pending, ownerKey, reason) {
+    // D2: the game never saw this send, so it did not put a batch in flight: back to what was true before it.
+    if (this.batchInFlightBeforeSend !== undefined) {
+      this.batchInFlight = this.batchInFlightBeforeSend === true
+      this.batchInFlightBeforeSend = undefined
+    }
     this.memory.updatePendingOperation?.(ownerKey, { effect: EFFECT.NOT_HAPPENED, reason }, pending.operation_key)
     if (this.memory.clearPendingOperation?.(ownerKey, { operationKey: pending.operation_key }) !== true) {
       await this.traceEvent('operation.settlement_refused', { request_id: pending.request_id, operation_key: pending.operation_key,
@@ -8039,6 +8062,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async taskStatusReceipt() {
     this.noteWorldMutation() // D2: a batch receipt is being read; whatever was observed before it is history
     this.batchInFlight = false
+    this.batchInFlightBeforeSend = undefined
     try {
       const raw = String(await this.rcon.command(toolCommand('getTaskStatus', {}))).slice(0, 8_000_000)
       await this.settleOutstandingOperation(raw)
@@ -11693,8 +11717,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       let reconciledAdmitted = false
       try {
+        this.batchInFlightBeforeSend = this.batchInFlight // restored if the game provably never saw this send
         this.noteWorldMutation({ sent: true }) // D2: observations taken before this send date from before the batch; the batch is in flight until its receipt is read
         const acknowledgement = await executeAuthorizedBatch(this.rcon, before.epoch, commands, undefined, pendingAdmission)
+        this.batchInFlightBeforeSend = undefined // the game took it: it stays in flight until its receipt
         await this.traceEvent('operations.ack', {
           operations: operations.map((operation, index) => ({ ...operation, admission_result: acknowledgement.results[index] })),
         })
@@ -11720,6 +11746,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         if (reconciliation?.admitted) {
           // The game took the batch; only its receipt is outstanding. Carry on as acknowledged: nothing is sent again.
           reconciledAdmitted = true
+          this.batchInFlightBeforeSend = undefined
           await this.traceEvent('operations.ack', {
             operations: operations.map(operation => ({ ...operation, admission_result: 'reconciled_admitted' })),
             reconciled: true,
