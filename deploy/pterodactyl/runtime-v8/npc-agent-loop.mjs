@@ -797,6 +797,21 @@ function worldStateContract(contract) {
     && contract.requirements.every(requirement => WORLD_STATE_REQUIREMENT_KINDS.has(requirement?.kind))
 }
 
+// Repair unit G: why a fresh read of a committed checkpoint cannot decide the step (undefined when every requirement was
+// read). A stale identity (the exact target is not bound to this request) or a read that returned no count/entity answer
+// never closes a step.
+function freshCheckpointReadGap(contract, facts) {
+  for (const requirement of sanitizeStepCompletionContract(contract).requirements ?? []) {
+    const fact = facts?.[requirement.id]
+    if (!fact || fact.stale === true) return { reason: 'checkpoint_target_stale', requirement_id: requirement.id }
+    const countKind = requirement.kind === 'inventory_count' || requirement.kind === 'entity_inventory_count'
+    const unread = String(fact.summary ?? '').startsWith('condition_observation_failed')
+      || (countKind ? !Number.isFinite(fact.current) : fact.exists !== true && fact.exists !== false)
+    if (unread) return { reason: 'checkpoint_unreadable', requirement_id: requirement.id }
+  }
+  return undefined
+}
+
 function activeStepCheckpointSnapshot(board) {
   const index = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
   const step = index === undefined ? undefined : board?.steps?.[index]
@@ -5822,6 +5837,79 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     })
     await this.rollProviderBudgetAtStepClose(source ?? trigger, reduced.state)
     return { closed: true, state: reduced.state }
+  }
+
+  // Repair unit G (G1/G2): the harness closes the active step as soon as a FRESH read of its committed, machine-checkable
+  // checkpoint shows it already met, before a batch is admitted or a wait runs. It is the ordinary close, not a second
+  // one: the same completion facts and evaluation as the post-receipt close (completionFactsForContract +
+  // evaluateCompletionContract), and the same reducer entry (applyStepClose -> applyOutcomeAuthority), so only Plan Tracker
+  // progress moves, never the committed plan. It closes only on a verified read: an unreadable or stale read, a changed
+  // actor/epoch or a step that moved during the read closes nothing (fail safe, traced). Prose-only steps and contracts
+  // that need a receipt or controller state never close here. The step it closes is always the one active right now, so a
+  // second call (or the ordinary close after it) finds the next step and cannot close this one twice.
+  async closeActiveStepOnFreshRead({ previousState, trigger, operations = [] }) {
+    const key = this.requestInfo?.memoryKey
+    const board = previousState?.task_board
+    const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
+    const step = activeIndex === undefined ? undefined : board?.steps?.[activeIndex]
+    if (!key || previousState?.status !== 'active' || !step) return { closed: false }
+    const reducerPlan = getActivePlanningPlan(this.memory.planningState?.(key))
+    if (!FROZEN_PLAN_STATUSES.has(reducerPlan?.status)) return { closed: false }
+    const contract = persistedStepCheckpoint(board, step.id)?.contract
+    if (!contract || !worldStateContract(contract)) return { closed: false }
+
+    const base = { request_id: this.traceRequest?.id, plan_id: reducerPlan.plan_id, step_index: activeIndex, step_id: step.id, trigger }
+    const skip = async (reason, detail = {}) => {
+      await this.traceEvent('plan.step_close_skipped_on_fresh_read', { ...base, reason, ...detail })
+      return { closed: false, reason }
+    }
+    // The read is fenced by the request's actor and epoch on both sides: a replaced actor or a restart during it throws
+    // (the ordinary stale-turn failure) after the skip is traced, and nothing is closed.
+    let actorBefore
+    let facts
+    try {
+      actorBefore = await this.assertCurrent()
+      facts = await this.completionFactsForContract(contract, undefined, [])
+      const actorAfter = await this.assertCurrent()
+      if (actorAfter.actor_id !== actorBefore.actor_id || actorAfter.epoch !== actorBefore.epoch) {
+        return await skip('stale_actor_or_epoch', { actor_id: actorBefore.actor_id, epoch: actorBefore.epoch })
+      }
+    }
+    catch (error) {
+      await skip('stale_actor_or_epoch', { actor_id: actorBefore?.actor_id, epoch: actorBefore?.epoch })
+      throw error
+    }
+    const evaluation = evaluateCompletionContract(contract, facts)
+    if (!evaluation.satisfied) {
+      const gap = freshCheckpointReadGap(contract, facts)
+      return gap ? skip(gap.reason, { requirement_id: gap.requirement_id }) : { closed: false }
+    }
+    const current = this.memory.currentPlan?.(key)
+    if (current?.status !== 'active' || current.task_board?.active_step_id !== step.id) return skip('step_changed_during_read')
+
+    const finalPlanStep = activeIndex === (Array.isArray(board.steps) ? board.steps.length - 1 : -1)
+    const steeringRecommendation = finalPlanStep && this.steeringDecisionProvider
+      ? await this.requestBoundarySteeringRecommendation(key, { boundary: STEERING_BOUNDARY.PLAN_COMPLETED })
+      : undefined
+    const closed = await this.applyStepClose(`fresh_read_${trigger}`, {
+      key,
+      step,
+      contract,
+      results: evaluation.results,
+      reasonCode: 'deterministic_checkpoint_satisfied',
+      source: 'deterministic_completion_contract',
+      steeringRecommendation,
+    })
+    if (!closed.closed) return { closed: false, reason: closed.reason, state: closed.state, ...(closed.paused ? { paused: true, disagreement: closed.disagreement } : {}) }
+    await this.traceEvent('plan.step_closed_on_fresh_read', {
+      ...base,
+      reason: trigger,
+      actor_id: actorBefore.actor_id,
+      epoch: actorBefore.epoch,
+      evidence: evaluation.results.map(result => ({ id: result.id, kind: result.kind, satisfied: result.satisfied, summary: result.summary })),
+      operations_not_run: operations.slice(0, 8).map(operation => cleanMemoryText(operation?.name, 80)),
+    })
+    return { closed: true, state: closed.state }
   }
 
   async evaluateWorldStateCheckpoint(checkpoint) {
@@ -11113,6 +11201,39 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           currentStep: Number.isSafeInteger(previousState.current_step) ? previousState.current_step : plan.currentStep,
           ...(droppedOperationsNote ? { chatMessage: `${plan.chatMessage ?? ''} ${droppedOperationsNote}`.trim() } : {}),
         }
+      }
+    }
+    // Repair unit G (G1/G2): a batch is about to be admitted or timed for the active step. When a fresh read shows the
+    // step's committed checkpoint already met, the step closes first through the ordinary evaluator, so neither a blind
+    // timer nor a later collection can run against a target that is already satisfied. The batch was written for the
+    // step that just closed, so it is not run: the model gets the closed-step fact and the active step and authors the
+    // next batch (a closed final step settles through the ordinary slice/goal path instead).
+    if (commands.length > 0) {
+      const fresh = await this.closeActiveStepOnFreshRead({
+        previousState,
+        trigger: isWaitOnlyBatch(plan.operations) ? 'checkpoint_met_before_wait' : 'checkpoint_met_before_batch',
+        operations: plan.operations,
+      })
+      if (fresh.paused) return this.pauseForPlanBoardDisagreement(fresh.disagreement)
+      if (fresh.closed) {
+        previousState = fresh.state ?? previousState
+        this.resetRepairAfterClosedStep()
+        this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
+        const names = plan.operations.slice(0, 8).map(operation => cleanMemoryText(operation?.name, 80)).join(', ')
+        const board = previousState?.task_board
+        const nextStep = previousState?.status === 'active' && Number.isSafeInteger(board?.active_index) ? board.steps?.[board.active_index] : undefined
+        const notRun = `[HARNESS] A fresh world read shows the committed checkpoint of the active step is already met, so the harness closed that step before running anything. The batch you just sent (${names}) was written for the step that closed and did not run.`
+        if (previousState?.status === 'completed') {
+          const settled = await this.settleCompletedStepState(previousState, { withinTurn: true, droppedOperationsNote: `${notRun} It was the final step of the committed slice.` })
+          if (settled) return settled
+        }
+        this.messages.push({
+          role: 'user',
+          content: nextStep
+            ? `${notRun} The active step is now ${JSON.stringify(cleanMemoryText(nextStep.description, 200))}. Facts only: the committed plan is unchanged and only its progress advanced.`
+            : `${notRun} The committed plan is unchanged and only its progress advanced.`,
+        })
+        return this.runTurn()
       }
     }
     // The active step's own checkpoint as it stood BEFORE this batch; the

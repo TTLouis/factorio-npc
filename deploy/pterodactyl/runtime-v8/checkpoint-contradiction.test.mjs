@@ -610,7 +610,7 @@ test('commit time: the counter is persisted on the board and survives a restore;
   assert.equal(checkpointStockRefusalCount(world.plan().task_board), 1)
 })
 
-test('commit time: an already satisfied checkpoint does not refuse; the step closes through the normal verifier', async () => {
+test('commit time: an already satisfied checkpoint is never refused; the step closes on a fresh read before the extraction can empty it', async () => {
   const rcon = new Rcon()
   const world = harness(rcon, [
     observe(),
@@ -621,9 +621,12 @@ test('commit time: an already satisfied checkpoint does not refuse; the step clo
 
   await continuation(world)
 
+  // Unit C never refuses a met checkpoint, and unit G closes the step before the batch (it was the final step, so the
+  // plan completes) instead of letting the extraction empty the stock of an open step.
   assert.equal(world.named('checkpoint.stock_extraction_refused').length, 0)
-  assert.equal(checkpointStockRefusalCount(world.plan().task_board), 0)
-  assert.equal(rcon.mutations.length, 2, "the extraction was admitted")
+  assert.equal(rcon.mutations.length, 1, 'the extraction was not admitted')
+  assert.equal(world.named('plan.step_closed_on_fresh_read').length, 1)
+  assert.equal(getActivePlan(world.memory.planningState(KEY)).status, PLAN_STATUS.COMPLETED)
 })
 
 test('commit time: another item or another unit is unaffected, mining the checkpoint entity is refused', async () => {

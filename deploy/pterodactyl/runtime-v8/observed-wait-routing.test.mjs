@@ -564,7 +564,7 @@ test('a blind wait with no machine to read says so in the trace and adds nothing
   assert.equal(blind.reason, 'no_machine_known')
 })
 
-test('a mixed batch (wait plus another operation) is unchanged: no routing and no extra read', async () => {
+test('a mixed batch (wait plus another operation) is unchanged: no routing and no machine read', async () => {
   const world = makeWorld({ committed: true, script: [sleepingModel()] })
   observeFurnace(world.agent)
   const conditionReadsBefore = world.rcon.commands.filter(command => command.includes('evaluate_condition')).length
@@ -578,7 +578,9 @@ test('a mixed batch (wait plus another operation) is unchanged: no routing and n
   assert.equal(world.plan().condition_wait, undefined)
   assert.equal(world.named('wait.routed_to_condition').length, 0)
   assert.equal(world.agent.pendingBlindWait ?? null, null)
-  assert.equal(world.rcon.commands.filter(command => command.includes('evaluate_condition')).length, conditionReadsBefore)
+  // The only read is unit G's one fresh read of the committed checkpoint before the batch (unmet here); routing adds none.
+  assert.equal(world.rcon.commands.filter(command => command.includes('evaluate_condition')).length, conditionReadsBefore + 1)
+  assert.equal(world.named('plan.step_closed_on_fresh_read').length, 0)
 
   world.agent.active = true
   world.rcon.completeBatch(['waiting', 'crafting'])

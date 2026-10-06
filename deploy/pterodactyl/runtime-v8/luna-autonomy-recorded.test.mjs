@@ -533,14 +533,55 @@ test('shape 3: a routed wait that ends on a stopped furnace wakes with the concr
 
 // The retained turn-1 furnace (47 plates, 2 ore, fuel, working) finishes inside the very first 600-tick wait: three
 // more plates make the 50. Every later wait in the retained run was spent on an idle furnace whose checkpoint was met.
-test('shape 3 residual: a wait-only batch on an idle furnace whose checkpoint is already satisfied should not run as another blind timer', { todo: 'runtime gap found by the recorded replay: routeWaitOnlyBatch declines on machine_not_working even when the committed checkpoint is already satisfied; the model only gets the satisfied fact in the receipt' }, async () => {
+// Repair unit G (G1): the retained turn-1 furnace finishes its 50 inside the first wait, so every later wait of the retained
+// run was spent on an idle furnace whose committed checkpoint was already met. The harness now closes the step from a fresh
+// read of the furnace before the wait runs; the wait is never started as a timer and the model authors the next step.
+test('shape 3 residual (G1): a wait-only batch on a furnace whose committed checkpoint is already met closes the step on a fresh read and never runs as a blind timer', async () => {
   const world = new RecordedWorld({ furnace: worldReads.furnace47Plates, held: heldPlates(), inProgress: 1 })
-  const run = loop(world, [furnaceReads(), plannerCommit3(), executorWait(), executorWait()])
+  const run = loop(world, [
+    furnaceReads(),
+    plannerCommit3(),
+    executorWait(),
+    // The model's next action once it is told step 1 closed: the recorded copper load, for the step that is now active.
+    recorded('req_muw0yzan_3.turn13.copper_load', { plan: FIVE_STEPS, currentStep: 1 }),
+  ])
   await run.say(requestText.req_muw0yzan_3)
-  world.finishBatch()
+  const committedPlan = structuredClone(run.reducerPlan())
+  world.finishBatch() // the furnace finishes its 50 inside the first wait, as in the retained run
   assert.equal(world.totalInFurnace('iron-plate'), 50)
+  assert.equal(world.working(), false, 'the furnace is idle')
+  assert.equal(run.plan().task_board.completed_count, 0)
+
   await run.agent.completed()
-  assert.equal(world.mutations.length, 1, 'the recorded executor wait was not admitted as a second timer')
+
+  // The recorded executor wait was not admitted as a timer, and not routed to a condition wait either: step 1 closed from
+  // the furnace count, then the model's next batch (for the now active step) was the only second mutation.
+  assert.equal(world.mutations.length, 2)
+  assert.doesNotMatch(world.mutations[1], /'wait'/)
+  assert.match(world.mutations[1], /move_items_exact/)
+  assert.equal(run.plan().task_board.completed_count, 1)
+  assert.equal(run.named('wait.routed_to_condition').length, 0)
+  assert.equal(run.plan().condition_wait, undefined)
+  const [closed] = run.named('plan.step_closed_on_fresh_read')
+  assert.ok(requestIdOf(closed))
+  assert.equal(data(closed).reason, 'checkpoint_met_before_wait')
+  assert.equal(data(closed).plan_id, committedPlan.plan_id)
+  assert.equal(data(closed).step_index, committedPlan.active_step_index)
+  assert.deepEqual(data(closed).operations_not_run, ['wait'])
+  assert.equal(data(closed).evidence[0].kind, 'entity_inventory_count')
+  assert.equal(data(closed).evidence[0].satisfied, true)
+  assert.equal(run.named('plan.step_close_skipped_on_fresh_read').length, 0)
+  // The ordinary close path made the verdict: its verified trace names the contract, and the committed plan is untouched.
+  assert.ok(run.named('step.verified').some(row => data(row).source === 'deterministic_completion_contract'))
+  const after = run.reducerPlan()
+  assert.equal(after.plan_id, committedPlan.plan_id)
+  assert.deepEqual(after.steps, committedPlan.steps)
+  assert.equal(after.active_step_index, committedPlan.active_step_index + 1)
+  const [fact] = run.harnessMessages(3).filter(message => message.includes('closed that step'))
+  assert.match(fact, /did not run/)
+  assert.match(fact, /Smelt and collect 10 copper plates/)
+  assert.equal(run.plan().status, 'active')
+  assert.equal(run.plan().blocker, '')
 })
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -685,16 +726,48 @@ test('shape 1 (truthful failure): a model that keeps re-sending the recorded col
   assert.equal(data(exhausted).refusals_used, 2)
 })
 
-test('shape 1 residual: with the furnace already holding 50 (the retained state at the turn-12 collection) the committed stock checkpoint should close before the collection empties it', { todo: 'runtime gap found by the recorded replay: an already satisfied committed stock checkpoint is not refused (unit C), but nothing closes the step before the collection, after which the contract can never be satisfied' }, async () => {
+// Repair unit G (G2): unit C refuses taking stock the committed checkpoint still needs, but stock that is already there
+// needs no refusal: the step closes first, from the furnace count, so the collection can never empty a met target of an
+// open step. The batch in hand was written for the step that closed, so it does not run; the model re-authors for the
+// step that is now active (the judgement of unit C then applies to that step, not to the closed one).
+test('shape 1 residual (G2): with the furnace already holding 50 (the retained state at the turn-12 collection) the committed stock checkpoint closes before the collection empties it', async () => {
   const world = new RecordedWorld({ furnace: worldReads.furnace47Plates, held: heldPlates(), inProgress: 1 })
-  const run = loop(world, [furnaceReads(), plannerCommit3(), turn12()])
+  const run = loop(world, [
+    furnaceReads(),
+    plannerCommit3(),
+    turn12(),
+    recorded('req_muw0yzan_3.turn13.copper_load', { plan: FIVE_STEPS, currentStep: 1 }),
+  ])
   await run.say(requestText.req_muw0yzan_3)
+  const committedPlan = structuredClone(run.reducerPlan())
   world.finishBatch() // the furnace finishes its 50 inside the first wait, as in the retained run
   assert.equal(world.totalInFurnace('iron-plate'), 50)
+
   await run.agent.completed()
-  world.finishBatch()
-  await run.agent.completed().catch(() => undefined)
+
+  // The recorded turn-12 collection never ran: the smelting step closed from the furnace count that was already met.
   assert.equal(run.plan().task_board.completed_count, 1, 'the smelting step closed from the furnace count that was met')
+  assert.equal(world.mutations.length, 2)
+  assert.doesNotMatch(world.mutations[1], /iron-plate/, 'the collection was not admitted')
+  assert.match(world.mutations[1], /copper-ore/)
+  assert.equal(world.totalInFurnace('iron-plate'), 50, 'the furnace stock the step required was never emptied')
+  assert.equal(run.named('checkpoint.stock_extraction_refused').length, 0, 'not refused (unit C): closed')
+  // The turn-12 reply's held-iron checkpoint change was dropped with its batch (only the re-authored copper one is ignored).
+  assert.ok(run.named('step.checkpoint_change_ignored').every(row => data(row).proposed_contract.requirements[0].item_name === 'copper-plate'))
+  const [closed] = run.named('plan.step_closed_on_fresh_read')
+  assert.ok(requestIdOf(closed))
+  assert.equal(data(closed).reason, 'checkpoint_met_before_batch')
+  assert.equal(data(closed).plan_id, committedPlan.plan_id)
+  assert.equal(data(closed).step_index, committedPlan.active_step_index)
+  assert.deepEqual(data(closed).operations_not_run, ['move_items_exact'])
+  const after = run.reducerPlan()
+  assert.deepEqual(after.steps, committedPlan.steps, 'only Plan Tracker progress moved')
+  assert.equal(after.active_step_index, committedPlan.active_step_index + 1)
+  const [fact] = run.harnessMessages(3).filter(message => message.includes('closed that step'))
+  assert.match(fact, /move_items_exact\) was written for the step that closed and did not run/)
+  assert.equal(run.plan().status, 'active')
+  assert.equal(run.plan().blocker, '')
+  assert.equal(world.finishBatch(), undefined, 'the re-authored batch for the new step ran')
 })
 
 // ---------------------------------------------------------------------------------------------------------------
