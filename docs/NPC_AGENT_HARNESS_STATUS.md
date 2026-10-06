@@ -8,16 +8,30 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
-## October 6 CLI proxy Luna live trial
+## October 5 CLI proxy red-to-green guided proof (Toronto)
 
-The authenticated Tailscale proxy smoke test passed with `gpt-6-luna`. The
-isolated fresh-world run at `6439c996` stopped before world actions when a
-planning response exceeded the 256 KiB transport guard. Red-science unlock and
-automation remain unproven. The container is stopped; existing saves were
-preserved. See the [trial checkpoint](validation/CLI_PROXY_LUNA_RED_SCIENCE_2026-10-06.md)
-for evidence, the separate first-intake routing observation and the pending
-owner-approved diagnostic replay.
+The CLI proxy test world reached green science at candidate `d8fa2a1c` on
+Factorio 2.0.77: **75 red packs genuinely hand-crafted and 75 consumed** by two
+native steam-powered labs; green technology researched and its recipe enabled,
+with `by_script=false`, actor 10, zero humans and game speed 1. The successful
+save and native proof are retained; the isolated container is stopped.
 
+This is a guided finish. Luna completed early mining/smelting but its planning
+and continuation pauses prevented autonomous completion. The operator finished
+through existing bounded native operations under the owner's manual-allowed
+objective. Full autonomy and automated science production remain unproven.
+
+Two fixes arose from the trial: local GPT-6 closed rounds now retain the tool
+schema with explicit `tool_choice: none` (`8a60ba43`), avoiding the unsolicited
+image observed in a diagnostic replay; and confirmed standalone native crafts
+now supply missing production-statistics flow for ready craft-item research
+triggers, without goal double counting (`dd81485e`). A genuine second lab craft
+unlocked red science in the same world. Gates: **1,629 runtime and 970 mod tests**,
+typecheck/Lua/generated-Lua checks, 9 payload tests, plus a passing real-Factorio
+`craft-trigger` lane. See the [guided checkpoint](validation/CLI_PROXY_LUNA_RED_TO_GREEN_2026-10-05.md)
+for exact candidates, saved proof, model usage, diagnostics and remaining limits.
+The [blocked first trial](validation/CLI_PROXY_LUNA_RED_SCIENCE_2026-10-06.md)
+remains historical evidence (its date is UTC).
 ## October 5 goal requirements grounding (scripted engine proof, no new live-provider run)
 
 Merged at `4f833278` after the live run `goal_052327n_1`, where the planner
@@ -30,7 +44,9 @@ It also exposed and fixed false asteroid-research requirements for mineable ores
 (`a3385471`, payload repin `dfd019bd`). Gate: **1,624 runtime and 967 mod tests**,
 typecheck, Lua build, generated-Lua check, and 9 installer tests. Evidence and
 limits: [focused October 5 checkpoint](validation/GOAL_REQUIREMENTS_E2E_2026-10-05.md).
-Ordinary unlock progression and automated red-science output remain unproven.
+Ordinary unlock progression was unproven at that checkpoint; the guided proof
+above now covers red-to-green progression. Automated red-science output remains
+unproven.
 
 - `autorio_planning.goal_requirements` reads the goal's `done_when` targets from
   the live game: locked recipes and ingredients, compatible machines, and the
