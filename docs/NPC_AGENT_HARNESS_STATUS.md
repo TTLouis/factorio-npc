@@ -8,6 +8,16 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 6 CLI proxy Luna live trial
+
+The authenticated Tailscale proxy smoke test passed with `gpt-6-luna`. The
+isolated fresh-world run at `6439c996` stopped before world actions when a
+planning response exceeded the 256 KiB transport guard. Red-science unlock and
+automation remain unproven. The container is stopped; existing saves were
+preserved. See the [trial checkpoint](validation/CLI_PROXY_LUNA_RED_SCIENCE_2026-10-06.md)
+for evidence, the separate first-intake routing observation and the pending
+owner-approved diagnostic replay.
+
 ## October 5 goal requirements grounding (scripted engine proof, no new live-provider run)
 
 Merged at `4f833278` after the live run `goal_052327n_1`, where the planner
