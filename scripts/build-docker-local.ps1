@@ -1,5 +1,6 @@
 param(
-    [switch]$Restart
+    [switch]$Restart,
+    [switch]$NoEnvUpdate
 )
 
 $ErrorActionPreference = 'Stop'
@@ -12,9 +13,9 @@ Push-Location $repo
 $oldSourceRef = $env:SGLUNA_SOURCE_REF
 $oldLocalSource = $env:SGLUNA_LOCAL_SOURCE
 try {
-    $sha = (& git rev-parse HEAD).Trim()
+    $sha = (& git -c "safe.directory=$repo" rev-parse HEAD).Trim()
     if ($LASTEXITCODE -ne 0 -or $sha -notmatch '^[a-f0-9]{40}$') { throw 'Cannot identify HEAD commit.' }
-    if (@(& git status --porcelain).Count -ne 0) { throw 'Commit or discard working-tree changes before a pinned local build.' }
+    if (@(& git -c "safe.directory=$repo" status --porcelain).Count -ne 0) { throw 'Commit or discard working-tree changes before a pinned local build.' }
     if (Test-Path -LiteralPath $marker) { throw 'Stale local-source marker exists; inspect it before rebuilding.' }
     if (-not (Test-Path -LiteralPath $envFile)) { throw 'Local .env file is missing.' }
 
@@ -26,10 +27,13 @@ try {
     & docker compose build sgluna-factorio
     if ($LASTEXITCODE -ne 0) { throw 'Local Docker build failed.' }
 
-    $content = [System.IO.File]::ReadAllText($envFile)
-    $pattern = '(?m)^SGLUNA_SOURCE_REF=[^\r\n]*$'
-    if (-not [regex]::IsMatch($content, $pattern)) { throw '.env has no SGLUNA_SOURCE_REF entry.' }
-    [System.IO.File]::WriteAllText($envFile, [regex]::Replace($content, $pattern, "SGLUNA_SOURCE_REF=$sha"))
+    # Isolated runs keep source/model overrides in the process environment.
+    if (-not $NoEnvUpdate) {
+        $content = [System.IO.File]::ReadAllText($envFile)
+        $pattern = '(?m)^SGLUNA_SOURCE_REF=[^\r\n]*$'
+        if (-not [regex]::IsMatch($content, $pattern)) { throw '.env has no SGLUNA_SOURCE_REF entry.' }
+        [System.IO.File]::WriteAllText($envFile, [regex]::Replace($content, $pattern, "SGLUNA_SOURCE_REF=$sha"))
+    }
 
     if ($Restart) {
         & docker compose up -d --no-build --force-recreate sgluna-factorio
