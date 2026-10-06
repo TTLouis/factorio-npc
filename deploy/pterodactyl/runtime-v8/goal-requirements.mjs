@@ -476,6 +476,7 @@ function loadedTrace(result, extra) {
     machine_gap_count: result.summary.machine_gap_count,
     locked_subjects: result.summary.locked_subjects,
     recipes_walked: result.parsed.counts.recipes_walked,
+    raw_items: result.parsed.counts.raw_items,
     truncated: Object.keys(result.parsed.truncated),
     ...extra,
   }

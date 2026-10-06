@@ -98,6 +98,7 @@ interface Context {
   force: LuaForce
   unlock_index?: Record<string, string[]>
   producer_index?: Record<string, string[]>
+  resource_products?: Record<string, boolean>
   paths: Record<string, any>
   analysis: Record<string, ItemAnalysis>
   visited: Record<string, boolean>
@@ -256,6 +257,24 @@ function best_unlock(ctx: Context, recipes: string[]): UnlockChoice | undefined 
 function analyze_item(ctx: Context, item: string): ItemAnalysis {
   const cached = ctx.analysis[item]
   if (cached !== undefined) return cached
+  // A resource's mined product does not require a recipe unlock merely because
+  // an alternate (e.g. asteroid-processing) recipe also produces it. This is a
+  // prototype acquisition fact, not proof of a reachable deposit or production.
+  // Only resources count: mining a placed machine returns its construction item
+  // and must not bypass that item's actual recipe/research requirement.
+  if (!ctx.resource_products) {
+    const products: Record<string, boolean> = {}
+    for (const [, prototype] of pairs(prototypes.entity)) {
+      if (prototype.type !== 'resource' || prototype.mineable_properties?.minable !== true) continue
+      for (const product of prototype.mineable_properties.products ?? []) products[product.name] = true
+    }
+    ctx.resource_products = products
+  }
+  if (ctx.resource_products[item]) {
+    const raw: ItemAnalysis = { status: 'no_recipe' }
+    ctx.analysis[item] = raw
+    return raw
+  }
   const names = producer_recipes(ctx, item)
   let result: ItemAnalysis
   let enabled: string | undefined

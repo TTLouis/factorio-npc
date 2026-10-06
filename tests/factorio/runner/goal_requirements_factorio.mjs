@@ -66,6 +66,8 @@ async function main() {
     const machines = parsed.machines.find(row => row.for_item === 'automation-science-pack')
     assert.ok(machines?.options.some(row => row.entity === 'assembling-machine-1' && row.status === 'locked' && row.unlocked_by === 'automation'), raw)
     assert.equal(machines.craftable, false)
+    assert.ok(!parsed.locked.some(row => ['iron-ore', 'copper-ore', 'metallic-asteroid-chunk'].includes(row.subject)), 'mineable ore must not create asteroid-processing prerequisites')
+    assert.equal(facts.truncated.paths, false, 'ordinary red-science prerequisites must fit without spurious orbital research')
 
     const memory = new CanonicalTaskBoardMemory()
     const traceFile = path.join(results, 'requirements-behavior.jsonl')
@@ -114,6 +116,9 @@ async function main() {
       assert.ok(selected[0].request_id, event)
     }
     assert.equal(rows.filter(row => row.event === 'planning.requirements_unavailable').length, 0)
+    const loaded = rows.find(row => row.event === 'planning.requirements_loaded')
+    assert.equal(loaded.data.reason, 'locked_requirements_found')
+    assert.ok(loaded.data.raw_items >= 2, 'trace must identify raw ingredients instead of orbital recipe locks')
     assert.equal(rows.filter(row => row.event === 'provider.request').length, 2)
     await agent.persistState()
     await fsp.writeFile(path.join(results, 'requirements-prompts.json'), JSON.stringify(calls, null, 2))

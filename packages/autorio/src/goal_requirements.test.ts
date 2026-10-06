@@ -63,7 +63,7 @@ function actorWith(recipes: any[], technologies: any[]) {
 
 interface MachineFixture { name: string, type?: string, places?: string[], categories: string[] }
 
-function installPrototypes(options: { triggers?: Record<string, any>, machines?: MachineFixture[], items?: string[], fluids?: string[] } = {}) {
+function installPrototypes(options: { triggers?: Record<string, any>, machines?: MachineFixture[], items?: string[], fluids?: string[], resources?: Record<string, string[]> } = {}) {
   const machines = options.machines ?? []
   const entity: Record<string, any> = {}
   for (const machine of machines) {
@@ -71,6 +71,9 @@ function installPrototypes(options: { triggers?: Record<string, any>, machines?:
       type: machine.type ?? 'assembling-machine',
       items_to_place_this: (machine.places ?? []).map(name => ({ name, count: 1 })),
     }
+  }
+  for (const name in options.resources ?? {}) {
+    entity[name] = { type: 'resource', mineable_properties: { minable: true, products: options.resources![name].map(product => ({ type: 'item', name: product })) } }
   }
   const technology: Record<string, any> = {}
   for (const name in options.triggers ?? {}) technology[name] = { research_trigger: (options.triggers ?? {})[name] }
@@ -124,6 +127,31 @@ function lockedTargetFixture() {
 }
 
 describe('goal requirements query', () => {
+  it('does not require an alternate locked recipe for an ore mined from a resource', () => {
+    installPrototypes({ items: ['ore-a', 'plate-a'], resources: { 'deposit-a': ['ore-a'] } })
+    const alternate = technology('orbital-tech', { unlocks: ['orbital-ore'] })
+    const actor = actorWith([
+      recipe('plate-a', { ingredients: ['ore-a'] }),
+      recipe('orbital-ore', { enabled: false, ingredients: ['chunk-a'] }, 'ore-a'),
+    ], [alternate])
+    for (const item of ['plate-a', 'ore-a']) {
+      const result: any = goal_requirements(actor, { items: [item] })
+      expect(result.ok).toBe(true)
+      expect(result.locked).toEqual([])
+      expect(result.research).toEqual({})
+      expect(result.counts.raw_items).toBe(1)
+      expect(result.truncated.paths).toBe(false)
+    }
+  })
+
+  it('does not treat reclaiming a placed machine as raw-resource acquisition', () => {
+    installPrototypes({ items: ['machine-a'], machines: [{ name: 'machine-a', places: ['machine-a'], categories: [] }] })
+    ;(globalThis as any).prototypes.entity['machine-a'].mineable_properties = { minable: true, products: [{ type: 'item', name: 'machine-a' }] }
+    const actor = actorWith([recipe('machine-a', { enabled: false })], [technology('machine-tech', { unlocks: ['machine-a'] })])
+    const result: any = goal_requirements(actor, { items: ['machine-a'] })
+    expect(result.locked[0]).toMatchObject({ subject: 'machine-a', unlocked_by: 'machine-tech' })
+  })
+
   it('reports a locked target recipe, its trigger technology and the pending science prerequisite first', () => {
     const actor = lockedTargetFixture()
     const result: any = goal_requirements(actor, { items: [{ name: 'target-pack', machine_output: false }] })
