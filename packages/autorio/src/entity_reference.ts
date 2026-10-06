@@ -1,6 +1,7 @@
 import type { MapPositionStruct } from 'factorio:prototype'
 import type { LuaEntity, LuaSurface, UnitNumber } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
+import { find_world_entities, is_npc_vision_entity } from './npc_vision'
 
 export interface EntityReferenceHint {
   name: string
@@ -52,7 +53,7 @@ function identity_at(surface: LuaSurface, hint: EntityReferenceHint, unit_number
     name: hint.name,
   }
   if (force) filters.force = force
-  const candidates = surface.find_entities_filtered(filters as any)
+  const candidates = find_world_entities(surface, filters as any)
   for (const candidate of candidates) {
     if (!candidate.valid || candidate.unit_number !== unit_number) continue
     remember_entity_reference(candidate)
@@ -65,6 +66,8 @@ export function resolve_entity_reference(actor: ControlledActor, unit_number: nu
   // Only prototypes flagged get-by-unit-number are indexed here; ordinary
   // buildings are not and fall through to the observation hint.
   const direct = game.get_entity_by_unit_number(unit_number as UnitNumber)
+  // The hidden NPC vision vehicle is not part of the world the NPC can reference.
+  if (direct && direct.valid && is_npc_vision_entity(direct)) return undefined
   if (direct && direct.valid) {
     remember_entity_reference(direct)
     return direct

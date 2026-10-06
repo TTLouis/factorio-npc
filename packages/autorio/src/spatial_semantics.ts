@@ -1,4 +1,5 @@
 import type { LuaEntity } from 'factorio:runtime'
+import { find_world_entities } from './npc_vision'
 
 const MAX_FLUID_STORAGES = 8
 const MAX_PIPE_CONNECTIONS_PER_STORAGE = 8
@@ -143,7 +144,7 @@ function compact_mining_coverage(entity: LuaEntity) {
   const offset = mining_offset(prototype, entity.direction)
   const center = { x: entity.position.x + offset.x, y: entity.position.y + offset.y }
   const categories = mining_categories(prototype)
-  const resources = entity.surface.find_entities_filtered({
+  const resources = find_world_entities(entity.surface, {
     area: [
       { x: center.x - radius, y: center.y - radius },
       { x: center.x + radius, y: center.y + radius },

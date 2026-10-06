@@ -9,6 +9,7 @@ import type {
   PlayerParametersWalkToEntity,
 } from './types'
 import { TaskStates } from './types'
+import { find_world_entities } from './npc_vision'
 
 const LEGACY_ENTITY_SEARCH_DISTANCE = 8
 const PLACEMENT_ESCAPE_REACH = 0.75
@@ -212,7 +213,7 @@ export function new_interaction_recovery(manager: Manager) {
     }
 
     if (!task.entity_name || !prototypes.entity[task.entity_name]) return false
-    const nearby = actor.surface.find_entities_filtered({
+    const nearby = find_world_entities(actor.surface, {
       position: actor.position,
       radius: math.max(LEGACY_ENTITY_SEARCH_DISTANCE, reach),
       name: task.entity_name,

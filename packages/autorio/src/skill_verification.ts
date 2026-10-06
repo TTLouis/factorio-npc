@@ -22,6 +22,7 @@ import {
   put_skill_definition,
   type SkillDefinition,
 } from './skills'
+import { find_world_entities } from './npc_vision'
 
 export type SkillVerificationRunState
   = | 'validating'
@@ -564,7 +565,7 @@ function resolve_built_entities(actor: ControlledActor, run: SkillVerificationRu
   for (let index = 0; index < run.placements.length; index++) {
     const placement = run.placements[index]
     const template_entity = template.entities[index]
-    const matches = actor.surface.find_entities_filtered({ position: { x: placement.x, y: placement.y }, radius: POSITION_EPSILON, name: placement.entity_name })
+    const matches = find_world_entities(actor.surface, { position: { x: placement.x, y: placement.y }, radius: POSITION_EPSILON, name: placement.entity_name })
     let unit_number: number | undefined
     for (const entity of matches) {
       if (!entity.valid) continue

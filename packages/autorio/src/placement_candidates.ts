@@ -2,6 +2,7 @@ import type { ControlledActor } from './actors/types'
 import type { CandidateFluidPort } from './placement_spatial_features'
 import { candidate_fluid_ports } from './placement_spatial_features'
 import { placement_check_args, placement_footprint, placement_footprint_covers_point, snap_placement_center, type PlacementFootprint } from './placement_geometry'
+import { find_world_entities } from './npc_vision'
 
 const MAX_RADIUS = 24
 const MAX_LIMIT = 8
@@ -156,7 +157,7 @@ function resource_coverage(
   const search_center = { x: position.x + offset.x, y: position.y + offset.y }
 
   const allowed_categories = resource_categories(prototype)
-  const resources = actor.surface.find_entities_filtered({
+  const resources = find_world_entities(actor.surface, {
     area: [
       { x: search_center.x - radius, y: search_center.y - radius },
       { x: search_center.x + radius, y: search_center.y + radius },

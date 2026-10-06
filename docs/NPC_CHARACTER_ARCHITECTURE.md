@@ -217,6 +217,57 @@ returned `area_uncharted`.
     a sync does nothing while no player is online, because the engine charts
     nothing then.
 
+### Live vision vehicle (hidden)
+
+A character prototype has no `chunk_exploration_radius`, so continuous map vision
+needs a separate entity. A hidden car, `sgluna-npc-vision`, follows the NPC and
+charts a 5×5 chunk window around itself the way a spidertron does
+(`chunk_exploration_radius = 2`, the same size as `KNOWLEDGE_CHUNK_RADIUS`; do not
+grow it). It exists only so the NPC's force charts and sees the area around the
+NPC. It must not interact with the world at all.
+
+- **Prototype** (`packages/autorio/data.lua`): hidden; no item, recipe, technology
+  unlock, `placeable_by` or `minable`; an empty collision mask and a zero collision
+  box, so it never blocks placement, walking, belts, inserters, vehicles, trains,
+  biters or projectiles; not selectable and no selection box; not a military
+  target and a trigger target mask nothing matches; no passengers, no guns, no
+  inventory, a void energy source (no fuel, no emissions); no graphics, light,
+  sound, corpse or explosion; flags that remove map, blueprint, copy-paste,
+  deconstruction, upgrade, repair, kill-statistics and fire interaction.
+  `deploy/pterodactyl/staging/source-preparer.mjs` refuses a package that drops
+  one of these.
+- **Lifecycle** (`packages/autorio/src/npc_vision.ts`, driven from the awareness
+  tick, so only for a standalone NPC): at most one vehicle per NPC actor, same
+  force, built with `raise_built = false` and without disturbing ghosts or
+  corpses under it. Right after creation it is made indestructible, unminable,
+  inoperable and unrotatable. It teleports to the NPC when the NPC changes chunk
+  or surface and is corrected every 60 ticks. It is destroyed when the actor is
+  replaced, dies, is removed or is not a standalone NPC, and rebuilt only for the
+  current live actor. `on_init` and `on_configuration_changed` (and every create)
+  sweep all vehicles on all surfaces and keep only the one stored for the current
+  actor. Each create, destroy, failed create and sweep writes an
+  `npc.vision.*` log line with the actor id and a reason.
+- **Invisible to the NPC**: every entity scan in the mod goes through
+  `find_world_entities` / `count_world_entities`, which drop the vehicle (and
+  match nothing when asked for it by name), and exact unit-number references to
+  it do not resolve. Placement checks never see an obstacle because the collision
+  mask is empty. A unit test fails on any direct engine entity scan.
+- **Why `destructible = false` matters**: an enemy told to hunt an area attacks
+  any destructible entity of the player force, military target or not (a plain
+  chest dies the same way), so the prototype flags alone do not stop it. The real
+  engine lane shows a destructible instance dying to a hunting biter and the
+  runtime-flagged live one being ignored.
+- **Scans**: the helpers are also exact for `limit` (the engine applies it before
+  the vehicle is dropped, so a limited scan asks for one extra result per vehicle),
+  `invert`, and counts.
+- **Zero connected players**: Factorio charts nothing for a force without a
+  connected player: not `LuaForce.chart`, not a powered radar, and not this
+  vehicle (active or inactive). The vehicle therefore adds live vision for
+  connected observers; the mod's own map knowledge above still covers the
+  zero-player case. Whether `active = false` would suppress exploration with a
+  player connected cannot be observed headless, so the vehicle stays active (zero
+  fuel and no driver, so it cannot move).
+
 ## Controller boundary
 
 The long-term API should remain semantic and actor-oriented.

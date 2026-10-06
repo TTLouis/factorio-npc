@@ -1,5 +1,6 @@
 import type { ControlledActor } from './actors/types'
 import { resolve_entity_reference } from './entity_reference'
+import { find_world_entities } from './npc_vision'
 
 type Position = { x: number, y: number }
 type Area = { left_top: Position, right_bottom: Position }
@@ -78,7 +79,7 @@ function squared_distance(a: Position, b: Position) {
 }
 
 function inspect_area(actor: ControlledActor, bounds: Area) {
-  const entities = actor.surface.find_entities_filtered({ area: bounds })
+  const entities = find_world_entities(actor.surface, { area: bounds })
   let hard_entity_count = 0
   let transient_character_count = 0
   for (const entity of entities) {

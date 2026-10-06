@@ -2,6 +2,7 @@ import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import type { PlayerParametersWalkToEntity } from './types'
 import { distance } from './utils/math'
+import { find_world_entities } from './npc_vision'
 
 const SAMPLE_TICKS = 30
 const STUCK_TICKS = 90
@@ -82,7 +83,7 @@ function state_for(actor: ControlledActor, task: NavigationTask) {
 }
 
 function nearest_natural_obstacle(actor: ControlledActor) {
-  const candidates = actor.surface.find_entities_filtered({
+  const candidates = find_world_entities(actor.surface, {
     position: actor.position,
     radius: SCAN_RADIUS,
   }).filter(entity => entity.valid && is_natural_navigation_obstacle(entity))

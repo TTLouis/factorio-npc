@@ -108,6 +108,7 @@ lane_offset() {
     provenance) printf '4' ;;
     requirements) printf '5' ;;
     craft-trigger) printf '6' ;;
+    vision) printf '7' ;;
     *) printf '[npc-test] Unknown lane requested: %s\n' "$1" >&2; return 2 ;;
   esac
 }

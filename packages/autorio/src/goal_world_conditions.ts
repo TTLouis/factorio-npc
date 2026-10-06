@@ -24,6 +24,7 @@
 
 import type { LuaEntity, LuaForce, LuaSurface } from 'factorio:runtime'
 import { hand_work_since } from './hand_work'
+import { find_world_entities } from './npc_vision'
 
 export const WORLD_CONDITION_KINDS: Record<string, boolean> = {
   entity_working: true,
@@ -80,7 +81,7 @@ function force_entities(force: LuaForce, entity_name: string) {
   const found: LuaEntity[] = []
   let truncated = false
   for (const [, surface] of game.surfaces) {
-    for (const entity of surface.find_entities_filtered({ name: entity_name, force })) {
+    for (const entity of find_world_entities(surface, { name: entity_name, force })) {
       if (found.length >= MAX_SCANNED_ENTITIES) {
         truncated = true
         break
@@ -151,7 +152,7 @@ function network_producers(pole: LuaEntity) {
 function poles_by_network(surface: LuaSurface, force: LuaForce) {
   const poles: Record<number, LuaEntity> = {}
   let scanned = 0
-  for (const pole of surface.find_entities_filtered({ type: 'electric-pole', force })) {
+  for (const pole of find_world_entities(surface, { type: 'electric-pole', force })) {
     scanned += 1
     if (scanned > MAX_SCANNED_ENTITIES) break
     const id = pole.electric_network_id

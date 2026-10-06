@@ -1,6 +1,7 @@
 import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import { drain_push_queue, KNOWLEDGE_CHUNK_RADIUS, observe_window, pull_engine_chart, queue_full_push } from './map_knowledge'
+import { new_npc_vision_controller } from './npc_vision'
 
 // How often to look for newly connected players and pull the engine chart.
 const SYNC_CHECK_INTERVAL = 60
@@ -41,11 +42,12 @@ function sync_with_players(actor: ControlledActor) {
   drain_push_queue(actor.force)
 }
 
-export function new_awareness_controller() {
+export function new_awareness_controller(vision = new_npc_vision_controller()) {
   function tick(actor: ControlledActor) {
     const identity = actor.status_snapshot()
     if (identity.kind !== 'standalone_character') {
       storage.sgluna_awareness_chunk = undefined
+      vision.tick(actor, identity, false)
       return false
     }
 
@@ -58,6 +60,8 @@ export function new_awareness_controller() {
       || previous.surface_index !== actor.surface.index
       || previous.chunk_x !== chunk_x
       || previous.chunk_y !== chunk_y
+    // The hidden vision vehicle follows the NPC (live exploration around it).
+    vision.tick(actor, identity, changed_chunk)
     if (!changed_chunk) return false
 
     // Load the 5x5 window around the NPC the way a player's character does.
@@ -74,5 +78,5 @@ export function new_awareness_controller() {
     return true
   }
 
-  return { tick }
+  return { tick, vision }
 }
