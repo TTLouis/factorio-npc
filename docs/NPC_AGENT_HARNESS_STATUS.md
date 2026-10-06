@@ -2,6 +2,60 @@
 
 This file is the current status summary for the single-NPC integration line. Historical detailed checkpoints are retained under `docs/validation/`.
 
+## October 5 NPC live vision vehicle (unit and real-engine lane evidence; branch `feat/npc-vision-vehicle`, not yet merged)
+
+A hidden car prototype, `sgluna-npc-vision` (`chunk_exploration_radius = 2`), follows the
+standalone NPC so its force charts and sees a 5×5 chunk window around it, like a
+spidertron. The design is in `docs/NPC_CHARACTER_ARCHITECTURE.md`, "Map knowledge".
+Real Factorio 2.0.77 evidence comes from the new `vision` lane
+(`NPC_TEST_LANES=vision`, `tests/factorio/runner/npc_vision_cell.py`, opt-in like
+`provenance`; it is not in the default lane list).
+
+What the lane proved with zero connected players:
+
+- **Lifecycle**: exactly one vehicle for the NPC, on the NPC, same single entity
+  across a new chunk, a move inside one chunk (correction timer) and another new
+  chunk. After the vehicle was removed it was rebuilt and an orphan was swept
+  (`npc.vision.destroyed ... reason=entity_invalid`, `npc.vision.swept ...
+  destroyed=1 reason=before_create:no_vehicle`). After the NPC died the old
+  vehicle was destroyed (`reason=actor_replaced`) and one was built for the
+  replacement actor. After a real stop/restart exactly one vehicle survived as the
+  same entity, was not rebuilt, and still followed the NPC.
+- **Non-interaction**: the engine reports a hidden car with no collision layers,
+  not selectable, not a military target, no passengers, no emissions, no item,
+  recipe, placing item or unlocking technology. The live entity is indestructible,
+  unminable, inoperable, unrotatable, and `damage(1000)` deals 0. The NPC placed a
+  wooden chest and a stone furnace on the exact tile an instance occupied; a burner
+  inserter and a belt built on instance tiles moved coal past them to the belt end;
+  area clearing removed a tree beside an instance and left the instance. A hunting
+  biter and an armed enemy turret never harmed the live vehicle in 1,500 ticks,
+  while the same biter destroyed a destructible instance and the same turret shot
+  a real target. No pollution at the vehicle.
+- **Invisible**: `get_nearby_entities`, `get_entity_status`, `find_entities`,
+  `query_area` and `inspect_entity` never returned it, with six instances inside
+  the 20-tile radius in the engine.
+- **Finding**: hunting enemies attack any destructible player-force entity, so the
+  runtime `destructible = false` (set at creation) is what protects the vehicle,
+  not the prototype flags.
+- **Named limitation, `zero_connected_players_no_engine_chart`**: with zero
+  connected players the engine charted nothing for the vehicle (active and
+  inactive), for `LuaForce.chart` and for a powered, working radar (0 of 25, 16,
+  16, 1 and 9 chunks). Vehicle exploration with a connected player is not proven
+  here, and neither is whether `active = false` would suppress it. The vehicle
+  stays active. The lane does not fake charting: if a future engine charts, the
+  vehicle's whole window must be charted or the lane fails.
+
+Gate: **1,637 runtime and 986 mod tests**, typecheck, Lua build and generated-Lua
+check; the staging guard has one test per prototype property, and
+`npc_vision.test.ts` covers lifecycle, sweep, trace lines and a source scan that
+fails on any direct `find_entities_filtered`. Real engine: the `vision`, `core`
+and `research-combat` lanes pass; `production` passes alone (one parallel run
+failed the steam-power hand-mining sentinel under load); `resilience` fails
+identically on the unchanged base `467dd799` at the planning-lifecycle step
+(`providerCalls` 4, expected 3), so it is not caused by this work. Not exercised
+in a real engine: a cross-surface teleport and `on_configuration_changed`
+(both unit-tested).
+
 ## October 5 goal requirements grounding (unit evidence only, no live run yet)
 
 Merged at `4f833278` after the live run `goal_052327n_1`, where the planner
