@@ -730,6 +730,34 @@ function normalizeTransferSupplyRecoveries(value) {
   return Object.keys(counts).length > 0 || refs.length > 0 ? { counts, refs } : undefined
 }
 
+// Monotonic per-step counter of refusals by the committed-checkpoint stock guard (a batch that would take the stock
+// the step's own checkpoint requires). Same shape and bounds as the transfer-supply counter, but separate, so the two
+// budgets never consume each other: { counts: { [step_id]: n } }.
+export function taskBoardCheckpointStockRefusals(board, stepId = board?.active_step_id) {
+  const count = board?.checkpoint_stock_refusals?.counts?.[stepId]
+  return Number.isSafeInteger(count) && count > 0 ? count : 0
+}
+
+export function recordTaskBoardCheckpointStockRefusal(board, { now = Date.now() } = {}) {
+  if (!board || board.kind !== 'task_board_lite' || !board.active_step_id) return board
+  const prior = board.checkpoint_stock_refusals ?? { counts: {} }
+  const counts = { ...prior.counts, [board.active_step_id]: taskBoardCheckpointStockRefusals(board) + 1 }
+  const keys = Object.keys(counts)
+  for (const key of keys.slice(0, Math.max(0, keys.length - TASK_BOARD_MAX_RECOVERY_STEPS))) delete counts[key]
+  return { ...board, checkpoint_stock_refusals: { counts }, revision: board.revision + 1, updated_at: now }
+}
+
+function normalizeCheckpointStockRefusals(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const counts = {}
+  const rawCounts = value.counts && typeof value.counts === 'object' && !Array.isArray(value.counts) ? value.counts : {}
+  for (const [key, count] of Object.entries(rawCounts).slice(-TASK_BOARD_MAX_RECOVERY_STEPS)) {
+    const id = taskBoardText(key, 80)
+    if (id && Number.isSafeInteger(count) && count > 0) counts[id] = count
+  }
+  return Object.keys(counts).length > 0 ? { counts } : undefined
+}
+
 export function addTaskBoardEvidence(board, { kind = 'operation_receipt', summary = '', ref = '', now = Date.now() } = {}) {
   if (!board || board.kind !== 'task_board_lite') return board
   const record = {
@@ -826,6 +854,7 @@ export function sanitizeTaskBoard(value, { fallbackPlan = [], fallbackCurrentSte
     created_at: Number.isFinite(value.created_at) ? value.created_at : now,
     updated_at: Number.isFinite(value.updated_at) ? value.updated_at : now,
     ...(normalizeTransferSupplyRecoveries(value.transfer_supply_recoveries) ? { transfer_supply_recoveries: normalizeTransferSupplyRecoveries(value.transfer_supply_recoveries) } : {}),
+    ...(normalizeCheckpointStockRefusals(value.checkpoint_stock_refusals) ? { checkpoint_stock_refusals: normalizeCheckpointStockRefusals(value.checkpoint_stock_refusals) } : {}),
   }
   return applyTaskBoardStatuses(board, value.active_index)
 }

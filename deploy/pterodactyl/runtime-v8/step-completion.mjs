@@ -220,6 +220,64 @@ export function provePermanentlyUnsatisfiable(contract, { staleUnitNumbers = [] 
   }
 }
 
+// Does one operation of a batch remove the stock (or the entity) that a world-state requirement needs?
+// Exact identity only: the same unit_number and, for stock, the same item name. An extraction is a
+// move_items_exact that takes from the entity (to_entity === false); mine_entity_exact removes the entity
+// together with its contents. Anything else (other machines, other items, name-based operations) is not a match.
+function operationRemovesRequirementStock(operation, requirement) {
+  const args = operation?.args
+  if (!args || typeof args !== 'object') return undefined
+  const unitNumber = positiveInteger(integerValue(args.unit_number))
+  if (unitNumber === undefined || unitNumber !== requirement.unit_number) return undefined
+  if (operation.name === 'mine_entity_exact') return 'removes_entity'
+  if (operation.name === 'move_items_exact'
+    && requirement.kind === 'entity_inventory_count'
+    && args.to_entity === false
+    && args.item_name === requirement.item_name) return 'extracts_item'
+  return undefined
+}
+
+/**
+ * Find requirements of a checkpoint contract that the same batch of operations would undo: an
+ * entity_inventory_count whose stock a move_items_exact takes out of that entity, or any identity-pinned
+ * requirement (entity_inventory_count, entity_exists, entity_state) whose entity a mine_entity_exact removes.
+ * Returns undefined when nothing conflicts, otherwise { requirement_id, requirement_kind, unit_number,
+ * item_name?, minimum?, operation_index, operation, effect, conflicts }, naming the first conflict (the
+ * earliest operation) and listing every conflicting requirement/operation pair in `conflicts`.
+ *
+ * Mode matters: an `all` contract is unsatisfiable as soon as one requirement is undone; an `any` contract is
+ * only unsatisfiable when every requirement is undone. Nothing here reads prose or rewrites the contract.
+ */
+export function checkpointBatchContradiction(contract, operations) {
+  const normalized = sanitizeStepCompletionContract(contract)
+  if (normalized.mode === 'semantic_unknown' || !Array.isArray(operations) || operations.length === 0) return undefined
+  const conflicts = []
+  const conflicted = new Set()
+  for (const requirement of normalized.requirements) {
+    if (!IDENTITY_PINNED_REQUIREMENT_KINDS.has(requirement.kind)) continue
+    for (let index = 0; index < operations.length; index++) {
+      const effect = operationRemovesRequirementStock(operations[index], requirement)
+      if (!effect) continue
+      conflicted.add(requirement.id)
+      conflicts.push({
+        requirement_id: requirement.id,
+        requirement_kind: requirement.kind,
+        unit_number: requirement.unit_number,
+        ...(requirement.item_name ? { item_name: requirement.item_name } : {}),
+        ...(requirement.minimum ? { minimum: requirement.minimum } : {}),
+        operation_index: index,
+        operation: operations[index].name,
+        effect,
+      })
+      break
+    }
+  }
+  if (conflicts.length === 0) return undefined
+  if (normalized.mode === 'any' && conflicted.size < normalized.requirements.length) return undefined
+  const first = [...conflicts].sort((a, b) => a.operation_index - b.operation_index)[0]
+  return { ...first, conflicts }
+}
+
 export function conditionFromRequirement(requirement) {
   const normalized = boundedRequirement(requirement, 0)
   if (!normalized) return undefined
