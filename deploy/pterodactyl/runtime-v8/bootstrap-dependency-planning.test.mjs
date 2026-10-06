@@ -130,6 +130,8 @@ test('uncraftable downstream craft is replanned to first bootstrap dependency be
       assert.match(text, /satisfaction_scope":"inventory_acquisition"/)
       assert.match(text, /placed_instance_required":true/)
       assert.match(text, /Never invent a unit_number/)
+      assert.match(text, /satisfaction_scope=placed_instance means a compatible machine is already placed/)
+      assert.match(text, /not by itself proof that it is fueled, powered or supplied/)
       return planMessage([{
         name: 'place_entity',
         args: { entity_name: 'furnace-x' },

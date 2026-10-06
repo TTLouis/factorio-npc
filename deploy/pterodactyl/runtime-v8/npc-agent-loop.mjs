@@ -337,6 +337,57 @@ export function transferSupplyFacts(preflight) {
   }
 }
 const RESEARCH_PREFLIGHT_RETRY_BUDGET = 2
+// A craft_item aimed at an enabled recipe whose categories the character cannot hand-craft. The mod answers with live
+// facts (recipe, compatible machine prototypes, held and placed machines); it is a recoverable fact result inside the
+// same committed step, never a blocker. Past the budget the request pauses (no WORLD_BLOCKED, the plan is not frozen).
+export const REQUIRES_MACHINE_CODE = 'requires_machine'
+export const REQUIRES_MACHINE_RETRY_BUDGET = 2
+
+// Bounded facts about a requires_machine preflight result, for trace rows, board evidence and the model message.
+export function requiresMachineFacts(preflight) {
+  const list = (value, limit) => (Array.isArray(value) ? value.slice(0, limit) : [])
+  const recipe = preflight?.recipe ?? {}
+  const machines = preflight?.machines ?? {}
+  return {
+    code: preflight?.code,
+    operation: preflight?.operation,
+    operation_index: preflight?.operation_index,
+    item_name: preflight?.identity,
+    requested_count: preflight?.requested_count,
+    hand_craftable: false,
+    recipe: {
+      name: recipe.name ?? preflight?.recipe_name,
+      categories: list(recipe.categories, 8),
+      energy: recipe.energy,
+      ingredients: list(recipe.ingredients, 8),
+      products: list(recipe.products, 8),
+    },
+    machines: {
+      matched_count: machines.matched_count,
+      truncated: machines.truncated,
+      candidates: list(machines.candidates, 8).map(candidate => ({
+        name: candidate?.name,
+        type: candidate?.type,
+        held_count: candidate?.held_count,
+        place_items: list(candidate?.place_items, 4),
+      })),
+      held: list(machines.held, 8),
+      placed_count: machines.placed_count,
+      placed_working_count: machines.placed_working_count,
+      placed_truncated: machines.placed_truncated,
+      placed_search_radius: machines.placed_search_radius,
+      placed: list(machines.placed, 6).map(machine => ({
+        unit_number: machine?.unit_number,
+        name: machine?.name,
+        position: machine?.position,
+        distance: machine?.distance,
+        working: machine?.working,
+        readiness: machine?.readiness,
+        status_code: machine?.status_code,
+      })),
+    },
+  }
+}
 // Chained in-turn slice continuations (a claim that closes a slice, whose
 // unmet goal plans the next slice inside the same planner turn) allowed per
 // run. A model that keeps authoring claim-only slices ends the run visibly
@@ -6593,6 +6644,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.modelCorrectablePreflightRetries = 0
     this.researchPreflightRetries = 0
     this.bootstrapDependencyPreflightRetries = 0
+    this.requiresMachinePreflightRetries = 0
     this.authorizationRefusalRetries = 0
     this.duplicateEffectRetries = 0
     this.duplicateEffectHold = null
@@ -6875,6 +6927,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.modelCorrectablePreflightRetries = 0
     this.researchPreflightRetries = 0
     this.bootstrapDependencyPreflightRetries = 0
+    this.requiresMachinePreflightRetries = 0
     this.authorizationRefusalRetries = 0
     return true
   }
@@ -9994,15 +10047,111 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return { action: 'recovered', stateResult }
   }
 
+  // A machine-only recipe asked for as a hand craft (see REQUIRES_MACHINE_CODE). 'recovered' re-enters the planner turn
+  // inside the same committed step with the live facts; 'exhausted' ends the request as a recoverable pause.
+  async handleRequiresMachinePreflight(failure, plan, before, stateResult) {
+    const preflight = failure.preflight
+    const key = this.requestInfo?.memoryKey
+    const requestId = this.traceRequest?.id
+    const index = Number.isSafeInteger(preflight.operation_index) ? preflight.operation_index : 0
+    const facts = requiresMachineFacts({ ...preflight, operation_index: index })
+    const prior = this.requiresMachinePreflightRetries ?? 0
+    const base = {
+      request_id: requestId,
+      step_id: key ? this.memory.currentPlan?.(key)?.task_board?.active_step_id : undefined,
+      operation_index: index,
+      operation: plan.operations?.[index]?.name,
+      code: REQUIRES_MACHINE_CODE,
+      item_name: preflight.identity,
+      recipe_name: preflight.recipe_name,
+      facts,
+    }
+    if (key) {
+      const state = this.memory.setAdmissionState?.(key, 'preflight_rejected')
+      if (state) stateResult = { ...(stateResult ?? {}), state }
+    }
+    if (prior >= REQUIRES_MACHINE_RETRY_BUDGET) {
+      await this.traceEvent('craft.requires_machine_exhausted', {
+        ...base,
+        reason: 'retry_budget_spent_request_paused_without_blocker',
+        retries_used: prior,
+        retry_budget: REQUIRES_MACHINE_RETRY_BUDGET,
+      })
+      return {
+        action: 'exhausted',
+        result: await this.finishPreflightRecoveryFailure(stateResult, plan, before, preflight, {
+          source: 'requires_machine_preflight_recovery',
+          reason: 'requires_machine_retry_exhausted',
+          retryBudget: REQUIRES_MACHINE_RETRY_BUDGET,
+          chatMessage: `[Plan paused] ${cleanMemoryText(preflight.identity, 80)} is made in a machine and was requested as a hand craft repeatedly; the request stopped without declaring a world blocker.`,
+          facts,
+        }),
+      }
+    }
+
+    const attempt = prior + 1
+    this.requiresMachinePreflightRetries = attempt
+    if (key) {
+      this.memory.recordBoardEvidence?.(key, {
+        kind: 'operation_preflight_recoverable',
+        ref: `${requestId ?? 'request'}/requires_machine_${index}`,
+        summary: JSON.stringify({
+          code: REQUIRES_MACHINE_CODE,
+          operation_index: index,
+          operation: preflight.operation,
+          item_name: preflight.identity,
+          recipe_name: preflight.recipe_name,
+          categories: facts.recipe.categories,
+          compatible_machines: facts.machines.candidates.map(candidate => candidate.name),
+          held: facts.machines.held,
+          placed_count: facts.machines.placed_count,
+          placed: facts.machines.placed.slice(0, 3),
+        }),
+      })
+      await this.persistState()
+    }
+    await this.traceEvent('craft.requires_machine', {
+      ...base,
+      reason: 'recipe_made_in_machine_not_hand_craftable',
+      attempt,
+      retry_budget: REQUIRES_MACHINE_RETRY_BUDGET,
+      tools_enabled: true,
+      plan_changed: false,
+    })
+    await this.traceEvent('operations.preflight_recoverable', {
+      failure_class: REQUIRES_MACHINE_CODE,
+      preflight,
+      tools_enabled: true,
+      retry: attempt,
+      retry_budget: REQUIRES_MACHINE_RETRY_BUDGET,
+    })
+    this.messages.push({
+      role: 'user',
+      content: `[HARNESS] Deterministic craft preflight did not run operation ${index + 1} (craft_item ${cleanMemoryText(preflight.identity, 80)}), and no operation from this batch ran: recipe ${cleanMemoryText(preflight.recipe_name, 80)} is in crafting categories ${JSON.stringify(facts.recipe.categories)} that the character cannot hand-craft, so it is made in a machine. This is a recoverable fact result, not WORLD_BLOCKED: the plan, step contract and requested result are unchanged and tools remain enabled. A machine listed as placed is not by itself proof that it is fueled, powered or supplied; each placed entry carries its own readiness (working, or the engine's status name and raw status_code). Result ${attempt} of ${REQUIRES_MACHINE_RETRY_BUDGET} before this request pauses. Facts from the live game: ${JSON.stringify(facts)}`,
+    })
+    return { action: 'recovered', stateResult }
+  }
+
   async finishResearchPreflightRecoveryFailure(stateResult, plan, before, preflight) {
+    return this.finishPreflightRecoveryFailure(stateResult, plan, before, preflight, {
+      source: 'research_preflight_recovery',
+      reason: 'research_preflight_retry_exhausted',
+      retryBudget: RESEARCH_PREFLIGHT_RETRY_BUDGET,
+      chatMessage: '[Plan paused] Deterministic research correction was ignored repeatedly; planner/control recovery stopped without declaring a world blocker.',
+      facts: this.researchPreflightFacts(preflight),
+    })
+  }
+
+  // The request stops without a blocker: a recoverable pause, the committed plan untouched.
+  async finishPreflightRecoveryFailure(stateResult, plan, before, preflight, { source, reason, retryBudget, chatMessage, facts }) {
     let state = stateResult?.state
     if (this.requestInfo) {
       const runtime = await this.readInteractionTaskStatus()
       const persistentRuntime = await this.persistentRuntimeStatus()
       const failureCandidate = {
         kind: 'recoverable_provider_failure',
-        source: 'research_preflight_recovery',
-        reason_code: 'research_preflight_retry_exhausted',
+        source,
+        reason_code: reason,
         evidence: [],
       }
       await this.traceEvent('outcome.candidate', failureCandidate)
@@ -10024,8 +10173,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
     this.active = false
     await this.traceEvent('operations.preflight_recovery_exhausted', {
-      failure_class: 'research_preflight_retry_exhausted',
-      retry_budget: RESEARCH_PREFLIGHT_RETRY_BUDGET,
+      failure_class: reason,
+      retry_budget: retryBudget,
       preflight,
       task_board: visibleTaskBoard(state?.task_board),
     })
@@ -10037,7 +10186,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     })
     this.traceRequest = null
     return {
-      chatMessage: '[Plan paused] Deterministic research correction was ignored repeatedly; planner/control recovery stopped without declaring a world blocker.',
+      chatMessage,
       plan: state?.plan ?? plan.plan,
       currentStep: state?.current_step ?? plan.currentStep,
       operations: [],
@@ -10048,8 +10197,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       taskBoard: visibleTaskBoard(state?.task_board),
       recoverableFailure: {
         class: 'provider_control_plane',
-        reason: 'research_preflight_retry_exhausted',
-        preflight: this.researchPreflightFacts(preflight),
+        reason,
+        preflight: facts,
       },
     }
   }
@@ -10764,6 +10913,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         this.modelCorrectablePreflightRetries = 0
         this.researchPreflightRetries = 0
         this.bootstrapDependencyPreflightRetries = 0
+        this.requiresMachinePreflightRetries = 0
         // MW1 admission gate, run BEFORE the plan is committed so a refusal leaves the plan a DRAFT exactly as every other
         // deterministic refusal does: a replacement plan's grant is re-checked for this actor and epoch, an exact operation on
         // a player-built entity (grant-backed work) needs an approval record, reserved containers are never withdrawn from,
@@ -10901,6 +11051,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           }
           return this.finishResearchPreflightRecoveryFailure(stateResult, plan, before, error.preflight)
         }
+        if (error?.preflight?.code === REQUIRES_MACHINE_CODE) {
+          const requiresMachine = await this.handleRequiresMachinePreflight(error, plan, before, stateResult)
+          if (requiresMachine.action === 'recovered') {
+            stateResult = requiresMachine.stateResult
+            return this.runTurn()
+          }
+          return requiresMachine.result
+        }
         if (error?.preflight?.code === 'bootstrap_dependency_unresolved' && this.bootstrapDependencyPreflightRetries < 2) {
           this.bootstrapDependencyPreflightRetries++
           if (this.requestInfo) {
@@ -10929,7 +11087,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           })
           this.messages.push({
             role: 'user',
-            content: `[HARNESS] Deterministic craft preflight rejected the requested craft before Autorio admission because it is not currently craftable. Resolve the first unresolved bootstrap dependency before retrying the downstream craft. Reuse held items/buildings marked already_satisfied; bootstrap only missing quantities. A machine dependency with satisfaction_scope=inventory_acquisition means the machine item is already owned, not that a placed live machine instance exists. If processing requires that machine, first use an existing live observed compatible instance or place one from the held item; after placement, re-observe it and bind its real unit_number before any exact supply/configuration operation. Never invent a unit_number. This bootstrap inventory is for construction/startup only and does not remove steady-state recipe flow from a continuous production topology. Preflight: ${JSON.stringify(error.preflight.bootstrap ?? {})}`,
+            content: `[HARNESS] Deterministic craft preflight rejected the requested craft before Autorio admission because it is not currently craftable. Resolve the first unresolved bootstrap dependency before retrying the downstream craft. Reuse held items/buildings marked already_satisfied; bootstrap only missing quantities. A machine dependency with satisfaction_scope=inventory_acquisition means the machine item is already owned, not that a placed live machine instance exists. satisfaction_scope=placed_instance means a compatible machine is already placed (placed lists its unit_numbers, nearest first); each placed entry's readiness is a separate fact (working, or the engine's status name and raw status_code), and a placed machine is not by itself proof that it is fueled, powered or supplied. If processing requires that machine, first use an existing live observed compatible instance or place one from the held item; after placement, re-observe it and bind its real unit_number before any exact supply/configuration operation. Never invent a unit_number. This bootstrap inventory is for construction/startup only and does not remove steady-state recipe flow from a continuous production topology. Preflight: ${JSON.stringify(error.preflight.bootstrap ?? {})}`,
           })
           return this.runTurn()
         }
