@@ -136,6 +136,9 @@ start_factorio
 run_py run.py
 
 case "$LANE" in
+  craft-trigger)
+    run_py craft_trigger_cell.py
+    ;;
   requirements)
     printf '[npc-test][requirements] Running scripted first-plan grounding against live recipe/research facts...\n'
     run_node goal_requirements_factorio.mjs

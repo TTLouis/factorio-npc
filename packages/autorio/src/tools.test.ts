@@ -72,6 +72,15 @@ describe('goal conditions while the NPC body is dead', () => {
     ;(globalThis as any).storage = {}
   })
 
+  it('does not count trigger craft flow twice, including older unmirrored crafts', async () => {
+    ;(globalThis as any).game.forces = { player: force(0) }
+    ;(globalThis as any).game.surfaces = new Map([[1, {}]])
+    ;(globalThis as any).storage = { sgluna_crafted_items: { 1: { 'iron-gear-wheel': 3 } }, sgluna_craft_trigger_statistics: { 1: { 'iron-gear-wheel': 2 } } }
+    const tools = await tools_interface()
+    expect(tools.evaluate_condition({ kind: 'items_produced', item_name: 'iron-gear-wheel', minimum: 8 }))
+      .toMatchObject({ current: 8, production_statistics: 7, hand_crafted: 3, hand_crafted_in_statistics: 2 })
+  })
+
   it('counts hand crafting alone when the machine statistics are empty (goal baseline still reads the same evaluator)', async () => {
     const empty_force = { ...force(0), get_item_production_statistics: () => ({ get_input_count: () => 0 }) }
     ;(globalThis as any).game.forces = { player: empty_force }

@@ -1,3 +1,4 @@
+import type { LuaForce, LuaSurface } from 'factorio:runtime'
 // Per-force counter of items the NPC really hand-crafted.
 //
 // Why this exists: Factorio 2.0.77 records a character's hand crafting in the
@@ -5,6 +6,8 @@
 // The products never reach the input counts when the crafter is a standalone
 // `character` with no LuaPlayer attached, and `on_player_crafted_item` never
 // fires for it either (measured in tests/factorio hand_craft_statistics_cell.py).
+// Active craft-item research triggers receive a completion-only statistics
+// bridge below; the overlap ledger keeps that flow from counting twice.
 // Without this counter a goal such as "items_produced stone-furnace >= 1" can
 // never be met by the NPC's own crafting.
 //
@@ -16,6 +19,7 @@ import { record_hand_crafted_tick } from './hand_work'
 
 export interface CraftedItemsStorage {
   sgluna_crafted_items?: Record<number, Record<string, number>>
+  sgluna_craft_trigger_statistics?: Record<number, Record<string, number>>
 }
 
 declare const storage: CraftedItemsStorage
@@ -50,6 +54,37 @@ export function record_crafted_items(force_index: number, item_name: string, cou
   per_force[item_name] = (per_force[item_name] ?? 0) + count
 }
 
+// Only completed native crafts may supply the engine's missing trigger flow.
+// Keep the old counter for ordinary products; track overlap so goals count once.
+export function craft_trigger_statistics_count(force_index: number, item_name: string): number {
+  return storage.sgluna_craft_trigger_statistics?.[force_index]?.[item_name] ?? 0
+}
+
+export function credit_craft_trigger_statistics(force: LuaForce, surface: LuaSurface, item_name: string, count: number, request_id: string) {
+  if (!(count > 0)) return
+  let needed = false
+  for (const [, technology] of pairs(force.technologies)) {
+    const trigger = technology.prototype.research_trigger as any
+    if (technology.researched || !technology.enabled || trigger?.type !== 'craft-item') continue
+    const filter = trigger.item
+    const name = typeof filter === 'string' ? filter : filter?.name
+    if (name !== item_name || (filter?.quality !== undefined && filter.quality !== 'normal')) continue
+    let ready = true
+    for (const [, prerequisite] of pairs(technology.prerequisites)) {
+      if (!prerequisite.researched) ready = false
+    }
+    if (ready) needed = true
+  }
+  if (!needed) return
+  force.get_item_production_statistics(surface).on_flow(item_name, count)
+  const all = storage.sgluna_craft_trigger_statistics ?? {}
+  storage.sgluna_craft_trigger_statistics = all
+  const per_force = all[force.index] ?? {}
+  all[force.index] = per_force
+  per_force[item_name] = (per_force[item_name] ?? 0) + count
+  log(`[AUTORIO] crafting.trigger_flow request_id=${request_id} reason=completed_native_craft item_name=${item_name} count=${count}`)
+}
+
 export function craft_queue_totals(queue: readonly QueueEntry[]): CraftQueueTotals {
   const totals: CraftQueueTotals = {}
   for (const entry of queue) {
@@ -78,7 +113,7 @@ function certain_item_products(recipe_name: string): Array<{ name: string, amoun
  * before it cancels, so a cancelled craft is never seen here as completed).
  * Returns the number of crafts credited.
  */
-export function credit_finished_crafts(force_index: number, previous: CraftQueueTotals, current: CraftQueueTotals): number {
+export function credit_finished_crafts(force_index: number, previous: CraftQueueTotals, current: CraftQueueTotals, on_product?: (item_name: string, count: number) => void): number {
   let crafts = 0
   for (const [recipe_name, before] of Object.entries(previous)) {
     const finished = before - (current[recipe_name] ?? 0)
@@ -86,6 +121,7 @@ export function credit_finished_crafts(force_index: number, previous: CraftQueue
     crafts += finished
     for (const product of certain_item_products(recipe_name)) {
       record_crafted_items(force_index, product.name, finished * product.amount)
+      on_product?.(product.name, finished * product.amount)
     }
   }
   return crafts

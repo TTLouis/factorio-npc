@@ -18,6 +18,7 @@ function make_context() {
     surface: {},
     force: {
       index: 1,
+      technologies: {},
       recipes: {
         'iron-gear-wheel': { enabled: true },
       },

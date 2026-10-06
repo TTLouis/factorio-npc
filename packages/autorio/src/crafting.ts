@@ -1,7 +1,7 @@
 import type { ControlledActor } from './actors/types'
 import type { new_task_manager } from './task_manager'
 import type { PlayerParametersCraftItem } from './types'
-import { craft_queue_totals, credit_finished_crafts } from './crafted_items'
+import { craft_queue_totals, credit_finished_crafts, credit_craft_trigger_statistics } from './crafted_items'
 import { TaskStates } from './types'
 
 const MAX_CRAFT_COUNT = 1000
@@ -129,7 +129,9 @@ export function new_crafting_controller(get_actor: () => ControlledActor | undef
       return
     }
     const current = craft_queue_totals(actor.get_crafting_queue())
-    credit_finished_crafts(task.owner_force_index, task.queue_snapshot, current)
+    credit_finished_crafts(task.owner_force_index, task.queue_snapshot, current, (item_name, count) => {
+      credit_craft_trigger_statistics(actor.force, actor.surface, item_name, count, `native_craft/${task.owner_actor_id}/${task.started_tick}`)
+    })
     task.queue_snapshot = current
   }
 

@@ -1,7 +1,7 @@
 import type { LuaEntity, LuaForce } from 'factorio:runtime'
 import { create_actor_remote_interface, get_controlled_actor } from './actors/actor_controller'
 import type { ControlledActor } from './actors/types'
-import { crafted_item_count } from './crafted_items'
+import { crafted_item_count, craft_trigger_statistics_count } from './crafted_items'
 import { remember_entity_reference, resolve_exact_entity } from './entity_reference'
 import { evaluate_world_condition, WORLD_CONDITION_KINDS } from './goal_world_conditions'
 import { machine_eta } from './production_eta'
@@ -75,10 +75,11 @@ function evaluate_force_condition(force: LuaForce | undefined, kind: unknown, re
     }
     // The engine does not record a character's hand-crafted products in those
     // statistics (see crafted_items.ts), so the crafts the NPC's own native
-    // queue really finished are added. The two sources do not overlap.
+    // queue really finished are added. Trigger-flow credits overlap and are subtracted.
     const hand_crafted = crafted_item_count(force.index, item_name)
-    const current = production_statistics + hand_crafted
-    return { ok: true, kind, satisfied: current >= (minimum as number), current, production_statistics, hand_crafted, minimum, progress_known: false }
+    const hand_crafted_in_statistics = craft_trigger_statistics_count(force.index, item_name)
+    const current = production_statistics + hand_crafted - hand_crafted_in_statistics
+    return { ok: true, kind, satisfied: current >= (minimum as number), current, production_statistics, hand_crafted, hand_crafted_in_statistics, minimum, progress_known: false }
   }
 
   if (kind === 'space_location_unlocked') {
