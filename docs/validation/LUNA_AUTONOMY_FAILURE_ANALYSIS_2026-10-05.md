@@ -181,8 +181,8 @@ system-prompt text; each gives Luna facts or rejects a draft.
 |---|---|---|---|---|
 | A | Transfer preflight returns source/destination counts; batch-aware missing-supply rejection; recoverable acquisition inside the step, bounded at 2 | `fix/transfer-preflight-counts` | `f2641267` | merged; gate 1,645 runtime / 991 mod |
 | B | `wait`-only batches on a machine-output checkpoint route to the condition wait; wait receipts carry a fresh machine read | `fix/observed-waits` | `cb2628d6` | merged; gate 1,688 runtime / 1,018 mod |
-| C | Reject drafts whose operations empty the stock their own checkpoint requires (`checkpoint_contradicts_batch`) | `fix/checkpoint-contradiction` | | in progress |
-| D1 | `craft_item` on machine-only recipes returns `requires_machine` facts; bootstrap separates held, placed and running machines | | | queued |
+| C | Reject drafts whose operations empty the stock their own checkpoint requires (`checkpoint_contradicts_batch`) | `fix/checkpoint-contradiction` | `551d4a5b` | merged; gate 1,705 runtime / 1,018 mod |
+| D1 | `craft_item` on machine-only recipes returns `requires_machine` facts; bootstrap separates held, placed and running machines | `fix/machine-recipe-facts` | | in progress |
 | D2 | Fresh executor context carries active step, contract, latest receipt, bounded recipe summary and refreshed counts | | | queued |
 | E | Recorded scripted-reply regression of the retained run's four failure shapes | | | queued |
 | F | Live ladder (smelt/collect, red unlock, steam lab, green) | | | owner runs it |
