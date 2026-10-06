@@ -1,5 +1,5 @@
 import type { ControlledActor } from './actors/types'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { craft_bootstrap_preflight_for_actor, recipe_bootstrap_for_actor } from './bootstrap_planning'
 
 function recipe(name: string, product: string, {
@@ -223,4 +223,216 @@ describe('recipe bootstrap dependency closure', () => {
     })
   })
 
+})
+
+describe('machine-only recipes and placed machines', () => {
+  const originalDefines = (globalThis as any).defines
+  const STATUS = { working: 1, no_power: 2, no_fuel: 3, no_ingredients: 4 }
+
+  beforeEach(() => {
+    ;(globalThis as any).defines = { ...originalDefines, entity_status: { ...STATUS } }
+    ;(globalThis as any).prototypes.get_entity_filtered = (filters: Array<Record<string, string>>) => {
+      if (filters[0]?.crafting_category !== 'smelting') return {}
+      return {
+        'stone-furnace': { name: 'stone-furnace', type: 'furnace', items_to_place_this: [{ name: 'stone-furnace', count: 1 }] },
+        'electric-furnace': { name: 'electric-furnace', type: 'furnace', items_to_place_this: [{ name: 'electric-furnace', count: 1 }] },
+      }
+    }
+  })
+
+  afterEach(() => {
+    ;(globalThis as any).defines = originalDefines
+  })
+
+  function placedEntity(unit_number: number, x: number, status: number | undefined, name = 'stone-furnace') {
+    return { valid: true, name, type: 'furnace', unit_number, position: { x, y: 0 }, status }
+  }
+
+  function smeltingActor(placed: any[], inventory: Record<string, number> = {}, recipes?: Record<string, any>) {
+    const smelting = { ...recipe('iron-plate', 'iron-plate', { category: 'smelting', ingredient: 'iron-ore' }), energy: 3.2 }
+    const find = vi.fn((_query: any) => placed)
+    const actor = {
+      ...actorWith(recipes ?? { 'iron-plate': smelting }, inventory),
+      surface: { find_entities_filtered: find },
+      position: { x: 0, y: 0 },
+    } as unknown as ControlledActor
+    ;(actor.force as any).index = 1
+    return { actor, find, smelting }
+  }
+
+  it('rejects a hand craft of a machine-only recipe with requires_machine and live facts (held and placed machines)', () => {
+    const { actor, find } = smeltingActor(
+      [placedEntity(11, 9, STATUS.no_fuel), placedEntity(10, 3, STATUS.working)],
+      { 'iron-ore': 7, 'electric-furnace': 2 },
+    )
+
+    const result = craft_bootstrap_preflight_for_actor(actor, 'iron-plate', 5) as any
+
+    expect(result).toMatchObject({
+      ok: false,
+      code: 'requires_machine',
+      operation: 'craft_item',
+      identity: 'iron-plate',
+      recipe_name: 'iron-plate',
+      requested_count: 5,
+      hand_craftable: false,
+    })
+    expect(result.recipe).toMatchObject({
+      name: 'iron-plate',
+      categories: ['smelting'],
+      energy: 3.2,
+      products: [{ type: 'item', name: 'iron-plate', amount: 1 }],
+      ingredients: [{ type: 'item', name: 'iron-ore', amount: 1, held: 7 }],
+    })
+    expect(result.machines.matched_count).toBe(2)
+    expect(result.machines.truncated).toBe(false)
+    expect(result.machines.candidates.map((candidate: any) => candidate.name)).toEqual(['electric-furnace', 'stone-furnace'])
+    expect(result.machines.held).toEqual([{ name: 'electric-furnace', held_count: 2 }])
+    expect(result.machines.placed_count).toBe(2)
+    expect(result.machines.placed_working_count).toBe(1)
+    expect(result.machines.placed_truncated).toBe(false)
+    expect(result.machines.placed_search_radius).toBe(128)
+    // Nearest first, each with its own readiness and unit_number.
+    expect(result.machines.placed).toEqual([
+      { unit_number: 10, name: 'stone-furnace', position: { x: 3, y: 0 }, distance: 3, working: true, readiness: 'working', status_code: STATUS.working },
+      { unit_number: 11, name: 'stone-furnace', position: { x: 9, y: 0 }, distance: 9, working: false, readiness: 'no_fuel', status_code: STATUS.no_fuel },
+    ])
+    // The scan is bounded by radius, force and surface, over only the compatible machine prototypes.
+    expect(find).toHaveBeenCalledWith({
+      name: ['stone-furnace', 'electric-furnace'],
+      force: actor.force,
+      position: { x: 0, y: 0 },
+      radius: 128,
+    })
+  })
+
+  it('reports an unmapped or unavailable status honestly instead of calling the machine working', () => {
+    const { actor } = smeltingActor([placedEntity(1, 1, 99), placedEntity(2, 2, undefined)])
+
+    const result = craft_bootstrap_preflight_for_actor(actor, 'iron-plate', 1) as any
+
+    expect(result.code).toBe('requires_machine')
+    expect(result.machines.placed_working_count).toBe(0)
+    expect(result.machines.placed[0]).toMatchObject({ unit_number: 1, working: false, readiness: 'unmapped_status', status_code: 99 })
+    expect(result.machines.placed[1]).toMatchObject({ unit_number: 2, working: false, readiness: 'status_unavailable' })
+    expect(result.machines.placed[1].status_code).toBeUndefined()
+  })
+
+  it('reports no held and no placed machines as empty lists', () => {
+    const { actor } = smeltingActor([])
+
+    const result = craft_bootstrap_preflight_for_actor(actor, 'iron-plate', 1) as any
+
+    expect(result.code).toBe('requires_machine')
+    expect(result.machines).toMatchObject({ held: [], placed: [], placed_count: 0, placed_working_count: 0, placed_truncated: false })
+  })
+
+  it('keeps a hand-craftable recipe on the direct craft path and a locked machine recipe on recipe_locked', () => {
+    const widget = recipe('widget', 'widget', { ingredient: 'plate-x' })
+    const direct = craft_bootstrap_preflight_for_actor(actorWith({ widget }, { 'plate-x': 5 }, { widget: 5 }), 'widget', 1) as any
+    expect(direct.ok).toBe(true)
+    expect(direct.code).toBeUndefined()
+
+    const locked = { ...recipe('iron-plate', 'iron-plate', { category: 'smelting' }), enabled: false }
+    ;(globalThis as any).prototypes.technology = {}
+    const { actor } = smeltingActor([placedEntity(1, 1, STATUS.working)], {}, { 'iron-plate': locked })
+    ;(actor.force as any).research_enabled = true
+    ;(actor.force as any).technologies = {}
+    const refused = craft_bootstrap_preflight_for_actor(actor, 'iron-plate', 1) as any
+    expect(refused.code).toBe('recipe_locked')
+    expect(refused.machines).toBeUndefined()
+
+    const unknown = craft_bootstrap_preflight_for_actor(actor, 'no-such-recipe', 1) as any
+    expect(unknown).toMatchObject({ ok: false, code: 'unknown_recipe' })
+  })
+
+  it('bounds the placed list to the nearest six while counting every machine in range', () => {
+    const placed: any[] = []
+    for (let i = 1; i <= 10; i++) placed.push(placedEntity(100 + i, 50 - i * 4, i === 3 ? STATUS.working : STATUS.no_ingredients))
+    const { actor } = smeltingActor(placed)
+
+    const result = craft_bootstrap_preflight_for_actor(actor, 'iron-plate', 1) as any
+
+    expect(result.machines.placed_count).toBe(10)
+    expect(result.machines.placed_working_count).toBe(1)
+    expect(result.machines.placed_truncated).toBe(true)
+    expect(result.machines.placed).toHaveLength(6)
+    // x = 46, 42, ..., 10: the nearest to the origin are unit_numbers 110 down to 105.
+    expect(result.machines.placed.map((machine: any) => machine.unit_number)).toEqual([110, 109, 108, 107, 106, 105])
+  })
+
+  it('counts a placed compatible furnace as satisfying the machine dependency and reports its readiness separately', () => {
+    const { actor, smelting } = smeltingActor([placedEntity(21, 4, STATUS.no_fuel)], { 'iron-ore': 8 })
+
+    const result = recipe_bootstrap_for_actor(actor, smelting, 4)
+    const machine = result.inventory_overlay.machine_dependency
+
+    expect(machine).toMatchObject({
+      required: 1,
+      held: 0,
+      status: 'already_satisfied',
+      satisfaction_scope: 'placed_instance',
+      placed_instance_required: false,
+      placed_count: 1,
+      placed_working_count: 0,
+      placed: [{ unit_number: 21, name: 'stone-furnace', working: false, readiness: 'no_fuel' }],
+    })
+    // No electric-furnace (or any) acquisition is demanded while a compatible machine already stands.
+    expect(machine?.selected_item_dependency).toBeUndefined()
+    expect(result.first_unresolved).toBeUndefined()
+  })
+
+  it('still demands machine acquisition when no compatible machine is held or placed', () => {
+    const { actor, smelting } = smeltingActor([], { 'iron-ore': 8 })
+
+    const machine = recipe_bootstrap_for_actor(actor, smelting, 4).inventory_overlay.machine_dependency
+
+    expect(machine).toMatchObject({
+      held: 0,
+      status: 'needs_acquisition/processing',
+      satisfaction_scope: 'inventory_acquisition',
+      placed_instance_required: true,
+      placed_count: 0,
+      placed: [],
+      selected_item_dependency: { name: 'electric-furnace', role: 'crafting_machine' },
+    })
+  })
+
+  it('keeps held-only machines at inventory scope and prefers the placed scope when both exist', () => {
+    const held = smeltingActor([], { 'stone-furnace': 3 })
+    expect(recipe_bootstrap_for_actor(held.actor, held.smelting, 1).inventory_overlay.machine_dependency).toMatchObject({
+      held: 3,
+      satisfaction_scope: 'inventory_acquisition',
+      placed_instance_required: true,
+      placed_count: 0,
+    })
+
+    const both = smeltingActor([placedEntity(5, 2, STATUS.working)], { 'stone-furnace': 3 })
+    expect(recipe_bootstrap_for_actor(both.actor, both.smelting, 1).inventory_overlay.machine_dependency).toMatchObject({
+      held: 3,
+      satisfaction_scope: 'placed_instance',
+      placed_instance_required: false,
+      placed_count: 1,
+      placed_working_count: 1,
+      placed: [{ unit_number: 5, readiness: 'working', working: true }],
+    })
+  })
+
+  it('searches placed machines across every compatible prototype even when the candidate report is truncated', () => {
+    const machines: Record<string, any> = {}
+    for (let i = 1; i <= 12; i++) {
+      const name = `kiln-${String(i).padStart(2, '0')}`
+      machines[name] = { name, type: 'furnace', items_to_place_this: [{ name, count: 1 }] }
+    }
+    ;(globalThis as any).prototypes.get_entity_filtered = () => machines
+    const { actor, find } = smeltingActor([placedEntity(7, 1, STATUS.working, 'kiln-12')])
+
+    const result = craft_bootstrap_preflight_for_actor(actor, 'iron-plate', 1) as any
+
+    expect(result.machines.matched_count).toBe(12)
+    expect(result.machines.truncated).toBe(true)
+    expect(result.machines.candidates).toHaveLength(8)
+    expect((find.mock.calls[0] as any)[0].name).toHaveLength(12)
+    expect(result.machines.placed).toMatchObject([{ unit_number: 7, name: 'kiln-12', readiness: 'working' }])
+  })
 })

@@ -1,5 +1,7 @@
+import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import { recipe_unlock_summary } from './goal_requirements'
+import { find_world_entities } from './npc_vision'
 
 export type BootstrapDependencyStatus = 'already_satisfied' | 'needs_crafting' | 'needs_acquisition/processing'
 
@@ -10,15 +12,38 @@ export interface BootstrapMachineCandidate {
   place_items: Array<{ name: string, count: number }>
 }
 
+// A compatible machine already standing in the world. Acquisition, placement and operational readiness stay
+// separate facts: `readiness` is the entity's own status (`working`, or the engine's status name such as
+// `no_fuel`/`no_power`/`no_ingredients`/`full_output`), and `status_code` is the raw engine status value. Finding a
+// machine never proves it is fueled or powered.
+export interface BootstrapPlacedMachine {
+  unit_number?: number
+  name: string
+  position: { x: number, y: number }
+  distance: number
+  working: boolean
+  readiness: string
+  status_code?: number
+}
+
 export interface BootstrapMachineDependency {
   required: number
   held: number
   status: BootstrapDependencyStatus
-  satisfaction_scope: 'inventory_acquisition'
+  // `placed_instance`: a compatible machine is already placed (see `placed`, with unit_numbers), so acquisition is
+  // not needed and `placed_instance_required` is false. `inventory_acquisition`: only held items were counted.
+  satisfaction_scope: 'inventory_acquisition' | 'placed_instance'
   placed_instance_required: boolean
   matched_count: number
   truncated: boolean
   candidates: BootstrapMachineCandidate[]
+  // Compatible machines placed on the actor's surface for the actor's force within `placed_search_radius` tiles of
+  // the actor: the total, how many report `working`, and up to MAX_PLACED_MACHINES of them nearest first.
+  placed_count: number
+  placed_working_count: number
+  placed_truncated: boolean
+  placed_search_radius: number
+  placed: BootstrapPlacedMachine[]
   selected_item_dependency?: BootstrapDependency
 }
 
@@ -59,6 +84,10 @@ const MAX_BOOTSTRAP_DEPTH = 6
 const MAX_BOOTSTRAP_NODES = 32
 const MAX_MACHINE_CANDIDATES = 8
 const MAX_PRODUCER_CANDIDATES = 8
+const MAX_PLACED_MACHINES = 6
+const PLACED_MACHINE_SEARCH_RADIUS = 128
+const MAX_REQUIRES_MACHINE_INGREDIENTS = 8
+const MAX_REQUIRES_MACHINE_PRODUCTS = 8
 
 function sort_strings(values: string[]) {
   for (let i = 0; i < values.length; i++) {
@@ -168,6 +197,7 @@ function place_items_for_machine(actor: ControlledActor, prototype: any) {
 function machine_candidates(actor: ControlledActor, categories: string[]) {
   const seen: Record<string, boolean> = {}
   const candidates: BootstrapMachineCandidate[] = []
+  const names: string[] = []
 
   for (const category of categories) {
     const matches = prototypes.get_entity_filtered([
@@ -176,6 +206,7 @@ function machine_candidates(actor: ControlledActor, categories: string[]) {
     for (const [name, prototype] of pairs(matches)) {
       if (seen[name] === true) continue
       seen[name] = true
+      names.push(name)
       const place = place_items_for_machine(actor, prototype)
       candidates.push({
         name,
@@ -204,7 +235,73 @@ function machine_candidates(actor: ControlledActor, categories: string[]) {
     truncated: candidates.length > MAX_MACHINE_CANDIDATES,
     held,
     candidates: candidates.slice(0, MAX_MACHINE_CANDIDATES),
+    names,
   }
+}
+
+function status_name(status: defines.entity_status | undefined) {
+  if (status === undefined) return undefined
+  for (const [name, value] of pairs(defines.entity_status)) {
+    if (value === status) return name as string
+  }
+  return undefined
+}
+
+function round_tenth(value: number) {
+  return math.floor(value * 10 + 0.5) / 10
+}
+
+// Placed machines of the given prototypes on the actor's surface and force, nearest first. The engine scan is bounded
+// by PLACED_MACHINE_SEARCH_RADIUS; only MAX_PLACED_MACHINES entries are reported, but every machine in range is counted.
+function placed_machines(actor: ControlledActor, names: string[]) {
+  const result = {
+    placed_count: 0,
+    placed_working_count: 0,
+    placed_truncated: false,
+    placed_search_radius: PLACED_MACHINE_SEARCH_RADIUS,
+    placed: [] as BootstrapPlacedMachine[],
+  }
+  const surface = actor.surface
+  const origin = actor.position
+  if (!surface || !origin || names.length === 0) return result
+
+  const ranked: Array<{ entity: LuaEntity, distance_squared: number, unit_number: number }> = []
+  for (const entity of find_world_entities(surface, { name: names, force: actor.force, position: origin, radius: PLACED_MACHINE_SEARCH_RADIUS })) {
+    if (!entity.valid) continue
+    const dx = entity.position.x - origin.x
+    const dy = entity.position.y - origin.y
+    ranked.push({ entity, distance_squared: dx * dx + dy * dy, unit_number: entity.unit_number ?? 0 })
+    if (entity.status === defines.entity_status.working) result.placed_working_count++
+  }
+  result.placed_count = ranked.length
+  result.placed_truncated = ranked.length > MAX_PLACED_MACHINES
+
+  const keep = math.min(MAX_PLACED_MACHINES, ranked.length)
+  for (let i = 0; i < keep; i++) {
+    let best = i
+    for (let j = i + 1; j < ranked.length; j++) {
+      const left = ranked[j]
+      const right = ranked[best]
+      if (left.distance_squared < right.distance_squared || (left.distance_squared === right.distance_squared && left.unit_number < right.unit_number)) best = j
+    }
+    const swap = ranked[i]
+    ranked[i] = ranked[best]
+    ranked[best] = swap
+
+    const entity = ranked[i].entity
+    const status = entity.status
+    const working = status === defines.entity_status.working
+    result.placed.push({
+      unit_number: entity.unit_number,
+      name: entity.name,
+      position: { x: entity.position.x, y: entity.position.y },
+      distance: round_tenth(math.sqrt(ranked[i].distance_squared)),
+      working,
+      readiness: working ? 'working' : status === undefined ? 'status_unavailable' : (status_name(status) ?? 'unmapped_status'),
+      status_code: status,
+    })
+  }
+  return result
 }
 
 interface ResolveState {
@@ -240,17 +337,21 @@ function machine_dependency_for(
   if (character_can_craft(actor, categories)) return {}
 
   const machines = machine_candidates(actor, categories)
-  if (machines.held >= 1) {
+  const placed = placed_machines(actor, machines.names)
+  // A machine already standing in the world satisfies the acquisition dependency; whether it is fueled, powered or
+  // supplied is reported separately per instance (`readiness`), never inferred from its existence.
+  if (placed.placed_count >= 1 || machines.held >= 1) {
     return {
       dependency: {
         required: 1,
         held: machines.held,
         status: 'already_satisfied',
-        satisfaction_scope: 'inventory_acquisition',
-        placed_instance_required: true,
+        satisfaction_scope: placed.placed_count >= 1 ? 'placed_instance' : 'inventory_acquisition',
+        placed_instance_required: placed.placed_count < 1,
         matched_count: machines.matched_count,
         truncated: machines.truncated,
         candidates: machines.candidates,
+        ...placed,
       },
     }
   }
@@ -276,6 +377,7 @@ function machine_dependency_for(
       matched_count: machines.matched_count,
       truncated: machines.truncated,
       candidates: machines.candidates,
+      ...placed,
       selected_item_dependency,
     },
     first,
@@ -515,6 +617,71 @@ export function recipe_bootstrap_for_actor(actor: ControlledActor, recipe: any, 
   }
 }
 
+function recipe_ingredient_facts(actor: ControlledActor, recipe: any) {
+  const ingredients: Array<Record<string, unknown>> = []
+  for (const ingredient of recipe?.ingredients ?? []) {
+    if (ingredients.length >= MAX_REQUIRES_MACHINE_INGREDIENTS) break
+    ingredients.push({
+      type: ingredient.type,
+      name: ingredient.name,
+      amount: ingredient.amount,
+      held: ingredient.type === 'item' ? inventory_count(actor, ingredient.name) : undefined,
+    })
+  }
+  return ingredients
+}
+
+function recipe_product_facts(recipe: any) {
+  const products: Array<Record<string, unknown>> = []
+  for (const product of recipe?.products ?? []) {
+    if (products.length >= MAX_REQUIRES_MACHINE_PRODUCTS) break
+    products.push({
+      type: product.type,
+      name: product.name,
+      amount: product.amount,
+      amount_min: product.amount_min,
+      amount_max: product.amount_max,
+      probability: product.probability,
+    })
+  }
+  return products
+}
+
+// The recipe is enabled but its categories are not hand-craftable: it is made in a machine. Facts only, all read from
+// the live game (recipe, machine prototypes, held items, placed entities); no rule about which machine to use is baked in.
+function requires_machine_result(actor: ControlledActor, recipe: any, item_name: string, count: number, categories: string[]) {
+  const machines = machine_candidates(actor, categories)
+  const placed = placed_machines(actor, machines.names)
+  const held_machines: Array<{ name: string, held_count: number }> = []
+  for (const candidate of machines.candidates) {
+    if (candidate.held_count >= 1) held_machines.push({ name: candidate.name, held_count: candidate.held_count })
+  }
+  return {
+    ok: false,
+    code: 'requires_machine',
+    operation: 'craft_item',
+    field: 'item_name',
+    identity: item_name,
+    recipe_name: recipe.name,
+    requested_count: count,
+    hand_craftable: false,
+    recipe: {
+      name: recipe.name,
+      categories,
+      energy: recipe.energy,
+      ingredients: recipe_ingredient_facts(actor, recipe),
+      products: recipe_product_facts(recipe),
+    },
+    machines: {
+      matched_count: machines.matched_count,
+      truncated: machines.truncated,
+      candidates: machines.candidates,
+      held: held_machines,
+      ...placed,
+    },
+  }
+}
+
 export function craft_bootstrap_preflight_for_actor(actor: ControlledActor, item_name: string, count: number = 1) {
   const recipe = actor.force.recipes[item_name]
   if (!recipe) {
@@ -539,6 +706,9 @@ export function craft_bootstrap_preflight_for_actor(actor: ControlledActor, item
       unlock: recipe_unlock_summary(actor, recipe.name),
     }
   }
+
+  const categories = categories_for(recipe)
+  if (!character_can_craft(actor, categories)) return requires_machine_result(actor, recipe, item_name, count, categories)
 
   const bootstrap = recipe_bootstrap_for_actor(actor, recipe, count)
   if (!bootstrap.craftable_now) {
