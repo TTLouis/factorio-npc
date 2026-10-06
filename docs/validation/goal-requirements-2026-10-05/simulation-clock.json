@@ -1,0 +1,18 @@
+{
+  "status": "pass",
+  "before": {
+    "tick": 30,
+    "tick_paused": false,
+    "speed": 1,
+    "connected_players": 0
+  },
+  "after": {
+    "tick": 151,
+    "tick_paused": false,
+    "speed": 1,
+    "connected_players": 0
+  },
+  "quiet_wall_seconds": 2.0166190699999333,
+  "advanced_ticks": 121,
+  "observed_ups": 60.00141613259861
+}

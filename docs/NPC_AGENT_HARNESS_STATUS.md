@@ -8,12 +8,19 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
-## October 5 goal requirements grounding (unit evidence only, no live run yet)
+## October 5 goal requirements grounding (scripted engine proof, no new live-provider run)
 
 Merged at `4f833278` after the live run `goal_052327n_1`, where the planner
 hand-crafted automation science packs before the trigger technology that unlocks
-the recipe. Gate: **1,624 runtime and 965 mod tests**, typecheck, Lua build and
-generated-Lua check. None of the new Lua has run in a real engine.
+the recipe. A focused Docker engine fixture now passes at `483e68c2` on Factorio
+2.0.77 with zero connected humans and scripted replies. It verifies the real
+requirements query, one grounding round before commit/admission, and terminal
+locked-craft refusal with unlock evidence and unchanged sampled gameplay state.
+It also exposed and fixed false asteroid-research requirements for mineable ores
+(`a3385471`, payload repin `dfd019bd`). Gate: **1,624 runtime and 967 mod tests**,
+typecheck, Lua build, generated-Lua check, and 9 installer tests. Evidence and
+limits: [focused October 5 checkpoint](validation/GOAL_REQUIREMENTS_E2E_2026-10-05.md).
+Ordinary unlock progression and automated red-science output remain unproven.
 
 - `autorio_planning.goal_requirements` reads the goal's `done_when` targets from
   the live game: locked recipes and ingredients, compatible machines, and the
@@ -30,8 +37,12 @@ generated-Lua check. None of the new Lua has run in a real engine.
 - Known follow-ups:
   - The skill cards and the requirements block pick the unlocking technology
     differently: fewest direct prerequisites versus fewest pending path nodes.
-  - Items that are mined or pumped may be flagged as locked when no enabled
-    recipe makes them. Not confirmed.
+  - Resource-mined products are now treated as raw inputs even when an alternate
+    crafting recipe is locked. This does not prove local deposit availability or
+    extraction machinery; offshore-pumped fluids have not been checked here.
+  - Optional higher-tier machine research can legitimately exceed the bounded
+    path report. Red-science and assembler-1 paths are complete in this fixture;
+    the assembler-3 alternative is explicitly truncated.
   - The `DURABLE_PLAN_PROMPT` paragraph and its ordering rule were approved
     by the owner on 2026-10-05.
 
