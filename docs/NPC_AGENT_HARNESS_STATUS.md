@@ -2,6 +2,12 @@
 
 This file is the current status summary for the single-NPC integration line. Historical detailed checkpoints are retained under `docs/validation/`.
 
+For the unfinished playable-checkpoint work, preserved candidate refs, review
+blockers and settled owner decisions, read the
+[October 5 handoff](validation/PLAYABLE_HANDOFF_2026-10-05.md). It accounts for later
+ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
+must not be used to reset current integration.
+
 ## October 5 goal requirements grounding (unit evidence only, no live run yet)
 
 Merged at `4f833278` after the live run `goal_052327n_1`, where the planner
