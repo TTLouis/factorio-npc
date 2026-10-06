@@ -245,7 +245,7 @@ describe('machine-only recipes and placed machines', () => {
   })
 
   function placedEntity(unit_number: number, x: number, status: number | undefined, name = 'stone-furnace') {
-    return { valid: true, name, type: 'furnace', unit_number, position: { x, y: 0 }, status }
+    return { valid: true, name, type: 'furnace', unit_number, position: { x, y: 0 }, status, to_be_deconstructed: () => false, get_recipe: () => [undefined] }
   }
 
   function smeltingActor(placed: any[], inventory: Record<string, number> = {}, recipes?: Record<string, any>) {
@@ -434,5 +434,62 @@ describe('machine-only recipes and placed machines', () => {
     expect(result.machines.candidates).toHaveLength(8)
     expect((find.mock.calls[0] as any)[0].name).toHaveLength(12)
     expect(result.machines.placed).toMatchObject([{ unit_number: 7, name: 'kiln-12', readiness: 'working' }])
+  })
+
+  it('excludes machines marked for deconstruction from placed and counts them separately', () => {
+    const marked = { ...placedEntity(31, 1, STATUS.working), to_be_deconstructed: () => true }
+    const live = placedEntity(32, 6, STATUS.no_fuel)
+    const { actor } = smeltingActor([marked, live])
+
+    const result = craft_bootstrap_preflight_for_actor(actor, 'iron-plate', 1) as any
+
+    expect(result.machines.placed_count).toBe(1)
+    expect(result.machines.placed_working_count).toBe(0)
+    expect(result.machines.placed_marked_for_deconstruction_count).toBe(1)
+    expect(result.machines.placed.map((machine: any) => machine.unit_number)).toEqual([32])
+  })
+
+  it('does not let a machine marked for deconstruction satisfy the placed_instance dependency', () => {
+    const marked = { ...placedEntity(31, 1, STATUS.working), to_be_deconstructed: () => true }
+    const { actor, smelting } = smeltingActor([marked], { 'iron-ore': 8 })
+
+    const machine = recipe_bootstrap_for_actor(actor, smelting, 2).inventory_overlay.machine_dependency
+
+    expect(machine).toMatchObject({
+      held: 0,
+      status: 'needs_acquisition/processing',
+      satisfaction_scope: 'inventory_acquisition',
+      placed_instance_required: true,
+      placed_count: 0,
+      placed_marked_for_deconstruction_count: 1,
+      placed: [],
+      selected_item_dependency: { name: 'electric-furnace' },
+    })
+  })
+
+  it('reports the current recipe of placed crafting machines so a wrong-recipe assembler is visible', () => {
+    const assembler = {
+      ...placedEntity(51, 2, STATUS.no_ingredients, 'assembler-x'),
+      type: 'assembling-machine',
+      get_recipe: () => [{ name: 'iron-gear-wheel' }],
+    }
+    const blankAssembler = { ...assembler, unit_number: 52, position: { x: 3, y: 0 }, get_recipe: () => [undefined] }
+    const idleFurnace = { ...placedEntity(53, 4, STATUS.no_ingredients), previous_recipe: { name: 'iron-plate' } }
+    const smeltingFurnace = { ...placedEntity(54, 5, STATUS.working), get_recipe: () => [{ name: 'copper-plate' }] }
+    const chest = { ...placedEntity(55, 6, undefined, 'storage-x'), type: 'container', get_recipe: () => { throw new Error('not a crafting machine') } }
+    const { actor } = smeltingActor([assembler, blankAssembler, idleFurnace, smeltingFurnace, chest])
+
+    const result = craft_bootstrap_preflight_for_actor(actor, 'iron-plate', 1) as any
+    const byUnit: Record<number, any> = {}
+    for (const machine of result.machines.placed) byUnit[machine.unit_number] = machine
+
+    expect(byUnit[51].recipe_name).toBe('iron-gear-wheel')
+    expect(byUnit[52].recipe_name).toBeUndefined()
+    expect(byUnit[52].previous_recipe_name).toBeUndefined()
+    expect(byUnit[53].recipe_name).toBeUndefined()
+    expect(byUnit[53].previous_recipe_name).toBe('iron-plate')
+    expect(byUnit[54].recipe_name).toBe('copper-plate')
+    expect(byUnit[54].previous_recipe_name).toBeUndefined()
+    expect(byUnit[55].recipe_name).toBeUndefined()
   })
 })

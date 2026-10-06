@@ -374,6 +374,7 @@ export function requiresMachineFacts(preflight) {
       held: list(machines.held, 8),
       placed_count: machines.placed_count,
       placed_working_count: machines.placed_working_count,
+      placed_marked_for_deconstruction_count: machines.placed_marked_for_deconstruction_count,
       placed_truncated: machines.placed_truncated,
       placed_search_radius: machines.placed_search_radius,
       placed: list(machines.placed, 6).map(machine => ({
@@ -384,6 +385,8 @@ export function requiresMachineFacts(preflight) {
         working: machine?.working,
         readiness: machine?.readiness,
         status_code: machine?.status_code,
+        recipe_name: machine?.recipe_name,
+        previous_recipe_name: machine?.previous_recipe_name,
       })),
     },
   }

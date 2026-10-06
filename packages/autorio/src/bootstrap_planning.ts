@@ -24,6 +24,11 @@ export interface BootstrapPlacedMachine {
   working: boolean
   readiness: string
   status_code?: number
+  // Crafting machines only (assembling machines and furnaces): the recipe currently set, so a machine set to the
+  // wrong recipe is visible. Absent means no recipe is set (or the entity is not a crafting machine). A furnace with no
+  // current recipe reports the one it last smelted as `previous_recipe_name`.
+  recipe_name?: string
+  previous_recipe_name?: string
 }
 
 export interface BootstrapMachineDependency {
@@ -41,6 +46,9 @@ export interface BootstrapMachineDependency {
   // the actor: the total, how many report `working`, and up to MAX_PLACED_MACHINES of them nearest first.
   placed_count: number
   placed_working_count: number
+  // Compatible machines in range that are marked for deconstruction: not counted in `placed_count`, not listed in
+  // `placed`, and they do not satisfy the dependency.
+  placed_marked_for_deconstruction_count: number
   placed_truncated: boolean
   placed_search_radius: number
   placed: BootstrapPlacedMachine[]
@@ -257,6 +265,7 @@ function placed_machines(actor: ControlledActor, names: string[]) {
   const result = {
     placed_count: 0,
     placed_working_count: 0,
+    placed_marked_for_deconstruction_count: 0,
     placed_truncated: false,
     placed_search_radius: PLACED_MACHINE_SEARCH_RADIUS,
     placed: [] as BootstrapPlacedMachine[],
@@ -268,6 +277,10 @@ function placed_machines(actor: ControlledActor, names: string[]) {
   const ranked: Array<{ entity: LuaEntity, distance_squared: number, unit_number: number }> = []
   for (const entity of find_world_entities(surface, { name: names, force: actor.force, position: origin, radius: PLACED_MACHINE_SEARCH_RADIUS })) {
     if (!entity.valid) continue
+    if (entity.to_be_deconstructed()) {
+      result.placed_marked_for_deconstruction_count++
+      continue
+    }
     const dx = entity.position.x - origin.x
     const dy = entity.position.y - origin.y
     ranked.push({ entity, distance_squared: dx * dx + dy * dy, unit_number: entity.unit_number ?? 0 })
@@ -291,6 +304,13 @@ function placed_machines(actor: ControlledActor, names: string[]) {
     const entity = ranked[i].entity
     const status = entity.status
     const working = status === defines.entity_status.working
+    let recipe_name: string | undefined
+    let previous_recipe_name: string | undefined
+    if (entity.type === 'assembling-machine' || entity.type === 'furnace') {
+      const [recipe] = entity.get_recipe()
+      recipe_name = recipe?.name
+      if (recipe_name === undefined && entity.type === 'furnace') previous_recipe_name = entity.previous_recipe?.name
+    }
     result.placed.push({
       unit_number: entity.unit_number,
       name: entity.name,
@@ -299,6 +319,8 @@ function placed_machines(actor: ControlledActor, names: string[]) {
       working,
       readiness: working ? 'working' : status === undefined ? 'status_unavailable' : (status_name(status) ?? 'unmapped_status'),
       status_code: status,
+      recipe_name,
+      previous_recipe_name,
     })
   }
   return result
