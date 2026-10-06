@@ -418,6 +418,8 @@ const UI_TASK_PAUSE_SUMMARIES = new Map([
   ['follow_mode', 'SGLuna paused the current task while following a player.'],
   ['jev_needs_user_clarification', 'SGLuna needs your direction before it can commit a plan. Reply with the clarification, or continue to retry.'],
   ['jev_refinement_budget_exhausted', 'SGLuna could not settle on a plan it could commit. Reply with more specific direction, or continue to retry.'],
+  ['recoverable_provider_failure:requires_machine_retry_exhausted', 'Paused: the craft needs a machine and the retry limit was reached. Press Resume or say continue.'],
+  ['recoverable_provider_failure:research_preflight_retry_exhausted', 'Paused: the research request was refused repeatedly and the retry limit was reached. Press Resume or say continue.'],
 ])
 
 function requestFailurePauseSummary(raw) {
