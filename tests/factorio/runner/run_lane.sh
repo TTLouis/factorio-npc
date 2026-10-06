@@ -136,6 +136,11 @@ start_factorio
 run_py run.py
 
 case "$LANE" in
+  requirements)
+    printf '[npc-test][requirements] Running scripted first-plan grounding against live recipe/research facts...\n'
+    run_node goal_requirements_factorio.mjs
+    ;;
+
   core)
     printf '[npc-test][core] Running placement/transfer and lifecycle cancellation gates...\n'
     run_py placement_transfer.py
