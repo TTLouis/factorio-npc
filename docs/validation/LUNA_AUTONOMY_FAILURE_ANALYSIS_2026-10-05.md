@@ -186,6 +186,14 @@ system-prompt text; each gives Luna facts or rejects a draft.
 | D2 | Fresh executor context carries active step, contract, latest receipt, bounded recipe summary and refreshed counts | `fix/executor-handoff-context` | `257e019a` | merged; gate 1,735 runtime / 1,030 mod |
 | E | Recorded scripted-reply regression of the retained run's four failure shapes | `test/recorded-autonomy-regression` | `17f4ae59` | merged; gate 1,749 pass + 3 todo / 1,030 mod |
 | F | Live ladder (smelt/collect, red unlock, steam lab, green) | | | owner runs it |
-| G1 | A wait-only batch on an idle machine whose committed checkpoint is already met still runs a blind timer (E todo, shape 3) | `fix/met-checkpoint-close` | `af2854e4` | built; awaiting review; gate 1,761 pass + 1 todo runtime / 1,030 mod |
-| G2 | An already-met committed stock checkpoint does not close its step before a later collection empties it (E todo, shape 1) | `fix/met-checkpoint-close` | `af2854e4` | built; awaiting review; gate 1,761 pass + 1 todo runtime / 1,030 mod |
+| G1 | A wait-only batch on an idle machine whose committed checkpoint is already met still runs a blind timer (E todo, shape 3) | `fix/met-checkpoint-close` | `9b2e2e12` | merged after Opus review (pending-amendment hold added); gate 1,767 pass + 1 todo runtime / 1,030 mod |
+| G2 | An already-met committed stock checkpoint does not close its step before a later collection empties it (E todo, shape 1) | `fix/met-checkpoint-close` | `9b2e2e12` | merged after Opus review (pending-amendment hold added); gate 1,767 pass + 1 todo runtime / 1,030 mod |
 | G3 | The deferred executor refresh reads nothing for a prose-only step, so the next step gets no held counts (E todo, shape 4) | | | found by E; needs owner go |
+| G4 | Trade-off of G1/G2: a fresh read skips as `checkpoint_target_stale` when the checkpoint's exact target was not observed in the current request. Proposed deltas G4.1–G4.7 below | | | proposed; needs owner go and the G4.3 choice |
+| G4.1 | Harness re-binds each unbound exact checkpoint target before the fresh read: durable locator (`historicalExactTargetLocator`) then a harness `getEntityStatus` near it, under the actor/epoch fence (new `rebindCheckpointTargets()` from `closeActiveStepOnFreshRead`) | | | proposed |
+| G4.2 | Accept only when unit number, name, surface and position match the durable locator; otherwise skip `checkpoint_target_identity_mismatch` / `checkpoint_target_missing`; no locator stays `checkpoint_target_stale` | | | proposed |
+| G4.3 | Record a successful re-bind as a live observation (the `:4792` wait-facts precedent) with trace `plan.checkpoint_target_rebound`; owner choice: (a) shared so the model may also use the id, or (b) harness-only for the close | | | needs owner choice |
+| G4.4 | Use the same re-bind in G1 wait routing (`checkpointWaitCandidate`) so a fresh-request wait becomes an observed wait, not a blind timer | | | proposed |
+| G4.5 | Fences: epoch/actor change during the re-bind discards it with a trace; at most one re-bind per target per request; 8-requirement cap | | | proposed |
+| G4.6 | Recorded replay gets fresh-request variants of G1/G2 with no model observation; both must close | | | proposed |
+| G4.7 | Opus review (Plan Tracker), gate, status rows | | | proposed |
