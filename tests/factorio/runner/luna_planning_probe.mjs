@@ -15,7 +15,6 @@ const { CanonicalTaskBoardMemory } = await load('canonical-task-board-memory.mjs
 const { getActivePlan } = await load('planning-state.mjs')
 const { evaluateCompletionContract, sanitizeStepCompletionContract } = await load('step-completion.mjs')
 const { buildHandoffPacket } = await load('handoff-packet.mjs')
-const { roleSystemPrompt } = await load('agent-roles.mjs')
 const { RUNTIME_RELIABILITY_GUIDANCE } = await load('supervisor.mjs')
 
 const args = process.argv.slice(2)
@@ -103,7 +102,7 @@ function packet(world) {
     runtime: { task_state: 'idle', queue_length: 0 } })
 }
 function messages(world, instruction, executor = false) {
-  const rows = [{ role: 'system', content: roleSystemPrompt(world.agent.systemPrompt, executor ? 'executor' : 'planner') }]
+  const rows = world.agent.rolePrefixMessages(executor ? 'executor' : 'planner')
   if (executor) {
     const handoff = packet(world)
     rows.push({ role: 'user', content: handoff.stableText }, { role: 'user', content: handoff.volatileText })
@@ -118,19 +117,24 @@ function requireResearchAction(plan) {
 async function makeCase(name) {
   if (name === 'new_plan') {
     const world = controller()
-    return { world, role: 'planner', sample: draft,
-      messages: messages(world, '[CHAT] probe_owner: Gather ten copper ore and research automation. Fresh authoritative fixture facts: copper ore held=0, automation researched=false, research is available. Propose the first plan using the production completion declarations. No operations from this response will execute.'),
+    return { world, role: 'planner', sample: { ...draft, operations: [] },
+      messages: messages(world, '[CHAT] probe_owner: Gather ten copper ore and research automation. Fresh authoritative fixture facts: copper ore held=0, automation researched=false, research is available. Author the plan with production completion declarations. You may delegate first-action selection to a fresh executor by returning currentStep:0 and operations:[]. This isolated fixture validates the declared plan; a separate scripted runtime test validates executor action admission.'),
       async validate(plan) {
         await world.agent.validateStepCompletionDeclarations(plan)
         assert.ok(plan.stepCompletions?.length === plan.plan.length)
         assert.ok(plan.stepCompletions.some(spec => spec.kind === 'deterministic' && spec.checkpoint.requirements.some(req => req.kind === 'inventory_count' && req.item_name === 'copper-ore' && req.minimum === 10)))
         assert.ok(plan.stepCompletions.some(spec => spec.kind === 'deterministic' && spec.checkpoint.requirements.some(req => req.kind === 'research_completed' && req.technology === 'automation')))
         const semanticAdmission = plan.operations.length === 0 && plan.stepCompletions[plan.currentStep]?.kind === 'semantic'
-        assert.ok(plan.operations.length > 0 || semanticAdmission, 'initial deterministic plan has no operation proposal; it cannot be admitted')
-        const recorded = world.memory.recordPlan(request.memoryKey, request, plan, { validatedSemanticAdmission: semanticAdmission })
+        const plannerAdmission = world.agent.plannerOnlyDraftCandidate(plan)
+        assert.ok(plan.operations.length > 0 || semanticAdmission || plannerAdmission, 'initial plan is not eligible for delegation or batch admission')
+        const recorded = world.memory.recordPlan(request.memoryKey, request, plan, {
+          validatedSemanticAdmission: semanticAdmission, validatedPlannerAdmission: plannerAdmission,
+        })
         assert.ok(recorded?.state, 'validated draft was not admitted by planning memory')
         world.memory.reconcileTaskBoard(request.memoryKey, recorded.state.task_board, plan, recorded)
-        world.memory.commitPlanningPlan(request.memoryKey, { runtime_validation: { passed: true } })
+        world.memory.commitPlanningPlan(request.memoryKey, { runtime_validation: { passed: true,
+          ...(plannerAdmission ? { scope: 'completion_contracts' } : {}),
+        } })
         assert.equal(getActivePlan(world.memory.planningState(request.memoryKey)).status, 'COMMITTED')
         assert.equal(world.memory.currentPlan(request.memoryKey).task_board.completed_count, 0)
         assert.equal(world.memory.planningState(request.memoryKey).goal.status, 'active')

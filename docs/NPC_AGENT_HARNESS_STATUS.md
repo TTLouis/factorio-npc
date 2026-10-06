@@ -8,6 +8,10 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 6 planner-first delegation: scripted gates green
+
+The owner selected Luna planner → Luna executor for one NPC. A new validated protocol-v2 plan can now commit with no initial operations and hand first-action selection to a fresh executor context. Completion contracts freeze before handoff; actual executor actions still require the ordinary preflight and admission checks. Seven new regressions cover zero synthetic progress, preserved identities/contracts on restore, unchanged allowance, missing declarations, preflight refusal, disabled/failed handoff and stale actors. Unit runtime gate: 1,812 passed; mod gate: 1,036 passed with typechecks and generated-Lua checks. The updated planning probe passes 4/4 scripted samples. Integration/payload gates are recorded below once complete. No new live provider or gameplay run. [Contract and evidence](validation/LUNA_PLANNER_FIRST_DELEGATION_2026-10-06.md).
+
 ## October 6 fresh planning-test container: 3/4 passed
 
 An owner-requested fresh disposable container reran the same four Luna scenarios at `d3988992`. Unmet research now proposed an action; continuation and semantic closure passed again. Initial deterministic planning still omitted operations. All responses returned normally, so the changed answer does not establish a container stall. No gameplay, Jev calls, corrective prompts or automatic retries. [Retry evidence and attribution](validation/LUNA_PLANNING_TRACKER_RESTART_2026-10-06.md).
