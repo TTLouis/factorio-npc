@@ -8,6 +8,10 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 6 fresh planning-test container: 3/4 passed
+
+An owner-requested fresh disposable container reran the same four Luna scenarios at `d3988992`. Unmet research now proposed an action; continuation and semantic closure passed again. Initial deterministic planning still omitted operations. All responses returned normally, so the changed answer does not establish a container stall. No gameplay, Jev calls, corrective prompts or automatic retries. [Retry evidence and attribution](validation/LUNA_PLANNING_TRACKER_RESTART_2026-10-06.md).
+
 ## October 6 Luna planning/tracker probes: proxy healthy, 2/4 passed
 
 After Tailscale startup, the owner's Docker VM proxy passed unauthenticated health and authenticated model-list checks from Docker. Four one-shot Luna decisions used a direct Tailscale endpoint override: satisfied-step continuation and grounded semantic closure passed; the initial deterministic plan and unmet-research reply omitted actions. Zero corrective prompts, retries, Jev calls or game connections. The initial planning probe's missing-admission diagnostic was clarified without changing saved replies or pass/fail criteria. [Planning-only evidence and fixture limitations](validation/LUNA_PLANNING_TRACKER_PROBES_2026-10-06.md). The earlier connectivity blocker below is superseded for this direct endpoint; `.env` still uses its existing Docker-host address.
