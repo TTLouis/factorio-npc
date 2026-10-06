@@ -1,7 +1,7 @@
 import type { ControlledActor } from './actors/types'
 import type { LuaEntity, LuaInventory } from 'factorio:runtime'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { transfer_preflight_facts } from './transfer_preflight'
+import { transfer_preflight_facts, transfer_unknown_item } from './transfer_preflight'
 
 interface InventoryOptions {
   name?: string
@@ -79,6 +79,12 @@ function actor_with(held: Record<string, number>, options: InventoryOptions = {}
 
 beforeEach(() => {
   ;(globalThis as any).game.tick = 100
+  ;(globalThis as any).prototypes.item = {
+    ...(globalThis as any).prototypes.item,
+    'coal': {},
+    'iron-ore': {},
+    'iron-gear-wheel': {},
+  }
 })
 
 describe('transfer preflight facts: supply_entity', () => {
@@ -164,8 +170,38 @@ describe('transfer preflight facts: supply_entity', () => {
     expect(facts.transfer.items[0]).toMatchObject({ destination_accepts: 8, expected_moved: 8, status: 'ok' })
   })
 
-  it('rejects the batch when any one item would certainly move nothing, and lists every item', () => {
+  it('accepts a mixed batch with per-item statuses: one item that cannot move does not reject the others', () => {
+    // Fuel slot full: coal has nowhere to go (a refusal), while the ore still moves natively.
+    const { actor } = actor_with({ 'iron-ore': 50, coal: 5 })
+    const parts = furnace_parts({ fuel_room: 0 })
+    ;(parts.source as any).can_insert = vi.fn((stack: { name: string }) => stack.name !== 'coal')
+    const target = furnace(15, parts)
+
+    const facts = transfer_preflight_facts(actor, target, 'supply_entity', {
+      unit_number: 15,
+      items: [{ item_name: 'iron-ore', count: 50 }, { item_name: 'coal', count: 5 }],
+    })!
+
+    expect(facts.ok).toBe(true)
+    expect(facts.code).toBeUndefined()
+    expect(facts.transfer.items.map(item => [item.item_name, item.status])).toEqual([['iron-ore', 'ok'], ['coal', 'destination_full']])
+  })
+
+  it('accepts when only some items are missing (an earlier missing item is reported per item, execution recovers)', () => {
     const { actor } = actor_with({ 'iron-ore': 50 })
+    const target = furnace(15, furnace_parts())
+
+    const facts = transfer_preflight_facts(actor, target, 'supply_entity', {
+      unit_number: 15,
+      items: [{ item_name: 'coal', count: 5 }, { item_name: 'iron-ore', count: 50 }],
+    })!
+
+    expect(facts.ok).toBe(true)
+    expect(facts.transfer.items.map(item => [item.item_name, item.status, item.missing])).toEqual([['coal', 'supply_missing', 5], ['iron-ore', 'ok', 0]])
+  })
+
+  it('rejects supply_entity only when every item would certainly move nothing, and lists every item', () => {
+    const { actor } = actor_with({})
     const target = furnace(15, furnace_parts())
 
     const facts = transfer_preflight_facts(actor, target, 'supply_entity', {
@@ -173,8 +209,17 @@ describe('transfer preflight facts: supply_entity', () => {
       items: [{ item_name: 'iron-ore', count: 50 }, { item_name: 'coal', count: 5 }],
     })!
 
+    expect(facts.ok).toBe(false)
     expect(facts.code).toBe('supply_missing')
-    expect(facts.transfer.items.map(item => item.status)).toEqual(['ok', 'supply_missing'])
+    expect(facts.transfer.items.map(item => item.status)).toEqual(['supply_missing', 'supply_missing'])
+  })
+
+  it('reports unknown item names so the caller can reject them before any inventory call', () => {
+    expect(transfer_unknown_item('supply_entity', { unit_number: 15, items: [{ item_name: 'iron-ore', count: 1 }, { item_name: 'colal', count: 5 }] })).toBe('colal')
+    expect(transfer_unknown_item('move_items_exact', { item_name: 'iron-oar', unit_number: 15, max_count: 5, to_entity: true })).toBe('iron-oar')
+    expect(transfer_unknown_item('supply_entity', { unit_number: 15, items: [{ item_name: 'coal', count: 1 }] })).toBeUndefined()
+    expect(transfer_unknown_item('move_items_exact', { item_name: 'coal', unit_number: 15, max_count: 5, to_entity: true })).toBeUndefined()
+    expect(transfer_unknown_item('rotate_entity', {})).toBeUndefined()
   })
 
   it('leaves malformed arguments to the native admission', () => {
@@ -300,6 +345,18 @@ describe('operation_preflight wiring (autorio_preflight.operation)', () => {
     expect(result).toMatchObject({ code: 'supply_missing', operation: 'supply_entity', identity: 15 })
     expect(result.target.unit_number).toBe(15)
     expect(result.transfer.items[0]).toMatchObject({ item_name: 'coal', source_count: 0, requested: 5, missing: 5 })
+  })
+
+  it('rejects an unknown item name as the model-correctable unknown_prototype for supply_entity and move_items_exact', () => {
+    current_target = exact(15)
+    const inventory_calls = (held.main.get_item_count as any).mock.calls.length
+
+    const supply = preflight('supply_entity', { unit_number: 15, items: [{ item_name: 'colal', count: 5 }] })
+    const move = preflight('move_items_exact', { item_name: 'iron-oar', unit_number: 15, max_count: 5, to_entity: false })
+
+    expect(supply).toMatchObject({ ok: false, code: 'unknown_prototype', field: 'item_name', identity: 'colal', expected_type: 'item', operation: 'supply_entity' })
+    expect(move).toMatchObject({ ok: false, code: 'unknown_prototype', field: 'item_name', identity: 'iron-oar', expected_type: 'item', operation: 'move_items_exact' })
+    expect((held.main.get_item_count as any).mock.calls.length).toBe(inventory_calls)
   })
 
   it('does not apply the transfer facts to other exact operations, and stale targets still reject first', () => {

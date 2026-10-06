@@ -51,6 +51,27 @@ export interface TransferPreflightFacts {
 
 const MAX_TRANSFER_PREFLIGHT_ITEMS = 8
 
+/**
+ * The first requested item name that is not a current-game item prototype (supply_entity items, or the
+ * move_items_exact item). The engine inventory APIs throw on an unknown name, so the caller rejects it as the
+ * model-correctable `unknown_prototype` before reading any count.
+ */
+export function transfer_unknown_item(name: string, args: Record<string, any>): string | undefined {
+  if (name === 'supply_entity') {
+    const requested_items: any[] | undefined = args.items
+    if (!requested_items || !Array.isArray(requested_items)) return undefined
+    for (let i = 0; i < requested_items.length && i < MAX_TRANSFER_PREFLIGHT_ITEMS; i++) {
+      const item = requested_items[i]
+      if (item && typeof item.item_name === 'string' && !prototypes.item[item.item_name]) return item.item_name
+    }
+    return undefined
+  }
+  if (name === 'move_items_exact') {
+    if (typeof args.item_name === 'string' && !prototypes.item[args.item_name]) return args.item_name
+  }
+  return undefined
+}
+
 function positive_integer(value: unknown): value is number {
   return typeof value === 'number' && value === math.floor(value) && value >= 1 && value <= 100000
 }
@@ -150,14 +171,20 @@ export function transfer_preflight_facts(
     return undefined
   }
 
-  // The first item that would certainly move nothing decides the rejection code.
+  // Natively every supply_entity item is its own move task, and a to-entity refusal (nothing_moved) does not cancel
+  // the items queued behind it, so one item that cannot move must not reject the others. Reject only when EVERY item
+  // would certainly move nothing; otherwise accept and report each item's status and missing amount. The first failing
+  // item names the rejection code. Known limit: an item_missing failure (nothing held) on an earlier item cancels the
+  // later tasks natively; that mixed case is still accepted here (the facts show the per-item status) and the
+  // execution-time recovery handles the resulting item_missing receipt.
   let code: TransferPreflightCode | undefined
+  let all_failing = items.length > 0
   for (const item of items) {
-    if (item.status === 'supply_missing' || item.status === 'extraction_empty' || item.status === 'destination_full') {
-      code = item.status
-      break
-    }
+    const failing = item.status === 'supply_missing' || item.status === 'extraction_empty' || item.status === 'destination_full'
+    if (!failing) all_failing = false
+    else if (code === undefined) code = item.status as TransferPreflightCode
   }
+  if (!all_failing) code = undefined
   return {
     ok: code === undefined,
     code,
