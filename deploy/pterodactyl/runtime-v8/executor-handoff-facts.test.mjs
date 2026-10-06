@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
-import { NpcAgentLoop } from './npc-agent-loop.mjs'
+import { NpcAgentLoop, requiresMachineFacts } from './npc-agent-loop.mjs'
 import { getActivePlan } from './planning-state.mjs'
 import { deployment, FakeFactorio, gather, inventoryCheckpoint, planReply, recordingJev } from './task-loop-fixtures.mjs'
 
@@ -144,7 +144,7 @@ function harness({ game, script }) {
 
 // The live shape: the planner reads the lab recipe, the recipes under it and the inventory, then commits a plan whose
 // first batch gathers copper plates (the harness hands the slice to an executor at the commit).
-async function plannerCollectedTenCopper({ inventory } = {}) {
+async function plannerCollectedTenCopper({ inventory, receipt = true } = {}) {
   const world = harness({
     game: liveGame({ inventory }),
     script: [readsRound(), plannerCommit(), executorGather(5)],
@@ -153,6 +153,8 @@ async function plannerCollectedTenCopper({ inventory } = {}) {
   assert.equal(world.calls.length, 2, 'planner reads, then commits')
   assert.equal(getActivePlan(world.memory.planningState(KEY)).status, 'COMMITTED')
   world.give('copper-plate', 10) // the batch gathered ten plates
+  // The harness reads the batch receipt when the game reports the batch done (completed() / failed()): until then the batch is in flight.
+  if (receipt) await world.agent.taskStatusReceipt()
   return world
 }
 
@@ -182,7 +184,7 @@ test('D2 live shape: after the planner read the lab recipe and collected ten cop
   assert.match(step, /^recipe_fact electronic-circuit .*ingredients=1 iron-plate \+ 3 copper-cable \| products=1 electronic-circuit/m)
   assert.match(step, /^recipe_fact copper-cable .*ingredients=1 copper-plate \| products=2 copper-cable/m)
   // Counts re-read now, not the planner's older ones.
-  assert.match(step, /^held_counts \(fresh live read of the actor inventory, as_of=epoch:3\): .*copper-plate=10/m)
+  assert.match(step, /^held_counts \(fresh live read of the actor inventory, as_of=tick:601,epoch:3\): .*copper-plate=10/m)
   assert.doesNotMatch(step, /held_counts_STALE/)
   // Residual needs: ten circuits need 30 cable = 15 crafts (the recipe yields 2) = 15 plates; ten are held, so five more are missing.
   const residual = step.split('\n').find(line => line.startsWith('residual_needs'))
@@ -191,7 +193,7 @@ test('D2 live shape: after the planner read the lab recipe and collected ten cop
   assert.match(residual, /copper-cable required=30 held=0 missing=30 crafts=15 via copper-cable/)
   assert.match(residual, /copper-plate required=15 held=10 missing=5/)
   // Authority: the committed step, its contract and the latest receipt are in the packet; history is labelled.
-  assert.match(step, /^authority: active_step=\S+ \(committed plan\) contract=all \(committed\) latest_receipt=.*entity_ids_in_receipts_and_snapshots=historical_observations current_exact_targets=only_from_a_fresh_observation$/m)
+  assert.match(step, /^authority: active_step=\S+ \(committed plan\) contract=all \(committed\) latest_receipt=.*entity_ids_in_receipts_and_snapshots=historical_observations$/m)
   assert.match(step, /^active_step_contract: all: inventory_count electronic-circuit>=10$/m)
   assert.match(step, /^active_step: 1 of 2 /m)
 
@@ -247,7 +249,16 @@ test('D2: an executor that still returns zero operations twice keeps the existin
   assert.equal(world.calls.length, 4, 'one ordinary round and the one bounded act-or-block repair, then the failure')
   const executorRequests = world.calls.slice(2)
   assert.ok(executorRequests.every(request => request.context.role === 'executor'))
-  assert.match(textOf(stepBlock(executorRequests[0].messages)), /^recipe_fact lab /m, 'the facts were in front of the executor when it returned nothing')
+  for (const request of executorRequests) {
+    const step = textOf(stepBlock(request.messages))
+    assert.match(step, /^recipe_fact lab /m, 'the recipe facts were in front of the executor when it returned nothing')
+    assert.match(step, /^counts_deferred=batch_in_flight /m, 'the packet says the counts were deferred behind the batch')
+    // The receipt landed before this request: the counts the packet could not carry arrive with the continuation, read then.
+    const refreshed = request.messages.map(textOf).find(text => text.includes('[HARNESS] Executor facts refreshed after the batch receipt landed'))
+    assert.ok(refreshed, 'the continuation carries the refreshed facts')
+    assert.match(refreshed, /held_counts \(fresh live read of the actor inventory, as_of=tick:601,epoch:3\): .*copper-plate=10/m)
+    assert.match(refreshed, /copper-plate required=15 held=10 missing=5/)
+  }
   assert.equal(world.rows('recovery.action_omission_failed').length, 1)
   const state = world.memory.currentPlan(KEY)
   assert.notEqual(state.status, 'completed')
@@ -341,11 +352,12 @@ test('D2: the checkpoint machine is re-read fresh through the existing fresh-mac
   // The planner saw the furnace in its reads (its exact id is a live observation of this loop).
   world.game.nearby = { actor_position: { x: 0, y: 0 }, entities: [{ name: 'stone-furnace', type: 'furnace', unit_number: 55, position: { x: 3, y: 3 }, distance: 4.2, status: 1, working: true }] }
   await world.say()
+  await world.agent.taskStatusReceipt() // the batch finished: nothing is in flight
   const result = await restageToFreshExecutor(world)
   assert.equal(result.restaged, true, JSON.stringify(result))
   const step = textOf(stepBlock(world.agent.messages))
   const machine = step.split('\n').find(line => line.startsWith('checkpoint_machine'))
-  assert.match(machine, /^checkpoint_machine \(fresh live read, as_of=epoch:3\): \{"unit_number":55,"name":"stone-furnace"/)
+  assert.match(machine, /^checkpoint_machine \(fresh live read, as_of=tick:601,epoch:3\): \{"unit_number":55,"name":"stone-furnace"/)
   assert.match(machine, /"checkpoint":\{"item_name":"copper-plate","minimum":10,"current":3,"satisfied":false\}/)
   const history = step.split('\n').find(line => line.startsWith('historical_entities'))
   assert.match(history, /^historical_entities \(earlier observations, NOT current exact targets; ids withheld\): stone-furnace x1/)
@@ -360,7 +372,7 @@ test('D2: the checkpoint machine is re-read fresh through the existing fresh-mac
   const again = await world.agent.restageBetweenTurns({ checkpoint: 'C7', role: 'executor', reason: 'recovery:again', actor: world.agent.epoch, requestId: world.requestId() })
   assert.equal(again.restaged, true, JSON.stringify(again))
   const staleLine = lineOf(world.agent.messages, 'checkpoint_machine')
-  assert.match(staleLine, /^checkpoint_machine_STALE \(earlier observation as_of=epoch:3, NOT current; fresh_read_failed\)/)
+  assert.match(staleLine, /^checkpoint_machine_STALE \(earlier observation as_of=tick:601,epoch:3, NOT current; fresh_read_failed\)/)
 })
 
 test('D2: a planner restage carries none of the executor facts', async () => {
@@ -368,4 +380,110 @@ test('D2: a planner restage carries none of the executor facts', async () => {
   const planner = world.agent.buildRestagePacket({ checkpoint: 'C1', role: 'planner', reason: 'x' })
   assert.doesNotMatch(planner.text, /recipe_fact|held_counts|residual_needs|authority:/)
   assert.equal(planner.executor_facts, undefined)
+})
+
+test('D2 B1: at the plan commit the batch is still in flight, so the C3 packet defers counts, machine and residual and says so', async () => {
+  const world = await plannerCollectedTenCopper({ receipt: false })
+  // The planner committed "gather ten copper plates"; the game is still gathering. A read now would say 0 and be confidently wrong.
+  const step = textOf(stepBlock(world.agent.messages))
+  assert.match(step, /^restage: role=executor checkpoint=C3 /m)
+  assert.match(step, /^counts_deferred=batch_in_flight /m)
+  assert.doesNotMatch(step, /^held_counts/m)
+  assert.doesNotMatch(step, /^checkpoint_machine/m)
+  assert.doesNotMatch(step, /^residual_needs/m)
+  assert.match(step, /^recipe_fact lab /m, 'recipe facts do not depend on the world and stay')
+  assert.match(step, /^authority: active_step=/m, 'authority stays')
+  const row = world.rows('context.executor_facts_carried').find(item => item.data.checkpoint === 'C3')
+  assert.equal(row.data.reads_attempted, 0, 'no count was read while the batch was in flight')
+  assert.equal(row.data.fresh_items, 0)
+  assert.equal(row.data.residual_needs, 0)
+  assert.equal(row.data.residual_omitted_reason, 'batch_in_flight')
+  assert.equal(row.data.refresh, 'deferred')
+  assert.equal(world.agent.pendingExecutorFactsRefresh?.handoff_id, row.data.handoff_id, 'the deferred half is armed for this handoff')
+})
+
+test('D2 B1: after the batch receipt lands the executor first continuation carries the fresh counts and residual, once', async () => {
+  const world = harness({
+    game: liveGame(),
+    script: [readsRound(), plannerCommit(), executorGather(5), executorGather(5)],
+  })
+  await world.say()
+  world.give('copper-plate', 10) // the batch gathered ten plates
+  await world.agent.completed() // receipt read -> the executor continues (call 3)
+  assert.equal(world.calls.length, 3)
+  const request = world.calls[2]
+  assert.equal(request.context.role, 'executor')
+  const refreshed = request.messages.map(textOf).filter(text => text.includes('[HARNESS] Executor facts refreshed after the batch receipt landed'))
+  assert.equal(refreshed.length, 1)
+  assert.match(refreshed[0], /held_counts \(fresh live read of the actor inventory, as_of=tick:601,epoch:3\): .*copper-plate=10/)
+  assert.match(refreshed[0], /copper-plate required=15 held=10 missing=5/)
+  assert.ok(request.messages.map(textOf).some(text => text.startsWith('[MOD] Autorio operation batch completed')), 'it rides the receipt continuation')
+  const row = world.rows('context.executor_facts_refreshed_after_batch')[0]
+  assert.ok(row)
+  assert.equal(row.request_id, world.requestId())
+  assert.equal(row.data.handoff_id, world.agent.agentContext.handoffId)
+  assert.ok(row.data.fresh_items >= 4)
+  assert.equal(row.data.stale_items, 0)
+  assert.equal(row.data.residual_needs, 4)
+  assert.equal(row.data.reason, 'batch_receipt_landed_after_deferred_handoff_counts')
+  assert.equal(world.agent.pendingExecutorFactsRefresh, null, 'consumed')
+
+  // The scripted gather of five plates was admitted; its receipt must not repeat the refresh.
+  world.give('copper-plate', 5)
+  await world.agent.completed()
+  assert.equal(world.rows('context.executor_facts_refreshed_after_batch').length, 1, 'once per deferred handoff')
+  const lastContinuation = world.calls[3].messages.map(textOf).filter(text => text.startsWith('[MOD] Autorio operation batch completed')).at(-1)
+  assert.ok(lastContinuation, 'the second receipt continued the executor')
+  assert.ok(!lastContinuation.includes('Executor facts refreshed'), 'the second receipt carries no second refresh')
+})
+
+test('D2 B1: a refresh whose handoff was replaced, or whose actor changed, is skipped and traced, and never briefs the new conversation', async () => {
+  const replaced = harness({ game: liveGame(), script: [readsRound(), plannerCommit(), executorGather(5)] })
+  await replaced.say()
+  assert.ok(replaced.agent.pendingExecutorFactsRefresh)
+  replaced.agent.pendingExecutorFactsRefresh = { ...replaced.agent.pendingExecutorFactsRefresh, handoff_id: 'ho_other' }
+  replaced.give('copper-plate', 10)
+  await replaced.agent.completed()
+  assert.equal(replaced.rows('context.executor_facts_refreshed_after_batch').length, 0)
+  assert.equal(replaced.rows('context.executor_facts_refresh_skipped')[0].data.reason, 'handoff_replaced')
+
+  const moved = harness({ game: liveGame(), script: [readsRound(), plannerCommit(), executorGather(5)] })
+  await moved.say()
+  moved.game.onConditionRead = (game) => { game.status = deployment({ epoch: 4 }) }
+  moved.give('copper-plate', 10)
+  await moved.agent.taskStatusReceipt() // the batch finished
+  const text = await moved.agent.executorFactsRefreshText().catch(error => error)
+  assert.equal(text, undefined, 'no message when the actor changed during the reads')
+  assert.equal(moved.rows('context.executor_facts_refresh_skipped').at(-1).data.reason, 'actor_changed_during_handoff_refresh')
+})
+
+test('D2 N1/N2: a restage the guard will refuse spends no reads, and a goal that stopped being restageable during the reads refuses it', async () => {
+  const guarded = await plannerCollectedTenCopper()
+  const reads = guarded.game.conditionReads.length
+  // A turn token the caller does not hold: round_open, refused before any read.
+  guarded.agent.turnConversation = { stale: 'token' }
+  const refused = await guarded.agent.restageBetweenTurns({ checkpoint: 'C7', role: 'executor', reason: 'recovery:test', actor: guarded.agent.epoch, requestId: guarded.requestId() })
+  guarded.agent.turnConversation = null
+  assert.equal(refused.restaged, false)
+  assert.equal(guarded.game.conditionReads.length, reads, 'no read was spent on a refused restage')
+
+  const world = await plannerCollectedTenCopper()
+  world.game.onConditionRead = () => {
+    // The goal is paused by the time the reads return.
+    const state = world.memory.currentPlan(KEY)
+    world.memory.planningState(KEY).goal.status = 'paused'
+    void state
+  }
+  const result = await restageToFreshExecutor(world)
+  assert.equal(result.restaged, false)
+  assert.equal(result.reason, 'goal_not_active')
+  assert.equal(world.rows('context.restage_refused').at(-1).data.reason, 'goal_not_active')
+})
+
+test('D2: requiresMachineFacts flags a recipe cut at eight ingredients, and the carried recipe is incomplete', () => {
+  const ingredients = Array.from({ length: 10 }, (_, index) => ({ type: 'item', name: `part-${index}`, amount: 1 }))
+  const facts = requiresMachineFacts({ code: 'requires_machine', identity: 'big-thing', recipe: { name: 'big-thing', categories: ['crafting'], energy: 1, ingredients, products: [{ type: 'item', name: 'big-thing', amount: 1 }] }, machines: { candidates: [{ name: 'assembling-machine-1' }] } })
+  assert.equal(facts.recipe.ingredients.length, 8)
+  assert.equal(facts.recipe.ingredients_truncated, true)
+  assert.equal(facts.recipe.products_truncated, false)
 })

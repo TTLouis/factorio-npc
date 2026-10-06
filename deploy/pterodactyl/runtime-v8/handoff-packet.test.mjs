@@ -6,9 +6,11 @@ import {
   deriveResidualNeeds,
   estimateTokens,
   HANDOFF_PACKET_LIMITS,
+  executorFactsRefreshMessage,
   neededItems,
   normalizeRecipeFact,
   parseInventoryCounts,
+  recipeFactFromRequiresMachine,
   recipeFactLine,
   sanitizeHandoffNote,
   selectRecipeFacts,
@@ -589,7 +591,7 @@ test('D2: the residual record names the contract and its rows; the authority rec
   assert.equal(residual, 'residual_needs (derived from recipe_fact and fresh held_counts for the step contract electronic-circuit>=10; shared stock counted once): electronic-circuit required=10 held=0 missing=10 crafts=10 via electronic-circuit | iron-plate required=10 held=0 missing=10 | copper-cable required=30 held=0 missing=30 crafts=15 via copper-cable | copper-plate required=15 held=10 missing=5')
   const authority = text.split('\n').find(line => line.startsWith('authority:'))
   const stepId = getActivePlan(state).steps[0].step_id
-  assert.equal(authority, `authority: active_step=${stepId} (committed plan) contract=all (committed) latest_receipt=#2 operation_receipt batch_2 (this step) entity_ids_in_receipts_and_snapshots=historical_observations current_exact_targets=only_from_a_fresh_observation`)
+  assert.equal(authority, `authority: active_step=${stepId} (committed plan) contract=all (committed) latest_receipt=#2 operation_receipt batch_2 (this step) entity_ids_in_receipts_and_snapshots=historical_observations`)
   assert.ok(text.includes('active_step_contract: all: inventory_count electronic-circuit>=10'), 'the committed contract is present')
   assert.ok(text.includes('receipt #2 operation_receipt batch_2'), 'the latest correlated receipt is present')
   assert.deepEqual(summary, { recipe_facts: 3, fresh_items: 2, stale_items: 0, residual_needs: 4, machine: 'none', historical_entity_kinds: 1 })
@@ -612,4 +614,52 @@ test('D2: inventory text parses from JSON and from the serpent block the game pr
   assert.equal(parseInventoryCounts('no controlled actor'), undefined)
   assert.equal(parseInventoryCounts(''), undefined)
   assert.equal(parseInventoryCounts('{"found":false}'), undefined)
+})
+
+test('D2: a recipe with several item products is a leaf (its crafts would double count the other product)', () => {
+  const split = recipeFact('oil-split', [['crude-chunk', 2]], [['light-chunk', 1], ['heavy-chunk', 1]])
+  const result = deriveResidualNeeds({ roots: [{ item: 'light-chunk', count: 4 }], recipes: [split], held: heldOf({ 'light-chunk': 0 }) })
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.rows.map(row => row.item), ['light-chunk'], 'no expansion into crude-chunk')
+  // A fluid by-product does not count as a second item product.
+  const withFluid = normalizeRecipeFact({ name: 'gear-with-slag', ingredients: [{ name: 'iron-plate', amount: 2 }], products: [{ name: 'iron-gear-wheel', amount: 1 }, { type: 'fluid', name: 'steam', amount: 5 }] }, { tag: TAG })
+  const expanded = deriveResidualNeeds({ roots: [{ item: 'iron-gear-wheel', count: 2 }], recipes: [withFluid], held: heldOf({ 'iron-gear-wheel': 0, 'iron-plate': 0 }) })
+  assert.deepEqual(expanded.rows.map(row => row.item), ['iron-gear-wheel', 'iron-plate'])
+})
+
+test('D2: a requires_machine recipe cut to its first eight ingredients is incomplete and is not expanded', () => {
+  const ingredients = Array.from({ length: 8 }, (_, index) => ({ type: 'item', name: `part-${index}`, amount: 1 }))
+  const cut = recipeFactFromRequiresMachine({
+    recipe: { name: 'big-thing', categories: ['crafting'], energy: 1, ingredients, products: [{ type: 'item', name: 'big-thing', amount: 1 }], ingredients_truncated: true, products_truncated: false },
+    machines: { candidates: [{ name: 'assembling-machine-1' }] },
+  }, { tag: TAG })
+  assert.equal(cut.complete, false)
+  assert.ok(recipeFactLine(cut).includes('incomplete'))
+  const result = deriveResidualNeeds({ roots: [{ item: 'big-thing', count: 2 }], recipes: [cut], held: heldOf({ 'big-thing': 0 }) })
+  assert.deepEqual(result.rows.map(row => row.item), ['big-thing'])
+  const whole = recipeFactFromRequiresMachine({
+    recipe: { name: 'big-thing', categories: ['crafting'], energy: 1, ingredients, products: [{ type: 'item', name: 'big-thing', amount: 1 }], ingredients_truncated: false, products_truncated: false },
+    machines: { candidates: [] },
+  }, { tag: TAG })
+  assert.equal(whole.complete, true)
+})
+
+test('D2: a deferred packet says so and carries no counts, machine or residual; the refresh message carries them in the packet labels', () => {
+  const state = circuitState()
+  const deferred = buildHandoffPacket({ planningState: state, ...ARGS, executorFacts: { recipes: [LAB, CIRCUIT, CABLE], counts: { items: [], unavailable: [], deferred: 'batch_in_flight', as_of: TAG }, historical_entities: [] } })
+  assert.ok(deferred.text.includes('counts_deferred=batch_in_flight (an operation batch was sent and has not finished; held_counts, checkpoint_machine and residual_needs are omitted from this packet)'))
+  assert.doesNotMatch(deferred.text, /^(held_counts|checkpoint_machine|residual_needs)/m)
+  assert.ok(deferred.text.includes('recipe_fact lab '), 'recipe facts stay')
+  assert.ok(deferred.text.includes('authority: active_step='), 'authority stays')
+  assert.equal(deferred.executor_facts.counts_deferred, 'batch_in_flight')
+
+  const facts = FRESH_FACTS()
+  const message = executorFactsRefreshMessage({ counts: facts.counts, residual: facts.residual })
+  const lines = message.split('\n')
+  assert.ok(lines[0].startsWith('[HARNESS] Executor facts refreshed after the batch receipt landed'))
+  assert.ok(lines.some(line => line.startsWith('held_counts (fresh live read of the actor inventory, as_of=tick:612,epoch:3): ')))
+  assert.ok(lines.some(line => line.startsWith('residual_needs (derived from recipe_fact and fresh held_counts')))
+  assert.ok(!message.includes('recipe_fact lab'), 'only the parts that changed')
+  assert.equal(executorFactsRefreshMessage({ counts: { items: [], unavailable: [] } }), '')
+  assert.equal(executorFactsRefreshMessage(undefined), '')
 })

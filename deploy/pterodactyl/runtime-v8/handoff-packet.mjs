@@ -351,7 +351,8 @@ export function normalizeRecipeFact(raw, { source = 'unknown', tag, limits: over
   const products = rawProducts.map(normalizeProduct).filter(Boolean)
   if (ingredients.length === 0 && products.length === 0) return undefined
   const machines = [...new Set(asList(raw.machines).map(machine => factName(typeof machine === 'string' ? machine : machine?.name)).filter(Boolean))]
-  const complete = ingredients.length === rawIngredients.length
+  const complete = raw.truncated !== true
+    && ingredients.length === rawIngredients.length
     && products.length === rawProducts.length
     && ingredients.length <= limits.recipeIngredients
     && products.length <= limits.recipeProducts
@@ -399,6 +400,8 @@ export function recipeFactFromRequiresMachine(facts, { tag, limits } = {}) {
     products: recipe.products,
     machines: asList(facts?.machines?.candidates),
     machines_truncated: facts?.machines?.truncated === true,
+    // requiresMachineFacts cuts the lists before this point: a cut recipe is not a complete one.
+    truncated: recipe.ingredients_truncated === true || recipe.products_truncated === true,
   }, { source: 'requires_machine', tag, limits })
 }
 
@@ -473,6 +476,8 @@ function expandableRecipe(item, recipes) {
   const product = chosen.products.find(entry => entry.name === item && entry.type === 'item')
   const output = product?.amount
   if (!(output > 0) || product.amount_min !== undefined || product.amount_max !== undefined) return undefined
+  // A recipe with several item products yields them together: counting crafts for one product would double count the other.
+  if (chosen.products.filter(entry => entry.type === 'item').length !== 1) return undefined
   if (product.probability !== undefined && product.probability !== 1) return undefined
   if (chosen.ingredients.length === 0) return undefined
   const usable = chosen.ingredients.every(ingredient => ingredient.type === 'item' && ingredient.amount > 0 && ingredient.name !== item)
@@ -529,6 +534,13 @@ export function deriveResidualNeeds({ roots, recipes, held }) {
     }
   }
   if (order.length !== edges.size) return { ok: false, reason: 'recipe_cycle' }
+  // Two needed items made by one recipe would each claim its ingredients: refuse rather than double count.
+  const used = new Set()
+  for (const expansion of expansions.values()) {
+    if (!expansion) continue
+    if (used.has(expansion.recipe.name)) return { ok: false, reason: `shared_recipe:${expansion.recipe.name}` }
+    used.add(expansion.recipe.name)
+  }
   const demand = new Map()
   for (const root of roots) demand.set(root.item, (demand.get(root.item) ?? 0) + root.count)
   const rows = []
@@ -614,6 +626,14 @@ function countsRecords(counts, limits) {
   const fresh = items.filter(entry => entry.state === 'fresh')
   const stale = items.filter(entry => entry.state === 'stale')
   const unavailable = asList(counts?.unavailable).map(factName).filter(Boolean).slice(0, limits.countItems)
+  if (counts?.deferred === 'batch_in_flight') {
+    records.push({
+      key: 'counts_deferred',
+      block: 'step',
+      drop: 'fresh_counts',
+      text: 'counts_deferred=batch_in_flight (an operation batch was sent and has not finished; held_counts, checkpoint_machine and residual_needs are omitted from this packet)',
+    })
+  }
   if (fresh.length > 0) {
     records.push({
       key: 'held_counts',
@@ -686,7 +706,7 @@ function authorityRecord(plan, step, limits) {
   return {
     key: 'executor_authority',
     block: 'step',
-    text: oneLine(`authority: active_step=${step.step_id} (committed plan) contract=${contract?.mode ? `${contract.mode} (committed)` : 'none'} latest_receipt=${latest ? `#${latest.seq ?? held.length} ${latest.kind} ${latest.ref} (this step)` : 'none'} entity_ids_in_receipts_and_snapshots=historical_observations current_exact_targets=only_from_a_fresh_observation`, limits.authorityChars),
+    text: oneLine(`authority: active_step=${step.step_id} (committed plan) contract=${contract?.mode ? `${contract.mode} (committed)` : 'none'} latest_receipt=${latest ? `#${latest.seq ?? held.length} ${latest.kind} ${latest.ref} (this step)` : 'none'} entity_ids_in_receipts_and_snapshots=historical_observations`, limits.authorityChars),
   }
 }
 
@@ -718,7 +738,23 @@ function executorFactsSummary(facts, kept) {
     residual_needs: keys.has('residual_needs') ? asList(facts?.residual?.rows).length : 0,
     machine: keys.has('checkpoint_machine') ? (facts?.machine?.state ?? 'none') : 'none',
     historical_entity_kinds: keys.has('historical_entities') ? asList(facts?.historical_entities).length : 0,
+    ...(keys.has('counts_deferred') ? { counts_deferred: 'batch_in_flight' } : {}),
   }
+}
+
+/**
+ * The message a deferred handoff sends once the batch receipt landed: the counts, the checkpoint machine and the residual
+ * needs read then, in the packet's own labels. '' when there is nothing to say.
+ */
+export function executorFactsRefreshMessage(facts, limits = EXECUTOR_FACT_LIMITS) {
+  if (!facts || typeof facts !== 'object') return ''
+  const records = [...countsRecords({ ...facts.counts, deferred: undefined }, limits)]
+  const machine = machineRecord(facts.machine, limits)
+  if (machine) records.push(machine)
+  const residual = residualRecord(facts.residual, limits)
+  if (residual) records.push(residual)
+  if (records.length === 0) return ''
+  return ['[HARNESS] Executor facts refreshed after the batch receipt landed (live reads taken now, same labels as the handoff packet; facts only):', ...records.map(record => record.text)].join('\n')
 }
 
 function stepRecords(state, plan, activeIndex, limits, { role, checkpoint, reason, budget, note, actor, runtime, amendment, jevFacts, jevHints, executorFacts }) {

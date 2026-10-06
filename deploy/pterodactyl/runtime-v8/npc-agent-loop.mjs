@@ -20,6 +20,7 @@ import {
   buildHandoffPacket,
   deriveResidualNeeds,
   EXECUTOR_FACT_LIMITS,
+  executorFactsRefreshMessage,
   mergeRecipeFact,
   neededItems,
   normalizeFactTag,
@@ -374,6 +375,8 @@ export function requiresMachineFacts(preflight) {
       energy: recipe.energy,
       ingredients: list(recipe.ingredients, 8),
       products: list(recipe.products, 8),
+      ingredients_truncated: Array.isArray(recipe.ingredients) && recipe.ingredients.length > 8,
+      products_truncated: Array.isArray(recipe.products) && recipe.products.length > 8,
     },
     machines: {
       matched_count: machines.matched_count,
@@ -2837,6 +2840,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.handoffInventoryObservations = new Map()
     this.handoffRequirementMachines = new Map()
     this.worldMutationSeq = 0
+    this.batchInFlight = false // an operation batch was sent and its receipt has not been read yet
+    this.pendingExecutorFactsRefresh = null // an executor handoff whose counts were deferred because of that batch
     this.rejectedExactTargets = new Set()
     this.staleExactPreflightRetries = 0
     this.modelCorrectablePreflightRetries = 0
@@ -3129,9 +3134,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // restage, a failed read marks the last values stale. Planner packets carry none of it.
       let executorFacts
       let executorFactsMeta
-      if (!args.packet && role === EXECUTOR_ROLE) {
+      // A restage the guard will refuse anyway spends no reads.
+      if (!args.packet && role === EXECUTOR_ROLE && !this.restageGuardRefusal(safePoint)) {
         const before = getActivePlanningPlan(state)
-        const gathered = await this.gatherExecutorHandoffFacts({ state, actor: args.actor })
+        const gathered = await this.gatherExecutorHandoffFacts({ state, actor: args.actor, runtime: args.runtime })
         if (gathered?.refusal) {
           await this.jev.afterRestage(prepared, { restaged: false, reason: gathered.refusal })
           await this.traceEvent('context.restage_refused', { role, checkpoint, reason: gathered.refusal, reads_attempted: gathered.meta?.reads_attempted, request_id: requestId }, { requestId })
@@ -3144,6 +3150,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           await this.traceEvent('context.restage_refused', { role, checkpoint, reason: 'state_moved_on_during_handoff_refresh', request_id: requestId }, { requestId })
           return { restaged: false, reason: 'state_moved_on_during_handoff_refresh' }
         }
+        // The state the awaits ran under may have stopped being restageable (goal paused or met, plan frozen): the same checks
+        // as before the reads, on the state as it is now, and the packet is built from that state.
+        if (!args.planningState) {
+          const fresh = this.memory.planningState?.(this.activePlanKey()) ?? state
+          const stale = stateRefusal(fresh)
+          if (stale) {
+            await this.jev.afterRestage(prepared, { restaged: false, reason: stale })
+            await this.traceEvent('context.restage_refused', { role, checkpoint, reason: stale, request_id: requestId }, { requestId })
+            return { restaged: false, reason: stale }
+          }
+          state = fresh
+        }
         executorFacts = gathered?.facts
         executorFactsMeta = gathered?.meta
       }
@@ -3154,7 +3172,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       const restaged = await this.restageContext({ checkpoint, reason: args.reason, packet, role, softLimitTokens: args.softLimitTokens, requestId, safePoint, parkPlanner: args.parkPlanner })
       await this.jev.afterRestage(prepared, restaged)
-      if (restaged.restaged === true && packet.executor_facts) await this.traceExecutorFactsCarried({ packet, restaged, checkpoint, requestId, meta: executorFactsMeta })
+      if (restaged.restaged === true && packet.executor_facts) {
+        await this.traceExecutorFactsCarried({ packet, restaged, checkpoint, requestId, meta: executorFactsMeta })
+        // The counts were deferred behind a batch in flight: the first continuation after its receipt carries them (once).
+        if (executorFactsMeta?.counts_deferred) {
+          this.pendingExecutorFactsRefresh = { handoff_id: restaged.handoff_id, request_id: requestId, checkpoint, actor_id: this.epoch?.actor_id, epoch: this.epoch?.epoch }
+        }
+      }
       return restaged
     }
     catch (error) {
@@ -4022,14 +4046,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // packet as stable, fresh, stale or historical. Nothing here decides what the executor does next.
 
   resetHandoffObservations() {
+    this.batchInFlight = false
+    this.pendingExecutorFactsRefresh = null
     this.handoffInventoryObservations = new Map()
     this.handoffRequirementMachines = new Map()
   }
 
   // The world changed, or may have: an operation batch was sent, or a batch receipt was read. Observations taken
   // under an earlier sequence number date from before that change.
-  noteWorldMutation() {
+  noteWorldMutation({ sent = false } = {}) {
     this.worldMutationSeq = (this.worldMutationSeq ?? 0) + 1
+    if (sent) this.batchInFlight = true
   }
 
   // Where and when a read happened: the game tick of the last completed batch the harness knows, the actor epoch and
@@ -4146,7 +4173,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // a change before or after the reads refuses the restage (`refusal`), because nothing read under another actor may brief
   // this one. A failed read is not a refusal: the last value the harness saw is carried marked stale, never as current.
   // Returns undefined when there is nothing to say; `{ refusal, meta }` or `{ facts, meta }` otherwise. Never throws.
-  async gatherExecutorHandoffFacts({ state, actor }) {
+  //
+  // A batch in flight (sent, receipt not yet read) makes any count read now a read of a world that is still changing, and
+  // the executor only sees the packet after the batch finishes: counts, the checkpoint machine and residual needs are then
+  // NOT read (`counts_deferred`); recipe facts and history still ride. `mode: 'refresh'` is the later read, taken after
+  // the receipt landed: counts, machine and residual only.
+  async gatherExecutorHandoffFacts({ state, actor, runtime, mode = 'packet' }) {
     try {
       const plan = getActivePlanningPlan(state)
       const step = plan?.steps?.[plan.active_step_index]
@@ -4176,10 +4208,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
       const source = actor ?? this.epoch
       const fence = Number.isSafeInteger(source?.actor_id) && Number.isSafeInteger(source?.epoch) && typeof source?.mode === 'string' && typeof source?.actor_kind === 'string' ? source : undefined
-      const meta = { reads_attempted: 0, reads_failed: 0, refresh: 'skipped', residual_omitted: undefined, recipe_cache: cached.length }
+      const meta = { reads_attempted: 0, reads_failed: 0, refresh: 'skipped', residual_omitted: undefined, recipe_cache: cached.length, counts_deferred: undefined }
       const fresh = new Map()
       let freshMachine
-      if ((readItems.length > 0 || machineRequirement) && fence) {
+      const inFlight = this.batchInFlight === true || runtime?.idle === false || (Number.isFinite(runtime?.queue_length) && runtime.queue_length > 0)
+      if (inFlight && mode === 'refresh') return undefined
+      if (inFlight) {
+        meta.counts_deferred = 'batch_in_flight'
+        meta.refresh = 'deferred'
+      }
+      else if ((readItems.length > 0 || machineRequirement) && fence) {
         try {
           await this.handoffFenceCheck(fence, 'before')
           for (const item of readItems) {
@@ -4221,7 +4259,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const staleReason = seq => [fence ? 'fresh_read_failed' : 'refresh_skipped', Number.isSafeInteger(seq) && seq < this.worldMutationSeq ? 'predates_latest_batch' : undefined].filter(Boolean).join(',')
       const items = []
       const unavailable = []
-      for (const item of readItems) {
+      for (const item of inFlight ? [] : readItems) {
         if (fresh.has(item)) {
           const count = fresh.get(item)
           items.push({ item, count, state: 'fresh' })
@@ -4235,7 +4273,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
 
       let machine
-      if (freshMachine) machine = { state: 'fresh', facts: freshMachine, as_of: tag }
+      if (inFlight) machine = undefined
+      else if (freshMachine) machine = { state: 'fresh', facts: freshMachine, as_of: tag }
       else if (machineRequirement) {
         const known = this.liveObservedExactTarget(machineRequirement.unit_number)
         if (known) {
@@ -4254,7 +4293,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
 
       let residual
-      if (needs.roots.length === 0) meta.residual_omitted = 'no_inventory_contract_root'
+      if (inFlight) meta.residual_omitted = 'batch_in_flight'
+      else if (needs.roots.length === 0) meta.residual_omitted = 'no_inventory_contract_root'
       else if (!closure.complete) meta.residual_omitted = 'too_many_items'
       else {
         const derived = deriveResidualNeeds({ roots: needs.roots, recipes: cached, held: fresh })
@@ -4262,12 +4302,63 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         else meta.residual_omitted = derived.reason
       }
 
-      const counts = { items, unavailable, as_of: tag }
-      const hasContent = recipes.length > 0 || items.length > 0 || unavailable.length > 0 || machine || residual || historical.length > 0
+      const counts = { items, unavailable, as_of: tag, ...(meta.counts_deferred ? { deferred: meta.counts_deferred } : {}) }
+      if (mode === 'refresh') {
+        const any = items.length > 0 || unavailable.length > 0 || machine || residual
+        return { facts: any ? { counts, machine, residual } : undefined, meta }
+      }
+      const hasContent = recipes.length > 0 || items.length > 0 || unavailable.length > 0 || counts.deferred || machine || residual || historical.length > 0
       return { facts: hasContent ? { recipes, counts, machine, residual, historical_entities: historical } : undefined, meta }
     }
     catch (error) {
       this.log(`[handoff] executor facts failed: ${error instanceof Error ? error.message : String(error)}`)
+      return undefined
+    }
+  }
+
+  // The deferred half of a handoff (see gatherExecutorHandoffFacts): once the receipt of the batch that was in flight has landed,
+  // the first continuation of the SAME executor conversation carries one bounded [HARNESS] message with the counts, the
+  // checkpoint machine and the residual needs, read now under the same actor/epoch fence, in the packet's labels. Once per
+  // deferred handoff: the pending marker is consumed whatever happens. Returns the message text, or undefined. Never throws.
+  // except nothing: a failed read or a changed actor simply yields no message (stale work fails safe).
+  async executorFactsRefreshText() {
+    const pending = this.pendingExecutorFactsRefresh
+    if (!pending) return undefined
+    if (this.batchInFlight) return undefined // another batch went out meanwhile: wait for its receipt
+    this.pendingExecutorFactsRefresh = null
+    const requestId = this.traceRequest?.id ?? pending.request_id
+    const skip = async (reason) => {
+      try {
+        await this.traceEvent('context.executor_facts_refresh_skipped', { request_id: requestId, handoff_id: pending.handoff_id, reason }, { requestId })
+      }
+      catch {}
+      return undefined
+    }
+    try {
+      if (this.agentContext.role !== EXECUTOR_ROLE || this.agentContext.handoffId !== pending.handoff_id) return skip('handoff_replaced')
+      const state = this.memory.planningState?.(this.activePlanKey())
+      if (!state?.goal?.goal_id) return skip('no_admitted_goal')
+      const gathered = await this.gatherExecutorHandoffFacts({ state, actor: this.epoch, mode: 'refresh' })
+      if (gathered?.refusal) return skip(gathered.refusal)
+      const text = executorFactsRefreshMessage(gathered?.facts)
+      if (!text) return skip('nothing_to_refresh')
+      const counts = gathered.facts.counts?.items ?? []
+      await this.traceEvent('context.executor_facts_refreshed_after_batch', {
+        request_id: requestId,
+        handoff_id: pending.handoff_id,
+        checkpoint: pending.checkpoint,
+        fresh_items: counts.filter(entry => entry.state === 'fresh').length,
+        stale_items: counts.filter(entry => entry.state === 'stale').length + (gathered.facts.counts?.unavailable?.length ?? 0),
+        residual_needs: gathered.facts.residual?.rows?.length ?? 0,
+        residual_omitted_reason: gathered.facts.residual ? undefined : gathered.meta?.residual_omitted,
+        machine: gathered.facts.machine?.state ?? 'none',
+        reads_attempted: gathered.meta?.reads_attempted,
+        reads_failed: gathered.meta?.reads_failed,
+        reason: 'batch_receipt_landed_after_deferred_handoff_counts',
+      }, { requestId })
+      return text
+    }
+    catch {
       return undefined
     }
   }
@@ -7947,6 +8038,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   async taskStatusReceipt() {
     this.noteWorldMutation() // D2: a batch receipt is being read; whatever was observed before it is history
+    this.batchInFlight = false
     try {
       const raw = String(await this.rcon.command(toolCommand('getTaskStatus', {}))).slice(0, 8_000_000)
       await this.settleOutstandingOperation(raw)
@@ -8397,6 +8489,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // Repair unit B: a finished wait-only batch carries a fresh read of the step's machine, so the model never
     // plans its next move from a stale narrative observation.
     const blindWaitFacts = pendingAmendment ? undefined : await this.blindWaitReceiptFacts(receipt)
+    const deferredFacts = await this.executorFactsRefreshText() // D2: counts a batch in flight kept out of the handoff packet
 
     this.reasoningTriggerSource = routed.route === 'continue_current'
       ? 'post_step_continue'
@@ -8425,7 +8518,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let wakeFailed = true
     try {
       const result = await this.continueFromModMessage(
-        `[MOD] Autorio operation batch completed. ${stepOpenHint ? `${stepOpenHint} ` : ''}Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}${blindWaitFacts ? ` ${blindWaitFacts}` : ''}`,
+        `[MOD] Autorio operation batch completed. ${stepOpenHint ? `${stepOpenHint} ` : ''}Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}${blindWaitFacts ? ` ${blindWaitFacts}` : ''}${deferredFacts ? ` ${deferredFacts}` : ''}`,
         'factorio.completion_continuation',
       )
       wakeFailed = false
@@ -8563,9 +8656,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const recoverableGuidance = recoverable
       ? ` [HARNESS] The engine refused the ${cleanMemoryText(recoverable.entity_name ?? 'entity', 100)} placement at the coordinate you chose (${cleanMemoryText(recoverable.code, 64)}); this is a correctable placement error, not a world blocker, and the committed step is unchanged. Use the receipt's placement_footprint, placement_grid.nearest_valid_center and placement_blockers to choose a valid position (or clear the reported blocker); when the machine must cover or receive another entity's output, use getPlacementCandidates with covers_position and place the returned candidate instead of a hand-picked centre. Then resubmit the same step with its dependent operations. Do not change the plan's steps. Attempt ${recoverable.attempt} of ${recoverable.retry_budget} before the step is blocked.`
       : ''
+    const deferredFacts = await this.executorFactsRefreshText() // D2: counts a batch in flight kept out of the handoff packet
     try {
       return await this.continueFromModMessage(
-        `[MOD] Autorio operation error: ${cleanError}. A failure cancels the operations queued behind it; a refused item move (nothing moved, items still held) does not, so read the receipt for which operations completed. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}${recoverableGuidance}${supplyGuidance}`,
+        `[MOD] Autorio operation error: ${cleanError}. A failure cancels the operations queued behind it; a refused item move (nothing moved, items still held) does not, so read the receipt for which operations completed. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}${recoverableGuidance}${supplyGuidance}${deferredFacts ? ` ${deferredFacts}` : ''}`,
         'factorio.error_continuation',
       )
     }
@@ -11599,7 +11693,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       let reconciledAdmitted = false
       try {
-        this.noteWorldMutation() // D2: observations taken before this send date from before the batch
+        this.noteWorldMutation({ sent: true }) // D2: observations taken before this send date from before the batch; the batch is in flight until its receipt is read
         const acknowledgement = await executeAuthorizedBatch(this.rcon, before.epoch, commands, undefined, pendingAdmission)
         await this.traceEvent('operations.ack', {
           operations: operations.map((operation, index) => ({ ...operation, admission_result: acknowledgement.results[index] })),
