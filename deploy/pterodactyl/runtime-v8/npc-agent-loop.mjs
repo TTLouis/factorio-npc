@@ -9764,36 +9764,43 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return stateResult
   }
 
-  // Live read of the active step's committed checkpoint through the engine's own condition evaluator: whether it holds
-  // now and the current count per requirement. Unknown stays unknown (no count is invented); a requirement kind the
-  // evaluator cannot read counts as not satisfied.
+  // Live read of the active step's committed checkpoint through the engine's own condition evaluator: per requirement
+  // whether it holds now and the current count. Unknown stays unknown (no count is invented): a requirement that could
+  // not be read (transport/JSON error, a not-ok answer, or a kind the evaluator cannot read) carries read:false and no
+  // satisfied flag. The contract result is tri-state: satisfied true | false | undefined (cannot be decided).
   async liveCheckpointState(contract) {
     const normalized = sanitizeStepCompletionContract(contract)
     const byId = {}
     for (const requirement of normalized.requirements ?? []) {
       if (!WORLD_STATE_REQUIREMENT_KINDS.has(requirement.kind)) {
-        byId[requirement.id] = { satisfied: false }
+        byId[requirement.id] = { read: false }
         continue
       }
       const { id: _id, ...condition } = requirement
       try {
         const raw = JSON.parse(String(await this.rcon.command(runtimeConditionCommand(condition))).trim())
         byId[requirement.id] = raw?.ok === true
-          ? { satisfied: raw.satisfied === true, ...(Number.isFinite(raw.current) ? { current: raw.current } : {}) }
-          : { satisfied: false }
+          ? { read: true, satisfied: raw.satisfied === true, ...(Number.isFinite(raw.current) ? { current: raw.current } : {}) }
+          : { read: false }
       }
       catch {
-        byId[requirement.id] = { satisfied: false }
+        byId[requirement.id] = { read: false }
       }
     }
-    const results = normalized.requirements.map(requirement => byId[requirement.id]?.satisfied === true)
-    const satisfied = results.length > 0 && (normalized.mode === 'any' ? results.some(Boolean) : results.every(Boolean))
+    const results = normalized.requirements.map(requirement => (byId[requirement.id]?.read === true ? byId[requirement.id].satisfied : undefined))
+    let satisfied
+    if (results.length > 0) {
+      if (normalized.mode === 'any') satisfied = results.includes(true) ? true : results.includes(undefined) ? undefined : false
+      else satisfied = results.includes(false) ? false : results.includes(undefined) ? undefined : true
+    }
     return { satisfied, byId }
   }
 
   // The commit-time guard. Returns the conflict (with the live count when known) when the active step has a persisted
   // checkpoint that is not yet met and this batch would take the stock/entity it requires; otherwise undefined. A met
-  // checkpoint never refuses: the normal verifier closes the step. Stale actor/epoch throws before a refusal is built.
+  // checkpoint never refuses: the normal verifier closes the step. Fail open: when the conflicting requirement (or the
+  // contract) cannot be read, the batch proceeds, no budget is spent and checkpoint.stock_extraction_unverified is traced.
+  // Stale actor/epoch throws before a refusal is built.
   async checkpointStockExtractionConflict(operations) {
     const key = this.requestInfo?.memoryKey
     if (!key || !Array.isArray(operations) || operations.length === 0) return undefined
@@ -9805,7 +9812,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!conflict) return undefined
     const live = await this.liveCheckpointState(contract)
     await this.assertCurrent()
-    if (live.satisfied) return undefined
+    if (live.satisfied === true) return undefined
+    if (live.satisfied === undefined || live.byId[conflict.requirement_id]?.read !== true) {
+      await this.traceEvent('checkpoint.stock_extraction_unverified', {
+        request_id: this.traceRequest?.id,
+        step_id: stepId,
+        ...checkpointConflictFacts(conflict),
+        reason: 'checkpoint_stock_unreadable_batch_not_refused',
+      })
+      return undefined
+    }
     const current = live.byId[conflict.requirement_id]?.current
     return { ...conflict, step_id: stepId, ...(Number.isFinite(current) ? { current } : {}) }
   }
