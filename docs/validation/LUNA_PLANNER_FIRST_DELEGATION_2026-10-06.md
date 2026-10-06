@@ -32,10 +32,12 @@ The probe's first-case instruction and validation now permit a valid plan-only d
 
 | Unit | Owner | State |
 |---|---|---|
-| Planner-only admission and C3 handoff | Integration owner | Implemented; scripted gates green |
+| Planner-only admission and C3 handoff | Integration owner | Unit `21e6b129`, merged `1306b003` |
 | Independent invariant review | Separate read-only reviewer | No remaining merge blocker |
 | Updated planning probe | Integration owner | 4/4 offline samples green |
-| Integration merge, installer repin and final Docker gates | Integration owner | Required before publication; recorded in the current status document |
+| Integration merge, installer repin and final Docker gates | Integration owner | Repin `bc7bcced`; all required gates passed |
 | Real Luna planning or gameplay follow-up | Owner-authorized live trial | Not run in this checkpoint |
 
 Local evidence is retained under `test-results/luna-system-fixes-2026-10-06/planner-first/` after integration. Autonomous green research and multiplayer acceptance remain open. This change supplies no gameplay walkthrough or operator-authored actions to Luna.
+
+Final integration evidence at `bc7bcced`: official Docker `all` exit 0 (1,812 runtime and 1,036 mod tests, typechecks, TSTL and generated-Lua check); full Docker build exit 0; nine payload checks exit 0. The payload loader pins source `1306b00328b77820560d60e01ca6c34cbfd4bc17`; installer source SHA256 remains `ef8d9447c44009365022fac9dca158c0db8b622a229626e60bebcb1191586de5`. Logs: `integration-all.log`, `full-build.log`, `payload.log`, `unit-runtime-final.log`, `unit-all.log`, `initial-runtime.log` and `offline-probe.log`. Offline reply artifacts and their zero-call summary are retained in `planner-first-offline/`. No server deployment or live acceptance claim is made. Weekly account usage read 39% at the integration checkpoint (previous planning checkpoint 38%).
