@@ -309,7 +309,7 @@ function placed_machines(actor: ControlledActor, names: string[]) {
     if (entity.type === 'assembling-machine' || entity.type === 'furnace') {
       const [recipe] = entity.get_recipe()
       recipe_name = recipe?.name
-      if (recipe_name === undefined && entity.type === 'furnace') previous_recipe_name = entity.previous_recipe?.name
+      if (recipe_name === undefined && entity.type === 'furnace') previous_recipe_name = entity.previous_recipe?.name.name
     }
     result.placed.push({
       unit_number: entity.unit_number,

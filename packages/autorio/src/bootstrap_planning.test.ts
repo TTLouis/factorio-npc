@@ -474,7 +474,7 @@ describe('machine-only recipes and placed machines', () => {
       get_recipe: () => [{ name: 'iron-gear-wheel' }],
     }
     const blankAssembler = { ...assembler, unit_number: 52, position: { x: 3, y: 0 }, get_recipe: () => [undefined] }
-    const idleFurnace = { ...placedEntity(53, 4, STATUS.no_ingredients), previous_recipe: { name: 'iron-plate' } }
+    const idleFurnace = { ...placedEntity(53, 4, STATUS.no_ingredients), previous_recipe: { name: { name: 'iron-plate' } } }
     const smeltingFurnace = { ...placedEntity(54, 5, STATUS.working), get_recipe: () => [{ name: 'copper-plate' }] }
     const chest = { ...placedEntity(55, 6, undefined, 'storage-x'), type: 'container', get_recipe: () => { throw new Error('not a crafting machine') } }
     const { actor } = smeltingActor([assembler, blankAssembler, idleFurnace, smeltingFurnace, chest])
