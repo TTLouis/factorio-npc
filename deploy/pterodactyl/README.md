@@ -119,7 +119,9 @@ No separate `PRIVATE_SERVER` flag exists.
 
 - `direct` — the wire format is detected from `OPENAI_API_BASEURL`'s host and the model, the same as today's default (`auto`) behaviour. Requires HTTPS.
 - `router` — the OpenRouter capability profile (reasoning field, style block, cache breakpoints, usage parsing resolved per model). Requires HTTPS.
-- `local` — the LM Studio-style local capability profile. Plain `http` is allowed only to `localhost`, `127.0.0.1`, `[::1]`, or `host.docker.internal`.
+- `local` — the LM Studio-style local capability profile. Plain `http` is allowed to `localhost`, `127.0.0.1`, `[::1]`, `host.docker.internal`, or a hostname ending in `.ts.net` for a Tailscale tunnel.
+
+For CLIProxyAPI over Tailscale, set `AI_API_METHOD=local`, `OPENAI_API_BASEURL=http://<machine>.<tailnet>.ts.net:18317/v1`, and the exact proxy model ID (for example, `OPENAI_MODEL=gpt-6-luna`). `OPENAI_API_KEY` is the proxy's client API key; upstream OAuth credentials stay in CLIProxyAPI. A credential priority prefers an account but does not guarantee exclusive routing if the proxy falls back. Use account-specific routing or disable competing credentials for an account-isolated test.
 
 Leaving `AI_API_METHOD` unset keeps the legacy `PROVIDER_PROFILE`-driven behaviour exactly as before, including an explicit `PROVIDER_PROFILE` value. If both are set, `AI_API_METHOD` wins and the startup log says so. The startup log and the in-game Debug window both show one line, e.g. `AI: method=router host=openrouter.ai main=<model[0]> subagent=<model[1]|none>` — never a key.
 

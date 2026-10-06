@@ -73,19 +73,31 @@ test('direct and router require https even to an otherwise-allowed local hostnam
   )
 })
 
-test('local allows plain http only to the fixed local hostname allowlist, https elsewhere', () => {
+test('local allows plain http to local or Tailscale hosts, https elsewhere', () => {
   assert.doesNotThrow(() => checkApiMethodUrlRule('local', 'http://localhost:1234/v1'))
   assert.doesNotThrow(() => checkApiMethodUrlRule('local', 'http://127.0.0.1:1234/v1'))
   assert.doesNotThrow(() => checkApiMethodUrlRule('local', 'http://[::1]:1234/v1'))
   assert.doesNotThrow(() => checkApiMethodUrlRule('local', 'http://host.docker.internal:1234/v1'))
   assert.doesNotThrow(() => checkApiMethodUrlRule('local', 'https://lmstudio.example.test/v1'))
   // checkApiMethodUrlRule itself only adds the direct/router https gate; the
-  // existing providerEndpoint hostname allowlist (unchanged) is what actually
+  // providerEndpoint hostname allowlist is what actually
   // rejects a non-local http host for `local`, exercised end to end here.
   assert.throws(
     () => configuration({}, baseEnv({ AI_API_METHOD: 'local', OPENAI_API_BASEURL: 'http://not-local.example.test/v1' })),
     /Remote provider URL requires HTTPS/,
   )
+})
+
+test('Tailscale proxy configuration permits local HTTP while direct/router still require HTTPS', () => {
+  const base = 'http://proxy.example-tailnet.ts.net:18317/v1'
+  const config = configuration({}, baseEnv({ AI_API_METHOD: 'local', OPENAI_API_BASEURL: base, OPENAI_MODEL: 'gpt-6-luna' }))
+  assert.equal(config.base, base)
+  assert.equal(config.model, 'gpt-6-luna')
+  assert.equal(config.models.length, 1)
+  assert.equal(config.aiApiMethod, 'local')
+  for (const method of ['direct', 'router']) {
+    assert.throws(() => configuration({}, baseEnv({ AI_API_METHOD: method, OPENAI_API_BASEURL: base })), /requires an https OPENAI_API_BASEURL/)
+  }
 })
 
 test('OPENAI_MODEL is a comma-separated list: [0] is the main model, [1] is the reserved subagent model', () => {

@@ -1253,13 +1253,15 @@ export function providerEndpoint(base) {
   try { url = new URL(base) }
   catch { throw new DeploymentError('Invalid provider URL') }
   check(!url.username && !url.password && !url.search && !url.hash, 'Provider URL cannot contain credentials, query, or fragment')
-  check(url.protocol === 'https:' || (url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]', 'host.docker.internal'].includes(url.hostname)), 'Remote provider URL requires HTTPS')
+  const localHttpHost = ['127.0.0.1', 'localhost', '[::1]', 'host.docker.internal'].includes(url.hostname)
+    || url.hostname.endsWith('.ts.net')
+  check(url.protocol === 'https:' || (url.protocol === 'http:' && localHttpHost), 'Remote provider URL requires HTTPS')
   url.pathname = `${url.pathname.replace(/\/?$/, '/')}chat/completions`
   return url.toString()
 }
 
-// providerEndpoint above already restricts plain http to a fixed local
-// hostname allowlist for every profile; that is exactly the 'local' method's
+// providerEndpoint above restricts plain http to local hosts and Tailscale
+// .ts.net hosts for every profile; that is the 'local' method's
 // rule (plan 1.10). 'direct'/'router' are stricter still: they need https
 // even to one of those same local hostnames, since they mean a real
 // (potentially remote) OpenAI-compatible or OpenRouter endpoint. This check

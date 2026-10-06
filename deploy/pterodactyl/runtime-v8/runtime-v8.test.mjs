@@ -194,6 +194,17 @@ test('provider URL is HTTPS remotely and may be loopback HTTP', () => {
   assert.throws(() => providerEndpoint('https://user:pass@example.com/v1'))
 })
 
+test('provider URL permits HTTP on Tailscale hosts and rejects suffix lookalikes', () => {
+  assert.equal(providerEndpoint('http://proxy.example-tailnet.ts.net:18317/v1'), 'http://proxy.example-tailnet.ts.net:18317/v1/chat/completions')
+  assert.equal(providerEndpoint('http://PROXY.EXAMPLE-TAILNET.TS.NET:18317/v1'), 'http://proxy.example-tailnet.ts.net:18317/v1/chat/completions')
+  for (const host of ['ts.net', 'evilts.net', 'proxy.example-tailnet.ts.net.example.com', 'ts.net-example.com']) {
+    assert.throws(() => providerEndpoint(`http://${host}:18317/v1`), /Remote provider URL requires HTTPS/)
+  }
+  assert.throws(() => providerEndpoint('http://user:pass@proxy.example-tailnet.ts.net:18317/v1'), /cannot contain credentials/)
+  assert.throws(() => providerEndpoint('http://proxy.example-tailnet.ts.net:18317/v1?key=fixture'), /query/)
+  assert.throws(() => providerEndpoint('ftp://proxy.example-tailnet.ts.net:18317/v1'), /Remote provider URL requires HTTPS/)
+})
+
 const fakeFactorio = `#!/usr/bin/env node
 import fs from 'node:fs';
 import net from 'node:net';
