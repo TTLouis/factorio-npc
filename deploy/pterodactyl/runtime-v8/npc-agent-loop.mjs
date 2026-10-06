@@ -16,13 +16,26 @@ import {
 } from './common.mjs'
 import { AgentContext, contextRestagedRow, conversationChars, STALE_REDRIVE_LIMIT, STALE_REPLY_ERROR_CODE, STALE_REPLY_MESSAGE } from './agent-context.mjs'
 import { EXECUTOR_ROLE, PLANNER_ROLE, roleSystemPrompt } from './agent-roles.mjs'
-import { buildHandoffPacket } from './handoff-packet.mjs'
+import {
+  buildHandoffPacket,
+  deriveResidualNeeds,
+  EXECUTOR_FACT_LIMITS,
+  executorFactsRefreshMessage,
+  mergeRecipeFact,
+  neededItems,
+  normalizeFactTag,
+  parseInventoryCounts,
+  recipeFactFromRequiresMachine,
+  recipeFactsFromDetails,
+  selectRecipeFacts,
+  stepContractNeeds,
+} from './handoff-packet.mjs'
 import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CODES } from './authorization.mjs'
 import { JevCheckpoints } from './jev-checkpoints.mjs'
 import { buildVerifiedResults } from './verified-results.mjs'
 import { cleanMemoryText, sanitizeDurableModelText, sanitizeDurableModelValue } from './durable-text.mjs'
 import { normalizeProviderPlanContent, providerCapabilityProfile } from './provider.mjs'
-import { executeAuthorizedBatch } from './supervisor-adapter.mjs'
+import { actorChanged, deploymentStatus, executeAuthorizedBatch } from './supervisor-adapter.mjs'
 import { OPERATION_LEDGER_LIMIT } from './operation-ledger.mjs'
 import {
   batchWatermark,
@@ -107,7 +120,7 @@ import { activeStepOf, parseTimeReview, PlanTiming } from './plan-time-estimate.
 import { insertTailBlock } from './prompt-prefix.mjs'
 import { ChatAcknowledger } from './responsiveness.mjs'
 import { UsageLedger } from './usage-ledger.mjs'
-import { checkpointMachineRequirements, checkpointWaitRequirement, compactMachineFacts, conditionEta, conditionWakeCause, freshReadCondition, isWaitOnlyBatch, mostRecentWorkingUnit, safeWaitSchedule, scheduleWait, waitOnlyTicks, WAIT_BASIS, WAIT_FACT_MAX_MACHINES, WAIT_FACT_RADIUS } from './production-wait.mjs'
+import { checkpointMachineRequirements, checkpointWaitRequirement, compactMachineFacts, compactMachineInventories, conditionEta, conditionWakeCause, freshReadCondition, isWaitOnlyBatch, mostRecentWorkingUnit, safeWaitSchedule, scheduleWait, waitOnlyTicks, WAIT_BASIS, WAIT_FACT_MAX_MACHINES, WAIT_FACT_RADIUS } from './production-wait.mjs'
 import {
   combineGroundingWithChallenge,
   ensureGoalRequirements,
@@ -118,6 +131,7 @@ import {
   describeLockedRecipePreflight,
   REQUIREMENTS_PREFIX,
   refreshGoalRequirementsAtShelfPickup,
+  requirementTargets,
   retireGoalRequirements,
 } from './goal-requirements.mjs'
 import { abortSkillChoice, ensureSkillOffers, injectedSkillChars, refreshSkillOffersAtShelfPickup, SKILL_OFFERS_PREFIX, skillOffersContext, traceSkillLoaded, traceSkillsFollowed } from './skill-offers.mjs'
@@ -361,6 +375,8 @@ export function requiresMachineFacts(preflight) {
       energy: recipe.energy,
       ingredients: list(recipe.ingredients, 8),
       products: list(recipe.products, 8),
+      ingredients_truncated: Array.isArray(recipe.ingredients) && recipe.ingredients.length > 8,
+      products_truncated: Array.isArray(recipe.products) && recipe.products.length > 8,
     },
     machines: {
       matched_count: machines.matched_count,
@@ -2818,6 +2834,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.conditionPollPromise = null
     this.pendingBlindWait = null
     this.liveEntityObservations = new Map()
+    // Repair unit D2: what a fresh executor can be told. Recipe facts are stable game data and outlive requests;
+    // inventory observations are world state and reset with the entity observations. The mutation sequence orders them.
+    this.handoffRecipeFacts = new Map()
+    this.handoffInventoryObservations = new Map()
+    this.handoffRequirementMachines = new Map()
+    this.worldMutationSeq = 0
+    this.batchInFlight = false // an operation batch was sent and its receipt has not been read yet
+    this.pendingExecutorFactsRefresh = null // an executor handoff whose counts were deferred because of that batch
     this.rejectedExactTargets = new Set()
     this.staleExactPreflightRetries = 0
     this.modelCorrectablePreflightRetries = 0
@@ -2880,6 +2904,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.pendingInteractionAmendment = null
     this.pendingAmendmentConversationSeq = undefined
     this.pendingBlindWait = null
+    // D2: a reset (actor replacement, death, a new request) ends whatever the deferred handoff facts were waiting for.
+    this.batchInFlight = false
+    this.batchInFlightBeforeSend = undefined
+    this.pendingExecutorFactsRefresh = null
     this.agentContext.beginLineage() // planner role: an executor role never leaks into the next chat
     super.reset()
   }
@@ -3010,7 +3038,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // (the slice-close wake passes the state it just settled); `shelfCandidates`
   // rides a planner restage at a shelf pickup. Undefined when no goal has been
   // admitted (a reducer-less memory, a goal that never started).
-  buildRestagePacket({ checkpoint, role, reason, budget, note, actor, runtime, shelfCandidates, planningState, jevFacts, jevHints } = {}) {
+  buildRestagePacket({ checkpoint, role, reason, budget, note, actor, runtime, shelfCandidates, planningState, jevFacts, jevHints, executorFacts } = {}) {
     const packetRole = role ?? this.agentContext.role
     const held = planningState ?? this.memory.planningState?.(this.activePlanKey())
     if (!held?.goal?.goal_id) return undefined
@@ -3029,6 +3057,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       shelfCandidates,
       jevFacts, // U11 advisory: bounded facts Jev's observation families add (never replacing a mandatory record)
       jevHints,
+      executorFacts: packetRole === EXECUTOR_ROLE ? executorFacts : undefined, // D2: harness-read facts for a fresh executor, labelled fresh / stale / historical
       // A staged user amendment belongs to the planner: it rides the packet of a planner restage (C5,
       // C1/C2) so the restage that replaces the conversation holding its text does not drop it. The
       // executor never gets it.
@@ -3104,13 +3133,56 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           }
         }
       }
-      const packet = args.packet ?? this.buildRestagePacket({ ...args, role, planningState: state, jevFacts: prepared?.facts, jevHints: prepared?.hints })
+      // D2: a fresh executor is briefed with what the harness read from the live game (stable recipe facts, held counts
+      // re-read now, the step's machine, residual needs). The reads are fenced by actor and epoch: a change refuses the
+      // restage, a failed read marks the last values stale. Planner packets carry none of it.
+      let executorFacts
+      let executorFactsMeta
+      // A restage the guard will refuse anyway spends no reads.
+      if (!args.packet && role === EXECUTOR_ROLE && !this.restageGuardRefusal(safePoint)) {
+        const before = getActivePlanningPlan(state)
+        const gathered = await this.gatherExecutorHandoffFacts({ state, actor: args.actor, runtime: args.runtime })
+        if (gathered?.refusal) {
+          await this.jev.afterRestage(prepared, { restaged: false, reason: gathered.refusal })
+          await this.traceEvent('context.restage_refused', { role, checkpoint, reason: gathered.refusal, reads_attempted: gathered.meta?.reads_attempted, request_id: requestId }, { requestId })
+          return { restaged: false, reason: gathered.refusal }
+        }
+        // The reducer is read again after the awaits: a step or plan that moved on means these facts brief the wrong step.
+        const after = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()) ?? state)
+        if (before && ((after?.plan_id ?? null) !== before.plan_id || (after?.active_step_index ?? null) !== before.active_step_index)) {
+          await this.jev.afterRestage(prepared, { restaged: false, reason: 'state_moved_on_during_handoff_refresh' })
+          await this.traceEvent('context.restage_refused', { role, checkpoint, reason: 'state_moved_on_during_handoff_refresh', request_id: requestId }, { requestId })
+          return { restaged: false, reason: 'state_moved_on_during_handoff_refresh' }
+        }
+        // The state the awaits ran under may have stopped being restageable (goal paused or met, plan frozen): the same checks
+        // as before the reads, on the state as it is now, and the packet is built from that state.
+        if (!args.planningState) {
+          const fresh = this.memory.planningState?.(this.activePlanKey()) ?? state
+          const stale = stateRefusal(fresh)
+          if (stale) {
+            await this.jev.afterRestage(prepared, { restaged: false, reason: stale })
+            await this.traceEvent('context.restage_refused', { role, checkpoint, reason: stale, request_id: requestId }, { requestId })
+            return { restaged: false, reason: stale }
+          }
+          state = fresh
+        }
+        executorFacts = gathered?.facts
+        executorFactsMeta = gathered?.meta
+      }
+      const packet = args.packet ?? this.buildRestagePacket({ ...args, role, planningState: state, jevFacts: prepared?.facts, jevHints: prepared?.hints, executorFacts })
       if (!packet) {
         await this.jev.afterRestage(prepared, { restaged: false, reason: 'no_admitted_goal' })
         return { restaged: false, reason: 'no_admitted_goal' }
       }
       const restaged = await this.restageContext({ checkpoint, reason: args.reason, packet, role, softLimitTokens: args.softLimitTokens, requestId, safePoint, parkPlanner: args.parkPlanner })
       await this.jev.afterRestage(prepared, restaged)
+      if (restaged.restaged === true && packet.executor_facts) {
+        await this.traceExecutorFactsCarried({ packet, restaged, checkpoint, requestId, meta: executorFactsMeta })
+        // The counts were deferred behind a batch in flight: the first continuation after its receipt carries them (once).
+        if (executorFactsMeta?.counts_deferred) {
+          this.pendingExecutorFactsRefresh = { handoff_id: restaged.handoff_id, request_id: requestId, checkpoint, actor_id: this.epoch?.actor_id, epoch: this.epoch?.epoch }
+        }
+      }
       return restaged
     }
     catch (error) {
@@ -3533,9 +3605,22 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       role: EXECUTOR_ROLE,
       reason: decision.reason,
       actor: this.epoch,
+      runtime: this.lastRuntimeView(),
       softLimitTokens,
       requestId: rid,
     })
+  }
+
+  // The runtime state the last batch receipt showed (task_state, queue_length, idle), when one was read: lets the handoff's
+  // in-flight check rest on what the game reported and not only on the harness's own send/receipt flag.
+  lastRuntimeView() {
+    const view = this.lastTaskStatusView
+    if (!view || typeof view !== 'object' || typeof view.task_state !== 'string') return undefined
+    return {
+      task_state: view.task_state,
+      queue_length: Number.isFinite(view.queue_length) ? view.queue_length : undefined,
+      idle: view.task_state === 'idle' && view.queue_empty !== false,
+    }
   }
 
   // The executor's plan contract. There is ONE submitPlan tool for both roles; the
@@ -3971,6 +4056,360 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return toolCommand(name, args)
   }
 
+  // --- Repair unit D2: the facts a fresh executor is briefed with ------------------------------------------------
+  //
+  // A restage into the executor discards the conversation that held the planner's reads (a lab recipe, an inventory
+  // read). The harness keeps what it read from the live game and re-reads what changes, then labels each part of the
+  // packet as stable, fresh, stale or historical. Nothing here decides what the executor does next.
+
+  resetHandoffObservations() {
+    this.batchInFlight = false
+    this.pendingExecutorFactsRefresh = null
+    this.handoffInventoryObservations = new Map()
+    this.handoffRequirementMachines = new Map()
+  }
+
+  // The world changed, or may have: an operation batch was sent, or a batch receipt was read. Observations taken
+  // under an earlier sequence number date from before that change.
+  noteWorldMutation({ sent = false } = {}) {
+    this.worldMutationSeq = (this.worldMutationSeq ?? 0) + 1
+    if (sent) this.batchInFlight = true
+  }
+
+  // Where and when a read happened: the game tick of the last completed batch the harness knows, the actor epoch and
+  // the wall clock. The tick is omitted when no batch has completed yet (the harness has no other tick source).
+  observationTag() {
+    const tick = this.lastTaskStatusView?.last_completed_batch?.tick
+    return normalizeFactTag({
+      tick: Number.isSafeInteger(tick) ? tick : undefined,
+      epoch: this.epoch?.epoch,
+      actor_id: this.epoch?.actor_id,
+      at_ms: Date.now(),
+    })
+  }
+
+  rememberRecipeFact(fact) {
+    if (!fact?.name) return
+    const existing = this.handoffRecipeFacts.get(fact.name)
+    this.handoffRecipeFacts.delete(fact.name) // a re-read is the most recent read
+    this.handoffRecipeFacts.set(fact.name, mergeRecipeFact(existing, fact))
+    while (this.handoffRecipeFacts.size > EXECUTOR_FACT_LIMITS.cachedRecipes) {
+      const oldest = this.handoffRecipeFacts.keys().next().value
+      if (oldest === undefined) break
+      this.handoffRecipeFacts.delete(oldest)
+    }
+  }
+
+  // Tool results the planner or executor read from the live game that a later executor should not have to re-read.
+  recordHandoffToolFacts(toolName, raw) {
+    try {
+      if (toolName === 'getRecipeDetails') {
+        let parsed
+        try { parsed = JSON.parse(String(raw ?? '')) }
+        catch { return }
+        const tag = this.observationTag()
+        for (const fact of recipeFactsFromDetails(parsed, { tag })) this.rememberRecipeFact(fact)
+      }
+      else if (toolName === 'getInventoryItems') {
+        const counts = parseInventoryCounts(raw)
+        if (!counts) return
+        // A full inventory snapshot lists what is held; an item known earlier that is absent is held no more.
+        for (const known of this.handoffInventoryObservations.keys()) if (!counts.has(known)) counts.set(known, 0)
+        const tag = this.observationTag()
+        const seq = this.worldMutationSeq
+        let stored = 0
+        for (const [item, count] of counts) {
+          if (stored++ >= 64) break
+          this.handoffInventoryObservations.delete(item)
+          this.handoffInventoryObservations.set(item, { count, seq, ...tag })
+        }
+        while (this.handoffInventoryObservations.size > 64) this.handoffInventoryObservations.delete(this.handoffInventoryObservations.keys().next().value)
+      }
+    }
+    catch (error) {
+      this.log(`[handoff] fact capture failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  // The recipe a requires_machine preflight reported (repair unit D1 facts), with its compatible machine names.
+  recordRequiresMachineRecipe(facts) {
+    try {
+      const fact = recipeFactFromRequiresMachine(facts, { tag: this.observationTag() })
+      if (fact) this.rememberRecipeFact(fact)
+    }
+    catch {}
+  }
+
+  // The requirements answer's machine options for machine-output targets (goal-requirements.mjs queryRequirements).
+  recordRequirementsFacts(parsed) {
+    try {
+      for (const report of Array.isArray(parsed?.machines) ? parsed.machines : []) {
+        const machines = (Array.isArray(report?.options) ? report.options : []).map(option => option?.entity).filter(entity => typeof entity === 'string' && entity)
+        if (typeof report?.recipe !== 'string' || machines.length === 0) continue
+        this.handoffRequirementMachines.set(report.recipe, { machines: [...new Set(machines)].slice(0, EXECUTOR_FACT_LIMITS.recipeMachines), truncated: report.truncated === true || machines.length > EXECUTOR_FACT_LIMITS.recipeMachines, tick: Number.isSafeInteger(parsed.tick) ? parsed.tick : undefined })
+      }
+    }
+    catch {}
+  }
+
+  // Entity kinds seen earlier in this loop, counted by name, with exact ids withheld: a fresh conversation gets the
+  // history as history, never as executable targets.
+  historicalEntityFacts() {
+    const kinds = new Map()
+    for (const observation of this.liveEntityObservations?.values?.() ?? []) {
+      if (typeof observation?.name !== 'string') continue
+      const entry = kinds.get(observation.name) ?? { name: observation.name, count: 0, tick: undefined }
+      entry.count += 1
+      if (Number.isSafeInteger(observation.observed_tick) && (entry.tick === undefined || observation.observed_tick > entry.tick)) entry.tick = observation.observed_tick
+      kinds.set(observation.name, entry)
+    }
+    return [...kinds.values()].sort((left, right) => (right.count - left.count) || left.name.localeCompare(right.name)).slice(0, EXECUTOR_FACT_LIMITS.historicalKinds)
+  }
+
+  // One bounded live read of how many of an item the actor holds, through the same runtime condition the checkpoints use.
+  async readActorItemCount(item) {
+    try {
+      const raw = JSON.parse(String(await this.rcon.command(runtimeConditionCommand({ kind: 'inventory_count', item_name: item, minimum: 1 }))).trim())
+      return raw?.ok === true && Number.isSafeInteger(raw.current) && raw.current >= 0 ? raw.current : undefined
+    }
+    catch {
+      return undefined
+    }
+  }
+
+  async handoffFenceCheck(fence, phase) {
+    const status = await deploymentStatus(this.rcon, { requireAllowed: true })
+    if (actorChanged(fence, status)) {
+      const error = new AgentLoopError(`NPC actor or epoch changed ${phase} the executor handoff refresh`)
+      error.handoffFence = `actor_changed_${phase}_handoff_refresh`
+      throw error
+    }
+  }
+
+  // The facts for the packet of an executor restage. Reads are fenced by the actor and epoch the restage was asked for:
+  // a change before or after the reads refuses the restage (`refusal`), because nothing read under another actor may brief
+  // this one. A failed read is not a refusal: the last value the harness saw is carried marked stale, never as current.
+  // Returns undefined when there is nothing to say; `{ refusal, meta }` or `{ facts, meta }` otherwise. Never throws.
+  //
+  // A batch in flight (sent, receipt not yet read) makes any count read now a read of a world that is still changing, and
+  // the executor only sees the packet after the batch finishes: counts, the checkpoint machine and residual needs are then
+  // NOT read (`counts_deferred`); recipe facts and history still ride. `mode: 'refresh'` is the later read, taken after
+  // the receipt landed: counts, machine and residual only.
+  async gatherExecutorHandoffFacts({ state, actor, runtime, mode = 'packet' }) {
+    try {
+      const plan = getActivePlanningPlan(state)
+      const step = plan?.steps?.[plan.active_step_index]
+      if (!plan || !step) return undefined
+      const limits = EXECUTOR_FACT_LIMITS
+      const needs = stepContractNeeds(step)
+      const wanted = [...new Set([...needs.items, ...requirementTargets(state.goal?.definition).items.map(item => item.name)])]
+      const cached = [...this.handoffRecipeFacts.values()]
+      const closure = neededItems(needs.roots, cached)
+      const recipes = selectRecipeFacts(cached, { wanted, needed: closure.items }).map((recipe) => {
+        const known = this.handoffRequirementMachines.get(recipe.name)
+        return known && recipe.machines.length === 0
+          ? { ...recipe, machines: known.machines, machines_truncated: known.truncated, source: `${recipe.source}+requirements` }
+          : recipe
+      })
+      const readItems = []
+      const addItem = (item) => {
+        if (typeof item === 'string' && item && !readItems.includes(item) && readItems.length < limits.countItems) readItems.push(item)
+      }
+      closure.items.forEach(addItem)
+      needs.items.forEach(addItem)
+      for (const recipe of recipes) {
+        if (recipe.products.some(product => wanted.includes(product.name))) recipe.ingredients.filter(ingredient => ingredient.type === 'item').forEach(ingredient => addItem(ingredient.name))
+      }
+      const machineRequirement = checkpointMachineRequirements(step.completion_contract)[0]
+      const historical = this.historicalEntityFacts()
+
+      const source = actor ?? this.epoch
+      const fence = Number.isSafeInteger(source?.actor_id) && Number.isSafeInteger(source?.epoch) && typeof source?.mode === 'string' && typeof source?.actor_kind === 'string' ? source : undefined
+      const meta = { reads_attempted: 0, reads_failed: 0, refresh: 'skipped', residual_omitted: undefined, recipe_cache: cached.length, counts_deferred: undefined }
+      const fresh = new Map()
+      let freshMachine
+      const inFlight = this.batchInFlight === true || runtime?.idle === false || (Number.isFinite(runtime?.queue_length) && runtime.queue_length > 0)
+      if (inFlight && mode === 'refresh') return undefined
+      if (inFlight) {
+        meta.counts_deferred = 'batch_in_flight'
+        meta.refresh = 'deferred'
+      }
+      else if ((readItems.length > 0 || machineRequirement) && fence) {
+        try {
+          await this.handoffFenceCheck(fence, 'before')
+          for (const item of readItems) {
+            meta.reads_attempted += 1
+            const current = await this.readActorItemCount(item)
+            if (current === undefined) meta.reads_failed += 1
+            else fresh.set(item, current)
+          }
+          if (machineRequirement) {
+            meta.reads_attempted += 1
+            try {
+              const facts = await this.readFreshMachine(machineRequirement.unit_number, machineRequirement, { wait: { actor_id: fence.actor_id, actor_epoch: fence.epoch } })
+              if (facts?.error) meta.reads_failed += 1
+              else freshMachine = facts
+            }
+            catch (error) {
+              if (/epoch changed/i.test(error instanceof Error ? error.message : String(error))) {
+                const fenced = new AgentLoopError('NPC actor or epoch changed during the executor handoff refresh')
+                fenced.handoffFence = 'actor_changed_during_handoff_refresh'
+                throw fenced
+              }
+              meta.reads_failed += 1
+            }
+          }
+          await this.handoffFenceCheck(fence, 'during')
+          meta.refresh = meta.reads_failed === 0 ? 'ok' : meta.reads_failed >= meta.reads_attempted ? 'failed' : 'partial'
+        }
+        catch (error) {
+          if (error?.handoffFence) return { refusal: error.handoffFence, meta }
+          meta.refresh = 'failed'
+          meta.reads_failed = meta.reads_attempted + Math.max(0, readItems.length - fresh.size)
+          fresh.clear()
+          freshMachine = undefined
+        }
+      }
+
+      const tag = this.observationTag()
+      // Why an older value is carried: the read did not happen or failed, and whether a batch was sent after it was taken.
+      const staleReason = seq => [fence ? 'fresh_read_failed' : 'refresh_skipped', Number.isSafeInteger(seq) && seq < this.worldMutationSeq ? 'predates_latest_batch' : undefined].filter(Boolean).join(',')
+      const items = []
+      const unavailable = []
+      for (const item of inFlight ? [] : readItems) {
+        if (fresh.has(item)) {
+          const count = fresh.get(item)
+          items.push({ item, count, state: 'fresh' })
+          this.handoffInventoryObservations.delete(item)
+          this.handoffInventoryObservations.set(item, { count, seq: this.worldMutationSeq, ...tag })
+          continue
+        }
+        const prior = this.handoffInventoryObservations.get(item)
+        if (prior) items.push({ item, count: prior.count, state: 'stale', ...normalizeFactTag({ tick: prior.tick, epoch: prior.epoch }), reason: staleReason(prior.seq) })
+        else unavailable.push(item)
+      }
+
+      let machine
+      if (inFlight) machine = undefined
+      else if (freshMachine) machine = { state: 'fresh', facts: freshMachine, as_of: tag }
+      else if (machineRequirement) {
+        const known = this.liveObservedExactTarget(machineRequirement.unit_number)
+        if (known) {
+          machine = {
+            state: 'stale',
+            facts: {
+              unit_number: machineRequirement.unit_number,
+              name: known.name,
+              working: known.working,
+              ...(known.inventories ? { inventories: compactMachineInventories({ type: known.type, inventories: known.inventories }) } : {}),
+            },
+            as_of: normalizeFactTag({ tick: known.observed_tick, epoch: this.epoch?.epoch }),
+            reason: staleReason(known.observed_seq),
+          }
+        }
+      }
+
+      let residual
+      if (inFlight) meta.residual_omitted = 'batch_in_flight'
+      else if (needs.roots.length === 0) meta.residual_omitted = 'no_inventory_contract_root'
+      else if (!closure.complete) meta.residual_omitted = 'too_many_items'
+      else {
+        const derived = deriveResidualNeeds({ roots: needs.roots, recipes: cached, held: fresh })
+        if (derived.ok) residual = { rows: derived.rows, roots: needs.roots }
+        else meta.residual_omitted = derived.reason
+      }
+
+      const counts = { items, unavailable, as_of: tag, ...(meta.counts_deferred ? { deferred: meta.counts_deferred } : {}) }
+      if (mode === 'refresh') {
+        const any = items.length > 0 || unavailable.length > 0 || machine || residual
+        return { facts: any ? { counts, machine, residual } : undefined, meta }
+      }
+      const hasContent = recipes.length > 0 || items.length > 0 || unavailable.length > 0 || counts.deferred || machine || residual || historical.length > 0
+      return { facts: hasContent ? { recipes, counts, machine, residual, historical_entities: historical } : undefined, meta }
+    }
+    catch (error) {
+      this.log(`[handoff] executor facts failed: ${error instanceof Error ? error.message : String(error)}`)
+      return undefined
+    }
+  }
+
+  // The deferred half of a handoff (see gatherExecutorHandoffFacts): once the receipt of the batch that was in flight has landed,
+  // the first continuation of the SAME executor conversation carries one bounded [HARNESS] message with the counts, the
+  // checkpoint machine and the residual needs, read now under the same actor/epoch fence, in the packet's labels. Once per
+  // deferred handoff: the pending marker is consumed whatever happens. Returns the message text, or undefined. Never throws.
+  // except nothing: a failed read or a changed actor simply yields no message (stale work fails safe).
+  async executorFactsRefreshText() {
+    const pending = this.pendingExecutorFactsRefresh
+    if (!pending) return undefined
+    if (this.batchInFlight) return undefined // another batch went out meanwhile: wait for its receipt
+    this.pendingExecutorFactsRefresh = null
+    const requestId = this.traceRequest?.id ?? pending.request_id
+    const skip = async (reason) => {
+      try {
+        await this.traceEvent('context.executor_facts_refresh_skipped', { request_id: requestId, handoff_id: pending.handoff_id, reason }, { requestId })
+      }
+      catch {}
+      return undefined
+    }
+    try {
+      if (this.agentContext.role !== EXECUTOR_ROLE || this.agentContext.handoffId !== pending.handoff_id) return skip('handoff_replaced')
+      if (pending.actor_id !== this.epoch?.actor_id || pending.epoch !== this.epoch?.epoch) return skip('actor_changed_since_handoff')
+      const state = this.memory.planningState?.(this.activePlanKey())
+      if (!state?.goal?.goal_id) return skip('no_admitted_goal')
+      const gathered = await this.gatherExecutorHandoffFacts({ state, actor: this.epoch, mode: 'refresh' })
+      if (gathered?.refusal) return skip(gathered.refusal)
+      const text = executorFactsRefreshMessage(gathered?.facts)
+      if (!text) return skip('nothing_to_refresh')
+      const counts = gathered.facts.counts?.items ?? []
+      await this.traceEvent('context.executor_facts_refreshed_after_batch', {
+        request_id: requestId,
+        handoff_id: pending.handoff_id,
+        checkpoint: pending.checkpoint,
+        fresh_items: counts.filter(entry => entry.state === 'fresh').length,
+        stale_items: counts.filter(entry => entry.state === 'stale').length + (gathered.facts.counts?.unavailable?.length ?? 0),
+        residual_needs: gathered.facts.residual?.rows?.length ?? 0,
+        residual_omitted_reason: gathered.facts.residual ? undefined : gathered.meta?.residual_omitted,
+        machine: gathered.facts.machine?.state ?? 'none',
+        reads_attempted: gathered.meta?.reads_attempted,
+        reads_failed: gathered.meta?.reads_failed,
+        reason: 'batch_receipt_landed_after_deferred_handoff_counts',
+      }, { requestId })
+      return text
+    }
+    catch {
+      return undefined
+    }
+  }
+
+  // The trace row of an executor restage that carried facts: what was carried, how fresh it is and why. Never throws
+  // (the restage it describes has already happened).
+  async traceExecutorFactsCarried({ packet, restaged, checkpoint, requestId, meta }) {
+    try {
+      const summary = packet.executor_facts
+      const factRecord = key => key.startsWith('recipe_fact_') || ['held_counts', 'held_counts_stale', 'checkpoint_machine', 'residual_needs', 'historical_entities'].includes(key)
+      await this.traceEvent('context.executor_facts_carried', {
+        request_id: requestId,
+        handoff_id: restaged.handoff_id,
+        role: EXECUTOR_ROLE,
+        checkpoint,
+        recipe_facts: summary.recipe_facts,
+        recipe_facts_known: meta?.recipe_cache,
+        fresh_items: summary.fresh_items,
+        stale_items: summary.stale_items,
+        residual_needs: summary.residual_needs,
+        residual_omitted_reason: summary.residual_needs === 0 ? meta?.residual_omitted : undefined,
+        machine: summary.machine,
+        historical_entity_kinds: summary.historical_entity_kinds,
+        reads_attempted: meta?.reads_attempted,
+        reads_failed: meta?.reads_failed,
+        refresh: meta?.refresh,
+        dropped_for_size: (packet.dropped ?? []).filter(factRecord),
+        reason: 'executor_context_rebuilt_without_the_prior_conversation_reads',
+      }, { requestId })
+    }
+    catch {}
+  }
+
   recordLiveEntityObservation(entity, actorPosition, source, observationMeta = {}) {
     if (!entity || typeof entity !== 'object' || typeof entity.name !== 'string') return
     const unitNumber = Number.isSafeInteger(entity.unit_number) ? entity.unit_number : undefined
@@ -4010,6 +4449,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       status: Number.isFinite(entity.status) ? entity.status : undefined,
       inventories: Array.isArray(entity.inventories) ? sanitizeDurableModelValue(entity.inventories) : undefined,
       recipe: typeof entity.recipe === 'string' ? cleanMemoryText(entity.recipe, 160) : undefined,
+      // D2: when this was seen (the game tick of the last completed batch, when known), for the historical record.
+      observed_seq: this.worldMutationSeq,
+      observed_tick: Number.isSafeInteger(this.lastTaskStatusView?.last_completed_batch?.tick) ? this.lastTaskStatusView.last_completed_batch.tick : undefined,
     })
   }
 
@@ -6278,6 +6720,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // A prepared attempt the game provably never saw (rejected before transport, or the game refused it before recording
   // anything): settle it as not happened so it leaves no hold.
   async settleUnsentOperation(pending, ownerKey, reason) {
+    // D2: the game never saw this send, so it did not put a batch in flight: back to what was true before it.
+    if (this.batchInFlightBeforeSend !== undefined) {
+      this.batchInFlight = this.batchInFlightBeforeSend === true
+      this.batchInFlightBeforeSend = undefined
+    }
     this.memory.updatePendingOperation?.(ownerKey, { effect: EFFECT.NOT_HAPPENED, reason }, pending.operation_key)
     if (this.memory.clearPendingOperation?.(ownerKey, { operationKey: pending.operation_key }) !== true) {
       await this.traceEvent('operation.settlement_refused', { request_id: pending.request_id, operation_key: pending.operation_key,
@@ -6642,6 +7089,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       : undefined
 
     this.liveEntityObservations = new Map()
+    this.resetHandoffObservations()
     this.rejectedExactTargets = new Set()
     this.staleExactPreflightRetries = 0
     this.modelCorrectablePreflightRetries = 0
@@ -6925,6 +7373,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.outputBudgetRecoveryGuard = null
     this.clearActionOmissionRecovery()
     this.liveEntityObservations = new Map()
+    this.resetHandoffObservations()
     this.rejectedExactTargets = new Set()
     this.staleExactPreflightRetries = 0
     this.modelCorrectablePreflightRetries = 0
@@ -7611,6 +8060,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async taskStatusReceipt() {
+    this.noteWorldMutation() // D2: a batch receipt is being read; whatever was observed before it is history
+    this.batchInFlight = false
+    this.batchInFlightBeforeSend = undefined
     try {
       const raw = String(await this.rcon.command(toolCommand('getTaskStatus', {}))).slice(0, 8_000_000)
       await this.settleOutstandingOperation(raw)
@@ -8061,6 +8513,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // Repair unit B: a finished wait-only batch carries a fresh read of the step's machine, so the model never
     // plans its next move from a stale narrative observation.
     const blindWaitFacts = pendingAmendment ? undefined : await this.blindWaitReceiptFacts(receipt)
+    const deferredFacts = await this.executorFactsRefreshText() // D2: counts a batch in flight kept out of the handoff packet
 
     this.reasoningTriggerSource = routed.route === 'continue_current'
       ? 'post_step_continue'
@@ -8089,7 +8542,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let wakeFailed = true
     try {
       const result = await this.continueFromModMessage(
-        `[MOD] Autorio operation batch completed. ${stepOpenHint ? `${stepOpenHint} ` : ''}Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}${blindWaitFacts ? ` ${blindWaitFacts}` : ''}`,
+        `[MOD] Autorio operation batch completed. ${stepOpenHint ? `${stepOpenHint} ` : ''}Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}${blindWaitFacts ? ` ${blindWaitFacts}` : ''}${deferredFacts ? ` ${deferredFacts}` : ''}`,
         'factorio.completion_continuation',
       )
       wakeFailed = false
@@ -8227,9 +8680,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const recoverableGuidance = recoverable
       ? ` [HARNESS] The engine refused the ${cleanMemoryText(recoverable.entity_name ?? 'entity', 100)} placement at the coordinate you chose (${cleanMemoryText(recoverable.code, 64)}); this is a correctable placement error, not a world blocker, and the committed step is unchanged. Use the receipt's placement_footprint, placement_grid.nearest_valid_center and placement_blockers to choose a valid position (or clear the reported blocker); when the machine must cover or receive another entity's output, use getPlacementCandidates with covers_position and place the returned candidate instead of a hand-picked centre. Then resubmit the same step with its dependent operations. Do not change the plan's steps. Attempt ${recoverable.attempt} of ${recoverable.retry_budget} before the step is blocked.`
       : ''
+    const deferredFacts = await this.executorFactsRefreshText() // D2: counts a batch in flight kept out of the handoff packet
     try {
       return await this.continueFromModMessage(
-        `[MOD] Autorio operation error: ${cleanError}. A failure cancels the operations queued behind it; a refused item move (nothing moved, items still held) does not, so read the receipt for which operations completed. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}${recoverableGuidance}${supplyGuidance}`,
+        `[MOD] Autorio operation error: ${cleanError}. A failure cancels the operations queued behind it; a refused item move (nothing moved, items still held) does not, so read the receipt for which operations completed. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}${recoverableGuidance}${supplyGuidance}${deferredFacts ? ` ${deferredFacts}` : ''}`,
         'factorio.error_continuation',
       )
     }
@@ -9595,6 +10049,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const original = String(results[index].content ?? '')
       const toolName = admittedPrepared[index]?.tool?.function?.name
       this.recordLiveEntityToolResult(toolName, original)
+      if (admittedCached[index] !== true) this.recordHandoffToolFacts(toolName, original) // D2: stable recipe facts and counts a later executor is briefed with
       const loadedSkill = this.recordLoadedSkillToolResult(toolName, admittedPrepared[index]?.args, original)
       if (loadedSkill) {
         await this.traceEvent('skill.context_loaded', {
@@ -10058,6 +10513,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const requestId = this.traceRequest?.id
     const index = Number.isSafeInteger(preflight.operation_index) ? preflight.operation_index : 0
     const facts = requiresMachineFacts({ ...preflight, operation_index: index })
+    this.recordRequiresMachineRecipe(facts) // D2: the recipe and its compatible machines stay available across a restage
     const prior = this.requiresMachinePreflightRetries ?? 0
     const base = {
       request_id: requestId,
@@ -11261,7 +11717,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       let reconciledAdmitted = false
       try {
+        this.batchInFlightBeforeSend = this.batchInFlight // restored if the game provably never saw this send
+        this.noteWorldMutation({ sent: true }) // D2: observations taken before this send date from before the batch; the batch is in flight until its receipt is read
         const acknowledgement = await executeAuthorizedBatch(this.rcon, before.epoch, commands, undefined, pendingAdmission)
+        this.batchInFlightBeforeSend = undefined // the game took it: it stays in flight until its receipt
         await this.traceEvent('operations.ack', {
           operations: operations.map((operation, index) => ({ ...operation, admission_result: acknowledgement.results[index] })),
         })
@@ -11287,6 +11746,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         if (reconciliation?.admitted) {
           // The game took the batch; only its receipt is outstanding. Carry on as acknowledged: nothing is sent again.
           reconciledAdmitted = true
+          this.batchInFlightBeforeSend = undefined
           await this.traceEvent('operations.ack', {
             operations: operations.map(operation => ({ ...operation, admission_result: 'reconciled_admitted' })),
             reconciled: true,
