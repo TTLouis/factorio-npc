@@ -2204,6 +2204,7 @@ Object.assign(HANDLERS, {
       runtime_validation: {
         passed: true,
         validated_at: now,
+        ...(event.runtime_validation?.scope === 'completion_contracts' ? { scope: 'completion_contracts' } : {}),
         unsupported_step_ids: stringList(event.runtime_validation?.unsupported_step_ids, { max: 16, maxLength: 200 }),
       },
     }, PLAN_STATUS.COMMITTED, { now, reason: 'auto_commit_runtime_validated' }))

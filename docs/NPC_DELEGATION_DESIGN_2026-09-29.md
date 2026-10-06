@@ -441,6 +441,8 @@ After U11: a proposed flash-only live test (both roles on DeepSeek flash, trial 
 
 ## 14. Week 1 macro extensions (owner Q&A, 2026-09-30; not built)
 
+October 6 follow-up: the owner selected planner → executor delegation for one NPC before the first operation batch. Protocol-v2 declared planner-only drafts now commit supported completion contracts with `operations: []`, park the planner at C3 and ask a fresh executor for the first actions. Actual executor operations retain all admission checks; C3 does not reset the allowance or manufacture progress. Legacy/action-bearing decisions retain the original boundary. Seven scripted regressions and the updated offline planning probe are green; see [the new checkpoint](validation/LUNA_PLANNER_FIRST_DELEGATION_2026-10-06.md). This is static evidence; live autonomy remains unproved.
+
 Use [NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md](NPC_MACRO_EXECUTION_DESIGN_2026-09-30.md)
 for MW1–MW6 and integrated acceptance. Add standing Auto/player-task authorization,
 new-version recovery with player explanations, shared-material/protected-asset checks,

@@ -1320,7 +1320,7 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
     return state
   }
 
-  recordPlan(key, requestInfo, plan, { continuation = false, persistentRuntime, durableOperations = [], exactTargetAudit = [], verifiedCompletion = false, completionEvidence = [], resolveGoalId, validatedSemanticAdmission = false } = {}) {
+  recordPlan(key, requestInfo, plan, { continuation = false, persistentRuntime, durableOperations = [], exactTargetAudit = [], verifiedCompletion = false, completionEvidence = [], resolveGoalId, validatedSemanticAdmission = false, validatedPlannerAdmission = false } = {}) {
     const previous = this.planByNpc.get(key)
     const hasOperations = plan.operations.length > 0
     const incomingDurableOperations = (Array.isArray(durableOperations) ? durableOperations : []).slice(0, 16).map(operation => sanitizeDurableModelValue(operation))
@@ -1333,7 +1333,7 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
     const runtime = safePersistentRuntime(persistentRuntime)
     const runtimeHealthy = runtime?.active === true && runtime.healthy === true && runtime.controller_live === true
 
-    if (!hasOperations && !validatedSemanticAdmission && !continuation && !runtimeHealthy && !verifiedCompletion) {
+    if (!hasOperations && !validatedSemanticAdmission && !validatedPlannerAdmission && !continuation && !runtimeHealthy && !verifiedCompletion) {
       return { state: previous, blockedByHarness: false, changed: false }
     }
 
@@ -1347,7 +1347,7 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
         }].slice(-PLAN_HISTORY_LIMIT)
       : []
 
-    if (hasOperations || validatedSemanticAdmission) {
+    if (hasOperations || validatedSemanticAdmission || validatedPlannerAdmission) {
       const state = {
         goal_id: previous?.goal_id ?? this.newGoalId(resolveGoalId, now),
         owner: cleanMemoryText(requestInfo?.sender ?? previous?.owner ?? 'unknown', 128),
@@ -1359,7 +1359,7 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
         persistent_runtime: previous?.persistent_runtime,
         condition_wait: undefined,
         plan: incomingPlan,
-        current_step: previous?.current_step ?? 0,
+        current_step: validatedPlannerAdmission ? 0 : previous?.current_step ?? 0,
         revision: (previous?.revision ?? 0) + 1,
         last_chat_message: cleanMemoryText(plan.chatMessage, 2000),
         last_operations: plan.operations.slice(0, 16).map(operation => cleanMemoryText(`${operation.name} ${JSON.stringify(operation.args ?? {})}`, 800)),
@@ -3045,7 +3045,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // executor suffix for the executor. The prefix is the same for every conversation of
   // a role, so a restage within a role keeps the provider's cached prefix.
   rolePrefixMessages(role) {
-    return [{ role: 'system', content: roleSystemPrompt(this.systemPrompt, role === EXECUTOR_ROLE ? EXECUTOR_ROLE : PLANNER_ROLE) }]
+    const plannerDelegation = this.completionProtocolVersion >= 2 && this.executorHandoffEnabled && role !== EXECUTOR_ROLE
+      ? '\n\n[PLANNER DELEGATION] For a new plan, choose the intended results and quantities and declare stepCompletions aligned with every step. You may return currentStep: 0 and operations: [] to hand a validated plan to a fresh executor context for this same NPC. This commits the declared outcomes without claiming any progress. The executor chooses the first bounded actions and the harness validates them before admission. This option does not replace a committed plan or waive amendment authority.'
+      : ''
+    return [{ role: 'system', content: roleSystemPrompt(this.systemPrompt, role === EXECUTOR_ROLE ? EXECUTOR_ROLE : PLANNER_ROLE) + plannerDelegation }]
   }
 
   // The one place that decides whether the conversation may be swapped right now: not
@@ -3396,8 +3399,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // returns to the planner (returnControlToPlanner) and the executor conversation
   // is dropped. The executor never authors or changes the plan: enforceExecutorContract.
 
-  // C3: called from commitPlan, in the running turn's call chain, after the batch
-  // was admitted and the reply appended, and only when this reply committed the plan.
+  // C3: called from commitPlan in the running turn's call chain, when this reply
+  // committed a plan: after legacy/action-bearing admission, or before the first
+  // batch for a v2 declared planner-only draft.
   async startExecutorAtCommit({ planId, requestId }) {
     const state = this.memory.planningState?.(this.activePlanKey())
     const plan = state ? getActivePlanningPlan(state) : undefined
@@ -5770,7 +5774,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   // `draft` is false for a committed (frozen) plan, whose checkpoint is immutable and never re-judged against a later
   // batch here: the commit-time stock guard owns that case.
-  async validatePlannerCheckpointContract(contract, operations = [], { draft = true } = {}) {
+  async validatePlannerCheckpointContract(contract, operations = [], { draft = true, plannerOnlyDraft = false } = {}) {
     const normalized = sanitizeStepCompletionContract(contract)
     if (!completionContractSupported(normalized)) {
       return { accepted: false, reason: 'unsupported_or_malformed_contract' }
@@ -5780,8 +5784,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (contradiction) {
       return { accepted: false, reason: CHECKPOINT_CONTRADICTS_BATCH_REASON, ...checkpointConflictFacts(contradiction) }
     }
-    const allowedReceiptNames = new Set(
-      (Array.isArray(operations) ? operations : [])
+    const allowedReceiptNames = new Set(plannerOnlyDraft && draft
+      ? approvedOperationNames()
+      : (Array.isArray(operations) ? operations : [])
         .map(operation => operation?.name)
         .filter(name => typeof name === 'string' && name),
     )
@@ -5797,6 +5802,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
     return { accepted: true, contract: normalized }
+  }
+
+  plannerOnlyDraftCandidate(plan) {
+    const held = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
+    return this.completionProtocolVersion >= 2 && this.executorHandoffEnabled
+      && this.agentContext.role === PLANNER_ROLE && !!this.requestInfo
+      && plan.operations.length === 0 && plan.plan.length > 0 && plan.currentStep === 0
+      && plan.stepCompletions?.length === plan.plan.length
+      && !plan.semanticCompletion && !providerBlockerReason(plan)
+      && !this.currentPendingAmendment() && !held?.replacement
+      && (!held || [PLAN_STATUS.DRAFT, PLAN_STATUS.RUNTIME_VALIDATION, PLAN_STATUS.READY, PLAN_STATUS.COMPLETED].includes(held.status))
+      && !this.actionOmissionRepairActive && !this.genericRecoveryDecisionActive
+      && !this.freshContextRecoveryInProgress
   }
 
   async validateStepCompletionDeclarations(plan) {
@@ -5826,6 +5844,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       error.code = 'missing_step_completions'
       throw error
     }
+    const plannerOnlyDraft = this.plannerOnlyDraftCandidate(plan)
     for (const [index, declaration] of plan.stepCompletions.entries()) {
       if (declaration.kind === 'semantic') {
         if (index === plan.currentStep && plan.operations.length > 0) {
@@ -5838,12 +5857,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       const operations = index === plan.currentStep ? plan.operations : []
       for (const requirement of declaration.checkpoint.requirements) {
-        const allowedReceiptNames = new Set(index === plan.currentStep ? operations.map(operation => operation.name) : approvedOperationNames())
+        const allowedReceiptNames = new Set(index === plan.currentStep && !plannerOnlyDraft ? operations.map(operation => operation.name) : approvedOperationNames())
         const grounded = await this.authoritativeGroundCheckpointRequirement(requirement, { allowedReceiptNames })
         if (!grounded.ok) throw await this.checkpointRejectionError({ accepted: false, reason: grounded.reason, requirement_id: requirement.id })
       }
       if (index === plan.currentStep) {
-        const validation = await this.validatePlannerCheckpointContract(declaration.checkpoint, operations)
+        const validation = await this.validatePlannerCheckpointContract(declaration.checkpoint, operations, { plannerOnlyDraft })
         if (!validation.accepted) throw await this.checkpointRejectionError(validation)
       }
     }
@@ -5889,7 +5908,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const reducerPlan = planning ? getActivePlanningPlan(planning) : undefined
     const frozen = FROZEN_PLAN_STATUSES.has(reducerPlan?.status)
 
-    const validation = await this.validatePlannerCheckpointContract(plan.checkpoint, plan.operations, { draft: !frozen })
+    const validation = await this.validatePlannerCheckpointContract(plan.checkpoint, plan.operations, {
+      draft: !frozen, plannerOnlyDraft: this.plannerOnlyDraftCandidate(plan),
+    })
     if (!validation.accepted) throw await this.checkpointRejectionError(validation, { stepId: step.id })
     const existing = persistedStepCheckpoint(board, step.id)
     const incomingSignature = JSON.stringify(validation.contract)
@@ -8219,7 +8240,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const scope = this.currentTurnScope()
     // super.request() has just built requestInfo for a player chat request;
     // supervisor recovery runs build their own and enter here directly.
-    if (this.chatRequestPending && this.requestInfo) this.requestInfo.origin = 'chat'
+    if (this.chatRequestPending && this.requestInfo) {
+      this.requestInfo.origin = 'chat'
+      // Base request builds the shared prefix before entering this seam. Apply
+      // the same role prefix used by restages to the fresh chat lineage, too.
+      const prefix = this.rolePrefixMessages(this.agentContext.role)[0]
+      this.baseMessages = this.baseMessages.map((message, index) => index === 0 && message.role === 'system' ? { ...prefix } : message)
+      this.messages = this.messages.map((message, index) => index === 0 && message.role === 'system' ? { ...prefix } : message)
+    }
     this.chatRequestPending = false
     try {
       await this.applyStartRestage()
@@ -11521,6 +11549,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const checkpointBeforeBatch = activeStepCheckpointSnapshot(previousState?.task_board)
     const runtimeHealthy = persistentRuntimeHealthy(persistentRuntime)
     const heldForSemanticAdmission = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
+    const initialPlannerAdmission = this.plannerOnlyDraftCandidate(plan)
+      && before.idle === true && !runtimeHealthy && !this.batchInFlight
+      && !this.memory.pendingOperation?.(this.activePlanKey())
     const initialSemanticAdmission = this.completionProtocolVersion >= 2
       && this.requestInfo && commands.length === 0 && !plan.semanticCompletion
       && !FROZEN_PLAN_STATUSES.has(heldForSemanticAdmission?.status)
@@ -11571,7 +11602,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     const conditionWaitActive = conditionWait?.state === 'active'
 
-    if (!initialSemanticAdmission && commands.length === 0 && this.actionOmissionRepairActive && !runtimeHealthy && !conditionWaitActive && !finalCompletionVerified) {
+    if (!initialSemanticAdmission && !initialPlannerAdmission && commands.length === 0 && this.actionOmissionRepairActive && !runtimeHealthy && !conditionWaitActive && !finalCompletionVerified) {
       if (explicitBlocker) {
         return this.finishNoOperationBlock(plan, before, 'provider_reported_blocker', explicitBlocker, 'provider_blocker')
       }
@@ -11586,7 +11617,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       )
     }
 
-    if (!initialSemanticAdmission && commands.length === 0 && remainingCanonicalWork && !runtimeHealthy && !conditionWaitActive) {
+    if (!initialSemanticAdmission && !initialPlannerAdmission && commands.length === 0 && remainingCanonicalWork && !runtimeHealthy && !conditionWaitActive) {
       if (this.genericRecoveryDecisionActive) {
         // Generic strict recovery exists because the provider already failed to
         // produce a valid decision. Tools are intentionally disabled there, so
@@ -11688,6 +11719,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       stateResult = this.memory.recordPlan?.(this.requestInfo.memoryKey, await this.revisionSafeRequestInfo(), durablePlan, {
         continuation: this.continuations > 0,
         validatedSemanticAdmission: initialSemanticAdmission,
+        validatedPlannerAdmission: initialPlannerAdmission,
         persistentRuntime,
         durableOperations,
         exactTargetAudit,
@@ -11774,6 +11806,51 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           reason: stateResult?.state?.blocker ?? 'plan_blocked_awaiting_user',
         },
       }
+    }
+
+    if (initialPlannerAdmission && stateResult?.blockedByHarness !== true) {
+      // Commit intended outcomes only. The fresh executor's actual operations
+      // still pass preflight and admission; no batch or completion is invented.
+      await this.assertCurrent()
+      const key = this.requestInfo.memoryKey
+      const draft = getActivePlanningPlan(this.memory.planningState?.(key))
+      if (!draft || draft.replacement || !this.plannerOnlyDraftCandidate(plan)) {
+        throw new AgentLoopError('planner_only_commit_refused: draft identity or authority changed')
+      }
+      const committedState = this.memory.commitPlanningPlan(key, {
+        now: Date.now(), runtime_validation: { passed: true, scope: 'completion_contracts' },
+      })
+      const committed = getActivePlanningPlan(committedState)
+      if (!committed || committed.plan_id !== draft.plan_id || committed.status !== PLAN_STATUS.COMMITTED) {
+        throw new AgentLoopError('planner_only_commit_refused: reducer did not commit the declared draft')
+      }
+      await this.persistState()
+      await this.traceEvent('plan.delegation_committed', {
+        request_id: this.traceRequest?.id,
+        plan_id: committed.plan_id, step_id: committed.steps[0].step_id,
+        reason: 'validated_plan_without_initial_batch', validation_scope: 'completion_contracts',
+      })
+      if (initialSemanticAdmission) await this.traceEvent('plan.semantic_assessment_committed', {
+        plan_id: committed.plan_id, step_id: committed.steps[0].step_id,
+        reason: 'validated_observation_only_empty_batch',
+      })
+      const handoff = await this.startExecutorAtCommit({ planId: committed.plan_id, requestId: this.traceRequest?.id })
+      if (handoff.restaged) return this.runTurn()
+      await this.assertCurrent()
+      if (getActivePlanningPlan(this.memory.planningState?.(key))?.plan_id !== committed.plan_id) {
+        throw new AgentLoopError('planner_only_handoff_superseded: committed plan changed')
+      }
+      const reason = `executor_handoff_failed:${handoff.reason ?? 'unknown'}`
+      const paused = this.memory.pausePlan(key, reason)
+      this.active = false
+      await this.persistState()
+      await this.traceEvent('plan.delegation_handoff_failed', { request_id: this.traceRequest?.id, plan_id: committed.plan_id, reason })
+      const chatMessage = 'The plan is committed, but the executor handoff failed. I paused with the unfinished goal and plan retained.'
+      await this.traceEvent('request.completed', { outcome: 'executor_handoff_unavailable', reason, chat_message: chatMessage })
+      this.traceRequest = null
+      return { chatMessage, plan: plan.plan, currentStep: 0, operations: [], epoch: before.epoch,
+        actorId: before.actor_id, goalId: paused?.goal_id, goalStatus: paused?.status,
+        taskBoard: visibleTaskBoard(paused?.task_board) }
     }
 
     if (initialSemanticAdmission && stateResult?.blockedByHarness !== true) {

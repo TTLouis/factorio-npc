@@ -16,7 +16,7 @@ function draft(overrides = {}) {
     stepCompletions: [{ kind: 'deterministic', checkpoint: copper }], ...overrides }
 }
 
-function harness(provider, game = new FakeFactorio()) {
+function harness(provider, game = new FakeFactorio(), options = {}) {
   const memory = new CanonicalTaskBoardMemory()
   const events = []
   const calls = []
@@ -25,11 +25,19 @@ function harness(provider, game = new FakeFactorio()) {
     provider: async (messages) => {
       calls.push(messages.map(message => ({ ...message })))
       assert.ok(calls.length < 9, 'bounded fixture provider calls')
-      return planReply(await provider(calls.length, memory))
+      const reply = planReply(await provider(calls.length, memory))
+      if (options.fixtureOutputTokens) Object.defineProperty(reply, '_sglunaProvider', {
+        value: { diagnostic_code: 'ok', finish_reason: 'stop', usage: {
+          prompt_tokens: 100, completion_tokens: options.fixtureOutputTokens,
+          total_tokens: 100 + options.fixtureOutputTokens,
+        } },
+      })
+      return reply
     },
     interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
     systemPrompt: 'Strict Luna controller fixture.', stateFile: null, traceFile: null, decisionTraceFile: null, npcId: 'sgluna',
     onActivity: (event, data) => events.push({ event, data }),
+    ...options,
   })
   return { agent, memory, game, calls, events }
 }
@@ -177,4 +185,128 @@ test('strict executor index ownership distinguishes repeated descriptions from a
   await assert.rejects(world.agent.enforceExecutorContract({ plan: [], currentStep: 0, operations }),
     error => error.code === 'executor_stale_step')
   assert.equal(world.game.mutations.length, 1, 'neither ownership check executes gameplay')
+})
+
+test('a declared plan with no first batch delegates to a fresh executor without progress or admission', async () => {
+  let planId
+  let goalId
+  const world = harness((call, memory) => {
+    if (call === 1) {
+      assert.match(world.calls[0][0].content, /PLANNER DELEGATION/)
+      return draft({ operations: [] })
+    }
+    const planning = memory.planningState(KEY)
+    const held = planning.plans.find(plan => plan.plan_id === planning.active_plan_id)
+    planId = held.plan_id
+    goalId = planning.goal.goal_id
+    assert.equal(held.status, PLAN_STATUS.COMMITTED)
+    assert.equal(held.runtime_validation.scope, 'completion_contracts')
+    assert.equal(held.active_step_index, 0)
+    assert.equal(memory.currentPlan(KEY).task_board.completed_count, 0)
+    assert.equal(world.game.mutations.length, 0)
+    assert.equal(world.game.admissions.length, 0)
+    assert.equal(world.agent.agentContext.role, 'executor')
+    assert.equal(world.agent.agentContext.hasParkedPlanner, true)
+    assert.equal(world.agent.providerBudgetGeneration, 1)
+    assert.equal(world.agent.providerBudgetGenerationOutputUnits, 100)
+    assert.match(world.calls[1][0].content, /ROLE: EXECUTOR/)
+    assert.match(world.calls[1].map(row => row.content ?? '').join('\n'), new RegExp(planId))
+    const restored = new CanonicalTaskBoardMemory()
+    restored.restore(memory.snapshot())
+    const retained = restored.planningState(KEY)
+    assert.equal(retained.active_plan_id, planId)
+    assert.equal(retained.goal.goal_id, goalId)
+    assert.equal(retained.plans.find(plan => plan.plan_id === planId).active_step_index, 0)
+    assert.deepEqual(retained.plans.find(plan => plan.plan_id === planId).steps, held.steps)
+    return { plan: ['Gather ten copper ore'], currentStep: 0, operations: [gather('copper-ore', 10)] }
+  }, new FakeFactorio(), { fixtureOutputTokens: 100 })
+  await world.agent.request('Gather ten copper ore.', { sender: 'Louis' })
+  assert.equal(world.calls.length, 2)
+  assert.equal(world.game.mutations.length, 1)
+  assert.equal(world.memory.planningState(KEY).active_plan_id, planId)
+  assert.equal(world.memory.planningState(KEY).goal.goal_id, goalId)
+  assert.equal(world.memory.planningState(KEY).goal.status, 'active')
+  assert.equal(world.memory.currentPlan(KEY).task_board.completed_count, 0)
+  const trace = world.events.filter(row => row.event === 'plan.delegation_committed')
+  assert.equal(trace.length, 1)
+  assert.equal(trace[0].data.reason, 'validated_plan_without_initial_batch')
+  assert.ok(trace[0].data.request_id)
+  assert.equal(world.agent.providerBudgetGeneration, 1)
+  assert.equal(world.agent.providerBudgetGenerationOutputUnits, 200)
+})
+
+test('planner-only receipt contracts defer action selection but never manufacture a receipt', async () => {
+  const receipt = { mode: 'all', requirements: [{ id: 'mined', kind: 'authoritative_operation_receipt', operation_name: 'gather_resource' }] }
+  const world = harness(call => call === 1
+    ? draft({ operations: [], checkpoint: receipt, stepCompletions: [{ kind: 'deterministic', checkpoint: receipt }] })
+    : { plan: ['Gather ten copper ore'], currentStep: 0, operations: [gather('copper-ore', 10)] })
+  await world.agent.request('Gather ten copper ore.', { sender: 'Louis' })
+  assert.equal(world.calls.length, 2)
+  assert.equal(world.game.mutations.length, 1)
+  assert.equal(world.memory.currentPlan(KEY).task_board.completed_count, 0)
+  assert.equal(world.events.filter(row => row.event === 'plan.delegation_committed').length, 1)
+})
+
+test('missing declarations are corrected before a planner-only commitment', async () => {
+  const world = harness(call => call === 1 ? draft({ operations: [], stepCompletions: undefined })
+    : call === 2 ? draft({ operations: [] })
+    : { plan: ['Gather ten copper ore'], currentStep: 0, operations: [gather('copper-ore', 10)] })
+  await world.agent.request('Gather ten copper ore.', { sender: 'Louis' })
+  assert.equal(world.calls.length, 3)
+  assert.match(world.calls[1].map(row => row.content ?? '').join('\n'), /missing_step_completions/)
+  assert.equal(world.events.filter(row => row.event === 'plan.delegation_committed').length, 1)
+  assert.equal(world.game.mutations.length, 1)
+})
+
+test('a planner-only commitment does not bypass the executor operation preflight', async () => {
+  const game = new FakeFactorio({ preflight: () => ({ ok: false, code: 'fixture_refusal', reason: 'No accessible patch.' }) })
+  const world = harness(call => call === 1 ? draft({ operations: [] })
+    : call === 2 ? { plan: ['Gather ten copper ore'], currentStep: 0, operations: [gather('copper-ore', 10)] }
+    : { plan: ['Gather ten copper ore'], currentStep: 0, operations: [], chatMessage: 'BLOCKED: No accessible patch.' }, game)
+  await world.agent.request('Gather ten copper ore.', { sender: 'Louis' })
+  assert.equal(game.mutations.length, 0)
+  assert.equal(game.admissions.length, 0)
+  assert.equal(world.memory.currentPlan(KEY).task_board.completed_count, 0)
+  assert.notEqual(world.memory.planningState(KEY).goal.status, 'completed')
+  assert.ok(world.events.some(row => row.event.includes('preflight')))
+})
+
+test('disabled executor handoff keeps the existing bounded initial action repair', async () => {
+  const world = harness(call => draft(call === 1 ? { operations: [] } : {}), new FakeFactorio(), { executorHandoff: false })
+  await world.agent.request('Gather ten copper ore.', { sender: 'Louis' })
+  assert.equal(world.calls.length, 2)
+  assert.equal(world.game.mutations.length, 1)
+  assert.equal(world.agent.agentContext.role, 'planner')
+  assert.equal(world.events.filter(row => row.event === 'plan.delegation_committed').length, 0)
+})
+
+test('failed initial delegation pauses with the committed unfinished goal retained', async () => {
+  const world = harness(() => draft({ operations: [] }))
+  world.agent.startExecutorAtCommit = async () => ({ restaged: false, reason: 'fixture_handoff_unavailable' })
+  const result = await world.agent.request('Gather ten copper ore.', { sender: 'Louis' })
+  assert.equal(world.calls.length, 1)
+  assert.equal(world.game.mutations.length, 0)
+  assert.equal(world.memory.currentPlan(KEY).task_board.completed_count, 0)
+  assert.equal(world.memory.currentPlan(KEY).status, 'paused')
+  assert.notEqual(world.memory.planningState(KEY).goal.status, 'completed')
+  assert.ok(world.memory.planningState(KEY).active_plan_id)
+  assert.match(result.chatMessage, /executor handoff failed/)
+  const trace = world.events.filter(row => row.event === 'plan.delegation_handoff_failed')
+  assert.equal(trace.length, 1)
+  assert.equal(trace[0].data.reason, 'executor_handoff_failed:fixture_handoff_unavailable')
+  assert.ok(trace[0].data.request_id)
+})
+
+test('an actor change after initial delegation refuses executor admission without goal completion', async () => {
+  const world = harness(call => {
+    if (call === 1) return draft({ operations: [] })
+    world.game.status.actor_id += 1
+    world.game.status.epoch += 1
+    return { plan: ['Gather ten copper ore'], currentStep: 0, operations: [gather('copper-ore', 10)] }
+  })
+  await assert.rejects(world.agent.request('Gather ten copper ore.', { sender: 'Louis' }), /epoch changed|actor|superseded/i)
+  assert.equal(world.calls.length, 2)
+  assert.equal(world.game.mutations.length, 0)
+  assert.equal(world.memory.currentPlan(KEY).task_board.completed_count, 0)
+  assert.notEqual(world.memory.planningState(KEY).goal.status, 'completed')
 })
