@@ -59,6 +59,7 @@ export function openRouterModelFamily(model) {
 const LOCAL_REASONING_FAMILIES = new Set()
 export function localModelFamily(model) {
   const value = String(model ?? '').toLowerCase()
+  if (/^gpt-6(?:[.-]|$)/.test(value)) return 'openai-gpt'
   if (/qwen3-coder/.test(value)) return 'qwen3-coder'
   if (/qwen3\.5/.test(value)) return 'qwen3.5'
   if (/gemma/.test(value)) return 'gemma'
@@ -116,6 +117,10 @@ function localCapability(config, requested) {
     id: 'local',
     token_field: 'max_tokens',
     reasoning_effort: LOCAL_REASONING_FAMILIES.has(family),
+    // CLIProxy Codex can attach generated images when tools/choice are omitted.
+    // The October 5 live replay stayed compact when closed rounds kept the
+    // function definitions and explicitly disallowed every tool invocation.
+    tools_kept_when_closed: family === 'openai-gpt',
     thinking_control: 'none',
     tool_support: true,
     structured_output: 'tools_or_json',
@@ -1358,6 +1363,13 @@ export async function providerRequest(config, messages, {
     promptLayout: promptLayout(styledMessages, { tools: body.tools }),
   }
   await traceProviderPayload(body, traceOptions)
+  if (keepClosedTools && capability.id === 'local' && capability.model_family === 'openai-gpt') {
+    await traceProviderResult('provider.closed_tool_contract', {
+      reason: 'local_openai_explicit_tool_choice_none',
+      tool_choice: body.tool_choice,
+      tool_count: body.tools.length,
+    }, traceOptions)
+  }
 
   try {
     const response = await fetchImpl(providerEndpoint(config.base), {
