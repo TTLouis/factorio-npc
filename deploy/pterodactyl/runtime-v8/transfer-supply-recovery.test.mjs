@@ -374,7 +374,7 @@ test('the recovery is bounded at two per step: the third proved shortage takes t
   assert.equal(world.named('transfer.preflight_missing_supply').length, 3)
 })
 
-test('the per-step counter is persisted board evidence: it survives a restart, and a new step starts at zero', async () => {
+test('the per-step counter is persisted on the board: it survives a restart, and a new step starts at zero', async () => {
   const rcon = new Rcon()
   rcon.preflight.supply_entity = missingCoal()
   const world = harness(rcon, [observe(), planMessage([COAL_SUPPLY]), planMessage([GATHER_COAL, COAL_SUPPLY])])
@@ -576,4 +576,78 @@ test('a frozen (blocked) plan is never pulled into supply recovery', async () =>
   )
   assert.equal(outcome.action, 'unhandled')
   assert.equal(world.plan().blocker, 'structural_blocker')
+})
+
+test('the budget is a monotonic board counter: more than 32 evidence items in a step cannot evict it, and a restore keeps it', async () => {
+  const rcon = new Rcon()
+  rcon.preflight.supply_entity = missingCoal()
+  const world = harness(rcon, [observe(), planMessage([COAL_SUPPLY]), planMessage([GATHER_COAL, COAL_SUPPLY]), planMessage([COAL_SUPPLY])])
+  await world.agent.request('load the furnace with coal', { sender: 'tester' })
+  assert.equal(transferSupplyRecoveryCount(world.plan().task_board), 1)
+
+  // A long acquisition step: far more evidence than the board keeps. The recovery record itself is evicted ...
+  for (let i = 0; i < 40; i++) world.memory.recordBoardEvidence(KEY, { kind: 'note', ref: `filler_${i}`, summary: 'acquisition progress' })
+  const board = world.plan().task_board
+  assert.ok(board.evidence.length <= 32)
+  assert.equal(board.evidence.some(item => item.kind === TRANSFER_SUPPLY_RECOVERABLE_KIND), false, 'the evidence record was trimmed away')
+  // ... but the budget was not reset.
+  assert.equal(transferSupplyRecoveryCount(board), 1)
+
+  const restored = new CanonicalTaskBoardMemory()
+  restored.restore(JSON.parse(JSON.stringify(world.memory.snapshot())))
+  assert.equal(transferSupplyRecoveryCount(restored.currentPlan(KEY).task_board), 1, 'a restore keeps the counter')
+
+  // Execution-time shortages keep counting from the persisted value: one more recovery, then the blocker.
+  const shortage = (n) => ({
+    kind: 'operation_error_receipt',
+    ref: `batch-g1-${n}`,
+    summary: JSON.stringify({ outcome: 'failed', task_types: ['moving_items'], tick: 200 + n, basic_operation: { type: 'moving_items', code: 'item_missing', completed: false, item_name: 'coal', to_entity: true, requested_count: 5, target_unit_number: 15 } }),
+  })
+  world.memory.recordBoardEvidence(KEY, shortage(7))
+  assert.equal(transferSupplyRecoveryCount(world.plan().task_board), 2)
+  assert.equal(world.plan().status, 'active')
+  world.memory.recordBoardEvidence(KEY, shortage(8))
+  assert.equal(world.plan().status, 'blocked')
+  assert.equal(world.plan().blocker, 'transfer_failed:item_missing')
+  assert.equal(transferSupplyRecoveryCount(world.plan().task_board), 2)
+})
+
+test('the batch-ref de-dup is persisted on the board too, so a trimmed evidence window cannot double-count a batch', async () => {
+  const rcon = new Rcon()
+  const world = harness(rcon, [observe(), planMessage([COAL_SUPPLY]), planMessage([COAL_SUPPLY])])
+  await world.agent.request('load the furnace with coal', { sender: 'tester' })
+  rcon.failMove(1)
+  await world.agent.failed('moving_items:item_missing')
+  assert.equal(transferSupplyRecoveryCount(world.plan().task_board), 1)
+  for (let i = 0; i < 40; i++) world.memory.recordBoardEvidence(KEY, { kind: 'note', ref: `filler_${i}`, summary: 'progress' })
+  world.memory.recordBoardEvidence(KEY, {
+    kind: 'operation_error_receipt',
+    ref: 'batch-g1-1',
+    summary: JSON.stringify({ outcome: 'failed', task_types: ['moving_items'], tick: 201, basic_operation: { type: 'moving_items', code: 'item_missing', completed: false, item_name: 'coal', to_entity: true, requested_count: 5, target_unit_number: 15 } }),
+  })
+  assert.equal(transferSupplyRecoveryCount(world.plan().task_board), 1)
+})
+
+test('admission runs over operations 0..i first: a reserved container earlier in the batch refuses before any recovery budget is spent', async () => {
+  const rcon = new Rcon()
+  rcon.preflight.supply_entity = missingCoal()
+  const world = harness(rcon, [
+    observe(),
+    planMessage([
+      { name: 'move_items_exact', args: { item_name: 'iron-plate', unit_number: 900, max_count: 5, to_entity: false } },
+      COAL_SUPPLY,
+    ], { plan: ['Take plates and load coal'] }),
+    planMessage([{ name: 'wait', args: { ticks: 60 } }], { plan: ['Take plates and load coal'] }),
+  ])
+  world.memory.recordReservation(KEY, { unit_number: 900, entity_name: 'iron-chest', reserved_by: 'louis' }, { now: Date.now() })
+
+  const result = await world.agent.request('take plates and load coal', { sender: 'tester' })
+
+  const [refused] = world.named('admission.reserved_refused')
+  assert.ok(refused, 'the earlier reserved target refused first')
+  assert.equal(data(refused).unit_number, 900)
+  assert.equal(world.named('transfer.supply_recovery').length, 0)
+  assert.equal(world.named('transfer.preflight_missing_supply').length, 0)
+  assert.equal(transferSupplyRecoveryCount(world.plan().task_board), 0, 'no recovery budget was spent')
+  assert.equal(result.operations[0].name, 'wait')
 })

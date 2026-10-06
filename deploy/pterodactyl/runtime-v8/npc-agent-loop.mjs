@@ -5,6 +5,8 @@ import path from 'node:path'
 import { AgentLoopError, NpcAgentLoop as BaseNpcAgentLoop, NpcDialogueMemory as BaseNpcDialogueMemory } from '../staging/npc-agent-loop.mjs'
 import {
   addTaskBoardEvidence,
+  recordTaskBoardTransferSupplyRecovery,
+  taskBoardTransferSupplyRecoveries,
   reconcileTaskBoard,
   sanitizeTaskBoard,
   setTaskBoardStatus,
@@ -191,9 +193,9 @@ const LOST_ACK_RETRY_BUDGET = 1
 export const OPERATION_FAILURE_RECOVERABLE_KIND = 'operation_failure_recoverable'
 // A transfer the world proved cannot move anything yet (the NPC holds none of the item, the entity holds none to take, or
 // the destination accepts none). It is an acquisition dependency inside the same committed step: the plan, checkpoint and
-// result are untouched. Board evidence of this kind (written both by the preflight path and, for an execution-time
-// item_missing/nothing_moved receipt, by the board memory) is the persisted per-step counter, so the bound survives
-// continuation and restart. The step is blocked through the ordinary path once the budget is spent.
+// result are untouched. The per-step counter is persisted on the board (board.transfer_supply_recoveries, survives
+// continuation, restart and evidence trimming); evidence of this kind is kept for traceability (written both by the
+// preflight path and, for an execution-time item_missing/nothing_moved receipt, by the board memory). The step is blocked through the ordinary path once the budget is spent.
 export const TRANSFER_SUPPLY_RECOVERABLE_KIND = 'transfer_supply_recoverable'
 export const TRANSFER_SUPPLY_RECOVERY_BUDGET = 2
 export const TRANSFER_SUPPLY_PREFLIGHT_CODES = new Set(['supply_missing', 'extraction_empty', 'destination_full'])
@@ -203,14 +205,10 @@ const TRANSFER_SUPPLY_CODE_MEANING = {
   destination_full: 'the destination accepts none of the item',
 }
 
-// Recoveries already spent on the board's active step (both phases).
+// Recoveries already spent on the board's active step (both phases): the monotonic counter persisted on the board,
+// not the (trimmed) evidence window.
 export function transferSupplyRecoveryCount(board) {
-  const stepId = board?.active_step_id
-  let count = 0
-  for (const item of Array.isArray(board?.evidence) ? board.evidence : []) {
-    if (item?.kind === TRANSFER_SUPPLY_RECOVERABLE_KIND && item.step_id === stepId) count++
-  }
-  return count
+  return taskBoardTransferSupplyRecoveries(board)
 }
 
 function parseEvidenceSummary(item) {
@@ -1351,6 +1349,18 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
   // the result here (3.3 move 2).
   appendBoardEvidence(_key, _state, board, item) {
     return addTaskBoardEvidence(board, item)
+  }
+
+  // Spend one transfer-supply recovery on the active step (monotonic, persisted with the board).
+  noteTransferSupplyRecovery(key, ref) {
+    const state = key ? this.planByNpc.get(key) : undefined
+    if (!state) return undefined
+    const board = this.ensureTaskBoard(state)
+    state.task_board = recordTaskBoardTransferSupplyRecovery(board, { ref, now: Date.now() })
+    state.revision += 1
+    state.updated_at = Date.now()
+    this.planByNpc.set(key, state)
+    return state.task_board
   }
 
   recordBoardEvidence(key, evidence) {
@@ -9354,6 +9364,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (result?.ok !== true) {
         const failure = new AgentLoopError(`Operation preflight rejected operation ${index + 1} (${operations[index].name}): ${result?.code ?? 'unknown_preflight_failure'}`)
         failure.preflight = { ...result, operation_index: index }
+        failure.preflightResults = results.slice()
         throw failure
       }
     }
@@ -9438,9 +9449,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!key || !operation) return { action: 'unhandled' }
 
     if (typeof this.memory.checkOperationAdmission === 'function') {
+      // Operations 0..index with the preflight results gathered so far (the failing one carries its target), so a
+      // reserved/protected target earlier in the batch refuses first and no recovery budget is spent.
+      const collected = Array.isArray(failure.preflightResults) ? failure.preflightResults : []
       const admission = this.memory.checkOperationAdmission(key, {
-        operations: [operation],
-        preflight: [{ ok: true, operation: operation.name, target: preflight.target }],
+        operations: plan.operations.slice(0, index + 1),
+        preflight: plan.operations.slice(0, index + 1).map((_, i) => (i === index ? { ok: true, operation: operation.name, target: preflight.target } : (collected[i] ?? { ok: true }))),
         actor: { actor_id: before.actor_id, actor_epoch: before.epoch },
       }, { requestId })
       if (admission?.ok === false) {
@@ -9450,7 +9464,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           code: admission.code,
           reason: admission.reason,
           operation: admission.operation,
-          operation_index: index,
+          operation_index: admission.operation_index ?? index,
           identity: admission.unit_number,
           detail: admission.reason,
           ...(admission.last_user ? { last_user: admission.last_user } : {}),
@@ -9492,9 +9506,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const attempt = prior + 1
     const admissionState = this.memory.setAdmissionState?.(key, 'preflight_rejected')
     if (admissionState) stateResult = { ...(stateResult ?? {}), state: admissionState }
+    const recoveryRef = `${requestId ?? 'request'}/transfer_${preflight.code}_${index}`
+    this.memory.noteTransferSupplyRecovery?.(key, recoveryRef)
     this.memory.recordBoardEvidence?.(key, {
       kind: TRANSFER_SUPPLY_RECOVERABLE_KIND,
-      ref: `${requestId ?? 'request'}/transfer_${preflight.code}_${index}`,
+      ref: recoveryRef,
       summary: JSON.stringify({
         phase: 'preflight',
         failure_class: `transfer_${preflight.code}`,

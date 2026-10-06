@@ -1,6 +1,6 @@
 import { NpcDialogueMemory, OPERATION_FAILURE_RECOVERABLE_KIND, TRANSFER_SUPPLY_RECOVERABLE_KIND, TRANSFER_SUPPLY_RECOVERY_BUDGET, transferSupplyRecoveryCount } from './npc-agent-loop.mjs'
 import { restoreLedger as restoreJevLedger, serializeLedger as serializeJevLedger } from './jev-judgments.mjs'
-import { createTaskBoard, reconcileTaskBoard, setTaskBoardStatus } from './common.mjs'
+import { createTaskBoard, reconcileTaskBoard, setTaskBoardStatus, taskBoardTransferSupplyRefSeen } from './common.mjs'
 import { validateOutcomeCandidate } from './outcome-authority.mjs'
 import { completionContractSupported, provePermanentlyUnsatisfiable, sanitizeStepCompletionContract } from './step-completion.mjs'
 import {
@@ -2894,9 +2894,10 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const shortage = state.status === 'active' ? correctableTransferShortage(evidence) : undefined
     if (shortage) {
       // A re-reported failure of the same batch is not another recovery.
-      if (evidence.ref && (boardAfterReceipt.evidence ?? []).some(item => item?.kind === TRANSFER_SUPPLY_RECOVERABLE_KIND && item.ref === evidence.ref)) return boardAfterReceipt
+      if (taskBoardTransferSupplyRefSeen(boardAfterReceipt, evidence.ref)) return boardAfterReceipt
       const used = transferSupplyRecoveryCount(boardAfterReceipt)
       if (used < TRANSFER_SUPPLY_RECOVERY_BUDGET) {
+        this.noteTransferSupplyRecovery(key, evidence.ref)
         return super.recordBoardEvidence(key, {
           kind: TRANSFER_SUPPLY_RECOVERABLE_KIND,
           ref: evidence.ref,
