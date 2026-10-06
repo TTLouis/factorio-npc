@@ -160,6 +160,16 @@ case "$LANE" in
     run_py last_user_provenance.py
     ;;
 
+  vision)
+    # Hidden NPC vision vehicle: lifecycle, non-interaction, invisibility and what the engine
+    # charts with zero players, then a real save/restart of the single persisted vehicle.
+    printf '[npc-test][vision] Running NPC vision vehicle gate...\n'
+    run_py npc_vision_cell.py --phase prepare --save "$SAVE"
+    restart_factorio
+    printf '[npc-test][vision] Verifying the persisted vision vehicle after a real Factorio restart...\n'
+    run_py npc_vision_cell.py --phase verify
+    ;;
+
   research-combat)
     printf '[npc-test][research-combat] Running native research gate...\n'
     run_py research.py
