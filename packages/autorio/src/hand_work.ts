@@ -27,6 +27,7 @@
 import type { LuaEntity, LuaSurface, SurfaceIndex } from 'factorio:runtime'
 import { note_output_proof_hand_craft, note_output_proof_manual_mutation } from './output_delivery_proof'
 import { entity_role_inventories, has_separate_output } from './inventory_roles'
+import { find_world_entities } from './npc_vision'
 
 /** Fed machines remembered per force; more than this voids every window for a long while. */
 export const MAX_FED_ENTITIES = 64
@@ -149,7 +150,7 @@ function remember_fed_entity(work: ForceHandWork, entity: LuaEntity, item_name: 
 function resolve_fed_entity(entry: FedEntity): LuaEntity | undefined {
   const surface = game.get_surface(entry.surface_index as SurfaceIndex)
   if (!surface || !surface.valid) return undefined
-  for (const candidate of surface.find_entities_filtered({ position: { x: entry.x, y: entry.y }, radius: 0.25, name: entry.entity_name })) {
+  for (const candidate of find_world_entities(surface, { position: { x: entry.x, y: entry.y }, radius: 0.25, name: entry.entity_name })) {
     if (candidate.valid && candidate.unit_number === entry.unit_number) return candidate
   }
   return undefined
@@ -215,7 +216,7 @@ export function record_hand_mined_item(force_index: number, item_name: string) {
  */
 export function mining_targets_at(surface: LuaSurface, position: { x: number, y: number } | undefined, exclude?: LuaEntity): LuaEntity[] {
   if (!position) return []
-  const found = surface.find_entities_filtered({
+  const found = find_world_entities(surface, {
     area: { left_top: { x: position.x - 0.5, y: position.y - 0.5 }, right_bottom: { x: position.x + 0.5, y: position.y + 0.5 } },
   })
   const targets: LuaEntity[] = []

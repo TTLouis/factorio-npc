@@ -7,6 +7,7 @@ import { resolve_entity_reference } from './entity_reference'
 import { TaskStates } from './types'
 import { direction_towards } from './utils/direction'
 import { distance } from './utils/math'
+import { find_world_entities } from './npc_vision'
 
 const MAX_SEARCH_RADIUS = 4096
 const MAX_NAVIGATION_TICKS = 10 * 60 * 60
@@ -457,7 +458,7 @@ export function new_navigation_controller(get_actor: () => ControlledActor | und
       }
     }
     else {
-      target = nearest(actor, actor.surface.find_entities_filtered({ position: actor.position, radius: task.search_radius, name: task.entity_name }))
+      target = nearest(actor, find_world_entities(actor.surface, { position: actor.position, radius: task.search_radius, name: task.entity_name }))
     }
     if (!target) {
       fail(actor, task, 'no_target')

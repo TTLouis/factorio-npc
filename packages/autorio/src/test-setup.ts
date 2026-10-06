@@ -1,4 +1,4 @@
-import { event_handlers, set_load_handler } from './test-event-registry'
+import { event_handlers, set_configuration_changed_handler, set_init_handler, set_load_handler } from './test-event-registry'
 
 // Minimal stand-ins for the Factorio/Lua globals that control.ts touches at module
 // load time (remote.add_interface, script lifecycle registration, the closing log()
@@ -21,6 +21,12 @@ import { event_handlers, set_load_handler } from './test-event-registry'
   on_nth_tick: (_tick: number, _handler: ((event: any) => void) | undefined) => {},
   on_load: (handler: (() => void) | undefined) => {
     set_load_handler(handler)
+  },
+  on_init: (handler: (() => void) | undefined) => {
+    set_init_handler(handler)
+  },
+  on_configuration_changed: (handler: (() => void) | undefined) => {
+    set_configuration_changed_handler(handler)
   },
 }
 

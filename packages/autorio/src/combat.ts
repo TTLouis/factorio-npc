@@ -7,6 +7,7 @@ import { entity_interaction_reach } from './interaction_range'
 import { TaskStates } from './types'
 import { direction_towards } from './utils/direction'
 import { distance } from './utils/math'
+import { find_world_entities } from './npc_vision'
 
 // Tuning constants live in one table: new_combat_controller captures each
 // module-level local as an upvalue, and LuaJIT allows at most 60 per function.
@@ -537,7 +538,7 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
 
   function area_enemies(actor: ControlledActor, task: CombatTask) {
     const origin = task.origin_position ?? actor.position
-    return actor.surface.find_entities_filtered({ position: origin, radius: task.search_radius, force: 'enemy' })
+    return find_world_entities(actor.surface, { position: origin, radius: task.search_radius, force: 'enemy' })
   }
 
   function live_owned_turrets(task: CombatTask) {
@@ -658,7 +659,7 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
   function nearby_mobile_threat(actor: ControlledActor, radius = COMBAT.MOBILE_THREAT_PRIORITY_RADIUS) {
     let threat: LuaEntity | undefined
     let best = math.huge
-    const local_units = actor.surface.find_entities_filtered({ position: actor.position, radius, force: 'enemy', type: 'unit' })
+    const local_units = find_world_entities(actor.surface, { position: actor.position, radius, force: 'enemy', type: 'unit' })
     for (const entity of local_units) {
       if (!is_alive(entity)) continue
       const candidate = distance(actor.position, entity.position)
@@ -675,7 +676,7 @@ export function new_combat_controller(get_actor: () => ControlledActor | undefin
     if (scan_radius <= 0) return undefined
     let threat: LuaEntity | undefined
     let best = math.huge
-    const local_turrets = actor.surface.find_entities_filtered({
+    const local_turrets = find_world_entities(actor.surface, {
       position: actor.position,
       radius: scan_radius,
       force: 'enemy',

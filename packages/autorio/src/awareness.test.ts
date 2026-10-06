@@ -48,7 +48,9 @@ describe('standalone NPC map knowledge', () => {
     const controller = new_awareness_controller()
 
     expect(controller.tick(actor)).toBe(true)
-    expect(surface.create_entity).not.toHaveBeenCalled()
+    // The only entity it creates is the hidden vision vehicle (npc_vision.test.ts), never a radar.
+    expect(surface.create_entity).toHaveBeenCalledTimes(1)
+    expect(surface.create_entity.mock.calls[0][0].name).toBe('sgluna-npc-vision')
     expect(surface.request_to_generate_chunks).toHaveBeenCalledWith(actor.position, 2)
     expect(surface.force_generate_chunk_requests).not.toHaveBeenCalled()
     // Chunk (1, -1): the window spans chunks -1..3 by -3..1.

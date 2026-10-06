@@ -51,6 +51,7 @@ import { create_tools_remote_interface } from './tools'
 import { TaskStates } from './types'
 import { direction_towards } from './utils/direction'
 import { get_actor_inventory_items } from './utils/inventory'
+import { find_world_entities } from './npc_vision'
 
 create_tools_remote_interface()
 create_discovery_remote_interface(get_controlled_actor)
@@ -136,6 +137,12 @@ remote.add_interface('autorio_follow', {
   status: () => follow_controller.status(),
 })
 
+// Read-only diagnostics for the hidden NPC vision vehicle (npc_vision.ts); it is
+// not an NPC tool and no model contract maps it.
+remote.add_interface('autorio_npc_vision', {
+  status: () => awareness_controller.vision.status(),
+})
+
 remote.add_interface('autorio_defense', {
   status: () => defense_controller.status(),
 })
@@ -178,7 +185,7 @@ function log_actor_info() {
     if (tech.researched) technologies.push(name)
   }
 
-  const nearby_entities = actor.surface.find_entities_filtered({
+  const nearby_entities = find_world_entities(actor.surface, {
     position: actor.position,
     radius: 20,
   }).map(({ name, position }) => ({ name, position }))
@@ -608,6 +615,17 @@ script.on_event(defines.events.on_player_mined_entity, (event: OnPlayerMinedEnti
   }
 })
 
+// A leftover vision vehicle (an old save, a lost record) must not outlive the
+// actor it followed: keep only the one stored for the current NPC.
+function sweep_npc_vision(reason: string) {
+  const identity = peek_controlled_actor()?.status_snapshot()
+  const actor_id = identity?.kind === 'standalone_character' ? identity.actor_id : undefined
+  awareness_controller.vision.sweep(actor_id, reason)
+}
+
+script.on_init(() => sweep_npc_vision('on_init'))
+script.on_configuration_changed(() => sweep_npc_vision('on_configuration_changed'))
+
 function setup() {
   const seeded = ensure_basic_skill_definitions()
   setup_complete = true
@@ -627,6 +645,8 @@ script.on_event(defines.events.on_tick, (_event) => {
       log('[AUTORIO] No valid controlled actor found')
       no_actor_found = true
     }
+    // No standalone NPC to follow: the vision vehicle goes with it.
+    awareness_controller.vision.release('no_controlled_actor')
     return
   }
   no_actor_found = false

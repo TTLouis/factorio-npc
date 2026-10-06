@@ -6,6 +6,7 @@ import type { new_task_manager } from './task_manager'
 import type { PlayerParametersHarvestProduct, PlayerParametersWalkToEntity } from './types'
 import { TaskStates } from './types'
 import { get_actor_inventory_items } from './utils/inventory'
+import { find_world_entities } from './npc_vision'
 
 type TaskManager = ReturnType<typeof new_task_manager>
 
@@ -55,7 +56,7 @@ function source_is_compatible(task: PlayerParametersHarvestProduct, entity: LuaE
 function find_source(actor: ControlledActor, task: PlayerParametersHarvestProduct) {
   let radius = math.min(INITIAL_SEARCH_RADIUS, task.search_radius)
   while (radius <= task.search_radius) {
-    const matches = actor.surface.find_entities_filtered({
+    const matches = find_world_entities(actor.surface, {
       position: actor.position,
       radius,
       name: task.source_names,

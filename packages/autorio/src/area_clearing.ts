@@ -4,6 +4,7 @@ import { is_placed_building_entity, MAX_MINING_START_REJECTIONS, mining_navigati
 import type { new_task_manager } from './task_manager'
 import type { PlayerParametersClearConstructionArea, PlayerParametersWalkToEntity } from './types'
 import { TaskStates } from './types'
+import { find_world_entities } from './npc_vision'
 
 type TaskManager = ReturnType<typeof new_task_manager>
 
@@ -58,7 +59,7 @@ function position_inside_area(position: { x: number, y: number }, area: ReturnTy
 
 function nearest_blocker(actor: ControlledActor, task: PlayerParametersClearConstructionArea) {
   const area = task_area(task)
-  const entities = actor.surface.find_entities_filtered({ area })
+  const entities = find_world_entities(actor.surface, { area })
   let nearest: LuaEntity | undefined
   let best = math.huge
   for (const entity of entities) {
