@@ -24,6 +24,12 @@
 // mid-way. Mandatory records are never dropped (the result reports
 // `over_limit: true` if they alone exceed the limit).
 //
+// Executor facts (repair unit D2): a fresh executor conversation has none of the planner's earlier reads, so an
+// executor restage can carry a bounded, labelled record of what the harness itself read from the live game
+// (`executorFacts`): stable recipe facts, held counts (fresh, or stale with the tick they date from), the machine
+// the step checkpoint names, a residual-needs derivation from those facts, and historical entity observations
+// with exact ids withheld. Labels and fields only; nothing here is advice and no game rule is baked in.
+//
 // Wired: the C5 budget handoff and the C7 recovery restage (U8), the planner slice-close
 // restage at C1/C2 (U7) and the executor's C3, C6 and C8 restages (U6) build one through
 // NpcAgentLoop.buildRestagePacket.
@@ -69,16 +75,39 @@ export const HANDOFF_PACKET_LIMITS = Object.freeze({
 export const HANDOFF_DROP_ORDER = Object.freeze([
   'jev_facts',
   'note',
+  'historical_entities',
   'receipt',
   'skills',
   'runtime',
   'budget',
   'shelf_candidates',
+  'recipe_facts',
+  'stale_counts',
   'contract',
+  'fresh_counts',
+  'residual_needs',
   'roadmap_node',
   'step_completed',
   'step_pending',
 ])
+
+// Executor-facts bounds (repair unit D2). Kept apart from HANDOFF_PACKET_LIMITS: a packet without facts is unchanged.
+export const EXECUTOR_FACT_LIMITS = Object.freeze({
+  recipes: 5,
+  recipeChars: 340,
+  recipeIngredients: 8,
+  recipeProducts: 4,
+  recipeMachines: 6,
+  countItems: 12,
+  countChars: 360,
+  machineChars: 480,
+  residualRows: 10,
+  residualChars: 520,
+  historicalKinds: 6,
+  historicalChars: 280,
+  authorityChars: 320,
+  cachedRecipes: 32,
+})
 
 const HEADER = '[HANDOFF] Rebuilt from durable harness state, not from the previous conversation. Verify against the world before acting.'
 
@@ -250,7 +279,449 @@ function jevFactRecords(jevFacts, jevHints, limits) {
   return records
 }
 
-function stepRecords(state, plan, activeIndex, limits, { role, checkpoint, reason, budget, note, actor, runtime, amendment, jevFacts, jevHints }) {
+// --- executor facts (repair unit D2) --------------------------------------------------------------------------------
+//
+// Everything below is a pure function of facts the harness read from the live game (recipe tool results, the
+// requirements answer, requires_machine preflight facts, fresh count and machine reads). Nothing is hard-coded about
+// which recipe makes what: the derivation only reads the amounts those facts carry.
+
+const FACT_NAME = /^[a-z0-9][a-z0-9._-]{0,99}$/
+
+function factName(value) {
+  return typeof value === 'string' && FACT_NAME.test(value) ? value : undefined
+}
+
+function finiteNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function asList(value) {
+  return Array.isArray(value) ? value : []
+}
+
+// Where and when a fact came from: the game tick when the harness knew one, the actor epoch and the wall clock.
+export function normalizeFactTag(tag) {
+  const out = {}
+  if (Number.isSafeInteger(tag?.tick)) out.tick = tag.tick
+  if (Number.isSafeInteger(tag?.epoch)) out.epoch = tag.epoch
+  if (Number.isSafeInteger(tag?.actor_id)) out.actor_id = tag.actor_id
+  if (finiteNumber(tag?.at_ms) !== undefined) out.at_ms = tag.at_ms
+  return out
+}
+
+function tagText(tag) {
+  const parts = []
+  if (Number.isSafeInteger(tag?.tick)) parts.push(`tick:${tag.tick}`)
+  if (Number.isSafeInteger(tag?.epoch)) parts.push(`epoch:${tag.epoch}`)
+  return parts.length > 0 ? parts.join(',') : 'unknown'
+}
+
+function normalizeIngredient(raw) {
+  const name = factName(raw?.name)
+  if (!name) return undefined
+  const amount = finiteNumber(raw.amount)
+  return { type: raw.type === 'fluid' ? 'fluid' : 'item', name, ...(amount !== undefined ? { amount } : {}) }
+}
+
+function normalizeProduct(raw) {
+  const name = factName(raw?.name)
+  if (!name) return undefined
+  const product = { type: raw.type === 'fluid' ? 'fluid' : 'item', name }
+  for (const key of ['amount', 'amount_min', 'amount_max']) {
+    const value = finiteNumber(raw[key])
+    if (value !== undefined) product[key] = value
+  }
+  const probability = finiteNumber(raw.probability ?? raw.independent_probability)
+  if (probability !== undefined) product.probability = probability
+  return product
+}
+
+/**
+ * One recipe fact, bounded and name-checked. `raw` is a recipe entry as the live game reported it (getRecipeDetails
+ * `recipes[]`, or the requires_machine facts' recipe plus its machine names). `complete` is false when anything was
+ * cut or unreadable: an incomplete recipe is shown but never used to derive quantities.
+ */
+export function normalizeRecipeFact(raw, { source = 'unknown', tag, limits: overrides } = {}) {
+  const limits = { ...EXECUTOR_FACT_LIMITS, ...overrides }
+  const name = factName(raw?.name)
+  if (!name) return undefined
+  const rawIngredients = asList(raw.ingredients)
+  const rawProducts = asList(raw.products)
+  const ingredients = rawIngredients.map(normalizeIngredient).filter(Boolean)
+  const products = rawProducts.map(normalizeProduct).filter(Boolean)
+  if (ingredients.length === 0 && products.length === 0) return undefined
+  const machines = [...new Set(asList(raw.machines).map(machine => factName(typeof machine === 'string' ? machine : machine?.name)).filter(Boolean))]
+  const complete = ingredients.length === rawIngredients.length
+    && products.length === rawProducts.length
+    && ingredients.length <= limits.recipeIngredients
+    && products.length <= limits.recipeProducts
+  const energy = finiteNumber(raw.energy)
+  return {
+    name,
+    categories: [...new Set(asList(raw.categories).map(factName).filter(Boolean))].slice(0, 6),
+    ...(energy !== undefined ? { energy } : {}),
+    ingredients: ingredients.slice(0, limits.recipeIngredients),
+    products: products.slice(0, limits.recipeProducts),
+    machines: machines.slice(0, limits.recipeMachines),
+    machines_truncated: machines.length > limits.recipeMachines || raw.machines_truncated === true,
+    complete,
+    source: typeof source === 'string' ? source.slice(0, 40) : 'unknown',
+    as_of: normalizeFactTag(tag),
+  }
+}
+
+/** Recipe facts out of a parsed getRecipeDetails answer (found, recipes[] with crafting_machines[]). */
+export function recipeFactsFromDetails(parsed, { tag, limits } = {}) {
+  if (!parsed || typeof parsed !== 'object' || parsed.found !== true) return []
+  return asList(parsed.recipes).flatMap((entry) => {
+    const fact = normalizeRecipeFact({
+      name: entry?.name,
+      energy: entry?.energy,
+      categories: entry?.categories,
+      ingredients: entry?.ingredients,
+      products: entry?.products,
+      machines: asList(entry?.crafting_machines),
+      machines_truncated: entry?.crafting_machines_truncated === true,
+    }, { source: 'getRecipeDetails', tag, limits })
+    return fact ? [fact] : []
+  })
+}
+
+/** The recipe a requires_machine preflight reported (requiresMachineFacts shape), with the compatible machine names. */
+export function recipeFactFromRequiresMachine(facts, { tag, limits } = {}) {
+  const recipe = facts?.recipe
+  if (!recipe) return undefined
+  return normalizeRecipeFact({
+    name: recipe.name,
+    energy: recipe.energy,
+    categories: recipe.categories,
+    ingredients: recipe.ingredients,
+    products: recipe.products,
+    machines: asList(facts?.machines?.candidates),
+    machines_truncated: facts?.machines?.truncated === true,
+  }, { source: 'requires_machine', tag, limits })
+}
+
+/** Merge a newer read of the same recipe over an older one; machine names survive when the newer read has none. */
+export function mergeRecipeFact(existing, incoming) {
+  if (!existing) return incoming
+  return {
+    ...incoming,
+    machines: incoming.machines.length > 0 ? incoming.machines : existing.machines,
+    machines_truncated: incoming.machines.length > 0 ? incoming.machines_truncated : existing.machines_truncated,
+    categories: incoming.categories.length > 0 ? incoming.categories : existing.categories,
+  }
+}
+
+/** Parse the actor inventory the game printed: a JSON array, or the serpent block of {name, count} tables. */
+export function parseInventoryCounts(raw) {
+  const text = String(raw ?? '').trim()
+  if (!text) return undefined
+  const counts = new Map()
+  const add = (name, count) => {
+    const clean = factName(name)
+    if (!clean || !Number.isSafeInteger(count) || count < 0) return
+    counts.set(clean, (counts.get(clean) ?? 0) + count)
+  }
+  try {
+    const parsed = JSON.parse(text)
+    if (Array.isArray(parsed)) {
+      for (const entry of parsed) add(entry?.name, entry?.count)
+      return counts
+    }
+    // An empty Lua table prints as {} (or []): an empty inventory. Any other object is not an inventory.
+    if (parsed && typeof parsed === 'object') return Object.keys(parsed).length === 0 ? counts : undefined
+  }
+  catch {}
+  // serpent.block: fields sorted by key, so `count` precedes `name`; accept either order inside one table.
+  const tables = text.match(/\{[^{}]*\}/g) ?? []
+  for (const table of tables) {
+    const name = /name\s*=\s*"([^"]*)"/.exec(table)?.[1]
+    const count = /count\s*=\s*(-?\d+)/.exec(table)?.[1]
+    if (name !== undefined && count !== undefined) add(name, Number(count))
+  }
+  return counts.size > 0 || /^\{\s*\}$/.test(text) ? counts : undefined
+}
+
+/**
+ * What the active step's committed contract asks of the actor inventory, and every item its contract names.
+ * Only a mode `all` contract names definite roots: a mode `any` contract does not say which requirement will be met.
+ */
+export function stepContractNeeds(step) {
+  const contract = step?.completion_contract
+  const requirements = asList(contract?.requirements)
+  const items = []
+  const roots = []
+  for (const requirement of requirements) {
+    const item = factName(requirement?.item_name)
+    if (!item) continue
+    if (!items.includes(item)) items.push(item)
+    if (contract.mode === 'all' && requirement.kind === 'inventory_count' && Number.isSafeInteger(requirement.minimum) && requirement.minimum > 0) {
+      const existing = roots.find(root => root.item === item)
+      if (existing) existing.count = Math.max(existing.count, requirement.minimum)
+      else roots.push({ item, count: requirement.minimum })
+    }
+  }
+  return { roots, items }
+}
+
+// The recipe the derivation may use to make `item`: one deterministic, complete recipe with a certain item output.
+function expandableRecipe(item, recipes) {
+  const candidates = recipes.filter(recipe => recipe.complete && recipe.products.some(product => product.name === item && product.type === 'item'))
+  const chosen = candidates.length === 1 ? candidates[0] : candidates.find(recipe => recipe.name === item)
+  if (!chosen) return undefined
+  const product = chosen.products.find(entry => entry.name === item && entry.type === 'item')
+  const output = product?.amount
+  if (!(output > 0) || product.amount_min !== undefined || product.amount_max !== undefined) return undefined
+  if (product.probability !== undefined && product.probability !== 1) return undefined
+  if (chosen.ingredients.length === 0) return undefined
+  const usable = chosen.ingredients.every(ingredient => ingredient.type === 'item' && ingredient.amount > 0 && ingredient.name !== item)
+  if (!usable) return undefined
+  return { recipe: chosen, output }
+}
+
+/** The items a derivation would need counts for, breadth first from the roots through the recipes it can expand. */
+export function neededItems(roots, recipes, limit = EXECUTOR_FACT_LIMITS.countItems) {
+  const order = []
+  const queue = roots.map(root => root.item)
+  while (queue.length > 0) {
+    const item = queue.shift()
+    if (order.includes(item)) continue
+    order.push(item)
+    const expansion = expandableRecipe(item, recipes)
+    if (expansion) for (const ingredient of expansion.recipe.ingredients) queue.push(ingredient.name)
+  }
+  return { items: order.slice(0, limit), complete: order.length <= limit }
+}
+
+/**
+ * Residual needs of one step: per needed item the required amount, the held amount and what is still missing, with
+ * shared stock (an item two consumers need is accumulated once and the held amount is taken once) and recipe output
+ * quantities (a recipe yielding two per craft needs half the crafts). Returns `{ ok: true, rows }`, or
+ * `{ ok: false, reason }` when an input is unknown: it never guesses. `held` is a Map of fresh counts.
+ */
+export function deriveResidualNeeds({ roots, recipes, held }) {
+  if (!Array.isArray(roots) || roots.length === 0) return { ok: false, reason: 'no_contract_roots' }
+  const facts = Array.isArray(recipes) ? recipes : []
+  // Reachable graph through expandable recipes, in dependency order (consumers before their ingredients).
+  const edges = new Map()
+  const expansions = new Map()
+  const visit = [...roots.map(root => root.item)]
+  while (visit.length > 0) {
+    const item = visit.pop()
+    if (edges.has(item)) continue
+    const expansion = expandableRecipe(item, facts)
+    expansions.set(item, expansion)
+    const next = expansion ? [...new Set(expansion.recipe.ingredients.map(ingredient => ingredient.name))] : []
+    edges.set(item, next)
+    visit.push(...next)
+  }
+  const indegree = new Map([...edges.keys()].map(item => [item, 0]))
+  for (const next of edges.values()) for (const item of next) indegree.set(item, (indegree.get(item) ?? 0) + 1)
+  const ready = [...indegree.entries()].filter(([, degree]) => degree === 0).map(([item]) => item)
+  const order = []
+  while (ready.length > 0) {
+    const item = ready.shift()
+    order.push(item)
+    for (const next of edges.get(item) ?? []) {
+      indegree.set(next, indegree.get(next) - 1)
+      if (indegree.get(next) === 0) ready.push(next)
+    }
+  }
+  if (order.length !== edges.size) return { ok: false, reason: 'recipe_cycle' }
+  const demand = new Map()
+  for (const root of roots) demand.set(root.item, (demand.get(root.item) ?? 0) + root.count)
+  const rows = []
+  for (const item of order) {
+    const required = demand.get(item) ?? 0
+    if (required <= 0) continue
+    const count = held instanceof Map ? held.get(item) : undefined
+    if (!Number.isSafeInteger(count) || count < 0) return { ok: false, reason: `held_unknown:${item}` }
+    const missing = Math.max(0, required - count)
+    const row = { item, required, held: count, missing }
+    const expansion = expansions.get(item)
+    if (expansion && missing > 0) {
+      const crafts = Math.ceil(missing / expansion.output)
+      row.crafts = crafts
+      row.recipe = expansion.recipe.name
+      for (const ingredient of expansion.recipe.ingredients) demand.set(ingredient.name, (demand.get(ingredient.name) ?? 0) + crafts * ingredient.amount)
+    }
+    rows.push(row)
+  }
+  return { ok: true, rows }
+}
+
+/**
+ * Which recipe facts to carry: those producing an item the step or the goal names first, then those touching an item the
+ * derivation needs, then the most recently read. `recipes` is oldest read first. Bounded; stable order.
+ */
+export function selectRecipeFacts(recipes, { wanted = [], needed = [], limit = EXECUTOR_FACT_LIMITS.recipes } = {}) {
+  const list = Array.isArray(recipes) ? recipes : []
+  const wantedSet = new Set(wanted)
+  const neededSet = new Set(needed)
+  const scored = list.map((recipe, index) => {
+    const produces = recipe.products.map(product => product.name)
+    const consumes = recipe.ingredients.map(ingredient => ingredient.name)
+    const score = produces.some(name => wantedSet.has(name)) ? 3
+      : produces.some(name => neededSet.has(name)) || consumes.some(name => wantedSet.has(name)) ? 2
+        : 1
+    return { recipe, score, index }
+  })
+  scored.sort((left, right) => (right.score - left.score) || (right.index - left.index))
+  return scored.slice(0, limit).map(entry => entry.recipe)
+}
+
+function amountText(entry) {
+  if (entry.amount !== undefined) return String(entry.amount)
+  if (entry.amount_min !== undefined || entry.amount_max !== undefined) return `${entry.amount_min ?? '?'}-${entry.amount_max ?? '?'}`
+  return '?'
+}
+
+function stackText(entry) {
+  const probability = entry.probability !== undefined && entry.probability !== 1 ? ` p=${entry.probability}` : ''
+  return `${entry.type === 'fluid' ? 'fluid ' : ''}${amountText(entry)} ${entry.name}${probability}`
+}
+
+// Joins whole parts up to a character budget; the parts that do not fit are counted, never cut.
+function joinBounded(parts, separator, max) {
+  const kept = []
+  let used = 0
+  for (const part of parts) {
+    const next = used + (kept.length > 0 ? separator.length : 0) + part.length
+    if (next > max && kept.length > 0) break
+    kept.push(part)
+    used = next
+  }
+  const left = parts.length - kept.length
+  return `${kept.join(separator)}${left > 0 ? `${separator}(+${left} more)` : ''}`
+}
+
+export function recipeFactLine(fact, max = EXECUTOR_FACT_LIMITS.recipeChars) {
+  const head = `recipe_fact ${fact.name} (stable recipe data, source=${fact.source}, as_of=${tagText(fact.as_of)}${fact.complete ? '' : ', incomplete'})`
+  const body = [
+    fact.categories.length > 0 ? `categories=${fact.categories.join('+')}` : '',
+    fact.energy !== undefined ? `energy=${fact.energy}` : '',
+    `ingredients=${fact.ingredients.map(stackText).join(' + ') || 'none'}`,
+    `products=${fact.products.map(stackText).join(' + ') || 'none'}`,
+    fact.machines.length > 0 ? `machines=${fact.machines.join(',')}${fact.machines_truncated ? '+' : ''}` : '',
+  ].filter(Boolean)
+  return oneLine(`${head}: ${body.join(' | ')}`, max)
+}
+
+function countsRecords(counts, limits) {
+  const records = []
+  const items = asList(counts?.items).filter(entry => factName(entry?.item) && Number.isSafeInteger(entry.count)).slice(0, limits.countItems)
+  const fresh = items.filter(entry => entry.state === 'fresh')
+  const stale = items.filter(entry => entry.state === 'stale')
+  const unavailable = asList(counts?.unavailable).map(factName).filter(Boolean).slice(0, limits.countItems)
+  if (fresh.length > 0) {
+    records.push({
+      key: 'held_counts',
+      block: 'step',
+      drop: 'fresh_counts',
+      text: `held_counts (fresh live read of the actor inventory, as_of=${tagText(counts.as_of)}): ${joinBounded(fresh.map(entry => `${entry.item}=${entry.count}`), ' ', limits.countChars)}`,
+    })
+  }
+  if (stale.length > 0 || unavailable.length > 0) {
+    const parts = stale.map(entry => `${entry.item}=${entry.count} (observed ${tagText(entry)}${entry.reason ? `, ${entry.reason}` : ''})`)
+    if (unavailable.length > 0) parts.push(`no value: ${unavailable.join(',')}`)
+    records.push({
+      key: 'held_counts_stale',
+      block: 'step',
+      drop: 'stale_counts',
+      text: `held_counts_STALE (earlier observations, NOT current; the fresh read failed or was skipped): ${joinBounded(parts, ' ', limits.countChars)}`,
+    })
+  }
+  return records
+}
+
+function machineRecord(machine, limits) {
+  if (!machine || typeof machine !== 'object' || !machine.facts) return undefined
+  const facts = machine.facts
+  const body = {}
+  for (const key of ['unit_number', 'name', 'recipe', 'working', 'status_code', 'checkpoint', 'inventories', 'inventory_read', 'error']) {
+    if (facts[key] !== undefined) body[key] = facts[key]
+  }
+  const fresh = machine.state === 'fresh'
+  const label = fresh
+    ? `checkpoint_machine (fresh live read, as_of=${tagText(machine.as_of)})`
+    : `checkpoint_machine_STALE (earlier observation as_of=${tagText(machine.as_of)}, NOT current${machine.reason ? `; ${machine.reason}` : ''})`
+  return {
+    key: 'checkpoint_machine',
+    block: 'step',
+    drop: fresh ? 'fresh_counts' : 'stale_counts',
+    text: oneLine(`${label}: ${JSON.stringify(body)}`, limits.machineChars),
+  }
+}
+
+function residualRecord(residual, limits) {
+  if (!residual?.rows || residual.rows.length === 0) return undefined
+  const rows = residual.rows.slice(0, limits.residualRows).map(row => `${row.item} required=${row.required} held=${row.held} missing=${row.missing}${row.crafts !== undefined ? ` crafts=${row.crafts} via ${row.recipe}` : ''}`)
+  const roots = asList(residual.roots).map(root => `${root.item}>=${root.count}`).join(',')
+  return {
+    key: 'residual_needs',
+    block: 'step',
+    drop: 'residual_needs',
+    text: `residual_needs (derived from recipe_fact and fresh held_counts for the step contract ${roots}; shared stock counted once): ${joinBounded(rows, ' | ', limits.residualChars)}`,
+  }
+}
+
+function historicalRecord(entities, limits) {
+  const list = asList(entities).filter(entry => factName(entry?.name) && Number.isSafeInteger(entry.count)).slice(0, limits.historicalKinds)
+  if (list.length === 0) return undefined
+  const parts = list.map(entry => `${entry.name} x${entry.count}${Number.isSafeInteger(entry.tick) ? ` (tick:${entry.tick})` : ''}`)
+  return {
+    key: 'historical_entities',
+    block: 'step',
+    drop: 'historical_entities',
+    text: `historical_entities (earlier observations, NOT current exact targets; ids withheld): ${joinBounded(parts, ' | ', limits.historicalChars)}`,
+  }
+}
+
+// Fields naming what is authoritative in this packet and what is only history. Mandatory (never dropped by size).
+function authorityRecord(plan, step, limits) {
+  const contract = step?.completion_contract
+  const held = plan?.execution?.receipts?.[step?.step_id]
+  const latest = Array.isArray(held) && held.length > 0 ? held[held.length - 1] : undefined
+  return {
+    key: 'executor_authority',
+    block: 'step',
+    text: oneLine(`authority: active_step=${step.step_id} (committed plan) contract=${contract?.mode ? `${contract.mode} (committed)` : 'none'} latest_receipt=${latest ? `#${latest.seq ?? held.length} ${latest.kind} ${latest.ref} (this step)` : 'none'} entity_ids_in_receipts_and_snapshots=historical_observations current_exact_targets=only_from_a_fresh_observation`, limits.authorityChars),
+  }
+}
+
+function executorFactRecords(facts, plan, step, limits) {
+  if (!facts || typeof facts !== 'object') return []
+  const records = []
+  if (plan && step) records.push(authorityRecord(plan, step, limits))
+  records.push(...countsRecords(facts.counts, limits))
+  const machine = machineRecord(facts.machine, limits)
+  if (machine) records.push(machine)
+  const residual = residualRecord(facts.residual, limits)
+  if (residual) records.push(residual)
+  asList(facts.recipes).slice(0, limits.recipes).forEach((fact, index) => {
+    records.push({ key: `recipe_fact_${index}`, block: 'step', drop: 'recipe_facts', rank: index, text: recipeFactLine(fact, limits.recipeChars) })
+  })
+  const historical = historicalRecord(facts.historical_entities, limits)
+  if (historical) records.push(historical)
+  return records
+}
+
+// What an executor-facts packet carried after size control, for the trace row.
+function executorFactsSummary(facts, kept) {
+  const keys = new Set(kept.map(record => record.key))
+  const counts = asList(facts?.counts?.items)
+  return {
+    recipe_facts: kept.filter(record => record.key.startsWith('recipe_fact_')).length,
+    fresh_items: keys.has('held_counts') ? counts.filter(entry => entry.state === 'fresh').length : 0,
+    stale_items: keys.has('held_counts_stale') ? counts.filter(entry => entry.state === 'stale').length + asList(facts?.counts?.unavailable).length : 0,
+    residual_needs: keys.has('residual_needs') ? asList(facts?.residual?.rows).length : 0,
+    machine: keys.has('checkpoint_machine') ? (facts?.machine?.state ?? 'none') : 'none',
+    historical_entity_kinds: keys.has('historical_entities') ? asList(facts?.historical_entities).length : 0,
+  }
+}
+
+function stepRecords(state, plan, activeIndex, limits, { role, checkpoint, reason, budget, note, actor, runtime, amendment, jevFacts, jevHints, executorFacts }) {
   const records = [
     { key: 'restage', block: 'step', text: `restage: role=${role} checkpoint=${checkpoint}${reason ? ` reason=${oneLine(reason, limits.reasonChars)}` : ''}` },
   ]
@@ -292,6 +763,7 @@ function stepRecords(state, plan, activeIndex, limits, { role, checkpoint, reaso
           text: `receipt #${entry.seq ?? index + 1} ${entry.kind} ${entry.ref}: ${oneLine(entry.summary, 240)}`,
         })
       })
+      records.push(...executorFactRecords(executorFacts, plan, step, limits))
     }
     else {
       records.push({ key: 'active_step', block: 'step', text: 'active_step: none (all steps closed)' })
@@ -346,13 +818,14 @@ export function estimateTokens(chars) {
  * @param {object} [args.runtime] compact runtime state (task_state, queue_length, idle)
  * @param {{sender:string,text:string}} [args.amendment] a staged user amendment not yet applied (mandatory, never dropped by size)
  * @param {{family:string,text:string}[]} [args.jevFacts] U11 advisory: bounded deterministic facts for the families Jev selected (dropped first when over size)
+ * @param {object} [args.executorFacts] D2: harness-read facts for a fresh executor ({recipes, counts, machine, residual, historical_entities}); each record is labelled fresh, stale or historical
  * @param {string[]} [args.jevHints] U11 advisory: families Jev selected that have no parameterless fact read (one hint line)
  */
-export function buildHandoffPacket({ planningState, role, checkpoint, reason = '', note = '', budget = '', actor, runtime, shelfCandidates, amendment, jevFacts, jevHints, previousContextChars, now, limits: limitOverrides } = {}) {
+export function buildHandoffPacket({ planningState, role, checkpoint, reason = '', note = '', budget = '', actor, runtime, shelfCandidates, amendment, jevFacts, jevHints, executorFacts, previousContextChars, now, limits: limitOverrides } = {}) {
   if (!CONTEXT_RESTAGE_ROLES.includes(role)) throw new RangeError(`handoff role must be one of ${CONTEXT_RESTAGE_ROLES.join(', ')}`)
   if (!CONTEXT_RESTAGE_CHECKPOINTS.includes(checkpoint)) throw new RangeError(`handoff checkpoint must be one of ${CONTEXT_RESTAGE_CHECKPOINTS.join(', ')}`)
   if (!planningState?.goal?.goal_id) throw new RangeError('handoff packet needs a planning state with a goal')
-  const limits = { ...HANDOFF_PACKET_LIMITS, ...limitOverrides }
+  const limits = { ...HANDOFF_PACKET_LIMITS, ...EXECUTOR_FACT_LIMITS, ...limitOverrides }
 
   const plan = getActivePlan(planningState)
   const activeIndex = plan && Number.isInteger(plan.active_step_index) ? plan.active_step_index : -1
@@ -361,7 +834,7 @@ export function buildHandoffPacket({ planningState, role, checkpoint, reason = '
     ...goalRecords(planningState, limits),
     ...(roadmap ? [roadmap] : []),
     ...planRecords(plan, activeIndex, limits),
-    ...stepRecords(planningState, plan, activeIndex, limits, { role, checkpoint, reason, budget, note, actor, runtime, amendment, jevFacts, jevHints }),
+    ...stepRecords(planningState, plan, activeIndex, limits, { role, checkpoint, reason, budget, note, actor, runtime, amendment, jevFacts, jevHints, executorFacts }),
     ...shelfCandidateRecords(shelfCandidates, limits),
   ]
 
@@ -405,6 +878,8 @@ export function buildHandoffPacket({ planningState, role, checkpoint, reason = '
     event,
     dropped,
     amendment_included: records.some(record => record.key === 'user_amendment'),
+    // Present only when the caller supplied executor facts: what survived size control (the loop traces it).
+    ...(executorFacts ? { executor_facts: executorFactsSummary(executorFacts, kept) } : {}),
     over_limit: text.length > limits.maxChars,
   }
 }

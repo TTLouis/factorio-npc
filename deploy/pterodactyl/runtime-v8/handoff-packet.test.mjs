@@ -3,9 +3,16 @@ import assert from 'node:assert/strict'
 
 import {
   buildHandoffPacket,
+  deriveResidualNeeds,
   estimateTokens,
   HANDOFF_PACKET_LIMITS,
+  neededItems,
+  normalizeRecipeFact,
+  parseInventoryCounts,
+  recipeFactLine,
   sanitizeHandoffNote,
+  selectRecipeFacts,
+  stepContractNeeds,
 } from './handoff-packet.mjs'
 import {
   applyPlanningEvent,
@@ -372,4 +379,237 @@ test('the actor line is mandatory when supplied, the runtime and contract lines 
   const tiny = run(1)
   assert.deepEqual(tiny.dropped, ['runtime', 'budget', 'contract', 'roadmap_node', 'step_1'], 'fixed order; the pending step drops last, the active step never')
   assert.ok(tiny.text.includes('actor: actor_id=19'), 'the actor snapshot is never dropped')
+})
+
+// --- D2: executor facts (recipe records, fresh/stale counts, residual needs, authority and history labels) ---
+
+function circuitState() {
+  const drafted = applyPlanningEvent(goalState(), {
+    type: PLANNING_EVENT.DRAFT_CREATED,
+    now: 20,
+    roadmap_node_ids: ['node_power'],
+    steps: [
+      { description: 'Craft 10 electronic circuits for the lab', completion_contract: { mode: 'all', requirements: [{ id: 'circuits', kind: 'inventory_count', item_name: 'electronic-circuit', minimum: 10 }] } },
+      { description: 'Craft the lab' },
+    ],
+  })
+  const committed = applyPlanningEvent(drafted, {
+    type: PLANNING_EVENT.PLAN_COMMITTED,
+    now: 30,
+    plan_id: getActivePlan(drafted).plan_id,
+    runtime_validation: { passed: true },
+  })
+  return withReceipts(committed, 2)
+}
+
+const TAG = { tick: 612, epoch: 3, actor_id: 19, at_ms: 1_700_000_000_000 }
+const recipeFact = (name, ingredients, products, extra = {}) => normalizeRecipeFact({
+  name,
+  energy: 0.5,
+  categories: ['crafting'],
+  ingredients: ingredients.map(([ingredient, amount]) => ({ type: 'item', name: ingredient, amount })),
+  products: products.map(([product, amount]) => ({ type: 'item', name: product, amount })),
+  machines: ['assembling-machine-1', 'assembling-machine-2'],
+  ...extra,
+}, { source: 'getRecipeDetails', tag: TAG })
+const LAB = recipeFact('lab', [['electronic-circuit', 10], ['iron-gear-wheel', 10], ['transport-belt', 4]], [['lab', 1]])
+const CIRCUIT = recipeFact('electronic-circuit', [['iron-plate', 1], ['copper-cable', 3]], [['electronic-circuit', 1]])
+const CABLE = recipeFact('copper-cable', [['copper-plate', 1]], [['copper-cable', 2]])
+const GEAR = recipeFact('iron-gear-wheel', [['iron-plate', 2]], [['iron-gear-wheel', 1]])
+const heldOf = entries => new Map(Object.entries(entries))
+
+const FRESH_FACTS = () => ({
+  recipes: [LAB, CIRCUIT, CABLE],
+  counts: {
+    items: [{ item: 'electronic-circuit', count: 0, state: 'fresh' }, { item: 'copper-plate', count: 10, state: 'fresh' }],
+    unavailable: [],
+    as_of: TAG,
+  },
+  residual: { roots: [{ item: 'electronic-circuit', count: 10 }], rows: deriveResidualNeeds({ roots: [{ item: 'electronic-circuit', count: 10 }], recipes: [CIRCUIT, CABLE], held: heldOf({ 'electronic-circuit': 0, 'iron-plate': 0, 'copper-cable': 0, 'copper-plate': 10 }) }).rows },
+  historical_entities: [{ name: 'stone-furnace', count: 2, tick: 600 }],
+})
+
+test('D2: a recipe record is carried tagged and bounded, and the plan block and a packet without facts do not change', () => {
+  const state = circuitState()
+  const plain = buildHandoffPacket({ planningState: state, ...ARGS })
+  const withFacts = buildHandoffPacket({ planningState: state, ...ARGS, executorFacts: FRESH_FACTS() })
+  assert.equal(withFacts.stableText, plain.stableText, 'the cache-friendly plan block is byte-identical')
+  assert.ok(Buffer.from(withFacts.stableText).equals(Buffer.from(plain.stableText)))
+  assert.equal(plain.executor_facts, undefined, 'no facts, no summary')
+  assert.ok(!plain.text.includes('recipe_fact'))
+  const line = withFacts.text.split('\n').find(item => item.startsWith('recipe_fact lab '))
+  assert.equal(line, 'recipe_fact lab (stable recipe data, source=getRecipeDetails, as_of=tick:612,epoch:3): categories=crafting | energy=0.5 | ingredients=10 electronic-circuit + 10 iron-gear-wheel + 4 transport-belt | products=1 lab | machines=assembling-machine-1,assembling-machine-2')
+  assert.equal(withFacts.executor_facts.recipe_facts, 3)
+  assert.ok(withFacts.volatileText.includes('recipe_fact'), 'recipe facts live in the step block')
+
+  // Bounded: at most five records, each within its character bound, an over-long recipe is marked incomplete, bad names are refused.
+  const many = Array.from({ length: 9 }, (_, index) => recipeFact(`widget-${index}`, [['iron-plate', 1]], [[`widget-${index}`, 1]]))
+  const crowded = buildHandoffPacket({ planningState: state, ...ARGS, executorFacts: { recipes: selectRecipeFacts(many, { wanted: ['widget-3'], limit: 5 }) }, limits: { maxChars: 100000 } })
+  const lines = crowded.text.split('\n').filter(item => item.startsWith('recipe_fact '))
+  assert.equal(lines.length, 5)
+  assert.ok(lines[0].startsWith('recipe_fact widget-3 '), 'a recipe producing a named item comes first')
+  for (const item of lines) assert.ok(item.length <= 340)
+  const big = recipeFact('big', Array.from({ length: 12 }, (_, index) => [`part-${index}`, 1]), [['big', 1]])
+  assert.equal(big.complete, false)
+  assert.equal(big.ingredients.length, 8)
+  assert.ok(recipeFactLine(big).includes('incomplete'))
+  assert.equal(normalizeRecipeFact({ name: 'Bad Name', ingredients: [{ name: 'x', amount: 1 }] }), undefined)
+  assert.equal(normalizeRecipeFact({ name: 'ok', ingredients: [], products: [] }), undefined)
+})
+
+test('D2: recipe facts, counts and residual needs drop whole in the fixed order, above the note and below the mandatory records', () => {
+  const state = circuitState()
+  const run = maxChars => buildHandoffPacket({ planningState: state, ...ARGS, note: 'a note', budget: 'effort low', executorFacts: FRESH_FACTS(), actor: ACTOR, limits: { maxChars } })
+  const full = run(100000)
+  assert.deepEqual(full.dropped, [])
+  const tiny = run(1)
+  assert.equal(tiny.over_limit, true)
+  const order = tiny.dropped
+  const at = key => order.findIndex(item => item === key || item.startsWith(key))
+  for (const [first, second] of [
+    ['note', 'historical_entities'],
+    ['historical_entities', 'receipt_1'],
+    ['receipt_2', 'budget'],
+    ['budget', 'recipe_fact_2'],
+    ['recipe_fact_2', 'recipe_fact_0'],
+    ['recipe_fact_0', 'contract'],
+    ['contract', 'held_counts'],
+    ['held_counts', 'residual_needs'],
+    ['residual_needs', 'roadmap_node'],
+  ]) {
+    assert.ok(at(first) >= 0 && at(second) >= 0, `${first} and ${second} dropped`)
+    assert.ok(at(first) < at(second), `${first} drops before ${second}: ${order.join(', ')}`)
+  }
+  // Mandatory records survive every drop: the authority fields, the active step, the actor line.
+  for (const needle of ['authority: active_step=', 'active_step: 1 of 2', 'actor: actor_id=19']) assert.ok(tiny.text.includes(needle), `mandatory ${needle} dropped`)
+  assert.ok(!order.includes('executor_authority'))
+  // Same input, same drops, and every surviving line is whole.
+  assert.deepEqual(run(1).dropped, order)
+  for (const line of full.text.split('\n')) {
+    if (tiny.text.includes(line.slice(0, 12))) assert.ok(tiny.text.includes(line), `cut mid-record: ${line}`)
+  }
+  // A limit just under the full packet drops only the optional note.
+  assert.deepEqual(run(full.chars - 1).dropped, ['note'])
+})
+
+test('D2: counts are labelled fresh or stale with their tick, a failed read never shows as current, and a missing value says so', () => {
+  const state = circuitState()
+  const facts = {
+    counts: {
+      items: [
+        { item: 'copper-plate', count: 10, state: 'fresh' },
+        { item: 'iron-plate', count: 4, state: 'stale', tick: 300, epoch: 3, reason: 'fresh_read_failed' },
+      ],
+      unavailable: ['coal'],
+      as_of: TAG,
+    },
+    machine: { state: 'stale', facts: { unit_number: 55, name: 'stone-furnace', working: true, inventories: { input: { 'copper-ore': 3 } } }, as_of: { tick: 300, epoch: 3 }, reason: 'fresh_read_failed' },
+  }
+  const { text } = buildHandoffPacket({ planningState: state, ...ARGS, executorFacts: facts })
+  assert.ok(text.includes('held_counts (fresh live read of the actor inventory, as_of=tick:612,epoch:3): copper-plate=10'))
+  const stale = text.split('\n').find(line => line.startsWith('held_counts_STALE'))
+  assert.ok(stale.includes('NOT current'))
+  assert.ok(stale.includes('iron-plate=4 (observed tick:300,epoch:3, fresh_read_failed)'))
+  assert.ok(stale.includes('no value: coal'))
+  assert.ok(!stale.includes('copper-plate'), 'a fresh item is never listed as stale')
+  const fresh = text.split('\n').find(line => line.startsWith('held_counts '))
+  assert.ok(!fresh.includes('iron-plate'), 'a stale item is never listed as fresh')
+  const machine = text.split('\n').find(line => line.startsWith('checkpoint_machine'))
+  assert.ok(machine.startsWith('checkpoint_machine_STALE (earlier observation as_of=tick:300,epoch:3, NOT current; fresh_read_failed)'))
+  const freshMachine = buildHandoffPacket({ planningState: state, ...ARGS, executorFacts: { machine: { state: 'fresh', facts: { unit_number: 55, name: 'stone-furnace', working: true, checkpoint: { current: 3, minimum: 10, satisfied: false } }, as_of: TAG } } }).text
+  assert.ok(freshMachine.includes('checkpoint_machine (fresh live read, as_of=tick:612,epoch:3): {"unit_number":55,"name":"stone-furnace","working":true,"checkpoint":{"current":3,"minimum":10,"satisfied":false}}'))
+})
+
+test('D2: residual needs use shared stock once and recipe output quantities, and are omitted rather than guessed', () => {
+  const circuits = [{ item: 'electronic-circuit', count: 10 }]
+  const rows = (roots, recipes, held) => {
+    const result = deriveResidualNeeds({ roots, recipes, held: heldOf(held) })
+    assert.equal(result.ok, true, JSON.stringify(result))
+    return Object.fromEntries(result.rows.map(row => [row.item, row]))
+  }
+
+  // Copper-cable yields 2 per craft: 30 cable is 15 crafts, so 15 plates, and 10 held plates leave 5 missing.
+  const base = rows(circuits, [CIRCUIT, CABLE], { 'electronic-circuit': 0, 'iron-plate': 0, 'copper-cable': 0, 'copper-plate': 10 })
+  assert.deepEqual(base['electronic-circuit'], { item: 'electronic-circuit', required: 10, held: 0, missing: 10, crafts: 10, recipe: 'electronic-circuit' })
+  assert.deepEqual(base['copper-cable'], { item: 'copper-cable', required: 30, held: 0, missing: 30, crafts: 15, recipe: 'copper-cable' })
+  assert.deepEqual(base['copper-plate'], { item: 'copper-plate', required: 15, held: 10, missing: 5 })
+  assert.deepEqual(base['iron-plate'], { item: 'iron-plate', required: 10, held: 0, missing: 10 })
+
+  // An odd cable demand rounds the crafts up; held intermediates cut the crafts first.
+  const odd = rows([{ item: 'copper-cable', count: 31 }], [CABLE], { 'copper-cable': 0, 'copper-plate': 0 })
+  assert.equal(odd['copper-cable'].crafts, 16)
+  assert.equal(odd['copper-plate'].required, 16)
+  const partial = rows(circuits, [CIRCUIT, CABLE], { 'electronic-circuit': 4, 'iron-plate': 0, 'copper-cable': 0, 'copper-plate': 0 })
+  assert.equal(partial['electronic-circuit'].crafts, 6)
+  assert.equal(partial['copper-cable'].required, 18)
+  assert.equal(partial['copper-plate'].required, 9)
+  const covered = rows(circuits, [CIRCUIT, CABLE], { 'electronic-circuit': 12, 'iron-plate': 0, 'copper-cable': 0, 'copper-plate': 0 })
+  assert.deepEqual(Object.keys(covered), ['electronic-circuit'], 'enough held: nothing below it is needed')
+  assert.equal(covered['electronic-circuit'].missing, 0)
+
+  // Shared stock: iron plate is needed by the circuits (10) and by the gears (2 each, 5 gears = 10): 20 in all, taken once.
+  const shared = rows([...circuits, { item: 'iron-gear-wheel', count: 5 }], [CIRCUIT, CABLE, GEAR], { 'electronic-circuit': 0, 'iron-gear-wheel': 0, 'iron-plate': 12, 'copper-cable': 0, 'copper-plate': 0 })
+  assert.equal(shared['iron-plate'].required, 20)
+  assert.equal(shared['iron-plate'].held, 12)
+  assert.equal(shared['iron-plate'].missing, 8, 'not counted once per consumer (which would hide the shortfall)')
+
+  // Unknown inputs: no row is invented.
+  assert.deepEqual(deriveResidualNeeds({ roots: circuits, recipes: [CIRCUIT, CABLE], held: heldOf({ 'electronic-circuit': 0 }) }), { ok: false, reason: 'held_unknown:iron-plate' })
+  assert.deepEqual(deriveResidualNeeds({ roots: [], recipes: [CIRCUIT], held: heldOf({}) }), { ok: false, reason: 'no_contract_roots' })
+  // No recipe known: the contract item itself is still a row (required, held, missing), nothing more.
+  const bare = rows([{ item: 'copper-plate', count: 10 }], [], { 'copper-plate': 3 })
+  assert.deepEqual(bare['copper-plate'], { item: 'copper-plate', required: 10, held: 3, missing: 7 })
+  // Recipes that cannot be counted exactly are not expanded: fluid ingredient, probabilistic product, incomplete, ambiguous, catalyst.
+  const fluid = recipeFact('oil-thing', [['iron-plate', 1]], [['oil-thing', 1]], { ingredients: [{ type: 'item', name: 'iron-plate', amount: 1 }, { type: 'fluid', name: 'water', amount: 5 }] })
+  const chance = normalizeRecipeFact({ name: 'lucky', ingredients: [{ name: 'iron-plate', amount: 1 }], products: [{ name: 'lucky', amount_min: 1, amount_max: 2 }] }, { tag: TAG })
+  const catalyst = recipeFact('loop-thing', [['loop-thing', 1], ['iron-plate', 1]], [['loop-thing', 2]])
+  const twin = [recipeFact('alt-a', [['iron-plate', 1]], [['alt-target', 1]]), recipeFact('alt-b', [['copper-plate', 1]], [['alt-target', 1]])]
+  const bigRecipe = recipeFact('big', Array.from({ length: 12 }, (_, index) => [`part-${index}`, 1]), [['big', 1]])
+  for (const [item, recipes] of [['oil-thing', [fluid]], ['lucky', [chance]], ['big', [bigRecipe]], ['alt-target', twin], ['loop-thing', [catalyst]]]) {
+    const result = rows([{ item, count: 4 }], recipes, { [item]: 1 })
+    assert.deepEqual(Object.keys(result), [item], `${item} is a leaf row only`)
+  }
+  // A cycle between two recipes is refused outright.
+  const ping = recipeFact('ping', [['pong', 1]], [['ping', 1]])
+  const pong = recipeFact('pong', [['ping', 1]], [['pong', 1]])
+  assert.deepEqual(deriveResidualNeeds({ roots: [{ item: 'ping', count: 1 }], recipes: [ping, pong], held: heldOf({ ping: 0, pong: 0 }) }), { ok: false, reason: 'recipe_cycle' })
+
+  // The contract decides the roots: a mode `any` contract names none, an entity-inventory requirement is not actor stock.
+  assert.deepEqual(stepContractNeeds({ completion_contract: { mode: 'all', requirements: [{ kind: 'inventory_count', item_name: 'copper-plate', minimum: 10 }, { kind: 'entity_inventory_count', item_name: 'iron-plate', unit_number: 5, minimum: 4 }] } }), { roots: [{ item: 'copper-plate', count: 10 }], items: ['copper-plate', 'iron-plate'] })
+  assert.deepEqual(stepContractNeeds({ completion_contract: { mode: 'any', requirements: [{ kind: 'inventory_count', item_name: 'copper-plate', minimum: 10 }] } }).roots, [])
+  assert.deepEqual(stepContractNeeds({}), { roots: [], items: [] })
+  assert.deepEqual(neededItems([{ item: 'electronic-circuit', count: 1 }], [CIRCUIT, CABLE]).items, ['electronic-circuit', 'iron-plate', 'copper-cable', 'copper-plate'])
+  assert.equal(neededItems([{ item: 'electronic-circuit', count: 1 }], [CIRCUIT, CABLE], 2).complete, false)
+})
+
+test('D2: the residual record names the contract and its rows; the authority record labels the committed step and history', () => {
+  const state = circuitState()
+  const { text, executor_facts: summary } = buildHandoffPacket({ planningState: state, ...ARGS, executorFacts: FRESH_FACTS() })
+  const residual = text.split('\n').find(line => line.startsWith('residual_needs'))
+  assert.equal(residual, 'residual_needs (derived from recipe_fact and fresh held_counts for the step contract electronic-circuit>=10; shared stock counted once): electronic-circuit required=10 held=0 missing=10 crafts=10 via electronic-circuit | iron-plate required=10 held=0 missing=10 | copper-cable required=30 held=0 missing=30 crafts=15 via copper-cable | copper-plate required=15 held=10 missing=5')
+  const authority = text.split('\n').find(line => line.startsWith('authority:'))
+  const stepId = getActivePlan(state).steps[0].step_id
+  assert.equal(authority, `authority: active_step=${stepId} (committed plan) contract=all (committed) latest_receipt=#2 operation_receipt batch_2 (this step) entity_ids_in_receipts_and_snapshots=historical_observations current_exact_targets=only_from_a_fresh_observation`)
+  assert.ok(text.includes('active_step_contract: all: inventory_count electronic-circuit>=10'), 'the committed contract is present')
+  assert.ok(text.includes('receipt #2 operation_receipt batch_2'), 'the latest correlated receipt is present')
+  assert.deepEqual(summary, { recipe_facts: 3, fresh_items: 2, stale_items: 0, residual_needs: 4, machine: 'none', historical_entity_kinds: 1 })
+})
+
+test('D2: historical entity observations are labelled, carry their tick and withhold exact ids', () => {
+  const state = circuitState()
+  const { text } = buildHandoffPacket({ planningState: state, ...ARGS, executorFacts: { historical_entities: [{ name: 'stone-furnace', count: 2, tick: 600, unit_number: 4242 }, { name: 'wooden-chest', count: 1 }] } })
+  const line = text.split('\n').find(item => item.startsWith('historical_entities'))
+  assert.equal(line, 'historical_entities (earlier observations, NOT current exact targets; ids withheld): stone-furnace x2 (tick:600) | wooden-chest x1')
+  assert.ok(!text.includes('4242'))
+})
+
+test('D2: inventory text parses from JSON and from the serpent block the game prints, and anything else is refused', () => {
+  assert.deepEqual([...parseInventoryCounts('[{"name":"copper-plate","count":10},{"name":"coal","count":2}]')], [['copper-plate', 10], ['coal', 2]])
+  const serpent = '{\n  {\n    count = 10,\n    name = "copper-plate"\n  },\n  {\n    count = 2,\n    name = "coal"\n  }\n}'
+  assert.deepEqual([...parseInventoryCounts(serpent)], [['copper-plate', 10], ['coal', 2]])
+  assert.deepEqual([...parseInventoryCounts('{ { name = "iron-plate", count = 3 } }')], [['iron-plate', 3]], 'either field order')
+  assert.equal(parseInventoryCounts('{}').size, 0, 'an empty inventory is a valid empty answer')
+  assert.equal(parseInventoryCounts('no controlled actor'), undefined)
+  assert.equal(parseInventoryCounts(''), undefined)
+  assert.equal(parseInventoryCounts('{"found":false}'), undefined)
 })
