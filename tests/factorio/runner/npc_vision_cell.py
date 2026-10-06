@@ -342,6 +342,41 @@ def run(client: Rcon, results: Path, phase: str, save_path: Path | None, process
     require(damage['dealt'] == 0 and damage['valid'] is True and damage['before'] == damage['after'], damage)
     evidence['live_damage'] = damage
 
+    # A car always has a driver seat in the engine's eyes, so entry is tried every way the API offers,
+    # on the live vehicle (every runtime flag off) and on a fresh instance (operable, destructible), with
+    # the NPC standing on it. Nothing may end up inside, and nobody may be driving.
+    json_command(
+        lua(actor_lookup(), f"local fresh=s.create_entity{{name='{VISION}',position=a.position,force='player',raise_built=false}};",
+            'rcon.print(helpers.table_to_json({unit=fresh.unit_number}))'),
+        'driver test instance',
+    )
+    entry = json_command(
+        lua(actor_lookup(), f"local live=nil; local fresh=nil; for _,e in pairs(s.find_entities_filtered{{name='{VISION}'}}) do if e.unit_number=={unit_number} then live=e else fresh=e end end;",
+            'local out={}; for label,v in pairs({live=live,fresh=fresh}) do local r={};',
+            "local attempts={{'set_driver',function() v.set_driver(a) end},{'set_passenger',function() v.set_passenger(a) end},",
+            "{'set_driving',function() a.set_driving(true) end},{'set_driving_forced',function() a.set_driving(true,true) end}};",
+            'for _,attempt in ipairs(attempts) do local ok,err=pcall(attempt[2]);',
+            'r[attempt[1]]={threw=not ok,driver=v.get_driver()~=nil,passenger=v.get_passenger()~=nil,npc_driving=a.driving,npc_vehicle=a.vehicle~=nil}; if a.driving then a.set_driving(false) end end;',
+            'out[label]=r end; fresh.destroy(); rcon.print(helpers.table_to_json(out))'),
+        'vehicle entry attempts',
+    )
+    # Control (alone, so set_driving cannot pick the vision vehicle): an ordinary car does take the NPC, so the
+    # attempts above can fail only because of the prototype.
+    control_car = json_command(
+        lua(actor_lookup(), "local car=s.create_entity{name='car',position=a.position,force='player'}; assert(car,'control car');",
+            "car.set_driver(a); local entered=car.get_driver()~=nil and a.driving; if a.driving then a.set_driving(false) end; car.destroy();",
+            'rcon.print(helpers.table_to_json({entered=entered}))'),
+        'control car entry',
+    )
+    require(control_car['entered'] is True, ('an ordinary car must accept the NPC as driver', control_car))
+    for label, attempts in entry.items():
+        for attempt, result in attempts.items():
+            require(result['driver'] is False and result['passenger'] is False and result['npc_driving'] is False and result['npc_vehicle'] is False,
+                    ('the NPC got inside the vision vehicle', label, attempt, result))
+    evidence['driver_entry'] = {**entry, 'control_car': control_car}
+    print('PASS: set_driver, set_passenger and set_driving (also forced) never put the NPC inside the live vehicle or a fresh instance while an ordinary car takes it as driver', flush=True)
+    require(len(vision_entities()) == 1, 'only the live vehicle is left after the entry attempts')
+
     # Arena for placement, belts and clearing around the NPC (a test-only fixture, not a blueprint).
     teleport_npc(*NPC_HOP_ONE)
     json_command(lua("remote.call('autorio_operations','cancel_all_tasks'); rcon.print('{}')"), 'cancel tasks')

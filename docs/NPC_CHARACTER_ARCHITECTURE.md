@@ -257,6 +257,9 @@ NPC. It must not interact with the world at all.
   chest dies the same way), so the prototype flags alone do not stop it. The real
   engine lane shows a destructible instance dying to a hunting biter and the
   runtime-flagged live one being ignored.
+- **Scans**: the helpers are also exact for `limit` (the engine applies it before
+  the vehicle is dropped, so a limited scan asks for one extra result per vehicle),
+  `invert`, and counts.
 - **Zero connected players**: Factorio charts nothing for a force without a
   connected player: not `LuaForce.chart`, not a powered radar, and not this
   vehicle (active or inactive). The vehicle therefore adds live vision for

@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ControlledActor } from './actors/types'
 import { new_awareness_controller } from './awareness'
 // control.ts registers the on_init / on_configuration_changed sweeps when imported.
@@ -278,7 +278,7 @@ describe('NPC vision vehicle lifecycle', () => {
     ;(globalThis as any).game.tick = 50
     vision.tick(actor, actor.status_snapshot(), false)
     expect(surface.create_entity).toHaveBeenCalledTimes(1)
-    expect(trace_lines()).toContain('[AUTORIO] npc.vision.create_failed actor_id=9 reason=create_entity_returned_nothing trigger=no_vehicle')
+    expect(trace_lines()).toContain('[AUTORIO] npc.vision.create_failed actor_id=9 reason=create_entity_returned_nothing trigger=no_vehicle failures=1')
 
     // Retry once the back-off passed, and succeed.
     ;(globalThis as any).game.tick = 400
@@ -290,6 +290,54 @@ describe('NPC vision vehicle lifecycle', () => {
     vision.tick(actor, actor.status_snapshot(), false)
     expect(surface.create_entity).toHaveBeenCalledTimes(2)
     expect(vision.status()).toMatchObject({ present: true })
+  })
+})
+
+describe('NPC vision vehicle creation failures', () => {
+  afterEach(() => {
+    delete (globalThis as any).pcall
+  })
+
+  it('treats a create_entity that throws like one that returns nothing, with the same back-off', () => {
+    ;(globalThis as any).pcall = (fn: () => unknown) => {
+      try { return [true, fn()] }
+      catch (error) { return [false, String(error)] }
+    }
+    const { actor, surface } = make_actor()
+    register_surfaces(surface)
+    surface.create_entity.mockImplementation(() => { throw new Error('surface refuses the entity') })
+    const vision = new_npc_vision_controller()
+
+    vision.tick(actor, actor.status_snapshot(), true)
+    ;(globalThis as any).game.tick = 50
+    vision.tick(actor, actor.status_snapshot(), false)
+
+    expect(surface.create_entity).toHaveBeenCalledTimes(1)
+    expect(vision.status()).toEqual({ present: false, stored: false })
+    expect(trace_lines()).toEqual([
+      '[AUTORIO] npc.vision.create_failed actor_id=9 reason=create_entity_threw:Error: surface refuses the entity trigger=no_vehicle failures=1',
+    ])
+    ;(globalThis as any).game.tick = 400
+    vision.tick(actor, actor.status_snapshot(), false)
+    expect(surface.create_entity).toHaveBeenCalledTimes(2)
+  })
+
+  it('logs the first failure and then only every twelfth, and stays quiet while the sweep finds nothing', () => {
+    const { actor, surface } = make_actor()
+    register_surfaces(surface)
+    surface.create_entity.mockReturnValue(undefined)
+    const vision = new_npc_vision_controller()
+    for (let attempt = 0; attempt < 25; attempt++) {
+      ;(globalThis as any).game.tick = 1 + attempt * 300
+      vision.tick(actor, actor.status_snapshot(), false)
+    }
+
+    expect(surface.create_entity).toHaveBeenCalledTimes(25)
+    const failed = trace_lines().filter((line: string) => line.includes('create_failed'))
+    expect(failed).toHaveLength(3)
+    expect(failed[1]).toContain('failures=12')
+    expect(failed[2]).toContain('failures=24')
+    expect(trace_lines().filter((line: string) => line.includes('npc.vision.swept'))).toEqual([])
   })
 })
 
@@ -427,6 +475,82 @@ describe('every entity scan excludes the vision vehicle', () => {
     expect(count_world_entities(surface, { name: 'sgluna-npc-vision' })).toBe(0)
     expect(surface.count_entities_filtered).not.toHaveBeenCalled()
     expect(count_world_entities(surface, { name: 'wooden-chest', radius: 4, position: { x: 0, y: 0 } })).toBe(1)
+  })
+
+  it('counts and lists without the vehicle for unnamed, type, area and limited scans', () => {
+    // A surface that really filters: one chest, one real car and two vision vehicles.
+    const chest = { name: 'wooden-chest', type: 'container' }
+    const car = { name: 'car', type: 'car' }
+    const vision_a = { name: 'sgluna-npc-vision', type: 'car' }
+    const vision_b = { name: 'sgluna-npc-vision', type: 'car' }
+    const everything = [vision_a, chest, vision_b, car]
+    const surface: any = {
+      find_entities_filtered: vi.fn((filters: any) => {
+        let found = everything.filter((entity) => {
+          const names = filters.name === undefined ? undefined : ([] as string[]).concat(filters.name)
+          const types = filters.type === undefined ? undefined : ([] as string[]).concat(filters.type)
+          const match = (names === undefined || names.includes(entity.name)) && (types === undefined || types.includes(entity.type))
+          return filters.invert === true ? !match : match
+        })
+        if (filters.limit !== undefined) found = found.slice(0, filters.limit)
+        return found
+      }),
+      count_entities_filtered: vi.fn((filters: any) => surface.find_entities_filtered(filters).length),
+    }
+
+    expect(count_world_entities(surface, { area: [[0, 0], [10, 10]] })).toBe(2)
+    expect(count_world_entities(surface, { type: 'car' })).toBe(1)
+    expect(count_world_entities(surface, { type: ['car', 'container'] })).toBe(2)
+    expect(count_world_entities(surface, { position: { x: 0, y: 0 }, radius: 5 })).toBe(2)
+    expect(find_world_entities(surface, { type: 'car' })).toEqual([car])
+    // The engine would fill limit 1 with a vehicle and the filter would drop it.
+    expect(find_world_entities(surface, { type: 'car', limit: 1 })).toEqual([car])
+    expect(find_world_entities(surface, { area: [[0, 0], [10, 10]], limit: 1 })).toEqual([chest])
+    expect(count_world_entities(surface, { type: 'car', limit: 1 })).toBe(1)
+  })
+
+  it('handles inverted filters: the vehicle never comes back through invert', () => {
+    const chest = { name: 'wooden-chest', type: 'container' }
+    const vision = { name: 'sgluna-npc-vision', type: 'car' }
+    const surface: any = {
+      find_entities_filtered: vi.fn((filters: any) => (filters.invert === true && filters.name === 'wooden-chest' ? [vision] : [chest, vision])),
+      count_entities_filtered: vi.fn(() => 1),
+    }
+
+    // "everything except chests" would be just the vehicle: it is dropped.
+    expect(find_world_entities(surface, { name: 'wooden-chest', invert: true })).toEqual([])
+    expect(count_world_entities(surface, { name: 'wooden-chest', invert: true })).toBe(0)
+    // Inverting a filter that names the vehicle is still passed through, then filtered.
+    expect(find_world_entities(surface, { name: 'sgluna-npc-vision', invert: true })).toEqual([chest])
+  })
+
+  it('repeats a limited scan without the limit when orphan vehicles filled the extra window', () => {
+    const chest = { name: 'wooden-chest', type: 'container' }
+    const orphans = [{ name: 'sgluna-npc-vision' }, { name: 'sgluna-npc-vision' }]
+    const surface: any = {
+      find_entities_filtered: vi.fn((filters: any) => [...orphans, chest].slice(0, filters.limit)),
+      count_entities_filtered: vi.fn(() => 2),
+    }
+    expect(find_world_entities(surface, { area: [[0, 0], [1, 1]], limit: 1 })).toEqual([chest])
+    expect(surface.find_entities_filtered).toHaveBeenCalledTimes(2)
+    expect(surface.find_entities_filtered).toHaveBeenLastCalledWith({ area: [[0, 0], [1, 1]] })
+  })
+
+  it('does not pay for a post-filter when no vehicle exists or the filter names real entities', () => {
+    const chest = { name: 'wooden-chest' }
+    const surface: any = {
+      find_entities_filtered: vi.fn(() => [chest]),
+      count_entities_filtered: vi.fn((filters: any) => (filters.name === 'sgluna-npc-vision' ? 0 : 1)),
+    }
+    expect(find_world_entities(surface, { area: [[0, 0], [1, 1]], limit: 1 })).toEqual([chest])
+    expect(surface.find_entities_filtered).toHaveBeenCalledTimes(1)
+    expect(surface.find_entities_filtered).toHaveBeenLastCalledWith({ area: [[0, 0], [1, 1]], limit: 2 })
+    // A type filter without cars cannot match the vehicle: no extra window.
+    expect(find_world_entities(surface, { type: 'container', limit: 1 })).toEqual([chest])
+    expect(surface.find_entities_filtered).toHaveBeenLastCalledWith({ type: 'container', limit: 1 })
+    expect(count_world_entities(surface, { type: 'container' })).toBe(1)
+    expect(find_world_entities(surface, { name: 'wooden-chest', limit: 1 })).toEqual([chest])
+    expect(surface.find_entities_filtered).toHaveBeenLastCalledWith({ name: 'wooden-chest', limit: 1 })
   })
 
   it('leaves no mod source calling the engine scan directly', () => {

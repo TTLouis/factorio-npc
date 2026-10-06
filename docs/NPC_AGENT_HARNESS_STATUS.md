@@ -11,6 +11,13 @@ Real Factorio 2.0.77 evidence comes from the new `vision` lane
 (`NPC_TEST_LANES=vision`, `tests/factorio/runner/npc_vision_cell.py`, opt-in like
 `provenance`; it is not in the default lane list).
 
+**What this does and does not prove.** Live charting and vision with a connected
+player is **unproven**: the lane runs with zero players, and the engine charts nothing
+for a force without a connected player (not for the vehicle, `LuaForce.chart` or a
+powered radar). What the lane proves is lifecycle and non-interaction, listed below.
+Whether the vehicle actually charts for an observer has to be checked with a real
+connected client.
+
 What the lane proved with zero connected players:
 
 - **Lifecycle**: exactly one vehicle for the NPC, on the NPC, same single entity
@@ -31,6 +38,10 @@ What the lane proved with zero connected players:
   biter and an armed enemy turret never harmed the live vehicle in 1,500 ticks,
   while the same biter destroyed a destructible instance and the same turret shot
   a real target. No pollution at the vehicle.
+- **No entry**: `set_driver`, `set_passenger` and `set_driving` (also forced), with the
+  NPC standing on it, never put anyone inside the live vehicle or a fresh instance
+  (`get_driver` and `get_passenger` stay nil), so `allow_passengers = false` holds
+  for the driver seat too.
 - **Invisible**: `get_nearby_entities`, `get_entity_status`, `find_entities`,
   `query_area` and `inspect_entity` never returned it, with six instances inside
   the 20-tile radius in the engine.
@@ -45,7 +56,7 @@ What the lane proved with zero connected players:
   stays active. The lane does not fake charting: if a future engine charts, the
   vehicle's whole window must be charted or the lane fails.
 
-Gate: **1,637 runtime and 986 mod tests**, typecheck, Lua build and generated-Lua
+Gate: **1,637 runtime and 992 mod tests**, typecheck, Lua build and generated-Lua
 check; the staging guard has one test per prototype property, and
 `npc_vision.test.ts` covers lifecycle, sweep, trace lines and a source scan that
 fails on any direct `find_entities_filtered`. Real engine: the `vision`, `core`

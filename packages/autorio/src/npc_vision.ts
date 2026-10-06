@@ -16,6 +16,8 @@ export const NPC_VISION_ENTITY_NAME = 'sgluna-npc-vision'
 const FOLLOW_CORRECTION_INTERVAL = 60
 // A failed create is retried at most this often so it cannot spend every tick.
 const CREATE_RETRY_INTERVAL = 300
+// While creation keeps failing only the first failure and every Nth is logged.
+const CREATE_FAILURE_LOG_EVERY = 12
 
 interface NpcVisionRecord {
   entity: LuaEntity
@@ -31,6 +33,7 @@ declare const storage: {
   // In storage, not a module local, so every multiplayer peer decides
   // identically whether to try creating the vehicle on a given tick.
   sgluna_npc_vision_retry_tick?: number
+  sgluna_npc_vision_failures?: number
 }
 
 export function is_npc_vision_entity(entity: { name: string }) {
@@ -60,22 +63,57 @@ function world_filters(filters: EntitySearchFilters): EntitySearchFilters | unde
   return kept.length === 0 ? undefined : { ...filters, name: kept }
 }
 
+// A scan whose name filter lists real entities, whose type filter leaves out
+// cars, or that asks for ghosts, can never match the vehicle, so it goes to the
+// engine as it is. Anything else (area, radius, force ... and every inverted
+// filter) could return it and is post-filtered.
+function cannot_match_vehicle(filters: EntitySearchFilters) {
+  if (filters.name !== undefined || filters.ghost_name !== undefined || filters.ghost_type !== undefined) return true
+  const type = filters.type
+  if (type === undefined) return false
+  const types = Array.isArray(type) ? type as readonly string[] : [type as string]
+  return !types.includes('car')
+}
+
+// The engine applies `limit` before this module drops the vehicle, so a limited
+// scan asks for one extra result. If several vehicles (an orphan) ate that
+// window and the engine had more to give, it is repeated without the limit.
+function post_filtered(surface: LuaSurface, filters: EntitySearchFilters): LuaEntity[] {
+  const limit = filters.limit
+  if (limit === undefined) return without_npc_vision(surface.find_entities_filtered(filters))
+  const raw = surface.find_entities_filtered({ ...filters, limit: limit + 1 })
+  const found = without_npc_vision(raw)
+  if (found.length >= limit || raw.length < limit + 1) return found.slice(0, limit)
+  const { limit: _limit, ...unlimited } = filters
+  return without_npc_vision(surface.find_entities_filtered(unlimited)).slice(0, limit)
+}
+
 /**
  * LuaSurface.find_entities_filtered for the game world as the NPC and the model
- * see it: the vision vehicle is never part of it. Every entity scan in the mod
- * goes through this; npc_vision.test.ts fails on a direct call.
+ * see it: the vision vehicle is never part of it, whatever the filters are
+ * (including `limit` and `invert`). Every entity scan in the mod goes through
+ * this; npc_vision.test.ts fails on a direct call.
  */
 export function find_world_entities(surface: LuaSurface, filters: EntitySearchFilters): LuaEntity[] {
+  // An inverted name filter that lists the vehicle excludes it in the engine;
+  // otherwise the vehicle is matched and dropped below.
+  if (filters.invert === true) return post_filtered(surface, filters)
   const allowed = world_filters(filters)
   if (allowed === undefined) return []
-  return without_npc_vision(surface.find_entities_filtered(allowed))
+  if (cannot_match_vehicle(allowed)) return without_npc_vision(surface.find_entities_filtered(allowed))
+  return post_filtered(surface, allowed)
 }
 
 /** LuaSurface.count_entities_filtered, without the vision vehicle. */
 export function count_world_entities(surface: LuaSurface, filters: EntitySearchFilters): number {
-  const allowed = world_filters(filters)
+  const direct = filters.invert !== true
+  const allowed = direct ? world_filters(filters) : filters
   if (allowed === undefined) return 0
-  return surface.count_entities_filtered(allowed)
+  if (direct && cannot_match_vehicle(allowed)) return surface.count_entities_filtered(allowed)
+  // Counting stays in the engine while no vehicle exists; otherwise the vehicle
+  // could be among the matches, so the matches are listed and counted here.
+  if (surface.count_entities_filtered({ name: NPC_VISION_ENTITY_NAME }) === 0) return surface.count_entities_filtered(allowed)
+  return post_filtered(surface, allowed).length
 }
 
 type TraceField = [key: string, value: string | number | boolean | undefined]
@@ -105,7 +143,7 @@ export function new_npc_vision_controller() {
   // Called when the mod is initialised or its configuration changes, and before
   // a new vehicle is created, so a lost record or an old save never leaves a
   // vehicle that nothing follows.
-  function sweep(keep_actor_id: number | undefined, reason: string) {
+  function sweep(keep_actor_id: number | undefined, reason: string, quiet_when_empty = false) {
     const record = storage.sgluna_npc_vision
     const keep = record !== undefined
       && record.entity.valid
@@ -123,12 +161,16 @@ export function new_npc_vision_controller() {
       }
     }
     if (record !== undefined && keep === undefined) storage.sgluna_npc_vision = undefined
-    trace('npc.vision.swept', [
-      ['keep_actor_id', keep_actor_id],
-      ['kept_unit_number', keep],
-      ['destroyed', destroyed],
-      ['reason', reason],
-    ])
+    // The sweep before every create finds nothing almost always; say so only
+    // when something was destroyed.
+    if (destroyed > 0 || !quiet_when_empty) {
+      trace('npc.vision.swept', [
+        ['keep_actor_id', keep_actor_id],
+        ['kept_unit_number', keep],
+        ['destroyed', destroyed],
+        ['reason', reason],
+      ])
+    }
     return destroyed
   }
 
@@ -136,10 +178,10 @@ export function new_npc_vision_controller() {
     const retry_tick = storage.sgluna_npc_vision_retry_tick
     if (retry_tick !== undefined && game.tick < retry_tick) return undefined
 
-    sweep(actor_id, `before_create:${reason}`)
+    sweep(actor_id, `before_create:${reason}`, true)
     const position = actor.position
     // Nothing is built: no event, no smoke, and nothing under it is removed.
-    const entity = actor.surface.create_entity({
+    const build = () => actor.surface.create_entity({
       name: NPC_VISION_ENTITY_NAME,
       position,
       force: actor.force,
@@ -149,13 +191,32 @@ export function new_npc_vision_controller() {
       move_stuck_players: false,
       preserve_ghosts_and_corpses: true,
     })
-    if (entity === undefined || !entity.valid || entity.unit_number === undefined) {
+    // Some surfaces may refuse the entity by throwing instead of returning nothing.
+    let entity: LuaEntity | undefined
+    let failure: string | undefined
+    if (typeof pcall === 'function') {
+      const [ok, result] = pcall(() => build())
+      if (ok) entity = result as LuaEntity | undefined
+      else failure = `create_entity_threw:${String(result).slice(0, 120)}`
+    }
+    else {
+      entity = build()
+    }
+    if (failure === undefined && (entity === undefined || !entity.valid || entity.unit_number === undefined)) {
+      failure = 'create_entity_returned_nothing'
+    }
+    if (failure !== undefined || entity === undefined) {
       storage.sgluna_npc_vision_retry_tick = game.tick + CREATE_RETRY_INTERVAL
-      trace('npc.vision.create_failed', [
-        ['actor_id', actor_id],
-        ['reason', 'create_entity_returned_nothing'],
-        ['trigger', reason],
-      ])
+      const failures = (storage.sgluna_npc_vision_failures ?? 0) + 1
+      storage.sgluna_npc_vision_failures = failures
+      if (failures === 1 || failures % CREATE_FAILURE_LOG_EVERY === 0) {
+        trace('npc.vision.create_failed', [
+          ['actor_id', actor_id],
+          ['reason', failure],
+          ['trigger', reason],
+          ['failures', failures],
+        ])
+      }
       return undefined
     }
 
@@ -166,9 +227,10 @@ export function new_npc_vision_controller() {
     entity.operable = false
     entity.rotatable = false
     storage.sgluna_npc_vision_retry_tick = undefined
+    storage.sgluna_npc_vision_failures = undefined
     const record: NpcVisionRecord = {
       entity,
-      unit_number: entity.unit_number,
+      unit_number: entity.unit_number as number,
       actor_id,
       force_index: actor.force.index,
       surface_index: actor.surface.index,
