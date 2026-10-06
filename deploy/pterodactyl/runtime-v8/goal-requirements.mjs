@@ -464,6 +464,7 @@ async function queryRequirements(loop, definition, { trigger }) {
     await loop.traceEvent('planning.requirements_unavailable', { trigger, reason: parsed.reason, ...(parsed.error ? { error: parsed.error } : {}) })
     return { ok: false, reason: parsed.reason }
   }
+  loop.recordRequirementsFacts?.(parsed) // D2: the machine options stay available to a fresh executor (never throws)
   return { ok: true, parsed, summary: requirementsSummary(parsed), targets }
 }
 
