@@ -67,7 +67,14 @@ async function main() {
     assert.ok(machines?.options.some(row => row.entity === 'assembling-machine-1' && row.status === 'locked' && row.unlocked_by === 'automation'), raw)
     assert.equal(machines.craftable, false)
     assert.ok(!parsed.locked.some(row => ['iron-ore', 'copper-ore', 'metallic-asteroid-chunk'].includes(row.subject)), 'mineable ore must not create asteroid-processing prerequisites')
-    assert.equal(facts.truncated.paths, false, 'ordinary red-science prerequisites must fit without spurious orbital research')
+    assert.ok(!parsed.research['space-platform'] && !parsed.research['advanced-asteroid-processing'], 'raw ores must not inject orbital research')
+    assert.ok(!locked.path_truncated, 'the target red-science unlock path must be complete')
+    const firstMachine = parsed.locked.find(row => row.role === 'machine' && row.subject === 'assembling-machine-1')
+    assert.ok(firstMachine && !firstMachine.path_truncated, 'the first assembler unlock path must be complete')
+    // Optional higher-tier machine paths can legitimately exceed the report cap.
+    // Require truthful truncation evidence, rather than assuming every option is
+    // part of the minimal red-science path.
+    assert.equal(facts.truncated.paths, parsed.locked.some(row => row.path_truncated === true))
 
     const memory = new CanonicalTaskBoardMemory()
     const traceFile = path.join(results, 'requirements-behavior.jsonl')
