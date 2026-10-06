@@ -63,6 +63,7 @@ class Rcon {
     this.stock = { '15:iron-plate': 20 }
     this.held = { 'iron-plate': 0 }
     this.changeEpochOnCondition = false
+    this.unreadable = undefined // 'garbage' | 'not_ok' | 'throw' once armed
     this.conditionCalls = 0
     this.nearby = {
       actor_position: { x: 0, y: 0 },
@@ -104,7 +105,12 @@ class Rcon {
     this.commands.push(text)
     if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(deployment(this.epoch))
     if (text.includes('remote.call("autorio_tools","get_nearby_entities"')) return JSON.stringify(this.nearby)
-    if (text.includes('remote.call("autorio_tools","evaluate_condition"')) return JSON.stringify(this.evaluate(text))
+    if (text.includes('remote.call("autorio_tools","evaluate_condition"')) {
+      if (this.unreadable === 'throw') throw new Error('rcon transport error')
+      if (this.unreadable === 'garbage') return 'not json'
+      if (this.unreadable === 'not_ok') return JSON.stringify({ ok: false, error: 'condition_unavailable' })
+      return JSON.stringify(this.evaluate(text))
+    }
     if (text.includes('remote.call("autorio_follow","status")')) return JSON.stringify({ active: false })
     if (text.includes('remote.call("autorio_operations","status")')) {
       return JSON.stringify({
@@ -362,7 +368,11 @@ test('persistPlannerCheckpoint rejects a contradicting draft with the model-corr
   assert.ok(fresh.currentPlan(KEY).task_board.steps[0].completion_contract)
 })
 
-test('a split plan closes each step from world evidence: furnace stock for the smelt step, held plates for the collect step', async () => {
+// This proves the completion evaluator: a step that carries a furnace-stock contract closes when the furnace count is
+// reached, and a step that carries a held-inventory contract closes when the held count is reached. It does not claim
+// a pending collect step gets that contract after commit (it cannot). In the live flow a pending collect step without
+// a checkpoint closes by the Main LLM's semantic completion claim, or gets its contract from its own draft/slice.
+test('the evaluator closes a step that carries a furnace-stock contract and a step that carries a held-inventory contract, each from its own count', async () => {
   const rcon = new Rcon()
   const memory = new CanonicalTaskBoardMemory()
   const now = Date.now()
@@ -689,4 +699,59 @@ test('the immutable committed contract still ignores a changed checkpoint when n
   assert.deepEqual(world.plan().task_board.steps[0].completion_contract, committed.task_board.steps[0].completion_contract)
   assert.equal(world.named('checkpoint.stock_extraction_refused').length, 0)
   assert.equal(world.named('checkpoint.contradicts_batch').length, 0)
+})
+
+test('commit time: an unreadable checkpoint stock fails open: the batch proceeds, no budget is spent, the gap is traced', async () => {
+  for (const mode of ['throw', 'garbage', 'not_ok']) {
+    const rcon = new Rcon()
+    const world = harness(rcon, [
+      observe(),
+      planMessage([COAL_SUPPLY], { ...SMELT, checkpoint: furnaceCheckpoint() }),
+      planMessage([takePlates()], SMELT),
+    ])
+    // Already met, but the read fails: a refusal here would block a legitimate extraction and burn budget.
+    await committedStep(world, rcon, { stock: 60 })
+    rcon.unreadable = mode
+
+    await continuation(world)
+
+    assert.equal(rcon.mutations.length, 2, `${mode}: the extraction was admitted`)
+    assert.match(rcon.mutations[1], /move_items_exact/)
+    assert.equal(world.named('checkpoint.stock_extraction_refused').length, 0)
+    assert.equal(checkpointStockRefusalCount(world.plan().task_board), 0, `${mode}: no budget spent`)
+    const [row] = world.named('checkpoint.stock_extraction_unverified')
+    assert.ok(row, `${mode}: traced`)
+    const payload = data(row)
+    assert.ok(payload.request_id)
+    assert.equal(payload.step_id, world.plan().task_board.active_step_id)
+    assert.equal(payload.requirement_id, 'furnace_plates')
+    assert.equal(payload.unit_number, 15)
+    assert.equal(payload.item_name, 'iron-plate')
+    assert.equal(payload.operation_index, 0)
+    assert.equal(payload.reason, 'checkpoint_stock_unreadable_batch_not_refused')
+    assert.equal(world.plan().status, 'active')
+  }
+})
+
+test('commit time: a stale actor epoch during an unreadable read still throws instead of failing open', async () => {
+  const rcon = new Rcon()
+  const world = harness(rcon, [
+    observe(),
+    planMessage([COAL_SUPPLY], { ...SMELT, checkpoint: furnaceCheckpoint() }),
+    planMessage([takePlates()], SMELT),
+  ])
+  await committedStep(world, rcon)
+  rcon.unreadable = 'not_ok'
+  rcon.changeEpochOnCondition = false
+  const original = rcon.command.bind(rcon)
+  rcon.command = async (text) => {
+    const answer = await original(text)
+    if (text.includes('"evaluate_condition"')) rcon.epoch++
+    return answer
+  }
+
+  await assert.rejects(continuation(world), /NPC actor epoch changed/)
+  assert.equal(rcon.mutations.length, 1)
+  assert.equal(world.named('checkpoint.stock_extraction_unverified').length, 0)
+  assert.equal(world.named('checkpoint.stock_extraction_refused').length, 0)
 })
