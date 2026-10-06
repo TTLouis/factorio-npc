@@ -139,6 +139,10 @@ case "$LANE" in
   craft-trigger)
     run_py craft_trigger_cell.py
     ;;
+  trigger-ladder)
+    printf '[npc-test][trigger-ladder] Running fresh-world research-trigger ladder (every trigger tech in the red/green science closure)...\n'
+    run_py trigger_ladder_cell.py
+    ;;
   requirements)
     printf '[npc-test][requirements] Running scripted first-plan grounding against live recipe/research facts...\n'
     run_node goal_requirements_factorio.mjs

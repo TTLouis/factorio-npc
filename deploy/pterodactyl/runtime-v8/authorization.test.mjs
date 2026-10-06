@@ -1062,6 +1062,8 @@ test('MW1: reservations and NPC placements survive a new goal, clearTaskContext,
 
   const retired = seed()
   retired.planByNpc.set(KEY, { goal_id: GOAL_ID, status: 'completed' })
+  assert.equal(retired.retireCompletedPlan(KEY).goal_id, GOAL_ID, 'a completed projection does not retire the active canonical goal')
+  retired.recordGoalSatisfaction(KEY, { source: 'runtime', evidenceRefs: ['goal/verified'], rationale: 'Separate canonical acceptance proof.' })
   assert.equal(retired.retireCompletedPlan(KEY), undefined)
   assert.deepEqual(worldOf(retired), { reservations: [900], placements: [20], goal: null, grants: 0 })
 

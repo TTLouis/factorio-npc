@@ -109,6 +109,7 @@ lane_offset() {
     requirements) printf '5' ;;
     craft-trigger) printf '6' ;;
     vision) printf '7' ;;
+    trigger-ladder) printf '8' ;;
     *) printf '[npc-test] Unknown lane requested: %s\n' "$1" >&2; return 2 ;;
   esac
 }

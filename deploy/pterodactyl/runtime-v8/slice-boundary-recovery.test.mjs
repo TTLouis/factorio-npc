@@ -380,7 +380,7 @@ test('C7: an actor replacement rebuilds from a packet with the replacement actor
     if (calls === 1) return readNearby
     if (calls === 2) return twoStepReply()
     if (calls === 3) return new Promise((resolve) => { release = resolve }) // the old turn: a provider call still in flight when the body dies
-    return planReply({ plan: twoStep, currentStep: 0, operations: [gather('iron-ore', 10)] })
+    return planReply({ plan: twoStep, currentStep: 1, operations: [gather('copper-ore', 10)] })
   }
   const agent = agentWith(game, new CanonicalTaskBoardMemory(), provider, { file })
   const trace = traced(agent)

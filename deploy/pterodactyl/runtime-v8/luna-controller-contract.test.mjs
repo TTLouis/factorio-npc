@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
+import { PLAN_STATUS } from './planning-state.mjs'
 import { FakeFactorio, gather, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
 
 const KEY = 'npc:sgluna'
@@ -63,7 +64,7 @@ test('an initial observation-only draft commits without gameplay and requires gr
     const planning = memory.planningState(KEY)
     const held = planning.plans.find(plan => plan.plan_id === planning.active_plan_id)
     committedStepId = held.steps[held.active_step_index].step_id
-    assert.equal(held.status, 'committed')
+    assert.equal(held.status, PLAN_STATUS.COMMITTED)
     assert.equal(world.game.mutations.length, 0)
     return { plan: steps, currentStep: 0, operations: [], chatMessage: 'BLOCKED: A fresh patch observation is still needed.' }
   })
@@ -114,7 +115,7 @@ test('research checkpoint completion requires authoritative researched state, no
 test('idle settlement closes an already satisfied committed inventory checkpoint without another provider call', async () => {
   const world = harness(() => draft())
   await world.agent.request('Gather ten copper ore.', { sender: 'Louis' })
-  assert.deepEqual(await world.agent.settleIdleStepCheckpoint(), { closed: false }, 'unsettled admission cannot close')
+  assert.deepEqual(await world.agent.settleIdleStepCheckpoint(), { closed: false, reason: 'operation_batch_in_flight' }, 'unsettled admission cannot close')
   world.game.inventory['copper-ore'] = 10
   await world.agent.taskStatusReceipt()
   const before = world.calls.length
@@ -158,4 +159,22 @@ test('ordinary no-action repair gets at most one durable fresh-context recovery 
   assert.equal(world.calls.length, before)
   assert.equal(world.game.mutations.length, 1)
   assert.notEqual(world.memory.currentPlan(KEY).status, 'completed')
+})
+
+test('strict executor index ownership distinguishes repeated descriptions from an exact active suffix', async () => {
+  const world = harness(() => draft({ plan: ['Gather copper', 'Gather copper'], stepCompletions: [
+    { kind: 'deterministic', checkpoint: copper }, { kind: 'deterministic', checkpoint: copper },
+  ] }))
+  await world.agent.request('Gather copper in two measured stages.', { sender: 'Louis' })
+  const planning = world.memory.planningState(KEY)
+  const held = planning.plans.find(plan => plan.plan_id === planning.active_plan_id)
+  // Model a later admitted step whose prose happens to match the completed step.
+  held.active_step_index = 1
+  const operations = [gather('copper-ore', 10)]
+  await assert.rejects(world.agent.enforceExecutorContract({ plan: ['Gather copper', 'Gather copper'], currentStep: 0, operations }),
+    error => error.code === 'executor_stale_step')
+  await world.agent.enforceExecutorContract({ plan: ['Gather copper'], currentStep: 0, operations })
+  await assert.rejects(world.agent.enforceExecutorContract({ plan: [], currentStep: 0, operations }),
+    error => error.code === 'executor_stale_step')
+  assert.equal(world.game.mutations.length, 1, 'neither ownership check executes gameplay')
 })

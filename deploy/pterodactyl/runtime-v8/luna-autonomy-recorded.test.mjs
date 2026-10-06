@@ -538,10 +538,15 @@ test('shape 3 residual: a wait-only batch on an idle furnace whose checkpoint is
   const nextCopper = () => recorded('req_muw0yzan_3.turn2.executor_wait', { currentStep: 1, operations: [{ name: 'gather_resource', args: { resource_name: 'copper-ore', count: 5, search_radius: 256 } }] })
   const run = loop(world, [furnaceReads(), plannerCommit3(), executorWait(), nextCopper()])
   await run.say(requestText.req_muw0yzan_3)
-  world.finishBatch()
+  const committedPlan = structuredClone(run.reducerPlan())
+  world.finishBatch() // the furnace finishes its 50 inside the first wait, as in the retained run
   assert.equal(world.totalInFurnace('iron-plate'), 50)
+  assert.equal(world.working(), false, 'the furnace is idle')
+  assert.equal(run.plan().task_board.completed_count, 0)
+
   await run.agent.completed()
-  assert.equal(run.named('plan.followup_operations_dropped').length, 1, 'the retained old-step wait was discarded')
+  assert.equal(run.named('plan.step_closed_on_fresh_read').length, 1, 'the retained old-step wait was discarded at the shared settlement boundary')
+  assert.deepEqual(data(run.named('plan.step_closed_on_fresh_read')[0]).operations_not_run, ['wait'])
   assert.equal(run.plan().task_board.completed_count, 1, 'the furnace checkpoint closed from world facts')
   assert.equal(world.mutations.length, 2, 'only the original wait and newly authored copper action were admitted')
   assert.doesNotMatch(world.mutations[1], /'wait'/)
@@ -722,14 +727,42 @@ test('shape 1 (truthful failure): a model that keeps re-sending the recorded col
 
 test('shape 1 residual: with the furnace already holding 50 (the retained state at the turn-12 collection) the committed stock checkpoint should close before the collection empties it', async () => {
   const world = new RecordedWorld({ furnace: worldReads.furnace47Plates, held: heldPlates(), inProgress: 1 })
-  const run = loop(world, [furnaceReads(), plannerCommit3(), turn12()])
+  const run = loop(world, [
+    furnaceReads(),
+    plannerCommit3(),
+    turn12(),
+    recorded('req_muw0yzan_3.turn13.copper_load', { plan: FIVE_STEPS, currentStep: 1 }),
+  ])
   await run.say(requestText.req_muw0yzan_3)
+  const committedPlan = structuredClone(run.reducerPlan())
   world.finishBatch() // the furnace finishes its 50 inside the first wait, as in the retained run
   assert.equal(world.totalInFurnace('iron-plate'), 50)
+
   await run.agent.completed()
-  world.finishBatch()
-  await run.agent.completed().catch(() => undefined)
+
+  // The recorded turn-12 collection never ran: the smelting step closed from the furnace count that was already met.
   assert.equal(run.plan().task_board.completed_count, 1, 'the smelting step closed from the furnace count that was met')
+  assert.equal(world.mutations.length, 2)
+  assert.doesNotMatch(world.mutations[1], /iron-plate/, 'the collection was not admitted')
+  assert.match(world.mutations[1], /copper-ore/)
+  assert.equal(world.totalInFurnace('iron-plate'), 50, 'the furnace stock the step required was never emptied')
+  assert.equal(run.named('checkpoint.stock_extraction_refused').length, 0, 'not refused (unit C): closed')
+  // The turn-12 reply's held-iron checkpoint change was dropped with its batch (only the re-authored copper one is ignored).
+  assert.ok(run.named('step.checkpoint_change_ignored').every(row => data(row).proposed_contract.requirements[0].item_name === 'copper-plate'))
+  const [closed] = run.named('plan.step_closed_on_fresh_read')
+  assert.ok(requestIdOf(closed))
+  assert.equal(data(closed).reason, 'checkpoint_met_before_batch')
+  assert.equal(data(closed).plan_id, committedPlan.plan_id)
+  assert.equal(data(closed).step_index, committedPlan.active_step_index)
+  assert.deepEqual(data(closed).operations_not_run, ['move_items_exact'])
+  const after = run.reducerPlan()
+  assert.deepEqual(after.steps, committedPlan.steps, 'only Plan Tracker progress moved')
+  assert.equal(after.active_step_index, committedPlan.active_step_index + 1)
+  const [fact] = run.harnessMessages(3).filter(message => message.includes('closed that step'))
+  assert.match(fact, /move_items_exact\) was written for the step that closed and did not run/)
+  assert.equal(run.plan().status, 'active')
+  assert.equal(run.plan().blocker, '')
+  assert.equal(world.finishBatch(), undefined, 'the re-authored batch for the new step ran')
 })
 
 // ---------------------------------------------------------------------------------------------------------------
