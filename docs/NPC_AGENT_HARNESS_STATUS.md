@@ -8,6 +8,16 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 6 research-trigger ladder (scripted real-engine evidence, no model run)
+
+New real-engine lane `trigger-ladder` (`tests/factorio/runner/trigger_ladder_cell.py`). It answers a gap the owner's "automate red science" run exposed: the `craft-trigger` lane seeds steam-power and electronics as researched, so nothing had shown the earlier triggers complete natively from a fresh world. This is scripted engine evidence, not a provider or planner run.
+
+- Fresh world, zero connected players, nothing researched. The cell reads the prerequisite closure of `automation-science-pack` and `logistic-science-pack` from the engine (2.0.77, bundled mods) and dispatches on each technology's `research_trigger` type. Closure: `electronics` (craft-item copper-plate x10), `steam-power` (craft-item iron-plate x50), `automation-science-pack` (craft-item lab x1, prerequisites both), and `logistic-science-pack` (lab research, 75 red packs, listed as `lab_research_not_exercised`).
+- The NPC performs exactly each trigger through its own operations. Plates come from a real stone furnace it crafted, placed, fuelled and supplied (`craft_item`, `place_entity`, `supply_entity`, `move_items_exact`, `wait`) and empties; the lab comes from the native hand-crafting queue, with gears, circuits, cable and belts crafted natively and the missing 5 copper plates smelted first. Only raw ore, coal and stone are seeded (each checked against the engine to be a resource product, and listed in the JSON as `seeded_raw_inputs`). No research state, plates or target items are written by the cell.
+- Result: all three trigger technologies researched with their unlocked recipes enabled. Observed ticks (polled; game.speed 4): electronics 2952, steam-power 12759, automation-science-pack 15230. A per-poll trace shows each smelting trigger completing only after `products_finished` reached the trigger count. Smelted plates are credited by the engine's own production statistics; the lab is credited by the existing craft-trigger bridge (statistics 1, `hand_crafted` 1, `hand_crafted_in_statistics` 1, goal `current` 1, not double counted).
+- No finding: every trigger completed after the NPC performed it exactly, so no mod change was needed. The cell fails with `FINDING trigger_not_credited ...`, `trigger_type_unsupported_by_cell`, `item_not_producible_by_npc`, `recipe_locked_for_trigger` or `prerequisite_unresearched` if that stops being true.
+- Limits: only the `craft-item` trigger type is driven (no mine-entity, build-entity, craft-fluid or orbit trigger exists in this closure; any other type fails with a named finding rather than passing). `on_research_finished.by_script` cannot be captured from an RCON cell, so script-independence rests on the cell never writing research state. Lab research is not exercised.
+
 ## October 6 autonomy repair units A–E (unit and recorded-replay evidence only, no live run)
 
 Repairs for the four failure shapes in [the October 5 autonomy failure analysis](validation/LUNA_AUTONOMY_FAILURE_ANALYSIS_2026-10-05.md); its closing checklist holds the commits.
