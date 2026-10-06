@@ -5,7 +5,9 @@ import path from 'node:path'
 import { AgentLoopError, NpcAgentLoop as BaseNpcAgentLoop, NpcDialogueMemory as BaseNpcDialogueMemory } from '../staging/npc-agent-loop.mjs'
 import {
   addTaskBoardEvidence,
+  recordTaskBoardCheckpointStockRefusal,
   recordTaskBoardTransferSupplyRecovery,
+  taskBoardCheckpointStockRefusals,
   taskBoardTransferSupplyRecoveries,
   reconcileTaskBoard,
   sanitizeTaskBoard,
@@ -75,6 +77,7 @@ import {
 import { RECOVERY_SEMANTIC_SCOPES, deterministicRecoveryRoute, parseRecoveryDecision, recoveryDecisionQuestions, recoveryFailureClassHint, validateRecoveryRoute } from './recovery-route.mjs'
 import {
   applyConditionObservation,
+  checkpointBatchContradiction,
   completionContractSupported,
   evaluateCompletionContract,
   makeConditionWait,
@@ -211,6 +214,42 @@ const TRANSFER_SUPPLY_CODE_MEANING = {
 // not the (trimmed) evidence window.
 export function transferSupplyRecoveryCount(board) {
   return taskBoardTransferSupplyRecoveries(board)
+}
+
+// Committed-checkpoint stock guard. A step's committed checkpoint can name stock a later batch of the SAME step would
+// take away (an extraction from the checkpoint entity, or mining the entity). Such a batch is refused before admission
+// as a recoverable preflight result: no plan freeze, no checkpoint change, no plan rewrite. The per-step refusal count
+// is a monotonic board counter (board.checkpoint_stock_refusals, survives restore) separate from the transfer-supply
+// budget; the refusal after the budget is spent takes the ordinary blocker path so a loop surfaces instead of spinning.
+export const CHECKPOINT_STOCK_EXTRACTION_CODE = 'checkpoint_stock_extraction'
+export const CHECKPOINT_STOCK_REFUSAL_BUDGET = 2
+export const CHECKPOINT_CONTRADICTS_BATCH_REASON = 'checkpoint_contradicts_batch'
+
+export function checkpointStockRefusalCount(board) {
+  return taskBoardCheckpointStockRefusals(board)
+}
+
+// Bounded facts about one checkpoint/batch conflict, for trace rows, board evidence and the model message.
+export function checkpointConflictFacts(conflict) {
+  return {
+    requirement_id: conflict?.requirement_id,
+    requirement_kind: conflict?.requirement_kind,
+    unit_number: conflict?.unit_number,
+    ...(conflict?.item_name ? { item_name: conflict.item_name } : {}),
+    ...(Number.isFinite(conflict?.minimum) ? { minimum: conflict.minimum } : {}),
+    ...(Number.isFinite(conflict?.current) ? { current: conflict.current } : {}),
+    operation_index: conflict?.operation_index,
+    operation: conflict?.operation,
+    effect: conflict?.effect,
+  }
+}
+
+function checkpointConflictSentence(conflict) {
+  const unit = conflict.unit_number
+  if (conflict.effect === 'removes_entity') {
+    return `${conflict.operation} would mine unit ${unit} and remove it together with its contents, but requirement ${conflict.requirement_id} (${conflict.requirement_kind}) needs that entity`
+  }
+  return `${conflict.operation} would take ${conflict.item_name} out of unit ${unit}, but requirement ${conflict.requirement_id} (entity_inventory_count) needs unit ${unit} to hold at least ${conflict.minimum} ${conflict.item_name}`
 }
 
 function parseEvidenceSummary(item) {
@@ -1359,6 +1398,18 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
     if (!state) return undefined
     const board = this.ensureTaskBoard(state)
     state.task_board = recordTaskBoardTransferSupplyRecovery(board, { ref, now: Date.now() })
+    state.revision += 1
+    state.updated_at = Date.now()
+    this.planByNpc.set(key, state)
+    return state.task_board
+  }
+
+  // Spend one committed-checkpoint stock refusal on the active step (monotonic, persisted with the board).
+  noteCheckpointStockRefusal(key) {
+    const state = key ? this.planByNpc.get(key) : undefined
+    if (!state) return undefined
+    const board = this.ensureTaskBoard(state)
+    state.task_board = recordTaskBoardCheckpointStockRefusal(board, { now: Date.now() })
     state.revision += 1
     state.updated_at = Date.now()
     this.planByNpc.set(key, state)
@@ -5113,10 +5164,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return { ok: false, reason: 'unsupported_predicate_kind' }
   }
 
-  async validatePlannerCheckpointContract(contract, operations = []) {
+  // `draft` is false for a committed (frozen) plan, whose checkpoint is immutable and never re-judged against a later
+  // batch here: the commit-time stock guard owns that case.
+  async validatePlannerCheckpointContract(contract, operations = [], { draft = true } = {}) {
     const normalized = sanitizeStepCompletionContract(contract)
     if (!completionContractSupported(normalized)) {
       return { accepted: false, reason: 'unsupported_or_malformed_contract' }
+    }
+    // A draft whose own batch would undo its checkpoint can never close: reject it so the planner redrafts.
+    const contradiction = draft ? checkpointBatchContradiction(normalized, operations) : undefined
+    if (contradiction) {
+      return { accepted: false, reason: CHECKPOINT_CONTRADICTS_BATCH_REASON, ...checkpointConflictFacts(contradiction) }
     }
     const allowedReceiptNames = new Set(
       (Array.isArray(operations) ? operations : [])
@@ -5137,6 +5195,29 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return { accepted: true, contract: normalized }
   }
 
+  // The model-correctable rejection of a planner checkpoint (plan_category / invalid_semantic_checkpoint). A
+  // checkpoint that its own batch would undo is traced with the exact requirement and operation so a later run can be
+  // diagnosed from the logs.
+  async checkpointRejectionError(validation, { stepId } = {}) {
+    const contradiction = validation.reason === CHECKPOINT_CONTRADICTS_BATCH_REASON
+    if (contradiction) {
+      await this.traceEvent('checkpoint.contradicts_batch', {
+        request_id: this.traceRequest?.id,
+        step_id: stepId ?? this.memory.currentPlan?.(this.activePlanKey())?.task_board?.active_step_id,
+        reason: CHECKPOINT_CONTRADICTS_BATCH_REASON,
+        ...checkpointConflictFacts(validation),
+      })
+    }
+    const detail = contradiction
+      ? `; requirement=${validation.requirement_id}; operation ${validation.operation_index + 1} (${validation.operation}) ${validation.effect === 'removes_entity' ? `mines unit ${validation.unit_number}` : `takes ${validation.item_name} out of unit ${validation.unit_number}`}, which undoes the checkpoint it is submitted with`
+      : validation.requirement_id ? `; requirement=${validation.requirement_id}` : ''
+    const error = new AgentLoopError(`deterministic_checkpoint_rejected: ${validation.reason}${detail}`)
+    error.failureClass = 'plan_category'
+    error.code = 'invalid_semantic_checkpoint'
+    error.details = validation
+    return error
+  }
+
   async persistPlannerCheckpoint(plan) {
     if (!plan?.checkpoint || !this.requestInfo?.memoryKey) {
       return { state: this.memory.currentPlan?.(this.activePlanKey()) }
@@ -5150,20 +5231,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw new AgentLoopError('checkpoint_requires_active_step')
     }
 
-    const validation = await this.validatePlannerCheckpointContract(plan.checkpoint, plan.operations)
-    if (!validation.accepted) {
-      const error = new AgentLoopError(
-        `deterministic_checkpoint_rejected: ${validation.reason}${validation.requirement_id ? `; requirement=${validation.requirement_id}` : ''}`,
-      )
-      error.failureClass = 'plan_category'
-      error.code = 'invalid_semantic_checkpoint'
-      error.details = validation
-      throw error
-    }
-
     const planning = this.memory.planningState?.(key)
     const reducerPlan = planning ? getActivePlanningPlan(planning) : undefined
     const frozen = FROZEN_PLAN_STATUSES.has(reducerPlan?.status)
+
+    const validation = await this.validatePlannerCheckpointContract(plan.checkpoint, plan.operations, { draft: !frozen })
+    if (!validation.accepted) throw await this.checkpointRejectionError(validation, { stepId: step.id })
     const existing = persistedStepCheckpoint(board, step.id)
     const incomingSignature = JSON.stringify(validation.contract)
     const existingSignature = existing ? JSON.stringify(existing.contract) : ''
@@ -9197,7 +9270,27 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       error.details = grounding.details
       throw error
     }
+    // A DRAFT checkpoint its own batch would undo is refused here, on the same plan_category correction path as every
+    // other unusable plan, before anything is persisted or admitted. A committed plan keeps its immutable checkpoint
+    // (the commit-time stock guard covers its later batches).
+    const contradiction = this.draftCheckpointContradiction(plan)
+    if (contradiction) {
+      throw await this.checkpointRejectionError({ accepted: false, reason: CHECKPOINT_CONTRADICTS_BATCH_REASON, ...checkpointConflictFacts(contradiction) })
+    }
     return plan
+  }
+
+  activePlanFrozen() {
+    const key = this.activePlanKey()
+    const planning = key ? this.memory.planningState?.(key) : undefined
+    const reducerPlan = planning ? getActivePlanningPlan(planning) : undefined
+    return FROZEN_PLAN_STATUSES.has(reducerPlan?.status)
+  }
+
+  draftCheckpointContradiction(plan) {
+    if (!plan?.checkpoint || !Array.isArray(plan.operations) || plan.operations.length === 0) return undefined
+    if (this.activePlanFrozen()) return undefined
+    return checkpointBatchContradiction(plan.checkpoint, plan.operations)
   }
 
   prepareToolBatch(message) {
@@ -9669,6 +9762,112 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     })
     await this.persistState()
     return stateResult
+  }
+
+  // Live read of the active step's committed checkpoint through the engine's own condition evaluator: whether it holds
+  // now and the current count per requirement. Unknown stays unknown (no count is invented); a requirement kind the
+  // evaluator cannot read counts as not satisfied.
+  async liveCheckpointState(contract) {
+    const normalized = sanitizeStepCompletionContract(contract)
+    const byId = {}
+    for (const requirement of normalized.requirements ?? []) {
+      if (!WORLD_STATE_REQUIREMENT_KINDS.has(requirement.kind)) {
+        byId[requirement.id] = { satisfied: false }
+        continue
+      }
+      const { id: _id, ...condition } = requirement
+      try {
+        const raw = JSON.parse(String(await this.rcon.command(runtimeConditionCommand(condition))).trim())
+        byId[requirement.id] = raw?.ok === true
+          ? { satisfied: raw.satisfied === true, ...(Number.isFinite(raw.current) ? { current: raw.current } : {}) }
+          : { satisfied: false }
+      }
+      catch {
+        byId[requirement.id] = { satisfied: false }
+      }
+    }
+    const results = normalized.requirements.map(requirement => byId[requirement.id]?.satisfied === true)
+    const satisfied = results.length > 0 && (normalized.mode === 'any' ? results.some(Boolean) : results.every(Boolean))
+    return { satisfied, byId }
+  }
+
+  // The commit-time guard. Returns the conflict (with the live count when known) when the active step has a persisted
+  // checkpoint that is not yet met and this batch would take the stock/entity it requires; otherwise undefined. A met
+  // checkpoint never refuses: the normal verifier closes the step. Stale actor/epoch throws before a refusal is built.
+  async checkpointStockExtractionConflict(operations) {
+    const key = this.requestInfo?.memoryKey
+    if (!key || !Array.isArray(operations) || operations.length === 0) return undefined
+    const state = this.memory.currentPlan?.(key)
+    const stepId = state?.status === 'active' ? state.task_board?.active_step_id : undefined
+    const contract = stepId ? persistedStepCheckpoint(state.task_board, stepId)?.contract : undefined
+    if (!contract) return undefined
+    const conflict = checkpointBatchContradiction(contract, operations)
+    if (!conflict) return undefined
+    const live = await this.liveCheckpointState(contract)
+    await this.assertCurrent()
+    if (live.satisfied) return undefined
+    const current = live.byId[conflict.requirement_id]?.current
+    return { ...conflict, step_id: stepId, ...(Number.isFinite(current) ? { current } : {}) }
+  }
+
+  // 'recovered' re-enters the planner turn inside the same committed step; 'unhandled' (no live plan, or the budget is
+  // spent) leaves the rejection to the ordinary blocker path. Never changes the plan, the checkpoint or the step.
+  async handleCheckpointStockExtraction(failure, plan, before, stateResult) {
+    const conflict = failure.preflight?.conflict
+    const key = this.requestInfo?.memoryKey
+    const requestId = this.traceRequest?.id
+    if (!key || !conflict) return { action: 'unhandled' }
+    const state = this.memory.currentPlan?.(key)
+    if (!state || state.status !== 'active') return { action: 'unhandled' }
+    const board = state.task_board
+    const prior = checkpointStockRefusalCount(board)
+    const facts = checkpointConflictFacts(conflict)
+    const base = {
+      request_id: requestId,
+      step_id: board?.active_step_id,
+      ...facts,
+      retry_budget: CHECKPOINT_STOCK_REFUSAL_BUDGET,
+    }
+    if (prior >= CHECKPOINT_STOCK_REFUSAL_BUDGET) {
+      await this.traceEvent('checkpoint.stock_extraction_exhausted', {
+        ...base,
+        reason: 'refusal_budget_spent_step_blocked_through_existing_path',
+        refusals_used: prior,
+      })
+      return { action: 'unhandled' }
+    }
+
+    const attempt = prior + 1
+    const admissionState = this.memory.setAdmissionState?.(key, 'preflight_rejected')
+    if (admissionState) stateResult = { ...(stateResult ?? {}), state: admissionState }
+    this.memory.noteCheckpointStockRefusal?.(key)
+    this.memory.recordBoardEvidence?.(key, {
+      kind: 'operation_preflight_recoverable',
+      ref: `${requestId ?? 'request'}/${CHECKPOINT_STOCK_EXTRACTION_CODE}_${conflict.operation_index}`,
+      summary: JSON.stringify({ code: CHECKPOINT_STOCK_EXTRACTION_CODE, ...facts, attempt, retry_budget: CHECKPOINT_STOCK_REFUSAL_BUDGET }),
+    })
+    await this.persistState()
+    await this.traceEvent('checkpoint.stock_extraction_refused', {
+      ...base,
+      reason: 'committed_checkpoint_stock_would_be_removed',
+      attempt,
+      tools_enabled: true,
+      plan_changed: false,
+      checkpoint_changed: false,
+    })
+    await this.traceEvent('operations.preflight_recoverable', {
+      failure_class: CHECKPOINT_STOCK_EXTRACTION_CODE,
+      preflight: failure.preflight,
+      tools_enabled: true,
+      retry: attempt,
+      retry_budget: CHECKPOINT_STOCK_REFUSAL_BUDGET,
+    })
+    const heldNow = Number.isFinite(conflict.current) ? ` The latest live read shows ${conflict.current}.` : ''
+    this.messages.push({
+      role: 'user',
+      content: `[HARNESS] Deterministic checkpoint guard refused operation ${conflict.operation_index + 1} (${cleanMemoryText(conflict.operation, 80)}) before admission; no operation from this batch ran. Step ${board?.active_step_id} is committed and its checkpoint is not met yet: ${checkpointConflictSentence(conflict)}.${heldNow} This is a recoverable result, not WORLD_BLOCKED: the plan, the step checkpoint and the requested result are unchanged, and tools remain enabled. The committed checkpoint still decides when this step completes. Refusal ${attempt} of ${CHECKPOINT_STOCK_REFUSAL_BUDGET} before this step blocks. Facts: ${JSON.stringify(facts)}`,
+    })
+    return { action: 'recovered', stateResult }
   }
 
   // A transfer preflight that proved the move cannot move anything yet (see TRANSFER_SUPPLY_RECOVERABLE_KIND). Protected
@@ -10575,6 +10774,22 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           }
           this.authorizationRefusalRetries = 0
         }
+        // Admission ran over the whole batch above (reserved/protected targets refuse first and spend nothing). Now the
+        // committed-checkpoint stock guard: a batch that would take the stock the step's own checkpoint requires.
+        const stockConflict = await this.checkpointStockExtractionConflict(plan.operations)
+        if (stockConflict) {
+          const failure = new AgentLoopError(`Checkpoint stock guard refused operation ${stockConflict.operation_index + 1} (${stockConflict.operation}): ${CHECKPOINT_STOCK_EXTRACTION_CODE}`)
+          failure.preflight = {
+            ok: false,
+            code: CHECKPOINT_STOCK_EXTRACTION_CODE,
+            operation: stockConflict.operation,
+            operation_index: stockConflict.operation_index,
+            identity: stockConflict.unit_number,
+            detail: checkpointConflictSentence(stockConflict),
+            conflict: stockConflict,
+          }
+          throw failure
+        }
         // Recover exact receipts even when the notification was lost and this
         // turn arrived through recovery rather than completed().
         if (this.memory.pendingOperation?.(this.activePlanKey())) {
@@ -10633,6 +10848,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       catch (error) {
         if (!error?.preflight) throw error
+        if (error.preflight.code === CHECKPOINT_STOCK_EXTRACTION_CODE) {
+          const guarded = await this.handleCheckpointStockExtraction(error, plan, before, stateResult)
+          if (guarded.action === 'recovered') {
+            stateResult = guarded.stateResult
+            return this.runTurn()
+          }
+          // A spent budget falls through to the ordinary blocker path.
+        }
         if (TRANSFER_SUPPLY_PREFLIGHT_CODES.has(error.preflight.code)) {
           const supply = await this.handleTransferSupplyPreflight(error, plan, before, stateResult)
           if (supply.action === 'recovered') {
