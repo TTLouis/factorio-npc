@@ -3,6 +3,7 @@ import type { ControlledActor } from './actors/types'
 import { remember_entity_reference, resolve_entity_reference } from './entity_reference'
 import { is_chunk_known_charted, is_chunk_known_visible, map_knowledge_summary } from './map_knowledge'
 import { crafting_categories_support_recipe } from './recipe_categories'
+import { find_world_entities } from './npc_vision'
 
 const MAX_MAP_QUERY_RADIUS = 256
 const MAX_MAP_QUERY_RESULTS = 64
@@ -194,7 +195,7 @@ export function query_charted_entities(
   for (const visible_area of query_areas) {
     const filters: any = { area: visible_area }
     if (name !== undefined) filters.name = name
-    const candidates = surface.find_entities_filtered(filters)
+    const candidates = find_world_entities(surface, filters)
     for (const entity of candidates) {
       if (!entity.valid) continue
       if (!is_position_visible(actor, surface, entity.position)) continue

@@ -2,6 +2,7 @@ import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import { resolve_entity_reference } from './entity_reference'
 import { placement_check_args, placement_footprint, placement_tile_size, snap_placement_center, type PlacementWorldBox } from './placement_geometry'
+import { find_world_entities } from './npc_vision'
 
 const DEFAULT_HALF_SIZE = 12
 const MIN_HALF_SIZE = 4
@@ -257,7 +258,7 @@ export function local_spatial_observation(actor: ControlledActor, request: Const
     left_top: { x: anchor.position.x - half_size, y: anchor.position.y - half_size },
     right_bottom: { x: anchor.position.x + half_size, y: anchor.position.y + half_size },
   }
-  const matches = actor.surface.find_entities_filtered({ area })
+  const matches = find_world_entities(actor.surface, { area })
   sort_entities(matches)
   const entities = matches.slice(0, MAX_ENTITIES).map(entity => entity_summary(entity, actor))
   const terrain = terrain_snapshot(actor, anchor.position, half_size)
@@ -309,8 +310,8 @@ function direction_vector(side: PlacementSide): Position | undefined {
 
 function nearby_blockers(actor: ControlledActor, position: Position, footprint_box?: PlacementWorldBox) {
   const matches = footprint_box
-    ? actor.surface.find_entities_filtered({ area: footprint_box })
-    : actor.surface.find_entities_filtered({ position, radius: 1.5 })
+    ? find_world_entities(actor.surface, { area: footprint_box })
+    : find_world_entities(actor.surface, { position, radius: 1.5 })
   const blockers: Array<Record<string, unknown>> = []
   for (const entity of matches) {
     if (blockers.length >= 8) break

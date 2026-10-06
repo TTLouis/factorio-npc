@@ -8,6 +8,7 @@ import { machine_eta } from './production_eta'
 import { create_placement_candidate_set, type PlacementCandidateRequest } from './placement_candidates'
 import { compact_spatial_summary } from './spatial_semantics'
 import { get_actor_inventory_items } from './utils/inventory'
+import { find_world_entities } from './npc_vision'
 
 const MAX_NEARBY_RADIUS = 64
 const MAX_NEARBY_RESULTS = 40
@@ -308,7 +309,7 @@ export function create_tools_remote_interface() {
         filters.type = entity_type
       }
 
-      const matches = actor.surface.find_entities_filtered(filters as any)
+      const matches = find_world_entities(actor.surface, filters as any)
       // Engine order is not meaningful and the result is capped, so keep
       // entities with a unit_number (buildings, vehicles) ahead of resources
       // and trees, nearest first. type_counts covers every match, so the model
@@ -368,7 +369,7 @@ export function create_tools_remote_interface() {
       }
 
       const bounded_radius = math.max(1, math.min(MAX_ENTITY_STATUS_RADIUS, radius || 8))
-      const matches = actor.surface.find_entities_filtered({
+      const matches = find_world_entities(actor.surface, {
         position: actor.position,
         radius: bounded_radius,
         name,

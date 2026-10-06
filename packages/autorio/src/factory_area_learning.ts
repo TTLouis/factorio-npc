@@ -2,6 +2,7 @@ import type { LuaEntity, LuaInventory } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import type { SkillDefinition } from './skills'
 import { local_spatial_observation } from './construction_planning'
+import { find_world_entities } from './npc_vision'
 
 const MAX_RADIUS = 16
 const MAX_AREA_SPAN = MAX_RADIUS * 2
@@ -318,7 +319,7 @@ function target_id(entity: LuaEntity | undefined) {
 
 function mining_resources(entity: LuaEntity) {
   if (entity.type !== 'mining-drill') return []
-  const matches = entity.surface.find_entities_filtered({ area: entity.bounding_box, type: 'resource', limit: MAX_RESOURCE_MATCHES })
+  const matches = find_world_entities(entity.surface, { area: entity.bounding_box, type: 'resource', limit: MAX_RESOURCE_MATCHES })
   const names: string[] = []
   for (const resource of matches) if (!names.includes(resource.name)) names.push(resource.name)
   names.sort()
@@ -605,7 +606,7 @@ export function analyze_factory_area(actor: ControlledActor, request: FactoryAre
   if ('error' in resolved) return { ok: false as const, error: resolved.error }
   const spatial: any = local_spatial_observation(actor, { position: resolved.center, half_size: resolved.half_size })
   if (!spatial?.ok) return { ok: false as const, error: spatial?.error ?? 'local spatial observation failed' }
-  const matches = actor.surface.find_entities_filtered({ area: resolved.area })
+  const matches = find_world_entities(actor.surface, { area: resolved.area })
   const relevant: LuaEntity[] = []
   for (const entity of matches) {
     if (relevant.length >= MAX_ENTITIES) break

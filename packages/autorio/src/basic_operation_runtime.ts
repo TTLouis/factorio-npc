@@ -13,6 +13,7 @@ import { placement_check_args, placement_footprint, placement_grid_rule, snap_pl
 import type { new_task_manager } from './task_manager'
 import type { PlayerParametersMineEntity, PlayerParametersWalkToEntity } from './types'
 import { TaskStates } from './types'
+import { find_world_entities } from './npc_vision'
 
 type Manager = ReturnType<typeof new_task_manager>
 type BasicController = ReturnType<typeof new_basic_operation_controller>
@@ -20,7 +21,7 @@ type BasicController = ReturnType<typeof new_basic_operation_controller>
 const MINING_TARGET_SEARCH_RADIUS = 5
 
 function placement_blocker_summaries(actor: ControlledActor, box: { left_top: { x: number, y: number }, right_bottom: { x: number, y: number } }) {
-  const matches = actor.surface.find_entities_filtered({ area: box })
+  const matches = find_world_entities(actor.surface, { area: box })
   const result: Array<{ name: string, type: string, unit_number?: number, position: { x: number, y: number } }> = []
   for (const entity of matches) {
     if (!entity.valid) continue
@@ -211,7 +212,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       return exact
     }
     if (!task.position || !task.entity_name) return undefined
-    return actor.surface.find_entities_filtered({
+    return find_world_entities(actor.surface, {
       position: task.position,
       radius: 0.25,
       name: task.entity_name,
@@ -344,7 +345,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       }
     }
     else if (task.requested_position !== undefined && task.entity_name !== undefined) {
-      target = actor.surface.find_entities_filtered({
+      target = find_world_entities(actor.surface, {
         position: task.requested_position,
         radius: 0.25,
         name: task.entity_name,
@@ -355,7 +356,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       }
     }
     else if (task.entity_name !== undefined) {
-      const entities = actor.surface.find_entities_filtered({
+      const entities = find_world_entities(actor.surface, {
         position: actor.position,
         radius: MINING_TARGET_SEARCH_RADIUS,
         name: task.entity_name,
@@ -634,7 +635,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       return undefined
     }
 
-    const nearby = actor.surface.find_entities_filtered({
+    const nearby = find_world_entities(actor.surface, {
       position: actor.position,
       radius: reach,
       name: task.entity_name,

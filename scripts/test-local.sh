@@ -39,6 +39,8 @@ run_runtime() {
   # packages/autorio/src + packages/agent/src: read by the mod/runtime contract
   #   tests (task-board-control-contract, deployed-operation-contract); the
   #   image copy goes stale as soon as those sources change.
+  # packages/autorio/data.lua: source-preparer.test.mjs guards the shipped NPC
+  #   vision vehicle prototype; the image copy would test a stale prototype.
   # .devcontainer + the repo-root compose/.env/.gitignore/.dockerignore files:
   #   read directly by local-compose-secret-boundary.test.mjs.
   MSYS_NO_PATHCONV=1 docker run --rm \
@@ -46,6 +48,7 @@ run_runtime() {
     -v "$(pwd -W)/deploy/pterodactyl:/src/deploy/pterodactyl" \
     -v "$(pwd -W)/contracts:/src/contracts:ro" \
     -v "$(pwd -W)/packages/autorio/src:/src/packages/autorio/src:ro" \
+    -v "$(pwd -W)/packages/autorio/data.lua:/src/packages/autorio/data.lua:ro" \
     -v "$(pwd -W)/packages/agent/src:/src/packages/agent/src:ro" \
     -v "$(pwd -W)/.devcontainer:/src/.devcontainer:ro" \
     -v "$(pwd -W)/compose.devcontainer.yml:/src/compose.devcontainer.yml:ro" \

@@ -5,6 +5,7 @@ import { resolve_exact_entity } from './entity_reference'
 import * as estimate from './production_estimate_live'
 import * as rates from './production_rates'
 import { recipe_categories } from './recipe_categories'
+import { find_world_entities } from './npc_vision'
 
 const MAX_RECIPE_MATCHES = 8
 const MAX_MACHINE_MATCHES = 8
@@ -518,7 +519,7 @@ export function logistics_topology_for_actor(actor: ControlledActor, unit_number
     })
   }
 
-  const nearby_inserters = center.surface.find_entities_filtered({
+  const nearby_inserters = find_world_entities(center.surface, {
     position: center.position,
     radius,
     type: 'inserter',

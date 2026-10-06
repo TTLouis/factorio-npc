@@ -101,3 +101,69 @@ for _, name in ipairs({"learn", "history", "debug"}) do
 end
 
 data:extend(console_icons)
+
+-- The hidden NPC vision vehicle. A character prototype has no
+-- chunk_exploration_radius, so the standalone NPC gets live map vision from a
+-- separate hidden vehicle that follows it (src/npc_vision.ts, docs/
+-- NPC_CHARACTER_ARCHITECTURE.md "Map knowledge"). It exists only so the NPC
+-- force charts the area around the NPC: it must never interact with the world.
+-- Every property below removes one way to interact with it, and
+-- deploy/pterodactyl/staging/source-preparer.mjs refuses a package that drops
+-- one. Do not grow the radius, add an item/recipe, or give it graphics.
+data:extend({
+  { type = "trigger-target-type", name = "sgluna-untargetable" },
+  {
+    type = "car",
+    name = "sgluna-npc-vision",
+    hidden = true,
+    hidden_in_factoriopedia = true,
+    icon = "__base__/graphics/icons/car.png",
+    icon_size = 64,
+    flags = {
+      "not-on-map",
+      "placeable-off-grid",
+      "not-blueprintable",
+      "not-deconstructable",
+      "not-upgradable",
+      "not-repairable",
+      "no-copy-paste",
+      "not-selectable-in-game",
+      "not-in-kill-statistics",
+      "not-flammable",
+      "hide-alt-info",
+    },
+    -- How many chunks it charts around itself, like a spidertron. 2 matches
+    -- KNOWLEDGE_CHUNK_RADIUS (src/map_knowledge.ts): a 5x5 window.
+    chunk_exploration_radius = 2,
+    -- No collision at all: it never blocks placement, walking, belts,
+    -- inserters, vehicles, trains, biters or projectiles.
+    collision_box = {{0, 0}, {0, 0}},
+    collision_mask = { layers = {} },
+    -- No selection_box: it cannot be selected, hovered or targeted by hand.
+    selectable_in_game = false,
+    allow_copy_paste = false,
+    remove_decoratives = "false",
+    protected_from_tile_building = false,
+    is_military_target = false,
+    -- Turrets and trigger effects match entities by trigger target type; the
+    -- only type it has is one nothing is ever set to target.
+    trigger_target_mask = { "sgluna-untargetable" },
+    max_health = 1,
+    healing_per_tick = 0,
+    alert_when_damaged = false,
+    create_ghost_on_death = false,
+    allow_passengers = false,
+    inventory_size = 0,
+    energy_source = { type = "void" },
+    -- Nothing here can move it: no driver, no fuel, no engine output.
+    weight = 1,
+    braking_power = "1W",
+    consumption = "1W",
+    effectivity = 0.01,
+    friction = 1,
+    rotation_speed = 0.0001,
+    rotation_snap_angle = 0,
+    energy_per_hit_point = 1,
+    -- No graphics, light, sound, smoke, corpse or explosion.
+  },
+})
