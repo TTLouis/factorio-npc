@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
-import { NpcAgentLoop } from './npc-agent-loop.mjs'
+import { NpcAgentLoop, PASSIVE_ROUTE_MIN_WAIT_TICKS } from './npc-agent-loop.mjs'
 import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 
 // Repair unit B (docs/validation/LUNA_AUTONOMY_FAILURE_ANALYSIS_2026-10-05.md section 3). A batch of only `wait`
@@ -613,4 +613,58 @@ test('a zero-operation turn still registers its wait exactly as before and route
   assert.equal(world.named('runtime.condition_registered').length, 1)
   assert.equal(world.named('wait.routed_to_condition').length, 0)
   assert.equal(world.rcon.commands.filter(command => command.includes('evaluate_condition')).length, 0, 'no extra read on a zero-operation turn')
+})
+
+test('the passive route needs at least 300 requested ticks: below it the timer runs with the fresh-read receipt, at it the wait is routed', async () => {
+  assert.equal(PASSIVE_ROUTE_MIN_WAIT_TICKS, 300)
+  const short = makeWorld({ committed: true, script: [sleepingModel()] })
+  short.plan().task_board.steps[0].completion_contract = undefined
+  observeFurnace(short.agent)
+
+  await short.agent.commitPlan(waitReply(299))
+
+  assert.equal(short.rcon.mutations.length, 1, 'a short settle wait runs as a timer')
+  assert.equal(short.plan().condition_wait, undefined)
+  assert.equal(short.named('wait.routed_to_condition').length, 0)
+  assert.equal(short.agent.pendingBlindWait.reason, 'short_wait_below_passive_threshold')
+  assert.deepEqual(short.agent.pendingBlindWait.unit_numbers, [FURNACE])
+  short.agent.active = true
+  short.rcon.completeBatch(['waiting'])
+  await short.agent.completed()
+  const [blind] = short.named('wait.blind_with_fresh_read')
+  assert.equal(blind.reason, 'short_wait_below_passive_threshold')
+  assert.deepEqual(blind.unit_numbers, [FURNACE])
+
+  // The sum of several waits counts.
+  const summed = makeWorld({ committed: true })
+  summed.plan().task_board.steps[0].completion_contract = undefined
+  observeFurnace(summed.agent)
+  await summed.agent.commitPlan(waitReply(150, { operations: [{ name: 'wait', args: { ticks: 150 } }, { name: 'wait', args: { ticks: 150 } }] }))
+  assert.equal(summed.rcon.mutations.length, 0)
+  assert.equal(summed.plan().condition_wait?.mode, 'passive_progress')
+
+  const exact = makeWorld({ committed: true })
+  exact.plan().task_board.steps[0].completion_contract = undefined
+  observeFurnace(exact.agent)
+  await exact.agent.commitPlan(waitReply(300))
+  assert.equal(exact.rcon.mutations.length, 0)
+  assert.equal(exact.plan().condition_wait?.mode, 'passive_progress')
+})
+
+test('a short wait on a committed machine checkpoint is still routed: only the passive route is gated', async () => {
+  const world = makeWorld({ committed: true })
+  observeFurnace(world.agent)
+
+  await world.agent.commitPlan(waitReply(10))
+
+  assert.equal(world.rcon.mutations.length, 0)
+  assert.equal(world.plan().condition_wait?.mode, 'completion')
+})
+
+test('pendingBlindWait starts empty and a reset clears it', () => {
+  const world = makeWorld({ committed: true })
+  assert.equal(world.agent.pendingBlindWait, null)
+  world.agent.pendingBlindWait = { request_id: 'req', reason: 'x', unit_numbers: [1] }
+  world.agent.reset()
+  assert.equal(world.agent.pendingBlindWait, null)
 })

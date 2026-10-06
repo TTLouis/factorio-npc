@@ -127,6 +127,8 @@ const SENSITIVE_TRACE_KEY = /authorization|api.?key|token|password|secret|cookie
 const STATE_SCHEMA = 1
 const PLAN_HISTORY_LIMIT = 24
 const MAX_OBSERVATION_TOOL_CALLS_PER_BATCH = 4
+// A wait-only batch asking for fewer ticks than this (5 s) is never routed to a passive-progress wait.
+export const PASSIVE_ROUTE_MIN_WAIT_TICKS = 300
 const JEV_OBSERVATION_LOG_LIMIT = 12
 const PLANNING_LOD_GUIDANCE = '[PLANNING_LOD] Your reply, including all reasoning, has a fixed output budget. Work at outline level. Before any reads, only decide which reads you need. In a plan, write the goal definition (on the first plan), one short line per step (plus Roadmap Shelf nodes for a long_horizon goal), and concrete operations only for the active step. Do not work out later steps\' operations, counts, or positions now; each step is refined when it becomes active.'
 // Evidence kinds that let a semantic step completion claim through.
@@ -2709,6 +2711,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.observationRelevanceOverride = null
     this.genericRecoveryDecisionActive = false
     this.conditionPollPromise = null
+    this.pendingBlindWait = null
     this.liveEntityObservations = new Map()
     this.rejectedExactTargets = new Set()
     this.staleExactPreflightRetries = 0
@@ -2771,6 +2774,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (this.pendingInteractionAmendment) this.dropPendingAmendment('reset_discarded_the_conversation_holding_the_text') // its staged text lived in the conversation this reset discards
     this.pendingInteractionAmendment = null
     this.pendingAmendmentConversationSeq = undefined
+    this.pendingBlindWait = null
     this.agentContext.beginLineage() // planner role: an executor role never leaks into the next chat
     super.reset()
   }
@@ -4313,6 +4317,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const requirement = checkpointWaitRequirement(contract, () => true)
     const unitNumber = requirement?.unit_number ?? mostRecentWorkingUnit(this.liveEntityObservations?.values?.())
     if (!Number.isSafeInteger(unitNumber)) return decline('no_machine_known')
+    // Only the checkpoint route is tied to the step's own machine. A passive wait sleeps until some machine stops or
+    // its deadline passes, so a short settle wait is not worth it and runs as the timer it is.
+    if (!requirement && waitOnlyTicks(plan.operations) < PASSIVE_ROUTE_MIN_WAIT_TICKS) {
+      readUnits = [unitNumber]
+      return decline('short_wait_below_passive_threshold')
+    }
     // The cached working flag may be arbitrarily stale (it dates from whenever the model last looked), so the
     // machine is read once now and that answer decides.
     const fresh = await this.readFreshMachine(unitNumber, requirement)
