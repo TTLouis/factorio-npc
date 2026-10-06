@@ -8,6 +8,10 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 6 Luna planning/tracker probes: proxy healthy, 2/4 passed
+
+After Tailscale startup, the owner's Docker VM proxy passed unauthenticated health and authenticated model-list checks from Docker. Four one-shot Luna decisions used a direct Tailscale endpoint override: satisfied-step continuation and grounded semantic closure passed; the initial deterministic plan and unmet-research reply omitted actions. Zero corrective prompts, retries, Jev calls or game connections. The initial planning probe's missing-admission diagnostic was clarified without changing saved replies or pass/fail criteria. [Planning-only evidence and fixture limitations](validation/LUNA_PLANNING_TRACKER_PROBES_2026-10-06.md). The earlier connectivity blocker below is superseded for this direct endpoint; `.env` still uses its existing Docker-host address.
+
 ## October 6 controller reconciliation: static gates green
 
 Local Luna repairs preserved in `90fc419c` are reconciled with Claude's shared HEAD `48e2f1f7`. The official Docker gate passes 1,805 runtime tests and 1,036 mod tests, plus typechecks and generated-Lua checks. Shared checkpoint settlement retains pending-amendment and identity fences; canonical goal retirement and semantic admission regressions pass. The full Docker build, nine payload checks, and isolated native trigger-ladder lane also pass; installer repin is `fa0ce8bf`. The opt-in planning/tracker runner passes 4/4 scripted decisions. Live Luna probes received no HTTP/model response because the configured proxy refuses TCP connections; waiting for the owner to restore it. Evidence and open gates are tracked in the [new reconciliation checkpoint](validation/LUNA_CONTROLLER_RECONCILIATION_2026-10-06.md). Autonomous gameplay and multiplayer gates remain open.

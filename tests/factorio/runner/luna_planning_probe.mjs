@@ -125,7 +125,10 @@ async function makeCase(name) {
         assert.ok(plan.stepCompletions?.length === plan.plan.length)
         assert.ok(plan.stepCompletions.some(spec => spec.kind === 'deterministic' && spec.checkpoint.requirements.some(req => req.kind === 'inventory_count' && req.item_name === 'copper-ore' && req.minimum === 10)))
         assert.ok(plan.stepCompletions.some(spec => spec.kind === 'deterministic' && spec.checkpoint.requirements.some(req => req.kind === 'research_completed' && req.technology === 'automation')))
-        const recorded = world.memory.recordPlan(request.memoryKey, request, plan)
+        const semanticAdmission = plan.operations.length === 0 && plan.stepCompletions[plan.currentStep]?.kind === 'semantic'
+        assert.ok(plan.operations.length > 0 || semanticAdmission, 'initial deterministic plan has no operation proposal; it cannot be admitted')
+        const recorded = world.memory.recordPlan(request.memoryKey, request, plan, { validatedSemanticAdmission: semanticAdmission })
+        assert.ok(recorded?.state, 'validated draft was not admitted by planning memory')
         world.memory.reconcileTaskBoard(request.memoryKey, recorded.state.task_board, plan, recorded)
         world.memory.commitPlanningPlan(request.memoryKey, { runtime_validation: { passed: true } })
         assert.equal(getActivePlan(world.memory.planningState(request.memoryKey)).status, 'COMMITTED')
