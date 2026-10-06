@@ -693,6 +693,43 @@ export function setTaskBoardStatus(board, status, { blocker = '', pauseReason = 
   return taskBoardEvent(next, status, now, { active_step_id: next.active_step_id })
 }
 
+// Monotonic per-step transfer-supply recovery counter, kept ON the board (not derived from the evidence window, which
+// is trimmed to TASK_BOARD_MAX_EVIDENCE): { counts: { [step_id]: n }, refs: [handled batch refs] }. Bounded in size.
+const TASK_BOARD_MAX_RECOVERY_STEPS = 64
+const TASK_BOARD_MAX_RECOVERY_REFS = 16
+
+export function taskBoardTransferSupplyRecoveries(board, stepId = board?.active_step_id) {
+  const count = board?.transfer_supply_recoveries?.counts?.[stepId]
+  return Number.isSafeInteger(count) && count > 0 ? count : 0
+}
+
+export function taskBoardTransferSupplyRefSeen(board, ref) {
+  return Boolean(ref) && (board?.transfer_supply_recoveries?.refs ?? []).includes(ref)
+}
+
+export function recordTaskBoardTransferSupplyRecovery(board, { ref = '', now = Date.now() } = {}) {
+  if (!board || board.kind !== 'task_board_lite' || !board.active_step_id) return board
+  const prior = board.transfer_supply_recoveries ?? { counts: {}, refs: [] }
+  const counts = { ...prior.counts, [board.active_step_id]: taskBoardTransferSupplyRecoveries(board) + 1 }
+  const keys = Object.keys(counts)
+  for (const key of keys.slice(0, Math.max(0, keys.length - TASK_BOARD_MAX_RECOVERY_STEPS))) delete counts[key]
+  const text = taskBoardText(ref, 160)
+  const refs = text ? [...(prior.refs ?? []), text].slice(-TASK_BOARD_MAX_RECOVERY_REFS) : [...(prior.refs ?? [])]
+  return { ...board, transfer_supply_recoveries: { counts, refs }, revision: board.revision + 1, updated_at: now }
+}
+
+function normalizeTransferSupplyRecoveries(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const counts = {}
+  const rawCounts = value.counts && typeof value.counts === 'object' && !Array.isArray(value.counts) ? value.counts : {}
+  for (const [key, count] of Object.entries(rawCounts).slice(-TASK_BOARD_MAX_RECOVERY_STEPS)) {
+    const id = taskBoardText(key, 80)
+    if (id && Number.isSafeInteger(count) && count > 0) counts[id] = count
+  }
+  const refs = (Array.isArray(value.refs) ? value.refs : []).slice(-TASK_BOARD_MAX_RECOVERY_REFS).map(ref => taskBoardText(ref, 160)).filter(Boolean)
+  return Object.keys(counts).length > 0 || refs.length > 0 ? { counts, refs } : undefined
+}
+
 export function addTaskBoardEvidence(board, { kind = 'operation_receipt', summary = '', ref = '', now = Date.now() } = {}) {
   if (!board || board.kind !== 'task_board_lite') return board
   const record = {
@@ -788,6 +825,7 @@ export function sanitizeTaskBoard(value, { fallbackPlan = [], fallbackCurrentSte
     })),
     created_at: Number.isFinite(value.created_at) ? value.created_at : now,
     updated_at: Number.isFinite(value.updated_at) ? value.updated_at : now,
+    ...(normalizeTransferSupplyRecoveries(value.transfer_supply_recoveries) ? { transfer_supply_recoveries: normalizeTransferSupplyRecoveries(value.transfer_supply_recoveries) } : {}),
   }
   return applyTaskBoardStatuses(board, value.active_index)
 }

@@ -5,6 +5,8 @@ import path from 'node:path'
 import { AgentLoopError, NpcAgentLoop as BaseNpcAgentLoop, NpcDialogueMemory as BaseNpcDialogueMemory } from '../staging/npc-agent-loop.mjs'
 import {
   addTaskBoardEvidence,
+  recordTaskBoardTransferSupplyRecovery,
+  taskBoardTransferSupplyRecoveries,
   reconcileTaskBoard,
   sanitizeTaskBoard,
   setTaskBoardStatus,
@@ -189,6 +191,110 @@ const LOST_ACK_RETRY_BUDGET = 1
 // memory records it instead of freezing the plan and blocks once the bounded
 // retries for the step run out.
 export const OPERATION_FAILURE_RECOVERABLE_KIND = 'operation_failure_recoverable'
+// A transfer the world proved cannot move anything yet (the NPC holds none of the item, the entity holds none to take, or
+// the destination accepts none). It is an acquisition dependency inside the same committed step: the plan, checkpoint and
+// result are untouched. The per-step counter is persisted on the board (board.transfer_supply_recoveries, survives
+// continuation, restart and evidence trimming); evidence of this kind is kept for traceability (written both by the
+// preflight path and, for an execution-time item_missing/nothing_moved receipt, by the board memory). The step is blocked through the ordinary path once the budget is spent.
+export const TRANSFER_SUPPLY_RECOVERABLE_KIND = 'transfer_supply_recoverable'
+export const TRANSFER_SUPPLY_RECOVERY_BUDGET = 2
+export const TRANSFER_SUPPLY_PREFLIGHT_CODES = new Set(['supply_missing', 'extraction_empty', 'destination_full'])
+const TRANSFER_SUPPLY_CODE_MEANING = {
+  supply_missing: 'the NPC inventory holds none of the item',
+  extraction_empty: 'the target entity holds none of the item to take',
+  destination_full: 'the destination accepts none of the item',
+}
+
+// Recoveries already spent on the board's active step (both phases): the monotonic counter persisted on the board,
+// not the (trimmed) evidence window.
+export function transferSupplyRecoveryCount(board) {
+  return taskBoardTransferSupplyRecoveries(board)
+}
+
+function parseEvidenceSummary(item) {
+  try {
+    const parsed = JSON.parse(item?.summary)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : undefined
+  }
+  catch { return undefined }
+}
+
+// The newest board evidence when it is an execution-phase transfer-supply record (written right after the failure
+// receipt it classified), so an older record can never relabel a later, unrelated failure.
+function latestTransferSupplyExecutionRecovery(state) {
+  const evidence = state?.status === 'active' ? state?.task_board?.evidence : undefined
+  const latest = Array.isArray(evidence) ? evidence.at(-1) : undefined
+  if (latest?.kind !== TRANSFER_SUPPLY_RECOVERABLE_KIND) return undefined
+  const parsed = parseEvidenceSummary(latest)
+  return parsed?.phase === 'execution' ? parsed : undefined
+}
+
+const SUPPLY_TO_ACTOR_OPERATIONS = new Set(['mine_entity', 'mine_entity_exact', 'recover_corpse'])
+
+// Could an earlier operation of the same batch put `item` into the NPC inventory (supply_missing), give an empty source
+// something to take (extraction_empty), or free room at the same destination (destination_full)? When it could, the
+// preflight rejection is only a snapshot taken before that operation runs, so the decision is deferred to execution,
+// whose own checks stay authoritative. Deliberately lenient and deterministic: it never asserts the supply is enough.
+function batchSupplierFor(operations, index, status, item, direction, unitNumber) {
+  for (let j = 0; j < index; j++) {
+    const op = operations[j]
+    const args = op?.args ?? {}
+    if (status === 'supply_missing') {
+      if (op?.name === 'craft_item' && args.item_name === item) return j
+      if ((op?.name === 'gather_resource' || op?.name === 'mine_resource_at') && args.resource_name === item) return j
+      if (op?.name === 'harvest_product' && args.product_name === item) return j
+      if (SUPPLY_TO_ACTOR_OPERATIONS.has(op?.name)) return j
+      if ((op?.name === 'move_items_exact' || op?.name === 'move_items') && args.to_entity === false && args.item_name === item) return j
+    }
+    else if (status === 'extraction_empty') {
+      if (op?.name === 'wait') return j
+      if (op?.name === 'move_items_exact' && args.to_entity === true && args.unit_number === unitNumber && args.item_name === item) return j
+      if (op?.name === 'supply_entity' && args.unit_number === unitNumber && Array.isArray(args.items) && args.items.some(entry => entry?.item_name === item)) return j
+    }
+    else if (status === 'destination_full' && direction === 'to_entity') {
+      if (op?.name === 'move_items_exact' && args.to_entity === false && args.unit_number === unitNumber) return j
+    }
+  }
+  return undefined
+}
+
+// The batch-dependency rule for a transfer preflight rejection: undefined means "reject", otherwise the earlier operations
+// that could supply every failing item.
+export function transferBatchDependency(operations, index, result) {
+  const items = Array.isArray(result?.transfer?.items) ? result.transfer.items : []
+  const failing = items.filter(item => TRANSFER_SUPPLY_PREFLIGHT_CODES.has(item?.status))
+  if (failing.length === 0) return undefined
+  const dependencies = []
+  for (const item of failing) {
+    const supplier = batchSupplierFor(operations, index, item.status, item.item_name, result.transfer.direction, result.target?.unit_number ?? result.identity)
+    if (supplier === undefined) return undefined
+    dependencies.push({ item_name: item.item_name, status: item.status, operation_index: supplier, operation: operations[supplier]?.name })
+  }
+  return dependencies
+}
+
+// Bounded facts about a transfer preflight result, for trace rows, board evidence and the model message.
+export function transferSupplyFacts(preflight) {
+  const items = Array.isArray(preflight?.transfer?.items) ? preflight.transfer.items.slice(0, 8) : []
+  return {
+    code: preflight?.code,
+    operation: preflight?.operation,
+    operation_index: preflight?.operation_index,
+    direction: preflight?.transfer?.direction,
+    target: preflight?.target
+      ? { unit_number: preflight.target.unit_number, name: preflight.target.name }
+      : (preflight?.identity === undefined ? undefined : { unit_number: preflight.identity }),
+    items: items.map(item => ({
+      item_name: item?.item_name,
+      requested: item?.requested,
+      source_count: item?.source_count,
+      missing: item?.missing,
+      destination_accepts: item?.destination_accepts,
+      status: item?.status,
+      ...(item?.refusal_cause ? { refusal_cause: item.refusal_cause } : {}),
+    })),
+  }
+}
 const RESEARCH_PREFLIGHT_RETRY_BUDGET = 2
 // Chained in-turn slice continuations (a claim that closes a slice, whose
 // unmet goal plans the next slice inside the same planner turn) allowed per
@@ -1243,6 +1349,18 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
   // the result here (3.3 move 2).
   appendBoardEvidence(_key, _state, board, item) {
     return addTaskBoardEvidence(board, item)
+  }
+
+  // Spend one transfer-supply recovery on the active step (monotonic, persisted with the board).
+  noteTransferSupplyRecovery(key, ref) {
+    const state = key ? this.planByNpc.get(key) : undefined
+    if (!state) return undefined
+    const board = this.ensureTaskBoard(state)
+    state.task_board = recordTaskBoardTransferSupplyRecovery(board, { ref, now: Date.now() })
+    state.revision += 1
+    state.updated_at = Date.now()
+    this.planByNpc.set(key, state)
+    return state.task_board
   }
 
   recordBoardEvidence(key, evidence) {
@@ -7707,12 +7825,47 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         retry_budget: recoverable.retry_budget,
       })
     }
+    const supplyState = this.memory.currentPlan?.(this.activePlanKey())
+    const supplyRecovery = latestTransferSupplyExecutionRecovery(supplyState)
+    if (supplyRecovery) {
+      await this.traceEvent('transfer.supply_recovery', {
+        request_id: this.traceRequest?.id,
+        step_id: supplyState?.task_board?.active_step_id,
+        phase: 'execution',
+        code: supplyRecovery.code,
+        item_name: supplyRecovery.item_name,
+        requested: supplyRecovery.requested_count,
+        to_entity: supplyRecovery.to_entity,
+        target_unit_number: supplyRecovery.target_unit_number,
+        attempt: supplyRecovery.attempt,
+        retry_budget: supplyRecovery.retry_budget,
+        tools_enabled: true,
+        plan_changed: false,
+        reason: `execution_${supplyRecovery.code}`,
+      })
+    }
+    else if (supplyState?.status === 'blocked'
+      && /^transfer_failed:(?:item_missing|nothing_moved)$/.test(String(supplyState.blocker ?? ''))
+      && transferSupplyRecoveryCount(supplyState.task_board) >= TRANSFER_SUPPLY_RECOVERY_BUDGET) {
+      await this.traceEvent('transfer.supply_recovery_exhausted', {
+        request_id: this.traceRequest?.id,
+        step_id: supplyState.task_board?.active_step_id,
+        phase: 'execution',
+        reason: 'recovery_budget_spent_step_blocked_through_existing_path',
+        blocker: supplyState.blocker,
+        recoveries_used: transferSupplyRecoveryCount(supplyState.task_board),
+        retry_budget: TRANSFER_SUPPLY_RECOVERY_BUDGET,
+      })
+    }
+    const supplyGuidance = supplyRecovery
+      ? ` [HARNESS] The engine found nothing to move for ${cleanMemoryText(supplyRecovery.item_name ?? 'the requested item', 100)} (${cleanMemoryText(supplyRecovery.code, 64)}; requested ${supplyRecovery.requested_count ?? 'unknown'}, ${supplyRecovery.to_entity === false ? 'taking from' : 'giving to'} unit ${supplyRecovery.target_unit_number ?? 'unknown'}). This is a recoverable supply dependency inside the same committed step, not WORLD_BLOCKED: the plan, step contract and requested result are unchanged, and tools remain enabled. A destination that already holds the item does not by itself complete the transfer. Re-observe the real counts, then acquire the missing amount or submit a different valid transfer for this step. Recovery ${supplyRecovery.attempt} of ${supplyRecovery.retry_budget} before this step blocks.`
+      : ''
     const recoverableGuidance = recoverable
       ? ` [HARNESS] The engine refused the ${cleanMemoryText(recoverable.entity_name ?? 'entity', 100)} placement at the coordinate you chose (${cleanMemoryText(recoverable.code, 64)}); this is a correctable placement error, not a world blocker, and the committed step is unchanged. Use the receipt's placement_footprint, placement_grid.nearest_valid_center and placement_blockers to choose a valid position (or clear the reported blocker); when the machine must cover or receive another entity's output, use getPlacementCandidates with covers_position and place the returned candidate instead of a hand-picked centre. Then resubmit the same step with its dependent operations. Do not change the plan's steps. Attempt ${recoverable.attempt} of ${recoverable.retry_budget} before the step is blocked.`
       : ''
     try {
       return await this.continueFromModMessage(
-        `[MOD] Autorio operation error: ${cleanError}. A failure cancels the operations queued behind it; a refused item move (nothing moved, items still held) does not, so read the receipt for which operations completed. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}${recoverableGuidance}`,
+        `[MOD] Autorio operation error: ${cleanError}. A failure cancels the operations queued behind it; a refused item move (nothing moved, items still held) does not, so read the receipt for which operations completed. Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}${recoverableGuidance}${supplyGuidance}`,
         'factorio.error_continuation',
       )
     }
@@ -9188,9 +9341,30 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       await assertPreflightCurrent()
       results.push(result)
+      if (result?.ok !== true && TRANSFER_SUPPLY_PREFLIGHT_CODES.has(result?.code)) {
+        // The mod answers from the world as it is NOW. An earlier operation of this batch that could supply the item
+        // (a craft, a gather, an extraction) has not run yet, so the transfer is accepted with its dependency recorded
+        // and the execution-time checks decide.
+        const dependencies = transferBatchDependency(operations, index, result)
+        if (dependencies) {
+          results[results.length - 1] = { ...result, ok: true, deferred: 'batch_dependency', dependencies }
+          await this.traceEvent('transfer.preflight_supply_deferred', {
+            request_id: this.traceRequest?.id,
+            step_id: this.memory.currentPlan?.(memoryKey)?.task_board?.active_step_id,
+            operation_index: index,
+            operation: operations[index].name,
+            code: result.code,
+            reason: 'earlier_operation_in_batch_could_supply',
+            dependencies,
+            facts: transferSupplyFacts({ ...result, operation_index: index }),
+          })
+          continue
+        }
+      }
       if (result?.ok !== true) {
         const failure = new AgentLoopError(`Operation preflight rejected operation ${index + 1} (${operations[index].name}): ${result?.code ?? 'unknown_preflight_failure'}`)
         failure.preflight = { ...result, operation_index: index }
+        failure.preflightResults = results.slice()
         throw failure
       }
     }
@@ -9260,6 +9434,114 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     })
     await this.persistState()
     return stateResult
+  }
+
+  // A transfer preflight that proved the move cannot move anything yet (see TRANSFER_SUPPLY_RECOVERABLE_KIND). Protected
+  // and reserved targets keep the admission handling; stale actor/epoch never reaches here (assertCurrent throws first).
+  // 'recovered' re-enters the planner turn inside the same committed step; 'refused' hands back the admission failure;
+  // 'unhandled' (no live plan, or the budget is spent) leaves the rejection to the ordinary blocker path.
+  async handleTransferSupplyPreflight(failure, plan, before, stateResult) {
+    const preflight = failure.preflight
+    const key = this.requestInfo?.memoryKey
+    const requestId = this.traceRequest?.id
+    const index = Number.isSafeInteger(preflight.operation_index) ? preflight.operation_index : 0
+    const operation = plan.operations?.[index]
+    if (!key || !operation) return { action: 'unhandled' }
+
+    if (typeof this.memory.checkOperationAdmission === 'function') {
+      // Operations 0..index with the preflight results gathered so far (the failing one carries its target), so a
+      // reserved/protected target earlier in the batch refuses first and no recovery budget is spent.
+      const collected = Array.isArray(failure.preflightResults) ? failure.preflightResults : []
+      const admission = this.memory.checkOperationAdmission(key, {
+        operations: plan.operations.slice(0, index + 1),
+        preflight: plan.operations.slice(0, index + 1).map((_, i) => (i === index ? { ok: true, operation: operation.name, target: preflight.target } : (collected[i] ?? { ok: true }))),
+        actor: { actor_id: before.actor_id, actor_epoch: before.epoch },
+      }, { requestId })
+      if (admission?.ok === false) {
+        const refusal = new AgentLoopError(`Operation admission refused operation ${index + 1}: ${admission.code}`)
+        refusal.preflight = {
+          ok: false,
+          code: admission.code,
+          reason: admission.reason,
+          operation: admission.operation,
+          operation_index: admission.operation_index ?? index,
+          identity: admission.unit_number,
+          detail: admission.reason,
+          ...(admission.last_user ? { last_user: admission.last_user } : {}),
+        }
+        return { action: 'refused', error: refusal }
+      }
+    }
+
+    const state = this.memory.currentPlan?.(key)
+    if (state && state.status !== 'active') return { action: 'unhandled' }
+    const board = state?.task_board
+    const prior = transferSupplyRecoveryCount(board)
+    const facts = transferSupplyFacts({ ...preflight, operation_index: index })
+    const base = {
+      request_id: requestId,
+      step_id: board?.active_step_id,
+      operation_index: index,
+      operation: operation.name,
+      code: preflight.code,
+      facts,
+    }
+    await this.traceEvent('transfer.preflight_missing_supply', {
+      ...base,
+      reason: 'preflight_proved_transfer_moves_nothing',
+      recoveries_used: prior,
+      retry_budget: TRANSFER_SUPPLY_RECOVERY_BUDGET,
+    })
+    if (prior >= TRANSFER_SUPPLY_RECOVERY_BUDGET) {
+      await this.traceEvent('transfer.supply_recovery_exhausted', {
+        ...base,
+        phase: 'preflight',
+        reason: 'recovery_budget_spent_step_blocked_through_existing_path',
+        recoveries_used: prior,
+        retry_budget: TRANSFER_SUPPLY_RECOVERY_BUDGET,
+      })
+      return { action: 'unhandled' }
+    }
+
+    const attempt = prior + 1
+    const admissionState = this.memory.setAdmissionState?.(key, 'preflight_rejected')
+    if (admissionState) stateResult = { ...(stateResult ?? {}), state: admissionState }
+    const recoveryRef = `${requestId ?? 'request'}/transfer_${preflight.code}_${index}`
+    this.memory.noteTransferSupplyRecovery?.(key, recoveryRef)
+    this.memory.recordBoardEvidence?.(key, {
+      kind: TRANSFER_SUPPLY_RECOVERABLE_KIND,
+      ref: recoveryRef,
+      summary: JSON.stringify({
+        phase: 'preflight',
+        failure_class: `transfer_${preflight.code}`,
+        ...facts,
+        items: facts.items.slice(0, 3),
+        attempt,
+        retry_budget: TRANSFER_SUPPLY_RECOVERY_BUDGET,
+      }),
+    })
+    await this.persistState()
+    await this.traceEvent('transfer.supply_recovery', {
+      ...base,
+      phase: 'preflight',
+      attempt,
+      retry_budget: TRANSFER_SUPPLY_RECOVERY_BUDGET,
+      tools_enabled: true,
+      plan_changed: false,
+      reason: 'recoverable_acquisition_dependency_in_same_step',
+    })
+    await this.traceEvent('operations.preflight_recoverable', {
+      failure_class: `transfer_${preflight.code}`,
+      preflight,
+      tools_enabled: true,
+      retry: attempt,
+      retry_budget: TRANSFER_SUPPLY_RECOVERY_BUDGET,
+    })
+    this.messages.push({
+      role: 'user',
+      content: `[HARNESS] Deterministic transfer preflight proved operation ${index + 1} (${cleanMemoryText(operation.name, 80)}) cannot move anything right now (${preflight.code}: ${TRANSFER_SUPPLY_CODE_MEANING[preflight.code] ?? 'nothing would move'}); no operation from this batch ran. This is a recoverable supply dependency inside the same committed step, not WORLD_BLOCKED: the plan, step contract and requested result are unchanged, and tools remain enabled. A destination that already holds the item does not by itself complete the transfer. Choose how to acquire the missing amount, or submit a different valid transfer for this step. Recovery ${attempt} of ${TRANSFER_SUPPLY_RECOVERY_BUDGET} before this step blocks. Facts from the live game: ${JSON.stringify(facts)}`,
+    })
+    return { action: 'recovered', stateResult }
   }
 
   async finishResearchPreflightRecoveryFailure(stateResult, plan, before, preflight) {
@@ -10129,6 +10411,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       catch (error) {
         if (!error?.preflight) throw error
+        if (TRANSFER_SUPPLY_PREFLIGHT_CODES.has(error.preflight.code)) {
+          const supply = await this.handleTransferSupplyPreflight(error, plan, before, stateResult)
+          if (supply.action === 'recovered') {
+            stateResult = supply.stateResult
+            return this.runTurn()
+          }
+          // A protected/reserved target takes the admission refusal; a spent budget falls through to the blocker path.
+          if (supply.action === 'refused') error = supply.error
+          else if (supply.stateResult) stateResult = supply.stateResult
+        }
         if (error.preflight.operation === 'research_technology' && RESEARCH_PREFLIGHT_RECOVERABLE_CODES.has(error.preflight.code)) {
           this.researchPreflightRetries++
           stateResult = await this.recordRecoverableResearchPreflight(stateResult, error.preflight)

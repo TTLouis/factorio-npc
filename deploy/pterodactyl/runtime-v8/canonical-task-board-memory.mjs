@@ -1,6 +1,6 @@
-import { NpcDialogueMemory, OPERATION_FAILURE_RECOVERABLE_KIND } from './npc-agent-loop.mjs'
+import { NpcDialogueMemory, OPERATION_FAILURE_RECOVERABLE_KIND, TRANSFER_SUPPLY_RECOVERABLE_KIND, TRANSFER_SUPPLY_RECOVERY_BUDGET, transferSupplyRecoveryCount } from './npc-agent-loop.mjs'
 import { restoreLedger as restoreJevLedger, serializeLedger as serializeJevLedger } from './jev-judgments.mjs'
-import { createTaskBoard, reconcileTaskBoard, setTaskBoardStatus } from './common.mjs'
+import { createTaskBoard, reconcileTaskBoard, setTaskBoardStatus, taskBoardTransferSupplyRefSeen } from './common.mjs'
 import { validateOutcomeCandidate } from './outcome-authority.mjs'
 import { completionContractSupported, provePermanentlyUnsatisfiable, sanitizeStepCompletionContract } from './step-completion.mjs'
 import {
@@ -289,6 +289,32 @@ function correctablePlacementRefusal(evidence) {
             : undefined,
         }))
       : undefined,
+  }
+}
+
+// A move the engine could not make because there was nothing to move (the NPC held none of the item, or an extraction
+// found none) is a supply dependency of the same committed step, not proof that the world prevents the step: the planner
+// re-observes and acquires or picks another transfer. Refusals by the destination with the item held (a full or
+// mismatched input slot) and player-inventory moves keep the ordinary failure path. The bound is the persisted board
+// evidence count for the step (TRANSFER_SUPPLY_RECOVERY_BUDGET, shared with the preflight path); past it the existing
+// transfer_failed blocker applies.
+function correctableTransferShortage(evidence) {
+  if (evidence?.kind !== 'operation_error_receipt') return undefined
+  const receipt = parseReceiptSummary(evidence)
+  const basic = receipt?.basic_operation
+  // basic_operation only survives the runtime receipt when it correlates with this batch (task type, tick, actor).
+  if (basic?.type !== 'moving_items' || basic.completed === true || typeof basic.player_name === 'string') return undefined
+  const itemMissing = basic.code === 'item_missing'
+  const extractionEmpty = basic.code === 'nothing_moved' && basic.to_entity === false
+  if (!itemMissing && !extractionEmpty) return undefined
+  return {
+    task_type: 'moving_items',
+    code: basic.code,
+    item_name: typeof basic.item_name === 'string' ? basic.item_name.slice(0, 100) : undefined,
+    requested_count: Number.isSafeInteger(basic.requested_count) ? basic.requested_count : undefined,
+    to_entity: typeof basic.to_entity === 'boolean' ? basic.to_entity : undefined,
+    target_unit_number: Number.isSafeInteger(basic.target_unit_number) ? basic.target_unit_number : undefined,
+    entity_name: typeof basic.entity_name === 'string' ? basic.entity_name.slice(0, 100) : undefined,
   }
 }
 
@@ -2863,6 +2889,27 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
           retry_budget: CORRECTABLE_PLACEMENT_RETRY_BUDGET,
         }),
       }) ?? boardAfterReceipt
+    }
+
+    const shortage = state.status === 'active' ? correctableTransferShortage(evidence) : undefined
+    if (shortage) {
+      // A re-reported failure of the same batch is not another recovery.
+      if (taskBoardTransferSupplyRefSeen(boardAfterReceipt, evidence.ref)) return boardAfterReceipt
+      const used = transferSupplyRecoveryCount(boardAfterReceipt)
+      if (used < TRANSFER_SUPPLY_RECOVERY_BUDGET) {
+        this.noteTransferSupplyRecovery(key, evidence.ref)
+        return super.recordBoardEvidence(key, {
+          kind: TRANSFER_SUPPLY_RECOVERABLE_KIND,
+          ref: evidence.ref,
+          summary: JSON.stringify({
+            phase: 'execution',
+            failure_class: `transfer_${shortage.code}`,
+            ...shortage,
+            attempt: used + 1,
+            retry_budget: TRANSFER_SUPPLY_RECOVERY_BUDGET,
+          }),
+        }) ?? boardAfterReceipt
+      }
     }
 
     if (evidence?.kind === 'operation_error_receipt' && stateHasUnverifiedTransferIntent(state)) {

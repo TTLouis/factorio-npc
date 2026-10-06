@@ -41,6 +41,7 @@ import { new_recipe_configuration_runtime } from './recipe_configuration'
 import { new_rocket_launch_runtime } from './rocket_launch'
 import { new_research_controller } from './research'
 import { research_operation_preflight } from './research_preflight'
+import { transfer_preflight_facts, transfer_unknown_item } from './transfer_preflight'
 import { ensure_basic_skill_definitions } from './skills'
 import { with_research_trigger } from './research_trigger'
 import { is_runtime_task_state, type RuntimeTaskState } from './task_state_runtime'
@@ -289,6 +290,18 @@ function operation_preflight(name: string, args: Record<string, any>) {
       // MW1: the engine's last-user record, so the harness can tell a player-built
       // entity (human last_user) from an NPC- or map-built one at admission.
       last_user: entity_last_user(target),
+    }
+    if (name === 'supply_entity' || name === 'move_items_exact') {
+      const unknown_item = transfer_unknown_item(name, args)
+      if (unknown_item !== undefined) {
+        return reject('unknown_prototype', { field: 'item_name', identity: unknown_item, expected_type: 'item' })
+      }
+      // Source/destination facts: reject only when the native move is certain to move nothing.
+      const facts = transfer_preflight_facts(actor, target, name, args)
+      if (facts) {
+        const details = { field: 'unit_number', identity: unit_number, target: exact_target, transfer: facts.transfer }
+        return facts.ok ? accept(details) : reject(facts.code as string, details)
+      }
     }
     if (name !== 'set_machine_recipe') {
       return accept({ field: 'unit_number', identity: unit_number, target: exact_target })
