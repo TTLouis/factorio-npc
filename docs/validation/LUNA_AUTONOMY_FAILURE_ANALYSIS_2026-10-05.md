@@ -179,8 +179,8 @@ system-prompt text; each gives Luna facts or rejects a draft.
 
 | Unit | Scope | Branch | Commit | Status |
 |---|---|---|---|---|
-| A | Transfer preflight returns source/destination counts; batch-aware missing-supply rejection; recoverable acquisition inside the step, bounded at 2 | `fix/transfer-preflight-counts` | | in progress |
-| B | `wait`-only batches on a machine-output checkpoint route to the condition wait; wait receipts carry a fresh machine read | | | queued |
+| A | Transfer preflight returns source/destination counts; batch-aware missing-supply rejection; recoverable acquisition inside the step, bounded at 2 | `fix/transfer-preflight-counts` | `f2641267` | merged; gate 1,645 runtime / 991 mod |
+| B | `wait`-only batches on a machine-output checkpoint route to the condition wait; wait receipts carry a fresh machine read | `fix/observed-waits` | | in progress |
 | C | Reject drafts whose operations empty the stock their own checkpoint requires (`checkpoint_contradicts_batch`) | | | queued |
 | D1 | `craft_item` on machine-only recipes returns `requires_machine` facts; bootstrap separates held, placed and running machines | | | queued |
 | D2 | Fresh executor context carries active step, contract, latest receipt, bounded recipe summary and refreshed counts | | | queued |
