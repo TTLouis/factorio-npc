@@ -207,7 +207,7 @@ case "$LANE" in
     # the lifecycle controller before preparing the next one; interleaving
     # their restores would reuse an operation ordinal consumed by its peer.
     printf '[npc-test][resilience] Preparing live planning BLOCKED state against real Factorio preflight...\n'
-    run_node planning_live_factorio.mjs --mode prepare
+    run_node planning_live_factorio.mjs --mode prepare --save "$SAVE"
     restart_factorio
     printf '[npc-test][resilience] Restoring planning BLOCKED state after real Factorio restart...\n'
     run_node planning_live_factorio.mjs --mode verify
