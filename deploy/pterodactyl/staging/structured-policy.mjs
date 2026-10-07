@@ -821,10 +821,17 @@ export const toolDefinitions = [
     },
     additionalProperties: false,
   }),
-  functionTool('getEntityStatus', 'Inspect one nearest exact-name local entity.', {
+  functionTool('getEntityStatus', 'Inspect the exact actor-force same-surface entity by unit_number, or the nearest local entity by name and optional radius. Exact identity never falls back to a nearest match.', {
     type: 'object',
-    properties: { name: nameStringSchema, radius: { type: 'integer', minimum: 1, maximum: 32, default: 8 } },
-    required: ['name'],
+    properties: {
+      name: nameStringSchema,
+      radius: { type: 'integer', minimum: 1, maximum: 32, default: 8 },
+      unit_number: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
+    },
+    oneOf: [
+      { required: ['name'], not: { required: ['unit_number'] } },
+      { required: ['unit_number'], not: { anyOf: [{ required: ['name'] }, { required: ['radius'] }] } },
+    ],
     additionalProperties: false,
   }),
   functionTool('getEntityGeometry', 'Inspect exact same-surface runtime I/O geometry for one entity by stable Factorio unit_number.', {
@@ -984,6 +991,11 @@ export function toolCommand(name, rawArgs = {}) {
       return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_discovery","find_nearest_enemy",${maxDistance})))`
     }
     case 'getEntityStatus': {
+      if (Object.hasOwn(args, 'unit_number')) {
+        noExtra(args, ['unit_number'])
+        const unitNumber = integer(args.unit_number, 'unit_number', 1, Number.MAX_SAFE_INTEGER)
+        return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_tools","get_entity_status",nil,nil,${unitNumber})))`
+      }
       noExtra(args, ['name', 'radius'])
       const radius = integer(args.radius ?? 8, 'radius', 1, 32)
       return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_tools","get_entity_status",${luaString(factorioName(args.name))},${radius})))`

@@ -142,6 +142,9 @@ start_factorio
 run_py run.py
 
 case "$LANE" in
+  entity-observation)
+    run_py exact_entity_status_cell.py
+    ;;
   craft-trigger)
     run_py craft_trigger_cell.py
     ;;
@@ -155,6 +158,8 @@ case "$LANE" in
     ;;
 
   core)
+    printf '[npc-test][core] Running exact entity observation gate...\n'
+    run_py exact_entity_status_cell.py
     printf '[npc-test][core] Running placement/transfer and lifecycle cancellation gates...\n'
     run_py placement_transfer.py
     printf '[npc-test][core] Running full furnace supply/retrieval transfer gate...\n'
