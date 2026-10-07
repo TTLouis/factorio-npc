@@ -8,6 +8,10 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 7 targeted-recovery live trial: paused before first batch
+
+Owner-authorized fresh run at `38bc2018`: five Luna and four Jev calls, 60.194 seconds, speed 1, zero humans or corrective prompts/gameplay takeover. Luna corrected prerequisite ordering but tried to hand-craft copper plates. Preflight correctly required a furnace before commitment. Its targeted read was refused because the plan was still `DRAFT`; inconsistent tools-enabled versus tools-closed guidance and a refusal lacking completion declarations then led to a format correction and blocker. Canonical goal stays active, board paused at 0/4, red production/consumption zero, green research/recipe false. No successful targeted read or furnace reuse was reached. Evidence retained; container/network/worlds removed. Next gap is draft-stage planner/preflight recovery. [Live packet, attribution and cleanup](validation/LUNA_TARGETED_LIVE_2026-10-07.md).
+
 ## October 7 targeted observation recovery: static and native gates passed
 
 The closed-round missing-fact repair is integrated and independently reviewed. Luna can request one typed exact entity, inventory or research read while preserving the committed plan; idle execution, ownership and correlation checks guard it. The allowance persists across restart and renews only with native receipt or active-step progress. Superseded handoff step facts no longer conflict with current planning state. Frozen candidate `61f70f54` passes 1,868 runtime and 1,041 mod tests, typechecks, generated Lua, full Docker build and nine payload checks; all 45 shipped image runtime files match. Native exact entity and research passed; the restart lane passed on one fresh retry after a retained process-shutdown stall. No live providers or autonomous-success claim. Shared usage is 21%, below this phase's 24% ceiling. [Conflict, contracts and build checklist](validation/LUNA_TARGETED_OBSERVATION_2026-10-07.md).
