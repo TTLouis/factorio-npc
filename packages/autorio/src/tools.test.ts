@@ -174,3 +174,97 @@ describe('nearby entity observation', () => {
     expect((globalThis as any).storage.sgluna_entity_reference_hints[41]).toMatchObject({ name: 'burner-mining-drill' })
   })
 })
+
+describe('exact entity status observation', () => {
+  function fixture() {
+    ;(globalThis as any).storage = {}
+    ;(globalThis as any).game.tick = 12
+    ;(globalThis as any).defines.entity_status = { working: 1 }
+    const actor_force = { index: 1, name: 'player' }
+    const find = vi.fn(() => [] as any[])
+    const surface = { index: 1, find_entities_filtered: find }
+    actor_state.actor = { position: { x: 0, y: 0 }, surface, force: actor_force }
+    const lookup = vi.fn((_unit: number) => undefined as any)
+    ;(globalThis as any).game.get_entity_by_unit_number = lookup
+    function furnace(unit_number: number, x: number, count: number) {
+      return {
+        valid: true, name: 'stone-furnace', type: 'furnace', unit_number,
+        position: { x, y: 0 }, surface, force: actor_force, status: 1,
+        get_max_inventory_index: () => 1,
+        get_inventory: () => ({ get_contents: () => [{ name: 'iron-plate', count, quality: 'normal' }] }),
+        get_recipe: () => [{ name: 'iron-plate' }, undefined],
+      }
+    }
+    return { surface, actor_force, find, lookup, furnace }
+  }
+
+  it('reads the requested same-name furnace and its native inventory and recipe, even when another is nearer', async () => {
+    const { find, lookup, furnace } = fixture()
+    const near = furnace(41, 2, 1)
+    const far = furnace(42, 80, 17)
+    find.mockReturnValue([near])
+    lookup.mockImplementation(unit => unit === 42 ? far : near)
+    const tools = await tools_interface()
+    const result = tools.get_entity_status(undefined, undefined, 42)
+    expect(result).toMatchObject({ found: true, unit_number: 42, entity: {
+      unit_number: 42, position: { x: 80, y: 0 }, recipe: 'iron-plate', working: true,
+      inventories: [{ index: 1, items: [{ name: 'iron-plate', count: 17, quality: 'normal' }] }],
+    } })
+    expect(result.radius).toBeUndefined()
+    expect(find).not.toHaveBeenCalled()
+    expect((globalThis as any).storage.sgluna_entity_reference_hints[42]).toMatchObject({ surface_index: 1, force_index: 1 })
+  })
+
+  it('rejects direct-index entities on another surface or force without a nearest fallback', async () => {
+    const { find, lookup, furnace } = fixture()
+    const own = furnace(41, 2, 1)
+    const foreign_force = { ...furnace(42, 3, 9), force: { index: 2, name: 'enemy' } }
+    const foreign_surface = { ...furnace(43, 4, 11), surface: { index: 2 } }
+    find.mockReturnValue([own])
+    lookup.mockImplementation(unit => unit === 42 ? foreign_force : foreign_surface)
+    const tools = await tools_interface()
+    for (const unit of [42, 43]) {
+      expect(tools.get_entity_status(undefined, undefined, unit)).toMatchObject({ found: false, error: 'exact_entity_not_found', unit_number: unit })
+    }
+    expect(find).not.toHaveBeenCalled()
+  })
+
+  it('resolves a remembered ordinary building but never substitutes its replacement', async () => {
+    const { find, lookup, furnace } = fixture()
+    const observed = furnace(42, 3, 17)
+    find.mockReturnValue([observed])
+    const tools = await tools_interface()
+    expect(tools.get_entity_status('stone-furnace', 8).entity.unit_number).toBe(42)
+    // Ordinary buildings need the persisted lookup hint when the engine index misses.
+    expect(tools.get_entity_status(undefined, undefined, 42).entity.unit_number).toBe(42)
+    expect(find).toHaveBeenLastCalledWith(expect.objectContaining({ name: 'stone-furnace', radius: 0.25, force: observed.force }))
+    find.mockReturnValue([furnace(99, 3, 20)])
+    expect(tools.get_entity_status(undefined, undefined, 42)).toMatchObject({ found: false, error: 'exact_entity_not_found', unit_number: 42 })
+    expect(lookup).toHaveBeenCalledWith(42)
+  })
+
+  it('truthfully rejects unknown identities and invalid or mixed direct arguments', async () => {
+    const { find, lookup } = fixture()
+    const tools = await tools_interface()
+    expect(tools.get_entity_status(undefined, undefined, 404)).toMatchObject({ found: false, error: 'exact_entity_not_found', unit_number: 404 })
+    lookup.mockClear()
+    for (const args of [
+      [undefined, undefined, 0], [undefined, undefined, 1.5], [undefined, undefined, Infinity],
+      [undefined, undefined, 9007199254740992], ['stone-furnace', undefined, 42], [undefined, 8, 42],
+    ]) expect(tools.get_entity_status(...args)).toMatchObject({ found: false, error: 'invalid_exact_identity' })
+    expect(tools.get_entity_status()).toMatchObject({ found: false, error: 'invalid_entity_name' })
+    expect(find).not.toHaveBeenCalled()
+    expect(lookup).not.toHaveBeenCalled()
+  })
+
+  it('keeps the legacy nearest-name scan and radius bounds', async () => {
+    const { find, lookup, furnace } = fixture()
+    find.mockReturnValue([furnace(42, 7, 17), furnace(41, 2, 1)])
+    const tools = await tools_interface()
+    expect(tools.get_entity_status('stone-furnace').entity.unit_number).toBe(41)
+    expect(find).toHaveBeenLastCalledWith({ name: 'stone-furnace', position: { x: 0, y: 0 }, radius: 8 })
+    tools.get_entity_status('stone-furnace', 90)
+    expect(find).toHaveBeenLastCalledWith(expect.objectContaining({ radius: 32 }))
+    expect(lookup).not.toHaveBeenCalled()
+  })
+})

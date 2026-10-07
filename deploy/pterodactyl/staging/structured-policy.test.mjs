@@ -193,6 +193,24 @@ test('read-only tool renderer targets native actor-aware interfaces without play
   assert.equal(toolCommand('getLogisticsTopology', { unit_number: 4242, radius: 16 }), '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_knowledge","logistics_topology",4242,16)))')
 })
 
+test('entity status accepts strict exclusive exact identity or legacy nearest-name queries', () => {
+  assert.equal(toolCommand('getEntityStatus', { unit_number: 4242 }), '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_tools","get_entity_status",nil,nil,4242)))')
+  assert.equal(toolCommand('getEntityStatus', { name: 'stone-furnace', radius: 16 }), '/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_tools","get_entity_status",\'stone-furnace\',16)))')
+  for (const args of [
+    {}, { radius: 8 }, { unit_number: 0 }, { unit_number: -1 }, { unit_number: 1.5 },
+    { unit_number: Number.MAX_SAFE_INTEGER + 1 }, { unit_number: '4242' },
+    { unit_number: 4242, name: 'stone-furnace' }, { unit_number: 4242, radius: 8 },
+    { unit_number: 4242, surface: 1 }, { unit_number: 4242, force: 'player' },
+  ]) assert.throws(() => toolCommand('getEntityStatus', args), JSON.stringify(args))
+  const schema = toolDefinitions.find(tool => tool.function.name === 'getEntityStatus').function.parameters
+  assert.equal(schema.additionalProperties, false)
+  assert.equal(schema.properties.unit_number.maximum, Number.MAX_SAFE_INTEGER)
+  assert.deepEqual(schema.oneOf, [
+    { required: ['name'], not: { required: ['unit_number'] } },
+    { required: ['unit_number'], not: { anyOf: [{ required: ['name'] }, { required: ['radius'] }] } },
+  ])
+})
+
 test('mutation identity preflight is read-only and limited to operations that need deterministic identities', () => {
   const craft = renderOperationPreflight({ name: 'craft_item', args: { item_name: 'burner-mining-drill', count: 1 } })
   assert.match(craft, /^\/silent-command rcon\.print\(helpers\.table_to_json\(remote\.call\("autorio_preflight","operation",/)

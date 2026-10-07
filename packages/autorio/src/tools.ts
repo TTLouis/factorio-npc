@@ -359,7 +359,7 @@ export function create_tools_remote_interface() {
         type_counts,
       }
     },
-    get_entity_status: (name: string, radius: number = 8) => {
+    get_entity_status: (name?: string, radius?: number, unit_number?: number) => {
       const actor = get_controlled_actor()
       if (!actor) {
         return {
@@ -368,21 +368,35 @@ export function create_tools_remote_interface() {
         }
       }
 
-      const bounded_radius = math.max(1, math.min(MAX_ENTITY_STATUS_RADIUS, radius || 8))
-      const matches = find_world_entities(actor.surface, {
-        position: actor.position,
-        radius: bounded_radius,
-        name,
-      })
+      const exact = unit_number !== undefined
+      if (exact && (name !== undefined || radius !== undefined || !positive_integer(unit_number) || unit_number > 9007199254740991)) {
+        return { found: false, error: 'invalid_exact_identity', unit_number }
+      }
+      if (!exact && typeof name !== 'string') return { found: false, error: 'invalid_entity_name' }
 
-      let entity = matches[0]
-      let nearest_distance = entity !== undefined ? squared_distance(actor.position, entity.position) : math.huge
-      for (let i = 1; i < matches.length; i++) {
-        const candidate = matches[i]
-        const candidate_distance = squared_distance(actor.position, candidate.position)
-        if (candidate_distance < nearest_distance) {
-          entity = candidate
-          nearest_distance = candidate_distance
+      const bounded_radius = exact ? undefined : math.max(1, math.min(MAX_ENTITY_STATUS_RADIUS, radius || 8))
+      let entity: LuaEntity | undefined
+      if (exact) {
+        entity = resolve_exact_entity(actor, unit_number)
+        // The resolver's direct engine-index path can return entities outside
+        // the body's scope. Enforce the read contract on every lookup path.
+        if (entity && (!entity.valid || entity.surface.index !== actor.surface.index || entity.force.index !== actor.force.index)) entity = undefined
+      }
+      else {
+        const matches = find_world_entities(actor.surface, {
+          position: actor.position,
+          radius: bounded_radius,
+          name,
+        })
+        entity = matches[0]
+        let nearest_distance = entity !== undefined ? squared_distance(actor.position, entity.position) : math.huge
+        for (let i = 1; i < matches.length; i++) {
+          const candidate = matches[i]
+          const candidate_distance = squared_distance(actor.position, candidate.position)
+          if (candidate_distance < nearest_distance) {
+            entity = candidate
+            nearest_distance = candidate_distance
+          }
         }
       }
 
@@ -392,6 +406,8 @@ export function create_tools_remote_interface() {
           actor_position: actor.position,
           radius: bounded_radius,
           name,
+          unit_number,
+          error: exact ? 'exact_entity_not_found' : undefined,
         }
       }
 
@@ -433,7 +449,7 @@ export function create_tools_remote_interface() {
       }
 
       let recipe_name: string | undefined
-      if (entity.type === 'assembling-machine') {
+      if (entity.type === 'assembling-machine' || entity.type === 'furnace') {
         const [recipe] = entity.get_recipe()
         recipe_name = recipe?.name
       }
@@ -467,6 +483,7 @@ export function create_tools_remote_interface() {
         found: true,
         actor_position: actor.position,
         radius: bounded_radius,
+        unit_number,
         entity: entity_summary,
       }
     },
