@@ -20,6 +20,7 @@ function recipe(name: string, options: RecipeOptions = {}, product = name) {
     name,
     enabled: options.enabled ?? true,
     hidden: options.hidden ?? false,
+    prototype: { hidden_from_player_crafting: false },
     category: options.category ?? 'crafting',
     additional_categories: [] as string[],
     ingredients: (options.ingredients ?? []).map(ingredient => ({ type: 'item', name: ingredient, amount: 1 })),
@@ -127,6 +128,75 @@ function lockedTargetFixture() {
 }
 
 describe('goal requirements query', () => {
+  it('distinguishes a native craft-item trigger from hand crafting using the live recipe and machine categories', () => {
+    installPrototypes({ triggers: { 'trigger-tech': { type: 'craft-item', item: { name: 'smelted-a' }, count: 7 } },
+      items: ['smelted-a', 'furnace-a'], machines: [{ name: 'furnace-a', type: 'furnace', places: ['furnace-a'], categories: ['smelting'] }] })
+    const actor = actorWith([recipe('smelted-a', { category: 'smelting' }), recipe('furnace-a')], [technology('trigger-tech')])
+    ;(actor as any).character = { prototype: { crafting_categories: { crafting: true } } }
+    ;(actor as any).get_craftable_count = () => { throw new Error('cannot query a machine-only recipe as hand craftable') }
+    const result: any = goal_requirements(actor, { technologies: ['trigger-tech'] })
+    expect(result.research['trigger-tech'].trigger).toEqual({ type: 'craft-item', item: 'smelted-a', count: 7 })
+    expect(result.research['trigger-tech'].trigger_crafting).toEqual({ item: 'smelted-a', truncated: false, recipes: [{
+      recipe: 'smelted-a', enabled: true, categories: ['smelting'], categories_truncated: false,
+      hand_craftable: false, hand_craftable_reason: 'category_unsupported', craftable_now_count: undefined,
+      machines: [{ entity: 'furnace-a', item: 'furnace-a', status: 'craftable', unlocked_by: undefined }], machines_truncated: false,
+    }] })
+    expect(result.machines).toEqual([])
+    expect(result.locked).toHaveLength(1)
+  })
+
+  it('reports alternate producer names, additional categories and native current craftable counts without guessing inventory', () => {
+    installPrototypes({ triggers: { 'trigger-tech': { type: 'craft-item', item: { name: 'widget' }, count: 3 } }, items: ['widget'] })
+    const alternate = recipe('widget-alternate', { category: 'custom' }, 'widget')
+    alternate.additional_categories = ['crafting']
+    const actor = actorWith([alternate], [technology('trigger-tech')])
+    ;(actor as any).character = { prototype: { crafting_categories: { crafting: true } } }
+    const queried: string[] = []
+    ;(actor as any).character.get_craftable_count = (name: string) => { queried.push(name); return 0 }
+    const result: any = goal_requirements(actor, { technologies: ['trigger-tech'] })
+    expect(result.research['trigger-tech'].trigger_crafting.recipes[0]).toMatchObject({
+      recipe: 'widget-alternate', enabled: true, categories: ['custom', 'crafting'], hand_craftable: true,
+      hand_craftable_reason: 'supported', craftable_now_count: 0,
+    })
+    expect(queried).toEqual(['widget-alternate'])
+  })
+
+  it('keeps locked, hidden, fluid, unknown-actor and missing producer facts explicit', () => {
+    installPrototypes({ triggers: { 'trigger-tech': { type: 'craft-item', item: { name: 'widget' }, count: 1 } }, items: ['widget'] })
+    for (const reason of ['recipe_locked', 'hidden_recipe', 'fluid_recipe', 'actor_categories_unknown', 'no_recipe']) {
+      const producer = recipe('widget')
+      if (reason === 'recipe_locked') producer.enabled = false
+      if (reason === 'hidden_recipe') producer.prototype.hidden_from_player_crafting = true
+      if (reason === 'fluid_recipe') producer.ingredients = [{ type: 'fluid', name: 'fluid-a', amount: 1 }]
+      const actor = actorWith(reason === 'no_recipe' ? [] : [producer], [technology('trigger-tech')])
+      if (reason !== 'actor_categories_unknown') (actor as any).character = { prototype: { crafting_categories: { crafting: true } } }
+      ;(actor as any).get_craftable_count = () => { throw new Error('unsupported capability must not become native hand-craft evidence') }
+      const result: any = goal_requirements(actor, { technologies: ['trigger-tech'] })
+      const report = result.research['trigger-tech'].trigger_crafting
+      if (reason === 'no_recipe') expect(report.recipes).toEqual([])
+      else expect(report.recipes[0]).toMatchObject({ hand_craftable: reason === 'actor_categories_unknown' ? undefined : false, hand_craftable_reason: reason })
+    }
+  })
+
+  it('bounds alternate recipes and machine options and marks omitted alternatives', () => {
+    const machines = Array.from({ length: 8 }, (_, i) => ({ name: `machine-${i}`, places: [`machine-${i}`], categories: ['custom'] }))
+    installPrototypes({ triggers: { 'trigger-tech': { type: 'craft-item', item: { name: 'widget' }, count: 2 } }, items: ['widget'], machines })
+    const actor = actorWith([
+      ...Array.from({ length: 8 }, (_, i) => recipe(`producer-${i}`, { category: 'custom' }, 'widget')),
+      ...machines.map(machine => recipe(machine.name)),
+    ], [technology('trigger-tech')])
+    ;(actor as any).character = { prototype: { crafting_categories: { crafting: true } } }
+    const result: any = goal_requirements(actor, { technologies: ['trigger-tech'] })
+    const report = result.research['trigger-tech'].trigger_crafting
+    expect(report.truncated).toBe(true)
+    expect(report.recipes.map((entry: any) => entry.recipe)).toEqual(Array.from({ length: 6 }, (_, i) => `producer-${i}`))
+    for (const entry of report.recipes) {
+      expect(entry.machines).toHaveLength(6)
+      expect(entry.machines_truncated).toBe(true)
+      expect(entry.hand_craftable).toBe(false)
+    }
+  })
+
   it('does not require an alternate locked recipe for an ore mined from a resource', () => {
     installPrototypes({ items: ['ore-a', 'plate-a'], resources: { 'deposit-a': ['ore-a'] } })
     const alternate = technology('orbital-tech', { unlocks: ['orbital-ore'] })

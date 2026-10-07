@@ -58,6 +58,37 @@ async function main() {
     const engineItem = typeof before.trigger.item === 'string' ? before.trigger.item : before.trigger.item.name
     assert.deepEqual(node.trigger, { type: before.trigger.type, item: engineItem, count: before.trigger.count })
     assert.equal(node.mode, 'trigger')
+    // The engine label describes production, not the NPC's hand-craft command.
+    // Check every craft-item node against native LuaRecipe/character/prototype
+    // reads, including smelting-category items along this fresh-world path.
+    let craftNodes = 0
+    let machineOnlyRecipes = 0
+    for (const research of Object.values(parsed.research)) {
+      if (research.trigger?.type !== 'craft-item') continue
+      craftNodes++
+      const report = research.trigger_crafting
+      assert.ok(report && !report.unavailable && report.item === research.trigger.item, raw)
+      for (const producer of report.recipes) {
+        const native = JSON.parse(await rcon.command('/silent-command '
+          + `local r=game.forces.player.recipes[${JSON.stringify(producer.recipe)}]; assert(r); `
+          + 'local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; '
+          + 'local cats={r.category}; for _,c in pairs(r.additional_categories) do cats[#cats+1]=c end; '
+          + 'local supported=false; for _,c in pairs(cats) do if a.prototype.crafting_categories[c] then supported=true end end; '
+          + 'local fluid=false; for _,i in pairs(r.ingredients) do if i.type=="fluid" then fluid=true end end; '
+          + 'for _,p in pairs(r.products) do if p.type=="fluid" then fluid=true end end; '
+          + 'local hand=r.enabled and supported and not r.prototype.hidden_from_player_crafting and not fluid; '
+          + 'rcon.print(helpers.table_to_json({enabled=r.enabled,categories=cats,hand=hand,count=hand and a.get_craftable_count(r.name) or nil}))'))
+        assert.equal(producer.enabled, native.enabled)
+        assert.deepEqual(producer.categories, native.categories.slice(0, 4))
+        assert.equal(producer.hand_craftable, native.hand)
+        if (native.hand) assert.equal(producer.craftable_now_count, native.count)
+        if (producer.hand_craftable_reason === 'category_unsupported') {
+          machineOnlyRecipes++
+          assert.ok(producer.machines.length > 0, `${producer.recipe}: machine-only native recipe must report options`)
+        }
+      }
+    }
+    assert.ok(craftNodes > 0 && machineOnlyRecipes > 0, 'fresh science path must exercise native craft-item machine-only facts')
     for (const name of locked.path) {
       for (const dependency of parsed.research[name].requires) {
         assert.ok(locked.path.indexOf(dependency) >= 0 && locked.path.indexOf(dependency) < locked.path.indexOf(name), 'research must be dependency-first')
