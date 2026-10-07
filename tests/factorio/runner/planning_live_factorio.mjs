@@ -4,6 +4,7 @@ import { execFile } from 'node:child_process'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
+import { setTimeout as delay } from 'node:timers/promises'
 import { promisify } from 'node:util'
 
 import { CanonicalTaskBoardMemory } from '../pterodactyl/runtime-v8/canonical-task-board-memory.mjs'
@@ -230,7 +231,28 @@ async function main() {
   const stateFile = path.join(results, 'planning-live-state.json')
   const rcon = new OneShotRcon({ host, port, password })
 
-  if (mode === 'prepare') await prepare({ rcon, results, stateFile })
+  if (mode === 'prepare') {
+    await prepare({ rcon, results, stateFile })
+    // Persist the current game journal as well as the controller JSON. Loading
+    // an earlier save would rewind operation ordinals consumed by its peer.
+    const saveFile = path.resolve(requiredArg('save'))
+    const beforeSave = await fsp.stat(saveFile)
+    await rcon.command('/silent-command game.server_save()')
+    const deadline = Date.now() + 20000
+    let saved
+    while (Date.now() < deadline) {
+      const current = await fsp.stat(saveFile).catch(error => {
+        if (error.code === 'ENOENT') return undefined
+        throw error
+      })
+      if (current && current.mtimeMs > beforeSave.mtimeMs && current.size > 0) { saved = current; break }
+      await delay(100)
+    }
+    assert.ok(saved, `server save did not update ${saveFile} before restart`)
+    await fsp.writeFile(path.join(results, 'planning-live-game-save.json'), JSON.stringify({
+      status: 'saved', previous_mtime_ms: beforeSave.mtimeMs, saved_mtime_ms: saved.mtimeMs, saved_bytes: saved.size,
+    }, null, 2))
+  }
   else await verify({ rcon, results, stateFile })
 }
 

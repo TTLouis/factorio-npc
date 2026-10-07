@@ -195,9 +195,6 @@ case "$LANE" in
     printf '[npc-test][resilience] Preparing full planning lifecycle acceptance state on real Factorio...\n'
     run_node planning_lifecycle_factorio.mjs --mode prepare
 
-    printf '[npc-test][resilience] Preparing live planning BLOCKED state against real Factorio preflight...\n'
-    run_node planning_live_factorio.mjs --mode prepare
-
     printf '[npc-test][resilience] Saving active movement for real process restart...\n'
     run_py persistence_prepare.py --save "$SAVE"
     restart_factorio
@@ -206,6 +203,12 @@ case "$LANE" in
     printf '[npc-test][resilience] Verifying full planning lifecycle lineage after real Factorio restart...\n'
     run_node planning_lifecycle_factorio.mjs --mode verify
 
+    # Each fixture owns independent durable memory for the same actor. Finish
+    # the lifecycle controller before preparing the next one; interleaving
+    # their restores would reuse an operation ordinal consumed by its peer.
+    printf '[npc-test][resilience] Preparing live planning BLOCKED state against real Factorio preflight...\n'
+    run_node planning_live_factorio.mjs --mode prepare --save "$SAVE"
+    restart_factorio
     printf '[npc-test][resilience] Restoring planning BLOCKED state after real Factorio restart...\n'
     run_node planning_live_factorio.mjs --mode verify
 
@@ -216,7 +219,7 @@ case "$LANE" in
     printf '[npc-test][resilience] Running owned native crafting/cancellation gate...\n'
     run_py crafting.py
 
-    printf '[npc-test][resilience] Saving active owned craft for second process restart...\n'
+    printf '[npc-test][resilience] Saving active owned craft for crafting restart...\n'
     run_py crafting_restart_prepare.py --save "$SAVE"
     restart_factorio
     run_py crafting_restart_verify.py
