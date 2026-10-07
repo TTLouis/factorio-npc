@@ -196,6 +196,40 @@ test('actor, goal, step and handoff changes during a read discard its result and
   }
 })
 
+test('supersession during post-read diagnostics or result tracing cannot write into the newer context', async () => {
+  for (const boundary of ['diagnostic', 'tool.call', 'tool.result']) {
+    const world = fixture()
+    world.agent.observationDecisionForced = false
+    const replace = () => {
+      world.agent.agentContext.conversationSeq++
+      world.agent.messages = [{ role: 'user', content: 'newer context' }]
+      world.agent.liveEntityObservations.clear()
+      world.agent.handoffInventoryObservations.clear()
+      world.agent.toolCache.clear()
+      world.agent.freshObservationSinceContinuation = false
+      world.agent.observationDecisionForced = false
+      world.agent.actionOmissionObservationUsed = false
+    }
+    if (boundary === 'diagnostic') world.agent.recoveryDiagnostic = async () => replace()
+    else {
+      const trace = world.agent.traceEvent.bind(world.agent)
+      world.agent.traceEvent = async (event, ...args) => {
+        await trace(event, ...args)
+        if (event === boundary) replace()
+      }
+    }
+    await assert.rejects(world.agent.handleObservationRequest(world.request(), world.context), /cancelled|superseded|stale/i)
+    assert.deepEqual(world.agent.messages, [{ role: 'user', content: 'newer context' }])
+    assert.equal(world.agent.liveEntityObservations.size, 0)
+    assert.equal(world.agent.handoffInventoryObservations.size, 0)
+    assert.equal(world.agent.toolCache.size, 0)
+    assert.equal(world.agent.freshObservationSinceContinuation, false)
+    assert.equal(world.agent.observationDecisionForced, false)
+    assert.equal(world.agent.actionOmissionObservationUsed, false)
+    assert.equal(world.counts().calls, 0)
+  }
+})
+
 test('only a new authoritative operation receipt renews the allowance within one step', async () => {
   const world = fixture()
   await world.agent.handleObservationRequest(world.request(), world.context)

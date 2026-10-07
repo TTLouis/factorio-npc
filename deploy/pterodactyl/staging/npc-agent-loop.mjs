@@ -458,7 +458,7 @@ export class NpcAgentLoop {
     return 1
   }
 
-  async forceDecisionFromObservations(reason, reasonCode = 'observation_decision_required') {
+  async forceDecisionFromObservations(reason, reasonCode = 'observation_decision_required', readFence) {
     if (this.observationDecisionForced) return
     this.observationDecisionPressure = true
     this.observationDecisionPressureRemaining = 0
@@ -471,6 +471,7 @@ export class NpcAgentLoop {
       retry_limit: 1,
       tools_enabled: false,
     })
+    if (typeof readFence === 'function') await readFence()
     this.messages.push({
       role: 'user',
       content: `[HARNESS] ${reason} The observation phase for this decision is now closed. Reuse the grounded evidence already collected and return the required strict-JSON plan/action or a truthful blocker. Do not request another read-only observation; ${OBSERVATION_LOCATE_HINT}`,

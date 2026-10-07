@@ -9454,9 +9454,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.closedRoundObservationUsed = false
   }
 
-  async forceDecisionFromObservations(reason, reasonCode) {
+  async forceDecisionFromObservations(reason, reasonCode, readFence) {
     const before = this.messages.length
-    await super.forceDecisionFromObservations(reason, reasonCode)
+    await super.forceDecisionFromObservations(reason, reasonCode, readFence)
+    if (typeof readFence === 'function') await readFence()
     if (this.messages.length > before) {
       const message = this.messages.at(-1)
       message.content = message.content.replace('Do not request another read-only observation;', 'Normal observation tools remain closed;')
@@ -10532,6 +10533,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async handleToolBatch(message, prepared = this.prepareToolBatch(message)) {
+    const readFence = prepared.find(entry => typeof entry._sglunaReadFence === 'function')?._sglunaReadFence
     if (this.actionOmissionRepairActive && (this.actionOmissionObservationUsed || prepared.length !== 1)) {
       this.actionOmissionForceNoTools = true
       const reason = this.actionOmissionObservationUsed
@@ -10651,6 +10653,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       if (this.traceRequest) this.traceRequest.last_tool = toolTrace
       await this.traceEvent('tool.call', toolTrace)
+      if (readFence) await readFence()
     }
     const beforeCount = this.messages.length
     const admittedMessage = { ...message, tool_calls: admittedPrepared.map(entry => entry.tool) }
@@ -10679,7 +10682,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             ? `Jev observation budget is exhausted for this decision after partially admitting the useful subset; ${totalDeferredCount} observation call(s) were deferred.`
             : 'Jev observation budget is exhausted for this decision.',
           'jev_observation_budget_complete',
+          readFence,
         )
+        if (readFence) await readFence()
       }
     }
     else if (totalDeferredCount > 0) {
@@ -10724,6 +10729,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       if (this.traceRequest) this.traceRequest.last_tool = toolTrace
       await this.traceEvent('tool.result', { ...toolTrace, output })
+      if (readFence) await readFence()
     }
     this.compactWorkingContext()
     if (this.actionOmissionRepairActive) {
