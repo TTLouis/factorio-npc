@@ -46,6 +46,12 @@ import { estimateTokensFromChars } from './restage-policy.mjs'
 // - blocked_before_mutation: `request.completed` with
 //   `data.outcome === 'blocked_before_mutation'`
 //   (npc-agent-loop.mjs:4836-4842).
+// - semantic_contract_dead_end: a delegated semantic assessment rejects a
+//   mutation (`recovery.classified.reason_code=semantic_step_cannot_mutate`)
+//   and the same executor ends in a provider_reported_blocker pause without
+//   admission, receipt or step progress. Reads plan.delegation_committed,
+//   context.restaged, provider.response, goal.paused and request.completed
+//   from npc-agent-loop.mjs; diagnoses the correlated outcome, not prose intent.
 // - stale_step_tracker_behind_batch: a step stays active while a
 //   `factorio.status` event (npc-agent-loop.mjs:5104-5108,
 //   `data.task_status.last_completed_batch.batch_id`) reports a batch that
@@ -310,6 +316,60 @@ function detectExecutorResearchFactsMissing(rows) {
   return { count: 1, first_ts: carried.ts, detail: Array.isArray(missing)
     ? `research step paused with unavailable executor facts: ${missing.join(', ')}`
     : `legacy executor packet has no research coverage metadata for: ${subjects.join(', ')}` }
+}
+
+// Narrow historical contract dead end, not every semantic mutation refusal. The
+// board uses its own step ids; the C3 handoff uses immutable reducer step ids.
+// Correlate each in its own vocabulary instead of comparing those unlike ids.
+function detectSemanticContractDeadEnd(rows) {
+  const terminal = terminalEvent(rows)
+  const board = terminal?.data?.task_board
+  const pauseReason = 'recoverable_provider_failure:provider_reported_blocker'
+  if (terminal?.event !== 'request.completed'
+    || terminal.data?.outcome !== 'recoverable_provider_failure'
+    || board?.status !== 'paused' || board.pause_reason !== pauseReason) return undefined
+  const step = Array.isArray(board.steps) ? board.steps.find(step => step?.id === board.active_step_id) : undefined
+  if (step?.completion_mode !== 'semantic' || step.completion_contract != null) return undefined
+
+  const terminalIndex = rows.lastIndexOf(terminal)
+  const commitIndex = rows.findLastIndex((row, index) => index < terminalIndex
+    && row?.event === 'plan.delegation_committed'
+    && nonEmptyString(row.data?.plan_id) && nonEmptyString(row.data?.step_id))
+  if (commitIndex < 0) return undefined
+  const commit = rows[commitIndex]
+  // A replacement actor/epoch or malformed ownership must not join this chain.
+  if (safeInteger(commit.actor_id) === undefined || safeInteger(commit.epoch) === undefined) return undefined
+  const sameOwner = row => row?.actor_id === commit.actor_id && row?.epoch === commit.epoch
+  if (!sameOwner(terminal)) return undefined
+  const window = rows.slice(commitIndex + 1, terminalIndex).filter(sameOwner)
+  const progress = row => (['operations.admit', 'operations.ack'].includes(row.event)
+      && Array.isArray(row.data?.operations) && row.data.operations.length > 0)
+    || (['step.verified', 'step.semantic_completed'].includes(row.event) && nonEmptyString(row.data?.active_step_id))
+    || (row.event === 'factorio.status' && safeInteger(row.data?.task_status?.last_completed_batch?.batch_id) > 0)
+    || (row.event === 'request.time_split' && safeInteger(row.data?.batches) > 0)
+  if (window.some(progress)) return undefined
+
+  const pausedIndex = window.findLastIndex(row => row.event === 'goal.paused'
+    && row.data?.pause_reason === pauseReason
+    && row.data?.goal_id === board.goal_id && nonEmptyString(board.goal_id)
+    && row.data?.active_step_id === board.active_step_id)
+  if (pausedIndex < 0) return undefined
+  const rejectedIndex = window.findLastIndex((row, index) => index < pausedIndex
+    && row.event === 'recovery.classified' && row.data?.reason_code === 'semantic_step_cannot_mutate')
+  if (rejectedIndex < 0) return undefined
+  const handoffIndex = window.findLastIndex((row, index) => index < rejectedIndex
+    && row.event === 'context.restaged' && row.data?.role === 'executor' && row.data?.checkpoint === 'C3'
+    && row.data?.plan_id === commit.data.plan_id && row.data?.step_id === commit.data.step_id
+    && nonEmptyString(row.data?.handoff_id))
+  if (handoffIndex < 0) return undefined
+  const handoffId = window[handoffIndex].data.handoff_id
+  const reply = window.slice(handoffIndex + 1, rejectedIndex).findLast(row => row.event === 'provider.response')
+  if (reply?.data?.role !== 'executor' || reply.data.handoff_id !== handoffId) return undefined
+  return {
+    count: 1,
+    first_ts: nonEmptyString(window[rejectedIndex].ts),
+    detail: `plan_id=${commit.data.plan_id} step_id=${commit.data.step_id}: reason_code=semantic_step_cannot_mutate followed by pause_reason=${pauseReason} without admission, receipt or step progress`,
+  }
 }
 
 function detectBlockedBeforeMutation(rows) {
@@ -597,6 +657,7 @@ function detectJevDecidingSkipUnverified(rows) {
 }
 
 const SIGNATURES = [
+  { id: 'semantic_contract_dead_end', label: 'delegated semantic contract dead end before gameplay', detect: detectSemanticContractDeadEnd },
   { id: 'executor_research_facts_missing', label: 'paused research step lacks executor research facts', detect: detectExecutorResearchFactsMissing },
   {
     id: 'observation_phase_closed_loop',
