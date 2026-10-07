@@ -161,7 +161,7 @@ function nodeById(planning, id) {
 function assertUnmeasuredShelfProgress(planning, id, planId) {
   const node = nodeById(planning, id)
   assert.ok(node, `${id}: shelf node must survive the lifecycle`)
-  assert.equal(node.capability_frontier, undefined, `${id}: this fixture declares no separate recognition contract`)
+  assert.equal(node.capability_frontier ?? null, null, `${id}: this fixture declares no separate recognition contract`)
   assert.equal(node.status, 'partially_realized', `${id}: a completed linked slice proves progress, not the broader shelf intent`)
   assert.ok(node.resolved_by.includes(planId), `${id}: progress must retain its exact completed plan lineage`)
   assert.ok(node.verified_results.length > 0, `${id}: partial progress still requires verified results`)
