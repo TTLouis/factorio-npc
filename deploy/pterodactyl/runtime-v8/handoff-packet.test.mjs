@@ -17,6 +17,9 @@ import {
   stepContractNeeds,
   researchPathFact,
   researchFactItems,
+  cacheTriggerCraftingReports,
+  attachCachedTriggerCrafting,
+  EXECUTOR_FACT_LIMITS,
 } from './handoff-packet.mjs'
 import {
   applyPlanningEvent,
@@ -60,6 +63,118 @@ test('research coverage records survive packet trimming and deferred refresh lab
   assert.deepEqual(packet.executor_facts.missing_research, ['electronics'])
   assert.equal(packet.over_limit, true)
   assert.match(executorFactsRefreshMessage({ research: [fact] }), /research_path_read_failed/)
+})
+
+function triggerCapabilityResearch(item = 'plate-a') {
+  return { electronics: { trigger: { type: 'craft-item', item, count: 10 }, trigger_crafting: {
+    item, recipes: [{ recipe: 'smelt-a', enabled: true, categories: ['smelting'],
+      hand_craftable: false, hand_craftable_reason: 'category_unsupported', craftable_now_count: 123456,
+      machines: [{ entity: 'furnace-a', item: 'furnace-a', status: 'craftable' }],
+    }],
+  } } }
+}
+
+function nativeTriggerPath(item = 'plate-a') {
+  return researchPathFact({ ok: true, target: 'electronics', node_count: 1, nodes: [
+    { name: 'electronics', researched: false, mode: 'trigger', research_trigger: { type: 'craft-item', item, count: 10 } },
+  ] }, 'electronics', { tick: 900, actor_id: 4, epoch: 2 })
+}
+
+test('craft-trigger capability cache survives serialized handoff with historical source/tags and without volatile inventory counts', () => {
+  const research = triggerCapabilityResearch()
+  const cache = cacheTriggerCraftingReports(research, { tick: 100, actor_id: 4, epoch: 1, at_ms: 1000 })
+  assert.equal(cache.length, 1)
+  assert.equal(cache[0].state, 'historical')
+  assert.equal(cache[0].source, 'goal_requirements')
+  assert.deepEqual(cache[0].as_of, { tick: 100, epoch: 1, actor_id: 4, at_ms: 1000 })
+  assert.doesNotMatch(JSON.stringify(cache), /craftable_now_count|123456/)
+  const fresh = nativeTriggerPath()
+  const attached = attachCachedTriggerCrafting(fresh, JSON.parse(JSON.stringify(cache)))
+  assert.equal(attached.state, 'fresh')
+  assert.equal(attached.as_of.tick, 900)
+  assert.deepEqual(attached.nodes[0].research_trigger, fresh.nodes[0].research_trigger)
+  const report = attached.nodes[0].trigger_crafting
+  assert.equal(report.state, 'historical')
+  assert.equal(report.as_of.tick, 100)
+  assert.equal(report.as_of.epoch, 1, 'cached actor capability must not inherit the new epoch')
+  assert.equal(report.recipes[0].hand_craftable, false)
+  assert.equal(report.recipes[0].enabled, true)
+  assert.equal(fresh.nodes[0].trigger_crafting, undefined, 'pure augmentation does not alter the native fact')
+  assert.match(executorFactsRefreshMessage({ research: [attached] }), /trigger_crafting is cached\/historical, not current admission proof/)
+  assert.doesNotMatch(JSON.stringify(attached), /craftable_now_count|123456/)
+})
+
+test('craft-trigger handoff never substitutes another item/technology and missing capabilities remain explicit', () => {
+  const cache = cacheTriggerCraftingReports(triggerCapabilityResearch(), { epoch: 1 })
+  const changed = attachCachedTriggerCrafting(nativeTriggerPath('other-item'), cache)
+  assert.equal(changed.nodes[0].trigger_crafting.state, 'unavailable')
+  assert.equal(changed.nodes[0].trigger_crafting.reason, 'trigger_crafting_not_reported')
+  assert.doesNotMatch(JSON.stringify(changed), /smelt-a|furnace-a|plate-a/)
+  const research = triggerCapabilityResearch()
+  research.electronics.trigger_crafting.recipes[0].hand_craftable = undefined
+  research.electronics.trigger_crafting.recipes[0].hand_craftable_reason = 'actor_categories_unknown'
+  const unknown = cacheTriggerCraftingReports(research, {})[0]
+  assert.equal(unknown.recipes[0].hand_craftable, 'unknown')
+  assert.deepEqual(unknown.as_of, {})
+  const unavailable = { target: 'electronics', state: 'unavailable', reason: 'read_failed' }
+  assert.equal(attachCachedTriggerCrafting(unavailable, cache), unavailable)
+})
+
+test('craft-trigger cache bounds technologies, recipes, categories, machine options and report characters', () => {
+  const node = triggerCapabilityResearch().electronics
+  const base = node.trigger_crafting.recipes[0]
+  const crowded = { ...base, categories: Array.from({ length: 10 }, (_, i) => `category-${i}`),
+    machines: Array.from({ length: 20 }, (_, i) => ({ entity: `machine-${i}`, item: `machine-${i}`, status: 'locked', unlocked_by: 'machine-tech' })),
+    ignored: 'x'.repeat(10000),
+  }
+  const research = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`technology-${i}`, { ...node,
+    trigger_crafting: { item: 'plate-a', recipes: Array.from({ length: 20 }, (_, j) => ({ ...crowded, recipe: `recipe-${j}` })) },
+  }]))
+  const cache = cacheTriggerCraftingReports(research, { tick: 1 })
+  assert.equal(cache.length, EXECUTOR_FACT_LIMITS.researchNodes)
+  for (const report of cache) {
+    assert.ok(JSON.stringify(report).length <= EXECUTOR_FACT_LIMITS.researchChars)
+    assert.equal(report.truncated, true)
+    assert.ok(report.recipes.length > 0 && report.recipes.length <= EXECUTOR_FACT_LIMITS.recipes)
+    for (const recipe of report.recipes) {
+      assert.equal(recipe.categories.length, EXECUTOR_FACT_LIMITS.recipeProducts)
+      assert.equal(recipe.categories_truncated, true)
+      assert.equal(recipe.machines.length, EXECUTOR_FACT_LIMITS.recipeMachines)
+      assert.equal(recipe.machines_truncated, true)
+    }
+    assert.doesNotMatch(JSON.stringify(report), /ignored|craftable_now_count/)
+  }
+})
+
+test('augmented fresh research respects the shared character cap with truthful missing facts instead of truncated native evidence', () => {
+  const cache = cacheTriggerCraftingReports(triggerCapabilityResearch(), { tick: 1 })
+  const fresh = nativeTriggerPath()
+  fresh.nodes[0].prerequisites = ['x'.repeat(EXECUTOR_FACT_LIMITS.researchChars - JSON.stringify(fresh).length - 40)]
+  assert.ok(JSON.stringify(fresh).length <= EXECUTOR_FACT_LIMITS.researchChars)
+  const snapshot = JSON.stringify(fresh)
+  const attached = attachCachedTriggerCrafting(fresh, cache)
+  assert.deepEqual(attached, { target: 'electronics', state: 'unavailable', reason: 'research_path_with_trigger_crafting_size_limit' })
+  assert.equal(JSON.stringify(fresh), snapshot)
+  assert.ok(JSON.stringify(attached).length <= EXECUTOR_FACT_LIMITS.researchChars)
+  const ordinary = attachCachedTriggerCrafting(nativeTriggerPath(), cache)
+  const packet = buildHandoffPacket({ planningState: circuitState(), ...ARGS, role: 'executor', executorFacts: { research: [ordinary] } })
+  assert.match(packet.text, /"state":"historical"/)
+  assert.match(packet.text, /smelt-a/)
+  assert.doesNotMatch(packet.text, /craftable_now_count/)
+})
+
+test('craft-trigger attachment reserves unknown coverage for later nodes before fitting early cached alternatives', () => {
+  const research = triggerCapabilityResearch()
+  research['next-tech'] = { ...research.electronics, trigger_crafting: { ...research.electronics.trigger_crafting } }
+  const cache = cacheTriggerCraftingReports(research, { tick: 1 })
+  const first = nativeTriggerPath()
+  const fact = { ...first, nodes: [first.nodes[0], { ...first.nodes[0], name: 'next-tech' }] }
+  fact.nodes[0].prerequisites = ['x'.repeat(400)]
+  const attached = attachCachedTriggerCrafting(fact, cache)
+  assert.equal(attached.state, 'fresh', 'bounded missing capability markers must preserve the complete fresh native path')
+  assert.equal(attached.nodes.length, 2)
+  assert.ok(JSON.stringify(attached).length <= EXECUTOR_FACT_LIMITS.researchChars)
+  for (const node of attached.nodes) assert.ok(node.trigger_crafting)
 })
 
 function goalState() {
