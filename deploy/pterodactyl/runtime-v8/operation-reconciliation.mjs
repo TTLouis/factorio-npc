@@ -209,12 +209,28 @@ export function provenRefusal(admission, status) {
     unrun_slots: 0 }
 }
 
+// A restart can change live generation without invalidating already sealed work.
+// Require the complete per-slot witness for that exception: terminal text alone,
+// unrelated watermarks or receipts from a different generation prove nothing.
+function historicalCompletionProven(admission, status) {
+  if (admission.state !== 'completed' || !Number.isSafeInteger(admission.generation) || admission.generation < 1) return false
+  const slots = admission.slots
+  if (!Array.isArray(slots) || slots.length !== admission.operation_count
+    || !slots.every((slot, index) => slot?.index === index + 1 && slot.ok === true && Array.isArray(slot.batch_refs))) return false
+  const receipts = Array.isArray(status?.receipt_journal) ? status.receipt_journal : []
+  return slots.every(slot => slot.batch_refs.every(ref => Number.isSafeInteger(ref?.batch_id) && ref.batch_id > 0
+    && ref.batch_generation === admission.generation && ref.batch_ref === `batch-g${ref.batch_generation}-${ref.batch_id}`
+    && receipts.some(receipt => receipt?.batch_ref === ref.batch_ref && receipt.batch_id === ref.batch_id
+      && receipt.batch_generation === ref.batch_generation && receipt.state === 'completed'
+      && receipt.outcome !== 'refused' && receipt.outcome !== 'cancelled')))
+}
+
 /**
  * Decide what happened to a pending batch from the mod's current status and the current actor. Pure; the caller traces it.
  *
  *   stale_actor          the actor id or epoch changed: the old body's queue died with it. The effect cannot be assumed.
- *   generation_changed   the mod reloaded (restart or save/load): the queue and batch records were lost, so whether the batch
- *                        ran before the save is unknown. Never counted as success, never replayed blindly.
+ *   generation_changed   live execution was invalidated by restart; unfinished work remains unknown. A complete exact
+ *                        historical journal witness can still prove terminal completion, never authorize replay.
  *   admitted_*           a batch newer than the baseline exists (or the open batch grew): the game took the batch.
  *   not_admitted         nothing newer exists and nothing is queued: the batch never reached the game; reissuing is safe.
  *   unknown              the status could not be read or has no baseline to compare with.
@@ -241,11 +257,16 @@ export function reconcilePendingOperation(pending, { status, actor } = {}) {
     if (!Number.isSafeInteger(pending.ordinal) || pending.ordinal !== admission.ordinal || admission.operation_count !== pending.operations.length) {
       return { verdict: RECONCILE_VERDICT.UNKNOWN, effect: EFFECT.UNKNOWN, reason: 'operation_identity_incomplete' }
     }
+    const batchId = admission.slots?.[0]?.batch_refs?.[0]?.batch_id
+    if (Number.isSafeInteger(status?.batch_generation) && admission.generation !== status.batch_generation
+      && historicalCompletionProven(admission, status)) {
+      return { verdict: RECONCILE_VERDICT.ADMITTED_COMPLETED, effect: EFFECT.HAPPENED,
+        reason: 'exact_historical_receipts_completed', batch_id: batchId }
+    }
     if (!Number.isSafeInteger(admission.generation) || !Number.isSafeInteger(status?.batch_generation)
       || admission.generation !== status.batch_generation) {
       return staleActor ?? { verdict: RECONCILE_VERDICT.GENERATION_CHANGED, effect: EFFECT.PARTIAL_UNKNOWN, reason: 'admission_generation_changed' }
     }
-    const batchId = admission.slots?.[0]?.batch_refs?.[0]?.batch_id
     // Exact refusal evidence is historical and needs no live actor: nothing refused changed anything.
     const refusal = provenRefusal(admission, status)
     if (refusal) {

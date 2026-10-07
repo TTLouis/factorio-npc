@@ -1,3 +1,37 @@
+const STRICT_TASKS_BY_OPERATION = new Map([
+  ['walk_to_entity', ['walking_to_entity']],
+  ['walk_to_entity_exact', ['walking_to_entity']],
+  ['walk_to_player', ['walking_to_entity']],
+  ['mine_entity', ['mining']],
+  ['mine_entity_exact', ['mining']],
+  ['gather_resource', ['walking_to_entity', 'mining']],
+  ['harvest_product', ['harvesting']],
+  ['clear_construction_area', ['clearing_area']],
+  ['place_entity', ['placing']],
+  ['move_items', ['moving_items']],
+  ['move_items_exact', ['moving_items']],
+  ['move_items_with_player', ['moving_items']],
+  ['set_machine_recipe', ['setting_recipe']],
+  ['launch_rocket', ['launching_rocket']],
+  ['craft_item', ['crafting']],
+  ['attack_nearest_enemy', ['attacking']],
+  ['clear_enemy_area', ['attacking']],
+])
+
+export function strictTaskTypesForOperation(operation) {
+  if (operation.name === 'supply_entity') {
+    const items = operation.args?.items
+    if (!Array.isArray(items) || items.length < 1 || items.length > 8) return undefined
+    return Array.from({ length: items.length }, () => 'moving_items')
+  }
+  if (operation.name === 'execute_construction_plan') {
+    const count = operation.args?.placement_count
+    if (!Number.isSafeInteger(count) || count < 1 || count > 16) return undefined
+    return Array.from({ length: count }, () => 'placing')
+  }
+  return STRICT_TASKS_BY_OPERATION.get(operation.name)
+}
+
 const SUPPORTED_REQUIREMENT_KINDS = new Set([
   'inventory_count',
   'research_completed',
@@ -132,6 +166,16 @@ export function sanitizeStepCompletionContract(raw) {
 export function completionContractSupported(contract) {
   const normalized = sanitizeStepCompletionContract(contract)
   return normalized.mode !== 'semantic_unknown' && normalized.requirements.length > 0
+}
+
+// New declarations must be provable by the same policy as the receipt verifier.
+// Keep legacy sanitization lossless: historical contracts are not rewritten.
+export function authoredCompletionContractSupported(contract) {
+  const normalized = sanitizeStepCompletionContract(contract)
+  return completionContractSupported(normalized) && normalized.requirements.every(requirement =>
+    requirement.kind !== 'authoritative_operation_receipt'
+    || STRICT_TASKS_BY_OPERATION.has(requirement.operation_name)
+    || ['supply_entity', 'execute_construction_plan'].includes(requirement.operation_name))
 }
 
 function evaluateRequirementFact(requirement, fact) {

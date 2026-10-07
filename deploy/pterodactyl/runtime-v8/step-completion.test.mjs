@@ -4,11 +4,28 @@ import test from 'node:test'
 import {
   applyConditionObservation,
   completionContractSupported,
+  authoredCompletionContractSupported,
   evaluateCompletionContract,
   makeConditionWait,
   provePermanentlyUnsatisfiable,
   sanitizeStepCompletionContract,
+  strictTaskTypesForOperation,
 } from './step-completion.mjs'
+
+test('receipt declarations share the verifier support policy, research still requires authoritative world state', () => {
+  for (const operation_name of ['wait', 'research_technology', 'unknown_operation']) {
+    assert.equal(strictTaskTypesForOperation({ name: operation_name, args: {} }), undefined)
+    const contract = { mode: 'all', requirements: [{ kind: 'authoritative_operation_receipt', operation_name }] }
+    assert.equal(authoredCompletionContractSupported(contract), false)
+    assert.equal(sanitizeStepCompletionContract(contract).requirements[0].operation_name, operation_name,
+      'legacy contracts remain structurally preserved without acquiring invented completion proof')
+  }
+  for (const name of ['craft_item', 'place_entity', 'gather_resource']) {
+    assert.ok(strictTaskTypesForOperation({ name, args: {} }))
+    assert.equal(authoredCompletionContractSupported({ mode: 'all', requirements: [{ kind: 'authoritative_operation_receipt', operation_name: name }] }), true)
+  }
+  assert.equal(authoredCompletionContractSupported({ mode: 'all', requirements: [{ kind: 'research_completed', technology: 'automation' }] }), true)
+})
 
 test('unsupported, mixed, truncated, or malformed completion semantics fail closed', () => {
   assert.equal(sanitizeStepCompletionContract({ mode: 'all', requirements: [{ kind: 'natural_language', predicate: 'looks done' }] }).mode, 'semantic_unknown')

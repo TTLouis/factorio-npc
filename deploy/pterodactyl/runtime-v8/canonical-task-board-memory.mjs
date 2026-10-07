@@ -3,7 +3,7 @@ export { completionFinalizationDecision } from './completion-finalization.mjs'
 import { restoreLedger as restoreJevLedger, serializeLedger as serializeJevLedger } from './jev-judgments.mjs'
 import { createTaskBoard, reconcileTaskBoard, setTaskBoardStatus, taskBoardTransferSupplyRefSeen } from './common.mjs'
 import { validateOutcomeCandidate } from './outcome-authority.mjs'
-import { completionContractSupported, provePermanentlyUnsatisfiable, sanitizeStepCompletionContract } from './step-completion.mjs'
+import { completionContractSupported, provePermanentlyUnsatisfiable, sanitizeStepCompletionContract, strictTaskTypesForOperation } from './step-completion.mjs'
 import {
   ADMISSION_REFUSAL,
   authorizationOf,
@@ -74,26 +74,6 @@ const PRE_COMMIT_REPLACEABLE_STATUSES = Object.freeze([
   PLAN_STATUS.DRAFT,
   PLAN_STATUS.RUNTIME_VALIDATION,
   PLAN_STATUS.READY,
-])
-
-const STRICT_TASKS_BY_OPERATION = new Map([
-  ['walk_to_entity', ['walking_to_entity']],
-  ['walk_to_entity_exact', ['walking_to_entity']],
-  ['walk_to_player', ['walking_to_entity']],
-  ['mine_entity', ['mining']],
-  ['mine_entity_exact', ['mining']],
-  ['gather_resource', ['walking_to_entity', 'mining']],
-  ['harvest_product', ['harvesting']],
-  ['clear_construction_area', ['clearing_area']],
-  ['place_entity', ['placing']],
-  ['move_items', ['moving_items']],
-  ['move_items_exact', ['moving_items']],
-  ['move_items_with_player', ['moving_items']],
-  ['set_machine_recipe', ['setting_recipe']],
-  ['launch_rocket', ['launching_rocket']],
-  ['craft_item', ['crafting']],
-  ['attack_nearest_enemy', ['attacking']],
-  ['clear_enemy_area', ['attacking']],
 ])
 
 const TRANSFER_OPERATION_NAMES = new Set(['move_items', 'move_items_exact', 'move_items_with_player', 'supply_entity'])
@@ -248,20 +228,6 @@ function staleExactTargetProof(evidence) {
 function taskTypesMatch(actual, expected) {
   if (!Array.isArray(actual) || actual.length !== expected.length) return false
   return expected.every((taskType, index) => actual[index] === taskType)
-}
-
-function strictTaskTypesForOperation(operation) {
-  if (operation.name === 'supply_entity') {
-    const items = operation.args?.items
-    if (!Array.isArray(items) || items.length < 1 || items.length > 8) return undefined
-    return Array.from({ length: items.length }, () => 'moving_items')
-  }
-  if (operation.name === 'execute_construction_plan') {
-    const count = operation.args?.placement_count
-    if (!Number.isSafeInteger(count) || count < 1 || count > 16) return undefined
-    return Array.from({ length: count }, () => 'placing')
-  }
-  return STRICT_TASKS_BY_OPERATION.get(operation.name)
 }
 
 function stateHasUnverifiedTransferIntent(state) {
