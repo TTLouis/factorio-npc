@@ -1,4 +1,5 @@
 import * as base from '../staging/structured-policy.mjs'
+import { normalizeObservationRequest, TARGETED_OBSERVATION_GUIDANCE } from './targeted-observation.mjs'
 
 export * from '../staging/structured-policy.mjs'
 
@@ -709,6 +710,15 @@ export const plannerControlToolDefinitions = [{
         },
         currentStep: { type: 'integer', minimum: 0, maximum: 30 },
         assessmentOnly: { type: 'boolean', description: 'Set true only for an intentionally observation-only slice: all stepCompletions are semantic and operations is empty. Omit or set false for execution drafts, which require at least one deterministic world-result checkpoint. This does not change an existing committed plan.' },
+        observationRequest: {
+          type: 'object', additionalProperties: false, required: ['stepId', 'tool', 'args', 'rationale'],
+          description: TARGETED_OBSERVATION_GUIDANCE,
+          properties: {
+            stepId: { type: 'string', minLength: 1, maxLength: 240 },
+            tool: { type: 'string', enum: ['getEntityStatus', 'getInventoryItems', 'getResearchStatus'] },
+            args: { type: 'object' }, rationale: { type: 'string', minLength: 1, maxLength: 500 },
+          },
+        },
         operations: {
           type: 'array',
           maxItems: 16,
@@ -889,7 +899,7 @@ export function plannerControlPayloadFromMessage(message) {
   let args
   try { args = JSON.parse(rawArgs) }
   catch { throw new base.PolicyError('submitPlan arguments must be valid JSON') }
-  exactKeys(args, ['chatMessage', 'plan', 'currentStep', 'operations', 'assessmentOnly', 'checkpoint', 'stepCompletions', 'semanticCompletion', 'roadmapNodeIds', 'developmentMode', 'roadmap', 'goal', 'timeReview'])
+  exactKeys(args, ['chatMessage', 'plan', 'currentStep', 'operations', 'observationRequest', 'assessmentOnly', 'checkpoint', 'stepCompletions', 'semanticCompletion', 'roadmapNodeIds', 'developmentMode', 'roadmap', 'goal', 'timeReview'])
   check(Array.isArray(args.plan), 'submitPlan.plan must be an array')
   check(Number.isSafeInteger(args.currentStep), 'submitPlan.currentStep must be an integer')
   check(Array.isArray(args.operations), 'submitPlan.operations must be an array')
@@ -908,6 +918,7 @@ export function plannerControlPayloadFromMessage(message) {
     plan: args.plan,
     currentStep: args.currentStep,
     operations: args.operations,
+    ...(args.observationRequest !== undefined ? { observationRequest: normalizeObservationRequest(args.observationRequest) } : {}),
     ...(args.assessmentOnly !== undefined ? { assessmentOnly: args.assessmentOnly } : {}),
     ...(args.checkpoint !== undefined ? { checkpoint: args.checkpoint } : {}),
     ...(args.stepCompletions !== undefined ? { stepCompletions: args.stepCompletions } : {}),

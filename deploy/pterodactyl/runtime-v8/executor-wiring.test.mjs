@@ -441,7 +441,11 @@ test('C8: below the hard limit there is no restage at a step close, however far 
   assert.equal(decision.data.soft_limit_tokens, 4000)
   // One conversation carried the slice: the executor round after the close still holds its own earlier exchange.
   assert.equal(world.calls[2].messages.some(message => textOf(message).startsWith('[MOD] Autorio operation batch completed')), true)
-  assert.match(textOf(stepBlock(world.calls[2].messages)), /checkpoint=C3/, 'still the C3 packet')
+  assert.equal(textOf(stepBlock(world.calls[2].messages)), '', 'the closed step block is superseded without restaging')
+  assert.ok(world.calls[2].messages.some(message => textOf(message).includes('[PLANNING_STATE]')))
+  const superseded = world.rows('context.handoff_step_superseded').at(-1)
+  assert.equal(superseded.data.reason, 'current_planning_state_replaces_old_handoff_step')
+  assert.ok(superseded.data.request_id)
   assert.equal(world.rows('context.planner_resumed').length, 1)
 })
 
