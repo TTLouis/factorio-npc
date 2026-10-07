@@ -1,6 +1,7 @@
 import fsp from 'node:fs/promises'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import path from 'node:path'
+import { normalizeObservationRequest, observationRecoveryBasis, TARGETED_OBSERVATION_GUIDANCE } from './targeted-observation.mjs'
 
 import { AgentLoopError, NpcAgentLoop as BaseNpcAgentLoop, NpcDialogueMemory as BaseNpcDialogueMemory } from '../staging/npc-agent-loop.mjs'
 import {
@@ -4043,6 +4044,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const messages = super.providerMessages().filter(message => !(message?.role === 'user'
       && typeof message.content === 'string'
       && (message.content.startsWith('[SKILL_CONTEXT]') || message.content.startsWith(SKILL_OFFERS_PREFIX) || message.content.startsWith(REQUIREMENTS_PREFIX))))
+    // The stable committed plan remains cacheable. Its old handoff step block
+    // is a snapshot, and must not contradict the current PLANNING_STATE tail.
+    const held = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
+    const step = held?.steps?.[held.active_step_index]
+    for (let index = messages.length - 1; index >= 0; index--) {
+      const text = messages[index]?.content
+      if (messages[index]?.role !== 'user' || typeof text !== 'string' || !text.startsWith('--- step block ---')) continue
+      const recorded = /^active_step: \d+ of \d+ (\S+) /m.exec(text)?.[1]
+      if (recorded && recorded !== step?.step_id) {
+        messages.splice(index, 1)
+        this.pendingSupersededHandoffTrace = { previous_step_id: recorded, current_step_id: step?.step_id }
+      }
+    }
     // 2.9: the skill offers are recomputed per round (shown only while a plan
     // is authored), so they are tail, like steering. Loaded skill context lives
     // for a whole logical task, so it stays in the fixed prefix.
@@ -9440,6 +9454,95 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.closedRoundObservationUsed = false
   }
 
+  async forceDecisionFromObservations(reason, reasonCode) {
+    const before = this.messages.length
+    await super.forceDecisionFromObservations(reason, reasonCode)
+    if (this.messages.length > before) {
+      const message = this.messages.at(-1)
+      message.content = message.content.replace('Do not request another read-only observation;', 'Normal observation tools remain closed;')
+        + `\n${TARGETED_OBSERVATION_GUIDANCE}`
+    }
+  }
+
+  targetedObservationIdentity() {
+    const key = this.activePlanKey()
+    const planning = this.memory.planningState?.(key)
+    const plan = getActivePlanningPlan(planning)
+    const step = plan?.steps?.[plan.active_step_index]
+    const state = this.memory.currentPlan?.(key)
+    const receipts = plan?.execution?.receipts?.[step?.step_id] ?? []
+    const receipt = receipts.filter(row => ['operation_receipt', 'operation_error_receipt'].includes(row.kind)).at(-1)
+    const data = { goalId: planning?.goal?.goal_id, planId: plan?.plan_id, stepId: step?.step_id,
+      receiptRef: receipt?.ref, actorId: this.epoch?.actor_id, epoch: this.epoch?.epoch }
+    return { key, planning, plan, step, state, data, basis: observationRecoveryBasis(data) }
+  }
+
+  async handleObservationRequest(message, { generation, attribution, current, round, recoveryAttempt, recoveryKind, omissionRepair }) {
+    let intent
+    try { intent = JSON.parse(message.content) } catch { return undefined }
+    if (!intent || !Object.hasOwn(intent, 'observationRequest')) return undefined
+    const initial = this.targetedObservationIdentity()
+    const reject = async reason => {
+      await this.traceEvent('observation.targeted_refused', { request_id: this.traceRequest?.id, reason,
+        goal_id: initial.data.goalId, step_id: initial.data.stepId })
+      return providerMessageWith(message, { tool_calls: undefined, content: JSON.stringify({
+        plan: initial.state?.plan ?? [], currentStep: initial.state?.current_step ?? 0, operations: [],
+        chatMessage: `BLOCKED: Targeted observation request refused (${reason}). No gameplay or completion was admitted.`,
+      }) })
+    }
+    let request
+    try { request = normalizeObservationRequest(intent.observationRequest) } catch (error) { return reject(error.message) }
+    if (this.closedRoundObservationUsed || this.actionOmissionObservationUsed) return reject('targeted_allowance_already_used')
+    if (!this.requestInfo || !initial.step || initial.planning?.goal?.status !== GOAL_STATUS.ACTIVE
+      || !FROZEN_PLAN_STATUSES.has(initial.plan?.status) || initial.state?.status !== 'active' || this.currentPendingAmendment()) return reject('no_eligible_active_step')
+    if (request.stepId !== initial.data.stepId || intent.currentStep !== initial.state.current_step
+      || JSON.stringify(intent.plan) !== JSON.stringify(initial.state.plan)) return reject('stale_plan_or_step')
+    if (!Array.isArray(intent.operations) || intent.operations.length !== 0 || Object.keys(intent).some(key => !['chatMessage', 'plan', 'currentStep', 'operations', 'observationRequest'].includes(key))) return reject('read_cannot_edit_or_complete_plan')
+    if (request.tool === 'getEntityStatus' && !this.liveObservedExactTarget(request.args.unit_number)
+      && !initial.step.completion_contract?.requirements?.some(row => row.unit_number === request.args.unit_number)) return reject('entity_not_grounded')
+    const ledger = this.memory.targetedObservationLedger ??= new Map()
+    if (ledger.get(initial.key) === initial.basis) return reject('targeted_allowance_already_used')
+    const fence = async () => {
+      await this.assertCurrent()
+      await this.dropIfStale(attribution)
+      if (this.generation !== generation || this.targetedObservationIdentity().basis !== initial.basis
+        || this.targetedObservationIdentity().planning?.goal?.status !== GOAL_STATUS.ACTIVE
+        || !FROZEN_PLAN_STATUSES.has(this.targetedObservationIdentity().plan?.status)
+        || this.targetedObservationIdentity().state?.status !== 'active' || this.currentPendingAmendment()) throw new AgentLoopError('Targeted observation was cancelled or superseded')
+    }
+    await fence()
+    const raw = await this.readTaskStatusRaw()
+    await fence()
+    let runtime
+    try { runtime = typeof raw === 'string' ? JSON.parse(raw) : raw } catch { return reject('runtime_status_unreadable') }
+    if (this.batchInFlight || !idleRuntimeStatus(runtime) || this.memory.pendingOperation?.(initial.key)) return reject('runtime_not_idle')
+    const tool = { id: `targeted_${round}`, type: 'function', function: { name: request.tool, arguments: JSON.stringify(request.args) } }
+    let prepared
+    try { prepared = this.prepareToolBatch({ tool_calls: [tool] }) } catch (error) { return reject(`invalid_target:${error.message}`) }
+    ledger.set(initial.key, initial.basis)
+    this.closedRoundObservationUsed = true
+    while (ledger.size > 128) ledger.delete(ledger.keys().next().value)
+    await this.persistState() // Consume before the read; failed/interrupting reads do not refund it.
+    await fence()
+    if (this.stateFile) {
+      const saved = JSON.parse(await fsp.readFile(this.stateFile, 'utf8'))
+      if (!saved.targeted_observation_ledger?.some(row => row[0] === initial.key && row[1] === initial.basis)) return reject('claim_not_persisted')
+    }
+    await this.traceEvent('observation.targeted_granted', { request_id: this.traceRequest?.id,
+      reason: 'one_missing_fact_read_at_native_progress_boundary', tool: request.tool, goal_id: initial.data.goalId,
+      step_id: initial.data.stepId, receipt_ref: initial.data.receiptRef, observation_budget_remaining: this.observationBudgetRemaining })
+    await fence()
+    // Run through normal result recording, cache and usage accounting. Only
+    // this validated single fact overrides the closed observation admission.
+    Object.defineProperty(prepared, '_sglunaTargetedRecovery', { value: true })
+    Object.defineProperty(prepared[0], '_sglunaReadFence', { value: fence })
+    this.toolCache.delete(prepared[0].signature)
+    await this.handleToolBatch({ content: '', tool_calls: [tool] }, prepared)
+    await fence()
+    this.messages.push({ role: 'user', content: '[HARNESS] The requested targeted live fact is above. The targeted allowance is consumed until native operation receipt or step progress; normal tools remain closed. Return one JSON action, grounded completion, or truthful blocker. Keep the committed plan unchanged.' })
+    return this.callProvider(current, generation, { round, allowTools: false, recoveryAttempt, recoveryKind })
+  }
+
   // A round that closed tool use can still name calls: operations the model
   // meant for the plan, or a read it wanted. The tool list stays visible on
   // closed rounds, but nothing executes from them directly.
@@ -9635,6 +9738,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const controller = new AbortController()
     this.providerAbort = controller
     let providerMessages = providerMessagesOverride ?? this.providerMessages()
+    if (providerMessagesOverride === undefined && this.pendingSupersededHandoffTrace) {
+      const data = this.pendingSupersededHandoffTrace
+      this.pendingSupersededHandoffTrace = undefined
+      const key = `${this.agentContext.handoffId}:${data.previous_step_id}:${data.current_step_id}`
+      if (key !== this.lastSupersededHandoffTrace) {
+        this.lastSupersededHandoffTrace = key
+        await this.traceEvent('context.handoff_step_superseded', { request_id: this.traceRequest?.id,
+          reason: 'current_planning_state_replaces_old_handoff_step', ...data })
+        await this.assertCurrent()
+      }
+    }
     const triggerSource = this.reasoningTriggerSource ?? this.planUpdateReason
     if (providerMessagesOverride === undefined && this.planningHorizonOverride) {
       const horizonGuidance = {
@@ -9913,6 +10027,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (salvaged) return salvaged
     }
 
+    const observed = await this.handleObservationRequest(message, { generation, attribution, current, round, recoveryAttempt, recoveryKind, omissionRepair })
+    if (observed) return observed
+
     if (omissionRepair && !effectiveAllowTools && message.tool_calls !== undefined) {
       const state = this.memory.currentPlan?.(this.activePlanKey())
       await this.traceEvent('recovery.action_omission_observation_rejected', {
@@ -10038,6 +10155,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   parsePlanMessage(message) {
+    // Requests for a read are consumed by callProvider, never by gameplay
+    // commitment. Direct callers must not accidentally admit them as plans.
+    let candidate
+    try { candidate = JSON.parse(message.content) } catch {}
+    if (candidate && Object.hasOwn(candidate, 'observationRequest')) {
+      const error = new AgentLoopError('observationRequest must pass targeted read admission before gameplay planning')
+      error.failureClass = 'plan_category'
+      error.code = 'observation_request_not_processed'
+      throw error
+    }
     if (providerOutputBudgetExhausted(message)) {
       const error = new AgentLoopError('provider_output_budget_exhausted: provider response exhausted its output budget before emitting valid plan content')
       error.failureClass = 'provider_budget'
@@ -10458,7 +10585,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // that is what bounds the planner's rounds.
       const tierOverride = fresh && !withinJev && this.observationDecisionForced !== true
         && (tier === 'fact' || (tier === 'discovery' && discoveryAdmitted === 0))
-      if (withinJev || tierOverride) {
+      if (withinJev || tierOverride || prepared._sglunaTargetedRecovery === true) {
         admittedPrepared.push(prepared[index])
         admittedCached.push(cachedPrepared[index])
         admittedStaticCached.push(staticCachedPrepared[index])
@@ -10532,6 +10659,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.compactionDeferred = true
     try {
       await super.handleToolBatch(admittedMessage, admittedPrepared)
+      for (const entry of admittedPrepared) {
+        if (typeof entry._sglunaReadFence === 'function') await entry._sglunaReadFence()
+      }
     }
     catch (error) {
       await this.traceEvent('tool.error', { message: error instanceof Error ? error.message : String(error) })

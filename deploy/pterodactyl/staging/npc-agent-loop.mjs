@@ -833,6 +833,7 @@ export class NpcAgentLoop {
           output = String(await this.rcon.command(entry.command)).slice(0, 12000)
           await this.assertCurrent()
         }
+        if (typeof entry._sglunaReadFence === 'function') await entry._sglunaReadFence()
         this.toolCache.set(entry.signature, output)
       }
       this.messages.push({ role: 'tool', tool_call_id: entry.tool.id, content: String(output).slice(0, 16000) })

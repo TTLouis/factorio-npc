@@ -347,7 +347,7 @@ test('restageContext dispatches CONTEXT_RESTAGED, the reducer log records it, an
   assert.equal(world.agent.messages[2].content, packet.volatileText)
 })
 
-test('the next provider request after a restage starts with the system prefix, the packet stable block, then its volatile block, and none of the earlier messages', async () => {
+test('the next provider request preserves the restaged prefix and replaces superseded step facts with current state', async () => {
   const world = loopHarness([firstPlan(), secondPlan()])
   await world.say()
   const packet = world.packet()
@@ -358,7 +358,11 @@ test('the next provider request after a restage starts with the system prefix, t
   const { messages, context } = world.calls[1]
   assert.equal(messages[0].content, roleSystemPrompt(world.calls[0].messages[0].content, 'executor'))
   assert.equal(messages[1].content, packet.stableText)
-  assert.equal(messages[2].content, packet.volatileText)
+  assert.ok(!messages.some(message => message.content === packet.volatileText), 'the closed step packet is superseded')
+  assert.ok(messages.some(message => String(message.content).includes('[PLANNING_STATE]')), 'current authoritative state remains')
+  const superseded = world.rows('context.handoff_step_superseded').at(-1)
+  assert.equal(superseded.data.reason, 'current_planning_state_replaces_old_handoff_step')
+  assert.ok(superseded.data.request_id)
   assert.ok(!messages.some(message => typeof message.content === 'string' && message.content.startsWith('[CHAT]')), 'the old request text is gone')
   assert.equal(context.role, 'executor', 'the provider is told which role this conversation runs as')
   assert.equal(Object.hasOwn(world.calls[0].context, 'role'), false, 'and was not told before any restage')

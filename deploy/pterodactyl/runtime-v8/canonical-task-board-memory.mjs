@@ -1,6 +1,7 @@
 import { NpcDialogueMemory, OPERATION_FAILURE_RECOVERABLE_KIND, TRANSFER_SUPPLY_RECOVERABLE_KIND, TRANSFER_SUPPLY_RECOVERY_BUDGET, transferSupplyRecoveryCount } from './npc-agent-loop.mjs'
 export { completionFinalizationDecision } from './completion-finalization.mjs'
 import { restoreLedger as restoreJevLedger, serializeLedger as serializeJevLedger } from './jev-judgments.mjs'
+import { restoreObservationLedger } from './targeted-observation.mjs'
 import { createTaskBoard, reconcileTaskBoard, setTaskBoardStatus, taskBoardTransferSupplyRefSeen } from './common.mjs'
 import { validateOutcomeCandidate } from './outcome-authority.mjs'
 import { completionContractSupported, provePermanentlyUnsatisfiable, sanitizeStepCompletionContract, strictTaskTypesForOperation } from './step-completion.mjs'
@@ -2523,6 +2524,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const snapshot = super.snapshot()
     return {
       ...snapshot,
+      targeted_observation_ledger: [...(this.targetedObservationLedger ?? new Map()).entries()].slice(0, 128),
       planning_states: [...this.planningByNpc.entries()].map(([key, state]) => ({
         key,
         state: serializePlanningState(state),
@@ -2659,6 +2661,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         : [],
     )
     super.restore(snapshot)
+    this.targetedObservationLedger = restoreObservationLedger(snapshot?.targeted_observation_ledger)
     if (snapshot?.jev_judgment_ledger) {
       const restoredLedger = restoreJevLedger(snapshot.jev_judgment_ledger)
       this.jevLedger = restoredLedger.ledger
