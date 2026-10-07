@@ -8,6 +8,10 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 7 repaired Luna trial: electronics completed, paused before iron smelting
+
+Owner-authorized fresh run at `bea69cbc`: 21 Luna and 19 Jev calls, 330.916 seconds, zero humans or operator corrections. Luna committed deterministic checkpoints, mined copper and coal, recovered placement failure, fed a native furnace and completed electronics. It then mined 50 iron ore but claimed it could not reuse the copper furnace without another observation after tools closed. The harness retained the active goal and paused truthfully at 1/4; red production/consumption stayed zero and green research false. The earlier assessment-contract dead end did not recur. Logs and exact replies are retained; trial container/world discarded. Shared weekly usage reached the 19% ceiling, so further work stops pending a new budget. [Trial evidence and next investigation](validation/LUNA_SEMANTIC_LIVE_2026-10-07.md).
+
 ## October 7 planner contract boundary: repaired, live acceptance pending
 
 The recorded all-semantic execution draft is now refused before commitment. New execution drafts require a deterministic world-result checkpoint; explicit `assessmentOnly:true` slices stay with the planner. Research instructions now consistently support future `research_completed` outcomes and multiple technologies. Frozen saved contracts remain unchanged, and the offline checker recognizes the original delegated semantic dead end. Independently reviewed units are integrated at `26ad8871`; Docker runtime 1,855, mod 1,036, typechecks, generated Lua, full build and nine payload checks passed. Native research, crafting and restart lanes passed with zero humans; no new live provider run occurred. Temporary worlds were discarded after preserving evidence. [Repair contracts and validation](validation/LUNA_SEMANTIC_CONTRACT_REPAIR_2026-10-07.md).
