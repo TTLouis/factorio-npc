@@ -36,6 +36,17 @@ test('research completion remains a world-state predicate rather than an accepte
   assert.equal(result[0].checkpoint.requirements[0].technology, 'logistic-science-pack')
 })
 
+test('new receipt declarations reject operations requiring world verification and preserve assessment-only declarations', () => {
+  for (const operation_name of ['wait', 'research_technology']) {
+    const checkpoint = { mode: 'all', requirements: [{ kind: 'authoritative_operation_receipt', operation_name }] }
+    assert.throws(() => normalizeStepCompletions(['Execute action'], [{ kind: 'deterministic', checkpoint }]), /requires a supported checkpoint/)
+  }
+  const checkpoint = { mode: 'all', requirements: [{ kind: 'authoritative_operation_receipt', operation_name: 'craft_item' }] }
+  assert.equal(normalizeStepCompletions(['Craft an item'], [{ kind: 'deterministic', checkpoint }])[0].checkpoint.requirements[0].operation_name, 'craft_item')
+  assert.deepEqual(normalizeStepCompletions(['Assess current observations'], [{ kind: 'semantic', rationale: 'Assess fresh authoritative observations without operations.' }]),
+    [{ kind: 'semantic', rationale: 'Assess fresh authoritative observations without operations.' }])
+})
+
 test('semantic assessments require an explicit nonempty rationale, not a completion guess', () => {
   for (const value of [null, 'done', { kind: 'semantic' }, { kind: 'semantic', rationale: '' }, { kind: 'semantic', rationale: '  ' }, { kind: 'semantic', rationale: 1 }, { kind: 'automatic', rationale: 'Assume done' }]) {
     assert.throws(() => normalizeStepCompletions(['Assess a site'], [value]), /must declare deterministic completion or a semantic assessment rationale/)

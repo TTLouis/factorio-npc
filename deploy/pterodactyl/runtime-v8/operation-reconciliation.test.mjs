@@ -287,3 +287,36 @@ test('legacy records reconcile by the batch baseline when it applies, and carry 
   // Until it is settled a legacy record still guards every conflicting effect.
   assert.equal(duplicateEffectGuard({ ...legacy, scopes: ['*'], effect: EFFECT.UNKNOWN }, { operations: [{ name: 'craft_item', args: { item_name: 'iron-plate' } }] }).refuse, true)
 })
+
+test('restart accepts only a complete correlated historical completion witness', () => {
+  const pending = exactPending([...PLACE, ...PLACE])
+  const admission = journalFor(pending, { state: 'completed', proven_refusal: undefined,
+    slots: [queuedSlot(1), { index: 2, ok: true, batch_refs: [] }] })
+  const receipt = { ...BATCH_REF, state: 'completed', task_count: 1, task_types: ['placing'], tick: 90 }
+  const status = { batch_generation: 2, admission_journal: [admission], receipt_journal: [receipt] }
+  const result = reconcilePendingOperation(pending, { actor: EXACT_ACTOR, status })
+  assert.equal(result.effect, EFFECT.HAPPENED)
+  assert.equal(result.reason, 'exact_historical_receipts_completed')
+  assert.equal(reconcilePendingOperation(pending, { actor: { actor_id: 99, epoch: 9 }, status }).effect, EFFECT.HAPPENED,
+    'sealed original-actor work is historical evidence, not replacement-actor execution')
+  const mutations = [
+    { admission: { signature: 'wrong' } }, { admission: { attempt_id: 'wrong' } },
+    { admission: { ordinal: 99 } }, { admission: { operation_count: 1 } },
+    { admission: { actor_id: 99 } }, { admission: { epoch: 99 } },
+    { admission: { generation: 3 } }, { admission: { generation: null } },
+    { admission: { slots: [] } }, { admission: { slots: [queuedSlot(2), admission.slots[1]] } },
+    { admission: { slots: [{ ...queuedSlot(1), ok: false }, admission.slots[1]] } },
+    { admission: { state: 'admitted' } }, { admission: { state: 'uncertain' } },
+    { receipts: [] }, { receipt: { batch_id: 99 } }, { receipt: { batch_generation: 2 } },
+    { receipt: { batch_ref: 'batch-g1-99' } }, { receipt: { state: 'cancelled' } },
+    { receipt: { state: 'uncertain' } }, { receipt: { outcome: 'refused' } },
+  ]
+  for (const mutation of mutations) {
+    const weaker = { ...status, admission_journal: [{ ...admission, ...mutation.admission }],
+      receipt_journal: mutation.receipts ?? [{ ...receipt, ...mutation.receipt }] }
+    const held = reconcilePendingOperation(pending, { actor: EXACT_ACTOR, status: weaker })
+    assert.notEqual(held.effect, EFFECT.HAPPENED, JSON.stringify(mutation))
+    assert.notEqual(held.effect, EFFECT.NOT_HAPPENED, JSON.stringify(mutation))
+  }
+  assert.equal(reconcilePendingOperation(pending, { actor: {}, status }).effect, EFFECT.UNKNOWN)
+})

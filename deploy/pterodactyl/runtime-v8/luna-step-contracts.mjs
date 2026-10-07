@@ -1,4 +1,4 @@
-import { completionContractSupported, sanitizeStepCompletionContract } from './step-completion.mjs'
+import { authoredCompletionContractSupported, sanitizeStepCompletionContract } from './step-completion.mjs'
 
 export function normalizeStepCompletions(descriptions, values) {
   if (!Array.isArray(values) || values.length !== descriptions.length) {
@@ -7,7 +7,7 @@ export function normalizeStepCompletions(descriptions, values) {
   return values.map((value, index) => {
     if (value?.kind === 'deterministic') {
       const checkpoint = sanitizeStepCompletionContract(value.checkpoint)
-      if (!completionContractSupported(checkpoint)) throw new Error(`stepCompletions[${index}] requires a supported checkpoint`)
+      if (!authoredCompletionContractSupported(checkpoint)) throw new Error(`stepCompletions[${index}] requires a supported checkpoint`)
       if (Object.keys(value).some(key => !['kind', 'checkpoint'].includes(key))) throw new Error(`stepCompletions[${index}] has unexpected fields`)
       return { kind: 'deterministic', checkpoint }
     }

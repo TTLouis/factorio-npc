@@ -24,10 +24,15 @@ class LossyGame extends FakeFactorio {
     this.dropSendOnce = false
     this.statusUnreadable = false
     this.deliveries = []
+    this.receipts = []
   }
 
   completeBatch() {
-    if (this.activeBatch) this.completedBatch = { ...this.activeBatch, tick: 900 + this.activeBatch.batch_id }
+    if (this.activeBatch) {
+      this.completedBatch = { ...this.activeBatch, tick: 900 + this.activeBatch.batch_id }
+      this.receipts.push({ ...this.completedBatch, batch_generation: this.generation,
+        batch_ref: `batch-g${this.generation}-${this.activeBatch.batch_id}`, state: 'completed' })
+    }
     this.activeBatch = undefined
     this.taskState = 'idle'
     this.queueLength = 0
@@ -56,7 +61,7 @@ class LossyGame extends FakeFactorio {
         last_completed_batch: this.completedBatch,
         last_cancelled_batch: this.cancelledBatch,
         admission_journal: this.admissionJournal(),
-        receipt_journal: this.cancelledBatch ? [{ ...this.cancelledBatch, state: 'cancelled', batch_ref: `batch-g${this.generation}-${this.cancelledBatch.batch_id}` }] : [],
+        receipt_journal: [...this.receipts, ...(this.cancelledBatch ? [{ ...this.cancelledBatch, state: 'cancelled', batch_ref: `batch-g${this.generation}-${this.cancelledBatch.batch_id}` }] : [])],
         basic_operation: this.completedBatch ? { last_result: { operation_id: this.batchId, tick: this.completedBatch.tick, actor_id: this.status.actor_id, accepted: true, completed: true, code: 'completed', type: 'moving_items', moved_count: 5, to_entity: true } } : undefined,
       })
     }
@@ -293,6 +298,57 @@ test('an acknowledged delivery with a correlated completion receipt still settle
   assert.equal(world.pending(), null)
   assert.equal(world.game.deliveries.length, 1)
   assert.equal(world.calls.length, 1)
+})
+
+test('completed journal evidence settles after startup without replay or manufactured board progress', async () => {
+  const first = harness({ replies: [deliveryPlan()] })
+  await first.say('deliver 5 coal to the wooden chest')
+  // The game finished, but the process never consumed its completion before restart.
+  first.game.completeBatch()
+  const wire = JSON.parse(JSON.stringify(first.memory.snapshot()))
+  first.game.reloadMod()
+  const memory = new CanonicalTaskBoardMemory()
+  memory.restore(wire)
+  const second = harness({ memory, game: first.game, replies: [] })
+  const result = await second.agent.reconcileOutstandingOperation({ trigger: 'runtime_restart', requestId: 'req_restart_completed' })
+  assert.equal(result.effect, 'happened')
+  assert.equal(result.reason, 'exact_historical_receipts_completed')
+  assert.equal(second.named('operation.reconciled').at(-1).request_id, 'req_restart_completed')
+  assert.equal(second.named('operation.reconciled').at(-1).reason, 'exact_historical_receipts_completed')
+  second.agent.epoch = await second.agent.captureEpoch()
+  await second.agent.taskStatusReceipt()
+  assert.equal(second.pending(), null)
+  assert.equal(second.calls.length, 0)
+  assert.equal(first.game.deliveries.length, 1)
+  assert.equal(memory.currentPlan(KEY).task_board.completed_count, 0,
+    'a terminal action does not establish this plan inventory predicate or the canonical delivery goal')
+  assert.equal(memory.planningState(KEY).goal.status, 'active')
+})
+
+test('unverifiable receipt declarations are corrected before gameplay admission', async () => {
+  for (const name of ['wait', 'research_technology']) {
+    const checkpoint = inventoryCheckpoint('coal', 5)
+    const goal = { scope: 'finite', summary: 'Have five coal.', doneWhen: [{ kind: 'inventory_count', item_name: 'coal', minimum: 5 }] }
+    const invalid = planReply({ plan: ['Perform the requested action'], currentStep: 0, goal,
+      operations: [{ name, args: name === 'wait' ? { ticks: 60 } : { technology_name: 'automation' } }],
+      stepCompletions: [{ kind: 'deterministic', checkpoint: { mode: 'all',
+        requirements: [{ kind: 'authoritative_operation_receipt', operation_name: name }] } }] })
+    const corrected = planReply({ plan: ['Gather five coal'], currentStep: 0, goal,
+      operations: [{ name: 'gather_resource', args: { resource_name: 'coal', count: 5, search_radius: 32 } }],
+      stepCompletions: [{ kind: 'deterministic', checkpoint }] })
+    const world = harness({ replies: [invalid, corrected] })
+    world.agent.completionProtocolVersion = 2
+    await world.say('Have five coal.')
+    assert.equal(world.calls.length, 2, name)
+    assert.equal(world.game.mutations.length, 1, 'only the corrected plan reaches the game')
+    assert.equal(world.game.admissions[0].operation_count, 1)
+    assert.deepEqual(world.memory.currentPlan(KEY).plan, ['Gather five coal'])
+    const correction = world.named('recovery.classified')
+    assert.ok(correction.length > 0)
+    assert.ok(correction[0].request_id)
+    assert.ok(correction[0].reason_code)
+    assert.equal(world.memory.currentPlan(KEY).task_board.completed_count, 0)
+  }
 })
 
 test('restart after an actor replacement: the old body\'s outstanding operation is refused as stale, never counted as done', async () => {

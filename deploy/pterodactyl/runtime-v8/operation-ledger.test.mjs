@@ -50,7 +50,13 @@ test('unrelated completed batches cannot settle an exact admission, nor can miss
   assert.equal(reconcilePendingOperation(pending,{status:{...status,admission_journal:[admission]},actor:{}}).effect,EFFECT.UNKNOWN)
   assert.equal(reconcilePendingOperation(pending,{status:{...status,admission_journal:[{...admission,signature:'other'}]},actor}).effect,EFFECT.UNKNOWN)
   assert.equal(reconcilePendingOperation(pending,{status:{...status,admission_journal:[{...admission,state:'not_admitted'}]},actor}).effect,EFFECT.NOT_HAPPENED)
-  assert.equal(reconcilePendingOperation(pending,{status:{...status,batch_generation:3,admission_journal:[admission]},actor}).effect,EFFECT.PARTIAL_UNKNOWN)
+  assert.equal(reconcilePendingOperation(pending,{status:{...status,batch_generation:3,admission_journal:[admission]},actor}).effect,EFFECT.PARTIAL_UNKNOWN,
+    'terminal text without the complete historical slot/receipt witness remains held')
+  const ref={batch_id:8,batch_generation:2,batch_ref:'batch-g2-8'}
+  const completed={...admission,slots:[{index:1,ok:true,batch_refs:[ref]}]}
+  assert.equal(reconcilePendingOperation(pending,{status:{...status,batch_generation:3,admission_journal:[completed],
+    receipt_journal:[{...ref,state:'completed'}]},actor}).effect,EFFECT.HAPPENED,
+  'startup invalidates unfinished work, but cannot undo this exact sealed completion')
   assert.equal(reconcilePendingOperation(pending,{status:{...status,admission_journal:[admission]},actor:{actor_id:19,epoch:4}}).effect,EFFECT.HAPPENED)
   assert.equal(reconcilePendingOperation(pending,{status:{...status,admission_journal:[{...admission,state:'admitted'}]},actor:{actor_id:19,epoch:4}}).verdict,'stale_actor')
 })

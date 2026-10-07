@@ -218,6 +218,18 @@ test('research and wait still require additional verification', () => {
   }
 })
 
+test('legacy receipt contracts survive restart unchanged without gaining completion authority', () => {
+  const state = planState({ last_operations: ['wait {"ticks":120}'] })
+  const contract = { mode: 'all', requirements: [{ id: 'old_wait', kind: 'authoritative_operation_receipt', operation_name: 'wait' }], confidence: 0.8, source: 'legacy_checkpoint' }
+  state.task_board.steps[2].completion_contract = contract
+  const memory = new CanonicalTaskBoardMemory()
+  memory.restore({ version: 1, dialogue: [], plans: [{ key: 'npc:sgluna', state }] })
+  const restored = memory.currentPlan('npc:sgluna')
+  assert.deepEqual(restored.task_board.steps[2].completion_contract, contract)
+  assert.equal(restored.task_board.completed_count, 2)
+  assert.equal(verifyDeterministicReceipt(restored, completedReceipt({ taskTypes: ['waiting'] })).verified, false)
+})
+
 test('receipt task types must match the submitted strict operations exactly', () => {
   const result = verifyDeterministicReceipt(planState(), completedReceipt({ taskTypes: ['mining'] }))
   assert.deepEqual(result, { verified: false, reason: 'receipt_operation_mismatch' })
