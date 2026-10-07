@@ -8,6 +8,10 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 6 planner-first live trial: handoff works, research facts lost
+
+Owner-authorized fresh run at `6b268031`, with the old 60/120 trial call caps removed: Luna committed a declared plan without operations and C3 created a fresh executor. The executor paused before gameplay because its handoff omitted the exact research triggers already observed by the planner, while retaining `observation_budget_remaining=0`. Five Luna and five Jev calls, 60 seconds, zero gameplay batches/red packs/humans or operator corrective prompts. Canonical goal remained active; board paused truthfully. Server stopped; evidence retained. Next bounded repair: carry authoritative facts for the active research contract and provide bounded missing-fact observation at the executor decision boundary, preserving the shared allowance and identity fences. [Live evidence and attribution](validation/LUNA_PLANNER_FIRST_LIVE_2026-10-06.md).
+
 ## October 6 planner-first delegation: scripted gates green
 
 The owner selected Luna planner → Luna executor for one NPC. A new validated protocol-v2 plan can now commit with no initial operations and hand first-action selection to a fresh executor context. Completion contracts freeze before handoff; actual executor actions still require the ordinary preflight and admission checks. Seven new regressions cover zero synthetic progress, preserved identities/contracts on restore, unchanged allowance, missing declarations, preflight refusal, disabled/failed handoff and stale actors. Unit `21e6b129`, merge `1306b003`, installer repin `bc7bcced`. Final integration Docker gate: 1,812 runtime tests, 1,036 mod tests, typechecks and generated-Lua checks passed; full Docker build and nine payload tests passed. The updated planning probe passes 4/4 scripted samples. No new live provider or gameplay run. [Contract and evidence](validation/LUNA_PLANNER_FIRST_DELEGATION_2026-10-06.md).
