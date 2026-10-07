@@ -13,6 +13,7 @@ import {
   taskBoardTransferSupplyRecoveries,
   reconcileTaskBoard,
   sanitizeTaskBoard,
+  serializeAdmissionBlockerEvidence,
   setTaskBoardStatus,
   taskBoardProgress,
 } from './common.mjs'
@@ -11433,20 +11434,22 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         : undefined
     const operation = operationIndex !== undefined ? operations[operationIndex] : undefined
     const factorioError = cleanMemoryText(failure?.factorioError ?? failure?.message ?? String(failure), 1600)
+    const requestId = this.traceRequest?.id
+    const serialized = serializeAdmissionBlockerEvidence({
+      request_id: requestId,
+      operation_index: operationIndex === undefined ? undefined : operationIndex + 1,
+      operation_name: operation?.name,
+      operation_args: sanitizeTraceValue(operation?.args ?? {}),
+      reason_code: failure?.preflight?.code,
+      // A locked recipe names its unlocking technology and the next research node (still a terminal blocker).
+      ...(failure?.preflight?.code === 'recipe_locked' ? { locked_recipe: describeLockedRecipePreflight(failure.preflight).facts } : {}),
+      factorio_error: factorioError,
+      no_replay: failure?.noReplay === true,
+    })
     const evidence = {
       kind,
-      ref: `${this.traceRequest?.id ?? 'request'}/admission`,
-      summary: JSON.stringify({
-        request_id: this.traceRequest?.id,
-        operation_index: operationIndex === undefined ? undefined : operationIndex + 1,
-        operation_name: operation?.name,
-        operation_args: sanitizeTraceValue(operation?.args ?? {}),
-        reason_code: failure?.preflight?.code,
-        // A locked recipe names its unlocking technology and the next research node (still a terminal blocker).
-        ...(failure?.preflight?.code === 'recipe_locked' ? { locked_recipe: describeLockedRecipePreflight(failure.preflight).facts } : {}),
-        factorio_error: factorioError,
-        no_replay: failure?.noReplay === true,
-      }),
+      ref: `${requestId ?? 'request'}/admission`,
+      summary: serialized.summary,
     }
     const blocker = failure?.preflight?.code === 'recipe_locked'
       ? lockedRecipeBlocker(failure.preflight)
@@ -11454,7 +11457,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         ? `operation_preflight_failed:${failure.preflight.code}`
         : 'operation_admission_failed'
     const state = this.memory.setAdmissionState?.(this.requestInfo.memoryKey, 'admission_failed', { blocker, evidence })
-    await this.persistState()
+    // Capture and queue telemetry before the existing persistence handoff. No
+    // new read/admission follows it, and no newer request can relabel this fact.
+    const traceWrite = serialized.compacted ? this.traceEvent('operation.blocker_evidence_compacted', {
+      request_id: requestId,
+      reason: 'durable_structured_evidence_limit',
+      reason_code: failure?.preflight?.code,
+      operation_index: operationIndex === undefined ? undefined : operationIndex + 1,
+      operation_name: operation?.name,
+      summary_chars: serialized.summary.length,
+      omitted_fields: serialized.omitted_fields,
+      truncated_fields: serialized.truncated_fields,
+    }, { requestId }) : undefined
+    await Promise.all([this.persistState(), traceWrite])
     return state ? { ...(stateResult ?? {}), state } : stateResult
   }
 

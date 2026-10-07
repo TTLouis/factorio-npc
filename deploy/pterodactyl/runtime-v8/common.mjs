@@ -776,6 +776,64 @@ function normalizeCheckpointStockRefusals(value) {
   return Object.keys(counts).length > 0 ? { counts } : undefined
 }
 
+// Admission blockers carry JSON, unlike prose evidence. Bound the object before
+// serialization: clipping its string at the board limit destroys the evidence.
+// These fields identify the refusal; optional facts are admitted whole and any
+// omission is explicit. This never supplies authority to replay an operation.
+export function serializeAdmissionBlockerEvidence(value) {
+  const original = JSON.stringify(value)
+  if (original.length <= 1200) return { summary: original, compacted: false }
+  // Work on the serialized snapshot, not caller-owned nested trigger data.
+  value = JSON.parse(original)
+  const essential = ['request_id', 'operation_index', 'operation_name', 'reason_code', 'no_replay']
+  const record = Object.fromEntries(essential.filter(key => value[key] !== undefined).map(key => [key, value[key]]))
+  const optional = Object.entries(value).filter(([key]) => !essential.includes(key) && key !== 'locked_recipe')
+  const locked = value.locked_recipe
+  if (locked && typeof locked === 'object') {
+    record.locked_recipe = Object.fromEntries(Object.entries(locked).filter(([key]) => key !== 'next_actionable'))
+    if (locked.next_actionable) {
+      const next = locked.next_actionable
+      const keys = ['name', 'mode', 'status', 'trigger']
+      record.locked_recipe.next_actionable = Object.fromEntries(keys.filter(key => next[key] !== undefined).map(key => [key, next[key]]))
+      // Unlock/trigger identities precede their potentially large capability or
+      // science detail. Preserve optional native facts without partial objects.
+      optional.unshift(...Object.entries(next).filter(([key]) => !keys.includes(key)).map(([key, item]) => [`locked_recipe.next_actionable.${key}`, item]))
+    }
+  }
+  record.omitted_fields = optional.map(([key]) => key)
+  // Normal runtime identities fit easily. Escaped or pathological long strings
+  // still cannot overflow the durable cap; identify every shortened field.
+  const strings = []
+  function visit(object, prefix = '') {
+    for (const [key, item] of Object.entries(object)) {
+      if (key === 'omitted_fields') continue
+      const field = prefix ? `${prefix}.${key}` : key
+      if (typeof item === 'string') strings.push({ object, key, field })
+      else if (item && typeof item === 'object') visit(item, field)
+    }
+  }
+  visit(record)
+  while (JSON.stringify(record).length > 1200) {
+    const largest = strings.filter(item => item.object[item.key].length > 1).sort((a, b) => JSON.stringify(b.object[b.key]).length - JSON.stringify(a.object[a.key]).length)[0]
+    if (!largest) throw new Error('Admission blocker identity exceeds durable evidence capacity')
+    record.truncated_fields ??= []
+    if (!record.truncated_fields.includes(largest.field)) record.truncated_fields.push(largest.field)
+    largest.object[largest.key] = `${largest.object[largest.key].slice(0, Math.max(0, Math.floor(largest.object[largest.key].length / 2) - 1))}…`
+  }
+  for (const [key, item] of optional) {
+    if (item === undefined) {
+      record.omitted_fields = record.omitted_fields.filter(field => field !== key)
+      continue
+    }
+    const candidate = structuredClone(record)
+    candidate.omitted_fields = candidate.omitted_fields.filter(field => field !== key)
+    if (key.startsWith('locked_recipe.next_actionable.')) candidate.locked_recipe.next_actionable[key.split('.').at(-1)] = item
+    else candidate[key] = item
+    if (JSON.stringify(candidate).length <= 1200) Object.assign(record, candidate)
+  }
+  return { summary: JSON.stringify(record), compacted: true, omitted_fields: record.omitted_fields, truncated_fields: record.truncated_fields ?? [] }
+}
+
 export function addTaskBoardEvidence(board, { kind = 'operation_receipt', summary = '', ref = '', now = Date.now() } = {}) {
   if (!board || board.kind !== 'task_board_lite') return board
   const record = {

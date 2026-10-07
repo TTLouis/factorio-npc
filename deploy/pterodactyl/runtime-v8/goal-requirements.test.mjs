@@ -14,6 +14,7 @@ import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
+import { serializeAdmissionBlockerEvidence } from './common.mjs'
 import { sanitizeGoalDefinition } from './goal-definition.mjs'
 import {
   describeLockedRecipePreflight,
@@ -759,6 +760,77 @@ test('a locked recipe stays a terminal blocker, but its evidence names the techn
     next_actionable: { name: 'logistic-fixture-tech', mode: 'science', status: 'ready', science: { count: 10, ingredients: [{ name: 'fixture-pack', amount: 1 }] } },
   })
   assert.match(formatTaskCondition(state.blocker, 'blocker', state.task_board.evidence).summary, /^SGLuna cannot craft that yet: automation-science-pack is locked until technology automation-science-pack is researched; next research: logistic-fixture-tech/)
+})
+
+test('the retained native locked-recipe blocker stays parseable through durable persistence without replay', async () => {
+  // Exact native preflight from the failed requirements lane (2026-10-07):
+  // copper smelting and casting producers made the old JSON exceed 1200 chars.
+  const preflight = JSON.parse(await fsp.readFile(new URL('./fixtures/native-recipe-locked.json', import.meta.url), 'utf8'))
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-blocker-evidence-'))
+  const stateFile = path.join(dir, 'npc-state.json')
+  const { memory, calls, game, events } = await scenario({
+    game: new FakeFactorio({ preflight: () => preflight }),
+    requirements: { ...LIVE_LOCKED, locked: [], machines: [], research: {} },
+    planner: () => premature(),
+    traceDir: dir,
+    extra: { stateFile },
+  })
+  assert.equal(calls.length, 1)
+  assert.equal(game.mutations.length, 0)
+  const state = memory.currentPlan(KEY)
+  const evidence = state.task_board.evidence.find(item => item.kind === 'operation_preflight_blocker')
+  assert.ok(evidence.summary.length <= 1200)
+  const summary = JSON.parse(evidence.summary)
+  assert.equal(summary.request_id, events('operation.blocker_evidence_compacted')[0].request_id)
+  assert.equal(summary.operation_index, 1)
+  assert.equal(summary.operation_name, 'craft_item')
+  assert.equal(summary.reason_code, 'recipe_locked')
+  assert.equal(summary.no_replay, false)
+  assert.equal(summary.locked_recipe.recipe, 'automation-science-pack')
+  assert.equal(summary.locked_recipe.unlocked_by, 'automation-science-pack')
+  assert.equal(summary.locked_recipe.next_actionable.name, 'electronics')
+  assert.deepEqual(summary.locked_recipe.next_actionable.trigger, { type: 'craft-item', item: 'copper-plate', count: 10 })
+  assert.ok(summary.omitted_fields.includes('locked_recipe.next_actionable.trigger_crafting'))
+  assert.deepEqual(summary.operation_args, craftOperation.args)
+  const trace = events('operation.blocker_evidence_compacted')
+  assert.equal(trace.length, 1)
+  assert.equal(trace[0].data.reason, 'durable_structured_evidence_limit')
+  assert.equal(trace[0].data.summary_chars, evidence.summary.length)
+  const restored = new CanonicalTaskBoardMemory()
+  restored.restore(JSON.parse(await fsp.readFile(stateFile, 'utf8')))
+  const after = restored.currentPlan(KEY)
+  assert.equal(after.status, 'blocked')
+  assert.equal(after.blocker, state.blocker)
+  assert.equal(after.goal_id, state.goal_id)
+  assert.deepEqual(after.plan, state.plan)
+  const persisted = after.task_board.evidence.find(item => item.kind === evidence.kind)
+  assert.equal(persisted.summary, evidence.summary)
+  assert.deepEqual(JSON.parse(persisted.summary), summary)
+  assert.match(lockedRecipeSummary(after.blocker, after.task_board.evidence), /next research: electronics/)
+})
+
+test('structured admission evidence preserves small records and bounds escaped identities and large optional facts', () => {
+  const small = { request_id: 'r1', operation_index: 2, operation_name: 'transfer_items', reason_code: 'stale_exact_target', no_replay: true, operation_args: { unit_number: 12 } }
+  assert.deepEqual(serializeAdmissionBlockerEvidence(small), { summary: JSON.stringify(small), compacted: false })
+  const large = { ...small, factorio_error: 'Native failure '.repeat(1000) }
+  const bounded = serializeAdmissionBlockerEvidence(large)
+  assert.ok(bounded.summary.length <= 1200)
+  assert.deepEqual(JSON.parse(bounded.summary), { ...small, omitted_fields: ['factorio_error'] })
+  const escaped = serializeAdmissionBlockerEvidence({ ...large, request_id: '\u0001"\\'.repeat(600) })
+  assert.ok(escaped.summary.length <= 1200)
+  const parsed = JSON.parse(escaped.summary)
+  assert.ok(parsed.truncated_fields.includes('request_id'))
+  assert.equal(parsed.no_replay, true)
+  assert.equal(parsed.reason_code, 'stale_exact_target')
+  assert.equal(parsed.operation_index, 2)
+  const nested = { ...large, locked_recipe: { recipe: 'target', unlocked_by: 'unlock', next_actionable: { name: 'first', mode: 'trigger', status: 'ready', trigger: { type: 'craft-item', item: '\u0001"\\'.repeat(600), count: 10 } } } }
+  const before = structuredClone(nested)
+  const result = serializeAdmissionBlockerEvidence(nested)
+  assert.deepEqual(nested, before, 'compaction cannot mutate caller-owned identities or facts')
+  assert.ok(result.summary.length <= 1200)
+  const compacted = JSON.parse(result.summary)
+  assert.ok(compacted.truncated_fields.includes('locked_recipe.next_actionable.trigger.item'))
+  assert.equal(compacted.locked_recipe.next_actionable.trigger.count, 10)
 })
 
 test('the hooks are wired in the live loop (not only implemented)', async () => {
