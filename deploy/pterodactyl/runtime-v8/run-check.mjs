@@ -292,6 +292,26 @@ function detectProviderTurnOutputCapExceeded(rows) {
   }
 }
 
+// A terminal research step whose executor packet lacked research coverage. Legacy packets without the new
+// metadata are explicitly distinguished; this finding identifies missing evidence, not the cause of every pause.
+function detectExecutorResearchFactsMissing(rows) {
+  const terminal = rows.find(row => row.event === 'request.completed'
+    && row.data?.task_board?.status === 'paused'
+    && row.data?.task_board?.pause_reason?.includes('provider_reported_blocker'))
+  if (!terminal) return undefined
+  const board = terminal.data.task_board
+  const step = board.steps?.[board.active_index ?? 0]
+  const subjects = step?.completion_contract?.requirements?.filter(requirement => requirement.kind === 'research_completed').map(requirement => requirement.technology) ?? []
+  if (!subjects.length) return undefined
+  const carried = rows.filter(row => row.event === 'context.executor_facts_carried').at(-1)
+  if (!carried) return undefined
+  const missing = carried.data?.missing_research
+  if (Array.isArray(missing) && missing.length === 0 && carried.data?.research_paths > 0) return undefined
+  return { count: 1, first_ts: carried.ts, detail: Array.isArray(missing)
+    ? `research step paused with unavailable executor facts: ${missing.join(', ')}`
+    : `legacy executor packet has no research coverage metadata for: ${subjects.join(', ')}` }
+}
+
 function detectBlockedBeforeMutation(rows) {
   const matches = rows.filter(row => row?.event === 'request.completed' && row?.data?.outcome === 'blocked_before_mutation')
   if (matches.length === 0) return undefined
@@ -577,6 +597,7 @@ function detectJevDecidingSkipUnverified(rows) {
 }
 
 const SIGNATURES = [
+  { id: 'executor_research_facts_missing', label: 'paused research step lacks executor research facts', detect: detectExecutorResearchFactsMissing },
   {
     id: 'observation_phase_closed_loop',
     label: 'observation_phase_closed loop',

@@ -27,6 +27,8 @@ import {
   parseInventoryCounts,
   recipeFactFromRequiresMachine,
   recipeFactsFromDetails,
+  researchPathFact,
+  researchFactItems,
   selectRecipeFacts,
   stepContractNeeds,
 } from './handoff-packet.mjs'
@@ -3125,6 +3127,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // user; there is nothing healthy to re-brief).
   async restageThrough(args, safePoint) {
     const requestId = args.requestId ?? this.traceRequest?.id
+    const generation = this.generation
+    const lineage = this.agentContext.lineageSequence
+    const actorFence = { ...(args.actor ?? this.epoch) }
     const role = args.role ?? args.packet?.event?.role ?? this.agentContext.role
     const checkpoint = args.checkpoint ?? args.packet?.event?.checkpoint
     try {
@@ -3212,6 +3217,29 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         if (executorFactsMeta?.counts_deferred) {
           this.pendingExecutorFactsRefresh = { handoff_id: restaged.handoff_id, request_id: requestId, checkpoint, actor_id: this.epoch?.actor_id, epoch: this.epoch?.epoch, goal_id: state?.goal?.goal_id, read_items: executorFactsMeta.read_items }
         }
+      }
+      if (restaged.restaged === true && role === EXECUTOR_ROLE && checkpoint === 'C3' && args.parkPlanner === true) {
+        const currentState = this.memory.planningState?.(this.activePlanKey())
+        const expectedPlan = getActivePlanningPlan(state)
+        const currentPlan = currentState && getActivePlanningPlan(currentState)
+        if (this.generation !== generation || this.agentContext.lineageSequence !== lineage
+          || this.agentContext.handoffId !== restaged.handoff_id || this.agentContext.role !== EXECUTOR_ROLE
+          || this.epoch?.actor_id !== actorFence.actor_id || this.epoch?.epoch !== actorFence.epoch
+          || currentState?.goal?.goal_id !== state.goal.goal_id || currentState?.goal?.status !== GOAL_STATUS.ACTIVE
+          || currentPlan?.plan_id !== expectedPlan?.plan_id || currentPlan?.plan_version !== expectedPlan?.plan_version
+          || currentPlan?.active_step_index !== expectedPlan?.active_step_index) {
+          return { restaged: false, reason: 'executor_decision_superseded_after_handoff' }
+        }
+        // A role handoff starts a new bounded observation decision, not a new provider/campaign allowance.
+        const previousRemaining = this.observationBudgetRemaining
+        this.resetObservationDecisionState()
+        this.observationBudgetOverride = 4
+        this.observationBudgetRemaining = 4
+        this.observationRelevanceOverride = null
+        try { await this.traceEvent('context.executor_observation_started', {
+          request_id: requestId, handoff_id: restaged.handoff_id, previous_remaining: previousRemaining,
+          observation_remaining: 4, reason: 'new_executor_decision_at_commit',
+        }, { requestId }) } catch {}
       }
       return restaged
     }
@@ -4267,7 +4295,38 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (!plan || !step) return undefined
       const limits = EXECUTOR_FACT_LIMITS
       const needs = stepContractNeeds(step)
+      const source = actor ?? this.epoch
+      const fence = Number.isSafeInteger(source?.actor_id) && Number.isSafeInteger(source?.epoch) && typeof source?.mode === 'string' && typeof source?.actor_kind === 'string' ? source : undefined
+      const inFlight = this.batchInFlight === true || runtime?.idle === false || (Number.isFinite(runtime?.queue_length) && runtime.queue_length > 0)
+      if (inFlight && mode === 'refresh') return undefined
+      const meta = { reads_attempted: 0, reads_failed: 0, refresh: 'skipped', residual_omitted: undefined, recipe_cache: this.handoffRecipeFacts.size, counts_deferred: undefined }
+      const research = []
+      if (needs.technologies?.length) {
+        try {
+          if (fence && !inFlight) await this.handoffFenceCheck(fence, 'before')
+          for (const [index, target] of needs.technologies.entries()) {
+            let fact = { target, state: inFlight ? 'deferred' : 'unavailable', reason: inFlight ? 'batch_in_flight' : !fence ? 'actor_fence_unavailable' : 'research_target_limit' }
+            if (fence && !inFlight && index < limits.researchTargets) {
+              meta.reads_attempted += 1
+              try {
+                const parsed = JSON.parse(String(await this.rcon.command(this.observationToolCommand('getResearchPath', { name: target, max_nodes: limits.researchNodes }))).trim())
+                fact = researchPathFact(parsed, target, this.observationTag())
+              }
+              catch { fact = { target, state: 'unavailable', reason: 'research_path_read_failed' } }
+              if (fact.state !== 'fresh') meta.reads_failed += 1
+            }
+            research.push(fact)
+          }
+          if (fence && !inFlight) await this.handoffFenceCheck(fence, 'during')
+        }
+        catch (error) {
+          if (error?.handoffFence) return { refusal: error.handoffFence, meta }
+          return { refusal: 'research_handoff_fence_failed', meta }
+        }
+      }
+      const researchItems = researchFactItems(research)
       const wanted = [...new Set([...needs.items, ...requirementTargets(state.goal?.definition).items.map(item => item.name)])]
+      wanted.unshift(...researchItems)
       const cached = [...this.handoffRecipeFacts.values()]
       const closure = neededItems(needs.roots, cached)
       const recipes = selectRecipeFacts(cached, { wanted, needed: closure.items }).map((recipe) => {
@@ -4282,6 +4341,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       closure.items.forEach(addItem)
       needs.items.forEach(addItem)
+      researchItems.forEach(addItem)
       refreshItems.forEach(addItem)
       for (const item of this.handoffTouchedItems ?? []) addItem(item)
       for (const recipe of recipes) {
@@ -4295,13 +4355,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const machineRequirement = checkpointMachineRequirements(step.completion_contract)[0]
       const historical = this.historicalEntityFacts()
 
-      const source = actor ?? this.epoch
-      const fence = Number.isSafeInteger(source?.actor_id) && Number.isSafeInteger(source?.epoch) && typeof source?.mode === 'string' && typeof source?.actor_kind === 'string' ? source : undefined
-      const meta = { reads_attempted: 0, reads_failed: 0, refresh: 'skipped', residual_omitted: undefined, recipe_cache: cached.length, counts_deferred: undefined, read_items: readItems }
+      meta.read_items = readItems
       const fresh = new Map()
       let freshMachine
-      const inFlight = this.batchInFlight === true || runtime?.idle === false || (Number.isFinite(runtime?.queue_length) && runtime.queue_length > 0)
-      if (inFlight && mode === 'refresh') return undefined
       if (inFlight) {
         meta.counts_deferred = 'batch_in_flight'
         meta.refresh = 'deferred'
@@ -4393,11 +4449,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
       const counts = { items, unavailable, as_of: tag, ...(meta.counts_deferred ? { deferred: meta.counts_deferred } : {}) }
       if (mode === 'refresh') {
-        const any = items.length > 0 || unavailable.length > 0 || machine || residual
-        return { facts: any ? { recipes, counts, machine, residual, historical_entities: historical } : undefined, meta }
+        const any = research.length > 0 || items.length > 0 || unavailable.length > 0 || machine || residual
+        return { facts: any ? { recipes, counts, machine, residual, research, historical_entities: historical } : undefined, meta }
       }
-      const hasContent = recipes.length > 0 || items.length > 0 || unavailable.length > 0 || counts.deferred || machine || residual || historical.length > 0
-      return { facts: hasContent ? { recipes, counts, machine, residual, historical_entities: historical } : undefined, meta }
+      const hasContent = research.length > 0 || recipes.length > 0 || items.length > 0 || unavailable.length > 0 || counts.deferred || machine || residual || historical.length > 0
+      return { facts: hasContent ? { recipes, counts, machine, residual, research, historical_entities: historical } : undefined, meta }
     }
     catch (error) {
       this.log(`[handoff] executor facts failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -4498,6 +4554,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         role: EXECUTOR_ROLE,
         checkpoint,
         recipe_facts: summary.recipe_facts,
+        research_paths: summary.research_paths,
+        missing_research: summary.missing_research,
         recipe_facts_known: meta?.recipe_cache,
         fresh_items: summary.fresh_items,
         stale_items: summary.stale_items,
@@ -7422,6 +7480,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const previousObservationBudgetRemaining = this.observationBudgetRemaining
     const previousObservationRelevance = this.observationRelevanceOverride
     const previousPlanningHorizon = this.planningHorizonOverride
+    let requestObservationScope = { generation: this.generation, lineage: this.agentContext.lineageSequence }
     if (plannerShape) {
       const requestedReasoningBudget = plannerShape.reasoning_budget
       const requestedObservationBudget = Number.isSafeInteger(plannerShape.observation_budget)
@@ -7580,7 +7639,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     try {
       this.chatRequestPending = true
       this.startRestage = pendingStartRestage // consumed by the first turn (applyStartRestage); cleared in the finally below whatever happens
-      const result = await super.request(text, options)
+      const pendingRequest = super.request(text, options)
+      // Base request synchronously starts its lineage before its first await.
+      requestObservationScope = { generation: this.generation, lineage: this.agentContext.lineageSequence }
+      const result = await pendingRequest
       if (this.requestInfo?.memoryKey) this.lastMemoryKey = this.requestInfo.memoryKey
       if (resumeProviderBudgetHandoff) {
         this.memory.setProviderRecovery?.(memoryKey, undefined)
@@ -7608,12 +7670,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw error
     }
     finally {
-      this.startRestage = undefined
-      this.reasoningBudgetOverride = previousReasoningBudget
-      this.observationBudgetOverride = previousObservationBudget
-      this.observationBudgetRemaining = previousObservationBudgetRemaining
-      this.observationRelevanceOverride = previousObservationRelevance
-      this.planningHorizonOverride = previousPlanningHorizon
+      if (this.generation === requestObservationScope.generation && this.agentContext.lineageSequence === requestObservationScope.lineage) {
+        this.startRestage = undefined
+        this.reasoningBudgetOverride = previousReasoningBudget
+        this.observationBudgetOverride = previousObservationBudget
+        this.observationBudgetRemaining = previousObservationBudgetRemaining
+        this.observationRelevanceOverride = previousObservationRelevance
+        this.planningHorizonOverride = previousPlanningHorizon
+      }
     }
   }
 

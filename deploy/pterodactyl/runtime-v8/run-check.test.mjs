@@ -25,6 +25,16 @@ async function loadFixtureRows(name) {
   return rows
 }
 
+test('retained Luna research handoff pause reports missing coverage, without labeling every research pause a context failure', async () => {
+  const rows = await loadFixtureRows('luna-research-handoff-paused.jsonl')
+  const findings = analyzeBehaviorTrace(rows).findings.filter(row => row.signature === 'executor_research_facts_missing')
+  assert.equal(findings.length, 1)
+  assert.match(findings[0].detail, /legacy.*electronics.*steam-power/)
+  const covered = rows.map(row => row.event === 'context.executor_facts_carried'
+    ? { ...row, data: { ...row.data, research_paths: 2, missing_research: [] } } : row)
+  assert.equal(analyzeBehaviorTrace(covered).findings.filter(row => row.signature === 'executor_research_facts_missing').length, 0)
+})
+
 function findingsFor(result, signature) {
   return result.findings.filter(f => f.signature === signature)
 }

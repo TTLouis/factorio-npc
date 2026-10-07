@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { readFileSync } from 'node:fs'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { PLAN_STATUS } from './planning-state.mjs'
 import { FakeFactorio, gather, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
+import { executorFactsRefreshMessage, EXECUTOR_FACT_LIMITS } from './handoff-packet.mjs'
 
 const KEY = 'npc:sgluna'
+const capturedResearch = JSON.parse(readFileSync(new URL('./fixtures/luna-research-handoff-2026-10-06.json', import.meta.url), 'utf8'))
 const copper = inventoryCheckpoint('copper-ore', 10)
 const research = { mode: 'all', requirements: [{ kind: 'research_completed', technology: 'automation' }] }
 const goal = { scope: 'finite', summary: 'Gather ten copper ore.', doneWhen: [{ kind: 'inventory_count', item_name: 'copper-ore', minimum: 10 }] }
@@ -41,6 +44,162 @@ function harness(provider, game = new FakeFactorio(), options = {}) {
   })
   return { agent, memory, game, calls, events }
 }
+
+function researchWorld({ fail = false, changeActor = false } = {}) {
+  const game = new FakeFactorio({ inventory: { 'iron-plate': 8 } })
+  for (const node of capturedResearch.researchPath.nodes) game.knownTechnologies.add(node.name)
+  const original = game.command.bind(game)
+  game.researchReads = []
+  game.command = async command => {
+    if (!command.includes('"research_path"')) return original(command)
+    const target = /research_path",['"]([^'"]+)['"]/.exec(command)?.[1]
+    game.researchReads.push(target)
+    if (changeActor) { game.status.actor_id += 1; game.status.epoch += 1 }
+    if (fail) return '{}'
+    const node = capturedResearch.researchPath.nodes.find(entry => entry.name === target)
+    return JSON.stringify({ ok: true, target, node_count: 1, nodes: [node] })
+  }
+  return game
+}
+
+test('the retained research blocker still pauses truthfully after the repaired handoff', async () => {
+  const world = harness(call => call === 1 ? capturedResearch.planner : {
+    plan: capturedResearch.planner.plan, currentStep: 0, operations: [], chatMessage: capturedResearch.blocker,
+  }, researchWorld())
+  await world.agent.request(capturedResearch.planner.goal.summary, { sender: 'Louis' })
+  assert.equal(world.calls.length, 2)
+  assert.equal(world.game.mutations.length, 0)
+  assert.equal(world.memory.currentPlan(KEY).status, 'paused')
+  assert.equal(world.memory.currentPlan(KEY).task_board.completed_count, 0)
+  assert.equal(world.memory.planningState(KEY).goal.status, 'active')
+})
+
+test('a fresh executor receives current research triggers, relevant counts and a bounded new observation decision', async () => {
+  const world = harness(call => {
+    if (call === 1) {
+      world.agent.observationBudgetOverride = 3
+      world.agent.planningHorizonOverride = 'subgoal'
+      world.agent.observationBudgetRemaining = 0
+      world.agent.observationRelevanceOverride = ['research_state']
+      world.agent.observationDecisionForced = true
+      return capturedResearch.planner
+    }
+    const packet = world.calls[1].map(row => row.content ?? '').join('\n')
+    assert.match(packet, /research_trigger.*copper-plate.*10/)
+    assert.match(packet, /research_trigger.*iron-plate.*50/)
+    assert.match(packet, /iron-plate=8/)
+    assert.match(packet, /copper-plate=0/)
+    assert.match(packet, /observation_budget_remaining=4/)
+    assert.equal(world.agent.observationDecisionForced, false)
+    assert.equal(world.agent.observationRelevanceOverride, null)
+    assert.equal(world.agent.providerBudgetGeneration, 1)
+    assert.equal(world.agent.providerBudgetGenerationOutputUnits, 100)
+    assert.equal(world.game.admissions.length, 0)
+    return { plan: capturedResearch.planner.plan, currentStep: 0, operations: [gather('copper-ore', 10)] }
+  }, researchWorld(), { fixtureOutputTokens: 100 })
+  await world.agent.request(capturedResearch.planner.goal.summary, { sender: 'Louis' })
+  assert.equal(world.game.mutations.length, 1)
+  assert.equal(world.agent.providerBudgetGenerationOutputUnits, 200)
+  assert.equal(world.memory.currentPlan(KEY).task_board.completed_count, 0)
+  assert.equal(world.memory.planningState(KEY).goal.status, 'active')
+  const facts = world.events.find(row => row.event === 'context.executor_facts_carried')
+  assert.equal(facts.data.research_paths, 2)
+  assert.deepEqual(facts.data.missing_research, [])
+  const decision = world.events.find(row => row.event === 'context.executor_observation_started')
+  assert.ok(decision.data.request_id)
+  assert.equal(decision.data.previous_remaining, 0)
+  assert.equal(decision.data.reason, 'new_executor_decision_at_commit')
+})
+
+test('failed mandatory research reads remain explicit and cannot manufacture research completion', async () => {
+  const world = harness(call => {
+    if (call === 1) return capturedResearch.planner
+    assert.match(world.calls[1].map(row => row.content ?? '').join('\n'), /"state":"unavailable"/)
+    return { plan: capturedResearch.planner.plan, currentStep: 0, operations: [], chatMessage: capturedResearch.blocker }
+  }, researchWorld({ fail: true }))
+  await world.agent.request(capturedResearch.planner.goal.summary, { sender: 'Louis' })
+  const facts = world.events.find(row => row.event === 'context.executor_facts_carried')
+  assert.equal(facts.data.research_paths, 0)
+  assert.deepEqual(facts.data.missing_research, ['electronics', 'steam-power'])
+  assert.equal(world.game.researchReads.length, 2)
+  assert.equal(world.game.admissions.length, 0)
+  assert.equal(world.memory.currentPlan(KEY).task_board.completed_count, 0)
+})
+
+test('an actor change during research handoff refuses all executor admissions', async () => {
+  const world = harness(() => capturedResearch.planner, researchWorld({ changeActor: true }))
+  await assert.rejects(world.agent.request(capturedResearch.planner.goal.summary, { sender: 'Louis' }), /actor|epoch changed|superseded/i)
+  assert.equal(world.calls.length, 1)
+  assert.equal(world.game.admissions.length, 0)
+  assert.equal(world.memory.currentPlan(KEY).task_board.completed_count, 0)
+  assert.equal(world.memory.planningState(KEY).goal.status, 'active')
+  assert.ok(world.events.some(row => row.event === 'context.restage_refused' && /actor/.test(row.data.reason)))
+})
+
+test('restored committed research subjects rebuild facts without conversation caches', async () => {
+  const world = harness(call => call === 1 ? capturedResearch.planner : {
+    plan: capturedResearch.planner.plan, currentStep: 0, operations: [], chatMessage: capturedResearch.blocker,
+  }, researchWorld())
+  await world.agent.request(capturedResearch.planner.goal.summary, { sender: 'Louis' })
+  const restored = new CanonicalTaskBoardMemory()
+  restored.restore(world.memory.snapshot())
+  const restarted = new NpcAgentLoop({ rcon: world.game, memory: restored, provider: async () => assert.fail('restored fact gathering must not wake a model'), stateFile: null, traceFile: null, decisionTraceFile: null, npcId: 'sgluna' })
+  restarted.epoch = world.agent.epoch
+  const state = restored.planningState(KEY)
+  const result = await restarted.gatherExecutorHandoffFacts({ state, actor: restarted.epoch })
+  assert.equal(result.facts.research.filter(path => path.state === 'fresh').length, 2)
+  assert.equal(restarted.handoffRecipeFacts.size, 0)
+  assert.equal(world.game.researchReads.length, 4)
+  assert.equal(restored.planningState(KEY).active_plan_id, world.memory.planningState(KEY).active_plan_id)
+  assert.equal(restored.currentPlan(KEY).task_board.completed_count, 0)
+})
+
+test('research reads defer behind in-flight work, refresh after settlement, and obey subject scan limits', async () => {
+  const world = harness(call => call === 1 ? capturedResearch.planner : {
+    plan: capturedResearch.planner.plan, currentStep: 0, operations: [], chatMessage: capturedResearch.blocker,
+  }, researchWorld())
+  await world.agent.request(capturedResearch.planner.goal.summary, { sender: 'Louis' })
+  const state = world.memory.planningState(KEY)
+  const before = world.game.researchReads.length
+  const deferred = await world.agent.gatherExecutorHandoffFacts({ state, actor: world.agent.epoch, runtime: { idle: false } })
+  assert.equal(world.game.researchReads.length, before)
+  assert.equal(deferred.facts.counts.deferred, 'batch_in_flight')
+  assert.ok(deferred.facts.research.every(path => path.state === 'deferred'))
+  const refreshed = await world.agent.gatherExecutorHandoffFacts({ state, actor: world.agent.epoch, mode: 'refresh' })
+  assert.match(executorFactsRefreshMessage(refreshed.facts), /research_trigger.*copper-plate/)
+  assert.equal(world.game.researchReads.length, before + 2)
+  const oversized = structuredClone(state)
+  const plan = oversized.plans.find(plan => plan.plan_id === oversized.active_plan_id)
+  plan.steps[0].completion_contract.requirements = ['electronics', 'steam-power', 'automation-science-pack', 'logistic-science-pack', 'automation']
+    .map(technology => ({ kind: 'research_completed', technology }))
+  const limitBefore = world.game.researchReads.length
+  const limited = await world.agent.gatherExecutorHandoffFacts({ state: oversized, actor: world.agent.epoch })
+  assert.equal(world.game.researchReads.length - limitBefore, EXECUTOR_FACT_LIMITS.researchTargets)
+  assert.equal(limited.facts.research.at(-1).reason, 'research_target_limit')
+  assert.ok(limited.facts.counts.items.length <= 12)
+})
+
+test('a superseded C3 handoff cannot replenish a newer lineage observation allowance', async () => {
+  const world = harness(() => capturedResearch.planner, researchWorld())
+  const original = world.agent.jev.afterRestage.bind(world.agent.jev)
+  world.agent.jev.afterRestage = async (prepared, result) => {
+    await original(prepared, result)
+    if (result.restaged) {
+      world.agent.reset()
+      world.agent.observationBudgetOverride = 1
+      world.agent.observationBudgetRemaining = 1
+      world.agent.observationRelevanceOverride = ['inventory']
+      world.agent.observationDecisionForced = true
+    }
+  }
+  await assert.rejects(world.agent.request(capturedResearch.planner.goal.summary, { sender: 'Louis' }), /superseded|no longer active|actor|epoch/i)
+  assert.equal(world.agent.observationBudgetRemaining, 1)
+  assert.equal(world.agent.observationBudgetOverride, 1)
+  assert.deepEqual(world.agent.observationRelevanceOverride, ['inventory'])
+  assert.equal(world.agent.observationDecisionForced, true)
+  assert.equal(world.game.admissions.length, 0)
+  assert.equal(world.events.filter(row => row.event === 'context.executor_observation_started').length, 0)
+})
 
 test('protocol 2 corrects missing or misaligned draft declarations before admitting any gameplay batch', async () => {
   for (const stepCompletions of [undefined, []]) {

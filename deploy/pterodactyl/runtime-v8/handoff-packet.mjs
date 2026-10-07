@@ -107,6 +107,9 @@ export const EXECUTOR_FACT_LIMITS = Object.freeze({
   historicalChars: 280,
   authorityChars: 320,
   cachedRecipes: 32,
+  researchTargets: 4,
+  researchNodes: 8,
+  researchChars: 1600,
 })
 
 const HEADER = '[HANDOFF] Rebuilt from durable harness state, not from the previous conversation. Verify against the world before acting.'
@@ -455,7 +458,10 @@ export function stepContractNeeds(step) {
   const requirements = asList(contract?.requirements)
   const items = []
   const roots = []
+  const technologies = []
   for (const requirement of requirements) {
+    const technology = requirement.kind === 'research_completed' ? factName(requirement.technology) : undefined
+    if (technology && !technologies.includes(technology)) technologies.push(technology)
     const item = factName(requirement?.item_name)
     if (!item) continue
     if (!items.includes(item)) items.push(item)
@@ -465,7 +471,41 @@ export function stepContractNeeds(step) {
       else roots.push({ item, count: requirement.minimum })
     }
   }
-  return { roots, items }
+  return { roots, items, ...(technologies.length ? { technologies } : {}) }
+}
+
+// Fresh research paths are bounded whole records. A malformed, incomplete or oversized answer is explicitly
+// unavailable, never a partial path presented as complete. Quantities/actions remain the executor's choice.
+export function researchPathFact(parsed, target, tag) {
+  const unavailable = reason => ({ target, state: 'unavailable', reason })
+  const nodes = asList(parsed?.nodes)
+  if (parsed?.ok !== true || parsed.target !== target || nodes.length === 0 || !nodes.some(node => node.name === target)
+    || nodes.length > EXECUTOR_FACT_LIMITS.researchNodes || (parsed.node_count !== undefined && parsed.node_count !== nodes.length)
+    || parsed.truncated === true) return unavailable('research_path_incomplete')
+  const selected = []
+  for (const node of nodes) {
+    if (!factName(node.name) || typeof node.researched !== 'boolean' || !['trigger', 'science'].includes(node.mode)) return unavailable('research_node_invalid')
+    if (node.mode === 'trigger' && !node.research_trigger?.type) return unavailable('research_trigger_missing')
+    if (node.mode === 'science' && !node.science && !node.researched) return unavailable('research_science_missing')
+    selected.push({ name: node.name, researched: node.researched, mode: node.mode, status: node.status,
+      prerequisites: node.prerequisites, unresolved_prerequisites: node.unresolved_prerequisites,
+      ...(node.research_trigger ? { research_trigger: node.research_trigger } : {}),
+      ...(node.science ? { science: node.science } : {}) })
+  }
+  const fact = { target, state: 'fresh', as_of: normalizeFactTag(tag), nodes: selected }
+  if (JSON.stringify(fact).length > EXECUTOR_FACT_LIMITS.researchChars) return unavailable('research_path_size_limit')
+  return fact
+}
+
+export function researchFactItems(paths) {
+  return [...new Set(asList(paths).filter(path => path.state === 'fresh').flatMap(path => path.nodes.flatMap(node => [
+    node.research_trigger?.item, ...asList(node.science?.ingredients).map(ingredient => ingredient.name),
+  ])).map(factName).filter(Boolean))]
+}
+
+function researchRecords(paths) {
+  return asList(paths).map((path, index) => ({ key: `research_path_${index}`, block: 'step',
+    text: `research_path (authoritative getResearchPath; current read or explicit missing fact): ${JSON.stringify(path)}` }))
 }
 
 // The recipe the derivation may use to make `item`: one deterministic, complete recipe with a certain item output.
@@ -714,6 +754,7 @@ function executorFactRecords(facts, plan, step, limits) {
   if (!facts || typeof facts !== 'object') return []
   const records = []
   if (plan && step) records.push(authorityRecord(plan, step, limits))
+  records.push(...researchRecords(facts.research))
   records.push(...countsRecords(facts.counts, limits))
   const machine = machineRecord(facts.machine, limits)
   if (machine) records.push(machine)
@@ -732,6 +773,10 @@ function executorFactsSummary(facts, kept) {
   const keys = new Set(kept.map(record => record.key))
   const counts = asList(facts?.counts?.items)
   return {
+    ...(facts?.research?.length ? {
+      research_paths: facts.research.filter(path => path.state === 'fresh').length,
+      missing_research: facts.research.filter(path => path.state !== 'fresh').map(path => path.target),
+    } : {}),
     recipe_facts: kept.filter(record => record.key.startsWith('recipe_fact_')).length,
     fresh_items: keys.has('held_counts') ? counts.filter(entry => entry.state === 'fresh').length : 0,
     stale_items: keys.has('held_counts_stale') ? counts.filter(entry => entry.state === 'stale').length + asList(facts?.counts?.unavailable).length : 0,
@@ -749,6 +794,7 @@ function executorFactsSummary(facts, kept) {
 export function executorFactsRefreshMessage(facts, limits = EXECUTOR_FACT_LIMITS) {
   if (!facts || typeof facts !== 'object') return ''
   const records = [...countsRecords({ ...facts.counts, deferred: undefined }, limits)]
+  records.push(...researchRecords(facts.research))
   const machine = machineRecord(facts.machine, limits)
   if (machine) records.push(machine)
   const residual = residualRecord(facts.residual, limits)
