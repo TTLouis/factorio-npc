@@ -122,6 +122,19 @@ test('draft read rejects stale identities, executor ownership, mixed gameplay an
 
 test('read refusal uses bounded category correction, retains draft contracts and continues through planner commitment to executor', async () => {
   const world = fixture()
+  world.agent.recordRequirementsFacts({ tick: 42, research: { electronics: {
+    trigger: { type: 'craft-item', item: 'copper-plate', count: 1 },
+    trigger_crafting: { item: 'copper-plate', recipes: [{ recipe: 'copper-plate', enabled: true, categories: ['smelting'],
+      hand_craftable: false, hand_craftable_reason: 'category_unsupported', craftable_now_count: 18,
+      machines: [{ entity: 'stone-furnace', item: 'stone-furnace', status: 'craftable' }] }] },
+  } } })
+  const command = world.game.command.bind(world.game)
+  world.game.command = async text => {
+    if (text.includes('research_path')) return JSON.stringify({ ok: true, target: 'electronics', nodes: [{
+      name: 'electronics', researched: false, mode: 'trigger', research_trigger: { type: 'craft-item', item: 'copper-plate', count: 1 },
+    }] })
+    return command(text)
+  }
   let calls = 0
   world.agent.provider = async (messages, context) => {
     calls++
@@ -142,6 +155,13 @@ test('read refusal uses bounded category correction, retains draft contracts and
     assert.equal(calls, 3)
     assert.equal(context.role, 'executor', messages.at(-1).content)
     assert.equal(world.agent.targetedObservationIdentity().plan.status, 'COMMITTED')
+    const packet = messages.find(row => row.content.includes('research_path (authoritative getResearchPath'))
+    assert.ok(packet, 'fresh C3 carries bounded research facts')
+    assert.match(packet.content, /"source":"goal_requirements","state":"historical"/)
+    assert.match(packet.content, /"tick":42/)
+    assert.match(packet.content, /"hand_craftable":false/)
+    assert.match(packet.content, /"entity":"stone-furnace"/)
+    assert.doesNotMatch(packet.content, /craftable_now_count/)
     return planReply({ plan: world.state.plan, currentStep: 0,
       operations: [{ name: 'gather_resource', args: { resource_name: 'copper-ore', count: 10, search_radius: 32 } }] })
   }
@@ -152,6 +172,10 @@ test('read refusal uses bounded category correction, retains draft contracts and
   assert.equal(world.agent.targetedObservationIdentity().plan.steps[0].completion_contract.requirements[0].technology, 'electronics')
   assert.equal(world.memory.planningState(KEY).goal.status, 'active')
   assert.equal(world.events.some(row => row.event === 'observation.targeted_refused' && row.data.reason === 'stale_plan_or_step'), true)
+  const handoff = world.events.find(row => row.event === 'context.trigger_crafting_handoff')
+  assert.equal(handoff.data.reason, 'trigger_capabilities_preserved_as_history_with_unknowns_explicit')
+  assert.equal(handoff.data.historical_count, 1)
+  assert.ok(handoff.data.request_id)
 })
 
 test('draft rewrite, restage and restart do not replenish its persisted allowance', async () => {

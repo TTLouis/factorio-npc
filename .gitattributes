@@ -17,4 +17,4 @@ deploy/pterodactyl/egg-sgluna-factorio-*.json text eol=lf
 
 # Retained live failure evidence is tested by its original byte hash.
 deploy/pterodactyl/runtime-v8/fixtures/luna-draft-state-2026-10-07.json -text
-deploy/pterodactyl/runtime-v8/fixtures/luna-draft-replies-2026-10-07.json -text
+deploy/pterodactyl/runtime-v8/fixtures/luna-draft-replies-2026-10-07.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
