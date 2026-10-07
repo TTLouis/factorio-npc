@@ -8,6 +8,10 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 7 planner contract boundary: repaired, live acceptance pending
+
+The recorded all-semantic execution draft is now refused before commitment. New execution drafts require a deterministic world-result checkpoint; explicit `assessmentOnly:true` slices stay with the planner. Research instructions now consistently support future `research_completed` outcomes and multiple technologies. Frozen saved contracts remain unchanged, and the offline checker recognizes the original delegated semantic dead end. Independently reviewed units are integrated at `26ad8871`; Docker runtime 1,855, mod 1,036, typechecks, generated Lua, full build and nine payload checks passed. Native research, crafting and restart lanes passed with zero humans; no new live provider run occurred. Temporary worlds were discarded after preserving evidence. [Repair contracts and validation](validation/LUNA_SEMANTIC_CONTRACT_REPAIR_2026-10-07.md).
+
 ## October 7 fresh Luna + Jev trial: semantic contract prevents execution
 
 Owner-authorized fresh run at `3278c4b1`: seven Luna calls and five Jev requests/responses, 60.229 seconds, zero gameplay batches, humans or operator corrective prompts. The planner committed three semantic assessment steps, then the fresh executor proposed copper gathering with conflicting deterministic declarations. Admission correctly rejected `semantic_step_cannot_mutate`; the executor exhausted its observations and paused. Canonical goal remains active, board paused at 0/3, red production/consumption zero and green research false. The previous handoff repair supplied fresh research reads and four executor observations as intended. Next repair is the planner/executor completion-contract boundary, preserving committed semantics and using authorized successor planning. Logs/state retained; test container and worlds discarded. [Evidence, attribution and bounded follow-up](validation/LUNA_AUDIT_LIVE_2026-10-07.md).
