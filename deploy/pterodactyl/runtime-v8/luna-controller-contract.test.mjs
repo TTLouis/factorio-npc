@@ -10,6 +10,7 @@ import { executorFactsRefreshMessage, EXECUTOR_FACT_LIMITS } from './handoff-pac
 
 const KEY = 'npc:sgluna'
 const capturedResearch = JSON.parse(readFileSync(new URL('./fixtures/luna-research-handoff-2026-10-06.json', import.meta.url), 'utf8'))
+const capturedSemantic = JSON.parse(readFileSync(new URL('./fixtures/luna-semantic-contract-2026-10-07.json', import.meta.url), 'utf8'))
 const copper = inventoryCheckpoint('copper-ore', 10)
 const research = { mode: 'all', requirements: [{ kind: 'research_completed', technology: 'automation' }] }
 const goal = { scope: 'finite', summary: 'Gather ten copper ore.', doneWhen: [{ kind: 'inventory_count', item_name: 'copper-ore', minimum: 10 }] }
@@ -468,4 +469,89 @@ test('an actor change after initial delegation refuses executor admission withou
   assert.equal(world.game.mutations.length, 0)
   assert.equal(world.memory.currentPlan(KEY).task_board.completed_count, 0)
   assert.notEqual(world.memory.planningState(KEY).goal.status, 'completed')
+})
+
+test('the retained assessment-only execution draft is refused before commitment without manufacturing contracts', async () => {
+  const world = harness(() => capturedSemantic.planner, researchWorld())
+  await world.agent.request(capturedSemantic.planner.goal.summary, { sender: 'Louis' })
+  assert.equal(world.game.mutations.length, 0)
+  assert.equal(world.game.admissions.length, 0)
+  assert.equal(world.events.filter(row => row.event === 'plan.delegation_committed').length, 0)
+  assert.equal(world.events.filter(row => row.event === 'plan.semantic_assessment_committed').length, 0)
+  const rejected = world.events.filter(row => row.event === 'plan.completion_declarations_rejected')
+  assert.ok(rejected.length > 0)
+  assert.ok(rejected.every(row => row.data.request_id && row.data.reason === 'execution_plan_has_no_world_checkpoint'))
+  assert.match(world.calls[1].map(row => row.content ?? '').join('\n'), /research_completed.*mode:"all"/)
+  assert.ok(!world.memory.planningState(KEY)?.plans?.some(plan => plan.status === PLAN_STATUS.COMMITTED))
+})
+
+test('corrected scripted declarations commit future research outcomes and allow bounded copper gathering', async () => {
+  const world = harness(call => {
+    if (call === 1) return capturedSemantic.planner
+    if (call === 2) {
+      assert.equal(world.game.admissions.length, 0)
+      return { ...capturedSemantic.planner, stepCompletions: capturedSemantic.executor.stepCompletions }
+    }
+    const planning = world.memory.planningState(KEY)
+    const held = planning.plans.find(plan => plan.plan_id === planning.active_plan_id)
+    assert.ok(held.steps.every(step => step.completion_mode === 'deterministic'))
+    assert.equal(held.steps[0].completion_contract.requirements.length, 2)
+    assert.equal(world.memory.currentPlan(KEY).task_board.completed_count, 0)
+    return capturedSemantic.executor
+  }, researchWorld())
+  await world.agent.request(capturedSemantic.planner.goal.summary, { sender: 'Louis' })
+  assert.equal(world.calls.length, 3)
+  assert.equal(world.events.filter(row => row.event === 'plan.delegation_committed').length, 1)
+  assert.equal(world.game.mutations.length, 1)
+  assert.match(world.game.mutations[0], /gather_resource/)
+  assert.equal(world.memory.currentPlan(KEY).task_board.completed_count, 0)
+  assert.equal(world.memory.planningState(KEY).goal.status, 'active')
+})
+
+test('an explicitly assessment-only slice stays with the planner and cannot admit a mutation', async () => {
+  const world = harness(call => call === 1 ? draft({ plan: ['Assess available supplies'], operations: [],
+    assessmentOnly: true, stepCompletions: [{ kind: 'semantic', rationale: 'Assess inventory from fresh observations.' }] })
+    : { plan: ['Assess available supplies'], currentStep: 0, operations: [], chatMessage: 'BLOCKED: Supply assessment needs a fresh observation.' })
+  await world.agent.request('Assess available supplies.', { sender: 'Louis' })
+  assert.equal(world.calls.length, 2)
+  assert.equal(world.agent.agentContext.role, 'planner')
+  assert.equal(world.game.mutations.length, 0)
+  assert.equal(world.events.filter(row => row.event === 'plan.delegation_committed').length, 0)
+  assert.equal(world.events.filter(row => row.event === 'plan.semantic_assessment_committed').length, 1)
+})
+
+test('the assessment-only marker cannot conceal deterministic work or gameplay operations', async () => {
+  for (const first of [draft({ assessmentOnly: true, operations: [] }), draft({ assessmentOnly: true,
+    stepCompletions: [{ kind: 'semantic', rationale: 'Assess inventory.' }] })]) {
+    const world = harness(call => call === 1 ? first : draft())
+    await world.agent.request('Gather ten copper ore.', { sender: 'Louis' })
+    assert.equal(world.calls.length, 2)
+    assert.equal(world.game.mutations.length, 1)
+    const rejected = world.events.find(row => row.event === 'plan.completion_declarations_rejected')
+    assert.equal(rejected.data.reason, 'assessment_only_conflicts_with_execution')
+    assert.ok(rejected.data.request_id)
+  }
+})
+
+test('restoring the recorded committed assessment never rewrites its contracts or accepts executor mutations', async () => {
+  const world = harness(() => capturedSemantic.executor)
+  world.memory.restore(capturedSemantic.committedMemory)
+  const recordedKey = capturedSemantic.committedMemory.planning_states[0].key
+  world.agent.requestInfo = { memoryKey: recordedKey }
+  const before = structuredClone(world.memory.planningState(recordedKey))
+  await assert.rejects(world.agent.validateStepCompletionDeclarations(capturedSemantic.executor), /observations only/)
+  assert.deepEqual(world.memory.planningState(recordedKey), before)
+  assert.equal(world.game.mutations.length, 0)
+  assert.equal(world.calls.length, 0)
+})
+
+test('assessment intent requires a boolean on the JSON control boundary', () => {
+  const world = harness(() => draft())
+  for (const assessmentOnly of ['true', 1, null, {}]) {
+    assert.throws(() => world.agent.parsePlanMessage(planReply(draft({ assessmentOnly }))),
+      error => error.code === 'invalid_assessment_only')
+  }
+  for (const assessmentOnly of [true, false]) {
+    assert.equal(world.agent.parsePlanMessage(planReply(draft({ assessmentOnly }))).assessmentOnly, assessmentOnly)
+  }
 })

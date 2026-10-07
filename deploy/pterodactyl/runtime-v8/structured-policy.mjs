@@ -708,6 +708,7 @@ export const plannerControlToolDefinitions = [{
           items: { type: 'string', minLength: 1, maxLength: 500 },
         },
         currentStep: { type: 'integer', minimum: 0, maximum: 30 },
+        assessmentOnly: { type: 'boolean', description: 'Set true only for an intentionally observation-only slice: all stepCompletions are semantic and operations is empty. Omit or set false for execution drafts, which require at least one deterministic world-result checkpoint. This does not change an existing committed plan.' },
         operations: {
           type: 'array',
           maxItems: 16,
@@ -740,7 +741,7 @@ export const plannerControlToolDefinitions = [{
                   kind: {
                     type: 'string',
                     enum: ['inventory_count', 'entity_inventory_count', 'entity_exists', 'entity_state', 'research_completed', 'authoritative_operation_receipt', 'runtime_controller_state'],
-                    description: 'inventory_count {item_name, minimum}; entity_inventory_count {unit_number, item_name, minimum}; entity_exists {unit_number}; entity_state {unit_number, expected: working|not_working|exists}; authoritative_operation_receipt {operation_name}; runtime_controller_state {controller: follow, expected: active|idle|healthy}.',
+                    description: 'inventory_count {item_name, minimum}; research_completed {technology} (actual completed research, including trigger technologies; combine requirements with mode all); entity_inventory_count {unit_number, item_name, minimum}; entity_exists {unit_number}; entity_state {unit_number, expected: working|not_working|exists}; authoritative_operation_receipt {operation_name}; runtime_controller_state {controller: follow, expected: active|idle|healthy}.',
                   },
                   item_name: { type: 'string', maxLength: 160 },
                   technology: { type: 'string', maxLength: 160 },
@@ -888,10 +889,11 @@ export function plannerControlPayloadFromMessage(message) {
   let args
   try { args = JSON.parse(rawArgs) }
   catch { throw new base.PolicyError('submitPlan arguments must be valid JSON') }
-  exactKeys(args, ['chatMessage', 'plan', 'currentStep', 'operations', 'checkpoint', 'stepCompletions', 'semanticCompletion', 'roadmapNodeIds', 'developmentMode', 'roadmap', 'goal', 'timeReview'])
+  exactKeys(args, ['chatMessage', 'plan', 'currentStep', 'operations', 'assessmentOnly', 'checkpoint', 'stepCompletions', 'semanticCompletion', 'roadmapNodeIds', 'developmentMode', 'roadmap', 'goal', 'timeReview'])
   check(Array.isArray(args.plan), 'submitPlan.plan must be an array')
   check(Number.isSafeInteger(args.currentStep), 'submitPlan.currentStep must be an integer')
   check(Array.isArray(args.operations), 'submitPlan.operations must be an array')
+  check(args.assessmentOnly === undefined || typeof args.assessmentOnly === 'boolean', 'submitPlan.assessmentOnly must be boolean')
   check(args.semanticCompletion === undefined
     || (args.semanticCompletion && typeof args.semanticCompletion === 'object' && !Array.isArray(args.semanticCompletion)
       && typeof args.semanticCompletion.stepId === 'string' && args.semanticCompletion.stepId.trim()),
@@ -906,6 +908,7 @@ export function plannerControlPayloadFromMessage(message) {
     plan: args.plan,
     currentStep: args.currentStep,
     operations: args.operations,
+    ...(args.assessmentOnly !== undefined ? { assessmentOnly: args.assessmentOnly } : {}),
     ...(args.checkpoint !== undefined ? { checkpoint: args.checkpoint } : {}),
     ...(args.stepCompletions !== undefined ? { stepCompletions: args.stepCompletions } : {}),
     ...(args.semanticCompletion !== undefined ? { semanticCompletion: args.semanticCompletion } : {}),

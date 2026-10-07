@@ -508,9 +508,9 @@ When a draft intentionally refines one or more existing Shelf nodes, add roadmap
 
 For a bounded planning slice, add developmentMode as vertical, horizontal, maintain, or recover to describe the dominant direction YOU authored relative to the current critical path. Follow [PLANNING_STATE].steering when it remains appropriate, but this field describes the draft rather than granting steering authority. Small measured supporting work does not require a second mode; substantial mixed-direction work should be split at a better checkpoint.
 
-On every newly authored plan, include stepCompletions aligned with plan descriptions: {kind:"deterministic",checkpoint:{mode:"all",requirements:[...]}} for world-changing steps or waits, or {kind:"semantic",rationale:"..."} for observation/assessment only. You choose the intended outcome and quantities; the harness checks them. Research steps use research_completed with the exact technology, not an accepted request receipt. A semantic assessment cannot execute gameplay mutations. When tools are closed, return one JSON control object; checkpoint, stepCompletions and semanticCompletion remain permitted.
+On every newly authored plan, include stepCompletions aligned with plan descriptions: {kind:"deterministic",checkpoint:{mode:"all",requirements:[...]}} for world-changing steps or waits, or {kind:"semantic",rationale:"..."} for observation/assessment only. You choose the intended outcome and quantities; the harness checks them. A checkpoint declares a future result; missing inventory or unmet research does not make that result semantic. Research steps use research_completed with the exact technology, not an accepted request receipt. Combine multiple research_completed requirements with mode:"all" when the intended step requires multiple technologies. Execution drafts need at least one deterministic step. An intentionally observation-only slice instead declares assessmentOnly:true, has only semantic steps and no gameplay operations; it stays in the assessment conversation. A semantic assessment cannot execute gameplay mutations. When tools are closed, return one JSON control object; checkpoint, stepCompletions, assessmentOnly and semanticCompletion remain permitted.
 
-For the active Plan Tracker step, you may add one optional root field named checkpoint beside chatMessage/plan/currentStep/operations. checkpoint is your semantic completion proposal for deterministic runtime validation and verification, not a claim that the step is already done. It must use a runtime-supported contract: {"mode":"all|any","requirements":[...]} with requirement kinds inventory_count, entity_inventory_count, entity_exists, entity_state, authoritative_operation_receipt, or runtime_controller_state. Prefer world-state outcomes over action occurrence. Example: if the step means "have 100 stone" and the next operation only gathers 40 more because 62 are already held, checkpoint must say inventory_count stone >= 100, not >= 40. The operation batch describes what to do next; checkpoint describes what would prove the semantic step complete. Runtime remains completion authority for supported deterministic contracts. Omit checkpoint when no safe deterministic predicate represents the step; prose-only semantic steps remain the Main LLM's responsibility rather than being delegated to a second AI judge.
+For the active Plan Tracker step, you may add one optional root field named checkpoint beside chatMessage/plan/currentStep/operations. checkpoint is your completion proposal for deterministic runtime validation and verification, not a claim that the step is already done. It must use a runtime-supported contract: {"mode":"all|any","requirements":[...]} with requirement kinds inventory_count, research_completed {technology}, entity_inventory_count, entity_exists, entity_state, authoritative_operation_receipt, or runtime_controller_state. Prefer world-state outcomes over action occurrence. Example: if the step means "have 100 stone" and the next operation only gathers 40 more because 62 are already held, checkpoint must say inventory_count stone >= 100, not >= 40. The operation batch describes what to do next; checkpoint describes what would prove the step complete. Runtime remains completion authority for supported deterministic contracts. Reserve semantic declarations for actual observations and assessments; unknown current measurements are not a reason to downgrade an intended world result to an assessment.
 
 For a prose-only active step that intentionally has no deterministic checkpoint, you may explicitly close that semantic step with semanticCompletion: {"stepId":"<exact active step id>","rationale":"..."}. Use the stable active step id from [PLANNING_STATE]. The harness accepts this only when the id is still current, the step has no deterministic completion contract, and recent authoritative runtime evidence or a fresh live observation grounds your judgment. Never use semanticCompletion to bypass an unmet deterministic checkpoint. You may pair a valid semanticCompletion with operations for the newly-active next step; the harness advances the semantic step first, then validates those operations normally. Keeping the same plan and moving currentStep exactly one step forward with operations for that next step is read as the same claim for the active step, under the same checks.
 
@@ -3057,7 +3057,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // a role, so a restage within a role keeps the provider's cached prefix.
   rolePrefixMessages(role) {
     const plannerDelegation = this.completionProtocolVersion >= 2 && this.executorHandoffEnabled && role !== EXECUTOR_ROLE
-      ? '\n\n[PLANNER DELEGATION] For a new plan, choose the intended results and quantities and declare stepCompletions aligned with every step. You may return currentStep: 0 and operations: [] to hand a validated plan to a fresh executor context for this same NPC. This commits the declared outcomes without claiming any progress. The executor chooses the first bounded actions and the harness validates them before admission. This option does not replace a committed plan or waive amendment authority.'
+      ? '\n\n[PLANNER DELEGATION] For a new execution plan, choose the intended results and quantities and declare stepCompletions aligned with every step, including at least one deterministic checkpoint. You may return currentStep: 0 and operations: [] to hand that validated execution plan to a fresh executor context for this same NPC. Unmet checkpoints name future results, not progress claims. Multiple research results can use mode:"all" with research_completed {technology} requirements. To author an intentionally observation-only slice, declare assessmentOnly:true and only semantic steps; the planner performs that assessment without an executor handoff. The executor chooses bounded actions under frozen contracts and cannot change those contracts. This option does not replace a committed plan or waive amendment authority.'
       : ''
     return [{ role: 'system', content: roleSystemPrompt(this.systemPrompt, role === EXECUTOR_ROLE ? EXECUTOR_ROLE : PLANNER_ROLE) + plannerDelegation }]
   }
@@ -3790,6 +3790,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (next.roadmap !== undefined) { strip('roadmap'); ignored.push('roadmap'); reasons.push('roadmap_is_planner_authority') }
     if (next.roadmapNodeIds !== undefined) { strip('roadmapNodeIds'); ignored.push('roadmapNodeIds'); reasons.push('roadmap_is_planner_authority') }
     if (next.developmentMode !== undefined) { strip('developmentMode'); ignored.push('developmentMode'); reasons.push('development_mode_is_planner_authority') }
+    if (next.assessmentOnly !== undefined) { strip('assessmentOnly'); ignored.push('assessmentOnly'); reasons.push('assessment_only_is_planner_authority') }
     if (ignored.length === 0) return plan
     const requestId = this.traceRequest?.id
     await this.traceEvent('executor.plan_semantics_ignored', {
@@ -5885,6 +5886,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       && this.agentContext.role === PLANNER_ROLE && !!this.requestInfo
       && plan.operations.length === 0 && plan.plan.length > 0 && plan.currentStep === 0
       && plan.stepCompletions?.length === plan.plan.length
+      && plan.assessmentOnly !== true
       && !plan.semanticCompletion && !providerBlockerReason(plan)
       && !this.currentPendingAmendment() && !held?.replacement
       && (!held || [PLAN_STATUS.DRAFT, PLAN_STATUS.RUNTIME_VALIDATION, PLAN_STATUS.READY, PLAN_STATUS.COMPLETED].includes(held.status))
@@ -5920,6 +5922,24 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw error
     }
     const plannerOnlyDraft = this.plannerOnlyDraftCandidate(plan)
+    const allSemantic = plan.stepCompletions.every(declaration => declaration.kind === 'semantic')
+    const declarationError = plan.assessmentOnly === true && (!allSemantic || plan.operations.length > 0)
+      ? 'assessment_only_conflicts_with_execution'
+      : allSemantic && plan.operations.length === 0 && plan.assessmentOnly !== true ? 'execution_plan_has_no_world_checkpoint' : undefined
+    if (declarationError) {
+      await this.traceEvent('plan.completion_declarations_rejected', {
+        request_id: this.traceRequest?.id,
+        reason: declarationError,
+        assessment_only: plan.assessmentOnly === true,
+        step_count: plan.stepCompletions.length,
+      })
+      const error = new AgentLoopError(declarationError === 'assessment_only_conflicts_with_execution'
+        ? 'assessmentOnly:true permits only semantic observations/assessments and no gameplay operations; author an execution draft with deterministic checkpoints for world results instead'
+        : 'execution_plan_has_no_world_checkpoint: this draft declares only observations/assessments and cannot execute world work. Declare deterministic checkpoints for intended world results, including research_completed {technology}; mode:"all" can require multiple technologies. Unmet research or missing inventory does not make the intended result semantic. If you intentionally want only an assessment slice, declare assessmentOnly:true, retain only assessment steps and no gameplay operations, then close them with grounded semanticCompletion. Choose your own outcomes and quantities; no contract has been committed.')
+      error.failureClass = 'plan_category'
+      error.code = declarationError
+      throw error
+    }
     for (const [index, declaration] of plan.stepCompletions.entries()) {
       if (declaration.kind === 'semantic') {
         if (index === plan.currentStep && plan.operations.length > 0) {
@@ -10047,6 +10067,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw error
     }
     let stepCompletions
+    let assessmentOnly
     let checkpoint
     let goalDefinition
     let roadmap
@@ -10060,6 +10081,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       try { raw = JSON.parse(message.content) }
       catch {}
       if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        if (Object.prototype.hasOwnProperty.call(raw, 'assessmentOnly')) {
+          if (typeof raw.assessmentOnly !== 'boolean') {
+            const error = new AgentLoopError('assessmentOnly must be boolean')
+            error.failureClass = 'plan_category'
+            error.code = 'invalid_assessment_only'
+            throw error
+          }
+          assessmentOnly = raw.assessmentOnly
+        }
         if (Object.prototype.hasOwnProperty.call(raw, 'stepCompletions')) {
           try { stepCompletions = normalizeStepCompletions(raw.plan ?? [], raw.stepCompletions) }
           catch (cause) {
@@ -10122,7 +10152,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
         // 2.6: the model's answer to a time review; traced, never executed.
         if (Object.prototype.hasOwnProperty.call(raw, 'timeReview')) timeReview = parseTimeReview(raw.timeReview)
-        if (stepCompletions || checkpoint || semanticCompletion || roadmap || roadmapNodeIds || developmentMode || goalDefinition
+        if (assessmentOnly !== undefined || stepCompletions || checkpoint || semanticCompletion || roadmap || roadmapNodeIds || developmentMode || goalDefinition
           || Object.prototype.hasOwnProperty.call(raw, 'timeReview')
           || Object.prototype.hasOwnProperty.call(raw, 'goal')
           || Object.prototype.hasOwnProperty.call(raw, 'roadmap')
@@ -10130,6 +10160,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           || Object.prototype.hasOwnProperty.call(raw, 'developmentMode')
           || Object.prototype.hasOwnProperty.call(raw, 'semanticCompletion')) {
           const {
+            assessmentOnly: _assessmentOnly,
             stepCompletions: _stepCompletions,
             checkpoint: _checkpoint,
             semanticCompletion: _semanticCompletion,
@@ -10145,6 +10176,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
     const plan = super.parsePlanMessage(baseMessage)
+    if (assessmentOnly !== undefined) plan.assessmentOnly = assessmentOnly
     if (stepCompletions) plan.stepCompletions = stepCompletions
     if (checkpoint) plan.checkpoint = checkpoint
     if (semanticCompletion) plan.semanticCompletion = semanticCompletion
