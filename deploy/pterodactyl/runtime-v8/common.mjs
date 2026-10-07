@@ -406,7 +406,25 @@ export class Rcon {
   }
 }
 
+// A supervisor owns these files, but its foreground and shadow requests can
+// overlap. Atomic rename protects file contents, not the read/check/increment
+// transaction. Queue that whole transaction per resolved file in this process.
+const budgetReservations = new Map()
+
 export async function reserveBudget(filename, maximum, now = Date.now(), options = {}) {
+  const resolved = path.resolve(filename)
+  const key = process.platform === 'win32' ? resolved.toLowerCase() : resolved
+  const previous = budgetReservations.get(key) ?? Promise.resolve()
+  const reservation = previous.catch(() => {}).then(() => reserveBudgetTransaction(resolved, maximum, now, options))
+  budgetReservations.set(key, reservation)
+  try { return await reservation }
+  finally {
+    // An older completion must not remove a newer queued reservation.
+    if (budgetReservations.get(key) === reservation) budgetReservations.delete(key)
+  }
+}
+
+async function reserveBudgetTransaction(filename, maximum, now, options) {
   const budget = await readJson(filename, { since: now, count: 0 })
   check(Number.isSafeInteger(budget.since) && Number.isSafeInteger(budget.count) && budget.count >= 0, 'Invalid persisted provider budget')
   check(Number.isSafeInteger(maximum) && maximum >= 1, 'Invalid provider request budget maximum')
