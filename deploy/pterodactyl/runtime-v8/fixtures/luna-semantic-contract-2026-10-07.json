@@ -1,0 +1,587 @@
+{
+  "source": {
+    "candidate": "3278c4b19f45609da3f0f144af27eb09ff88b4bb",
+    "request_id": "req_muxsvx42_1",
+    "note": "Planner reconstructed from persisted committed declarations and acceptance trace; executor arguments retained unchanged from subsequent request history.",
+    "state_sha256": "d9841ffea0181d6788d26c4559b1c1549520f814ef8353f14889a2f39a2a804f"
+  },
+  "planner": {
+    "chatMessage": "I’ll follow the dependency order: first complete the exact triggers for electronics and steam power, then the automation-science-pack trigger, and only then research logistic science. The current evidence does not establish that copper ore is available or that gathering it completed, so I can’t safely claim that milestone or proceed with later actions.",
+    "plan": [
+      "Complete electronics and steam-power research triggers",
+      "Complete the automation-science-pack trigger",
+      "Research logistic science"
+    ],
+    "currentStep": 0,
+    "operations": [],
+    "goal": {
+      "scope": "long_horizon",
+      "summary": "Produce red science and research logistic-science-pack to unlock green science.",
+      "doneWhen": [
+        {
+          "id": "done_1",
+          "kind": "research_completed",
+          "technology": "logistic-science-pack"
+        }
+      ]
+    },
+    "roadmap": [
+      {
+        "id": "research-prerequisites",
+        "intent": "Complete research prerequisites",
+        "why_it_matters": "Perform the exact triggers for electronics, steam power, and automation science before logistic science."
+      },
+      {
+        "id": "produce-red-science",
+        "intent": "Produce red science",
+        "why_it_matters": "Make the required science available using natural resources and native game mechanics."
+      },
+      {
+        "id": "research-logistic-science",
+        "intent": "Research logistic science",
+        "why_it_matters": "Research logistic-science-pack and unlock its recipe."
+      }
+    ],
+    "stepCompletions": [
+      {
+        "kind": "semantic",
+        "rationale": "The exact trigger items and quantities are known, but current inventory and trigger completion are not verified; no safe deterministic checkpoint can establish both prerequisite technologies."
+      },
+      {
+        "kind": "semantic",
+        "rationale": "The lab trigger and its prerequisites must be completed and verified before advancing."
+      },
+      {
+        "kind": "semantic",
+        "rationale": "Logistic science requires 75 automation science packs; research completion must be verified."
+      }
+    ]
+  },
+  "executor": {
+    "chatMessage": "I’ll work on the active prerequisite step by acquiring the copper plates needed to trigger electronics research; steam-power still requires its own live verification and trigger work afterward.",
+    "plan": [
+      "Complete electronics and steam-power research triggers",
+      "Complete the automation-science-pack trigger",
+      "Research logistic science"
+    ],
+    "currentStep": 0,
+    "operations": [
+      {
+        "name": "gather_resource",
+        "args": {
+          "resource_name": "copper-ore",
+          "count": 10,
+          "search_radius": 4096
+        }
+      }
+    ],
+    "stepCompletions": [
+      {
+        "kind": "deterministic",
+        "checkpoint": {
+          "mode": "all",
+          "requirements": [
+            {
+              "kind": "research_completed",
+              "technology": "electronics"
+            },
+            {
+              "kind": "research_completed",
+              "technology": "steam-power"
+            }
+          ]
+        }
+      },
+      {
+        "kind": "deterministic",
+        "checkpoint": {
+          "mode": "all",
+          "requirements": [
+            {
+              "kind": "research_completed",
+              "technology": "automation-science-pack"
+            }
+          ]
+        }
+      },
+      {
+        "kind": "deterministic",
+        "checkpoint": {
+          "mode": "all",
+          "requirements": [
+            {
+              "kind": "research_completed",
+              "technology": "logistic-science-pack"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "blocker": "BLOCKED: The active prerequisite step requires completing both the electronics and steam-power research triggers. The available live evidence shows neither is researched, and SGLuna has no copper plates; with observations closed, I can’t confirm the copper-ore source or safely proceed with the required gathering.",
+  "committedMemory": {
+    "plans": [
+      {
+        "key": "npc:npc-1",
+        "state": {
+          "goal_id": "goal_088r72h_1",
+          "owner": "<server>",
+          "objective": "Produce red science and use it to research logistic-science-pack and unlock green science. Hand crafting and hand-fed machines are allowed; factory automation is optional. Use natural resources and native game mechanics. Finish when logistic-science-pack is researched and its recipe is enabled.",
+          "status": "paused",
+          "blocker": "",
+          "pause_reason": "recoverable_provider_failure:provider_reported_blocker",
+          "plan": [
+            "Complete electronics and steam-power research triggers",
+            "Complete the automation-science-pack trigger",
+            "Research logistic science"
+          ],
+          "current_step": 0,
+          "revision": 2,
+          "last_chat_message": "BLOCKED: The active prerequisite step requires completing both the electronics and steam-power research triggers. The available live evidence shows neither is researched, and SGLuna has no copper plates; with observations closed, I can’t confirm the copper-ore source or safely proceed with the required gathering.",
+          "last_operations": [],
+          "durable_last_operations": [],
+          "exact_target_audit": [],
+          "last_mutation_verified": false,
+          "updated_at": 1791359024530,
+          "history": [
+            {
+              "revision": 1,
+              "status": "active",
+              "current_step": 0,
+              "step": "Complete electronics and steam-power research triggers",
+              "chat": "BLOCKED: The active prerequisite step requires completing both the electronics and steam-power research triggers. The available live evidence shows neither is researched, and SGLuna has no copper plates; with observations closed, I can’t confirm the copper-ore source or safely proceed with the required gathering."
+            }
+          ],
+          "task_board": {
+            "kind": "task_board_lite",
+            "goal_id": "goal_088r72h_1",
+            "status": "paused",
+            "blocker": "",
+            "pause_reason": "recoverable_provider_failure:provider_reported_blocker",
+            "revision": 2,
+            "event_sequence": 2,
+            "active_index": 0,
+            "active_step_id": "step_1",
+            "proposed_focus_index": 0,
+            "proposed_focus_step_id": "step_1",
+            "completed_count": 0,
+            "total_steps": 3,
+            "steps": [
+              {
+                "id": "step_1",
+                "description": "Complete electronics and steam-power research triggers",
+                "status": "paused",
+                "revision": 1,
+                "completion_contract": null,
+                "completion_mode": "semantic",
+                "semantic_rationale": "The exact trigger items and quantities are known, but current inventory and trigger completion are not verified; no safe deterministic checkpoint can establish both prerequisite technologies."
+              },
+              {
+                "id": "step_2",
+                "description": "Complete the automation-science-pack trigger",
+                "status": "pending",
+                "revision": 1,
+                "completion_contract": null,
+                "completion_mode": "semantic",
+                "semantic_rationale": "The lab trigger and its prerequisites must be completed and verified before advancing."
+              },
+              {
+                "id": "step_3",
+                "description": "Research logistic science",
+                "status": "pending",
+                "revision": 1,
+                "completion_contract": null,
+                "completion_mode": "semantic",
+                "semantic_rationale": "Logistic science requires 75 automation science packs; research completion must be verified."
+              }
+            ],
+            "evidence": [],
+            "events": [
+              {
+                "seq": 1,
+                "type": "created",
+                "at": 1791359007297,
+                "revision": 1,
+                "active_step_id": "step_1",
+                "total_steps": 3
+              },
+              {
+                "seq": 2,
+                "type": "paused",
+                "at": 1791359024530,
+                "revision": 2,
+                "active_step_id": "step_1"
+              }
+            ],
+            "created_at": 1791359007297,
+            "updated_at": 1791359024530,
+            "evidence_sequence": 0
+          },
+          "planning": {
+            "reasoning_epoch": 2,
+            "plan": {
+              "plan_id": "goal_088r72h_1_p3",
+              "plan_version": 1,
+              "roadmap_node_id": "research-prerequisites"
+            }
+          }
+        }
+      }
+    ],
+    "planning_states": [
+      {
+        "key": "npc:npc-1",
+        "state": {
+          "version": 1,
+          "sequence": 3,
+          "goal": {
+            "goal_id": "goal_088r72h_1",
+            "owner": "<server>",
+            "objective": "Produce red science and use it to research logistic-science-pack and unlock green science. Hand crafting and hand-fed machines are allowed; factory automation is optional. Use natural resources and native game mechanics. Finish when logistic-science-pack is researched and its recipe is enabled.",
+            "constraints": [],
+            "status": "active",
+            "created_at": 1791358982524,
+            "updated_at": 1791359007303,
+            "definition": {
+              "scope": "long_horizon",
+              "summary": "Produce red science and research logistic-science-pack to unlock green science.",
+              "done_when": [
+                {
+                  "id": "done_1",
+                  "kind": "research_completed",
+                  "technology": "logistic-science-pack"
+                }
+              ],
+              "source": "main_planner",
+              "defined_at": 1791359007303
+            }
+          },
+          "roadmap": {
+            "roadmap_revision_id": "goal_088r72h_1_r2",
+            "goal_id": "goal_088r72h_1",
+            "revision_index": 1,
+            "derived_from_revision_id": null,
+            "reason": "goal_decomposed_to_shelf",
+            "authority": "user",
+            "evidence_refs": [],
+            "created_at": 1791359007297,
+            "nodes": [
+              {
+                "id": "research-prerequisites",
+                "ready_since": 1791359007297,
+                "intent": "Complete research prerequisites",
+                "why_it_matters": "Perform the exact triggers for electronics, steam power, and automation science before logistic science.",
+                "status": "ready_to_refine",
+                "depends_on": [],
+                "resolved_by": [],
+                "assumptions": [],
+                "first_seen_revision_id": "goal_088r72h_1_r2",
+                "verified_results": [],
+                "capability_frontier": null
+              },
+              {
+                "id": "produce-red-science",
+                "ready_since": 1791359007297,
+                "intent": "Produce red science",
+                "why_it_matters": "Make the required science available using natural resources and native game mechanics.",
+                "status": "ready_to_refine",
+                "depends_on": [],
+                "resolved_by": [],
+                "assumptions": [],
+                "first_seen_revision_id": "goal_088r72h_1_r2",
+                "verified_results": [],
+                "capability_frontier": null
+              },
+              {
+                "id": "research-logistic-science",
+                "ready_since": 1791359007297,
+                "intent": "Research logistic science",
+                "why_it_matters": "Research logistic-science-pack and unlock its recipe.",
+                "status": "ready_to_refine",
+                "depends_on": [],
+                "resolved_by": [],
+                "assumptions": [],
+                "first_seen_revision_id": "goal_088r72h_1_r2",
+                "verified_results": [],
+                "capability_frontier": null
+              }
+            ]
+          },
+          "roadmap_history": [],
+          "plans": [
+            {
+              "plan_id": "goal_088r72h_1_p3",
+              "plan_version": 1,
+              "goal_id": "goal_088r72h_1",
+              "roadmap_revision_id": "goal_088r72h_1_r2",
+              "roadmap_node_ids": [
+                "research-prerequisites"
+              ],
+              "development_mode": "vertical",
+              "refinement_grounding": {
+                "ready_node_ids": [
+                  "research-prerequisites"
+                ],
+                "not_ready": []
+              },
+              "steering_at_draft": {
+                "mode": "vertical",
+                "steering_sequence": 1,
+                "critical_path": null,
+                "diverges_from_steering": false
+              },
+              "status": "COMMITTED",
+              "steps": [
+                {
+                  "step_id": "goal_088r72h_1_p3_v1_s1_1xd3iiq",
+                  "description": "Complete electronics and steam-power research triggers",
+                  "completion_contract": null,
+                  "completion_mode": "semantic",
+                  "semantic_rationale": "The exact trigger items and quantities are known, but current inventory and trigger completion are not verified; no safe deterministic checkpoint can establish both prerequisite technologies.",
+                  "completion_confidence": "reduced",
+                  "reduced_confidence": true
+                },
+                {
+                  "step_id": "goal_088r72h_1_p3_v1_s2_1ibk7kk",
+                  "description": "Complete the automation-science-pack trigger",
+                  "completion_contract": null,
+                  "completion_mode": "semantic",
+                  "semantic_rationale": "The lab trigger and its prerequisites must be completed and verified before advancing.",
+                  "completion_confidence": "reduced",
+                  "reduced_confidence": true
+                },
+                {
+                  "step_id": "goal_088r72h_1_p3_v1_s3_0ovdasa",
+                  "description": "Research logistic science",
+                  "completion_contract": null,
+                  "completion_mode": "semantic",
+                  "semantic_rationale": "Logistic science requires 75 automation science packs; research completion must be verified.",
+                  "completion_confidence": "reduced",
+                  "reduced_confidence": true
+                }
+              ],
+              "active_step_index": 0,
+              "derived_from_plan_id": null,
+              "superseded_by_plan_id": null,
+              "origin": "live_task_board",
+              "created_at": 1791359007297,
+              "updated_at": 1791359024530,
+              "committed_at": 1791359007344,
+              "completed_at": null,
+              "blocker": null,
+              "execution": {
+                "step_progress": {
+                  "goal_088r72h_1_p3_v1_s1_1xd3iiq": {
+                    "status": "active",
+                    "accepted_evidence": [],
+                    "batches_attempted": 1,
+                    "batches_since_evidence": 1,
+                    "operations_attempted": 1,
+                    "failure_counts": {
+                      "provider_reported_blocker": 1
+                    },
+                    "contract_satisfied": false,
+                    "unsatisfiable": null,
+                    "completed_at": null
+                  },
+                  "goal_088r72h_1_p3_v1_s2_1ibk7kk": {
+                    "status": "pending",
+                    "accepted_evidence": [],
+                    "batches_attempted": 0,
+                    "batches_since_evidence": 0,
+                    "operations_attempted": 0,
+                    "failure_counts": {},
+                    "contract_satisfied": false,
+                    "unsatisfiable": null,
+                    "completed_at": null
+                  },
+                  "goal_088r72h_1_p3_v1_s3_0ovdasa": {
+                    "status": "pending",
+                    "accepted_evidence": [],
+                    "batches_attempted": 0,
+                    "batches_since_evidence": 0,
+                    "operations_attempted": 0,
+                    "failure_counts": {},
+                    "contract_satisfied": false,
+                    "unsatisfiable": null,
+                    "completed_at": null
+                  }
+                },
+                "batches_attempted": 1,
+                "receipts": {},
+                "receipts_seeded": true
+              },
+              "advisory": {
+                "planner_focus_step_id": "goal_088r72h_1_p3_v1_s1_1xd3iiq",
+                "planner_focus_at": 1791359007297,
+                "steering_note": null
+              },
+              "carried_forward_evidence": [],
+              "lifecycle": [
+                {
+                  "status": "DRAFT",
+                  "at": 1791359007297,
+                  "reason": "live_task_board"
+                },
+                {
+                  "status": "COMMITTED",
+                  "at": 1791359007344,
+                  "reason": "auto_commit_runtime_validated"
+                }
+              ],
+              "runtime_validation": {
+                "passed": true,
+                "validated_at": 1791359007344,
+                "scope": "completion_contracts",
+                "unsupported_step_ids": []
+              }
+            }
+          ],
+          "active_plan_id": "goal_088r72h_1_p3",
+          "steering": {
+            "current_mode": "vertical",
+            "previous_mode": null,
+            "reason": null,
+            "critical_path": null,
+            "pressure": {
+              "vertical": [
+                "capability_absent",
+                "goal_requires_new_capability"
+              ],
+              "horizontal": []
+            },
+            "dropped_pressure": [],
+            "last_plan_id": null,
+            "last_directional_mode": "vertical",
+            "consecutive_mode_slices": 1,
+            "hysteresis_applied": false,
+            "hold_reasons": [],
+            "proposed_mode": "vertical",
+            "forced_by_user": false,
+            "recommendation": {
+              "recommended_by": "jev",
+              "recommended_mode": "vertical",
+              "confidence": 0.36,
+              "reason_codes": [
+                "capability_absent",
+                "goal_requires_new_capability"
+              ],
+              "candidate_shelf_nodes": []
+            },
+            "user_priority": null,
+            "boundary": "goal_admission",
+            "authority": "runtime",
+            "sequence": 1,
+            "updated_at": 1791358982708,
+            "history": [
+              {
+                "mode": "vertical",
+                "boundary": "goal_admission",
+                "at": 1791358982708,
+                "plan_id": null,
+                "changed": true,
+                "hysteresis_applied": false,
+                "hold_reasons": []
+              }
+            ]
+          },
+          "updated_at": 1791359024530,
+          "reasoning_epoch": 2,
+          "last_reasoning_reset": {
+            "epoch": 2,
+            "at": 1791359007297,
+            "event_type": "ROADMAP_REVISED",
+            "reason": "goal_decomposed_to_shelf"
+          },
+          "run": {
+            "paused": true,
+            "pause_reason": "recoverable_provider_failure:provider_reported_blocker",
+            "pause_code": "recoverable_provider_failure",
+            "paused_at": 1791359024530,
+            "resumed_at": null,
+            "pause_count": 1,
+            "condition_wait": null,
+            "provider_recovery": null,
+            "persistent_runtime": null,
+            "pending_operation": null,
+            "locators": {
+              "durable_last_operations": [],
+              "exact_target_audit": []
+            },
+            "stale_exact_identities": [],
+            "updated_at": 1791359024530
+          },
+          "context_restages": [
+            {
+              "goal_id": "goal_088r72h_1",
+              "plan_id": "goal_088r72h_1_p3",
+              "role": "executor",
+              "checkpoint": "C3",
+              "reason": "executor_fresh_at_plan_commit",
+              "handoff_id": "ho_1fbdb58d3af9",
+              "packet_chars": 1669,
+              "previous_context_chars": 73685,
+              "at": 1791359007494
+            }
+          ],
+          "log": [
+            {
+              "type": "GOAL_ACCEPTED",
+              "at": 1791358982524,
+              "goal_id": "goal_088r72h_1"
+            },
+            {
+              "type": "STEERING_EVALUATED",
+              "at": 1791358982708,
+              "boundary": "goal_admission",
+              "mode": "vertical",
+              "hysteresis_applied": false
+            },
+            {
+              "type": "ROADMAP_REVISED",
+              "at": 1791359007297,
+              "roadmap_revision_id": "goal_088r72h_1_r2",
+              "reason": "goal_decomposed_to_shelf"
+            },
+            {
+              "type": "DRAFT_CREATED",
+              "at": 1791359007297,
+              "plan_id": "goal_088r72h_1_p3"
+            },
+            {
+              "type": "GOAL_DEFINED",
+              "at": 1791359007303,
+              "goal_id": "goal_088r72h_1"
+            },
+            {
+              "type": "PLAN_COMMITTED",
+              "at": 1791359007344,
+              "plan_id": "goal_088r72h_1_p3"
+            },
+            {
+              "type": "RUN_PAUSED",
+              "at": 1791359024530,
+              "reason_code": "recoverable_provider_failure"
+            }
+          ]
+        }
+      }
+    ],
+    "version": 1,
+    "dialogue": [
+      {
+        "key": "npc:npc-1",
+        "summary": "",
+        "recent": [
+          {
+            "id": 1,
+            "sender": "<server>",
+            "user": "Produce red science and use it to research logistic-science-pack and unlock green science. Hand crafting and hand-fed machines are allowed; factory automation is optional. Use natural resources and native game mechanics. Finish when logistic-science-pack is researched and its recipe is enabled.",
+            "assistant": "BLOCKED: The active prerequisite step requires completing both the electronics and steam-power research triggers. The available live evidence shows neither is researched, and SGLuna has no copper plates; with observations closed, I can’t confirm the copper-ore source or safely proceed with the required gathering.",
+            "actions": ""
+          }
+        ]
+      }
+    ]
+  }
+}
