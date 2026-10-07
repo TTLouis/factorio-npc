@@ -2347,6 +2347,15 @@ function stateFileFromOptions(options) {
 
 // Cut a truncated JSON object back to its last complete top-level member.
 // Never invents content: it only drops an incomplete trailing member.
+function providerMessageWith(message, patch) {
+  const result = { ...message, ...patch }
+  for (const key of ['_sglunaProvider', '_sglunaClosedRoundCalls']) {
+    const descriptor = Object.getOwnPropertyDescriptor(message, key)
+    if (descriptor) Object.defineProperty(result, key, descriptor)
+  }
+  return result
+}
+
 export function salvageTruncatedJsonObject(raw) {
   if (typeof raw !== 'string') return undefined
   const text = raw.trimStart()
@@ -5453,7 +5462,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   async classifyInteraction(text, sender, taskStatus, planState) {
     const current = await super.captureEpoch()
-    await this.reserve({ epoch: current.epoch, actorId: current.actor_id })
     const currentGoal = planState
       ? {
           goal_id: sanitizeDurableModelText(planState.goal_id, 100),
@@ -5550,6 +5558,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           typed_intent: typedDecision.intent,
           typed_confidence: typedDecision.intent_confidence,
           language_router_called: false,
+          request_id: this.traceRequest?.id ?? decisionId,
+          reason: 'typed_route_without_main_provider',
         })
         return {
           route,
@@ -5568,6 +5578,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         throw new AgentLoopError('Interaction router provider is unavailable for ambiguous or conversational interaction')
       }
 
+      // Jev has its own allowance; reserve main quota only for a language call.
+      await this.reserve({ epoch: current.epoch, actorId: current.actor_id })
+      await this.traceEvent('interaction.main_provider_reserved', {
+        request_id: this.traceRequest?.id ?? decisionId ?? 'interaction',
+        reason: 'language_router_fallback',
+      })
+      if (controller.signal.aborted) throw new AgentLoopError('Interaction routing cancelled or superseded')
       const message = await this.interactionProvider([
         { role: 'system', content: INTERACTION_ROUTER_PROMPT },
         { role: 'user', content: JSON.stringify(state) },
@@ -7946,11 +7963,68 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // goal_start counter still lacks. Called when the goal is defined, so the
   // baseline is where the counter stood then, and again at every evaluation in
   // case that first read failed.
+  // Force-level checks are intentionally readable without a body during a death
+  // gap. Capture that absence too: replacement/body recovery changes the fence.
+  async goalEvaluationActor(definition) {
+    const raw = await this.rcon.command('/silent-command rcon.print(helpers.table_to_json(remote.call("sgluna_deployment","status")))')
+    let status
+    try { status = JSON.parse(String(raw).trim()) }
+    catch { throw new AgentLoopError('goal_evaluation_identity_unverifiable: invalid deployment status') }
+    const valid = status?.revision === 'sgluna-deploy-v8-npc-staging' && status.mode === 'npc'
+      && typeof status.session === 'string' && status.session.length > 0
+      && Number.isSafeInteger(status.epoch) && status.epoch > 0 && typeof status.allowed === 'boolean'
+      && status.actor_interface === true && status.operations === true && status.tools === true
+    const hasBody = Number.isSafeInteger(status?.actor_id) && status.actor_id > 0 && status.actor_kind === 'standalone_character'
+    const absentBody = status?.actor_id === undefined && status?.actor_kind === undefined
+    if (!valid || (!hasBody && !absentBody) || (definition.done_when.some(condition => condition.kind === 'inventory_count') && !hasBody)) {
+      throw new AgentLoopError('goal_evaluation_identity_unverifiable: deployment has no compatible actor lineage')
+    }
+    return { session: status.session, mode: status.mode, epoch: status.epoch, actor_id: status.actor_id, actor_kind: status.actor_kind }
+  }
+
+  goalEvaluationMatches(fence) {
+    const goal = this.memory.planningState?.(fence.key)?.goal
+    return this.activePlanKey() === fence.key && goal?.goal_id === fence.goalId
+      && JSON.stringify(goal?.definition) === fence.definition
+      && this.generation === fence.generation && this.agentContext.lineageSequence === fence.lineage
+      && JSON.stringify(this.epoch) === fence.runtimeActor
+  }
+
+  async assertGoalEvaluationCurrent(fence) {
+    const actor = await this.goalEvaluationActor(fence.conditions)
+    if (!this.goalEvaluationMatches(fence) || JSON.stringify(actor) !== JSON.stringify(fence.actor)) {
+      await this.traceEvent('goal.evaluation_discarded', {
+        request_id: fence.requestId, goal_id: fence.goalId, reason: 'goal_definition_or_actor_lineage_superseded',
+      }, { requestId: fence.requestId })
+      const error = new AgentLoopError('goal_evaluation_superseded: goal definition or actor epoch changed')
+      error.code = 'goal_evaluation_superseded'
+      throw error
+    }
+  }
+
   async readGoalDefinition(key, definition, sampling = this.goalSampling) {
-    const evaluation = await evaluateGoalDefinition(definition, command => this.rcon.command(command), sampling)
+    const fence = {
+      key, goalId: this.memory.planningState?.(key)?.goal?.goal_id,
+      definition: JSON.stringify(definition), conditions: definition,
+      generation: this.generation, lineage: this.agentContext.lineageSequence,
+      runtimeActor: JSON.stringify(this.epoch),
+      requestId: this.traceRequest?.id ?? this.turnScope.getStore()?.requestId ?? 'goal-evaluation',
+    }
+    fence.actor = await this.goalEvaluationActor(definition)
+    if (!this.goalEvaluationMatches(fence)) await this.assertGoalEvaluationCurrent(fence)
+    const evaluation = await evaluateGoalDefinition(definition, async command => {
+      await this.assertGoalEvaluationCurrent(fence)
+      const result = await this.rcon.command(command)
+      await this.assertGoalEvaluationCurrent(fence)
+      return result
+    }, sampling)
+    await this.assertGoalEvaluationCurrent(fence)
+    Object.defineProperty(evaluation, '_sglunaGoalFence', { value: fence, enumerable: false })
     if (Object.keys(evaluation.baselines ?? {}).length > 0 && typeof this.memory.recordGoalBaselines === 'function') {
       this.memory.recordGoalBaselines(key, evaluation.baselines)
+      fence.definition = JSON.stringify(this.memory.goalDefinition?.(key))
       await this.traceEvent('goal.baselines_recorded', { baselines: evaluation.baselines })
+      await this.assertGoalEvaluationCurrent(fence)
     }
     return evaluation
   }
@@ -7960,24 +8034,30 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const definition = this.memory.goalDefinition?.(key)
     if (!definition) return undefined
     const evaluation = await this.readGoalDefinition(key, definition)
-    this.lastGoalEvaluation = evaluation
+    await this.assertGoalEvaluationCurrent(evaluation._sglunaGoalFence)
     await this.traceEvent('goal.evaluated', {
       satisfied: evaluation.satisfied,
       progress: formatGoalProgress(evaluation),
       results: evaluation.results,
     })
+    await this.assertGoalEvaluationCurrent(evaluation._sglunaGoalFence)
+    this.lastGoalEvaluation = evaluation
     if (record && evaluation.satisfied) await this.recordGoalEvaluationSatisfied(evaluation)
     return evaluation
   }
 
   async recordGoalEvaluationSatisfied(evaluation) {
     if (typeof this.memory.recordGoalSatisfaction !== 'function') return
-    this.memory.recordGoalSatisfaction(this.activePlanKey(), {
+    const fence = evaluation._sglunaGoalFence
+    if (!fence || !evaluation.satisfied) throw new AgentLoopError('Goal satisfaction requires current authoritative evaluation')
+    await this.assertGoalEvaluationCurrent(fence)
+    this.memory.recordGoalSatisfaction(fence.key, {
       source: 'runtime',
       evidenceRefs: evaluation.results.map(result => `goal_condition/${result.id}/${result.current ?? 'true'}`),
       rationale: 'goal_definition_conditions_satisfied',
     })
     await this.persistState()
+    await this.assertGoalEvaluationCurrent(fence)
   }
 
   // The planner declared the whole goal done while plan steps remain. With a
@@ -7989,6 +8069,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!this.memory.goalDefinition?.(key)) return undefined
     const evaluation = await this.evaluateGoalCompletion({ record: false })
     if (!evaluation) return undefined
+    await this.assertGoalEvaluationCurrent(evaluation._sglunaGoalFence)
     const unverifiable = evaluation.results.filter(result => /^(?:unknown_|invalid_)/.test(result.error ?? ''))
     if (unverifiable.length > 0) return this.pauseForUnverifiableGoal(unverifiable)
     if (!evaluation.satisfied) return undefined
@@ -8005,6 +8086,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }],
     }, { chatMessage: plan.chatMessage })
     await this.recordGoalEvaluationSatisfied(evaluation)
+    await this.assertGoalEvaluationCurrent(evaluation._sglunaGoalFence)
     this.clearActionOmissionRecovery()
     this.active = false
     // The legacy plan is completed and retired; its board is re-projected from
@@ -8017,12 +8099,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       reason_code: 'goal_definition_satisfied',
       task_board: completedBoard,
     })
+    await this.assertGoalEvaluationCurrent(evaluation._sglunaGoalFence)
     await this.traceEvent('request.completed', {
       chat_message: chatMessage,
       outcome: 'goal_verified_complete',
       task_board: completedBoard,
       usage: this.traceRequest?.usage,
     })
+    await this.assertGoalEvaluationCurrent(evaluation._sglunaGoalFence)
     this.traceRequest = null
     return {
       chatMessage,
@@ -8039,7 +8123,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   unmetGoalNote() {
     const evaluation = this.lastGoalEvaluation
-    if (!evaluation || evaluation.satisfied) return ''
+    if (!evaluation || evaluation.satisfied
+      || (evaluation._sglunaGoalFence && !this.goalEvaluationMatches(evaluation._sglunaGoalFence))) return ''
     const unmet = evaluation.results.filter(result => !result.satisfied)
       .map(result => `${result.id}${result.current !== undefined ? ` (currently ${result.current})` : ''}`)
       .join(', ')
@@ -8574,6 +8659,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       && planningAfterCompletion?.goal?.status === GOAL_STATUS.ACTIVE
       && reducerPlanAfterCompletion?.status === PLAN_STATUS.COMPLETED) {
       goalEvaluation = await this.evaluateGoalCompletion()
+      if (goalEvaluation) await this.assertGoalEvaluationCurrent(goalEvaluation._sglunaGoalFence)
       planningAfterCompletion = this.memory.planningState?.(this.activePlanKey())
       const unverifiable = goalEvaluation?.results.filter(result => /^(?:unknown_|invalid_)/.test(result.error ?? '')) ?? []
       if (unverifiable.length > 0) return this.pauseForUnverifiableGoal(unverifiable)
@@ -8638,6 +8724,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (planningAfterCompletion?.goal && this.memory.planningState?.(this.activePlanKey())?.goal?.status !== GOAL_STATUS.COMPLETED) {
         return this.endSliceWithoutPlanner({ route: 'legacy_completion_not_goal_proof', reason: 'canonical_goal_not_completed' })
       }
+      if (goalEvaluation) await this.assertGoalEvaluationCurrent(goalEvaluation._sglunaGoalFence)
       this.active = false
       const completedBoard = visibleTaskBoard(completionState.task_board)
       await this.traceEvent('outcome.validated', {
@@ -8646,10 +8733,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         reason_code: 'verified_final_step',
         task_board: completedBoard,
       })
+      if (goalEvaluation) await this.assertGoalEvaluationCurrent(goalEvaluation._sglunaGoalFence)
       await this.traceEvent('planner.skipped', {
         source: 'outcome_authority',
         route: 'deterministic_close',
       })
+      if (goalEvaluation) await this.assertGoalEvaluationCurrent(goalEvaluation._sglunaGoalFence)
       const completionMessage = goalEvaluation?.satisfied
         ? `The requested goal is verified complete: the game reports ${formatGoalProgress(goalEvaluation)}.`
         : 'The requested goal is verified complete.'
@@ -8659,6 +8748,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         task_board: completedBoard,
         usage: this.traceRequest?.usage,
       })
+      if (goalEvaluation) await this.assertGoalEvaluationCurrent(goalEvaluation._sglunaGoalFence)
       this.traceRequest = null
       return {
         chatMessage: completionMessage,
@@ -9397,11 +9487,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         plan_steps: state.plan.length,
         current_step: currentStep,
       })
-      return {
-        ...message,
+      return providerMessageWith(message, {
         tool_calls: undefined,
         content: JSON.stringify({ chatMessage: '', plan: state.plan, currentStep, operations: parsed }),
-      }
+      })
     }
 
     // Observation-only.
@@ -9725,6 +9814,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     await this.assertCurrent()
     await this.dropIfStale(attribution)
     if (!message || typeof message !== 'object') throw new AgentLoopError('Provider returned no message')
+    // Filtered output must never reach planner extraction or salvage. Transport
+    // diagnostics are non-enumerable and ordinary spread normalization loses them.
+    if (message?._sglunaProvider?.diagnostic_code === 'provider_safety_blocked') {
+      await this.traceEvent('provider.fatal_response_rejected', {
+        request_id: this.traceRequest?.id ?? 'provider-response',
+        reason: 'provider_safety_blocked', round,
+      })
+      const error = new AgentLoopError('provider_safety_blocked: provider refused the response through a safety/content filter')
+      error.failureClass = 'provider_safety'
+      error.code = 'provider_safety_blocked'
+      throw error
+    }
     // Calls a closed round made anyway (structured or leaked DSML text); provider-base
     // dropped them from the message and left them here for salvage.
     const closedRoundCalls = !effectiveAllowTools ? message._sglunaClosedRoundCalls : undefined
@@ -9758,10 +9859,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const salvaged = salvageTruncatedJsonObject(rawArgs)
       if (salvaged) {
         try {
-          plannerSubmission = plannerControlPayloadFromMessage({
-            ...message,
+          plannerSubmission = plannerControlPayloadFromMessage(providerMessageWith(message, {
             tool_calls: [{ ...call, function: { ...call.function, arguments: salvaged.text } }],
-          })
+          }))
           await this.traceEvent('provider.plan_submission_salvaged', {
             kept_keys: salvaged.keys,
             dropped_chars: rawArgs.length - salvaged.cut,
@@ -9769,7 +9869,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
         catch {}
       }
-      if (!plannerSubmission) message = { ...message, tool_calls: undefined, content: rawArgs }
+      if (!plannerSubmission) message = providerMessageWith(message, { tool_calls: undefined, content: rawArgs })
     }
     if (plannerSubmission) {
       await this.traceEvent('provider.plan_submission', {
@@ -9780,11 +9880,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         roadmap_nodes: Array.isArray(plannerSubmission.roadmap) ? plannerSubmission.roadmap.length : 0,
         natural_content_chars: typeof message.content === 'string' ? message.content.length : 0,
       })
-      message = {
-        ...message,
+      message = providerMessageWith(message, {
         tool_calls: undefined,
         content: JSON.stringify(plannerSubmission),
-      }
+      })
     }
 
     if (Array.isArray(closedRoundCalls) && closedRoundCalls.length > 0) {
@@ -9800,8 +9899,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         reason_code: 'observation_budget_exhausted',
         requested_tool_calls: Array.isArray(message.tool_calls) ? message.tool_calls.length : 0,
       })
-      message = {
-        ...message,
+      message = providerMessageWith(message, {
         tool_calls: undefined,
         content: JSON.stringify({
           chatMessage: 'Action-omission repair attempted another observation after the bounded observation budget was exhausted.',
@@ -9809,7 +9907,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           currentStep: Number.isSafeInteger(state?.current_step) ? state.current_step : 0,
           operations: [],
         }),
-      }
+      })
     }
 
     // Scope output-budget recovery to this provider decision rather than the
@@ -10042,7 +10140,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             timeReview: _timeReview,
             ...base
           } = raw
-          baseMessage = { ...message, content: JSON.stringify(base) }
+          baseMessage = providerMessageWith(message, { content: JSON.stringify(base) })
         }
       }
     }
