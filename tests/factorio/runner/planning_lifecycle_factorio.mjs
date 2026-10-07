@@ -167,6 +167,12 @@ function assertUnmeasuredShelfProgress(planning, id, planId) {
   assert.ok(node.verified_results.length > 0, `${id}: partial progress still requires verified results`)
 }
 
+function assertUnreadyFrontierRecorded(planning, plan) {
+  assert.equal(nodeById(planning, 'next-capability-frontier')?.status, 'tentative', 'unmeasured support cannot unblock its dependent frontier')
+  assert.deepEqual(plan.refinement_grounding.ready_node_ids, [], 'intentional refinement must not invent dependency readiness')
+  assert.deepEqual(plan.refinement_grounding.not_ready, [{ node_id: 'next-capability-frontier', reason: 'dependencies_unsatisfied' }])
+}
+
 async function prepare({ rcon, results, stateFile }) {
   await configureNpcSession(rcon, 'sgluna-factorio-planning-lifecycle-prepare-0001')
 
@@ -233,7 +239,10 @@ async function prepare({ rcon, results, stateFile }) {
       return planMessage({
         chatMessage: 'Starting the next vertical frontier slice.',
         step: 'Advance the next capability frontier',
-        minimum: ironBefore + 3,
+        // Keep this committed step genuinely unmet before restart. A satisfied
+        // checkpoint now settles at idle admission, so it cannot be used to
+        // test blocking/revision of an unfinished immutable plan.
+        minimum: ironBefore + 4,
         roadmapNodeIds: ['next-capability-frontier'],
         developmentMode: 'vertical',
       })
@@ -258,8 +267,8 @@ async function prepare({ rcon, results, stateFile }) {
       return steeringAnswer(
         questions,
         'horizontal',
-        // The only horizontal pressure the steering state can ground: the
-        // shelf marks acquisition-support as horizontal and it is now ready.
+        // This advisory proposes support work; refinement grounding below
+        // records that the unmeasured dependency is still unsatisfied.
         'shelf_support_node_ready',
         ['acquisition-support'],
       )
@@ -329,7 +338,7 @@ async function prepare({ rcon, results, stateFile }) {
 
   assertUnmeasuredShelfProgress(planning, 'acquisition-frontier', completedV1.plan_id)
   assertUnmeasuredShelfProgress(planning, 'acquisition-support', completedV2.plan_id)
-  assert.equal(nodeById(planning, 'next-capability-frontier')?.status, 'ready_to_refine')
+  assertUnreadyFrontierRecorded(planning, active)
   assert.equal(planning.goal.status, 'active')
   assert.equal(planning.steering.current_mode, 'vertical')
   assert.deepEqual(
@@ -340,6 +349,9 @@ async function prepare({ rcon, results, stateFile }) {
 
   const ironAfter = JSON.parse(await rcon.command(actorIronCommand())).iron
   assert.ok(ironAfter >= ironBefore + 3, `real Factorio inventory did not reflect three admitted acquisition slices: before=${ironBefore} after=${ironAfter}`)
+  const activeIron = active.steps[0].completion_contract?.requirements.find(requirement => requirement.kind === 'inventory_count' && requirement.item_name === 'iron-ore')
+  assert.equal(activeIron?.minimum, ironBefore + 4, 'v3 retains its declared unfinished target')
+  assert.ok(ironAfter < activeIron.minimum, 'the committed v3 checkpoint must remain unmet before restart')
 
   await agent.persistState()
   await fsp.writeFile(path.join(results, 'planning-lifecycle-prepare.json'), JSON.stringify({
@@ -438,7 +450,7 @@ async function verify({ rcon, results, stateFile }) {
   )
   assertUnmeasuredShelfProgress(planning, 'acquisition-frontier', before.completed_v1)
   assertUnmeasuredShelfProgress(planning, 'acquisition-support', before.completed_v2)
-  assert.equal(nodeById(planning, 'next-capability-frontier')?.status, 'ready_to_refine')
+  assertUnreadyFrontierRecorded(planning, active)
 
   const blockedResult = await agent.request('continue', { sender: 'Louis' })
   planning = memory.planningState(key)
