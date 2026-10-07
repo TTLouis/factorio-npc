@@ -33,7 +33,7 @@ function fixture({ stateFile = null, provider } = {}) {
       await game.duringEntityRead?.()
       return JSON.stringify({ found: true, entity: { unit_number: 12, name: 'stone-furnace', type: 'furnace',
         position: { x: 82, y: -1 }, working: false, status: 18,
-        inventories: [{ id: 'source', contents: [] }, { id: 'fuel', contents: [{ name: 'coal', count: 4 }] }],
+        inventories: [{ index: 1, items: [] }, { index: 2, items: [{ name: 'coal', quality: 'normal', count: 4 }] }],
       } })
     }
     return original(text)
