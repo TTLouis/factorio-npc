@@ -8,6 +8,10 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 6 executor research context repair: scripted gates green
+
+Active research contracts now drive bounded authoritative research-path reads and relevant inventory refresh. C3 starts a fresh bounded executor observation decision without resetting the shared allowance; superseded handoffs and request cleanup cannot overwrite newer-lineage observation state. Missing/deferred facts remain explicit. Eleven regressions include the unchanged live blocker, corrected scripted admission, stale actors, restored state, in-flight refresh, scan limits and supersession. Unit `15d15b21`, merge `c0511b01`, repin `c66f3a16`. Final official Docker gates: 1,823 runtime and 1,036 mod tests, typechecks and generated Lua passed; full Docker build and nine payload checks passed. The upgraded checker now flags the retained live failure. No live run or deployment; autonomous gameplay remains unproved. [Repair contract, verification and remaining work](validation/LUNA_EXECUTOR_RESEARCH_CONTEXT_2026-10-06.md).
+
 ## October 6 planner-first live trial: handoff works, research facts lost
 
 Owner-authorized fresh run at `6b268031`, with the old 60/120 trial call caps removed: Luna committed a declared plan without operations and C3 created a fresh executor. The executor paused before gameplay because its handoff omitted the exact research triggers already observed by the planner, while retaining `observation_budget_remaining=0`. Five Luna and five Jev calls, 60 seconds, zero gameplay batches/red packs/humans or operator corrective prompts. Canonical goal remained active; board paused truthfully. Server stopped; evidence retained. Next bounded repair: carry authoritative facts for the active research contract and provide bounded missing-fact observation at the executor decision boundary, preserving the shared allowance and identity fences. [Live evidence and attribution](validation/LUNA_PLANNER_FIRST_LIVE_2026-10-06.md).
