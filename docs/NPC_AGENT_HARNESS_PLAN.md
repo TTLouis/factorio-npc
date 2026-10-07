@@ -4,6 +4,8 @@ This is the current single-NPC roadmap. Historical pass-by-pass plans are retain
 
 ## Current checkpoint
 
+October 7 Luna recovery candidate `61f70f54` adds typed missing-fact reads without changing committed intent. The sequentially integrated units, review outcomes and acceptance checklist are in [the targeted observation checkpoint](validation/LUNA_TARGETED_OBSERVATION_2026-10-07.md). Autonomous red-to-green acceptance and multiplayer reliability remain open.
+
 The project has moved beyond the original "prove a zero-player character can wait/move/mine/craft" transition phase. The standalone-NPC architecture is now the baseline being prepared for promotion to `main`.
 
 As of the 2026-09-16 promotion cleanup, `feat/npc-transition-work` had a green ordinary CI at commit `02167ac690c46b056ba2f0a62db056438c702419`. The branch is long-lived and continues to move, so any actual promotion must freeze and record a fresh candidate SHA before heavyweight validation.
