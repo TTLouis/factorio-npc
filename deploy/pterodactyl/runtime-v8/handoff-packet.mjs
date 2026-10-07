@@ -497,6 +497,89 @@ export function researchPathFact(parsed, target, tag) {
   return fact
 }
 
+const CRAFT_CAPABILITY_REASONS = new Set(['supported', 'recipe_locked', 'hidden_recipe', 'fluid_recipe', 'category_unsupported', 'actor_categories_unknown'])
+
+function historicalTriggerCrafting(technology, item, raw, tag) {
+  const report = { technology, item, source: 'goal_requirements', state: 'historical', as_of: normalizeFactTag(tag),
+    recipes_status: 'available', recipes: [], truncated: raw?.truncated === true }
+  if (!raw || raw.item !== item || raw.unavailable === true || raw.state === 'unavailable') {
+    return { technology, item, source: 'goal_requirements', state: 'unavailable', as_of: report.as_of,
+      reason: raw ? 'trigger_crafting_unavailable' : 'trigger_crafting_not_reported' }
+  }
+  if (!Array.isArray(raw.recipes)) return { ...report, state: 'unavailable', reason: 'trigger_crafting_invalid' }
+  report.recipes_status = raw.recipes_status === 'unavailable' ? 'unavailable' : raw.recipes.length === 0 ? 'no_known_recipe' : 'available'
+  for (const recipe of raw.recipes.slice(0, EXECUTOR_FACT_LIMITS.recipes)) {
+    const name = factName(recipe?.recipe)
+    const reason = CRAFT_CAPABILITY_REASONS.has(recipe?.hand_craftable_reason) ? recipe.hand_craftable_reason : 'actor_categories_unknown'
+    const categories = [...new Set(asList(recipe?.categories).map(factName).filter(Boolean))].slice(0, EXECUTOR_FACT_LIMITS.recipeProducts)
+    if (!name || categories.length === 0) { report.truncated = true; continue }
+    const machines = asList(recipe.machines).map(machine => ({ entity: factName(machine?.entity), item: factName(machine?.item),
+      status: ['craftable', 'locked', 'no_recipe'].includes(machine?.status) ? machine.status : 'unknown',
+      ...(factName(machine?.unlocked_by) ? { unlocked_by: machine.unlocked_by } : {}) }))
+      .filter(machine => machine.entity && machine.item).slice(0, EXECUTOR_FACT_LIMITS.recipeMachines)
+    // Every value remains historical. Volatile craftable-now inventory counts
+    // are intentionally excluded, even if they were present in the source.
+    const handKnown = typeof recipe.hand_craftable === 'boolean' && CRAFT_CAPABILITY_REASONS.has(recipe.hand_craftable_reason)
+      && !(recipe.hand_craftable && (recipe.enabled !== true || reason !== 'supported'))
+      && !(!recipe.hand_craftable && ['supported', 'actor_categories_unknown'].includes(reason))
+    report.recipes.push({ recipe: name, enabled: typeof recipe.enabled === 'boolean' ? recipe.enabled : 'unknown', categories,
+      categories_truncated: recipe.categories_truncated === true || asList(recipe.categories).length > categories.length,
+      hand_craftable: handKnown ? recipe.hand_craftable : 'unknown', hand_craftable_reason: handKnown ? reason : 'actor_categories_unknown',
+      machines, machines_truncated: recipe.machines_truncated === true || asList(recipe.machines).length > machines.length })
+  }
+  if (raw.recipes.length > report.recipes.length) report.truncated = true
+  while (report.recipes.length > 0 && JSON.stringify(report).length > EXECUTOR_FACT_LIMITS.researchChars) {
+    report.recipes.pop(); report.truncated = true
+  }
+  if (report.recipes.length === 0 && raw.recipes.length > 0) {
+    report.recipes_status = 'unavailable'; report.reason = 'trigger_crafting_cache_size_or_validation_limit'
+  }
+  return report
+}
+
+// Cache only native craft-item capability reports. Names/tags survive restart;
+// enabled state and actor capabilities are labelled historical, never fresh.
+export function cacheTriggerCraftingReports(research, tag) {
+  if (!research || typeof research !== 'object' || Array.isArray(research)) return []
+  return Object.entries(research).filter(([technology, node]) => factName(technology)
+    && node?.trigger?.type === 'craft-item' && factName(node.trigger.item))
+    .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+    .slice(0, EXECUTOR_FACT_LIMITS.researchNodes)
+    .map(([technology, node]) => historicalTriggerCrafting(technology, node.trigger.item, node.trigger_crafting, tag))
+}
+
+// Augment a validated fresh getResearchPath fact with matching cached facts.
+// Keep the authoritative trigger untouched and the old capability tag intact.
+// Size reduction drops whole recipe alternatives, always marking omissions.
+export function attachCachedTriggerCrafting(fact, cachedReports) {
+  if (fact?.state !== 'fresh' || !Array.isArray(fact.nodes)) return fact
+  if (fact.nodes.length > EXECUTOR_FACT_LIMITS.researchNodes || JSON.stringify(fact).length > EXECUTOR_FACT_LIMITS.researchChars) {
+    return { target: fact.target, state: 'unavailable', reason: 'research_path_size_limit' }
+  }
+  const reports = asList(cachedReports).slice(0, EXECUTOR_FACT_LIMITS.researchNodes)
+  const augmented = { ...fact, nodes: fact.nodes.map(node => ({ ...node })) }
+  const craftNodes = augmented.nodes.filter(node => node.research_trigger?.type === 'craft-item' && factName(node.research_trigger.item))
+  // Reserve explicit unknown markers for all nodes before filling any cached
+  // details. An early recipe must not consume the space a later node needs.
+  for (const node of craftNodes) node.trigger_crafting = { item: node.research_trigger.item, state: 'unavailable', reason: 'trigger_crafting_not_reported' }
+  if (JSON.stringify(augmented).length > EXECUTOR_FACT_LIMITS.researchChars) {
+    return { target: fact.target, state: 'unavailable', reason: 'research_path_with_trigger_crafting_size_limit' }
+  }
+  for (const node of craftNodes) {
+    const cached = reports.find(report => report?.technology === node.name && report.item === node.research_trigger.item)
+    const report = historicalTriggerCrafting(node.name, node.research_trigger.item, cached, cached?.as_of)
+    node.trigger_crafting = report
+    while (report.recipes?.length > 0 && JSON.stringify(augmented).length > EXECUTOR_FACT_LIMITS.researchChars) {
+      report.recipes.pop(); report.truncated = true
+      if (report.recipes.length === 0) { report.recipes_status = 'unavailable'; report.reason = 'trigger_crafting_handoff_size_limit' }
+    }
+    if (JSON.stringify(augmented).length > EXECUTOR_FACT_LIMITS.researchChars) {
+      node.trigger_crafting = { item: node.research_trigger.item, state: 'unavailable', reason: 'craft_facts_size_limit' }
+    }
+  }
+  return augmented
+}
+
 export function researchFactItems(paths) {
   return [...new Set(asList(paths).filter(path => path.state === 'fresh').flatMap(path => path.nodes.flatMap(node => [
     node.research_trigger?.item, ...asList(node.science?.ingredients).map(ingredient => ingredient.name),
@@ -505,7 +588,7 @@ export function researchFactItems(paths) {
 
 function researchRecords(paths) {
   return asList(paths).map((path, index) => ({ key: `research_path_${index}`, block: 'step',
-    text: `research_path (authoritative getResearchPath; current read or explicit missing fact): ${JSON.stringify(path)}` }))
+    text: `research_path (authoritative getResearchPath; current read or explicit missing fact${path.nodes?.some(node => node.trigger_crafting) ? '; trigger_crafting is cached/historical, not current admission proof' : ''}): ${JSON.stringify(path)}` }))
 }
 
 // The recipe the derivation may use to make `item`: one deterministic, complete recipe with a certain item output.

@@ -156,6 +156,9 @@ function sanitizeNode(raw) {
   }
   const trigger = sanitizeTrigger(source.trigger)
   if (trigger) node.trigger = trigger
+  if (trigger?.type === 'craft-item' && Object.hasOwn(source, 'trigger_crafting')) {
+    node.trigger_crafting = sanitizeTriggerCrafting(source.trigger_crafting, trigger.item)
+  }
   if (source.science && typeof source.science === 'object') {
     node.science = {
       count: Number.isFinite(source.science.count) ? source.science.count : undefined,
@@ -166,6 +169,36 @@ function sanitizeNode(raw) {
     }
   }
   return node
+}
+
+const HAND_CRAFT_REASONS = new Set(['supported', 'recipe_locked', 'hidden_recipe', 'fluid_recipe', 'category_unsupported', 'actor_categories_unknown'])
+
+function sanitizeTriggerCrafting(raw, item) {
+  const unavailable = { item, unavailable: true }
+  if (!item || raw?.item !== item || (!Array.isArray(raw.recipes)
+    && (!raw.recipes || typeof raw.recipes !== 'object' || Object.keys(raw.recipes).length > 0))) return unavailable
+  const sourceRecipes = asArray(raw.recipes)
+  const recipes = []
+  for (const entry of sourceRecipes.slice(0, 6)) {
+    const recipe = name(entry?.recipe)
+    const categories = asArray(entry?.categories).map(name).filter(Boolean).slice(0, 4)
+    const hand = entry?.hand_craftable
+    const reason = entry?.hand_craftable_reason
+    if (!recipe || typeof entry.enabled !== 'boolean' || categories.length === 0
+      || (hand !== undefined && typeof hand !== 'boolean') || !HAND_CRAFT_REASONS.has(reason)
+      || (hand === true && (!entry.enabled || reason !== 'supported'))
+      || (hand === false && (reason === 'supported' || reason === 'actor_categories_unknown'))
+      || (hand === undefined && reason !== 'actor_categories_unknown')) return unavailable
+    recipes.push({
+      recipe, enabled: entry.enabled, categories,
+      categories_truncated: entry.categories_truncated === true || asArray(entry.categories).length > 4,
+      hand_craftable: hand, hand_craftable_reason: reason,
+      craftable_now_count: Number.isSafeInteger(entry.craftable_now_count) && entry.craftable_now_count >= 0 ? entry.craftable_now_count : undefined,
+      machines: (sanitizeMachines({ for_item: item, recipe, options: entry.machines })?.options ?? []).slice(0, 6),
+      machines_truncated: entry.machines_truncated === true || asArray(entry.machines).length > 6,
+    })
+  }
+  return { item, recipes, truncated: raw.truncated === true || sourceRecipes.length > 6 }
 }
 
 function sanitizeLocked(raw) {
@@ -258,7 +291,20 @@ export function describeResearchNode(technology, node) {
     ? triggerText(node.trigger)
     : node.mode === 'trigger' ? 'trigger' : node.science ? scienceText(node.science) : 'lab research'
   const flag = node.status === 'disabled' || node.status === 'research_disabled' ? '; research is disabled' : ''
-  return `${technology} [${detail}${flag}]`
+  const craft = node.trigger_crafting ? '; native production trigger, not a craft_item instruction' : ''
+  return `${technology} [${detail}${flag}${craft}]`
+}
+
+function triggerCraftingLines(technology, report) {
+  if (report.unavailable) return [`${technology}: trigger-item crafting facts unavailable.`]
+  if (report.recipes.length === 0) return [`${technology}: no known producer recipe for trigger item ${report.item}; hand crafting is not established.`]
+  const lines = report.recipes.map(recipe => {
+    const hand = recipe.hand_craftable === undefined ? 'unknown' : recipe.hand_craftable ? 'yes' : 'no'
+    const machines = recipe.machines.map(machine => `${machine.entity} (place-item ${machine.item}: ${machine.status}${machine.unlocked_by ? `, unlock ${machine.unlocked_by}` : ''})`).join(', ')
+    return text(`${technology}: trigger item ${report.item}, producer recipe ${recipe.recipe}; enabled=${recipe.enabled}; categories=${recipe.categories.join('|')}${recipe.categories_truncated ? '|... (truncated)' : ''}; hand-craftable=${hand} (${recipe.hand_craftable_reason})${recipe.craftable_now_count !== undefined ? `, native craftable-now count=${recipe.craftable_now_count}` : ''}; machine options=${machines || 'none found'}${recipe.machines_truncated ? ', ... (truncated)' : ''}.`, REQUIREMENTS_MAX_LINE_CHARS)
+  })
+  if (report.truncated) lines.push(`${technology}: producer recipes truncated; alternatives may be missing.`)
+  return lines
 }
 
 const ROLE_LABEL = {
@@ -310,6 +356,9 @@ export function requirementsFacts(parsed) {
   const summary = requirementsSummary(parsed)
   if (summary.attention === 0) return ''
   const lines = parsed.locked.map((entry, index) => lockedLine(entry, parsed.research, index + 1))
+  for (const [technology, node] of Object.entries(parsed.research)) {
+    if (node.trigger_crafting) lines.push(...triggerCraftingLines(technology, node.trigger_crafting))
+  }
   for (const report of machineGaps(parsed)) {
     lines.push(text(`${lines.length + 1}. No placeable crafting machine in the running game crafts ${report.for_item} (recipe ${report.recipe}); it can only be hand crafted, so a machine-output target for it cannot be met.`, REQUIREMENTS_MAX_LINE_CHARS))
   }
@@ -370,6 +419,7 @@ export function lockedRecipeFacts(preflight) {
             mode: next.mode,
             status: next.status,
             ...(next.trigger ? { trigger: next.trigger } : {}),
+            ...(next.trigger_crafting ? { trigger_crafting: next.trigger_crafting } : {}),
             ...(next.science ? { science: next.science } : {}),
           },
         }
@@ -465,6 +515,15 @@ async function queryRequirements(loop, definition, { trigger }) {
     return { ok: false, reason: parsed.reason }
   }
   loop.recordRequirementsFacts?.(parsed) // D2: the machine options stay available to a fresh executor (never throws)
+  const craftNodes = Object.entries(parsed.research).filter(([, node]) => node.trigger_crafting)
+  if (craftNodes.length > 0) {
+    await loop.traceEvent('planning.trigger_crafting_facts', {
+      trigger, reason: 'native_craft_item_production_capability',
+      technologies: craftNodes.map(([technology]) => technology),
+      recipes: craftNodes.reduce((total, [, node]) => total + (node.trigger_crafting.recipes?.length ?? 0), 0),
+      unavailable: craftNodes.filter(([, node]) => node.trigger_crafting.unavailable).map(([technology]) => technology),
+    })
+  }
   return { ok: true, parsed, summary: requirementsSummary(parsed), targets }
 }
 

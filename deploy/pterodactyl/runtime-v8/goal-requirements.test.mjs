@@ -203,6 +203,69 @@ test('the block states locked recipes, the unlocking technology and the dependen
   assert.doesNotMatch(block, /hand-craft|build order|ratio/i, 'facts only, no strategy')
 })
 
+function triggerCraftingFixture(overrides = {}) {
+  return {
+    item: 'plate-a', recipes: [{ recipe: 'smelt-plate-a', enabled: true, categories: ['smelting'],
+      hand_craftable: false, hand_craftable_reason: 'category_unsupported',
+      machines: [{ entity: 'furnace-a', item: 'furnace-a', status: 'craftable' }], ...overrides }],
+  }
+}
+
+function craftingRequirements(report) {
+  return parseGoalRequirements(JSON.stringify({ ok: true,
+    locked: [{ subject: 'trigger-tech', role: 'target_technology', path: ['trigger-tech'] }],
+    research: { 'trigger-tech': { mode: 'trigger', trigger: { type: 'craft-item', item: 'plate-a', count: 10 }, trigger_crafting: report } },
+    machines: [], counts: {}, truncated: {},
+  }))
+}
+
+test('craft-item research carries exact production capability facts rather than a hand-craft instruction', () => {
+  const parsed = craftingRequirements(triggerCraftingFixture())
+  const node = parsed.research['trigger-tech']
+  assert.equal(node.trigger.count, 10)
+  assert.equal(node.trigger_crafting.recipes[0].recipe, 'smelt-plate-a')
+  const facts = requirementsFacts(parsed)
+  assert.match(facts, /native production trigger, not a craft_item instruction/)
+  assert.match(facts, /trigger item plate-a, producer recipe smelt-plate-a; enabled=true; categories=smelting; hand-craftable=no \(category_unsupported\)/)
+  assert.match(facts, /machine options=furnace-a \(place-item furnace-a: craftable\)/)
+  assert.doesNotMatch(facts, /craftable-now count|operations|smelt.*x10/)
+  const hand = requirementsFacts(craftingRequirements(triggerCraftingFixture({
+    recipe: 'alternate-plate', categories: ['crafting'], hand_craftable: true,
+    hand_craftable_reason: 'supported', craftable_now_count: 0, machines: [],
+  })))
+  assert.match(hand, /producer recipe alternate-plate/)
+  assert.match(hand, /hand-craftable=yes \(supported\), native craftable-now count=0/)
+})
+
+test('craft-item facts retain unknown, missing recipe, incompatible and conflicting metadata truthfully', () => {
+  const unknown = requirementsFacts(craftingRequirements(triggerCraftingFixture({ hand_craftable: undefined, hand_craftable_reason: 'actor_categories_unknown' })))
+  assert.match(unknown, /hand-craftable=unknown \(actor_categories_unknown\)/)
+  assert.match(requirementsFacts(craftingRequirements({ item: 'plate-a', recipes: {} })), /no known producer recipe/)
+  for (const report of [
+    { ...triggerCraftingFixture(), item: 'another-item' },
+    triggerCraftingFixture({ enabled: false, hand_craftable: true, hand_craftable_reason: 'supported' }),
+    triggerCraftingFixture({ hand_craftable: false, hand_craftable_reason: 'supported' }),
+    triggerCraftingFixture({ hand_craftable_reason: 'invented' }),
+  ]) {
+    const parsed = craftingRequirements(report)
+    assert.equal(parsed.research['trigger-tech'].trigger_crafting.unavailable, true)
+    assert.match(requirementsFacts(parsed), /trigger-item crafting facts unavailable/)
+  }
+})
+
+test('craft-item fact parsing and rendering retain the existing recipe, machine and text bounds', () => {
+  const recipe = triggerCraftingFixture().recipes[0]
+  const machines = Array.from({ length: 9 }, (_, i) => ({ entity: `machine-${i}`, item: `machine-${i}`, status: 'locked', unlocked_by: 'unlock-a' }))
+  const parsed = craftingRequirements({ item: 'plate-a', recipes: Array.from({ length: 9 }, (_, i) => ({ ...recipe, recipe: `producer-${i}`, machines })) })
+  const report = parsed.research['trigger-tech'].trigger_crafting
+  assert.equal(report.recipes.length, 6)
+  assert.equal(report.truncated, true)
+  for (const entry of report.recipes) { assert.equal(entry.machines.length, 6); assert.equal(entry.machines_truncated, true) }
+  const facts = requirementsFacts(parsed)
+  assert.ok(facts.length <= REQUIREMENTS_MAX_BLOCK_CHARS + 100)
+  assert.match(facts, /truncated|more lines omitted/)
+})
+
 test('nothing is rendered when nothing needs attention (cheaper than a one-line all-clear in every authoring round)', () => {
   const clear = parseGoalRequirements(JSON.stringify({ ...LIVE_LOCKED, locked: [], machines: [{ ...LIVE_LOCKED.machines[0], craftable: true, options: [{ entity: 'assembling-machine-1', item: 'assembling-machine-1', status: 'craftable' }] }], research: {} }))
   assert.equal(requirementsBlock(clear), '')
@@ -310,6 +373,22 @@ test('a locked-recipe preflight names the technology and the next research; the 
   assert.match(formatTaskCondition('operation_preflight_failed:missing_dependency', 'blocker').summary, /failed a preflight check/)
   assert.deepEqual(describeLockedRecipePreflight({ code: 'recipe_locked', recipe_name: 'x', unlock: { unlock_unknown: true } }).facts, { recipe: 'x', unlock_unknown: true })
   assert.equal(describeLockedRecipePreflight({ code: 'recipe_locked', recipe_name: 'x' }).text, '')
+})
+
+test('live requirement facts trace native craft-trigger capability with request identity and reason', async () => {
+  const requirements = structuredClone(LIVE_LOCKED)
+  const node = requirements.research['automation-science-pack']
+  node.trigger = { type: 'craft-item', item: 'plate-a', count: 10 }
+  node.trigger_crafting = triggerCraftingFixture()
+  const { events, calls } = await scenario({ requirements, planner: callIndex => callIndex === 1 ? premature() : reordered() })
+  const trace = events('planning.trigger_crafting_facts')
+  assert.equal(trace.length, 1)
+  assert.ok(trace[0].request_id)
+  assert.equal(trace[0].data.reason, 'native_craft_item_production_capability')
+  assert.deepEqual(trace[0].data.technologies, ['automation-science-pack'])
+  assert.equal(trace[0].data.recipes, 1)
+  assert.deepEqual(trace[0].data.unavailable, [])
+  assert.match(calls[1].messages.map(message => String(message.content ?? '')).join('\n'), /hand-craftable=no \(category_unsupported\)/)
 })
 
 // --- whole loop ----------------------------------------------------------

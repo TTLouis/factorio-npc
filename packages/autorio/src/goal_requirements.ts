@@ -25,7 +25,7 @@
 // passes the peeked actor and nothing here writes `storage` or creates a body.
 import type { LuaForce } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
-import { recipe_categories } from './recipe_categories'
+import { crafting_categories_support_recipe, recipe_categories } from './recipe_categories'
 import { plan_research_path } from './research_path'
 
 const MAX_TARGETS = 8
@@ -74,6 +74,7 @@ interface ResearchNode {
   mode: string
   status: string
   trigger?: Record<string, unknown>
+  trigger_crafting?: TriggerCraftingReport
   science?: { count?: number, ingredients: Array<{ name: string, amount: number }> }
   requires: string[]
 }
@@ -93,6 +94,22 @@ interface MachineReport {
   craftable: boolean
 }
 
+interface TriggerCraftingReport {
+  item: string
+  recipes: Array<{
+    recipe: string
+    enabled: boolean
+    categories: string[]
+    categories_truncated: boolean
+    hand_craftable?: boolean
+    hand_craftable_reason: string
+    craftable_now_count?: number
+    machines: MachineOption[]
+    machines_truncated: boolean
+  }>
+  truncated: boolean
+}
+
 interface Context {
   actor: ControlledActor
   force: LuaForce
@@ -106,6 +123,7 @@ interface Context {
   locked_keys: Record<string, boolean>
   research: Record<string, ResearchNode>
   research_count: number
+  trigger_crafting: Record<string, TriggerCraftingReport>
   machines: MachineReport[]
   unknown: string[]
   recipes_visited: number
@@ -295,7 +313,7 @@ function analyze_item(ctx: Context, item: string): ItemAnalysis {
   return result
 }
 
-function compact_node(node: any): ResearchNode & { name: string } {
+function compact_node(ctx: Context, node: any): ResearchNode & { name: string } {
   const ingredients: Array<{ name: string, amount: number }> = []
   const science = node.science
   if (science && typeof science === 'object') {
@@ -312,6 +330,8 @@ function compact_node(node: any): ResearchNode & { name: string } {
     mode: node.mode,
     status: node.status,
     trigger: node.research_trigger,
+    trigger_crafting: node.research_trigger?.type === 'craft-item' && typeof node.research_trigger.item === 'string'
+      ? trigger_crafting_report(ctx, node.research_trigger.item) : undefined,
     science: science && typeof science === 'object' ? { count: science.count, ingredients } : undefined,
     requires,
   }
@@ -340,7 +360,7 @@ function register_path(ctx: Context, technology: string) {
         truncated = true
         break
       }
-      ctx.research[node.name] = compact_node(node)
+      ctx.research[node.name] = compact_node(ctx, node)
       ctx.research_count++
     }
     names.push(node.name)
@@ -424,9 +444,9 @@ function status_rank(status: MachineOption['status']) {
 }
 
 // Crafting machines that can craft `recipe_name`, and what each needs.
-function machine_report(ctx: Context, item: string, recipe_name: string) {
+function machine_candidates(ctx: Context, recipe_name: string) {
   const recipe = ctx.force.recipes[recipe_name]
-  if (!recipe) return
+  if (!recipe) return []
   const seen: Record<string, boolean> = {}
   const candidates: Array<{ entity: string, item: string, analysis: ItemAnalysis }> = []
   for (const category of recipe_categories(recipe)) {
@@ -447,6 +467,10 @@ function machine_report(ctx: Context, item: string, recipe_name: string) {
     if (distance !== 0) return distance
     return left.entity < right.entity ? -1 : left.entity > right.entity ? 1 : 0
   })
+  return candidates
+}
+
+function machine_options(candidates: Array<{ entity: string, item: string, analysis: ItemAnalysis }>) {
   const options: MachineOption[] = []
   for (const candidate of candidates) {
     if (array_length(options) >= MAX_MACHINE_OPTIONS) break
@@ -457,6 +481,54 @@ function machine_report(ctx: Context, item: string, recipe_name: string) {
       unlocked_by: candidate.analysis.unlock ? candidate.analysis.unlock.technology : undefined,
     })
   }
+  return options
+}
+
+// Facts about every known recipe producing a craft-item trigger's item. A
+// native research-trigger label does not prescribe the NPC hand-craft command.
+// Do not walk/add machine research here: that would mutate the pending path
+// while compacting it (and can recurse when an unlock triggers on its own item).
+function trigger_crafting_report(ctx: Context, item: string): TriggerCraftingReport {
+  if (ctx.trigger_crafting[item]) return ctx.trigger_crafting[item]
+  const names = producer_recipes(ctx, item)
+  const report: TriggerCraftingReport = {
+    item, recipes: [], truncated: array_length(recipe_producer_index(ctx)[item]) > array_length(names),
+  }
+  ctx.trigger_crafting[item] = report
+  for (const name of names) {
+    const recipe = ctx.force.recipes[name]
+    if (!recipe) continue
+    const categories = recipe_categories(recipe)
+    const character = ctx.actor.character
+    const supported = character?.prototype.crafting_categories
+    let hand_craftable: boolean | undefined
+    let reason = 'actor_categories_unknown'
+    const fluid_recipe = (recipe.ingredients ?? []).some(ingredient => ingredient.type === 'fluid')
+      || (recipe.products ?? []).some(product => product.type === 'fluid')
+    if (!recipe.enabled) { hand_craftable = false; reason = 'recipe_locked' }
+    else if (recipe.prototype?.hidden_from_player_crafting === true) { hand_craftable = false; reason = 'hidden_recipe' }
+    else if (fluid_recipe) { hand_craftable = false; reason = 'fluid_recipe' }
+    else if (supported !== undefined) {
+      hand_craftable = crafting_categories_support_recipe(supported, recipe)
+      reason = hand_craftable ? 'supported' : 'category_unsupported'
+    }
+    const candidates = machine_candidates(ctx, name)
+    report.recipes.push({
+      recipe: name, enabled: recipe.enabled, categories: categories.slice(0, MAX_NODE_PREREQUISITES),
+      categories_truncated: array_length(categories) > MAX_NODE_PREREQUISITES,
+      hand_craftable, hand_craftable_reason: reason,
+      craftable_now_count: hand_craftable === true && character ? character.get_craftable_count(name) : undefined,
+      machines: machine_options(candidates), machines_truncated: array_length(candidates) > MAX_MACHINE_OPTIONS,
+    })
+  }
+  return report
+}
+
+function machine_report(ctx: Context, item: string, recipe_name: string) {
+  const recipe = ctx.force.recipes[recipe_name]
+  if (!recipe) return
+  const candidates = machine_candidates(ctx, recipe_name)
+  const options = machine_options(candidates)
   const craftable = array_length(candidates) > 0 && item_status(candidates[0].analysis) === 'craftable'
   ctx.machines.push({ for_item: item, recipe: recipe_name, options, truncated: array_length(candidates) > MAX_MACHINE_OPTIONS, craftable })
   if (array_length(candidates) === 0) return
@@ -534,6 +606,7 @@ function new_context(actor: ControlledActor): Context {
     locked_keys: {},
     research: {},
     research_count: 0,
+    trigger_crafting: {},
     machines: [],
     unknown: [],
     recipes_visited: 0,
@@ -567,7 +640,7 @@ export function recipe_unlock_summary(actor: ControlledActor, recipe_name: strin
   return {
     unlocked_by: unlock.technology,
     pending_count: path.pending_count as number,
-    next_actionable: path.next_actionable ? compact_node(path.next_actionable) : undefined,
+    next_actionable: path.next_actionable ? compact_node(ctx, path.next_actionable) : undefined,
     blocked: path.blocked === true ? true : undefined,
   }
 }
