@@ -15,6 +15,8 @@ import {
   sanitizeHandoffNote,
   selectRecipeFacts,
   stepContractNeeds,
+  researchPathFact,
+  researchFactItems,
 } from './handoff-packet.mjs'
 import {
   applyPlanningEvent,
@@ -25,6 +27,40 @@ import {
 } from './planning-state.mjs'
 
 const GOAL_ID = 'goal_handoff'
+
+test('research contracts declare technology subjects without inventing item quantities or intent for any contracts', () => {
+  assert.deepEqual(stepContractNeeds({ completion_contract: { mode: 'any', requirements: [
+    { kind: 'research_completed', technology: 'electronics' }, { kind: 'research_completed', technology: 'steam-power' },
+  ] } }), { roots: [], items: [], technologies: ['electronics', 'steam-power'] })
+})
+
+test('research paths keep exact engine triggers and reject missing, wrong-target and oversized evidence', () => {
+  const path = { ok: true, target: 'electronics', node_count: 1, nodes: [
+    { name: 'electronics', researched: false, mode: 'trigger', research_trigger: { type: 'craft-item', item: 'copper-plate', count: 10 } },
+  ] }
+  const fact = researchPathFact(path, 'electronics', { epoch: 1 })
+  assert.equal(fact.state, 'fresh')
+  assert.equal(fact.nodes[0].research_trigger.count, 10)
+  assert.deepEqual(researchFactItems([fact]), ['copper-plate'])
+  for (const malformed of [{}, { ...path, target: 'other' }, { ...path, node_count: 9 }, { ...path, truncated: true },
+    { ...path, nodes: [{ ...path.nodes[0], research_trigger: undefined }] },
+    { ...path, nodes: [{ ...path.nodes[0], prerequisites: ['x'.repeat(1700)] }] }]) {
+    const rejected = researchPathFact(malformed, 'electronics', { epoch: 1 })
+    assert.equal(rejected.state, 'unavailable')
+    assert.equal(rejected.nodes, undefined)
+    assert.deepEqual(researchFactItems([rejected]), [])
+  }
+})
+
+test('research coverage records survive packet trimming and deferred refresh labels missing reads explicitly', () => {
+  const state = circuitState()
+  const fact = { target: 'electronics', state: 'unavailable', reason: 'research_path_read_failed' }
+  const packet = buildHandoffPacket({ planningState: state, ...ARGS, role: 'executor', executorFacts: { research: [fact] }, limits: { maxChars: 100 } })
+  assert.match(packet.text, /research_path_read_failed/)
+  assert.deepEqual(packet.executor_facts.missing_research, ['electronics'])
+  assert.equal(packet.over_limit, true)
+  assert.match(executorFactsRefreshMessage({ research: [fact] }), /research_path_read_failed/)
+})
 
 function goalState() {
   let state = applyPlanningEvent(createEmptyPlanningState(), {
