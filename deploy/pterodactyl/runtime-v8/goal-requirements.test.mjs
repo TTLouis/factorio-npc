@@ -279,11 +279,28 @@ test('long research closures retain each exact craft trigger before incidental r
   }))
   const facts = requirementsFacts(parsed)
   assert.match(facts, /goal-item \[recipe of a goal target\] is LOCKED/)
-  for (const [i, technology] of path.entries()) assert.ok(facts.includes(`${technology}: trigger craft-item (item plate-a, count ${i + 1})`), `${technology} must survive the inline path cap and optional-record pressure`)
+  for (const [i, technology] of path.entries()) {
+    const record = facts.split('\n').find(line => line.startsWith(`${technology}: trigger craft-item (item plate-a, count ${i + 1})`))
+    assert.ok(record, `${technology} must survive the inline path cap and optional-record pressure`)
+    assert.ok(record.includes('hand-craftable=no (category_unsupported)'), `${technology} must carry the machine-only capability before optional rows`)
+    assert.ok(record.includes('categories=smelting'), `${technology} must carry native recipe categories`)
+  }
   assert.ok(facts.includes(`pending prerequisites=${path.at(-2)}`), 'native prerequisite links survive as facts without inventing an action sequence')
   assert.equal(facts.match(/native production trigger, not a craft_item instruction/g).length, 1)
   assert.match(facts, /more lines omitted/)
-  assert.ok(facts.length <= REQUIREMENTS_MAX_BLOCK_CHARS + 100)
+  assert.ok(facts.length <= REQUIREMENTS_MAX_BLOCK_CHARS)
+})
+
+test('an explicit whole-record omission marker stays inside the strict requirements block bound', () => {
+  for (let width = 30; width <= 80; width++) {
+    const parsed = parseGoalRequirements(JSON.stringify({ ok: true,
+      locked: Array.from({ length: 16 }, (_, i) => ({ subject: `item-${i}-${'x'.repeat(width)}`, role: 'ingredient_recipe', needed_for: `target-${'y'.repeat(70)}`, unlock_unknown: true, path: [] })),
+      research: {}, machines: [], counts: {}, truncated: {},
+    }))
+    const facts = requirementsFacts(parsed)
+    assert.ok(facts.length <= REQUIREMENTS_MAX_BLOCK_CHARS, `width=${width}: ${facts.length}`)
+    assert.match(facts, /\(\d+ more lines omitted\)$/)
+  }
 })
 
 test('nothing is rendered when nothing needs attention (cheaper than a one-line all-clear in every authoring round)', () => {

@@ -137,6 +137,12 @@ async function main() {
     assert.match(grounding, /requirements_grounding/)
     assert.match(grounding, /automation-science-pack \[recipe of a goal target\] is LOCKED/)
     assert.ok(grounding.includes(`trigger ${node.trigger.type} (item ${engineItem}, count ${node.trigger.count})`))
+    const machineOnly = Object.values(parsed.research).flatMap(research => research.trigger_crafting?.recipes ?? [])
+      .find(producer => producer.hand_craftable_reason === 'category_unsupported' && producer.categories.includes('smelting'))
+    assert.ok(machineOnly, 'native smelting capability must be available for the grounding visibility gate')
+    assert.ok(grounding.split('\n').some(line => line.includes(`producer recipe ${machineOnly.recipe}`)
+      && line.includes('hand-craftable=no (category_unsupported)') && line.includes('categories=smelting')),
+    'grounded correction must actually carry native machine-only capability, not only the craft-item trigger label')
     assert.match(grounding, /assembling-machine-1/)
     const state = memory.currentPlan(key)
     assert.equal(state.status, 'blocked')

@@ -306,6 +306,17 @@ function triggerCraftingLines(technology, report) {
   return lines
 }
 
+// One compact reported producer is evidence, not a selected operation. Keep
+// its hand/category facts beside the exact trigger under context pressure;
+// detailed machine options and other alternatives are lower-priority records.
+function primaryTriggerCraftingText(report) {
+  if (report.unavailable) return 'producer capabilities unavailable'
+  if (report.recipes.length === 0) return 'no known producer recipe; hand-craftability unknown'
+  const recipe = report.recipes[0]
+  const hand = recipe.hand_craftable === undefined ? 'unknown' : recipe.hand_craftable ? 'yes' : 'no'
+  return `producer recipe ${recipe.recipe}; hand-craftable=${hand} (${recipe.hand_craftable_reason}); categories=${recipe.categories.join('|')}${recipe.categories_truncated ? '|... (truncated)' : ''}; enabled=${recipe.enabled}${report.recipes.length > 1 ? `; other reported producer alternatives=${report.recipes.length - 1}` : ''}${report.truncated ? '; producer alternatives truncated' : ''}`
+}
+
 const ROLE_LABEL = {
   target_recipe: () => 'recipe of a goal target',
   ingredient_recipe: entry => `ingredient recipe${entry.needed_for ? `, needed for ${entry.needed_for}` : ''}`,
@@ -365,7 +376,7 @@ export function requirementsFacts(parsed) {
     : indexed.map(({ line }) => line)
   if (craftNodes.length > 0) {
     lines.push('craft-item: native production trigger, not a craft_item instruction.')
-    for (const [technology, node] of craftNodes) lines.push(text(`${technology}: ${triggerText(node.trigger)}${node.requires.length ? `; pending prerequisites=${node.requires.join('|')}` : ''}.`, REQUIREMENTS_MAX_LINE_CHARS))
+    for (const [technology, node] of craftNodes) lines.push(text(`${technology}: ${triggerText(node.trigger)}; ${primaryTriggerCraftingText(node.trigger_crafting)}${node.requires.length ? `; pending prerequisites=${node.requires.join('|')}` : ''}.`, REQUIREMENTS_MAX_LINE_CHARS))
     lines.push(...indexed.filter(({ entry }) => !['target_recipe', 'target_technology'].includes(entry.role)).map(({ line }) => line))
   }
   for (const [technology, node] of craftNodes) {
@@ -382,13 +393,16 @@ export function requirementsFacts(parsed) {
   if (notes.length > 0) lines.push(`${notes.join('; ')}.`)
   const kept = []
   let used = 0
-  for (const line of lines) {
-    if (used + line.length + 1 > REQUIREMENTS_MAX_BLOCK_CHARS) {
-      kept.push(`(${lines.length - kept.length} more lines omitted)`)
+  for (const [index, line] of lines.entries()) {
+    const candidateChars = used + (kept.length ? 1 : 0) + line.length
+    const remaining = lines.length - index - 1
+    const reserve = remaining > 0 ? 1 + `(${remaining} more lines omitted)`.length : 0
+    if (candidateChars + reserve > REQUIREMENTS_MAX_BLOCK_CHARS) {
+      kept.push(`(${lines.length - index} more lines omitted)`)
       break
     }
     kept.push(line)
-    used += line.length + 1
+    used = candidateChars
   }
   return kept.join('\n')
 }
