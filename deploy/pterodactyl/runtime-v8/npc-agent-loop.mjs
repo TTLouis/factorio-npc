@@ -1,7 +1,8 @@
 import fsp from 'node:fs/promises'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import path from 'node:path'
-import { normalizeObservationRequest, observationRecoveryBasis, TARGETED_OBSERVATION_GUIDANCE } from './targeted-observation.mjs'
+import { createHash } from 'node:crypto'
+import { normalizeObservationRequest, observationRecoveryBasis } from './targeted-observation.mjs'
 
 import { AgentLoopError, NpcAgentLoop as BaseNpcAgentLoop, NpcDialogueMemory as BaseNpcDialogueMemory } from '../staging/npc-agent-loop.mjs'
 import {
@@ -9461,7 +9462,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (this.messages.length > before) {
       const message = this.messages.at(-1)
       message.content = message.content.replace('Do not request another read-only observation;', 'Normal observation tools remain closed;')
-        + `\n${TARGETED_OBSERVATION_GUIDANCE}`
+        + '\nFollow the current CONTROL_DECISION_STATE for any eligible bounded fact request.'
     }
   }
 
@@ -9475,7 +9476,32 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const receipt = receipts.filter(row => ['operation_receipt', 'operation_error_receipt'].includes(row.kind)).at(-1)
     const data = { goalId: planning?.goal?.goal_id, planId: plan?.plan_id, stepId: step?.step_id,
       receiptRef: receipt?.ref, actorId: this.epoch?.actor_id, epoch: this.epoch?.epoch }
-    return { key, planning, plan, step, state, data, basis: observationRecoveryBasis(data) }
+    const draft = plan?.status === 'DRAFT'
+    // Draft revisions cannot mint another allowance. Keep this claim separate
+    // from execution receipts so committing and later authoring cannot erase it.
+    const ledgerKey = draft ? `draft:${createHash('sha256').update(JSON.stringify([key, data.goalId])).digest('hex')}` : key
+    const basis = observationRecoveryBasis(draft ? { ...data, planId: 'draft', stepId: 'authoring', receiptRef: undefined } : data)
+    const fenceIdentity = JSON.stringify({ data, status: plan?.status, version: plan?.plan_version,
+      revision: plan?.updated_at, draftSteps: draft ? plan?.steps : undefined })
+    return { key, planning, plan, step, state, data, basis, ledgerKey, draft, fenceIdentity }
+  }
+
+  controlDecisionState(allowTools) {
+    const identity = this.targetedObservationIdentity()
+    const eligible = Boolean(this.requestInfo && identity.step && identity.planning?.goal?.status === GOAL_STATUS.ACTIVE
+      && identity.state?.status === 'active' && !this.currentPendingAmendment()
+      && (identity.draft ? this.agentContext.role !== EXECUTOR_ROLE : FROZEN_PLAN_STATUSES.has(identity.plan?.status)))
+    const used = Boolean(this.closedRoundObservationUsed || this.actionOmissionObservationUsed
+      || this.memory.targetedObservationLedger?.get(identity.ledgerKey) === identity.basis)
+    return { toolsEnabled: allowTools, phase: identity.draft ? 'draft' : FROZEN_PLAN_STATUSES.has(identity.plan?.status) ? 'committed' : 'no_plan',
+      role: this.agentContext.role, targetedReadEligible: eligible && !used, targetedAllowanceUsed: used,
+      goalId: identity.data.goalId, planId: identity.data.planId, planVersion: identity.plan?.plan_version,
+      draftRevision: identity.draft ? identity.plan?.updated_at : undefined, stepId: identity.data.stepId,
+      currentStep: identity.state?.current_step, plan: identity.draft ? identity.state?.plan : undefined,
+      stepCompletions: identity.draft ? identity.plan?.steps?.map(step => step.completion_mode === 'semantic'
+        ? { kind: 'semantic', rationale: step.semantic_rationale }
+        : step.completion_contract ? { kind: 'deterministic', checkpoint: step.completion_contract } : null) : undefined,
+    }
   }
 
   async handleObservationRequest(message, { generation, attribution, current, round, recoveryAttempt, recoveryKind, omissionRepair }) {
@@ -9486,30 +9512,44 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const reject = async reason => {
       await this.traceEvent('observation.targeted_refused', { request_id: this.traceRequest?.id, reason,
         goal_id: initial.data.goalId, step_id: initial.data.stepId })
-      return providerMessageWith(message, { tool_calls: undefined, content: JSON.stringify({
-        plan: initial.state?.plan ?? [], currentStep: initial.state?.current_step ?? 0, operations: [],
-        chatMessage: `BLOCKED: Targeted observation request refused (${reason}). No gameplay or completion was admitted.`,
-      }) })
+      // Preserve exactly what Luna authored. The ordinary bounded category
+      // correction handles this control refusal; it is not a world blocker.
+      return providerMessageWith(message, { tool_calls: undefined, _sglunaObservationRefusal: {
+        reason, controlState: this.controlDecisionState(false),
+      } })
     }
     let request
     try { request = normalizeObservationRequest(intent.observationRequest) } catch (error) { return reject(error.message) }
     if (this.closedRoundObservationUsed || this.actionOmissionObservationUsed) return reject('targeted_allowance_already_used')
     if (!this.requestInfo || !initial.step || initial.planning?.goal?.status !== GOAL_STATUS.ACTIVE
-      || !FROZEN_PLAN_STATUSES.has(initial.plan?.status) || initial.state?.status !== 'active' || this.currentPendingAmendment()) return reject('no_eligible_active_step')
-    if (request.stepId !== initial.data.stepId || intent.currentStep !== initial.state.current_step
+      || !(initial.draft ? this.agentContext.role !== EXECUTOR_ROLE : FROZEN_PLAN_STATUSES.has(initial.plan?.status))
+      || initial.state?.status !== 'active' || this.currentPendingAmendment()) return reject('no_eligible_active_step')
+    if (initial.draft !== (request.scope === 'draft')) return reject('observation_scope_does_not_match_phase')
+    if ((initial.draft ? request.goalId !== initial.data.goalId || request.planId !== initial.data.planId
+      || request.planVersion !== initial.plan.plan_version || request.draftRevision !== initial.plan.updated_at
+      : request.stepId !== initial.data.stepId) || intent.currentStep !== initial.state.current_step
       || JSON.stringify(intent.plan) !== JSON.stringify(initial.state.plan)) return reject('stale_plan_or_step')
-    if (!Array.isArray(intent.operations) || intent.operations.length !== 0 || Object.keys(intent).some(key => !['chatMessage', 'plan', 'currentStep', 'operations', 'observationRequest'].includes(key))) return reject('read_cannot_edit_or_complete_plan')
+    if (!Array.isArray(intent.operations) || intent.operations.length !== 0 || Object.keys(intent).some(key => !['chatMessage', 'plan', 'currentStep', 'operations', 'observationRequest', 'stepCompletions'].includes(key))) return reject('read_cannot_edit_or_complete_plan')
+    if (Object.hasOwn(intent, 'stepCompletions')) {
+      try {
+        const declared = normalizeStepCompletions(intent.plan, intent.stepCompletions)
+        const held = normalizeStepCompletions(intent.plan, initial.plan.steps.map(step => step.completion_mode === 'semantic'
+          ? { kind: 'semantic', rationale: step.semantic_rationale } : { kind: 'deterministic', checkpoint: step.completion_contract }))
+        if (JSON.stringify(declared) !== JSON.stringify(held)) return reject('read_cannot_edit_or_complete_plan')
+      } catch { return reject('read_cannot_edit_or_complete_plan') }
+    }
     if (request.tool === 'getEntityStatus' && !this.liveObservedExactTarget(request.args.unit_number)
       && !initial.step.completion_contract?.requirements?.some(row => row.unit_number === request.args.unit_number)) return reject('entity_not_grounded')
     const ledger = this.memory.targetedObservationLedger ??= new Map()
-    if (ledger.get(initial.key) === initial.basis) return reject('targeted_allowance_already_used')
+    if (ledger.get(initial.ledgerKey) === initial.basis) return reject('targeted_allowance_already_used')
     const fence = async () => {
       await this.assertCurrent()
       await this.dropIfStale(attribution)
-      if (this.generation !== generation || this.targetedObservationIdentity().basis !== initial.basis
-        || this.targetedObservationIdentity().planning?.goal?.status !== GOAL_STATUS.ACTIVE
-        || !FROZEN_PLAN_STATUSES.has(this.targetedObservationIdentity().plan?.status)
-        || this.targetedObservationIdentity().state?.status !== 'active' || this.currentPendingAmendment()) throw new AgentLoopError('Targeted observation was cancelled or superseded')
+      const now = this.targetedObservationIdentity()
+      if (this.generation !== generation || now.fenceIdentity !== initial.fenceIdentity
+        || now.planning?.goal?.status !== GOAL_STATUS.ACTIVE
+        || !(now.draft ? this.agentContext.role !== EXECUTOR_ROLE : FROZEN_PLAN_STATUSES.has(now.plan?.status))
+        || now.state?.status !== 'active' || this.currentPendingAmendment()) throw new AgentLoopError('Targeted observation was cancelled or superseded')
     }
     await fence()
     const raw = await this.readTaskStatusRaw()
@@ -9520,17 +9560,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const tool = { id: `targeted_${round}`, type: 'function', function: { name: request.tool, arguments: JSON.stringify(request.args) } }
     let prepared
     try { prepared = this.prepareToolBatch({ tool_calls: [tool] }) } catch (error) { return reject(`invalid_target:${error.message}`) }
-    ledger.set(initial.key, initial.basis)
+    ledger.set(initial.ledgerKey, initial.basis)
     this.closedRoundObservationUsed = true
     while (ledger.size > 128) ledger.delete(ledger.keys().next().value)
     await this.persistState() // Consume before the read; failed/interrupting reads do not refund it.
     await fence()
     if (this.stateFile) {
       const saved = JSON.parse(await fsp.readFile(this.stateFile, 'utf8'))
-      if (!saved.targeted_observation_ledger?.some(row => row[0] === initial.key && row[1] === initial.basis)) return reject('claim_not_persisted')
+      if (!saved.targeted_observation_ledger?.some(row => row[0] === initial.ledgerKey && row[1] === initial.basis)) return reject('claim_not_persisted')
     }
     await this.traceEvent('observation.targeted_granted', { request_id: this.traceRequest?.id,
-      reason: 'one_missing_fact_read_at_native_progress_boundary', tool: request.tool, goal_id: initial.data.goalId,
+      reason: initial.draft ? 'one_missing_fact_read_at_draft_authoring_boundary' : 'one_missing_fact_read_at_native_progress_boundary', scope: initial.draft ? 'draft' : 'step', tool: request.tool, goal_id: initial.data.goalId,
       step_id: initial.data.stepId, receipt_ref: initial.data.receiptRef, observation_budget_remaining: this.observationBudgetRemaining })
     await fence()
     // Run through normal result recording, cache and usage accounting. Only
@@ -9540,7 +9580,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.toolCache.delete(prepared[0].signature)
     await this.handleToolBatch({ content: '', tool_calls: [tool] }, prepared)
     await fence()
-    this.messages.push({ role: 'user', content: '[HARNESS] The requested targeted live fact is above. The targeted allowance is consumed until native operation receipt or step progress; normal tools remain closed. Return one JSON action, grounded completion, or truthful blocker. Keep the committed plan unchanged.' })
+    this.messages.push({ role: 'user', content: initial.draft
+      ? '[HARNESS] The requested draft fact is above. The draft allowance is consumed for this goal; normal tools remain closed. As planner, correct the draft and its completion declarations. You may submit a valid plan with operations: [] for executor delegation, or correct the optional first action. No plan or operation was committed by this read.'
+      : '[HARNESS] The requested targeted live fact is above. The targeted allowance is consumed until native operation receipt or step progress; normal tools remain closed. Return one JSON action, grounded completion, or truthful blocker. Keep the committed plan unchanged.' })
     return this.callProvider(current, generation, { round, allowTools: false, recoveryAttempt, recoveryKind })
   }
 
@@ -9739,6 +9781,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const controller = new AbortController()
     this.providerAbort = controller
     let providerMessages = providerMessagesOverride ?? this.providerMessages()
+    const controlState = this.controlDecisionState(effectiveAllowTools)
+    const controlText = `[CONTROL_DECISION_STATE] ${JSON.stringify(controlState)}\n${controlState.phase === 'draft'
+        ? 'The planner owns this uncommitted draft. Correct it with completion declarations; a valid draft may have operations: [] and then be delegated to the executor.'
+        : 'Preserve committed semantics and grounded completion authority.'}`
+    // A volatile tail block must not enter the cacheable history or displace
+    // the immediate correction. Rebuild it from canonical state each round.
+    providerMessages = insertTailBlock(providerMessages.filter(row => !String(row.content).startsWith('[CONTROL_DECISION_STATE]')),
+      { role: 'user', content: controlText })
+    await this.traceEvent('control.decision_state', { request_id: this.traceRequest?.id,
+      reason: 'guidance_matches_effective_tools_and_canonical_phase', tools_enabled: effectiveAllowTools,
+      phase: controlState.phase, targeted_read_eligible: controlState.targetedReadEligible })
     if (providerMessagesOverride === undefined && this.pendingSupersededHandoffTrace) {
       const data = this.pendingSupersededHandoffTrace
       this.pendingSupersededHandoffTrace = undefined
@@ -10156,6 +10209,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   parsePlanMessage(message) {
+    if (message?._sglunaObservationRefusal) {
+      const error = new AgentLoopError(`Targeted observation refused: ${JSON.stringify(message._sglunaObservationRefusal)}. No gameplay or completion was admitted. Correct the control decision using this current state, reuse grounded facts, or submit a valid draft with completion declarations and operations: [].`)
+      error.failureClass = 'plan_category'
+      error.code = 'observation_request_refused'
+      error.details = message._sglunaObservationRefusal
+      throw error
+    }
     // Requests for a read are consumed by callProvider, never by gameplay
     // commitment. Direct callers must not accidentally admit them as plans.
     let candidate
@@ -11232,6 +11292,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
     const attempt = prior + 1
     this.requiresMachinePreflightRetries = attempt
+    const toolsEnabled = this.observationDecisionForced !== true && !(this.actionOmissionRepairActive && this.actionOmissionForceNoTools)
     if (key) {
       this.memory.recordBoardEvidence?.(key, {
         kind: 'operation_preflight_recoverable',
@@ -11256,19 +11317,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       reason: 'recipe_made_in_machine_not_hand_craftable',
       attempt,
       retry_budget: REQUIRES_MACHINE_RETRY_BUDGET,
-      tools_enabled: true,
+      tools_enabled: toolsEnabled,
       plan_changed: false,
     })
     await this.traceEvent('operations.preflight_recoverable', {
       failure_class: REQUIRES_MACHINE_CODE,
       preflight,
-      tools_enabled: true,
+      tools_enabled: toolsEnabled,
       retry: attempt,
       retry_budget: REQUIRES_MACHINE_RETRY_BUDGET,
     })
     this.messages.push({
       role: 'user',
-      content: `[HARNESS] Deterministic craft preflight did not run operation ${index + 1} (craft_item ${cleanMemoryText(preflight.identity, 80)}), and no operation from this batch ran: recipe ${cleanMemoryText(preflight.recipe_name, 80)} is in crafting categories ${JSON.stringify(facts.recipe.categories)} that the character cannot hand-craft, so it is made in a machine. This is a recoverable fact result, not WORLD_BLOCKED: the plan, step contract and requested result are unchanged and tools remain enabled. A machine listed as placed is not by itself proof that it is fueled, powered or supplied; each placed entry carries its own readiness (working, or the engine's status name and raw status_code). Result ${attempt} of ${REQUIRES_MACHINE_RETRY_BUDGET} before this request pauses. Facts from the live game: ${JSON.stringify(facts)}`,
+      content: `[HARNESS] Deterministic craft preflight did not run operation ${index + 1} (craft_item ${cleanMemoryText(preflight.identity, 80)}), and no operation from this batch ran: recipe ${cleanMemoryText(preflight.recipe_name, 80)} is in crafting categories ${JSON.stringify(facts.recipe.categories)} that the character cannot hand-craft, so it is made in a machine. This is a recoverable fact result, not WORLD_BLOCKED: the plan, step contract and requested result are unchanged. ${toolsEnabled ? 'Normal observation tools remain enabled.' : 'Normal observation tools remain closed; use the current CONTROL_DECISION_STATE for any eligible bounded fact request.'} For an uncommitted draft the planner may correct the optional first action or submit the valid plan with completion declarations and operations: [] for executor delegation. A machine listed as placed is not by itself proof that it is fueled, powered or supplied; each placed entry carries its own readiness (working, or the engine's status name and raw status_code). Result ${attempt} of ${REQUIRES_MACHINE_RETRY_BUDGET} before this request pauses. Facts from the live game: ${JSON.stringify(facts)}`,
     })
     return { action: 'recovered', stateResult }
   }

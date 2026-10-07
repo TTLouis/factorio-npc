@@ -1017,13 +1017,14 @@ export class NpcAgentLoop {
         if (error?.failureClass === 'plan_category') {
           this.planCategoryRetries++
           const reason = error instanceof Error ? error.message : String(error)
+          const toolsEnabled = this.observationDecisionForced !== true && !(this.actionOmissionRepairActive && this.actionOmissionForceNoTools)
           await this.recoveryDiagnostic({
             failure_class: 'plan_category',
             reason_code: error.code,
             reason,
             retry: this.planCategoryRetries,
             retry_limit: this.maxToolValidationRetries,
-            tools_enabled: true,
+            tools_enabled: toolsEnabled,
             ...(error?.details && typeof error.details === 'object' ? error.details : {}),
           })
           if (error?.details?.deterministic_no_retry === true) {
@@ -1038,8 +1039,8 @@ export class NpcAgentLoop {
               : `Provider repeatedly returned a plan the harness refused (${error.code ?? 'plan_category'}): ${reason}`, 'plan_category')
           }
           this.messages.push({ role: 'assistant', content: cleanMemoryText(message.content, 4000) })
-          const toolInstruction = this.observationDecisionForced
-            ? 'Tools remain disabled because the observation phase for this decision is closed. Reuse the evidence already collected and return a corrected strict-JSON plan or truthful blocker.'
+          const toolInstruction = !toolsEnabled
+            ? 'Normal observation tools remain closed. Follow the current CONTROL_DECISION_STATE for eligible bounded fact requests; otherwise reuse collected evidence and return a corrected strict-JSON plan with its completion declarations or truthful blocker.'
             : 'Tools remain enabled. Preserve the observations and canonical Task Board already collected. Use the supplied correction exactly: issue one required observation tool call when a fact is missing, otherwise return a strict-JSON plan containing only safe approved world-mutation operations.'
           this.messages.push({
             role: 'user',

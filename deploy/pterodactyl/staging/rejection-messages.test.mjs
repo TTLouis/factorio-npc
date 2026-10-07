@@ -142,7 +142,7 @@ test('an observation tool placed in operations after the phase closed is not tol
   await agent.request('observe until the budget closes')
   const correction = seen[5]
   assert.match(correction, /getRecipe is an observation\/planning tool, not an approved world-mutation operation/)
-  assert.match(correction, /Tools remain disabled because the observation phase for this decision is closed/)
+  assert.match(correction, /Normal observation tools remain closed/)
   assert.doesNotMatch(correction, /Call it as a tool/)
 })
 
