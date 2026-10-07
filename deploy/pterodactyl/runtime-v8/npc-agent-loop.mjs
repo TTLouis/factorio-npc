@@ -9780,6 +9780,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
     const controller = new AbortController()
     this.providerAbort = controller
+    const controlAttribution = { lineage: this.agentContext.lineageSequence, seq: this.agentContext.conversationSeq,
+      role: this.agentContext.role, handoffId: this.agentContext.handoffId }
     let providerMessages = providerMessagesOverride ?? this.providerMessages()
     const controlState = this.controlDecisionState(effectiveAllowTools)
     const controlText = `[CONTROL_DECISION_STATE] ${JSON.stringify(controlState)}\n${controlState.phase === 'draft'
@@ -9792,6 +9794,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     await this.traceEvent('control.decision_state', { request_id: this.traceRequest?.id,
       reason: 'guidance_matches_effective_tools_and_canonical_phase', tools_enabled: effectiveAllowTools,
       phase: controlState.phase, targeted_read_eligible: controlState.targetedReadEligible })
+    await this.assertCurrent()
+    await this.dropIfStale(controlAttribution)
+    if (generation !== this.generation || !this.active) throw new AgentLoopError('Model turn was cancelled or superseded')
     if (providerMessagesOverride === undefined && this.pendingSupersededHandoffTrace) {
       const data = this.pendingSupersededHandoffTrace
       this.pendingSupersededHandoffTrace = undefined

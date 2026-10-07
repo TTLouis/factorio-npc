@@ -189,3 +189,26 @@ test('draft revision and handoff changes during native read discard facts before
     assert.equal(world.agent.toolCache.size, 0)
   }
 })
+
+test('supersession while control guidance is traced sends no old input or usage into the newer conversation', async () => {
+  const world = fixture()
+  const trace = world.agent.traceEvent.bind(world.agent)
+  const newerAttribution = { seq: 999, lineage: 999 }
+  const newerRequest = { id: 'req_newer', usage: { provider_calls: 0, tool_calls: 0 } }
+  world.agent.traceEvent = async (event, ...args) => {
+    await trace(event, ...args)
+    if (event === 'control.decision_state') {
+      world.agent.agentContext.conversationSeq++
+      world.agent.generation++
+      world.agent.turnConversation = newerAttribution
+      world.agent.traceRequest = newerRequest
+      world.agent.messages = [{ role: 'user', content: 'newer conversation' }]
+    }
+  }
+  await assert.rejects(world.agent.callProviderRound(world.context.current, world.context.generation, { round: 1, allowTools: false }), /superseded|stale/i)
+  assert.equal(world.counts().calls, 0)
+  assert.equal(world.agent.turnConversation, newerAttribution)
+  assert.equal(world.agent.traceRequest, newerRequest)
+  assert.deepEqual(newerRequest.usage, { provider_calls: 0, tool_calls: 0 })
+  assert.deepEqual(world.agent.messages, [{ role: 'user', content: 'newer conversation' }])
+})
