@@ -39,6 +39,92 @@ function findingsFor(result, signature) {
   return result.findings.filter(f => f.signature === signature)
 }
 
+test('retained Luna semantic contract dead end is diagnosed without changing its recorded failure', async () => {
+  const { result, parse_errors: errors } = await runCheck({ behaviorFile: path.join(fixturesDir, 'luna-semantic-contract-dead-end.jsonl') })
+  assert.equal(errors.length, 0)
+  assert.equal(result.row_count, 85)
+  assert.equal(result.request_count, 1)
+  assert.equal(result.findings.length, 1)
+  const [finding] = findingsFor(result, 'semantic_contract_dead_end')
+  assert.equal(finding.request_id, 'req_muxsvx42_1')
+  assert.equal(finding.count, 1)
+  assert.equal(finding.first_ts, '2026-10-07T07:43:37.699Z')
+  assert.match(finding.detail, /plan_id=goal_088r72h_1_p3 step_id=goal_088r72h_1_p3_v1_s1_1xd3iiq/)
+  assert.match(finding.detail, /reason_code=semantic_step_cannot_mutate.*pause_reason=recoverable_provider_failure:provider_reported_blocker/)
+  assert.match(formatCheckReport(result), /\[semantic_contract_dead_end\] request_id=req_muxsvx42_1/)
+  const rows = await loadFixtureRows('luna-semantic-contract-dead-end.jsonl')
+  const terminal = rows.at(-1)
+  assert.equal(terminal.data.outcome, 'recoverable_provider_failure')
+  assert.equal(terminal.data.task_board.status, 'paused')
+  assert.equal(terminal.data.task_board.completed_count, 0)
+  assert.equal(rows.find(row => row.event === 'request.time_split').data.batches, 0)
+})
+
+test('semantic contract diagnostic requires same request, actor, handoff, commit and terminal pause', async () => {
+  const original = await loadFixtureRows('luna-semantic-contract-dead-end.jsonl')
+  const controls = [
+    ['unrelated refusal request', rows => { rows.find(row => row.data?.reason_code === 'semantic_step_cannot_mutate').request_id = 'req_other' }],
+    ['unrelated pause request', rows => { rows.find(row => row.event === 'goal.paused').request_id = 'req_other' }],
+    ['unrelated commit request', rows => { rows.find(row => row.event === 'plan.delegation_committed').request_id = 'req_other' }],
+    ['replacement actor', rows => { rows.find(row => row.data?.reason_code === 'semantic_step_cannot_mutate').actor_id = 4 }],
+    ['replacement epoch', rows => { rows.find(row => row.data?.reason_code === 'semantic_step_cannot_mutate').epoch = 3 }],
+    ['other committed plan', rows => { rows.find(row => row.event === 'context.restaged').data.plan_id = 'plan_other' }],
+    ['other immutable step', rows => { rows.find(row => row.event === 'context.restaged').data.step_id = 'step_other' }],
+    ['other executor handoff', rows => { rows.find(row => row.seq === 62).data.handoff_id = 'ho_other' }],
+    ['planner refusal', rows => { rows.find(row => row.seq === 62).data.role = 'planner' }],
+    ['different refusal', rows => { rows.find(row => row.data?.reason_code === 'semantic_step_cannot_mutate').data.reason_code = 'invalid_tool_batch' }],
+    ['different pause cause', rows => { rows.at(-1).data.task_board.pause_reason = 'generation_cap' }],
+    ['other paused goal', rows => { rows.find(row => row.event === 'goal.paused').data.goal_id = 'goal_other' }],
+    ['other paused board step', rows => { rows.find(row => row.event === 'goal.paused').data.active_step_id = 'step_2' }],
+    ['no terminal pause', rows => { rows.at(-1).data.task_board.status = 'active' }],
+    ['incomplete trace', rows => { rows.pop() }],
+    ['subsequent committed successor', rows => { rows.splice(-1, 0, { ...rows.find(row => row.event === 'plan.delegation_committed'), seq: 84.5, ts: rows.at(-1).ts, data: { plan_id: 'successor', step_id: 'successor_step' } }) }],
+  ]
+  for (const [label, change] of controls) {
+    const rows = structuredClone(original)
+    change(rows)
+    assert.deepEqual(findingsFor(analyzeBehaviorTrace(rows), 'semantic_contract_dead_end'), [], label)
+  }
+  // Content text is not evidence for this detector, even when misleading.
+  const noProse = structuredClone(original)
+  for (const row of noProse) {
+    if (row.data?.chat_message) row.data.chat_message = 'Assessment complete.'
+    if (row.data?.reason) row.data.reason = 'Unrelated prose.'
+    for (const step of row.data?.task_board?.steps ?? []) {
+      step.description = 'Observe only'
+      step.semantic_rationale = 'A legitimate assessment'
+    }
+  }
+  assert.equal(findingsFor(analyzeBehaviorTrace(noProse), 'semantic_contract_dead_end').length, 1)
+})
+
+test('semantic contract diagnostic preserves assessment closure and actual corrected gameplay continuation', async () => {
+  const original = await loadFixtureRows('luna-semantic-contract-dead-end.jsonl')
+  const clean = await loadFixtureRows('steam-run-clean-step-progress.jsonl')
+  const cleanProgress = clean.filter(row => ['operations.admit', 'operations.ack', 'factorio.status', 'step.verified'].includes(row.event))
+    .filter(row => row.event !== 'factorio.status' || row.data?.task_status?.last_completed_batch?.batch_id > 0)
+  assert.ok(cleanProgress.some(row => row.event === 'operations.admit'))
+  assert.ok(cleanProgress.some(row => row.event === 'operations.ack'))
+  assert.ok(cleanProgress.some(row => row.event === 'factorio.status'))
+  assert.ok(cleanProgress.some(row => row.event === 'step.verified'))
+  const continuation = cleanProgress.map((row, index) => ({ ...row, request_id: 'req_muxsvx42_1', actor_id: 3, epoch: 2,
+    ts: '2026-10-07T07:43:44.550Z', seq: 100 + index }))
+  // Each actual progress signal disproves the narrow "before gameplay" dead end,
+  // even if a later, independent reason pauses this same request.
+  for (const row of continuation) {
+    assert.deepEqual(findingsFor(analyzeBehaviorTrace([...original, row]), 'semantic_contract_dead_end'), [], row.event)
+    assert.equal(findingsFor(analyzeBehaviorTrace([...original, { ...row, request_id: 'req_other' }]), 'semantic_contract_dead_end').length, 1, `${row.event} in another request`)
+  }
+  const continued = structuredClone(original).filter(row => row.event !== 'goal.paused')
+  continued.at(-1).data.outcome = 'step_completed'
+  continued.at(-1).data.task_board.status = 'active'
+  continued.at(-1).data.task_board.pause_reason = ''
+  continued.at(-1).data.task_board.completed_count = 1
+  assert.deepEqual(findingsFor(analyzeBehaviorTrace([...continued, ...continuation]), 'semantic_contract_dead_end'), [])
+  const assessment = { ...continuation[0], event: 'step.semantic_completed', data: { active_step_id: 'step_1', source: 'main_planner', grounding_refs: ['tool:researchStatus'], rationale: 'Verified bounded assessment' } }
+  assert.deepEqual(findingsFor(analyzeBehaviorTrace([...original, assessment]), 'semantic_contract_dead_end'), [])
+})
+
 // --- real-log fixtures (trimmed from data/logs/sgluna-behavior.jsonl) -----
 
 test('observation_phase_closed loop is detected from repeated recovery.classified retries (qwen round, req_muixboqf_1)', async () => {
