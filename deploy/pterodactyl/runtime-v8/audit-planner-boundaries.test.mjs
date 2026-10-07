@@ -4,6 +4,7 @@ import test from 'node:test'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { providerRequest } from './provider.mjs'
+import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 import { FakeFactorio, deployment } from './task-loop-fixtures.mjs'
 
 const KEY = 'npc:sgluna'
@@ -104,6 +105,95 @@ test('finishIfGoalMet rejects a superseded evaluation before closing the legacy 
   await assert.rejects(world.agent.finishIfGoalMet({ chatMessage: '' }, previous), /goal_evaluation_superseded/)
   assert.equal(world.memory.currentPlan(KEY).status, 'active')
   assert.equal(world.memory.planningState(KEY).goal.status, 'active')
+})
+
+function replaceRequest(world, kind = 'goal') {
+  const state = world.memory.planningByNpc.get(KEY)
+  if (kind === 'goal') world.memory.planningByNpc.set(KEY, {
+    ...state, goal: { ...state.goal, goal_id: 'replacement-goal', status: 'active' },
+  })
+  if (kind === 'actor') world.game.status = deployment({ actor_id: 19, epoch: 4 })
+  if (kind === 'generation') world.agent.generation++
+  world.agent.active = true
+  world.agent.traceRequest = { id: 'replacement-request', usage: { provider_calls: 0 } }
+  return world.agent.traceRequest
+}
+
+test('a goal evaluation cannot return satisfied after supersession during satisfaction persistence', async () => {
+  for (const kind of ['goal', 'actor', 'generation']) {
+    const world = harness()
+    let replacement
+    world.agent.persistState = async () => {
+      await Promise.resolve()
+      replacement = replaceRequest(world, kind)
+    }
+    await assert.rejects(world.agent.evaluateGoalCompletion(), /goal_evaluation_superseded/, kind)
+    assert.equal(world.agent.traceRequest, replacement, kind)
+    assert.equal(world.agent.active, true, kind)
+    assert.equal(world.events.some(row => row.event === 'request.completed'), false, kind)
+    if (kind === 'goal') assert.equal(world.memory.planningState(KEY).goal.status, 'active')
+  }
+  const stable = harness()
+  stable.agent.persistState = async () => { await Promise.resolve() }
+  assert.equal((await stable.agent.evaluateGoalCompletion()).satisfied, true)
+  assert.equal(stable.memory.planningState(KEY).goal.status, 'completed')
+})
+
+function completedSlice(world) {
+  // Boundary fixture: a slice whose separate deterministic step gate already
+  // closed it. This unit exercises subsequent goal evidence and request cleanup.
+  const state = world.memory.planningByNpc.get(KEY)
+  const active = getActivePlan(state)
+  assert.ok(active)
+  world.memory.planningByNpc.set(KEY, {
+    ...state, plans: state.plans.map(plan => plan.plan_id === active.plan_id ? { ...plan, status: PLAN_STATUS.COMPLETED } : plan),
+  })
+  const legacy = world.memory.currentPlan(KEY)
+  return { ...legacy, status: 'completed', task_board: { ...legacy.task_board, status: 'completed' } }
+}
+
+test('terminal settlement checks returned goal evidence before refreshing state or ending the request', async () => {
+  const world = harness()
+  const completion = completedSlice(world)
+  const original = world.agent.evaluateGoalCompletion.bind(world.agent)
+  let replacement
+  world.agent.evaluateGoalCompletion = async options => {
+    const result = await original(options)
+    replacement = replaceRequest(world)
+    return result
+  }
+  await assert.rejects(world.agent.settleCompletedStepState(completion), /goal_evaluation_superseded/)
+  assert.equal(world.memory.planningState(KEY).goal.status, 'active')
+  assert.equal(world.agent.traceRequest, replacement)
+  assert.equal(world.agent.active, true)
+  assert.equal(world.events.some(row => row.event === 'outcome.validated' || row.event === 'request.completed'), false)
+})
+
+test('terminal settlement trace awaits cannot clear or complete a replacement request', async () => {
+  for (const awaitedEvent of ['outcome.validated', 'planner.skipped', 'request.completed']) {
+    const world = harness()
+    const completion = completedSlice(world)
+    const original = world.agent.traceEvent.bind(world.agent)
+    let replacement
+    world.agent.traceEvent = async (event, ...args) => {
+      await original(event, ...args)
+      if (event === awaitedEvent) replacement = replaceRequest(world)
+    }
+    await assert.rejects(world.agent.settleCompletedStepState(completion), /goal_evaluation_superseded/, awaitedEvent)
+    assert.equal(world.memory.planningState(KEY).goal.status, 'active', awaitedEvent)
+    assert.equal(world.agent.traceRequest, replacement, awaitedEvent)
+    assert.equal(world.agent.active, true, awaitedEvent)
+    if (awaitedEvent !== 'request.completed') assert.equal(world.events.some(row => row.event === 'request.completed'), false)
+    const refusal = world.events.find(row => row.event === 'goal.evaluation_discarded')
+    assert.equal(refusal.data.request_id, 'request-audit')
+    assert.equal(refusal.data.reason, 'goal_definition_or_actor_lineage_superseded')
+  }
+  const stable = harness()
+  const result = await stable.agent.settleCompletedStepState(completedSlice(stable))
+  assert.equal(result.goalStatus, 'completed')
+  assert.equal(stable.memory.planningState(KEY).goal.status, 'completed')
+  assert.equal(stable.agent.traceRequest, null)
+  assert.equal(stable.agent.active, false)
 })
 
 test('force-only native research remains evaluable during the existing no-body death gap', async () => {

@@ -8057,6 +8057,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       rationale: 'goal_definition_conditions_satisfied',
     })
     await this.persistState()
+    await this.assertGoalEvaluationCurrent(fence)
   }
 
   // The planner declared the whole goal done while plan steps remain. With a
@@ -8658,6 +8659,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       && planningAfterCompletion?.goal?.status === GOAL_STATUS.ACTIVE
       && reducerPlanAfterCompletion?.status === PLAN_STATUS.COMPLETED) {
       goalEvaluation = await this.evaluateGoalCompletion()
+      if (goalEvaluation) await this.assertGoalEvaluationCurrent(goalEvaluation._sglunaGoalFence)
       planningAfterCompletion = this.memory.planningState?.(this.activePlanKey())
       const unverifiable = goalEvaluation?.results.filter(result => /^(?:unknown_|invalid_)/.test(result.error ?? '')) ?? []
       if (unverifiable.length > 0) return this.pauseForUnverifiableGoal(unverifiable)
@@ -8722,6 +8724,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (planningAfterCompletion?.goal && this.memory.planningState?.(this.activePlanKey())?.goal?.status !== GOAL_STATUS.COMPLETED) {
         return this.endSliceWithoutPlanner({ route: 'legacy_completion_not_goal_proof', reason: 'canonical_goal_not_completed' })
       }
+      if (goalEvaluation) await this.assertGoalEvaluationCurrent(goalEvaluation._sglunaGoalFence)
       this.active = false
       const completedBoard = visibleTaskBoard(completionState.task_board)
       await this.traceEvent('outcome.validated', {
@@ -8730,10 +8733,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         reason_code: 'verified_final_step',
         task_board: completedBoard,
       })
+      if (goalEvaluation) await this.assertGoalEvaluationCurrent(goalEvaluation._sglunaGoalFence)
       await this.traceEvent('planner.skipped', {
         source: 'outcome_authority',
         route: 'deterministic_close',
       })
+      if (goalEvaluation) await this.assertGoalEvaluationCurrent(goalEvaluation._sglunaGoalFence)
       const completionMessage = goalEvaluation?.satisfied
         ? `The requested goal is verified complete: the game reports ${formatGoalProgress(goalEvaluation)}.`
         : 'The requested goal is verified complete.'
@@ -8743,6 +8748,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         task_board: completedBoard,
         usage: this.traceRequest?.usage,
       })
+      if (goalEvaluation) await this.assertGoalEvaluationCurrent(goalEvaluation._sglunaGoalFence)
       this.traceRequest = null
       return {
         chatMessage: completionMessage,
