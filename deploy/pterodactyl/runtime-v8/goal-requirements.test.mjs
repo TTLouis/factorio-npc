@@ -266,6 +266,26 @@ test('craft-item fact parsing and rendering retain the existing recipe, machine 
   assert.match(facts, /truncated|more lines omitted/)
 })
 
+test('long research closures retain each exact craft trigger before incidental rows consume the bounded grounding context', () => {
+  const path = Array.from({ length: 6 }, (_, i) => `dependency-${i}-with-a-long-prototype-name`)
+  const research = Object.fromEntries(path.map((technology, i) => [technology, {
+    mode: 'trigger', status: 'ready', trigger: { type: 'craft-item', item: 'plate-a', count: i + 1 },
+    trigger_crafting: triggerCraftingFixture(), requires: i === 0 ? [] : [path[i - 1]],
+  }]))
+  const parsed = parseGoalRequirements(JSON.stringify({ ok: true,
+    locked: [{ subject: 'goal-item', role: 'target_recipe', unlocked_by: path.at(-1), path },
+      ...Array.from({ length: 10 }, (_, i) => ({ subject: `optional-machine-${i}`, role: 'machine', unlocked_by: path.at(-1), path }))],
+    research, machines: [], counts: {}, truncated: {},
+  }))
+  const facts = requirementsFacts(parsed)
+  assert.match(facts, /goal-item \[recipe of a goal target\] is LOCKED/)
+  for (const [i, technology] of path.entries()) assert.ok(facts.includes(`${technology}: trigger craft-item (item plate-a, count ${i + 1})`), `${technology} must survive the inline path cap and optional-record pressure`)
+  assert.ok(facts.includes(`pending prerequisites=${path.at(-2)}`), 'native prerequisite links survive as facts without inventing an action sequence')
+  assert.equal(facts.match(/native production trigger, not a craft_item instruction/g).length, 1)
+  assert.match(facts, /more lines omitted/)
+  assert.ok(facts.length <= REQUIREMENTS_MAX_BLOCK_CHARS + 100)
+})
+
 test('nothing is rendered when nothing needs attention (cheaper than a one-line all-clear in every authoring round)', () => {
   const clear = parseGoalRequirements(JSON.stringify({ ...LIVE_LOCKED, locked: [], machines: [{ ...LIVE_LOCKED.machines[0], craftable: true, options: [{ entity: 'assembling-machine-1', item: 'assembling-machine-1', status: 'craftable' }] }], research: {} }))
   assert.equal(requirementsBlock(clear), '')

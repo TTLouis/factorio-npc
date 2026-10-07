@@ -291,8 +291,7 @@ export function describeResearchNode(technology, node) {
     ? triggerText(node.trigger)
     : node.mode === 'trigger' ? 'trigger' : node.science ? scienceText(node.science) : 'lab research'
   const flag = node.status === 'disabled' || node.status === 'research_disabled' ? '; research is disabled' : ''
-  const craft = node.trigger_crafting ? '; native production trigger, not a craft_item instruction' : ''
-  return `${technology} [${detail}${flag}${craft}]`
+  return `${technology} [${detail}${flag}]`
 }
 
 function triggerCraftingLines(technology, report) {
@@ -355,9 +354,22 @@ export function requirementsSummary(parsed) {
 export function requirementsFacts(parsed) {
   const summary = requirementsSummary(parsed)
   if (summary.attention === 0) return ''
-  const lines = parsed.locked.map((entry, index) => lockedLine(entry, parsed.research, index + 1))
-  for (const [technology, node] of Object.entries(parsed.research)) {
-    if (node.trigger_crafting) lines.push(...triggerCraftingLines(technology, node.trigger_crafting))
+  const indexed = parsed.locked.map((entry, index) => ({ entry, line: lockedLine(entry, parsed.research, index + 1) }))
+  const craftNodes = Object.entries(parsed.research).filter(([, node]) => node.trigger_crafting)
+  // A long dependency path is compacted at the line cap. Its exact trigger
+  // must remain a separate whole record, before optional machine/ingredient
+  // rows and producer alternatives can consume the block budget. State the
+  // native-label distinction once rather than expanding every inline node.
+  const lines = craftNodes.length > 0
+    ? indexed.filter(({ entry }) => ['target_recipe', 'target_technology'].includes(entry.role)).map(({ line }) => line)
+    : indexed.map(({ line }) => line)
+  if (craftNodes.length > 0) {
+    lines.push('craft-item: native production trigger, not a craft_item instruction.')
+    for (const [technology, node] of craftNodes) lines.push(text(`${technology}: ${triggerText(node.trigger)}${node.requires.length ? `; pending prerequisites=${node.requires.join('|')}` : ''}.`, REQUIREMENTS_MAX_LINE_CHARS))
+    lines.push(...indexed.filter(({ entry }) => !['target_recipe', 'target_technology'].includes(entry.role)).map(({ line }) => line))
+  }
+  for (const [technology, node] of craftNodes) {
+    lines.push(...triggerCraftingLines(technology, node.trigger_crafting))
   }
   for (const report of machineGaps(parsed)) {
     lines.push(text(`${lines.length + 1}. No placeable crafting machine in the running game crafts ${report.for_item} (recipe ${report.recipe}); it can only be hand crafted, so a machine-output target for it cannot be met.`, REQUIREMENTS_MAX_LINE_CHARS))

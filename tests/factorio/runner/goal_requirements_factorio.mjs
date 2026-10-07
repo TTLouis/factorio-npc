@@ -133,6 +133,7 @@ async function main() {
     const result = await agent.request('Automate red science at 20 packs per minute.', { sender: 'Louis' })
     assert.equal(calls.length, 2)
     const grounding = calls[1].messages.map(row => String(row.content ?? '')).join('\n')
+    await fsp.writeFile(path.join(results, 'planner-grounding.txt'), grounding)
     assert.match(grounding, /requirements_grounding/)
     assert.match(grounding, /automation-science-pack \[recipe of a goal target\] is LOCKED/)
     assert.ok(grounding.includes(`trigger ${node.trigger.type} (item ${engineItem}, count ${node.trigger.count})`))
