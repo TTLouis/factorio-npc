@@ -113,7 +113,8 @@ test('targeted recovery rejects discovery, stale steps, ungrounded units and mix
     const intent = JSON.parse(world.request().content)
     alter(intent)
     const reply = await world.agent.handleObservationRequest({ content: JSON.stringify(intent) }, world.context)
-    assert.match(reply.content, /BLOCKED:/)
+    assert.equal(reply._sglunaObservationRefusal !== undefined, true)
+    assert.throws(() => world.agent.parsePlanMessage(reply), error => error.code === 'observation_request_refused')
     assert.equal(world.game.entityReads, 0)
     assert.equal(world.counts().calls, 0)
     const refusal = world.events.find(row => row.event === 'observation.targeted_refused')
@@ -144,11 +145,11 @@ test('an unpersisted claim and an already consumed repair allowance cannot execu
     await fsp.writeFile(stateFile, '{}')
     const world = fixture({ stateFile })
     world.agent.persistState = async () => {}
-    assert.match((await world.agent.handleObservationRequest(world.request(), world.context)).content, /claim_not_persisted/)
+    assert.match((await world.agent.handleObservationRequest(world.request(), world.context))._sglunaObservationRefusal.reason, /claim_not_persisted/)
     assert.equal(world.game.entityReads, 0)
     const used = fixture()
     used.agent.actionOmissionObservationUsed = true
-    assert.match((await used.agent.handleObservationRequest(used.request(), used.context)).content, /already_used/)
+    assert.match((await used.agent.handleObservationRequest(used.request(), used.context))._sglunaObservationRefusal.reason, /already_used/)
     assert.equal(used.game.entityReads, 0)
   } finally { await fsp.rm(dir, { recursive: true, force: true }) }
 })
@@ -159,7 +160,7 @@ test('busy runtime and unresolved operation ownership forbid targeted reads', as
     if (pending) world.memory.pendingOperation = () => ({ state: 'recorded' })
     else { world.game.taskState = 'mining'; world.game.queueLength = 1 }
     const reply = await world.agent.handleObservationRequest(world.request(), world.context)
-    assert.match(reply.content, /runtime_not_idle/)
+    assert.match(reply._sglunaObservationRefusal.reason, /runtime_not_idle/)
     assert.equal(world.game.entityReads, 0)
   }
 })
@@ -171,10 +172,10 @@ test('restage and restart cannot renew the read allowance at the same native rec
     const world = fixture({ stateFile })
     await world.agent.handleObservationRequest(world.request(), world.context)
     world.agent.resetObservationDecisionState()
-    assert.match((await world.agent.handleObservationRequest(world.request(), world.context)).content, /targeted_allowance_already_used/)
+    assert.match((await world.agent.handleObservationRequest(world.request(), world.context))._sglunaObservationRefusal.reason, /targeted_allowance_already_used/)
     const restarted = fixture({ stateFile })
     await restarted.agent.loadPersistentState()
-    assert.match((await restarted.agent.handleObservationRequest(restarted.request(), restarted.context)).content, /targeted_allowance_already_used/)
+    assert.match((await restarted.agent.handleObservationRequest(restarted.request(), restarted.context))._sglunaObservationRefusal.reason, /targeted_allowance_already_used/)
     assert.equal(restarted.game.entityReads, 0)
   } finally { await fsp.rm(dir, { recursive: true, force: true }) }
 })
@@ -236,7 +237,7 @@ test('only a new authoritative operation receipt renews the allowance within one
   world.agent.resetObservationDecisionState()
   const held = world.agent.targetedObservationIdentity()
   held.plan.execution.receipts[held.step.step_id].push({ kind: 'deterministic_verification', ref: 'unrelated-assessment' })
-  assert.match((await world.agent.handleObservationRequest(world.request(), world.context)).content, /already_used/)
+  assert.match((await world.agent.handleObservationRequest(world.request(), world.context))._sglunaObservationRefusal.reason, /already_used/)
   held.plan.execution.receipts[held.step.step_id].push({ kind: 'operation_receipt', ref: 'batch-g1-8' })
   await world.agent.handleObservationRequest(world.request(), world.context)
   assert.equal(world.game.entityReads, 2)

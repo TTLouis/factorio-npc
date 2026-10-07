@@ -3,8 +3,16 @@
 // not provider rounds, context restages, or prose claims of progress.
 export function normalizeObservationRequest(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('observationRequest must be an object')
-  if (Object.keys(value).some(key => !['stepId', 'tool', 'args', 'rationale'].includes(key))) throw new Error('Unexpected observationRequest field')
-  if (typeof value.stepId !== 'string' || !value.stepId.trim() || value.stepId.length > 240) throw new Error('observationRequest needs the exact active stepId')
+  const draft = value.scope === 'draft'
+  const identityKeys = draft ? ['scope', 'goalId', 'planId', 'planVersion', 'draftRevision'] : ['scope', 'stepId']
+  if (Object.keys(value).some(key => ![...identityKeys, 'tool', 'args', 'rationale'].includes(key))) throw new Error('Unexpected observationRequest field')
+  if (value.scope !== undefined && !['step', 'draft'].includes(value.scope)) throw new Error('Unsupported observationRequest scope')
+  if (draft) {
+    if (![value.goalId, value.planId].every(id => typeof id === 'string' && id.trim() && id.length <= 240)
+      || !Number.isSafeInteger(value.planVersion) || value.planVersion < 1
+      || !Number.isSafeInteger(value.draftRevision) || value.draftRevision < 0) throw new Error('Draft observationRequest needs exact goalId, planId, planVersion and draftRevision')
+  }
+  else if (typeof value.stepId !== 'string' || !value.stepId.trim() || value.stepId.length > 240) throw new Error('observationRequest needs the exact active stepId')
   if (typeof value.rationale !== 'string' || !value.rationale.trim() || value.rationale.length > 500) throw new Error('observationRequest needs a bounded missing-fact rationale')
   const args = value.args
   if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('observationRequest.args must be an object')
@@ -15,7 +23,10 @@ export function normalizeObservationRequest(value) {
     if (Object.keys(args).length !== 0) throw new Error('Targeted inventory/research status takes no arguments')
   }
   else throw new Error('Targeted recovery permits only exact getEntityStatus, getInventoryItems, or getResearchStatus; discovery is unavailable')
-  return { stepId: value.stepId, tool: value.tool, args: { ...args }, rationale: value.rationale.trim() }
+  const identity = draft
+    ? { scope: 'draft', goalId: value.goalId, planId: value.planId, planVersion: value.planVersion, draftRevision: value.draftRevision }
+    : { ...(value.scope ? { scope: value.scope } : {}), stepId: value.stepId }
+  return { ...identity, tool: value.tool, args: { ...args }, rationale: value.rationale.trim() }
 }
 
 export function observationRecoveryBasis({ goalId, planId, stepId, receiptRef, actorId, epoch }) {
@@ -36,4 +47,4 @@ export function restoreObservationLedger(rows) {
   return ledger
 }
 
-export const TARGETED_OBSERVATION_GUIDANCE = 'When a specific missing live fact prevents the next action after observations close, return one JSON control decision with the unchanged plan/currentStep, operations:[], and observationRequest:{stepId:"<exact active reducer step id>",tool:"getEntityStatus",args:{unit_number:<observed exact unit>},rationale:"<missing fact and why needed>"}. getInventoryItems or getResearchStatus with args:{} are also supported. This requests one bounded harness read, not a tool invocation. No discovery, plan edits or completion claims may accompany it. The allowance is one read until a new correlated operation receipt or active step; restaging/restarting does not renew it. After the result, return an action, grounded completion, or truthful blocker. A previous_recipe_name is historical and does not mean a machine currently has that recipe.'
+export const TARGETED_OBSERVATION_GUIDANCE = 'A specific missing live fact may be requested as a JSON control decision with unchanged plan/currentStep and operations:[]. Follow the scope and exact identities in the current [CONTROL_DECISION_STATE]. For committed execution use observationRequest:{stepId:"<active reducer step id>",tool,args,rationale}. For draft planning use observationRequest:{scope:"draft",goalId,planId,planVersion,draftRevision,tool,args,rationale}; no committed step is required to correct or author a draft. Supported facts are exact getEntityStatus({unit_number:<observed exact unit>}), getInventoryItems({}) and getResearchStatus({}). No discovery, plan edits or completion claims may accompany the read. It grants no gameplay authority. Draft revision/restaging/restart cannot renew its one-read allowance; committed execution renews only with native receipt or active-step progress. Reuse sufficient facts instead of requesting a read. A previous_recipe_name is historical, not current configuration.'

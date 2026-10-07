@@ -711,9 +711,15 @@ export const plannerControlToolDefinitions = [{
         currentStep: { type: 'integer', minimum: 0, maximum: 30 },
         assessmentOnly: { type: 'boolean', description: 'Set true only for an intentionally observation-only slice: all stepCompletions are semantic and operations is empty. Omit or set false for execution drafts, which require at least one deterministic world-result checkpoint. This does not change an existing committed plan.' },
         observationRequest: {
-          type: 'object', additionalProperties: false, required: ['stepId', 'tool', 'args', 'rationale'],
+          type: 'object', additionalProperties: false, required: ['tool', 'args', 'rationale'],
+          anyOf: [{ required: ['stepId'] }, { required: ['scope', 'goalId', 'planId', 'planVersion', 'draftRevision'] }],
           description: TARGETED_OBSERVATION_GUIDANCE,
           properties: {
+            scope: { type: 'string', enum: ['step', 'draft'] },
+            goalId: { type: 'string', minLength: 1, maxLength: 240 },
+            planId: { type: 'string', minLength: 1, maxLength: 240 },
+            planVersion: { type: 'integer', minimum: 1 },
+            draftRevision: { type: 'integer', minimum: 0 },
             stepId: { type: 'string', minLength: 1, maxLength: 240 },
             tool: { type: 'string', enum: ['getEntityStatus', 'getInventoryItems', 'getResearchStatus'] },
             args: { type: 'object' }, rationale: { type: 'string', minLength: 1, maxLength: 500 },

@@ -1,59 +1,59 @@
 {
   "calls": [
     {
-      "body": "a16247cf50cad04e",
+      "body": "8b2af55398a93c2c",
       "context": "d1cd83efd9119c14",
-      "messages": 5
+      "messages": 6
     },
     {
-      "body": "c04196314f893c5b",
+      "body": "9735adfff21af240",
       "context": "fc692382fd4fbd9e",
-      "messages": 9
+      "messages": 10
     },
     {
-      "body": "5833ea4a0dbeb56d",
+      "body": "21b576aaf5851fa9",
       "context": "c51081091f8bad92",
-      "messages": 11
-    },
-    {
-      "body": "418c41830b32ec21",
-      "context": "da8f379fd5fb1353",
       "messages": 12
     },
     {
-      "body": "74c77911c4a3f955",
+      "body": "ecf21679eecb00ab",
+      "context": "da8f379fd5fb1353",
+      "messages": 13
+    },
+    {
+      "body": "1adabcb411fcd581",
       "context": "4357955560255795",
-      "messages": 8
-    },
-    {
-      "body": "87d43268037fe9d9",
-      "context": "2f6995293af92ca5",
-      "messages": 11
-    },
-    {
-      "body": "97af0acbd3571b2f",
-      "context": "4e21d90ef4cb5b39",
-      "messages": 14
-    },
-    {
-      "body": "e73baa4ce6f766ee",
-      "context": "b94658aadb52ffc8",
-      "messages": 14
-    },
-    {
-      "body": "697aad35e3ac93ae",
-      "context": "762450d8ff62934a",
       "messages": 9
     },
     {
-      "body": "e4059eb1cd8b0cbb",
-      "context": "7217558eeb84fb0c",
+      "body": "f922cad33b4a3848",
+      "context": "2f6995293af92ca5",
       "messages": 12
     },
     {
-      "body": "381b5c5888e01a2f",
-      "context": "69e185a12395f799",
+      "body": "69226cda70511139",
+      "context": "4e21d90ef4cb5b39",
+      "messages": 15
+    },
+    {
+      "body": "07b0d065cc7a3fa3",
+      "context": "b94658aadb52ffc8",
+      "messages": 15
+    },
+    {
+      "body": "68a6c7fb2d18f07f",
+      "context": "762450d8ff62934a",
+      "messages": 10
+    },
+    {
+      "body": "9cab7aadd0da86f5",
+      "context": "7217558eeb84fb0c",
       "messages": 13
+    },
+    {
+      "body": "4956c2e1e889a34d",
+      "context": "69e185a12395f799",
+      "messages": 14
     }
   ],
   "trace": [
@@ -86,504 +86,548 @@
       "sha": "3690a03e5ff9b068"
     },
     {
+      "event": "control.decision_state",
+      "sha": "d0caf5a5f4db282c"
+    },
+    {
       "event": "provider.request",
-      "sha": "976823871f19d1b7"
+      "sha": "3424d1a8c8cdcfeb"
     },
     {
       "event": "provider.round_policy",
-      "sha": "42ad507cae393ba8"
+      "sha": "132188c8aba8cd96"
     },
     {
       "event": "provider.response",
-      "sha": "211bd47cfa8b6aaf"
+      "sha": "d44c7a16b9fd29d6"
     },
     {
       "event": "tool.call",
-      "sha": "9ca006de7b7772ed"
+      "sha": "20e5ae9b5dbe6448"
     },
     {
       "event": "tool.call",
-      "sha": "714ad3bba179baf9"
+      "sha": "2aca374b6617295c"
     },
     {
       "event": "tool.call",
-      "sha": "57fa3f39b75170e9"
+      "sha": "97a1b4d23a14bdda"
     },
     {
       "event": "tool.result",
-      "sha": "cdf1194a421af553"
+      "sha": "7f582e5a4a0eafa2"
     },
     {
       "event": "tool.result",
-      "sha": "c3a7fa2f312a2457"
+      "sha": "49d162b185e2162e"
     },
     {
       "event": "tool.result",
-      "sha": "bea6215797c9dcb9"
+      "sha": "86fa804711713c73"
     },
     {
       "event": "budget.reserved",
-      "sha": "7a9136d7cd22b9e6"
+      "sha": "5ec598915910a991"
+    },
+    {
+      "event": "control.decision_state",
+      "sha": "cc68f23ac3ef57df"
     },
     {
       "event": "provider.request",
-      "sha": "1fcbdb55b2d43933"
+      "sha": "d8312d6a21e96024"
     },
     {
       "event": "provider.round_policy",
-      "sha": "67679ffd73e39b59"
+      "sha": "8bde2bf4d43c105d"
     },
     {
       "event": "provider.response",
-      "sha": "c63126e9dcd22e4b"
+      "sha": "ab9486791182a186"
     },
     {
       "event": "tool.call",
-      "sha": "f526476853e33f51"
+      "sha": "5b4faae029ea0cc5"
     },
     {
       "event": "tool.call",
-      "sha": "b5906dd2de8b0122"
+      "sha": "7b9c8688ee172b17"
     },
     {
       "event": "tool.call",
-      "sha": "849b45f560a91003"
+      "sha": "56faedb621d11591"
     },
     {
       "event": "tool.call",
-      "sha": "91ce13824b96aa05"
+      "sha": "95a5d69ad13fdc53"
     },
     {
       "event": "tool.result",
-      "sha": "b3b903d674044cce"
+      "sha": "9277d089c619a02e"
     },
     {
       "event": "tool.result",
-      "sha": "5cfc9cb43f55766b"
+      "sha": "99607154aa223272"
     },
     {
       "event": "tool.result",
-      "sha": "ae796ba4a16970d2"
+      "sha": "46933a6dbabb142f"
     },
     {
       "event": "tool.result",
-      "sha": "3dfde3889d29ac5c"
+      "sha": "63baa078900d44e9"
     },
     {
       "event": "budget.reserved",
-      "sha": "725d4da0a7e8c2e8"
+      "sha": "987d55f161bc15de"
+    },
+    {
+      "event": "control.decision_state",
+      "sha": "275c38fffd7aef49"
     },
     {
       "event": "provider.request",
-      "sha": "62adeab8b10d3060"
+      "sha": "92ac2b75a80ad124"
     },
     {
       "event": "provider.round_policy",
-      "sha": "131c360b9d84d87f"
+      "sha": "5fbea11413d8d519"
     },
     {
       "event": "provider.response",
-      "sha": "1acc028b07ecda72"
+      "sha": "ec66e4f950f18dac"
     },
     {
       "event": "tool.call",
-      "sha": "0ad87b15c6fff6ab"
+      "sha": "c36c6694000479e8"
     },
     {
       "event": "tool.call",
-      "sha": "7749b72877c09076"
+      "sha": "bfd987762a0c25b5"
     },
     {
       "event": "tool.call",
-      "sha": "1fc02fc2b9e0908b"
+      "sha": "a91882d25342c931"
     },
     {
       "event": "tool.call",
-      "sha": "518a302268691d66"
+      "sha": "bfccfe5b54fb782e"
     },
     {
       "event": "tool.result",
-      "sha": "80ef44b8bb6448f9"
+      "sha": "3829e32f778457e7"
     },
     {
       "event": "tool.result",
-      "sha": "0e5a8af29e51e189"
+      "sha": "cd0d261d5ea94f29"
     },
     {
       "event": "tool.result",
-      "sha": "3790ba10fbdf3eb4"
+      "sha": "dd546d7de81a70a4"
     },
     {
       "event": "tool.result",
-      "sha": "d372d505edeaa692"
+      "sha": "fb1551f2824dbd23"
     },
     {
       "event": "recovery.classified",
-      "sha": "2583905449d62bc9"
+      "sha": "181e3e1fe7d0eea2"
     },
     {
       "event": "budget.reserved",
-      "sha": "38a2c27757c9c6c9"
+      "sha": "4c48bb53ac3c8f10"
+    },
+    {
+      "event": "control.decision_state",
+      "sha": "142c8327e0d77599"
     },
     {
       "event": "provider.request",
-      "sha": "0012fe56bdc4bf60"
+      "sha": "bdec27481f9ceee0"
     },
     {
       "event": "provider.round_policy",
-      "sha": "2b464bc6b1a69591"
+      "sha": "596636937c623540"
     },
     {
       "event": "provider.response",
-      "sha": "383d2b23ec5e2b1b"
+      "sha": "33007033a3619ef7"
     },
     {
       "event": "provider.plan_submission",
-      "sha": "38f0214b9c859fe9"
+      "sha": "992c06d5deadca8e"
     },
     {
       "event": "plan.accepted",
-      "sha": "a8ad67ea6f6d2ac1"
+      "sha": "b7fce68b546268f8"
     },
     {
       "event": "plan.persisted",
-      "sha": "6680c5f3d0c62eea"
+      "sha": "d08531f8f22b6a0a"
     },
     {
       "event": "step.checkpoint_validated",
-      "sha": "e9870e00a81be6d6"
+      "sha": "85d2a5af40236457"
     },
     {
       "event": "operations.preflight_ok",
-      "sha": "0f7110fe2bc32879"
+      "sha": "d5d54bcb18a980db"
     },
     {
       "event": "operation.pending_recorded",
-      "sha": "4e538d5611113a0b"
+      "sha": "b88d04da4c54f704"
     },
     {
       "event": "operations.admit",
-      "sha": "2f9296b13ee4f146"
+      "sha": "256abf5125352421"
     },
     {
       "event": "operations.ack",
-      "sha": "4cb72e88af851994"
+      "sha": "87045a4203d2a935"
     },
     {
       "event": "plan.time_estimate",
-      "sha": "e69fe070110b4d23"
+      "sha": "70fe1aa96b45f798"
     },
     {
       "event": "request.waiting",
-      "sha": "a7fcd7a4dee63bae"
+      "sha": "40f43919db43a814"
     },
     {
       "event": "factorio.completed_signal",
-      "sha": "669f134540677744"
+      "sha": "bcc99f455a7f19fb"
     },
     {
       "event": "factorio.status",
-      "sha": "9f5df5f924b7bfa5"
+      "sha": "0ae8ea15f6faa46d"
     },
     {
       "event": "step.completion_checked",
-      "sha": "4bbc77e1de837ae3"
+      "sha": "19c0e898e8f560ed"
     },
     {
       "event": "step.verified",
-      "sha": "60a07d0688132ed0"
+      "sha": "77b32900a043ab69"
     },
     {
       "event": "step.time_measured",
-      "sha": "82cb7e3995539a61"
+      "sha": "6005f35154a87c03"
     },
     {
       "event": "budget.generation_rolled",
-      "sha": "3765573d98a387a2"
+      "sha": "a28dda0a2c47e90e"
     },
     {
       "event": "factorio.completion_continuation",
-      "sha": "f49c67850b25d58b"
+      "sha": "d618b24da3a0eb94"
     },
     {
       "event": "budget.reserved",
-      "sha": "bb9ea80b313e18f4"
+      "sha": "5394fa3104a5ec45"
+    },
+    {
+      "event": "control.decision_state",
+      "sha": "e4e0f81d674aa2a4"
     },
     {
       "event": "provider.request",
-      "sha": "177405664595a5f1"
+      "sha": "f8e0151a43a3b01a"
     },
     {
       "event": "provider.round_policy",
-      "sha": "4a58d481e16c7614"
+      "sha": "6be368a15949105f"
     },
     {
       "event": "provider.response",
-      "sha": "93af45299246b094"
+      "sha": "4734a2ee09e92037"
     },
     {
       "event": "tool.call",
-      "sha": "c1bb8bedf0a13b37"
+      "sha": "7a9c8c14f2dfe622"
     },
     {
       "event": "tool.call",
-      "sha": "2c908b52bee3b708"
+      "sha": "7ffc124033d8bb89"
     },
     {
       "event": "tool.result",
-      "sha": "19d48e32a4530334"
+      "sha": "83f3e51929ed0b2b"
     },
     {
       "event": "tool.result",
-      "sha": "c9478d1d94f4135a"
+      "sha": "1a8f34e4ff017b15"
     },
     {
       "event": "budget.reserved",
-      "sha": "1deb2aac112c3d9b"
+      "sha": "ed700b2de5695f20"
+    },
+    {
+      "event": "control.decision_state",
+      "sha": "0499fa4fb5af9d95"
     },
     {
       "event": "provider.request",
-      "sha": "3dc2559de7f7f07d"
+      "sha": "9d4e090e4a9d1ccc"
     },
     {
       "event": "provider.round_policy",
-      "sha": "b0411312279485b3"
+      "sha": "968e878dd700cfc7"
     },
     {
       "event": "provider.response",
-      "sha": "f57a58b1136a2ad6"
+      "sha": "b94104c1a150beaf"
     },
     {
       "event": "tool.call",
-      "sha": "247146d44e9d448e"
+      "sha": "1070335676df1b6c"
     },
     {
       "event": "tool.call",
-      "sha": "da4ddf2378478c53"
+      "sha": "20fce3e893b997ef"
     },
     {
       "event": "tool.call",
-      "sha": "8377cd537cc4f142"
+      "sha": "7ee2226993fe269d"
     },
     {
       "event": "tool.call",
-      "sha": "a5720d052bb26b9e"
+      "sha": "6fde9e1c84edeac2"
     },
     {
       "event": "tool.result",
-      "sha": "9e252e25bb2c5c86"
+      "sha": "f4ae636190b72a6b"
     },
     {
       "event": "tool.result",
-      "sha": "9680399c4cdc3b63"
+      "sha": "5f02bda6a3e93edb"
     },
     {
       "event": "tool.result",
-      "sha": "ec5b1b8d3f5691a9"
+      "sha": "dc5b880c5fb81b6c"
     },
     {
       "event": "tool.result",
-      "sha": "774f4aeca435d377"
+      "sha": "659781a13e58b8e0"
     },
     {
       "event": "budget.reserved",
-      "sha": "e27f606e82be48b1"
+      "sha": "8a2c732eb583ac74"
+    },
+    {
+      "event": "control.decision_state",
+      "sha": "d913e2ca56be4f4d"
     },
     {
       "event": "provider.request",
-      "sha": "98081008c85bf341"
+      "sha": "4bd86a6ede0dfd26"
     },
     {
       "event": "provider.round_policy",
-      "sha": "b79002297be29d7f"
+      "sha": "822083ce8ba63ace"
     },
     {
       "event": "provider.response",
-      "sha": "5496e835e3543344"
+      "sha": "749423dbca421dfd"
     },
     {
       "event": "tool.call",
-      "sha": "fc07a9720df25708"
+      "sha": "8f7ce3af4437ea4c"
     },
     {
       "event": "tool.call",
-      "sha": "0809ebafedac15c6"
+      "sha": "ec093d7448be8818"
     },
     {
       "event": "tool.call",
-      "sha": "aa565bc2d0afe2cd"
+      "sha": "3b7062138db8820d"
     },
     {
       "event": "tool.result",
-      "sha": "79ed855fcff037f4"
+      "sha": "b89c238aa7c4ddd0"
     },
     {
       "event": "tool.result",
-      "sha": "ad26f688ec2eb7dd"
+      "sha": "30a5d536956828a4"
     },
     {
       "event": "tool.result",
-      "sha": "a98d89f4db1efe4e"
+      "sha": "3fccd0dbd14aed1a"
     },
     {
       "event": "recovery.classified",
-      "sha": "f40bb40b742eda5d"
+      "sha": "3e47d57099bc5e67"
     },
     {
       "event": "budget.reserved",
-      "sha": "eb6c57053ee49893"
+      "sha": "c68d69c4dd546445"
+    },
+    {
+      "event": "control.decision_state",
+      "sha": "e3badd7923aac531"
     },
     {
       "event": "provider.request",
-      "sha": "6a894e4197b5f458"
+      "sha": "111d5c5ee05e1d1a"
     },
     {
       "event": "provider.round_policy",
-      "sha": "92a236820cb3c62d"
+      "sha": "914d3dd9bcd4110d"
     },
     {
       "event": "provider.response",
-      "sha": "b1208200fea884c7"
+      "sha": "6b2a4f2496af901c"
     },
     {
       "event": "provider.plan_submission",
-      "sha": "96f16eca26426b3b"
+      "sha": "cfa6c8e0bf2d56f2"
     },
     {
       "event": "plan.accepted",
-      "sha": "59dc4cf3ae2c9357"
+      "sha": "1762275786ffa33f"
     },
     {
       "event": "plan.persisted",
-      "sha": "59e57b5bb8b6a5ec"
+      "sha": "8c3ef1034576b88f"
     },
     {
       "event": "operations.preflight_ok",
-      "sha": "d497cd8943606ff7"
+      "sha": "6315030a3bcf78e7"
     },
     {
       "event": "operation.pending_recorded",
-      "sha": "0d755afa7d3d6521"
+      "sha": "5c0c131a207c749e"
     },
     {
       "event": "operations.admit",
-      "sha": "600453f245f13b32"
+      "sha": "11666f80401659b0"
     },
     {
       "event": "operations.ack",
-      "sha": "d51a63f30aed6dab"
+      "sha": "7b04477ec3e76575"
     },
     {
       "event": "request.waiting",
-      "sha": "934881dcc788a2a8"
+      "sha": "c205c9ec8768322c"
     },
     {
       "event": "operation.reconciled",
-      "sha": "d66b0542025edfe1"
+      "sha": "d7cc568f1fc6f1e7"
     },
     {
       "event": "factorio.status",
-      "sha": "0054aaa84d96f3a5"
+      "sha": "5555054f0554d66d"
     },
     {
       "event": "factorio.error_continuation",
-      "sha": "6256817a15ce9a20"
-    },
-    {
-      "event": "budget.reserved",
-      "sha": "d8590745b99cc780"
-    },
-    {
-      "event": "provider.request",
-      "sha": "d1d53e795805104e"
-    },
-    {
-      "event": "provider.round_policy",
-      "sha": "b704d404a49c96b6"
-    },
-    {
-      "event": "provider.response",
-      "sha": "696871ec5e9ef01c"
-    },
-    {
-      "event": "tool.call",
-      "sha": "f7ed162e8bf680e3"
-    },
-    {
-      "event": "tool.call",
-      "sha": "649e0e4175b6c879"
-    },
-    {
-      "event": "tool.result",
-      "sha": "61b3851df90cf57a"
-    },
-    {
-      "event": "tool.result",
-      "sha": "74668f8ee2274b7a"
+      "sha": "c3038c0940f01bf2"
     },
     {
       "event": "budget.reserved",
       "sha": "dcf8c47aaac6ef5e"
     },
     {
+      "event": "control.decision_state",
+      "sha": "a249ba61723c1b93"
+    },
+    {
       "event": "provider.request",
-      "sha": "62cc1281a406323c"
+      "sha": "4eb4a6d7f62da418"
     },
     {
       "event": "provider.round_policy",
-      "sha": "bebf04e9962d8613"
+      "sha": "3c1ece00d610a257"
     },
     {
       "event": "provider.response",
-      "sha": "c05d115520288a96"
+      "sha": "09f073a6e69cab7a"
     },
     {
       "event": "tool.call",
-      "sha": "973a2ff3d748e65f"
+      "sha": "e6d055a1b59e6035"
     },
     {
       "event": "tool.call",
-      "sha": "373f66bbfdac8218"
+      "sha": "ad1b7801b0de61f6"
     },
     {
       "event": "tool.result",
-      "sha": "feff5c669b876a3f"
+      "sha": "349238efc9c11abf"
     },
     {
       "event": "tool.result",
-      "sha": "5679d258fd3bb999"
+      "sha": "05a1fb04ca393564"
     },
     {
       "event": "budget.reserved",
-      "sha": "639d8bc3702586dc"
+      "sha": "bf6d30e57c913019"
+    },
+    {
+      "event": "control.decision_state",
+      "sha": "8518ce439d260893"
     },
     {
       "event": "provider.request",
-      "sha": "6cbf3fac11cf355d"
+      "sha": "e0ba8fe64ebc6281"
     },
     {
       "event": "provider.round_policy",
-      "sha": "b333fad33cb85c99"
+      "sha": "4597e5b64794d875"
     },
     {
       "event": "provider.response",
-      "sha": "59b2cc26e744ab79"
+      "sha": "c24451c0b054fade"
+    },
+    {
+      "event": "tool.call",
+      "sha": "b2782a0c40d1e81f"
+    },
+    {
+      "event": "tool.call",
+      "sha": "8ca87804f75dd641"
+    },
+    {
+      "event": "tool.result",
+      "sha": "38b19e4592ef65bf"
+    },
+    {
+      "event": "tool.result",
+      "sha": "55048794bcfdf5c4"
+    },
+    {
+      "event": "budget.reserved",
+      "sha": "1fd97a44f23c5085"
+    },
+    {
+      "event": "control.decision_state",
+      "sha": "7970a1bfa5934069"
+    },
+    {
+      "event": "provider.request",
+      "sha": "985b3efce2255011"
+    },
+    {
+      "event": "provider.round_policy",
+      "sha": "c3e511715f4a463b"
+    },
+    {
+      "event": "provider.response",
+      "sha": "c7477b34d8235e29"
     },
     {
       "event": "plan.accepted",
-      "sha": "8bfb550f8950bb5a"
+      "sha": "e19c38bdf4a94b54"
     },
     {
       "event": "plan.persisted",
-      "sha": "b5775bc4c097dedd"
+      "sha": "bca9397c8ac47d9d"
     },
     {
       "event": "request.time_split",
-      "sha": "f3cb7663fb731a8d"
+      "sha": "0a9c9c670838cc6f"
     },
     {
       "event": "request.completed",
-      "sha": "72c2157422129db9"
+      "sha": "880ff491f95a6d04"
     }
   ]
 }

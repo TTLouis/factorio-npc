@@ -157,6 +157,22 @@ test('requires_machine is a recoverable fact result: the model gets the live fac
   assert.equal(named('operations.preflight_recoverable').some(event => event.failure_class === 'requires_machine'), true)
 })
 
+test('closed machine-preflight recovery reports actual tool state and permits planner no-action correction', async () => {
+  const { agent, rcon, named } = harness(async () => planMessage([]))
+  agent.observationDecisionForced = true
+  agent.traceRequest = { id: 'req_closed_machine' }
+  const result = await agent.handleRequiresMachinePreflight({ preflight: requiresMachine() },
+    { operations: [{ name: 'craft_item', args: { item_name: 'plate-x', count: 5 } }] }, {}, {})
+  assert.equal(result.action, 'recovered')
+  assert.equal(rcon.mutations.length, 0)
+  const text = agent.messages.at(-1).content
+  assert.match(text, /Normal observation tools remain closed/)
+  assert.doesNotMatch(text, /tools remain enabled/)
+  assert.match(text, /operations: \[\] for executor delegation/)
+  assert.equal(named('craft.requires_machine')[0].tools_enabled, false)
+  assert.equal(named('craft.requires_machine')[0].request_id, 'req_closed_machine')
+})
+
 test('repeated requires_machine retries are bounded and pause the request without a blocker or a frozen plan', async () => {
   let calls = 0
   const { rcon, agent, named } = harness(async () => {

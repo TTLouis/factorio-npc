@@ -178,8 +178,9 @@ test('steam replay: the 390-ore step gets one time review before it runs, and th
   assert.equal(reviewCall.round.id, 'time_review_answer')
   const index = reviewCall.messages.findIndex(message => message.role === 'user' && String(message.content).startsWith('[HARNESS] Time review'))
   assert.ok(index > 0)
-  assert.equal(reviewCall.messages[index - 1].role, 'assistant')
-  assert.deepEqual(JSON.parse(reviewCall.messages[index - 1].content).operations, STEP1_OPERATIONS)
+  const draft = reviewCall.messages.slice(0, index).findLast(message => message.role === 'assistant')
+  assert.ok(draft, 'the held draft precedes the review and volatile control state')
+  assert.deepEqual(JSON.parse(draft.content).operations, STEP1_OPERATIONS)
   const last = reviewCall.messages[index]
   assert.match(last.content, /about 13\.0 min of serial work on the NPC's own lane/)
   assert.match(last.content, /made no estimateProductionTime or getMiningDetails call/)
@@ -590,4 +591,3 @@ test('seconds per hand-mined item never go negative when machine time exceeds th
   assert.equal(measured.machine_wait_seconds, 95)
   assert.equal(measured.measured_seconds_per_hand_mined_item, 0)
 })
-
