@@ -18,9 +18,15 @@ MODS="$LANE_ROOT/mods"
 CONFIG="$LANE_ROOT/config.ini"
 FACTORIO_PID=""
 START_COUNT=0
+PRISTINE_SAVE="$LANE_ROOT/pristine-planning-live.zip"
 export PYTHONUNBUFFERED=1
 
 mkdir -p "$RESULTS" "$WRITE_DATA" "$MODS"
+if [[ "$LANE" == resilience ]]; then
+  # Independent controllers cannot share a persisted operation-ordinal journal.
+  # Capture the untouched generated world before either controller runs.
+  cp "$SAVE" "$PRISTINE_SAVE"
+fi
 # Parallel Factorio instances must not share a writable mod directory. Factorio
 # may maintain per-instance mod metadata/caches there, so clone the prepared test
 # mod tree once per lane just like save/write-data/ports are isolated.
@@ -203,9 +209,12 @@ case "$LANE" in
     printf '[npc-test][resilience] Verifying full planning lifecycle lineage after real Factorio restart...\n'
     run_node planning_lifecycle_factorio.mjs --mode verify
 
-    # Each fixture owns independent durable memory for the same actor. Finish
-    # the lifecycle controller before preparing the next one; interleaving
-    # their restores would reuse an operation ordinal consumed by its peer.
+    # Each fixture owns independent durable memory. Restart preserves the world
+    # admission high-water mark, so use a pristine world for the next controller
+    # rather than resetting that production replay fence.
+    stop_factorio
+    SAVE="$PRISTINE_SAVE"
+    start_factorio
     printf '[npc-test][resilience] Preparing live planning BLOCKED state against real Factorio preflight...\n'
     run_node planning_live_factorio.mjs --mode prepare --save "$SAVE"
     restart_factorio
