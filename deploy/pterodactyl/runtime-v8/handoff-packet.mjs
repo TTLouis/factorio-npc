@@ -537,7 +537,7 @@ function historicalTriggerCrafting(technology, item, raw, tag) {
   return report
 }
 
-// Cache only native craft-item capability reports. Names/tags survive restart;
+// Cache only native craft-item capability reports. Serialization retains tags;
 // enabled state and actor capabilities are labelled historical, never fresh.
 export function cacheTriggerCraftingReports(research, tag) {
   if (!research || typeof research !== 'object' || Array.isArray(research)) return []

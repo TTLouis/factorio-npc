@@ -30,6 +30,8 @@ import {
   recipeFactFromRequiresMachine,
   recipeFactsFromDetails,
   researchPathFact,
+  cacheTriggerCraftingReports,
+  attachCachedTriggerCrafting,
   researchFactItems,
   selectRecipeFacts,
   stepContractNeeds,
@@ -2876,6 +2878,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // Repair unit D2: what a fresh executor can be told. Recipe facts are stable game data and outlive requests;
     // inventory observations are world state and reset with the entity observations. The mutation sequence orders them.
     this.handoffRecipeFacts = new Map()
+    this.handoffTriggerCraftingReports = []
     this.handoffInventoryObservations = new Map()
     this.handoffTouchedItems = new Set()
     this.handoffRequirementMachines = new Map()
@@ -4261,6 +4264,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // The requirements answer's machine options for machine-output targets (goal-requirements.mjs queryRequirements).
   recordRequirementsFacts(parsed) {
     try {
+      const reports = cacheTriggerCraftingReports(parsed?.research, { ...this.observationTag(), tick: parsed?.tick })
+      const updated = new Set(reports.map(report => report.technology))
+      this.handoffTriggerCraftingReports = [...reports, ...this.handoffTriggerCraftingReports.filter(report => !updated.has(report.technology))]
+        .slice(0, EXECUTOR_FACT_LIMITS.researchNodes)
       for (const report of Array.isArray(parsed?.machines) ? parsed.machines : []) {
         const machines = (Array.isArray(report?.options) ? report.options : []).map(option => option?.entity).filter(entity => typeof entity === 'string' && entity)
         if (typeof report?.recipe !== 'string' || machines.length === 0) continue
@@ -4335,7 +4342,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
               meta.reads_attempted += 1
               try {
                 const parsed = JSON.parse(String(await this.rcon.command(this.observationToolCommand('getResearchPath', { name: target, max_nodes: limits.researchNodes }))).trim())
-                fact = researchPathFact(parsed, target, this.observationTag())
+                fact = attachCachedTriggerCrafting(researchPathFact(parsed, target, this.observationTag()), this.handoffTriggerCraftingReports)
+                const triggerFacts = fact.nodes?.filter(node => node.trigger_crafting) ?? []
+                if (triggerFacts.length) await this.traceEvent('context.trigger_crafting_handoff', {
+                  request_id: this.traceRequest?.id,
+                  reason: 'trigger_capabilities_preserved_as_history_with_unknowns_explicit',
+                  target, node_count: triggerFacts.length,
+                  historical_count: triggerFacts.filter(node => node.trigger_crafting.state === 'historical').length,
+                })
               }
               catch { fact = { target, state: 'unavailable', reason: 'research_path_read_failed' } }
               if (fact.state !== 'fresh') meta.reads_failed += 1
