@@ -8,6 +8,25 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 8 after trial C: semantic steps prevented, minimal MW5 recovery wired (static gates passed, not live-validated)
+
+- **Prevention.** Execution plans may declare only deterministic checkpoints (`68b7945f`).
+  - A semantic step in an execution draft is refused at commit as `semantic_step_in_execution_plan`, traced as `plan.semantic_step_refused`.
+  - `assessmentOnly` slices are unchanged. Committed plans from saved games keep working.
+  - Planner prompt and schema wording now state the same rule.
+- **Minimal MW5** (`b0cf4b59`, installer pin `43fc6dbc`).
+  - A chat objective gets a `player_task` grant.
+  - A committed plan that becomes BLOCKED by a harness-evidenced world change wakes the planner with `[PLAN_BLOCKED]` to author a replacement under MW1. It is capped at 3 per goal by a durable counter.
+    - A world change here is an allowlisted preflight code, or a proven admission refusal.
+  - The player gets one chat line per replacement.
+  - Deadlocks and provider failures never wake the planner.
+  - The protected-structure gates apply to Luna's own replacement plans and to a future Auto mandate.
+- **Gates.** `bash scripts/test-local.sh all` exit 0: 1,974 runtime tests and 120 mod files.
+- **Open.**
+  - An executor reply that uses the board's step index instead of `stepId` after a replacement is refused and pauses the goal.
+  - The one-step contract prediction (`docs/NPC_PLANNING_ROADMAP.md`) is designed but not built.
+  - Deterministic repair of malformed model JSON is next.
+
 ## October 8 Haiku trial C: slice hand-over fixed live, paused on a semantic smelting step
 
 Owner-approved rerun at `2281bd1f` (`claude-haiku-5-5`, CLI proxy): 47 Luna and 54 Jev calls, 1,023 seconds, zero humans or corrections. Two full slices and one step of a third verified (9 steps, red science unlocked); slice 2 handed over with `budget.continuation_slice_reset`, and all 23 executor replies bound by `stepId`. The planner then declared a smelting step semantic; the executor was refused (`semantic_step_cannot_mutate`), reported a blocker, and the goal paused as a recoverable provider failure. Open: semantic world-changing steps are accepted at commit and have no route back to the planner, and bound executor replies can no longer use the semantic-to-deterministic transition. Details: [trial C](validation/LUNA_HAIKU_LIVE_2026-10-08C.md).
