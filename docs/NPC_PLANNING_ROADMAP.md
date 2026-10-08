@@ -654,6 +654,8 @@ This is authoring discipline, not a Jev rejection loop.
 
 ## 6. Step contracts are fixed before commit
 
+> Owner decision 2026-10-08 (proposed, not built): each step's contract becomes fixed before that step activates, not at slice commit. See [One-step contract prediction](#one-step-contract-prediction-owner-decision-2026-10-08-proposed-not-built).
+
 A committed semantic step should already know what successful completion means.
 
 Example:
@@ -1174,6 +1176,64 @@ Constraints any design has to keep:
 - "More machines" is a throughput decision. It follows the measured-throughput rule
   (no unvalidated inserter or belt figures) and fits the production-rate goals
   above.
+
+### One-step contract prediction (owner decision, 2026-10-08; proposed, not built)
+
+Trigger: [Haiku trial C](validation/LUNA_HAIKU_LIVE_2026-10-08C.md). The planner writes every step's completion contract when it commits a slice, several steps before those steps run. By then the facts can be stale (trial C committed "mine 100 iron ore" while Luna already held 130), and a contract that turns out wrong is frozen with the plan.
+
+The owner's decision: keep the residual planning and the Roadmap Shelf, and plan each step close to when it runs. "We do one step prediction to reduce idle time, ie if an actual execution plan has taken place we start to assume that plan got finished and pre plan the next, with just in time as a fall back."
+
+This is the run-ahead mechanic described in the section above, applied to step contracts. It is a generic harness mechanic (keep a proposal with the outcome it assumed, compare it with the real state, use it only if they match), not Factorio strategy.
+
+**What is committed when**
+
+- The slice stays the strategic unit. At slice commit the planner commits the ordered step intents (descriptions) and the first step's completion contract. Shelf refinement, Jev ranking and steering stay at slice boundaries, unchanged.
+- Each later step's contract is bound when that step becomes active. Binding is append-only: it adds the contract a step did not yet have and never rewrites one.
+- Step intents and their order are immutable from slice commit. A bound contract is immutable. Changing either is still a new plan version (§1.1, MW5).
+
+**Prediction (the normal path)**
+
+1. When the active step has at least one admitted operation batch, the harness asks the planner to author the next step's contract on the assumption that the active step's contract is met.
+2. The result is held as a prediction. It is keyed to the plan id, the next step id, the active step id and the fingerprint of the contract it assumed, the actor id and epoch, and the loop generation. At most one prediction is in flight.
+3. A prediction admits nothing and changes nothing. The executor never sees it before it is bound. Only one context acts on the body, as before.
+4. When the active step closes, the harness re-validates the prediction against fresh facts with the same checks as a commit: requirement grounding, checkpoint contract validation, and the semantic-step rule. If it passes, it is bound and the executor goes on without waiting for the planner.
+
+**Just in time (the fallback)**
+
+The prediction is discarded, with a traced reason, and the planner authors the contract when the step activates, if any of these hold:
+
+- it failed re-validation;
+- there was none;
+- it assumed something that did not happen (the step closed semantically, through recovery, or with different evidence);
+- the actor, epoch or generation changed.
+
+If the prediction call is still running at step close, the harness waits for it. It is the same call just-in-time planning would make, started earlier.
+
+**Authority and boundaries**
+
+- The planner authors contracts. The executor never does. Jev does not validate them. The harness validates and binds.
+- The prediction runs as a side call built from the planner's cached prompt prefix and a harness packet: the slice's intents, the active step's contract as the assumed outcome, and current verified facts. The parked planner conversation is not changed, so a discarded prediction leaves nothing behind.
+- A failed step or a structural blocker discards the prediction, and recovery runs through MW5. A future step whose contract was never bound needs no replacement plan; only a change of intent does.
+
+**Cost and evidence**
+
+- Prediction calls count against the shared campaign allowance. A discarded prediction is a wasted call, so the hit rate is traced.
+- Trace events: `plan.contract_prediction_started`, `plan.contract_prediction_bound`, `plan.contract_prediction_discarded` (with reason) and `plan.contract_bound_just_in_time`. Each carries `request_id`, `plan_id`, `step_id` and a reason.
+
+**Compatibility**
+
+A plan whose contracts were all bound at commit stays valid: those steps skip binding. The first phase covers steps inside a slice. Predicting the next slice while the last step runs is a later phase.
+
+**Build units (proposed)**
+
+| Unit | Scope |
+|---|---|
+| P1 | Reducer: steps committed without a contract; a runtime-only, append-only, validated contract-binding event; Plan Tracker shows "contract pending" |
+| P2 | Runtime: just-in-time binding at step activation, through a synchronous planner call. This alone removes stale contracts |
+| P3 | Runtime: the prediction lane (asynchronous side call, keyed, re-validated, discard reasons) |
+| P4 | Static scenarios with recorded replies: a prediction bound, discarded on a changed fact, discarded on a failed step, and discarded on an actor replacement mid-prediction |
+
+Order: minimal MW5 first, because recovery is needed in both designs and it is what stopped trial C. Then P1–P4.
 
 ## Agent split: sequential planner and executor (design updated 2026-09-30)
 
