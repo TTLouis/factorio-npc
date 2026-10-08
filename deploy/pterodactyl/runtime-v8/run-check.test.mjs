@@ -569,3 +569,23 @@ test('executor step identity: executor.stale_step_rejected events are counted pe
   assert.match(findings[0].detail, /expected step_3/)
   assert.equal(findingsFor(analyzeBehaviorTrace(rows.slice(4)), 'executor_stale_step_rejected').length, 0)
 })
+
+test('an execution draft refused for a semantic step is counted as informational, never as a finding', async () => {
+  const { result, parse_errors: errors } = await runCheck({ behaviorFile: path.join(fixturesDir, 'semantic-step-refused.jsonl') })
+  assert.equal(errors.length, 0)
+  assert.deepEqual(result.findings, [])
+  assert.equal(result.informational.length, 1)
+  const [item] = result.informational
+  assert.equal(item.signature, 'semantic_step_refused')
+  assert.equal(item.request_id, 'req_semref_1')
+  assert.equal(item.count, 1, 'the commit trace row and its recovery classification are one refusal')
+  assert.match(item.detail, /semantic_step_in_execution_plan.*step indexes 1/)
+  assert.match(formatCheckReport(result), /No known failure signatures found\.[\s\S]*1 informational \(not findings\):\n- \[semantic_step_refused\] request_id=req_semref_1 count=1/)
+  // Without the commit trace row, the recovery classification alone still counts.
+  const rows = await loadFixtureRows('semantic-step-refused.jsonl')
+  const classifiedOnly = analyzeBehaviorTrace(rows.filter(row => row.event !== 'plan.semantic_step_refused'))
+  assert.equal(classifiedOnly.informational[0].count, 1)
+  assert.deepEqual(classifiedOnly.findings, [])
+  // A trace with no refusal reports nothing informational.
+  assert.deepEqual(analyzeBehaviorTrace(rows.filter(row => !/semantic_step/.test(JSON.stringify(row)))).informational, [])
+})

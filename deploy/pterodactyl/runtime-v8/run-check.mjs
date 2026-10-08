@@ -751,6 +751,31 @@ const SIGNATURES = [
   },
 ]
 
+// Informational counts: model-correctable events that are not failures, so they never add a finding or change the
+// exit code. A new execution draft that declares a semantic step is refused at commit
+// (npc-agent-loop.mjs validateStepCompletionDeclarations: plan.semantic_step_refused / semantic_step_in_execution_plan)
+// and the planner redrafts; the count shows how often the planner reaches for the escape hatch.
+function detectSemanticStepRefusals(rows) {
+  const refused = rows.filter(row => row?.event === 'plan.semantic_step_refused')
+  const classified = rows.filter(row => row?.event === 'recovery.classified' && row?.data?.reason_code === 'semantic_step_in_execution_plan')
+  const matches = refused.length > 0 ? refused : classified
+  if (matches.length === 0) return undefined
+  const indexes = refused.flatMap(row => Array.isArray(row.data?.semantic_step_indexes) ? row.data.semantic_step_indexes : [])
+  return {
+    count: matches.length,
+    first_ts: firstTsOf(matches),
+    detail: `execution draft(s) declared semantic steps and were refused at commit (semantic_step_in_execution_plan)${indexes.length > 0 ? `; step indexes ${indexes.join(',')}` : ''}`,
+  }
+}
+
+const INFORMATIONAL_SIGNATURES = [
+  {
+    id: 'semantic_step_refused',
+    label: 'execution draft with a semantic step refused at commit',
+    detect: detectSemanticStepRefusals,
+  },
+]
+
 // Trace-scoped signatures (see the delegation detectors above).
 const TRACE_SIGNATURES = [
   {
@@ -789,6 +814,14 @@ export function analyzeBehaviorTrace(rows, { since } = {}) {
       })
     }
   }
+  const informational = []
+  for (const [requestId, requestRows] of byRequest) {
+    for (const signature of INFORMATIONAL_SIGNATURES) {
+      const item = signature.detect(requestRows)
+      if (!item) continue
+      informational.push({ signature: signature.id, label: signature.label, request_id: requestId, count: item.count, first_ts: item.first_ts, detail: item.detail })
+    }
+  }
   const withRequest = row => nonEmptyString(row?.request_id) !== undefined
   const allWithRequest = sorted.filter(withRequest)
   const scopedWithRequest = scoped.filter(withRequest)
@@ -814,6 +847,7 @@ export function analyzeBehaviorTrace(rows, { since } = {}) {
 
   return {
     findings,
+    informational,
     request_count: byRequest.size,
     row_count: scoped.length,
     since: sinceMs !== undefined ? new Date(sinceMs).toISOString() : undefined,
@@ -838,6 +872,12 @@ export function formatCheckReport(result, { parseErrorCount = 0 } = {}) {
     lines.push('', `${result.findings.length} finding(s):`)
     for (const finding of result.findings) {
       lines.push(`- [${finding.signature}] request_id=${finding.request_id} count=${finding.count} first_ts=${printable(finding.first_ts)} :: ${finding.detail}`)
+    }
+  }
+  if (result.informational?.length > 0) {
+    lines.push('', `${result.informational.length} informational (not findings):`)
+    for (const item of result.informational) {
+      lines.push(`- [${item.signature}] request_id=${item.request_id} count=${item.count} first_ts=${printable(item.first_ts)} :: ${item.detail}`)
     }
   }
   if (parseErrorCount > 0) lines.push('', `JSONL parse warnings: ${parseErrorCount} (bad lines were skipped, not treated as failures)`)

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -299,8 +300,24 @@ test('the executor prompt variants name only fields the executor schema has; the
   // The planner text is untouched.
   assert.match(COMPACT_CONTINUATION_PROMPT, /checkpoint, semanticCompletion and stepCompletions remain allowed\. Closing observations does not close the control decision\. New drafts include stepCompletions aligned to plan/)
   assert.match(COMPACT_CONTINUATION_PROMPT, /\nNew execution drafts need at least one deterministic step\. For an intentionally observation-only slice, set assessmentOnly:true/)
-  assert.match(CLOSED_CONTROL_PROMPT, /New execution drafts require at least one deterministic step and stepCompletions aligned to plan/)
+  assert.match(CLOSED_CONTROL_PROMPT, /New execution drafts require stepCompletions aligned to plan, every entry \{kind:"deterministic",checkpoint:\{mode,requirements\}\}; keep committed completion specifications unchanged/)
   assert.match(CLOSED_CONTROL_PROMPT, /assessmentOnly:true with only semantic steps and no operations\. Research completion/)
+})
+
+// Owner decision 2026-10-08: execution slices declare only deterministic checkpoints; semantic declarations belong to an
+// assessmentOnly slice. The planner wording says so; the executor variants are byte-identical to before the change.
+test('planner prompts and the stepCompletions schema say execution plans declare only deterministic checkpoints; executor variants are unchanged', () => {
+  const stepCompletions = plannerControlToolDefinitions[0].function.parameters.properties.stepCompletions
+  assert.match(stepCompletions.description, /Execution plans declare only deterministic checkpoints\. Semantic declarations are accepted only with assessmentOnly:true\.$/)
+  assert.doesNotMatch(stepCompletions.description, /World-changing steps require|observation\/assessment only/)
+  assert.equal(stepCompletions.items.oneOf.length, 2, 'assessmentOnly still needs the semantic item')
+  assert.match(COMPACT_CONTINUATION_PROMPT, /each entry is \{kind:"deterministic",checkpoint:\{mode,requirements\}\}; \{kind:"semantic",rationale:"\.\.\."\} entries only with assessmentOnly:true\. Luna authors the outcome/)
+  assert.doesNotMatch(COMPACT_CONTINUATION_PROMPT, /\} or \{kind:"semantic"/)
+  assert.doesNotMatch(CLOSED_CONTROL_PROMPT, /\} or \{kind:"semantic"|at least one deterministic step and stepCompletions/)
+  const sha = text => createHash('sha256').update(text).digest('hex')
+  // Hashes recorded from the executor variants immediately before the wording change.
+  assert.equal(sha(EXECUTOR_COMPACT_CONTINUATION_PROMPT), 'cf609a119e5907e504ab0db36a355e415b8b0a3c940e28a8055ac363ac9b6028')
+  assert.equal(sha(EXECUTOR_CLOSED_CONTROL_PROMPT), 'c16eaa752f1089668448e47be9ac44aed134ae1f5768f98d06d658fa06d4cbdc')
 })
 
 test('a submitPlan wrapper in content whose nested object names the step (no plan array) unwraps and binds like a bare stepId reply', async () => {

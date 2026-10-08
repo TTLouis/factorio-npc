@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
-import { PLAN_STATUS } from './planning-state.mjs'
+import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 import { FakeFactorio, gather, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
 import { executorFactsRefreshMessage, EXECUTOR_FACT_LIMITS } from './handoff-packet.mjs'
 
@@ -218,16 +218,22 @@ test('semantic assessments cannot admit world mutations, and a corrected determi
   await world.agent.request('Gather ten copper ore.', { sender: 'Louis' })
   assert.equal(world.calls.length, 2)
   assert.equal(world.game.mutations.length, 1)
-  assert.match(world.calls[1].map(message => message.content ?? '').join('\n'), /semantic_step_cannot_mutate|permit observations only/)
+  // A semantic declaration with operations in an execution draft is refused as a semantic step in an execution plan.
+  assert.match(world.calls[1].map(message => message.content ?? '').join('\n'), /semantic_step_in_execution_plan/)
+  const refused = world.events.filter(row => row.event === 'plan.semantic_step_refused')
+  assert.equal(refused.length, 1)
+  assert.deepEqual(refused[0].data.semantic_step_indexes, [0])
 })
 
 test('an initial observation-only draft commits without gameplay and requires grounded completion', async () => {
-  const steps = ['Assess the copper patch', 'Gather ten copper ore']
+  // Observation-only drafts are all-semantic with assessmentOnly:true; a semantic step beside a deterministic one is
+  // refused in a new execution draft (see the semantic_step_in_execution_plan tests below).
+  const steps = ['Assess the copper patch', 'Confirm the patch can supply ten copper ore']
   let committedStepId
   const world = harness((call, memory) => {
-    if (call === 1) return draft({ plan: steps, operations: [], stepCompletions: [
+    if (call === 1) return draft({ plan: steps, operations: [], assessmentOnly: true, stepCompletions: [
       { kind: 'semantic', rationale: 'Assess the available copper patch from observations.' },
-      { kind: 'deterministic', checkpoint: copper },
+      { kind: 'semantic', rationale: 'Confirm the patch size from observations.' },
     ] })
     const planning = memory.planningState(KEY)
     const held = planning.plans.find(plan => plan.plan_id === planning.active_plan_id)
@@ -243,6 +249,111 @@ test('an initial observation-only draft commits without gameplay and requires gr
   assert.match(world.calls[1].map(message => message.content ?? '').join('\n'), new RegExp(committedStepId))
   assert.equal(world.memory.currentPlan(KEY).task_board.completed_count, 0)
   assert.equal(world.events.filter(row => row.event === 'recovery.action_omission_failed').length, 0)
+})
+
+// Haiku live run C (docs/validation/LUNA_HAIKU_LIVE_2026-10-08C.md): the planner committed a semantic "smelt" step between two
+// deterministic ones; the executor could not act on it and the goal paused. Execution slices now declare only
+// deterministic checkpoints, so that draft is refused before anything is committed or admitted.
+const runCSteps = ['Mine 100 iron ore', 'Smelt the mined iron ore and the held copper ore into plates for 75 automation-science-packs', 'Craft 75 automation-science-packs']
+const runCGoal = { scope: 'finite', summary: 'Craft 75 automation science packs.', doneWhen: [{ kind: 'inventory_count', item_name: 'automation-science-pack', minimum: 75 }] }
+const ironOre100 = inventoryCheckpoint('iron-ore', 100)
+const packs75 = inventoryCheckpoint('automation-science-pack', 75)
+
+test('a mixed deterministic and semantic execution draft is refused with semantic_step_in_execution_plan and an all-deterministic redraft commits', async () => {
+  const mixed = draft({ plan: runCSteps, goal: runCGoal, operations: [gather('iron-ore', 100)], stepCompletions: [
+    { kind: 'deterministic', checkpoint: ironOre100 },
+    { kind: 'semantic', rationale: 'Smelting is judged from the held plates once the ore is mined.' },
+    { kind: 'deterministic', checkpoint: packs75 },
+  ] })
+  const corrected = draft({ plan: runCSteps, goal: runCGoal, operations: [gather('iron-ore', 100)], stepCompletions: [
+    { kind: 'deterministic', checkpoint: ironOre100 },
+    { kind: 'deterministic', checkpoint: inventoryCheckpoint('iron-plate', 100) },
+    { kind: 'deterministic', checkpoint: packs75 },
+  ] })
+  const world = harness(call => {
+    if (call === 1) return mixed
+    // The refusal commits nothing and admits nothing.
+    assert.equal(world.game.admissions.length, 0)
+    assert.equal(world.game.mutations.length, 0)
+    assert.ok(!world.memory.planningState(KEY)?.plans?.some(plan => plan.status === PLAN_STATUS.COMMITTED))
+    return corrected
+  })
+  await world.agent.request('Craft 75 automation science packs.', { sender: 'Louis' })
+  assert.equal(world.calls.length, 2)
+  // The refusal reaches the planner as the repair message, with the facts and nothing more.
+  const repair = world.calls[1].map(message => message.content ?? '').join('\n')
+  assert.match(repair, /semantic_step_in_execution_plan: execution plans declare only deterministic checkpoints, one per step, naming the step's world result\. Semantic declarations are accepted only with assessmentOnly:true \(no operations\)\. No contract has been committed\./)
+  const refused = world.events.filter(row => row.event === 'plan.semantic_step_refused')
+  assert.equal(refused.length, 1)
+  assert.ok(refused[0].data.request_id)
+  assert.equal(refused[0].data.reason, 'execution_plan_declares_only_deterministic_checkpoints')
+  assert.equal(refused[0].data.step_count, 3)
+  assert.deepEqual(refused[0].data.semantic_step_indexes, [1])
+  assert.deepEqual(refused[0].data.semantic_step_descriptions, [runCSteps[1]])
+  assert.equal(world.events.filter(row => row.event === 'plan.completion_declarations_rejected').length, 0)
+  // The corrected draft commits with every step deterministic and admits its batch.
+  assert.equal(world.game.mutations.length, 1)
+  const planning = world.memory.planningState(KEY)
+  const held = planning.plans.find(plan => plan.plan_id === planning.active_plan_id)
+  assert.equal(held.status, PLAN_STATUS.COMMITTED)
+  assert.deepEqual(held.steps.map(step => step.completion_mode), ['deterministic', 'deterministic', 'deterministic'])
+  assert.equal(world.memory.currentPlan(KEY).status, 'active')
+})
+
+test('assessmentOnly keeps its all-semantic no-operation slice, still refuses operations, and an unmarked all-semantic draft keeps its own code', async () => {
+  const steps = ['Assess the copper patch']
+  const semantic = [{ kind: 'semantic', rationale: 'Assess the available copper patch from observations.' }]
+  const assessed = harness((call, memory) => call === 1
+    ? draft({ plan: steps, operations: [], assessmentOnly: true, stepCompletions: semantic })
+    : { plan: steps, currentStep: 0, operations: [], chatMessage: 'BLOCKED: A fresh patch observation is still needed.' })
+  await assessed.agent.request('Assess the copper patch.', { sender: 'Louis' })
+  assert.equal(assessed.events.filter(row => row.event === 'plan.semantic_assessment_committed').length, 1)
+  assert.equal(assessed.events.filter(row => row.event === 'plan.semantic_step_refused').length, 0)
+  assert.equal(assessed.game.mutations.length, 0)
+
+  const withOperations = harness(call => call === 1 ? draft({ plan: steps, assessmentOnly: true, stepCompletions: semantic }) : draft())
+  await withOperations.agent.request('Gather ten copper ore.', { sender: 'Louis' })
+  assert.equal(withOperations.events.find(row => row.event === 'plan.completion_declarations_rejected').data.reason, 'assessment_only_conflicts_with_execution')
+  assert.equal(withOperations.events.filter(row => row.event === 'plan.semantic_step_refused').length, 0)
+  assert.equal(withOperations.game.mutations.length, 1)
+
+  const unmarked = harness(call => call === 1 ? draft({ plan: steps, operations: [], stepCompletions: semantic }) : draft())
+  await unmarked.agent.request('Gather ten copper ore.', { sender: 'Louis' })
+  assert.equal(unmarked.events.find(row => row.event === 'plan.completion_declarations_rejected').data.reason, 'execution_plan_has_no_world_checkpoint')
+  assert.equal(unmarked.events.filter(row => row.event === 'plan.semantic_step_refused').length, 0)
+})
+
+test('a committed plan that already carries a semantic step still accepts a grounded executor semanticCompletion close', async () => {
+  const steps = ['Assess the copper patch', 'Gather ten copper ore']
+  const stepCompletions = [
+    { kind: 'semantic', rationale: 'Assess the available copper patch from observations.' },
+    { kind: 'deterministic', checkpoint: copper },
+  ]
+  const world = harness(() => draft())
+  // A saved game: the plan was committed before the rule existed, so it is frozen with a semantic first step.
+  const proposal = { chatMessage: '', plan: steps, currentStep: 0, operations: [], stepCompletions }
+  const recorded = world.memory.recordPlan(KEY, { sender: 'Louis', text: 'Assess the copper patch and gather ten copper ore.', turnId: 1 }, proposal, { validatedSemanticAdmission: true })
+  world.memory.reconcileTaskBoard(KEY, recorded.state.task_board, proposal, recorded)
+  world.memory.commitPlanningPlan(KEY, { runtime_validation: { passed: true } })
+  const planning = world.memory.planningState(KEY)
+  const held = planning.plans.find(plan => plan.plan_id === planning.active_plan_id)
+  assert.equal(held.status, PLAN_STATUS.COMMITTED)
+  assert.deepEqual(held.steps.map(step => step.completion_mode), ['semantic', 'deterministic'])
+  world.agent.requestInfo = { memoryKey: KEY }
+  world.agent.freshObservationSinceContinuation = true
+  const stepId = world.memory.currentPlan(KEY).task_board.active_step_id
+  const close = { chatMessage: '', plan: steps, currentStep: 0, operations: [], stepCompletions,
+    semanticCompletion: { stepId, rationale: 'The fresh patch observation shows enough copper ore.' } }
+  await world.agent.validateStepCompletionDeclarations(close) // the frozen branch: no semantic_step_in_execution_plan
+  const closed = await world.agent.applySemanticCompletionClaim(close, world.memory.currentPlan(KEY))
+  assert.equal(closed.applied, true)
+  assert.equal(world.memory.currentPlan(KEY).task_board.completed_count, 1)
+  assert.equal(world.events.filter(row => row.event === 'plan.semantic_step_refused').length, 0)
+  // The frozen rule is unchanged: a world-changing batch on the semantic step is still refused as before.
+  const mutatingWorld = harness(() => draft())
+  mutatingWorld.memory.restore(capturedSemantic.committedMemory)
+  mutatingWorld.agent.requestInfo = { memoryKey: capturedSemantic.committedMemory.planning_states[0].key }
+  await assert.rejects(mutatingWorld.agent.validateStepCompletionDeclarations(capturedSemantic.executor), /observations only/)
 })
 
 test('an active legacy checkpoint conflicting with the declared outcome is corrected before admission', async () => {
@@ -481,6 +592,8 @@ test('the retained assessment-only execution draft is refused before commitment 
   const rejected = world.events.filter(row => row.event === 'plan.completion_declarations_rejected')
   assert.ok(rejected.length > 0)
   assert.ok(rejected.every(row => row.data.request_id && row.data.reason === 'execution_plan_has_no_world_checkpoint'))
+  // An all-semantic no-operation execution draft keeps its own, clearer code ahead of the semantic-step rule.
+  assert.equal(world.events.filter(row => row.event === 'plan.semantic_step_refused').length, 0)
   assert.match(world.calls[1].map(row => row.content ?? '').join('\n'), /research_completed.*mode:"all"/)
   assert.ok(!world.memory.planningState(KEY)?.plans?.some(plan => plan.status === PLAN_STATUS.COMMITTED))
 })
@@ -554,4 +667,76 @@ test('assessment intent requires a boolean on the JSON control boundary', () => 
   for (const assessmentOnly of [true, false]) {
     assert.equal(world.agent.parsePlanMessage(planReply(draft({ assessmentOnly }))).assessmentOnly, assessmentOnly)
   }
+})
+
+test('the planner system prompt says execution plans declare deterministic checkpoints and semantic declarations belong to assessmentOnly plans', async () => {
+  const world = harness(() => draft())
+  await world.agent.request('Gather ten copper ore.', { sender: 'Louis' })
+  const system = world.calls[0].filter(message => message.role === 'system').map(message => message.content ?? '').join('\n')
+  assert.match(system, /\{kind:"deterministic",checkpoint:\{mode:"all",requirements:\[\.\.\.\]\}\} for every step of an execution plan; \{kind:"semantic",rationale:"\.\.\."\} only in an assessmentOnly:true plan\. You choose the intended outcome/)
+  assert.match(system, /Semantic declarations belong only to assessmentOnly:true plans; unknown current measurements are not a reason to downgrade an intended world result to an assessment\./)
+  assert.doesNotMatch(system, /for world-changing steps or waits|for observation\/assessment only|Reserve semantic declarations/)
+})
+
+test('a committed [semantic, deterministic] plan closes the semantic step and admits the next step\'s operations; the same reply aimed at the semantic step is refused', async () => {
+  const steps = ['Assess the copper patch', 'Gather ten copper ore']
+  const stepCompletions = [
+    { kind: 'semantic', rationale: 'Assess the available copper patch from observations.' },
+    { kind: 'deterministic', checkpoint: copper },
+  ]
+  const world = harness(() => draft())
+  const proposal = { chatMessage: '', plan: steps, currentStep: 0, operations: [], stepCompletions }
+  const recorded = world.memory.recordPlan(KEY, { sender: 'Louis', text: 'Assess the copper patch and gather ten copper ore.', turnId: 1 }, proposal, { validatedSemanticAdmission: true })
+  world.memory.reconcileTaskBoard(KEY, recorded.state.task_board, proposal, recorded)
+  world.memory.commitPlanningPlan(KEY, { runtime_validation: { passed: true } })
+  world.agent.requestInfo = { memoryKey: KEY }
+  world.agent.freshObservationSinceContinuation = true
+  // The declared-transition check compares the Plan Tracker step id; the claim check accepts it as well as the board id.
+  const trackerPlan = getActivePlan(world.memory.planningState(KEY))
+  const stepId = trackerPlan.steps[trackerPlan.active_step_index].step_id
+  const reply = overrides => ({ chatMessage: '', plan: steps, currentStep: 1, operations: [gather('copper-ore', 10)], stepCompletions,
+    semanticCompletion: { stepId, rationale: 'The fresh patch observation shows enough copper ore.' }, ...overrides })
+
+  // Aimed at the semantic step itself, the same operations are refused and nothing changes.
+  await assert.rejects(world.agent.validateStepCompletionDeclarations(reply({ currentStep: 0 })), error => error.code === 'semantic_step_cannot_mutate')
+  assert.equal(world.memory.currentPlan(KEY).task_board.completed_count, 0)
+  assert.equal(world.game.mutations.length, 0)
+
+  // The declared transition (claim on step 0, currentStep 1, operations for step 1) passes the frozen-branch check and closes step 0.
+  await world.agent.validateStepCompletionDeclarations(reply())
+  const closed = await world.agent.applySemanticCompletionClaim(reply(), world.memory.currentPlan(KEY))
+  assert.equal(closed.applied, true)
+  const board = world.memory.currentPlan(KEY).task_board
+  assert.equal(board.completed_count, 1)
+  assert.equal(board.steps[board.active_index].description, steps[1])
+  // With the semantic step closed, the operations are no longer aimed at a semantic step, so the check passes on their own.
+  await world.agent.validateStepCompletionDeclarations(reply({ semanticCompletion: undefined }))
+  assert.equal(world.events.filter(row => row.event === 'plan.semantic_step_refused').length, 0)
+})
+
+test('the declared semantic-to-deterministic transition on a committed plan admits the next step\'s operations through commitPlan', async () => {
+  const steps = ['Assess the copper patch', 'Gather ten copper ore']
+  const stepCompletions = [
+    { kind: 'semantic', rationale: 'Assess the available copper patch from observations.' },
+    { kind: 'deterministic', checkpoint: copper },
+  ]
+  const world = harness(() => draft())
+  const proposal = { chatMessage: '', plan: steps, currentStep: 0, operations: [], stepCompletions }
+  const recorded = world.memory.recordPlan(KEY, { sender: 'Louis', text: 'Assess the copper patch and gather ten copper ore.', turnId: 1 }, proposal, { validatedSemanticAdmission: true })
+  world.memory.reconcileTaskBoard(KEY, recorded.state.task_board, proposal, recorded)
+  world.memory.commitPlanningPlan(KEY, { runtime_validation: { passed: true } })
+  world.agent.requestInfo = { memoryKey: KEY, sender: 'Louis', text: 'Assess the copper patch and gather ten copper ore.', turnId: 1 }
+  world.agent.epoch = await world.agent.captureEpoch()
+  world.agent.active = true
+  world.agent.freshObservationSinceContinuation = true
+  const trackerPlan = getActivePlan(world.memory.planningState(KEY))
+  const stepId = trackerPlan.steps[trackerPlan.active_step_index].step_id
+  const reply = planReply({ plan: steps, currentStep: 1, operations: [gather('copper-ore', 10)], stepCompletions,
+    semanticCompletion: { stepId, rationale: 'The fresh patch observation shows enough copper ore.' } })
+  await world.agent.commitPlan(world.agent.parsePlanMessage(reply))
+  assert.equal(world.game.mutations.length, 1)
+  assert.match(world.game.mutations[0], /gather_resource/)
+  const board = world.memory.currentPlan(KEY).task_board
+  assert.equal(board.completed_count, 1)
+  assert.equal(board.steps[board.active_index].description, steps[1])
 })

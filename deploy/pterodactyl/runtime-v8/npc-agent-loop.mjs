@@ -523,9 +523,9 @@ When a draft intentionally refines one or more existing Shelf nodes, add roadmap
 
 For a bounded planning slice, add developmentMode as vertical, horizontal, maintain, or recover to describe the dominant direction YOU authored relative to the current critical path. Follow [PLANNING_STATE].steering when it remains appropriate, but this field describes the draft rather than granting steering authority. Small measured supporting work does not require a second mode; substantial mixed-direction work should be split at a better checkpoint.
 
-On every newly authored plan, include stepCompletions aligned with plan descriptions: {kind:"deterministic",checkpoint:{mode:"all",requirements:[...]}} for world-changing steps or waits, or {kind:"semantic",rationale:"..."} for observation/assessment only. You choose the intended outcome and quantities; the harness checks them. A checkpoint declares a future result; missing inventory or unmet research does not make that result semantic. Research steps use research_completed with the exact technology, not an accepted request receipt. Combine multiple research_completed requirements with mode:"all" when the intended step requires multiple technologies. Execution drafts need at least one deterministic step. An intentionally observation-only slice instead declares assessmentOnly:true, has only semantic steps and no gameplay operations; it stays in the assessment conversation. A semantic assessment cannot execute gameplay mutations. When tools are closed, return one JSON control object; checkpoint, stepCompletions, assessmentOnly and semanticCompletion remain permitted.
+On every newly authored plan, include stepCompletions aligned with plan descriptions: {kind:"deterministic",checkpoint:{mode:"all",requirements:[...]}} for every step of an execution plan; {kind:"semantic",rationale:"..."} only in an assessmentOnly:true plan. You choose the intended outcome and quantities; the harness checks them. A checkpoint declares a future result; missing inventory or unmet research does not make that result semantic. Research steps use research_completed with the exact technology, not an accepted request receipt. Combine multiple research_completed requirements with mode:"all" when the intended step requires multiple technologies. Execution drafts need at least one deterministic step. An intentionally observation-only slice instead declares assessmentOnly:true, has only semantic steps and no gameplay operations; it stays in the assessment conversation. A semantic assessment cannot execute gameplay mutations. When tools are closed, return one JSON control object; checkpoint, stepCompletions, assessmentOnly and semanticCompletion remain permitted.
 
-For the active Plan Tracker step, you may add one optional root field named checkpoint beside chatMessage/plan/currentStep/operations. checkpoint is your completion proposal for deterministic runtime validation and verification, not a claim that the step is already done. It must use a runtime-supported contract: {"mode":"all|any","requirements":[...]} with requirement kinds inventory_count, research_completed {technology}, entity_inventory_count, entity_exists, entity_state, authoritative_operation_receipt, or runtime_controller_state. Prefer world-state outcomes over action occurrence. Example: if the step means "have 100 stone" and the next operation only gathers 40 more because 62 are already held, checkpoint must say inventory_count stone >= 100, not >= 40. The operation batch describes what to do next; checkpoint describes what would prove the step complete. Runtime remains completion authority for supported deterministic contracts. Reserve semantic declarations for actual observations and assessments; unknown current measurements are not a reason to downgrade an intended world result to an assessment.
+For the active Plan Tracker step, you may add one optional root field named checkpoint beside chatMessage/plan/currentStep/operations. checkpoint is your completion proposal for deterministic runtime validation and verification, not a claim that the step is already done. It must use a runtime-supported contract: {"mode":"all|any","requirements":[...]} with requirement kinds inventory_count, research_completed {technology}, entity_inventory_count, entity_exists, entity_state, authoritative_operation_receipt, or runtime_controller_state. Prefer world-state outcomes over action occurrence. Example: if the step means "have 100 stone" and the next operation only gathers 40 more because 62 are already held, checkpoint must say inventory_count stone >= 100, not >= 40. The operation batch describes what to do next; checkpoint describes what would prove the step complete. Runtime remains completion authority for supported deterministic contracts. Semantic declarations belong only to assessmentOnly:true plans; unknown current measurements are not a reason to downgrade an intended world result to an assessment.
 
 For a prose-only active step that intentionally has no deterministic checkpoint, you may explicitly close that semantic step with semanticCompletion: {"stepId":"<exact active step id>","rationale":"..."}. Use the stable active step id from [PLANNING_STATE]. The harness accepts this only when the id is still current, the step has no deterministic completion contract, and recent authoritative runtime evidence or a fresh live observation grounds your judgment. Never use semanticCompletion to bypass an unmet deterministic checkpoint. You may pair a valid semanticCompletion with operations for the newly-active next step; the harness advances the semantic step first, then validates those operations normally. Keeping the same plan and moving currentStep exactly one step forward with operations for that next step is read as the same claim for the active step, under the same checks.
 
@@ -6057,16 +6057,29 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       error.code = declarationError
       throw error
     }
-    for (const [index, declaration] of plan.stepCompletions.entries()) {
-      if (declaration.kind === 'semantic') {
-        if (index === plan.currentStep && plan.operations.length > 0) {
-          const error = new AgentLoopError('semantic_step_cannot_mutate: observation/assessment steps cannot admit world-changing operations or waits')
-          error.failureClass = 'plan_category'
-          error.code = 'semantic_step_cannot_mutate'
-          throw error
-        }
-        continue
+    // Execution slices declare only deterministic checkpoints (owner decision 2026-10-08). Observation is done with
+    // observation tools, not plan steps; semantic declarations belong to an assessmentOnly slice. This applies to a newly
+    // authored draft only: the frozen branch above keeps committed (saved) plans with semantic steps working.
+    if (plan.assessmentOnly !== true) {
+      const semanticIndexes = plan.stepCompletions.flatMap((declaration, index) => declaration.kind === 'semantic' ? [index] : [])
+      if (semanticIndexes.length > 0) {
+        await this.traceEvent('plan.semantic_step_refused', {
+          request_id: this.traceRequest?.id,
+          reason: 'execution_plan_declares_only_deterministic_checkpoints',
+          step_count: plan.stepCompletions.length,
+          semantic_step_indexes: semanticIndexes.slice(0, 30),
+          semantic_step_descriptions: semanticIndexes.slice(0, 30).map(index => cleanMemoryText(plan.plan[index], 200)),
+        })
+        const error = new AgentLoopError('semantic_step_in_execution_plan: execution plans declare only deterministic checkpoints, one per step, naming the step\'s world result. Semantic declarations are accepted only with assessmentOnly:true (no operations). No contract has been committed.')
+        error.failureClass = 'plan_category'
+        error.code = 'semantic_step_in_execution_plan'
+        throw error
       }
+    }
+    for (const [index, declaration] of plan.stepCompletions.entries()) {
+      // Only an assessmentOnly draft reaches a semantic declaration here, and one with operations was refused above
+      // (assessment_only_conflicts_with_execution), so a semantic declaration never sits beside admitted operations.
+      if (declaration.kind === 'semantic') continue
       const operations = index === plan.currentStep ? plan.operations : []
       for (const requirement of declaration.checkpoint.requirements) {
         const allowedReceiptNames = new Set(index === plan.currentStep && !plannerOnlyDraft ? operations.map(operation => operation.name) : approvedOperationNames())
