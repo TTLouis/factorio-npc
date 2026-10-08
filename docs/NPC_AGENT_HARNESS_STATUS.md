@@ -25,7 +25,12 @@ must not be used to reset current integration.
 - **Open.**
   - An executor reply that uses the board's step index instead of `stepId` after a replacement is refused and pauses the goal.
   - The one-step contract prediction (`docs/NPC_PLANNING_ROADMAP.md`) is designed but not built.
-  - Deterministic repair of malformed model JSON is next.
+- **Deterministic control-JSON repair** (`dec23c37`, installer pin `16cc9bcf`).
+  - Fixes only stringified arrays, stringified objects, closed-enum strings that were encoded twice, and trailing commas.
+  - Runs only after a pure shape failure and before any stateful check. Never on replies with several tool calls.
+  - Traced as `provider.control_json_repaired` or `provider.control_json_repair_failed`.
+  - Trial C's twice-encoded `developmentMode` used to be dropped silently by the salvage; it is now kept.
+  - Gate: 1,998 runtime tests and 120 mod files.
 
 ## October 8 Haiku trial C: slice hand-over fixed live, paused on a semantic smelting step
 
