@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { EXECUTOR_ROLE_PROMPT } from './agent-roles.mjs'
+import { compactCompletionReceipt } from './provider-base.mjs'
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { getActivePlan } from './planning-state.mjs'
@@ -38,8 +39,9 @@ const RECORDED_COPPER_REPLY = '{"chatMessage":"Copper step is now active. I\'ll 
 const withStepId = (content, stepId) => ({ content: JSON.stringify({ ...JSON.parse(content), stepId }) })
 const recorded = content => ({ content })
 
-function plannerCommit() {
+function plannerCommit(extra = {}) {
   return planReply({
+    ...extra,
     plan: STEPS,
     currentStep: 0,
     operations: [{ name: 'gather_resource', args: { resource_name: 'iron-ore', count: 10, search_radius: 32 } }],
@@ -51,12 +53,12 @@ function plannerCommit() {
 
 // The real loop against a fake Factorio. The planner commits the three-step slice, step 1 closes on the game, the
 // executor submits recorded reply 2 (step 2 is already met), and the replies after it follow.
-function harness(afterStepTwo) {
+function harness(afterStepTwo, { plannerExtra } = {}) {
   const game = new FakeFactorio()
   const memory = new CanonicalTaskBoardMemory()
   // The reply with no operations meets the finite-goal nudge once (the harness asks for an action or a grounded claim),
   // and the same reply sent again is what the harness settles: step 2's checkpoint is met, so it closes on a fresh read.
-  const script = [plannerCommit(), recorded(RECORDED_STEP_TWO_REPLY), recorded(RECORDED_STEP_TWO_REPLY), ...afterStepTwo]
+  const script = [plannerCommit(plannerExtra), recorded(RECORDED_STEP_TWO_REPLY), recorded(RECORDED_STEP_TWO_REPLY), ...afterStepTwo]
   const calls = []
   const trace = []
   const jev = recordingJev(async (_state, questions) => (questions.intent ? { overrides: { intent: { choice: 'new_goal', confidence: 0.9 } } } : undefined))
@@ -142,8 +144,8 @@ test('recorded reply 4 as-is (no stepId): the legacy index rule refuses it, and 
   assert.equal(world.agent.planCategoryRetries, 0, 'the shared plan_category allowance was not spent')
 
   const message = harnessMessagesOf(world.calls[4]).at(-1)
-  assert.ok(message.startsWith(`[HARNESS] Operations were sent for step index 1 ("${STEPS[2]}"), which is not the active step; nothing ran. `))
-  assert.ok(message.endsWith(`The active step is "${STEPS[2]}" (stepId ${stepThreeOf(world).step_id}, index 2). The committed plan is unchanged.`))
+  // The index pointed at text identical to the active step's own, so the message does not call that text "not the active step".
+  assert.equal(message, `[HARNESS] Operations were sent with step index 1; nothing ran. The active step is "${STEPS[2]}" (stepId ${stepThreeOf(world).step_id}, index 2). The committed plan is unchanged.`)
   assert.equal(world.game.mutations.length, 2, 'the planner batch and the bound executor batch; the refused reply ran nothing')
 })
 
@@ -287,4 +289,73 @@ test('submitPlan with only stepId, chatMessage and operations is accepted by the
   assert.throws(() => plannerControlPayloadFromMessage(call({ chatMessage: 'x', operations })), /submitPlan.plan must be an array/, 'without the id the plan is still required')
   assert.throws(() => plannerControlPayloadFromMessage(call({ plan: [], currentStep: 0, operations, stepId: '' })), /submitPlan.stepId/)
   assert.equal(plannerControlPayloadFromMessage(call({ plan: ['a'], currentStep: 0, operations: [] })).stepId, undefined)
+})
+
+test('the step-closing continuation keeps the transition fact in the lead, so receipt compaction still works and keeps the fact', async () => {
+  const world = harness([w => withStepId(RECORDED_COPPER_REPLY, stepThreeOf(w).step_id)])
+  await world.toStepThree()
+  const continuation = world.calls[1].map(textOf).find(text => text.startsWith('[MOD] Autorio operation batch completed'))
+  const fact = `[HARNESS] The active step is now "${STEPS[1]}" (stepId ${stepTwoOf(world).step_id}).`
+  assert.ok(continuation.indexOf(fact) > 0 && continuation.indexOf(fact) < continuation.indexOf('Detailed task receipt:'), 'the fact precedes the receipt')
+  // The receipt as the builder writes it: the lead (fact included), then the receipt JSON and nothing after it.
+  const receipt = { observation_mode: 'full', task_state: 'idle', queue_empty: true, queue_length: 0, last_completed_batch: { batch_id: 1, task_count: 2, task_types: ['mining'], tick: 601 }, extra_bulk: 'x'.repeat(400) }
+  const built = `[MOD] Autorio operation batch completed. ${fact} Detailed task receipt: ${JSON.stringify(receipt)}`
+  const compact = compactCompletionReceipt(built)
+  assert.ok(compact.includes(fact), 'the fact survives compaction')
+  assert.match(compact, /Compact task receipt: \{/)
+  assert.doesNotMatch(compact, /extra_bulk/, 'and the receipt really was compacted')
+})
+
+test('a reply bound by the active step id always normalises currentStep to the committed active index unless it carries a semanticCompletion claim', async () => {
+  const world = harness([w => withStepId(RECORDED_COPPER_REPLY, stepThreeOf(w).step_id)])
+  await world.toStepThree()
+  const active = world.tracker().active_step_index
+  const stepId = world.tracker().steps[active].step_id
+  const operations = [{ name: 'gather_resource', args: { resource_name: 'copper-ore', count: 20, search_radius: 256 } }]
+  const forward = await world.agent.enforceExecutorContract({ chatMessage: '', plan: STEPS, currentStep: active + 1, operations, stepId })
+  assert.equal(forward.currentStep, active, 'active+1 with a bound id is not the implied-next-step form')
+  assert.deepEqual(forward.plan, STEPS)
+  assert.equal('stepId' in forward, false)
+  const behind = await world.agent.enforceExecutorContract({ chatMessage: '', plan: STEPS.slice(1), currentStep: 1, operations, stepId })
+  assert.equal(behind.currentStep, active, 'the recorded tail-relative index is normalised too')
+  const claim = await world.agent.enforceExecutorContract({ chatMessage: '', plan: STEPS, currentStep: active + 1, operations, stepId, semanticCompletion: { stepId, rationale: 'done' } })
+  assert.equal(claim.currentStep, active + 1, 'an explicit claim keeps the currentStep it was written with')
+})
+
+test('a bound zero-operation reply keeps the plan array it sent, so the completion paths see the shape of a reply without a step id', async () => {
+  const world = harness([w => withStepId(RECORDED_COPPER_REPLY, stepThreeOf(w).step_id)])
+  await world.toStepThree()
+  const stepId = stepThreeOf(world).step_id
+  const legacy = { chatMessage: 'All done.', plan: [], currentStep: 0, operations: [] }
+  const legacyOut = await world.agent.enforceExecutorContract(legacy)
+  const boundOut = await world.agent.enforceExecutorContract({ ...legacy, stepId })
+  assert.deepEqual(boundOut, legacyOut, 'identical input for verifiedFinalCompletion, finishIfGoalMet, unmetGoalNote and persistentRuntimeStatus')
+  assert.deepEqual(boundOut.plan, [])
+  const withPlan = await world.agent.enforceExecutorContract({ chatMessage: '', plan: STEPS.slice(2), currentStep: 0, operations: [], stepId })
+  assert.deepEqual(withPlan.plan, STEPS.slice(2), 'the sent plan is not replaced by the committed descriptions')
+  assert.equal(withPlan.currentStep, world.tracker().active_step_index)
+})
+
+test('a planner draft that carries a stepId is unchanged by it, and the ignored id is traced with the request id and a reason', async () => {
+  const world = harness([], { plannerExtra: { stepId: 'step_1' } })
+  await world.toStepThree()
+  const [ignored] = world.rows('planner.step_id_ignored')
+  assert.ok(ignored.data.request_id)
+  assert.equal(ignored.data.reason, 'step_id_is_executor_only')
+  assert.equal(ignored.data.role, 'planner')
+  assert.deepEqual(world.tracker().steps.map(step => step.description), STEPS)
+  assert.equal(world.rows('request.failed').length, 0)
+})
+
+test('a superseded reply is not counted as a stale-step rejection: the fence runs before the rejection is traced', async () => {
+  const world = harness([w => withStepId(RECORDED_COPPER_REPLY, stepThreeOf(w).step_id)])
+  await world.toStepThree()
+  const before = world.rows('executor.stale_step_rejected').length
+  const operations = [{ name: 'gather_resource', args: { resource_name: 'copper-ore', count: 20, search_radius: 256 } }]
+  const original = world.agent.assertCurrent.bind(world.agent)
+  world.agent.assertCurrent = async () => { throw new Error('Model turn was cancelled or superseded') }
+  await assert.rejects(world.agent.enforceExecutorContract({ chatMessage: '', plan: [], currentStep: 0, operations, stepId: stepTwoOf(world).step_id }), /superseded/)
+  await assert.rejects(world.agent.enforceExecutorContract({ chatMessage: '', plan: STEPS.slice(1), currentStep: 1, operations }), /superseded/)
+  world.agent.assertCurrent = original
+  assert.equal(world.rows('executor.stale_step_rejected').length, before, 'no rejection row for a superseded reply')
 })
