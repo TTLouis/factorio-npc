@@ -11873,7 +11873,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   async correctExecutorStepIdentity(plan, error) {
     const requestId = this.traceRequest?.id
-    // The fence ran before the rejection was traced (enforceExecutorContract), so a superseded reply never gets here.
+    // The fence ran before the rejection was traced (enforceExecutorContract); re-check it here because that trace
+    // awaited, so the allowance is never charged for a reply superseded in between.
+    await this.assertCurrent()
     const state = this.memory.planningState?.(this.activePlanKey())
     const committed = state ? getActivePlanningPlan(state) : undefined
     const expected = error.expectedStep ?? {}
