@@ -801,7 +801,13 @@ export function evaluateOperationAdmission(state, { operations, preflight, actor
   // INTERIM (owner decision pending): protected-asset and player-inventory gates apply only to grant-backed work - a plan
   // that carries replacement lineage, or any goal with an active grant. An ordinary user-requested goal is the player's own
   // request and behaves as before MW1. Reserved-container exclusion applies to every goal.
-  const grantBacked = Boolean(plan?.replacement) || auth.grants.some(grant => grant.status === GRANT_STATUS.ACTIVE && grant.goal_id === goalId)
+  // MW5: admission issues a bare player_task grant (no protected assets or materials) to every player objective so a
+  // replacement can be authorized. That grant records the request itself; it does not turn the gates on for an ordinary goal.
+  const grantBacked = Boolean(plan?.replacement) || auth.grants.some(grant => grant.status === GRANT_STATUS.ACTIVE
+    && grant.goal_id === goalId
+    && !(grant.mandate_kind === MANDATE_KIND.PLAYER_TASK
+      && grant.protected_assets.unit_numbers.length === 0
+      && grant.protected_materials.length === 0))
 
   const reservations = activeReservations(auth)
   const reservedUnits = new Set(reservations.map(item => item.unit_number))

@@ -38,6 +38,15 @@ import {
   stepContractNeeds,
 } from './handoff-packet.mjs'
 import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CODES } from './authorization.mjs'
+import {
+  buildPlanBlockedMessage,
+  blockerFacts,
+  MAX_REPLACEMENTS_PER_GOAL,
+  playerObjectiveGrant,
+  REPLACEMENT_WAKE_SKIP,
+  replacementAnnouncement,
+  replacementApprovalLine,
+} from './replacement-wake.mjs'
 import { JevCheckpoints } from './jev-checkpoints.mjs'
 import { buildVerifiedResults } from './verified-results.mjs'
 import { cleanMemoryText, sanitizeDurableModelText, sanitizeDurableModelValue } from './durable-text.mjs'
@@ -434,6 +443,12 @@ export const REQUEST_CONTINUATION_BACKSTOP = 256
 const LOW_RISK_NAVIGATION_PROJECTION_MAX_CANDIDATES = 8
 // Once the system commits a plan, its semantic content is immutable; later batches fulfil it rather than rewriting it.
 const FROZEN_PLAN_STATUSES = new Set([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING])
+
+// The blocker in plain words, for the line the player reads when a replacement could not be authored.
+function replacementPlainLine(blocker) {
+  const reason = String(blocker?.reason_code ?? 'a structural blocker').replace(/^operation_preflight_failed:/, '').replace(/[_:]+/g, ' ').trim()
+  return `The plan stopped: ${cleanMemoryText(reason, 160)}.`
+}
 // Decisions whose job is to author or revise a plan; closed-round operation
 // calls are never turned into operations of the old plan for these.
 const CLOSED_ROUND_AUTHORING_TRIGGERS = new Set(['new_goal', 'amend_current', 'plan_slice_completed', 'post_step_replan', 'recovery_replan_high', 'reanchor_plan'])
@@ -2928,6 +2943,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // and in production; `executorHandoff: false` is a construction option for the tests of the
     // older seams (U4-U8), which exercise one conversation in isolation. It is not an env setting.
     this.executorHandoffEnabled = options.executorHandoff !== false
+    // MW5: the player-objective grant at goal admission and the replacement wake. Off unless the supervisor turns it on (the same
+    // pattern as completionProtocolVersion), so a loop built without it keeps the pre-MW5 blocked-awaiting-user behaviour exactly.
+    this.replacementWakeEnabled = options.replacementWake === true
     this.restageSoftLimitOption = options.restageSoftLimitTokens // U7: a number, or { planner, executor }; default is prefix-aware (restageSoftLimitTokens)
     this.providerCallsInFlight = 0 // provider rounds between request start and the end of their reply processing
     this.providerCallsByGeneration = new Map() // the same count per loop generation: restageContext refuses only while a round of the CURRENT generation is in flight
@@ -2962,6 +2980,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.batchInFlight = false
     this.batchInFlightBeforeSend = undefined
     this.pendingExecutorFactsRefresh = null
+    this.replacementWake = null // MW5: a wake belongs to the request that raised it
     this.agentContext.beginLineage() // planner role: an executor role never leaks into the next chat
     super.reset()
     // The base reset zeroes the request-wide continuation counter; the slice baseline and the slice's
@@ -3165,9 +3184,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     try {
       let state = args.planningState ?? this.memory.planningState?.(this.activePlanKey())
       if (!state?.goal?.goal_id) return { restaged: false, reason: 'no_admitted_goal' }
+      // A BLOCKED plan is never restaged, except for the one reason that exists to author its replacement (MW5).
       const stateRefusal = (held) => (held.goal.status !== GOAL_STATUS.ACTIVE
         ? 'goal_not_active'
-        : getActivePlanningPlan(held)?.status === PLAN_STATUS.BLOCKED ? 'plan_blocked' : undefined)
+        : getActivePlanningPlan(held)?.status === PLAN_STATUS.BLOCKED && args.allowBlockedFor !== 'replacement' ? 'plan_blocked' : undefined)
       let refusal = stateRefusal(state)
       if (refusal) {
         await this.traceEvent('context.restage_refused', { role, checkpoint, handoff_id: args.packet?.handoff_id, reason: refusal }, { requestId })
@@ -3536,6 +3556,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // or turn that is open refuses it (the wake then proceeds on the existing
   // conversation and the next slice close retries).
   async returnControlToPlanner({ route, planningState, withinTurn = false, reason = 'slice_close', requestId, shelfCandidates } = {}) {
+    // MW5: the replacement wake is the only reason that may restage a planner onto a BLOCKED plan.
+    const allowBlockedFor = reason === 'replacement' ? 'replacement' : undefined
     const rid = requestId ?? this.traceRequest?.id ?? this.turnScope.getStore()?.requestId
     const fromHandoffId = this.agentContext.handoffId
     const refusal = this.restageGuardRefusal(withinTurn ? (this.turnToken ?? undefined) : undefined)
@@ -3581,10 +3603,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const result = await restage.call(this, {
       checkpoint,
       role: PLANNER_ROLE,
-      reason: 'planner_fresh_at_slice_close_no_parked_context',
+      reason: allowBlockedFor ? 'planner_fresh_for_replacement_no_parked_context' : 'planner_fresh_at_slice_close_no_parked_context',
       shelfCandidates: candidates,
       planningState,
       requestId: rid,
+      allowBlockedFor,
     })
     if (!result.restaged) {
       await this.traceEvent('context.planner_resume_failed', { request_id: rid, role: PLANNER_ROLE, from_role: EXECUTOR_ROLE, from_handoff_id: fromHandoffId, reason: result.reason, route }, { requestId: rid })
@@ -3603,6 +3626,208 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const rid = args.requestId ?? this.traceRequest?.id ?? this.turnScope.getStore()?.requestId
     await this.traceEvent('context.planner_resume_retried', { request_id: rid, role: PLANNER_ROLE, reason: first.reason, route: args.route }, { requestId: rid })
     return this.returnControlToPlanner(args)
+  }
+
+  // --- MW5 (minimal): grant at admission and the replacement wake -------------------------------------------------------
+  //
+  // A player's objective carries a player_task grant (permitted scope: everything toward its own result; no actor binding,
+  // so it survives a respawn - actor and epoch are still fenced at the wake, the commit and every admission). When the
+  // active plan becomes BLOCKED by a harness-evidenced structural blocker or a deadlock and the goal has a current grant,
+  // the planner is woken once to author a replacement version through the ordinary draft/validate/commit path, instead of
+  // the request ending to wait for the player. The model proposes; the harness classifies the request against the grant
+  // (MW1), commits only under a current grant, and re-checks it at every admission. Nothing here lets the model grant,
+  // approve or commit anything.
+
+  async grantPlayerObjective(memoryKey, goal, text) {
+    if (!this.replacementWakeEnabled || typeof this.memory.grantAuthorization !== 'function' || typeof this.memory.currentGoalGrant !== 'function') return undefined
+    if (goal.status !== GOAL_STATUS.ACTIVE || String(goal.objective ?? '') !== String(text ?? '').slice(0, 1000)) return undefined
+    if (this.memory.currentGoalGrant(memoryKey)) return undefined
+    const granted = this.memory.grantAuthorization(memoryKey, playerObjectiveGrant(goal.goal_id), { requestId: this.traceRequest?.id })
+    if (granted?.ok) await this.persistState()
+    return granted
+  }
+
+  async skipReplacementWake(reason, { trigger, plan, extra = {} } = {}) {
+    await this.traceEvent('plan.replacement_wake_skipped', {
+      request_id: this.traceRequest?.id,
+      plan_id: plan?.plan_id,
+      trigger,
+      reason,
+      ...extra,
+    })
+    return undefined
+  }
+
+  /**
+   * Called right after a request's active plan became BLOCKED. Returns the continued turn's result when the planner was
+   * woken, or undefined when the request should end blocked exactly as before (every skip is traced with its reason).
+   */
+  async wakePlannerForReplacement({ trigger, batchMayHaveRun = false }) {
+    if (!this.replacementWakeEnabled || !this.requestInfo || typeof this.memory.requestReplacementFromDraft !== 'function') return undefined
+    const key = this.requestInfo.memoryKey
+    const requestId = this.traceRequest?.id
+    const planning = this.memory.planningState?.(key)
+    const plan = planning ? getActivePlanningPlan(planning) : undefined
+    if (!plan || plan.status !== PLAN_STATUS.BLOCKED) return undefined // nothing blocked this plan: not a replacement case
+    const skip = (reason, extra) => this.skipReplacementWake(reason, { trigger, plan, extra })
+    if (planning.goal?.status !== GOAL_STATUS.ACTIVE) return skip(REPLACEMENT_WAKE_SKIP.GOAL_NOT_ACTIVE)
+    if (batchMayHaveRun) return skip(REPLACEMENT_WAKE_SKIP.NOT_PROVABLY_UNEXECUTED)
+    if (plan.blocker?.user_choice) return skip(REPLACEMENT_WAKE_SKIP.USER_CHOICE_RECORDED)
+    const grant = this.memory.currentGoalGrant?.(key)
+    if (!grant) return skip(REPLACEMENT_WAKE_SKIP.NO_GRANT)
+    try {
+      await this.assertCurrent() // a stale actor, epoch or generation fails safe before anything is woken
+    }
+    catch (error) {
+      await this.skipReplacementWake('turn_superseded', { trigger, plan, extra: { message: cleanMemoryText(error instanceof Error ? error.message : String(error), 200) } })
+      throw error
+    }
+    const check = this.memory.checkAuthorizationGrant?.(key, {
+      grant_id: grant.grant_id,
+      grant_revision: grant.revision,
+      actor_id: this.epoch?.actor_id,
+      actor_epoch: this.epoch?.epoch,
+    }, { requestId, stage: 'wake' })
+    if (!check?.ok) return skip(REPLACEMENT_WAKE_SKIP.GRANT_STALE, { grant_id: grant.grant_id, grant_reason: check?.reason })
+    const used = this.memory.replacementsUsed(key, grant.grant_id)
+    if (used >= MAX_REPLACEMENTS_PER_GOAL) return skip(REPLACEMENT_WAKE_SKIP.CAP_REACHED, { grant_id: grant.grant_id, replacements_used: used, cap: MAX_REPLACEMENTS_PER_GOAL })
+
+    const roleBefore = this.agentContext.role
+    if (roleBefore === EXECUTOR_ROLE) {
+      const returned = await this.returnControlToPlannerWithRetry({ route: 'replacement', planningState: planning, withinTurn: true, reason: 'replacement', requestId })
+      if (!returned.returned) return skip(REPLACEMENT_WAKE_SKIP.PLANNER_UNAVAILABLE, { planner_reason: returned.reason })
+    }
+    if (this.agentContext.role !== PLANNER_ROLE) return skip(REPLACEMENT_WAKE_SKIP.PLANNER_UNAVAILABLE, { planner_reason: 'planner_role_not_active' })
+    const facts = blockerFacts(plan)
+    this.replacementWake = {
+      plan_id: plan.plan_id,
+      grant_id: grant.grant_id,
+      grant_revision: grant.revision,
+      request_id: requestId,
+      repairs: 0,
+      blocker: facts,
+    }
+    await this.traceEvent('plan.replacement_wake', {
+      request_id: requestId,
+      plan_id: plan.plan_id,
+      trigger,
+      reason: 'structural_blocker_with_current_grant',
+      reason_code: facts.reason_code,
+      blocker_kind: facts.kind,
+      grant_id: grant.grant_id,
+      grant_revision: grant.revision,
+      replacements_used: used,
+      cap: MAX_REPLACEMENTS_PER_GOAL,
+      role_before: roleBefore,
+    })
+    const message = buildPlanBlockedMessage({ plan, grant, replacementsUsedCount: used })
+    const continued = await this.continueFromModMessage(message, 'plan.replacement_wake_continuation', { withinTurn: true })
+    if (continued === null) {
+      this.replacementWake = null
+      return skip(REPLACEMENT_WAKE_SKIP.PLANNER_UNAVAILABLE, { planner_reason: 'request_not_active' })
+    }
+    return continued
+  }
+
+  /** The request ends with the plan still BLOCKED and a chat line saying why (no model is woken). */
+  async endBlockedAfterReplacement({ outcome, chatMessage, reason, extra = {} }) {
+    await this.persistState()
+    const state = this.peekPlanState(this.activePlanKey())
+    this.active = false
+    this.replacementWake = null
+    await this.traceEvent('request.completed', {
+      chat_message: chatMessage,
+      outcome,
+      reason,
+      ...extra,
+      task_board: visibleTaskBoard(state?.task_board),
+      usage: this.traceRequest?.usage,
+    })
+    this.traceRequest = null
+    return {
+      chatMessage,
+      plan: state?.plan ?? [],
+      currentStep: state?.current_step ?? 0,
+      operations: [],
+      epoch: this.epoch?.epoch,
+      actorId: this.epoch?.actor_id,
+      goalId: state?.goal_id,
+      goalStatus: state?.status,
+      taskBoard: visibleTaskBoard(state?.task_board),
+      blocker: { class: 'plan_blocked_awaiting_user', reason: state?.blocker ?? reason },
+    }
+  }
+
+  /**
+   * The planner's reply while a replacement wake is open. Returns undefined to let the reply continue through the normal
+   * commit path (an accepted replacement has already made its successor DRAFT the active plan), or { result } when the
+   * request moved on (a repair round, or the request ended).
+   */
+  async gateReplacementDraft(plan) {
+    const wake = this.replacementWake
+    if (!wake || !this.requestInfo || this.agentContext.role !== PLANNER_ROLE) return undefined
+    const key = this.requestInfo.memoryKey
+    const requestId = this.traceRequest?.id
+    const held = getActivePlanningPlan(this.memory.planningState?.(key))
+    if (held?.status !== PLAN_STATUS.BLOCKED || held.plan_id !== wake.plan_id) return undefined
+    if (!Array.isArray(plan.operations) || plan.operations.length === 0 || !Array.isArray(plan.plan) || plan.plan.length === 0) {
+      wake.repairs += 1
+      if (wake.repairs > 2) {
+        await this.traceEvent('plan.replacement_refused', { request_id: requestId, plan_id: wake.plan_id, grant_id: wake.grant_id, reason: 'draft_without_operations_after_repair', stage: 'draft' })
+        return { result: await this.endBlockedAfterReplacement({
+          outcome: 'replacement_not_authored',
+          reason: 'draft_without_operations_after_repair',
+          chatMessage: `[Plan blocked] ${replacementPlainLine(wake.blocker)} I could not author a replacement plan, so the old plan stays blocked. Revise or Cancel it; say in chat what to change.`,
+        }) }
+      }
+      await this.traceEvent('plan.replacement_draft_repair', { request_id: requestId, plan_id: wake.plan_id, reason: 'replacement_draft_needs_operations', attempt: wake.repairs })
+      this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
+      this.messages.push({ role: 'user', content: '[HARNESS] A replacement draft needs the full step list with stepCompletions for every step, currentStep set to the first unfinished step, and the operations for that step. This reply did not have them, so nothing was changed.' })
+      return { result: await this.runTurn() }
+    }
+    const current = await this.assertCurrent()
+    const verdict = this.memory.requestReplacementFromDraft(key, {
+      grantId: wake.grant_id,
+      current: { actor_id: current.actor_id, actor_epoch: current.epoch },
+    }, plan, { requestId })
+    if (verdict.decision === 'accept') {
+      wake.successor_plan_id = verdict.plan?.plan_id
+      return { accepted: true }
+    }
+    if (verdict.decision === 'ask') {
+      return { result: await this.endBlockedAfterReplacement({
+        outcome: 'replacement_needs_approval',
+        reason: verdict.reason,
+        extra: { question_id: verdict.question?.question_id, reason_codes: verdict.reason_codes },
+        chatMessage: replacementApprovalLine({ reasonCodes: verdict.reason_codes, detail: wake.blocker.detail }),
+      }) }
+    }
+    return { result: await this.endBlockedAfterReplacement({
+      outcome: 'replacement_refused',
+      reason: verdict.reason,
+      chatMessage: `[Plan blocked] ${replacementPlainLine(wake.blocker)} The harness did not accept a replacement (${cleanMemoryText(verdict.reason, 80)}), so the old plan stays blocked. Revise or Cancel it; say in chat what to change.`,
+    }) }
+  }
+
+  /** The replacement just committed: tell the player what changed and why (the supervisor prints it once per plan). */
+  async announceReplacementCommitted(plan) {
+    const key = this.requestInfo?.memoryKey
+    const planning = key ? this.memory.planningState?.(key) : undefined
+    const predecessor = planning?.plans?.find(item => item.plan_id === plan.replacement?.predecessor_plan_id)
+    const blocker = predecessor?.blocker ?? this.replacementWake?.blocker
+    const firstStep = plan.steps?.[plan.active_step_index]?.description ?? plan.steps?.[0]?.description
+    const chatMessage = replacementAnnouncement({ plan, blocker, firstStep })
+    this.replacementWake = null
+    await this.traceEvent('plan.replacement_announced', {
+      request_id: this.traceRequest?.id,
+      plan_id: plan.plan_id,
+      plan_version: plan.plan_version,
+      predecessor_plan_id: plan.replacement?.predecessor_plan_id,
+      grant_id: plan.replacement?.grant_id,
+      reason: 'replacement_committed',
+      reason_code: blocker?.reason_code,
+      chat_message: chatMessage,
+    })
   }
 
   // The slice is verified complete but the planner cannot take the goal back. The request ends
@@ -7770,6 +7995,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         objective: text,
         now: Date.now(),
       })
+      // MW5: the player's own objective carries a grant so a replacement can be authorized later. Only a chat-origin
+      // new_goal reaches this point; recovery runs, amendments and chat-only intents never mint one.
+      if (admitted?.goal) await this.grantPlayerObjective(memoryKey, admitted.goal, text)
       if (admitted?.goal && this.steeringDecisionProvider
         && typeof this.memory.evaluateSteeringAtBoundary === 'function') {
         const recommendation = await this.requestBoundarySteeringRecommendation(memoryKey, {
@@ -12051,6 +12279,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     if (plan.executorCannotAuthor) return this.endSliceWithoutPlanner({ route: 'executor_reply_without_committed_plan', reason: 'executor_cannot_author_plan' })
     await this.validateStepCompletionDeclarations(plan)
+    // MW5: while a replacement wake is open, the planner's reply is classified against the grant before anything else
+    // touches it. An accepted replacement continues through the ordinary commit path below.
+    const replacementGate = await this.gateReplacementDraft(plan)
+    if (replacementGate?.result !== undefined) return replacementGate.result
     const timeReview = await this.reviewPlanTime(plan)
     if (timeReview?.held === true) return timeReview.result
     plan = await this.applyLowRiskTypedProjection(plan)
@@ -12432,6 +12664,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const completionGeneration = this.generation
       stateResult = this.memory.recordPlan?.(this.requestInfo.memoryKey, await this.revisionSafeRequestInfo(), durablePlan, {
         continuation: this.continuations > 0,
+        ...(replacementGate?.accepted === true ? { replacementAccepted: true } : {}),
         validatedSemanticAdmission: initialSemanticAdmission,
         validatedPlannerAdmission: initialPlannerAdmission,
         persistentRuntime,
@@ -12686,6 +12919,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
               failure.preflight = { ok: false, code: ADMISSION_REFUSAL.AUTHORIZATION_STALE, reason: replaced.reason, stage: 'commit', operation_index: 0 }
               throw failure
             }
+            await this.announceReplacementCommitted(getActivePlanningPlan(replaced.state) ?? reducerPlanBeforeCommit)
           }
           else {
             this.memory.commitPlanningPlan(this.requestInfo.memoryKey, {
@@ -12902,6 +13136,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           return this.runTurn()
         }
         stateResult = await this.markAdmissionFailure(stateResult, operations, error, 'operation_preflight_blocker')
+        // MW5: a plan this preflight blocked may be replaced under the goal's grant instead of waiting for the player.
+        const preflightWake = await this.wakePlannerForReplacement({ trigger: 'operation_preflight_blocker' })
+        if (preflightWake !== undefined) return preflightWake
         await this.traceEvent('operations.preflight_rejected', {
           failure_class: 'deterministic_preflight',
           reason: error instanceof Error ? error.message : String(error),
@@ -13022,6 +13259,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             reconciliation: reconciliation ? reconciliationFacts(reconciliation, reconciliation.pending) : undefined,
             task_board: visibleTaskBoard(stateResult?.state?.task_board),
           })
+          // MW5: a refusal that provably ran nothing may be replaced under the goal's grant; one that may have run is not.
+          const admissionWake = await this.wakePlannerForReplacement({
+            trigger: 'operation_admission_failure',
+            batchMayHaveRun: error?.notSent !== true && error?.notAdmitted !== true,
+          })
+          if (admissionWake !== undefined) return admissionWake
           throw error
         }
       }
@@ -13534,6 +13777,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       })
       if (reduced?.decision?.accepted) {
         await this.persistState()
+        // MW5: this failure may have been the attempt that tripped the deadlock detector, which blocks the plan.
+        if (getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))?.blocker?.kind === 'deadlock') {
+          const deadlockWake = await this.wakePlannerForReplacement({ trigger: 'deadlock_detected' })
+          if (deadlockWake !== undefined) return deadlockWake
+        }
         this.active = false
         await this.traceEvent('planner.skipped', {
           source: 'decision_provider',

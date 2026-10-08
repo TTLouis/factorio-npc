@@ -2143,6 +2143,7 @@ export class Session {
     if (event === 'budget.goal_warning') this.announceGoalBudgetWarning(data)
     if (event === 'amendment.dropped') this.announceAmendmentDropped(data)
     if (event === ACK_EVENT) this.announceAcknowledgement(data)
+    if (event === 'plan.replacement_announced') this.announceReplacement(data)
     this.responsivenessTracker().observe(event, data, { requestId: this.agent?.traceRequest?.id, ts: Date.now() })
     if (event === 'goal.evaluated') {
       this.announceSliceProgress(data)
@@ -2432,6 +2433,19 @@ export class Session {
       evaluation,
     })
     for (const line of lines) await this.printChat(line)
+  }
+
+  // MW5: a committed replacement plan tells the player what changed and why. Printed once per plan id.
+  announceReplacement(data) {
+    const line = uiText(data?.chat_message, 400)
+    const planId = typeof data?.plan_id === 'string' ? data.plan_id : ''
+    if (!line || !planId) return
+    this.announcedReplacementPlans ??= new Set()
+    if (this.announcedReplacementPlans.has(planId)) return
+    this.announcedReplacementPlans.add(planId)
+    if (this.announcedReplacementPlans.size > 64) this.announcedReplacementPlans.delete(this.announcedReplacementPlans.values().next().value)
+    this.appendUiConversation?.('assistant', this.npcName || 'SGLuna', line)
+    this.printChat(line).catch(error => this.log(`Unable to announce the replacement plan: ${error instanceof Error ? error.message : String(error)}`))
   }
 
   announceGoalUnderstanding(data) {
@@ -2770,6 +2784,7 @@ export class Session {
       : undefined
     this.agent = new NpcAgentLoop({
       completionProtocolVersion: 2,
+      replacementWake: true, // MW5: player-objective grant at admission and the replacement wake
       rcon: this.rcon,
       systemPrompt: `${prompt}\n\n${RUNTIME_RELIABILITY_GUIDANCE}`,
       npcId: this.npcId,

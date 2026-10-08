@@ -1100,3 +1100,19 @@ test('MW1: restore merges goalless world facts into a goal state a legacy migrat
   assert.equal(authorizationOf(state).world.reservations[0].unit_number, 900, 'the world facts were not lost to the migrated goal state')
   assert.equal(authorizationOf(state).world.npc_placements[0].unit_number, 20)
 })
+
+test('MW5: a bare player_task grant (the player objective itself) leaves the interim gates off; one that names protected assets or materials, and a standing_auto grant, turn them on', () => {
+  const humanBuilt = [{ ok: true, target: { unit_number: 501, last_user: { name: 'louis', index: 1 } } }]
+  const mine = [{ name: 'mine_entity_exact', args: { unit_number: 501 } }]
+  const takeFromPlayer = [{ name: 'move_items_with_player', args: { item_name: 'iron-plate', player_name: 'louis', max_count: 5, to_player: false } }]
+  const check = (state, operations, preflight) => evaluateOperationAdmission(state, { operations, preflight: preflight ?? operations.map(() => ({ ok: true })), actor: ACTOR })
+  const objective = { mandate_kind: MANDATE_KIND.PLAYER_TASK, mandate_id: GOAL_ID, requested_result: { result_key: `goal:${GOAL_ID}`, destination: '' }, permitted_scope: Object.values(ACTION_SCOPE) }
+  const bare = granted(goalState(), objective)
+  assert.deepEqual(check(bare, mine, humanBuilt), { ok: true })
+  assert.deepEqual(check(bare, takeFromPlayer), { ok: true })
+  const protectedAsset = granted(goalState(), { ...objective, protected_assets: { unit_numbers: [77] } })
+  assert.equal(check(protectedAsset, mine, humanBuilt).code, ADMISSION_REFUSAL.PROTECTED_ENTITY)
+  const protectedMaterial = granted(goalState(), { ...objective, protected_materials: [{ item_name: 'iron-plate' }] })
+  assert.equal(check(protectedMaterial, takeFromPlayer).code, ADMISSION_REFUSAL.PLAYER_INVENTORY)
+  assert.equal(check(granted(goalState(), STANDING_AUTO), mine, humanBuilt).code, ADMISSION_REFUSAL.PROTECTED_ENTITY)
+})
