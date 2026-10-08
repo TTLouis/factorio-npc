@@ -298,6 +298,36 @@ What remains provisional or open:
   (treated as protected, by design). The human arm of the engine rule cannot be exercised in
   the zero-player headless lane; it is recorded as not exercised.
 
+### MW5 minimal wiring (2026-10-08, branch `feat/mw5-minimal-recovery`)
+
+Static coverage only (scripted model replies, fake Factorio); no real-engine lane and no live provider run. Defaults below are
+chosen, not owner-confirmed.
+
+- **Grant at goal admission.** A chat-origin `new_goal` (`NpcAgentLoop.request`) issues a `player_task` grant: mandate id = goal id,
+  requested result `goal:<goal_id>` with no destination, all five action scopes, not bound to an actor (it survives a respawn; actor
+  and epoch are still fenced at the wake, the commit and every admission). Recovery runs, amendments, chat-only and status routes never
+  mint one. Because MW1's protected-asset and player-inventory gates are grant-backed and still an interim owner decision, a bare
+  `player_task` grant (no protected assets or materials) does not switch them on for an ordinary goal.
+- **Replacement wake.** When the active plan becomes BLOCKED by a harness-evidenced preflight or admission blocker (an admission refusal
+  counts only when the batch provably did not run) or by the deadlock detector, and the goal has a current grant and fewer than 3
+  accepted replacements (read from the retained plan lineage, so it survives restart), the request does not end awaiting the player.
+  The planner is resumed (or a fresh packet is built) through the explicit `replacement` restage reason, which is the only reason
+  that may restage onto a BLOCKED plan, and receives a `[PLAN_BLOCKED]` facts message. Its ordinary `submitPlan` reply is turned into
+  an MW1 `REPLACEMENT_PLAN_REQUESTED` by the harness (grant id and current revision, the grant's own requested result, scope
+  `recovery`, empty impacts, the blocker's code, detail and evidence refs). Accept: the successor DRAFT commits through
+  `commitReplacementPlan` and the executor is handed the new version. Ask: the old plan stays BLOCKED and untouched, a question is
+  recorded and the player is told what needs their approval. Refuse, a stale grant, an exhausted cap or no grant: the request ends
+  blocked as before.
+- **Player notification.** A committed replacement emits `plan.replacement_announced` with the chat line; the supervisor prints it once
+  per plan id.
+- **Trace events** (each carries `request_id` and a `reason`): `plan.replacement_wake`, `plan.replacement_wake_skipped`,
+  `plan.replacement_draft_repair`, `plan.replacement_announced`, plus the MW1 `plan.replacement_drafted|committed|refused|question_raised`
+  and `authorization.granted|grant_checked` (stage `wake` is new). Tests: `replacement-wake.test.mjs`, `authorization.test.mjs`.
+- **Not wired.** Unevidenced `BLOCKED:` replies still pause the goal. A semantic-step contract mismatch is prevented at commit by a
+  separate unit. The deadlock trigger is hooked at one recovery branch and covered by a direct unit test, not by a looped deadlock
+  scenario. The ask path has no player-answer flow beyond the existing keep_paused / revise / cancel controls; operation-level impacts
+  (player-built structures, reserved supplies) are not computed at request time, admission re-checks them per operation.
+
 ## 8. MW2 build status
 
 Status as of 2026-10-01: **MW2a (durable task ledger) and MW2b (operation reconciliation) are built on branch
