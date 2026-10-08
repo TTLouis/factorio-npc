@@ -6077,15 +6077,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
     for (const [index, declaration] of plan.stepCompletions.entries()) {
-      if (declaration.kind === 'semantic') {
-        if (index === plan.currentStep && plan.operations.length > 0) {
-          const error = new AgentLoopError('semantic_step_cannot_mutate: observation/assessment steps cannot admit world-changing operations or waits')
-          error.failureClass = 'plan_category'
-          error.code = 'semantic_step_cannot_mutate'
-          throw error
-        }
-        continue
-      }
+      // Only an assessmentOnly draft reaches a semantic declaration here, and one with operations was refused above
+      // (assessment_only_conflicts_with_execution), so a semantic declaration never sits beside admitted operations.
+      if (declaration.kind === 'semantic') continue
       const operations = index === plan.currentStep ? plan.operations : []
       for (const requirement of declaration.checkpoint.requirements) {
         const allowedReceiptNames = new Set(index === plan.currentStep && !plannerOnlyDraft ? operations.map(operation => operation.name) : approvedOperationNames())
