@@ -480,7 +480,7 @@ function structuredContentDiagnostics(content, { planContract = true } = {}) {
   // The agent loop lifts these plan-surface extensions off before parsePlan;
   // checking them here flagged every goal/roadmap plan as schema-invalid.
   if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-    parsed = Object.fromEntries(Object.entries(parsed).filter(([key]) => !PLAN_EXTENSION_KEYS.includes(key)))
+    parsed = planSurfaceOf(parsed)
   }
   try {
     parsePlan(parsed)
@@ -748,7 +748,19 @@ function topLevelJsonObjectSpans(text) {
 // (parsePlanMessage in npc-agent-loop.mjs), so a plan object that carries them
 // is still a plan. parsePlan itself is strict-exact-keys over the executable
 // surface only.
-const PLAN_EXTENSION_KEYS = ['checkpoint', 'semanticCompletion', 'stepCompletions', 'assessmentOnly', 'observationRequest', 'roadmap', 'roadmapNodeIds', 'developmentMode', 'goal', 'timeReview']
+const PLAN_EXTENSION_KEYS = ['checkpoint', 'semanticCompletion', 'stepCompletions', 'assessmentOnly', 'observationRequest', 'roadmap', 'roadmapNodeIds', 'developmentMode', 'goal', 'timeReview', 'stepId']
+
+// The executable surface of a plan object once its extensions are lifted. An executor binds its operations to the
+// committed active step by `stepId` and then needs neither plan nor currentStep: parsePlanMessage defaults them the
+// same way, so this check agrees with it.
+function planSurfaceOf(object) {
+  const surface = Object.fromEntries(Object.entries(object).filter(([key]) => !PLAN_EXTENSION_KEYS.includes(key)))
+  if (typeof object.stepId === 'string' && object.stepId.trim()) {
+    if (surface.plan === undefined) surface.plan = []
+    if (surface.currentStep === undefined) surface.currentStep = 0
+  }
+  return surface
+}
 // Members a model wrapping the submitPlan arguments inside the plan object may
 // carry beside `submitPlan` (live 2026-10-01, deepseek-v4-flash through
 // OpenRouter). Anything else next to the wrapper is ambiguous and is refused.
@@ -795,7 +807,7 @@ function planCandidate(candidate) {
   const object = lifted.object
   if (!isPlainObject(object)) return undefined
   try {
-    parsePlan(Object.fromEntries(Object.entries(object).filter(([key]) => !PLAN_EXTENSION_KEYS.includes(key))))
+    parsePlan(planSurfaceOf(object))
   }
   catch {
     return undefined

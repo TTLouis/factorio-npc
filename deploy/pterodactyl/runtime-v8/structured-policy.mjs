@@ -709,6 +709,7 @@ export const plannerControlToolDefinitions = [{
           items: { type: 'string', minLength: 1, maxLength: 500 },
         },
         currentStep: { type: 'integer', minimum: 0, maximum: 30 },
+        stepId: { type: 'string', minLength: 1, maxLength: 200, description: 'Executor only: the active committed step id from [CONTROL_DECISION_STATE]. Binds the operations to that step; plan and currentStep do not decide which step they belong to.' },
         assessmentOnly: { type: 'boolean', description: 'Set true only for an intentionally observation-only slice: all stepCompletions are semantic and operations is empty. Omit or set false for execution drafts, which require at least one deterministic world-result checkpoint. This does not change an existing committed plan.' },
         observationRequest: {
           type: 'object', additionalProperties: false, required: ['tool', 'args', 'rationale'],
@@ -905,9 +906,14 @@ export function plannerControlPayloadFromMessage(message) {
   let args
   try { args = JSON.parse(rawArgs) }
   catch { throw new base.PolicyError('submitPlan arguments must be valid JSON') }
-  exactKeys(args, ['chatMessage', 'plan', 'currentStep', 'operations', 'observationRequest', 'assessmentOnly', 'checkpoint', 'stepCompletions', 'semanticCompletion', 'roadmapNodeIds', 'developmentMode', 'roadmap', 'goal', 'timeReview'])
-  check(Array.isArray(args.plan), 'submitPlan.plan must be an array')
-  check(Number.isSafeInteger(args.currentStep), 'submitPlan.currentStep must be an integer')
+  exactKeys(args, ['chatMessage', 'plan', 'currentStep', 'operations', 'observationRequest', 'assessmentOnly', 'checkpoint', 'stepCompletions', 'semanticCompletion', 'roadmapNodeIds', 'developmentMode', 'roadmap', 'goal', 'timeReview', 'stepId'])
+  // An executor binds its operations to the committed active step by id; plan and currentStep are then not needed.
+  const stepIdGiven = typeof args.stepId === 'string' && args.stepId.trim().length > 0
+  check(args.stepId === undefined || stepIdGiven, 'submitPlan.stepId must be the active step id')
+  const plan = args.plan === undefined && stepIdGiven ? [] : args.plan
+  const currentStep = args.currentStep === undefined && stepIdGiven ? 0 : args.currentStep
+  check(Array.isArray(plan), 'submitPlan.plan must be an array')
+  check(Number.isSafeInteger(currentStep), 'submitPlan.currentStep must be an integer')
   check(Array.isArray(args.operations), 'submitPlan.operations must be an array')
   check(args.assessmentOnly === undefined || typeof args.assessmentOnly === 'boolean', 'submitPlan.assessmentOnly must be boolean')
   check(args.semanticCompletion === undefined
@@ -921,9 +927,10 @@ export function plannerControlPayloadFromMessage(message) {
   const fallback = typeof args.chatMessage === 'string' ? args.chatMessage : ''
   return {
     chatMessage: natural || fallback,
-    plan: args.plan,
-    currentStep: args.currentStep,
+    plan,
+    currentStep,
     operations: args.operations,
+    ...(stepIdGiven ? { stepId: args.stepId.trim() } : {}),
     ...(args.observationRequest !== undefined ? { observationRequest: normalizeObservationRequest(args.observationRequest) } : {}),
     ...(args.assessmentOnly !== undefined ? { assessmentOnly: args.assessmentOnly } : {}),
     ...(args.checkpoint !== undefined ? { checkpoint: args.checkpoint } : {}),

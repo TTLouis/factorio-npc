@@ -433,6 +433,31 @@ function detectNoChatReply(rows) {
   return undefined
 }
 
+// A request that ends in request.failed with recoverable=false stops the run with no repair path: the loop reset itself
+// and the goal is left for the supervisor's stranded-plan pause. Emitted by runGuardedTurn (npc-agent-loop.mjs).
+function detectUnrecoverableRequestFailure(rows) {
+  const terminal = terminalEvent(rows)
+  if (terminal?.event !== 'request.failed' || terminal?.data?.recoverable !== false) return undefined
+  return {
+    count: 1,
+    first_ts: nonEmptyString(terminal?.ts),
+    detail: `request.failed recoverable=false (stage ${nonEmptyString(terminal?.data?.stage) ?? 'n/a'}): ${nonEmptyString(terminal?.data?.message) ?? 'no message'}`,
+  }
+}
+
+// An executor reply whose operations named a step that is not the committed active one (executor.stale_step_rejected,
+// npc-agent-loop.mjs enforceExecutorContract). Each is corrected up to a bounded allowance, so any occurrence is worth seeing.
+function detectExecutorStaleStepRejected(rows) {
+  const matches = rows.filter(row => row?.event === 'executor.stale_step_rejected')
+  if (matches.length === 0) return undefined
+  const first = matches[0].data ?? {}
+  return {
+    count: matches.length,
+    first_ts: firstTsOf(matches),
+    detail: `executor operations named a step other than the active one (${nonEmptyString(first.reason) ?? 'stale step'}; incoming index ${first.incoming_step_index ?? 'n/a'}${nonEmptyString(first.incoming_step_id) ? `, id ${first.incoming_step_id}` : ''}; expected ${nonEmptyString(first.expected_step?.stepId) ?? 'n/a'})`,
+  }
+}
+
 function detectGoalPausedNoChat(rows) {
   const pausedRows = rows.filter(row => row?.data?.task_board?.status === 'paused')
   if (pausedRows.length === 0) return undefined
@@ -673,6 +698,16 @@ const SIGNATURES = [
     id: 'invalid_tool_batch_repeated',
     label: 'invalid_tool_batch repeated',
     detect: rows => detectReasonCodeLoop(rows, 'invalid_tool_batch'),
+  },
+  {
+    id: 'request_failed_unrecoverable',
+    label: 'request failed with recoverable=false',
+    detect: detectUnrecoverableRequestFailure,
+  },
+  {
+    id: 'executor_stale_step_rejected',
+    label: 'executor operations rejected for naming a non-active step',
+    detect: detectExecutorStaleStepRejected,
   },
   {
     id: 'goal_paused_no_chat',
