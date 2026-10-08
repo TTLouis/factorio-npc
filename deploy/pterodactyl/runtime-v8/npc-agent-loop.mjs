@@ -425,6 +425,12 @@ export function requiresMachineFacts(preflight) {
 // run. A model that keeps authoring claim-only slices ends the run visibly
 // instead of spending the whole continuation limit.
 const MAX_IN_TURN_SLICE_CONTINUATIONS = 3
+// A request's continuations are counted per plan slice (the limits in
+// continueFromModMessage are per slice; the request-wide counter still numbers
+// the trace turns). Until the shared campaign allowance exists (AGENTS.md), this
+// hard cap bounds a request that keeps closing verified slices: one request can
+// never run unbounded. 256 is a chosen default, not an owner-selected figure.
+export const REQUEST_CONTINUATION_BACKSTOP = 256
 const LOW_RISK_NAVIGATION_PROJECTION_MAX_CANDIDATES = 8
 // Once the system commits a plan, its semantic content is immutable; later batches fulfil it rather than rewriting it.
 const FROZEN_PLAN_STATUSES = new Set([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING])
@@ -2958,6 +2964,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.pendingExecutorFactsRefresh = null
     this.agentContext.beginLineage() // planner role: an executor role never leaks into the next chat
     super.reset()
+    // The base reset zeroes the request-wide continuation counter; the slice baseline and the slice's
+    // deterministic-progress count start from the same point.
+    this.sliceContinuationBaseline = 0
+    this.sliceDeterministicCloses = 0
   }
 
   // The running turn's token for restageContext({ safePoint }); null between turns.
@@ -5450,6 +5460,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           condition: wait.condition,
           task_board: visibleTaskBoard(reduced?.state?.task_board),
         })
+        this.sliceDeterministicCloses = (this.sliceDeterministicCloses ?? 0) + 1
         await this.traceEvent('step.verified', {
           source: 'condition_wait',
           wait_id: identity.wait_id,
@@ -6197,6 +6208,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       contract,
       task_board: visibleTaskBoard(reduced?.state?.task_board),
     })
+    this.sliceDeterministicCloses = (this.sliceDeterministicCloses ?? 0) + 1
     await this.rollProviderBudgetAtStepClose(source ?? trigger, reduced.state)
     return { closed: true, state: reduced.state }
   }
@@ -8729,7 +8741,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!this.active || !this.epoch) return null
     const currentPlan = this.memory.currentPlan?.(this.activePlanKey())
     const continuationLimit = currentPlan?.status === 'active' ? 64 : this.maxContinuations
-    if (this.continuations >= continuationLimit) {
+    const sliceContinuations = this.continuations - (this.sliceContinuationBaseline ?? 0)
+    if (this.continuations >= REQUEST_CONTINUATION_BACKSTOP) {
+      await this.traceEvent('budget.request_continuation_backstop', {
+        reason: `request_continuation_backstop_${REQUEST_CONTINUATION_BACKSTOP}`,
+        request_continuations: this.continuations,
+        slice_continuations: sliceContinuations,
+        limit: REQUEST_CONTINUATION_BACKSTOP,
+      })
+      await this.pausePersistentPlan(`request_continuation_backstop_${REQUEST_CONTINUATION_BACKSTOP}`)
+      throw new AgentLoopError(`Request continuation backstop reached (${REQUEST_CONTINUATION_BACKSTOP} across all plan slices); durable plan paused`)
+    }
+    if (sliceContinuations >= continuationLimit) {
       await this.pausePersistentPlan(`continuation_limit_${continuationLimit}`)
       throw new AgentLoopError(`Continuation limit reached (${continuationLimit}); durable plan paused`)
     }
@@ -9398,7 +9421,40 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // The plan-slice-completed boundary (settleCompletedStepState, before the next
   // slice's planner wake): the next slice starts counting from here. A step
   // close inside a slice never resets it.
+  //
+  // The continuation baseline moves here too, but only for a slice that verified
+  // at least one deterministic world-result checkpoint (applyStepClose, or a
+  // satisfied condition wait). A slice that closed on semantic claims alone is
+  // not progress the harness can vouch for, so it keeps the old accounting. The
+  // slice's progress count restarts at every slice close either way.
+  async closeContinuationSlice(route) {
+    const previousBaseline = this.sliceContinuationBaseline ?? 0
+    const sliceContinuations = this.continuations - previousBaseline
+    const deterministicCloses = this.sliceDeterministicCloses ?? 0
+    this.sliceDeterministicCloses = 0
+    if (deterministicCloses < 1) {
+      await this.traceEvent('budget.continuation_slice_reset_withheld', {
+        route,
+        reason: 'no_deterministic_progress_in_slice',
+        slice_continuations: sliceContinuations,
+        request_continuations: this.continuations,
+        slice_continuation_baseline: previousBaseline,
+      })
+      return
+    }
+    this.sliceContinuationBaseline = this.continuations
+    await this.traceEvent('budget.continuation_slice_reset', {
+      route,
+      reason: 'slice_verified_deterministic_progress',
+      previous_slice_continuations: sliceContinuations,
+      request_continuations: this.continuations,
+      previous_slice_continuation_baseline: previousBaseline,
+      slice_continuation_baseline: this.continuations,
+      deterministic_steps_verified: deterministicCloses,
+    })
+  }
   async closeOutputSlice(route) {
+    await this.closeContinuationSlice(route)
     const before = this.sliceOutputCeiling()
     const baseline = markRequestSliceClosed(this.traceRequest)
     if (baseline === undefined) return
