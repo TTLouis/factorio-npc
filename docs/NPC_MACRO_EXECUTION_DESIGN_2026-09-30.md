@@ -308,11 +308,21 @@ chosen, not owner-confirmed.
 - **Grant at goal admission.** A chat-origin `new_goal` (`NpcAgentLoop.request`) issues a `player_task` grant: mandate id = goal id,
   requested result `goal:<goal_id>` with no destination, all five action scopes, not bound to an actor (it survives a respawn; actor
   and epoch are still fenced at the wake, the commit and every admission). Recovery runs, amendments, chat-only and status routes never
-  mint one. Because MW1's protected-asset and player-inventory gates are grant-backed and still an interim owner decision, a bare
-  `player_task` grant (no protected assets or materials) does not switch them on for an ordinary goal.
-- **Replacement wake.** When the active plan becomes BLOCKED by a harness-evidenced preflight or admission blocker (an admission refusal
-  counts only when the batch provably did not run) or by the deadlock detector, and the goal has a current grant and fewer than 3
-  accepted replacements (read from the retained plan lineage, so it survives restart), the request does not end awaiting the player.
+  mint one, and a goal that ever held a `player_task` grant never gets another (a revoked one is not re-activated). Owner rule for MW1's
+  protected-asset and player-inventory gates: they are grant-backed only for a replacement-lineage plan or an ACTIVE `standing_auto`
+  grant of the goal, so the player's own request stays its own approval. An asset or material explicitly listed in any active grant of
+  the goal (`protected_assets`, `protected_materials`) is always protected, grant-backed or not.
+- **Replacement wake.** When a COMMITTED plan becomes BLOCKED by harness-evidenced world change, and the goal has a current grant and
+  fewer than 3 accepted replacements, the request does not end awaiting the player. World evidence is an explicit allowlist
+  (`WORLD_CHANGE_PREFLIGHT_CODES` in `replacement-wake.mjs`, default deny): the exact target is gone (`stale_exact_target`, and only
+  with proof the unit existed: an NPC placement receipt, an earlier authoritative observation, or the mod's own last-observed record),
+  or the measured stock/room facts `supply_missing`, `extraction_empty`, `destination_full`; or an admission refusal the game proved
+  happened before any mutation of the first operation. Authorization refusals, the uncertain-effect hold, model argument errors, a
+  locked recipe, a blocked pre-commit draft, transport/epoch/journal refusals, unevidenced `BLOCKED:` replies, provider failures and
+  the deadlock detector (its `repeating_failure` signal counts provider failures) never wake the planner and keep the blocked end;
+  each skip is traced (`blocker_not_world_evidence`, `plan_not_committed`, `batch_may_have_run`, `no_current_grant`, `grant_stale`,
+  `replacement_cap_reached`). The cap counts accepted replacements on the goal record (`goal.replacements_accepted`, incremented only by
+  the accept branch of `REPLACEMENT_PLAN_REQUESTED`, durable across snapshot/restore, independent of retained plans and grants).
   The planner is resumed (or a fresh packet is built) through the explicit `replacement` restage reason, which is the only reason
   that may restage onto a BLOCKED plan, and receives a `[PLAN_BLOCKED]` facts message. Its ordinary `submitPlan` reply is turned into
   an MW1 `REPLACEMENT_PLAN_REQUESTED` by the harness (grant id and current revision, the grant's own requested result, scope
@@ -325,10 +335,14 @@ chosen, not owner-confirmed.
 - **Trace events** (each carries `request_id` and a `reason`): `plan.replacement_wake`, `plan.replacement_wake_skipped`,
   `plan.replacement_draft_repair`, `plan.replacement_announced`, plus the MW1 `plan.replacement_drafted|committed|refused|question_raised`
   and `authorization.granted|grant_checked` (stage `wake` is new). Tests: `replacement-wake.test.mjs`, `authorization.test.mjs`.
-- **Not wired.** Unevidenced `BLOCKED:` replies still pause the goal. A semantic-step contract mismatch is prevented at commit by a
-  separate unit. The deadlock trigger is hooked at one recovery branch and covered by a direct unit test, not by a looped deadlock
-  scenario. The ask path has no player-answer flow beyond the existing keep_paused / revise / cancel controls; operation-level impacts
-  (player-built structures, reserved supplies) are not computed at request time, admission re-checks them per operation.
+- **Re-draft rule.** The planner's reply is classified against the grant immediately before it is recorded. Re-submitting the accepted
+  successor with the same steps passes through; with different steps the plan ends BLOCKED visibly (`plan.replacement_refused`,
+  `redraft_steps_changed_since_authorization`) because MW1 refuses a drifted fingerprint at commit.
+- **Not wired / limitations.** Unevidenced `BLOCKED:` replies still pause the goal. A semantic-step contract mismatch is prevented at
+  commit by a separate unit. With the default grant, requests always carry the grant's own result and empty impacts, so only
+  `scope_not_granted` can ask at request time; protected and reserved conflicts are caught per operation at admission; result integrity
+  relies on the immutable goal definition. The ask path has no player-answer flow beyond the existing keep_paused / revise / cancel
+  controls. A replacement whose step text equals the blocked plan's is not refused (the cap bounds it).
 
 ## 8. MW2 build status
 
