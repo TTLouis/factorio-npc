@@ -13,7 +13,7 @@ import {
   EXECUTOR_CLOSED_CONTROL_PROMPT,
   EXECUTOR_COMPACT_CONTINUATION_PROMPT,
 } from './provider-base.mjs'
-import { providerRequest } from './provider.mjs'
+import { normalizeProviderPlanContentDetailed, providerRequest } from './provider.mjs'
 import {
   EXECUTOR_CONTROL_FIELDS,
   EXECUTOR_CONTROL_REQUIRED,
@@ -283,4 +283,45 @@ test('the whole goal complete: an executor {stepId, operations: [], semanticComp
   assert.equal(world.rows('executor.step_bound').length, 1)
   assert.equal(world.rows('request.failed').length, 0)
   assert.equal(world.game.mutations.length, 1, 'only the planner batch reached the game')
+})
+
+// --- review follow-ups: planner-only fields out of the executor wording, and the wrapper form ------------------
+
+test('the executor prompt variants name only fields the executor schema has; the planner prompts keep every planner field', () => {
+  for (const prompt of [EXECUTOR_COMPACT_CONTINUATION_PROMPT, EXECUTOR_CLOSED_CONTROL_PROMPT]) {
+    assert.doesNotMatch(prompt, /stepCompletions|assessmentOnly|roadmapNodeIds|developmentMode|currentStep/)
+    assert.doesNotMatch(prompt, /New (?:execution )?drafts/)
+  }
+  assert.match(EXECUTOR_COMPACT_CONTINUATION_PROMPT, /checkpoint and semanticCompletion remain allowed\./)
+  assert.match(EXECUTOR_COMPACT_CONTINUATION_PROMPT, /Closing observations does not close the control decision\. Root checkpoint is the active-step compatibility form\./)
+  assert.match(EXECUTOR_COMPACT_CONTINUATION_PROMPT, /\nresearch_completed \{technology\} is supported, including multiple requirements with mode:"all"\./)
+  assert.match(EXECUTOR_CLOSED_CONTROL_PROMPT, /Do not call submitPlan or another tool, and do not omit completion fields merely because tools are closed\.\nUse chatMessage, stepId and operations, plus the applicable checkpoint, semanticCompletion or timeReview\. Research completion uses research_completed/)
+  // The planner text is untouched.
+  assert.match(COMPACT_CONTINUATION_PROMPT, /checkpoint, semanticCompletion and stepCompletions remain allowed\. Closing observations does not close the control decision\. New drafts include stepCompletions aligned to plan/)
+  assert.match(COMPACT_CONTINUATION_PROMPT, /\nNew execution drafts need at least one deterministic step\. For an intentionally observation-only slice, set assessmentOnly:true/)
+  assert.match(CLOSED_CONTROL_PROMPT, /New execution drafts require at least one deterministic step and stepCompletions aligned to plan/)
+  assert.match(CLOSED_CONTROL_PROMPT, /assessmentOnly:true with only semantic steps and no operations\. Research completion/)
+})
+
+test('a submitPlan wrapper in content whose nested object names the step (no plan array) unwraps and binds like a bare stepId reply', async () => {
+  const wrapped = JSON.stringify({ submitPlan: { chatMessage: '', stepId: 'step_3', operations: [] } })
+  const result = normalizeProviderPlanContentDetailed(wrapped)
+  assert.equal(result.refused, undefined)
+  assert.deepEqual(JSON.parse(result.content), { chatMessage: '', stepId: 'step_3', operations: [] })
+  // Still refused without a plan array or a step id, or with a blank id.
+  for (const nested of [{ chatMessage: '', operations: [] }, { chatMessage: '', stepId: '  ', operations: [] }, { chatMessage: '', stepId: 7, operations: [] }]) {
+    assert.equal(normalizeProviderPlanContentDetailed(JSON.stringify({ submitPlan: nested })).refused, 'submit_plan_wrapper_not_a_plan')
+  }
+
+  // And the loop binds it: the executor's wrapped reply is read as the bound step reply.
+  const world = harness([
+    plannerSlice(),
+    // The provider layer unwraps the content before the loop reads it (the stub stands in for the wire).
+    w => ({ content: normalizeProviderPlanContentDetailed(JSON.stringify({ submitPlan: { chatMessage: '', stepId: w.stepId(), operations: [gather('copper-ore', 10)] } })).content }),
+  ])
+  await world.say('get steam power going and run an electric mining drill on iron ore')
+  world.game.inventory['iron-ore'] = 10
+  await world.agent.completed()
+  assert.equal(world.rows('executor.step_bound').length, 1)
+  assert.equal(world.rows('request.failed').length, 0)
 })

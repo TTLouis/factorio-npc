@@ -2968,6 +2968,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // deterministic-progress count start from the same point.
     this.sliceContinuationBaseline = 0
     this.sliceDeterministicCloses = 0
+    this.sliceAdmittedBatches = 0
   }
 
   // The running turn's token for restageContext({ safePoint }); null between turns.
@@ -5378,6 +5379,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async pollConditionWait() {
     if (this.conditionPollPromise) return this.conditionPollPromise
     this.conditionPollPromise = (async () => {
+      const generation = this.generation // the slice-progress credit for a satisfied wait belongs to this lineage only
+      const requestId = this.traceRequest?.id
       const inspected = await this.inspectConditionWait()
       if (!inspected || inspected.action === 'absent') return null
 
@@ -5460,7 +5463,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           condition: wait.condition,
           task_board: visibleTaskBoard(reduced?.state?.task_board),
         })
-        this.sliceDeterministicCloses = (this.sliceDeterministicCloses ?? 0) + 1
+        await this.creditSliceProgress('deterministic_close', generation, requestId)
         await this.traceEvent('step.verified', {
           source: 'condition_wait',
           wait_id: identity.wait_id,
@@ -6178,6 +6181,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async applyStepClose(trigger, { key, step, contract, results, reasonCode, source, plannerStep, extraEvidence = [], steeringRecommendation }) {
+    const generation = this.generation // the slice-progress credit below belongs to this lineage only
+    const requestId = this.traceRequest?.id
     const reduced = this.memory.applyOutcomeAuthority?.(key, {
       kind: 'verified_complete',
       source: 'deterministic_runtime',
@@ -6202,13 +6207,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         ...(reduced?.decision?.paused === true ? { paused: true, disagreement: reduced.progressDisagreement } : {}),
       }
     }
+    await this.creditSliceProgress('deterministic_close', generation, requestId)
     await this.traceEvent('step.verified', {
       active_step_id: step.id,
       source,
       contract,
       task_board: visibleTaskBoard(reduced?.state?.task_board),
     })
-    this.sliceDeterministicCloses = (this.sliceDeterministicCloses ?? 0) + 1
     await this.rollProviderBudgetAtStepClose(source ?? trigger, reduced.state)
     return { closed: true, state: reduced.state }
   }
@@ -9431,14 +9436,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const previousBaseline = this.sliceContinuationBaseline ?? 0
     const sliceContinuations = this.continuations - previousBaseline
     const deterministicCloses = this.sliceDeterministicCloses ?? 0
+    const admittedBatches = this.sliceAdmittedBatches ?? 0
     this.sliceDeterministicCloses = 0
-    if (deterministicCloses < 1) {
+    this.sliceAdmittedBatches = 0
+    if (deterministicCloses < 1 || admittedBatches < 1) {
       await this.traceEvent('budget.continuation_slice_reset_withheld', {
         route,
-        reason: 'no_deterministic_progress_in_slice',
+        reason: deterministicCloses < 1 ? 'no_deterministic_progress_in_slice' : 'no_admitted_operations_in_slice',
         slice_continuations: sliceContinuations,
         request_continuations: this.continuations,
         slice_continuation_baseline: previousBaseline,
+        deterministic_steps_verified: deterministicCloses,
+        admitted_operation_batches: admittedBatches,
       })
       return
     }
@@ -9451,7 +9460,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       previous_slice_continuation_baseline: previousBaseline,
       slice_continuation_baseline: this.continuations,
       deterministic_steps_verified: deterministicCloses,
+      admitted_operation_batches: admittedBatches,
     })
+  }
+
+  // Slice progress is credited synchronously (before the first await) and only for the lineage that earned it: a reset or an
+  // actor replacement bumps the generation, so a close or an admission that finishes after it never lands in the new
+  // request's slice. A dropped credit is traced with the request it belonged to.
+  async creditSliceProgress(kind, generation, requestId) {
+    if (generation === this.generation) {
+      if (kind === 'admitted_operations') this.sliceAdmittedBatches = (this.sliceAdmittedBatches ?? 0) + 1
+      else this.sliceDeterministicCloses = (this.sliceDeterministicCloses ?? 0) + 1
+      return true
+    }
+    await this.traceEvent('budget.continuation_slice_progress_dropped', { kind, reason: 'stale_generation', stale_request_id: requestId })
+    return false
   }
   async closeOutputSlice(route) {
     await this.closeContinuationSlice(route)
@@ -12406,6 +12429,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
               : []),
           ].slice(0, 2)
         : []
+      const completionGeneration = this.generation
       stateResult = this.memory.recordPlan?.(this.requestInfo.memoryKey, await this.revisionSafeRequestInfo(), durablePlan, {
         continuation: this.continuations > 0,
         validatedSemanticAdmission: initialSemanticAdmission,
@@ -12416,6 +12440,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         verifiedCompletion: finalCompletionVerified,
         completionEvidence,
       })
+      // A final-step completion the reducer accepted on the harness's own deterministic receipt verification is a
+      // deterministic close; one grounded only on a fresh observation is semantic and earns no slice progress.
+      if (finalCompletionVerified && stateResult?.outcomeDecision?.accepted === true
+        && completionEvidence.some(item => item?.kind === 'deterministic_verification')) {
+        await this.creditSliceProgress('deterministic_close', completionGeneration, this.traceRequest?.id)
+      }
         // The shelf can only be revised once the goal it belongs to has been
       // admitted, and `recordPlan` is what admits it, so this runs after it and
       // not with the rest of the plan-surface parsing.
@@ -12901,6 +12931,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
       }
 
+      const admitGeneration = this.generation
+      const admitRequestId = this.traceRequest?.id
       const pendingAdmission = await this.recordPendingOperationBeforeSend(operations, before)
       const operationOwnerKey = this.activePlanKey()
       // A restage that landed during that await must not let this reply's batch through
@@ -12993,6 +13025,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           throw error
         }
       }
+      // Reached only when the game took the batch (acknowledged, or reconciled as admitted): real work for this slice.
+      await this.creditSliceProgress('admitted_operations', admitGeneration, admitRequestId)
     }
 
     // U6. The reply is admitted and appended; nothing is in flight. A reply that

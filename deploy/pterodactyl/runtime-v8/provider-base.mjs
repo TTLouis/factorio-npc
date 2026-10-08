@@ -285,6 +285,12 @@ export const EXECUTOR_COMPACT_CONTINUATION_PROMPT = executorPrompt(COMPACT_CONTI
     'operations contains only approved structured operations.'],
   ['return plan:[], currentStep:0, operations:[] and a short completion chatMessage.',
     'return operations:[] and a short completion chatMessage.'],
+  ['checkpoint, semanticCompletion and stepCompletions remain allowed.',
+    'checkpoint and semanticCompletion remain allowed.'],
+  [' New drafts include stepCompletions aligned to plan: each entry is {kind:"deterministic",checkpoint:{mode,requirements}} or {kind:"semantic",rationale:"..."}. Luna authors the outcome; the harness validates it.',
+    ''],
+  ['New execution drafts need at least one deterministic step. For an intentionally observation-only slice, set assessmentOnly:true with only semantic steps and no operations. Missing stock or unmet research describes work remaining, not an assessment-only result. research_completed',
+    'research_completed'],
 ])
 
 export const EXECUTOR_CLOSED_CONTROL_PROMPT = executorPrompt(CLOSED_CONTROL_PROMPT, [
@@ -292,6 +298,8 @@ export const EXECUTOR_CLOSED_CONTROL_PROMPT = executorPrompt(CLOSED_CONTROL_PROM
     'Use chatMessage, stepId and operations, plus the applicable checkpoint, semanticCompletion or timeReview.'],
   ['Example shape (replace placeholders and use the actual currentStep): {"chatMessage":"","plan":["<committed step>"],"currentStep":0,"operations":[],"semanticCompletion"',
     'Example shape (replace placeholders): {"chatMessage":"","stepId":"<exact active step id>","operations":[],"semanticCompletion"'],
+  ['New execution drafts require at least one deterministic step and stepCompletions aligned to plan, with entries {kind:"deterministic",checkpoint:{mode,requirements}} or {kind:"semantic",rationale:"..."}; keep committed completion specifications unchanged. For an intentionally observation-only slice, set assessmentOnly:true with only semantic steps and no operations. Research completion',
+    'Research completion'],
 ])
 
 function sanitizePromptTraceValue(value, key = '') {
@@ -813,7 +821,9 @@ function isPlainObject(value) {
 function unwrapSubmitPlan(parsed) {
   if (!isPlainObject(parsed) || !Object.hasOwn(parsed, 'submitPlan')) return { object: parsed }
   const nested = parsed.submitPlan
-  if (!isPlainObject(nested) || !Array.isArray(nested.plan)) return { refused: 'submit_plan_wrapper_not_a_plan' }
+  // The plan array satisfies the check, and so does an executor's step id (planSurfaceOf).
+  const namesStep = isPlainObject(nested) && typeof nested.stepId === 'string' && nested.stepId.trim() !== ''
+  if (!isPlainObject(nested) || (!Array.isArray(nested.plan) && !namesStep)) return { refused: 'submit_plan_wrapper_not_a_plan' }
   if (Object.hasOwn(nested, 'submitPlan')) return { refused: 'submit_plan_wrapper_nested_twice' }
   if (!Object.keys(parsed).every(key => SUBMIT_PLAN_WRAPPER_OUTER_KEYS.has(key))) return { refused: 'submit_plan_wrapper_unknown_members' }
   for (const key of SUBMIT_PLAN_SHARED_MEMBERS) {

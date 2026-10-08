@@ -3,7 +3,7 @@ import test from 'node:test'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { AgentLoopError, NpcAgentLoop, REQUEST_CONTINUATION_BACKSTOP } from './npc-agent-loop.mjs'
-import { FakeFactorio, gather, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
+import { FakeFactorio, gather, inventoryCheckpoint, planReply, recordingJev } from './task-loop-fixtures.mjs'
 
 // Per-slice continuation accounting (live Haiku run 2026-10-08, commit a8610bb5). One request ran all four steps of its
 // first bounded slice on 14 continuations; the slice closed on a deterministic checkpoint, and the slice-completion
@@ -24,7 +24,7 @@ const SHELF = [
 ]
 const deterministic = (item, minimum) => ({ kind: 'deterministic', checkpoint: inventoryCheckpoint(item, minimum) })
 
-function harness({ provider, maxContinuations } = {}) {
+function harness({ provider, maxContinuations, delegated = false } = {}) {
   const game = new FakeFactorio()
   const memory = new CanonicalTaskBoardMemory()
   const trace = []
@@ -39,6 +39,12 @@ function harness({ provider, maxContinuations } = {}) {
       return provider(world.calls, world)
     },
     interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
+    ...(delegated
+      ? {
+          completionProtocolVersion: 2, // production: a zero-operation planner draft is handed to the executor
+          interactionDecisionProvider: recordingJev(async (_state, questions) => (questions.intent ? { overrides: { intent: { choice: 'new_goal', confidence: 0.9 } } } : undefined)),
+        }
+      : {}),
     systemPrompt: 'slice continuation budget test',
     goalDefinitionPolicy: 'required',
     stateFile: null,
@@ -272,4 +278,84 @@ test('a new request starts with a zero slice baseline and no carried progress', 
   assert.equal(world.agent.continuations, 0)
   assert.equal(world.agent.sliceContinuationBaseline, 0)
   assert.equal(world.agent.sliceDeterministicCloses, 0)
+})
+
+// --- review follow-ups: stale progress and real progress -------------------------------------------------------
+
+test('a close that finishes after a reset is not credited to the new request: the credit is fenced by generation and traced as dropped', async () => {
+  const world = harness({ provider: deterministicSlices })
+  await world.agent.request('get steam power going and run an electric mining drill on iron ore', { sender: 'TTLouis' })
+  world.game.inventory['iron-ore'] = 10
+
+  // The reducer accepts the step close synchronously; the loop is then reset (a new request or an actor replacement)
+  // while the close awaits its persistence, before it would credit the slice.
+  let armed = false
+  const apply = world.memory.applyOutcomeAuthority.bind(world.memory)
+  world.memory.applyOutcomeAuthority = (key, candidate, options) => {
+    const result = apply(key, candidate, options)
+    if (candidate?.reason_code === 'deterministic_checkpoint_satisfied') armed = true
+    return result
+  }
+  const persist = world.agent.persistState.bind(world.agent)
+  world.agent.persistState = async (...args) => {
+    if (armed) { armed = false; world.agent.reset() }
+    return persist(...args)
+  }
+  const staleRequestId = world.agent.traceRequest.id
+  await world.agent.completed().catch(() => {})
+
+  assert.equal(armed, false, 'the reset really landed inside the close')
+  assert.equal(world.agent.sliceDeterministicCloses, 0, 'the new lineage starts with no earned progress')
+  const [dropped] = world.events('budget.continuation_slice_progress_dropped')
+  assert.equal(dropped.data.kind, 'deterministic_close')
+  assert.equal(dropped.data.reason, 'stale_generation')
+  assert.equal(dropped.data.stale_request_id, staleRequestId)
+  // The new request's slice closing now earns no baseline reset.
+  await world.agent.closeContinuationSlice('next_shelf_slice')
+  assert.equal(world.events('budget.continuation_slice_reset').length, 0)
+  assert.equal(world.agent.sliceContinuationBaseline, 0)
+})
+
+test('a slice whose checkpoint was already met when it was committed, with no operation batch admitted, is withheld: no_admitted_operations_in_slice', async () => {
+  const world = harness({
+    delegated: true,
+    provider: (call) => {
+      if (call === 1) {
+        return planReply({
+          plan: ['Hold 10 iron ore'],
+          operations: [],
+          stepCompletions: [deterministic('iron-ore', 10)],
+          goal: GOAL,
+          roadmap: SHELF,
+        })
+      }
+      return planReply({ chatMessage: 'Next slice.', plan: ['Gather 20 copper ore'], operations: [gather('copper-ore', 20)], stepCompletions: [deterministic('copper-ore', 20)] })
+    },
+  })
+  world.game.inventory['iron-ore'] = 10
+  await world.agent.request('get steam power going and run an electric mining drill on iron ore', { sender: 'TTLouis' })
+
+  const withheld = world.events('budget.continuation_slice_reset_withheld')
+  assert.equal(withheld.length, 1)
+  assert.ok(withheld[0].request_id)
+  assert.equal(withheld[0].data.reason, 'no_admitted_operations_in_slice')
+  assert.equal(withheld[0].data.deterministic_steps_verified, 1)
+  assert.equal(withheld[0].data.admitted_operation_batches, 0)
+  assert.equal(world.events('budget.continuation_slice_reset').length, 0)
+  assert.equal(world.agent.sliceContinuationBaseline, 0)
+})
+
+test('the live shape still resets: an admitted operation batch and a deterministic close in the same slice', async () => {
+  const world = harness({ provider: deterministicSlices })
+  await world.agent.request('get steam power going and run an electric mining drill on iron ore', { sender: 'TTLouis' })
+  assert.equal(world.agent.sliceAdmittedBatches, 1)
+  world.agent.continuations = 14
+  world.game.inventory['iron-ore'] = 10
+  await world.agent.completed()
+  const [reset] = world.events('budget.continuation_slice_reset')
+  assert.equal(reset.data.admitted_operation_batches, 1)
+  assert.equal(reset.data.deterministic_steps_verified, 1)
+  // The next slice starts with neither counter.
+  assert.equal(world.agent.sliceDeterministicCloses, 0)
+  assert.equal(world.agent.sliceAdmittedBatches, 1, 'only the next slice own admitted batch')
 })
