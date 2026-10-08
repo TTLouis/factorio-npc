@@ -35,8 +35,7 @@ export const WORLD_CHANGE_PREFLIGHT_CODES = Object.freeze({
   // The exact entity the batch targets is gone (destroyed, mined, replaced). The mod resolves the unit number against the live
   // world, so a miss is an engine fact - but only if the unit really existed, which is checked separately (EXISTENCE_EVIDENCE_CODES).
   stale_exact_target: 'the exact target entity no longer exists',
-  // Live inventory facts measured by the mod's transfer preflight: the plan assumed stock or room that the world does not have now.
-  supply_missing: 'the NPC inventory no longer holds the item the step relies on',
+  // Live facts measured by the mod's transfer preflight: the plan assumed stock or room that the world does not have now.
   extraction_empty: 'the entity the step takes from holds none of the item now',
   destination_full: 'the entity the step feeds accepts none of the item now',
 })
@@ -53,6 +52,8 @@ export const NEVER_WAKE_PREFLIGHT_CODES = Object.freeze([
   'duplicate_effect_suppressed',
   'recipe_locked', 'unknown_prototype', 'unknown_recipe', 'unknown_technology', 'invalid_unit_number', 'invalid_target_kind', 'invalid_preflight_args',
   'bootstrap_dependency_unresolved', 'no_actor', 'different_surface', 'preflight_transport_error',
+  // The NPC's own inventory accounting (what it expected to hold) is usually the planner's or executor's mistake, not the world changing.
+  'supply_missing',
 ])
 
 /**
@@ -63,7 +64,7 @@ export const NEVER_WAKE_PREFLIGHT_CODES = Object.freeze([
  *   trigger 'operation_admission_failure': only a refusal the mod proved happened before any mutation of the first operation
  *     (`provenRefusal`). A transport, epoch or journal refusal is a harness problem, not the world.
  */
-export function blockerWorldEvidence({ trigger, preflight, existed = false, provenRefusal = false } = {}) {
+export function blockerWorldEvidence({ trigger, preflight, existed = false, provenRefusal = false, refusalCode } = {}) {
   if (trigger === 'operation_preflight_blocker') {
     const code = clean(preflight?.code, 80)
     if (!Object.hasOwn(WORLD_CHANGE_PREFLIGHT_CODES, code)) return { ok: false, detail: `code_not_world_change:${code || 'none'}` }
@@ -71,6 +72,9 @@ export function blockerWorldEvidence({ trigger, preflight, existed = false, prov
     return { ok: true, detail: code }
   }
   if (trigger === 'operation_admission_failure') {
+    // The mod's own refusal code is checked against the never-wake list first: a proven refusal for an authorization reason is not the world.
+    const refusal = clean(refusalCode, 80)
+    if (refusal && NEVER_WAKE_PREFLIGHT_CODES.includes(refusal)) return { ok: false, detail: `refusal_code_never_wakes:${refusal}` }
     return provenRefusal ? { ok: true, detail: 'proven_refusal_before_mutation' } : { ok: false, detail: 'admission_refusal_not_proven_by_the_game' }
   }
   return { ok: false, detail: `unsupported_trigger:${clean(trigger, 60)}` }
@@ -132,7 +136,6 @@ export function blockerFacts(plan) {
 // The world-change codes in the words a player reads; any other code is shown as its own words.
 const PLAIN_BLOCKER_REASONS = Object.freeze({
   stale_exact_target: 'something I was working on is gone',
-  supply_missing: 'I no longer have the items the step needs',
   extraction_empty: 'the machine or chest I was taking from is empty',
   destination_full: 'the machine or chest I was filling is full',
 })
@@ -183,9 +186,11 @@ export function buildPlanBlockedMessage({ plan, grant, replacementsUsedCount, ca
 }
 
 /** The line the player sees when a replacement plan has committed. */
-export function replacementAnnouncement({ plan, blocker, firstStep }) {
+export function replacementAnnouncement({ plan, blocker, firstStep, unchanged = false }) {
   const reason = plainBlockerReason(blocker?.reason_code)
   const first = clean(firstStep, 160) || 'the next step'
+  // A replacement with the very same steps is a retry, not a change of plan.
+  if (unchanged) return `Retrying the plan: ${reason}. Plan v${plan.plan_version} resumes with: ${first}.`
   return `Changed plan: ${reason}. New plan v${plan.plan_version} starts with: ${first}.`
 }
 

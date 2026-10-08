@@ -1124,3 +1124,55 @@ test('MW5: a player_task grant (the player objective itself) leaves the gates of
   assert.deepEqual(check(protectedMaterial, [{ name: 'move_items_exact', args: { item_name: 'iron-plate', unit_number: 901, max_count: 5, to_entity: true } }]), { ok: true }, 'putting the item INTO storage spends nothing')
   assert.equal(check(granted(goalState(), STANDING_AUTO), mine, humanBuilt).code, ADMISSION_REFUSAL.PROTECTED_ENTITY)
 })
+
+// --- listed materials: per-entry meaning, name-based containers, several subjects --------------------------------------------
+
+const OBJECTIVE_GRANT = { mandate_kind: MANDATE_KIND.PLAYER_TASK, mandate_id: GOAL_ID, requested_result: { result_key: `goal:${GOAL_ID}`, destination: '' }, permitted_scope: Object.values(ACTION_SCOPE) }
+const takeFrom = (itemName, unit) => [{ name: 'move_items_exact', args: { item_name: itemName, unit_number: unit, max_count: 5, to_entity: false } }]
+const admit = (state, operations) => evaluateOperationAdmission(state, { operations, preflight: operations.map(() => ({ ok: true })), actor: ACTOR })
+
+test('MW5: a listed material naming an item AND a container means that item in that container, matched per entry', () => {
+  const state = granted(goalState(), { ...OBJECTIVE_GRANT, protected_materials: [{ item_name: 'iron-plate', container_unit_number: 900 }] })
+  const refused = admit(state, takeFrom('iron-plate', 900))
+  assert.equal(refused.code, ADMISSION_REFUSAL.RESERVED_SUPPLY)
+  assert.equal(refused.reason, 'grant_protected_material')
+  assert.deepEqual(refused.subjects, ['iron-plate@900'])
+  assert.deepEqual(admit(state, takeFrom('copper-plate', 900)), { ok: true }, 'another item from the same container')
+  assert.deepEqual(admit(state, takeFrom('iron-plate', 901)), { ok: true }, 'the same item from another container')
+  // Mining the container takes whatever it holds, so the container half of the entry is enough.
+  assert.equal(admit(state, [{ name: 'mine_entity_exact', args: { unit_number: 900 } }]).code, ADMISSION_REFUSAL.RESERVED_SUPPLY)
+  assert.deepEqual(admit(state, [{ name: 'mine_entity_exact', args: { unit_number: 901 } }]), { ok: true })
+})
+
+test('MW5: a listed container is also covered for name-based withdrawal and mining, by its entity name or its placement receipt name', () => {
+  const named = granted(goalState(), { ...OBJECTIVE_GRANT, protected_materials: [{ container_unit_number: 900, entity_name: 'wooden-chest' }] })
+  const byName = admit(named, [{ name: 'move_items', args: { item_name: 'coal', entity_name: 'wooden-chest', max_count: 5, to_entity: false } }])
+  assert.equal(byName.code, ADMISSION_REFUSAL.RESERVED_AMBIGUOUS)
+  assert.equal(byName.reason, 'reserved_supply_ambiguous_target')
+  assert.equal(admit(named, [{ name: 'mine_entity', args: { entity_name: 'wooden-chest', count: 1 } }]).code, ADMISSION_REFUSAL.RESERVED_AMBIGUOUS)
+  assert.deepEqual(admit(named, [{ name: 'mine_entity', args: { entity_name: 'iron-chest', count: 1 } }]), { ok: true })
+  assert.deepEqual(admit(named, [{ name: 'move_items', args: { item_name: 'coal', entity_name: 'wooden-chest', max_count: 5, to_entity: true } }]), { ok: true }, 'putting items in spends nothing')
+  // Without an entity_name the placement receipt that recorded the unit names it.
+  let bare = granted(goalState(), { ...OBJECTIVE_GRANT, protected_materials: [{ container_unit_number: 900 }] })
+  assert.deepEqual(admit(bare, [{ name: 'mine_entity', args: { entity_name: 'wooden-chest', count: 1 } }]), { ok: true }, 'nothing names the container yet')
+  bare = applyPlanningEvent(bare, { type: PLANNING_EVENT.NPC_PLACEMENT_RECORDED, source: 'runtime', now: 1500, unit_number: 900, entity_name: 'wooden-chest', actor_id: 18, actor_epoch: 3 })
+  assert.equal(admit(bare, [{ name: 'mine_entity', args: { entity_name: 'wooden-chest', count: 1 } }]).code, ADMISSION_REFUSAL.RESERVED_AMBIGUOUS)
+})
+
+test('MW5: one operation hitting several protected subjects needs an approval covering every one of them', () => {
+  const state = granted(goalState(), { ...OBJECTIVE_GRANT, protected_materials: [{ item_name: 'iron-plate' }, { container_unit_number: 900 }] })
+  const operations = takeFrom('iron-plate', 900)
+  const refused = admit(state, operations)
+  assert.equal(refused.code, ADMISSION_REFUSAL.RESERVED_SUPPLY)
+  assert.deepEqual(new Set(refused.subjects), new Set([900, 'iron-plate']))
+  const approve = (current, subjects) => applyPlanningEvent(current, {
+    type: PLANNING_EVENT.AUTHORIZATION_APPROVAL_RECORDED, source: 'user', now: 1600, decision: 'approve', approved_by: 'louis',
+    reason_codes: [APPROVAL_REASON.RESERVED_SUPPLY], subjects,
+  })
+  const onlyItem = approve(state, ['iron-plate'])
+  const stillRefused = admit(onlyItem, operations)
+  assert.equal(stillRefused.ok, false, 'one approval does not let the second protected subject through')
+  assert.deepEqual(stillRefused.subjects, [900])
+  assert.equal(admit(approve(state, [900]), operations).ok, false)
+  assert.deepEqual(admit(approve(onlyItem, [900]), operations), { ok: true })
+})

@@ -474,7 +474,7 @@ test('MW5: a loop built without the replacementWake option keeps the pre-MW5 beh
 // --- what counts as world evidence ----------------------------------------------------------------------------------------
 
 test('MW5: the world-change allowlist is explicit, default-deny, and never overlaps the codes that must keep the blocked end', () => {
-  assert.deepEqual(Object.keys(WORLD_CHANGE_PREFLIGHT_CODES).sort(), ['destination_full', 'extraction_empty', 'stale_exact_target', 'supply_missing'])
+  assert.deepEqual(Object.keys(WORLD_CHANGE_PREFLIGHT_CODES).sort(), ['destination_full', 'extraction_empty', 'stale_exact_target'])
   for (const code of Object.keys(WORLD_CHANGE_PREFLIGHT_CODES)) assert.ok(!NEVER_WAKE_PREFLIGHT_CODES.includes(code), code)
   for (const code of ['protected_entity_refused', 'reserved_supply_refused', 'player_inventory_excluded', 'authorization_stale', 'duplicate_effect_suppressed']) {
     assert.ok(NEVER_WAKE_PREFLIGHT_CODES.includes(code), code)
@@ -733,3 +733,105 @@ test('MW5: the replacement counter lives on the goal record and survives snapsho
   assert.equal(restored.replacementsUsed(KEY), 1)
   assert.equal(replacementsUsed(restored.planningState(KEY)), 1)
 })
+
+// --- review round 3 ------------------------------------------------------------------------------------------------------------
+
+test('MW5: supply_missing is the NPC\'s own accounting, not a world change: it never wakes the planner', () => {
+  assert.ok(NEVER_WAKE_PREFLIGHT_CODES.includes('supply_missing'))
+  assert.ok(!Object.hasOwn(WORLD_CHANGE_PREFLIGHT_CODES, 'supply_missing'))
+  assert.equal(blockerWorldEvidence({ trigger: 'operation_preflight_blocker', preflight: { code: 'supply_missing' }, existed: true }).ok, false)
+})
+
+test('MW5: a proven admission refusal whose mod refusal_code is an authorization reason is not world evidence', async () => {
+  const w = world((call) => {
+    if (call === 1) return plannerDraft()
+    if (call === 2) { w.game.syncRefusal = { slot: 1, operation: 'place_entity', error: 'protected_entity_refused', proven: true }; return executorPlace() }
+    return replacementDraft()
+  }, { game: new FakeFactorio() })
+  await w.agent.request(OBJECTIVE, { sender: 'Louis' })
+  w.game.inventory['iron-ore'] = 10
+  await assert.rejects(w.agent.completed())
+  assert.equal(w.named('plan.replacement_wake').length, 0)
+  const skipped = w.data(w.named('plan.replacement_wake_skipped')[0])
+  assert.equal(skipped.reason, 'blocker_not_world_evidence')
+  assert.equal(skipped.evidence_detail, 'refusal_code_never_wakes:protected_entity_refused')
+  assert.equal(blockerWorldEvidence({ trigger: 'operation_admission_failure', provenRefusal: true, refusalCode: 'no_free_tile' }).ok, true)
+})
+
+test('MW5: unitHadExisted accepts an NPC placement receipt, an observation, or the mod\'s own record, and nothing else', async () => {
+  const w = world([plannerDraft(), observation()])
+  await w.agent.request(OBJECTIVE, { sender: 'Louis' })
+  assert.equal(w.agent.unitHadExisted(4242, {}), false)
+  assert.equal(w.agent.unitHadExisted('4242', { last_observed: { unit_number: 4242 } }), false, 'not a unit number')
+  assert.equal(w.agent.unitHadExisted(4242, { last_observed: { unit_number: 4242 } }), true, 'the mod saw it')
+  w.memory.recordNpcPlacement(KEY, { unit_number: 4242, entity_name: 'stone-furnace', actor_id: 18, actor_epoch: 3 })
+  assert.equal(w.agent.unitHadExisted(4242, {}), true, 'the NPC placed it (placement receipt)')
+  assert.equal(w.agent.unitHadExisted(4243, {}), false)
+})
+
+test('MW5: the announcement says "Changed plan" when the steps changed and "Retrying the plan" when the replacement has the very same steps', async () => {
+  const changed = world([plannerDraft(), observation(), ...staleTwice(), replacementDraft()])
+  await changed.agent.request(OBJECTIVE, { sender: 'Louis' })
+  changed.game.inventory['iron-ore'] = 10
+  await changed.agent.completed()
+  assert.match(changed.data(changed.named('plan.replacement_announced')[0]).chat_message, /^Changed plan: /)
+  assert.equal(changed.data(changed.named('plan.replacement_announced')[0]).steps_unchanged, false)
+
+  const sameSteps = planReply({ plan: IRON_PLAN, currentStep: 1, operations: [placeFurnace()], stepCompletions: [det(ore), det(plates), det(gears)] })
+  const retry = world([plannerDraft(), observation(), ...staleTwice(), sameSteps])
+  await retry.agent.request(OBJECTIVE, { sender: 'Louis' })
+  retry.game.inventory['iron-ore'] = 10
+  await retry.agent.completed()
+  const line = retry.data(retry.named('plan.replacement_announced')[0])
+  assert.equal(line.steps_unchanged, true)
+  assert.equal(line.chat_message, `Retrying the plan: something I was working on is gone. Plan v2 resumes with: ${IRON_PLAN[1]}.`)
+  assert.equal(replacementAnnouncement({ plan: { plan_version: 2 }, blocker: { reason_code: 'x_y' }, firstStep: 'Do it', unchanged: true }), 'Retrying the plan: x y. Plan v2 resumes with: Do it.')
+})
+
+// The executor works from its packet, which shows the reducer's plan: after a replacement that is the suffix after the verified
+// prefix, so the active step is index 0 there while the board still counts the verified prefix (index 1). Pinned behaviour:
+// a reply that names the active step by stepId is bound and admitted; a board-form reply (full board list, currentStep 1, no
+// stepId) is refused as step_index_not_the_active_step, corrected twice, and then the goal pauses (executor_step_identity_exhausted).
+for (const mode of ['stepId', 'board']) {
+  test(`MW5: after a replacement, an executor reply in ${mode} form ${mode === 'stepId' ? 'is bound to the active step and admitted' : 'is refused, corrected twice, then the goal pauses'} (pinned, indexing unchanged)`, async () => {
+    let afterReplacement = 0
+    const w = world((call, memory, calls) => {
+      const system = String(calls.at(-1)[0].content)
+      if (/ROLE: EXECUTOR/.test(system)) {
+        const held = getActivePlan(memory.planningState(KEY))
+        if (held.plan_version === 2) {
+          afterReplacement += 1
+          if (afterReplacement === 1) return observation()
+          const wait = [{ name: 'wait', args: { ticks: 60 } }]
+          if (mode === 'board') return planReply({ plan: memory.currentPlan(KEY).task_board.steps.map(step => step.description), currentStep: 1, operations: wait })
+          return planReply({ plan: held.steps.map(step => step.description), currentStep: held.active_step_index, stepId: held.steps[held.active_step_index].step_id, operations: wait })
+        }
+        if (!calls.at(-1).some(message => message.role === 'tool')) return observation()
+        return planReply({ plan: held.steps.map(step => step.description), currentStep: held.active_step_index, operations: [insertOre()] })
+      }
+      return w.named('plan.replacement_wake').length >= 1 ? replacementDraft() : plannerDraft()
+    })
+    await w.agent.request(OBJECTIVE, { sender: 'Louis' })
+    w.game.inventory['iron-ore'] = 10
+    await w.agent.completed() // block and replacement
+    assert.equal(getActivePlan(w.planning()).plan_version, 2)
+    const board = w.memory.currentPlan(KEY).task_board
+    assert.equal(board.active_index, 1, 'the board counts the verified prefix')
+    assert.equal(getActivePlan(w.planning()).active_step_index, 0, 'the reducer plan is the suffix')
+    const before = w.rows.length
+    const result = await w.agent.completed()
+    const events = w.rows.slice(before).map(row => row.event)
+    if (mode === 'stepId') {
+      assert.ok(events.includes('executor.step_bound'))
+      assert.equal(result.operations[0].name, 'wait')
+      assert.ok(!events.includes('executor.stale_step_rejected'))
+    }
+    else {
+      assert.equal(events.filter(event => event === 'executor.stale_step_rejected').length, 3)
+      assert.equal(events.filter(event => event === 'executor.step_identity_correction').length, 2)
+      assert.ok(events.includes('executor.step_identity_exhausted'))
+      assert.equal(result.operations.length, 0)
+      assert.match(result.chatMessage, /kept sending actions for a step that is not the active one/)
+    }
+  })
+}

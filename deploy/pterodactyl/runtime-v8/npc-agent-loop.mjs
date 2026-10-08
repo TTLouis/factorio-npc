@@ -3674,7 +3674,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
    * Called right after a request's active plan became BLOCKED. Returns the continued turn's result when the planner was
    * woken, or undefined when the request should end blocked exactly as before (every skip is traced with its reason).
    */
-  async wakePlannerForReplacement({ trigger, preflight, existed = false, provenRefusal = false, batchMayHaveRun = false }) {
+  async wakePlannerForReplacement({ trigger, preflight, existed = false, provenRefusal = false, refusalCode, batchMayHaveRun = false }) {
     if (!this.replacementWakeEnabled || !this.requestInfo || typeof this.memory.requestReplacementFromDraft !== 'function') return undefined
     const key = this.requestInfo.memoryKey
     const requestId = this.traceRequest?.id
@@ -3687,7 +3687,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!plan.committed_at) return skip(REPLACEMENT_WAKE_SKIP.PLAN_NOT_COMMITTED)
     if (batchMayHaveRun) return skip(REPLACEMENT_WAKE_SKIP.NOT_PROVABLY_UNEXECUTED)
     // The wake is for blockers the harness observed in the game, never for argument errors, authorization refusals or holds.
-    const evidence = blockerWorldEvidence({ trigger, preflight, existed, provenRefusal })
+    const evidence = blockerWorldEvidence({ trigger, preflight, existed, provenRefusal, refusalCode })
     if (!evidence.ok) return skip(REPLACEMENT_WAKE_SKIP.BLOCKER_NOT_WORLD_EVIDENCE, { evidence_detail: evidence.detail })
     if (plan.blocker?.user_choice) return skip(REPLACEMENT_WAKE_SKIP.USER_CHOICE_RECORDED)
     const grant = this.memory.currentGoalGrant?.(key)
@@ -3852,7 +3852,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const predecessor = planning?.plans?.find(item => item.plan_id === plan.replacement?.predecessor_plan_id)
     const blocker = predecessor?.blocker ?? this.replacementWake?.blocker
     const firstStep = plan.steps?.[plan.active_step_index]?.description ?? plan.steps?.[0]?.description
-    const chatMessage = replacementAnnouncement({ plan, blocker, firstStep })
+    // The steps the blocked plan had left to do, compared with the successor's: equal text means a retry, not a changed plan.
+    const remaining = (predecessor?.steps ?? []).filter(step => predecessor.execution?.step_progress?.[step.step_id]?.status !== 'completed').map(step => step.description)
+    const unchanged = remaining.length > 0 && JSON.stringify(remaining) === JSON.stringify((plan.steps ?? []).map(step => step.description))
+    const chatMessage = replacementAnnouncement({ plan, blocker, firstStep, unchanged })
     this.replacementWake = null
     await this.traceEvent('plan.replacement_announced', {
       request_id: this.traceRequest?.id,
@@ -3862,6 +3865,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       grant_id: plan.replacement?.grant_id,
       reason: 'replacement_committed',
       reason_code: blocker?.reason_code,
+      steps_unchanged: unchanged,
       chat_message: chatMessage,
     })
   }
@@ -13308,6 +13312,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           const admissionWake = await this.wakePlannerForReplacement({
             trigger: 'operation_admission_failure',
             provenRefusal,
+            refusalCode: error?.admission?.slots?.[operationIndex ?? 0]?.refusal_code,
             batchMayHaveRun: error?.notSent !== true && error?.notAdmitted !== true && !provenRefusal,
           })
           if (admissionWake !== undefined) return admissionWake
