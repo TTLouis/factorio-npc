@@ -469,6 +469,16 @@ export function canonicalContinuationPlan(previousBoard, plan, { allowReplan = f
   }
 }
 
+function restoreExecutorStepIdentityLedger(rows) {
+  const ledger = new Map()
+  for (const row of Array.isArray(rows) ? rows.slice(-128) : []) {
+    if (!Array.isArray(row) || row.length !== 2 || typeof row[0] !== 'string' || row[0].length > 700) continue
+    if (!Number.isSafeInteger(row[1]) || row[1] < 1 || row[1] > 100) continue
+    ledger.set(row[0], row[1])
+  }
+  return ledger
+}
+
 export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   constructor(options = {}) {
     super(options)
@@ -2525,6 +2535,9 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return {
       ...snapshot,
       targeted_observation_ledger: [...(this.targetedObservationLedger ?? new Map()).entries()].slice(0, 128),
+      // Executor step-identity corrections spent per goal/plan/step (npc-agent-loop correctExecutorStepIdentity): durable so a
+      // restage, a new request or a restart inside the same step cannot renew the allowance.
+      executor_step_identity_ledger: [...(this.executorStepIdentityLedger ?? new Map()).entries()].slice(-128),
       planning_states: [...this.planningByNpc.entries()].map(([key, state]) => ({
         key,
         state: serializePlanningState(state),
@@ -2662,6 +2675,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     )
     super.restore(snapshot)
     this.targetedObservationLedger = restoreObservationLedger(snapshot?.targeted_observation_ledger)
+    this.executorStepIdentityLedger = restoreExecutorStepIdentityLedger(snapshot?.executor_step_identity_ledger)
     if (snapshot?.jev_judgment_ledger) {
       const restoredLedger = restoreJevLedger(snapshot.jev_judgment_ledger)
       this.jevLedger = restoredLedger.ledger

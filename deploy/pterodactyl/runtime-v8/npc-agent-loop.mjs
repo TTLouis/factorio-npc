@@ -214,6 +214,10 @@ const AUTHORIZATION_REFUSAL_RETRY_BUDGET = 1
 const DUPLICATE_EFFECT_CODE = 'duplicate_effect_suppressed'
 const DUPLICATE_EFFECT_RETRY_BUDGET = 1
 const LOST_ACK_RETRY_BUDGET = 1
+// Corrections allowed per committed active step when an executor reply names another step (executor_stale_step). Kept
+// apart from the shared plan_category corrections so neither spends the other's allowance.
+const EXECUTOR_STEP_IDENTITY_CORRECTION_LIMIT = 2
+const EXECUTOR_STEP_IDENTITY_LEDGER_MAX = 128
 // Board evidence kind for an executed operation the engine refused in a way the
 // planner can correct (a placement refused at its chosen coordinate). The board
 // memory records it instead of freezing the plan and blocks once the bounded
@@ -3732,6 +3736,44 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return { ...plan, executorCannotAuthor: true }
     }
     const activeBoardStepId = this.memory.currentPlan?.(this.activePlanKey())?.task_board?.active_step_id
+    const activeStep = committed.steps?.[committed.active_step_index]
+    const stepRequestId = this.traceRequest?.id
+    // Step identity: a reply that names the active step by its stable id owns its operations by that id, whatever
+    // plan list or index it echoes. The Plan Tracker's id and the Task Board's alias both name the same active step.
+    const incomingStepId = typeof plan.stepId === 'string' && plan.stepId.trim() ? plan.stepId.trim() : undefined
+    const activeStepIds = [activeStep?.step_id, activeBoardStepId].filter(id => typeof id === 'string' && id)
+    const stepBound = incomingStepId !== undefined && activeStepIds.includes(incomingStepId)
+    if (incomingStepId === undefined) {
+      await this.traceEvent('executor.legacy_step_index_used', {
+        request_id: stepRequestId,
+        role: EXECUTOR_ROLE,
+        handoff_id: this.agentContext.handoffId,
+        incoming_step_index: plan.currentStep,
+        expected_step_index: committed.active_step_index,
+        reason: 'reply_without_step_id_uses_index_rule',
+      }, { requestId: stepRequestId })
+    }
+    else if (stepBound) {
+      await this.traceEvent('executor.step_bound', {
+        request_id: stepRequestId,
+        role: EXECUTOR_ROLE,
+        handoff_id: this.agentContext.handoffId,
+        step_id: activeStep?.step_id,
+        reason: 'step_id_matches_active_step',
+      }, { requestId: stepRequestId })
+    }
+    else {
+      const named = committed.steps.find(step => step.step_id === incomingStepId)
+      const error = new AgentLoopError('executor_stale_step: choose new operations for the current committed active step')
+      error.failureClass = 'plan_category'
+      error.code = 'executor_stale_step'
+      error.expectedStep = { index: committed.active_step_index, stepId: activeStep?.step_id, description: activeStep?.description }
+      error.incomingStep = { stepId: incomingStepId, description: named?.description }
+      await this.traceEvent('executor.stale_step_rejected', { request_id: stepRequestId, role: EXECUTOR_ROLE, handoff_id: this.agentContext.handoffId,
+        incoming_step_index: plan.currentStep, incoming_step_id: incomingStepId, expected_step: error.expectedStep, operation_count: plan.operations?.length ?? 0,
+        reason: 'step_id_names_another_step' }, { requestId: stepRequestId })
+      throw error
+    }
     const explicitNextStepClaim = [activeBoardStepId, committed.steps?.[committed.active_step_index]?.step_id].includes(plan.semanticCompletion?.stepId)
       && Boolean(plan.semanticCompletion?.stepId)
       && plan.currentStep === committed.active_step_index + 1
@@ -3739,7 +3781,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       && plan.currentStep === committed.active_step_index + 1
       && impliedSemanticCompletion(plan, this.memory.currentPlan?.(this.activePlanKey())) !== undefined
     // The downstream semantic transition validator still checks the explicit claim.
-    if (!explicitNextStepClaim && !legacyImpliedNextStep && plan.operations?.length > 0
+    if (incomingStepId === undefined && !explicitNextStepClaim && !legacyImpliedNextStep && plan.operations?.length > 0
       && plan.currentStep !== committed.active_step_index) {
       const incomingStep = normalizedStepText(plan.plan?.[plan.currentStep])
       const expected = committed.steps[committed.active_step_index]
@@ -3759,8 +3801,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         error.failureClass = 'plan_category'
         error.code = 'executor_stale_step'
         error.expectedStep = { index: committed.active_step_index, stepId: expected?.step_id, description: expected?.description }
-        await this.traceEvent('executor.stale_step_rejected', { role: EXECUTOR_ROLE, handoff_id: this.agentContext.handoffId,
-          incoming_step_index: plan.currentStep, expected_step: error.expectedStep, operation_count: plan.operations.length })
+        const rawIncoming = Array.isArray(plan.plan) ? plan.plan[plan.currentStep] : undefined
+        error.incomingStep = { index: plan.currentStep, description: typeof rawIncoming === 'string' && rawIncoming.trim() ? rawIncoming : undefined }
+        await this.traceEvent('executor.stale_step_rejected', { request_id: stepRequestId, role: EXECUTOR_ROLE, handoff_id: this.agentContext.handoffId,
+          incoming_step_index: plan.currentStep, expected_step: error.expectedStep, operation_count: plan.operations.length,
+          reason: 'step_index_not_the_active_step' }, { requestId: stepRequestId })
         throw error
       }
     }
@@ -3797,7 +3842,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (next.roadmapNodeIds !== undefined) { strip('roadmapNodeIds'); ignored.push('roadmapNodeIds'); reasons.push('roadmap_is_planner_authority') }
     if (next.developmentMode !== undefined) { strip('developmentMode'); ignored.push('developmentMode'); reasons.push('development_mode_is_planner_authority') }
     if (next.assessmentOnly !== undefined) { strip('assessmentOnly'); ignored.push('assessmentOnly'); reasons.push('assessment_only_is_planner_authority') }
-    if (ignored.length === 0) return plan
+    // A reply bound by step id carries the committed plan list and the committed active index downstream, so every
+    // later consumer sees one consistent identity. A semantic claim that moves currentStep one forward keeps its own
+    // meaning (the claim closes the active step), so that form is left as the model wrote it.
+    const finish = (value) => {
+      if (!stepBound) return value
+      const { stepId: _stepId, ...rest } = value
+      if (explicitNextStepClaim || legacyImpliedNextStep) return rest
+      return { ...rest, plan: committed.steps.map(step => step.description), currentStep: committed.active_step_index }
+    }
+    if (ignored.length === 0) return finish(plan)
     const requestId = this.traceRequest?.id
     await this.traceEvent('executor.plan_semantics_ignored', {
       request_id: requestId,
@@ -3809,7 +3863,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       incoming_steps: Array.isArray(plan.plan) ? plan.plan.length : 0,
       committed_steps: committed?.steps?.length ?? 0,
     }, { requestId })
-    return next
+    return finish(next)
   }
 
   // C5: a provider-budget boundary. The fresh conversation runs in the SAME
@@ -6486,6 +6540,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return `[HARNESS] Step ${JSON.stringify(cleanMemoryText(step.description, 100))} stays open: it has no completion contract, so a finished batch cannot close it. In your next submitPlan add checkpoint {mode,requirements} for the world state that proves it, or semanticCompletion {"stepId":"${stepId}"}${alias} if your evidence already shows it is done.`
   }
 
+  // The one builder of the fact that names the step now active after a step closed (a fresh-read close and the receipt
+  // close both use it). It carries the description and the stable step id the executor binds its operations to.
+  stepTransitionFact(state) {
+    const board = state?.task_board
+    const index = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
+    const step = state?.status === 'active' && index !== undefined ? board?.steps?.[index] : undefined
+    if (!step) return ''
+    const tracker = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
+    const trackerId = tracker?.active_step_index === index ? tracker?.steps?.[index]?.step_id : undefined
+    return `The active step is now ${JSON.stringify(cleanMemoryText(step.description, 200))} (stepId ${trackerId ?? step.id}).`
+  }
+
   async routeStepCompletionDecision(receipt) {
     const key = this.activePlanKey()
     const planState = this.memory.planByNpc?.get?.(key) ?? this.memory.currentPlan?.(key)
@@ -9020,6 +9086,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // plans its next move from a stale narrative observation.
     const blindWaitFacts = pendingAmendment ? undefined : await this.blindWaitReceiptFacts(receipt)
     const deferredFacts = await this.executorFactsRefreshText() // D2: counts a batch in flight kept out of the handoff packet
+    const transitionFact = stepCompletion?.verified === true ? this.stepTransitionFact(stepCompletion.state) : ''
 
     this.reasoningTriggerSource = routed.route === 'continue_current'
       ? 'post_step_continue'
@@ -9048,7 +9115,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let wakeFailed = true
     try {
       const result = await this.continueFromModMessage(
-        `[MOD] Autorio operation batch completed. ${stepOpenHint ? `${stepOpenHint} ` : ''}Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}${blindWaitFacts ? ` ${blindWaitFacts}` : ''}${deferredFacts ? ` ${deferredFacts}` : ''}`,
+        `[MOD] Autorio operation batch completed. ${stepOpenHint ? `${stepOpenHint} ` : ''}Detailed task receipt: ${JSON.stringify(receipt.providerStatus)}${blindWaitFacts ? ` ${blindWaitFacts}` : ''}${deferredFacts ? ` ${deferredFacts}` : ''}${transitionFact ? ` [HARNESS] ${transitionFact}` : ''}`,
         'factorio.completion_continuation',
       )
       wakeFailed = false
@@ -10283,6 +10350,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let developmentMode
     let semanticCompletion
     let timeReview
+    let stepId
     let baseMessage = message
     if (typeof message?.content === 'string') {
       let raw
@@ -10358,9 +10426,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           }
           checkpoint = { ...checkpoint, source: 'planner_semantic_checkpoint' }
         }
+        // An executor binds its operations to the committed active step by this id (enforceExecutorContract).
+        if (Object.prototype.hasOwnProperty.call(raw, 'stepId')) {
+          if (typeof raw.stepId !== 'string' || !raw.stepId.trim()) {
+            const error = new AgentLoopError('stepId must be the active committed step id as a non-empty string')
+            error.failureClass = 'plan_category'
+            error.code = 'invalid_step_id'
+            throw error
+          }
+          stepId = cleanMemoryText(raw.stepId, 200)
+        }
         // 2.6: the model's answer to a time review; traced, never executed.
         if (Object.prototype.hasOwnProperty.call(raw, 'timeReview')) timeReview = parseTimeReview(raw.timeReview)
-        if (assessmentOnly !== undefined || stepCompletions || checkpoint || semanticCompletion || roadmap || roadmapNodeIds || developmentMode || goalDefinition
+        if (assessmentOnly !== undefined || stepCompletions || checkpoint || semanticCompletion || roadmap || roadmapNodeIds || developmentMode || goalDefinition || stepId !== undefined
           || Object.prototype.hasOwnProperty.call(raw, 'timeReview')
           || Object.prototype.hasOwnProperty.call(raw, 'goal')
           || Object.prototype.hasOwnProperty.call(raw, 'roadmap')
@@ -10377,8 +10455,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             developmentMode: _developmentMode,
             goal: _goal,
             timeReview: _timeReview,
+            stepId: _stepId,
             ...base
           } = raw
+          // With the step id given, plan and currentStep are not needed from the executor.
+          if (stepId !== undefined) {
+            if (base.plan === undefined) base.plan = []
+            if (base.currentStep === undefined) base.currentStep = 0
+          }
           baseMessage = providerMessageWith(message, { content: JSON.stringify(base) })
         }
       }
@@ -10393,6 +10477,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (developmentMode) plan.developmentMode = developmentMode
     if (goalDefinition) plan.goalDefinition = goalDefinition
     if (timeReview) plan.timeReview = timeReview
+    if (stepId !== undefined && this.agentContext.role === EXECUTOR_ROLE) plan.stepId = stepId
     if (semanticCompletion) {
       // Refused here, the claim reaches the planner as a correction it can act
       // on; refused in commitPlan, it failed the request (live, 2026-09-25).
@@ -11758,8 +11843,107 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return { held: true, result: await this.runTurn() }
   }
 
+  // The executor named a step that is not the committed active one; nothing ran. Each committed active step has its own
+  // bounded allowance of corrections, persisted with the memory (so a restage, a new request or a restart inside the
+  // same step cannot renew it) and keyed by goal, plan and step. When it is spent the goal pauses for the player.
+  executorStepIdentityKey(committed) {
+    const planning = this.memory.planningState?.(this.activePlanKey())
+    const stepId = committed?.steps?.[committed.active_step_index]?.step_id
+    return JSON.stringify([planning?.goal?.goal_id ?? null, committed?.plan_id ?? null, stepId ?? null])
+  }
+
+  async correctExecutorStepIdentity(plan, error) {
+    const requestId = this.traceRequest?.id
+    // The ordinary fences first: a reply of a replaced actor, epoch, generation or conversation is dropped, not corrected.
+    await this.assertCurrent()
+    const state = this.memory.planningState?.(this.activePlanKey())
+    const committed = state ? getActivePlanningPlan(state) : undefined
+    const expected = error.expectedStep ?? {}
+    const incoming = error.incomingStep ?? {}
+    const ledger = this.memory.executorStepIdentityLedger ??= new Map()
+    const key = this.executorStepIdentityKey(committed)
+    const used = ledger.get(key) ?? 0
+    const reason = incoming.stepId !== undefined ? 'step_id_names_another_step' : 'step_index_not_the_active_step'
+    if (used >= EXECUTOR_STEP_IDENTITY_CORRECTION_LIMIT) {
+      await this.traceEvent('executor.step_identity_exhausted', {
+        request_id: requestId,
+        role: EXECUTOR_ROLE,
+        handoff_id: this.agentContext.handoffId,
+        step_id: expected.stepId,
+        attempts: used,
+        limit: EXECUTOR_STEP_IDENTITY_CORRECTION_LIMIT,
+        reason: 'executor_step_identity_exhausted',
+      }, { requestId })
+      return this.pauseForExecutorStepIdentity(expected)
+    }
+    ledger.delete(key)
+    ledger.set(key, used + 1)
+    while (ledger.size > EXECUTOR_STEP_IDENTITY_LEDGER_MAX) ledger.delete(ledger.keys().next().value)
+    await this.persistState()
+    await this.traceEvent('executor.step_identity_correction', {
+      request_id: requestId,
+      role: EXECUTOR_ROLE,
+      handoff_id: this.agentContext.handoffId,
+      step_id: expected.stepId,
+      incoming_step_id: incoming.stepId,
+      incoming_step_index: incoming.index,
+      attempt: used + 1,
+      limit: EXECUTOR_STEP_IDENTITY_CORRECTION_LIMIT,
+      reason,
+    }, { requestId })
+    // An id names a step outright. An index only means something against the list it indexes, so the active step's
+    // index is given beside it (the text the index pointed at can well be the active step's own).
+    const sentText = incoming.description ? JSON.stringify(cleanMemoryText(incoming.description, 200)) : undefined
+    const byId = incoming.stepId !== undefined
+    const sentFor = byId
+      ? `${sentText ? `${sentText}, ` : ''}stepId ${cleanMemoryText(incoming.stepId, 100)}`
+      : `index ${incoming.index}${sentText ? ` (${sentText})` : ''}`
+    const activeIdentity = `stepId ${expected.stepId}${byId ? '' : `, index ${expected.index}`}`
+    this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
+    this.messages.push({
+      role: 'user',
+      content: `[HARNESS] Operations were sent for step ${sentFor}, which is not the active step; nothing ran. The active step is ${JSON.stringify(cleanMemoryText(expected.description, 200))} (${activeIdentity}). The committed plan is unchanged.`,
+    })
+    return this.runTurn()
+  }
+
+  async pauseForExecutorStepIdentity(expected) {
+    const chatMessage = `I paused this goal: my step executor kept sending actions for a step that is not the active one, so I stopped instead of guessing. ${RESUME_HINT}`
+    const state = await this.pausePersistentPlan('executor_step_identity_exhausted')
+    const taskBoard = visibleTaskBoard(state?.task_board)
+    await this.traceEvent('request.completed', {
+      chat_message: chatMessage,
+      outcome: 'executor_step_identity_exhausted',
+      reason: 'executor_step_identity_exhausted',
+      step_id: expected?.stepId,
+      task_board: taskBoard,
+      usage: this.traceRequest?.usage,
+    })
+    this.traceRequest = null
+    this.active = false
+    return {
+      chatMessage,
+      plan: state?.plan ?? [],
+      currentStep: state?.current_step ?? 0,
+      operations: [],
+      epoch: this.epoch?.epoch,
+      actorId: this.epoch?.actor_id,
+      goalId: state?.goal_id,
+      goalStatus: 'paused',
+      taskBoard,
+    }
+  }
+
   async commitPlan(plan) {
-    plan = await this.enforceExecutorContract(plan) // U6: an executor reply never changes plan semantics
+    try {
+      plan = await this.enforceExecutorContract(plan) // U6: an executor reply never changes plan semantics
+    }
+    catch (error) {
+      // Operations written for another step are a correctable executor reply, not a failed request: this seam sits
+      // after the parse-time correction loop, so an error thrown here used to end the request unrecoverable.
+      if (error?.code !== 'executor_stale_step') throw error
+      return this.correctExecutorStepIdentity(plan, error)
+    }
     if (plan.executorCannotAuthor) return this.endSliceWithoutPlanner({ route: 'executor_reply_without_committed_plan', reason: 'executor_cannot_author_plan' })
     await this.validateStepCompletionDeclarations(plan)
     const timeReview = await this.reviewPlanTime(plan)
@@ -11923,8 +12107,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         previousState = fresh.state ?? previousState
         this.resetRepairAfterClosedStep()
         const names = plan.operations.slice(0, 8).map(operation => cleanMemoryText(operation?.name, 80)).join(', ')
-        const board = previousState?.task_board
-        const nextStep = previousState?.status === 'active' && Number.isSafeInteger(board?.active_index) ? board.steps?.[board.active_index] : undefined
+        const transition = this.stepTransitionFact(previousState)
         const notRun = `[HARNESS] A fresh world read shows the committed checkpoint of the active step is already met, so the harness closed that step before running anything. The batch you just sent (${names}) was written for the step that closed and did not run.`
         if (previousState?.status === 'completed') {
           // The final step closed. Nothing is left to author for it: the ordinary slice/goal settlement decides what
@@ -11962,8 +12145,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         if (boundary?.restaged !== true) this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
         this.messages.push({
           role: 'user',
-          content: nextStep
-            ? `${notRun} The active step is now ${JSON.stringify(cleanMemoryText(nextStep.description, 200))}. Facts only: the committed plan is unchanged and only its progress advanced.`
+          content: transition
+            ? `${notRun} ${transition} Facts only: the committed plan is unchanged and only its progress advanced.`
             : `${notRun} The committed plan is unchanged and only its progress advanced.`,
         })
         return this.runTurn()
