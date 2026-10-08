@@ -8,6 +8,10 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 8 Haiku trial C: slice hand-over fixed live, paused on a semantic smelting step
+
+Owner-approved rerun at `2281bd1f` (`claude-haiku-5-5`, CLI proxy): 47 Luna and 54 Jev calls, 1,023 seconds, zero humans or corrections. Two full slices and one step of a third verified (9 steps, red science unlocked); slice 2 handed over with `budget.continuation_slice_reset`, and all 23 executor replies bound by `stepId`. The planner then declared a smelting step semantic; the executor was refused (`semantic_step_cannot_mutate`), reported a blocker, and the goal paused as a recoverable provider failure. Open: semantic world-changing steps are accepted at commit and have no route back to the planner, and bound executor replies can no longer use the semantic-to-deterministic transition. Details: [trial C](validation/LUNA_HAIKU_LIVE_2026-10-08C.md).
+
 ## October 8 Haiku trial B and per-slice continuations: repaired, static gates passed
 
 Owner-approved rerun at `a8610bb5` with `claude-haiku-5-5` through the CLI proxy: 41 Luna calls, 542 seconds, zero humans or corrections. Step identity held (11 bound by `stepId`, 9 correct legacy indexes, no refusals) and Luna verified all four steps of the first slice (50 iron and 12 copper plates, two fuelled furnaces). The hand-over to the next slice then paused with `continuation_limit_10` because the request-wide continuation counter (14) was compared with the non-active limit once the slice completed. Merged `f9a8a627` measures continuation limits per plan slice, resets only after a slice with a verified deterministic close and an admitted operation batch (generation-fenced), adds a 256 request-wide backstop, and gives delegated executor rounds a `submitPlan` schema requiring `stepId` with matching executor-only prompt wording. Not yet live-validated. See [the trial B record](validation/LUNA_HAIKU_LIVE_2026-10-08B.md).
