@@ -24,10 +24,12 @@ function validPlanArguments(extra = {}) {
   }
 }
 
-function makeAgent(provider) {
+function makeAgent(provider, { goalAnswers, extra = {} } = {}) {
   const game = new FakeFactorio()
-  const jev = recordingJev(async (_state, questions) =>
-    questions.intent ? { overrides: { intent: { choice: 'new_goal', confidence: 0.9 } } } : undefined)
+  const jev = recordingJev(async (_state, questions) => {
+    if (questions.goal_scope && goalAnswers) return { overrides: goalAnswers }
+    return questions.intent ? { overrides: { intent: { choice: 'new_goal', confidence: 0.9 } } } : undefined
+  })
   const traces = []
   const agent = new NpcAgentLoop({
     rcon: game,
@@ -41,6 +43,7 @@ function makeAgent(provider) {
     traceFile: null,
     decisionTraceFile: null,
     npcId: 'sgluna',
+    ...extra,
   })
   const write = agent.traceEvent.bind(agent)
   agent.traceEvent = (event, data, options) => { traces.push({ event, data }); return write(event, data, options) }
@@ -81,8 +84,10 @@ test('the run C reply is repaired and accepted with no model retry', async () =>
   assert.equal(rows('provider.plan_submission_salvaged').length, 0)
   assert.equal(rows('plan.accepted')[0].data.development_mode, 'vertical')
   // The repair is traced after the strict refusal it replaced and before the plan is accepted.
+  // The tool-path repair is reported once the repaired plan has passed the strict parse, so after plan_submission.
   const order = traces.map(row => row.event)
-  assert.ok(order.indexOf('provider.plan_submission_invalid') < order.indexOf('provider.control_json_repaired'))
+  assert.ok(order.indexOf('provider.plan_submission_invalid') < order.indexOf('provider.plan_submission'))
+  assert.ok(order.indexOf('provider.plan_submission') < order.indexOf('provider.control_json_repaired'))
   assert.ok(order.indexOf('provider.control_json_repaired') < order.indexOf('plan.accepted'))
 })
 
@@ -189,4 +194,119 @@ test('submitPlan arguments with trailing commas are repaired before the truncati
   assert.deepEqual(repaired[0].data.repairs.map(item => item.kind), ['trailing_comma', 'trailing_comma'])
   assert.equal(rows('provider.plan_submission_salvaged').length, 0)
   assert.equal(rows('plan.accepted')[0].data.development_mode, 'maintain', 'the last member survives; salvage would have dropped it')
+})
+
+test('a tool-path repair whose plan then fails the strict parse is reported as failed, not repaired', async () => {
+  let calls = 0
+  // Trailing comma (repairable) plus a stepCompletions entry the strict parser refuses (deterministic without a checkpoint).
+  const broken = `${JSON.stringify(validPlanArguments({ stepCompletions: [{ kind: 'deterministic' }] })).slice(0, -1)},}`
+  const { agent, game, rows } = makeAgent(async () => {
+    calls++
+    return calls === 1 ? submitCall(broken) : planReply({ plan: ['Gather 10 coal'], operations: [gather('coal', 10)], checkpoint: inventoryCheckpoint('coal', 10) })
+  })
+  const result = await agent.request('gather 10 coal', { sender: 'Louis' })
+
+  assert.equal(result.goalStatus, 'active')
+  assert.equal(calls, 2)
+  assert.equal(game.mutations.length, 1)
+  assert.equal(rows('provider.control_json_repaired').length, 0)
+  const failed = rows('provider.control_json_repair_failed')
+  assert.equal(failed.length, 1)
+  assert.equal(failed[0].data.source, 'submit_plan_arguments')
+  assert.equal(failed[0].data.reason, 'repaired_form_still_invalid')
+  assert.equal(typeof failed[0].data.request_id, 'string')
+  assert.equal(failed[0].data.round, 0)
+})
+
+test('sibling tool calls are never silently dropped: no repair and no truncation salvage on a multi-call reply', async () => {
+  let calls = 0
+  const overEncoded = JSON.stringify(validPlanArguments({ developmentMode: '"vertical"' }))
+  const truncated = '{"chatMessage":"Harvesting wood","plan":["Harvest 3 wood"],"currentStep":0,"operations":[{"name":"harvest_product","args":{"product_name":"wood","count":3,"search_radius":256}}],"checkpoint"::'
+  for (const args of [overEncoded, truncated]) {
+    calls = 0
+    const { agent, game, rows } = makeAgent(async () => {
+      calls++
+      if (calls === 1) {
+        return { content: '', tool_calls: [
+          { id: 'p1', type: 'function', function: { name: 'submitPlan', arguments: args } },
+          { id: 'o1', type: 'function', function: { name: 'getInventoryItems', arguments: '{}' } },
+        ] }
+      }
+      return planReply({ plan: ['Gather 10 coal'], operations: [gather('coal', 10)], checkpoint: inventoryCheckpoint('coal', 10) })
+    })
+    const result = await agent.request('gather 10 coal', { sender: 'Louis' })
+    assert.equal(result.goalStatus, 'active')
+    assert.equal(game.mutations.length, 1)
+    assert.equal(rows('provider.control_json_repaired').length, 0, args.slice(0, 40))
+    assert.equal(rows('provider.control_json_repair_failed').length, 0)
+    assert.equal(rows('provider.plan_submission_salvaged').length, 0)
+    assert.equal(rows('provider.plan_submission_invalid').length, 1)
+  }
+})
+
+// --- stateful checks: repair must never re-run a parse that already touched goal-definition state -----------------
+
+const FINITE_ROCKET = { scope: 'finite', summary: 'Launch one rocket from this save.', doneWhen: [{ id: 'rocket', kind: 'rockets_launched', minimum: 1 }] }
+const GOAL_REQUIRED = { goalDefinitionPolicy: 'required' }
+const goalReply = (extra = {}) => planReply({
+  plan: ['Gather 10 iron ore'], operations: [gather('iron-ore', 10)], checkpoint: inventoryCheckpoint('iron-ore', 10), ...extra,
+})
+
+test('a goal challenge is not bypassed by a repair: the challenge fails once and is not re-run on a repaired copy', async () => {
+  const prompts = []
+  let calls = 0
+  // roadmapNodeIds as a string would be repaired, but the strict parse only ignores it, so it never fails by itself.
+  const { agent, game, rows } = makeAgent(async (messages) => {
+    calls++
+    prompts.push(messages.map(message => String(message?.content ?? '')).join('\n'))
+    return goalReply({ goal: FINITE_ROCKET, roadmapNodeIds: '["n3"]' })
+  }, {
+    goalAnswers: { goal_scope: { choice: 'long_horizon', confidence: 0.85 }, goal_family: { choice: 'rocket_launch', confidence: 0.9 } },
+    extra: GOAL_REQUIRED,
+  })
+  const result = await agent.request('launch a rocket', { sender: 'Louis' })
+
+  assert.equal(calls, 2, 'the single corrective challenge costs one model round')
+  assert.match(prompts[1], /goal_reading_disagreement/)
+  assert.equal(result.goalStatus, 'active', 'the planner then has the last word')
+  assert.equal(game.mutations.length, 1)
+  assert.equal(rows('provider.control_json_repaired').length, 0)
+  assert.equal(rows('provider.control_json_repair_failed').length, 0)
+})
+
+test('one corrective goal retry is not turned into a goal block by a repair', async () => {
+  let calls = 0
+  const { agent, game, rows } = makeAgent(async () => {
+    calls++
+    return calls === 1
+      ? goalReply({ roadmapNodeIds: '["n3"]' }) // no goal on a first plan: goal_definition_required, once
+      : goalReply({ goal: FINITE_ROCKET })
+  }, { extra: GOAL_REQUIRED })
+  const result = await agent.request('launch a rocket', { sender: 'Louis' })
+
+  assert.equal(calls, 2)
+  assert.notEqual(result.blocked, true)
+  assert.equal(result.goalStatus, 'active')
+  assert.equal(agent.goalDefinitionBlock ?? null, null)
+  assert.equal(game.mutations.length, 1)
+  assert.equal(rows('provider.control_json_repaired').length, 0)
+})
+
+test('a pure shape error under the goal policy is still repaired, and the repaired plan meets the goal checks once', async () => {
+  let calls = 0
+  const { agent, game, rows } = makeAgent(async () => {
+    calls++
+    return goalReply({ goal: FINITE_ROCKET, developmentMode: '"vertical"' })
+  }, {
+    goalAnswers: { goal_scope: { choice: 'finite', confidence: 0.9 }, goal_family: { choice: 'rocket_launch', confidence: 0.9 } },
+    extra: GOAL_REQUIRED,
+  })
+  const result = await agent.request('launch a rocket', { sender: 'Louis' })
+
+  assert.equal(calls, 1)
+  assert.equal(result.goalStatus, 'active')
+  assert.equal(game.mutations.length, 1)
+  const repaired = rows('provider.control_json_repaired')
+  assert.equal(repaired.length, 1)
+  assert.deepEqual(repaired[0].data.repairs, [{ kind: 'decoded_string', path: 'developmentMode' }])
 })

@@ -4,14 +4,18 @@
 // invented, defaulted, dropped or reinterpreted. Two repairs exist:
 //
 //   trailing_comma   a `,` directly before `}` or `]` outside strings, applied only when the text then parses.
-//   decoded_string   a value the schema expects to be an enum / array / object / number, sent as a string
-//                    that holds that value JSON-encoded once (`"operations": "[{...}]"`, or an enum member wrapped in
-//                    its own quotes: `"developmentMode": "\"vertical\""`). The string is replaced by the decoded
-//                    value only when the decoded value validates against the field's own schema. One level only.
+//   decoded_string   a value the schema expects to be an array or object, or a member of a closed enum, sent as a
+//                    string that holds that value JSON-encoded once (`"operations": "[{...}]"`, or an enum member
+//                    wrapped in its own quotes: `"developmentMode": "\"vertical\""`). The string is replaced by the
+//                    decoded value only when the decoded value validates against the field's own schema. One level.
 //
-// A string whose schema is free text (no enum) is never decoded, and a string that is already valid for its
-// schema is left alone. The caller runs its normal parse/validation on the result exactly as if the model had sent
-// the repaired form, and keeps today's behaviour (format recovery / retry) when that still fails.
+// Never decoded: a string whose schema is free text (no enum), a string already valid for its schema, and scalars.
+// A stringified number is a type error the model should be told about, and a stringified boolean
+// (assessmentOnly "true") is pinned as refused by luna-controller-contract.test.mjs.
+// The caller runs its normal parse/validation on the result exactly as if the model had sent the repaired form,
+// and keeps today's behaviour (format recovery / retry) when that still fails. Repair is only ever attempted
+// after the strict path failed, so a member the strict path would silently ignore or drop after a successful parse
+// is not a reason to repair and is not covered here.
 //
 // Pure module: the schema is passed in, nothing is read from the runtime.
 
@@ -96,6 +100,7 @@ function stripTrailingCommas(text) {
   let inString = false
   let escaped = false
   let stringStart = -1
+  let previous = '' // last significant character seen outside a string
   for (let index = 0; index < text.length; index++) {
     const char = text[index]
     if (inString) {
@@ -103,6 +108,7 @@ function stripTrailingCommas(text) {
       else if (char === '\\') escaped = true
       else if (char === '"') {
         inString = false
+        previous = '"'
         const top = frames[frames.length - 1]
         if (top && !top.array && top.expectKey) {
           try { top.key = JSON.parse(text.slice(stringStart, index + 1)) }
@@ -120,13 +126,15 @@ function stripTrailingCommas(text) {
     else if (char === ',' && top) {
       let next = index + 1
       while (next < text.length && /\s/.test(text[next])) next++
-      if (text[next] === '}' || text[next] === ']') {
+      // A comma that follows no value (`[,]`, `{,}`, `,,`) is not a trailing comma and is not removed.
+      if ((text[next] === '}' || text[next] === ']') && previous !== '' && !'[{,:'.includes(previous)) {
         removeAt.push(index)
         dropped.push(pathOf())
       }
       else if (top.array) top.index++
       else top.expectKey = true
     }
+    if (!/\s/.test(char)) previous = char
   }
   if (removeAt.length === 0) return undefined
   let cleaned = ''
@@ -176,19 +184,9 @@ function decodeString(str, schema, path, repairs) {
   if (!expected.some(type => matchesType(parsed, type))) return undefined
   if (typeof parsed === 'string') {
     // Only a string that is itself a JSON-encoded string, and only into a closed set of members.
-    if (!Array.isArray(schema.enum) && !(schema.oneOf || schema.anyOf)) return undefined
-    if (!trimmed.startsWith('"')) return undefined
+    if (!Array.isArray(schema.enum) || !trimmed.startsWith('"')) return undefined
   }
-  else if (typeof parsed === 'boolean') {
-    // Withheld on purpose: assessmentOnly decides whether a plan may act at all, and the control boundary
-    // pins that it must arrive as a real boolean (luna-controller-contract.test.mjs, "assessment intent
-    // requires a boolean"). Decoding "true" here would override that pinned rule, so an owner call is needed.
-    return undefined
-  }
-  else if (typeof parsed === 'number') {
-    if (JSON.stringify(parsed) !== trimmed) return undefined // canonical scalar spelling only
-  }
-  else if (parsed === null) return undefined
+  else if (parsed === null || typeof parsed !== 'object') return undefined // numbers and booleans are never decoded
   // One level only: a decoded string is final, so a triple-encoded value is never decoded twice. A decoded
   // container's members are separate values and each gets its own single decode.
   const nested = []
@@ -214,7 +212,10 @@ function repairNode(value, schema, path, repairs) {
     if (!isPlainObject(branch.properties)) return value
     const out = {}
     for (const [key, child] of Object.entries(value)) {
-      out[key] = Object.hasOwn(branch.properties, key) ? repairNode(child, branch.properties[key], childPath(path, key), repairs) : child
+      // defineProperty, not assignment: a model-sent `__proto__` key must stay an own key (and reach the strict
+      // unexpected-argument check) rather than set the prototype.
+      const next = Object.hasOwn(branch.properties, key) ? repairNode(child, branch.properties[key], childPath(path, key), repairs) : child
+      Object.defineProperty(out, key, { value: next, enumerable: true, writable: true, configurable: true })
     }
     return out
   }

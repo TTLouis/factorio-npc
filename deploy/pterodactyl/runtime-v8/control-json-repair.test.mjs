@@ -72,11 +72,11 @@ test('the run C reply (developmentMode "\\"vertical\\"") is repaired to the mode
   assertOnlyTheModelsOwnValues(RUN_C.arguments, repair)
 })
 
-test('stringified operations, stepCompletions, checkpoint and other typed members are decoded once', () => {
+test('stringified containers and enum members are decoded once; scalars are not', () => {
   const raw = JSON.stringify({
     chatMessage: 'Mining.',
     plan: ['Mine 100 iron ore'],
-    currentStep: '0',
+    currentStep: 0,
     operations: JSON.stringify([GATHER]),
     stepCompletions: JSON.stringify([{ kind: 'deterministic', checkpoint: IRON_CHECKPOINT }]),
     checkpoint: JSON.stringify(IRON_CHECKPOINT),
@@ -85,7 +85,7 @@ test('stringified operations, stepCompletions, checkpoint and other typed member
   })
   const repair = repairControlJson(raw, SCHEMA)
   assert.deepEqual(repair.repairs.map(item => item.path).sort(),
-    ['checkpoint', 'currentStep', 'developmentMode', 'operations', 'roadmapNodeIds', 'stepCompletions'])
+    ['checkpoint', 'developmentMode', 'operations', 'roadmapNodeIds', 'stepCompletions'])
   assert.ok(repair.repairs.every(item => item.kind === 'decoded_string'))
   assert.deepEqual(repair.object, {
     chatMessage: 'Mining.',
@@ -150,8 +150,9 @@ test('a decoded value of the wrong type, outside the enum, or invalid for its sc
     'object where an array is expected': { operations: '{"name":"gather_resource"}' },
     'array where an object is expected': { checkpoint: '[1,2]' },
     'string where an integer is expected': { currentStep: '"3"' },
+    'a stringified number is a type error to report, not to decode': { currentStep: '0' },
     'integer outside its bounds': { currentStep: '99' },
-    'noncanonical number spelling': { currentStep: '1e0' },
+    'a stringified float': { currentStep: '1.5' },
     'null': { checkpoint: 'null' },
     'array whose entries fail the schema (unknown operation name)': { operations: '[{"name":"rm_rf","args":{}}]' },
     'array whose entries fail the schema (extra member)': { operations: '[{"name":"gather_resource","args":{},"extra":1}]' },
@@ -186,6 +187,29 @@ test('trailing commas before } or ] are removed only outside strings and only wh
   assert.equal(repairControlJson('{"plan": [], "currentStep": 0,, "operations": []}', SCHEMA), undefined, 'a doubled comma is not a trailing comma')
   assert.equal(repairControlJson('{"plan": ["a",], "currentStep": 0, "operations": [', SCHEMA), undefined, 'still unparseable after the repair')
   assert.equal(repairControlJson('{"a": [1, 2,}', SCHEMA), undefined, 'mismatched closer')
+})
+
+test('a comma that follows no value is not a trailing comma', () => {
+  for (const raw of [
+    '{"plan": [,], "currentStep": 0, "operations": []}',
+    '{"plan": [], "currentStep": 0, "operations": [], "checkpoint": {,}}',
+    '{"plan": [,,], "currentStep": 0, "operations": []}',
+    '{,}',
+    '{"plan": ["a" , ], "currentStep": 0, "operations": [] , ',
+  ]) assert.equal(repairControlJson(raw, SCHEMA), undefined, raw)
+  // A comma after a value, with whitespace before the closer, still is one.
+  assert.deepEqual(repairControlJson('{"plan": ["a" ,\n], "currentStep": 0, "operations": [] ,\n}', SCHEMA).object, { plan: ['a'], currentStep: 0, operations: [] })
+})
+
+test('a model-sent __proto__ key stays an own key and still reaches the strict unexpected-argument check', () => {
+  const raw = '{"plan": ["a"], "currentStep": 0, "operations": "[]", "__proto__": {"polluted": true}}'
+  const repair = repairControlJson(raw, SCHEMA)
+  assert.deepEqual(repair.repairs, [{ kind: 'decoded_string', path: 'operations' }])
+  assert.equal(Object.getPrototypeOf(repair.object), Object.prototype)
+  assert.equal(Object.hasOwn(repair.object, '__proto__'), true)
+  assert.equal(({}).polluted, undefined)
+  assert.ok(repair.text.includes('"__proto__"'))
+  assert.throws(() => plannerControlPayloadFromMessage(submit(repair.text)), /Unexpected argument/)
 })
 
 test('trailing commas and over-encoded members repair together, including inside a code fence', () => {

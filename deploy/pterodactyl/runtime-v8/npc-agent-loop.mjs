@@ -2382,21 +2382,36 @@ function stateFileFromOptions(options) {
 // control tool's own parameters, so no field list lives here.
 const CONTROL_JSON_SCHEMA = plannerControlToolDefinitions[0].function.parameters
 
-// Strict-parse failures that are about something other than the shape of the control JSON; repair never applies.
-const CONTROL_REPAIR_SKIPPED_CODES = new Set([
-  'observation_request_refused',
-  'observation_request_not_processed',
-  'provider_output_budget_exhausted',
-  'provider_safety_blocked',
-  'plan_content_refused',
-  'dsml_malformed',
+// Content-path repair is attempted ONLY for a failure raised by the pure shape-parsing half of
+// parsePlanMessageStrict, i.e. before this.parseStatefulReached is set (right after super.parsePlanMessage).
+// Everything after that point mutates state that a re-run would corrupt: semanticCompletionClaimCheck,
+// enforceGoalDefinition / challengeGoalDefinition (goalReading.challenged, pendingGoalReadingTrace,
+// goalDefinitionRetries, lastGoalDefinitionError, goalDefinitionBlock), the exact-target set. So the rule is the
+// conjunction of the stage flag (nothing stateful ran) and this allowlist of pure shape/type errors:
+//   - an error with no code (invalid provider content JSON, a PolicyError from parsePlan, "no strict JSON content");
+//   - the codes below, each thrown from the pure pre-super section (a late invalid_step_completions raised after
+//     enforceGoalDefinition is excluded by the stage flag, not by its code).
+// Never repaired: goal_* / long_horizon_* / invalid_goal_definition (goalDefinitionError counts retries even when
+// thrown early), semantic_completion_* claim checks, exact_* / remote_name_* / observation_tool_as_operation,
+// observation_request_*, budget / safety / plan_content_refused / dsml_malformed.
+const CONTROL_REPAIR_SHAPE_CODES = new Set([
+  'invalid_assessment_only',
+  'invalid_step_completions',
+  'invalid_development_mode',
+  'invalid_semantic_completion',
+  'invalid_semantic_checkpoint',
+  'invalid_step_id',
 ])
+
+function controlRepairEligibleError(error) {
+  return error instanceof Error && (error.code === undefined || CONTROL_REPAIR_SHAPE_CODES.has(error.code))
+}
 
 // Cut a truncated JSON object back to its last complete top-level member.
 // Never invents content: it only drops an incomplete trailing member.
 function providerMessageWith(message, patch) {
   const result = { ...message, ...patch }
-  for (const key of ['_sglunaProvider', '_sglunaClosedRoundCalls']) {
+  for (const key of ['_sglunaProvider', '_sglunaClosedRoundCalls', '_sglunaControlRepair', '_sglunaNoControlRepair']) {
     const descriptor = Object.getOwnPropertyDescriptor(message, key)
     if (descriptor) Object.defineProperty(result, key, descriptor)
   }
@@ -10502,6 +10517,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const closedRoundCalls = !effectiveAllowTools ? message._sglunaClosedRoundCalls : undefined
 
     let plannerSubmission
+    let controlRepair
     try {
       plannerSubmission = effectiveAllowTools ? plannerControlPayloadFromMessage(message) : undefined
     }
@@ -10524,14 +10540,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       })
       // Encoding/syntax repair comes before the truncation salvage: salvage would drop an over-encoded
       // trailing member (live 2026-10-08: developmentMode "\"vertical\""), repair keeps the model's value.
-      const repair = repairControlJson(rawArgs, CONTROL_JSON_SCHEMA)
+      // Sibling calls (or a second submitPlan) must never be silently dropped by a repair or the salvage below:
+      // both rebuild tool_calls from the one control call, so they apply to a lone call only.
+      const loneCall = Array.isArray(message.tool_calls) && message.tool_calls.length === 1
+      const repair = loneCall ? repairControlJson(rawArgs, CONTROL_JSON_SCHEMA) : undefined
       if (repair) {
         const repairTrace = { request_id: this.traceRequest?.id, round, source: 'submit_plan_arguments', repairs: repair.repairs }
         try {
           plannerSubmission = plannerControlPayloadFromMessage(providerMessageWith(message, {
             tool_calls: [{ ...call, function: { ...call.function, arguments: repair.text } }],
           }))
-          await this.traceEvent('provider.control_json_repaired', { ...repairTrace, reason: 'deterministic_syntax_repair' })
+          // Reported by parsePlanMessage once the repaired plan has passed (or failed) the strict parse.
+          controlRepair = repairTrace
         }
         catch (repairError) {
           await this.traceEvent('provider.control_json_repair_failed', { ...repairTrace,
@@ -10543,7 +10563,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // while reporting a clean finish. Everything before that member is a
       // complete plan. Keep it -- but only if the salvaged object passes the
       // same validation as an intact submission.
-      const salvaged = plannerSubmission ? undefined : salvageTruncatedJsonObject(rawArgs)
+      const salvaged = plannerSubmission || !loneCall ? undefined : salvageTruncatedJsonObject(rawArgs)
       if (salvaged) {
         try {
           plannerSubmission = plannerControlPayloadFromMessage(providerMessageWith(message, {
@@ -10556,7 +10576,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
         catch {}
       }
-      if (!plannerSubmission) message = providerMessageWith(message, { tool_calls: undefined, content: rawArgs })
+      if (!plannerSubmission) {
+        message = providerMessageWith(message, { tool_calls: undefined, content: rawArgs })
+        if (!loneCall) Object.defineProperty(message, '_sglunaNoControlRepair', { value: true, configurable: true, enumerable: false })
+      }
     }
     if (plannerSubmission) {
       await this.traceEvent('provider.plan_submission', {
@@ -10571,6 +10594,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         tool_calls: undefined,
         content: JSON.stringify(plannerSubmission),
       })
+      if (controlRepair) Object.defineProperty(message, '_sglunaControlRepair', { value: controlRepair, configurable: true, enumerable: false })
     }
 
     if (Array.isArray(closedRoundCalls) && closedRoundCalls.length > 0) {
@@ -10708,33 +10732,45 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   // A malformed control reply is repaired deterministically (control-json-repair.mjs) before the model is asked
-  // again: only after the strict parse/validation failed, and only when the repaired form passes the same strict
-  // path. Otherwise the original error stands and the existing format recovery / retry runs unchanged.
+  // again: only after the strict parse failed, only for a pure shape error raised before any stateful check (see
+  // CONTROL_REPAIR_SHAPE_CODES), and the repaired form goes through the same strict path. A tool-path repair is
+  // reported here too, after its plan passed (or failed) the strict parse. A failed repair rethrows the original
+  // error so the existing retry runs unchanged. A repaired form that parses but is then refused by a stateful check
+  // (goal challenge, claim check, exact target) is handled exactly as if the model had sent it: that error stands.
   parsePlanMessage(message) {
-    const rejectedBefore = new Set(this.rejectedExactTargets)
+    const prior = message?._sglunaControlRepair
+    const first = this.tryStrictParse(message)
+    if (prior) this.traceControlRepair(prior, first)
+    if (first.plan) return first.plan
+    if (prior || first.shapeValid || message?._sglunaNoControlRepair === true
+      || typeof message?.content !== 'string' || !controlRepairEligibleError(first.error)) throw first.error
+    const repair = repairControlJson(message.content, CONTROL_JSON_SCHEMA)
+    if (!repair) throw first.error
+    const second = this.tryStrictParse(providerMessageWith(message, { content: repair.text }))
+    this.traceControlRepair({ request_id: this.traceRequest?.id, round: this.lastProviderRound, source: 'content', repairs: repair.repairs }, second)
+    if (second.plan) return second.plan
+    throw second.shapeValid ? second.error : first.error
+  }
+
+  // { plan } on success, else { error, shapeValid }: shapeValid says the pure shape-parsing half passed and the
+  // failure came from a stateful check after it.
+  tryStrictParse(message) {
+    this.parseStatefulReached = false
     try {
-      return this.parsePlanMessageStrict(message)
+      return { plan: this.parsePlanMessageStrict(message), shapeValid: true }
     }
     catch (error) {
-      if (CONTROL_REPAIR_SKIPPED_CODES.has(error?.code) || typeof message?.content !== 'string') throw error
-      const repair = repairControlJson(message.content, CONTROL_JSON_SCHEMA)
-      if (!repair) throw error
-      const trace = { request_id: this.traceRequest?.id, round: this.lastProviderRound, source: 'content', repairs: repair.repairs }
-      // The strict path remembers rejected exact targets; the repaired attempt must not count as a repeat of the first.
-      const rejectedAfterFirst = this.rejectedExactTargets
-      this.rejectedExactTargets = rejectedBefore
-      try {
-        const plan = this.parsePlanMessageStrict(providerMessageWith(message, { content: repair.text }))
-        void this.traceEvent('provider.control_json_repaired', { ...trace, reason: 'deterministic_syntax_repair' })
-        return plan
-      }
-      catch (repairError) {
-        this.rejectedExactTargets = rejectedAfterFirst
-        void this.traceEvent('provider.control_json_repair_failed', { ...trace,
-          reason: 'repaired_form_still_invalid', failure: cleanMemoryText(repairError instanceof Error ? repairError.message : String(repairError), 300) })
-        throw error
-      }
+      return { error, shapeValid: this.parseStatefulReached === true }
     }
+  }
+
+  traceControlRepair(trace, outcome) {
+    if (outcome.plan || outcome.shapeValid) {
+      void this.traceEvent('provider.control_json_repaired', { ...trace, reason: 'deterministic_syntax_repair' })
+      return
+    }
+    void this.traceEvent('provider.control_json_repair_failed', { ...trace, reason: 'repaired_form_still_invalid',
+      failure: cleanMemoryText(outcome.error instanceof Error ? outcome.error.message : String(outcome.error), 300) })
   }
 
   parsePlanMessageStrict(message) {
@@ -10910,6 +10946,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
     const plan = super.parsePlanMessage(baseMessage)
+    // Everything from here on is stateful (claim check, goal definition challenge, exact targets): see CONTROL_REPAIR_SHAPE_CODES.
+    this.parseStatefulReached = true
     if (assessmentOnly !== undefined) plan.assessmentOnly = assessmentOnly
     if (stepCompletions) plan.stepCompletions = stepCompletions
     if (checkpoint) plan.checkpoint = checkpoint
