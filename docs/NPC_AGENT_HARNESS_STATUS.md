@@ -8,6 +8,10 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 8 Haiku trial B and per-slice continuations: repaired, static gates passed
+
+Owner-approved rerun at `a8610bb5` with `claude-haiku-5-5` through the CLI proxy: 41 Luna calls, 542 seconds, zero humans or corrections. Step identity held (11 bound by `stepId`, 9 correct legacy indexes, no refusals) and Luna verified all four steps of the first slice (50 iron and 12 copper plates, two fuelled furnaces). The hand-over to the next slice then paused with `continuation_limit_10` because the request-wide continuation counter (14) was compared with the non-active limit once the slice completed. Merged `f9a8a627` measures continuation limits per plan slice, resets only after a slice with a verified deterministic close and an admitted operation batch (generation-fenced), adds a 256 request-wide backstop, and gives delegated executor rounds a `submitPlan` schema requiring `stepId` with matching executor-only prompt wording. Not yet live-validated. See [the trial B record](validation/LUNA_HAIKU_LIVE_2026-10-08B.md).
+
 ## October 8 Haiku live trial and executor step identity: repaired, static gates passed
 
 Owner-requested cheap run at `3dc1de6d` with `claude-haiku-5-5` through the CLI proxy: 10 Luna and 14 Jev calls, 390.8 seconds, zero humans or corrections. Luna closed two of three steps (58 iron plates) but echoed a stale step index after an in-request step close; the v2 guard refused it outside the correction loop and the goal paused as non-recoverable. Merged `0f337065` binds executor operations to the committed step id, gives step-identity refusals a persisted allowance of two corrections per step, shares one step-transition fact and makes run-check flag terminal failures. Gate: runtime 1,906, mod 1,045, payload current. Not yet live-validated. See [the checkpoint](validation/LUNA_HAIKU_LIVE_2026-10-08.md).
