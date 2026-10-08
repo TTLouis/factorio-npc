@@ -2944,6 +2944,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.batchInFlight = false // an operation batch was sent and its receipt has not been read yet
     this.pendingExecutorFactsRefresh = null // an executor handoff whose counts were deferred because of that batch
     this.rejectedExactTargets = new Set()
+    this.parseStatefulReached = false // set once parsePlanMessageStrict passes its pure shape-parsing half
     this.staleExactPreflightRetries = 0
     this.modelCorrectablePreflightRetries = 0
     this.researchPreflightRetries = 0
@@ -10752,15 +10753,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     throw second.shapeValid ? second.error : first.error
   }
 
-  // { plan } on success, else { error, shapeValid }: shapeValid says the pure shape-parsing half passed and the
-  // failure came from a stateful check after it.
+  // { plan } on success, else { error, shapeValid }: shapeValid is false only for a pure shape error (the failure
+  // class repair can change). A failure from a stateful check, or a content error with a code outside
+  // CONTROL_REPAIR_SHAPE_CODES (a goal-definition error raised early still bumped its retry counters), means the
+  // shape parsed and a repaired copy must be treated exactly as if the model had sent it: that error stands.
   tryStrictParse(message) {
     this.parseStatefulReached = false
     try {
       return { plan: this.parsePlanMessageStrict(message), shapeValid: true }
     }
     catch (error) {
-      return { error, shapeValid: this.parseStatefulReached === true }
+      return { error, shapeValid: this.parseStatefulReached === true || !controlRepairEligibleError(error) }
     }
   }
 

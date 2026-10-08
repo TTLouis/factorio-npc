@@ -310,3 +310,31 @@ test('a pure shape error under the goal policy is still repaired, and the repair
   assert.equal(repaired.length, 1)
   assert.deepEqual(repaired[0].data.repairs, [{ kind: 'decoded_string', path: 'developmentMode' }])
 })
+
+test('a repaired copy refused by an early goal-definition error is treated as if the model sent it: the goal error stands, counted once', async () => {
+  const prompts = []
+  const seen = []
+  let calls = 0
+  const checkpoint = inventoryCheckpoint('iron-ore', 10)
+  const { agent, game, rows } = makeAgent(async (messages) => {
+    calls++
+    prompts.push(messages.map(message => String(message?.content ?? '')).join('\n'))
+    seen.push({ retries: agent.goalDefinitionRetries, block: agent.goalDefinitionBlock })
+    return calls === 1
+      // Stringified stepCompletions fails the shape half first; once repaired, the invalid goal scope is the real problem.
+      ? goalReply({ goal: { ...FINITE_ROCKET, scope: 'bogus' }, stepCompletions: JSON.stringify([{ kind: 'deterministic', checkpoint }]) })
+      : goalReply({ goal: FINITE_ROCKET })
+  }, { extra: GOAL_REQUIRED })
+  const result = await agent.request('launch a rocket', { sender: 'Louis' })
+
+  assert.equal(calls, 2)
+  assert.match(prompts[1], /goal\.scope must be/, 'the model is told about the goal error, not the hidden shape error')
+  assert.equal(seen[1].retries, 1, 'one goal error counted once')
+  assert.ok(!seen[1].block, 'no block after a single goal correction')
+  assert.equal(result.goalStatus, 'active')
+  assert.equal(game.mutations.length, 1)
+  const repaired = rows('provider.control_json_repaired')
+  assert.equal(repaired.length, 1)
+  assert.deepEqual(repaired[0].data.repairs, [{ kind: 'decoded_string', path: 'stepCompletions' }])
+  assert.equal(rows('provider.control_json_repair_failed').length, 0)
+})
