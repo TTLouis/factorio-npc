@@ -1034,6 +1034,42 @@ export const providerToolDefinitions = [
   ...plannerControlToolDefinitions,
 ]
 
+// The executor's own submitPlan (same tool name). The executor binds its operations to the committed active step by
+// id, so the schema requires stepId and operations and carries only the fields the executor contract uses: the planner
+// authors the plan, the goal, the roadmap, the development mode and the step completions, and the harness ignores them
+// from an executor (enforceExecutorContract). The planner's definition above is unchanged. The parser stays tolerant:
+// a reply that still carries plan and currentStep (closed-control JSON content, recorded fixtures) is read as before.
+export const EXECUTOR_CONTROL_FIELDS = Object.freeze(['chatMessage', 'stepId', 'observationRequest', 'operations', 'checkpoint', 'semanticCompletion', 'timeReview'])
+export const EXECUTOR_CONTROL_REQUIRED = Object.freeze(['stepId', 'operations'])
+
+function executorControlToolDefinition(planner) {
+  const source = planner.function.parameters
+  const properties = {}
+  for (const field of Object.keys(source.properties)) {
+    if (EXECUTOR_CONTROL_FIELDS.includes(field)) properties[field] = structuredClone(source.properties[field])
+  }
+  return {
+    type: 'function',
+    function: {
+      name: planner.function.name,
+      description: planner.function.description,
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: [...EXECUTOR_CONTROL_REQUIRED],
+        properties,
+      },
+    },
+  }
+}
+
+export const executorControlToolDefinitions = [executorControlToolDefinition(plannerControlToolDefinitions[0])]
+
+export const executorProviderToolDefinitions = [
+  ...toolDefinitions,
+  ...executorControlToolDefinitions,
+]
+
 const OBSERVATION_TOOL_FAMILY = Object.freeze({
   getActorStatus: 'runtime_status',
   getTaskStatus: 'runtime_status',

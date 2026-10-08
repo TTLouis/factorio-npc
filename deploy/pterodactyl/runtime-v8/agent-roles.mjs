@@ -37,8 +37,9 @@ export function resolveAgentRole(config, role = PLANNER_ROLE) {
 
 // The executor's role suffix (delegation U6, design note section 6). The
 // executor carries one committed plan slice: the planner authored it, the harness
-// committed it, and it is immutable. There is ONE submitPlan tool for both roles;
-// only this suffix and the loop's plan-semantics validator differ.
+// committed it, and it is immutable. The executor has its own submitPlan schema
+// (same tool name, structured-policy.mjs); this suffix and the loop's
+// plan-semantics validator differ too.
 export const EXECUTOR_ROLE_PROMPT = [
   '[ROLE: EXECUTOR] You are the executor for one committed plan slice. The planner authored the slice and the harness committed it; the committed plan is in the [HANDOFF] block and is immutable.',
   'Execute the committed ACTIVE step only. Return approved observation tool calls, or submitPlan carrying the operations that advance the active step (plus semanticCompletion or a checkpoint for that step only). Do not author or revise the plan: do not change, reorder, reword, add or drop steps, and do not send a goal definition (scope, doneWhen), a roadmap or a development mode. In submitPlan send stepId as the active step id from [CONTROL_DECISION_STATE]; plan and currentStep are not needed. The harness ignores plan changes from you and records that it did.',
