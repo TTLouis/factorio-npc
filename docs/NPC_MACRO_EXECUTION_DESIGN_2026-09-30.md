@@ -303,6 +303,8 @@ What remains provisional or open:
 Static coverage only (scripted model replies, fake Factorio); no real-engine lane and no live provider run. Defaults below are
 chosen, not owner-confirmed.
 
+- **Switch.** The loop option `replacementWake` (default off; the supervisor passes `true`, like `completionProtocolVersion: 2`) enables the
+  grant and the wake together, so a loop built without it keeps the pre-MW5 blocked-awaiting-user behaviour exactly.
 - **Grant at goal admission.** A chat-origin `new_goal` (`NpcAgentLoop.request`) issues a `player_task` grant: mandate id = goal id,
   requested result `goal:<goal_id>` with no destination, all five action scopes, not bound to an actor (it survives a respawn; actor
   and epoch are still fenced at the wake, the commit and every admission). Recovery runs, amendments, chat-only and status routes never
