@@ -1198,17 +1198,11 @@ This is the run-ahead mechanic described in the section above, applied to step c
 3. A prediction admits nothing and changes nothing. The executor never sees it before it is bound. Only one context acts on the body, as before.
 4. When the active step closes, the harness re-validates the prediction against fresh facts with the same checks as a commit: requirement grounding, checkpoint contract validation, and the semantic-step rule. If it passes, it is bound and the executor goes on without waiting for the planner.
 
-**Steps that are always just in time (owner direction, 2026-10-08)**
+**Gathering is a tool call, not a plan step (owner direction, 2026-10-08)**
 
-Some steps should never be predicted, for example gathering materials. Their contract is a count, and the right count depends on the exact inventory and stock when the step starts. A count written one step early is the staleness this design removes.
+Gathering materials is execution detail under a result step (§7), done with ordinary operations such as `gather_resource`. It is not its own plan step. A step names a world result (packs crafted, a furnace running, research completed). When the executor works on that step, it gathers whatever the shortfall is at that moment, so no material count is ever written ahead of time.
 
-Proposed rule: at slice commit, each step intent carries a coarse contract family with no numbers:
-
-- `materials`: inventory or item counts. Always bound just in time and never predicted.
-- `world`: entities, research, production and other world results. Predicted.
-- `assessment`: semantic and observation-only.
-
-A bound contract must match its family. The harness checks this by mapping requirement kinds to families. This adds one field to the planner's commit schema; its wording is shown to the owner before it changes.
+The harness cannot stop the planner writing a gathering step, so one more rule applies. A predicted contract that consists only of material counts is never bound from the prediction. It is discarded (`material_count_needs_fresh_state`) and authored just in time.
 
 **Just in time (the fallback)**
 
