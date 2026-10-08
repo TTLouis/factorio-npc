@@ -517,3 +517,55 @@ test('delegation: findings print through formatCheckReport like every other sign
   const text = formatCheckReport(analyzeBehaviorTrace(rows))
   assert.match(text, /\[restage_packet_oversize\] request_id=req_d_1 count=1 first_ts=2026-09-29T11:00:01\.000Z :: planner C1 packet ho_plan_big/)
 })
+
+// --- executor step identity (2026-10-08 Haiku live run) ------------------------------------------
+
+test('executor step identity: a request that ends in request.failed with recoverable=false is reported, and a recoverable one is not', () => {
+  const stale = drow(5, 'executor.stale_step_rejected', 'req_id_1', {
+    incoming_step_index: 1,
+    expected_step: { index: 2, stepId: 'step_3', description: 'Hand-mine copper ore and smelt at least 20 copper plates' },
+    operation_count: 1,
+    reason: 'step_index_not_the_active_step',
+  })
+  const failed = recoverable => drow(6, 'request.failed', 'req_id_1', {
+    stage: 'runtime',
+    message: 'executor_stale_step: choose new operations for the current committed active step',
+    recoverable,
+  })
+  const unrecoverable = analyzeBehaviorTrace([drow(0, 'request.received', 'req_id_1', {}), stale, failed(false)])
+  const [finding] = findingsFor(unrecoverable, 'request_failed_unrecoverable')
+  assert.equal(finding.request_id, 'req_id_1')
+  assert.equal(finding.count, 1)
+  assert.match(finding.detail, /recoverable=false \(stage runtime\): executor_stale_step/)
+  assert.match(formatCheckReport(unrecoverable), /\[request_failed_unrecoverable\] request_id=req_id_1/)
+
+  const recoverable = analyzeBehaviorTrace([drow(0, 'request.received', 'req_id_2', {}), { ...failed(true), request_id: 'req_id_2' }])
+  assert.equal(findingsFor(recoverable, 'request_failed_unrecoverable').length, 0)
+  const unmarked = analyzeBehaviorTrace([drow(0, 'request.received', 'req_id_3', {}), { ...failed(undefined), request_id: 'req_id_3' }])
+  assert.equal(findingsFor(unmarked, 'request_failed_unrecoverable').length, 0, 'a failure that does not say recoverable=false is not this finding')
+})
+
+test('executor step identity: executor.stale_step_rejected events are counted per request', () => {
+  const rejected = (seconds, requestId, data = {}) => drow(seconds, 'executor.stale_step_rejected', requestId, {
+    incoming_step_index: 1,
+    expected_step: { index: 2, stepId: 'step_3' },
+    operation_count: 1,
+    reason: 'step_index_not_the_active_step',
+    ...data,
+  })
+  const rows = [
+    drow(0, 'request.received', 'req_id_4', {}),
+    rejected(1, 'req_id_4'),
+    rejected(2, 'req_id_4', { incoming_step_id: 'step_2', reason: 'step_id_names_another_step' }),
+    drow(3, 'request.completed', 'req_id_4', { chat_message: 'done' }),
+    drow(4, 'request.received', 'req_id_5', {}),
+    drow(5, 'request.completed', 'req_id_5', { chat_message: 'done' }),
+  ]
+  const result = analyzeBehaviorTrace(rows)
+  const findings = findingsFor(result, 'executor_stale_step_rejected')
+  assert.equal(findings.length, 1)
+  assert.equal(findings[0].request_id, 'req_id_4')
+  assert.equal(findings[0].count, 2)
+  assert.match(findings[0].detail, /expected step_3/)
+  assert.equal(findingsFor(analyzeBehaviorTrace(rows.slice(4)), 'executor_stale_step_rejected').length, 0)
+})
