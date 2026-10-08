@@ -298,6 +298,62 @@ What remains provisional or open:
   (treated as protected, by design). The human arm of the engine rule cannot be exercised in
   the zero-player headless lane; it is recorded as not exercised.
 
+### MW5 minimal wiring (2026-10-08, branch `feat/mw5-minimal-recovery`)
+
+Static coverage only (scripted model replies, fake Factorio); no real-engine lane and no live provider run. Defaults below are
+chosen, not owner-confirmed.
+
+- **Switch.** The loop option `replacementWake` (default off; the supervisor passes `true`, like `completionProtocolVersion: 2`) enables the
+  grant and the wake together, so a loop built without it keeps the pre-MW5 blocked-awaiting-user behaviour exactly.
+- **Grant at goal admission.** A chat-origin `new_goal` (`NpcAgentLoop.request`) issues a `player_task` grant: mandate id = goal id,
+  requested result `goal:<goal_id>` with no destination, all five action scopes, not bound to an actor (it survives a respawn; actor
+  and epoch are still fenced at the wake, the commit and every admission). Recovery runs, amendments, chat-only and status routes never
+  mint one, and a goal that ever held a `player_task` grant never gets another (a revoked one is not re-activated). Owner rule for MW1's
+  protected-asset and player-inventory gates: they are grant-backed only for a replacement-lineage plan or an ACTIVE `standing_auto`
+  grant of the goal, so the player's own request stays its own approval. An asset or material explicitly listed in any active grant of
+  the goal (`protected_assets`, `protected_materials`) is always protected, grant-backed or not. A material entry naming both an item and
+  a container means that item in that container; a container-only entry is also covered for name-based `move_items` / `mine_entity`
+  (by its `entity_name`, or the name its placement receipt recorded) as an ambiguous target; one operation that hits several protected
+  subjects needs an approval covering every one of them.
+- **Replacement wake.** When a COMMITTED plan becomes BLOCKED by harness-evidenced world change, and the goal has a current grant and
+  fewer than 3 accepted replacements, the request does not end awaiting the player. World evidence is an explicit allowlist
+  (`WORLD_CHANGE_PREFLIGHT_CODES` in `replacement-wake.mjs`, default deny): the exact target is gone (`stale_exact_target`, and only
+  with proof the unit existed: an NPC placement receipt, an earlier authoritative observation, or the mod's own last-observed record),
+  or the measured facts `extraction_empty` and `destination_full` (`supply_missing` is the NPC's own accounting and never wakes); or an
+  admission refusal the game proved happened before any mutation of the first operation, and whose `refusal_code` is not on the
+  never-wake list. Authorization refusals, the uncertain-effect hold, model argument errors, a
+  locked recipe, a blocked pre-commit draft, transport/epoch/journal refusals, unevidenced `BLOCKED:` replies, provider failures and
+  the deadlock detector (its `repeating_failure` signal counts provider failures) never wake the planner and keep the blocked end;
+  each skip is traced (`blocker_not_world_evidence`, `plan_not_committed`, `batch_may_have_run`, `no_current_grant`, `grant_stale`,
+  `replacement_cap_reached`). The cap counts accepted replacements on the goal record (`goal.replacements_accepted`, incremented only by
+  the accept branch of `REPLACEMENT_PLAN_REQUESTED`, durable across snapshot/restore, independent of retained plans and grants).
+  The planner is resumed (or a fresh packet is built) through the explicit `replacement` restage reason, which is the only reason
+  that may restage onto a BLOCKED plan, and receives a `[PLAN_BLOCKED]` facts message. Its ordinary `submitPlan` reply is turned into
+  an MW1 `REPLACEMENT_PLAN_REQUESTED` by the harness (grant id and current revision, the grant's own requested result, scope
+  `recovery`, empty impacts, the blocker's code, detail and evidence refs). Accept: the successor DRAFT commits through
+  `commitReplacementPlan` and the executor is handed the new version. Ask: the old plan stays BLOCKED and untouched, a question is
+  recorded and the player is told what needs their approval. Refuse, a stale grant, an exhausted cap or no grant: the request ends
+  blocked as before.
+- **Player notification.** A committed replacement emits `plan.replacement_announced` with the chat line; the supervisor prints it once
+  per plan id.
+- **Trace events** (each carries `request_id` and a `reason`): `plan.replacement_wake`, `plan.replacement_wake_skipped`,
+  `plan.replacement_draft_repair`, `plan.replacement_announced`, plus the MW1 `plan.replacement_drafted|committed|refused|question_raised`
+  and `authorization.granted|grant_checked` (stage `wake` is new). Tests: `replacement-wake.test.mjs`, `authorization.test.mjs`.
+- **Executor indexing after a replacement (pinned, not changed).** The executor's packet shows the reducer plan, which after a
+  replacement is the suffix after the verified prefix (active step index 0) while the board still counts the prefix (index 1). A reply
+  naming the active step by `stepId` is bound and admitted; a board-form reply (full board list, `currentStep: 1`, no stepId) is
+  refused as `step_index_not_the_active_step`, corrected twice, and then the goal pauses (`executor_step_identity_exhausted`). Open.
+- **Announcement wording.** `Changed plan: ...` when the replacement's step text differs from the blocked plan's remaining steps;
+  `Retrying the plan: <reason>. Plan v<n> resumes with: <step>.` when it is the same.
+- **Re-draft rule.** The planner's reply is classified against the grant immediately before it is recorded. Re-submitting the accepted
+  successor with the same steps passes through; with different steps the plan ends BLOCKED visibly (`plan.replacement_refused`,
+  `redraft_steps_changed_since_authorization`) because MW1 refuses a drifted fingerprint at commit.
+- **Not wired / limitations.** Unevidenced `BLOCKED:` replies still pause the goal. A semantic-step contract mismatch is prevented at
+  commit by a separate unit. With the default grant, requests always carry the grant's own result and empty impacts, so only
+  `scope_not_granted` can ask at request time; protected and reserved conflicts are caught per operation at admission; result integrity
+  relies on the immutable goal definition. The ask path has no player-answer flow beyond the existing keep_paused / revise / cancel
+  controls. A replacement whose step text equals the blocked plan's is not refused (the cap bounds it).
+
 ## 8. MW2 build status
 
 Status as of 2026-10-01: **MW2a (durable task ledger) and MW2b (operation reconciliation) are built on branch

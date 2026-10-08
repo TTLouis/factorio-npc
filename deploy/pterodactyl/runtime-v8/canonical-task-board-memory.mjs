@@ -13,8 +13,11 @@ import {
   classifyReplacement,
   entityProtection,
   evaluateOperationAdmission,
+  MANDATE_KIND,
   REPLACEMENT_DECISION,
+  replacementStepsFingerprint,
 } from './authorization.mjs'
+import { blockerFacts, currentGoalGrant, replacementsUsed } from './replacement-wake.mjs'
 import {
   carriedAcrossGoals,
   classifyTaskInterruption,
@@ -1347,6 +1350,69 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return { ...verdict, state: after }
   }
 
+  // --- MW5 (minimal): replacement wake ---------------------------------------------------------------------------------
+
+  /** The grant that currently backs the goal, if any. */
+  currentGoalGrant(key) {
+    return currentGoalGrant(this.planningState(key))
+  }
+
+  /** True when the goal has ever held a player_task grant (revoked or not): admission never re-activates one. */
+  hasPlayerTaskGrant(key) {
+    const planning = this.planningState(key)
+    const goalId = planning?.goal?.goal_id
+    return Boolean(goalId) && authorizationOf(planning).grants.some(grant => grant.goal_id === goalId && grant.mandate_kind === MANDATE_KIND.PLAYER_TASK)
+  }
+
+  /**
+   * The planner re-submitted while an accepted replacement successor is still an uncommitted DRAFT. A re-draft is fine only if
+   * it is the same steps the grant check covered (the commit refuses a drifted fingerprint, MW1). Returns undefined when no
+   * replacement draft is pending.
+   */
+  pendingReplacementDraft(key, draft) {
+    const held = getActivePlan(this.planningState(key))
+    if (!held?.replacement || held.status !== PLAN_STATUS.DRAFT) return undefined
+    const suffix = revisionSuffix(this.planByNpc.get(key)?.task_board, Array.isArray(draft?.plan) ? draft.plan : [])
+    return { plan_id: held.plan_id, grant_id: held.replacement.grant_id, unchanged: replacementStepsFingerprint(suffix) === held.replacement.steps_fingerprint }
+  }
+
+  /** Accepted replacements the goal has used (the reducer's durable per-goal counter). */
+  replacementsUsed(key) {
+    return replacementsUsed(this.planningState(key))
+  }
+
+  /**
+   * Turn the planner's replacement submission into a MW1 replacement request for the BLOCKED active plan. The harness
+   * builds the request: the blocker facts and the grant come from its own records, the requested result is the grant's
+   * own, the scope is `recovery`, and impacts are empty (admission re-checks protected entities and reserved supplies per
+   * operation). Returns the requestReplacementPlan verdict; an accepted one has already made the successor DRAFT active.
+   */
+  requestReplacementFromDraft(key, { grantId, current }, draft, { requestId, now = Date.now() } = {}) {
+    const planning = this.planningState(key)
+    const blocked = getActivePlan(planning)
+    const held = authorizationOf(planning).grants.find(item => item.grant_id === grantId)
+    if (!blocked || blocked.status !== PLAN_STATUS.BLOCKED || !held) {
+      return { decision: REPLACEMENT_DECISION.REFUSE, reason: !held ? 'grant_not_found' : 'predecessor_not_blocked' }
+    }
+    const board = this.planByNpc.get(key)?.task_board
+    const incoming = Array.isArray(draft?.plan) ? draft.plan : []
+    const suffix = revisionSuffix(board, incoming)
+    if (suffix.length === 0) return { decision: REPLACEMENT_DECISION.REFUSE, reason: 'steps_empty' }
+    const facts = blockerFacts(blocked)
+    return this.requestReplacementPlan(key, {
+      plan_id: blocked.plan_id,
+      grant: { grant_id: held.grant_id, revision: held.revision },
+      current,
+      requested_result: held.requested_result,
+      action_scope: 'recovery',
+      reason: { code: facts.reason_code, detail: facts.detail, evidence_refs: facts.evidence_refs },
+      impacts: {},
+      steps: proposalSteps(suffix, draft?.stepCompletions, incoming.length - suffix.length),
+      ...(Array.isArray(draft?.roadmapNodeIds) ? { roadmap_node_ids: draft.roadmapNodeIds } : {}),
+      ...(draft?.developmentMode ? { development_mode: draft.developmentMode } : {}),
+    }, { requestId, now })
+  }
+
   /** A user's answer to a pending question (or a standing approval for named subjects). Never the planner or Jev. */
   recordAuthorizationApproval(key, approval, { now = Date.now(), requestId, source = 'user' } = {}) {
     const before = authorizationOf(this.planningState(key))
@@ -2078,7 +2144,12 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     // carries a human sender and text, never for a harness continuation. The
     // blocked-revision path above already has its own lineage event and must
     // not supersede on top of it.
-    const supersededPlanId = userRevisionApproved
+    // MW5: the successor of a replacement the harness already accepted (requestReplacementFromDraft) is the active DRAFT.
+    // It is neither a user revision nor a supersession of a healthy slice, and it must not be re-drafted from the board.
+    const replacementAccepted = options?.replacementAccepted === true
+      && getActivePlan(priorPlanning)?.status === PLAN_STATUS.DRAFT
+      && Boolean(getActivePlan(priorPlanning)?.replacement)
+    const supersededPlanId = userRevisionApproved || replacementAccepted
       ? undefined
       : this.#supersedeInFlightPlan(key, requestInfo, plan, options)
 
@@ -2104,7 +2175,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         roadmapNodeIds: plan?.roadmapNodeIds,
         developmentMode: plan?.developmentMode,
         stepCompletions: plan?.stepCompletions,
-        replacePrecommit: Array.isArray(plan?.stepCompletions) && !userRevisionApproved && !supersededPlanId,
+        replacePrecommit: Array.isArray(plan?.stepCompletions) && !userRevisionApproved && !supersededPlanId && !replacementAccepted,
       })
       this.seedRunFromLegacy(key, result.state)
       this.seedReceiptLedgerFromLegacy(key, result.state)
@@ -2117,10 +2188,11 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const completedSliceDraftApproved = priorReducerPlan?.status === PLAN_STATUS.COMPLETED
       && activeAfterDraft?.status === PLAN_STATUS.DRAFT
       && activeAfterDraft.plan_id !== priorReducerPlan.plan_id
-    if (!userRevisionApproved && !supersededPlanId && !completedSliceDraftApproved) return result
+    if (!userRevisionApproved && !supersededPlanId && !completedSliceDraftApproved && !replacementAccepted) return result
     return {
       ...result,
       ...(userRevisionApproved ? { userRevisionApproved: true } : {}),
+      ...(replacementAccepted ? { replacementAccepted: true } : {}),
       ...(supersededPlanId ? { supersededPlanId } : {}),
       ...(completedSliceDraftApproved ? { completedSliceDraftApproved: true } : {}),
     }
@@ -2789,7 +2861,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     if (previousBoard?.kind === 'task_board_lite'
       && previousBoard.status === 'blocked'
       && stateResult?.state
-      && stateResult?.userRevisionApproved !== true) {
+      && stateResult?.userRevisionApproved !== true
+      && stateResult?.replacementAccepted !== true) {
       const state = stateResult.state
       state.status = 'blocked'
       state.blocker = previousBoard.blocker ?? state.blocker
@@ -2809,7 +2882,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
             : []
         }),
     )
-    const revisionApproved = stateResult?.userRevisionApproved === true
+    const revisionApproved = stateResult?.userRevisionApproved === true || stateResult?.replacementAccepted === true
     const completedSliceDraftApproved = stateResult?.completedSliceDraftApproved === true
     // BLOCKED/COMMITTED work is frozen for ordinary continuation. Replacement
     // is allowed only for explicit user revision or a fresh draft after the

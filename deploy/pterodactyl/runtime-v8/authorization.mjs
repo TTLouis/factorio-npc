@@ -231,7 +231,9 @@ function sanitizeMaterials(raw) {
     const itemName = text(item.item_name, 120)
     const container = Number.isSafeInteger(item.container_unit_number) ? item.container_unit_number : undefined
     if (!itemName && container === undefined) return []
-    return [{ item_name: itemName || null, container_unit_number: container ?? null }]
+    // The container's entity name is optional; it lets a name-based withdrawal or mining be recognised as possibly hitting it.
+    const entityName = text(item.entity_name, 120)
+    return [{ item_name: itemName || null, container_unit_number: container ?? null, ...(entityName ? { entity_name: entityName } : {}) }]
   }).slice(0, AUTHORIZATION_LIMITS.materials)
 }
 
@@ -798,10 +800,20 @@ export function evaluateOperationAdmission(state, { operations, preflight, actor
     }
   }
 
-  // INTERIM (owner decision pending): protected-asset and player-inventory gates apply only to grant-backed work - a plan
-  // that carries replacement lineage, or any goal with an active grant. An ordinary user-requested goal is the player's own
-  // request and behaves as before MW1. Reserved-container exclusion applies to every goal.
-  const grantBacked = Boolean(plan?.replacement) || auth.grants.some(grant => grant.status === GRANT_STATUS.ACTIVE && grant.goal_id === goalId)
+  // Owner rule (2026-10-08): the protected-entity and player-inventory gates are for work done under a standing mandate, not for a
+  // player's own request. A plan that carries replacement lineage is grant-backed work, and so is any goal with an ACTIVE
+  // standing_auto grant. A player_task grant (every player objective gets one at admission) records the request itself and does not
+  // turn the gates on: the player's own request is their approval. Reserved-container exclusion applies to every goal.
+  // Separately, an asset or material explicitly listed in ANY active grant of the goal is always protected, grant-backed or not.
+  const grantBacked = Boolean(plan?.replacement) || auth.grants.some(grant => grant.status === GRANT_STATUS.ACTIVE
+    && grant.goal_id === goalId
+    && grant.mandate_kind === MANDATE_KIND.STANDING_AUTO)
+  const listedGrants = auth.grants.filter(grant => grant.status === GRANT_STATUS.ACTIVE && grant.goal_id === goalId)
+  const listedUnits = new Set(listedGrants.flatMap(grant => grant.protected_assets.unit_numbers))
+  const listedMaterials = listedGrants.flatMap(grant => grant.protected_materials)
+  // The name a listed container goes by: its own entity_name, else the name its NPC placement receipt recorded.
+  const containerName = material => material.entity_name
+    ?? auth.world.npc_placements.find(item => item.unit_number === material.container_unit_number)?.entity_name
 
   const reservations = activeReservations(auth)
   const reservedUnits = new Set(reservations.map(item => item.unit_number))
@@ -819,6 +831,50 @@ export function evaluateOperationAdmission(state, { operations, preflight, actor
 
     const unit = Number.isSafeInteger(args.unit_number) ? args.unit_number : undefined
     const withdraws = (name === 'move_items_exact' && args.to_entity === false) || name === 'mine_entity_exact'
+    // A material the grant lists is never taken (from a container, by name, from a container it lives in, or from a player).
+    const takes = ((name === 'move_items_exact' || name === 'move_items') && args.to_entity === false)
+      || (name === 'move_items_with_player' && args.to_player === false) || name === 'mine_entity_exact' || name === 'mine_entity'
+    if (takes) {
+      // Each listed entry is matched on its own terms: an entry naming both an item and a container means "this item in this
+      // container" (taking the container itself, by mining, takes whatever it holds). One operation can hit several entries; an
+      // approval must then cover every hit subject.
+      const hits = new Map()
+      for (const material of listedMaterials) {
+        const hasItem = Boolean(material.item_name)
+        const hasContainer = material.container_unit_number !== null && material.container_unit_number !== undefined
+        const itemMatches = hasItem && args.item_name === material.item_name
+        const containerMatches = hasContainer && unit !== undefined && unit === material.container_unit_number
+        const hit = hasItem && hasContainer ? (name === 'mine_entity_exact' ? containerMatches : itemMatches && containerMatches)
+          : hasItem ? itemMatches
+          : containerMatches
+        if (hit) {
+          const subject = hasItem && hasContainer ? `${material.item_name}@${material.container_unit_number}` : hasContainer ? material.container_unit_number : material.item_name
+          hits.set(subject, { code: ADMISSION_REFUSAL.RESERVED_SUPPLY, reason: 'grant_protected_material' })
+        }
+        // A name-based withdrawal or mining cannot say which container it takes from: while a listed container goes by that name
+        // it is refused rather than guessed (the reservation rule, applied to listed containers).
+        if (hasContainer && !itemMatches && hasItem) continue
+        const listedName = hasContainer ? containerName(material) : undefined
+        const byName = (name === 'move_items' && args.to_entity === false) || name === 'mine_entity'
+        if (byName && listedName && args.entity_name === listedName) {
+          hits.set(`name:${listedName}`, { code: ADMISSION_REFUSAL.RESERVED_AMBIGUOUS, reason: 'reserved_supply_ambiguous_target' })
+        }
+      }
+      const unapproved = [...hits.keys()].filter(subject => !hasApproval(auth, { reason: APPROVAL_REASON.RESERVED_SUPPLY, subject, goalId }))
+      if (unapproved.length > 0) {
+        const first = hits.get(unapproved[0])
+        return {
+          ok: false,
+          code: first.code,
+          reason: first.reason,
+          operation: name,
+          operation_index: index,
+          ...(unit !== undefined ? { unit_number: unit } : {}),
+          item_name: text(args.item_name, 120),
+          subjects: unapproved,
+        }
+      }
+    }
     if (withdraws && unit !== undefined && reservedUnits.has(unit) && !hasApproval(auth, { reason: APPROVAL_REASON.RESERVED_SUPPLY, subject: unit, goalId })) {
       return { ok: false, code: ADMISSION_REFUSAL.RESERVED_SUPPLY, reason: 'container_is_reserved', operation: name, operation_index: index, unit_number: unit }
     }
@@ -833,7 +889,7 @@ export function evaluateOperationAdmission(state, { operations, preflight, actor
       return { ok: false, code: ADMISSION_REFUSAL.RESERVED_AMBIGUOUS, reason: 'name_based_mining_while_a_container_of_that_name_is_reserved', operation: name, operation_index: index, entity_name: text(args.entity_name, 120) }
     }
 
-    if (grantBacked && PROTECTED_MUTATION_OPERATIONS.includes(name) && unit !== undefined) {
+    if ((grantBacked || (unit !== undefined && listedUnits.has(unit))) && PROTECTED_MUTATION_OPERATIONS.includes(name) && unit !== undefined) {
       const protection = entityProtection(auth, { unit_number: unit, last_user: target?.last_user }, { goalId })
       if (protection.protected && !hasApproval(auth, { reason: APPROVAL_REASON.PROTECTED_ENTITY, subject: unit, goalId })) {
         return {
