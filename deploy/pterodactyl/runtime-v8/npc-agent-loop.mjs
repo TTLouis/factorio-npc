@@ -125,6 +125,7 @@ import {
   isPlannerControlToolName,
   parsePlan as parseRuntimePlan,
   plannerControlPayloadFromMessage,
+  plannerControlToolDefinitions,
   renderOperation,
   renderOperationPreflight,
   runtimeConditionCommand,
@@ -138,6 +139,7 @@ import {
 } from './jev-typed-projection.mjs'
 import { activeStepOf, parseTimeReview, PlanTiming } from './plan-time-estimate.mjs'
 import { insertTailBlock } from './prompt-prefix.mjs'
+import { repairControlJson } from './control-json-repair.mjs'
 import { ChatAcknowledger } from './responsiveness.mjs'
 import { UsageLedger } from './usage-ledger.mjs'
 import { checkpointMachineRequirements, checkpointWaitRequirement, compactMachineFacts, compactMachineInventories, conditionEta, conditionWakeCause, freshReadCondition, isWaitOnlyBatch, mostRecentWorkingUnit, safeWaitSchedule, scheduleWait, waitOnlyTicks, WAIT_BASIS, WAIT_FACT_MAX_MACHINES, WAIT_FACT_RADIUS } from './production-wait.mjs'
@@ -2375,6 +2377,20 @@ function stateFileFromOptions(options) {
   if (process.env.NODE_TEST_CONTEXT) return null
   return path.join(path.resolve(process.env.CONTAINER_ROOT || '/home/container'), '.sgluna', 'npc-state.json')
 }
+
+// Deterministic syntax repair of a malformed control reply (control-json-repair.mjs). The schema is the planner
+// control tool's own parameters, so no field list lives here.
+const CONTROL_JSON_SCHEMA = plannerControlToolDefinitions[0].function.parameters
+
+// Strict-parse failures that are about something other than the shape of the control JSON; repair never applies.
+const CONTROL_REPAIR_SKIPPED_CODES = new Set([
+  'observation_request_refused',
+  'observation_request_not_processed',
+  'provider_output_budget_exhausted',
+  'provider_safety_blocked',
+  'plan_content_refused',
+  'dsml_malformed',
+])
 
 // Cut a truncated JSON object back to its last complete top-level member.
 // Never invents content: it only drops an incomplete trailing member.
@@ -10468,6 +10484,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     await this.assertCurrent()
     await this.dropIfStale(attribution)
     if (!message || typeof message !== 'object') throw new AgentLoopError('Provider returned no message')
+    this.lastProviderRound = round
     // Filtered output must never reach planner extraction or salvage. Transport
     // diagnostics are non-enumerable and ordinary spread normalization loses them.
     if (message?._sglunaProvider?.diagnostic_code === 'provider_safety_blocked') {
@@ -10505,12 +10522,28 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         arguments_tail: cleanMemoryText(rawArgs.slice(-200), 200),
         finish_reason: message._sglunaProvider?.finish_reason,
       })
+      // Encoding/syntax repair comes before the truncation salvage: salvage would drop an over-encoded
+      // trailing member (live 2026-10-08: developmentMode "\"vertical\""), repair keeps the model's value.
+      const repair = repairControlJson(rawArgs, CONTROL_JSON_SCHEMA)
+      if (repair) {
+        const repairTrace = { request_id: this.traceRequest?.id, round, source: 'submit_plan_arguments', repairs: repair.repairs }
+        try {
+          plannerSubmission = plannerControlPayloadFromMessage(providerMessageWith(message, {
+            tool_calls: [{ ...call, function: { ...call.function, arguments: repair.text } }],
+          }))
+          await this.traceEvent('provider.control_json_repaired', { ...repairTrace, reason: 'deterministic_syntax_repair' })
+        }
+        catch (repairError) {
+          await this.traceEvent('provider.control_json_repair_failed', { ...repairTrace,
+            reason: 'repaired_form_still_invalid', failure: cleanMemoryText(repairError instanceof Error ? repairError.message : String(repairError), 300) })
+        }
+      }
       // Live, deepseek reproducibly stops a submitPlan mid-way through an
       // optional trailing member (`..."operations":[...], "checkpoint"::`)
       // while reporting a clean finish. Everything before that member is a
       // complete plan. Keep it -- but only if the salvaged object passes the
       // same validation as an intact submission.
-      const salvaged = salvageTruncatedJsonObject(rawArgs)
+      const salvaged = plannerSubmission ? undefined : salvageTruncatedJsonObject(rawArgs)
       if (salvaged) {
         try {
           plannerSubmission = plannerControlPayloadFromMessage(providerMessageWith(message, {
@@ -10674,7 +10707,37 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return parseRuntimePlan(raw)
   }
 
+  // A malformed control reply is repaired deterministically (control-json-repair.mjs) before the model is asked
+  // again: only after the strict parse/validation failed, and only when the repaired form passes the same strict
+  // path. Otherwise the original error stands and the existing format recovery / retry runs unchanged.
   parsePlanMessage(message) {
+    const rejectedBefore = new Set(this.rejectedExactTargets)
+    try {
+      return this.parsePlanMessageStrict(message)
+    }
+    catch (error) {
+      if (CONTROL_REPAIR_SKIPPED_CODES.has(error?.code) || typeof message?.content !== 'string') throw error
+      const repair = repairControlJson(message.content, CONTROL_JSON_SCHEMA)
+      if (!repair) throw error
+      const trace = { request_id: this.traceRequest?.id, round: this.lastProviderRound, source: 'content', repairs: repair.repairs }
+      // The strict path remembers rejected exact targets; the repaired attempt must not count as a repeat of the first.
+      const rejectedAfterFirst = this.rejectedExactTargets
+      this.rejectedExactTargets = rejectedBefore
+      try {
+        const plan = this.parsePlanMessageStrict(providerMessageWith(message, { content: repair.text }))
+        void this.traceEvent('provider.control_json_repaired', { ...trace, reason: 'deterministic_syntax_repair' })
+        return plan
+      }
+      catch (repairError) {
+        this.rejectedExactTargets = rejectedAfterFirst
+        void this.traceEvent('provider.control_json_repair_failed', { ...trace,
+          reason: 'repaired_form_still_invalid', failure: cleanMemoryText(repairError instanceof Error ? repairError.message : String(repairError), 300) })
+        throw error
+      }
+    }
+  }
+
+  parsePlanMessageStrict(message) {
     if (message?._sglunaObservationRefusal) {
       const error = new AgentLoopError(`Targeted observation refused: ${JSON.stringify(message._sglunaObservationRefusal)}. No gameplay or completion was admitted. Correct the control decision using this current state, reuse grounded facts, or submit a valid draft with completion declarations and operations: [].`)
       error.failureClass = 'plan_category'

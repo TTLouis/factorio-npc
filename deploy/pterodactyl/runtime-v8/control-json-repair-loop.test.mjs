@@ -1,0 +1,192 @@
+// The real NpcAgentLoop with deterministic control-JSON repair: a malformed control reply is repaired in code and
+// admitted without a model retry, a reply whose content is wrong is not repaired, and a repair whose result still
+// fails goes down today's retry path. Traces carry request_id, round and the reason.
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+
+import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
+import { NpcAgentLoop } from './npc-agent-loop.mjs'
+import { FakeFactorio, gather, inventoryCheckpoint, planReply, recordingJev } from './task-loop-fixtures.mjs'
+
+const RUN_C = JSON.parse(readFileSync(new URL('./fixtures/control-json-repair-run-c-2026-10-08.json', import.meta.url), 'utf8'))
+
+function submitCall(argumentsText) {
+  return { content: '', tool_calls: [{ id: 'p1', type: 'function', function: { name: 'submitPlan', arguments: argumentsText } }] }
+}
+
+function validPlanArguments(extra = {}) {
+  return {
+    plan: ['Gather 10 coal'],
+    currentStep: 0,
+    operations: [gather('coal', 10)],
+    ...extra,
+  }
+}
+
+function makeAgent(provider) {
+  const game = new FakeFactorio()
+  const jev = recordingJev(async (_state, questions) =>
+    questions.intent ? { overrides: { intent: { choice: 'new_goal', confidence: 0.9 } } } : undefined)
+  const traces = []
+  const agent = new NpcAgentLoop({
+    rcon: game,
+    memory: new CanonicalTaskBoardMemory(),
+    provider: async (...args) => provider(...args),
+    interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
+    interactionDecisionProvider: jev,
+    steeringDecisionProvider: jev,
+    systemPrompt: 'control json repair',
+    stateFile: null,
+    traceFile: null,
+    decisionTraceFile: null,
+    npcId: 'sgluna',
+  })
+  const write = agent.traceEvent.bind(agent)
+  agent.traceEvent = (event, data, options) => { traces.push({ event, data }); return write(event, data, options) }
+  const rows = name => traces.filter(row => row.event === name)
+  return { agent, game, traces, rows }
+}
+
+// Live run C was a later slice of a long-horizon goal, where a semantic step is allowed. A fresh goal in this
+// harness world refuses semantic steps (semantic_step_in_execution_plan) whatever the repair did, so that one
+// entry is swapped for a deterministic one. The over-encoded tail the test is about is left byte for byte.
+const SEMANTIC_ENTRY = /\{"kind":"semantic","rationale":"[^"]*"\}/
+const DETERMINISTIC_ENTRY = '{"kind":"deterministic","checkpoint":{"mode":"all","requirements":[{"id":"requirement_1","kind":"inventory_count","item_name":"iron-plate","minimum":75}]}}'
+
+test('the run C reply is repaired and accepted with no model retry', async () => {
+  let calls = 0
+  const args = RUN_C.arguments.replace(SEMANTIC_ENTRY, DETERMINISTIC_ENTRY)
+  assert.notEqual(args, RUN_C.arguments)
+  assert.ok(args.endsWith(RUN_C.tail_verbatim))
+  const { agent, game, traces, rows } = makeAgent(async () => {
+    calls++
+    return submitCall(args)
+  })
+  game.knownTechnologies.add('logistic-science-pack')
+  const result = await agent.request('gather 100 iron ore', { sender: 'Louis' })
+
+  assert.equal(result.goalStatus, 'active')
+  assert.equal(calls, 1, 'no second model round')
+  assert.equal(game.mutations.length, 1)
+
+  const repaired = rows('provider.control_json_repaired')
+  assert.equal(repaired.length, 1)
+  assert.equal(typeof repaired[0].data.request_id, 'string')
+  assert.equal(repaired[0].data.round, 0)
+  assert.equal(repaired[0].data.reason, 'deterministic_syntax_repair')
+  assert.deepEqual(repaired[0].data.repairs, [{ kind: 'decoded_string', path: 'developmentMode' }])
+  assert.equal(rows('provider.control_json_repair_failed').length, 0)
+  // The model's own value reaches the plan; the truncation salvage that used to drop it never ran.
+  assert.equal(rows('provider.plan_submission_salvaged').length, 0)
+  assert.equal(rows('plan.accepted')[0].data.development_mode, 'vertical')
+  // The repair is traced after the strict refusal it replaced and before the plan is accepted.
+  const order = traces.map(row => row.event)
+  assert.ok(order.indexOf('provider.plan_submission_invalid') < order.indexOf('provider.control_json_repaired'))
+  assert.ok(order.indexOf('provider.control_json_repaired') < order.indexOf('plan.accepted'))
+})
+
+test('a deeper over-encoding (stringified stepCompletions) is repaired on the content path with the same trace', async () => {
+  let calls = 0
+  const checkpoint = inventoryCheckpoint('coal', 10)
+  const { agent, game, rows } = makeAgent(async () => {
+    calls++
+    return submitCall(JSON.stringify(validPlanArguments({
+      stepCompletions: JSON.stringify([{ kind: 'deterministic', checkpoint }]),
+    })))
+  })
+  const result = await agent.request('gather 10 coal', { sender: 'Louis' })
+
+  assert.equal(result.goalStatus, 'active')
+  assert.equal(calls, 1)
+  assert.equal(game.mutations.length, 1)
+  const repaired = rows('provider.control_json_repaired')
+  assert.equal(repaired.length, 1)
+  assert.equal(repaired[0].data.source, 'content')
+  assert.equal(repaired[0].data.reason, 'deterministic_syntax_repair')
+  assert.equal(typeof repaired[0].data.request_id, 'string')
+  assert.equal(repaired[0].data.round, 0)
+  assert.deepEqual(repaired[0].data.repairs, [{ kind: 'decoded_string', path: 'stepCompletions' }])
+})
+
+test('a JSON control object with trailing commas in assistant content is repaired without a retry', async () => {
+  let calls = 0
+  const { agent, game, rows } = makeAgent(async () => {
+    calls++
+    const body = JSON.stringify({ chatMessage: 'Gathering', ...validPlanArguments({ checkpoint: inventoryCheckpoint('coal', 10) }) })
+    return { content: `${body.replace('}}]', '}},]').slice(0, -1)},}` }
+  })
+  const result = await agent.request('gather 10 coal', { sender: 'Louis' })
+
+  assert.equal(result.goalStatus, 'active')
+  assert.equal(calls, 1)
+  assert.equal(game.mutations.length, 1)
+  const repaired = rows('provider.control_json_repaired')
+  assert.equal(repaired.length, 1)
+  assert.equal(repaired[0].data.source, 'content')
+  assert.ok(repaired[0].data.repairs.length >= 1 && repaired[0].data.repairs.every(item => item.kind === 'trailing_comma'))
+})
+
+test('a reply whose content is wrong (invalid enum value) is not repaired and goes to the retry path', async () => {
+  let calls = 0
+  const { agent, game, rows } = makeAgent(async () => {
+    calls++
+    if (calls === 1) {
+      return planReply({ plan: ['Gather 10 coal'], operations: [gather('coal', 10)], checkpoint: inventoryCheckpoint('coal', 10), developmentMode: 'sideways' })
+    }
+    return planReply({ plan: ['Gather 10 coal'], operations: [gather('coal', 10)], checkpoint: inventoryCheckpoint('coal', 10), developmentMode: 'vertical' })
+  })
+  const result = await agent.request('gather 10 coal', { sender: 'Louis' })
+
+  assert.equal(result.goalStatus, 'active')
+  assert.equal(calls, 2, 'the model was asked again')
+  assert.equal(game.mutations.length, 1)
+  assert.equal(rows('provider.control_json_repaired').length, 0)
+  assert.equal(rows('provider.control_json_repair_failed').length, 0)
+})
+
+test('a repair whose result still fails validation is traced as failed and the old retry runs', async () => {
+  let calls = 0
+  const { agent, game, rows } = makeAgent(async () => {
+    calls++
+    if (calls === 1) {
+      // The stringified operations decode to an array the control schema accepts, but gather_resource without its
+      // arguments is refused by the strict operation parser, exactly as it would be if sent unencoded.
+      return planReply({ plan: ['Gather 10 coal'], operations: JSON.stringify([{ name: 'gather_resource', args: {} }]), checkpoint: inventoryCheckpoint('coal', 10) })
+    }
+    return planReply({ plan: ['Gather 10 coal'], operations: [gather('coal', 10)], checkpoint: inventoryCheckpoint('coal', 10) })
+  })
+  const result = await agent.request('gather 10 coal', { sender: 'Louis' })
+
+  assert.equal(result.goalStatus, 'active')
+  assert.equal(calls, 2, 'the failed repair falls through to the existing retry')
+  assert.equal(game.mutations.length, 1)
+  assert.equal(rows('provider.control_json_repaired').length, 0)
+  const failed = rows('provider.control_json_repair_failed')
+  assert.equal(failed.length, 1)
+  assert.equal(failed[0].data.reason, 'repaired_form_still_invalid')
+  assert.equal(typeof failed[0].data.request_id, 'string')
+  assert.equal(failed[0].data.round, 0)
+  assert.deepEqual(failed[0].data.repairs, [{ kind: 'decoded_string', path: 'operations' }])
+})
+
+test('submitPlan arguments with trailing commas are repaired before the truncation salvage, keeping every member', async () => {
+  let calls = 0
+  const arguments_ = `${JSON.stringify(validPlanArguments({ checkpoint: inventoryCheckpoint('coal', 10), developmentMode: 'maintain' })).replace('}}]', '}},]').slice(0, -1)},}`
+  const { agent, game, rows } = makeAgent(async () => {
+    calls++
+    return submitCall(arguments_)
+  })
+  const result = await agent.request('gather 10 coal', { sender: 'Louis' })
+
+  assert.equal(result.goalStatus, 'active')
+  assert.equal(calls, 1)
+  assert.equal(game.mutations.length, 1)
+  const repaired = rows('provider.control_json_repaired')
+  assert.equal(repaired.length, 1)
+  assert.equal(repaired[0].data.source, 'submit_plan_arguments')
+  assert.equal(repaired[0].data.round, 0)
+  assert.deepEqual(repaired[0].data.repairs.map(item => item.kind), ['trailing_comma', 'trailing_comma'])
+  assert.equal(rows('provider.plan_submission_salvaged').length, 0)
+  assert.equal(rows('plan.accepted')[0].data.development_mode, 'maintain', 'the last member survives; salvage would have dropped it')
+})
