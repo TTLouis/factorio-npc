@@ -880,7 +880,7 @@ export const plannerControlToolDefinitions = [{
 
 plannerControlToolDefinitions[0].function.parameters.properties.stepCompletions = {
   type: 'array', maxItems: 30,
-  description: 'Required on newly authored plans: one declaration per plan description at the same index. World-changing steps require deterministic checkpoints; semantic mode is for observation/assessment only.',
+  description: 'Required on newly authored plans: one declaration per plan description at the same index. Execution plans declare only deterministic checkpoints. Semantic declarations are accepted only with assessmentOnly:true.',
   items: { oneOf: [
     { type: 'object', additionalProperties: false, required: ['kind', 'checkpoint'], properties: {
       kind: { type: 'string', enum: ['deterministic'] },

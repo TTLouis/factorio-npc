@@ -6057,6 +6057,25 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       error.code = declarationError
       throw error
     }
+    // Execution slices declare only deterministic checkpoints (owner decision 2026-10-08). Observation is done with
+    // observation tools, not plan steps; semantic declarations belong to an assessmentOnly slice. This applies to a newly
+    // authored draft only: the frozen branch above keeps committed (saved) plans with semantic steps working.
+    if (plan.assessmentOnly !== true) {
+      const semanticIndexes = plan.stepCompletions.flatMap((declaration, index) => declaration.kind === 'semantic' ? [index] : [])
+      if (semanticIndexes.length > 0) {
+        await this.traceEvent('plan.semantic_step_refused', {
+          request_id: this.traceRequest?.id,
+          reason: 'execution_plan_declares_only_deterministic_checkpoints',
+          step_count: plan.stepCompletions.length,
+          semantic_step_indexes: semanticIndexes.slice(0, 30),
+          semantic_step_descriptions: semanticIndexes.slice(0, 30).map(index => cleanMemoryText(plan.plan[index], 200)),
+        })
+        const error = new AgentLoopError('semantic_step_in_execution_plan: execution plans declare only deterministic checkpoints, one per step, naming the step\'s world result. Semantic declarations are accepted only with assessmentOnly:true (no operations). No contract has been committed.')
+        error.failureClass = 'plan_category'
+        error.code = 'semantic_step_in_execution_plan'
+        throw error
+      }
+    }
     for (const [index, declaration] of plan.stepCompletions.entries()) {
       if (declaration.kind === 'semantic') {
         if (index === plan.currentStep && plan.operations.length > 0) {
