@@ -4,7 +4,8 @@ import path from 'node:path'
 import { check, DeploymentError } from './common.mjs'
 import { diagnoseDsmlRejection, parseDsmlToolCalls } from './dsml-tool-calls.mjs'
 import { cacheBreakpointIndexes, insertTailBlock, lastUserOutsideTail, promptLayout } from './prompt-prefix.mjs'
-import { approvedOperationListText, parsePlan, providerToolDefinitions as toolDefinitions } from './structured-policy.mjs'
+import { EXECUTOR_ROLE } from './agent-roles.mjs'
+import { approvedOperationListText, executorProviderToolDefinitions, parsePlan, providerToolDefinitions as toolDefinitions } from './structured-policy.mjs'
 
 const COMPLETION_MARKER = '[MOD] Autorio operation batch completed.'
 const FAILURE_MARKER = '[MOD] Autorio operation error:'
@@ -263,6 +264,43 @@ plan is the visible canonical checklist proposal, currentStep indexes it, and op
 export const CLOSED_CONTROL_PROMPT = `[CONTROL_OUTPUT] Tool invocations are disabled for this round (tool_choice none). Normal observations are closed; the harness still accepts your control decision as ONE strict JSON object in assistant content. Follow the current [CONTROL_DECISION_STATE] for eligible bounded missing-fact reads and draft versus committed-step authority. Do not call submitPlan or another tool, and do not omit completion fields merely because tools are closed.
 Use chatMessage, plan, currentStep and operations, plus the applicable checkpoint, semanticCompletion, stepCompletions, assessmentOnly, goal, roadmap, roadmapNodeIds, developmentMode or timeReview. New execution drafts require at least one deterministic step and stepCompletions aligned to plan, with entries {kind:"deterministic",checkpoint:{mode,requirements}} or {kind:"semantic",rationale:"..."}; keep committed completion specifications unchanged. For an intentionally observation-only slice, set assessmentOnly:true with only semantic steps and no operations. Research completion uses research_completed {technology}, including mode:"all" for multiple technologies; an unmet result is a valid future checkpoint, not an assessment. Root checkpoint remains the active-step compatibility form.
 An executor may close the exact active prose-only step with a grounded semanticCompletion. For the final step of a slice, operations:[] is valid; the harness checks the user goal and returns control to the planner if more work remains. Example shape (replace placeholders and use the actual currentStep): {"chatMessage":"","plan":["<committed step>"],"currentStep":0,"operations":[],"semanticCompletion":{"stepId":"<exact active step id>","rationale":"<grounded judgment>"}}. Never bypass an unmet deterministic checkpoint or invent another gameplay action just to close a completed step. If genuinely blocked, start chatMessage with "BLOCKED: " and state the exact blocker.`
+
+// The executor sends stepId, not plan and currentStep (agent-roles.mjs EXECUTOR_ROLE_PROMPT; its submitPlan schema requires
+// stepId). Each pair below rewrites one sentence of the shared prompts that still told every role to send plan and
+// currentStep. The planner's text is the constants above, byte for byte; a pair that no longer matches fails at load, so
+// the shared wording cannot drift away from the executor's silently.
+function executorPrompt(text, substitutions) {
+  let out = text
+  for (const [from, to] of substitutions) {
+    if (!out.includes(from)) throw new Error(`executor prompt substitution no longer matches the shared prompt: ${from.slice(0, 60)}`)
+    out = out.replace(from, () => to)
+  }
+  return out
+}
+
+export const EXECUTOR_COMPACT_CONTINUATION_PROMPT = executorPrompt(COMPACT_CONTINUATION_PROMPT, [
+  ['Answer with one submitPlan call when tool calls are enabled: {plan:["observable step"],currentStep,operations:[{name,args}]} plus the applicable completion fields.',
+    'Answer with one submitPlan call when tool calls are enabled: {stepId,operations:[{name,args}]} plus the applicable completion fields, where stepId is the active step id from [CONTROL_DECISION_STATE].'],
+  ['plan is the visible canonical checklist proposal, currentStep indexes it, and operations contains only approved structured operations.',
+    'operations contains only approved structured operations.'],
+  ['return plan:[], currentStep:0, operations:[] and a short completion chatMessage.',
+    'return operations:[] and a short completion chatMessage.'],
+  ['checkpoint, semanticCompletion and stepCompletions remain allowed.',
+    'checkpoint and semanticCompletion remain allowed.'],
+  [' New drafts include stepCompletions aligned to plan: each entry is {kind:"deterministic",checkpoint:{mode,requirements}} or {kind:"semantic",rationale:"..."}. Luna authors the outcome; the harness validates it.',
+    ''],
+  ['New execution drafts need at least one deterministic step. For an intentionally observation-only slice, set assessmentOnly:true with only semantic steps and no operations. Missing stock or unmet research describes work remaining, not an assessment-only result. research_completed',
+    'research_completed'],
+])
+
+export const EXECUTOR_CLOSED_CONTROL_PROMPT = executorPrompt(CLOSED_CONTROL_PROMPT, [
+  ['Use chatMessage, plan, currentStep and operations, plus the applicable checkpoint, semanticCompletion, stepCompletions, assessmentOnly, goal, roadmap, roadmapNodeIds, developmentMode or timeReview.',
+    'Use chatMessage, stepId and operations, plus the applicable checkpoint, semanticCompletion or timeReview.'],
+  ['Example shape (replace placeholders and use the actual currentStep): {"chatMessage":"","plan":["<committed step>"],"currentStep":0,"operations":[],"semanticCompletion"',
+    'Example shape (replace placeholders): {"chatMessage":"","stepId":"<exact active step id>","operations":[],"semanticCompletion"'],
+  ['New execution drafts require at least one deterministic step and stepCompletions aligned to plan, with entries {kind:"deterministic",checkpoint:{mode,requirements}} or {kind:"semantic",rationale:"..."}; keep committed completion specifications unchanged. For an intentionally observation-only slice, set assessmentOnly:true with only semantic steps and no operations. Research completion',
+    'Research completion'],
+])
 
 function sanitizePromptTraceValue(value, key = '') {
   if (SENSITIVE_PROMPT_KEY.test(key)) return '[REDACTED]'
@@ -783,7 +821,9 @@ function isPlainObject(value) {
 function unwrapSubmitPlan(parsed) {
   if (!isPlainObject(parsed) || !Object.hasOwn(parsed, 'submitPlan')) return { object: parsed }
   const nested = parsed.submitPlan
-  if (!isPlainObject(nested) || !Array.isArray(nested.plan)) return { refused: 'submit_plan_wrapper_not_a_plan' }
+  // The plan array satisfies the check, and so does an executor's step id (planSurfaceOf).
+  const namesStep = isPlainObject(nested) && typeof nested.stepId === 'string' && nested.stepId.trim() !== ''
+  if (!isPlainObject(nested) || (!Array.isArray(nested.plan) && !namesStep)) return { refused: 'submit_plan_wrapper_not_a_plan' }
   if (Object.hasOwn(nested, 'submitPlan')) return { refused: 'submit_plan_wrapper_nested_twice' }
   if (!Object.keys(parsed).every(key => SUBMIT_PLAN_WRAPPER_OUTER_KEYS.has(key))) return { refused: 'submit_plan_wrapper_unknown_members' }
   for (const key of SUBMIT_PLAN_SHARED_MEMBERS) {
@@ -1247,12 +1287,12 @@ export function compactCompletionReceipt(content) {
   }
 }
 
-export function compactCompletionMessages(messages) {
+export function compactCompletionMessages(messages, { role } = {}) {
   let replacedSystem = false
   return messages.map((message) => {
     if (!replacedSystem && message?.role === 'system') {
       replacedSystem = true
-      return { ...message, content: COMPACT_CONTINUATION_PROMPT }
+      return { ...message, content: role === EXECUTOR_ROLE ? EXECUTOR_COMPACT_CONTINUATION_PROMPT : COMPACT_CONTINUATION_PROMPT }
     }
     if (message?.role === 'user' && typeof message.content === 'string') {
       if (message.content.startsWith(COMPLETION_MARKER)) {
@@ -1326,6 +1366,7 @@ export async function providerRequest(config, messages, {
   providerPolicy,
   forceFullPlanner = false,
   interactionRouter = false,
+  role,
 } = {}) {
   check(typeof config.key === 'string' && config.key.trim().length > 0, 'OPENAI_API_KEY is missing')
   check(typeof config.model === 'string' && /^[a-zA-Z0-9._:/-]{1,200}$/.test(config.model), 'Invalid model identifier')
@@ -1342,7 +1383,10 @@ export async function providerRequest(config, messages, {
   const outputBudgetRecovery = recoveryKind === 'output_budget_exhaustion'
   const compactContinuation = outputBudgetRecovery
     || (!forceFullPlanner && isSuccessfulCompletionContinuation(messages, { allowTools, recoveryAttempt }))
-  const compactedMessages = compactContinuation ? compactCompletionMessages(messages) : messages
+  // The executor has its own submitPlan schema and answer-shape wording; every other caller keeps the shared ones.
+  const executorRound = role === EXECUTOR_ROLE && !interactionRouter
+  const roleToolDefinitions = executorRound ? executorProviderToolDefinitions : toolDefinitions
+  const compactedMessages = compactContinuation ? compactCompletionMessages(messages, { role: executorRound ? EXECUTOR_ROLE : undefined }) : messages
   const capability = providerCapabilityProfile(config)
   check(!allowTools || capability.tool_support === true, 'Provider profile does not allow tool calls')
   const disableThinking = compactContinuation && capability.thinking_control === 'deepseek'
@@ -1352,7 +1396,7 @@ export async function providerRequest(config, messages, {
   // control contract is dynamic guidance beside steering, before the receipt.
   const controlledMessages = !interactionRouter && !allowTools
     ? steeredMessages.map(message => message?.role === 'user' && typeof message.content === 'string' && message.content.startsWith(STEERING_MARKER)
-      ? { ...message, content: `${message.content}\n\n${CLOSED_CONTROL_PROMPT}` }
+      ? { ...message, content: `${message.content}\n\n${executorRound ? EXECUTOR_CLOSED_CONTROL_PROMPT : CLOSED_CONTROL_PROMPT}` }
       : message)
     : steeredMessages
   // The interaction router answers in JSON content, so it keeps its own
@@ -1382,7 +1426,7 @@ export async function providerRequest(config, messages, {
   // from its first token, so the whole cached history is lost.
   const keepClosedTools = !allowTools && !interactionRouter && capability.tools_kept_when_closed === true && capability.tool_support === true
   if (allowTools || keepClosedTools) {
-    body.tools = compactContinuation ? compactCompletionTools(toolDefinitions) : toolDefinitions
+    body.tools = compactContinuation ? compactCompletionTools(roleToolDefinitions) : roleToolDefinitions
     body.tool_choice = allowTools ? 'auto' : 'none'
   }
   applyRequestBodyPatch(body, requestBodyPatch, capability)
@@ -1402,6 +1446,14 @@ export async function providerRequest(config, messages, {
     promptLayout: promptLayout(styledMessages, { tools: body.tools }),
   }
   await traceProviderPayload(body, traceOptions)
+  if (executorRound) {
+    await traceProviderResult('provider.executor_control_contract', {
+      reason: 'executor_submit_plan_requires_step_id',
+      role: EXECUTOR_ROLE,
+      submit_plan_required: body.tools?.find(tool => tool?.function?.name === 'submitPlan')?.function?.parameters?.required,
+      prompt_variant: !allowTools ? 'executor_closed_control' : compactContinuation ? 'executor_compact_continuation' : 'executor_full',
+    }, traceOptions)
+  }
   if (!interactionRouter && !allowTools) {
     await traceProviderResult('provider.control_output_contract', {
       reason: 'observations_closed_control_json_allowed',

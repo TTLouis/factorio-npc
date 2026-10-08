@@ -425,6 +425,12 @@ export function requiresMachineFacts(preflight) {
 // run. A model that keeps authoring claim-only slices ends the run visibly
 // instead of spending the whole continuation limit.
 const MAX_IN_TURN_SLICE_CONTINUATIONS = 3
+// A request's continuations are counted per plan slice (the limits in
+// continueFromModMessage are per slice; the request-wide counter still numbers
+// the trace turns). Until the shared campaign allowance exists (AGENTS.md), this
+// hard cap bounds a request that keeps closing verified slices: one request can
+// never run unbounded. 256 is a chosen default, not an owner-selected figure.
+export const REQUEST_CONTINUATION_BACKSTOP = 256
 const LOW_RISK_NAVIGATION_PROJECTION_MAX_CANDIDATES = 8
 // Once the system commits a plan, its semantic content is immutable; later batches fulfil it rather than rewriting it.
 const FROZEN_PLAN_STATUSES = new Set([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING])
@@ -2958,6 +2964,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.pendingExecutorFactsRefresh = null
     this.agentContext.beginLineage() // planner role: an executor role never leaks into the next chat
     super.reset()
+    // The base reset zeroes the request-wide continuation counter; the slice baseline and the slice's
+    // deterministic-progress count start from the same point.
+    this.sliceContinuationBaseline = 0
+    this.sliceDeterministicCloses = 0
+    this.sliceAdmittedBatches = 0
   }
 
   // The running turn's token for restageContext({ safePoint }); null between turns.
@@ -5368,6 +5379,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async pollConditionWait() {
     if (this.conditionPollPromise) return this.conditionPollPromise
     this.conditionPollPromise = (async () => {
+      const generation = this.generation // the slice-progress credit for a satisfied wait belongs to this lineage only
+      const requestId = this.traceRequest?.id
       const inspected = await this.inspectConditionWait()
       if (!inspected || inspected.action === 'absent') return null
 
@@ -5450,6 +5463,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           condition: wait.condition,
           task_board: visibleTaskBoard(reduced?.state?.task_board),
         })
+        await this.creditSliceProgress('deterministic_close', generation, requestId)
         await this.traceEvent('step.verified', {
           source: 'condition_wait',
           wait_id: identity.wait_id,
@@ -6167,6 +6181,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async applyStepClose(trigger, { key, step, contract, results, reasonCode, source, plannerStep, extraEvidence = [], steeringRecommendation }) {
+    const generation = this.generation // the slice-progress credit below belongs to this lineage only
+    const requestId = this.traceRequest?.id
     const reduced = this.memory.applyOutcomeAuthority?.(key, {
       kind: 'verified_complete',
       source: 'deterministic_runtime',
@@ -6191,6 +6207,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         ...(reduced?.decision?.paused === true ? { paused: true, disagreement: reduced.progressDisagreement } : {}),
       }
     }
+    await this.creditSliceProgress('deterministic_close', generation, requestId)
     await this.traceEvent('step.verified', {
       active_step_id: step.id,
       source,
@@ -8729,7 +8746,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!this.active || !this.epoch) return null
     const currentPlan = this.memory.currentPlan?.(this.activePlanKey())
     const continuationLimit = currentPlan?.status === 'active' ? 64 : this.maxContinuations
-    if (this.continuations >= continuationLimit) {
+    const sliceContinuations = this.continuations - (this.sliceContinuationBaseline ?? 0)
+    if (this.continuations >= REQUEST_CONTINUATION_BACKSTOP) {
+      await this.traceEvent('budget.request_continuation_backstop', {
+        reason: `request_continuation_backstop_${REQUEST_CONTINUATION_BACKSTOP}`,
+        request_continuations: this.continuations,
+        slice_continuations: sliceContinuations,
+        limit: REQUEST_CONTINUATION_BACKSTOP,
+      })
+      await this.pausePersistentPlan(`request_continuation_backstop_${REQUEST_CONTINUATION_BACKSTOP}`)
+      throw new AgentLoopError(`Request continuation backstop reached (${REQUEST_CONTINUATION_BACKSTOP} across all plan slices); durable plan paused`)
+    }
+    if (sliceContinuations >= continuationLimit) {
       await this.pausePersistentPlan(`continuation_limit_${continuationLimit}`)
       throw new AgentLoopError(`Continuation limit reached (${continuationLimit}); durable plan paused`)
     }
@@ -9398,7 +9426,58 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // The plan-slice-completed boundary (settleCompletedStepState, before the next
   // slice's planner wake): the next slice starts counting from here. A step
   // close inside a slice never resets it.
+  //
+  // The continuation baseline moves here too, but only for a slice that verified
+  // at least one deterministic world-result checkpoint (applyStepClose, or a
+  // satisfied condition wait). A slice that closed on semantic claims alone is
+  // not progress the harness can vouch for, so it keeps the old accounting. The
+  // slice's progress count restarts at every slice close either way.
+  async closeContinuationSlice(route) {
+    const previousBaseline = this.sliceContinuationBaseline ?? 0
+    const sliceContinuations = this.continuations - previousBaseline
+    const deterministicCloses = this.sliceDeterministicCloses ?? 0
+    const admittedBatches = this.sliceAdmittedBatches ?? 0
+    this.sliceDeterministicCloses = 0
+    this.sliceAdmittedBatches = 0
+    if (deterministicCloses < 1 || admittedBatches < 1) {
+      await this.traceEvent('budget.continuation_slice_reset_withheld', {
+        route,
+        reason: deterministicCloses < 1 ? 'no_deterministic_progress_in_slice' : 'no_admitted_operations_in_slice',
+        slice_continuations: sliceContinuations,
+        request_continuations: this.continuations,
+        slice_continuation_baseline: previousBaseline,
+        deterministic_steps_verified: deterministicCloses,
+        admitted_operation_batches: admittedBatches,
+      })
+      return
+    }
+    this.sliceContinuationBaseline = this.continuations
+    await this.traceEvent('budget.continuation_slice_reset', {
+      route,
+      reason: 'slice_verified_deterministic_progress',
+      previous_slice_continuations: sliceContinuations,
+      request_continuations: this.continuations,
+      previous_slice_continuation_baseline: previousBaseline,
+      slice_continuation_baseline: this.continuations,
+      deterministic_steps_verified: deterministicCloses,
+      admitted_operation_batches: admittedBatches,
+    })
+  }
+
+  // Slice progress is credited synchronously (before the first await) and only for the lineage that earned it: a reset or an
+  // actor replacement bumps the generation, so a close or an admission that finishes after it never lands in the new
+  // request's slice. A dropped credit is traced with the request it belonged to.
+  async creditSliceProgress(kind, generation, requestId) {
+    if (generation === this.generation) {
+      if (kind === 'admitted_operations') this.sliceAdmittedBatches = (this.sliceAdmittedBatches ?? 0) + 1
+      else this.sliceDeterministicCloses = (this.sliceDeterministicCloses ?? 0) + 1
+      return true
+    }
+    await this.traceEvent('budget.continuation_slice_progress_dropped', { kind, reason: 'stale_generation', stale_request_id: requestId })
+    return false
+  }
   async closeOutputSlice(route) {
+    await this.closeContinuationSlice(route)
     const before = this.sliceOutputCeiling()
     const baseline = markRequestSliceClosed(this.traceRequest)
     if (baseline === undefined) return
@@ -12350,6 +12429,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
               : []),
           ].slice(0, 2)
         : []
+      const completionGeneration = this.generation
       stateResult = this.memory.recordPlan?.(this.requestInfo.memoryKey, await this.revisionSafeRequestInfo(), durablePlan, {
         continuation: this.continuations > 0,
         validatedSemanticAdmission: initialSemanticAdmission,
@@ -12360,6 +12440,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         verifiedCompletion: finalCompletionVerified,
         completionEvidence,
       })
+      // A final-step completion the reducer accepted on the harness's own deterministic receipt verification is a
+      // deterministic close; one grounded only on a fresh observation is semantic and earns no slice progress.
+      if (finalCompletionVerified && stateResult?.outcomeDecision?.accepted === true
+        && completionEvidence.some(item => item?.kind === 'deterministic_verification')) {
+        await this.creditSliceProgress('deterministic_close', completionGeneration, this.traceRequest?.id)
+      }
         // The shelf can only be revised once the goal it belongs to has been
       // admitted, and `recordPlan` is what admits it, so this runs after it and
       // not with the rest of the plan-surface parsing.
@@ -12845,6 +12931,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
       }
 
+      const admitGeneration = this.generation
+      const admitRequestId = this.traceRequest?.id
       const pendingAdmission = await this.recordPendingOperationBeforeSend(operations, before)
       const operationOwnerKey = this.activePlanKey()
       // A restage that landed during that await must not let this reply's batch through
@@ -12937,6 +13025,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           throw error
         }
       }
+      // Reached only when the game took the batch (acknowledged, or reconciled as admitted): real work for this slice.
+      await this.creditSliceProgress('admitted_operations', admitGeneration, admitRequestId)
     }
 
     // U6. The reply is admitted and appended; nothing is in flight. A reply that

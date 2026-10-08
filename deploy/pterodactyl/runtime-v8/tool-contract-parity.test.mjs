@@ -219,6 +219,26 @@ test('submitPlan advertises exactly the fields its parser accepts', () => {
   }
 })
 
+// The executor has its own submitPlan (same name): stepId and operations are required, plan and currentStep are not
+// advertised, and every field it does advertise is one the parser accepts. The planner's definition above is unchanged.
+test('the executor submitPlan advertises exactly the executor fields, all of which the parser accepts', () => {
+  const [definition] = runtime.executorControlToolDefinitions
+  assert.equal(definition.function.name, runtime.PLANNER_CONTROL_TOOL_NAME)
+  assert.deepEqual(definition.function.parameters.required, ['stepId', 'operations'])
+  const advertised = Object.keys(definition.function.parameters.properties).sort()
+  assert.deepEqual(advertised, ['chatMessage', 'checkpoint', 'observationRequest', 'operations', 'semanticCompletion', 'stepId', 'timeReview'])
+  const sample = { observationRequest: { stepId: 's', tool: 'getInventoryItems', args: {}, rationale: 'Need current inventory.' }, chatMessage: 'x', operations: [], checkpoint: {}, semanticCompletion: { stepId: 'step_1' }, stepId: 'step_1', timeReview: { decision: 'keep_serial', reason: 'x' } }
+  for (const field of advertised) {
+    assert.ok(Object.hasOwn(sample, field), `no parity sample for advertised field ${field}`)
+    assert.doesNotThrow(() => runtime.plannerControlPayloadFromMessage({
+      content: '',
+      tool_calls: [{ id: 'control-1', type: 'function', function: { name: runtime.PLANNER_CONTROL_TOOL_NAME, arguments: JSON.stringify({ stepId: 'step_1', operations: [], [field]: sample[field] }) } }],
+    }), `the executor submitPlan advertises ${field} but its parser refuses it`)
+  }
+  const executorTools = runtime.executorProviderToolDefinitions.map(tool => tool.function.name)
+  assert.deepEqual(executorTools, runtime.providerToolDefinitions.map(tool => tool.function.name))
+})
+
 test('submitPlan preserves aligned deterministic and semantic completion declarations on the control boundary', () => {
   const declarations = [
     { kind: 'deterministic', checkpoint: { mode: 'all', requirements: [{ kind: 'research_completed', technology: 'electronics' }] } },
