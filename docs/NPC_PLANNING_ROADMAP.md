@@ -1198,6 +1198,18 @@ This is the run-ahead mechanic described in the section above, applied to step c
 3. A prediction admits nothing and changes nothing. The executor never sees it before it is bound. Only one context acts on the body, as before.
 4. When the active step closes, the harness re-validates the prediction against fresh facts with the same checks as a commit: requirement grounding, checkpoint contract validation, and the semantic-step rule. If it passes, it is bound and the executor goes on without waiting for the planner.
 
+**Steps that are always just in time (owner direction, 2026-10-08)**
+
+Some steps should never be predicted, for example gathering materials. Their contract is a count, and the right count depends on the exact inventory and stock when the step starts. A count written one step early is the staleness this design removes.
+
+Proposed rule: at slice commit, each step intent carries a coarse contract family with no numbers:
+
+- `materials`: inventory or item counts. Always bound just in time and never predicted.
+- `world`: entities, research, production and other world results. Predicted.
+- `assessment`: semantic and observation-only.
+
+A bound contract must match its family. The harness checks this by mapping requirement kinds to families. This adds one field to the planner's commit schema; its wording is shown to the owner before it changes.
+
 **Just in time (the fallback)**
 
 The prediction is discarded, with a traced reason, and the planner authors the contract when the step activates, if any of these hold:
