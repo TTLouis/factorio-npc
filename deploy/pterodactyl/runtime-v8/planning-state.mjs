@@ -676,6 +676,8 @@ function sanitizeGoal(raw) {
     ...(satisfaction ? { satisfaction, satisfied_at: finiteNumber(raw.satisfied_at) ?? satisfaction.at } : {}),
     ...(definition ? { definition } : {}),
     ...(raw.fresh_context_recovery_used === true ? { fresh_context_recovery_used: true } : {}),
+    // MW5: accepted replacement plans this goal has used (the durable cap counter; independent of retained plans and grants).
+    ...(Number.isSafeInteger(raw.replacements_accepted) && raw.replacements_accepted > 0 ? { replacements_accepted: Math.min(raw.replacements_accepted, 1000) } : {}),
     owner: text(raw.owner, 128) || 'unknown',
     objective: text(raw.objective, 1000),
     constraints: stringList(raw.constraints, { max: 24, maxLength: 300 }),
@@ -2725,6 +2727,8 @@ Object.assign(HANDLERS, {
       plans: retainPlans([...plans, successor], successor.plan_id),
       active_plan_id: successor.plan_id,
       authorization: nextAuth,
+      // The accept branch is the only place a replacement is counted: a re-draft of the same successor never passes here.
+      goal: state.goal ? { ...state.goal, replacements_accepted: (state.goal.replacements_accepted ?? 0) + 1, updated_at: now } : state.goal,
       updated_at: now,
       log: logEntry(state, {
         type: PLANNING_EVENT.REPLACEMENT_PLAN_REQUESTED,

@@ -22,7 +22,59 @@ export const REPLACEMENT_WAKE_SKIP = Object.freeze({
   USER_CHOICE_RECORDED: 'user_choice_recorded',
   PLANNER_UNAVAILABLE: 'planner_unavailable',
   NOT_PROVABLY_UNEXECUTED: 'batch_may_have_run',
+  // The plan was never committed (a blocked pre-commit DRAFT): there is nothing to replace, the draft is simply refused.
+  PLAN_NOT_COMMITTED: 'plan_not_committed',
+  // The blocker is not harness-evidenced world change (see blockerWorldEvidence).
+  BLOCKER_NOT_WORLD_EVIDENCE: 'blocker_not_world_evidence',
 })
+
+// What counts as "the world changed under the plan". The wake is only for blockers the harness itself observed in the game;
+// anything else (a model's argument mistake, an authorization refusal, an uncertain-effect hold, a provider failure) keeps
+// today's blocked end. Default deny: a code that is not listed here never wakes the planner.
+export const WORLD_CHANGE_PREFLIGHT_CODES = Object.freeze({
+  // The exact entity the batch targets is gone (destroyed, mined, replaced). The mod resolves the unit number against the live
+  // world, so a miss is an engine fact - but only if the unit really existed, which is checked separately (EXISTENCE_EVIDENCE_CODES).
+  stale_exact_target: 'the exact target entity no longer exists',
+  // Live inventory facts measured by the mod's transfer preflight: the plan assumed stock or room that the world does not have now.
+  supply_missing: 'the NPC inventory no longer holds the item the step relies on',
+  extraction_empty: 'the entity the step takes from holds none of the item now',
+  destination_full: 'the entity the step feeds accepts none of the item now',
+})
+
+// Codes whose meaning depends on the target having existed: a model-invented unit number must not trigger a replan.
+export const EXISTENCE_EVIDENCE_CODES = Object.freeze(['stale_exact_target'])
+
+// Never world evidence, listed so the intent is explicit (default deny already covers them): authorization refusals of MW1
+// (protected / reserved / player inventory / stale grant), the uncertain-effect hold, argument and prototype errors the model
+// can fix itself, a locked recipe (the plan was wrong from the start; the requirements block informs the planner), and the
+// actor or surface being elsewhere.
+export const NEVER_WAKE_PREFLIGHT_CODES = Object.freeze([
+  'authorization_stale', 'protected_entity_refused', 'reserved_supply_refused', 'reserved_supply_ambiguous_target', 'player_inventory_excluded',
+  'duplicate_effect_suppressed',
+  'recipe_locked', 'unknown_prototype', 'unknown_recipe', 'unknown_technology', 'invalid_unit_number', 'invalid_target_kind', 'invalid_preflight_args',
+  'bootstrap_dependency_unresolved', 'no_actor', 'different_surface', 'preflight_transport_error',
+])
+
+/**
+ * Is this blocker harness-evidenced world change?
+ *   trigger 'operation_preflight_blocker': the preflight code must be in WORLD_CHANGE_PREFLIGHT_CODES, and for the existence
+ *     codes the harness must hold evidence the target existed (`existed`: an NPC placement receipt, an earlier authoritative
+ *     observation of the unit, or the mod's own last-observed record).
+ *   trigger 'operation_admission_failure': only a refusal the mod proved happened before any mutation of the first operation
+ *     (`provenRefusal`). A transport, epoch or journal refusal is a harness problem, not the world.
+ */
+export function blockerWorldEvidence({ trigger, preflight, existed = false, provenRefusal = false } = {}) {
+  if (trigger === 'operation_preflight_blocker') {
+    const code = clean(preflight?.code, 80)
+    if (!Object.hasOwn(WORLD_CHANGE_PREFLIGHT_CODES, code)) return { ok: false, detail: `code_not_world_change:${code || 'none'}` }
+    if (EXISTENCE_EVIDENCE_CODES.includes(code) && !existed) return { ok: false, detail: 'target_existence_unproven' }
+    return { ok: true, detail: code }
+  }
+  if (trigger === 'operation_admission_failure') {
+    return provenRefusal ? { ok: true, detail: 'proven_refusal_before_mutation' } : { ok: false, detail: 'admission_refusal_not_proven_by_the_game' }
+  }
+  return { ok: false, detail: `unsupported_trigger:${clean(trigger, 60)}` }
+}
 
 // The scopes the implicit goal grant carries: everything a player's request permits toward its own result.
 export const PLAYER_OBJECTIVE_SCOPE = Object.freeze([
@@ -56,9 +108,10 @@ export function currentGoalGrant(planning) {
   return authorizationOf(planning).grants.find(grant => grant.status === GRANT_STATUS.ACTIVE && grant.goal_id === goalId)
 }
 
-/** Accepted replacements already authored under this grant. Durable: it is read from the retained plan lineage. */
-export function replacementsUsed(planning, grantId) {
-  return (planning?.plans ?? []).filter(plan => plan?.replacement && (!grantId || plan.replacement.grant_id === grantId)).length
+/** Accepted replacements this goal has used. Durable: the reducer counts them on the goal record (snapshot/restore safe). */
+export function replacementsUsed(planning) {
+  const used = planning?.goal?.replacements_accepted
+  return Number.isSafeInteger(used) && used > 0 ? used : 0
 }
 
 /** The blocker of the plan as the replacement request needs it: reason code, detail and the evidence it is grounded in. */
@@ -76,12 +129,19 @@ export function blockerFacts(plan) {
   }
 }
 
-/** Why the plan stopped, in plain words for the player: `operation_preflight_failed:target_not_found` becomes a phrase. */
+// The world-change codes in the words a player reads; any other code is shown as its own words.
+const PLAIN_BLOCKER_REASONS = Object.freeze({
+  stale_exact_target: 'something I was working on is gone',
+  supply_missing: 'I no longer have the items the step needs',
+  extraction_empty: 'the machine or chest I was taking from is empty',
+  destination_full: 'the machine or chest I was filling is full',
+})
+
+/** Why the plan stopped, in plain words for the player: `operation_preflight_failed:stale_exact_target` becomes a phrase. */
 export function plainBlockerReason(reasonCode) {
-  const text = clean(reasonCode, 160)
-    .replace(/^operation_preflight_failed:/, '')
-    .replace(/[_:]+/g, ' ')
-    .trim()
+  const code = clean(reasonCode, 160).replace(/^operation_preflight_failed:/, '')
+  if (Object.hasOwn(PLAIN_BLOCKER_REASONS, code)) return PLAIN_BLOCKER_REASONS[code]
+  const text = code.replace(/[_:]+/g, ' ').trim()
   return text || 'a structural blocker'
 }
 

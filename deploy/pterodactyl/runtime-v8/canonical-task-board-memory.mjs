@@ -13,7 +13,9 @@ import {
   classifyReplacement,
   entityProtection,
   evaluateOperationAdmission,
+  MANDATE_KIND,
   REPLACEMENT_DECISION,
+  replacementStepsFingerprint,
 } from './authorization.mjs'
 import { blockerFacts, currentGoalGrant, replacementsUsed } from './replacement-wake.mjs'
 import {
@@ -1355,9 +1357,28 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return currentGoalGrant(this.planningState(key))
   }
 
-  /** Accepted replacements the goal has used under a grant (read from the retained plan lineage, so it survives restart). */
-  replacementsUsed(key, grantId) {
-    return replacementsUsed(this.planningState(key), grantId)
+  /** True when the goal has ever held a player_task grant (revoked or not): admission never re-activates one. */
+  hasPlayerTaskGrant(key) {
+    const planning = this.planningState(key)
+    const goalId = planning?.goal?.goal_id
+    return Boolean(goalId) && authorizationOf(planning).grants.some(grant => grant.goal_id === goalId && grant.mandate_kind === MANDATE_KIND.PLAYER_TASK)
+  }
+
+  /**
+   * The planner re-submitted while an accepted replacement successor is still an uncommitted DRAFT. A re-draft is fine only if
+   * it is the same steps the grant check covered (the commit refuses a drifted fingerprint, MW1). Returns undefined when no
+   * replacement draft is pending.
+   */
+  pendingReplacementDraft(key, draft) {
+    const held = getActivePlan(this.planningState(key))
+    if (!held?.replacement || held.status !== PLAN_STATUS.DRAFT) return undefined
+    const suffix = revisionSuffix(this.planByNpc.get(key)?.task_board, Array.isArray(draft?.plan) ? draft.plan : [])
+    return { plan_id: held.plan_id, grant_id: held.replacement.grant_id, unchanged: replacementStepsFingerprint(suffix) === held.replacement.steps_fingerprint }
+  }
+
+  /** Accepted replacements the goal has used (the reducer's durable per-goal counter). */
+  replacementsUsed(key) {
+    return replacementsUsed(this.planningState(key))
   }
 
   /**

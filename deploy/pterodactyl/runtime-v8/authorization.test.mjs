@@ -1101,7 +1101,7 @@ test('MW1: restore merges goalless world facts into a goal state a legacy migrat
   assert.equal(authorizationOf(state).world.npc_placements[0].unit_number, 20)
 })
 
-test('MW5: a bare player_task grant (the player objective itself) leaves the interim gates off; one that names protected assets or materials, and a standing_auto grant, turn them on', () => {
+test('MW5: a player_task grant (the player objective itself) leaves the gates off, a standing_auto grant turns them on, and an asset or material a grant lists is always protected', () => {
   const humanBuilt = [{ ok: true, target: { unit_number: 501, last_user: { name: 'louis', index: 1 } } }]
   const mine = [{ name: 'mine_entity_exact', args: { unit_number: 501 } }]
   const takeFromPlayer = [{ name: 'move_items_with_player', args: { item_name: 'iron-plate', player_name: 'louis', max_count: 5, to_player: false } }]
@@ -1110,9 +1110,17 @@ test('MW5: a bare player_task grant (the player objective itself) leaves the int
   const bare = granted(goalState(), objective)
   assert.deepEqual(check(bare, mine, humanBuilt), { ok: true })
   assert.deepEqual(check(bare, takeFromPlayer), { ok: true })
-  const protectedAsset = granted(goalState(), { ...objective, protected_assets: { unit_numbers: [77] } })
+  // An explicitly listed asset is protected whatever the grant kind; an unlisted unit of the same goal is not.
+  const protectedAsset = granted(goalState(), { ...objective, protected_assets: { unit_numbers: [501] } })
   assert.equal(check(protectedAsset, mine, humanBuilt).code, ADMISSION_REFUSAL.PROTECTED_ENTITY)
-  const protectedMaterial = granted(goalState(), { ...objective, protected_materials: [{ item_name: 'iron-plate' }] })
-  assert.equal(check(protectedMaterial, takeFromPlayer).code, ADMISSION_REFUSAL.PLAYER_INVENTORY)
+  assert.deepEqual(check(protectedAsset, [{ name: 'mine_entity_exact', args: { unit_number: 502 } }], humanBuilt), { ok: true })
+  // An explicitly listed material is never taken (by item, or from the container it lives in) and never from a player.
+  const protectedMaterial = granted(goalState(), { ...objective, protected_materials: [{ item_name: 'iron-plate' }, { container_unit_number: 900 }] })
+  const hit = check(protectedMaterial, takeFromPlayer)
+  assert.equal(hit.code, ADMISSION_REFUSAL.RESERVED_SUPPLY)
+  assert.equal(hit.reason, 'grant_protected_material')
+  assert.equal(check(protectedMaterial, [{ name: 'move_items_exact', args: { item_name: 'coal', unit_number: 900, max_count: 5, to_entity: false } }]).reason, 'grant_protected_material')
+  assert.deepEqual(check(protectedMaterial, [{ name: 'move_items_exact', args: { item_name: 'coal', unit_number: 901, max_count: 5, to_entity: false } }]), { ok: true })
+  assert.deepEqual(check(protectedMaterial, [{ name: 'move_items_exact', args: { item_name: 'iron-plate', unit_number: 901, max_count: 5, to_entity: true } }]), { ok: true }, 'putting the item INTO storage spends nothing')
   assert.equal(check(granted(goalState(), STANDING_AUTO), mine, humanBuilt).code, ADMISSION_REFUSAL.PROTECTED_ENTITY)
 })

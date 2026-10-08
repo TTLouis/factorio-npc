@@ -37,11 +37,13 @@ import {
   selectRecipeFacts,
   stepContractNeeds,
 } from './handoff-packet.mjs'
-import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CODES } from './authorization.mjs'
+import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CODES, REPLACEMENT_DECISION } from './authorization.mjs'
 import {
-  buildPlanBlockedMessage,
   blockerFacts,
+  blockerWorldEvidence,
+  buildPlanBlockedMessage,
   MAX_REPLACEMENTS_PER_GOAL,
+  plainBlockerReason,
   playerObjectiveGrant,
   REPLACEMENT_WAKE_SKIP,
   replacementAnnouncement,
@@ -446,8 +448,7 @@ const FROZEN_PLAN_STATUSES = new Set([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTI
 
 // The blocker in plain words, for the line the player reads when a replacement could not be authored.
 function replacementPlainLine(blocker) {
-  const reason = String(blocker?.reason_code ?? 'a structural blocker').replace(/^operation_preflight_failed:/, '').replace(/[_:]+/g, ' ').trim()
-  return `The plan stopped: ${cleanMemoryText(reason, 160)}.`
+  return `The plan stopped: ${cleanMemoryText(plainBlockerReason(blocker?.reason_code), 160)}.`
 }
 // Decisions whose job is to author or revise a plan; closed-round operation
 // calls are never turned into operations of the old plan for these.
@@ -3641,10 +3642,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async grantPlayerObjective(memoryKey, goal, text) {
     if (!this.replacementWakeEnabled || typeof this.memory.grantAuthorization !== 'function' || typeof this.memory.currentGoalGrant !== 'function') return undefined
     if (goal.status !== GOAL_STATUS.ACTIVE || String(goal.objective ?? '') !== String(text ?? '').slice(0, 1000)) return undefined
-    if (this.memory.currentGoalGrant(memoryKey)) return undefined
+    // One player_task grant per goal, ever: a revoked grant is not re-activated by a later admission call.
+    if (this.memory.hasPlayerTaskGrant?.(memoryKey)) return undefined
     const granted = this.memory.grantAuthorization(memoryKey, playerObjectiveGrant(goal.goal_id), { requestId: this.traceRequest?.id })
     if (granted?.ok) await this.persistState()
     return granted
+  }
+
+  /** Evidence a unit number named a real entity: an NPC placement receipt, an earlier authoritative observation, or the mod's own last-observed record. */
+  unitHadExisted(unitNumber, preflight) {
+    if (!Number.isSafeInteger(unitNumber)) return false
+    const key = this.requestInfo?.memoryKey
+    const placements = key ? this.memory.authorizationState?.(key)?.world?.npc_placements : undefined
+    return Boolean(this.liveObservedExactTarget(unitNumber))
+      || (Array.isArray(placements) && placements.some(item => item.unit_number === unitNumber))
+      || preflight?.last_observed?.unit_number === unitNumber
   }
 
   async skipReplacementWake(reason, { trigger, plan, extra = {} } = {}) {
@@ -3662,7 +3674,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
    * Called right after a request's active plan became BLOCKED. Returns the continued turn's result when the planner was
    * woken, or undefined when the request should end blocked exactly as before (every skip is traced with its reason).
    */
-  async wakePlannerForReplacement({ trigger, batchMayHaveRun = false }) {
+  async wakePlannerForReplacement({ trigger, preflight, existed = false, provenRefusal = false, batchMayHaveRun = false }) {
     if (!this.replacementWakeEnabled || !this.requestInfo || typeof this.memory.requestReplacementFromDraft !== 'function') return undefined
     const key = this.requestInfo.memoryKey
     const requestId = this.traceRequest?.id
@@ -3671,7 +3683,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!plan || plan.status !== PLAN_STATUS.BLOCKED) return undefined // nothing blocked this plan: not a replacement case
     const skip = (reason, extra) => this.skipReplacementWake(reason, { trigger, plan, extra })
     if (planning.goal?.status !== GOAL_STATUS.ACTIVE) return skip(REPLACEMENT_WAKE_SKIP.GOAL_NOT_ACTIVE)
+    // Only a plan that was committed can be replaced; a blocked pre-commit draft is simply refused (nothing was admitted).
+    if (!plan.committed_at) return skip(REPLACEMENT_WAKE_SKIP.PLAN_NOT_COMMITTED)
     if (batchMayHaveRun) return skip(REPLACEMENT_WAKE_SKIP.NOT_PROVABLY_UNEXECUTED)
+    // The wake is for blockers the harness observed in the game, never for argument errors, authorization refusals or holds.
+    const evidence = blockerWorldEvidence({ trigger, preflight, existed, provenRefusal })
+    if (!evidence.ok) return skip(REPLACEMENT_WAKE_SKIP.BLOCKER_NOT_WORLD_EVIDENCE, { evidence_detail: evidence.detail })
     if (plan.blocker?.user_choice) return skip(REPLACEMENT_WAKE_SKIP.USER_CHOICE_RECORDED)
     const grant = this.memory.currentGoalGrant?.(key)
     if (!grant) return skip(REPLACEMENT_WAKE_SKIP.NO_GRANT)
@@ -3689,7 +3706,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       actor_epoch: this.epoch?.epoch,
     }, { requestId, stage: 'wake' })
     if (!check?.ok) return skip(REPLACEMENT_WAKE_SKIP.GRANT_STALE, { grant_id: grant.grant_id, grant_reason: check?.reason })
-    const used = this.memory.replacementsUsed(key, grant.grant_id)
+    const used = this.memory.replacementsUsed(key)
     if (used >= MAX_REPLACEMENTS_PER_GOAL) return skip(REPLACEMENT_WAKE_SKIP.CAP_REACHED, { grant_id: grant.grant_id, replacements_used: used, cap: MAX_REPLACEMENTS_PER_GOAL })
 
     const roleBefore = this.agentContext.role
@@ -3769,6 +3786,26 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const key = this.requestInfo.memoryKey
     const requestId = this.traceRequest?.id
     const held = getActivePlanningPlan(this.memory.planningState?.(key))
+    // The planner re-submitted while the accepted successor is still an uncommitted DRAFT (a correctable preflight went back to it).
+    // The same steps pass through; steps that drifted from what the grant check covered cannot commit (MW1), so the plan ends
+    // BLOCKED visibly here instead of failing at the commit and looping back through a wake.
+    const pending = held?.status === PLAN_STATUS.DRAFT ? this.memory.pendingReplacementDraft?.(key, plan) : undefined
+    if (pending && pending.grant_id === wake.grant_id) {
+      if (pending.unchanged) return undefined
+      await this.traceEvent('plan.replacement_refused', { request_id: requestId, plan_id: pending.plan_id, grant_id: wake.grant_id, reason: 'redraft_steps_changed_since_authorization', stage: 'draft' })
+      this.memory.applyOutcomeAuthority?.(key, {
+        kind: 'world_blocked',
+        source: 'deterministic_runtime',
+        reason_code: 'replacement_redraft_changed',
+        candidate_blocker: 'replacement_redraft_changed',
+        evidence: [{ kind: 'deterministic_preflight', ref: `${requestId ?? 'request'}/replacement_redraft`, summary: 'The re-drafted steps differ from the steps the replacement was authorized for.' }],
+      })
+      return { result: await this.endBlockedAfterReplacement({
+        outcome: 'replacement_redraft_refused',
+        reason: 'redraft_steps_changed_since_authorization',
+        chatMessage: '[Plan blocked] The replacement plan was changed after the harness checked it against your request, so it cannot be committed. Revise or Cancel it; say in chat what to change.',
+      }) }
+    }
     if (held?.status !== PLAN_STATUS.BLOCKED || held.plan_id !== wake.plan_id) return undefined
     if (!Array.isArray(plan.operations) || plan.operations.length === 0 || !Array.isArray(plan.plan) || plan.plan.length === 0) {
       wake.repairs += 1
@@ -3781,7 +3818,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }) }
       }
       await this.traceEvent('plan.replacement_draft_repair', { request_id: requestId, plan_id: wake.plan_id, reason: 'replacement_draft_needs_operations', attempt: wake.repairs })
-      this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
       this.messages.push({ role: 'user', content: '[HARNESS] A replacement draft needs the full step list with stepCompletions for every step, currentStep set to the first unfinished step, and the operations for that step. This reply did not have them, so nothing was changed.' })
       return { result: await this.runTurn() }
     }
@@ -3790,11 +3826,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       grantId: wake.grant_id,
       current: { actor_id: current.actor_id, actor_epoch: current.epoch },
     }, plan, { requestId })
-    if (verdict.decision === 'accept') {
+    if (verdict.decision === REPLACEMENT_DECISION.ACCEPT) {
       wake.successor_plan_id = verdict.plan?.plan_id
       return { accepted: true }
     }
-    if (verdict.decision === 'ask') {
+    if (verdict.decision === REPLACEMENT_DECISION.ASK) {
       return { result: await this.endBlockedAfterReplacement({
         outcome: 'replacement_needs_approval',
         reason: verdict.reason,
@@ -12279,10 +12315,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     if (plan.executorCannotAuthor) return this.endSliceWithoutPlanner({ route: 'executor_reply_without_committed_plan', reason: 'executor_cannot_author_plan' })
     await this.validateStepCompletionDeclarations(plan)
-    // MW5: while a replacement wake is open, the planner's reply is classified against the grant before anything else
-    // touches it. An accepted replacement continues through the ordinary commit path below.
-    const replacementGate = await this.gateReplacementDraft(plan)
-    if (replacementGate?.result !== undefined) return replacementGate.result
     const timeReview = await this.reviewPlanTime(plan)
     if (timeReview?.held === true) return timeReview.result
     plan = await this.applyLowRiskTypedProjection(plan)
@@ -12662,6 +12694,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           ].slice(0, 2)
         : []
       const completionGeneration = this.generation
+      // MW5: while a replacement wake is open, the planner's reply is classified against the grant immediately before it is
+      // recorded, so no earlier branch of this method can leave a successor DRAFT in the reducer while the board stays blocked.
+      // An accepted replacement continues through the ordinary record/commit path below.
+      const replacementGate = await this.gateReplacementDraft(durablePlan)
+      if (replacementGate?.result !== undefined) return replacementGate.result
       stateResult = this.memory.recordPlan?.(this.requestInfo.memoryKey, await this.revisionSafeRequestInfo(), durablePlan, {
         continuation: this.continuations > 0,
         ...(replacementGate?.accepted === true ? { replacementAccepted: true } : {}),
@@ -13136,9 +13173,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           return this.runTurn()
         }
         stateResult = await this.markAdmissionFailure(stateResult, operations, error, 'operation_preflight_blocker')
-        // MW5: a plan this preflight blocked may be replaced under the goal's grant instead of waiting for the player.
-        const preflightWake = await this.wakePlannerForReplacement({ trigger: 'operation_preflight_blocker' })
-        if (preflightWake !== undefined) return preflightWake
         await this.traceEvent('operations.preflight_rejected', {
           failure_class: 'deterministic_preflight',
           reason: error instanceof Error ? error.message : String(error),
@@ -13146,6 +13180,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           operations,
           task_board: visibleTaskBoard(stateResult?.state?.task_board),
         })
+        // MW5: a committed plan this world-evidenced preflight blocked may be replaced under the goal's grant instead of waiting
+        // for the player. A unit number counts as existing only with an NPC placement receipt, an authoritative observation or the
+        // mod's own last-observed record of it.
+        const preflightWake = await this.wakePlannerForReplacement({
+          trigger: 'operation_preflight_blocker',
+          preflight: error?.preflight,
+          existed: this.unitHadExisted(error?.preflight?.identity, error?.preflight),
+        })
+        if (preflightWake !== undefined) return preflightWake
         this.active = false
         await this.traceEvent('request.completed', {
           chat_message: planProgress(plan, stateResult),
@@ -13259,10 +13302,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             reconciliation: reconciliation ? reconciliationFacts(reconciliation, reconciliation.pending) : undefined,
             task_board: visibleTaskBoard(stateResult?.state?.task_board),
           })
-          // MW5: a refusal that provably ran nothing may be replaced under the goal's grant; one that may have run is not.
+          // MW5: only a refusal the game proved happened before any mutation of the first operation is world evidence; a batch
+          // that may have run is never replanned, and a transport/epoch/journal refusal is a harness problem, not the world.
+          const provenRefusal = error?.admission?.proven_refusal === true && operationIndex === 0
           const admissionWake = await this.wakePlannerForReplacement({
             trigger: 'operation_admission_failure',
-            batchMayHaveRun: error?.notSent !== true && error?.notAdmitted !== true,
+            provenRefusal,
+            batchMayHaveRun: error?.notSent !== true && error?.notAdmitted !== true && !provenRefusal,
           })
           if (admissionWake !== undefined) return admissionWake
           throw error
@@ -13777,11 +13823,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       })
       if (reduced?.decision?.accepted) {
         await this.persistState()
-        // MW5: this failure may have been the attempt that tripped the deadlock detector, which blocks the plan.
-        if (getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))?.blocker?.kind === 'deadlock') {
-          const deadlockWake = await this.wakePlannerForReplacement({ trigger: 'deadlock_detected' })
-          if (deadlockWake !== undefined) return deadlockWake
-        }
         this.active = false
         await this.traceEvent('planner.skipped', {
           source: 'decision_provider',

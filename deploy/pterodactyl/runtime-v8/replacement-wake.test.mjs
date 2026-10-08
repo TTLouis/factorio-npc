@@ -6,12 +6,15 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { getActivePlan, PLAN_STATUS, PLANNING_EVENT } from './planning-state.mjs'
 import {
+  blockerWorldEvidence,
   buildPlanBlockedMessage,
   MAX_REPLACEMENTS_PER_GOAL,
   playerObjectiveGrant,
   replacementAnnouncement,
+  NEVER_WAKE_PREFLIGHT_CODES,
   replacementApprovalLine,
   replacementsUsed,
+  WORLD_CHANGE_PREFLIGHT_CODES,
 } from './replacement-wake.mjs'
 import { recoverInterruptedAgentPlan, Session } from './supervisor.mjs'
 import { FakeFactorio, gather, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
@@ -41,7 +44,9 @@ const plannerDraft = () => planReply({
   stepCompletions: [det(ore), det(plates), det(gears)],
 })
 const observation = () => ({ content: null, tool_calls: [{ id: 'call_obs', index: 0, type: 'function', function: { name: 'getNearbyEntities', arguments: JSON.stringify({ radius: 17 }) } }] })
-const executorInsert = () => planReply({ plan: IRON_PLAN, currentStep: 1, operations: [insertOre()] })
+const executorInsert = (unit = FURNACE) => planReply({ plan: IRON_PLAN, currentStep: 1, operations: [{ ...insertOre(), args: { ...insertOre().args, unit_number: unit } }] })
+// A stale exact target gets one rebinding round before it is a blocker, so the executor sends the batch twice.
+const staleTwice = (unit = FURNACE) => [executorInsert(unit), executorInsert(unit)]
 const replacementDraft = (overrides = {}) => planReply({
   chatMessage: 'The furnace is gone; placing a new one.',
   plan: REPLACED_PLAN,
@@ -52,12 +57,20 @@ const replacementDraft = (overrides = {}) => planReply({
 })
 
 // The furnace the executor was about to feed no longer exists when the harness preflights the batch.
-function gameWithMissingFurnace(onBlocked) {
+function gameWithMissingFurnace(onBlocked, { code = 'stale_exact_target', unit = FURNACE, lastObserved = true } = {}) {
   const game = new FakeFactorio({
     preflight: (text) => {
-      if (!text.includes(String(FURNACE))) return { ok: true }
+      const target = Number(/unit_number[^0-9]*(\d+)/.exec(text)?.[1])
+      if (target !== unit) return { ok: true }
       onBlocked?.()
-      return { ok: false, code: 'target_not_found', operation: 'move_items_exact', field: 'unit_number', identity: FURNACE }
+      return {
+        ok: false,
+        code,
+        operation: 'move_items_exact',
+        field: 'unit_number',
+        identity: unit,
+        ...(lastObserved ? { last_observed: { unit_number: unit, name: 'stone-furnace', surface_index: 1, force_index: 1, position: { x: 8, y: 1 }, observed_tick: 100 } } : {}),
+      }
     },
   })
   game.nearby = { actor_position: { x: 0, y: 0 }, entities: [{ name: 'stone-furnace', type: 'furnace', unit_number: FURNACE, position: { x: 8, y: 1 }, distance: 8 }] }
@@ -76,7 +89,7 @@ function world(script, { game = gameWithMissingFurnace(), intents = [], agentOpt
     replacementWake: true,
     provider: async (messages) => {
       calls.push(messages.map(message => ({ ...message })))
-      const reply = script[calls.length - 1]
+      const reply = typeof script === 'function' ? script(calls.length, memory, calls) : script[calls.length - 1]
       assert.ok(reply, `unscripted provider call ${calls.length}`)
       return typeof reply === 'function' ? reply(memory, calls) : { ...reply }
     },
@@ -161,7 +174,7 @@ test('MW5: a supervisor recovery run never mints a grant, and keeps the one the 
 // --- the replacement wake: the run-C shape, triggered by a harness-evidenced admission blocker -------------------------
 
 test('MW5 scenario: a preflight blocker freezes the slice, the planner is woken with [PLAN_BLOCKED], the replacement commits under the grant and the executor is handed the new version', async () => {
-  const w = world([plannerDraft(), observation(), executorInsert(), replacementDraft()])
+  const w = world([plannerDraft(), observation(), ...staleTwice(), replacementDraft()])
   const first = await w.agent.request(OBJECTIVE, { sender: 'Louis' })
   assert.equal(first.operations[0].name, 'gather_resource')
   const goalId = w.planning().goal.goal_id
@@ -173,12 +186,12 @@ test('MW5 scenario: a preflight blocker freezes the slice, the planner is woken 
   w.game.inventory['iron-ore'] = 10
   const result = await w.agent.completed()
 
-  // Calls: planner, executor observation, executor batch (blocked at preflight), planner replacement.
-  assert.equal(w.calls.length, 4)
-  const wakeText = chatText([w.calls[3]])
+  // Calls: planner, executor observation, executor batch twice (stale target, one rebinding round), planner replacement.
+  assert.equal(w.calls.length, 5)
+  const wakeText = chatText([w.calls[4]])
   assert.match(wakeText, /\[PLAN_BLOCKED\]/)
   assert.match(wakeText, new RegExp(`committed plan ${v1.plan_id} \\(version 1\\)`))
-  assert.match(wakeText, /blocker: operation_preflight_failed:target_not_found/)
+  assert.match(wakeText, /blocker: operation_preflight_failed:stale_exact_target/)
   assert.match(wakeText, /1\. completed, deterministic: Gather 10 iron ore/)
   assert.match(wakeText, /2\. blocked, deterministic: Smelt the ore into iron plates in the furnace/)
   assert.match(wakeText, /3\. pending, deterministic: Craft 5 iron gear wheels/)
@@ -199,7 +212,7 @@ test('MW5 scenario: a preflight blocker freezes the slice, the planner is woken 
   assert.equal(v2.replacement.predecessor_plan_id, v1.plan_id)
   assert.equal(v2.replacement.grant_id, `player_task:${goalId}`)
   assert.equal(v2.replacement.action_scope, ACTION_SCOPE.RECOVERY)
-  assert.equal(v2.replacement.reason.code, 'operation_preflight_failed:target_not_found')
+  assert.equal(v2.replacement.reason.code, 'operation_preflight_failed:stale_exact_target')
   assert.ok(v2.replacement.reason.evidence_refs.length > 0, 'grounded in the admission evidence')
   assert.equal(v2.steps[0].description, REPLACED_PLAN[1])
 
@@ -214,7 +227,7 @@ test('MW5 scenario: a preflight blocker freezes the slice, the planner is woken 
   assert.ok(requestId)
   const wake = w.data(w.named('plan.replacement_wake')[0])
   assert.equal(wake.plan_id, v1.plan_id)
-  assert.equal(wake.reason_code, 'operation_preflight_failed:target_not_found')
+  assert.equal(wake.reason_code, 'operation_preflight_failed:stale_exact_target')
   assert.equal(wake.grant_id, `player_task:${goalId}`)
   assert.equal(wake.replacements_used, 0)
   assert.equal(wake.reason, 'structural_blocker_with_current_grant')
@@ -228,20 +241,14 @@ test('MW5 scenario: a preflight blocker freezes the slice, the planner is woken 
   const stages = w.named('authorization.grant_checked').map(row => w.data(row).stage)
   assert.ok(stages.includes('wake') && stages.includes('commit') && stages.includes('admission'), `grant checked at ${stages}`)
   const announced = w.data(w.named('plan.replacement_announced')[0])
-  assert.equal(announced.chat_message, `Changed plan: target not found. New plan v2 starts with: ${REPLACED_PLAN[1]}.`)
+  assert.equal(announced.chat_message, `Changed plan: something I was working on is gone. New plan v2 starts with: ${REPLACED_PLAN[1]}.`)
   assert.equal(announced.plan_id, v2.plan_id)
   assert.equal(w.named('plan.replacement_wake_skipped').length, 0)
   assert.equal(replacementsUsed(planning, `player_task:${goalId}`), 1)
 })
 
-test('MW5: a deadlock-blocked plan wakes the planner the same way, with synthesized evidence refs, and the replacement count survives a restart', async () => {
-  const w = world([plannerDraft(), planReply({
-    plan: ['Gather 10 iron ore from the second patch', IRON_PLAN[1], IRON_PLAN[2]],
-    currentStep: 0,
-    operations: [gather('iron-ore', 10)],
-    checkpoint: ore,
-    stepCompletions: [det(ore), det(plates), det(gears)],
-  })])
+test('MW5: a deadlock-blocked plan is not woken: deadlock signals count provider failures, which pause the goal', async () => {
+  const w = world([plannerDraft()])
   await w.agent.request(OBJECTIVE, { sender: 'Louis' })
   const v1 = getActivePlan(w.planning())
   w.memory.dispatchPlanningEvent(KEY, {
@@ -249,19 +256,12 @@ test('MW5: a deadlock-blocked plan wakes the planner the same way, with synthesi
     signals: [{ kind: 'repeating_failure', step_id: v1.steps[0].step_id, detail: 'the same failure three times' }],
   })
   assert.equal(getActivePlan(w.planning()).status, PLAN_STATUS.BLOCKED)
-  const result = await w.agent.wakePlannerForReplacement({ trigger: 'deadlock_detected' })
-  assert.equal(w.calls.length, 2)
-  assert.match(chatText([w.calls[1]]), /blocker: repeating_failure - the same failure three times/)
-  assert.match(chatText([w.calls[1]]), new RegExp(`evidence: ${v1.plan_id}/deadlock/repeating_failure`))
-  const v2 = getActivePlan(w.planning())
-  assert.equal(v2.plan_version, 2)
-  assert.equal(v2.replacement.reason.code, 'repeating_failure')
-  assert.deepEqual(v2.replacement.reason.evidence_refs, [`${v1.plan_id}/deadlock/repeating_failure`])
-  assert.equal(result.operations[0].name, 'gather_resource')
-  assert.equal(w.data(w.named('plan.replacement_wake')[0]).trigger, 'deadlock_detected')
-  const restored = new CanonicalTaskBoardMemory()
-  restored.restore(w.memory.snapshot())
-  assert.equal(restored.replacementsUsed(KEY, v2.replacement.grant_id), 1, 'the cap reads the durable plan lineage')
+  assert.equal(await w.agent.wakePlannerForReplacement({ trigger: 'deadlock_detected' }), undefined)
+  assert.equal(w.calls.length, 1, 'no provider call: the blocked end stands')
+  const skipped = w.data(w.named('plan.replacement_wake_skipped')[0])
+  assert.equal(skipped.reason, 'blocker_not_world_evidence')
+  assert.equal(skipped.evidence_detail, 'unsupported_trigger:deadlock_detected')
+  assert.equal(w.named('plan.replacement_wake').length, 0)
 })
 
 test('MW5: the supervisor prints the replacement line once per plan and keeps it in the conversation', () => {
@@ -284,7 +284,7 @@ test('MW5: the supervisor prints the replacement line once per plan and keeps it
 })
 
 test('MW5: the wake is traced and skipped, and the request ends blocked as before, when there is no grant', async () => {
-  const w = world([plannerDraft(), observation(), executorInsert()], {
+  const w = world([plannerDraft(), observation(), ...staleTwice()], {
     game: gameWithMissingFurnace(() => {
       const grantId = authorizationOf(w.planning()).grants[0]?.grant_id
       if (grantId) w.memory.revokeAuthorization(KEY, grantId, { reason: 'player withdrew' })
@@ -293,7 +293,7 @@ test('MW5: the wake is traced and skipped, and the request ends blocked as befor
   await w.agent.request(OBJECTIVE, { sender: 'Louis' })
   w.game.inventory['iron-ore'] = 10
   const result = await w.agent.completed()
-  assert.equal(w.calls.length, 3, 'no planner wake')
+  assert.equal(w.calls.length, 4, 'no planner wake')
   assert.equal(getActivePlan(w.planning()).status, PLAN_STATUS.BLOCKED)
   assert.equal(w.named('plan.replacement_wake').length, 0)
   const skipped = w.named('plan.replacement_wake_skipped')[0]
@@ -305,7 +305,7 @@ test('MW5: the wake is traced and skipped, and the request ends blocked as befor
 })
 
 test('MW5: a grant that is no longer current for this actor is stale and the request ends blocked', async () => {
-  const w = world([plannerDraft(), observation(), executorInsert()], {
+  const w = world([plannerDraft(), observation(), ...staleTwice()], {
     game: gameWithMissingFurnace(() => {
       const grantId = authorizationOf(w.planning()).grants[0]?.grant_id
       // The grant is revised to bind a different actor: the one executing is no longer covered by it.
@@ -315,7 +315,7 @@ test('MW5: a grant that is no longer current for this actor is stale and the req
   await w.agent.request(OBJECTIVE, { sender: 'Louis' })
   w.game.inventory['iron-ore'] = 10
   await w.agent.completed()
-  assert.equal(w.calls.length, 3)
+  assert.equal(w.calls.length, 4)
   assert.equal(getActivePlan(w.planning()).status, PLAN_STATUS.BLOCKED)
   const skipped = w.data(w.named('plan.replacement_wake_skipped')[0])
   assert.equal(skipped.reason, 'grant_stale')
@@ -324,21 +324,17 @@ test('MW5: a grant that is no longer current for this actor is stale and the req
 })
 
 test('MW5: after three accepted replacements the cap is reached and the request ends blocked, traced with the reason', async () => {
-  const w = world([plannerDraft(), observation(), executorInsert()], {
+  const w = world([plannerDraft(), observation(), ...staleTwice()], {
     game: gameWithMissingFurnace(() => {
+      // The durable per-goal counter, as three earlier accepted replacements would have left it.
       const planning = w.planning()
-      const grantId = authorizationOf(planning).grants[0].grant_id
-      const template = getActivePlan(planning)
-      const used = Array.from({ length: MAX_REPLACEMENTS_PER_GOAL }, (_, index) => ({
-        ...structuredClone(template), plan_id: `old_${index}`, status: PLAN_STATUS.SUPERSEDED, replacement: { grant_id: grantId, grant_revision: 1, predecessor_plan_id: 'x' },
-      }))
-      w.memory.planningByNpc.set(KEY, { ...planning, plans: [...used, ...planning.plans] })
+      w.memory.planningByNpc.set(KEY, { ...planning, goal: { ...planning.goal, replacements_accepted: MAX_REPLACEMENTS_PER_GOAL } })
     }),
   })
   await w.agent.request(OBJECTIVE, { sender: 'Louis' })
   w.game.inventory['iron-ore'] = 10
   await w.agent.completed()
-  assert.equal(w.calls.length, 3, 'no planner wake past the cap')
+  assert.equal(w.calls.length, 4, 'no planner wake past the cap')
   assert.equal(getActivePlan(w.planning()).status, PLAN_STATUS.BLOCKED)
   const skipped = w.data(w.named('plan.replacement_wake_skipped')[0])
   assert.equal(skipped.reason, 'replacement_cap_reached')
@@ -347,7 +343,7 @@ test('MW5: after three accepted replacements the cap is reached and the request 
 })
 
 test('MW5: an actor epoch that changes while the wake is deciding fails safe: nothing is woken or committed', async () => {
-  const w = world([plannerDraft(), observation(), executorInsert()])
+  const w = world([plannerDraft(), observation(), ...staleTwice()])
   await w.agent.request(OBJECTIVE, { sender: 'Louis' })
   const persist = w.agent.persistState.bind(w.agent)
   w.agent.persistState = async (...args) => {
@@ -357,7 +353,7 @@ test('MW5: an actor epoch that changes while the wake is deciding fails safe: no
   }
   w.game.inventory['iron-ore'] = 10
   await assert.rejects(w.agent.completed(), /epoch changed|superseded|cancelled/i)
-  assert.equal(w.calls.length, 3, 'the planner was never woken')
+  assert.equal(w.calls.length, 4, 'the planner was never woken')
   const skipped = w.data(w.named('plan.replacement_wake_skipped')[0])
   assert.equal(skipped.reason, 'turn_superseded')
   assert.equal(w.named('plan.replacement_wake').length, 0)
@@ -365,7 +361,7 @@ test('MW5: an actor epoch that changes while the wake is deciding fails safe: no
 })
 
 test('MW5: a replacement that leaves the grant (scope not granted) asks the player, the old plan stays untouched and a chat line says what needs approval', async () => {
-  const w = world([plannerDraft(), observation(), executorInsert(), replacementDraft()], {
+  const w = world([plannerDraft(), observation(), ...staleTwice(), replacementDraft()], {
     game: gameWithMissingFurnace(() => {
       const grantId = authorizationOf(w.planning()).grants[0].grant_id
       w.memory.reviseAuthorization(KEY, grantId, { permitted_scope: [ACTION_SCOPE.SUPPORTING_WORK] }, { reason: 'player narrowed the request' })
@@ -374,7 +370,7 @@ test('MW5: a replacement that leaves the grant (scope not granted) asks the play
   await w.agent.request(OBJECTIVE, { sender: 'Louis' })
   w.game.inventory['iron-ore'] = 10
   const result = await w.agent.completed()
-  assert.equal(w.calls.length, 4, 'the planner was woken and answered')
+  assert.equal(w.calls.length, 5, 'the planner was woken and answered')
   const planning = w.planning()
   const active = getActivePlan(planning)
   assert.equal(active.status, PLAN_STATUS.BLOCKED, 'the old plan stays blocked and untouched')
@@ -396,11 +392,11 @@ test('MW5: a replacement that leaves the grant (scope not granted) asks the play
 
 test('MW5: a planner reply without operations gets repair rounds, then the request ends blocked and says so', async () => {
   const noOps = () => replacementDraft({ operations: [] })
-  const w = world([plannerDraft(), observation(), executorInsert(), noOps(), noOps(), noOps()])
+  const w = world([plannerDraft(), observation(), ...staleTwice(), noOps(), noOps(), noOps()])
   await w.agent.request(OBJECTIVE, { sender: 'Louis' })
   w.game.inventory['iron-ore'] = 10
   const result = await w.agent.completed()
-  assert.equal(w.calls.length, 6)
+  assert.equal(w.calls.length, 7)
   assert.equal(getActivePlan(w.planning()).status, PLAN_STATUS.BLOCKED)
   assert.equal(w.named('plan.replacement_draft_repair').length, 2)
   assert.equal(w.data(w.named('plan.replacement_refused')[0]).reason, 'draft_without_operations_after_repair')
@@ -410,7 +406,7 @@ test('MW5: a planner reply without operations gets repair rounds, then the reque
 
 test('MW5: existing BLOCKED-awaiting-user behaviour is unchanged when the goal has no grant at all', async () => {
   // A goal admitted outside the chat path has no grant; the same blocker ends exactly as before MW5.
-  const w = world([plannerDraft(), observation(), executorInsert()], {
+  const w = world([plannerDraft(), observation(), ...staleTwice()], {
     game: gameWithMissingFurnace(() => {
       const grants = authorizationOf(w.planning()).grants
       w.memory.planningByNpc.set(KEY, { ...w.planning(), authorization: { ...authorizationOf(w.planning()), grants: grants.filter(() => false) } })
@@ -433,10 +429,10 @@ test('MW5: the [PLAN_BLOCKED] message states facts only: blocker, steps, verifie
     plan_id: 'g_p1',
     plan_version: 1,
     active_step_index: 1,
-    blocker: { kind: 'structural', reason_code: 'operation_preflight_failed:target_not_found', detail: 'unit 77 is gone', evidence_refs: ['req_1/admission'] },
+    blocker: { kind: 'structural', reason_code: 'operation_preflight_failed:stale_exact_target', detail: 'unit 77 is gone', evidence_refs: ['req_1/admission'] },
     carried_forward_evidence: [],
     steps: [
-      { step_id: 's1', description: 'Gather 10 iron ore', completion_mode: 'deterministic' },
+      { step_id: 's1', description: 'Place and fuel a stone furnace', completion_mode: 'deterministic' },
       { step_id: 's2', description: 'Smelt the ore', completion_mode: 'deterministic' },
     ],
     execution: { step_progress: { s1: { status: 'completed' }, s2: { status: 'active' } } },
@@ -445,10 +441,10 @@ test('MW5: the [PLAN_BLOCKED] message states facts only: blocker, steps, verifie
   const text = buildPlanBlockedMessage({ plan, grant, replacementsUsedCount: 1 })
   assert.equal(text, [
     '[PLAN_BLOCKED] The harness blocked committed plan g_p1 (version 1). It is preserved as history and cannot be edited.',
-    'blocker: operation_preflight_failed:target_not_found - unit 77 is gone',
+    'blocker: operation_preflight_failed:stale_exact_target - unit 77 is gone',
     'evidence: req_1/admission',
     'steps (status, completion mode, description):',
-    '1. completed, deterministic: Gather 10 iron ore',
+    '1. completed, deterministic: Place and fuel a stone furnace',
     '2. blocked, deterministic: Smelt the ore',
     'verified prefix: steps 1. Verified work stays verified in the successor.',
     'authorization: player_task:g revision 2 (player_task) permits recovery, route_change. The requested result stays goal:g delivered to chest-1; a replacement cannot change it.',
@@ -461,16 +457,279 @@ test('MW5: the [PLAN_BLOCKED] message states facts only: blocker, steps, verifie
 })
 
 test('MW5: a loop built without the replacementWake option keeps the pre-MW5 behaviour (no grant, no wake), and the supervisor turns it on', async () => {
-  const w = world([plannerDraft(), observation(), executorInsert()], { agentOptions: { replacementWake: undefined } })
+  const w = world([plannerDraft(), observation(), ...staleTwice()], { agentOptions: { replacementWake: undefined } })
   await w.agent.request(OBJECTIVE, { sender: 'Louis' })
   assert.deepEqual(authorizationOf(w.planning()).grants, [])
   w.game.inventory['iron-ore'] = 10
   const result = await w.agent.completed()
-  assert.equal(w.calls.length, 3)
+  assert.equal(w.calls.length, 4)
   assert.equal(getActivePlan(w.planning()).status, PLAN_STATUS.BLOCKED)
   assert.equal(result.operations.length, 0)
   assert.equal(w.named('plan.replacement_wake').length + w.named('plan.replacement_wake_skipped').length, 0)
   assert.equal(w.named('authorization.granted').length, 0)
   const supervisorSource = (await import('node:fs')).readFileSync(new URL('./supervisor.mjs', import.meta.url), 'utf8')
   assert.match(supervisorSource, /replacementWake: true/)
+})
+
+// --- what counts as world evidence ----------------------------------------------------------------------------------------
+
+test('MW5: the world-change allowlist is explicit, default-deny, and never overlaps the codes that must keep the blocked end', () => {
+  assert.deepEqual(Object.keys(WORLD_CHANGE_PREFLIGHT_CODES).sort(), ['destination_full', 'extraction_empty', 'stale_exact_target', 'supply_missing'])
+  for (const code of Object.keys(WORLD_CHANGE_PREFLIGHT_CODES)) assert.ok(!NEVER_WAKE_PREFLIGHT_CODES.includes(code), code)
+  for (const code of ['protected_entity_refused', 'reserved_supply_refused', 'player_inventory_excluded', 'authorization_stale', 'duplicate_effect_suppressed']) {
+    assert.ok(NEVER_WAKE_PREFLIGHT_CODES.includes(code), code)
+    assert.equal(blockerWorldEvidence({ trigger: 'operation_preflight_blocker', preflight: { code }, existed: true }).ok, false, code)
+  }
+  assert.equal(blockerWorldEvidence({ trigger: 'operation_preflight_blocker', preflight: { code: 'brand_new_code' }, existed: true }).ok, false, 'an unlisted code is denied')
+  assert.equal(blockerWorldEvidence({ trigger: 'operation_preflight_blocker', preflight: { code: 'extraction_empty' } }).ok, true)
+  assert.equal(blockerWorldEvidence({ trigger: 'operation_preflight_blocker', preflight: { code: 'stale_exact_target' }, existed: false }).detail, 'target_existence_unproven')
+  assert.equal(blockerWorldEvidence({ trigger: 'operation_preflight_blocker', preflight: { code: 'stale_exact_target' }, existed: true }).ok, true)
+  assert.equal(blockerWorldEvidence({ trigger: 'operation_admission_failure', provenRefusal: false }).ok, false)
+  assert.equal(blockerWorldEvidence({ trigger: 'operation_admission_failure', provenRefusal: true }).ok, true)
+})
+
+test('MW5: an allowlisted code with a unit number nobody placed, observed or recorded is not evidence the target existed', async () => {
+  // The loop already refuses an exact unit that no live observation bound before it reaches preflight
+  // (exact_entity_requires_live_observation); the wake keeps its own check as a second line.
+  const w = world([plannerDraft()])
+  await w.agent.request(OBJECTIVE, { sender: 'Louis' })
+  const v1 = getActivePlan(w.planning())
+  w.memory.dispatchPlanningEvent(KEY, {
+    type: PLANNING_EVENT.STRUCTURAL_BLOCKER_CONFIRMED, source: 'runtime', now: Date.now(), plan_id: v1.plan_id,
+    reason_code: 'operation_preflight_failed:stale_exact_target', detail: 'unit 999 is gone', evidence_refs: ['req_x/admission'],
+  })
+  assert.equal(getActivePlan(w.planning()).status, PLAN_STATUS.BLOCKED)
+  const preflight = { code: 'stale_exact_target', identity: 999 }
+  assert.equal(w.agent.unitHadExisted(999, preflight), false, 'invented: no placement receipt, no observation, no mod record')
+  assert.equal(w.agent.unitHadExisted(999, { ...preflight, last_observed: { unit_number: 999 } }), true, 'the mod saw it')
+  assert.equal(w.agent.unitHadExisted(77, preflight), false)
+  assert.equal(await w.agent.wakePlannerForReplacement({ trigger: 'operation_preflight_blocker', preflight, existed: false }), undefined)
+  assert.equal(w.calls.length, 1, 'no provider call')
+  const skipped = w.data(w.named('plan.replacement_wake_skipped')[0])
+  assert.equal(skipped.reason, 'blocker_not_world_evidence')
+  assert.equal(skipped.evidence_detail, 'target_existence_unproven')
+  assert.equal(w.named('plan.replacement_wake').length, 0)
+  // An NPC placement receipt is evidence the unit existed.
+  w.memory.recordNpcPlacement(KEY, { unit_number: 999, entity_name: 'stone-furnace', actor_id: 18, actor_epoch: 3 })
+  assert.equal(w.agent.unitHadExisted(999, preflight), true)
+})
+
+test('MW5: an authorization refusal is never world evidence and keeps the blocked end', async () => {
+  const w = world([plannerDraft(), observation(), ...staleTwice()], { game: gameWithMissingFurnace(undefined, { code: 'protected_entity_refused' }) })
+  await w.agent.request(OBJECTIVE, { sender: 'Louis' })
+  w.game.inventory['iron-ore'] = 10
+  await w.agent.completed()
+  assert.equal(w.calls.length, 4, 'one correction round, then the blocked end')
+  assert.equal(getActivePlan(w.planning()).status, PLAN_STATUS.BLOCKED)
+  const skipped = w.data(w.named('plan.replacement_wake_skipped')[0])
+  assert.equal(skipped.reason, 'blocker_not_world_evidence')
+  assert.equal(skipped.evidence_detail, 'code_not_world_change:protected_entity_refused')
+  assert.equal(w.data(w.named('request.completed').at(-1)).outcome, 'blocked_preflight')
+})
+
+test('MW5: operations.preflight_rejected is traced before the wake, and a blocked pre-commit draft never wakes (plan_not_committed)', async () => {
+  const draft = () => planReply({
+    plan: ['Feed the ore into the furnace'],
+    currentStep: 0,
+    operations: [insertOre()],
+    goal: GOAL,
+    stepCompletions: [det(plates)],
+  })
+  const w = world([observation(), draft(), draft()])
+  const result = await w.agent.request(OBJECTIVE, { sender: 'Louis' })
+  const plan = getActivePlan(w.planning())
+  assert.equal(plan.status, PLAN_STATUS.BLOCKED)
+  assert.equal(plan.committed_at, null, 'the plan was never committed')
+  assert.equal(w.calls.length, 3)
+  assert.equal(w.data(w.named('plan.replacement_wake_skipped')[0]).reason, 'plan_not_committed')
+  assert.equal(result.operations.length, 0)
+  const order = w.rows.map(row => row.event)
+  assert.ok(order.indexOf('operations.preflight_rejected') < order.indexOf('plan.replacement_wake_skipped'), 'the rejection is traced first')
+})
+
+// --- the admission-failure hook ---------------------------------------------------------------------------------------------
+
+const executorPlace = () => planReply({ plan: IRON_PLAN, currentStep: 1, operations: [placeFurnace()] })
+
+test('MW5: an admission refusal the game proved happened before any mutation wakes the planner; one that may have run does not', async () => {
+  for (const proven of [true, false]) {
+    const refuse = () => { w.game.syncRefusal = { slot: 1, operation: 'place_entity', error: 'no free tile', proven } }
+    const w = world((call) => {
+      if (call === 1) return plannerDraft()
+      if (call === 2) { refuse(); return executorPlace() }
+      return replacementDraft()
+    }, { game: new FakeFactorio() })
+    await w.agent.request(OBJECTIVE, { sender: 'Louis' })
+    w.game.inventory['iron-ore'] = 10
+    if (proven) {
+      await w.agent.completed()
+      assert.equal(w.named('plan.replacement_wake').length, 1, 'proven refusal: woken')
+      assert.equal(w.data(w.named('plan.replacement_wake')[0]).trigger, 'operation_admission_failure')
+      assert.equal(getActivePlan(w.planning()).plan_version, 2)
+    }
+    else {
+      await assert.rejects(w.agent.completed())
+      assert.equal(w.named('plan.replacement_wake').length, 0)
+      assert.equal(w.data(w.named('plan.replacement_wake_skipped')[0]).reason, 'batch_may_have_run')
+      assert.equal(getActivePlan(w.planning()).status, PLAN_STATUS.BLOCKED)
+    }
+  }
+})
+
+// --- verdict paths ----------------------------------------------------------------------------------------------------------
+
+test('MW5: a refused verdict (the grant was revoked while the planner was answering) leaves the old plan blocked and says so', async () => {
+  const w = world([plannerDraft(), observation(), ...staleTwice(), (memory) => {
+    memory.revokeAuthorization(KEY, authorizationOf(memory.planningState(KEY)).grants[0].grant_id, { reason: 'player withdrew' })
+    return replacementDraft()
+  }])
+  await w.agent.request(OBJECTIVE, { sender: 'Louis' })
+  w.game.inventory['iron-ore'] = 10
+  const result = await w.agent.completed()
+  assert.equal(w.calls.length, 5)
+  assert.equal(getActivePlan(w.planning()).status, PLAN_STATUS.BLOCKED)
+  assert.equal(getActivePlan(w.planning()).plan_version, 1)
+  const refused = w.named('plan.replacement_refused')[0]
+  assert.ok(refused.request_id)
+  assert.equal(w.data(refused).reason, 'grant_revoked')
+  assert.match(result.chatMessage, /did not accept a replacement \(grant_revoked\)/)
+  assert.equal(w.data(w.named('request.completed').at(-1)).outcome, 'replacement_refused')
+  assert.equal(w.planning().goal.replacements_accepted ?? 0, 0, 'a refusal is not counted')
+})
+
+test('MW5: a wake with no parked planner restages a fresh planner whose packet carries the blocked plan facts', async () => {
+  const w = world([plannerDraft(), observation(), ...staleTwice(), replacementDraft()], {
+    game: gameWithMissingFurnace(() => { w.agent.agentContext.dropParkedPlanner() }),
+  })
+  await w.agent.request(OBJECTIVE, { sender: 'Louis' })
+  const v1 = getActivePlan(w.planning())
+  w.game.inventory['iron-ore'] = 10
+  await w.agent.completed()
+  const restaged = w.named('context.restaged').find(row => w.data(row).role === 'planner')
+  assert.ok(restaged, 'a fresh planner was built from a packet')
+  assert.equal(w.data(restaged).checkpoint, 'C1')
+  assert.match(w.data(restaged).reason, /planner_fresh_for_replacement_no_parked_context/)
+  const plannerCall = chatText([w.calls[4]])
+  assert.match(plannerCall, new RegExp(v1.plan_id), 'the packet names the blocked plan')
+  assert.match(plannerCall, /BLOCKED/)
+  assert.match(plannerCall, /Smelt the ore into iron plates in the furnace/)
+  assert.match(plannerCall, /\[PLAN_BLOCKED\]/)
+  assert.equal(getActivePlan(w.planning()).plan_version, 2, 'and the replacement still committed')
+})
+
+// --- several replacements in one request -------------------------------------------------------------------------------------
+
+test('MW5: three real replacements in one request commit; the fourth block reaches the cap and ends blocked', async () => {
+  let draftNumber = 1
+  const w = world((call, memory, calls) => {
+    const system = String(calls.at(-1)[0].content)
+    if (/ROLE: EXECUTOR/.test(system)) {
+      // The executor works from the reducer's plan block: a replacement's steps are the suffix after the verified prefix.
+      const held = getActivePlan(memory.planningState(KEY))
+      if (!calls.at(-1).some(message => message.role === 'tool')) return observation()
+      return planReply({ plan: held.steps.map(step => step.description), currentStep: held.active_step_index, operations: [insertOre()] })
+    }
+    if (w.named('plan.replacement_wake').length >= draftNumber) { // one draft per wake the harness traced
+      draftNumber += 1
+      const board = memory.currentPlan(KEY).task_board
+      const plan = board.steps.map((step, index) => (index === 1 ? `Place furnace attempt ${draftNumber}` : step.description))
+      return planReply({ plan, currentStep: 1, operations: [placeFurnace()], stepCompletions: board.steps.map((_, index) => det([ore, plates, gears][index])) })
+    }
+    return plannerDraft()
+  })
+  await w.agent.request(OBJECTIVE, { sender: 'Louis' })
+  w.game.inventory['iron-ore'] = 10
+  for (let cycle = 1; cycle <= 3; cycle++) {
+    await w.agent.completed()
+    assert.equal(getActivePlan(w.planning()).plan_version, cycle + 1, `replacement ${cycle} committed`)
+    assert.equal(w.planning().goal.replacements_accepted, cycle)
+  }
+  await w.agent.completed()
+  assert.equal(getActivePlan(w.planning()).status, PLAN_STATUS.BLOCKED, 'the fourth block waits for the player')
+  assert.equal(getActivePlan(w.planning()).plan_version, 4)
+  assert.equal(w.named('plan.replacement_wake').length, 3)
+  const skipped = w.data(w.named('plan.replacement_wake_skipped').at(-1))
+  assert.equal(skipped.reason, 'replacement_cap_reached')
+  assert.equal(skipped.replacements_used, 3)
+  assert.equal(w.named('plan.replacement_announced').length, 3)
+})
+
+// --- re-drafting an accepted successor -----------------------------------------------------------------------------------------
+
+function redraftWorld(secondDraft) {
+  // The replacement's first batch hits a model-correctable preflight (unknown prototype) once, so the planner re-submits.
+  let rejected = false
+  const game = gameWithMissingFurnace()
+  const base = game.preflight
+  game.preflight = (text) => {
+    if (text.includes('place_entity') && !rejected) {
+      rejected = true
+      return { ok: false, code: 'unknown_prototype', operation: 'place_entity', field: 'entity_name', identity: 'stone-furnace' }
+    }
+    return base(text)
+  }
+  return world([plannerDraft(), observation(), ...staleTwice(), replacementDraft(), secondDraft], { game })
+}
+
+test('MW5: re-submitting the same replacement steps after a correctable preflight passes through and commits once', async () => {
+  const w = redraftWorld(replacementDraft())
+  await w.agent.request(OBJECTIVE, { sender: 'Louis' })
+  w.game.inventory['iron-ore'] = 10
+  const result = await w.agent.completed()
+  const plan = getActivePlan(w.planning())
+  assert.equal(plan.plan_version, 2)
+  assert.ok([PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan.status))
+  assert.equal(w.planning().goal.replacements_accepted, 1, 'the re-draft is not counted again')
+  assert.equal(w.named('plan.replacement_drafted').length, 1)
+  assert.equal(w.named('plan.replacement_committed').length, 1)
+  assert.equal(w.named('plan.replacement_wake').length, 1, 'no second wake')
+  assert.equal(result.operations[0].name, 'place_entity')
+})
+
+test('MW5: re-drafting the accepted successor with different steps ends BLOCKED visibly with a trace instead of failing at the commit and waking again', async () => {
+  const changed = () => planReply({
+    plan: [IRON_PLAN[0], 'Place a different furnace somewhere else', IRON_PLAN[2]],
+    currentStep: 1,
+    operations: [placeFurnace()],
+    stepCompletions: [det(ore), det(plates), det(gears)],
+  })
+  const w = redraftWorld(changed())
+  await w.agent.request(OBJECTIVE, { sender: 'Louis' })
+  w.game.inventory['iron-ore'] = 10
+  const result = await w.agent.completed()
+  const refused = w.named('plan.replacement_refused').find(row => w.data(row).reason === 'redraft_steps_changed_since_authorization')
+  assert.ok(refused?.request_id)
+  assert.equal(getActivePlan(w.planning()).status, PLAN_STATUS.BLOCKED)
+  assert.equal(getActivePlan(w.planning()).blocker.reason_code, 'replacement_redraft_changed')
+  assert.equal(w.named('plan.replacement_wake').length, 1, 'one wake only')
+  assert.match(result.chatMessage, /changed after the harness checked it/)
+  assert.equal(w.data(w.named('request.completed').at(-1)).outcome, 'replacement_redraft_refused')
+  assert.equal(w.named('plan.replacement_committed').length, 0)
+})
+
+// --- grant issuance ----------------------------------------------------------------------------------------------------------
+
+test('MW5: admission never re-activates a revoked player_task grant, and issues one only when the goal has none', async () => {
+  const w = world([plannerDraft()])
+  await w.agent.request(OBJECTIVE, { sender: 'Louis' })
+  const goal = w.planning().goal
+  const grantId = authorizationOf(w.planning()).grants[0].grant_id
+  assert.equal(w.memory.hasPlayerTaskGrant(KEY), true)
+  assert.equal(await w.agent.grantPlayerObjective(KEY, goal, OBJECTIVE), undefined, 'already granted')
+  w.memory.revokeAuthorization(KEY, grantId, { reason: 'player withdrew' })
+  const before = authorizationOf(w.planning()).grants
+  assert.equal(await w.agent.grantPlayerObjective(KEY, goal, OBJECTIVE), undefined, 'a revoked grant is not re-activated')
+  assert.deepEqual(authorizationOf(w.planning()).grants, before)
+})
+
+test('MW5: the replacement counter lives on the goal record and survives snapshot and restore', async () => {
+  const w = world([plannerDraft(), observation(), ...staleTwice(), replacementDraft()])
+  await w.agent.request(OBJECTIVE, { sender: 'Louis' })
+  w.game.inventory['iron-ore'] = 10
+  await w.agent.completed()
+  assert.equal(w.planning().goal.replacements_accepted, 1)
+  const restored = new CanonicalTaskBoardMemory()
+  restored.restore(w.memory.snapshot())
+  assert.equal(restored.replacementsUsed(KEY), 1)
+  assert.equal(replacementsUsed(restored.planningState(KEY)), 1)
 })
