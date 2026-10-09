@@ -38,6 +38,10 @@ const RECORDED_COPPER_REPLY = '{"chatMessage":"Copper step is now active. I\'ll 
 
 const withStepId = (content, stepId) => ({ content: JSON.stringify({ ...JSON.parse(content), stepId }) })
 const recorded = content => ({ content })
+const withPlanList = (content, plan, currentStep) => ({ content: JSON.stringify({ ...JSON.parse(content), plan, currentStep }) })
+// The same recorded reply, but the entry its currentStep points at is text that is no committed step: the step text does not
+// identify a step, so the legacy index rule decides (index 1, while the active step is index 2).
+const UNRESOLVED_COPPER_REPLY = JSON.stringify({ ...JSON.parse(RECORDED_COPPER_REPLY), plan: [STEPS[1], 'Mine copper by hand'], currentStep: 1 })
 
 function plannerCommit(extra = {}) {
   return planReply({
@@ -116,8 +120,29 @@ test('prompt: the executor is told to send the active step id from CONTROL_DECIS
   assert.doesNotMatch(EXECUTOR_ROLE_PROMPT, /plan as the committed steps unchanged/)
 })
 
-test('recorded reply 4 as-is (no stepId): the legacy index rule refuses it, and the refusal is a bounded correction, not request.failed or a pause', async () => {
-  const world = harness([recorded(RECORDED_COPPER_REPLY), w => withStepId(RECORDED_COPPER_REPLY, stepThreeOf(w).step_id)])
+test('recorded reply 4 as-is (no stepId): its list text at currentStep names the active step, so it is resolved by text, bound and admitted', async () => {
+  const world = harness([recorded(RECORDED_COPPER_REPLY)])
+  await world.toStepThree()
+
+  assert.equal(world.calls.length, 4, 'planner, step-2 reply (nudged, then settled), and the text-resolved reply')
+  const [resolved] = world.rows('executor.step_resolved_by_text')
+  assert.equal(resolved.data.incoming_step_index, 1)
+  assert.equal(resolved.data.step_id, stepThreeOf(world).step_id)
+  assert.equal(resolved.data.active_step_id, stepThreeOf(world).step_id)
+  assert.equal(resolved.data.reason, 'reply_step_text_names_one_committed_step')
+  assert.ok(resolved.data.request_id)
+  assert.ok(resolved.data.handoff_id !== undefined || world.agent.agentContext.handoffId === undefined)
+  assert.equal(world.rows('executor.step_bound').length, 1, 'bound exactly as a reply that carried the id')
+  assert.equal(world.rows('executor.legacy_step_index_used').length, 1, 'only the zero-operation step-2 reply traced the index rule; the copper reply did not')
+  assert.equal(world.rows('executor.stale_step_rejected').length, 0)
+  assert.equal(world.rows('request.failed').length, 0)
+  assert.equal(world.game.mutations.length, 2)
+  assert.match(world.game.mutations[1], /copper-ore/)
+  assert.deepEqual(world.tracker().steps.map(step => step.description), STEPS, 'the echoed two-entry list changed nothing')
+})
+
+test('a reply whose step text matches no committed step: the legacy index rule refuses it, and the refusal is a bounded correction, not request.failed or a pause', async () => {
+  const world = harness([recorded(UNRESOLVED_COPPER_REPLY), w => withStepId(RECORDED_COPPER_REPLY, stepThreeOf(w).step_id)])
   await world.toStepThree()
 
   assert.equal(world.calls.length, 5, 'planner, step-2 reply (nudged, then settled), legacy reply (corrected), bound reply')
@@ -127,10 +152,12 @@ test('recorded reply 4 as-is (no stepId): the legacy index rule refuses it, and 
   assert.equal(stale.data.expected_step.stepId, stepThreeOf(world).step_id)
   assert.equal(stale.data.reason, 'step_index_not_the_active_step')
   assert.ok(stale.data.request_id)
-  const [legacy] = world.rows('executor.legacy_step_index_used')
+  const legacy = world.rows('executor.legacy_step_index_used').at(-1)
   assert.equal(legacy.data.incoming_step_index, 1)
   assert.equal(legacy.data.reason, 'reply_without_step_id_uses_index_rule')
+  assert.equal(legacy.data.text_resolution, 'not_a_committed_step')
   assert.equal(legacy.data.request_id, stale.data.request_id)
+  assert.equal(world.rows('executor.step_resolved_by_text').length, 0)
 
   const [correction] = world.rows('executor.step_identity_correction')
   assert.equal(correction.data.request_id, stale.data.request_id)
@@ -144,9 +171,130 @@ test('recorded reply 4 as-is (no stepId): the legacy index rule refuses it, and 
   assert.equal(world.agent.planCategoryRetries, 0, 'the shared plan_category allowance was not spent')
 
   const message = harnessMessagesOf(world.calls[4]).at(-1)
-  // The index pointed at text identical to the active step's own, so the message does not call that text "not the active step".
-  assert.equal(message, `[HARNESS] Operations were sent with step index 1; nothing ran. The active step is "${STEPS[2]}" (stepId ${stepThreeOf(world).step_id}, index 2). The committed plan is unchanged.`)
+  assert.equal(message, `[HARNESS] Operations were sent for step index 1 ("Mine copper by hand"), which is not the active step; nothing ran. The active step is "${STEPS[2]}" (stepId ${stepThreeOf(world).step_id}, index 2). The committed plan is unchanged.`)
   assert.equal(world.game.mutations.length, 2, 'the planner batch and the bound executor batch; the refused reply ran nothing')
+})
+
+test('a reply without stepId whose list text names ANOTHER committed step is refused as step_id_names_another_step, and nothing ran', async () => {
+  // The list is the full committed plan and currentStep 0 points at step 1's text, which is a different committed step.
+  const world = harness([withPlanList(RECORDED_COPPER_REPLY, STEPS, 0), w => withStepId(RECORDED_COPPER_REPLY, stepThreeOf(w).step_id)])
+  await world.toStepThree()
+
+  const [resolved] = world.rows('executor.step_resolved_by_text')
+  assert.equal(resolved.data.step_id, world.tracker().steps[0].step_id)
+  assert.equal(resolved.data.active_step_id, stepThreeOf(world).step_id)
+  const [stale] = world.rows('executor.stale_step_rejected')
+  assert.equal(stale.data.reason, 'step_id_names_another_step')
+  assert.equal(stale.data.incoming_step_id, world.tracker().steps[0].step_id)
+  assert.equal(stale.data.resolved_by_text, true)
+  assert.equal(stale.data.expected_step.stepId, stepThreeOf(world).step_id)
+  const [correction] = world.rows('executor.step_identity_correction')
+  assert.equal(correction.data.reason, 'step_id_names_another_step')
+  assert.equal(world.rows('executor.legacy_step_index_used').filter(row => row.data.incoming_step_index === 0).length, 0)
+  assert.equal(harnessMessagesOf(world.calls[4]).at(-1), `[HARNESS] Operations were sent for step index 0 naming ${JSON.stringify(STEPS[0])}, which is not the active step; nothing ran. The active step is "${STEPS[2]}" (stepId ${stepThreeOf(world).step_id}). The committed plan is unchanged.`, 'the reply sent no id, so the message names the index and text it used')
+  assert.equal(world.game.mutations.length, 2, 'only the planner batch and the corrected, bound batch ran')
+  assert.equal(world.rows('request.failed').length, 0)
+})
+
+test('ambiguous step text (two committed steps share it) falls back to the index rule with text_resolution ambiguous', async () => {
+  const world = harness([w => withStepId(RECORDED_COPPER_REPLY, stepThreeOf(w).step_id)])
+  await world.toStepThree()
+  // Steps 2 and 3 now carry the same text, so the text at index 1 cannot say which one the reply means.
+  const held = world.tracker()
+  held.steps = held.steps.map((step, index) => (index === 1 ? { ...step, description: STEPS[2] } : step))
+  const before = world.rows('executor.legacy_step_index_used').length
+  const operations = [{ name: 'gather_resource', args: { resource_name: 'copper-ore', count: 20, search_radius: 256 } }]
+  await assert.rejects(world.agent.enforceExecutorContract({ chatMessage: '', plan: [STEPS[0], STEPS[2]], currentStep: 1, operations }), error => error.code === 'executor_stale_step')
+  const rows = world.rows('executor.legacy_step_index_used')
+  assert.equal(rows.length, before + 1)
+  assert.equal(rows.at(-1).data.text_resolution, 'ambiguous')
+  assert.equal(world.rows('executor.stale_step_rejected').at(-1).data.reason, 'step_index_not_the_active_step')
+  assert.equal(world.rows('executor.step_resolved_by_text').length, 0)
+})
+
+test('a reply that echoes the board list and indexes a verified board-prefix step is refused as step_text_names_verified_step, whatever index it sends, and never reaches the index rule', async () => {
+  const world = harness([w => withStepId(RECORDED_COPPER_REPLY, stepThreeOf(w).step_id)])
+  await world.toStepThree()
+  // Model a replacement: the committed plan is the suffix after the verified prefix (active index 0) while the board
+  // still lists steps 1 and 2 (board index 2).
+  const held = world.tracker()
+  held.steps = held.steps.slice(2)
+  held.active_step_index = 0
+  const boardList = world.board().task_board.steps.map(step => step.description)
+  assert.deepEqual(boardList, STEPS)
+  const operations = [{ name: 'gather_resource', args: { resource_name: 'copper-ore', count: 20, search_radius: 256 } }]
+  const legacyBefore = world.rows('executor.legacy_step_index_used').length
+  // currentStep 0 equals the committed active index, so the old index rule would have admitted a reply on verified step 1.
+  for (const currentStep of [0, 1]) {
+    const send = { chatMessage: '', plan: boardList, currentStep, operations }
+    const error = await world.agent.enforceExecutorContract(send).then(() => undefined, caught => caught)
+    assert.equal(error?.code, 'executor_stale_step', `currentStep ${currentStep} is refused`)
+    const stale = world.rows('executor.stale_step_rejected').at(-1)
+    assert.equal(stale.data.reason, 'step_text_names_verified_step')
+    assert.equal(stale.data.incoming_step_index, currentStep)
+    assert.equal(stale.data.matched_board_step_id, world.board().task_board.steps[currentStep].id)
+    assert.equal(stale.data.expected_step.stepId, held.steps[0].step_id)
+    // The refusal goes through the bounded correction path and says what the reply used.
+    world.agent.runTurn = async () => 'turn'
+    await world.agent.correctExecutorStepIdentity(send, error)
+    const correction = world.rows('executor.step_identity_correction').at(-1)
+    assert.equal(correction.data.reason, 'step_text_names_verified_step')
+    assert.equal(world.agent.messages.at(-1).content, `[HARNESS] Operations were sent for step index ${currentStep} naming ${JSON.stringify(STEPS[currentStep])}, which is an already verified step, not the active step; nothing ran. The active step is "${STEPS[2]}" (stepId ${held.steps[0].step_id}). The committed plan is unchanged.`)
+  }
+  assert.equal(world.rows('executor.legacy_step_index_used').length, legacyBefore, 'the index rule was never consulted')
+  assert.equal(world.rows('executor.step_resolved_by_text').length, 0)
+  // The board form that names the committed step (board index 2) is resolved by text instead.
+  const resolved = await world.agent.enforceExecutorContract({ chatMessage: '', plan: boardList, currentStep: 2, operations })
+  assert.equal(world.rows('executor.step_resolved_by_text').at(-1).data.step_id, held.steps[0].step_id)
+  assert.equal(resolved.currentStep, 0)
+  assert.deepEqual(resolved.plan, [STEPS[2]])
+})
+
+test('a committed step whose text is also on a board step other than its own copy is ambiguous, not resolved', async () => {
+  const world = harness([w => withStepId(RECORDED_COPPER_REPLY, stepThreeOf(w).step_id)])
+  await world.toStepThree()
+  const held = world.tracker()
+  held.steps = held.steps.slice(2)
+  held.active_step_index = 0
+  // The verified prefix repeats the committed step's text: the board copy is the last entry, the other match is not it.
+  const board = world.memory.currentPlan(KEY).task_board
+  board.steps[0].description = STEPS[2]
+  const operations = [{ name: 'gather_resource', args: { resource_name: 'copper-ore', count: 20, search_radius: 256 } }]
+  const rows = world.rows('executor.legacy_step_index_used').length
+  const outcome = await world.agent.enforceExecutorContract({ chatMessage: '', plan: board.steps.map(step => step.description), currentStep: 2, operations }).then(() => 'admitted', error => error.code)
+  assert.equal(world.rows('executor.step_resolved_by_text').length, 0)
+  const legacy = world.rows('executor.legacy_step_index_used')
+  assert.equal(legacy.length, rows + 1)
+  assert.equal(legacy.at(-1).data.text_resolution, 'ambiguous')
+  assert.equal(outcome, 'executor_stale_step', 'index 2 is not the committed active index 0')
+})
+
+test('currentStep equal to the active index but its text naming ANOTHER committed step is refused and corrected', async () => {
+  // The list [step 2, step 3, step 1] puts step 1's text at index 2, which is the active index.
+  const world = harness([withPlanList(RECORDED_COPPER_REPLY, [STEPS[1], STEPS[2], STEPS[0]], 2), w => withStepId(RECORDED_COPPER_REPLY, stepThreeOf(w).step_id)])
+  await world.toStepThree()
+
+  const [stale] = world.rows('executor.stale_step_rejected')
+  assert.equal(stale.data.incoming_step_index, 2)
+  assert.equal(stale.data.expected_step.index, 2)
+  assert.equal(stale.data.reason, 'step_id_names_another_step')
+  assert.equal(stale.data.resolved_by_text, true)
+  assert.equal(stale.data.incoming_step_id, world.tracker().steps[0].step_id)
+  const [correction] = world.rows('executor.step_identity_correction')
+  assert.equal(correction.data.attempt, 1)
+  assert.equal(correction.data.reason, 'step_id_names_another_step')
+  assert.equal(harnessMessagesOf(world.calls[4]).at(-1), `[HARNESS] Operations were sent for step index 2 naming ${JSON.stringify(STEPS[0])}, which is not the active step; nothing ran. The active step is "${STEPS[2]}" (stepId ${stepThreeOf(world).step_id}). The committed plan is unchanged.`)
+  assert.equal(world.game.mutations.length, 2, 'the refused reply ran nothing')
+  assert.equal(world.rows('request.failed').length, 0)
+})
+
+test('a reply without a plan list falls back to the index rule with text_resolution no_text', async () => {
+  const world = harness([withPlanList(RECORDED_COPPER_REPLY, [], 1), w => withStepId(RECORDED_COPPER_REPLY, stepThreeOf(w).step_id)])
+  await world.toStepThree()
+  const legacy = world.rows('executor.legacy_step_index_used').at(-1)
+  assert.equal(legacy.data.text_resolution, 'no_text')
+  assert.equal(world.rows('executor.stale_step_rejected')[0].data.reason, 'step_index_not_the_active_step')
+  assert.equal(world.rows('executor.step_resolved_by_text').length, 0)
 })
 
 test('recorded reply 4 plus the active step id: accepted, bound by id, and the operation is admitted for step 3', async () => {
@@ -192,7 +340,7 @@ test('a stepId naming the closed step 2 is refused and corrected, and nothing is
 })
 
 test('two consecutive wrong-step replies are corrected twice; the third pauses the goal with executor_step_identity_exhausted', async () => {
-  const world = harness([recorded(RECORDED_COPPER_REPLY), recorded(RECORDED_COPPER_REPLY), recorded(RECORDED_COPPER_REPLY)])
+  const world = harness([recorded(UNRESOLVED_COPPER_REPLY), recorded(UNRESOLVED_COPPER_REPLY), recorded(UNRESOLVED_COPPER_REPLY)])
   const result = await world.toStepThree()
 
   assert.equal(world.calls.length, 6)
@@ -218,7 +366,7 @@ test('two consecutive wrong-step replies are corrected twice; the third pauses t
 })
 
 test('the allowance is keyed by goal, plan and step, persists, and is not renewed by a restage or a restart inside the same step', async () => {
-  const world = harness([recorded(RECORDED_COPPER_REPLY), recorded(RECORDED_COPPER_REPLY), recorded(RECORDED_COPPER_REPLY)])
+  const world = harness([recorded(UNRESOLVED_COPPER_REPLY), recorded(UNRESOLVED_COPPER_REPLY), recorded(UNRESOLVED_COPPER_REPLY)])
   await world.toStepThree()
   const snapshot = JSON.parse(JSON.stringify(world.memory.snapshot()))
   assert.equal(snapshot.executor_step_identity_ledger.length, 1)
@@ -355,7 +503,7 @@ test('a superseded reply is not counted as a stale-step rejection: the fence run
   const original = world.agent.assertCurrent.bind(world.agent)
   world.agent.assertCurrent = async () => { throw new Error('Model turn was cancelled or superseded') }
   await assert.rejects(world.agent.enforceExecutorContract({ chatMessage: '', plan: [], currentStep: 0, operations, stepId: stepTwoOf(world).step_id }), /superseded/)
-  await assert.rejects(world.agent.enforceExecutorContract({ chatMessage: '', plan: STEPS.slice(1), currentStep: 1, operations }), /superseded/)
+  await assert.rejects(world.agent.enforceExecutorContract({ chatMessage: '', plan: [STEPS[1], 'Mine copper by hand'], currentStep: 1, operations }), /superseded/)
   world.agent.assertCurrent = original
   assert.equal(world.rows('executor.stale_step_rejected').length, before, 'no rejection row for a superseded reply')
 })

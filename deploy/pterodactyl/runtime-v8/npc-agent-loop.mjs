@@ -4059,9 +4059,52 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const stepRequestId = this.traceRequest?.id
     // Step identity: a reply that names the active step by its stable id owns its operations by that id, whatever
     // plan list or index it echoes. The Plan Tracker's id and the Task Board's alias both name the same active step.
-    const incomingStepId = typeof plan.stepId === 'string' && plan.stepId.trim() ? plan.stepId.trim() : undefined
+    // The two semantic-transition forms name the NEXT step through currentStep on purpose, so the step text at
+    // currentStep is not an identity claim for them; they keep their own validation further down.
+    const explicitNextStepClaim = [activeBoardStepId, committed.steps?.[committed.active_step_index]?.step_id].includes(plan.semanticCompletion?.stepId)
+      && Boolean(plan.semanticCompletion?.stepId)
+      && plan.currentStep === committed.active_step_index + 1
+    const legacyImpliedNextStep = !committed.steps?.[committed.active_step_index]?.completion_mode
+      && plan.currentStep === committed.active_step_index + 1
+      && impliedSemanticCompletion(plan, this.memory.currentPlan?.(this.activePlanKey())) !== undefined
+    let incomingStepId = typeof plan.stepId === 'string' && plan.stepId.trim() ? plan.stepId.trim() : undefined
+    // A reply without a step id names its step by the text its own list puts at currentStep. When that text identifies
+    // exactly one committed step (and no verified-prefix board step repeats it) the reply is treated as if it carried
+    // that step's id, so no index frame is compared: after a replacement the committed suffix and the board list count
+    // from different origins, while the text is the same in both. Only a reply with operations makes an identity claim, and
+    // only under completion protocol 2: version 1 keeps historical programmatic callers whose plan text is advisory.
+    let textResolution
+    if (this.completionProtocolVersion >= 2 && incomingStepId === undefined && plan.operations?.length > 0 && !explicitNextStepClaim && !legacyImpliedNextStep) {
+      textResolution = this.resolveReplyStepByText(plan, committed)
+      if (textResolution.resolution === 'resolved') incomingStepId = textResolution.step.step_id
+    }
     const activeStepIds = [activeStep?.step_id, activeBoardStepId].filter(id => typeof id === 'string' && id)
     const stepBound = incomingStepId !== undefined && activeStepIds.includes(incomingStepId)
+    if (textResolution?.resolution === 'resolved') {
+      await this.traceEvent('executor.step_resolved_by_text', {
+        request_id: stepRequestId,
+        role: EXECUTOR_ROLE,
+        handoff_id: this.agentContext.handoffId,
+        incoming_step_index: plan.currentStep,
+        step_id: incomingStepId,
+        active_step_id: activeStep?.step_id,
+        reason: 'reply_step_text_names_one_committed_step',
+      }, { requestId: stepRequestId })
+    }
+    if (textResolution?.resolution === 'verified_step') {
+      // The reply's own list puts a step the board already shows as verified (it is not in the committed plan) at currentStep:
+      // it is operating on a finished step, whatever index it echoes, so the index rule never gets to admit it.
+      const error = new AgentLoopError('executor_stale_step: choose new operations for the current committed active step')
+      error.failureClass = 'plan_category'
+      error.code = 'executor_stale_step'
+      error.expectedStep = { index: committed.active_step_index, stepId: activeStep?.step_id, description: activeStep?.description }
+      error.incomingStep = { index: plan.currentStep, description: textResolution.text, verified: true }
+      await this.assertCurrent()
+      await this.traceEvent('executor.stale_step_rejected', { request_id: stepRequestId, role: EXECUTOR_ROLE, handoff_id: this.agentContext.handoffId,
+        incoming_step_index: plan.currentStep, matched_board_step_id: textResolution.boardStepId, expected_step: error.expectedStep, operation_count: plan.operations?.length ?? 0,
+        reason: 'step_text_names_verified_step' }, { requestId: stepRequestId })
+      throw error
+    }
     if (incomingStepId === undefined) {
       await this.traceEvent('executor.legacy_step_index_used', {
         request_id: stepRequestId,
@@ -4069,6 +4112,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         handoff_id: this.agentContext.handoffId,
         incoming_step_index: plan.currentStep,
         expected_step_index: committed.active_step_index,
+        text_resolution: textResolution?.resolution,
         reason: 'reply_without_step_id_uses_index_rule',
       }, { requestId: stepRequestId })
     }
@@ -4087,20 +4131,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       error.failureClass = 'plan_category'
       error.code = 'executor_stale_step'
       error.expectedStep = { index: committed.active_step_index, stepId: activeStep?.step_id, description: activeStep?.description }
-      error.incomingStep = { stepId: incomingStepId, description: named?.description }
+      // A reply that sent no id (resolved by its step text) is told what it did send: its index and the text there.
+      error.incomingStep = textResolution?.resolution === 'resolved'
+        ? { stepId: incomingStepId, description: named?.description, byText: true, index: plan.currentStep }
+        : { stepId: incomingStepId, description: named?.description }
       // A reply of a replaced actor, epoch, generation or conversation is dropped here and never counted as a rejection.
       await this.assertCurrent()
       await this.traceEvent('executor.stale_step_rejected', { request_id: stepRequestId, role: EXECUTOR_ROLE, handoff_id: this.agentContext.handoffId,
-        incoming_step_index: plan.currentStep, incoming_step_id: incomingStepId, expected_step: error.expectedStep, operation_count: plan.operations?.length ?? 0,
+        incoming_step_index: plan.currentStep, incoming_step_id: incomingStepId, resolved_by_text: textResolution?.resolution === 'resolved' ? true : undefined, expected_step: error.expectedStep, operation_count: plan.operations?.length ?? 0,
         reason: 'step_id_names_another_step' }, { requestId: stepRequestId })
       throw error
     }
-    const explicitNextStepClaim = [activeBoardStepId, committed.steps?.[committed.active_step_index]?.step_id].includes(plan.semanticCompletion?.stepId)
-      && Boolean(plan.semanticCompletion?.stepId)
-      && plan.currentStep === committed.active_step_index + 1
-    const legacyImpliedNextStep = !committed.steps?.[committed.active_step_index]?.completion_mode
-      && plan.currentStep === committed.active_step_index + 1
-      && impliedSemanticCompletion(plan, this.memory.currentPlan?.(this.activePlanKey())) !== undefined
     // The downstream semantic transition validator still checks the explicit claim.
     if (incomingStepId === undefined && !explicitNextStepClaim && !legacyImpliedNextStep && plan.operations?.length > 0
       && plan.currentStep !== committed.active_step_index) {
@@ -4111,6 +4152,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const namesCommittedStep = committed.steps.some(step => normalizedStepText(step.description) === incomingStep)
       const incomingSteps = (Array.isArray(plan.plan) ? plan.plan : []).map(normalizedStepText)
       const activeSuffix = committed.steps.slice(committed.active_step_index).map(step => normalizedStepText(step.description))
+      // Text that identifies one step has already been resolved above. What reaches this rule is a reply whose text did not
+      // (missing, unknown or ambiguous), and an exact restatement of the active suffix at index zero is the one form whose
+      // position still names the active step when repeated descriptions make the text ambiguous.
       const relativeActiveStep = plan.currentStep === 0 && incomingSteps.length > 0
         && (JSON.stringify(incomingSteps) === JSON.stringify(activeSuffix)
           || (incomingSteps.length === 1 && incomingSteps[0] === normalizedStepText(expected?.description)))
@@ -4191,6 +4235,39 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       committed_steps: committed?.steps?.length ?? 0,
     }, { requestId })
     return finish(next)
+  }
+
+  // Which committed step does the text a reply's own list puts at currentStep name? The text is looked up among the
+  // committed steps and the Task Board's steps (the board still lists the verified prefix a replacement dropped from the
+  // committed plan). Resolved only when exactly one committed step and no other board step carries that text.
+  // no_text: no list entry at currentStep; not_a_committed_step: the text names no committed step (an unknown text or a
+  // verified-prefix step); ambiguous: the same text sits on more than one step.
+  resolveReplyStepByText(plan, committed) {
+    const raw = Array.isArray(plan.plan) ? plan.plan[plan.currentStep] : undefined
+    const text = typeof raw === 'string' ? normalizedStepText(raw) : ''
+    if (!text) return { resolution: 'no_text' }
+    const committedTexts = (committed.steps ?? []).map(step => normalizedStepText(step.description))
+    const matchIndexes = committedTexts.flatMap((value, index) => (value === text ? [index] : []))
+    const board = this.memory.currentPlan?.(this.activePlanKey())?.task_board
+    const boardSteps = Array.isArray(board?.steps) ? board.steps : []
+    const boardMatches = boardSteps.flatMap((step, index) => (normalizedStepText(step?.description) === text ? [{ index, id: step?.id }] : []))
+    if (matchIndexes.length === 0) {
+      // Text that is no committed step but is exactly one board step: that step is already verified (the replaced prefix).
+      if (boardMatches.length === 1) return { resolution: 'verified_step', text: raw, boardStepId: boardMatches[0].id }
+      return { resolution: 'not_a_committed_step' }
+    }
+    if (matchIndexes.length > 1) return { resolution: 'ambiguous' }
+    // The board lists the committed plan as its own tail (a replacement keeps the verified prefix in front of it), so the
+    // board copy of the matched step sits at the same distance from the end. Any board match other than that copy makes the
+    // text ambiguous. When the board does not line up with the committed plan the copy cannot be told apart, and the one
+    // match a board normally holds for a committed step is assumed to be it.
+    const offset = boardSteps.length - committedTexts.length
+    const aligned = offset >= 0 && committedTexts.every((value, index) => normalizedStepText(boardSteps[offset + index]?.description) === value)
+    const others = aligned ? boardMatches.filter(match => match.index !== offset + matchIndexes[0]) : boardMatches.slice(1)
+    if (others.length > 0) return { resolution: 'ambiguous' }
+    const step = committed.steps[matchIndexes[0]]
+    if (typeof step.step_id !== 'string' || !step.step_id) return { resolution: 'not_a_committed_step' }
+    return { resolution: 'resolved', step }
   }
 
   // C5: a provider-budget boundary. The fresh conversation runs in the SAME
@@ -12347,7 +12424,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const ledger = this.memory.executorStepIdentityLedger ??= new Map()
     const key = this.executorStepIdentityKey(committed)
     const used = ledger.get(key) ?? 0
-    const reason = incoming.stepId !== undefined ? 'step_id_names_another_step' : 'step_index_not_the_active_step'
+    const reason = incoming.verified ? 'step_text_names_verified_step' : incoming.stepId !== undefined ? 'step_id_names_another_step' : 'step_index_not_the_active_step'
     if (used >= EXECUTOR_STEP_IDENTITY_CORRECTION_LIMIT) {
       await this.traceEvent('executor.step_identity_exhausted', {
         request_id: requestId,
@@ -12378,13 +12455,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // An id names a step outright. An index only means something against the list it indexes, so the active step's
     // index is given beside it (the text the index pointed at can well be the active step's own).
     const sentText = incoming.description ? JSON.stringify(cleanMemoryText(incoming.description, 200)) : undefined
-    const byId = incoming.stepId !== undefined
+    // A reply resolved by its step text sent no id: what it sent was an index and the text there, so that is what it is told.
+    const byId = incoming.stepId !== undefined && !incoming.byText
     const sameText = !byId && Boolean(incoming.description) && normalizedStepText(incoming.description) === normalizedStepText(expected.description)
-    const activeStep = `${JSON.stringify(cleanMemoryText(expected.description, 200))} (stepId ${expected.stepId}${byId ? '' : `, index ${expected.index}`})`
+    const activeStep = `${JSON.stringify(cleanMemoryText(expected.description, 200))} (stepId ${expected.stepId}${byId || incoming.byText || incoming.verified ? '' : `, index ${expected.index}`})`
     let content
     if (sameText) {
       // The index pointed at the active step's own text, so that text is not "another step": say what the reply used.
       content = `[HARNESS] Operations were sent with step index ${incoming.index}; nothing ran. The active step is ${activeStep}. The committed plan is unchanged.`
+    }
+    else if (incoming.byText || incoming.verified) {
+      const naming = incoming.description ? ` naming ${JSON.stringify(cleanMemoryText(incoming.description, 200))}` : ''
+      const kind = incoming.verified ? 'an already verified step, not the active step' : 'not the active step'
+      content = `[HARNESS] Operations were sent for step index ${incoming.index}${naming}, which is ${kind}; nothing ran. The active step is ${activeStep}. The committed plan is unchanged.`
     }
     else {
       const sentFor = byId
