@@ -654,7 +654,7 @@ This is authoring discipline, not a Jev rejection loop.
 
 ## 6. Step contracts are fixed before commit
 
-> Owner decision 2026-10-08 (proposed, not built): each step's contract becomes fixed before that step activates, not at slice commit. See [One-step contract prediction](#one-step-contract-prediction-owner-decision-2026-10-08-proposed-not-built).
+> Owner decision 2026-10-08 (P1–P2 built 2026-10-09, P3–P4 not built): each step's contract becomes fixed before that step activates, not at slice commit. See [One-step contract prediction](#one-step-contract-prediction-owner-decision-2026-10-08-p1p2-built-p3p4-not-built).
 
 A committed semantic step should already know what successful completion means.
 
@@ -1177,7 +1177,7 @@ Constraints any design has to keep:
   (no unvalidated inserter or belt figures) and fits the production-rate goals
   above.
 
-### One-step contract prediction (owner decision, 2026-10-08; proposed, not built)
+### One-step contract prediction (owner decision, 2026-10-08; P1–P2 built, P3–P4 not built)
 
 Trigger: [Haiku trial C](validation/LUNA_HAIKU_LIVE_2026-10-08C.md). The planner writes every step's completion contract when it commits a slice, several steps before those steps run. By then the facts can be stale (trial C committed "mine 100 iron ore" while Luna already held 130), and a contract that turns out wrong is frozen with the plan.
 
@@ -1230,7 +1230,7 @@ If the prediction call is still running at step close, the harness waits for it.
 
 A plan whose contracts were all bound at commit stays valid: those steps skip binding. The first phase covers steps inside a slice. Predicting the next slice while the last step runs is a later phase.
 
-**Build units (proposed)**
+**Build units**
 
 | Unit | Scope |
 |---|---|
@@ -1240,6 +1240,16 @@ A plan whose contracts were all bound at commit stays valid: those steps skip bi
 | P4 | Static scenarios with recorded replies: a prediction bound, discarded on a changed fact, discarded on a failed step, and discarded on an actor replacement mid-prediction |
 
 Order: minimal MW5 first, because recovery is needed in both designs and it is what stopped trial C. Then P1–P4.
+
+**Build status (2026-10-09).** P1 and P2 merged together as `f111edc9` (static gates passed, not live-validated):
+
+- An execution draft carries a checkpoint for the step at `currentStep` (and for the first step the reducer will hold). Later steps may be `{kind:"deterministic"}` with no checkpoint. Later checkpoints in a draft are stripped and traced as `plan.later_contracts_deferred`.
+- Such a step is committed with `contract_status: 'pending'`. `STEP_CONTRACT_BOUND` is a runtime-only, append-only reducer event that binds a contract to the active step only.
+- When a pending step becomes active (step close, condition-wait close, or the admission backstop `step_contract_pending`), the harness makes one planner-role step contract call: a closed `{stepId, checkpoint}` reply, validated like a commit, with one correction re-ask. Staleness is fenced on lineage, generation, epoch and actor; `cancel()`/`reset()` abort the call.
+- A call that fails, or whose actor status cannot be read, pauses the goal with `step_contract_unavailable`. A stale call binds nothing, after the close it followed has been credited.
+- The call's usage is charged to the request and traced as a `provider.response` row with `trigger_source: 'step_contract'`.
+
+P3 (prediction lane) and P4 (recorded-reply scenarios) are not built. The mod's task board does not yet show `pending` contracts.
 
 ## Agent split: sequential planner and executor (design updated 2026-09-30)
 

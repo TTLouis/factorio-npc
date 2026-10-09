@@ -8,6 +8,22 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 9: step identity by text, just-in-time step contracts (static gates passed, not live-validated)
+
+- **Execution-draft wording** (`81ac9958`, owner OK). Planner prompts say every execution step is deterministic.
+- **Executor step identity after a replacement** (`643940f3`). A reply without a `stepId` is resolved by the step text its own list names, not by comparing index frames.
+  - A text that names a verified step is refused as `executor_stale_step` with reason `step_text_names_verified_step`.
+  - A text-resolved reply is traced as `executor.step_resolved_by_text`, counted by `run-check` as informational.
+  - This closes the October 8 open item where a board-index reply paused the goal.
+- **Just-in-time step contracts, P1+P2** (`f111edc9`). Steps after the first are committed with a pending contract and bound by a planner step contract call when they become active. See [the roadmap build status](NPC_PLANNING_ROADMAP.md#one-step-contract-prediction-owner-decision-2026-10-08-p1p2-built-p3p4-not-built).
+  - `run-check` counts deferred and just-in-time contracts and flags `step_contract_unavailable` pauses.
+  - The installer payload did not change; the pin check passes.
+- **Gates.** `bash scripts/test-local.sh all` exit 0: 2,066 runtime tests and the mod lane.
+- **Open.**
+  - P3 (prediction lane) and P4 (recorded-reply scenarios) are not built.
+  - The mod's task board parses `contract_kind` but does not render it, so a pending contract is not shown.
+  - The next live Haiku run waits for the owner's go.
+
 ## October 8 after trial C: semantic steps prevented, minimal MW5 recovery wired (static gates passed, not live-validated)
 
 - **Prevention.** Execution plans may declare only deterministic checkpoints (`68b7945f`).
