@@ -1367,6 +1367,7 @@ export async function providerRequest(config, messages, {
   providerPolicy,
   forceFullPlanner = false,
   interactionRouter = false,
+  triggerSource,
   role,
 } = {}) {
   check(typeof config.key === 'string' && config.key.trim().length > 0, 'OPENAI_API_KEY is missing')
@@ -1631,7 +1632,7 @@ export async function providerRequest(config, messages, {
       : undefined
     const normalizedContent = typeof message.content === 'string' ? message.content : ''
     const structured = message.tool_calls === undefined
-      ? structuredContentDiagnostics(normalizedContent, { planContract: interactionRouter !== true })
+      ? structuredContentDiagnostics(normalizedContent, { planContract: interactionRouter !== true && triggerSource !== 'step_contract' })
       : undefined
     const finishReason = choice?.finish_reason
     const usageNumbers = providerUsageNumbers(data?.usage)

@@ -8,6 +8,8 @@ import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 import { COMPACT_CONTINUATION_PROMPT, CLOSED_CONTROL_PROMPT, EXECUTOR_CLOSED_CONTROL_PROMPT, EXECUTOR_COMPACT_CONTINUATION_PROMPT } from './provider-base.mjs'
 import { STEP_CONTRACT_MARKER } from './luna-step-contracts.mjs'
+import { providerRequest } from './provider.mjs'
+import { makeConditionWait } from './step-completion.mjs'
 import { FakeFactorio, gather, planReply, recordingJev } from './task-loop-fixtures.mjs'
 
 // Step contracts bind just in time (docs/NPC_PLANNING_ROADMAP.md, "One-step contract prediction"): a slice commits its step
@@ -496,7 +498,8 @@ test('a loop that was reset while the call was out binds nothing either', async 
   closeStepOneOnTheReducer(world)
   await assert.rejects(world.agent.ensureActiveStepContract({ trigger: 'test' }))
   assert.equal(world.tracker().steps[1].contract_status, 'pending')
-  assert.equal(world.rows('plan.contract_call_failed')[0].data.reason, 'stale_superseded')
+  // reset() aborts the in-flight side call, so the call reports the abort before the lineage change.
+  assert.equal(world.rows('plan.contract_call_failed')[0].data.reason, 'stale_cancelled')
 })
 
 test('the call is charged to the request: reserve, call count and output units, and never to the generation output cap', async () => {
@@ -632,4 +635,141 @@ test('a fresh-read close binds the next contract before it returns', async () =>
   assert.equal(world.tracker().steps[1].contract_status, 'bound')
   assert.equal(closed.state.task_board.steps[1].completion_contract.requirements[0].item_name, 'iron-plate', 'the state it hands back already carries the bound contract')
   assert.equal(world.rows('plan.contract_requested')[0].data.trigger, 'step_close')
+})
+
+// --- review fixes: unreadable status, abort, credit before propagate, usage, first-index checkpoint ------------------------
+
+const STATUS_READ = 'remote.call("sgluna_deployment","status")'
+const withUsage = (call) => {
+  const reply = answerDeclared(call)
+  Object.defineProperty(reply, '_sglunaProvider', { value: { diagnostic_code: 'ok', finish_reason: 'stop', usage: { prompt_tokens: 900, completion_tokens: 37, total_tokens: 937 } } })
+  return reply
+}
+
+test('a status read that fails after the contract reply pauses the goal as step_contract_unavailable instead of dropping the close silently', async () => {
+  // Outside a turn (the supervisor's completed()), a stale-turn throw is swallowed as an expected cancellation, so an unreadable
+  // status must never be reported as a stale kind: it is a failed call and the goal pauses.
+  const statusBreaksAfterReply = async (call, world) => {
+    const read = world.game.command.bind(world.game)
+    world.game.command = async (text) => {
+      if (text.includes(STATUS_READ)) throw new Error('rcon connection closed')
+      return read(text)
+    }
+    return answerDeclared(call)
+  }
+  const world = harness({ script: [plannerCommit()], contracts: [statusBreaksAfterReply] })
+  const result = await world.closeStepOne()
+
+  assert.equal(result.goalStatus, 'paused')
+  assert.equal(world.board().status, 'paused')
+  assert.equal(world.board().pause_reason, 'step_contract_unavailable')
+  assert.equal(world.contractCalls.length, 1, 'an unreadable status is not retried inside the call')
+  const [failed] = world.rows('plan.contract_call_failed')
+  assert.equal(failed.data.reason, 'actor_status_unreadable')
+  assert.ok(failed.data.request_id)
+  assert.equal(world.tracker().steps[1].contract_status, 'pending', 'nothing was bound')
+  assert.equal(world.rows('plan.contract_bound_just_in_time').length, 0)
+  assert.equal(world.rows('step.verified').length, 1, 'the close stands')
+})
+
+test('cancel() while the contract call is out aborts its signal and binds nothing', async () => {
+  let seenSignal
+  const cancelledMidCall = async (call, world) => {
+    seenSignal = call.context.signal
+    assert.ok(seenSignal, 'the side call carries its own abort signal')
+    assert.equal(seenSignal.aborted, false)
+    world.agent.cancel('test_cancel')
+    assert.equal(seenSignal.aborted, true, 'cancel() aborts the in-flight contract call')
+    return answerDeclared(call)
+  }
+  const world = harness({ script: [plannerCommit()], contracts: [cancelledMidCall] })
+  await world.commit()
+  closeStepOneOnTheReducer(world)
+  await assert.rejects(world.agent.ensureActiveStepContract({ trigger: 'test' }), error => error.code === STALE_REPLY_ERROR_CODE)
+
+  assert.equal(world.tracker().steps[1].contract_status, 'pending')
+  assert.equal(world.board().task_board.steps[1].completion_contract, null)
+  assert.equal(world.rows('plan.contract_bound_just_in_time').length, 0)
+  assert.equal(world.rows('plan.contract_call_failed')[0].data.reason, 'stale_cancelled')
+  assert.equal(world.agent.stepContractAborts.size, 0, 'a finished call leaves no controller behind')
+})
+
+test('a stale contract call after a step close still credits and traces the close before the error propagates', async () => {
+  const replacedMidCall = async (call, world) => {
+    world.game.status = { ...world.game.status, epoch: world.game.status.epoch + 1 }
+    return answerDeclared(call)
+  }
+  const world = harness({ script: [plannerCommit()], contracts: [replacedMidCall] })
+  await world.commit()
+  const closesBefore = world.agent.sliceDeterministicCloses ?? 0
+  world.game.inventory['iron-ore'] = 10
+  await assert.rejects(world.agent.completed(), error => error.code === STALE_REPLY_ERROR_CODE)
+
+  assert.equal(world.rows('step.verified').length, 1, 'the verified close is traced before the stale error propagates')
+  assert.equal(world.agent.sliceDeterministicCloses, closesBefore + 1, 'and credited to the slice')
+  assert.equal(world.tracker().execution.step_progress[world.tracker().steps[0].step_id].status, 'completed')
+  assert.equal(world.tracker().steps[1].contract_status, 'pending', 'the stale bind itself bound nothing')
+  assert.equal(world.rows('plan.contract_call_failed')[0].data.reason, 'stale_actor_or_epoch_changed')
+})
+
+test('a step_contract reply is not traced provider_content_schema_invalid, while the same reply for another trigger still is', async () => {
+  const content = JSON.stringify({ stepId: 'step_2', checkpoint: IRON_PLATE })
+  const request = triggerSource => providerRequest(
+    { key: 'test-key', model: 'deepseek-flash', base: 'https://proxy.example/v1', profile: 'deepseek', timeoutMs: 5000 },
+    [{ role: 'system', content: 'system' }, { role: 'user', content: 'a step contract request' }],
+    {
+      allowTools: false,
+      triggerSource,
+      requestBodyPatch: { max_tokens: 6000, response_format: { type: 'json_object' } },
+      fetchImpl: async () => new Response(JSON.stringify({
+        id: 'contract-response',
+        model: 'deepseek-flash',
+        choices: [{ finish_reason: 'stop', message: { role: 'assistant', content } }],
+        usage: { prompt_tokens: 800, completion_tokens: 40, total_tokens: 840 },
+      }), { status: 200, headers: { 'content-type': 'application/json' } }),
+    },
+  )
+  const contract = await request('step_contract')
+  assert.equal(contract._sglunaProvider.diagnostic_code, 'ok')
+  assert.deepEqual(contract._sglunaProvider.structured_content, { json_valid: true })
+  const planner = await request('new_goal')
+  assert.equal(planner._sglunaProvider.diagnostic_code, 'provider_content_schema_invalid')
+})
+
+test('a contract call made from a condition-wait close outside a turn is recorded as a provider.response so the usage ledger counts it', async () => {
+  const world = harness({ script: [plannerCommit()], contracts: [withUsage] })
+  await world.commit()
+  const durable = world.memory.planByNpc.get(KEY)
+  durable.condition_wait = makeConditionWait(
+    { kind: 'inventory_count', item_name: 'iron-ore', minimum: 10 },
+    { goalId: durable.goal_id, stepId: durable.task_board.active_step_id, actorId: world.game.status.actor_id, actorEpoch: world.game.status.epoch, maxChecks: 10 },
+  )
+  world.game.inventory['iron-ore'] = 10
+  world.agent.traceRequest = undefined // no turn is open: the poll runs on its own
+  const responsesBefore = world.rows('provider.response').length
+
+  const polled = await world.agent.pollConditionWait()
+
+  assert.equal(polled.action, 'verified')
+  assert.equal(world.contractCalls.length, 1)
+  assert.equal(world.tracker().steps[1].contract_status, 'bound')
+  const rows = world.rows('provider.response').slice(responsesBefore)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].data.trigger_source, 'step_contract')
+  assert.equal(rows[0].data.usage.input_units >= 900, true)
+  assert.equal(rows[0].data.usage.output_units, 37)
+})
+
+test('a fresh draft with currentStep 1 and a bare deterministic entry at index 0 is refused with missing_active_step_checkpoint', async () => {
+  // Step 1 is the first step the reducer will hold; currentStep points past it, so a bare entry there would be committed pending
+  // and the commit refused with no explanation.
+  const bareFirst = [{ kind: 'deterministic' }, { kind: 'deterministic', checkpoint: IRON_PLATE }, { kind: 'deterministic' }]
+  const world = harness({ script: [plannerCommit({ currentStep: 1, stepCompletions: bareFirst }), plannerCommit()] })
+  await world.commit()
+  const [rejected] = world.rows('plan.completion_declarations_rejected')
+  assert.ok(rejected, 'the draft was refused in acceptance')
+  assert.equal(rejected.data.reason, 'missing_active_step_checkpoint')
+  assert.ok(rejected.data.request_id)
+  assert.match(harnessMessagesOf(world.calls[1]).join('\n'), /missing_active_step_checkpoint/)
+  assert.equal(world.tracker().steps[0].contract_status, 'bound')
 })

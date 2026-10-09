@@ -3016,6 +3016,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   set baseMessages(value) { this.agentContext.baseMessages = value }
 
   reset() {
+    this.abortStepContractCalls()
     this.turnConversation = null
     this.executorStepMark = null
     if (this.pendingInteractionAmendment) this.dropPendingAmendment('reset_discarded_the_conversation_holding_the_text') // its staged text lived in the conversation this reset discards
@@ -5851,7 +5852,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           task_board: visibleTaskBoard(reduced?.state?.task_board),
         })
         // This close does not go through applyStepClose, so the next step's contract is bound here, before the close is credited.
-        const contracted = await this.ensureActiveStepContract({ trigger: 'condition_wait', closedStepId: identity.step_id, closedBy: 'condition_wait' })
+        const contracted = await this.ensureContractAfterClose({ trigger: 'condition_wait', closedStepId: identity.step_id, closedBy: 'condition_wait' })
         const closedState = contracted.state ?? reduced?.state
         await this.creditSliceProgress('deterministic_close', generation, requestId)
         await this.traceEvent('step.verified', {
@@ -5860,6 +5861,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           task_board: visibleTaskBoard(closedState?.task_board),
         })
         await this.rollProviderBudgetAtStepClose('condition_wait', closedState)
+        if (contracted.thrown) throw contracted.thrown
         if (contracted.ok === false) {
           const stopped = await this.pauseForStepContract(contracted.failure)
           return { action: 'paused', wait_id: identity.wait_id, state: closedState, chat_message: stopped.chatMessage }
@@ -6433,6 +6435,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw error
     }
     const plannerOnlyDraft = this.plannerOnlyDraftCandidate(plan)
+    const firstReducerIndex = held && [PLAN_STATUS.DRAFT, PLAN_STATUS.RUNTIME_VALIDATION, PLAN_STATUS.READY].includes(held.status)
+      ? (held.carried_forward_evidence?.length ?? 0)
+      : 0
     const allSemantic = plan.stepCompletions.every(declaration => declaration.kind === 'semantic')
     const declarationError = plan.assessmentOnly === true && (!allSemantic || plan.operations.length > 0)
       ? 'assessment_only_conflicts_with_execution'
@@ -6475,8 +6480,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // (assessment_only_conflicts_with_execution), so a semantic declaration never sits beside admitted operations.
       if (declaration.kind === 'semantic') continue
       if (!declaration.checkpoint) {
-        // A step declared without a checkpoint is bound when it is about to start. The step that runs first cannot wait.
-        if (index !== plan.currentStep) continue
+        // A step declared without a checkpoint is bound when it is about to start. The step that runs first cannot wait: that is
+        // the step at currentStep and the first step the reducer will hold (index 0, or after a replacement's carried prefix),
+        // which a currentStep beyond it would otherwise leave pending and the commit would refuse without a word.
+        if (index !== plan.currentStep && index !== firstReducerIndex) continue
         await this.traceEvent('plan.completion_declarations_rejected', {
           request_id: this.traceRequest?.id,
           reason: 'missing_active_step_checkpoint',
@@ -6642,7 +6649,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     // The step that just became active may have been committed without its checkpoint. Its contract is authored and bound
     // here, before anything can act on that step and before this close is credited.
-    const contracted = await this.ensureActiveStepContract({ trigger: 'step_close', closedStepId: step.id, closedBy: source ?? trigger })
+    const contracted = await this.ensureContractAfterClose({ trigger: 'step_close', closedStepId: step.id, closedBy: source ?? trigger })
     const state = contracted.state ?? reduced.state
     await this.creditSliceProgress('deterministic_close', generation, requestId)
     await this.traceEvent('step.verified', {
@@ -6652,7 +6659,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       task_board: visibleTaskBoard(state?.task_board),
     })
     await this.rollProviderBudgetAtStepClose(source ?? trigger, state)
-    // The close is real either way; a contract that could not be bound pauses the goal after it was recorded.
+    // The close is real either way; a stale bind is propagated only now that it has been credited and traced.
+    if (contracted.thrown) throw contracted.thrown
+    // A contract that could not be bound pauses the goal after the close was recorded.
     const contractPause = contracted.ok === false ? await this.pauseForStepContract(contracted.failure) : undefined
     return { closed: true, state, ...(contractPause ? { contractPause } : {}) }
   }
@@ -6697,7 +6706,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // { ok: false, reason, attempts } or { stale: <kind> }. Calls this.provider directly: callProvider/callProviderRound would
   // append to the conversation, mutate the agent context's request counters and count in providerCallsByGeneration (which
   // makes a restage refuse). Reserve and usage are charged to the request; the generation output cap is left alone.
-  async requestStepContract({ key, step, requestId, facts, assumedOutcome }) {
+  async requestStepContract(args) {
+    // The call has its own controller like the other side calls: cancel() and reset() abort it, and an aborted call is stale.
+    const controller = new AbortController()
+    this.stepContractAborts ??= new Set()
+    this.stepContractAborts.add(controller)
+    try { return await this.runStepContractCall({ ...args, controller }) }
+    finally { this.stepContractAborts.delete(controller) }
+  }
+
+  abortStepContractCalls() {
+    for (const controller of this.stepContractAborts ?? []) controller.abort()
+    this.stepContractAborts?.clear()
+  }
+
+  async runStepContractCall({ key, step, requestId, facts, assumedOutcome, controller }) {
     const planning = this.memory.planningState?.(key)
     const packet = buildStepContractPacket({ planningState: planning, stepId: step.step_id, facts, assumedOutcome })
     if (!packet) return { ok: false, reason: 'packet_unavailable', attempts: 0 }
@@ -6706,13 +6729,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     catch { return { ok: false, reason: 'actor_status_unreadable', attempts: 0 } }
     const fence = { lineage: this.agentContext.lineageSequence, generation: this.generation, status }
     // Not assertCurrent(): that resets the loop on a change, and this is a side call that must not touch the turn.
+    // { stale } only when the loop, the actor or the epoch really changed. A status read that fails is a transient transport
+    // failure, not a stale turn: it is { unreadable }, which fails the call (and pauses) instead of silently dropping it.
     const staleKind = async () => {
-      if (this.agentContext.lineageSequence !== fence.lineage || this.generation !== fence.generation) return 'superseded'
+      if (controller.signal.aborted) return { stale: 'cancelled' }
+      if (this.agentContext.lineageSequence !== fence.lineage || this.generation !== fence.generation) return { stale: 'superseded' }
       try {
         const current = await deploymentStatus(this.rcon, { requireAllowed: true })
-        return actorChanged(fence.status, current) ? 'actor_or_epoch_changed' : undefined
+        return actorChanged(fence.status, current) ? { stale: 'actor_or_epoch_changed' } : undefined
       }
-      catch { return 'actor_status_unreadable' }
+      catch { return { unreadable: true } }
     }
     const base = [...this.rolePrefixMessages(PLANNER_ROLE), { role: 'user', content: stepContractUserMessage(packet) }]
     let messages = base
@@ -6733,6 +6759,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           recoveryAttempt: 0,
           triggerSource: STEP_CONTRACT_TRIGGER,
           requestId,
+          signal: controller.signal,
           requestBodyPatch: {
             max_tokens: STEP_CONTRACT_MAX_TOKENS,
             response_format: { type: 'json_object' },
@@ -6740,12 +6767,20 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         })
       }
       catch (error) {
+        if (controller.signal.aborted) return { stale: 'cancelled', attempts }
         return { ok: false, reason: `provider_error: ${cleanMemoryText(error instanceof Error ? error.message : String(error), 200)}`, attempts }
       }
       const usage = estimatedOutputUsage(normalizedProviderUsage(reply?._sglunaProvider?.usage), reply?._sglunaProvider)
       accumulateProviderUsage(this.traceRequest?.usage, usage)
-      const stale = await staleKind()
-      if (stale) return { stale, attempts }
+      // The goal usage ledger counts provider.response rows, and a call outside a turn has no traceRequest, so the call is
+      // recorded the way a loop round is.
+      await this.traceEvent('provider.response', {
+        kind: 'response', round: 0, trigger_source: STEP_CONTRACT_TRIGGER, attempt: attempts, latency_ms: Date.now() - startedAt,
+        usage, provider: compactProviderMetadata(reply?._sglunaProvider),
+      }, { requestId })
+      const changed = await staleKind()
+      if (changed?.stale) return { stale: changed.stale, attempts }
+      if (changed?.unreadable) return { ok: false, reason: 'actor_status_unreadable', attempts }
       const content = typeof reply?.content === 'string' ? reply.content : ''
       const parsed = parseStepContractReply(content, { stepId: step.step_id })
       let reason
@@ -6754,8 +6789,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         // The same validator a commit runs on an active step: supported, grounded in the live game.
         const validation = await this.validatePlannerCheckpointContract(parsed.checkpoint, [], { draft: true, plannerOnlyDraft: true })
         if (validation.accepted) {
-          const lateStale = await staleKind()
-          if (lateStale) return { stale: lateStale, attempts }
+          const late = await staleKind()
+          if (late?.stale) return { stale: late.stale, attempts }
+          if (late?.unreadable) return { ok: false, reason: 'actor_status_unreadable', attempts }
           await this.traceEvent('plan.contract_call_attempt', { request_id: requestId, step_id: step.step_id, attempt: attempts, outcome: 'accepted',
             reason: 'checkpoint_valid', latency_ms: Date.now() - startedAt, repairs: parsed.repairs.length, usage }, { requestId })
           return { ok: true, contract: validation.contract, attempts, repairs: parsed.repairs }
@@ -6769,6 +6805,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       messages = [...base, { role: 'assistant', content }, { role: 'user', content: stepContractCorrectionMessage(reason) }]
     }
     return { ok: false, reason: 'attempts_exhausted', attempts }
+  }
+
+  // The same, for a close that is already recorded: a call that throws (stale) is captured, so the caller can credit and trace
+  // the close first and then propagate it.
+  async ensureContractAfterClose(args) {
+    try { return await this.ensureActiveStepContract(args) }
+    catch (error) { return { ok: true, thrown: error } }
   }
 
   // Bind the active step's contract when it is pending. Returns { ok: true, skipped } when there is nothing to do,
@@ -9968,6 +10011,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   cancel(reason = 'cancelled') {
+    this.abortStepContractCalls()
     this.jev?.abortAll(reason)
     this.interactionAbort?.abort()
     this.interactionAbort = null
