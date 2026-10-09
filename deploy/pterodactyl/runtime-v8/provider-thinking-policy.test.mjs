@@ -838,3 +838,23 @@ test('round 0 of every authoring or replan trigger keeps the full effort and cap
   }
 })
 
+
+test('a step contract call is a small bounded decision: low reasoning, the caller output cap, JSON response format, and not plan authoring', async () => {
+  const messages = [
+    { role: 'system', content: 'system' },
+    { role: 'user', content: '[STEP_CONTRACT_REQUEST] Author the completion checkpoint for the target step. {"goal":{}}' },
+  ]
+  assert.deepEqual(selectReasoningPolicy(config(), messages, { allowTools: false, triggerSource: 'step_contract' }), {
+    effort: 'low',
+    reason: 'step_contract',
+  })
+  const { seen, message } = await captureRequest(messages, {
+    allowTools: false,
+    triggerSource: 'step_contract',
+    requestBodyPatch: { max_tokens: 6000, response_format: { type: 'json_object' } },
+  })
+  assert.equal(seen.body.reasoning_effort, 'low')
+  assert.equal(seen.body.max_tokens, 6000)
+  assert.deepEqual(seen.body.response_format, { type: 'json_object' })
+  assert.equal(message._sglunaProvider.reasoning_policy_reason, 'step_contract')
+})

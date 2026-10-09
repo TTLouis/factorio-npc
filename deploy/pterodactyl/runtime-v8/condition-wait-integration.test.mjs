@@ -967,3 +967,73 @@ test('an overrun wakes the planner with expected and elapsed seconds, never a co
   assert.ok(overrun.elapsed_seconds >= 60, String(overrun.elapsed_seconds))
   assert.equal(memory.planByNpc.get('npc:sgluna').task_board.completed_count, 0)
 })
+
+// --- step contracts: the condition-wait close does not go through applyStepClose, so it binds the next contract itself ---
+
+const WAIT_PLATES = { mode: 'all', requirements: [{ id: 'plates', kind: 'inventory_count', item_name: 'iron-plate', minimum: 9 }] }
+const NEXT_STEP_CONTRACT = { mode: 'all', requirements: [{ id: 'craft', kind: 'inventory_count', item_name: 'copper-plate', minimum: 4 }] }
+
+function committedWithPendingNextStep(options = {}) {
+  const made = makeAgent(options)
+  const { memory, rcon, agent } = made
+  memory.ensurePlanningDraft('npc:sgluna', memory.planByNpc.get('npc:sgluna'), {
+    now: 1,
+    stepCompletions: [{ kind: 'deterministic', checkpoint: WAIT_PLATES }, { kind: 'deterministic' }],
+  })
+  memory.commitPlanningPlan('npc:sgluna', { now: 2, runtime_validation: { passed: true } })
+  const durable = memory.planByNpc.get('npc:sgluna')
+  durable.condition_wait = makeConditionWait(
+    { kind: 'inventory_count', item_name: 'iron-plate', minimum: 9 },
+    { goalId: durable.goal_id, stepId: durable.task_board.active_step_id, actorId: agent.epoch.actor_id, actorEpoch: agent.epoch.epoch, maxChecks: 10 },
+  )
+  rcon.inventoryCount = 9
+  const rows = []
+  agent.behaviorTrace = { emit: async (record) => { rows.push(record) } }
+  return { ...made, rows }
+}
+
+const targetStepOf = (messages) => {
+  const text = String(messages.find(message => message.role === 'user' && String(message.content).startsWith('[STEP_CONTRACT_REQUEST]')).content)
+  return JSON.parse(text.slice(text.indexOf(' {"goal"') + 1)).target.step_id
+}
+
+test('step contracts: a satisfied condition wait closes its step and binds the next step\'s contract before the close is credited', async () => {
+  const seen = []
+  const { agent, memory, rows } = committedWithPendingNextStep({
+    provider: async (messages, context) => {
+      seen.push(context)
+      return { content: JSON.stringify({ stepId: targetStepOf(messages), checkpoint: NEXT_STEP_CONTRACT }) }
+    },
+  })
+  const verified = await agent.pollConditionWait()
+
+  assert.equal(verified.action, 'verified')
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].triggerSource, 'step_contract')
+  assert.equal(seen[0].allowTools, false)
+  const plan = getActivePlan(memory.planningState('npc:sgluna'))
+  assert.equal(plan.active_step_index, 1)
+  assert.equal(plan.steps[1].contract_status, 'bound')
+  assert.equal(plan.steps[1].contract_binding.binding, 'just_in_time')
+  assert.equal(verified.state.task_board.steps[1].completion_contract.requirements[0].item_name, 'copper-plate', 'the state the poll returns already carries the bound contract')
+  const order = rows.map(row => row.event)
+  assert.ok(order.indexOf('plan.contract_bound_just_in_time') < order.indexOf('step.verified'), 'bound before the close is traced as verified')
+  const requested = rows.find(row => row.event === 'plan.contract_requested')
+  assert.equal(requested.data.trigger, 'condition_wait')
+  assert.equal(requested.data.closed_by, 'condition_wait')
+  assert.ok(requested.data.request_id)
+})
+
+test('step contracts: a condition wait whose next contract cannot be bound still records the close and pauses the goal visibly', async () => {
+  const { agent, memory, rows } = committedWithPendingNextStep({ provider: async () => { throw new Error('upstream 503') } })
+  const result = await agent.pollConditionWait()
+
+  assert.equal(result.action, 'paused')
+  assert.match(result.chat_message, /I could not get a valid completion checkpoint for the next step/)
+  const plan = getActivePlan(memory.planningState('npc:sgluna'))
+  assert.equal(plan.execution.step_progress[plan.steps[0].step_id].status, 'completed')
+  assert.equal(plan.steps[1].contract_status, 'pending')
+  assert.equal(memory.planByNpc.get('npc:sgluna').pause_reason, 'step_contract_unavailable')
+  assert.equal(rows.filter(row => row.event === 'step.verified').length, 1)
+  assert.equal(rows.find(row => row.event === 'plan.contract_call_failed').data.step_id, plan.steps[1].step_id)
+})

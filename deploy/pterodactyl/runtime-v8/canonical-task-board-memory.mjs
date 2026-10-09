@@ -20,8 +20,12 @@ import {
 import { blockerFacts, currentGoalGrant, replacementsUsed } from './replacement-wake.mjs'
 import {
   carriedAcrossGoals,
+  checkStepContractBind,
   classifyTaskInterruption,
   classifyTaskResume,
+  isStepContractPending,
+  STEP_CONTRACT_PENDING_CODE,
+  STEP_CONTRACT_STATUS,
 } from './planning-state.mjs'
 import { duplicateEffectGuard } from './operation-reconciliation.mjs'
 import { pendingOperations, conflictingOperation } from './operation-ledger.mjs'
@@ -141,11 +145,16 @@ function draftStepsFromBoard(board, draftPlan) {
     description: step.description,
     completion_contract: safeDurableStepCompletionContract(step.completion_contract),
     ...(step.completion_mode ? { completion_mode: step.completion_mode, semantic_rationale: step.semantic_rationale } : {}),
+    ...(step.contract_status === STEP_CONTRACT_STATUS.PENDING ? { contract_status: STEP_CONTRACT_STATUS.PENDING } : {}),
   }))
 }
 
 function completionPolicyFields(entry) {
   if (entry?.kind === 'deterministic') {
+    // A deterministic entry with no checkpoint is a step whose contract is requested when the step is about to start.
+    if (entry.checkpoint === undefined || entry.checkpoint === null) {
+      return { completion_mode: 'deterministic', completion_contract: null, contract_status: STEP_CONTRACT_STATUS.PENDING }
+    }
     const contract = safeDurableStepCompletionContract(entry.checkpoint)
     return contract ? { completion_mode: 'deterministic', completion_contract: contract } : undefined
   }
@@ -873,12 +882,14 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         legacyState.task_board.steps = legacyState.task_board.steps.map((step, index) => {
           const canonical = plan.steps[index - alignment]
           if (!canonical?.completion_mode && !canonical?.completion_contract) return step
-          const { semantic_rationale: _priorRationale, ...kept } = step
+          const { semantic_rationale: _priorRationale, contract_status: _priorStatus, contract_binding: _priorBinding, ...kept } = step
           return {
             ...kept,
             completion_contract: canonical.completion_contract,
             ...(canonical.completion_mode ? { completion_mode: canonical.completion_mode } : {}),
             ...(canonical.completion_mode === 'semantic' ? { semantic_rationale: canonical.semantic_rationale } : {}),
+            ...(canonical.contract_status ? { contract_status: canonical.contract_status } : {}),
+            ...(canonical.contract_binding ? { contract_binding: { ...canonical.contract_binding } } : {}),
           }
         })
       }
@@ -1499,8 +1510,29 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
    */
   checkOperationAdmission(key, { operations, preflight, actor } = {}, { requestId } = {}) {
     const planning = this.planningState(key)
-    const verdict = evaluateOperationAdmission(planning, { operations, preflight, actor })
     const plan = getActivePlan(planning)
+    // A step with no bound contract cannot take operations: its checkpoint is requested when it is about to start.
+    const pendingStep = plan?.steps?.[plan.active_step_index]
+    if (isStepContractPending(pendingStep)) {
+      const refusal = {
+        ok: false,
+        code: STEP_CONTRACT_PENDING_CODE,
+        reason: 'step_contract_pending',
+        stage: 'admission',
+        operation_index: 0,
+        plan_id: plan.plan_id,
+        step_id: pendingStep.step_id,
+      }
+      this.#authTrace('admission.step_contract_pending_refused', {
+        stage: 'admission',
+        code: refusal.code,
+        reason: refusal.reason,
+        plan_id: plan.plan_id,
+        step_id: pendingStep.step_id,
+      }, requestId)
+      return refusal
+    }
+    const verdict = evaluateOperationAdmission(planning, { operations, preflight, actor })
     if (plan?.replacement) {
       this.#authTrace('authorization.grant_checked', {
         stage: 'admission',
@@ -1849,6 +1881,57 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       }, requestId)
     }
     return guard
+  }
+
+  /**
+   * Bind the contract a pending step was committed without (just in time, or from a held prediction). Runtime authority
+   * only, append-only: the reducer adds the one contract and refuses everything else (see checkStepContractBind). The
+   * legacy board mirror gets the same contract, because every close path reads the BOARD contract; the existing
+   * setStepCompletionContract is left alone, since it correctly refuses committed plans.
+   */
+  bindStepCompletionContract(key, { planId, stepId, contract, binding, requestId, now = Date.now() } = {}) {
+    const legacy = key ? this.planByNpc.get(key) : undefined
+    const planning = key ? this.planningByNpc.get(key) : undefined
+    const refuse = (reason) => {
+      this.#authTrace('plan.contract_bind_refused', { plan_id: planId, step_id: stepId, binding, reason }, requestId)
+      return { ok: false, reason }
+    }
+    if (!legacy || !planning || !legacy.task_board || !Array.isArray(legacy.task_board.steps)) return refuse('no_plan')
+    const event = { type: PLANNING_EVENT.STEP_CONTRACT_BOUND, now, source: 'runtime', plan_id: planId, step_id: stepId, contract, binding, request_id: requestId }
+    const check = checkStepContractBind(planning, event)
+    if (!check.ok) return refuse(check.reason)
+    const durable = safeDurableStepCompletionContract(check.contract)
+    const alignment = boardPlanAlignment(legacy.task_board, check.plan)
+    const boardIndex = alignment === undefined ? -1 : alignment + check.index
+    if (!durable || boardIndex < 0 || legacy.task_board.steps[boardIndex] === undefined) return refuse('board_step_not_found')
+    const after = applyPlanningEvent(planning, event)
+    if (after === planning) return refuse('reducer_refused')
+    this.planningByNpc.set(key, after)
+    const previous = legacy.task_board.steps[boardIndex]
+    const steps = legacy.task_board.steps.slice()
+    steps[boardIndex] = {
+      ...previous,
+      completion_contract: durable,
+      completion_contract_at: now,
+      revision: (Number.isSafeInteger(previous.revision) ? previous.revision : 0) + 1,
+    }
+    legacy.task_board = {
+      ...legacy.task_board,
+      steps,
+      revision: (Number.isSafeInteger(legacy.task_board.revision) ? legacy.task_board.revision : 0) + 1,
+      updated_at: now,
+    }
+    legacy.revision = (legacy.revision ?? 0) + 1
+    legacy.updated_at = now
+    this.planByNpc.set(key, legacy)
+    this.recordBoardEvidence(key, {
+      kind: 'step_contract_bound',
+      ref: `${requestId ?? 'request'}/contract/${stepId}`,
+      summary: JSON.stringify({ step_id: stepId, binding, mode: durable.mode, requirement_kinds: durable.requirements.map(item => item.kind) }),
+      now,
+    })
+    this.syncPlanningState(key, this.planByNpc.get(key))
+    return { ok: true, state: this.planByNpc.get(key), contract: durable }
   }
 
   setStepCompletionContract(key, stepId, contract, { now = Date.now() } = {}) {

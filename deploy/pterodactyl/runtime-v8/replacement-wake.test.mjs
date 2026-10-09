@@ -17,7 +17,7 @@ import {
   WORLD_CHANGE_PREFLIGHT_CODES,
 } from './replacement-wake.mjs'
 import { recoverInterruptedAgentPlan, Session } from './supervisor.mjs'
-import { FakeFactorio, gather, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
+import { answersStepContract, FakeFactorio, gather, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
 
 // MW5 (minimal): the player-task grant at goal admission and the replacement wake. Static scenarios: the real
 // NpcAgentLoop against a fake Factorio with scripted model replies; nothing here calls a provider.
@@ -87,12 +87,12 @@ function world(script, { game = gameWithMissingFurnace(), intents = [], agentOpt
     memory,
     completionProtocolVersion: 2,
     replacementWake: true,
-    provider: async (messages) => {
+    provider: answersStepContract(async (messages) => {
       calls.push(messages.map(message => ({ ...message })))
       const reply = typeof script === 'function' ? script(calls.length, memory, calls) : script[calls.length - 1]
       assert.ok(reply, `unscripted provider call ${calls.length}`)
       return typeof reply === 'function' ? reply(memory, calls) : { ...reply }
-    },
+    }),
     interactionProvider: async () => ({ content: JSON.stringify({ intent: intents[routed++] ?? 'new_goal', queue_conflict: false, reply: '' }) }),
     systemPrompt: 'replacement wake fixture',
     stateFile: null,
@@ -450,7 +450,7 @@ test('MW5: the [PLAN_BLOCKED] message states facts only: blocker, steps, verifie
     'authorization: player_task:g revision 2 (player_task) permits recovery, route_change. The requested result stays goal:g delivered to chest-1; a replacement cannot change it.',
     'needs the player: changing the requested result or destination, removing or redesigning player-built structures, using reserved supplies. The harness checks each operation at admission.',
     'replacements used for this goal: 1 of 3.',
-    'reply: an ordinary submitPlan. List every step of the plan, completed steps unchanged, with stepCompletions for every step, currentStep set to the first unfinished step, and the operations for that step. The harness validates it and commits it as a new plan version.',
+    'reply: an ordinary submitPlan. List every step of the plan, completed steps unchanged, with stepCompletions for every step (a checkpoint for the step at currentStep, {kind:"deterministic"} after it), currentStep set to the first unfinished step, and the operations for that step. The harness validates it and commits it as a new plan version.',
   ].join('\n'))
   assert.equal(replacementAnnouncement({ plan: { plan_version: 3 }, blocker: { reason_code: 'source_depleted' }, firstStep: 'Find another patch' }), 'Changed plan: source depleted. New plan v3 starts with: Find another patch.')
   assert.match(replacementApprovalLine({ reasonCodes: ['protected_redesign'], detail: '' }), /removing or changing something you built/)
@@ -836,3 +836,21 @@ for (const mode of ['stepId', 'board']) {
     }
   })
 }
+
+test('step contracts: a replacement draft follows the same rule; the step at currentStep carries its checkpoint and the later one is an intent bound when it starts', async () => {
+  const w = world([plannerDraft(), observation(), ...staleTwice(), replacementDraft({ stepCompletions: [det(ore), det(plates), { kind: 'deterministic' }] })])
+  await w.agent.request(OBJECTIVE, { sender: 'Louis' })
+  w.game.inventory['iron-ore'] = 10
+  await w.agent.completed()
+
+  const v2 = getActivePlan(w.planning())
+  assert.equal(v2.plan_version, 2)
+  assert.deepEqual(v2.steps.map(step => step.description), [REPLACED_PLAN[1], REPLACED_PLAN[2]], 'the verified prefix is carried, not restated as steps')
+  assert.deepEqual(v2.steps.map(step => step.contract_status), ['bound', 'pending'])
+  assert.equal(v2.steps[0].completion_contract.requirements[0].item_name, 'iron-plate')
+  assert.equal(v2.steps[1].completion_contract, null)
+  // Both drafts were traced: the original slice discarded two later checkpoints, the replacement sent none.
+  const deferred = w.named('plan.later_contracts_deferred')
+  assert.deepEqual(deferred.map(row => [row.data.step_count, row.data.discarded_checkpoints]), [[2, 2], [1, 0]])
+  assert.ok(deferred.every(row => row.data.reason === 'contracts_bound_when_each_step_activates' && row.data.request_id))
+})

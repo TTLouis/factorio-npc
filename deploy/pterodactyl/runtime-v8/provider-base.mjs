@@ -257,12 +257,12 @@ Token-efficient continuation rules:
 Approved operations and bounded arguments (complete list; "?" marks an optional key):
 ${approvedOperationListText()}.
 
-Answer with one submitPlan call when tool calls are enabled: {plan:["observable step"],currentStep,operations:[{name,args}]} plus the applicable completion fields. Do not mix submitPlan with observation tool calls. When tool calls are disabled, return the same control decision as exactly one strict JSON object in assistant content; checkpoint, semanticCompletion and stepCompletions remain allowed. Closing observations does not close the control decision. New drafts include stepCompletions aligned to plan: each entry is {kind:"deterministic",checkpoint:{mode,requirements}}; {kind:"semantic",rationale:"..."} entries only with assessmentOnly:true. Luna authors the outcome; the harness validates it. Root checkpoint is the active-step compatibility form. semanticCompletion identifies the exact active prose-only step from [PLANNING_STATE], and may have operations:[] when closing the final step of a slice. Do not invent another operation merely to close a completed step.
+Answer with one submitPlan call when tool calls are enabled: {plan:["observable step"],currentStep,operations:[{name,args}]} plus the applicable completion fields. Do not mix submitPlan with observation tool calls. When tool calls are disabled, return the same control decision as exactly one strict JSON object in assistant content; checkpoint, semanticCompletion and stepCompletions remain allowed. Closing observations does not close the control decision. New drafts include stepCompletions aligned to plan: the currentStep entry is {kind:"deterministic",checkpoint:{mode,requirements}} and later entries are {kind:"deterministic"}; {kind:"semantic",rationale:"..."} entries only with assessmentOnly:true. Luna authors the outcome; the harness validates it. Root checkpoint is the active-step compatibility form. semanticCompletion identifies the exact active prose-only step from [PLANNING_STATE], and may have operations:[] when closing the final step of a slice. Do not invent another operation merely to close a completed step.
 Every step of a new execution draft is deterministic. For an intentionally observation-only slice, set assessmentOnly:true with only semantic steps and no operations. Missing stock or unmet research describes work remaining, not an assessment-only result. research_completed {technology} is supported, including multiple requirements with mode:"all".
 plan is the visible canonical checklist proposal, currentStep indexes it, and operations contains only approved structured operations. For time or rate questions use getRecipeDetails, getMiningDetails and estimateProductionTime, not remembered numbers. If the whole goal is verified complete, return plan:[], currentStep:0, operations:[] and a short completion chatMessage.`
 
 export const CLOSED_CONTROL_PROMPT = `[CONTROL_OUTPUT] Tool invocations are disabled for this round (tool_choice none). Normal observations are closed; the harness still accepts your control decision as ONE strict JSON object in assistant content. Follow the current [CONTROL_DECISION_STATE] for eligible bounded missing-fact reads and draft versus committed-step authority. Do not call submitPlan or another tool, and do not omit completion fields merely because tools are closed.
-Use chatMessage, plan, currentStep and operations, plus the applicable checkpoint, semanticCompletion, stepCompletions, assessmentOnly, goal, roadmap, roadmapNodeIds, developmentMode or timeReview. New execution drafts require stepCompletions aligned to plan, every entry {kind:"deterministic",checkpoint:{mode,requirements}}; keep committed completion specifications unchanged. For an intentionally observation-only slice, set assessmentOnly:true with only semantic steps and no operations. Research completion uses research_completed {technology}, including mode:"all" for multiple technologies; an unmet result is a valid future checkpoint, not an assessment. Root checkpoint remains the active-step compatibility form.
+Use chatMessage, plan, currentStep and operations, plus the applicable checkpoint, semanticCompletion, stepCompletions, assessmentOnly, goal, roadmap, roadmapNodeIds, developmentMode or timeReview. New execution drafts require stepCompletions aligned to plan, {kind:"deterministic",checkpoint:{mode,requirements}} at currentStep and {kind:"deterministic"} for each later step; keep committed completion specifications unchanged. For an intentionally observation-only slice, set assessmentOnly:true with only semantic steps and no operations. Research completion uses research_completed {technology}, including mode:"all" for multiple technologies; an unmet result is a valid future checkpoint, not an assessment. Root checkpoint remains the active-step compatibility form.
 An executor may close the exact active prose-only step with a grounded semanticCompletion. For the final step of a slice, operations:[] is valid; the harness checks the user goal and returns control to the planner if more work remains. Example shape (replace placeholders and use the actual currentStep): {"chatMessage":"","plan":["<committed step>"],"currentStep":0,"operations":[],"semanticCompletion":{"stepId":"<exact active step id>","rationale":"<grounded judgment>"}}. Never bypass an unmet deterministic checkpoint or invent another gameplay action just to close a completed step. If genuinely blocked, start chatMessage with "BLOCKED: " and state the exact blocker.`
 
 // The executor sends stepId, not plan and currentStep (agent-roles.mjs EXECUTOR_ROLE_PROMPT; its submitPlan schema requires
@@ -287,7 +287,7 @@ export const EXECUTOR_COMPACT_CONTINUATION_PROMPT = executorPrompt(COMPACT_CONTI
     'return operations:[] and a short completion chatMessage.'],
   ['checkpoint, semanticCompletion and stepCompletions remain allowed.',
     'checkpoint and semanticCompletion remain allowed.'],
-  [' New drafts include stepCompletions aligned to plan: each entry is {kind:"deterministic",checkpoint:{mode,requirements}}; {kind:"semantic",rationale:"..."} entries only with assessmentOnly:true. Luna authors the outcome; the harness validates it.',
+  [' New drafts include stepCompletions aligned to plan: the currentStep entry is {kind:"deterministic",checkpoint:{mode,requirements}} and later entries are {kind:"deterministic"}; {kind:"semantic",rationale:"..."} entries only with assessmentOnly:true. Luna authors the outcome; the harness validates it.',
     ''],
   ['Every step of a new execution draft is deterministic. For an intentionally observation-only slice, set assessmentOnly:true with only semantic steps and no operations. Missing stock or unmet research describes work remaining, not an assessment-only result. research_completed',
     'research_completed'],
@@ -298,7 +298,7 @@ export const EXECUTOR_CLOSED_CONTROL_PROMPT = executorPrompt(CLOSED_CONTROL_PROM
     'Use chatMessage, stepId and operations, plus the applicable checkpoint, semanticCompletion or timeReview.'],
   ['Example shape (replace placeholders and use the actual currentStep): {"chatMessage":"","plan":["<committed step>"],"currentStep":0,"operations":[],"semanticCompletion"',
     'Example shape (replace placeholders): {"chatMessage":"","stepId":"<exact active step id>","operations":[],"semanticCompletion"'],
-  ['New execution drafts require stepCompletions aligned to plan, every entry {kind:"deterministic",checkpoint:{mode,requirements}}; keep committed completion specifications unchanged. For an intentionally observation-only slice, set assessmentOnly:true with only semantic steps and no operations. Research completion',
+  ['New execution drafts require stepCompletions aligned to plan, {kind:"deterministic",checkpoint:{mode,requirements}} at currentStep and {kind:"deterministic"} for each later step; keep committed completion specifications unchanged. For an intentionally observation-only slice, set assessmentOnly:true with only semantic steps and no operations. Research completion',
     'Research completion'],
 ])
 
@@ -1218,6 +1218,7 @@ function compactPlanningState(state) {
               description: step?.description,
               status: step?.status,
               completion_contract: step?.completion_contract,
+              contract_status: step?.contract_status,
               reduced_confidence: step?.reduced_confidence,
               evidence_refs: Array.isArray(step?.evidence_refs) ? step.evidence_refs.slice(-8) : [],
             }))
@@ -1366,6 +1367,7 @@ export async function providerRequest(config, messages, {
   providerPolicy,
   forceFullPlanner = false,
   interactionRouter = false,
+  triggerSource,
   role,
 } = {}) {
   check(typeof config.key === 'string' && config.key.trim().length > 0, 'OPENAI_API_KEY is missing')
@@ -1630,7 +1632,7 @@ export async function providerRequest(config, messages, {
       : undefined
     const normalizedContent = typeof message.content === 'string' ? message.content : ''
     const structured = message.tool_calls === undefined
-      ? structuredContentDiagnostics(normalizedContent, { planContract: interactionRouter !== true })
+      ? structuredContentDiagnostics(normalizedContent, { planContract: interactionRouter !== true && triggerSource !== 'step_contract' })
       : undefined
     const finishReason = choice?.finish_reason
     const usageNumbers = providerUsageNumbers(data?.usage)

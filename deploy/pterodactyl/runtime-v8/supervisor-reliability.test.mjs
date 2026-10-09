@@ -384,3 +384,29 @@ test('restart during output-budget recovery fails closed without another planner
   assert.equal(persisted, true)
   assert.equal(cancelled, true)
 })
+
+test('player tracker shows a step whose checkpoint is not bound yet as contract_kind pending, not as a prose step', () => {
+  const state = {
+    goal_id: 'goal_pending',
+    objective: 'Build a staged factory',
+    status: 'active',
+    planning: { plan: { plan_id: 'goal_pending_p1', plan_version: 1 } },
+    task_board: {
+      kind: 'task_board_lite', goal_id: 'goal_pending', status: 'active', blocker: '', pause_reason: '',
+      completed_count: 0, total_steps: 2, active_index: 0,
+      steps: [{ id: 'a', description: 'First', status: 'active' }, { id: 'b', description: 'Second', status: 'pending' }],
+      evidence: [],
+    },
+  }
+  const tracker = {
+    kind: 'plan_tracker_view', goal_id: 'goal_pending', plan_id: 'goal_pending_p1', plan_version: 1, roadmap_node_ids: [], status: 'COMMITTED', active_step_index: 0,
+    steps: [
+      { step_id: 'p1_s1', description: 'First', status: 'active', completion_contract: { mode: 'all' }, contract_status: 'bound', reduced_confidence: false },
+      { step_id: 'p1_s2', description: 'Second', status: 'pending', completion_contract: null, contract_status: 'pending', completion_confidence: 'pending', reduced_confidence: false },
+    ],
+    blocker: null, derived_from_plan_id: null, superseded_by_plan_id: null,
+  }
+  const snapshot = taskBoardUiSnapshot(state, undefined, tracker)
+  assert.deepEqual(snapshot.steps.map(step => step.contract_kind), ['grounded', 'pending'])
+  assert.equal(snapshot.steps.some(step => step.reduced_confidence === true), false)
+})

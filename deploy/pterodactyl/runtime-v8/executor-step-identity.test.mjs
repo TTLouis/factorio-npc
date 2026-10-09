@@ -7,7 +7,7 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { getActivePlan } from './planning-state.mjs'
 import { analyzeBehaviorTrace } from './run-check.mjs'
-import { FakeFactorio, planReply, recordingJev } from './task-loop-fixtures.mjs'
+import { answersStepContract, FakeFactorio, planReply, recordingJev } from './task-loop-fixtures.mjs'
 
 // Executor step identity (Haiku live run 2026-10-08, request req_muz4y1hy_1). An executor binds its operations to the
 // committed active step by the stable step id from [CONTROL_DECISION_STATE]; the plan list and currentStep it echoes no
@@ -69,14 +69,14 @@ function harness(afterStepTwo, { plannerExtra } = {}) {
   const agent = new NpcAgentLoop({
     rcon: game,
     memory,
-    provider: async (messages) => {
+    provider: answersStepContract(async (messages) => {
       calls.push(messages.map(message => ({ ...message })))
       const entry = script[calls.length - 1]
       assert.ok(entry, `unscripted provider call ${calls.length}`)
       // An entry may be a function of the world, for replies that name a step id the plan only gets once committed.
       const next = typeof entry === 'function' ? entry(world) : entry
       return { ...next }
-    },
+    }),
     interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
     interactionDecisionProvider: jev,
     steeringDecisionProvider: jev,

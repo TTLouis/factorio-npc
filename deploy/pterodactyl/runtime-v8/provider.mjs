@@ -107,6 +107,10 @@ function baseReasoningPolicy(config, messages, options = {}) {
   if (Number.isSafeInteger(options.recoveryAttempt) && options.recoveryAttempt > 0) {
     return { effort: 'none', reason: 'strict_recovery' }
   }
+  // One step's checkpoint from a harness packet of facts: a small bounded decision, not plan authoring.
+  if (options.triggerSource === 'step_contract') {
+    return { effort: 'low', reason: 'step_contract' }
+  }
   // Authoring a plan is where extra reasoning pays off; it gets the largest
   // bracket whatever Jev rated the turn, so it is not cut off and retried.
   if (PLAN_AUTHORING_TRIGGERS.has(options.triggerSource)) {

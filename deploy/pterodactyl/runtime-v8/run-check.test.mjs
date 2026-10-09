@@ -616,3 +616,44 @@ test('an execution draft refused for a semantic step is counted as informational
   // A trace with no refusal reports nothing informational.
   assert.deepEqual(analyzeBehaviorTrace(rows.filter(row => !/semantic_step/.test(JSON.stringify(row)))).informational, [])
 })
+
+test('step contracts: deferred and just-in-time-bound contracts are informational counts per request, never findings', () => {
+  const rows = [
+    drow(0, 'request.received', 'req_ct_1', {}),
+    drow(1, 'plan.later_contracts_deferred', 'req_ct_1', { step_count: 2, discarded_checkpoints: 1, reason: 'contracts_bound_when_each_step_activates' }),
+    drow(2, 'plan.contract_bound_just_in_time', 'req_ct_1', { plan_id: 'p1', step_id: 's2', attempts: 1, trigger: 'step_close', reason: 'step_activated_without_contract' }),
+    drow(3, 'plan.contract_bound_just_in_time', 'req_ct_1', { plan_id: 'p1', step_id: 's3', attempts: 2, trigger: 'condition_wait', reason: 'step_activated_without_contract' }),
+    drow(4, 'request.completed', 'req_ct_1', { chat_message: 'done' }),
+    drow(5, 'request.received', 'req_ct_2', {}),
+    drow(6, 'request.completed', 'req_ct_2', { chat_message: 'done' }),
+  ]
+  const result = analyzeBehaviorTrace(rows)
+  assert.deepEqual(result.findings, [])
+  assert.deepEqual(result.informational.map(item => [item.signature, item.request_id, item.count]), [
+    ['later_contracts_deferred', 'req_ct_1', 1],
+    ['contract_bound_just_in_time', 'req_ct_1', 2],
+  ])
+  assert.match(result.informational[0].detail, /deferred 2 later step contract\(s\).*1 checkpoint\(s\) sent for later steps were discarded/)
+  assert.match(result.informational[1].detail, /bound just in time in 3 planner call\(s\) \(trigger step_close, condition_wait\)/)
+  assert.deepEqual(analyzeBehaviorTrace(rows.slice(5)).informational, [])
+})
+
+test('step contracts: a contract call that failed and paused the goal is a finding, a stale call that bound nothing is not', () => {
+  const failed = (seconds, reason) => drow(seconds, 'plan.contract_call_failed', 'req_ct_3', { plan_id: 'p1', step_id: 's2', trigger: 'step_close', reason, attempts: 2 })
+  const rows = [
+    drow(0, 'request.received', 'req_ct_3', {}),
+    failed(1, 'checkpoint_not_supported:invented_kind'),
+    drow(2, 'request.completed', 'req_ct_3', { chat_message: 'I paused this goal: I could not get a valid completion checkpoint', outcome: 'paused_step_contract_unavailable' }),
+    drow(3, 'request.received', 'req_ct_4', {}),
+    drow(4, 'plan.contract_call_failed', 'req_ct_4', { plan_id: 'p1', step_id: 's2', trigger: 'step_close', reason: 'stale_actor_or_epoch_changed', attempts: 1 }),
+    drow(5, 'request.completed', 'req_ct_4', { chat_message: 'done' }),
+  ]
+  const result = analyzeBehaviorTrace(rows)
+  const findings = findingsFor(result, 'step_contract_unavailable')
+  assert.equal(findings.length, 1)
+  assert.equal(findings[0].request_id, 'req_ct_3')
+  assert.equal(findings[0].count, 1)
+  assert.match(findings[0].detail, /could not give step s2 a valid contract \(checkpoint_not_supported:invented_kind; attempts 2; trigger step_close\)/)
+  assert.equal(findingsFor(analyzeBehaviorTrace(rows.slice(3)), 'step_contract_unavailable').length, 0, 'a stale call is not a pause')
+  assert.match(formatCheckReport(result), /\[step_contract_unavailable\] request_id=req_ct_3 count=1/)
+})

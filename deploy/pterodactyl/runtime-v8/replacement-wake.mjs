@@ -180,7 +180,7 @@ export function buildPlanBlockedMessage({ plan, grant, replacementsUsedCount, ca
     `authorization: ${grant.grant_id} revision ${grant.revision} (${grant.mandate_kind}) permits ${scope}. The requested result stays ${grant.requested_result.result_key}${grant.requested_result.destination ? ` delivered to ${grant.requested_result.destination}` : ''}; a replacement cannot change it.`,
     'needs the player: changing the requested result or destination, removing or redesigning player-built structures, using reserved supplies. The harness checks each operation at admission.',
     `replacements used for this goal: ${replacementsUsedCount} of ${cap}.`,
-    'reply: an ordinary submitPlan. List every step of the plan, completed steps unchanged, with stepCompletions for every step, currentStep set to the first unfinished step, and the operations for that step. The harness validates it and commits it as a new plan version.',
+    'reply: an ordinary submitPlan. List every step of the plan, completed steps unchanged, with stepCompletions for every step (a checkpoint for the step at currentStep, {kind:"deterministic"} after it), currentStep set to the first unfinished step, and the operations for that step. The harness validates it and commits it as a new plan version.',
   )
   return lines.join('\n')
 }

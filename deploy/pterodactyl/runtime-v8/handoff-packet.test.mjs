@@ -814,3 +814,26 @@ test('D2: a deferred packet says so and carries no counts, machine or residual; 
   assert.equal(executorFactsRefreshMessage({ counts: { items: [], unavailable: [] } }), '')
   assert.equal(executorFactsRefreshMessage(undefined), '')
 })
+
+test('step contracts: the authority record says contract=pending for an active step whose checkpoint is not bound yet, and shows no contract for it', () => {
+  const drafted = applyPlanningEvent(goalState(), {
+    type: PLANNING_EVENT.DRAFT_CREATED,
+    now: 20,
+    roadmap_node_ids: ['node_power'],
+    steps: [
+      { description: 'Mine stone and craft a boiler' },
+      { description: 'Place the steam engine and offshore pump', completion_mode: 'deterministic', contract_status: 'pending' },
+    ],
+  })
+  const committedPlan = applyPlanningEvent(drafted, { type: PLANNING_EVENT.PLAN_COMMITTED, now: 30, plan_id: getActivePlan(drafted).plan_id, runtime_validation: { passed: true } })
+  const state = closeActiveStep(committedPlan, 40)
+  assert.equal(getActivePlan(state).steps[getActivePlan(state).active_step_index].contract_status, 'pending')
+  const { text } = buildHandoffPacket({ planningState: state, ...ARGS, executorFacts: FRESH_FACTS() })
+  const authority = text.split('\n').find(line => line.startsWith('authority:'))
+  assert.match(authority, /\(committed plan\) contract=pending latest_receipt=/)
+  assert.doesNotMatch(authority, /contract=none/)
+  assert.equal(text.includes('active_step_contract:'), false, 'a pending step has no contract line')
+  // The stable plan block never carries a step contract, bound or not.
+  const stable = text.slice(0, text.indexOf('--- step block'))
+  assert.doesNotMatch(stable, /inventory_count|contract=/)
+})

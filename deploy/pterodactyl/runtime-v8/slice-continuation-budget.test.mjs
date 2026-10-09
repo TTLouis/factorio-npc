@@ -3,7 +3,7 @@ import test from 'node:test'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { AgentLoopError, NpcAgentLoop, REQUEST_CONTINUATION_BACKSTOP } from './npc-agent-loop.mjs'
-import { FakeFactorio, gather, inventoryCheckpoint, planReply, recordingJev } from './task-loop-fixtures.mjs'
+import { answersStepContract, FakeFactorio, gather, inventoryCheckpoint, planReply, recordingJev } from './task-loop-fixtures.mjs'
 
 // Per-slice continuation accounting (live Haiku run 2026-10-08, commit a8610bb5). One request ran all four steps of its
 // first bounded slice on 14 continuations; the slice closed on a deterministic checkpoint, and the slice-completion
@@ -33,11 +33,11 @@ function harness({ provider, maxContinuations, delegated = false } = {}) {
     rcon: game,
     memory,
     ...(maxContinuations === undefined ? {} : { maxContinuations }),
-    provider: async (messages) => {
+    provider: answersStepContract(async (messages) => {
       world.calls++
       assert.ok(world.calls < 20, 'slice scenario did not terminate')
       return provider(world.calls, world)
-    },
+    }),
     interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
     ...(delegated
       ? {

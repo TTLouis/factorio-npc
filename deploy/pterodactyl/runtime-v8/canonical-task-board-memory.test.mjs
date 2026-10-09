@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 
 import { canonicalContinuationPlan, CanonicalTaskBoardMemory, verifyDeterministicReceipt } from './canonical-task-board-memory.mjs'
 import { createTaskBoard, reconcileTaskBoard } from './common.mjs'
-import { getActivePlan, GOAL_STATUS, PLAN_STATUS } from './planning-state.mjs'
+import { getActivePlan, GOAL_STATUS, PLAN_STATUS, STEP_CONTRACT_PENDING_CODE } from './planning-state.mjs'
 
 // A plan only commits on a real Jev scope review plus a real preflight result;
 // there is deliberately no default, so tests state the review they mean.
@@ -1194,4 +1194,153 @@ test('harness continuation and an unchanged plan never supersede the in-flight s
   assert.equal(reEmitted.supersededPlanId, undefined)
   assert.equal(getActivePlan(memory.planningState(key)).plan_id, inFlight.plan_id)
   assert.equal(getActivePlan(memory.planningState(key)).status, PLAN_STATUS.COMMITTED)
+})
+
+// --- pending step contracts: intents commit, the contract binds when the step starts ----------------------------
+
+const IRON_ORE_CHECKPOINT = { mode: 'all', requirements: [{ id: 'iron_ore', kind: 'inventory_count', item_name: 'iron-ore', minimum: 10 }] }
+const IRON_PLATE_CHECKPOINT = { mode: 'all', requirements: [{ id: 'iron_plate', kind: 'inventory_count', item_name: 'iron-plate', minimum: 20 }] }
+
+// Step 1 declares its checkpoint; step 2 is {kind:'deterministic'} only, so it commits as an intent.
+function pendingSlice(key = 'npc:sgluna') {
+  const memory = new CanonicalTaskBoardMemory()
+  const traces = []
+  memory.traceSink = (name, payload) => traces.push({ name, payload })
+  memory.planByNpc.set(key, twoStepState())
+  memory.ensurePlanningDraft(key, memory.planByNpc.get(key), {
+    now: 100,
+    stepCompletions: [{ kind: 'deterministic', checkpoint: IRON_ORE_CHECKPOINT }, { kind: 'deterministic' }],
+  })
+  memory.commitPlanningPlan(key, { now: 110, runtime_validation: RUNTIME_VALIDATED })
+  return { memory, key, traces }
+}
+
+function closeFirstStep(memory, key) {
+  const proof = { kind: 'deterministic_verification', ref: 'proof_step_1', summary: 'iron ore gathered' }
+  memory.recordBoardEvidence(key, proof)
+  return memory.applyOutcomeAuthority(key, {
+    kind: 'verified_complete',
+    source: 'deterministic_runtime',
+    reason_code: 'step_1_verified',
+    evidence: [proof],
+    metadata: { scope: 'step' },
+  })
+}
+
+test('stepCompletions with a bare deterministic entry commit that step as pending, and the board projection carries it', () => {
+  const { memory, key } = pendingSlice()
+  const plan = getActivePlan(memory.planningState(key))
+  assert.equal(plan.status, PLAN_STATUS.COMMITTED)
+  assert.deepEqual(plan.steps.map(step => step.contract_status), ['bound', 'pending'])
+  assert.equal(plan.steps[1].completion_contract, null)
+  const steps = memory.currentPlan(key).task_board.steps
+  assert.deepEqual(steps.map(step => step.contract_status), ['bound', 'pending'])
+  assert.equal(steps[1].completion_mode, 'deterministic')
+  assert.equal(steps[1].completion_contract, null)
+  assert.equal(steps[0].completion_contract.requirements[0].item_name, 'iron-ore')
+  // The tracker view the planner reads says so too.
+  assert.equal(memory.planningTrackerView(key).steps[1].contract_status, 'pending')
+})
+
+test('a draft whose active step has no checkpoint is never committed', () => {
+  const key = 'npc:sgluna'
+  const memory = new CanonicalTaskBoardMemory()
+  memory.planByNpc.set(key, twoStepState())
+  memory.ensurePlanningDraft(key, memory.planByNpc.get(key), { now: 100, stepCompletions: [{ kind: 'deterministic' }, { kind: 'deterministic' }] })
+  memory.commitPlanningPlan(key, { now: 110, runtime_validation: RUNTIME_VALIDATED })
+  assert.equal(getActivePlan(memory.planningState(key)).status, PLAN_STATUS.DRAFT)
+})
+
+test('bindStepCompletionContract binds through the reducer, mirrors the contract onto the board, records evidence and survives a snapshot', () => {
+  const { memory, key, traces } = pendingSlice()
+  assert.equal(closeFirstStep(memory, key).decision.accepted, true)
+  const plan = getActivePlan(memory.planningState(key))
+  assert.equal(plan.active_step_index, 1)
+  const stepId = plan.steps[1].step_id
+  // The existing pre-commit setter still refuses a committed plan; binding is the only runtime path.
+  const before = JSON.stringify(memory.currentPlan(key).task_board.steps[1])
+  memory.setStepCompletionContract(key, memory.currentPlan(key).task_board.steps[1].id, IRON_PLATE_CHECKPOINT, { now: 200 })
+  assert.equal(JSON.stringify(memory.currentPlan(key).task_board.steps[1]), before)
+
+  const bound = memory.bindStepCompletionContract(key, { planId: plan.plan_id, stepId, contract: IRON_PLATE_CHECKPOINT, binding: 'just_in_time', requestId: 'req_bind_1', now: 300 })
+  assert.equal(bound.ok, true)
+  const after = getActivePlan(memory.planningState(key))
+  assert.equal(after.steps[1].contract_status, 'bound')
+  assert.deepEqual(after.steps[1].contract_binding, { binding: 'just_in_time', request_id: 'req_bind_1', bound_at: 300 })
+  const board = memory.currentPlan(key).task_board
+  assert.equal(board.steps[1].completion_contract.requirements[0].item_name, 'iron-plate')
+  assert.equal(board.steps[1].completion_contract_at, 300)
+  assert.equal(board.steps[1].contract_status, 'bound')
+  assert.deepEqual(board.steps[1].contract_binding, { binding: 'just_in_time', request_id: 'req_bind_1', bound_at: 300 })
+  assert.equal(board.active_step_id, board.steps[1].id, 'the board still points at the same active step')
+  const evidence = board.evidence.filter(item => item.kind === 'step_contract_bound')
+  assert.equal(evidence.length, 1)
+  assert.equal(evidence[0].step_id, board.steps[1].id)
+  assert.equal(JSON.parse(evidence[0].summary).binding, 'just_in_time')
+
+  const restored = new CanonicalTaskBoardMemory()
+  restored.restore(JSON.parse(JSON.stringify(memory.snapshot())))
+  const restoredBoard = restored.currentPlan(key).task_board
+  assert.equal(restoredBoard.steps[1].completion_contract.requirements[0].item_name, 'iron-plate', 'the board contract is what every close path reads, and it persists')
+  assert.equal(getActivePlan(restored.planningState(key)).steps[1].contract_status, 'bound')
+  assert.equal(traces.some(row => row.name === 'plan.contract_bind_refused'), false)
+})
+
+test('bindStepCompletionContract refuses and traces a reason for every case the reducer refuses, and changes nothing', () => {
+  const { memory, key, traces } = pendingSlice()
+  const plan = getActivePlan(memory.planningState(key))
+  const snapshot = JSON.stringify([memory.planningState(key), memory.currentPlan(key)])
+  const attempts = [
+    ['step_not_active', { planId: plan.plan_id, stepId: plan.steps[1].step_id, contract: IRON_PLATE_CHECKPOINT }],
+    ['step_not_pending', { planId: plan.plan_id, stepId: plan.steps[0].step_id, contract: IRON_PLATE_CHECKPOINT }],
+    ['plan_not_found', { planId: 'g_nope', stepId: plan.steps[0].step_id, contract: IRON_PLATE_CHECKPOINT }],
+    ['plan_id_required', { stepId: plan.steps[0].step_id, contract: IRON_PLATE_CHECKPOINT }],
+  ]
+  for (const [reason, args] of attempts) {
+    const result = memory.bindStepCompletionContract(key, { binding: 'just_in_time', requestId: 'req_refused', ...args })
+    assert.deepEqual([result.ok, result.reason], [false, reason])
+  }
+  assert.equal(JSON.stringify([memory.planningState(key), memory.currentPlan(key)]), snapshot)
+  const refusals = traces.filter(row => row.name === 'plan.contract_bind_refused')
+  assert.equal(refusals.length, attempts.length)
+  assert.ok(refusals.every(row => row.payload.request_id === 'req_refused' && typeof row.payload.reason === 'string'))
+  assert.equal(memory.bindStepCompletionContract('npc:nobody', { planId: plan.plan_id }).reason, 'no_plan')
+})
+
+test('operation admission refuses with step_contract_pending while the active step has no contract, and admits once it is bound', () => {
+  const { memory, key, traces } = pendingSlice()
+  const operations = [{ name: 'craft_item', args: { item_name: 'iron-gear-wheel', count: 1 } }]
+  const actor = { actor_id: 18, actor_epoch: 3 }
+  assert.equal(memory.checkOperationAdmission(key, { operations, preflight: [{ ok: true }], actor }, { requestId: 'req_a' }).ok, true)
+  closeFirstStep(memory, key)
+  const refused = memory.checkOperationAdmission(key, { operations, preflight: [{ ok: true }], actor }, { requestId: 'req_b' })
+  assert.equal(refused.ok, false)
+  assert.equal(refused.code, STEP_CONTRACT_PENDING_CODE)
+  assert.equal(refused.reason, 'step_contract_pending')
+  const plan = getActivePlan(memory.planningState(key))
+  assert.equal(refused.step_id, plan.steps[1].step_id)
+  const row = traces.find(item => item.name === 'admission.step_contract_pending_refused')
+  assert.equal(row.payload.request_id, 'req_b')
+  assert.equal(row.payload.reason, 'step_contract_pending')
+  assert.equal(row.payload.step_id, plan.steps[1].step_id)
+  memory.bindStepCompletionContract(key, { planId: plan.plan_id, stepId: plan.steps[1].step_id, contract: IRON_PLATE_CHECKPOINT, binding: 'just_in_time', requestId: 'req_bind' })
+  assert.equal(memory.checkOperationAdmission(key, { operations, preflight: [{ ok: true }], actor }, { requestId: 'req_c' }).ok, true)
+})
+
+test('a pending step is refused at admission even on a draft, and an outcome close of a pending step is declined by the reducer', () => {
+  const key = 'npc:sgluna'
+  const memory = new CanonicalTaskBoardMemory()
+  memory.planByNpc.set(key, twoStepState())
+  memory.ensurePlanningDraft(key, memory.planByNpc.get(key), { now: 100, stepCompletions: [{ kind: 'deterministic' }, { kind: 'deterministic' }] })
+  const refused = memory.checkOperationAdmission(key, { operations: [{ name: 'wait', args: { ticks: 1 } }], preflight: [{ ok: true }], actor: { actor_id: 18, actor_epoch: 3 } })
+  assert.equal(refused.code, STEP_CONTRACT_PENDING_CODE)
+
+  const { memory: slice, key: sliceKey } = pendingSlice()
+  closeFirstStep(slice, sliceKey)
+  const attempt = slice.applyOutcomeAuthority(sliceKey, {
+    kind: 'verified_complete', source: 'deterministic_runtime', reason_code: 'forged', metadata: { scope: 'step' },
+    evidence: [{ kind: 'deterministic_verification', ref: 'proof_forged', summary: 'claimed' }],
+  })
+  assert.equal(attempt.decision.accepted, false)
+  assert.equal(getActivePlan(slice.planningState(sliceKey)).execution.step_progress[getActivePlan(slice.planningState(sliceKey)).steps[1].step_id].status, 'active')
 })
