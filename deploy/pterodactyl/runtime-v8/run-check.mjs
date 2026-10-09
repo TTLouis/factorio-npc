@@ -458,6 +458,20 @@ function detectExecutorStaleStepRejected(rows) {
   }
 }
 
+// Step contracts bind just in time (npc-agent-loop.mjs ensureActiveStepContract). A contract call that failed for a reason
+// other than staleness paused the goal as step_contract_unavailable: the planner could not author a valid checkpoint for the
+// next step in two tries, or the provider failed. A stale call (stale_*) bound nothing and paused nothing, so it is not this.
+function detectStepContractUnavailable(rows) {
+  const matches = rows.filter(row => row?.event === 'plan.contract_call_failed' && !String(row?.data?.reason ?? '').startsWith('stale_'))
+  if (matches.length === 0) return undefined
+  const first = matches[0].data ?? {}
+  return {
+    count: matches.length,
+    first_ts: firstTsOf(matches),
+    detail: `the planner could not give step ${nonEmptyString(first.step_id) ?? 'n/a'} a valid contract (${nonEmptyString(first.reason) ?? 'unknown reason'}; attempts ${first.attempts ?? 'n/a'}; trigger ${nonEmptyString(first.trigger) ?? 'n/a'}); the goal paused as step_contract_unavailable`,
+  }
+}
+
 function detectGoalPausedNoChat(rows) {
   const pausedRows = rows.filter(row => row?.data?.task_board?.status === 'paused')
   if (pausedRows.length === 0) return undefined
@@ -710,6 +724,11 @@ const SIGNATURES = [
     detect: detectExecutorStaleStepRejected,
   },
   {
+    id: 'step_contract_unavailable',
+    label: 'goal paused because a step contract could not be bound (step_contract_unavailable)',
+    detect: detectStepContractUnavailable,
+  },
+  {
     id: 'goal_paused_no_chat',
     label: 'goal paused with no chat line',
     detect: detectGoalPausedNoChat,
@@ -782,7 +801,43 @@ function detectExecutorStepResolvedByText(rows) {
   }
 }
 
+// Step contracts (npc-agent-loop.mjs): how many later steps a draft left to bind when they start, and how many contracts were
+// authored at activation. Not failures; the pair shows how much of a slice's contract authoring moved to the step that runs it.
+function detectLaterContractsDeferred(rows) {
+  const matches = rows.filter(row => row?.event === 'plan.later_contracts_deferred')
+  if (matches.length === 0) return undefined
+  const steps = matches.reduce((total, row) => total + (Number.isSafeInteger(row.data?.step_count) ? row.data.step_count : 0), 0)
+  const discarded = matches.reduce((total, row) => total + (Number.isSafeInteger(row.data?.discarded_checkpoints) ? row.data.discarded_checkpoints : 0), 0)
+  return {
+    count: matches.length,
+    first_ts: firstTsOf(matches),
+    detail: `draft(s) deferred ${steps} later step contract(s) until each step starts${discarded > 0 ? `; ${discarded} checkpoint(s) sent for later steps were discarded` : ''}`,
+  }
+}
+
+function detectContractsBoundJustInTime(rows) {
+  const matches = rows.filter(row => row?.event === 'plan.contract_bound_just_in_time')
+  if (matches.length === 0) return undefined
+  const attempts = matches.reduce((total, row) => total + (Number.isSafeInteger(row.data?.attempts) ? row.data.attempts : 0), 0)
+  const triggers = [...new Set(matches.map(row => nonEmptyString(row.data?.trigger)).filter(Boolean))]
+  return {
+    count: matches.length,
+    first_ts: firstTsOf(matches),
+    detail: `step contract(s) bound just in time in ${attempts} planner call(s)${triggers.length > 0 ? ` (trigger ${triggers.join(', ')})` : ''}`,
+  }
+}
+
 const INFORMATIONAL_SIGNATURES = [
+  {
+    id: 'later_contracts_deferred',
+    label: 'draft left later step contracts to be bound when each step starts',
+    detect: detectLaterContractsDeferred,
+  },
+  {
+    id: 'contract_bound_just_in_time',
+    label: 'step contract authored and bound when the step started',
+    detect: detectContractsBoundJustInTime,
+  },
   {
     id: 'semantic_step_refused',
     label: 'execution draft with a semantic step refused at commit',
