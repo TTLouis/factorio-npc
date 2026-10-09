@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
-import { FakeFactorio, gather, inventoryCheckpoint, planReply, recordingJev } from './task-loop-fixtures.mjs'
+import { answersStepContract, FakeFactorio, gather, inventoryCheckpoint, planReply, recordingJev } from './task-loop-fixtures.mjs'
 
 const RUN_C = JSON.parse(readFileSync(new URL('./fixtures/control-json-repair-run-c-2026-10-08.json', import.meta.url), 'utf8'))
 
@@ -34,7 +34,7 @@ function makeAgent(provider, { goalAnswers, extra = {} } = {}) {
   const agent = new NpcAgentLoop({
     rcon: game,
     memory: new CanonicalTaskBoardMemory(),
-    provider: async (...args) => provider(...args),
+    provider: answersStepContract(async (...args) => provider(...args)),
     interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
     interactionDecisionProvider: jev,
     steeringDecisionProvider: jev,
@@ -198,8 +198,9 @@ test('submitPlan arguments with trailing commas are repaired before the truncati
 
 test('a tool-path repair whose plan then fails the strict parse is reported as failed, not repaired', async () => {
   let calls = 0
-  // Trailing comma (repairable) plus a stepCompletions entry the strict parser refuses (deterministic without a checkpoint).
-  const broken = `${JSON.stringify(validPlanArguments({ stepCompletions: [{ kind: 'deterministic' }] })).slice(0, -1)},}`
+  // Trailing comma (repairable) plus a stepCompletions entry the strict parser refuses (a deterministic checkpoint with no
+  // requirements; a deterministic entry with NO checkpoint is a valid later step since step contracts bind just in time).
+  const broken = `${JSON.stringify(validPlanArguments({ stepCompletions: [{ kind: 'deterministic', checkpoint: { mode: 'all', requirements: [] } }] })).slice(0, -1)},}`
   const { agent, game, rows } = makeAgent(async () => {
     calls++
     return calls === 1 ? submitCall(broken) : planReply({ plan: ['Gather 10 coal'], operations: [gather('coal', 10)], checkpoint: inventoryCheckpoint('coal', 10) })

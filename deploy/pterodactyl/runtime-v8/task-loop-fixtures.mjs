@@ -192,6 +192,7 @@ export class FakeFactorio {
         basic_operation: this.batchId > 0 ? { last_result: this.lastBasicResult ?? { operation_id: this.batchId, code: 'completed', completed: true } } : undefined,
       })
     }
+    if (text.includes('remote.call("autorio_tools","get_inventory_items")')) return JSON.stringify(Object.entries(this.inventory).map(([name, count]) => ({ name, count })))
     if (text.includes('remote.call("autorio_tools","get_nearby_entities"')) return JSON.stringify(this.nearby)
     if (text.includes('remote.call("autorio_skills","get"')) {
       const id = /remote\.call\("autorio_skills","get",'([^']+)'\)/.exec(text)?.[1]
@@ -369,4 +370,51 @@ export function inventoryCheckpoint(itemName, minimum) {
 
 export function gather(resourceName, count = 10) {
   return { name: 'gather_resource', args: { resource_name: resourceName, count, search_radius: 32 } }
+}
+
+// Step contracts are authored when each step is about to start (docs/NPC_PLANNING_ROADMAP.md, "One-step contract
+// prediction"), so a scenario that scripts a whole slice with a checkpoint for every step now sees one contract call per
+// later step. This wrapper keeps such a scenario's meaning: it answers a [STEP_CONTRACT_REQUEST] call with the checkpoint the
+// scenario ORIGINALLY declared for that step, and delegates every other call untouched (so its call-by-call script and
+// counters never see the contract calls). The declared checkpoints are learned from the replies the wrapped provider
+// returns (stepCompletions aligned with plan), or given up front by step id or description in `contracts`.
+// `wrapped.contractCalls` records each contract call it answered; `wrapped.declared` is what it learned.
+export function answersStepContract(provider, { contracts = {} } = {}) {
+  const declared = new Map(Object.entries(contracts))
+  const contractCalls = []
+  const remember = (reply) => {
+    const bodies = []
+    if (typeof reply?.content === 'string') bodies.push(reply.content)
+    for (const call of Array.isArray(reply?.tool_calls) ? reply.tool_calls : []) {
+      if (typeof call?.function?.arguments === 'string') bodies.push(call.function.arguments)
+    }
+    for (const body of bodies) {
+      let parsed
+      try { parsed = JSON.parse(body) }
+      catch { continue }
+      if (!Array.isArray(parsed?.plan) || !Array.isArray(parsed?.stepCompletions)) continue
+      parsed.stepCompletions.forEach((entry, index) => {
+        if (entry?.kind === 'deterministic' && entry.checkpoint && typeof parsed.plan[index] === 'string') declared.set(parsed.plan[index], entry.checkpoint)
+      })
+    }
+  }
+  const wrapped = async (messages, context) => {
+    if (context?.triggerSource === 'step_contract') {
+      const request = [...messages].reverse().find(message => message?.role === 'user' && String(message.content).startsWith('[STEP_CONTRACT_REQUEST]'))
+      assert.ok(request, 'a step_contract call carries a [STEP_CONTRACT_REQUEST] message')
+      const text = String(request.content)
+      const packet = JSON.parse(text.slice(text.indexOf(' {"goal"') + 1))
+      const target = packet.target
+      const checkpoint = declared.get(target.step_id) ?? declared.get(target.description)
+      assert.ok(checkpoint, `answersStepContract: no checkpoint was declared for step "${target.description}" (${target.step_id})`)
+      contractCalls.push({ messages, context, packet, checkpoint })
+      return { content: JSON.stringify({ stepId: target.step_id, checkpoint }) }
+    }
+    const reply = await provider(messages, context)
+    remember(reply)
+    return reply
+  }
+  wrapped.contractCalls = contractCalls
+  wrapped.declared = declared
+  return wrapped
 }
