@@ -791,9 +791,10 @@ test('MW5: the announcement says "Changed plan" when the steps changed and "Retr
 // The executor works from its packet, which shows the reducer's plan: after a replacement that is the suffix after the verified
 // prefix, so the active step is index 0 there while the board still counts the verified prefix (index 1). Pinned behaviour:
 // a reply that names the active step by stepId is bound and admitted; a board-form reply (full board list, currentStep 1, no
-// stepId) is refused as step_index_not_the_active_step, corrected twice, and then the goal pauses (executor_step_identity_exhausted).
+// stepId) names the active step by the text its own list puts at currentStep, so it is resolved by text (executor.step_resolved_by_text),
+// bound exactly as a stepId reply and admitted. No index frame is compared, so the board's prefix offset does not matter.
 for (const mode of ['stepId', 'board']) {
-  test(`MW5: after a replacement, an executor reply in ${mode} form ${mode === 'stepId' ? 'is bound to the active step and admitted' : 'is refused, corrected twice, then the goal pauses'} (pinned, indexing unchanged)`, async () => {
+  test(`MW5: after a replacement, an executor reply in ${mode} form ${mode === 'stepId' ? 'is bound to the active step and admitted' : 'is resolved by its step text, bound and admitted'}`, async () => {
     let afterReplacement = 0
     const w = world((call, memory, calls) => {
       const system = String(calls.at(-1)[0].content)
@@ -827,11 +828,11 @@ for (const mode of ['stepId', 'board']) {
       assert.ok(!events.includes('executor.stale_step_rejected'))
     }
     else {
-      assert.equal(events.filter(event => event === 'executor.stale_step_rejected').length, 3)
-      assert.equal(events.filter(event => event === 'executor.step_identity_correction').length, 2)
-      assert.ok(events.includes('executor.step_identity_exhausted'))
-      assert.equal(result.operations.length, 0)
-      assert.match(result.chatMessage, /kept sending actions for a step that is not the active one/)
+      assert.ok(events.includes('executor.step_resolved_by_text'))
+      assert.ok(events.includes('executor.step_bound'))
+      assert.ok(!events.includes('executor.legacy_step_index_used'))
+      assert.ok(!events.includes('executor.stale_step_rejected'))
+      assert.equal(result.operations[0].name, 'wait')
     }
   })
 }
