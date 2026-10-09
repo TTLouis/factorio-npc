@@ -299,7 +299,7 @@ test('the executor prompt variants name only fields the executor schema has; the
   assert.match(EXECUTOR_CLOSED_CONTROL_PROMPT, /Do not call submitPlan or another tool, and do not omit completion fields merely because tools are closed\.\nUse chatMessage, stepId and operations, plus the applicable checkpoint, semanticCompletion or timeReview\. Research completion uses research_completed/)
   // The planner text is untouched.
   assert.match(COMPACT_CONTINUATION_PROMPT, /checkpoint, semanticCompletion and stepCompletions remain allowed\. Closing observations does not close the control decision\. New drafts include stepCompletions aligned to plan/)
-  assert.match(COMPACT_CONTINUATION_PROMPT, /\nNew execution drafts need at least one deterministic step\. For an intentionally observation-only slice, set assessmentOnly:true/)
+  assert.match(COMPACT_CONTINUATION_PROMPT, /\nEvery step of a new execution draft is deterministic\. For an intentionally observation-only slice, set assessmentOnly:true/)
   assert.match(CLOSED_CONTROL_PROMPT, /New execution drafts require stepCompletions aligned to plan, every entry \{kind:"deterministic",checkpoint:\{mode,requirements\}\}; keep committed completion specifications unchanged/)
   assert.match(CLOSED_CONTROL_PROMPT, /assessmentOnly:true with only semantic steps and no operations\. Research completion/)
 })

@@ -710,7 +710,7 @@ export const plannerControlToolDefinitions = [{
         },
         currentStep: { type: 'integer', minimum: 0, maximum: 30 },
         stepId: { type: 'string', minLength: 1, maxLength: 200, description: 'Executor only: the active committed step id from [CONTROL_DECISION_STATE]. Binds the operations to that step; plan and currentStep do not decide which step they belong to.' },
-        assessmentOnly: { type: 'boolean', description: 'Set true only for an intentionally observation-only slice: all stepCompletions are semantic and operations is empty. Omit or set false for execution drafts, which require at least one deterministic world-result checkpoint. This does not change an existing committed plan.' },
+        assessmentOnly: { type: 'boolean', description: 'Set true only for an intentionally observation-only slice: all stepCompletions are semantic and operations is empty. Omit or set false for execution drafts, which declare a deterministic world-result checkpoint for every step. This does not change an existing committed plan.' },
         observationRequest: {
           type: 'object', additionalProperties: false, required: ['tool', 'args', 'rationale'],
           anyOf: [{ required: ['stepId'] }, { required: ['scope', 'goalId', 'planId', 'planVersion', 'draftRevision'] }],
