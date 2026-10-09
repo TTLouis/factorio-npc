@@ -570,6 +570,33 @@ test('executor step identity: executor.stale_step_rejected events are counted pe
   assert.equal(findingsFor(analyzeBehaviorTrace(rows.slice(4)), 'executor_stale_step_rejected').length, 0)
 })
 
+test('executor step identity: executor.step_resolved_by_text is an informational count per request, never a finding', () => {
+  const resolved = (seconds, requestId) => drow(seconds, 'executor.step_resolved_by_text', requestId, {
+    incoming_step_index: 1,
+    step_id: 'step_3',
+    active_step_id: 'step_3',
+    reason: 'reply_step_text_names_one_committed_step',
+  })
+  const rows = [
+    drow(0, 'request.received', 'req_id_6', {}),
+    resolved(1, 'req_id_6'),
+    resolved(2, 'req_id_6'),
+    drow(3, 'request.completed', 'req_id_6', { chat_message: 'done' }),
+    drow(4, 'request.received', 'req_id_7', {}),
+    drow(5, 'request.completed', 'req_id_7', { chat_message: 'done' }),
+  ]
+  const result = analyzeBehaviorTrace(rows)
+  assert.deepEqual(result.findings, [])
+  assert.equal(result.informational.length, 1)
+  const [item] = result.informational
+  assert.equal(item.signature, 'executor_step_resolved_by_text')
+  assert.equal(item.request_id, 'req_id_6')
+  assert.equal(item.count, 2)
+  assert.match(item.detail, /resolved by its step text \(incoming index 1; step step_3; active step_3\)/)
+  assert.match(formatCheckReport(result), /1 informational \(not findings\):\n- \[executor_step_resolved_by_text\] request_id=req_id_6 count=2/)
+  assert.deepEqual(analyzeBehaviorTrace(rows.slice(4)).informational, [])
+})
+
 test('an execution draft refused for a semantic step is counted as informational, never as a finding', async () => {
   const { result, parse_errors: errors } = await runCheck({ behaviorFile: path.join(fixturesDir, 'semantic-step-refused.jsonl') })
   assert.equal(errors.length, 0)

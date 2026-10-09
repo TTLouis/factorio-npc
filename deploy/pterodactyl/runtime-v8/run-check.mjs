@@ -768,11 +768,30 @@ function detectSemanticStepRefusals(rows) {
   }
 }
 
+// An executor reply without a step id that the harness bound by the step text its own list put at currentStep
+// (executor.step_resolved_by_text, npc-agent-loop.mjs enforceExecutorContract). Not a failure: the count shows how often
+// the executor leaves the step id out.
+function detectExecutorStepResolvedByText(rows) {
+  const matches = rows.filter(row => row?.event === 'executor.step_resolved_by_text')
+  if (matches.length === 0) return undefined
+  const first = matches[0].data ?? {}
+  return {
+    count: matches.length,
+    first_ts: firstTsOf(matches),
+    detail: `executor reply without a step id was resolved by its step text (incoming index ${first.incoming_step_index ?? 'n/a'}; step ${nonEmptyString(first.step_id) ?? 'n/a'}; active ${nonEmptyString(first.active_step_id) ?? 'n/a'})`,
+  }
+}
+
 const INFORMATIONAL_SIGNATURES = [
   {
     id: 'semantic_step_refused',
     label: 'execution draft with a semantic step refused at commit',
     detect: detectSemanticStepRefusals,
+  },
+  {
+    id: 'executor_step_resolved_by_text',
+    label: 'executor reply without a step id resolved by its step text',
+    detect: detectExecutorStepResolvedByText,
   },
 ]
 
