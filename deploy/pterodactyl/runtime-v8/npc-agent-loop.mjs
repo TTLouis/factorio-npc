@@ -29,6 +29,7 @@ import {
   normalizeFactTag,
   parseInventoryCounts,
   recipeFactFromRequiresMachine,
+  recipeFactLine,
   recipeFactsFromDetails,
   researchPathFact,
   cacheTriggerCraftingReports,
@@ -86,8 +87,10 @@ import { isLifecycleMetaStep, normalizeCanonicalPlan, validateOutcomeCandidate }
 import {
   getActivePlan as getActivePlanningPlan,
   GOAL_STATUS,
+  isStepContractPending,
   PLAN_STATUS,
   PLANNING_EVENT,
+  STEP_CONTRACT_PENDING_CODE,
   STEERING_BOUNDARY,
   STEERING_PRESSURE_VOCABULARY,
   askableSteeringPressures,
@@ -97,7 +100,17 @@ import {
 import { decideRestage, estimateTokensFromChars, markRequestSliceClosed, requestSliceCeiling, RESTAGE_BOUNDARY } from './restage-policy.mjs'
 import { emptyJevHealth, recordJevHealth, recordPendingDecisionRequest, settlePendingDecisionRequest, summarizeJevHealth, takePendingDecisionRequest } from './jev-health.mjs'
 import { describeUnmetGoalResult, evaluateGoalDefinition, formatGoalProgress, goalConditionCommand, GOAL_SCOPE, needsGoalBaseline, sanitizeGoalDefinition } from './goal-definition.mjs'
-import { completionContractSignature, normalizeStepCompletions } from './luna-step-contracts.mjs'
+import {
+  buildStepContractPacket,
+  completionContractSignature,
+  normalizeStepCompletions,
+  parseStepContractReply,
+  STEP_CONTRACT_MAX_ATTEMPTS,
+  STEP_CONTRACT_MAX_TOKENS,
+  STEP_CONTRACT_TRIGGER,
+  stepContractCorrectionMessage,
+  stepContractUserMessage,
+} from './luna-step-contracts.mjs'
 import { completionFinalizationDecision } from './completion-finalization.mjs'
 import {
   compareGoalReading,
@@ -541,7 +554,7 @@ When a draft intentionally refines one or more existing Shelf nodes, add roadmap
 
 For a bounded planning slice, add developmentMode as vertical, horizontal, maintain, or recover to describe the dominant direction YOU authored relative to the current critical path. Follow [PLANNING_STATE].steering when it remains appropriate, but this field describes the draft rather than granting steering authority. Small measured supporting work does not require a second mode; substantial mixed-direction work should be split at a better checkpoint.
 
-On every newly authored plan, include stepCompletions aligned with plan descriptions: {kind:"deterministic",checkpoint:{mode:"all",requirements:[...]}} for every step of an execution plan; {kind:"semantic",rationale:"..."} only in an assessmentOnly:true plan. You choose the intended outcome and quantities; the harness checks them. A checkpoint declares a future result; missing inventory or unmet research does not make that result semantic. Research steps use research_completed with the exact technology, not an accepted request receipt. Combine multiple research_completed requirements with mode:"all" when the intended step requires multiple technologies. An intentionally observation-only slice instead declares assessmentOnly:true, has only semantic steps and no gameplay operations; it stays in the assessment conversation. A semantic assessment cannot execute gameplay mutations. When tools are closed, return one JSON control object; checkpoint, stepCompletions, assessmentOnly and semanticCompletion remain permitted.
+On every newly authored plan, include stepCompletions aligned with plan descriptions: {kind:"deterministic",checkpoint:{mode:"all",requirements:[...]}} for the step at currentStep of an execution plan and {kind:"deterministic"} with no checkpoint for each later step, whose checkpoint the harness asks you for when that step is about to start; {kind:"semantic",rationale:"..."} only in an assessmentOnly:true plan. You choose the intended outcome and quantities; the harness checks them. A checkpoint declares a future result; missing inventory or unmet research does not make that result semantic. Research steps use research_completed with the exact technology, not an accepted request receipt. Combine multiple research_completed requirements with mode:"all" when the intended step requires multiple technologies. An intentionally observation-only slice instead declares assessmentOnly:true, has only semantic steps and no gameplay operations; it stays in the assessment conversation. A semantic assessment cannot execute gameplay mutations. When tools are closed, return one JSON control object; checkpoint, stepCompletions, assessmentOnly and semanticCompletion remain permitted.
 
 For the active Plan Tracker step, you may add one optional root field named checkpoint beside chatMessage/plan/currentStep/operations. checkpoint is your completion proposal for deterministic runtime validation and verification, not a claim that the step is already done. It must use a runtime-supported contract: {"mode":"all|any","requirements":[...]} with requirement kinds inventory_count, research_completed {technology}, entity_inventory_count, entity_exists, entity_state, authoritative_operation_receipt, or runtime_controller_state. Prefer world-state outcomes over action occurrence. Example: if the step means "have 100 stone" and the next operation only gathers 40 more because 62 are already held, checkpoint must say inventory_count stone >= 100, not >= 40. The operation batch describes what to do next; checkpoint describes what would prove the step complete. Runtime remains completion authority for supported deterministic contracts. Semantic declarations belong only to assessmentOnly:true plans; unknown current measurements are not a reason to downgrade an intended world result to an assessment.
 
@@ -3130,7 +3143,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // a role, so a restage within a role keeps the provider's cached prefix.
   rolePrefixMessages(role) {
     const plannerDelegation = this.completionProtocolVersion >= 2 && this.executorHandoffEnabled && role !== EXECUTOR_ROLE
-      ? '\n\n[PLANNER DELEGATION] For a new execution plan, choose the intended results and quantities and declare stepCompletions aligned with every step, with a deterministic checkpoint for every step. You may return currentStep: 0 and operations: [] to hand that validated execution plan to a fresh executor context for this same NPC. Unmet checkpoints name future results, not progress claims. Multiple research results can use mode:"all" with research_completed {technology} requirements. To author an intentionally observation-only slice, declare assessmentOnly:true and only semantic steps; the planner performs that assessment without an executor handoff. The executor chooses bounded actions under frozen contracts and cannot change those contracts. This option does not replace a committed plan or waive amendment authority.'
+      ? '\n\n[PLANNER DELEGATION] For a new execution plan, choose the intended results and quantities and declare stepCompletions aligned with every step: a deterministic checkpoint for the first step and {kind:"deterministic"} for each later step, whose checkpoint the harness requests when that step is about to start. You may return currentStep: 0 and operations: [] to hand that validated execution plan to a fresh executor context for this same NPC. Unmet checkpoints name future results, not progress claims. Multiple research results can use mode:"all" with research_completed {technology} requirements. To author an intentionally observation-only slice, declare assessmentOnly:true and only semantic steps; the planner performs that assessment without an executor handoff. The executor chooses bounded actions under frozen contracts and cannot change those contracts. This option does not replace a committed plan or waive amendment authority.'
       : ''
     return [{ role: 'system', content: roleSystemPrompt(this.systemPrompt, role === EXECUTOR_ROLE ? EXECUTOR_ROLE : PLANNER_ROLE) + plannerDelegation }]
   }
@@ -3850,7 +3863,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }) }
       }
       await this.traceEvent('plan.replacement_draft_repair', { request_id: requestId, plan_id: wake.plan_id, reason: 'replacement_draft_needs_operations', attempt: wake.repairs })
-      this.messages.push({ role: 'user', content: '[HARNESS] A replacement draft needs the full step list with stepCompletions for every step, currentStep set to the first unfinished step, and the operations for that step. This reply did not have them, so nothing was changed.' })
+      this.messages.push({ role: 'user', content: '[HARNESS] A replacement draft needs the full step list with stepCompletions for every step (a checkpoint for the step at currentStep, {kind:"deterministic"} after it), currentStep set to the first unfinished step, and the operations for that step. This reply did not have them, so nothing was changed.' })
       return { result: await this.runTurn() }
     }
     const current = await this.assertCurrent()
@@ -5837,15 +5850,22 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           condition: wait.condition,
           task_board: visibleTaskBoard(reduced?.state?.task_board),
         })
+        // This close does not go through applyStepClose, so the next step's contract is bound here, before the close is credited.
+        const contracted = await this.ensureActiveStepContract({ trigger: 'condition_wait', closedStepId: identity.step_id, closedBy: 'condition_wait' })
+        const closedState = contracted.state ?? reduced?.state
         await this.creditSliceProgress('deterministic_close', generation, requestId)
         await this.traceEvent('step.verified', {
           source: 'condition_wait',
           wait_id: identity.wait_id,
-          task_board: visibleTaskBoard(reduced?.state?.task_board),
+          task_board: visibleTaskBoard(closedState?.task_board),
         })
-        await this.rollProviderBudgetAtStepClose('condition_wait', reduced?.state)
+        await this.rollProviderBudgetAtStepClose('condition_wait', closedState)
+        if (contracted.ok === false) {
+          const stopped = await this.pauseForStepContract(contracted.failure)
+          return { action: 'paused', wait_id: identity.wait_id, state: closedState, chat_message: stopped.chatMessage }
+        }
         const facts = await this.conditionWakeFacts({ action: 'verified', wait, observation: normalizedObservation })
-        return { action: 'verified', wait_id: identity.wait_id, state: reduced?.state, observation: normalizedObservation, facts }
+        return { action: 'verified', wait_id: identity.wait_id, state: closedState, observation: normalizedObservation, facts }
       }
 
       const updated = result.wait
@@ -6454,6 +6474,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // Only an assessmentOnly draft reaches a semantic declaration here, and one with operations was refused above
       // (assessment_only_conflicts_with_execution), so a semantic declaration never sits beside admitted operations.
       if (declaration.kind === 'semantic') continue
+      if (!declaration.checkpoint) {
+        // A step declared without a checkpoint is bound when it is about to start. The step that runs first cannot wait.
+        if (index !== plan.currentStep) continue
+        await this.traceEvent('plan.completion_declarations_rejected', {
+          request_id: this.traceRequest?.id,
+          reason: 'missing_active_step_checkpoint',
+          assessment_only: false,
+          step_count: plan.stepCompletions.length,
+          step_index: index,
+        })
+        const error = new AgentLoopError(`missing_active_step_checkpoint: the step at currentStep (${plan.currentStep}) must carry its deterministic checkpoint {mode,requirements} in stepCompletions. Only later steps may be {kind:"deterministic"} without one; no contract has been committed.`)
+        error.failureClass = 'plan_category'
+        error.code = 'missing_active_step_checkpoint'
+        throw error
+      }
       const operations = index === plan.currentStep ? plan.operations : []
       for (const requirement of declaration.checkpoint.requirements) {
         const allowedReceiptNames = new Set(index === plan.currentStep && !plannerOnlyDraft ? operations.map(operation => operation.name) : approvedOperationNames())
@@ -6464,6 +6499,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         const validation = await this.validatePlannerCheckpointContract(declaration.checkpoint, operations, { plannerOnlyDraft })
         if (!validation.accepted) throw await this.checkpointRejectionError(validation)
       }
+    }
+    // The draft is accepted: say once, for this draft, which steps' contracts wait until the step starts. This method runs at
+    // several call sites for the same plan object, so the trace is marked on it.
+    if (plan.laterContractsDeferred && plan.laterContractsDeferredTraced !== true) {
+      plan.laterContractsDeferredTraced = true
+      await this.traceEvent('plan.later_contracts_deferred', {
+        request_id: this.traceRequest?.id,
+        reason: 'contracts_bound_when_each_step_activates',
+        step_count: plan.laterContractsDeferred.step_count,
+        discarded_checkpoints: plan.laterContractsDeferred.discarded_checkpoints,
+      })
     }
   }
 
@@ -6594,16 +6640,224 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         ...(reduced?.decision?.paused === true ? { paused: true, disagreement: reduced.progressDisagreement } : {}),
       }
     }
+    // The step that just became active may have been committed without its checkpoint. Its contract is authored and bound
+    // here, before anything can act on that step and before this close is credited.
+    const contracted = await this.ensureActiveStepContract({ trigger: 'step_close', closedStepId: step.id, closedBy: source ?? trigger })
+    const state = contracted.state ?? reduced.state
     await this.creditSliceProgress('deterministic_close', generation, requestId)
     await this.traceEvent('step.verified', {
       active_step_id: step.id,
       source,
       contract,
-      task_board: visibleTaskBoard(reduced?.state?.task_board),
+      task_board: visibleTaskBoard(state?.task_board),
     })
-    await this.rollProviderBudgetAtStepClose(source ?? trigger, reduced.state)
-    return { closed: true, state: reduced.state }
+    await this.rollProviderBudgetAtStepClose(source ?? trigger, state)
+    // The close is real either way; a contract that could not be bound pauses the goal after it was recorded.
+    const contractPause = contracted.ok === false ? await this.pauseForStepContract(contracted.failure) : undefined
+    return { closed: true, state, ...(contractPause ? { contractPause } : {}) }
   }
+
+  // --- Step contracts (docs/NPC_PLANNING_ROADMAP.md, "One-step contract prediction") ---
+  //
+  // A plan slice commits its step intents and the first step's checkpoint; every later step is `pending` until it is about
+  // to start. ensureActiveStepContract is the one place that asks the planner for that checkpoint (just in time), validates
+  // it exactly as a commit validates an active step, and binds it through the reducer. The call is a SIDE exchange: the
+  // planner prefix plus one harness packet, built apart from the planner and executor conversations, so a bound or failed
+  // call leaves nothing in either of them. It is shaped so a later prediction lane can start the same call earlier
+  // (requestStepContract takes the facts and an optional assumed outcome as parameters).
+
+  // Facts for the packet, read now. Bounded; a failed read is reported as unavailable, never guessed.
+  async gatherStepContractFacts() {
+    const facts = { as_of: this.observationTag() }
+    try {
+      const raw = await this.rcon.command(this.observationToolCommand('getInventoryItems', {}))
+      const counts = parseInventoryCounts(raw)
+      facts.inventory = counts ? Object.fromEntries([...counts].slice(0, EXECUTOR_FACT_LIMITS.countItems * 4)) : 'unavailable'
+      this.recordHandoffToolFacts('getInventoryItems', raw)
+    }
+    catch {
+      facts.inventory = 'unavailable'
+    }
+    const entities = [...(this.liveEntityObservations?.values?.() ?? [])]
+      .filter(entity => typeof entity?.name === 'string')
+      .slice(-24)
+      .map(entity => ({
+        name: entity.name,
+        ...(Number.isSafeInteger(entity.unit_number) ? { unit_number: entity.unit_number } : {}),
+        ...(typeof entity.type === 'string' ? { type: entity.type } : {}),
+        ...(Number.isSafeInteger(entity.observed_tick) ? { observed_tick: entity.observed_tick } : {}),
+      }))
+    if (entities.length > 0) facts.observed_entities = entities
+    const recipes = [...this.handoffRecipeFacts.values()].slice(-12).map(fact => recipeFactLine(fact))
+    if (recipes.length > 0) facts.recipes = recipes
+    return facts
+  }
+
+  // One planner contract call for `step`, with at most one correction. Returns { ok, contract, attempts } or
+  // { ok: false, reason, attempts } or { stale: <kind> }. Calls this.provider directly: callProvider/callProviderRound would
+  // append to the conversation, mutate the agent context's request counters and count in providerCallsByGeneration (which
+  // makes a restage refuse). Reserve and usage are charged to the request; the generation output cap is left alone.
+  async requestStepContract({ key, step, requestId, facts, assumedOutcome }) {
+    const planning = this.memory.planningState?.(key)
+    const packet = buildStepContractPacket({ planningState: planning, stepId: step.step_id, facts, assumedOutcome })
+    if (!packet) return { ok: false, reason: 'packet_unavailable', attempts: 0 }
+    let status
+    try { status = await deploymentStatus(this.rcon, { requireAllowed: true }) }
+    catch { return { ok: false, reason: 'actor_status_unreadable', attempts: 0 } }
+    const fence = { lineage: this.agentContext.lineageSequence, generation: this.generation, status }
+    // Not assertCurrent(): that resets the loop on a change, and this is a side call that must not touch the turn.
+    const staleKind = async () => {
+      if (this.agentContext.lineageSequence !== fence.lineage || this.generation !== fence.generation) return 'superseded'
+      try {
+        const current = await deploymentStatus(this.rcon, { requireAllowed: true })
+        return actorChanged(fence.status, current) ? 'actor_or_epoch_changed' : undefined
+      }
+      catch { return 'actor_status_unreadable' }
+    }
+    const base = [...this.rolePrefixMessages(PLANNER_ROLE), { role: 'user', content: stepContractUserMessage(packet) }]
+    let messages = base
+    let attempts = 0
+    while (attempts < STEP_CONTRACT_MAX_ATTEMPTS) {
+      attempts++
+      try { await this.reserve({ epoch: status.epoch, actorId: status.actor_id }) }
+      catch (error) { return { ok: false, reason: `provider_budget_unavailable: ${cleanMemoryText(error instanceof Error ? error.message : String(error), 160)}`, attempts } }
+      const startedAt = Date.now()
+      let reply
+      try {
+        reply = await this.provider(messages, {
+          role: PLANNER_ROLE,
+          epoch: status.epoch,
+          actorId: status.actor_id,
+          round: 0,
+          allowTools: false,
+          recoveryAttempt: 0,
+          triggerSource: STEP_CONTRACT_TRIGGER,
+          requestId,
+          requestBodyPatch: {
+            max_tokens: STEP_CONTRACT_MAX_TOKENS,
+            response_format: { type: 'json_object' },
+          },
+        })
+      }
+      catch (error) {
+        return { ok: false, reason: `provider_error: ${cleanMemoryText(error instanceof Error ? error.message : String(error), 200)}`, attempts }
+      }
+      const usage = estimatedOutputUsage(normalizedProviderUsage(reply?._sglunaProvider?.usage), reply?._sglunaProvider)
+      accumulateProviderUsage(this.traceRequest?.usage, usage)
+      const stale = await staleKind()
+      if (stale) return { stale, attempts }
+      const content = typeof reply?.content === 'string' ? reply.content : ''
+      const parsed = parseStepContractReply(content, { stepId: step.step_id })
+      let reason
+      if (!parsed.ok) reason = parsed.reason
+      else {
+        // The same validator a commit runs on an active step: supported, grounded in the live game.
+        const validation = await this.validatePlannerCheckpointContract(parsed.checkpoint, [], { draft: true, plannerOnlyDraft: true })
+        if (validation.accepted) {
+          const lateStale = await staleKind()
+          if (lateStale) return { stale: lateStale, attempts }
+          await this.traceEvent('plan.contract_call_attempt', { request_id: requestId, step_id: step.step_id, attempt: attempts, outcome: 'accepted',
+            reason: 'checkpoint_valid', latency_ms: Date.now() - startedAt, repairs: parsed.repairs.length, usage }, { requestId })
+          return { ok: true, contract: validation.contract, attempts, repairs: parsed.repairs }
+        }
+        reason = `deterministic_checkpoint_rejected: ${validation.reason}${validation.requirement_id ? ` (requirement ${validation.requirement_id})` : ''}`
+      }
+      await this.traceEvent('plan.contract_call_attempt', { request_id: requestId, step_id: step.step_id, attempt: attempts, outcome: 'rejected',
+        reason: cleanMemoryText(reason, 300), latency_ms: Date.now() - startedAt, usage }, { requestId })
+      if (attempts >= STEP_CONTRACT_MAX_ATTEMPTS) return { ok: false, reason, attempts }
+      // The correction is part of this side exchange and never reaches the planner or executor conversation.
+      messages = [...base, { role: 'assistant', content }, { role: 'user', content: stepContractCorrectionMessage(reason) }]
+    }
+    return { ok: false, reason: 'attempts_exhausted', attempts }
+  }
+
+  // Bind the active step's contract when it is pending. Returns { ok: true, skipped } when there is nothing to do,
+  // { ok: true, bound, state } after a bind, or { ok: false, failure } when the contract could not be bound: the CALLER
+  // pauses (pauseForStepContract), after it has finished whatever the step close still owes. A stale call (superseded or a
+  // changed actor/epoch) throws the ordinary stale-turn error: it binds nothing, and the next turn's admission backstop
+  // binds the step.
+  async ensureActiveStepContract({ trigger, closedStepId, closedBy } = {}) {
+    const key = this.requestInfo?.memoryKey ?? this.activePlanKey()
+    const plan = getActivePlanningPlan(this.memory.planningState?.(key))
+    const step = plan?.steps?.[plan.active_step_index]
+    if (!plan || ![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan.status) || !isStepContractPending(step)
+      || plan.execution?.step_progress?.[step.step_id]?.status === 'completed') return { ok: true, skipped: true }
+    this.stepContractsInFlight ??= new Map()
+    const flightKey = `${plan.plan_id}/${step.step_id}`
+    const held = this.stepContractsInFlight.get(flightKey)
+    if (held) return held
+    const flight = this.bindActiveStepContract({ key, plan, step, trigger, closedStepId, closedBy })
+    this.stepContractsInFlight.set(flightKey, flight)
+    try { return await flight }
+    finally { this.stepContractsInFlight.delete(flightKey) }
+  }
+
+  async bindActiveStepContract({ key, plan, step, trigger, closedStepId, closedBy }) {
+    const requestId = this.traceRequest?.id ?? `step_contract_${Date.now().toString(36)}`
+    const base = { request_id: requestId, plan_id: plan.plan_id, step_id: step.step_id }
+    await this.traceEvent('plan.contract_requested', { ...base, trigger, reason: 'step_active_without_contract', closed_step_id: closedStepId, closed_by: closedBy }, { requestId })
+    const failed = async (reason, attempts) => {
+      await this.traceEvent('plan.contract_call_failed', { ...base, trigger, reason: cleanMemoryText(reason, 300), attempts }, { requestId })
+      return { ok: false, failure: { reason, attempts, ...base } }
+    }
+    let outcome
+    try {
+      outcome = await this.requestStepContract({ key, step, requestId, facts: await this.gatherStepContractFacts() })
+    }
+    catch (error) {
+      outcome = { ok: false, reason: `step_contract_call_error: ${cleanMemoryText(error instanceof Error ? error.message : String(error), 200)}`, attempts: 0 }
+    }
+    if (outcome.stale) {
+      await this.traceEvent('plan.contract_call_failed', { ...base, trigger, reason: `stale_${outcome.stale}`, attempts: outcome.attempts }, { requestId })
+      const error = new AgentLoopError(STALE_REPLY_MESSAGE)
+      error.code = STALE_REPLY_ERROR_CODE
+      error.staleKind = 'superseded'
+      throw error
+    }
+    if (!outcome.ok) return failed(outcome.reason, outcome.attempts)
+    const bound = this.memory.bindStepCompletionContract?.(key, {
+      planId: plan.plan_id, stepId: step.step_id, contract: outcome.contract, binding: 'just_in_time', requestId,
+    })
+    if (!bound?.ok) return failed(`bind_refused: ${bound?.reason ?? 'unsupported'}`, outcome.attempts)
+    // Every close path reads the BOARD contract, so the bind is proven there before anything relies on it.
+    const state = this.memory.currentPlan?.(key)
+    const persisted = persistedStepCheckpoint(state?.task_board, state?.task_board?.active_step_id)
+    if (!persisted || completionContractSignature(persisted.contract) !== completionContractSignature(outcome.contract)) return failed('bound_contract_not_persisted', outcome.attempts)
+    await this.persistState()
+    await this.traceEvent('plan.contract_bound_just_in_time', {
+      ...base, trigger, reason: 'step_activated_without_contract', attempts: outcome.attempts,
+      requirement_kinds: outcome.contract.requirements.map(item => item.kind),
+    }, { requestId })
+    return { ok: true, bound: true, state }
+  }
+
+  // The step contract could not be bound: stop visibly. The player resumes with the usual hint, and the resumed turn's
+  // admission backstop tries again.
+  async pauseForStepContract(failure) {
+    const detail = cleanMemoryText(failure?.reason, 200)
+    const chatMessage = `I paused this goal: I could not get a valid completion checkpoint for the next step (${detail}), so I stopped instead of guessing. ${RESUME_HINT}`
+    const state = await this.pausePersistentPlan('step_contract_unavailable')
+    if (this.traceRequest) {
+      await this.traceEvent('request.completed', {
+        chat_message: chatMessage,
+        outcome: 'paused_step_contract_unavailable',
+        usage: this.traceRequest?.usage,
+      })
+      this.traceRequest = null
+    }
+    return {
+      chatMessage,
+      plan: state?.plan ?? [],
+      currentStep: state?.current_step ?? 0,
+      operations: [],
+      epoch: this.epoch?.epoch,
+      actorId: this.epoch?.actor_id,
+      goalId: state?.goal_id,
+      goalStatus: 'paused',
+      taskBoard: visibleTaskBoard(state?.task_board),
+    }
+  }
+
 
   // Repair unit G (G1/G2): the harness closes the active step as soon as a FRESH read of its committed, machine-checkable
   // checkpoint shows it already met, before a batch is admitted or a wait runs. It is the ordinary close, not a second
@@ -6714,7 +6968,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       evidence: evaluation.results.map(result => ({ id: result.id, kind: result.kind, satisfied: result.satisfied, summary: result.summary })),
       operations_not_run: operations.slice(0, 8).map(operation => cleanMemoryText(operation?.name, 80)),
     })
-    return { closed: true, state: closed.state }
+    return { closed: true, state: closed.state, ...(closed.contractPause ? { contractPause: closed.contractPause } : {}) }
   }
 
   async evaluateWorldStateCheckpoint(checkpoint) {
@@ -6955,7 +7209,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const board = state?.task_board
     const index = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
     const step = index === undefined ? undefined : board?.steps?.[index]
-    if (!step) return ''
+    if (!step || isStepContractPending(step)) return ''
     const tracker = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
     const trackerId = tracker?.active_step_index === index ? tracker?.steps?.[index]?.step_id : undefined
     const stepId = trackerId ?? step.id
@@ -6992,6 +7246,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           && item?.step_id === step?.id)
       : undefined
 
+    // A step whose checkpoint is not bound yet cannot close; it is not a prose step that needs a planner claim either.
+    if (planState?.status === 'active' && isStepContractPending(step)) {
+      await this.declineStepClose('batch_receipt', 'step_contract_pending', { active_step_id: step.id })
+      return { verified: false, reason: 'step_contract_pending', state: planState }
+    }
     if (!planState || planState.status !== 'active' || !step || !verification) {
       await this.declineStepClose('batch_receipt', 'no_authoritative_operation_receipt', {
         active_step_id: step?.id,
@@ -7071,7 +7330,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         ...(closed.paused ? { paused: true, disagreement: closed.disagreement } : {}),
       }
     }
-    return { verified: true, state: closed.state, contract: checkpoint.contract }
+    return { verified: true, state: closed.state, contract: checkpoint.contract, ...(closed.contractPause ? { contractPause: closed.contractPause } : {}) }
   }
 
   // Planner-shape judgments (reasoning budget, horizon, observation relevance,
@@ -9487,6 +9746,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       ? { verified: false, reason: 'pending_amendment' }
       : await this.routeStepCompletionDecision(receipt)
     if (stepCompletion?.paused) return this.pauseForPlanBoardDisagreement(stepCompletion.disagreement)
+    if (stepCompletion?.contractPause) return stepCompletion.contractPause
 
     // The reason a step did not close used to be trace-only: the model saw a
     // finished batch and nothing about why the step stayed open.
@@ -10070,7 +10330,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       currentStep: identity.state?.current_step, plan: identity.draft ? identity.state?.plan : undefined,
       stepCompletions: identity.draft ? identity.plan?.steps?.map(step => step.completion_mode === 'semantic'
         ? { kind: 'semantic', rationale: step.semantic_rationale }
-        : step.completion_contract ? { kind: 'deterministic', checkpoint: step.completion_contract } : null) : undefined,
+        : isStepContractPending(step) ? { kind: 'deterministic' }
+          : step.completion_contract ? { kind: 'deterministic', checkpoint: step.completion_contract } : null) : undefined,
     }
   }
 
@@ -10104,7 +10365,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       try {
         const declared = normalizeStepCompletions(intent.plan, intent.stepCompletions)
         const held = normalizeStepCompletions(intent.plan, initial.plan.steps.map(step => step.completion_mode === 'semantic'
-          ? { kind: 'semantic', rationale: step.semantic_rationale } : { kind: 'deterministic', checkpoint: step.completion_contract }))
+          ? { kind: 'semantic', rationale: step.semantic_rationale }
+          : isStepContractPending(step) ? { kind: 'deterministic' } : { kind: 'deterministic', checkpoint: step.completion_contract }))
         if (JSON.stringify(declared) !== JSON.stringify(held)) return reject('read_cannot_edit_or_complete_plan')
       } catch { return reject('read_cannot_edit_or_complete_plan') }
     }
@@ -11050,8 +11312,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const normalizedPlan = normalizeCanonicalPlan(plan.plan, plan.currentStep)
     if (plan.stepCompletions) {
       plan.stepCompletions = plan.stepCompletions.filter((_, index) => !isLifecycleMetaStep(plan.plan[index]))
+      // Only the step at currentStep commits a checkpoint with the slice. A checkpoint sent for a later step is discarded:
+      // that step's contract is requested when the step is about to start (just-in-time binding), from facts read then.
+      // Indexes before currentStep (the carried prefix of a replacement) are left as sent.
+      const laterIndexes = plan.stepCompletions.flatMap((declaration, index) =>
+        index > normalizedPlan.currentStep && declaration.kind === 'deterministic' ? [index] : [])
+      if (laterIndexes.length > 0) {
+        const discarded = laterIndexes.filter(index => plan.stepCompletions[index].checkpoint !== undefined).length
+        plan.stepCompletions = plan.stepCompletions.map((declaration, index) =>
+          laterIndexes.includes(index) ? { kind: 'deterministic' } : declaration)
+        plan.laterContractsDeferred = { step_count: laterIndexes.length, discarded_checkpoints: discarded }
+      }
       const declared = plan.stepCompletions[normalizedPlan.currentStep]
-      if (declared?.kind === 'deterministic') {
+      if (declared?.kind === 'deterministic' && declared.checkpoint) {
         if (plan.checkpoint && completionContractSignature(plan.checkpoint) !== completionContractSignature(declared.checkpoint)) {
           const error = new AgentLoopError('active checkpoint disagrees with stepCompletions')
           error.failureClass = 'plan_category'
@@ -12280,6 +12553,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       error.code = 'semantic_completion_step_mismatch'
       throw error
     }
+    // A step whose checkpoint is not bound yet has no deterministic contract to bypass and no semantic mode either: it is
+    // deterministic, so nothing may close it until its contract is bound and met.
+    if (isStepContractPending(step) || isStepContractPending(trackerPlan?.steps?.[trackerPlan.active_step_index])) {
+      void this.traceEvent('step.semantic_completion_refused', {
+        request_id: this.traceRequest?.id,
+        reason: 'semantic_completion_contract_pending',
+        step_id: step.id,
+      })
+      const error = new AgentLoopError('semantic_completion_contract_pending: this step is deterministic and its checkpoint is bound when the step starts; it closes only when that checkpoint is met')
+      error.failureClass = 'plan_category'
+      error.code = 'semantic_completion_contract_pending'
+      throw error
+    }
     if (completionContractSupported(step.completion_contract)) {
       const error = new AgentLoopError('semantic_completion_cannot_bypass_deterministic_contract')
       error.failureClass = 'plan_category'
@@ -12676,6 +12962,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         throw error
       }
       if (fresh.paused) return this.pauseForPlanBoardDisagreement(fresh.disagreement)
+      if (fresh.contractPause) return fresh.contractPause
       if (fresh.closed) {
         previousState = fresh.state ?? previousState
         this.resetRepairAfterClosedStep()
@@ -13178,6 +13465,33 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       catch (error) {
         if (!error?.preflight) throw error
+        if (error.preflight.code === STEP_CONTRACT_PENDING_CODE) {
+          // Backstop: a restart between the step close and the bind, or a resumed task, reaches an active step with no
+          // contract. Bind it now, tell the model what changed, and let it send the batch again.
+          const reducerPlan = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
+          if (FROZEN_PLAN_STATUSES.has(reducerPlan?.status)) {
+            const ensured = await this.ensureActiveStepContract({ trigger: 'admission_backstop' })
+            if (ensured.ok === false) return this.pauseForStepContract(ensured.failure)
+            if (ensured.bound !== true) {
+              const unbound = new AgentLoopError('step_contract_pending: the active step has no completion checkpoint and none could be bound for this plan state')
+              unbound.failureClass = 'plan_category'
+              unbound.code = 'step_contract_pending'
+              throw unbound
+            }
+            const after = ensured.state ?? this.memory.currentPlan?.(this.activePlanKey())
+            const bound = persistedStepCheckpoint(after?.task_board, after?.task_board?.active_step_id)
+            this.messages.push({
+              role: 'user',
+              content: `[HARNESS] The active step had no completion checkpoint yet, so no operation from that batch ran. ${bound ? `The harness has now bound its checkpoint: ${JSON.stringify(bound.contract)}.` : 'The checkpoint is being bound.'} Send the operations for this step again under that checkpoint.`,
+            })
+            return this.runTurn()
+          }
+          // A draft cannot be bound; it must carry its own active-step checkpoint.
+          const missing = new AgentLoopError('missing_active_step_checkpoint: the step at currentStep must carry its deterministic checkpoint {mode,requirements} in stepCompletions; no contract has been committed.')
+          missing.failureClass = 'plan_category'
+          missing.code = 'missing_active_step_checkpoint'
+          throw missing
+        }
         if (error.preflight.code === CHECKPOINT_STOCK_EXTRACTION_CODE) {
           const guarded = await this.handleCheckpointStockExtraction(error, plan, before, stateResult)
           if (guarded.action === 'recovered') {

@@ -1,7 +1,18 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { completionContractSignature, normalizeStepCompletions } from './luna-step-contracts.mjs'
+import {
+  buildStepContractPacket,
+  completionContractSignature,
+  normalizeStepCompletions,
+  parseStepContractReply,
+  STEP_CONTRACT_MARKER,
+  stepContractCorrectionMessage,
+  stepContractUserMessage,
+} from './luna-step-contracts.mjs'
+import { validatesAgainstSchema } from './control-json-repair.mjs'
+import { applyPlanningEvent, createEmptyPlanningState, getActivePlan, PLANNING_EVENT } from './planning-state.mjs'
+import { plannerControlToolDefinitions } from './structured-policy.mjs'
 
 const inventory = { mode: 'all', requirements: [{ kind: 'inventory_count', item_name: 'copper-ore', minimum: 10 }] }
 
@@ -24,7 +35,9 @@ test('every new plan step requires exactly one explicit declaration', () => {
 })
 
 test('unsupported or malformed deterministic predicates are not silently downgraded to prose', () => {
-  for (const checkpoint of [undefined, {}, { mode: 'all', requirements: [] }, { mode: 'all', requirements: [{ kind: 'invented_kind' }] }]) {
+  // A deterministic entry with NO checkpoint is a later step whose contract is bound when it starts (tested below); a checkpoint
+  // that is present but null, empty or unsupported is still refused and never downgraded to "pending".
+  for (const checkpoint of [null, {}, { mode: 'all', requirements: [] }, { mode: 'all', requirements: [{ kind: 'invented_kind' }] }]) {
     assert.throws(() => normalizeStepCompletions(['Gather copper'], [{ kind: 'deterministic', checkpoint }]), /requires a supported checkpoint/)
   }
 })
@@ -64,4 +77,110 @@ test('contract signature normalizes the same predicate shape consistently', () =
   assert.equal(completionContractSignature(inventory), completionContractSignature(reordered))
   const other = { ...inventory, requirements: [{ kind: 'inventory_count', item_name: 'copper-ore', minimum: 11 }] }
   assert.notEqual(completionContractSignature(inventory), completionContractSignature(other))
+})
+
+// --- later steps declare {kind:"deterministic"} with no checkpoint (step contracts bind just in time) ----------------
+
+test('a deterministic declaration with no checkpoint is a later step: accepted as is, refused with any extra member', () => {
+  assert.deepEqual(normalizeStepCompletions(['Now', 'Later'], [{ kind: 'deterministic', checkpoint: inventory }, { kind: 'deterministic' }])[1], { kind: 'deterministic' })
+  assert.deepEqual(normalizeStepCompletions(['Later'], [{ kind: 'deterministic', checkpoint: undefined }]), [{ kind: 'deterministic' }])
+  assert.throws(() => normalizeStepCompletions(['Later'], [{ kind: 'deterministic', rationale: 'because' }]), /unexpected fields/)
+  assert.throws(() => normalizeStepCompletions(['Later'], [{ kind: 'deterministic', checkpoint: null }]), /requires a supported checkpoint/)
+})
+
+test('normalizer and the submitPlan stepCompletions schema accept and refuse the same declarations', () => {
+  const items = plannerControlToolDefinitions[0].function.parameters.properties.stepCompletions.items
+  const table = [
+    { kind: 'deterministic' },
+    { kind: 'deterministic', checkpoint: inventory },
+    { kind: 'semantic', rationale: 'Assess the observed site constraints.' },
+    { kind: 'deterministic', checkpoint: null },
+    { kind: 'deterministic', checkpoint: { mode: 'all', requirements: [] } },
+    { kind: 'deterministic', checkpoint: { mode: 'all', requirements: [{ kind: 'invented_kind' }] } },
+    { kind: 'deterministic', rationale: 'because' },
+    { kind: 'semantic' },
+    { kind: 'semantic', rationale: 'Assess.', checkpoint: inventory },
+    { kind: 'automatic' },
+    { checkpoint: inventory },
+  ]
+  for (const value of table) {
+    let normalizerAccepts = true
+    try { normalizeStepCompletions(['step'], [value]) }
+    catch { normalizerAccepts = false }
+    assert.equal(validatesAgainstSchema(value, items), normalizerAccepts, JSON.stringify(value))
+  }
+})
+
+// --- the step contract call: packet and reply ---------------------------------------------------------------------
+
+function committedSlice() {
+  let state = applyPlanningEvent(createEmptyPlanningState(), { type: PLANNING_EVENT.GOAL_ACCEPTED, now: 1000, owner: 'louis', objective: 'Build toward a rocket-capable factory' })
+  state = applyPlanningEvent(state, {
+    type: PLANNING_EVENT.DRAFT_CREATED,
+    now: 1200,
+    steps: [
+      { description: 'Gather ten iron ore', completion_mode: 'deterministic', completion_contract: inventory },
+      { description: 'Smelt twenty iron plates', completion_mode: 'deterministic', contract_status: 'pending' },
+      { description: 'Craft a pickaxe', completion_mode: 'deterministic', contract_status: 'pending' },
+    ],
+  })
+  return applyPlanningEvent(state, { type: PLANNING_EVENT.PLAN_COMMITTED, now: 1300, runtime_validation: { passed: true } })
+}
+
+test('the packet is facts only: goal, step intents and statuses, verified results, the target and the facts; no strategy and no contracts of other steps', () => {
+  const state = committedSlice()
+  const plan = getActivePlan(state)
+  const facts = { inventory: { 'iron-ore': 130 }, as_of: { tick: 5000 } }
+  const packet = buildStepContractPacket({ planningState: state, stepId: plan.steps[1].step_id, facts })
+  assert.deepEqual(Object.keys(packet), ['goal', 'done_when', 'slice', 'verified_results', 'target', 'facts'])
+  assert.equal(packet.goal.objective, 'Build toward a rocket-capable factory')
+  assert.deepEqual(packet.slice.steps.map(step => [step.description, step.status, step.contract]), [
+    ['Gather ten iron ore', 'active', 'bound'],
+    ['Smelt twenty iron plates', 'pending', 'pending'],
+    ['Craft a pickaxe', 'pending', 'pending'],
+  ])
+  assert.deepEqual(packet.target, { step_id: plan.steps[1].step_id, index: 1, description: 'Smelt twenty iron plates' })
+  assert.deepEqual(packet.facts, facts)
+  assert.equal(JSON.stringify(packet).includes('minimum'), false, 'no contract content of any step is sent')
+  assert.equal(Object.hasOwn(packet, 'assumed_outcome'), false)
+  // A prediction call (later unit) states the outcome it assumes; the parameter is carried verbatim.
+  const predicted = buildStepContractPacket({ planningState: state, stepId: plan.steps[1].step_id, facts, assumedOutcome: { active_step_contract_met: true } })
+  assert.deepEqual(predicted.assumed_outcome, { active_step_contract_met: true })
+  assert.equal(buildStepContractPacket({ planningState: state, stepId: 'nope' }), undefined)
+  const message = stepContractUserMessage(packet)
+  assert.ok(message.startsWith(`${STEP_CONTRACT_MARKER} `))
+  assert.deepEqual(JSON.parse(message.slice(message.indexOf(' {"goal"') + 1)), packet)
+  assert.match(stepContractCorrectionMessage('checkpoint_not_supported:x'), /^\[HARNESS\] checkpoint_not_supported:x; nothing was bound\.$/)
+})
+
+test('a contract reply is one JSON object for the target step with a supported deterministic checkpoint, repaired only in syntax', () => {
+  const reply = { stepId: 'step_2', checkpoint: inventory }
+  const ok = parseStepContractReply(JSON.stringify(reply), { stepId: 'step_2' })
+  assert.equal(ok.ok, true)
+  assert.equal(ok.checkpoint.requirements[0].item_name, 'copper-ore')
+  assert.deepEqual(ok.repairs, [])
+  assert.equal(parseStepContractReply(`\`\`\`json\n${JSON.stringify(reply)}\n\`\`\``, { stepId: 'step_2' }).ok, true, 'a fenced reply is unwrapped')
+  const trailing = parseStepContractReply(`${JSON.stringify(reply).slice(0, -1)},}`, { stepId: 'step_2' })
+  assert.equal(trailing.ok, true)
+  assert.equal(trailing.repairs[0].kind, 'trailing_comma')
+  const encoded = parseStepContractReply(JSON.stringify({ stepId: 'step_2', checkpoint: JSON.stringify(inventory) }), { stepId: 'step_2' })
+  assert.equal(encoded.ok, true, 'a checkpoint sent as a JSON-encoded string is decoded once')
+  assert.equal(encoded.repairs[0].kind, 'decoded_string')
+  const refusals = {
+    'empty reply': '',
+    'not JSON': 'the checkpoint is ten copper ore',
+    'an array': '[]',
+    'another step': JSON.stringify({ stepId: 'step_3', checkpoint: inventory }),
+    'no step id': JSON.stringify({ checkpoint: inventory }),
+    'extra member': JSON.stringify({ stepId: 'step_2', checkpoint: inventory, rationale: 'x' }),
+    'no checkpoint': JSON.stringify({ stepId: 'step_2' }),
+    'checkpoint not an object': JSON.stringify({ stepId: 'step_2', checkpoint: 'ten copper ore' }),
+    'unsupported predicate': JSON.stringify({ stepId: 'step_2', checkpoint: { mode: 'all', requirements: [{ kind: 'invented_kind' }] } }),
+    'receipt that needs world verification': JSON.stringify({ stepId: 'step_2', checkpoint: { mode: 'all', requirements: [{ kind: 'authoritative_operation_receipt', operation_name: 'wait' }] } }),
+  }
+  for (const [name, content] of Object.entries(refusals)) {
+    const result = parseStepContractReply(content, { stepId: 'step_2' })
+    assert.equal(result.ok, false, name)
+    assert.equal(typeof result.reason, 'string', name)
+  }
 })
