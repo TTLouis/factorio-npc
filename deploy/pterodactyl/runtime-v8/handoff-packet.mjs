@@ -829,7 +829,7 @@ function authorityRecord(plan, step, limits) {
   return {
     key: 'executor_authority',
     block: 'step',
-    text: oneLine(`authority: active_step=${step.step_id} (committed plan) contract=${contract?.mode ? `${contract.mode} (committed)` : 'none'} latest_receipt=${latest ? `#${latest.seq ?? held.length} ${latest.kind} ${latest.ref} (this step)` : 'none'} entity_ids_in_receipts_and_snapshots=historical_observations`, limits.authorityChars),
+    text: oneLine(`authority: active_step=${step.step_id} (committed plan) contract=${contract?.mode ? `${contract.mode} (committed)` : step?.contract_status === 'pending' ? 'pending' : 'none'} latest_receipt=${latest ? `#${latest.seq ?? held.length} ${latest.kind} ${latest.ref} (this step)` : 'none'} entity_ids_in_receipts_and_snapshots=historical_observations`, limits.authorityChars),
   }
 }
 

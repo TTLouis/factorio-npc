@@ -22,7 +22,7 @@
 //   * The Roadmap Shelf is storage only. No export turns a shelf node into
 //     operations or into plan steps.
 
-import { completionContractSupported, sanitizeStepCompletionContract } from './step-completion.mjs'
+import { authoredCompletionContractSupported, completionContractSupported, sanitizeStepCompletionContract } from './step-completion.mjs'
 import { needsGoalBaseline, restoreGoalDefinition, sanitizeGoalDefinition } from './goal-definition.mjs'
 import {
   authorizationHasContent,
@@ -70,6 +70,13 @@ import {
 } from './task-ledger.mjs'
 
 export const PLANNING_STATE_VERSION = 1
+
+// A step committed without its checkpoint is `pending` until the runtime binds one when the step is about to
+// start. Binding is append-only (see STEP_CONTRACT_BOUND).
+export const STEP_CONTRACT_STATUS = Object.freeze({ PENDING: 'pending', BOUND: 'bound' })
+export const STEP_CONTRACT_BINDINGS = Object.freeze(['just_in_time', 'prediction'])
+// Not an authorization refusal: the active step simply has no contract yet, so it cannot take operations.
+export const STEP_CONTRACT_PENDING_CODE = 'step_contract_pending'
 
 // --- lifecycle (roadmap section 5) -----------------------------------------
 
@@ -422,6 +429,8 @@ export const PLANNING_EVENT = Object.freeze({
   // A pre-journal (legacy) operation record whose effect no exact or baseline evidence can settle becomes a harness-raised
   // question the user can answer. Runtime authority raises it; only the user's approval (then a runtime clear) settles it.
   OPERATION_EFFECT_QUESTION_RAISED: 'OPERATION_EFFECT_QUESTION_RAISED',
+  // Append-only binding of the checkpoint a pending step was committed without. Runtime authority only.
+  STEP_CONTRACT_BOUND: 'STEP_CONTRACT_BOUND',
 })
 
 const PLANNING_EVENT_TYPES = Object.freeze(Object.values(PLANNING_EVENT))
@@ -819,6 +828,11 @@ function sanitizeStep(raw, { planId, planVersion, sequence }) {
   const contract = sanitizeOptionalCompletionContract(source.completion_contract)
   const stepId = text(source.step_id, 200)
     || `${planId}_v${planVersion}_s${sequence}_${fingerprint(`${planId}|${sequence}|${description}`)}`
+  // A deterministic step whose checkpoint is not authored yet (its contract is
+  // requested when the step is about to start). Only an explicit stored marker
+  // makes a step pending: old saves, semantic steps and prose steps have none.
+  const pending = !contract && source.completion_mode === 'deterministic' && source.contract_status === 'pending'
+  const binding = contract ? sanitizeContractBinding(source.contract_binding) : undefined
   return {
     step_id: stepId,
     description,
@@ -826,10 +840,28 @@ function sanitizeStep(raw, { planId, planVersion, sequence }) {
     ...(source.completion_mode === 'deterministic' || source.completion_mode === 'semantic'
       ? { completion_mode: source.completion_mode, ...(source.completion_mode === 'semantic' ? { semantic_rationale: text(source.semantic_rationale, 600) } : {}) }
       : {}),
-    // Explicit reduced-confidence marker for prose-only steps.
-    completion_confidence: contract ? 'grounded' : 'reduced',
-    reduced_confidence: !contract,
+    ...(contract ? { contract_status: STEP_CONTRACT_STATUS.BOUND } : pending ? { contract_status: STEP_CONTRACT_STATUS.PENDING } : {}),
+    ...(binding ? { contract_binding: binding } : {}),
+    // Explicit reduced-confidence marker for prose-only steps. A pending step
+    // is neither grounded nor prose: it cannot run or close until it is bound.
+    completion_confidence: contract ? 'grounded' : pending ? 'pending' : 'reduced',
+    reduced_confidence: !contract && !pending,
   }
+}
+
+function sanitizeContractBinding(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  if (!STEP_CONTRACT_BINDINGS.includes(raw.binding)) return undefined
+  return {
+    binding: raw.binding,
+    request_id: text(raw.request_id, 200) || null,
+    bound_at: finiteNumber(raw.bound_at) ?? 0,
+  }
+}
+
+/** True for a deterministic step whose checkpoint has not been bound yet. */
+export function isStepContractPending(step) {
+  return !!step && step.contract_status === STEP_CONTRACT_STATUS.PENDING && !step.completion_contract
 }
 
 function sanitizeSteps(rawSteps, { planId, planVersion }) {
@@ -1471,7 +1503,7 @@ export const HARNESS_DEADLOCK_EVALUATORS = Object.freeze([
     evaluate({ step, progress, limits }) {
       // Prose-only steps have no contract, so signals (a) and (c) cannot see
       // them. This hard ceiling is their backstop against looping forever.
-      if (step.completion_contract) return undefined
+      if (step.completion_contract || isStepContractPending(step)) return undefined
       if (progress.batches_attempted < limits.proseOnlyOperationCeiling) return undefined
       return {
         kind: DEADLOCK_SIGNAL_KIND.PROSE_ONLY_CEILING,
@@ -1566,6 +1598,8 @@ export function planTrackerView(state, { planId } = {}) {
         description: step.description,
         completion_contract: clone(step.completion_contract),
         ...(step.completion_mode ? { completion_mode: step.completion_mode, ...(step.completion_mode === 'semantic' ? { semantic_rationale: step.semantic_rationale } : {}) } : {}),
+        ...(step.contract_status ? { contract_status: step.contract_status } : {}),
+        ...(step.contract_binding ? { contract_binding: clone(step.contract_binding) } : {}),
         completion_confidence: step.completion_confidence,
         reduced_confidence: step.reduced_confidence,
         status: progress.status,
@@ -1870,6 +1904,30 @@ function blockPlan(state, plan, { now, blocker }) {
     reason: blocker?.reason_code ?? 'blocked',
   })
   return withPlan(state, plan.plan_id, () => blocked)
+}
+
+/**
+ * Whether a STEP_CONTRACT_BOUND event would be accepted, with the refusal reason when it would not. The reducer and the
+ * board mirror share it so a trace and the state change cannot disagree.
+ */
+export function checkStepContractBind(state, event) {
+  const refuse = reason => ({ ok: false, reason })
+  if (!event || typeof event !== 'object') return refuse('malformed_event')
+  if (!isRuntimeAuthority(event.source)) return refuse('runtime_authority_required')
+  const planId = text(event.plan_id, 200)
+  if (!planId) return refuse('plan_id_required')
+  const plan = getPlan(state, planId)
+  if (!plan) return refuse('plan_not_found')
+  if (![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan.status)) return refuse('plan_not_executing')
+  const index = plan.active_step_index
+  const step = plan.steps[index]
+  if (!step || text(event.step_id, 200) !== step.step_id) return refuse('step_not_active')
+  if (plan.execution.step_progress[step.step_id]?.status === 'completed') return refuse('step_already_completed')
+  if (!isStepContractPending(step)) return refuse('step_not_pending')
+  if (!STEP_CONTRACT_BINDINGS.includes(event.binding)) return refuse('binding_not_recognized')
+  const contract = sanitizeOptionalCompletionContract(event.contract)
+  if (!contract || !authoredCompletionContractSupported(contract)) return refuse('contract_unsupported')
+  return { ok: true, plan, index, step, contract }
 }
 
 /**
@@ -2179,6 +2237,8 @@ Object.assign(HANDLERS, {
     // executable.
     if (event.runtime_validation?.passed !== true) return state
     if (plan.steps.length === 0) return state
+    // The step that runs first must carry its checkpoint. Later steps may still be pending.
+    if (isStepContractPending(plan.steps[plan.active_step_index])) return state
     // A replacement plan commits only while its grant is still current (MW1): the revision it was authorized under,
     // the goal, the actor epoch and the steps that were classified. Refused, it stays an uncommitted DRAFT and the
     // refusal is recorded for the trace; nothing else about the state moves.
@@ -2247,6 +2307,8 @@ Object.assign(HANDLERS, {
     if (!step) return state
     const stepId = text(event.step_id, 200) || step.step_id
     if (stepId !== step.step_id) return state
+    // Nothing can be attempted against a step that has no contract yet.
+    if (isStepContractPending(step)) return state
     const failureCode = text(event.failure_reason_code, 120)
     const updated = updateProgress(plan, stepId, progress => ({
       ...progress,
@@ -2342,6 +2404,8 @@ Object.assign(HANDLERS, {
     const index = plan.active_step_index
     const step = plan.steps[index]
     if (!step || text(event.step_id, 200) !== step.step_id) return state
+    // A step with no bound contract cannot close, by runtime evidence or by a semantic claim.
+    if (isStepContractPending(step)) return state
 
     const runtimeCompletion = isRuntimeAuthority(event.source)
     const semanticCompletion = isSemanticCompletionAuthority(event.source)
@@ -2400,6 +2464,29 @@ Object.assign(HANDLERS, {
       updated_at: now,
       plans: state.plans.map(item => (item.plan_id === plan.plan_id ? advanced : item)),
       log: logEntry(state, { type: PLANNING_EVENT.STEP_COMPLETED, at: now, plan_id: plan.plan_id, step_id: step.step_id }),
+    }
+  },
+
+  [PLANNING_EVENT.STEP_CONTRACT_BOUND](state, event, now) {
+    // Append-only: adds the one contract a pending step was committed without. It never rewrites a contract, a
+    // step intent or the step order, and only the runtime may do it.
+    const check = checkStepContractBind(state, event)
+    if (!check.ok) return state
+    const { plan, index, step, contract } = check
+    const bound = deepFreeze({
+      ...step,
+      completion_contract: contract,
+      contract_status: STEP_CONTRACT_STATUS.BOUND,
+      contract_binding: { binding: event.binding, request_id: text(event.request_id, 200) || null, bound_at: now },
+      completion_confidence: 'grounded',
+      reduced_confidence: false,
+    })
+    const steps = Object.freeze(plan.steps.map((item, itemIndex) => (itemIndex === index ? bound : item)))
+    return {
+      ...state,
+      updated_at: now,
+      plans: state.plans.map(item => (item.plan_id === plan.plan_id ? { ...item, updated_at: now, steps } : item)),
+      log: logEntry(state, { type: PLANNING_EVENT.STEP_CONTRACT_BOUND, at: now, plan_id: plan.plan_id, step_id: step.step_id, binding: event.binding }),
     }
   },
 

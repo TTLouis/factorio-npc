@@ -1368,7 +1368,7 @@ function trackerUiSteps(tracker, state) {
       id: String(step?.step_id ?? '').slice(0, 80),
       description: String(step?.description ?? '').slice(0, 500),
       status,
-      contract_kind: step?.completion_contract ? 'grounded' : 'prose',
+      contract_kind: step?.completion_contract ? 'grounded' : step?.contract_status === 'pending' ? 'pending' : 'prose',
       ...(step?.reduced_confidence === true ? { reduced_confidence: true } : {}),
     }
   })

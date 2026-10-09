@@ -252,7 +252,9 @@ test('submitPlan preserves aligned deterministic and semantic completion declara
   const schema = runtime.plannerControlToolDefinitions.find(tool => tool.function.name === runtime.PLANNER_CONTROL_TOOL_NAME).function.parameters.properties.stepCompletions
   assert.equal(schema.type, 'array')
   assert.equal(schema.maxItems, 30)
-  assert.deepEqual(schema.items.oneOf.map(branch => branch.required), [['kind', 'checkpoint'], ['kind', 'rationale']])
+  // A later step of an execution plan is {kind:"deterministic"} with no checkpoint (its checkpoint is bound when the step starts).
+  assert.deepEqual(schema.items.oneOf.map(branch => branch.required), [['kind'], ['kind', 'rationale']])
+  assert.ok(schema.items.oneOf[0].properties.checkpoint)
   assert.ok(schema.items.oneOf.every(branch => branch.additionalProperties === false))
 })
 

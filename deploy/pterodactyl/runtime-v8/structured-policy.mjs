@@ -710,7 +710,7 @@ export const plannerControlToolDefinitions = [{
         },
         currentStep: { type: 'integer', minimum: 0, maximum: 30 },
         stepId: { type: 'string', minLength: 1, maxLength: 200, description: 'Executor only: the active committed step id from [CONTROL_DECISION_STATE]. Binds the operations to that step; plan and currentStep do not decide which step they belong to.' },
-        assessmentOnly: { type: 'boolean', description: 'Set true only for an intentionally observation-only slice: all stepCompletions are semantic and operations is empty. Omit or set false for execution drafts, which declare a deterministic world-result checkpoint for every step. This does not change an existing committed plan.' },
+        assessmentOnly: { type: 'boolean', description: 'Set true only for an intentionally observation-only slice: all stepCompletions are semantic and operations is empty. Omit or set false for execution drafts, which declare deterministic steps: the current step\'s world-result checkpoint now, each later one when it is about to start. This does not change an existing committed plan.' },
         observationRequest: {
           type: 'object', additionalProperties: false, required: ['tool', 'args', 'rationale'],
           anyOf: [{ required: ['stepId'] }, { required: ['scope', 'goalId', 'planId', 'planVersion', 'draftRevision'] }],
@@ -880,9 +880,9 @@ export const plannerControlToolDefinitions = [{
 
 plannerControlToolDefinitions[0].function.parameters.properties.stepCompletions = {
   type: 'array', maxItems: 30,
-  description: 'Required on newly authored plans: one declaration per plan description at the same index. Execution plans declare only deterministic checkpoints. Semantic declarations are accepted only with assessmentOnly:true.',
+  description: 'Required on newly authored plans: one declaration per plan description at the same index. In an execution plan the entry at currentStep carries its deterministic checkpoint; later entries are {kind:"deterministic"} and their checkpoints are requested when each step is about to start. Semantic declarations are accepted only with assessmentOnly:true.',
   items: { oneOf: [
-    { type: 'object', additionalProperties: false, required: ['kind', 'checkpoint'], properties: {
+    { type: 'object', additionalProperties: false, required: ['kind'], properties: {
       kind: { type: 'string', enum: ['deterministic'] },
       checkpoint: plannerControlToolDefinitions[0].function.parameters.properties.checkpoint,
     } },

@@ -1807,3 +1807,230 @@ test('Jev is asked only the steering pressures that the supplied state has facts
   assert.equal(questions.pressure_machine_idle_no_input, undefined)
   assert.equal(questions.pressure_capability_absent.instructions.condition, STEERING_PRESSURE_EVIDENCE.capability_absent.definition)
 })
+
+// --- pending step contracts (one-step contract prediction, 2026-10-09) -------------------------------------------
+
+const SMELT_CONTRACT = { mode: 'all', requirements: [{ id: 'req_plates', kind: 'inventory_count', item_name: 'iron-plate', minimum: 20 }] }
+
+// Step 1 carries its checkpoint; step 2 is committed as an intent only and gets its contract when it starts.
+function pendingSteps() {
+  return [
+    { description: 'Acquire enough stone for two furnaces', completion_mode: 'deterministic', completion_contract: GROUNDED_CONTRACT },
+    { description: 'Smelt twenty iron plates', completion_mode: 'deterministic', contract_status: 'pending' },
+  ]
+}
+
+function pendingFixture(options = {}) {
+  return committedFixture({ steps: pendingSteps(), ...options })
+}
+
+// Step 1 verified by runtime evidence and closed: step 2 is now the active, still unbound, step.
+function pendingBecomesActive() {
+  const first = pendingFixture()
+  const evidence = runtimeEvidence(first, { ref: 'batch_7', requirementIds: ['req_stone'] })
+  return completeActiveStep(evidence)
+}
+
+function bindEvent(state, overrides = {}) {
+  const plan = getActivePlan(state)
+  return {
+    type: PLANNING_EVENT.STEP_CONTRACT_BOUND,
+    now: 1600,
+    source: 'runtime',
+    plan_id: plan.plan_id,
+    step_id: plan.steps[plan.active_step_index].step_id,
+    contract: SMELT_CONTRACT,
+    binding: 'just_in_time',
+    request_id: 'req_contract_1',
+    ...overrides,
+  }
+}
+
+test('a step is pending only when it is a deterministic step with a stored pending marker and no contract', () => {
+  const state = drafted(shelved(goalState()), {
+    steps: [
+      { description: 'bound by contract', completion_mode: 'deterministic', completion_contract: GROUNDED_CONTRACT },
+      { description: 'pending deterministic', completion_mode: 'deterministic', contract_status: 'pending' },
+      { description: 'pending marker on a semantic step', completion_mode: 'semantic', semantic_rationale: 'Assess.', contract_status: 'pending' },
+      { description: 'pending marker on a prose step', contract_status: 'pending' },
+      { description: 'bound marker without a contract', completion_mode: 'deterministic', contract_status: 'bound' },
+      { description: 'pending marker beside a supported contract', completion_mode: 'deterministic', contract_status: 'pending', completion_contract: GROUNDED_CONTRACT },
+    ],
+  })
+  const [bound, pending, semantic, prose, fakeBound, contractWins] = getActivePlan(state).steps
+  assert.equal(bound.contract_status, 'bound')
+  assert.equal(bound.contract_binding, undefined, 'a contract committed with the slice has no runtime binding')
+  assert.equal(bound.completion_confidence, 'grounded')
+  assert.equal(pending.contract_status, 'pending')
+  assert.equal(pending.completion_contract, null)
+  assert.equal(pending.completion_confidence, 'pending')
+  assert.equal(pending.reduced_confidence, false)
+  for (const step of [semantic, prose, fakeBound]) {
+    assert.equal(Object.hasOwn(step, 'contract_status'), false, `${step.description} carries no contract_status`)
+  }
+  assert.equal(prose.reduced_confidence, true)
+  assert.equal(fakeBound.reduced_confidence, true)
+  assert.equal(contractWins.contract_status, 'bound', 'a supported contract always wins over a stored pending marker')
+})
+
+test('old saves restore unchanged: contracted steps become bound, prose steps keep no status, nothing becomes pending', () => {
+  const oldSave = serializePlanningState(committedFixture())
+  for (const plan of oldSave.plans) for (const step of plan.steps) delete step.contract_status
+  const restored = restorePlanningState(oldSave)
+  const steps = getActivePlan(restored).steps
+  assert.deepEqual(steps.map(step => step.contract_status), ['bound', 'bound'])
+  assert.deepEqual(steps.map(step => step.completion_confidence), ['grounded', 'grounded'])
+  const prose = restorePlanningState(serializePlanningState(committed(drafted(shelved(goalState()), { steps: [{ description: 'Look around' }] }))))
+  assert.equal(Object.hasOwn(getActivePlan(prose).steps[0], 'contract_status'), false)
+  assert.equal(getActivePlan(prose).steps[0].reduced_confidence, true)
+})
+
+test('STEP_CONTRACT_BOUND binds the active pending step append-only and records how it was bound', () => {
+  const before = pendingBecomesActive()
+  const plan = getActivePlan(before)
+  const pendingStep = plan.steps[1]
+  assert.equal(pendingStep.contract_status, 'pending')
+  const snapshot = JSON.stringify(before)
+  const after = applyPlanningEvent(before, bindEvent(before))
+  assert.notEqual(after, before)
+  const bound = getActivePlan(after).steps[1]
+  assert.equal(bound.contract_status, 'bound')
+  assert.deepEqual(bound.contract_binding, { binding: 'just_in_time', request_id: 'req_contract_1', bound_at: 1600 })
+  assert.equal(bound.completion_contract.requirements[0].item_name, 'iron-plate')
+  assert.equal(bound.completion_confidence, 'grounded')
+  assert.equal(bound.reduced_confidence, false)
+  // Append-only: the step id, intent and order are the committed ones, the other step is the very same object, the old state is untouched.
+  assert.equal(bound.step_id, pendingStep.step_id)
+  assert.equal(bound.description, pendingStep.description)
+  assert.equal(getActivePlan(after).steps[0], plan.steps[0])
+  assert.deepEqual(getActivePlan(after).steps.map(step => step.step_id), plan.steps.map(step => step.step_id))
+  assert.equal(JSON.stringify(before), snapshot)
+  assert.equal(after.log.at(-1).type, PLANNING_EVENT.STEP_CONTRACT_BOUND)
+  assert.equal(after.log.at(-1).step_id, bound.step_id)
+  assert.equal(Object.isFrozen(getActivePlan(after).steps), true)
+  assert.equal(Object.isFrozen(bound), true)
+  // The bound contract is evidence-closable like any committed contract.
+  const evidenced = runtimeEvidence(after, { ref: 'batch_9', requirementIds: ['req_plates'], now: 1700 })
+  assert.equal(getActivePlan(evidenced).execution.step_progress[bound.step_id].contract_satisfied, true)
+  assert.equal(getActivePlan(completeActiveStep(evidenced, { now: 1800 })).execution.step_progress[bound.step_id].status, 'completed')
+})
+
+test('STEP_CONTRACT_BOUND refuses everything but a runtime bind of the active pending step, and a refusal returns the very same state', () => {
+  const state = pendingBecomesActive()
+  const plan = getActivePlan(state)
+  const cases = {
+    'planner authority': { source: 'main_planner' },
+    'user authority': { source: 'user' },
+    'no source': { source: undefined },
+    'no plan id': { plan_id: undefined },
+    'unknown plan': { plan_id: 'g_nope' },
+    'no step id': { step_id: undefined },
+    'another step': { step_id: plan.steps[0].step_id },
+    'unknown step': { step_id: 'nope' },
+    'no contract': { contract: undefined },
+    'null contract': { contract: null },
+    'empty requirements': { contract: { mode: 'all', requirements: [] } },
+    'unsupported requirement kind': { contract: { mode: 'all', requirements: [{ kind: 'invented_kind' }] } },
+    'a receipt that needs world verification': { contract: { mode: 'all', requirements: [{ kind: 'authoritative_operation_receipt', operation_name: 'wait' }] } },
+    'no binding': { binding: undefined },
+    'unknown binding': { binding: 'planner_said_so' },
+  }
+  for (const [name, change] of Object.entries(cases)) {
+    assert.equal(applyPlanningEvent(state, bindEvent(state, change)), state, `${name} is refused`)
+  }
+  for (const binding of ['just_in_time', 'prediction']) {
+    assert.notEqual(applyPlanningEvent(state, bindEvent(state, { binding })), state, `${binding} is a recognised binding`)
+  }
+  // A DRAFT, a blocked plan and a completed step are not bindable either.
+  const draft = drafted(shelved(goalState()), { steps: pendingSteps() })
+  assert.equal(applyPlanningEvent(draft, bindEvent(draft, { step_id: getActivePlan(draft).steps[0].step_id })), draft)
+  const blocked = applyPlanningEvent(state, { type: PLANNING_EVENT.STRUCTURAL_BLOCKER_CONFIRMED, now: 1650, source: 'runtime', plan_id: plan.plan_id, reason_code: 'world_blocked', detail: 'x' })
+  assert.equal(getActivePlan(blocked).status, PLAN_STATUS.BLOCKED)
+  assert.equal(applyPlanningEvent(blocked, bindEvent(blocked)), blocked)
+})
+
+test('a bound contract is immutable: a second bind with another contract is refused and the first stays', () => {
+  const pendingState = pendingBecomesActive()
+  const bound = applyPlanningEvent(pendingState, bindEvent(pendingState))
+  const other = { mode: 'all', requirements: [{ id: 'req_other', kind: 'inventory_count', item_name: 'copper-plate', minimum: 5 }] }
+  assert.equal(applyPlanningEvent(bound, bindEvent(bound, { contract: other, request_id: 'req_contract_2' })), bound)
+  const step = getActivePlan(bound).steps[1]
+  assert.equal(step.completion_contract.requirements[0].item_name, 'iron-plate')
+  assert.throws(() => { step.completion_contract.requirements[0].minimum = 1 })
+  assert.throws(() => { step.contract_status = 'pending' })
+  // A step committed WITH its contract is not pending, so it cannot be rebound either.
+  const first = pendingFixture()
+  assert.equal(applyPlanningEvent(first, bindEvent(first)), first)
+})
+
+test('contract_status and contract_binding survive serialize and restore, and the pending step restores as pending', () => {
+  const pendingState = pendingBecomesActive()
+  const restoredPending = restorePlanningState(JSON.parse(JSON.stringify(serializePlanningState(pendingState))))
+  assert.equal(getActivePlan(restoredPending).steps[1].contract_status, 'pending')
+  assert.equal(getActivePlan(restoredPending).steps[1].completion_contract, null)
+  const boundState = applyPlanningEvent(pendingState, bindEvent(pendingState))
+  const restored = restorePlanningState(JSON.parse(JSON.stringify(serializePlanningState(boundState))))
+  const step = getActivePlan(restored).steps[1]
+  assert.equal(step.contract_status, 'bound')
+  assert.deepEqual(step.contract_binding, { binding: 'just_in_time', request_id: 'req_contract_1', bound_at: 1600 })
+  assert.deepEqual(getActivePlan(restored).steps, getActivePlan(boundState).steps)
+  // A stored binding without a contract is not trusted.
+  const raw = JSON.parse(JSON.stringify(serializePlanningState(pendingState)))
+  raw.plans[0].steps[1].contract_binding = { binding: 'just_in_time', request_id: 'x', bound_at: 1 }
+  assert.equal(Object.hasOwn(getActivePlan(restorePlanningState(raw)).steps[1], 'contract_binding'), false)
+})
+
+test('a pending step cannot be closed, by runtime evidence or by a planner semantic claim', () => {
+  const state = pendingBecomesActive()
+  const plan = getActivePlan(state)
+  const stepId = plan.steps[1].step_id
+  const withEvidence = runtimeEvidence(state, { ref: 'batch_8', requirementIds: ['req_plates'], now: 1450 })
+  const runtimeClose = applyPlanningEvent(withEvidence, { type: PLANNING_EVENT.STEP_COMPLETED, now: 1500, source: 'runtime', plan_id: plan.plan_id, step_id: stepId })
+  assert.equal(runtimeClose, withEvidence, 'accepted evidence does not close a step that has no contract')
+  const semanticClaim = applyPlanningEvent(state, {
+    type: PLANNING_EVENT.STEP_COMPLETED, now: 1500, source: 'main_planner', plan_id: plan.plan_id, step_id: stepId,
+    semantic_claim: true, grounding_refs: ['obs_1'],
+  })
+  assert.equal(semanticClaim, state)
+  assert.equal(getActivePlan(state).execution.step_progress[stepId].status, 'active')
+})
+
+test('PLAN_COMMITTED refuses a draft whose active step is pending, and commits one whose later steps are pending', () => {
+  const pendingFirst = drafted(shelved(goalState()), { steps: [
+    { description: 'Smelt twenty iron plates', completion_mode: 'deterministic', contract_status: 'pending' },
+    { description: 'Craft a pickaxe', completion_mode: 'deterministic', completion_contract: GROUNDED_CONTRACT },
+  ] })
+  assert.equal(committed(pendingFirst), pendingFirst)
+  assert.equal(getActivePlan(pendingFirst).status, PLAN_STATUS.DRAFT)
+  const pendingLater = committed(drafted(shelved(goalState()), { steps: pendingSteps() }))
+  assert.equal(getActivePlan(pendingLater).status, PLAN_STATUS.COMMITTED)
+  assert.deepEqual(getActivePlan(pendingLater).steps.map(step => step.contract_status), ['bound', 'pending'])
+})
+
+test('batches against a pending step are ignored, and the prose-only ceiling skips it but still catches a prose step', () => {
+  const state = pendingBecomesActive()
+  const plan = getActivePlan(state)
+  const attempt = applyPlanningEvent(state, { type: PLANNING_EVENT.OPERATION_BATCH_ATTEMPTED, now: 1500, plan_id: plan.plan_id, step_id: plan.steps[1].step_id })
+  assert.equal(attempt, state)
+  // Force the counter past the ceiling by hand: a pending step is still not a prose-only deadlock.
+  const loaded = JSON.parse(JSON.stringify(serializePlanningState(state)))
+  loaded.plans[0].execution.step_progress[plan.steps[1].step_id].batches_attempted = PROSE_ONLY_STEP_OPERATION_CEILING + 5
+  assert.deepEqual(evaluateDeadlockSignals(restorePlanningState(loaded)).signals, [])
+  const prose = committed(drafted(shelved(goalState()), { steps: [{ description: 'Look around' }] }))
+  const proseLoaded = JSON.parse(JSON.stringify(serializePlanningState(prose)))
+  const proseStep = getActivePlan(prose).steps[0].step_id
+  proseLoaded.plans[0].execution.step_progress[proseStep].batches_attempted = PROSE_ONLY_STEP_OPERATION_CEILING
+  assert.equal(evaluateDeadlockSignals(restorePlanningState(proseLoaded)).signals[0]?.kind, DEADLOCK_SIGNAL_KIND.PROSE_ONLY_CEILING)
+})
+
+test('the Plan Tracker view shows contract_status and contract_binding without exposing anything mutable', () => {
+  const pendingView = planTrackerView(pendingBecomesActive())
+  assert.deepEqual(pendingView.steps.map(step => step.contract_status), ['bound', 'pending'])
+  assert.equal(pendingView.steps[1].completion_contract, null)
+  assert.equal(pendingView.steps[0].contract_binding, undefined)
+  const state = pendingBecomesActive()
+  const boundView = planTrackerView(applyPlanningEvent(state, bindEvent(state)))
+  assert.equal(boundView.steps[1].contract_status, 'bound')
+  assert.deepEqual(boundView.steps[1].contract_binding, { binding: 'just_in_time', request_id: 'req_contract_1', bound_at: 1600 })
+  assert.equal(Object.isFrozen(boundView.steps[1].contract_binding), true)
+})
