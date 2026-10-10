@@ -41,23 +41,35 @@ try {
     provider: async (messages, context) => {
       calls.push({ messages, controlProtocol: context.controlProtocol })
       assert.equal(context.controlProtocol, 'pursuit')
-      if (calls.length === 1) return { content: JSON.stringify({ observations: [{ name: 'getNearbyEntities', args: { radius: 128 } }] }) }
-      if (calls.length === 2) assert.match(messages[1].content, /invalid_decision_argument/)
+      if (calls.length === 1) return { content: JSON.stringify({
+        operations: [{ name: 'craft_item', args: { item_name: 'iron-gear-wheel', count: 1 } }],
+        observations: [{ name: 'getInventoryItems', args: {} }] }) }
+      if (calls.length === 2) {
+        assert.match(messages[1].content, /one_decision_kind_required/)
+        return { content: JSON.stringify({ observations: [{ name: 'getNearbyEntities', args: { radius: 128 } }] }) }
+      }
+      if (calls.length === 3) {
+        assert.match(messages[1].content, /radius must be an integer from 1 to 64/)
+        return { content: JSON.stringify({ observations: [{ name: 'getRecipeDetails', args: { item_or_recipe: 'iron-gear-wheel', requested_count: 1 } }] }) }
+      }
+      if (calls.length === 4) assert(JSON.parse(messages[1].content).recipeKnowledge.some(fact => fact.name === 'iron-gear-wheel' && fact.complete))
       return { content: JSON.stringify({ notes: 'Native hand crafting.', operations: [{ name: 'craft_item', args: { item_name: 'iron-gear-wheel', count: 1 } }] }) }
     } }
   const first = new PursuitRuntime(options)
   await first.request(JSON.stringify(goal(1)))
   await settle(first)
-  assert.equal(first.loop.state.budget.calls, 2)
+  assert.equal(first.loop.state.budget.calls, 4)
+  assert(first.loop.state.recipeKnowledge.some(fact => fact.name === 'iron-gear-wheel' && fact.historical))
+  assert.equal(first.loop.state.history[0].requested_actions[0].args.count, 1)
   const ordinal = first.loop.state.ordinal
   // Reload the on-disk campaign and dispatch a second goal against real global
   // native high-water state. Neither ordinal nor provider allowance can reset.
   const restarted = new PursuitRuntime(options)
   await restarted.request(JSON.stringify(goal(2)))
   await settle(restarted)
-  assert.equal(restarted.loop.state.budget.calls, 3)
+  assert.equal(restarted.loop.state.budget.calls, 5)
   assert.equal(restarted.loop.state.ordinal, ordinal + 1)
-  assert.equal(calls.length, 3)
+  assert.equal(calls.length, 5)
   const final = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; rcon.print(helpers.table_to_json({plates=a.get_item_count("iron-plate"),gears=a.get_item_count("iron-gear-wheel"),connected_players=#game.connected_players}))'))
   assert.equal(final.plates, 0)
   assert.equal(final.gears, 2)
@@ -74,7 +86,7 @@ try {
   } })
   await harvester.request(JSON.stringify(woodGoal))
   await settle(harvester)
-  assert.equal(harvester.loop.state.budget.calls, 4)
+  assert.equal(harvester.loop.state.budget.calls, 6)
   assert.equal(harvester.loop.state.ordinal, ordinal + 2)
   const naturalFinal = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; rcon.print(helpers.table_to_json({wood=a.get_item_count("wood"),connected_players=#game.connected_players,speed=game.speed}))'))
   assert(naturalFinal.wood >= naturalSetup.wood_before + 1)

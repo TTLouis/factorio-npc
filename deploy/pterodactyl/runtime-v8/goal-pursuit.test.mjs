@@ -285,6 +285,85 @@ test('native read memory retains earlier facts as historical, refreshes duplicat
   assert.equal(f.events.some(row => row.event === 'pursuit.observations_retained' && row.request_id), true)
 })
 
+test('retained mixed action/read decision is refused without effects and can correct within its original allowance', async () => {
+  let turn = 0, reads = 0
+  const f = fixture({ provider: async packet => {
+    if (++turn === 1) return { ...action, observations: [{ name: 'getInventoryItems', args: {} }] }
+    assert.match(packet.observations.at(-1).result, /one_decision_kind_required/)
+    return action
+  } })
+  f.adapter.observe = async () => { reads++; return '{}' }
+  await f.loop.wake('mixed')
+  assert.equal(reads, 0)
+  assert.equal(f.sent.length, 0)
+  assert.equal(f.loop.snapshot().status, 'active')
+  assert.equal(f.loop.snapshot().budget.calls, 1)
+  await f.loop.wake('corrected')
+  assert.equal(f.sent.length, 1)
+  assert.equal(f.loop.snapshot().budget.calls, 2)
+})
+
+test('native recipe rules and exact submitted quantities survive settlement without retaining mutable reads or replaying', async () => {
+  let turn = 0
+  const packets = []
+  const f = fixture({ provider: async packet => {
+    packets.push(packet)
+    if (++turn === 1) return { observations: [{ name: 'getRecipeDetails', args: { item_or_recipe: 'iron-plate' } }] }
+    return turn === 2 ? action : { pauseReason: 'test checkpoint' }
+  } })
+  f.adapter.observe = async () => JSON.stringify({ found: true, inventory: { 'iron-ore': 999 }, enabled: true,
+    recipes: [{ name: 'iron-plate', energy: 3.2, categories: ['smelting'], enabled: true,
+      ingredients: [{ name: 'iron-ore', amount: 1 }], products: [{ name: 'iron-plate', amount: 1 }],
+      crafting_machines: [{ name: 'stone-furnace' }] }] })
+  await f.loop.wake('read')
+  await f.loop.wake('act')
+  const pending = f.loop.snapshot().pending
+  assert.deepEqual(pending.requested_actions, f.sent[0].operations)
+  f.world.runtime.admission_journal = [{ ...pending, actor_id: actor.actor_id, epoch: actor.epoch,
+    generation: 1, operation_count: 1, state: 'completed', slots: [] }]
+  await f.loop.wake('settled')
+  const packet = packets.at(-1)
+  assert.deepEqual(packet.observations, [])
+  assert.equal(packet.recipeKnowledge[0].name, 'iron-plate')
+  assert.equal(packet.recipeKnowledge[0].complete, true)
+  assert.equal(packet.recipeKnowledge[0].historical, true)
+  assert.deepEqual(packet.recipeKnowledge[0].ingredients, [{ type: 'item', name: 'iron-ore', amount: 1 }])
+  assert.equal(JSON.stringify(packet.recipeKnowledge).includes('999'), false)
+  assert.equal(JSON.stringify(packet.recipeKnowledge).includes('enabled'), false)
+  assert.deepEqual(packet.receipts[0].requested_actions, f.sent[0].operations)
+  assert.equal(packet.receipts[0].verdict, 'admitted_completed')
+  assert.equal(f.sent.length, 1)
+  assert.ok(f.events.some(row => row.event === 'pursuit.recipe_knowledge_retained'
+    && row.reason === 'native_prototype_quantities_only' && row.request_id))
+  const restarted = new GoalPursuit({ state: f.loop.snapshot(), adapter: f.adapter, provider: async () => action, now: f.now })
+  assert.deepEqual(restarted.snapshot().recipeKnowledge, [])
+  assert.equal(restarted.snapshot().budget.calls, 3)
+})
+
+test('prototype knowledge refuses unreadable answers, preserves incomplete flags and remains bounded', async () => {
+  const f = fixture({ reply: { observations: [{ name: 'getRecipeDetails', args: { item_or_recipe: 'iron-plate' } }] } })
+  f.adapter.observe = async () => 'unreadable native text'
+  await f.loop.wake('read')
+  assert.deepEqual(f.loop.snapshot().recipeKnowledge, [])
+  f.adapter.observe = async () => JSON.stringify({ found: true, recipes: Array.from({ length: 40 }, (_, i) => ({
+    name: `recipe-${i}`, ingredients: Array.from({ length: 50 }, (_, j) => ({ name: `item-${j}`, amount: 1 })),
+    products: [{ name: `recipe-${i}`, amount: 1 }], crafting_machines: [] })) })
+  await f.loop.wake('read')
+  const knowledge = f.loop.snapshot().recipeKnowledge
+  assert.ok(knowledge.length > 0 && knowledge.length <= 32)
+  assert.ok(JSON.stringify(knowledge).length <= 16000)
+  assert.ok(knowledge.every(fact => fact.complete === false))
+  f.adapter.observe = async () => JSON.stringify({ found: true, recipes: [
+    { name: 'missing-ingredient-quantity', ingredients: [{ name: 'iron-ore' }], products: [{ name: 'iron-plate', amount: 1 }] },
+    { name: 'missing-product-quantity', ingredients: [{ name: 'iron-ore', amount: 1 }], products: [{ name: 'iron-plate' }] },
+    { name: 'invalid-probability', ingredients: [{ name: 'iron-ore', amount: 1 }], products: [{ name: 'iron-plate', amount: 1, probability: 2 }] },
+    { name: 'unreadable-probability', ingredients: [{ name: 'iron-ore', amount: 1 }], products: [{ name: 'iron-plate', amount: 1, probability: 'invalid' }] },
+    { name: 'null-probability', ingredients: [{ name: 'iron-ore', amount: 1 }], products: [{ name: 'iron-plate', amount: 1, independent_probability: null }] },
+  ] })
+  await f.loop.wake('malformed quantities')
+  assert.ok(f.loop.snapshot().recipeKnowledge.slice(-5).every(fact => fact.complete === false))
+})
+
 test('completion requires the trusted adapter to read and satisfy the owner predicate', async () => {
   const f = fixture()
   f.adapter.verify = async () => ({ read: true, satisfied: true, redProduced: 75, redConsumed: 75 })

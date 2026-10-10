@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { isObservationToolName, parseOperation, toolCommand, PolicyError } from './structured-policy.mjs'
 import { actorChanged } from './supervisor-adapter.mjs'
 import { batchWatermark, buildPendingOperation, reconcilePendingOperation, RECONCILE_VERDICT } from './operation-reconciliation.mjs'
+import { recipeFactsFromDetails } from './handoff-packet.mjs'
 
 // Cancellation seals the queue, but can leave partial physical effects. Hold
 // its identity until those effects are reconciled; never authorize blind replay.
@@ -21,6 +22,30 @@ function observationText(raw) {
   try { text = JSON.stringify(JSON.parse(text)) } catch { /* Native serpent text stays verbatim. */ }
   return text.length <= 8000 ? text : `${text.slice(0, 7900)}\n[Native observation truncated; request a narrower read for omitted facts.]`
 }
+function rememberRecipeKnowledge(previous, read, raw, observedAt) {
+  if (read.name !== 'getRecipeDetails') return previous
+  let parsed
+  try { parsed = JSON.parse(String(raw)) } catch { return previous }
+  // Extract prototype quantities only. Inventory, recipe enablement and exact
+  // entity state never survive the action boundary through this cache.
+  const quantity = value => Number.isFinite(value) && value >= 0
+  const fresh = recipeFactsFromDetails(parsed).map(fact => {
+    const rawRecipe = Array.isArray(parsed.recipes) ? parsed.recipes.find(row => row?.name === fact.name) : undefined
+    // Normalization drops unreadable optional fields. Check explicit native
+    // probability fields before that loss so unknown yield stays incomplete.
+    const probabilitiesReadable = Array.isArray(rawRecipe?.products) && rawRecipe.products.every(item =>
+      ['probability', 'independent_probability'].every(key => !Object.hasOwn(item ?? {}, key)
+        || (quantity(item[key]) && item[key] <= 1)))
+    return { ...fact,
+      complete: fact.complete && probabilitiesReadable && fact.ingredients.every(item => quantity(item.amount))
+        && fact.products.every(item => quantity(item.amount) || (quantity(item.amount_min) && quantity(item.amount_max) && item.amount_max >= item.amount_min)),
+      observed_at_ms: observedAt, historical: true }
+  })
+  const names = new Set(fresh.map(fact => fact.name))
+  const rows = [...previous.filter(fact => !names.has(fact.name)), ...fresh]
+  while (rows.length > 32 || JSON.stringify(rows).length > 16000) rows.shift()
+  return rows
+}
 
 // Separate protocol for the experiment: notes are revisable, dispatched actions
 // are not. Adapters own native physical/permission admission, durable storage,
@@ -33,7 +58,7 @@ export function pursuitDecision(raw) {
   const observations = raw.observations ?? []
   check(Array.isArray(operations) && operations.length <= 16, 'operations_limit')
   check(Array.isArray(observations) && observations.length <= 4, 'observations_limit')
-  check(!(operations.length && observations.length), 'one_decision_kind_required')
+  if (operations.length && observations.length) throw new PolicyError('one_decision_kind_required: submit actions or observations, then inspect after exact action settlement')
   check(raw.pauseReason === undefined || (typeof raw.pauseReason === 'string' && raw.pauseReason.length <= 300 && raw.pauseReason.trim()), 'pause_reason_required')
   check(!raw.pauseReason || (!operations.length && !observations.length), 'pause_cannot_dispatch')
   return {
@@ -83,6 +108,7 @@ export class GoalPursuit {
     // Reads from a previous process are historical evidence, not a current
     // observation. A restart must obtain fresh targets through bounded tools.
     this.state.observations = []
+    this.state.recipeKnowledge = [] // A new process must read its deployed prototypes.
     this.adapter = adapter
     this.provider = provider
     this.now = now
@@ -168,7 +194,7 @@ export class GoalPursuit {
       // of receipt history. Strategy is explicitly non-authoritative.
       const packet = { objective: this.state.objective, predicate: this.state.predicate,
         notes: this.state.notes, actor: this.state.actor, world: world.observation,
-        receipts: this.state.history, observations: this.state.observations, verification,
+        receipts: this.state.history, observations: this.state.observations, recipeKnowledge: this.state.recipeKnowledge, verification,
         remainingCalls: budget.maxCalls - budget.calls }
       const inputChars = this.provider.inputChars ? this.provider.inputChars(clone(packet)) : JSON.stringify(packet).length
       check(Number.isSafeInteger(inputChars) && inputChars > 0, 'provider_input_accounting_invalid')
@@ -221,13 +247,18 @@ export class GoalPursuit {
         const observations = []
         for (const read of decision.observations) {
           await this.fence(generation)
-          const result = observationText(await this.adapter.observe(clone(read)))
+          const raw = await this.adapter.observe(clone(read))
           await this.fence(generation)
-          observations.push({ ...read, result, observed_at_ms: this.now(), historical: false })
+          const observedAt = this.now()
+          this.state.recipeKnowledge = rememberRecipeKnowledge(this.state.recipeKnowledge, read, raw, observedAt)
+          observations.push({ ...read, result: observationText(raw), observed_at_ms: observedAt, historical: false })
         }
         this.state.observations = rememberObservations(this.state.observations, observations)
         await this.save()
         await this.event('pursuit.observations_retained', 'bounded_native_read_memory', { fresh: observations.length, retained: this.state.observations.length })
+        if (decision.observations.some(read => read.name === 'getRecipeDetails')) {
+          await this.event('pursuit.recipe_knowledge_retained', 'native_prototype_quantities_only', { retained: this.state.recipeKnowledge.length })
+        }
         return this.snapshot() // Driver wakes on these newly completed reads.
       }
       if (!decision.operations.length) return this.pause('provider_no_progress')
@@ -247,6 +278,9 @@ export class GoalPursuit {
         operationKey: `${this.state.request_id}/batch_${ordinal}`, ordinal, protocolVersion: 2,
         operations: decision.operations, goalId: this.state.request_id, actor: world.actor,
         baseline: batchWatermark(world.runtime), now: this.now() })
+      // Historical action arguments explain what exact receipts settled. They
+      // are never a replay source; only the fresh validated decision dispatches.
+      this.state.pending.requested_actions = clone(decision.operations)
       await this.save()
       await this.event('pursuit.dispatch_reserved', 'native_admission_passed', { operation_key: this.state.pending.operation_key, signature: this.state.pending.signature })
       await this.fence(generation)
