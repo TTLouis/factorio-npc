@@ -5,13 +5,18 @@ $evidence = Join-Path $repo 'test-results/goal-pursuit-2026-10-10/live'
 if ($Container -ne 'goal-pursuit-live-20261010') { throw 'Only this experiment container is authorized.' }
 $mount = (& docker inspect --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}' $Container).Trim()
 if ($LASTEXITCODE -ne 0 -or $mount.Replace('\','/').TrimEnd('/') -ne (Join-Path $evidence 'data').Replace('\','/').TrimEnd('/')) { throw 'Isolated data mount mismatch.' }
-if (Test-Path -LiteralPath (Join-Path $evidence 'watchdog.json')) { throw 'This single trial has already been launched.' }
+if (Test-Path -LiteralPath (Join-Path $evidence 'watchdog-started.json')) { throw 'This single trial has already been launched.' }
+$releaseStart = (& docker exec $Container readlink -f /opt/sgluna/start-sgluna.sh).Trim()
+if ($LASTEXITCODE -ne 0 -or $releaseStart -notmatch '^/opt/sgluna/\.sgluna/releases/[a-zA-Z0-9_-]+/start-sgluna\.sh$') { throw 'Cannot identify pinned runtime binary.' }
+$nodeBinary = $releaseStart.Replace('/start-sgluna.sh', '/node/bin/node')
+$marker = [System.IO.File]::Open((Join-Path $evidence 'watchdog-started.json'), [System.IO.FileMode]::CreateNew)
+try { $marker.Write([System.Text.Encoding]::UTF8.GetBytes('{"single_trial":true}'), 0, 21); $marker.Flush($true) } finally { $marker.Dispose() }
 $clock = [System.Diagnostics.Stopwatch]::StartNew()
 $limitMs = 1190000 # 19m50s; reserve ten seconds for stop command latency.
 $process = $null
 $reason = 'controller_exit'
 try {
-    $process = Start-Process -FilePath 'docker' -WindowStyle Hidden -PassThru -ArgumentList @('exec', $Container, '/opt/sgluna/node/bin/node', '/e2e/pursuit_live.mjs', '--go') -RedirectStandardOutput (Join-Path $evidence 'controller.log') -RedirectStandardError (Join-Path $evidence 'controller-error.log')
+    $process = Start-Process -FilePath 'docker' -WindowStyle Hidden -PassThru -ArgumentList @('exec', $Container, $nodeBinary, '/e2e/pursuit_live.mjs', '--go') -RedirectStandardOutput (Join-Path $evidence 'controller.log') -RedirectStandardError (Join-Path $evidence 'controller-error.log')
     while (-not $process.HasExited -and $clock.ElapsedMilliseconds -lt $limitMs) { Start-Sleep -Milliseconds 500; $process.Refresh() }
     if (-not $process.HasExited) { $reason = 'external_wall_limit' }
 } finally {
