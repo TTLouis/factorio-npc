@@ -349,6 +349,37 @@ describe('operation_preflight wiring (autorio_preflight.operation)', () => {
     expect(scan).not.toHaveBeenCalled()
   })
 
+  it('refuses exact mining beyond a finite tile amount before dispatch and reports the observed limit', () => {
+    ;(globalThis as any).prototypes.entity['iron-ore'] = { type: 'resource', infinite_resource: false }
+    const source = { valid: true, name: 'iron-ore', amount: 40, position: { x: -23.5, y: -68.5 } }
+    const scan = vi.fn(() => [source])
+    ;(held.actor as any).surface.find_entities_filtered = scan
+    const args = { resource_name: 'iron-ore', x: -23.5, y: -68.5, count: 50 }
+    expect(preflight('mine_resource_at', args)).toMatchObject({ ok: false, code: 'resource_source_insufficient',
+      resource_target: { amount: 40, requested_count: 50, position: source.position, infinite: false } })
+    expect(scan).toHaveBeenCalledWith(expect.objectContaining({ position: source.position, radius: 0.25, limit: 1, type: 'resource' }))
+    expect(preflight('mine_resource_at', { ...args, count: 40 })).toMatchObject({ ok: true, resource_target: { amount: 40 } })
+    ;(globalThis as any).prototypes.entity['iron-ore'].infinite_resource = true
+    expect(preflight('mine_resource_at', args)).toMatchObject({ ok: true, resource_target: { infinite: true } })
+  })
+
+  it('refuses missing or depleted exact sources and malformed coordinates or counts', () => {
+    ;(globalThis as any).prototypes.entity['iron-ore'] = { type: 'resource' }
+    const source = { valid: true, amount: 0, position: { x: 1.5, y: 2.5 } }
+    const scan = vi.fn(() => [source])
+    ;(held.actor as any).surface.find_entities_filtered = scan
+    const args = { resource_name: 'iron-ore', x: 1.5, y: 2.5, count: 1 }
+    expect(preflight('mine_resource_at', args)).toMatchObject({ ok: false, code: 'resource_source_not_found' })
+    scan.mockReturnValue([])
+    expect(preflight('mine_resource_at', args)).toMatchObject({ ok: false, code: 'resource_source_not_found' })
+    scan.mockClear()
+    expect(preflight('mine_resource_at', { ...args, x: Number.NaN })).toMatchObject({ ok: false, code: 'invalid_resource_position' })
+    expect(preflight('mine_resource_at', { ...args, y: Number.POSITIVE_INFINITY })).toMatchObject({ ok: false, code: 'invalid_resource_position' })
+    expect(preflight('mine_resource_at', { ...args, count: 0 })).toMatchObject({ ok: false, code: 'invalid_resource_count' })
+    expect(preflight('mine_resource_at', { ...args, count: 1.5 })).toMatchObject({ ok: false, code: 'invalid_resource_count' })
+    expect(scan).not.toHaveBeenCalled()
+  })
+
   it('keeps the exact-target identity fields on accepted transfers and adds the counts', () => {
     current_target = exact(15)
 

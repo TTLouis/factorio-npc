@@ -103,6 +103,13 @@ try {
   // declared; the runtime must mine the exact ore without harvesting the tree.
   const overlapSetup = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local s=a.surface; local e=s.create_entity{name="copper-ore",position={math.floor(a.position.x)+1.5,math.floor(a.position.y)+0.5},amount=10}; assert(e); local t=s.create_entity{name="tree-05",position={e.position.x-0.0625,e.position.y+1.9375},force="neutral"}; assert(t); storage.pursuit_overlap_resource=e; storage.pursuit_overlap_tree=t; a.update_selected_entity(e.position); rcon.print(helpers.table_to_json({position=e.position,amount=e.amount,centre_selects_tree=a.selected==t,copper=a.get_item_count("copper-ore"),wood=a.get_item_count("wood")}))'))
   assert.equal(overlapSetup.centre_selects_tree, true)
+  const exactAmountRefusal = JSON.parse(await rcon.command(`/silent-command local e=storage.pursuit_overlap_resource; local before=remote.call("autorio_operations","status"); local result=remote.call("autorio_preflight","operation","mine_resource_at",{resource_name="copper-ore",x=e.position.x,y=e.position.y,count=e.amount+1}); local after=remote.call("autorio_operations","status"); rcon.print(helpers.table_to_json({result=result,before=before,after=after,amount=e.amount}))`))
+  assert.equal(exactAmountRefusal.result.ok, false)
+  assert.equal(exactAmountRefusal.result.code, 'resource_source_insufficient')
+  assert.equal(exactAmountRefusal.result.resource_target.amount, overlapSetup.amount)
+  assert.equal(exactAmountRefusal.amount, overlapSetup.amount)
+  assert.equal(exactAmountRefusal.before.queue_length, exactAmountRefusal.after.queue_length)
+  assert.equal(exactAmountRefusal.before.task_state, exactAmountRefusal.after.task_state)
   const overlapGoal = { objective: 'Mine one exact copper ore under an overlapping tree selection box.', predicate: {
     scope: 'finite', summary: 'Gain one native copper ore.', doneWhen: [{ kind: 'inventory_count', item_name: 'copper-ore', minimum: overlapSetup.copper + 1 }] } }
   const overlapMiner = new PursuitRuntime({ ...options, provider: async (_messages, context) => {
@@ -122,7 +129,7 @@ try {
   assert.equal(overlapFinal.humans, 0)
   assert.equal(overlapFinal.speed, 1)
   await fsp.writeFile(path.join(results, 'pursuit-evidence.json'), JSON.stringify({ setup, final, calls: calls.length,
-    ordinal: overlapMiner.loop.state.ordinal, state: overlapMiner.loop.snapshot(), missingSource, naturalSetup, naturalFinal, overlapSetup, overlapFinal, commands }, null, 2))
+    ordinal: overlapMiner.loop.state.ordinal, state: overlapMiner.loop.snapshot(), missingSource, naturalSetup, naturalFinal, overlapSetup, exactAmountRefusal, overlapFinal, commands }, null, 2))
   console.log('PASS pursuit: native hand-craft receipts, zero humans, persistent campaign and cross-goal ordinals')
 }
 finally { connection.close() }

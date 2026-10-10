@@ -367,12 +367,17 @@ function operation_preflight(name: string, args: Record<string, any>) {
       return accept({ field: 'resource_name', identity: resource_name, expected_type: 'resource', observed_type: prototype.type,
         resource_search: { radius, position: source.position, amount: source.amount } })
     }
-    return accept({
-      field: 'resource_name',
-      identity: resource_name,
-      expected_type: 'resource',
-      observed_type: prototype.type,
-    })
+    if (!actor || !actor.is_valid) return reject('no_actor')
+    const x = args.x, y = args.y, count = args.count ?? 1
+    if (typeof x !== 'number' || typeof y !== 'number' || x !== x || y !== y || math.abs(x) === math.huge || math.abs(y) === math.huge) {
+      return reject('invalid_resource_position')
+    }
+    if (typeof count !== 'number' || count !== math.floor(count) || count < 1 || count === math.huge) return reject('invalid_resource_count')
+    const source = find_world_entities(actor.surface, { position: { x, y }, radius: 0.25, name: resource_name, type: 'resource', limit: 1 })[0]
+    if (!source || !source.valid || !(source.amount > 0)) return reject('resource_source_not_found', { field: 'resource_name', identity: resource_name, position: { x, y } })
+    const resource_target = { position: source.position, amount: source.amount, requested_count: count, infinite: prototype.infinite_resource === true }
+    if (!resource_target.infinite && count > source.amount) return reject('resource_source_insufficient', { field: 'resource_name', identity: resource_name, resource_target })
+    return accept({ field: 'resource_name', identity: resource_name, expected_type: 'resource', observed_type: prototype.type, resource_target })
   }
 
   if (name === 'place_entity' || name === 'mine_entity' || name === 'walk_to_entity') {
