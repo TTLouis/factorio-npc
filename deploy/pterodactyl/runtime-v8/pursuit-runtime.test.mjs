@@ -65,6 +65,7 @@ async function fixture(t, replies = [action]) {
 
 test('production adapter dispatches the exact persisted journal identity; receipt poll spends no extra calls', async t => {
   const f = await fixture(t)
+  f.runtime.actor = { actor_id: f.actor.actor_id, position: { x: 11, y: -3 } }
   await f.agent.request(goal.objective, { sender: 'owner' })
   const stored = JSON.parse(await fsp.readFile(f.options.stateFile))
   assert.equal(stored.current.pending.protocol_version, 2)
@@ -74,6 +75,7 @@ test('production adapter dispatches the exact persisted journal identity; receip
   assert.equal(f.requests[0].context.controlProtocol, 'pursuit')
   assert.equal(f.requests[0].context.allowTools, false)
   assert.match(JSON.parse(f.requests[0].messages[1].content).world.inventory, /name = "copper-ore"/)
+  assert.deepEqual(JSON.parse(f.requests[0].messages[1].content).world.actor_position, { x: 11, y: -3 })
   assert.ok(stored.budget.inputChars >= JSON.stringify(f.requests[0].messages).length)
   await f.agent.pollPursuit()
   assert.equal(f.requests.length, 1)

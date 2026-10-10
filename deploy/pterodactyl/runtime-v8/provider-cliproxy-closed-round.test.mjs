@@ -17,7 +17,7 @@ function gateway(captured, decision = plan) {
     const body = JSON.parse(options.body)
     captured.push(body)
     const message = { role: 'assistant', content: JSON.stringify(decision) }
-    if (body.tool_choice !== 'none' && body.tool_choice?.function?.name !== 'submitPursuitDecision') message.images = [{ type: 'image_url', image_url: { url: `data:image/png;base64,${'A'.repeat(271137)}` } }]
+    if (body.tool_choice !== 'none' && !(body.tools?.length === 1 && body.tools[0].function?.name === 'submitPursuitDecision')) message.images = [{ type: 'image_url', image_url: { url: `data:image/png;base64,${'A'.repeat(271137)}` } }]
     return new Response(JSON.stringify({ id: 'recorded-wire-shape', model: config.model, choices: [{ finish_reason: 'stop', message }] }))
   }
 }
@@ -31,7 +31,8 @@ test('CLI proxy pursuit exposes only the bounded decision tool without legacy pl
   const reply = await providerRequest(config, messages, { controlProtocol: 'pursuit', allowTools: false,
     fetchImpl: gateway(captured, decision), promptTraceFile: traceFile, requestId: 'req_pursuit_proxy' })
   assert.deepEqual(JSON.parse(reply.content), decision)
-  assert.deepEqual(captured[0].tool_choice, { type: 'function', function: { name: 'submitPursuitDecision' } })
+  assert.equal(captured[0].tool_choice, 'auto')
+  assert.equal(captured[0].reasoning_effort, 'medium')
   assert.equal(captured[0].tools.length, 1)
   const schema = captured[0].tools[0].function.parameters.properties.decision
   assert.equal(schema.properties.observations.minItems, 1)
@@ -41,6 +42,7 @@ test('CLI proxy pursuit exposes only the bounded decision tool without legacy pl
   assert.equal(contract.request_id, 'req_pursuit_proxy')
   assert.equal(contract.reason, 'local_openai_pursuit_bounded_decision_tool')
   assert.equal(contract.response_format, 'unspecified')
+  assert.equal(contract.reasoning_effort, 'medium')
   assert.deepEqual(contract.allowed_decision_fields, ['notes', 'operations', 'observations', 'pauseReason'])
   assert.equal(trace.some(row => row.event === 'provider.control_output_contract'), false)
 })

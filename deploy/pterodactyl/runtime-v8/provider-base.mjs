@@ -1441,7 +1441,8 @@ export async function providerRequest(config, messages, {
   const pursuitClosedTools = pursuit && capability.id === 'local' && capability.model_family === 'openai-gpt'
   if (pursuitClosedTools) {
     body.tools = [pursuitDecisionToolDefinition]
-    body.tool_choice = { type: 'function', function: { name: 'submitPursuitDecision' } }
+    body.tool_choice = 'auto'
+    body.reasoning_effort = 'medium'
   }
   applyRequestBodyPatch(body, requestBodyPatch, capability)
   const requestedOutputCap = body[capability.token_field]
@@ -1479,6 +1480,7 @@ export async function providerRequest(config, messages, {
       reason: 'local_openai_pursuit_bounded_decision_tool',
       tool_choice: body.tool_choice,
       response_format: body.response_format?.type ?? 'unspecified',
+      reasoning_effort: body.reasoning_effort,
       allowed_decision_fields: ['notes', 'operations', 'observations', 'pauseReason'],
     }, traceOptions)
   }
