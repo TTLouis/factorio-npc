@@ -95,6 +95,7 @@ export interface PlayerParametersHarvestProduct {
   requested_count: number
   search_radius: number
   source_names: string[]
+  natural_only?: boolean
   inventory_count_before: number
   verified_gain: number
   target?: LuaEntity | null

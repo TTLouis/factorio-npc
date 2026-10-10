@@ -60,8 +60,26 @@ try {
   assert.equal(final.plates, 0)
   assert.equal(final.gears, 2)
   assert.equal(final.connected_players, 0)
+  // Independent declared engine fixture: a natural tree, mined by the real
+  // standalone actor. Production trials never create these fixture sources.
+  const naturalSetup = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local s=a.surface; local p=s.find_non_colliding_position("tree-01",{a.position.x+2,a.position.y},8,0.5); assert(p); local e=s.create_entity{name="tree-01",position=p,force="neutral"}; assert(e); local ok,u=pcall(function() return e.last_user end); rcon.print(helpers.table_to_json({created=true,kind=e.type,force=e.force.name,last_user_readable=ok,has_last_user=u~=nil,wood_before=a.get_item_count("wood")}))'))
+  assert(naturalSetup.last_user_readable && !naturalSetup.has_last_user)
+  const woodGoal = { objective: 'Harvest and hold one wood from an unowned natural source.', predicate: {
+    scope: 'finite', summary: 'Hold at least one wood.', doneWhen: [{ kind: 'inventory_count', item_name: 'wood', minimum: naturalSetup.wood_before + 1 }] } }
+  const harvester = new PursuitRuntime({ ...options, provider: async (_messages, context) => {
+    calls.push({ controlProtocol: context.controlProtocol, operation: 'harvest_product' })
+    return { content: JSON.stringify({ operations: [{ name: 'harvest_product', args: { product_name: 'wood', count: 1, search_radius: 64 } }] }) }
+  } })
+  await harvester.request(JSON.stringify(woodGoal))
+  await settle(harvester)
+  assert.equal(harvester.loop.state.budget.calls, 3)
+  assert.equal(harvester.loop.state.ordinal, ordinal + 2)
+  const naturalFinal = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; rcon.print(helpers.table_to_json({wood=a.get_item_count("wood"),connected_players=#game.connected_players,speed=game.speed}))'))
+  assert(naturalFinal.wood >= naturalSetup.wood_before + 1)
+  assert.equal(naturalFinal.connected_players, 0)
+  assert.equal(naturalFinal.speed, 1)
   await fsp.writeFile(path.join(results, 'pursuit-evidence.json'), JSON.stringify({ setup, final, calls: calls.length,
-    ordinal: restarted.loop.state.ordinal, state: restarted.loop.snapshot(), commands }, null, 2))
+    ordinal: harvester.loop.state.ordinal, state: harvester.loop.snapshot(), naturalSetup, naturalFinal, commands }, null, 2))
   console.log('PASS pursuit: native hand-craft receipts, zero humans, persistent campaign and cross-goal ordinals')
 }
 finally { connection.close() }

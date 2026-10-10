@@ -1,6 +1,6 @@
 import type { ControlledActor } from './actors/types'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { new_harvest_controller } from './harvest'
+import { new_harvest_controller, is_unowned_natural_harvest_source } from './harvest'
 import { new_task_manager } from './task_manager'
 import { TaskStates } from './types'
 
@@ -25,6 +25,7 @@ function mineable(name: string, type: string, product: string, amount: number, x
     type,
     position: { x, y: 0 },
     prototype,
+    force: { name: 'neutral' },
   }
   return { prototype, entity }
 }
@@ -126,6 +127,35 @@ beforeEach(() => {
 })
 
 describe('product-oriented finite harvesting', () => {
+  it('natural-only harvesting skips human-touched trees and rechecks ownership before mining', () => {
+    const f = fixture()
+    f.treeA.last_user = { valid: true, name: 'owner', index: 1 }
+    // Keep the eligible tree distinct from the rock at the same fixture x.
+    // Exact native selection must resolve to the tree, rather than a neighbour.
+    f.treeB.position.y = 0.5
+    expect(f.harvest.submit('wood', 1, 64, true)[0]).toBe(true)
+    f.harvest.tick(f.actor)
+    expect(f.manager.player_state.parameters_harvest_product?.target).toBe(f.treeB)
+    expect(f.actor.set_mining_state).not.toHaveBeenCalledWith({ mining: true, position: f.treeA.position })
+    f.treeB.force = { name: 'player' }
+    f.harvest.tick(f.actor)
+    expect(f.actor.set_mining_state).toHaveBeenLastCalledWith({ mining: false })
+    expect(f.manager.get_status_snapshot().last_cancelled_batch?.reason).toBe('harvest:no_target')
+  })
+
+  it('natural-only source guards refuse buildings, non-neutral assets and unreadable provenance', () => {
+    const f = fixture()
+    expect(is_unowned_natural_harvest_source(f.treeA)).toBe(true)
+    f.treeA.prototype.is_building = true
+    expect(is_unowned_natural_harvest_source(f.treeA)).toBe(false)
+    f.treeA.prototype.is_building = false
+    f.treeA.force = { name: 'player' }
+    expect(is_unowned_natural_harvest_source(f.treeA)).toBe(false)
+    f.treeA.force = { name: 'neutral' }
+    ;(globalThis as any).pcall = () => [false, 'unsupported property']
+    try { expect(is_unowned_natural_harvest_source(f.treeA)).toBe(false) }
+    finally { delete (globalThis as any).pcall }
+  })
   it('stops after one entity when its verified stone gain exceeds the requested quantity', () => {
     const f = fixture()
     expect(f.harvest.submit('stone', 6, 64)[0]).toBe(true)

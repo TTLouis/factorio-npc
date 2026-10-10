@@ -28,7 +28,7 @@ import { new_corpse_recovery_controller, note_npc_corpse, note_npc_death } from 
 import { entity_last_user } from './entity_provenance'
 import { entity_reference_hint, resolve_exact_entity } from './entity_reference'
 import { new_follow_controller } from './follow'
-import { new_harvest_controller } from './harvest'
+import { new_harvest_controller, natural_harvest_source_names } from './harvest'
 import { new_interaction_recovery } from './interaction_recovery'
 import { create_knowledge_remote_interface } from './knowledge'
 import { new_navigation_controller } from './navigation'
@@ -242,6 +242,12 @@ function operation_preflight(name: string, args: Record<string, any>) {
   if (name === 'research_technology') {
     return research_operation_preflight(actor, args.technology_name)
   }
+  if (name === 'harvest_natural_product') {
+    if (!actor || !actor.is_valid) return reject('no_actor')
+    if (typeof args.product_name !== 'string' || !prototypes.item[args.product_name]) return reject('unknown_prototype')
+    const sources = natural_harvest_source_names(args.product_name)
+    return sources.length > 0 ? accept({ natural_only: true, source_names: sources }) : reject('no_natural_harvest_source')
+  }
 
   let exact_target: Record<string, unknown> | undefined
   const exact_unit_operations = [
@@ -450,6 +456,11 @@ remote.add_interface('autorio_operations', {
   harvest_product: (product_name: string, count: number = 1, search_radius: number = 256): [boolean, string] => {
     const result = harvest_controller.submit(product_name, count, search_radius)
     if (result[0]) log(`[AUTORIO] New harvest_product task: ${product_name} +${count}, radius=${search_radius}`)
+    return result
+  },
+  harvest_natural_product: (product_name: string, count: number = 1, search_radius: number = 256): [boolean, string] => {
+    const result = harvest_controller.submit(product_name, count, search_radius, true)
+    if (result[0]) log(`[AUTORIO] Natural harvest task: ${product_name} +${count}, radius=${search_radius}`)
     return result
   },
   clear_construction_area: (x: number, y: number, width: number, height: number): [boolean, string] => {

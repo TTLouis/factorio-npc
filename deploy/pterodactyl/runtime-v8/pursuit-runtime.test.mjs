@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { PursuitRuntime, pursuitProvider, pursuitIntake, pursuitMessages } from './pursuit-runtime.mjs'
+import { PursuitRuntime, pursuitProvider, pursuitIntake, pursuitMessages, renderPursuitOperation } from './pursuit-runtime.mjs'
 import { providerRequest } from './provider.mjs'
 
 const goal = { objective: 'Gather ten copper ore.', predicate: { scope: 'finite', summary: 'Hold ten copper ore.',
@@ -112,6 +112,39 @@ test('native reservations and human target provenance refuse mutations determini
   assert.equal((await f.agent.admit([{ name: 'mine_entity_exact', args: { unit_number: 27 } }], f.agent.loop.state.actor)).code, 'protected_entity')
   assert.equal(f.mutations.length, 0)
   assert.equal((await f.agent.admit([{ name: 'harvest_product', args: { product_name: 'wooden-chest', count: 1 } }], f.agent.loop.state.actor)).ok, false)
+})
+
+test('pursuit harvest routes only through the positive natural-source guard and retains correlated identity', async t => {
+  const f = await fixture(t, [{ operations: [{ name: 'harvest_product', args: { product_name: 'wood', count: 1 } }] }])
+  const command = f.options.rcon.command
+  f.options.rcon.command = text => text.includes('autorio_preflight')
+    ? JSON.stringify({ ok: true, natural_only: true, source_names: ['tree-01'] }) : command(text)
+  await f.agent.request(goal.objective)
+  assert.equal(f.mutations.length, 1)
+  assert.match(f.mutations[0], /harvest_natural_product/)
+  assert.equal(f.agent.loop.state.pending.operations[0].name, 'harvest_product')
+  const rows = (await fsp.readFile(f.options.traceFile, 'utf8')).trim().split('\n').map(JSON.parse)
+  const admitted = rows.find(row => row.event === 'pursuit.natural_harvest_admitted')
+  assert.equal(admitted.request_id, f.agent.loop.state.request_id)
+  assert.equal(admitted.reason, 'native_natural_source_guard_verified')
+  assert.throws(() => renderPursuitOperation({ name: 'harvest_product', args: { product_name: 'wood', count: '1);evil()' } }))
+})
+
+test('pursuit harvest refuses legacy-only mod preflight and active reservations', async t => {
+  const f = await fixture(t, [{ operations: [{ name: 'harvest_product', args: { product_name: 'wood', count: 1 } }] }, { pauseReason: 'Fixture exhausted.' }])
+  await f.agent.request(goal.objective)
+  assert.equal(f.mutations.length, 0)
+  const harvest = [{ name: 'harvest_product', args: { product_name: 'wood', count: 1, search_radius: 256 } }]
+  assert.equal((await f.agent.admit(harvest, f.agent.loop.state.actor)).code, 'pursuit_natural_guard_unavailable')
+  f.agent.memory.recordReservation('unused', { unit_number: 25, reserved_by: 'owner' })
+  assert.equal((await f.agent.admit(harvest, f.agent.loop.state.actor)).code, 'pursuit_harvest_reserved_world')
+})
+
+test('pursuit explains external JSON execution despite provider tool_choice none', () => {
+  const prompt = pursuitMessages({ objective: 'Research green science.' })[0].content
+  assert.match(prompt, /Native Factorio actions ARE available/)
+  assert.match(prompt, /does not disable operations or observations/)
+  assert.match(prompt, /name the blocker and supporting observation/)
 })
 
 test('two dispatched owner goals share the native ordinal and cumulative campaign', async t => {

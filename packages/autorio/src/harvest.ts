@@ -16,6 +16,25 @@ const MAX_HARVEST_SEARCH_RADIUS = 4096
 const INITIAL_SEARCH_RADIUS = 8
 const SEARCH_RESULT_LIMIT = 32
 
+export function natural_harvest_source_names(product_name: string) {
+  return harvest_source_prototype_names(product_name).filter(name => {
+    const prototype = prototypes.entity[name]
+    return (prototype.type === 'tree' || prototype.type === 'simple-entity') && !prototype.is_building
+  })
+}
+
+// Positive native provenance, checked both during selection and every tick.
+// Unsupported last_user reads fail closed instead of implying map ownership.
+export function is_unowned_natural_harvest_source(entity: LuaEntity | null | undefined) {
+  if (!entity || !entity.valid || (entity.type !== 'tree' && entity.type !== 'simple-entity')
+    || entity.prototype.is_building || entity.force?.name !== 'neutral') return false
+  if (typeof pcall === 'function') {
+    const [ok, user] = pcall(() => entity.last_user)
+    return ok && !user
+  }
+  return !entity.last_user
+}
+
 function valid_integer(value: number, min: number, max: number) {
   return typeof value === 'number' && value === math.floor(value) && value >= min && value <= max
 }
@@ -47,6 +66,7 @@ function nearest_entity(actor: ControlledActor, entities: LuaEntity[]) {
 
 function source_is_compatible(task: PlayerParametersHarvestProduct, entity: LuaEntity | null | undefined) {
   if (!entity || !entity.valid || entity.type === 'resource') return false
+  if (task.natural_only && !is_unowned_natural_harvest_source(entity)) return false
   for (const name of task.source_names) {
     if (entity.name === name) return true
   }
@@ -62,7 +82,7 @@ function find_source(actor: ControlledActor, task: PlayerParametersHarvestProduc
       name: task.source_names,
       limit: SEARCH_RESULT_LIMIT,
     })
-    const nearest = nearest_entity(actor, matches)
+    const nearest = nearest_entity(actor, task.natural_only ? matches.filter(is_unowned_natural_harvest_source) : matches)
     if (nearest) return nearest
     if (radius === task.search_radius) break
     radius = math.min(task.search_radius, radius * 2)
@@ -126,6 +146,7 @@ export function new_harvest_controller(
     product_name: string,
     count: number = 1,
     search_radius: number = DEFAULT_HARVEST_SEARCH_RADIUS,
+    natural_only: boolean = false,
   ): [boolean, string] {
     if (typeof product_name !== 'string' || product_name.length < 1 || product_name.length > 200 || !prototypes.item[product_name]) {
       return [false, 'product_name must identify a current-game item prototype']
@@ -143,7 +164,7 @@ export function new_harvest_controller(
       return [false, 'controlled actor is unavailable']
     }
 
-    const source_names = harvest_source_prototype_names(product_name)
+    const source_names = natural_only ? natural_harvest_source_names(product_name) : harvest_source_prototype_names(product_name)
     if (source_names.length === 0) {
       return [false, `no non-resource mineable prototypes currently yield ${product_name}`]
     }
@@ -154,6 +175,7 @@ export function new_harvest_controller(
       requested_count: count,
       search_radius,
       source_names,
+      natural_only,
       inventory_count_before: inventory_count(actor, product_name),
       verified_gain: 0,
       owner_actor_id: identity.actor_id,

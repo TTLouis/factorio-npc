@@ -3,7 +3,7 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { GoalPursuit, newPursuit } from './goal-pursuit.mjs'
 import { deploymentStatus, executeAuthorizedBatch, actorChanged } from './supervisor-adapter.mjs'
-import { approvedOperationListText, toolDefinitions, toolCommand, renderOperation, renderOperationPreflight } from './structured-policy.mjs'
+import { approvedOperationListText, toolDefinitions, toolCommand, renderOperation, renderOperationPreflight, luaString, parseOperation } from './structured-policy.mjs'
 import { sanitizeGoalDefinition, evaluateGoalDefinition } from './goal-definition.mjs'
 import { createEmptyAuthorization, evaluateOperationAdmission, entityProtection, recordReservation, releaseReservation, restoreAuthorization } from './authorization.mjs'
 
@@ -11,19 +11,35 @@ const copy = value => structuredClone(value)
 const check = (ok, message) => { if (!ok) throw new Error(message) }
 const json = raw => JSON.parse(String(raw).trim())
 const actorView = actor => ({ actor_id: actor.actor_id, epoch: actor.epoch, mode: actor.mode, actor_kind: actor.actor_kind })
-const AMBIGUOUS = new Set(['harvest_product', 'mine_entity', 'rotate_entity', 'clear_area', 'clear_construction_area', 'execute_construction_plan'])
+const AMBIGUOUS = new Set(['mine_entity', 'rotate_entity', 'clear_area', 'clear_construction_area', 'execute_construction_plan'])
 const EXACT_MUTATIONS = new Set(['mine_entity_exact', 'rotate_entity_exact', 'set_machine_recipe', 'move_items_exact', 'supply_entity'])
 
 export const PURSUIT_PROMPT = `You control a standalone Factorio character through a bounded pursuit harness.
+Native Factorio actions ARE available through the external harness. The provider's tool_choice:none disables provider-hosted tools only; it does not disable operations or observations in your JSON response. The harness validates and executes those JSON requests and returns their native receipts. This is an action request, not a chat-only turn.
 Pursue the immutable user objective and trusted done-when predicate in the packet. Choose observations, the next native action batch, strategy and recovery yourself. Notes may evolve; a dispatched batch cannot change identity. Native actions and factory production continue while you think.
 Reply with ONE JSON object using only notes (optional strategic memory, max 2000 chars), operations (max 16), observations (max 4 approved read requests {name,args}), or pauseReason (max 300 chars). Choose only one of operations, observations, or pauseReason per decision. Do not emit a plan, stepId, tool_calls, generated Lua, shell, goal replacement or completion claim.
 Only trusted game state proves success. Receipts distinguish admitted, running, completed, refused and uncertain effects. Never replay uncertain work, treat an admission as completion, or invent prototype names, entity IDs, recipes or game mechanics. Use approved tools to inspect what you need. Native preflight refusal is evidence for recovery, not proof the world cannot support the goal. Empty decisions pause. Use native wait for a bounded condition check when appropriate.
+Missing materials or knowledge are reasons to choose observations or acquisition actions. Pause only for a concrete blocker requiring owner intervention or an observed unavailable capability; name the blocker and supporting observation in pauseReason. Do not pause merely because wire tool calls are disabled. harvest_product is restricted to unowned neutral natural trees/rocks; buildings and player-touched sources cannot be harvested.
 Keep player-built structures and reserved supplies intact. Use exact targets for mutations/withdrawals; ambiguous destructive operations and player inventory withdrawal are refused. Inputs marked historical may be stale; re-observe exact targets. Resume/restarts share one cumulative call, wall-time and input allowance.
 Approved operations and argument shapes: ${approvedOperationListText()}
 Approved read tool schemas: ${JSON.stringify(toolDefinitions)}`
 
 export function pursuitMessages(packet) {
   return [{ role: 'system', content: PURSUIT_PROMPT }, { role: 'user', content: JSON.stringify(packet) }]
+}
+
+export function renderPursuitOperation(raw) {
+  const operation = parseOperation(raw)
+  if (operation.name !== 'harvest_product') return renderOperation(operation)
+  // Parsing/identity still uses the approved bounded harvest operation. Only
+  // this adapter routes it to the stricter native source-selection interface.
+  const args = operation.args
+  return `remote.call('autorio_operations','harvest_natural_product',${luaString(args.product_name)},${args.count},${args.search_radius})`
+}
+
+function pursuitPreflight(operation) {
+  if (operation.name !== 'harvest_product') return renderOperationPreflight(operation)
+  return `/silent-command rcon.print(helpers.table_to_json(remote.call('autorio_preflight','operation','harvest_natural_product',{product_name=${luaString(operation.args.product_name)}})))`
 }
 
 export function pursuitProvider(provider, reserve = async () => {}) {
@@ -185,14 +201,19 @@ export class PursuitRuntime {
         || (operation.name === 'move_items_with_player' && operation.args.to_player === false)) {
         return { ok: false, code: 'pursuit_ambiguous_or_player_mutation', operation_index: index }
       }
+      if (operation.name === 'harvest_product' && this.authorization.world.reservations.some(row => row.status === 'active')) {
+        return { ok: false, code: 'pursuit_harvest_reserved_world', operation_index: index }
+      }
       const before = actorView(await deploymentStatus(this.rcon, { requireAllowed: true }))
       check(!actorChanged(actor, before), 'pursuit_stale_actor')
-      const command = renderOperationPreflight(operation)
+      const command = pursuitPreflight(operation)
       const result = command ? json(await this.rcon.command(command)) : { ok: true }
       const after = actorView(await deploymentStatus(this.rcon, { requireAllowed: true }))
       check(!actorChanged(actor, after), 'pursuit_stale_actor')
       preflight.push(result)
       if (result.ok !== true) return { ...result, operation_index: index }
+      if (operation.name === 'harvest_product' && result.natural_only !== true) return { ok: false, code: 'pursuit_natural_guard_unavailable', operation_index: index }
+      if (operation.name === 'harvest_product') await this.traceEvent('pursuit.natural_harvest_admitted', { reason: 'native_natural_source_guard_verified', product_name: operation.args.product_name })
       if (EXACT_MUTATIONS.has(operation.name)) {
         // Exact preflight must positively provide target identity/ownership.
         if (!result.target) return { ok: false, code: 'pursuit_target_ownership_unreadable', operation_index: index }
@@ -212,7 +233,7 @@ export class PursuitRuntime {
     const admission = await this.admit(operations, pending.actor.mode ? pending.actor : this.loop.state.actor)
     check(admission.ok === true, `pursuit_final_admission_refused:${admission.code}`)
     check(this.active && loop.generation === generation && this.now() < deadlineAt, 'wall_budget_exhausted')
-    return executeAuthorizedBatch(this.rcon, pending.actor.epoch, operations.map(renderOperation), undefined, pending,
+    return executeAuthorizedBatch(this.rcon, pending.actor.epoch, operations.map(renderPursuitOperation), undefined, pending,
       { requireIdle: true, deadlineAt, isCurrent: () => this.loop === loop && loop.generation === generation && this.active })
   }
 
