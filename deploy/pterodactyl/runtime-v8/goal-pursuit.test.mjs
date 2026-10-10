@@ -149,6 +149,18 @@ test('restart discards mutable reads and preserves the charged allowance and obj
   assert.equal(restarted.snapshot().budget.calls, 2)
 })
 
+test('a larger fresh input allowance cannot replenish an existing campaign on restart', async () => {
+  const f = fixture()
+  const state = f.loop.snapshot()
+  state.budget = { ...state.budget, maxInputChars: 500, inputChars: 499, calls: 1, startedAt: 1000 }
+  const restarted = new GoalPursuit({ state, adapter: f.adapter, provider: async () => { throw new Error('budget bypass') }, now: f.now })
+  const result = await restarted.wake('restart')
+  assert.equal(result.pauseReason, 'input_budget_exhausted')
+  assert.equal(result.budget.maxInputChars, 500)
+  assert.equal(result.budget.inputChars, 499)
+  assert.equal(result.budget.calls, 1)
+})
+
 test('unreadable and unowned native work cannot spend a provider call or append operations', async () => {
   for (const runtime of [null, {}, { task_state: 'running', queue_length: 1, batch_generation: 1 }]) {
     const f = fixture()
@@ -229,6 +241,48 @@ test('native permission refusal is model-visible evidence and never admits an ac
   assert.equal(f.sent.length, 0)
   assert.equal(result.pending, null)
   assert.match(result.observations[0].result, /protected_structure/)
+})
+
+test('retained live invalid-radius decision supplies bounded correction without executing the rejected reads', async () => {
+  let calls = 0, reads = 0
+  const f = fixture({ provider: async packet => {
+    if (++calls === 1) return { observations: [{ name: 'getNearbyEntities', args: { radius: 128 } }] }
+    assert.match(packet.observations.at(-1).result, /radius must be an integer from 1 to 64/)
+    return action
+  } })
+  f.adapter.observe = async () => { reads++; return '{}' }
+  const refused = await f.loop.wake('intake')
+  assert.equal(refused.status, 'active')
+  assert.equal(refused.budget.calls, 1)
+  assert.equal(refused.metrics.length, 1)
+  assert.equal(f.sent.length, 0)
+  assert.equal(reads, 0)
+  assert.equal(f.events.at(-1).reason, 'invalid_bounded_argument')
+  await f.loop.wake('correction')
+  assert.equal(f.sent.length, 1)
+  assert.equal(f.loop.snapshot().budget.calls, 2)
+})
+
+test('native read memory retains earlier facts as historical, refreshes duplicates and stays bounded', async () => {
+  let item = 'iron-plate'
+  const f = fixture({ provider: async () => ({ observations: [{ name: 'getRecipe', args: { item } }] }) })
+  f.adapter.observe = async () => '{ "value": 0.9900000000000000 }'
+  await f.loop.wake('read')
+  f.advance(1); item = 'copper-plate'
+  await f.loop.wake('read')
+  const rows = f.loop.snapshot().observations
+  assert.equal(rows[0].historical, true)
+  assert.equal(rows[1].historical, false)
+  assert.equal(rows[0].result, '{"value":0.99}')
+  assert.equal(rows[0].observed_at_ms, 1000)
+  assert.equal(rows[1].observed_at_ms, 1001)
+  item = 'iron-plate'
+  await f.loop.wake('refresh')
+  assert.equal(f.loop.snapshot().observations.length, 2)
+  assert.equal(f.loop.snapshot().observations.at(-1).args.item, 'iron-plate')
+  for (let index = 0; index < 15; index++) { item = `recipe-${index}`; await f.loop.wake('read') }
+  assert.equal(f.loop.snapshot().observations.length, 12)
+  assert.equal(f.events.some(row => row.event === 'pursuit.observations_retained' && row.request_id), true)
 })
 
 test('completion requires the trusted adapter to read and satisfy the owner predicate', async () => {

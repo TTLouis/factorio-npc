@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { isObservationToolName, parseOperation, toolCommand } from './structured-policy.mjs'
+import { isObservationToolName, parseOperation, toolCommand, PolicyError } from './structured-policy.mjs'
 import { actorChanged } from './supervisor-adapter.mjs'
 import { batchWatermark, buildPendingOperation, reconcilePendingOperation, RECONCILE_VERDICT } from './operation-reconciliation.mjs'
 
@@ -8,6 +8,19 @@ import { batchWatermark, buildPendingOperation, reconcilePendingOperation, RECON
 const TERMINAL = new Set([RECONCILE_VERDICT.ADMITTED_COMPLETED, RECONCILE_VERDICT.NOT_ADMITTED, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION])
 const clone = value => structuredClone(value)
 const check = (ok, reason) => { if (!ok) throw new Error(reason) }
+
+const observationKey = row => `${row.name}:${JSON.stringify(Object.entries(row.args ?? {}).sort(([a], [b]) => a.localeCompare(b)))}`
+function rememberObservations(previous, fresh) {
+  const keys = new Set(fresh.map(observationKey))
+  const rows = [...previous.filter(row => !keys.has(observationKey(row))).map(row => ({ ...row, historical: true })), ...fresh]
+  while (rows.length > 12 || JSON.stringify(rows).length > 48000) rows.shift()
+  return rows
+}
+function observationText(raw) {
+  let text = String(raw)
+  try { text = JSON.stringify(JSON.parse(text)) } catch { /* Native serpent text stays verbatim. */ }
+  return text.length <= 8000 ? text : `${text.slice(0, 7900)}\n[Native observation truncated; request a narrower read for omitted facts.]`
+}
 
 // Separate protocol for the experiment: notes are revisable, dispatched actions
 // are not. Adapters own native physical/permission admission, durable storage,
@@ -48,7 +61,7 @@ function validateBudget(budget) {
   check(budget.calls === 0 || budget.startedAt !== null, 'persisted_budget_start_missing')
 }
 
-export function newPursuit({ objective, predicate, actor, maxCalls = 30, maxWallMs = 1200000, maxInputChars = 600000 }) {
+export function newPursuit({ objective, predicate, actor, maxCalls = 30, maxWallMs = 1200000, maxInputChars = 2000000 }) {
   check(typeof objective === 'string' && objective.trim() && objective.length <= 4000, 'objective_required')
   check(predicate && typeof predicate === 'object', 'owner_predicate_required')
   check(Number.isSafeInteger(actor?.actor_id) && Number.isSafeInteger(actor?.epoch), 'actor_required')
@@ -181,26 +194,40 @@ export class GoalPursuit {
       finally { clearTimeout(timer); controller.signal.removeEventListener('abort', abort); this.controller = null }
       world = await this.fence(generation)
       if (this.now() - budget.startedAt >= budget.maxWallMs) return this.pause('wall_budget_exhausted')
-      const decision = pursuitDecision(answer?.decision ?? answer)
       const metric = { call: budget.calls, latency_ms: this.now() - started, input_chars: inputChars,
         ...(answer?.decision ? { usage: clone(answer.usage ?? null) } : {}) }
       this.state.metrics.push(metric)
       this.state.metrics = this.state.metrics.slice(-30)
-      if (decision.notes !== undefined) this.state.notes = decision.notes
       await this.save()
       await this.event('pursuit.provider_received', 'provider_response_accounted', metric)
+      let decision
+      try { decision = pursuitDecision(answer?.decision ?? answer) }
+      catch (error) {
+        // A deterministic operation/argument policy rejection is correctable
+        // evidence, never permission to execute it. Outer envelope violations
+        // and provider failures still pause.
+        if (!(error instanceof PolicyError)) throw error
+        this.state.observations = rememberObservations(this.state.observations, [{ name: 'decision_validation',
+          result: JSON.stringify({ ok: false, code: 'invalid_decision_argument', message: error.message.slice(0, 300) }),
+          observed_at_ms: this.now(), historical: false }])
+        await this.save()
+        await this.event('pursuit.decision_refused', 'invalid_bounded_argument', { message: error.message.slice(0, 300) })
+        return this.snapshot()
+      }
+      if (decision.notes !== undefined) this.state.notes = decision.notes
       await this.event('pursuit.decision', 'bounded_model_decision', { call: budget.calls, operations: decision.operations.length, observations: decision.observations.length })
       if (decision.pauseReason) return this.pause(`provider_reported:${decision.pauseReason}`)
       if (decision.observations.length) {
         const observations = []
         for (const read of decision.observations) {
           await this.fence(generation)
-          const result = String(await this.adapter.observe(clone(read))).slice(0, 8000)
+          const result = observationText(await this.adapter.observe(clone(read)))
           await this.fence(generation)
-          observations.push({ ...read, result })
+          observations.push({ ...read, result, observed_at_ms: this.now(), historical: false })
         }
-        this.state.observations = observations
+        this.state.observations = rememberObservations(this.state.observations, observations)
         await this.save()
+        await this.event('pursuit.observations_retained', 'bounded_native_read_memory', { fresh: observations.length, retained: this.state.observations.length })
         return this.snapshot() // Driver wakes on these newly completed reads.
       }
       if (!decision.operations.length) return this.pause('provider_no_progress')
