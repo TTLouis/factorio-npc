@@ -8,6 +8,10 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 10: opt-in pursuit experiment (static and native gates passed)
+
+The isolated experiment now integrates a separate pursuit loop, strict owner predicate, single provider protocol, native receipts/permissions, actor fencing and persistent campaign budgets. Legacy defaults remain. Docker gates pass (2,102 runtime and 1,046 mod tests), and real-engine pursuit/provenance lanes pass across an on-disk campaign reload and second goal. Independent invariant review found no remaining source blocker. Candidate shipping verification and the one capped Luna trial are pending; this is not yet red-to-green autonomous evidence. See [candidate record](validation/GOAL_PURSUIT_CANDIDATE_2026-10-10.md) and [design/limitations](GOAL_PURSUIT_HARNESS_EXPERIMENT_2026-10-10.md).
+
 ## October 9: step identity by text, just-in-time step contracts (static gates passed, not live-validated)
 
 - **Execution-draft wording** (`81ac9958`, owner OK). Planner prompts say every execution step is deterministic.

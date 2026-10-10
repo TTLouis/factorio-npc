@@ -21,6 +21,7 @@ export const GOAL_CONDITION_KINDS = Object.freeze([
   'research_completed',
   'rockets_launched',
   'items_produced',
+  'items_consumed',
   'inventory_count',
   'space_location_unlocked',
   'entity_working',
@@ -43,7 +44,7 @@ const MAX_PER_MINUTE = 1_000_000
 // that already launched one, or "make 100 gears" on a save that made thousands,
 // must not read as done at once, so these count from when the goal started
 // unless the planner explicitly asks for the save total.
-export const GOAL_COUNTER_KINDS = Object.freeze(['rockets_launched', 'items_produced'])
+export const GOAL_COUNTER_KINDS = Object.freeze(['rockets_launched', 'items_produced', 'items_consumed'])
 export const GOAL_COUNT_FROM = Object.freeze({ GOAL_START: 'goal_start', SAVE_START: 'save_start' })
 
 export const GOAL_DEFINITION_LIMITS = Object.freeze({
@@ -148,7 +149,7 @@ function sanitizeCondition(raw, index, options = {}) {
     }
   }
   const condition = { id, kind, item_name: prototypeName(raw.item_name, 'item_name', kind, raw), minimum: minimum(raw.minimum, kind) }
-  return kind === 'items_produced' ? withCounter(condition, raw, options) : condition
+  return ['items_produced', 'items_consumed'].includes(kind) ? withCounter(condition, raw, options) : condition
 }
 
 // Validates the planner-authored `goal` object from submitPlan. Throws a
@@ -222,6 +223,9 @@ export function describeGoalCondition(condition) {
       ? `at least ${condition.minimum} × ${condition.item_name} produced in this save (all surfaces)`
       : `${condition.minimum} × ${condition.item_name} produced from now on (all surfaces)`
     case 'inventory_count': return `SGLuna holds at least ${condition.minimum} × ${condition.item_name}`
+    case 'items_consumed': return condition.count_from === GOAL_COUNT_FROM.SAVE_START
+      ? `at least ${condition.minimum} × ${condition.item_name} consumed in this save (all surfaces)`
+      : `${condition.minimum} × ${condition.item_name} consumed from now on (all surfaces)`
     case 'space_location_unlocked': return `space location "${condition.name}" is unlocked`
     case 'entity_working': return `${condition.minimum} × ${condition.entity_name} working now`
     case 'electric_network_satisfied': return `${condition.minimum} × ${condition.entity_name} powered by a running electric network`

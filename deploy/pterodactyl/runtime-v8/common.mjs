@@ -388,8 +388,13 @@ export class Rcon {
     }
   }
 
-  queuedCommand(text) {
+  queuedCommand(text, { deadlineAt, isCurrent } = {}) {
     const command = this.queue.catch(() => {}).then(async () => {
+      if ((deadlineAt !== undefined && Date.now() >= deadlineAt) || (isCurrent && !isCurrent())) {
+        const error = new DeploymentError('Native command expired or cancelled before send')
+        error.notSent = true
+        throw error
+      }
       check(this.socket && !this.socket.destroyed, 'RCON is not connected')
       const id = ++this.sequence
       const response = this.request(id, 2, text, 0)
@@ -400,9 +405,9 @@ export class Rcon {
     return command
   }
 
-  command(text) {
+  command(text, options) {
     if (!this.auxiliary && taskBoardUiRconCommand(text)) return this.taskBoardCommand(text)
-    return this.queuedCommand(text)
+    return this.queuedCommand(text, options)
   }
 }
 

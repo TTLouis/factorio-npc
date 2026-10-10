@@ -111,6 +111,7 @@ lane_offset() {
     vision) printf '7' ;;
     trigger-ladder) printf '8' ;;
     entity-observation) printf '9' ;;
+    pursuit) printf '10' ;;
     *) printf '[npc-test] Unknown lane requested: %s\n' "$1" >&2; return 2 ;;
   esac
 }

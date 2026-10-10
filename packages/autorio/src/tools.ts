@@ -46,7 +46,7 @@ function entity_item_count(entity: LuaEntity, item_name: string) {
 // than "is this step done?", and read game-wide state so they hold across a
 // long goal and across Space Age surfaces. Undefined for any other kind.
 function evaluate_force_condition(force: LuaForce | undefined, kind: unknown, request: Record<string, unknown>) {
-  if (kind !== 'research_completed' && kind !== 'rockets_launched' && kind !== 'items_produced' && kind !== 'space_location_unlocked') return undefined
+  if (kind !== 'research_completed' && kind !== 'rockets_launched' && kind !== 'items_produced' && kind !== 'items_consumed' && kind !== 'space_location_unlocked') return undefined
   if (!force) return { ok: false, error: 'no_force' }
   if (kind === 'research_completed') {
     const technology = request.technology
@@ -60,6 +60,18 @@ function evaluate_force_condition(force: LuaForce | undefined, kind: unknown, re
     const minimum = request.minimum
     if (!positive_integer(minimum)) return { ok: false, error: 'invalid_rockets_launched_condition' }
     const current = force.rockets_launched
+    return { ok: true, kind, satisfied: current >= (minimum as number), current, minimum, progress_known: false }
+  }
+
+  if (kind === 'items_consumed') {
+    const item_name = request.item_name
+    const minimum = request.minimum
+    if (typeof item_name !== 'string' || !positive_integer(minimum)) return { ok: false, error: 'invalid_items_consumed_condition' }
+    if (!prototypes.item[item_name]) return { ok: false, error: 'unknown_item', item_name }
+    let current = 0
+    for (const [, surface] of game.surfaces) {
+      current += force.get_item_production_statistics(surface).get_output_count(item_name) as number
+    }
     return { ok: true, kind, satisfied: current >= (minimum as number), current, minimum, progress_known: false }
   }
 

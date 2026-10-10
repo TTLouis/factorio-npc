@@ -8,7 +8,7 @@ services:
         SGLUNA_LOCAL_SOURCE: ${SGLUNA_LOCAL_SOURCE:-0}
         SGLUNA_SOURCE_NONCE: ${SGLUNA_SOURCE_NONCE:-}
         FACTORIO_VERSION: ${FACTORIO_VERSION:-latest}
-    image: factorio-npc:local
+    image: ${SGLUNA_LOCAL_IMAGE:-factorio-npc:local}
     platform: linux/amd64
     restart: unless-stopped
     stdin_open: true

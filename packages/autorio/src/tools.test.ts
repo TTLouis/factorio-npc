@@ -48,6 +48,19 @@ beforeEach(() => {
 })
 
 describe('goal conditions while the NPC body is dead', () => {
+  it('reads native consumption counters across surfaces without crediting hand crafts', async () => {
+    const npc_force = force(0)
+    npc_force.get_item_production_statistics = () => ({ get_input_count: () => 999, get_output_count: () => 7 })
+    ;(globalThis as any).game.forces = { player: npc_force }
+    ;(globalThis as any).game.surfaces = new Map([[1, {}], [2, {}]])
+    const tools = await tools_interface()
+    expect(tools.evaluate_condition({ kind: 'items_consumed', item_name: 'iron-gear-wheel', minimum: 14 }))
+      .toMatchObject({ ok: true, current: 14, satisfied: true })
+    expect(tools.evaluate_condition({ kind: 'items_consumed', item_name: 'iron-gear-wheel', minimum: 15 }))
+      .toMatchObject({ ok: true, current: 14, satisfied: false })
+    expect(tools.evaluate_condition({ kind: 'items_consumed', item_name: 'unknown', minimum: 1 }))
+      .toMatchObject({ ok: false, error: 'unknown_item' })
+  })
   it('reads force-level conditions from the player force when there is no live actor', async () => {
     ;(globalThis as any).game.forces = { player: force(2) }
     ;(globalThis as any).game.surfaces = new Map([[1, {}]])

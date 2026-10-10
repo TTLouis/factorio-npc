@@ -157,7 +157,8 @@ export class GoalPursuit {
         notes: this.state.notes, actor: this.state.actor, world: world.observation,
         receipts: this.state.history, observations: this.state.observations, verification,
         remainingCalls: budget.maxCalls - budget.calls }
-      const inputChars = JSON.stringify(packet).length
+      const inputChars = this.provider.inputChars ? this.provider.inputChars(clone(packet)) : JSON.stringify(packet).length
+      check(Number.isSafeInteger(inputChars) && inputChars > 0, 'provider_input_accounting_invalid')
       if (budget.inputChars + inputChars > budget.maxInputChars) return this.pause('input_budget_exhausted')
       const started = this.now()
       budget.startedAt ??= started
@@ -180,11 +181,14 @@ export class GoalPursuit {
       finally { clearTimeout(timer); controller.signal.removeEventListener('abort', abort); this.controller = null }
       world = await this.fence(generation)
       if (this.now() - budget.startedAt >= budget.maxWallMs) return this.pause('wall_budget_exhausted')
-      const decision = pursuitDecision(answer)
-      this.state.metrics.push({ call: budget.calls, latency_ms: this.now() - started, input_chars: inputChars })
+      const decision = pursuitDecision(answer?.decision ?? answer)
+      const metric = { call: budget.calls, latency_ms: this.now() - started, input_chars: inputChars,
+        ...(answer?.decision ? { usage: clone(answer.usage ?? null) } : {}) }
+      this.state.metrics.push(metric)
       this.state.metrics = this.state.metrics.slice(-30)
       if (decision.notes !== undefined) this.state.notes = decision.notes
       await this.save()
+      await this.event('pursuit.provider_received', 'provider_response_accounted', metric)
       await this.event('pursuit.decision', 'bounded_model_decision', { call: budget.calls, operations: decision.operations.length, observations: decision.observations.length })
       if (decision.pauseReason) return this.pause(`provider_reported:${decision.pauseReason}`)
       if (decision.observations.length) {
@@ -210,23 +214,34 @@ export class GoalPursuit {
         await this.event('pursuit.admission_refused', 'native_or_permission_refusal', { admission })
         return this.snapshot()
       }
+      if (Number.isSafeInteger(world.runtime.admission_high_water)) this.state.ordinal = Math.max(this.state.ordinal, world.runtime.admission_high_water)
       const ordinal = ++this.state.ordinal
       this.state.pending = buildPendingOperation({ requestId: this.state.request_id,
         operationKey: `${this.state.request_id}/batch_${ordinal}`, ordinal, protocolVersion: 2,
         operations: decision.operations, goalId: this.state.request_id, actor: world.actor,
         baseline: batchWatermark(world.runtime), now: this.now() })
       await this.save()
-      await this.event('pursuit.dispatch', 'native_admission_passed', { operation_key: this.state.pending.operation_key, signature: this.state.pending.signature })
+      await this.event('pursuit.dispatch_reserved', 'native_admission_passed', { operation_key: this.state.pending.operation_key, signature: this.state.pending.signature })
       await this.fence(generation)
       const deadlineAt = budget.startedAt + budget.maxWallMs
       if (this.now() >= deadlineAt) return this.pause('wall_budget_exhausted')
       // Pending is retained on every transport exception. Only exact native
       // reconciliation can make another dispatch possible after this point.
-      await this.adapter.dispatch(clone(decision.operations), clone(this.state.pending), { deadlineAt })
+      const acknowledgement = await this.adapter.dispatch(clone(decision.operations), clone(this.state.pending), { deadlineAt })
+      await this.event('pursuit.dispatch_acknowledged', 'native_acknowledgement_received', { operation_key: this.state.pending.operation_key, acknowledgement })
       await this.fence(generation)
       return this.snapshot()
     }
     catch (error) {
+      if (this.state.pending && (error.notSent === true || error.notAdmitted === true)) {
+        // Only the trusted transport/native begin refusal can prove this.
+        // Provider exceptions and lost acknowledgements never carry this proof.
+        this.state.history = [...this.state.history, { ...this.state.pending,
+          verdict: RECONCILE_VERDICT.NOT_ADMITTED, effect: 'not_happened', reason: 'trusted_transport_proved_not_admitted' }].slice(-16)
+        this.state.pending = null
+        await this.save()
+        await this.event('pursuit.not_admitted', 'trusted_transport_proved_not_admitted')
+      }
       await this.event('pursuit.failure', 'fail_closed', { code: String(error.message).slice(0, 300) })
       return this.pause(String(error.message).slice(0, 300))
     }

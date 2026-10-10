@@ -1,4 +1,5 @@
 import fsp from 'node:fs/promises'
+import { PursuitRuntime, ownerPursuitGoal } from './pursuit-runtime.mjs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -211,6 +212,7 @@ export function configuration(raw = {}, env = process.env) {
     profile,
     aiApiMethod,
     goalPursuitMode,
+    goalPursuitGoal: env.SGLUNA_GOAL_PURSUIT_GOAL ? ownerPursuitGoal(JSON.parse(env.SGLUNA_GOAL_PURSUIT_GOAL)) : undefined,
     aiApiMethodOverridesProfile,
     overriddenProviderProfile: aiApiMethodOverridesProfile ? overriddenProviderProfile : undefined,
     key: env.OPENAI_API_KEY ?? '',
@@ -1577,6 +1579,7 @@ function completedTaskResult(result) {
 }
 
 export async function finalizeCompletedTaskBoundary(session, result) {
+  if (session?.agent instanceof PursuitRuntime) return false // Keep its durable receipt/budget ledger after completion.
   if (!session?.agent || !completedTaskResult(result)) return false
   await session.agent.loadPersistentState?.()
   const key = session.agent.activePlanKey?.() ?? session.agent.lastMemoryKey ?? `npc:${session.npcId ?? 'sgluna'}`
@@ -2473,6 +2476,7 @@ export class Session {
   // Bounded: the attempt count resets only on real world progress, and any
   // player request, stop, or plan change cancels a pending resume.
   async scheduleAutoResume(message) {
+    if (this.agent instanceof PursuitRuntime) return false
     const kind = transientProviderFailure(message)
     if (!kind || this.stopping) return false
     const attempt = this.autoResume?.attempt ?? 0
@@ -2657,6 +2661,19 @@ export class Session {
 
   pollRuntimeCondition() {
     if (!this.agent || !this.rcon || !this.ready || this.stopping || this.conditionPollRunning) return false
+    if (this.agent instanceof PursuitRuntime) {
+      if (!this.agent.active || this.agent.driving) return false
+      this.conditionPollRunning = true
+      this.queueEvent(async () => {
+        try {
+          const result = await this.agent.pollPursuit()
+          await this.syncTaskBoardUi()
+          if (result.chatMessage) await this.printChat(result.chatMessage)
+        }
+        finally { this.conditionPollRunning = false }
+      }, { reportError: true })
+      return true
+    }
     const state = this.currentPlanState()
     if (state?.condition_wait?.state !== 'active' || typeof this.agent.pollConditionWait !== 'function') return false
     this.conditionPollRunning = true
@@ -2789,14 +2806,17 @@ export class Session {
           },
         )
       : undefined
-    this.agent = new NpcAgentLoop({
+    const RuntimeAgent = this.config.goalPursuitMode === 'direct' ? PursuitRuntime : NpcAgentLoop
+    this.agent = new RuntimeAgent({
       completionProtocolVersion: 2,
       replacementWake: true, // MW5: player-objective grant at admission and the replacement wake
       rcon: this.rcon,
       systemPrompt: `${prompt}\n\n${RUNTIME_RELIABILITY_GUIDANCE}`,
       npcId: this.npcId,
       memory: new CanonicalTaskBoardMemory(),
-      stateFile: path.join(this.root, '.sgluna', 'npc-state.json'),
+      stateFile: path.join(this.root, '.sgluna', this.config.goalPursuitMode === 'direct' ? 'pursuit-state.json' : 'npc-state.json'),
+      traceFile: path.join(this.root, 'logs', 'sgluna-pursuit.jsonl'),
+      ownerGoal: this.config.goalPursuitGoal,
       provider: (messages, context) => this.roleProvider(messages, context),
       interactionProvider: (messages, context) => this.roleProvider(messages, context),
       agentRoleConfig: this.config, // names the planner/executor models for the loop's role tagging (agent-roles.mjs)
@@ -2834,7 +2854,14 @@ export class Session {
       this.ensureAuthorization().catch(error => this.log(`NPC authorization health check failed: ${error.message}`))
     }, 2000)
     const startupState = this.currentPlanState()
-    if (startupState?.condition_wait?.state !== 'active' && this.recoverablePlan(startupState)) {
+    if (this.agent instanceof PursuitRuntime) {
+      this.queueEvent(async () => {
+        const result = await this.agent.pollPursuit()
+        await this.syncTaskBoardUi()
+        if (result.chatMessage) await this.printChat(result.chatMessage)
+      }, { reportError: true })
+    }
+    else if (startupState?.condition_wait?.state !== 'active' && this.recoverablePlan(startupState)) {
       this.queueEvent(async () => {
         await this.recoverInterruptedPlan('runtime_restart', { actor_id: this.lastStatus?.actor_id, epoch: this.lastStatus?.epoch })
       })
@@ -2888,7 +2915,7 @@ export class Session {
     this.eventQueue = this.eventQueue.then(fn).catch(async error => {
       const message = error instanceof Error ? error.message : String(error)
       this.log(message)
-      if (reportError && !expectedCancellation(error) && this.agent) {
+      if (reportError && !expectedCancellation(error) && this.agent && !(this.agent instanceof PursuitRuntime)) {
         try {
           const state = await pauseStrandedPlanAfterRequestError(this, message)
           if (state) this.log('Canonical Task Board paused after a failed request left Autorio idle')
@@ -2947,6 +2974,19 @@ export class Session {
   }
 
   queueUiControl(input) {
+    if (this.agent instanceof PursuitRuntime) {
+      if (['pause', 'terminate', 'cancel'].includes(input.action)) this.agent.cancel(`ui_${input.action}_immediate`).catch(error => this.log(error.message))
+      this.queueEvent(async () => {
+        if (['pause', 'terminate', 'cancel', 'keep_paused'].includes(input.action)) {
+          await this.agent.pausePersistentPlan(`ui_${input.action}`)
+          await this.rcon.command('/silent-command remote.call("sgluna_deployment","cancel")')
+          await this.syncTaskBoardUi()
+          await this.ackTaskBoardUiLifecycle(input.player_index, input.action)
+        }
+        else await this.printChat('Direct pursuit accepts an owner goal with done-when conditions, or Resume. This control does not change the objective.')
+      }, { reportError: true })
+      return true
+    }
     // Terminate is an emergency stop, not ordinary queued work. Abort the
     // current provider turn before entering eventQueue so a long model response
     // cannot delay termination. The queued handler still owns durable-state
@@ -3061,6 +3101,15 @@ export class Session {
 
     const recovery = line.match(/\[AUTORIO\] Recovered standalone NPC actor_id=(\d+) -> (\d+) without inventory transfer/)
     if (recovery) {
+      if (this.agent instanceof PursuitRuntime) {
+        this.agent.cancel('actor_replaced').catch(error => this.log(error.message))
+        this.queueEvent(async () => {
+          await this.ensureAuthorization()
+          await this.syncTaskBoardUi()
+          await this.printChat('The NPC body changed. Pursuit is paused with its old operation receipts and allowance retained; stale work will not be replayed.')
+        }, { reportError: true })
+        return
+      }
       this.queueEvent(async () => {
         const planBeforeRecovery = this.currentPlanState()
         this.agent.cancel?.('actor_replaced_stale_turn')

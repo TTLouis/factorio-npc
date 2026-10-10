@@ -156,6 +156,10 @@ case "$LANE" in
     printf '[npc-test][requirements] Running scripted first-plan grounding against live recipe/research facts...\n'
     run_node goal_requirements_factorio.mjs
     ;;
+  pursuit)
+    printf '[npc-test][pursuit] Running scripted pursuit against native crafting and exact receipts...\n'
+    run_node pursuit_factorio.mjs
+    ;;
 
   core)
     printf '[npc-test][core] Running exact entity observation gate...\n'

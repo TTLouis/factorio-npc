@@ -1,0 +1,204 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import fsp from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { PursuitRuntime, pursuitProvider, pursuitIntake, pursuitMessages } from './pursuit-runtime.mjs'
+import { providerRequest } from './provider.mjs'
+
+const goal = { objective: 'Gather ten copper ore.', predicate: { scope: 'finite', summary: 'Hold ten copper ore.',
+  doneWhen: [{ kind: 'inventory_count', item_name: 'copper-ore', minimum: 10 }] } }
+const action = { notes: 'Acquire the requested ore.', operations: [{ name: 'gather_resource', args: { resource_name: 'copper-ore', count: 10 } }] }
+
+async function fixture(t, replies = [action]) {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'pursuit-runtime-'))
+  t.after(() => fsp.rm(root, { recursive: true, force: true }))
+  const actor = { revision: 'sgluna-deploy-v8-npc-staging', mode: 'npc', actor_kind: 'standalone_character',
+    actor_id: 18, epoch: 3, allowed: true, idle: true, actor_interface: true, operations: true, tools: true }
+  const runtime = { batch_generation: 1, task_state: 'idle', queue_length: 0, admission_journal: [] }
+  const requests = [], mutations = []
+  let satisfied = false, failSend = false, time = 1000
+  let agent
+  const rcon = { command: async command => {
+    if (command.includes('SGLUNA_RESULT_')) {
+      mutations.push(command)
+      if (failSend) throw new Error('lost native acknowledgement')
+      const identity = agent.loop.snapshot().pending
+      const record = { ...identity, actor_id: actor.actor_id, epoch: actor.epoch, generation: 1,
+        operation_count: identity.operations.length, state: 'admitted', slots: [] }
+      runtime.admission_journal.push(record)
+      runtime.task_state = 'running'; runtime.queue_length = 1
+      const marker = command.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)[0]
+      return marker + JSON.stringify({ ok: true, result: [true], admission: record })
+    }
+    if (command.includes('sgluna_deployment')) return JSON.stringify(actor)
+    if (command.includes('autorio_operation_admission')) return JSON.stringify({ high_water: runtime.admission_journal.at(-1)?.ordinal ?? 0 })
+    if (command.includes('evaluate_condition')) return JSON.stringify({ ok: true, current: satisfied ? 10 : 0, satisfied })
+    if (command.includes('autorio_preflight')) return JSON.stringify({ ok: true, target: { unit_number: 25, last_user: null } })
+    if (command.includes('autorio_operations')) return JSON.stringify(runtime)
+    return '{\n  { name = "copper-ore", count = 0 }\n}'
+  } }
+  const options = { rcon, stateFile: path.join(root, 'state.json'), traceFile: path.join(root, 'trace.jsonl'), ownerGoal: goal,
+    now: () => time, provider: async (messages, context) => {
+      requests.push({ messages, context })
+      const reply = replies.shift()
+      if (reply instanceof Error) throw reply
+      return { content: JSON.stringify(reply ?? { pauseReason: 'Fixture exhausted.' }),
+        _sglunaProvider: { usage: { prompt_tokens: 120, completion_tokens: 20, prompt_tokens_details: { cached_tokens: 40 } } } }
+    } }
+  agent = new PursuitRuntime(options)
+  return { agent, options, actor, runtime, requests, mutations,
+    advance: ms => { time += ms }, failSend: () => { failSend = true }, satisfy: () => { satisfied = true },
+    complete: () => { runtime.task_state = 'idle'; runtime.queue_length = 0; runtime.admission_journal.at(-1).state = 'completed' } }
+}
+
+test('production adapter dispatches the exact persisted journal identity; receipt poll spends no extra calls', async t => {
+  const f = await fixture(t)
+  await f.agent.request(goal.objective, { sender: 'owner' })
+  const stored = JSON.parse(await fsp.readFile(f.options.stateFile))
+  assert.equal(stored.current.pending.protocol_version, 2)
+  assert.equal(stored.budget.calls, 1)
+  assert.equal(f.mutations.length, 1)
+  assert.ok(f.mutations[0].includes(stored.current.pending.operation_key))
+  assert.equal(f.requests[0].context.controlProtocol, 'pursuit')
+  assert.equal(f.requests[0].context.allowTools, false)
+  assert.match(JSON.parse(f.requests[0].messages[1].content).world.inventory, /name = "copper-ore"/)
+  assert.ok(stored.budget.inputChars >= JSON.stringify(f.requests[0].messages).length)
+  await f.agent.pollPursuit()
+  assert.equal(f.requests.length, 1)
+  f.complete(); f.satisfy()
+  assert.equal((await f.agent.pollPursuit()).goalStatus, 'completed')
+  assert.equal(f.agent.loop.snapshot().history[0].verdict, 'admitted_completed')
+  assert.equal(f.requests.length, 1)
+})
+
+test('campaign allowance survives failure, restart, Resume and a new owner goal', async t => {
+  const f = await fixture(t, [new Error('provider failure'), { pauseReason: 'Cannot progress this turn.' }, { pauseReason: 'No action.' }])
+  await f.agent.request(goal.objective)
+  assert.equal(f.agent.loop.state.budget.calls, 1)
+  const restarted = new PursuitRuntime(f.options)
+  const resumed = await restarted.request('Resume')
+  assert.equal(restarted.loop.state.budget.calls, 2, JSON.stringify(resumed))
+  const objective = { ...goal, objective: 'Gather ore for a second owner request.' }
+  await restarted.request(JSON.stringify(objective))
+  assert.equal(restarted.loop.state.budget.calls, 3)
+  assert.equal(restarted.loop.state.budget.startedAt, 1000)
+  assert.equal(restarted.archives[0].objective, goal.objective)
+})
+
+test('lost acknowledgement blocks new goals, replay and provider calls after restart', async t => {
+  const f = await fixture(t)
+  f.failSend()
+  await f.agent.request(goal.objective)
+  const pending = f.agent.loop.snapshot().pending
+  const restarted = new PursuitRuntime(f.options)
+  const result = await restarted.request('Resume')
+  assert.equal(result.goalStatus, 'paused')
+  assert.equal(restarted.loop.state.pending.operation_key, pending.operation_key)
+  await assert.rejects(restarted.request(JSON.stringify({ ...goal, objective: 'Different outcome.' })), /pending_effect/)
+  assert.equal(f.requests.length, 1)
+  assert.equal(f.mutations.length, 1)
+})
+
+test('native reservations and human target provenance refuse mutations deterministically', async t => {
+  const f = await fixture(t, [{ pauseReason: 'Fixture setup.' }])
+  await f.agent.request(goal.objective)
+  f.agent.memory.recordReservation('unused', { unit_number: 25, entity_name: 'iron-chest', reserved_by: 'owner' })
+  const withdraw = [{ name: 'move_items_exact', args: { unit_number: 25, item_name: 'iron-plate', max_count: 1, to_entity: false } }]
+  assert.equal((await f.agent.admit(withdraw, f.agent.loop.state.actor)).ok, false)
+  const command = f.options.rcon.command
+  f.options.rcon.command = async text => text.includes('autorio_preflight')
+    ? JSON.stringify({ ok: true, target: { unit_number: 27, last_user: { name: 'owner' } } }) : command(text)
+  assert.equal((await f.agent.admit([{ name: 'mine_entity_exact', args: { unit_number: 27 } }], f.agent.loop.state.actor)).code, 'protected_entity')
+  assert.equal(f.mutations.length, 0)
+  assert.equal((await f.agent.admit([{ name: 'harvest_product', args: { product_name: 'wooden-chest', count: 1 } }], f.agent.loop.state.actor)).ok, false)
+})
+
+test('two dispatched owner goals share the native ordinal and cumulative campaign', async t => {
+  const f = await fixture(t, [action, action])
+  await f.agent.request(goal.objective)
+  f.complete(); f.satisfy()
+  await f.agent.pollPursuit()
+  const first = f.agent.loop.state.ordinal
+  // A new objective can still need work in the same actor/native campaign.
+  const command = f.options.rcon.command
+  f.options.rcon.command = text => text.includes('evaluate_condition') ? JSON.stringify({ ok: true, current: 0, satisfied: false }) : command(text)
+  await f.agent.request(JSON.stringify({ ...goal, objective: 'Gather ten copper ore for another request.' }))
+  assert.equal(f.agent.loop.state.ordinal, first + 1)
+  assert.equal(f.agent.loop.state.budget.calls, 2)
+  assert.equal(f.mutations.length, 2)
+})
+
+test('native atomic queue guard refuses same-actor work started during provider await', async t => {
+  const f = await fixture(t)
+  f.agent.provider = pursuitProvider(async () => { f.runtime.queue_length = 1; f.runtime.task_state = 'running'; return { content: JSON.stringify(action) } })
+  const command = f.options.rcon.command
+  f.options.rcon.command = async text => {
+    if (text.includes('SGLUNA_RESULT_')) {
+      assert.ok(text.includes('s.task_state~="idle" or s.queue_length~=0'))
+      const marker = text.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)[0]
+      return marker + JSON.stringify({ ok: false, result: 'admission_begin_refused:unowned_native_work', prefix: [] })
+    }
+    return command(text)
+  }
+  const result = await f.agent.request(goal.objective)
+  assert.equal(result.goalStatus, 'paused')
+  assert.equal(f.agent.loop.state.pending, null)
+  assert.equal(f.agent.loop.state.history.at(-1).verdict, 'not_admitted')
+  assert.equal(f.mutations.length, 0)
+})
+
+test('native actor changes during a provider request discard its actions but charge the call', async t => {
+  const f = await fixture(t)
+  f.agent.provider = pursuitProvider(async () => { f.actor.epoch++; return { content: JSON.stringify(action) } })
+  await f.agent.request(goal.objective)
+  assert.equal(f.agent.loop.state.pauseReason, 'pursuit_stale_actor')
+  assert.equal(f.agent.loop.state.budget.calls, 1)
+  assert.equal(f.mutations.length, 0)
+})
+
+test('trusted intake refuses changed predicates in provider decisions and mismatched unstructured goals', async t => {
+  assert.throws(() => pursuitIntake('A different result.', goal), /owner goal/)
+  const f = await fixture(t, [{ predicate: { satisfied: true }, operations: [] }])
+  await f.agent.request(goal.objective)
+  assert.equal(f.agent.loop.state.pauseReason, 'decision_unknown_field')
+  assert.equal(f.mutations.length, 0)
+  assert.equal(f.agent.loop.state.objective, goal.objective)
+})
+
+test('retained blocker-style reply pauses truthfully while large reads consume the same campaign', async t => {
+  const f = await fixture(t, [{ observations: [{ name: 'getInventoryItems', args: {} }] },
+    { notes: 'Copper and iron triggers remain unmet.', operations: [], pauseReason: 'Cannot perform remaining work this turn.' }])
+  const command = f.options.rcon.command
+  f.options.rcon.command = text => text.includes('get_inventory') ? JSON.stringify({ evidence: 'native inventory facts '.repeat(2000) }) : command(text)
+  await f.agent.request(goal.objective)
+  assert.equal(f.agent.loop.state.status, 'paused')
+  assert.match(f.agent.loop.state.pauseReason, /provider_reported/)
+  assert.equal(f.requests.length, 2)
+  assert.equal(f.mutations.length, 0)
+  assert.equal(f.agent.loop.state.metrics[0].usage.prompt_tokens_details.cached_tokens, 40)
+})
+
+test('corrupt campaign budget storage fails closed rather than granting a fresh allowance', async t => {
+  const f = await fixture(t, [new Error('provider failure')])
+  await f.agent.request(goal.objective)
+  const stored = JSON.parse(await fsp.readFile(f.options.stateFile))
+  stored.budget.calls = 0
+  await fsp.writeFile(f.options.stateFile, JSON.stringify(stored))
+  await assert.rejects(new PursuitRuntime(f.options).loadPersistentState(), /budget_mismatch/)
+  assert.equal(f.requests.length, 1)
+})
+
+test('pursuit provider wire protocol preserves JSON and never injects legacy control/tools', async () => {
+  let body
+  const decision = { notes: 'Inspect.', observations: [{ name: 'getInventoryItems', args: {} }] }
+  const history = pursuitMessages({ objective: 'Owner objective', predicate: goal.predicate })
+  const message = await providerRequest({ base: 'http://127.0.0.1:18317/v1', key: 'fixture', model: 'gpt-6-luna', profile: 'local' }, history, {
+    controlProtocol: 'pursuit', allowTools: false, promptTraceFile: null,
+    fetchImpl: async (_url, options) => { body = JSON.parse(options.body); return new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: JSON.stringify(decision) }, finish_reason: 'stop' }], usage: { prompt_tokens: 4, completion_tokens: 3, total_tokens: 7 } }), { status: 200 }) },
+  })
+  assert.deepEqual(body.messages, history)
+  assert.equal(body.tools, undefined)
+  assert.equal(message.content, JSON.stringify(decision))
+  assert.equal(message._sglunaProvider.diagnostic_code, 'ok')
+})

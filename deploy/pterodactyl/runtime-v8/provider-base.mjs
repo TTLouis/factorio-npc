@@ -1369,7 +1369,11 @@ export async function providerRequest(config, messages, {
   interactionRouter = false,
   triggerSource,
   role,
+  controlProtocol = 'legacy',
 } = {}) {
+  check(['legacy', 'pursuit'].includes(controlProtocol), 'Invalid provider control protocol')
+  const pursuit = controlProtocol === 'pursuit'
+  check(!pursuit || allowTools === false, 'Pursuit uses bounded JSON decisions, not wire tool calls')
   check(typeof config.key === 'string' && config.key.trim().length > 0, 'OPENAI_API_KEY is missing')
   check(typeof config.model === 'string' && /^[a-zA-Z0-9._:/-]{1,200}$/.test(config.model), 'Invalid model identifier')
   check(Array.isArray(messages) && messages.length > 0 && messages.length <= 50, 'Invalid provider message history')
@@ -1393,17 +1397,17 @@ export async function providerRequest(config, messages, {
   check(!allowTools || capability.tool_support === true, 'Provider profile does not allow tool calls')
   const disableThinking = compactContinuation && capability.thinking_control === 'deepseek'
   const compactReasoningDisabled = outputBudgetRecovery && capability.reasoning_effort === true
-  const steeredMessages = interactionRouter ? compactedMessages : applySteeringMessages(compactedMessages, messages)
+  const steeredMessages = interactionRouter || pursuit ? compactedMessages : applySteeringMessages(compactedMessages, messages)
   // Keep the role-stable prefix and tool schemas unchanged. The closed-round
   // control contract is dynamic guidance beside steering, before the receipt.
-  const controlledMessages = !interactionRouter && !allowTools
+  const controlledMessages = !interactionRouter && !pursuit && !allowTools
     ? steeredMessages.map(message => message?.role === 'user' && typeof message.content === 'string' && message.content.startsWith(STEERING_MARKER)
       ? { ...message, content: `${message.content}\n\n${executorRound ? EXECUTOR_CLOSED_CONTROL_PROMPT : CLOSED_CONTROL_PROMPT}` }
       : message)
     : steeredMessages
   // The interaction router answers in JSON content, so it keeps its own
   // prompt untouched by either the style block or a cache breakpoint.
-  const styledMessages = interactionRouter
+  const styledMessages = interactionRouter || pursuit
     ? controlledMessages
     : applyProviderStylePrompt(controlledMessages, capability.style_profile ?? capability.id)
   const cacheBreakpoints = interactionRouter
@@ -1426,7 +1430,7 @@ export async function providerRequest(config, messages, {
   // A round that closes tool use keeps the tool block where the profile
   // honours tool_choice "none" (2.9): removing it changes the prompt prefix
   // from its first token, so the whole cached history is lost.
-  const keepClosedTools = !allowTools && !interactionRouter && capability.tools_kept_when_closed === true && capability.tool_support === true
+  const keepClosedTools = !allowTools && !interactionRouter && !pursuit && capability.tools_kept_when_closed === true && capability.tool_support === true
   if (allowTools || keepClosedTools) {
     body.tools = compactContinuation ? compactCompletionTools(roleToolDefinitions) : roleToolDefinitions
     body.tool_choice = allowTools ? 'auto' : 'none'
@@ -1572,7 +1576,7 @@ export async function providerRequest(config, messages, {
     // (2.9 follow-up): operations become plan operations, observations get one
     // bounded look. Names and argument strings only; nothing here executes.
     let closedRoundCalls
-    if (!allowTools && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+    if (!pursuit && !allowTools && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
       const calls = message.tool_calls
       const sole = calls.length === 1 && calls[0]?.function?.name === 'submitPlan' && typeof calls[0].function.arguments === 'string'
       if (sole) {
@@ -1589,7 +1593,7 @@ export async function providerRequest(config, messages, {
     const rawContent = typeof message.content === 'string' ? message.content : ''
     const rawShape = contentShape(rawContent)
     const reasoningContentChars = providerReasoningChars(message)
-    const dsml = message.tool_calls === undefined && typeof message.content === 'string'
+    const dsml = !pursuit && message.tool_calls === undefined && typeof message.content === 'string'
       ? recoverDsmlToolCalls(message.content)
       : undefined
     let dsmlRecovered
@@ -1620,7 +1624,7 @@ export async function providerRequest(config, messages, {
     }
     const toolCallCount = Array.isArray(message.tool_calls) ? message.tool_calls.length : 0
     let contentNormalization
-    if (message.tool_calls === undefined && typeof message.content === 'string') {
+    if (!pursuit && message.tool_calls === undefined && typeof message.content === 'string') {
       contentNormalization = normalizeProviderPlanContentDetailed(message.content)
       message.content = contentNormalization.content
     }
@@ -1632,7 +1636,7 @@ export async function providerRequest(config, messages, {
       : undefined
     const normalizedContent = typeof message.content === 'string' ? message.content : ''
     const structured = message.tool_calls === undefined
-      ? structuredContentDiagnostics(normalizedContent, { planContract: interactionRouter !== true && triggerSource !== 'step_contract' })
+      ? structuredContentDiagnostics(normalizedContent, { planContract: !pursuit && interactionRouter !== true && triggerSource !== 'step_contract' })
       : undefined
     const finishReason = choice?.finish_reason
     const usageNumbers = providerUsageNumbers(data?.usage)

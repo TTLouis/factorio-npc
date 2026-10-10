@@ -1,12 +1,20 @@
 param(
     [switch]$Restart,
-    [switch]$NoEnvUpdate
+    [switch]$NoEnvUpdate,
+    [string]$EnvFilePath,
+    [string]$ProjectName,
+    [string[]]$ComposeFiles = @('compose.yml')
 )
 
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $marker = Join-Path $repo '.docker-local-source-sha'
-$envFile = Join-Path $repo '.env'
+$envFile = if ($EnvFilePath) { [System.IO.Path]::GetFullPath($EnvFilePath) } else { Join-Path $repo '.env' }
+if ($EnvFilePath -and -not $NoEnvUpdate) { throw 'An external env file requires -NoEnvUpdate; it is consumed opaquely and never edited.' }
+if ($ProjectName -and $ProjectName -notmatch '^[a-z0-9][a-z0-9_-]+$') { throw 'Invalid isolated Compose project name.' }
+$composeArgs = @('compose', '--env-file', $envFile)
+if ($ProjectName) { $composeArgs += @('--project-name', $ProjectName) }
+foreach ($composeFile in $ComposeFiles) { $composeArgs += @('--file', $composeFile) }
 $createdMarker = $false
 
 Push-Location $repo
@@ -24,7 +32,7 @@ try {
     $env:SGLUNA_SOURCE_REF = $sha
     $env:SGLUNA_LOCAL_SOURCE = '1'
 
-    & docker compose build sgluna-factorio
+    & docker @composeArgs build sgluna-factorio
     if ($LASTEXITCODE -ne 0) { throw 'Local Docker build failed.' }
 
     # Isolated runs keep source/model overrides in the process environment.
@@ -36,7 +44,7 @@ try {
     }
 
     if ($Restart) {
-        & docker compose up -d --no-build --force-recreate sgluna-factorio
+        & docker @composeArgs up -d --no-build --force-recreate sgluna-factorio
         if ($LASTEXITCODE -ne 0) { throw 'Image built, but container restart failed.' }
     }
     Write-Output "Built local source $sha$(if ($Restart) { ' and restarted the container' })."

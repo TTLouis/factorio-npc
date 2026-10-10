@@ -1,92 +1,56 @@
 # Goal-pursuit harness experiment
 
-## Scope and status
+This opt-in experiment now has a separate pursuit runtime and provider protocol. `8415a486` removed routing overhead; it did not implement the harness. `3c0f988f` retained the bounded core. The current candidate integrates that core with the supervisor, native permissions, operation journal, persistent campaign budget and provider bridge. Legacy remains the default.
 
-Budget checkpoint: the direct route at `8415a486` is not the requested pursuit
-harness. A separate bounded `goal-pursuit.mjs` core and regressions now exist,
-but runtime/provider integration is unfinished and no live trial has run.
-See `validation/GOAL_PURSUIT_CHECKPOINT_2026-10-10.md` for current evidence,
-independent core review, allowance boundaries and exact remaining work.
+Set `SGLUNA_GOAL_PURSUIT_MODE=direct`. An authenticated owner supplies exact JSON `{objective,predicate:{scope,summary,doneWhen:[...]}}`, or raw chat matching the exact trusted `SGLUNA_GOAL_PURSUIT_GOAL` objective. The harness does not infer completion conditions from arbitrary free text. The provider can revise notes and choose observations, bounded operations or a truthful pause; it cannot replace the objective/predicate, emit a frozen executable plan, generate Lua or claim completion.
 
-This is an opt-in, local-first experiment on `experiment/goal-pursuit-harness`.
-`SGLUNA_GOAL_PURSUIT_MODE=direct` removes the interaction-classifier and Jev
-routing decisions from the critical path. The main provider still chooses what
-to inspect, the next bounded native action, strategy changes, and recovery
-within the existing runtime's authoritative goal, admission, receipt, and
-actor/epoch boundaries. The default remains `legacy`.
-
-The experiment deliberately does **not** add a gameplay recipe script, a shell
-tool, generated Lua, fake inventory changes, or a completion claim based on a
-provider response. World-state predicates and native receipts remain the only
-completion evidence.
-
-## Design comparison
-
-| Concern | Legacy path | Direct experiment |
+| Concern | Legacy | Pursuit |
 | --- | --- | --- |
-| Turn entry | Main interaction classifier, optional Jev signal, then planner/executor lifecycle | Deterministic new-goal/Resume routing, then one main-model lifecycle |
-| Strategy | Immutable committed plan and separate planning boundaries | Main model may evolve strategy on each bounded lifecycle turn; user goal and admitted operation identity remain fixed |
-| Safety | Native preflight/admission, actor/epoch fence, receipts, reconciliation | Reuses the same native safety boundary unchanged |
-| Cost/latency | Extra provider and decision-provider routing can precede first action | No interaction/Jev routing call; measure time-to-first-action and provider call count from trace |
-| Default | Yes | No; requires `SGLUNA_GOAL_PURSUIT_MODE=direct` |
-
-The current first implementation keeps the existing execution lifecycle as its
-transport so that persistence, uncertain-operation reconciliation, condition
-waits, and real-engine evidence do not fork. It is therefore a controlled
-removal of routing overhead, not a claim that legacy strategic contracts have
-been erased globally.
+| Decisions | Classifier, optional Jev, planner/executor | One main-model protocol; receipt/condition-driven |
+| Strategy | Committed plan semantics | Revisable notes and next native batch |
+| Authority | Native checks and persisted goal | Immutable owner objective/predicate; native checks |
+| Effects | Correlated operation journal | Same exact journal; pending saved before dispatch |
+| Allowance | Existing guards | Persistent campaign: 30 attempts, 20 minutes, 600,000 input characters including instruction prefix |
+| Default | Enabled | Explicit opt-in |
 
 ```mermaid
 flowchart LR
-  U[User goal] --> I[Interaction classifier]
-  I --> J[Jev routing / shaping]
-  J --> P[Planner/executor model turn]
-  P --> A[Native preflight + admission]
-  A --> R[Receipt / condition / world check]
-  R --> P
+ U[Owner goal] --> I[Classifier and optional Jev]
+ I --> P[Legacy planner and executor]
+ P --> A[Native admission]
+ A --> R[Receipts and world predicates]
+ R --> P
 ```
 
 ```mermaid
 flowchart LR
-  U[User goal or Resume] --> D[Deterministic direct route]
-  D --> M[One main-model turn: inspect, act, recover]
-  M --> A[Native preflight + admission]
-  A --> R[Receipt / condition / world check]
-  R --> M
-  A -. actor or epoch changes .-> X[Reject stale work]
-  R -. unknown effect .-> Q[Reconcile before replay]
+ U[Owner objective and predicate] --> H[Durable pursuit state and budget]
+ H --> M[Model chooses observation, action or pause]
+ M --> V[Structured validation and native permission checks]
+ V --> A[Persist identity then atomic idle and epoch admission]
+ A --> R[Exact receipt and world predicate poll]
+ R --> H
+ R --> Q[Hold unknown effects without replay]
+ V --> F[Reject stale actor or expired allowance]
 ```
 
-## Known evidence and open risks
+Native work continues during inference. Polling running work spends no provider calls. Actor/epoch checks surround awaited reads and preflight. A final socket-send guard checks cancellation generation and deadline; native Lua checks idle before recording admission. Global admission ordinals carry across goals and use the native high-water mark. Lost acknowledgements retain immutable pending identity, block replacement and require exact reconciliation. Known pre-send refusal can clear pending with evidence. Counters are durable before calls and survive owner Resume, restart and new goals. Authorization reservations persist separately in the same atomic envelope.
 
-The retained October 8 Luna run made six Luna calls, consumed 132,033 input
-tokens (73,728 cached), and made no gameplay action after a planner/executor
-blocker handoff. It is not a controlled comparison: it used an older commit
-and a different lifecycle. The direct trace must separately record provider
-calls, token usage where returned, provider latency, first admitted action,
-native busy/idle time, duplicate/no-progress behavior, and goal predicate
-results.
+Conservative permissions refuse ambiguous harvesting/destruction, name-based withdrawals and player inventory withdrawals. Exact target mutations require positive native provenance, and reserved supplies remain protected. This limits capabilities: harvesting natural wood through `harvest_product` is also refused until native source-specific protection exists. Native navigation clearing remains existing physical behavior. Cancellation can leave partial effects and truthfully holds uncertain receipts. Owner predicates are structured; this prototype has no automatic goal interpretation or actor rebinding after replacement.
 
-Open risks are deliberately explicit: direct routing must not misclassify a
-new user goal as Resume; a provider blocker remains a truthful pause, not a
-world blocker; and an accepted batch is not completion. The scripted gates
-cover those boundaries before the single permitted live run.
+## Verified build checklist
 
-## Durable checklist
+- [x] Preserve checkpoint and legacy defaults; separate real opt-in loop.
+- [x] Runtime/provider, persistence, actor fences, native admission and permission integration.
+- [x] Regressions for failures/restart/budgets, lost acknowledgements, model goal rewrite, retained realistic blocker, queue races, transport expiry and native text observations.
+- [x] Docker all gate: 2,102 runtime tests; 1,046 mod tests; typecheck, Lua build and generated-Lua guard.
+- [x] Full build gate; real Factorio pursuit and provenance lanes. Two native hand crafts consume four plates, reload between goals, keep zero humans and carry calls/ordinals to two.
+- [x] Independent invariant review; three reported blockers and transport deadline gap fixed and re-reviewed. Inventory-text engine failure fixed, regression added, engine re-run green.
+- [ ] Candidate freeze and installer repin; complete deployed-runtime/mod comparison.
+- [ ] Exactly one isolated Luna trial (30 calls or 20 minutes); retain actual result, tokens, latency, receipts and save.
 
-- [x] Baseline isolated at `30cb9b99`; legacy path preserved.
-- [x] Reuse boundary and direct-vs-legacy design recorded.
-- [x] Direct-mode configuration, route, trace, and scripted regressions complete (focused Docker: 51 tests).
-- [x] Separate pursuit core preserved, safety fixes and regressions added, independent core review obtained.
-- [ ] Actual pursuit runtime/provider/permission/driver integration complete.
-- [ ] Docker static gate and relevant real-engine lane complete.
-- [ ] Invariant review, clean candidate commit, shipped-runtime/mod verification complete.
-- [ ] One capped fresh-world Luna run complete, or a truthful preflight/budget checkpoint retained.
+Evidence and remaining gates: [candidate validation](validation/GOAL_PURSUIT_CANDIDATE_2026-10-10.md). The October 8 legacy run made six calls, 132,033 input tokens (73,728 cached), 1,108 output tokens and no gameplay actions. It used an older commit and a shorter/different lifecycle, so it is not a controlled comparison.
 
-## Budget ledger
+## Authority and usage
 
-At restart, account five-hour usage was 16%; the conservative stop threshold
-remains 61%, with a checkpoint due by 56%. No provider gameplay call has been
-made by this experiment. This document records intent and accounting only; the
-live evidence packet must record actual provider responses and wall-clock
-limits.
+The user explicitly renewed continuation after the reset. Latest milestone reading: 34% five-hour usage, 51% weekly; retain the original 56% checkpoint and 61% five-hour stop. No reset credit consumed. The single Luna allowance remains unused until candidate and shipped verification pass. No push, PR, other-worktree change, production deployment or extra live attempt is authorized.
