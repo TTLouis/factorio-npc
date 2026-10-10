@@ -12,15 +12,47 @@ const plan = { chatMessage: '', plan: ['Gather iron ore'], currentStep: 0, opera
 // Recorded wire shape: JSON-only replay returned a compact valid plan plus
 // message.images containing a data URL. Capture exceeded 1 MiB. Retaining tools
 // with tool_choice none alone returned 1,064 bytes and no images. No paid calls.
-function gateway(captured) {
+function gateway(captured, decision = plan) {
   return async (_url, options) => {
     const body = JSON.parse(options.body)
     captured.push(body)
-    const message = { role: 'assistant', content: JSON.stringify(plan) }
+    const message = { role: 'assistant', content: JSON.stringify(decision) }
     if (body.tool_choice !== 'none') message.images = [{ type: 'image_url', image_url: { url: `data:image/png;base64,${'A'.repeat(271137)}` } }]
     return new Response(JSON.stringify({ id: 'recorded-wire-shape', model: config.model, choices: [{ finish_reason: 'stop', message }] }))
   }
 }
+
+test('CLI proxy pursuit disables implicit tools without adding legacy planner schemas', async t => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-pursuit-cliproxy-'))
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }))
+  const traceFile = path.join(dir, 'prompts.jsonl')
+  const captured = []
+  const decision = { observations: [{ name: 'getInventoryItems', args: {} }] }
+  const reply = await providerRequest(config, messages, { controlProtocol: 'pursuit', allowTools: false,
+    fetchImpl: gateway(captured, decision), promptTraceFile: traceFile, requestId: 'req_pursuit_proxy' })
+  assert.deepEqual(JSON.parse(reply.content), decision)
+  assert.equal(captured[0].tool_choice, 'none')
+  assert.equal('tools' in captured[0], false)
+  const trace = (await fsp.readFile(traceFile, 'utf8')).trim().split('\n').map(JSON.parse)
+  const contract = trace.find(row => row.event === 'provider.pursuit_wire_contract')
+  assert.equal(contract.request_id, 'req_pursuit_proxy')
+  assert.equal(contract.reason, 'local_openai_pursuit_explicit_tool_choice_none')
+  assert.deepEqual(contract.allowed_decision_fields, ['notes', 'operations', 'observations', 'pauseReason'])
+  assert.equal(trace.some(row => row.event === 'provider.control_output_contract'), false)
+})
+
+test('non-GPT pursuit requests preserve their existing JSON-only wire shape', async () => {
+  const captured = []
+  await providerRequest({ ...config, model: 'qwen3-coder-30b-a3b-instruct' }, messages, {
+    controlProtocol: 'pursuit', allowTools: false,
+    fetchImpl: async (_url, options) => {
+      captured.push(JSON.parse(options.body))
+      return new Response(JSON.stringify({ choices: [{ message: { content: '{"pauseReason":"fixture"}' } }] }))
+    },
+  })
+  assert.equal('tools' in captured[0], false)
+  assert.equal('tool_choice' in captured[0], false)
+})
 
 test('CLI proxy GPT closed rounds disable implicit tools and retain their schema with correlated diagnostics', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-cliproxy-'))
