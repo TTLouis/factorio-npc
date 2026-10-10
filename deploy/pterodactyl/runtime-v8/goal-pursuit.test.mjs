@@ -104,6 +104,33 @@ test('a backwards clock cannot reopen a persisted wall allowance', async () => {
   assert.equal(f.calls(), 1)
 })
 
+test('planning packets expose the cumulative wall allowance across actions and restart without extending it', async () => {
+  const packets = []
+  const provider = async packet => { packets.push(packet); return action }
+  const f = fixture({ provider, options: { maxWallMs: 12000 } })
+  await f.loop.wake('owner_intake')
+  assert.equal(packets[0].remainingWallMs, 12000)
+  const pending = f.loop.snapshot().pending
+  f.advance(3000)
+  f.world.runtime.admission_journal = [{ ...pending, actor_id: actor.actor_id, epoch: actor.epoch,
+    generation: 1, operation_count: 1, state: 'completed', slots: [] }]
+  const restarted = new GoalPursuit({ state: f.loop.snapshot(), adapter: f.adapter, provider, now: f.now })
+  await restarted.wake('receipt_after_restart')
+  assert.equal(packets[1].remainingWallMs, 9000)
+  assert.equal(packets[1].remainingCalls, 29)
+  assert.equal(restarted.snapshot().budget.startedAt, 1000)
+  const reserved = f.events.filter(row => row.event === 'pursuit.provider_reserved')
+  assert.deepEqual(reserved.map(row => row.packet_remaining_wall_ms), [12000, 9000])
+  assert.deepEqual(reserved.map(row => row.packet_at_ms), [1000, 4000])
+  f.advance(9000)
+  f.world.runtime.admission_journal.at(-1).state = 'completed'
+  // Complete the second exact admission before checking the expired allowance.
+  f.world.runtime.admission_journal.push({ ...restarted.snapshot().pending, actor_id: actor.actor_id, epoch: actor.epoch,
+    generation: 1, operation_count: 1, state: 'completed', slots: [] })
+  assert.equal((await restarted.wake('wall_expired')).pauseReason, 'wall_budget_exhausted')
+  assert.equal(packets.length, 2)
+})
+
 test('actor changes during provider await discard actions and preserve charged call', async () => {
   const f = fixture({ provider: async () => { f.world.actor.epoch++; return action } })
   const result = await f.loop.wake('owner_intake')

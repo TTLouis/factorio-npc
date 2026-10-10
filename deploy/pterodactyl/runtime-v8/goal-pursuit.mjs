@@ -187,15 +187,17 @@ export class GoalPursuit {
         return this.snapshot()
       }
       const budget = this.state.budget
-      if (budget.startedAt !== null && this.now() < budget.startedAt) return this.pause('wall_clock_regressed')
-      if (budget.startedAt !== null && this.now() - budget.startedAt >= budget.maxWallMs) return this.pause('wall_budget_exhausted')
+      const packetAt = this.now()
+      if (budget.startedAt !== null && packetAt < budget.startedAt) return this.pause('wall_clock_regressed')
+      if (budget.startedAt !== null && packetAt - budget.startedAt >= budget.maxWallMs) return this.pause('wall_budget_exhausted')
       if (budget.calls >= budget.maxCalls) return this.pause('call_budget_exhausted')
       // Compact from durable facts each time, never a model-generated summary
       // of receipt history. Strategy is explicitly non-authoritative.
       const packet = { objective: this.state.objective, predicate: this.state.predicate,
         notes: this.state.notes, actor: this.state.actor, world: world.observation,
         receipts: this.state.history, observations: this.state.observations, recipeKnowledge: this.state.recipeKnowledge, verification,
-        remainingCalls: budget.maxCalls - budget.calls }
+        remainingCalls: budget.maxCalls - budget.calls,
+        remainingWallMs: budget.startedAt === null ? budget.maxWallMs : budget.maxWallMs - (packetAt - budget.startedAt) }
       const inputChars = this.provider.inputChars ? this.provider.inputChars(clone(packet)) : JSON.stringify(packet).length
       check(Number.isSafeInteger(inputChars) && inputChars > 0, 'provider_input_accounting_invalid')
       if (budget.inputChars + inputChars > budget.maxInputChars) return this.pause('input_budget_exhausted')
@@ -204,7 +206,8 @@ export class GoalPursuit {
       budget.calls++ // Failed, planning and correction attempts cost a slot.
       budget.inputChars += inputChars
       await this.save() // Crash/restart cannot reset reservations.
-      await this.event('pursuit.provider_reserved', reason, { call: budget.calls, input_chars: inputChars })
+      await this.event('pursuit.provider_reserved', reason, { call: budget.calls, input_chars: inputChars,
+        packet_at_ms: packetAt, packet_remaining_wall_ms: packet.remainingWallMs })
       await this.fence(generation)
       const remainingMs = budget.maxWallMs - (this.now() - budget.startedAt)
       if (remainingMs <= 0) return this.pause('wall_budget_exhausted')
