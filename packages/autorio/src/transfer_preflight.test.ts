@@ -325,6 +325,30 @@ describe('operation_preflight wiring (autorio_preflight.operation)', () => {
     return base as LuaEntity
   }
 
+  it('refuses a known resource with no live source inside the exact gather radius', () => {
+    ;(globalThis as any).prototypes.entity['copper-ore'] = { type: 'resource' }
+    ;(held.actor as any).position = { x: 25, y: -46 }
+    const scan = vi.fn(() => [])
+    ;(held.actor as any).surface.find_entities_filtered = scan
+    expect(preflight('gather_resource', { resource_name: 'copper-ore', count: 75, search_radius: 8 }))
+      .toMatchObject({ ok: false, code: 'resource_source_not_found', identity: 'copper-ore', search_radius: 8 })
+    expect(scan).toHaveBeenCalledWith(expect.objectContaining({ position: held.actor.position, radius: 8, name: 'copper-ore', type: 'resource' }))
+  })
+
+  it('admits a live resource source and rejects depleted sources and invalid gather radius', () => {
+    ;(globalThis as any).prototypes.entity['copper-ore'] = { type: 'resource' }
+    const source = { valid: true, name: 'copper-ore', amount: 75, position: { x: 1.5, y: 2.5 } }
+    const scan = vi.fn(() => [source])
+    ;(held.actor as any).surface.find_entities_filtered = scan
+    expect(preflight('gather_resource', { resource_name: 'copper-ore', count: 75, search_radius: 8 }))
+      .toMatchObject({ ok: true, resource_search: { radius: 8, position: source.position, amount: 75 } })
+    source.amount = 0
+    expect(preflight('gather_resource', { resource_name: 'copper-ore', search_radius: 8 })).toMatchObject({ ok: false, code: 'resource_source_not_found' })
+    scan.mockClear()
+    expect(preflight('gather_resource', { resource_name: 'copper-ore', search_radius: 0 })).toMatchObject({ ok: false, code: 'invalid_resource_search_radius' })
+    expect(scan).not.toHaveBeenCalled()
+  })
+
   it('keeps the exact-target identity fields on accepted transfers and adds the counts', () => {
     current_target = exact(15)
 

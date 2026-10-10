@@ -37,6 +37,13 @@ try {
   assert.equal(setup.added, 4)
   assert.equal(setup.connected_players, 0)
   assert.equal(setup.speed, 1)
+  // A missing local resource is a pre-dispatch refusal, not an admitted batch
+  // that immediately cancels navigation and loses its effect certainty.
+  const missingSource = JSON.parse(await rcon.command('/silent-command local before=remote.call("autorio_operations","status"); local result=remote.call("autorio_preflight","operation","gather_resource",{resource_name="uranium-ore",count=75,search_radius=1}); local after=remote.call("autorio_operations","status"); rcon.print(helpers.table_to_json({result=result,before=before,after=after}))'))
+  assert.equal(missingSource.result.ok, false)
+  assert.equal(missingSource.result.code, 'resource_source_not_found')
+  assert.equal(missingSource.before.queue_length, missingSource.after.queue_length)
+  assert.equal(missingSource.before.task_state, missingSource.after.task_state)
   const options = { rcon, stateFile: path.join(results, 'pursuit-state.json'), traceFile: path.join(results, 'pursuit-trace.jsonl'),
     provider: async (messages, context) => {
       calls.push({ messages, controlProtocol: context.controlProtocol })
@@ -93,7 +100,7 @@ try {
   assert.equal(naturalFinal.connected_players, 0)
   assert.equal(naturalFinal.speed, 1)
   await fsp.writeFile(path.join(results, 'pursuit-evidence.json'), JSON.stringify({ setup, final, calls: calls.length,
-    ordinal: harvester.loop.state.ordinal, state: harvester.loop.snapshot(), naturalSetup, naturalFinal, commands }, null, 2))
+    ordinal: harvester.loop.state.ordinal, state: harvester.loop.snapshot(), missingSource, naturalSetup, naturalFinal, commands }, null, 2))
   console.log('PASS pursuit: native hand-craft receipts, zero humans, persistent campaign and cross-goal ordinals')
 }
 finally { connection.close() }

@@ -353,6 +353,20 @@ function operation_preflight(name: string, args: Record<string, any>) {
         observed_type: prototype.type,
       })
     }
+    if (name === 'gather_resource') {
+      if (!actor || !actor.is_valid) return reject('no_actor')
+      const radius = args.search_radius ?? 256
+      if (typeof radius !== 'number' || radius !== math.floor(radius) || radius < 1 || radius > 4096) {
+        return reject('invalid_resource_search_radius')
+      }
+      // A known prototype does not prove a source exists in this search. Do
+      // this read before reserving a native batch that navigation would cancel.
+      const sources = find_world_entities(actor.surface, { position: actor.position, radius, name: resource_name, type: 'resource', limit: 64 })
+      const source = sources.find(entity => entity.valid && entity.amount > 0)
+      if (!source) return reject('resource_source_not_found', { field: 'resource_name', identity: resource_name, search_radius: radius })
+      return accept({ field: 'resource_name', identity: resource_name, expected_type: 'resource', observed_type: prototype.type,
+        resource_search: { radius, position: source.position, amount: source.amount } })
+    }
     return accept({
       field: 'resource_name',
       identity: resource_name,
