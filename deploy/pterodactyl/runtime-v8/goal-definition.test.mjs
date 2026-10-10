@@ -160,6 +160,75 @@ test('a first plan without a goal definition is asked again once, then accepted 
   assert.equal(defined.data.objective, 'launch a rocket')
 })
 
+test('direct goal-pursuit mode skips interaction routing and Jev while retaining the normal admitted action path', async () => {
+  const game = new FakeFactorio()
+  const memory = new CanonicalTaskBoardMemory()
+  const events = []
+  let interactionCalls = 0
+  const agent = agentWith(game, memory, async () => planReply({
+    plan: ['Gather 10 iron ore'],
+    operations: [gather('iron-ore', 10)],
+    checkpoint: inventoryCheckpoint('iron-ore', 10),
+    goal: { scope: 'finite', summary: 'Gather iron ore.', doneWhen: [{ kind: 'inventory_count', item_name: 'iron-ore', minimum: 10 }] },
+  }), {
+    goalPursuitMode: 'direct',
+    interactionProvider: async () => {
+      interactionCalls++
+      throw new Error('direct mode must not call the interaction provider')
+    },
+    interactionDecisionProvider: async () => { throw new Error('direct mode must not call Jev') },
+    onActivity: (event, data) => events.push({ event, data }),
+  })
+
+  await agent.request('gather 10 iron ore', { sender: 'Louis' })
+
+  assert.equal(interactionCalls, 0)
+  assert.equal(game.mutations.length, 1)
+  const route = events.find(entry => entry.event === 'harness.goal_pursuit_direct_routed')
+  assert.equal(route.data.reason, 'single_model_turn_skips_interaction_and_jev_routing')
+  assert.match(route.data.request_id, /^req_/)
+})
+
+test('direct goal-pursuit mode preserves the idle Resume guard instead of admitting Resume as a goal', async () => {
+  const game = new FakeFactorio()
+  const memory = new CanonicalTaskBoardMemory()
+  let providerCalls = 0
+  const agent = agentWith(game, memory, async () => {
+    providerCalls++
+    throw new Error('idle Resume must not call the main provider')
+  }, { goalPursuitMode: 'direct' })
+
+  const result = await agent.request('resume', { sender: 'Louis' })
+
+  assert.equal(providerCalls, 0)
+  assert.equal(result.routedOnly, true)
+  assert.match(result.chatMessage, /There is no current goal to continue/)
+})
+
+test('direct goal-pursuit mode cancels incompatible active work through the existing epoch fence', async () => {
+  const game = new FakeFactorio()
+  game.taskState = 'running'
+  game.queueLength = 1
+  const memory = new CanonicalTaskBoardMemory()
+  memory.recordPlan(KEY, { sender: 'Louis', text: 'old goal' }, {
+    chatMessage: 'Working.', plan: ['Gather iron'], currentStep: 0, operations: [gather('iron-ore', 1)],
+  })
+  let cancelledEpoch
+  const agent = agentWith(game, memory, async () => planReply({
+    plan: ['Gather 10 copper ore'],
+    operations: [gather('copper-ore', 10)],
+    checkpoint: inventoryCheckpoint('copper-ore', 10),
+    goal: { scope: 'finite', summary: 'Gather copper ore.', doneWhen: [{ kind: 'inventory_count', item_name: 'copper-ore', minimum: 10 }] },
+  }), { goalPursuitMode: 'direct' })
+  agent.cancelInteractionWorldWork = async epoch => { cancelledEpoch = epoch }
+
+  await agent.request('gather 10 copper ore', { sender: 'Louis' })
+
+  assert.equal(cancelledEpoch.actor_id, game.status.actor_id)
+  assert.equal(cancelledEpoch.epoch, game.status.epoch)
+  assert.equal(memory.planningState(KEY).goal.objective, 'gather 10 copper ore')
+})
+
 test('a second missing definition stops before any mutation and asks the player', async () => {
   const game = new FakeFactorio()
   const memory = new CanonicalTaskBoardMemory()

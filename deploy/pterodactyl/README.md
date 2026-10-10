@@ -102,6 +102,7 @@ Fresh eggs expose these preferred deployment controls:
 | AI API method | `AI_API_METHOD` | `direct` / `router` / `local`; see "AI provider method" below |
 | Provider URL | `OPENAI_API_BASEURL` | OpenAI-compatible endpoint; `direct`/`router` require HTTPS |
 | Model list | `OPENAI_MODEL` | comma-separated model identifiers: `[0]` main agent, `[1]` subagent (reserved, not yet used) |
+| Goal-pursuit experiment | `SGLUNA_GOAL_PURSUIT_MODE` | `legacy` (default) or `direct`; direct skips interaction/Jev routing but keeps native admission and goal checks |
 | Provider credential | `OPENAI_API_KEY` | required; environment-only |
 | Jev credential | `TYPESAFE_API_KEY` (NPC E2E egg only; local Compose maps `JEV_TYPESAFE_API_KEY` to it) | optional; environment-only; blank disables Jev |
 | Provider timeout | `PROVIDER_TIMEOUT_MS` | provider request timeout |
@@ -123,7 +124,7 @@ No separate `PRIVATE_SERVER` flag exists.
 
 For CLIProxyAPI over Tailscale, set `AI_API_METHOD=local`, `OPENAI_API_BASEURL=http://<machine>.<tailnet>.ts.net:18317/v1`, and the exact proxy model ID (for example, `OPENAI_MODEL=gpt-6-luna`). `OPENAI_API_KEY` is the proxy's client API key; upstream OAuth credentials stay in CLIProxyAPI. A credential priority prefers an account but does not guarantee exclusive routing if the proxy falls back. Use account-specific routing or disable competing credentials for an account-isolated test.
 
-Leaving `AI_API_METHOD` unset keeps the legacy `PROVIDER_PROFILE`-driven behaviour exactly as before, including an explicit `PROVIDER_PROFILE` value. If both are set, `AI_API_METHOD` wins and the startup log says so. The startup log and the in-game Debug window both show one line, e.g. `AI: method=router host=openrouter.ai main=<model[0]> subagent=<model[1]|none>` — never a key.
+Leaving `AI_API_METHOD` unset keeps the legacy `PROVIDER_PROFILE`-driven behaviour exactly as before, including an explicit `PROVIDER_PROFILE` value. If both are set, `AI_API_METHOD` wins and the startup log says so. The startup log and the in-game Debug window show the selected goal-pursuit mode as well, never a key.
 
 ### Legacy environment compatibility
 

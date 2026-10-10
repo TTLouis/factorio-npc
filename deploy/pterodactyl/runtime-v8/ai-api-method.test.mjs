@@ -165,13 +165,22 @@ test('the AI status line names the method, host, and models, and never the API k
     OPENAI_MODEL: 'anthropic/claude-opus-5.5,deepseek/deepseek-chat',
   }))
   const line = aiApiMethodLine(config)
-  assert.equal(line, 'AI: method=router host=openrouter.ai main=anthropic/claude-opus-5.5 subagent=deepseek/deepseek-chat')
+  assert.equal(line, 'AI: method=router host=openrouter.ai main=anthropic/claude-opus-5.5 subagent=deepseek/deepseek-chat goal_pursuit=legacy')
   assert.equal(line.includes(config.key), false)
 
   const soloConfig = configuration({}, baseEnv())
   const soloLine = aiApiMethodLine(soloConfig)
-  assert.match(soloLine, /^AI: method=unset\(profile=auto\) host=provider\.example\.test main=main-model subagent=none$/)
+  assert.match(soloLine, /^AI: method=unset\(profile=auto\) host=provider\.example\.test main=main-model subagent=none goal_pursuit=legacy$/)
   assert.equal(soloLine.includes(soloConfig.key), false)
+})
+
+test('goal pursuit mode is opt-in, validates strictly, and the environment wins over saved configuration', () => {
+  assert.equal(configuration({}, baseEnv()).goalPursuitMode, 'legacy')
+  assert.equal(configuration({}, baseEnv({ SGLUNA_GOAL_PURSUIT_MODE: 'DIRECT' })).goalPursuitMode, 'direct')
+  assert.equal(configuration({ goalPursuitMode: 'direct' }, baseEnv()).goalPursuitMode, 'direct')
+  assert.equal(configuration({ goalPursuitMode: 'direct' }, baseEnv({ SGLUNA_GOAL_PURSUIT_MODE: 'legacy' })).goalPursuitMode, 'legacy')
+  assert.throws(() => configuration({}, baseEnv({ SGLUNA_GOAL_PURSUIT_MODE: 'anything-else' })), /SGLUNA_GOAL_PURSUIT_MODE must be legacy or direct/)
+  assert.equal(migrateConfig({}, baseEnv({ SGLUNA_GOAL_PURSUIT_MODE: 'direct' })).goalPursuitMode, 'direct')
 })
 
 test('an egg-shaped config with no method and a saved PROVIDER_PROFILE=openai-reasoning keeps openai-reasoning', () => {

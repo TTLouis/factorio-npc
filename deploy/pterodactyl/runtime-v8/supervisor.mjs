@@ -150,7 +150,7 @@ function aiApiHostname(base) {
 export function aiApiMethodLine(config) {
   const method = config.aiApiMethod ?? `unset(profile=${config.profile})`
   const subagent = config.subagentModel ?? 'none'
-  return `AI: method=${method} host=${aiApiHostname(config.base)} main=${config.model} subagent=${subagent}`
+  return `AI: method=${method} host=${aiApiHostname(config.base)} main=${config.model} subagent=${subagent} goal_pursuit=${config.goalPursuitMode ?? 'legacy'}`
 }
 
 export function deploymentCompatibilityWarnings(env = process.env) {
@@ -181,6 +181,8 @@ export function configuration(raw = {}, env = process.env) {
   const modelList = modelListValue(env, raw, 'replace-me')
   const base = env.OPENAI_API_BASEURL ?? raw.providerUrl ?? 'https://provider.invalid/v1'
   const aiApiMethod = aiApiMethodValue(env)
+  const goalPursuitMode = cleanString(env.SGLUNA_GOAL_PURSUIT_MODE ?? raw.goalPursuitMode ?? 'legacy', 'SGLUNA_GOAL_PURSUIT_MODE', 32).toLowerCase()
+  check(['legacy', 'direct'].includes(goalPursuitMode), 'SGLUNA_GOAL_PURSUIT_MODE must be legacy or direct')
   // A profile worth overriding can come from either the env var or a value
   // already saved in sgluna-config.json (raw.providerProfile) by an earlier
   // run or egg version; either one is reported to the operator when a
@@ -208,6 +210,7 @@ export function configuration(raw = {}, env = process.env) {
     base,
     profile,
     aiApiMethod,
+    goalPursuitMode,
     aiApiMethodOverridesProfile,
     overriddenProviderProfile: aiApiMethodOverridesProfile ? overriddenProviderProfile : undefined,
     key: env.OPENAI_API_KEY ?? '',
@@ -263,6 +266,7 @@ export const SGLUNA_CONFIG_DEFAULTS = {
   chatPlayers: 'none',
   providerUrl: 'https://provider.invalid/v1',
   providerProfile: 'auto',
+  goalPursuitMode: 'legacy',
   model: 'replace-me',
   save: '',
   // A 32,000-unit plan-authoring reply takes about three minutes.
@@ -287,11 +291,14 @@ export function migrateConfig(raw = {}, env = process.env) {
   // rather than rejected: an old or unrelated value on disk must never block
   // startup for a server that has already moved to the method setting.
   const aiApiMethod = aiApiMethodValue(env)
+  const goalPursuitMode = cleanString(env.SGLUNA_GOAL_PURSUIT_MODE ?? raw.goalPursuitMode ?? SGLUNA_CONFIG_DEFAULTS.goalPursuitMode, 'SGLUNA_GOAL_PURSUIT_MODE', 32).toLowerCase()
+  check(['legacy', 'direct'].includes(goalPursuitMode), 'SGLUNA_GOAL_PURSUIT_MODE must be legacy or direct')
   const next = {
     actorMode,
     chatPlayers,
     providerUrl: env.OPENAI_API_BASEURL ?? raw.providerUrl ?? SGLUNA_CONFIG_DEFAULTS.providerUrl,
     providerProfile: providerProfileValue(env, raw, SGLUNA_CONFIG_DEFAULTS.providerProfile, { validate: !aiApiMethod }),
+    goalPursuitMode,
     model: cleanString(env.OPENAI_MODEL ?? raw.model ?? SGLUNA_CONFIG_DEFAULTS.model, 'OPENAI_MODEL', 200),
     save: cleanString(env.SAVE_NAME ?? raw.save ?? SGLUNA_CONFIG_DEFAULTS.save, 'SAVE_NAME', 160),
     providerTimeoutMs: safeInteger(
@@ -2793,13 +2800,14 @@ export class Session {
       provider: (messages, context) => this.roleProvider(messages, context),
       interactionProvider: (messages, context) => this.roleProvider(messages, context),
       agentRoleConfig: this.config, // names the planner/executor models for the loop's role tagging (agent-roles.mjs)
+      goalPursuitMode: this.config.goalPursuitMode,
       // Production contract: every goal starts from a game-checkable goal
       // definition that the player sees in game.
       goalDefinitionPolicy: 'required',
-      interactionDecisionProvider: jevDecisionProvider,
-      steeringDecisionProvider: jevDecisionProvider,
-      operationProjectionDecisionProvider: jevDecisionProvider,
-      skillDecisionProvider: jevDecisionProvider,
+      interactionDecisionProvider: this.config.goalPursuitMode === 'direct' ? undefined : jevDecisionProvider,
+      steeringDecisionProvider: this.config.goalPursuitMode === 'direct' ? undefined : jevDecisionProvider,
+      operationProjectionDecisionProvider: this.config.goalPursuitMode === 'direct' ? undefined : jevDecisionProvider,
+      skillDecisionProvider: this.config.goalPursuitMode === 'direct' ? undefined : jevDecisionProvider,
       reserve: async context => reserveBudget(
         path.join(this.root, '.sgluna', 'provider-budget.json'),
         this.config.budget,

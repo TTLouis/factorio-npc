@@ -2882,6 +2882,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     this.applyContextWindowCeiling(profileWindow, 'provider_profile')
     this.interactionProvider = typeof options.interactionProvider === 'function' ? options.interactionProvider : null
+    if (!['legacy', 'direct'].includes(options.goalPursuitMode ?? 'legacy')) {
+      throw new AgentLoopError('goalPursuitMode must be legacy or direct')
+    }
+    // `direct` is an opt-in experiment. It preserves this loop's native
+    // operation admission, receipt reconciliation, durable state and actor
+    // fencing, while avoiding a separate model/Jev interaction-routing turn.
+    this.goalPursuitMode = options.goalPursuitMode ?? 'legacy'
     this.interactionDecisionProvider = this.recordedDecisionProvider(options.interactionDecisionProvider)
     this.steeringDecisionProvider = this.recordedDecisionProvider(options.steeringDecisionProvider)
     this.operationProjectionDecisionProvider = this.recordedDecisionProvider(options.operationProjectionDecisionProvider)
@@ -8133,6 +8140,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const taskStatus = await this.readInteractionTaskStatus()
     const healthyRuntime = interactionRuntimeHealthy(taskStatus)
 
+    // The normal classifier would recognize an idle bare Resume as a
+    // non-goal chat turn. Direct mode does not call that classifier, so keep
+    // this deterministic guard before selecting its route. A restart-paused
+    // goal remains redrivable below; only the truly empty case is rejected.
+    if (this.goalPursuitMode === 'direct' && isBareContinuation(text) && !planBefore && !healthyRuntime
+      && !this.redrivableGoalWithoutPlan(memoryKey)) {
+      const reply = 'There is no current goal to continue; the last one is finished. Tell me what you want me to do next.'
+      await this.rememberRoutedInteraction(memoryKey, sender, text, reply)
+      return { chatMessage: reply, plan: [], currentStep: 0, operations: [], interactionIntent: 'continue_current', routedOnly: true }
+    }
+
     // Upgrade safety: older builds could persist a provider/control-plane
     // failure as durable WORLD_BLOCKED. That is not Factorio truth. Demote it
     // before interaction routing while preserving the verified Task Board.
@@ -8150,7 +8168,20 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
     let routed
-    if (!this.interactionProvider && !this.interactionDecisionProvider) {
+    if (this.goalPursuitMode === 'direct') {
+      routed = {
+        route: { intent: planBefore && isBareContinuation(text) ? 'continue_current' : 'new_goal', queue_conflict: false, reply: '' },
+        epoch: healthyRuntime ? await super.captureEpoch() : undefined,
+        // Keep the existing non-model lifecycle guards enabled: they cancel
+        // incompatible live work with the captured epoch, retain interrupted
+        // tasks, and reject an idle bare Resume. Only classification itself is
+        // bypassed in this mode.
+        router_bypassed: false,
+        classifier_skipped: 'goal_pursuit_direct',
+        route_source: 'goal_pursuit_direct',
+      }
+    }
+    else if (!this.interactionProvider && !this.interactionDecisionProvider) {
       routed = {
         route: { intent: planBefore ? 'continue_current' : 'new_goal', queue_conflict: false, reply: '' },
         epoch: undefined,
@@ -8307,7 +8338,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       && planBefore?.provider_recovery?.kind === 'budget_handoff'
       && planBefore?.provider_recovery?.phase === 'planner_pending'
       && !healthyRuntime
-    const plannerShape = !resumeProviderBudgetHandoff
+    const plannerShape = this.goalPursuitMode !== 'direct'
+      && !resumeProviderBudgetHandoff
       && ['new_goal', 'amend_current', 'continue_current'].includes(intent)
       ? await this.requestInteractionPlannerShape(text, sender, taskStatus, planBefore, intent, routed.epoch)
       : undefined
@@ -8436,6 +8468,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // same reason did not pause it (goal.paused is for new pauses).
       start_status: planBefore?.status,
       start_pause_reason: planBefore?.pause_reason,
+    }
+    if (this.goalPursuitMode === 'direct') {
+      await this.traceEvent('harness.goal_pursuit_direct_routed', {
+        request_id: this.traceRequest.id,
+        reason: 'single_model_turn_skips_interaction_and_jev_routing',
+        intent,
+        retained_native_guards: ['actor_epoch', 'structured_admission', 'operation_receipts', 'reconciliation'],
+      })
     }
     await this.traceEvent('request.received', {
       sender,
