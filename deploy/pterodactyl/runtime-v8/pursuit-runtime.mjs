@@ -3,7 +3,7 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { GoalPursuit, newPursuit } from './goal-pursuit.mjs'
 import { deploymentStatus, executeAuthorizedBatch, actorChanged } from './supervisor-adapter.mjs'
-import { approvedOperationListText, toolDefinitions, toolCommand, renderOperation, renderOperationPreflight, luaString, parseOperation } from './structured-policy.mjs'
+import { approvedOperationListText, toolDefinitions, toolCommand, renderOperation, renderOperationPreflight, luaString, parseOperation, pursuitDecisionToolDefinition } from './structured-policy.mjs'
 import { sanitizeGoalDefinition, evaluateGoalDefinition } from './goal-definition.mjs'
 import { createEmptyAuthorization, evaluateOperationAdmission, entityProtection, recordReservation, releaseReservation, restoreAuthorization } from './authorization.mjs'
 
@@ -15,14 +15,14 @@ const AMBIGUOUS = new Set(['mine_entity', 'rotate_entity', 'clear_area', 'clear_
 const EXACT_MUTATIONS = new Set(['mine_entity_exact', 'rotate_entity_exact', 'set_machine_recipe', 'move_items_exact', 'supply_entity'])
 
 export const PURSUIT_PROMPT = `You control a standalone Factorio character through a bounded pursuit harness.
-Native Factorio actions ARE available through the external harness. The provider's tool_choice:none disables provider-hosted tools only; it does not disable operations or observations in your JSON response. The harness validates and executes those JSON requests and returns their native receipts. This is an action request, not a chat-only turn.
+Native Factorio actions ARE available through the external harness. When submitPursuitDecision is available, call it with your decision; otherwise return the same decision envelope as JSON. The harness validates and executes the bounded requests and returns their native receipts.
 Pursue the immutable user objective and trusted done-when predicate in the packet. Choose observations, the next native action batch, strategy and recovery yourself. Notes may evolve; a dispatched batch cannot change identity. Native actions and factory production continue while you think.
-Reply with ONE JSON object using only notes (optional strategic memory, max 2000 chars), operations (max 16), observations (max 4 approved read requests {name,args}), or pauseReason (max 300 chars). Choose only one of operations, observations, or pauseReason per decision. Do not emit a plan, stepId, tool_calls, generated Lua, shell, goal replacement or completion claim.
+Reply with ONE JSON object containing exactly a decision field. The decision object uses only notes (optional strategic memory, max 2000 chars), operations (1-16), observations (1-4 approved read requests {name,args}), or pauseReason (max 300 chars). Choose only one of operations, observations, or pauseReason per decision. For example, a knowledge request is {"decision":{"observations":[{"name":"getInventoryItems","args":{}}]}}. Empty arrays cannot request anything. Do not emit a plan, stepId, tool_calls, generated Lua, shell, goal replacement or completion claim.
 Only trusted game state proves success. Receipts distinguish admitted, running, completed, refused and uncertain effects. Never replay uncertain work, treat an admission as completion, or invent prototype names, entity IDs, recipes or game mechanics. Use approved tools to inspect what you need. Native preflight refusal is evidence for recovery, not proof the world cannot support the goal. Empty decisions pause. Use native wait for a bounded condition check when appropriate.
-Missing materials or knowledge are reasons to choose observations or acquisition actions. Pause only for a concrete blocker requiring owner intervention or an observed unavailable capability; name the blocker and supporting observation in pauseReason. Do not pause merely because wire tool calls are disabled. harvest_product is restricted to unowned neutral natural trees/rocks; buildings and player-touched sources cannot be harvested.
+Missing materials or knowledge are reasons to choose observations or acquisition actions. Pause only for a concrete blocker requiring owner intervention or an observed unavailable capability; name the blocker and supporting observation in pauseReason. Use the decision submission interface to request observations or native actions. harvest_product is restricted to unowned neutral natural trees/rocks; buildings and player-touched sources cannot be harvested.
 Keep player-built structures and reserved supplies intact. Use exact targets for mutations/withdrawals; ambiguous destructive operations and player inventory withdrawal are refused. Inputs marked historical may be stale; re-observe exact targets. Resume/restarts share one cumulative call, wall-time and input allowance.
 Approved operations and argument shapes: ${approvedOperationListText()}
-Approved read tool schemas: ${JSON.stringify(toolDefinitions)}`
+Approved observation request schemas (these are JSON requests to the external harness): ${JSON.stringify(toolDefinitions.map(tool => ({ name: tool.function.name, description: tool.function.description, args: tool.function.parameters })))}`
 
 export function pursuitMessages(packet) {
   return [{ role: 'system', content: PURSUIT_PROMPT }, { role: 'user', content: JSON.stringify(packet) }]
@@ -48,12 +48,15 @@ export function pursuitProvider(provider, reserve = async () => {}) {
     check(!context.signal.aborted, 'pursuit_cancelled')
     const message = await provider(pursuitMessages(packet), { ...context, allowTools: false,
       controlProtocol: 'pursuit', role: 'planner', triggerSource: 'pursuit', requestBodyPatch: { max_tokens: 4000 } })
-    check(!message.tool_calls?.length, 'pursuit_wire_tools_refused')
+    const calls = message.tool_calls ?? []
+    check(Array.isArray(calls) && (calls.length === 0 || (calls.length === 1 && calls[0]?.type === 'function' && calls[0].function?.name === 'submitPursuitDecision')), 'pursuit_wire_tools_refused')
     check(!['length', 'content_filter', 'safety', 'blocked'].includes(message._sglunaProvider?.finish_reason), 'pursuit_provider_incomplete')
-    return { decision: json(message.content), usage: copy(message._sglunaProvider?.usage ?? null) }
+    const parsed = json(calls.length ? calls[0].function.arguments : message.content)
+    if (parsed.decision !== undefined) check(Object.keys(parsed).length === 1, 'pursuit_wire_envelope_invalid')
+    return { decision: parsed.decision ?? parsed, usage: copy(message._sglunaProvider?.usage ?? null) }
   }
   // Includes the stable instruction/tool prefix, not just the observation packet.
-  call.inputChars = packet => JSON.stringify(pursuitMessages(packet)).length
+  call.inputChars = packet => JSON.stringify(pursuitMessages(packet)).length + JSON.stringify(pursuitDecisionToolDefinition).length
   return call
 }
 

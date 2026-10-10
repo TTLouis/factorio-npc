@@ -10,6 +10,17 @@ const goal = { objective: 'Gather ten copper ore.', predicate: { scope: 'finite'
   doneWhen: [{ kind: 'inventory_count', item_name: 'copper-ore', minimum: 10 }] } }
 const action = { notes: 'Acquire the requested ore.', operations: [{ name: 'gather_resource', args: { resource_name: 'copper-ore', count: 10 } }] }
 
+test('pursuit accepts one decision submission and refuses other or multiple wire tools', async () => {
+  const context = { signal: new AbortController().signal, requestId: 'wire_fixture' }
+  const tool = { type: 'function', function: { name: 'submitPursuitDecision', arguments: JSON.stringify({ decision: action }) } }
+  const call = pursuitProvider(async () => ({ tool_calls: [tool] }))
+  assert.deepEqual((await call({}, context)).decision, action)
+  for (const calls of [[{ ...tool, function: { ...tool.function, name: 'executeLua' } }], [tool, tool], {}, 'malformed', [null]]) {
+    await assert.rejects(pursuitProvider(async () => ({ tool_calls: calls }))({}, context), /pursuit_wire_tools_refused/)
+  }
+  await assert.rejects(pursuitProvider(async () => ({ content: JSON.stringify({ decision: action, extra: true }) }))({}, context), /pursuit_wire_envelope_invalid/)
+})
+
 async function fixture(t, replies = [action]) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'pursuit-runtime-'))
   t.after(() => fsp.rm(root, { recursive: true, force: true }))
@@ -140,10 +151,10 @@ test('pursuit harvest refuses legacy-only mod preflight and active reservations'
   assert.equal((await f.agent.admit(harvest, f.agent.loop.state.actor)).code, 'pursuit_harvest_reserved_world')
 })
 
-test('pursuit explains external JSON execution despite provider tool_choice none', () => {
+test('pursuit explains bounded decision submission and grounded blockers', () => {
   const prompt = pursuitMessages({ objective: 'Research green science.' })[0].content
   assert.match(prompt, /Native Factorio actions ARE available/)
-  assert.match(prompt, /does not disable operations or observations/)
+  assert.match(prompt, /validates and executes the bounded requests/)
   assert.match(prompt, /name the blocker and supporting observation/)
 })
 
@@ -231,7 +242,8 @@ test('pursuit provider wire protocol preserves JSON and never injects legacy con
     fetchImpl: async (_url, options) => { body = JSON.parse(options.body); return new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: JSON.stringify(decision) }, finish_reason: 'stop' }], usage: { prompt_tokens: 4, completion_tokens: 3, total_tokens: 7 } }), { status: 200 }) },
   })
   assert.deepEqual(body.messages, history)
-  assert.equal(body.tools, undefined)
+  assert.equal(body.tools.length, 1)
+  assert.equal(body.tools[0].function.name, 'submitPursuitDecision')
   assert.equal(message.content, JSON.stringify(decision))
   assert.equal(message._sglunaProvider.diagnostic_code, 'ok')
 })

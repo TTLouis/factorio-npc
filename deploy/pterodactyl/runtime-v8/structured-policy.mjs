@@ -1241,3 +1241,27 @@ export function toolCommand(name, args) {
   if (name === 'getResearchPath') return renderResearchPath(args)
   return base.toolCommand(name, args)
 }
+
+const pursuitResponseFormat = {
+  type: 'json_schema', json_schema: { name: 'pursuit_decision', strict: false, schema: {
+    type: 'object', additionalProperties: false, required: ['decision'],
+    properties: { decision: { type: 'object', additionalProperties: false,
+    properties: {
+      notes: { type: 'string', maxLength: 2000 },
+      operations: { type: 'array', minItems: 1, maxItems: 16, items: {
+        type: 'object', additionalProperties: false, required: ['name', 'args'],
+        properties: { name: { type: 'string' }, args: { type: 'object' } },
+      } },
+      observations: { type: 'array', minItems: 1, maxItems: 4, items: {
+        type: 'object', additionalProperties: false, required: ['name', 'args'],
+        properties: { name: { type: 'string', enum: toolDefinitions.map(tool => tool.function.name) }, args: { type: 'object' } },
+      } },
+      pauseReason: { type: 'string', minLength: 1, maxLength: 300 },
+    },
+    oneOf: [{ required: ['operations'] }, { required: ['observations'] }, { required: ['pauseReason'] }],
+    } },
+  } },
+}
+
+
+export const pursuitDecisionToolDefinition = { type: 'function', function: { name: 'submitPursuitDecision', description: 'Submit one bounded next decision to the external Factorio harness. This submission does not itself execute game actions; native validation and admission follow.', parameters: pursuitResponseFormat.json_schema.schema } }

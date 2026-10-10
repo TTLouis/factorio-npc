@@ -5,7 +5,7 @@ import { check, DeploymentError } from './common.mjs'
 import { diagnoseDsmlRejection, parseDsmlToolCalls } from './dsml-tool-calls.mjs'
 import { cacheBreakpointIndexes, insertTailBlock, lastUserOutsideTail, promptLayout } from './prompt-prefix.mjs'
 import { EXECUTOR_ROLE } from './agent-roles.mjs'
-import { approvedOperationListText, executorProviderToolDefinitions, parsePlan, providerToolDefinitions as toolDefinitions } from './structured-policy.mjs'
+import { approvedOperationListText, executorProviderToolDefinitions, parsePlan, providerToolDefinitions as toolDefinitions, pursuitDecisionToolDefinition } from './structured-policy.mjs'
 
 const COMPLETION_MARKER = '[MOD] Autorio operation batch completed.'
 const FAILURE_MARKER = '[MOD] Autorio operation error:'
@@ -1436,10 +1436,13 @@ export async function providerRequest(config, messages, {
     body.tools = compactContinuation ? compactCompletionTools(roleToolDefinitions) : roleToolDefinitions
     body.tool_choice = allowTools ? 'auto' : 'none'
   }
-  // The pursuit protocol has no wire tools. CLIProxy's Codex route still needs
-  // an explicit prohibition so omitted tool settings cannot enable built-ins.
+  // Expose one decision submission, never native game tools. The explicit
+  // custom tool list prevents implicit provider built-ins.
   const pursuitClosedTools = pursuit && capability.id === 'local' && capability.model_family === 'openai-gpt'
-  if (pursuitClosedTools) body.tool_choice = 'none'
+  if (pursuitClosedTools) {
+    body.tools = [pursuitDecisionToolDefinition]
+    body.tool_choice = { type: 'function', function: { name: 'submitPursuitDecision' } }
+  }
   applyRequestBodyPatch(body, requestBodyPatch, capability)
   const requestedOutputCap = body[capability.token_field]
 
@@ -1473,8 +1476,9 @@ export async function providerRequest(config, messages, {
   }
   if (pursuitClosedTools) {
     await traceProviderResult('provider.pursuit_wire_contract', {
-      reason: 'local_openai_pursuit_explicit_tool_choice_none',
+      reason: 'local_openai_pursuit_bounded_decision_tool',
       tool_choice: body.tool_choice,
+      response_format: body.response_format?.type ?? 'unspecified',
       allowed_decision_fields: ['notes', 'operations', 'observations', 'pauseReason'],
     }, traceOptions)
   }

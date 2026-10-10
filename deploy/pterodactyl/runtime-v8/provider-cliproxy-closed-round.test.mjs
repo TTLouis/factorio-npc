@@ -17,12 +17,12 @@ function gateway(captured, decision = plan) {
     const body = JSON.parse(options.body)
     captured.push(body)
     const message = { role: 'assistant', content: JSON.stringify(decision) }
-    if (body.tool_choice !== 'none') message.images = [{ type: 'image_url', image_url: { url: `data:image/png;base64,${'A'.repeat(271137)}` } }]
+    if (body.tool_choice !== 'none' && body.tool_choice?.function?.name !== 'submitPursuitDecision') message.images = [{ type: 'image_url', image_url: { url: `data:image/png;base64,${'A'.repeat(271137)}` } }]
     return new Response(JSON.stringify({ id: 'recorded-wire-shape', model: config.model, choices: [{ finish_reason: 'stop', message }] }))
   }
 }
 
-test('CLI proxy pursuit disables implicit tools without adding legacy planner schemas', async t => {
+test('CLI proxy pursuit exposes only the bounded decision tool without legacy planner schemas', async t => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-pursuit-cliproxy-'))
   t.after(() => fsp.rm(dir, { recursive: true, force: true }))
   const traceFile = path.join(dir, 'prompts.jsonl')
@@ -31,12 +31,16 @@ test('CLI proxy pursuit disables implicit tools without adding legacy planner sc
   const reply = await providerRequest(config, messages, { controlProtocol: 'pursuit', allowTools: false,
     fetchImpl: gateway(captured, decision), promptTraceFile: traceFile, requestId: 'req_pursuit_proxy' })
   assert.deepEqual(JSON.parse(reply.content), decision)
-  assert.equal(captured[0].tool_choice, 'none')
-  assert.equal('tools' in captured[0], false)
+  assert.deepEqual(captured[0].tool_choice, { type: 'function', function: { name: 'submitPursuitDecision' } })
+  assert.equal(captured[0].tools.length, 1)
+  const schema = captured[0].tools[0].function.parameters.properties.decision
+  assert.equal(schema.properties.observations.minItems, 1)
+  assert.equal(schema.properties.operations.minItems, 1)
   const trace = (await fsp.readFile(traceFile, 'utf8')).trim().split('\n').map(JSON.parse)
   const contract = trace.find(row => row.event === 'provider.pursuit_wire_contract')
   assert.equal(contract.request_id, 'req_pursuit_proxy')
-  assert.equal(contract.reason, 'local_openai_pursuit_explicit_tool_choice_none')
+  assert.equal(contract.reason, 'local_openai_pursuit_bounded_decision_tool')
+  assert.equal(contract.response_format, 'unspecified')
   assert.deepEqual(contract.allowed_decision_fields, ['notes', 'operations', 'observations', 'pauseReason'])
   assert.equal(trace.some(row => row.event === 'provider.control_output_contract'), false)
 })

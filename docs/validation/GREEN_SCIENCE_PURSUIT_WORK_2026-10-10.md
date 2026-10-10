@@ -11,7 +11,7 @@ Fresh natural world, standalone NPC, zero connected humans, normal speed. Declar
 - [x] Prior transport correction: `f41cd245`, explicit provider tool prohibition; one exact-prompt replay returned a generic pause in 3.5 seconds. This did not prove gameplay.
 - [x] Clarify that external JSON actions/observations remain executable while provider-hosted tools are disabled; request concrete evidence for pauses.
 - [x] Add a stricter native natural-harvest interface, protecting player assets and refusing ambiguous harvest when reservations exist.
-- [ ] Complete deterministic protection/correlation regressions and native tree-harvest proof.
+- [x] Complete deterministic protection/correlation regressions and native tree-harvest proof: real wood gain=4, zero humans, speed=1; pending receipt preserved.
 - [x] Independent invariant review and Docker gates: 2,111 runtime tests, 1,049 mod tests, typechecks and generated Lua checks pass.
 - [ ] Freeze candidate, repin installer, full build and deployed-file/mod verification.
 - [ ] Run bounded fresh-world green-science attempt; diagnose every failed outcome from actual traces.
@@ -23,3 +23,7 @@ Full working evidence: `test-results/green-science-pursuit-20261010/`. Current i
 ## Native finding and correction
 
 The first new tree-harvest lane exposed an existing Lua receipt defect: mapping missing receipts produced nil holes, and every() reported completion while native mining was still active. Retained acknowledgement proves the premature completed state. Reconciliation now iterates dense batch references and looks up each exact receipt; absent receipts stay in flight. Independent review found no blocker. Native replay remains pending before live validation.
+
+## Live wire finding
+
+Pinned candidate c7a1938a matched all49 shipped runtime modules and native-tested control.lua. Attempt01 stopped after one4.5second request returning an empty observations array; no resources or research progressed. A response schema diagnostic was accepted after moving the decision union below the root, but Luna still claimed no game access. An explicit sole submitPursuitDecision tool returned four concrete approved reads in3.7seconds. It submits bounded data; existing operation validation, admission and receipts remain authoritative. Unexpected/multiple/malformed tool calls and extra envelope fields are refused. Static final runtime gate and fresh attempt02 are pending. Native control bytes remain unchanged from the passing tree/provenance gate. All probes dispatch no gameplay.
