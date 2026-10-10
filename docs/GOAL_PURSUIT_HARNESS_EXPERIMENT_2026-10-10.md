@@ -2,6 +2,12 @@
 
 ## Scope and status
 
+Budget checkpoint: the direct route at `8415a486` is not the requested pursuit
+harness. A separate bounded `goal-pursuit.mjs` core and regressions now exist,
+but runtime/provider integration is unfinished and no live trial has run.
+See `validation/GOAL_PURSUIT_CHECKPOINT_2026-10-10.md` for current evidence,
+independent core review, allowance boundaries and exact remaining work.
+
 This is an opt-in, local-first experiment on `experiment/goal-pursuit-harness`.
 `SGLUNA_GOAL_PURSUIT_MODE=direct` removes the interaction-classifier and Jev
 routing decisions from the critical path. The main provider still chooses what
@@ -71,6 +77,8 @@ cover those boundaries before the single permitted live run.
 - [x] Baseline isolated at `30cb9b99`; legacy path preserved.
 - [x] Reuse boundary and direct-vs-legacy design recorded.
 - [x] Direct-mode configuration, route, trace, and scripted regressions complete (focused Docker: 51 tests).
+- [x] Separate pursuit core preserved, safety fixes and regressions added, independent core review obtained.
+- [ ] Actual pursuit runtime/provider/permission/driver integration complete.
 - [ ] Docker static gate and relevant real-engine lane complete.
 - [ ] Invariant review, clean candidate commit, shipped-runtime/mod verification complete.
 - [ ] One capped fresh-world Luna run complete, or a truthful preflight/budget checkpoint retained.
