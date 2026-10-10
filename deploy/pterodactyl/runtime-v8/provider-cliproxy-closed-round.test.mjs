@@ -44,6 +44,8 @@ test('CLI proxy pursuit exposes only the bounded decision tool without legacy pl
   assert.equal(contract.response_format, 'unspecified')
   assert.equal(contract.reasoning_effort, 'medium')
   assert.deepEqual(contract.allowed_decision_fields, ['notes', 'operations', 'observations', 'pauseReason'])
+  assert.ok(contract.allowed_operation_names.includes('place_entity'))
+  assert.equal(contract.allowed_operation_names.includes('clear_construction_area'), false)
   assert.equal(trace.some(row => row.event === 'provider.control_output_contract'), false)
 })
 

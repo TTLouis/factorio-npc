@@ -1482,6 +1482,7 @@ export async function providerRequest(config, messages, {
       response_format: body.response_format?.type ?? 'unspecified',
       reasoning_effort: body.reasoning_effort,
       allowed_decision_fields: ['notes', 'operations', 'observations', 'pauseReason'],
+      allowed_operation_names: body.tools?.[0]?.function?.parameters?.properties?.decision?.properties?.operations?.items?.properties?.name?.enum,
     }, traceOptions)
   }
   if (keepClosedTools && capability.id === 'local' && capability.model_family === 'openai-gpt') {

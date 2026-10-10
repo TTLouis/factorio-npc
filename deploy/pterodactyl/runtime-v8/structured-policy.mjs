@@ -149,6 +149,15 @@ export function approvedOperationListText() {
   }).join('; ')
 }
 
+export const pursuitDeniedOperationNames = Object.freeze(['mine_entity', 'rotate_entity', 'clear_area', 'clear_construction_area', 'execute_construction_plan'])
+export function pursuitOperationNames() {
+  return operationTypeCatalog().map(entry => entry.name).filter(name => !pursuitDeniedOperationNames.includes(name))
+}
+export function pursuitOperationListText() {
+  const denied = new Set(pursuitDeniedOperationNames)
+  return approvedOperationListText().split('; ').filter(row => !denied.has(row.split(' ')[0])).join('; ')
+}
+
 export function parseOperation(value) {
   if (value?.name !== 'place_candidate') return base.parseOperation(value)
   check(value && typeof value === 'object' && !Array.isArray(value), 'Operation must be an object')
@@ -1250,7 +1259,7 @@ const pursuitResponseFormat = {
       notes: { type: 'string', maxLength: 2000 },
       operations: { type: 'array', minItems: 1, maxItems: 16, items: {
         type: 'object', additionalProperties: false, required: ['name', 'args'],
-        properties: { name: { type: 'string' }, args: { type: 'object' } },
+        properties: { name: { type: 'string', enum: pursuitOperationNames() }, args: { type: 'object' } },
       } },
       observations: { type: 'array', minItems: 1, maxItems: 4, items: {
         type: 'object', additionalProperties: false, required: ['name', 'args'],

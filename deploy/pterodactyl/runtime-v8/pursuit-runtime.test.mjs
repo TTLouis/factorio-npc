@@ -5,10 +5,25 @@ import os from 'node:os'
 import path from 'node:path'
 import { PursuitRuntime, pursuitProvider, pursuitIntake, pursuitMessages, renderPursuitOperation } from './pursuit-runtime.mjs'
 import { providerRequest } from './provider.mjs'
+import { pursuitDecisionToolDefinition, approvedOperationListText } from './structured-policy.mjs'
 
 const goal = { objective: 'Gather ten copper ore.', predicate: { scope: 'finite', summary: 'Hold ten copper ore.',
   doneWhen: [{ kind: 'inventory_count', item_name: 'copper-ore', minimum: 10 }] } }
 const action = { notes: 'Acquire the requested ore.', operations: [{ name: 'gather_resource', args: { resource_name: 'copper-ore', count: 10 } }] }
+
+test('pursuit advertised operations match its restricted adapter while the general catalog stays available', () => {
+  const names = pursuitDecisionToolDefinition.function.parameters.properties.decision.properties.operations.items.properties.name.enum
+  const prompt = pursuitMessages({})[0].content
+  const operations = prompt.split('Approved operations and argument shapes: ')[1].split('\n')[0]
+  for (const denied of ['mine_entity', 'rotate_entity', 'clear_area', 'clear_construction_area', 'execute_construction_plan']) {
+    assert.equal(names.includes(denied), false)
+    assert.equal(operations.split('; ').some(row => row.startsWith(`${denied} {`)), false)
+  }
+  assert.ok(approvedOperationListText().includes('mine_entity {'))
+  assert.ok(approvedOperationListText().includes('rotate_entity {'))
+  for (const allowed of ['place_entity', 'place_candidate', 'supply_entity', 'mine_entity_exact', 'gather_resource']) assert.ok(names.includes(allowed))
+  assert.match(prompt, /Never guess a future unit_number/)
+})
 
 test('pursuit accepts one decision submission and refuses other or multiple wire tools', async () => {
   const context = { signal: new AbortController().signal, requestId: 'wire_fixture' }

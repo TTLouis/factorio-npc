@@ -3,7 +3,7 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { GoalPursuit, newPursuit } from './goal-pursuit.mjs'
 import { deploymentStatus, executeAuthorizedBatch, actorChanged } from './supervisor-adapter.mjs'
-import { approvedOperationListText, toolDefinitions, toolCommand, renderOperation, renderOperationPreflight, luaString, parseOperation, pursuitDecisionToolDefinition } from './structured-policy.mjs'
+import { pursuitOperationListText, pursuitDeniedOperationNames, toolDefinitions, toolCommand, renderOperation, renderOperationPreflight, luaString, parseOperation, pursuitDecisionToolDefinition } from './structured-policy.mjs'
 import { sanitizeGoalDefinition, evaluateGoalDefinition } from './goal-definition.mjs'
 import { createEmptyAuthorization, evaluateOperationAdmission, entityProtection, recordReservation, releaseReservation, restoreAuthorization } from './authorization.mjs'
 
@@ -11,7 +11,7 @@ const copy = value => structuredClone(value)
 const check = (ok, message) => { if (!ok) throw new Error(message) }
 const json = raw => JSON.parse(String(raw).trim())
 const actorView = actor => ({ actor_id: actor.actor_id, epoch: actor.epoch, mode: actor.mode, actor_kind: actor.actor_kind })
-const AMBIGUOUS = new Set(['mine_entity', 'rotate_entity', 'clear_area', 'clear_construction_area', 'execute_construction_plan'])
+const AMBIGUOUS = new Set(pursuitDeniedOperationNames)
 const EXACT_MUTATIONS = new Set(['mine_entity_exact', 'rotate_entity_exact', 'set_machine_recipe', 'move_items_exact', 'supply_entity'])
 
 export const PURSUIT_PROMPT = `You control a standalone Factorio character through a bounded pursuit harness.
@@ -25,7 +25,8 @@ The packet already supplies current inventory, task state and actor position whe
 recipeKnowledge retains compact native prototype quantities across actions; complete:false means quantities are incomplete and cannot support input calculations. It contains historical recipe rules, not current inventory, unlock status, target identity or admission. Use complete retained recipes without repeatedly re-reading unchanged ingredients. Inspect fresh mutable facts when required for execution.
 Receipt requested_actions describes historical submitted quantities and targets. Use exact receipt verdicts together with current inventory to recognize completed work; never blindly repeat those actions or treat their targets as fresh.
 Keep player-built structures and reserved supplies intact. Use exact targets for mutations/withdrawals; ambiguous destructive operations and player inventory withdrawal are refused. Inputs marked historical may be stale; re-observe exact targets. Resume/restarts share one cumulative call, wall-time and input allowance.
-Approved operations and argument shapes: ${approvedOperationListText()}
+Place a held machine as its own action boundary when its future native identity is needed. After its exact placement receipt settles, observe the new entity and use the observed unit_number in a later supply/recipe action. Never guess a future unit_number or supply a machine in the batch that creates it. Use placement candidates or verified unobstructed positions; ambiguous clearing operations are unavailable. move_items may only supply entities (to_entity:true); move_items_with_player may only give items (to_player:true).
+Approved operations and argument shapes: ${pursuitOperationListText()}
 Approved observation request schemas (these are JSON requests to the external harness): ${JSON.stringify(toolDefinitions.map(tool => ({ name: tool.function.name, description: tool.function.description, args: tool.function.parameters })))}`
 
 export function pursuitMessages(packet) {
@@ -206,7 +207,7 @@ export class PursuitRuntime {
       const operation = operations[index]
       if (AMBIGUOUS.has(operation.name) || (operation.name === 'move_items' && operation.args.to_entity === false)
         || (operation.name === 'move_items_with_player' && operation.args.to_player === false)) {
-        return { ok: false, code: 'pursuit_ambiguous_or_player_mutation', operation_index: index }
+        return { ok: false, code: 'pursuit_ambiguous_or_player_mutation', operation: operation.name, operation_index: index }
       }
       if (operation.name === 'harvest_product' && this.authorization.world.reservations.some(row => row.status === 'active')) {
         return { ok: false, code: 'pursuit_harvest_reserved_world', operation_index: index }
