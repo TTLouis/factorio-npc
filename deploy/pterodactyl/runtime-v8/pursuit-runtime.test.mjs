@@ -202,3 +202,34 @@ test('pursuit provider wire protocol preserves JSON and never injects legacy con
   assert.equal(message.content, JSON.stringify(decision))
   assert.equal(message._sglunaProvider.diagnostic_code, 'ok')
 })
+
+test('retained Luna oversized-response finding charges one attempt and pauses without admission or automatic retry', async t => {
+  const f = await fixture(t)
+  const traceFile = path.join(path.dirname(f.options.stateFile), 'provider.jsonl')
+  let attempts = 0
+  const provider = (messages, context) => providerRequest({ base: 'http://127.0.0.1:18317/v1', key: 'fixture', model: 'gpt-6-luna', profile: 'local' }, messages, {
+    ...context, promptTraceFile: traceFile,
+    fetchImpl: async (_url, options) => {
+      attempts++
+      assert.equal(JSON.parse(options.body).max_tokens, 4000)
+      // The live body was not retained after reader cancellation. Reproduce
+      // its observed byte count/guard failure, without inventing model output.
+      return new Response('x'.repeat(263521), { status: 200 })
+    },
+  })
+  const agent = new PursuitRuntime({ ...f.options, provider })
+  const result = await agent.request(goal.objective)
+  assert.equal(result.goalStatus, 'paused')
+  assert.equal(agent.loop.state.pauseReason, 'Provider response too large')
+  assert.equal(agent.loop.state.budget.calls, 1)
+  assert.equal(agent.loop.state.pending, null)
+  assert.equal(f.mutations.length, 0)
+  const restarted = new PursuitRuntime({ ...f.options, provider })
+  await restarted.loadPersistentState()
+  await restarted.pollPursuit()
+  assert.equal(restarted.loop.state.budget.calls, 1)
+  assert.equal(attempts, 1)
+  const rows = (await fsp.readFile(traceFile, 'utf8')).trim().split('\n').map(JSON.parse)
+  assert.equal(rows.filter(row => row.event === 'provider.request').length, 1)
+  assert.equal(rows.find(row => row.event === 'provider.response_error').response_bytes, 263521)
+})

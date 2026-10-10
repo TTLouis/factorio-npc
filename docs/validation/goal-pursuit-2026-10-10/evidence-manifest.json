@@ -1,0 +1,72 @@
+[
+  {
+    "size": 1238,
+    "sha256": "914d6a68c7c022b26d6a81c4bac90d9b803912a6468cec4e1df99b48373527ef",
+    "path": "summary.json"
+  },
+  {
+    "size": 127,
+    "sha256": "ab700f44fcbe1ab77efe18e3f917296f148818ecdd330d1da7a69e5365689978",
+    "path": "watchdog.json"
+  },
+  {
+    "size": 3378,
+    "sha256": "884d72b4a87641507a7fe5baf343c72263e50d63693c6356070c560f53eeabbf",
+    "path": "controller.log"
+  },
+  {
+    "size": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "path": "controller-error.log"
+  },
+  {
+    "size": 15131,
+    "sha256": "6370d9de68c7d1accd4166ffb116a1083144ceb2b0b4cc1a3f278f52ba8d5856",
+    "path": "container.log"
+  },
+  {
+    "size": 32662,
+    "sha256": "a1bd06193af99cbf3029cebc70ad146d14d1b26e27fce565ba28d762dc51eab2",
+    "path": "data/logs/sgluna-prompts.jsonl"
+  },
+  {
+    "size": 1471,
+    "sha256": "c0326f8c5a33863c24a6cd78dcd9d73a86bbe255386e0b2e35b1d66502fe3f7f",
+    "path": "data/logs/sgluna-pursuit.jsonl"
+  },
+  {
+    "size": 5145,
+    "sha256": "60569d74432476c0d117541ad24a75b166278e54316070bf3c37702b5c08ea8c",
+    "path": "data/logs/trial-contract.json"
+  },
+  {
+    "size": 14146,
+    "sha256": "79c221caabce3046f7c042ef521e41729825ddc0dd1b40f7cf47511908205b9b",
+    "path": "data/logs/trial-result.json"
+  },
+  {
+    "size": 65914,
+    "sha256": "ce0e7234f91a1e5ce8e4a41fda4baf1a4e6faf0db0df2b20dc29ea6cc0764c42",
+    "path": "data/logs/trial-snapshots.jsonl"
+  },
+  {
+    "size": 461,
+    "sha256": "ceab9c7fa832561e29d3b9aeb0f88b03551f23450e1e20b4367cc2c21be4a5a3",
+    "path": "data/logs/deployment-verification.json"
+  },
+  {
+    "size": 1593,
+    "sha256": "025e229b7ef8349f3bbb90185ba0ad9eb1ffef1f1ebc15dfecb77b64aa8249e8",
+    "path": "data/.sgluna/pursuit-state.json"
+  },
+  {
+    "size": 516589,
+    "sha256": "428acbfcfc885dda75558ad7180304a40606ccd4976cf31c97da8dda5dbd9c6e",
+    "path": "data/saves/luna-pursuit-20261010-checkpoint.zip"
+  },
+  {
+    "size": 495310,
+    "sha256": "c28f4357b2167d594bcaee1d5afa7ccb1764d1b2d9c1d994a132bc49a3fc0b87",
+    "path": "data/saves/luna-pursuit-fresh-20261010.zip"
+  }
+]

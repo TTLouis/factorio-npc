@@ -1,0 +1,13 @@
+{
+  "candidate": "cea70174d2bcd2a5fabfadc48264bfae6182321f",
+  "release": "/opt/sgluna/.sgluna/releases/docker-cea70174d2bc-install-cYm4I8",
+  "runtime_modules_compared": 49,
+  "mismatches": [],
+  "control_sha256": "6826dbe19ca5ff379b9ab3f83e930014c6e09077845e800414872446a38c20e8",
+  "active_control_matches_release": true,
+  "release_control_matches_engine_gate": true,
+  "model": "gpt-6-luna",
+  "mode": "direct",
+  "jev_enabled": false,
+  "verified": true
+}

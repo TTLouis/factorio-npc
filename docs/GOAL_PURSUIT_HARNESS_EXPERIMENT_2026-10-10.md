@@ -46,11 +46,11 @@ Conservative permissions refuse ambiguous harvesting/destruction, name-based wit
 - [x] Docker all gate: 2,102 runtime tests; 1,046 mod tests; typecheck, Lua build and generated-Lua guard.
 - [x] Full build gate; real Factorio pursuit and provenance lanes. Two native hand crafts consume four plates, reload between goals, keep zero humans and carry calls/ordinals to two.
 - [x] Independent invariant review; three reported blockers and transport deadline gap fixed and re-reviewed. Inventory-text engine failure fixed, regression added, engine re-run green.
-- [ ] Candidate freeze and installer repin; complete deployed-runtime/mod comparison.
-- [ ] Exactly one isolated Luna trial (30 calls or 20 minutes); retain actual result, tokens, latency, receipts and save.
+- [x] Candidate freeze and installer repin; all 49 deployed modules and active/engine-tested compiled mod matched.
+- [x] Exactly one isolated Luna trial completed: one attempt, 41.669s to oversized-response error, no gameplay admission; truthful pause, budget/state and native save retained. Token usage unavailable.
 
 Evidence and remaining gates: [candidate validation](validation/GOAL_PURSUIT_CANDIDATE_2026-10-10.md). The October 8 legacy run made six calls, 132,033 input tokens (73,728 cached), 1,108 output tokens and no gameplay actions. It used an older commit and a shorter/different lifecycle, so it is not a controlled comparison.
 
 ## Authority and usage
 
-The user explicitly renewed continuation after the reset. Latest milestone reading: 34% five-hour usage, 51% weekly; retain the original 56% checkpoint and 61% five-hour stop. No reset credit consumed. The single Luna allowance remains unused until candidate and shipped verification pass. No push, PR, other-worktree change, production deployment or extra live attempt is authorized.
+The user explicitly renewed continuation after the reset. Final milestone reading: 46% five-hour usage, 52% weekly; retain the original 56% checkpoint and 61% five-hour stop. No reset credit consumed. The single Luna allowance is consumed. See [actual result](validation/GOAL_PURSUIT_LUNA_TRIAL_2026-10-10.md); no further live attempt is authorized. No push, PR, other-worktree change, production deployment or extra live attempt is authorized.

@@ -19,3 +19,7 @@ Reviewer `/root/pursuit_invariant_review` performed read-only bounded source rev
 Final reviewer finding: “No remaining promotion blocker found in this bounded source review.” Approval conditional on final Docker gates, real-engine evidence and freezing the candidate. Narrow follow-up review of inventory text: “No new blocker found”; completion/admission remain trusted structured reads and actor fences surround inventory observation.
 
 The final gates above meet the code/engine conditions. Candidate commit, installer repin, full shipped-runtime/mod comparison and single-trial results will be appended as new evidence milestones. This is an experimental local candidate, not production promotion or proof of red-to-green autonomy.
+
+## Closed experiment milestone
+
+Source candidate c1194b28, installer/deployed candidate cea70174, external watchdog fix d4e048be. Full shipping verification passed and the one authorized trial ran, pausing safely after a single oversized response. No gameplay was admitted. Post-trial deterministic regression and Docker all gates passed (2,103 runtime tests; 1,046 mod tests). Detailed actual results and immutable small evidence are retained in [the trial record](GOAL_PURSUIT_LUNA_TRIAL_2026-10-10.md). The experiment is complete with a failed autonomy result; its live allowance is consumed. No push, PR, production deployment, other-worktree edit or additional trial occurred.

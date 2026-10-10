@@ -1,0 +1,42 @@
+{
+  "admitted_batches": 0,
+  "provider_attempts": 1,
+  "response_bytes": 263521,
+  "watchdog": {
+    "limit_ms": 1190000,
+    "elapsed_ms": 48876,
+    "reason": "controller_exit",
+    "controller_exit": 0,
+    "stop_exit": 0
+  },
+  "result": "paused:Provider response too large",
+  "duplicate_batches": 0,
+  "provider_token_usage": null,
+  "red_consumed": 0,
+  "actor_final": 6,
+  "token_usage_reason": "No valid provider response parsed; cached/uncached input and output token counts unavailable.",
+  "humans": 0,
+  "controller_candidate": "d4e048be367d810b0c4a35423ffdf3760d475908",
+  "request_to_error_ms": 41669.0,
+  "speed": 1,
+  "controller_elapsed_ms": 45280,
+  "red_produced": 0,
+  "goal_id": "pursuit_4dc62ca9-0bd4-415d-9bd4-c8f9156506e6",
+  "deployment_candidate": "cea70174d2bcd2a5fabfadc48264bfae6182321f",
+  "actor_before": 6,
+  "cumulative_budget": {
+    "maxCalls": 30,
+    "maxWallMs": 1200000,
+    "maxInputChars": 600000,
+    "calls": 1,
+    "inputChars": 31015,
+    "startedAt": 1791642208493
+  },
+  "gameplay_takeover": 0,
+  "first_action_ms": null,
+  "native_reaction_ms": null,
+  "green_researched": false,
+  "green_enabled": false,
+  "trials": 1,
+  "corrective_prompts": 0
+}
