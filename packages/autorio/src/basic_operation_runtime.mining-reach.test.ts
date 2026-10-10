@@ -67,6 +67,40 @@ beforeEach(() => {
 })
 
 describe('mining reach recovery', () => {
+  it('selects the exact resource through an interior point when an overlapping tree wins centre selection', () => {
+    const trace = vi.spyOn(globalThis, 'log')
+    const f = fixture(2)
+    const tree = { valid: true, name: 'tree-05', unit_number: 200 }
+    Object.assign(f.resource, { selection_box: { left_top: { x: 1.5, y: -0.5 }, right_bottom: { x: 2.5, y: 0.5 } } })
+    const select = vi.mocked(f.actor.update_selected_entity)
+    select.mockImplementation(position => { f.character.selected = position.y < 0 ? f.resource : tree })
+    expect(f.controller.submit_mining('iron-ore', 1)).toBe(true)
+    f.runtime.state_mining(f.actor)
+    expect(select.mock.calls[0][0]).toEqual({ x: 2, y: 0 })
+    expect(select.mock.calls[1][0]).toEqual({ x: 1.6, y: -0.4 })
+    expect(f.character.selected).toBe(f.resource)
+    expect(f.set_mining_state).toHaveBeenLastCalledWith({ mining: true, position: { x: 2, y: 0 } })
+    expect(f.manager.player_state.task_state).toBe(TaskStates.MINING)
+    expect(trace).toHaveBeenCalledWith(expect.stringContaining('mining.exact_selection_recovered reason=resource_centre_occluded actor_id=42'))
+    trace.mockRestore()
+  })
+
+  it('never mines a same-name substitute when every bounded resource selection point misses the exact target', () => {
+    const f = fixture(2)
+    Object.assign(f.resource, { selection_box: { left_top: { x: 1.5, y: -0.5 }, right_bottom: { x: 2.5, y: 0.5 } } })
+    const other = { ...f.resource, unit_number: 92 }
+    const select = vi.mocked(f.actor.update_selected_entity)
+    select.mockImplementation(() => { f.character.selected = other })
+    expect(f.controller.submit_mining('iron-ore', 1)).toBe(true)
+    f.runtime.state_mining(f.actor)
+    expect(select).toHaveBeenCalledTimes(9)
+    expect(f.set_mining_state).not.toHaveBeenCalledWith(expect.objectContaining({ mining: true }))
+    for (const [point] of select.mock.calls.slice(1)) {
+      expect(point.x).toBeGreaterThan(1.5); expect(point.x).toBeLessThan(2.5)
+      expect(point.y).toBeGreaterThan(-0.5); expect(point.y).toBeLessThan(0.5)
+    }
+  })
+
   it('temporarily pathfinds closer when the next resource is outside real resource reach', () => {
     const f = fixture(3)
     expect(f.controller.submit_mining('iron-ore', 20)).toBe(true)

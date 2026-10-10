@@ -64,11 +64,30 @@ export function mining_navigation_requires_movement(actor: ControlledActor, enti
 
 /** Bind mining to the exact already-observed entity rather than same-name proximity. */
 export function select_exact_mining_target(actor: ControlledActor, target: LuaEntity) {
-  actor.update_selected_entity(target.position)
-  const selected = actor.character?.selected
-  if (!selected || !selected.valid) return false
-  if (target.unit_number !== undefined || selected.unit_number !== undefined) {
-    return target.unit_number !== undefined && selected.unit_number === target.unit_number
+  const select_position = (position: { x: number, y: number }) => {
+    actor.update_selected_entity(position)
+    const selected = actor.character?.selected
+    if (!selected || !selected.valid) return false
+    if (target.unit_number !== undefined || selected.unit_number !== undefined) {
+      return target.unit_number !== undefined && selected.unit_number === target.unit_number
+    }
+    return selected === target
   }
-  return selected === target
+  if (select_position(target.position)) return true
+  // A tree's selection box can cover an ore centre without covering the whole
+  // tile. Probe only bounded interior points of this exact resource's native
+  // selection box; never select a substitute entity or clear the obstruction.
+  if (target.type !== 'resource' || !target.selection_box) return false
+  const box = target.selection_box
+  const centre = { x: (box.left_top.x + box.right_bottom.x) / 2, y: (box.left_top.y + box.right_bottom.y) / 2 }
+  const dx = (box.right_bottom.x - box.left_top.x) * 0.4
+  const dy = (box.right_bottom.y - box.left_top.y) * 0.4
+  if (!(dx > 0 && dy > 0 && dx < math.huge && dy < math.huge)) return false
+  for (const offset of [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]]) {
+    if (select_position({ x: centre.x + dx * offset[0], y: centre.y + dy * offset[1] })) {
+      log(`[AUTORIO] mining.exact_selection_recovered reason=resource_centre_occluded actor_id=${actor.status_snapshot().actor_id} entity=${target.name} position=${serpent.line(target.position)}`)
+      return true
+    }
+  }
+  return false
 }
