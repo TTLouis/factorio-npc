@@ -9,6 +9,42 @@ const MACHINE_TYPES = new Set(['furnace', 'lab', 'assembling-machine', 'boiler',
 const object = value => value && typeof value === 'object' && !Array.isArray(value)
 const name = value => typeof value === 'string' && NAME.test(value)
 
+// Historical search hints only. Empty local reads do not erase distant sources.
+// Restart/new-goal callers discard these because native surface indices can recur.
+export function rememberFluidSources(previous, read, raw, observedAt) {
+  if (read.name !== 'getFluidSourceTiles') return previous
+  const result = String(raw).length <= 4096 ? parse(raw) : null
+  const radius = read.args.search_radius ?? 128
+  const limit = read.args.limit ?? 8
+  const samples = Array.isArray(result?.samples) ? result.samples
+    : object(result?.samples) && Object.keys(result.samples).length === 0 ? [] : null
+  if (!object(result) || result.ok !== true || result.fluid_name !== read.args.fluid_name
+    || !name(result.fluid_name) || result.coverage !== 'generated_bounding_square'
+    || !Number.isSafeInteger(result.surface_index) || result.surface_index < 1
+    || !Number.isSafeInteger(result.observed_tick) || result.observed_tick < 0
+    || !Number.isSafeInteger(radius) || radius < 1 || radius > 256 || result.search_radius !== radius
+    || !Number.isSafeInteger(limit) || limit < 1 || limit > 8
+    || typeof result.truncated !== 'boolean' || !samples
+    || result.returned_count !== samples.length || samples.length > limit
+    || samples.length > 8 || !Number.isSafeInteger(observedAt) || observedAt < 0) return previous
+  if (!samples.length) return previous
+  const validPosition = p => Number.isInteger(p?.x) && Number.isInteger(p?.y)
+    && Math.abs(p.x) <= 10000256 && Math.abs(p.y) <= 10000256
+  if (samples.some(row => !object(row) || !name(row.name) || row.fluid_name !== result.fluid_name
+    || row.surface_index !== result.surface_index || !validPosition(row.position))) return previous
+  const rows = [...previous]
+  for (const sample of samples) {
+    const anchor = { name: sample.name, fluid_name: sample.fluid_name, surface_index: sample.surface_index,
+      position: { x: sample.position.x, y: sample.position.y },
+      observed_at_ms: observedAt, historical: true }
+    const index = rows.findIndex(old => old.surface_index === anchor.surface_index
+      && old.position.x === anchor.position.x && old.position.y === anchor.position.y)
+    if (index >= 0) rows.splice(index, 1)
+    rows.push(anchor)
+    while (rows.length > 16 || JSON.stringify(rows).length > 4000) rows.shift()
+  }
+  return rows
+}
 // Ephemeral native facts, never an action, ownership grant or inventory total.
 // Keep valid JSON with explicit unreadability instead of clipping JSON text.
 export async function planningEntityObservation(anchors, read) {

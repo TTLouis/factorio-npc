@@ -680,6 +680,48 @@ try {
     && row.reason === 'native_unknown_entity_prototype'))
   await fsp.writeFile(path.join(results, 'fluid-source-evidence.json'), JSON.stringify({ setup: fluidSetup,
     final: fluidFinal, packets: fluidPackets, state: fluidObservation.loop.snapshot(), trace: fluidTrace }, null, 2))
+  // Independent declared terrain fixture: hints survive a real native action
+  // and a smaller empty read without becoming placement authority.
+  const fluidMemorySetup = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local s=a.surface; local old={}; local wet={}; for y=20,27 do for x=20,27 do local p={x=math.floor(a.position.x)+x,y=math.floor(a.position.y)+y}; table.insert(old,{name=s.get_tile(p).name,position=p}); table.insert(wet,{name="water",position=p}) end end; storage.pursuit_fluid_memory_tiles=old; s.set_tiles(wet,false,false,false,false); local chunks=0; for c in s.get_chunks() do chunks=chunks+1 end; rcon.print(helpers.table_to_json({chunks=chunks,inventory=a.get_main_inventory().get_contents(),position=a.position,admission=remote.call("autorio_operation_admission","status")}))'))
+  let memoryCalls = 0, waterHints
+  const fluidMemory = new PursuitRuntime({ rcon, stateFile: path.join(results, 'fluid-memory-state.json'),
+    traceFile: path.join(results, 'fluid-memory-trace.jsonl'), provider: async messages => {
+      const packet = JSON.parse(messages[1].content); memoryCalls++
+      if (memoryCalls === 1) return { content: JSON.stringify({ observations: [{ name: 'getFluidSourceTiles', args: { fluid_name: 'water', search_radius: 128 } }] }) }
+      if (memoryCalls === 2) {
+        waterHints = packet.fluidSourceKnowledge
+        assert.equal(waterHints.length, 8); assert(waterHints.every(row => row.historical === true))
+        return { content: JSON.stringify({ operations: [{ name: 'wait', args: { ticks: 1 } }] }) }
+      }
+      assert.deepEqual(packet.fluidSourceKnowledge, waterHints)
+      if (memoryCalls === 3) {
+        assert.deepEqual(packet.observations, [])
+        return { content: JSON.stringify({ observations: [{ name: 'getFluidSourceTiles', args: { fluid_name: 'water', search_radius: 1 } }] }) }
+      }
+      assert.equal(memoryCalls, 4)
+      assert.equal(JSON.parse(packet.observations.find(row => row.name === 'getFluidSourceTiles').result).returned_count, 0)
+      return { content: JSON.stringify({ pauseReason: 'Fixture verified historical fluid hints after action and local negative.' }) }
+    } })
+  await fluidMemory.request(JSON.stringify(goal(1)))
+  const memoryUntil = Date.now() + 90000
+  while (fluidMemory.active && Date.now() < memoryUntil) { await delay(500); await fluidMemory.pollPursuit() }
+  assert.equal(memoryCalls, 4); assert.equal(fluidMemory.loop.state.status, 'paused')
+  assert.equal(fluidMemory.loop.state.budget.calls, 4)
+  assert.equal(fluidMemory.loop.state.ordinal, fluidMemorySetup.admission.high_water + 1)
+  assert.equal(fluidMemory.loop.state.pending, null)
+  const fluidMemoryFinal = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local s=a.surface; local chunks=0; for c in s.get_chunks() do chunks=chunks+1 end; local result={chunks=chunks,inventory=a.get_main_inventory().get_contents(),position=a.position,admission=remote.call("autorio_operation_admission","status"),operations=remote.call("autorio_operations","status"),preflight=remote.call("autorio_preflight","operation","place_entity",{entity_name="offshore-pump"}),humans=#game.connected_players,speed=game.speed}; s.set_tiles(storage.pursuit_fluid_memory_tiles,false,false,false,false); storage.pursuit_fluid_memory_tiles=nil; rcon.print(helpers.table_to_json(result))'))
+  assert.equal(fluidMemoryFinal.chunks, fluidMemorySetup.chunks)
+  assert.deepEqual(fluidMemoryFinal.inventory, fluidMemorySetup.inventory); assert.deepEqual(fluidMemoryFinal.position, fluidMemorySetup.position)
+  assert.equal(fluidMemoryFinal.admission.high_water, fluidMemorySetup.admission.high_water + 1)
+  assert.equal(fluidMemoryFinal.operations.queue_length, 0); assert.equal(fluidMemoryFinal.operations.task_state, 'idle')
+  assert.equal(fluidMemoryFinal.preflight.code, 'placement_item_missing')
+  assert.equal(fluidMemoryFinal.humans, 0); assert.equal(fluidMemoryFinal.speed, 1)
+  const fluidMemoryTrace = (await fsp.readFile(path.join(results, 'fluid-memory-trace.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse)
+  assert(fluidMemoryTrace.some(row => row.event === 'pursuit.fluid_source_knowledge_retained' && row.request_id === fluidMemory.loop.state.request_id
+    && row.reason === 'historical_native_tile_locations_only' && row.positive_reads === 1 && row.retained === 8))
+  assert(fluidMemoryTrace.some(row => row.event === 'pursuit.fluid_source_knowledge_retained' && row.positive_reads === 0 && row.retained === 8))
+  await fsp.writeFile(path.join(results, 'fluid-memory-evidence.json'), JSON.stringify({ setup: fluidMemorySetup,
+    final: fluidMemoryFinal, state: fluidMemory.loop.snapshot(), trace: fluidMemoryTrace }, null, 2))
   const options = { rcon, stateFile: path.join(results, 'pursuit-state.json'), traceFile: path.join(results, 'pursuit-trace.jsonl'),
     campaignBudget: { maxCalls: 500, maxInputChars: 50000000, maxWallMs: 3600000 },
     provider: async (messages, context) => {

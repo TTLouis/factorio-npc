@@ -938,3 +938,49 @@ test('retained Oct 8 blocker shape is a truthful provider pause without goal ret
   assert.equal(f.sent.length, 0)
   assert.equal(f.events.some(row => row.event === 'pursuit.completed'), false)
 })
+
+test('fluid location hints survive native action settlement and read eviction without changing authority or budgets', async () => {
+  let reply = { observations: [{ name: 'getFluidSourceTiles', args: { fluid_name: 'water', search_radius: 128 } }] }
+  let packet
+  const f = fixture({ options: { maxCalls: 80, maxInputChars: 5000000 }, provider: async value => { packet = value; return reply } })
+  const accounted = []
+  f.loop.provider.inputChars = value => { const chars = JSON.stringify(value).length; accounted.push(chars); return chars }
+  let positive = true
+  f.adapter.observe = async read => read.name === 'getFluidSourceTiles' ? JSON.stringify({ ok: true, fluid_name: 'water',
+    surface_index: 1, observed_tick: 50, search_radius: read.args.search_radius, coverage: 'generated_bounding_square',
+    returned_count: positive ? 1 : 0, truncated: false,
+    samples: positive ? [{ name: 'water', fluid_name: 'water', surface_index: 1, position: { x: -82, y: -19 } }] : {} }) : '{}'
+  await f.loop.wake('positive_fluid_read')
+  const anchors = f.loop.snapshot().fluidSourceKnowledge
+  assert.equal(anchors.length, 1)
+  reply = action
+  await f.loop.wake('action_after_discovery')
+  const pending = f.loop.snapshot().pending
+  const inFlight = f.loop.snapshot()
+  const reload = new GoalPursuit({ state: inFlight, adapter: f.adapter, now: f.now, provider: async () => ({}) })
+  assert.deepEqual(reload.snapshot().fluidSourceKnowledge, [])
+  assert.deepEqual(reload.snapshot().pending, inFlight.pending); assert.deepEqual(reload.snapshot().budget, inFlight.budget)
+  f.world.runtime.admission_journal = [{ ...pending, actor_id: actor.actor_id, epoch: actor.epoch,
+    generation: 1, operation_count: 1, state: 'completed', slots: [] }]
+  positive = false
+  for (let i = 1; i <= 14; i++) {
+    reply = { observations: [{ name: 'getFluidSourceTiles', args: { fluid_name: 'water', search_radius: i } }] }
+    f.advance(10); await f.loop.wake('empty_local_read')
+  }
+  assert.equal(packet.observations.length, 12)
+  assert(!packet.observations.some(row => row.args?.search_radius === 128))
+  assert.deepEqual(packet.fluidSourceKnowledge, anchors)
+  assert.equal(f.sent.length, 1); assert.equal(f.loop.snapshot().pending, null)
+  assert(f.events.some(row => row.event === 'pursuit.fluid_source_knowledge_retained' && row.request_id
+    && row.reason === 'historical_native_tile_locations_only' && row.positive_reads === 1 && row.retained === 1))
+  assert(f.events.some(row => row.event === 'pursuit.fluid_source_knowledge_retained' && row.positive_reads === 0 && row.retained === 1))
+  assert.equal(f.loop.snapshot().budget.inputChars, accounted.reduce((a, b) => a + b, 0))
+  const before = f.loop.snapshot()
+  const restarted = new GoalPursuit({ state: before, adapter: f.adapter, now: f.now, provider: async () => ({ pauseReason: 'Fixture' }) })
+  assert.deepEqual(restarted.snapshot().fluidSourceKnowledge, [])
+  assert.deepEqual(restarted.snapshot().budget, before.budget)
+  assert.deepEqual(restarted.snapshot().pending, before.pending)
+  assert.deepEqual(restarted.snapshot().history, before.history)
+  const fresh = new GoalPursuit({ state: newPursuit({ objective: 'New goal', predicate: {}, actor }), adapter: f.adapter, now: f.now, provider: async () => ({}) })
+  assert.deepEqual(fresh.snapshot().fluidSourceKnowledge, [])
+})

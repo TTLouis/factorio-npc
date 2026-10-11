@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { seedPursuitKnowledge, planningEntityObservation } from './pursuit-knowledge.mjs'
+import { seedPursuitKnowledge, planningEntityObservation, rememberFluidSources } from './pursuit-knowledge.mjs'
 
 const machine = unit_number => ({ unit_number, type: 'furnace' })
 const machineStatus = (unit_number, count = 12) => ({ found: true, unit_number, entity: { unit_number,
@@ -133,4 +133,31 @@ test('native and local truncation flags remain visible even when the dependency 
       JSON.stringify(read.args.item_or_recipe === 'mod-part' ? details : { found: false }))
     assert.equal(result.truncated, true)
   }
+})
+
+test('fluid hints retain only coherent native locations, ignore local negatives and replace changed tiles', () => {
+  const read = { name: 'getFluidSourceTiles', args: { fluid_name: 'water', search_radius: 128, limit: 8 } }
+  const sample = { name: 'water', fluid_name: 'water', surface_index: 1, position: { x: -82, y: -19 }, owned: true }
+  const positive = { ok: true, fluid_name: 'water', surface_index: 1, observed_tick: 50,
+    search_radius: 128, coverage: 'generated_bounding_square', returned_count: 1, truncated: false, samples: [sample] }
+  const learn = (raw, old = [], query = read) => rememberFluidSources(old, query, JSON.stringify(raw), 1000)
+  const anchors = learn(positive)
+  assert.deepEqual(anchors, [{ name: 'water', fluid_name: 'water', surface_index: 1,
+    position: { x: -82, y: -19 }, observed_at_ms: 1000, historical: true }])
+  for (const bad of [null, [], { ...positive, ok: false }, { ...positive, fluid_name: 'steam' },
+    { ...positive, surface_index: 2 }, { ...positive, search_radius: 64 }, { ...positive, returned_count: 2 },
+    { ...positive, samples: [{ ...sample, fluid_name: 'steam' }] }, { ...positive, samples: [{ ...sample, position: { x: 1.5, y: 2 } }] },
+    { ...positive, samples: [{ ...sample, position: { x: Infinity, y: 2 } }] },
+    { ...positive, samples: {}, returned_count: 0 }, { ...positive, samples: [], returned_count: 0 }]) {
+    assert.equal(learn(bad, anchors), anchors)
+  }
+  assert.equal(rememberFluidSources(anchors, read, 'bad-json', 1000), anchors)
+  assert.equal(rememberFluidSources(anchors, read, 'x'.repeat(4097), 1000), anchors)
+  assert.equal(learn(positive, anchors, { ...read, name: 'getPrototypeDetails' }), anchors)
+  let bounded = anchors
+  for (let i = 0; i < 40; i++) bounded = learn({ ...positive, samples: [{ ...sample, position: { x: i, y: 0 } }] }, bounded)
+  assert.equal(bounded.length, 16); assert(JSON.stringify(bounded).length <= 4000)
+  const changed = learn({ ...positive, samples: [{ ...sample, name: 'deepwater', position: { x: 39, y: 0 } }] }, bounded)
+  assert.equal(changed.length, 16); assert.equal(changed.at(-1).name, 'deepwater')
+  assert.equal(changed.filter(row => row.position.x === 39).length, 1)
 })

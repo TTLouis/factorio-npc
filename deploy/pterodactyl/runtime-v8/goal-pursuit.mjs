@@ -3,6 +3,7 @@ import { isObservationToolName, parseOperation, toolCommand, PolicyError } from 
 import { actorChanged } from './supervisor-adapter.mjs'
 import { batchWatermark, buildPendingOperation, reconcilePendingOperation, RECONCILE_VERDICT } from './operation-reconciliation.mjs'
 import { recipeFactsFromDetails } from './handoff-packet.mjs'
+import { rememberFluidSources } from './pursuit-knowledge.mjs'
 
 // Cancellation seals the queue, but can leave partial physical effects. Hold
 // its identity until those effects are reconciled; never authorize blind replay.
@@ -155,6 +156,7 @@ export class GoalPursuit {
     // observation. A restart must obtain fresh targets through bounded tools.
     this.state.observations = []
     this.state.recipeKnowledge = [] // A new process must read its deployed prototypes.
+    this.state.fluidSourceKnowledge = [] // Surface indices alone do not survive world reload safely.
     this.state.entityKnowledge = entityAnchors(this.state.entityKnowledge)
     delete this.state.knowledgeSeed
     this.adapter = adapter
@@ -319,7 +321,7 @@ export class GoalPursuit {
         notes: this.state.notes, actor: this.state.actor, world: { ...world.observation, snapshot_read_completed_at_ms: packetAt,
           ...(planningObservation ? { known_entities: planningObservation } : {}) },
         receipts: this.state.history, observations: this.state.observations, recipeKnowledge: this.state.recipeKnowledge,
-        entityKnowledge: this.state.entityKnowledge,
+        entityKnowledge: this.state.entityKnowledge, fluidSourceKnowledge: this.state.fluidSourceKnowledge,
         knowledgeSeed: this.state.knowledgeSeed, verification,
         remainingCalls: budget.maxCalls - budget.calls,
         remainingWallMs: budget.startedAt === null ? budget.maxWallMs : budget.maxWallMs - (packetAt - budget.startedAt) }
@@ -383,6 +385,7 @@ export class GoalPursuit {
       if (decision.pauseReason) return this.pause(`provider_reported:${decision.pauseReason}`)
       if (decision.observations.length) {
         const observations = []
+        let fluidPositiveReads = 0
         for (const read of decision.observations) {
           await this.fence(generation)
           const raw = await this.adapter.observe(clone(read))
@@ -390,11 +393,17 @@ export class GoalPursuit {
           const observedAt = this.now()
           this.state.recipeKnowledge = rememberRecipeKnowledge(this.state.recipeKnowledge, read, raw, observedAt)
           this.state.entityKnowledge = rememberEntities(this.state.entityKnowledge, read, raw, observedAt)
+          const fluidSources = rememberFluidSources(this.state.fluidSourceKnowledge, read, raw, observedAt)
+          if (fluidSources !== this.state.fluidSourceKnowledge) fluidPositiveReads++
+          this.state.fluidSourceKnowledge = fluidSources
           observations.push({ ...read, result: observationText(raw), observed_at_ms: observedAt, historical: false })
         }
         this.state.observations = rememberObservations(this.state.observations, observations)
         await this.save()
         await this.event('pursuit.observations_retained', 'bounded_native_read_memory', { fresh: observations.length, retained: this.state.observations.length })
+        if (decision.observations.some(read => read.name === 'getFluidSourceTiles')) {
+          await this.event('pursuit.fluid_source_knowledge_retained', 'historical_native_tile_locations_only', { positive_reads: fluidPositiveReads, retained: this.state.fluidSourceKnowledge.length })
+        }
         if (decision.observations.some(read => read.name === 'getRecipeDetails')) {
           await this.event('pursuit.recipe_knowledge_retained', 'native_prototype_quantities_only', { retained: this.state.recipeKnowledge.length })
         }
