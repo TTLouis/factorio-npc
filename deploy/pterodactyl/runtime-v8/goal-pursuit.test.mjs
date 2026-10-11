@@ -330,6 +330,33 @@ test('retained mixed action/read decision is refused without effects and can cor
   assert.equal(f.loop.snapshot().budget.calls, 2)
 })
 
+test('repeated whole-envelope refusals spend the original cap and never admit actions', async () => {
+  const f = fixture({ options: { maxCalls: 1 }, provider: async () => ({ refusal: {
+    code: 'pursuit_wire_envelope_invalid', message: 'Submit only decision.' } }) })
+  let admits = 0, reads = 0
+  f.adapter.admit = async () => { admits++; return { ok: true } }
+  f.adapter.observe = async () => { reads++; return '{}' }
+  const first = await f.loop.wake('invalid_envelope')
+  assert.equal(first.status, 'active'); assert.equal(first.budget.calls, 1)
+  assert.equal(first.pending, null); assert.equal(first.ordinal, 0)
+  const last = await f.loop.wake('correction')
+  assert.equal(last.status, 'paused'); assert.equal(last.pauseReason, 'call_budget_exhausted')
+  assert.equal(f.calls(), 1); assert.equal(admits, 0); assert.equal(reads, 0); assert.equal(f.sent.length, 0)
+})
+
+test('whole-envelope refusal feedback reaches the next charged decision without prior effects', async () => {
+  let calls = 0
+  const f = fixture({ provider: async packet => {
+    if (++calls === 1) return { refusal: { code: 'pursuit_wire_envelope_invalid', message: 'Submit only decision.' } }
+    assert.match(packet.observations.at(-1).result, /pursuit_wire_envelope_invalid/)
+    return action
+  } })
+  await f.loop.wake('refused')
+  assert.equal(f.sent.length, 0); assert.equal(f.loop.snapshot().pending, null)
+  await f.loop.wake('corrected')
+  assert.equal(f.sent.length, 1); assert.equal(f.loop.snapshot().budget.calls, 2)
+})
+
 test('native recipe rules and exact submitted quantities survive settlement without retaining mutable reads or replaying', async () => {
   let turn = 0
   const packets = []

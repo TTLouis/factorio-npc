@@ -224,16 +224,26 @@ export class GoalPursuit {
       world = await this.fence(generation)
       if (this.now() - budget.startedAt >= budget.maxWallMs) return this.pause('wall_budget_exhausted')
       const metric = { call: budget.calls, latency_ms: this.now() - started, input_chars: inputChars,
-        ...(answer?.decision ? { usage: clone(answer.usage ?? null) } : {}) }
+        ...(answer?.decision || answer?.refusal ? { usage: clone(answer.usage ?? null) } : {}) }
       this.state.metrics.push(metric)
       this.state.metrics = this.state.metrics.slice(-30)
       await this.save()
       await this.event('pursuit.provider_received', 'provider_response_accounted', metric)
+      if (answer?.refusal !== undefined) {
+        const refusal = answer.refusal
+        check(refusal?.code === 'pursuit_wire_envelope_invalid' && typeof refusal.message === 'string'
+          && refusal.message.length <= 300 && Object.keys(refusal).every(key => ['code', 'message'].includes(key)), 'provider_refusal_invalid')
+        this.state.observations = rememberObservations(this.state.observations, [{ name: 'decision_validation',
+          result: JSON.stringify({ ok: false, ...refusal }), observed_at_ms: this.now(), historical: false }])
+        await this.save()
+        await this.event('pursuit.decision_refused', 'invalid_decision_envelope', { code: refusal.code })
+        return this.snapshot()
+      }
       let decision
       try { decision = pursuitDecision(answer?.decision ?? answer) }
       catch (error) {
         // A deterministic operation/argument policy rejection is correctable
-        // evidence, never permission to execute it. Outer envelope violations
+        // evidence, never permission to execute it. Other structural violations
         // and provider failures still pause.
         if (!(error instanceof PolicyError)) throw error
         this.state.observations = rememberObservations(this.state.observations, [{ name: 'decision_validation',

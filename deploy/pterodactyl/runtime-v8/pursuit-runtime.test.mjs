@@ -33,7 +33,44 @@ test('pursuit accepts one decision submission and refuses other or multiple wire
   for (const calls of [[{ ...tool, function: { ...tool.function, name: 'executeLua' } }], [tool, tool], {}, 'malformed', [null]]) {
     await assert.rejects(pursuitProvider(async () => ({ tool_calls: calls }))({}, context), /pursuit_wire_tools_refused/)
   }
-  await assert.rejects(pursuitProvider(async () => ({ content: JSON.stringify({ decision: action, extra: true }) }))({}, context), /pursuit_wire_envelope_invalid/)
+  const refused = await pursuitProvider(async () => ({ content: JSON.stringify({ decision: action, extra: true }) }))({}, context)
+  assert.equal(refused.decision, undefined)
+  assert.equal(refused.refusal.code, 'pursuit_wire_envelope_invalid')
+})
+
+test('retained extra-envelope finding refuses all effects and corrects within the durable campaign budget', async t => {
+  const f = await fixture(t)
+  let attempts = 0
+  const provider = async messages => {
+    const decision = ++attempts === 1 ? { decision: action, goal: 'Replace the owner objective', notes: 'Outside envelope' } : { decision: action }
+    if (attempts === 2) assert.equal(JSON.parse(messages[1].content).remainingCalls, 29)
+    return { tool_calls: [{ type: 'function', function: { name: 'submitPursuitDecision', arguments: JSON.stringify(decision) } }],
+      _sglunaProvider: { usage: { prompt_tokens: 10, completion_tokens: 8 } } }
+  }
+  const agent = f.agent
+  agent.provider = pursuitProvider(provider)
+  // Stop after this decision boundary to inspect and reload its durable state.
+  agent.drive = reason => agent.loop.wake(reason)
+  await agent.request(goal.objective)
+  const original = agent.loop.snapshot()
+  assert.equal(original.status, 'active'); assert.equal(original.budget.calls, 1)
+  assert.equal(original.pending, null); assert.equal(original.ordinal, 0); assert.equal(f.mutations.length, 0)
+  assert.equal(original.objective, goal.objective)
+  assert.equal(original.metrics[0].usage.completion_tokens, 8)
+  assert.match(original.observations.at(-1).result, /pursuit_wire_envelope_invalid/)
+  const restarted = new PursuitRuntime({ ...f.options, provider })
+  await restarted.loadPersistentState()
+  assert.deepEqual(restarted.loop.snapshot().budget, original.budget)
+  assert.equal(restarted.loop.snapshot().request_id, original.request_id)
+  assert.deepEqual(restarted.loop.snapshot().observations, []) // restart discards all read memory
+  f.setAgent(restarted)
+  await restarted.pollPursuit()
+  assert.equal(restarted.loop.snapshot().budget.calls, 2)
+  assert.equal(restarted.loop.snapshot().budget.startedAt, original.budget.startedAt)
+  assert.equal(f.mutations.length, 1)
+  assert.equal(restarted.loop.snapshot().objective, goal.objective)
+  const rows = (await fsp.readFile(f.options.traceFile, 'utf8')).trim().split('\n').map(JSON.parse)
+  assert(rows.some(row => row.event === 'pursuit.decision_refused' && row.reason === 'invalid_decision_envelope' && row.request_id === original.request_id))
 })
 
 async function fixture(t, replies = [action]) {
@@ -73,7 +110,7 @@ async function fixture(t, replies = [action]) {
         _sglunaProvider: { usage: { prompt_tokens: 120, completion_tokens: 20, prompt_tokens_details: { cached_tokens: 40 } } } }
     } }
   agent = new PursuitRuntime(options)
-  return { agent, options, actor, runtime, requests, mutations,
+  return { agent, options, actor, runtime, requests, mutations, setAgent: next => { agent = next },
     advance: ms => { time += ms }, failSend: () => { failSend = true }, satisfy: () => { satisfied = true },
     complete: () => { runtime.task_state = 'idle'; runtime.queue_length = 0; runtime.admission_journal.at(-1).state = 'completed' } }
 }

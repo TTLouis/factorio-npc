@@ -57,7 +57,13 @@ export function pursuitProvider(provider, reserve = async () => {}) {
     check(Array.isArray(calls) && (calls.length === 0 || (calls.length === 1 && calls[0]?.type === 'function' && calls[0].function?.name === 'submitPursuitDecision')), 'pursuit_wire_tools_refused')
     check(!['length', 'content_filter', 'safety', 'blocked'].includes(message._sglunaProvider?.finish_reason), 'pursuit_provider_incomplete')
     const parsed = json(calls.length ? calls[0].function.arguments : message.content)
-    if (parsed.decision !== undefined) check(Object.keys(parsed).length === 1, 'pursuit_wire_envelope_invalid')
+    if (parsed?.decision !== undefined && Object.keys(parsed).length !== 1) {
+      // Refuse the whole well-formed reply, including its action payload. This
+      // is correctable format feedback, never authority to strip extra fields.
+      return { refusal: { code: 'pursuit_wire_envelope_invalid',
+        message: 'Submit exactly {"decision":{...}}. Put notes inside decision. No fields beside decision. The entire prior reply was refused; no observations or actions ran.' },
+      usage: copy(message._sglunaProvider?.usage ?? null) }
+    }
     return { decision: parsed.decision ?? parsed, usage: copy(message._sglunaProvider?.usage ?? null) }
   }
   // Includes the stable instruction/tool prefix, not just the observation packet.
