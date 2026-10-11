@@ -636,6 +636,50 @@ try {
     && row.request_id === powerObservation.loop.state.request_id && row.machines.some(machine => machine.unit_number === powerSetup.unit_number)))
   await fsp.writeFile(path.join(results, 'planning-power-evidence.json'), JSON.stringify({ setup: powerSetup,
     final: powerFinal, packets: powerPackets, state: powerObservation.loop.snapshot() }, null, 2))
+  // Attempt 32 exposed a fluid/entity discovery gap. This declared fixture
+  // generates coverage and adds terrain before the read, never during it.
+  const fluidSetup = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local s=a.surface; s.request_to_generate_chunks(a.position,5); s.force_generate_chunk_requests(); assert(prototypes.tile.water.fluid.name=="water"); local old={}; local wet={}; for y=20,27 do for x=20,27 do local p={x=math.floor(a.position.x)+x,y=math.floor(a.position.y)+y}; table.insert(old,{name=s.get_tile(p).name,position=p}); table.insert(wet,{name="water",position=p}) end end; storage.pursuit_fluid_tiles=old; s.set_tiles(wet,false,false,false,false); local chunks=0; for c in s.get_chunks() do chunks=chunks+1 end; rcon.print(helpers.table_to_json({chunks=chunks,inventory=a.get_inventory(defines.inventory.character_main).get_contents(),position=a.position,surface_index=s.index,admission=remote.call("autorio_operation_admission","status"),operations=remote.call("autorio_operations","status")}))'))
+  let fluidCalls = 0
+  const fluidPackets = []
+  const fluidObservation = new PursuitRuntime({ rcon, stateFile: path.join(results, 'fluid-source-state.json'),
+    traceFile: path.join(results, 'fluid-source-trace.jsonl'), provider: async messages => {
+      const packet = JSON.parse(messages[1].content); fluidPackets.push(packet); fluidCalls++
+      if (fluidCalls === 1) return { content: JSON.stringify({ observations: [
+        { name: 'getNearbyEntities', args: { name: 'water', radius: 64, limit: 5 } },
+        { name: 'getFluidSourceTiles', args: { fluid_name: 'water', search_radius: 128, limit: 8 } },
+      ] }) }
+      assert.equal(fluidCalls, 2)
+      const refused = JSON.parse(packet.observations.find(row => row.name === 'getNearbyEntities').result)
+      assert.equal(refused.code, 'unknown_entity_prototype'); assert.equal(refused.observation_tool, 'getFluidSourceTiles')
+      const sources = JSON.parse(packet.observations.find(row => row.name === 'getFluidSourceTiles').result)
+      assert.equal(sources.ok, true); assert.equal(sources.coverage, 'generated_bounding_square')
+      assert.equal(sources.returned_count, 8); assert.equal(sources.samples.length, 8); assert.equal(sources.truncated, true)
+      assert.equal(sources.ordering, 'native_samples_not_nearest'); assert.equal(sources.surface_index, fluidSetup.surface_index)
+      assert(sources.samples.every(row => row.fluid_name === 'water' && row.surface_index === fluidSetup.surface_index
+        && Number.isInteger(row.position.x) && Number.isInteger(row.position.y)))
+      assert.equal(sources.candidates, undefined)
+      return { content: JSON.stringify({ pauseReason: 'Fixture verified bounded native fluid terrain without actions.' }) }
+    } })
+  await fluidObservation.request(JSON.stringify(goal(1)))
+  assert.equal(fluidCalls, 2); assert.equal(fluidObservation.loop.state.status, 'paused')
+  assert.equal(fluidObservation.loop.state.budget.calls, 2)
+  assert.equal(fluidObservation.loop.state.ordinal, fluidSetup.admission.high_water)
+  assert.deepEqual(fluidObservation.authorization.world.npc_placements, [])
+  const fluidFinal = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local s=a.surface; local chunks=0; for c in s.get_chunks() do chunks=chunks+1 end; local result={chunks=chunks,inventory=a.get_inventory(defines.inventory.character_main).get_contents(),position=a.position,admission=remote.call("autorio_operation_admission","status"),operations=remote.call("autorio_operations","status"),preflight=remote.call("autorio_preflight","operation","place_entity",{entity_name="offshore-pump"}),humans=#game.connected_players,speed=game.speed}; s.set_tiles(storage.pursuit_fluid_tiles,false,false,false,false); storage.pursuit_fluid_tiles=nil; rcon.print(helpers.table_to_json(result))'))
+  assert.equal(fluidFinal.chunks, fluidSetup.chunks)
+  assert.deepEqual(fluidFinal.inventory, fluidSetup.inventory); assert.deepEqual(fluidFinal.position, fluidSetup.position)
+  assert.deepEqual(fluidFinal.admission, fluidSetup.admission)
+  assert.equal(fluidFinal.operations.tasks_added, fluidSetup.operations.tasks_added)
+  assert.equal(fluidFinal.operations.queue_length, 0); assert.equal(fluidFinal.operations.task_state, 'idle')
+  assert.equal(fluidFinal.preflight.code, 'placement_item_missing')
+  assert.equal(fluidFinal.humans, 0); assert.equal(fluidFinal.speed, 1)
+  const fluidTrace = (await fsp.readFile(path.join(results, 'fluid-source-trace.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse)
+  assert(fluidTrace.some(row => row.event === 'pursuit.fluid_sources_observed' && row.request_id === fluidObservation.loop.state.request_id
+    && row.reason === 'bounded_native_fluid_tile_read' && row.native_result.returned_count === 8))
+  assert(fluidTrace.some(row => row.event === 'pursuit.entity_read_refused' && row.request_id === fluidObservation.loop.state.request_id
+    && row.reason === 'native_unknown_entity_prototype'))
+  await fsp.writeFile(path.join(results, 'fluid-source-evidence.json'), JSON.stringify({ setup: fluidSetup,
+    final: fluidFinal, packets: fluidPackets, state: fluidObservation.loop.snapshot(), trace: fluidTrace }, null, 2))
   const options = { rcon, stateFile: path.join(results, 'pursuit-state.json'), traceFile: path.join(results, 'pursuit-trace.jsonl'),
     campaignBudget: { maxCalls: 500, maxInputChars: 50000000, maxWallMs: 3600000 },
     provider: async (messages, context) => {

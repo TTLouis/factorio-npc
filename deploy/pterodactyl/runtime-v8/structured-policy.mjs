@@ -225,6 +225,14 @@ function renderPlacementCandidates(args) {
   return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_tools","get_placement_candidates",{${fields.join(',')}})))`
 }
 
+function renderFluidSourceTiles(args) {
+  exactKeys(args, ['fluid_name', 'search_radius', 'limit'])
+  const fields = [`fluid_name=${base.luaString(base.factorioName(args.fluid_name))}`]
+  if (args.search_radius !== undefined) fields.push(`search_radius=${optionalInteger(args.search_radius, 'search_radius', 1, 256)}`)
+  if (args.limit !== undefined) fields.push(`limit=${optionalInteger(args.limit, 'limit', 1, 8)}`)
+  return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_tools","get_fluid_source_tiles",{${fields.join(',')}})))`
+}
+
 function parseProductionScope(args) {
   exactKeys(args, ['calculation_id', 'target', 'max_depth', 'max_materials'])
   exactKeys(args.target, ['type', 'name'])
@@ -595,6 +603,18 @@ const placementCandidatesDefinition = {
         limit: { type: 'integer', minimum: 1, maximum: 8, default: 5 },
       },
     },
+  },
+}
+
+const fluidSourceTilesDefinition = {
+  type: 'function', function: {
+    name: 'getFluidSourceTiles',
+    description: 'Read native fluid-bearing terrain tiles (for example water for an offshore pump) around the current actor on its current surface. Derives tile names from native fluid prototypes. Default radius 128, maximum 256, at most 8 samples plus explicit truncation. Samples are not guaranteed nearest, reachable or legal pump placements. Refuses incomplete generated-chunk coverage; use a smaller radius or explore with approved native movement, then read again. Does not generate terrain. Use getPlacementCandidates around a returned tile to independently verify pump geometry. Fluids are not entity names: getNearbyEntities cannot discover water by name.',
+    parameters: { type: 'object', additionalProperties: false, required: ['fluid_name'], properties: {
+      fluid_name: { type: 'string', minLength: 1, maxLength: 200 },
+      search_radius: { type: 'integer', minimum: 1, maximum: 256, default: 128 },
+      limit: { type: 'integer', minimum: 1, maximum: 8, default: 8 },
+    } },
   },
 }
 
@@ -1027,6 +1047,7 @@ const researchPathDefinition = {
 export const toolDefinitions = [
   ...base.toolDefinitions,
   placementCandidatesDefinition,
+  fluidSourceTilesDefinition,
   productionScopeDefinition,
   solveProductionDefinition,
   miningDetailsDefinition,
@@ -1125,6 +1146,7 @@ const OBSERVATION_TOOL_FAMILY = Object.freeze({
   getResearchPath: 'research_state',
 
   getPlacementCandidates: 'placement_candidates',
+  getFluidSourceTiles: 'nearby_world',
   planPlacement: 'placement_candidates',
 
   findConstructionSites: 'construction_state',
@@ -1177,6 +1199,7 @@ export const OBSERVATION_TOOL_TIER = Object.freeze({
   getTransportCapacity: 'discovery',
   // Deterministic harness-computed placement choices with bounded output.
   getPlacementCandidates: 'fact',
+  getFluidSourceTiles: 'discovery',
   planPlacement: 'fact',
   findConstructionSites: 'discovery',
   validateConstructionPlan: 'discovery',
@@ -1238,6 +1261,7 @@ export function isObservationToolName(name) {
 }
 
 export function toolCommand(name, args) {
+  if (name === 'getFluidSourceTiles') return renderFluidSourceTiles(args)
   if (name === 'getPlacementCandidates') return renderPlacementCandidates(args)
   if (name === 'getProductionScope') return renderProductionScope(args)
   if (name === 'solveProduction') return renderSolveProduction(args)

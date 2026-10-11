@@ -34,6 +34,8 @@ world.inventory is the native held-inventory read for this decision, with task s
 recipeKnowledge retains compact native prototype quantities across actions; complete:false means quantities are incomplete and cannot support input calculations. It contains historical recipe rules, not current inventory, unlock status, target identity or admission. Use complete retained recipes without repeatedly re-reading unchanged ingredients. Inspect fresh mutable facts when required for execution.
 Before the first decision, the harness reads bounded prototype dependencies and research paths from the trusted acceptance targets. These are native facts, not an executable plan. The seed is partial when truncated or unreadable; use approved observations for missing facts. Energy in recipeKnowledge is native seconds per craft at speed one; actual machine speed, hand crafting eligibility, power, fuel and concurrent production require verified native facts.
 Receipt requested_actions describes historical submitted quantities and targets. Use exact receipt verdicts together with current inventory to recognize completed work; never blindly repeat those actions or treat their targets as fresh.
+Fluids such as water are terrain, not entity names. getFluidSourceTiles derives bounded samples from native tile prototypes on the current actor surface. An unexplored-coverage refusal means unknown terrain; reduce the radius or physically explore before reading again. Samples are not necessarily nearest, reachable or legal pump positions. Use getPlacementCandidates around an observed tile to inspect native pump geometry; current held items and fresh native preflight remain required.
+
 entityKnowledge contains bounded historical native entity identities and positions, retained after older receipts and reads leave the packet. Use these references to freshly inspect existing equipment before deciding to build it again. Surface identity is unknown: do not navigate using an old position before a fresh exact getEntityStatus confirms the target on the current surface. References prove neither current existence nor ownership, inventory, fuel, power or reach. An empty nearby scan only covers that scan's radius; it does not prove that a previously observed distant lab or machine disappeared. Fresh native preflight remains required for every action.
 world.known_entities supplies up to four exact native machine status reads refreshed for this decision. Use these timestamped inventories and working/status facts without requesting the same sufficient read again. status_name is the native enum name; energy_source classifies the native prototype. Electric energy is stored energy, not wattage or supply sufficiency; electric_network_id is a current identity observation, not proof of adequate power. Missing fields are unknown, and energy_source:none only means no recognized source prototype. Resolve an observed no_power, low_power or not_plugged_in_electric_network prerequisite before waiting for powered production or research. Inventory indices have their native meaning; no roles or totals are inferred. Reads are sequential snapshots, not an atomic factory state or an admission grant. read:false means unreadable, never zero stock; found:false covers only the current actor surface/force. Truncation explicitly limits completeness. Missing power or fuel is a prerequisite to resolve through native progress, not a reason to repeatedly inspect unchanged lab/research state. Choose an available prerequisite action once its essential facts are known.
 Keep player-built structures and reserved supplies intact. Use exact targets for mutations/withdrawals; ambiguous destructive operations and player inventory withdrawal are refused. Inputs marked historical may be stale; re-observe exact targets. Resume/restarts share one cumulative call, wall-time and input allowance.
@@ -183,7 +185,7 @@ export class PursuitRuntime {
   install(state) {
     this.loop = new GoalPursuit({ state, provider: this.provider, now: this.now, adapter: {
       world: () => this.world(), verify: predicate => this.verify(predicate),
-      observe: async read => this.rcon.command(toolCommand(read.name, read.args)),
+      observe: read => this.observe(read),
       seedKnowledge: seedPursuitKnowledge,
       planningObservation: planningEntityObservation,
       admit: (operations, actor) => this.admit(operations, actor),
@@ -229,6 +231,20 @@ export class PursuitRuntime {
     check(!actorChanged(actor, after), 'pursuit_stale_actor')
     return { actor, runtime, observation: { inventory, actor_position: copy(runtime.actor?.position), task_state: runtime.task_state, queue_length: runtime.queue_length,
       reservations: this.authorization.world.reservations.filter(row => row.status === 'active') } }
+  }
+
+  async observe(read) {
+    const raw = await this.rcon.command(toolCommand(read.name, read.args))
+    if (read.name === 'getFluidSourceTiles' || read.name === 'getNearbyEntities') {
+      let result
+      try { if (typeof raw === 'string' && raw.length <= 4096) result = JSON.parse(raw) } catch {}
+      if (read.name === 'getFluidSourceTiles') await this.traceEvent('pursuit.fluid_sources_observed', {
+        reason: 'bounded_native_fluid_tile_read', fluid_name: read.args.fluid_name,
+        readable: Boolean(result && typeof result === 'object' && !Array.isArray(result)), native_result: result })
+      else if (result?.code === 'unknown_entity_prototype') await this.traceEvent('pursuit.entity_read_refused', {
+        reason: 'native_unknown_entity_prototype', identity: result.identity, observation_tool: result.observation_tool })
+    }
+    return raw
   }
 
   async verify(predicate) {

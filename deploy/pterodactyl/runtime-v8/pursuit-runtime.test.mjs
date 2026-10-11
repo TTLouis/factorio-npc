@@ -5,11 +5,46 @@ import os from 'node:os'
 import path from 'node:path'
 import { PursuitRuntime, ownerPursuitBudget, pursuitProvider, pursuitIntake, pursuitMessages, renderPursuitOperation } from './pursuit-runtime.mjs'
 import { providerRequest } from './provider.mjs'
-import { pursuitDecisionToolDefinition, approvedOperationListText, renderOperationPreflight, operationMetadataForName } from './structured-policy.mjs'
+import { pursuitDecisionToolDefinition, approvedOperationListText, renderOperationPreflight, operationMetadataForName, toolCommand, toolDefinitions } from './structured-policy.mjs'
 
 const goal = { objective: 'Gather ten copper ore.', predicate: { scope: 'finite', summary: 'Hold ten copper ore.',
   doneWhen: [{ kind: 'inventory_count', item_name: 'copper-ore', minimum: 10 }] } }
 const action = { notes: 'Acquire the requested ore.', operations: [{ name: 'gather_resource', args: { resource_name: 'copper-ore', count: 10 } }] }
+
+test('fluid source reads render only bounded native calls and advertise explicit terrain limits', () => {
+  assert.equal(toolCommand('getFluidSourceTiles', { fluid_name: 'water' }), `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_tools","get_fluid_source_tiles",{fluid_name='water'})))`)
+  assert.match(toolCommand('getFluidSourceTiles', { fluid_name: 'modded-fluid', search_radius: 256, limit: 8 }), /search_radius=256,limit=8/)
+  for (const args of [{}, { fluid_name: 'water', extra: 1 }, { fluid_name: 'water', search_radius: 257 },
+    { fluid_name: 'water', search_radius: 1.5 }, { fluid_name: 'water', limit: 9 }, { fluid_name: 'water', limit: 0 }]) {
+    assert.throws(() => toolCommand('getFluidSourceTiles', args))
+  }
+  assert(toolDefinitions.some(row => row.function.name === 'getFluidSourceTiles'))
+  assert.match(pursuitMessages({})[0].content, /Samples are not necessarily nearest, reachable or legal pump positions/)
+})
+
+test('fluid terrain and unknown entity observations retain charge and correlated traces without effects', async t => {
+  const fluid = { ok: true, fluid_name: 'water', samples: [{ name: 'water', fluid_name: 'water', position: { x: 22, y: 8 }, surface_index: 1 }], returned_count: 1, truncated: false }
+  const refused = { ok: false, code: 'unknown_entity_prototype', identity: 'water', fluid_name: 'water', observation_tool: 'getFluidSourceTiles' }
+  const f = await fixture(t, [{ observations: [
+    { name: 'getFluidSourceTiles', args: { fluid_name: 'water' } },
+    { name: 'getNearbyEntities', args: { name: 'water' } },
+  ] }, { pauseReason: 'Read fixture complete.' }])
+  const original = f.options.rcon.command
+  f.options.rcon.command = command => command.includes('get_fluid_source_tiles') ? Promise.resolve(JSON.stringify(fluid))
+    : command.includes('get_nearby_entities') ? Promise.resolve(JSON.stringify(refused)) : original(command)
+  await f.agent.request(goal.objective)
+  assert.equal(f.agent.loop.state.budget.calls, 2)
+  assert(f.agent.loop.state.budget.inputChars > 0)
+  assert.equal(f.agent.loop.state.ordinal, 0); assert.equal(f.mutations.length, 0)
+  const packet = JSON.parse(f.requests[1].messages[1].content)
+  assert.deepEqual(JSON.parse(packet.observations.find(row => row.name === 'getFluidSourceTiles').result), fluid)
+  assert.deepEqual(f.agent.authorization.world.npc_placements, [])
+  const trace = (await fsp.readFile(f.options.traceFile, 'utf8')).trim().split('\n').map(JSON.parse)
+  assert(trace.some(row => row.event === 'pursuit.fluid_sources_observed' && row.request_id === f.agent.loop.state.request_id
+    && row.reason === 'bounded_native_fluid_tile_read' && row.native_result.returned_count === 1))
+  assert(trace.some(row => row.event === 'pursuit.entity_read_refused' && row.request_id === f.agent.loop.state.request_id
+    && row.reason === 'native_unknown_entity_prototype' && row.observation_tool === 'getFluidSourceTiles'))
+})
 
 test('pursuit advertised operations match its restricted adapter while the general catalog stays available', () => {
   const names = pursuitDecisionToolDefinition.function.parameters.properties.decision.properties.operations.items.properties.name.enum

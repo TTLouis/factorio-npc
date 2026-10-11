@@ -48,6 +48,17 @@ beforeEach(() => {
 })
 
 describe('goal conditions while the NPC body is dead', () => {
+  it('refuses water as an entity name before an engine query and supplies the native fluid-read alternative', async () => {
+    const find = vi.fn()
+    actor_state.actor = { position: { x: 0, y: 0 }, surface: { index: 1, find_entities_filtered: find } }
+    ;(globalThis as any).prototypes.entity = {}
+    ;(globalThis as any).prototypes.fluid = { water: {} }
+    const tools = await tools_interface()
+    expect(tools.get_nearby_entities(64, 'water', 'resource', 5)).toEqual({ ok: false, code: 'unknown_entity_prototype',
+      field: 'name', identity: 'water', fluid_name: 'water', observation_tool: 'getFluidSourceTiles' })
+    expect(tools.get_nearby_entities(64, 'unknown-tile', undefined, 5)).toMatchObject({ ok: false, code: 'unknown_entity_prototype' })
+    expect(find).not.toHaveBeenCalled()
+  })
   it('reads native consumption counters across surfaces without crediting hand crafts', async () => {
     const npc_force = force(0)
     npc_force.get_item_production_statistics = () => ({ get_input_count: () => 999, get_output_count: () => 7 })

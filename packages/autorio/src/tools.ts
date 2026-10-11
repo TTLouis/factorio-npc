@@ -10,6 +10,7 @@ import { compact_spatial_summary } from './spatial_semantics'
 import { energy_source_kind } from './prototype_knowledge'
 import { get_actor_inventory_items } from './utils/inventory'
 import { find_world_entities } from './npc_vision'
+import { fluid_source_observation, type FluidSourceRequest } from './fluid_source_observation'
 
 const MAX_NEARBY_RADIUS = 64
 const MAX_NEARBY_RESULTS = 40
@@ -309,6 +310,10 @@ export function create_tools_remote_interface() {
         }
       }
 
+      if (name !== undefined && !prototypes.entity[name]) {
+        return { ok: false, code: 'unknown_entity_prototype', field: 'name', identity: name,
+          ...(prototypes.fluid[name] ? { fluid_name: name, observation_tool: 'getFluidSourceTiles' } : {}) }
+      }
       const bounded_radius = math.max(1, math.min(MAX_NEARBY_RADIUS, radius || 20))
       const bounded_limit = math.max(1, math.min(MAX_NEARBY_RESULTS, limit || 50))
       const filters: Record<string, unknown> = {
@@ -509,6 +514,7 @@ export function create_tools_remote_interface() {
         entity: entity_summary,
       }
     },
+    get_fluid_source_tiles: (request: FluidSourceRequest) => fluid_source_observation(get_controlled_actor(), request),
     get_placement_candidates: (request: PlacementCandidateRequest) => {
       const actor = get_controlled_actor()
       if (!actor) return { ok: false, error: 'no controlled actor' }
