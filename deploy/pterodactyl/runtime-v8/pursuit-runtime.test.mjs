@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { PursuitRuntime, pursuitProvider, pursuitIntake, pursuitMessages, renderPursuitOperation } from './pursuit-runtime.mjs'
+import { PursuitRuntime, ownerPursuitBudget, pursuitProvider, pursuitIntake, pursuitMessages, renderPursuitOperation } from './pursuit-runtime.mjs'
 import { providerRequest } from './provider.mjs'
 import { pursuitDecisionToolDefinition, approvedOperationListText } from './structured-policy.mjs'
 
@@ -114,6 +114,42 @@ async function fixture(t, replies = [action]) {
     advance: ms => { time += ms }, failSend: () => { failSend = true }, satisfy: () => { satisfied = true },
     complete: () => { runtime.task_state = 'idle'; runtime.queue_length = 0; runtime.admission_journal.at(-1).state = 'completed' } }
 }
+
+test('deployment campaign limits are bounded and cannot alter the fixed wall allowance', () => {
+  assert.deepEqual(ownerPursuitBudget(), { maxCalls: 30, maxInputChars: 2000000 })
+  assert.deepEqual(ownerPursuitBudget({ maxCalls: 60, maxInputChars: 4000000 }), { maxCalls: 60, maxInputChars: 4000000 })
+  for (const raw of [null, [], {}, { maxCalls: 61, maxInputChars: 4000000 },
+    { maxCalls: '60', maxInputChars: 4000000 }, { maxCalls: 60, maxInputChars: 4000001 },
+    { maxCalls: 60, maxInputChars: NaN }, { maxCalls: 60, maxInputChars: 4000000, maxWallMs: 2400000 }]) {
+    assert.throws(() => ownerPursuitBudget(raw), /owner_pursuit/)
+  }
+})
+
+test('fresh deployment limits never replenish a persisted campaign on restart or new goal', async t => {
+  for (const initial of [undefined, { maxCalls: 60, maxInputChars: 4000000 }]) {
+    const f = await fixture(t, [{ pauseReason: 'Fixture boundary.' }])
+    const first = new PursuitRuntime({ ...f.options, campaignBudget: initial })
+    f.setAgent(first)
+    await first.request(goal.objective)
+    const original = first.loop.snapshot().budget
+    assert.equal(original.maxCalls, initial?.maxCalls ?? 30)
+    assert.equal(original.maxInputChars, initial?.maxInputChars ?? 2000000)
+    assert.equal(original.maxWallMs, 1200000)
+    const restarted = new PursuitRuntime({ ...f.options,
+      campaignBudget: initial ? undefined : { maxCalls: 60, maxInputChars: 4000000 } })
+    f.setAgent(restarted)
+    await restarted.loadPersistentState()
+    assert.deepEqual(restarted.loop.snapshot().budget, original)
+    await restarted.request(JSON.stringify({ ...goal, objective: 'A new owner goal, same campaign.' }))
+    const next = restarted.loop.snapshot().budget
+    assert.equal(next.maxCalls, original.maxCalls)
+    assert.equal(next.maxInputChars, original.maxInputChars)
+    assert.equal(next.maxWallMs, original.maxWallMs)
+    assert.equal(next.startedAt, original.startedAt)
+    assert.equal(next.calls, original.calls + 1)
+    assert(next.inputChars > original.inputChars)
+  }
+})
 
 test('production adapter dispatches the exact persisted journal identity; receipt poll spends no extra calls', async t => {
   const f = await fixture(t)

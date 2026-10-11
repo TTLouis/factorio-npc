@@ -155,12 +155,29 @@ test('restored reservations cannot lose the start time or counters', () => {
   const f = fixture()
   for (const budget of [
     { calls: 1, startedAt: null }, { calls: -1 }, { calls: 31 }, { inputChars: -1 },
-    { maxCalls: 31 }, { maxWallMs: 1200001 }, { startedAt: NaN },
+    { maxCalls: 61 }, { maxWallMs: 1200001 }, { startedAt: NaN },
   ]) {
     const state = structuredClone(f.state)
     Object.assign(state.budget, budget)
     assert.throws(() => new GoalPursuit({ state, adapter: f.adapter, provider: async () => action }), /budget|limit/)
   }
+})
+
+test('approved sixty-call campaign stops at its own cap without changing the default', async () => {
+  assert.equal(fixture().state.budget.maxCalls, 30)
+  const remaining = []
+  const f = fixture({ options: { maxCalls: 60, maxInputChars: 4000000 }, provider: async packet => {
+    remaining.push(packet.remainingCalls)
+    return { observations: [{ name: 'getInventoryItems', args: {} }] }
+  } })
+  for (let index = 0; index < 60; index++) await f.loop.wake('read')
+  const stopped = await f.loop.wake('over_cap')
+  assert.equal(f.calls(), 60)
+  assert.equal(stopped.pauseReason, 'call_budget_exhausted')
+  assert.equal(stopped.budget.calls, 60)
+  assert.equal(stopped.budget.maxInputChars, 4000000)
+  assert.equal(stopped.budget.maxWallMs, 1200000)
+  assert.deepEqual(remaining, Array.from({ length: 60 }, (_, index) => 60 - index))
 })
 
 test('restart discards mutable reads and preserves the charged allowance and objective', async () => {

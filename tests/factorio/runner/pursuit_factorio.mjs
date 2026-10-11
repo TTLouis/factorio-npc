@@ -62,6 +62,7 @@ try {
   assert.equal(furnaceCollision.humans, 0)
   assert.equal(furnaceCollision.speed, 1)
   const options = { rcon, stateFile: path.join(results, 'pursuit-state.json'), traceFile: path.join(results, 'pursuit-trace.jsonl'),
+    campaignBudget: { maxCalls: 60, maxInputChars: 4000000 },
     provider: async (messages, context) => {
       calls.push({ messages, controlProtocol: context.controlProtocol })
       assert.equal(context.controlProtocol, 'pursuit')
@@ -93,15 +94,21 @@ try {
   await first.request(JSON.stringify(goal(1)))
   await settle(first)
   assert.equal(first.loop.state.budget.calls, 5)
+  assert.equal(first.loop.state.budget.maxCalls, 60)
+  assert.equal(first.loop.state.budget.maxInputChars, 4000000)
+  assert.equal(first.loop.state.budget.maxWallMs, 1200000)
   assert(first.loop.state.recipeKnowledge.some(fact => fact.name === 'iron-gear-wheel' && fact.historical))
   assert.equal(first.loop.state.history[0].requested_actions[0].args.count, 1)
   const ordinal = first.loop.state.ordinal
   // Reload the on-disk campaign and dispatch a second goal against real global
   // native high-water state. Neither ordinal nor provider allowance can reset.
-  const restarted = new PursuitRuntime(options)
+  const restarted = new PursuitRuntime({ ...options, campaignBudget: undefined })
   await restarted.request(JSON.stringify(goal(2)))
   await settle(restarted)
   assert.equal(restarted.loop.state.budget.calls, 6)
+  assert.equal(restarted.loop.state.budget.maxCalls, 60)
+  assert.equal(restarted.loop.state.budget.maxInputChars, 4000000)
+  assert.equal(restarted.loop.state.budget.startedAt, first.loop.state.budget.startedAt)
   assert.equal(restarted.loop.state.ordinal, ordinal + 1)
   assert.equal(calls.length, 6)
   const final = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; rcon.print(helpers.table_to_json({plates=a.get_item_count("iron-plate"),gears=a.get_item_count("iron-gear-wheel"),connected_players=#game.connected_players}))'))

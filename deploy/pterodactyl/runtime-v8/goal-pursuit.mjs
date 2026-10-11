@@ -83,7 +83,7 @@ export function pursuitDecision(raw) {
 }
 
 function validateBudget(budget) {
-  check(Number.isSafeInteger(budget?.maxCalls) && budget.maxCalls > 0 && budget.maxCalls <= 30, 'call_limit')
+  check(Number.isSafeInteger(budget?.maxCalls) && budget.maxCalls > 0 && budget.maxCalls <= 60, 'call_limit')
   check(Number.isSafeInteger(budget.maxWallMs) && budget.maxWallMs > 0 && budget.maxWallMs <= 1200000, 'wall_limit')
   check(Number.isSafeInteger(budget.maxInputChars) && budget.maxInputChars > 0, 'input_limit')
   check(Number.isSafeInteger(budget.calls) && budget.calls >= 0 && budget.calls <= budget.maxCalls, 'persisted_call_budget_invalid')
@@ -96,7 +96,7 @@ export function newPursuit({ objective, predicate, actor, maxCalls = 30, maxWall
   check(typeof objective === 'string' && objective.trim() && objective.length <= 4000, 'objective_required')
   check(predicate && typeof predicate === 'object', 'owner_predicate_required')
   check(Number.isSafeInteger(actor?.actor_id) && Number.isSafeInteger(actor?.epoch), 'actor_required')
-  check(Number.isSafeInteger(maxCalls) && maxCalls > 0 && maxCalls <= 30, 'call_limit')
+  check(Number.isSafeInteger(maxCalls) && maxCalls > 0 && maxCalls <= 60, 'call_limit')
   check(Number.isSafeInteger(maxWallMs) && maxWallMs > 0 && maxWallMs <= 1200000, 'wall_limit')
   check(Number.isSafeInteger(maxInputChars) && maxInputChars > 0, 'input_limit')
   return { version: 1, request_id: `pursuit_${randomUUID()}`, objective, predicate: clone(predicate), actor: clone(actor),

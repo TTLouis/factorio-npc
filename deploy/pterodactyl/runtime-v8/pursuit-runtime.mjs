@@ -104,9 +104,21 @@ async function durableWrite(filename, value) {
   }
 }
 
+// Deployment authority only. Goals and model decisions cannot select limits.
+// Applied only when no durable campaign budget exists.
+export function ownerPursuitBudget(raw) {
+  if (raw === undefined) return { maxCalls: 30, maxInputChars: 2000000 }
+  check(raw && typeof raw === 'object' && !Array.isArray(raw)
+    && Object.keys(raw).every(key => ['maxCalls', 'maxInputChars'].includes(key)), 'owner_pursuit_budget_invalid')
+  check(Number.isSafeInteger(raw.maxCalls) && raw.maxCalls > 0 && raw.maxCalls <= 60, 'owner_pursuit_call_limit')
+  check(Number.isSafeInteger(raw.maxInputChars) && raw.maxInputChars > 0 && raw.maxInputChars <= 4000000, 'owner_pursuit_input_limit')
+  return { maxCalls: raw.maxCalls, maxInputChars: raw.maxInputChars }
+}
+
 export class PursuitRuntime {
-  constructor({ rcon, provider, reserve, stateFile, traceFile, ownerGoal, npcId = 'sgluna', onActivity = () => {}, now = Date.now }) {
+  constructor({ rcon, provider, reserve, stateFile, traceFile, ownerGoal, campaignBudget, npcId = 'sgluna', onActivity = () => {}, now = Date.now }) {
     Object.assign(this, { rcon, stateFile, traceFile, ownerGoal, npcId, onActivity, now })
+    this.campaignBudget = ownerPursuitBudget(campaignBudget)
     this.provider = pursuitProvider(provider, reserve)
     this.authorization = createEmptyAuthorization()
     this.archives = []
@@ -279,7 +291,7 @@ export class PursuitRuntime {
       ...(evaluation.baselines[row.id] !== undefined ? { baseline: evaluation.baselines[row.id] } : {}) })) }
     check(predicate.done_when.every(row => !['items_produced', 'items_consumed', 'rockets_launched'].includes(row.kind)
       || row.count_from === 'save_start' || Number.isSafeInteger(row.baseline)), 'pursuit_goal_baseline_unreadable')
-    const state = newPursuit({ objective: goal.objective, predicate, actor: world.actor })
+    const state = newPursuit({ objective: goal.objective, predicate, actor: world.actor, ...this.campaignBudget })
     if (this.budget) state.budget = copy(this.budget)
     state.ordinal = Math.max(this.loop?.state.ordinal ?? 0, world.runtime.admission_high_water)
     state.owner = sender

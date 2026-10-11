@@ -174,6 +174,16 @@ test('the AI status line names the method, host, and models, and never the API k
   assert.equal(soloLine.includes(soloConfig.key), false)
 })
 
+test('pursuit budget override requires deployment environment and keeps fixed limits', () => {
+  const approved = { maxCalls: 60, maxInputChars: 4000000 }
+  assert.equal(configuration({ goalPursuitBudget: approved }, baseEnv()).goalPursuitBudget, undefined)
+  assert.deepEqual(configuration({}, baseEnv({ SGLUNA_GOAL_PURSUIT_BUDGET: JSON.stringify(approved) })).goalPursuitBudget, approved)
+  for (const text of ['', 'null', '[]', '{"maxCalls":61,"maxInputChars":4000000}',
+    '{"maxCalls":60,"maxInputChars":4000000,"maxWallMs":2400000}']) {
+    assert.throws(() => configuration({}, baseEnv({ SGLUNA_GOAL_PURSUIT_BUDGET: text })))
+  }
+})
+
 test('goal pursuit mode is opt-in, validates strictly, and the environment wins over saved configuration', () => {
   assert.equal(configuration({}, baseEnv()).goalPursuitMode, 'legacy')
   assert.equal(configuration({}, baseEnv({ SGLUNA_GOAL_PURSUIT_MODE: 'DIRECT' })).goalPursuitMode, 'direct')
