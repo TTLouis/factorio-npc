@@ -242,6 +242,31 @@ describe('exact entity status observation', () => {
     expect(find).not.toHaveBeenCalled()
   })
 
+  it('exposes native electric status names and stored energy without claiming supply sufficiency', async () => {
+    const { lookup, furnace } = fixture()
+    ;(globalThis as any).defines.entity_status = { working: 1, no_power: 87 }
+    const lab = { ...furnace(42, 80, 75), name: 'lab', type: 'lab', status: 87,
+      prototype: { electric_energy_source_prototype: {} }, energy: 0, electric_network_id: undefined as number | undefined }
+    lookup.mockReturnValue(lab)
+    const tools = await tools_interface()
+    expect(tools.get_entity_status(undefined, undefined, 42).entity).toMatchObject({
+      unit_number: 42, status: 87, status_name: 'no_power', working: false, energy_source: 'electric', energy: 0,
+    })
+    lab.status = 1; lab.energy = 1200; lab.electric_network_id = 23
+    expect(tools.get_entity_status(undefined, undefined, 42).entity).toMatchObject({
+      status_name: 'working', working: true, energy: 1200, electric_network_id: 23,
+    })
+    lab.status = 9999; lab.energy = Infinity; lab.electric_network_id = -1
+    const unknown = tools.get_entity_status(undefined, undefined, 42).entity
+    expect(unknown.status_name).toBeUndefined(); expect(unknown.energy).toBeUndefined()
+    expect(unknown.electric_network_id).toBeUndefined()
+    const burner = { ...furnace(43, 3, 2), prototype: { burner_prototype: {} },
+      get energy(): number { throw new Error('non-electric energy must not be read') },
+      get electric_network_id(): number { throw new Error('non-electric network must not be read') } }
+    lookup.mockReturnValue(burner)
+    expect(tools.get_entity_status(undefined, undefined, 43).entity).toMatchObject({ energy_source: 'burner' })
+  })
+
   it('resolves a remembered ordinary building but never substitutes its replacement', async () => {
     const { find, lookup, furnace } = fixture()
     const observed = furnace(42, 3, 17)

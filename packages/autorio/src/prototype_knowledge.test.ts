@@ -176,6 +176,15 @@ describe('prototype build knowledge', () => {
     ;(globalThis as any).prototypes = originalPrototypes
   })
 
+  it('reports recognized native energy source prototypes on individual entity details', () => {
+    expect(prototype_details('electric-mining-drill').entity).toMatchObject({ energy_source: 'electric' })
+    expect(prototype_details('burner-mining-drill').entity).toMatchObject({ energy_source: 'burner' })
+    expect(prototype_details('transport-belt').entity).toMatchObject({ energy_source: 'none' })
+    const custom = { name: 'custom-lab', type: 'lab', electric_energy_source_prototype: {}, fluidbox_prototypes: [] }
+    ;(globalThis as any).prototypes.entity['custom-lab'] = custom
+    expect(prototype_details('custom-lab').entity).toMatchObject({ name: 'custom-lab', energy_source: 'electric' })
+  })
+
   it('discovers force-available mining prototypes from a resource identity without guessing names', () => {
     const actor = {
       is_valid: true,

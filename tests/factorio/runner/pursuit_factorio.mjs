@@ -526,6 +526,56 @@ try {
   assert.deepEqual(currentStock.authorization.world.npc_placements, [])
   await fsp.writeFile(path.join(results, 'planning-stock-evidence.json'), JSON.stringify({ setup: stockSetup, pole: poleSetup,
     final: stockFinal, packets: stockPackets, state: currentStock.loop.snapshot() }, null, 2))
+  // Observation-only power fixture, not a gameplay completion shortcut. The
+  // lab stays empty: declared native solar power changes its current facts,
+  // never science stock, research progress or the campaign's acceptance.
+  const powerSetup = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local s=a.surface; local p=s.find_non_colliding_position("lab",{a.position.x+25,a.position.y+15},8,0.5); assert(p); local e=s.create_entity{name="lab",position=p,force=a.force}; assert(e); storage.pursuit_power_fixture={lab=e,daytime=s.daytime,freeze_daytime=s.freeze_daytime}; remote.call("autorio_tools","get_nearby_entities",64,"lab","lab",8); local status=remote.call("autorio_tools","get_entity_status",nil,nil,e.unit_number); local goal={produced=remote.call("autorio_tools","evaluate_condition",{kind="items_produced",item_name="automation-science-pack",minimum=75}),consumed=remote.call("autorio_tools","evaluate_condition",{kind="items_consumed",item_name="automation-science-pack",minimum=75}),researched=a.force.technologies["logistic-science-pack"].researched,enabled=a.force.recipes["logistic-science-pack"].enabled}; rcon.print(helpers.table_to_json({unit_number=e.unit_number,status=status,goal=goal,inventory=a.get_inventory(defines.inventory.character_main).get_contents(),position=a.position,admission=remote.call("autorio_operation_admission","status")}))'))
+  const powerPackets = []
+  let powerCalls = 0
+  const powerObservation = new PursuitRuntime({ rcon, stateFile: path.join(results, 'planning-power-state.json'),
+    traceFile: path.join(results, 'planning-power-trace.jsonl'), provider: async messages => {
+      const packet = JSON.parse(messages[1].content)
+      powerPackets.push(packet); powerCalls++
+      if (powerCalls === 1) return { content: JSON.stringify({ observations: [
+        { name: 'getNearbyEntities', args: { name: 'lab', radius: 64, limit: 8 } },
+        { name: 'getPrototypeDetails', args: { name: 'lab' } } ] }) }
+      const current = packet.world.known_entities.find(row => row.query.args.unit_number === powerSetup.unit_number)
+      assert.equal(current.read, true); assert.equal(current.found, true)
+      assert.equal(current.entity.energy_source, 'electric')
+      assert.equal(current.entity.unit_number, powerSetup.unit_number)
+      if (powerCalls === 2) {
+        assert.equal(current.entity.status_name, powerSetup.status.entity.status_name)
+        assert(['no_power', 'not_plugged_in_electric_network', 'low_power'].includes(current.entity.status_name))
+        assert.equal(current.entity.energy, 0)
+        const prototype = JSON.parse(packet.observations.find(row => row.name === 'getPrototypeDetails').result)
+        assert.equal(prototype.entity.energy_source, 'electric')
+        return { content: JSON.stringify({ operations: [{ name: 'wait', args: { ticks: 600 } }] }) }
+      }
+      assert.equal(powerCalls, 3)
+      assert(!['no_power', 'not_plugged_in_electric_network', 'low_power'].includes(current.entity.status_name))
+      assert(current.entity.energy > 0); assert(Number.isSafeInteger(current.entity.electric_network_id))
+      assert(current.entity.electric_network_id > 0)
+      assert(current.observed_at_ms >= powerPackets[1].world.known_entities[0].observed_at_ms)
+      assert(current.entity.inventories.every(row => row.items.length === 0))
+      return { content: JSON.stringify({ pauseReason: 'Fixture verified native power observations without science or research.' }) }
+    } })
+  await powerObservation.request(JSON.stringify(goal(1)))
+  await powerObservation.pollPursuit()
+  assert.equal(powerCalls, 2); assert(powerObservation.loop.state.pending)
+  await rcon.command('/silent-command local f=storage.pursuit_power_fixture; local e=f.lab; local s=e.surface; s.freeze_daytime=true; s.daytime=0; f.solar=s.create_entity{name="solar-panel",position={e.position.x+5,e.position.y},force=e.force}; f.pole=s.create_entity{name="small-electric-pole",position={e.position.x+2.5,e.position.y+2.5},force=e.force}; assert(f.solar and f.pole)')
+  const powerUntil = Date.now() + 90000
+  while (powerObservation.active && Date.now() < powerUntil) { await delay(100); await powerObservation.pollPursuit() }
+  assert.equal(powerObservation.loop.state.status, 'paused'); assert.equal(powerObservation.loop.state.pending, null)
+  const powerFinal = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local f=storage.pursuit_power_fixture; local e=f.lab; local s=e.surface; local goal={produced=remote.call("autorio_tools","evaluate_condition",{kind="items_produced",item_name="automation-science-pack",minimum=75}),consumed=remote.call("autorio_tools","evaluate_condition",{kind="items_consumed",item_name="automation-science-pack",minimum=75}),researched=a.force.technologies["logistic-science-pack"].researched,enabled=a.force.recipes["logistic-science-pack"].enabled}; local result={goal=goal,science=e.get_inventory(defines.inventory.lab_input).get_item_count("automation-science-pack"),inventory=a.get_inventory(defines.inventory.character_main).get_contents(),position=a.position,admission=remote.call("autorio_operation_admission","status"),humans=#game.connected_players,speed=game.speed}; assert(e.destroy()); assert(f.solar.destroy()); assert(f.pole.destroy()); s.daytime=f.daytime; s.freeze_daytime=f.freeze_daytime; storage.pursuit_power_fixture=nil; rcon.print(helpers.table_to_json(result))'))
+  assert.deepEqual(powerFinal.goal, powerSetup.goal)
+  assert.deepEqual(powerFinal.inventory, powerSetup.inventory); assert.deepEqual(powerFinal.position, powerSetup.position)
+  assert.equal(powerFinal.science, 0); assert.equal(powerFinal.humans, 0); assert.equal(powerFinal.speed, 1)
+  assert.equal(powerFinal.admission.high_water, powerSetup.admission.high_water + 1)
+  const powerTrace = (await fsp.readFile(path.join(results, 'planning-power-trace.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse)
+  assert(powerTrace.some(row => row.event === 'pursuit.planning_power_observed' && row.reason === 'native_machine_power_facts'
+    && row.request_id === powerObservation.loop.state.request_id && row.machines.some(machine => machine.unit_number === powerSetup.unit_number)))
+  await fsp.writeFile(path.join(results, 'planning-power-evidence.json'), JSON.stringify({ setup: powerSetup,
+    final: powerFinal, packets: powerPackets, state: powerObservation.loop.snapshot() }, null, 2))
   const options = { rcon, stateFile: path.join(results, 'pursuit-state.json'), traceFile: path.join(results, 'pursuit-trace.jsonl'),
     campaignBudget: { maxCalls: 500, maxInputChars: 50000000, maxWallMs: 3600000 },
     provider: async (messages, context) => {

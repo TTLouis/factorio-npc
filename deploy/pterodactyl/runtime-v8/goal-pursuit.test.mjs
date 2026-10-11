@@ -96,6 +96,25 @@ test('planning refresh runs once per packet, charges fresh machine stock, and re
   assert(packets.every(packet => packet.entityKnowledge[0].historical && !packet.entityKnowledge[0].inventories))
 })
 
+test('planning power facts are timestamped, charged and traced without becoming durable authority', async () => {
+  const packets = []
+  const f = withPlanningRefresh(fixture({ provider: async packet => { packets.push(packet); return { pauseReason: 'fixture done' } } }))
+  const observe = f.adapter.observe
+  f.adapter.observe = async query => {
+    const raw = JSON.parse(await observe(query))
+    Object.assign(raw.entity, { energy_source: 'electric', status_name: 'no_power', energy: 0 })
+    return JSON.stringify(raw)
+  }
+  await f.loop.wake('owner_intake')
+  assert.equal(packets[0].world.known_entities[0].entity.status_name, 'no_power')
+  assert.equal(f.loop.state.budget.inputChars, JSON.stringify(packets[0]).length)
+  assert.equal(f.loop.state.entityKnowledge[0].energy_source, undefined)
+  const event = f.events.find(row => row.event === 'pursuit.planning_power_observed')
+  assert.equal(event.reason, 'native_machine_power_facts')
+  assert.equal(event.request_id, f.loop.state.request_id)
+  assert.deepEqual(event.machines, [{ unit_number: 58, observed_at_ms: 1000, status_name: 'no_power', energy_source: 'electric', energy: 0, electric_network_id: undefined }])
+})
+
 test('planning refresh is excluded from completed, exhausted and unowned native work', async () => {
   for (const kind of ['completed', 'calls', 'wall', 'unowned']) {
     const f = withPlanningRefresh(fixture())

@@ -302,6 +302,11 @@ export class GoalPursuit {
         planningAt = this.now()
         await this.event('pursuit.planning_entities_refreshed', 'bounded_current_known_machine_reads',
           { reads: readUnits.size, unreadable: planningObservation.filter(row => row.read === false).length })
+        const power = planningObservation.filter(row => row.read === true && row.found === true && row.entity?.energy_source === 'electric')
+          .map(row => ({ unit_number: row.entity.unit_number, observed_at_ms: row.observed_at_ms,
+            status_name: row.entity.status_name, energy_source: row.entity.energy_source,
+            energy: row.entity.energy, electric_network_id: row.entity.electric_network_id }))
+        if (power.length) await this.event('pursuit.planning_power_observed', 'native_machine_power_facts', { machines: power })
       }
       world = await this.fence(generation)
       packetAt = this.now()

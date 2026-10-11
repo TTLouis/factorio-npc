@@ -55,7 +55,13 @@ export async function planningEntityObservation(anchors, read) {
       name: entity.name, type: entity.type, position: { x: entity.position.x, y: entity.position.y }, inventories,
       inventories_truncated: entity.inventories_truncated, inventory_items_truncated: entity.inventory_items_truncated } }
     if (Number.isSafeInteger(entity.status) && entity.status >= 0) summary.entity.status = entity.status
+    if (typeof entity.status_name === 'string' && /^[a-z][a-z0-9_]{0,99}$/.test(entity.status_name)) summary.entity.status_name = entity.status_name
     if (typeof entity.working === 'boolean') summary.entity.working = entity.working
+    if (['electric', 'burner', 'heat', 'fluid', 'void', 'none'].includes(entity.energy_source)) summary.entity.energy_source = entity.energy_source
+    if (entity.energy_source === 'electric') {
+      if (Number.isFinite(entity.energy) && entity.energy >= 0) summary.entity.energy = entity.energy
+      if (Number.isSafeInteger(entity.electric_network_id) && entity.electric_network_id > 0) summary.entity.electric_network_id = entity.electric_network_id
+    }
     for (const key of ['recipe', 'previous_recipe_name']) if (name(entity[key])) summary.entity[key] = entity[key]
     rows.push(JSON.stringify(summary).length <= 3500 ? summary : unreadable('native_summary_truncated'))
   }

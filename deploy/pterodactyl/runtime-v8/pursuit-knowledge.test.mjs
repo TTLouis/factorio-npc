@@ -62,6 +62,30 @@ test('machines without item inventories retain native status facts from empty Lu
   assert.deepEqual(row.entity.inventories, [])
 })
 
+test('current power projection preserves optional native facts without decoding enum numbers or inferring capacity', async () => {
+  const raw = machineStatus(1)
+  Object.assign(raw.entity, { status: 54, status_name: 'not_plugged_in_electric_network', energy_source: 'electric', energy: 0 })
+  const project = async () => (await planningEntityObservation([machine(1)], async () => ({ raw: JSON.stringify(raw), observed_at_ms: 2000 })))[0]
+  const disconnected = await project()
+  assert.equal(disconnected.entity.status_name, 'not_plugged_in_electric_network')
+  assert.equal(disconnected.entity.energy, 0); assert.equal(disconnected.entity.energy_source, 'electric')
+  assert.equal(disconnected.entity.electric_network_id, undefined)
+  Object.assign(raw.entity, { status: 123456, status_name: undefined, energy: 1200.5, electric_network_id: 9 })
+  const connected = await project()
+  assert.equal(connected.entity.status_name, undefined)
+  assert.equal(connected.entity.energy, 1200.5); assert.equal(connected.entity.electric_network_id, 9)
+  assert.equal(connected.entity.power_sufficient, undefined); assert.equal(connected.entity.owned, undefined)
+  for (const invalid of [null, -1, '1200', {}, Infinity]) {
+    Object.assign(raw.entity, { energy: invalid, electric_network_id: invalid, status_name: invalid })
+    const row = await project()
+    assert.equal(row.entity.energy, undefined); assert.equal(row.entity.electric_network_id, undefined)
+    assert.equal(row.entity.status_name, undefined)
+  }
+  Object.assign(raw.entity, { energy_source: 'burner', energy: 1200, electric_network_id: 9 })
+  assert.equal((await project()).entity.energy, undefined)
+  assert.equal((await project()).entity.electric_network_id, undefined)
+})
+
 test('native knowledge seed follows only acceptance targets and bounded native dependencies, never model prose', async () => {
   const reads = []
   const result = await seedPursuitKnowledge({ done_when: [{ kind: 'research_completed', technology: 'mod-research' },
