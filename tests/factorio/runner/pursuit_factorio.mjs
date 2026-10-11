@@ -128,8 +128,29 @@ try {
   assert.equal(overlapFinal.tree_valid, true)
   assert.equal(overlapFinal.humans, 0)
   assert.equal(overlapFinal.speed, 1)
+  // Two declared natural trees reproduce the failed live tree-on-tree selection.
+  // Only the nearest exact tree may be harvested; its neighbour stays intact.
+  const treeOverlapSetup = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local s=a.surface; local t=s.create_entity{name="tree-01",position={a.position.x-1.25,a.position.y},force="neutral"}; assert(t); local n=s.create_entity{name="tree-01",position={t.position.x-0.5,t.position.y+1.25},force="neutral"}; assert(n); storage.pursuit_exact_tree=t; storage.pursuit_neighbour_tree=n; a.update_selected_entity(t.position); rcon.print(helpers.table_to_json({centre_selects_neighbour=a.selected==n,wood=a.get_item_count("wood"),position=t.position,actor=a.position}))'))
+  assert.equal(treeOverlapSetup.centre_selects_neighbour, true)
+  const treeGoal = { objective: 'Harvest four wood from the nearest natural tree under another tree selection box.', predicate: {
+    scope: 'finite', summary: 'Gain four native wood.', doneWhen: [{ kind: 'inventory_count', item_name: 'wood', minimum: treeOverlapSetup.wood + 4 }] } }
+  const treeHarvester = new PursuitRuntime({ ...options, provider: async (_messages, context) => {
+    calls.push({ controlProtocol: context.controlProtocol, operation: 'harvest_product' })
+    return { content: JSON.stringify({ operations: [{ name: 'harvest_product', args: { product_name: 'wood', count: 4, search_radius: 8 } }] }) }
+  } })
+  await treeHarvester.request(JSON.stringify(treeGoal))
+  await settle(treeHarvester)
+  assert.equal(treeHarvester.loop.state.budget.calls, 8)
+  assert.equal(treeHarvester.loop.state.ordinal, ordinal + 4)
+  const treeOverlapFinal = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; rcon.print(helpers.table_to_json({target_valid=storage.pursuit_exact_tree.valid,neighbour_valid=storage.pursuit_neighbour_tree.valid,wood=a.get_item_count("wood"),actor=a.position,humans=#game.connected_players,speed=game.speed}))'))
+  assert.equal(treeOverlapFinal.target_valid, false)
+  assert.equal(treeOverlapFinal.neighbour_valid, true)
+  assert.equal(treeOverlapFinal.wood, treeOverlapSetup.wood + 4)
+  assert.deepEqual(treeOverlapFinal.actor, treeOverlapSetup.actor)
+  assert.equal(treeOverlapFinal.humans, 0)
+  assert.equal(treeOverlapFinal.speed, 1)
   await fsp.writeFile(path.join(results, 'pursuit-evidence.json'), JSON.stringify({ setup, final, calls: calls.length,
-    ordinal: overlapMiner.loop.state.ordinal, state: overlapMiner.loop.snapshot(), missingSource, naturalSetup, naturalFinal, overlapSetup, exactAmountRefusal, overlapFinal, commands }, null, 2))
+    ordinal: treeHarvester.loop.state.ordinal, state: treeHarvester.loop.snapshot(), missingSource, naturalSetup, naturalFinal, overlapSetup, exactAmountRefusal, overlapFinal, treeOverlapSetup, treeOverlapFinal, commands }, null, 2))
   console.log('PASS pursuit: native hand-craft receipts, zero humans, persistent campaign and cross-goal ordinals')
 }
 finally { connection.close() }

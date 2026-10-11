@@ -4,6 +4,7 @@ import { new_basic_operation_runtime } from './basic_operation_runtime'
 import { new_basic_operation_controller } from './basic_operations'
 import { new_task_manager } from './task_manager'
 import { TaskStates } from './types'
+import { select_exact_mining_target } from './mining_reach'
 
 function fixture(target_x: number) {
   let mining = false
@@ -67,6 +68,38 @@ beforeEach(() => {
 })
 
 describe('mining reach recovery', () => {
+  it('selects a centre-occluded natural tree by exact object identity without a unit number', () => {
+    const trace = vi.spyOn(globalThis, 'log')
+    const f = fixture(2)
+    const target = { ...f.resource, type: 'tree', name: 'tree-01', unit_number: undefined,
+      prototype: { is_building: false, mineable_properties: { minable: true } },
+      selection_box: { left_top: { x: 1, y: -2 }, right_bottom: { x: 3, y: 0.5 } } } as any
+    const other = { ...target }
+    vi.mocked(f.actor.update_selected_entity).mockImplementation(position => {
+      f.character.selected = position.y < -1 ? target : other
+    })
+    expect(select_exact_mining_target(f.actor, target)).toBe(true)
+    expect(f.character.selected).toBe(target)
+    expect(trace).toHaveBeenCalledWith(expect.stringContaining('reason=natural_centre_occluded actor_id=42'))
+    trace.mockRestore()
+  })
+
+  it('refuses a same-name natural substitute after all nine probes and keeps placed buildings centre-only', () => {
+    const f = fixture(2)
+    const target = { ...f.resource, type: 'simple-entity', unit_number: undefined,
+      prototype: { is_building: false, mineable_properties: { minable: true } },
+      selection_box: { left_top: { x: 1, y: -1 }, right_bottom: { x: 3, y: 1 } } } as any
+    const select = vi.mocked(f.actor.update_selected_entity)
+    select.mockImplementation(() => { f.character.selected = { ...target } })
+    expect(select_exact_mining_target(f.actor, target)).toBe(false)
+    expect(select).toHaveBeenCalledTimes(9)
+    select.mockClear()
+    target.prototype.is_building = true
+    target.prototype.items_to_place_this = [{ name: 'rock', count: 1 }]
+    expect(select_exact_mining_target(f.actor, target)).toBe(false)
+    expect(select).toHaveBeenCalledTimes(1)
+  })
+
   it('selects the exact resource through an interior point when an overlapping tree wins centre selection', () => {
     const trace = vi.spyOn(globalThis, 'log')
     const f = fixture(2)

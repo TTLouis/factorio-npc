@@ -74,10 +74,11 @@ export function select_exact_mining_target(actor: ControlledActor, target: LuaEn
     return selected === target
   }
   if (select_position(target.position)) return true
-  // A tree's selection box can cover an ore centre without covering the whole
-  // tile. Probe only bounded interior points of this exact resource's native
+  // Overlapping natural selection boxes can cover an ore or tree centre.
+  // Probe only bounded interior points of this exact mineable's native
   // selection box; never select a substitute entity or clear the obstruction.
-  if (target.type !== 'resource' || !target.selection_box) return false
+  const natural = (target.type === 'tree' || target.type === 'simple-entity') && finite_world_mining_target(target)
+  if ((target.type !== 'resource' && !natural) || !target.selection_box) return false
   const box = target.selection_box
   const centre = { x: (box.left_top.x + box.right_bottom.x) / 2, y: (box.left_top.y + box.right_bottom.y) / 2 }
   const dx = (box.right_bottom.x - box.left_top.x) * 0.4
@@ -85,7 +86,8 @@ export function select_exact_mining_target(actor: ControlledActor, target: LuaEn
   if (!(dx > 0 && dy > 0 && dx < math.huge && dy < math.huge)) return false
   for (const offset of [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]]) {
     if (select_position({ x: centre.x + dx * offset[0], y: centre.y + dy * offset[1] })) {
-      log(`[AUTORIO] mining.exact_selection_recovered reason=resource_centre_occluded actor_id=${actor.status_snapshot().actor_id} entity=${target.name} position=${serpent.line(target.position)}`)
+      const reason = target.type === 'resource' ? 'resource_centre_occluded' : 'natural_centre_occluded'
+      log(`[AUTORIO] mining.exact_selection_recovered reason=${reason} actor_id=${actor.status_snapshot().actor_id} entity=${target.name} position=${serpent.line(target.position)}`)
       return true
     }
   }
