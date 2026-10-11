@@ -299,6 +299,42 @@ try {
     && row.admission.code === 'player_unavailable'))
   await fsp.writeFile(path.join(results, 'absent-player-evidence.json'), JSON.stringify({ setup: absentPlayerSetup, final: absentPlayerFinal,
     state: absentPlayer.loop.snapshot(), trace: absentPlayerTrace }, null, 2))
+  // A malformed or oversized read array is model-correctable; no prefix of
+  // the rejected list may run and the original campaign remains charged.
+  const readArraySetup = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; rcon.print(helpers.table_to_json({inventory=a.get_inventory(defines.inventory.character_main).get_contents(),operations=remote.call("autorio_operations","status"),admission=remote.call("autorio_operation_admission","status")}))'))
+  let readArrayCalls = 0, readArrayStart
+  const readArray = new PursuitRuntime({ rcon, stateFile: path.join(results, 'read-array-state.json'),
+    traceFile: path.join(results, 'read-array-trace.jsonl'), provider: async messages => {
+      const packet = JSON.parse(messages[1].content)
+      if (++readArrayCalls === 1) return { content: JSON.stringify({ observations: Array.from({ length: 5 },
+        () => ({ name: 'getInventoryItems', args: {} })) }) }
+      if (readArrayCalls === 2) {
+        assert.match(packet.observations.find(row => row.name === 'decision_validation').result, /observations_limit.*array of at most 4/)
+        assert.equal(packet.remainingCalls, 29)
+        readArrayStart = readArray.loop.state.budget.startedAt
+        return { content: JSON.stringify({ observations: [{ name: 'getInventoryItems', args: {} }] }) }
+      }
+      assert.equal(readArrayCalls, 3); assert.equal(packet.remainingCalls, 28)
+      assert(packet.observations.some(row => row.name === 'getInventoryItems' && row.historical === false))
+      assert.equal(readArray.loop.state.budget.startedAt, readArrayStart)
+      return { content: JSON.stringify({ pauseReason: 'Fixture ends after bounded read-array correction.' }) }
+    } })
+  await readArray.request(JSON.stringify(goal(1)))
+  assert.equal(readArrayCalls, 3); assert.equal(readArray.loop.state.pending, null)
+  assert.equal(readArray.loop.state.ordinal, readArraySetup.admission.high_water)
+  const readArrayFinal = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; rcon.print(helpers.table_to_json({inventory=a.get_inventory(defines.inventory.character_main).get_contents(),operations=remote.call("autorio_operations","status"),admission=remote.call("autorio_operation_admission","status"),humans=#game.connected_players,speed=game.speed}))'))
+  assert.deepEqual(readArrayFinal.inventory, readArraySetup.inventory)
+  assert.deepEqual(readArrayFinal.admission, readArraySetup.admission)
+  assert.equal(readArrayFinal.operations.tasks_added, readArraySetup.operations.tasks_added)
+  assert.equal(readArrayFinal.operations.queue_length, readArraySetup.operations.queue_length)
+  assert.equal(readArrayFinal.operations.task_state, readArraySetup.operations.task_state)
+  assert.deepEqual(readArrayFinal.operations.actor.position, readArraySetup.operations.actor.position)
+  assert.equal(readArrayFinal.humans, 0); assert.equal(readArrayFinal.speed, 1)
+  const readArrayTrace = (await fsp.readFile(path.join(results, 'read-array-trace.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse)
+  assert(readArrayTrace.some(row => row.event === 'pursuit.decision_refused' && row.request_id === readArray.loop.state.request_id
+    && row.reason === 'invalid_bounded_argument' && row.message.startsWith('observations_limit')))
+  await fsp.writeFile(path.join(results, 'read-array-evidence.json'), JSON.stringify({ setup: readArraySetup, final: readArrayFinal,
+    state: readArray.loop.snapshot(), trace: readArrayTrace }, null, 2))
   const options = { rcon, stateFile: path.join(results, 'pursuit-state.json'), traceFile: path.join(results, 'pursuit-trace.jsonl'),
     campaignBudget: { maxCalls: 500, maxInputChars: 50000000, maxWallMs: 3600000 },
     provider: async (messages, context) => {

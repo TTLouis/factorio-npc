@@ -334,6 +334,48 @@ test('retained live invalid-radius decision supplies bounded correction without 
   assert.equal(f.loop.snapshot().budget.calls, 2)
 })
 
+test('invalid decision array shape or cardinality refuses every request and corrects within the same allowance', async () => {
+  for (const [invalid, code] of [
+    [{ observations: Array.from({ length: 5 }, () => ({ name: 'getInventoryItems', args: {} })) }, 'observations_limit'],
+    [{ observations: { name: 'getInventoryItems', args: {} } }, 'observations_limit'],
+    [{ operations: Array.from({ length: 17 }, () => action.operations[0]) }, 'operations_limit'],
+    [{ operations: action.operations[0] }, 'operations_limit'],
+  ]) {
+    let turn = 0, reads = 0, admits = 0
+    const f = fixture({ provider: async packet => {
+      if (++turn === 1) return { notes: 'Unaccepted notes must not persist.', ...invalid }
+      assert.match(packet.observations.at(-1).result, new RegExp(`${code}.*array of at most`))
+      return action
+    } })
+    f.adapter.observe = async () => { reads++; return '{}' }
+    f.adapter.admit = async () => { admits++; return { ok: true } }
+    const refused = await f.loop.wake('invalid_array')
+    assert.equal(refused.status, 'active'); assert.equal(refused.pending, null); assert.equal(refused.ordinal, 0)
+    assert.equal(refused.notes, ''); assert.equal(reads, 0); assert.equal(admits, 0); assert.equal(f.sent.length, 0)
+    assert.equal(refused.budget.calls, 1); assert.equal(refused.metrics.length, 1)
+    assert(f.events.some(row => row.event === 'pursuit.decision_refused' && row.reason === 'invalid_bounded_argument'
+      && row.request_id === refused.request_id && row.message.startsWith(code)))
+    f.advance(5)
+    const corrected = await f.loop.wake('correction')
+    assert.equal(corrected.budget.calls, 2); assert.equal(corrected.budget.startedAt, refused.budget.startedAt)
+    assert(corrected.budget.inputChars > refused.budget.inputChars)
+    assert.equal(corrected.request_id, refused.request_id); assert.equal(corrected.objective, refused.objective)
+    assert.equal(reads, 0); assert.equal(admits, 1); assert.equal(f.sent.length, 1)
+  }
+})
+
+test('repeated malformed read arrays cannot replenish the campaign or bypass its call ceiling', async () => {
+  const f = fixture({ options: { maxCalls: 2 }, reply: { observations: {} } })
+  await f.loop.wake('invalid_one')
+  const first = f.loop.snapshot()
+  f.advance(1)
+  await f.loop.wake('invalid_two')
+  const exhausted = await f.loop.wake('limit')
+  assert.equal(exhausted.pauseReason, 'call_budget_exhausted')
+  assert.equal(exhausted.budget.calls, 2); assert.equal(exhausted.budget.startedAt, first.budget.startedAt)
+  assert.equal(exhausted.pending, null); assert.equal(f.sent.length, 0); assert.equal(f.calls(), 2)
+})
+
 test('native read memory retains earlier facts as historical, refreshes duplicates and stays bounded', async () => {
   let item = 'iron-plate'
   const f = fixture({ provider: async () => ({ observations: [{ name: 'getRecipe', args: { item } }] }) })
