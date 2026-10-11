@@ -175,10 +175,10 @@ test('the AI status line names the method, host, and models, and never the API k
 })
 
 test('completion trial budget requires deployment environment and keeps bounded limits', () => {
-  const approved = { maxCalls: 120, maxInputChars: 12000000, maxWallMs: 3600000 }
+  const approved = { maxCalls: 500, maxInputChars: 50000000, maxWallMs: 3600000 }
   assert.equal(configuration({ goalPursuitBudget: approved }, baseEnv()).goalPursuitBudget, undefined)
   assert.deepEqual(configuration({}, baseEnv({ SGLUNA_GOAL_PURSUIT_BUDGET: JSON.stringify(approved) })).goalPursuitBudget, approved)
-  for (const text of ['', 'null', '[]', '{"maxCalls":121,"maxInputChars":12000000}',
+  for (const text of ['', 'null', '[]', '{"maxCalls":501,"maxInputChars":50000000}',
     '{"maxCalls":120,"maxInputChars":12000000,"maxWallMs":3600001}']) {
     assert.throws(() => configuration({}, baseEnv({ SGLUNA_GOAL_PURSUIT_BUDGET: text })))
   }

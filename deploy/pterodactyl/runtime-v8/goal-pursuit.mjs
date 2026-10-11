@@ -9,7 +9,7 @@ import { recipeFactsFromDetails } from './handoff-packet.mjs'
 const TERMINAL = new Set([RECONCILE_VERDICT.ADMITTED_COMPLETED, RECONCILE_VERDICT.NOT_ADMITTED, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION])
 const clone = value => structuredClone(value)
 const check = (ok, reason) => { if (!ok) throw new Error(reason) }
-export const PURSUIT_BUDGET_LIMITS = Object.freeze({ maxCalls: 120, maxWallMs: 3600000, maxInputChars: 12000000 })
+export const PURSUIT_BUDGET_LIMITS = Object.freeze({ maxCalls: 500, maxWallMs: 3600000, maxInputChars: 50000000 })
 
 const observationKey = row => `${row.name}:${JSON.stringify(Object.entries(row.args ?? {}).sort(([a], [b]) => a.localeCompare(b)))}`
 function rememberObservations(previous, fresh) {

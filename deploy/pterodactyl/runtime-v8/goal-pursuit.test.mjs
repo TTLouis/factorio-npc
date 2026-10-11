@@ -155,7 +155,7 @@ test('restored reservations cannot lose the start time or counters', () => {
   const f = fixture()
   for (const budget of [
     { calls: 1, startedAt: null }, { calls: -1 }, { calls: 31 }, { inputChars: -1 },
-    { maxCalls: 121 }, { maxWallMs: 3600001 }, { startedAt: NaN },
+    { maxCalls: 501 }, { maxWallMs: 3600001 }, { startedAt: NaN },
   ]) {
     const state = structuredClone(f.state)
     Object.assign(state.budget, budget)
@@ -182,7 +182,7 @@ test('approved sixty-call campaign stops at its own cap without changing the def
 
 test('completion trial can pass the old wall ceiling but stops at its original configured deadline', async () => {
   const remaining = []
-  const f = fixture({ options: { maxCalls: 120, maxInputChars: 12000000, maxWallMs: 3600000 }, provider: async packet => {
+  const f = fixture({ options: { maxCalls: 500, maxInputChars: 50000000, maxWallMs: 3600000 }, provider: async packet => {
     remaining.push(packet.remainingWallMs)
     return { observations: [{ name: 'getInventoryItems', args: {} }] }
   } })
@@ -196,12 +196,12 @@ test('completion trial can pass the old wall ceiling but stops at its original c
   assert.equal(stopped.budget.calls, 2)
 })
 
-test('completion trial stops before a 121st provider call and keeps legacy defaults', async () => {
-  const f = fixture({ options: { maxCalls: 120, maxInputChars: 12000000, maxWallMs: 3600000 },
+test('completion trial stops before a 501st provider call and keeps legacy defaults', async () => {
+  const f = fixture({ options: { maxCalls: 500, maxInputChars: 50000000, maxWallMs: 3600000 },
     reply: { observations: [{ name: 'getInventoryItems', args: {} }] } })
-  for (let index = 0; index < 120; index++) await f.loop.wake('read')
+  for (let index = 0; index < 500; index++) await f.loop.wake('read')
   const stopped = await f.loop.wake('over_cap')
-  assert.equal(f.calls(), 120)
+  assert.equal(f.calls(), 500)
   assert.equal(stopped.pauseReason, 'call_budget_exhausted')
   assert.equal(fixture().state.budget.maxWallMs, 1200000)
   assert.equal(fixture().state.budget.maxInputChars, 2000000)

@@ -23,6 +23,10 @@ test('pursuit advertised operations match its restricted adapter while the gener
   assert.ok(approvedOperationListText().includes('rotate_entity {'))
   for (const allowed of ['place_entity', 'place_candidate', 'supply_entity', 'mine_entity_exact', 'gather_resource']) assert.ok(names.includes(allowed))
   assert.match(prompt, /Never guess a future unit_number/)
+  assert.match(prompt, /set_machine_recipe accepts only an exact assembling-machine, never a furnace/)
+  assert.match(prompt, /preflights EVERY operation against the current world before dispatching ANY operation/)
+  assert.match(prompt, /does not simulate future inventory from earlier operations/)
+  assert.match(prompt, /settle its exact receipt, then use the resulting inventory/)
 })
 
 test('pursuit accepts one decision submission and refuses other or multiple wire tools', async () => {
@@ -208,10 +212,10 @@ test('mixed occupied-input supply is wholly refused and a corrected decision use
 test('deployment campaign limits allow a bounded completion trial and preserve defaults', () => {
   assert.deepEqual(ownerPursuitBudget(), { maxCalls: 30, maxInputChars: 2000000 })
   assert.deepEqual(ownerPursuitBudget({ maxCalls: 60, maxInputChars: 4000000 }), { maxCalls: 60, maxInputChars: 4000000 })
-  const completion = { maxCalls: 120, maxInputChars: 12000000, maxWallMs: 3600000 }
+  const completion = { maxCalls: 500, maxInputChars: 50000000, maxWallMs: 3600000 }
   assert.deepEqual(ownerPursuitBudget(completion), completion)
-  for (const raw of [null, [], {}, { ...completion, maxCalls: 121 },
-    { ...completion, maxCalls: '120' }, { ...completion, maxInputChars: 12000001 },
+  for (const raw of [null, [], {}, { ...completion, maxCalls: 501 },
+    { ...completion, maxCalls: '500' }, { ...completion, maxInputChars: 50000001 },
     { ...completion, maxInputChars: NaN }, { ...completion, maxWallMs: 3600001 },
     { ...completion, maxWallMs: 0 }, { ...completion, maxWallMs: '3600000' },
     { ...completion, maxWallMs: NaN }, { ...completion, retryBudget: 1 }]) {
@@ -221,7 +225,8 @@ test('deployment campaign limits allow a bounded completion trial and preserve d
 
 test('fresh deployment limits never replenish a persisted campaign on restart or new goal', async t => {
   for (const initial of [undefined, { maxCalls: 60, maxInputChars: 4000000 },
-    { maxCalls: 120, maxInputChars: 12000000, maxWallMs: 3600000 }]) {
+    { maxCalls: 120, maxInputChars: 12000000, maxWallMs: 3600000 },
+    { maxCalls: 500, maxInputChars: 50000000, maxWallMs: 3600000 }]) {
     const f = await fixture(t, [{ pauseReason: 'Fixture boundary.' }])
     const first = new PursuitRuntime({ ...f.options, campaignBudget: initial })
     f.setAgent(first)
@@ -231,7 +236,7 @@ test('fresh deployment limits never replenish a persisted campaign on restart or
     assert.equal(original.maxInputChars, initial?.maxInputChars ?? 2000000)
     assert.equal(original.maxWallMs, initial?.maxWallMs ?? 1200000)
     const restarted = new PursuitRuntime({ ...f.options,
-      campaignBudget: initial ? undefined : { maxCalls: 120, maxInputChars: 12000000, maxWallMs: 3600000 } })
+      campaignBudget: initial ? undefined : { maxCalls: 500, maxInputChars: 50000000, maxWallMs: 3600000 } })
     f.setAgent(restarted)
     await restarted.loadPersistentState()
     assert.deepEqual(restarted.loop.snapshot().budget, original)
