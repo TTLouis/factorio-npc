@@ -320,7 +320,10 @@ export class GoalPursuit {
       const admission = await this.adapter.admit(clone(decision.operations), clone(world.actor))
       world = await this.fence(generation)
       if (admission?.ok !== true) {
-        this.state.observations = [{ name: 'admission', result: JSON.stringify(admission).slice(0, 8000) }]
+        // Pre-dispatch refusal ran no actions. Keep bounded read evidence as
+        // historical, without presenting mutable facts as current authority.
+        this.state.observations = rememberObservations(this.state.observations, [{ name: 'admission',
+          result: observationText(JSON.stringify(admission)), observed_at_ms: this.now(), historical: false }])
         await this.save()
         await this.event('pursuit.admission_refused', 'native_or_permission_refusal', { admission })
         return this.snapshot()

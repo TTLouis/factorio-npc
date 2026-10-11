@@ -76,13 +76,23 @@ try {
         assert.match(messages[1].content, /radius must be an integer from 1 to 64/)
         return { content: JSON.stringify({ observations: [{ name: 'getRecipeDetails', args: { item_or_recipe: 'iron-gear-wheel', requested_count: 1 } }] }) }
       }
-      if (calls.length === 4) assert(JSON.parse(messages[1].content).recipeKnowledge.some(fact => fact.name === 'iron-gear-wheel' && fact.complete))
+      if (calls.length === 4) {
+        assert(JSON.parse(messages[1].content).recipeKnowledge.some(fact => fact.name === 'iron-gear-wheel' && fact.complete))
+        return { content: JSON.stringify({ operations: [{ name: 'gather_resource', args: { resource_name: 'uranium-ore', count: 75, search_radius: 1 } }] }) }
+      }
+      if (calls.length === 5) {
+        const packet = JSON.parse(messages[1].content)
+        assert(packet.observations.some(row => row.name === 'getRecipeDetails' && row.historical === true))
+        const refusal = packet.observations.find(row => row.name === 'admission')
+        assert.equal(refusal.historical, false)
+        assert.equal(JSON.parse(refusal.result).code, 'resource_source_not_found')
+      }
       return { content: JSON.stringify({ notes: 'Native hand crafting.', operations: [{ name: 'craft_item', args: { item_name: 'iron-gear-wheel', count: 1 } }] }) }
     } }
   const first = new PursuitRuntime(options)
   await first.request(JSON.stringify(goal(1)))
   await settle(first)
-  assert.equal(first.loop.state.budget.calls, 4)
+  assert.equal(first.loop.state.budget.calls, 5)
   assert(first.loop.state.recipeKnowledge.some(fact => fact.name === 'iron-gear-wheel' && fact.historical))
   assert.equal(first.loop.state.history[0].requested_actions[0].args.count, 1)
   const ordinal = first.loop.state.ordinal
@@ -91,9 +101,9 @@ try {
   const restarted = new PursuitRuntime(options)
   await restarted.request(JSON.stringify(goal(2)))
   await settle(restarted)
-  assert.equal(restarted.loop.state.budget.calls, 5)
+  assert.equal(restarted.loop.state.budget.calls, 6)
   assert.equal(restarted.loop.state.ordinal, ordinal + 1)
-  assert.equal(calls.length, 5)
+  assert.equal(calls.length, 6)
   const final = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; rcon.print(helpers.table_to_json({plates=a.get_item_count("iron-plate"),gears=a.get_item_count("iron-gear-wheel"),connected_players=#game.connected_players}))'))
   assert.equal(final.plates, 0)
   assert.equal(final.gears, 2)
@@ -113,7 +123,7 @@ try {
   } })
   await harvester.request(JSON.stringify(woodGoal))
   await settle(harvester)
-  assert.equal(harvester.loop.state.budget.calls, 6)
+  assert.equal(harvester.loop.state.budget.calls, 7)
   assert.equal(harvester.loop.state.ordinal, ordinal + 2)
   const naturalFinal = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; rcon.print(helpers.table_to_json({wood=a.get_item_count("wood"),connected_players=#game.connected_players,speed=game.speed}))'))
   assert(naturalFinal.wood >= naturalSetup.wood_before + 1)
@@ -139,7 +149,7 @@ try {
   } })
   await overlapMiner.request(JSON.stringify(overlapGoal))
   await settle(overlapMiner)
-  assert.equal(overlapMiner.loop.state.budget.calls, 7)
+  assert.equal(overlapMiner.loop.state.budget.calls, 8)
   assert.equal(overlapMiner.loop.state.ordinal, ordinal + 3)
   const overlapFinal = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local e=storage.pursuit_overlap_resource; local t=storage.pursuit_overlap_tree; rcon.print(helpers.table_to_json({amount=e.valid and e.amount or 0,tree_valid=t.valid,copper=a.get_item_count("copper-ore"),wood=a.get_item_count("wood"),humans=#game.connected_players,speed=game.speed}))'))
   assert.equal(overlapFinal.copper, overlapSetup.copper + 1)
@@ -160,7 +170,7 @@ try {
   } })
   await treeHarvester.request(JSON.stringify(treeGoal))
   await settle(treeHarvester)
-  assert.equal(treeHarvester.loop.state.budget.calls, 8)
+  assert.equal(treeHarvester.loop.state.budget.calls, 9)
   assert.equal(treeHarvester.loop.state.ordinal, ordinal + 4)
   const treeOverlapFinal = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; rcon.print(helpers.table_to_json({target_valid=storage.pursuit_exact_tree.valid,neighbour_valid=storage.pursuit_neighbour_tree.valid,wood=a.get_item_count("wood"),actor=a.position,humans=#game.connected_players,speed=game.speed}))'))
   assert.equal(treeOverlapFinal.target_valid, false)

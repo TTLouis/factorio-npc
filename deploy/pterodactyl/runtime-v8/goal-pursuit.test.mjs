@@ -312,6 +312,56 @@ test('native read memory retains earlier facts as historical, refreshes duplicat
   assert.equal(f.events.some(row => row.event === 'pursuit.observations_retained' && row.request_id), true)
 })
 
+test('native pre-dispatch refusals preserve bounded historical reads and replace only refusal feedback', async () => {
+  let turn = 0, refusal = 'resource_source_not_found'
+  const f = fixture({ provider: async packet => {
+    if (++turn === 1) return { observations: [{ name: 'getInventoryItems', args: {} },
+      { name: 'getNearbyEntities', args: { radius: 20, limit: 5 } }] }
+    if (turn > 2) {
+      assert.equal(packet.observations.length, 3)
+      assert(packet.observations.slice(0, 2).every(row => row.historical === true && row.observed_at_ms === 1000))
+      assert.equal(packet.world.inventory['copper-ore'], 4)
+      assert.equal(packet.observations.at(-1).historical, false)
+      assert.equal(JSON.parse(packet.observations.at(-1).result).code, turn === 3 ? 'resource_source_not_found' : 'supply_missing')
+    }
+    return action
+  } })
+  f.adapter.observe = async read => JSON.stringify({ source: read.name, inventory: { 'copper-ore': 0 } })
+  f.adapter.admit = async () => ({ ok: false, code: refusal })
+  await f.loop.wake('read')
+  f.advance(10)
+  await f.loop.wake('refused')
+  f.world.observation.inventory['copper-ore'] = 4
+  refusal = 'supply_missing'
+  f.advance(10)
+  await f.loop.wake('refused_again')
+  await f.loop.wake('feedback')
+  assert.equal(f.sent.length, 0)
+  assert.equal(f.loop.snapshot().pending, null)
+  assert.equal(f.loop.snapshot().ordinal, 0)
+  assert.equal(f.loop.snapshot().budget.calls, 4)
+  assert.equal(f.loop.snapshot().budget.startedAt, 1000)
+  const restarted = new GoalPursuit({ state: f.loop.snapshot(), adapter: f.adapter, provider: async () => action })
+  assert.deepEqual(restarted.snapshot().observations, [])
+})
+
+test('native refusal retention obeys row and character bounds while feedback remains fresh', async () => {
+  let item = 0
+  const f = fixture({ provider: async () => ({ observations: [{ name: 'getRecipe', args: { item: `recipe-${item++}` } }] }) })
+  f.adapter.observe = async () => 'x'.repeat(7500)
+  for (let index = 0; index < 8; index++) await f.loop.wake('read')
+  f.loop.provider = async () => action
+  f.adapter.admit = async () => ({ ok: false, code: 'refused', detail: 'y'.repeat(9000) })
+  await f.loop.wake('refused')
+  const rows = f.loop.snapshot().observations
+  assert(rows.length <= 12 && JSON.stringify(rows).length <= 48000)
+  assert(rows.slice(0, -1).every(row => row.historical === true))
+  assert.equal(rows.at(-1).name, 'admission')
+  assert.equal(rows.at(-1).historical, false)
+  assert.match(rows.at(-1).result, /Native observation truncated/)
+  assert.equal(f.sent.length, 0)
+})
+
 test('retained mixed action/read decision is refused without effects and can correct within its original allowance', async () => {
   let turn = 0, reads = 0
   const f = fixture({ provider: async packet => {
