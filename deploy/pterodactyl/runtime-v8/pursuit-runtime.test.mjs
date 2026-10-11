@@ -174,6 +174,37 @@ test('mixed missing-source supply is wholly refused and a corrected decision use
     && row.reason === 'native_or_permission_refusal' && row.admission.code === 'supply_missing'))
 })
 
+test('mixed occupied-input supply is wholly refused and a corrected decision uses the same charged campaign', async t => {
+  const supply = { operations: [
+    { name: 'supply_entity', args: { unit_number: 34, items: [
+      { item_name: 'copper-ore', count: 75 }, { item_name: 'wood', count: 18 } ] } },
+    { name: 'wait', args: { ticks: 12000 } },
+  ] }
+  const f = await fixture(t, [supply, action])
+  const command = f.options.rcon.command
+  f.options.rcon.command = text => text.includes('autorio_preflight') && text.includes('supply_entity')
+    ? JSON.stringify({ ok: false, code: 'destination_full', target: { unit_number: 34 }, transfer: { direction: 'to_entity', items: [
+      { item_name: 'copper-ore', source_count: 75, expected_moved: 0, status: 'destination_full', refusal_cause: 'input_slot_holds_other_item' },
+      { item_name: 'wood', source_count: 18, expected_moved: 18, status: 'ok' },
+    ] } }) : command(text)
+  f.agent.drive = reason => f.agent.loop.wake(reason)
+  await f.agent.request(goal.objective)
+  const state = f.agent.loop.snapshot()
+  assert.equal(state.pending, null); assert.equal(state.ordinal, 0); assert.equal(f.mutations.length, 0)
+  assert.equal(state.budget.calls, 1)
+  const refusal = JSON.parse(state.observations.at(-1).result)
+  assert.equal(refusal.code, 'destination_full'); assert.equal(refusal.operation_index, 0)
+  assert.equal(refusal.transfer.items[0].refusal_cause, 'input_slot_holds_other_item')
+  await f.agent.pollPursuit()
+  assert.equal(f.agent.loop.state.budget.calls, 2)
+  assert.equal(f.agent.loop.state.budget.startedAt, state.budget.startedAt)
+  assert.equal(f.mutations.length, 1)
+  assert.equal(f.agent.loop.state.pending.requested_actions[0].name, 'gather_resource')
+  const rows = (await fsp.readFile(f.options.traceFile, 'utf8')).trim().split('\n').map(JSON.parse)
+  assert(rows.some(row => row.event === 'pursuit.admission_refused' && row.request_id === state.request_id
+    && row.reason === 'native_or_permission_refusal' && row.admission.code === 'destination_full'))
+})
+
 test('deployment campaign limits allow a bounded completion trial and preserve defaults', () => {
   assert.deepEqual(ownerPursuitBudget(), { maxCalls: 30, maxInputChars: 2000000 })
   assert.deepEqual(ownerPursuitBudget({ maxCalls: 60, maxInputChars: 4000000 }), { maxCalls: 60, maxInputChars: 4000000 })

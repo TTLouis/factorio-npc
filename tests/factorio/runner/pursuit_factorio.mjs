@@ -148,6 +148,44 @@ try {
     && row.admission.code === 'supply_missing'))
   await fsp.writeFile(path.join(results, 'missing-supply-evidence.json'), JSON.stringify({ setup: missingSupplySetup, final: missingSupplyFinal,
     state: missingSupply.loop.snapshot(), trace: missingSupplyTrace }, null, 2))
+  // Replay occupied iron input plus copper and usable wood from attempt 20.
+  // Native refusal taints exact-batch completion; preflight must prevent even the
+  // otherwise usable fuel transfer before returning a charged decision.
+  const blockedSupplySetup = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; a.remove_item{name="wood",count=100000}; assert(a.insert{name="wood",count=18}==18); local p=a.surface.find_non_colliding_position("stone-furnace",{a.position.x+3,a.position.y},16,0.5); assert(p); local e=a.surface.create_entity{name="stone-furnace",position=p,force=a.force}; assert(e); assert(e.get_inventory(defines.inventory.furnace_source).insert{name="iron-ore",count=42}==42); storage.pursuit_blocked_supply_furnace=e; remote.call("autorio_tools","get_nearby_entities",16,"stone-furnace","furnace",16); rcon.print(helpers.table_to_json({unit_number=e.unit_number,inventory=a.get_inventory(defines.inventory.character_main).get_contents(),operations=remote.call("autorio_operations","status"),admission=remote.call("autorio_operation_admission","status")}))'))
+  let blockedSupplyCalls = 0
+  const blockedSupply = new PursuitRuntime({ rcon, stateFile: path.join(results, 'blocked-supply-state.json'),
+    traceFile: path.join(results, 'blocked-supply-trace.jsonl'), provider: async messages => {
+      if (++blockedSupplyCalls === 1) return { content: JSON.stringify({ operations: [
+        { name: 'supply_entity', args: { unit_number: blockedSupplySetup.unit_number, items: [
+          { item_name: 'copper-ore', count: 75 }, { item_name: 'wood', count: 18 } ] } },
+        { name: 'wait', args: { ticks: 12000 } },
+      ] }) }
+      const refusal = JSON.parse(JSON.parse(messages[1].content).observations.find(row => row.name === 'admission').result)
+      assert.equal(refusal.code, 'destination_full'); assert.equal(refusal.operation_index, 0)
+      assert.equal(refusal.transfer.items[0].expected_moved, 0); assert.equal(refusal.transfer.items[0].refusal_cause, 'input_slot_holds_other_item')
+      assert.equal(refusal.transfer.items[1].expected_moved, 18)
+      return { content: JSON.stringify({ pauseReason: 'Fixture ends after observing the occupied-input no-effect refusal.' }) }
+    } })
+  await blockedSupply.request(JSON.stringify(goal(1)))
+  assert.equal(blockedSupplyCalls, 2)
+  assert.equal(blockedSupply.loop.state.status, 'paused')
+  assert.equal(blockedSupply.loop.state.budget.calls, 2)
+  assert.equal(blockedSupply.loop.state.pending, null)
+  assert.equal(blockedSupply.loop.state.ordinal, blockedSupplySetup.admission.high_water)
+  const blockedSupplyFinal = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local e=storage.pursuit_blocked_supply_furnace; local result={inventory=a.get_inventory(defines.inventory.character_main).get_contents(),operations=remote.call("autorio_operations","status"),admission=remote.call("autorio_operation_admission","status"),iron=e.get_inventory(defines.inventory.furnace_source).get_item_count("iron-ore"),wood=e.get_fuel_inventory().get_item_count("wood"),humans=#game.connected_players,speed=game.speed}; assert(e.destroy()); rcon.print(helpers.table_to_json(result))'))
+  assert.deepEqual(blockedSupplyFinal.inventory, blockedSupplySetup.inventory)
+  assert.deepEqual(blockedSupplyFinal.admission, blockedSupplySetup.admission)
+  assert.equal(blockedSupplyFinal.operations.queue_length, blockedSupplySetup.operations.queue_length)
+  assert.equal(blockedSupplyFinal.operations.tasks_added, blockedSupplySetup.operations.tasks_added)
+  assert.equal(blockedSupplyFinal.operations.task_state, blockedSupplySetup.operations.task_state)
+  assert.deepEqual(blockedSupplyFinal.operations.actor.position, blockedSupplySetup.operations.actor.position)
+  assert.equal(blockedSupplyFinal.iron, 42); assert.equal(blockedSupplyFinal.wood, 0)
+  assert.equal(blockedSupplyFinal.humans, 0); assert.equal(blockedSupplyFinal.speed, 1)
+  const blockedSupplyTrace = (await fsp.readFile(path.join(results, 'blocked-supply-trace.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse)
+  assert(blockedSupplyTrace.some(row => row.event === 'pursuit.admission_refused' && row.request_id === blockedSupply.loop.state.request_id
+    && row.admission.code === 'destination_full'))
+  await fsp.writeFile(path.join(results, 'blocked-supply-evidence.json'), JSON.stringify({ setup: blockedSupplySetup, final: blockedSupplyFinal,
+    state: blockedSupply.loop.snapshot(), trace: blockedSupplyTrace }, null, 2))
   const options = { rcon, stateFile: path.join(results, 'pursuit-state.json'), traceFile: path.join(results, 'pursuit-trace.jsonl'),
     campaignBudget: { maxCalls: 120, maxInputChars: 12000000, maxWallMs: 3600000 },
     provider: async (messages, context) => {

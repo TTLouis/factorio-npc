@@ -179,17 +179,14 @@ export function transfer_preflight_facts(
       return { ok: false, code: 'supply_missing', transfer: { direction: 'to_entity', items } }
     }
   }
-  // A destination-only nothing_moved refusal does not cancel later transfers.
-  // Preserve that partial-transfer policy: reject capacity refusals only when
-  // every item would move nothing, and retain all per-item facts for feedback.
+  // Native refusal may let later tasks run, but the exact batch still records
+  // that refusal and cannot satisfy pursuit completion. Reject any currently
+  // known zero-transfer item before another item causes partial effects.
   let code: TransferPreflightCode | undefined
-  let all_failing = items.length > 0
   for (const item of items) {
     const failing = item.status === 'supply_missing' || item.status === 'extraction_empty' || item.status === 'destination_full'
-    if (!failing) all_failing = false
-    else if (code === undefined) code = item.status as TransferPreflightCode
+    if (failing && code === undefined) code = item.status as TransferPreflightCode
   }
-  if (!all_failing) code = undefined
   return {
     ok: code === undefined,
     code,

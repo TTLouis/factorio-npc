@@ -170,7 +170,7 @@ describe('transfer preflight facts: supply_entity', () => {
     expect(facts.transfer.items[0]).toMatchObject({ destination_accepts: 8, expected_moved: 8, status: 'ok' })
   })
 
-  it('accepts a mixed batch with per-item statuses: one item that cannot move does not reject the others', () => {
+  it('refuses a mixed batch when one destination takes nothing, retaining every item fact', () => {
     // Fuel slot full: coal has nowhere to go (a refusal), while the ore still moves natively.
     const { actor } = actor_with({ 'iron-ore': 50, coal: 5 })
     const parts = furnace_parts({ fuel_room: 0 })
@@ -182,9 +182,26 @@ describe('transfer preflight facts: supply_entity', () => {
       items: [{ item_name: 'iron-ore', count: 50 }, { item_name: 'coal', count: 5 }],
     })!
 
-    expect(facts.ok).toBe(true)
-    expect(facts.code).toBeUndefined()
+    expect(facts.ok).toBe(false)
+    expect(facts.code).toBe('destination_full')
     expect(facts.transfer.items.map(item => [item.item_name, item.status])).toEqual([['iron-ore', 'ok'], ['coal', 'destination_full']])
+  })
+
+  it.each([true, false])('refuses occupied furnace input with usable fuel, blocked ore first=%s', (ore_first) => {
+    const { actor } = actor_with({ 'copper-ore': 75, wood: 18 })
+    const parts = furnace_parts({ source: { 'iron-ore': 42 } })
+    ;(parts.source as any).count_empty_stacks = vi.fn(() => 0)
+    ;(parts.source as any).can_insert = vi.fn((stack: { name: string }) => stack.name === 'iron-ore')
+    ;(parts.fuel as any).can_insert = vi.fn((stack: { name: string }) => stack.name === 'wood')
+    const ore = { item_name: 'copper-ore', count: 75 }, fuel = { item_name: 'wood', count: 18 }
+    const facts = transfer_preflight_facts(actor, furnace(3, parts), 'supply_entity', {
+      unit_number: 3, items: ore_first ? [ore, fuel] : [fuel, ore],
+    })!
+    expect(facts).toMatchObject({ ok: false, code: 'destination_full' })
+    expect(facts.transfer.items.find(item => item.item_name === 'copper-ore')).toMatchObject({
+      source_count: 75, expected_moved: 0, status: 'destination_full', refusal_cause: 'input_slot_holds_other_item',
+    })
+    expect(facts.transfer.items.find(item => item.item_name === 'wood')).toMatchObject({ expected_moved: 18, status: 'ok' })
   })
 
   it.each([true, false])('refuses all supply when one source is missing, missing item first=%s', (missing_first) => {
