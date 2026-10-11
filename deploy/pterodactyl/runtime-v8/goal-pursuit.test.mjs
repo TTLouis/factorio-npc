@@ -5,6 +5,39 @@ import { planningEntityObservation } from './pursuit-knowledge.mjs'
 
 const actor = { actor_id: 18, epoch: 3, mode: 'npc', actor_kind: 'standalone_character' }
 const action = { notes: 'Acquire inputs before research.', operations: [{ name: 'gather_resource', args: { resource_name: 'copper-ore', count: 10 } }] }
+
+test('crafting consumes one settled action boundary instead of sharing current ingredients across independent preflights', async () => {
+  const craft = { name: 'craft_item', args: { item_name: 'iron-gear-wheel', count: 10 } }
+  const supply = { name: 'move_items_exact', args: { unit_number: 58, item_name: 'iron-plate', max_count: 20, to_entity: true } }
+  for (const operations of [[craft, craft], [craft, supply], [supply, craft], [craft, action.operations[0]]]) {
+    assert.throws(() => pursuitDecision({ operations }), /crafting_action_boundary_required/)
+  }
+  assert.deepEqual(pursuitDecision({ operations: [craft] }).operations, [craft])
+  assert.equal(pursuitDecision({ operations: [action.operations[0], { name: 'wait', args: { ticks: 1 } }] }).operations.length, 2)
+})
+
+test('duplicate craft refusal runs no reads or admission, charges correction, and permits one fresh single craft', async () => {
+  const craft = { name: 'craft_item', args: { item_name: 'iron-gear-wheel', count: 10 } }
+  let attempt = 0
+  const f = fixture({ provider: async packet => {
+    attempt++
+    if (attempt === 1) return { notes: 'Rejected notes must not replace strategy.', operations: [craft, craft] }
+    assert.match(packet.observations.find(row => row.name === 'decision_validation').result, /crafting_action_boundary_required/)
+    return { operations: [craft] }
+  } })
+  let reads = 0, admissions = 0
+  f.adapter.observe = async () => { reads++; return '{}' }
+  f.adapter.admit = async () => { admissions++; return { ok: true } }
+  const refused = await f.loop.wake('owner_intake')
+  assert.equal(refused.status, 'active'); assert.equal(refused.pending, null); assert.equal(refused.ordinal, 0)
+  assert.equal(refused.notes, '')
+  assert.equal(refused.budget.calls, 1); assert.equal(reads, 0); assert.equal(admissions, 0); assert.equal(f.sent.length, 0)
+  assert(f.events.some(row => row.event === 'pursuit.decision_refused' && row.reason === 'invalid_bounded_argument'
+    && /crafting_action_boundary_required/.test(row.message)))
+  const accepted = await f.loop.wake('correction')
+  assert.equal(accepted.budget.calls, 2); assert.equal(accepted.budget.startedAt, refused.budget.startedAt)
+  assert.equal(admissions, 1); assert.equal(f.sent.length, 1); assert.deepEqual(f.sent[0].operations, [craft])
+})
 function fixture({ reply = action, options = {}, provider } = {}) {
   let time = 1000
   const saved = [], events = [], sent = []

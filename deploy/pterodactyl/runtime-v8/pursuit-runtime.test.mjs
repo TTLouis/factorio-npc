@@ -288,7 +288,7 @@ test('withdrawals share current exact source stock without rejecting compatible 
 
 test('unavailable player transfer refuses the whole decision and a corrected action stays charged', async t => {
   const f = await fixture(t, [{ operations: [
-    { name: 'craft_item', args: { item_name: 'iron-gear-wheel', count: 1 } },
+    { name: 'wait', args: { ticks: 1 } },
     { name: 'move_items_with_player', args: { player_name: 'SGLuna', item_name: 'copper-ore', max_count: 74, to_player: true } },
   ] }, action])
   const command = f.options.rcon.command

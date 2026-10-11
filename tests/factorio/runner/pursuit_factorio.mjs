@@ -265,7 +265,7 @@ try {
   await fsp.writeFile(path.join(results, 'absent-harvest-evidence.json'), JSON.stringify({ setup: absentHarvestSetup, final: absentHarvestFinal,
     state: absentHarvester.loop.snapshot(), trace: absentHarvestTrace }, null, 2))
   // Attempt 24 used the NPC display name as a human player transfer target.
-  // An absent LuaPlayer must refuse before an otherwise valid craft can run.
+  // An absent LuaPlayer must refuse before an otherwise valid wait can run.
   const absentPlayerSetup = JSON.parse(await rcon.command('/silent-command assert(game.get_player("SGLuna")==nil); local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; rcon.print(helpers.table_to_json({inventory=a.get_inventory(defines.inventory.character_main).get_contents(),operations=remote.call("autorio_operations","status"),admission=remote.call("autorio_operation_admission","status"),actor=remote.call("autorio_actor","status"),craft=remote.call("autorio_preflight","operation","craft_item",{item_name="iron-gear-wheel",count=1}),transfer=remote.call("autorio_preflight","operation","move_items_with_player",{player_name="SGLuna",item_name="copper-ore",max_count=74,to_player=true})}))'))
   assert.equal(absentPlayerSetup.craft.ok, true)
   assert.equal(absentPlayerSetup.transfer.code, 'player_unavailable')
@@ -274,7 +274,7 @@ try {
   const absentPlayer = new PursuitRuntime({ rcon, stateFile: path.join(results, 'absent-player-state.json'),
     traceFile: path.join(results, 'absent-player-trace.jsonl'), provider: async messages => {
       if (++absentPlayerCalls === 1) return { content: JSON.stringify({ operations: [
-        { name: 'craft_item', args: { item_name: 'iron-gear-wheel', count: 1 } },
+        { name: 'wait', args: { ticks: 1 } },
         { name: 'move_items_with_player', args: { player_name: 'SGLuna', item_name: 'copper-ore', max_count: 74, to_player: true } },
       ] }) }
       const refusal = JSON.parse(JSON.parse(messages[1].content).observations.find(row => row.name === 'admission').result)
@@ -299,6 +299,40 @@ try {
     && row.admission.code === 'player_unavailable'))
   await fsp.writeFile(path.join(results, 'absent-player-evidence.json'), JSON.stringify({ setup: absentPlayerSetup, final: absentPlayerFinal,
     state: absentPlayer.loop.snapshot(), trace: absentPlayerTrace }, null, 2))
+  // Attempt 29: two individually craftable requests claimed the same plates.
+  // Declared fixture stock reproduces 25 plates vs two crafts needing 20 each.
+  const craftBoundarySetup = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; assert(a.get_inventory(defines.inventory.character_main).get_item_count("iron-plate")==4); assert(a.insert{name="iron-plate",count=21}==21); rcon.print(helpers.table_to_json({inventory=a.get_inventory(defines.inventory.character_main).get_contents(),position=a.position,operations=remote.call("autorio_operations","status"),admission=remote.call("autorio_operation_admission","status"),first=remote.call("autorio_preflight","operation","craft_item",{item_name="iron-gear-wheel",count=10}),second=remote.call("autorio_preflight","operation","craft_item",{item_name="iron-gear-wheel",count=10})}))'))
+  assert.equal(craftBoundarySetup.first.ok, true); assert.equal(craftBoundarySetup.second.ok, true)
+  let craftBoundaryCalls = 0, craftBoundaryStart
+  const craftBoundary = new PursuitRuntime({ rcon, stateFile: path.join(results, 'craft-boundary-state.json'),
+    traceFile: path.join(results, 'craft-boundary-trace.jsonl'), provider: async messages => {
+      const packet = JSON.parse(messages[1].content)
+      craftBoundaryStart ??= craftBoundary.loop.state.budget.startedAt
+      if (++craftBoundaryCalls === 1) return { content: JSON.stringify({ notes: 'Rejected duplicate craft strategy.', operations: [
+        { name: 'craft_item', args: { item_name: 'iron-gear-wheel', count: 10 } },
+        { name: 'craft_item', args: { item_name: 'iron-gear-wheel', count: 10 } } ] }) }
+      assert.equal(craftBoundaryCalls, 2)
+      assert.match(packet.observations.find(row => row.name === 'decision_validation').result, /crafting_action_boundary_required/)
+      assert.equal(packet.notes, ''); assert.equal(packet.remainingCalls, 29)
+      return { content: JSON.stringify({ pauseReason: 'Fixture verified whole duplicate-craft refusal before any native action.' }) }
+    } })
+  await craftBoundary.request(JSON.stringify(goal(1)))
+  assert.equal(craftBoundaryCalls, 2); assert.equal(craftBoundary.loop.state.pending, null)
+  assert.equal(craftBoundary.loop.state.ordinal, craftBoundarySetup.admission.high_water)
+  assert.equal(craftBoundary.loop.state.budget.startedAt, craftBoundaryStart)
+  assert.equal(craftBoundary.loop.state.budget.calls, 2)
+  const craftBoundaryFinal = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local result={inventory=a.get_inventory(defines.inventory.character_main).get_contents(),position=a.position,operations=remote.call("autorio_operations","status"),admission=remote.call("autorio_operation_admission","status"),humans=#game.connected_players,speed=game.speed}; assert(a.get_inventory(defines.inventory.character_main).remove{name="iron-plate",count=21}==21); rcon.print(helpers.table_to_json(result))'))
+  assert.deepEqual(craftBoundaryFinal.inventory, craftBoundarySetup.inventory)
+  assert.deepEqual(craftBoundaryFinal.position, craftBoundarySetup.position)
+  assert.deepEqual(craftBoundaryFinal.admission, craftBoundarySetup.admission)
+  assert.equal(craftBoundaryFinal.operations.tasks_added, craftBoundarySetup.operations.tasks_added)
+  assert.equal(craftBoundaryFinal.operations.queue_length, 0); assert.equal(craftBoundaryFinal.operations.task_state, 'idle')
+  assert.equal(craftBoundaryFinal.humans, 0); assert.equal(craftBoundaryFinal.speed, 1)
+  const craftBoundaryTrace = (await fsp.readFile(path.join(results, 'craft-boundary-trace.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse)
+  assert(craftBoundaryTrace.some(row => row.event === 'pursuit.decision_refused' && row.request_id === craftBoundary.loop.state.request_id
+    && row.reason === 'invalid_bounded_argument' && /crafting_action_boundary_required/.test(row.message)))
+  await fsp.writeFile(path.join(results, 'craft-boundary-evidence.json'), JSON.stringify({ setup: craftBoundarySetup,
+    final: craftBoundaryFinal, state: craftBoundary.loop.snapshot(), trace: craftBoundaryTrace }, null, 2))
   // A malformed or oversized read array is model-correctable; no prefix of
   // the rejected list may run and the original campaign remains charged.
   const readArraySetup = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; rcon.print(helpers.table_to_json({inventory=a.get_inventory(defines.inventory.character_main).get_contents(),operations=remote.call("autorio_operations","status"),admission=remote.call("autorio_operation_admission","status")}))'))

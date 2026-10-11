@@ -99,6 +99,9 @@ export function pursuitDecision(raw) {
   if (operations.length > 1 && operations.some(operation => ['place_entity', 'place_candidate'].includes(operation?.name))) {
     throw new PolicyError('placement_action_boundary_required: submit one placement as the sole operation. No request ran. After its exact receipt, observe the resulting identity and collision geometry before choosing navigation, supply or other actions.')
   }
+  if (operations.length > 1 && operations.some(operation => operation?.name === 'craft_item')) {
+    throw new PolicyError('crafting_action_boundary_required: submit one craft_item as the sole operation. No request ran. Each craft must settle before another action can claim its current ingredients. Use resulting inventory after its exact receipt; do not rely on duplicate or mixed preflights against the same stock.')
+  }
   check(raw.pauseReason === undefined || (typeof raw.pauseReason === 'string' && raw.pauseReason.length <= 300 && raw.pauseReason.trim()), 'pause_reason_required')
   check(!raw.pauseReason || (!operations.length && !observations.length), 'pause_cannot_dispatch')
   return {
