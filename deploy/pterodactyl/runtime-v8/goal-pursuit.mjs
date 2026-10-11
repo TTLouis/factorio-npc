@@ -59,6 +59,9 @@ export function pursuitDecision(raw) {
   check(Array.isArray(operations) && operations.length <= 16, 'operations_limit')
   check(Array.isArray(observations) && observations.length <= 4, 'observations_limit')
   if (operations.length && observations.length) throw new PolicyError('one_decision_kind_required: choose exactly one field: operations for native actions OR observations for reads. No request ran. Submit reads first when facts are missing; submit actions in a later decision after inspecting those facts.')
+  if (operations.length > 1 && operations.some(operation => ['place_entity', 'place_candidate'].includes(operation?.name))) {
+    throw new PolicyError('placement_action_boundary_required: submit one placement as the sole operation. No request ran. After its exact receipt, observe the resulting identity and collision geometry before choosing navigation, supply or other actions.')
+  }
   check(raw.pauseReason === undefined || (typeof raw.pauseReason === 'string' && raw.pauseReason.length <= 300 && raw.pauseReason.trim()), 'pause_reason_required')
   check(!raw.pauseReason || (!operations.length && !observations.length), 'pause_cannot_dispatch')
   return {

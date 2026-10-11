@@ -361,6 +361,28 @@ test('read mixed with an action in operations refuses the entire list before adm
   assert.equal(f.loop.snapshot().ordinal, 0)
 })
 
+test('placement mixed with later navigation is refused whole, then a single placement uses a new charged decision', async () => {
+  for (const placement of [
+    { name: 'place_entity', args: { entity_name: 'stone-furnace', x: 16, y: -96 } },
+    { name: 'place_candidate', args: { candidate_set_id: 'placement-1', candidate_id: 'candidate-1' } },
+  ]) {
+    let turn = 0, admits = 0
+    const f = fixture({ provider: async packet => {
+      if (++turn === 1) return { operations: [placement, { name: 'walk_to_position', args: { x: 16, y: -96, reach_distance: 0.75 } }] }
+      assert.match(packet.observations.at(-1).result, /placement_action_boundary_required/)
+      return { operations: [placement] }
+    } })
+    f.adapter.admit = async () => { admits++; return { ok: true } }
+    await f.loop.wake('mixed_placement')
+    assert.equal(admits, 0); assert.equal(f.sent.length, 0)
+    assert.equal(f.loop.snapshot().budget.calls, 1)
+    await f.loop.wake('single_placement')
+    assert.equal(admits, 1); assert.equal(f.sent.length, 1)
+    assert.equal(f.loop.snapshot().budget.calls, 2)
+    assert.equal(f.sent[0].operations.length, 1)
+  }
+})
+
 test('repeated whole-envelope refusals spend the original cap and never admit actions', async () => {
   const f = fixture({ options: { maxCalls: 1 }, provider: async () => ({ refusal: {
     code: 'pursuit_wire_envelope_invalid', message: 'Submit only decision.' } }) })

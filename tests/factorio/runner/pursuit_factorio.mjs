@@ -50,6 +50,17 @@ try {
   assert.equal(missingNavigation.before.queue_length, missingNavigation.after.queue_length)
   assert.equal(missingNavigation.before.task_state, missingNavigation.after.task_state)
   assert.deepEqual(missingNavigation.position_before, missingNavigation.position_after)
+  const furnaceCollision = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local p=a.surface.find_non_colliding_position("stone-furnace",{a.position.x+3,a.position.y},16,0.5); assert(p); local e=a.surface.create_entity{name="stone-furnace",position=p,force=a.force}; assert(e); local before=remote.call("autorio_operations","status"); local tight=remote.call("autorio_preflight","operation","walk_to_position",{x=e.position.x,y=e.position.y,reach_distance=0.75}); local wide=remote.call("autorio_preflight","operation","walk_to_position",{x=e.position.x,y=e.position.y,reach_distance=2}); local after=remote.call("autorio_operations","status"); local result={tight=tight,wide=wide,position_requested=p,position_actual=e.position,before=before,after=after,humans=#game.connected_players,speed=game.speed}; assert(e.destroy()); rcon.print(helpers.table_to_json(result))'))
+  await fsp.writeFile(path.join(results, 'furnace-collision-preflight.json'), JSON.stringify(furnaceCollision, null, 2))
+  assert.equal(furnaceCollision.tight.ok, false)
+  assert.equal(furnaceCollision.tight.code, 'navigation_position_inside_furnace_collision')
+  assert(furnaceCollision.tight.minimum_collision_clearance > 0.75)
+  assert.equal(furnaceCollision.wide.ok, true)
+  assert.equal(furnaceCollision.before.queue_length, furnaceCollision.after.queue_length)
+  assert.equal(furnaceCollision.before.task_state, furnaceCollision.after.task_state)
+  assert.deepEqual(furnaceCollision.before.actor.position, furnaceCollision.after.actor.position)
+  assert.equal(furnaceCollision.humans, 0)
+  assert.equal(furnaceCollision.speed, 1)
   const options = { rcon, stateFile: path.join(results, 'pursuit-state.json'), traceFile: path.join(results, 'pursuit-trace.jsonl'),
     provider: async (messages, context) => {
       calls.push({ messages, controlProtocol: context.controlProtocol })
@@ -159,7 +170,7 @@ try {
   assert.equal(treeOverlapFinal.humans, 0)
   assert.equal(treeOverlapFinal.speed, 1)
   await fsp.writeFile(path.join(results, 'pursuit-evidence.json'), JSON.stringify({ setup, final, calls: calls.length,
-    ordinal: treeHarvester.loop.state.ordinal, state: treeHarvester.loop.snapshot(), missingSource, missingNavigation, presentNavigation, naturalSetup, naturalFinal, overlapSetup, exactAmountRefusal, overlapFinal, treeOverlapSetup, treeOverlapFinal, commands }, null, 2))
+    ordinal: treeHarvester.loop.state.ordinal, state: treeHarvester.loop.snapshot(), missingSource, missingNavigation, furnaceCollision, presentNavigation, naturalSetup, naturalFinal, overlapSetup, exactAmountRefusal, overlapFinal, treeOverlapSetup, treeOverlapFinal, commands }, null, 2))
   console.log('PASS pursuit: native hand-craft receipts, zero humans, persistent campaign and cross-goal ordinals')
 }
 finally { connection.close() }

@@ -41,6 +41,7 @@ import { new_recipe_configuration_runtime } from './recipe_configuration'
 import { new_rocket_launch_runtime } from './rocket_launch'
 import { new_research_controller } from './research'
 import { research_operation_preflight } from './research_preflight'
+import { navigation_position_preflight } from './navigation_position_preflight'
 import { transfer_preflight_facts, transfer_unknown_item } from './transfer_preflight'
 import { ensure_basic_skill_definitions } from './skills'
 import { with_research_trigger } from './research_trigger'
@@ -238,6 +239,7 @@ function operation_preflight(name: string, args: Record<string, any>) {
   })
 
   if (!args || typeof args !== 'object') return reject('invalid_preflight_args')
+  if (name === 'walk_to_position') return navigation_position_preflight(actor, args)
 
   if (name === 'research_technology') {
     return research_operation_preflight(actor, args.technology_name)
