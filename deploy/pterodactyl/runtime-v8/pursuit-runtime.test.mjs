@@ -115,6 +115,34 @@ async function fixture(t, replies = [action]) {
     complete: () => { runtime.task_state = 'idle'; runtime.queue_length = 0; runtime.admission_journal.at(-1).state = 'completed' } }
 }
 
+test('furnace recipe refusal prevents all earlier supplies in the decision and stays charged and correlated', async t => {
+  const decision = { operations: [
+    { name: 'supply_entity', args: { unit_number: 22, items: [
+      { item_name: 'wood', count: 22 }, { item_name: 'iron-ore', count: 12 }, { item_name: 'copper-ore', count: 75 } ] } },
+    { name: 'set_machine_recipe', args: { unit_number: 22, recipe_name: 'iron-plate' } },
+    { name: 'wait', args: { ticks: 1200 } },
+  ] }
+  const f = await fixture(t, [decision, { pauseReason: 'Fixture stops after observing the no-effect refusal.' }])
+  const command = f.options.rcon.command
+  f.options.rcon.command = text => text.includes('autorio_preflight') && text.includes('set_machine_recipe')
+    ? JSON.stringify({ ok: false, code: 'not_recipe_machine', observed_type: 'furnace', target: { unit_number: 22 } })
+    : command(text)
+  f.agent.drive = reason => f.agent.loop.wake(reason)
+  await f.agent.request(goal.objective)
+  const state = f.agent.loop.snapshot()
+  assert.equal(state.status, 'active'); assert.equal(state.budget.calls, 1)
+  assert.equal(state.pending, null); assert.equal(state.ordinal, 0); assert.equal(f.mutations.length, 0)
+  const refusal = JSON.parse(state.observations.at(-1).result)
+  assert.equal(refusal.code, 'not_recipe_machine'); assert.equal(refusal.operation_index, 1)
+  const rows = (await fsp.readFile(f.options.traceFile, 'utf8')).trim().split('\n').map(JSON.parse)
+  assert(rows.some(row => row.event === 'pursuit.admission_refused' && row.request_id === state.request_id
+    && row.reason === 'native_or_permission_refusal' && row.admission.code === 'not_recipe_machine'))
+  await f.agent.pollPursuit()
+  assert.equal(f.agent.loop.state.budget.calls, 2)
+  assert.equal(f.agent.loop.state.budget.startedAt, state.budget.startedAt)
+  assert.equal(f.mutations.length, 0)
+})
+
 test('deployment campaign limits are bounded and cannot alter the fixed wall allowance', () => {
   assert.deepEqual(ownerPursuitBudget(), { maxCalls: 30, maxInputChars: 2000000 })
   assert.deepEqual(ownerPursuitBudget({ maxCalls: 60, maxInputChars: 4000000 }), { maxCalls: 60, maxInputChars: 4000000 })

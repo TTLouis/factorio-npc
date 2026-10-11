@@ -306,6 +306,15 @@ function operation_preflight(name: string, args: Record<string, any>) {
       // entity (human last_user) from an NPC- or map-built one at admission.
       last_user: entity_last_user(target),
     }
+    // Match execution's capability check before the harness reserves any batch.
+    // In particular, supplying a furnace must not run before an unsupported
+    // explicit recipe operation is discovered during execution.
+    if (name === 'set_machine_recipe' && target.type !== 'assembling-machine') {
+      return reject('not_recipe_machine', {
+        field: 'unit_number', identity: unit_number, target: exact_target,
+        observed_type: target.type, expected_type: 'assembling-machine',
+      })
+    }
     if (name === 'supply_entity' || name === 'move_items_exact') {
       const unknown_item = transfer_unknown_item(name, args)
       if (unknown_item !== undefined) {

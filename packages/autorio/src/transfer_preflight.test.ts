@@ -325,6 +325,31 @@ describe('operation_preflight wiring (autorio_preflight.operation)', () => {
     return base as LuaEntity
   }
 
+  it.each(['furnace', 'container', 'mining-drill'])('refuses setting a recipe on a %s before any recipe or inventory read', (type) => {
+    const target: any = exact(15)
+    target.type = type
+    current_target = target
+    Object.defineProperty(held.actor.force, 'recipes', { get: () => { throw new Error('must not read recipes') } })
+    const inventory_calls = (held.main.get_item_count as any).mock.calls.length
+
+    expect(preflight('set_machine_recipe', { unit_number: 15, recipe_name: 'iron-plate' }))
+      .toMatchObject({ ok: false, code: 'not_recipe_machine', operation: 'set_machine_recipe',
+        identity: 15, observed_type: type, expected_type: 'assembling-machine', target: { unit_number: 15 } })
+    expect((held.main.get_item_count as any).mock.calls.length).toBe(inventory_calls)
+  })
+
+  it('keeps recipe preflight available for an exact assembling machine and preserves unknown-recipe refusal', () => {
+    const target: any = exact(15)
+    target.type = 'assembling-machine'
+    target.name = 'assembling-machine-1'
+    current_target = target
+    ;(held.actor.force as any).recipes = { 'iron-gear-wheel': { name: 'iron-gear-wheel' } }
+    expect(preflight('set_machine_recipe', { unit_number: 15, recipe_name: 'iron-gear-wheel' }))
+      .toMatchObject({ ok: true, recipe_name: 'iron-gear-wheel', target: { unit_number: 15, name: 'assembling-machine-1' } })
+    expect(preflight('set_machine_recipe', { unit_number: 15, recipe_name: '__absent__' }))
+      .toMatchObject({ ok: false, code: 'unknown_recipe' })
+  })
+
   it('refuses navigation to a known prototype absent from the requested native search', () => {
     ;(globalThis as any).prototypes.entity['copper-stromatolite'] = { type: 'simple-entity' }
     ;(held.actor as any).position = { x: 25, y: -46 }

@@ -61,6 +61,55 @@ try {
   assert.deepEqual(furnaceCollision.before.actor.position, furnaceCollision.after.actor.position)
   assert.equal(furnaceCollision.humans, 0)
   assert.equal(furnaceCollision.speed, 1)
+  // Replay the live supply -> furnace recipe -> wait finding with scripted
+  // decisions and declared fixture stock. Preflight must refuse the whole batch
+  // while the actor still holds every item and no native ordinal is reserved.
+  const recipeSetup = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local p=a.surface.find_non_colliding_position("stone-furnace",{a.position.x+3,a.position.y},16,0.5); assert(p); local e=a.surface.create_entity{name="stone-furnace",position=p,force=a.force}; assert(e); storage.pursuit_recipe_furnace=e; remote.call("autorio_tools","get_nearby_entities",16,"stone-furnace","furnace",16); assert(a.insert{name="wood",count=22}==22); assert(a.insert{name="iron-ore",count=12}==12); assert(a.insert{name="copper-ore",count=75}==75); local input=e.get_inventory(defines.inventory.furnace_source); rcon.print(helpers.table_to_json({unit_number=e.unit_number,input_slots=#input,iron_room=input.get_insertable_count{name="iron-ore"},copper_room=input.get_insertable_count{name="copper-ore"},inventory=a.get_inventory(defines.inventory.character_main).get_contents(),operations=remote.call("autorio_operations","status"),admission=remote.call("autorio_operation_admission","status")}))'))
+  let recipeCalls = 0
+  const recipeGuard = new PursuitRuntime({ rcon, stateFile: path.join(results, 'recipe-guard-state.json'),
+    traceFile: path.join(results, 'recipe-guard-trace.jsonl'), provider: async messages => {
+      if (++recipeCalls === 1) return { content: JSON.stringify({ operations: [
+        { name: 'supply_entity', args: { unit_number: recipeSetup.unit_number, items: [
+          { item_name: 'wood', count: 22 }, { item_name: 'iron-ore', count: 12 }, { item_name: 'copper-ore', count: 75 } ] } },
+        { name: 'set_machine_recipe', args: { unit_number: recipeSetup.unit_number, recipe_name: 'iron-plate' } },
+        { name: 'wait', args: { ticks: 1200 } },
+      ] }) }
+      const refusal = JSON.parse(JSON.parse(messages[1].content).observations.find(row => row.name === 'admission').result)
+      assert.equal(refusal.code, 'not_recipe_machine'); assert.equal(refusal.operation_index, 1)
+      assert.equal(refusal.observed_type, 'furnace')
+      return { content: JSON.stringify({ pauseReason: 'Fixture intentionally ends after verifying the pre-dispatch refusal.' }) }
+    } })
+  await recipeGuard.request(JSON.stringify(goal(1)))
+  assert.equal(recipeCalls, 2)
+  assert.equal(recipeGuard.loop.state.status, 'paused')
+  assert.equal(recipeGuard.loop.state.budget.calls, 2)
+  assert.equal(recipeGuard.loop.state.pending, null)
+  assert.equal(recipeGuard.loop.state.ordinal, recipeSetup.admission.high_water)
+  const recipeFinal = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local e=storage.pursuit_recipe_furnace; local result={inventory=a.get_inventory(defines.inventory.character_main).get_contents(),operations=remote.call("autorio_operations","status"),admission=remote.call("autorio_operation_admission","status"),fuel=e.get_fuel_inventory().get_item_count("wood"),iron=e.get_inventory(defines.inventory.furnace_source).get_item_count("iron-ore"),humans=#game.connected_players,speed=game.speed}; assert(e.destroy()); rcon.print(helpers.table_to_json(result))'))
+  assert.deepEqual(recipeFinal.inventory, recipeSetup.inventory)
+  assert.equal(recipeFinal.operations.queue_length, recipeSetup.operations.queue_length)
+  assert.equal(recipeFinal.operations.tasks_added, recipeSetup.operations.tasks_added)
+  assert.equal(recipeFinal.operations.task_state, recipeSetup.operations.task_state)
+  assert.deepEqual(recipeFinal.operations.actor.position, recipeSetup.operations.actor.position)
+  assert.deepEqual(recipeFinal.admission, recipeSetup.admission)
+  assert.equal(recipeFinal.fuel, 0); assert.equal(recipeFinal.iron, 0)
+  assert.equal(recipeFinal.humans, 0); assert.equal(recipeFinal.speed, 1)
+  const recipeTrace = (await fsp.readFile(path.join(results, 'recipe-guard-trace.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse)
+  assert(recipeTrace.some(row => row.event === 'pursuit.admission_refused' && row.request_id === recipeGuard.loop.state.request_id
+    && row.admission.code === 'not_recipe_machine'))
+  assert.equal(recipeSetup.input_slots, 1)
+  assert(recipeSetup.iron_room > 0 && recipeSetup.copper_room > 0)
+  // Independent native capacity probe: individual empty-slot capacities do
+  // not promise that two different ores can be supplied together. Keep the
+  // existing partial-transfer execution policy and report the engine facts.
+  const recipeCapabilities = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local p=a.surface.find_non_colliding_position("stone-furnace",{a.position.x+3,a.position.y},16,0.5); assert(p); local e=a.surface.create_entity{name="stone-furnace",position=p,force=a.force}; assert(e); local input=e.get_inventory(defines.inventory.furnace_source); assert(input.insert{name="iron-ore",count=12}==12); local mixed={iron=input.get_item_count("iron-ore"),copper_can_insert=input.can_insert{name="copper-ore"},copper_room=input.get_insertable_count{name="copper-ore"}}; assert(e.destroy()); local p2=a.surface.find_non_colliding_position("assembling-machine-1",p,16,0.5); assert(p2); local m=a.surface.create_entity{name="assembling-machine-1",position=p2,force=a.force}; assert(m); remote.call("autorio_tools","get_nearby_entities",32,"assembling-machine-1","assembling-machine",16); local recipe=remote.call("autorio_preflight","operation","set_machine_recipe",{unit_number=m.unit_number,recipe_name="iron-gear-wheel"}); assert(m.destroy()); rcon.print(helpers.table_to_json({mixed=mixed,assembler_recipe=recipe}))'))
+  assert.equal(recipeCapabilities.mixed.iron, 12)
+  assert.equal(recipeCapabilities.mixed.copper_can_insert, false)
+  assert.equal(recipeCapabilities.mixed.copper_room, 0)
+  assert.equal(recipeCapabilities.assembler_recipe.ok, true)
+  assert.equal(recipeCapabilities.assembler_recipe.target.name, 'assembling-machine-1')
+  await fsp.writeFile(path.join(results, 'recipe-guard-evidence.json'), JSON.stringify({ setup: recipeSetup, final: recipeFinal,
+    capabilities: recipeCapabilities, state: recipeGuard.loop.snapshot(), trace: recipeTrace }, null, 2))
   const options = { rcon, stateFile: path.join(results, 'pursuit-state.json'), traceFile: path.join(results, 'pursuit-trace.jsonl'),
     campaignBudget: { maxCalls: 60, maxInputChars: 4000000 },
     provider: async (messages, context) => {
