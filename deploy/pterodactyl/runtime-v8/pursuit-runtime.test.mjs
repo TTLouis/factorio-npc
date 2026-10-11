@@ -143,18 +143,23 @@ test('furnace recipe refusal prevents all earlier supplies in the decision and s
   assert.equal(f.mutations.length, 0)
 })
 
-test('deployment campaign limits are bounded and cannot alter the fixed wall allowance', () => {
+test('deployment campaign limits allow a bounded completion trial and preserve defaults', () => {
   assert.deepEqual(ownerPursuitBudget(), { maxCalls: 30, maxInputChars: 2000000 })
   assert.deepEqual(ownerPursuitBudget({ maxCalls: 60, maxInputChars: 4000000 }), { maxCalls: 60, maxInputChars: 4000000 })
-  for (const raw of [null, [], {}, { maxCalls: 61, maxInputChars: 4000000 },
-    { maxCalls: '60', maxInputChars: 4000000 }, { maxCalls: 60, maxInputChars: 4000001 },
-    { maxCalls: 60, maxInputChars: NaN }, { maxCalls: 60, maxInputChars: 4000000, maxWallMs: 2400000 }]) {
+  const completion = { maxCalls: 120, maxInputChars: 12000000, maxWallMs: 3600000 }
+  assert.deepEqual(ownerPursuitBudget(completion), completion)
+  for (const raw of [null, [], {}, { ...completion, maxCalls: 121 },
+    { ...completion, maxCalls: '120' }, { ...completion, maxInputChars: 12000001 },
+    { ...completion, maxInputChars: NaN }, { ...completion, maxWallMs: 3600001 },
+    { ...completion, maxWallMs: 0 }, { ...completion, maxWallMs: '3600000' },
+    { ...completion, maxWallMs: NaN }, { ...completion, retryBudget: 1 }]) {
     assert.throws(() => ownerPursuitBudget(raw), /owner_pursuit/)
   }
 })
 
 test('fresh deployment limits never replenish a persisted campaign on restart or new goal', async t => {
-  for (const initial of [undefined, { maxCalls: 60, maxInputChars: 4000000 }]) {
+  for (const initial of [undefined, { maxCalls: 60, maxInputChars: 4000000 },
+    { maxCalls: 120, maxInputChars: 12000000, maxWallMs: 3600000 }]) {
     const f = await fixture(t, [{ pauseReason: 'Fixture boundary.' }])
     const first = new PursuitRuntime({ ...f.options, campaignBudget: initial })
     f.setAgent(first)
@@ -162,9 +167,9 @@ test('fresh deployment limits never replenish a persisted campaign on restart or
     const original = first.loop.snapshot().budget
     assert.equal(original.maxCalls, initial?.maxCalls ?? 30)
     assert.equal(original.maxInputChars, initial?.maxInputChars ?? 2000000)
-    assert.equal(original.maxWallMs, 1200000)
+    assert.equal(original.maxWallMs, initial?.maxWallMs ?? 1200000)
     const restarted = new PursuitRuntime({ ...f.options,
-      campaignBudget: initial ? undefined : { maxCalls: 60, maxInputChars: 4000000 } })
+      campaignBudget: initial ? undefined : { maxCalls: 120, maxInputChars: 12000000, maxWallMs: 3600000 } })
     f.setAgent(restarted)
     await restarted.loadPersistentState()
     assert.deepEqual(restarted.loop.snapshot().budget, original)

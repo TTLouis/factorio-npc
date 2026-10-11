@@ -155,7 +155,7 @@ test('restored reservations cannot lose the start time or counters', () => {
   const f = fixture()
   for (const budget of [
     { calls: 1, startedAt: null }, { calls: -1 }, { calls: 31 }, { inputChars: -1 },
-    { maxCalls: 61 }, { maxWallMs: 1200001 }, { startedAt: NaN },
+    { maxCalls: 121 }, { maxWallMs: 3600001 }, { startedAt: NaN },
   ]) {
     const state = structuredClone(f.state)
     Object.assign(state.budget, budget)
@@ -178,6 +178,33 @@ test('approved sixty-call campaign stops at its own cap without changing the def
   assert.equal(stopped.budget.maxInputChars, 4000000)
   assert.equal(stopped.budget.maxWallMs, 1200000)
   assert.deepEqual(remaining, Array.from({ length: 60 }, (_, index) => 60 - index))
+})
+
+test('completion trial can pass the old wall ceiling but stops at its original configured deadline', async () => {
+  const remaining = []
+  const f = fixture({ options: { maxCalls: 120, maxInputChars: 12000000, maxWallMs: 3600000 }, provider: async packet => {
+    remaining.push(packet.remainingWallMs)
+    return { observations: [{ name: 'getInventoryItems', args: {} }] }
+  } })
+  await f.loop.wake('start')
+  f.advance(1200000)
+  await f.loop.wake('past_old_ceiling')
+  assert.deepEqual(remaining, [3600000, 2400000])
+  f.advance(2400000)
+  const stopped = await f.loop.wake('configured_deadline')
+  assert.equal(stopped.pauseReason, 'wall_budget_exhausted')
+  assert.equal(stopped.budget.calls, 2)
+})
+
+test('completion trial stops before a 121st provider call and keeps legacy defaults', async () => {
+  const f = fixture({ options: { maxCalls: 120, maxInputChars: 12000000, maxWallMs: 3600000 },
+    reply: { observations: [{ name: 'getInventoryItems', args: {} }] } })
+  for (let index = 0; index < 120; index++) await f.loop.wake('read')
+  const stopped = await f.loop.wake('over_cap')
+  assert.equal(f.calls(), 120)
+  assert.equal(stopped.pauseReason, 'call_budget_exhausted')
+  assert.equal(fixture().state.budget.maxWallMs, 1200000)
+  assert.equal(fixture().state.budget.maxInputChars, 2000000)
 })
 
 test('restart discards mutable reads and preserves the charged allowance and objective', async () => {

@@ -1,7 +1,7 @@
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { GoalPursuit, newPursuit } from './goal-pursuit.mjs'
+import { GoalPursuit, newPursuit, PURSUIT_BUDGET_LIMITS } from './goal-pursuit.mjs'
 import { deploymentStatus, executeAuthorizedBatch, actorChanged } from './supervisor-adapter.mjs'
 import { pursuitOperationListText, pursuitDeniedOperationNames, toolDefinitions, toolCommand, renderOperation, renderOperationPreflight, luaString, parseOperation, pursuitDecisionToolDefinition } from './structured-policy.mjs'
 import { sanitizeGoalDefinition, evaluateGoalDefinition } from './goal-definition.mjs'
@@ -109,10 +109,13 @@ async function durableWrite(filename, value) {
 export function ownerPursuitBudget(raw) {
   if (raw === undefined) return { maxCalls: 30, maxInputChars: 2000000 }
   check(raw && typeof raw === 'object' && !Array.isArray(raw)
-    && Object.keys(raw).every(key => ['maxCalls', 'maxInputChars'].includes(key)), 'owner_pursuit_budget_invalid')
-  check(Number.isSafeInteger(raw.maxCalls) && raw.maxCalls > 0 && raw.maxCalls <= 60, 'owner_pursuit_call_limit')
-  check(Number.isSafeInteger(raw.maxInputChars) && raw.maxInputChars > 0 && raw.maxInputChars <= 4000000, 'owner_pursuit_input_limit')
-  return { maxCalls: raw.maxCalls, maxInputChars: raw.maxInputChars }
+    && Object.keys(raw).every(key => ['maxCalls', 'maxInputChars', 'maxWallMs'].includes(key)), 'owner_pursuit_budget_invalid')
+  check(Number.isSafeInteger(raw.maxCalls) && raw.maxCalls > 0 && raw.maxCalls <= PURSUIT_BUDGET_LIMITS.maxCalls, 'owner_pursuit_call_limit')
+  check(Number.isSafeInteger(raw.maxInputChars) && raw.maxInputChars > 0 && raw.maxInputChars <= PURSUIT_BUDGET_LIMITS.maxInputChars, 'owner_pursuit_input_limit')
+  check(raw.maxWallMs === undefined || (Number.isSafeInteger(raw.maxWallMs) && raw.maxWallMs > 0
+    && raw.maxWallMs <= PURSUIT_BUDGET_LIMITS.maxWallMs), 'owner_pursuit_wall_limit')
+  return { maxCalls: raw.maxCalls, maxInputChars: raw.maxInputChars,
+    ...(raw.maxWallMs === undefined ? {} : { maxWallMs: raw.maxWallMs }) }
 }
 
 export class PursuitRuntime {

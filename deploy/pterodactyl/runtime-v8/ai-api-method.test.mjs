@@ -174,12 +174,12 @@ test('the AI status line names the method, host, and models, and never the API k
   assert.equal(soloLine.includes(soloConfig.key), false)
 })
 
-test('pursuit budget override requires deployment environment and keeps fixed limits', () => {
-  const approved = { maxCalls: 60, maxInputChars: 4000000 }
+test('completion trial budget requires deployment environment and keeps bounded limits', () => {
+  const approved = { maxCalls: 120, maxInputChars: 12000000, maxWallMs: 3600000 }
   assert.equal(configuration({ goalPursuitBudget: approved }, baseEnv()).goalPursuitBudget, undefined)
   assert.deepEqual(configuration({}, baseEnv({ SGLUNA_GOAL_PURSUIT_BUDGET: JSON.stringify(approved) })).goalPursuitBudget, approved)
-  for (const text of ['', 'null', '[]', '{"maxCalls":61,"maxInputChars":4000000}',
-    '{"maxCalls":60,"maxInputChars":4000000,"maxWallMs":2400000}']) {
+  for (const text of ['', 'null', '[]', '{"maxCalls":121,"maxInputChars":12000000}',
+    '{"maxCalls":120,"maxInputChars":12000000,"maxWallMs":3600001}']) {
     assert.throws(() => configuration({}, baseEnv({ SGLUNA_GOAL_PURSUIT_BUDGET: text })))
   }
 })
