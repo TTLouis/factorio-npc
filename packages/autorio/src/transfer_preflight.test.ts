@@ -325,6 +325,34 @@ describe('operation_preflight wiring (autorio_preflight.operation)', () => {
     return base as LuaEntity
   }
 
+  it('refuses navigation to a known prototype absent from the requested native search', () => {
+    ;(globalThis as any).prototypes.entity['copper-stromatolite'] = { type: 'simple-entity' }
+    ;(held.actor as any).position = { x: 25, y: -46 }
+    const scan = vi.fn(() => [])
+    ;(held.actor as any).surface.find_entities_filtered = scan
+    expect(preflight('walk_to_entity', { entity_name: 'copper-stromatolite', search_radius: 4096 }))
+      .toMatchObject({ ok: false, code: 'navigation_target_not_found', identity: 'copper-stromatolite', search_radius: 4096 })
+    expect(scan).toHaveBeenCalledWith({ position: held.actor.position, radius: 4096, name: 'copper-stromatolite', limit: 64 })
+  })
+
+  it('requires a live navigation target and validates radius and actor before scanning', () => {
+    ;(globalThis as any).prototypes.entity['tree-01'] = { type: 'tree' }
+    const target = { valid: true, name: 'tree-01' }
+    const scan = vi.fn(() => [target])
+    ;(held.actor as any).surface.find_entities_filtered = scan
+    expect(preflight('walk_to_entity', { entity_name: 'tree-01', search_radius: 8 }))
+      .toMatchObject({ ok: true, navigation_search: { radius: 8, target_present: true } })
+    target.valid = false
+    expect(preflight('walk_to_entity', { entity_name: 'tree-01', search_radius: 8 })).toMatchObject({ ok: false, code: 'navigation_target_not_found' })
+    scan.mockClear()
+    for (const radius of [undefined, 0, 4097, 1.5, NaN, Infinity]) {
+      expect(preflight('walk_to_entity', { entity_name: 'tree-01', search_radius: radius })).toMatchObject({ ok: false, code: 'invalid_navigation_search_radius' })
+    }
+    ;(held.actor as any).is_valid = false
+    expect(preflight('walk_to_entity', { entity_name: 'tree-01', search_radius: 8 })).toMatchObject({ ok: false, code: 'no_actor' })
+    expect(scan).not.toHaveBeenCalled()
+  })
+
   it('refuses a known resource with no live source inside the exact gather radius', () => {
     ;(globalThis as any).prototypes.entity['copper-ore'] = { type: 'resource' }
     ;(held.actor as any).position = { x: 25, y: -46 }

@@ -44,6 +44,12 @@ try {
   assert.equal(missingSource.result.code, 'resource_source_not_found')
   assert.equal(missingSource.before.queue_length, missingSource.after.queue_length)
   assert.equal(missingSource.before.task_state, missingSource.after.task_state)
+  const missingNavigation = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local before=remote.call("autorio_operations","status"); local p={x=a.position.x,y=a.position.y}; local result=remote.call("autorio_preflight","operation","walk_to_entity",{entity_name="uranium-ore",search_radius=1}); local after=remote.call("autorio_operations","status"); rcon.print(helpers.table_to_json({result=result,before=before,after=after,position_before=p,position_after=a.position}))'))
+  assert.equal(missingNavigation.result.ok, false)
+  assert.equal(missingNavigation.result.code, 'navigation_target_not_found')
+  assert.equal(missingNavigation.before.queue_length, missingNavigation.after.queue_length)
+  assert.equal(missingNavigation.before.task_state, missingNavigation.after.task_state)
+  assert.deepEqual(missingNavigation.position_before, missingNavigation.position_after)
   const options = { rcon, stateFile: path.join(results, 'pursuit-state.json'), traceFile: path.join(results, 'pursuit-trace.jsonl'),
     provider: async (messages, context) => {
       calls.push({ messages, controlProtocol: context.controlProtocol })
@@ -85,6 +91,9 @@ try {
   // standalone actor. Production trials never create these fixture sources.
   const naturalSetup = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local s=a.surface; local p=s.find_non_colliding_position("tree-01",{a.position.x+2,a.position.y},8,0.5); assert(p); local e=s.create_entity{name="tree-01",position=p,force="neutral"}; assert(e); local ok,u=pcall(function() return e.last_user end); rcon.print(helpers.table_to_json({created=true,kind=e.type,force=e.force.name,last_user_readable=ok,has_last_user=u~=nil,wood_before=a.get_item_count("wood")}))'))
   assert(naturalSetup.last_user_readable && !naturalSetup.has_last_user)
+  const presentNavigation = JSON.parse(await rcon.command('/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_preflight","operation","walk_to_entity",{entity_name="tree-01",search_radius=64})))'))
+  assert.equal(presentNavigation.ok, true)
+  assert.deepEqual(presentNavigation.navigation_search, { radius: 64, target_present: true })
   const woodGoal = { objective: 'Harvest and hold one wood from an unowned natural source.', predicate: {
     scope: 'finite', summary: 'Hold at least one wood.', doneWhen: [{ kind: 'inventory_count', item_name: 'wood', minimum: naturalSetup.wood_before + 1 }] } }
   const harvester = new PursuitRuntime({ ...options, provider: async (_messages, context) => {
@@ -150,7 +159,7 @@ try {
   assert.equal(treeOverlapFinal.humans, 0)
   assert.equal(treeOverlapFinal.speed, 1)
   await fsp.writeFile(path.join(results, 'pursuit-evidence.json'), JSON.stringify({ setup, final, calls: calls.length,
-    ordinal: treeHarvester.loop.state.ordinal, state: treeHarvester.loop.snapshot(), missingSource, naturalSetup, naturalFinal, overlapSetup, exactAmountRefusal, overlapFinal, treeOverlapSetup, treeOverlapFinal, commands }, null, 2))
+    ordinal: treeHarvester.loop.state.ordinal, state: treeHarvester.loop.snapshot(), missingSource, missingNavigation, presentNavigation, naturalSetup, naturalFinal, overlapSetup, exactAmountRefusal, overlapFinal, treeOverlapSetup, treeOverlapFinal, commands }, null, 2))
   console.log('PASS pursuit: native hand-craft receipts, zero humans, persistent campaign and cross-goal ordinals')
 }
 finally { connection.close() }

@@ -390,6 +390,21 @@ function operation_preflight(name: string, args: Record<string, any>) {
         expected: 'entity prototype',
       })
     }
+    if (name === 'walk_to_entity') {
+      if (!actor || !actor.is_valid) return reject('no_actor')
+      const radius = args.search_radius
+      if (typeof radius !== 'number' || radius !== math.floor(radius) || radius < 1 || radius > 4096) {
+        return reject('invalid_navigation_search_radius')
+      }
+      // Prototype existence alone cannot establish a navigable target. This
+      // bounded current-world read makes absence a refusal before queueing;
+      // execution still owns target selection, pathfinding and live validity.
+      const targets = find_world_entities(actor.surface, { position: actor.position, radius, name: entity_name, limit: 64 })
+      const target = targets.find(entity => entity.valid)
+      if (!target) return reject('navigation_target_not_found', { field: 'entity_name', identity: entity_name, search_radius: radius })
+      return accept({ field: 'entity_name', identity: entity_name, observed_type: prototype.type,
+        navigation_search: { radius, target_present: true } })
+    }
     return accept({ field: 'entity_name', identity: entity_name, observed_type: prototype.type })
   }
 
