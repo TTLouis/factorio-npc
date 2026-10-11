@@ -73,21 +73,25 @@ function source_is_compatible(task: PlayerParametersHarvestProduct, entity: LuaE
   return false
 }
 
-function find_source(actor: ControlledActor, task: PlayerParametersHarvestProduct) {
-  let radius = math.min(INITIAL_SEARCH_RADIUS, task.search_radius)
-  while (radius <= task.search_radius) {
+export function find_harvest_source(actor: ControlledActor, source_names: string[], search_radius: number, natural_only: boolean) {
+  let radius = math.min(INITIAL_SEARCH_RADIUS, search_radius)
+  while (radius <= search_radius) {
     const matches = find_world_entities(actor.surface, {
       position: actor.position,
       radius,
-      name: task.source_names,
+      name: source_names,
       limit: SEARCH_RESULT_LIMIT,
     })
-    const nearest = nearest_entity(actor, task.natural_only ? matches.filter(is_unowned_natural_harvest_source) : matches)
+    const nearest = nearest_entity(actor, natural_only ? matches.filter(is_unowned_natural_harvest_source) : matches)
     if (nearest) return nearest
-    if (radius === task.search_radius) break
-    radius = math.min(task.search_radius, radius * 2)
+    if (radius === search_radius) break
+    radius = math.min(search_radius, radius * 2)
   }
   return undefined
+}
+
+function find_source(actor: ControlledActor, task: PlayerParametersHarvestProduct) {
+  return find_harvest_source(actor, task.source_names, task.search_radius, task.natural_only === true)
 }
 
 function navigation_to_target(actor: ControlledActor, task: PlayerParametersHarvestProduct, target: LuaEntity, rejected_starts: number = 0): PlayerParametersWalkToEntity | undefined {

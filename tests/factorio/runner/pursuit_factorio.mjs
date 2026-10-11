@@ -186,6 +186,40 @@ try {
     && row.admission.code === 'destination_full'))
   await fsp.writeFile(path.join(results, 'blocked-supply-evidence.json'), JSON.stringify({ setup: blockedSupplySetup, final: blockedSupplyFinal,
     state: blockedSupply.loop.snapshot(), trace: blockedSupplyTrace }, null, 2))
+  // A compatible rock prototype alone cannot authorize harvesting: this
+  // declared one-tile search has no eligible rock in the real native world.
+  const absentHarvestSetup = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; rcon.print(helpers.table_to_json({inventory=a.get_inventory(defines.inventory.character_main).get_contents(),operations=remote.call("autorio_operations","status"),admission=remote.call("autorio_operation_admission","status"),preflight=remote.call("autorio_preflight","operation","harvest_natural_product",{product_name="stone",search_radius=1})}))'))
+  assert.equal(absentHarvestSetup.preflight.code, 'natural_harvest_source_not_found')
+  assert(absentHarvestSetup.preflight.source_names.length > 0)
+  let absentHarvestCalls = 0
+  const absentHarvester = new PursuitRuntime({ rcon, stateFile: path.join(results, 'absent-harvest-state.json'),
+    traceFile: path.join(results, 'absent-harvest-trace.jsonl'), provider: async messages => {
+      if (++absentHarvestCalls === 1) return { content: JSON.stringify({ operations: [
+        { name: 'harvest_product', args: { product_name: 'stone', count: 5, search_radius: 1 } },
+        { name: 'wait', args: { ticks: 1200 } },
+      ] }) }
+      const refusal = JSON.parse(JSON.parse(messages[1].content).observations.find(row => row.name === 'admission').result)
+      assert.equal(refusal.code, 'natural_harvest_source_not_found'); assert.equal(refusal.operation_index, 0)
+      assert.equal(refusal.search_radius, 1)
+      return { content: JSON.stringify({ pauseReason: 'Fixture ends after verifying absent natural source refusal.' }) }
+    } })
+  await absentHarvester.request(JSON.stringify(goal(1)))
+  assert.equal(absentHarvestCalls, 2)
+  assert.equal(absentHarvester.loop.state.pending, null)
+  assert.equal(absentHarvester.loop.state.ordinal, absentHarvestSetup.admission.high_water)
+  const absentHarvestFinal = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; rcon.print(helpers.table_to_json({inventory=a.get_inventory(defines.inventory.character_main).get_contents(),operations=remote.call("autorio_operations","status"),admission=remote.call("autorio_operation_admission","status"),humans=#game.connected_players,speed=game.speed}))'))
+  assert.deepEqual(absentHarvestFinal.inventory, absentHarvestSetup.inventory)
+  assert.deepEqual(absentHarvestFinal.admission, absentHarvestSetup.admission)
+  assert.equal(absentHarvestFinal.operations.tasks_added, absentHarvestSetup.operations.tasks_added)
+  assert.equal(absentHarvestFinal.operations.queue_length, absentHarvestSetup.operations.queue_length)
+  assert.equal(absentHarvestFinal.operations.task_state, absentHarvestSetup.operations.task_state)
+  assert.deepEqual(absentHarvestFinal.operations.actor.position, absentHarvestSetup.operations.actor.position)
+  assert.equal(absentHarvestFinal.humans, 0); assert.equal(absentHarvestFinal.speed, 1)
+  const absentHarvestTrace = (await fsp.readFile(path.join(results, 'absent-harvest-trace.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse)
+  assert(absentHarvestTrace.some(row => row.event === 'pursuit.admission_refused' && row.request_id === absentHarvester.loop.state.request_id
+    && row.admission.code === 'natural_harvest_source_not_found'))
+  await fsp.writeFile(path.join(results, 'absent-harvest-evidence.json'), JSON.stringify({ setup: absentHarvestSetup, final: absentHarvestFinal,
+    state: absentHarvester.loop.snapshot(), trace: absentHarvestTrace }, null, 2))
   const options = { rcon, stateFile: path.join(results, 'pursuit-state.json'), traceFile: path.join(results, 'pursuit-trace.jsonl'),
     campaignBudget: { maxCalls: 500, maxInputChars: 50000000, maxWallMs: 3600000 },
     provider: async (messages, context) => {
@@ -244,6 +278,9 @@ try {
   // standalone actor. Production trials never create these fixture sources.
   const naturalSetup = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local s=a.surface; local p=s.find_non_colliding_position("tree-01",{a.position.x+2,a.position.y},8,0.5); assert(p); local e=s.create_entity{name="tree-01",position=p,force="neutral"}; assert(e); local ok,u=pcall(function() return e.last_user end); rcon.print(helpers.table_to_json({created=true,kind=e.type,force=e.force.name,last_user_readable=ok,has_last_user=u~=nil,wood_before=a.get_item_count("wood")}))'))
   assert(naturalSetup.last_user_readable && !naturalSetup.has_last_user)
+  const presentHarvest = JSON.parse(await rcon.command('/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_preflight","operation","harvest_natural_product",{product_name="wood",search_radius=64})))'))
+  assert.equal(presentHarvest.ok, true)
+  assert.deepEqual(presentHarvest.source_search, { radius: 64, target_present: true })
   const presentNavigation = JSON.parse(await rcon.command('/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_preflight","operation","walk_to_entity",{entity_name="tree-01",search_radius=64})))'))
   assert.equal(presentNavigation.ok, true)
   assert.deepEqual(presentNavigation.navigation_search, { radius: 64, target_present: true })

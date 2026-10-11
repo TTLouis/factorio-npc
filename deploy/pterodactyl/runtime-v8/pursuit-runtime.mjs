@@ -50,7 +50,7 @@ export function renderPursuitOperation(raw) {
 
 function pursuitPreflight(operation) {
   if (operation.name !== 'harvest_product') return renderOperationPreflight(operation)
-  return `/silent-command rcon.print(helpers.table_to_json(remote.call('autorio_preflight','operation','harvest_natural_product',{product_name=${luaString(operation.args.product_name)}})))`
+  return `/silent-command rcon.print(helpers.table_to_json(remote.call('autorio_preflight','operation','harvest_natural_product',{product_name=${luaString(operation.args.product_name)},search_radius=${operation.args.search_radius}})))`
 }
 
 export function pursuitProvider(provider, reserve = async () => {}) {
@@ -248,7 +248,10 @@ export class PursuitRuntime {
       check(!actorChanged(actor, after), 'pursuit_stale_actor')
       preflight.push(result)
       if (result.ok !== true) return { ...result, operation_index: index }
-      if (operation.name === 'harvest_product' && result.natural_only !== true) return { ok: false, code: 'pursuit_natural_guard_unavailable', operation_index: index }
+      if (operation.name === 'harvest_product' && (result.natural_only !== true
+        || result.source_search?.target_present !== true || result.source_search.radius !== operation.args.search_radius)) {
+        return { ok: false, code: 'pursuit_natural_guard_unavailable', operation_index: index }
+      }
       if (operation.name === 'harvest_product') await this.traceEvent('pursuit.natural_harvest_admitted', { reason: 'native_natural_source_guard_verified', product_name: operation.args.product_name })
       if (EXACT_MUTATIONS.has(operation.name)) {
         // Exact preflight must positively provide target identity/ownership.

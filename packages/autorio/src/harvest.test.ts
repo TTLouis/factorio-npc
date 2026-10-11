@@ -1,6 +1,6 @@
 import type { ControlledActor } from './actors/types'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { new_harvest_controller, is_unowned_natural_harvest_source } from './harvest'
+import { new_harvest_controller, is_unowned_natural_harvest_source, find_harvest_source, natural_harvest_source_names } from './harvest'
 import { new_task_manager } from './task_manager'
 import { TaskStates } from './types'
 
@@ -127,6 +127,28 @@ beforeEach(() => {
 })
 
 describe('product-oriented finite harvesting', () => {
+  it('shares a bounded absent-source search with admission without mining or queuing work', () => {
+    const f = fixture()
+    f.rockA.valid = false; f.rockB.valid = false
+    const before = f.manager.get_status_snapshot()
+    expect(find_harvest_source(f.actor, natural_harvest_source_names('stone'), 64, true)).toBeUndefined()
+    expect((f.actor.surface.find_entities_filtered as any).mock.calls.map((call: any[]) => call[0].radius)).toEqual([8, 16, 32, 64])
+    expect((f.actor.surface.find_entities_filtered as any).mock.calls.every((call: any[]) => call[0].limit === 32)).toBe(true)
+    expect(f.manager.get_status_snapshot()).toEqual(before)
+    expect(f.actor.set_mining_state).not.toHaveBeenCalled()
+  })
+
+  it('shares exact-radius positive source selection and excludes player-touched sources', () => {
+    const f = fixture()
+    f.rockA.position.x = 3
+    const names = natural_harvest_source_names('stone')
+    expect(find_harvest_source(f.actor, names, 1, true)).toBeUndefined()
+    expect(find_harvest_source(f.actor, names, 2, true)).toBe(f.rockB)
+    f.rockB.last_user = { index: 1 }
+    expect(find_harvest_source(f.actor, names, 2, true)).toBeUndefined()
+    expect(find_harvest_source(f.actor, names, 4, true)).toBe(f.rockA)
+  })
+
   it('natural-only harvesting skips human-touched trees and rechecks ownership before mining', () => {
     const f = fixture()
     f.treeA.last_user = { valid: true, name: 'owner', index: 1 }

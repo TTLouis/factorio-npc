@@ -28,7 +28,7 @@ import { new_corpse_recovery_controller, note_npc_corpse, note_npc_death } from 
 import { entity_last_user } from './entity_provenance'
 import { entity_reference_hint, resolve_exact_entity } from './entity_reference'
 import { new_follow_controller } from './follow'
-import { new_harvest_controller, natural_harvest_source_names } from './harvest'
+import { new_harvest_controller, natural_harvest_source_names, find_harvest_source } from './harvest'
 import { new_interaction_recovery } from './interaction_recovery'
 import { create_knowledge_remote_interface } from './knowledge'
 import { new_navigation_controller } from './navigation'
@@ -247,8 +247,15 @@ function operation_preflight(name: string, args: Record<string, any>) {
   if (name === 'harvest_natural_product') {
     if (!actor || !actor.is_valid) return reject('no_actor')
     if (typeof args.product_name !== 'string' || !prototypes.item[args.product_name]) return reject('unknown_prototype')
+    const radius = args.search_radius ?? 256
+    if (typeof radius !== 'number' || radius !== math.floor(radius) || radius < 1 || radius > 4096) return reject('invalid_harvest_search_radius')
     const sources = natural_harvest_source_names(args.product_name)
-    return sources.length > 0 ? accept({ natural_only: true, source_names: sources }) : reject('no_natural_harvest_source')
+    if (sources.length === 0) return reject('no_natural_harvest_source')
+    const source = find_harvest_source(actor, sources, radius, true)
+    if (!source) return reject('natural_harvest_source_not_found', { field: 'product_name', identity: args.product_name,
+      search_radius: radius, natural_only: true, source_names: sources })
+    return accept({ natural_only: true, source_names: sources, source_search: { radius, target_present: true },
+      natural_source: { name: source.name, position: source.position } })
   }
 
   let exact_target: Record<string, unknown> | undefined

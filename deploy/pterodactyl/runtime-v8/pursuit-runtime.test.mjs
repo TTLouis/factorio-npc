@@ -315,11 +315,12 @@ test('native reservations and human target provenance refuse mutations determini
   assert.equal((await f.agent.admit([{ name: 'harvest_product', args: { product_name: 'wooden-chest', count: 1 } }], f.agent.loop.state.actor)).ok, false)
 })
 
-test('pursuit harvest routes only through the positive natural-source guard and retains correlated identity', async t => {
-  const f = await fixture(t, [{ operations: [{ name: 'harvest_product', args: { product_name: 'wood', count: 1 } }] }])
+test('pursuit harvest routes only through the exact-radius positive natural-source guard and retains correlated identity', async t => {
+  const f = await fixture(t, [{ operations: [{ name: 'harvest_product', args: { product_name: 'wood', count: 1, search_radius: 64 } }] }])
   const command = f.options.rcon.command
   f.options.rcon.command = text => text.includes('autorio_preflight')
-    ? JSON.stringify({ ok: true, natural_only: true, source_names: ['tree-01'] }) : command(text)
+    ? (assert.match(text, /product_name='wood',search_radius=64/), JSON.stringify({ ok: true, natural_only: true,
+      source_names: ['tree-01'], source_search: { radius: 64, target_present: true } })) : command(text)
   await f.agent.request(goal.objective)
   assert.equal(f.mutations.length, 1)
   assert.match(f.mutations[0], /harvest_natural_product/)
@@ -331,12 +332,38 @@ test('pursuit harvest routes only through the positive natural-source guard and 
   assert.throws(() => renderPursuitOperation({ name: 'harvest_product', args: { product_name: 'wood', count: '1);evil()' } }))
 })
 
+test('absent natural harvest is refused without dispatch and correction keeps the same charged campaign', async t => {
+  const f = await fixture(t, [{ operations: [{ name: 'harvest_product', args: { product_name: 'stone', count: 5, search_radius: 64 } }] }, action])
+  const command = f.options.rcon.command
+  f.options.rcon.command = text => text.includes('autorio_preflight') && text.includes('harvest_natural_product')
+    ? (assert.match(text, /search_radius=64/), JSON.stringify({ ok: false, code: 'natural_harvest_source_not_found', search_radius: 64 })) : command(text)
+  f.agent.drive = reason => f.agent.loop.wake(reason)
+  await f.agent.request(goal.objective)
+  const before = f.agent.loop.snapshot()
+  assert.equal(before.budget.calls, 1); assert.equal(before.ordinal, 0); assert.equal(before.pending, null)
+  assert.equal(f.mutations.length, 0)
+  await f.agent.pollPursuit()
+  assert.equal(f.agent.loop.state.budget.calls, 2)
+  assert.equal(f.agent.loop.state.budget.startedAt, before.budget.startedAt)
+  assert.equal(f.mutations.length, 1)
+  assert.equal(f.agent.loop.state.pending.requested_actions[0].name, 'gather_resource')
+  const rows = (await fsp.readFile(f.options.traceFile, 'utf8')).trim().split('\n').map(JSON.parse)
+  assert(rows.some(row => row.event === 'pursuit.admission_refused' && row.request_id === before.request_id
+    && row.reason === 'native_or_permission_refusal' && row.admission.code === 'natural_harvest_source_not_found'))
+})
+
 test('pursuit harvest refuses legacy-only mod preflight and active reservations', async t => {
   const f = await fixture(t, [{ operations: [{ name: 'harvest_product', args: { product_name: 'wood', count: 1 } }] }, { pauseReason: 'Fixture exhausted.' }])
   await f.agent.request(goal.objective)
   assert.equal(f.mutations.length, 0)
   const harvest = [{ name: 'harvest_product', args: { product_name: 'wood', count: 1, search_radius: 256 } }]
   assert.equal((await f.agent.admit(harvest, f.agent.loop.state.actor)).code, 'pursuit_natural_guard_unavailable')
+  const command = f.options.rcon.command
+  for (const source_search of [undefined, { radius: 64, target_present: true }, { radius: 256, target_present: false }]) {
+    f.options.rcon.command = text => text.includes('autorio_preflight')
+      ? JSON.stringify({ ok: true, natural_only: true, source_search }) : command(text)
+    assert.equal((await f.agent.admit(harvest, f.agent.loop.state.actor)).code, 'pursuit_natural_guard_unavailable')
+  }
   f.agent.memory.recordReservation('unused', { unit_number: 25, reserved_by: 'owner' })
   assert.equal((await f.agent.admit(harvest, f.agent.loop.state.actor)).code, 'pursuit_harvest_reserved_world')
 })
