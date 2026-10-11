@@ -110,6 +110,44 @@ try {
   assert.equal(recipeCapabilities.assembler_recipe.target.name, 'assembling-machine-1')
   await fsp.writeFile(path.join(results, 'recipe-guard-evidence.json'), JSON.stringify({ setup: recipeSetup, final: recipeFinal,
     capabilities: recipeCapabilities, state: recipeGuard.loop.snapshot(), trace: recipeTrace }, null, 2))
+  // The next live finding supplied available iron followed by absent coal.
+  // Native item_missing cancels the batch; preflight must prevent even the
+  // earlier iron transfer, while permitting a new charged model decision.
+  const missingSupplySetup = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; assert(a.get_item_count("coal")==0); local p=a.surface.find_non_colliding_position("stone-furnace",{a.position.x+3,a.position.y},16,0.5); assert(p); local e=a.surface.create_entity{name="stone-furnace",position=p,force=a.force}; assert(e); storage.pursuit_missing_supply_furnace=e; remote.call("autorio_tools","get_nearby_entities",16,"stone-furnace","furnace",16); rcon.print(helpers.table_to_json({unit_number=e.unit_number,inventory=a.get_inventory(defines.inventory.character_main).get_contents(),operations=remote.call("autorio_operations","status"),admission=remote.call("autorio_operation_admission","status")}))'))
+  let missingSupplyCalls = 0
+  const missingSupply = new PursuitRuntime({ rcon, stateFile: path.join(results, 'missing-supply-state.json'),
+    traceFile: path.join(results, 'missing-supply-trace.jsonl'), provider: async messages => {
+      if (++missingSupplyCalls === 1) return { content: JSON.stringify({ operations: [
+        { name: 'supply_entity', args: { unit_number: missingSupplySetup.unit_number, items: [
+          { item_name: 'iron-ore', count: 12 }, { item_name: 'coal', count: 38 } ] } },
+        { name: 'wait', args: { ticks: 12000 } },
+      ] }) }
+      const refusal = JSON.parse(JSON.parse(messages[1].content).observations.find(row => row.name === 'admission').result)
+      assert.equal(refusal.code, 'supply_missing'); assert.equal(refusal.operation_index, 0)
+      assert.equal(refusal.transfer.items[0].expected_moved, 12)
+      assert.equal(refusal.transfer.items[1].source_count, 0)
+      return { content: JSON.stringify({ pauseReason: 'Fixture ends after observing the missing-source no-effect refusal.' }) }
+    } })
+  await missingSupply.request(JSON.stringify(goal(1)))
+  assert.equal(missingSupplyCalls, 2)
+  assert.equal(missingSupply.loop.state.status, 'paused')
+  assert.equal(missingSupply.loop.state.budget.calls, 2)
+  assert.equal(missingSupply.loop.state.pending, null)
+  assert.equal(missingSupply.loop.state.ordinal, missingSupplySetup.admission.high_water)
+  const missingSupplyFinal = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local e=storage.pursuit_missing_supply_furnace; local result={inventory=a.get_inventory(defines.inventory.character_main).get_contents(),operations=remote.call("autorio_operations","status"),admission=remote.call("autorio_operation_admission","status"),iron=e.get_inventory(defines.inventory.furnace_source).get_item_count("iron-ore"),coal=e.get_fuel_inventory().get_item_count("coal"),humans=#game.connected_players,speed=game.speed}; assert(e.destroy()); rcon.print(helpers.table_to_json(result))'))
+  assert.deepEqual(missingSupplyFinal.inventory, missingSupplySetup.inventory)
+  assert.deepEqual(missingSupplyFinal.admission, missingSupplySetup.admission)
+  assert.equal(missingSupplyFinal.operations.queue_length, missingSupplySetup.operations.queue_length)
+  assert.equal(missingSupplyFinal.operations.tasks_added, missingSupplySetup.operations.tasks_added)
+  assert.equal(missingSupplyFinal.operations.task_state, missingSupplySetup.operations.task_state)
+  assert.deepEqual(missingSupplyFinal.operations.actor.position, missingSupplySetup.operations.actor.position)
+  assert.equal(missingSupplyFinal.iron, 0); assert.equal(missingSupplyFinal.coal, 0)
+  assert.equal(missingSupplyFinal.humans, 0); assert.equal(missingSupplyFinal.speed, 1)
+  const missingSupplyTrace = (await fsp.readFile(path.join(results, 'missing-supply-trace.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse)
+  assert(missingSupplyTrace.some(row => row.event === 'pursuit.admission_refused' && row.request_id === missingSupply.loop.state.request_id
+    && row.admission.code === 'supply_missing'))
+  await fsp.writeFile(path.join(results, 'missing-supply-evidence.json'), JSON.stringify({ setup: missingSupplySetup, final: missingSupplyFinal,
+    state: missingSupply.loop.snapshot(), trace: missingSupplyTrace }, null, 2))
   const options = { rcon, stateFile: path.join(results, 'pursuit-state.json'), traceFile: path.join(results, 'pursuit-trace.jsonl'),
     campaignBudget: { maxCalls: 120, maxInputChars: 12000000, maxWallMs: 3600000 },
     provider: async (messages, context) => {

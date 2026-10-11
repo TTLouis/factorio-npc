@@ -171,12 +171,17 @@ export function transfer_preflight_facts(
     return undefined
   }
 
-  // Natively every supply_entity item is its own move task, and a to-entity refusal (nothing_moved) does not cancel
-  // the items queued behind it, so one item that cannot move must not reject the others. Reject only when EVERY item
-  // would certainly move nothing; otherwise accept and report each item's status and missing amount. The first failing
-  // item names the rejection code. Known limit: an item_missing failure (nothing held) on an earlier item cancels the
-  // later tasks natively; that mixed case is still accepted here (the facts show the per-item status) and the
-  // execution-time recovery handles the resulting item_missing receipt.
+  // Each supply item becomes a separate native move task. Missing source stock
+  // fails with item_missing and cancels the batch, even when another item can
+  // move. Refuse the whole operation before any earlier transfer can run.
+  for (const item of items) {
+    if (item.status === 'supply_missing') {
+      return { ok: false, code: 'supply_missing', transfer: { direction: 'to_entity', items } }
+    }
+  }
+  // A destination-only nothing_moved refusal does not cancel later transfers.
+  // Preserve that partial-transfer policy: reject capacity refusals only when
+  // every item would move nothing, and retain all per-item facts for feedback.
   let code: TransferPreflightCode | undefined
   let all_failing = items.length > 0
   for (const item of items) {

@@ -187,20 +187,24 @@ describe('transfer preflight facts: supply_entity', () => {
     expect(facts.transfer.items.map(item => [item.item_name, item.status])).toEqual([['iron-ore', 'ok'], ['coal', 'destination_full']])
   })
 
-  it('accepts when only some items are missing (an earlier missing item is reported per item, execution recovers)', () => {
+  it.each([true, false])('refuses all supply when one source is missing, missing item first=%s', (missing_first) => {
     const { actor } = actor_with({ 'iron-ore': 50 })
     const target = furnace(15, furnace_parts())
 
     const facts = transfer_preflight_facts(actor, target, 'supply_entity', {
       unit_number: 15,
-      items: [{ item_name: 'coal', count: 5 }, { item_name: 'iron-ore', count: 50 }],
+      items: missing_first
+        ? [{ item_name: 'coal', count: 5 }, { item_name: 'iron-ore', count: 50 }]
+        : [{ item_name: 'iron-ore', count: 50 }, { item_name: 'coal', count: 5 }],
     })!
 
-    expect(facts.ok).toBe(true)
-    expect(facts.transfer.items.map(item => [item.item_name, item.status, item.missing])).toEqual([['coal', 'supply_missing', 5], ['iron-ore', 'ok', 0]])
+    expect(facts.ok).toBe(false)
+    expect(facts.code).toBe('supply_missing')
+    expect(facts.transfer.items.find(item => item.item_name === 'coal')).toMatchObject({ status: 'supply_missing', source_count: 0, missing: 5 })
+    expect(facts.transfer.items.find(item => item.item_name === 'iron-ore')).toMatchObject({ status: 'ok', source_count: 50, expected_moved: 50 })
   })
 
-  it('rejects supply_entity only when every item would certainly move nothing, and lists every item', () => {
+  it('lists every item when all supply sources are missing', () => {
     const { actor } = actor_with({})
     const target = furnace(15, furnace_parts())
 
@@ -453,6 +457,16 @@ describe('operation_preflight wiring (autorio_preflight.operation)', () => {
     expect(result).toMatchObject({ code: 'supply_missing', operation: 'supply_entity', identity: 15 })
     expect(result.target.unit_number).toBe(15)
     expect(result.transfer.items[0]).toMatchObject({ item_name: 'coal', source_count: 0, requested: 5, missing: 5 })
+  })
+
+  it('rejects the live mixed supply even when its preceding ore transfer could move', () => {
+    current_target = exact(15)
+    const result = preflight('supply_entity', { unit_number: 15, items: [
+      { item_name: 'iron-ore', count: 41 }, { item_name: 'coal', count: 38 },
+    ] })
+    expect(result).toMatchObject({ ok: false, code: 'supply_missing', target: { unit_number: 15 } })
+    expect(result.transfer.items[0]).toMatchObject({ source_count: 50, expected_moved: 41, status: 'ok' })
+    expect(result.transfer.items[1]).toMatchObject({ source_count: 0, expected_moved: 0, status: 'supply_missing' })
   })
 
   it('rejects an unknown item name as the model-correctable unknown_prototype for supply_entity and move_items_exact', () => {
