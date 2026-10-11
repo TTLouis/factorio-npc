@@ -3,6 +3,7 @@ import type { CandidateFluidPort } from './placement_spatial_features'
 import { candidate_fluid_ports } from './placement_spatial_features'
 import { placement_check_args, placement_footprint, placement_footprint_covers_point, snap_placement_center, type PlacementFootprint } from './placement_geometry'
 import { find_world_entities } from './npc_vision'
+import { placement_item_preflight } from './placement_preflight'
 
 const MAX_RADIUS = 24
 const MAX_LIMIT = 8
@@ -414,16 +415,15 @@ export function create_placement_candidate_set(actor: ControlledActor, request: 
   }
 }
 
-export function execute_placement_candidate(
+function resolve_placement_candidate(
   actor: ControlledActor,
   candidate_set_id: string,
   candidate_id: string,
-  submit_placement: (entity_name: string, x?: number, y?: number, direction?: number) => boolean,
-): [boolean, string] {
+) {
   const set = candidate_sets()[candidate_set_id]
-  if (!set) return [false, 'placement candidate set is unavailable']
-  if (game.tick - set.generated_tick > CANDIDATE_TTL_TICKS) return [false, 'placement candidate set expired']
-  if (actor.surface.index !== set.surface_index || actor.force.index !== set.force_index) return [false, 'placement candidate belongs to another actor surface/force']
+  if (!set) return { ok: false as const, error: 'placement candidate set is unavailable' }
+  if (game.tick - set.generated_tick > CANDIDATE_TTL_TICKS) return { ok: false as const, error: 'placement candidate set expired' }
+  if (actor.surface.index !== set.surface_index || actor.force.index !== set.force_index) return { ok: false as const, error: 'placement candidate belongs to another actor surface/force' }
 
   let candidate: PlacementCandidate | undefined
   for (const value of set.candidates) {
@@ -432,26 +432,45 @@ export function execute_placement_candidate(
       break
     }
   }
-  if (!candidate) return [false, 'placement candidate is unavailable']
+  if (!candidate) return { ok: false as const, error: 'placement candidate is unavailable' }
 
   const prototype = prototypes.entity[set.entity_name]
-  if (!prototype) return [false, 'entity prototype is no longer available']
+  if (!prototype) return { ok: false as const, error: 'entity prototype is no longer available' }
   if (!actor.surface.can_place_entity({
     name: set.entity_name,
     position: candidate.position,
     direction: candidate.direction,
     force: actor.force,
     ...placement_check_args(set.entity_name),
-  })) return [false, 'placement candidate is no longer placeable']
+  })) return { ok: false as const, error: 'placement candidate is no longer placeable' }
 
   if (set.target_resource !== undefined) {
     const coverage = resource_coverage(actor, prototype, candidate.position, candidate.direction, set.target_resource)
     const live_candidate: PlacementCandidate = { ...candidate, resource_coverage: coverage }
     if (!candidate_has_target_resource(live_candidate, set.target_resource)) {
-      return [false, 'placement candidate no longer covers the requested resource']
+      return { ok: false as const, error: 'placement candidate no longer covers the requested resource' }
     }
   }
 
+  return { ok: true as const, set, candidate }
+}
+
+export function placement_candidate_preflight(actor: ControlledActor, candidate_set_id: string, candidate_id: string) {
+  const resolved = resolve_placement_candidate(actor, candidate_set_id, candidate_id)
+  if (!resolved.ok) return { ok: false, code: 'placement_candidate_unavailable', error: resolved.error }
+  // Only the native registry supplies entity identity and geometry.
+  return placement_item_preflight(actor, resolved.set.entity_name)
+}
+
+export function execute_placement_candidate(
+  actor: ControlledActor,
+  candidate_set_id: string,
+  candidate_id: string,
+  submit_placement: (entity_name: string, x?: number, y?: number, direction?: number) => boolean,
+): [boolean, string] {
+  const resolved = resolve_placement_candidate(actor, candidate_set_id, candidate_id)
+  if (!resolved.ok) return [false, resolved.error]
+  const { set, candidate } = resolved
   const accepted = submit_placement(set.entity_name, candidate.position.x, candidate.position.y, candidate.direction)
   return accepted
     ? [true, `placement candidate accepted: ${candidate_set_id}/${candidate_id}`]

@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { PursuitRuntime, ownerPursuitBudget, pursuitProvider, pursuitIntake, pursuitMessages, renderPursuitOperation } from './pursuit-runtime.mjs'
 import { providerRequest } from './provider.mjs'
-import { pursuitDecisionToolDefinition, approvedOperationListText } from './structured-policy.mjs'
+import { pursuitDecisionToolDefinition, approvedOperationListText, renderOperationPreflight, operationMetadataForName } from './structured-policy.mjs'
 
 const goal = { objective: 'Gather ten copper ore.', predicate: { scope: 'finite', summary: 'Hold ten copper ore.',
   doneWhen: [{ kind: 'inventory_count', item_name: 'copper-ore', minimum: 10 }] } }
@@ -118,6 +118,29 @@ async function fixture(t, replies = [action]) {
     advance: ms => { time += ms }, failSend: () => { failSend = true }, satisfy: () => { satisfied = true },
     complete: () => { runtime.task_state = 'idle'; runtime.queue_length = 0; runtime.admission_journal.at(-1).state = 'completed' } }
 }
+
+test('both placement paths preflight missing held items before dispatch, retaining charge and correlated refusal', async t => {
+  for (const operation of [{ name: 'place_entity', args: { entity_name: 'small-electric-pole' } },
+    { name: 'place_candidate', args: { candidate_set_id: 'placement-1', candidate_id: 'candidate-1' } }]) {
+    const command = renderOperationPreflight(operation)
+    assert(command.startsWith('/silent-command rcon.print(helpers.table_to_json('))
+    assert(command.includes('autorio_preflight') && command.includes(operation.name))
+    assert.equal(operationMetadataForName(operation.name).preflight, true)
+    const f = await fixture(t, [{ operations: [operation] }, { pauseReason: 'Fixture inspected refusal.' }])
+    const original = f.options.rcon.command
+    f.options.rcon.command = text => text.includes('autorio_preflight')
+      ? JSON.stringify({ ok: false, code: 'placement_item_missing', operation: operation.name,
+        placement_item: { entity_name: 'small-electric-pole', item_name: 'small-electric-pole', count: 1, held_count: 0 } }) : original(text)
+    await f.agent.request(goal.objective)
+    assert.equal(f.mutations.length, 0); assert.equal(f.agent.loop.state.ordinal, 0)
+    assert.equal(f.agent.loop.state.budget.calls, 2); assert.equal(f.agent.loop.state.budget.startedAt, 1000)
+    const correction = JSON.parse(f.requests[1].messages[1].content)
+    assert.equal(JSON.parse(correction.observations.find(row => row.name === 'admission').result).code, 'placement_item_missing')
+    const rows = (await fsp.readFile(f.options.traceFile, 'utf8')).trim().split('\n').map(JSON.parse)
+    assert(rows.some(row => row.event === 'pursuit.placement_item_refused' && row.reason === 'native_current_held_item_missing'
+      && row.request_id === f.agent.loop.state.request_id && row.operation === operation.name && row.placement_item.held_count === 0))
+  }
+})
 
 test('furnace recipe refusal prevents all earlier supplies in the decision and stays charged and correlated', async t => {
   const decision = { operations: [

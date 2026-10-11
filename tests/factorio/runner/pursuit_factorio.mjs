@@ -333,6 +333,66 @@ try {
     && row.reason === 'invalid_bounded_argument' && /crafting_action_boundary_required/.test(row.message)))
   await fsp.writeFile(path.join(results, 'craft-boundary-evidence.json'), JSON.stringify({ setup: craftBoundarySetup,
     final: craftBoundaryFinal, state: craftBoundary.loop.snapshot(), trace: craftBoundaryTrace }, null, 2))
+  // Attempt 31: a pole prototype and its ingredients are not a held pole.
+  // Declared fixture additions are removed again; no paid campaign is modified.
+  const placementEvidence = []
+  for (const pathName of ['place_entity', 'place_candidate']) {
+    const before = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local i=a.get_inventory(defines.inventory.character_main); assert(i.get_item_count("small-electric-pole")==0); assert(i.insert{name="wood",count=1}==1); assert(i.insert{name="copper-cable",count=2}==2); local choices=remote.call("autorio_tools","get_placement_candidates",{entity_name="small-electric-pole",center={x=a.position.x+3,y=a.position.y},radius=2,limit=1}); assert(choices.ok and #choices.candidates==1); rcon.print(helpers.table_to_json({choices=choices,inventory=i.get_contents(),position=a.position,operations=remote.call("autorio_operations","status"),admission=remote.call("autorio_operation_admission","status")}))'))
+    const operation = pathName === 'place_entity' ? { name: pathName, args: { entity_name: 'small-electric-pole' } }
+      : { name: pathName, args: { candidate_set_id: before.choices.candidate_set_id, candidate_id: before.choices.candidates[0].id } }
+    let negativeCalls = 0, negativeStart
+    const traceFile = path.join(results, `placement-${pathName}-trace.jsonl`)
+    const negative = new PursuitRuntime({ rcon, stateFile: path.join(results, `placement-${pathName}-negative.json`), traceFile,
+      provider: async messages => {
+        const packet = JSON.parse(messages[1].content)
+        assert(Number.isSafeInteger(packet.world.snapshot_read_completed_at_ms))
+        negativeStart ??= negative.loop.state.budget.startedAt
+        if (++negativeCalls === 1) return { content: JSON.stringify({ operations: [operation] }) }
+        assert.equal(negativeCalls, 2)
+        const refusal = JSON.parse(packet.observations.find(row => row.name === 'admission').result)
+        assert.equal(refusal.code, 'placement_item_missing'); assert.equal(refusal.operation_index, 0)
+        assert.deepEqual(refusal.placement_item, { entity_name: 'small-electric-pole', item_name: 'small-electric-pole', count: 1, held_count: 0 })
+        return { content: JSON.stringify({ pauseReason: 'Fixture verified missing placement item before admission.' }) }
+      } })
+    await negative.request(JSON.stringify(goal(1)))
+    const after = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; rcon.print(helpers.table_to_json({inventory=a.get_inventory(defines.inventory.character_main).get_contents(),position=a.position,operations=remote.call("autorio_operations","status"),admission=remote.call("autorio_operation_admission","status"),humans=#game.connected_players,speed=game.speed}))'))
+    assert.deepEqual(after.inventory, before.inventory); assert.deepEqual(after.position, before.position)
+    assert.deepEqual(after.admission, before.admission)
+    assert.equal(after.operations.tasks_added, before.operations.tasks_added)
+    assert.equal(after.operations.queue_length, 0); assert.equal(after.operations.task_state, 'idle')
+    assert.equal(after.humans, 0); assert.equal(after.speed, 1)
+    assert.equal(negative.loop.state.ordinal, before.admission.high_water); assert.equal(negative.loop.state.pending, null)
+    assert.equal(negative.loop.state.budget.calls, 2); assert.equal(negative.loop.state.budget.startedAt, negativeStart)
+    const trace = (await fsp.readFile(traceFile, 'utf8')).trim().split('\n').map(JSON.parse)
+    assert(trace.some(row => row.event === 'pursuit.placement_item_refused' && row.request_id === negative.loop.state.request_id
+      && row.reason === 'native_current_held_item_missing' && row.operation === pathName && row.placement_item.held_count === 0))
+    // A separate fresh fixture can place a genuinely held pole normally.
+    const positiveSetup = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; assert(a.insert{name="small-electric-pole",count=1}==1); rcon.print(helpers.table_to_json({preflight=remote.call("autorio_preflight","operation","place_entity",{entity_name="small-electric-pole"})}))'))
+    assert.equal(positiveSetup.preflight.ok, true); assert.equal(positiveSetup.preflight.placement_item.held_count, 1)
+    let positiveCalls = 0
+    const positive = new PursuitRuntime({ rcon, stateFile: path.join(results, `placement-${pathName}-positive.json`),
+      traceFile: path.join(results, `placement-${pathName}-positive-trace.jsonl`), provider: async messages => {
+        const packet = JSON.parse(messages[1].content)
+        assert(Number.isSafeInteger(packet.world.snapshot_read_completed_at_ms))
+        positiveCalls++
+        return { content: JSON.stringify(positiveCalls === 1 ? { operations: [operation] }
+          : positiveCalls === 2 ? { observations: [{ name: 'getNearbyEntities', args: { radius: 16, name: 'small-electric-pole', limit: 8 } }] }
+            : { pauseReason: 'Fixture verified native placement consumed the genuinely held item.' }) }
+      } })
+    await positive.request(JSON.stringify(goal(1)))
+    const until = Date.now() + 30000
+    while (positive.active && Date.now() < until) { await delay(50); await positive.pollPursuit() }
+    assert.equal(positive.loop.state.status, 'paused'); assert.equal(positiveCalls, 3)
+    assert.equal(positive.loop.state.pending, null)
+    const placed = positive.loop.state.entityKnowledge.find(row => row.name === 'small-electric-pole')
+    assert(placed && Number.isSafeInteger(placed.unit_number))
+    const final = JSON.parse(await rcon.command(`/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local i=a.get_inventory(defines.inventory.character_main); local e; for _,v in pairs(a.surface.find_entities_filtered{name="small-electric-pole",position={x=${placed.position.x},y=${placed.position.y}},radius=0.1,limit=8}) do if v.valid and v.unit_number==${placed.unit_number} then e=v; break end end; assert(e and e.valid and e.name=="small-electric-pole"); assert(i.get_item_count("small-electric-pole")==0); local result={placed_unit_number=e.unit_number,inventory=i.get_contents(),admission=remote.call("autorio_operation_admission","status"),humans=#game.connected_players,speed=game.speed}; assert(e.destroy()); assert(i.remove{name="wood",count=1}==1); assert(i.remove{name="copper-cable",count=2}==2); rcon.print(helpers.table_to_json(result))`))
+    assert.equal(final.admission.high_water, before.admission.high_water + 1)
+    assert.deepEqual(final.inventory, before.inventory); assert.equal(final.humans, 0); assert.equal(final.speed, 1)
+    placementEvidence.push({ path: pathName, before, after, negative: negative.loop.snapshot(), trace,
+      positive_setup: positiveSetup, positive: positive.loop.snapshot(), final })
+  }
+  await fsp.writeFile(path.join(results, 'placement-item-evidence.json'), JSON.stringify(placementEvidence, null, 2))
   // A malformed or oversized read array is model-correctable; no prefix of
   // the rejected list may run and the original campaign remains charged.
   const readArraySetup = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; rcon.print(helpers.table_to_json({inventory=a.get_inventory(defines.inventory.character_main).get_contents(),operations=remote.call("autorio_operations","status"),admission=remote.call("autorio_operation_admission","status")}))'))

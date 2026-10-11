@@ -34,7 +34,8 @@ import { create_knowledge_remote_interface } from './knowledge'
 import { new_navigation_controller } from './navigation'
 import { new_navigation_obstacle_recovery } from './navigation_obstacle_recovery'
 import { new_orientation_runtime } from './orientation_runtime'
-import { execute_placement_candidate } from './placement_candidates'
+import { execute_placement_candidate, placement_candidate_preflight } from './placement_candidates'
+import { placement_item_preflight } from './placement_preflight'
 import { create_production_planning_remote_interface } from './production_planning_remote'
 import { create_prototype_knowledge_remote_interface } from './prototype_knowledge'
 import { new_recipe_configuration_runtime } from './recipe_configuration'
@@ -240,6 +241,11 @@ function operation_preflight(name: string, args: Record<string, any>) {
 
   if (!args || typeof args !== 'object') return reject('invalid_preflight_args')
   if (name === 'walk_to_position') return navigation_position_preflight(actor, args)
+  if (name === 'place_candidate') {
+    if (!actor || !actor.is_valid) return reject('no_actor')
+    if (typeof args.candidate_set_id !== 'string' || typeof args.candidate_id !== 'string') return reject('invalid_preflight_args')
+    return { operation: name, ...placement_candidate_preflight(actor, args.candidate_set_id, args.candidate_id) }
+  }
 
   if (name === 'move_items_with_player') {
     if (!actor || !actor.is_valid) return reject('no_actor')
@@ -420,6 +426,7 @@ function operation_preflight(name: string, args: Record<string, any>) {
         expected: 'entity prototype',
       })
     }
+    if (name === 'place_entity') return { operation: name, ...placement_item_preflight(actor, entity_name) }
     if (name === 'walk_to_entity') {
       if (!actor || !actor.is_valid) return reject('no_actor')
       const radius = args.search_radius

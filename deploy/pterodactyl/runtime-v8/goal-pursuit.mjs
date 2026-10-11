@@ -316,7 +316,7 @@ export class GoalPursuit {
       // Compact from durable facts each time, never a model-generated summary
       // of receipt history. Strategy is explicitly non-authoritative.
       const packet = { objective: this.state.objective, predicate: this.state.predicate,
-        notes: this.state.notes, actor: this.state.actor, world: { ...world.observation,
+        notes: this.state.notes, actor: this.state.actor, world: { ...world.observation, snapshot_read_completed_at_ms: packetAt,
           ...(planningObservation ? { known_entities: planningObservation } : {}) },
         receipts: this.state.history, observations: this.state.observations, recipeKnowledge: this.state.recipeKnowledge,
         entityKnowledge: this.state.entityKnowledge,

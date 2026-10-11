@@ -278,13 +278,20 @@ test('planning packets expose the cumulative wall allowance across actions and r
   const f = fixture({ provider, options: { maxWallMs: 12000 } })
   await f.loop.wake('owner_intake')
   assert.equal(packets[0].remainingWallMs, 12000)
+  assert.equal(packets[0].world.snapshot_read_completed_at_ms, 1000)
+  assert.deepEqual(packets[0].world.inventory, {})
   const pending = f.loop.snapshot().pending
   f.advance(3000)
+  f.world.observation.inventory = { 'copper-ore': 10 }
   f.world.runtime.admission_journal = [{ ...pending, actor_id: actor.actor_id, epoch: actor.epoch,
     generation: 1, operation_count: 1, state: 'completed', slots: [] }]
   const restarted = new GoalPursuit({ state: f.loop.snapshot(), adapter: f.adapter, provider, now: f.now })
   await restarted.wake('receipt_after_restart')
   assert.equal(packets[1].remainingWallMs, 9000)
+  assert.equal(packets[1].world.snapshot_read_completed_at_ms, 4000)
+  assert.deepEqual(packets[1].world.inventory, { 'copper-ore': 10 })
+  assert.equal(restarted.snapshot().world, undefined)
+  assert.equal(restarted.snapshot().budget.inputChars, packets.reduce((sum, packet) => sum + JSON.stringify(packet).length, 0))
   assert.equal(packets[1].remainingCalls, 29)
   assert.equal(restarted.snapshot().budget.startedAt, 1000)
   const reserved = f.events.filter(row => row.event === 'pursuit.provider_reserved')
