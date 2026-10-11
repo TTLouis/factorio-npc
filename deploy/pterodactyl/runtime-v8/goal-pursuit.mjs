@@ -58,12 +58,15 @@ export function pursuitDecision(raw) {
   const observations = raw.observations ?? []
   check(Array.isArray(operations) && operations.length <= 16, 'operations_limit')
   check(Array.isArray(observations) && observations.length <= 4, 'observations_limit')
-  if (operations.length && observations.length) throw new PolicyError('one_decision_kind_required: submit actions or observations, then inspect after exact action settlement')
+  if (operations.length && observations.length) throw new PolicyError('one_decision_kind_required: choose exactly one field: operations for native actions OR observations for reads. No request ran. Submit reads first when facts are missing; submit actions in a later decision after inspecting those facts.')
   check(raw.pauseReason === undefined || (typeof raw.pauseReason === 'string' && raw.pauseReason.length <= 300 && raw.pauseReason.trim()), 'pause_reason_required')
   check(!raw.pauseReason || (!operations.length && !observations.length), 'pause_cannot_dispatch')
   return {
     notes: raw.notes,
-    operations: operations.map(parseOperation),
+    operations: operations.map(operation => {
+      if (isObservationToolName(operation?.name)) throw new PolicyError(`read_request_in_operations: ${operation.name} is a read. No request ran. Submit it under decision.observations using its approved args and omit decision.operations.`)
+      return parseOperation(operation)
+    }),
     observations: observations.map(read => {
       check(read && typeof read === 'object' && !Array.isArray(read) && Object.keys(read).every(key => ['name', 'args'].includes(key)), 'observation_unknown_field')
       check(isObservationToolName(read.name), 'observation_tool_required')

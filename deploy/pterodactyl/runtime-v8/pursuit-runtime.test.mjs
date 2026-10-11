@@ -287,6 +287,17 @@ test('corrupt campaign budget storage fails closed rather than granting a fresh 
   assert.equal(f.requests.length, 1)
 })
 
+test('pursuit decision tool describes distinct read/action channels without advertising read names as operations', () => {
+  const schema = pursuitDecisionToolDefinition.function.parameters.properties.decision
+  assert.match(schema.properties.operations.description, /Native actions ONLY/)
+  assert.match(schema.properties.observations.description, /Approved read requests ONLY/)
+  for (const name of ['getNearbyEntities', 'getActorStatus', 'getRecipeDetails']) {
+    assert.ok(schema.properties.observations.items.properties.name.enum.includes(name))
+    assert.equal(schema.properties.operations.items.properties.name.enum.includes(name), false)
+  }
+  assert.deepEqual(schema.oneOf, [{ required: ['operations'] }, { required: ['observations'] }, { required: ['pauseReason'] }])
+})
+
 test('pursuit provider wire protocol preserves JSON and never injects legacy control/tools', async () => {
   let body
   const decision = { notes: 'Inspect.', observations: [{ name: 'getInventoryItems', args: {} }] }

@@ -330,6 +330,37 @@ test('retained mixed action/read decision is refused without effects and can cor
   assert.equal(f.loop.snapshot().budget.calls, 2)
 })
 
+test('retained read-in-action-list mistake gives actionable feedback without relocating or executing requests', async () => {
+  let turn = 0, reads = 0, admits = 0
+  const read = { name: 'getNearbyEntities', args: { radius: 10, limit: 20 } }
+  const f = fixture({ provider: async packet => {
+    if (++turn === 1) return { operations: [read] }
+    assert.match(packet.observations.at(-1).result, /read_request_in_operations.*getNearbyEntities.*decision.observations/)
+    return { observations: [read] }
+  } })
+  f.adapter.observe = async request => { reads++; assert.deepEqual(request, read); return '{}' }
+  f.adapter.admit = async () => { admits++; return { ok: true } }
+  await f.loop.wake('wrong_slot')
+  assert.equal(reads, 0); assert.equal(admits, 0); assert.equal(f.sent.length, 0)
+  assert.equal(f.loop.snapshot().budget.calls, 1)
+  assert.equal(f.loop.snapshot().pending, null)
+  await f.loop.wake('corrected_read')
+  assert.equal(reads, 1); assert.equal(admits, 0); assert.equal(f.sent.length, 0)
+  assert.equal(f.loop.snapshot().budget.calls, 2)
+})
+
+test('read mixed with an action in operations refuses the entire list before admission', async () => {
+  const f = fixture({ reply: { operations: [...action.operations, { name: 'getActorStatus', args: {} }] } })
+  let reads = 0, admits = 0
+  f.adapter.observe = async () => { reads++; return '{}' }
+  f.adapter.admit = async () => { admits++; return { ok: true } }
+  await f.loop.wake('mixed_slots')
+  assert.match(f.loop.snapshot().observations.at(-1).result, /read_request_in_operations/)
+  assert.equal(reads, 0); assert.equal(admits, 0); assert.equal(f.sent.length, 0)
+  assert.equal(f.loop.snapshot().budget.calls, 1)
+  assert.equal(f.loop.snapshot().ordinal, 0)
+})
+
 test('repeated whole-envelope refusals spend the original cap and never admit actions', async () => {
   const f = fixture({ options: { maxCalls: 1 }, provider: async () => ({ refusal: {
     code: 'pursuit_wire_envelope_invalid', message: 'Submit only decision.' } }) })

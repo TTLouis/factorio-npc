@@ -1257,11 +1257,11 @@ const pursuitResponseFormat = {
     properties: { decision: { type: 'object', additionalProperties: false,
     properties: {
       notes: { type: 'string', maxLength: 2000 },
-      operations: { type: 'array', minItems: 1, maxItems: 16, items: {
+      operations: { description: 'Native actions ONLY. Never put read requests here. Omit observations and pauseReason when supplying operations. Actions settle before a later decision can inspect their results.', type: 'array', minItems: 1, maxItems: 16, items: {
         type: 'object', additionalProperties: false, required: ['name', 'args'],
         properties: { name: { type: 'string', enum: pursuitOperationNames() }, args: { type: 'object' } },
       } },
-      observations: { type: 'array', minItems: 1, maxItems: 4, items: {
+      observations: { description: 'Approved read requests ONLY, including getNearbyEntities, getActorStatus and getRecipeDetails. Omit operations and pauseReason when supplying observations; choose actions in a later decision after these results.', type: 'array', minItems: 1, maxItems: 4, items: {
         type: 'object', additionalProperties: false, required: ['name', 'args'],
         properties: { name: { type: 'string', enum: toolDefinitions.map(tool => tool.function.name) }, args: { type: 'object' } },
       } },
