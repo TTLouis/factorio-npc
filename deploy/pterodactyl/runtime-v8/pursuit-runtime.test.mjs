@@ -533,6 +533,10 @@ test('pursuit harvest routes only through the exact-radius positive natural-sour
   const admitted = rows.find(row => row.event === 'pursuit.natural_harvest_admitted')
   assert.equal(admitted.request_id, f.agent.loop.state.request_id)
   assert.equal(admitted.reason, 'native_natural_source_guard_verified')
+  const selection = rows.find(row => row.event === 'pursuit.native_selection_policy_bound')
+  assert.equal(selection.request_id, f.agent.loop.state.request_id)
+  assert.equal(selection.reason, 'standalone_exact_natural_selection_with_native_reach')
+  assert.equal(selection.policy, 'same_surface_same_target_after_coordinate_probes_no_reach_override')
   assert.throws(() => renderPursuitOperation({ name: 'harvest_product', args: { product_name: 'wood', count: '1);evil()' } }))
 })
 

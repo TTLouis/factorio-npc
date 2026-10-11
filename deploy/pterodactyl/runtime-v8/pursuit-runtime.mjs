@@ -327,6 +327,9 @@ export class PursuitRuntime {
         return { ok: false, code: 'pursuit_natural_guard_unavailable', operation_index: index }
       }
       if (operation.name === 'harvest_product') await this.traceEvent('pursuit.natural_harvest_admitted', { reason: 'native_natural_source_guard_verified', product_name: operation.args.product_name })
+      if (operation.name === 'harvest_product') await this.traceEvent('pursuit.native_selection_policy_bound', {
+        reason: 'standalone_exact_natural_selection_with_native_reach', product_name: operation.args.product_name,
+        policy: 'same_surface_same_target_after_coordinate_probes_no_reach_override' })
       if (EXACT_MUTATIONS.has(operation.name)) {
         // Exact preflight must positively provide target identity/ownership.
         if (!result.target) return { ok: false, code: 'pursuit_target_ownership_unreadable', operation_index: index }

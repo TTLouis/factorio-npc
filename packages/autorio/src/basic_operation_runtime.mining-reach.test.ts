@@ -84,7 +84,7 @@ describe('mining reach recovery', () => {
     trace.mockRestore()
   })
 
-  it('refuses a same-name natural substitute after all nine probes and keeps placed buildings centre-only', () => {
+  it('keeps non-harvest selection unchanged and placed buildings centre-only without an opt-in', () => {
     const f = fixture(2)
     const target = { ...f.resource, type: 'simple-entity', unit_number: undefined,
       prototype: { is_building: false, mineable_properties: { minable: true } },
@@ -98,6 +98,38 @@ describe('mining reach recovery', () => {
     target.prototype.items_to_place_this = [{ name: 'rock', count: 1 }]
     expect(select_exact_mining_target(f.actor, target)).toBe(false)
     expect(select).toHaveBeenCalledTimes(1)
+  })
+
+  it('uses verified native exact selection only for an in-reach same-surface standalone natural target', () => {
+    const f = fixture(2)
+    const target = { ...f.resource, type: 'tree', unit_number: undefined,
+      prototype: { is_building: false, mineable_properties: { minable: true } },
+      selection_box: { left_top: { x: 1, y: -1 }, right_bottom: { x: 3, y: 1 } } } as any
+    const other = { ...target }
+    const recovered = vi.fn()
+    vi.mocked(f.actor.update_selected_entity).mockImplementation(() => { f.character.selected = other })
+    expect(select_exact_mining_target(f.actor, target, recovered)).toBe(true)
+    expect(f.actor.update_selected_entity).toHaveBeenCalledTimes(9)
+    expect(f.character.selected).toBe(target)
+    expect(recovered).toHaveBeenCalledTimes(1)
+    expect(f.set_mining_state).not.toHaveBeenCalled()
+  })
+
+  it('never grants exact native selection across reach, surface, actor kind or native selection refusal', () => {
+    for (const mode of ['far', 'surface', 'connected', 'native_refusal']) {
+      const f = fixture(mode === 'far' ? 8 : 2)
+      const target = { ...f.resource, type: 'tree', unit_number: undefined,
+        prototype: { is_building: false, mineable_properties: { minable: true } },
+        selection_box: { left_top: { x: 1, y: -1 }, right_bottom: { x: 3, y: 1 } } } as any
+      const other = { ...target }, recovered = vi.fn()
+      if (mode === 'surface') target.surface = { index: 2 }
+      if (mode === 'connected') (f.actor as any).status_snapshot = () => ({ actor_id: 42, kind: 'connected_player' })
+      vi.mocked(f.actor.update_selected_entity).mockImplementation(() => { f.character.selected = other })
+      if (mode === 'native_refusal') Object.defineProperty(f.character, 'selected', { get: () => other, set: () => {} })
+      expect(select_exact_mining_target(f.actor, target, recovered)).toBe(false)
+      expect(recovered).not.toHaveBeenCalled()
+      expect(f.set_mining_state).not.toHaveBeenCalled()
+    }
   })
 
   it('selects the exact resource through an interior point when an overlapping tree wins centre selection', () => {

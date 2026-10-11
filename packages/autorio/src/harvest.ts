@@ -1,6 +1,6 @@
 import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
-import { MAX_MINING_START_REJECTIONS, mining_navigation_reach, mining_navigation_requires_movement, select_exact_mining_target, within_mining_reach } from './mining_reach'
+import { MAX_MINING_START_REJECTIONS, mining_navigation_reach, mining_navigation_requires_movement, mining_target_selected, select_exact_mining_target, within_mining_reach } from './mining_reach'
 import { harvest_source_prototype_names } from './prototype_knowledge'
 import type { new_task_manager } from './task_manager'
 import type { PlayerParametersHarvestProduct, PlayerParametersWalkToEntity } from './types'
@@ -190,7 +190,7 @@ export function new_harvest_controller(
     return [true, `Product harvest task started with ${source_names.length} compatible source prototype(s)`]
   }
 
-  function reposition_after_rejected_start(actor: ControlledActor, task: PlayerParametersHarvestProduct, target: LuaEntity) {
+  function reposition_after_rejected_start(actor: ControlledActor, task: PlayerParametersHarvestProduct, target: LuaEntity, reason: string) {
     actor.set_mining_state({ mining: false })
     task.mining_attempted = false
     task.mining_rejects = (task.mining_rejects ?? 0) + 1
@@ -200,6 +200,7 @@ export function new_harvest_controller(
     }
     const navigation = navigation_to_target(actor, task, target, task.mining_rejects)
     const reach = navigation?.reach_distance ?? 0
+    log(`[AUTORIO] harvest.mining_rejected reason=${reason} actor_id=${actor.status_snapshot().actor_id} batch_ref=${manager.get_status_snapshot().active_batch?.batch_ref ?? 'none'} tick=${game.tick} target=${target.name} target_position=${serpent.line(target.position)} selected=${actor.character?.selected?.name ?? 'none'} selected_position=${serpent.line(actor.character?.selected?.position)} actor_position=${serpent.line(actor.position)} approach_radius=${reach}`)
     if (!navigation || !mining_navigation_requires_movement(actor, target, reach)
       || !manager.interrupt_current_with(navigation, task)) {
       fail(actor, task, 'mining_rejected')
@@ -257,18 +258,27 @@ export function new_harvest_controller(
 
     if (actor.get_mining_state().mining) return
     if (task.mining_attempted) {
-      reposition_after_rejected_start(actor, task, target)
+      reposition_after_rejected_start(actor, task, target, 'mining_stopped_before_gain')
       return
     }
-    if (!select_exact_mining_target(actor, target)) {
-      reposition_after_rejected_start(actor, task, target)
+    let native_recovery = false
+    if (!select_exact_mining_target(actor, target, () => {
+      native_recovery = true
+      log(`[AUTORIO] harvest.selection_recovered reason=native_exact_natural_selection actor_id=${actor.status_snapshot().actor_id} batch_ref=${manager.get_status_snapshot().active_batch?.batch_ref ?? 'none'} tick=${game.tick} target=${target.name} position=${serpent.line(target.position)}`)
+    })) {
+      reposition_after_rejected_start(actor, task, target, 'exact_selection_unavailable')
       return
     }
 
     actor.set_mining_state({ mining: true, position: target.position })
     task.mining_attempted = true
+    if (native_recovery && !mining_target_selected(actor, target)) {
+      actor.set_mining_state({ mining: false })
+      fail(actor, task, 'exact_selection_changed_on_start')
+      return
+    }
     if (!actor.get_mining_state().mining) {
-      reposition_after_rejected_start(actor, task, target)
+      reposition_after_rejected_start(actor, task, target, 'native_mining_start_rejected')
       return
     }
 

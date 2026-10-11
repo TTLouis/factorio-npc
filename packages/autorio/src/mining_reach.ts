@@ -63,15 +63,19 @@ export function mining_navigation_requires_movement(actor: ControlledActor, enti
 }
 
 /** Bind mining to the exact already-observed entity rather than same-name proximity. */
-export function select_exact_mining_target(actor: ControlledActor, target: LuaEntity) {
+export function mining_target_selected(actor: ControlledActor, target: LuaEntity) {
+  const selected = actor.character?.selected
+  if (!target.valid || !selected || !selected.valid) return false
+  if (target.unit_number !== undefined || selected.unit_number !== undefined) {
+    return target.unit_number !== undefined && selected.unit_number === target.unit_number
+  }
+  return selected === target
+}
+
+export function select_exact_mining_target(actor: ControlledActor, target: LuaEntity, on_native_recovery?: () => void) {
   const select_position = (position: { x: number, y: number }) => {
     actor.update_selected_entity(position)
-    const selected = actor.character?.selected
-    if (!selected || !selected.valid) return false
-    if (target.unit_number !== undefined || selected.unit_number !== undefined) {
-      return target.unit_number !== undefined && selected.unit_number === target.unit_number
-    }
-    return selected === target
+    return mining_target_selected(actor, target)
   }
   if (select_position(target.position)) return true
   // Overlapping natural selection boxes can cover an ore or tree centre.
@@ -88,6 +92,21 @@ export function select_exact_mining_target(actor: ControlledActor, target: LuaEn
     if (select_position({ x: centre.x + dx * offset[0], y: centre.y + dy * offset[1] })) {
       const reason = target.type === 'resource' ? 'resource_centre_occluded' : 'natural_centre_occluded'
       log(`[AUTORIO] mining.exact_selection_recovered reason=${reason} actor_id=${actor.status_snapshot().actor_id} entity=${target.name} position=${serpent.line(target.position)}`)
+      return true
+    }
+  }
+  // Dense natural selection boxes can cover every probe. LuaControl.selected
+  // supports exact native selection; it grants no mining reach or yield.
+  // Harvest opts in with a callback and checks identity again on mining start.
+  // Other mining paths and connected players retain their existing behavior.
+  const character = actor.character
+  if (on_native_recovery && natural && actor.is_valid && character?.valid && target.valid
+    && actor.status_snapshot().kind === 'standalone_character'
+    && target.surface.index === actor.surface.index && within_mining_reach(actor, target)) {
+    character.selected = target
+    if (mining_target_selected(actor, target)) {
+      log(`[AUTORIO] mining.exact_selection_recovered reason=native_exact_natural_selection actor_id=${actor.status_snapshot().actor_id} entity=${target.name} position=${serpent.line(target.position)}`)
+      on_native_recovery?.()
       return true
     }
   }

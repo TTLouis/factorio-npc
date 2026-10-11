@@ -808,8 +808,40 @@ try {
   assert.deepEqual(treeOverlapFinal.actor, treeOverlapSetup.actor)
   assert.equal(treeOverlapFinal.humans, 0)
   assert.equal(treeOverlapFinal.speed, 1)
+  // The live dry-hairy-tree/tree-06 geometry covers ALL nine coordinate probes.
+  // Declare this independent fixture before baseline; no spent save is replayed.
+  const occludedSetup = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local s=a.surface; for _,e in pairs(s.find_entities_filtered{position=a.position,radius=8,type={"tree","simple-entity"},force="neutral"}) do e.destroy() end; local p={x=a.position.x-0.29296875,y=a.position.y+2.40234375}; local t=s.create_entity{name="dry-hairy-tree",position=p,force="neutral"}; local n=s.create_entity{name="tree-06",position={x=p.x+0.25,y=p.y+1.0625},force="neutral"}; assert(t and n); storage.pursuit_occluded_target=t; storage.pursuit_occluded_neighbor=n; local exact=0; local function probe(p) a.update_selected_entity(p); if a.selected==t then exact=exact+1 end end; probe(t.position); local b=t.selection_box; local c={x=(b.left_top.x+b.right_bottom.x)/2,y=(b.left_top.y+b.right_bottom.y)/2}; local dx=(b.right_bottom.x-b.left_top.x)*0.4; local dy=(b.right_bottom.y-b.left_top.y)*0.4; for _,v in pairs({{-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1}}) do probe{x=c.x+dx*v[1],y=c.y+dy*v[2]} end; a.mining_state={mining=false}; rcon.print(helpers.table_to_json({exact_probe_count=exact,wood=a.get_item_count("wood"),inventory=a.get_main_inventory().get_contents(),actor=a.position,target=t.position,neighbor=n.position,humans=#game.connected_players,speed=game.speed}))'))
+  assert.equal(occludedSetup.exact_probe_count, 0)
+  const occludedGoal = { objective: 'Harvest two native wood from the nearest wholly occluded natural tree.', predicate: {
+    scope: 'finite', summary: 'Gain two native wood.', doneWhen: [{ kind: 'inventory_count', item_name: 'wood', minimum: occludedSetup.wood + 2 }] } }
+  const occludedHarvester = new PursuitRuntime({ ...options, provider: async (_messages, context) => {
+    calls.push({ controlProtocol: context.controlProtocol, operation: 'harvest_product' })
+    return { content: JSON.stringify({ operations: [{ name: 'harvest_product', args: { product_name: 'wood', count: 2, search_radius: 8 } }] }) }
+  } })
+  await occludedHarvester.request(JSON.stringify(occludedGoal))
+  await settle(occludedHarvester)
+  assert.equal(occludedHarvester.loop.state.budget.calls, 10)
+  assert.equal(occludedHarvester.loop.state.ordinal, ordinal + 5)
+  const occludedFinal = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; rcon.print(helpers.table_to_json({target_valid=storage.pursuit_occluded_target.valid,neighbor_valid=storage.pursuit_occluded_neighbor.valid,wood=a.get_item_count("wood"),inventory=a.get_main_inventory().get_contents(),actor=a.position,humans=#game.connected_players,speed=game.speed,operations=remote.call("autorio_operations","status")}))'))
+  assert.equal(occludedFinal.target_valid, false)
+  assert.equal(occludedFinal.neighbor_valid, true)
+  assert.equal(occludedFinal.wood, occludedSetup.wood + 2)
+  assert.deepEqual(occludedFinal.actor, occludedSetup.actor)
+  assert.equal(occludedFinal.humans, 0); assert.equal(occludedFinal.speed, 1)
+  for (const item of occludedSetup.inventory) if (item.name !== 'wood') {
+    assert.deepEqual(occludedFinal.inventory.find(row => row.name === item.name && row.quality === item.quality), item)
+  }
+  assert.equal(occludedFinal.operations.queue_length, 0)
+  assert.equal(occludedFinal.operations.last_completed_batch.batch_ref,
+    occludedFinal.operations.admission_journal.at(-1).slots[0].batch_refs[0].batch_ref)
+  const selectionTrace = (await fsp.readFile(options.traceFile, 'utf8')).trim().split('\n').map(JSON.parse)
+  assert(selectionTrace.some(row => row.event === 'pursuit.native_selection_policy_bound'
+    && row.request_id === occludedHarvester.loop.state.request_id
+    && row.reason === 'standalone_exact_natural_selection_with_native_reach'))
+  await fsp.writeFile(path.join(results, 'occluded-tree-evidence.json'), JSON.stringify({ setup: occludedSetup,
+    final: occludedFinal, budget: occludedHarvester.loop.state.budget, pending: occludedHarvester.loop.state.pending }, null, 2))
   await fsp.writeFile(path.join(results, 'pursuit-evidence.json'), JSON.stringify({ setup, final, calls: calls.length,
-    ordinal: treeHarvester.loop.state.ordinal, state: treeHarvester.loop.snapshot(), missingSource, missingNavigation, furnaceCollision, presentNavigation, naturalSetup, naturalFinal, overlapSetup, exactAmountRefusal, overlapFinal, treeOverlapSetup, treeOverlapFinal, commands }, null, 2))
+    ordinal: occludedHarvester.loop.state.ordinal, state: occludedHarvester.loop.snapshot(), missingSource, missingNavigation, furnaceCollision, presentNavigation, naturalSetup, naturalFinal, overlapSetup, exactAmountRefusal, overlapFinal, treeOverlapSetup, treeOverlapFinal, occludedSetup, occludedFinal, commands }, null, 2))
   console.log('PASS pursuit: native hand-craft receipts, zero humans, persistent campaign and cross-goal ordinals')
 }
 finally { connection.close() }

@@ -309,6 +309,43 @@ describe('product-oriented finite harvesting', () => {
     })
   })
 
+  it.each(['exact_selection_unavailable', 'native_mining_start_rejected', 'mining_stopped_before_gain'])(
+    'records the actual harvest rejection phase: %s', reason => {
+    const trace = vi.spyOn(globalThis, 'log')
+      const f = fixture()
+      f.rockB.valid = false
+      if (reason === 'exact_selection_unavailable') vi.mocked(f.actor.update_selected_entity).mockImplementation(() => {
+        ;(f.actor.character as any).selected = f.treeA
+      })
+      else if (reason === 'native_mining_start_rejected') vi.mocked(f.actor.get_mining_state).mockReturnValue({ mining: false })
+      expect(f.harvest.submit('stone', 1, 64)[0]).toBe(true)
+      f.harvest.tick(f.actor)
+      if (reason === 'mining_stopped_before_gain') {
+        vi.mocked(f.actor.get_mining_state).mockReturnValue({ mining: false })
+        f.harvest.tick(f.actor)
+      }
+      expect(trace).toHaveBeenCalledWith(expect.stringContaining(`harvest.mining_rejected reason=${reason}`))
+      expect(trace).toHaveBeenCalledWith(expect.stringContaining('batch_ref=batch-g1-1'))
+    trace.mockRestore()
+  })
+
+  it('stops before a tick of mining if native exact selection changes on mining start', () => {
+    const f = fixture()
+    f.rockB.valid = false
+    f.rockA.surface = f.actor.surface
+    f.rockA.selection_box = { left_top: { x: 0.5, y: -0.5 }, right_bottom: { x: 1.5, y: 0.5 } }
+    vi.mocked(f.actor.update_selected_entity).mockImplementation(() => { (f.actor.character as any).selected = f.treeA })
+    vi.mocked(f.actor.set_mining_state).mockImplementation(state => {
+      if (state.mining) (f.actor.character as any).selected = f.treeA
+    })
+    expect(f.harvest.submit('stone', 1, 64, true)[0]).toBe(true)
+    f.harvest.tick(f.actor)
+    expect(f.actor.set_mining_state).toHaveBeenLastCalledWith({ mining: false })
+    expect(f.manager.get_status_snapshot().last_cancelled_batch?.reason).toBe('harvest:exact_selection_changed_on_start')
+    expect(f.rockA.valid).toBe(true)
+    expect(f.treeA.valid).toBe(true)
+  })
+
   it('excludes ordinary resource patches from the harvest source set', () => {
     const f = fixture()
     expect(f.harvest.submit('stone', 1, 64)[0]).toBe(true)
