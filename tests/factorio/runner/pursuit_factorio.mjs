@@ -406,6 +406,9 @@ try {
       assert(anchor); assert.equal(anchor.name, 'lab'); assert.equal(anchor.type, 'lab')
       assert.deepEqual(anchor.position, entitySetup.position); assert.equal(anchor.historical, true)
       assert.deepEqual(Object.keys(anchor).sort(), ['historical', 'name', 'observed_at_ms', 'position', 'type', 'unit_number'])
+      const currentLab = packet.world.known_entities.find(row => row.query.args.unit_number === anchor.unit_number)
+      assert.equal(currentLab.read, true); assert.equal(currentLab.found, true)
+      assert.equal(currentLab.entity.unit_number, anchor.unit_number)
       entityStart ??= entityMemory.loop.state.budget.startedAt
       if (entityCalls <= 19) return { content: JSON.stringify({ operations: [{ name: 'wait', args: { ticks: 1 } }] }) }
       assert.equal(packet.receipts.length, 16)
@@ -445,6 +448,50 @@ try {
   assert.equal(entityFinal.humans, 0); assert.equal(entityFinal.speed, 1)
   await fsp.writeFile(path.join(results, 'entity-memory-evidence.json'), JSON.stringify({ setup: entitySetup, final: entityFinal,
     before_restart: entityBeforeRestart, state: entityRestarted.loop.snapshot(), packets: entityPackets }, null, 2))
+  // Declared native fixture: real smelting changes machine output while the
+  // actor waits. Planning snapshots observe it without moving or minting items.
+  const stockSetup = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local p=a.surface.find_non_colliding_position("stone-furnace",{a.position.x+20,a.position.y},4,0.5); assert(p); local e=a.surface.create_entity{name="stone-furnace",position=p,force=a.force}; assert(e); e.active=false; assert(e.get_inventory(defines.inventory.furnace_source).insert{name="iron-ore",count=2}==2); assert(e.get_inventory(defines.inventory.fuel).insert{name="coal",count=1}==1); storage.pursuit_stock_fixture=e; rcon.print(helpers.table_to_json({unit_number=e.unit_number,inventory=a.get_inventory(defines.inventory.character_main).get_contents(),position=a.position,admission=remote.call("autorio_operation_admission","status")}))'))
+  const poleSetup = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local p=a.surface.find_non_colliding_position("small-electric-pole",{a.position.x+15,a.position.y},4,0.5); assert(p); local e=a.surface.create_entity{name="small-electric-pole",position=p,force=a.force}; assert(e); storage.pursuit_stock_pole=e; rcon.print(helpers.table_to_json({unit_number=e.unit_number}))'))
+  let stockCalls = 0
+  const stockPackets = []
+  const currentStock = new PursuitRuntime({ rcon, stateFile: path.join(results, 'planning-stock-state.json'),
+    traceFile: path.join(results, 'planning-stock-trace.jsonl'), provider: async messages => {
+      const packet = JSON.parse(messages[1].content)
+      stockPackets.push(packet); stockCalls++
+      if (stockCalls === 1) return { content: JSON.stringify({ observations: [
+        { name: 'getNearbyEntities', args: { name: 'stone-furnace', radius: 32, limit: 8 } },
+        { name: 'getNearbyEntities', args: { name: 'small-electric-pole', radius: 32, limit: 8 } } ] }) }
+      const pole = packet.world.known_entities.find(row => row.query.args.unit_number === poleSetup.unit_number)
+      assert.equal(pole.read, true); assert.equal(pole.found, true)
+      assert.deepEqual(pole.entity.inventories, [])
+      const current = packet.world.known_entities.find(row => row.query.args.unit_number === stockSetup.unit_number)
+      assert.equal(current.read, true); assert.equal(current.found, true)
+      const output = current.entity.inventories.find(row => row.index === 3)
+      assert(output)
+      const plates = output.items.find(row => row.name === 'iron-plate')?.count ?? 0
+      if (stockCalls === 2) {
+        assert.equal(plates, 0)
+        return { content: JSON.stringify({ operations: [{ name: 'wait', args: { ticks: 600 } }] }) }
+      }
+      assert.equal(stockCalls, 3); assert.equal(plates, 2)
+      assert.equal(packet.receipts.length, 1)
+      return { content: JSON.stringify({ pauseReason: 'Fixture verified fresh native machine stock after real smelting.' }) }
+    } })
+  await currentStock.request(JSON.stringify(goal(1)))
+  await currentStock.pollPursuit()
+  assert.equal(stockCalls, 2); assert(currentStock.loop.state.pending)
+  await rcon.command('/silent-command assert(storage.pursuit_stock_fixture.valid); storage.pursuit_stock_fixture.active=true')
+  const stockUntil = Date.now() + 90000
+  while (currentStock.active && Date.now() < stockUntil) { await delay(100); await currentStock.pollPursuit() }
+  assert.equal(currentStock.loop.state.status, 'paused'); assert.equal(currentStock.loop.state.pending, null)
+  await rcon.command('/silent-command assert(storage.pursuit_stock_pole.valid); assert(storage.pursuit_stock_pole.destroy())')
+  const stockFinal = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local e=storage.pursuit_stock_fixture; assert(e.valid); local result={inventory=a.get_inventory(defines.inventory.character_main).get_contents(),position=a.position,output=e.get_inventory(defines.inventory.furnace_result).get_contents(),admission=remote.call("autorio_operation_admission","status"),humans=#game.connected_players,speed=game.speed}; assert(e.destroy()); rcon.print(helpers.table_to_json(result))'))
+  assert.deepEqual(stockFinal.inventory, stockSetup.inventory); assert.deepEqual(stockFinal.position, stockSetup.position)
+  assert.equal(stockFinal.admission.high_water, stockSetup.admission.high_water + 1)
+  assert.equal(stockFinal.humans, 0); assert.equal(stockFinal.speed, 1)
+  assert.deepEqual(currentStock.authorization.world.npc_placements, [])
+  await fsp.writeFile(path.join(results, 'planning-stock-evidence.json'), JSON.stringify({ setup: stockSetup, pole: poleSetup,
+    final: stockFinal, packets: stockPackets, state: currentStock.loop.snapshot() }, null, 2))
   const options = { rcon, stateFile: path.join(results, 'pursuit-state.json'), traceFile: path.join(results, 'pursuit-trace.jsonl'),
     campaignBudget: { maxCalls: 500, maxInputChars: 50000000, maxWallMs: 3600000 },
     provider: async (messages, context) => {

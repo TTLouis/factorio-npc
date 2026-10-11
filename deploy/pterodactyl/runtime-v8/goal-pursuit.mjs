@@ -264,14 +264,52 @@ export class GoalPursuit {
         await this.save()
         await this.event('pursuit.knowledge_seeded', 'trusted_predicate_native_dependencies', report)
       }
+      let planningObservation, planningAt
+      if (typeof this.adapter.planningObservation === 'function') {
+        budget.startedAt ??= this.now()
+        await this.save()
+        const known = new Set(this.state.entityKnowledge.map(row => row.unit_number))
+        const readUnits = new Set()
+        let lastReadAt = this.now()
+        const planningFence = async () => {
+          const current = await this.fence(generation)
+          check(batchWatermark(current.runtime) && Number.isSafeInteger(current.runtime?.batch_generation)
+            && Number.isSafeInteger(current.runtime?.queue_length) && typeof current.runtime?.task_state === 'string', 'native_status_unreadable')
+          check(current.runtime.task_state === 'idle' && current.runtime.queue_length === 0, 'unowned_native_work')
+          const at = this.now()
+          check(at >= budget.startedAt && at >= lastReadAt, 'wall_clock_regressed')
+          check(at - budget.startedAt < budget.maxWallMs, 'wall_budget_exhausted')
+          lastReadAt = at
+          return current
+        }
+        await planningFence()
+        planningObservation = await this.adapter.planningObservation(clone(this.state.entityKnowledge), async read => {
+          check(read?.name === 'getEntityStatus' && Object.keys(read.args ?? {}).length === 1
+            && known.has(read.args.unit_number) && !readUnits.has(read.args.unit_number) && readUnits.size < 4, 'planning_read_scope_invalid')
+          toolCommand(read.name, read.args)
+          readUnits.add(read.args.unit_number)
+          await planningFence()
+          const raw = await this.adapter.observe(clone(read))
+          await planningFence()
+          return { raw, observed_at_ms: this.now() }
+        })
+        check(Array.isArray(planningObservation) && planningObservation.length <= 4
+          && JSON.stringify(planningObservation).length <= 16000, 'planning_observation_limit')
+        world = await planningFence()
+        planningAt = this.now()
+        await this.event('pursuit.planning_entities_refreshed', 'bounded_current_known_machine_reads',
+          { reads: readUnits.size, unreadable: planningObservation.filter(row => row.read === false).length })
+      }
       world = await this.fence(generation)
       packetAt = this.now()
-      if (budget.startedAt !== null && packetAt < budget.startedAt) return this.pause('wall_clock_regressed')
+      if (budget.startedAt !== null && (packetAt < budget.startedAt || (planningAt !== undefined && packetAt < planningAt))) return this.pause('wall_clock_regressed')
       if (budget.startedAt !== null && packetAt - budget.startedAt >= budget.maxWallMs) return this.pause('wall_budget_exhausted')
+      if (world.runtime.task_state !== 'idle' || world.runtime.queue_length !== 0) return this.pause('unowned_native_work')
       // Compact from durable facts each time, never a model-generated summary
       // of receipt history. Strategy is explicitly non-authoritative.
       const packet = { objective: this.state.objective, predicate: this.state.predicate,
-        notes: this.state.notes, actor: this.state.actor, world: world.observation,
+        notes: this.state.notes, actor: this.state.actor, world: { ...world.observation,
+          ...(planningObservation ? { known_entities: planningObservation } : {}) },
         receipts: this.state.history, observations: this.state.observations, recipeKnowledge: this.state.recipeKnowledge,
         entityKnowledge: this.state.entityKnowledge,
         knowledgeSeed: this.state.knowledgeSeed, verification,

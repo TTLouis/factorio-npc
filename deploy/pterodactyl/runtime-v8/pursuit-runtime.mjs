@@ -6,7 +6,7 @@ import { deploymentStatus, executeAuthorizedBatch, actorChanged } from './superv
 import { pursuitOperationListText, pursuitDeniedOperationNames, toolDefinitions, toolCommand, renderOperation, renderOperationPreflight, luaString, parseOperation, pursuitDecisionToolDefinition } from './structured-policy.mjs'
 import { sanitizeGoalDefinition, evaluateGoalDefinition } from './goal-definition.mjs'
 import { createEmptyAuthorization, evaluateOperationAdmission, entityProtection, recordReservation, releaseReservation, restoreAuthorization } from './authorization.mjs'
-import { seedPursuitKnowledge } from './pursuit-knowledge.mjs'
+import { seedPursuitKnowledge, planningEntityObservation } from './pursuit-knowledge.mjs'
 
 const copy = value => structuredClone(value)
 const check = (ok, message) => { if (!ok) throw new Error(message) }
@@ -34,6 +34,7 @@ recipeKnowledge retains compact native prototype quantities across actions; comp
 Before the first decision, the harness reads bounded prototype dependencies and research paths from the trusted acceptance targets. These are native facts, not an executable plan. The seed is partial when truncated or unreadable; use approved observations for missing facts. Energy in recipeKnowledge is native seconds per craft at speed one; actual machine speed, hand crafting eligibility, power, fuel and concurrent production require verified native facts.
 Receipt requested_actions describes historical submitted quantities and targets. Use exact receipt verdicts together with current inventory to recognize completed work; never blindly repeat those actions or treat their targets as fresh.
 entityKnowledge contains bounded historical native entity identities and positions, retained after older receipts and reads leave the packet. Use these references to freshly inspect existing equipment before deciding to build it again. Surface identity is unknown: do not navigate using an old position before a fresh exact getEntityStatus confirms the target on the current surface. References prove neither current existence nor ownership, inventory, fuel, power or reach. An empty nearby scan only covers that scan's radius; it does not prove that a previously observed distant lab or machine disappeared. Fresh native preflight remains required for every action.
+world.known_entities supplies up to four exact native machine status reads refreshed for this decision. Use these timestamped inventories and working/status facts without requesting the same sufficient read again. Inventory indices have their native meaning; no roles or totals are inferred. Reads are sequential snapshots, not an atomic factory state or an admission grant. read:false means unreadable, never zero stock; found:false covers only the current actor surface/force. Truncation explicitly limits completeness. Missing power or fuel is a prerequisite to resolve through native progress, not a reason to repeatedly inspect unchanged lab/research state. Choose an available prerequisite action once its essential facts are known.
 Keep player-built structures and reserved supplies intact. Use exact targets for mutations/withdrawals; ambiguous destructive operations and player inventory withdrawal are refused. Inputs marked historical may be stale; re-observe exact targets. Resume/restarts share one cumulative call, wall-time and input allowance.
 Submit place_entity or place_candidate as the sole operation in its decision. After its exact placement receipt settles, observe the new entity and use the observed unit_number in a later supply/recipe action. Placement changes collision geometry: walking to the centre of a building may be physically impossible with a small reach_distance. Verify an accessible approach or use exact entity interaction with appropriate native reach. Never guess a future unit_number or supply a machine in the batch that creates it. Use placement candidates or verified unobstructed positions; ambiguous clearing operations are unavailable. move_items may only supply entities (to_entity:true); move_items_with_player may only give items (to_player:true).
 Approved operations and argument shapes: ${pursuitOperationListText()}
@@ -183,6 +184,7 @@ export class PursuitRuntime {
       world: () => this.world(), verify: predicate => this.verify(predicate),
       observe: async read => this.rcon.command(toolCommand(read.name, read.args)),
       seedKnowledge: seedPursuitKnowledge,
+      planningObservation: planningEntityObservation,
       admit: (operations, actor) => this.admit(operations, actor),
       dispatch: (operations, pending, options) => this.dispatch(operations, pending, options),
       save: state => this.persistState(state), trace: row => this.traceEvent(row.event, row),

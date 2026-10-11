@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { GoalPursuit, newPursuit, pursuitDecision } from './goal-pursuit.mjs'
+import { planningEntityObservation } from './pursuit-knowledge.mjs'
 
 const actor = { actor_id: 18, epoch: 3, mode: 'npc', actor_kind: 'standalone_character' }
 const action = { notes: 'Acquire inputs before research.', operations: [{ name: 'gather_resource', args: { resource_name: 'copper-ore', count: 10 } }] }
@@ -21,6 +22,118 @@ function fixture({ reply = action, options = {}, provider } = {}) {
   const loop = new GoalPursuit({ state, adapter, provider: wrapped, now: () => time })
   return { loop, world, adapter, sent, saved, events, state, calls: () => calls, now: () => time, advance: ms => { time += ms } }
 }
+
+function withPlanningRefresh(f, count = 12) {
+  f.loop.state.entityKnowledge = [{ unit_number: 58, name: 'stone-furnace', type: 'furnace', position: { x: 1, y: 2 }, observed_at_ms: 900, historical: true }]
+  f.adapter.planningObservation = planningEntityObservation
+  f.adapter.observe = async () => JSON.stringify({ found: true, unit_number: 58, entity: { unit_number: 58,
+    name: 'stone-furnace', type: 'furnace', position: { x: 1, y: 2 }, status: 18, working: false,
+    inventories: [{ index: 3, items: [{ name: 'iron-plate', quality: 'normal', count }] }],
+    inventories_truncated: false, inventory_items_truncated: false } })
+  return f
+}
+
+test('planning refresh runs once per packet, charges fresh machine stock, and re-reads after restart without renewing budgets', async () => {
+  const packets = [], stock = []
+  const f = withPlanningRefresh(fixture({ provider: async packet => { packets.push(packet); return { observations: [{ name: 'getResearchStatus', args: {} }] } } }))
+  const observe = f.adapter.observe
+  let reads = 0
+  f.adapter.observe = async query => {
+    if (query.name !== 'getEntityStatus') return '{}'
+    reads++
+    assert.equal(f.saved.at(-1).budget.startedAt, 1000)
+    const raw = JSON.parse(await observe(query))
+    raw.entity.inventories[0].items[0].count = reads * 12
+    stock.push(reads * 12)
+    return JSON.stringify(raw)
+  }
+  await f.loop.wake('owner_intake')
+  f.advance(2000)
+  const restarted = new GoalPursuit({ state: f.loop.snapshot(), adapter: f.adapter, provider: async packet => {
+    packets.push(packet); return { pauseReason: 'fixture done' }
+  }, now: f.now })
+  await restarted.wake('restart')
+  assert.equal(reads, 2)
+  assert.deepEqual(packets.map(packet => packet.world.known_entities[0].entity.inventories[0].items[0].count), stock)
+  assert.equal(restarted.snapshot().budget.startedAt, 1000)
+  assert.equal(restarted.snapshot().budget.calls, 2)
+  assert.equal(restarted.snapshot().budget.inputChars, packets.reduce((sum, packet) => sum + JSON.stringify(packet).length, 0))
+  assert.equal(restarted.snapshot().world, undefined)
+  assert(f.events.some(row => row.event === 'pursuit.planning_entities_refreshed' && row.reason === 'bounded_current_known_machine_reads' && row.reads === 1))
+  assert(packets.every(packet => packet.entityKnowledge[0].historical && !packet.entityKnowledge[0].inventories))
+})
+
+test('planning refresh is excluded from completed, exhausted and unowned native work', async () => {
+  for (const kind of ['completed', 'calls', 'wall', 'unowned']) {
+    const f = withPlanningRefresh(fixture())
+    let reads = 0
+    f.adapter.planningObservation = async () => { reads++; return [] }
+    if (kind === 'completed') f.adapter.verify = async () => ({ read: true, satisfied: true })
+    if (kind === 'calls') { f.loop.state.budget.calls = 30; f.loop.state.budget.startedAt = 1000 }
+    if (kind === 'wall') { f.loop.state.budget.startedAt = 1000; f.advance(1200000) }
+    if (kind === 'unowned') f.world.runtime.task_state = 'running'
+    await f.loop.wake('fixture')
+    assert.equal(reads, 0, kind)
+    assert.equal(f.calls(), 0, kind)
+    assert.equal(f.sent.length, 0, kind)
+  }
+})
+
+test('planning refresh rejects cancellation, actor replacement, new work, transport, deadline and clock changes before any provider call', async () => {
+  for (const kind of ['cancel', 'actor', 'work', 'transport', 'deadline', 'clock']) {
+    const f = withPlanningRefresh(fixture())
+    f.adapter.observe = async () => {
+      if (kind === 'cancel') await f.loop.cancel()
+      if (kind === 'actor') f.world.actor.epoch++
+      if (kind === 'work') f.world.runtime.queue_length = 1
+      if (kind === 'transport') throw new Error('native read failed')
+      if (kind === 'deadline') f.advance(1200000)
+      if (kind === 'clock') f.advance(-1)
+      return '{"found":false}'
+    }
+    const result = await f.loop.wake('fixture')
+    assert.equal(result.status, 'paused', kind)
+    assert.equal(result.budget.startedAt, 1000, kind)
+    assert.equal(result.budget.calls, 0, kind)
+    assert.equal(result.budget.inputChars, 0, kind)
+    assert.equal(f.calls(), 0, kind)
+    assert.equal(f.sent.length, 0, kind)
+  }
+})
+
+test('planning native read scope is bounded and new summaries count toward the input cap before reservation', async () => {
+  for (const invalid of [{ name: 'getInventoryItems', args: {} }, { name: 'getEntityStatus', args: { unit_number: 99 } }]) {
+    const f = withPlanningRefresh(fixture())
+    f.adapter.planningObservation = async (_anchors, read) => [await read(invalid)]
+    assert.equal((await f.loop.wake('fixture')).pauseReason, 'planning_read_scope_invalid')
+    assert.equal(f.calls(), 0)
+  }
+  const f = withPlanningRefresh(fixture({ options: { maxInputChars: 1 } }))
+  const result = await f.loop.wake('fixture')
+  assert.equal(result.pauseReason, 'input_budget_exhausted')
+  assert.equal(result.budget.calls, 0)
+  assert.equal(result.budget.inputChars, 0)
+  assert.equal(result.budget.startedAt, 1000)
+  assert.equal(f.sent.length, 0)
+})
+
+test('planning callback independently rejects duplicate and fifth unique exact native reads', async () => {
+  for (const ids of [[58, 58], [58, 59, 60, 61, 62]]) {
+    const f = withPlanningRefresh(fixture())
+    f.loop.state.entityKnowledge = Array.from({ length: 5 }, (_, i) => ({ ...f.loop.state.entityKnowledge[0], unit_number: 58 + i }))
+    let observed = 0
+    f.adapter.observe = async () => { observed++; return '{}' }
+    f.adapter.planningObservation = async (_anchors, read) => {
+      for (const unit_number of ids) await read({ name: 'getEntityStatus', args: { unit_number } })
+      return []
+    }
+    assert.equal((await f.loop.wake('fixture')).pauseReason, 'planning_read_scope_invalid')
+    assert.equal(observed, ids.length - 1)
+    assert.equal(f.calls(), 0); assert.equal(f.sent.length, 0)
+    assert.equal(f.loop.state.budget.startedAt, 1000)
+    assert.equal(f.loop.state.budget.calls, 0)
+  }
+})
 
 test('strategy evolves independently; dispatch receives an immutable correlated native identity persisted first', async () => {
   const f = fixture()
@@ -56,6 +169,8 @@ test('uncertain dispatch survives restart and suppresses all replay and provider
 test('receipt polling while an admitted batch runs spends no further provider calls', async () => {
   const f = fixture()
   await f.loop.wake('owner_intake')
+  let planningReads = 0
+  f.adapter.planningObservation = async () => { planningReads++; return [] }
   const pending = f.loop.snapshot().pending
   f.world.runtime.task_state = 'running'
   f.world.runtime.queue_length = 1
@@ -65,6 +180,7 @@ test('receipt polling while an admitted batch runs spends no further provider ca
   assert.equal(f.calls(), 1)
   assert.equal(f.sent.length, 1)
   assert.ok(f.loop.snapshot().pending)
+  assert.equal(planningReads, 0)
 })
 
 test('cancelled partial effects retain their immutable identity and prohibit replay', async () => {
