@@ -245,6 +245,47 @@ test('single-slot claims refuse competing transfers across operations and keep c
   }
 })
 
+test('withdrawals share current exact source stock without rejecting compatible partial or independent transfers', async t => {
+  for (const scenario of ['exhausted', 'growing', 'compatible_partial', 'distinct_entity', 'distinct_item', 'unreadable']) {
+    const first = { name: 'move_items_exact', args: { unit_number: 51, item_name: 'iron-plate', max_count: 80, to_entity: false } }
+    const second = structuredClone(first)
+    if (scenario === 'compatible_partial') first.args.max_count = 5
+    if (scenario === 'distinct_entity') second.args.unit_number = 52
+    if (scenario === 'distinct_item') second.args.item_name = 'copper-plate'
+    const f = await fixture(t, [{ operations: [first, second] }, action])
+    const command = f.options.rcon.command
+    let preflights = 0
+    f.options.rcon.command = text => {
+      if (!text.includes('autorio_preflight') || !text.includes('move_items_exact')) return command(text)
+      const unit_number = Number(text.match(/\['unit_number'\]=(\d+)/)[1])
+      const requested = Number(text.match(/\['max_count'\]=(\d+)/)[1])
+      const source_count = scenario === 'growing' && ++preflights === 2 ? 13 : 12
+      return JSON.stringify({ ok: true, target: { unit_number }, transfer: { direction: 'from_entity', items: [{
+        item_name: text.includes('copper-plate') ? 'copper-plate' : 'iron-plate', requested,
+        source_count: scenario === 'unreadable' ? '12' : source_count, expected_moved: Math.min(requested, source_count),
+      }] } })
+    }
+    f.agent.drive = reason => f.agent.loop.wake(reason)
+    await f.agent.request(goal.objective)
+    const before = f.agent.loop.snapshot()
+    if (['compatible_partial', 'distinct_entity', 'distinct_item'].includes(scenario)) { assert.equal(f.mutations.length, 1); continue }
+    assert.equal(before.pending, null); assert.equal(before.ordinal, 0); assert.equal(f.mutations.length, 0)
+    const refusal = JSON.parse(before.observations.at(-1).result)
+    const expected = scenario === 'unreadable' ? 'pursuit_transfer_source_unreadable' : 'extraction_source_conflict'
+    assert.equal(refusal.code, expected)
+    if (scenario !== 'unreadable') {
+      assert.equal(refusal.operation_index, 1); assert.equal(refusal.source_conflict.prior_max_requested, 80)
+      assert.equal(refusal.source_conflict.source_count, scenario === 'growing' ? 13 : 12)
+    }
+    await f.agent.pollPursuit()
+    assert.equal(f.agent.loop.state.budget.calls, 2); assert.equal(f.agent.loop.state.budget.startedAt, before.budget.startedAt)
+    assert.equal(f.mutations.length, 1)
+    const rows = (await fsp.readFile(f.options.traceFile, 'utf8')).trim().split('\n').map(JSON.parse)
+    assert(rows.some(row => row.event === 'pursuit.admission_refused' && row.request_id === before.request_id
+      && row.reason === 'native_or_permission_refusal' && row.admission.code === expected))
+  }
+})
+
 test('unavailable player transfer refuses the whole decision and a corrected action stays charged', async t => {
   const f = await fixture(t, [{ operations: [
     { name: 'craft_item', args: { item_name: 'iron-gear-wheel', count: 1 } },

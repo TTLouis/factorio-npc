@@ -25,6 +25,7 @@ set_machine_recipe accepts only an exact assembling-machine, never a furnace. Fu
 The harness preflights EVERY operation against the current world before dispatching ANY operation in that decision. It does not simulate future inventory from earlier operations. An acquisition followed by crafting, or intermediate crafting followed by dependent crafting, can therefore refuse the whole batch if the later operation lacks ingredients now. Submit independently admissible progress first, settle its exact receipt, then use the resulting inventory for a later decision. Partial positive stock can transfer; an item known to transfer zero refuses supply before other items move. Use the returned per-item source counts and destination diagnostics to correct the next request.
 Different item types cannot claim the same sole one-slot destination in one decision, including through separate supply_entity or move_items_exact operations. A supply_destination_conflict reports the native inventory and competing items; choose compatible transfers and verify the slot again before supplying another input type in a later decision.
 Your standalone actor's display name does not identify a human player. move_items_with_player requires an actual connected player with a character; it cannot supply or extract a machine or transfer to yourself. Use observed exact entity identities for machine transfers. A player_unavailable preflight refusal executes nothing.
+Withdrawals in one decision share the currently observed stock of each exact entity and item. Earlier max_count requests claim that stock before later withdrawals; extraction_source_conflict refuses a later request that has no current stock left. Do not repeat a withdrawal expecting the same observed items or future machine output to be available twice. A single partial positive withdrawal remains allowed.
 Only trusted game state proves success. Receipts distinguish admitted, running, completed, refused and uncertain effects. Never replay uncertain work, treat an admission as completion, or invent prototype names, entity IDs, recipes or game mechanics. Use approved tools to inspect what you need. Native preflight refusal is evidence for recovery, not proof the world cannot support the goal. Empty decisions pause. Use native wait for a bounded condition check when appropriate.
 Missing materials or knowledge are reasons to choose observations or acquisition actions. Pause only for a concrete blocker requiring owner intervention or an observed unavailable capability; name the blocker and supporting observation in pauseReason. Use the decision submission interface to request observations or native actions. harvest_product is restricted to unowned neutral natural trees/rocks; buildings and player-touched sources cannot be harvested.
 Choose the smallest executable progress action after verifying its essential facts. Do not gather a complete factory plan before acquiring an available input. Read results remain in bounded memory across observation turns; historical:true marks older reads whose mutable inventory, targets or machine state may be stale. Re-read those facts when needed for an exact action, and use retained prototype/recipe knowledge instead of repeatedly requesting unchanged rules. Validation feedback describes a refused request; correct its bounded arguments without claiming an action occurred.
@@ -234,6 +235,7 @@ export class PursuitRuntime {
   async admit(operations, actor) {
     const preflight = []
     const transferSlots = new Map()
+    const withdrawalClaims = new Map()
     for (let index = 0; index < operations.length; index++) {
       const operation = operations[index]
       if (AMBIGUOUS.has(operation.name) || (operation.name === 'move_items' && operation.args.to_entity === false)
@@ -279,6 +281,26 @@ export class PursuitRuntime {
         const protection = entityProtection(this.authorization, { unit_number: operation.args.unit_number,
           last_user: result.target.last_user }, { goalId: this.loop.state.request_id })
         if (protection.protected) return { ok: false, code: 'protected_entity', operation_index: index, ...protection }
+      }
+      if (operation.name === 'move_items_exact' && operation.args.to_entity === false) {
+        const items = result.transfer?.items
+        const item = Array.isArray(items) && items.length === 1 ? items[0] : null
+        if (result.target.unit_number !== operation.args.unit_number || result.transfer?.direction !== 'from_entity'
+          || item?.item_name !== operation.args.item_name || item.requested !== operation.args.max_count
+          || !Number.isSafeInteger(item.source_count) || item.source_count < 1) {
+          return { ok: false, code: 'pursuit_transfer_source_unreadable', operation_index: index }
+        }
+        const key = `${operation.args.unit_number}:${operation.args.item_name}`
+        const claimed = withdrawalClaims.get(key) ?? 0
+        if (item.source_count <= claimed) {
+          return { ok: false, code: 'extraction_source_conflict', operation_index: index, target: result.target,
+            source_conflict: { item_name: item.item_name, source_count: item.source_count,
+              prior_max_requested: claimed, requested: item.requested } }
+        }
+        // Reserve the earlier maximum, not expected_moved: native production
+        // can increase stock before execution and that earlier request may take
+        // more than its preflight estimate. No future output is promised here.
+        withdrawalClaims.set(key, claimed + operation.args.max_count)
       }
     }
     return evaluateOperationAdmission({ authorization: this.authorization, goal: { goal_id: this.loop.state.request_id } },

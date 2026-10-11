@@ -335,6 +335,60 @@ try {
     && row.reason === 'invalid_bounded_argument' && row.message.startsWith('observations_limit')))
   await fsp.writeFile(path.join(results, 'read-array-evidence.json'), JSON.stringify({ setup: readArraySetup, final: readArrayFinal,
     state: readArray.loop.snapshot(), trace: readArrayTrace }, null, 2))
+  // Attempt 26 duplicated a partial withdrawal against the same source stock.
+  // Stable declared outputs isolate source claims from concurrent production.
+  const withdrawalSetup = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; assert(a.get_item_count("iron-plate")==4); local units={}; storage.pursuit_withdrawal_entities={}; for _,spec in ipairs({{name="copper-plate",count=50,dx=3},{name="iron-plate",count=12,dx=-3}}) do local p=a.surface.find_non_colliding_position("stone-furnace",{a.position.x+spec.dx,a.position.y},16,0.5); assert(p); local e=a.surface.create_entity{name="stone-furnace",position=p,force=a.force}; assert(e); assert(e.get_output_inventory().insert{name=spec.name,count=spec.count}==spec.count); units[spec.name]=e.unit_number; storage.pursuit_withdrawal_entities[spec.name]=e; end; storage.pursuit_withdrawal_units=units; remote.call("autorio_tools","get_nearby_entities",32,"stone-furnace","furnace",16); rcon.print(helpers.table_to_json({units=units,inventory=a.get_inventory(defines.inventory.character_main).get_contents(),operations=remote.call("autorio_operations","status"),admission=remote.call("autorio_operation_admission","status")}))'))
+  const withdrawalOperations = [
+    { name: 'move_items_exact', args: { unit_number: withdrawalSetup.units['copper-plate'], item_name: 'copper-plate', max_count: 75, to_entity: false } },
+    { name: 'move_items_exact', args: { unit_number: withdrawalSetup.units['iron-plate'], item_name: 'iron-plate', max_count: 80, to_entity: false } },
+    { name: 'move_items_exact', args: { unit_number: withdrawalSetup.units['iron-plate'], item_name: 'iron-plate', max_count: 80, to_entity: false } },
+  ]
+  let withdrawalCalls = 0
+  const withdrawal = new PursuitRuntime({ rcon, stateFile: path.join(results, 'withdrawal-conflict-state.json'),
+    traceFile: path.join(results, 'withdrawal-conflict-trace.jsonl'), provider: async messages => {
+      if (++withdrawalCalls === 1) return { content: JSON.stringify({ operations: withdrawalOperations }) }
+      const refusal = JSON.parse(JSON.parse(messages[1].content).observations.find(row => row.name === 'admission').result)
+      assert.equal(refusal.code, 'extraction_source_conflict'); assert.equal(refusal.operation_index, 2)
+      assert.deepEqual(refusal.source_conflict, { item_name: 'iron-plate', source_count: 12, prior_max_requested: 80, requested: 80 })
+      return { content: JSON.stringify({ pauseReason: 'Fixture ends after shared-source whole-decision refusal.' }) }
+    } })
+  await withdrawal.request(JSON.stringify(goal(1)))
+  assert.equal(withdrawalCalls, 2); assert.equal(withdrawal.loop.state.pending, null)
+  assert.equal(withdrawal.loop.state.ordinal, withdrawalSetup.admission.high_water)
+  const withdrawalRefused = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local counts={}; for name,e in pairs(storage.pursuit_withdrawal_entities) do assert(e.valid); counts[name]=e.get_output_inventory().get_item_count(name); end; rcon.print(helpers.table_to_json({counts=counts,inventory=a.get_inventory(defines.inventory.character_main).get_contents(),operations=remote.call("autorio_operations","status"),admission=remote.call("autorio_operation_admission","status"),humans=#game.connected_players,speed=game.speed}))'))
+  assert.deepEqual(withdrawalRefused.counts, { 'copper-plate': 50, 'iron-plate': 12 })
+  assert.deepEqual(withdrawalRefused.inventory, withdrawalSetup.inventory)
+  assert.deepEqual(withdrawalRefused.admission, withdrawalSetup.admission)
+  assert.equal(withdrawalRefused.operations.tasks_added, withdrawalSetup.operations.tasks_added)
+  assert.equal(withdrawalRefused.operations.queue_length, withdrawalSetup.operations.queue_length)
+  assert.equal(withdrawalRefused.operations.task_state, withdrawalSetup.operations.task_state)
+  assert.deepEqual(withdrawalRefused.operations.actor.position, withdrawalSetup.operations.actor.position)
+  assert.equal(withdrawalRefused.humans, 0); assert.equal(withdrawalRefused.speed, 1)
+  const withdrawalTrace = (await fsp.readFile(path.join(results, 'withdrawal-conflict-trace.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse)
+  assert(withdrawalTrace.some(row => row.event === 'pursuit.admission_refused' && row.request_id === withdrawal.loop.state.request_id
+    && row.admission.code === 'extraction_source_conflict'))
+  // Positive native arm: five plates then a partial seven-plate withdrawal.
+  let partialWithdrawalCalls = 0
+  const partialWithdrawal = new PursuitRuntime({ rcon, stateFile: path.join(results, 'withdrawal-partial-state.json'),
+    traceFile: path.join(results, 'withdrawal-partial-trace.jsonl'), provider: async () => {
+      assert.equal(++partialWithdrawalCalls, 1)
+      return { content: JSON.stringify({ operations: [
+        { ...withdrawalOperations[1], args: { ...withdrawalOperations[1].args, max_count: 5 } }, withdrawalOperations[2],
+      ] }) }
+    } })
+  await partialWithdrawal.request(JSON.stringify({ objective: 'Hold sixteen iron plates after native fixture withdrawals.',
+    predicate: { scope: 'finite', summary: 'Hold sixteen iron plates.', doneWhen: [
+      { kind: 'inventory_count', item_name: 'iron-plate', minimum: 16 },
+    ] } }))
+  await settle(partialWithdrawal)
+  assert.equal(partialWithdrawalCalls, 1)
+  const withdrawalPositive = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local counts={}; for name,e in pairs(storage.pursuit_withdrawal_entities) do assert(e.valid); counts[name]=e.get_output_inventory().get_item_count(name); assert(e.destroy()); end; local result={counts=counts,held_iron=a.get_item_count("iron-plate"),operations=remote.call("autorio_operations","status"),admission=remote.call("autorio_operation_admission","status")}; assert(a.remove_item{name="iron-plate",count=12}==12); rcon.print(helpers.table_to_json(result))'))
+  assert.deepEqual(withdrawalPositive.counts, { 'copper-plate': 50, 'iron-plate': 0 })
+  assert.equal(withdrawalPositive.held_iron, 16)
+  assert.equal(withdrawalPositive.operations.basic_operation.last_result.moved_count, 7)
+  await fsp.writeFile(path.join(results, 'withdrawal-source-evidence.json'), JSON.stringify({ setup: withdrawalSetup,
+    refused: withdrawalRefused, trace: withdrawalTrace, state: withdrawal.loop.snapshot(), positive: withdrawalPositive,
+    positive_state: partialWithdrawal.loop.snapshot() }, null, 2))
   const options = { rcon, stateFile: path.join(results, 'pursuit-state.json'), traceFile: path.join(results, 'pursuit-trace.jsonl'),
     campaignBudget: { maxCalls: 500, maxInputChars: 50000000, maxWallMs: 3600000 },
     provider: async (messages, context) => {
