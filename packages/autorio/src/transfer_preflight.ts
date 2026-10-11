@@ -20,8 +20,9 @@ import { entity_role_inventories } from './inventory_roles'
  *   main inventory when taking) accepts none of the item.
  * Item status `ok` and `partial` (some of the request available) are accepted.
  */
-export type TransferPreflightCode = 'supply_missing' | 'extraction_empty' | 'destination_full'
-export type TransferItemStatus = 'ok' | 'partial' | TransferPreflightCode
+type TransferItemRefusalCode = 'supply_missing' | 'extraction_empty' | 'destination_full'
+export type TransferPreflightCode = TransferItemRefusalCode | 'supply_destination_conflict'
+export type TransferItemStatus = 'ok' | 'partial' | TransferItemRefusalCode
 
 export interface TransferItemFacts {
   item_name: string
@@ -38,6 +39,8 @@ export interface TransferItemFacts {
   /** Present on destination_full when moving into an entity: why nothing fits. */
   refusal_cause?: TransferRefusalCause
   target_inventories?: TransferInventorySnapshot[]
+  /** Present only when the item's sole currently accepting destination has one slot. */
+  single_slot_destination?: { inventory_index: number, slot_count: number }
 }
 
 export interface TransferPreflightFacts {
@@ -46,6 +49,7 @@ export interface TransferPreflightFacts {
   transfer: {
     direction: 'to_entity' | 'from_entity'
     items: TransferItemFacts[]
+    destination_conflict?: { inventory_index: number, slot_count: number, item_names: string[] }
   }
 }
 
@@ -81,10 +85,17 @@ function item_facts_to_entity(actor: ControlledActor, target: LuaEntity, item_na
   const source_count = actor_inventory ? actor_inventory.get_item_count(item_name) : 0
   // The native move inserts only into input and fuel inventories that can take the item.
   let destination_accepts = 0
+  let destinations = 0
+  let single_slot_index: number | undefined
   for (const { inventory, role } of entity_role_inventories(target)) {
     if (role !== 'input' && role !== 'fuel') continue
     if (!inventory.can_insert({ name: item_name })) continue
-    destination_accepts += inventory.get_insertable_count({ name: item_name })
+    const room = inventory.get_insertable_count({ name: item_name })
+    destination_accepts += room
+    if (room > 0) {
+      destinations++
+      if (inventory.length === 1) single_slot_index = inventory.index
+    }
   }
   const missing = math.max(0, requested - source_count)
   const expected_moved = math.min(requested, source_count, destination_accepts)
@@ -100,6 +111,9 @@ function item_facts_to_entity(actor: ControlledActor, target: LuaEntity, item_na
     expected_moved,
     missing,
     status,
+  }
+  if (destinations === 1 && single_slot_index !== undefined) {
+    facts.single_slot_destination = { inventory_index: single_slot_index, slot_count: 1 }
   }
   if (status === 'destination_full') {
     const diagnostics = transfer_refusal_diagnostics([target], item_name)
@@ -186,6 +200,22 @@ export function transfer_preflight_facts(
   for (const item of items) {
     const failing = item.status === 'supply_missing' || item.status === 'extraction_empty' || item.status === 'destination_full'
     if (failing && code === undefined) code = item.status as TransferPreflightCode
+  }
+  if (code === undefined && name === 'supply_entity') {
+    // Independent native capacities for two item kinds can both describe the
+    // same empty slot. Claim only a sole one-slot destination: alternative
+    // inventories or multiple slots do not establish this particular conflict.
+    const claims: Record<number, string> = {}
+    for (const item of items) {
+      const single_slot_index = item.single_slot_destination?.inventory_index
+      if (single_slot_index === undefined) continue
+      const claimed = claims[single_slot_index]
+      if (claimed !== undefined && claimed !== item.item_name) {
+        return { ok: false, code: 'supply_destination_conflict', transfer: { direction: 'to_entity', items,
+          destination_conflict: { inventory_index: single_slot_index, slot_count: 1, item_names: [claimed, item.item_name] } } }
+      }
+      claims[single_slot_index] = item.item_name
+    }
   }
   return {
     ok: code === undefined,

@@ -23,6 +23,7 @@ Read requests such as getNearbyEntities, getActorStatus and getRecipeDetails bel
 craft_item requests native hand crafting, not general item production. A requires_machine refusal means that requested recipe cannot be hand crafted. Its native recipe and machine facts describe the required production capability; choose appropriate native machine operations after verifying placement, identity, inputs and fuel or power. Repeating craft_item for that recipe cannot smelt or operate a machine. A craft-item research trigger counts native production of its item, including machine production; its wording does not require the craft_item operation.
 set_machine_recipe accepts only an exact assembling-machine, never a furnace. Furnaces select their native smelting recipe from supplied inputs; use observed inventories and status to resolve incompatible input or output contents. Repeating set_machine_recipe on a furnace cannot change its recipe. A placed machine is no longer held: another placement requires another held item.
 The harness preflights EVERY operation against the current world before dispatching ANY operation in that decision. It does not simulate future inventory from earlier operations. An acquisition followed by crafting, or intermediate crafting followed by dependent crafting, can therefore refuse the whole batch if the later operation lacks ingredients now. Submit independently admissible progress first, settle its exact receipt, then use the resulting inventory for a later decision. Partial positive stock can transfer; an item known to transfer zero refuses supply before other items move. Use the returned per-item source counts and destination diagnostics to correct the next request.
+Different item types cannot claim the same sole one-slot destination in one decision, including through separate supply_entity or move_items_exact operations. A supply_destination_conflict reports the native inventory and competing items; choose compatible transfers and verify the slot again before supplying another input type in a later decision.
 Only trusted game state proves success. Receipts distinguish admitted, running, completed, refused and uncertain effects. Never replay uncertain work, treat an admission as completion, or invent prototype names, entity IDs, recipes or game mechanics. Use approved tools to inspect what you need. Native preflight refusal is evidence for recovery, not proof the world cannot support the goal. Empty decisions pause. Use native wait for a bounded condition check when appropriate.
 Missing materials or knowledge are reasons to choose observations or acquisition actions. Pause only for a concrete blocker requiring owner intervention or an observed unavailable capability; name the blocker and supporting observation in pauseReason. Use the decision submission interface to request observations or native actions. harvest_product is restricted to unowned neutral natural trees/rocks; buildings and player-touched sources cannot be harvested.
 Choose the smallest executable progress action after verifying its essential facts. Do not gather a complete factory plan before acquiring an available input. Read results remain in bounded memory across observation turns; historical:true marks older reads whose mutable inventory, targets or machine state may be stale. Re-read those facts when needed for an exact action, and use retained prototype/recipe knowledge instead of repeatedly requesting unchanged rules. Validation feedback describes a refused request; correct its bounded arguments without claiming an action occurred.
@@ -231,6 +232,7 @@ export class PursuitRuntime {
 
   async admit(operations, actor) {
     const preflight = []
+    const transferSlots = new Map()
     for (let index = 0; index < operations.length; index++) {
       const operation = operations[index]
       if (AMBIGUOUS.has(operation.name) || (operation.name === 'move_items' && operation.args.to_entity === false)
@@ -248,6 +250,23 @@ export class PursuitRuntime {
       check(!actorChanged(actor, after), 'pursuit_stale_actor')
       preflight.push(result)
       if (result.ok !== true) return { ...result, operation_index: index }
+      if (result.transfer?.direction === 'to_entity') {
+        for (const item of result.transfer.items ?? []) {
+          const slot = item.single_slot_destination
+          if (!slot) continue
+          if (slot.slot_count !== 1 || !Number.isSafeInteger(slot.inventory_index) || slot.inventory_index < 1
+            || !result.target || result.target.unit_number !== operation.args.unit_number || typeof item.item_name !== 'string') {
+            return { ok: false, code: 'pursuit_transfer_slot_unreadable', operation_index: index }
+          }
+          const key = `${operation.args.unit_number}:${slot.inventory_index}`
+          const claimed = transferSlots.get(key)
+          if (claimed !== undefined && claimed !== item.item_name) {
+            return { ok: false, code: 'supply_destination_conflict', operation_index: index,
+              target: result.target, destination_conflict: { ...slot, item_names: [claimed, item.item_name] } }
+          }
+          transferSlots.set(key, item.item_name)
+        }
+      }
       if (operation.name === 'harvest_product' && (result.natural_only !== true
         || result.source_search?.target_present !== true || result.source_search.radius !== operation.args.search_radius)) {
         return { ok: false, code: 'pursuit_natural_guard_unavailable', operation_index: index }

@@ -122,7 +122,7 @@ async function fixture(t, replies = [action]) {
 test('furnace recipe refusal prevents all earlier supplies in the decision and stays charged and correlated', async t => {
   const decision = { operations: [
     { name: 'supply_entity', args: { unit_number: 22, items: [
-      { item_name: 'wood', count: 22 }, { item_name: 'iron-ore', count: 12 }, { item_name: 'copper-ore', count: 75 } ] } },
+      { item_name: 'wood', count: 22 }, { item_name: 'iron-ore', count: 12 } ] } },
     { name: 'set_machine_recipe', args: { unit_number: 22, recipe_name: 'iron-plate' } },
     { name: 'wait', args: { ticks: 1200 } },
   ] }
@@ -207,6 +207,42 @@ test('mixed occupied-input supply is wholly refused and a corrected decision use
   const rows = (await fsp.readFile(f.options.traceFile, 'utf8')).trim().split('\n').map(JSON.parse)
   assert(rows.some(row => row.event === 'pursuit.admission_refused' && row.request_id === state.request_id
     && row.reason === 'native_or_permission_refusal' && row.admission.code === 'destination_full'))
+})
+
+test('single-slot claims refuse competing transfers across operations and keep correction charged', async t => {
+  const operations = [
+    { name: 'supply_entity', args: { unit_number: 11, items: [{ item_name: 'copper-ore', count: 80 }] } },
+    { name: 'move_items_exact', args: { unit_number: 11, item_name: 'iron-ore', max_count: 120, to_entity: true } },
+  ]
+  for (const distinct of [false, true]) {
+    const requested = structuredClone(operations)
+    if (distinct) requested[1].args.unit_number = 12
+    const f = await fixture(t, [{ operations: requested }, action])
+    const command = f.options.rcon.command
+    f.options.rcon.command = text => {
+      if (!text.includes('autorio_preflight') || !(text.includes('supply_entity') || text.includes('move_items_exact'))) return command(text)
+      const unit_number = Number(text.match(/\['unit_number'\]=(\d+)/)[1])
+      return JSON.stringify({ ok: true, target: { unit_number }, transfer: { direction: 'to_entity', items: [{
+        item_name: text.includes('copper-ore') ? 'copper-ore' : 'iron-ore', expected_moved: 70,
+        single_slot_destination: { inventory_index: 2, slot_count: 1 },
+      }] } })
+    }
+    f.agent.drive = reason => f.agent.loop.wake(reason)
+    await f.agent.request(goal.objective)
+    const before = f.agent.loop.snapshot()
+    if (distinct) { assert.equal(f.mutations.length, 1); continue }
+    assert.equal(before.pending, null); assert.equal(before.ordinal, 0); assert.equal(f.mutations.length, 0)
+    const refusal = JSON.parse(before.observations.at(-1).result)
+    assert.equal(refusal.code, 'supply_destination_conflict'); assert.equal(refusal.operation_index, 1)
+    assert.deepEqual(refusal.destination_conflict.item_names, ['copper-ore', 'iron-ore'])
+    await f.agent.pollPursuit()
+    assert.equal(f.agent.loop.state.budget.calls, 2)
+    assert.equal(f.agent.loop.state.budget.startedAt, before.budget.startedAt)
+    assert.equal(f.mutations.length, 1)
+    const rows = (await fsp.readFile(f.options.traceFile, 'utf8')).trim().split('\n').map(JSON.parse)
+    assert(rows.some(row => row.event === 'pursuit.admission_refused' && row.request_id === before.request_id
+      && row.reason === 'native_or_permission_refusal' && row.admission.code === 'supply_destination_conflict'))
+  }
 })
 
 test('deployment campaign limits allow a bounded completion trial and preserve defaults', () => {

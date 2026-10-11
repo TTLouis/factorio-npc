@@ -70,7 +70,7 @@ try {
     traceFile: path.join(results, 'recipe-guard-trace.jsonl'), provider: async messages => {
       if (++recipeCalls === 1) return { content: JSON.stringify({ operations: [
         { name: 'supply_entity', args: { unit_number: recipeSetup.unit_number, items: [
-          { item_name: 'wood', count: 22 }, { item_name: 'iron-ore', count: 12 }, { item_name: 'copper-ore', count: 75 } ] } },
+          { item_name: 'wood', count: 22 }, { item_name: 'iron-ore', count: 12 } ] } },
         { name: 'set_machine_recipe', args: { unit_number: recipeSetup.unit_number, recipe_name: 'iron-plate' } },
         { name: 'wait', args: { ticks: 1200 } },
       ] }) }
@@ -186,7 +186,51 @@ try {
     && row.admission.code === 'destination_full'))
   await fsp.writeFile(path.join(results, 'blocked-supply-evidence.json'), JSON.stringify({ setup: blockedSupplySetup, final: blockedSupplyFinal,
     state: blockedSupply.loop.snapshot(), trace: blockedSupplyTrace }, null, 2))
-  // A compatible rock prototype alone cannot authorize harvesting: this
+  // Declared fixture reproducing attempt 23's independently positive copper
+  // and iron capacities competing for the same initially empty furnace slot.
+  const sharedSlotSetup = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; assert(a.get_item_count("iron-ore")==12 and a.get_item_count("copper-ore")==75 and a.get_item_count("coal")==0); assert(a.insert{name="iron-ore",count=188}==188); assert(a.insert{name="copper-ore",count=5}==5); assert(a.insert{name="coal",count=20}==20); local p=a.surface.find_non_colliding_position("stone-furnace",{a.position.x+3,a.position.y},16,0.5); assert(p); local e=a.surface.create_entity{name="stone-furnace",position=p,force=a.force}; assert(e); storage.pursuit_shared_slot_furnace=e; remote.call("autorio_tools","get_nearby_entities",16,"stone-furnace","furnace",16); rcon.print(helpers.table_to_json({unit_number=e.unit_number,inventory=a.get_inventory(defines.inventory.character_main).get_contents(),operations=remote.call("autorio_operations","status"),admission=remote.call("autorio_operation_admission","status"),positive=remote.call("autorio_preflight","operation","supply_entity",{unit_number=e.unit_number,items={{item_name="coal",count=20},{item_name="copper-ore",count=80}}})}))'))
+  assert.equal(sharedSlotSetup.positive.ok, true)
+  const sharedSlotCases = []
+  for (const split of [false, true]) {
+    let sharedSlotCalls = 0
+    const suffix = split ? 'split' : 'combined'
+    const sharedSlot = new PursuitRuntime({ rcon, stateFile: path.join(results, `shared-slot-${suffix}-state.json`),
+      traceFile: path.join(results, `shared-slot-${suffix}-trace.jsonl`), provider: async messages => {
+        if (++sharedSlotCalls === 1) return { content: JSON.stringify({ operations: split ? [
+          { name: 'supply_entity', args: { unit_number: sharedSlotSetup.unit_number, items: [
+            { item_name: 'coal', count: 20 }, { item_name: 'copper-ore', count: 80 } ] } },
+          { name: 'move_items_exact', args: { unit_number: sharedSlotSetup.unit_number, item_name: 'iron-ore', max_count: 120, to_entity: true } },
+        ] : [{ name: 'supply_entity', args: { unit_number: sharedSlotSetup.unit_number, items: [
+          { item_name: 'coal', count: 20 }, { item_name: 'copper-ore', count: 80 }, { item_name: 'iron-ore', count: 120 } ] } }] }) }
+        const refusal = JSON.parse(JSON.parse(messages[1].content).observations.find(row => row.name === 'admission').result)
+        assert.equal(refusal.code, 'supply_destination_conflict'); assert.equal(refusal.operation_index, split ? 1 : 0)
+        const conflict = refusal.destination_conflict ?? refusal.transfer.destination_conflict
+        assert.equal(conflict.inventory_index, 2); assert.equal(conflict.slot_count, 1)
+        assert.deepEqual(conflict.item_names, ['copper-ore', 'iron-ore'])
+        if (!split) assert(refusal.transfer.items.every(item => item.expected_moved > 0))
+        return { content: JSON.stringify({ pauseReason: 'Fixture ends after shared-slot whole-decision refusal.' }) }
+      } })
+    await sharedSlot.request(JSON.stringify(goal(1)))
+    assert.equal(sharedSlotCalls, 2)
+    assert.equal(sharedSlot.loop.state.pending, null)
+    assert.equal(sharedSlot.loop.state.ordinal, sharedSlotSetup.admission.high_water)
+    const trace = (await fsp.readFile(path.join(results, `shared-slot-${suffix}-trace.jsonl`), 'utf8')).trim().split('\n').map(JSON.parse)
+    assert(trace.some(row => row.event === 'pursuit.admission_refused' && row.request_id === sharedSlot.loop.state.request_id
+      && row.admission.code === 'supply_destination_conflict'))
+    sharedSlotCases.push({ split, state: sharedSlot.loop.snapshot(), trace })
+  }
+  const sharedSlotFinal = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local e=storage.pursuit_shared_slot_furnace; local input=e.get_inventory(defines.inventory.furnace_source); local result={inventory=a.get_inventory(defines.inventory.character_main).get_contents(),operations=remote.call("autorio_operations","status"),admission=remote.call("autorio_operation_admission","status"),coal=e.get_fuel_inventory().get_item_count("coal"),iron=input.get_item_count("iron-ore"),copper=input.get_item_count("copper-ore"),humans=#game.connected_players,speed=game.speed}; assert(e.destroy()); rcon.print(helpers.table_to_json(result))'))
+  assert.deepEqual(sharedSlotFinal.inventory, sharedSlotSetup.inventory)
+  assert.deepEqual(sharedSlotFinal.admission, sharedSlotSetup.admission)
+  assert.equal(sharedSlotFinal.operations.tasks_added, sharedSlotSetup.operations.tasks_added)
+  assert.equal(sharedSlotFinal.operations.queue_length, sharedSlotSetup.operations.queue_length)
+  assert.equal(sharedSlotFinal.operations.task_state, sharedSlotSetup.operations.task_state)
+  assert.deepEqual(sharedSlotFinal.operations.actor.position, sharedSlotSetup.operations.actor.position)
+  assert.equal(sharedSlotFinal.coal, 0); assert.equal(sharedSlotFinal.iron, 0); assert.equal(sharedSlotFinal.copper, 0)
+  assert.equal(sharedSlotFinal.humans, 0); assert.equal(sharedSlotFinal.speed, 1)
+  await fsp.writeFile(path.join(results, 'shared-slot-evidence.json'), JSON.stringify({ setup: sharedSlotSetup, final: sharedSlotFinal,
+    cases: sharedSlotCases }, null, 2))
+  // A compatible source prototype alone cannot authorize harvesting: this
   // declared one-tile search has no eligible rock in the real native world.
   const absentHarvestSetup = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; rcon.print(helpers.table_to_json({inventory=a.get_inventory(defines.inventory.character_main).get_contents(),operations=remote.call("autorio_operations","status"),admission=remote.call("autorio_operation_admission","status"),preflight=remote.call("autorio_preflight","operation","harvest_natural_product",{product_name="stone",search_radius=1})}))'))
   assert.equal(absentHarvestSetup.preflight.code, 'natural_harvest_source_not_found')

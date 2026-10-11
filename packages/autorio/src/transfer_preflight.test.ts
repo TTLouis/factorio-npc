@@ -88,6 +88,30 @@ beforeEach(() => {
 })
 
 describe('transfer preflight facts: supply_entity', () => {
+  it.each([true, false])('refuses different ores competing for one initially empty slot, copper first=%s', (copper_first) => {
+    const { actor } = actor_with({ coal: 20, 'copper-ore': 80, 'iron-ore': 200 })
+    const parts = furnace_parts()
+    ;(parts.fuel as any).length = 1
+    ;(parts.source as any).length = 1
+    ;(parts.fuel as any).can_insert = vi.fn((stack: { name: string }) => stack.name === 'coal')
+    ;(parts.source as any).can_insert = vi.fn((stack: { name: string }) => stack.name !== 'coal')
+    const copper = { item_name: 'copper-ore', count: 80 }, iron = { item_name: 'iron-ore', count: 120 }
+    const target = furnace(11, parts)
+    const facts = transfer_preflight_facts(actor, target, 'supply_entity', { unit_number: 11,
+      items: [{ item_name: 'coal', count: 20 }, ...(copper_first ? [copper, iron] : [iron, copper])],
+    })!
+    expect(facts).toMatchObject({ ok: false, code: 'supply_destination_conflict', transfer: {
+      destination_conflict: { inventory_index: 2, slot_count: 1, item_names: copper_first ? ['copper-ore', 'iron-ore'] : ['iron-ore', 'copper-ore'] },
+    } })
+    expect(facts.transfer.items.every(item => item.expected_moved > 0)).toBe(true)
+    expect(transfer_preflight_facts(actor, target, 'supply_entity', { unit_number: 11,
+      items: [{ item_name: 'coal', count: 20 }, copper],
+    })!.ok).toBe(true)
+    // Multiple native input slots do not establish this sole-slot conflict.
+    ;(parts.source as any).length = 2
+    expect(transfer_preflight_facts(actor, target, 'supply_entity', { unit_number: 11, items: [copper, iron] })!.ok).toBe(true)
+  })
+
   it('rejects with supply_missing and counts when the NPC holds none of the item (zero coal)', () => {
     const { actor } = actor_with({ 'iron-plate': 10 })
     const target = furnace(15, furnace_parts())
