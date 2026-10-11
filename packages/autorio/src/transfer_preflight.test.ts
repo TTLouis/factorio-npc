@@ -354,6 +354,7 @@ describe('operation_preflight wiring (autorio_preflight.operation)', () => {
     ;(held.actor as any).force = { index: 1 }
     current_target = undefined
     ;(globalThis as any).game.get_entity_by_unit_number = () => current_target
+    ;(globalThis as any).game.get_player = () => undefined
     vi.doMock('./actors/actor_controller', async (original) => ({
       ...(await original<typeof import('./actors/actor_controller')>()),
       get_controlled_actor: () => held.actor,
@@ -369,6 +370,33 @@ describe('operation_preflight wiring (autorio_preflight.operation)', () => {
     base.position = { x: 1, y: 1 }
     return base as LuaEntity
   }
+
+  it('refuses unavailable player identities before dispatch without treating the actor name as a player', () => {
+    const args = { player_name: 'SGLuna', item_name: 'copper-ore', max_count: 74, to_player: true }
+    const lookup = vi.fn((): any => undefined)
+    ;(globalThis as any).game.get_player = lookup
+    ;(held.actor as any).status_snapshot = () => ({ name: 'SGLuna' })
+    const inventory_calls = (held.main.get_item_count as any).mock.calls.length
+    expect(preflight('move_items_with_player', args)).toMatchObject({ ok: false, code: 'player_unavailable',
+      operation: 'move_items_with_player', field: 'player_name', identity: 'SGLuna' })
+    expect(lookup).toHaveBeenCalledWith('SGLuna')
+    for (const player of [{ valid: false, connected: true, character: {} }, { valid: true, connected: false, character: {} },
+      { valid: true, connected: true }]) {
+      lookup.mockReturnValue(player)
+      expect(preflight('move_items_with_player', args)).toMatchObject({ ok: false, code: 'player_unavailable' })
+    }
+    lookup.mockReturnValue({ valid: true, connected: true, character: {} })
+    expect(preflight('move_items_with_player', args)).toMatchObject({ ok: true, identity: 'SGLuna' })
+    expect((held.main.get_item_count as any).mock.calls.length).toBe(inventory_calls)
+    lookup.mockClear()
+    for (const player_name of ['', undefined, 42]) {
+      expect(preflight('move_items_with_player', { ...args, player_name })).toMatchObject({ ok: false, code: 'player_unavailable' })
+    }
+    expect(lookup).not.toHaveBeenCalled()
+    ;(held.actor as any).is_valid = false
+    expect(preflight('move_items_with_player', args)).toMatchObject({ ok: false, code: 'no_actor' })
+    expect(lookup).not.toHaveBeenCalled()
+  })
 
   it('refuses absent natural harvest sources inside the requested radius and admits only eligible current sources', () => {
     ;(globalThis as any).prototypes.item.stone = {}

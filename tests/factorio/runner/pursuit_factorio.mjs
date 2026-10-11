@@ -264,6 +264,41 @@ try {
     && row.admission.code === 'natural_harvest_source_not_found'))
   await fsp.writeFile(path.join(results, 'absent-harvest-evidence.json'), JSON.stringify({ setup: absentHarvestSetup, final: absentHarvestFinal,
     state: absentHarvester.loop.snapshot(), trace: absentHarvestTrace }, null, 2))
+  // Attempt 24 used the NPC display name as a human player transfer target.
+  // An absent LuaPlayer must refuse before an otherwise valid craft can run.
+  const absentPlayerSetup = JSON.parse(await rcon.command('/silent-command assert(game.get_player("SGLuna")==nil); local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; rcon.print(helpers.table_to_json({inventory=a.get_inventory(defines.inventory.character_main).get_contents(),operations=remote.call("autorio_operations","status"),admission=remote.call("autorio_operation_admission","status"),actor=remote.call("autorio_actor","status"),craft=remote.call("autorio_preflight","operation","craft_item",{item_name="iron-gear-wheel",count=1}),transfer=remote.call("autorio_preflight","operation","move_items_with_player",{player_name="SGLuna",item_name="copper-ore",max_count=74,to_player=true})}))'))
+  assert.equal(absentPlayerSetup.craft.ok, true)
+  assert.equal(absentPlayerSetup.transfer.code, 'player_unavailable')
+  assert.equal(absentPlayerSetup.actor.actor.kind, 'standalone_character')
+  let absentPlayerCalls = 0
+  const absentPlayer = new PursuitRuntime({ rcon, stateFile: path.join(results, 'absent-player-state.json'),
+    traceFile: path.join(results, 'absent-player-trace.jsonl'), provider: async messages => {
+      if (++absentPlayerCalls === 1) return { content: JSON.stringify({ operations: [
+        { name: 'craft_item', args: { item_name: 'iron-gear-wheel', count: 1 } },
+        { name: 'move_items_with_player', args: { player_name: 'SGLuna', item_name: 'copper-ore', max_count: 74, to_player: true } },
+      ] }) }
+      const refusal = JSON.parse(JSON.parse(messages[1].content).observations.find(row => row.name === 'admission').result)
+      assert.equal(refusal.code, 'player_unavailable'); assert.equal(refusal.operation_index, 1)
+      assert.equal(refusal.identity, 'SGLuna')
+      return { content: JSON.stringify({ pauseReason: 'Fixture ends after unavailable-player whole-decision refusal.' }) }
+    } })
+  await absentPlayer.request(JSON.stringify(goal(1)))
+  assert.equal(absentPlayerCalls, 2)
+  assert.equal(absentPlayer.loop.state.pending, null)
+  assert.equal(absentPlayer.loop.state.ordinal, absentPlayerSetup.admission.high_water)
+  const absentPlayerFinal = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; rcon.print(helpers.table_to_json({inventory=a.get_inventory(defines.inventory.character_main).get_contents(),operations=remote.call("autorio_operations","status"),admission=remote.call("autorio_operation_admission","status"),humans=#game.connected_players,speed=game.speed}))'))
+  assert.deepEqual(absentPlayerFinal.inventory, absentPlayerSetup.inventory)
+  assert.deepEqual(absentPlayerFinal.admission, absentPlayerSetup.admission)
+  assert.equal(absentPlayerFinal.operations.tasks_added, absentPlayerSetup.operations.tasks_added)
+  assert.equal(absentPlayerFinal.operations.queue_length, absentPlayerSetup.operations.queue_length)
+  assert.equal(absentPlayerFinal.operations.task_state, absentPlayerSetup.operations.task_state)
+  assert.deepEqual(absentPlayerFinal.operations.actor.position, absentPlayerSetup.operations.actor.position)
+  assert.equal(absentPlayerFinal.humans, 0); assert.equal(absentPlayerFinal.speed, 1)
+  const absentPlayerTrace = (await fsp.readFile(path.join(results, 'absent-player-trace.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse)
+  assert(absentPlayerTrace.some(row => row.event === 'pursuit.admission_refused' && row.request_id === absentPlayer.loop.state.request_id
+    && row.admission.code === 'player_unavailable'))
+  await fsp.writeFile(path.join(results, 'absent-player-evidence.json'), JSON.stringify({ setup: absentPlayerSetup, final: absentPlayerFinal,
+    state: absentPlayer.loop.snapshot(), trace: absentPlayerTrace }, null, 2))
   const options = { rcon, stateFile: path.join(results, 'pursuit-state.json'), traceFile: path.join(results, 'pursuit-trace.jsonl'),
     campaignBudget: { maxCalls: 500, maxInputChars: 50000000, maxWallMs: 3600000 },
     provider: async (messages, context) => {

@@ -245,6 +245,29 @@ test('single-slot claims refuse competing transfers across operations and keep c
   }
 })
 
+test('unavailable player transfer refuses the whole decision and a corrected action stays charged', async t => {
+  const f = await fixture(t, [{ operations: [
+    { name: 'craft_item', args: { item_name: 'iron-gear-wheel', count: 1 } },
+    { name: 'move_items_with_player', args: { player_name: 'SGLuna', item_name: 'copper-ore', max_count: 74, to_player: true } },
+  ] }, action])
+  const command = f.options.rcon.command
+  f.options.rcon.command = text => text.includes('autorio_preflight') && text.includes('move_items_with_player')
+    ? JSON.stringify({ ok: false, code: 'player_unavailable', field: 'player_name', identity: 'SGLuna' }) : command(text)
+  f.agent.drive = reason => f.agent.loop.wake(reason)
+  await f.agent.request(goal.objective)
+  const before = f.agent.loop.snapshot()
+  assert.equal(before.pending, null); assert.equal(before.ordinal, 0); assert.equal(f.mutations.length, 0)
+  const refusal = JSON.parse(before.observations.at(-1).result)
+  assert.equal(refusal.code, 'player_unavailable'); assert.equal(refusal.operation_index, 1)
+  await f.agent.pollPursuit()
+  assert.equal(f.agent.loop.state.budget.calls, 2); assert.equal(f.agent.loop.state.budget.startedAt, before.budget.startedAt)
+  assert.equal(f.mutations.length, 1)
+  const rows = (await fsp.readFile(f.options.traceFile, 'utf8')).trim().split('\n').map(JSON.parse)
+  assert(rows.some(row => row.event === 'pursuit.admission_refused' && row.request_id === before.request_id
+    && row.reason === 'native_or_permission_refusal' && row.admission.code === 'player_unavailable'))
+  assert.match(pursuitMessages({})[0].content, /actor's display name does not identify a human player/)
+})
+
 test('deployment campaign limits allow a bounded completion trial and preserve defaults', () => {
   assert.deepEqual(ownerPursuitBudget(), { maxCalls: 30, maxInputChars: 2000000 })
   assert.deepEqual(ownerPursuitBudget({ maxCalls: 60, maxInputChars: 4000000 }), { maxCalls: 60, maxInputChars: 4000000 })
