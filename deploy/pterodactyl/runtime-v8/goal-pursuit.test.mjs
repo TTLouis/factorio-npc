@@ -232,6 +232,97 @@ test('a larger fresh input allowance cannot replenish an existing campaign on re
   assert.equal(result.budget.calls, 1)
 })
 
+test('native entity references outlive receipt aging and restart without retaining mutable machine facts', async () => {
+  let reply = { observations: [{ name: 'getNearbyEntities', args: { radius: 32, name: 'lab', limit: 8 } }] }
+  let packet
+  const f = fixture({ options: { maxCalls: 80, maxInputChars: 5000000 }, provider: async value => { packet = value; return reply } })
+  f.adapter.observe = async () => JSON.stringify({ entities: [{ unit_number: 58, name: 'lab', type: 'lab',
+    position: { x: 73.5, y: -59.5 }, inventory: { 'automation-science-pack': 75 }, working: true, owned: true }] })
+  await f.loop.wake('native_lab_observation')
+  const anchor = { unit_number: 58, name: 'lab', type: 'lab', position: { x: 73.5, y: -59.5 },
+    observed_at_ms: 1000, historical: true }
+  reply = action
+  await f.loop.wake('first_action')
+  for (let index = 0; index < 18; index++) {
+    const pending = f.loop.snapshot().pending
+    f.world.runtime.admission_journal = [{ ...pending, actor_id: actor.actor_id, epoch: actor.epoch,
+      generation: 1, operation_count: 1, state: 'completed', slots: [] }]
+    f.advance(100)
+    await f.loop.wake('completed_native_batch')
+  }
+  assert.equal(f.loop.snapshot().history.length, 16)
+  assert.deepEqual(packet.observations, [])
+  assert.deepEqual(packet.entityKnowledge, [anchor])
+  reply = { observations: [{ name: 'getInventoryItems', args: {} }] }
+  const pending = f.loop.snapshot().pending
+  f.world.runtime.admission_journal = [{ ...pending, actor_id: actor.actor_id, epoch: actor.epoch,
+    generation: 1, operation_count: 1, state: 'completed', slots: [] }]
+  await f.loop.wake('final_receipt_before_restart')
+  const before = f.loop.snapshot()
+  const restarted = new GoalPursuit({ state: before, adapter: f.adapter, now: f.now,
+    provider: async value => { packet = value; return { pauseReason: 'Fixture inspected historical lab.' } } })
+  await restarted.wake('restart')
+  assert.deepEqual(packet.entityKnowledge, [anchor])
+  assert.deepEqual(packet.observations, [])
+  assert.equal(restarted.snapshot().budget.startedAt, before.budget.startedAt)
+  assert.equal(restarted.snapshot().budget.calls, before.budget.calls + 1)
+  assert(restarted.snapshot().budget.inputChars > before.budget.inputChars)
+})
+
+test('entity references are bounded, refreshed by exact native reads and removed only by exact absence', async () => {
+  let read = { name: 'getNearbyEntities', args: { radius: 64, limit: 40 } }
+  let raw = JSON.stringify({ entities: Array.from({ length: 40 }, (_, index) => ({
+    unit_number: index + 1, name: 'stone-furnace', type: 'furnace', position: { x: index, y: 0 }, inventory: { coal: 10 } })) })
+  let packet
+  const f = fixture({ provider: async value => { packet = value; return { observations: [read] } } })
+  f.adapter.observe = async () => raw
+  await f.loop.wake('native_scan')
+  assert.equal(f.loop.snapshot().entityKnowledge.length, 32)
+  assert(JSON.stringify(f.loop.snapshot().entityKnowledge).length <= 8000)
+  raw = '{"entities":[]}'
+  await f.loop.wake('empty_local_scan')
+  assert.equal(f.loop.snapshot().entityKnowledge.length, 32)
+  read = { name: 'getEntityStatus', args: { name: 'lab', radius: 32 } }
+  raw = JSON.stringify({ found: true, entity: { unit_number: 58, name: 'lab', type: 'lab', position: { x: 4, y: 5 },
+    inventories: [{ coal: 1 }], working: true, ownership: 'npc', source: 'model' } })
+  f.advance(10)
+  await f.loop.wake('fresh_exact_entity')
+  const known = f.loop.snapshot().entityKnowledge.at(-1)
+  assert.deepEqual(known, { unit_number: 58, name: 'lab', type: 'lab', position: { x: 4, y: 5 }, observed_at_ms: 1010, historical: true })
+  read = { name: 'getEntityStatus', args: { unit_number: 58 } }
+  for (const unreadable of ['null', '[]', '{"found":true,"entity":{"unit_number":99}}']) {
+    raw = unreadable
+    await f.loop.wake('unreadable_or_mismatched_exact_read')
+    assert.deepEqual(f.loop.snapshot().entityKnowledge.at(-1), known)
+  }
+  raw = '{"found":false}'
+  await f.loop.wake('exact_entity_absent')
+  assert(!f.loop.snapshot().entityKnowledge.some(row => row.unit_number === 58))
+  assert(packet.entityKnowledge.some(row => row.unit_number === 58)) // Read result changes only the next packet.
+  raw = 'unreadable native response'
+  await f.loop.wake('unreadable_read')
+  assert(!packet.entityKnowledge.some(row => row.unit_number === 58))
+})
+
+test('historical entity references cannot authorize protected actions or restore mutable persisted fields', async () => {
+  const f = fixture({ provider: async packet => {
+    assert.deepEqual(packet.entityKnowledge, [{ unit_number: 58, name: 'lab', type: 'lab', position: { x: 1, y: 2 }, observed_at_ms: 1000, historical: true }])
+    return { operations: [{ name: 'move_items_exact', args: { unit_number: 58, item_name: 'automation-science-pack', max_count: 1, to_entity: false } }] }
+  } })
+  const state = f.loop.snapshot()
+  state.entityKnowledge = [{ unit_number: 58, name: 'lab', type: 'lab', position: { x: 1, y: 2 }, observed_at_ms: 1000, historical: false, inventory: { coal: 9 }, owned: true },
+    { unit_number: 99, name: 'bad', type: 'lab', position: { x: '1', y: 2 }, observed_at_ms: 1000 }]
+  let admissions = 0
+  f.adapter.admit = async () => { admissions++; return { ok: false, code: 'protected_structure' } }
+  const loop = new GoalPursuit({ state, adapter: f.adapter, now: f.now, provider: f.loop.provider })
+  await loop.wake('restored_historical_reference')
+  assert.equal(admissions, 1)
+  assert.equal(f.sent.length, 0)
+  assert.equal(loop.snapshot().pending, null)
+  assert.equal(loop.snapshot().budget.calls, 1)
+  assert.match(loop.snapshot().observations.at(-1).result, /protected_structure/)
+})
+
 test('unreadable and unowned native work cannot spend a provider call or append operations', async () => {
   for (const runtime of [null, {}, { task_state: 'running', queue_length: 1, batch_generation: 1 }]) {
     const f = fixture()

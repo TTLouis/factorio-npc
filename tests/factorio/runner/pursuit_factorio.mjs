@@ -389,6 +389,62 @@ try {
   await fsp.writeFile(path.join(results, 'withdrawal-source-evidence.json'), JSON.stringify({ setup: withdrawalSetup,
     refused: withdrawalRefused, trace: withdrawalTrace, state: withdrawal.loop.snapshot(), positive: withdrawalPositive,
     positive_state: partialWithdrawal.loop.snapshot() }, null, 2))
+  // A distant lab remains a historical search reference after more than the
+  // receipt-history window of real native batches, an empty local scan and a
+  // runtime restart. References never insert science or power the lab.
+  const entitySetup = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local p=a.surface.find_non_colliding_position("lab",{a.position.x+40,a.position.y},4,0.5); assert(p); local e=a.surface.create_entity{name="lab",position=p,force=a.force}; assert(e); storage.pursuit_entity_memory_lab=e; rcon.print(helpers.table_to_json({unit_number=e.unit_number,position=e.position,inventory=a.get_inventory(defines.inventory.character_main).get_contents(),operations=remote.call("autorio_operations","status"),admission=remote.call("autorio_operation_admission","status")}))'))
+  let entityCalls = 0, entityStart
+  const entityPackets = []
+  const entityOptions = { rcon, stateFile: path.join(results, 'entity-memory-state.json'), traceFile: path.join(results, 'entity-memory-trace.jsonl'),
+    provider: async messages => {
+      const packet = JSON.parse(messages[1].content)
+      entityPackets.push(packet)
+      entityCalls++
+      if (entityCalls === 1) return { content: JSON.stringify({ observations: [
+        { name: 'getNearbyEntities', args: { radius: 64, name: 'lab', limit: 8 } } ] }) }
+      const anchor = packet.entityKnowledge.find(row => row.unit_number === entitySetup.unit_number)
+      assert(anchor); assert.equal(anchor.name, 'lab'); assert.equal(anchor.type, 'lab')
+      assert.deepEqual(anchor.position, entitySetup.position); assert.equal(anchor.historical, true)
+      assert.deepEqual(Object.keys(anchor).sort(), ['historical', 'name', 'observed_at_ms', 'position', 'type', 'unit_number'])
+      entityStart ??= entityMemory.loop.state.budget.startedAt
+      if (entityCalls <= 19) return { content: JSON.stringify({ operations: [{ name: 'wait', args: { ticks: 1 } }] }) }
+      assert.equal(packet.receipts.length, 16)
+      if (entityCalls === 20) return { content: JSON.stringify({ observations: [
+        { name: 'getNearbyEntities', args: { radius: 1, name: 'lab', limit: 8 } } ] }) }
+      if (entityCalls === 21) {
+        const local = packet.observations.find(row => row.name === 'getNearbyEntities' && row.args.radius === 1)
+        assert.equal(JSON.parse(local.result).matched_count, 0)
+        return { content: JSON.stringify({ observations: [{ name: 'getEntityStatus', args: { unit_number: anchor.unit_number } }] }) }
+      }
+      assert.equal(entityCalls, 22)
+      assert.equal(JSON.parse(packet.observations.find(row => row.name === 'getEntityStatus').result).found, true)
+      return { content: JSON.stringify({ pauseReason: 'Fixture verified historical equipment reference and fresh native identity.' }) }
+    } }
+  const entityMemory = new PursuitRuntime(entityOptions)
+  await entityMemory.request(JSON.stringify(goal(1)))
+  const entityUntil = Date.now() + 90000
+  while (entityCalls < 19 && Date.now() < entityUntil) { await delay(50); await entityMemory.pollPursuit() }
+  assert.equal(entityCalls, 19); assert(entityMemory.loop.state.pending)
+  const entityBeforeRestart = entityMemory.loop.snapshot()
+  const entityRestarted = new PursuitRuntime(entityOptions)
+  await entityRestarted.loadPersistentState()
+  assert.deepEqual(entityRestarted.loop.state.entityKnowledge, entityBeforeRestart.entityKnowledge)
+  assert.equal(entityRestarted.loop.state.budget.startedAt, entityStart)
+  assert.equal(entityRestarted.loop.state.budget.calls, 19)
+  while (entityRestarted.active && Date.now() < entityUntil) { await delay(50); await entityRestarted.pollPursuit() }
+  assert.equal(entityRestarted.loop.state.status, 'paused'); assert.equal(entityCalls, 22)
+  assert.equal(entityRestarted.loop.state.pending, null)
+  assert.equal(entityRestarted.loop.state.budget.startedAt, entityStart)
+  assert.equal(entityRestarted.loop.state.budget.calls, 22)
+  const entityFinal = JSON.parse(await rcon.command('/silent-command local a=game.surfaces[1].find_entities_filtered{name="character"}[1]; local e=storage.pursuit_entity_memory_lab; assert(e.valid); local result={unit_number=e.unit_number,position=e.position,lab_science=e.get_inventory(defines.inventory.lab_input).get_item_count("automation-science-pack"),inventory=a.get_inventory(defines.inventory.character_main).get_contents(),operations=remote.call("autorio_operations","status"),admission=remote.call("autorio_operation_admission","status"),humans=#game.connected_players,speed=game.speed}; assert(e.destroy()); rcon.print(helpers.table_to_json(result))'))
+  assert.equal(entityFinal.unit_number, entitySetup.unit_number); assert.deepEqual(entityFinal.position, entitySetup.position)
+  assert.equal(entityFinal.lab_science, 0); assert.deepEqual(entityFinal.inventory, entitySetup.inventory)
+  assert.deepEqual(entityFinal.operations.actor.position, entitySetup.operations.actor.position)
+  assert.equal(entityFinal.admission.high_water, entitySetup.admission.high_water + 18)
+  assert.equal(entityFinal.operations.queue_length, 0); assert.equal(entityFinal.operations.task_state, 'idle')
+  assert.equal(entityFinal.humans, 0); assert.equal(entityFinal.speed, 1)
+  await fsp.writeFile(path.join(results, 'entity-memory-evidence.json'), JSON.stringify({ setup: entitySetup, final: entityFinal,
+    before_restart: entityBeforeRestart, state: entityRestarted.loop.snapshot(), packets: entityPackets }, null, 2))
   const options = { rcon, stateFile: path.join(results, 'pursuit-state.json'), traceFile: path.join(results, 'pursuit-trace.jsonl'),
     campaignBudget: { maxCalls: 500, maxInputChars: 50000000, maxWallMs: 3600000 },
     provider: async (messages, context) => {

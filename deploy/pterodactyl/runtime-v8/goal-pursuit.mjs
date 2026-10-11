@@ -23,6 +23,40 @@ function observationText(raw) {
   try { text = JSON.stringify(JSON.parse(text)) } catch { /* Native serpent text stays verbatim. */ }
   return text.length <= 8000 ? text : `${text.slice(0, 7900)}\n[Native observation truncated; request a narrower read for omitted facts.]`
 }
+// Search hints only: retain where native reads last saw an entity, never its
+// inventory, working state, ownership or continued existence. Empty local
+// scans cannot establish that an older, possibly distant entity disappeared.
+function entityAnchors(rows) {
+  const anchors = []
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (!Number.isSafeInteger(row?.unit_number) || row.unit_number < 1
+      || typeof row.name !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(row.name)
+      || typeof row.type !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(row.type)
+      || !Number.isFinite(row.position?.x) || !Number.isFinite(row.position?.y)
+      || !Number.isSafeInteger(row.observed_at_ms) || row.observed_at_ms < 0) continue
+    const anchor = { unit_number: row.unit_number, name: row.name, type: row.type,
+      position: { x: row.position.x, y: row.position.y }, observed_at_ms: row.observed_at_ms, historical: true }
+    const index = anchors.findIndex(old => old.unit_number === anchor.unit_number)
+    if (index >= 0) anchors.splice(index, 1)
+    anchors.push(anchor)
+    while (anchors.length > 32 || JSON.stringify(anchors).length > 8000) anchors.shift()
+  }
+  return anchors
+}
+function rememberEntities(previous, read, raw, observedAt) {
+  if (!['getEntityStatus', 'getNearbyEntities'].includes(read.name)) return previous
+  let parsed
+  try { parsed = JSON.parse(String(raw)) } catch { return previous }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return previous
+  if (read.name === 'getEntityStatus' && parsed.found === false) {
+    return previous.filter(row => row.unit_number !== read.args.unit_number)
+  }
+  if (read.name === 'getEntityStatus' && read.args.unit_number !== undefined
+    && parsed.entity?.unit_number !== read.args.unit_number) return previous
+  const fresh = read.name === 'getEntityStatus' ? (parsed.found === true ? [parsed.entity] : [])
+    : (Array.isArray(parsed.entities) ? parsed.entities.slice(0, 64) : [])
+  return entityAnchors([...previous, ...fresh.map(row => ({ ...row, observed_at_ms: observedAt }))])
+}
 function rememberRecipeKnowledge(previous, read, raw, observedAt) {
   if (read.name !== 'getRecipeDetails') return previous
   let parsed
@@ -118,6 +152,7 @@ export class GoalPursuit {
     // observation. A restart must obtain fresh targets through bounded tools.
     this.state.observations = []
     this.state.recipeKnowledge = [] // A new process must read its deployed prototypes.
+    this.state.entityKnowledge = entityAnchors(this.state.entityKnowledge)
     delete this.state.knowledgeSeed
     this.adapter = adapter
     this.provider = provider
@@ -238,6 +273,7 @@ export class GoalPursuit {
       const packet = { objective: this.state.objective, predicate: this.state.predicate,
         notes: this.state.notes, actor: this.state.actor, world: world.observation,
         receipts: this.state.history, observations: this.state.observations, recipeKnowledge: this.state.recipeKnowledge,
+        entityKnowledge: this.state.entityKnowledge,
         knowledgeSeed: this.state.knowledgeSeed, verification,
         remainingCalls: budget.maxCalls - budget.calls,
         remainingWallMs: budget.startedAt === null ? budget.maxWallMs : budget.maxWallMs - (packetAt - budget.startedAt) }
@@ -307,6 +343,7 @@ export class GoalPursuit {
           await this.fence(generation)
           const observedAt = this.now()
           this.state.recipeKnowledge = rememberRecipeKnowledge(this.state.recipeKnowledge, read, raw, observedAt)
+          this.state.entityKnowledge = rememberEntities(this.state.entityKnowledge, read, raw, observedAt)
           observations.push({ ...read, result: observationText(raw), observed_at_ms: observedAt, historical: false })
         }
         this.state.observations = rememberObservations(this.state.observations, observations)
