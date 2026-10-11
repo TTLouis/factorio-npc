@@ -4,10 +4,57 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { providerCapabilityProfile, providerRequest } from './provider.mjs'
+import { pursuitProvider } from './pursuit-runtime.mjs'
 
 const config = { base: 'http://proxy.example-tailnet.ts.net:18317/v1', key: 'fixture-key', model: 'gpt-6-luna', profile: 'local' }
 const messages = [{ role: 'system', content: 'Return a strict JSON plan.' }, { role: 'user', content: 'Produce red science.' }]
 const plan = { chatMessage: '', plan: ['Gather iron ore'], currentStep: 0, operations: [{ name: 'gather_resource', args: { resource_name: 'iron-ore', count: 50, search_radius: 256 } }] }
+
+test('owner Luna experiment reaches the actual wire with bounded headroom and correlated evidence', async t => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'luna-profile-'))
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }))
+  const traceFile = path.join(dir, 'wire.jsonl'), captured = []
+  const call = pursuitProvider((history, options) => providerRequest(config, history, {
+    ...options, fetchImpl: gateway(captured, { pauseReason: 'Fixture boundary.' }), promptTraceFile: traceFile,
+  }), async () => {}, { reasoningEffort: 'high', maxOutputTokens: 12000 })
+  const reply = await call({}, { signal: new AbortController().signal, requestId: 'owner_profile_test' })
+  assert.equal(reply.decision.pauseReason, 'Fixture boundary.')
+  assert.equal(captured[0].reasoning_effort, 'high'); assert.equal(captured[0].max_tokens, 12000)
+  assert.equal(captured[0].tools.length, 1); assert.equal(captured[0].tool_choice, 'auto')
+  assert.equal(captured[0].tools[0].function.name, 'submitPursuitDecision')
+  const contract = (await fsp.readFile(traceFile, 'utf8')).trim().split('\n').map(JSON.parse)
+    .find(row => row.event === 'provider.pursuit_wire_contract')
+  assert.equal(contract.request_id, 'owner_profile_test')
+  assert.equal(contract.reason, 'local_openai_pursuit_bounded_decision_tool')
+  assert.equal(contract.selection_reason, 'owner_luna_pursuit_experiment')
+  assert.equal(contract.max_output_tokens, 12000); assert.equal(contract.output_token_field, 'max_tokens')
+  assert.equal(contract.reasoning_effort, 'high')
+})
+
+test('explicit Luna experiment rejects incompatible scope and caps before fetch', async () => {
+  let fetches = 0
+  const options = { allowTools: false, controlProtocol: 'pursuit', pursuitReasoningEffort: 'high',
+    requestBodyPatch: { max_tokens: 12000 }, fetchImpl: async () => { fetches++; throw Error('unexpected fetch') } }
+  for (const [target, override] of [
+    [{ ...config, model: 'gpt-6-sol' }, {}], [{ ...config, profile: 'generic' }, {}],
+    [config, { controlProtocol: 'legacy' }], [config, { allowTools: true }],
+    [config, { pursuitReasoningEffort: 'max' }],
+    [config, { requestBodyPatch: { max_tokens: 16001 } }],
+  ]) await assert.rejects(providerRequest(target, messages, { ...options, ...override }))
+  assert.equal(fetches, 0)
+})
+
+test('owner experiment keeps incomplete response and cancellation guards', async () => {
+  const profile = { reasoningEffort: 'high', maxOutputTokens: 12000 }
+  await assert.rejects(pursuitProvider(async () => ({ content: '{"pauseReason":"truncated"}',
+    _sglunaProvider: { finish_reason: 'length' } }), async () => {}, profile)({},
+  { signal: new AbortController().signal }), /pursuit_provider_incomplete/)
+  let fetches = 0
+  const controller = new AbortController(); controller.abort()
+  await assert.rejects(pursuitProvider(async () => { fetches++ }, async () => {}, profile)({},
+    { signal: controller.signal }), /pursuit_cancelled/)
+  assert.equal(fetches, 0)
+})
 
 // Recorded wire shape: JSON-only replay returned a compact valid plan plus
 // message.images containing a data URL. Capture exceeded 1 MiB. Retaining tools

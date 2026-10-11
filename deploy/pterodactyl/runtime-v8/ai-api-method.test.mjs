@@ -174,6 +174,17 @@ test('the AI status line names the method, host, and models, and never the API k
   assert.equal(soloLine.includes(soloConfig.key), false)
 })
 
+test('owner pursuit provider profile is exact, bounded and environment-only', () => {
+  const approved = { reasoningEffort: 'high', maxOutputTokens: 12000 }
+  assert.equal(configuration({ goalPursuitProvider: approved }, baseEnv()).goalPursuitProvider, undefined)
+  assert.deepEqual(configuration({}, baseEnv({ SGLUNA_GOAL_PURSUIT_PROVIDER: JSON.stringify(approved) })).goalPursuitProvider, approved)
+  for (const raw of [null, [], {}, { reasoningEffort: 'high' }, { ...approved, extra: true },
+    { ...approved, reasoningEffort: 'max' }, { ...approved, maxOutputTokens: 16001 },
+    { ...approved, maxOutputTokens: 3999 }, { ...approved, maxOutputTokens: 4000.5 }]) {
+    assert.throws(() => configuration({}, baseEnv({ SGLUNA_GOAL_PURSUIT_PROVIDER: JSON.stringify(raw) })))
+  }
+})
+
 test('completion trial budget requires deployment environment and keeps bounded limits', () => {
   const approved = { maxCalls: 500, maxInputChars: 50000000, maxWallMs: 3600000 }
   assert.equal(configuration({ goalPursuitBudget: approved }, baseEnv()).goalPursuitBudget, undefined)

@@ -61,12 +61,26 @@ function pursuitPreflight(operation) {
   return `/silent-command rcon.print(helpers.table_to_json(remote.call('autorio_preflight','operation','harvest_natural_product',{product_name=${luaString(operation.args.product_name)},search_radius=${operation.args.search_radius}})))`
 }
 
-export function pursuitProvider(provider, reserve = async () => {}) {
+export function ownerPursuitProvider(raw) {
+  if (raw === undefined) return undefined
+  check(raw && typeof raw === 'object' && !Array.isArray(raw)
+    && Object.keys(raw).length === 2
+    && Object.keys(raw).every(key => ['reasoningEffort', 'maxOutputTokens'].includes(key))
+    && ['medium', 'high'].includes(raw.reasoningEffort)
+    && Number.isSafeInteger(raw.maxOutputTokens) && raw.maxOutputTokens >= 4000 && raw.maxOutputTokens <= 16000,
+  'owner_pursuit_provider_invalid')
+  return Object.freeze({ reasoningEffort: raw.reasoningEffort, maxOutputTokens: raw.maxOutputTokens })
+}
+
+export function pursuitProvider(provider, reserve = async () => {}, profile) {
+  profile = ownerPursuitProvider(profile)
   const call = async (packet, context) => {
     await reserve(context)
     check(!context.signal.aborted, 'pursuit_cancelled')
     const message = await provider(pursuitMessages(packet), { ...context, allowTools: false,
-      controlProtocol: 'pursuit', role: 'planner', triggerSource: 'pursuit', requestBodyPatch: { max_tokens: 4000 } })
+      controlProtocol: 'pursuit', role: 'planner', triggerSource: 'pursuit',
+      ...(profile ? { pursuitReasoningEffort: profile.reasoningEffort } : {}),
+      requestBodyPatch: { max_tokens: profile?.maxOutputTokens ?? 4000 } })
     const calls = message.tool_calls ?? []
     check(Array.isArray(calls) && (calls.length === 0 || (calls.length === 1 && calls[0]?.type === 'function' && calls[0].function?.name === 'submitPursuitDecision')), 'pursuit_wire_tools_refused')
     check(!['length', 'content_filter', 'safety', 'blocked'].includes(message._sglunaProvider?.finish_reason), 'pursuit_provider_incomplete')
@@ -129,10 +143,13 @@ export function ownerPursuitBudget(raw) {
 }
 
 export class PursuitRuntime {
-  constructor({ rcon, provider, reserve, stateFile, traceFile, ownerGoal, campaignBudget, npcId = 'sgluna', onActivity = () => {}, now = Date.now }) {
+  constructor({ rcon, provider, reserve, stateFile, traceFile, ownerGoal, campaignBudget, providerProfile, npcId = 'sgluna', onActivity = () => {}, now = Date.now }) {
     Object.assign(this, { rcon, stateFile, traceFile, ownerGoal, npcId, onActivity, now })
     this.campaignBudget = ownerPursuitBudget(campaignBudget)
-    this.provider = pursuitProvider(provider, reserve)
+    this.providerProfile = ownerPursuitProvider(providerProfile)
+    this.rawProvider = provider
+    this.reserve = reserve
+    this.provider = pursuitProvider(provider, reserve, this.providerProfile)
     this.authorization = createEmptyAuthorization()
     this.archives = []
     this.loop = null
@@ -169,6 +186,7 @@ export class PursuitRuntime {
 
   async persistState(current = this.loop?.snapshot()) {
     const envelope = { version: 1, current: current ?? null, budget: current?.budget ?? this.budget ?? null,
+      providerProfile: this.providerProfile ?? null,
       authorization: copy(this.authorization), archives: copy(this.archives) }
     const write = this.saveQueue.then(() => durableWrite(this.stateFile, envelope))
     this.saveQueue = write // A storage failure poisons later writes; no provider dispatch follows.
@@ -208,12 +226,20 @@ export class PursuitRuntime {
         'pursuit_reservations_corrupt')
       this.archives = envelope.archives
       this.budget = envelope.budget
+      // An older ledger has the original medium/4000 profile. Environment
+      // changes never alter a durable campaign, its pending receipt or budget.
+      const pinned = ownerPursuitProvider(envelope.providerProfile ?? undefined)
+      const drift = JSON.stringify(pinned) !== JSON.stringify(this.providerProfile)
+      this.providerProfile = pinned
+      this.provider = pursuitProvider(this.rawProvider, this.reserve, pinned)
       check(!envelope.budget || envelope.current, 'pursuit_campaign_without_current_state')
       if (envelope.current) {
         check(JSON.stringify(envelope.budget) === JSON.stringify(envelope.current.budget), 'pursuit_campaign_budget_mismatch')
         this.install(envelope.current) // Validates restored budget; never falls back to a new allowance.
         check(sanitizeGoalDefinition(envelope.current.predicate, { trusted: true }).done_when.length > 0, 'pursuit_predicate_invalid')
       }
+      if (drift) await this.traceEvent('pursuit.provider_profile_retained', {
+        reason: 'durable_campaign_provider_profile_wins', provider_profile: pinned ?? null })
     }
     this.loaded = true
   }

@@ -1371,6 +1371,7 @@ export async function providerRequest(config, messages, {
   triggerSource,
   role,
   controlProtocol = 'legacy',
+  pursuitReasoningEffort,
 } = {}) {
   check(['legacy', 'pursuit'].includes(controlProtocol), 'Invalid provider control protocol')
   const pursuit = controlProtocol === 'pursuit'
@@ -1395,6 +1396,12 @@ export async function providerRequest(config, messages, {
   const roleToolDefinitions = executorRound ? executorProviderToolDefinitions : toolDefinitions
   const compactedMessages = compactContinuation ? compactCompletionMessages(messages, { role: executorRound ? EXECUTOR_ROLE : undefined }) : messages
   const capability = providerCapabilityProfile(config)
+  if (pursuitReasoningEffort !== undefined) {
+    check(pursuit && allowTools === false && capability.id === 'local' && config.model === 'gpt-6-luna'
+      && ['medium', 'high'].includes(pursuitReasoningEffort), 'Invalid owner Luna pursuit reasoning profile')
+    check(Number.isSafeInteger(requestBodyPatch?.max_tokens) && requestBodyPatch.max_tokens >= 4000
+      && requestBodyPatch.max_tokens <= 16000, 'Invalid owner Luna pursuit output cap')
+  }
   check(!allowTools || capability.tool_support === true, 'Provider profile does not allow tool calls')
   const disableThinking = compactContinuation && capability.thinking_control === 'deepseek'
   const compactReasoningDisabled = outputBudgetRecovery && capability.reasoning_effort === true
@@ -1442,7 +1449,7 @@ export async function providerRequest(config, messages, {
   if (pursuitClosedTools) {
     body.tools = [pursuitDecisionToolDefinition]
     body.tool_choice = 'auto'
-    body.reasoning_effort = 'medium'
+    body.reasoning_effort = pursuitReasoningEffort ?? 'medium'
   }
   applyRequestBodyPatch(body, requestBodyPatch, capability)
   const requestedOutputCap = body[capability.token_field]
@@ -1481,6 +1488,9 @@ export async function providerRequest(config, messages, {
       tool_choice: body.tool_choice,
       response_format: body.response_format?.type ?? 'unspecified',
       reasoning_effort: body.reasoning_effort,
+      output_token_field: capability.token_field,
+      max_output_tokens: requestedOutputCap,
+      selection_reason: pursuitReasoningEffort === undefined ? 'existing_pursuit_default' : 'owner_luna_pursuit_experiment',
       allowed_decision_fields: ['notes', 'operations', 'observations', 'pauseReason'],
       allowed_operation_names: body.tools?.[0]?.function?.parameters?.properties?.decision?.properties?.operations?.items?.properties?.name?.enum,
     }, traceOptions)

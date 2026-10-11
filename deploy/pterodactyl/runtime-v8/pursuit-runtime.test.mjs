@@ -381,6 +381,52 @@ test('deployment campaign limits allow a bounded completion trial and preserve d
   }
 })
 
+test('provider profile is durable before reservation and survives restart and replacement without budget reset', async t => {
+  const high = { reasoningEffort: 'high', maxOutputTokens: 12000 }
+  for (const initial of [undefined, high]) {
+    const f = await fixture(t, [{ pauseReason: 'Boundary.' }, { pauseReason: 'Replacement.' }])
+    const first = new PursuitRuntime({ ...f.options, providerProfile: initial, reserve: async () => {
+      const stored = JSON.parse(await fsp.readFile(f.options.stateFile, 'utf8'))
+      assert.deepEqual(stored.providerProfile, initial ?? null)
+      assert.equal(stored.budget.calls, 1)
+    } })
+    f.setAgent(first); await first.request(goal.objective)
+    const original = first.loop.snapshot()
+    const restarted = new PursuitRuntime({ ...f.options, providerProfile: initial ? undefined : high })
+    f.setAgent(restarted); await restarted.loadPersistentState()
+    assert.deepEqual(restarted.providerProfile, initial)
+    assert.deepEqual(restarted.loop.snapshot().budget, original.budget)
+    assert.deepEqual(restarted.loop.snapshot().pending, original.pending)
+    assert.equal(restarted.loop.snapshot().request_id, original.request_id)
+    await restarted.request(JSON.stringify({ ...goal, objective: 'Replacement goal with original campaign profile.' }))
+    assert.equal(f.requests.at(-1).context.pursuitReasoningEffort, initial?.reasoningEffort)
+    assert.equal(f.requests.at(-1).context.requestBodyPatch.max_tokens, initial?.maxOutputTokens ?? 4000)
+    const next = restarted.loop.snapshot().budget
+    assert.equal(next.calls, original.budget.calls + 1)
+    assert.equal(next.startedAt, original.budget.startedAt)
+    assert.equal(next.maxCalls, original.budget.maxCalls); assert.equal(next.maxWallMs, original.budget.maxWallMs)
+    assert.equal(next.maxInputChars, original.budget.maxInputChars); assert(next.inputChars > original.budget.inputChars)
+    const rows = (await fsp.readFile(f.options.traceFile, 'utf8')).trim().split('\n').map(JSON.parse)
+    assert(rows.some(row => row.event === 'pursuit.provider_profile_retained' && row.request_id === original.request_id
+      && row.reason === 'durable_campaign_provider_profile_wins'))
+  }
+})
+
+test('older ledger and uncertain receipt never inherit a new provider profile', async t => {
+  const f = await fixture(t); f.failSend(); await f.agent.request(goal.objective)
+  const stored = JSON.parse(await fsp.readFile(f.options.stateFile, 'utf8'))
+  delete stored.providerProfile
+  await fsp.writeFile(f.options.stateFile, JSON.stringify(stored))
+  const restarted = new PursuitRuntime({ ...f.options, providerProfile: { reasoningEffort: 'high', maxOutputTokens: 12000 } })
+  await restarted.loadPersistentState()
+  assert.equal(restarted.providerProfile, undefined)
+  assert.deepEqual(restarted.loop.snapshot().pending, stored.current.pending)
+  assert.deepEqual(restarted.loop.snapshot().budget, stored.current.budget)
+  const calls = f.requests.length
+  await restarted.request('Resume')
+  assert.equal(f.requests.length, calls)
+})
+
 test('fresh deployment limits never replenish a persisted campaign on restart or new goal', async t => {
   for (const initial of [undefined, { maxCalls: 60, maxInputChars: 4000000 },
     { maxCalls: 120, maxInputChars: 12000000, maxWallMs: 3600000 },

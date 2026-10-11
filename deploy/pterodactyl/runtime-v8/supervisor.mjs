@@ -1,5 +1,5 @@
 import fsp from 'node:fs/promises'
-import { PursuitRuntime, ownerPursuitGoal, ownerPursuitBudget } from './pursuit-runtime.mjs'
+import { PursuitRuntime, ownerPursuitGoal, ownerPursuitBudget, ownerPursuitProvider } from './pursuit-runtime.mjs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -214,6 +214,7 @@ export function configuration(raw = {}, env = process.env) {
     goalPursuitMode,
     goalPursuitGoal: env.SGLUNA_GOAL_PURSUIT_GOAL ? ownerPursuitGoal(JSON.parse(env.SGLUNA_GOAL_PURSUIT_GOAL)) : undefined,
     goalPursuitBudget: env.SGLUNA_GOAL_PURSUIT_BUDGET === undefined ? undefined : ownerPursuitBudget(JSON.parse(env.SGLUNA_GOAL_PURSUIT_BUDGET)),
+    goalPursuitProvider: env.SGLUNA_GOAL_PURSUIT_PROVIDER === undefined ? undefined : ownerPursuitProvider(JSON.parse(env.SGLUNA_GOAL_PURSUIT_PROVIDER)),
     aiApiMethodOverridesProfile,
     overriddenProviderProfile: aiApiMethodOverridesProfile ? overriddenProviderProfile : undefined,
     key: env.OPENAI_API_KEY ?? '',
@@ -2819,6 +2820,7 @@ export class Session {
       traceFile: path.join(this.root, 'logs', 'sgluna-pursuit.jsonl'),
       ownerGoal: this.config.goalPursuitGoal,
       campaignBudget: this.config.goalPursuitBudget,
+      providerProfile: this.config.goalPursuitProvider,
       provider: (messages, context) => this.roleProvider(messages, context),
       interactionProvider: (messages, context) => this.roleProvider(messages, context),
       agentRoleConfig: this.config, // names the planner/executor models for the loop's role tagging (agent-roles.mjs)
