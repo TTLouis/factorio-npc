@@ -357,6 +357,52 @@ test('whole-envelope refusal feedback reaches the next charged decision without 
   assert.equal(f.sent.length, 1); assert.equal(f.loop.snapshot().budget.calls, 2)
 })
 
+test('native seed consumes durable wall time before one charged decision and exposes only bounded prototype rules', async () => {
+  const f = fixture({ provider: async packet => {
+    assert.equal(packet.remainingWallMs, 1199990)
+    assert.equal(packet.recipeKnowledge[0].name, 'native-part')
+    assert.equal(packet.recipeKnowledge[0].ingredients[0].amount, 2)
+    assert.equal(packet.recipeKnowledge[0].enabled, undefined)
+    assert.equal(packet.knowledgeSeed.recipe_reads, 1)
+    assert.equal(packet.knowledgeSeed.historical, true)
+    return action
+  } })
+  let seeds = 0
+  f.adapter.seedKnowledge = async (_predicate, read) => {
+    seeds++; await read({ name: 'getRecipeDetails', args: { item_or_recipe: 'native-part' } })
+    return { recipe_reads: 1 }
+  }
+  f.adapter.observe = async () => {
+    assert.equal(f.saved.at(-1).budget.startedAt, 1000)
+    f.advance(10)
+    return JSON.stringify({ found: true, recipes: [{ name: 'native-part', enabled: true,
+      ingredients: [{ name: 'native-ore', amount: 2 }], products: [{ name: 'native-part', amount: 1 }] }] })
+  }
+  await f.loop.wake('seed')
+  assert.equal(seeds, 1); assert.equal(f.calls(), 1); assert.equal(f.sent.length, 1)
+  assert(f.events.some(row => row.event === 'pursuit.knowledge_seeded' && row.request_id && row.reason))
+  await f.loop.wake('pending')
+  assert.equal(seeds, 1); assert.equal(f.calls(), 1)
+})
+
+test('expired seed reads suppress provider and admission without resetting the campaign start', async () => {
+  const f = fixture({ options: { maxWallMs: 10 } })
+  f.adapter.seedKnowledge = async (_predicate, read) => read({ name: 'getRecipeDetails', args: { item_or_recipe: 'native-part' } })
+  f.adapter.observe = async () => { f.advance(11); return '{}' }
+  const result = await f.loop.wake('seed')
+  assert.equal(result.pauseReason, 'wall_budget_exhausted')
+  assert.equal(result.budget.startedAt, 1000); assert.equal(result.budget.calls, 0); assert.equal(f.calls(), 0); assert.equal(f.sent.length, 0)
+})
+
+test('a clock regression during a seed read cannot extend the persisted allowance', async () => {
+  const f = fixture()
+  f.adapter.seedKnowledge = async (_predicate, read) => read({ name: 'getRecipeDetails', args: { item_or_recipe: 'native-part' } })
+  f.adapter.observe = async () => { f.advance(-1); return '{}' }
+  const result = await f.loop.wake('seed')
+  assert.equal(result.pauseReason, 'wall_clock_regressed'); assert.equal(result.budget.startedAt, 1000)
+  assert.equal(result.budget.calls, 0); assert.equal(f.calls(), 0); assert.equal(f.sent.length, 0)
+})
+
 test('native recipe rules and exact submitted quantities survive settlement without retaining mutable reads or replaying', async () => {
   let turn = 0
   const packets = []

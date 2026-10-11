@@ -109,11 +109,13 @@ export class GoalPursuit {
     // observation. A restart must obtain fresh targets through bounded tools.
     this.state.observations = []
     this.state.recipeKnowledge = [] // A new process must read its deployed prototypes.
+    delete this.state.knowledgeSeed
     this.adapter = adapter
     this.provider = provider
     this.now = now
     this.busy = false
     this.generation = 0
+    this.knowledgeSeeded = false
   }
 
   snapshot() { return clone(this.state) }
@@ -187,15 +189,47 @@ export class GoalPursuit {
         return this.snapshot()
       }
       const budget = this.state.budget
-      const packetAt = this.now()
+      let packetAt = this.now()
       if (budget.startedAt !== null && packetAt < budget.startedAt) return this.pause('wall_clock_regressed')
       if (budget.startedAt !== null && packetAt - budget.startedAt >= budget.maxWallMs) return this.pause('wall_budget_exhausted')
       if (budget.calls >= budget.maxCalls) return this.pause('call_budget_exhausted')
+      if (!this.knowledgeSeeded && typeof this.adapter.seedKnowledge === 'function') {
+        // Native seed reads consume the original wall allowance, including on
+        // restart. Every read is fenced; none can run while a batch is pending.
+        budget.startedAt ??= this.now()
+        await this.save()
+        const report = await this.adapter.seedKnowledge(clone(this.state.predicate), async read => {
+          await this.fence(generation)
+          if (this.now() < budget.startedAt) throw new Error('wall_clock_regressed')
+          if (this.now() - budget.startedAt >= budget.maxWallMs) throw new Error('wall_budget_exhausted')
+          const raw = await this.adapter.observe(clone(read))
+          await this.fence(generation)
+          if (this.now() < budget.startedAt) throw new Error('wall_clock_regressed')
+          if (this.now() - budget.startedAt >= budget.maxWallMs) throw new Error('wall_budget_exhausted')
+          if (read.name === 'getRecipeDetails') {
+            this.state.recipeKnowledge = rememberRecipeKnowledge(this.state.recipeKnowledge, read, raw, this.now())
+          } else {
+            this.state.observations = rememberObservations(this.state.observations, [{ ...clone(read),
+              result: observationText(raw), observed_at_ms: this.now(), historical: false }])
+          }
+          await this.save()
+          return raw
+        })
+        this.knowledgeSeeded = true
+        this.state.knowledgeSeed = { ...clone(report), observed_at_ms: this.now(), historical: true }
+        await this.save()
+        await this.event('pursuit.knowledge_seeded', 'trusted_predicate_native_dependencies', report)
+      }
+      world = await this.fence(generation)
+      packetAt = this.now()
+      if (budget.startedAt !== null && packetAt < budget.startedAt) return this.pause('wall_clock_regressed')
+      if (budget.startedAt !== null && packetAt - budget.startedAt >= budget.maxWallMs) return this.pause('wall_budget_exhausted')
       // Compact from durable facts each time, never a model-generated summary
       // of receipt history. Strategy is explicitly non-authoritative.
       const packet = { objective: this.state.objective, predicate: this.state.predicate,
         notes: this.state.notes, actor: this.state.actor, world: world.observation,
-        receipts: this.state.history, observations: this.state.observations, recipeKnowledge: this.state.recipeKnowledge, verification,
+        receipts: this.state.history, observations: this.state.observations, recipeKnowledge: this.state.recipeKnowledge,
+        knowledgeSeed: this.state.knowledgeSeed, verification,
         remainingCalls: budget.maxCalls - budget.calls,
         remainingWallMs: budget.startedAt === null ? budget.maxWallMs : budget.maxWallMs - (packetAt - budget.startedAt) }
       const inputChars = this.provider.inputChars ? this.provider.inputChars(clone(packet)) : JSON.stringify(packet).length

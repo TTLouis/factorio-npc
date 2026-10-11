@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 umask 077
 REF="250fb503529637dd430299cf0010e9c498897646"
-EXPECTED_SOURCE_SHA256="d1865a8e48277a6890c313fed8feb04afa70b5233b9de6855021a7e5143ab238"
+EXPECTED_SOURCE_SHA256="e77c46114e73b2042439cc1e3cd855698009822acd404fc8ea286a7310039faf"
 URL="https://raw.githubusercontent.com/TTLouis/factorio-npc/$REF/deploy/pterodactyl/payload-src/installer.sh"
 TMP="$(mktemp)"
 log() { printf '[SGLuna bootstrap] %s\n' "$*"; }
