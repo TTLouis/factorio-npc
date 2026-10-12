@@ -52,6 +52,7 @@ export interface OperationAdmission extends OperationCorrelation {
 export const PURE_SUBMIT_OPERATIONS = [
   'place_entity', 'mine_entity', 'mine_entity_exact', 'mine_resource_at', 'rotate_entity', 'move_items', 'move_items_exact',
   'move_items_with_player', 'set_machine_recipe', 'launch_rocket', 'wait', 'craft_item',
+  'harvest_product',
 ]
 declare const storage: { sgluna_operation_admissions?: OperationAdmission[], sgluna_operation_admission_high_water?: number,
   sgluna_task_receipt_journal?: TaskBatchReceipt[], sgluna_task_batch_generation?: number }

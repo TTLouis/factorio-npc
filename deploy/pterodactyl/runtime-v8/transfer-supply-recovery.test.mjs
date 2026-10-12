@@ -703,7 +703,6 @@ test('a placement refusal with no earlier supplier passes the mod code through t
 
 for (const refusal of [
   { operation: 'harvest_product', args: { product_name: 'wood', count: 4, search_radius: 64 }, code: 'natural_harvest_source_not_found', extra: { search_radius: 64 } },
-  { operation: 'harvest_product', args: { product_name: 'stone-furnace', count: 1, search_radius: 64 }, code: 'no_natural_harvest_source', extra: {} },
   { operation: 'gather_resource', args: { resource_name: 'iron-ore', count: 5, search_radius: 64 }, code: 'resource_source_not_found', extra: { identity: 'iron-ore', search_radius: 64 } },
   { operation: 'walk_to_entity', args: { entity_name: 'stone-furnace', search_radius: 64 }, code: 'navigation_target_not_found', extra: { identity: 'stone-furnace', search_radius: 64 } },
   { operation: 'supply_entity', args: COAL_SUPPLY.args, code: 'supply_destination_conflict', extra: { identity: 15 } },

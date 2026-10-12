@@ -154,15 +154,23 @@ test('gather_resource tree identity is rejected deterministically before mutatio
   assert.equal(memory.currentPlan('npc:sgluna').status, 'blocked')
 })
 
-test('a reach inside a furnace collision box is an argument error: one bounded correction turn, then admission', async () => {
+for (const { label, operation, code } of [
+  { label: 'a reach inside a furnace collision box', code: 'navigation_position_inside_furnace_collision',
+    operation: { name: 'walk_to_position', args: { x: 2, y: 0, reach_distance: 0.75 } } },
+  // The candidate set expired or the spot stopped being placeable: re-fetching candidates is the correction.
+  { label: 'an expired placement candidate', code: 'placement_candidate_unavailable',
+    operation: { name: 'place_candidate', args: { candidate_set_id: 'placement-1', candidate_id: 'candidate-1' } } },
+  { label: 'a product no natural source yields', code: 'no_natural_harvest_source',
+    operation: { name: 'harvest_product', args: { product_name: 'stone-furnace', count: 1, search_radius: 64 } } },
+]) test(`${label} is an argument error: one bounded correction turn, then admission`, async () => {
   const rcon = new RuntimeRcon()
   const command = rcon.command.bind(rcon)
-  rcon.command = async text => text.includes('remote.call("autorio_preflight","operation"') && text.includes("'walk_to_position'")
-    ? JSON.stringify({ ok: false, code: 'navigation_position_inside_furnace_collision', operation: 'walk_to_position', minimum_collision_clearance: 1.2 })
+  rcon.command = async text => /autorio_preflight['"],['"]operation/.test(text) && text.includes(`'${operation.name}'`)
+    ? JSON.stringify({ ok: false, code, operation: operation.name })
     : command(text)
   const memory = new NpcDialogueMemory()
   const replies = [
-    planMessage([{ name: 'walk_to_position', args: { x: 2, y: 0, reach_distance: 0.75 } }]),
+    planMessage([operation]),
     planMessage([{ name: 'wait', args: { ticks: 60 } }]),
   ]
   const harness = []
@@ -178,18 +186,19 @@ test('a reach inside a furnace collision box is an argument error: one bounded c
   const traced = []
   const trace = agent.traceEvent.bind(agent)
   agent.traceEvent = async (event, data) => {
-    traced.push({ event, data })
+    traced.push({ event, data, request_id: agent.traceRequest?.id })
     return trace(event, data)
   }
 
-  await agent.request('stand next to the furnace', { sender: 'tester' })
-  assert.ok(harness.some(content => /rejected operation 1 \(walk_to_position\).*code navigation_position_inside_furnace_collision/.test(content)))
+  await agent.request('do the next thing', { sender: 'tester' })
+  assert.ok(harness.some(content => content.includes(`rejected operation 1 (${operation.name})`) && content.includes(`code ${code}`)))
   const recoverable = traced.filter(row => row.event === 'operations.preflight_recoverable')
   assert.equal(recoverable.length, 1)
-  assert.equal(recoverable[0].data.failure_class, 'model_correctable_navigation_position_inside_furnace_collision')
+  assert.equal(recoverable[0].data.failure_class, `model_correctable_${code}`)
   assert.equal(recoverable[0].data.retry, 1)
+  assert.ok(recoverable[0].request_id, 'the recoverable trace row carries request_id')
   assert.equal(rcon.mutations.length, 1)
-  assert.doesNotMatch(rcon.mutations[0], /walk_to_position/)
+  assert.doesNotMatch(rcon.mutations[0], new RegExp(operation.name))
   assert.notEqual(memory.currentPlan('npc:sgluna').status, 'blocked')
 })
 

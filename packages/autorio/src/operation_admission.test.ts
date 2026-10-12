@@ -165,6 +165,12 @@ describe('durable operation admission', () => {
       expect(pinned_operation_batch_refs()).toEqual([])
       expect((globalThis as any).log).toHaveBeenCalledWith('[AUTORIO] operation.admission.refused request_id=request operation_key=request/operation reason=refused_before_mutation')
     })
+    it('settles a returned harvest_product refusal as failed: its submit validates, then queues', () => {
+      const { admission } = setup()
+      admission.slot(identity.operation_key, 1, { ...refusal, operation: 'harvest_product', error: 'no natural (tree or rock) prototypes currently yield stone-furnace' })
+      admission.finish(identity.operation_key, { ok: false, error: 'autorio rejected operation 1' })
+      expect(admission.status().records[0]).toMatchObject({ state: 'failed', proven_refusal: true, slots: [{ refused_before_mutation: true }] })
+    })
     it('keeps a thrown error uncertain because it may have changed something before throwing', () => {
       const { admission } = setup()
       admission.slot(identity.operation_key, 1, { ok: false, operation: 'craft_item', error: 'boom', batch_refs: [] })

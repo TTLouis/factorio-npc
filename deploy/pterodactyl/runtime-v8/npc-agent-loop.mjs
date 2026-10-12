@@ -234,7 +234,10 @@ const RESEARCH_PREFLIGHT_RECOVERABLE_CODES = new Set(['missing_prerequisites', '
 // radius/position/count arguments are argument errors of the same kind.
 const MODEL_CORRECTABLE_PREFLIGHT_CODES = new Set(['unknown_prototype', 'unknown_recipe', 'invalid_unit_number', 'invalid_target_kind', 'invalid_preflight_args',
   'not_recipe_machine', 'navigation_position_inside_furnace_collision', 'invalid_navigation_position', 'invalid_navigation_reach_distance',
-  'invalid_navigation_search_radius', 'invalid_harvest_search_radius', 'invalid_resource_count', 'invalid_resource_position', 'invalid_resource_search_radius'])
+  'invalid_navigation_search_radius', 'invalid_harvest_search_radius', 'invalid_resource_count', 'invalid_resource_position', 'invalid_resource_search_radius',
+  // An expired or no-longer-placeable candidate is corrected by fetching fresh candidates; a
+  // product no tree or rock prototype yields is a wrong product name, like an unknown recipe.
+  'placement_candidate_unavailable', 'no_natural_harvest_source'])
 const MODEL_CORRECTABLE_PREFLIGHT_RETRY_BUDGET = 1
 // MW1: operation-level authorization refusals. A protected, reserved or player-inventory target is something the model can
 // route around inside its grant (one retry); a stale grant is not (it ends the request like any other blocker).

@@ -479,6 +479,31 @@ async function main() {
     evidence.occluded_tree = { setup, final }
   }
 
+  // 1efbdefc: stone comes from rocks, so a neutral simple-entity must pass the same last_user and
+  // force guards as a tree and be harvested natively.
+  {
+    await clearNaturals()
+    await clearStock()
+    const setup = await lua('local name; for _,n in pairs({"big-rock","huge-rock","big-sand-rock"}) do if prototypes.entity[n] then name=n break end end; assert(name); '
+      + 'local s=a.surface; local p=s.find_non_colliding_position(name,{a.position.x+3,a.position.y},8,0.5); assert(p); local r=s.create_entity{name=name,position=p,force="neutral"}; assert(r); '
+      + 'local ok,u=pcall(function() return r.last_user end); storage.native_admission_rock=r; '
+      + 'rcon.print(helpers.table_to_json({name=name,type=r.type,force=r.force.name,last_user_readable=ok,has_last_user=u~=nil,stone=a.get_item_count("stone")}))')
+    assert.equal(setup.type, 'simple-entity')
+    assert.equal(setup.force, 'neutral')
+    assert(setup.last_user_readable && !setup.has_last_user, JSON.stringify(setup))
+    const present = await preflight('harvest_product', '{product_name="stone",search_radius=8}')
+    assert.equal(present.ok, true, JSON.stringify(present))
+    assert.equal(present.natural_source.name, setup.name)
+    await runOperation('harvest_product', { product_name: 'stone', count: 1, search_radius: 8 })
+    const final = await lua('local r=storage.native_admission_rock; local out={rock=r.valid,stone=a.get_item_count("stone"),humans=#game.connected_players,speed=game.speed}; '
+      + `if r.valid then r.destroy() end; storage.native_admission_rock=nil; ${MAIN}.clear(); rcon.print(helpers.table_to_json(out))`)
+    assert.equal(final.rock, false, 'the natural rock was the harvested entity')
+    assert(final.stone >= setup.stone + 1)
+    assert.equal(final.humans, 0)
+    assert.equal(final.speed, 1)
+    evidence.natural_rock = { setup, present, final }
+  }
+
   await fsp.writeFile(path.join(results, 'native-admission-engine.json'), JSON.stringify({
     status: 'pass', scenario: 'native-admission-preflights-and-natural-harvest', candidate_sha: process.env.NPC_TEST_CANDIDATE_SHA,
     provider_mode: 'scripted', evidence,
