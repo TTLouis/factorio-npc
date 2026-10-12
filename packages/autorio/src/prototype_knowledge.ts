@@ -1,6 +1,7 @@
 import type { ControlledActor } from './actors/types'
 import { get_actor_inventory_items } from './utils/inventory'
 import * as rates from './production_rates'
+import { is_placed_building_prototype } from './mining_reach'
 
 const MAX_PLACE_ITEMS = 4
 const MAX_FLUIDBOX_PROTOTYPES = 8
@@ -206,14 +207,15 @@ function yields_item_product(prototype: any, product_name: string) {
   return false
 }
 
-// Harvest sources are map-generated trees and rocks only. Any other entity that
+// Harvest sources are map-generated trees and rocks only (rocks are is_building, but
+// have no owner or placing item). Any other entity that
 // merely yields the product when mined (a furnace, a chest, a belt) is a
 // player- or NPC-built asset and must never be a harvest target.
 export function natural_harvest_source_names(product_name: string) {
   const names: string[] = []
   if (!prototypes.item[product_name]) return names
   for (const [name, prototype] of pairs(prototypes.entity)) {
-    if (!prototype || (prototype.type !== 'tree' && prototype.type !== 'simple-entity') || prototype.is_building) continue
+    if (!prototype || (prototype.type !== 'tree' && prototype.type !== 'simple-entity') || is_placed_building_prototype(prototype)) continue
     if (yields_item_product(prototype, product_name)) names.push(name)
   }
   return sort_strings(names)

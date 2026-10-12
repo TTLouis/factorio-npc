@@ -1,4 +1,4 @@
-import type { LuaEntity } from 'factorio:runtime'
+import type { LuaEntity, LuaEntityPrototype } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 
 const MINING_REACH_MARGIN = 0.25
@@ -12,12 +12,17 @@ function squared_distance(a: { x: number, y: number }, b: { x: number, y: number
   return (a.x - b.x) ** 2 + (a.y - b.y) ** 2
 }
 
-export function is_placed_building_entity(entity: LuaEntity) {
-  const prototype = entity.prototype
+// The engine marks every SimpleEntityPrototype as a building, so map rocks have
+// is_building true. A placed building is one that also has an owner or a placing item.
+export function is_placed_building_prototype(prototype: LuaEntityPrototype) {
   const place_items = prototype.items_to_place_this
   return prototype.is_building === true
     && (prototype.is_entity_with_owner === true
       || (place_items !== undefined && place_items.length > 0))
+}
+
+export function is_placed_building_entity(entity: LuaEntity) {
+  return is_placed_building_prototype(entity.prototype)
 }
 
 function finite_world_mining_target(entity: LuaEntity) {

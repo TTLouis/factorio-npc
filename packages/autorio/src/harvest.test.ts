@@ -13,7 +13,8 @@ function mineable(name: string, type: string, product: string, amount: number, x
   const prototype = {
     name,
     type,
-    is_building: false,
+    // The engine marks every simple-entity (map rocks) as a building.
+    is_building: type === 'simple-entity',
     mineable_properties: {
       minable: true,
       mining_time: 0.5,
@@ -179,13 +180,25 @@ describe('product-oriented finite harvesting', () => {
     expect(f.harvest.submit('stone-furnace', 1, 64)[0]).toBe(false)
     expect(f.manager.get_status_snapshot().queue_length).toBe(0)
     expect(natural_harvest_source_names('stone')).toEqual(['mod-rock-a', 'mod-rock-b'])
+    ;(globalThis as any).prototypes.entity['mod-placed-stone'] = {
+      ...mineable('mod-placed-stone', 'simple-entity', 'stone', 1, 9).prototype,
+      items_to_place_this: [{ name: 'stone', count: 1 }],
+    }
+    expect(natural_harvest_source_names('stone')).toEqual(['mod-rock-a', 'mod-rock-b'])
   })
 
   it('natural-only source guards refuse buildings, non-neutral assets and unreadable provenance', () => {
     const f = fixture()
     expect(is_unowned_natural_harvest_source(f.treeA)).toBe(true)
+    expect(f.rockA.prototype.is_building).toBe(true)
+    expect(is_unowned_natural_harvest_source(f.rockA)).toBe(true)
     f.treeA.prototype.is_building = true
+    f.treeA.prototype.items_to_place_this = [{ name: 'mod-tree-a', count: 1 }]
     expect(is_unowned_natural_harvest_source(f.treeA)).toBe(false)
+    f.treeA.prototype.items_to_place_this = undefined
+    f.treeA.prototype.is_entity_with_owner = true
+    expect(is_unowned_natural_harvest_source(f.treeA)).toBe(false)
+    f.treeA.prototype.is_entity_with_owner = false
     f.treeA.prototype.is_building = false
     f.treeA.force = { name: 'player' }
     expect(is_unowned_natural_harvest_source(f.treeA)).toBe(false)

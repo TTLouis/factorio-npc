@@ -1,6 +1,6 @@
 import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
-import { MAX_MINING_START_REJECTIONS, mining_navigation_reach, mining_navigation_requires_movement, mining_target_selected, select_exact_mining_target, within_mining_reach } from './mining_reach'
+import { is_placed_building_entity, MAX_MINING_START_REJECTIONS, mining_navigation_reach, mining_navigation_requires_movement, mining_target_selected, select_exact_mining_target, within_mining_reach } from './mining_reach'
 import { natural_harvest_source_names } from './prototype_knowledge'
 import type { new_task_manager } from './task_manager'
 import type { PlayerParametersHarvestProduct, PlayerParametersWalkToEntity } from './types'
@@ -20,7 +20,7 @@ const SEARCH_RESULT_LIMIT = 32
 // Unsupported last_user reads fail closed instead of implying map ownership.
 export function is_unowned_natural_harvest_source(entity: LuaEntity | null | undefined) {
   if (!entity || !entity.valid || (entity.type !== 'tree' && entity.type !== 'simple-entity')
-    || entity.prototype.is_building || entity.force?.name !== 'neutral') return false
+    || is_placed_building_entity(entity) || entity.force?.name !== 'neutral') return false
   if (typeof pcall === 'function') {
     const [ok, user] = pcall(() => entity.last_user)
     return ok && !user
