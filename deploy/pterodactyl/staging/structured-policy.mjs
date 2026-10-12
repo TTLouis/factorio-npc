@@ -121,7 +121,7 @@ const OPERATION_METADATA = Object.freeze({
     },
   }),
   walk_to_position: operationMetadata(['navigation'], {
-    preflight: false,
+    preflight: true,
     risk: 'low',
     arguments: {
       x: argumentMetadata('planner_numeric'),

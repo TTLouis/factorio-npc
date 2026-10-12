@@ -325,6 +325,114 @@ describe('operation_preflight wiring (autorio_preflight.operation)', () => {
     return base as LuaEntity
   }
 
+  it.each(['furnace', 'container', 'mining-drill'])('refuses setting a recipe on a %s before any recipe or inventory read', (type) => {
+    const target: any = exact(15)
+    target.type = type
+    current_target = target
+    Object.defineProperty(held.actor.force, 'recipes', { get: () => { throw new Error('must not read recipes') } })
+    const inventory_calls = (held.main.get_item_count as any).mock.calls.length
+
+    expect(preflight('set_machine_recipe', { unit_number: 15, recipe_name: 'iron-plate' }))
+      .toMatchObject({ ok: false, code: 'not_recipe_machine', operation: 'set_machine_recipe',
+        identity: 15, observed_type: type, expected_type: 'assembling-machine', target: { unit_number: 15 } })
+    expect((held.main.get_item_count as any).mock.calls.length).toBe(inventory_calls)
+  })
+
+  it('keeps recipe preflight available for an exact assembling machine and preserves unknown-recipe refusal', () => {
+    const target: any = exact(15)
+    target.type = 'assembling-machine'
+    target.name = 'assembling-machine-1'
+    current_target = target
+    ;(held.actor.force as any).recipes = { 'iron-gear-wheel': { name: 'iron-gear-wheel' } }
+    expect(preflight('set_machine_recipe', { unit_number: 15, recipe_name: 'iron-gear-wheel' }))
+      .toMatchObject({ ok: true, recipe_name: 'iron-gear-wheel', target: { unit_number: 15, name: 'assembling-machine-1' } })
+    expect(preflight('set_machine_recipe', { unit_number: 15, recipe_name: '__absent__' }))
+      .toMatchObject({ ok: false, code: 'unknown_recipe' })
+  })
+
+  it('refuses navigation to a known prototype absent from the requested native search', () => {
+    ;(globalThis as any).prototypes.entity['copper-stromatolite'] = { type: 'simple-entity' }
+    ;(held.actor as any).position = { x: 25, y: -46 }
+    const scan = vi.fn(() => [])
+    ;(held.actor as any).surface.find_entities_filtered = scan
+    expect(preflight('walk_to_entity', { entity_name: 'copper-stromatolite', search_radius: 4096 }))
+      .toMatchObject({ ok: false, code: 'navigation_target_not_found', identity: 'copper-stromatolite', search_radius: 4096 })
+    expect(scan).toHaveBeenCalledWith({ position: held.actor.position, radius: 4096, name: 'copper-stromatolite', limit: 64 })
+  })
+
+  it('requires a live navigation target and validates radius and actor before scanning', () => {
+    ;(globalThis as any).prototypes.entity['tree-01'] = { type: 'tree' }
+    const target = { valid: true, name: 'tree-01' }
+    const scan = vi.fn(() => [target])
+    ;(held.actor as any).surface.find_entities_filtered = scan
+    expect(preflight('walk_to_entity', { entity_name: 'tree-01', search_radius: 8 }))
+      .toMatchObject({ ok: true, navigation_search: { radius: 8, target_present: true } })
+    target.valid = false
+    expect(preflight('walk_to_entity', { entity_name: 'tree-01', search_radius: 8 })).toMatchObject({ ok: false, code: 'navigation_target_not_found' })
+    scan.mockClear()
+    for (const radius of [undefined, 0, 4097, 1.5, NaN, Infinity]) {
+      expect(preflight('walk_to_entity', { entity_name: 'tree-01', search_radius: radius })).toMatchObject({ ok: false, code: 'invalid_navigation_search_radius' })
+    }
+    ;(held.actor as any).is_valid = false
+    expect(preflight('walk_to_entity', { entity_name: 'tree-01', search_radius: 8 })).toMatchObject({ ok: false, code: 'no_actor' })
+    expect(scan).not.toHaveBeenCalled()
+  })
+
+  it('refuses a known resource with no live source inside the exact gather radius', () => {
+    ;(globalThis as any).prototypes.entity['copper-ore'] = { type: 'resource' }
+    ;(held.actor as any).position = { x: 25, y: -46 }
+    const scan = vi.fn(() => [])
+    ;(held.actor as any).surface.find_entities_filtered = scan
+    expect(preflight('gather_resource', { resource_name: 'copper-ore', count: 75, search_radius: 8 }))
+      .toMatchObject({ ok: false, code: 'resource_source_not_found', identity: 'copper-ore', search_radius: 8 })
+    expect(scan).toHaveBeenCalledWith(expect.objectContaining({ position: held.actor.position, radius: 8, name: 'copper-ore', type: 'resource' }))
+  })
+
+  it('admits a live resource source and rejects depleted sources and invalid gather radius', () => {
+    ;(globalThis as any).prototypes.entity['copper-ore'] = { type: 'resource' }
+    const source = { valid: true, name: 'copper-ore', amount: 75, position: { x: 1.5, y: 2.5 } }
+    const scan = vi.fn(() => [source])
+    ;(held.actor as any).surface.find_entities_filtered = scan
+    expect(preflight('gather_resource', { resource_name: 'copper-ore', count: 75, search_radius: 8 }))
+      .toMatchObject({ ok: true, resource_search: { radius: 8, position: source.position, amount: 75 } })
+    source.amount = 0
+    expect(preflight('gather_resource', { resource_name: 'copper-ore', search_radius: 8 })).toMatchObject({ ok: false, code: 'resource_source_not_found' })
+    scan.mockClear()
+    expect(preflight('gather_resource', { resource_name: 'copper-ore', search_radius: 0 })).toMatchObject({ ok: false, code: 'invalid_resource_search_radius' })
+    expect(scan).not.toHaveBeenCalled()
+  })
+
+  it('refuses exact mining beyond a finite tile amount before dispatch and reports the observed limit', () => {
+    ;(globalThis as any).prototypes.entity['iron-ore'] = { type: 'resource', infinite_resource: false }
+    const source = { valid: true, name: 'iron-ore', amount: 40, position: { x: -23.5, y: -68.5 } }
+    const scan = vi.fn(() => [source])
+    ;(held.actor as any).surface.find_entities_filtered = scan
+    const args = { resource_name: 'iron-ore', x: -23.5, y: -68.5, count: 50 }
+    expect(preflight('mine_resource_at', args)).toMatchObject({ ok: false, code: 'resource_source_insufficient',
+      resource_target: { amount: 40, requested_count: 50, position: source.position, infinite: false } })
+    expect(scan).toHaveBeenCalledWith(expect.objectContaining({ position: source.position, radius: 0.25, limit: 1, type: 'resource' }))
+    expect(preflight('mine_resource_at', { ...args, count: 40 })).toMatchObject({ ok: true, resource_target: { amount: 40 } })
+    ;(globalThis as any).prototypes.entity['iron-ore'].infinite_resource = true
+    expect(preflight('mine_resource_at', args)).toMatchObject({ ok: true, resource_target: { infinite: true } })
+  })
+
+  it('refuses missing or depleted exact sources and malformed coordinates or counts', () => {
+    ;(globalThis as any).prototypes.entity['iron-ore'] = { type: 'resource' }
+    const source = { valid: true, amount: 0, position: { x: 1.5, y: 2.5 } }
+    const scan = vi.fn(() => [source])
+    ;(held.actor as any).surface.find_entities_filtered = scan
+    const args = { resource_name: 'iron-ore', x: 1.5, y: 2.5, count: 1 }
+    expect(preflight('mine_resource_at', args)).toMatchObject({ ok: false, code: 'resource_source_not_found' })
+    scan.mockReturnValue([])
+    expect(preflight('mine_resource_at', args)).toMatchObject({ ok: false, code: 'resource_source_not_found' })
+    scan.mockClear()
+    expect(preflight('mine_resource_at', { ...args, x: Number.NaN })).toMatchObject({ ok: false, code: 'invalid_resource_position' })
+    expect(preflight('mine_resource_at', { ...args, y: Number.POSITIVE_INFINITY })).toMatchObject({ ok: false, code: 'invalid_resource_position' })
+    expect(preflight('mine_resource_at', { ...args, count: 0 })).toMatchObject({ ok: false, code: 'invalid_resource_count' })
+    expect(preflight('mine_resource_at', { ...args, count: 1.5 })).toMatchObject({ ok: false, code: 'invalid_resource_count' })
+    expect(scan).not.toHaveBeenCalled()
+  })
+
   it('keeps the exact-target identity fields on accepted transfers and adds the counts', () => {
     current_target = exact(15)
 
