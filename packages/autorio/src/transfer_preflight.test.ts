@@ -367,4 +367,42 @@ describe('operation_preflight wiring (autorio_preflight.operation)', () => {
     current_target = undefined
     expect(preflight('move_items_exact', { item_name: 'coal', unit_number: 99, max_count: 5, to_entity: true })).toMatchObject({ ok: false, code: 'stale_exact_target' })
   })
+
+  it('refuses harvest_product with a named code unless a current unowned natural source exists in the radius', () => {
+    ;(globalThis as any).prototypes.item.stone = {}
+    ;(globalThis as any).prototypes.item['stone-furnace'] = {}
+    const prototype = { type: 'simple-entity', is_building: false, mineable_properties: {
+      minable: true, products: [{ type: 'item', name: 'stone', amount: 20 }],
+    } }
+    ;(globalThis as any).prototypes.entity['fixture-rock'] = prototype
+    ;(globalThis as any).prototypes.entity['stone-furnace'] = { type: 'furnace', is_building: true, mineable_properties: {
+      minable: true, products: [{ type: 'item', name: 'stone-furnace', amount: 1 }],
+    } }
+    ;(held.actor as any).position = { x: 0, y: 0 }
+    const scan = vi.fn((): any[] => [])
+    ;(held.actor as any).surface.find_entities_filtered = scan
+    expect(preflight('harvest_product', { product_name: 'stone', search_radius: 64 }))
+      .toMatchObject({ ok: false, code: 'natural_harvest_source_not_found', operation: 'harvest_product', search_radius: 64 })
+    expect(scan.mock.calls.map((call: any[]) => call[0].radius)).toEqual([8, 16, 32, 64])
+    const source: any = { valid: true, name: 'fixture-rock', type: 'simple-entity', prototype,
+      force: { name: 'neutral' }, position: { x: 1, y: 0 } }
+    scan.mockReturnValue([source])
+    expect(preflight('harvest_product', { product_name: 'stone', search_radius: 64 }))
+      .toMatchObject({ ok: true, source_search: { radius: 64, target_present: true },
+        natural_source: { name: 'fixture-rock', position: source.position } })
+    source.last_user = { index: 1 }
+    expect(preflight('harvest_product', { product_name: 'stone', search_radius: 64 }))
+      .toMatchObject({ ok: false, code: 'natural_harvest_source_not_found' })
+    scan.mockClear()
+    // A built entity that yields the product when mined is never a harvest source.
+    expect(preflight('harvest_product', { product_name: 'stone-furnace', search_radius: 64 }))
+      .toMatchObject({ ok: false, code: 'no_natural_harvest_source', operation: 'harvest_product' })
+    expect(preflight('harvest_product', { product_name: 'not-an-item', search_radius: 64 }))
+      .toMatchObject({ ok: false, code: 'unknown_prototype' })
+    for (const search_radius of [0, 4097, 1.5, NaN, Infinity]) {
+      expect(preflight('harvest_product', { product_name: 'stone', search_radius }))
+        .toMatchObject({ ok: false, code: 'invalid_harvest_search_radius' })
+    }
+    expect(scan).not.toHaveBeenCalled()
+  })
 })

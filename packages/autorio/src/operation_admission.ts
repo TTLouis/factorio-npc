@@ -89,20 +89,28 @@ function reconcile_record(stored: OperationAdmission, status: { receipt_journal:
   const record = { ...stored }
   if (!admission_unresolved(record)) return record
   const refs = record.slots.flatMap(slot => slot.batch_refs)
-  const receipts = refs.map(ref => status.receipt_journal.find(receipt => receipt.batch_ref === ref.batch_ref
-    && receipt.batch_id === ref.batch_id && receipt.batch_generation === ref.batch_generation))
-  if (record.state === 'admitted' && refs.length > 0 && receipts.every(receipt => receipt?.state === 'completed')) {
+  // Mapping missing receipts creates nil holes in Lua arrays. Iterate the
+  // dense reference list so absent evidence cannot make every() vacuously true.
+  const receipt_for = (ref: TaskBatchIdentity) => status.receipt_journal.find(receipt => receipt.batch_ref === ref.batch_ref
+    && receipt.batch_id === ref.batch_id && receipt.batch_generation === ref.batch_generation)
+  if (record.state === 'admitted' && refs.length > 0 && refs.every(ref => receipt_for(ref)?.state === 'completed')) {
     record.state = 'completed'
   }
   else if (record.state === 'admitted' && refs.length > 0
     && record.slots.every(slot => slot.ok && slot.batch_refs.length > 0 && slot.operation !== undefined && PURE_SUBMIT_OPERATIONS.includes(slot.operation))
-    && receipts.every(receipt => receipt?.state === 'cancelled' && receipt.started_count === 1 && receipt.failed_before_mutation === true)) {
+    && refs.every(ref => {
+      const receipt = receipt_for(ref)
+      return receipt?.state === 'cancelled' && receipt.started_count === 1 && receipt.failed_before_mutation === true
+    })) {
     record.state = 'failed'
     record.ok = false
     record.proven_refusal = true
     record.error = 'refused_before_mutation'
   }
-  else if (record.generation !== status.batch_generation || receipts.some(receipt => receipt && receipt.state !== 'completed')) {
+  else if (record.generation !== status.batch_generation || refs.some(ref => {
+    const receipt = receipt_for(ref)
+    return receipt !== undefined && receipt.state !== 'completed'
+  })) {
     record.state = 'uncertain'
     record.error = 'batch_reconciliation_required'
   }

@@ -28,7 +28,7 @@ import { new_corpse_recovery_controller, note_npc_corpse, note_npc_death } from 
 import { entity_last_user } from './entity_provenance'
 import { entity_reference_hint, resolve_exact_entity } from './entity_reference'
 import { new_follow_controller } from './follow'
-import { new_harvest_controller } from './harvest'
+import { find_harvest_source, new_harvest_controller } from './harvest'
 import { new_interaction_recovery } from './interaction_recovery'
 import { create_knowledge_remote_interface } from './knowledge'
 import { new_navigation_controller } from './navigation'
@@ -36,7 +36,7 @@ import { new_navigation_obstacle_recovery } from './navigation_obstacle_recovery
 import { new_orientation_runtime } from './orientation_runtime'
 import { execute_placement_candidate } from './placement_candidates'
 import { create_production_planning_remote_interface } from './production_planning_remote'
-import { create_prototype_knowledge_remote_interface } from './prototype_knowledge'
+import { create_prototype_knowledge_remote_interface, natural_harvest_source_names } from './prototype_knowledge'
 import { new_recipe_configuration_runtime } from './recipe_configuration'
 import { new_rocket_launch_runtime } from './rocket_launch'
 import { new_research_controller } from './research'
@@ -241,6 +241,19 @@ function operation_preflight(name: string, args: Record<string, any>) {
 
   if (name === 'research_technology') {
     return research_operation_preflight(actor, args.technology_name)
+  }
+  if (name === 'harvest_product') {
+    if (!actor || !actor.is_valid) return reject('no_actor')
+    if (typeof args.product_name !== 'string' || !prototypes.item[args.product_name]) return reject('unknown_prototype')
+    const radius = args.search_radius ?? 256
+    if (typeof radius !== 'number' || radius !== math.floor(radius) || radius < 1 || radius > 4096) return reject('invalid_harvest_search_radius')
+    const sources = natural_harvest_source_names(args.product_name)
+    if (sources.length === 0) return reject('no_natural_harvest_source')
+    const source = find_harvest_source(actor, sources, radius)
+    if (!source) return reject('natural_harvest_source_not_found', { field: 'product_name', identity: args.product_name,
+      search_radius: radius, source_names: sources })
+    return accept({ source_names: sources, source_search: { radius, target_present: true },
+      natural_source: { name: source.name, position: source.position } })
   }
 
   let exact_target: Record<string, unknown> | undefined

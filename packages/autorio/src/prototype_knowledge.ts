@@ -206,11 +206,14 @@ function yields_item_product(prototype: any, product_name: string) {
   return false
 }
 
-export function harvest_source_prototype_names(product_name: string) {
+// Harvest sources are map-generated trees and rocks only. Any other entity that
+// merely yields the product when mined (a furnace, a chest, a belt) is a
+// player- or NPC-built asset and must never be a harvest target.
+export function natural_harvest_source_names(product_name: string) {
   const names: string[] = []
   if (!prototypes.item[product_name]) return names
   for (const [name, prototype] of pairs(prototypes.entity)) {
-    if (!prototype || prototype.type === 'resource') continue
+    if (!prototype || (prototype.type !== 'tree' && prototype.type !== 'simple-entity') || prototype.is_building) continue
     if (yields_item_product(prototype, product_name)) names.push(name)
   }
   return sort_strings(names)
@@ -378,7 +381,7 @@ function discovery_candidates(request: PrototypeDiscoveryRequest) {
     if (!request.product_name || !prototypes.item[request.product_name]) {
       return { error: 'harvest discovery requires a current-game item product_name' }
     }
-    for (const name of harvest_source_prototype_names(request.product_name)) matches[name] = prototypes.entity[name]
+    for (const name of natural_harvest_source_names(request.product_name)) matches[name] = prototypes.entity[name]
   }
   else {
     return { error: 'unsupported discovery capability' }
