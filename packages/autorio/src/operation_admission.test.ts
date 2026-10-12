@@ -16,6 +16,20 @@ beforeEach(() => {
   ;(globalThis as any).remote = { interfaces: { sgluna_deployment: { authorize: true } }, call: vi.fn((_name, _method, epoch) => epoch === 3) }
 })
 describe('durable operation admission', () => {
+  it('keeps missing first or trailing native receipts in flight until every exact reference completes', () => {
+    const trailing = { batch_id: 2, batch_generation: 1, batch_ref: 'batch-g1-2' }
+    let receipts: any[] = []
+    const admission = new_operation_admission(actor, () => ({ batch_generation: 1, receipt_journal: receipts }))
+    admission.begin(identity)
+    admission.slot(identity.operation_key, 1, { ok: true, operation: 'harvest_product', batch_refs: [ref, trailing] })
+    expect(admission.finish(identity.operation_key, { ok: true }).record?.state).toBe('admitted')
+    receipts = [{ ...ref, state: 'completed' }]
+    expect(admission.status().records[0].state).toBe('admitted')
+    receipts = [{ ...trailing, state: 'completed' }]
+    expect(admission.status().records[0].state).toBe('admitted')
+    receipts = [{ ...ref, state: 'completed' }, { ...trailing, state: 'completed' }]
+    expect(admission.status().records[0].state).toBe('completed')
+  })
   it('derives receipt completion on status without writing admissions, counters or initialization', () => {
     const manager = new_task_manager(() => undefined)
     const admission = new_operation_admission(actor, manager.get_status_snapshot)

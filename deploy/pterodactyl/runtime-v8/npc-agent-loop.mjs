@@ -323,6 +323,8 @@ function latestTransferSupplyExecutionRecovery(state) {
   return parsed?.phase === 'execution' ? parsed : undefined
 }
 
+// The mod's held-item preflight for place_entity / place_candidate (what the character holds at admission time).
+const PLACEMENT_ITEM_MISSING_CODE = 'placement_item_missing'
 const SUPPLY_TO_ACTOR_OPERATIONS = new Set(['mine_entity', 'mine_entity_exact', 'recover_corpse'])
 
 // Could an earlier operation of the same batch put `item` into the NPC inventory (supply_missing), give an empty source
@@ -11920,6 +11922,28 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             reason: 'earlier_operation_in_batch_could_supply',
             dependencies,
             facts: transferSupplyFacts({ ...result, operation_index: index }),
+          })
+          continue
+        }
+      }
+      if (result?.ok !== true && result?.code === PLACEMENT_ITEM_MISSING_CODE) {
+        // Same snapshot rule for a placement: the mod reads the items held NOW. An earlier operation of this batch that could
+        // supply the placement item (a craft of it, an extraction, a mining yield) has not run yet, so the placement is
+        // accepted with its dependency recorded and the execution-time held-item check stays authoritative.
+        const item = result.placement_item?.item_name
+        const supplier = typeof item === 'string' ? batchSupplierFor(operations, index, 'supply_missing', item) : undefined
+        if (supplier !== undefined) {
+          const dependencies = [{ item_name: item, status: PLACEMENT_ITEM_MISSING_CODE, operation_index: supplier, operation: operations[supplier]?.name }]
+          results[results.length - 1] = { ...result, ok: true, deferred: 'batch_dependency', dependencies }
+          await this.traceEvent('placement.preflight_item_deferred', {
+            request_id: this.traceRequest?.id,
+            step_id: this.memory.currentPlan?.(memoryKey)?.task_board?.active_step_id,
+            operation_index: index,
+            operation: operations[index].name,
+            code: result.code,
+            reason: 'earlier_operation_in_batch_could_supply',
+            dependencies,
+            placement_item: result.placement_item,
           })
           continue
         }

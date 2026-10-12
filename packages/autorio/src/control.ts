@@ -28,19 +28,21 @@ import { new_corpse_recovery_controller, note_npc_corpse, note_npc_death } from 
 import { entity_last_user } from './entity_provenance'
 import { entity_reference_hint, resolve_exact_entity } from './entity_reference'
 import { new_follow_controller } from './follow'
-import { new_harvest_controller } from './harvest'
+import { find_harvest_source, new_harvest_controller } from './harvest'
 import { new_interaction_recovery } from './interaction_recovery'
 import { create_knowledge_remote_interface } from './knowledge'
 import { new_navigation_controller } from './navigation'
 import { new_navigation_obstacle_recovery } from './navigation_obstacle_recovery'
 import { new_orientation_runtime } from './orientation_runtime'
-import { execute_placement_candidate } from './placement_candidates'
+import { execute_placement_candidate, placement_candidate_preflight } from './placement_candidates'
+import { placement_item_preflight } from './placement_preflight'
 import { create_production_planning_remote_interface } from './production_planning_remote'
-import { create_prototype_knowledge_remote_interface } from './prototype_knowledge'
+import { create_prototype_knowledge_remote_interface, natural_harvest_source_names } from './prototype_knowledge'
 import { new_recipe_configuration_runtime } from './recipe_configuration'
 import { new_rocket_launch_runtime } from './rocket_launch'
 import { new_research_controller } from './research'
 import { research_operation_preflight } from './research_preflight'
+import { navigation_position_preflight } from './navigation_position_preflight'
 import { transfer_preflight_facts, transfer_unknown_item } from './transfer_preflight'
 import { ensure_basic_skill_definitions } from './skills'
 import { with_research_trigger } from './research_trigger'
@@ -238,9 +240,40 @@ function operation_preflight(name: string, args: Record<string, any>) {
   })
 
   if (!args || typeof args !== 'object') return reject('invalid_preflight_args')
+  if (name === 'walk_to_position') return navigation_position_preflight(actor, args)
+  if (name === 'place_candidate') {
+    if (!actor || !actor.is_valid) return reject('no_actor')
+    if (typeof args.candidate_set_id !== 'string' || typeof args.candidate_id !== 'string') return reject('invalid_preflight_args')
+    return { operation: name, ...placement_candidate_preflight(actor, args.candidate_set_id, args.candidate_id) }
+  }
+
+  if (name === 'move_items_with_player') {
+    if (!actor || !actor.is_valid) return reject('no_actor')
+    const player_name = args.player_name
+    const details = { field: 'player_name', identity: player_name }
+    if (typeof player_name !== 'string' || player_name.length === 0) return reject('player_unavailable', details)
+    // Match execution's availability check. An NPC display name is not a
+    // LuaPlayer identity; refuse before any operation in the decision runs.
+    const player = game.get_player(player_name)
+    if (!player || !player.valid || !player.connected || !player.character) return reject('player_unavailable', details)
+    return accept(details)
+  }
 
   if (name === 'research_technology') {
     return research_operation_preflight(actor, args.technology_name)
+  }
+  if (name === 'harvest_product') {
+    if (!actor || !actor.is_valid) return reject('no_actor')
+    if (typeof args.product_name !== 'string' || !prototypes.item[args.product_name]) return reject('unknown_prototype')
+    const radius = args.search_radius ?? 256
+    if (typeof radius !== 'number' || radius !== math.floor(radius) || radius < 1 || radius > 4096) return reject('invalid_harvest_search_radius')
+    const sources = natural_harvest_source_names(args.product_name)
+    if (sources.length === 0) return reject('no_natural_harvest_source')
+    const source = find_harvest_source(actor, sources, radius)
+    if (!source) return reject('natural_harvest_source_not_found', { field: 'product_name', identity: args.product_name,
+      search_radius: radius, source_names: sources })
+    return accept({ source_names: sources, source_search: { radius, target_present: true },
+      natural_source: { name: source.name, position: source.position } })
   }
 
   let exact_target: Record<string, unknown> | undefined
@@ -298,6 +331,15 @@ function operation_preflight(name: string, args: Record<string, any>) {
       // entity (human last_user) from an NPC- or map-built one at admission.
       last_user: entity_last_user(target),
     }
+    // Match execution's capability check before the harness reserves any batch.
+    // In particular, supplying a furnace must not run before an unsupported
+    // explicit recipe operation is discovered during execution.
+    if (name === 'set_machine_recipe' && target.type !== 'assembling-machine') {
+      return reject('not_recipe_machine', {
+        field: 'unit_number', identity: unit_number, target: exact_target,
+        observed_type: target.type, expected_type: 'assembling-machine',
+      })
+    }
     if (name === 'supply_entity' || name === 'move_items_exact') {
       const unknown_item = transfer_unknown_item(name, args)
       if (unknown_item !== undefined) {
@@ -347,12 +389,31 @@ function operation_preflight(name: string, args: Record<string, any>) {
         observed_type: prototype.type,
       })
     }
-    return accept({
-      field: 'resource_name',
-      identity: resource_name,
-      expected_type: 'resource',
-      observed_type: prototype.type,
-    })
+    if (name === 'gather_resource') {
+      if (!actor || !actor.is_valid) return reject('no_actor')
+      const radius = args.search_radius ?? 256
+      if (typeof radius !== 'number' || radius !== math.floor(radius) || radius < 1 || radius > 4096) {
+        return reject('invalid_resource_search_radius')
+      }
+      // A known prototype does not prove a source exists in this search. Do
+      // this read before reserving a native batch that navigation would cancel.
+      const sources = find_world_entities(actor.surface, { position: actor.position, radius, name: resource_name, type: 'resource', limit: 64 })
+      const source = sources.find(entity => entity.valid && entity.amount > 0)
+      if (!source) return reject('resource_source_not_found', { field: 'resource_name', identity: resource_name, search_radius: radius })
+      return accept({ field: 'resource_name', identity: resource_name, expected_type: 'resource', observed_type: prototype.type,
+        resource_search: { radius, position: source.position, amount: source.amount } })
+    }
+    if (!actor || !actor.is_valid) return reject('no_actor')
+    const x = args.x, y = args.y, count = args.count ?? 1
+    if (typeof x !== 'number' || typeof y !== 'number' || x !== x || y !== y || math.abs(x) === math.huge || math.abs(y) === math.huge) {
+      return reject('invalid_resource_position')
+    }
+    if (typeof count !== 'number' || count !== math.floor(count) || count < 1 || count === math.huge) return reject('invalid_resource_count')
+    const source = find_world_entities(actor.surface, { position: { x, y }, radius: 0.25, name: resource_name, type: 'resource', limit: 1 })[0]
+    if (!source || !source.valid || !(source.amount > 0)) return reject('resource_source_not_found', { field: 'resource_name', identity: resource_name, position: { x, y } })
+    const resource_target = { position: source.position, amount: source.amount, requested_count: count, infinite: prototype.infinite_resource === true }
+    if (!resource_target.infinite && count > source.amount) return reject('resource_source_insufficient', { field: 'resource_name', identity: resource_name, resource_target })
+    return accept({ field: 'resource_name', identity: resource_name, expected_type: 'resource', observed_type: prototype.type, resource_target })
   }
 
   if (name === 'place_entity' || name === 'mine_entity' || name === 'walk_to_entity') {
@@ -364,6 +425,22 @@ function operation_preflight(name: string, args: Record<string, any>) {
         identity: entity_name,
         expected: 'entity prototype',
       })
+    }
+    if (name === 'place_entity') return { operation: name, ...placement_item_preflight(actor, entity_name) }
+    if (name === 'walk_to_entity') {
+      if (!actor || !actor.is_valid) return reject('no_actor')
+      const radius = args.search_radius
+      if (typeof radius !== 'number' || radius !== math.floor(radius) || radius < 1 || radius > 4096) {
+        return reject('invalid_navigation_search_radius')
+      }
+      // Prototype existence alone cannot establish a navigable target. This
+      // bounded current-world read makes absence a refusal before queueing;
+      // execution still owns target selection, pathfinding and live validity.
+      const targets = find_world_entities(actor.surface, { position: actor.position, radius, name: entity_name, limit: 64 })
+      const target = targets.find(entity => entity.valid)
+      if (!target) return reject('navigation_target_not_found', { field: 'entity_name', identity: entity_name, search_radius: radius })
+      return accept({ field: 'entity_name', identity: entity_name, observed_type: prototype.type,
+        navigation_search: { radius, target_present: true } })
     }
     return accept({ field: 'entity_name', identity: entity_name, observed_type: prototype.type })
   }

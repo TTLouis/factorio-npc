@@ -1,6 +1,7 @@
 import type { ControlledActor } from './actors/types'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { new_harvest_controller } from './harvest'
+import { find_harvest_source, is_unowned_natural_harvest_source, new_harvest_controller } from './harvest'
+import { natural_harvest_source_names } from './prototype_knowledge'
 import { new_task_manager } from './task_manager'
 import { TaskStates } from './types'
 
@@ -25,6 +26,7 @@ function mineable(name: string, type: string, product: string, amount: number, x
     type,
     position: { x, y: 0 },
     prototype,
+    force: { name: 'neutral' },
   }
   return { prototype, entity }
 }
@@ -126,6 +128,72 @@ beforeEach(() => {
 })
 
 describe('product-oriented finite harvesting', () => {
+  it('shares a bounded absent-source search with admission without mining or queuing work', () => {
+    const f = fixture()
+    f.rockA.valid = false; f.rockB.valid = false
+    const before = f.manager.get_status_snapshot()
+    expect(find_harvest_source(f.actor, natural_harvest_source_names('stone'), 64)).toBeUndefined()
+    expect((f.actor.surface.find_entities_filtered as any).mock.calls.map((call: any[]) => call[0].radius)).toEqual([8, 16, 32, 64])
+    expect((f.actor.surface.find_entities_filtered as any).mock.calls.every((call: any[]) => call[0].limit === 32)).toBe(true)
+    expect(f.manager.get_status_snapshot()).toEqual(before)
+    expect(f.actor.set_mining_state).not.toHaveBeenCalled()
+  })
+
+  it('shares exact-radius positive source selection and excludes player-touched sources', () => {
+    const f = fixture()
+    f.rockA.position.x = 3
+    const names = natural_harvest_source_names('stone')
+    expect(find_harvest_source(f.actor, names, 1)).toBeUndefined()
+    expect(find_harvest_source(f.actor, names, 2)).toBe(f.rockB)
+    f.rockB.last_user = { index: 1 }
+    expect(find_harvest_source(f.actor, names, 2)).toBeUndefined()
+    expect(find_harvest_source(f.actor, names, 4)).toBe(f.rockA)
+  })
+
+  it('natural-only harvesting skips human-touched trees and rechecks ownership before mining', () => {
+    const f = fixture()
+    f.treeA.last_user = { valid: true, name: 'owner', index: 1 }
+    // Keep the eligible tree distinct from the rock at the same fixture x.
+    // Exact native selection must resolve to the tree, rather than a neighbour.
+    f.treeB.position.y = 0.5
+    expect(f.harvest.submit('wood', 1, 64)[0]).toBe(true)
+    f.harvest.tick(f.actor)
+    expect(f.manager.player_state.parameters_harvest_product?.target).toBe(f.treeB)
+    expect(f.actor.set_mining_state).not.toHaveBeenCalledWith({ mining: true, position: f.treeA.position })
+    f.treeB.force = { name: 'player' }
+    f.harvest.tick(f.actor)
+    expect(f.actor.set_mining_state).toHaveBeenLastCalledWith({ mining: false })
+    expect(f.manager.get_status_snapshot().last_cancelled_batch?.reason).toBe('harvest:no_target')
+  })
+
+  it('never offers a built entity as a harvest source, even when mining it yields the product', () => {
+    const f = fixture()
+    ;(globalThis as any).prototypes.item['stone-furnace'] = { name: 'stone-furnace' }
+    ;(globalThis as any).prototypes.entity['stone-furnace'] = {
+      name: 'stone-furnace',
+      type: 'furnace',
+      is_building: true,
+      mineable_properties: { minable: true, mining_time: 0.2, products: [{ type: 'item', name: 'stone-furnace', amount: 1 }] },
+    }
+    expect(natural_harvest_source_names('stone-furnace')).toEqual([])
+    expect(f.harvest.submit('stone-furnace', 1, 64)[0]).toBe(false)
+    expect(f.manager.get_status_snapshot().queue_length).toBe(0)
+    expect(natural_harvest_source_names('stone')).toEqual(['mod-rock-a', 'mod-rock-b'])
+  })
+
+  it('natural-only source guards refuse buildings, non-neutral assets and unreadable provenance', () => {
+    const f = fixture()
+    expect(is_unowned_natural_harvest_source(f.treeA)).toBe(true)
+    f.treeA.prototype.is_building = true
+    expect(is_unowned_natural_harvest_source(f.treeA)).toBe(false)
+    f.treeA.prototype.is_building = false
+    f.treeA.force = { name: 'player' }
+    expect(is_unowned_natural_harvest_source(f.treeA)).toBe(false)
+    f.treeA.force = { name: 'neutral' }
+    ;(globalThis as any).pcall = () => [false, 'unsupported property']
+    try { expect(is_unowned_natural_harvest_source(f.treeA)).toBe(false) }
+    finally { delete (globalThis as any).pcall }
+  })
   it('stops after one entity when its verified stone gain exceeds the requested quantity', () => {
     const f = fixture()
     expect(f.harvest.submit('stone', 6, 64)[0]).toBe(true)
@@ -255,6 +323,43 @@ describe('product-oriented finite harvesting', () => {
       queue_length: 1,
       queued_task_types: [TaskStates.HARVESTING],
     })
+  })
+
+  it.each(['exact_selection_unavailable', 'native_mining_start_rejected', 'mining_stopped_before_gain'])(
+    'records the actual harvest rejection phase: %s', reason => {
+    const trace = vi.spyOn(globalThis, 'log')
+      const f = fixture()
+      f.rockB.valid = false
+      if (reason === 'exact_selection_unavailable') vi.mocked(f.actor.update_selected_entity).mockImplementation(() => {
+        ;(f.actor.character as any).selected = f.treeA
+      })
+      else if (reason === 'native_mining_start_rejected') vi.mocked(f.actor.get_mining_state).mockReturnValue({ mining: false })
+      expect(f.harvest.submit('stone', 1, 64)[0]).toBe(true)
+      f.harvest.tick(f.actor)
+      if (reason === 'mining_stopped_before_gain') {
+        vi.mocked(f.actor.get_mining_state).mockReturnValue({ mining: false })
+        f.harvest.tick(f.actor)
+      }
+      expect(trace).toHaveBeenCalledWith(expect.stringContaining(`harvest.mining_rejected reason=${reason}`))
+      expect(trace).toHaveBeenCalledWith(expect.stringContaining('batch_ref=batch-g1-1'))
+    trace.mockRestore()
+  })
+
+  it('stops before a tick of mining if native exact selection changes on mining start', () => {
+    const f = fixture()
+    f.rockB.valid = false
+    f.rockA.surface = f.actor.surface
+    f.rockA.selection_box = { left_top: { x: 0.5, y: -0.5 }, right_bottom: { x: 1.5, y: 0.5 } }
+    vi.mocked(f.actor.update_selected_entity).mockImplementation(() => { (f.actor.character as any).selected = f.treeA })
+    vi.mocked(f.actor.set_mining_state).mockImplementation(state => {
+      if (state.mining) (f.actor.character as any).selected = f.treeA
+    })
+    expect(f.harvest.submit('stone', 1, 64)[0]).toBe(true)
+    f.harvest.tick(f.actor)
+    expect(f.actor.set_mining_state).toHaveBeenLastCalledWith({ mining: false })
+    expect(f.manager.get_status_snapshot().last_cancelled_batch?.reason).toBe('harvest:exact_selection_changed_on_start')
+    expect(f.rockA.valid).toBe(true)
+    expect(f.treeA.valid).toBe(true)
   })
 
   it('excludes ordinary resource patches from the harvest source set', () => {

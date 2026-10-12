@@ -49,7 +49,7 @@ const EXPERIMENT_OPERATION_METADATA = Object.freeze({
   place_candidate: Object.freeze({
     name: 'place_candidate',
     scopes: Object.freeze(['construction']),
-    preflight: false,
+    preflight: true,
     risk: 'high',
     arguments: Object.freeze({
       candidate_set_id: Object.freeze({
@@ -173,7 +173,9 @@ export function renderOperation(value) {
 
 export function renderOperationPreflight(value) {
   const operation = parseOperation(value)
-  if (operation.name === 'place_candidate') return null
+  if (operation.name === 'place_candidate') {
+    return `/silent-command rcon.print(helpers.table_to_json(remote.call('autorio_preflight','operation','place_candidate',{candidate_set_id=${base.luaString(operation.args.candidate_set_id)},candidate_id=${base.luaString(operation.args.candidate_id)}})))`
+  }
   return base.renderOperationPreflight(operation)
 }
 

@@ -121,7 +121,7 @@ const OPERATION_METADATA = Object.freeze({
     },
   }),
   walk_to_position: operationMetadata(['navigation'], {
-    preflight: false,
+    preflight: true,
     risk: 'low',
     arguments: {
       x: argumentMetadata('planner_numeric'),
@@ -309,7 +309,7 @@ const OPERATION_METADATA = Object.freeze({
     },
   }),
   move_items_with_player: operationMetadata(['logistics'], {
-    preflight: false,
+    preflight: true,
     risk: 'moderate',
     arguments: {
       item_name: argumentMetadata('runtime_candidate', { provenance: 'inventory_items' }),

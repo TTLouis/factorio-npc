@@ -14,6 +14,7 @@ import {
   operationTypeCatalog,
   operationTypeCatalogForScope,
   parseOperation,
+  renderOperationPreflight,
 } from './structured-policy.mjs'
 
 const fixtures = Object.freeze({
@@ -154,4 +155,10 @@ test('scope-specific type catalogs are projections of the authoritative metadata
   assert.ok(operationNamesForScope('logistics').includes('move_items_exact'))
   assert.ok(operationNamesForScope('production').includes('move_items_exact'))
   assert.ok(operationNamesForScope('construction').includes('place_candidate'))
+})
+
+test('place_candidate is preflighted through the native registry, with no model-supplied entity identity', () => {
+  assert.equal(operationMetadataForName('place_candidate').preflight, true)
+  const command = renderOperationPreflight(parseOperation(fixtures.place_candidate))
+  assert.equal(command, "/silent-command rcon.print(helpers.table_to_json(remote.call('autorio_preflight','operation','place_candidate',{candidate_set_id='placement-1',candidate_id='candidate-1'})))")
 })
