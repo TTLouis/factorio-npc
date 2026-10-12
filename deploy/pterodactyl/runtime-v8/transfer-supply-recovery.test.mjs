@@ -651,3 +651,78 @@ test('admission runs over operations 0..i first: a reserved container earlier in
   assert.equal(transferSupplyRecoveryCount(world.plan().task_board), 0, 'no recovery budget was spent')
   assert.equal(result.operations[0].name, 'wait')
 })
+
+// Native admission refusals (mod: placement_item_missing, natural_harvest_source_not_found, ...). The harness passes the
+// mod's code through unchanged to the blocker, the rejection trace and the durable evidence, with the request id.
+const PLACE_FURNACE = { name: 'place_entity', args: { entity_name: 'stone-furnace' } }
+const CRAFT_FURNACE = { name: 'craft_item', args: { item_name: 'stone-furnace', count: 1 } }
+const missingFurnaceItem = () => ({
+  ok: false,
+  code: 'placement_item_missing',
+  operation: 'place_entity',
+  placement_item: { entity_name: 'stone-furnace', item_name: 'stone-furnace', count: 1, held_count: 0 },
+})
+
+test('a placement preceded in the same batch by a craft of its item is not refused on the held-item snapshot', async () => {
+  const rcon = new Rcon()
+  rcon.preflight.place_entity = missingFurnaceItem()
+  const world = harness(rcon, [observe(), planMessage([CRAFT_FURNACE, PLACE_FURNACE], { plan: ['Craft and place a furnace'] })])
+
+  const result = await world.agent.request('craft and place a furnace', { sender: 'tester' })
+
+  assert.equal(rcon.mutations.length, 1, 'the batch was admitted')
+  assert.deepEqual(result.operations.map(operation => operation.name), ['craft_item', 'place_entity'])
+  const [deferred] = world.named('placement.preflight_item_deferred')
+  assert.ok(deferred, 'the deferral is traced')
+  assert.ok(data(deferred).request_id)
+  assert.equal(data(deferred).code, 'placement_item_missing')
+  assert.equal(data(deferred).operation_index, 1)
+  assert.deepEqual(data(deferred).dependencies, [{ item_name: 'stone-furnace', status: 'placement_item_missing', operation_index: 0, operation: 'craft_item' }])
+  assert.equal(data(world.named('operations.preflight_ok').at(-1)).operations[1].preflight.deferred, 'batch_dependency')
+})
+
+test('a placement refusal with no earlier supplier passes the mod code through to the blocker, the trace and the durable evidence', async () => {
+  const rcon = new Rcon()
+  rcon.preflight.place_entity = missingFurnaceItem()
+  const world = harness(rcon, [observe(), planMessage([{ name: 'craft_item', args: { item_name: 'iron-gear-wheel', count: 1 } }, PLACE_FURNACE], { plan: ['Place a furnace'] })])
+
+  const result = await world.agent.request('place a furnace', { sender: 'tester' })
+
+  assert.equal(rcon.mutations.length, 0, 'nothing was admitted')
+  assert.equal(world.named('placement.preflight_item_deferred').length, 0)
+  assert.equal(result.blocker?.code, 'placement_item_missing')
+  assert.equal(world.plan().blocker, 'operation_preflight_failed:placement_item_missing')
+  const [rejected] = world.named('operations.preflight_rejected')
+  assert.equal(data(rejected).preflight.code, 'placement_item_missing')
+  assert.equal(data(rejected).preflight.operation_index, 1)
+  const evidence = world.plan().task_board.evidence.find(item => /placement_item_missing/.test(item.summary))
+  assert.ok(evidence, 'the durable blocker evidence names the mod code')
+  assert.equal(JSON.parse(evidence.summary).reason_code, 'placement_item_missing')
+  assert.ok(JSON.parse(evidence.summary).request_id)
+})
+
+for (const refusal of [
+  { operation: 'harvest_product', args: { product_name: 'wood', count: 4, search_radius: 64 }, code: 'natural_harvest_source_not_found', extra: { search_radius: 64 } },
+  { operation: 'harvest_product', args: { product_name: 'stone-furnace', count: 1, search_radius: 64 }, code: 'no_natural_harvest_source', extra: {} },
+  { operation: 'gather_resource', args: { resource_name: 'iron-ore', count: 5, search_radius: 64 }, code: 'resource_source_not_found', extra: { identity: 'iron-ore', search_radius: 64 } },
+  { operation: 'walk_to_entity', args: { entity_name: 'stone-furnace', search_radius: 64 }, code: 'navigation_target_not_found', extra: { identity: 'stone-furnace', search_radius: 64 } },
+  { operation: 'supply_entity', args: COAL_SUPPLY.args, code: 'supply_destination_conflict', extra: { identity: 15 } },
+]) {
+  test(`the native refusal ${refusal.code} reaches the blocker unchanged and is not mistaken for a recoverable or world-change code`, async () => {
+    const rcon = new Rcon()
+    rcon.preflight[refusal.operation] = { ok: false, code: refusal.code, operation: refusal.operation, ...refusal.extra }
+    const world = harness(rcon, [observe(), planMessage([{ name: refusal.operation, args: refusal.args }], { plan: ['Do the current step'] })])
+
+    const result = await world.agent.request('do the thing', { sender: 'tester' })
+
+    assert.equal(rcon.mutations.length, 0, 'no batch was admitted')
+    assert.equal(result.blocker?.code, refusal.code)
+    const [rejected] = world.named('operations.preflight_rejected')
+    assert.equal(data(rejected).preflight.code, refusal.code)
+    assert.equal(data(rejected).preflight.operation, refusal.operation)
+    const evidence = world.plan().task_board.evidence.find(item => item.summary?.includes(refusal.code))
+    assert.ok(evidence, 'the durable blocker evidence names the mod code')
+    assert.ok(JSON.parse(evidence.summary).request_id)
+    assert.equal(world.named('transfer.supply_recovery').length, 0)
+  })
+}

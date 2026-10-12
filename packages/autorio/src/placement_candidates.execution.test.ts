@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { create_placement_candidate_set, execute_placement_candidate } from './placement_candidates'
+import { create_placement_candidate_set, execute_placement_candidate, placement_candidate_preflight } from './placement_candidates'
 
 function luaPairs(value: Record<string, unknown>) {
   return Object.entries(value)
@@ -131,5 +131,28 @@ describe('placement candidate execution', () => {
     )
 
     expect(result).toEqual([false, 'placement candidate set expired'])
+  })
+
+  it('preflights the trusted candidate identity and current held alias/count without queueing, preserving TTL, surface and geometry checks', () => {
+    ;(globalThis as any).prototypes.item['candidate-test-kit'] = {}
+    ;(globalThis as any).prototypes.entity = { 'candidate-test-machine': { name: 'candidate-test-machine', type: 'container',
+      tile_width: 1, tile_height: 1, items_to_place_this: [{ name: 'candidate-test-kit', count: 2 }] } }
+    let held = 1, placeable = true
+    const controlled = actor(() => placeable)
+    controlled.is_valid = true
+    controlled.get_main_inventory = () => ({ get_item_count: (name: string) => { expect(name).toBe('candidate-test-kit'); return held } })
+    const generated = create_placement_candidate_set(controlled, { entity_name: 'candidate-test-machine', radius: 1, limit: 1 }) as any
+    const check = () => placement_candidate_preflight(controlled, generated.candidate_set_id, generated.candidates[0].id)
+    expect(check()).toMatchObject({ ok: false, code: 'placement_item_missing', placement_item: { entity_name: 'candidate-test-machine', held_count: 1, count: 2 } })
+    held = 2
+    expect(check()).toMatchObject({ ok: true, placement_item: { item_name: 'candidate-test-kit', held_count: 2 } })
+    placeable = false
+    expect(check()).toMatchObject({ ok: false, code: 'placement_candidate_unavailable', error: 'placement candidate is no longer placeable' })
+    placeable = true; controlled.surface.index = 8
+    expect(check()).toMatchObject({ ok: false, code: 'placement_candidate_unavailable', error: 'placement candidate belongs to another actor surface/force' })
+    controlled.surface.index = 7
+    expect(placement_candidate_preflight(controlled, generated.candidate_set_id, 'candidate-999')).toMatchObject({ ok: false, code: 'placement_candidate_unavailable' })
+    ;(globalThis as any).game.tick = generated.expires_tick + 1
+    expect(check()).toMatchObject({ ok: false, code: 'placement_candidate_unavailable', error: 'placement candidate set expired' })
   })
 })
