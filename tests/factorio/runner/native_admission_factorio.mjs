@@ -181,28 +181,41 @@ async function main() {
     evidence.recipe_machine = probe
   }
 
+  // One OG agent and operation ledger for every fixture that admits work, as in production: a fresh
+  // ledger would restart operation ordinals below the native admission high-water.
+  const natural = agentHarness('og-admitted')
   // 56cc1391 through the OG loop: supply, furnace recipe, wait. The whole batch is refused before
-  // admission, so the earlier supply never runs; the code reaches the OG record unchanged.
+  // admission, so the earlier supply never runs. A recipe sent to a furnace is an argument error:
+  // the native code reaches one bounded correction turn, and the corrected batch is admitted.
   {
     await insertStock({ wood: 22, 'iron-ore': 12 })
     const setup = await lua(`${furnaceNear('f', 3)} rcon.print(helpers.table_to_json({unit_number=f.unit_number}))`)
     const before = await snapshot()
-    const world = agentHarness('recipe-guard')
+    const world = natural
+    let correction
     world.script.push(world.observe('stone-furnace', 'furnace'), world.plan([
       { name: 'supply_entity', args: { unit_number: setup.unit_number, items: [{ item_name: 'wood', count: 22 }, { item_name: 'iron-ore', count: 12 }] } },
       { name: 'set_machine_recipe', args: { unit_number: setup.unit_number, recipe_name: 'iron-plate' } },
       { name: 'wait', args: { ticks: 1200 } },
-    ]))
+    ]), messages => {
+      correction = messages.map(message => String(message.content ?? '')).filter(content => content.startsWith('[HARNESS]')).at(-1)
+      return world.plan([{ name: 'wait', args: { ticks: 60 } }])
+    })
     const result = await world.agent.request('load the furnace and set its recipe', { sender: 'tester' })
     const rows = await world.rows()
-    blockedBy(result, 'not_recipe_machine', world, rows)
-    assert.equal((rows.find(row => row.event === 'operations.preflight_rejected').data ?? {}).preflight.operation_index, 1)
-    noEffect(before, await snapshot(), 'OG recipe-guard batch')
-    const after = await lua(`local f=a.surface.find_entities_filtered{name="stone-furnace",position=a.position,radius=8}[1]; rcon.print(helpers.table_to_json({wood=f.get_fuel_inventory().get_item_count("wood"),iron=f.get_inventory(defines.inventory.furnace_source).get_item_count("iron-ore")}))`)
-    assert.equal(after.wood, 0)
+    assert.match(correction ?? '', /rejected operation 2 \(set_machine_recipe\).*code not_recipe_machine/s, 'the correction turn carries the native code')
+    const recoverable = rows.filter(row => row.event === 'operations.preflight_recoverable')
+    assert.equal(recoverable.length, 1)
+    assert.equal((recoverable[0].data ?? recoverable[0]).failure_class, 'model_correctable_not_recipe_machine')
+    assert.ok(recoverable[0].request_id, 'the recoverable trace row carries request_id')
+    assert.deepEqual(result.operations.map(operation => operation.name), ['wait'])
+    await untilIdle('corrected recipe-guard batch')
+    const after = await lua(`local f=a.surface.find_entities_filtered{name="stone-furnace",position=a.position,radius=8}[1]; rcon.print(helpers.table_to_json({wood=f.get_fuel_inventory().get_item_count("wood"),iron=f.get_inventory(defines.inventory.furnace_source).get_item_count("iron-ore"),inventory=${MAIN}.get_contents()}))`)
+    assert.equal(after.wood, 0, 'the refused batch never supplied the furnace')
     assert.equal(after.iron, 0)
+    assert.deepEqual(after.inventory, before.inventory)
     await lua('for _,e in pairs(a.surface.find_entities_filtered{name="stone-furnace",position=a.position,radius=8}) do e.destroy() end; rcon.print(helpers.table_to_json({ok=true}))')
-    evidence.recipe_guard_og = { result: result.blocker, before }
+    evidence.recipe_guard_og = { correction, before, after }
   }
 
   // 3562d0bd / b02caea7: available iron followed by absent coal. The whole supply is refused so
@@ -292,7 +305,6 @@ async function main() {
   // 1efbdefc: a built entity that yields the product when mined is never a harvest source, and a
   // natural tree is still harvested through the OG admission path. (A player-touched natural entity cannot be
   // fabricated with zero connected players, so the last_user and force guards stay unit-tested only.)
-  const natural = agentHarness('natural-harvest')
   {
     await clearNaturals()
     await clearStock()
@@ -487,12 +499,12 @@ async function main() {
     const setup = await lua('local name; for _,n in pairs({"big-rock","huge-rock","big-sand-rock"}) do if prototypes.entity[n] then name=n break end end; assert(name); '
       + 'local s=a.surface; local p=s.find_non_colliding_position(name,{a.position.x+3,a.position.y},8,0.5); assert(p); local r=s.create_entity{name=name,position=p,force="neutral"}; assert(r); '
       + 'local ok,u=pcall(function() return r.last_user end); storage.native_admission_rock=r; '
-      + 'rcon.print(helpers.table_to_json({name=name,type=r.type,force=r.force.name,last_user_readable=ok,has_last_user=u~=nil,stone=a.get_item_count("stone")}))')
+      + 'local pr=prototypes.entity[name]; rcon.print(helpers.table_to_json({name=name,type=r.type,is_building=pr.is_building,products=pr.mineable_properties.products,force=r.force.name,last_user_readable=ok,has_last_user=u~=nil,stone=a.get_item_count("stone")}))')
     assert.equal(setup.type, 'simple-entity')
     assert.equal(setup.force, 'neutral')
     assert(setup.last_user_readable && !setup.has_last_user, JSON.stringify(setup))
     const present = await preflight('harvest_product', '{product_name="stone",search_radius=8}')
-    assert.equal(present.ok, true, JSON.stringify(present))
+    assert.equal(present.ok, true, JSON.stringify({ present, setup }))
     assert.equal(present.natural_source.name, setup.name)
     await runOperation('harvest_product', { product_name: 'stone', count: 1, search_radius: 8 })
     const final = await lua('local r=storage.native_admission_rock; local out={rock=r.valid,stone=a.get_item_count("stone"),humans=#game.connected_players,speed=game.speed}; '
