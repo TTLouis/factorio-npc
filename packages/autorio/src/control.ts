@@ -241,6 +241,18 @@ function operation_preflight(name: string, args: Record<string, any>) {
   if (!args || typeof args !== 'object') return reject('invalid_preflight_args')
   if (name === 'walk_to_position') return navigation_position_preflight(actor, args)
 
+  if (name === 'move_items_with_player') {
+    if (!actor || !actor.is_valid) return reject('no_actor')
+    const player_name = args.player_name
+    const details = { field: 'player_name', identity: player_name }
+    if (typeof player_name !== 'string' || player_name.length === 0) return reject('player_unavailable', details)
+    // Match execution's availability check. An NPC display name is not a
+    // LuaPlayer identity; refuse before any operation in the decision runs.
+    const player = game.get_player(player_name)
+    if (!player || !player.valid || !player.connected || !player.character) return reject('player_unavailable', details)
+    return accept(details)
+  }
+
   if (name === 'research_technology') {
     return research_operation_preflight(actor, args.technology_name)
   }

@@ -88,6 +88,30 @@ beforeEach(() => {
 })
 
 describe('transfer preflight facts: supply_entity', () => {
+  it.each([true, false])('refuses different ores competing for one initially empty slot, copper first=%s', (copper_first) => {
+    const { actor } = actor_with({ coal: 20, 'copper-ore': 80, 'iron-ore': 200 })
+    const parts = furnace_parts()
+    ;(parts.fuel as any).length = 1
+    ;(parts.source as any).length = 1
+    ;(parts.fuel as any).can_insert = vi.fn((stack: { name: string }) => stack.name === 'coal')
+    ;(parts.source as any).can_insert = vi.fn((stack: { name: string }) => stack.name !== 'coal')
+    const copper = { item_name: 'copper-ore', count: 80 }, iron = { item_name: 'iron-ore', count: 120 }
+    const target = furnace(11, parts)
+    const facts = transfer_preflight_facts(actor, target, 'supply_entity', { unit_number: 11,
+      items: [{ item_name: 'coal', count: 20 }, ...(copper_first ? [copper, iron] : [iron, copper])],
+    })!
+    expect(facts).toMatchObject({ ok: false, code: 'supply_destination_conflict', transfer: {
+      destination_conflict: { inventory_index: 2, slot_count: 1, item_names: copper_first ? ['copper-ore', 'iron-ore'] : ['iron-ore', 'copper-ore'] },
+    } })
+    expect(facts.transfer.items.every(item => item.expected_moved > 0)).toBe(true)
+    expect(transfer_preflight_facts(actor, target, 'supply_entity', { unit_number: 11,
+      items: [{ item_name: 'coal', count: 20 }, copper],
+    })!.ok).toBe(true)
+    // Multiple native input slots do not establish this sole-slot conflict.
+    ;(parts.source as any).length = 2
+    expect(transfer_preflight_facts(actor, target, 'supply_entity', { unit_number: 11, items: [copper, iron] })!.ok).toBe(true)
+  })
+
   it('rejects with supply_missing and counts when the NPC holds none of the item (zero coal)', () => {
     const { actor } = actor_with({ 'iron-plate': 10 })
     const target = furnace(15, furnace_parts())
@@ -170,7 +194,7 @@ describe('transfer preflight facts: supply_entity', () => {
     expect(facts.transfer.items[0]).toMatchObject({ destination_accepts: 8, expected_moved: 8, status: 'ok' })
   })
 
-  it('accepts a mixed batch with per-item statuses: one item that cannot move does not reject the others', () => {
+  it('refuses a mixed batch when one destination takes nothing, retaining every item fact', () => {
     // Fuel slot full: coal has nowhere to go (a refusal), while the ore still moves natively.
     const { actor } = actor_with({ 'iron-ore': 50, coal: 5 })
     const parts = furnace_parts({ fuel_room: 0 })
@@ -182,25 +206,46 @@ describe('transfer preflight facts: supply_entity', () => {
       items: [{ item_name: 'iron-ore', count: 50 }, { item_name: 'coal', count: 5 }],
     })!
 
-    expect(facts.ok).toBe(true)
-    expect(facts.code).toBeUndefined()
+    expect(facts.ok).toBe(false)
+    expect(facts.code).toBe('destination_full')
     expect(facts.transfer.items.map(item => [item.item_name, item.status])).toEqual([['iron-ore', 'ok'], ['coal', 'destination_full']])
   })
 
-  it('accepts when only some items are missing (an earlier missing item is reported per item, execution recovers)', () => {
+  it.each([true, false])('refuses occupied furnace input with usable fuel, blocked ore first=%s', (ore_first) => {
+    const { actor } = actor_with({ 'copper-ore': 75, wood: 18 })
+    const parts = furnace_parts({ source: { 'iron-ore': 42 } })
+    ;(parts.source as any).count_empty_stacks = vi.fn(() => 0)
+    ;(parts.source as any).can_insert = vi.fn((stack: { name: string }) => stack.name === 'iron-ore')
+    ;(parts.fuel as any).can_insert = vi.fn((stack: { name: string }) => stack.name === 'wood')
+    const ore = { item_name: 'copper-ore', count: 75 }, fuel = { item_name: 'wood', count: 18 }
+    const facts = transfer_preflight_facts(actor, furnace(3, parts), 'supply_entity', {
+      unit_number: 3, items: ore_first ? [ore, fuel] : [fuel, ore],
+    })!
+    expect(facts).toMatchObject({ ok: false, code: 'destination_full' })
+    expect(facts.transfer.items.find(item => item.item_name === 'copper-ore')).toMatchObject({
+      source_count: 75, expected_moved: 0, status: 'destination_full', refusal_cause: 'input_slot_holds_other_item',
+    })
+    expect(facts.transfer.items.find(item => item.item_name === 'wood')).toMatchObject({ expected_moved: 18, status: 'ok' })
+  })
+
+  it.each([true, false])('refuses all supply when one source is missing, missing item first=%s', (missing_first) => {
     const { actor } = actor_with({ 'iron-ore': 50 })
     const target = furnace(15, furnace_parts())
 
     const facts = transfer_preflight_facts(actor, target, 'supply_entity', {
       unit_number: 15,
-      items: [{ item_name: 'coal', count: 5 }, { item_name: 'iron-ore', count: 50 }],
+      items: missing_first
+        ? [{ item_name: 'coal', count: 5 }, { item_name: 'iron-ore', count: 50 }]
+        : [{ item_name: 'iron-ore', count: 50 }, { item_name: 'coal', count: 5 }],
     })!
 
-    expect(facts.ok).toBe(true)
-    expect(facts.transfer.items.map(item => [item.item_name, item.status, item.missing])).toEqual([['coal', 'supply_missing', 5], ['iron-ore', 'ok', 0]])
+    expect(facts.ok).toBe(false)
+    expect(facts.code).toBe('supply_missing')
+    expect(facts.transfer.items.find(item => item.item_name === 'coal')).toMatchObject({ status: 'supply_missing', source_count: 0, missing: 5 })
+    expect(facts.transfer.items.find(item => item.item_name === 'iron-ore')).toMatchObject({ status: 'ok', source_count: 50, expected_moved: 50 })
   })
 
-  it('rejects supply_entity only when every item would certainly move nothing, and lists every item', () => {
+  it('lists every item when all supply sources are missing', () => {
     const { actor } = actor_with({})
     const target = furnace(15, furnace_parts())
 
@@ -309,6 +354,7 @@ describe('operation_preflight wiring (autorio_preflight.operation)', () => {
     ;(held.actor as any).force = { index: 1 }
     current_target = undefined
     ;(globalThis as any).game.get_entity_by_unit_number = () => current_target
+    ;(globalThis as any).game.get_player = () => undefined
     vi.doMock('./actors/actor_controller', async (original) => ({
       ...(await original<typeof import('./actors/actor_controller')>()),
       get_controlled_actor: () => held.actor,
@@ -324,6 +370,33 @@ describe('operation_preflight wiring (autorio_preflight.operation)', () => {
     base.position = { x: 1, y: 1 }
     return base as LuaEntity
   }
+
+  it('refuses unavailable player identities before dispatch without treating the actor name as a player', () => {
+    const args = { player_name: 'SGLuna', item_name: 'copper-ore', max_count: 74, to_player: true }
+    const lookup = vi.fn((): any => undefined)
+    ;(globalThis as any).game.get_player = lookup
+    ;(held.actor as any).status_snapshot = () => ({ name: 'SGLuna' })
+    const inventory_calls = (held.main.get_item_count as any).mock.calls.length
+    expect(preflight('move_items_with_player', args)).toMatchObject({ ok: false, code: 'player_unavailable',
+      operation: 'move_items_with_player', field: 'player_name', identity: 'SGLuna' })
+    expect(lookup).toHaveBeenCalledWith('SGLuna')
+    for (const player of [{ valid: false, connected: true, character: {} }, { valid: true, connected: false, character: {} },
+      { valid: true, connected: true }]) {
+      lookup.mockReturnValue(player)
+      expect(preflight('move_items_with_player', args)).toMatchObject({ ok: false, code: 'player_unavailable' })
+    }
+    lookup.mockReturnValue({ valid: true, connected: true, character: {} })
+    expect(preflight('move_items_with_player', args)).toMatchObject({ ok: true, identity: 'SGLuna' })
+    expect((held.main.get_item_count as any).mock.calls.length).toBe(inventory_calls)
+    lookup.mockClear()
+    for (const player_name of ['', undefined, 42]) {
+      expect(preflight('move_items_with_player', { ...args, player_name })).toMatchObject({ ok: false, code: 'player_unavailable' })
+    }
+    expect(lookup).not.toHaveBeenCalled()
+    ;(held.actor as any).is_valid = false
+    expect(preflight('move_items_with_player', args)).toMatchObject({ ok: false, code: 'no_actor' })
+    expect(lookup).not.toHaveBeenCalled()
+  })
 
   it.each(['furnace', 'container', 'mining-drill'])('refuses setting a recipe on a %s before any recipe or inventory read', (type) => {
     const target: any = exact(15)
@@ -453,6 +526,16 @@ describe('operation_preflight wiring (autorio_preflight.operation)', () => {
     expect(result).toMatchObject({ code: 'supply_missing', operation: 'supply_entity', identity: 15 })
     expect(result.target.unit_number).toBe(15)
     expect(result.transfer.items[0]).toMatchObject({ item_name: 'coal', source_count: 0, requested: 5, missing: 5 })
+  })
+
+  it('rejects the live mixed supply even when its preceding ore transfer could move', () => {
+    current_target = exact(15)
+    const result = preflight('supply_entity', { unit_number: 15, items: [
+      { item_name: 'iron-ore', count: 41 }, { item_name: 'coal', count: 38 },
+    ] })
+    expect(result).toMatchObject({ ok: false, code: 'supply_missing', target: { unit_number: 15 } })
+    expect(result.transfer.items[0]).toMatchObject({ source_count: 50, expected_moved: 41, status: 'ok' })
+    expect(result.transfer.items[1]).toMatchObject({ source_count: 0, expected_moved: 0, status: 'supply_missing' })
   })
 
   it('rejects an unknown item name as the model-correctable unknown_prototype for supply_entity and move_items_exact', () => {

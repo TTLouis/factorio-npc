@@ -231,6 +231,15 @@ test('mutation identity preflight is read-only and limited to operations that ne
   assert.match(research, /'automation'/)
 
   assert.equal(renderOperationPreflight({ name: 'wait', args: { ticks: 60 } }), null)
+  const playerTransfer = renderOperationPreflight({ name: 'move_items_with_player', args: {
+    item_name: 'copper-ore', player_name: 'SGLuna', max_count: 74, to_player: true,
+  } })
+  assert.match(playerTransfer, /autorio_preflight/)
+  assert.match(playerTransfer, /move_items_with_player/)
+  assert.match(playerTransfer, /\['player_name'\]='SGLuna'/)
+  const positionWalk = renderOperationPreflight({ name: 'walk_to_position', args: { x: 10, y: -4, reach_distance: 0.75 } })
+  assert.match(positionWalk, /autorio_preflight/)
+  assert.match(positionWalk, /walk_to_position/)
 })
 
 test('tool calls reject unknown names, unsafe names, extras, and out-of-bound scans', () => {
