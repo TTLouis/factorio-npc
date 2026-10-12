@@ -154,6 +154,45 @@ test('gather_resource tree identity is rejected deterministically before mutatio
   assert.equal(memory.currentPlan('npc:sgluna').status, 'blocked')
 })
 
+test('a reach inside a furnace collision box is an argument error: one bounded correction turn, then admission', async () => {
+  const rcon = new RuntimeRcon()
+  const command = rcon.command.bind(rcon)
+  rcon.command = async text => text.includes('remote.call("autorio_preflight","operation"') && text.includes("'walk_to_position'")
+    ? JSON.stringify({ ok: false, code: 'navigation_position_inside_furnace_collision', operation: 'walk_to_position', minimum_collision_clearance: 1.2 })
+    : command(text)
+  const memory = new NpcDialogueMemory()
+  const replies = [
+    planMessage([{ name: 'walk_to_position', args: { x: 2, y: 0, reach_distance: 0.75 } }]),
+    planMessage([{ name: 'wait', args: { ticks: 60 } }]),
+  ]
+  const harness = []
+  const agent = new NpcAgentLoop({
+    rcon,
+    memory,
+    provider: async messages => {
+      harness.push(...messages.filter(message => message.role === 'user' && message.content.startsWith('[HARNESS]')).map(message => message.content))
+      return replies.shift() ?? planMessage([{ name: 'wait', args: { ticks: 60 } }])
+    },
+    systemPrompt: 'NPC test prompt',
+  })
+  const traced = []
+  const trace = agent.traceEvent.bind(agent)
+  agent.traceEvent = async (event, data) => {
+    traced.push({ event, data })
+    return trace(event, data)
+  }
+
+  await agent.request('stand next to the furnace', { sender: 'tester' })
+  assert.ok(harness.some(content => /rejected operation 1 \(walk_to_position\).*code navigation_position_inside_furnace_collision/.test(content)))
+  const recoverable = traced.filter(row => row.event === 'operations.preflight_recoverable')
+  assert.equal(recoverable.length, 1)
+  assert.equal(recoverable[0].data.failure_class, 'model_correctable_navigation_position_inside_furnace_collision')
+  assert.equal(recoverable[0].data.retry, 1)
+  assert.equal(rcon.mutations.length, 1)
+  assert.doesNotMatch(rcon.mutations[0], /walk_to_position/)
+  assert.notEqual(memory.currentPlan('npc:sgluna').status, 'blocked')
+})
+
 test('first batch admission failure preserves canonical plan, conversation, and Factorio error without replay', async () => {
   const underlying = 'autorio operation 1 failed: deterministic Factorio failure'
   const rcon = new RuntimeRcon({ batchFailure: underlying })
