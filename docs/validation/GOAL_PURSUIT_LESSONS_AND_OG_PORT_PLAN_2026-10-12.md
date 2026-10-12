@@ -1,6 +1,6 @@
 # Goal-pursuit experiment: lessons and OG port plan (2026-10-12)
 
-Status: handoff. **Nothing below has been ported yet.** The owner chose the original
+Status: porting. Unit 1 is merged; see [Build status](#build-status). The owner chose the original
 (OG) staged planner/executor harness on 2026-10-12; the opt-in direct goal-pursuit loop
 (`SGLUNA_GOAL_PURSUIT_MODE=direct`) is concluded as a dead end.
 
@@ -123,3 +123,27 @@ Each unit follows the AGENTS.md merge protocol: unit worktree, reviewer, `bash s
 green, repin the installer payload if shipped files changed, push to the integration branch. Every
 behaviour change gets a named trace event with `request_id` and a reason. No live e2e without the
 owner's go.
+
+## Build status
+
+| Unit | Commits on `experiment/jev-agent-architecture` | Status |
+|---|---|---|
+| 1. Native mod fixes | `2530d3c8` `7f469a5d` `b17b12a8` `926e97c2` `c2ac975a`, merge `969fefb2`, follow-ups `6fabdf5d` `afa0aa40` `db8bfae0` `a0647b49` | Merged. Static gates green. The `native-admission` real-engine lane, the OG equivalent of the `pursuit_factorio.mjs` fixtures, passed on 2026-10-12. |
+| 2. Facts and diagnostics | — | Not started |
+| 3. Active-step fact handoff | — | Not started |
+| 4. Dependency-aware batch stock accounting | — | Not started |
+| 5. Steam-power exact-layout fixture | — | Not started |
+
+Unit 1 notes:
+
+- `harvest_product` is natural-only: it takes neutral trees and rocks with no `last_user`, and fails closed. Rocks are `is_building` in the engine, so the guard excludes only placed buildings (`db8bfae0`); the pursuit source wrongly excluded rocks. No separate `harvest_natural_product` op or contract change. Fish is no longer a harvest source.
+- In the OG loop, argument-error refusals get the one bounded model-correction turn:
+  - malformed radius, position or count;
+  - a reach inside a furnace collision box;
+  - an expired placement candidate;
+  - a product that no tree or rock yields.
+- World-in-radius refusals go through the existing `blocked_preflight` path, with an MW5 replacement attempt. These are `resource_source_not_found`, `navigation_target_not_found`, `natural_harvest_source_not_found`, `resource_source_insufficient`, `supply_destination_conflict` and `player_unavailable`. That policy is awaiting the owner's decision.
+- `placement_item_missing` is deferred when an earlier operation in the same batch can supply the item. That deferral is traced as `placement.preflight_item_deferred`.
+- Real-engine proof:
+  - Done: trees, rocks, held-item placement, craft-then-place, exact ore under a tree.
+  - Not done: a player-touched natural entity, because one can't be made with zero connected players. The `operation_admission` nil-hole fix has unit tests only.

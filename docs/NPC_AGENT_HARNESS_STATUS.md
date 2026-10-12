@@ -8,6 +8,27 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 12: goal-pursuit native admission fixes ported to OG, unit 1 (static gates and real-engine lane passed, not live-validated)
+
+- **Why.** The owner concluded the direct goal-pursuit loop on 2026-10-12 and chose this harness. Its useful output was the native admission fixes in `packages/autorio`, now ported. The plan and build status are in the [port plan](validation/GOAL_PURSUIT_LESSONS_AND_OG_PORT_PLAN_2026-10-12.md#build-status).
+- **Native preflights** (merge `969fefb2`). They refuse, with stable codes and before dispatch, work the native layer cannot complete:
+  - gathers, navigation and harvests with no source in the radius;
+  - a recipe set on a furnace;
+  - a reach inside a furnace collision box;
+  - mixed or competing supplies, and transfers to an absent human;
+  - a placement item that isn't held.
+  - `harvest_product` is natural-only, and its target selection is exact.
+  - The admission reconcile no longer treats a missing receipt as complete.
+- **OG policy.** `6fabdf5d` and `afa0aa40` give argument-error refusals the one bounded correction turn. These are malformed args, a reach inside a furnace, an expired placement candidate, and a product no tree or rock yields. World-in-radius refusals still freeze through `blocked_preflight`, with an MW5 replacement attempt, pending the owner's decision. A same-batch craft defers `placement_item_missing`, traced as `placement.preflight_item_deferred`.
+- **Gates.** `bash scripts/test-local.sh all` exit 0: 2,076 runtime tests and 1,089 mod tests. The installer payload did not change.
+- **Real engine.** New opt-in lane `native-admission` (`c2ac975a`, `a0647b49`). `NPC_TEST_LANES=native-admission` passed on 2026-10-12, with zero connected players. It covered:
+  - refusals that left the world and the OG record unchanged;
+  - the real-engine recipe correction turn;
+  - harvesting a tree and a map rock, and the exact ore under a tree;
+  - held-item and craft-then-place placement.
+- **Rock fix** (`db8bfae0`). The lane found that Factorio sets `is_building` on every simple-entity, so the harvest guard had excluded map rocks. The pursuit source had the same bug. The guard now excludes only placed buildings (with an owner or a placing item).
+- **Open.** Units 2–5 of the port plan.
+
 ## October 9: step identity by text, just-in-time step contracts (static gates passed, not live-validated)
 
 - **Execution-draft wording** (`81ac9958`, owner OK). Planner prompts say every execution step is deterministic.
