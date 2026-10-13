@@ -596,4 +596,21 @@ describe('operation_preflight wiring (autorio_preflight.operation)', () => {
     }
     expect(scan).not.toHaveBeenCalled()
   })
+
+  it('declares a refusal_class on every refused result at the interface and never on an accepted one', () => {
+    expect(preflight('harvest_product', { product_name: 'not-an-item' })).toMatchObject({ ok: false, code: 'unknown_prototype', refusal_class: 'argument' })
+    expect(preflight('harvest_product', { product_name: 'stone', search_radius: 0 })).toMatchObject({ ok: false, code: 'invalid_harvest_search_radius', refusal_class: 'argument' })
+    expect(preflight('move_items_with_player', { player_name: '' })).toMatchObject({ ok: false, code: 'player_unavailable', refusal_class: 'world' })
+    expect(preflight('research_technology', { technology_name: 42 })).toMatchObject({ ok: false, code: 'invalid_name', refusal_class: 'world' })
+    expect(preflight('craft_item', { item_name: 42 })).toMatchObject({ ok: false, code: 'unknown_recipe', refusal_class: 'argument' })
+    expect(preflight('walk_to_position', null as any)).toMatchObject({ ok: false, code: 'invalid_preflight_args', refusal_class: 'argument' })
+    expect(preflight('rotate_entity', { unit_number: 'x' })).toMatchObject({ ok: false, code: 'invalid_unit_number', refusal_class: 'argument' })
+    const target: any = exact(15)
+    target.type = 'furnace'
+    current_target = target
+    expect(preflight('set_machine_recipe', { unit_number: 15, recipe_name: 'iron-plate' }))
+      .toMatchObject({ ok: false, code: 'not_recipe_machine', refusal_class: 'argument' })
+    current_target = undefined
+    expect(preflight('unlisted_operation', {})).not.toHaveProperty('refusal_class')
+  })
 })
