@@ -39,6 +39,8 @@ import {
   stepContractNeeds,
   fluidSourceHintsFromRead,
   rememberFluidHints,
+  expandableIngredients,
+  recipeKnownForItem,
 } from './handoff-packet.mjs'
 import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CLASS, REPLACEMENT_DECISION } from './authorization.mjs'
 import { REFUSAL_CLASS, refusalClassLabel, refusalClassOf } from './refusal-class.mjs'
@@ -2950,6 +2952,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // Repair unit D2: what a fresh executor can be told. Recipe facts are stable game data and outlive requests;
     // inventory observations are world state and reset with the entity observations. The mutation sequence orders them.
     this.handoffRecipeFacts = new Map()
+    this.handoffNoRecipeItems = new Set() // items the game answered "no recipe" for (raw resources): stable data, not re-read
     this.handoffTriggerCraftingReports = []
     this.handoffInventoryObservations = new Map()
     this.handoffTouchedItems = new Set()
@@ -3275,7 +3278,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // A restage the guard will refuse anyway spends no reads.
       if (!args.packet && role === EXECUTOR_ROLE && !this.restageGuardRefusal(safePoint)) {
         const before = getActivePlanningPlan(state)
-        const gathered = await this.gatherExecutorHandoffFacts({ state, actor: args.actor, runtime: args.runtime })
+        const gathered = await this.gatherExecutorHandoffFacts({ state, actor: args.actor, runtime: args.runtime, requestId })
         if (gathered?.refusal) {
           await this.jev.afterRestage(prepared, { restaged: false, reason: gathered.refusal })
           await this.traceEvent('context.restage_refused', { role, checkpoint, reason: gathered.refusal, reads_attempted: gathered.meta?.reads_attempted, request_id: requestId }, { requestId })
@@ -4783,6 +4786,57 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  // Unit 3b. Breadth first from the step's inventory roots through the ingredients of the recipes the derivation can expand,
+  // the same native getRecipeDetails read the model would make, at most `recipePrefetchReads` per handoff. A recipe fact that
+  // is already cached is not read again (its ingredients are still followed); an item the game has no recipe for is
+  // remembered so raw resources are not re-read at every restage. Results go through recordHandoffToolFacts, so the recipe
+  // cache bound applies. A fence refusal (`error.handoffFence`) rolls back what this call added and rethrows. Returns
+  // { reads, found, unreadable, no_recipe, truncated }; `truncated` means an uncached item was left unread.
+  async prefetchRecipeClosure({ roots, fence }) {
+    const limits = EXECUTOR_FACT_LIMITS
+    const stats = { reads: 0, found: 0, unreadable: 0, no_recipe: 0, truncated: false }
+    const before = new Set(this.handoffRecipeFacts.keys())
+    const knownRecipe = item => this.handoffNoRecipeItems.has(item) || recipeKnownForItem(item, [...this.handoffRecipeFacts.values()])
+    const queue = roots.map(root => root.item)
+    const seen = new Set()
+    let fenced = false
+    try {
+      while (queue.length > 0) {
+        const item = queue.shift()
+        if (seen.has(item)) continue
+        seen.add(item)
+        if (!knownRecipe(item)) {
+          if (stats.reads >= limits.recipePrefetchReads) { stats.truncated = true; break }
+          if (!fenced) { await this.handoffFenceCheck(fence, 'before'); fenced = true }
+          stats.reads += 1
+          let raw
+          let parsed
+          try {
+            raw = String(await this.rcon.command(this.observationToolCommand('getRecipeDetails', { item_or_recipe: item, requested_count: 1 }))).trim()
+            parsed = JSON.parse(raw)
+          }
+          catch { stats.unreadable += 1; continue }
+          if (parsed?.found === false && parsed.error === undefined) {
+            this.handoffNoRecipeItems.add(item)
+            while (this.handoffNoRecipeItems.size > limits.noRecipeItems) this.handoffNoRecipeItems.delete(this.handoffNoRecipeItems.values().next().value)
+            stats.no_recipe += 1
+            continue
+          }
+          this.recordHandoffToolFacts('getRecipeDetails', raw)
+          if (!recipeKnownForItem(item, [...this.handoffRecipeFacts.values()])) { stats.unreadable += 1; continue }
+          stats.found += 1
+        }
+        queue.push(...expandableIngredients(item, [...this.handoffRecipeFacts.values()]))
+      }
+      if (fenced) await this.handoffFenceCheck(fence, 'during')
+    }
+    catch (error) {
+      for (const key of [...this.handoffRecipeFacts.keys()]) if (!before.has(key)) this.handoffRecipeFacts.delete(key)
+      throw error
+    }
+    return stats
+  }
+
   async handoffFenceCheck(fence, phase) {
     const status = await deploymentStatus(this.rcon, { requireAllowed: true })
     if (actorChanged(fence, status)) {
@@ -4801,7 +4855,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // the executor only sees the packet after the batch finishes: counts, the checkpoint machine and residual needs are then
   // NOT read (`counts_deferred`); recipe facts and history still ride. `mode: 'refresh'` is the later read, taken after
   // the receipt landed: counts, machine and residual only.
-  async gatherExecutorHandoffFacts({ state, actor, runtime, mode = 'packet', refreshItems = [] }) {
+  async gatherExecutorHandoffFacts({ state, actor, runtime, mode = 'packet', refreshItems = [], requestId }) {
     try {
       const plan = getActivePlanningPlan(state)
       const step = plan?.steps?.[plan.active_step_index]
@@ -4842,6 +4896,32 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         catch (error) {
           if (error?.handoffFence) return { refusal: error.handoffFence, meta }
           return { refusal: 'research_handoff_fence_failed', meta }
+        }
+      }
+      // Unit 3b: the harness closes the recipe chain under the step's inventory roots itself, so a root nobody read a recipe
+      // for does not become a raw leaf in the residual derivation. Never while a batch is in flight (the executor sees this
+      // packet after it ends), and only under the actor/epoch fence.
+      if (mode === 'packet' && !inFlight && fence && needs.roots.length > 0) {
+        try {
+          const prefetch = await this.prefetchRecipeClosure({ roots: needs.roots, fence })
+          meta.recipe_prefetch = prefetch
+          meta.recipe_cache = this.handoffRecipeFacts.size
+          if (prefetch.reads > 0 || prefetch.truncated) {
+            await this.traceEvent('context.recipe_closure_prefetched', {
+              request_id: requestId ?? this.traceRequest?.id,
+              roots: needs.roots.map(root => root.item).slice(0, 4),
+              reads: prefetch.reads,
+              found: prefetch.found,
+              unreadable: prefetch.unreadable,
+              no_recipe: prefetch.no_recipe,
+              truncated: prefetch.truncated,
+              reason: 'step_roots_without_cached_recipe_facts',
+            }, { requestId })
+          }
+        }
+        catch (error) {
+          if (error?.handoffFence) return { refusal: error.handoffFence, meta }
+          meta.recipe_prefetch = { reads: 0, found: 0, unreadable: 0, no_recipe: 0, truncated: false, skipped: 'fence_status_unreadable' }
         }
       }
       const researchItems = researchFactItems(research)

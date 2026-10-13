@@ -116,6 +116,9 @@ export const EXECUTOR_FACT_LIMITS = Object.freeze({
   fluidHintChars: 1200,
   fluidHintStoreChars: 4000,
   fluidReadChars: 4096,
+  // Unit 3b: recipe reads the harness may spend on one handoff to close a step root's recipe chain.
+  recipePrefetchReads: 8,
+  noRecipeItems: 32,
 })
 
 const HEADER = '[HANDOFF] Rebuilt from durable harness state, not from the previous conversation. Verify against the world before acting.'
@@ -360,11 +363,22 @@ export function normalizeRecipeFact(raw, { source = 'unknown', tag, limits: over
   const products = rawProducts.map(normalizeProduct).filter(Boolean)
   if (ingredients.length === 0 && products.length === 0) return undefined
   const machines = [...new Set(asList(raw.machines).map(machine => factName(typeof machine === 'string' ? machine : machine?.name)).filter(Boolean))]
+  // Complete also means every quantity the derivation will use was reported: an ingredient without an amount, a product
+  // with neither an amount nor a min/max pair, or a probability outside [0, 1] makes the recipe shown but never derived from.
+  const amountsKnown = rawIngredients.every(entry => finiteNumber(entry?.amount) !== undefined)
+    && rawProducts.every(entry => finiteNumber(entry?.amount) !== undefined
+      || (finiteNumber(entry?.amount_min) !== undefined && finiteNumber(entry?.amount_max) !== undefined))
+  const probabilitiesKnown = rawProducts.every((entry) => {
+    const probability = entry?.probability ?? entry?.independent_probability
+    return probability === undefined || (finiteNumber(probability) !== undefined && probability >= 0 && probability <= 1)
+  })
   const complete = raw.truncated !== true
     && ingredients.length === rawIngredients.length
     && products.length === rawProducts.length
     && ingredients.length <= limits.recipeIngredients
     && products.length <= limits.recipeProducts
+    && amountsKnown
+    && probabilitiesKnown
   const energy = finiteNumber(raw.energy)
   return {
     name,
@@ -612,6 +626,17 @@ function expandableRecipe(item, recipes) {
   const usable = chosen.ingredients.every(ingredient => ingredient.type === 'item' && ingredient.amount > 0 && ingredient.name !== item)
   if (!usable) return undefined
   return { recipe: chosen, output }
+}
+
+/** The item ingredients of the one recipe a derivation would expand `item` with, or [] when no recipe can be counted exactly. */
+export function expandableIngredients(item, recipes) {
+  const expansion = expandableRecipe(item, asList(recipes))
+  return expansion ? expansion.recipe.ingredients.map(ingredient => ingredient.name) : []
+}
+
+/** Whether any recipe fact names `item` (by recipe name or as an item product). */
+export function recipeKnownForItem(item, recipes) {
+  return asList(recipes).some(recipe => recipe.name === item || recipe.products.some(product => product.name === item))
 }
 
 /** The items a derivation would need counts for, breadth first from the roots through the recipes it can expand. */
