@@ -142,6 +142,10 @@ start_factorio
 run_py run.py
 
 case "$LANE" in
+  steam-lab)
+    printf '[npc-test][steam-lab] Running steam/drill canary and native powered-lab research gate...\n'
+    run_py steam_power_cell.py
+    ;;
   entity-observation)
     run_py exact_entity_status_cell.py
     ;;

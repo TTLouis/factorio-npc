@@ -1,0 +1,190 @@
+{
+  "status": "pass",
+  "rung": "A1",
+  "actor_id": 1,
+  "target": "automation",
+  "science_seeded": 10,
+  "receipts": [
+    {
+      "operation": "supply_entity",
+      "receipt": {
+        "operation_id": 82,
+        "type": "moving_items",
+        "accepted": true,
+        "completed": true,
+        "code": "completed",
+        "tick": 27222,
+        "actor_id": 1,
+        "actor_kind": "standalone_character",
+        "force_index": 1,
+        "target_unit_number": 8,
+        "item_name": "coal",
+        "requested_count": 10,
+        "to_entity": true,
+        "moved_count": 10,
+        "held_count": 11
+      }
+    },
+    {
+      "operation": "place_entity",
+      "receipt": {
+        "operation_id": 83,
+        "type": "placing",
+        "accepted": true,
+        "completed": true,
+        "code": "completed",
+        "tick": 27226,
+        "actor_id": 1,
+        "actor_kind": "standalone_character",
+        "force_index": 1,
+        "entity_name": "lab",
+        "requested_position": {
+          "x": 10.5,
+          "y": 4.5
+        },
+        "placed_unit_number": 16,
+        "placed_entity_type": "lab",
+        "placed_position": {
+          "x": 10.5,
+          "y": 4.5
+        },
+        "placed_surface_index": 1,
+        "placed_direction": 0
+      }
+    },
+    {
+      "operation": "supply_entity",
+      "receipt": {
+        "operation_id": 84,
+        "type": "moving_items",
+        "accepted": true,
+        "completed": true,
+        "code": "completed",
+        "tick": 27230,
+        "actor_id": 1,
+        "actor_kind": "standalone_character",
+        "force_index": 1,
+        "target_unit_number": 16,
+        "item_name": "automation-science-pack",
+        "requested_count": 10,
+        "to_entity": true,
+        "moved_count": 10,
+        "held_count": 10
+      }
+    },
+    {
+      "operation": "place_entity",
+      "receipt": {
+        "operation_id": 86,
+        "type": "placing",
+        "accepted": true,
+        "completed": true,
+        "code": "completed",
+        "tick": 27541,
+        "actor_id": 1,
+        "actor_kind": "standalone_character",
+        "force_index": 1,
+        "entity_name": "small-electric-pole",
+        "requested_position": {
+          "x": 12.5,
+          "y": 1.5
+        },
+        "placed_unit_number": 17,
+        "placed_entity_type": "electric-pole",
+        "placed_position": {
+          "x": 12.5,
+          "y": 1.5
+        },
+        "placed_surface_index": 1,
+        "placed_direction": 0
+      }
+    }
+  ],
+  "submission": [
+    true,
+    "Research request queued; verify technology completion separately",
+    1
+  ],
+  "unpowered": {
+    "tick": 27540,
+    "speed": 1,
+    "humans": 0,
+    "actor_id": 1,
+    "actor_valid": true,
+    "actor_kind": "standalone_character",
+    "lab_id": 16,
+    "current": "automation",
+    "progress": 0,
+    "researched": false,
+    "science": 10,
+    "lab_status": "no_power",
+    "lab_energy": 0,
+    "lab_network": 0,
+    "engine_network": 1,
+    "engine_generating": 1500,
+    "steam": 200,
+    "lab_count": 1,
+    "artificial_power_count": 0
+  },
+  "before": {
+    "tick": 27850,
+    "speed": 1,
+    "humans": 0,
+    "actor_id": 1,
+    "actor_valid": true,
+    "actor_kind": "standalone_character",
+    "lab_id": 16,
+    "current": "automation",
+    "progress": 0.05133333333333317,
+    "researched": false,
+    "science": 10,
+    "lab_status": "working",
+    "lab_energy": 1066.6666666666667,
+    "lab_network": 1,
+    "engine_network": 1,
+    "engine_generating": 2500,
+    "steam": 200,
+    "lab_count": 1,
+    "artificial_power_count": 0
+  },
+  "after": {
+    "tick": 28157,
+    "speed": 1,
+    "humans": 0,
+    "actor_id": 1,
+    "actor_valid": true,
+    "actor_kind": "standalone_character",
+    "lab_id": 16,
+    "current": "automation",
+    "progress": 0.10250000000000101,
+    "researched": false,
+    "science": 9,
+    "lab_status": "working",
+    "lab_energy": 1066.6666666666667,
+    "lab_network": 1,
+    "engine_network": 1,
+    "engine_generating": 2500,
+    "steam": 200,
+    "lab_count": 1,
+    "artificial_power_count": 0
+  },
+  "power_condition": {
+    "ok": true,
+    "kind": "electric_network_satisfied",
+    "satisfied": true,
+    "current": 1,
+    "minimum": 1,
+    "entity_name": "lab",
+    "found": 1,
+    "truncated": false,
+    "statuses": {
+      "working": 1
+    },
+    "without_producer": 0,
+    "producers": [
+      "steam-engine"
+    ],
+    "tick": 28158,
+    "progress_known": false
+  }
+}
