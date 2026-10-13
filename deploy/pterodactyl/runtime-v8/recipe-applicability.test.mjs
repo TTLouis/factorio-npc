@@ -38,6 +38,10 @@ test('native recipe filter rejects only proven unavailable routes and keeps lock
   assert.equal(hidden.hidden, true)
   assert.equal(hidden.hidden_from_player_crafting, true)
   assert.equal(hidden.hand_craftable_category, false)
+  const permissions = recipeFactsFromDetails(details([{ ...recipe('permissions', undefined), allow_as_intermediate: false, allow_intermediates: true }]))[0]
+  assert.equal(permissions.allow_as_intermediate, false)
+  assert.equal(permissions.allow_intermediates, true)
+  assert.equal(hidden.allow_as_intermediate, undefined)
   assert.equal(deriveResidualNeeds({ roots: [{ item: 'widget', count: 2 }], recipes: [facts[0]], held: new Map([['widget', 0], ['iron-plate', 0]]) }).ok, true)
 })
 

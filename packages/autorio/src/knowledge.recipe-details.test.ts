@@ -43,6 +43,15 @@ beforeEach(() => {
 })
 
 describe('recipe details use Factorio 2.0 recipe category fields', () => {
+  it('reports native intermediate permissions without treating missing flags as permission', () => {
+    const item = recipe('item', 'item') as any
+    const actor = actorWithRecipes({ item })
+    expect(recipe_details_for_actor(actor, 'item').recipes[0].allow_intermediates).toBeUndefined()
+    item.prototype.allow_as_intermediate = false
+    item.prototype.allow_intermediates = true
+    expect(recipe_details_for_actor(actor, 'item').recipes[0]).toMatchObject({ allow_as_intermediate: false, allow_intermediates: true })
+  })
+
   it('reports native surface eligibility independently of research locks and honors inclusive bounds and ignore flag', () => {
     const locked = recipe('locked', 'locked') as any
     locked.enabled = false

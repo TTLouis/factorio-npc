@@ -466,6 +466,8 @@ export function recipe_details_for_actor(actor: ControlledActor, item_or_recipe:
         hand_craftable_category: hand_craftable,
         hand_crafting: hand_crafting_summary(actor, recipe, hand_craftable),
         hidden_from_player_crafting: recipe.prototype?.hidden_from_player_crafting,
+        allow_as_intermediate: recipe.prototype?.allow_as_intermediate,
+        allow_intermediates: recipe.prototype?.allow_intermediates,
         ingredients: ingredient_summaries(recipe),
         products: product_summaries(recipe),
         crafting_machine_count: machine_result.matched_count,
