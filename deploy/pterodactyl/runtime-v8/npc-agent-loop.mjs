@@ -37,6 +37,8 @@ import {
   researchFactItems,
   selectRecipeFacts,
   stepContractNeeds,
+  fluidSourceHintsFromRead,
+  rememberFluidHints,
 } from './handoff-packet.mjs'
 import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CLASS, REPLACEMENT_DECISION } from './authorization.mjs'
 import { REFUSAL_CLASS, refusalClassLabel, refusalClassOf } from './refusal-class.mjs'
@@ -2952,6 +2954,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.handoffInventoryObservations = new Map()
     this.handoffTouchedItems = new Set()
     this.handoffRequirementMachines = new Map()
+    this.handoffFluidHints = new Map() // historical native fluid-tile anchors (unit 3a), keyed surface_index:x:y
     this.worldMutationSeq = 0
     this.batchInFlight = false // an operation batch was sent and its receipt has not been read yet
     this.pendingExecutorFactsRefresh = null // an executor handoff whose counts were deferred because of that batch
@@ -4660,6 +4663,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.handoffInventoryObservations = new Map()
     this.handoffTouchedItems = new Set()
     this.handoffRequirementMachines = new Map()
+    this.handoffFluidHints = new Map()
   }
 
   // The world changed, or may have: an operation batch was sent, or a batch receipt was read. Observations taken
@@ -4694,7 +4698,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   // Tool results the planner or executor read from the live game that a later executor should not have to re-read.
-  recordHandoffToolFacts(toolName, raw) {
+  recordHandoffToolFacts(toolName, raw, args) {
     try {
       if (toolName === 'getRecipeDetails') {
         let parsed
@@ -4702,6 +4706,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         catch { return }
         const tag = this.observationTag()
         for (const fact of recipeFactsFromDetails(parsed, { tag })) this.rememberRecipeFact(fact)
+      }
+      else if (toolName === 'getFluidSourceTiles') {
+        // Only a well-formed answer to the request that was made adds anchors; an empty, failed or mismatched read changes nothing.
+        const learned = fluidSourceHintsFromRead(raw, args, this.observationTag())
+        if (learned.anchors) rememberFluidHints(this.handoffFluidHints, learned.anchors)
       }
       else if (toolName === 'getInventoryItems') {
         const counts = parseInventoryCounts(raw)
@@ -4865,6 +4874,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       for (const item of this.handoffInventoryObservations.keys()) addItem(item)
       const machineRequirement = checkpointMachineRequirements(step.completion_contract)[0]
       const historical = this.historicalEntityFacts()
+      const fluidHints = [...this.handoffFluidHints.values()].reverse() // newest first
 
       meta.read_items = readItems
       const fresh = new Map()
@@ -4963,8 +4973,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         const any = research.length > 0 || items.length > 0 || unavailable.length > 0 || machine || residual
         return { facts: any ? { recipes, counts, machine, residual, research, historical_entities: historical } : undefined, meta }
       }
-      const hasContent = research.length > 0 || recipes.length > 0 || items.length > 0 || unavailable.length > 0 || counts.deferred || machine || residual || historical.length > 0
-      return { facts: hasContent ? { recipes, counts, machine, residual, research, historical_entities: historical } : undefined, meta }
+      const hasContent = research.length > 0 || recipes.length > 0 || items.length > 0 || unavailable.length > 0 || counts.deferred || machine || residual || historical.length > 0 || fluidHints.length > 0
+      return { facts: hasContent ? { recipes, counts, machine, residual, research, historical_entities: historical, fluid_source_hints: fluidHints } : undefined, meta }
     }
     catch (error) {
       this.log(`[handoff] executor facts failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -5058,7 +5068,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async traceExecutorFactsCarried({ packet, restaged, checkpoint, requestId, meta }) {
     try {
       const summary = packet.executor_facts
-      const factRecord = key => key.startsWith('recipe_fact_') || ['held_counts', 'held_counts_stale', 'checkpoint_machine', 'residual_needs', 'historical_entities'].includes(key)
+      const factRecord = key => key.startsWith('recipe_fact_') || ['held_counts', 'held_counts_stale', 'checkpoint_machine', 'residual_needs', 'historical_entities', 'fluid_source_hints'].includes(key)
       await this.traceEvent('context.executor_facts_carried', {
         request_id: requestId,
         handoff_id: restaged.handoff_id,
@@ -5080,6 +5090,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         dropped_for_size: (packet.dropped ?? []).filter(factRecord),
         reason: 'executor_context_rebuilt_without_the_prior_conversation_reads',
       }, { requestId })
+      if (summary.fluid_source_hints !== undefined) {
+        await this.traceEvent('context.fluid_source_hints_carried', {
+          request_id: requestId,
+          handoff_id: restaged.handoff_id,
+          checkpoint,
+          retained: summary.fluid_source_hints,
+          known: this.handoffFluidHints.size,
+          dropped_for_size: (packet.dropped ?? []).includes('fluid_source_hints'),
+          reason: 'historical_native_tile_locations_only',
+        }, { requestId })
+      }
     }
     catch {}
   }
@@ -11747,7 +11768,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const original = String(results[index].content ?? '')
       const toolName = admittedPrepared[index]?.tool?.function?.name
       this.recordLiveEntityToolResult(toolName, original)
-      if (admittedCached[index] !== true) this.recordHandoffToolFacts(toolName, original) // D2: stable recipe facts and counts a later executor is briefed with
+      if (admittedCached[index] !== true) this.recordHandoffToolFacts(toolName, original, admittedPrepared[index]?.args) // D2: stable recipe facts and counts a later executor is briefed with
       const loadedSkill = this.recordLoadedSkillToolResult(toolName, admittedPrepared[index]?.args, original)
       if (loadedSkill) {
         await this.traceEvent('skill.context_loaded', {

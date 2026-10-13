@@ -52,6 +52,7 @@ const serpent = inventory => `{\n${Object.entries(inventory).filter(([, count]) 
 function liveGame({ inventory = {} } = {}) {
   const game = new FakeFactorio({ inventory })
   game.conditionReads = []
+  game.fluidReads = []
   game.failConditionReads = false
   game.onConditionRead = undefined
   const base = game.command.bind(game)
@@ -60,6 +61,12 @@ function liveGame({ inventory = {} } = {}) {
     if (text.includes('"recipe_details"')) {
       const name = /"recipe_details",['"]([a-z0-9-]+)['"]/.exec(text)?.[1]
       return JSON.stringify(RECIPES[name] ? { found: true, query: name, truncated: false, recipes: [RECIPES[name]] } : { found: false, query: name })
+    }
+    if (text.includes('"get_fluid_source_tiles"')) {
+      // The far read finds water; a small radius around the actor finds none (the native answer for an empty local search).
+      const radius = Number(/search_radius=(\d+)/.exec(text)?.[1] ?? 128)
+      game.fluidReads.push(radius)
+      return JSON.stringify(radius === 128 ? WATER_FAR : { ...WATER_FAR, search_radius: radius, samples: [], returned_count: 0 })
     }
     if (text.includes('"evaluate_condition"') && text.includes('inventory_count')) {
       game.conditionReads.push(/"item_name"\s*:\s*"([^"]+)"/.exec(text)?.[1])
@@ -586,4 +593,92 @@ test('D2: the C8 step-close restage passes the runtime the last receipt showed, 
   world.agent.batchInFlight = false
   const gathered = await world.agent.gatherExecutorHandoffFacts({ state: world.memory.planningState(KEY), actor: world.agent.epoch, runtime: seen.runtime })
   assert.equal(gathered.meta.counts_deferred, 'batch_in_flight')
+})
+
+// --- Unit 3a: historical fluid-source hints ---------------------------------------------------------------------------
+
+const WATER_FAR = {
+  ok: true, fluid_name: 'water', actor_position: { x: 0, y: 0 }, surface_index: 1, observed_tick: 77, search_radius: 128,
+  coverage: 'generated_bounding_square', checked_chunks: 81, matching_tile_prototypes: 2,
+  samples: [{ name: 'water', fluid_name: 'water', position: { x: 22, y: 8 }, surface_index: 1 }, { name: 'water', fluid_name: 'water', position: { x: -82, y: -19 }, surface_index: 1 }],
+  returned_count: 2, truncated: false, ordering: 'native_samples_not_nearest',
+}
+const fluidRound = () => ({
+  tool_calls: [
+    read('getFluidSourceTiles', { fluid_name: 'water' }, 'water_far'),
+    read('getFluidSourceTiles', { fluid_name: 'water', search_radius: 16 }, 'water_local'),
+  ].map((call, index) => ({ ...call, index })),
+})
+
+test('3a: water seen by an earlier read and then an empty local read: the restage packet still lists the anchors as historical, and the carry is traced', async () => {
+  const world = harness({ game: liveGame(), script: [fluidRound(), readsRound(), plannerCommit(), executorGather(5)] })
+  await world.say()
+  assert.deepEqual(world.game.fluidReads, [128, 16], 'the far read found water, the local read found none')
+  assert.deepEqual([...world.agent.handoffFluidHints.keys()], ['1:22:8', '1:-82:-19'], 'the empty local read erased nothing')
+  world.give('copper-plate', 10)
+  await world.agent.taskStatusReceipt()
+  const result = await restageToFreshExecutor(world)
+  assert.equal(result.restaged, true, JSON.stringify(result))
+  assert.equal(world.agent.messages.filter(message => message.role === 'assistant' || message.role === 'tool').length, 0, 'the reads themselves are gone from the conversation')
+
+  const line = lineOf(world.agent.messages, 'fluid_source_hints')
+  assert.match(line, /^fluid_source_hints \(HISTORICAL: positions where native fluid tiles were observed earlier, newest first; NOT current, not nearest, not a reachable or legal placement; re-check with getFluidSourceTiles before placing anything\): /)
+  assert.match(line, /water:water@\(-82,-19\) surface=1 observed tick:77,epoch:3 \| water:water@\(22,8\) surface=1 observed tick:77,epoch:3$/)
+
+  const row = world.rows('context.fluid_source_hints_carried').find(item => item.data.checkpoint === 'C7')
+  assert.ok(row, 'context.fluid_source_hints_carried was traced')
+  assert.equal(row.request_id, world.requestId())
+  assert.equal(row.data.request_id, world.requestId())
+  assert.equal(row.data.handoff_id, result.handoff_id)
+  assert.equal(row.data.reason, 'historical_native_tile_locations_only')
+  assert.equal(row.data.retained, 2)
+  assert.equal(row.data.known, 2)
+  assert.equal(row.data.dropped_for_size, false)
+  assert.ok(world.rows('context.fluid_source_hints_carried').some(item => item.data.checkpoint === 'C3'), 'the commit handoff carried them too')
+  assert.equal(world.rows('context.executor_facts_carried').find(item => item.data.checkpoint === 'C7').data.dropped_for_size.includes('fluid_source_hints'), false)
+
+  // A reset clears them like the other handoff caches; the next restage carries none and traces none.
+  world.agent.resetHandoffObservations()
+  assert.equal(world.agent.handoffFluidHints.size, 0)
+  const carried = world.rows('context.fluid_source_hints_carried').length
+  const again = await world.agent.restageBetweenTurns({ checkpoint: 'C7', role: 'executor', reason: 'recovery:after_reset', actor: world.agent.epoch, requestId: world.requestId() })
+  assert.equal(again.restaged, true, JSON.stringify(again))
+  assert.doesNotMatch(textOf(stepBlock(world.agent.messages)), /fluid_source_hints/)
+  assert.equal(world.rows('context.fluid_source_hints_carried').length, carried)
+})
+
+test('3a: a size-dropped hint record is traced as dropped, not silently missing', async () => {
+  const world = await plannerCollectedTenCopper()
+  world.agent.recordHandoffToolFacts('getFluidSourceTiles', JSON.stringify(WATER_FAR), { fluid_name: 'water' })
+  assert.equal(world.agent.handoffFluidHints.size, 2)
+  // The packet drops whole records when over its limit (handoff-packet.test.mjs); the loop reports it instead of going silent.
+  const packet = { executor_facts: { recipe_facts: 3, fluid_source_hints: 0 }, dropped: ['fluid_source_hints'] }
+  await world.agent.traceExecutorFactsCarried({ packet, restaged: { handoff_id: 'ho_dropped' }, checkpoint: 'C7', requestId: world.requestId(), meta: {} })
+  const row = world.rows('context.fluid_source_hints_carried').find(item => item.data.checkpoint === 'C7')
+  assert.equal(row.data.retained, 0)
+  assert.equal(row.data.known, 2)
+  assert.equal(row.data.dropped_for_size, true)
+  assert.equal(row.data.reason, 'historical_native_tile_locations_only')
+})
+
+test('3a: only a well-formed answer to the request that was made reaches the cache', async () => {
+  const world = await plannerCollectedTenCopper()
+  const record = (answer, args) => world.agent.recordHandoffToolFacts('getFluidSourceTiles', typeof answer === 'string' ? answer : JSON.stringify(answer), args)
+  const request = { fluid_name: 'water' }
+  for (const [answer, args] of [
+    ['not json', request],
+    [{ ...WATER_FAR, ok: false, code: 'fluid_source_search_unexplored' }, request],
+    [{ ...WATER_FAR, search_radius: 64 }, request], // a radius the request did not make
+    [WATER_FAR, { fluid_name: 'steam' }], // another fluid than asked
+    [WATER_FAR, undefined], // no request to check the answer against
+    [{ ...WATER_FAR, returned_count: 3 }, request],
+    [{ ...WATER_FAR, samples: [{ ...WATER_FAR.samples[0], surface_index: 2 }, WATER_FAR.samples[1]] }, request],
+    [{ ...WATER_FAR, padding: 'x'.repeat(5000) }, request],
+  ]) record(answer, args)
+  assert.equal(world.agent.handoffFluidHints.size, 0)
+  record(WATER_FAR, request)
+  assert.equal(world.agent.handoffFluidHints.size, 2)
+  record({ ...WATER_FAR, samples: [], returned_count: 0 }, request)
+  record('not json', request)
+  assert.equal(world.agent.handoffFluidHints.size, 2, 'an empty or failed read never erases anchors')
 })

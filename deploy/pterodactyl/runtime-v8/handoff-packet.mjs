@@ -76,6 +76,7 @@ export const HANDOFF_DROP_ORDER = Object.freeze([
   'jev_facts',
   'note',
   'historical_entities',
+  'fluid_source_hints',
   'receipt',
   'skills',
   'runtime',
@@ -110,6 +111,11 @@ export const EXECUTOR_FACT_LIMITS = Object.freeze({
   researchTargets: 4,
   researchNodes: 8,
   researchChars: 1600,
+  // Historical native fluid-tile anchors (unit 3a): bounded count, rendered length, stored length and accepted answer size.
+  fluidHints: 16,
+  fluidHintChars: 1200,
+  fluidHintStoreChars: 4000,
+  fluidReadChars: 4096,
 })
 
 const HEADER = '[HANDOFF] Rebuilt from durable harness state, not from the previous conversation. Verify against the world before acting.'
@@ -717,8 +723,8 @@ function stackText(entry) {
   return `${entry.type === 'fluid' ? 'fluid ' : ''}${amountText(entry)} ${entry.name}${probability}`
 }
 
-// Joins whole parts up to a character budget; the parts that do not fit are counted, never cut.
-function joinBounded(parts, separator, max) {
+// The whole parts that fit a character budget (the first part is always kept).
+function boundedKept(parts, separator, max) {
   const kept = []
   let used = 0
   for (const part of parts) {
@@ -727,6 +733,12 @@ function joinBounded(parts, separator, max) {
     kept.push(part)
     used = next
   }
+  return kept
+}
+
+// Joins whole parts up to a character budget; the parts that do not fit are counted, never cut.
+function joinBounded(parts, separator, max) {
+  const kept = boundedKept(parts, separator, max)
   const left = parts.length - kept.length
   return `${kept.join(separator)}${left > 0 ? `${separator}(+${left} more)` : ''}`
 }
@@ -809,6 +821,94 @@ function residualRecord(residual, limits) {
   }
 }
 
+// --- Historical native fluid-tile anchors (unit 3a) ----------------------------------------------------------------
+//
+// getFluidSourceTiles answers live only in the conversation that asked, and a restage or compaction discards them. The
+// harness keeps the tile positions a WELL-FORMED native answer reported, as history: where water was observed, not
+// where it is reachable, legal to place on, or nearest. The validator mirrors the answer the mod actually returns
+// (packages/autorio fluid_source_observation) and refuses anything that does not match the request it answers.
+
+const FLUID_COORDINATE_LIMIT = 10000256
+
+const isPlainObject = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+
+export function fluidHintKey(anchor) {
+  return `${anchor.surface_index}:${anchor.position.x}:${anchor.position.y}`
+}
+
+/**
+ * The anchors in one getFluidSourceTiles answer, or `{ rejected: <reason> }`. `raw` is the answer text, `args` the request
+ * the model made (fluid_name, search_radius default 128, limit default 8), `tag` where the read happened (its tick is
+ * replaced by the game tick the answer itself reports). An empty answer is `{ rejected: 'no_samples' }`: nothing to keep.
+ */
+export function fluidSourceHintsFromRead(raw, args, tag, limits = EXECUTOR_FACT_LIMITS) {
+  const rejected = reason => ({ rejected: reason })
+  if (typeof raw !== 'string' || raw.length > limits.fluidReadChars) return rejected('unreadable_or_oversized')
+  let result
+  try { result = JSON.parse(raw) }
+  catch { return rejected('unreadable_or_oversized') }
+  if (!isPlainObject(result) || result.ok !== true) return rejected('not_a_successful_answer')
+  if (!isPlainObject(args)) return rejected('request_unknown')
+  const fluid = factName(result.fluid_name)
+  if (!fluid || result.fluid_name !== args.fluid_name) return rejected('fluid_name_mismatch')
+  if (result.coverage !== 'generated_bounding_square') return rejected('coverage_not_declared')
+  if (!Number.isSafeInteger(result.surface_index) || result.surface_index < 1) return rejected('surface_index_invalid')
+  if (!Number.isSafeInteger(result.observed_tick) || result.observed_tick < 0) return rejected('observed_tick_invalid')
+  const radius = args.search_radius ?? 128
+  if (!Number.isSafeInteger(radius) || radius < 1 || radius > 256 || result.search_radius !== radius) return rejected('search_radius_mismatch')
+  const limit = args.limit ?? 8
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 8) return rejected('limit_invalid')
+  // An empty Lua table prints as [] or {}.
+  const samples = Array.isArray(result.samples) ? result.samples
+    : isPlainObject(result.samples) && Object.keys(result.samples).length === 0 ? [] : undefined
+  if (!samples || typeof result.truncated !== 'boolean' || result.returned_count !== samples.length || samples.length > limit) return rejected('sample_count_inconsistent')
+  if (samples.length === 0) return rejected('no_samples')
+  const inRange = value => Number.isInteger(value) && Math.abs(value) <= FLUID_COORDINATE_LIMIT
+  if (samples.some(sample => !isPlainObject(sample) || !factName(sample.name) || sample.fluid_name !== result.fluid_name
+    || sample.surface_index !== result.surface_index || !inRange(sample.position?.x) || !inRange(sample.position?.y))) return rejected('sample_invalid')
+  const as_of = normalizeFactTag({ ...tag, tick: result.observed_tick })
+  return {
+    anchors: samples.map(sample => ({
+      name: sample.name,
+      fluid_name: sample.fluid_name,
+      surface_index: sample.surface_index,
+      position: { x: sample.position.x, y: sample.position.y },
+      as_of,
+    })),
+  }
+}
+
+/** Merge anchors into a Map keyed surface_index:x:y (most recent last). Bounded by count and by serialized size; returns the number evicted. */
+export function rememberFluidHints(store, anchors, limits = EXECUTOR_FACT_LIMITS) {
+  for (const anchor of anchors) {
+    const key = fluidHintKey(anchor)
+    store.delete(key) // a re-read is the most recent read
+    store.set(key, anchor)
+  }
+  let evicted = 0
+  while (store.size > 0 && (store.size > limits.fluidHints || JSON.stringify([...store.values()]).length > limits.fluidHintStoreChars)) {
+    store.delete(store.keys().next().value)
+    evicted += 1
+  }
+  return evicted
+}
+
+function fluidHintsRecord(hints, limits) {
+  const list = asList(hints).filter(anchor => isPlainObject(anchor) && factName(anchor.name) && factName(anchor.fluid_name)
+    && Number.isSafeInteger(anchor.surface_index) && Number.isInteger(anchor.position?.x) && Number.isInteger(anchor.position?.y)).slice(0, limits.fluidHints)
+  if (list.length === 0) return undefined
+  const parts = list.map(anchor => `${anchor.fluid_name}:${anchor.name}@(${anchor.position.x},${anchor.position.y}) surface=${anchor.surface_index} observed ${tagText(anchor.as_of)}`)
+  const kept = boundedKept(parts, ' | ', limits.fluidHintChars)
+  const more = parts.length - kept.length
+  return {
+    key: 'fluid_source_hints',
+    block: 'step',
+    drop: 'fluid_source_hints',
+    shown: kept.length,
+    text: `fluid_source_hints (HISTORICAL: positions where native fluid tiles were observed earlier, newest first; NOT current, not nearest, not a reachable or legal placement; re-check with getFluidSourceTiles before placing anything): ${kept.join(' | ')}${more > 0 ? ` | (+${more} more)` : ''}`,
+  }
+}
+
 function historicalRecord(entities, limits) {
   const list = asList(entities).filter(entry => factName(entry?.name) && Number.isSafeInteger(entry.count)).slice(0, limits.historicalKinds)
   if (list.length === 0) return undefined
@@ -848,6 +948,8 @@ function executorFactRecords(facts, plan, step, limits) {
   })
   const historical = historicalRecord(facts.historical_entities, limits)
   if (historical) records.push(historical)
+  const fluidHints = fluidHintsRecord(facts.fluid_source_hints, limits)
+  if (fluidHints) records.push(fluidHints)
   return records
 }
 
@@ -866,6 +968,9 @@ function executorFactsSummary(facts, kept) {
     residual_needs: keys.has('residual_needs') ? asList(facts?.residual?.rows).length : 0,
     machine: keys.has('checkpoint_machine') ? (facts?.machine?.state ?? 'none') : 'none',
     historical_entity_kinds: keys.has('historical_entities') ? asList(facts?.historical_entities).length : 0,
+    ...(asList(facts?.fluid_source_hints).length > 0
+      ? { fluid_source_hints: keys.has('fluid_source_hints') ? kept.find(record => record.key === 'fluid_source_hints').shown : 0 }
+      : {}),
     ...(keys.has('counts_deferred') ? { counts_deferred: 'batch_in_flight' } : {}),
   }
 }
@@ -983,7 +1088,7 @@ export function estimateTokens(chars) {
  * @param {object} [args.runtime] compact runtime state (task_state, queue_length, idle)
  * @param {{sender:string,text:string}} [args.amendment] a staged user amendment not yet applied (mandatory, never dropped by size)
  * @param {{family:string,text:string}[]} [args.jevFacts] U11 advisory: bounded deterministic facts for the families Jev selected (dropped first when over size)
- * @param {object} [args.executorFacts] D2: harness-read facts for a fresh executor ({recipes, counts, machine, residual, historical_entities}); each record is labelled fresh, stale or historical
+ * @param {object} [args.executorFacts] D2: harness-read facts for a fresh executor ({recipes, counts, machine, residual, historical_entities, fluid_source_hints}); each record is labelled fresh, stale or historical
  * @param {string[]} [args.jevHints] U11 advisory: families Jev selected that have no parameterless fact read (one hint line)
  */
 export function buildHandoffPacket({ planningState, role, checkpoint, reason = '', note = '', budget = '', actor, runtime, shelfCandidates, amendment, jevFacts, jevHints, executorFacts, previousContextChars, now, limits: limitOverrides } = {}) {
