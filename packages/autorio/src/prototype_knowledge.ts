@@ -228,6 +228,7 @@ function entity_details(prototype: any) {
     name: prototype.name,
     type: prototype.type,
     is_building: prototype.is_building,
+    energy_source: energy_source_kind(prototype),
     tile_width: prototype.tile_width,
     tile_height: prototype.tile_height,
     collision_box: prototype.collision_box,
@@ -302,7 +303,7 @@ function fluid_details(prototype: any) {
 }
 
 
-function energy_source_kind(prototype: any): PrototypeEnergySource {
+export function energy_source_kind(prototype: any): PrototypeEnergySource {
   if (prototype?.burner_prototype) return 'burner'
   if (prototype?.electric_energy_source_prototype) return 'electric'
   if (prototype?.heat_energy_source_prototype) return 'heat'
