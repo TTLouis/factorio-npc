@@ -131,12 +131,12 @@ owner's go.
 | 1. Native mod fixes | `2530d3c8` `7f469a5d` `b17b12a8` `926e97c2` `c2ac975a`, merge `969fefb2`, follow-ups `6fabdf5d` `afa0aa40` `db8bfae0` `a0647b49` | Merged. Static gates green. The `native-admission` real-engine lane, the OG equivalent of the `pursuit_factorio.mjs` fixtures, passed on 2026-10-12. |
 | 2. Facts and diagnostics | 2a merge `175cde97`; 2b merge `7b23ae71`, `a8021ed5`; 2c `f01225e9` `ab39ab76` `1cd94b4c` `35c0f5d5` `1d81df66`, merge `e818d83a`, installer repin `ce4b025e` | Merged. Gate green; `native-admission` lane PASS. |
 | 3. Active-step fact handoff | `7acf4ccb` `7e4cd887` `645ec17f` `f0fc5ac8`, merge `572d4600` | Merged. Gate green; `native-admission` lane PASS. |
-| 4. Dependency-aware batch stock accounting | — | In progress |
+| 4. Dependency-aware batch stock accounting | `3fd26f42`, merge `0708bd4b`, fresh recipe integration `16138b9a` | Reviewed and merged. Ordered stock accounts for exact capacity, uncertain yields, native intermediate rules and current recipe eligibility. Combined gates green. |
 | 5. Steam-power exact-layout fixture | `481a1196`, evidence `133504ff` | Merged locally. Focused steam-lab and full production engine lanes passed; native powered lab research progresses with seeded science/prerequisites. |
 | 6. Raw-leaf acquisition facts (run C follow-up) | `ab2290f3`, merge `015c2ab3` | Merged. Bounded native source facts; static gate green, not live-validated. |
 | Run C blocker recovery and diagnostics | `fdb55d72`, merge `b974dc97`, repin `473327a0` | Merged. Rejected blockers use durable bounded recovery; original run C diagnosed. Combined 2,129 runtime + 1,105 mod tests and 9 payload tests passed. See [checkpoint](LUNA_RUN_C_STATIC_FOLLOWUP_2026-10-13.md). |
 
-Additional run C fixes: recipe applicability `5c9826cb` and bounded resource observation recovery `ec2f359a` are reviewed and merged locally. Combined gate:2,136 runtime/staging and1,107 mod tests, typecheck and generated Lua passed. See [red-to-green checklist](GREEN_SCIENCE_RED_TO_GREEN_2026-10-13.md) for remaining candidate gates and the one-run authorization.
+Additional run C fixes: recipe applicability `5c9826cb` and bounded resource observation recovery `ec2f359a` are reviewed and merged locally. Combined gate: 2,173 runtime/staging and 1,108 mod tests, typecheck and generated Lua passed; 9 payload tests passed. See [red-to-green checklist](GREEN_SCIENCE_RED_TO_GREEN_2026-10-13.md) for remaining candidate gates and the one-run authorization.
 
 Unit 1 notes:
 

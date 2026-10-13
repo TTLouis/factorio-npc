@@ -12,8 +12,8 @@ must not be used to reset current integration.
 
 - **Integrated.** Native surface-applicability filtering (`5c9826cb`) and one native-grounded resource search through the existing durable targeted-read allowance (`ec2f359a`). Normal observation limits are unchanged. Both received independent source review.
 - **Engine evidence.** Powered-lab fixture (`481a1196`, evidence update `133504ff`) passed the focused steam-lab and full production lanes. Real research advanced after native pole placement, with one lab, the original steam engine, zero humans and speed 1. Seeded science/prerequisites make this a mechanics proof; autonomous green science remains unproven.
-- **Combined static gate.** 2,136 runtime/staging tests and 1,107 mod tests passed, plus typecheck, Lua build and generated-Lua validation.
-- **Remaining.** Unit 4 batch-stock review fixes and final candidate/payload validation. One autonomous run is authorized after prerequisites are green; it has not started. Once started, finish the test rather than stopping for preparation usage targets; the owner set a 50% weekly remaining hard floor.
+- **Combined static gate.** 2,173 runtime/staging tests and 1,108 mod tests passed, plus typecheck, Lua build and generated-Lua validation; 9 installer payload tests passed.
+- **Candidate.** Unit 4 batch stock (`3fd26f42`, merge `0708bd4b`) and fresh native recipe projection (`16138b9a`) are reviewed and green. All preparation prerequisites passed. One autonomous run is authorized; it has not started. Once started, finish the test rather than stopping for preparation usage targets; the owner set a 50% weekly remaining hard floor.
 - **Durable checklist.** [Green-science red-to-green pass](validation/GREEN_SCIENCE_RED_TO_GREEN_2026-10-13.md).
 
 ## October 13: run C static repairs integrated (gate green, not live-validated)
