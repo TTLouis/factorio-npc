@@ -1,4 +1,4 @@
-// A closed decision can request one exact fact, without opening discovery or
+// A closed decision can request one exact fact or a grounded resource location, without opening general discovery or
 // granting gameplay authority. The allowance follows native receipt progress,
 // not provider rounds, context restages, or prose claims of progress.
 export function normalizeObservationRequest(value) {
@@ -22,7 +22,13 @@ export function normalizeObservationRequest(value) {
   else if (['getInventoryItems', 'getResearchStatus'].includes(value.tool)) {
     if (Object.keys(args).length !== 0) throw new Error('Targeted inventory/research status takes no arguments')
   }
-  else throw new Error('Targeted recovery permits only exact getEntityStatus, getInventoryItems, or getResearchStatus; discovery is unavailable')
+  else if (value.tool === 'findLongRangeEntities') {
+    if (Object.keys(args).some(key => !['name', 'max_radius', 'limit'].includes(key))
+      || typeof args.name !== 'string' || !args.name.trim() || args.name.length > 200
+      || !Number.isSafeInteger(args.max_radius) || args.max_radius < 64 || args.max_radius > 1024
+      || args.limit !== 1) throw new Error('Targeted resource search requires an exact native source name, max_radius 64..1024 and limit 1')
+  }
+  else throw new Error('Targeted recovery permits exact status facts or one native-grounded resource search; general discovery is unavailable')
   const identity = draft
     ? { scope: 'draft', goalId: value.goalId, planId: value.planId, planVersion: value.planVersion, draftRevision: value.draftRevision }
     : { ...(value.scope ? { scope: value.scope } : {}), stepId: value.stepId }
@@ -47,4 +53,4 @@ export function restoreObservationLedger(rows) {
   return ledger
 }
 
-export const TARGETED_OBSERVATION_GUIDANCE = 'A specific missing live fact may be requested as a JSON control decision with unchanged plan/currentStep and operations:[]. Follow the scope and exact identities in the current [CONTROL_DECISION_STATE]. For committed execution use observationRequest:{stepId:"<active reducer step id>",tool,args,rationale}. For draft planning use observationRequest:{scope:"draft",goalId,planId,planVersion,draftRevision,tool,args,rationale}; no committed step is required to correct or author a draft. Supported facts are exact getEntityStatus({unit_number:<observed exact unit>}), getInventoryItems({}) and getResearchStatus({}). No discovery, plan edits or completion claims may accompany the read. It grants no gameplay authority. Draft revision/restaging/restart cannot renew its one-read allowance; committed execution renews only with native receipt or active-step progress. Reuse sufficient facts instead of requesting a read. A previous_recipe_name is historical, not current configuration.'
+export const TARGETED_OBSERVATION_GUIDANCE = 'A specific missing live fact may be requested as a JSON control decision with unchanged plan/currentStep and operations:[]. Follow the scope and exact identities in the current [CONTROL_DECISION_STATE]. For committed execution use observationRequest:{stepId:"<active reducer step id>",tool,args,rationale}. For draft planning use observationRequest:{scope:"draft",goalId,planId,planVersion,draftRevision,tool,args,rationale}; no committed step is required to correct or author a draft. Supported facts are exact getEntityStatus({unit_number:<observed exact unit>}), getInventoryItems({}) and getResearchStatus({}). If native recipe data identifies a mined_from resource, the same one-read allowance can instead request findLongRangeEntities({name:<that exact resource>,max_radius:1024,limit:1}) after an empty nearby scan or a missing location. Only names in resourceSearchNames in CONTROL_DECISION_STATE are eligible; a name guessed from an item is not sufficient. No general discovery, plan edits or completion claims may accompany the read. It grants no gameplay authority. Draft revision/restaging/restart cannot renew its one-read allowance; committed execution renews only with native receipt or active-step progress. Reuse sufficient facts instead of requesting a read. A previous_recipe_name is historical, not current configuration.'

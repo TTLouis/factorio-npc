@@ -13,7 +13,7 @@ const saved = JSON.parse(readFileSync(new URL('./fixtures/luna-furnace-state-202
 const packets = readFileSync(new URL('./fixtures/luna-furnace-closed-2026-10-07.jsonl', import.meta.url), 'utf8').trim().split('\n').map(JSON.parse)
 const KEY = saved.planning_states[0].key
 
-function fixture({ stateFile = null, provider } = {}) {
+function fixture({ stateFile = null, provider, resource = false } = {}) {
   const memory = new CanonicalTaskBoardMemory()
   memory.restore(structuredClone(saved))
   const state = memory.currentPlan(KEY)
@@ -45,7 +45,7 @@ function fixture({ stateFile = null, provider } = {}) {
     provider: async (messages, context) => {
       calls++
       assert.equal(context.allowTools, false)
-      assert.ok(messages.some(message => String(message.content).includes('"unit_number":12')))
+      assert.ok(messages.some(message => String(message.content).includes(resource ? '"name":"copper-ore"' : '"unit_number":12')))
       return planReply(provider ? await provider(calls, agent) : { plan: state.plan, currentStep: state.current_step,
         operations: [{ name: 'supply_entity', args: { unit_number: 12, items: [{ item_name: 'iron-ore', count: 50 }] } }] })
     }, reserve: async () => { reservations++; return {} },
@@ -259,4 +259,94 @@ test('targeted control cannot accidentally enter direct plan commitment and ledg
   assert.throws(() => world.agent.parsePlanMessage(world.request()), error => error.code === 'observation_request_not_processed')
   assert.throws(() => normalizeObservationRequest({ stepId: 's', tool: 'getEntityStatus', args: { name: 'stone-furnace' }, rationale: 'look' }), /unit_number/)
   assert.equal(restoreObservationLedger([['k', 'not-json'], ['k', '[]'], null]).size, 0)
+})
+
+function resourceFixture(options = {}) {
+  const world = fixture({ ...options, resource: true })
+  const original = world.game.command.bind(world.game)
+  world.game.resourceReads = 0
+  world.game.command = async command => {
+    if (command.includes('"autorio_discovery","find_entities"')) {
+      world.game.resourceReads++
+      await world.game.duringResourceRead?.()
+      return JSON.stringify({ name: 'copper-ore', max_radius: 1024, searched_radius: 128,
+        found: true, matched_count: 1, returned_count: 1,
+        entities: [{ name: 'copper-ore', type: 'resource', position: { x: 96, y: 0 }, distance: 96 }] })
+    }
+    return original(command)
+  }
+  world.agent.recordHandoffToolFacts('getRecipeDetails', JSON.stringify({
+    query: 'copper-ore', found: false, code: 'no_recipe', mined_from: ['copper-ore'], recipes: [],
+  }), { item_or_recipe: 'copper-ore' })
+  const intent = JSON.parse(world.request().content)
+  intent.observationRequest = { stepId: world.agent.targetedObservationIdentity().data.stepId,
+    tool: 'findLongRangeEntities', args: { name: 'copper-ore', max_radius: 1024, limit: 1 },
+    rationale: 'The nearby resource scan is empty; locate the native copper mining source.' }
+  world.resourceRequest = { content: JSON.stringify(intent) }
+  return world
+}
+
+test('run C four-read shape leaves one durable native-grounded resource search, without reopening tools', async () => {
+  const world = resourceFixture()
+  const before = structuredClone(world.memory.planningState(KEY))
+  world.agent.observationBudgetRemaining = 4
+  world.agent.observationDecisionForced = false
+  world.agent.observationRelevanceOverride = null
+  // Same read sequence as LUNA_GPT6_PROXY_LIVE_RUN_C_2026-10-13.md.
+  for (const [index, [name, args]] of [
+    ['getInventoryItems', {}], ['getNearbyEntities', { radius: 32, type: 'resource' }],
+    ['getNearbyEntities', { radius: 16, name: 'stone-furnace' }], ['getRecipeDetails', { item_or_recipe: 'copper-plate' }],
+  ].entries()) await world.agent.handleToolBatch({ tool_calls: [{ id: `run_c_${index}`, type: 'function',
+    function: { name, arguments: JSON.stringify(args) } }] })
+  assert.equal(world.agent.observationBudgetRemaining, 0)
+  assert.equal(world.agent.observationDecisionForced, true)
+  assert.deepEqual(world.agent.controlDecisionState(false).resourceSearchNames, ['copper-ore'])
+  await world.agent.handleObservationRequest(world.resourceRequest, world.context)
+  assert.equal(world.game.resourceReads, 1)
+  assert.equal(world.agent.observationBudgetRemaining, 0)
+  assert.equal(world.agent.observationDecisionForced, true)
+  assert.equal(world.game.mutations.length, 0)
+  assert.deepEqual(world.memory.planningState(KEY), before)
+  const trace = world.events.find(row => row.event === 'observation.targeted_resource_search')
+  assert.equal(trace.data.request_id, 'req_targeted_fixture')
+  assert.equal(trace.data.reason, 'native_source_location_missing_with_normal_observations_closed')
+  assert.equal(trace.data.limit, 1)
+  assert.match((await world.agent.handleObservationRequest(world.request(), world.context))._sglunaObservationRefusal.reason, /already_used/)
+  world.agent.resetObservationDecisionState()
+  assert.match((await world.agent.handleObservationRequest(world.resourceRequest, world.context))._sglunaObservationRefusal.reason, /already_used/)
+})
+
+test('resource recovery refuses guessed names, broad searches and hidden extra arguments before reading', async () => {
+  for (const args of [
+    { name: 'iron-ore', max_radius: 1024, limit: 1 },
+    { name: 'copper-ore', max_radius: 1025, limit: 1 },
+    { name: 'copper-ore', max_radius: 1024, limit: 2 },
+    { name: 'copper-ore', max_radius: 1024, limit: 1, type: 'resource' },
+    { max_radius: 1024, limit: 1 },
+  ]) {
+    const world = resourceFixture()
+    const intent = JSON.parse(world.resourceRequest.content)
+    intent.observationRequest.args = args
+    const result = await world.agent.handleObservationRequest({ content: JSON.stringify(intent) }, world.context)
+    assert.ok(result._sglunaObservationRefusal)
+    assert.equal(world.game.resourceReads, 0)
+    assert.equal(world.counts().calls, 0)
+  }
+})
+
+test('resource search consumes the persisted allowance and actor replacement cannot publish its location', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'luna-resource-'))
+  try {
+    const stateFile = path.join(dir, 'state.json')
+    const world = resourceFixture({ stateFile })
+    world.game.duringResourceRead = () => { world.game.status.epoch++ }
+    await assert.rejects(world.agent.handleObservationRequest(world.resourceRequest, world.context), /epoch changed|cancelled|superseded|stale/i)
+    assert.equal(world.counts().calls, 0)
+    assert.equal(world.agent.toolCache.size, 0)
+    assert.ok(!world.agent.messages.some(row => row.role === 'tool'))
+    const restarted = resourceFixture({ stateFile })
+    await restarted.agent.loadPersistentState()
+    assert.match((await restarted.agent.handleObservationRequest(restarted.resourceRequest, restarted.context))._sglunaObservationRefusal.reason, /already_used/)
+    assert.equal(restarted.game.resourceReads, 0)
+  } finally { await fsp.rm(dir, { recursive: true, force: true }) }
 })
