@@ -3,12 +3,14 @@ import { create_actor_remote_interface, get_controlled_actor } from './actors/ac
 import type { ControlledActor } from './actors/types'
 import { crafted_item_count, craft_trigger_statistics_count } from './crafted_items'
 import { remember_entity_reference, resolve_exact_entity } from './entity_reference'
-import { evaluate_world_condition, WORLD_CONDITION_KINDS } from './goal_world_conditions'
+import { evaluate_world_condition, status_name, WORLD_CONDITION_KINDS } from './goal_world_conditions'
 import { machine_eta } from './production_eta'
 import { create_placement_candidate_set, type PlacementCandidateRequest } from './placement_candidates'
 import { compact_spatial_summary } from './spatial_semantics'
+import { energy_source_kind } from './prototype_knowledge'
 import { get_actor_inventory_items } from './utils/inventory'
 import { find_world_entities } from './npc_vision'
+import { fluid_source_observation, type FluidSourceRequest } from './fluid_source_observation'
 
 const MAX_NEARBY_RADIUS = 64
 const MAX_NEARBY_RESULTS = 40
@@ -296,6 +298,10 @@ export function create_tools_remote_interface() {
         }
       }
 
+      if (name !== undefined && !prototypes.entity[name]) {
+        return { ok: false, code: 'unknown_entity_prototype', field: 'name', identity: name,
+          ...(prototypes.fluid[name] ? { fluid_name: name, observation_tool: 'getFluidSourceTiles' } : {}) }
+      }
       const bounded_radius = math.max(1, math.min(MAX_NEARBY_RADIUS, radius || 20))
       const bounded_limit = math.max(1, math.min(MAX_NEARBY_RESULTS, limit || 50))
       const filters: Record<string, unknown> = {
@@ -454,6 +460,7 @@ export function create_tools_remote_interface() {
         recipe_name = recipe?.name
       }
 
+      const energy_source = energy_source_kind(entity.prototype)
       const entity_summary: Record<string, unknown> = {
         name: entity.name,
         type: entity.type,
@@ -466,10 +473,18 @@ export function create_tools_remote_interface() {
         amount: entity.type === 'resource' ? entity.amount : undefined,
         recipe: recipe_name,
         status: entity.status,
+        status_name: status_name(entity.status),
         working: entity.status === defines.entity_status.working,
+        energy_source,
         inventories,
         inventories_truncated: entity.get_max_inventory_index() > MAX_ENTITY_INVENTORIES,
         inventory_items_truncated,
+      }
+      if (energy_source === 'electric') {
+        const energy = entity.energy
+        if (typeof energy === 'number' && energy >= 0 && energy < math.huge) entity_summary.energy = energy
+        const network = entity.electric_network_id
+        if (typeof network === 'number' && positive_integer(network) && network <= 9007199254740991) entity_summary.electric_network_id = network
       }
       if (entity.type === 'rocket-silo') {
         entity_summary.rocket_parts = entity.rocket_parts
@@ -487,6 +502,7 @@ export function create_tools_remote_interface() {
         entity: entity_summary,
       }
     },
+    get_fluid_source_tiles: (request: FluidSourceRequest) => fluid_source_observation(get_controlled_actor(), request),
     get_placement_candidates: (request: PlacementCandidateRequest) => {
       const actor = get_controlled_actor()
       if (!actor) return { ok: false, error: 'no controlled actor' }

@@ -11780,6 +11780,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       if (this.traceRequest) this.traceRequest.last_tool = toolTrace
       await this.traceEvent('tool.result', { ...toolTrace, output })
+      if (admittedCached[index] !== true) await this.traceNativeObservationFact(toolName, admittedPrepared[index]?.args, original)
       if (readFence) await readFence()
     }
     this.compactWorkingContext()
@@ -11791,6 +11792,37 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         cached: admittedCached[0] === true,
         observation: admittedPrepared[0]?.tool?.function?.name,
         tools_enabled_next_round: false,
+      })
+    }
+  }
+
+  // Named, request-correlated rows for two native read outcomes that change what the model can learn from a read:
+  // a bounded fluid-terrain sample set, and an entity-name read refused because the name is not an entity prototype
+  // (a fluid name points at getFluidSourceTiles). Observation-only: neither row changes state or admits anything.
+  async traceNativeObservationFact(toolName, args, raw) {
+    if (toolName !== 'getFluidSourceTiles' && toolName !== 'getNearbyEntities') return
+    let result
+    try { if (typeof raw === 'string' && raw.length <= 4096) result = JSON.parse(raw) } catch { /* unreadable stays undefined */ }
+    const readable = Boolean(result && typeof result === 'object' && !Array.isArray(result))
+    if (toolName === 'getFluidSourceTiles') {
+      await this.traceEvent('observation.fluid_sources_observed', {
+        reason: 'bounded_native_fluid_tile_read',
+        fluid_name: typeof args?.fluid_name === 'string' ? args.fluid_name.slice(0, 200) : undefined,
+        readable,
+        ok: readable ? result.ok === true : undefined,
+        code: readable ? result.code : undefined,
+        coverage: readable ? result.coverage : undefined,
+        surface_index: readable ? result.surface_index : undefined,
+        returned_count: readable ? result.returned_count : undefined,
+        truncated: readable ? result.truncated : undefined,
+      })
+    }
+    else if (readable && result.code === 'unknown_entity_prototype') {
+      await this.traceEvent('observation.entity_read_refused', {
+        reason: 'native_unknown_entity_prototype',
+        identity: typeof result.identity === 'string' ? result.identity.slice(0, 200) : undefined,
+        fluid_name: typeof result.fluid_name === 'string' ? result.fluid_name.slice(0, 200) : undefined,
+        observation_tool: result.observation_tool,
       })
     }
   }

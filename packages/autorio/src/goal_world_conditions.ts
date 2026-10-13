@@ -63,7 +63,7 @@ function positive_integer(value: unknown) {
   return typeof value === 'number' && value === math.floor(value) && value > 0
 }
 
-function status_name(status: defines.entity_status | undefined) {
+export function status_name(status: defines.entity_status | undefined) {
   if (status === undefined) return undefined
   for (const [name, value] of pairs(defines.entity_status)) {
     if (value === status) return name as string

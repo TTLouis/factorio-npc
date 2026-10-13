@@ -514,13 +514,141 @@ async function main() {
     assert.equal(final.humans, 0)
     assert.equal(final.speed, 1)
     evidence.natural_rock = { setup, present, final }
+
+  // 12364d63 (OG form): native machine power facts reach the planner through getEntityStatus. The lab stays
+  // empty: declared native solar power changes its current facts, never science stock or research progress.
+  // Read-only turns use their own scripted agent; they admit nothing, so they never touch the shared ledger.
+  const readOnlyTurn = async (label, reads, objective) => {
+    const world = agentHarness(label)
+    const seen = []
+    world.script.push({ content: null, tool_calls: reads.map((read, index) => ({ id: `${label}-${index}`, type: 'function',
+      function: { name: read.name, arguments: JSON.stringify(read.args) } })) }, messages => {
+      for (let index = 0; index < reads.length; index++) {
+        const tool = messages.find(message => message.role === 'tool' && message.tool_call_id === `${label}-${index}`)
+        seen.push(tool ? JSON.parse(tool.content) : undefined)
+      }
+      return { content: JSON.stringify({ chatMessage: 'Reads complete.', plan: [], currentStep: 0, operations: [] }) }
+    })
+    await world.agent.request(objective, { sender: 'tester' })
+    await world.agent.completed()
+    return { seen, rows: await world.rows() }
+  }
+  const factRow = (rows, event) => rows.filter(row => row.event === event).map(row => ({ request_id: row.request_id, ...(row.data ?? row) }))
+  const requestIdOf = rows => rows.find(row => row.event === 'tool.call')?.request_id
+  {
+    await clearStock()
+    const setup = await lua('local s=a.surface; local p=s.find_non_colliding_position("lab",{a.position.x+8,a.position.y+6},8,0.5); assert(p); local e=s.create_entity{name="lab",position=p,force=a.force}; assert(e); '
+      + 'storage.native_admission_power={lab=e,daytime=s.daytime,freeze_daytime=s.freeze_daytime}; local o=remote.call("autorio_operations","status"); local d=remote.call("autorio_operation_admission","status"); '
+      + 'rcon.print(helpers.table_to_json({unit_number=e.unit_number,science=e.get_inventory(defines.inventory.lab_input).get_item_count("automation-science-pack"),inventory=a.get_inventory(defines.inventory.character_main).get_contents(),'
+      + 'position={x=a.position.x,y=a.position.y},high_water=d.high_water,tasks_added=o.tasks_added,researched=a.force.technologies["logistic-science-pack"].researched}))')
+    const read = [{ name: 'getEntityStatus', args: { name: 'lab', radius: 32 } }, { name: 'getPrototypeDetails', args: { name: 'lab' } }]
+    const unpowered = await readOnlyTurn('og-power-off', read, 'read the status of the lab')
+    const off = unpowered.seen[0].entity
+    assert.equal(off.unit_number, setup.unit_number, JSON.stringify(unpowered.seen[0]))
+    assert.equal(off.energy_source, 'electric')
+    assert(['no_power', 'not_plugged_in_electric_network', 'low_power'].includes(off.status_name), JSON.stringify(off))
+    assert.equal(off.working, false)
+    assert.equal(off.energy, 0)
+    assert.equal(unpowered.seen[1].entity.energy_source, 'electric', 'prototype details carry the native energy source')
+    await lua('local f=storage.native_admission_power; local e=f.lab; local s=e.surface; s.freeze_daytime=true; s.daytime=0; f.solar=s.create_entity{name="solar-panel",position={e.position.x+5,e.position.y},force=e.force}; '
+      + 'f.pole=s.create_entity{name="small-electric-pole",position={e.position.x+2.5,e.position.y+2.5},force=e.force}; assert(f.solar and f.pole); rcon.print(helpers.table_to_json({ok=true}))')
+    const poweredBy = Date.now() + 60000
+    for (;;) {
+      const status = await lua(`rcon.print(helpers.table_to_json(remote.call("autorio_tools","get_entity_status",nil,nil,${setup.unit_number})))`)
+      if (status.entity?.energy > 0) break
+      assert.ok(Date.now() < poweredBy, `the declared solar panel never powered the lab: ${JSON.stringify(status.entity)}`)
+      await delay(500)
+    }
+    const powered = await readOnlyTurn('og-power-on', [read[0]], 'read the status of the lab after power was connected')
+    const on = powered.seen[0].entity
+    assert.equal(on.unit_number, setup.unit_number)
+    assert.equal(on.energy_source, 'electric')
+    assert(!['no_power', 'not_plugged_in_electric_network', 'low_power'].includes(on.status_name), JSON.stringify(on))
+    assert(on.energy > 0, JSON.stringify(on))
+    assert(Number.isSafeInteger(on.electric_network_id) && on.electric_network_id > 0, JSON.stringify(on))
+    const final = await lua('local f=storage.native_admission_power; local e=f.lab; local s=e.surface; local o=remote.call("autorio_operations","status"); local d=remote.call("autorio_operation_admission","status"); '
+      + 'local r={science=e.get_inventory(defines.inventory.lab_input).get_item_count("automation-science-pack"),inventory=a.get_inventory(defines.inventory.character_main).get_contents(),position={x=a.position.x,y=a.position.y},'
+      + 'high_water=d.high_water,tasks_added=o.tasks_added,queue_length=o.queue_length,researched=a.force.technologies["logistic-science-pack"].researched,humans=#game.connected_players,speed=game.speed}; '
+      + 'assert(e.destroy()); assert(f.solar.destroy()); assert(f.pole.destroy()); s.daytime=f.daytime; s.freeze_daytime=f.freeze_daytime; storage.native_admission_power=nil; rcon.print(helpers.table_to_json(r))')
+    assert.equal(final.science, 0)
+    assert.equal(final.researched, setup.researched)
+    assert.deepEqual(final.inventory, setup.inventory)
+    assert.deepEqual(final.position, setup.position)
+    assert.equal(final.high_water, setup.high_water)
+    assert.equal(final.tasks_added, setup.tasks_added)
+    assert.equal(final.queue_length, 0)
+    assert.equal(final.humans, 0)
+    assert.equal(final.speed, 1)
+    assert.equal((await lua('rcon.print(helpers.table_to_json({labs=#a.surface.find_entities_filtered{name="lab"}}))')).labs, 0, 'the fixture lab was removed')
+    assert.ok(requestIdOf(unpowered.rows) && requestIdOf(powered.rows) && requestIdOf(unpowered.rows) !== requestIdOf(powered.rows), 'each status read is traced under its own request_id')
+    evidence.machine_power = { setup, off, on, final }
+  }
+
+  // e9fcfcc7 (OG form): bounded fluid-terrain read plus the getNearbyEntities refusal for a fluid name. Terrain
+  // is declared (and chunk coverage generated) before the reads, never during them.
+  {
+    await clearStock()
+    const setup = await lua('local s=a.surface; s.request_to_generate_chunks(a.position,5); s.force_generate_chunk_requests(); assert(prototypes.tile.water.fluid.name=="water"); local old={}; local wet={}; '
+      + 'for y=20,27 do for x=20,27 do local p={x=math.floor(a.position.x)+x,y=math.floor(a.position.y)+y}; table.insert(old,{name=s.get_tile(p).name,position=p}); table.insert(wet,{name="water",position=p}) end end; '
+      + 'storage.native_admission_fluid_tiles=old; s.set_tiles(wet,false,false,false,false); local chunks=0; for c in s.get_chunks() do chunks=chunks+1 end; local o=remote.call("autorio_operations","status"); local d=remote.call("autorio_operation_admission","status"); '
+      + 'rcon.print(helpers.table_to_json({chunks=chunks,surface_index=s.index,inventory=a.get_inventory(defines.inventory.character_main).get_contents(),position={x=a.position.x,y=a.position.y},high_water=d.high_water,tasks_added=o.tasks_added}))')
+    const turn = await readOnlyTurn('og-fluid', [{ name: 'getNearbyEntities', args: { name: 'water', radius: 64, limit: 5 } },
+      { name: 'getFluidSourceTiles', args: { fluid_name: 'water', search_radius: 128, limit: 8 } }], 'find water for an offshore pump')
+    const [refused, sources] = turn.seen
+    assert.equal(refused.ok, false, JSON.stringify(refused))
+    assert.equal(refused.code, 'unknown_entity_prototype')
+    assert.equal(refused.identity, 'water')
+    assert.equal(refused.observation_tool, 'getFluidSourceTiles')
+    assert.equal(refused.entities, undefined, 'the refusal is not reported as an empty scan')
+    assert.equal(sources.ok, true, JSON.stringify(sources))
+    assert.equal(sources.coverage, 'generated_bounding_square')
+    assert.equal(sources.returned_count, 8)
+    assert.equal(sources.samples.length, 8)
+    assert.equal(sources.truncated, true)
+    assert.equal(sources.ordering, 'native_samples_not_nearest')
+    assert.equal(sources.surface_index, setup.surface_index)
+    assert(sources.samples.every(row => row.fluid_name === 'water' && row.surface_index === setup.surface_index
+      && Number.isInteger(row.position.x) && Number.isInteger(row.position.y)))
+    assert.equal(sources.candidates, undefined)
+    const sampleList = `{${sources.samples.map(row => `{name="${row.name}",x=${row.position.x},y=${row.position.y}}`).join(',')}}`
+    const sampleCheck = await lua(`local bad={}; for _,p in pairs(${sampleList}) do local t=a.surface.get_tile(p.x,p.y); `
+      + 'if t.name~=p.name or not t.prototype.fluid or t.prototype.fluid.name~="water" then table.insert(bad,p) end end; rcon.print(helpers.table_to_json({bad_count=#bad}))')
+    assert.equal(sampleCheck.bad_count, 0, 'every returned sample is a real water tile on the actor surface')
+    const final = await lua('local s=a.surface; local chunks=0; for c in s.get_chunks() do chunks=chunks+1 end; local o=remote.call("autorio_operations","status"); local d=remote.call("autorio_operation_admission","status"); '
+      + 'local r={chunks=chunks,inventory=a.get_inventory(defines.inventory.character_main).get_contents(),position={x=a.position.x,y=a.position.y},high_water=d.high_water,tasks_added=o.tasks_added,queue_length=o.queue_length,task_state=o.task_state,humans=#game.connected_players,speed=game.speed}; '
+      + 's.set_tiles(storage.native_admission_fluid_tiles,false,false,false,false); local restored=true; for _,t in pairs(storage.native_admission_fluid_tiles) do if s.get_tile(t.position).name~=t.name then restored=false end end; '
+      + 'r.restored=restored; storage.native_admission_fluid_tiles=nil; rcon.print(helpers.table_to_json(r))')
+    assert.equal(final.restored, true, 'the declared water tiles were restored')
+    assert.equal(final.chunks, setup.chunks, 'the read generated no terrain')
+    assert.deepEqual(final.inventory, setup.inventory)
+    assert.deepEqual(final.position, setup.position)
+    assert.equal(final.high_water, setup.high_water)
+    assert.equal(final.tasks_added, setup.tasks_added)
+    assert.equal(final.queue_length, 0)
+    assert.equal(final.humans, 0)
+    assert.equal(final.speed, 1)
+    const requestId = requestIdOf(turn.rows)
+    assert.ok(requestId)
+    const fluidTrace = factRow(turn.rows, 'observation.fluid_sources_observed')
+    assert.equal(fluidTrace.length, 1)
+    assert.equal(fluidTrace[0].request_id, requestId)
+    assert.equal(fluidTrace[0].reason, 'bounded_native_fluid_tile_read')
+    assert.equal(fluidTrace[0].returned_count, 8)
+    assert.equal(fluidTrace[0].truncated, true)
+    const refusalTrace = factRow(turn.rows, 'observation.entity_read_refused')
+    assert.equal(refusalTrace.length, 1)
+    assert.equal(refusalTrace[0].request_id, requestId)
+    assert.equal(refusalTrace[0].reason, 'native_unknown_entity_prototype')
+    assert.equal(refusalTrace[0].observation_tool, 'getFluidSourceTiles')
+    evidence.fluid_sources = { setup, refused, sources, final }
+  }
   }
 
   await fsp.writeFile(path.join(results, 'native-admission-engine.json'), JSON.stringify({
-    status: 'pass', scenario: 'native-admission-preflights-and-natural-harvest', candidate_sha: process.env.NPC_TEST_CANDIDATE_SHA,
+    status: 'pass', scenario: 'native-admission-preflights-natural-harvest-and-native-facts', candidate_sha: process.env.NPC_TEST_CANDIDATE_SHA,
     provider_mode: 'scripted', evidence,
   }, null, 2))
-  console.log('PASS: native admission refusals left the real world untouched and reached the OG record unchanged; natural-only harvest, exact selection and held-item placement ran in the real engine')
+  console.log('PASS: native admission refusals left the real world untouched and reached the OG record unchanged; natural-only harvest, exact selection and held-item placement ran in the real engine; native machine power facts and bounded fluid-terrain reads reached the OG planner')
 }
 
 main().catch(async error => {

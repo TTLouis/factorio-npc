@@ -32,6 +32,7 @@ const toolSamples = {
   getPlayerStatus: { player_name: 'Louis' },
   getNearbyEntities: {},
   getPlacementCandidates: { entity_name: 'stone-furnace' },
+  getFluidSourceTiles: { fluid_name: 'water' },
   findLongRangeEntities: { name: 'iron-ore' },
   findNearestEnemy: {},
   getEntityStatus: { name: 'stone-furnace' },
@@ -116,6 +117,7 @@ test('intentional runtime-only tools stay explicit without requiring symmetry ad
   assert.deepEqual(runtimeOnly, [
     'estimateProductionTime',
     'findSkills',
+    'getFluidSourceTiles',
     'getLocalSpatialObservation',
     'getMiningDetails',
     'getResearchPath',

@@ -48,6 +48,17 @@ beforeEach(() => {
 })
 
 describe('goal conditions while the NPC body is dead', () => {
+  it('refuses water as an entity name before an engine query and supplies the native fluid-read alternative', async () => {
+    const find = vi.fn()
+    actor_state.actor = { position: { x: 0, y: 0 }, surface: { index: 1, find_entities_filtered: find } }
+    ;(globalThis as any).prototypes.entity = {}
+    ;(globalThis as any).prototypes.fluid = { water: {} }
+    const tools = await tools_interface()
+    expect(tools.get_nearby_entities(64, 'water', 'resource', 5)).toEqual({ ok: false, code: 'unknown_entity_prototype',
+      field: 'name', identity: 'water', fluid_name: 'water', observation_tool: 'getFluidSourceTiles' })
+    expect(tools.get_nearby_entities(64, 'unknown-tile', undefined, 5)).toMatchObject({ ok: false, code: 'unknown_entity_prototype' })
+    expect(find).not.toHaveBeenCalled()
+  })
   it('reads force-level conditions from the player force when there is no live actor', async () => {
     ;(globalThis as any).game.forces = { player: force(2) }
     ;(globalThis as any).game.surfaces = new Map([[1, {}]])
@@ -227,6 +238,31 @@ describe('exact entity status observation', () => {
       expect(tools.get_entity_status(undefined, undefined, unit)).toMatchObject({ found: false, error: 'exact_entity_not_found', unit_number: unit })
     }
     expect(find).not.toHaveBeenCalled()
+  })
+
+  it('exposes native electric status names and stored energy without claiming supply sufficiency', async () => {
+    const { lookup, furnace } = fixture()
+    ;(globalThis as any).defines.entity_status = { working: 1, no_power: 87 }
+    const lab = { ...furnace(42, 80, 75), name: 'lab', type: 'lab', status: 87,
+      prototype: { electric_energy_source_prototype: {} }, energy: 0, electric_network_id: undefined as number | undefined }
+    lookup.mockReturnValue(lab)
+    const tools = await tools_interface()
+    expect(tools.get_entity_status(undefined, undefined, 42).entity).toMatchObject({
+      unit_number: 42, status: 87, status_name: 'no_power', working: false, energy_source: 'electric', energy: 0,
+    })
+    lab.status = 1; lab.energy = 1200; lab.electric_network_id = 23
+    expect(tools.get_entity_status(undefined, undefined, 42).entity).toMatchObject({
+      status_name: 'working', working: true, energy: 1200, electric_network_id: 23,
+    })
+    lab.status = 9999; lab.energy = Infinity; lab.electric_network_id = -1
+    const unknown = tools.get_entity_status(undefined, undefined, 42).entity
+    expect(unknown.status_name).toBeUndefined(); expect(unknown.energy).toBeUndefined()
+    expect(unknown.electric_network_id).toBeUndefined()
+    const burner = { ...furnace(43, 3, 2), prototype: { burner_prototype: {} },
+      get energy(): number { throw new Error('non-electric energy must not be read') },
+      get electric_network_id(): number { throw new Error('non-electric network must not be read') } }
+    lookup.mockReturnValue(burner)
+    expect(tools.get_entity_status(undefined, undefined, 43).entity).toMatchObject({ energy_source: 'burner' })
   })
 
   it('resolves a remembered ordinary building but never substitutes its replacement', async () => {
