@@ -44,6 +44,9 @@ export const refusal_class_by_code: Record<string, RefusalClass> = {
   invalid_resource_search_radius: 'argument',
   placement_candidate_unavailable: 'argument',
   no_natural_harvest_source: 'argument',
+  // A wrong technology name is the same kind of naming error as an unknown recipe or prototype.
+  invalid_name: 'argument',
+  unknown_technology: 'argument',
 
   // --- prerequisite: research preconditions ------------------------------------------------------------------------
   missing_prerequisites: 'prerequisite',
@@ -73,8 +76,6 @@ export const refusal_class_by_code: Record<string, RefusalClass> = {
   not_item_placeable: 'world',
   ambiguous_placement_item: 'world',
   invalid_placement_item: 'world',
-  invalid_name: 'world',
-  unknown_technology: 'world',
   technology_disabled: 'world',
   research_disabled: 'world',
 }
