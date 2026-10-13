@@ -4666,6 +4666,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.handoffInventoryObservations = new Map()
     this.handoffTouchedItems = new Set()
     this.handoffRequirementMachines = new Map()
+  }
+
+  // Fluid-tile anchors are world data, like the recipe cache: they outlive a player's chat message, an amendment and an
+  // actor replacement (all of which go through request()/reset()). They end with the goal that read them (completion, or
+  // a new goal) and with the process (the Map lives in memory only).
+  resetHandoffFluidHints() {
     this.handoffFluidHints = new Map()
   }
 
@@ -4816,7 +4822,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             parsed = JSON.parse(raw)
           }
           catch { stats.unreadable += 1; continue }
-          if (parsed?.found === false && parsed.error === undefined) {
+          // The mod declares "the game has no recipe for this name" as code no_recipe (knowledge.ts recipe_details_for_actor);
+          // any other found:false answer (no controlled actor, unreadable) is a failed read, never remembered as raw.
+          if (parsed?.found === false && parsed.code === 'no_recipe') {
             this.handoffNoRecipeItems.add(item)
             while (this.handoffNoRecipeItems.size > limits.noRecipeItems) this.handoffNoRecipeItems.delete(this.handoffNoRecipeItems.values().next().value)
             stats.no_recipe += 1
@@ -4832,6 +4840,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     catch (error) {
       for (const key of [...this.handoffRecipeFacts.keys()]) if (!before.has(key)) this.handoffRecipeFacts.delete(key)
+      if (error && typeof error === 'object') error.recipePrefetch = stats // so a refusal still reports the reads it spent
       throw error
     }
     return stats
@@ -4901,10 +4910,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // Unit 3b: the harness closes the recipe chain under the step's inventory roots itself, so a root nobody read a recipe
       // for does not become a raw leaf in the residual derivation. Never while a batch is in flight (the executor sees this
       // packet after it ends), and only under the actor/epoch fence.
+      let prefetchReads = 0 // recipe reads are counted in reads_attempted but are not part of the count refresh's success rate
       if (mode === 'packet' && !inFlight && fence && needs.roots.length > 0) {
         try {
           const prefetch = await this.prefetchRecipeClosure({ roots: needs.roots, fence })
           meta.recipe_prefetch = prefetch
+          meta.reads_attempted += prefetch.reads
+          prefetchReads = prefetch.reads
           meta.recipe_cache = this.handoffRecipeFacts.size
           if (prefetch.reads > 0 || prefetch.truncated) {
             await this.traceEvent('context.recipe_closure_prefetched', {
@@ -4920,6 +4932,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           }
         }
         catch (error) {
+          meta.reads_attempted += error?.recipePrefetch?.reads ?? 0
+          prefetchReads = error?.recipePrefetch?.reads ?? 0
           if (error?.handoffFence) return { refusal: error.handoffFence, meta }
           meta.recipe_prefetch = { reads: 0, found: 0, unreadable: 0, no_recipe: 0, truncated: false, skipped: 'fence_status_unreadable' }
         }
@@ -4989,12 +5003,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             }
           }
           await this.handoffFenceCheck(fence, 'during')
-          meta.refresh = meta.reads_failed === 0 ? 'ok' : meta.reads_failed >= meta.reads_attempted ? 'failed' : 'partial'
+          meta.refresh = meta.reads_failed === 0 ? 'ok' : meta.reads_failed >= meta.reads_attempted - prefetchReads ? 'failed' : 'partial'
         }
         catch (error) {
           if (error?.handoffFence) return { refusal: error.handoffFence, meta }
           meta.refresh = 'failed'
-          meta.reads_failed = meta.reads_attempted + Math.max(0, readItems.length - fresh.size)
+          meta.reads_failed = meta.reads_attempted - prefetchReads + Math.max(0, readItems.length - fresh.size)
           fresh.clear()
           freshMachine = undefined
         }
@@ -8414,6 +8428,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
     this.liveEntityObservations = new Map()
     this.resetHandoffObservations()
+    if (intent === 'new_goal') this.resetHandoffFluidHints() // a new goal starts without the last goal's water anchors; an amendment or "continue" keeps them
     this.rejectedExactTargets = new Set()
     this.staleExactPreflightRetries = 0
     this.modelCorrectablePreflightRetries = 0
@@ -8712,6 +8727,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.clearActionOmissionRecovery()
     this.liveEntityObservations = new Map()
     this.resetHandoffObservations()
+    this.resetHandoffFluidHints() // the goal that read them is complete
     this.rejectedExactTargets = new Set()
     this.staleExactPreflightRetries = 0
     this.modelCorrectablePreflightRetries = 0

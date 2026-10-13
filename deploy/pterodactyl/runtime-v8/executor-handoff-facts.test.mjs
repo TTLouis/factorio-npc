@@ -48,6 +48,8 @@ const RECIPES = {
   'transport-belt': detail('transport-belt', [['iron-plate', 1], ['iron-gear-wheel', 1]], [['transport-belt', 2]], ['assembling-machine-1']),
 }
 
+const MINED_FROM = { 'iron-ore': ['iron-ore'], 'copper-ore': ['copper-ore'] }
+
 // The live engine prints the inventory as a serpent block, recipe details as JSON.
 const serpent = inventory => `{\n${Object.entries(inventory).filter(([, count]) => count > 0).map(([name, count]) => `  {\n    count = ${count},\n    name = "${name}"\n  }`).join(',\n')}\n}`
 
@@ -67,7 +69,12 @@ function liveGame({ inventory = {}, recipes = {} } = {}) {
       const name = /"recipe_details",['"]([a-z0-9-]+)['"]/.exec(text)?.[1]
       game.recipeReads.push(name)
       game.onRecipeRead?.(game, name)
-      return JSON.stringify(table[name] ? { found: true, query: name, truncated: false, recipes: [table[name]] } : { found: false, query: name })
+      // The exact shape of the mod's answer for a name no recipe makes (knowledge.ts recipe_details_for_actor): the code is
+      // declared; mined_from is present only for an item a resource yields.
+      const mined = MINED_FROM[name]
+      return JSON.stringify(table[name]
+        ? { found: true, query: name, truncated: false, recipes: [table[name]] }
+        : { found: false, query: name, code: 'no_recipe', error: 'no recipe produces this item/fluid and no recipe has this name', ...(mined ? { mined_from: mined } : {}) })
     }
     if (text.includes('"get_fluid_source_tiles"')) {
       // The far read finds water; a small radius around the actor finds none (the native answer for an empty local search).
@@ -111,7 +118,7 @@ const lineOf = (messages, prefix) => textOf(stepBlock(messages)).split('\n').fin
 
 function harness({ game, script, agentOptions = {} }) {
   const memory = new CanonicalTaskBoardMemory()
-  const world = { game, memory, calls: [], trace: [] }
+  const world = { game, memory, calls: [], trace: [], intent: 'new_goal' } // the route the next chat message takes
   const provider = async (messages, context) => {
     world.calls.push({ messages: messages.map(message => ({ ...message })), context })
     const reply = script[world.calls.length - 1]
@@ -119,7 +126,7 @@ function harness({ game, script, agentOptions = {} }) {
     return typeof reply === 'function' ? reply(messages, context, world) : { ...reply }
   }
   const jev = recordingJev(async (_state, questions) => {
-    if (questions.intent) return { overrides: { intent: { choice: 'new_goal', confidence: 0.9 } } }
+    if (questions.intent) return { overrides: { intent: { choice: world.intent, confidence: 0.9 } } }
     if (questions.recovery_semantics) {
       return {
         model: 'jev-latest',
@@ -137,7 +144,7 @@ function harness({ game, script, agentOptions = {} }) {
     rcon: game,
     memory,
     provider,
-    interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
+    interactionProvider: async () => ({ content: JSON.stringify({ intent: world.intent, queue_conflict: false, reply: '' }) }),
     interactionDecisionProvider: jev,
     steeringDecisionProvider: jev,
     systemPrompt: 'executor handoff facts test system prompt',
@@ -644,14 +651,58 @@ test('3a: water seen by an earlier read and then an empty local read: the restag
   assert.ok(world.rows('context.fluid_source_hints_carried').some(item => item.data.checkpoint === 'C3'), 'the commit handoff carried them too')
   assert.equal(world.rows('context.executor_facts_carried').find(item => item.data.checkpoint === 'C7').data.dropped_for_size.includes('fluid_source_hints'), false)
 
-  // A reset clears them like the other handoff caches; the next restage carries none and traces none.
+  // The per-request observation reset keeps them (water is world data); only the goal boundary clears them.
   world.agent.resetHandoffObservations()
+  assert.equal(world.agent.handoffFluidHints.size, 2)
+  world.agent.resetHandoffFluidHints()
   assert.equal(world.agent.handoffFluidHints.size, 0)
+  // The next restage carries none and traces none.
   const carried = world.rows('context.fluid_source_hints_carried').length
   const again = await world.agent.restageBetweenTurns({ checkpoint: 'C7', role: 'executor', reason: 'recovery:after_reset', actor: world.agent.epoch, requestId: world.requestId() })
   assert.equal(again.restaged, true, JSON.stringify(again))
   assert.doesNotMatch(textOf(stepBlock(world.agent.messages)), /fluid_source_hints/)
   assert.equal(world.rows('context.fluid_source_hints_carried').length, carried)
+})
+
+test('3a: anchors outlive a chat amendment and a "continue" in the same goal, and end when a new goal starts', async () => {
+  for (const intent of ['amend_current', 'continue_current']) {
+    const world = harness({ game: liveGame(), script: [fluidRound(), readsRound(), plannerCommit(), executorGather(5), executorGather(5), executorGather(5), executorGather(5)] })
+    await world.say()
+    assert.equal(world.agent.handoffFluidHints.size, 2, 'the planner read found water')
+    const goalId = world.memory.planningState(KEY).goal.goal_id
+    let resets = 0
+    const baseReset = world.agent.resetHandoffObservations.bind(world.agent)
+    world.agent.resetHandoffObservations = () => { resets += 1; baseReset() }
+    world.intent = intent
+    world.give('copper-plate', 10)
+    await world.agent.taskStatusReceipt()
+    await world.agent.request('please also keep an eye on the water', { sender: 'TTLouis' }).catch(() => {})
+    assert.ok(resets >= 1, `${intent}: the chat message went through request()'s per-request observation reset`)
+    assert.equal(world.memory.planningState(KEY).goal.goal_id, goalId, `${intent}: still the same goal`)
+    assert.equal(world.agent.handoffFluidHints.size, 2, `${intent}: the water anchors survived the chat message`)
+    await world.agent.taskStatusReceipt().catch(() => {})
+    const result = await restageToFreshExecutor(world)
+    assert.equal(result.restaged, true, JSON.stringify(result))
+    assert.match(lineOf(world.agent.messages, 'fluid_source_hints'), /water:water@\(22,8\) surface=1/)
+  }
+
+  const fresh = harness({ game: liveGame(), script: [fluidRound(), readsRound(), plannerCommit(), executorGather(5), plannerCommit(), executorGather(5)] })
+  await fresh.say()
+  assert.equal(fresh.agent.handoffFluidHints.size, 2)
+  fresh.intent = 'new_goal'
+  await fresh.agent.request('make iron plates instead', { sender: 'TTLouis' }).catch(() => {})
+  assert.equal(fresh.agent.handoffFluidHints.size, 0, 'a new goal starts without the last goal\'s anchors')
+})
+
+test('3a: the anchors come from the tool-result text the model itself received, so a wrapper around the answer would stop them', async () => {
+  const world = harness({ game: liveGame(), script: [fluidRound(), readsRound(), plannerCommit(), executorGather(5)] })
+  await world.say()
+  const toolMessages = world.calls[1].messages.filter(message => message.role === 'tool')
+  const farMessage = toolMessages.find(message => message.tool_call_id === 'call_water_far')
+  assert.deepEqual(JSON.parse(farMessage.content), WATER_FAR, 'the model was handed the raw mod answer')
+  assert.deepEqual([...world.agent.handoffFluidHints.keys()], ['1:22:8', '1:-82:-19'], 'and the very same text became the anchors')
+  // The empty local answer reached the model too and added nothing.
+  assert.equal(JSON.parse(toolMessages.find(message => message.tool_call_id === 'call_water_local').content).returned_count, 0)
 })
 
 test('3a: a size-dropped hint record is traced as dropped, not silently missing', async () => {
@@ -732,6 +783,7 @@ test('3b: an empty recipe cache and a lab root: the harness reads the recipe cha
   assert.equal(row.data.request_id, world.requestId())
   assert.deepEqual({ reads: row.data.reads, found: row.data.found, unreadable: row.data.unreadable, no_recipe: row.data.no_recipe, truncated: row.data.truncated }, { reads: 7, found: 5, unreadable: 0, no_recipe: 2, truncated: false })
   assert.deepEqual(row.data.roots, ['lab'])
+  assert.ok(world.rows('context.executor_facts_carried').find(item => item.data.checkpoint === 'C7').data.reads_attempted >= 7, 'the prefetch reads are counted with the other handoff reads')
   assert.equal(row.data.reason, 'step_roots_without_cached_recipe_facts')
 
   // Cached recipes (and the two raw items the game has no recipe for) are not read again at the next restage.
@@ -803,6 +855,7 @@ test('3b: an actor or epoch change refuses the restage, and what the prefetch re
   assert.equal(during.rows('context.executor_facts_carried').length, carriedBefore)
   assert.equal(during.rows('context.recipe_closure_prefetched').length, 0)
   assert.equal(during.rows('context.restage_refused').at(-1).data.reason, 'actor_changed_during_handoff_refresh')
+  assert.ok(during.rows('context.restage_refused').at(-1).data.reads_attempted >= 1, 'a refusal still reports the reads it spent')
 
   // A change before the first read spends no read at all.
   const before = labWorld()
@@ -832,4 +885,33 @@ test('3b: an unreadable recipe answer is counted, not cached, and does not stop 
   assert.equal(row.data.unreadable, 1)
   assert.ok(!world.agent.handoffRecipeFacts.has('transport-belt'))
   assert.equal(world.agent.handoffNoRecipeItems.has('transport-belt'), false, 'a failed read is not "no recipe"')
+})
+
+test('3b: the mod\'s no_recipe answer (with its mining sources) is remembered and never re-read; any other found:false answer is a failed read', async () => {
+  const recipes = { 'widget-root': detail('widget-root', [['iron-ore', 2], ['unlisted-thing', 1]], [['widget-root', 1]], ['assembling-machine-1']) }
+  const world = harness({
+    game: liveGame({ recipes }),
+    script: [planReply({ plan: STEPS, currentStep: 0, operations: [gather('iron-ore', 5)], checkpoint: inventoryCheckpoint('widget-root', 1), goal: GOAL, roadmap: SHELF }), executorGather(5)],
+  })
+  await world.say()
+  await world.agent.taskStatusReceipt()
+  const base = world.game.command
+  world.game.command = async (text) => {
+    // The remote interface's answer when the actor is gone: found:false with an error and no recipe code.
+    if (/recipe_details.*unlisted-thing/.test(text)) {
+      world.game.recipeReads.push('unlisted-thing')
+      return JSON.stringify({ found: false, query: 'unlisted-thing', error: 'no controlled actor' })
+    }
+    return base(text)
+  }
+  const result = await restageToFreshExecutor(world)
+  assert.equal(result.restaged, true, JSON.stringify(result))
+  assert.deepEqual(world.game.recipeReads, ['widget-root', 'iron-ore', 'unlisted-thing'])
+  assert.deepEqual([...world.agent.handoffNoRecipeItems], ['iron-ore'], 'only the declared no_recipe answer is remembered')
+  const row = world.rows('context.recipe_closure_prefetched')[0]
+  assert.deepEqual({ reads: row.data.reads, found: row.data.found, no_recipe: row.data.no_recipe, unreadable: row.data.unreadable }, { reads: 3, found: 1, no_recipe: 1, unreadable: 1 })
+  // The raw item is not read again; the failed read is retried.
+  const again = await restageToFreshExecutor(world)
+  assert.equal(again.restaged, true, JSON.stringify(again))
+  assert.deepEqual(world.game.recipeReads.slice(3), ['unlisted-thing'])
 })
