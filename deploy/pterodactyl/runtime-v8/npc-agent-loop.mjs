@@ -11982,7 +11982,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!this.memory.claimFreshContextRecovery?.(key, { requestId: this.traceRequest?.id })) return { attempted: false }
     await this.persistState() // Claim before any await/call that could be interrupted by restart.
     const held = getActivePlanningPlan(planning)
-    const role = FROZEN_PLAN_STATUSES.has(held?.status) ? EXECUTOR_ROLE : PLANNER_ROLE
+    const assessmentOnly = held?.steps?.length > 0 && held.steps.every(step => step.completion_mode === 'semantic')
+    const role = FROZEN_PLAN_STATUSES.has(held?.status) && !assessmentOnly ? EXECUTOR_ROLE : PLANNER_ROLE
     const restaged = await this.restageInTurn({ checkpoint: 'C5', role, reason: 'action_omission_fresh_context', actor: this.epoch, runtime: this.lastRuntimeView() })
     await this.traceEvent('recovery.fresh_context_started', { goal_id: planning.goal.goal_id, attempted: 1, restaged: restaged.restaged, role })
     if (!restaged.restaged) return { attempted: false }
@@ -12665,35 +12666,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     })
 
     if (!blockerDecision?.decision?.accepted) {
-      const runtime = await this.readInteractionTaskStatus()
-      const persistentRuntime = await this.persistentRuntimeStatus()
-      const failureCandidate = {
-        kind: 'recoverable_provider_failure',
-        source: evidenceKind === 'provider_blocker' ? 'main_planner' : 'action_omission_repair',
-        reason_code: blocker || 'provider_recovery_failed',
-        evidence: [],
-      }
-      await this.traceEvent('outcome.candidate', failureCandidate)
-      const reduced = this.memory.applyOutcomeAuthority?.(this.requestInfo.memoryKey, failureCandidate, {
-        world: {
-          ...runtime,
-          persistent_runtime: persistentRuntime,
-          persistent_runtime_healthy: persistentRuntimeHealthy(persistentRuntime),
-          condition_wait_active: state?.condition_wait?.state === 'active',
-          condition_wait: state?.condition_wait,
-        },
-        chatMessage: plan.chatMessage,
+      // A model's unverified world claim is not a provider outage. Use the existing
+      // durable, one-per-goal recovery allowance before reporting controller exhaustion.
+      await this.traceEvent('recovery.unverified_blocker', {
+        request_id: this.traceRequest?.id,
+        reason: 'rejected_world_claim_requires_grounded_action_recovery',
+        rejection_reason: blockerDecision?.decision?.rejection_reason,
+        goal_id: state?.goal_id,
       })
-      state = reduced?.state ?? state
-      await this.traceEvent(reduced?.decision?.accepted ? 'outcome.validated' : 'outcome.rejected', reduced?.decision ?? failureCandidate)
-      if (reduced?.changed) {
-        await this.traceEvent('task_state.transition', {
-          status: state?.status,
-          blocker: state?.blocker,
-          pause_reason: state?.pause_reason,
-          task_board: visibleTaskBoard(state?.task_board),
-        })
-      }
+      const fresh = await this.tryFreshContextActionRecovery()
+      if (fresh.attempted) return fresh.result
+      throw new AgentLoopError('provider_action_omission_repair_failed: unverified_blocker_recovery_exhausted; no authoritative world blocker was established')
     }
     else {
       state = blockerDecision.state ?? state
