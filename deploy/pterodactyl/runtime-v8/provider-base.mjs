@@ -690,7 +690,7 @@ function safeProviderErrorText(value, max = 800) {
   return text.length <= max ? text : `${text.slice(0, Math.max(0, max - 1))}…`
 }
 
-async function boundedProviderErrorBody(response, maxBytes = 64 * 1024) {
+async function boundedProviderErrorBody(response, maxBytes = 64 * 1024, onBytes = () => {}) {
   if (!response?.body) return { text: '', bytes: 0, truncated: false }
   const reader = response.body.getReader()
   const chunks = []
@@ -699,6 +699,7 @@ async function boundedProviderErrorBody(response, maxBytes = 64 * 1024) {
   while (true) {
     const { value, done } = await reader.read()
     if (done) break
+    onBytes(bytes + value.length)
     const remaining = maxBytes - bytes
     if (remaining <= 0) {
       truncated = true
@@ -1470,6 +1471,12 @@ export async function providerRequest(config, messages, {
     }, traceOptions)
   }
 
+  // Timeout diagnostics only: where the exchange stalled and how much arrived.
+  // Never retains or logs response content.
+  let responseStage = 'waiting_headers'
+  let responseBytes = 0
+  let httpStatus
+  let responseContentType
   try {
     const response = await fetchImpl(providerEndpoint(config.base), {
       method: 'POST',
@@ -1481,9 +1488,13 @@ export async function providerRequest(config, messages, {
       },
       body: JSON.stringify(body),
     })
+    responseStage = 'reading_body'
+    httpStatus = response.status
+    responseContentType = String(response.headers?.get('content-type') ?? '').slice(0, 120)
 
     if (!response.ok) {
-      const errorBody = await boundedProviderErrorBody(response)
+      responseStage = 'reading_error_body'
+      const errorBody = await boundedProviderErrorBody(response, 64 * 1024, bytes => { responseBytes = bytes })
       const diagnostics = providerHttpErrorDiagnostics(errorBody.text)
       await traceProviderResult('provider.response_error', {
         ...diagnostics,
@@ -1512,6 +1523,7 @@ export async function providerRequest(config, messages, {
       const { value, done } = await reader.read()
       if (done) break
       bytes += value.length
+      responseBytes = bytes
       if (bytes > 256 * 1024) {
         await reader.cancel()
         await traceProviderResult('provider.response_error', {
@@ -1523,6 +1535,7 @@ export async function providerRequest(config, messages, {
       chunks.push(value)
     }
 
+    responseStage = 'parsing_body'
     const responseText = Buffer.concat(chunks).toString('utf8')
     let data
     try { data = JSON.parse(responseText) }
@@ -1751,6 +1764,10 @@ export async function providerRequest(config, messages, {
       await traceProviderResult('provider.response_error', {
         diagnostic_code: 'provider_timeout',
         timeout_ms: timeoutMs,
+        response_stage: responseStage,
+        response_bytes: responseBytes,
+        http_status: httpStatus,
+        response_content_type: responseContentType,
       }, traceOptions)
       throw new DeploymentError(`Provider timed out after ${timeoutMs} ms`)
     }

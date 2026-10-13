@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import fsp from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 
 import { normalizeProviderPlanContent, providerRequest } from './provider.mjs'
 
@@ -51,6 +54,36 @@ test('provider timeout reports an explicit error instead of leaving the turn act
     /Provider timed out after 1000 ms/,
   )
 })
+
+for (const stage of ['waiting_headers', 'reading_body', 'reading_error_body']) {
+  test(`provider timeout identifies ${stage} without logging partial response content`, async t => {
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-timeout-'))
+    t.after(() => fsp.rm(dir, { recursive: true, force: true }))
+    const traceFile = path.join(dir, 'prompts.jsonl')
+    const partial = '{"private_partial_response":'
+    const fetchImpl = stage === 'waiting_headers' ? hangingFetch : async (_url, { signal }) => {
+      const keepAlive = setTimeout(() => {}, 10000)
+      return new Response(new ReadableStream({ start(controller) {
+        controller.enqueue(new TextEncoder().encode(partial))
+        signal.addEventListener('abort', () => {
+          clearTimeout(keepAlive)
+          controller.error(signal.reason)
+        }, { once: true })
+      } }), { status: stage === 'reading_error_body' ? 503 : 200, headers: { 'content-type': 'application/json' } })
+    }
+    await assert.rejects(providerRequest({ ...config, timeoutMs: 1000 }, messages, {
+      fetchImpl, promptTraceFile: traceFile, requestId: `req_timeout_${stage}`,
+    }), /Provider timed out after 1000 ms/)
+    const raw = await fsp.readFile(traceFile, 'utf8')
+    const failure = raw.trim().split('\n').map(JSON.parse).find(row => row.diagnostic_code === 'provider_timeout')
+    assert.equal(failure.request_id, `req_timeout_${stage}`)
+    assert.equal(failure.response_stage, stage)
+    assert.equal(failure.response_bytes, stage !== 'waiting_headers' ? Buffer.byteLength(partial) : 0)
+    assert.equal(failure.http_status, stage === 'waiting_headers' ? undefined : stage === 'reading_error_body' ? 503 : 200)
+    assert.equal(failure.response_content_type, stage !== 'waiting_headers' ? 'application/json' : undefined)
+    assert.equal(raw.includes(partial), false)
+  })
+}
 
 test('external cancellation aborts an in-flight provider request', async () => {
   const controller = new AbortController()
