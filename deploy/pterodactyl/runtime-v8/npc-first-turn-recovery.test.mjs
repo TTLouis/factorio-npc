@@ -335,15 +335,17 @@ test('repeated cached and irrelevant observations recover into an executable pla
 
 // --- the recovery path follows the producer's declared refusal_class, never a list of codes ------------------------------------
 
-async function runWithMockRefusal(refusal) {
+const GATHER = { name: 'gather_resource', args: { resource_name: 'iron-ore', count: 4, search_radius: 64 } }
+
+async function runWithMockRefusal(refusal, operation = GATHER) {
   const rcon = new RuntimeRcon()
   const command = rcon.command.bind(rcon)
-  rcon.command = async text => /autorio_preflight['"],['"]operation/.test(text) && text.includes("'gather_resource'")
-    ? JSON.stringify({ ok: false, operation: 'gather_resource', ...refusal })
+  rcon.command = async text => /autorio_preflight['"],['"]operation/.test(text) && text.includes(`'${operation.name}'`)
+    ? JSON.stringify({ ok: false, operation: operation.name, ...refusal })
     : command(text)
   const memory = new NpcDialogueMemory()
   const replies = [
-    planMessage([{ name: 'gather_resource', args: { resource_name: 'iron-ore', count: 4, search_radius: 64 } }]),
+    planMessage([operation]),
     planMessage([{ name: 'wait', args: { ticks: 60 } }]),
   ]
   const harness = []
@@ -418,4 +420,28 @@ for (const [label, refusal] of [
   assert.ok(traced.findIndex(row => row.event === 'operations.preflight_unclassified') < traced.findIndex(row => row.event === 'operations.preflight_rejected'))
   assert.equal(result.blocker.code, 'unknown_prototype')
   assert.equal(traced.find(row => row.event === 'request.completed').data.outcome, 'blocked_preflight')
+})
+
+// A wrong technology name is a naming error like an unknown recipe (integrator decision): it reaches the argument path, never the
+// research-prerequisite path, even though the operation is research_technology.
+for (const code of ['unknown_technology', 'invalid_name']) test(`${code} on research_technology gets one bounded argument correction turn`, async () => {
+  const { harness, traced, rcon, memory } = await runWithMockRefusal(
+    { code, refusal_class: 'argument', technology: 'automatoin' },
+    { name: 'research_technology', args: { technology_name: 'automatoin' } },
+  )
+  const recoverable = traced.filter(row => row.event === 'operations.preflight_recoverable')
+  assert.equal(recoverable.length, 1)
+  assert.equal(recoverable[0].data.failure_class, `model_correctable_${code}`)
+  assert.equal(recoverable[0].data.refusal_class, 'argument')
+  assert.equal(recoverable[0].data.retry, 1)
+  assert.ok(recoverable[0].request_id, 'the recoverable row carries request_id')
+  assert.equal(recoverable[0].data.preflight.code, code)
+  assert.equal(recoverable[0].data.preflight.operation_index, 0)
+  assert.ok(harness.some(content => content.includes(`code ${code}`) && content.includes('naming/argument error')))
+  assert.equal(harness.filter(content => content.includes('research')  && content.includes('prerequisite')).length, 0, 'not the research prerequisite message')
+  assert.equal(traced.filter(row => String(row.data?.failure_class ?? '').startsWith('research_')).length, 0)
+  assert.equal(traced.filter(row => row.event === 'operations.preflight_unclassified').length, 0)
+  assert.equal(traced.filter(row => row.event === 'operations.preflight_rejected').length, 0)
+  assert.equal(rcon.mutations.length, 1)
+  assert.notEqual(memory.currentPlan('npc:sgluna').status, 'blocked')
 })

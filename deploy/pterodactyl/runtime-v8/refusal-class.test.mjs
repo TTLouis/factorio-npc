@@ -21,6 +21,10 @@ const OLD_MODEL_CORRECTABLE_PREFLIGHT_CODES = [
   'invalid_navigation_search_radius', 'invalid_harvest_search_radius', 'invalid_resource_count', 'invalid_resource_position', 'invalid_resource_search_radius',
   'placement_candidate_unavailable', 'no_natural_harvest_source',
 ]
+// Deliberate behaviour changes from the old lists (integrator decision): a wrong technology name is a naming error like unknown_recipe,
+// so these two now get the one bounded correction turn instead of the blocked end. Anything not listed here must match oldPath.
+const INTENTIONAL_CHANGES = { invalid_name: 'argument', unknown_technology: 'argument' }
+
 // Every admission refusal except authorization_stale (ADMISSION_REFUSAL_CODES minus the stale grant).
 const OLD_AUTHORIZATION_RECOVERABLE_CODES = ['protected_entity_refused', 'reserved_supply_refused', 'reserved_supply_ambiguous_target', 'player_inventory_excluded']
 
@@ -50,11 +54,17 @@ test('equivalence: the mod-declared class reproduces the old hand-list path for 
     assert.ok(Object.hasOwn(modRegistry, code), `${code} from an old list is classified by the mod`)
   }
   for (const [code, declared] of Object.entries(modRegistry)) {
+    if (Object.hasOwn(INTENTIONAL_CHANGES, code)) {
+      assert.equal(oldPath(code, operationOf(code)), 'world', `${code} was on the blocked path before`)
+      assert.equal(declared, INTENTIONAL_CHANGES[code], `${code}: recorded intentional change`)
+      continue
+    }
     assert.equal(declared, oldPath(code, operationOf(code)), `${code}: class-derived path equals the old path`)
   }
-  // The classes' sizes are exactly the old lists' sizes: nothing else moved onto a recovery path.
+  for (const code of Object.keys(INTENTIONAL_CHANGES)) assert.ok(Object.hasOwn(modRegistry, code), code)
+  // The classes' sizes are the old lists' sizes plus the recorded changes: nothing else moved onto a recovery path.
   const count = refusalClass => Object.values(modRegistry).filter(declared => declared === refusalClass).length
-  assert.equal(count('argument'), OLD_MODEL_CORRECTABLE_PREFLIGHT_CODES.length)
+  assert.equal(count('argument'), OLD_MODEL_CORRECTABLE_PREFLIGHT_CODES.length + Object.keys(INTENTIONAL_CHANGES).length)
   assert.equal(count('prerequisite'), OLD_RESEARCH_PREFLIGHT_RECOVERABLE_CODES.length)
   assert.equal(count('authority'), 0, 'the mod preflight has no authority refusals; admission produces them')
 })
@@ -68,7 +78,7 @@ test('equivalence: the "nothing found in radius" family and the codes with dedic
     'stale_exact_target', 'supply_missing', 'extraction_empty', 'destination_full', 'requires_machine',
     'bootstrap_dependency_unresolved', 'recipe_locked', 'placement_item_missing',
     // not on the old correction list, so identical behaviour keeps them blocked
-    'invalid_name', 'unknown_technology', 'no_actor', 'different_surface',
+    'no_actor', 'different_surface', 'technology_disabled', 'research_disabled',
   ]) assert.equal(modRegistry[code], 'world', code)
 })
 
@@ -92,11 +102,53 @@ test('a refusal with a missing, unknown or non-string class is unclassified and 
   }
 })
 
-test('every refusal the loop itself raises declares its class where it builds the refusal', () => {
-  // Static guard: a new `.preflight = { ok: false, ... }` in the loop must carry a refusal_class, or the refusal arrives unclassified.
-  const loop = readFileSync(new URL('./npc-agent-loop.mjs', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
-  const blocks = [...loop.matchAll(/\.preflight = \{([^}]*)\}/g)].map(match => match[1])
-  const refusals = blocks.filter(block => /\bok: false\b/.test(block))
-  assert.ok(refusals.length >= 6, `found ${refusals.length} loop-built refusals`)
-  for (const block of refusals) assert.match(block, /refusal_class:/, block.replace(/\s+/g, ' ').slice(0, 120))
+// Static guard. A refusal object literal is one that says `ok: false` and has its own top-level `code:`. Every one built in the
+// loop or the memory facade must carry a refusal_class, or the refusal reaches the loop unclassified. The scan balances braces, so
+// nested literals (conflict: {...}, duplicate: {...}) inside a refusal do not cut it short.
+function refusalLiterals(text) {
+  const found = []
+  for (const start of text.matchAll(/\{\s*ok: false\b/g)) {
+    let depth = 0
+    let quote
+    let end = -1
+    for (let i = start.index; i < text.length; i++) {
+      const char = text[i]
+      if (quote) {
+        if (char === String.fromCharCode(92)) i++
+        else if (char === quote) quote = undefined
+        continue
+      }
+      if (char === '\'' || char === '"' || char === '`') quote = char
+      else if (char === '{') depth++
+      else if (char === '}' && --depth === 0) { end = i; break }
+    }
+    assert.ok(end > 0, `unbalanced literal near offset ${start.index}`)
+    const literal = text.slice(start.index, end + 1)
+    // Top level only: drop every nested {...} before looking for keys.
+    let top = literal.slice(1, -1)
+    for (let previous; previous !== top;) { previous = top; top = top.replace(/\{[^{}]*\}/g, '') }
+    if (/\bcode:/.test(top)) found.push({ literal, top })
+  }
+  return found
+}
+
+for (const [file, minimum] of [['npc-agent-loop.mjs', 6], ['canonical-task-board-memory.mjs', 1]]) {
+  test(`every refusal literal built in ${file} declares its refusal_class`, () => {
+    const text = readFileSync(new URL(`./${file}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+    const refusals = refusalLiterals(text)
+    assert.ok(refusals.length >= minimum, `found ${refusals.length} refusal literals in ${file}`)
+    for (const { literal, top } of refusals) assert.match(top, /\brefusal_class:/, literal.replace(/\s+/g, ' ').slice(0, 140))
+  })
+}
+
+test('the step_contract_pending refusal is among the guarded literals', () => {
+  const text = readFileSync(new URL('./canonical-task-board-memory.mjs', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+  assert.ok(refusalLiterals(text).some(({ top }) => /STEP_CONTRACT_PENDING_CODE/.test(top) && /refusal_class: REFUSAL_CLASS\.WORLD/.test(top)))
+})
+
+test('the guard does catch a refusal that forgot its class, including one with a nested literal', () => {
+  const missing = refusalLiterals('x.preflight = {\n  ok: false,\n  code: \'a\',\n  conflict: { n: 1 },\n  detail: \'}\',\n}')
+  assert.equal(missing.length, 1)
+  assert.doesNotMatch(missing[0].top, /refusal_class:/)
+  assert.match(missing[0].top, /detail:/, 'a nested literal and a brace inside a string do not end the scan early')
 })
