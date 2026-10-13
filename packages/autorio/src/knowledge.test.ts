@@ -168,8 +168,14 @@ describe('recipe knowledge', () => {
     expect(recipe_details_for_actor(actor, 'does-not-exist')).toEqual({
       found: false,
       query: 'does-not-exist',
+      code: 'no_recipe',
       error: 'no recipe produces this item/fluid and no recipe has this name',
     })
+  })
+
+  it('declares code no_recipe next to the error text for an item no recipe makes', () => {
+    const recipes = { is_valid: true, force: { recipes: {} } } as any
+    expect(recipe_details_for_actor(recipes, 'iron-ore')).toMatchObject({ found: false, query: 'iron-ore', code: 'no_recipe', error: 'no recipe produces this item/fluid and no recipe has this name' })
   })
 })
 

@@ -380,6 +380,8 @@ export function recipe_details_for_actor(actor: ControlledActor, item_or_recipe:
     return {
       found: false,
       query: item_or_recipe,
+      // Declared by the producer so the harness never matches the sentence: the game has no recipe for this name.
+      code: 'no_recipe',
       error: 'no recipe produces this item/fluid and no recipe has this name',
       mined_from: mined_from.length > 0 ? mined_from.map(resource => resource.name) : undefined,
     }
