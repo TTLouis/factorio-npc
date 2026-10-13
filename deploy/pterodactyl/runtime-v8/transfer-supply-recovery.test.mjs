@@ -60,8 +60,31 @@ function missingCoal(overrides = {}) {
   }
 }
 
+// Real recipe shapes for the batch stock ledger: the live getRecipeDetails answer and the serpent block the game prints for an inventory.
+const recipeDetail = (name, ingredients, products, hand = true) => ({
+  name,
+  enabled: true,
+  hidden: false,
+  energy: 0.5,
+  categories: [hand ? 'crafting' : 'smelting'],
+  hand_craftable_category: hand,
+  ingredients: ingredients.map(([item, amount]) => ({ type: 'item', name: item, amount })),
+  products: products.map(([item, amount]) => ({ type: 'item', name: item, amount })),
+  crafting_machine_count: 1,
+  crafting_machines: [{ name: 'assembling-machine-1', type: 'assembling-machine', crafting_speed: 0.5, seconds_per_craft: 1 }],
+  crafting_machines_truncated: false,
+})
+const RECIPE_DETAILS = {
+  'iron-gear-wheel': recipeDetail('iron-gear-wheel', [['iron-plate', 2]], [['iron-gear-wheel', 1]]),
+  'iron-plate': recipeDetail('iron-plate', [['iron-ore', 1]], [['iron-plate', 1]], false),
+  'stone-furnace': recipeDetail('stone-furnace', [['stone', 5]], [['stone-furnace', 1]]),
+}
+const serpent = inventory => ['{', Object.entries(inventory).filter(([, count]) => count > 0).map(([name, count]) => `  {\n    count = ${count},\n    name = "${name}"\n  }`).join(',\n'), '}'].join('\n')
+
 class Rcon {
   constructor() {
+    this.inventory = undefined // the actor inventory the game prints; unset answers like an empty table
+    this.recipes = undefined // getRecipeDetails answers by name; unset answers like an unreadable read
     this.commands = []
     this.mutations = []
     this.preflightCalls = []
@@ -145,6 +168,13 @@ class Rcon {
         admission_journal: this.admissionJournal(),
         receipt_journal: this.operationStatus.last_cancelled_batch ? [{ ...this.operationStatus.last_cancelled_batch, state: 'cancelled' }] : [],
       })
+    }
+    if (this.inventory && text.includes('"get_inventory_items"')) return serpent(this.inventory)
+    if (this.recipes && text.includes('"recipe_details"')) {
+      const name = /"recipe_details",['"]([a-z0-9-]+)['"]/.exec(text)?.[1]
+      return JSON.stringify(this.recipes[name]
+        ? { found: true, query: name, truncated: false, recipes: [this.recipes[name]] }
+        : { found: false, query: name, code: 'no_recipe', error: 'no recipe produces this item/fluid and no recipe has this name' })
     }
     if (text.includes('remote.call("autorio_preflight","operation"')) {
       const name = text.match(/"autorio_preflight","operation",'([a-z_]+)'/)?.[1]
@@ -230,6 +260,8 @@ test('a transfer preceded in the same batch by an operation that could supply th
 
 test('a craft that produces the transferred item defers a move_items_exact into a chest', async () => {
   const rcon = new Rcon()
+  rcon.inventory = { 'iron-plate': 10 }
+  rcon.recipes = RECIPE_DETAILS
   rcon.preflight.move_items_exact = {
     ...missingCoal(),
     operation: 'move_items_exact',
@@ -246,28 +278,21 @@ test('a craft that produces the transferred item defers a move_items_exact into 
 
   assert.equal(rcon.mutations.length, 1)
   assert.equal(world.named('transfer.preflight_supply_deferred').length, 1)
+  assert.deepEqual(data(world.named('transfer.preflight_supply_deferred')[0]).dependencies, [{ item_name: 'iron-gear-wheel', status: 'supply_missing', operation_index: 0, operation: 'craft_item' }])
   assert.equal(world.named('transfer.preflight_missing_supply').length, 0)
 })
 
-test('the batch-dependency rule defers only for an operation that could supply the proved shortage', () => {
+test('the batch-dependency rule covers the machine side only: stock the actor must hold belongs to the batch stock ledger, by quantity', () => {
   const missing = missingCoal()
-  const ops = names => names.map(name => ({ name, args: {} }))
-  assert.equal(transferBatchDependency(ops(['walk_to_position', 'supply_entity']), 1, missing), undefined, 'a walk supplies nothing')
-  assert.equal(transferBatchDependency([{ name: 'gather_resource', args: { resource_name: 'iron-ore' } }, COAL_SUPPLY], 1, missing), undefined, 'a gather of another resource does not supply coal')
-  assert.equal(transferBatchDependency([{ name: 'craft_item', args: { item_name: 'iron-gear-wheel' } }, COAL_SUPPLY], 1, missing), undefined, 'a craft of another item does not supply coal')
-  assert.equal(transferBatchDependency([COAL_SUPPLY, GATHER_COAL], 0, missing), undefined, 'only EARLIER operations count')
-  assert.deepEqual(transferBatchDependency([GATHER_COAL, COAL_SUPPLY], 1, missing)?.[0].operation_index, 0)
-  assert.ok(transferBatchDependency([{ name: 'mine_entity_exact', args: { unit_number: 9 } }, COAL_SUPPLY], 1, missing), 'a mining operation could yield the item')
-  assert.ok(transferBatchDependency([{ name: 'move_items_exact', args: { item_name: 'coal', unit_number: 77, max_count: 5, to_entity: false } }, COAL_SUPPLY], 1, missing), 'an extraction of the item could supply it')
-  // Every failing item needs its own supplier.
-  const two = missingCoal({ transfer: { direction: 'to_entity', items: [
-    { item_name: 'coal', status: 'supply_missing' },
-    { item_name: 'iron-ore', status: 'supply_missing' },
-  ] } })
-  assert.equal(transferBatchDependency([GATHER_COAL, COAL_SUPPLY], 1, two), undefined)
+  // A missing item in the actor inventory is no longer decided by a name match: even a gather of that very item is not a "dependency" here.
+  assert.equal(transferBatchDependency([GATHER_COAL, COAL_SUPPLY], 1, missing), undefined)
+  assert.equal(transferBatchDependency([{ name: 'mine_entity_exact', args: { unit_number: 9 } }, COAL_SUPPLY], 1, missing), undefined)
+  assert.equal(transferBatchDependency([{ name: 'move_items_exact', args: { item_name: 'coal', unit_number: 77, max_count: 5, to_entity: false } }, COAL_SUPPLY], 1, missing), undefined)
   // An empty extraction is deferred by a wait, a full destination only by a same-unit extraction.
   const empty = { ...missingCoal(), code: 'extraction_empty', transfer: { direction: 'from_entity', items: [{ item_name: 'iron-plate', status: 'extraction_empty' }] } }
   assert.ok(transferBatchDependency([{ name: 'wait', args: { ticks: 600 } }, { name: 'move_items_exact', args: {} }], 1, empty))
+  assert.equal(transferBatchDependency([{ name: 'walk_to_position', args: {} }, { name: 'move_items_exact', args: {} }], 1, empty), undefined, 'a walk supplies nothing')
+  assert.equal(transferBatchDependency([{ name: 'move_items_exact', args: {} }, { name: 'wait', args: { ticks: 600 } }], 0, empty), undefined, 'only EARLIER operations count')
   const full = { ...missingCoal(), code: 'destination_full', transfer: { direction: 'to_entity', items: [{ item_name: 'coal', status: 'destination_full' }] } }
   assert.equal(transferBatchDependency([GATHER_COAL, COAL_SUPPLY], 1, full), undefined)
   assert.ok(transferBatchDependency([{ name: 'move_items_exact', args: { item_name: 'iron-plate', unit_number: 15, max_count: 9, to_entity: false } }, COAL_SUPPLY], 1, full))
@@ -665,6 +690,8 @@ const missingFurnaceItem = () => ({
 
 test('a placement preceded in the same batch by a craft of its item is not refused on the held-item snapshot', async () => {
   const rcon = new Rcon()
+  rcon.inventory = { stone: 5 }
+  rcon.recipes = RECIPE_DETAILS
   rcon.preflight.place_entity = missingFurnaceItem()
   const world = harness(rcon, [observe(), planMessage([CRAFT_FURNACE, PLACE_FURNACE], { plan: ['Craft and place a furnace'] })])
 
@@ -678,11 +705,14 @@ test('a placement preceded in the same batch by a craft of its item is not refus
   assert.equal(data(deferred).code, 'placement_item_missing')
   assert.equal(data(deferred).operation_index, 1)
   assert.deepEqual(data(deferred).dependencies, [{ item_name: 'stone-furnace', status: 'placement_item_missing', operation_index: 0, operation: 'craft_item' }])
+  assert.equal(data(deferred).reason, 'earlier_operation_in_batch_supplies_item')
   assert.equal(data(world.named('operations.preflight_ok').at(-1)).operations[1].preflight.deferred, 'batch_dependency')
 })
 
 test('a placement refusal with no earlier supplier passes the mod code through to the blocker, the trace and the durable evidence', async () => {
   const rcon = new Rcon()
+  rcon.inventory = { 'iron-plate': 2 }
+  rcon.recipes = RECIPE_DETAILS
   rcon.preflight.place_entity = missingFurnaceItem()
   const world = harness(rcon, [observe(), planMessage([{ name: 'craft_item', args: { item_name: 'iron-gear-wheel', count: 1 } }, PLACE_FURNACE], { plan: ['Place a furnace'] })])
 
