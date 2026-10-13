@@ -133,6 +133,8 @@ owner's go.
 | 3. Active-step fact handoff | `7acf4ccb` `7e4cd887` `645ec17f` `f0fc5ac8`, merge `572d4600` | Merged. Gate green; `native-admission` lane PASS. |
 | 4. Dependency-aware batch stock accounting | — | In progress |
 | 5. Steam-power exact-layout fixture | — | Mostly covered by existing `steam_power_cell.py`; powered lab + research progress still open. |
+| 6. Raw-leaf acquisition facts (run C follow-up) | `ab2290f3`, merge `015c2ab3` | Merged. Bounded native source facts; static gate green, not live-validated. |
+| Run C blocker recovery and diagnostics | `fdb55d72`, merge `b974dc97`, repin `473327a0` | Merged. Rejected blockers use durable bounded recovery; original run C diagnosed. Combined 2,129 runtime + 1,105 mod tests and 9 payload tests passed. See [checkpoint](LUNA_RUN_C_STATIC_FOLLOWUP_2026-10-13.md). |
 
 Unit 1 notes:
 

@@ -8,6 +8,14 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 13: run C static repairs integrated (gate green, not live-validated)
+
+- **Code.** Unit 6 raw acquisition facts (`ab2290f3`, merge `015c2ab3`) and rejected-blocker recovery/diagnostics (`fdb55d72`, merge `b974dc97`); installer repin `473327a0`.
+- **Result.** Executor handoffs now carry bounded native mining-source observations for missing raw materials, without expanding ore recycling/crushing recipes. Rejected model blockers receive the existing durable recovery attempt instead of being relabelled provider outages. Exhaustion remains explicit and bounded.
+- **Validation.** Combined Docker gate: 2,129 runtime/staging and 1,105 mod tests passed, plus typecheck, Lua build/check, and 9 payload tests. Independent review passed. The revised checker flags the original 99-row run C trace with `rejected_blocker_pause`.
+- **Next.** Unit 4 batch stock and unit 5 powered-lab/research-progress proof remain open. The general observation budget and surface/expansion-aware recipe eligibility still need focused follow-up. No new live run or deployment.
+- **Checkpoint.** [Static follow-up and remaining work](validation/LUNA_RUN_C_STATIC_FOLLOWUP_2026-10-13.md).
+
 ## October 13: GPT-6 proxy live run c on `572d4600` (paused on step 1, not green science)
 
 - **Setup.** Cold start, objective "research logistic science", actor 20, zero connected humans, starter kit only. Luna model `gpt-6-luna` through the CLI proxy. Deployment matched the candidate (48 runtime modules, 0 mismatches).
