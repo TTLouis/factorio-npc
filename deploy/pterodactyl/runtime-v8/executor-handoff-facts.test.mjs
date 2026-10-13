@@ -209,7 +209,7 @@ test('D2 live shape: after the planner read the lab recipe and collected ten cop
   const step = textOf(stepBlock(world.agent.messages))
   // Stable recipe facts, tagged with where they came from.
   const lab = step.split('\n').find(line => line.startsWith('recipe_fact lab '))
-  assert.match(lab, /^recipe_fact lab \(stable recipe data, source=getRecipeDetails, as_of=epoch:3\): categories=crafting \| energy=0\.5 \| ingredients=10 electronic-circuit \+ 10 iron-gear-wheel \+ 4 transport-belt \| products=1 lab \| machines=assembling-machine-1,assembling-machine-2$/)
+  assert.match(lab, /^recipe_fact lab \(stable recipe data, source=getRecipeDetails, as_of=epoch:3\): applicability=unknown \| categories=crafting \| energy=0\.5 \| ingredients=10 electronic-circuit \+ 10 iron-gear-wheel \+ 4 transport-belt \| products=1 lab \| machines=assembling-machine-1,assembling-machine-2$/)
   assert.match(step, /^recipe_fact electronic-circuit .*ingredients=1 iron-plate \+ 3 copper-cable \| products=1 electronic-circuit/m)
   assert.match(step, /^recipe_fact copper-cable .*ingredients=1 copper-plate \| products=2 copper-cable/m)
   // Counts re-read now, not the planner's older ones.

@@ -360,6 +360,22 @@ function normalizeProduct(raw) {
  * `recipes[]`, or the requires_machine facts' recipe plus its machine names). `complete` is false when anything was
  * cut or unreadable: an incomplete recipe is shown but never used to derive quantities.
  */
+export function recipeApplicability(raw) {
+  const reasons = {
+    available: ['no_surface_conditions', 'surface_conditions_satisfied', 'surface_conditions_ignored'],
+    unavailable: ['surface_condition_mismatch'],
+    unknown: ['recipe_prototype_unavailable', 'actor_surface_unavailable', 'surface_property_unavailable'],
+  }
+  const state = raw?.state
+  const surface = Number.isSafeInteger(raw?.surface_index) && raw.surface_index > 0 ? raw.surface_index : undefined
+  const unbound = state === 'available' && raw?.reason === 'no_surface_conditions' && raw?.surface_bound === false
+  if (!reasons[state]?.includes(raw?.reason) || (!unbound && raw?.surface_bound !== true)
+    || (state !== 'unknown' && !unbound && surface === undefined)) {
+    return { state: 'unknown', reason: 'applicability_not_reported', surface_bound: true }
+  }
+  return { state, reason: raw.reason, surface_bound: !unbound, ...(surface !== undefined ? { surface_index: surface } : {}) }
+}
+
 export function normalizeRecipeFact(raw, { source = 'unknown', tag, limits: overrides } = {}) {
   const limits = { ...EXECUTOR_FACT_LIMITS, ...overrides }
   const name = factName(raw?.name)
@@ -389,6 +405,11 @@ export function normalizeRecipeFact(raw, { source = 'unknown', tag, limits: over
   const energy = finiteNumber(raw.energy)
   return {
     name,
+    ...(raw.applicability ? { applicability: recipeApplicability(raw.applicability) } : {}),
+    ...(typeof raw.enabled === 'boolean' ? { enabled: raw.enabled } : {}),
+    ...(typeof raw.hidden === 'boolean' ? { hidden: raw.hidden } : {}),
+    ...(typeof raw.hidden_from_player_crafting === 'boolean' ? { hidden_from_player_crafting: raw.hidden_from_player_crafting } : {}),
+    ...(typeof raw.hand_craftable_category === 'boolean' ? { hand_craftable_category: raw.hand_craftable_category } : {}),
     categories: [...new Set(asList(raw.categories).map(factName).filter(Boolean))].slice(0, 6),
     ...(energy !== undefined ? { energy } : {}),
     ingredients: ingredients.slice(0, limits.recipeIngredients),
@@ -405,8 +426,16 @@ export function normalizeRecipeFact(raw, { source = 'unknown', tag, limits: over
 export function recipeFactsFromDetails(parsed, { tag, limits } = {}) {
   if (!parsed || typeof parsed !== 'object' || parsed.found !== true) return []
   return asList(parsed.recipes).flatMap((entry) => {
+    const applicability = recipeApplicability(entry?.applicability)
+    if (applicability.state === 'unavailable') return []
     const fact = normalizeRecipeFact({
       name: entry?.name,
+      // Legacy reads remain explicit unknowns rather than silently becoming proven eligible.
+      applicability,
+      enabled: entry?.enabled,
+      hidden: entry?.hidden,
+      hidden_from_player_crafting: entry?.hidden_from_player_crafting,
+      hand_craftable_category: entry?.hand_craftable_category,
       energy: entry?.energy,
       categories: entry?.categories,
       ingredients: entry?.ingredients,
@@ -850,6 +879,8 @@ function joinBounded(parts, separator, max) {
 export function recipeFactLine(fact, max = EXECUTOR_FACT_LIMITS.recipeChars) {
   const head = `recipe_fact ${fact.name} (stable recipe data, source=${fact.source}, as_of=${tagText(fact.as_of)}${fact.complete ? '' : ', incomplete'})`
   const body = [
+    fact.applicability ? `applicability=${fact.applicability.state}${fact.applicability.surface_index ? `@surface:${fact.applicability.surface_index}` : ''}` : '',
+    fact.enabled === false ? 'locked (planning dependency)' : '',
     fact.categories.length > 0 ? `categories=${fact.categories.join('+')}` : '',
     fact.energy !== undefined ? `energy=${fact.energy}` : '',
     `ingredients=${fact.ingredients.map(stackText).join(' + ') || 'none'}`,

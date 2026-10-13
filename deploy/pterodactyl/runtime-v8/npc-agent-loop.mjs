@@ -31,6 +31,7 @@ import {
   recipeFactFromRequiresMachine,
   recipeFactLine,
   recipeFactsFromDetails,
+  recipeApplicability,
   researchPathFact,
   cacheTriggerCraftingReports,
   attachCachedTriggerCrafting,
@@ -4712,7 +4713,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   // Tool results the planner or executor read from the live game that a later executor should not have to re-read.
-  recordHandoffToolFacts(toolName, raw, args) {
+  recordHandoffToolFacts(toolName, raw, args, { requestId } = {}) {
     try {
       if (toolName === 'getRecipeDetails') {
         let parsed
@@ -4730,6 +4731,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           while (this.handoffRawLeaves.size > EXECUTOR_FACT_LIMITS.noRecipeItems) this.handoffRawLeaves.delete(this.handoffRawLeaves.keys().next().value)
         }
         const tag = this.observationTag()
+        const excluded = []
+        for (const entry of parsed?.recipes ?? []) {
+          if (recipeApplicability(entry?.applicability).state !== 'unavailable') continue
+          this.handoffRecipeFacts.delete(entry.name)
+          excluded.push(entry.name)
+        }
+        if (excluded.length) void this.traceEvent('context.recipe_applicability', {
+          request_id: requestId ?? this.traceRequest?.id,
+          reason: 'native_surface_condition_mismatch', query: parsed.query, excluded,
+        }, { requestId }).catch(() => {})
         for (const fact of recipeFactsFromDetails(parsed, { tag })) this.rememberRecipeFact(fact)
       }
       else if (toolName === 'getFluidSourceTiles') {
@@ -4814,7 +4825,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // remembered so raw resources are not re-read at every restage. Results go through recordHandoffToolFacts, so the recipe
   // cache bound applies. A fence refusal (`error.handoffFence`) rolls back what this call added and rethrows. Returns
   // { reads, found, unreadable, no_recipe, truncated }; `truncated` means an uncached item was left unread.
-  async prefetchRecipeClosure({ roots, fence }) {
+  async prefetchRecipeClosure({ roots, fence, requestId }) {
     const limits = EXECUTOR_FACT_LIMITS
     const stats = { reads: 0, found: 0, unreadable: 0, no_recipe: 0, truncated: false }
     const before = new Map(this.handoffRecipeFacts)
@@ -4842,7 +4853,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           }
           catch { stats.unreadable += 1; continue }
           if (parsed?.query !== item) { stats.unreadable += 1; continue }
-          this.recordHandoffToolFacts('getRecipeDetails', raw, { item_or_recipe: item })
+          this.recordHandoffToolFacts('getRecipeDetails', raw, { item_or_recipe: item }, { requestId })
           // The mod declares "the game has no recipe for this name" as code no_recipe (knowledge.ts recipe_details_for_actor);
           // any other found:false answer (no controlled actor, unreadable) is a failed read, never remembered as raw.
           if (parsed?.found === false && parsed.code === 'no_recipe') {
@@ -4892,6 +4903,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const plan = getActivePlanningPlan(state)
       const step = plan?.steps?.[plan.active_step_index]
       if (!plan || !step) return undefined
+      // Surface conditions (including ignore_surface_conditions) can change without an actor epoch.
+      // Re-read bounded scoped facts for each handoff; never carry yesterday's eligibility as stable data.
+      const expired = [...this.handoffRecipeFacts.values()].filter(fact => fact.applicability?.state === 'available' && fact.applicability.surface_bound === true)
+      for (const fact of expired) this.handoffRecipeFacts.delete(fact.name)
+      if (expired.length) await this.traceEvent('context.recipe_applicability', {
+        request_id: requestId ?? this.traceRequest?.id,
+        reason: 'surface_evidence_requires_refresh', expired: expired.map(fact => fact.name),
+      }, { requestId })
       const limits = EXECUTOR_FACT_LIMITS
       const needs = stepContractNeeds(step)
       const source = actor ?? this.epoch
@@ -4936,7 +4955,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       let prefetchReads = 0 // recipe reads are counted in reads_attempted but are not part of the count refresh's success rate
       if (mode === 'packet' && !inFlight && fence && needs.roots.length > 0) {
         try {
-          const prefetch = await this.prefetchRecipeClosure({ roots: needs.roots, fence })
+          const prefetch = await this.prefetchRecipeClosure({ roots: needs.roots, fence, requestId })
           meta.recipe_prefetch = prefetch
           meta.reads_attempted += prefetch.reads
           prefetchReads = prefetch.reads
