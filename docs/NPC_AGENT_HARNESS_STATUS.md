@@ -8,12 +8,20 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 13: authorized green-science attempt D (provider failure, no gameplay)
+
+- **Candidate/deployment.** Clean pushed HEAD `35150fc61244d25a1992f50025d3e824ddf19b08` (reviewed code `16138b9a`) built with `-NoEnvUpdate`. All 49 shipped runtime/staging modules matched candidate source after CR normalization; all 31 active mod files matched the release.
+- **Current model.** `qwen3-coder-30b-a3b-instruct`, confirmed from non-secret config and the actual request payload. Existing gameplay settings were preserved; no `.env` read or edit.
+- **Result.** One cold-world raw-chat objective created goal `goal_1aai7qd_1` for standalone actor 11/epoch 1, request `req_mv6fo1ee_1`. The first and only Luna provider request failed with `fetch failed`, followed by `request.failed recoverable=false`; four Jev calls. No committed plan, gameplay operation, red science production/consumption or research completion. Green science remains unproven; the transport cause is not established.
+- **Stop/evidence.** Stopped at the first blocker, final save preserved, one RCON closed and isolated Compose stack removed. No corrective prompts, provider retry, runtime changes or second run. Zero humans and speed 1 throughout. `run-check` flags `request_failed_unrecoverable`. Weekly allowance was 76% remaining at shutdown.
+- **Checkpoint.** [Attempt D and exact evidence paths](validation/GREEN_SCIENCE_LIVE_D_2026-10-13.md); local evidence `test-results/luna-green-live-2026-10-13d/`.
+
 ## October 13: green-science prerequisites, second static pass
 
 - **Integrated.** Native surface-applicability filtering (`5c9826cb`) and one native-grounded resource search through the existing durable targeted-read allowance (`ec2f359a`). Normal observation limits are unchanged. Both received independent source review.
 - **Engine evidence.** Powered-lab fixture (`481a1196`, evidence update `133504ff`) passed the focused steam-lab and full production lanes. Real research advanced after native pole placement, with one lab, the original steam engine, zero humans and speed 1. Seeded science/prerequisites make this a mechanics proof; autonomous green science remains unproven.
 - **Combined static gate.** 2,173 runtime/staging tests and 1,108 mod tests passed, plus typecheck, Lua build and generated-Lua validation; 9 installer payload tests passed.
-- **Candidate.** Unit 4 batch stock (`3fd26f42`, merge `0708bd4b`) and fresh native recipe projection (`16138b9a`) are reviewed and green. All preparation prerequisites passed. One autonomous run is authorized; it has not started. Once started, finish the test rather than stopping for preparation usage targets; the owner set a 50% weekly remaining hard floor.
+- **Candidate.** Unit 4 batch stock (`3fd26f42`, merge `0708bd4b`) and fresh native recipe projection (`16138b9a`) are reviewed and green. All preparation prerequisites passed. The one authorized attempt is now concluded as attempt D above, blocked by the first provider transport failure before gameplay. The owner set a 50% weekly remaining hard floor; 76% remained at shutdown.
 - **Durable checklist.** [Green-science red-to-green pass](validation/GREEN_SCIENCE_RED_TO_GREEN_2026-10-13.md).
 
 ## October 13: run C static repairs integrated (gate green, not live-validated)

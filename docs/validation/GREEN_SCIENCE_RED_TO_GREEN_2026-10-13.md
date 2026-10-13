@@ -18,7 +18,7 @@
 | Observation decision budget | Parent | existing durable targeted-read allowance | Missing facts remain obtainable without blanket allowance increases; regression scenarios | Reviewed ec2f359a merged; 2132 runtime/1105 mod/typecheck/Lua passed |
 | Steam-power → powered lab → research progress | powered_lab_gate / powered-lab-chain | current native APIs | Real-engine exact-layout proof, preserve powered-drill canary | Reviewed 481a1196 merged; steam-lab exit0, real research0.051333→0.102500; full production lane exit 0 (including transport and powered assembler), evidence133504ff |
 | Candidate integration | Parent + independent reviewer | all above | Recorded SHA, payload pin, combined static + engine gates | Green code16138b9a; 2,173 runtime,1,108 mod,9 payload tests; typecheck/Lua/check passed. Steam-lab +full production engine lanes passed. |
-| One autonomous validation | Separate local Sol overseer | green candidate gates | Complete test with structured evidence and truthful result | Not started |
+| One autonomous validation | Separate local Sol overseer | green candidate gates | Complete test with structured evidence and truthful result | Attempt D concluded: first provider request failed before plan/gameplay. Save/traces preserved, stack down; no retry. |
 
 Existing worktrees and unfinished candidates must be preserved. No production Pterodactyl deployment is authorized.
 
@@ -46,3 +46,7 @@ Code `16138b9a578d2dcfd3f42f804f36ad963fa66026` includes all reviewed units. Bat
 Final `scripts/test-local.sh all` exited0: **2,173 runtime/staging tests,1,108 mod tests in124files, TypeScript, Lua build and generated-Lua check**. Final output retained as `test-green-final.log`. The combined replay fingerprint was regenerated for the reviewed prompt and stock-trace changes, then passed again with regeneration disabled. Payload builder/check and **9payload tests** exited0 in Docker using canonical mounts (`test-green-payload.log`). Payload source hash: `7fab89d9ebdb4ba58ea51794211ee2725391687c5cd54307e6f37c8477cb9144`.
 
 No autonomous provider run occurred during preparation. All prerequisites for the one authorized overseer-controlled validation are now green. The run remains a separate empirical gate and must not be described as successful until native logistic-science research and the canonical goal are verified.
+
+## Authorized attempt concluded
+
+The separate local Sol overseer (`01a1346a-17b5-72d0-876d-76067d8e3cab`) completed attempt D on candidate `35150fc6`. Current configured Luna model `qwen3-coder-30b-a3b-instruct` was preserved. The only provider request failed with `fetch failed` before a plan or gameplay; a fresh canonical goal exists but no science progress occurred. All49runtime and31mod deployment files matched. Evidence was saved and the isolated stack stopped without a retry. Usage remained76%; this stop was the first-blocker condition, not a preparation usage target. See [attempt D](GREEN_SCIENCE_LIVE_D_2026-10-13.md). No autonomous success is claimed.
