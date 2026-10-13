@@ -41,6 +41,9 @@ import {
   rememberFluidHints,
   expandableIngredients,
   recipeKnownForItem,
+  rawLeafFromRecipeDetails,
+  rawLeafSourceFromRead,
+  withoutRawLeafRecipes,
 } from './handoff-packet.mjs'
 import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CLASS, REPLACEMENT_DECISION } from './authorization.mjs'
 import { REFUSAL_CLASS, refusalClassLabel, refusalClassOf } from './refusal-class.mjs'
@@ -2952,6 +2955,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // Repair unit D2: what a fresh executor can be told. Recipe facts are stable game data and outlive requests;
     // inventory observations are world state and reset with the entity observations. The mutation sequence orders them.
     this.handoffRecipeFacts = new Map()
+    this.handoffRecipeQueries = new Set()
+    this.handoffRawLeaves = new Map()
     this.handoffNoRecipeItems = new Set() // items the game answered "no recipe" for (raw resources): stable data, not re-read
     this.handoffTriggerCraftingReports = []
     this.handoffInventoryObservations = new Map()
@@ -4713,6 +4718,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         let parsed
         try { parsed = JSON.parse(String(raw ?? '')) }
         catch { return }
+        if (args?.item_or_recipe && parsed?.query !== args.item_or_recipe) return
+        if (parsed?.found === true || (parsed?.found === false && parsed.code === 'no_recipe')) {
+          this.handoffRecipeQueries.add(parsed.query)
+          while (this.handoffRecipeQueries.size > EXECUTOR_FACT_LIMITS.noRecipeItems) this.handoffRecipeQueries.delete(this.handoffRecipeQueries.values().next().value)
+        }
+        const rawLeaf = rawLeafFromRecipeDetails(parsed)
+        if (rawLeaf) {
+          this.handoffRawLeaves.delete(rawLeaf.item)
+          this.handoffRawLeaves.set(rawLeaf.item, rawLeaf)
+          while (this.handoffRawLeaves.size > EXECUTOR_FACT_LIMITS.noRecipeItems) this.handoffRawLeaves.delete(this.handoffRawLeaves.keys().next().value)
+        }
         const tag = this.observationTag()
         for (const fact of recipeFactsFromDetails(parsed, { tag })) this.rememberRecipeFact(fact)
       }
@@ -4801,8 +4817,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async prefetchRecipeClosure({ roots, fence }) {
     const limits = EXECUTOR_FACT_LIMITS
     const stats = { reads: 0, found: 0, unreadable: 0, no_recipe: 0, truncated: false }
-    const before = new Set(this.handoffRecipeFacts.keys())
-    const knownRecipe = item => this.handoffNoRecipeItems.has(item) || recipeKnownForItem(item, [...this.handoffRecipeFacts.values()])
+    const before = new Map(this.handoffRecipeFacts)
+    const queriesBefore = new Set(this.handoffRecipeQueries)
+    const rawBefore = new Map(this.handoffRawLeaves)
+    const noRecipeBefore = new Set(this.handoffNoRecipeItems)
+    const knownRecipe = item => this.handoffRawLeaves.has(item) || this.handoffNoRecipeItems.has(item) || (this.handoffRecipeQueries.has(item) && recipeKnownForItem(item, [...this.handoffRecipeFacts.values()]))
     const queue = roots.map(root => root.item)
     const seen = new Set()
     let fenced = false
@@ -4822,6 +4841,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             parsed = JSON.parse(raw)
           }
           catch { stats.unreadable += 1; continue }
+          if (parsed?.query !== item) { stats.unreadable += 1; continue }
+          this.recordHandoffToolFacts('getRecipeDetails', raw, { item_or_recipe: item })
           // The mod declares "the game has no recipe for this name" as code no_recipe (knowledge.ts recipe_details_for_actor);
           // any other found:false answer (no controlled actor, unreadable) is a failed read, never remembered as raw.
           if (parsed?.found === false && parsed.code === 'no_recipe') {
@@ -4830,16 +4851,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             stats.no_recipe += 1
             continue
           }
-          this.recordHandoffToolFacts('getRecipeDetails', raw)
           if (!recipeKnownForItem(item, [...this.handoffRecipeFacts.values()])) { stats.unreadable += 1; continue }
           stats.found += 1
         }
-        queue.push(...expandableIngredients(item, [...this.handoffRecipeFacts.values()]))
+        queue.push(...expandableIngredients(item, [...this.handoffRecipeFacts.values()], this.handoffRawLeaves))
       }
       if (fenced) await this.handoffFenceCheck(fence, 'during')
     }
     catch (error) {
-      for (const key of [...this.handoffRecipeFacts.keys()]) if (!before.has(key)) this.handoffRecipeFacts.delete(key)
+      this.handoffRecipeQueries = queriesBefore
+      this.handoffRecipeFacts = before
+      this.handoffRawLeaves = rawBefore
+      this.handoffNoRecipeItems = noRecipeBefore
       if (error && typeof error === 'object') error.recipePrefetch = stats // so a refusal still reports the reads it spent
       throw error
     }
@@ -4941,7 +4964,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const researchItems = researchFactItems(research)
       const wanted = [...new Set([...needs.items, ...requirementTargets(state.goal?.definition).items.map(item => item.name)])]
       wanted.unshift(...researchItems)
-      const cached = [...this.handoffRecipeFacts.values()]
+      const cached = withoutRawLeafRecipes([...this.handoffRecipeFacts.values()], this.handoffRawLeaves)
       const closure = neededItems(needs.roots, cached)
       const recipes = selectRecipeFacts(cached, { wanted, needed: closure.items }).map((recipe) => {
         const known = this.handoffRequirementMachines.get(recipe.name)
@@ -5058,7 +5081,53 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       else if (!closure.complete) meta.residual_omitted = 'too_many_items'
       else {
         const derived = deriveResidualNeeds({ roots: needs.roots, recipes: cached, held: fresh })
-        if (derived.ok) residual = { rows: derived.rows, roots: needs.roots }
+        if (derived.ok) {
+          residual = { rows: derived.rows, roots: needs.roots }
+          const sources = new Map()
+          let sourceReads = 0
+          const rawRows = residual.rows.filter(row => row.missing > 0 && this.handoffRawLeaves.has(row.item))
+          if (rawRows.length && fence) {
+            try {
+              await this.handoffFenceCheck(fence, 'before')
+              for (const row of rawRows) {
+                const raw = this.handoffRawLeaves.get(row.item)
+                for (const resource of raw.mined_from) {
+                  if (sources.has(resource) || sources.size >= limits.rawLeafResources) continue
+                  meta.reads_attempted += 1
+                  sourceReads += 1
+                  let answer
+                  try { answer = await this.rcon.command(this.observationToolCommand('findLongRangeEntities', { name: resource, max_radius: limits.rawLeafRadius, limit: 1 })) }
+                  catch { /* An unreadable source is not evidence of absence. */ }
+                  const source = rawLeafSourceFromRead(answer, resource, limits.rawLeafRadius)
+                  if (source.state === 'failed') {
+                    meta.reads_failed += 1
+                    if (meta.refresh === 'ok') meta.refresh = 'partial'
+                  }
+                  sources.set(resource, source)
+                }
+              }
+              await this.handoffFenceCheck(fence, 'during')
+            }
+            catch (error) {
+              if (error?.handoffFence) return { refusal: error.handoffFence, meta }
+              // An unreadable fence means none of these locations can be carried.
+              sources.clear()
+            }
+          }
+          for (const row of rawRows) {
+            const raw = this.handoffRawLeaves.get(row.item)
+            row.raw = { ...raw, as_of: this.observationTag(), sources: raw.mined_from.map(resource => sources.get(resource) ?? { resource, state: 'not_read' }) }
+          }
+          if (rawRows.length) await this.traceEvent('context.raw_leaf_acquisition', {
+            request_id: requestId ?? this.traceRequest?.id,
+            reason: 'missing_raw_materials_with_native_mining_sources',
+            items: rawRows.map(row => row.item),
+            reads: sourceReads,
+            found: [...sources.values()].filter(source => source.state === 'found').length,
+            failed: [...sources.values()].filter(source => source.state === 'failed').length,
+            truncated: rawRows.some(row => row.raw.sources.some(source => source.state === 'not_read')),
+          }, { requestId })
+        }
         else meta.residual_omitted = derived.reason
       }
 

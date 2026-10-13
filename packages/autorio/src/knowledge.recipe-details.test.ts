@@ -76,7 +76,7 @@ describe('recipe details use Factorio 2.0 recipe category fields', () => {
       get_max_energy_usage: () => 1250,
       electric_energy_source_prototype: {},
     }
-    ;(globalThis as any).prototypes.get_entity_filtered = () => machines
+    ;(globalThis as any).prototypes.get_entity_filtered = (filters: Array<{ type?: string }>) => filters[0]?.type === 'resource' ? {} : machines
     const actor = actorWithRecipes({ widget: recipe('widget', 'widget') })
     const result = recipe_details_for_actor(actor, 'widget') as any
     expect(result.recipes[0].crafting_machine_count).toBe(12)
@@ -100,7 +100,7 @@ describe('recipe details use Factorio 2.0 recipe category fields', () => {
     const plate = recipe('iron-plate', 'iron-plate', 'smelting') as any
     plate.energy = 3.2
     plate.ingredients = [{ type: 'item', name: 'iron-ore', amount: 1 }]
-    ;(globalThis as any).prototypes.get_entity_filtered = () => ({
+    ;(globalThis as any).prototypes.get_entity_filtered = (filters: Array<{ type?: string }>) => filters[0]?.type === 'resource' ? {} : ({
       'stone-furnace': {
         name: 'stone-furnace',
         type: 'furnace',

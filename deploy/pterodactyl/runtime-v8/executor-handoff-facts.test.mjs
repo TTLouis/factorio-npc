@@ -56,6 +56,7 @@ const serpent = inventory => `{\n${Object.entries(inventory).filter(([, count]) 
 function liveGame({ inventory = {}, recipes = {} } = {}) {
   const game = new FakeFactorio({ inventory })
   const table = { ...RECIPES, ...recipes }
+  game.sourceReads = []
   game.recipeReads = []
   game.onRecipeRead = undefined
   game.conditionReads = []
@@ -64,6 +65,12 @@ function liveGame({ inventory = {}, recipes = {} } = {}) {
   game.onConditionRead = undefined
   const base = game.command.bind(game)
   game.command = async (text) => {
+    if (text.includes('"autorio_discovery","find_entities"')) {
+      const resource = /"find_entities",'([^']+)'/.exec(text)?.[1]
+      game.sourceReads.push(resource)
+      game.onSourceRead?.(game, resource)
+      return JSON.stringify(game.sourceAnswer ?? sourceAnswer(resource))
+    }
     if (text.includes('"get_inventory_items"')) return serpent(game.inventory)
     if (text.includes('"recipe_details"')) {
       const name = /"recipe_details",['"]([a-z0-9-]+)['"]/.exec(text)?.[1]
@@ -73,7 +80,7 @@ function liveGame({ inventory = {}, recipes = {} } = {}) {
       // declared; mined_from is present only for an item a resource yields.
       const mined = MINED_FROM[name]
       return JSON.stringify(table[name]
-        ? { found: true, query: name, truncated: false, recipes: [table[name]] }
+        ? { found: true, query: name, truncated: false, recipes: [table[name]], ...(mined ? { mined_from: mined } : {}) }
         : { found: false, query: name, code: 'no_recipe', error: 'no recipe produces this item/fluid and no recipe has this name', ...(mined ? { mined_from: mined } : {}) })
     }
     if (text.includes('"get_fluid_source_tiles"')) {
@@ -122,7 +129,7 @@ function harness({ game, script, agentOptions = {} }) {
   const provider = async (messages, context) => {
     world.calls.push({ messages: messages.map(message => ({ ...message })), context })
     const reply = script[world.calls.length - 1]
-    assert.ok(reply, `unscripted provider call ${world.calls.length}`)
+    assert.ok(reply, `unscripted provider call ${world.calls.length}: ${JSON.stringify(world.trace.slice(-8))}`)
     return typeof reply === 'function' ? reply(messages, context, world) : { ...reply }
   }
   const jev = recordingJev(async (_state, questions) => {
@@ -914,4 +921,107 @@ test('3b: the mod\'s no_recipe answer (with its mining sources) is remembered an
   const again = await restageToFreshExecutor(world)
   assert.equal(again.restaged, true, JSON.stringify(again))
   assert.deepEqual(world.game.recipeReads.slice(3), ['unlisted-thing'])
+})
+
+
+// Run C: the local scan was empty; native discovery can locate copper without another model call.
+function sourceAnswer(resource = 'copper-ore') {
+  return { found: true, name: resource, actor_position: { x: 0, y: 0 }, searched_radius: 193, max_radius: 1024,
+    matched_count: 1, returned_count: 1, truncated: false,
+    entities: [{ name: resource, type: 'resource', position: { x: 192.5, y: 8.5 }, distance: 192.688868386, amount: 2200, force: 'neutral' }] }
+}
+async function rawCopperWorld() {
+  const recycling = detail('copper-ore-recycling', [['copper-ore', 1]], [['copper-ore', 1]], ['recycler'], { categories: ['recycling'] })
+  recycling.products[0].probability = 0.25
+  recycling.inventory_overlay = { diagnostics: 'native recipe detail '.repeat(180) }
+  const world = harness({ game: liveGame({ inventory: { 'burner-mining-drill': 1, 'stone-furnace': 1, 'iron-plate': 8 }, recipes: {
+    'copper-plate': detail('copper-plate', [['copper-ore', 1]], [['copper-plate', 1]], ['stone-furnace'], { categories: ['smelting'], energy: 3.2 }),
+    'copper-ore': recycling,
+  } }), script: [planReply({ plan: ['Produce 10 copper plates'], currentStep: 0, operations: [],
+    stepCompletions: [{ kind: 'deterministic', checkpoint: inventoryCheckpoint('copper-plate', 10) }], goal: GOAL, roadmap: SHELF }), planReply({ plan: ['Produce 10 copper plates'], currentStep: 0, operations: [gather('copper-ore', 10)] })], agentOptions: { completionProtocolVersion: 2 } })
+  await world.say()
+  return world
+}
+
+test('6 run C: copper acquisition is carried before executor observations; raw recycling does not expand the closure', async () => {
+  const world = await rawCopperWorld()
+  const step = textOf(stepBlock(world.agent.messages))
+  assert.match(step, /copper-ore missing=10 raw: mined_from=copper-ore/)
+  assert.match(step, /nearest=\(192.5,8.5\) distance=192.7/)
+  assert.match(step, /reach\/path unverified/)
+  assert.doesNotMatch(step, /recycling|asteroid/)
+  assert.deepEqual(world.game.recipeReads, ['copper-plate', 'copper-ore'])
+  assert.deepEqual(world.game.sourceReads, ['copper-ore'])
+  const trace = world.rows('context.raw_leaf_acquisition')[0]
+  assert.equal(trace.request_id, world.requestId())
+  assert.equal(trace.data.request_id, world.requestId())
+  assert.equal(trace.data.reason, 'missing_raw_materials_with_native_mining_sources')
+  assert.equal(trace.data.found, 1)
+  assert.equal(trace.data.reads, 1)
+})
+
+test('6: absence and read failure stay distinct; locations are refreshed, never cached', async () => {
+  const world = await rawCopperWorld()
+  world.agent.batchInFlight = false
+  world.game.sourceAnswer = { ...sourceAnswer(), found: false, searched_radius: 1024, matched_count: 0, returned_count: 0, entities: [] }
+  await restageToFreshExecutor(world)
+  assert.match(lineOf(world.agent.messages, 'raw_leaf_acquisition'), /nearest=none_within_1024/)
+  world.game.sourceAnswer = { ok: false, error: 'no controlled actor' }
+  await restageToFreshExecutor(world)
+  assert.match(lineOf(world.agent.messages, 'raw_leaf_acquisition'), /nearest=read_failed/)
+  assert.doesNotMatch(lineOf(world.agent.messages, 'raw_leaf_acquisition'), /192.5|none_within/)
+  assert.equal(world.rows('context.raw_leaf_acquisition').at(-1).data.failed, 1)
+})
+
+test('6: a source search crossing an actor epoch refuses the restage and carries no location', async () => {
+  const world = await rawCopperWorld()
+  world.agent.batchInFlight = false
+  world.game.onSourceRead = game => { game.status = deployment({ epoch: 4 }) }
+  const carried = world.rows('context.raw_leaf_acquisition').length
+  assert.deepEqual(await restageToFreshExecutor(world), { restaged: false, reason: 'actor_changed_during_handoff_refresh' })
+  assert.equal(world.rows('context.raw_leaf_acquisition').length, carried)
+})
+
+test('6: recipe-prefetch fence rollback restores raw leaves and the no-recipe memo', async () => {
+  const world = labWorld()
+  await world.say()
+  await world.agent.taskStatusReceipt()
+  world.game.onRecipeRead = (game, name) => { if (name === 'iron-plate') game.status = deployment({ epoch: 4 }) }
+  assert.equal((await restageToFreshExecutor(world)).restaged, false)
+  assert.equal(world.agent.handoffRawLeaves.size, 0)
+  assert.equal(world.agent.handoffNoRecipeItems.size, 0)
+})
+
+
+test('6: a collateral crushing product cannot suppress the exact copper mining query', async () => {
+  const world = await plannerCollectedTenCopper()
+  const crushing = detail('advanced-metallic-asteroid-crushing', [['metallic-asteroid-chunk', 1]], [['iron-ore', 20], ['copper-ore', 10]], ['crusher'])
+  world.agent.recordHandoffToolFacts('getRecipeDetails', JSON.stringify({ found: true, query: 'iron-ore', mined_from: ['iron-ore'], recipes: [crushing] }), { item_or_recipe: 'iron-ore' })
+  assert.equal(world.agent.handoffRawLeaves.has('copper-ore'), false)
+  await world.agent.prefetchRecipeClosure({ roots: [{ item: 'copper-ore', count: 10 }], fence: world.agent.epoch })
+  assert.equal(world.game.recipeReads.at(-1), 'copper-ore')
+  assert.deepEqual(world.agent.handoffRawLeaves.get('copper-ore').mined_from, ['copper-ore'])
+})
+
+
+test('6: at most three distinct resource searches per handoff; held and in-flight raw leaves spend none', async () => {
+  const world = await rawCopperWorld()
+  world.agent.batchInFlight = false
+  const state = structuredClone(world.memory.planningState(KEY))
+  const held = getActivePlan(state)
+  const ores = ['copper-ore', 'iron-ore', 'stone', 'coal']
+  held.steps[held.active_step_index].completion_contract = { mode: 'all', requirements: ores.map(item => ({ kind: 'inventory_count', item_name: item, minimum: 10 })) }
+  for (const item of ores) world.agent.handoffRawLeaves.set(item, { item, mined_from: [item] })
+  const before = world.game.sourceReads.length
+  const result = await world.agent.gatherExecutorHandoffFacts({ state, actor: world.agent.epoch })
+  assert.equal(world.game.sourceReads.length - before, 3)
+  const unread = result.facts.residual.rows.filter(row => row.raw?.sources[0].state === 'not_read')
+  assert.equal(unread.length, 1)
+  assert.ok(!world.game.sourceReads.slice(before).includes(unread[0].item))
+  const count = world.game.sourceReads.length
+  await world.agent.gatherExecutorHandoffFacts({ state, actor: world.agent.epoch, runtime: { idle: false } })
+  assert.equal(world.game.sourceReads.length, count)
+  for (const item of ores) world.game.inventory[item] = 10
+  await world.agent.gatherExecutorHandoffFacts({ state, actor: world.agent.epoch })
+  assert.equal(world.game.sourceReads.length, count)
 })
