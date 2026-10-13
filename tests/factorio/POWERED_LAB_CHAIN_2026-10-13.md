@@ -54,6 +54,7 @@ of using `--rm`, so its full evidence could be copied out.
 | Full Docker build | 0 | 55 prompt tests, 1,105 mod tests, typecheck and Lua build |
 | Engine runner Python suite | 0 | 92 tests, including negative powered-lab oracle cases |
 | `NPC_TEST_LANES=steam-lab` | 0 | Existing steam canary plus powered-lab progress |
+| `NPC_TEST_LANES=production` | 0 | Earlier production fixtures, steam/lab gate, compiled tools, transport and powered assembler |
 | `git diff --check` | 0 | No whitespace errors |
 
 Compact native receipts and samples are committed in
@@ -62,6 +63,14 @@ Full local artifacts remain in `test-results/powered-lab-attempt2/`, including
 `steam-power-cell.json` and Factorio logs; console/build outputs are
 `powered-lab-engine.log` and `powered-lab-build.log`.
 
+The broader production lane subsequently passed against the same built image
+(no source changes or rebuild). Its output is `powered-lab-production.log`;
+full structured evidence is in `test-results/powered-lab-production/`, copied
+from retained container `npc-powered-lab-production`. This checks the new
+fixture's prerequisite/research state after earlier scenarios and its cleanup
+before the compiled-tool, transport and powered-assembler scenarios. The final
+assembler produced 13 gears and passed native recipe configuration.
+
 Attempt 1 exited 1 because the new observation probe had an extra Lua `end`.
 Every preceding steam/drill/provenance assertion passed. The probe was fixed,
 the image rebuilt, and attempt 2 ran in a fresh world. The failed attempt is
@@ -69,6 +78,6 @@ preserved in `test-results/powered-lab-attempt1/` and
 `powered-lab-engine-attempt1.log`; no gameplay assertion was weakened.
 
 No runtime/mod behavior was changed. Integration still owns the ordinary
-`scripts/test-local.sh all` gate and any broader production-lane check on the
-merged candidate. No provider, Jev, CLI proxy, credentials or deployment were
+`scripts/test-local.sh all` gate on the merged candidate. No provider, Jev,
+CLI proxy, credentials or deployment were
 used by this unit.
