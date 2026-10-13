@@ -4823,7 +4823,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // remembered so raw resources are not re-read at every restage. Results go through recordHandoffToolFacts, so the recipe
   // cache bound applies. A fence refusal (`error.handoffFence`) rolls back what this call added and rethrows. Returns
   // { reads, found, unreadable, no_recipe, truncated }; `truncated` means an uncached item was left unread.
-  async prefetchRecipeClosure({ roots, fence, requestId }) {
+  async prefetchRecipeClosure({ roots, fence, requestId, refresh = false }) {
     const limits = EXECUTOR_FACT_LIMITS
     const stats = { reads: 0, found: 0, unreadable: 0, no_recipe: 0, truncated: false }
     const before = new Map(this.handoffRecipeFacts)
@@ -4835,6 +4835,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const seen = new Set()
     let fenced = false
     try {
+      if (refresh) {
+        await this.handoffFenceCheck(fence, 'before')
+        fenced = true
+        // Execution projections need current force/surface eligibility, including after research.
+        // Keep immutable raw/no-recipe knowledge; unread recipes cannot inherit old permission.
+        this.handoffRecipeFacts = new Map()
+        this.handoffRecipeQueries = new Set()
+      }
       while (queue.length > 0) {
         const item = queue.shift()
         if (seen.has(item)) continue
@@ -4868,8 +4876,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (fenced) await this.handoffFenceCheck(fence, 'during')
     }
     catch (error) {
-      this.handoffRecipeQueries = queriesBefore
-      this.handoffRecipeFacts = before
+      this.handoffRecipeQueries = refresh ? new Set() : queriesBefore
+      this.handoffRecipeFacts = refresh ? new Map() : before
       this.handoffRawLeaves = rawBefore
       this.handoffNoRecipeItems = noRecipeBefore
       if (error && typeof error === 'object') error.recipePrefetch = stats // so a refusal still reports the reads it spent
@@ -12241,11 +12249,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (roots.length > 0) {
       await assertPreflightCurrent()
       try {
-        recipeReads = (await this.prefetchRecipeClosure({ roots: roots.map(item => ({ item })), fence: this.epoch })).reads
+        recipeReads = (await this.prefetchRecipeClosure({ roots: roots.map(item => ({ item })), fence: this.epoch, refresh: true })).reads
+        await trace('operations.batch_stock_recipe_refresh', { reason: 'current_force_and_surface_recipe_eligibility', recipe_reads: recipeReads })
       }
       catch (error) {
         if (error?.handoffFence) throw error
         recipeReads = error?.recipePrefetch?.reads ?? 0
+        await trace('operations.batch_stock_recipe_refresh', { reason: 'recipe_refresh_failed_current_eligibility_unknown', recipe_reads: recipeReads })
       }
     }
     await assertPreflightCurrent()

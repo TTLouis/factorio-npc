@@ -435,3 +435,34 @@ test('a batch with one stock-claiming operation and no held rejection is not rep
   assert.equal(rcon.mutations.length, 1)
   assert.equal(world.named('operations.batch_stock_checked').length, 0)
 })
+
+
+test('batch stock refreshes cached force and surface permissions before proving dependent crafts', async () => {
+  for (const unavailable of ['locked', 'surface', 'unreadable', 'fence_transport']) {
+    const recipes = structuredClone(RECIPES)
+    if (unavailable === 'locked') recipes['iron-gear-wheel'].enabled = false
+    if (unavailable === 'surface') recipes['iron-gear-wheel'].applicability = {
+      state: 'unavailable', reason: 'surface_condition_mismatch', surface_bound: true, surface_index: 2,
+    }
+    const rcon = new StockRcon({ inventory: { 'iron-gear-wheel': 1, 'iron-plate': 3 }, recipes,
+      recipeReadable: unavailable !== 'unreadable', entities: { 77: { name: 'wooden-chest', stock: {} } } })
+    const world = harness(rcon, [])
+    world.agent.epoch = deployment()
+    world.agent.active = true
+    world.agent.traceRequest = { id: 'req_batch_fresh_recipe' }
+    for (const [name, recipe] of Object.entries(RECIPES)) world.agent.recordHandoffToolFacts('getRecipeDetails',
+      JSON.stringify({ query: name, found: true, recipes: [recipe] }), { item_or_recipe: name })
+    if (unavailable === 'fence_transport') world.agent.handoffFenceCheck = async () => { throw new Error('temporary fence transport failure') }
+    const supply = item_name => ({ name: 'supply_entity', args: { unit_number: 77, items: [{ item_name, count: 1 }] } })
+    await assert.rejects(world.agent.preflightOperations([
+      supply('iron-gear-wheel'), craft('transport-belt', 1), supply('transport-belt'),
+    ]), error => ['batch_stock_insufficient', 'batch_stock_unverified_dependency'].includes(error.preflight?.code))
+    assert.equal(rcon.mutations.length, 0)
+    assert.equal(world.named('transfer.preflight_supply_deferred').length, 0)
+    if (unavailable !== 'fence_transport') assert.ok(rcon.commands.some(command => command.includes('"recipe_details"')))
+    else assert.equal(world.agent.handoffRecipeFacts.size, 0, 'failed refresh cannot restore stale eligibility')
+    const refreshed = data(world.named('operations.batch_stock_recipe_refresh')[0])
+    assert.equal(refreshed.request_id, 'req_batch_fresh_recipe')
+    assert.equal(refreshed.reason, unavailable === 'fence_transport' ? 'recipe_refresh_failed_current_eligibility_unknown' : 'current_force_and_surface_recipe_eligibility')
+  }
+})
