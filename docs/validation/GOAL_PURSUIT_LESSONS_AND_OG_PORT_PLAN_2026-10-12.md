@@ -130,8 +130,8 @@ owner's go.
 |---|---|---|
 | 1. Native mod fixes | `2530d3c8` `7f469a5d` `b17b12a8` `926e97c2` `c2ac975a`, merge `969fefb2`, follow-ups `6fabdf5d` `afa0aa40` `db8bfae0` `a0647b49` | Merged. Static gates green. The `native-admission` real-engine lane, the OG equivalent of the `pursuit_factorio.mjs` fixtures, passed on 2026-10-12. |
 | 2. Facts and diagnostics | 2a merge `175cde97`; 2b merge `7b23ae71`, `a8021ed5`; 2c `f01225e9` `ab39ab76` `1cd94b4c` `35c0f5d5` `1d81df66`, merge `e818d83a`, installer repin `ce4b025e` | Merged. Gate green; `native-admission` lane PASS. |
-| 3. Active-step fact handoff | — | Not started |
-| 4. Dependency-aware batch stock accounting | — | Not started |
+| 3. Active-step fact handoff | `7acf4ccb` `7e4cd887` `645ec17f` `f0fc5ac8`, merge `572d4600` | Merged. Gate green; `native-admission` lane PASS. |
+| 4. Dependency-aware batch stock accounting | — | In progress |
 | 5. Steam-power exact-layout fixture | — | Mostly covered by existing `steam_power_cell.py`; powered lab + research progress still open. |
 
 Unit 1 notes:
@@ -158,3 +158,12 @@ Unit 2 notes:
 - Refusal classes (2c): every mod preflight refusal declares a class from the closed set `argument | authority | prerequisite | world`. The registry is `packages/autorio/src/refusal_classes.ts`, stamped in `autorio_preflight.operation`. The OG loop picks recovery by that class. `argument` gets the one correction turn. A missing or unknown class fails closed to `world` and emits `operations.preflight_unclassified`. `invalid_name` and `unknown_technology` are now `argument`.
 - Why (2c): a new refusal code can no longer take the wrong recovery path silently. A static guard test fails if a refusal literal in the mod has no class. The shared class set ships with the installer as `deploy/pterodactyl/runtime-v8/refusal-class.mjs`.
 - Open: the "nothing found in radius" codes stay `world`. The planner-wake list in `replacement-wake.mjs` and `TRANSFER_SUPPLY_PREFLIGHT_CODES` are similar hand lists that could later come from the producer.
+
+Unit 3 notes:
+
+- Water anchors (3a): validated `getFluidSourceTiles` answers become historical anchors (at most 16, 4000 chars, keyed `surface:x:y`). They reach executor restages as a `fluid_source_hints` record labelled historical, to be re-checked before placing. An empty or failed read never erases them. They last for the goal, through chat amendments and "continue", and clear on a new goal, goal completion or process restart. Trace: `context.fluid_source_hints_carried`.
+- Recipe closure (3b): at restage the harness reads `getRecipeDetails` for step roots it has not seen, breadth-first, at most 8 reads per handoff. It never reads while a batch is in flight, and it runs inside the actor/epoch fence; a fence change refuses the restage and rolls it back. A lab root now yields circuit and gear crafts, not a one-row "missing". Trace: `context.recipe_closure_prefetched`.
+- `normalizeRecipeFact` marks a recipe incomplete when an amount is missing or a probability is out of range.
+- The mod's no-recipe answer declares `code: 'no_recipe'` (raw items such as iron ore), so the harness remembers it instead of matching error text.
+- Not ported, on purpose: raw historical entity ids and positions (OG withholds them so stale targets are not reused), and pursuit's reads kept after a refusal (OG never lost them).
+- Deferred: fresh reads of known machines at restage (3c), until a steam-chain scenario shows the need.

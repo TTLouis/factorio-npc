@@ -43,6 +43,15 @@ must not be used to reset current integration.
 - **Gates.** `bash scripts/test-local.sh all` exit 0 on `e818d83a`: 2,098 runtime tests and 124 mod test files. The real-engine `native-admission` lane passed.
 - **Open.** The "nothing found in radius" codes stay `world`. The planner-wake list in `replacement-wake.mjs` and `TRANSFER_SUPPLY_PREFLIGHT_CODES` are hand lists that could later come from the producer. Unit 5 (powered lab with research progress) is still open; the steam-power fixture already exists.
 
+## October 12: port unit 3, active-step fact handoff (merged, gate green, native-admission lane PASS, not live-validated)
+
+- **Water anchors** (3a, `7acf4ccb`). Validated `getFluidSourceTiles` answers become historical anchors for the goal (at most 16, 4000 chars, keyed `surface:x:y`). Executor restages carry them as a `fluid_source_hints` record labelled historical; the model must re-check before placing. An empty or failed read never erases them. Trace: `context.fluid_source_hints_carried`.
+- **Recipe closure** (3b, `7e4cd887`, `645ec17f`, `f0fc5ac8`). At restage the harness reads `getRecipeDetails` for unseen step roots, breadth-first, at most 8 reads per handoff. It never reads during a batch and stays inside the actor/epoch fence. A lab root now yields its circuit and gear crafts. `normalizeRecipeFact` marks a recipe incomplete when an amount is missing or a probability is out of range. The mod's no-recipe answer declares `code: 'no_recipe'`, so the harness no longer matches error text. Trace: `context.recipe_closure_prefetched`.
+- **Not ported, on purpose.** Raw historical entity ids and positions (OG withholds them so stale targets are not reused), and pursuit's reads kept after a refusal.
+- **Deferred.** Fresh reads of known machines at restage (3c), until a steam-chain scenario shows the need.
+- **Gates.** Merge `572d4600`: runtime 2,116/2,116, mod 124/124 files, `native-admission` lane PASS. The installer payload did not change, so no repin.
+- **Live.** No live run has been made on this build. A GPT-6 proxy run was set up on 2026-10-13 (image `572d4600`, isolated project, empty data dir) but stopped before any goal was sent, because the stack read a non-GPT-6 local model setting. No provider calls were made. It waits for the owner to confirm the provider configuration.
+
 ## October 9: step identity by text, just-in-time step contracts (static gates passed, not live-validated)
 
 - **Execution-draft wording** (`81ac9958`, owner OK). Planner prompts say every execution step is deterministic.
