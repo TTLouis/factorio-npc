@@ -10545,6 +10545,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return { key, planning, plan, step, state, data, basis, ledgerKey, draft, fenceIdentity }
   }
 
+  targetedResourceSearchNames() {
+    // Prototype acquisition facts identify resources; item names and blocker prose do not.
+    return [...new Set([...this.handoffRawLeaves.values()].flatMap(row => row.mined_from ?? []))].sort()
+  }
+
   controlDecisionState(allowTools) {
     const identity = this.targetedObservationIdentity()
     const eligible = Boolean(this.requestInfo && identity.step && identity.planning?.goal?.status === GOAL_STATUS.ACTIVE
@@ -10554,6 +10559,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       || this.memory.targetedObservationLedger?.get(identity.ledgerKey) === identity.basis)
     return { toolsEnabled: allowTools, phase: identity.draft ? 'draft' : FROZEN_PLAN_STATUSES.has(identity.plan?.status) ? 'committed' : 'no_plan',
       role: this.agentContext.role, targetedReadEligible: eligible && !used, targetedAllowanceUsed: used,
+      resourceSearchNames: this.targetedResourceSearchNames(),
       goalId: identity.data.goalId, planId: identity.data.planId, planVersion: identity.plan?.plan_version,
       draftRevision: identity.draft ? identity.plan?.updated_at : undefined, stepId: identity.data.stepId,
       currentStep: identity.state?.current_step, plan: identity.draft ? identity.state?.plan : undefined,
@@ -10601,6 +10607,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     if (request.tool === 'getEntityStatus' && !this.liveObservedExactTarget(request.args.unit_number)
       && !initial.step.completion_contract?.requirements?.some(row => row.unit_number === request.args.unit_number)) return reject('entity_not_grounded')
+    if (request.tool === 'findLongRangeEntities' && !this.targetedResourceSearchNames().includes(request.args.name)) return reject('resource_source_not_grounded')
     const ledger = this.memory.targetedObservationLedger ??= new Map()
     if (ledger.get(initial.ledgerKey) === initial.basis) return reject('targeted_allowance_already_used')
     const fence = async () => {
@@ -10629,6 +10636,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (this.stateFile) {
       const saved = JSON.parse(await fsp.readFile(this.stateFile, 'utf8'))
       if (!saved.targeted_observation_ledger?.some(row => row[0] === initial.ledgerKey && row[1] === initial.basis)) return reject('claim_not_persisted')
+    }
+    if (request.tool === 'findLongRangeEntities') {
+      await this.traceEvent('observation.targeted_resource_search', { request_id: this.traceRequest?.id,
+        reason: 'native_source_location_missing_with_normal_observations_closed', resource: request.args.name,
+        max_radius: request.args.max_radius, limit: request.args.limit, goal_id: initial.data.goalId, step_id: initial.data.stepId })
+      await fence()
     }
     await this.traceEvent('observation.targeted_granted', { request_id: this.traceRequest?.id,
       reason: initial.draft ? 'one_missing_fact_read_at_draft_authoring_boundary' : 'one_missing_fact_read_at_native_progress_boundary', scope: initial.draft ? 'draft' : 'step', tool: request.tool, goal_id: initial.data.goalId,
