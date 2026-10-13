@@ -37,6 +37,10 @@ import {
   researchFactItems,
   selectRecipeFacts,
   stepContractNeeds,
+  fluidSourceHintsFromRead,
+  rememberFluidHints,
+  expandableIngredients,
+  recipeKnownForItem,
 } from './handoff-packet.mjs'
 import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CLASS, REPLACEMENT_DECISION } from './authorization.mjs'
 import { REFUSAL_CLASS, refusalClassLabel, refusalClassOf } from './refusal-class.mjs'
@@ -2948,10 +2952,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // Repair unit D2: what a fresh executor can be told. Recipe facts are stable game data and outlive requests;
     // inventory observations are world state and reset with the entity observations. The mutation sequence orders them.
     this.handoffRecipeFacts = new Map()
+    this.handoffNoRecipeItems = new Set() // items the game answered "no recipe" for (raw resources): stable data, not re-read
     this.handoffTriggerCraftingReports = []
     this.handoffInventoryObservations = new Map()
     this.handoffTouchedItems = new Set()
     this.handoffRequirementMachines = new Map()
+    this.handoffFluidHints = new Map() // historical native fluid-tile anchors (unit 3a), keyed surface_index:x:y
     this.worldMutationSeq = 0
     this.batchInFlight = false // an operation batch was sent and its receipt has not been read yet
     this.pendingExecutorFactsRefresh = null // an executor handoff whose counts were deferred because of that batch
@@ -3272,7 +3278,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // A restage the guard will refuse anyway spends no reads.
       if (!args.packet && role === EXECUTOR_ROLE && !this.restageGuardRefusal(safePoint)) {
         const before = getActivePlanningPlan(state)
-        const gathered = await this.gatherExecutorHandoffFacts({ state, actor: args.actor, runtime: args.runtime })
+        const gathered = await this.gatherExecutorHandoffFacts({ state, actor: args.actor, runtime: args.runtime, requestId })
         if (gathered?.refusal) {
           await this.jev.afterRestage(prepared, { restaged: false, reason: gathered.refusal })
           await this.traceEvent('context.restage_refused', { role, checkpoint, reason: gathered.refusal, reads_attempted: gathered.meta?.reads_attempted, request_id: requestId }, { requestId })
@@ -4662,6 +4668,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.handoffRequirementMachines = new Map()
   }
 
+  // Fluid-tile anchors are world data, like the recipe cache: they outlive a player's chat message, an amendment and an
+  // actor replacement (all of which go through request()/reset()). They end with the goal that read them (completion, or
+  // a new goal) and with the process (the Map lives in memory only).
+  resetHandoffFluidHints() {
+    this.handoffFluidHints = new Map()
+  }
+
   // The world changed, or may have: an operation batch was sent, or a batch receipt was read. Observations taken
   // under an earlier sequence number date from before that change.
   noteWorldMutation({ sent = false } = {}) {
@@ -4694,7 +4707,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   // Tool results the planner or executor read from the live game that a later executor should not have to re-read.
-  recordHandoffToolFacts(toolName, raw) {
+  recordHandoffToolFacts(toolName, raw, args) {
     try {
       if (toolName === 'getRecipeDetails') {
         let parsed
@@ -4702,6 +4715,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         catch { return }
         const tag = this.observationTag()
         for (const fact of recipeFactsFromDetails(parsed, { tag })) this.rememberRecipeFact(fact)
+      }
+      else if (toolName === 'getFluidSourceTiles') {
+        // Only a well-formed answer to the request that was made adds anchors; an empty, failed or mismatched read changes nothing.
+        const learned = fluidSourceHintsFromRead(raw, args, this.observationTag())
+        if (learned.anchors) rememberFluidHints(this.handoffFluidHints, learned.anchors)
       }
       else if (toolName === 'getInventoryItems') {
         const counts = parseInventoryCounts(raw)
@@ -4774,6 +4792,60 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  // Unit 3b. Breadth first from the step's inventory roots through the ingredients of the recipes the derivation can expand,
+  // the same native getRecipeDetails read the model would make, at most `recipePrefetchReads` per handoff. A recipe fact that
+  // is already cached is not read again (its ingredients are still followed); an item the game has no recipe for is
+  // remembered so raw resources are not re-read at every restage. Results go through recordHandoffToolFacts, so the recipe
+  // cache bound applies. A fence refusal (`error.handoffFence`) rolls back what this call added and rethrows. Returns
+  // { reads, found, unreadable, no_recipe, truncated }; `truncated` means an uncached item was left unread.
+  async prefetchRecipeClosure({ roots, fence }) {
+    const limits = EXECUTOR_FACT_LIMITS
+    const stats = { reads: 0, found: 0, unreadable: 0, no_recipe: 0, truncated: false }
+    const before = new Set(this.handoffRecipeFacts.keys())
+    const knownRecipe = item => this.handoffNoRecipeItems.has(item) || recipeKnownForItem(item, [...this.handoffRecipeFacts.values()])
+    const queue = roots.map(root => root.item)
+    const seen = new Set()
+    let fenced = false
+    try {
+      while (queue.length > 0) {
+        const item = queue.shift()
+        if (seen.has(item)) continue
+        seen.add(item)
+        if (!knownRecipe(item)) {
+          if (stats.reads >= limits.recipePrefetchReads) { stats.truncated = true; break }
+          if (!fenced) { await this.handoffFenceCheck(fence, 'before'); fenced = true }
+          stats.reads += 1
+          let raw
+          let parsed
+          try {
+            raw = String(await this.rcon.command(this.observationToolCommand('getRecipeDetails', { item_or_recipe: item, requested_count: 1 }))).trim()
+            parsed = JSON.parse(raw)
+          }
+          catch { stats.unreadable += 1; continue }
+          // The mod declares "the game has no recipe for this name" as code no_recipe (knowledge.ts recipe_details_for_actor);
+          // any other found:false answer (no controlled actor, unreadable) is a failed read, never remembered as raw.
+          if (parsed?.found === false && parsed.code === 'no_recipe') {
+            this.handoffNoRecipeItems.add(item)
+            while (this.handoffNoRecipeItems.size > limits.noRecipeItems) this.handoffNoRecipeItems.delete(this.handoffNoRecipeItems.values().next().value)
+            stats.no_recipe += 1
+            continue
+          }
+          this.recordHandoffToolFacts('getRecipeDetails', raw)
+          if (!recipeKnownForItem(item, [...this.handoffRecipeFacts.values()])) { stats.unreadable += 1; continue }
+          stats.found += 1
+        }
+        queue.push(...expandableIngredients(item, [...this.handoffRecipeFacts.values()]))
+      }
+      if (fenced) await this.handoffFenceCheck(fence, 'during')
+    }
+    catch (error) {
+      for (const key of [...this.handoffRecipeFacts.keys()]) if (!before.has(key)) this.handoffRecipeFacts.delete(key)
+      if (error && typeof error === 'object') error.recipePrefetch = stats // so a refusal still reports the reads it spent
+      throw error
+    }
+    return stats
+  }
+
   async handoffFenceCheck(fence, phase) {
     const status = await deploymentStatus(this.rcon, { requireAllowed: true })
     if (actorChanged(fence, status)) {
@@ -4792,7 +4864,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // the executor only sees the packet after the batch finishes: counts, the checkpoint machine and residual needs are then
   // NOT read (`counts_deferred`); recipe facts and history still ride. `mode: 'refresh'` is the later read, taken after
   // the receipt landed: counts, machine and residual only.
-  async gatherExecutorHandoffFacts({ state, actor, runtime, mode = 'packet', refreshItems = [] }) {
+  async gatherExecutorHandoffFacts({ state, actor, runtime, mode = 'packet', refreshItems = [], requestId }) {
     try {
       const plan = getActivePlanningPlan(state)
       const step = plan?.steps?.[plan.active_step_index]
@@ -4835,6 +4907,37 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           return { refusal: 'research_handoff_fence_failed', meta }
         }
       }
+      // Unit 3b: the harness closes the recipe chain under the step's inventory roots itself, so a root nobody read a recipe
+      // for does not become a raw leaf in the residual derivation. Never while a batch is in flight (the executor sees this
+      // packet after it ends), and only under the actor/epoch fence.
+      let prefetchReads = 0 // recipe reads are counted in reads_attempted but are not part of the count refresh's success rate
+      if (mode === 'packet' && !inFlight && fence && needs.roots.length > 0) {
+        try {
+          const prefetch = await this.prefetchRecipeClosure({ roots: needs.roots, fence })
+          meta.recipe_prefetch = prefetch
+          meta.reads_attempted += prefetch.reads
+          prefetchReads = prefetch.reads
+          meta.recipe_cache = this.handoffRecipeFacts.size
+          if (prefetch.reads > 0 || prefetch.truncated) {
+            await this.traceEvent('context.recipe_closure_prefetched', {
+              request_id: requestId ?? this.traceRequest?.id,
+              roots: needs.roots.map(root => root.item).slice(0, 4),
+              reads: prefetch.reads,
+              found: prefetch.found,
+              unreadable: prefetch.unreadable,
+              no_recipe: prefetch.no_recipe,
+              truncated: prefetch.truncated,
+              reason: 'step_roots_without_cached_recipe_facts',
+            }, { requestId })
+          }
+        }
+        catch (error) {
+          meta.reads_attempted += error?.recipePrefetch?.reads ?? 0
+          prefetchReads = error?.recipePrefetch?.reads ?? 0
+          if (error?.handoffFence) return { refusal: error.handoffFence, meta }
+          meta.recipe_prefetch = { reads: 0, found: 0, unreadable: 0, no_recipe: 0, truncated: false, skipped: 'fence_status_unreadable' }
+        }
+      }
       const researchItems = researchFactItems(research)
       const wanted = [...new Set([...needs.items, ...requirementTargets(state.goal?.definition).items.map(item => item.name)])]
       wanted.unshift(...researchItems)
@@ -4865,6 +4968,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       for (const item of this.handoffInventoryObservations.keys()) addItem(item)
       const machineRequirement = checkpointMachineRequirements(step.completion_contract)[0]
       const historical = this.historicalEntityFacts()
+      const fluidHints = [...this.handoffFluidHints.values()].reverse() // newest first
 
       meta.read_items = readItems
       const fresh = new Map()
@@ -4899,12 +5003,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             }
           }
           await this.handoffFenceCheck(fence, 'during')
-          meta.refresh = meta.reads_failed === 0 ? 'ok' : meta.reads_failed >= meta.reads_attempted ? 'failed' : 'partial'
+          meta.refresh = meta.reads_failed === 0 ? 'ok' : meta.reads_failed >= meta.reads_attempted - prefetchReads ? 'failed' : 'partial'
         }
         catch (error) {
           if (error?.handoffFence) return { refusal: error.handoffFence, meta }
           meta.refresh = 'failed'
-          meta.reads_failed = meta.reads_attempted + Math.max(0, readItems.length - fresh.size)
+          meta.reads_failed = meta.reads_attempted - prefetchReads + Math.max(0, readItems.length - fresh.size)
           fresh.clear()
           freshMachine = undefined
         }
@@ -4963,8 +5067,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         const any = research.length > 0 || items.length > 0 || unavailable.length > 0 || machine || residual
         return { facts: any ? { recipes, counts, machine, residual, research, historical_entities: historical } : undefined, meta }
       }
-      const hasContent = research.length > 0 || recipes.length > 0 || items.length > 0 || unavailable.length > 0 || counts.deferred || machine || residual || historical.length > 0
-      return { facts: hasContent ? { recipes, counts, machine, residual, research, historical_entities: historical } : undefined, meta }
+      const hasContent = research.length > 0 || recipes.length > 0 || items.length > 0 || unavailable.length > 0 || counts.deferred || machine || residual || historical.length > 0 || fluidHints.length > 0
+      return { facts: hasContent ? { recipes, counts, machine, residual, research, historical_entities: historical, fluid_source_hints: fluidHints } : undefined, meta }
     }
     catch (error) {
       this.log(`[handoff] executor facts failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -5058,7 +5162,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async traceExecutorFactsCarried({ packet, restaged, checkpoint, requestId, meta }) {
     try {
       const summary = packet.executor_facts
-      const factRecord = key => key.startsWith('recipe_fact_') || ['held_counts', 'held_counts_stale', 'checkpoint_machine', 'residual_needs', 'historical_entities'].includes(key)
+      const factRecord = key => key.startsWith('recipe_fact_') || ['held_counts', 'held_counts_stale', 'checkpoint_machine', 'residual_needs', 'historical_entities', 'fluid_source_hints'].includes(key)
       await this.traceEvent('context.executor_facts_carried', {
         request_id: requestId,
         handoff_id: restaged.handoff_id,
@@ -5080,6 +5184,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         dropped_for_size: (packet.dropped ?? []).filter(factRecord),
         reason: 'executor_context_rebuilt_without_the_prior_conversation_reads',
       }, { requestId })
+      if (summary.fluid_source_hints !== undefined) {
+        await this.traceEvent('context.fluid_source_hints_carried', {
+          request_id: requestId,
+          handoff_id: restaged.handoff_id,
+          checkpoint,
+          retained: summary.fluid_source_hints,
+          known: this.handoffFluidHints.size,
+          dropped_for_size: (packet.dropped ?? []).includes('fluid_source_hints'),
+          reason: 'historical_native_tile_locations_only',
+        }, { requestId })
+      }
     }
     catch {}
   }
@@ -8313,6 +8428,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
     this.liveEntityObservations = new Map()
     this.resetHandoffObservations()
+    if (intent === 'new_goal') this.resetHandoffFluidHints() // a new goal starts without the last goal's water anchors; an amendment or "continue" keeps them
     this.rejectedExactTargets = new Set()
     this.staleExactPreflightRetries = 0
     this.modelCorrectablePreflightRetries = 0
@@ -8611,6 +8727,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.clearActionOmissionRecovery()
     this.liveEntityObservations = new Map()
     this.resetHandoffObservations()
+    this.resetHandoffFluidHints() // the goal that read them is complete
     this.rejectedExactTargets = new Set()
     this.staleExactPreflightRetries = 0
     this.modelCorrectablePreflightRetries = 0
@@ -11747,7 +11864,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const original = String(results[index].content ?? '')
       const toolName = admittedPrepared[index]?.tool?.function?.name
       this.recordLiveEntityToolResult(toolName, original)
-      if (admittedCached[index] !== true) this.recordHandoffToolFacts(toolName, original) // D2: stable recipe facts and counts a later executor is briefed with
+      if (admittedCached[index] !== true) this.recordHandoffToolFacts(toolName, original, admittedPrepared[index]?.args) // D2: stable recipe facts and counts a later executor is briefed with
       const loadedSkill = this.recordLoadedSkillToolResult(toolName, admittedPrepared[index]?.args, original)
       if (loadedSkill) {
         await this.traceEvent('skill.context_loaded', {

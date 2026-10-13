@@ -20,6 +20,11 @@ import {
   cacheTriggerCraftingReports,
   attachCachedTriggerCrafting,
   EXECUTOR_FACT_LIMITS,
+  fluidHintKey,
+  fluidSourceHintsFromRead,
+  rememberFluidHints,
+  expandableIngredients,
+  recipeKnownForItem,
 } from './handoff-packet.mjs'
 import {
   applyPlanningEvent,
@@ -836,4 +841,176 @@ test('step contracts: the authority record says contract=pending for an active s
   // The stable plan block never carries a step contract, bound or not.
   const stable = text.slice(0, text.indexOf('--- step block'))
   assert.doesNotMatch(stable, /inventory_count|contract=/)
+})
+
+// --- Unit 3a: historical native fluid-tile anchors --------------------------------------------------------------------
+
+const waterSample = (x, y, extra = {}) => ({ name: 'water', fluid_name: 'water', position: { x, y }, surface_index: 1, ...extra })
+const waterAnswer = (samples, extra = {}) => ({
+  ok: true, fluid_name: 'water', actor_position: { x: 0, y: 0 }, surface_index: 1, observed_tick: 77, search_radius: 128,
+  coverage: 'generated_bounding_square', checked_chunks: 81, matching_tile_prototypes: 2, samples, returned_count: samples.length,
+  truncated: false, ordering: 'native_samples_not_nearest', ...extra,
+})
+const learnWater = (answer, args = { fluid_name: 'water' }) => fluidSourceHintsFromRead(typeof answer === 'string' ? answer : JSON.stringify(answer), args, { epoch: 3, actor_id: 19, at_ms: 5, tick: 9999 })
+
+test('3a: a well-formed native fluid answer yields keyed anchors tagged with the game tick it reports, and nothing else does', () => {
+  const learned = learnWater(waterAnswer([waterSample(22, 8), waterSample(-82, -19, { name: 'deepwater' })]))
+  assert.deepEqual(learned.anchors.map(fluidHintKey), ['1:22:8', '1:-82:-19'])
+  assert.deepEqual(learned.anchors[0], { name: 'water', fluid_name: 'water', surface_index: 1, position: { x: 22, y: 8 }, as_of: { tick: 77, epoch: 3, actor_id: 19, at_ms: 5 } })
+  assert.equal(learned.anchors[1].name, 'deepwater')
+  // A request that spelled the bounds out is the same request.
+  assert.ok(learnWater(waterAnswer([waterSample(1, 1)], { search_radius: 64 }), { fluid_name: 'water', search_radius: 64, limit: 4 }).anchors)
+
+  const good = waterAnswer([waterSample(22, 8)])
+  const cases = [
+    ['unreadable_or_oversized', 'not json'],
+    ['unreadable_or_oversized', 'x'.repeat(EXECUTOR_FACT_LIMITS.fluidReadChars + 1)],
+    ['not_a_successful_answer', [good]],
+    ['not_a_successful_answer', { ...good, ok: false, code: 'fluid_source_search_unexplored' }],
+    ['fluid_name_mismatch', { ...good, fluid_name: 'crude-oil', samples: [waterSample(1, 1, { fluid_name: 'crude-oil' })] }],
+    ['coverage_not_declared', { ...good, coverage: 'incomplete' }],
+    ['coverage_not_declared', { ...good, coverage: undefined }],
+    ['surface_index_invalid', { ...good, surface_index: 0 }],
+    ['observed_tick_invalid', { ...good, observed_tick: -1 }],
+    ['observed_tick_invalid', { ...good, observed_tick: undefined }],
+    ['search_radius_mismatch', { ...good, search_radius: 64 }],
+    ['sample_count_inconsistent', { ...good, returned_count: 2 }],
+    ['sample_count_inconsistent', { ...good, truncated: undefined }],
+    ['sample_count_inconsistent', { ...good, samples: 'tiles', returned_count: 1 }],
+    ['sample_invalid', { ...good, samples: [waterSample(22, 8, { fluid_name: 'steam' })] }],
+    ['sample_invalid', { ...good, samples: [waterSample(22, 8, { surface_index: 2 })] }],
+    ['sample_invalid', { ...good, samples: [waterSample(1.5, 8)] }],
+    ['sample_invalid', { ...good, samples: [waterSample(22, 10000257)] }],
+    ['sample_invalid', { ...good, samples: [waterSample(22, 8, { name: 'Bad Name' })] }],
+    ['no_samples', waterAnswer([])],
+    ['no_samples', { ...waterAnswer([]), samples: {} }],
+  ]
+  for (const [reason, answer] of cases) assert.equal(learnWater(answer).rejected, reason, `${reason}: ${JSON.stringify(answer).slice(0, 80)}`)
+  // More samples than the request's limit, a radius the request did not make, a fluid it did not ask for, no request at all.
+  assert.equal(learnWater(waterAnswer([waterSample(1, 1), waterSample(2, 2)]), { fluid_name: 'water', limit: 1 }).rejected, 'sample_count_inconsistent')
+  assert.equal(learnWater(good, { fluid_name: 'water', search_radius: 64 }).rejected, 'search_radius_mismatch')
+  assert.equal(learnWater(good, { fluid_name: 'steam' }).rejected, 'fluid_name_mismatch')
+  assert.equal(learnWater(good, null).rejected, 'request_unknown')
+})
+
+test('3a: anchors are bounded by count and by serialized size, a re-read moves an anchor, and an empty read erases nothing', () => {
+  const store = new Map()
+  const remember = (samples, name = 'water') => rememberFluidHints(store, learnWater(waterAnswer(samples.map(([x, y]) => waterSample(x, y, { name })))).anchors)
+  remember([[0, 0]])
+  remember([[1, 0]])
+  assert.deepEqual([...store.keys()], ['1:0:0', '1:1:0'])
+  remember([[0, 0]]) // re-read: same key, now the most recent
+  assert.deepEqual([...store.keys()], ['1:1:0', '1:0:0'])
+  // An empty or failed read yields no anchors to merge: the store is untouched.
+  const before = [...store.keys()]
+  assert.equal(learnWater(waterAnswer([])).anchors, undefined)
+  assert.equal(learnWater('not json').anchors, undefined)
+  assert.deepEqual([...store.keys()], before)
+
+  for (let index = 0; index < 40; index++) remember([[index + 10, 0]])
+  assert.equal(store.size, EXECUTOR_FACT_LIMITS.fluidHints)
+  assert.equal([...store.keys()].at(-1), '1:49:0')
+  assert.ok(!store.has('1:0:0') && !store.has('1:1:0'), 'the oldest were evicted')
+
+  // Long names hit the serialized-size bound before the count bound.
+  const big = new Map()
+  const evicted = rememberFluidHints(big, Array.from({ length: 16 }, (_, index) => ({
+    name: `w${'a'.repeat(98)}`, fluid_name: `f${'b'.repeat(98)}`, surface_index: 1, position: { x: index, y: 0 }, as_of: { tick: 1, epoch: 1, actor_id: 1, at_ms: 1_700_000_000_000 },
+  })))
+  assert.ok(JSON.stringify([...big.values()]).length <= EXECUTOR_FACT_LIMITS.fluidHintStoreChars)
+  assert.ok(big.size < 16 && evicted === 16 - big.size)
+  assert.ok(big.has('1:15:0'), 'the newest survives')
+})
+
+test('3a: the packet lists the anchors as historical, newest first, and they drop before core facts', () => {
+  const state = circuitState()
+  const anchors = learnWater(waterAnswer([waterSample(22, 8), waterSample(-82, -19)])).anchors
+  const facts = { ...FRESH_FACTS(), fluid_source_hints: [...anchors].reverse() }
+  const packet = buildHandoffPacket({ planningState: state, ...ARGS, executorFacts: facts, limits: { maxChars: 100000 } })
+  const line = packet.volatileText.split('\n').find(item => item.startsWith('fluid_source_hints'))
+  assert.match(line, /^fluid_source_hints \(HISTORICAL: positions where native fluid tiles were observed earlier, newest first; NOT current, not nearest, not a reachable or legal placement; re-check with getFluidSourceTiles before placing anything\): water:water@\(-82,-19\) surface=1 observed tick:77,epoch:3 \| water:water@\(22,8\) surface=1 observed tick:77,epoch:3$/)
+  assert.equal(packet.executor_facts.fluid_source_hints, 2)
+  // No hints: no record and no summary field, so a packet without them is unchanged.
+  const without = buildHandoffPacket({ planningState: state, ...ARGS, executorFacts: FRESH_FACTS(), limits: { maxChars: 100000 } })
+  assert.doesNotMatch(without.text, /fluid_source_hints/)
+  assert.equal(without.executor_facts.fluid_source_hints, undefined)
+
+  // Drop order: after the note and the history, before receipts and every core fact.
+  const tiny = buildHandoffPacket({ planningState: state, ...ARGS, note: 'a note', executorFacts: facts, limits: { maxChars: 1 } }).dropped
+  const at = key => tiny.findIndex(item => item === key || item.startsWith(key))
+  for (const [first, second] of [['note', 'historical_entities'], ['historical_entities', 'fluid_source_hints'], ['fluid_source_hints', 'receipt_1'], ['fluid_source_hints', 'recipe_fact_2'], ['fluid_source_hints', 'held_counts'], ['fluid_source_hints', 'residual_needs']]) {
+    assert.ok(at(first) >= 0 && at(second) >= 0 && at(first) < at(second), `${first} before ${second}: ${tiny.join(', ')}`)
+  }
+  // A limit just under the full packet drops only the hints when nothing optional ranks below them.
+  const lean = { ...facts, historical_entities: [] }
+  const full = buildHandoffPacket({ planningState: state, ...ARGS, executorFacts: lean, limits: { maxChars: 100000 } })
+  const trimmed = buildHandoffPacket({ planningState: state, ...ARGS, executorFacts: lean, limits: { maxChars: full.chars - 1 } })
+  assert.deepEqual(trimmed.dropped, ['fluid_source_hints'])
+  assert.equal(trimmed.executor_facts.fluid_source_hints, 0, 'known but dropped for size')
+  assert.doesNotMatch(trimmed.text, /fluid_source_hints/)
+
+  // The rendered record is bounded and says how many did not fit.
+  const crowded = Array.from({ length: 16 }, (_, index) => ({ ...anchors[0], name: `w${'a'.repeat(60)}`, position: { x: 1000 + index, y: -1000 - index } }))
+  const bounded = buildHandoffPacket({ planningState: state, ...ARGS, executorFacts: { fluid_source_hints: crowded }, limits: { maxChars: 100000 } })
+  const boundedLine = bounded.volatileText.split('\n').find(item => item.startsWith('fluid_source_hints'))
+  assert.match(boundedLine, /\(\+\d+ more\)$/)
+  assert.ok(boundedLine.length < EXECUTOR_FACT_LIMITS.fluidHintChars + 400)
+  assert.ok(bounded.executor_facts.fluid_source_hints < 16 && bounded.executor_facts.fluid_source_hints > 0)
+})
+
+// --- Unit 3b: recipe completeness and the closure helpers ---------------------------------------------------------------
+
+test('3b: a recipe is complete only when every ingredient and product quantity is a number and every probability is within [0, 1]', () => {
+  const make = (ingredients, products) => normalizeRecipeFact({ name: 'widget', ingredients, products }, { tag: TAG })
+  const iron = { name: 'iron-plate', amount: 2 }
+  const widget = { name: 'widget', amount: 1 }
+  assert.equal(make([iron], [widget]).complete, true)
+  // A product that reports a min/max pair instead of an amount, or a probability inside [0, 1], is still a reported quantity.
+  assert.equal(make([iron], [{ name: 'widget', amount_min: 1, amount_max: 2 }]).complete, true)
+  assert.equal(make([iron], [{ ...widget, probability: 0.25 }]).complete, true)
+  assert.equal(make([iron], [{ ...widget, probability: 0 }]).complete, true)
+  assert.equal(make([iron], [{ ...widget, probability: 1 }]).complete, true)
+  assert.equal(make([iron], [{ ...widget, independent_probability: 1 }]).complete, true)
+  // An ingredient or product amount that is missing, not a number or not finite makes it incomplete (still shown, never derived from).
+  for (const bad of [undefined, null, '2', Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.equal(make([{ name: 'iron-plate', amount: bad }], [widget]).complete, false, `ingredient amount ${String(bad)}`)
+    assert.equal(make([iron], [{ name: 'widget', amount: bad }]).complete, false, `product amount ${String(bad)}`)
+  }
+  assert.equal(make([{ name: 'iron-plate' }], [widget]).complete, false)
+  assert.equal(make([iron], [{ name: 'widget', amount_min: 1 }]).complete, false, 'a half range is not a quantity')
+  // A probability outside [0, 1], or not a number, makes it incomplete.
+  for (const bad of [1.5, -0.1, Number.NaN, Number.POSITIVE_INFINITY, '0.5']) {
+    assert.equal(make([iron], [{ ...widget, probability: bad }]).complete, false, `probability ${String(bad)}`)
+    assert.equal(make([iron], [{ ...widget, independent_probability: bad }]).complete, false, `independent_probability ${String(bad)}`)
+  }
+  const incomplete = make([{ name: 'iron-plate' }], [widget])
+  assert.ok(recipeFactLine(incomplete).includes('incomplete'))
+  // An incomplete recipe is not expanded by the residual derivation.
+  const result = deriveResidualNeeds({ roots: [{ item: 'widget', count: 3 }], recipes: [incomplete], held: heldOf({ widget: 0 }) })
+  assert.deepEqual(result.rows.map(row => row.item), ['widget'])
+})
+
+test('3b: expandableIngredients names what a derivation would follow, and recipeKnownForItem finds a recipe by name or product', () => {
+  assert.deepEqual(expandableIngredients('electronic-circuit', [CIRCUIT, CABLE]), ['iron-plate', 'copper-cable'])
+  assert.deepEqual(expandableIngredients('copper-plate', [CIRCUIT, CABLE]), [], 'no recipe fact')
+  const fluid = recipeFact('oil-thing', [['iron-plate', 1]], [['oil-thing', 1]], { ingredients: [{ type: 'item', name: 'iron-plate', amount: 1 }, { type: 'fluid', name: 'water', amount: 5 }] })
+  assert.deepEqual(expandableIngredients('oil-thing', [fluid]), [], 'a fluid ingredient cannot be counted exactly, so nothing below it is worth reading')
+  const big = recipeFact('big', Array.from({ length: 12 }, (_, index) => [`part-${index}`, 1]), [['big', 1]])
+  assert.deepEqual(expandableIngredients('big', [big]), [], 'an incomplete recipe is not followed')
+  assert.equal(recipeKnownForItem('electronic-circuit', [CIRCUIT]), true)
+  assert.equal(recipeKnownForItem('copper-cable', [recipeFact('cable-recipe', [['copper-plate', 1]], [['copper-cable', 2]])]), true, 'by product')
+  assert.equal(recipeKnownForItem('copper-plate', [CIRCUIT, CABLE]), false)
+  assert.equal(recipeKnownForItem('copper-plate', []), false)
+})
+
+test('3b: the step contract shape names recipe roots only through inventory_count; entity checkpoints carry unit numbers, not items to craft', () => {
+  const contract = { mode: 'all', requirements: [
+    { kind: 'inventory_count', item_name: 'lab', minimum: 1 },
+    { kind: 'entity_exists', unit_number: 55 },
+    { kind: 'entity_state', unit_number: 55, expected: 'working' },
+    { kind: 'entity_inventory_count', unit_number: 55, item_name: 'copper-plate', minimum: 10 },
+  ] }
+  const needs = stepContractNeeds({ completion_contract: contract })
+  assert.deepEqual(needs.roots, [{ item: 'lab', count: 1 }])
+  assert.deepEqual(needs.items, ['lab', 'copper-plate'], 'the machine content is a name to count, never a craft root')
 })
