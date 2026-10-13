@@ -43,6 +43,43 @@ beforeEach(() => {
 })
 
 describe('recipe details use Factorio 2.0 recipe category fields', () => {
+  it('reports native surface eligibility independently of research locks and honors inclusive bounds and ignore flag', () => {
+    const locked = recipe('locked', 'locked') as any
+    locked.enabled = false
+    locked.prototype.surface_conditions = [{ property: 'pressure', min: 1000, max: 1000 }]
+    const actor = actorWithRecipes({ locked }) as any
+    actor.surface = { index: 1, ignore_surface_conditions: false, get_property: (name: string) => { expect(name).toBe('pressure'); return 1000 } }
+    expect(recipe_details_for_actor(actor, 'locked').recipes[0]).toMatchObject({ enabled: false,
+      applicability: { state: 'available', reason: 'surface_conditions_satisfied', surface_index: 1, surface_bound: true } })
+    actor.surface.get_property = () => 4000
+    expect(recipe_details_for_actor(actor, 'locked').recipes[0].applicability.state).toBe('unavailable')
+    actor.surface.ignore_surface_conditions = true
+    expect(recipe_details_for_actor(actor, 'locked').recipes[0].applicability.reason).toBe('surface_conditions_ignored')
+    actor.surface.ignore_surface_conditions = false
+    actor.surface.get_property = () => { throw new Error('unreadable') }
+    expect(recipe_details_for_actor(actor, 'locked').recipes[0].applicability.state).toBe('unknown')
+    delete locked.prototype.surface_conditions
+    expect(recipe_details_for_actor(actor, 'locked').recipes[0].applicability).toEqual({ state: 'available', reason: 'no_surface_conditions', surface_bound: false })
+  })
+
+  it('keeps valid alternatives ahead of unavailable expansion routes before bounding the native response', () => {
+    const recipes: Record<string, any> = {}
+    for (let i = 0; i < 9; i++) {
+      recipes[`alien-${i}`] = recipe(`alien-${i}`, 'shared-product')
+      recipes[`alien-${i}`].prototype.surface_conditions = [{ property: 'pressure', min: 4000, max: 4000 }]
+    }
+    recipes['z-local'] = recipe('z-local', 'shared-product')
+    const actor = actorWithRecipes(recipes) as any
+    actor.surface = { index: 1, get_property: () => 1000 }
+    const result = recipe_details_for_actor(actor, 'shared-product')
+    expect(result.truncated).toBe(true)
+    expect(result.recipes).toHaveLength(8)
+    expect(result.recipes[0].name).toBe('z-local')
+    // An exact name that is also a product must not suppress a valid local producer.
+    recipes['shared-product'] = { ...recipes['alien-0'], name: 'shared-product' }
+    expect(recipe_details_for_actor(actor, 'shared-product').recipes[0].name).toBe('z-local')
+  })
+
   it('returns burner-mining-drill details from the Factorio 2.0 category field', () => {
     const actor = actorWithRecipes({
       'burner-mining-drill': recipe('burner-mining-drill', 'burner-mining-drill'),

@@ -1,4 +1,4 @@
-import type { LuaEntity, LuaEntityPrototype } from 'factorio:runtime'
+import type { LuaEntity, LuaEntityPrototype, SurfaceCondition } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import { recipe_bootstrap_for_actor } from './bootstrap_planning'
 import { resolve_exact_entity } from './entity_reference'
@@ -18,6 +18,7 @@ const MAX_TOPOLOGY_RELATIONS = 64
 interface RecipeCandidate {
   name: string
   recipe: any
+  applicability: ReturnType<typeof recipe_applicability>
 }
 
 interface MachineCandidate {
@@ -38,25 +39,55 @@ function sort_named<T extends { name: string }>(values: T[]) {
   }
 }
 
+// Prototype presence comes from the loaded game, not a base-game/expansion name list.
+// Enabled is deliberately separate: locked recipes remain useful research dependencies.
+function recipe_applicability(actor: ControlledActor, recipe: any) {
+  const surface = actor.surface
+  const scope = { surface_index: surface?.index }
+  if (!recipe.prototype) return { ...scope, state: 'unknown', reason: 'recipe_prototype_unavailable', surface_bound: true }
+  const conditions = recipe.prototype.surface_conditions as SurfaceCondition[] | undefined
+  if (!conditions || conditions.length === 0) return { state: 'available', reason: 'no_surface_conditions', surface_bound: false }
+  if (surface?.ignore_surface_conditions === true) return { ...scope, state: 'available', reason: 'surface_conditions_ignored', surface_bound: true }
+  if (!surface) return { ...scope, state: 'unknown', reason: 'actor_surface_unavailable', surface_bound: true }
+  try {
+    for (const condition of conditions) {
+      const value = surface.get_property(condition.property)
+      if (typeof value !== 'number' || value !== value || typeof condition.min !== 'number' || typeof condition.max !== 'number') {
+        return { ...scope, state: 'unknown', reason: 'surface_property_unavailable', surface_bound: true }
+      }
+      if (value < condition.min || value > condition.max) return { ...scope, state: 'unavailable', reason: 'surface_condition_mismatch', surface_bound: true }
+    }
+    return { ...scope, state: 'available', reason: 'surface_conditions_satisfied', surface_bound: true }
+  }
+  catch { return { ...scope, state: 'unknown', reason: 'surface_property_unavailable', surface_bound: true } }
+}
+
 function recipe_candidates(actor: ControlledActor, item_or_recipe: string) {
   const direct = actor.force.recipes[item_or_recipe]
-  if (direct !== undefined) {
-    return { candidates: [{ name: direct.name, recipe: direct }], truncated: false }
+  const direct_applicability = direct && recipe_applicability(actor, direct)
+  if (direct !== undefined && direct_applicability?.state !== 'unavailable') {
+    return { candidates: [{ name: direct.name, recipe: direct, applicability: direct_applicability! }], truncated: false }
   }
 
   const candidates: RecipeCandidate[] = []
   for (const [name, recipe] of pairs(actor.force.recipes)) {
     for (const product of recipe.products) {
       if (product.name === item_or_recipe) {
-        candidates.push({ name, recipe })
+        candidates.push({ name, recipe, applicability: recipe_applicability(actor, recipe) })
         break
       }
     }
   }
   sort_named(candidates)
+  // Irrelevant surface recipes must not fill the bounded response ahead of valid alternatives.
+  const ordered = [...candidates.filter(candidate => candidate.applicability.state !== 'unavailable'),
+    ...candidates.filter(candidate => candidate.applicability.state === 'unavailable')]
+  if (direct && !candidates.some(candidate => candidate.name === direct.name)) {
+    ordered.push({ name: direct.name, recipe: direct, applicability: direct_applicability! })
+  }
   return {
-    candidates: candidates.slice(0, MAX_RECIPE_MATCHES),
-    truncated: candidates.length > MAX_RECIPE_MATCHES,
+    candidates: ordered.slice(0, MAX_RECIPE_MATCHES),
+    truncated: ordered.length > MAX_RECIPE_MATCHES,
   }
 }
 
@@ -412,7 +443,7 @@ export function recipe_details_for_actor(actor: ControlledActor, item_or_recipe:
     // (acquired by mining), whatever recycling or crushing recipes also list it as a product.
     mined_from: mined_from_names(item_or_recipe),
     rate_basis: rates.RATE_BASIS,
-    recipes: candidates.map(({ name, recipe }) => {
+    recipes: candidates.map(({ name, recipe, applicability }) => {
       const categories = categories_for(recipe)
       const machine_result = machine_summaries(categories, recipe, fuel_name)
       const hand_craftable = character_can_craft(actor, categories)
@@ -420,6 +451,7 @@ export function recipe_details_for_actor(actor: ControlledActor, item_or_recipe:
       return {
         name,
         enabled: recipe.enabled,
+        applicability,
         requested_crafts: bootstrap.requested_crafts,
         craftable_now_count: bootstrap.craftable_now_count,
         craftable_now: bootstrap.craftable_now,
