@@ -57,7 +57,7 @@ const replacementDraft = (overrides = {}) => planReply({
 })
 
 // The furnace the executor was about to feed no longer exists when the harness preflights the batch.
-function gameWithMissingFurnace(onBlocked, { code = 'stale_exact_target', unit = FURNACE, lastObserved = true } = {}) {
+function gameWithMissingFurnace(onBlocked, { code = 'stale_exact_target', unit = FURNACE, lastObserved = true, refusal_class = 'world' } = {}) {
   const game = new FakeFactorio({
     preflight: (text) => {
       const target = Number(/unit_number[^0-9]*(\d+)/.exec(text)?.[1])
@@ -66,6 +66,7 @@ function gameWithMissingFurnace(onBlocked, { code = 'stale_exact_target', unit =
       return {
         ok: false,
         code,
+        refusal_class,
         operation: 'move_items_exact',
         field: 'unit_number',
         identity: unit,
@@ -515,7 +516,7 @@ test('MW5: an allowlisted code with a unit number nobody placed, observed or rec
 })
 
 test('MW5: an authorization refusal is never world evidence and keeps the blocked end', async () => {
-  const w = world([plannerDraft(), observation(), ...staleTwice()], { game: gameWithMissingFurnace(undefined, { code: 'protected_entity_refused' }) })
+  const w = world([plannerDraft(), observation(), ...staleTwice()], { game: gameWithMissingFurnace(undefined, { code: 'protected_entity_refused', refusal_class: 'authority' }) })
   await w.agent.request(OBJECTIVE, { sender: 'Louis' })
   w.game.inventory['iron-ore'] = 10
   await w.agent.completed()
@@ -664,7 +665,7 @@ function redraftWorld(secondDraft) {
   game.preflight = (text) => {
     if (text.includes('place_entity') && !rejected) {
       rejected = true
-      return { ok: false, code: 'unknown_prototype', operation: 'place_entity', field: 'entity_name', identity: 'stone-furnace' }
+      return { ok: false, code: 'unknown_prototype', refusal_class: 'argument', operation: 'place_entity', field: 'entity_name', identity: 'stone-furnace' }
     }
     return base(text)
   }

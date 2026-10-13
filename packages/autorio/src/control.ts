@@ -42,6 +42,7 @@ import { new_recipe_configuration_runtime } from './recipe_configuration'
 import { new_rocket_launch_runtime } from './rocket_launch'
 import { new_research_controller } from './research'
 import { research_operation_preflight } from './research_preflight'
+import { with_refusal_class } from './refusal_classes'
 import { navigation_position_preflight } from './navigation_position_preflight'
 import { transfer_preflight_facts, transfer_unknown_item } from './transfer_preflight'
 import { ensure_basic_skill_definitions } from './skills'
@@ -468,7 +469,8 @@ function operation_preflight(name: string, args: Record<string, any>) {
 }
 
 remote.add_interface('autorio_preflight', {
-  operation: (name: string, args: Record<string, any>) => operation_preflight(name, args),
+  // The single place a preflight refusal gets its class (see refusal_classes.ts); every ok:false result passes through here.
+  operation: (name: string, args: Record<string, any>) => with_refusal_class(operation_preflight(name, args)),
 })
 
 remote.add_interface('autorio_operations', {

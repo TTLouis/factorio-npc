@@ -236,7 +236,7 @@ test('a misnamed prototype gets one deterministic correction turn instead of a J
   let rejections = 1
   const game = new FakeFactorio({
     preflight: () => (rejections-- > 0
-      ? { ok: false, code: 'unknown_prototype', operation: 'gather_resource' }
+      ? { ok: false, code: 'unknown_prototype', refusal_class: 'argument', operation: 'gather_resource' }
       : { ok: true }),
   })
   const world = harness({
@@ -259,7 +259,7 @@ test('a deterministically blocked plan explains itself and requires user revisio
   let reject = true
   const game = new FakeFactorio({
     preflight: () => (reject
-      ? { ok: false, code: 'unknown_prototype', operation: 'gather_resource' }
+      ? { ok: false, code: 'unknown_prototype', refusal_class: 'argument', operation: 'gather_resource' }
       : { ok: true }),
   })
   const world = harness({

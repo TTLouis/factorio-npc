@@ -81,6 +81,7 @@ function missingPrerequisite() {
   return {
     ok: false,
     code: 'missing_prerequisites',
+    refusal_class: 'prerequisite',
     operation: 'research_technology',
     technology: 'automation',
     requested: {
@@ -150,9 +151,19 @@ test('missing prerequisite recovery preserves goal and active semantic step and 
     },
   })
 
+  const traced = []
+  const trace = agent.traceEvent.bind(agent)
+  agent.traceEvent = async (event, data) => {
+    traced.push({ event, data })
+    return trace(event, data)
+  }
   const result = await agent.request('research automation', { sender: 'tester' })
   const finalState = agent.memory.currentPlan('npc:sgluna')
   const evidence = finalState.task_board.evidence.find(item => item.kind === 'operation_preflight_recoverable')
+  const recoverableRows = traced.filter(row => row.event === 'operations.preflight_recoverable')
+  assert.equal(recoverableRows.length, 1)
+  assert.equal(recoverableRows[0].data.failure_class, 'research_missing_prerequisites')
+  assert.equal(recoverableRows[0].data.refusal_class, 'prerequisite')
 
   assert.equal(calls, 2)
   assert.equal(result.operations[0].args.technology_name, 'steam-power')
@@ -176,6 +187,7 @@ test('trigger research recovery returns the exact deterministic trigger with too
     ? {
         ok: false,
         code: 'trigger_research',
+        refusal_class: 'prerequisite',
         operation: 'research_technology',
         technology: 'steam-power',
         requested: {
@@ -230,6 +242,7 @@ test('force_busy remains recoverable and preserves the existing research identit
     ? {
         ok: false,
         code: 'force_busy',
+        refusal_class: 'prerequisite',
         operation: 'research_technology',
         technology: 'automation',
         current_research: { name: 'logistics', level: 1, progress: 0.4 },

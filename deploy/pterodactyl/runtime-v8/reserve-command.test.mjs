@@ -82,6 +82,7 @@ test('MW1 reserve: reserve records the container, refuses a second reserve, and 
   const state = memory.planningState(KEY)
   const take = [{ name: 'move_items_exact', args: { item_name: 'iron-plate', unit_number: 900, max_count: 5, to_entity: false } }]
   assert.equal(evaluateOperationAdmission(state, { operations: take, preflight: [{ ok: true }] }).code, ADMISSION_REFUSAL.RESERVED_SUPPLY)
+  assert.equal(evaluateOperationAdmission(state, { operations: take, preflight: [{ ok: true }] }).refusal_class, 'authority')
 
   const again = await executeReserveCommand({ rcon, memory, key: KEY, sender: 'louis', command: { action: 'reserve' } })
   assert.deepEqual([again.ok, again.code], [false, 'already_reserved'])

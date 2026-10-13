@@ -546,6 +546,7 @@ test('MW1: admission re-checks the grant of a replacement plan and refuses a sta
     const verdict = evaluateOperationAdmission(stale, { operations, preflight: [{ ok: true }], actor })
     assert.equal(verdict.ok, false, reason)
     assert.equal(verdict.code, ADMISSION_REFUSAL.AUTHORIZATION_STALE)
+    assert.equal(verdict.refusal_class, 'world', 'a stale grant ends the request like any other blocker')
     assert.equal(verdict.reason, reason)
     assert.equal(verdict.stage, 'admission')
     assert.equal(verdict.grant_id, 'standing_auto:goal_mw1')
@@ -587,6 +588,7 @@ test('MW1: admission refuses removal, rotation, mining and reconfiguration of a 
     const refused = evaluateOperationAdmission(state, { operations, preflight: preflightFor({ name: 'louis', index: 1 }), actor: ACTOR })
     assert.equal(refused.ok, false, name)
     assert.equal(refused.code, ADMISSION_REFUSAL.PROTECTED_ENTITY)
+    assert.equal(refused.refusal_class, 'authority')
     assert.equal(refused.reason, 'human_last_user')
     assert.equal(refused.unit_number, 501)
     assert.equal(refused.operation_index, 0)
@@ -640,6 +642,7 @@ test('MW1: reserved containers are never withdrawn from or mined; a player inven
   // Player inventories are always excluded as a source (to_player=false takes FROM the player).
   const fromPlayer = check([{ name: 'move_items_with_player', args: { item_name: 'iron-plate', player_name: 'louis', max_count: 5, to_player: false } }])
   assert.equal(fromPlayer.code, ADMISSION_REFUSAL.PLAYER_INVENTORY)
+  assert.equal(fromPlayer.refusal_class, 'authority')
   assert.deepEqual(check([{ name: 'move_items_with_player', args: { item_name: 'iron-plate', player_name: 'louis', max_count: 5, to_player: true } }]), { ok: true })
 
   // The exclusion list for availability queries, and the annotation on observed entities.
