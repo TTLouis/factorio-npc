@@ -8,6 +8,14 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 13: GPT-6 proxy live run c on `572d4600` (paused on step 1, not green science)
+
+- **Setup.** Cold start, objective "research logistic science", actor 20, zero connected humans, starter kit only. Luna model `gpt-6-luna` through the CLI proxy. Deployment matched the candidate (48 runtime modules, 0 mismatches).
+- **Result.** The planner committed one step: produce 10 copper plates. The executor found no copper ore within radius 32 and had no acquisition fact for it. The model answered BLOCKED. The harness rejected that blocker as unverified, then accepted the same text as `recoverable_provider_failure`, and the goal paused on step 1. No gameplay was executed. About 46 s and 7 Luna calls, no provider errors.
+- **Findings.** Raw leaves lack native acquisition facts. A rejected unverified blocker still pauses autonomy. The executor observation budget ends after 4 reads. Recipe closure carries Space Age recipes into a base-game goal. `run-check` reported no failure signatures for this pause shape.
+- **Next.** Unit 6 (raw-leaf acquisition facts) started 2026-10-13. The blocker-rejection pause and the `run-check` gap are queued. Each finding gets a static fixture before another live run, which waits for the owner's go or the standing allowance window.
+- **Checkpoint.** [Run c](validation/LUNA_GPT6_PROXY_LIVE_RUN_C_2026-10-13.md). Runs a and b were stopped before the goal by provider configuration and have no gameplay evidence.
+
 ## October 12: goal-pursuit native admission fixes ported to OG, unit 1 (static gates and real-engine lane passed, not live-validated)
 
 - **Why.** The owner concluded the direct goal-pursuit loop on 2026-10-12 and chose this harness. Its useful output was the native admission fixes in `packages/autorio`, now ported. The plan and build status are in the [port plan](validation/GOAL_PURSUIT_LESSONS_AND_OG_PORT_PLAN_2026-10-12.md#build-status).

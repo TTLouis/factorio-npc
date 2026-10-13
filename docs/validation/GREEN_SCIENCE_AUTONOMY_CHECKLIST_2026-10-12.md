@@ -29,8 +29,8 @@ rules. Those rules are:
 |---|---|---|
 | 1 | Unit 2c: refusal classes replace the loop's code lists | Done: merge `e818d83a`, repin `ce4b025e`, gate green, lane PASS |
 | 2 | Unit 2 docs: status doc and port-plan build status (Haiku) | Done (this commit) |
-| 3 | First GPT-6 proxy live run on the current build, cold start, objective "research logistic science" | Set up 2026-10-13 at `572d4600`; stopped before the goal (provider config was not GPT-6); waiting for the owner |
-| 4 | Turn each live finding into a design fix plus a static fixture | Pending run 3 |
+| 3 | First GPT-6 proxy live run on the current build, cold start, objective "research logistic science" | Done 2026-10-13 (run c, `572d4600`): paused at step 1 on an unverified copper-ore blocker; see LUNA_GPT6_PROXY_LIVE_RUN_C_2026-10-13.md |
+| 4 | Turn each live finding into a design fix plus a static fixture | In progress: unit 6 raw-leaf acquisition facts; blocker-rejection pause and run-check gap queued |
 | 5 | Unit 3: active-step fact handoff (port plan) | Done: merge `572d4600` (3a water anchors, 3b recipe closure; 3c deferred) |
 | 6 | Unit 4: dependency-aware batch stock accounting | In progress |
 | 7 | Repeat runs (one per window) until green science is researched autonomously, verified from world state and logs | Open |
