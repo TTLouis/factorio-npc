@@ -16,6 +16,8 @@
 //   world      Facts that outlive a goal: NPC placement receipts (to tell NPC-built from player-built) and
 //              reserved containers. Player inventories are never available to the NPC.
 
+import { REFUSAL_CLASS } from './refusal-class.mjs'
+
 export const AUTHORIZATION_VERSION = 1
 
 export const MANDATE_KIND = Object.freeze({
@@ -87,6 +89,17 @@ export const ADMISSION_REFUSAL = Object.freeze({
   PLAYER_INVENTORY: 'player_inventory_excluded',
 })
 export const ADMISSION_REFUSAL_CODES = Object.freeze(Object.values(ADMISSION_REFUSAL))
+
+// The class each admission refusal declares (see refusal-class.mjs). A protected, reserved or player-inventory target is
+// something the model can route around inside its grant: 'authority'. A stale grant is not (it ends the request like any other
+// blocker): 'world'. evaluateOperationAdmission is the one place that stamps the class on a refusal.
+export const ADMISSION_REFUSAL_CLASS = Object.freeze({
+  [ADMISSION_REFUSAL.AUTHORIZATION_STALE]: REFUSAL_CLASS.WORLD,
+  [ADMISSION_REFUSAL.PROTECTED_ENTITY]: REFUSAL_CLASS.AUTHORITY,
+  [ADMISSION_REFUSAL.RESERVED_SUPPLY]: REFUSAL_CLASS.AUTHORITY,
+  [ADMISSION_REFUSAL.RESERVED_AMBIGUOUS]: REFUSAL_CLASS.AUTHORITY,
+  [ADMISSION_REFUSAL.PLAYER_INVENTORY]: REFUSAL_CLASS.AUTHORITY,
+})
 
 // Approval reason codes for operation-level protected/reserved targets.
 export const APPROVAL_REASON = Object.freeze({
@@ -775,7 +788,12 @@ function hasApproval(auth, { reason, subject, goalId }) {
  * `preflight[i].target` carries the engine's view of operation i's exact target (`last_user`). Returns
  * { ok: true } or { ok: false, code, reason, operation_index, ... } for the FIRST refused operation.
  */
-export function evaluateOperationAdmission(state, { operations, preflight, actor } = {}) {
+export function evaluateOperationAdmission(state, input = {}) {
+  const verdict = admissionVerdict(state, input)
+  return verdict.ok === false ? { ...verdict, refusal_class: ADMISSION_REFUSAL_CLASS[verdict.code] } : verdict
+}
+
+function admissionVerdict(state, { operations, preflight, actor } = {}) {
   const auth = authorizationOf(state)
   const goalId = state?.goal?.goal_id
   const plan = state?.plans?.find(item => item.plan_id === state.active_plan_id)

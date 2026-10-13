@@ -4,6 +4,7 @@ import { restoreLedger as restoreJevLedger, serializeLedger as serializeJevLedge
 import { restoreObservationLedger } from './targeted-observation.mjs'
 import { createTaskBoard, reconcileTaskBoard, setTaskBoardStatus, taskBoardTransferSupplyRefSeen } from './common.mjs'
 import { validateOutcomeCandidate } from './outcome-authority.mjs'
+import { REFUSAL_CLASS } from './refusal-class.mjs'
 import { completionContractSupported, provePermanentlyUnsatisfiable, sanitizeStepCompletionContract, strictTaskTypesForOperation } from './step-completion.mjs'
 import {
   ADMISSION_REFUSAL,
@@ -1517,6 +1518,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       const refusal = {
         ok: false,
         code: STEP_CONTRACT_PENDING_CODE,
+        // Dedicated recovery by code (bind the checkpoint, then resend); 'world' is where it ends if that cannot bind.
+        refusal_class: REFUSAL_CLASS.WORLD,
         reason: 'step_contract_pending',
         stage: 'admission',
         operation_index: 0,

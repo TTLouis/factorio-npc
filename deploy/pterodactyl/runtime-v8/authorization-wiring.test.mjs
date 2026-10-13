@@ -183,6 +183,7 @@ test('MW1 wiring: grant-backed work - admission refuses a player-built exact tar
 
   const recoverable = named('operations.preflight_recoverable').at(-1)
   assert.equal((recoverable.data ?? recoverable).failure_class, 'authorization_protected_entity_refused')
+  assert.equal((recoverable.data ?? recoverable).refusal_class, 'authority')
   assert.equal(recoverable.request_id ?? requestId, requestId)
 
   // The model was told what happened and what not to do, and the requested result was not rewritten.

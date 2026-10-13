@@ -38,7 +38,8 @@ import {
   selectRecipeFacts,
   stepContractNeeds,
 } from './handoff-packet.mjs'
-import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CODES, REPLACEMENT_DECISION } from './authorization.mjs'
+import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CLASS, REPLACEMENT_DECISION } from './authorization.mjs'
+import { REFUSAL_CLASS, refusalClassLabel, refusalClassOf } from './refusal-class.mjs'
 import {
   blockerFacts,
   blockerWorldEvidence,
@@ -226,22 +227,11 @@ function actionOmissionRepairMessage(state) {
   return `${ACTION_OMISSION_REPAIR_MESSAGE} If the evidence you already hold shows that the active prose-only step ${JSON.stringify(cleanMemoryText(step.description, 200))} is complete, close it with semanticCompletion {"stepId":${JSON.stringify(step.id)},"rationale":"..."} and add the operations for the next step if one remains. Do not answer plan: [] while later steps remain.`
 }
 const ACTION_OMISSION_AFTER_OBSERVATION_MESSAGE = 'The targeted observation budget for this decision is complete. Do not observe again or switch to another read-only tool. Submit the next executable operation now, or keep the remaining plan and start chatMessage with "BLOCKED: " followed by the exact still-missing fact or truthful blocker.'
-const RESEARCH_PREFLIGHT_RECOVERABLE_CODES = new Set(['missing_prerequisites', 'trigger_research', 'force_busy'])
-// Preflight codes that mean the planner named something wrongly (a prototype,
-// recipe, identity or argument), not that the world blocks the step. They get
-// one bounded correction turn before the plan is frozen as BLOCKED. A recipe sent
-// to a furnace, a reach inside a furnace's collision box and malformed native
-// radius/position/count arguments are argument errors of the same kind.
-const MODEL_CORRECTABLE_PREFLIGHT_CODES = new Set(['unknown_prototype', 'unknown_recipe', 'invalid_unit_number', 'invalid_target_kind', 'invalid_preflight_args',
-  'not_recipe_machine', 'navigation_position_inside_furnace_collision', 'invalid_navigation_position', 'invalid_navigation_reach_distance',
-  'invalid_navigation_search_radius', 'invalid_harvest_search_radius', 'invalid_resource_count', 'invalid_resource_position', 'invalid_resource_search_radius',
-  // An expired or no-longer-placeable candidate is corrected by fetching fresh candidates; a
-  // product no tree or rock prototype yields is a wrong product name, like an unknown recipe.
-  'placement_candidate_unavailable', 'no_natural_harvest_source'])
+// Which recovery a generic preflight/admission refusal gets is decided by the class its producer declared (refusal-class.mjs):
+// 'prerequisite' (research recovery), 'argument' (one bounded correction turn: the planner named something wrongly), 'authority'
+// (MW1: a protected, reserved or player-inventory target, one retry inside the grant) and 'world' (the blocker path). The loop
+// keeps no list of codes for this. The budgets below are per recovery path.
 const MODEL_CORRECTABLE_PREFLIGHT_RETRY_BUDGET = 1
-// MW1: operation-level authorization refusals. A protected, reserved or player-inventory target is something the model can
-// route around inside its grant (one retry); a stale grant is not (it ends the request like any other blocker).
-const AUTHORIZATION_RECOVERABLE_CODES = new Set(ADMISSION_REFUSAL_CODES.filter(code => code !== ADMISSION_REFUSAL.AUTHORIZATION_STALE))
 const AUTHORIZATION_REFUSAL_RETRY_BUDGET = 1
 // MW2b: an identical batch refused because an earlier one's effect is not proven absent, and a batch proven not to have reached the game.
 const DUPLICATE_EFFECT_CODE = 'duplicate_effect_suppressed'
@@ -11908,7 +11898,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       catch (error) {
         const failure = new AgentLoopError(`Deterministic operation preflight failed to return valid JSON for operation ${index + 1}: ${error instanceof Error ? error.message : String(error)}`)
-        failure.preflight = { ok: false, code: 'preflight_transport_error', operation_index: index }
+        failure.preflight = { ok: false, code: 'preflight_transport_error', refusal_class: REFUSAL_CLASS.WORLD, operation_index: index }
         throw failure
       }
       await assertPreflightCurrent()
@@ -12140,6 +12130,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     await this.traceEvent('operations.preflight_recoverable', {
       failure_class: CHECKPOINT_STOCK_EXTRACTION_CODE,
       preflight: failure.preflight,
+      refusal_class: refusalClassLabel(failure.preflight),
       tools_enabled: true,
       retry: attempt,
       retry_budget: CHECKPOINT_STOCK_REFUSAL_BUDGET,
@@ -12178,6 +12169,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         refusal.preflight = {
           ok: false,
           code: admission.code,
+          refusal_class: admission.refusal_class,
           reason: admission.reason,
           operation: admission.operation,
           operation_index: admission.operation_index ?? index,
@@ -12249,6 +12241,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     await this.traceEvent('operations.preflight_recoverable', {
       failure_class: `transfer_${preflight.code}`,
       preflight,
+      refusal_class: refusalClassLabel(preflight),
       tools_enabled: true,
       retry: attempt,
       retry_budget: TRANSFER_SUPPLY_RECOVERY_BUDGET,
@@ -12336,6 +12329,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     await this.traceEvent('operations.preflight_recoverable', {
       failure_class: REQUIRES_MACHINE_CODE,
       preflight,
+      refusal_class: refusalClassLabel(preflight),
       tools_enabled: toolsEnabled,
       retry: attempt,
       retry_budget: REQUIRES_MACHINE_RETRY_BUDGET,
@@ -13454,6 +13448,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             failure.preflight = {
               ok: false,
               code: admission.code,
+              refusal_class: admission.refusal_class,
               reason: admission.reason,
               operation: admission.operation,
               operation_index: admission.operation_index ?? 0,
@@ -13473,6 +13468,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           failure.preflight = {
             ok: false,
             code: CHECKPOINT_STOCK_EXTRACTION_CODE,
+            refusal_class: REFUSAL_CLASS.WORLD,
             operation: stockConflict.operation,
             operation_index: stockConflict.operation_index,
             identity: stockConflict.unit_number,
@@ -13494,6 +13490,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             failure.preflight = {
               ok: false,
               code: DUPLICATE_EFFECT_CODE,
+              refusal_class: REFUSAL_CLASS.WORLD,
               reason: duplicate.reason,
               operation_index: 0,
               detail: `effect=${duplicate.effect} verdict=${duplicate.verdict ?? 'none'} state=${duplicate.state}`,
@@ -13519,7 +13516,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             })
             if (!replaced.ok) {
               const failure = new AgentLoopError(`Replacement plan commit refused: ${replaced.reason}`)
-              failure.preflight = { ok: false, code: ADMISSION_REFUSAL.AUTHORIZATION_STALE, reason: replaced.reason, stage: 'commit', operation_index: 0 }
+              failure.preflight = { ok: false, code: ADMISSION_REFUSAL.AUTHORIZATION_STALE, refusal_class: ADMISSION_REFUSAL_CLASS[ADMISSION_REFUSAL.AUTHORIZATION_STALE], reason: replaced.reason, stage: 'commit', operation_index: 0 }
               throw failure
             }
             await this.announceReplacementCommitted(getActivePlanningPlan(replaced.state) ?? reducerPlanBeforeCommit)
@@ -13585,12 +13582,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           if (supply.action === 'refused') error = supply.error
           else if (supply.stateResult) stateResult = supply.stateResult
         }
-        if (error.preflight.operation === 'research_technology' && RESEARCH_PREFLIGHT_RECOVERABLE_CODES.has(error.preflight.code)) {
+        // The producer's declaration decides the generic path; a missing or unknown class is reported below and fails closed to 'world'.
+        const refusal = refusalClassOf(error.preflight)
+        if (refusal.refusal_class === REFUSAL_CLASS.PREREQUISITE && error.preflight.operation === 'research_technology') {
           this.researchPreflightRetries++
           stateResult = await this.recordRecoverableResearchPreflight(stateResult, error.preflight)
           await this.traceEvent('operations.preflight_recoverable', {
             failure_class: `research_${error.preflight.code}`,
             preflight: error.preflight,
+            refusal_class: refusalClassLabel(error.preflight),
             tools_enabled: true,
             retry: this.researchPreflightRetries,
             retry_budget: RESEARCH_PREFLIGHT_RETRY_BUDGET,
@@ -13635,6 +13635,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           await this.traceEvent('operations.preflight_recoverable', {
             failure_class: 'bootstrap_dependency_unresolved',
             preflight: error.preflight,
+            refusal_class: refusalClassLabel(error.preflight),
             tools_enabled: true,
             retry: this.bootstrapDependencyPreflightRetries,
           })
@@ -13655,6 +13656,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           await this.traceEvent('operations.preflight_recoverable', {
             failure_class: DUPLICATE_EFFECT_CODE,
             preflight: error.preflight,
+            refusal_class: refusalClassLabel(error.preflight),
             tools_enabled: true,
             retry: this.duplicateEffectRetries,
             retry_budget: DUPLICATE_EFFECT_RETRY_BUDGET,
@@ -13667,7 +13669,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           })
           return this.runTurn()
         }
-        if (AUTHORIZATION_RECOVERABLE_CODES.has(error?.preflight?.code)
+        if (refusal.refusal_class === REFUSAL_CLASS.AUTHORITY
           && (this.authorizationRefusalRetries ?? 0) < AUTHORIZATION_REFUSAL_RETRY_BUDGET) {
           this.authorizationRefusalRetries = (this.authorizationRefusalRetries ?? 0) + 1
           if (this.requestInfo) {
@@ -13688,6 +13690,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           await this.traceEvent('operations.preflight_recoverable', {
             failure_class: `authorization_${error.preflight.code}`,
             preflight: error.preflight,
+            refusal_class: refusalClassLabel(error.preflight),
             tools_enabled: true,
             retry: this.authorizationRefusalRetries,
             retry_budget: AUTHORIZATION_REFUSAL_RETRY_BUDGET,
@@ -13699,7 +13702,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           })
           return this.runTurn()
         }
-        if (MODEL_CORRECTABLE_PREFLIGHT_CODES.has(error?.preflight?.code)
+        if (refusal.refusal_class === REFUSAL_CLASS.ARGUMENT
           && (this.modelCorrectablePreflightRetries ?? 0) < MODEL_CORRECTABLE_PREFLIGHT_RETRY_BUDGET) {
           this.modelCorrectablePreflightRetries = (this.modelCorrectablePreflightRetries ?? 0) + 1
           if (this.requestInfo) {
@@ -13720,6 +13723,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           await this.traceEvent('operations.preflight_recoverable', {
             failure_class: `model_correctable_${error.preflight.code}`,
             preflight: error.preflight,
+            refusal_class: refusalClassLabel(error.preflight),
             tools_enabled: true,
             retry: this.modelCorrectablePreflightRetries,
             retry_budget: MODEL_CORRECTABLE_PREFLIGHT_RETRY_BUDGET,
@@ -13752,6 +13756,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           await this.traceEvent('operations.preflight_recoverable', {
             failure_class: 'stale_exact_target',
             preflight: error.preflight,
+            refusal_class: refusalClassLabel(error.preflight),
             tools_enabled: true,
             retry: this.staleExactPreflightRetries,
           })
@@ -13765,11 +13770,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           })
           return this.runTurn()
         }
+        if (!refusal.classified) {
+          await this.traceEvent('operations.preflight_unclassified', {
+            request_id: this.traceRequest?.id,
+            code: error?.preflight?.code,
+            operation: error?.preflight?.operation,
+            reason: 'refusal_declares_no_valid_class_failing_closed_to_world',
+            refusal_class: REFUSAL_CLASS.WORLD,
+          })
+        }
         stateResult = await this.markAdmissionFailure(stateResult, operations, error, 'operation_preflight_blocker')
         await this.traceEvent('operations.preflight_rejected', {
           failure_class: 'deterministic_preflight',
           reason: error instanceof Error ? error.message : String(error),
           preflight: error?.preflight,
+          refusal_class: refusalClassLabel(error?.preflight),
           operations,
           task_board: visibleTaskBoard(stateResult?.state?.task_board),
         })
