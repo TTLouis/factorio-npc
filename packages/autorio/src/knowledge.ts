@@ -304,6 +304,24 @@ function resources_yielding(resource_or_item: string) {
   return result
 }
 
+// Resource prototypes whose mining yields `item_name` as a product, by prototype data only. Unlike resources_yielding it
+// does not match a resource merely named like the query: the answer says what is MINED as this item.
+function resources_mining_product(item_name: string) {
+  const result: ResourceCandidate[] = []
+  const matches = prototypes.get_entity_filtered([{ filter: 'type', type: 'resource' }])
+  for (const [name, prototype] of pairs(matches)) {
+    if (resource_yields(prototype, item_name)) result.push({ name, prototype })
+  }
+  sort_named(result)
+  return result
+}
+
+// Bounded, deterministic (name-sorted) resource names that mine into the queried item; undefined when none do.
+function mined_from_names(item_name: string) {
+  const names = resources_mining_product(item_name).map(resource => resource.name)
+  return names.length > 0 ? names.slice(0, MAX_RECIPE_MATCHES) : undefined
+}
+
 function drill_summaries(actor: ControlledActor, resource: LuaEntityPrototype, category: string, fuel_name: string | undefined) {
   const candidates: MachineCandidate[] = []
   const matches = prototypes.get_entity_filtered([{ filter: 'type', type: 'mining-drill' }])
@@ -376,14 +394,13 @@ export function mining_details_for_actor(actor: ControlledActor, resource_or_ite
 export function recipe_details_for_actor(actor: ControlledActor, item_or_recipe: string, requested_count: number = 1, fuel_name?: string) {
   const { candidates, truncated } = recipe_candidates(actor, item_or_recipe)
   if (candidates.length === 0) {
-    const mined_from = resources_yielding(item_or_recipe)
     return {
       found: false,
       query: item_or_recipe,
       // Declared by the producer so the harness never matches the sentence: the game has no recipe for this name.
       code: 'no_recipe',
       error: 'no recipe produces this item/fluid and no recipe has this name',
-      mined_from: mined_from.length > 0 ? mined_from.map(resource => resource.name) : undefined,
+      mined_from: mined_from_names(item_or_recipe),
     }
   }
 
@@ -391,6 +408,9 @@ export function recipe_details_for_actor(actor: ControlledActor, item_or_recipe:
     found: true,
     query: item_or_recipe,
     truncated,
+    // Present whenever the queried item is also the mining product of a resource prototype: such an item is a raw leaf
+    // (acquired by mining), whatever recycling or crushing recipes also list it as a product.
+    mined_from: mined_from_names(item_or_recipe),
     rate_basis: rates.RATE_BASIS,
     recipes: candidates.map(({ name, recipe }) => {
       const categories = categories_for(recipe)

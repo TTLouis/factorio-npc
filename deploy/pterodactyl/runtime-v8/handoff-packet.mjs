@@ -87,6 +87,7 @@ export const HANDOFF_DROP_ORDER = Object.freeze([
   'contract',
   'fresh_counts',
   'residual_needs',
+  'raw_leaf_acquisition',
   'roadmap_node',
   'step_completed',
   'step_pending',
@@ -104,6 +105,7 @@ export const EXECUTOR_FACT_LIMITS = Object.freeze({
   machineChars: 480,
   residualRows: 10,
   residualChars: 520,
+  acquisitionChars: 900,
   historicalKinds: 6,
   historicalChars: 280,
   authorityChars: 320,
@@ -119,6 +121,11 @@ export const EXECUTOR_FACT_LIMITS = Object.freeze({
   // Unit 3b: recipe reads the harness may spend on one handoff to close a step root's recipe chain.
   recipePrefetchReads: 8,
   noRecipeItems: 32,
+  // Unit 6: raw leaves (items a resource prototype mines) are remembered with their mining sources, and the harness reads the
+  // nearest instance of at most `rawLeafResources` distinct resources per handoff, within `rawLeafRadius` tiles.
+  rawLeafResources: 3,
+  rawLeafRadius: 1024,
+  rawLeafMinedFrom: 4,
 })
 
 const HEADER = '[HANDOFF] Rebuilt from durable harness state, not from the previous conversation. Verify against the world before acting.'
@@ -628,10 +635,82 @@ function expandableRecipe(item, recipes) {
   return { recipe: chosen, output }
 }
 
-/** The item ingredients of the one recipe a derivation would expand `item` with, or [] when no recipe can be counted exactly. */
-export function expandableIngredients(item, recipes) {
+/**
+ * The item ingredients of the one recipe a derivation would expand `item` with, or [] when no recipe can be counted exactly.
+ * `rawLeaves` (anything with `has(item)`) names items that are mined, not made: they are never expanded.
+ */
+export function expandableIngredients(item, recipes, rawLeaves) {
+  if (rawLeaves?.has?.(item)) return []
   const expansion = expandableRecipe(item, asList(recipes))
   return expansion ? expansion.recipe.ingredients.map(ingredient => ingredient.name) : []
+}
+
+// --- Raw leaves (unit 6) -------------------------------------------------------------------------------------------
+//
+// An item that a resource prototype mines (the mod's getRecipeDetails answer carries `mined_from`) is acquired by mining,
+// whatever recycling or crushing recipes also list it as a product. Those recipes are noise for a step brief, so the
+// harness keeps the item as a raw leaf: never expanded, and no recipe that produces it is carried.
+
+/** The raw-leaf declaration of a parsed getRecipeDetails answer: `{ item, mined_from }`, or undefined when it has none. */
+export function rawLeafFromRecipeDetails(parsed, limits = EXECUTOR_FACT_LIMITS) {
+  if (!parsed || typeof parsed !== 'object') return undefined
+  if (!(parsed.found === true || (parsed.found === false && parsed.code === 'no_recipe'))) return undefined
+  const item = factName(parsed.query)
+  if (!item || !Array.isArray(parsed.mined_from)) return undefined
+  const minedFrom = [...new Set(parsed.mined_from.map(factName).filter(Boolean))].slice(0, limits.rawLeafMinedFrom)
+  return minedFrom.length > 0 ? { item, mined_from: minedFrom } : undefined
+}
+
+/** The recipe facts that do not produce a raw leaf; `rawLeaves` is anything with `has(item)`. */
+export function withoutRawLeafRecipes(recipes, rawLeaves) {
+  const list = asList(recipes)
+  if (!rawLeaves || !(rawLeaves.size > 0)) return list
+  return list.filter(recipe => !recipe.products.some(product => rawLeaves.has(product.name)))
+}
+
+/**
+ * One mining source read: the answer of findLongRangeEntities (name, max_radius, limit 1) for `resource`, as a fact.
+ * `found` carries the nearest instance's position and distance; `none` only for the mod's own empty answer (matched_count 0,
+ * no error); anything else, including an answer for another name, is `failed`: never read as absence.
+ */
+export function rawLeafSourceFromRead(raw, resource, radius) {
+  let parsed
+  try { parsed = typeof raw === 'string' ? JSON.parse(raw) : raw }
+  catch { return { resource, state: 'failed' } }
+  if (!parsed || typeof parsed !== 'object' || parsed.ok === false || parsed.error !== undefined) return { resource, state: 'failed' }
+  if (parsed.name !== resource || parsed.max_radius !== radius || !Number.isFinite(parsed.searched_radius) || parsed.searched_radius < 1 || parsed.searched_radius > radius) return { resource, state: 'failed' }
+  const nearest = Array.isArray(parsed.entities) ? parsed.entities[0] : undefined
+  if (parsed.found === true && parsed.returned_count === 1 && Array.isArray(parsed.entities) && parsed.entities.length === 1 && parsed.matched_count >= 1 && nearest?.name === resource && nearest.type === 'resource') {
+    const x = finiteNumber(nearest.position?.x)
+    const y = finiteNumber(nearest.position?.y)
+    const distance = finiteNumber(nearest.distance)
+    if (x === undefined || y === undefined || distance === undefined || distance < 0 || distance > parsed.searched_radius || Math.abs(x) > 10000256 || Math.abs(y) > 10000256) return { resource, state: 'failed' }
+    const round = value => Math.round(value * 10) / 10
+    return { resource, state: 'found', x: round(x), y: round(y), distance: round(distance), radius }
+  }
+  if (parsed.found === false && parsed.searched_radius === radius && parsed.returned_count === 0 && parsed.matched_count === 0 && Array.isArray(parsed.entities) && parsed.entities.length === 0) return { resource, state: 'none', radius }
+  return { resource, state: 'failed' }
+}
+
+function rawSourceText(source, multiple) {
+  const label = multiple ? `@${source.resource}` : ''
+  if (source.state === 'found') return `nearest${label}=(${source.x},${source.y}) distance${label}=${source.distance}`
+  if (source.state === 'none') return `nearest${label}=none_within_${source.radius}`
+  if (source.state === 'failed') return `nearest${label}=read_failed`
+  return `nearest${label}=not_read`
+}
+
+/** The acquisition clause of a residual row: how the raw leaf is natively acquired and where the nearest source was last read. */
+export function rawLeafRowText(raw) {
+  const sources = asList(raw?.sources)
+  const minedFrom = asList(raw?.mined_from)
+  if (minedFrom.length === 0) return ''
+  const read = sources.some(source => source.state !== 'not_read')
+  return [
+    `raw: mined_from=${minedFrom.join(',')} (source observation; reach/path unverified)`,
+    ...sources.map(source => rawSourceText(source, minedFrom.length > 1)),
+    read ? `as_of=${tagText(raw.as_of)}` : '',
+  ].filter(Boolean).join(' ')
 }
 
 /** Whether any recipe fact names `item` (by recipe name or as an item product). */
@@ -846,6 +925,14 @@ function residualRecord(residual, limits) {
   }
 }
 
+// Acquisition is separate from recipe arithmetic so long intermediate chains cannot truncate the raw leaves.
+function acquisitionRecord(residual, limits) {
+  const rows = asList(residual?.rows).filter(row => row.raw).map(row => `${row.item} missing=${row.missing} ${rawLeafRowText(row.raw)}`)
+  if (!rows.length) return undefined
+  return { key: 'raw_leaf_acquisition', block: 'step', drop: 'raw_leaf_acquisition',
+    text: `raw_leaf_acquisition: ${joinBounded(rows, ' | ', limits.acquisitionChars)}` }
+}
+
 // --- Historical native fluid-tile anchors (unit 3a) ----------------------------------------------------------------
 //
 // getFluidSourceTiles answers live only in the conversation that asked, and a restage or compaction discards them. The
@@ -968,6 +1055,8 @@ function executorFactRecords(facts, plan, step, limits) {
   if (machine) records.push(machine)
   const residual = residualRecord(facts.residual, limits)
   if (residual) records.push(residual)
+  const acquisition = acquisitionRecord(facts.residual, limits)
+  if (acquisition) records.push(acquisition)
   asList(facts.recipes).slice(0, limits.recipes).forEach((fact, index) => {
     records.push({ key: `recipe_fact_${index}`, block: 'step', drop: 'recipe_facts', rank: index, text: recipeFactLine(fact, limits.recipeChars) })
   })
@@ -1012,6 +1101,8 @@ export function executorFactsRefreshMessage(facts, limits = EXECUTOR_FACT_LIMITS
   if (machine) records.push(machine)
   const residual = residualRecord(facts.residual, limits)
   if (residual) records.push(residual)
+  const acquisition = acquisitionRecord(facts.residual, limits)
+  if (acquisition) records.push(acquisition)
   if (records.length === 0) return ''
   return ['[HARNESS] Executor facts refreshed after the batch receipt landed (live reads taken now, same labels as the handoff packet; facts only):', ...records.map(record => record.text)].join('\n')
 }
