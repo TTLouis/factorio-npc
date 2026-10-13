@@ -394,6 +394,7 @@ export function normalizeRecipeFact(raw, { source = 'unknown', tag, limits: over
     // The live game's own answer to "can the character hand-craft this recipe's category" (getRecipeDetails
     // hand_craftable_category). Absent when the read did not say: the batch stock ledger then does not assume either way.
     ...(typeof raw.hand_craftable === 'boolean' ? { hand_craftable: raw.hand_craftable } : {}),
+    ...Object.fromEntries(['enabled', 'hidden', 'hidden_from_player_crafting', 'allow_as_intermediate', 'allow_intermediates'].filter(key => typeof raw[key] === 'boolean').map(key => [key, raw[key]])),
     ingredients: ingredients.slice(0, limits.recipeIngredients),
     products: products.slice(0, limits.recipeProducts),
     machines: machines.slice(0, limits.recipeMachines),
@@ -413,6 +414,11 @@ export function recipeFactsFromDetails(parsed, { tag, limits } = {}) {
       energy: entry?.energy,
       categories: entry?.categories,
       hand_craftable: entry?.hand_craftable_category,
+      enabled: entry?.enabled,
+      hidden: entry?.hidden,
+      hidden_from_player_crafting: entry?.hidden_from_player_crafting,
+      allow_as_intermediate: entry?.allow_as_intermediate,
+      allow_intermediates: entry?.allow_intermediates,
       ingredients: entry?.ingredients,
       products: entry?.products,
       machines: asList(entry?.crafting_machines),

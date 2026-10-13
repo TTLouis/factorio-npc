@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   BATCH_STOCK_INSUFFICIENT_CODE,
   BATCH_STOCK_UNACCOUNTED_CODE,
+  BATCH_STOCK_UNVERIFIED_CODE,
   batchStockDecision,
   evaluateBatchStock,
   OPERATION_STOCK_EFFECTS,
@@ -20,6 +21,9 @@ import { approvedOperationNames } from './structured-policy.mjs'
 const recipe = (name, ingredients, products, { hand = true } = {}) => normalizeRecipeFact({
   name,
   hand_craftable: hand,
+  enabled: true,
+  allow_as_intermediate: true,
+  allow_intermediates: true,
   categories: [hand ? 'crafting' : 'smelting'],
   energy: 0.5,
   ingredients: ingredients.map(([item, amount]) => ({ type: 'item', name: item, amount })),
@@ -50,7 +54,9 @@ const withdrawFacts = (unit_number, item_name, requested, source_count) => ({
 })
 
 const run = (operations, inventory, preflight = [], extra = {}) => evaluateBatchStock({
-  operations, preflight, inventory: new Map(Object.entries(inventory)), recipes: RECIPES, noRecipeItems: RAW, ...extra,
+  operations, preflight: operations.map((operation, index) => preflight[index] ?? (operation.name === 'supply_entity' ? {
+    ok: true, target: { unit_number: operation.args.unit_number }, transfer: { direction: 'to_entity', items: operation.args.items.map(item => ({ ...item, destination_accepts: 1000 })) },
+  } : undefined)), inventory: new Map(Object.entries(inventory)), recipes: RECIPES, noRecipeItems: RAW, ...extra,
 })
 const statuses = report => report.verdicts.map(verdict => verdict.status)
 
@@ -173,28 +179,28 @@ test('two withdrawals from one machine share its stock; what a withdrawal is exp
   assert.equal(tooMany.verdicts[1].status, STOCK_STATUS.SHORT, 'only the eight plates the machine held are counted')
 })
 
-test('uncertain production is never supply: it is named in the refusal instead', () => {
+test('uncertain production cannot overturn a native shortage or prove a batch shortage', () => {
   const operations = [{ name: 'mine_entity_exact', args: { unit_number: 9 } }, placeFurnace]
   const report = run(operations, {}, [{ ok: true }, FURNACE_ITEM(0)])
   assert.deepEqual(statuses(report), [STOCK_STATUS.COVERED, STOCK_STATUS.SHORT])
   assert.deepEqual(report.uncertain, [{ operation_index: 0, operation: 'mine_entity_exact', reason: 'mine_entity_exact_yield_not_deterministic' }])
   const decision = batchStockDecision(report, new Set([1]))
-  assert.equal(decision.action, 'refuse')
-  assert.equal(decision.refusal.refusal_class, REFUSAL_CLASS.ARGUMENT)
-  assert.deepEqual(decision.refusal.batch_stock.not_counted_as_supply, [{ operation_index: 0, operation: 'mine_entity_exact', reason: 'mine_entity_exact_yield_not_deterministic' }])
-  assert.match(decision.refusal.correction_message, /not deterministic/)
+  assert.equal(decision.refusal.code, BATCH_STOCK_UNVERIFIED_CODE)
+  assert.equal(report.short[0].proven, false)
 
   // A withdrawal nobody read the source of is uncertain too.
   const unread = run([{ name: 'move_items', args: { item_name: 'stone-furnace', entity_name: 'wooden-chest', max_count: 1, to_entity: false } }, placeFurnace], {}, [{ ok: true }, FURNACE_ITEM(0)])
-  assert.equal(batchStockDecision(unread, new Set([1])).action, 'refuse')
+  assert.equal(batchStockDecision(unread, new Set([1])).refusal.code, BATCH_STOCK_UNVERIFIED_CODE)
 })
 
-test('deterministic yields supply: a gather or resource mining count, and a verified harvest count', () => {
+test('resource cycles have unknown item yield; harvest supplies only its verified minimum', () => {
   const gathered = run([{ name: 'gather_resource', args: { resource_name: 'stone', count: 10, search_radius: 64 } }, craft('stone-furnace', 2)], {})
-  assert.deepEqual(statuses(gathered), [STOCK_STATUS.COVERED, STOCK_STATUS.COVERED_BY_EARLIER_OP])
+  assert.deepEqual(statuses(gathered), [STOCK_STATUS.COVERED, STOCK_STATUS.SHORT])
+  assert.equal(gathered.short[0].proven, false)
   const tooLittle = run([{ name: 'mine_resource_at', args: { resource_name: 'stone', x: 1, y: 2, count: 9 } }, craft('stone-furnace', 2)], {})
   assert.equal(tooLittle.verdicts[1].status, STOCK_STATUS.SHORT)
-  assert.deepEqual(tooLittle.short[0].items[0], { item_name: 'stone', needed: 10, available: 9, short_by: 1, source: 'actor', isolated_ok: false, touched_by: [0] })
+  assert.equal(tooLittle.short[0].items[0].available, 0)
+  assert.equal(tooLittle.short[0].proven, false)
   assert.equal(batchStockDecision(tooLittle).action, 'proceed', 'a shortage that was already there before the batch is for the mod preflight, not for this ledger')
   const wood = run([{ name: 'harvest_product', args: { product_name: 'wood', count: 4, search_radius: 32 } }, supply(15, 'wood', 4)], {})
   assert.deepEqual(statuses(wood), [STOCK_STATUS.COVERED, STOCK_STATUS.COVERED_BY_EARLIER_OP])
@@ -206,7 +212,7 @@ test('a recipe nobody read cannot be accounted for: the shortage after it is not
   assert.equal(report.verdicts[0].status, STOCK_STATUS.UNACCOUNTED)
   assert.deepEqual(report.unaccounted, [{ operation_index: 0, operation: 'craft_item', reason: 'recipe_unavailable', fail_closed: false }])
   assert.equal(report.short[0].proven, false)
-  assert.equal(batchStockDecision(report, new Set([1])).action, 'proceed')
+  assert.equal(batchStockDecision(report, new Set([1])).refusal.code, BATCH_STOCK_UNVERIFIED_CODE)
 
   // The same for an intermediate nobody read: raw and craftable are not the same thing, and the ledger does not guess.
   const unknownIntermediate = run([craft('lab', 1)], { 'iron-plate': 100 }, [], {
@@ -252,6 +258,69 @@ test('an uncertain withdrawal of one item implicates only that item: an unrelate
   assert.equal(coal.verdicts[1].status, STOCK_STATUS.SHORT)
   assert.deepEqual(batchStockDecision(coal, new Set([1])), { action: 'standalone', operation_index: 1, reason: 'shortage_not_touched_by_earlier_operations' })
   const plates = run([unread, supply(15, 'iron-plate', 5)], {}, [{ ok: true }, { ok: false, code: 'supply_missing' }])
-  assert.equal(batchStockDecision(plates, new Set([1])).action, 'refuse')
-  assert.deepEqual(batchStockDecision(plates, new Set([1])).refusal.batch_stock.not_counted_as_supply, [{ operation_index: 0, operation: 'move_items', reason: 'move_items_source_not_read', items: ['iron-plate'] }])
+  assert.equal(batchStockDecision(plates, new Set([1])).refusal.code, BATCH_STOCK_UNVERIFIED_CODE)
+  assert.equal(plates.short[0].proven, false)
+})
+
+test('consuming a held intermediate exposes the later native craft shortage', () => {
+  const report = run([supply(15, 'iron-gear-wheel', 5), craft('transport-belt', 5)], { 'iron-gear-wheel': 5, 'iron-plate': 5 })
+  assert.equal(batchStockDecision(report).action, 'refuse')
+  assert.deepEqual(report.short[0].items[0].touched_by, [0])
+  assert.equal(report.short[0].items[0].isolated_ok, true)
+})
+
+test('outbound capacity preserves stock and a supply replenishes a previously emptied entity', () => {
+  const deposit = (unit, item, room) => ({ ok: true, target: { unit_number: unit }, transfer: { direction: 'to_entity', items: [{ item_name: item, destination_accepts: room }] } })
+  const bounded = run([supply(15, 'coal', 100), supply(16, 'coal', 10)], { coal: 100 }, [deposit(15, 'coal', 1), deposit(16, 'coal', 100)])
+  assert.equal(batchStockDecision(bounded).action, 'proceed')
+  assert.equal(bounded.short.length, 0)
+  const roundtrip = run([withdraw(77, 'coal', 5), supply(77, 'coal', 5), withdraw(77, 'coal', 5)], { coal: 5 }, [withdrawFacts(77, 'coal', 5, 5), deposit(77, 'coal', 100), withdrawFacts(77, 'coal', 5, 5)])
+  assert.equal(batchStockDecision(roundtrip).action, 'proceed')
+  assert.equal(roundtrip.short.length, 0)
+})
+
+test('harvest surplus cannot prove a shortage after its minimum has been spent', () => {
+  const report = run([{ name: 'harvest_product', args: { product_name: 'wood', count: 1 } }, supply(15, 'wood', 1), supply(16, 'wood', 1)], {})
+  assert.equal(report.short[0].proven, false)
+  assert.equal(batchStockDecision(report).action, 'proceed')
+  assert.equal(batchStockDecision(report, new Set([2])).refusal.code, BATCH_STOCK_UNVERIFIED_CODE)
+})
+
+test('an incomplete craft cannot supply simulated intermediate surplus to a held rejection', () => {
+  const report = run([craft('widget'), supply(15, 'part-a', 1)], { raw: 1 }, [], { recipes: [
+    recipe('widget', [['part-a', 2], ['part-b', 1]], [['widget', 1]]),
+    recipe('part-a', [['raw', 1]], [['part-a', 3]]),
+  ], noRecipeItems: new Set(['raw']) })
+  assert.equal(report.verdicts[0].status, STOCK_STATUS.UNACCOUNTED)
+  assert.equal(report.verdicts[1].status, STOCK_STATUS.SHORT)
+  assert.equal(report.verdicts[1].supplied_by.length, 0)
+  assert.equal(batchStockDecision(report, new Set([1])).refusal.code, BATCH_STOCK_UNVERIFIED_CODE)
+})
+
+test('waiting invalidates exact entity stock without claiming production or a proven shortage', () => {
+  const report = run([withdraw(77, 'iron-plate', 5), { name: 'wait', args: { ticks: 600 } }, withdraw(77, 'iron-plate', 5)], {}, [withdrawFacts(77, 'iron-plate', 5, 5), { ok: true }, withdrawFacts(77, 'iron-plate', 5, 5)])
+  assert.equal(report.short[0].proven, false)
+  assert.equal(batchStockDecision(report).action, 'proceed')
+})
+
+test('withdrawals share observed actor capacity and waiting invalidates destination capacity', () => {
+  const oneRoom = unit => ({ ...withdrawFacts(unit, 'iron-plate', 1, 10), transfer: { direction: 'from_entity', items: [{ item_name: 'iron-plate', source_count: 10, destination_accepts: 1, expected_moved: 1 }] } })
+  const inbound = run([withdraw(77, 'iron-plate', 1), withdraw(78, 'iron-plate', 1)], {}, [oneRoom(77), oneRoom(78)])
+  assert.equal(inbound.verdicts[1].status, STOCK_STATUS.SHORT)
+  assert.equal(batchStockDecision(inbound).action, 'refuse')
+  const cap = { ok: true, target: { unit_number: 15 }, transfer: { direction: 'to_entity', items: [{ item_name: 'coal', destination_accepts: 100 }] } }
+  const afterWait = run([supply(15, 'coal', 100), { name: 'wait', args: { ticks: 600 } }, supply(15, 'coal', 1)], { coal: 101 }, [cap, undefined, cap])
+  assert.equal(afterWait.verdicts[2].status, STOCK_STATUS.UNACCOUNTED)
+  assert.equal(batchStockDecision(afterWait).action, 'proceed')
+})
+
+test('native intermediate permissions are required before replacing consumed held intermediates', () => {
+  for (const key of ['allow_as_intermediate', 'allow_intermediates']) {
+    const recipes = structuredClone(RECIPES)
+    if (key === 'allow_as_intermediate') recipes.find(recipe => recipe.name === 'iron-gear-wheel')[key] = false
+    else recipes.find(recipe => recipe.name === 'transport-belt')[key] = false
+    const report = run([supply(15, 'iron-gear-wheel', 1), craft('transport-belt')], { 'iron-gear-wheel': 1, 'iron-plate': 3 }, [], { recipes })
+    assert.notEqual(report.verdicts[1].status, STOCK_STATUS.COVERED)
+    assert.notEqual(report.verdicts[1].status, STOCK_STATUS.COVERED_BY_EARLIER_OP)
+  }
 })

@@ -333,7 +333,7 @@ const PLACEMENT_ITEM_MISSING_CODE = 'placement_item_missing'
 // Preflight rejections about the actor's own stock. They are read against the inventory NOW, before an earlier operation of the
 // same batch ran, so they are held back from the per-operation rejection and settled by the batch stock ledger (batch-stock.mjs):
 // supplied by an earlier operation, or not.
-const BATCH_STOCK_SETTLED_CODES = new Set(['supply_missing', PLACEMENT_ITEM_MISSING_CODE])
+const BATCH_STOCK_SETTLED_CODES = new Set(['supply_missing', PLACEMENT_ITEM_MISSING_CODE, 'bootstrap_dependency_unresolved'])
 
 // Could an earlier operation of the same batch give an empty source something to take (extraction_empty), or free room at the
 // same destination (destination_full)? When it could, the preflight rejection is only a snapshot taken before that operation
@@ -12121,6 +12121,26 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       await assertPreflightCurrent()
       results.push(result)
+      if (index > 0 && result?.code === 'supply_missing' && result.transfer?.items?.length > 1) {
+        // Source shortage has precedence in the mod's multi-item result. It must not conceal an independent
+        // destination refusal or two item kinds competing for the same sole slot when stock is supplied later.
+        const blocked = result.transfer.items.find(item => item.destination_accepts === 0)
+        const slots = new Map()
+        let conflict = false
+        for (const item of result.transfer.items) {
+          const slot = item.single_slot_destination?.inventory_index
+          if (slot === undefined) continue
+          if (slots.has(slot) && slots.get(slot) !== item.item_name) conflict = true
+          slots.set(slot, item.item_name)
+        }
+        if (blocked || conflict) {
+          const code = blocked ? 'destination_full' : 'supply_destination_conflict'
+          const failure = new AgentLoopError(`Operation preflight rejected operation ${index + 1} (${operations[index].name}): ${code}`)
+          failure.preflight = { ...result, code, operation_index: index }
+          failure.preflightResults = results.slice()
+          throw failure
+        }
+      }
       if (index > 0 && result?.ok !== true && BATCH_STOCK_SETTLED_CODES.has(result?.code)
         && (result.code !== PLACEMENT_ITEM_MISSING_CODE || typeof result.placement_item?.item_name === 'string')) {
         // The mod answers from the inventory as it is NOW. What an earlier operation of this batch crafts, gathers or takes out of
@@ -12230,12 +12250,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     for (const index of [...held].sort((left, right) => left - right)) {
       const result = results[index]
       const verdict = report.verdicts[index]
+      if (!verdict.proven || !['covered', 'covered_by_earlier_op'].includes(verdict.status)) throw reject(index)
       const supplied = verdict.status === 'covered_by_earlier_op'
       const dependencies = verdict.dependencies.map(entry => ({ ...entry, status: result.code }))
       const reason = supplied ? 'earlier_operation_in_batch_supplies_item' : verdict.status === 'covered' ? 'observed_stock_covers_item' : 'shortage_not_proven_by_batch_facts'
       results[index] = { ...result, ok: true, deferred: supplied ? 'batch_dependency' : 'batch_stock_unproven', dependencies }
       if (result.code === PLACEMENT_ITEM_MISSING_CODE) {
         await trace('placement.preflight_item_deferred', { operation_index: index, operation: operations[index].name, code: result.code, reason, dependencies, placement_item: result.placement_item })
+      }
+      else if (result.code === 'bootstrap_dependency_unresolved') {
+        await trace('craft.preflight_stock_deferred', { operation_index: index, operation: operations[index].name, code: result.code, reason, dependencies })
       }
       else {
         await trace('transfer.preflight_supply_deferred', { operation_index: index, operation: operations[index].name, code: result.code, reason, dependencies, facts: transferSupplyFacts({ ...result, operation_index: index }) })

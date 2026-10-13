@@ -236,26 +236,22 @@ function harness(rcon, script, { memory = new CanonicalTaskBoardMemory() } = {})
 const observe = (name = 'stone-furnace') => ({ content: null, tool_calls: [toolCall('observe', 'getNearbyEntities', { radius: 64, name, limit: 4 })] })
 const data = row => row.data ?? row
 
-test('a transfer preceded in the same batch by an operation that could supply the item is not rejected', async () => {
+test('unknown mining yield gets a bounded same-plan correction to settle acquisition first', async () => {
   const rcon = new Rcon()
   rcon.preflight.supply_entity = missingCoal()
-  const world = harness(rcon, [observe(), planMessage([GATHER_COAL, COAL_SUPPLY])])
+  const world = harness(rcon, [observe(), planMessage([GATHER_COAL, COAL_SUPPLY]), planMessage([GATHER_COAL])])
 
   const result = await world.agent.request('load the furnace with coal', { sender: 'tester' })
 
   assert.equal(rcon.mutations.length, 1, 'the batch was admitted')
-  assert.deepEqual(result.operations.map(operation => operation.name), ['gather_resource', 'supply_entity'])
+  assert.deepEqual(result.operations.map(operation => operation.name), ['gather_resource'])
   assert.equal(world.named('transfer.preflight_missing_supply').length, 0)
   assert.equal(world.named('transfer.supply_recovery').length, 0)
-  const [deferred] = world.named('transfer.preflight_supply_deferred')
-  assert.ok(deferred, 'the deferral is traced')
-  assert.ok(data(deferred).request_id)
-  assert.equal(data(deferred).operation_index, 1)
-  assert.equal(data(deferred).code, 'supply_missing')
-  assert.deepEqual(data(deferred).dependencies, [{ item_name: 'coal', status: 'supply_missing', operation_index: 0, operation: 'gather_resource' }])
-  const ok = world.named('operations.preflight_ok').at(-1)
-  assert.equal(data(ok).operations[1].preflight.deferred, 'batch_dependency')
-  assert.equal(data(ok).operations[1].preflight.ok, true)
+  assert.equal(world.named('transfer.preflight_supply_deferred').length, 0)
+  const [correction] = world.named('operations.preflight_recoverable')
+  assert.equal(data(correction).preflight.code, 'batch_stock_unverified_dependency')
+  assert.match(world.harnessMessages(2).join('\n'), /wait for its receipt/)
+  assert.equal(world.plan().status, 'active')
 })
 
 test('a craft that produces the transferred item defers a move_items_exact into a chest', async () => {
@@ -606,7 +602,9 @@ test('a frozen (blocked) plan is never pulled into supply recovery', async () =>
 test('the budget is a monotonic board counter: more than 32 evidence items in a step cannot evict it, and a restore keeps it', async () => {
   const rcon = new Rcon()
   rcon.preflight.supply_entity = missingCoal()
-  const world = harness(rcon, [observe(), planMessage([COAL_SUPPLY]), planMessage([GATHER_COAL, COAL_SUPPLY]), planMessage([COAL_SUPPLY])])
+  const withdrawal = { name: 'move_items_exact', args: { item_name: 'coal', unit_number: 77, max_count: 5, to_entity: false } }
+  rcon.preflight.move_items_exact = { ok: true, target: { unit_number: 77 }, transfer: { direction: 'from_entity', items: [{ item_name: 'coal', requested: 5, source_count: 5, expected_moved: 5, destination_accepts: 1000 }] } }
+  const world = harness(rcon, [observe(), planMessage([COAL_SUPPLY]), planMessage([withdrawal, COAL_SUPPLY]), planMessage([COAL_SUPPLY])])
   await world.agent.request('load the furnace with coal', { sender: 'tester' })
   assert.equal(transferSupplyRecoveryCount(world.plan().task_board), 1)
 

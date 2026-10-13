@@ -13,14 +13,14 @@
 // approved operation has no entry, so a new operation cannot silently bypass the ledger.
 //
 // Supply rules (what an earlier operation may be counted as producing):
-//  - counted: the product of a hand craft the recipe facts describe exactly; a gather / resource mining count (the
-//    operation only completes once that many units are mined); a harvest count (completion is verified against the
-//    inventory); what a withdrawal from an exact machine is expected to move, bounded by the stock the preflight read.
+//  - counted: a completely derived hand craft; the verified minimum harvest gain; exact transfers bounded by observed
+//    source stock and destination capacity. Intermediate surplus is provisional until the entire craft is accounted for.
 //  - never counted: anything whose yield is not deterministic (mining an entity, clearing an area, taking from a player,
 //    a withdrawal with no read of the source). Such an operation is recorded as `uncertain`: it does not supply, but a
-//    shortage after it is reported with it named, because it is the operation the model should have settled first.
+//    shortage after it cannot be called proven. Resource depletion counts also do not establish item yield.
 //  - an operation whose facts are missing (a recipe nobody read) is `unaccounted` with `may_produce`: a shortage after it is
-//    NOT proven, so it is not refused (the execution-time checks stay authoritative, as they were before this ledger).
+//    NOT proven. Native accepted operations keep execution-time checks; rejected dependencies require a bounded correction
+//    to settle acquisition and observe stock before submitting dependent work.
 //
 // Engine semantics kept as they are: a transfer that moves part of the request succeeds, and only a transfer that finds
 // nothing fails. So a supply or withdrawal claims what is left (never more) and is short only when nothing is left.
@@ -34,6 +34,7 @@ import { REFUSAL_CLASS } from './refusal-class.mjs'
 
 export const BATCH_STOCK_INSUFFICIENT_CODE = 'batch_stock_insufficient'
 export const BATCH_STOCK_UNACCOUNTED_CODE = 'batch_stock_unaccounted'
+export const BATCH_STOCK_UNVERIFIED_CODE = 'batch_stock_unverified_dependency'
 
 export const STOCK_STATUS = Object.freeze({
   COVERED: 'covered',
@@ -76,16 +77,24 @@ function transferEffect(operation, fact) {
   const item_name = text(args.item_name)
   const requested = count(args.max_count)
   if (!item_name || requested === undefined || typeof args.to_entity !== 'boolean') return { unverifiable: { reason: 'transfer_arguments_unreadable', may_produce: false } }
-  if (args.to_entity) return { takes: [{ item_name, count: requested, mode: 'some' }] }
+  if (args.to_entity) return outboundEffect(operation, fact, [{ item_name, count: requested, mode: 'some' }])
   // A withdrawal is supply only where the harness read the source: the mod's exact-target transfer facts.
   const transfer = fact?.transfer
   const item = transfer?.items?.[0]
   if (operation.name === 'move_items_exact' && transfer?.direction === 'from_entity' && fact?.target?.unit_number === args.unit_number
     && item?.item_name === item_name && Number.isSafeInteger(item.source_count) && item.source_count >= 0) {
-    const expected = Number.isSafeInteger(item.expected_moved) && item.expected_moved >= 0 ? item.expected_moved : 0
-    return { withdraw: { unit_number: args.unit_number, item_name, requested, source_count: item.source_count, expected_moved: expected } }
+    if (Number.isSafeInteger(item.destination_accepts) && item.destination_accepts >= 0) return { withdraw: { unit_number: args.unit_number, item_name, requested, source_count: item.source_count, capacity: item.destination_accepts } }
   }
   return { uncertain: `${operation.name}_source_not_read`, uncertain_items: [item_name] }
+}
+
+function outboundEffect(operation, fact, takes) {
+  const unit = operation.args?.unit_number
+  if (Number.isSafeInteger(unit) && fact?.target?.unit_number === unit && fact.transfer?.direction === 'to_entity') {
+    const items = takes.map(entry => ({ ...entry, capacity: fact.transfer.items?.find(item => item.item_name === entry.item_name)?.destination_accepts }))
+    if (items.every(item => Number.isSafeInteger(item.capacity) && item.capacity >= 0)) return { deposit: { unit_number: unit, items } }
+  }
+  return { takes: takes.map(entry => ({ ...entry, uncertain_consumption: true })) }
 }
 
 function placementEffect(_operation, fact) {
@@ -141,18 +150,18 @@ export const OPERATION_STOCK_EFFECTS = Object.freeze({
   mine_entity: UNCERTAIN_YIELD,
   mine_entity_exact: UNCERTAIN_YIELD,
   clear_construction_area: UNCERTAIN_YIELD,
-  // A resource mining/gather count completes only once that many resource units are mined, one item each.
-  gather_resource: yieldEffect('resource_name', 'gather_resource_arguments_unreadable'),
-  mine_resource_at: yieldEffect('resource_name', 'mine_resource_at_arguments_unreadable'),
+  // Resource depletion counts do not prove which item products entered the actor's inventory.
+  gather_resource: UNCERTAIN_YIELD,
+  mine_resource_at: UNCERTAIN_YIELD,
   // A harvest completes when the inventory gained the requested count of the product (harvest.ts verified_gain).
-  harvest_product: yieldEffect('product_name', 'harvest_product_arguments_unreadable'),
+  harvest_product: Object.freeze({ claims: false, effect: operation => ({ ...yieldEffect('product_name', 'harvest_product_arguments_unreadable').effect(operation), uncertain: 'harvest_surplus_unknown', uncertain_items: [operation.args?.product_name] }) }),
   supply_entity: Object.freeze({
     claims: true,
-    effect: (operation) => {
+    effect: (operation, fact) => {
       const items = Array.isArray(operation.args?.items) ? operation.args.items : []
       const takes = items.map(entry => ({ item_name: text(entry?.item_name), count: count(entry?.count), mode: 'some' }))
       if (takes.length === 0 || takes.some(entry => !entry.item_name || entry.count === undefined)) return { unverifiable: { reason: 'supply_items_unreadable', may_produce: false } }
-      return { takes }
+      return outboundEffect(operation, fact, takes)
     },
   }),
   move_items: Object.freeze({ claims: true, effect: transferEffect }),
@@ -164,7 +173,7 @@ export const OPERATION_STOCK_EFFECTS = Object.freeze({
       const item_name = text(args.item_name)
       const requested = count(args.max_count)
       if (!item_name || requested === undefined || typeof args.to_player !== 'boolean') return { unverifiable: { reason: 'transfer_arguments_unreadable', may_produce: false } }
-      return args.to_player ? { takes: [{ item_name, count: requested, mode: 'some' }] } : { uncertain: 'player_inventory_yield_not_observed', uncertain_items: [item_name] }
+      return args.to_player ? { takes: [{ item_name, count: requested, mode: 'some', uncertain_consumption: true }] } : { uncertain: 'player_inventory_yield_not_observed', uncertain_items: [item_name] }
     },
   }),
   place_entity: Object.freeze({ claims: true, effect: placementEffect }),
@@ -193,7 +202,7 @@ export function stockClaimingOperation(name) {
 function intermediateSource(item, recipes, noRecipeItems) {
   const producing = recipes.filter(recipe => recipe.products.some(product => product.name === item && product.type === 'item'))
   if (producing.length === 0) return noRecipeItems?.has?.(item) ? { kind: 'raw' } : { kind: 'unknown', reason: 'recipe_unavailable' }
-  const hand = producing.filter(recipe => recipe.hand_craftable === true)
+  const hand = producing.filter(recipe => recipe.hand_craftable === true && recipe.enabled === true && recipe.hidden !== true && recipe.hidden_from_player_crafting !== true && recipe.allow_as_intermediate === true)
   if (hand.length === 0) return producing.every(recipe => recipe.hand_craftable === false) ? { kind: 'raw' } : { kind: 'unknown', reason: 'hand_craftability_unknown' }
   const expansion = expandableRecipe(item, hand)
   return expansion ? { kind: 'craftable', recipe: expansion.recipe, output: expansion.output } : { kind: 'unknown', reason: 'recipe_not_derivable' }
@@ -213,11 +222,17 @@ function sortedUnique(values) {
  * @param {Array<object>} [input.recipes] recipe facts (handoff cache entries)
  * @param {Set<string>} [input.noRecipeItems] items the game was read to have no recipe for
  */
-export function evaluateBatchStock({ operations, preflight = [], inventory, recipes = [], noRecipeItems }) {
+export function evaluateBatchStock({ operations, preflight = [], inventory, recipes = [], noRecipeItems, checkIsolation = true }) {
   const initial = new Map(inventory)
   const observed = new Map(inventory)
   const produced = new Map() // item -> [{ op, count }], oldest first
   const entityStock = new Map() // `entity:${unit}:${item}` -> count not yet claimed
+  const entityDeposits = new Map()
+  const entityCapacity = new Map()
+  const uncertainItems = new Set()
+  const actorCapacity = new Map()
+  const inventoryAddedItems = new Set()
+  let entityStockUncertain = false
   const touches = new Map() // item or entity key -> operation indexes that took from or gave to it
   const uncertainOps = []
   const blockingOps = [] // operations with an unknown effect that may have produced anything
@@ -243,12 +258,15 @@ export function evaluateBatchStock({ operations, preflight = [], inventory, reci
       fromOps.push(lot.op)
     }
     if (amount - remaining > 0) touch(item, op)
+    if (actorCapacity.has(item)) actorCapacity.set(item, actorCapacity.get(item) + amount - remaining)
     return { taken: amount - remaining, fromOps }
   }
   const give = (item, amount, op) => {
     if (amount <= 0) return
     if (!produced.has(item)) produced.set(item, [])
     produced.get(item).push({ op, count: amount })
+    inventoryAddedItems.add(item)
+    if (actorCapacity.has(item)) actorCapacity.set(item, Math.max(0, actorCapacity.get(item) - amount))
     touch(item, op)
   }
 
@@ -263,29 +281,58 @@ export function evaluateBatchStock({ operations, preflight = [], inventory, reci
       return
     }
     const effect = OPERATION_STOCK_EFFECTS[name].effect(operation, preflight[index]) ?? {}
+    if (name === 'wait') entityStockUncertain = true
     const touchedBy = key => sortedUnique([...(touches.get(key) ?? []), ...uncertainOps]).filter(op => op < index)
     const recordShort = ({ touch_key, ...entry }) => {
-      verdict.short.push({ ...entry, touched_by: touchedBy(touch_key ?? entry.item_name) })
+      verdict.short.push({ ...entry, ...((uncertainOps.length > 0 || uncertainItems.has(entry.item_name) || (entry.source === 'entity' && entityStockUncertain)) ? { uncertain: true } : {}), touched_by: touchedBy(touch_key ?? entry.item_name) })
     }
     const supplied = (item, ops) => {
       for (const op of ops) verdict.supplied_by.push({ item_name: item, operation_index: op })
     }
 
     if (effect.withdraw) {
-      const { unit_number, item_name, requested, source_count, expected_moved } = effect.withdraw
+      const { unit_number, item_name, requested, source_count, capacity } = effect.withdraw
+      const capacityUnknown = [...inventoryAddedItems].some(item => item !== item_name)
+      if (!actorCapacity.has(item_name)) actorCapacity.set(item_name, Math.max(0, capacity - Math.max(0, available(item_name) - (initial.get(item_name) ?? 0))))
       const key = `entity:${unit_number}:${item_name}`
-      const remaining = entityStock.has(key) ? entityStock.get(key) : source_count
+      const remaining = entityStock.has(key) ? entityStock.get(key) : source_count + (entityDeposits.get(key) ?? 0)
       if (remaining <= 0) {
         recordShort({ item_name, needed: requested, available: 0, short_by: requested, source: 'entity', unit_number, touch_key: key, isolated_ok: source_count >= 1 })
         entityStock.set(key, 0)
       }
       else {
-        // The earlier maximum is claimed, not what it is expected to move: stock can grow before execution, and the earlier
-        // request may then take more than its preflight estimate. Only the expected amount counts as supply.
-        const claimed = Math.min(requested, remaining)
+        // Replay the bounded transfer over shared source stock and the actor's remaining observed capacity.
+        const claimed = Math.min(requested, remaining, actorCapacity.get(item_name))
         entityStock.set(key, remaining - claimed)
+        if (entityCapacity.has(key)) entityCapacity.set(key, entityCapacity.get(key) + claimed)
         touch(key, index)
-        give(item_name, Math.min(expected_moved, claimed), index)
+        if (!entityStockUncertain && !capacityUnknown) give(item_name, claimed, index)
+        if (claimed === 0 && !capacityUnknown) recordShort({ item_name, needed: requested, available: 0, short_by: requested, source: 'actor_capacity', isolated_ok: capacity > 0 })
+      }
+      if (entityStockUncertain || capacityUnknown) { uncertainItems.add(item_name); verdict.unaccounted = { reason: entityStockUncertain ? 'entity_stock_changed_during_wait' : 'actor_capacity_changed_by_other_items', fail_closed: false }; blockingOps.push(index) }
+    }
+
+    if (effect.deposit) {
+      for (const entry of effect.deposit.items) {
+        if (stackMoved.has(entry.item_name)) { verdict.unaccounted = { reason: 'stack_moved_by_equip', fail_closed: false }; continue }
+        if (entityStockUncertain) {
+          uncertainItems.add(entry.item_name)
+          take(entry.item_name, Math.min(entry.count, available(entry.item_name)), index)
+          verdict.unaccounted = { reason: 'destination_capacity_changed_during_wait', fail_closed: false }
+          continue
+        }
+        const key = `entity:${effect.deposit.unit_number}:${entry.item_name}`
+        const room = entityCapacity.has(key) ? entityCapacity.get(key) : entry.capacity
+        const before = available(entry.item_name)
+        if (before < 1) recordShort({ item_name: entry.item_name, needed: entry.count, available: 0, short_by: entry.count, source: 'actor', isolated_ok: (initial.get(entry.item_name) ?? 0) >= 1 })
+        const moved = Math.min(entry.count, before, room)
+        const { fromOps } = take(entry.item_name, moved, index)
+        supplied(entry.item_name, fromOps)
+        entityCapacity.set(key, room - moved)
+        entityDeposits.set(key, (entityDeposits.get(key) ?? 0) + moved)
+        if (entityStock.has(key)) entityStock.set(key, entityStock.get(key) + moved)
+        touch(key, index)
+        if (room < 1) recordShort({ item_name: entry.item_name, needed: 1, available: 0, short_by: 1, source: 'destination', touch_key: key, isolated_ok: entry.capacity > 0 })
       }
     }
 
@@ -308,6 +355,7 @@ export function evaluateBatchStock({ operations, preflight = [], inventory, reci
       }
       const { fromOps } = take(entry.item_name, Math.min(entry.count, before), index)
       supplied(entry.item_name, fromOps)
+      if (entry.uncertain_consumption) uncertainItems.add(entry.item_name)
     }
     for (const item_name of effect.stack_moved ?? []) stackMoved.add(item_name)
 
@@ -321,18 +369,23 @@ export function evaluateBatchStock({ operations, preflight = [], inventory, reci
       }
       else {
         const leaves = new Map() // raw item -> { needed, available_before, short_by }
+        const craftCauses = new Set()
         let unknown
-        const demand = (item, amount, depth, trail) => {
+        const demand = (item, amount, depth, trail, allowIntermediates) => {
+          for (const op of touches.get(item) ?? []) if (op < index) craftCauses.add(op)
           const before = available(item)
           const { taken, fromOps } = take(item, Math.min(amount, before), index)
           supplied(item, fromOps)
           const remaining = amount - taken
           if (remaining <= 0) return
-          const source = depth >= MAX_CRAFT_DEPTH || trail.has(item) ? { kind: 'unknown', reason: 'recipe_depth_or_cycle' } : intermediateSource(item, recipes, noRecipeItems)
+          const source = allowIntermediates === false ? { kind: 'raw' }
+            : depth >= MAX_CRAFT_DEPTH || trail.has(item) ? { kind: 'unknown', reason: 'recipe_depth_or_cycle' }
+              : intermediateSource(item, recipes, noRecipeItems)
           if (source.kind === 'craftable') {
+            if (allowIntermediates !== true) { unknown ??= 'intermediate_permissions_unknown'; return }
             const crafts = Math.ceil(remaining / source.output)
             const nextTrail = new Set(trail).add(item)
-            for (const ingredient of source.recipe.ingredients) demand(ingredient.name, ingredient.amount * crafts, depth + 1, nextTrail)
+            for (const ingredient of source.recipe.ingredients) demand(ingredient.name, ingredient.amount * crafts, depth + 1, nextTrail, source.recipe.allow_intermediates)
             // The crafted surplus stays in the inventory (a recipe yielding two per craft, three needed).
             give(item, crafts * source.output - remaining, index)
             return
@@ -346,13 +399,15 @@ export function evaluateBatchStock({ operations, preflight = [], inventory, reci
           leaf.short_by += remaining
           leaves.set(item, leaf)
         }
-        for (const ingredient of ingredients) demand(ingredient.name, ingredient.amount * effect.craft.crafts, 0, new Set([effect.craft.recipe_name]))
+        for (const ingredient of ingredients) demand(ingredient.name, ingredient.amount * effect.craft.crafts, 0, new Set([effect.craft.recipe_name]), recipe.allow_intermediates)
         if (unknown) {
           effect.unverifiable = { reason: unknown, may_produce: true }
         }
         else if (leaves.size > 0) {
+          const isolated = checkIsolation ? evaluateBatchStock({ operations: [operation], preflight: [preflight[index]], inventory: initial, recipes, noRecipeItems, checkIsolation: false }).verdicts[0] : undefined
           for (const [item_name, leaf] of leaves) {
-            recordShort({ item_name, needed: leaf.needed, available: leaf.available_before, short_by: leaf.short_by, source: 'actor', isolated_ok: (initial.get(item_name) ?? 0) >= leaf.needed })
+            recordShort({ item_name, needed: leaf.needed, available: leaf.available_before, short_by: leaf.short_by, source: 'actor', isolated_ok: isolated ? [STOCK_STATUS.COVERED, STOCK_STATUS.COVERED_BY_EARLIER_OP].includes(isolated.status) : false })
+            verdict.short.at(-1).touched_by = sortedUnique([...verdict.short.at(-1).touched_by, ...craftCauses])
           }
         }
         else {
@@ -372,7 +427,7 @@ export function evaluateBatchStock({ operations, preflight = [], inventory, reci
     for (const entry of effect.gives ?? []) give(entry.item_name, entry.count, index)
     if (effect.uncertain) {
       // An unbounded yield (mining an entity) may have produced any item; a bounded one only the items it names.
-      if (effect.uncertain_items) for (const item_name of effect.uncertain_items) touch(item_name, index)
+      if (effect.uncertain_items) for (const item_name of effect.uncertain_items) { touch(item_name, index); uncertainItems.add(item_name) }
       else uncertainOps.push(index)
       verdict.uncertain = effect.uncertain
       if (effect.uncertain_items) verdict.uncertain_items = effect.uncertain_items
@@ -380,6 +435,11 @@ export function evaluateBatchStock({ operations, preflight = [], inventory, reci
     if (effect.unverifiable) {
       verdict.unaccounted = { reason: effect.unverifiable.reason, fail_closed: false }
       if (effect.unverifiable.may_produce) blockingOps.push(index)
+    }
+    if (effect.craft && (verdict.unaccounted || verdict.short.length > 0)) {
+      // Intermediate surplus is provisional until every ingredient is accounted for. An unresolved branch may consume it.
+      for (const [item, lots] of produced) produced.set(item, lots.filter(lot => lot.op !== index))
+      if (!blockingOps.includes(index)) blockingOps.push(index)
     }
     if (verdict.short.length > 0) verdict.status = STOCK_STATUS.SHORT
     else if (verdict.unaccounted) verdict.status = STOCK_STATUS.UNACCOUNTED
@@ -398,7 +458,7 @@ export function evaluateBatchStock({ operations, preflight = [], inventory, reci
     short: verdicts.filter(verdict => verdict.status === STOCK_STATUS.SHORT).map(verdict => ({
       operation_index: verdict.operation_index,
       operation: verdict.operation,
-      proven: verdict.proven,
+      proven: verdict.proven && verdict.short.every(item => !item.uncertain),
       items: verdict.short.slice(0, MAX_REPORTED_ITEMS),
     })),
     deferred_by_earlier_op: verdicts.filter(verdict => verdict.status === STOCK_STATUS.COVERED_BY_EARLIER_OP).map(verdict => ({
@@ -458,9 +518,23 @@ export function batchStockDecision(report, held = new Set()) {
       },
     }
   }
+  for (const index of [...held].sort((a, b) => a - b)) {
+    const verdict = report.verdicts[index]
+    const shortage = report.short.find(entry => entry.operation_index === index)
+    if (verdict?.status !== STOCK_STATUS.UNACCOUNTED && verdict?.proven !== false && shortage?.proven !== false) continue
+    return { action: 'refuse', reason: 'earlier_supply_not_deterministically_known', refusal: {
+      ok: false, code: BATCH_STOCK_UNVERIFIED_CODE, refusal_class: REFUSAL_CLASS.ARGUMENT,
+      operation: verdict.operation, operation_index: index,
+      detail: 'Native stock preflight rejected this operation; the earlier supply cannot be counted exactly yet.',
+      correction_message: '[HARNESS] No operation from this batch ran. A later operation lacks stock now, and the earlier mining, withdrawal or crafting result cannot yet prove enough supply. Keep the same plan and step: submit only the acquisition that can run now, wait for its receipt, then read the settled inventory before submitting dependent operations. This is an unverified dependency, not a proven world blocker or proven batch shortage.',
+    } }
+  }
   const candidates = []
   for (const entry of report.short) {
-    if (!entry.proven) continue
+    if (!entry.proven) {
+      if (held.has(entry.operation_index)) candidates.push({ entry, kind: 'standalone' })
+      continue
+    }
     const touched = entry.items.some(item => item.touched_by.length > 0)
     if (held.has(entry.operation_index)) candidates.push({ entry, kind: touched ? 'refuse' : 'standalone' })
     // An operation the mod accepted alone is refused only when what is missing was there at the start of the batch.

@@ -786,6 +786,8 @@ test('shape 4 (hand craft) and shape 2 (coal): the recorded plate craft gets req
     recorded('req_muw0mkcw_1.turn7.supply_coal_not_held'),
     // Scripted recovery (the retained run had none): acquire coal first, in the same batch as the supply.
     recorded('req_muw0mkcw_1.turn7.supply_coal_not_held', { operations: [GATHER_COAL, SUPPLY_COAL] }),
+    recorded('req_muw0mkcw_1.turn7.supply_coal_not_held', { operations: [GATHER_COAL] }),
+    recorded('req_muw0mkcw_1.turn7.supply_coal_not_held', { operations: [SUPPLY_COAL] }),
   ])
 
   const result = await run.say(requestText.req_muw0mkcw_1)
@@ -833,9 +835,12 @@ test('shape 4 (hand craft) and shape 2 (coal): the recorded plate craft gets req
   assert.equal(run.plan().blocker, '')
   assert.equal(run.plan().task_board.status, 'active')
   assert.equal(world.mutations.length, 1, 'only the corrected batch ran')
-  assert.deepEqual(result.operations.map(operation => operation.name), ['gather_resource', 'supply_entity'])
-  assert.ok(run.named('transfer.preflight_supply_deferred').length >= 1, 'the supply behind its own gather is a traced batch dependency')
-  assert.equal(world.finishBatch(), undefined, 'the game gathered the coal first, so the supply moved it')
+  assert.deepEqual(result.operations.map(operation => operation.name), ['gather_resource'])
+  assert.equal(run.named('transfer.preflight_supply_deferred').length, 0)
+  assert.equal(world.finishBatch(), undefined, 'settle mining before claiming its output')
+  const supplied = await run.agent.completed()
+  assert.deepEqual(supplied.operations.map(operation => operation.name), ['supply_entity'])
+  assert.equal(world.finishBatch(), undefined)
   assert.equal(world.furnace.fuel.coal, 10)
   assert.equal(world.statusCode(), 1, 'the furnace now has fuel and ore')
 })

@@ -36,6 +36,8 @@ const serpent = inventory => `{\n${Object.entries(inventory).filter(([, count]) 
 const detail = (name, ingredients, products, { hand = true } = {}) => ({
   name,
   enabled: true,
+  allow_as_intermediate: true,
+  allow_intermediates: true,
   hidden: false,
   energy: 0.5,
   categories: [hand ? 'crafting' : 'smelting'],
@@ -69,11 +71,12 @@ function preflightArgs(text) {
 }
 
 class StockRcon {
-  constructor({ inventory = {}, entities = {}, recipes = RECIPES, inventoryReadable = true } = {}) {
+  constructor({ inventory = {}, entities = {}, recipes = RECIPES, inventoryReadable = true, recipeReadable = true } = {}) {
     this.inventory = { ...inventory }
     this.entities = entities // unit_number -> { name, stock }
     this.recipes = recipes
     this.inventoryReadable = inventoryReadable
+    this.recipeReadable = recipeReadable
     this.commands = []
     this.mutations = []
     this.recipeReads = []
@@ -96,6 +99,31 @@ class StockRcon {
   // Each operation judged alone against the inventory now, as the mod's preflight does.
   preflight(text) {
     const { name, str, num, bool, items } = preflightArgs(text)
+    if (name === 'craft_item') {
+      const item = str('item_name')
+      const recipe = this.recipes[item]
+      if (!recipe) return { ok: false, operation: name, code: 'unknown_recipe' }
+      if (recipe.enabled === false) return { ok: false, operation: name, code: 'recipe_locked' }
+      if (!recipe.hand_craftable_category) return { ok: false, operation: name, code: 'requires_machine' }
+      const stock = { ...this.inventory }
+      const make = (entry, crafts, trail = []) => {
+        if (!entry || entry.enabled === false || !entry.hand_craftable_category || trail.includes(entry.name)) return false
+        for (const ingredient of entry.ingredients) {
+          const wanted = ingredient.amount * crafts
+          const missing = Math.max(0, wanted - (stock[ingredient.name] ?? 0))
+          if (missing) {
+            const intermediate = this.recipes[ingredient.name]
+            const output = intermediate?.products.find(product => product.name === ingredient.name)?.amount
+            if (!output || !make(intermediate, Math.ceil(missing / output), [...trail, entry.name])) return false
+          }
+          stock[ingredient.name] = (stock[ingredient.name] ?? 0) - wanted
+        }
+        for (const product of entry.products) stock[product.name] = (stock[product.name] ?? 0) + product.amount * crafts
+        return true
+      }
+      const covered = make(recipe, num('count') ?? 1)
+      return { ok: covered, operation: name, ...(covered ? {} : { code: 'bootstrap_dependency_unresolved' }), recipe_name: item, craftable_now_count: covered ? num('count') ?? 1 : 0 }
+    }
     if (name === 'place_entity') {
       const entity = str('entity_name')
       const held = this.inventory[entity] ?? 0
@@ -107,7 +135,8 @@ class StockRcon {
       const wanted = name === 'supply_entity' ? items : [{ item_name: str('item_name'), count: num('max_count') }]
       const facts = wanted.map(({ item_name, count }) => {
         const source = this.inventory[item_name] ?? 0
-        return { item_name, requested: count, source_count: source, destination_accepts: 1000, expected_moved: Math.min(count, source), missing: Math.max(0, count - source), status: source <= 0 ? 'supply_missing' : source < count ? 'partial' : 'ok' }
+        const room = this.entities[unit]?.capacity?.[item_name] ?? 1000
+        return { item_name, requested: count, source_count: source, destination_accepts: room, expected_moved: Math.min(count, source, room), missing: Math.max(0, count - source), status: source <= 0 ? 'supply_missing' : room <= 0 ? 'destination_full' : source < count ? 'partial' : 'ok' }
       })
       const base = { operation: name, field: 'unit_number', identity: unit, target: { unit_number: unit, name: this.entities[unit]?.name ?? 'stone-furnace' }, transfer: { direction: 'to_entity', items: facts } }
       return facts.some(item => item.status === 'supply_missing') ? { ok: false, code: 'supply_missing', ...base } : { ok: true, ...base }
@@ -137,6 +166,7 @@ class StockRcon {
       return this.inventoryReadable ? serpent(this.inventory) : 'not an inventory'
     }
     if (text.includes('"recipe_details"')) {
+      if (!this.recipeReadable) return 'unreadable recipe facts'
       const name = /"recipe_details",['"]([a-z0-9-]+)['"]/.exec(text)?.[1]
       this.recipeReads.push(name)
       if (this.recipes[name]) return JSON.stringify({ found: true, query: name, truncated: false, recipes: [this.recipes[name]] })
@@ -317,7 +347,7 @@ test('a placement short with nothing in the batch bearing on it keeps the mod re
   assert.equal(data(world.named('operations.preflight_rejected')[0]).preflight.code, 'placement_item_missing')
 })
 
-test('mining an entity is not counted as supply: the placement after it is refused with that operation named', async () => {
+test('mining an entity cannot overturn the native placement shortage', async () => {
   const rcon = new StockRcon({ inventory: {} })
   const plan = ['Mine the rock and place a furnace']
   const world = harness(rcon, [
@@ -329,11 +359,9 @@ test('mining an entity is not counted as supply: the placement after it is refus
   await world.agent.request('mine the rock and place a furnace', { sender: 'tester' })
 
   const [checked] = world.named('operations.batch_stock_checked')
-  assert.equal(data(checked).reason, 'batch_exceeds_observed_stock')
-  const [recoverable] = world.named('operations.preflight_recoverable')
-  assert.deepEqual(data(recoverable).preflight.batch_stock.not_counted_as_supply, [{ operation_index: 0, operation: 'mine_entity', reason: 'mine_entity_yield_not_deterministic' }])
-  assert.match(world.harnessMessages(2)[0], /not deterministic/)
-  assert.equal(rcon.mutations.length, 1)
+  assert.equal(data(checked).reason, 'earlier_supply_not_deterministically_known')
+  assert.equal(data(world.named('operations.preflight_recoverable')[0]).preflight.code, 'batch_stock_unverified_dependency')
+  assert.equal(rcon.mutations.length, 1, 'only the corrected acquisition runs')
   assert.equal(world.named('placement.preflight_item_deferred').length, 0)
 })
 
@@ -353,22 +381,36 @@ test('two withdrawals from one machine share its stock; a withdrawal that finds 
   await chained.agent.request('take plates and craft gears', { sender: 'tester' })
   assert.equal(chain.mutations.length, 1, 'a partial positive withdrawal is allowed and its plates are supply')
   assert.deepEqual(data(chained.named('operations.batch_stock_checked')[0]).deferred_by_earlier_op[0].dependencies, [{ item_name: 'iron-plate', operation_index: 0, operation: 'move_items_exact' }])
+  const craftDeferred = data(chained.named('craft.preflight_stock_deferred')[0])
+  assert.equal(craftDeferred.code, 'bootstrap_dependency_unresolved')
+  assert.equal(craftDeferred.reason, 'earlier_operation_in_batch_supplies_item')
+  assert.ok(craftDeferred.request_id)
 })
 
-test('a recipe the harness could not read leaves the shortage unproven: admitted, with the gap named in the trace', async () => {
-  const rcon = new StockRcon({ inventory: {} })
-  const world = harness(rcon, [observe(), planMessage([craft('mystery-part', 1), PLACE_FURNACE], ['Craft and place'])])
+test('a held multi-item shortage never conceals another item destination refusal', async () => {
+  const rcon = new StockRcon({ inventory: { coal: 1 }, entities: { 15: { capacity: { coal: 0 } } } })
+  const world = harness(rcon, [])
+  world.agent.epoch = deployment()
+  world.agent.active = true
+  await assert.rejects(world.agent.preflightOperations([
+    { name: 'harvest_product', args: { product_name: 'wood', count: 1, search_radius: 32 } },
+    { name: 'supply_entity', args: { unit_number: 15, items: [{ item_name: 'wood', count: 1 }, { item_name: 'coal', count: 1 }] } },
+  ]), error => error.preflight?.code === 'destination_full')
+  assert.equal(rcon.mutations.length, 0)
+})
+
+test('unreadable recipe facts cannot promote the native placement refusal', async () => {
+  const rcon = new StockRcon({ inventory: { stone: 5 }, recipeReadable: false })
+  const world = harness(rcon, [observe(), planMessage([craft('stone-furnace', 1), PLACE_FURNACE], ['Craft and place']), planMessage([craft('stone-furnace', 1)], ['Craft and place'])])
 
   const result = await world.agent.request('craft and place', { sender: 'tester' })
 
-  assert.equal(rcon.mutations.length, 1, 'the execution-time checks stay authoritative where the ledger cannot prove a shortage')
-  assert.deepEqual(result.operations.map(operation => operation.name), ['craft_item', 'place_entity'])
+  assert.equal(rcon.mutations.length, 1)
+  assert.deepEqual(result.operations.map(operation => operation.name), ['craft_item'])
   const [checked] = world.named('operations.batch_stock_checked')
-  assert.equal(data(checked).reason, 'shortage_not_proven_by_batch_facts')
+  assert.equal(data(checked).reason, 'earlier_supply_not_deterministically_known')
   assert.deepEqual(data(checked).unaccounted, [{ operation_index: 0, operation: 'craft_item', reason: 'recipe_unavailable', fail_closed: false }])
-  const [deferred] = world.named('placement.preflight_item_deferred')
-  assert.equal(data(deferred).reason, 'shortage_not_proven_by_batch_facts')
-  assert.equal(data(world.named('operations.preflight_ok').at(-1)).operations[1].preflight.deferred, 'batch_stock_unproven')
+  assert.equal(world.named('placement.preflight_item_deferred').length, 0)
 })
 
 test('an unreadable inventory leaves the mod rejection standing, with the gap traced', async () => {
