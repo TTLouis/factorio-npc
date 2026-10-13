@@ -325,6 +325,9 @@ function transformNearbyEntities(loop, entry, resultMessage) {
   let status
   try { status = JSON.parse(raw) }
   catch { return }
+  // A native refusal (ok:false with a code, e.g. unknown_entity_prototype) is not an empty scan: forwarding it through the
+  // snapshot view would report false absence and drop the code, so it reaches the model unchanged and sets no baseline.
+  if (status && typeof status === 'object' && !Array.isArray(status) && status.ok === false) return
   const view = nearbyDecisionView(status)
   if (!view) return
   const query = nearbyQueryFor(entry.args)

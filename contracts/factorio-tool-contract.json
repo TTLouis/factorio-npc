@@ -663,6 +663,13 @@
       ],
       "surface_policy": "shared"
     },
+    "getFluidSourceTiles": {
+      "remote": ["autorio_tools", "get_fluid_source_tiles"],
+      "category": "observation",
+      "surfaces": ["pterodactyl-runtime-v8"],
+      "surface_policy": "runtime-v8-only",
+      "args": ["fluid_name", "search_radius", "limit"]
+    },
     "findLongRangeEntities": {
       "remote": [
         "autorio_discovery",
