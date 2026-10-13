@@ -63,14 +63,17 @@ function researchWorld({ fail = false, changeActor = false } = {}) {
   return game
 }
 
-test('the retained research blocker still pauses truthfully after the repaired handoff', async () => {
+test('the retained unverified research blocker spends one recovery then reports controller exhaustion', async () => {
   const world = harness(call => call === 1 ? capturedResearch.planner : {
     plan: capturedResearch.planner.plan, currentStep: 0, operations: [], chatMessage: capturedResearch.blocker,
   }, researchWorld())
-  await world.agent.request(capturedResearch.planner.goal.summary, { sender: 'Louis' })
-  assert.equal(world.calls.length, 2)
+  await assert.rejects(world.agent.request(capturedResearch.planner.goal.summary, { sender: 'Louis' }), /unverified_blocker_recovery_exhausted/)
+  assert.equal(world.calls.length, 3)
   assert.equal(world.game.mutations.length, 0)
-  assert.equal(world.memory.currentPlan(KEY).status, 'paused')
+  assert.notEqual(world.memory.currentPlan(KEY).status, 'blocked')
+  assert.notEqual(world.memory.currentPlan(KEY).pause_reason, 'recoverable_provider_failure:provider_reported_blocker')
+  assert.equal(world.events.filter(row => row.event === 'recovery.fresh_context_started').length, 1)
+  assert.equal(world.memory.planningState(KEY).goal.fresh_context_recovery_used, true)
   assert.equal(world.memory.currentPlan(KEY).task_board.completed_count, 0)
   assert.equal(world.memory.planningState(KEY).goal.status, 'active')
 })
@@ -118,11 +121,11 @@ test('failed mandatory research reads remain explicit and cannot manufacture res
     assert.match(world.calls[1].map(row => row.content ?? '').join('\n'), /"state":"unavailable"/)
     return { plan: capturedResearch.planner.plan, currentStep: 0, operations: [], chatMessage: capturedResearch.blocker }
   }, researchWorld({ fail: true }))
-  await world.agent.request(capturedResearch.planner.goal.summary, { sender: 'Louis' })
+  await assert.rejects(world.agent.request(capturedResearch.planner.goal.summary, { sender: 'Louis' }), /unverified_blocker_recovery_exhausted/)
   const facts = world.events.find(row => row.event === 'context.executor_facts_carried')
   assert.equal(facts.data.research_paths, 0)
   assert.deepEqual(facts.data.missing_research, ['electronics', 'steam-power'])
-  assert.equal(world.game.researchReads.length, 2)
+  assert.equal(world.game.researchReads.length, 4)
   assert.equal(world.game.admissions.length, 0)
   assert.equal(world.memory.currentPlan(KEY).task_board.completed_count, 0)
 })
@@ -141,7 +144,7 @@ test('restored committed research subjects rebuild facts without conversation ca
   const world = harness(call => call === 1 ? capturedResearch.planner : {
     plan: capturedResearch.planner.plan, currentStep: 0, operations: [], chatMessage: capturedResearch.blocker,
   }, researchWorld())
-  await world.agent.request(capturedResearch.planner.goal.summary, { sender: 'Louis' })
+  await assert.rejects(world.agent.request(capturedResearch.planner.goal.summary, { sender: 'Louis' }), /unverified_blocker_recovery_exhausted/)
   const restored = new CanonicalTaskBoardMemory()
   restored.restore(world.memory.snapshot())
   const restarted = new NpcAgentLoop({ rcon: world.game, memory: restored, provider: async () => assert.fail('restored fact gathering must not wake a model'), stateFile: null, traceFile: null, decisionTraceFile: null, npcId: 'sgluna' })
@@ -150,7 +153,7 @@ test('restored committed research subjects rebuild facts without conversation ca
   const result = await restarted.gatherExecutorHandoffFacts({ state, actor: restarted.epoch })
   assert.equal(result.facts.research.filter(path => path.state === 'fresh').length, 2)
   assert.equal(restarted.handoffRecipeFacts.size, 0)
-  assert.equal(world.game.researchReads.length, 4)
+  assert.equal(world.game.researchReads.length, 6)
   assert.equal(restored.planningState(KEY).active_plan_id, world.memory.planningState(KEY).active_plan_id)
   assert.equal(restored.currentPlan(KEY).task_board.completed_count, 0)
 })
@@ -159,7 +162,7 @@ test('research reads defer behind in-flight work, refresh after settlement, and 
   const world = harness(call => call === 1 ? capturedResearch.planner : {
     plan: capturedResearch.planner.plan, currentStep: 0, operations: [], chatMessage: capturedResearch.blocker,
   }, researchWorld())
-  await world.agent.request(capturedResearch.planner.goal.summary, { sender: 'Louis' })
+  await assert.rejects(world.agent.request(capturedResearch.planner.goal.summary, { sender: 'Louis' }), /unverified_blocker_recovery_exhausted/)
   const state = world.memory.planningState(KEY)
   const before = world.game.researchReads.length
   const deferred = await world.agent.gatherExecutorHandoffFacts({ state, actor: world.agent.epoch, runtime: { idle: false } })
@@ -242,8 +245,8 @@ test('an initial observation-only draft commits without gameplay and requires gr
     assert.equal(world.game.mutations.length, 0)
     return { plan: steps, currentStep: 0, operations: [], chatMessage: 'BLOCKED: A fresh patch observation is still needed.' }
   })
-  await world.agent.request('Assess the copper patch and gather ten copper ore.', { sender: 'Louis' })
-  assert.equal(world.calls.length, 2, JSON.stringify({ state: world.memory.planningState(KEY), events: world.events.map(row => row.event) }))
+  await assert.rejects(world.agent.request('Assess the copper patch and gather ten copper ore.', { sender: 'Louis' }), /unverified_blocker_recovery_exhausted/)
+  assert.equal(world.calls.length, 3, JSON.stringify({ state: world.memory.planningState(KEY), events: world.events.map(row => row.event) }))
   assert.equal(world.game.mutations.length, 0)
   assert.equal(world.events.filter(row => row.event === 'plan.semantic_assessment_committed').length, 1)
   assert.match(world.calls[1].map(message => message.content ?? '').join('\n'), new RegExp(committedStepId))
@@ -306,7 +309,7 @@ test('assessmentOnly keeps its all-semantic no-operation slice, still refuses op
   const assessed = harness((call, memory) => call === 1
     ? draft({ plan: steps, operations: [], assessmentOnly: true, stepCompletions: semantic })
     : { plan: steps, currentStep: 0, operations: [], chatMessage: 'BLOCKED: A fresh patch observation is still needed.' })
-  await assessed.agent.request('Assess the copper patch.', { sender: 'Louis' })
+  await assert.rejects(assessed.agent.request('Assess the copper patch.', { sender: 'Louis' }), /unverified_blocker_recovery_exhausted/)
   assert.equal(assessed.events.filter(row => row.event === 'plan.semantic_assessment_committed').length, 1)
   assert.equal(assessed.events.filter(row => row.event === 'plan.semantic_step_refused').length, 0)
   assert.equal(assessed.game.mutations.length, 0)
@@ -625,8 +628,8 @@ test('an explicitly assessment-only slice stays with the planner and cannot admi
   const world = harness(call => call === 1 ? draft({ plan: ['Assess available supplies'], operations: [],
     assessmentOnly: true, stepCompletions: [{ kind: 'semantic', rationale: 'Assess inventory from fresh observations.' }] })
     : { plan: ['Assess available supplies'], currentStep: 0, operations: [], chatMessage: 'BLOCKED: Supply assessment needs a fresh observation.' })
-  await world.agent.request('Assess available supplies.', { sender: 'Louis' })
-  assert.equal(world.calls.length, 2)
+  await assert.rejects(world.agent.request('Assess available supplies.', { sender: 'Louis' }), /unverified_blocker_recovery_exhausted/)
+  assert.equal(world.calls.length, 3)
   assert.equal(world.agent.agentContext.role, 'planner')
   assert.equal(world.game.mutations.length, 0)
   assert.equal(world.events.filter(row => row.event === 'plan.delegation_committed').length, 0)
@@ -739,4 +742,21 @@ test('the declared semantic-to-deterministic transition on a committed plan admi
   const board = world.memory.currentPlan(KEY).task_board
   assert.equal(board.completed_count, 1)
   assert.equal(board.steps[board.active_index].description, steps[1])
+})
+
+
+test('run C: an unverified blocker gets one fresh handoff and can admit a grounded operation', async () => {
+  const world = harness(call => call === 1 ? draft({ operations: [] }) : call === 2
+    ? { plan: ['Gather ten copper ore'], currentStep: 0, operations: [], chatMessage: 'BLOCKED: no copper ore in the local scan. ' + 'The source location is unverified. '.repeat(40) }
+    : { plan: ['Gather ten copper ore'], currentStep: 0, operations: [gather('copper-ore', 10)] })
+  await world.agent.request('Gather ten copper ore.', { sender: 'Louis' })
+  assert.equal(world.calls.length, 3)
+  assert.equal(world.game.mutations.length, 1)
+  assert.equal(world.events.filter(row => row.event === 'recovery.fresh_context_started').length, 1)
+  const rejected = world.events.find(row => row.event === 'recovery.unverified_blocker')
+  assert.ok(rejected.data.request_id)
+  assert.equal(rejected.data.reason, 'rejected_world_claim_requires_grounded_action_recovery')
+  assert.equal(world.events.filter(row => row.event === 'outcome.validated' && row.data.reason_code === 'provider_reported_blocker').length, 0)
+  assert.equal(world.memory.currentPlan(KEY).status, 'active')
+  assert.equal(world.memory.currentPlan(KEY).task_board.completed_count, 0)
 })

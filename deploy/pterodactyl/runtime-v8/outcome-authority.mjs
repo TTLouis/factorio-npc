@@ -162,6 +162,7 @@ export function validateOutcomeCandidate(candidate, { world = {} } = {}) {
   }
 
   if (kind === 'recoverable_provider_failure') {
+    if (reasonCode === 'provider_reported_blocker') return { ...base, rejection_reason: 'unverified_blocker_is_not_provider_failure' }
     if (runtime.active) return { ...base, accepted: true, durable_status: 'active' }
     if (runtime.idle) return { ...base, accepted: true, durable_status: 'paused', pause_reason: `recoverable_provider_failure:${reasonCode}` }
     return { ...base, accepted: true, durable_status: 'active' }

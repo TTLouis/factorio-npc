@@ -139,3 +139,10 @@ test('provider failures cannot become WORLD_BLOCKED even when blocker evidence e
     assert.equal(decision.rejection_reason, 'provider_failure_cannot_be_world_blocker')
   }
 })
+
+
+test('a provider-reported world blocker cannot be relabelled a provider failure', () => {
+  const decision = validateOutcomeCandidate({ kind: 'recoverable_provider_failure', source: 'main_planner', reason_code: 'provider_reported_blocker', evidence: [] }, { world: { task_state: 'idle', queue_length: 0 } })
+  assert.equal(decision.accepted, false)
+  assert.equal(decision.rejection_reason, 'unverified_blocker_is_not_provider_failure')
+})

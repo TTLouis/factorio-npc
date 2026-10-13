@@ -44,7 +44,7 @@ test('retained Luna semantic contract dead end is diagnosed without changing its
   assert.equal(errors.length, 0)
   assert.equal(result.row_count, 85)
   assert.equal(result.request_count, 1)
-  assert.equal(result.findings.length, 1)
+  assert.equal(result.findings.length, 2)
   const [finding] = findingsFor(result, 'semantic_contract_dead_end')
   assert.equal(finding.request_id, 'req_muxsvx42_1')
   assert.equal(finding.count, 1)
@@ -656,4 +656,41 @@ test('step contracts: a contract call that failed and paused the goal is a findi
   assert.match(findings[0].detail, /could not give step s2 a valid contract \(checkpoint_not_supported:invented_kind; attempts 2; trigger step_close\)/)
   assert.equal(findingsFor(analyzeBehaviorTrace(rows.slice(3)), 'step_contract_unavailable').length, 0, 'a stale call is not a pause')
   assert.match(formatCheckReport(result), /\[step_contract_unavailable\] request_id=req_ct_3 count=1/)
+})
+
+
+test('run C rejected blocker pause is detected independently of semantic-contract and prose heuristics', () => {
+  const rows = [
+    { event: 'outcome.rejected', data: { kind: 'world_blocked', reason_code: 'provider_reported_blocker', rejection_reason: 'world_blocked_without_authoritative_evidence' } },
+    { event: 'outcome.validated', data: { kind: 'recoverable_provider_failure', accepted: true, reason_code: 'provider_reported_blocker', pause_reason: 'recoverable_provider_failure:provider_reported_blocker' } },
+    { event: 'request.completed', data: { outcome: 'recoverable_provider_failure', task_board: { status: 'paused', pause_reason: 'recoverable_provider_failure:provider_reported_blocker' } } },
+  ].map((row, seq) => ({ ...row, seq, request_id: 'req_run_c', actor_id: 20, epoch: 1, ts: `2026-10-13T03:27:0${seq}Z` }))
+  assert.equal(findingsFor(analyzeBehaviorTrace(rows), 'rejected_blocker_pause').length, 1)
+  for (const mutate of [
+    copy => { copy[0].request_id = 'other' },
+    copy => { copy[0].epoch = 2 },
+    copy => { copy[1].actor_id = 21 },
+    copy => { copy[0].data.rejection_reason = 'other' },
+    copy => { copy[2].data.task_board.status = 'active' },
+    copy => { copy[1].data.reason_code = 'provider_timeout' },
+    copy => { copy.reverse().forEach((row, seq) => { row.ts = `2026-10-13T03:28:0${seq}Z` }) },
+  ]) {
+    const copy = structuredClone(rows); mutate(copy)
+    assert.equal(findingsFor(analyzeBehaviorTrace(copy), 'rejected_blocker_pause').length, 0)
+  }
+})
+
+
+test('recorded research blocker chain also reports the rejected-blocker pause independently', async () => {
+  const rows = await loadFixtureRows('luna-research-handoff-paused.jsonl')
+  assert.equal(findingsFor(analyzeBehaviorTrace(rows), 'rejected_blocker_pause').length, 1)
+})
+
+
+test('sanitized October 13 run C trace exposes the previously missed rejected-blocker pause', async () => {
+  const rows = await loadFixtureRows('luna-run-c-rejected-blocker-pause.jsonl')
+  const [finding] = findingsFor(analyzeBehaviorTrace(rows), 'rejected_blocker_pause')
+  assert.equal(finding.request_id, 'req_mv64d4rf_1')
+  assert.equal(finding.count, 1)
+  assert.equal(rows.at(-1).data.task_board.completed_count, 0)
 })

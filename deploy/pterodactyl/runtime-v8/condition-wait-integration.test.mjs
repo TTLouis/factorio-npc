@@ -882,7 +882,7 @@ test('a working machine checkpoint becomes a completion wait instead of a guesse
   assert.equal(mainCalls(), 0)
 })
 
-test('a BLOCKED reply is recorded as a blocker even while the machine works toward the checkpoint', async () => {
+test('an unverified BLOCKED reply neither invents a world blocker nor waits on an unrelated working machine', async () => {
   const { agent, memory } = makeAgent()
   const events = []
   const traceEvent = agent.traceEvent.bind(agent)
@@ -900,19 +900,18 @@ test('a BLOCKED reply is recorded as a blocker even while the machine works towa
     status: 1,
   }, { x: 0, y: 0 }, 'getEntityStatus')
 
-  const result = await agent.commitPlan({
+  await assert.rejects(agent.commitPlan({
     chatMessage: 'BLOCKED: the plates are needed elsewhere and no other iron ore is reachable.',
     plan: ['Smelt required material', 'Craft requested item'],
     currentStep: 1,
     operations: [],
-  })
+  }), /unverified_blocker_recovery_exhausted/)
 
-  // The reply takes the blocker path (outcome authority decides blocked or
-  // paused on its evidence); it is never parked as a wait on the furnace.
+  // The unverified claim fails as controller exhaustion; it never becomes a furnace wait.
   const durable = memory.planByNpc.get('npc:sgluna')
   assert.equal(durable.condition_wait, undefined)
-  assert.ok(['blocked', 'paused'].includes(result.goalStatus), result.goalStatus)
-  assert.equal(durable.status, result.goalStatus)
+  assert.notEqual(durable.status, 'blocked')
+  assert.notEqual(durable.pause_reason, 'recoverable_provider_failure:provider_reported_blocker')
   assert.ok(events.some(entry => entry.event === 'outcome.candidate' && entry.data.kind === 'world_blocked'))
 })
 

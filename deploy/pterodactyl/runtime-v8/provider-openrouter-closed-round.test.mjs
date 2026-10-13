@@ -363,8 +363,7 @@ test('scripted post_step_observe closed round: malformed DSML then the fenced pl
     const { agent, memory, providerCalls, queue } = agentWithScriptedProvider([MALFORMED_DSML, PROSE_THEN_FENCE, followOn, FENCE_ONE, FENCE_TWO], { promptTraceFile })
     const first = await agent.callProvider(await agent.assertCurrent(), agent.generation, { round: 1, allowTools: false, recoveryAttempt: 0 })
     assert.throws(() => agent.parsePlanMessage(first), error => error.code === 'dsml_malformed')
-    const result = await agent.recoverPlan(agent.generation, new Error(`dsml_malformed: ${NAMED_REJECTION}`), 2)
-    assert.ok(result, 'recovery did not exhaust')
+    await assert.rejects(agent.recoverPlan(agent.generation, new Error(`dsml_malformed: ${NAMED_REJECTION}`), 2), /unverified_blocker_recovery_exhausted/)
     const board = memory.currentPlan('npc:sgluna').task_board
     assert.equal(board.completed_count, 1, 'the nested semanticCompletion closed the grounded active step')
     assert.equal(board.steps[0].status, 'completed')

@@ -529,12 +529,9 @@ test('healthy persistent runtime and explicit truthful blocker do not trigger om
     stateFile: null,
     traceFile: null,
   })
-  const blocked = await blockedAgent.request('use that capability', { sender: 'TTLouis' })
+  await assert.rejects(blockedAgent.request('use that capability', { sender: 'TTLouis' }), /unverified_blocker_recovery_exhausted/)
   assert.equal(blockerCalls, 1)
-  assert.equal(blocked.goalStatus, 'paused')
-  assert.equal(blocked.taskBoard.blocker, '')
-  assert.match(blocked.chatMessage, /recoverable provider failure/i)
-  assert.match(blocked.chatMessage, /required capability is unavailable/)
+  assert.equal(blockedAgent.memory.currentPlan('npc:sgluna').blocker, '')
   assert.equal(blockedAgent.rcon.mutations.length, 0)
 })
 
@@ -849,7 +846,7 @@ test('interrupted omission recovery uses a compact capsule instead of replaying 
       operations: [],
     })
   }
-  const resumed = await agent.request('continue', { sender: 'TTLouis' })
+  await assert.rejects(agent.request('continue', { sender: 'TTLouis' }), /unverified_blocker_recovery_exhausted/)
   const context = resumedMessages.map(message => message.content ?? '').join('\n')
   assert.match(context, /\[ACTION_OMISSION_RECOVERY\]/)
   assert.match(context, /"reason":"action_omission_recovery"/)
@@ -858,11 +855,8 @@ test('interrupted omission recovery uses a compact capsule instead of replaying 
   assert.doesNotMatch(context, /999/)
   assert.match(context, /historical unit_number values are non-executable/)
   assert.match(context, /remaining_steps/)
-  assert.equal(resumed.goalId, goalId)
-  assert.equal(resumed.goalStatus, 'paused')
-  assert.equal(resumed.taskBoard.blocker, '')
-  assert.match(resumed.chatMessage, /recoverable provider failure/i)
-  assert.match(resumed.chatMessage, /required live capability is still unavailable/)
+  assert.equal(memory.currentPlan('npc:sgluna').goal_id, goalId)
+  assert.equal(memory.currentPlan('npc:sgluna').blocker, '')
   assert.equal(rcon.mutations.length, 0)
 })
 
