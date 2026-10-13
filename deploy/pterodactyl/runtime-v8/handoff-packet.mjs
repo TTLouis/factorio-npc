@@ -414,6 +414,10 @@ export function normalizeRecipeFact(raw, { source = 'unknown', tag, limits: over
     ...(typeof raw.allow_intermediates === 'boolean' ? { allow_intermediates: raw.allow_intermediates } : {}),
     categories: [...new Set(asList(raw.categories).map(factName).filter(Boolean))].slice(0, 6),
     ...(energy !== undefined ? { energy } : {}),
+    // The live game's own answer to "can the character hand-craft this recipe's category" (getRecipeDetails
+    // hand_craftable_category). Absent when the read did not say: the batch stock ledger then does not assume either way.
+    ...(typeof raw.hand_craftable === 'boolean' ? { hand_craftable: raw.hand_craftable } : {}),
+    ...Object.fromEntries(['enabled', 'hidden', 'hidden_from_player_crafting', 'allow_as_intermediate', 'allow_intermediates'].filter(key => typeof raw[key] === 'boolean').map(key => [key, raw[key]])),
     ingredients: ingredients.slice(0, limits.recipeIngredients),
     products: products.slice(0, limits.recipeProducts),
     machines: machines.slice(0, limits.recipeMachines),
@@ -442,6 +446,12 @@ export function recipeFactsFromDetails(parsed, { tag, limits } = {}) {
       allow_intermediates: entry?.allow_intermediates,
       energy: entry?.energy,
       categories: entry?.categories,
+      hand_craftable: entry?.hand_craftable_category,
+      enabled: entry?.enabled,
+      hidden: entry?.hidden,
+      hidden_from_player_crafting: entry?.hidden_from_player_crafting,
+      allow_as_intermediate: entry?.allow_as_intermediate,
+      allow_intermediates: entry?.allow_intermediates,
       ingredients: entry?.ingredients,
       products: entry?.products,
       machines: asList(entry?.crafting_machines),
@@ -459,6 +469,7 @@ export function recipeFactFromRequiresMachine(facts, { tag, limits } = {}) {
     name: recipe.name,
     energy: recipe.energy,
     categories: recipe.categories,
+    hand_craftable: facts?.hand_craftable === false ? false : undefined,
     ingredients: recipe.ingredients,
     products: recipe.products,
     machines: asList(facts?.machines?.candidates),
@@ -476,6 +487,7 @@ export function mergeRecipeFact(existing, incoming) {
     machines: incoming.machines.length > 0 ? incoming.machines : existing.machines,
     machines_truncated: incoming.machines.length > 0 ? incoming.machines_truncated : existing.machines_truncated,
     categories: incoming.categories.length > 0 ? incoming.categories : existing.categories,
+    ...(incoming.hand_craftable === undefined && existing.hand_craftable !== undefined ? { hand_craftable: existing.hand_craftable } : {}),
   }
 }
 
@@ -652,7 +664,7 @@ function researchRecords(paths) {
 }
 
 // The recipe the derivation may use to make `item`: one deterministic, complete recipe with a certain item output.
-function expandableRecipe(item, recipes) {
+export function expandableRecipe(item, recipes) {
   const candidates = recipes.filter(recipe => recipe.complete && recipe.products.some(product => product.name === item && product.type === 'item'))
   const chosen = candidates.length === 1 ? candidates[0] : candidates.find(recipe => recipe.name === item)
   if (!chosen) return undefined

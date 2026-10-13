@@ -132,7 +132,7 @@ function refusalLiterals(text) {
   return found
 }
 
-for (const [file, minimum] of [['npc-agent-loop.mjs', 6], ['canonical-task-board-memory.mjs', 1]]) {
+for (const [file, minimum] of [['npc-agent-loop.mjs', 6], ['canonical-task-board-memory.mjs', 1], ['batch-stock.mjs', 2]]) {
   test(`every refusal literal built in ${file} declares its refusal_class`, () => {
     const text = readFileSync(new URL(`./${file}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n')
     const refusals = refusalLiterals(text)

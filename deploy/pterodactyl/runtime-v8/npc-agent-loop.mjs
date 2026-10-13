@@ -48,6 +48,7 @@ import {
 } from './handoff-packet.mjs'
 import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CLASS, REPLACEMENT_DECISION } from './authorization.mjs'
 import { REFUSAL_CLASS, refusalClassLabel, refusalClassOf } from './refusal-class.mjs'
+import { batchStockDecision, batchStockOperationLines, evaluateBatchStock, stockClaimingOperation } from './batch-stock.mjs'
 import {
   blockerFacts,
   blockerWorldEvidence,
@@ -330,24 +331,21 @@ function latestTransferSupplyExecutionRecovery(state) {
 
 // The mod's held-item preflight for place_entity / place_candidate (what the character holds at admission time).
 const PLACEMENT_ITEM_MISSING_CODE = 'placement_item_missing'
-const SUPPLY_TO_ACTOR_OPERATIONS = new Set(['mine_entity', 'mine_entity_exact', 'recover_corpse'])
+// Preflight rejections about the actor's own stock. They are read against the inventory NOW, before an earlier operation of the
+// same batch ran, so they are held back from the per-operation rejection and settled by the batch stock ledger (batch-stock.mjs):
+// supplied by an earlier operation, or not.
+const BATCH_STOCK_SETTLED_CODES = new Set(['supply_missing', PLACEMENT_ITEM_MISSING_CODE, 'bootstrap_dependency_unresolved'])
 
-// Could an earlier operation of the same batch put `item` into the NPC inventory (supply_missing), give an empty source
-// something to take (extraction_empty), or free room at the same destination (destination_full)? When it could, the
-// preflight rejection is only a snapshot taken before that operation runs, so the decision is deferred to execution,
-// whose own checks stay authoritative. Deliberately lenient and deterministic: it never asserts the supply is enough.
+// Could an earlier operation of the same batch give an empty source something to take (extraction_empty), or free room at the
+// same destination (destination_full)? When it could, the preflight rejection is only a snapshot taken before that operation
+// runs, so the decision is deferred to execution, whose own checks stay authoritative. Deliberately lenient and deterministic:
+// it never asserts the supply is enough. (Stock the actor itself must hold is not decided here: the batch stock ledger
+// accounts for it by quantity.)
 function batchSupplierFor(operations, index, status, item, direction, unitNumber) {
   for (let j = 0; j < index; j++) {
     const op = operations[j]
     const args = op?.args ?? {}
-    if (status === 'supply_missing') {
-      if (op?.name === 'craft_item' && args.item_name === item) return j
-      if ((op?.name === 'gather_resource' || op?.name === 'mine_resource_at') && args.resource_name === item) return j
-      if (op?.name === 'harvest_product' && args.product_name === item) return j
-      if (SUPPLY_TO_ACTOR_OPERATIONS.has(op?.name)) return j
-      if ((op?.name === 'move_items_exact' || op?.name === 'move_items') && args.to_entity === false && args.item_name === item) return j
-    }
-    else if (status === 'extraction_empty') {
+    if (status === 'extraction_empty') {
       if (op?.name === 'wait') return j
       if (op?.name === 'move_items_exact' && args.to_entity === true && args.unit_number === unitNumber && args.item_name === item) return j
       if (op?.name === 'supply_entity' && args.unit_number === unitNumber && Array.isArray(args.items) && args.items.some(entry => entry?.item_name === item)) return j
@@ -12122,6 +12120,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   async preflightOperations(operations) {
     const results = []
+    const held = [] // operations rejected on the actor's own stock, settled by the batch stock ledger below
     const memoryKey = this.requestInfo?.memoryKey
     const assertPreflightCurrent = async () => {
       try {
@@ -12154,10 +12153,39 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       await assertPreflightCurrent()
       results.push(result)
+      if (index > 0 && result?.code === 'supply_missing' && result.transfer?.items?.length > 1) {
+        // Source shortage has precedence in the mod's multi-item result. It must not conceal an independent
+        // destination refusal or two item kinds competing for the same sole slot when stock is supplied later.
+        const blocked = result.transfer.items.find(item => item.destination_accepts === 0)
+        const slots = new Map()
+        let conflict = false
+        for (const item of result.transfer.items) {
+          const slot = item.single_slot_destination?.inventory_index
+          if (slot === undefined) continue
+          if (slots.has(slot) && slots.get(slot) !== item.item_name) conflict = true
+          slots.set(slot, item.item_name)
+        }
+        if (blocked || conflict) {
+          const code = blocked ? 'destination_full' : 'supply_destination_conflict'
+          const failure = new AgentLoopError(`Operation preflight rejected operation ${index + 1} (${operations[index].name}): ${code}`)
+          failure.preflight = { ...result, code, operation_index: index }
+          failure.preflightResults = results.slice()
+          throw failure
+        }
+      }
+      if (index > 0 && result?.ok !== true && BATCH_STOCK_SETTLED_CODES.has(result?.code)
+        && (result.code !== PLACEMENT_ITEM_MISSING_CODE || typeof result.placement_item?.item_name === 'string')) {
+        // The mod answers from the inventory as it is NOW. What an earlier operation of this batch crafts, gathers or takes out of
+        // a machine has not happened yet, and what an earlier operation uses up is still in the inventory. The rejection is held
+        // for the batch stock ledger, which replays the whole batch over the observed stock after every operation was preflighted.
+        // (Nothing runs before the first operation, so a rejection there stands as the mod gave it.)
+        held.push(index)
+        continue
+      }
       if (result?.ok !== true && TRANSFER_SUPPLY_PREFLIGHT_CODES.has(result?.code)) {
-        // The mod answers from the world as it is NOW. An earlier operation of this batch that could supply the item
-        // (a craft, a gather, an extraction) has not run yet, so the transfer is accepted with its dependency recorded
-        // and the execution-time checks decide.
+        // An empty extraction or a full destination can also be a snapshot taken before an earlier operation of this batch
+        // (a wait, a supply into the same unit, an extraction at the same unit) changes it: the transfer is accepted with its
+        // dependency recorded and the execution-time checks decide.
         const dependencies = transferBatchDependency(operations, index, result)
         if (dependencies) {
           results[results.length - 1] = { ...result, ok: true, deferred: 'batch_dependency', dependencies }
@@ -12174,28 +12202,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           continue
         }
       }
-      if (result?.ok !== true && result?.code === PLACEMENT_ITEM_MISSING_CODE) {
-        // Same snapshot rule for a placement: the mod reads the items held NOW. An earlier operation of this batch that could
-        // supply the placement item (a craft of it, an extraction, a mining yield) has not run yet, so the placement is
-        // accepted with its dependency recorded and the execution-time held-item check stays authoritative.
-        const item = result.placement_item?.item_name
-        const supplier = typeof item === 'string' ? batchSupplierFor(operations, index, 'supply_missing', item) : undefined
-        if (supplier !== undefined) {
-          const dependencies = [{ item_name: item, status: PLACEMENT_ITEM_MISSING_CODE, operation_index: supplier, operation: operations[supplier]?.name }]
-          results[results.length - 1] = { ...result, ok: true, deferred: 'batch_dependency', dependencies }
-          await this.traceEvent('placement.preflight_item_deferred', {
-            request_id: this.traceRequest?.id,
-            step_id: this.memory.currentPlan?.(memoryKey)?.task_board?.active_step_id,
-            operation_index: index,
-            operation: operations[index].name,
-            code: result.code,
-            reason: 'earlier_operation_in_batch_could_supply',
-            dependencies,
-            placement_item: result.placement_item,
-          })
-          continue
-        }
-      }
       if (result?.ok !== true) {
         const failure = new AgentLoopError(`Operation preflight rejected operation ${index + 1} (${operations[index].name}): ${result?.code ?? 'unknown_preflight_failure'}`)
         failure.preflight = { ...result, operation_index: index }
@@ -12203,7 +12209,94 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         throw failure
       }
     }
+    await this.settleBatchStock(operations, results, held, assertPreflightCurrent)
     return results
+  }
+
+  // Batch-wide stock accounting (batch-stock.mjs). Each operation was preflighted against the same inventory, so two crafts that
+  // each fit the plates held both passed and the second failed at execution with the first one's effects already in the world.
+  // This replays the ordered batch over the inventory read now, with the recipe facts of the handoff cache, so an earlier
+  // operation both uses stock and supplies it for the later ones. It is the one place a held stock rejection is settled:
+  // supplied by an earlier operation of the batch (accepted, dependency traced), proven short because of the batch (refused
+  // before admission, class argument), or short with nothing in the batch bearing on it (the mod's own rejection stands).
+  // Only a shortage the ledger can prove is refused; anything it cannot account for leaves the execution-time checks authoritative.
+  async settleBatchStock(operations, results, heldIndexes, assertPreflightCurrent) {
+    const held = new Set(heldIndexes)
+    if (held.size === 0 && operations.filter(operation => stockClaimingOperation(operation?.name)).length < 2) return
+    const memoryKey = this.requestInfo?.memoryKey
+    const trace = (event, data) => this.traceEvent(event, {
+      request_id: this.traceRequest?.id,
+      step_id: this.memory.currentPlan?.(memoryKey)?.task_board?.active_step_id,
+      ...data,
+    })
+    const reject = (index) => {
+      const failure = new AgentLoopError(`Operation preflight rejected operation ${index + 1} (${operations[index].name}): ${results[index]?.code ?? 'unknown_preflight_failure'}`)
+      failure.preflight = { ...results[index], operation_index: index }
+      failure.preflightResults = results.slice()
+      return failure
+    }
+    // The recipes of every crafted item (and what they are made of) are read once and kept in the handoff recipe cache.
+    let recipeReads = 0
+    const roots = [...new Set(operations.filter(operation => operation?.name === 'craft_item' && typeof operation.args?.item_name === 'string').map(operation => operation.args.item_name))]
+    if (roots.length > 0) {
+      await assertPreflightCurrent()
+      try {
+        recipeReads = (await this.prefetchRecipeClosure({ roots: roots.map(item => ({ item })), fence: this.epoch })).reads
+      }
+      catch (error) {
+        if (error?.handoffFence) throw error
+        recipeReads = error?.recipePrefetch?.reads ?? 0
+      }
+    }
+    await assertPreflightCurrent()
+    let inventory
+    try {
+      inventory = parseInventoryCounts(String(await this.rcon.command(this.observationToolCommand('getInventoryItems', {}))))
+    }
+    catch {}
+    await assertPreflightCurrent()
+    if (!inventory) {
+      await trace('operations.batch_stock_checked', { reason: 'inventory_unavailable', ops: operations.slice(0, 16).map((operation, index) => ({ index, operation: operation?.name })), short: [], deferred_by_earlier_op: [], unaccounted: [], recipe_reads: recipeReads })
+      if (held.size > 0) throw reject(Math.min(...held))
+      return
+    }
+    const report = evaluateBatchStock({ operations, preflight: results, inventory, recipes: [...this.handoffRecipeFacts.values()], noRecipeItems: this.handoffNoRecipeItems })
+    const decision = batchStockDecision(report, held)
+    await trace('operations.batch_stock_checked', {
+      reason: decision.reason,
+      ops: batchStockOperationLines(report),
+      short: report.short.slice(0, 8),
+      deferred_by_earlier_op: report.deferred_by_earlier_op.slice(0, 8),
+      unaccounted: report.unaccounted.slice(0, 8),
+      refused: decision.action === 'refuse' ? decision.refusal.code : undefined,
+      recipe_reads: recipeReads,
+    })
+    if (decision.action === 'standalone') throw reject(decision.operation_index)
+    if (decision.action === 'refuse') {
+      const failure = new AgentLoopError(`Batch stock check refused operation ${decision.refusal.operation_index + 1} (${decision.refusal.operation}): ${decision.refusal.code}`)
+      failure.preflight = decision.refusal
+      failure.preflightResults = results.slice()
+      throw failure
+    }
+    // Held rejections the report settles: accepted with what supplies them (or why they are not refusable) recorded.
+    for (const index of [...held].sort((left, right) => left - right)) {
+      const result = results[index]
+      const verdict = report.verdicts[index]
+      if (!verdict.proven || !['covered', 'covered_by_earlier_op'].includes(verdict.status)) throw reject(index)
+      const supplied = verdict.status === 'covered_by_earlier_op'
+      const dependencies = verdict.dependencies.map(entry => ({ ...entry, status: result.code }))
+      const reason = supplied ? 'earlier_operation_in_batch_supplies_item' : verdict.status === 'covered' ? 'observed_stock_covers_item' : 'shortage_not_proven_by_batch_facts'
+      results[index] = { ...result, ok: true, deferred: supplied ? 'batch_dependency' : 'batch_stock_unproven', dependencies }
+      if (result.code === PLACEMENT_ITEM_MISSING_CODE) {
+        await trace('placement.preflight_item_deferred', { operation_index: index, operation: operations[index].name, code: result.code, reason, dependencies, placement_item: result.placement_item })
+      }
+      else if (result.code === 'bootstrap_dependency_unresolved') {
+        await trace('craft.preflight_stock_deferred', { operation_index: index, operation: operations[index].name, code: result.code, reason, dependencies })
+      }
+      else {
+        await trace('transfer.preflight_supply_deferred', { operation_index: index, operation: operations[index].name, code: result.code, reason, dependencies, facts: transferSupplyFacts({ ...result, operation_index: index }) })
+      }
+    }
   }
 
   researchPreflightFacts(preflight) {
@@ -13964,7 +14057,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           const index = Number.isSafeInteger(error.preflight.operation_index) ? error.preflight.operation_index : 0
           this.messages.push({
             role: 'user',
-            content: `[HARNESS] Deterministic preflight rejected operation ${index + 1} (${cleanMemoryText(plan.operations[index]?.name, 80)}) before Autorio admission with code ${error.preflight.code}; no mutation from this batch ran. This is a naming/argument error in the proposed operation, not a world blocker. Correct the prototype, recipe, identity or argument using exact Factorio names already confirmed by observation (observe once if the exact name is unknown), then resubmit the same step. Do not change the plan's steps to avoid the error. Preflight: ${JSON.stringify(error.preflight).slice(0, 600)}`,
+            // A producer may carry its own correction text (the batch stock refusal names the shortage per item).
+            content: typeof error.preflight.correction_message === 'string' ? error.preflight.correction_message : `[HARNESS] Deterministic preflight rejected operation ${index + 1} (${cleanMemoryText(plan.operations[index]?.name, 80)}) before Autorio admission with code ${error.preflight.code}; no mutation from this batch ran. This is a naming/argument error in the proposed operation, not a world blocker. Correct the prototype, recipe, identity or argument using exact Factorio names already confirmed by observation (observe once if the exact name is unknown), then resubmit the same step. Do not change the plan's steps to avoid the error. Preflight: ${JSON.stringify(error.preflight).slice(0, 600)}`,
           })
           return this.runTurn()
         }
