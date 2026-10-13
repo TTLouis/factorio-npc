@@ -1493,6 +1493,7 @@ export async function providerRequest(config, messages, {
     responseContentType = String(response.headers?.get('content-type') ?? '').slice(0, 120)
 
     if (!response.ok) {
+      responseStage = 'reading_error_body'
       const errorBody = await boundedProviderErrorBody(response, 64 * 1024, bytes => { responseBytes = bytes })
       const diagnostics = providerHttpErrorDiagnostics(errorBody.text)
       await traceProviderResult('provider.response_error', {

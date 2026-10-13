@@ -77,7 +77,7 @@ for (const stage of ['waiting_headers', 'reading_body', 'reading_error_body']) {
     const raw = await fsp.readFile(traceFile, 'utf8')
     const failure = raw.trim().split('\n').map(JSON.parse).find(row => row.diagnostic_code === 'provider_timeout')
     assert.equal(failure.request_id, `req_timeout_${stage}`)
-    assert.equal(failure.response_stage, stage === 'reading_error_body' ? 'reading_body' : stage)
+    assert.equal(failure.response_stage, stage)
     assert.equal(failure.response_bytes, stage !== 'waiting_headers' ? Buffer.byteLength(partial) : 0)
     assert.equal(failure.http_status, stage === 'waiting_headers' ? undefined : stage === 'reading_error_body' ? 503 : 200)
     assert.equal(failure.response_content_type, stage !== 'waiting_headers' ? 'application/json' : undefined)
