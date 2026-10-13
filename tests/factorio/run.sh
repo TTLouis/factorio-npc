@@ -112,6 +112,7 @@ lane_offset() {
     trigger-ladder) printf '8' ;;
     entity-observation) printf '9' ;;
     native-admission) printf '10' ;;
+    steam-lab) printf '11' ;;
     *) printf '[npc-test] Unknown lane requested: %s\n' "$1" >&2; return 2 ;;
   esac
 }

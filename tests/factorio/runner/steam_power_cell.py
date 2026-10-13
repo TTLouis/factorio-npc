@@ -33,6 +33,15 @@ Gates (semantic output, never placement alone):
     DRILL        the electric mining drill is `working` in every sample of the
                   measurement window
     ORE          ore in the chest rises at the drill's computed rate
+    LAB_UNPOWERED after the drill/provenance checks, a supplied lab outside
+                  pole coverage accepts research but makes zero progress
+    LAB_RESEARCH one physically placed pole connects that lab to this steam
+                  engine; at speed 1 with zero humans, native automation
+                  research advances in two samples and consumes real science
+
+The lab gate seeds only prerequisite technologies and actor-held items during
+fixture setup. It neither researches the target nor synthesizes electricity.
+This is an exact-layout A1 mechanics proof, not autonomous green-science proof.
 
 Goal conditions (plan 3.7), read through autorio_tools.evaluate_condition, the
 call the harness uses for goal checks:
@@ -98,6 +107,7 @@ from typing import Any
 
 from run import Rcon, connect_with_retry, decode_json, lua_json, remote_call
 from runtime import operation_status_command, wait_until_idle
+from powered_lab_chain import run_powered_lab_chain
 
 NORTH, EAST, SOUTH, WEST = 0, 4, 8, 12
 DIRECTION_VECTORS = {NORTH: (0, -1), EAST: (1, 0), SOUTH: (0, 1), WEST: (-1, 0)}
@@ -138,7 +148,10 @@ ITEMS = [
     ('small-electric-pole', 3),
     ('electric-mining-drill', 1),
     ('wooden-chest', 1),
-    ('coal', COAL + 4),
+    ('coal', COAL + 14),
+    ('lab', 1),
+    ('small-electric-pole', 1),
+    ('automation-science-pack', 10),
 ]
 
 
@@ -336,11 +349,15 @@ def run(client: Rcon, results: Path) -> None:
         # for the NPC's own hand mining (GOAL_HAND_MINED).
         "s.create_entity{name='iron-ore',position={ox+2.5,oy+2.5},amount=50}; "
         'local inv=a.get_main_inventory(); inv.clear(); ' + inserts + ' '
+        "assert(not a.force.technologies.automation.researched,'automation already researched'); "
+        "assert(not a.force.current_research,'fixture would overwrite research'); "
+        "local seeded={}; for _,n in ipairs({'steam-power','electronics','automation-science-pack'}) do "
+        "local t=a.force.technologies[n]; if not t.researched then t.researched=true; seeded[#seeded+1]=n end end; "
         'a.teleport({ox+2.5,oy+0.5}); '
         'local previous_speed=game.speed; game.speed=4; '
         'local natural=s.count_tiles_filtered{name={"water","deepwater"},position={ox,oy},radius=16}; '
         'rcon.print(helpers.table_to_json({ox=ox,oy=oy,force=a.force.name,previous_speed=previous_speed,'
-        'position=a.position,water_tiles_within_16=natural}))',
+        'position=a.position,water_tiles_within_16=natural,seeded_prerequisites=seeded}))',
         'steam power fixture',
     )
     ox, oy = fixture.get('ox'), fixture.get('oy')
@@ -954,6 +971,13 @@ def run(client: Rcon, results: Path) -> None:
             'boiler_coal': window_end['entities']['boiler']['coal'],
             'boiler_burning': window_end['entities']['boiler'].get('burning'),
         }
+        # Run after the drill throughput/provenance canaries: a lab changes
+        # electrical demand, so it must not contaminate their measurement.
+        evidence['powered_lab_chain'] = run_powered_lab_chain(
+            json_command, run_operation, wait_ticks, evaluate, find_actor,
+            actor_id, boiler_unit, engine_unit, pole_b, results,
+        )
+        flush()
     finally:
         # Restore the world even when a gate fails: entities, ore, lake and speed.
         json_command(
@@ -961,6 +985,8 @@ def run(client: Rcon, results: Path) -> None:
             f"game.speed={fixture.get('previous_speed') or 1}; "
             f"local ox={ox}; local oy={oy}; "
             'a.get_main_inventory().clear(); '
+            'a.force.research_queue={}; '
+            + ''.join(f"a.force.technologies['{name}'].researched=false; " for name in fixture['seeded_prerequisites']) +
             'for _,e in pairs(s.find_entities_filtered{area={{ox-24,oy-14},{ox+18,oy+14}}}) do '
             "if e~=a and e.type~='character' then e.destroy() end end; "
             'local tiles={}; for x=ox-24,ox-7 do for y=oy-14,oy+14 do '
