@@ -372,6 +372,29 @@ function detectSemanticContractDeadEnd(rows) {
   }
 }
 
+// Run C: correlate the rejected world claim with its later relabelled pause. Prose is not evidence.
+function detectRejectedBlockerPause(rows) {
+  const terminal = terminalEvent(rows)
+  const pauseReason = 'recoverable_provider_failure:provider_reported_blocker'
+  if (terminal?.event !== 'request.completed' || terminal.data?.task_board?.status !== 'paused'
+    || terminal.data?.task_board?.pause_reason !== pauseReason || terminal.data?.outcome !== 'recoverable_provider_failure') return undefined
+  if (safeInteger(terminal.actor_id) === undefined || safeInteger(terminal.epoch) === undefined) return undefined
+  const sameOwner = row => row.actor_id === terminal.actor_id && row.epoch === terminal.epoch
+  const window = rows.slice(0, rows.lastIndexOf(terminal))
+  const rejected = window.findLastIndex(row => sameOwner(row) && row.event === 'outcome.rejected'
+    && row.data?.kind === 'world_blocked' && row.data?.reason_code === 'provider_reported_blocker'
+    && row.data?.rejection_reason === 'world_blocked_without_authoritative_evidence')
+  if (rejected < 0) return undefined
+  const after = window.slice(rejected + 1)
+  if (after.some(row => sameOwner(row) && ['plan.delegation_committed', 'operations.admit', 'operations.ack', 'step.verified', 'step.semantic_completed'].includes(row.event))) return undefined
+  const validated = after.find(row => sameOwner(row) && row.event === 'outcome.validated'
+    && row.data?.kind === 'recoverable_provider_failure' && row.data?.accepted === true
+    && row.data?.reason_code === 'provider_reported_blocker' && row.data?.pause_reason === pauseReason)
+  if (!validated) return undefined
+  return { count: 1, first_ts: nonEmptyString(window[rejected].ts),
+    detail: 'world_blocked_without_authoritative_evidence was relabelled recoverable_provider_failure:provider_reported_blocker and paused the same request' }
+}
+
 function detectBlockedBeforeMutation(rows) {
   const matches = rows.filter(row => row?.event === 'request.completed' && row?.data?.outcome === 'blocked_before_mutation')
   if (matches.length === 0) return undefined
@@ -696,6 +719,7 @@ function detectJevDecidingSkipUnverified(rows) {
 }
 
 const SIGNATURES = [
+  { id: 'rejected_blocker_pause', label: 'unverified world blocker relabelled as provider pause', detect: detectRejectedBlockerPause },
   { id: 'semantic_contract_dead_end', label: 'delegated semantic contract dead end before gameplay', detect: detectSemanticContractDeadEnd },
   { id: 'executor_research_facts_missing', label: 'paused research step lacks executor research facts', detect: detectExecutorResearchFactsMissing },
   {

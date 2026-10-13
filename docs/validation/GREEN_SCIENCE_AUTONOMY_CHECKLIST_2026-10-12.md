@@ -21,7 +21,7 @@ rules. Those rules are:
   - minimal MW5 recovery;
   - step identity by text;
   - just-in-time step contracts.
-- **This week's port** (units 1, 2a and 2b, pushed; 2c merged and repinned): native admission fixes, power and fluid facts, provider timeout diagnostics, declared refusal classes.
+- **This week's port** (units 1, 2a and 2b, pushed; 2c merged and repinned; unit 3 merged, `572d4600`): native admission fixes, power and fluid facts, provider timeout diagnostics, declared refusal classes, historical water anchors and recipe closure.
 
 ## Checklist
 
@@ -29,10 +29,10 @@ rules. Those rules are:
 |---|---|---|
 | 1 | Unit 2c: refusal classes replace the loop's code lists | Done: merge `e818d83a`, repin `ce4b025e`, gate green, lane PASS |
 | 2 | Unit 2 docs: status doc and port-plan build status (Haiku) | Done (this commit) |
-| 3 | First GPT-6 proxy live run on the current build, cold start, objective "research logistic science" | Waiting for the 5-hour window to pass 60%. Evidence goes in a new `docs/validation/` checkpoint |
-| 4 | Turn each live finding into a design fix plus a static fixture | Pending run 3 |
-| 5 | Unit 3: active-step fact handoff (port plan) | Not started; reprioritize after run 3 |
-| 6 | Unit 4: dependency-aware batch stock accounting | Not started; reprioritize after run 3 |
+| 3 | First GPT-6 proxy live run on the current build, cold start, objective "research logistic science" | Done 2026-10-13 (run c, `572d4600`): paused at step 1 on an unverified copper-ore blocker; see LUNA_GPT6_PROXY_LIVE_RUN_C_2026-10-13.md |
+| 4 | Turn each live finding into a design fix plus a static fixture | In progress: unit 6 raw-leaf acquisition facts; blocker-rejection pause and run-check gap queued |
+| 5 | Unit 3: active-step fact handoff (port plan) | Done: merge `572d4600` (3a water anchors, 3b recipe closure; 3c deferred) |
+| 6 | Unit 4: dependency-aware batch stock accounting | In progress |
 | 7 | Repeat runs (one per window) until green science is researched autonomously, verified from world state and logs | Open |
 
 Acceptance: `logistic-science-pack` researched with `by_script=false`, zero operator operations, zero

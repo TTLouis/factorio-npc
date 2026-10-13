@@ -314,6 +314,47 @@ describe('mining knowledge', () => {
     const recipes = { ...actor(), force: { recipes: {} } } as any
     expect((recipe_details_for_actor(recipes, 'iron-ore') as any).mined_from).toEqual(['iron-ore'])
   })
+
+  it('names the resources an item is mined from in the found answer too, next to recipes that also list it as a product', () => {
+    // The live 2026-10-13 shape: copper-ore has recipes (recycling, asteroid crushing) AND is mined from a resource.
+    const recycling = recipe('copper-ore-recycling', {
+      categories: ['recycling'],
+      energy: 0.0625,
+      ingredients: [{ type: 'item', name: 'copper-ore', amount: 1 }],
+      products: [{ type: 'item', name: 'copper-ore', amount: 1, probability: 0.25 }],
+      hidden_from_player_crafting: true,
+    })
+    const crushing = recipe('advanced-metallic-asteroid-crushing', {
+      categories: ['crushing'],
+      energy: 2,
+      ingredients: [{ type: 'item', name: 'metallic-asteroid-chunk', amount: 1 }],
+      products: [{ type: 'item', name: 'copper-ore', amount: 10 }, { type: 'item', name: 'iron-ore', amount: 5 }],
+    })
+    const copperOre = { ...ironOre, name: 'copper-ore', mineable_properties: { mining_time: 1, products: [{ type: 'item', name: 'copper-ore', amount: 1, probability: 1 }] } }
+    // A resource whose name matches the query but which does not mine into it is not a source of the item.
+    const decoy = { ...ironOre, name: 'copper-ore-decoy', mineable_properties: { mining_time: 1, products: [{ type: 'item', name: 'stone', amount: 1 }] } }
+    ;(globalThis as any).prototypes.get_entity_filtered = (filters: Array<Record<string, unknown>>) => {
+      if (filters[0]?.type === 'resource') return { 'iron-ore': ironOre, 'copper-ore': copperOre, 'copper-ore-decoy': decoy, 'crude-oil': crudeOil }
+      return {}
+    }
+    const actor = {
+      is_valid: true,
+      force: { recipes: { 'copper-ore-recycling': recycling, 'advanced-metallic-asteroid-crushing': crushing } },
+      character: { prototype: { crafting_categories: { crafting: true }, get_crafting_speed: () => 1 } },
+      get_main_inventory: () => ({ get_item_count: () => 0 }),
+      get_craftable_count: () => 0,
+    } as any
+
+    const found = recipe_details_for_actor(actor, 'copper-ore') as any
+    expect(found.found).toBe(true)
+    expect(found.recipes.map((entry: any) => entry.name)).toEqual(['advanced-metallic-asteroid-crushing', 'copper-ore-recycling'])
+    expect(found.mined_from).toEqual(['copper-ore'])
+    // An item no resource mines carries no mined_from, found or not.
+    expect((recipe_details_for_actor(actor, 'metallic-asteroid-chunk') as any).mined_from).toBeUndefined()
+    expect((recipe_details_for_actor({ ...actor, force: { recipes: {} } }, 'iron-plate') as any).mined_from).toBeUndefined()
+    // A fluid resource product counts the same way, deterministically ordered and bounded.
+    expect((recipe_details_for_actor({ ...actor, force: { recipes: {} } }, 'crude-oil') as any).mined_from).toEqual(['crude-oil'])
+  })
 })
 
 describe('entity geometry knowledge', () => {

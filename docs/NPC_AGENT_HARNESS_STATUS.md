@@ -8,6 +8,22 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 13: run C static repairs integrated (gate green, not live-validated)
+
+- **Code.** Unit 6 raw acquisition facts (`ab2290f3`, merge `015c2ab3`) and rejected-blocker recovery/diagnostics (`fdb55d72`, merge `b974dc97`); installer repin `473327a0`.
+- **Result.** Executor handoffs now carry bounded native mining-source observations for missing raw materials, without expanding ore recycling/crushing recipes. Rejected model blockers receive the existing durable recovery attempt instead of being relabelled provider outages. Exhaustion remains explicit and bounded.
+- **Validation.** Combined Docker gate: 2,129 runtime/staging and 1,105 mod tests passed, plus typecheck, Lua build/check, and 9 payload tests. Independent review passed. The revised checker flags the original 99-row run C trace with `rejected_blocker_pause`.
+- **Next.** Unit 4 batch stock and unit 5 powered-lab/research-progress proof remain open. The general observation budget and surface/expansion-aware recipe eligibility still need focused follow-up. No new live run or deployment.
+- **Checkpoint.** [Static follow-up and remaining work](validation/LUNA_RUN_C_STATIC_FOLLOWUP_2026-10-13.md).
+
+## October 13: GPT-6 proxy live run c on `572d4600` (paused on step 1, not green science)
+
+- **Setup.** Cold start, objective "research logistic science", actor 20, zero connected humans, starter kit only. Luna model `gpt-6-luna` through the CLI proxy. Deployment matched the candidate (48 runtime modules, 0 mismatches).
+- **Result.** The planner committed one step: produce 10 copper plates. The executor found no copper ore within radius 32 and had no acquisition fact for it. The model answered BLOCKED. The harness rejected that blocker as unverified, then accepted the same text as `recoverable_provider_failure`, and the goal paused on step 1. No gameplay was executed. About 46 s and 7 Luna calls, no provider errors.
+- **Findings.** Raw leaves lack native acquisition facts. A rejected unverified blocker still pauses autonomy. The executor observation budget ends after 4 reads. Recipe closure carries Space Age recipes into a base-game goal. `run-check` reported no failure signatures for this pause shape.
+- **Next.** Unit 6 (raw-leaf acquisition facts) started 2026-10-13. The blocker-rejection pause and the `run-check` gap are queued. Each finding gets a static fixture before another live run, which waits for the owner's go or the standing allowance window.
+- **Checkpoint.** [Run c](validation/LUNA_GPT6_PROXY_LIVE_RUN_C_2026-10-13.md). Runs a and b were stopped before the goal by provider configuration and have no gameplay evidence.
+
 ## October 12: goal-pursuit native admission fixes ported to OG, unit 1 (static gates and real-engine lane passed, not live-validated)
 
 - **Why.** The owner concluded the direct goal-pursuit loop on 2026-10-12 and chose this harness. Its useful output was the native admission fixes in `packages/autorio`, now ported. The plan and build status are in the [port plan](validation/GOAL_PURSUIT_LESSONS_AND_OG_PORT_PLAN_2026-10-12.md#build-status).
@@ -42,6 +58,15 @@ must not be used to reset current integration.
 - **Installer.** `refusal-class.mjs` is now shipped, so the payload is repinned (`ce4b025e`). The pin check and `build-payload.test.mjs` (9/9) pass.
 - **Gates.** `bash scripts/test-local.sh all` exit 0 on `e818d83a`: 2,098 runtime tests and 124 mod test files. The real-engine `native-admission` lane passed.
 - **Open.** The "nothing found in radius" codes stay `world`. The planner-wake list in `replacement-wake.mjs` and `TRANSFER_SUPPLY_PREFLIGHT_CODES` are hand lists that could later come from the producer. Unit 5 (powered lab with research progress) is still open; the steam-power fixture already exists.
+
+## October 12: port unit 3, active-step fact handoff (merged, gate green, native-admission lane PASS, not live-validated)
+
+- **Water anchors** (3a, `7acf4ccb`). Validated `getFluidSourceTiles` answers become historical anchors for the goal (at most 16, 4000 chars, keyed `surface:x:y`). Executor restages carry them as a `fluid_source_hints` record labelled historical; the model must re-check before placing. An empty or failed read never erases them. Trace: `context.fluid_source_hints_carried`.
+- **Recipe closure** (3b, `7e4cd887`, `645ec17f`, `f0fc5ac8`). At restage the harness reads `getRecipeDetails` for unseen step roots, breadth-first, at most 8 reads per handoff. It never reads during a batch and stays inside the actor/epoch fence. A lab root now yields its circuit and gear crafts. `normalizeRecipeFact` marks a recipe incomplete when an amount is missing or a probability is out of range. The mod's no-recipe answer declares `code: 'no_recipe'`, so the harness no longer matches error text. Trace: `context.recipe_closure_prefetched`.
+- **Not ported, on purpose.** Raw historical entity ids and positions (OG withholds them so stale targets are not reused), and pursuit's reads kept after a refusal.
+- **Deferred.** Fresh reads of known machines at restage (3c), until a steam-chain scenario shows the need.
+- **Gates.** Merge `572d4600`: runtime 2,116/2,116, mod 124/124 files, `native-admission` lane PASS. The installer payload did not change, so no repin.
+- **Live.** No live run has been made on this build. A GPT-6 proxy run was set up on 2026-10-13 (image `572d4600`, isolated project, empty data dir) but stopped before any goal was sent, because the stack read a non-GPT-6 local model setting. No provider calls were made. It waits for the owner to confirm the provider configuration.
 
 ## October 9: step identity by text, just-in-time step contracts (static gates passed, not live-validated)
 

@@ -138,8 +138,6 @@ test('an unhealthy follow flag does not bypass the finite no-operation protectio
   })
 
   await agent.request('follow me', { sender: 'TTLouis' })
-  const result = await agent.completed()
-  assert.match(result.chatMessage, /^\[Plan paused for recoverable provider failure\].*navigation_blocked/i)
-  assert.equal(result.goalStatus, 'paused')
+  await assert.rejects(agent.completed(), /unverified_blocker_recovery_exhausted/)
   assert.equal(agent.memory.currentPlan('npc:sgluna').blocker, '')
 })

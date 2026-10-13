@@ -221,15 +221,8 @@ test('a plain LM-Studio decision with tool_calls:[] on the action-omission-repai
   })
 
   await agent.request('prepare the furnace', { sender: 'TTLouis' })
-  const result = await agent.completed()
-
-  // Processed as the genuine BLOCKED: decision it was, not discarded as a
-  // rejected phantom observation (which would have thrown
-  // provider_action_omission_repair_failed or replaced chatMessage with the
-  // canned "Action-omission repair attempted another observation..." text,
-  // per npc-agent-loop.mjs's recovery.action_omission_observation_rejected
-  // branch, keyed off the same `tool_calls !== undefined` test this fix
-  // addresses).
-  assert.match(result.chatMessage, /furnace already has enough ore/)
-  assert.doesNotMatch(result.chatMessage, /attempted another observation/)
+  await assert.rejects(agent.completed(), /unverified_blocker_recovery_exhausted/)
+  // The normalized decision reached outcome authority; no phantom observation retry occurred.
+  assert.equal(call, 4)
+  assert.equal(agent.memory.currentPlan('npc:sgluna').blocker, '')
 })

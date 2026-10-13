@@ -25,6 +25,8 @@ import {
   rememberFluidHints,
   expandableIngredients,
   recipeKnownForItem,
+  rawLeafFromRecipeDetails,
+  rawLeafSourceFromRead,
 } from './handoff-packet.mjs'
 import {
   applyPlanningEvent,
@@ -1013,4 +1015,28 @@ test('3b: the step contract shape names recipe roots only through inventory_coun
   const needs = stepContractNeeds({ completion_contract: contract })
   assert.deepEqual(needs.roots, [{ item: 'lab', count: 1 }])
   assert.deepEqual(needs.items, ['lab', 'copper-plate'], 'the machine content is a name to count, never a craft root')
+})
+
+
+test('6: mining-source normalization refuses wrong names, errors, partial searches, and malformed coordinates', () => {
+  const empty = { found: false, name: 'copper-ore', max_radius: 1024, searched_radius: 1024, returned_count: 0, matched_count: 0, entities: [] }
+  assert.equal(rawLeafSourceFromRead(empty, 'copper-ore', 1024).state, 'none')
+  for (const answer of [null, 'not json', { ...empty, ok: false }, { ...empty, name: 'iron-ore' },
+    { ...empty, searched_radius: 32 }, { ...empty, max_radius: 32 }, { ...empty, error: 'unavailable' },
+    { ...empty, found: true, returned_count: 1, matched_count: 1, entities: [{ name: 'copper-ore', type: 'resource', position: { x: NaN, y: 1 }, distance: 4 }] }]) {
+    assert.equal(rawLeafSourceFromRead(answer, 'copper-ore', 1024).state, 'failed')
+  }
+  assert.deepEqual(rawLeafFromRecipeDetails({ found: false, code: 'no_recipe', query: 'copper-ore', mined_from: ['copper-ore', 'copper-ore'] }), { item: 'copper-ore', mined_from: ['copper-ore'] })
+  assert.equal(rawLeafFromRecipeDetails({ found: false, query: 'copper-ore', mined_from: ['copper-ore'] }), undefined)
+})
+
+
+test('6: lab-sized recipe arithmetic cannot truncate the separate iron and copper acquisition record', () => {
+  const rows = ['lab', 'electronic-circuit', 'iron-gear-wheel', 'transport-belt', 'copper-cable', 'iron-plate', 'copper-plate', 'iron-ore', 'copper-ore'].map(item => ({ item, required: 100, held: 0, missing: 100, crafts: 100, recipe: item,
+    ...(item.endsWith('-ore') ? { raw: { mined_from: [item], sources: [{ resource: item, state: 'found', x: 192.5, y: 8.5, distance: 192.7, radius: 1024 }], as_of: { epoch: 3 } } } : {}) }))
+  const packet = buildHandoffPacket({ planningState: committedState(), ...ARGS, role: 'executor', executorFacts: { residual: { roots: [{ item: 'lab', count: 1 }], rows } } })
+  const acquisition = packet.text.split('\n').find(line => line.startsWith('raw_leaf_acquisition:'))
+  assert.match(acquisition, /iron-ore missing=100.*nearest=\(192.5,8.5\)/)
+  assert.match(acquisition, /copper-ore missing=100.*nearest=\(192.5,8.5\)/)
+  assert.equal(packet.over_limit, false)
 })
