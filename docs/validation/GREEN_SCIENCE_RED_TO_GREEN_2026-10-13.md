@@ -50,3 +50,7 @@ No autonomous provider run occurred during preparation. All prerequisites for th
 ## Authorized attempt concluded
 
 The separate local Sol overseer (`01a1346a-17b5-72d0-876d-76067d8e3cab`) completed attempt D on candidate `35150fc6`. Current configured Luna model `qwen3-coder-30b-a3b-instruct` was preserved. The only provider request failed with `fetch failed` before a plan or gameplay; a fresh canonical goal exists but no science progress occurred. All49runtime and31mod deployment files matched. Evidence was saved and the isolated stack stopped without a retry. Usage remained76%; this stop was the first-blocker condition, not a preparation usage target. See [attempt D](GREEN_SCIENCE_LIVE_D_2026-10-13.md). No autonomous success is claimed.
+
+## Owner-authorized provider repair and rerun E
+
+The owner authorized diagnosing/fixing the provider and one rerun, keeping the intended current CLI proxy and `gpt-6-luna`, with a 50% hard floor. Attempt D had used stale local LM Studio/Qwen defaults. E's explicit ignored overlay corrected provider routing; authenticated readiness passed, then 12/12 provider requests succeeded with no transport errors. The new cold-world trial mined 10 copper ore and stopped at bounded action-omission recovery exhaustion before smelting. Save/traces are preserved, stack is down, and 73% weekly remained. No further live retry occurred. See [completed rerun E](GREEN_SCIENCE_LIVE_E_2026-10-13.md). The original `.env` was neither read nor rewritten; reproduction uses E's confirmed provider overlay.

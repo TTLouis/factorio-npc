@@ -8,6 +8,13 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 13: CLI-proxy rerun E (transport fixed, copper mined, controller paused)
+
+- **Provider repair.** Attempt D had resolved stale local LM Studio/Qwen settings and failed with connection refused. The owner confirmed the intended CLI proxy with `gpt-6-luna`; rerun E used that configuration, authenticated HTTP 200, and 12 successful responses with zero provider errors. `.env` was not read or edited.
+- **Evidence.** Candidate `05c6c35f`, 49 runtime/staging and 31 mod files matched. Fresh standalone actor 9/epoch 1, zero humans/speed 1, unchanged starter procedure. Luna mined 10 copper ore natively.
+- **First blocker.** No next smelting/acquisition action after mining; bounded fresh-context/action-omission recovery exhausted and the controller paused (`provider_action_omission_repair_failed`). No copper plate, red science or green research completion. Trial concluded, save/traces preserved, stack down, no further retry. Usage remained 73%, above the 50% floor.
+- **Checkpoint.** [Provider repair and completed rerun E](validation/GREEN_SCIENCE_LIVE_E_2026-10-13.md).
+
 ## October 13: authorized green-science attempt D (provider failure, no gameplay)
 
 - **Candidate/deployment.** Clean pushed HEAD `35150fc61244d25a1992f50025d3e824ddf19b08` (reviewed code `16138b9a`) built with `-NoEnvUpdate`. All 49 shipped runtime/staging modules matched candidate source after CR normalization; all 31 active mod files matched the release.
