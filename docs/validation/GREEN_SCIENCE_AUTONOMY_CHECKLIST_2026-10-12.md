@@ -21,14 +21,14 @@ rules. Those rules are:
   - minimal MW5 recovery;
   - step identity by text;
   - just-in-time step contracts.
-- **This week's port** (units 1, 2a and 2b, pushed): native admission fixes, power and fluid facts, provider timeout diagnostics.
+- **This week's port** (units 1, 2a and 2b, pushed; 2c merged and repinned): native admission fixes, power and fluid facts, provider timeout diagnostics, declared refusal classes.
 
 ## Checklist
 
 | # | Item | Status |
 |---|---|---|
-| 1 | Unit 2c: refusal classes replace the loop's code lists | Reviewed, follow-up in progress (`invalid_name`, `unknown_technology` → argument; guard regex). Then merge, gate, lane, **installer repin** (`refusal-class.mjs` is now copied), push |
-| 2 | Unit 2 docs: status doc and port-plan build status (Haiku) | Pending |
+| 1 | Unit 2c: refusal classes replace the loop's code lists | Done: merge `e818d83a`, repin `ce4b025e`, gate green, lane PASS |
+| 2 | Unit 2 docs: status doc and port-plan build status (Haiku) | Done (this commit) |
 | 3 | First GPT-6 proxy live run on the current build, cold start, objective "research logistic science" | Waiting for the 5-hour window to pass 60%. Evidence goes in a new `docs/validation/` checkpoint |
 | 4 | Turn each live finding into a design fix plus a static fixture | Pending run 3 |
 | 5 | Unit 3: active-step fact handoff (port plan) | Not started; reprioritize after run 3 |

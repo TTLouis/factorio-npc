@@ -29,6 +29,20 @@ must not be used to reset current integration.
 - **Rock fix** (`db8bfae0`). The lane found that Factorio sets `is_building` on every simple-entity, so the harvest guard had excluded map rocks. The pursuit source had the same bug. The guard now excludes only placed buildings (with an owner or a placing item).
 - **Open.** Units 2–5 of the port plan.
 
+## October 12: port unit 2, facts, diagnostics and refusal classes (merged, gate green, native-admission lane PASS, not live-validated)
+
+- **Facts** (2a, merge `175cde97`). `getEntityStatus` reports `status_name`, `energy_source`, `energy` and `electric_network_id` for machines. A new bounded tool, `getFluidSourceTiles`, reads fluid terrain; the tool contract golden is updated. A wrong entity name is refused as `unknown_entity_prototype`. Traces: `observation.fluid_sources_observed` and `observation.entity_read_refused`.
+- **Seam fix.** `supervisor-adapter.mjs` `transformNearbyEntities` used to turn an `ok:false` refusal into an empty scan. It now forwards `ok:false` unchanged.
+- **Provider timeout diagnostics** (2b, merge `7b23ae71`, `a8021ed5`). Timeout traces carry `response_stage`, `response_bytes`, `http_status` and `response_content_type`. The `reading_error_body` stage is real.
+- **Refusal classes** (2c, commits `f01225e9` `ab39ab76` `1cd94b4c` `35c0f5d5` `1d81df66`, merge `e818d83a`).
+  - Every mod preflight refusal declares a class from the closed set `argument | authority | prerequisite | world`. The registry is `packages/autorio/src/refusal_classes.ts`, stamped in `autorio_preflight.operation`. Admission codes declare theirs through `ADMISSION_REFUSAL_CLASS` in `authorization.mjs`. The shared set is `deploy/pterodactyl/runtime-v8/refusal-class.mjs`.
+  - The OG loop chooses recovery by declared class. `argument` gets the one bounded correction turn; the others go through `blocked_preflight` and MW5. A missing or unknown class fails closed to `world` and emits `operations.preflight_unclassified`.
+  - `invalid_name` and `unknown_technology` are now `argument`.
+  - A static guard test fails if any refusal literal in the mod lacks a class. This removes a bug class instead of growing a list.
+- **Installer.** `refusal-class.mjs` is now shipped, so the payload is repinned (`ce4b025e`). The pin check and `build-payload.test.mjs` (9/9) pass.
+- **Gates.** `bash scripts/test-local.sh all` exit 0 on `e818d83a`: 2,098 runtime tests and 124 mod test files. The real-engine `native-admission` lane passed.
+- **Open.** The "nothing found in radius" codes stay `world`. The planner-wake list in `replacement-wake.mjs` and `TRANSFER_SUPPLY_PREFLIGHT_CODES` are hand lists that could later come from the producer. Unit 5 (powered lab with research progress) is still open; the steam-power fixture already exists.
+
 ## October 9: step identity by text, just-in-time step contracts (static gates passed, not live-validated)
 
 - **Execution-draft wording** (`81ac9958`, owner OK). Planner prompts say every execution step is deterministic.
