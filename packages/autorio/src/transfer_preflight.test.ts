@@ -601,7 +601,7 @@ describe('operation_preflight wiring (autorio_preflight.operation)', () => {
     expect(preflight('harvest_product', { product_name: 'not-an-item' })).toMatchObject({ ok: false, code: 'unknown_prototype', refusal_class: 'argument' })
     expect(preflight('harvest_product', { product_name: 'stone', search_radius: 0 })).toMatchObject({ ok: false, code: 'invalid_harvest_search_radius', refusal_class: 'argument' })
     expect(preflight('move_items_with_player', { player_name: '' })).toMatchObject({ ok: false, code: 'player_unavailable', refusal_class: 'world' })
-    expect(preflight('research_technology', { technology_name: 42 })).toMatchObject({ ok: false, code: 'invalid_name', refusal_class: 'world' })
+    expect(preflight('research_technology', { technology_name: 42 })).toMatchObject({ ok: false, code: 'invalid_name', refusal_class: 'argument' })
     expect(preflight('craft_item', { item_name: 42 })).toMatchObject({ ok: false, code: 'unknown_recipe', refusal_class: 'argument' })
     expect(preflight('walk_to_position', null as any)).toMatchObject({ ok: false, code: 'invalid_preflight_args', refusal_class: 'argument' })
     expect(preflight('rotate_entity', { unit_number: 'x' })).toMatchObject({ ok: false, code: 'invalid_unit_number', refusal_class: 'argument' })
