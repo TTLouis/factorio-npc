@@ -612,8 +612,8 @@ async function main() {
     assert.equal(sources.candidates, undefined)
     const sampleList = `{${sources.samples.map(row => `{name="${row.name}",x=${row.position.x},y=${row.position.y}}`).join(',')}}`
     const sampleCheck = await lua(`local bad={}; for _,p in pairs(${sampleList}) do local t=a.surface.get_tile(p.x,p.y); `
-      + 'if t.name~=p.name or not t.prototype.fluid or t.prototype.fluid.name~="water" then table.insert(bad,p) end end; rcon.print(helpers.table_to_json({bad=bad}))')
-    assert.deepEqual(sampleCheck.bad, [], 'every returned sample is a real water tile on the actor surface')
+      + 'if t.name~=p.name or not t.prototype.fluid or t.prototype.fluid.name~="water" then table.insert(bad,p) end end; rcon.print(helpers.table_to_json({bad_count=#bad}))')
+    assert.equal(sampleCheck.bad_count, 0, 'every returned sample is a real water tile on the actor surface')
     const final = await lua('local s=a.surface; local chunks=0; for c in s.get_chunks() do chunks=chunks+1 end; local o=remote.call("autorio_operations","status"); local d=remote.call("autorio_operation_admission","status"); '
       + 'local r={chunks=chunks,inventory=a.get_inventory(defines.inventory.character_main).get_contents(),position={x=a.position.x,y=a.position.y},high_water=d.high_water,tasks_added=o.tasks_added,queue_length=o.queue_length,task_state=o.task_state,humans=#game.connected_players,speed=game.speed}; '
       + 's.set_tiles(storage.native_admission_fluid_tiles,false,false,false,false); local restored=true; for _,t in pairs(storage.native_admission_fluid_tiles) do if s.get_tile(t.position).name~=t.name then restored=false end end; '
