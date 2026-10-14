@@ -88,7 +88,7 @@ test('a missing or unknown pause class reads as unclassified and never as an aut
 
 test('the hourly request budget error carries its transport subkind where it is raised', async t => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-pause-class-'))
-  t.after(() => fsp.rm(dir, { recursive: true, force: true }))
+  t.after(() => fsp.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 }))
   const file = path.join(dir, 'provider-budget.json')
   await reserveBudget(file, 1, 1000)
   const failure = await reserveBudget(file, 1, 2000).then(() => undefined, error => error)
@@ -340,7 +340,7 @@ const recoveryRows = (events, name) => events.filter(row => row.event === name).
 
 async function scheduledRunE(t, options = {}) {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-pause-class-resume-'))
-  t.after(() => fsp.rm(dir, { recursive: true, force: true }))
+  t.after(() => fsp.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 }))
   const stateFile = path.join(dir, 'npc-state.json')
   const scenario = await runEScenario({ stateFile, ...options })
   assert.match(scenario.failure?.message ?? '', /provider_action_omission_repair_failed/)
