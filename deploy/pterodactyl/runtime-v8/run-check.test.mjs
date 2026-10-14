@@ -731,3 +731,41 @@ test('an exhausted automatic resume is a finding that names the limit', async ()
   assert.equal(finding.count, 1)
   assert.match(finding.detail, /goal limit; step 1\/2, goal 6\/6; step_id=step_1/)
 })
+
+test('run F trace: a transport failure at goal intake is a finding only until an intake retry is scheduled', async () => {
+  const rows = await loadFixtureRows('luna-run-f-intake-transport.jsonl')
+  // The trace as run F wrote it: nothing kept the objective, so the failure stands.
+  const bare = analyzeBehaviorTrace(rows)
+  const [finding] = findingsFor(bare, 'request_failed_unrecoverable')
+  assert.equal(finding.request_id, 'req_mv7vuqp4_1')
+  assert.match(finding.detail, /recoverable=false \(stage runtime\): fetch failed/)
+  assert.equal(findingsFor(bare, 'intake_retry_exhausted').length, 0)
+
+  const row = (event, data, ts) => ({ schema: 1, ts, seq: 0, event, request_id: 'req_mv7vuqp4_1', actor_id: 11, epoch: 1, data })
+  const scheduled = row('recovery.intake_retry_scheduled', {
+    request_id: 'req_mv7vuqp4_1', reason: 'transport_failure_at_intake', attempt: 1, limit: 6, delay_ms: 30000, transport_subkind: 'transport', cause_code: 'ENOTFOUND',
+  }, '2026-10-14T09:03:48.050Z')
+  const kept = analyzeBehaviorTrace([...rows, scheduled])
+  assert.deepEqual(kept.findings.map(item => item.signature), [], 'a request.failed with a scheduled intake retry is not a finding')
+  const [info] = kept.informational.filter(item => item.signature === 'intake_retry_scheduled')
+  assert.equal(info.request_id, 'req_mv7vuqp4_1')
+  assert.match(info.detail, /cause ENOTFOUND; attempt 1\/6/)
+
+  // A cancelled retry (the player took over) is also a decision, not a finding.
+  const cancelled = row('recovery.intake_retry_cancelled', { request_id: 'req_mv7vuqp4_1', reason: 'player_request', attempt: 1 }, '2026-10-14T09:04:00.000Z')
+  assert.deepEqual(analyzeBehaviorTrace([...rows, scheduled, cancelled]).findings, [])
+
+  // The exhausted retry is the finding, once.
+  const exhausted = row('recovery.intake_retry_exhausted', {
+    request_id: 'req_mv7vuqp4_1', reason: 'retry_limit_reached', attempt: 6, limit: 6, transport_subkind: 'transport', cause_code: 'ENOTFOUND',
+  }, '2026-10-14T09:20:00.000Z')
+  const spent = analyzeBehaviorTrace([...rows, exhausted])
+  assert.deepEqual(spent.findings.map(item => item.signature), ['intake_retry_exhausted'])
+  assert.match(spent.findings[0].detail, /exhausted after 6\/6 attempts \(transport, cause ENOTFOUND\)/)
+
+  // Any other recoverable=false failure keeps the old finding, even with an unrelated scheduled retry elsewhere.
+  const other = rows.map(item => (item.event === 'request.failed' ? { ...item, data: { ...item.data, message: 'executor_stale_step: choose new operations', cause_code: undefined, pause_class: undefined, transport_subkind: undefined } } : item))
+  assert.equal(findingsFor(analyzeBehaviorTrace(other), 'request_failed_unrecoverable').length, 1)
+  const elsewhere = { ...scheduled, request_id: 'req_other_1' }
+  assert.equal(findingsFor(analyzeBehaviorTrace([...other, elsewhere]), 'request_failed_unrecoverable').length, 1)
+})
