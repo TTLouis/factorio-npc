@@ -605,3 +605,11 @@ test('a user pause over a transport or model_recoverable pause re-pauses as oper
   assert.equal(run.session.modelResume, null)
   assert.equal(recoveryRows(run.events, 'recovery.auto_resume_cancelled').at(-1).reason, 'operator_pause')
 })
+
+test('a BLOCKED plan is a structural stop: it is never auto-resumed, whatever its pause class says', async t => {
+  const run = await scheduledRunE(t, { mode: 'fail' })
+  run.session.currentPlanState = () => ({ ...run.memory.currentPlan(KEY), status: 'blocked' })
+  assert.equal(await run.session.considerPauseForAutoResume(), null)
+  assert.equal(run.session.modelResume, null)
+  assert.equal(recoveryRows(run.events, 'recovery.auto_resume_scheduled').length, 0)
+})
