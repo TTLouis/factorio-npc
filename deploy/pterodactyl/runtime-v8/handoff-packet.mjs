@@ -89,6 +89,9 @@ export const HANDOFF_DROP_ORDER = Object.freeze([
   // Unit 8: the energy and fuel facts drop before the residual (the production target and its arithmetic) they annotate.
   'machine_energy',
   'fuel_needs',
+  // Unit 14: a placed machine's own inventories (fuel, source, output). They outlast the machine_energy annotation because they
+  // are the live state the step acts on, and drop before the residual arithmetic.
+  'placed_machines',
   'residual_needs',
   // Intentionally after residual_needs (unit 6): acquisition is its own record so the raw-leaf mining sources and nearest
   // locations survive a long intermediate chain being dropped from the arithmetic.
@@ -142,6 +145,9 @@ export const EXECUTOR_FACT_LIMITS = Object.freeze({
   fuelItems: 6,
   fuelChars: 780,
   placedKinds: 64,
+  // Unit 14: placed crafting machines (furnaces, assemblers) whose own fuel/source/output inventories ride in the packet.
+  placedMachines: 3,
+  placedMachineChars: 900,
   fuelSourceCache: 16,
   // Unit 9: entity_count prototypes whose placing item the harness resolves per handoff, natural harvest sources carried per
   // raw leaf, and the lab prototypes a science residual names as its consumer.
@@ -1377,6 +1383,36 @@ function machineRecord(machine, limits) {
   }
 }
 
+const MACHINE_INVENTORY_LABELS = Object.freeze({ fuel: 'machine_fuel', input: 'machine_source', output: 'machine_output' })
+
+function inventoryCountsText(counts) {
+  const entries = Object.entries(counts && typeof counts === 'object' && !Array.isArray(counts) ? counts : {})
+    .filter(([name, count]) => factName(name) && Number.isFinite(count))
+  return entries.length > 0 ? `{${entries.map(([name, count]) => `${name}:${count}`).join(',')}}` : 'empty'
+}
+
+// The machines this harness saw placed, with their OWN fuel, source and output inventories (unit 14). The labels say whose inventory
+// each is: held_counts and fuel_needs describe the ACTOR's stock, never a machine's. An empty inventory is stated as empty, an
+// unread one is not listed, and the number of distinct item types in the source slot is a counted fact (no slot-size claim).
+function placedMachinesRecord(placed, limits) {
+  const entries = asList(placed).filter(entry => factName(entry?.name) && Number.isSafeInteger(entry.unit_number)).slice(0, limits.placedMachines)
+  if (entries.length === 0) return undefined
+  const parts = entries.map((entry) => {
+    const inventories = entry.inventories && typeof entry.inventories === 'object' ? entry.inventories : {}
+    const roles = ['fuel', 'input', 'output'].filter(role => inventories[role] !== undefined)
+      .map(role => `${MACHINE_INVENTORY_LABELS[role]}=${inventoryCountsText(inventories[role])}`)
+    const sourceTypes = inventories.input !== undefined ? ` source_item_types=${Object.keys(inventories.input).length}` : ''
+    const state = entry.state === 'fresh' ? `FRESH as_of=${tagText(entry.as_of)}` : `STALE observed ${tagText(entry.as_of)}, NOT current${entry.reason ? `; ${entry.reason}` : ''}`
+    return `${entry.name} unit=${entry.unit_number} [${state}] working=${entry.working === true}${roles.length > 0 ? ` ${roles.join(' ')}` : ''}${sourceTypes}`
+  })
+  return {
+    key: 'placed_machines',
+    block: 'step',
+    drop: 'placed_machines',
+    text: `placed_machines (machines this harness saw placed; machine_fuel, machine_source and machine_output are the MACHINE's own inventories, NOT the actor's held items in held_counts and fuel_needs; FRESH = live read now, STALE = earlier observation): ${joinBounded(parts, ' | ', limits.placedMachineChars)}`,
+  }
+}
+
 // What a root is for, next to its arithmetic (unit 9): the build it places, or the research whose packs it is.
 function rowPurposeText(row) {
   const parts = []
@@ -1629,6 +1665,8 @@ function executorFactRecords(facts, plan, step, limits) {
   if (machineEnergy) records.push(machineEnergy)
   const fuelNeeds = fuelNeedsRecord(facts.fuel_needs, limits)
   if (fuelNeeds) records.push(fuelNeeds)
+  const placedMachines = placedMachinesRecord(facts.placed_machines, limits)
+  if (placedMachines) records.push(placedMachines)
   asList(facts.recipes).slice(0, limits.recipes).forEach((fact, index) => {
     records.push({ key: `recipe_fact_${index}`, block: 'step', drop: 'recipe_facts', rank: index, text: recipeFactLine(fact, limits.recipeChars) })
   })
@@ -1658,6 +1696,7 @@ function executorFactsSummary(facts, kept) {
       fuel_needs: keys.has('fuel_needs') ? asList(facts.fuel_needs?.items).length : 0,
     } : {}),
     machine: keys.has('checkpoint_machine') ? (facts?.machine?.state ?? 'none') : 'none',
+    ...(asList(facts?.placed_machines).length > 0 ? { placed_machines: keys.has('placed_machines') ? Math.min(asList(facts.placed_machines).length, EXECUTOR_FACT_LIMITS.placedMachines) : 0 } : {}),
     historical_entity_kinds: keys.has('historical_entities') ? asList(facts?.historical_entities).length : 0,
     ...(asList(facts?.fluid_source_hints).length > 0
       ? { fluid_source_hints: keys.has('fluid_source_hints') ? kept.find(record => record.key === 'fluid_source_hints').shown : 0 }
@@ -1684,6 +1723,8 @@ export function executorFactsRefreshMessage(facts, limits = EXECUTOR_FACT_LIMITS
   if (machineEnergy) records.push(machineEnergy)
   const fuelNeeds = fuelNeedsRecord(facts.fuel_needs, limits)
   if (fuelNeeds) records.push(fuelNeeds)
+  const placedMachines = placedMachinesRecord(facts.placed_machines, limits)
+  if (placedMachines) records.push(placedMachines)
   if (records.length === 0) return ''
   return ['[HARNESS] Executor facts refreshed after the batch receipt landed (live reads taken now, same labels as the handoff packet; facts only):', ...records.map(record => record.text)].join('\n')
 }

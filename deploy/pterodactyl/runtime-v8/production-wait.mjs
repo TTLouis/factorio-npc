@@ -132,7 +132,7 @@ export const WAIT_FACT_RADIUS = 32
 const MACHINE_REQUIREMENT_KINDS = new Set(['entity_inventory_count', 'entity_state', 'entity_exists'])
 // Crafting machines (furnace, assembling-machine) share one Factorio 2.0 inventory layout:
 // fuel(1), crafter_input(2), crafter_output(3). The transfer inventory snapshots use the same layout.
-const CRAFTER_TYPES = new Set(['furnace', 'assembling-machine'])
+export const CRAFTER_TYPES = new Set(['furnace', 'assembling-machine'])
 const CRAFTER_INVENTORY_ROLES = Object.freeze({ 1: 'fuel', 2: 'input', 3: 'output' })
 
 export function isWaitOnlyBatch(operations) {

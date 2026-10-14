@@ -181,7 +181,7 @@ import { insertTailBlock } from './prompt-prefix.mjs'
 import { repairControlJson } from './control-json-repair.mjs'
 import { ChatAcknowledger } from './responsiveness.mjs'
 import { UsageLedger } from './usage-ledger.mjs'
-import { checkpointMachineRequirements, checkpointWaitRequirement, compactMachineFacts, compactMachineInventories, conditionEta, conditionWakeCause, freshReadCondition, isWaitOnlyBatch, mostRecentWorkingUnit, safeWaitSchedule, scheduleWait, waitOnlyTicks, WAIT_BASIS, WAIT_FACT_MAX_MACHINES, WAIT_FACT_RADIUS } from './production-wait.mjs'
+import { checkpointMachineRequirements, checkpointWaitRequirement, compactMachineFacts, compactMachineInventories, CRAFTER_TYPES, conditionEta, conditionWakeCause, freshReadCondition, isWaitOnlyBatch, mostRecentWorkingUnit, safeWaitSchedule, scheduleWait, waitOnlyTicks, WAIT_BASIS, WAIT_FACT_MAX_MACHINES, WAIT_FACT_RADIUS } from './production-wait.mjs'
 import {
   combineGroundingWithChallenge,
   ensureGoalRequirements,
@@ -5390,6 +5390,60 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         for (const kind of this.historicalEntityFacts(limits.placedKinds)) placed.set(kind.name, { count: kind.count, via: 'historical_entities' })
         const checkpointName = machine?.facts?.name
         if (typeof checkpointName === 'string' && checkpointName && !placed.has(checkpointName)) placed.set(checkpointName, { count: 1, via: 'checkpoint_machine' })
+      // Unit 14: the machines this harness saw placed, with their OWN fuel, source and output inventories. A fresh read where the
+      // actor can reach the machine, else the inventories as last observed, labelled stale. Bounded; a read that fails is counted.
+      const placedMachines = []
+      const placedStats = { candidates: 0, fresh: 0, stale: 0, unread: 0 }
+      if (!inFlight) {
+        const seenUnits = new Set(machineRequirement ? [machineRequirement.unit_number] : [])
+        const candidates = [...(this.liveEntityObservations?.values?.() ?? [])].reverse().filter((observation) => {
+          if (!CRAFTER_TYPES.has(observation?.type) || !Number.isSafeInteger(observation.unit_number) || seenUnits.has(observation.unit_number)) return false
+          seenUnits.add(observation.unit_number)
+          return true
+        }).slice(0, limits.placedMachines)
+        placedStats.candidates = candidates.length
+        const stale = (known, reason) => {
+          const inventories = known.inventories ? compactMachineInventories({ type: known.type, inventories: known.inventories }) : undefined
+          if (!inventories) { placedStats.unread += 1; return }
+          placedStats.stale += 1
+          placedMachines.push({ unit_number: known.unit_number, name: known.name, working: known.working === true, inventories, state: 'stale',
+            as_of: normalizeFactTag({ tick: known.observed_tick, epoch: this.epoch?.epoch }), reason })
+        }
+        let freshReads = false
+        if (candidates.length > 0 && fence) {
+          try {
+            await this.handoffFenceCheck(fence, 'before')
+            for (const known of candidates) {
+              let facts
+              try {
+                facts = await this.readFreshMachine(known.unit_number, undefined, { wait: { actor_id: fence.actor_id, actor_epoch: fence.epoch } })
+              }
+              catch (error) {
+                if (/epoch changed/i.test(error instanceof Error ? error.message : String(error))) {
+                  const fenced = new AgentLoopError('NPC actor or epoch changed during the executor handoff refresh')
+                  fenced.handoffFence = 'actor_changed_during_handoff_refresh'
+                  throw fenced
+                }
+              }
+              if (facts && !facts.error && facts.inventory_read === 'matched' && facts.inventories) {
+                placedStats.fresh += 1
+                placedMachines.push({ unit_number: known.unit_number, name: facts.name ?? known.name, working: facts.working === true, inventories: facts.inventories, state: 'fresh', as_of: tag })
+              }
+              else stale(known, facts?.error || !facts ? 'fresh_read_failed' : `inventory_${facts.inventory_read ?? 'unread'}`)
+            }
+            await this.handoffFenceCheck(fence, 'during')
+            freshReads = true
+          }
+          catch (error) {
+            if (error?.handoffFence) return { refusal: error.handoffFence, meta }
+            placedMachines.length = 0
+            Object.assign(placedStats, { fresh: 0, stale: 0, unread: 0 })
+          }
+        }
+        if (!freshReads) for (const known of candidates) stale(known, fence ? 'fresh_read_failed' : 'refresh_skipped')
+        meta.placed_machines = placedStats
+      }
+
         machineEnergy = deriveMachineEnergy({ recipes: cached, recipeNames: closureRecipeNames, statuses: machineStatuses, held: fresh, placed, limits })
         fuelNeeds = deriveFuelNeeds({ machineEnergy, fuels: [...this.handoffBurnerFuels.values()], held: fresh, limits })
         // The labs that consume a science research's packs (not crafting machines of any recipe, so appended after the fuel derivation).
@@ -5511,11 +5565,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
       const counts = { items, unavailable, as_of: tag, ...(meta.counts_deferred ? { deferred: meta.counts_deferred } : {}) }
       if (mode === 'refresh') {
-        const any = research.length > 0 || items.length > 0 || unavailable.length > 0 || machine || residual || machineEnergy
-        return { facts: any ? { recipes, counts, machine, residual, research, historical_entities: historical, machine_energy: machineEnergy, fuel_needs: fuelNeeds } : undefined, meta }
+        const any = research.length > 0 || items.length > 0 || unavailable.length > 0 || machine || residual || machineEnergy || placedMachines.length > 0
+        return { facts: any ? { recipes, counts, machine, residual, research, historical_entities: historical, machine_energy: machineEnergy, fuel_needs: fuelNeeds, placed_machines: placedMachines } : undefined, meta }
       }
-      const hasContent = research.length > 0 || recipes.length > 0 || items.length > 0 || unavailable.length > 0 || counts.deferred || machine || residual || machineEnergy || historical.length > 0 || fluidHints.length > 0
-      return { facts: hasContent ? { recipes, counts, machine, residual, research, historical_entities: historical, fluid_source_hints: fluidHints, machine_energy: machineEnergy, fuel_needs: fuelNeeds } : undefined, meta }
+      const hasContent = research.length > 0 || recipes.length > 0 || items.length > 0 || unavailable.length > 0 || counts.deferred || machine || residual || machineEnergy || historical.length > 0 || fluidHints.length > 0 || placedMachines.length > 0
+      return { facts: hasContent ? { recipes, counts, machine, residual, research, historical_entities: historical, fluid_source_hints: fluidHints, machine_energy: machineEnergy, fuel_needs: fuelNeeds, placed_machines: placedMachines } : undefined, meta }
     }
     catch (error) {
       this.log(`[handoff] executor facts failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -5609,7 +5663,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async traceExecutorFactsCarried({ packet, restaged, checkpoint, requestId, meta }) {
     try {
       const summary = packet.executor_facts
-      const factRecord = key => key.startsWith('recipe_fact_') || ['held_counts', 'held_counts_stale', 'checkpoint_machine', 'residual_needs', 'historical_entities', 'fluid_source_hints'].includes(key)
+      const factRecord = key => key.startsWith('recipe_fact_') || ['held_counts', 'held_counts_stale', 'checkpoint_machine', 'residual_needs', 'historical_entities', 'fluid_source_hints', 'placed_machines'].includes(key)
       await this.traceEvent('context.executor_facts_carried', {
         request_id: requestId,
         handoff_id: restaged.handoff_id,
@@ -5684,6 +5738,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
       }
     }
+        placed_machines: summary.placed_machines,
     const key = unitNumber !== undefined
       ? `unit:${unitNumber}`
       : `fallback:${entity.name}:${entity.type ?? 'unknown'}:${position?.x ?? '?'}:${position?.y ?? '?'}`
@@ -5699,6 +5754,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       distance,
       surface,
       surface_index: surfaceIndex,
+          // fuel_held is the ACTOR's stock of burner fuel (held_counts). A placed machine's own fuel is counted in context.placed_machines_carried.
+          fuel_held_scope: 'actor_inventory',
       source,
       working: entity.working === true,
       status: Number.isFinite(entity.status) ? entity.status : undefined,
@@ -5708,6 +5765,20 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       observed_seq: this.worldMutationSeq,
       observed_tick: Number.isSafeInteger(this.lastTaskStatusView?.last_completed_batch?.tick) ? this.lastTaskStatusView.last_completed_batch.tick : undefined,
     })
+      if (meta?.placed_machines && meta.placed_machines.candidates > 0) {
+        await this.traceEvent('context.placed_machines_carried', {
+          request_id: requestId,
+          handoff_id: restaged.handoff_id,
+          checkpoint,
+          candidates: meta.placed_machines.candidates,
+          fresh: meta.placed_machines.fresh,
+          stale: meta.placed_machines.stale,
+          unread: meta.placed_machines.unread,
+          carried: summary.placed_machines ?? 0,
+          dropped_for_size: (packet.dropped ?? []).includes('placed_machines'),
+          reason: 'placed_machine_own_inventories_kept_distinct_from_actor_held_items',
+        }, { requestId })
+      }
   }
 
   recordLiveEntityToolResult(toolName, raw) {
