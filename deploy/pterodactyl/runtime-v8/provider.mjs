@@ -195,7 +195,9 @@ function reasoningBodyPatch(policy, capabilities) {
   if (capabilities.reasoning_effort) {
     patch.reasoning_effort = capabilities.id === 'openai-reasoning'
       ? (policy.effort === 'none' ? 'minimal' : policy.effort === 'max' ? 'high' : policy.effort)
-      : policy.effort
+      : capabilities.reasoning_effort_range === 'low_to_high'
+        ? (policy.effort === 'none' ? 'low' : policy.effort === 'max' ? 'high' : policy.effort)
+        : policy.effort
   }
   if (capabilities.thinking_control === 'deepseek') {
     patch.thinking = { type: policy.effort === 'none' ? 'disabled' : 'enabled' }

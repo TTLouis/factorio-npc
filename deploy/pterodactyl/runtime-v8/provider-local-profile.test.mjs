@@ -74,6 +74,48 @@ test('reasoning control is resolved per model family; today\'s known local famil
   }
 })
 
+test('GPT-6 behind the CLI proxy takes the flat reasoning_effort, limited to low/medium/high', () => {
+  // Owner, 2026-10-14: runs H and I sent no effort to the proxy (provider_has_no_reasoning_control on every call), and
+  // most replies carried 0 reasoning tokens. The per-case policy now reaches this family.
+  for (const model of ['gpt-6-luna', 'gpt-6.1-sol']) {
+    const capability = providerCapabilityProfile(localConfig(model))
+    assert.equal(capability.model_family, 'openai-gpt', model)
+    assert.equal(capability.reasoning_effort, true, model)
+    assert.equal(capability.reasoning_effort_range, 'low_to_high', model)
+    assert.equal(capability.reasoning_field, undefined, model)
+  }
+  assert.equal(providerCapabilityProfile(localConfig('qwen3-coder-30b-a3b-instruct')).reasoning_effort_range, undefined)
+})
+
+test('the per-case reasoning policy drives GPT-6 effort; none and max map into the low-to-high range', async () => {
+  const cases = [
+    [{ triggerSource: 'new_goal' }, 'high', 'plan_authoring'],
+    [{ reasoningBudget: 'normal' }, 'high', 'jev_budget_normal'],
+    [{ triggerSource: 'post_step_continue' }, 'low', 'jev_post_step_continue'],
+    [{ triggerSource: 'step_contract' }, 'low', 'step_contract'],
+    [{ triggerSource: 'interaction_router', interactionRouter: true }, 'low', 'interaction_router'],
+    [{ triggerSource: 'new_goal', recoveryAttempt: 1 }, 'low', 'strict_recovery'],
+  ]
+  for (const [options, wire, reason] of cases) {
+    const captured = []
+    const decisions = []
+    const message = await providerRequest(localConfig('gpt-6-luna'), messages, {
+      fetchImpl: capturingFetch(captured),
+      allowTools: false,
+      onReasoningPolicy: decision => { decisions.push(decision) },
+      ...options,
+    })
+    const [body] = captured
+    assert.equal(body.reasoning_effort, wire, reason)
+    assert.equal(body.reasoning, undefined, reason)
+    assert.equal(body.thinking, undefined, reason)
+    assert.equal(decisions[0].reason, reason)
+    assert.equal(decisions[0].capability_profile, 'local')
+    assert.notEqual(decisions[0].reason, 'provider_has_no_reasoning_control')
+    assert.equal(message._sglunaProvider.requested_reasoning_effort, wire, reason)
+  }
+})
+
 test('the local profile never sends a reasoning field, even when a caller asks for effort', async () => {
   const captured = []
   await providerRequest(localConfig('qwen3-coder-30b-a3b-instruct'), messages, {
