@@ -28,8 +28,9 @@ import {
   restorePlanningState,
   serializePlanningState,
 } from './planning-state.mjs'
+import { analyzeBehaviorTrace } from './run-check.mjs'
 import { executeUiControl, pauseStrandedPlanAfterRequestError, Session, transientProviderFailure } from './supervisor.mjs'
-import { FakeFactorio, gather, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
+import { FakeFactorio, gather, inventoryCheckpoint, planReply, recordingJev } from './task-loop-fixtures.mjs'
 
 const KEY = 'npc:sgluna'
 // The exact failure run E ended on (fixtures/run-check/luna-run-e-action-omission-pause.jsonl).
@@ -284,35 +285,48 @@ function sessionFor(agent, { actor_id: actorId = 18, epoch = 3 } = {}) {
   return { session, chat, logs, queued }
 }
 
-// Run E's shape on a real agent: step 1 verifies, then the next planner call fails with the action-omission exhaustion.
-async function runEScenario({ stateFile, mode }) {
-  const game = new FakeFactorio()
+// The delegation harness of executor-wiring.test.mjs: the real loop, a committed two-step plan, a fresh executor per step.
+const GOAL = { scope: 'long_horizon', summary: 'Launch one rocket from this save.', doneWhen: [{ id: 'rocket', kind: 'rockets_launched', minimum: 1 }] }
+const SHELF = [
+  { id: 'node_power', intent: 'steam power running' },
+  { id: 'node_drill', intent: 'an electric mining drill on iron ore', depends_on: ['node_power'] },
+]
+const TWO_STEPS = ['Gather 10 iron ore', 'Gather 10 copper ore']
+const plannerSlice = () => planReply({ plan: TWO_STEPS, currentStep: 0, operations: [gather('iron-ore', 10)], checkpoint: inventoryCheckpoint('iron-ore', 10), goal: GOAL, roadmap: SHELF })
+// mode 'fail' is run E: the executor answers step 2 with a plan and no operation, again and again, until the repair is exhausted.
+const executorStep = mode => planReply({ plan: TWO_STEPS, currentStep: 1, operations: mode === 'fail' ? [] : [gather('copper-ore', 10)] })
+
+function makeWorld({ game = new FakeFactorio(), stateFile = null, mode = 'fail' } = {}) {
   const memory = new CanonicalTaskBoardMemory()
-  const events = []
-  const state = { mode: mode ?? 'fail' }
+  const trace = []
+  const state = { mode }
+  const jev = recordingJev(async (_state, questions) => (questions.intent ? { overrides: { intent: { choice: 'new_goal', confidence: 0.9 } } } : undefined))
   const agent = new NpcAgentLoop({
     rcon: game,
     memory,
-    provider: async () => {
-      const coalStep = (game.inventory['iron-ore'] ?? 0) >= 10
-      if (!coalStep) {
-        return planReply({ plan: ['Gather 10 iron ore', 'Gather 10 coal'], operations: [gather('iron-ore', 10)], checkpoint: inventoryCheckpoint('iron-ore', 10) })
-      }
-      if (state.mode === 'fail') throw new Error(RUN_E_FAILURE)
-      return planReply({ plan: ['Gather 10 iron ore', 'Gather 10 coal'], currentStep: 1, operations: [gather('coal', 10)] })
-    },
+    provider: async (_messages, context) => (context?.role === 'executor' ? executorStep(state.mode) : plannerSlice()),
     interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
+    interactionDecisionProvider: jev,
+    steeringDecisionProvider: jev,
     systemPrompt: 'pause class auto resume',
+    goalDefinitionPolicy: 'required',
+    maxContinuations: 64,
     stateFile,
     traceFile: null,
     decisionTraceFile: null,
     npcId: 'sgluna',
-    onActivity: (event, data) => events.push({ event, data }),
   })
-  await agent.request('gather iron then coal', { sender: 'Louis' })
-  game.inventory['iron-ore'] = 10
-  const failure = await agent.completed().then(() => undefined, error => error)
-  return { game, memory, agent, events, state, failure }
+  agent.behaviorTrace = { emit: async (record) => { trace.push(record) } }
+  return { game, memory, agent, events: trace, trace, state }
+}
+
+// Run E's shape: step 1 verifies, the executor takes step 2 and never produces an operation.
+async function runEScenario({ stateFile, mode }) {
+  const world = makeWorld({ stateFile, mode })
+  await world.agent.request('get steam power going and run an electric mining drill on iron ore', { sender: 'TTLouis' })
+  world.game.inventory['iron-ore'] = 10
+  const failure = await world.agent.completed().then(() => undefined, error => error)
+  return { ...world, failure }
 }
 
 const recoveryRows = (events, name) => events.filter(row => row.event === name).map(row => row.data)
@@ -367,12 +381,18 @@ test("run E's action-omission pause is declared model_recoverable, scheduled, an
   const restage = run.events.find(row => row.event === 'context.restaged' && row.data.checkpoint === 'C7')
   assert.ok(restage, 'the attempt rebuilt the conversation from a handoff packet')
   assert.match(restage.data.reason, /^recovery:auto_resume_after_model_recoverable_pause/)
+  assert.equal(restage.data.role, 'executor', 'a committed plan is carried by a fresh executor, not the old conversation')
+  assert.equal(restage.request_id, started.request_id, 'the restage belongs to the recovery request the started row names')
   const planAfter = run.memory.currentPlan(KEY)
   assert.equal(planAfter.goal_id, planBefore.goal_id, 'the goal is preserved')
   assert.notEqual(planAfter.status, 'paused')
   assert.equal(run.game.mutations.length, 2, 'the committed step was acted on without a human')
   assert.deepEqual(run.memory.planningState(KEY).plans.map(plan => [plan.plan_id, plan.plan_version]),
     [[correlation.plan_id, correlation.plan_version]], 'no plan was created or replaced')
+  // run-check reads the same rows: the pause was followed by a scheduling decision, so nothing is flagged.
+  const flagged = analyzeBehaviorTrace(run.trace).findings.map(finding => finding.signature)
+  assert.equal(flagged.includes('model_recoverable_pause_not_resumed'), false)
+  assert.equal(flagged.includes('auto_resume_exhausted'), false)
 })
 
 test('a restart mid-backoff keeps the persisted attempt count', async t => {
@@ -387,18 +407,8 @@ test('a restart mid-backoff keeps the persisted attempt count', async t => {
   clearTimeout(run.session.modelResume.timer)
 
   // Restart mid-backoff: a new process loads the same state file. The in-memory timer is gone, the count is not.
-  const events = []
-  const restarted = new NpcAgentLoop({
-    rcon: new FakeFactorio(),
-    memory: new CanonicalTaskBoardMemory(),
-    provider: async () => { throw new Error('inspection only') },
-    systemPrompt: 'pause class auto resume',
-    stateFile: run.stateFile,
-    traceFile: null,
-    decisionTraceFile: null,
-    npcId: 'sgluna',
-    onActivity: (event, data) => events.push({ event, data }),
-  })
+  const world = makeWorld({ stateFile: run.stateFile, mode: 'fail' })
+  const { agent: restarted, events } = world
   await restarted.loadPersistentState()
   assert.equal(restarted.memory.autoResumeAllowance(KEY).step_attempts, 1, 'the count came back from disk')
   assert.equal(restarted.memory.pauseRecord(KEY).pause_class, 'model_recoverable')
@@ -515,22 +525,9 @@ test('a player request or a stop cancels the pending resume', async t => {
 })
 
 async function startedAgent() {
-  const game = new FakeFactorio()
-  const events = []
-  const agent = new NpcAgentLoop({
-    rcon: game,
-    memory: new CanonicalTaskBoardMemory(),
-    provider: async () => planReply({ plan: ['Gather 10 iron ore'], operations: [gather('iron-ore', 10)], checkpoint: inventoryCheckpoint('iron-ore', 10) }),
-    interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
-    systemPrompt: 'pause class never resumes',
-    stateFile: null,
-    traceFile: null,
-    decisionTraceFile: null,
-    npcId: 'sgluna',
-    onActivity: (event, data) => events.push({ event, data }),
-  })
-  await agent.request('gather iron', { sender: 'Louis' })
-  return { agent, events }
+  const world = makeWorld({ mode: 'ok' })
+  await world.agent.request('get steam power going and run an electric mining drill on iron ore', { sender: 'TTLouis' })
+  return { agent: world.agent, events: world.events }
 }
 
 test('authority, operator, system and guard pauses never schedule an automatic resume', async t => {
