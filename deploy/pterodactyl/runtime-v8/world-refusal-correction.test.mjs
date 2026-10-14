@@ -593,6 +593,10 @@ test('unit 13: a repeating executor refusal is bounded end to end: two restages,
   assert.equal(new Set(ends.map(row => row.data.request_id)).size, 3, 'each end belongs to its own request')
   assert.equal(ends.every(row => row.data.pause_class === 'model_recoverable' && row.data.reason === 'argument_refusal_after_retry'), true)
   assert.equal(w.named('operations.blocked_end_paused').length, 0)
+  // Every restaged executor got its own argument correction turn before its refusal ended the request: one per request, three in all.
+  assert.deepEqual(w.named('operations.preflight_recoverable').map(row => row.data.failure_class), Array(3).fill('model_correctable_unknown_prototype'))
+  assert.equal(new Set(w.named('operations.preflight_recoverable').map(row => row.request_id)).size, 3)
+  assert.equal(rows('operations.refusal_budget_reset').length, 2, 'one reset per restage')
 
   // The deadlock detector counts the third identical failure on the step (DEADLOCK_REPEATED_FAILURE_LIMIT = 3: the request plus the two
   // allowed restages) and freezes the plan. That is the end of the bound, and it is one visible guard pause: durable, with the
@@ -624,4 +628,41 @@ test('unit 13: the new reason is a model_recoverable outcome reason with its own
   const outcome = validateOutcomeCandidate({ kind: 'recoverable_provider_failure', source: 'executor_refusal_recovery', reason_code: EXECUTOR_REFUSAL_UNCORRECTED_REASON }, { world: idle })
   assert.equal(outcome.pause_class, 'model_recoverable')
   assert.match(formatTaskCondition(`recoverable_provider_failure:${EXECUTOR_REFUSAL_UNCORRECTED_REASON}`, 'pause').summary, /^Paused: the game refused the planned operation again after a correction/)
+})
+
+test('unit 13: a restaged executor gets its own correction turn with the refusal facts, then its second refusal pauses', async () => {
+  const w = world([], {
+    game: gameRefusing(ARGUMENT_REFUSAL, supplyEntity),
+    provider: async (messages, context) => {
+      if (context?.role !== 'executor') return plannerDraft()
+      return messages.some(message => message.role === 'tool') ? executor(RUN_G_BATCH()) : observation()
+    },
+  })
+  const result = await runToExecutor(w)
+  assert.equal(result.recoverableFailure.reason, EXECUTOR_REFUSAL_UNCORRECTED_REASON)
+  assert.equal(w.named('operations.preflight_recoverable').length, 1, 'the first request spent its one correction turn')
+  assert.equal(w.agent.modelCorrectablePreflightRetries, 1, 'the pause left the budget spent')
+
+  const { session } = sessionFor(w.agent)
+  assert.equal(await session.considerPauseForAutoResume(), true)
+  clearTimeout(session.modelResume.timer)
+  await session.runModelRecoverableResume(session.modelResume.correlation, 1)
+
+  const [started] = w.rows.filter(row => row.event === 'recovery.auto_resume_started')
+  const requestId = started.data.request_id
+  const [reset] = w.named('operations.refusal_budget_reset')
+  assert.equal(reset.data.request_id, requestId)
+  assert.equal(reset.request_id, requestId)
+  assert.equal(reset.data.reason, 'fresh_restage_correction_budget')
+  assert.deepEqual(reset.data.before, { argument_retries: 1, world_correction_retries: 0 })
+  const ofRequest = event => w.named(event).filter(row => row.data.request_id === requestId || row.request_id === requestId)
+  // The restaged executor's first refusal returned the facts to it; its second ended the request.
+  const [correction, ...extra] = ofRequest('operations.preflight_recoverable')
+  assert.equal(extra.length, 0)
+  assert.equal(correction.data.failure_class, 'model_correctable_unknown_prototype')
+  assert.equal(correction.data.retry, 1)
+  const [end] = ofRequest('operations.blocked_end_classified')
+  assert.deepEqual([end.data.pause_class, end.data.reason, end.data.recovery_spent], ['model_recoverable', 'argument_refusal_after_retry', ['argument_retry']])
+  assert.equal(w.memory.pauseRecord(KEY).pause_class, 'model_recoverable')
+  assert.equal(w.memory.currentPlan(KEY).status, 'paused')
 })

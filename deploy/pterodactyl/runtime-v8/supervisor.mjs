@@ -2034,6 +2034,8 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
   if (typeof agent.traceEvent === 'function') {
     agent.traceRequest = { id: recoveryRequestId, seq: 0 }
     await agent.traceEvent('runtime.recovery_started', { reason, details })
+    // A fresh executor context gets its own correction turn for a refusal (unit 13).
+    await agent.resetRefusalRecoveryBudgets?.({ requestId: recoveryRequestId })
   }
   await restageRecoveryConversation(agent, { reason, recoveryMessage })
   if (options.isCancelled?.()) return { recovered: false, reason: 'cancelled_after_fire', state }

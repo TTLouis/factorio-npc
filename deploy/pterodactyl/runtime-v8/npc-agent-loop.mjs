@@ -13290,6 +13290,20 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     })
   }
 
+  // A restage that starts a fresh executor context (supervisor recovery, including an auto-resume) starts its refusal correction budgets
+  // over: the argument retry and the world-correction turn are per executor context, so the restaged executor gets its one correction
+  // turn with the refusal facts. Unit 7's per-step cap and the deadlock limit still bound the total number of restages.
+  async resetRefusalRecoveryBudgets({ requestId } = {}) {
+    const before = { argument_retries: this.modelCorrectablePreflightRetries ?? 0, world_correction_retries: this.worldCorrectionRetries ?? 0 }
+    this.modelCorrectablePreflightRetries = 0
+    this.worldCorrectionRetries = 0
+    await this.traceEvent('operations.refusal_budget_reset', {
+      request_id: requestId ?? this.traceRequest?.id,
+      reason: 'fresh_restage_correction_budget',
+      before,
+    })
+  }
+
   // Which executor recoveries this request already spent on the refusal that ended it (see EXECUTOR_RECOVERY).
   executorRecoveriesSpent(preflight) {
     const spent = []
