@@ -1930,12 +1930,16 @@ export function goalInterruptedBeforeFirstPlan(planning) {
 //   Session.runModelRecoverableResume). options.requestId names the recovery request so the caller's trace rows share it.
 // A model_recoverable resume is a FRESH executor restage: the leftover action-omission repair flags of the failed request are
 // cleared, so the rebuilt handoff packet starts a clean turn instead of inheriting the exhausted repair.
-// options.reactivate ({ pause_classes, identity, required, onResumed }): an automatic resume makes the plan ACTIVE again (the same
+// RULE: the executor is never restaged onto a PAUSED plan. A paused plan is made active first (memory.resumePausedPlan) or the
+//   recovery ends with the plan left paused and the reason traced and returned (`refusal`). A recovery that gives no `reactivate`
+//   gets the default: only a transport pause or a runtime-lifecycle pause (server stop, actor or session replacement) resumes.
+//   An ACTIVE plan (a crash mid-step) is restaged unchanged.
+// options.reactivate ({ pause_classes, identity, actor, onResumed }): an automatic resume makes the plan ACTIVE again (the same
 //   RUN_RESUMED transition a player's continue ends in) before the executor is restaged, because a checkpoint is refused on a paused
 //   plan (checkpoint_requires_active_step, run H). Only a pause of one of `pause_classes` is resumed (memory.resumePausedPlan), after
-//   `isCancelled` was checked with no await in between, so a player stop that already arrived wins. `required` ends the recovery
-//   when the plan cannot be resumed (the model_recoverable path: never restage onto a pause nobody may resume); without it the
-//   recovery goes on as before (the transport path). `onResumed(state)` lets the caller refresh its task-board UI.
+//   `isCancelled` was checked with no await in between, so a player stop that already arrived wins. `actor` ({ actor_id, epoch }) is
+//   what the resume was scheduled under: a different actor or epoch at resume time refuses it (actor_or_epoch_changed).
+//   `onResumed(state)` lets the caller refresh its task-board UI.
 export async function recoverInterruptedAgentPlan(agent, reason, details = {}, options = {}) {
   if (!agent) return { recovered: false, reason: 'agent_unavailable' }
   await agent.loadPersistentState?.()
@@ -1981,19 +1985,26 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
     const paused = await agent.pausePersistentPlan?.(`runtime_recovery_no_active_plan:${uiText(reason, 80)}`, { pause_class: PAUSE_CLASS.GUARD })
     return { recovered: false, reason: 'no_active_plan', paused: paused !== undefined, state: paused ?? state }
   }
-  if (!awaitingNextSlice && options.reactivate && agent.memory?.currentPlan?.(key)?.status === 'paused') {
+  if (!awaitingNextSlice && agent.memory?.currentPlan?.(key)?.status === 'paused') {
+    const reactivate = options.reactivate ?? { pause_classes: [PAUSE_CLASS.TRANSPORT] }
     // No await between this check and the resume: a stop that cancelled the token cannot be undone by it.
     if (options.isCancelled?.()) return { recovered: false, reason: 'cancelled_after_fire', state }
-    const resumed = agent.memory?.resumePausedPlan?.(key, { reason: `auto_resume:${uiText(reason, 80)}`, pauseClasses: options.reactivate.pause_classes ?? [], identity: options.reactivate.identity })
+    const scheduled = reactivate.actor
+    const actorChanged = scheduled && (scheduled.actor_id !== epoch?.actor_id || scheduled.epoch !== epoch?.epoch)
+    const resumed = actorChanged
+      ? { resumed: false, reason: 'actor_or_epoch_changed' }
+      : agent.memory?.resumePausedPlan?.(key, { reason: `auto_resume:${uiText(reason, 80)}`, pauseClasses: reactivate.pause_classes ?? [], identity: reactivate.identity, lifecycle: true })
     if (!resumed?.resumed) {
+      const refusal = resumed?.reason ?? 'plan_resume_unavailable'
       await agent.traceEvent?.('recovery.auto_resume_plan_not_resumed', {
         request_id: recoveryRequestId,
-        reason: resumed?.reason ?? 'plan_resume_unavailable',
+        reason: refusal,
         pause_class: resumed?.pause_class,
         step_id: resumed?.step_id,
         recovery_reason: uiText(reason, 80),
+        ...(actorChanged ? { scheduled_actor_id: scheduled.actor_id, scheduled_epoch: scheduled.epoch, actor_id: epoch?.actor_id, epoch: epoch?.epoch } : {}),
       }, { requestId: recoveryRequestId })
-      if (options.reactivate.required === true) return { recovered: false, reason: 'plan_not_resumable', state: agent.memory?.currentPlan?.(key) ?? state }
+      return { recovered: false, reason: 'plan_not_resumable', refusal, pause_class: resumed?.pause_class, state: agent.memory?.currentPlan?.(key) ?? state }
     }
     else {
       await agent.persistState?.()
@@ -2005,7 +2016,7 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
         goal_id: resumed.state?.goal_id,
         pause_reason: uiText(resumed.pause_reason, 160),
       }, { requestId: recoveryRequestId })
-      await options.reactivate.onResumed?.(resumed.state)
+      await reactivate.onResumed?.(resumed.state)
       if (options.isCancelled?.()) return { recovered: false, reason: 'cancelled_after_fire', state: resumed.state }
     }
   }
@@ -2566,7 +2577,7 @@ export class Session {
       this.queueEvent(() => this.runAutoResume(), { reportError: true })
     }, delayMs)
     timer.unref?.()
-    this.autoResume = { attempt: attempt + 1, kind, timer }
+    this.autoResume = { attempt: attempt + 1, kind, timer, actor: this.currentActorCorrelation() }
     this.log(`Auto-resume ${attempt + 1}/${maxAttempts} scheduled in ${Math.round(delayMs / 1000)} s after transient provider failure (${kind})`)
     await this.printChat(`Paused on a temporary model-provider problem (${kind}). Resuming automatically in ${Math.round(delayMs / 1000)} s (attempt ${attempt + 1}/${maxAttempts}).`)
     return true
@@ -2587,10 +2598,16 @@ export class Session {
       this.clearAutoResume()
       return null
     }
+    // Fenced like the model_recoverable resume: a takeover (a player request, a stop, a UI control) bumps cancelGeneration, and the
+    // job is checked at every await before the plan is made active and again before the executor turn runs.
+    const generation = this.cancelGeneration ?? 0
+    const cancelled = () => (this.cancelGeneration ?? 0) !== generation || this.stopping === true
+    const requestId = `recovery_${Date.now().toString(36)}`
+    const scheduledActor = this.autoResume?.actor
     return this.recoverInterruptedPlan('auto_resume_after_transient_provider_failure', {
       attempt: this.autoResume?.attempt,
       kind: this.autoResume?.kind,
-    }, { reactivate: { pause_classes: [PAUSE_CLASS.TRANSPORT], onResumed: resumed => this.syncTaskBoardUi(resumed) } })
+    }, { requestId, isCancelled: cancelled, reactivate: { pause_classes: [PAUSE_CLASS.TRANSPORT], actor: scheduledActor, onResumed: resumed => this.syncTaskBoardUi(resumed) } })
   }
 
   // --- model_recoverable automatic resume (pause-class.mjs) ----------------------------------------------------------------
@@ -3110,7 +3127,7 @@ export class Session {
         allowModelRecoverable: true,
         requestId,
         isCancelled: cancelled,
-        reactivate: { pause_classes: [PAUSE_CLASS.MODEL_RECOVERABLE], identity: correlation, required: true, onResumed: state => this.syncTaskBoardUi(state) },
+        reactivate: { pause_classes: [PAUSE_CLASS.MODEL_RECOVERABLE], identity: correlation, actor: { actor_id: correlation.actor_id, epoch: correlation.epoch }, onResumed: state => this.syncTaskBoardUi(state) },
       })
       if (cancelled()) await this.traceRecovery('recovery.auto_resume_cancelled', { ...traceBase, reason: 'cancelled_after_fire', cancelled_by: token.reason })
     }
@@ -3136,6 +3153,12 @@ export class Session {
     try {
       const recovery = await recoverInterruptedAgentPlan(this.agent, reason, details, options)
       if (!recovery.recovered) {
+        if (recovery.reason === 'plan_not_resumable') {
+          // The paused plan could not be made active, so nothing was restaged. It stays paused, and a person is told why.
+          if (recovery.state) await this.syncTaskBoardUi(recovery.state)
+          await this.printChat(`I could not resume the paused plan automatically after ${reason} (${recovery.refusal ?? 'not resumable'}), so it stays paused and nothing ran. Say continue to resume it.`)
+          return null
+        }
         if (recovery.reason === 'no_active_plan') {
           // C7 with no plan to carry: the goal is paused, never a model woken with nothing to run.
           if (recovery.paused && recovery.state) await this.syncTaskBoardUi(recovery.state)
@@ -3474,6 +3497,12 @@ export class Session {
     }
     if (startupState?.condition_wait?.state !== 'active' && this.recoverablePlan(startupState)) {
       this.queueEvent(async () => {
+        // A transport pause resumed by the restart is an automatic-resume attempt like any other: counted in the bounded in-memory
+        // counter, so a restage that fails on transport again backs off under the same cap instead of starting over.
+        const record = this.agent?.memory?.pauseRecord?.(this.planKey())
+        if (record?.paused && pauseClassOf(record).pause_class === PAUSE_CLASS.TRANSPORT) {
+          this.autoResume = { attempt: (this.autoResume?.attempt ?? 0) + 1, kind: pauseClassOf(record).pause_subkind || TRANSPORT_FALLBACK_SUBKIND, timer: null, actor: this.currentActorCorrelation() }
+        }
         await this.recoverInterruptedPlan('runtime_restart', { actor_id: this.lastStatus?.actor_id, epoch: this.lastStatus?.epoch })
       })
       return 'recover'

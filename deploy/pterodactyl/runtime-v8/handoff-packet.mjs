@@ -1403,13 +1403,14 @@ function placedMachinesRecord(placed, limits) {
       .map(role => `${MACHINE_INVENTORY_LABELS[role]}=${inventoryCountsText(inventories[role])}`)
     const sourceTypes = inventories.input !== undefined ? ` source_item_types=${Object.keys(inventories.input).length}` : ''
     const state = entry.state === 'fresh' ? `FRESH as_of=${tagText(entry.as_of)}` : `STALE observed ${tagText(entry.as_of)}, NOT current${entry.reason ? `; ${entry.reason}` : ''}`
-    return `${entry.name} unit=${entry.unit_number} [${state}] working=${entry.working === true}${roles.length > 0 ? ` ${roles.join(' ')}` : ''}${sourceTypes}`
+    const lastUser = factName(String(entry.last_user ?? '').toLowerCase()) ? ` last_user=${String(entry.last_user).slice(0, 40)}` : ''
+    return `${entry.name} unit=${entry.unit_number} [${state}] working=${entry.working === true}${roles.length > 0 ? ` ${roles.join(' ')}` : ''}${sourceTypes}${lastUser}`
   })
   return {
     key: 'placed_machines',
     block: 'step',
     drop: 'placed_machines',
-    text: `placed_machines (machines this harness saw placed; machine_fuel, machine_source and machine_output are the MACHINE's own inventories, NOT the actor's held items in held_counts and fuel_needs; FRESH = live read now, STALE = earlier observation): ${joinBounded(parts, ' | ', limits.placedMachineChars)}`,
+    text: `placed_machines (crafting machines seen in an earlier nearby scan or read, not necessarily built by SGLuna or still standing; machine_fuel, machine_source and machine_output are the MACHINE's own inventories, NOT the actor's held items in held_counts and fuel_needs; FRESH = live read now, STALE = earlier observation): ${joinBounded(parts, ' | ', limits.placedMachineChars)}`,
   }
 }
 

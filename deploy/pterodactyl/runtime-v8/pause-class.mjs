@@ -37,6 +37,13 @@ export const TRANSPORT_SUBKIND = Object.freeze({
 })
 export const TRANSPORT_SUBKINDS = Object.freeze(Object.values(TRANSPORT_SUBKIND))
 
+// The pause reasons of the runtime's own lifecycle (a graceful server stop, an actor or session replacement). They are class
+// system and have their own recovery (startup, actor replacement); that recovery resumes them like an automatic resume does.
+export function isLifecycleRecoveryReason(reason) {
+  const text = String(reason ?? '')
+  return text === 'npc_identity_or_session_changed' || text === 'actor_replaced' || text.startsWith('server_stop_')
+}
+
 // Only these classes are ever resumed without a person.
 export const AUTO_RESUMABLE_PAUSE_CLASSES = Object.freeze([PAUSE_CLASS.TRANSPORT, PAUSE_CLASS.MODEL_RECOVERABLE])
 

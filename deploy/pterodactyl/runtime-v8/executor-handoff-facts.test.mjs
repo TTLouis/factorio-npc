@@ -1727,7 +1727,7 @@ async function furnaceWorld({ statusRead = 'matched' } = {}) {
     }
     return baseCommand(text)
   }
-  world.game.nearby = { actor_position: { x: 0, y: 0 }, entities: [{ name: 'stone-furnace', type: 'furnace', unit_number: 26, position: { x: 3, y: 3 }, distance: 4.2, status: 8, working: false }] }
+  world.game.nearby = { actor_position: { x: 0, y: 0 }, entities: [{ name: 'stone-furnace', type: 'furnace', unit_number: 26, position: { x: 3, y: 3 }, distance: 4.2, status: 8, working: false, last_user: 'TTLouis' }] }
   await world.say()
   await world.agent.taskStatusReceipt()
   return world
@@ -1738,8 +1738,8 @@ test('unit 14: a placed furnace\'s own fuel, source and output are carried as fr
   const result = await restageToFreshExecutor(world)
   assert.equal(result.restaged, true, JSON.stringify(result))
   const line = lineOf(world.agent.messages, 'placed_machines')
-  assert.match(line, /^placed_machines \(machines this harness saw placed; machine_fuel, machine_source and machine_output are the MACHINE's own inventories, NOT the actor's held items in held_counts and fuel_needs; FRESH = live read now, STALE = earlier observation\): /)
-  assert.match(line, /stone-furnace unit=26 \[FRESH as_of=tick:\d+,epoch:3\] working=false machine_fuel=\{coal:9\} machine_source=\{copper-ore:5\} machine_output=\{copper-plate:4\} source_item_types=1$/)
+  assert.match(line, /^placed_machines \(crafting machines seen in an earlier nearby scan or read, not necessarily built by SGLuna or still standing; machine_fuel, machine_source and machine_output are the MACHINE's own inventories, NOT the actor's held items in held_counts and fuel_needs; FRESH = live read now, STALE = earlier observation\): /)
+  assert.match(line, /stone-furnace unit=26 \[FRESH as_of=tick:\d+,epoch:3\] working=false machine_fuel=\{coal:9\} machine_source=\{copper-ore:5\} machine_output=\{copper-plate:4\} source_item_types=1 last_user=TTLouis$/)
   assert.doesNotMatch(line, /iron-ore|iron-plate/, 'the actor\'s stock is a different record (held_counts)')
   // The actor's own stock stays where it was: iron ore, no coal.
   const held = lineOf(world.agent.messages, 'held_counts ')
@@ -1784,4 +1784,28 @@ test('unit 14: a placed machine whose inventories were never read is counted as 
   const [carried] = world.rows('context.placed_machines_carried')
   assert.deepEqual({ candidates: carried.data.candidates, fresh: carried.data.fresh, stale: carried.data.stale, unread: carried.data.unread, carried: carried.data.carried },
     { candidates: 1, fresh: 0, stale: 0, unread: 1, carried: 0 })
+})
+
+test('unit 14: a read that fails to match a placed machine keeps the old observation\'s own tick, seq and epoch, and the stale label is dated by them', async () => {
+  const world = await furnaceWorld()
+  await restageToFreshExecutor(world) // a fresh read recorded the inventories and dated them
+  const unit = () => world.agent.liveEntityObservations.get('unit:26')
+  assert.equal(unit().observed_epoch, 3)
+  unit().observed_epoch = 2 // the observation was taken under an earlier epoch than the one the actor is in now
+  const dated = { observed_tick: unit().observed_tick, observed_seq: unit().observed_seq, observed_epoch: unit().observed_epoch }
+  // Time passes: a batch lands (the world moved on), the game tick advances, and the actor can no longer read the machine's inventories.
+  world.agent.worldMutationSeq += 5
+  world.agent.lastTaskStatusView = { ...(world.agent.lastTaskStatusView ?? {}), last_completed_batch: { ...(world.agent.lastTaskStatusView?.last_completed_batch ?? {}), tick: (dated.observed_tick ?? 0) + 3000 } }
+  const baseCommand = world.game.command
+  world.game.command = async (text) => {
+    if (text.includes('get_entity_status')) return JSON.stringify({ found: true, entity: { ...FURNACE_26.entity, unit_number: 99 } }) // the nearest furnace is another unit
+    return baseCommand(text)
+  }
+  const gathered = await world.agent.gatherExecutorHandoffFacts({ state: world.memory.planningState(KEY), actor: world.agent.epoch })
+  assert.deepEqual({ tick: unit().observed_tick, seq: unit().observed_seq, epoch: unit().observed_epoch, inventories: JSON.stringify(unit().inventories) },
+    { tick: dated.observed_tick, seq: dated.observed_seq, epoch: dated.observed_epoch, inventories: JSON.stringify(FURNACE_26.entity.inventories) })
+  const [entry] = gathered.facts.placed_machines
+  assert.equal(entry.state, 'stale')
+  assert.equal(entry.reason, 'inventory_nearest_is_other_unit')
+  assert.deepEqual({ tick: entry.as_of.tick, epoch: entry.as_of.epoch }, { tick: dated.observed_tick, epoch: 2 }, 'dated by the observation, not by the current epoch 3')
 })

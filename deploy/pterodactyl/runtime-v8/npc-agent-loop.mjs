@@ -62,7 +62,7 @@ import {
   withoutRawLeafRecipes,
 } from './handoff-packet.mjs'
 import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CLASS, REPLACEMENT_DECISION } from './authorization.mjs'
-import { declarePauseClass, harnessStateFaultCode, isAutoResumable, isPauseClass, PAUSE_CLASS, pauseClassForCode, pauseClassLabel, pauseClassOf, TRANSPORT_SUBKIND, transportFailureOf, transportTraceFields } from './pause-class.mjs'
+import { declarePauseClass, harnessStateFaultCode, isAutoResumable, isLifecycleRecoveryReason, isPauseClass, PAUSE_CLASS, pauseClassForCode, pauseClassLabel, pauseClassOf, TRANSPORT_SUBKIND, transportFailureOf, transportTraceFields } from './pause-class.mjs'
 import { classifyBlockedEnd, EXECUTOR_RECOVERY, executorCannotFix, REFUSAL_CLASS, refusalClassLabel, refusalClassOf } from './refusal-class.mjs'
 import { batchStockDecision, batchStockOperationLines, evaluateBatchStock, stockClaimingOperation } from './batch-stock.mjs'
 import {
@@ -1757,7 +1757,7 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
   // authority, guard, system or unclassified pause never is; `identity` ({ goal_id, plan_id, plan_version, step_id }), when given,
   // must still name the live goal, plan, plan version and step. The automatic-resume allowance is not touched (it lives in the run's
   // auto_resume record, which RUN_RESUMED keeps). Returns { resumed, reason, pause_class, pause_reason, step_id, state }.
-  resumePausedPlan(key, { reason = 'auto_resume', pauseClasses = [], identity } = {}) {
+  resumePausedPlan(key, { reason = 'auto_resume', pauseClasses = [], identity, lifecycle = false } = {}) {
     const state = key ? this.planByNpc.get(key) : undefined
     if (!state) return { resumed: false, reason: 'no_plan' }
     if (state.status !== 'paused') return { resumed: false, reason: 'not_paused' }
@@ -1765,7 +1765,10 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
     if (record.paused !== true) return { resumed: false, reason: 'not_paused' }
     const declared = pauseClassOf(record)
     const pauseClass = declared.classified ? declared.pause_class : 'unclassified'
-    if (!declared.classified || !isAutoResumable(declared.pause_class) || !pauseClasses.includes(declared.pause_class)) {
+    // `lifecycle` additionally lets a runtime-lifecycle pause (class system, reason server_stop_* / actor replacement) be resumed by
+    // the recovery that exists for it. No other system pause is.
+    const lifecyclePause = lifecycle === true && declared.pause_class === PAUSE_CLASS.SYSTEM && isLifecycleRecoveryReason(record.pause_reason ?? state.pause_reason)
+    if (!declared.classified || !(lifecyclePause || (isAutoResumable(declared.pause_class) && pauseClasses.includes(declared.pause_class)))) {
       return { resumed: false, reason: 'pause_class_not_resumable', pause_class: pauseClass }
     }
     const board = this.ensureTaskBoard(state)
@@ -1774,6 +1777,8 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
     // The step identity of the reducer's committed plan when it holds one (the one the automatic-resume allowance is keyed on).
     const allowance = this.autoResumeAllowance?.(key)
     const stepId = allowance?.step_id ?? boardStepId
+    // The legacy board must still point at the step the reducer's committed plan is on.
+    if (this.resumeStepMismatch(key, board)) return { resumed: false, reason: 'step_mismatch', pause_class: pauseClass, step_id: stepId }
     if (identity) {
       const held = allowance ?? { goal_id: state.goal_id, step_id: boardStepId }
       const same = (expected, actual) => expected === undefined || expected === actual
@@ -1805,7 +1810,12 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
       this.planByNpc.set(key, state)
       return { resumed: false, reason: 'reducer_refused_resume', pause_class: pauseClass, step_id: stepId }
     }
-    return { resumed: true, reason, pause_class: pauseClass, pause_reason: pauseReason, step_id: stepId, state }
+    return { resumed: true, reason, pause_class: pauseClass, pause_subkind: declared.pause_subkind, pause_reason: pauseReason, step_id: stepId, state }
+  }
+
+  // True when the legacy board's active step is not the step of the reducer's committed plan. The base record has no reducer.
+  resumeStepMismatch(_key, _board) {
+    return false
   }
 
   maxTurnId() {
@@ -5407,7 +5417,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           if (!inventories) { placedStats.unread += 1; return }
           placedStats.stale += 1
           placedMachines.push({ unit_number: known.unit_number, name: known.name, working: known.working === true, inventories, state: 'stale',
-            as_of: normalizeFactTag({ tick: known.observed_tick, epoch: this.epoch?.epoch }), reason })
+            as_of: normalizeFactTag({ tick: known.observed_tick, epoch: known.observed_epoch }), reason,
+            ...(known.last_user ? { last_user: known.last_user } : {}) })
         }
         let freshReads = false
         if (candidates.length > 0 && fence) {
@@ -5427,7 +5438,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
               }
               if (facts && !facts.error && facts.inventory_read === 'matched' && facts.inventories) {
                 placedStats.fresh += 1
-                placedMachines.push({ unit_number: known.unit_number, name: facts.name ?? known.name, working: facts.working === true, inventories: facts.inventories, state: 'fresh', as_of: tag })
+                const lastUser = this.liveEntityObservations?.get?.(`unit:${known.unit_number}`)?.last_user ?? known.last_user
+                placedMachines.push({ unit_number: known.unit_number, name: facts.name ?? known.name, working: facts.working === true, inventories: facts.inventories, state: 'fresh', as_of: tag,
+                  ...(lastUser ? { last_user: lastUser } : {}) })
               }
               else stale(known, facts?.error || !facts ? 'fresh_read_failed' : `inventory_${facts.inventory_read ?? 'unread'}`)
             }
@@ -5833,9 +5846,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       status: Number.isFinite(entity.status) ? entity.status : undefined,
       inventories: Array.isArray(entity.inventories) ? sanitizeDurableModelValue(entity.inventories) : undefined,
       recipe: typeof entity.recipe === 'string' ? cleanMemoryText(entity.recipe, 160) : undefined,
-      // D2: when this was seen (the game tick of the last completed batch, when known), for the historical record.
-      observed_seq: this.worldMutationSeq,
-      observed_tick: Number.isSafeInteger(this.lastTaskStatusView?.last_completed_batch?.tick) ? this.lastTaskStatusView.last_completed_batch.tick : undefined,
+      // Who last touched it, when the read carried it (an engine last_user, a name or { name }); never read just for this.
+      last_user: [entity.last_user, entity.last_user?.name].find(value => typeof value === 'string' && value)?.slice(0, 80),
+      // D2: when this was seen (the game tick of the last completed batch, when known), for the historical record. A read that
+      // updated only the working state of an older observation (`keepObservedAt`) keeps that observation's own dating.
+      ...(observationMeta.keepObservedAt === true
+        ? { observed_seq: entity.observed_seq, observed_tick: entity.observed_tick, observed_epoch: entity.observed_epoch }
+        : {
+            observed_seq: this.worldMutationSeq,
+            observed_tick: Number.isSafeInteger(this.lastTaskStatusView?.last_completed_batch?.tick) ? this.lastTaskStatusView.last_completed_batch.tick : undefined,
+            observed_epoch: this.epoch?.epoch,
+          }),
     })
   }
 
@@ -6178,7 +6199,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         ...known,
         working: raw.progressing === true,
         status: Number.isFinite(raw.entity_status) ? raw.entity_status : known.status,
-      }, undefined, 'fresh_machine_read', { surface: known.surface, surface_index: known.surface_index })
+      }, undefined, 'fresh_machine_read', { surface: known.surface, surface_index: known.surface_index, keepObservedAt: true })
     }
     await this.assertMachineReadFence(wait)
     return compactMachineFacts({ unitNumber, known, raw, entity, inventoryRead, requirement })
