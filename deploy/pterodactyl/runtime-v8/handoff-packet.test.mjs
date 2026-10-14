@@ -4,6 +4,11 @@ import assert from 'node:assert/strict'
 import {
   buildHandoffPacket,
   burnerFuelsFromDetails,
+  deriveBuildBill,
+  labMachineEntries,
+  scienceProductionRoots,
+  scienceTargets,
+  withLabEnergy,
   deriveFuelNeeds,
   deriveMachineEnergy,
   deriveResidualNeeds,
@@ -1237,7 +1242,7 @@ test('8 C/D: the packet states the trigger target, the energy source and placeme
   assert.equal(line('residual_needs'), 'residual_needs (derived from recipe_fact and fresh held_counts for the step contract trigger:copper-platex10; shared stock counted once): trigger craft-item copper-plate count=10 for electronics (counts new crafts; held stock not counted) held=0 crafts=10 via copper-plate | copper-ore required=10 held=10 missing=0')
   assert.equal(line('machine_energy'), 'machine_energy (native prototype energy source; held = fresh live count of the machine item; placed = whether this harness observed an instance via historical_entities or checkpoint_machine, history and not a current exact target): stone-furnace energy=burner(fuel_categories=chemical, 90kW) status=craftable held=1 placed=not_observed | not_listed: locked=2')
   assert.equal(fuelNeeds.search, 'needed')
-  assert.match(line('fuel_needs'), /^fuel_needs \(burner stone-furnace burn fuel_categories=chemical; candidates from item prototypes, held from the fresh read; amount needed not derived; sources searched are resource prototypes only, no_resource_source = none yields it, trees and other non-resource sources are not derived\): held_fuel=none \| coal fuel_value=4MJ held=0 raw: mined_from=coal \(source observation; reach\/path unverified\) nearest=\(192\.5,8\.5\) distance=192\.7 as_of=tick:612,epoch:3 \| solid-fuel fuel_value=12MJ held=0 no_resource_source \| wood fuel_value=2MJ held=0 no_resource_source$/)
+  assert.match(line('fuel_needs'), /^fuel_needs \(burner stone-furnace burn fuel_categories=chemical; candidates from item prototypes, held from the fresh read; amount needed not derived; sources derived from prototypes: resources that mine into the item \(mined_from\) and the natural trees and rocks the harvest operation mines for it \(harvested_from\), no_derived_source = neither yields it\): held_fuel=none \| coal fuel_value=4MJ held=0 raw: mined_from=coal \(source observation; reach\/path unverified\) nearest=\(192\.5,8\.5\) distance=192\.7 as_of=tick:612,epoch:3 \| solid-fuel fuel_value=12MJ held=0 no_derived_source \| wood fuel_value=2MJ held=0 no_derived_source$/)
   assert.deepEqual({ machine_energy: packet.executor_facts.machine_energy, burner_machines: packet.executor_facts.burner_machines, fuel_needs: packet.executor_facts.fuel_needs }, { machine_energy: 1, burner_machines: 1, fuel_needs: 3 })
   assert.equal(packet.dropped.length, 0)
   // A packet without the new facts is unchanged: no keys, no lines.
@@ -1293,4 +1298,97 @@ test('3a: a partial fluid read keeps coverage_complete on its anchors and the pa
   const line = packet.volatileText.split('\n').find(item => item.startsWith('fluid_source_hints'))
   assert.match(line, /water:water@\(22,8\) surface=1 observed [^|]*coverage=INCOMPLETE\(2 chunks ungenerated; nearer water may exist\)/)
   assert.doesNotMatch(line.split(' | ').find(part => part.includes('@(30,8)')), /coverage=/)
+})
+
+
+// --- Unit 9 review: one packet with a build bill, a science residual and harvest sources at full size -----------------------
+
+test('9: a build bill, a science residual and harvest sources with full raw-leaf and fuel text fit the packet, and the drop order keeps the residual and acquisition longest', () => {
+  const recipes = [
+    recipeFact('offshore-pump', [['electronic-circuit', 2], ['pipe', 1], ['iron-gear-wheel', 1]], [['offshore-pump', 1]]),
+    recipeFact('boiler', [['stone-furnace', 1], ['pipe', 4]], [['boiler', 1]]),
+    recipeFact('steam-engine', [['iron-gear-wheel', 8], ['pipe', 5], ['iron-plate', 10]], [['steam-engine', 1]]),
+    recipeFact('small-electric-pole', [['wood', 1], ['copper-cable', 1]], [['small-electric-pole', 2]]),
+    recipeFact('automation-science-pack', [['copper-plate', 1], ['iron-gear-wheel', 1]], [['automation-science-pack', 1]]),
+    recipeFact('pipe', [['iron-plate', 1]], [['pipe', 1]]),
+    recipeFact('stone-furnace', [['stone', 5]], [['stone-furnace', 1]]),
+    recipeFact('electronic-circuit', [['iron-plate', 1], ['copper-cable', 3]], [['electronic-circuit', 1]]),
+    recipeFact('copper-cable', [['copper-plate', 1]], [['copper-cable', 2]]),
+    recipeFact('iron-gear-wheel', [['iron-plate', 2]], [['iron-gear-wheel', 1]]),
+    recipeFact('iron-plate', [['iron-ore', 1]], [['iron-plate', 1]]),
+    COPPER_PLATE_FACT,
+  ]
+  const placing = new Map(['offshore-pump', 'boiler', 'steam-engine', 'small-electric-pole'].map(prototype => [prototype, { prototype, item: prototype, count: 1 }]))
+  const builds = [
+    { id: 'pump', prototype: 'offshore-pump', minimum: 1 }, { id: 'boiler', prototype: 'boiler', minimum: 1 },
+    { id: 'engine', prototype: 'steam-engine', minimum: 2, state: 'powered' }, { id: 'poles', prototype: 'small-electric-pole', minimum: 2 },
+  ]
+  const bill = deriveBuildBill({ builds, placing, placed: new Map([['pump', 0], ['boiler', 0], ['engine', 1], ['poles', 0]]), stateCounts: new Map([['engine', 0]]) })
+  assert.deepEqual(bill.unresolved, [])
+  const research = researchPathFact({ ok: true, target: 'logistic-science-pack', node_count: 1, nodes: [{ name: 'logistic-science-pack', researched: false, mode: 'science', status: 'ready',
+    prerequisites: [], unresolved_prerequisites: [], science: { count: 75, energy: 5, ingredients: [{ name: 'automation-science-pack', amount: 1 }], ingredients_truncated: false } }] }, 'logistic-science-pack', TAG)
+  const science = scienceProductionRoots(scienceTargets([research]), new Map([['logistic-science-pack', 0.2]]), ['lab'])
+  const roots = [...bill.roots, ...science.flatMap(entry => entry.roots)]
+  const items = ['offshore-pump', 'boiler', 'steam-engine', 'small-electric-pole', 'automation-science-pack', 'electronic-circuit', 'pipe', 'iron-gear-wheel', 'stone-furnace', 'iron-plate', 'wood', 'copper-cable', 'stone', 'copper-plate', 'iron-ore', 'copper-ore', 'lab', 'coal', 'solid-fuel']
+  const held = heldOf(Object.fromEntries(items.map(item => [item, item === 'lab' ? 1 : item === 'iron-plate' ? 15 : 0])))
+  const derived = deriveResidualNeeds({ roots, recipes: recipes, held })
+  assert.equal(derived.ok, true, JSON.stringify(derived))
+  const found = (resource, x) => ({ resource, state: 'found', x, y: 8.5, distance: 192.7 + x / 100, radius: 1024 })
+  for (const row of derived.rows) {
+    if (row.item === 'iron-ore' || row.item === 'copper-ore') row.raw = { mined_from: [row.item], as_of: TAG, sources: [found(row.item, 192.5)], harvest_sources: [] }
+    if (row.item === 'stone') row.raw = { mined_from: ['stone'], harvested_from: ['big-rock', 'huge-rock', 'sand-rock-big'], as_of: TAG,
+      sources: [found('stone', 40.5)], harvest_sources: [found('big-rock', 61.5), { resource: 'huge-rock', state: 'none', radius: 1024 }, { resource: 'sand-rock-big', state: 'not_read' }] }
+    if (row.item === 'wood') row.raw = { mined_from: [], harvested_from: ['tree-01', 'tree-02', 'tree-03', 'tree-04'], as_of: TAG, sources: [],
+      harvest_sources: ['tree-01', 'tree-02', 'tree-03', 'tree-04'].map((name, index) => found(name, 100.5 + index)) }
+  }
+  const machineEnergy = withLabEnergy(
+    deriveMachineEnergy({ recipes: [COPPER_PLATE_FACT], recipeNames: ['copper-plate'], statuses: machineStatusesFrom({ triggerReports: cacheTriggerCraftingReports(requirementResearch({ 'stone-furnace': 'craftable', 'steel-furnace': 'locked', 'electric-furnace': 'locked' }), TAG) }), held, placed: new Map() }),
+    labMachineEntries({ candidates: [{ name: 'lab', energy_source: 'electric', item: 'lab', enabled_recipe: true, held_count: 1 }], held, placed: new Map() }))
+  const fuelNeeds = deriveFuelNeeds({ machineEnergy, held, fuels: [
+    { name: 'coal', category: 'chemical', fuel_value: 4000000, mined_from: ['coal'], harvested_from: ['huge-rock'] },
+    { name: 'wood', category: 'chemical', fuel_value: 2000000, mined_from: [], harvested_from: ['tree-01', 'tree-02', 'tree-03', 'tree-04'] },
+    { name: 'solid-fuel', category: 'chemical', fuel_value: 12000000, mined_from: [] },
+  ] })
+  fuelNeeds.items[0].raw = { mined_from: ['coal'], harvested_from: ['huge-rock'], as_of: TAG, sources: [found('coal', 192.5)], harvest_sources: [found('huge-rock', 61.5)] }
+  fuelNeeds.items[1].raw = { mined_from: [], harvested_from: ['tree-01', 'tree-02', 'tree-03', 'tree-04'], as_of: TAG, sources: [], harvest_sources: ['tree-01', 'tree-02', 'tree-03', 'tree-04'].map((name, index) => found(name, 100.5 + index)) }
+  const executorFacts = {
+    research: [research],
+    recipes: selectRecipeFacts(recipes, { wanted: ['offshore-pump', 'boiler', 'steam-engine'] }),
+    counts: { items: items.map(item => ({ item, count: held.get(item), state: 'fresh' })), unavailable: [], as_of: TAG },
+    residual: { roots, production: [], rows: derived.rows },
+    machine_energy: machineEnergy, fuel_needs: fuelNeeds,
+    historical_entities: [{ name: 'stone-furnace', count: 2, tick: 600 }],
+  }
+  const run = maxChars => buildHandoffPacket({ planningState: circuitState(), ...ARGS, note: 'a note', budget: 'effort low', executorFacts, actor: ACTOR, limits: { maxChars } })
+  const full = run(100000)
+  assert.deepEqual(full.dropped, [])
+  const lineOf = (packet, prefix) => packet.text.split('\n').find(line => line.startsWith(prefix))
+  assert.match(lineOf(full, 'residual_needs'), /for the step contract build:offshore-pumpx1,build:boilerx1,build:steam-enginex1,build:small-electric-polex2,science:automation-science-packx60;/)
+  assert.match(lineOf(full, 'residual_needs'), /\[build steam-engine: placed=1 powered=0 of 2, 1 more to place\]/)
+  assert.match(lineOf(full, 'residual_needs'), /\[science logistic-science-pack: 60 of 75 units x1 per unit, research progress 20% netted; consumed by lab\]/)
+  assert.doesNotMatch(lineOf(full, 'residual_needs'), /\(\+\d+ more\)/, 'the whole bill fits the residual bound')
+  assert.match(lineOf(full, 'raw_leaf_acquisition'), /wood missing=1 harvest: harvested_from=tree-01,tree-02,tree-03,tree-04 .*nearest@tree-04=/)
+  assert.match(lineOf(full, 'raw_leaf_acquisition'), /stone missing=\d+ raw: mined_from=stone .*harvest: harvested_from=big-rock,huge-rock,sand-rock-big .*nearest@huge-rock=none_within_1024 nearest@sand-rock-big=not_read/)
+  assert.match(lineOf(full, 'fuel_needs'), /wood fuel_value=2MJ held=0 harvest: harvested_from=tree-01,tree-02,tree-03,tree-04/)
+  assert.match(lineOf(full, 'machine_energy'), /lab energy=electric status=craftable held=1 placed=not_observed consumes=research_packs/)
+
+  // The ordinary limit is never exceeded by mandatory records alone: optional records drop whole, in the fixed order.
+  const ordinary = buildHandoffPacket({ planningState: circuitState(), ...ARGS, executorFacts, actor: ACTOR })
+  assert.equal(ordinary.over_limit, false)
+  const group = key => key.startsWith('recipe_fact_') ? 'recipe_facts' : key.startsWith('receipt_') ? 'receipt' : key === 'held_counts' ? 'fresh_counts' : key
+  const position = key => HANDOFF_DROP_ORDER.indexOf(group(key))
+  const ranks = ordinary.dropped.map(position)
+  assert.ok(ranks.every(rank => rank >= 0) && ranks.every((rank, index) => index === 0 || rank >= ranks[index - 1]), `dropped in the fixed order: ${ordinary.dropped.join(', ')}`)
+  assert.ok(!ordinary.dropped.includes('residual_needs') && !ordinary.dropped.includes('raw_leaf_acquisition'), 'the residual and the acquisition survive the ordinary limit')
+
+  // Squeezing further: every annotation (recipe facts, machine energy, fuel needs) is gone before the residual is, and the
+  // acquisition record outlives the residual's arithmetic.
+  let residualGone
+  for (let max = full.chars; max > 0 && !residualGone; max -= 25) {
+    const packet = run(max)
+    if (packet.dropped.includes('residual_needs')) residualGone = packet
+  }
+  assert.ok(residualGone, 'a limit small enough drops the residual')
+  for (const key of ['machine_energy', 'fuel_needs', 'recipe_fact_0', 'held_counts']) assert.ok(residualGone.dropped.includes(key), `${key} dropped before the residual`)
+  assert.ok(!residualGone.dropped.includes('raw_leaf_acquisition'), 'the acquisition record outlives the residual')
 })

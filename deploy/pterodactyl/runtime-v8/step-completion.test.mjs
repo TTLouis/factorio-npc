@@ -276,3 +276,61 @@ test('exact and upper-bound quantities stay unsupported', () => {
     assert.equal(completionContractSupported(contract), false, comparison)
   }
 })
+
+// --- Unit 9: build steps (entity_count) -------------------------------------------------------------------------------
+
+test('entity_count: a build step names a prototype and a lower bound, with an optional scope; malformed scopes fail closed', () => {
+  const plain = sanitizeStepCompletionContract({ mode: 'all', requirements: [{ id: 'boiler', kind: 'entity_count', prototype: 'boiler', minimum: 1 }] })
+  assert.deepEqual(plain.requirements, [{ id: 'boiler', kind: 'entity_count', prototype: 'boiler', minimum: 1 }])
+  assert.equal(completionContractSupported(plain), true)
+  assert.equal(authoredCompletionContractSupported(plain), true)
+  // The unambiguous "at least N" spellings the other count kinds accept, and entity_name for the prototype.
+  const aliased = sanitizeStepCompletionContract({ mode: 'all', requirements: [{ id: 'poles', kind: 'entity_count', entity_name: 'small-electric-pole', count: 4, comparison: '>=' }] })
+  assert.deepEqual(aliased.requirements[0], { id: 'poles', kind: 'entity_count', prototype: 'small-electric-pole', minimum: 4 })
+  const scoped = sanitizeStepCompletionContract({ mode: 'all', requirements: [{ id: 'engine', kind: 'entity_count', prototype: 'steam-engine', minimum: 2, radius: 40, anchor: { x: 12.5, y: -7 }, state: 'powered' }] })
+  assert.deepEqual(scoped.requirements[0], { id: 'engine', kind: 'entity_count', prototype: 'steam-engine', minimum: 2, radius: 40, anchor: { x: 12.5, y: -7 }, state: 'powered' })
+  for (const bad of [
+    { prototype: 'boiler' },
+    { prototype: 'boiler', minimum: 0 },
+    { prototype: 'Boiler With Spaces', minimum: 1 },
+    { prototype: 'boiler', minimum: 1, radius: 0 },
+    { prototype: 'boiler', minimum: 1, radius: 257 },
+    { prototype: 'boiler', minimum: 1, anchor: { x: 1, y: 2 } },
+    { prototype: 'boiler', minimum: 1, radius: 5, anchor: { x: 'a', y: 2 } },
+    { prototype: 'boiler', minimum: 1, state: 'hovering' },
+  ]) {
+    assert.equal(sanitizeStepCompletionContract({ mode: 'all', requirements: [{ id: 'bad', kind: 'entity_count', ...bad }] }).mode, 'semantic_unknown', JSON.stringify(bad))
+  }
+})
+
+test('entity_count: only a live native count of that prototype under that scope satisfies it, and a placement receipt never does', () => {
+  const contract = sanitizeStepCompletionContract({ mode: 'all', requirements: [{ id: 'engines', kind: 'entity_count', prototype: 'steam-engine', minimum: 2, state: 'working' }] })
+  const live = fact => evaluateCompletionContract(contract, { engines: { kind: 'entity_count', prototype: 'steam-engine', state: 'working', authoritative: true, current: 2, ...fact } }).satisfied
+  assert.equal(live({}), true)
+  assert.equal(live({ current: 1 }), false)
+  for (const fact of [
+    { authoritative: false },
+    { stale: true },
+    { prototype: 'boiler' },
+    { state: undefined },
+    { current: undefined },
+  ]) assert.equal(live(fact), false, JSON.stringify(fact))
+  // A receipt that a place_entity batch finished, however authoritative, is another kind of fact.
+  for (const fact of [
+    { kind: 'authoritative_operation_receipt', authoritative: true, operation_name: 'place_entity', operation_names: ['place_entity'] },
+    { kind: 'inventory_count', item_name: 'steam-engine', current: 5 },
+  ]) assert.equal(evaluateCompletionContract(contract, { engines: fact }).satisfied, false)
+  const scoped = sanitizeStepCompletionContract({ mode: 'all', requirements: [{ id: 'engines', kind: 'entity_count', prototype: 'steam-engine', minimum: 1, radius: 30 }] })
+  assert.equal(evaluateCompletionContract(scoped, { engines: { kind: 'entity_count', prototype: 'steam-engine', authoritative: true, current: 3 } }).satisfied, false, 'a count taken under another scope is not this requirement')
+  assert.equal(evaluateCompletionContract(scoped, { engines: { kind: 'entity_count', prototype: 'steam-engine', radius: 30, authoritative: true, current: 3 } }).satisfied, true)
+  // Naming no identity, it is never pinned to a unit_number: no destroyed entity can prove it unsatisfiable.
+  assert.equal(provePermanentlyUnsatisfiable(contract, { staleUnitNumbers: [1, 2, 3] }), undefined)
+})
+
+test('an operation-receipt contract is met by one receipt whatever the entity count (why a build step declares entity_count)', () => {
+  const receipt = sanitizeStepCompletionContract({ mode: 'all', requirements: [{ id: 'placed', kind: 'authoritative_operation_receipt', operation_name: 'place_entity' }] })
+  const oneReceipt = { placed: { kind: 'authoritative_operation_receipt', authoritative: true, operation_name: 'place_entity', operation_names: ['place_entity'] } }
+  assert.equal(evaluateCompletionContract(receipt, oneReceipt).satisfied, true, 'one place_entity receipt closes it with no count at all')
+  const count = sanitizeStepCompletionContract({ mode: 'all', requirements: [{ id: 'placed', kind: 'entity_count', prototype: 'boiler', minimum: 3 }] })
+  assert.equal(evaluateCompletionContract(count, oneReceipt).satisfied, false)
+})

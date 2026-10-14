@@ -71,6 +71,14 @@ export function status_name(status: defines.entity_status | undefined) {
   return undefined
 }
 
+// On an electric network and not short of power (no_power, low_power, not plugged in). This reads the entity's own status
+// only; it says nothing about whether a producer feeds the network (electric_network_satisfied checks that).
+export function entity_has_power(entity: LuaEntity) {
+  if (entity.electric_network_id === undefined) return false
+  const name = status_name(entity.status)
+  return name === undefined || POWER_SHORTAGE[name] !== true
+}
+
 function minimum_of(request: Record<string, unknown>) {
   const minimum = request.minimum ?? 1
   return positive_integer(minimum) && (minimum as number) <= MAX_MINIMUM ? minimum as number : undefined

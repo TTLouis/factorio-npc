@@ -459,6 +459,10 @@ export function new_research_controller(get_actor: () => ControlledActor | undef
       research_unit_count: trigger ? undefined : tech.research_unit_count,
       research_unit_energy: trigger ? undefined : tech.research_unit_energy,
       saved_progress: tech.saved_progress,
+      // The current research's progress lives on the force (LuaForce.research_progress); saved_progress belongs to a technology that
+      // is not the current research. `progress` reads the right one for this technology (0..1), so a caller never mixes them up.
+      is_current_research: actor.force.current_research?.name === tech.name,
+      progress: actor.force.current_research?.name === tech.name ? actor.force.research_progress : tech.saved_progress,
       ingredients: ingredients.slice(0, MAX_TECHNOLOGY_RECORDS).map(item => ({ name: item.name, amount: item.amount })),
       ingredients_truncated: ingredients.length > MAX_TECHNOLOGY_RECORDS,
       prerequisites,

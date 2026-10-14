@@ -286,6 +286,40 @@ describe('machine energy and burner fuel knowledge', () => {
     expect(text).not.toMatch(/uranium-fuel-cell|inert-lump|copper-plate/)
   })
 
+  it('names the trees and rocks the harvest operation mines for a fuel, and ranks a harvestable fuel with the mined ones', () => {
+    const original_entity = (globalThis as any).prototypes.entity
+    const natural = (name: string, type: string, product: string, extra: Record<string, unknown> = {}) => ({
+      name, type, is_building: type === 'simple-entity',
+      mineable_properties: { mining_time: 0.5, products: [{ type: 'item', name: product, amount: 4 }] }, ...extra,
+    })
+    ;(globalThis as any).prototypes.entity = {
+      'tree-02': natural('tree-02', 'tree', 'wood'),
+      'tree-01': natural('tree-01', 'tree', 'wood'),
+      'huge-rock': natural('huge-rock', 'simple-entity', 'coal'),
+      // A placed building that yields wood when mined is a player asset (owner and placing item), never a harvest source.
+      'wooden-chest': natural('wooden-chest', 'simple-entity', 'wood', { is_building: true, is_entity_with_owner: true, items_to_place_this: [{ name: 'wooden-chest', count: 1 }] }),
+      'dead-tree': natural('dead-tree', 'tree', 'copper-plate'),
+    }
+    try {
+      const result = recipe_details_for_actor(smelter(), 'copper-plate') as any
+      expect(result.burner_fuels.items).toEqual([
+        { name: 'coal', category: 'chemical', fuel_value: 4000000, mined_from: ['coal'], harvested_from: ['huge-rock'] },
+        { name: 'wood', category: 'chemical', fuel_value: 2000000, harvested_from: ['tree-01', 'tree-02'] },
+        { name: 'solid-fuel', category: 'chemical', fuel_value: 12000000 },
+      ])
+      // The queried item carries its own harvest sources, found or not, bounded and name-sorted.
+      expect(result.harvested_from).toEqual(['dead-tree'])
+      const wood = recipe_details_for_actor({ ...smelter(), force: { recipes: {} } }, 'wood') as any
+      expect(wood).toMatchObject({ found: false, code: 'no_recipe', harvested_from: ['tree-01', 'tree-02'] })
+      expect(wood.mined_from).toBeUndefined()
+      expect(JSON.stringify(wood)).not.toContain('wooden-chest')
+      expect((recipe_details_for_actor({ ...smelter(), force: { recipes: {} } }, 'solid-fuel') as any).harvested_from).toBeUndefined()
+    }
+    finally {
+      ;(globalThis as any).prototypes.entity = original_entity
+    }
+  })
+
   it('bounds the fuel list and reports the cut without dropping the minable fuels', () => {
     const many: Record<string, unknown> = {}
     for (let i = 0; i < 9; i++) many[`fuel-${i}`] = { name: `fuel-${i}`, fuel_category: 'chemical', fuel_value: 1000 + i }

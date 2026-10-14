@@ -106,11 +106,14 @@ export const EXECUTOR_FACT_LIMITS = Object.freeze({
   recipeProducts: 4,
   recipeMachines: 6,
   countItems: 12,
-  countChars: 360,
+  // Unit 9: the count-read cap sizes itself from the step's recipe closure (a steam-power build bill is about 15 items), up to this
+  // bound; whatever a closure larger than the bound leaves unread is reported, never silently absent.
+  countItemsMax: 32,
+  countChars: 720,
   machineChars: 480,
-  residualRows: 10,
-  residualChars: 520,
-  acquisitionChars: 900,
+  residualRows: 24,
+  residualChars: 1400,
+  acquisitionChars: 1200,
   historicalKinds: 6,
   historicalChars: 280,
   authorityChars: 320,
@@ -125,6 +128,9 @@ export const EXECUTOR_FACT_LIMITS = Object.freeze({
   fluidReadChars: 4096,
   // Unit 3b: recipe reads the harness may spend on one handoff to close a step root's recipe chain.
   recipePrefetchReads: 8,
+  // Unit 9: a build or science bill is a whole recipe closure (a steam-power build reaches 15 items), so a handoff for such a step may
+  // spend more recipe reads; still bounded, and the cut is still reported.
+  recipePrefetchReadsBill: 24,
   noRecipeItems: 32,
   // Unit 6: raw leaves (items a resource prototype mines) are remembered with their mining sources, and the harness reads the
   // nearest instance of at most `rawLeafResources` distinct resources per handoff, within `rawLeafRadius` tiles.
@@ -137,6 +143,11 @@ export const EXECUTOR_FACT_LIMITS = Object.freeze({
   fuelChars: 780,
   placedKinds: 64,
   fuelSourceCache: 16,
+  // Unit 9: entity_count prototypes whose placing item the harness resolves per handoff, natural harvest sources carried per
+  // raw leaf, and the lab prototypes a science residual names as its consumer.
+  buildPrototypes: 8,
+  rawLeafHarvestedFrom: 4,
+  labCandidates: 4,
 })
 
 const HEADER = '[HANDOFF] Rebuilt from durable harness state, not from the previous conversation. Verify against the world before acting.'
@@ -274,7 +285,7 @@ function contractText(step, max) {
   const contract = step?.completion_contract
   if (!contract || !Array.isArray(contract.requirements) || contract.requirements.length === 0) return ''
   const parts = contract.requirements.map((requirement) => {
-    const subject = requirement.item_name ?? requirement.entity_name ?? requirement.operation_name ?? ''
+    const subject = requirement.item_name ?? requirement.entity_name ?? requirement.prototype ?? requirement.operation_name ?? ''
     const minimum = Number.isFinite(requirement.minimum) ? `>=${requirement.minimum}` : ''
     return `${requirement.kind}${subject ? ` ${subject}` : ''}${minimum}`
   })
@@ -562,9 +573,22 @@ export function stepContractNeeds(step) {
   const items = []
   const roots = []
   const technologies = []
+  const builds = []
   for (const requirement of requirements) {
     const technology = requirement.kind === 'research_completed' ? factName(requirement.technology) : undefined
     if (technology && !technologies.includes(technology)) technologies.push(technology)
+    // Unit 9: a build step (entity_count) is met by placed entities. Its need is the prototype's placing item, times how many are
+    // still missing; the harness resolves both. Only a mode `all` contract names definite builds.
+    const prototype = requirement?.kind === 'entity_count' ? factName(requirement.prototype) : undefined
+    if (prototype && contract.mode === 'all' && Number.isSafeInteger(requirement.minimum) && requirement.minimum > 0 && builds.length < EXECUTOR_FACT_LIMITS.buildPrototypes
+      && !builds.some(build => build.id === requirement.id)) {
+      builds.push({
+        id: requirement.id, prototype, minimum: requirement.minimum,
+        ...(Number.isSafeInteger(requirement.radius) ? { radius: requirement.radius } : {}),
+        ...(requirement.anchor && Number.isFinite(requirement.anchor.x) && Number.isFinite(requirement.anchor.y) ? { anchor: { x: requirement.anchor.x, y: requirement.anchor.y } } : {}),
+        ...(typeof requirement.state === 'string' ? { state: requirement.state } : {}),
+      })
+    }
     const item = factName(requirement?.item_name)
     if (!item) continue
     if (!items.includes(item)) items.push(item)
@@ -574,7 +598,7 @@ export function stepContractNeeds(step) {
       else roots.push({ item, count: requirement.minimum })
     }
   }
-  return { roots, items, ...(technologies.length ? { technologies } : {}) }
+  return { roots, items, ...(technologies.length ? { technologies } : {}), ...(builds.length ? { builds } : {}) }
 }
 
 // Fresh research paths are bounded whole records. A malformed, incomplete or oversized answer is explicitly
@@ -590,9 +614,17 @@ export function researchPathFact(parsed, target, tag) {
     if (!factName(node.name) || typeof node.researched !== 'boolean' || !['trigger', 'science'].includes(node.mode)) return unavailable('research_node_invalid')
     if (node.mode === 'trigger' && !node.research_trigger?.type) return unavailable('research_trigger_missing')
     if (node.mode === 'science' && !node.science && !node.researched) return unavailable('research_science_missing')
+    // Unit 9 (crafted_items.ts credit_craft_trigger_statistics): a completed craft is credited to a craft-item trigger only while the
+    // technology is enabled and every prerequisite is researched. With any prerequisite unresolved, or the technology disabled, a craft
+    // now counts for nothing. `enabled: false` is carried from the same getResearchPath node.
+    const craftTrigger = node.mode === 'trigger' && node.researched === false && node.research_trigger?.type === 'craft-item'
+    const notCredited = craftTrigger && asList(node.unresolved_prerequisites).length > 0
+    const disabled = craftTrigger && node.enabled === false
     selected.push({ name: node.name, researched: node.researched, mode: node.mode, status: node.status,
       prerequisites: node.prerequisites, unresolved_prerequisites: node.unresolved_prerequisites,
       ...(node.research_trigger ? { research_trigger: node.research_trigger } : {}),
+      ...(notCredited ? { credited_only_after_prerequisites: true } : {}),
+      ...(disabled ? { enabled: false } : {}),
       ...(node.science ? { science: node.science } : {}) })
   }
   const fact = { target, state: 'fresh', as_of: normalizeFactTag(tag), nodes: selected }
@@ -727,14 +759,20 @@ export function expandableIngredients(item, recipes, rawLeaves) {
 // whatever recycling or crushing recipes also list it as a product. Those recipes are noise for a step brief, so the
 // harness keeps the item as a raw leaf: never expanded, and no recipe that produces it is carried.
 
-/** The raw-leaf declaration of a parsed getRecipeDetails answer: `{ item, mined_from }`, or undefined when it has none. */
+/**
+ * The raw-leaf declaration of a parsed getRecipeDetails answer: `{ item, mined_from, harvested_from? }`, or undefined when it has
+ * neither. `mined_from` names the resource prototypes that mine into the item; `harvested_from` (unit 9) names the natural trees and
+ * rocks the harvest operation mines for it (wood from trees). `harvested_from` is present only when the answer listed some.
+ */
 export function rawLeafFromRecipeDetails(parsed, limits = EXECUTOR_FACT_LIMITS) {
   if (!parsed || typeof parsed !== 'object') return undefined
   if (!(parsed.found === true || (parsed.found === false && parsed.code === 'no_recipe'))) return undefined
   const item = factName(parsed.query)
-  if (!item || !Array.isArray(parsed.mined_from)) return undefined
-  const minedFrom = [...new Set(parsed.mined_from.map(factName).filter(Boolean))].slice(0, limits.rawLeafMinedFrom)
-  return minedFrom.length > 0 ? { item, mined_from: minedFrom } : undefined
+  if (!item) return undefined
+  const minedFrom = [...new Set(asList(parsed.mined_from).map(factName).filter(Boolean))].slice(0, limits.rawLeafMinedFrom)
+  const harvestedFrom = [...new Set(asList(parsed.harvested_from).map(factName).filter(Boolean))].slice(0, limits.rawLeafHarvestedFrom)
+  if (minedFrom.length === 0 && harvestedFrom.length === 0) return undefined
+  return { item, mined_from: minedFrom, ...(harvestedFrom.length > 0 ? { harvested_from: harvestedFrom } : {}) }
 }
 
 /** The recipe facts that do not produce a raw leaf; `rawLeaves` is anything with `has(item)`. */
@@ -749,14 +787,16 @@ export function withoutRawLeafRecipes(recipes, rawLeaves) {
  * `found` carries the nearest instance's position and distance; `none` only for the mod's own empty answer (matched_count 0,
  * no error); anything else, including an answer for another name, is `failed`: never read as absence.
  */
-export function rawLeafSourceFromRead(raw, resource, radius) {
+export function rawLeafSourceFromRead(raw, resource, radius, { harvest = false } = {}) {
   let parsed
   try { parsed = typeof raw === 'string' ? JSON.parse(raw) : raw }
   catch { return { resource, state: 'failed' } }
   if (!parsed || typeof parsed !== 'object' || parsed.ok === false || parsed.error !== undefined) return { resource, state: 'failed' }
   if (parsed.name !== resource || parsed.max_radius !== radius || !Number.isFinite(parsed.searched_radius) || parsed.searched_radius < 1 || parsed.searched_radius > radius) return { resource, state: 'failed' }
   const nearest = Array.isArray(parsed.entities) ? parsed.entities[0] : undefined
-  if (parsed.found === true && parsed.returned_count === 1 && Array.isArray(parsed.entities) && parsed.entities.length === 1 && parsed.matched_count >= 1 && nearest?.name === resource && nearest.type === 'resource') {
+  // A mining source is a resource entity; a harvest source (unit 9) is a natural non-resource entity (tree, rock).
+  const typeOk = harvest ? typeof nearest?.type === 'string' && nearest.type !== 'resource' : nearest?.type === 'resource'
+  if (parsed.found === true && parsed.returned_count === 1 && Array.isArray(parsed.entities) && parsed.entities.length === 1 && parsed.matched_count >= 1 && nearest?.name === resource && typeOk) {
     const x = finiteNumber(nearest.position?.x)
     const y = finiteNumber(nearest.position?.y)
     const distance = finiteNumber(nearest.distance)
@@ -776,15 +816,27 @@ function rawSourceText(source, multiple) {
   return `nearest${label}=not_read`
 }
 
-/** The acquisition clause of a residual row: how the raw leaf is natively acquired and where the nearest source was last read. */
+/**
+ * The acquisition clause of a residual row: how the raw leaf is natively acquired and where the nearest source was last read.
+ * `raw: mined_from=...` for resources; `harvest: harvested_from=...` (unit 9) for the natural trees and rocks the harvest operation
+ * mines. Both clauses appear when an item has both sources.
+ */
 export function rawLeafRowText(raw) {
   const sources = asList(raw?.sources)
+  const harvestSources = asList(raw?.harvest_sources)
   const minedFrom = asList(raw?.mined_from)
-  if (minedFrom.length === 0) return ''
-  const read = sources.some(source => source.state !== 'not_read')
+  const harvestedFrom = asList(raw?.harvested_from)
+  if (minedFrom.length === 0 && harvestedFrom.length === 0) return ''
+  const read = [...sources, ...harvestSources].some(source => source.state !== 'not_read')
   return [
-    `raw: mined_from=${minedFrom.join(',')} (source observation; reach/path unverified)`,
-    ...sources.map(source => rawSourceText(source, minedFrom.length > 1)),
+    ...(minedFrom.length > 0 ? [
+      `raw: mined_from=${minedFrom.join(',')} (source observation; reach/path unverified)`,
+      ...sources.map(source => rawSourceText(source, minedFrom.length > 1)),
+    ] : []),
+    ...(harvestedFrom.length > 0 ? [
+      `harvest: harvested_from=${harvestedFrom.join(',')} (source observation; reach/path unverified)`,
+      ...harvestSources.map(source => rawSourceText(source, harvestedFrom.length > 1)),
+    ] : []),
     read ? `as_of=${tagText(raw.as_of)}` : '',
   ].filter(Boolean).join(' ')
 }
@@ -805,7 +857,7 @@ export function neededItems(roots, recipes, limit = EXECUTOR_FACT_LIMITS.countIt
     const expansion = expandableRecipe(item, recipes)
     if (expansion) for (const ingredient of expansion.recipe.ingredients) queue.push(ingredient.name)
   }
-  return { items: order.slice(0, limit), complete: order.length <= limit }
+  return { items: order.slice(0, limit), complete: order.length <= limit, omitted: order.slice(limit) }
 }
 
 /**
@@ -828,7 +880,9 @@ export function deriveResidualNeeds({ roots, recipes, held, production = [] }) {
   for (const target of targets) {
     const count = held instanceof Map ? held.get(target.item) : undefined
     const row = { item: target.item, required: target.count, ...(Number.isSafeInteger(count) && count >= 0 ? { held: count } : {}), missing: target.count,
-      trigger: { technology: target.technology, held_counted: false, ...(target.status ? { status: target.status } : {}) } }
+      trigger: { technology: target.technology, held_counted: false, ...(target.status ? { status: target.status } : {}),
+        ...(target.credited_only_after_prerequisites === true ? { credited_only_after_prerequisites: true, unresolved_prerequisites: asList(target.unresolved_prerequisites) } : {}),
+        ...(target.technology_disabled === true ? { technology_disabled: true } : {}) } }
     const expansion = expandableRecipe(target.item, facts)
     if (expansion) {
       if (usedByTargets.has(expansion.recipe.name)) return { ok: false, reason: `shared_recipe:${expansion.recipe.name}` }
@@ -873,7 +927,13 @@ export function deriveResidualNeeds({ roots, recipes, held, production = [] }) {
     used.add(expansion.recipe.name)
   }
   const demand = new Map(targetDemand)
-  for (const root of rootList) demand.set(root.item, (demand.get(root.item) ?? 0) + root.count)
+  // Unit 9: a root may carry what it is for (a build step's placing item, a research's science packs). The row keeps it, so the
+  // residual states the purpose next to the arithmetic.
+  const purposes = new Map()
+  for (const root of rootList) {
+    demand.set(root.item, (demand.get(root.item) ?? 0) + root.count)
+    if (root.build || root.science) purposes.set(root.item, { ...purposes.get(root.item), ...(root.build ? { build: root.build } : {}), ...(root.science ? { science: root.science } : {}) })
+  }
   const rows = []
   for (const item of order) {
     const required = demand.get(item) ?? 0
@@ -881,7 +941,7 @@ export function deriveResidualNeeds({ roots, recipes, held, production = [] }) {
     const count = held instanceof Map ? held.get(item) : undefined
     if (!Number.isSafeInteger(count) || count < 0) return { ok: false, reason: `held_unknown:${item}` }
     const missing = Math.max(0, required - count)
-    const row = { item, required, held: count, missing }
+    const row = { item, required, held: count, missing, ...purposes.get(item) }
     const expansion = expansions.get(item)
     if (expansion && missing > 0) {
       const crafts = Math.ceil(missing / expansion.output)
@@ -918,9 +978,166 @@ export function triggerProductionRoots(research, limits = EXECUTOR_FACT_LIMITS) 
     if (!item || !Number.isSafeInteger(trigger.count) || trigger.count < 1) continue
     if (trigger.item_quality !== undefined && trigger.item_quality !== 'normal') continue
     if (roots.some(root => root.item === item && root.technology === path.target)) continue
-    roots.push({ item, count: trigger.count, technology: path.target, held_counted: false, ...(typeof node.status === 'string' && node.status ? { status: oneLine(node.status, 40) } : {}) })
+    roots.push({ item, count: trigger.count, technology: path.target, held_counted: false, ...(typeof node.status === 'string' && node.status ? { status: oneLine(node.status, 40) } : {}),
+      // Unit 9: a craft is credited only while every prerequisite is researched; the root says so when some is not.
+      ...(node.credited_only_after_prerequisites === true ? { credited_only_after_prerequisites: true, unresolved_prerequisites: asList(node.unresolved_prerequisites).map(factName).filter(Boolean).slice(0, 4) } : {}),
+      ...(node.enabled === false ? { technology_disabled: true } : {}) })
   }
   return roots.slice(0, limits.researchTargets)
+}
+
+// --- Build bills and science residuals (unit 9) ------------------------------------------------------------------------
+//
+// A build step's contract is "N entities of prototype X exist" (entity_count). What it asks the actor to HAVE is the prototype's
+// placing item, N minus what is already placed times the count one placement consumes; the mod's getPrototypeDetails names that
+// item. A science research step's contract is research_completed for a technology whose unit cost is count x ingredients; what
+// it asks the actor to have is the packs, less the progress the force already made. Both become ordinary roots of the recipe
+// closure and the residual derivation. Nothing here names an item or an entity.
+
+/** The placing item of an entity prototype out of a parsed getPrototypeDetails answer: `{ prototype, item, count }` or `{ prototype, unresolved }`. */
+export function placingItemFromDetails(parsed, prototype) {
+  const unresolved = reason => ({ prototype, unresolved: reason })
+  if (!parsed || typeof parsed !== 'object' || parsed.found !== true) return unresolved('prototype_read_failed')
+  const entity = parsed.entity
+  if (!entity || typeof entity !== 'object' || entity.name !== prototype) return unresolved('not_an_entity_prototype')
+  const items = asList(entity.place_items).map(entry => ({ name: factName(entry?.name), count: entry?.count })).filter(entry => entry.name)
+  if (items.length === 0) return unresolved('no_placing_item')
+  if (items.length > 1) return unresolved('several_placing_items')
+  const count = Number.isSafeInteger(items[0].count) && items[0].count >= 1 ? items[0].count : undefined
+  return count ? { prototype, item: items[0].name, count } : unresolved('placing_item_count_unreadable')
+}
+
+/** An observed placed count out of a parsed entity_count condition answer, or undefined (never zero for an unreadable answer). */
+export function placedCountFromRead(parsed, prototype) {
+  if (!parsed || parsed.ok !== true || parsed.kind !== 'entity_count' || parsed.prototype !== prototype) return undefined
+  return Number.isSafeInteger(parsed.current) && parsed.current >= 0 ? parsed.current : undefined
+}
+
+/**
+ * The bill of a build step: per entity_count requirement the placing item times the entities still missing. `placing` is a Map of
+ * prototype to a placingItemFromDetails result, `placed` a Map of requirement id to the observed placed count (absent: unknown, and
+ * then the whole minimum is the need). Returns `{ roots, rows, unresolved }`; a prototype whose placing item is unknown is listed
+ * in `unresolved` with the reason, never guessed.
+ */
+export function deriveBuildBill({ builds, placing = new Map(), placed = new Map(), stateCounts = new Map() }) {
+  const roots = []
+  const rows = []
+  const unresolved = []
+  for (const build of asList(builds)) {
+    const resolved = placing.get(build.prototype)
+    if (!resolved || resolved.unresolved) {
+      unresolved.push({ prototype: build.prototype, reason: resolved?.unresolved ?? 'placing_item_not_read' })
+      continue
+    }
+    const have = placed.get(build.id)
+    // An unread placed count is not guessed (the whole minimum would add items for entities that may already stand): the prototype is
+    // left out of the bill and named, as every other unread count is not turned into a derived quantity.
+    if (!Number.isSafeInteger(have) || have < 0) {
+      unresolved.push({ prototype: build.prototype, reason: 'placed_count_unread' })
+      continue
+    }
+    const remaining = Math.max(0, build.minimum - have)
+    // `placed` counts the entities that stand, whatever their state; the state scope (working, powered) is a separate read fact.
+    const stateCount = build.state && Number.isSafeInteger(stateCounts.get(build.id)) ? stateCounts.get(build.id) : undefined
+    const stateNote = build.state ? { state: build.state, ...(stateCount !== undefined ? { state_count: stateCount } : {}) } : {}
+    rows.push({ prototype: build.prototype, item: resolved.item, per_entity: resolved.count, minimum: build.minimum, placed: have, remaining, ...stateNote })
+    if (remaining < 1) continue
+    const count = remaining * resolved.count
+    const existing = roots.find(root => root.item === resolved.item)
+    const note = { prototype: build.prototype, minimum: build.minimum, remaining, placed: have, ...stateNote }
+    if (existing) { existing.count += count; existing.build = { ...existing.build, remaining: existing.build.remaining + remaining } }
+    else roots.push({ item: resolved.item, count, build: note })
+  }
+  return { roots, rows, unresolved }
+}
+
+/**
+ * The science research targets of the active step: fresh getResearchPath facts whose target node is a not-yet-researched science
+ * technology with a complete unit cost (a count and every ingredient amount). Bounded by `researchTargets`.
+ */
+export function scienceTargets(research, limits = EXECUTOR_FACT_LIMITS) {
+  const targets = []
+  for (const path of asList(research)) {
+    if (path?.state !== 'fresh') continue
+    const node = asList(path.nodes).find(entry => entry?.name === path.target)
+    const science = node?.science
+    if (!node || node.researched !== false || node.mode !== 'science' || !science || science.ingredients_truncated === true) continue
+    const units = science.count
+    if (!Number.isSafeInteger(units) || units < 1) continue
+    const ingredients = asList(science.ingredients).map(entry => ({ item: factName(entry?.name), amount: entry?.amount }))
+    if (ingredients.length === 0 || ingredients.some(entry => !entry.item || !Number.isSafeInteger(entry.amount) || entry.amount < 1)) continue
+    if (targets.some(target => target.technology === path.target)) continue
+    targets.push({ technology: path.target, units, ingredients,
+      ...(asList(node.unresolved_prerequisites).length > 0 ? { unresolved_prerequisites: asList(node.unresolved_prerequisites).map(factName).filter(Boolean).slice(0, 4) } : {}) })
+  }
+  return targets.slice(0, limits.researchTargets)
+}
+
+/**
+ * The research progress fraction (0..1) out of a parsed getTechnology answer for that technology, or undefined when it is not reported.
+ * Uses the answer's `progress` (the mod reads LuaForce.research_progress for the current research and saved_progress for any other);
+ * `saved_progress` alone is never used, because for the current research it is not the progress made.
+ */
+export function scienceProgressFromRead(parsed, technology) {
+  if (!parsed || typeof parsed !== 'object' || parsed.found !== true || parsed.name !== technology || parsed.researched === true) return undefined
+  const progress = parsed.progress
+  return finiteNumber(progress) !== undefined && progress >= 0 && progress <= 1 ? progress : undefined
+}
+
+/**
+ * The packs a science research still needs: units x each ingredient amount, less the progress already made. `progress` is a Map of
+ * technology to the fraction read from the live game; a technology without an entry has unknown progress and is NOT netted (the
+ * whole unit cost is the need). `consumers` names the lab prototypes the packs are consumed in. Returns `{ technology, ...,
+ * roots }`, one root per ingredient with a count above zero.
+ */
+export function scienceProductionRoots(targets, progress = new Map(), consumers = []) {
+  return asList(targets).map((target) => {
+    const done = progress instanceof Map ? progress.get(target.technology) : undefined
+    const known = finiteNumber(done) !== undefined
+    const remaining = known ? Math.max(0, Math.ceil(target.units * (1 - done) - 1e-9)) : target.units
+    const packs = target.ingredients.map(entry => ({ item: entry.item, amount: entry.amount, count: remaining * entry.amount }))
+    const science = { technology: target.technology, units: target.units, remaining_units: remaining, progress_known: known,
+      ...(known ? { progress: Math.round(done * 1000) / 1000 } : {}), consumers: asList(consumers).slice(0, 4) }
+    return { technology: target.technology, units: target.units, remaining_units: remaining, progress_known: known,
+      ...(known ? { progress: science.progress } : {}), packs, unresolved_prerequisites: target.unresolved_prerequisites,
+      roots: packs.filter(pack => pack.count > 0).map(pack => ({ item: pack.item, count: pack.count, science: { ...science, amount: pack.amount } })) }
+  })
+}
+
+/** The lab candidates out of a parsed discoverPrototypes (entity-type lab) answer, or undefined when the answer is not that read. */
+export function labCandidatesFromRead(parsed, limits = EXECUTOR_FACT_LIMITS) {
+  if (!parsed || parsed.ok !== true || parsed.query?.capability !== 'entity-type' || parsed.query?.entity_type !== 'lab' || !Array.isArray(parsed.candidates)) return undefined
+  return parsed.candidates.slice(0, limits.labCandidates).flatMap((entry) => {
+    const name = factName(entry?.name)
+    if (!name || entry.type !== 'lab') return []
+    const items = asList(entry.place_items).map(item => factName(item?.name)).filter(Boolean)
+    const heldCount = Number.isSafeInteger(entry.held_count) && entry.held_count >= 0 ? entry.held_count : 0
+    return [{ name, energy_source: MACHINE_ENERGY_SOURCES.has(entry.energy_source) ? entry.energy_source : 'unknown',
+      ...(items.length === 1 ? { item: items[0] } : {}), enabled_recipe: typeof entry.enabled_recipe === 'string', held_count: heldCount }]
+  })
+}
+
+/**
+ * The labs, as machine_energy entries: native energy source, the item that places them, a fresh held count when the harness read
+ * one, and whether an instance was observed placed. The consuming machine of research packs; `consumes` says so.
+ */
+export function labMachineEntries({ candidates, held = new Map(), placed = new Map() }) {
+  return asList(candidates).map((entry) => {
+    const count = entry.item && held instanceof Map ? held.get(entry.item) : undefined
+    const seen = placed instanceof Map ? placed.get(entry.name) : undefined
+    return { name: entry.name, energy_source: entry.energy_source, ...(entry.item ? { item: entry.item } : {}),
+      status: entry.enabled_recipe ? 'craftable' : entry.held_count > 0 ? 'held' : 'available',
+      held: Number.isSafeInteger(count) && count >= 0 ? count : undefined,
+      placed: seen ? { observed: true, count: seen.count, via: seen.via } : { observed: false }, consumes: 'research_packs' }
+  })
+}
+
+/** machine_energy with the labs appended (they are not crafting machines of any recipe, so the recipe derivation never lists them). */
+export function withLabEnergy(machineEnergy, labs) {
+  const entries = asList(labs)
+  if (entries.length === 0) return machineEnergy
+  if (!machineEnergy) return { machines: entries, omitted: { locked: 0, unverified: 0, unread: 0, truncated: 0 }, burner_count: 0, fuel_categories: [] }
+  return { ...machineEnergy, machines: [...machineEnergy.machines, ...entries] }
 }
 
 /** The names of the recipes a derivation expands the given items with (the same single recipe `expandableRecipe` picks). */
@@ -947,7 +1164,8 @@ export function burnerFuelsFromDetails(parsed, limits = EXECUTOR_FACT_LIMITS) {
     const value = finiteNumber(entry?.fuel_value)
     if (!name || !category || value === undefined || !(value > 0)) return []
     const minedFrom = [...new Set(asList(entry.mined_from).map(factName).filter(Boolean))].slice(0, limits.rawLeafMinedFrom)
-    return [{ name, category, fuel_value: value, mined_from: minedFrom }]
+    const harvestedFrom = [...new Set(asList(entry.harvested_from).map(factName).filter(Boolean))].slice(0, limits.rawLeafHarvestedFrom)
+    return [{ name, category, fuel_value: value, mined_from: minedFrom, ...(harvestedFrom.length > 0 ? { harvested_from: harvestedFrom } : {}) }]
   })
 }
 
@@ -1022,11 +1240,14 @@ export function deriveFuelNeeds({ machineEnergy, fuels, held = new Map(), limits
   const burners = asList(machineEnergy?.machines).filter(entry => entry.energy_source === 'burner')
   if (burners.length === 0) return undefined
   const categories = machineEnergy.fuel_categories
+  // A fuel with a natural source (mined or harvested) outranks one with none, then name order.
+  const sourced = fuel => fuel.mined_from?.length > 0 || fuel.harvested_from?.length > 0
   const ordered = asList(fuels).filter(fuel => categories.includes(fuel.category))
-    .sort((left, right) => ((right.mined_from?.length > 0) - (left.mined_from?.length > 0)) || (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
+    .sort((left, right) => (sourced(right) - sourced(left)) || (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
   const items = ordered.slice(0, limits.fuelItems).map((fuel) => {
     const count = held instanceof Map ? held.get(fuel.name) : undefined
     return { name: fuel.name, category: fuel.category, fuel_value: fuel.fuel_value, mined_from: fuel.mined_from,
+      ...(fuel.harvested_from?.length > 0 ? { harvested_from: fuel.harvested_from } : {}),
       held: Number.isSafeInteger(count) && count >= 0 ? count : undefined }
   })
   const heldTotal = items.reduce((sum, item) => sum + (item.held ?? 0), 0)
@@ -1104,10 +1325,10 @@ export function recipeFactLine(fact, max = EXECUTOR_FACT_LIMITS.recipeChars) {
 
 function countsRecords(counts, limits) {
   const records = []
-  const items = asList(counts?.items).filter(entry => factName(entry?.item) && Number.isSafeInteger(entry.count)).slice(0, limits.countItems)
+  const items = asList(counts?.items).filter(entry => factName(entry?.item) && Number.isSafeInteger(entry.count)).slice(0, limits.countItemsMax)
   const fresh = items.filter(entry => entry.state === 'fresh')
   const stale = items.filter(entry => entry.state === 'stale')
-  const unavailable = asList(counts?.unavailable).map(factName).filter(Boolean).slice(0, limits.countItems)
+  const unavailable = asList(counts?.unavailable).map(factName).filter(Boolean).slice(0, limits.countItemsMax)
   if (counts?.deferred === 'batch_in_flight') {
     records.push({
       key: 'counts_deferred',
@@ -1156,18 +1377,68 @@ function machineRecord(machine, limits) {
   }
 }
 
+// What a root is for, next to its arithmetic (unit 9): the build it places, or the research whose packs it is.
+function rowPurposeText(row) {
+  const parts = []
+  if (row.build) {
+    const state = row.build.state ? ` ${row.build.state}=${row.build.state_count ?? 'unknown'}` : ''
+    parts.push(`[build ${row.build.prototype}: placed=${row.build.placed}${state} of ${row.build.minimum}, ${row.build.remaining} more to place]`)
+  }
+  if (row.science) {
+    const consumers = asList(row.science.consumers)
+    const progress = row.science.progress_known ? `research progress ${Math.round(row.science.progress * 100)}% netted` : 'research progress unknown, not netted'
+    parts.push(`[science ${row.science.technology}: ${row.science.remaining_units} of ${row.science.units} units x${row.science.amount} per unit, ${progress}; consumed by ${consumers.length > 0 ? consumers.join(',') : 'labs (none listed)'}]`)
+  }
+  return parts.length > 0 ? ` ${parts.join(' ')}` : ''
+}
+
+// A trigger the craft is only credited to once its prerequisites are researched (crafted_items.ts) says so instead of presenting the craft as productive.
+function triggerRowText(row) {
+  const trigger = row.trigger
+  const names = asList(trigger.unresolved_prerequisites).filter(Boolean)
+  const why = [
+    ...(trigger.credited_only_after_prerequisites === true ? [names.length > 0 ? `prerequisites ${names.join(',')} unresolved` : 'a prerequisite is unresolved'] : []),
+    ...(trigger.technology_disabled === true ? ['technology disabled'] : []),
+  ]
+  const credit = why.length > 0
+    ? `not ready: ${why.join(', ')}; crafts now are not credited; held stock not counted`
+    // A research trigger counts NEW crafts: held stock of the item is shown for context, never netted against the count.
+    : 'counts new crafts; held stock not counted'
+  return `trigger craft-item ${row.item} count=${row.required} for ${trigger.technology} (${credit})${row.held !== undefined ? ` held=${row.held}` : ''}${trigger.status && trigger.status !== 'ready' ? ` tech_status=${trigger.status}` : ''}${row.crafts !== undefined ? ` crafts=${row.crafts} via ${row.recipe}` : ''}`
+}
+
+// Build prototypes whose placing item could not be resolved are named with the reason, not dropped from the bill silently.
+function residualUnresolvedText(residual) {
+  const unresolved = asList(residual?.unresolved_builds)
+  return unresolved.length > 0 ? ` | build_unresolved (no placing item derived, not in this bill): ${unresolved.map(entry => `${entry.prototype}:${entry.reason}`).join(',')}` : ''
+}
+
 function residualRecord(residual, limits) {
+  // A residual that could not be derived because the closure outgrew the count-read bound is stated with what is unread, never silently absent.
+  if (residual?.omitted) {
+    const omitted = residual.omitted
+    const why = `${omitted.reason}: the step closure has ${omitted.closure_items} items, more than the ${omitted.cap} counts the harness reads`
+    return { key: 'residual_needs', block: 'step', drop: 'residual_needs',
+      text: `residual_needs (NOT derived, ${why}; unread: ${joinBounded(asList(omitted.unread), ',', limits.residualChars) || 'none listed'})` }
+  }
+  // Builds with a state scope (working, powered) that need nothing more placed: the entities stand, the state count is a read fact.
+  const stateFacts = asList(residual?.build_states).map(row => `${row.prototype} placed=${row.placed} ${row.state}=${row.state_count ?? 'unknown'} of ${row.minimum}, ${row.remaining} more to place`)
+  const stateText = stateFacts.length > 0 ? ` | build_state (read fact, not netted): ${stateFacts.join('; ')}` : ''
+  if ((!residual?.rows || residual.rows.length === 0) && stateFacts.length > 0) {
+    return { key: 'residual_needs', block: 'step', drop: 'residual_needs',
+      text: `residual_needs (nothing left to acquire for the step contract builds; entities standing, state counts read now)${stateText}${residualUnresolvedText(residual)}` }
+  }
   if (!residual?.rows || residual.rows.length === 0) return undefined
   const rows = residual.rows.slice(0, limits.residualRows).map(row => row.trigger
-    // A research trigger counts NEW crafts: held stock of the item is shown for context, never netted against the count.
-    ? `trigger craft-item ${row.item} count=${row.required} for ${row.trigger.technology} (counts new crafts; held stock not counted)${row.held !== undefined ? ` held=${row.held}` : ''}${row.trigger.status && row.trigger.status !== 'ready' ? ` tech_status=${row.trigger.status}` : ''}${row.crafts !== undefined ? ` crafts=${row.crafts} via ${row.recipe}` : ''}`
-    : `${row.item} required=${row.required} held=${row.held} missing=${row.missing}${row.crafts !== undefined ? ` crafts=${row.crafts} via ${row.recipe}` : ''}`)
-  const roots = [...asList(residual.roots).map(root => `${root.item}>=${root.count}`), ...asList(residual.production).map(root => `trigger:${root.item}x${root.count}`)].join(',')
+    ? triggerRowText(row)
+    : `${row.item} required=${row.required} held=${row.held} missing=${row.missing}${row.crafts !== undefined ? ` crafts=${row.crafts} via ${row.recipe}` : ''}${rowPurposeText(row)}`)
+  const rootLabel = root => root.build ? `build:${root.build.prototype}x${root.build.remaining}` : root.science ? `science:${root.item}x${root.count}` : `${root.item}>=${root.count}`
+  const roots = [...asList(residual.roots).map(rootLabel), ...asList(residual.production).map(root => `trigger:${root.item}x${root.count}`)].join(',')
   return {
     key: 'residual_needs',
     block: 'step',
     drop: 'residual_needs',
-    text: `residual_needs (derived from recipe_fact and fresh held_counts for the step contract ${roots}; shared stock counted once): ${joinBounded(rows, ' | ', limits.residualChars)}`,
+    text: `residual_needs (derived from recipe_fact and fresh held_counts for the step contract ${roots}; shared stock counted once): ${joinBounded(rows, ' | ', limits.residualChars)}${stateText}${residualUnresolvedText(residual)}`,
   }
 }
 
@@ -1193,7 +1464,7 @@ function machineSourceText(entry) {
 // where to put it and how much fuel it needs stay the executor's decisions.
 function machineEnergyRecord(machineEnergy, limits) {
   if (!machineEnergy) return undefined
-  const machines = asList(machineEnergy.machines).map(entry => `${entry.name} energy=${machineSourceText(entry)} status=${entry.status} held=${entry.held ?? 'unknown'} placed=${entry.placed?.observed ? `observed(x${entry.placed.count} via ${entry.placed.via})` : 'not_observed'}`)
+  const machines = asList(machineEnergy.machines).map(entry => `${entry.name} energy=${machineSourceText(entry)} status=${entry.status} held=${entry.held ?? 'unknown'} placed=${entry.placed?.observed ? `observed(x${entry.placed.count} via ${entry.placed.via})` : 'not_observed'}${entry.consumes ? ` consumes=${entry.consumes}` : ''}`)
   const omitted = machineEnergy.omitted ?? {}
   const unlisted = [omitted.locked > 0 ? `locked=${omitted.locked}` : '', omitted.unverified > 0 ? `unverified=${omitted.unverified}` : '', omitted.unread > 0 ? `unread=${omitted.unread}` : '', omitted.truncated > 0 ? `truncated=${omitted.truncated}` : ''].filter(Boolean)
   return {
@@ -1205,8 +1476,8 @@ function machineEnergyRecord(machineEnergy, limits) {
 }
 
 // The fuel burner machines need (unit 8): the item candidates their fuel categories accept, what the actor holds of them, and, when none is
-// held, how each is natively acquired and where the nearest resource instance was last read. Resources only: items yielded by
-// non-resource entities (trees and the like) are not searched.
+// held, how each is natively acquired and where the nearest source instance was last read: a resource that mines into it
+// (mined_from) or a natural tree or rock the harvest operation mines for it (harvested_from).
 function fuelNeedsRecord(fuel, limits) {
   if (!fuel) return undefined
   const items = asList(fuel.items)
@@ -1217,9 +1488,12 @@ function fuelNeedsRecord(fuel, limits) {
     const base = `${item.name} fuel_value=${megajoules(item.fuel_value)} held=${item.held ?? 'unknown'}`
     if (!searched) return base
     if (item.raw) return `${base} ${rawLeafRowText(item.raw)}`
-    return asList(item.mined_from).length > 0 ? `${base} raw: mined_from=${item.mined_from.join(',')} nearest=not_read` : `${base} no_resource_source`
+    const mined = asList(item.mined_from)
+    const harvested = asList(item.harvested_from)
+    if (mined.length === 0 && harvested.length === 0) return `${base} no_derived_source`
+    return [base, mined.length > 0 ? `raw: mined_from=${mined.join(',')} nearest=not_read` : '', harvested.length > 0 ? `harvest: harvested_from=${harvested.join(',')} nearest=not_read` : ''].filter(Boolean).join(' ')
   })
-  const head = `fuel_needs (burner ${asList(fuel.machines).join(',')} burn fuel_categories=${asList(fuel.categories).join('+') || 'unknown'}; candidates from item prototypes, held from the fresh read; amount needed not derived; sources searched are resource prototypes only, no_resource_source = none yields it, trees and other non-resource sources are not derived)`
+  const head = `fuel_needs (burner ${asList(fuel.machines).join(',')} burn fuel_categories=${asList(fuel.categories).join('+') || 'unknown'}; candidates from item prototypes, held from the fresh read; amount needed not derived; sources derived from prototypes: resources that mine into the item (mined_from) and the natural trees and rocks the harvest operation mines for it (harvested_from), no_derived_source = neither yields it)`
   const body = `held_fuel=${heldText}${!searched && items.length > 0 ? ' (acquisition not searched)' : ''}${parts.length > 0 ? ` | ${joinBounded(parts, ' | ', limits.fuelChars)}` : ' | candidates=not_reported (the recipe read carried no fuel list)'}`
   return { key: 'fuel_needs', block: 'step', drop: 'fuel_needs', text: `${head}: ${body}` }
 }

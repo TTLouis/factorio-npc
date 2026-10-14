@@ -22,13 +22,22 @@ import { EXECUTOR_ROLE, PLANNER_ROLE, roleSystemPrompt } from './agent-roles.mjs
 import {
   buildHandoffPacket,
   burnerFuelsFromDetails,
+  deriveBuildBill,
   deriveFuelNeeds,
   deriveMachineEnergy,
   deriveResidualNeeds,
   EXECUTOR_FACT_LIMITS,
   expansionRecipeNames,
+  labCandidatesFromRead,
+  labMachineEntries,
   machineStatusesFrom,
+  placedCountFromRead,
+  placingItemFromDetails,
+  scienceProductionRoots,
+  scienceProgressFromRead,
+  scienceTargets,
   triggerProductionRoots,
+  withLabEnergy,
   executorFactsRefreshMessage,
   mergeRecipeFact,
   neededItems,
@@ -500,7 +509,7 @@ function contentCarriesPlan(content) {
   }
   return false
 }
-const WORLD_STATE_REQUIREMENT_KINDS = new Set(['inventory_count', 'entity_inventory_count', 'entity_exists', 'entity_state', 'research_completed'])
+const WORLD_STATE_REQUIREMENT_KINDS = new Set(['inventory_count', 'entity_count', 'entity_inventory_count', 'entity_exists', 'entity_state', 'research_completed'])
 const EXACT_ENTITY_TARGET_OPERATIONS = new Set([
   'walk_to_entity_exact',
   'mine_entity_exact',
@@ -872,7 +881,7 @@ function freshCheckpointReadGap(contract, facts) {
       if (fact.authoritative !== true) return { reason: 'checkpoint_unreadable', requirement_id: requirement.id }
       continue
     }
-    const countKind = requirement.kind === 'inventory_count' || requirement.kind === 'entity_inventory_count'
+    const countKind = requirement.kind === 'inventory_count' || requirement.kind === 'entity_inventory_count' || requirement.kind === 'entity_count'
     const unread = String(fact.summary ?? '').startsWith('condition_observation_failed')
       || (countKind ? !Number.isFinite(fact.current) : fact.exists !== true && fact.exists !== false)
     if (unread) return { reason: 'checkpoint_unreadable', requirement_id: requirement.id }
@@ -2971,6 +2980,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.handoffFuelSources = new Map() // nearest-instance fuel resource reads, keyed plan|step|actor|epoch|resource: reused within one step and epoch
     this.handoffBurnerFuels = new Map() // fuel items the mod reported for burner machines' fuel categories: stable prototype data, keyed by item
     this.handoffNoRecipeItems = new Set() // items the game answered "no recipe" for (raw resources): stable data, not re-read
+    this.handoffPlacingItems = new Map() // entity prototype -> the item that places it (unit 9 build bills): stable prototype data
     this.handoffTriggerCraftingReports = []
     this.handoffInventoryObservations = new Map()
     this.handoffTouchedItems = new Set()
@@ -4760,6 +4770,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }, { requestId }).catch(() => {})
         for (const fact of recipeFactsFromDetails(parsed, { tag })) this.rememberRecipeFact(fact)
       }
+      else if (toolName === 'getPrototypeDetails') {
+        // The item that places an entity prototype is stable prototype data a later build bill need not read again.
+        let parsed
+        try { parsed = JSON.parse(String(raw ?? '')) }
+        catch { return }
+        if (typeof args?.name === 'string' && parsed?.found === true && parsed.entity?.name === args.name) this.rememberPlacingItem(placingItemFromDetails(parsed, args.name))
+      }
       else if (toolName === 'getFluidSourceTiles') {
         // Only a well-formed answer to the request that was made adds anchors; an empty, failed or mismatched read changes nothing.
         const learned = fluidSourceHintsFromRead(raw, args, this.observationTag())
@@ -4784,6 +4801,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     catch (error) {
       this.log(`[handoff] fact capture failed: ${error instanceof Error ? error.message : String(error)}`)
     }
+  }
+
+  // A resolved placing item, or a stable reason there is none (a prototype nothing places). A failed read is not stable and is never kept.
+  rememberPlacingItem(entry) {
+    if (!entry?.prototype || entry.unresolved === 'prototype_read_failed') return
+    this.handoffPlacingItems.delete(entry.prototype)
+    this.handoffPlacingItems.set(entry.prototype, entry)
+    while (this.handoffPlacingItems.size > EXECUTOR_FACT_LIMITS.noRecipeItems) this.handoffPlacingItems.delete(this.handoffPlacingItems.keys().next().value)
   }
 
   // The recipe a requires_machine preflight reported (repair unit D1 facts), with its compatible machine names.
@@ -4845,8 +4870,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // remembered so raw resources are not re-read at every restage. Results go through recordHandoffToolFacts, so the recipe
   // cache bound applies. A fence refusal (`error.handoffFence`) rolls back what this call added and rethrows. Returns
   // { reads, found, unreadable, no_recipe, truncated }; `truncated` means an uncached item was left unread.
-  async prefetchRecipeClosure({ roots, fence, requestId, refresh = false }) {
+  async prefetchRecipeClosure({ roots, fence, requestId, refresh = false, maxReads }) {
     const limits = EXECUTOR_FACT_LIMITS
+    const readBound = Number.isSafeInteger(maxReads) ? maxReads : limits.recipePrefetchReads
     const stats = { reads: 0, found: 0, unreadable: 0, no_recipe: 0, truncated: false }
     const before = new Map(this.handoffRecipeFacts)
     const queriesBefore = new Set(this.handoffRecipeQueries)
@@ -4871,7 +4897,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         if (seen.has(item)) continue
         seen.add(item)
         if (!knownRecipe(item)) {
-          if (stats.reads >= limits.recipePrefetchReads) { stats.truncated = true; break }
+          if (stats.reads >= readBound) { stats.truncated = true; break }
           if (!fenced) { await this.handoffFenceCheck(fence, 'before'); fenced = true }
           stats.reads += 1
           let raw
@@ -4985,7 +5011,92 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // Unit 8: a research step on a trigger technology has no inventory root; its production root is the fresh research path's own
       // craft-item item and count. It enters the same recipe closure and residual derivation, and is never netted against held stock.
       const triggerRoots = triggerProductionRoots(research)
-      const closureRoots = [...needs.roots, ...triggerRoots.map(root => ({ item: root.item, count: root.count }))]
+      // Unit 9. A science research step needs the packs its unit cost names, less the progress the force already made, and the labs
+      // consume them; the live progress and the lab prototypes are read here (never while a batch is in flight, under the same fence).
+      const sciences = scienceTargets(research)
+      const progress = new Map()
+      let labCandidates
+      if (sciences.length > 0 && fence && !inFlight) {
+        try {
+          await this.handoffFenceCheck(fence, 'before')
+          for (const target of sciences) {
+            meta.reads_attempted += 1
+            try {
+              const fraction = scienceProgressFromRead(JSON.parse(String(await this.rcon.command(this.observationToolCommand('getTechnology', { name: target.technology }))).trim()), target.technology)
+              if (fraction === undefined) meta.reads_failed += 1
+              else progress.set(target.technology, fraction)
+            }
+            catch { meta.reads_failed += 1 }
+          }
+          meta.reads_attempted += 1
+          try {
+            labCandidates = labCandidatesFromRead(JSON.parse(String(await this.rcon.command(this.observationToolCommand('discoverPrototypes', { capability: 'entity-type', entity_type: 'lab', limit: limits.labCandidates }))).trim()), limits)
+            if (labCandidates === undefined) meta.reads_failed += 1
+          }
+          catch { meta.reads_failed += 1 }
+          await this.handoffFenceCheck(fence, 'during')
+        }
+        catch (error) {
+          if (error?.handoffFence) return { refusal: error.handoffFence, meta }
+          progress.clear()
+          labCandidates = undefined
+        }
+      }
+      // Unit 9. A build step (entity_count) needs the placing item of each prototype, times what is not placed yet. The placing item is
+      // stable prototype data (cached); the placed count is a live read under the requirement's own scope.
+      const builds = needs.builds ?? []
+      const placing = new Map()
+      const placedCounts = new Map()
+      const stateCounts = new Map()
+      if (builds.length > 0 && fence && !inFlight) {
+        try {
+          await this.handoffFenceCheck(fence, 'before')
+          for (const build of builds) {
+            let known = this.handoffPlacingItems.get(build.prototype)
+            if (!known) {
+              meta.reads_attempted += 1
+              try {
+                known = placingItemFromDetails(JSON.parse(String(await this.rcon.command(this.observationToolCommand('getPrototypeDetails', { name: build.prototype }))).trim()), build.prototype)
+              }
+              catch { known = { prototype: build.prototype, unresolved: 'prototype_read_failed' } }
+              if (known.unresolved === 'prototype_read_failed') meta.reads_failed += 1
+              this.rememberPlacingItem(known)
+            }
+            placing.set(build.prototype, known)
+            meta.reads_attempted += 1
+            try {
+              // The placed count ignores the state scope (an unpowered engine stands and needs no second engine's items); radius and anchor
+              // stay, they define where entities count. The state-scoped count is read separately, as a fact.
+              const scope = { ...(build.radius !== undefined ? { radius: build.radius } : {}), ...(build.anchor ? { anchor: build.anchor } : {}) }
+              const count = placedCountFromRead(JSON.parse(String(await this.rcon.command(runtimeConditionCommand({ kind: 'entity_count', prototype: build.prototype, minimum: 1, ...scope }))).trim()), build.prototype)
+              if (count === undefined) meta.reads_failed += 1
+              else placedCounts.set(build.id, count)
+              if (build.state && count !== undefined) {
+                meta.reads_attempted += 1
+                try {
+                  const inState = placedCountFromRead(JSON.parse(String(await this.rcon.command(runtimeConditionCommand({ kind: 'entity_count', prototype: build.prototype, minimum: 1, ...scope, state: build.state }))).trim()), build.prototype)
+                  if (inState === undefined) meta.reads_failed += 1
+                  else stateCounts.set(build.id, inState)
+                }
+                catch { meta.reads_failed += 1 }
+              }
+            }
+            catch { meta.reads_failed += 1 }
+          }
+          await this.handoffFenceCheck(fence, 'during')
+        }
+        catch (error) {
+          if (error?.handoffFence) return { refusal: error.handoffFence, meta }
+          placing.clear()
+          placedCounts.clear()
+          stateCounts.clear()
+        }
+      }
+      const buildBill = deriveBuildBill({ builds, placing, placed: placedCounts, stateCounts })
+      const labNames = (labCandidates ?? []).map(lab => lab.name)
+      const scienceBill = scienceProductionRoots(sciences, progress, labNames)
+      const inventoryRoots = [...needs.roots, ...buildBill.roots, ...scienceBill.flatMap(entry => entry.roots)]
+      const closureRoots = [...inventoryRoots, ...triggerRoots.map(root => ({ item: root.item, count: root.count }))]
       // Once per restage: the deferred refresh re-derives the same root and does not announce it again.
       if (mode === 'packet') for (const root of triggerRoots) {
         await this.traceEvent('context.trigger_production_derived', {
@@ -4996,7 +5107,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       let prefetchReads = 0 // recipe reads are counted in reads_attempted but are not part of the count refresh's success rate
       if (mode === 'packet' && !inFlight && fence && closureRoots.length > 0) {
         try {
-          const prefetch = await this.prefetchRecipeClosure({ roots: closureRoots, fence, requestId })
+          const prefetch = await this.prefetchRecipeClosure({ roots: closureRoots, fence, requestId, maxReads: builds.length > 0 || sciences.length > 0 ? limits.recipePrefetchReadsBill : undefined })
           meta.recipe_prefetch = prefetch
           meta.reads_attempted += prefetch.reads
           prefetchReads = prefetch.reads
@@ -5023,9 +5134,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       const researchItems = researchFactItems(research)
       const wanted = [...new Set([...needs.items, ...requirementTargets(state.goal?.definition).items.map(item => item.name)])]
-      wanted.unshift(...researchItems)
+      wanted.unshift(...researchItems, ...buildBill.rows.map(row => row.item))
       const cached = withoutRawLeafRecipes([...this.handoffRecipeFacts.values()], this.handoffRawLeaves)
-      const closure = neededItems(closureRoots, cached)
+      // Unit 9: the closure may hold a build bill's worth of items (a steam-power build is about 15); the cap is sized from it.
+      const closure = neededItems(closureRoots, cached, limits.countItemsMax)
       // Unit 8: the machines the closure's recipes can run in, and (for a burner among them) the fuel items to count, are read
       // with the other counts, inside the same bound and fence.
       const closureRecipeNames = expansionRecipeNames(closure.items, cached)
@@ -5045,6 +5157,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           }
         }
         energyScope.fuelNames = [...this.handoffBurnerFuels.values()].filter(fuel => categories.has(fuel.category)).map(fuel => fuel.name)
+        for (const lab of labCandidates ?? []) if (lab.item) energyScope.machineItems.add(lab.item)
       }
       const recipes = selectRecipeFacts(cached, { wanted, needed: closure.items }).map((recipe) => {
         const known = this.handoffRequirementMachines.get(recipe.name)
@@ -5052,26 +5165,30 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           ? { ...recipe, machines: known.machines, machines_truncated: known.truncated, source: `${recipe.source}+requirements` }
           : recipe
       })
+      // The cap is the old fixed one, or the closure plus the machine and fuel counts that ride with it when that is more, up to
+      // `countItemsMax`. The fill-in tail below never reads past the old bound. Whatever the cap cuts is reported as unread.
+      const readCap = Math.min(limits.countItemsMax, Math.max(limits.countItems, closure.items.length + energyScope.machineItems.size + energyScope.fuelNames.length))
       const readItems = []
-      const addItem = (item) => {
-        if (typeof item === 'string' && item && !readItems.includes(item) && readItems.length < limits.countItems) readItems.push(item)
+      const addItem = (item, cap = readCap) => {
+        if (typeof item === 'string' && item && !readItems.includes(item) && readItems.length < cap) readItems.push(item)
       }
-      closure.items.forEach(addItem)
-      needs.items.forEach(addItem)
-      researchItems.forEach(addItem)
-      refreshItems.forEach(addItem)
+      const addTail = item => addItem(item, Math.min(readCap, limits.countItems))
+      closure.items.forEach(item => addItem(item))
+      needs.items.forEach(item => addItem(item))
+      researchItems.forEach(item => addItem(item))
+      refreshItems.forEach(item => addItem(item))
       for (const item of this.handoffTouchedItems ?? []) addItem(item)
       // Unit 8 machine and fuel counts follow the older priorities; whatever the cap cuts is reported as unread, never absent.
-      energyScope.machineItems.forEach(addItem)
-      energyScope.fuelNames.forEach(addItem)
+      energyScope.machineItems.forEach(item => addItem(item))
+      energyScope.fuelNames.forEach(item => addItem(item))
       for (const recipe of recipes) {
-        if (recipe.products.some(product => wanted.includes(product.name))) recipe.ingredients.filter(ingredient => ingredient.type === 'item').forEach(ingredient => addItem(ingredient.name))
+        if (recipe.products.some(product => wanted.includes(product.name))) recipe.ingredients.filter(ingredient => ingredient.type === 'item').forEach(ingredient => addTail(ingredient.name))
       }
       for (const recipe of cached) {
-        recipe.products?.filter(product => product.type !== 'fluid').forEach(product => addItem(product.name))
-        recipe.ingredients?.filter(ingredient => ingredient.type === 'item').forEach(ingredient => addItem(ingredient.name))
+        recipe.products?.filter(product => product.type !== 'fluid').forEach(product => addTail(product.name))
+        recipe.ingredients?.filter(ingredient => ingredient.type === 'item').forEach(ingredient => addTail(ingredient.name))
       }
-      for (const item of this.handoffInventoryObservations.keys()) addItem(item)
+      for (const item of this.handoffInventoryObservations.keys()) addTail(item)
       const machineRequirement = checkpointMachineRequirements(step.completion_contract)[0]
       const historical = this.historicalEntityFacts()
       const fluidHints = [...this.handoffFluidHints.values()].reverse() // newest first
@@ -5159,13 +5276,53 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
 
       let residual
+      // A residual that could not be derived because the closure outgrew the count-read bound is stated in the packet with what is unread.
+      const unreadItems = () => [...closure.items.filter(item => !fresh.has(item)), ...closure.omitted]
+      const omittedResidual = reason => ({ rows: [], roots: inventoryRoots, production: triggerRoots,
+        omitted: { reason, closure_items: closure.items.length + closure.omitted.length, cap: limits.countItemsMax, unread: unreadItems() } })
       if (inFlight) meta.residual_omitted = 'batch_in_flight'
-      else if (needs.roots.length === 0 && triggerRoots.length === 0) meta.residual_omitted = 'no_inventory_contract_root'
-      else if (!closure.complete) meta.residual_omitted = 'too_many_items'
+      else if (inventoryRoots.length === 0 && triggerRoots.length === 0) {
+        meta.residual_omitted = builds.length > 0 ? (buildBill.unresolved.length > 0 ? 'build_placing_item_unresolved' : 'build_requirements_already_met') : 'no_inventory_contract_root'
+      }
+      else if (!closure.complete) {
+        meta.residual_omitted = 'too_many_items'
+        residual = omittedResidual('too_many_items')
+      }
       else {
-        const derived = deriveResidualNeeds({ roots: needs.roots, production: triggerRoots, recipes: cached, held: fresh })
-        if (derived.ok) residual = { rows: derived.rows, roots: needs.roots, production: triggerRoots }
+        const derived = deriveResidualNeeds({ roots: inventoryRoots, production: triggerRoots, recipes: cached, held: fresh })
+        if (derived.ok) residual = { rows: derived.rows, roots: inventoryRoots, production: triggerRoots, ...(buildBill.unresolved.length > 0 ? { unresolved_builds: buildBill.unresolved } : {}) }
+        // An unread count is already carried as a stale or missing count (held_counts_STALE, `no value`): no residual is derived from it.
         else meta.residual_omitted = derived.reason
+      }
+      const standingStates = buildBill.rows.filter(row => row.state && row.remaining < 1)
+      if (standingStates.length > 0 && !residual?.omitted) {
+        residual = { ...(residual ?? { rows: [], roots: inventoryRoots, production: triggerRoots }), build_states: standingStates,
+          ...(buildBill.unresolved.length > 0 ? { unresolved_builds: buildBill.unresolved } : {}) }
+      }
+      if (mode === 'packet' && builds.length > 0) {
+        await this.traceEvent('context.build_bill_derived', {
+          request_id: requestId ?? this.traceRequest?.id,
+          prototypes: builds.map(build => build.prototype),
+          roots: buildBill.roots.map(root => ({ item: root.item, count: root.count, prototype: root.build.prototype, remaining: root.build.remaining })),
+          placed: buildBill.rows.map(row => ({ prototype: row.prototype, placed: row.placed ?? null, minimum: row.minimum, ...(row.state ? { state: row.state, state_count: row.state_count ?? null } : {}) })),
+          items: closure.items,
+          unread: unreadItems(),
+          unresolved: buildBill.unresolved,
+          residual_rows: residual?.rows?.length ?? 0,
+          reason: 'build_step_entity_count_converted_to_placing_item_bill',
+        }, { requestId })
+      }
+      if (mode === 'packet') {
+        for (const entry of scienceBill) {
+          await this.traceEvent('context.science_residual_derived', {
+            request_id: requestId ?? this.traceRequest?.id,
+            technology: entry.technology, units: entry.units, remaining_units: entry.remaining_units,
+            packs: entry.packs.map(pack => ({ item: pack.item, count: pack.count })),
+            progress_known: entry.progress_known, ...(entry.progress_known ? { progress: entry.progress } : {}),
+            labs: labNames, labs_read: labCandidates !== undefined,
+            reason: 'science_unit_cost_converted_to_pack_roots_less_research_progress',
+          }, { requestId })
+        }
       }
 
       // Unit 8: native energy source of the available machines, whether one is held or was seen placed, and the fuel a burner needs.
@@ -5178,6 +5335,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         if (typeof checkpointName === 'string' && checkpointName && !placed.has(checkpointName)) placed.set(checkpointName, { count: 1, via: 'checkpoint_machine' })
         machineEnergy = deriveMachineEnergy({ recipes: cached, recipeNames: closureRecipeNames, statuses: machineStatuses, held: fresh, placed, limits })
         fuelNeeds = deriveFuelNeeds({ machineEnergy, fuels: [...this.handoffBurnerFuels.values()], held: fresh, limits })
+        // The labs that consume a science research's packs (not crafting machines of any recipe, so appended after the fuel derivation).
+        if (labCandidates?.length > 0 && scienceBill.length > 0) machineEnergy = withLabEnergy(machineEnergy, labMachineEntries({ candidates: labCandidates, held: fresh, placed }))
       }
 
       // Native sources for what is missing: raw materials first, then (only when no fuel is held) the resources that yield a fuel.
@@ -5186,9 +5345,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       let sourceReads = 0
       let rawSourceReads = 0
       const rawRows = (residual?.rows ?? []).filter(row => !row.trigger && row.missing > 0 && this.handoffRawLeaves.has(row.item))
-      const rawResources = rawRows.flatMap(row => this.handoffRawLeaves.get(row.item).mined_from)
+      // Unit 9: a natural tree or rock the harvest operation mines for the item is read like a mining resource (nearest instance, same
+      // shared cap), after the resources: mined sources first, then harvest sources.
+      const rawHarvest = rawRows.flatMap(row => this.handoffRawLeaves.get(row.item).harvested_from ?? [])
+      const rawResources = [...rawRows.flatMap(row => this.handoffRawLeaves.get(row.item).mined_from ?? []), ...rawHarvest]
       const fuelSearch = fuelNeeds?.search === 'needed'
-      const fuelResources = fuelSearch ? fuelNeeds.items.flatMap(item => item.mined_from) : []
+      const fuelHarvest = fuelSearch ? fuelNeeds.items.flatMap(item => item.harvested_from ?? []) : []
+      const fuelResources = fuelSearch ? [...fuelNeeds.items.flatMap(item => item.mined_from ?? []), ...fuelHarvest] : []
+      const harvestNames = new Set([...rawHarvest, ...fuelHarvest])
       // A fuel location already read in this step and epoch is reused with its own as_of rather than read again at every refresh.
       const fuelKey = resource => `${plan.plan_id}|${step.step_id}|${fence?.actor_id}|${fence?.epoch}|${resource}`
       const reused = new Map()
@@ -5211,7 +5375,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             let answer
             try { answer = await this.rcon.command(this.observationToolCommand('findLongRangeEntities', { name: resource, max_radius: limits.rawLeafRadius, limit: 1 })) }
             catch { /* An unreadable source is not evidence of absence. */ }
-            const source = rawLeafSourceFromRead(answer, resource, limits.rawLeafRadius)
+            const source = rawLeafSourceFromRead(answer, resource, limits.rawLeafRadius, { harvest: harvestNames.has(resource) })
             if (source.state === 'failed') {
               meta.reads_failed += 1
               if (meta.refresh === 'ok') meta.refresh = 'partial'
@@ -5236,7 +5400,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       for (const row of rawRows) {
         const raw = this.handoffRawLeaves.get(row.item)
-        row.raw = { ...raw, as_of: this.observationTag(), sources: raw.mined_from.map(resource => sources.get(resource) ?? { resource, state: 'not_read' }) }
+        row.raw = { ...raw, as_of: this.observationTag(), sources: (raw.mined_from ?? []).map(resource => sources.get(resource) ?? { resource, state: 'not_read' }),
+          harvest_sources: (raw.harvested_from ?? []).map(resource => sources.get(resource) ?? { resource, state: 'not_read' }) }
       }
       if (rawRows.length) {
         const rawStates = [...new Set(rawResources)].map(resource => sources.get(resource)).filter(Boolean)
@@ -5247,17 +5412,40 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           reads: rawSourceReads,
           found: rawStates.filter(source => source.state === 'found').length,
           failed: rawStates.filter(source => source.state === 'failed').length,
-          truncated: rawRows.some(row => row.raw.sources.some(source => source.state === 'not_read')),
+          truncated: rawRows.some(row => [...row.raw.sources, ...row.raw.harvest_sources].some(source => source.state === 'not_read')),
         }, { requestId })
       }
       if (fuelSearch) {
         for (const item of fuelNeeds.items) {
-          if (item.mined_from.length === 0) continue
+          const names = [...item.mined_from, ...(item.harvested_from ?? [])]
+          if (names.length === 0) continue
           // The label is the oldest read among this item's sources: a reused location keeps the tag of the read it came from.
-          const tags = item.mined_from.map(resource => reused.get(resource)).filter(Boolean)
-          const anyRead = item.mined_from.some(resource => sources.has(resource) && !reused.has(resource))
+          const tags = names.map(resource => reused.get(resource)).filter(Boolean)
+          const anyRead = names.some(resource => sources.has(resource) && !reused.has(resource))
           const oldest = tags.sort((left, right) => (left.at_ms ?? 0) - (right.at_ms ?? 0))[0]
-          item.raw = { mined_from: item.mined_from, as_of: oldest && !anyRead ? oldest : this.observationTag(), sources: item.mined_from.map(resource => sources.get(resource) ?? { resource, state: 'not_read' }) }
+          item.raw = { mined_from: item.mined_from, ...(item.harvested_from ? { harvested_from: item.harvested_from } : {}), as_of: oldest && !anyRead ? oldest : this.observationTag(),
+            sources: item.mined_from.map(resource => sources.get(resource) ?? { resource, state: 'not_read' }),
+            harvest_sources: (item.harvested_from ?? []).map(resource => sources.get(resource) ?? { resource, state: 'not_read' }) }
+        }
+      }
+      // Unit 9: which items carry a natural harvest source, and how much of it was read.
+      {
+        const harvestRows = rawRows.filter(row => row.raw.harvest_sources.length > 0)
+        const harvestFuels = fuelSearch ? fuelNeeds.items.filter(item => item.raw?.harvest_sources?.length > 0) : []
+        if (harvestRows.length > 0 || harvestFuels.length > 0) {
+          const states = [...harvestNames].map(name => sources.get(name))
+          await this.traceEvent('context.harvest_sources_carried', {
+            request_id: requestId ?? this.traceRequest?.id,
+            items: harvestRows.map(row => row.item),
+            fuel_items: harvestFuels.map(item => item.name),
+            sources: [...harvestNames],
+            found: states.filter(source => source?.state === 'found').length,
+            none: states.filter(source => source?.state === 'none').length,
+            failed: states.filter(source => source?.state === 'failed').length,
+            not_read: states.filter(source => !source).length,
+            operation: 'harvest_product',
+            reason: 'natural_trees_and_rocks_the_harvest_operation_mines',
+          }, { requestId })
         }
       }
       if (machineEnergy) meta.machine_energy = { machines: machineEnergy.machines.map(entry => entry.name), burner_count: machineEnergy.burner_count,
@@ -6624,7 +6812,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       catch { return { ok: false, reason: 'research_grounding_failed' } }
     }
-    if (['inventory_count', 'entity_inventory_count', 'entity_exists', 'entity_state'].includes(normalized.kind)) {
+    if (['inventory_count', 'entity_count', 'entity_inventory_count', 'entity_exists', 'entity_state'].includes(normalized.kind)) {
       const exact = Number.isSafeInteger(normalized.unit_number)
         ? this.liveObservedExactTarget(normalized.unit_number)
         : undefined
@@ -7365,6 +7553,44 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async settleIdleStepCheckpoint() {
     return this.closeActiveStepOnFreshRead({ previousState: this.memory.currentPlan?.(this.activePlanKey()), trigger: 'idle_admission' })
   }
+  // One live native read of an entity_count requirement (the mod counts the NPC force's entities of the prototype under the
+  // requirement's own scope). A build step closes on this count and never on a placement receipt, so a failed or malformed read is
+  // a fact that decides nothing (no `authoritative`, no `current`). Every read is traced with the count it saw.
+  async readEntityCountFact(requirement) {
+    const { id: _id, ...condition } = requirement
+    let fact
+    let reason = 'live_world_count_decides_build_step_not_receipt'
+    try {
+      const raw = JSON.parse(String(await this.rcon.command(runtimeConditionCommand(condition))).trim())
+      const authoritative = raw?.ok === true && raw.kind === 'entity_count' && raw.prototype === requirement.prototype && Number.isFinite(raw.current)
+      if (!authoritative) reason = cleanMemoryText(raw?.error || 'entity_count_not_authoritatively_evaluable', 120)
+      fact = {
+        kind: requirement.kind,
+        prototype: requirement.prototype,
+        ...(requirement.radius !== undefined ? { radius: requirement.radius } : {}),
+        ...(requirement.state !== undefined ? { state: requirement.state } : {}),
+        ...(authoritative ? { authoritative: true, current: raw.current } : {}),
+        satisfied: authoritative && raw.satisfied === true,
+        summary: authoritative
+          ? cleanMemoryText(JSON.stringify({ kind: raw.kind, prototype: raw.prototype, current: raw.current, minimum: raw.minimum, found: raw.found, truncated: raw.truncated, state: raw.state, radius: raw.radius }), 600)
+          : `condition_observation_failed:${reason}`,
+      }
+    }
+    catch (error) {
+      reason = `read_failed:${cleanMemoryText(error instanceof Error ? error.message : String(error), 120)}`
+      fact = { kind: requirement.kind, prototype: requirement.prototype, summary: `condition_observation_failed:${reason}` }
+    }
+    try {
+      await this.traceEvent('step.entity_count_checked', {
+        request_id: this.traceRequest?.id, requirement_id: requirement.id, prototype: requirement.prototype, minimum: requirement.minimum,
+        ...(requirement.radius !== undefined ? { radius: requirement.radius } : {}), ...(requirement.state !== undefined ? { state: requirement.state } : {}),
+        authoritative: fact.authoritative === true, current: fact.current, satisfied: fact.satisfied === true, reason,
+      })
+    }
+    catch {}
+    return fact
+  }
+
   async completionFactsForContract(contract, verification, operationNames, { committedIdentity = false } = {}) {
     const facts = {}
     const normalized = sanitizeStepCompletionContract(contract)
@@ -7385,6 +7611,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           operation_names: operationNames,
           summary: cleanMemoryText(verification?.summary, 600),
         }
+        continue
+      }
+      if (requirement.kind === 'entity_count') {
+        facts[requirement.id] = await this.readEntityCountFact(requirement)
         continue
       }
       if (['inventory_count', 'entity_inventory_count', 'entity_exists', 'entity_state'].includes(requirement.kind)) {
@@ -10705,7 +10935,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   targetedResourceSearchNames() {
     // Prototype acquisition facts identify resources; item names and blocker prose do not.
-    return [...new Set([...this.handoffRawLeaves.values(), ...this.handoffBurnerFuels.values()].flatMap(row => row.mined_from ?? []))].sort()
+    return [...new Set([...this.handoffRawLeaves.values(), ...this.handoffBurnerFuels.values()].flatMap(row => [...(row.mined_from ?? []), ...(row.harvested_from ?? [])]))].sort()
   }
 
   controlDecisionState(allowTools) {

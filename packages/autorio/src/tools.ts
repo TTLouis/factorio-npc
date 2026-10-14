@@ -3,13 +3,13 @@ import { create_actor_remote_interface, get_controlled_actor } from './actors/ac
 import type { ControlledActor } from './actors/types'
 import { crafted_item_count, craft_trigger_statistics_count } from './crafted_items'
 import { remember_entity_reference, resolve_exact_entity } from './entity_reference'
-import { evaluate_world_condition, status_name, WORLD_CONDITION_KINDS } from './goal_world_conditions'
+import { entity_has_power, evaluate_world_condition, status_name, WORLD_CONDITION_KINDS } from './goal_world_conditions'
 import { machine_eta } from './production_eta'
 import { create_placement_candidate_set, type PlacementCandidateRequest } from './placement_candidates'
 import { compact_spatial_summary } from './spatial_semantics'
 import { energy_source_kind } from './prototype_knowledge'
 import { get_actor_inventory_items } from './utils/inventory'
-import { find_world_entities } from './npc_vision'
+import { count_world_entities, find_world_entities } from './npc_vision'
 import { fluid_source_observation, type FluidSourceRequest } from './fluid_source_observation'
 import { nearest_pole_for_unpowered, status_shows_no_power } from './electric_facts'
 
@@ -18,6 +18,8 @@ const MAX_NEARBY_RESULTS = 40
 const MAX_ENTITY_STATUS_RADIUS = 32
 const MAX_ENTITY_INVENTORIES = 8
 const MAX_ENTITY_INVENTORY_ITEMS = 20
+const MAX_ENTITY_COUNT_RADIUS = 256
+const MAX_ENTITY_COUNT_SCAN = 2000
 
 function squared_distance(a: { x: number, y: number }, b: { x: number, y: number }) {
   return (a.x - b.x) ** 2 + (a.y - b.y) ** 2
@@ -43,6 +45,53 @@ function entity_item_count(entity: LuaEntity, item_name: string) {
     }
   }
   return count
+}
+
+// "At least `minimum` entities of this prototype exist" for a step contract (a build step). The live world decides: the NPC's
+// force's entities of the prototype on the actor's surface, never a placement receipt. Optional `radius` (around the actor, or
+// around `anchor` {x, y}) and `state` ('working': status working; 'powered': on an electric network and not short of power)
+// narrow the count. Ghosts are not entities of the prototype, so a planned (unbuilt) entity is never counted.
+function evaluate_entity_count(actor: ControlledActor, request: Record<string, unknown>) {
+  const prototype = request.prototype
+  const minimum = request.minimum
+  if (typeof prototype !== 'string' || !positive_integer(minimum)) return { ok: false, error: 'invalid_entity_count_condition' }
+  if (!prototypes.entity[prototype]) return { ok: false, error: 'unknown_entity', prototype }
+  const state = request.state
+  if (state !== undefined && state !== 'working' && state !== 'powered') return { ok: false, error: 'invalid_entity_count_state', prototype }
+  const radius = request.radius
+  if (radius !== undefined && (!positive_integer(radius) || (radius as number) > MAX_ENTITY_COUNT_RADIUS)) return { ok: false, error: 'invalid_entity_count_radius', prototype }
+  const anchor = request.anchor as { x?: unknown, y?: unknown } | undefined
+  if (anchor !== undefined) {
+    if (radius === undefined || typeof anchor !== 'object' || typeof anchor.x !== 'number' || typeof anchor.y !== 'number') {
+      return { ok: false, error: 'invalid_entity_count_anchor', prototype }
+    }
+  }
+  const filters: Record<string, unknown> = { name: prototype, force: actor.force }
+  if (radius !== undefined) {
+    filters.position = anchor !== undefined ? { x: anchor.x as number, y: anchor.y as number } : actor.position
+    filters.radius = radius
+  }
+  const scope = {
+    prototype,
+    minimum,
+    ...(state !== undefined ? { state } : {}),
+    ...(radius !== undefined ? { radius } : {}),
+    ...(anchor !== undefined ? { anchor: { x: anchor.x, y: anchor.y } } : {}),
+    tick: game.tick,
+  }
+  if (state === undefined) {
+    const current = count_world_entities(actor.surface, filters as any)
+    return { ok: true, kind: 'entity_count', satisfied: current >= (minimum as number), current, found: current, truncated: false, ...scope, progress_known: false }
+  }
+  const found = find_world_entities(actor.surface, { ...filters, limit: MAX_ENTITY_COUNT_SCAN + 1 } as any)
+  const truncated = found.length > MAX_ENTITY_COUNT_SCAN
+  let current = 0
+  for (const entity of found) {
+    if (!entity.valid) continue
+    if (state === 'working' ? entity.status === defines.entity_status.working : entity_has_power(entity)) current += 1
+  }
+  // A scan cut at the bound cannot prove more than it counted, so the count never claims the minimum from a cut list alone.
+  return { ok: true, kind: 'entity_count', satisfied: current >= (minimum as number), current, found: math.min(found.length, MAX_ENTITY_COUNT_SCAN), truncated, ...scope, progress_known: false }
 }
 
 // Force-level goal conditions. These answer "is the user's goal met?" rather
@@ -128,6 +177,8 @@ function evaluate_runtime_condition(request: Record<string, unknown>) {
     const current = actor_item_count(actor, item_name)
     return { ok: true, kind, satisfied: current >= (minimum as number), current, minimum, progress_known: false }
   }
+
+  if (kind === 'entity_count') return evaluate_entity_count(actor, request)
 
   if (kind === 'entity_exists' || kind === 'entity_state' || kind === 'entity_inventory_count') {
     const unit_number = request.unit_number

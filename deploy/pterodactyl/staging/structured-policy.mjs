@@ -883,13 +883,28 @@ export function isObservationToolName(name) {
 export function runtimeConditionCommand(rawCondition = {}) {
   const condition = argsObject(rawCondition)
   const kind = condition.kind
-  check(['inventory_count', 'entity_inventory_count', 'entity_exists', 'entity_state'].includes(kind), 'Unsupported runtime condition kind')
+  check(['inventory_count', 'entity_inventory_count', 'entity_exists', 'entity_state', 'entity_count'].includes(kind), 'Unsupported runtime condition kind')
   const request = { kind }
 
   if (kind === 'inventory_count') {
     noExtra(condition, ['kind', 'item_name', 'minimum'])
     request.item_name = factorioName(condition.item_name)
     request.minimum = integer(condition.minimum, 'minimum', 1, Number.MAX_SAFE_INTEGER)
+  }
+  else if (kind === 'entity_count') {
+    noExtra(condition, ['kind', 'prototype', 'minimum', 'radius', 'anchor', 'state'])
+    request.prototype = factorioName(condition.prototype)
+    request.minimum = integer(condition.minimum, 'minimum', 1, Number.MAX_SAFE_INTEGER)
+    if (condition.radius !== undefined) request.radius = integer(condition.radius, 'radius', 1, 256)
+    if (condition.anchor !== undefined) {
+      check(condition.radius !== undefined, 'anchor needs a radius')
+      exactKeys(condition.anchor, ['x', 'y'])
+      request.anchor = { x: finiteNumber(condition.anchor.x, 'anchor.x', -10000256, 10000256), y: finiteNumber(condition.anchor.y, 'anchor.y', -10000256, 10000256) }
+    }
+    if (condition.state !== undefined) {
+      check(['working', 'powered'].includes(condition.state), 'Invalid entity_count state')
+      request.state = condition.state
+    }
   }
   else if (kind === 'entity_inventory_count') {
     noExtra(condition, ['kind', 'unit_number', 'item_name', 'minimum'])
