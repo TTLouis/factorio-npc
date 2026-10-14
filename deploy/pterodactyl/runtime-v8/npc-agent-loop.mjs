@@ -12014,9 +12014,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // a bounded fluid-terrain sample set, and an entity-name read refused because the name is not an entity prototype
   // (a fluid name points at getFluidSourceTiles). Observation-only: neither row changes state or admits anything.
   async traceNativeObservationFact(toolName, args, raw) {
-    if (toolName !== 'getFluidSourceTiles' && toolName !== 'getNearbyEntities') return
+    if (toolName !== 'getFluidSourceTiles' && toolName !== 'getNearbyEntities' && toolName !== 'getPlacementCandidates' && toolName !== 'getEntityStatus') return
     let result
-    try { if (typeof raw === 'string' && raw.length <= 4096) result = JSON.parse(raw) } catch { /* unreadable stays undefined */ }
+    const readLimit = toolName === 'getPlacementCandidates' || toolName === 'getEntityStatus' ? 65536 : 4096
+    try { if (typeof raw === 'string' && raw.length <= readLimit) result = JSON.parse(raw) } catch { /* unreadable stays undefined */ }
     const readable = Boolean(result && typeof result === 'object' && !Array.isArray(result))
     if (toolName === 'getFluidSourceTiles') {
       await this.traceEvent('observation.fluid_sources_observed', {
@@ -12026,9 +12027,49 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         ok: readable ? result.ok === true : undefined,
         code: readable ? result.code : undefined,
         coverage: readable ? result.coverage : undefined,
+        coverage_complete: readable ? result.coverage_complete : undefined,
+        generated_chunk_count: readable ? result.generated_chunk_count : undefined,
+        ungenerated_chunk_count: readable ? result.ungenerated_chunk_count : undefined,
+        empty_result_is_conclusive: readable ? result.empty_result_is_conclusive : undefined,
+        ordering: readable ? result.ordering : undefined,
         surface_index: readable ? result.surface_index : undefined,
         returned_count: readable ? result.returned_count : undefined,
         truncated: readable ? result.truncated : undefined,
+      })
+    }
+    else if (toolName === 'getPlacementCandidates') {
+      const candidates = readable && Array.isArray(result.candidates) ? result.candidates : []
+      const joined = candidates.filter(candidate => candidate?.connects_to && typeof candidate.connects_to === 'object')
+      const electric = candidates.filter(candidate => candidate?.electric && typeof candidate.electric === 'object')
+      await this.traceEvent('observation.placement_candidates_observed', {
+        reason: 'bounded_native_placement_candidate_read',
+        entity_name: typeof args?.entity_name === 'string' ? args.entity_name.slice(0, 200) : undefined,
+        readable,
+        ok: readable ? result.ok === true : undefined,
+        code: readable ? result.code : undefined,
+        ordering: readable ? result.ordering : undefined,
+        legal_candidate_count: readable ? result.legal_candidate_count : undefined,
+        returned_candidate_count: readable ? result.returned_candidate_count : undefined,
+        connects_to_unit_number: Number.isSafeInteger(args?.connects_to?.unit_number) ? args.connects_to.unit_number : undefined,
+        connects_to_joined_count: args?.connects_to ? joined.length : undefined,
+        electric_candidate_count: electric.length,
+        max_poles_in_wire_reach: electric.length > 0 ? Math.max(...electric.map(candidate => Number(candidate.electric.poles_in_wire_reach_count) || 0)) : undefined,
+        max_covered_entities: electric.length > 0 ? Math.max(...electric.map(candidate => Number(candidate.electric.covers_entities_count) || 0)) : undefined,
+      })
+    }
+    else if (toolName === 'getEntityStatus') {
+      const gap = readable && result.entity && typeof result.entity.power_gap === 'object' ? result.entity.power_gap : undefined
+      if (!gap) return
+      await this.traceEvent('observation.power_gap_observed', {
+        reason: 'entity_shows_no_power',
+        unit_number: result.entity.unit_number,
+        status_name: result.entity.status_name,
+        poles_found: gap.poles_found,
+        search_radius: gap.search_radius,
+        nearest_pole_unit_number: gap.nearest_pole?.unit_number,
+        nearest_pole_distance: gap.nearest_pole?.distance,
+        supply_area_covers_entity: gap.nearest_pole?.supply_area_covers_entity,
+        supply_gap_tiles: gap.nearest_pole?.supply_gap_tiles,
       })
     }
     else if (readable && result.code === 'unknown_entity_prototype') {
