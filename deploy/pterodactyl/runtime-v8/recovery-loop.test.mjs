@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict'
+import fsp from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import test from 'node:test'
 
 import { WORLD_REFUSAL_UNCORRECTED_REASON } from './npc-agent-loop.mjs'
@@ -11,11 +14,17 @@ import {
   executorPlan,
   fireResumeTimer,
   KEY,
+  observation,
   PLATES,
   reachRunG,
+  recoverySession,
+  recoveryWorld,
+  ScriptedModel,
+  settle,
   stepBlockLines,
 } from './recovery-loop-fixtures.mjs'
 import { analyzeBehaviorTrace } from './run-check.mjs'
+import { deployment, gather, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
 
 // Unit 17 (composed recovery-loop regressions). Every earlier recovery test stopped early (a checkpoint accepted, a batch admitted),
 // called Session.runModelRecoverableResume directly, and set the inventory to the expected answer. These drive the live failure chain
@@ -176,4 +185,359 @@ test('R-GHI: run G, H and I through the scheduled resume reach a verified comple
     assert.equal(signatures.includes(forbidden), false, `run-check flagged ${forbidden}: ${signatures.join(', ')}`)
   }
   assertStrictBoundary(ctx)
+})
+
+// --- helpers shared by the scenarios below --------------------------------------------------------------------------------------------
+
+// Runs H: the resumed executor makes a checkpoint-only answer and an unverified BLOCKED claim, and the plan pauses again.
+async function runH(ctx) {
+  ctx.model
+    .push('executor', 'h:checkpoint-only', () => executorPlan([], { checkpoint: PLATES }))
+    .push('executor', 'h:blocked-claim', BLOCKED_REPLY(), 2)
+  await fireResumeTimer(ctx)
+  assert.equal(ctx.world.memory.pauseRecord(KEY).pause_class, 'model_recoverable')
+}
+
+// What survives a restart: the durable allowance, the pause, the plan identity and the receipts of the verified prefix.
+function durableFacts(ctx) {
+  const { memory } = ctx.world
+  const planning = memory.planningState(KEY)
+  const pause = memory.pauseRecord(KEY)
+  return {
+    allowance: memory.autoResumeAllowance(KEY),
+    pause: { paused: pause.paused, pause_class: pause.pause_class, pause_reason: pause.pause_reason, goal_id: pause.goal_id },
+    plans: planning.plans.map(plan => [plan.plan_id, plan.plan_version]),
+    goalId: planning.goal.goal_id,
+    receipts: (memory.currentPlan(KEY).task_board.evidence ?? []).filter(item => item.kind === 'operation_receipt').map(item => item.ref),
+  }
+}
+
+// The process dies: its timers and every in-memory object go with it. A new process builds new instances from the state file.
+function restartProcess(ctx, model) {
+  ctx.session.stopping = true
+  ctx.t.mock.timers.reset()
+  ctx.t.mock.timers.enable({ apis: ['setTimeout'] })
+  const world = recoveryWorld({ game: ctx.game, model, stateFile: ctx.stateFile })
+  const { session, chat, logs } = recoverySession(world)
+  return { ...ctx, model, world, session, chat, logs }
+}
+
+const tempStateFile = async (t) => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sgluna-recovery-loop-'))
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }).catch(() => {}))
+  return path.join(dir, 'npc-state.json')
+}
+
+test('R-restart: a restart after the second pause keeps the attempt count and the verified prefix, replays nothing, and finishes on the next timer', async (t) => {
+  const stateFile = await tempStateFile(t)
+  const ctx = await reachRunG(t, { stateFile })
+  await runH(ctx)
+  const before = durableFacts(ctx)
+  const sentBefore = ctx.game.sent.map(batch => batch.operations)
+  assert.deepEqual([before.allowance.step_attempts, before.allowance.goal_attempts], [1, 1])
+  assert.deepEqual(before.receipts, ['batch-g1-1', 'batch-g1-2'])
+  assert.ok(ctx.session.modelResume.timer, 'attempt 2 was waiting on its timer when the process died')
+
+  const model = new ScriptedModel()
+    .push('executor', 'i:observe', (messages) => {
+      ctx.atI = { packet: stepBlockLines(messages), allowance: restarted.world.memory.autoResumeAllowance(KEY) }
+      return observation()
+    })
+    .push('executor', 'i:collect-machine-output', () => executorPlan([collect(3)]))
+  const restarted = restartProcess(ctx, model)
+  // The first process wrote nothing more after it died: the second reads the file the first left.
+  await restarted.world.agent.loadPersistentState()
+  assert.deepEqual(durableFacts(restarted), before, 'the allowance, the pause, the plan identity and the verified prefix came back from disk')
+  assert.equal(restarted.session.modelResume, null, 'the in-memory timer died with the process')
+
+  // The startup branch: a persisted model_recoverable pause is handed to the same decision the goal.paused activity uses.
+  assert.equal(restarted.session.queueStartupRecovery(restarted.session.currentPlanState()), 'consider_pause')
+  await settle(restarted.session)
+  const [scheduled, ...more] = restarted.world.named('recovery.auto_resume_scheduled')
+  assert.equal(more.length, 0)
+  assert.deepEqual([scheduled.attempt, scheduled.goal_attempt], [2, 2], 'attempt 2 of 2, not a fresh attempt 1')
+  assert.equal(restarted.world.named('recovery.auto_resume_started').length, 0)
+  assert.equal(model.calls.length, 0, 'a restart alone wakes no model')
+
+  await fireResumeTimer(restarted)
+  assert.equal(model.calls.length, 2)
+  assert.deepEqual([ctx.atI.allowance.step_attempts, ctx.atI.allowance.goal_attempts], [2, 2], 'the persisted count continued: one more attempt, counted once')
+  const [started] = restarted.world.named('recovery.auto_resume_started')
+  assert.deepEqual([started.attempt, started.step_attempt, started.goal_attempt], [2, 2, 2])
+  const resumedAt = restarted.world.trace.findIndex(row => row.event === 'recovery.auto_resume_plan_resumed')
+  const restagedAt = restarted.world.trace.findIndex(row => row.event === 'context.restaged' && row.data.checkpoint === 'C7')
+  assert.ok(resumedAt > -1 && restagedAt > resumedAt, 'the plan was active again before the executor was restaged')
+
+  // Nothing is replayed: the batches the first process sent are not sent again; the restarted run adds exactly the collection.
+  assert.deepEqual(ctx.game.sent.slice(0, sentBefore.length).map(batch => batch.operations), sentBefore)
+  assert.deepEqual(ctx.game.sent.slice(sentBefore.length).map(batch => batch.operations), [[collect(3)]])
+  assert.equal(ctx.game.admissions.at(-1).operation_key.startsWith(`${started.request_id}/`), true)
+
+  await completeAndReport(restarted)
+  assert.equal(ctx.game.inventory['copper-plate'], 12)
+  assert.equal(restarted.world.named('step.verified')[0].source, 'deterministic_completion_contract')
+  assert.equal(restarted.world.named('goal.evaluated').at(-1).satisfied, true)
+  assert.equal(restarted.world.named('outcome.validated').find(row => row.kind === 'verified_complete').reason_code, 'verified_final_step')
+  assert.equal(restarted.world.memory.currentPlan(KEY), undefined)
+  assert.match(restarted.chat.at(-1), /The requested goal is verified complete/)
+  const signatures = analyzeBehaviorTrace(restarted.world.trace).findings.map(finding => finding.signature)
+  for (const forbidden of ['harness_state_fault', 'silent_blocked_stall', 'model_recoverable_pause_not_resumed']) assert.equal(signatures.includes(forbidden), false, forbidden)
+  assertStrictBoundary(restarted)
+  assert.deepEqual(ctx.model.remaining, [])
+  assert.deepEqual(ctx.model.violations, [])
+})
+
+// --- cancellation: a pending resume yields to whoever took over ------------------------------------------------------------------------------
+
+const deferred = () => {
+  let open
+  const promise = new Promise((resolve) => { open = resolve })
+  return { promise, open }
+}
+
+const executorCalls = ctx => ctx.model.calls.filter(call => call.role === 'executor').length
+const c7Count = ctx => ctx.world.trace.filter(isC7Restage).length
+
+function cancellationSnapshot(ctx) {
+  return {
+    sent: ctx.game.sent.length,
+    effects: ctx.game.effects.length,
+    totals: ctx.game.worldTotals(),
+    executorCalls: executorCalls(ctx),
+    c7: c7Count(ctx),
+    allowance: ctx.world.memory.autoResumeAllowance(KEY),
+  }
+}
+
+// The timer is the only thing that can start a resume. After the takeover it must do nothing: no attempt counted, no plan reactivated,
+// no executor restaged or asked, nothing sent to the game.
+function assertNothingResumed(ctx, before) {
+  assert.equal(ctx.world.named('recovery.auto_resume_started').length, 0)
+  assert.equal(ctx.world.named('recovery.auto_resume_plan_resumed').length, 0)
+  assert.equal(c7Count(ctx), before.c7, 'no executor was restaged')
+  assert.equal(executorCalls(ctx), before.executorCalls, 'no executor call was made')
+  assert.equal(ctx.game.sent.length, before.sent, 'nothing was admitted')
+  assert.equal(ctx.game.effects.length, before.effects)
+  assert.deepEqual(ctx.game.worldTotals(), before.totals, 'the world did not change')
+  assert.equal(ctx.world.memory.autoResumeAllowance(KEY).goal_attempts, before.allowance.goal_attempts, 'no attempt was counted')
+  assert.equal(ctx.session.modelResume, null)
+}
+
+const takeovers = [
+  {
+    name: 'a player stop',
+    act: ctx => ctx.session.queuePlayerRequest('TTLouis', 'stop'),
+    reason: 'player_request',
+    check(ctx) {
+      assert.deepEqual([ctx.world.memory.pauseRecord(KEY).pause_class, ctx.world.memory.pauseRecord(KEY).pause_reason], ['operator', 'user_stop'])
+      assert.equal(ctx.game.cancels.length, 1, 'the stop cancelled queued game work')
+    },
+  },
+  {
+    name: 'a UI pause',
+    act: ctx => ctx.session.queueUiControl({ action: 'pause', player_index: 1, player_name: 'TTLouis' }),
+    reason: 'ui_pause',
+    check(ctx) {
+      assert.deepEqual([ctx.world.memory.pauseRecord(KEY).pause_class, ctx.world.memory.pauseRecord(KEY).pause_reason], ['operator', 'ui_pause'])
+    },
+  },
+]
+for (const takeover of takeovers) {
+  test(`R-cancel: ${takeover.name} while a resume timer is pending cancels it, and the timer does nothing`, async (t) => {
+    const ctx = await reachRunG(t)
+    assert.ok(ctx.session.modelResume.timer)
+    const before = cancellationSnapshot(ctx)
+    assert.equal(takeover.act(ctx), true)
+    await settle(ctx.session)
+    // The pending timer is cleared synchronously by the takeover; letting mock time pass proves nothing is left to fire.
+    ctx.t.mock.timers.tick(60_000)
+    await settle(ctx.session)
+    const [cancelled, ...extra] = ctx.world.named('recovery.auto_resume_cancelled')
+    assert.equal(extra.length, 0)
+    assert.equal(cancelled.reason, takeover.reason)
+    assert.equal(cancelled.attempt, 1)
+    assertNothingResumed(ctx, before)
+    takeover.check(ctx)
+    assert.equal(ctx.world.memory.currentPlan(KEY).status, 'paused', 'the operator pause stands')
+    assert.equal(ctx.world.named('recovery.auto_resume_scheduled').length, 1, 'nothing was scheduled behind the takeover')
+    assertStrictBoundary(ctx)
+  })
+}
+
+test('R-cancel: a new player goal while a resume timer is pending cancels it; the new goal stands and the old plan is not resumed', async (t) => {
+  const ctx = await reachRunG(t)
+  const old = ctx.world.memory.autoResumeAllowance(KEY)
+  const before = cancellationSnapshot(ctx)
+  const stones = inventoryCheckpoint('stone', 10)
+  ctx.model.push('planner', 'planner:new-goal', planReply({
+    plan: ['Gather 10 stone'],
+    currentStep: 0,
+    operations: [gather('stone', 10)],
+    checkpoint: stones,
+    goal: { scope: 'finite', summary: 'Have 10 stone.', doneWhen: [{ kind: 'inventory_count', item_name: 'stone', minimum: 10 }] },
+    stepCompletions: [{ kind: 'deterministic', checkpoint: stones }],
+  }))
+  assert.equal(ctx.session.queuePlayerRequest('TTLouis', 'forget that and gather ten stone'), true)
+  await settle(ctx.session)
+  ctx.t.mock.timers.tick(60_000)
+  await settle(ctx.session)
+
+  assert.equal(ctx.world.named('recovery.auto_resume_cancelled').at(0).reason, 'player_request')
+  assert.equal(ctx.world.named('recovery.auto_resume_started').length, 0)
+  assert.equal(ctx.world.named('recovery.auto_resume_plan_resumed').length, 0)
+  assert.equal(c7Count(ctx), before.c7)
+  assert.equal(executorCalls(ctx), before.executorCalls, 'the old plan executor was never restaged')
+  const planning = ctx.world.memory.planningState(KEY)
+  assert.notEqual(planning.goal.goal_id, old.goal_id, 'the new goal stands')
+  assert.equal(planning.goal.objective, 'forget that and gather ten stone')
+  assert.equal(ctx.world.memory.pauseRecord(KEY).paused, false)
+  assert.equal(ctx.session.modelResume, null)
+  // The only new batch is the new goal's own gather, under the new goal's request and not a recovery request.
+  assert.equal(ctx.game.sent.length, before.sent + 1)
+  assert.deepEqual(ctx.game.sent.at(-1).operations.map(operation => operation.name), ['gather_resource'])
+  assert.equal(ctx.game.admissions.at(-1).operation_key.startsWith('recovery_'), false)
+  assert.equal(ctx.game.effects.length, before.effects, 'nothing in the world moved yet')
+  assert.deepEqual(ctx.game.worldTotals(), before.totals)
+  assert.equal(ctx.world.named('recovery.auto_resume_scheduled').length, 1)
+  assertStrictBoundary(ctx)
+})
+
+for (const [name, change] of [
+  ['an actor change', { actor_id: 19 }],
+  ['an epoch change', { epoch: 4 }],
+]) {
+  test(`R-cancel: ${name} before the timer fires cancels the resume at fire time: no executor, no activation, no mutation`, async (t) => {
+    const ctx = await reachRunG(t)
+    const before = cancellationSnapshot(ctx)
+    ctx.game.status = deployment({ ...ctx.game.status, ...change })
+    await fireResumeTimer(ctx)
+    const [cancelled, ...extra] = ctx.world.named('recovery.auto_resume_cancelled')
+    assert.equal(extra.length, 0)
+    assert.equal(cancelled.reason, change.actor_id ? 'actor_changed' : 'epoch_changed')
+    assert.deepEqual([cancelled.actor_id, cancelled.actor_epoch], [18, 3], 'the trace names what the resume was scheduled under')
+    assertNothingResumed(ctx, before)
+    const pause = ctx.world.memory.pauseRecord(KEY)
+    assert.deepEqual([pause.paused, pause.pause_class], [true, 'model_recoverable'], 'the pause is untouched; a person or the lifecycle recovery owns it now')
+    assert.equal(ctx.world.named('recovery.auto_resume_scheduled').length, 1)
+    assertStrictBoundary(ctx)
+  })
+}
+
+test('R-cancel: a stop that lands while the fired resume waits on the executor model reaches the game with nothing, and the stop stands', async (t) => {
+  const ctx = await reachRunG(t)
+  const before = cancellationSnapshot(ctx)
+  const gate = deferred()
+  let reached = false
+  ctx.model.push('executor', 'executor:gated', async () => {
+    reached = true
+    await gate.promise
+    return executorPlan([collect(3)])
+  })
+  ctx.t.mock.timers.tick(15_000)
+  for (let spin = 0; spin < 400 && !reached; spin++) await new Promise(resolve => setImmediate(resolve))
+  assert.equal(reached, true, 'the restaged executor is waiting on the model')
+  assert.equal(ctx.world.named('recovery.auto_resume_plan_resumed').length, 1)
+  assert.equal(ctx.world.memory.currentPlan(KEY).status, 'active')
+  assert.equal(ctx.session.modelResume.token.cancelled, false)
+
+  assert.equal(ctx.session.queuePlayerRequest('TTLouis', 'stop'), true)
+  gate.open()
+  await settle(ctx.session)
+
+  assert.equal(ctx.game.sent.length, before.sent, 'the answer that arrived after the stop never reached the game')
+  assert.equal(ctx.game.pendingBatch, null)
+  assert.deepEqual(ctx.game.worldTotals(), before.totals)
+  assert.equal(ctx.world.memory.currentPlan(KEY).status, 'paused')
+  assert.deepEqual([ctx.world.memory.pauseRecord(KEY).pause_class, ctx.world.memory.pauseRecord(KEY).pause_reason], ['operator', 'user_stop'])
+  assert.equal(ctx.session.modelResume, null, 'no new automatic resume was scheduled behind the stop')
+  assert.equal(ctx.world.named('recovery.auto_resume_scheduled').length, 1)
+  assertStrictBoundary(ctx)
+})
+
+// --- no replay: a lost acknowledgement never makes the harness send the same effect twice --------------------------------------------
+
+// Runs I with the collection batch's acknowledgement lost on the way back: the game admitted the batch, the harness never heard.
+async function runIWithLostAcknowledgement(ctx) {
+  ctx.model.push('executor', 'i:collect-machine-output', executorPlan([collect(3)]))
+  ctx.game.dropAckOnce = true
+  await fireResumeTimer(ctx)
+  const [reconciled, ...extra] = ctx.world.named('operation.reconciled')
+  assert.equal(extra.length, 0)
+  assert.deepEqual([reconciled.trigger, reconciled.verdict, reconciled.effect], ['lost_acknowledgement', 'admitted_in_flight', 'in_flight'])
+  assert.equal(ctx.game.sent.length, 3, 'the collection reached the game once')
+  assert.equal(ctx.game.pendingBatch.batch_id, 3)
+  assert.equal(ctx.world.memory.currentPlan(KEY).status, 'active', 'a lost acknowledgement the game admitted is not a failure')
+  assert.equal(ctx.model.calls.at(-1).label, 'i:collect-machine-output')
+  assert.equal(ctx.world.memory.pendingOperation(KEY).operation_key.startsWith('recovery_'), true)
+}
+
+const collections = ctx => ctx.game.sent.filter(batch => batch.operations.some(operation => operation.name === 'move_items_exact' && operation.args.max_count === 3)).length
+
+test('R-noreplay: a lost acknowledgement whose effect is unknown after a restart stays held: no conflicting dispatch, a visible guard pause', async (t) => {
+  const stateFile = await tempStateFile(t)
+  const ctx = await reachRunG(t, { stateFile })
+  await runH(ctx)
+  await runIWithLostAcknowledgement(ctx)
+
+  // The game reloads while the batch is still queued: the queue and its records are gone and nothing proves whether it ran.
+  ctx.game.reloadMod()
+  assert.equal(ctx.game.inventory['copper-plate'], 9)
+  const model = new ScriptedModel()
+    .push('executor', 'restart:observe', (messages) => {
+      ctx.atRestart = { text: messages.map(message => String(message.content)).join('\n') }
+      return observation()
+    })
+    .push('executor', 'restart:replay-identical-collection', executorPlan([collect(3)]))
+    .push('executor', 'restart:replay-changed-collection', executorPlan([collect(2)]))
+  const restarted = restartProcess(ctx, model)
+  await restarted.world.agent.loadPersistentState()
+  assert.equal(restarted.session.queueStartupRecovery(restarted.session.currentPlanState()), 'recover')
+  await settle(restarted.session)
+
+  const [reconciled] = restarted.world.named('operation.reconciled')
+  assert.deepEqual([reconciled.trigger, reconciled.verdict, reconciled.effect], ['runtime_restart', 'generation_changed', 'partial_unknown'])
+  assert.match(ctx.atRestart.text, /UNKNOWN, not as done and not as absent/)
+  const suppressed = restarted.world.named('operation.duplicate_suppressed')
+  assert.ok(suppressed.length >= 1)
+  assert.equal(suppressed[0].reason, 'unresolved_operation_scope_conflict')
+  assert.equal(suppressed[0].effect, 'partial_unknown')
+  // No conflicting dispatch: neither the identical nor the changed collection reached the game, and the world did not move.
+  assert.equal(ctx.game.sent.length, 3)
+  assert.equal(collections(ctx), 1)
+  assert.equal(ctx.game.pendingBatch, null)
+  assert.equal(ctx.game.inventory['copper-plate'], 9)
+  assert.equal(ctx.game.worldTotals()['copper-plate'], 12)
+  // The end is a visible guard pause that no timer resumes.
+  const pause = restarted.world.memory.pauseRecord(KEY)
+  assert.deepEqual([pause.paused, pause.pause_class, pause.pause_reason], [true, 'guard', 'blocked_duplicate_effect_suppressed'])
+  assert.equal(restarted.session.modelResume, null)
+  assert.equal(restarted.world.named('recovery.auto_resume_scheduled').length, 0)
+  assert.equal(restarted.world.named('goal.paused').filter(row => row.pause_reason === 'blocked_duplicate_effect_suppressed').length, 1)
+  assertStrictBoundary(restarted)
+  assert.deepEqual(ctx.model.remaining, [])
+})
+
+// KNOWN GAP (found by R-restart, not fixed here): the machines a handoff packet reports come from the agent's in-memory live entity
+// observations (liveEntityObservations), which a restart empties. A restart between run G and run I therefore restages an executor whose
+// packet knows nothing about the furnace: residual_needs says copper-plate missing=1 and raw_leaf_acquisition sends it to mine more
+// copper ore, which is run I's defect (unit 15) again until the executor observes the furnace itself. The expectation below is the
+// behavior unit 15 gives within one process; it fails today, so it stays a todo until the restart restage can read the machines it
+// already knew (persisted unit numbers, or one nearby scan at restage).
+test.todo('R-restart: after a restart the restaged executor packet still credits the furnace output (in_machine_output) and demands no copper ore', async (t) => {
+  const stateFile = await tempStateFile(t)
+  const ctx = await reachRunG(t, { stateFile })
+  await runH(ctx)
+  const model = new ScriptedModel().push('executor', 'i:observe', (messages) => {
+    ctx.atI = { packet: stepBlockLines(messages) }
+    return observation()
+  })
+  const restarted = restartProcess(ctx, model)
+  await restarted.world.agent.loadPersistentState()
+  restarted.session.queueStartupRecovery(restarted.session.currentPlanState())
+  await settle(restarted.session)
+  ctx.t.mock.timers.tick(15_000)
+  for (let spin = 0; spin < 400 && model.calls.length === 0; spin++) await new Promise(resolve => setImmediate(resolve))
+  const residual = ctx.atI.packet.find(line => line.startsWith('residual_needs'))
+  assert.match(residual, /in_machine_output=3@stone-furnace unit=26 missing_after_machine=0/)
+  assert.equal(ctx.atI.packet.some(line => line.startsWith('raw_leaf_acquisition')), false)
 })

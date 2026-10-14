@@ -139,6 +139,11 @@ export class FurnaceFactorio extends FakeFactorio {
     this.sent = [] // every admitted batch's parsed operations, in order (a replay shows up as a second entry)
     this.effects = [] // what each operation actually moved, in the order it ran
     this.dropAckOnce = false
+    this.generation = 1
+    this.cancels = []
+    this.stopFollows = 0
+    this.lastCompleted = undefined
+    this.receipts = []
     this.readCommands = []
     this.preflights = [] // every preflight the harness asked, with the world answer
   }
@@ -266,7 +271,40 @@ export class FurnaceFactorio extends FakeFactorio {
   // --- admission and completion -------------------------------------------------------------------------------------------------
 
   async command(text) {
+    if (text.includes('remote.call("autorio_operations","status")')) {
+      const pending = this.pendingBatch
+      return JSON.stringify({
+        task_state: this.taskState,
+        batch_generation: this.generation,
+        queue_empty: this.queueLength === 0,
+        queue_length: this.queueLength,
+        active_batch: pending ? { batch_id: pending.batch_id, batch_generation: this.generation, task_count: this.lastTaskTypes.length, task_types: this.lastTaskTypes } : undefined,
+        last_completed_batch: this.lastCompleted,
+        last_cancelled_batch: this.cancelledBatch,
+        admission_journal: this.admissionJournal(),
+        receipt_journal: [...this.receipts],
+        basic_operation: this.batchId > 0 ? { last_result: this.lastBasicResult } : undefined,
+      })
+    }
     if (text.includes('remote.call("autorio_tools","get_nearby_entities"')) return JSON.stringify(this.nearbySnapshot())
+    if (text.includes('remote.call("autorio_operations","stop_follow_player")')) {
+      this.stopFollows += 1
+      return ''
+    }
+    if (text.includes('remote.call("sgluna_deployment","cancel")')) {
+      // A stop cancels queued work that has not run: nothing it would have moved ever moves.
+      this.cancels.push({ pending: this.pendingBatch })
+      this.pendingBatch = null
+      this.taskState = 'idle'
+      this.queueLength = 0
+      return ''
+    }
+    if (text.includes('"autorio_discovery","find_entities"')) {
+      // Static resource patches: the nearest patch of the named resource, far from the furnace.
+      const resource = /"find_entities",'([^']+)'/.exec(text)?.[1]
+      return JSON.stringify({ found: true, name: resource, actor_position: { x: 0, y: 0 }, searched_radius: 193, max_radius: 1024, matched_count: 1, returned_count: 1, truncated: false,
+        entities: [{ name: resource, type: 'resource', position: { x: 192.5, y: 8.5 }, distance: 192.69, amount: 2200, force: 'neutral' }] })
+    }
     if (text.includes('remote.call("autorio_skills","offer"')) return JSON.stringify({ ok: true, cards: [] })
     if (text.includes('"autorio_knowledge","production_estimate"')) return JSON.stringify(productionEstimateAnswer(text))
     if (text.includes('"evaluate_condition"') && text.includes('entity_state')) {
@@ -356,6 +394,9 @@ export class FurnaceFactorio extends FakeFactorio {
     this.furnace.source = withoutZeros(this.furnace.source)
     this.furnace.output = withoutZeros(this.furnace.output)
     this.completedBatches.push(batch)
+    this.lastCompleted = { batch_id: batch.batch_id, batch_generation: this.generation, batch_ref: `batch-g${this.generation}-${batch.batch_id}`, task_count: this.lastTaskTypes.length, task_types: this.lastTaskTypes, tick: 600 + batch.batch_id }
+    this.receipts.push({ ...this.lastCompleted, state: 'completed' })
+    for (const record of this.admissions) if (record.batch_id === batch.batch_id) record.state = 'completed'
     this.pendingBatch = null
     this.taskState = 'idle'
     this.queueLength = 0
@@ -364,6 +405,17 @@ export class FurnaceFactorio extends FakeFactorio {
       type: 'moving_items', moved_count: moved?.count ?? 0, to_entity: moved?.to_entity ?? true, target_unit_number: moved?.unit,
     }
     return batch
+  }
+
+  // A save/load: the queue and the batch records are gone, the batch generation moves on, and an admission the journal cannot prove
+  // completed is uncertain. A batch that was still queued never ran.
+  reloadMod() {
+    this.generation += 1
+    this.pendingBatch = null
+    this.lastCompleted = undefined // the live batch records are gone; the receipt journal is saved with the map
+    this.taskState = 'idle'
+    this.queueLength = 0
+    for (const record of this.admissions) if (record.state !== 'completed') record.state = 'uncertain'
   }
 
   // Item counts that exist anywhere in the world the fake models (actor + furnace); conservation checks use it.
