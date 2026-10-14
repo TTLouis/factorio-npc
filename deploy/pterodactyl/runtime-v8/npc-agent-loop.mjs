@@ -5047,6 +5047,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const builds = needs.builds ?? []
       const placing = new Map()
       const placedCounts = new Map()
+      const stateCounts = new Map()
       if (builds.length > 0 && fence && !inFlight) {
         try {
           await this.handoffFenceCheck(fence, 'before')
@@ -5064,11 +5065,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             placing.set(build.prototype, known)
             meta.reads_attempted += 1
             try {
-              const request = { kind: 'entity_count', prototype: build.prototype, minimum: 1, ...(build.radius !== undefined ? { radius: build.radius } : {}),
-                ...(build.anchor ? { anchor: build.anchor } : {}), ...(build.state ? { state: build.state } : {}) }
-              const count = placedCountFromRead(JSON.parse(String(await this.rcon.command(runtimeConditionCommand(request))).trim()), build.prototype)
+              // The placed count ignores the state scope (an unpowered engine stands and needs no second engine's items); radius and anchor
+              // stay, they define where entities count. The state-scoped count is read separately, as a fact.
+              const scope = { ...(build.radius !== undefined ? { radius: build.radius } : {}), ...(build.anchor ? { anchor: build.anchor } : {}) }
+              const count = placedCountFromRead(JSON.parse(String(await this.rcon.command(runtimeConditionCommand({ kind: 'entity_count', prototype: build.prototype, minimum: 1, ...scope }))).trim()), build.prototype)
               if (count === undefined) meta.reads_failed += 1
               else placedCounts.set(build.id, count)
+              if (build.state && count !== undefined) {
+                meta.reads_attempted += 1
+                try {
+                  const inState = placedCountFromRead(JSON.parse(String(await this.rcon.command(runtimeConditionCommand({ kind: 'entity_count', prototype: build.prototype, minimum: 1, ...scope, state: build.state }))).trim()), build.prototype)
+                  if (inState === undefined) meta.reads_failed += 1
+                  else stateCounts.set(build.id, inState)
+                }
+                catch { meta.reads_failed += 1 }
+              }
             }
             catch { meta.reads_failed += 1 }
           }
@@ -5078,9 +5089,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           if (error?.handoffFence) return { refusal: error.handoffFence, meta }
           placing.clear()
           placedCounts.clear()
+          stateCounts.clear()
         }
       }
-      const buildBill = deriveBuildBill({ builds, placing, placed: placedCounts })
+      const buildBill = deriveBuildBill({ builds, placing, placed: placedCounts, stateCounts })
       const labNames = (labCandidates ?? []).map(lab => lab.name)
       const scienceBill = scienceProductionRoots(sciences, progress, labNames)
       const inventoryRoots = [...needs.roots, ...buildBill.roots, ...scienceBill.flatMap(entry => entry.roots)]
@@ -5282,12 +5294,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         // An unread count is already carried as a stale or missing count (held_counts_STALE, `no value`): no residual is derived from it.
         else meta.residual_omitted = derived.reason
       }
+      const standingStates = buildBill.rows.filter(row => row.state && row.remaining < 1)
+      if (standingStates.length > 0 && !residual?.omitted) {
+        residual = { ...(residual ?? { rows: [], roots: inventoryRoots, production: triggerRoots }), build_states: standingStates,
+          ...(buildBill.unresolved.length > 0 ? { unresolved_builds: buildBill.unresolved } : {}) }
+      }
       if (mode === 'packet' && builds.length > 0) {
         await this.traceEvent('context.build_bill_derived', {
           request_id: requestId ?? this.traceRequest?.id,
           prototypes: builds.map(build => build.prototype),
           roots: buildBill.roots.map(root => ({ item: root.item, count: root.count, prototype: root.build.prototype, remaining: root.build.remaining })),
-          placed: buildBill.rows.map(row => ({ prototype: row.prototype, placed: row.placed ?? null, minimum: row.minimum })),
+          placed: buildBill.rows.map(row => ({ prototype: row.prototype, placed: row.placed ?? null, minimum: row.minimum, ...(row.state ? { state: row.state, state_count: row.state_count ?? null } : {}) })),
           items: closure.items,
           unread: unreadItems(),
           unresolved: buildBill.unresolved,

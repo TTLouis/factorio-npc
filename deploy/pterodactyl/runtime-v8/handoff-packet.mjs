@@ -615,13 +615,16 @@ export function researchPathFact(parsed, target, tag) {
     if (node.mode === 'trigger' && !node.research_trigger?.type) return unavailable('research_trigger_missing')
     if (node.mode === 'science' && !node.science && !node.researched) return unavailable('research_science_missing')
     // Unit 9 (crafted_items.ts credit_craft_trigger_statistics): a completed craft is credited to a craft-item trigger only while the
-    // technology is ready, i.e. every prerequisite is researched. With any prerequisite unresolved a craft now counts for nothing.
-    const notCredited = node.mode === 'trigger' && node.researched === false && node.research_trigger?.type === 'craft-item'
-      && asList(node.unresolved_prerequisites).length > 0
+    // technology is enabled and every prerequisite is researched. With any prerequisite unresolved, or the technology disabled, a craft
+    // now counts for nothing. `enabled: false` is carried from the same getResearchPath node.
+    const craftTrigger = node.mode === 'trigger' && node.researched === false && node.research_trigger?.type === 'craft-item'
+    const notCredited = craftTrigger && asList(node.unresolved_prerequisites).length > 0
+    const disabled = craftTrigger && node.enabled === false
     selected.push({ name: node.name, researched: node.researched, mode: node.mode, status: node.status,
       prerequisites: node.prerequisites, unresolved_prerequisites: node.unresolved_prerequisites,
       ...(node.research_trigger ? { research_trigger: node.research_trigger } : {}),
       ...(notCredited ? { credited_only_after_prerequisites: true } : {}),
+      ...(disabled ? { enabled: false } : {}),
       ...(node.science ? { science: node.science } : {}) })
   }
   const fact = { target, state: 'fresh', as_of: normalizeFactTag(tag), nodes: selected }
@@ -878,7 +881,8 @@ export function deriveResidualNeeds({ roots, recipes, held, production = [] }) {
     const count = held instanceof Map ? held.get(target.item) : undefined
     const row = { item: target.item, required: target.count, ...(Number.isSafeInteger(count) && count >= 0 ? { held: count } : {}), missing: target.count,
       trigger: { technology: target.technology, held_counted: false, ...(target.status ? { status: target.status } : {}),
-        ...(target.credited_only_after_prerequisites === true ? { credited_only_after_prerequisites: true, unresolved_prerequisites: asList(target.unresolved_prerequisites) } : {}) } }
+        ...(target.credited_only_after_prerequisites === true ? { credited_only_after_prerequisites: true, unresolved_prerequisites: asList(target.unresolved_prerequisites) } : {}),
+        ...(target.technology_disabled === true ? { technology_disabled: true } : {}) } }
     const expansion = expandableRecipe(target.item, facts)
     if (expansion) {
       if (usedByTargets.has(expansion.recipe.name)) return { ok: false, reason: `shared_recipe:${expansion.recipe.name}` }
@@ -976,7 +980,8 @@ export function triggerProductionRoots(research, limits = EXECUTOR_FACT_LIMITS) 
     if (roots.some(root => root.item === item && root.technology === path.target)) continue
     roots.push({ item, count: trigger.count, technology: path.target, held_counted: false, ...(typeof node.status === 'string' && node.status ? { status: oneLine(node.status, 40) } : {}),
       // Unit 9: a craft is credited only while every prerequisite is researched; the root says so when some is not.
-      ...(node.credited_only_after_prerequisites === true ? { credited_only_after_prerequisites: true, unresolved_prerequisites: asList(node.unresolved_prerequisites).map(factName).filter(Boolean).slice(0, 4) } : {}) })
+      ...(node.credited_only_after_prerequisites === true ? { credited_only_after_prerequisites: true, unresolved_prerequisites: asList(node.unresolved_prerequisites).map(factName).filter(Boolean).slice(0, 4) } : {}),
+      ...(node.enabled === false ? { technology_disabled: true } : {}) })
   }
   return roots.slice(0, limits.researchTargets)
 }
@@ -1014,7 +1019,7 @@ export function placedCountFromRead(parsed, prototype) {
  * then the whole minimum is the need). Returns `{ roots, rows, unresolved }`; a prototype whose placing item is unknown is listed
  * in `unresolved` with the reason, never guessed.
  */
-export function deriveBuildBill({ builds, placing = new Map(), placed = new Map() }) {
+export function deriveBuildBill({ builds, placing = new Map(), placed = new Map(), stateCounts = new Map() }) {
   const roots = []
   const rows = []
   const unresolved = []
@@ -1025,13 +1030,21 @@ export function deriveBuildBill({ builds, placing = new Map(), placed = new Map(
       continue
     }
     const have = placed.get(build.id)
-    const remaining = Number.isSafeInteger(have) && have >= 0 ? Math.max(0, build.minimum - have) : build.minimum
-    rows.push({ prototype: build.prototype, item: resolved.item, per_entity: resolved.count, minimum: build.minimum,
-      ...(Number.isSafeInteger(have) && have >= 0 ? { placed: have } : {}), remaining })
+    // An unread placed count is not guessed (the whole minimum would add items for entities that may already stand): the prototype is
+    // left out of the bill and named, as every other unread count is not turned into a derived quantity.
+    if (!Number.isSafeInteger(have) || have < 0) {
+      unresolved.push({ prototype: build.prototype, reason: 'placed_count_unread' })
+      continue
+    }
+    const remaining = Math.max(0, build.minimum - have)
+    // `placed` counts the entities that stand, whatever their state; the state scope (working, powered) is a separate read fact.
+    const stateCount = build.state && Number.isSafeInteger(stateCounts.get(build.id)) ? stateCounts.get(build.id) : undefined
+    const stateNote = build.state ? { state: build.state, ...(stateCount !== undefined ? { state_count: stateCount } : {}) } : {}
+    rows.push({ prototype: build.prototype, item: resolved.item, per_entity: resolved.count, minimum: build.minimum, placed: have, remaining, ...stateNote })
     if (remaining < 1) continue
     const count = remaining * resolved.count
     const existing = roots.find(root => root.item === resolved.item)
-    const note = { prototype: build.prototype, minimum: build.minimum, remaining, ...(Number.isSafeInteger(have) && have >= 0 ? { placed: have } : {}) }
+    const note = { prototype: build.prototype, minimum: build.minimum, remaining, placed: have, ...stateNote }
     if (existing) { existing.count += count; existing.build = { ...existing.build, remaining: existing.build.remaining + remaining } }
     else roots.push({ item: resolved.item, count, build: note })
   }
@@ -1060,10 +1073,14 @@ export function scienceTargets(research, limits = EXECUTOR_FACT_LIMITS) {
   return targets.slice(0, limits.researchTargets)
 }
 
-/** The research progress fraction (0..1) out of a parsed getTechnology answer for that technology, or undefined when it is not reported. */
+/**
+ * The research progress fraction (0..1) out of a parsed getTechnology answer for that technology, or undefined when it is not reported.
+ * Uses the answer's `progress` (the mod reads LuaForce.research_progress for the current research and saved_progress for any other);
+ * `saved_progress` alone is never used, because for the current research it is not the progress made.
+ */
 export function scienceProgressFromRead(parsed, technology) {
   if (!parsed || typeof parsed !== 'object' || parsed.found !== true || parsed.name !== technology || parsed.researched === true) return undefined
-  const progress = parsed.saved_progress
+  const progress = parsed.progress
   return finiteNumber(progress) !== undefined && progress >= 0 && progress <= 1 ? progress : undefined
 }
 
@@ -1363,7 +1380,10 @@ function machineRecord(machine, limits) {
 // What a root is for, next to its arithmetic (unit 9): the build it places, or the research whose packs it is.
 function rowPurposeText(row) {
   const parts = []
-  if (row.build) parts.push(`[build ${row.build.prototype}: placed=${row.build.placed ?? 'unknown'} of ${row.build.minimum}, ${row.build.remaining} more to place]`)
+  if (row.build) {
+    const state = row.build.state ? ` ${row.build.state}=${row.build.state_count ?? 'unknown'}` : ''
+    parts.push(`[build ${row.build.prototype}: placed=${row.build.placed}${state} of ${row.build.minimum}, ${row.build.remaining} more to place]`)
+  }
   if (row.science) {
     const consumers = asList(row.science.consumers)
     const progress = row.science.progress_known ? `research progress ${Math.round(row.science.progress * 100)}% netted` : 'research progress unknown, not netted'
@@ -1376,8 +1396,12 @@ function rowPurposeText(row) {
 function triggerRowText(row) {
   const trigger = row.trigger
   const names = asList(trigger.unresolved_prerequisites).filter(Boolean)
-  const credit = trigger.credited_only_after_prerequisites === true
-    ? `not ready: ${names.length > 0 ? `prerequisites ${names.join(',')} unresolved` : 'a prerequisite is unresolved'}; crafts now are not credited; held stock not counted`
+  const why = [
+    ...(trigger.credited_only_after_prerequisites === true ? [names.length > 0 ? `prerequisites ${names.join(',')} unresolved` : 'a prerequisite is unresolved'] : []),
+    ...(trigger.technology_disabled === true ? ['technology disabled'] : []),
+  ]
+  const credit = why.length > 0
+    ? `not ready: ${why.join(', ')}; crafts now are not credited; held stock not counted`
     // A research trigger counts NEW crafts: held stock of the item is shown for context, never netted against the count.
     : 'counts new crafts; held stock not counted'
   return `trigger craft-item ${row.item} count=${row.required} for ${trigger.technology} (${credit})${row.held !== undefined ? ` held=${row.held}` : ''}${trigger.status && trigger.status !== 'ready' ? ` tech_status=${trigger.status}` : ''}${row.crafts !== undefined ? ` crafts=${row.crafts} via ${row.recipe}` : ''}`
@@ -1397,6 +1421,13 @@ function residualRecord(residual, limits) {
     return { key: 'residual_needs', block: 'step', drop: 'residual_needs',
       text: `residual_needs (NOT derived, ${why}; unread: ${joinBounded(asList(omitted.unread), ',', limits.residualChars) || 'none listed'})` }
   }
+  // Builds with a state scope (working, powered) that need nothing more placed: the entities stand, the state count is a read fact.
+  const stateFacts = asList(residual?.build_states).map(row => `${row.prototype} placed=${row.placed} ${row.state}=${row.state_count ?? 'unknown'} of ${row.minimum}, ${row.remaining} more to place`)
+  const stateText = stateFacts.length > 0 ? ` | build_state (read fact, not netted): ${stateFacts.join('; ')}` : ''
+  if ((!residual?.rows || residual.rows.length === 0) && stateFacts.length > 0) {
+    return { key: 'residual_needs', block: 'step', drop: 'residual_needs',
+      text: `residual_needs (nothing left to acquire for the step contract builds; entities standing, state counts read now)${stateText}${residualUnresolvedText(residual)}` }
+  }
   if (!residual?.rows || residual.rows.length === 0) return undefined
   const rows = residual.rows.slice(0, limits.residualRows).map(row => row.trigger
     ? triggerRowText(row)
@@ -1407,7 +1438,7 @@ function residualRecord(residual, limits) {
     key: 'residual_needs',
     block: 'step',
     drop: 'residual_needs',
-    text: `residual_needs (derived from recipe_fact and fresh held_counts for the step contract ${roots}; shared stock counted once): ${joinBounded(rows, ' | ', limits.residualChars)}${residualUnresolvedText(residual)}`,
+    text: `residual_needs (derived from recipe_fact and fresh held_counts for the step contract ${roots}; shared stock counted once): ${joinBounded(rows, ' | ', limits.residualChars)}${stateText}${residualUnresolvedText(residual)}`,
   }
 }
 

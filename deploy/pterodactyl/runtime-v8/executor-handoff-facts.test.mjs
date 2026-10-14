@@ -81,6 +81,8 @@ function liveGame({ inventory = {}, recipes = {}, fuels, researchNodes } = {}) {
   game.technologyReads = []
   game.labReads = 0
   game.failDetails = new Set()
+  game.stateCounts = {} // "prototype:state" -> count of placed entities in that state
+  game.failPlacedFor = new Set() // prototypes whose minimum-1 (placed count) reads fail
   game.failConditionReads = false
   game.onConditionRead = undefined
   const base = game.command.bind(game)
@@ -112,8 +114,9 @@ function liveGame({ inventory = {}, recipes = {}, fuels, researchNodes } = {}) {
       const request = JSON.parse(/json_to_table\('(\{.*\})'\)/.exec(text)[1])
       game.entityCountReads.push(request)
       if (!(request.prototype in game.protos)) return JSON.stringify({ ok: false, error: 'unknown_entity', prototype: request.prototype })
-      const current = game.placed[request.prototype] ?? 0
-      return JSON.stringify({ ok: true, kind: 'entity_count', prototype: request.prototype, minimum: request.minimum, current, found: current, truncated: false, satisfied: current >= request.minimum, tick: 900, progress_known: false })
+      if (request.minimum === 1 && game.failPlacedFor.has(request.prototype)) return JSON.stringify({ ok: false, error: 'engine_query_failed' })
+      const current = request.state ? (game.stateCounts[`${request.prototype}:${request.state}`] ?? 0) : (game.placed[request.prototype] ?? 0)
+      return JSON.stringify({ ok: true, kind: 'entity_count', prototype: request.prototype, minimum: request.minimum, current, found: current, truncated: false, satisfied: current >= request.minimum, ...(request.state ? { state: request.state } : {}), tick: 900, progress_known: false })
     }
     if (text.includes('"get_inventory_items"')) return serpent(game.inventory)
     if (text.includes('"research_path"') && game.researchNodes) {
@@ -1511,7 +1514,7 @@ test('9 run G: a science research step carries the packs of its unit cost less t
   const run = async ({ progress, labs = true } = {}) => {
     const game = liveGame({ inventory: { 'copper-plate': 10 }, recipes: { 'automation-science-pack': pack }, researchNodes: [node] })
     game.knownTechnologies.add('logistic-science-pack')
-    if (progress !== undefined) game.technologies['logistic-science-pack'] = { found: true, name: 'logistic-science-pack', researched: false, saved_progress: progress }
+    if (progress !== undefined) game.technologies['logistic-science-pack'] = { found: true, name: 'logistic-science-pack', researched: false, saved_progress: progress, progress, is_current_research: false }
     if (labs) game.labs = { ok: true, query: { capability: 'entity-type', entity_type: 'lab', availability: 'force-available', limit: 4 }, matched_count: 1, available_count: 1, returned_count: 1, truncated: false,
       candidates: [{ name: 'lab', type: 'lab', energy_source: 'electric', place_items: [{ name: 'lab', count: 1 }], force_available: true, enabled_recipe: 'lab', held_count: 1 }] }
     game.inventory.lab = 1
@@ -1597,4 +1600,75 @@ test('9 G8: a trigger whose prerequisites are unresolved says crafts now are not
   const ready = await runEWorld()
   assert.doesNotMatch(stepLine(ready, 'research_path'), /credited_only_after_prerequisites/)
   assert.match(stepLine(ready, 'residual_needs'), /\(counts new crafts; held stock not counted\)/)
+})
+
+
+// --- Unit 9 review fixes ----------------------------------------------------------------------------------------------------
+
+async function runScienceWorld({ technology, labs = true } = {}) {
+  const pack = detail('automation-science-pack', [['copper-plate', 1], ['iron-gear-wheel', 1]], [['automation-science-pack', 1]], ['assembling-machine-1'], { energy: 5 })
+  const node = { name: 'logistic-science-pack', researched: false, mode: 'science', status: 'ready', prerequisites: [], unresolved_prerequisites: [],
+    science: { count: 75, energy: 5, ingredients: [{ name: 'automation-science-pack', amount: 1 }], ingredients_truncated: false } }
+  const contract = { mode: 'all', requirements: [{ id: 'research', kind: 'research_completed', technology: 'logistic-science-pack' }] }
+  const game = liveGame({ inventory: { 'copper-plate': 10, lab: 1 }, recipes: { 'automation-science-pack': pack }, researchNodes: [node] })
+  game.knownTechnologies.add('logistic-science-pack')
+  if (technology) game.technologies['logistic-science-pack'] = { found: true, name: 'logistic-science-pack', researched: false, ...technology }
+  if (labs) game.labs = { ok: true, query: { capability: 'entity-type', entity_type: 'lab', availability: 'force-available', limit: 4 }, candidates: [{ name: 'lab', type: 'lab', energy_source: 'electric', place_items: [{ name: 'lab', count: 1 }], force_available: true, enabled_recipe: 'lab', held_count: 1 }] }
+  const world = harness({ game, script: [planReply({ plan: ['Research logistic science'], currentStep: 0, operations: [gather('iron-ore', 5)], stepCompletions: [{ kind: 'deterministic', checkpoint: contract }], goal: GOAL, roadmap: SHELF }), executorGather(5)], agentOptions: { completionProtocolVersion: 2 } })
+  await world.say()
+  await world.agent.taskStatusReceipt()
+  assert.equal((await restageToFreshExecutor(world)).restaged, true)
+  return world
+}
+
+test('9 review: the active research is netted from the force progress, not from saved_progress; a missing progress stays unknown', async () => {
+  // The step's technology is the current research at 60%; saved_progress belongs to a technology that is not current and reads 0.
+  const current = await runScienceWorld({ technology: { is_current_research: true, progress: 0.6, saved_progress: 0 } })
+  assert.match(stepLine(current, 'residual_needs'), /automation-science-pack required=30 held=0 missing=30 crafts=30 via automation-science-pack \[science logistic-science-pack: 30 of 75 units x1 per unit, research progress 60% netted; consumed by lab\]/)
+  const derived = current.rows('context.science_residual_derived')[0].data
+  assert.deepEqual({ remaining_units: derived.remaining_units, progress: derived.progress, progress_known: derived.progress_known }, { remaining_units: 30, progress: 0.6, progress_known: true })
+  // An answer carrying only saved_progress (an older mod, or no progress field) is not trusted: unknown, not netted.
+  const legacy = await runScienceWorld({ technology: { saved_progress: 0.5 } })
+  assert.match(stepLine(legacy, 'residual_needs'), /75 of 75 units x1 per unit, research progress unknown, not netted/)
+  const garbage = await runScienceWorld({ technology: { progress: 'half', saved_progress: 0.5 } })
+  assert.match(stepLine(garbage, 'residual_needs'), /research progress unknown, not netted/)
+})
+
+test('9 review: a state-scoped build counts what stands without the state filter, and the state count is a separate read fact', async () => {
+  // One steam engine stands but is not powered; the step asks for one powered engine.
+  const contract = { mode: 'all', requirements: [{ id: 'engine', kind: 'entity_count', prototype: 'steam-engine', minimum: 1, state: 'powered' }, entityCount('pump', 'offshore-pump', 1)] }
+  const world = await runSteamWorld({ contract, placed: { 'steam-engine': 1, 'offshore-pump': 1 }, mutate: (game) => { game.stateCounts['steam-engine:powered'] = 0; game.stateCounts['offshore-pump:powered'] = 0 } })
+  const residual = stepLine(world, 'residual_needs')
+  assert.match(residual, /\(nothing left to acquire for the step contract builds; entities standing, state counts read now\) \| build_state \(read fact, not netted\): steam-engine placed=1 powered=0 of 1, 0 more to place$/)
+  assert.doesNotMatch(residual, /steam-engine required|pipe|iron-gear-wheel/, 'a standing engine adds no second engine\'s items to the bill')
+  // The harness read the placed count with no state filter, and the state count with it.
+  const reads = world.game.entityCountReads.filter(request => request.prototype === 'steam-engine')
+  assert.ok(reads.some(request => request.state === undefined && request.minimum === 1))
+  assert.ok(reads.some(request => request.state === 'powered' && request.minimum === 1))
+  const data = world.rows('context.build_bill_derived').at(-1).data
+  assert.deepEqual(data.placed.find(row => row.prototype === 'steam-engine'), { prototype: 'steam-engine', placed: 1, minimum: 1, state: 'powered', state_count: 0 })
+  assert.deepEqual(data.roots, [])
+  // With more to place, the state fact rides on the row.
+  const more = await runSteamWorld({ contract: { mode: 'all', requirements: [{ id: 'engine', kind: 'entity_count', prototype: 'steam-engine', minimum: 3, state: 'powered' }] }, placed: { 'steam-engine': 1 }, mutate: (game) => { game.stateCounts['steam-engine:powered'] = 0 } })
+  assert.match(stepLine(more, 'residual_needs'), /steam-engine required=2 .* \[build steam-engine: placed=1 powered=0 of 3, 2 more to place\]/)
+})
+
+test('9 review: an unread placed count is left out of the bill and named, never guessed as the whole minimum', async () => {
+  const world = await runSteamWorld({ mutate: (game) => { game.failPlacedFor.add('steam-engine') } })
+  const residual = stepLine(world, 'residual_needs')
+  assert.doesNotMatch(residual, /steam-engine required|more to place: unknown/)
+  assert.match(residual, /build_unresolved \(no placing item derived, not in this bill\): steam-engine:placed_count_unread$/)
+  assert.match(residual, /offshore-pump required=1 .*\[build offshore-pump: placed=0 of 1, 1 more to place\]/, 'the readable builds keep their bill')
+  assert.deepEqual(world.rows('context.build_bill_derived').at(-1).data.unresolved, [{ prototype: 'steam-engine', reason: 'placed_count_unread' }])
+})
+
+test('9 review G8: a disabled trigger technology is not credited either, read from the same research node', async () => {
+  const disabled = { ...ELECTRONICS_NODE, status: 'disabled', enabled: false, unresolved_prerequisites: [] }
+  const world = await runEWorld({ mutate: (game) => { game.researchNodes = [disabled] } })
+  assert.match(stepLine(world, 'research_path'), /"enabled":false/)
+  assert.match(stepLine(world, 'residual_needs'), /trigger craft-item copper-plate count=10 for electronics \(not ready: technology disabled; crafts now are not credited; held stock not counted\)/)
+  const both = await runEWorld({ mutate: (game) => { game.researchNodes = [{ ...disabled, unresolved_prerequisites: ['automation'] }] } })
+  assert.match(stepLine(both, 'residual_needs'), /\(not ready: prerequisites automation unresolved, technology disabled; crafts now are not credited; held stock not counted\)/)
+  const enabled = await runEWorld()
+  assert.doesNotMatch(stepLine(enabled, 'research_path'), /"enabled":false/)
 })
