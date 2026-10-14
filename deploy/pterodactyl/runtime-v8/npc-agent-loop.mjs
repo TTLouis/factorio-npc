@@ -21,8 +21,14 @@ import { AgentContext, contextRestagedRow, conversationChars, STALE_REDRIVE_LIMI
 import { EXECUTOR_ROLE, PLANNER_ROLE, roleSystemPrompt } from './agent-roles.mjs'
 import {
   buildHandoffPacket,
+  burnerFuelsFromDetails,
+  deriveFuelNeeds,
+  deriveMachineEnergy,
   deriveResidualNeeds,
   EXECUTOR_FACT_LIMITS,
+  expansionRecipeNames,
+  machineStatusesFrom,
+  triggerProductionRoots,
   executorFactsRefreshMessage,
   mergeRecipeFact,
   neededItems,
@@ -2956,6 +2962,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.handoffRecipeFacts = new Map()
     this.handoffRecipeQueries = new Set()
     this.handoffRawLeaves = new Map()
+    this.handoffFuelSources = new Map() // nearest-instance fuel resource reads, keyed plan|step|actor|epoch|resource: reused within one step and epoch
+    this.handoffBurnerFuels = new Map() // fuel items the mod reported for burner machines' fuel categories: stable prototype data, keyed by item
     this.handoffNoRecipeItems = new Set() // items the game answered "no recipe" for (raw resources): stable data, not re-read
     this.handoffTriggerCraftingReports = []
     this.handoffInventoryObservations = new Map()
@@ -4728,6 +4736,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           this.handoffRawLeaves.set(rawLeaf.item, rawLeaf)
           while (this.handoffRawLeaves.size > EXECUTOR_FACT_LIMITS.noRecipeItems) this.handoffRawLeaves.delete(this.handoffRawLeaves.keys().next().value)
         }
+        for (const fuel of burnerFuelsFromDetails(parsed)) {
+          this.handoffBurnerFuels.delete(fuel.name)
+          this.handoffBurnerFuels.set(fuel.name, fuel)
+        }
+        while (this.handoffBurnerFuels.size > EXECUTOR_FACT_LIMITS.noRecipeItems) this.handoffBurnerFuels.delete(this.handoffBurnerFuels.keys().next().value)
         const tag = this.observationTag()
         const excluded = []
         for (const entry of parsed?.recipes ?? []) {
@@ -4786,7 +4799,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       for (const report of Array.isArray(parsed?.machines) ? parsed.machines : []) {
         const machines = (Array.isArray(report?.options) ? report.options : []).map(option => option?.entity).filter(entity => typeof entity === 'string' && entity)
         if (typeof report?.recipe !== 'string' || machines.length === 0) continue
-        this.handoffRequirementMachines.set(report.recipe, { machines: [...new Set(machines)].slice(0, EXECUTOR_FACT_LIMITS.recipeMachines), truncated: report.truncated === true || machines.length > EXECUTOR_FACT_LIMITS.recipeMachines, tick: Number.isSafeInteger(parsed.tick) ? parsed.tick : undefined })
+        // The option status (craftable/locked/no_recipe) and the item that places the machine travel with the names: unit 8 needs them.
+        const options = (Array.isArray(report?.options) ? report.options : []).slice(0, EXECUTOR_FACT_LIMITS.recipeMachines)
+          .map(option => ({ entity: option?.entity, item: option?.item, status: option?.status }))
+        this.handoffRequirementMachines.set(report.recipe, { machines: [...new Set(machines)].slice(0, EXECUTOR_FACT_LIMITS.recipeMachines), options, truncated: report.truncated === true || machines.length > EXECUTOR_FACT_LIMITS.recipeMachines, tick: Number.isSafeInteger(parsed.tick) ? parsed.tick : undefined })
       }
     }
     catch {}
@@ -4794,7 +4810,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   // Entity kinds seen earlier in this loop, counted by name, with exact ids withheld: a fresh conversation gets the
   // history as history, never as executable targets.
-  historicalEntityFacts() {
+  historicalEntityFacts(limit = EXECUTOR_FACT_LIMITS.historicalKinds) {
     const kinds = new Map()
     for (const observation of this.liveEntityObservations?.values?.() ?? []) {
       if (typeof observation?.name !== 'string') continue
@@ -4803,7 +4819,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (Number.isSafeInteger(observation.observed_tick) && (entry.tick === undefined || observation.observed_tick > entry.tick)) entry.tick = observation.observed_tick
       kinds.set(observation.name, entry)
     }
-    return [...kinds.values()].sort((left, right) => (right.count - left.count) || left.name.localeCompare(right.name)).slice(0, EXECUTOR_FACT_LIMITS.historicalKinds)
+    return [...kinds.values()].sort((left, right) => (right.count - left.count) || left.name.localeCompare(right.name)).slice(0, limit)
   }
 
   // One bounded live read of how many of an item the actor holds, through the same runtime condition the checkpoints use.
@@ -4829,6 +4845,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const before = new Map(this.handoffRecipeFacts)
     const queriesBefore = new Set(this.handoffRecipeQueries)
     const rawBefore = new Map(this.handoffRawLeaves)
+    const fuelsBefore = new Map(this.handoffBurnerFuels)
     const noRecipeBefore = new Set(this.handoffNoRecipeItems)
     const knownRecipe = item => this.handoffRawLeaves.has(item) || this.handoffNoRecipeItems.has(item) || (this.handoffRecipeQueries.has(item) && recipeKnownForItem(item, [...this.handoffRecipeFacts.values()]))
     const queue = roots.map(root => root.item)
@@ -4879,6 +4896,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       this.handoffRecipeQueries = refresh ? new Set() : queriesBefore
       this.handoffRecipeFacts = refresh ? new Map() : before
       this.handoffRawLeaves = rawBefore
+      this.handoffBurnerFuels = fuelsBefore
       this.handoffNoRecipeItems = noRecipeBefore
       if (error && typeof error === 'object') error.recipePrefetch = stats // so a refusal still reports the reads it spent
       throw error
@@ -4958,10 +4976,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // Unit 3b: the harness closes the recipe chain under the step's inventory roots itself, so a root nobody read a recipe
       // for does not become a raw leaf in the residual derivation. Never while a batch is in flight (the executor sees this
       // packet after it ends), and only under the actor/epoch fence.
+      // Unit 8: a research step on a trigger technology has no inventory root; its production root is the fresh research path's own
+      // craft-item item and count. It enters the same recipe closure and residual derivation, and is never netted against held stock.
+      const triggerRoots = triggerProductionRoots(research)
+      const closureRoots = [...needs.roots, ...triggerRoots.map(root => ({ item: root.item, count: root.count }))]
+      // Once per restage: the deferred refresh re-derives the same root and does not announce it again.
+      if (mode === 'packet') for (const root of triggerRoots) {
+        await this.traceEvent('context.trigger_production_derived', {
+          request_id: requestId ?? this.traceRequest?.id, technology: root.technology, item: root.item, count: root.count,
+          held_counted: root.held_counted, reason: 'trigger_technology_counts_new_crafts_not_held_stock',
+        }, { requestId })
+      }
       let prefetchReads = 0 // recipe reads are counted in reads_attempted but are not part of the count refresh's success rate
-      if (mode === 'packet' && !inFlight && fence && needs.roots.length > 0) {
+      if (mode === 'packet' && !inFlight && fence && closureRoots.length > 0) {
         try {
-          const prefetch = await this.prefetchRecipeClosure({ roots: needs.roots, fence, requestId })
+          const prefetch = await this.prefetchRecipeClosure({ roots: closureRoots, fence, requestId })
           meta.recipe_prefetch = prefetch
           meta.reads_attempted += prefetch.reads
           prefetchReads = prefetch.reads
@@ -4969,7 +4998,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           if (prefetch.reads > 0 || prefetch.truncated) {
             await this.traceEvent('context.recipe_closure_prefetched', {
               request_id: requestId ?? this.traceRequest?.id,
-              roots: needs.roots.map(root => root.item).slice(0, 4),
+              roots: closureRoots.map(root => root.item).slice(0, 4),
               reads: prefetch.reads,
               found: prefetch.found,
               unreadable: prefetch.unreadable,
@@ -4990,7 +5019,27 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const wanted = [...new Set([...needs.items, ...requirementTargets(state.goal?.definition).items.map(item => item.name)])]
       wanted.unshift(...researchItems)
       const cached = withoutRawLeafRecipes([...this.handoffRecipeFacts.values()], this.handoffRawLeaves)
-      const closure = neededItems(needs.roots, cached)
+      const closure = neededItems(closureRoots, cached)
+      // Unit 8: the machines the closure's recipes can run in, and (for a burner among them) the fuel items to count, are read
+      // with the other counts, inside the same bound and fence.
+      const closureRecipeNames = expansionRecipeNames(closure.items, cached)
+      const machineStatuses = machineStatusesFrom({ triggerReports: this.handoffTriggerCraftingReports, requirementMachines: this.handoffRequirementMachines })
+      const energyScope = { machineItems: new Set(), fuelNames: [] }
+      {
+        const categories = new Set()
+        for (const name of closureRecipeNames) {
+          const fact = cached.find(recipe => recipe.name === name)
+          for (const machineName of fact?.machines ?? []) {
+            const status = machineStatuses.get(machineName)
+            if (status?.status === 'locked') continue
+            const energy = fact.machine_energy?.find(entry => entry.name === machineName)
+            const item = status?.item ?? energy?.item
+            if (item) energyScope.machineItems.add(item)
+            if (energy?.energy_source === 'burner') for (const category of energy.fuel_categories ?? []) categories.add(category)
+          }
+        }
+        energyScope.fuelNames = [...this.handoffBurnerFuels.values()].filter(fuel => categories.has(fuel.category)).map(fuel => fuel.name)
+      }
       const recipes = selectRecipeFacts(cached, { wanted, needed: closure.items }).map((recipe) => {
         const known = this.handoffRequirementMachines.get(recipe.name)
         return known && recipe.machines.length === 0
@@ -5006,6 +5055,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       researchItems.forEach(addItem)
       refreshItems.forEach(addItem)
       for (const item of this.handoffTouchedItems ?? []) addItem(item)
+      // Unit 8 machine and fuel counts follow the older priorities; whatever the cap cuts is reported as unread, never absent.
+      energyScope.machineItems.forEach(addItem)
+      energyScope.fuelNames.forEach(addItem)
       for (const recipe of recipes) {
         if (recipe.products.some(product => wanted.includes(product.name))) recipe.ingredients.filter(ingredient => ingredient.type === 'item').forEach(ingredient => addItem(ingredient.name))
       }
@@ -5102,67 +5154,117 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
       let residual
       if (inFlight) meta.residual_omitted = 'batch_in_flight'
-      else if (needs.roots.length === 0) meta.residual_omitted = 'no_inventory_contract_root'
+      else if (needs.roots.length === 0 && triggerRoots.length === 0) meta.residual_omitted = 'no_inventory_contract_root'
       else if (!closure.complete) meta.residual_omitted = 'too_many_items'
       else {
-        const derived = deriveResidualNeeds({ roots: needs.roots, recipes: cached, held: fresh })
-        if (derived.ok) {
-          residual = { rows: derived.rows, roots: needs.roots }
-          const sources = new Map()
-          let sourceReads = 0
-          const rawRows = residual.rows.filter(row => row.missing > 0 && this.handoffRawLeaves.has(row.item))
-          if (rawRows.length && fence) {
-            try {
-              await this.handoffFenceCheck(fence, 'before')
-              for (const row of rawRows) {
-                const raw = this.handoffRawLeaves.get(row.item)
-                for (const resource of raw.mined_from) {
-                  if (sources.has(resource) || sources.size >= limits.rawLeafResources) continue
-                  meta.reads_attempted += 1
-                  sourceReads += 1
-                  let answer
-                  try { answer = await this.rcon.command(this.observationToolCommand('findLongRangeEntities', { name: resource, max_radius: limits.rawLeafRadius, limit: 1 })) }
-                  catch { /* An unreadable source is not evidence of absence. */ }
-                  const source = rawLeafSourceFromRead(answer, resource, limits.rawLeafRadius)
-                  if (source.state === 'failed') {
-                    meta.reads_failed += 1
-                    if (meta.refresh === 'ok') meta.refresh = 'partial'
-                  }
-                  sources.set(resource, source)
-                }
-              }
-              await this.handoffFenceCheck(fence, 'during')
-            }
-            catch (error) {
-              if (error?.handoffFence) return { refusal: error.handoffFence, meta }
-              // An unreadable fence means none of these locations can be carried.
-              sources.clear()
-            }
-          }
-          for (const row of rawRows) {
-            const raw = this.handoffRawLeaves.get(row.item)
-            row.raw = { ...raw, as_of: this.observationTag(), sources: raw.mined_from.map(resource => sources.get(resource) ?? { resource, state: 'not_read' }) }
-          }
-          if (rawRows.length) await this.traceEvent('context.raw_leaf_acquisition', {
-            request_id: requestId ?? this.traceRequest?.id,
-            reason: 'missing_raw_materials_with_native_mining_sources',
-            items: rawRows.map(row => row.item),
-            reads: sourceReads,
-            found: [...sources.values()].filter(source => source.state === 'found').length,
-            failed: [...sources.values()].filter(source => source.state === 'failed').length,
-            truncated: rawRows.some(row => row.raw.sources.some(source => source.state === 'not_read')),
-          }, { requestId })
-        }
+        const derived = deriveResidualNeeds({ roots: needs.roots, production: triggerRoots, recipes: cached, held: fresh })
+        if (derived.ok) residual = { rows: derived.rows, roots: needs.roots, production: triggerRoots }
         else meta.residual_omitted = derived.reason
       }
 
+      // Unit 8: native energy source of the available machines, whether one is held or was seen placed, and the fuel a burner needs.
+      let machineEnergy
+      let fuelNeeds
+      if (!inFlight) {
+        const placed = new Map()
+        for (const kind of this.historicalEntityFacts(limits.placedKinds)) placed.set(kind.name, { count: kind.count, via: 'historical_entities' })
+        const checkpointName = machine?.facts?.name
+        if (typeof checkpointName === 'string' && checkpointName && !placed.has(checkpointName)) placed.set(checkpointName, { count: 1, via: 'checkpoint_machine' })
+        machineEnergy = deriveMachineEnergy({ recipes: cached, recipeNames: closureRecipeNames, statuses: machineStatuses, held: fresh, placed, limits })
+        fuelNeeds = deriveFuelNeeds({ machineEnergy, fuels: [...this.handoffBurnerFuels.values()], held: fresh, limits })
+      }
+
+      // Native sources for what is missing: raw materials first, then (only when no fuel is held) the resources that yield a fuel.
+      // One fence pair and one shared cap of `rawLeafResources` distinct resources per handoff.
+      const sources = new Map()
+      let sourceReads = 0
+      let rawSourceReads = 0
+      const rawRows = (residual?.rows ?? []).filter(row => !row.trigger && row.missing > 0 && this.handoffRawLeaves.has(row.item))
+      const rawResources = rawRows.flatMap(row => this.handoffRawLeaves.get(row.item).mined_from)
+      const fuelSearch = fuelNeeds?.search === 'needed'
+      const fuelResources = fuelSearch ? fuelNeeds.items.flatMap(item => item.mined_from) : []
+      // A fuel location already read in this step and epoch is reused with its own as_of rather than read again at every refresh.
+      const fuelKey = resource => `${plan.plan_id}|${step.step_id}|${fence?.actor_id}|${fence?.epoch}|${resource}`
+      const reused = new Map()
+      for (const resource of new Set(fuelResources)) {
+        if (rawResources.includes(resource)) continue
+        const cachedSource = fence ? this.handoffFuelSources.get(fuelKey(resource)) : undefined
+        if (cachedSource) { sources.set(resource, cachedSource.source); reused.set(resource, cachedSource.as_of) }
+      }
+      const pendingFuelWrites = []
+      let readsSpent = 0
+      if ((rawResources.length > 0 || fuelResources.some(resource => !sources.has(resource))) && fence) {
+        try {
+          await this.handoffFenceCheck(fence, 'before')
+          for (const resource of [...rawResources, ...fuelResources]) {
+            if (sources.has(resource) || readsSpent >= limits.rawLeafResources) continue
+            readsSpent += 1
+            meta.reads_attempted += 1
+            sourceReads += 1
+            if (rawResources.includes(resource)) rawSourceReads += 1
+            let answer
+            try { answer = await this.rcon.command(this.observationToolCommand('findLongRangeEntities', { name: resource, max_radius: limits.rawLeafRadius, limit: 1 })) }
+            catch { /* An unreadable source is not evidence of absence. */ }
+            const source = rawLeafSourceFromRead(answer, resource, limits.rawLeafRadius)
+            if (source.state === 'failed') {
+              meta.reads_failed += 1
+              if (meta.refresh === 'ok') meta.refresh = 'partial'
+            }
+            sources.set(resource, source)
+            if (!rawResources.includes(resource) && (source.state === 'found' || source.state === 'none')) pendingFuelWrites.push([fuelKey(resource), { source, as_of: this.observationTag() }])
+          }
+          await this.handoffFenceCheck(fence, 'during')
+          // Only reads that survived the fence are remembered, and a failed read is never reused.
+          for (const [key, value] of pendingFuelWrites) {
+            this.handoffFuelSources.delete(key)
+            this.handoffFuelSources.set(key, value)
+          }
+          while (this.handoffFuelSources.size > limits.fuelSourceCache) this.handoffFuelSources.delete(this.handoffFuelSources.keys().next().value)
+        }
+        catch (error) {
+          if (error?.handoffFence) return { refusal: error.handoffFence, meta }
+          // An unreadable fence means none of these locations can be carried.
+          sources.clear()
+          reused.clear()
+        }
+      }
+      for (const row of rawRows) {
+        const raw = this.handoffRawLeaves.get(row.item)
+        row.raw = { ...raw, as_of: this.observationTag(), sources: raw.mined_from.map(resource => sources.get(resource) ?? { resource, state: 'not_read' }) }
+      }
+      if (rawRows.length) {
+        const rawStates = [...new Set(rawResources)].map(resource => sources.get(resource)).filter(Boolean)
+        await this.traceEvent('context.raw_leaf_acquisition', {
+          request_id: requestId ?? this.traceRequest?.id,
+          reason: 'missing_raw_materials_with_native_mining_sources',
+          items: rawRows.map(row => row.item),
+          reads: rawSourceReads,
+          found: rawStates.filter(source => source.state === 'found').length,
+          failed: rawStates.filter(source => source.state === 'failed').length,
+          truncated: rawRows.some(row => row.raw.sources.some(source => source.state === 'not_read')),
+        }, { requestId })
+      }
+      if (fuelSearch) {
+        for (const item of fuelNeeds.items) {
+          if (item.mined_from.length === 0) continue
+          // The label is the oldest read among this item's sources: a reused location keeps the tag of the read it came from.
+          const tags = item.mined_from.map(resource => reused.get(resource)).filter(Boolean)
+          const anyRead = item.mined_from.some(resource => sources.has(resource) && !reused.has(resource))
+          const oldest = tags.sort((left, right) => (left.at_ms ?? 0) - (right.at_ms ?? 0))[0]
+          item.raw = { mined_from: item.mined_from, as_of: oldest && !anyRead ? oldest : this.observationTag(), sources: item.mined_from.map(resource => sources.get(resource) ?? { resource, state: 'not_read' }) }
+        }
+      }
+      if (machineEnergy) meta.machine_energy = { machines: machineEnergy.machines.map(entry => entry.name), burner_count: machineEnergy.burner_count,
+        fuel_held: fuelNeeds ? fuelNeeds.held_total > 0 : false, fuel_counts_unread: fuelNeeds?.unknown_held ?? 0,
+        machine_items_unread: machineEnergy.omitted.unread, fuel_sources_read: sourceReads - rawSourceReads, fuel_sources_reused: reused.size }
+
       const counts = { items, unavailable, as_of: tag, ...(meta.counts_deferred ? { deferred: meta.counts_deferred } : {}) }
       if (mode === 'refresh') {
-        const any = research.length > 0 || items.length > 0 || unavailable.length > 0 || machine || residual
-        return { facts: any ? { recipes, counts, machine, residual, research, historical_entities: historical } : undefined, meta }
+        const any = research.length > 0 || items.length > 0 || unavailable.length > 0 || machine || residual || machineEnergy
+        return { facts: any ? { recipes, counts, machine, residual, research, historical_entities: historical, machine_energy: machineEnergy, fuel_needs: fuelNeeds } : undefined, meta }
       }
-      const hasContent = research.length > 0 || recipes.length > 0 || items.length > 0 || unavailable.length > 0 || counts.deferred || machine || residual || historical.length > 0 || fluidHints.length > 0
-      return { facts: hasContent ? { recipes, counts, machine, residual, research, historical_entities: historical, fluid_source_hints: fluidHints } : undefined, meta }
+      const hasContent = research.length > 0 || recipes.length > 0 || items.length > 0 || unavailable.length > 0 || counts.deferred || machine || residual || machineEnergy || historical.length > 0 || fluidHints.length > 0
+      return { facts: hasContent ? { recipes, counts, machine, residual, research, historical_entities: historical, fluid_source_hints: fluidHints, machine_energy: machineEnergy, fuel_needs: fuelNeeds } : undefined, meta }
     }
     catch (error) {
       this.log(`[handoff] executor facts failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -5270,6 +5372,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         stale_items: summary.stale_items,
         residual_needs: summary.residual_needs,
         residual_omitted_reason: summary.residual_needs === 0 ? meta?.residual_omitted : undefined,
+        machine_energy: summary.machine_energy,
+        fuel_needs: summary.fuel_needs,
         machine: summary.machine,
         historical_entity_kinds: summary.historical_entity_kinds,
         reads_attempted: meta?.reads_attempted,
@@ -5278,6 +5382,23 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         dropped_for_size: (packet.dropped ?? []).filter(factRecord),
         reason: 'executor_context_rebuilt_without_the_prior_conversation_reads',
       }, { requestId })
+      if (meta?.machine_energy) {
+        await this.traceEvent('context.machine_energy_carried', {
+          request_id: requestId,
+          handoff_id: restaged.handoff_id,
+          checkpoint,
+          machines: meta.machine_energy.machines,
+          burner_count: meta.machine_energy.burner_count,
+          fuel_held: meta.machine_energy.fuel_held,
+          fuel_sources_read: meta.machine_energy.fuel_sources_read,
+          fuel_sources_reused: meta.machine_energy.fuel_sources_reused,
+          fuel_counts_unread: meta.machine_energy.fuel_counts_unread,
+          machine_items_unread: meta.machine_energy.machine_items_unread,
+          carried: (summary.machine_energy ?? 0) > 0,
+          dropped_for_size: (packet.dropped ?? []).filter(key => ['machine_energy', 'fuel_needs'].includes(key)),
+          reason: 'native_energy_source_placement_and_fuel_facts_for_available_machines',
+        }, { requestId })
+      }
       if (summary.fluid_source_hints !== undefined) {
         await this.traceEvent('context.fluid_source_hints_carried', {
           request_id: requestId,
@@ -10572,7 +10693,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   targetedResourceSearchNames() {
     // Prototype acquisition facts identify resources; item names and blocker prose do not.
-    return [...new Set([...this.handoffRawLeaves.values()].flatMap(row => row.mined_from ?? []))].sort()
+    return [...new Set([...this.handoffRawLeaves.values(), ...this.handoffBurnerFuels.values()].flatMap(row => row.mined_from ?? []))].sort()
   }
 
   controlDecisionState(allowTools) {
@@ -10616,11 +10737,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       || !(initial.draft ? this.agentContext.role !== EXECUTOR_ROLE : FROZEN_PLAN_STATUSES.has(initial.plan?.status))
       || initial.state?.status !== 'active' || this.currentPendingAmendment()) return reject('no_eligible_active_step')
     if (initial.draft !== (request.scope === 'draft')) return reject('observation_scope_does_not_match_phase')
+    // A committed executor names its step by the exact active stepId (submitPlan requires stepId and operations, and carries no
+    // plan or currentStep: the parser fills [] and 0). Its identity is that id; plan and currentStep are compared only when the
+    // request really supplies them. A planner or draft request keeps the planner-side comparison exactly as before.
+    const executorStepBound = !initial.draft && this.agentContext.role === EXECUTOR_ROLE && intent.stepId !== undefined
+    if (executorStepBound && intent.stepId !== initial.data.stepId) return reject('stale_plan_or_step')
+    const planSupplied = !executorStepBound || (Array.isArray(intent.plan) && intent.plan.length > 0)
     if ((initial.draft ? request.goalId !== initial.data.goalId || request.planId !== initial.data.planId
       || request.planVersion !== initial.plan.plan_version || request.draftRevision !== initial.plan.updated_at
-      : request.stepId !== initial.data.stepId) || intent.currentStep !== initial.state.current_step
-      || JSON.stringify(intent.plan) !== JSON.stringify(initial.state.plan)) return reject('stale_plan_or_step')
-    if (!Array.isArray(intent.operations) || intent.operations.length !== 0 || Object.keys(intent).some(key => !['chatMessage', 'plan', 'currentStep', 'operations', 'observationRequest', 'stepCompletions'].includes(key))) return reject('read_cannot_edit_or_complete_plan')
+      : request.stepId !== initial.data.stepId) || (planSupplied && (intent.currentStep !== initial.state.current_step
+      || JSON.stringify(intent.plan) !== JSON.stringify(initial.state.plan)))) return reject('stale_plan_or_step')
+    const allowedKeys = ['chatMessage', 'plan', 'currentStep', 'operations', 'observationRequest', 'stepCompletions', ...(executorStepBound ? ['stepId'] : [])]
+    if (!Array.isArray(intent.operations) || intent.operations.length !== 0 || Object.keys(intent).some(key => !allowedKeys.includes(key))) return reject('read_cannot_edit_or_complete_plan')
     if (Object.hasOwn(intent, 'stepCompletions')) {
       try {
         const declared = normalizeStepCompletions(intent.plan, intent.stepCompletions)

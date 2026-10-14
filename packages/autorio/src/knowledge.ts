@@ -116,6 +116,22 @@ function categories_for(recipe: any): string[] {
   return categories
 }
 
+// The item whose placement creates this machine, read from the prototype (name-sorted when several do), or undefined.
+// A fresh executor needs it to count how many of the machine the actor holds without assuming entity and item share a name.
+function placed_by_item(prototype: LuaEntityPrototype): string | undefined {
+  const names: string[] = []
+  try {
+    for (const stack of (prototype as any).items_to_place_this ?? []) {
+      if (typeof stack?.name === 'string') names.push(stack.name)
+    }
+  }
+  catch {
+    // An unreadable placing-item list leaves the machine item unnamed rather than failing the whole recipe read.
+  }
+  sort_strings(names)
+  return names[0]
+}
+
 function machine_summaries(categories: string[], recipe: any, fuel_name: string | undefined) {
   const seen: Record<string, boolean> = {}
   const candidates: MachineCandidate[] = []
@@ -138,6 +154,7 @@ function machine_summaries(categories: string[], recipe: any, fuel_name: string 
     machines: candidates.slice(0, MAX_MACHINE_MATCHES).map(({ name, prototype }) => ({
       name,
       type: prototype.type,
+      placed_by_item: placed_by_item(prototype),
       ...rates.machine_craft_rate(prototype, recipe, fuel_name),
     })),
   }
@@ -353,6 +370,36 @@ function mined_from_names(item_name: string) {
   return names.length > 0 ? names.slice(0, MAX_RECIPE_MATCHES) : undefined
 }
 
+const MAX_FUEL_ITEMS = 6
+
+// Fuel facts for burner machines, from item and resource prototypes only: every item whose fuel category a burner
+// accepts (with its fuel value), and the resources whose mining yields it. Items some resource yields come first, then
+// name order, so the bounded list keeps the natively minable fuels. Non-resource sources (trees and the like) are not
+// derived here: an item with no `mined_from` has no resource source, which is not a claim that nothing yields it.
+function burner_fuel_summary(categories: string[]) {
+  const accepted: Record<string, boolean> = {}
+  for (const category of categories) accepted[category] = true
+  const sourced: Array<{ name: string, category: string, fuel_value: number, mined_from: string[] }> = []
+  const unsourced: Array<{ name: string, category: string, fuel_value: number, mined_from: undefined }> = []
+  for (const [name, prototype] of pairs(prototypes.item)) {
+    const category = (prototype as any).fuel_category as string | undefined
+    const fuel_value = (prototype as any).fuel_value as number | undefined
+    if (category === undefined || accepted[category] !== true || typeof fuel_value !== 'number' || !(fuel_value > 0)) continue
+    const mined_from = mined_from_names(name)
+    if (mined_from !== undefined) sourced.push({ name, category, fuel_value, mined_from })
+    else unsourced.push({ name, category, fuel_value, mined_from: undefined })
+  }
+  sort_named(sourced)
+  sort_named(unsourced)
+  const ordered: Array<{ name: string, category: string, fuel_value: number, mined_from: string[] | undefined }> = [...sourced, ...unsourced]
+  return {
+    categories,
+    matched_count: ordered.length,
+    truncated: ordered.length > MAX_FUEL_ITEMS,
+    items: ordered.slice(0, MAX_FUEL_ITEMS),
+  }
+}
+
 function drill_summaries(actor: ControlledActor, resource: LuaEntityPrototype, category: string, fuel_name: string | undefined) {
   const candidates: MachineCandidate[] = []
   const matches = prototypes.get_entity_filtered([{ filter: 'type', type: 'mining-drill' }])
@@ -435,6 +482,39 @@ export function recipe_details_for_actor(actor: ControlledActor, item_or_recipe:
     }
   }
 
+  const recipes = candidates.map(({ name, recipe, applicability }) => {
+    const categories = categories_for(recipe)
+    const machine_result = machine_summaries(categories, recipe, fuel_name)
+    const hand_craftable = character_can_craft(actor, categories)
+    const bootstrap = recipe_bootstrap_for_actor(actor, recipe, requested_count)
+    return {
+      name,
+      enabled: recipe.enabled,
+      applicability,
+      requested_crafts: bootstrap.requested_crafts,
+      craftable_now_count: bootstrap.craftable_now_count,
+      craftable_now: bootstrap.craftable_now,
+      inventory_overlay: bootstrap.inventory_overlay,
+      bootstrap: {
+        dependencies: bootstrap.dependencies,
+        first_unresolved: bootstrap.first_unresolved,
+      },
+      hidden: recipe.hidden,
+      energy: recipe.energy,
+      categories,
+      hand_craftable_category: hand_craftable,
+      hand_crafting: hand_crafting_summary(actor, recipe, hand_craftable),
+      hidden_from_player_crafting: recipe.prototype?.hidden_from_player_crafting,
+      allow_as_intermediate: recipe.prototype?.allow_as_intermediate,
+      allow_intermediates: recipe.prototype?.allow_intermediates,
+      ingredients: ingredient_summaries(recipe),
+      products: product_summaries(recipe),
+      crafting_machine_count: machine_result.matched_count,
+      crafting_machines: machine_result.machines,
+      crafting_machines_truncated: machine_result.truncated,
+    }
+  })
+
   return {
     found: true,
     query: item_or_recipe,
@@ -443,39 +523,28 @@ export function recipe_details_for_actor(actor: ControlledActor, item_or_recipe:
     // (acquired by mining), whatever recycling or crushing recipes also list it as a product.
     mined_from: mined_from_names(item_or_recipe),
     rate_basis: rates.RATE_BASIS,
-    recipes: candidates.map(({ name, recipe, applicability }) => {
-      const categories = categories_for(recipe)
-      const machine_result = machine_summaries(categories, recipe, fuel_name)
-      const hand_craftable = character_can_craft(actor, categories)
-      const bootstrap = recipe_bootstrap_for_actor(actor, recipe, requested_count)
-      return {
-        name,
-        enabled: recipe.enabled,
-        applicability,
-        requested_crafts: bootstrap.requested_crafts,
-        craftable_now_count: bootstrap.craftable_now_count,
-        craftable_now: bootstrap.craftable_now,
-        inventory_overlay: bootstrap.inventory_overlay,
-        bootstrap: {
-          dependencies: bootstrap.dependencies,
-          first_unresolved: bootstrap.first_unresolved,
-        },
-        hidden: recipe.hidden,
-        energy: recipe.energy,
-        categories,
-        hand_craftable_category: hand_craftable,
-        hand_crafting: hand_crafting_summary(actor, recipe, hand_craftable),
-        hidden_from_player_crafting: recipe.prototype?.hidden_from_player_crafting,
-        allow_as_intermediate: recipe.prototype?.allow_as_intermediate,
-        allow_intermediates: recipe.prototype?.allow_intermediates,
-        ingredients: ingredient_summaries(recipe),
-        products: product_summaries(recipe),
-        crafting_machine_count: machine_result.matched_count,
-        crafting_machines: machine_result.machines,
-        crafting_machines_truncated: machine_result.truncated,
-      }
-    }),
+    // Present only when some listed crafting machine burns fuel: the fuels its categories accept, and which resources mine them.
+    burner_fuels: burner_fuels_of(recipes),
+    recipes,
   }
+}
+
+function burner_fuels_of(recipes: Array<{ crafting_machines: Array<Record<string, unknown>> }>) {
+  const categories: string[] = []
+  const seen: Record<string, boolean> = {}
+  for (const recipe of recipes) {
+    for (const machine of recipe.crafting_machines) {
+      if (machine.energy_source !== 'burner') continue
+      for (const category of (machine.fuel_categories as string[] | undefined) ?? []) {
+        if (seen[category] === true) continue
+        seen[category] = true
+        categories.push(category)
+      }
+    }
+  }
+  if (categories.length === 0) return undefined
+  sort_strings(categories)
+  return burner_fuel_summary(categories)
 }
 
 export function entity_geometry_for_actor(actor: ControlledActor, unit_number: number) {

@@ -99,13 +99,31 @@ export function fuel_burn(energy_watts: number, burner: LuaBurnerPrototype, fuel
   }
 }
 
+// The non-burner energy source kinds a prototype can declare, read from the prototype itself. A kind the prototype
+// does not expose stays 'other' rather than being guessed.
+function non_burner_energy_source(prototype: LuaEntityPrototype) {
+  if (prototype.electric_energy_source_prototype !== undefined) return 'electric'
+  // The other kinds are optional prototype keys: a prototype that rejects one is reported as 'other', never as a failed read.
+  let kind = 'other'
+  try {
+    const typed = prototype as any
+    if (typed.heat_energy_source_prototype !== undefined) kind = 'heat'
+    else if (typed.fluid_energy_source_prototype !== undefined) kind = 'fluid'
+    else if (typed.void_energy_source_prototype !== undefined) kind = 'void'
+  }
+  catch {
+    kind = 'other'
+  }
+  return kind
+}
+
 // Energy source facts for one machine; a named fuel adds its burn rate at full load.
 export function energy_facts(prototype: LuaEntityPrototype, fuel_name: string | undefined) {
   const energy_watts = prototype.get_max_energy_usage() * 60
   const burner = prototype.burner_prototype
   if (burner === undefined) {
     return {
-      energy_source: prototype.electric_energy_source_prototype !== undefined ? 'electric' : 'other',
+      energy_source: non_burner_energy_source(prototype),
       energy_watts: round_rate(energy_watts),
     }
   }

@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
+import { parseGoalRequirements } from './goal-requirements.mjs'
+import { executorFactsRefreshMessage } from './handoff-packet.mjs'
 import { NpcAgentLoop, requiresMachineFacts } from './npc-agent-loop.mjs'
 import { getActivePlan } from './planning-state.mjs'
 import { deployment, FakeFactorio, gather, inventoryCheckpoint, planReply, recordingJev } from './task-loop-fixtures.mjs'
@@ -53,9 +56,13 @@ const MINED_FROM = { 'iron-ore': ['iron-ore'], 'copper-ore': ['copper-ore'] }
 // The live engine prints the inventory as a serpent block, recipe details as JSON.
 const serpent = inventory => `{\n${Object.entries(inventory).filter(([, count]) => count > 0).map(([name, count]) => `  {\n    count = ${count},\n    name = "${name}"\n  }`).join(',\n')}\n}`
 
-function liveGame({ inventory = {}, recipes = {} } = {}) {
+function liveGame({ inventory = {}, recipes = {}, fuels, researchNodes } = {}) {
   const game = new FakeFactorio({ inventory })
   const table = { ...RECIPES, ...recipes }
+  // Unit 8: the mod's top-level burner_fuels answer (present when a listed crafting machine burns fuel) and getResearchPath nodes.
+  game.burnerFuels = fuels
+  game.researchNodes = researchNodes
+  game.researchReads = []
   game.sourceReads = []
   game.recipeReads = []
   game.onRecipeRead = undefined
@@ -72,6 +79,12 @@ function liveGame({ inventory = {}, recipes = {} } = {}) {
       return JSON.stringify(game.sourceAnswer ?? sourceAnswer(resource))
     }
     if (text.includes('"get_inventory_items"')) return serpent(game.inventory)
+    if (text.includes('"research_path"') && game.researchNodes) {
+      const target = /research_path",['"]([^'"]+)['"]/.exec(text)?.[1]
+      game.researchReads.push(target)
+      const node = game.researchNodes.find(entry => entry.name === target)
+      return JSON.stringify(node ? { ok: true, target, node_count: 1, nodes: [node] } : { ok: false, error: 'unknown_technology' })
+    }
     if (text.includes('"recipe_details"')) {
       const name = /"recipe_details",['"]([a-z0-9-]+)['"]/.exec(text)?.[1]
       game.recipeReads.push(name)
@@ -80,7 +93,8 @@ function liveGame({ inventory = {}, recipes = {} } = {}) {
       // declared; mined_from is present only for an item a resource yields.
       const mined = MINED_FROM[name]
       return JSON.stringify(table[name]
-        ? { found: true, query: name, truncated: false, recipes: [table[name]], ...(mined ? { mined_from: mined } : {}) }
+        ? { found: true, query: name, truncated: false, recipes: [table[name]], ...(mined ? { mined_from: mined } : {}),
+            ...(game.burnerFuels && table[name].crafting_machines.some(machine => machine.energy_source === 'burner') ? { burner_fuels: game.burnerFuels } : {}) }
         : { found: false, query: name, code: 'no_recipe', error: 'no recipe produces this item/fluid and no recipe has this name', ...(mined ? { mined_from: mined } : {}) })
     }
     if (text.includes('"get_fluid_source_tiles"')) {
@@ -1024,4 +1038,292 @@ test('6: at most three distinct resource searches per handoff; held and in-fligh
   for (const item of ores) world.game.inventory[item] = 10
   await world.agent.gatherExecutorHandoffFacts({ state, actor: world.agent.epoch })
   assert.equal(world.game.sourceReads.length, count)
+})
+
+
+// --- Unit 8: trigger-research production facts, machine energy and burner fuel -----------------------------------------
+//
+// Live run E (2026-10-13, GPT-6, fresh world): the step was "Complete electronics trigger by producing 10 copper plates",
+// its contract only `research_completed electronics`. The executor packet had no production root (residual derivation
+// only knew inventory_count contracts) and nothing said that the stone furnace in the starter kit burns fuel, that the
+// actor held none, or how fuel is natively acquired. The scripted answers below are the live shapes: the captured
+// electronics node from getResearchPath, the requirements read's trigger_crafting machine options, and the mod's
+// getRecipeDetails answer for copper-plate (crafting_machines with energy_source and top-level burner_fuels).
+
+const RESEARCH_FIXTURE = JSON.parse(readFileSync(new URL('./fixtures/luna-research-handoff-2026-10-06.json', import.meta.url), 'utf8'))
+const ELECTRONICS_NODE = RESEARCH_FIXTURE.researchPath.nodes.find(node => node.name === 'electronics')
+const E_STEPS = ['Complete electronics trigger by producing 10 copper plates']
+const E_GOAL = { scope: 'long_horizon', summary: 'Research electronics.', doneWhen: [{ id: 'research', kind: 'research_completed', technology: 'electronics' }] }
+const E_CONTRACT = { mode: 'all', requirements: [{ kind: 'research_completed', technology: 'electronics' }] }
+
+const furnaceMachine = (name, source, extra = {}) => ({
+  name, type: 'furnace', placed_by_item: name, crafting_speed: 1, seconds_per_craft: 3.2, crafts_per_second: 0.3125,
+  products_per_minute: [{ type: 'item', name: 'copper-plate', per_minute: 18.75 }], energy_source: source, energy_watts: 90000, ...extra,
+})
+const copperPlateRecipe = (machines = [
+  furnaceMachine('electric-furnace', 'electric', { crafting_speed: 2, energy_watts: 180000 }),
+  furnaceMachine('steel-furnace', 'burner', { burner_effectivity: 1, fuel_categories: ['chemical'] }),
+  furnaceMachine('stone-furnace', 'burner', { burner_effectivity: 1, fuel_categories: ['chemical'] }),
+]) => ({
+  ...detail('copper-plate', [['copper-ore', 1]], [['copper-plate', 1]], [], { categories: ['smelting'], energy: 3.2 }),
+  hand_craftable_category: false,
+  crafting_machine_count: machines.length,
+  crafting_machines: machines,
+})
+// The mod's burner_fuels (knowledge.ts): the items the burner categories accept, resource-mined fuels first, then name order.
+const BURNER_FUELS = { categories: ['chemical'], matched_count: 3, truncated: false, items: [
+  { name: 'coal', category: 'chemical', fuel_value: 4000000, mined_from: ['coal'] },
+  { name: 'solid-fuel', category: 'chemical', fuel_value: 12000000 },
+  { name: 'wood', category: 'chemical', fuel_value: 2000000 },
+] }
+// goal_requirements as the mod answers it: the stone furnace is craftable now, the others are locked behind research.
+const requirementsFor = ({ stone = 'craftable', steel = 'locked', electric = 'locked' } = {}) => ({
+  ok: true, tick: 5380, locked: [], unknown: [], machines: [],
+  counts: { locked: 0, recipes_walked: 1, unlocked_recipes: 0, raw_items: 0 }, truncated: {},
+  research: { electronics: { mode: 'trigger', status: 'ready', requires: [], trigger: { type: 'craft-item', item: 'copper-plate', count: 10 },
+    trigger_crafting: { item: 'copper-plate', recipes: [{ recipe: 'copper-plate', enabled: true, categories: ['smelting'], categories_truncated: false,
+      hand_craftable: false, hand_craftable_reason: 'category_unsupported', machines_truncated: false, machines: [
+        { entity: 'stone-furnace', item: 'stone-furnace', status: stone },
+        { entity: 'steel-furnace', item: 'steel-furnace', status: steel, unlocked_by: 'advanced-material-processing' },
+        { entity: 'electric-furnace', item: 'electric-furnace', status: electric, unlocked_by: 'advanced-material-processing-2' },
+      ] }] } } },
+})
+
+const electronicsCommit = () => planReply({
+  plan: E_STEPS, currentStep: 0, operations: [], stepCompletions: [{ kind: 'deterministic', checkpoint: E_CONTRACT }], goal: E_GOAL, roadmap: SHELF,
+})
+const electronicsGather = () => planReply({ plan: E_STEPS, currentStep: 0, operations: [gather('copper-ore', 10)] })
+// The executor's tool-call submitPlan (stepId, operations, observationRequest): no plan and no currentStep.
+const executorRead = (tool, args, rationale) => (_messages, _context, world) => {
+  const stepId = world.agent.targetedObservationIdentity().data.stepId
+  return { content: '', tool_calls: [{ id: 'call_read', index: 0, type: 'function', function: { name: 'submitPlan',
+    arguments: JSON.stringify({ stepId, operations: [], observationRequest: { stepId, tool, args, rationale } }) } }] }
+}
+
+async function runEWorld({ inventory = {}, statuses, fuels = BURNER_FUELS, recipe = copperPlateRecipe(), script, mutate } = {}) {
+  const game = liveGame({
+    inventory: { 'burner-mining-drill': 1, 'stone-furnace': 1, 'iron-plate': 8, 'copper-ore': 10, ...inventory },
+    recipes: { 'copper-plate': recipe },
+    fuels,
+    researchNodes: [ELECTRONICS_NODE],
+  })
+  game.requirements = requirementsFor(statuses)
+  mutate?.(game)
+  const world = harness({ game, script: script ?? [electronicsCommit(), electronicsGather()], agentOptions: { completionProtocolVersion: 2 } })
+  // The same production sanitizer the requirements query uses, so its trigger_crafting and machine options reach the cache.
+  world.agent.recordRequirementsFacts(parseGoalRequirements(JSON.stringify(game.requirements)))
+  await world.say()
+  return world
+}
+
+const stepLine = (world, prefix) => textOf(stepBlock(world.agent.messages)).split('\n').find(line => line.startsWith(prefix))
+
+test('8 run E: a trigger step carries its production target, the burner fuel requirement, fuel held 0 and the native fuel source, and the executor read is admitted', async () => {
+  const world = await runEWorld({ script: [electronicsCommit(),
+    executorRead('findLongRangeEntities', { name: 'coal', max_radius: 1024, limit: 1 }, 'The packet names coal as the native fuel source; locate the nearest instance again before committing to a route.'),
+    electronicsGather()] })
+  const step = textOf(stepBlock(world.agent.messages))
+
+  // B: the contract is only research_completed, yet the packet derives the production root from the live research trigger.
+  const residual = stepLine(world, 'residual_needs')
+  assert.match(residual, /for the step contract trigger:copper-platex10;/)
+  assert.match(residual, /trigger craft-item copper-plate count=10 for electronics \(counts new crafts; held stock not counted\) held=0 crafts=10 via copper-plate/)
+  assert.match(residual, /copper-ore required=10 held=10 missing=0/, 'ingredients still net against held stock')
+  assert.deepEqual(world.game.recipeReads, ['copper-plate', 'copper-ore'], 'the trigger root enters the same recipe-closure prefetch')
+  assert.deepEqual(world.game.researchReads.slice(0, 1), ['electronics'])
+
+  // C: the machine energy sources, with the held count and the placement fact, and the fuel the burner needs.
+  const machines = stepLine(world, 'machine_energy')
+  assert.match(machines, /: stone-furnace energy=burner\(fuel_categories=chemical, 90kW\) status=craftable held=1 placed=not_observed \| not_listed: locked=2$/)
+  assert.doesNotMatch(machines, /steel-furnace|electric-furnace/)
+  const fuel = stepLine(world, 'fuel_needs')
+  assert.match(fuel, /^fuel_needs \(burner stone-furnace burn fuel_categories=chemical;/)
+  assert.match(fuel, /\): held_fuel=none \| coal fuel_value=4MJ held=0 raw: mined_from=coal \(source observation; reach\/path unverified\) nearest=\(192\.5,8\.5\) distance=192\.7/)
+  assert.match(fuel, /solid-fuel fuel_value=12MJ held=0 no_resource_source \| wood fuel_value=2MJ held=0 no_resource_source/)
+  assert.match(fuel, /trees and other non-resource sources are not derived/)
+  assert.equal(world.game.sourceReads[0], 'coal', 'the fuel resource is read with the same nearest-instance path as raw leaves (copper ore is held, so no ore read)')
+  assert.doesNotMatch(step, /steel-furnace energy|electric-furnace energy/)
+
+  // D: named traces with the request id and a reason.
+  const requestId = world.requestId()
+  const derived = world.rows('context.trigger_production_derived')[0]
+  assert.equal(derived.data.request_id, requestId)
+  assert.deepEqual({ technology: derived.data.technology, item: derived.data.item, count: derived.data.count, held_counted: derived.data.held_counted },
+    { technology: 'electronics', item: 'copper-plate', count: 10, held_counted: false })
+  assert.equal(derived.data.reason, 'trigger_technology_counts_new_crafts_not_held_stock')
+  const carried = world.rows('context.machine_energy_carried')[0]
+  assert.equal(carried.data.request_id, requestId)
+  assert.deepEqual({ machines: carried.data.machines, burner_count: carried.data.burner_count, fuel_held: carried.data.fuel_held, fuel_sources_read: carried.data.fuel_sources_read, carried: carried.data.carried },
+    { machines: ['stone-furnace'], burner_count: 1, fuel_held: false, fuel_sources_read: 1, carried: true })
+  assert.ok(carried.data.reason)
+  const facts = world.rows('context.executor_facts_carried')[0]
+  assert.equal(facts.data.machine_energy, 1)
+  assert.equal(facts.data.fuel_needs, 3)
+  assert.ok(facts.data.reads_attempted >= 5, 'recipe, research, count and fuel-source reads are counted')
+
+  // A: the executor submitPlan (stepId, operations [], observationRequest, no plan/currentStep) reached the read path.
+  assert.equal(world.rows('observation.targeted_refused').length, 0)
+  const grant = world.rows('observation.targeted_granted')[0]
+  assert.equal(grant.data.request_id, requestId)
+  assert.equal(grant.data.tool, 'findLongRangeEntities')
+  assert.equal(world.rows('observation.targeted_resource_search')[0].data.resource, 'coal')
+  assert.deepEqual(world.game.sourceReads, ['coal', 'coal'])
+  assert.equal(world.game.mutations.length, 1, 'only the scripted gather ran; the read changed nothing')
+})
+
+test('8 B: held stock of the trigger item is shown but never netted against the trigger count; ingredients net against held stock', async () => {
+  const world = await runEWorld({ inventory: { 'copper-plate': 10, 'copper-ore': 4 } })
+  const residual = stepLine(world, 'residual_needs')
+  assert.match(residual, /trigger craft-item copper-plate count=10 for electronics \(counts new crafts; held stock not counted\) held=10 crafts=10 via copper-plate/)
+  assert.match(residual, /copper-ore required=10 held=4 missing=6/)
+  assert.doesNotMatch(residual, /copper-plate required=/, 'the target is not rendered as an inventory row that held stock could satisfy')
+  assert.deepEqual(world.game.sourceReads, ['copper-ore', 'coal'], 'missing ore is acquired through the raw-leaf path; fuel shares the same bound')
+  assert.match(stepLine(world, 'raw_leaf_acquisition'), /copper-ore missing=6 raw: mined_from=copper-ore/)
+  assert.equal(world.rows('context.trigger_production_derived')[0].data.held_counted, false)
+})
+
+test('8 C: fuel the actor holds is listed as held and suppresses the acquisition search', async () => {
+  const world = await runEWorld({ inventory: { coal: 5 } })
+  const fuel = stepLine(world, 'fuel_needs')
+  assert.match(fuel, /held_fuel=coal=5 \(acquisition not searched\)/)
+  assert.match(fuel, /coal fuel_value=4MJ held=5/)
+  assert.doesNotMatch(fuel, /nearest=/)
+  assert.deepEqual(world.game.sourceReads, [])
+  const carried = world.rows('context.machine_energy_carried')[0]
+  assert.deepEqual({ fuel_held: carried.data.fuel_held, fuel_sources_read: carried.data.fuel_sources_read }, { fuel_held: true, fuel_sources_read: 0 })
+})
+
+test('8 C: an empty or failed fuel source read stays distinct and is counted; nothing is carried as a location', async () => {
+  const none = await runEWorld({ mutate: (game) => { game.sourceAnswer = { found: false, name: 'coal', actor_position: { x: 0, y: 0 }, searched_radius: 1024, max_radius: 1024, matched_count: 0, returned_count: 0, truncated: false, entities: [] } } })
+  assert.match(stepLine(none, 'fuel_needs'), /coal fuel_value=4MJ held=0 raw: mined_from=coal \(source observation; reach\/path unverified\) nearest=none_within_1024/)
+  const failed = await runEWorld({ mutate: (game) => { game.sourceAnswer = { ok: false, error: 'no controlled actor' } } })
+  assert.match(stepLine(failed, 'fuel_needs'), /nearest=read_failed/)
+  assert.doesNotMatch(stepLine(failed, 'fuel_needs'), /192\.5|none_within/)
+  assert.ok(failed.rows('context.executor_facts_carried')[0].data.reads_failed >= 1)
+})
+
+test('8 C: with only an electric machine available there is no fuel row and no fuel read', async () => {
+  const world = await runEWorld({ statuses: { stone: 'locked', electric: 'craftable' }, inventory: { 'stone-furnace': 0 } })
+  const machines = stepLine(world, 'machine_energy')
+  assert.match(machines, /: electric-furnace energy=electric\(180kW\) status=craftable held=0 placed=not_observed \| not_listed: locked=2$/)
+  assert.equal(stepLine(world, 'fuel_needs'), undefined)
+  assert.deepEqual(world.game.sourceReads, [])
+  const carried = world.rows('context.machine_energy_carried')[0]
+  assert.deepEqual({ machines: carried.data.machines, burner_count: carried.data.burner_count, fuel_held: carried.data.fuel_held, fuel_sources_read: carried.data.fuel_sources_read },
+    { machines: ['electric-furnace'], burner_count: 0, fuel_held: false, fuel_sources_read: 0 })
+})
+
+test('8 C: a furnace the harness saw placed is reported as observed history with its count, not as a current target', async () => {
+  const world = await runEWorld({ inventory: { 'stone-furnace': 0 }, statuses: { stone: 'locked' }, script: [electronicsCommit(), electronicsGather()] })
+  world.agent.recordLiveEntityObservation({ unit_number: 41, name: 'stone-furnace', type: 'furnace', position: { x: 3, y: 4 } }, undefined, 'retained_nearby')
+  world.agent.batchInFlight = false
+  const gathered = await world.agent.gatherExecutorHandoffFacts({ state: world.memory.planningState(KEY), actor: world.agent.epoch })
+  const entry = gathered.facts.machine_energy.machines.find(machine => machine.name === 'stone-furnace')
+  assert.deepEqual(entry.placed, { observed: true, count: 1, via: 'historical_entities' })
+  assert.equal(entry.held, undefined, 'a locked machine item is not counted, so its held count is unknown rather than zero')
+  const text = executorFactsRefreshMessage(gathered.facts)
+  assert.match(text, /stone-furnace energy=burner\(fuel_categories=chemical, 90kW\) status=locked held=unknown placed=observed\(x1 via historical_entities\)/)
+  assert.doesNotMatch(text, /unit_number/)
+})
+
+test('8 C: an in-flight batch defers the energy and fuel facts; the refresh after the receipt carries them', async () => {
+  const world = await runEWorld()
+  const state = world.memory.planningState(KEY)
+  const deferred = await world.agent.gatherExecutorHandoffFacts({ state, actor: world.agent.epoch, runtime: { idle: false } })
+  assert.equal(deferred.facts.machine_energy, undefined)
+  assert.equal(deferred.facts.fuel_needs, undefined)
+  world.agent.batchInFlight = false
+  const announced = world.rows('context.trigger_production_derived').length
+  const refreshed = await world.agent.gatherExecutorHandoffFacts({ state, actor: world.agent.epoch, mode: 'refresh' })
+  assert.equal(world.rows('context.trigger_production_derived').length, announced, 'the refresh does not announce the production root again')
+  const text = executorFactsRefreshMessage(refreshed.facts)
+  assert.match(text, /^machine_energy /m)
+  assert.match(text, /^fuel_needs /m)
+  assert.match(text, /^residual_needs .*trigger craft-item copper-plate count=10/m)
+})
+
+test('8 C: fuel resource searches share the three-resource bound with raw leaves and report the unread rest', async () => {
+  const world = await runEWorld({ inventory: { 'copper-ore': 0 } })
+  world.agent.batchInFlight = false
+  const state = structuredClone(world.memory.planningState(KEY))
+  const held = getActivePlan(state)
+  const ores = ['copper-ore', 'iron-ore', 'stone']
+  held.steps[held.active_step_index].completion_contract = { mode: 'all', requirements: [
+    { kind: 'research_completed', technology: 'electronics' },
+    ...ores.map(item => ({ kind: 'inventory_count', item_name: item, minimum: 10 })),
+  ] }
+  for (const item of ores) world.agent.handoffRawLeaves.set(item, { item, mined_from: [item] })
+  world.agent.handoffFuelSources.clear() // a coal location read at C3 would be reused; this scenario is about the bound
+  const before = world.game.sourceReads.length
+  const gathered = await world.agent.gatherExecutorHandoffFacts({ state, actor: world.agent.epoch })
+  assert.equal(world.game.sourceReads.length - before, 3, 'three distinct resources at most, raw leaves first')
+  assert.ok(!world.game.sourceReads.slice(before).includes('coal'))
+  const coal = gathered.facts.fuel_needs.items.find(item => item.name === 'coal')
+  assert.equal(coal.raw.sources[0].state, 'not_read')
+  assert.match(executorFactsRefreshMessage(gathered.facts), /coal fuel_value=4MJ held=0 raw: mined_from=coal \(source observation; reach\/path unverified\) nearest=not_read/)
+})
+
+test('8: a source read crossing an actor epoch refuses the restage and carries no fuel location', async () => {
+  const world = await runEWorld()
+  world.agent.batchInFlight = false
+  world.agent.handoffFuelSources.clear() // the C3 read of this step and epoch would otherwise be reused: force a new read
+  world.game.onSourceRead = game => { game.status = deployment({ epoch: 4 }) }
+  const carried = world.rows('context.machine_energy_carried').length
+  assert.deepEqual(await restageToFreshExecutor(world), { restaged: false, reason: 'actor_changed_during_handoff_refresh' })
+  assert.equal(world.rows('context.machine_energy_carried').length, carried)
+})
+
+test('8 C: a refresh in the same step and epoch reuses the fuel location with its own as_of; a failed read is never reused', async () => {
+  const world = await runEWorld()
+  world.agent.batchInFlight = false
+  const state = world.memory.planningState(KEY)
+  const reads = world.game.sourceReads.length
+  const first = await world.agent.gatherExecutorHandoffFacts({ state, actor: world.agent.epoch })
+  const refreshed = await world.agent.gatherExecutorHandoffFacts({ state, actor: world.agent.epoch, mode: 'refresh' })
+  assert.equal(world.game.sourceReads.length, reads, 'the C3 read of this step and epoch is reused')
+  const coalOf = facts => facts.fuel_needs.items.find(item => item.name === 'coal').raw
+  assert.equal(coalOf(first.facts).sources[0].state, 'found')
+  assert.deepEqual(coalOf(refreshed.facts).as_of, coalOf(first.facts).as_of, 'the reused location keeps the tag of the read it came from')
+  assert.match(executorFactsRefreshMessage(refreshed.facts), /nearest=\(192\.5,8\.5\) distance=192\.7/)
+  assert.equal(first.meta.machine_energy.fuel_sources_reused, 1)
+  assert.equal(first.meta.machine_energy.fuel_sources_read, 0)
+
+  const failing = await runEWorld({ mutate: (game) => { game.sourceAnswer = { ok: false, error: 'no controlled actor' } } })
+  failing.agent.batchInFlight = false
+  const before = failing.game.sourceReads.length
+  failing.game.sourceAnswer = undefined
+  const retried = await failing.agent.gatherExecutorHandoffFacts({ state: failing.memory.planningState(KEY), actor: failing.agent.epoch })
+  assert.equal(failing.game.sourceReads.length, before + 1, 'the failed read is retried')
+  assert.equal(retried.facts.fuel_needs.items.find(item => item.name === 'coal').raw.sources[0].state, 'found')
+})
+
+test('8 C: when a fuel count could not be read the held fuel is unknown and no source search is made', async () => {
+  const world = await runEWorld({ mutate: (game) => { game.failConditionReads = true } })
+  const fuel = stepLine(world, 'fuel_needs')
+  assert.match(fuel, /: held_fuel=unknown \(3 of 3 counts unread\) \(acquisition not searched\) \| coal fuel_value=4MJ held=unknown \|/)
+  assert.doesNotMatch(fuel, /nearest=/)
+  assert.deepEqual(world.game.sourceReads, [])
+  assert.match(stepLine(world, 'machine_energy'), /stone-furnace energy=burner\(fuel_categories=chemical, 90kW\) status=craftable held=unknown/)
+  const carried = world.rows('context.machine_energy_carried')[0]
+  assert.deepEqual({ fuel_held: carried.data.fuel_held, fuel_counts_unread: carried.data.fuel_counts_unread, fuel_sources_read: carried.data.fuel_sources_read },
+    { fuel_held: false, fuel_counts_unread: 3, fuel_sources_read: 0 })
+})
+
+test('8 C: machine and fuel counts rank after refresh and touched items; what the cap cuts is reported unread, never absent', async () => {
+  const world = await runEWorld()
+  world.agent.batchInFlight = false
+  const state = world.memory.planningState(KEY)
+  const crowd = Array.from({ length: 12 }, (_, index) => `filler-item-${index}`)
+  const before = world.game.sourceReads.length
+  const gathered = await world.agent.gatherExecutorHandoffFacts({ state, actor: world.agent.epoch, mode: 'refresh', refreshItems: crowd })
+  assert.equal(gathered.meta.read_items.length, 12)
+  assert.ok(!gathered.meta.read_items.includes('stone-furnace') && !gathered.meta.read_items.includes('coal'))
+  assert.deepEqual(gathered.meta.read_items.slice(0, 2), ['copper-plate', 'copper-ore'], 'the closure still comes first')
+  assert.equal(gathered.facts.machine_energy.machines[0].held, undefined)
+  assert.equal(gathered.facts.fuel_needs.search, 'unknown_counts')
+  const text = executorFactsRefreshMessage(gathered.facts)
+  assert.match(text, /stone-furnace energy=burner\(fuel_categories=chemical, 90kW\) status=craftable held=unknown/)
+  assert.match(text, /held_fuel=unknown \(3 of 3 counts unread\) \(acquisition not searched\)/)
+  assert.equal(world.game.sourceReads.length, before, 'unknown counts start no source search')
+  assert.equal(gathered.meta.machine_energy.fuel_counts_unread, 3)
 })
