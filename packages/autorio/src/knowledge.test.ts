@@ -179,6 +179,132 @@ describe('recipe knowledge', () => {
   })
 })
 
+describe('machine energy and burner fuel knowledge', () => {
+  const originalPairs = (globalThis as any).pairs
+  const originalGetEntityFiltered = (globalThis as any).prototypes.get_entity_filtered
+  const originalItems = (globalThis as any).prototypes.item
+
+  // The live 2026-10-13 shape: copper-plate is smelted; the stone furnace burns a chemical fuel, the electric furnace
+  // takes power, and a hypothetical sink takes a void source. Fuel categories and items come from prototypes only.
+  const machines: Record<string, any> = {
+    'stone-furnace': {
+      name: 'stone-furnace',
+      type: 'furnace',
+      get_crafting_speed: () => 1,
+      get_max_energy_usage: () => 1500,
+      burner_prototype: { effectivity: 1, fuel_categories: { chemical: true } },
+      items_to_place_this: [{ name: 'stone-furnace', count: 1 }],
+    },
+    'electric-furnace': {
+      name: 'electric-furnace',
+      type: 'furnace',
+      get_crafting_speed: () => 2,
+      get_max_energy_usage: () => 3000,
+      electric_energy_source_prototype: {},
+      items_to_place_this: [{ name: 'electric-furnace', count: 1 }],
+    },
+    'free-furnace': {
+      name: 'free-furnace',
+      type: 'furnace',
+      get_crafting_speed: () => 1,
+      get_max_energy_usage: () => 100,
+      void_energy_source_prototype: {},
+    },
+  }
+  const resource = (name: string, product: string) => ({
+    name, type: 'resource', resource_category: 'basic-solid', infinite_resource: false,
+    mineable_properties: { mining_time: 1, products: [{ type: 'item', name: product, amount: 1 }] },
+  })
+  const items = (extra: Record<string, unknown> = {}) => ({
+    'copper-plate': {},
+    coal: { name: 'coal', fuel_category: 'chemical', fuel_value: 4000000 },
+    wood: { name: 'wood', fuel_category: 'chemical', fuel_value: 2000000 },
+    'solid-fuel': { name: 'solid-fuel', fuel_category: 'chemical', fuel_value: 12000000 },
+    'uranium-fuel-cell': { name: 'uranium-fuel-cell', fuel_category: 'nuclear', fuel_value: 8000000000 },
+    'inert-lump': { name: 'inert-lump', fuel_category: 'chemical', fuel_value: 0 },
+    ...extra,
+  })
+
+  beforeEach(() => {
+    ;(globalThis as any).pairs = luaPairs
+    ;(globalThis as any).prototypes.item = items()
+    ;(globalThis as any).prototypes.recipe_category = { smelting: { name: 'smelting' } }
+    ;(globalThis as any).prototypes.get_entity_filtered = (filters: Array<Record<string, unknown>>) => {
+      if (filters[0]?.type === 'resource') return { coal: resource('coal', 'coal'), 'copper-ore': resource('copper-ore', 'copper-ore') }
+      if (filters[0]?.filter === 'crafting-category') return machines
+      return {}
+    }
+  })
+
+  afterEach(() => {
+    ;(globalThis as any).pairs = originalPairs
+    ;(globalThis as any).prototypes.get_entity_filtered = originalGetEntityFiltered
+    ;(globalThis as any).prototypes.item = originalItems
+    delete (globalThis as any).prototypes.recipe_category
+  })
+
+  function smelter() {
+    const plate = recipe('copper-plate', {
+      categories: ['smelting'],
+      energy: 3.2,
+      ingredients: [{ type: 'item', name: 'copper-ore', amount: 1 }],
+      products: [{ type: 'item', name: 'copper-plate', amount: 1 }],
+    })
+    return {
+      is_valid: true,
+      force: { recipes: { 'copper-plate': plate } },
+      character: { prototype: { crafting_categories: { crafting: true }, get_crafting_speed: () => 1 } },
+      get_main_inventory: () => ({ get_item_count: () => 0 }),
+      get_craftable_count: () => 0,
+    } as any
+  }
+
+  it('names each machine energy source from its prototype, including void, and the item that places it', () => {
+    const result = recipe_details_for_actor(smelter(), 'copper-plate') as any
+    const byName = Object.fromEntries(result.recipes[0].crafting_machines.map((machine: any) => [machine.name, machine]))
+    expect(byName['stone-furnace']).toMatchObject({ energy_source: 'burner', fuel_categories: ['chemical'], energy_watts: 90000, placed_by_item: 'stone-furnace' })
+    expect(byName['electric-furnace']).toMatchObject({ energy_source: 'electric', placed_by_item: 'electric-furnace' })
+    expect(byName['electric-furnace'].fuel_categories).toBeUndefined()
+    expect(byName['free-furnace']).toMatchObject({ energy_source: 'void' })
+    expect(byName['free-furnace'].placed_by_item).toBeUndefined()
+  })
+
+  it('lists the fuels the burner categories accept, resource-mined ones first, with their mining resources', () => {
+    const result = recipe_details_for_actor(smelter(), 'copper-plate') as any
+    expect(result.burner_fuels).toEqual({
+      categories: ['chemical'],
+      matched_count: 3,
+      truncated: false,
+      items: [
+        { name: 'coal', category: 'chemical', fuel_value: 4000000, mined_from: ['coal'] },
+        { name: 'solid-fuel', category: 'chemical', fuel_value: 12000000 },
+        { name: 'wood', category: 'chemical', fuel_value: 2000000 },
+      ],
+    })
+    // Another category, a zero fuel value and a non-fuel item never appear.
+    const text = JSON.stringify(result.burner_fuels)
+    expect(text).not.toMatch(/uranium-fuel-cell|inert-lump|copper-plate/)
+  })
+
+  it('bounds the fuel list and reports the cut without dropping the minable fuels', () => {
+    const many: Record<string, unknown> = {}
+    for (let i = 0; i < 9; i++) many[`fuel-${i}`] = { name: `fuel-${i}`, fuel_category: 'chemical', fuel_value: 1000 + i }
+    ;(globalThis as any).prototypes.item = items(many)
+    const result = recipe_details_for_actor(smelter(), 'copper-plate') as any
+    expect(result.burner_fuels.items).toHaveLength(6)
+    expect(result.burner_fuels.matched_count).toBe(12)
+    expect(result.burner_fuels.truncated).toBe(true)
+    expect(result.burner_fuels.items[0].name).toBe('coal')
+  })
+
+  it('carries no fuel facts when no listed machine burns fuel', () => {
+    ;(globalThis as any).prototypes.get_entity_filtered = (filters: Array<Record<string, unknown>>) =>
+      filters[0]?.filter === 'crafting-category' ? { 'electric-furnace': machines['electric-furnace'] } : {}
+    const result = recipe_details_for_actor(smelter(), 'copper-plate') as any
+    expect(result.burner_fuels).toBeUndefined()
+  })
+})
+
 describe('mining knowledge', () => {
   const originalPairs = (globalThis as any).pairs
   const originalGetEntityFiltered = (globalThis as any).prototypes.get_entity_filtered
