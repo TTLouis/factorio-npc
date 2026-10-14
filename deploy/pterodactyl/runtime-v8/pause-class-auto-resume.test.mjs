@@ -69,7 +69,7 @@ test('request failures are classified from structured fields first, the loop fai
   // Declared at the raise site wins over the code table.
   assert.equal(classifyRequestFailure(Object.assign(new Error(RUN_E_FAILURE), { pause_class: 'authority' })).pause_class, 'authority')
   // Anything unplaceable fails closed.
-  assert.deepEqual(classifyRequestFailure(new Error('something odd happened')), { pause_class: 'guard', pause_subkind: '', code: 'request_failed', source: 'fallback' })
+  assert.deepEqual(classifyRequestFailure(new Error('executor_stale_step: choose new operations')), { pause_class: 'guard', pause_subkind: '', code: 'request_failed', source: 'fallback' })
   // transientProviderFailure is the same decision, kept for callers that only have text.
   assert.equal(transientProviderFailure('Provider timed out after 120000 ms'), 'timeout')
   assert.equal(transientProviderFailure(structured), 'rate_limited')
@@ -548,6 +548,7 @@ test('a pause that declared no class is reported as unclassified and is not resu
   const { agent, events } = await startedAgent()
   const { session } = sessionFor(agent)
   t.after(() => { if (session.modelResume?.timer) clearTimeout(session.modelResume.timer) })
+  agent.traceRequest = null // the request has ended: pausePersistentPlan names the pause itself
   await agent.pausePersistentPlan('some_new_pause_path')
   assert.equal(agent.memory.pauseRecord(KEY).pause_class, '')
   assert.equal(await session.considerPauseForAutoResume(), null)
@@ -565,6 +566,7 @@ test('a pause that declared no class is reported as unclassified and is not resu
 
 test('every goal.paused row carries the pause class, and the supervisor reacts to it', async () => {
   const { agent, events } = await startedAgent()
+  agent.traceRequest = null // the request has ended: pausePersistentPlan names the pause itself
   await agent.pausePersistentPlan('user_stop', { pause_class: PAUSE_CLASS.OPERATOR })
   assert.equal(recoveryRows(events, 'goal.paused').at(-1).pause_class, 'operator')
 
