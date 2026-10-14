@@ -1,3 +1,5 @@
+import { isPauseClass, PAUSE_CLASS } from './pause-class.mjs'
+
 const OUTCOME_KINDS = new Set([
   'execution_required',
   'runtime_active',
@@ -26,6 +28,11 @@ const COMPLETION_EVIDENCE_KINDS = new Set([
   'verified_world_state',
   'condition_satisfied',
 ])
+
+// Allowlist (fail closed): only these reasons are known to be fixed by a fresh restage, so only they auto-resume. Every other reason,
+// including a new one, a Jev failure class, provider_safety and the *_retry_exhausted preflight pauses (the model was corrected
+// repeatedly and did not comply; a fresh restage is not shown to change that), is a guard pause that needs a player.
+export const MODEL_RECOVERABLE_OUTCOME_REASONS = Object.freeze(new Set(['provider_budget', 'provider_format']))
 
 const PROVIDER_CONTROL_PLANE_FAILURES = new Set([
   'provider_format',
@@ -164,14 +171,30 @@ export function validateOutcomeCandidate(candidate, { world = {} } = {}) {
   if (kind === 'recoverable_provider_failure') {
     if (reasonCode === 'provider_reported_blocker') return { ...base, rejection_reason: 'unverified_blocker_is_not_provider_failure' }
     if (runtime.active) return { ...base, accepted: true, durable_status: 'active' }
-    if (runtime.idle) return { ...base, accepted: true, durable_status: 'paused', pause_reason: `recoverable_provider_failure:${reasonCode}` }
+    // The model could not finish (format, output budget): a fresh restage can fix it. A safety refusal will not change on a restage.
+    if (runtime.idle) {
+      return {
+        ...base,
+        accepted: true,
+        durable_status: 'paused',
+        pause_reason: `recoverable_provider_failure:${reasonCode}`,
+        pause_class: MODEL_RECOVERABLE_OUTCOME_REASONS.has(reasonCode) ? PAUSE_CLASS.MODEL_RECOVERABLE : PAUSE_CLASS.GUARD,
+      }
+    }
     return { ...base, accepted: true, durable_status: 'active' }
   }
 
   const metadata = candidate?.metadata && typeof candidate.metadata === 'object' ? candidate.metadata : {}
   if (metadata.server_authoritative !== true) return { ...base, rejection_reason: 'cancelled_without_server_authority' }
   if (metadata.transition === 'paused') {
-    return { ...base, accepted: true, durable_status: 'paused', pause_reason: clean(metadata.pause_reason || reasonCode, 300) }
+    // The caller declares the class (pause-class.mjs); an undeclared pause stays undeclared so it is reported, never guessed.
+    return {
+      ...base,
+      accepted: true,
+      durable_status: 'paused',
+      pause_reason: clean(metadata.pause_reason || reasonCode, 300),
+      ...(isPauseClass(metadata.pause_class) ? { pause_class: metadata.pause_class, pause_subkind: clean(metadata.pause_subkind, 40) } : {}),
+    }
   }
   return { ...base, accepted: true }
 }
