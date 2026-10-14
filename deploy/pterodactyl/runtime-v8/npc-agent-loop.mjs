@@ -109,7 +109,7 @@ import {
   typedStateDistillationQuestions,
   typedStateProvenance,
 } from './jev-decision-taxonomy.mjs'
-import { isLifecycleMetaStep, normalizeCanonicalPlan, validateOutcomeCandidate } from './outcome-authority.mjs'
+import { authoritativeRuntimeState, isLifecycleMetaStep, MODEL_RECOVERABLE_OUTCOME_REASONS, normalizeCanonicalPlan, validateOutcomeCandidate } from './outcome-authority.mjs'
 import {
   getActivePlan as getActivePlanningPlan,
   GOAL_STATUS,
@@ -13423,16 +13423,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         evidence: [],
       }
       await this.traceEvent('outcome.candidate', failureCandidate)
-      const reduced = this.memory.applyOutcomeAuthority?.(this.requestInfo.memoryKey, failureCandidate, {
-        world: {
-          ...runtime,
-          persistent_runtime: persistentRuntime,
-          persistent_runtime_healthy: persistentRuntimeHealthy(persistentRuntime),
-          condition_wait_active: state?.condition_wait?.state === 'active',
-          condition_wait: state?.condition_wait,
-        },
-        chatMessage: plan.chatMessage,
-      })
+      const world = {
+        ...runtime,
+        persistent_runtime: persistentRuntime,
+        persistent_runtime_healthy: persistentRuntimeHealthy(persistentRuntime),
+        condition_wait_active: state?.condition_wait?.state === 'active',
+        condition_wait: state?.condition_wait,
+      }
+      const reduced = this.memory.applyOutcomeAuthority?.(this.requestInfo.memoryKey, failureCandidate, { world, chatMessage: plan.chatMessage })
       state = reduced?.state ?? state
       if (state) stateResult = { ...(stateResult ?? {}), state }
       await this.traceEvent(reduced?.decision?.accepted ? 'outcome.validated' : 'outcome.rejected', reduced?.decision ?? failureCandidate)
@@ -13460,9 +13458,38 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         })
         if (record?.paused === true) await this.traceFrozenPlanPaused(record, pauseReason, stateResult, 'recovery_failure_frozen')
       }
+      else if (state?.status !== 'paused' && state?.status !== 'blocked') {
+        // The outcome authority declines to pause while the runtime is not idle (a task is running, or the status could not be read).
+        // This request is over (this.active is false below), and the supervisor drops a completion signal when the agent is not active,
+        // so nothing would wake the NPC again: end it as a visible pause instead of an active plan with no pending work. The class
+        // is the candidate's own when the runtime is known to be busy, and 'system' when its state is unknown.
+        const runtimeState = authoritativeRuntimeState(world)
+        const unknown = !runtimeState.active && !runtimeState.idle
+        const pauseClass = unknown
+          ? PAUSE_CLASS.SYSTEM
+          : MODEL_RECOVERABLE_OUTCOME_REASONS.has(reason) ? PAUSE_CLASS.MODEL_RECOVERABLE : PAUSE_CLASS.GUARD
+        const pauseReason = unknown ? `runtime_status_unknown:${reason}` : `recoverable_provider_failure:${reason}`
+        const paused = this.memory.pausePlan?.(this.requestInfo.memoryKey, pauseReason, { pause_class: pauseClass })
+        if (paused) {
+          state = paused
+          stateResult = { ...(stateResult ?? {}), state }
+        }
+        await this.persistState()
+        await this.traceEvent('operations.recovery_failure_runtime_gate', {
+          request_id: this.traceRequest?.id,
+          decision: unknown ? 'paused_runtime_status_unknown' : 'paused_runtime_active',
+          reason: pauseReason,
+          failure_class: reason,
+          pause_class: pauseClass,
+          paused: paused?.status === 'paused',
+          runtime: { active: runtimeState.active === true, idle: runtimeState.idle, task_state: runtimeState.task_state, queue_length: runtimeState.queue_length, status_error: runtime?.status_error },
+        })
+      }
     }
 
     this.active = false
+    // The line says "paused" only when the plan is paused or frozen; otherwise it states the facts without the prefix.
+    if (state?.status !== 'paused' && state?.status !== 'blocked') chatMessage = String(chatMessage ?? '').replace(/^\[Plan paused\]\s*/, '')
     await this.traceEvent('operations.preflight_recovery_exhausted', {
       failure_class: reason,
       retry_budget: retryBudget,

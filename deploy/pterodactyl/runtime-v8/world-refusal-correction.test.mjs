@@ -666,3 +666,95 @@ test('unit 13: a restaged executor gets its own correction turn with the refusal
   assert.equal(w.memory.pauseRecord(KEY).pause_class, 'model_recoverable')
   assert.equal(w.memory.currentPlan(KEY).status, 'paused')
 })
+
+// --- unit 13 review: when the outcome authority declines the pause, the request still ends visibly ----------------------------------
+//
+// The outcome authority pauses a recoverable failure only for an idle runtime. While a task runs, or when the task status cannot be
+// read, it keeps the plan active; but finishPreflightRecoveryFailure ends the request (agent.active = false), and the supervisor
+// drops an 'All operations completed' line when the agent is not active, so nothing would wake the NPC. The end is a pause instead.
+
+const ARGUMENT_BATCHES = () => [plannerDraft(), observation(), executor(RUN_G_BATCH()), executor(RUN_G_BATCH())]
+// The task status is the fixture's own until the executor's batch is refused; from then on the game answers with `status`, which is
+// what the request's end reads (the earlier step verification must not see it).
+function gameWithStatusAfterRefusal(refusal, status) {
+  let refused = false
+  const game = gameRefusing(refusal, (text) => {
+    if (!supplyEntity(text)) return false
+    refused = true
+    return true
+  })
+  const command = game.command.bind(game)
+  game.command = async (text) => {
+    if (refused && text.includes('remote.call("autorio_operations","status")')) {
+      if (status instanceof Error) throw status
+      return typeof status === 'string' ? status : JSON.stringify(status)
+    }
+    return command(text)
+  }
+  return game
+}
+
+test('unit 13: with a task still running the request ends as a visible pause, the line says what happened, and a completion signal would wake nothing', async () => {
+  const game = gameWithStatusAfterRefusal(ARGUMENT_REFUSAL, { task_state: 'walking', queue_empty: false, queue_length: 2 })
+  const w = world(ARGUMENT_BATCHES(), { game })
+  const result = await runToExecutor(w)
+  assert.equal(result.recoverableFailure.reason, EXECUTOR_REFUSAL_UNCORRECTED_REASON)
+  assert.match(result.chatMessage, /^\[Plan paused\] The game refused operation 2/)
+  const record = w.memory.pauseRecord(KEY)
+  assert.deepEqual([record.paused, record.pause_reason, record.pause_class], [true, `recoverable_provider_failure:${EXECUTOR_REFUSAL_UNCORRECTED_REASON}`, 'model_recoverable'])
+  assert.equal(w.memory.currentPlan(KEY).status, 'paused')
+  const [gate, ...extra] = w.named('operations.recovery_failure_runtime_gate')
+  assert.equal(extra.length, 0)
+  assert.equal(gate.data.request_id, gate.request_id)
+  assert.ok(gate.data.request_id)
+  assert.deepEqual([gate.data.decision, gate.data.pause_class, gate.data.paused], ['paused_runtime_active', 'model_recoverable', true])
+  assert.deepEqual([gate.data.runtime.active, gate.data.runtime.task_state, gate.data.runtime.queue_length], [true, 'walking', 2])
+  assert.equal(w.named('goal.paused').length, 1)
+  // Why it pauses: the request is over, so a later completion of the queued work is ignored (npc-agent-loop completed() returns null
+  // when the agent is not active, and the supervisor does not call it then).
+  assert.equal(w.agent.active, false)
+  assert.equal(await w.agent.completed(), null)
+  // The supervisor's auto-resume owns the wake instead.
+  const { decision } = await superviseOnce(w)
+  assert.equal(decision, true)
+})
+
+test('unit 13: a task status that cannot be read ends as a visible system pause, never an active plan with no pending work', async () => {
+  for (const [label, status] of [['unreadable json', 'not json'], ['rcon error', new Error('rcon connection reset')]]) {
+    const game = gameWithStatusAfterRefusal(ARGUMENT_REFUSAL, status)
+    const w = world(ARGUMENT_BATCHES(), { game })
+    const result = await runToExecutor(w)
+    assert.equal(result.recoverableFailure.reason, EXECUTOR_REFUSAL_UNCORRECTED_REASON, label)
+    const record = w.memory.pauseRecord(KEY)
+    assert.deepEqual([record.paused, record.pause_reason, record.pause_class], [true, `runtime_status_unknown:${EXECUTOR_REFUSAL_UNCORRECTED_REASON}`, 'system'], label)
+    assert.equal(w.memory.currentPlan(KEY).status, 'paused', label)
+    const [gate] = w.named('operations.recovery_failure_runtime_gate')
+    assert.equal(gate.data.request_id, gate.request_id, label)
+    assert.deepEqual([gate.data.decision, gate.data.pause_class], ['paused_runtime_status_unknown', 'system'], label)
+    assert.ok(gate.data.runtime.status_error, label)
+    assert.equal(w.named('goal.paused').length, 1, label)
+    // A system pause is for its own lifecycle recovery: the auto-resume timer never fires for it.
+    const { decision } = await superviseOnce(w)
+    assert.equal(decision, null, label)
+  }
+})
+
+test('unit 13: an idle runtime keeps the declared pause and never traces the runtime gate', async () => {
+  const w = world(ARGUMENT_BATCHES(), { game: gameRefusing(ARGUMENT_REFUSAL, supplyEntity) })
+  await runToExecutor(w)
+  assert.equal(w.named('operations.recovery_failure_runtime_gate').length, 0)
+  assert.equal(w.memory.pauseRecord(KEY).pause_class, 'model_recoverable')
+})
+
+test('unit 13: a failure line that did not pause anything does not say "[Plan paused]"', async () => {
+  const w = world([])
+  // No request is open (nothing to pause): the line states the facts without the prefix.
+  const result = await w.agent.finishPreflightRecoveryFailure(undefined, { chatMessage: '', plan: [], operations: [] }, { epoch: 3, actor_id: 18 }, { code: 'unknown_prototype', operation_index: 0 }, {
+    source: 'executor_refusal_recovery',
+    reason: EXECUTOR_REFUSAL_UNCORRECTED_REASON,
+    retryBudget: 1,
+    chatMessage: '[Plan paused] The game refused operation 1 (craft_item: unknown_prototype) again after the correction.',
+    facts: { code: 'unknown_prototype' },
+  })
+  assert.equal(result.chatMessage, 'The game refused operation 1 (craft_item: unknown_prototype) again after the correction.')
+})

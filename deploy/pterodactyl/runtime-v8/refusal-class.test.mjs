@@ -156,12 +156,22 @@ test('the guard does catch a refusal that forgot its class, including one with a
 
 // --- unit 13: who can fix a refusal ---------------------------------------------------------------------------------------------
 
-test('the world refusals an executor cannot fix are declared once and every one is a never-wake code of the refusal class it names', () => {
-  assert.deepEqual(Object.keys(EXECUTOR_UNFIXABLE_WORLD_CODES).sort(),
-    ['authorization_stale', 'bootstrap_dependency_unresolved', 'different_surface', 'duplicate_effect_suppressed', 'no_actor', 'recipe_locked'])
-  for (const code of Object.keys(EXECUTOR_UNFIXABLE_WORLD_CODES)) {
-    assert.equal(NEVER_WAKE_PREFLIGHT_CODES.includes(code), true, `${code} is also a never-wake code`)
-    assert.equal(executorCannotFix({ code }) !== undefined, true)
+test('the world refusals an executor cannot fix are declared once, each is declared world by its producer, and each names why', () => {
+  assert.deepEqual(Object.keys(EXECUTOR_UNFIXABLE_WORLD_CODES).sort(), [
+    'authorization_stale', 'bootstrap_dependency_unresolved', 'different_surface', 'duplicate_effect_suppressed', 'no_actor', 'no_inventory',
+    'player_unavailable', 'recipe_locked', 'research_disabled', 'technology_disabled',
+  ])
+  const loopSource = readFileSync(new URL('./npc-agent-loop.mjs', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+  for (const [code, why] of Object.entries(EXECUTOR_UNFIXABLE_WORLD_CODES)) {
+    // The class each code is declared with by whoever produces it: the mod's registry, the admission table, or the loop itself.
+    const declared = Object.hasOwn(modRegistry, code)
+      ? modRegistry[code]
+      : Object.hasOwn(ADMISSION_REFUSAL_CLASS, code)
+        ? ADMISSION_REFUSAL_CLASS[code]
+        : code === 'duplicate_effect_suppressed' && /code: DUPLICATE_EFFECT_CODE,\n\s+refusal_class: REFUSAL_CLASS\.WORLD,/.test(loopSource) ? 'world' : undefined
+    assert.equal(declared, 'world', `${code} is declared a world refusal by its producer`)
+    assert.equal(executorCannotFix({ code }), why)
+    assert.ok(['plan_level', 'authority_grant', 'harness_hold', 'lifecycle'].includes(why), code)
   }
   // The two meanings differ: the executor's own inventory accounting is never world evidence, but a fresh executor can fix it.
   assert.equal(NEVER_WAKE_PREFLIGHT_CODES.includes('supply_missing'), true)

@@ -8,10 +8,15 @@
 // The loop only reads it (refusalClassOf). It keeps no list of codes to decide between recovery paths.
 //
 // The closed set below must equal REFUSAL_CLASSES in the mod's refusal_classes.ts; refusal-class.test.mjs proves it.
-//   argument      the model named or shaped something wrongly: one bounded correction turn, plan unchanged
-//   authority     a protected, reserved or player-owned target: one authorization retry inside the grant
+//   argument      the model named or shaped something wrongly: one bounded correction turn, plan unchanged; a refusal that survives
+//                 it ends the request as a model_recoverable pause
+//   authority     a protected, reserved or player-owned target: one authorization retry inside the grant; a refusal that survives
+//                 it ends the request as a guard pause with the step blocked
 //   prerequisite  a research precondition: bounded research recovery inside the same step
-//   world         everything else, and the fail-closed class: the request ends as blocked_preflight
+//   world         everything else, and the fail-closed class (an unclassified refusal is treated as world). Which end it gets is
+//                 decided by classifyBlockedEnd below: one correction turn and then a model_recoverable pause when the executor can
+//                 fix it, a guard pause with the step blocked when it cannot (EXECUTOR_UNFIXABLE_WORLD_CODES), and the MW5
+//                 replacement wake first when the refusal is harness evidence of world change (replacement-wake.mjs)
 
 import { PAUSE_CLASS } from './pause-class.mjs'
 
@@ -57,8 +62,12 @@ export const EXECUTOR_UNFIXABLE_WORLD_CODES = Object.freeze({
   authorization_stale: EXECUTOR_CANNOT_FIX.AUTHORITY_GRANT,
   duplicate_effect_suppressed: EXECUTOR_CANNOT_FIX.HARNESS_HOLD,
   no_actor: EXECUTOR_CANNOT_FIX.LIFECYCLE,
+  no_inventory: EXECUTOR_CANNOT_FIX.LIFECYCLE,
+  player_unavailable: EXECUTOR_CANNOT_FIX.LIFECYCLE,
   different_surface: EXECUTOR_CANNOT_FIX.LIFECYCLE,
   bootstrap_dependency_unresolved: EXECUTOR_CANNOT_FIX.LIFECYCLE,
+  technology_disabled: EXECUTOR_CANNOT_FIX.PLAN_LEVEL,
+  research_disabled: EXECUTOR_CANNOT_FIX.PLAN_LEVEL,
 })
 
 export function executorCannotFix(preflight) {

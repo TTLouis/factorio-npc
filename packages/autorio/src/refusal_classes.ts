@@ -7,18 +7,23 @@
 //
 // A class names the recovery path the harness takes, not a taxonomy of causes:
 //   argument      The model named or shaped something wrongly (prototype, recipe, identity, radius, position, count, stale
-//                 candidate). One bounded correction turn, committed plan unchanged.
+//                 candidate). One bounded correction turn, committed plan unchanged. A refusal that survives it ends the
+//                 request as a model_recoverable pause, which the supervisor restages.
 //   authority     A protected, reserved or player-owned target. Admission refusals of this class are produced by the
 //                 harness itself (authorization.mjs); the mod's preflight has none today.
 //   prerequisite  A research precondition the NPC can satisfy first (queue prerequisites, wait for the busy queue). Bounded
 //                 research recovery inside the same step.
 //   world         Everything else: the current world, the actor or a harness-owned condition blocks the operation, or a
-//                 dedicated code-keyed recovery exists and, once spent, ends in the blocker path. The request ends as
-//                 blocked_preflight. This is also the fail-closed class for a refusal that carries no class.
+//                 dedicated code-keyed recovery exists and, once spent, takes the world path. The harness decides the end in
+//                 classifyBlockedEnd (deploy/pterodactyl/runtime-v8/refusal-class.mjs): one correction turn and then a
+//                 model_recoverable pause when the executor can fix it, a guard pause with the step blocked for the codes in
+//                 EXECUTOR_UNFIXABLE_WORLD_CODES (a locked recipe, a disabled technology, a missing actor or inventory, another
+//                 surface, a held effect), and the replacement wake first when the refusal is harness evidence of world change.
+//                 This is also the fail-closed class for a refusal that carries no class.
 //
 // Codes that have a dedicated recovery in the harness (stale_exact_target, supply_missing, extraction_empty,
 // destination_full, requires_machine, bootstrap_dependency_unresolved, recipe_locked, placement_item_missing) are `world`:
-// their dedicated handler runs first, and `world` is where they land when its budget is spent.
+// their dedicated handler runs first, and the world path is where they land when its budget is spent.
 //
 // Keep this file's shape simple (one `code: 'class'` entry per line): the runtime-v8 tests read it as text to prove the mod
 // and the harness agree on the closed set of classes.
