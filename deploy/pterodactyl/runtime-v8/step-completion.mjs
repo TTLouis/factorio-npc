@@ -35,12 +35,26 @@ export function strictTaskTypesForOperation(operation) {
 const SUPPORTED_REQUIREMENT_KINDS = new Set([
   'inventory_count',
   'research_completed',
+  'entity_count',
   'entity_inventory_count',
   'entity_exists',
   'entity_state',
   'authoritative_operation_receipt',
   'runtime_controller_state',
 ])
+
+// entity_count (a build step): bounds of the optional scope. The mod enforces the same radius bound (tools.ts).
+export const ENTITY_COUNT_MAX_RADIUS = 256
+export const ENTITY_COUNT_STATES = Object.freeze(['working', 'powered'])
+const ENTITY_PROTOTYPE_NAME = /^[a-z0-9][a-z0-9_-]{0,99}$/
+const MAX_ANCHOR_COORDINATE = 10000256
+
+function boundedAnchor(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const { x, y } = raw
+  if (!Number.isFinite(x) || !Number.isFinite(y) || Math.abs(x) > MAX_ANCHOR_COORDINATE || Math.abs(y) > MAX_ANCHOR_COORDINATE) return undefined
+  return { x: Math.round(x * 100) / 100, y: Math.round(y * 100) / 100 }
+}
 
 function clean(value, max = 500) {
   const text = String(value ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim()
@@ -102,6 +116,31 @@ function boundedRequirement(raw, index) {
     const technology = clean(raw.technology, 160)
     if (!/^[a-z0-9][a-z0-9_-]*$/.test(technology)) return undefined
     return { id, kind, technology }
+  }
+
+  if (kind === 'entity_count') {
+    // "At least `minimum` entities of this prototype exist": a build step's world result. No identity is named, so it is
+    // never pinned to a unit_number; the live count decides, not a placement receipt. A malformed scope is rejected, not dropped.
+    const prototype = clean(raw.prototype ?? raw.entity_name, 100)
+    const minimum = minimumFromAliases(raw)
+    if (!ENTITY_PROTOTYPE_NAME.test(prototype) || !minimum) return undefined
+    const requirement = { id, kind, prototype, minimum }
+    if (raw.radius !== undefined) {
+      const radius = positiveInteger(integerValue(raw.radius))
+      if (!radius || radius > ENTITY_COUNT_MAX_RADIUS) return undefined
+      requirement.radius = radius
+    }
+    if (raw.anchor !== undefined) {
+      const anchor = boundedAnchor(raw.anchor)
+      // A recorded anchor only means something with a radius around it.
+      if (!anchor || requirement.radius === undefined) return undefined
+      requirement.anchor = anchor
+    }
+    if (raw.state !== undefined) {
+      if (!ENTITY_COUNT_STATES.includes(raw.state)) return undefined
+      requirement.state = raw.state
+    }
+    return requirement
   }
 
   if (kind === 'entity_inventory_count') {
@@ -186,6 +225,12 @@ function evaluateRequirementFact(requirement, fact) {
   }
   if (requirement.kind === 'research_completed') {
     return { satisfied: fact.authoritative === true && fact.stale !== true && fact.technology === requirement.technology && fact.satisfied === true }
+  }
+  if (requirement.kind === 'entity_count') {
+    // Only a live native count of this prototype under this scope decides; a receipt fact has another kind and never matches.
+    return { satisfied: fact.stale !== true && fact.authoritative === true && fact.prototype === requirement.prototype
+      && fact.radius === requirement.radius && fact.state === requirement.state
+      && Number.isFinite(fact.current) && fact.current >= requirement.minimum }
   }
   if (requirement.kind === 'entity_inventory_count') {
     return { satisfied: fact.stale !== true && fact.unit_number === requirement.unit_number && fact.item_name === requirement.item_name && Number.isFinite(fact.current) && fact.current >= requirement.minimum }
