@@ -62,7 +62,7 @@ import {
   withoutRawLeafRecipes,
 } from './handoff-packet.mjs'
 import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CLASS, REPLACEMENT_DECISION } from './authorization.mjs'
-import { declarePauseClass, isPauseClass, PAUSE_CLASS, pauseClassForCode, pauseClassLabel, TRANSPORT_SUBKIND, transportFailureOf, transportTraceFields } from './pause-class.mjs'
+import { declarePauseClass, harnessStateFaultCode, isAutoResumable, isPauseClass, PAUSE_CLASS, pauseClassForCode, pauseClassLabel, pauseClassOf, TRANSPORT_SUBKIND, transportFailureOf, transportTraceFields } from './pause-class.mjs'
 import { classifyBlockedEnd, EXECUTOR_RECOVERY, executorCannotFix, REFUSAL_CLASS, refusalClassLabel, refusalClassOf } from './refusal-class.mjs'
 import { batchStockDecision, batchStockOperationLines, evaluateBatchStock, stockClaimingOperation } from './batch-stock.mjs'
 import {
@@ -1748,6 +1748,64 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
         pause_subkind: pauseInfo?.pause_subkind,
       },
     }).state
+  }
+
+  // The one transition an automatic resume makes before it restages an executor (supervisor.mjs recoverInterruptedAgentPlan): the
+  // paused plan becomes ACTIVE again, in the planning reducer (RUN_RESUMED, through recordRunResume) and in the legacy record and
+  // task board alike. Without it the restaged executor works on a paused plan, where operations run but a checkpoint is refused.
+  // Fail closed: only a pause whose DURABLE class is one of `pauseClasses` (and an auto-resumable one) is resumed, so an operator,
+  // authority, guard, system or unclassified pause never is; `identity` ({ goal_id, plan_id, plan_version, step_id }), when given,
+  // must still name the live goal, plan, plan version and step. The automatic-resume allowance is not touched (it lives in the run's
+  // auto_resume record, which RUN_RESUMED keeps). Returns { resumed, reason, pause_class, pause_reason, step_id, state }.
+  resumePausedPlan(key, { reason = 'auto_resume', pauseClasses = [], identity } = {}) {
+    const state = key ? this.planByNpc.get(key) : undefined
+    if (!state) return { resumed: false, reason: 'no_plan' }
+    if (state.status !== 'paused') return { resumed: false, reason: 'not_paused' }
+    const record = this.pauseRecord?.(key) ?? { paused: true, pause_reason: state.pause_reason, pause_class: state.pause_class, pause_subkind: state.pause_subkind }
+    if (record.paused !== true) return { resumed: false, reason: 'not_paused' }
+    const declared = pauseClassOf(record)
+    const pauseClass = declared.classified ? declared.pause_class : 'unclassified'
+    if (!declared.classified || !isAutoResumable(declared.pause_class) || !pauseClasses.includes(declared.pause_class)) {
+      return { resumed: false, reason: 'pause_class_not_resumable', pause_class: pauseClass }
+    }
+    const board = this.ensureTaskBoard(state)
+    const boardStepId = board?.steps?.[board.active_index]?.id
+    if (!boardStepId) return { resumed: false, reason: 'no_active_step', pause_class: pauseClass }
+    // The step identity of the reducer's committed plan when it holds one (the one the automatic-resume allowance is keyed on).
+    const allowance = this.autoResumeAllowance?.(key)
+    const stepId = allowance?.step_id ?? boardStepId
+    if (identity) {
+      const held = allowance ?? { goal_id: state.goal_id, step_id: boardStepId }
+      const same = (expected, actual) => expected === undefined || expected === actual
+      if (!same(identity.goal_id, held.goal_id) || !same(identity.plan_id, held.plan_id) || !same(identity.plan_version, held.plan_version) || !same(identity.step_id, held.step_id)) {
+        return { resumed: false, reason: 'plan_identity_changed', pause_class: pauseClass, step_id: stepId }
+      }
+    }
+    const pauseReason = state.pause_reason
+    const snapshot = { status: state.status, blocker: state.blocker, pause_reason: state.pause_reason, pause_class: state.pause_class, pause_subkind: state.pause_subkind, task_board: state.task_board, revision: state.revision, updated_at: state.updated_at, history: state.history }
+    const now = Date.now()
+    state.status = 'active'
+    state.blocker = ''
+    this.recordRunResume(key, state, reason)
+    state.task_board = setTaskBoardStatus(board, 'active', { now })
+    state.history = [...(state.history ?? []), {
+      revision: state.revision,
+      status: 'paused',
+      current_step: state.current_step,
+      step: currentPlanStep(state.plan, state.current_step),
+      chat: state.last_chat_message,
+    }].slice(-PLAN_HISTORY_LIMIT)
+    state.revision = (state.revision ?? 0) + 1
+    state.updated_at = now
+    this.planByNpc.set(key, state)
+    // The reducer is the writer of the pause: if it refused the resume (it holds a different goal) the record must not claim an
+    // active plan while the durable run is still paused.
+    if (this.pauseRecord?.(key)?.paused === true) {
+      Object.assign(state, snapshot)
+      this.planByNpc.set(key, state)
+      return { resumed: false, reason: 'reducer_refused_resume', pause_class: pauseClass, step_id: stepId }
+    }
+    return { resumed: true, reason, pause_class: pauseClass, pause_reason: pauseReason, step_id: stepId, state }
   }
 
   maxTurnId() {
@@ -5332,6 +5390,60 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
       }
 
+      // Unit 14: the machines this harness saw placed, with their OWN fuel, source and output inventories. A fresh read where the
+      // actor can reach the machine, else the inventories as last observed, labelled stale. Bounded; a read that fails is counted.
+      const placedMachines = []
+      const placedStats = { candidates: 0, fresh: 0, stale: 0, unread: 0 }
+      if (!inFlight) {
+        const seenUnits = new Set(machineRequirement ? [machineRequirement.unit_number] : [])
+        const candidates = [...(this.liveEntityObservations?.values?.() ?? [])].reverse().filter((observation) => {
+          if (!CRAFTER_TYPES.has(observation?.type) || !Number.isSafeInteger(observation.unit_number) || seenUnits.has(observation.unit_number)) return false
+          seenUnits.add(observation.unit_number)
+          return true
+        }).slice(0, limits.placedMachines)
+        placedStats.candidates = candidates.length
+        const stale = (known, reason) => {
+          const inventories = known.inventories ? compactMachineInventories({ type: known.type, inventories: known.inventories }) : undefined
+          if (!inventories) { placedStats.unread += 1; return }
+          placedStats.stale += 1
+          placedMachines.push({ unit_number: known.unit_number, name: known.name, working: known.working === true, inventories, state: 'stale',
+            as_of: normalizeFactTag({ tick: known.observed_tick, epoch: this.epoch?.epoch }), reason })
+        }
+        let freshReads = false
+        if (candidates.length > 0 && fence) {
+          try {
+            await this.handoffFenceCheck(fence, 'before')
+            for (const known of candidates) {
+              let facts
+              try {
+                facts = await this.readFreshMachine(known.unit_number, undefined, { wait: { actor_id: fence.actor_id, actor_epoch: fence.epoch } })
+              }
+              catch (error) {
+                if (/epoch changed/i.test(error instanceof Error ? error.message : String(error))) {
+                  const fenced = new AgentLoopError('NPC actor or epoch changed during the executor handoff refresh')
+                  fenced.handoffFence = 'actor_changed_during_handoff_refresh'
+                  throw fenced
+                }
+              }
+              if (facts && !facts.error && facts.inventory_read === 'matched' && facts.inventories) {
+                placedStats.fresh += 1
+                placedMachines.push({ unit_number: known.unit_number, name: facts.name ?? known.name, working: facts.working === true, inventories: facts.inventories, state: 'fresh', as_of: tag })
+              }
+              else stale(known, facts?.error || !facts ? 'fresh_read_failed' : `inventory_${facts.inventory_read ?? 'unread'}`)
+            }
+            await this.handoffFenceCheck(fence, 'during')
+            freshReads = true
+          }
+          catch (error) {
+            if (error?.handoffFence) return { refusal: error.handoffFence, meta }
+            placedMachines.length = 0
+            Object.assign(placedStats, { fresh: 0, stale: 0, unread: 0 })
+          }
+        }
+        if (!freshReads) for (const known of candidates) stale(known, fence ? 'fresh_read_failed' : 'refresh_skipped')
+        meta.placed_machines = placedStats
+      }
+
       let residual
       // A residual that could not be derived because the closure outgrew the count-read bound is stated in the packet with what is unread.
       const unreadItems = () => [...closure.items.filter(item => !fresh.has(item)), ...closure.omitted]
@@ -5390,60 +5502,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         for (const kind of this.historicalEntityFacts(limits.placedKinds)) placed.set(kind.name, { count: kind.count, via: 'historical_entities' })
         const checkpointName = machine?.facts?.name
         if (typeof checkpointName === 'string' && checkpointName && !placed.has(checkpointName)) placed.set(checkpointName, { count: 1, via: 'checkpoint_machine' })
-      // Unit 14: the machines this harness saw placed, with their OWN fuel, source and output inventories. A fresh read where the
-      // actor can reach the machine, else the inventories as last observed, labelled stale. Bounded; a read that fails is counted.
-      const placedMachines = []
-      const placedStats = { candidates: 0, fresh: 0, stale: 0, unread: 0 }
-      if (!inFlight) {
-        const seenUnits = new Set(machineRequirement ? [machineRequirement.unit_number] : [])
-        const candidates = [...(this.liveEntityObservations?.values?.() ?? [])].reverse().filter((observation) => {
-          if (!CRAFTER_TYPES.has(observation?.type) || !Number.isSafeInteger(observation.unit_number) || seenUnits.has(observation.unit_number)) return false
-          seenUnits.add(observation.unit_number)
-          return true
-        }).slice(0, limits.placedMachines)
-        placedStats.candidates = candidates.length
-        const stale = (known, reason) => {
-          const inventories = known.inventories ? compactMachineInventories({ type: known.type, inventories: known.inventories }) : undefined
-          if (!inventories) { placedStats.unread += 1; return }
-          placedStats.stale += 1
-          placedMachines.push({ unit_number: known.unit_number, name: known.name, working: known.working === true, inventories, state: 'stale',
-            as_of: normalizeFactTag({ tick: known.observed_tick, epoch: this.epoch?.epoch }), reason })
-        }
-        let freshReads = false
-        if (candidates.length > 0 && fence) {
-          try {
-            await this.handoffFenceCheck(fence, 'before')
-            for (const known of candidates) {
-              let facts
-              try {
-                facts = await this.readFreshMachine(known.unit_number, undefined, { wait: { actor_id: fence.actor_id, actor_epoch: fence.epoch } })
-              }
-              catch (error) {
-                if (/epoch changed/i.test(error instanceof Error ? error.message : String(error))) {
-                  const fenced = new AgentLoopError('NPC actor or epoch changed during the executor handoff refresh')
-                  fenced.handoffFence = 'actor_changed_during_handoff_refresh'
-                  throw fenced
-                }
-              }
-              if (facts && !facts.error && facts.inventory_read === 'matched' && facts.inventories) {
-                placedStats.fresh += 1
-                placedMachines.push({ unit_number: known.unit_number, name: facts.name ?? known.name, working: facts.working === true, inventories: facts.inventories, state: 'fresh', as_of: tag })
-              }
-              else stale(known, facts?.error || !facts ? 'fresh_read_failed' : `inventory_${facts.inventory_read ?? 'unread'}`)
-            }
-            await this.handoffFenceCheck(fence, 'during')
-            freshReads = true
-          }
-          catch (error) {
-            if (error?.handoffFence) return { refusal: error.handoffFence, meta }
-            placedMachines.length = 0
-            Object.assign(placedStats, { fresh: 0, stale: 0, unread: 0 })
-          }
-        }
-        if (!freshReads) for (const known of candidates) stale(known, fence ? 'fresh_read_failed' : 'refresh_skipped')
-        meta.placed_machines = placedStats
-      }
-
         machineEnergy = deriveMachineEnergy({ recipes: cached, recipeNames: closureRecipeNames, statuses: machineStatuses, held: fresh, placed, limits })
         fuelNeeds = deriveFuelNeeds({ machineEnergy, fuels: [...this.handoffBurnerFuels.values()], held: fresh, limits })
         // The labs that consume a science research's packs (not crafting machines of any recipe, so appended after the fuel derivation).
@@ -5680,6 +5738,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         machine_energy: summary.machine_energy,
         fuel_needs: summary.fuel_needs,
         machine: summary.machine,
+        placed_machines: summary.placed_machines,
         historical_entity_kinds: summary.historical_entity_kinds,
         reads_attempted: meta?.reads_attempted,
         reads_failed: meta?.reads_failed,
@@ -5695,6 +5754,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           machines: meta.machine_energy.machines,
           burner_count: meta.machine_energy.burner_count,
           fuel_held: meta.machine_energy.fuel_held,
+          // fuel_held is the ACTOR's stock of burner fuel (held_counts). A placed machine's own fuel is counted in context.placed_machines_carried.
+          fuel_held_scope: 'actor_inventory',
           fuel_sources_read: meta.machine_energy.fuel_sources_read,
           fuel_sources_reused: meta.machine_energy.fuel_sources_reused,
           fuel_counts_unread: meta.machine_energy.fuel_counts_unread,
@@ -5702,6 +5763,20 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           carried: (summary.machine_energy ?? 0) > 0,
           dropped_for_size: (packet.dropped ?? []).filter(key => ['machine_energy', 'fuel_needs'].includes(key)),
           reason: 'native_energy_source_placement_and_fuel_facts_for_available_machines',
+        }, { requestId })
+      }
+      if (meta?.placed_machines && meta.placed_machines.candidates > 0) {
+        await this.traceEvent('context.placed_machines_carried', {
+          request_id: requestId,
+          handoff_id: restaged.handoff_id,
+          checkpoint,
+          candidates: meta.placed_machines.candidates,
+          fresh: meta.placed_machines.fresh,
+          stale: meta.placed_machines.stale,
+          unread: meta.placed_machines.unread,
+          carried: summary.placed_machines ?? 0,
+          dropped_for_size: (packet.dropped ?? []).includes('placed_machines'),
+          reason: 'placed_machine_own_inventories_kept_distinct_from_actor_held_items',
         }, { requestId })
       }
       if (summary.fluid_source_hints !== undefined) {
@@ -5738,7 +5813,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
       }
     }
-        placed_machines: summary.placed_machines,
     const key = unitNumber !== undefined
       ? `unit:${unitNumber}`
       : `fallback:${entity.name}:${entity.type ?? 'unknown'}:${position?.x ?? '?'}:${position?.y ?? '?'}`
@@ -5754,8 +5828,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       distance,
       surface,
       surface_index: surfaceIndex,
-          // fuel_held is the ACTOR's stock of burner fuel (held_counts). A placed machine's own fuel is counted in context.placed_machines_carried.
-          fuel_held_scope: 'actor_inventory',
       source,
       working: entity.working === true,
       status: Number.isFinite(entity.status) ? entity.status : undefined,
@@ -5765,20 +5837,6 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       observed_seq: this.worldMutationSeq,
       observed_tick: Number.isSafeInteger(this.lastTaskStatusView?.last_completed_batch?.tick) ? this.lastTaskStatusView.last_completed_batch.tick : undefined,
     })
-      if (meta?.placed_machines && meta.placed_machines.candidates > 0) {
-        await this.traceEvent('context.placed_machines_carried', {
-          request_id: requestId,
-          handoff_id: restaged.handoff_id,
-          checkpoint,
-          candidates: meta.placed_machines.candidates,
-          fresh: meta.placed_machines.fresh,
-          stale: meta.placed_machines.stale,
-          unread: meta.placed_machines.unread,
-          carried: summary.placed_machines ?? 0,
-          dropped_for_size: (packet.dropped ?? []).includes('placed_machines'),
-          reason: 'placed_machine_own_inventories_kept_distinct_from_actor_held_items',
-        }, { requestId })
-      }
   }
 
   recordLiveEntityToolResult(toolName, raw) {
@@ -10045,6 +10103,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           message,
           recoverable: recoverablePlannerFailure,
           ...transportTraceFields(error),
+          ...(harnessStateFaultCode(error) ? { harness_state_fault: harnessStateFaultCode(error), pause_class: PAUSE_CLASS.SYSTEM } : {}),
           ...(intakeFailure ? { intake_retry_candidate: true } : {}),
           usage: this.traceRequest.usage,
           failure_snapshot: this.failureSnapshot('runtime', message),

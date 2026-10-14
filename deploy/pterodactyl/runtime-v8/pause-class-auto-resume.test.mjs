@@ -11,6 +11,8 @@ import { validateOutcomeCandidate } from './outcome-authority.mjs'
 import {
   AUTO_RESUMABLE_PAUSE_CLASSES,
   classifyRequestFailure,
+  HARNESS_STATE_FAULT_CODES,
+  harnessStateFaultCode,
   isAutoResumable,
   MODEL_RECOVERABLE_RESUME_LIMITS,
   PAUSE_CLASS,
@@ -30,7 +32,7 @@ import {
   serializePlanningState,
 } from './planning-state.mjs'
 import { analyzeBehaviorTrace } from './run-check.mjs'
-import { executeUiControl, pauseStrandedPlanAfterRequestError, Session, transientProviderFailure } from './supervisor.mjs'
+import { executeUiControl, pauseStrandedPlanAfterRequestError, recoverInterruptedAgentPlan, Session, transientProviderFailure } from './supervisor.mjs'
 import { FakeFactorio, gather, inventoryCheckpoint, planReply, recordingJev } from './task-loop-fixtures.mjs'
 
 const KEY = 'npc:sgluna'
@@ -302,16 +304,32 @@ const TWO_STEPS = ['Gather 10 iron ore', 'Gather 10 copper ore']
 const plannerSlice = () => planReply({ plan: TWO_STEPS, currentStep: 0, operations: [gather('iron-ore', 10)], checkpoint: inventoryCheckpoint('iron-ore', 10), goal: GOAL, roadmap: SHELF })
 // mode 'fail' is run E: the executor answers step 2 with a plan and no operation, again and again, until the repair is exhausted.
 const executorStep = mode => planReply({ plan: TWO_STEPS, currentStep: 1, operations: mode === 'fail' ? [] : [gather('copper-ore', 10)] })
+// mode 'checkpoint' is run H's attempt 2: the executor answers with the active step's checkpoint and no operation. The contract is
+// read from the board the way a model reads it from its handoff packet (the step's committed completion contract).
+function checkpointOnlyStep(memory) {
+  const board = memory.currentPlan(KEY)?.task_board
+  const contract = board?.steps?.[board.active_index]?.completion_contract
+  const checkpoint = contract?.requirements?.length
+    ? { mode: contract.mode, requirements: contract.requirements.map(({ id, kind, item_name: itemName, minimum }) => ({ id, kind, item_name: itemName, minimum })) }
+    : inventoryCheckpoint('copper-ore', 10)
+  return planReply({ plan: TWO_STEPS, currentStep: 1, operations: [], checkpoint })
+}
 
 function makeWorld({ game = new FakeFactorio(), stateFile = null, mode = 'fail' } = {}) {
   const memory = new CanonicalTaskBoardMemory()
   const trace = []
-  const state = { mode }
+  const state = { mode, executorCalls: 0, gate: undefined, onExecutorCall: undefined }
   const jev = recordingJev(async (_state, questions) => (questions.intent ? { overrides: { intent: { choice: 'new_goal', confidence: 0.9 } } } : undefined))
   const agent = new NpcAgentLoop({
     rcon: game,
     memory,
-    provider: async (_messages, context) => (context?.role === 'executor' ? executorStep(state.mode) : plannerSlice()),
+    provider: async (_messages, context) => {
+      if (context?.role !== 'executor') return plannerSlice()
+      state.executorCalls += 1
+      await state.onExecutorCall?.()
+      await state.gate?.promise
+      return state.mode === 'checkpoint' ? checkpointOnlyStep(memory) : executorStep(state.mode)
+    },
     interactionProvider: async () => ({ content: JSON.stringify({ intent: 'new_goal', queue_conflict: false, reply: '' }) }),
     interactionDecisionProvider: jev,
     steeringDecisionProvider: jev,
@@ -831,4 +849,238 @@ test('the startup branch schedules from a persisted model_recoverable pause, and
   await third.session.eventQueue
   assert.equal(third.session.modelResume, null)
   assert.equal(recoveryRows(stopped.events, 'recovery.auto_resume_scheduled').length, 0)
+})
+
+// --- unit 14: an automatic resume makes the plan active again before the executor is restaged (run H) --------------------------
+
+test('run H: after a model_recoverable auto-resume the plan is ACTIVE when the restaged executor answers, so its checkpoint is not refused', async t => {
+  const run = await scheduledRunE(t, { mode: 'fail' })
+  await run.session.considerPauseForAutoResume()
+  clearTimeout(run.session.modelResume.timer)
+  const { correlation } = run.session.modelResume
+  assert.equal(run.memory.currentPlan(KEY).status, 'paused')
+  assert.equal(run.memory.currentPlan(KEY).task_board.status, 'paused')
+
+  // Run H's own sequence: a checkpoint with no operations reaches persistPlannerCheckpoint. On the paused plan it threw
+  // checkpoint_requires_active_step (that is the precondition the resume removes) ...
+  const checkpoint = () => JSON.parse(checkpointOnlyStep(run.memory).content).checkpoint
+  run.agent.requestInfo = { memoryKey: KEY, sender: 'TTLouis', text: 'resume', origin: 'runtime' }
+  await assert.rejects(() => run.agent.persistPlannerCheckpoint({ checkpoint: checkpoint(), operations: [] }), /checkpoint_requires_active_step/)
+  run.agent.requestInfo = null
+
+  // ... and on the plan the auto-resume made active it is handled, with no throw, while the executor is mid-restage.
+  const during = []
+  run.state.mode = 'checkpoint'
+  run.state.onExecutorCall = async () => {
+    if (during.length > 0) return
+    const plan = run.memory.currentPlan(KEY)
+    const entry = { status: plan.status, board: plan.task_board.status, runPaused: run.memory.pauseRecord(KEY).paused, pauseClass: run.memory.pauseRecord(KEY).pause_class }
+    try {
+      const result = await run.agent.persistPlannerCheckpoint({ checkpoint: checkpoint(), operations: [] })
+      entry.stepId = result.stepId
+      entry.statusAfter = run.memory.currentPlan(KEY).status
+    }
+    catch (error) {
+      entry.threw = error instanceof Error ? error.message : String(error)
+    }
+    during.push(entry)
+  }
+  const before = run.memory.autoResumeAllowance(KEY)
+  await run.session.runModelRecoverableResume(correlation, 1)
+
+  assert.equal(during.length, 1, 'the restaged executor was asked')
+  assert.deepEqual({ status: during[0].status, board: during[0].board, runPaused: during[0].runPaused, pauseClass: during[0].pauseClass, threw: during[0].threw, statusAfter: during[0].statusAfter },
+    { status: 'active', board: 'active', runPaused: false, pauseClass: '', threw: undefined, statusAfter: 'active' })
+  assert.ok(during[0].stepId)
+  const [started] = recoveryRows(run.events, 'recovery.auto_resume_started')
+  const [resumed, ...extra] = recoveryRows(run.events, 'recovery.auto_resume_plan_resumed')
+  assert.equal(extra.length, 0)
+  assert.equal(resumed.request_id, started.request_id, 'the resume belongs to the recovery request')
+  assert.equal(resumed.pause_class, 'model_recoverable')
+  assert.equal(resumed.step_id, correlation.step_id)
+  assert.equal(resumed.goal_id, correlation.goal_id)
+  assert.match(resumed.reason, /^auto_resume_after_model_recoverable_pause/)
+  const resumedAt = run.events.findIndex(row => row.event === 'recovery.auto_resume_plan_resumed')
+  const restagedAt = run.events.findIndex(row => row.event === 'context.restaged' && row.data.checkpoint === 'C7')
+  assert.ok(resumedAt > -1 && restagedAt > resumedAt, 'the plan was made active before the executor was restaged')
+  // Nothing in the recovery failed on the harness's own state.
+  const failed = run.events.filter(row => row.event === 'request.failed').map(row => row.data.message)
+  assert.equal(failed.some(message => /checkpoint_requires_active_step/.test(message)), false, 'the harness-state fault is unreachable from the auto-resume path')
+  assert.equal(recoveryRows(run.events, 'recovery.harness_state_fault').length, 0)
+  // The attempt still counted, exactly once.
+  assert.equal(run.memory.autoResumeAllowance(KEY).step_attempts, before.step_attempts + 1)
+  assert.equal(run.memory.autoResumeAllowance(KEY).goal_attempts, before.goal_attempts + 1)
+  // run-check reads the same rows: no harness fault.
+  assert.equal(analyzeBehaviorTrace(run.trace).findings.some(finding => finding.signature === 'harness_state_fault'), false)
+})
+
+test('an auto-resume that fails again pauses model_recoverable once more, and the next attempt makes the plan active again', async t => {
+  const run = await scheduledRunE(t, { mode: 'fail' })
+  await run.session.considerPauseForAutoResume()
+  clearTimeout(run.session.modelResume.timer)
+  await run.session.runModelRecoverableResume(run.session.modelResume.correlation, 1)
+
+  // Attempt 1: the executor produced no operation, the request failed the way it failed originally, the plan is paused again.
+  const [first] = recoveryRows(run.events, 'recovery.auto_resume_plan_resumed')
+  assert.equal(first.pause_class, 'model_recoverable')
+  assert.equal(run.memory.currentPlan(KEY).status, 'paused')
+  assert.equal(run.memory.currentPlan(KEY).task_board.status, 'paused')
+  assert.deepEqual([run.memory.pauseRecord(KEY).paused, run.memory.pauseRecord(KEY).pause_class], [true, 'model_recoverable'])
+  assert.equal(run.memory.autoResumeAllowance(KEY).step_attempts, 1, 'the allowance accounting is untouched by the resume')
+  assert.deepEqual(recoveryRows(run.events, 'recovery.auto_resume_scheduled').map(row => row.attempt), [1, 2])
+
+  // Attempt 2 (the model answers properly): the plan is resumed again, and stays active.
+  clearTimeout(run.session.modelResume.timer)
+  run.state.mode = 'ok'
+  await run.session.runModelRecoverableResume(run.session.modelResume.correlation, 2)
+  const resumed = recoveryRows(run.events, 'recovery.auto_resume_plan_resumed')
+  const started = recoveryRows(run.events, 'recovery.auto_resume_started')
+  assert.deepEqual(resumed.map(row => row.request_id), started.map(row => row.request_id))
+  assert.equal(new Set(resumed.map(row => row.request_id)).size, 2)
+  const plan = run.memory.currentPlan(KEY)
+  assert.equal(plan.status, 'active')
+  assert.equal(plan.task_board.status, 'active')
+  assert.deepEqual([run.memory.pauseRecord(KEY).paused, run.memory.pauseRecord(KEY).pause_class], [false, ''])
+  assert.equal(run.memory.autoResumeAllowance(KEY).step_attempts, 2, 'both attempts are still counted against unit 7\'s caps')
+  assert.equal(run.game.mutations.length, 2)
+})
+
+test('the transport auto-resume makes the plan active before the restage too', async t => {
+  const run = await scheduledRunE(t, { mode: 'fail' })
+  await run.agent.pausePersistentPlan('provider_transient: Provider timed out after 120000 ms', { pause_class: PAUSE_CLASS.TRANSPORT, pause_subkind: 'timeout' })
+  assert.equal(run.memory.pauseRecord(KEY).pause_class, 'transport')
+  run.state.mode = 'ok'
+  await run.session.runAutoResume()
+  const [resumed] = recoveryRows(run.events, 'recovery.auto_resume_plan_resumed')
+  assert.equal(resumed.pause_class, 'transport')
+  assert.match(resumed.reason, /^auto_resume_after_transient_provider_failure/)
+  assert.equal(run.memory.currentPlan(KEY).status, 'active')
+  assert.equal(run.game.mutations.length, 2)
+})
+
+test('an operator, authority, guard, system or unclassified pause is never reactivated by an automatic resume', async t => {
+  const run = await scheduledRunE(t, { mode: 'fail' })
+  const ours = { pauseClasses: [PAUSE_CLASS.MODEL_RECOVERABLE, PAUSE_CLASS.TRANSPORT] }
+  for (const declared of [PAUSE_CLASS.OPERATOR, PAUSE_CLASS.AUTHORITY, PAUSE_CLASS.GUARD, PAUSE_CLASS.SYSTEM, undefined]) {
+    run.agent.traceRequest = null
+    await run.agent.pausePersistentPlan(`declared_${declared ?? 'nothing'}`, declared ? { pause_class: declared } : {})
+    const refused = run.memory.resumePausedPlan(KEY, ours)
+    assert.equal(refused.resumed, false, String(declared))
+    assert.equal(refused.reason, 'pause_class_not_resumable', String(declared))
+    assert.equal(refused.pause_class, declared ?? 'unclassified')
+    assert.equal(run.memory.currentPlan(KEY).status, 'paused', String(declared))
+    assert.equal(run.memory.currentPlan(KEY).task_board.status, 'paused', String(declared))
+    assert.equal(run.memory.pauseRecord(KEY).paused, true, String(declared))
+  }
+  // A transport pause is not ours when the caller only owns model_recoverable, and a stale identity is refused.
+  await run.agent.pausePersistentPlan('provider_transient: x', { pause_class: PAUSE_CLASS.TRANSPORT, pause_subkind: 'timeout' })
+  assert.equal(run.memory.resumePausedPlan(KEY, { pauseClasses: [PAUSE_CLASS.MODEL_RECOVERABLE] }).reason, 'pause_class_not_resumable')
+  const allowance = run.memory.autoResumeAllowance(KEY)
+  assert.equal(run.memory.resumePausedPlan(KEY, { pauseClasses: [PAUSE_CLASS.TRANSPORT], identity: { goal_id: allowance.goal_id, plan_id: allowance.plan_id, plan_version: allowance.plan_version, step_id: 'step_old' } }).reason, 'plan_identity_changed')
+  assert.equal(run.memory.currentPlan(KEY).status, 'paused')
+  // The one class the caller owns resumes, on both the reducer and the legacy record, and the allowance is not touched.
+  const before = run.memory.autoResumeAllowance(KEY)
+  const resumed = run.memory.resumePausedPlan(KEY, { pauseClasses: [PAUSE_CLASS.TRANSPORT], identity: { goal_id: allowance.goal_id, plan_id: allowance.plan_id, plan_version: allowance.plan_version, step_id: allowance.step_id } })
+  assert.deepEqual([resumed.resumed, resumed.pause_class, resumed.step_id], [true, 'transport', allowance.step_id])
+  assert.deepEqual([run.memory.currentPlan(KEY).status, run.memory.currentPlan(KEY).task_board.status, run.memory.pauseRecord(KEY).paused], ['active', 'active', false])
+  assert.deepEqual([run.memory.autoResumeAllowance(KEY).step_attempts, run.memory.autoResumeAllowance(KEY).goal_attempts], [before.step_attempts, before.goal_attempts])
+  assert.equal(run.memory.resumePausedPlan(KEY, ours).reason, 'not_paused')
+})
+
+test('an operator pause that reaches the restage is not resumed: the recovery ends before anything runs', async t => {
+  const run = await scheduledRunE(t, { mode: 'fail' })
+  run.agent.traceRequest = null
+  await run.agent.pausePersistentPlan('user_stop', { pause_class: PAUSE_CLASS.OPERATOR })
+  const allowance = run.memory.autoResumeAllowance(KEY)
+  const result = await recoverInterruptedAgentPlan(run.agent, 'auto_resume_after_model_recoverable_pause', {}, {
+    allowModelRecoverable: true,
+    requestId: 'recovery_operator_fence',
+    reactivate: { pause_classes: [PAUSE_CLASS.MODEL_RECOVERABLE], identity: { goal_id: allowance.goal_id, plan_id: allowance.plan_id, plan_version: allowance.plan_version, step_id: allowance.step_id }, required: true },
+  })
+  assert.equal(result.recovered, false)
+  assert.equal(result.reason, 'plan_not_resumable')
+  assert.deepEqual(recoveryRows(run.events, 'recovery.auto_resume_plan_resumed'), [])
+  const [refused] = recoveryRows(run.events, 'recovery.auto_resume_plan_not_resumed')
+  assert.deepEqual([refused.request_id, refused.reason, refused.pause_class], ['recovery_operator_fence', 'pause_class_not_resumable', 'operator'])
+  assert.equal(run.memory.currentPlan(KEY).status, 'paused')
+  assert.equal(run.memory.pauseRecord(KEY).pause_class, 'operator')
+  assert.equal(run.game.mutations.length, 1, 'no executor ran')
+})
+
+test('a player stop between the fire and the restage cancels the attempt with no reactivation, and the stop stands', async t => {
+  const run = await scheduledRunE(t, { mode: 'fail', realQueue: true })
+  run.state.mode = 'ok'
+  await run.session.considerPauseForAutoResume()
+  const { token, timer } = run.session.modelResume
+  clearTimeout(timer)
+  // The attempt parks after it was counted, before recovery starts (the persist of the count).
+  const persisted = gate()
+  const persist = run.agent.persistState.bind(run.agent)
+  run.agent.persistState = async () => { await persisted.promise; return persist() }
+  run.session.fireModelResume(token)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(run.session.queuePlayerRequest('TTLouis', 'stop'), true)
+  assert.equal(token.cancelled, true)
+  persisted.open()
+  await run.session.eventQueue
+
+  assert.deepEqual(recoveryRows(run.events, 'recovery.auto_resume_plan_resumed'), [], 'the plan was never reactivated')
+  assert.equal(recoveryRows(run.events, 'recovery.auto_resume_started').length, 0)
+  assert.equal(run.game.mutations.length, 1, 'nothing was sent to the game')
+  assert.equal(run.memory.currentPlan(KEY).status, 'paused')
+  assert.equal(run.memory.pauseRecord(KEY).pause_class, 'operator', 'the stop stands')
+})
+
+test('a player stop during the restage still wins: the plan ends paused as operator and nothing more reaches the game', async t => {
+  const run = await scheduledRunE(t, { mode: 'fail', realQueue: true })
+  run.state.mode = 'ok'
+  await run.session.considerPauseForAutoResume()
+  const { token, timer } = run.session.modelResume
+  clearTimeout(timer)
+  // The restaged executor's model call is held open: the plan has already been made active again when the stop arrives.
+  run.state.gate = gate()
+  const calls = run.state.executorCalls
+  run.session.fireModelResume(token)
+  for (let spin = 0; spin < 400 && run.state.executorCalls === calls; spin++) await new Promise(resolve => setTimeout(resolve, 5))
+  assert.equal(run.state.executorCalls, calls + 1, 'the restaged executor is waiting on the model')
+  assert.equal(recoveryRows(run.events, 'recovery.auto_resume_plan_resumed').length, 1)
+  assert.equal(run.memory.currentPlan(KEY).status, 'active')
+
+  assert.equal(run.session.queuePlayerRequest('TTLouis', 'stop'), true)
+  assert.equal(token.cancelled, true)
+  run.state.gate.open()
+  await run.session.eventQueue
+
+  assert.equal(run.memory.currentPlan(KEY).status, 'paused')
+  assert.deepEqual([run.memory.pauseRecord(KEY).pause_class, run.memory.pauseRecord(KEY).pause_reason], ['operator', 'user_stop'])
+  assert.equal(run.game.mutations.length, 1, 'the cancelled attempt sent nothing')
+  assert.equal(run.session.modelResume, null, 'no new automatic resume was scheduled behind the stop')
+})
+
+// --- unit 14: a harness-state invariant is a system pause with its code, not a guard -------------------------------------------
+
+test('checkpoint_requires_active_step is a harness-state fault: system class, a cause code, and run-check names it', async t => {
+  assert.deepEqual([...HARNESS_STATE_FAULT_CODES].sort(), ['checkpoint_requires_active_step', 'deterministic_checkpoint_failed_to_persist'])
+  assert.equal(harnessStateFaultCode(new Error('checkpoint_requires_active_step')), 'checkpoint_requires_active_step')
+  assert.equal(harnessStateFaultCode('deterministic_checkpoint_failed_to_persist: x'), 'deterministic_checkpoint_failed_to_persist')
+  assert.equal(harnessStateFaultCode('checkpoint_requires_active_step_but_more'), undefined)
+  assert.equal(harnessStateFaultCode(RUN_E_FAILURE), undefined)
+  assert.deepEqual(classifyRequestFailure(new Error('checkpoint_requires_active_step')), { pause_class: 'system', pause_subkind: '', code: 'checkpoint_requires_active_step', source: 'harness_state_fault' })
+
+  // A recovery whose request throws it (stubbed here: after the fix the auto-resume path cannot reach it).
+  const run = await scheduledRunE(t, { mode: 'fail' })
+  await run.session.considerPauseForAutoResume()
+  clearTimeout(run.session.modelResume.timer)
+  run.agent.runGuarded = async () => { throw new Error('checkpoint_requires_active_step') }
+  const scheduledBefore = recoveryRows(run.events, 'recovery.auto_resume_scheduled').length
+  await run.session.runModelRecoverableResume(run.session.modelResume.correlation, 1)
+  const record = run.memory.pauseRecord(KEY)
+  assert.equal(record.pause_class, 'system')
+  assert.match(record.pause_reason, /^runtime_recovery_failed:auto_resume_after_model_recoverable_pause:checkpoint_requires_active_step$/)
+  const [started] = recoveryRows(run.events, 'recovery.auto_resume_started')
+  const [fault] = recoveryRows(run.events, 'recovery.harness_state_fault')
+  assert.deepEqual([fault.request_id, fault.reason, fault.pause_class], [started.request_id, 'checkpoint_requires_active_step', 'system'])
+  assert.equal(recoveryRows(run.events, 'recovery.auto_resume_scheduled').length, scheduledBefore, 'a system pause is never scheduled for an automatic resume')
+  const finding = analyzeBehaviorTrace(run.trace).findings.find(item => item.signature === 'harness_state_fault')
+  assert.match(finding.detail, /harness state fault checkpoint_requires_active_step/)
 })
