@@ -86,7 +86,41 @@ export function pauseClassLabel(record) {
 //      classifier ("Provider response recovery exhausted after 3 attempts: ... HTTP 503"). It can be deleted once every wrapper
 //      forwards the original error's structured fields (staging/npc-agent-loop.mjs recoverPlan is the one that does not yet).
 
-const NETWORK_ERROR_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT', 'EPIPE', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT'])
+// Undici's fetch rejects with TypeError('fetch failed') and puts the network code on error.cause.code. A DNS failure (ENOTFOUND,
+// EAI_AGAIN) is a transport condition: waiting can fix it. UND_ERR_ABORTED is deliberately absent (the loop's own cancellation).
+const NETWORK_ERROR_CODES = new Set([
+  'ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED', 'ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT', 'EPIPE', 'EHOSTUNREACH', 'ENETUNREACH', 'ENETDOWN',
+  'UND_ERR_SOCKET', 'UND_ERR_CLOSED', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT',
+])
+const SAFE_CAUSE_CODE = /^[A-Z][A-Z0-9_]{1,39}$/
+
+// The error codes an error carries, outermost first: its own code, its cause's, and the first member of an AggregateError cause
+// (undici reports a refused connection to several addresses that way).
+function errorCodes(failure) {
+  if (!failure || typeof failure !== 'object') return []
+  const cause = failure.cause && typeof failure.cause === 'object' ? failure.cause : undefined
+  const member = Array.isArray(cause?.errors) ? cause.errors[0] : undefined
+  const nested = cause?.cause && typeof cause.cause === 'object' ? cause.cause : undefined
+  return [failure.cause_code, failure.code, cause?.code, member?.code, nested?.code].filter(code => typeof code === 'string')
+}
+
+// A short, safe token for a trace row (ENOTFOUND, ECONNREFUSED, UND_ERR_SOCKET ...), or undefined. Only a code is read, never an
+// error message: a network error's message names the host and URL (getaddrinfo ENOTFOUND <host>).
+export function failureCauseCode(failure) {
+  const codes = errorCodes(failure).filter(code => SAFE_CAUSE_CODE.test(code))
+  return codes.find(code => NETWORK_ERROR_CODES.has(code)) ?? codes[0]
+}
+
+// The bounded transport fields of a failure, for provider.error and request.failed rows:
+// { cause_code?, pause_class?: 'transport', transport_subkind? }.
+export function transportTraceFields(failure) {
+  const causeCode = failureCauseCode(failure)
+  const transport = transportFailureOf(failure)
+  return {
+    ...(causeCode ? { cause_code: causeCode } : {}),
+    ...(transport ? { pause_class: PAUSE_CLASS.TRANSPORT, transport_subkind: transport.subkind } : {}),
+  }
+}
 
 export const REQUEST_FAILURE_CODE_CLASS = Object.freeze({
   provider_action_omission_repair_failed: PAUSE_CLASS.MODEL_RECOVERABLE,
@@ -145,8 +179,7 @@ export function transportFailureOf(failure) {
     if (TRANSPORT_SUBKINDS.includes(failure.transport_subkind)) return { subkind: failure.transport_subkind, source: 'structured' }
     const fromStatus = subkindFromHttpStatus(failure.http_status)
     if (fromStatus) return { subkind: fromStatus, source: 'structured' }
-    const code = String(failure.code ?? failure.cause?.code ?? '')
-    if (NETWORK_ERROR_CODES.has(code)) return { subkind: TRANSPORT_SUBKIND.TRANSPORT, source: 'structured' }
+    if (errorCodes(failure).some(code => NETWORK_ERROR_CODES.has(code))) return { subkind: TRANSPORT_SUBKIND.TRANSPORT, source: 'structured' }
   }
   const fromText = transportSubkindFromText(failureMessage(failure))
   return fromText ? { subkind: fromText, source: 'legacy_text' } : undefined

@@ -62,7 +62,7 @@ import {
   withoutRawLeafRecipes,
 } from './handoff-packet.mjs'
 import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CLASS, REPLACEMENT_DECISION } from './authorization.mjs'
-import { isPauseClass, PAUSE_CLASS, pauseClassForCode, pauseClassLabel, transportFailureOf } from './pause-class.mjs'
+import { isPauseClass, PAUSE_CLASS, pauseClassForCode, pauseClassLabel, transportFailureOf, transportTraceFields } from './pause-class.mjs'
 import { REFUSAL_CLASS, refusalClassLabel, refusalClassOf } from './refusal-class.mjs'
 import { batchStockDecision, batchStockOperationLines, evaluateBatchStock, stockClaimingOperation } from './batch-stock.mjs'
 import {
@@ -8740,6 +8740,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // A bare Resume/continue on the goal a restart paused before its first plan re-drives that goal.
     const redriveGoal = isBareContinuation(text) ? this.redrivableGoalWithoutPlan(memoryKey) : undefined
     if (redriveGoal) routed.route = { ...routed.route, intent: 'continue_current', queue_conflict: false, reply: '' }
+    // An intake retry (supervisor.mjs) re-sends the objective whose first planner call failed on transport: the same intent it was
+    // received under, whatever the router would now say about the text.
+    if (options.intakeRetryIntent === 'new_goal' && !redriveGoal) routed.route = { ...routed.route, intent: 'new_goal', queue_conflict: false, reply: '' }
     const intent = routed.route.intent
     const jevNewGoalAligned = intent === 'new_goal' && routed.decision_shadow?.intent === 'new_goal'
     await this.traceEvent('interaction.routed', {
@@ -8854,7 +8857,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (healthyRuntime) await this.cancelInteractionWorldWork(routed.epoch)
       this.clearLoadedSkillContext()
       super.cancel()
-      await this.recordInterruptedTask(memoryKey, { sender, text, epoch: routed.epoch })
+      // An intake retry replaces the plan-less goal its own failed first attempt admitted: that goal never ran, so it is not an
+      // interrupted task to keep (the supervisor fenced out any other goal before re-sending).
+      if (!options.intakeRetryIntent) await this.recordInterruptedTask(memoryKey, { sender, text, epoch: routed.epoch })
       this.memory.clearTaskContext?.(memoryKey)
       await this.persistState()
     }
@@ -9089,6 +9094,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         await this.traceEvent('request.failed', {
           stage: 'bind',
           message,
+          ...transportTraceFields(error),
           usage: this.traceRequest.usage,
           failure_snapshot: this.failureSnapshot('bind', message),
         })
@@ -9883,12 +9889,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         })
       }
       const recoverablePlannerFailure = planState?.status === 'active' && RECOVERABLE_PLANNER_FAILURE.test(message)
+      // A transport failure on the first planner call of a new goal: no plan exists, so no pause can carry it. The failure is
+      // marked here (request id, intent, goal id) and the supervisor keeps the request as a pending intake retry.
+      const intakeFailure = !recoverablePlannerFailure ? this.intakeTransportFailure(error) : undefined
+      if (intakeFailure && error && typeof error === 'object') error.intake_failure = intakeFailure
       if (!recoverablePlannerFailure && generation === this.generation) this.reset()
       if (this.traceRequest) {
         await this.traceEvent('request.failed', {
           stage: 'runtime',
           message,
           recoverable: recoverablePlannerFailure,
+          ...transportTraceFields(error),
+          ...(intakeFailure ? { intake_retry_candidate: true } : {}),
           usage: this.traceRequest.usage,
           failure_snapshot: this.failureSnapshot('runtime', message),
         })
@@ -9896,6 +9908,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       throw error
     }
+  }
+
+  // { request_id, interaction_intent, goal_id } when `error` is a transport failure of the first planner call of a new goal (nothing
+  // planned, nothing committed), else undefined. Read BEFORE reset(): the request id is the failing request's.
+  intakeTransportFailure(error) {
+    if (this.requestLifecycle !== 'new_goal' || this.requestInfo?.origin !== 'chat' || !this.traceRequest?.id || !transportFailureOf(error)) return undefined
+    const key = this.activePlanKey()
+    const planning = this.memory.planningState?.(key)
+    if (getActivePlanningPlan(planning) || planning?.plans?.length > 0 || this.memory.currentPlan?.(key)) return undefined
+    return { request_id: this.traceRequest.id, interaction_intent: 'new_goal', goal_id: planning?.goal?.goal_id }
   }
 
   async pauseAfterProviderFailure(cause, message) {
@@ -11461,6 +11483,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         message: messageText,
         timeout: /timed out/i.test(messageText),
         cancelled: /cancelled/i.test(messageText),
+        // Undici's "fetch failed" carries its cause on error.cause.code (ENOTFOUND, ECONNREFUSED ...): a bounded token only, never the
+        // cause message (it names the host).
+        ...transportTraceFields(error),
         ...this.agentContext.traceFields(attribution),
       }
       if (this.traceRequest && !staleReply) this.traceRequest.last_provider_event = errorTrace
