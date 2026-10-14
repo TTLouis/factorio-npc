@@ -124,7 +124,22 @@ export function transportTraceFields(failure) {
   }
 }
 
+// Harness-state invariants (unit 14): errors the harness raises when ITS OWN state is inconsistent (a checkpoint submitted while the
+// plan is not active, a contract that did not read back after it was written). They are not model behaviour and not a guard that
+// stopped on purpose, so they are never a model_recoverable or guard pause: they pause as `system`, with the code as the cause, and
+// run-check reports them as a harness fault.
+export const HARNESS_STATE_FAULT_CODES = Object.freeze(['checkpoint_requires_active_step', 'deterministic_checkpoint_failed_to_persist'])
+
+// The harness-state fault code a failure carries (its message starts with the code, bare or as a "code: detail" prefix), or undefined.
+export function harnessStateFaultCode(failure) {
+  const message = failure instanceof Error ? failure.message : typeof failure === 'string' ? failure : String(failure?.message ?? '')
+  const text = message.trim()
+  return HARNESS_STATE_FAULT_CODES.find(code => text.startsWith(code) && !/[a-z0-9_]/.test(text.charAt(code.length)))
+}
+
 export const REQUEST_FAILURE_CODE_CLASS = Object.freeze({
+  checkpoint_requires_active_step: PAUSE_CLASS.SYSTEM,
+  deterministic_checkpoint_failed_to_persist: PAUSE_CLASS.SYSTEM,
   provider_action_omission_repair_failed: PAUSE_CLASS.MODEL_RECOVERABLE,
   provider_output_budget_exhausted: PAUSE_CLASS.MODEL_RECOVERABLE,
   provider_output_budget_recovery_exhausted: PAUSE_CLASS.MODEL_RECOVERABLE,
@@ -206,6 +221,8 @@ export function classifyRequestFailure(failure) {
   const declared = failure && typeof failure === 'object' ? failure.pause_class : undefined
   const code = failureCode(failureMessage(failure)) ?? 'request_failed'
   if (isPauseClass(declared)) return { pause_class: declared, pause_subkind: '', code, source: 'declared' }
+  const fault = harnessStateFaultCode(failure)
+  if (fault) return { pause_class: PAUSE_CLASS.SYSTEM, pause_subkind: '', code: fault, source: 'harness_state_fault' }
   const byCode = REQUEST_FAILURE_CODE_CLASS[code]
   if (byCode) return { pause_class: byCode, pause_subkind: '', code, source: 'failure_code' }
   return { pause_class: PAUSE_CLASS.GUARD, pause_subkind: '', code: 'request_failed', source: 'fallback' }

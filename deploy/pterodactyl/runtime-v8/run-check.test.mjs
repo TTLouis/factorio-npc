@@ -793,3 +793,36 @@ test('run G trace: a blocked_preflight request that nothing follows is a silent_
   assert.equal(stallCount([sameRequestPause]), 0, 'a goal.paused of the same request, written before its request.completed, answers it')
   assert.equal(stallCount([{ ...sameRequestPause, request_id: 'other_request' }]), 1, 'an earlier pause of another request does not')
 })
+
+// Run H (2026-10-14, candidate 49c490e2): two automatic resumes restaged the executor onto a plan that was still paused. Attempt 2's
+// checkpoint threw checkpoint_requires_active_step, the recovery ended as a guard pause, and the stale model_recoverable pause row
+// of the same request used to be reported as "not resumed".
+test('run H trace: a model_recoverable pause replaced by a later pause of its request is not "not resumed"; the findings name what went wrong', async () => {
+  const rows = await loadFixtureRows('luna-run-h-auto-resume-paused-restage.jsonl')
+  const result = analyzeBehaviorTrace(rows)
+  assert.equal(result.row_count, 75)
+  assert.equal(result.request_count, 3)
+  assert.equal(findingsFor(result, 'model_recoverable_pause_not_resumed').length, 0, 'no false positive')
+  assert.deepEqual(result.findings.map(item => item.signature).sort(), ['harness_state_fault', 'no_chat_reply', 'request_failed_unrecoverable'])
+  for (const finding of result.findings) assert.equal(finding.request_id, 'recovery_mv8fevzk', finding.signature)
+  const [fault] = findingsFor(result, 'harness_state_fault')
+  assert.match(fault.detail, /harness state fault checkpoint_requires_active_step \(request\.failed\)/)
+  const [unrecoverable] = findingsFor(result, 'request_failed_unrecoverable')
+  assert.match(unrecoverable.detail, /recoverable=false \(stage runtime\): checkpoint_requires_active_step/)
+  assert.match(formatCheckReport(result), /\[harness_state_fault\] request_id=recovery_mv8fevzk/)
+
+  // The same pause with nothing after it is still a finding: only a LATER pause of the same request supersedes one.
+  const alone = rows.filter(row => !(row.request_id === 'recovery_mv8fed6w' && row.event === 'recovery.auto_resume_scheduled'))
+  const [lone] = findingsFor(analyzeBehaviorTrace(alone), 'model_recoverable_pause_not_resumed')
+  assert.equal(lone.request_id, 'recovery_mv8fed6w')
+  const unsuperseded = rows.filter(row => !(row.request_id === 'recovery_mv8fevzk' && row.event === 'goal.paused' && row.data.cause === 'runtime_recovery_failed'))
+  assert.equal(findingsFor(analyzeBehaviorTrace(unsuperseded), 'model_recoverable_pause_not_resumed').length, 1, 'without the later pause the earlier one stands')
+
+  // A harness fault the runtime names itself is the same finding, whatever row carries it.
+  const named = { schema: 1, ts: '2026-10-14T18:30:00.000Z', seq: 0, event: 'recovery.harness_state_fault', request_id: 'recovery_next', data: { request_id: 'recovery_next', reason: 'checkpoint_requires_active_step', pause_class: 'system' } }
+  assert.deepEqual(analyzeBehaviorTrace([named]).findings.map(item => item.signature), ['harness_state_fault'])
+  const system = { ...named, event: 'goal.paused', data: { request_id: 'recovery_next', pause_class: 'system', pause_reason: 'runtime_recovery_failed:auto_resume:checkpoint_requires_active_step' } }
+  assert.deepEqual(analyzeBehaviorTrace([system]).findings.map(item => item.signature), ['harness_state_fault'])
+  const guard = { ...system, data: { ...system.data, pause_class: 'guard' } }
+  assert.deepEqual(analyzeBehaviorTrace([guard]).findings.map(item => item.signature), [])
+})

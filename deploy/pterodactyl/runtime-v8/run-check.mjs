@@ -2,6 +2,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { parseJsonl } from './debug-report.mjs'
+import { HARNESS_STATE_FAULT_CODES } from './pause-class.mjs'
 import { HANDOFF_PACKET_LIMITS } from './handoff-packet.mjs'
 import { CONTEXT_RESTAGE_CHECKPOINTS, CONTEXT_RESTAGE_ROLES } from './planning-state.mjs'
 import { estimateTokensFromChars } from './restage-policy.mjs'
@@ -78,7 +79,13 @@ import { estimateTokensFromChars } from './restage-policy.mjs'
 //   supervisor.mjs considerPauseForAutoResume). The first reads a goal.paused row whose `data.pause_class` is model_recoverable and
 //   finds no recovery.auto_resume_scheduled / _exhausted / _cancelled row after it in the same request: the pause was never decided
 //   on, so the plan sits paused with nobody resuming it. The second reads recovery.auto_resume_exhausted (`limit_kind` step | goal):
-//   the bounded automatic resumes ran out and the plan stays paused for a player.
+//   the bounded automatic resumes ran out and the plan stays paused for a player. A model_recoverable pause that a LATER pause of the
+//   same request replaced (the request failed again, and the plan was paused for a different reason) is not "not resumed": the later
+//   pause is the one that needs a decision, and it is judged on its own.
+// - harness_state_fault: the harness raised one of its own state invariants (pause-class.mjs HARNESS_STATE_FAULT_CODES, for example
+//   checkpoint_requires_active_step on a plan that was never made active again). It reads request.failed rows, recovery.harness_state_fault
+//   rows and goal.paused rows of class system whose reason names a code. Run H (2026-10-14): an auto-resumed plan stayed paused, so
+//   the restaged executor's checkpoint threw this and the recovery ended as a guard pause.
 // - intake_retry_exhausted (finding), intake_retry_scheduled (informational): a transport failure on the first planner call of a new
 //   goal (supervisor.mjs handleIntakeFailure). While recovery.intake_retry_scheduled follows the request.failed, the failure is not
 //   reported as request_failed_unrecoverable; recovery.intake_retry_exhausted is the finding.
@@ -415,7 +422,10 @@ const AUTO_RESUME_DECISION_EVENTS = new Set(['recovery.auto_resume_scheduled', '
 function detectModelRecoverablePauseNotResumed(rows) {
   const undecided = rows.flatMap((row, index) => {
     if (row?.event !== 'goal.paused' || row.data?.pause_class !== 'model_recoverable') return []
-    return rows.slice(index + 1).some(later => AUTO_RESUME_DECISION_EVENTS.has(later?.event)) ? [] : [row]
+    const later = rows.slice(index + 1)
+    // A later pause of the same request replaced this one; it carries its own decision (or its own finding).
+    if (later.some(next => next?.event === 'goal.paused')) return []
+    return later.some(next => AUTO_RESUME_DECISION_EVENTS.has(next?.event)) ? [] : [row]
   })
   if (undecided.length === 0) return undefined
   const first = undecided[0].data
@@ -423,6 +433,27 @@ function detectModelRecoverablePauseNotResumed(rows) {
     count: undecided.length,
     first_ts: firstTsOf(undecided),
     detail: `paused as model_recoverable (${nonEmptyString(first.pause_reason) ?? nonEmptyString(first.cause) ?? 'no reason'}; goal_id=${nonEmptyString(first.goal_id) ?? 'n/a'}) and no recovery.auto_resume_scheduled, _exhausted or _cancelled row followed`,
+  }
+}
+
+function harnessFaultCodeIn(value) {
+  const text = String(value ?? '')
+  return HARNESS_STATE_FAULT_CODES.find(code => text.includes(code))
+}
+
+function detectHarnessStateFault(rows) {
+  const matches = rows.filter((row) => {
+    if (row?.event === 'recovery.harness_state_fault') return true
+    if (row?.event === 'request.failed') return harnessFaultCodeIn(row.data?.message) !== undefined
+    return row?.event === 'goal.paused' && row.data?.pause_class === 'system' && harnessFaultCodeIn(row.data?.pause_reason) !== undefined
+  })
+  if (matches.length === 0) return undefined
+  const first = matches[0].data ?? {}
+  const code = nonEmptyString(first.reason) ?? harnessFaultCodeIn(first.message) ?? harnessFaultCodeIn(first.pause_reason) ?? 'unknown'
+  return {
+    count: matches.length,
+    first_ts: firstTsOf(matches),
+    detail: `harness state fault ${code} (${matches[0].event}${nonEmptyString(first.pause_class) ? `, pause_class=${first.pause_class}` : ''}): the harness's own state was inconsistent, not the model's behaviour`,
   }
 }
 
@@ -806,6 +837,7 @@ function detectSilentBlockedStalls(scopedRows) {
 const SIGNATURES = [
   { id: 'model_recoverable_pause_not_resumed', label: 'model_recoverable pause with no automatic resume decision', detect: detectModelRecoverablePauseNotResumed },
   { id: 'auto_resume_exhausted', label: 'automatic resume of a model_recoverable pause exhausted', detect: detectAutoResumeExhausted },
+  { id: 'harness_state_fault', label: 'harness state invariant failed (a harness fault, not a model or guard stop)', detect: detectHarnessStateFault },
   { id: 'intake_retry_exhausted', label: 'intake retry of a goal lost to a transport failure exhausted', detect: detectIntakeRetryExhausted },
   { id: 'rejected_blocker_pause', label: 'unverified world blocker relabelled as provider pause', detect: detectRejectedBlockerPause },
   { id: 'semantic_contract_dead_end', label: 'delegated semantic contract dead end before gameplay', detect: detectSemanticContractDeadEnd },
