@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
-import { NpcAgentLoop, worldRefusalCorrectionMessage, worldRefusalFacts, WORLD_REFUSAL_UNCORRECTED_REASON } from './npc-agent-loop.mjs'
+import { EXECUTOR_REFUSAL_UNCORRECTED_REASON, NpcAgentLoop, worldRefusalCorrectionMessage, worldRefusalFacts, WORLD_REFUSAL_UNCORRECTED_REASON } from './npc-agent-loop.mjs'
 import { MODEL_RECOVERABLE_OUTCOME_REASONS, validateOutcomeCandidate } from './outcome-authority.mjs'
 import { getActivePlan, PLAN_STATUS } from './planning-state.mjs'
 import { analyzeBehaviorTrace } from './run-check.mjs'
@@ -67,7 +67,7 @@ function gameRefusing(refusal = RUN_G_TRANSFER, when = text => text.includes("'s
   return game
 }
 
-function world(script, { game = gameRefusing() } = {}) {
+function world(script, { game = gameRefusing(), provider: roleProvider } = {}) {
   const memory = new CanonicalTaskBoardMemory()
   const rows = []
   const calls = []
@@ -76,8 +76,9 @@ function world(script, { game = gameRefusing() } = {}) {
     memory,
     completionProtocolVersion: 2,
     replacementWake: true,
-    provider: answersStepContract(async (messages) => {
+    provider: answersStepContract(async (messages, context) => {
       calls.push(messages.map(message => ({ ...message })))
+      if (roleProvider) return roleProvider(messages, context)
       const reply = script[calls.length - 1]
       assert.ok(reply, `unscripted provider call ${calls.length}`)
       return { ...reply }
@@ -90,7 +91,9 @@ function world(script, { game = gameRefusing() } = {}) {
     npcId: 'sgluna',
   })
   // retries is the world-correction counter at the moment the row was written.
-  agent.behaviorTrace = { emit: async (record) => { rows.push({ ...record, retries: agent.worldCorrectionRetries }) } }
+  // The row ts is strictly increasing (the live log is 15 s apart between restages; here they would share a millisecond), so run-check
+  // orders rows of different requests as they were written.
+  agent.behaviorTrace = { emit: async (record) => { rows.push({ ...record, ts: new Date(1_800_000_000_000 + rows.length).toISOString(), retries: agent.worldCorrectionRetries }) } }
   const named = name => rows.filter(row => row.event === name)
   const planning = () => memory.planningState(KEY)
   return { agent, memory, game, rows, calls, named, planning }
@@ -237,10 +240,12 @@ test('run G: a second refusal in the same request pauses as model_recoverable wi
 // --- the other classes keep their paths --------------------------------------------------------------------------------------
 
 // A code nobody listed anywhere: the producer's declared class alone picks the path.
-for (const [refusalClass, failureClass, worldCorrection] of [
-  ['authority', 'authorization_brand_new_mod_code', false],
-  ['argument', 'model_correctable_brand_new_mod_code', false],
-  ['world', 'world_correction_brand_new_mod_code', true],
+// Unit 13: the pause class follows who can fix the refusal. An authority refusal still ends blocked (a person is needed); an argument
+// refusal after its own retry is the executor's to fix and ends paused (model_recoverable) with the step untouched.
+for (const [refusalClass, failureClass, worldCorrection, endStatus] of [
+  ['authority', 'authorization_brand_new_mod_code', false, 'blocked'],
+  ['argument', 'model_correctable_brand_new_mod_code', false, 'paused'],
+  ['world', 'world_correction_brand_new_mod_code', true, 'paused'],
 ]) {
   test(`a ${refusalClass}-class refusal takes the ${refusalClass} path${worldCorrection ? ' (one correction turn) and then pauses' : ' and never the world-correction path'}`, async () => {
     const game = gameRefusing({ ok: false, code: 'brand_new_mod_code', refusal_class: refusalClass, operation: 'supply_entity', field: 'unit_number', identity: FURNACE }, text => text.includes("'supply_entity'"))
@@ -249,8 +254,8 @@ for (const [refusalClass, failureClass, worldCorrection] of [
     const classes = w.named('operations.preflight_recoverable').map(row => row.data.failure_class)
     assert.deepEqual(classes, [failureClass])
     assert.equal(classes.some(name => name.startsWith('world_correction_')), worldCorrection)
-    if (worldCorrection) assert.equal(w.memory.currentPlan(KEY).status, 'paused')
-    else assert.equal(w.memory.currentPlan(KEY).status, 'blocked', 'the authority and argument paths still end blocked once their own retry is spent')
+    assert.equal(w.memory.currentPlan(KEY).status, endStatus)
+    assert.equal(w.memory.pauseRecord(KEY).pause_class, endStatus === 'blocked' ? 'guard' : 'model_recoverable')
   })
 }
 
@@ -308,6 +313,9 @@ test('a world-evidence refusal whose wake was skipped (no current grant) ends in
   const [ended] = w.named('operations.blocked_end_paused')
   assert.equal(ended.data.request_id, ended.request_id)
   assert.equal(ended.data.reason, 'blocked_stale_exact_target')
+  const [classified] = w.named('operations.blocked_end_classified')
+  assert.equal(classified.data.request_id, classified.request_id)
+  assert.deepEqual([classified.data.pause_class, classified.data.reason], ['guard', 'world_evidence_wake_skipped'])
   assert.equal(w.named('request.completed').at(-1).data.outcome, 'blocked_preflight')
   assert.equal(analyzeBehaviorTrace(w.rows).findings.some(finding => finding.signature === 'silent_blocked_stall'), false, 'run-check sees the pause')
 })
@@ -323,6 +331,9 @@ test('a recipe_locked refusal gets no correction turn and ends in exactly one gu
   assert.deepEqual([record.paused, record.pause_reason, record.pause_class], [true, 'blocked_recipe_locked', 'guard'])
   assert.equal(w.named('goal.paused').length, 1)
   assert.equal(w.named('operations.blocked_end_paused').length, 1)
+  const [classified] = w.named('operations.blocked_end_classified')
+  assert.equal(classified.data.request_id, classified.request_id)
+  assert.deepEqual([classified.data.pause_class, classified.data.reason], ['guard', 'executor_cannot_fix:plan_level'])
 
   const { session } = sessionFor(w.agent)
   const events = []
@@ -380,3 +391,237 @@ test('the uncorrected world refusal is a model_recoverable outcome reason; its r
   assert.match(formatTaskCondition('blocked_recipe_locked', 'pause').summary, /^Paused: the game refused the next operation and the plan is blocked\./)
 })
 
+
+// --- unit 13: the pause class follows who can fix the refusal ------------------------------------------------------------------
+//
+// A request that ends on a refusal ends in exactly one place (classifyBlockedEnd, refusal-class.mjs). The NPC runs with zero connected
+// humans, so a guard pause is a dead end there; it is reserved for refusals only a person or a planning decision can resolve. A refusal
+// an executor caused and can fix on a fresh restage ends as a model_recoverable pause that unit 7's supervisor resumes under its caps.
+
+// The mod's own argument refusal for a name the executor invented: the loop gives it one bounded correction turn.
+const ARGUMENT_REFUSAL = { ok: false, code: 'unknown_prototype', refusal_class: 'argument', operation: 'supply_entity', field: 'item_name', identity: 'coal-lump' }
+// The mod's supply_missing for a single-item supply the NPC's inventory cannot cover (the NPC's own inventory accounting).
+const SUPPLY_MISSING = {
+  ok: false,
+  code: 'supply_missing',
+  operation: 'supply_entity',
+  field: 'unit_number',
+  identity: FURNACE,
+  target: { unit_number: FURNACE, name: 'stone-furnace', position: { x: 23, y: -72 }, surface_index: 1, force_index: 1 },
+  transfer: {
+    direction: 'to_entity',
+    items: [{ item_name: 'coal', requested: 10, source_count: 0, destination_accepts: 50, expected_moved: 0, missing: 10, status: 'supply_missing' }],
+  },
+  refusal_class: 'world',
+}
+const SUPPLY_ONLY_BATCH = () => [supply([{ item_name: 'coal', count: 10 }])]
+const supplyEntity = text => text.includes("'supply_entity'")
+const blockedEnds = w => w.named('operations.blocked_end_classified')
+const recoveryEvents = w => w.rows.filter(row => row.event.startsWith('recovery.auto_resume'))
+
+// Schedules (or declines) the supervisor's decision on the pause the request left, with the recovery rows captured.
+async function superviseOnce(w) {
+  const { session } = sessionFor(w.agent)
+  const events = []
+  session.traceRecovery = async (event, data) => { events.push({ event, data }) }
+  const decision = await session.considerPauseForAutoResume()
+  if (session.modelResume?.timer) clearTimeout(session.modelResume.timer)
+  return { session, events, decision }
+}
+
+test('unit 13: an argument refusal after its retry budget ends in exactly one model_recoverable pause, with the step untouched, and the supervisor schedules an auto-resume', async () => {
+  const w = world([plannerDraft(), observation(), executor(RUN_G_BATCH()), executor(RUN_G_BATCH())], { game: gameRefusing(ARGUMENT_REFUSAL, supplyEntity) })
+  const result = await runToExecutor(w)
+  assert.equal(w.calls.length, 4, 'planner, observation, refused batch, refused again after its one argument correction')
+  assert.equal(result.blocker, undefined, 'nothing is blocked')
+  assert.equal(result.recoverableFailure.reason, EXECUTOR_REFUSAL_UNCORRECTED_REASON)
+  assert.deepEqual(result.recoverableFailure.preflight, { code: 'unknown_prototype', target: { unit_number: 'coal-lump' } }, 'the facts of the refusal travel with the failure')
+  assert.match(result.chatMessage, /^\[Plan paused\] The game refused operation 2 \(supply_entity: unknown_prototype\) again after the correction\./)
+  assert.deepEqual(w.named('operations.preflight_recoverable').map(row => row.data.failure_class), ['model_correctable_unknown_prototype'], 'one argument correction turn only')
+
+  assert.notEqual(getActivePlan(w.planning()).status, PLAN_STATUS.BLOCKED)
+  const plan = w.memory.currentPlan(KEY)
+  assert.equal(plan.status, 'paused', 'paused, not blocked')
+  assert.equal(plan.pause_reason, `recoverable_provider_failure:${EXECUTOR_REFUSAL_UNCORRECTED_REASON}`)
+  const record = w.memory.pauseRecord(KEY)
+  assert.deepEqual([record.pause_class, record.pause_subkind], ['model_recoverable', ''])
+  const paused = w.named('goal.paused')
+  assert.equal(paused.length, 1, 'exactly one pause')
+  assert.equal(paused[0].data.pause_class, 'model_recoverable')
+  assert.equal(w.named('operations.blocked_end_paused').length, 0, 'the guard end was not taken')
+  assert.equal(w.named('request.completed').at(-1).data.outcome, 'recoverable_provider_failure')
+
+  const [classified, ...extra] = blockedEnds(w)
+  assert.equal(extra.length, 0)
+  assert.ok(classified.data.request_id)
+  assert.equal(classified.data.request_id, classified.request_id)
+  assert.deepEqual({ ...classified.data, request_id: undefined }, {
+    request_id: undefined,
+    code: 'unknown_prototype',
+    refusal_class: 'argument',
+    recovery_spent: ['argument_retry'],
+    pause_class: 'model_recoverable',
+    reason: 'argument_refusal_after_retry',
+  })
+  const [rejected] = w.named('operations.preflight_rejected')
+  assert.equal(rejected.data.reason, EXECUTOR_REFUSAL_UNCORRECTED_REASON)
+  assert.ok(rejected.data.request_id)
+
+  const { events, decision } = await superviseOnce(w)
+  assert.equal(decision, true)
+  const scheduled = events.find(item => item.event === 'recovery.auto_resume_scheduled')
+  assert.ok(scheduled, 'the supervisor decided on the pause')
+  assert.equal(scheduled.data.pause_class, 'model_recoverable')
+  assert.equal(scheduled.data.attempt, 1)
+  assert.equal(analyzeBehaviorTrace(w.rows).findings.some(finding => finding.signature === 'silent_blocked_stall'), false)
+})
+
+test('unit 13: supply_missing that survives its supply recovery gets one world-correction turn, then a model_recoverable pause', async () => {
+  const batch = () => executor(SUPPLY_ONLY_BATCH())
+  // Two supply recoveries, the world-correction turn, then the refusal that ends the request.
+  const w = world([plannerDraft(), observation(), batch(), batch(), batch(), batch()], { game: gameRefusing(SUPPLY_MISSING, supplyEntity) })
+  const result = await runToExecutor(w)
+  assert.equal(w.calls.length, 6)
+  assert.deepEqual(w.named('operations.preflight_recoverable').map(row => row.data.failure_class), [
+    'transfer_supply_missing',
+    'transfer_supply_missing',
+    'world_correction_supply_missing',
+  ])
+  assert.equal(noCorrection(w).length, 1, 'supply_missing is no longer excluded from the world-correction turn')
+  assert.equal(result.blocker, undefined)
+  assert.equal(result.recoverableFailure.reason, WORLD_REFUSAL_UNCORRECTED_REASON)
+  assert.notEqual(getActivePlan(w.planning()).status, PLAN_STATUS.BLOCKED)
+  const record = w.memory.pauseRecord(KEY)
+  assert.deepEqual([record.paused, record.pause_class], [true, 'model_recoverable'])
+  assert.equal(w.named('goal.paused').length, 1)
+  assert.equal(w.named('operations.blocked_end_paused').length, 0)
+  const { events, decision } = await superviseOnce(w)
+  assert.equal(decision, true)
+  assert.equal(events.find(item => item.event === 'recovery.auto_resume_scheduled').data.pause_class, 'model_recoverable')
+})
+
+test('unit 13: an authority refusal after its retry stays exactly one guard pause, with no auto-resume', async () => {
+  const refusal = { ok: false, code: 'protected_entity_refused', refusal_class: 'authority', operation: 'supply_entity', field: 'unit_number', identity: FURNACE, detail: 'the furnace was built by a player' }
+  const w = world([plannerDraft(), observation(), executor(RUN_G_BATCH()), executor(RUN_G_BATCH())], { game: gameRefusing(refusal, supplyEntity) })
+  const result = await runToExecutor(w)
+  assert.equal(w.calls.length, 4, 'planner, observation, refused batch, refused again after its one authorization retry')
+  assert.equal(result.blocker.code, 'protected_entity_refused')
+  assert.deepEqual(w.named('operations.preflight_recoverable').map(row => row.data.failure_class), ['authorization_protected_entity_refused'])
+  const record = w.memory.pauseRecord(KEY)
+  assert.deepEqual([record.paused, record.pause_reason, record.pause_class], [true, 'blocked_protected_entity_refused', 'guard'])
+  assert.equal(getActivePlan(w.planning()).status, PLAN_STATUS.BLOCKED)
+  assert.equal(w.named('goal.paused').length, 1)
+  assert.equal(w.named('operations.blocked_end_paused').length, 1)
+  const [classified, ...extra] = blockedEnds(w)
+  assert.equal(extra.length, 0)
+  assert.equal(classified.data.request_id, classified.request_id)
+  assert.deepEqual([classified.data.code, classified.data.refusal_class, classified.data.pause_class, classified.data.reason],
+    ['protected_entity_refused', 'authority', 'guard', 'authority_refusal_needs_a_person'])
+  const { events, decision, session } = await superviseOnce(w)
+  assert.equal(decision, null)
+  assert.equal(session.modelResume, null)
+  assert.deepEqual(events.filter(item => item.event.startsWith('recovery.auto_resume')), [])
+})
+
+test('unit 13: no_actor is a lifecycle refusal: no correction turn and exactly one guard pause', async () => {
+  const refusal = { ok: false, code: 'no_actor', refusal_class: 'world', operation: 'supply_entity', detail: 'no standalone actor is bound' }
+  const w = world([plannerDraft(), observation(), executor(RUN_G_BATCH())], { game: gameRefusing(refusal, supplyEntity) })
+  const result = await runToExecutor(w)
+  assert.equal(w.calls.length, 3, 'planner, observation, the refused batch: no correction turn')
+  assert.equal(noCorrection(w).length, 0)
+  assert.equal(result.blocker.code, 'no_actor')
+  const record = w.memory.pauseRecord(KEY)
+  assert.deepEqual([record.paused, record.pause_reason, record.pause_class], [true, 'blocked_no_actor', 'guard'])
+  assert.equal(w.named('goal.paused').length, 1)
+  const [classified] = blockedEnds(w)
+  assert.equal(classified.data.request_id, classified.request_id)
+  assert.deepEqual([classified.data.pause_class, classified.data.reason, classified.data.recovery_spent], ['guard', 'executor_cannot_fix:lifecycle', []])
+})
+
+test('unit 13: every guard end names its reason: recipe_locked, a world-evidence refusal whose wake was skipped, and a refusal with no declared class', async () => {
+  const locked = { ok: false, code: 'recipe_locked', refusal_class: 'world', operation: 'supply_entity', field: 'item_name', identity: 'automation-science-pack', recipe_name: 'automation-science-pack' }
+  const a = world([plannerDraft(), observation(), executor(RUN_G_BATCH())], { game: gameRefusing(locked, supplyEntity) })
+  await runToExecutor(a)
+  const [lockedEnd] = blockedEnds(a)
+  assert.equal(lockedEnd.data.request_id, lockedEnd.request_id)
+  assert.deepEqual([lockedEnd.data.code, lockedEnd.data.pause_class, lockedEnd.data.reason], ['recipe_locked', 'guard', 'executor_cannot_fix:plan_level'])
+
+  const b = world([plannerDraft(), observation(), executor(RUN_G_BATCH()), executor(RUN_G_BATCH())], { game: staleFurnace() })
+  await b.agent.request(OBJECTIVE, { sender: 'Louis' })
+  b.memory.revokeAuthorization(KEY, b.memory.currentGoalGrant(KEY).grant_id, { reason: 'test' })
+  b.game.inventory['iron-ore'] = 10
+  await b.agent.completed()
+  const [evidenceEnd] = blockedEnds(b)
+  assert.equal(evidenceEnd.data.request_id, evidenceEnd.request_id)
+  assert.deepEqual([evidenceEnd.data.code, evidenceEnd.data.pause_class, evidenceEnd.data.reason], ['stale_exact_target', 'guard', 'world_evidence_wake_skipped'])
+
+  const unclassified = { ok: false, code: 'brand_new_mod_code', operation: 'supply_entity', field: 'unit_number', identity: FURNACE }
+  const c = world([plannerDraft(), observation(), executor(RUN_G_BATCH())], { game: gameRefusing(unclassified, supplyEntity) })
+  await runToExecutor(c)
+  assert.equal(c.named('operations.preflight_unclassified').length, 1)
+  const [unclassifiedEnd] = blockedEnds(c)
+  assert.deepEqual([unclassifiedEnd.data.refusal_class, unclassifiedEnd.data.pause_class, unclassifiedEnd.data.reason], ['unclassified', 'guard', 'unclassified_refusal_fails_closed'])
+  assert.equal(c.memory.pauseRecord(KEY).pause_class, 'guard')
+})
+
+test('unit 13: a repeating executor refusal is bounded end to end: two restages, then one visible guard pause, never a silent blocked stall', async () => {
+  const w = world([], {
+    game: gameRefusing(ARGUMENT_REFUSAL, supplyEntity),
+    // The planner commits the plan; every executor, restaged or not, observes once (an exact unit number needs a live binding) and then
+    // sends the same refused batch.
+    provider: async (messages, context) => {
+      if (context?.role !== 'executor') return plannerDraft()
+      return messages.some(message => message.role === 'tool') ? executor(RUN_G_BATCH()) : observation()
+    },
+  })
+  const result = await runToExecutor(w)
+  assert.equal(result.recoverableFailure.reason, EXECUTOR_REFUSAL_UNCORRECTED_REASON)
+
+  const { session } = sessionFor(w.agent)
+  assert.equal(await session.considerPauseForAutoResume(), true)
+  for (const attempt of [1, 2]) {
+    clearTimeout(session.modelResume.timer)
+    await session.runModelRecoverableResume(session.modelResume.correlation, attempt)
+  }
+  assert.equal(session.modelResume, null, 'no third attempt is scheduled')
+
+  const rows = event => w.rows.filter(row => row.event === event)
+  assert.deepEqual(rows('recovery.auto_resume_scheduled').map(row => row.data.attempt), [1, 2])
+  assert.equal(rows('recovery.auto_resume_started').length, 2, 'exactly two restaged executors')
+  const ends = blockedEnds(w)
+  assert.equal(ends.length, 3, 'the original request and each restage ended on the same refusal')
+  assert.equal(new Set(ends.map(row => row.data.request_id)).size, 3, 'each end belongs to its own request')
+  assert.equal(ends.every(row => row.data.pause_class === 'model_recoverable' && row.data.reason === 'argument_refusal_after_retry'), true)
+  assert.equal(w.named('operations.blocked_end_paused').length, 0)
+
+  // The deadlock detector counts the third identical failure on the step (DEADLOCK_REPEATED_FAILURE_LIMIT = 3: the request plus the two
+  // allowed restages) and freezes the plan. That is the end of the bound, and it is one visible guard pause: durable, with the
+  // goal.paused row, and nothing schedules a resume for it. (The supervisor's own cap, recovery.auto_resume_exhausted, is covered by
+  // pause-class-auto-resume.test.mjs; for this reason code the detector reaches its limit on the same attempt.)
+  assert.equal(getActivePlan(w.planning()).status, PLAN_STATUS.BLOCKED)
+  assert.equal(getActivePlan(w.planning()).blocker.reason_code, 'repeating_failure')
+  const record = w.memory.pauseRecord(KEY)
+  assert.deepEqual([record.paused, record.pause_reason, record.pause_class], [true, 'blocked_repeating_failure', 'guard'])
+  const [frozen, ...extra] = rows('operations.recovery_failure_frozen')
+  assert.equal(extra.length, 0)
+  assert.equal(frozen.data.request_id, frozen.request_id)
+  assert.deepEqual([frozen.data.reason, frozen.data.failure_class, frozen.data.pause_class], ['blocked_repeating_failure', EXECUTOR_REFUSAL_UNCORRECTED_REASON, 'guard'])
+  const pauses = rows('goal.paused')
+  assert.deepEqual(pauses.map(row => row.data.pause_class), ['model_recoverable', 'model_recoverable', 'guard'])
+  assert.equal(pauses.at(-1).data.request_id, frozen.data.request_id)
+  assert.equal(await session.considerPauseForAutoResume(), null, 'a frozen plan is never auto-resumed')
+  assert.equal(rows('recovery.auto_resume_scheduled').length, 2)
+
+  // run-check: each model_recoverable pause was followed by a scheduling decision and the freeze ended in a pause.
+  const signatures = analyzeBehaviorTrace(w.rows).findings.map(finding => finding.signature)
+  assert.equal(signatures.includes('silent_blocked_stall'), false)
+  assert.equal(signatures.includes('model_recoverable_pause_not_resumed'), false)
+})
+
+test('unit 13: the new reason is a model_recoverable outcome reason with its own player line', () => {
+  assert.equal(MODEL_RECOVERABLE_OUTCOME_REASONS.has(EXECUTOR_REFUSAL_UNCORRECTED_REASON), true)
+  const idle = { task_state: 'idle', queue_length: 0 }
+  const outcome = validateOutcomeCandidate({ kind: 'recoverable_provider_failure', source: 'executor_refusal_recovery', reason_code: EXECUTOR_REFUSAL_UNCORRECTED_REASON }, { world: idle })
+  assert.equal(outcome.pause_class, 'model_recoverable')
+  assert.match(formatTaskCondition(`recoverable_provider_failure:${EXECUTOR_REFUSAL_UNCORRECTED_REASON}`, 'pause').summary, /^Paused: the game refused the planned operation again after a correction/)
+})

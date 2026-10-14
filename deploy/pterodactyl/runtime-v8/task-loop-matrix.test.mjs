@@ -259,7 +259,7 @@ test('a deterministically blocked plan explains itself and requires user revisio
   let reject = true
   const game = new FakeFactorio({
     preflight: () => (reject
-      ? { ok: false, code: 'unknown_prototype', refusal_class: 'argument', operation: 'gather_resource' }
+      ? { ok: false, code: 'recipe_locked', refusal_class: 'world', operation: 'gather_resource', field: 'item_name', identity: 'iron-ore', recipe_name: 'iron-ore' }
       : { ok: true }),
   })
   const world = harness({

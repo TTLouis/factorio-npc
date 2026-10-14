@@ -125,16 +125,17 @@ test('tools-disabled recovery cannot turn an unresolved identity into a craft mu
   // its recovery repeating the same unknown recipe, which then freezes.
   assert.equal(calls, 4)
   assert.equal(contexts[1].allowTools, false)
-  assert.equal(result.blocker.code, 'unknown_recipe')
+  // Unit 13: an argument refusal after its retry is the executor's to fix: no blocker, a recoverable failure.
+  assert.equal(result.blocker, undefined)
+  assert.equal(result.recoverableFailure.reason, 'preflight_executor_refusal_uncorrected')
+  assert.equal(result.recoverableFailure.preflight.code, 'unknown_recipe')
   assert.equal(rcon.mutations.length, 0)
 
-  // The terminal blocked end also pauses the run (guard class, blocked_<code>), so the stop is visible and no timer resumes it.
+  // The step is not blocked. This fixture's runtime status does not prove the NPC idle, so the outcome authority keeps the plan
+  // active rather than pausing it (the canonical-memory scenarios in world-refusal-correction.test.mjs cover the idle pause).
   const state = memory.currentPlan('npc:sgluna')
-  assert.equal(state.status, 'paused')
-  assert.equal(state.pause_reason, 'blocked_unknown_recipe')
-  assert.equal(state.pause_class, 'guard')
-  assert.equal(state.admission_status, 'admission_failed')
-  assert.equal(state.task_board.status, 'paused')
+  assert.equal(state.status, 'active')
+  assert.notEqual(state.task_board.status, 'blocked')
   assert.equal(state.task_board.active_index, 0)
   assert.equal(memory.byNpc.get('npc:sgluna').recent.length, 1)
 })
@@ -152,14 +153,13 @@ test('gather_resource tree identity is rejected deterministically before mutatio
   })
 
   const result = await agent.request('gather nearby resources', { sender: 'tester' })
-  assert.equal(result.blocker.code, 'invalid_target_kind')
-  assert.equal(result.blocker.expected_type, 'resource')
-  assert.equal(result.blocker.observed_type, 'tree')
+  // Unit 13: the refusal is still deterministic and nothing ran; being an argument refusal it ends as a model_recoverable pause.
+  assert.equal(result.blocker, undefined)
+  assert.equal(result.recoverableFailure.reason, 'preflight_executor_refusal_uncorrected')
+  assert.equal(result.recoverableFailure.preflight.code, 'invalid_target_kind')
   assert.equal(rcon.mutations.length, 0)
   const state = memory.currentPlan('npc:sgluna')
-  assert.equal(state.status, 'paused')
-  assert.equal(state.pause_reason, 'blocked_invalid_target_kind')
-  assert.equal(state.pause_class, 'guard')
+  assert.notEqual(state.status, 'blocked')
 })
 
 for (const { label, operation, code } of [
