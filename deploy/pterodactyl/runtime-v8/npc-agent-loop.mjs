@@ -10616,11 +10616,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       || !(initial.draft ? this.agentContext.role !== EXECUTOR_ROLE : FROZEN_PLAN_STATUSES.has(initial.plan?.status))
       || initial.state?.status !== 'active' || this.currentPendingAmendment()) return reject('no_eligible_active_step')
     if (initial.draft !== (request.scope === 'draft')) return reject('observation_scope_does_not_match_phase')
+    // A committed executor names its step by the exact active stepId (submitPlan requires stepId and operations, and carries no
+    // plan or currentStep: the parser fills [] and 0). Its identity is that id; plan and currentStep are compared only when the
+    // request really supplies them. A planner or draft request keeps the planner-side comparison exactly as before.
+    const executorStepBound = !initial.draft && this.agentContext.role === EXECUTOR_ROLE && intent.stepId !== undefined
+    if (executorStepBound && intent.stepId !== initial.data.stepId) return reject('stale_plan_or_step')
+    const planSupplied = !executorStepBound || (Array.isArray(intent.plan) && intent.plan.length > 0)
     if ((initial.draft ? request.goalId !== initial.data.goalId || request.planId !== initial.data.planId
       || request.planVersion !== initial.plan.plan_version || request.draftRevision !== initial.plan.updated_at
-      : request.stepId !== initial.data.stepId) || intent.currentStep !== initial.state.current_step
-      || JSON.stringify(intent.plan) !== JSON.stringify(initial.state.plan)) return reject('stale_plan_or_step')
-    if (!Array.isArray(intent.operations) || intent.operations.length !== 0 || Object.keys(intent).some(key => !['chatMessage', 'plan', 'currentStep', 'operations', 'observationRequest', 'stepCompletions'].includes(key))) return reject('read_cannot_edit_or_complete_plan')
+      : request.stepId !== initial.data.stepId) || (planSupplied && (intent.currentStep !== initial.state.current_step
+      || JSON.stringify(intent.plan) !== JSON.stringify(initial.state.plan)))) return reject('stale_plan_or_step')
+    const allowedKeys = ['chatMessage', 'plan', 'currentStep', 'operations', 'observationRequest', 'stepCompletions', ...(executorStepBound ? ['stepId'] : [])]
+    if (!Array.isArray(intent.operations) || intent.operations.length !== 0 || Object.keys(intent).some(key => !allowedKeys.includes(key))) return reject('read_cannot_edit_or_complete_plan')
     if (Object.hasOwn(intent, 'stepCompletions')) {
       try {
         const declared = normalizeStepCompletions(intent.plan, intent.stepCompletions)

@@ -8,6 +8,7 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { FakeFactorio, planReply } from './task-loop-fixtures.mjs'
 import { normalizeObservationRequest, restoreObservationLedger } from './targeted-observation.mjs'
+import { plannerControlPayloadFromMessage } from './structured-policy.mjs'
 
 const saved = JSON.parse(readFileSync(new URL('./fixtures/luna-furnace-state-2026-10-07.json', import.meta.url), 'utf8'))
 const packets = readFileSync(new URL('./fixtures/luna-furnace-closed-2026-10-07.jsonl', import.meta.url), 'utf8').trim().split('\n').map(JSON.parse)
@@ -349,4 +350,99 @@ test('resource search consumes the persisted allowance and actor replacement can
     assert.match((await restarted.agent.handleObservationRequest(restarted.resourceRequest, restarted.context))._sglunaObservationRefusal.reason, /already_used/)
     assert.equal(restarted.game.resourceReads, 0)
   } finally { await fsp.rm(dir, { recursive: true, force: true }) }
+})
+
+// --- Unit 8 A: the executor's targeted read ---------------------------------------------------------------------------
+// Live run E (2026-10-13): the executor's submitPlan carries stepId and operations, and no plan or currentStep (the parser
+// fills [] and 0). The committed-phase check compared those fillers with the planner's plan, and its key list lacked
+// stepId, so both targeted reads were refused as stale_plan_or_step although executor.step_bound matched the step.
+
+// The exact control decision the harness builds from the executor's submitPlan tool call (provider.plan_submission).
+function executorSubmission(world, args = {}, requestOverrides = {}) {
+  const stepId = world.agent.targetedObservationIdentity().data.stepId
+  const message = { content: '', tool_calls: [{ id: 'call_live', type: 'function', function: { name: 'submitPlan', arguments: JSON.stringify({
+    stepId,
+    operations: [],
+    observationRequest: { stepId, tool: 'getEntityStatus', args: { unit_number: 12 },
+      rationale: 'Need the furnace identity and its fuel and input quantities before acting.', ...requestOverrides },
+    ...args,
+  }) } }] }
+  return { content: JSON.stringify(plannerControlPayloadFromMessage(message)) }
+}
+
+function executorFixture(options) {
+  const world = fixture(options)
+  world.agent.agentContext.role = 'executor'
+  return world
+}
+
+test('8 A: the live executor submitPlan shape (stepId, operations [], no plan or currentStep) is admitted to the targeted read', async () => {
+  const world = executorFixture()
+  const message = executorSubmission(world)
+  const intent = JSON.parse(message.content)
+  assert.deepEqual(intent.plan, [], 'the parser fills the plan with []')
+  assert.equal(intent.currentStep, 0, 'and the step index with 0, which is the shape live run E had refused')
+  assert.equal(intent.stepId, world.agent.targetedObservationIdentity().data.stepId)
+  const before = structuredClone(world.memory.planningState(KEY))
+  const reply = await world.agent.handleObservationRequest(message, world.context)
+  assert.equal(reply._sglunaObservationRefusal, undefined)
+  assert.equal(world.agent.parsePlanMessage(reply).operations[0].name, 'supply_entity')
+  assert.equal(world.game.entityReads, 1, 'the exact observed unit was read')
+  assert.deepEqual(world.counts(), { calls: 1, reservations: 1 })
+  assert.equal(world.game.mutations.length, 0, 'a read never executes the returned operation')
+  assert.deepEqual(world.memory.planningState(KEY), before, 'the read changes no committed semantics or progress')
+  assert.equal(world.events.some(row => row.event === 'observation.targeted_refused'), false)
+  const grant = world.events.find(row => row.event === 'observation.targeted_granted')
+  assert.equal(grant.data.request_id, 'req_targeted_fixture')
+  assert.equal(grant.data.step_id, world.agent.targetedObservationIdentity().data.stepId)
+  assert.equal(grant.data.reason, 'one_missing_fact_read_at_native_progress_boundary')
+  // The one-allowance ledger is unchanged: a second executor read at the same boundary is refused.
+  const again = await world.agent.handleObservationRequest(executorSubmission(world), world.context)
+  assert.equal(again._sglunaObservationRefusal.reason, 'targeted_allowance_already_used')
+  assert.equal(world.game.entityReads, 1)
+})
+
+test('8 A: an executor read still refuses another step, a stale supplied plan, edits, completions, extra keys and ungrounded units', async () => {
+  const cases = [
+    ['stale_plan_or_step', world => executorSubmission(world, { stepId: 'goal_old_p1_v1_s1_x' })],
+    ['stale_plan_or_step', world => executorSubmission(world, {}, { stepId: 'goal_old_p1_v1_s1_x' })],
+    // A reply that does supply a plan is still compared with the committed plan.
+    ['stale_plan_or_step', world => executorSubmission(world, { plan: ['a different committed step'], currentStep: 0 })],
+    ['read_cannot_edit_or_complete_plan', world => executorSubmission(world, { operations: [{ name: 'wait', args: { ticks: 1 } }] })],
+    ['read_cannot_edit_or_complete_plan', world => executorSubmission(world, { semanticCompletion: { stepId: world.agent.targetedObservationIdentity().data.stepId, rationale: 'close it' } })],
+    ['read_cannot_edit_or_complete_plan', world => executorSubmission(world, { checkpoint: { mode: 'all', requirements: [] } })],
+    ['entity_not_grounded', world => executorSubmission(world, {}, { args: { unit_number: 99 } })],
+  ]
+  for (const [reason, build] of cases) {
+    const world = executorFixture()
+    const reply = await world.agent.handleObservationRequest(build(world), world.context)
+    assert.equal(reply._sglunaObservationRefusal.reason, reason, reason)
+    assert.equal(world.game.entityReads, 0)
+    assert.equal(world.counts().calls, 0)
+    const refusal = world.events.find(row => row.event === 'observation.targeted_refused')
+    assert.equal(refusal.data.reason, reason)
+    assert.ok(refusal.data.request_id)
+  }
+})
+
+test('8 A: planner and draft requests keep the plan/currentStep comparison and refuse a stepId key', async () => {
+  // A planner (the fixture default) that sends the executor's fillers is stale; the stepId key is not a planner key.
+  const stale = fixture()
+  const staleReply = await stale.agent.handleObservationRequest(executorSubmission(stale), stale.context)
+  assert.equal(staleReply._sglunaObservationRefusal.reason, 'stale_plan_or_step')
+  const stepKey = fixture()
+  const intent = JSON.parse(stepKey.request().content)
+  intent.stepId = stepKey.agent.targetedObservationIdentity().data.stepId
+  const keyReply = await stepKey.agent.handleObservationRequest({ content: JSON.stringify(intent) }, stepKey.context)
+  assert.equal(keyReply._sglunaObservationRefusal.reason, 'read_cannot_edit_or_complete_plan')
+  // An executor request without a stepId is the legacy shape: its supplied plan and currentStep are compared as before.
+  const legacy = executorFixture()
+  const legacyIntent = JSON.parse(legacy.request().content)
+  const ok = await legacy.agent.handleObservationRequest({ content: JSON.stringify(legacyIntent) }, legacy.context)
+  assert.equal(ok._sglunaObservationRefusal, undefined)
+  const staleLegacy = executorFixture()
+  legacyIntent.currentStep += 1
+  const staleReply2 = await staleLegacy.agent.handleObservationRequest({ content: JSON.stringify(legacyIntent) }, staleLegacy.context)
+  assert.equal(staleReply2._sglunaObservationRefusal.reason, 'stale_plan_or_step')
+  for (const world of [stale, stepKey, staleLegacy]) assert.equal(world.game.entityReads, 0)
 })
