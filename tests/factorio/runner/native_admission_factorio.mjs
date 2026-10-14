@@ -100,16 +100,23 @@ function agentHarness(label, memory = new CanonicalTaskBoardMemory()) {
     rows: async () => (await fsp.readFile(traceFile, 'utf8').catch(() => '')).trim().split('\n').filter(Boolean).map(JSON.parse),
   }
 }
-const blockedBy = (result, code, harness, rows) => {
-  assert.equal(result.blocker?.code, code, JSON.stringify(result.blocker))
+const worldRefusalPausedBy = (result, code, harness, rows) => {
+  assert.equal(harness.calls.length, 2, 'one correction turn, then the pause')
+  assert.equal(result.blocker, undefined, JSON.stringify(result.blocker))
+  assert.equal(result.recoverableFailure?.reason, 'preflight_world_refusal_uncorrected')
+  const recoverable = rows.filter(row => row.event === 'operations.preflight_recoverable')
+  assert.equal(recoverable.length, 1, 'exactly one correction turn')
+  assert.equal((recoverable[0].data ?? recoverable[0]).preflight.code, code, 'the correction carries the native code unchanged')
   const rejected = rows.find(row => row.event === 'operations.preflight_rejected')
   assert.ok(rejected, 'the OG rejection trace row exists')
   assert.equal((rejected.data ?? rejected).preflight.code, code, 'the OG record carries the native code unchanged')
   assert.ok(rejected.request_id, 'the OG rejection trace row carries request_id')
+  const goalPaused = rows.filter(row => row.event === 'goal.paused')
+  assert.equal(goalPaused.length, 1)
+  assert.equal((goalPaused[0].data ?? goalPaused[0]).pause_class, 'model_recoverable')
   const board = harness.memory.currentPlan(key)
-  assert.equal(board.blocker, `operation_preflight_failed:${code}`)
-  const durable = board.task_board.evidence.find(row => row.summary?.includes(code))
-  assert.ok(durable && JSON.parse(durable.summary).reason_code === code && JSON.parse(durable.summary).request_id, 'durable blocker evidence names the code and request_id')
+  assert.equal(board.status, 'paused', 'paused, not silently blocked')
+  assert.ok(board.task_board.evidence.some(row => row.kind === 'operation_preflight_recoverable' && row.ref?.endsWith(`/${code}`)), 'durable correction evidence names the code')
 }
 
 async function main() {
@@ -291,15 +298,18 @@ async function main() {
     assert.equal(result.search_radius, 1)
     assert(result.source_names.length > 0)
     noEffect(before, await snapshot(), 'harvest_product absent natural source')
+    // Unit 12: a declared world refusal gets one correction turn with its facts; the same batch refused again pauses the plan
+    // as model_recoverable instead of ending blocked with nothing to wake the NPC.
     const world = agentHarness('absent-harvest')
-    world.script.push(world.plan([
+    const batch = () => world.plan([
       { name: 'harvest_product', args: { product_name: 'stone', count: 5, search_radius: 1 } },
       { name: 'wait', args: { ticks: 1200 } },
-    ]))
-    const blocked = await world.agent.request('harvest five stone nearby', { sender: 'tester' })
-    blockedBy(blocked, 'natural_harvest_source_not_found', world, await world.rows())
+    ])
+    world.script.push(batch(), batch())
+    const paused = await world.agent.request('harvest five stone nearby', { sender: 'tester' })
+    worldRefusalPausedBy(paused, 'natural_harvest_source_not_found', world, await world.rows())
     noEffect(before, await snapshot(), 'OG absent natural harvest batch')
-    evidence.absent_harvest = { result, blocker: blocked.blocker }
+    evidence.absent_harvest = { result, pause: paused.recoverableFailure }
   }
 
   // 1efbdefc: a built entity that yields the product when mined is never a harvest source, and a
