@@ -1140,7 +1140,7 @@ test('8 run E: a trigger step carries its production target, the burner fuel req
   assert.match(fuel, /^fuel_needs \(burner stone-furnace burn fuel_categories=chemical;/)
   assert.match(fuel, /\): held_fuel=none \| coal fuel_value=4MJ held=0 raw: mined_from=coal \(source observation; reach\/path unverified\) nearest=\(192\.5,8\.5\) distance=192\.7/)
   assert.match(fuel, /solid-fuel fuel_value=12MJ held=0 no_resource_source \| wood fuel_value=2MJ held=0 no_resource_source/)
-  assert.match(fuel, /non-resource sources such as trees are not derived/)
+  assert.match(fuel, /trees and other non-resource sources are not derived/)
   assert.equal(world.game.sourceReads[0], 'coal', 'the fuel resource is read with the same nearest-instance path as raw leaves (copper ore is held, so no ore read)')
   assert.doesNotMatch(step, /steel-furnace energy|electric-furnace energy/)
 
@@ -1233,7 +1233,9 @@ test('8 C: an in-flight batch defers the energy and fuel facts; the refresh afte
   assert.equal(deferred.facts.machine_energy, undefined)
   assert.equal(deferred.facts.fuel_needs, undefined)
   world.agent.batchInFlight = false
+  const announced = world.rows('context.trigger_production_derived').length
   const refreshed = await world.agent.gatherExecutorHandoffFacts({ state, actor: world.agent.epoch, mode: 'refresh' })
+  assert.equal(world.rows('context.trigger_production_derived').length, announced, 'the refresh does not announce the production root again')
   const text = executorFactsRefreshMessage(refreshed.facts)
   assert.match(text, /^machine_energy /m)
   assert.match(text, /^fuel_needs /m)
@@ -1251,6 +1253,7 @@ test('8 C: fuel resource searches share the three-resource bound with raw leaves
     ...ores.map(item => ({ kind: 'inventory_count', item_name: item, minimum: 10 })),
   ] }
   for (const item of ores) world.agent.handoffRawLeaves.set(item, { item, mined_from: [item] })
+  world.agent.handoffFuelSources.clear() // a coal location read at C3 would be reused; this scenario is about the bound
   const before = world.game.sourceReads.length
   const gathered = await world.agent.gatherExecutorHandoffFacts({ state, actor: world.agent.epoch })
   assert.equal(world.game.sourceReads.length - before, 3, 'three distinct resources at most, raw leaves first')
@@ -1263,8 +1266,64 @@ test('8 C: fuel resource searches share the three-resource bound with raw leaves
 test('8: a source read crossing an actor epoch refuses the restage and carries no fuel location', async () => {
   const world = await runEWorld()
   world.agent.batchInFlight = false
+  world.agent.handoffFuelSources.clear() // the C3 read of this step and epoch would otherwise be reused: force a new read
   world.game.onSourceRead = game => { game.status = deployment({ epoch: 4 }) }
   const carried = world.rows('context.machine_energy_carried').length
   assert.deepEqual(await restageToFreshExecutor(world), { restaged: false, reason: 'actor_changed_during_handoff_refresh' })
   assert.equal(world.rows('context.machine_energy_carried').length, carried)
+})
+
+test('8 C: a refresh in the same step and epoch reuses the fuel location with its own as_of; a failed read is never reused', async () => {
+  const world = await runEWorld()
+  world.agent.batchInFlight = false
+  const state = world.memory.planningState(KEY)
+  const reads = world.game.sourceReads.length
+  const first = await world.agent.gatherExecutorHandoffFacts({ state, actor: world.agent.epoch })
+  const refreshed = await world.agent.gatherExecutorHandoffFacts({ state, actor: world.agent.epoch, mode: 'refresh' })
+  assert.equal(world.game.sourceReads.length, reads, 'the C3 read of this step and epoch is reused')
+  const coalOf = facts => facts.fuel_needs.items.find(item => item.name === 'coal').raw
+  assert.equal(coalOf(first.facts).sources[0].state, 'found')
+  assert.deepEqual(coalOf(refreshed.facts).as_of, coalOf(first.facts).as_of, 'the reused location keeps the tag of the read it came from')
+  assert.match(executorFactsRefreshMessage(refreshed.facts), /nearest=\(192\.5,8\.5\) distance=192\.7/)
+  assert.equal(first.meta.machine_energy.fuel_sources_reused, 1)
+  assert.equal(first.meta.machine_energy.fuel_sources_read, 0)
+
+  const failing = await runEWorld({ mutate: (game) => { game.sourceAnswer = { ok: false, error: 'no controlled actor' } } })
+  failing.agent.batchInFlight = false
+  const before = failing.game.sourceReads.length
+  failing.game.sourceAnswer = undefined
+  const retried = await failing.agent.gatherExecutorHandoffFacts({ state: failing.memory.planningState(KEY), actor: failing.agent.epoch })
+  assert.equal(failing.game.sourceReads.length, before + 1, 'the failed read is retried')
+  assert.equal(retried.facts.fuel_needs.items.find(item => item.name === 'coal').raw.sources[0].state, 'found')
+})
+
+test('8 C: when a fuel count could not be read the held fuel is unknown and no source search is made', async () => {
+  const world = await runEWorld({ mutate: (game) => { game.failConditionReads = true } })
+  const fuel = stepLine(world, 'fuel_needs')
+  assert.match(fuel, /: held_fuel=unknown \(3 of 3 counts unread\) \(acquisition not searched\) \| coal fuel_value=4MJ held=unknown \|/)
+  assert.doesNotMatch(fuel, /nearest=/)
+  assert.deepEqual(world.game.sourceReads, [])
+  assert.match(stepLine(world, 'machine_energy'), /stone-furnace energy=burner\(fuel_categories=chemical, 90kW\) status=craftable held=unknown/)
+  const carried = world.rows('context.machine_energy_carried')[0]
+  assert.deepEqual({ fuel_held: carried.data.fuel_held, fuel_counts_unread: carried.data.fuel_counts_unread, fuel_sources_read: carried.data.fuel_sources_read },
+    { fuel_held: false, fuel_counts_unread: 3, fuel_sources_read: 0 })
+})
+
+test('8 C: machine and fuel counts rank after refresh and touched items; what the cap cuts is reported unread, never absent', async () => {
+  const world = await runEWorld()
+  world.agent.batchInFlight = false
+  const state = world.memory.planningState(KEY)
+  const crowd = Array.from({ length: 12 }, (_, index) => `filler-item-${index}`)
+  const before = world.game.sourceReads.length
+  const gathered = await world.agent.gatherExecutorHandoffFacts({ state, actor: world.agent.epoch, mode: 'refresh', refreshItems: crowd })
+  assert.equal(gathered.meta.read_items.length, 12)
+  assert.ok(!gathered.meta.read_items.includes('stone-furnace') && !gathered.meta.read_items.includes('coal'))
+  assert.deepEqual(gathered.meta.read_items.slice(0, 2), ['copper-plate', 'copper-ore'], 'the closure still comes first')
+  assert.equal(gathered.facts.machine_energy.machines[0].held, undefined)
+  assert.equal(gathered.facts.fuel_needs.search, 'unknown_counts')
+  const text = executorFactsRefreshMessage(gathered.facts)
+  assert.match(text, /stone-furnace energy=burner\(fuel_categories=chemical, 90kW\) status=craftable held=unknown/)
+  assert.match(text, /held_fuel=unknown \(3 of 3 counts unread\) \(acquisition not searched\)/)
+  assert.equal(world.game.sourceReads.length, before, 'unknown counts start no source search')
+  assert.equal(gathered.meta.machine_energy.fuel_counts_unread, 3)
 })

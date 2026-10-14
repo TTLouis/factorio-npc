@@ -86,10 +86,13 @@ export const HANDOFF_DROP_ORDER = Object.freeze([
   'stale_counts',
   'contract',
   'fresh_counts',
-  'residual_needs',
+  // Unit 8: the energy and fuel facts drop before the residual (the production target and its arithmetic) they annotate.
   'machine_energy',
-  'raw_leaf_acquisition',
   'fuel_needs',
+  'residual_needs',
+  // Intentionally after residual_needs (unit 6): acquisition is its own record so the raw-leaf mining sources and nearest
+  // locations survive a long intermediate chain being dropped from the arithmetic.
+  'raw_leaf_acquisition',
   'roadmap_node',
   'step_completed',
   'step_pending',
@@ -133,6 +136,7 @@ export const EXECUTOR_FACT_LIMITS = Object.freeze({
   fuelItems: 6,
   fuelChars: 780,
   placedKinds: 64,
+  fuelSourceCache: 16,
 })
 
 const HEADER = '[HANDOFF] Rebuilt from durable harness state, not from the previous conversation. Verify against the world before acting.'
@@ -985,6 +989,7 @@ export function deriveMachineEnergy({ recipes, recipeNames, statuses = new Map()
   const listed = []
   let locked = 0
   let unverified = 0
+  let unread = 0
   for (const entry of entries.values()) {
     const status = statuses.get(entry.name)
     const item = status?.item ?? entry.item
@@ -993,6 +998,8 @@ export function deriveMachineEnergy({ recipes, recipeNames, statuses = new Map()
     const craftable = status?.status === 'craftable'
     if (!craftable && !(count > 0) && !seen) {
       if (status?.status === 'locked') locked += 1
+      // The machine item is known but its count was not read (the count-read list is capped): reported, never silently absent.
+      else if (item && count === undefined) unread += 1
       else unverified += 1
       continue
     }
@@ -1005,7 +1012,7 @@ export function deriveMachineEnergy({ recipes, recipeNames, statuses = new Map()
   if (listed.length === 0) return undefined
   const machines = listed.slice(0, limits.recipeMachines)
   const burners = machines.filter(entry => entry.energy_source === 'burner')
-  return { machines, omitted: { locked, unverified, truncated: listed.length - machines.length },
+  return { machines, omitted: { locked, unverified, unread, truncated: listed.length - machines.length },
     burner_count: burners.length,
     fuel_categories: [...new Set(burners.flatMap(entry => asList(entry.fuel_categories)))].sort() }
 }
@@ -1023,8 +1030,11 @@ export function deriveFuelNeeds({ machineEnergy, fuels, held = new Map(), limits
       held: Number.isSafeInteger(count) && count >= 0 ? count : undefined }
   })
   const heldTotal = items.reduce((sum, item) => sum + (item.held ?? 0), 0)
-  return { machines: burners.map(entry => entry.name), categories, items, held_total: heldTotal,
-    unknown_held: items.filter(item => item.held === undefined).length }
+  const unknownHeld = items.filter(item => item.held === undefined).length
+  // A source search is only warranted when every candidate count was read and the total is zero: any unread count means
+  // the actor may hold fuel, which is stated as unknown and never turned into a search.
+  const search = items.length === 0 ? 'no_candidates' : heldTotal > 0 ? 'held' : unknownHeld > 0 ? 'unknown_counts' : 'needed'
+  return { machines: burners.map(entry => entry.name), categories, items, held_total: heldTotal, unknown_held: unknownHeld, search }
 }
 
 /**
@@ -1185,7 +1195,7 @@ function machineEnergyRecord(machineEnergy, limits) {
   if (!machineEnergy) return undefined
   const machines = asList(machineEnergy.machines).map(entry => `${entry.name} energy=${machineSourceText(entry)} status=${entry.status} held=${entry.held ?? 'unknown'} placed=${entry.placed?.observed ? `observed(x${entry.placed.count} via ${entry.placed.via})` : 'not_observed'}`)
   const omitted = machineEnergy.omitted ?? {}
-  const unlisted = [omitted.locked > 0 ? `locked=${omitted.locked}` : '', omitted.unverified > 0 ? `unverified=${omitted.unverified}` : '', omitted.truncated > 0 ? `truncated=${omitted.truncated}` : ''].filter(Boolean)
+  const unlisted = [omitted.locked > 0 ? `locked=${omitted.locked}` : '', omitted.unverified > 0 ? `unverified=${omitted.unverified}` : '', omitted.unread > 0 ? `unread=${omitted.unread}` : '', omitted.truncated > 0 ? `truncated=${omitted.truncated}` : ''].filter(Boolean)
   return {
     key: 'machine_energy',
     block: 'step',
@@ -1201,15 +1211,16 @@ function fuelNeedsRecord(fuel, limits) {
   if (!fuel) return undefined
   const items = asList(fuel.items)
   const heldFuel = items.filter(item => item.held > 0).map(item => `${item.name}=${item.held}`)
-  const heldText = heldFuel.length > 0 ? heldFuel.join(',') : fuel.unknown_held > 0 ? `none_known (${fuel.unknown_held} unread)` : 'none'
+  const heldText = heldFuel.length > 0 ? heldFuel.join(',') : fuel.unknown_held > 0 ? `unknown (${fuel.unknown_held} of ${items.length} counts unread)` : 'none'
+  const searched = fuel.search === 'needed'
   const parts = items.map((item) => {
     const base = `${item.name} fuel_value=${megajoules(item.fuel_value)} held=${item.held ?? 'unknown'}`
-    if (fuel.held_total > 0) return base
+    if (!searched) return base
     if (item.raw) return `${base} ${rawLeafRowText(item.raw)}`
     return asList(item.mined_from).length > 0 ? `${base} raw: mined_from=${item.mined_from.join(',')} nearest=not_read` : `${base} no_resource_source`
   })
   const head = `fuel_needs (burner ${asList(fuel.machines).join(',')} burn fuel_categories=${asList(fuel.categories).join('+') || 'unknown'}; candidates from item prototypes, held from the fresh read; amount needed not derived; sources searched are resource prototypes only, no_resource_source = none yields it, trees and other non-resource sources are not derived)`
-  const body = `held_fuel=${heldText}${fuel.held_total > 0 ? ' (acquisition not searched)' : ''}${parts.length > 0 ? ` | ${joinBounded(parts, ' | ', limits.fuelChars)}` : ' | candidates=not_reported (the recipe read carried no fuel list)'}`
+  const body = `held_fuel=${heldText}${!searched && items.length > 0 ? ' (acquisition not searched)' : ''}${parts.length > 0 ? ` | ${joinBounded(parts, ' | ', limits.fuelChars)}` : ' | candidates=not_reported (the recipe read carried no fuel list)'}`
   return { key: 'fuel_needs', block: 'step', drop: 'fuel_needs', text: `${head}: ${body}` }
 }
 

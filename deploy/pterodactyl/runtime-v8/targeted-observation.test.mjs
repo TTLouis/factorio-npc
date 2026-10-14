@@ -406,6 +406,8 @@ test('8 A: an executor read still refuses another step, a stale supplied plan, e
   const cases = [
     ['stale_plan_or_step', world => executorSubmission(world, { stepId: 'goal_old_p1_v1_s1_x' })],
     ['stale_plan_or_step', world => executorSubmission(world, {}, { stepId: 'goal_old_p1_v1_s1_x' })],
+    // Step ids embed the plan id and version (live: goal_0krmyq5_1_p3_v1_s1_1yxphas): another plan version is another step.
+    ['stale_plan_or_step', world => executorSubmission(world, { stepId: 'goal_0krmyq5_1_p3_v2_s1_1yxphas' }, { stepId: 'goal_0krmyq5_1_p3_v2_s1_1yxphas' })],
     // A reply that does supply a plan is still compared with the committed plan.
     ['stale_plan_or_step', world => executorSubmission(world, { plan: ['a different committed step'], currentStep: 0 })],
     ['read_cannot_edit_or_complete_plan', world => executorSubmission(world, { operations: [{ name: 'wait', args: { ticks: 1 } }] })],

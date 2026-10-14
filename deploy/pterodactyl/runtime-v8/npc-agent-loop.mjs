@@ -2962,6 +2962,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.handoffRecipeFacts = new Map()
     this.handoffRecipeQueries = new Set()
     this.handoffRawLeaves = new Map()
+    this.handoffFuelSources = new Map() // nearest-instance fuel resource reads, keyed plan|step|actor|epoch|resource: reused within one step and epoch
     this.handoffBurnerFuels = new Map() // fuel items the mod reported for burner machines' fuel categories: stable prototype data, keyed by item
     this.handoffNoRecipeItems = new Set() // items the game answered "no recipe" for (raw resources): stable data, not re-read
     this.handoffTriggerCraftingReports = []
@@ -4979,7 +4980,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // craft-item item and count. It enters the same recipe closure and residual derivation, and is never netted against held stock.
       const triggerRoots = triggerProductionRoots(research)
       const closureRoots = [...needs.roots, ...triggerRoots.map(root => ({ item: root.item, count: root.count }))]
-      for (const root of triggerRoots) {
+      // Once per restage: the deferred refresh re-derives the same root and does not announce it again.
+      if (mode === 'packet') for (const root of triggerRoots) {
         await this.traceEvent('context.trigger_production_derived', {
           request_id: requestId ?? this.traceRequest?.id, technology: root.technology, item: root.item, count: root.count,
           held_counted: root.held_counted, reason: 'trigger_technology_counts_new_crafts_not_held_stock',
@@ -5051,10 +5053,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       closure.items.forEach(addItem)
       needs.items.forEach(addItem)
       researchItems.forEach(addItem)
-      energyScope.machineItems.forEach(addItem)
-      energyScope.fuelNames.forEach(addItem)
       refreshItems.forEach(addItem)
       for (const item of this.handoffTouchedItems ?? []) addItem(item)
+      // Unit 8 machine and fuel counts follow the older priorities; whatever the cap cuts is reported as unread, never absent.
+      energyScope.machineItems.forEach(addItem)
+      energyScope.fuelNames.forEach(addItem)
       for (const recipe of recipes) {
         if (recipe.products.some(product => wanted.includes(product.name))) recipe.ingredients.filter(ingredient => ingredient.type === 'item').forEach(ingredient => addItem(ingredient.name))
       }
@@ -5178,13 +5181,24 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       let rawSourceReads = 0
       const rawRows = (residual?.rows ?? []).filter(row => !row.trigger && row.missing > 0 && this.handoffRawLeaves.has(row.item))
       const rawResources = rawRows.flatMap(row => this.handoffRawLeaves.get(row.item).mined_from)
-      const fuelSearch = fuelNeeds !== undefined && fuelNeeds.held_total === 0
+      const fuelSearch = fuelNeeds?.search === 'needed'
       const fuelResources = fuelSearch ? fuelNeeds.items.flatMap(item => item.mined_from) : []
-      if ((rawResources.length > 0 || fuelResources.length > 0) && fence) {
+      // A fuel location already read in this step and epoch is reused with its own as_of rather than read again at every refresh.
+      const fuelKey = resource => `${plan.plan_id}|${step.step_id}|${fence?.actor_id}|${fence?.epoch}|${resource}`
+      const reused = new Map()
+      for (const resource of new Set(fuelResources)) {
+        if (rawResources.includes(resource)) continue
+        const cachedSource = fence ? this.handoffFuelSources.get(fuelKey(resource)) : undefined
+        if (cachedSource) { sources.set(resource, cachedSource.source); reused.set(resource, cachedSource.as_of) }
+      }
+      const pendingFuelWrites = []
+      let readsSpent = 0
+      if ((rawResources.length > 0 || fuelResources.some(resource => !sources.has(resource))) && fence) {
         try {
           await this.handoffFenceCheck(fence, 'before')
           for (const resource of [...rawResources, ...fuelResources]) {
-            if (sources.has(resource) || sources.size >= limits.rawLeafResources) continue
+            if (sources.has(resource) || readsSpent >= limits.rawLeafResources) continue
+            readsSpent += 1
             meta.reads_attempted += 1
             sourceReads += 1
             if (rawResources.includes(resource)) rawSourceReads += 1
@@ -5197,13 +5211,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
               if (meta.refresh === 'ok') meta.refresh = 'partial'
             }
             sources.set(resource, source)
+            if (!rawResources.includes(resource) && (source.state === 'found' || source.state === 'none')) pendingFuelWrites.push([fuelKey(resource), { source, as_of: this.observationTag() }])
           }
           await this.handoffFenceCheck(fence, 'during')
+          // Only reads that survived the fence are remembered, and a failed read is never reused.
+          for (const [key, value] of pendingFuelWrites) {
+            this.handoffFuelSources.delete(key)
+            this.handoffFuelSources.set(key, value)
+          }
+          while (this.handoffFuelSources.size > limits.fuelSourceCache) this.handoffFuelSources.delete(this.handoffFuelSources.keys().next().value)
         }
         catch (error) {
           if (error?.handoffFence) return { refusal: error.handoffFence, meta }
           // An unreadable fence means none of these locations can be carried.
           sources.clear()
+          reused.clear()
         }
       }
       for (const row of rawRows) {
@@ -5225,11 +5247,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (fuelSearch) {
         for (const item of fuelNeeds.items) {
           if (item.mined_from.length === 0) continue
-          item.raw = { mined_from: item.mined_from, as_of: this.observationTag(), sources: item.mined_from.map(resource => sources.get(resource) ?? { resource, state: 'not_read' }) }
+          // The label is the oldest read among this item's sources: a reused location keeps the tag of the read it came from.
+          const tags = item.mined_from.map(resource => reused.get(resource)).filter(Boolean)
+          const anyRead = item.mined_from.some(resource => sources.has(resource) && !reused.has(resource))
+          const oldest = tags.sort((left, right) => (left.at_ms ?? 0) - (right.at_ms ?? 0))[0]
+          item.raw = { mined_from: item.mined_from, as_of: oldest && !anyRead ? oldest : this.observationTag(), sources: item.mined_from.map(resource => sources.get(resource) ?? { resource, state: 'not_read' }) }
         }
       }
       if (machineEnergy) meta.machine_energy = { machines: machineEnergy.machines.map(entry => entry.name), burner_count: machineEnergy.burner_count,
-        fuel_held: fuelNeeds ? fuelNeeds.held_total > 0 : false, fuel_sources_read: sourceReads - rawSourceReads }
+        fuel_held: fuelNeeds ? fuelNeeds.held_total > 0 : false, fuel_counts_unread: fuelNeeds?.unknown_held ?? 0,
+        machine_items_unread: machineEnergy.omitted.unread, fuel_sources_read: sourceReads - rawSourceReads, fuel_sources_reused: reused.size }
 
       const counts = { items, unavailable, as_of: tag, ...(meta.counts_deferred ? { deferred: meta.counts_deferred } : {}) }
       if (mode === 'refresh') {
@@ -5364,6 +5391,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           burner_count: meta.machine_energy.burner_count,
           fuel_held: meta.machine_energy.fuel_held,
           fuel_sources_read: meta.machine_energy.fuel_sources_read,
+          fuel_sources_reused: meta.machine_energy.fuel_sources_reused,
+          fuel_counts_unread: meta.machine_energy.fuel_counts_unread,
+          machine_items_unread: meta.machine_energy.machine_items_unread,
           carried: (summary.machine_energy ?? 0) > 0,
           dropped_for_size: (packet.dropped ?? []).filter(key => ['machine_energy', 'fuel_needs'].includes(key)),
           reason: 'native_energy_source_placement_and_fuel_facts_for_available_machines',
