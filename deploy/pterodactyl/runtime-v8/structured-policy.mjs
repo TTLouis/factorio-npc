@@ -195,13 +195,24 @@ export function parsePlan(value) {
 }
 
 function parsePlacementCandidates(args) {
-  exactKeys(args, ['entity_name', 'center', 'radius', 'target_resource', 'covers_position', 'limit'])
+  exactKeys(args, ['entity_name', 'center', 'radius', 'target_resource', 'covers_position', 'connects_to', 'limit'])
   const parsed = { entity_name: base.factorioName(args.entity_name) }
   if (args.center !== undefined) parsed.center = position(args.center)
   if (args.radius !== undefined) parsed.radius = optionalInteger(args.radius, 'radius', 1, 24)
   if (args.target_resource !== undefined) parsed.target_resource = base.factorioName(args.target_resource)
   if (args.covers_position !== undefined) parsed.covers_position = position(args.covers_position)
+  if (args.connects_to !== undefined) parsed.connects_to = parseConnectsTo(args.connects_to)
   if (args.limit !== undefined) parsed.limit = optionalInteger(args.limit, 'limit', 1, 8)
+  return parsed
+}
+
+// A live entity fluid port the new entity must join: unit_number plus the storage and connection indices
+// getEntityStatus lists under spatial.fluid.storages (storage `index`, connection `connection_index`).
+function parseConnectsTo(value) {
+  exactKeys(value, ['unit_number', 'storage_index', 'connection_index'])
+  const parsed = { unit_number: positiveInteger(value.unit_number, 'connects_to.unit_number') }
+  if (value.storage_index !== undefined) parsed.storage_index = optionalInteger(value.storage_index, 'connects_to.storage_index', 1, 8)
+  if (value.connection_index !== undefined) parsed.connection_index = optionalInteger(value.connection_index, 'connects_to.connection_index', 1, 8)
   return parsed
 }
 
@@ -212,6 +223,12 @@ function renderPlacementCandidates(args) {
   if (parsed.radius !== undefined) fields.push(`radius=${parsed.radius}`)
   if (parsed.target_resource !== undefined) fields.push(`target_resource=${base.luaString(parsed.target_resource)}`)
   if (parsed.covers_position !== undefined) fields.push(`covers_position={x=${parsed.covers_position.x},y=${parsed.covers_position.y}}`)
+  if (parsed.connects_to !== undefined) {
+    const join = [`unit_number=${parsed.connects_to.unit_number}`]
+    if (parsed.connects_to.storage_index !== undefined) join.push(`storage_index=${parsed.connects_to.storage_index}`)
+    if (parsed.connects_to.connection_index !== undefined) join.push(`connection_index=${parsed.connects_to.connection_index}`)
+    fields.push(`connects_to={${join.join(',')}}`)
+  }
   if (parsed.limit !== undefined) fields.push(`limit=${parsed.limit}`)
   return `/silent-command rcon.print(helpers.table_to_json(remote.call("autorio_tools","get_placement_candidates",{${fields.join(',')}})))`
 }
@@ -582,7 +599,7 @@ const placementCandidatesDefinition = {
   type: 'function',
   function: {
     name: 'getPlacementCandidates',
-    description: 'Ask the local Factorio harness for a bounded set of live legal placement candidates derived from the current prototype and surface. For resource-bound mining placement, provide target_resource so non-covering placements are rejected; candidates may include live resource coverage, direct item output position, and current-prototype fluid port geometry. For an entity that must receive another entity\'s output (a furnace or chest fed by a drill), pass that candidate\'s item_output_position as covers_position so only placements whose footprint covers it are returned. Use returned candidate ids with place_candidate rather than retyping coordinates.',
+    description: 'Ask the local Factorio harness for a bounded set of live legal placement candidates derived from the current prototype and surface. For resource-bound mining placement, provide target_resource so non-covering placements are rejected; candidates may include live resource coverage, direct item output position, and current-prototype fluid port geometry. For an entity that must receive another entity\'s output (a furnace or chest fed by a drill), pass that candidate\'s item_output_position as covers_position so only placements whose footprint covers it are returned. Use returned candidate ids with place_candidate rather than retyping coordinates. connects_to {unit_number, storage_index?, connection_index?} (the indices getEntityStatus lists under spatial.fluid.storages) restricts results to footprints whose pipe connection joins that live entity\'s port: the footprints are solved from the prototype pipe connections, so radius does not limit them, each candidate\'s connects_to names the port it joins, and every open port of the entity is a target when connection_index is omitted. An entity whose legality is decided by tile rules (a shoreline) is ordered nearest the actor first (result ordering says which). Electric-pole candidates report electric.poles_in_wire_reach (existing poles it could wire to, by distance) and electric.covers_entities (powered or consuming entities its supply area covers), from live positions and the pole prototype reach.',
     parameters: {
       type: 'object', additionalProperties: false, required: ['entity_name'],
       properties: {
@@ -591,6 +608,14 @@ const placementCandidatesDefinition = {
         radius: { type: 'integer', minimum: 1, maximum: 24, default: 8 },
         target_resource: { type: 'string', minLength: 1, maxLength: 200 },
         covers_position: positionSchema,
+        connects_to: {
+          type: 'object', additionalProperties: false, required: ['unit_number'],
+          properties: {
+            unit_number: { type: 'integer', minimum: 1 },
+            storage_index: { type: 'integer', minimum: 1, maximum: 8 },
+            connection_index: { type: 'integer', minimum: 1, maximum: 8 },
+          },
+        },
         limit: { type: 'integer', minimum: 1, maximum: 8, default: 5 },
       },
     },
@@ -600,7 +625,7 @@ const placementCandidatesDefinition = {
 const fluidSourceTilesDefinition = {
   type: 'function', function: {
     name: 'getFluidSourceTiles',
-    description: 'Read native fluid-bearing terrain tiles (for example water, as used by an offshore pump) around the current actor on its current surface. Tile names are derived from native fluid prototypes. Default radius 128, maximum 256; at most 8 samples plus an explicit truncated flag. Samples are not guaranteed nearest, reachable or legal pump placements. Refuses with fluid_source_search_unexplored when any generated-chunk coverage in the search square is incomplete. Does not generate terrain. Fluids are not entity prototypes: getNearbyEntities refuses a fluid name with code unknown_entity_prototype.',
+    description: 'Read native fluid-bearing terrain tiles (for example water, as used by an offshore pump) around the current actor on its current surface. Tile names are derived from native fluid prototypes. Default radius 128, maximum 256; at most 8 samples, nearest the actor first among the tiles scanned (ordering says whether the scan was truncated), plus an explicit truncated flag. Samples are not reachable or legal pump placements. Ungenerated chunks in the search square are reported (generated_chunk_count, ungenerated_chunk_count, nearest ungenerated_chunks, coverage_complete) and the samples from generated terrain are still returned; an empty answer is conclusive only when empty_result_is_conclusive is true. Refuses with fluid_source_search_unexplored only when no chunk of the search square is generated. Does not generate terrain. Fluids are not entity prototypes: getNearbyEntities refuses a fluid name with code unknown_entity_prototype.',
     parameters: { type: 'object', additionalProperties: false, required: ['fluid_name'], properties: {
       fluid_name: { type: 'string', minLength: 1, maxLength: 200 },
       search_radius: { type: 'integer', minimum: 1, maximum: 256, default: 128 },

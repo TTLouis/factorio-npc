@@ -11,6 +11,7 @@ import { energy_source_kind } from './prototype_knowledge'
 import { get_actor_inventory_items } from './utils/inventory'
 import { find_world_entities } from './npc_vision'
 import { fluid_source_observation, type FluidSourceRequest } from './fluid_source_observation'
+import { nearest_pole_for_unpowered, status_shows_no_power } from './electric_facts'
 
 const MAX_NEARBY_RADIUS = 64
 const MAX_NEARBY_RESULTS = 40
@@ -485,6 +486,8 @@ export function create_tools_remote_interface() {
         if (typeof energy === 'number' && energy >= 0 && energy < math.huge) entity_summary.energy = energy
         const network = entity.electric_network_id
         if (typeof network === 'number' && positive_integer(network) && network <= 9007199254740991) entity_summary.electric_network_id = network
+        // An entity short of power names the nearest known pole and how far its supply area is, from live positions.
+        if (status_shows_no_power(entity_summary.status_name as string | undefined)) entity_summary.power_gap = nearest_pole_for_unpowered(entity)
       }
       if (entity.type === 'rocket-silo') {
         entity_summary.rocket_parts = entity.rocket_parts

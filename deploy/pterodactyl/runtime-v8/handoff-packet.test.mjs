@@ -1279,3 +1279,18 @@ test('8 C/D: the packet states the trigger target, the energy source and placeme
   const refreshCrowded = executorFactsRefreshMessage({ machine_energy: crowdedMachines, fuel_needs: crowdedFuel })
   assert.ok(refreshCrowded.includes(crowdedLine('machine_energy')) && refreshCrowded.includes(crowdedLine('fuel_needs')))
 })
+
+test('3a: a partial fluid read keeps coverage_complete on its anchors and the packet says the coverage was incomplete', () => {
+  const partial = learnWater(waterAnswer([waterSample(22, 8)], { coverage_complete: false, ungenerated_chunk_count: 2, ordering: 'nearest_first' }))
+  assert.deepEqual(partial.anchors[0], { name: 'water', fluid_name: 'water', surface_index: 1, position: { x: 22, y: 8 }, as_of: { tick: 77, epoch: 3, actor_id: 19, at_ms: 5 },
+    coverage_complete: false, ungenerated_chunk_count: 2 })
+  const complete = learnWater(waterAnswer([waterSample(30, 8)], { coverage_complete: true, ungenerated_chunk_count: 0, ordering: 'nearest_first' }))
+  assert.equal(complete.anchors[0].coverage_complete, true)
+  assert.equal(complete.anchors[0].ungenerated_chunk_count, undefined)
+
+  const facts = { ...FRESH_FACTS(), fluid_source_hints: [...complete.anchors, ...partial.anchors] }
+  const packet = buildHandoffPacket({ planningState: circuitState(), ...ARGS, executorFacts: facts, limits: { maxChars: 100000 } })
+  const line = packet.volatileText.split('\n').find(item => item.startsWith('fluid_source_hints'))
+  assert.match(line, /water:water@\(22,8\) surface=1 observed [^|]*coverage=INCOMPLETE\(2 chunks ungenerated; nearer water may exist\)/)
+  assert.doesNotMatch(line.split(' | ').find(part => part.includes('@(30,8)')), /coverage=/)
+})

@@ -1,7 +1,10 @@
+import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
-import type { CandidateFluidPort } from './placement_spatial_features'
-import { candidate_fluid_ports } from './placement_spatial_features'
-import { placement_check_args, placement_footprint, placement_footprint_covers_point, snap_placement_center, type PlacementFootprint } from './placement_geometry'
+import type { CandidateFluidPort, LiveFluidPort } from './placement_spatial_features'
+import { candidate_fluid_ports, fluid_ports_join, live_fluid_ports } from './placement_spatial_features'
+import { placement_check_args, placement_footprint, placement_footprint_covers_point, placement_grid_check, snap_placement_center, type PlacementFootprint } from './placement_geometry'
+import { resolve_exact_entity } from './entity_reference'
+import { pole_candidate_facts, pole_reach } from './electric_facts'
 import { find_world_entities } from './npc_vision'
 import { placement_item_preflight } from './placement_preflight'
 
@@ -20,7 +23,28 @@ export interface PlacementCandidateRequest {
   // Only placements whose footprint covers this point, for example a drill's
   // item_output_position when the new entity must receive its output.
   covers_position?: { x: number, y: number }
+  // Only footprints whose fluidbox connection joins this live entity port. The
+  // footprint is derived from the prototype pipe connections, so it is exact
+  // regardless of radius or limit.
+  connects_to?: PlacementConnectsTo
   limit?: number
+}
+
+export interface PlacementConnectsTo {
+  unit_number: number
+  // Fluid storage and connection to join (1-based, as get_entity_status lists them).
+  // Omitted, every open (unconnected) port of the entity is a target.
+  storage_index?: number
+  connection_index?: number
+}
+
+export interface PlacementCandidateJoin {
+  unit_number: number
+  entity_name: string
+  target_port: { storage_index: number, connection_index: number }
+  candidate_port: { storage_index: number, connection_index: number, direction?: number, filter?: string, flow_direction?: string }
+  // The tile where the new entity port sits: the tile the live port opens onto.
+  tile: { x: number, y: number }
 }
 
 interface ResourceCoverage {
@@ -38,6 +62,11 @@ export interface PlacementCandidate {
   fluid_ports?: CandidateFluidPort[]
   resource_coverage?: ResourceCoverage[]
   footprint: PlacementFootprint
+  // Set when the placement legality is decided by tile rules (a shoreline).
+  distance_from_actor?: number
+  connects_to?: PlacementCandidateJoin
+  // Electric-pole candidates only: wire links and supply coverage at this spot.
+  electric?: Record<string, unknown>
 }
 
 interface PlacementCandidateSet {
@@ -196,18 +225,23 @@ function coverage_score(candidate: PlacementCandidate, target_resource?: string)
   return { entities, amount }
 }
 
-function better(left: PlacementCandidate, right: PlacementCandidate, target_resource?: string) {
+function better(left: PlacementCandidate, right: PlacementCandidate, target_resource?: string, origin?: { x: number, y: number }) {
   const left_coverage = coverage_score(left, target_resource)
   const right_coverage = coverage_score(right, target_resource)
   if (left_coverage.entities !== right_coverage.entities) return left_coverage.entities > right_coverage.entities
   if (left_coverage.amount !== right_coverage.amount) return left_coverage.amount > right_coverage.amount
+  if (origin !== undefined) {
+    const left_origin = squared_distance(left.position, origin)
+    const right_origin = squared_distance(right.position, origin)
+    if (left_origin !== right_origin) return left_origin < right_origin
+  }
   if (left.distance_from_center !== right.distance_from_center) return left.distance_from_center < right.distance_from_center
   if (left.position.y !== right.position.y) return left.position.y < right.position.y
   if (left.position.x !== right.position.x) return left.position.x < right.position.x
   return left.direction < right.direction
 }
 
-export function sort_candidates(values: PlacementCandidate[], target_resource?: string) {
+export function sort_candidates(values: PlacementCandidate[], target_resource?: string, origin?: { x: number, y: number }) {
   // Bottom-up stable merge sort: a maximum-radius scan can yield ~10k legal
   // candidates. Quadratic sorting blocked the single simulation thread.
   const scratch: PlacementCandidate[] = []
@@ -218,7 +252,7 @@ export function sort_candidates(values: PlacementCandidate[], target_resource?: 
       let left = start
       let right = middle
       for (let index = start; index < end; index++) {
-        if (left < middle && (right >= end || !better(values[right], values[left], target_resource))) {
+        if (left < middle && (right >= end || !better(values[right], values[left], target_resource, origin))) {
           scratch[index] = values[left++]
         }
         else scratch[index] = values[right++]
@@ -248,15 +282,34 @@ function same_position(left: PlacementCandidate, right: PlacementCandidate) {
 }
 
 function port_signature(port: CandidateFluidPort) {
-  return `${port.storage_index}:${port.connection_index}:${port.production_type ?? ''}:${port.filter ?? ''}:${port.flow_direction ?? ''}:${port.position.x}:${port.position.y}:${port.direction ?? ''}`
+  return `${port.production_type ?? ''}:${port.filter ?? ''}:${port.flow_direction ?? ''}:${port.position.x}:${port.position.y}:${port.direction ?? ''}`
 }
 
+// Two orientations are the same geometry when they expose the same ports on the
+// same tiles, whichever connection of the prototype each port came from: the
+// two ends of a symmetric machine swap under a half turn. The fluid parts are
+// therefore compared as a sorted set, not as a list.
 function spatial_signature(candidate: PlacementCandidate) {
   const parts: string[] = []
   if (candidate.item_output_position !== undefined) {
     parts.push(`out:${candidate.item_output_position.x}:${candidate.item_output_position.y}`)
   }
-  for (const port of candidate.fluid_ports ?? []) parts.push(`fluid:${port_signature(port)}`)
+  const fluid: string[] = []
+  for (const port of candidate.fluid_ports ?? []) fluid.push(`fluid:${port_signature(port)}`)
+  for (let i = 0; i < fluid.length; i++) {
+    for (let j = i + 1; j < fluid.length; j++) {
+      if (fluid[j] < fluid[i]) {
+        const tmp = fluid[i]
+        fluid[i] = fluid[j]
+        fluid[j] = tmp
+      }
+    }
+  }
+  for (const part of fluid) parts.push(part)
+  if (candidate.connects_to !== undefined) {
+    const joined = candidate.connects_to.candidate_port
+    parts.push(`joins:${candidate.connects_to.unit_number}:${candidate.connects_to.target_port.storage_index}:${candidate.connects_to.target_port.connection_index}:${joined.filter ?? ''}:${joined.flow_direction ?? ''}`)
+  }
   return parts.join('|')
 }
 
@@ -309,11 +362,70 @@ function candidate_has_target_resource(candidate: PlacementCandidate, target_res
   return false
 }
 
+interface JoinTarget {
+  unit_number: number
+  entity_name: string
+  ports: LiveFluidPort[]
+}
+
+function bounded_index(value: unknown, maximum: number) {
+  return typeof value === 'number' && value === math.floor(value) && value >= 1 && value <= maximum
+}
+
+function join_failure(code: string, error: string, unit_number?: number) {
+  return { ok: false as const, code, error, unit_number }
+}
+
 /**
- * Enumerate legal placement choices locally using the running game's entity
+ * Resolve the live entity and the open fluid ports a connects_to request names.
+ * The entity must be on the actor surface and force; with no connection_index only
+ * unconnected ports are targets, because a connected port already has a neighbour.
+ */
+function resolve_join_target(actor: ControlledActor, request: PlacementConnectsTo) {
+  if (typeof request !== 'object' || !bounded_index(request.unit_number, 9007199254740991)) {
+    return join_failure('invalid_connects_to', 'connects_to.unit_number must be a positive integer')
+  }
+  if (request.storage_index !== undefined && !bounded_index(request.storage_index, 8)) {
+    return join_failure('invalid_connects_to', 'connects_to.storage_index must be an integer from 1 to 8', request.unit_number)
+  }
+  if (request.connection_index !== undefined && !bounded_index(request.connection_index, 8)) {
+    return join_failure('invalid_connects_to', 'connects_to.connection_index must be an integer from 1 to 8', request.unit_number)
+  }
+  const entity = resolve_exact_entity(actor, request.unit_number)
+  if (!entity || !entity.valid || entity.surface.index !== actor.surface.index || entity.force.index !== actor.force.index) {
+    return join_failure('connects_to_entity_not_found', 'connects_to entity is not on this surface and force', request.unit_number)
+  }
+  const ports: LiveFluidPort[] = []
+  let matched = 0
+  for (const port of live_fluid_ports(entity)) {
+    if (request.storage_index !== undefined && port.storage_index !== request.storage_index) continue
+    if (request.connection_index !== undefined && port.connection_index !== request.connection_index) continue
+    matched += 1
+    if (request.connection_index === undefined && port.connected) continue
+    ports.push(port)
+  }
+  if (matched === 0) return join_failure('connects_to_port_not_found', 'connects_to entity has no such fluid port', request.unit_number)
+  if (ports.length === 0) return join_failure('connects_to_port_unavailable', 'every matching fluid port is already connected', request.unit_number)
+  return { ok: true as const, target: { unit_number: request.unit_number, entity_name: entity.name, ports } as JoinTarget }
+}
+
+function joining_port(candidate: PlacementCandidate, target: LiveFluidPort) {
+  for (const port of candidate.fluid_ports ?? []) {
+    if (fluid_ports_join(target, port)) return port
+  }
+  return undefined
+}
+
+/**
+ * Enumerate legal placement choices locally using the running game entity
  * prototype and LuaSurface.can_place_entity. Resource coverage, mining search
  * offsets, output vectors, and fluid-port geometry are derived from active
  * prototype/runtime data so modded entities participate without name cases.
+ *
+ * With connects_to the footprints are solved from the prototype pipe connections
+ * so that a port lands on the tile the live port opens onto, instead of scanning
+ * a square and hoping an aligned footprint is among the first few. Placement whose
+ * legality is decided by tile rules (a shoreline) is ordered nearest the actor first.
  */
 export function placement_candidates_for_actor(actor: ControlledActor, request: PlacementCandidateRequest) {
   const prototype = prototypes.entity[request.entity_name]
@@ -323,60 +435,115 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
   if (covers !== undefined && (!finite(covers.x) || !finite(covers.y))) {
     return { ok: false as const, error: 'covers_position must be finite', entity_name: request.entity_name }
   }
-  const center = request.center ?? covers ?? actor.position
+  let join_target: JoinTarget | undefined
+  if (request.connects_to !== undefined) {
+    const resolved = resolve_join_target(actor, request.connects_to)
+    if (!resolved.ok) return { ok: false as const, error: resolved.error, code: resolved.code, entity_name: request.entity_name, unit_number: resolved.unit_number }
+    join_target = resolved.target
+  }
+  const join_origin = join_target !== undefined ? join_target.ports[0].target_position : undefined
+  const center = request.center ?? covers ?? join_origin ?? actor.position
   if (!finite(center.x) || !finite(center.y)) return { ok: false as const, error: 'center must be finite', entity_name: request.entity_name }
   const radius = math.max(1, math.min(MAX_RADIUS, math.floor(request.radius ?? (covers !== undefined ? COVERS_POSITION_DEFAULT_RADIUS : 8))))
   const limit = math.max(1, math.min(MAX_LIMIT, math.floor(request.limit ?? 5)))
   const directions = directions_for(prototype)
   const check_args = placement_check_args(request.entity_name)
+  const nearest_first = check_args.build_check_type !== undefined
+  const distance_origin = nearest_first ? { x: actor.position.x, y: actor.position.y } : undefined
   const candidates: PlacementCandidate[] = []
   let scanned = 0
 
-  for (const direction of directions) {
-    const snapped_center = snap_placement_center(prototype, center, direction)
-    for (let dy = -radius; dy <= radius; dy++) {
-      for (let dx = -radius; dx <= radius; dx++) {
-        const position = { x: snapped_center.x + dx, y: snapped_center.y + dy }
-        scanned += 1
+  function consider(position: { x: number, y: number }, direction: number) {
+    if (!actor.surface.can_place_entity({
+      name: request.entity_name,
+      position,
+      direction,
+      force: actor.force,
+      ...check_args,
+    })) return undefined
+    if (covers !== undefined && !placement_footprint_covers_point(prototype, position, direction, covers)) return undefined
+
+    const coverage = resource_coverage(actor, prototype, position, direction, request.target_resource)
+    if (request.target_resource !== undefined) {
+      let covered = false
+      for (const value of coverage ?? []) if (value.name === request.target_resource && value.entities > 0) covered = true
+      if (!covered) return undefined
+    }
+
+    const candidate: PlacementCandidate = {
+      id: '',
+      position,
+      direction,
+      distance_from_center: math.sqrt(squared_distance(position, center)),
+      footprint: placement_footprint(prototype, position, direction),
+    }
+    if (distance_origin !== undefined) candidate.distance_from_actor = math.sqrt(squared_distance(position, distance_origin))
+    const output = item_output_position(prototype, position, direction)
+    if (output !== undefined) candidate.item_output_position = output
+    const fluid_ports = candidate_fluid_ports(prototype, position, direction)
+    if (fluid_ports !== undefined) candidate.fluid_ports = fluid_ports
+    if (coverage !== undefined && coverage.length > 0) candidate.resource_coverage = coverage
+    return candidate
+  }
+
+  if (join_target !== undefined) {
+    const seen: Record<string, boolean> = {}
+    for (const target of join_target.ports) {
+      for (const direction of directions) {
+        for (const port of candidate_fluid_ports(prototype, { x: 0, y: 0 }, direction) ?? []) {
+          scanned += 1
+          const position = { x: target.target_position.x - port.position.x, y: target.target_position.y - port.position.y }
+          if (!placement_grid_check(prototype, position, direction).valid) continue
+          const key = `${target.storage_index}:${target.connection_index}:${position.x}:${position.y}:${direction}`
+          if (seen[key] === true) continue
+          seen[key] = true
+          const candidate = consider(position, direction)
+          if (candidate === undefined) continue
+          const joined = joining_port(candidate, target)
+          if (joined === undefined) continue
+          candidate.connects_to = {
+            unit_number: join_target.unit_number,
+            entity_name: join_target.entity_name,
+            target_port: { storage_index: target.storage_index, connection_index: target.connection_index },
+            candidate_port: {
+              storage_index: joined.storage_index,
+              connection_index: joined.connection_index,
+              direction: joined.direction,
+              filter: joined.filter,
+              flow_direction: joined.flow_direction,
+            },
+            tile: { x: target.target_position.x, y: target.target_position.y },
+          }
+          candidates.push(candidate)
+        }
+      }
+    }
+  }
+  else {
+    for (const direction of directions) {
+      const snapped_center = snap_placement_center(prototype, center, direction)
+      for (let dy = -radius; dy <= radius; dy++) {
+        for (let dx = -radius; dx <= radius; dx++) {
+          const position = { x: snapped_center.x + dx, y: snapped_center.y + dy }
+          scanned += 1
+          if (scanned > MAX_SCANNED_POSITIONS) break
+          const candidate = consider(position, direction)
+          if (candidate !== undefined) candidates.push(candidate)
+        }
         if (scanned > MAX_SCANNED_POSITIONS) break
-        if (!actor.surface.can_place_entity({
-          name: request.entity_name,
-          position,
-          direction,
-          force: actor.force,
-          ...check_args,
-        })) continue
-        if (covers !== undefined && !placement_footprint_covers_point(prototype, position, direction, covers)) continue
-
-        const coverage = resource_coverage(actor, prototype, position, direction, request.target_resource)
-        if (request.target_resource !== undefined) {
-          let covered = false
-          for (const value of coverage ?? []) if (value.name === request.target_resource && value.entities > 0) covered = true
-          if (!covered) continue
-        }
-
-        const candidate: PlacementCandidate = {
-          id: '',
-          position,
-          direction,
-          distance_from_center: math.sqrt(squared_distance(position, center)),
-          footprint: placement_footprint(prototype, position, direction),
-        }
-        const output = item_output_position(prototype, position, direction)
-        if (output !== undefined) candidate.item_output_position = output
-        const fluid_ports = candidate_fluid_ports(prototype, position, direction)
-        if (fluid_ports !== undefined) candidate.fluid_ports = fluid_ports
-        if (coverage !== undefined && coverage.length > 0) candidate.resource_coverage = coverage
-        candidates.push(candidate)
       }
       if (scanned > MAX_SCANNED_POSITIONS) break
     }
-    if (scanned > MAX_SCANNED_POSITIONS) break
   }
 
-  sort_candidates(candidates, request.target_resource)
+  sort_candidates(candidates, request.target_resource, distance_origin)
   const selected = diverse_top(candidates, limit)
   for (let index = 0; index < selected.length; index++) selected[index].id = `candidate-${index + 1}`
+
+  const reach = pole_reach(prototype)
+  if (reach !== undefined) {
+    for (const candidate of selected) candidate.electric = pole_candidate_facts(actor, prototype, candidate.position)
+  }
 
   return {
     ok: true as const,
@@ -385,6 +552,22 @@ export function placement_candidates_for_actor(actor: ControlledActor, request: 
     radius,
     target_resource: request.target_resource,
     covers_position: covers,
+    connects_to: join_target === undefined
+      ? undefined
+      : {
+          unit_number: join_target.unit_number,
+          entity_name: join_target.entity_name,
+          target_ports: join_target.ports.map(port => ({
+            storage_index: port.storage_index,
+            connection_index: port.connection_index,
+            tile: port.target_position,
+            own_tile: port.position,
+            filter: port.filter,
+            flow_direction: port.flow_direction,
+          })),
+        },
+    ordering: nearest_first ? 'nearest_to_actor_first' : 'resource_coverage_then_nearest_to_center',
+    electric_pole: reach,
     scanned,
     legal_candidate_count: candidates.length,
     returned_candidate_count: selected.length,
@@ -397,6 +580,14 @@ export function create_placement_candidate_set(actor: ControlledActor, request: 
   if (!result.ok) return result
 
   const id = next_candidate_set_id()
+  // The set is persisted in the save: keep what execution revalidates, not the
+  // live electric-network read, which is only for the answer.
+  const stored: PlacementCandidate[] = []
+  for (const candidate of result.candidates) {
+    const copy: PlacementCandidate = { ...candidate }
+    copy.electric = undefined
+    stored.push(copy)
+  }
   const set: PlacementCandidateSet = {
     id,
     generated_tick: game.tick,
@@ -404,7 +595,7 @@ export function create_placement_candidate_set(actor: ControlledActor, request: 
     surface_index: actor.surface.index,
     force_index: actor.force.index,
     target_resource: result.target_resource,
-    candidates: result.candidates,
+    candidates: stored,
   }
   store_candidate_set(set)
   return {
@@ -413,6 +604,27 @@ export function create_placement_candidate_set(actor: ControlledActor, request: 
     generated_tick: set.generated_tick,
     expires_tick: set.generated_tick + CANDIDATE_TTL_TICKS,
   }
+}
+
+/**
+ * Why a stored connection candidate no longer joins its target, or undefined when it still does: the live
+ * port must still exist, be open, and sit where the footprint (recomputed from the prototype) puts its port.
+ */
+function join_change(target: LuaEntity, prototype: any, candidate: PlacementCandidate) {
+  const join = candidate.connects_to
+  if (join === undefined) return undefined
+  let live: LiveFluidPort | undefined
+  for (const port of live_fluid_ports(target)) {
+    if (port.storage_index === join.target_port.storage_index && port.connection_index === join.target_port.connection_index) live = port
+  }
+  if (live === undefined) return 'the target fluid port no longer exists'
+  if (live.connected) return 'the target fluid port is already connected'
+  let own: CandidateFluidPort | undefined
+  for (const port of candidate_fluid_ports(prototype, candidate.position, candidate.direction) ?? []) {
+    if (port.storage_index === join.candidate_port.storage_index && port.connection_index === join.candidate_port.connection_index) own = port
+  }
+  if (own === undefined || !fluid_ports_join(live, own)) return 'the target fluid port no longer lines up with the stored footprint'
+  return undefined
 }
 
 function resolve_placement_candidate(
@@ -436,6 +648,15 @@ function resolve_placement_candidate(
 
   const prototype = prototypes.entity[set.entity_name]
   if (!prototype) return { ok: false as const, error: 'entity prototype is no longer available' }
+  if (candidate.connects_to !== undefined) {
+    // A connection candidate is only meaningful next to the entity it was solved for.
+    const target = resolve_exact_entity(actor, candidate.connects_to.unit_number)
+    if (!target || !target.valid || target.surface.index !== set.surface_index || target.force.index !== set.force_index) {
+      return { ok: false as const, error: 'placement candidate connection target is no longer available' }
+    }
+    const changed = join_change(target, prototype, candidate)
+    if (changed !== undefined) return { ok: false as const, code: 'connects_to_port_changed', error: `connects_to_port_changed: ${changed}` }
+  }
   if (!actor.surface.can_place_entity({
     name: set.entity_name,
     position: candidate.position,
@@ -457,6 +678,7 @@ function resolve_placement_candidate(
 
 export function placement_candidate_preflight(actor: ControlledActor, candidate_set_id: string, candidate_id: string) {
   const resolved = resolve_placement_candidate(actor, candidate_set_id, candidate_id)
+  // A changed join keeps the stale-candidate class; its error text starts with connects_to_port_changed.
   if (!resolved.ok) return { ok: false, code: 'placement_candidate_unavailable', error: resolved.error }
   // Only the native registry supplies entity identity and geometry.
   return placement_item_preflight(actor, resolved.set.entity_name)
