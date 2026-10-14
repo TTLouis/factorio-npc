@@ -304,3 +304,64 @@ describe('exact entity status observation', () => {
     expect(lookup).not.toHaveBeenCalled()
   })
 })
+
+describe('entity_count conditions (build steps)', () => {
+  function fixture(entities: any[]) {
+    ;(globalThis as any).game.tick = 77
+    ;(globalThis as any).defines.entity_status = { working: 1, no_power: 2, low_power: 3 }
+    ;(globalThis as any).prototypes = { item: {}, entity: { 'boiler': {}, 'steam-engine': {}, 'small-electric-pole': {} }, space_location: {} }
+    const force = { index: 1, name: 'player' }
+    const count = vi.fn((_filters: any) => entities.length)
+    const find = vi.fn((_filters: any) => entities)
+    actor_state.actor = { position: { x: 5, y: 6 }, force, surface: { index: 1, count_entities_filtered: count, find_entities_filtered: find } }
+    return { force, count, find }
+  }
+  const engine = (status: number, network?: number) => ({ valid: true, name: 'steam-engine', status, electric_network_id: network })
+
+  it('counts the force\'s placed entities of the prototype from the live world, never a receipt, and never a ghost', async () => {
+    const { force, count } = fixture([engine(1), engine(1), engine(1)])
+    const tools = await tools_interface()
+    const met = tools.evaluate_condition({ kind: 'entity_count', prototype: 'steam-engine', minimum: 3 })
+    expect(met).toMatchObject({ ok: true, kind: 'entity_count', prototype: 'steam-engine', minimum: 3, current: 3, found: 3, truncated: false, satisfied: true, tick: 77 })
+    expect(tools.evaluate_condition({ kind: 'entity_count', prototype: 'steam-engine', minimum: 4 })).toMatchObject({ satisfied: false, current: 3 })
+    // A name filter on the prototype and the NPC's force; no ghost filter, so a ghost (name entity-ghost) is not counted.
+    expect(count).toHaveBeenLastCalledWith({ name: 'steam-engine', force })
+  })
+
+  it('narrows by a radius around the actor or around a recorded anchor', async () => {
+    const { force, count } = fixture([engine(1)])
+    const tools = await tools_interface()
+    expect(tools.evaluate_condition({ kind: 'entity_count', prototype: 'steam-engine', minimum: 1, radius: 30 })).toMatchObject({ ok: true, satisfied: true, radius: 30 })
+    expect(count).toHaveBeenLastCalledWith({ name: 'steam-engine', force, position: { x: 5, y: 6 }, radius: 30 })
+    const anchored = tools.evaluate_condition({ kind: 'entity_count', prototype: 'steam-engine', minimum: 1, radius: 12, anchor: { x: -40, y: 8 } })
+    expect(anchored).toMatchObject({ ok: true, radius: 12, anchor: { x: -40, y: 8 } })
+    expect(count).toHaveBeenLastCalledWith({ name: 'steam-engine', force, position: { x: -40, y: 8 }, radius: 12 })
+  })
+
+  it('counts only entities in the requested state: working, or powered (on a network, not short of power)', async () => {
+    fixture([engine(1, 7), engine(2, 7), engine(3, 8), engine(1, undefined)])
+    const tools = await tools_interface()
+    expect(tools.evaluate_condition({ kind: 'entity_count', prototype: 'steam-engine', minimum: 2, state: 'working' })).toMatchObject({ ok: true, current: 2, found: 4, state: 'working', satisfied: true })
+    expect(tools.evaluate_condition({ kind: 'entity_count', prototype: 'steam-engine', minimum: 2, state: 'powered' })).toMatchObject({ ok: true, current: 1, satisfied: false, state: 'powered' })
+  })
+
+  it('refuses malformed or unknown requests without an engine query, and needs a body', async () => {
+    const { count, find } = fixture([])
+    const tools = await tools_interface()
+    for (const [request, error] of [
+      [{ prototype: 'not-an-entity', minimum: 1 }, 'unknown_entity'],
+      [{ prototype: 'boiler', minimum: 0 }, 'invalid_entity_count_condition'],
+      [{ minimum: 1 }, 'invalid_entity_count_condition'],
+      [{ prototype: 'boiler', minimum: 1, state: 'hovering' }, 'invalid_entity_count_state'],
+      [{ prototype: 'boiler', minimum: 1, radius: 257 }, 'invalid_entity_count_radius'],
+      [{ prototype: 'boiler', minimum: 1, anchor: { x: 1, y: 2 } }, 'invalid_entity_count_anchor'],
+      [{ prototype: 'boiler', minimum: 1, radius: 5, anchor: { x: 'a', y: 2 } }, 'invalid_entity_count_anchor'],
+    ] as Array<[Record<string, unknown>, string]>) {
+      expect(tools.evaluate_condition({ kind: 'entity_count', ...request })).toMatchObject({ ok: false, error })
+    }
+    expect(count).not.toHaveBeenCalled()
+    expect(find).not.toHaveBeenCalled()
+    actor_state.actor = undefined
+    expect(tools.evaluate_condition({ kind: 'entity_count', prototype: 'boiler', minimum: 1 })).toEqual({ ok: false, error: 'no_actor' })
+  })
+})
