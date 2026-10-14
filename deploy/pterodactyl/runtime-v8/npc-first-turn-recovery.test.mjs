@@ -379,16 +379,17 @@ test('a code nobody listed anywhere gets the correction turn because its produce
   assert.equal(rcon.mutations.length, 1)
 })
 
-test('a world-class refusal ends as blocked_preflight even when its code is one the model could once correct', async () => {
+test('a world-class refusal gets the world-correction message, not the argument one, even when its code is one the model could once correct', async () => {
   const { harness, traced, result } = await runWithMockRefusal({ code: 'unknown_prototype', refusal_class: 'world' })
   assert.equal(harness.filter(content => content.includes('naming/argument error')).length, 0)
-  assert.equal(traced.filter(row => row.event === 'operations.preflight_recoverable').length, 0)
+  assert.equal(harness.filter(content => content.includes('was refused before admission: unknown_prototype')).length, 1)
+  const recoverable = traced.filter(row => row.event === 'operations.preflight_recoverable')
+  assert.equal(recoverable.length, 1)
+  assert.equal(recoverable[0].data.failure_class, 'world_correction_unknown_prototype')
+  assert.equal(recoverable[0].data.refusal_class, 'world')
   assert.equal(traced.filter(row => row.event === 'operations.preflight_unclassified').length, 0)
-  const rejected = traced.filter(row => row.event === 'operations.preflight_rejected')
-  assert.equal(rejected.length, 1)
-  assert.equal(rejected[0].data.refusal_class, 'world')
-  assert.equal(result.blocker.code, 'unknown_prototype')
-  assert.equal(traced.find(row => row.event === 'request.completed').data.outcome, 'blocked_preflight')
+  assert.equal(traced.filter(row => row.event === 'operations.preflight_rejected').length, 0, 'the correction turn did not end the request')
+  assert.equal(result.operations[0].name, 'wait', 'the corrected batch was admitted')
 })
 
 test('an authority-class refusal gets the authorization message and one retry', async () => {

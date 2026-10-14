@@ -209,7 +209,8 @@ test('restart with an outstanding operation: both identical and changed deliveri
   memory.restore(wire)
   assert.equal(memory.pendingOperation(KEY).operation_key, first.pending().operation_key, 'the outstanding operation survives the restart')
 
-  const second = harness({ memory, game: first.game, replies: [deliveryPlan(), deliveryPlan(3), planReply({operations:[]})] })
+  // The third delivery is refused after the hold's own recovery is spent: one world-correction turn, then a pause.
+  const second = harness({ memory, game: first.game, replies: [deliveryPlan(), deliveryPlan(3), deliveryPlan(3)] })
   await recoverInterruptedAgentPlan(second.agent, 'runtime_restart', {})
 
   const reconciled = second.named('operation.reconciled').filter(row => row.trigger === 'runtime_restart')
@@ -222,7 +223,7 @@ test('restart with an outstanding operation: both identical and changed deliveri
 
   // The model replays the identical delivery: refused before admission, nothing reaches the game.
   const suppressed = second.named('operation.duplicate_suppressed')
-  assert.equal(suppressed.length, 2)
+  assert.equal(suppressed.length, 3)
   assert.equal(suppressed[0].reason, 'unresolved_operation_scope_conflict')
   assert.equal(suppressed[0].effect, 'partial_unknown')
   assert.deepEqual(suppressed[0].effect_classes, ['delivery'])

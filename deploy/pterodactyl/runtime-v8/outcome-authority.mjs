@@ -32,7 +32,12 @@ const COMPLETION_EVIDENCE_KINDS = new Set([
 // Allowlist (fail closed): only these reasons are known to be fixed by a fresh restage, so only they auto-resume. Every other reason,
 // including a new one, a Jev failure class, provider_safety and the *_retry_exhausted preflight pauses (the model was corrected
 // repeatedly and did not comply; a fresh restage is not shown to change that), is a guard pause that needs a player.
-export const MODEL_RECOVERABLE_OUTCOME_REASONS = Object.freeze(new Set(['provider_budget', 'provider_format']))
+//
+// preflight_world_refusal_uncorrected is an owner-delegated exception (2026-10-14, run G): a world-class preflight refusal that is not a
+// harness-evidenced structural blocker got one correction turn with its facts and was refused again. Unlike the *_retry_exhausted
+// pauses, ending the request here leaves an idle NPC with an active goal and no other wake, so it must be visible and must resume.
+// A fresh restage gives the executor new observations; unit 7's persisted caps (per step without progress, per goal) bound it.
+export const MODEL_RECOVERABLE_OUTCOME_REASONS = Object.freeze(new Set(['provider_budget', 'provider_format', 'preflight_world_refusal_uncorrected']))
 
 const PROVIDER_CONTROL_PLANE_FAILURES = new Set([
   'provider_format',
