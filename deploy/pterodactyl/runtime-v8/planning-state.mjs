@@ -47,6 +47,7 @@ import {
   serializeAuthorization,
 } from './authorization.mjs'
 import { sanitizePendingOperation } from './operation-reconciliation.mjs'
+import { AUTO_RESUMABLE_PAUSE_CLASSES, isPauseClass, MODEL_RECOVERABLE_RESUME_LIMITS, PAUSE_CLASS, TRANSPORT_SUBKINDS } from './pause-class.mjs'
 import { operationLedger, recordOperation, settleOperation } from './operation-ledger.mjs'
 import {
   addTask,
@@ -387,6 +388,9 @@ export const PLANNING_EVENT = Object.freeze({
   // touches plan semantics, the active step or approval state.
   RUN_PAUSED: 'RUN_PAUSED',
   RUN_RESUMED: 'RUN_RESUMED',
+  // A model_recoverable pause is being resumed automatically (pause-class.mjs). The reducer counts the attempt per step identity
+  // and per goal, durably, and refuses an attempt whose goal, plan, plan version or step is no longer the live one.
+  RUN_AUTO_RESUME_STARTED: 'RUN_AUTO_RESUME_STARTED',
   // Single-writer runtime fields. null clears the field.
   CONDITION_WAIT_RECORDED: 'CONDITION_WAIT_RECORDED',
   PROVIDER_RECOVERY_RECORDED: 'PROVIDER_RECOVERY_RECORDED',
@@ -626,6 +630,82 @@ function boundedRecord(value) {
   return bounded && Object.keys(bounded).length > 0 ? bounded : null
 }
 
+function pauseClassFields(event) {
+  const declared = isPauseClass(event.pause_class) ? event.pause_class : ''
+  return {
+    pause_class: declared,
+    pause_subkind: declared === PAUSE_CLASS.TRANSPORT && TRANSPORT_SUBKINDS.includes(event.pause_subkind) ? event.pause_subkind : '',
+  }
+}
+
+const AUTO_RESUME_RETAINED_STEPS = 16
+const STICKY_PAUSE_CLASSES = Object.freeze([PAUSE_CLASS.OPERATOR, PAUSE_CLASS.AUTHORITY, PAUSE_CLASS.GUARD])
+
+// What a verified-world-progress reset compares. Admission is not progress: only the step finishing, evidence the reducer
+// accepted for the step, or a `deterministic_verification` landing in the step's receipt ledger (a batch receipt whose effect the
+// harness verified) change it.
+function stepProgressMark(plan, stepId) {
+  const progress = plan.execution?.step_progress?.[stepId]
+  const receipts = Array.isArray(plan.execution?.receipts?.[stepId]) ? plan.execution.receipts[stepId] : []
+  const lastReceiptSeq = receipts.reduce((max, item) => (item.kind === 'deterministic_verification' && item.ref ? Math.max(max, item.seq ?? 0) : max), 0)
+  return `${progress?.status ?? 'none'}|${progress?.accepted_evidence?.length ?? 0}|${lastReceiptSeq}`
+}
+
+/**
+ * The automatic-resume allowance for the live goal / plan / plan version / step, read from durable run state.
+ *   step_attempts  attempts for this step identity since its last verified progress (0 when progress happened since).
+ *   goal_attempts  attempts for the goal in total (never reset by progress).
+ *   limit_kind     'step' | 'goal' when that limit is already reached, else undefined. Goal wins when both are reached.
+ * No goal or no active plan: step_key is undefined and nothing can be attempted.
+ */
+export function autoResumeAllowance(state, { limits = MODEL_RECOVERABLE_RESUME_LIMITS } = {}) {
+  const goalId = state?.goal?.goal_id
+  const plan = getActivePlan(state)
+  const step = plan?.steps?.[plan.active_step_index]
+  const base = { per_step: limits.per_step, per_goal: limits.per_goal, step_attempts: 0, goal_attempts: 0, limit_kind: undefined }
+  if (!goalId || !plan || !step) return { ...base, goal_id: goalId }
+  const stepKey = `${plan.plan_id}|${plan.plan_version}|${step.step_id}`
+  const held = state.run?.auto_resume?.goal_id === goalId ? state.run.auto_resume : null
+  const entry = held?.steps?.find(item => item.step_key === stepKey)
+  const mark = stepProgressMark(plan, step.step_id)
+  const progressed = !!entry && entry.mark !== mark
+  const stepAttempts = entry && !progressed ? entry.attempts : 0
+  const goalAttempts = held?.goal_total ?? 0
+  return {
+    ...base,
+    goal_id: goalId,
+    plan_id: plan.plan_id,
+    plan_version: plan.plan_version,
+    step_id: step.step_id,
+    step_key: stepKey,
+    mark,
+    progressed,
+    step_attempts: stepAttempts,
+    goal_attempts: goalAttempts,
+    limit_kind: goalAttempts >= limits.per_goal ? 'goal' : stepAttempts >= limits.per_step ? 'step' : undefined,
+  }
+}
+
+function restoreAutoResume(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const goalId = text(raw.goal_id, 120)
+  if (!goalId) return null
+  const steps = (Array.isArray(raw.steps) ? raw.steps : []).flatMap((entry) => {
+    const stepKey = text(entry?.step_key, 520)
+    if (!stepKey || !Number.isSafeInteger(entry?.attempts) || entry.attempts < 0) return []
+    return [{
+      step_key: stepKey,
+      plan_id: text(entry.plan_id, 200),
+      plan_version: Number.isSafeInteger(entry.plan_version) ? entry.plan_version : 0,
+      step_id: text(entry.step_id, 200),
+      attempts: Math.min(entry.attempts, 1000),
+      mark: text(entry.mark, 80),
+      last_at: finiteNumber(entry.last_at) ?? 0,
+    }]
+  }).slice(-AUTO_RESUME_RETAINED_STEPS)
+  return { goal_id: goalId, goal_total: Number.isSafeInteger(raw.goal_total) && raw.goal_total >= 0 ? Math.min(raw.goal_total, 10000) : 0, steps }
+}
+
 function pauseCodeOf(reason) {
   return text(String(reason ?? '').split(':')[0], RUN_STATE_LIMITS.pauseCode)
 }
@@ -635,6 +715,11 @@ export function createEmptyRunState() {
     paused: false,
     pause_reason: '',
     pause_code: '',
+    // Declared by whoever created the pause (pause-class.mjs); '' on a run that is not paused or whose pause declared nothing.
+    pause_class: '',
+    pause_subkind: '',
+    // Durable, bounded count of automatic model_recoverable resumes (see autoResumeAllowance). Survives resume and restart.
+    auto_resume: null,
     paused_at: null,
     resumed_at: null,
     pause_count: 0,
@@ -2665,7 +2750,7 @@ Object.assign(HANDLERS, {
       // The user's revision takes the goal out of its pause: a blocked plan
       // that was also paused must not leave the successor's run paused.
       run: state.run?.paused
-        ? { ...state.run, paused: false, pause_reason: '', pause_code: '', resumed_at: now, updated_at: now }
+        ? { ...state.run, paused: false, pause_reason: '', pause_code: '', pause_class: '', pause_subkind: '', resumed_at: now, updated_at: now }
         : state.run,
       updated_at: now,
       log: logEntry(state, {
@@ -3034,6 +3119,9 @@ Object.assign(HANDLERS, {
   [PLANNING_EVENT.RUN_PAUSED](state, event, now) {
     if (!runEventAllowed(state, event)) return state
     const run = state.run ?? createEmptyRunState()
+    // A pause that needs a person (operator, authority, guard) is never downgraded to one a timer resumes (model_recoverable,
+    // transport): a failure that lands after a stop must not turn the stop back into a retry. The first pause stands unchanged.
+    if (run.paused && STICKY_PAUSE_CLASSES.includes(run.pause_class) && AUTO_RESUMABLE_PAUSE_CLASSES.includes(event.pause_class)) return state
     const reason = text(event.reason, RUN_STATE_LIMITS.pauseReason)
     return {
       ...state,
@@ -3044,6 +3132,7 @@ Object.assign(HANDLERS, {
         paused: true,
         pause_reason: reason,
         pause_code: text(event.reason_code, RUN_STATE_LIMITS.pauseCode) || pauseCodeOf(reason),
+        ...pauseClassFields(event),
         paused_at: run.paused ? run.paused_at : now,
         pause_count: run.paused ? run.pause_count : run.pause_count + 1,
         condition_wait: null,
@@ -3059,13 +3148,52 @@ Object.assign(HANDLERS, {
     }
   },
 
+  [PLANNING_EVENT.RUN_AUTO_RESUME_STARTED](state, event, now) {
+    if (!runEventAllowed(state, event)) return state
+    const run = state.run ?? createEmptyRunState()
+    if (!run.paused || run.pause_class !== PAUSE_CLASS.MODEL_RECOVERABLE) return state
+    const allowance = autoResumeAllowance(state)
+    // Fail closed on stale correlation: the attempt must name the live goal, plan, plan version and step.
+    if (!allowance.step_key
+      || text(event.plan_id, 200) !== allowance.plan_id
+      || event.plan_version !== allowance.plan_version
+      || text(event.step_id, 200) !== allowance.step_id) return state
+    const held = run.auto_resume?.goal_id === state.goal.goal_id ? run.auto_resume : null
+    const steps = (held?.steps ?? []).filter(entry => entry.step_key !== allowance.step_key)
+    const next = {
+      goal_id: state.goal.goal_id,
+      goal_total: (held?.goal_total ?? 0) + 1,
+      steps: [...steps, {
+        step_key: allowance.step_key,
+        plan_id: allowance.plan_id,
+        plan_version: allowance.plan_version,
+        step_id: allowance.step_id,
+        attempts: allowance.step_attempts + 1,
+        mark: allowance.mark,
+        last_at: now,
+      }].slice(-AUTO_RESUME_RETAINED_STEPS),
+    }
+    return {
+      ...state,
+      run: { ...run, auto_resume: next, updated_at: now },
+      updated_at: now,
+      log: logEntry(state, {
+        type: PLANNING_EVENT.RUN_AUTO_RESUME_STARTED,
+        at: now,
+        plan_id: allowance.plan_id,
+        step_id: allowance.step_id,
+        reason_code: `attempt_${allowance.step_attempts + 1}`,
+      }),
+    }
+  },
+
   [PLANNING_EVENT.RUN_RESUMED](state, event, now) {
     if (!runEventAllowed(state, event)) return state
     const run = state.run
     if (!run?.paused) return state
     return {
       ...state,
-      run: { ...run, paused: false, pause_reason: '', pause_code: '', resumed_at: now, updated_at: now },
+      run: { ...run, paused: false, pause_reason: '', pause_code: '', pause_class: '', pause_subkind: '', resumed_at: now, updated_at: now },
       updated_at: now,
       log: logEntry(state, {
         type: PLANNING_EVENT.RUN_RESUMED,
@@ -3521,7 +3649,7 @@ Object.assign(HANDLERS, {
           ? { ...liveAuth, grants: [], questions: [], approvals: [], refusals: [] }
           : undefined)
     const run = restored.run
-      ? { ...restored.run, paused: false, pause_reason: '', pause_code: '', condition_wait: null, provider_recovery: null, persistent_runtime: null, updated_at: now }
+      ? { ...restored.run, paused: false, pause_reason: '', pause_code: '', pause_class: '', pause_subkind: '', condition_wait: null, provider_recovery: null, persistent_runtime: null, updated_at: now }
       : restored.run
     const next = {
       ...restored,
@@ -3966,6 +4094,8 @@ function restoreRun(raw) {
     paused,
     pause_reason: reason,
     pause_code: paused ? (text(raw.pause_code, RUN_STATE_LIMITS.pauseCode) || pauseCodeOf(reason)) : '',
+    ...(paused ? pauseClassFields(raw) : { pause_class: '', pause_subkind: '' }),
+    auto_resume: restoreAutoResume(raw.auto_resume),
     paused_at: finiteNumber(raw.paused_at) ?? null,
     resumed_at: finiteNumber(raw.resumed_at) ?? null,
     pause_count: Number.isSafeInteger(raw.pause_count) && raw.pause_count >= 0 ? raw.pause_count : 0,

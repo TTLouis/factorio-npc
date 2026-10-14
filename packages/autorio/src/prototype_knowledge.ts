@@ -2,6 +2,7 @@ import type { ControlledActor } from './actors/types'
 import { get_actor_inventory_items } from './utils/inventory'
 import * as rates from './production_rates'
 import { is_placed_building_prototype } from './mining_reach'
+import { electric_prototype_facts } from './electric_facts'
 
 const MAX_PLACE_ITEMS = 4
 const MAX_FLUIDBOX_PROTOTYPES = 8
@@ -240,6 +241,11 @@ function entity_details(prototype: any) {
 
   const mineable = mineable_details(prototype)
   if (mineable) result.mineable = mineable
+
+  // Electric and fluid-throughput facts straight from the prototype: pole supply
+  // area and wire reach, power in watts, burner fuel categories, pump and steam rates.
+  const electric = electric_prototype_facts(prototype)
+  for (const key in electric) result[key] = electric[key]
 
   if (prototype.crafting_categories) {
     result.crafting = {

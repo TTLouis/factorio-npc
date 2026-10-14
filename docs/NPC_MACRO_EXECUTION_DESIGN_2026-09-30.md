@@ -133,6 +133,9 @@ progress. A fresh context, replacement plan or new slice must not erase stagnati
 When bounded recovery cannot progress, preserve the task and ask or pause visibly;
 independent work remains subject to its own authorization and the shared allowance.
 Exact recovery thresholds remain an implementation-design question.
+Implemented 2026-10-13 for automatic resume of `model_recoverable` pauses only (`runtime-v8/pause-class.mjs`): at most 2 resumes per
+step identity (goal, plan, plan version, step) without verified progress and 6 per goal, both persisted in plan state (owner-delegated
+2026-10-13). These count resume attempts; they are not the campaign provider allowance, whose limit and accounting unit stay open.
 
 ## 5. Week 1 build sequence and acceptance
 

@@ -74,6 +74,12 @@ import { estimateTokensFromChars } from './restage-policy.mjs'
 //   that skipped a wake) whose outcome disagreed, meaning the step it skipped the wake for did not verify on
 //   its first batch.
 
+// - model_recoverable_pause_not_resumed, auto_resume_exhausted: automatic resume of model_recoverable pauses (pause-class.mjs,
+//   supervisor.mjs considerPauseForAutoResume). The first reads a goal.paused row whose `data.pause_class` is model_recoverable and
+//   finds no recovery.auto_resume_scheduled / _exhausted / _cancelled row after it in the same request: the pause was never decided
+//   on, so the plan sits paused with nobody resuming it. The second reads recovery.auto_resume_exhausted (`limit_kind` step | goal):
+//   the bounded automatic resumes ran out and the plan stays paused for a player.
+
 const LOOP_MIN_COUNT = 2
 
 /**
@@ -393,6 +399,34 @@ function detectRejectedBlockerPause(rows) {
   if (!validated) return undefined
   return { count: 1, first_ts: nonEmptyString(window[rejected].ts),
     detail: 'world_blocked_without_authoritative_evidence was relabelled recoverable_provider_failure:provider_reported_blocker and paused the same request' }
+}
+
+const AUTO_RESUME_DECISION_EVENTS = new Set(['recovery.auto_resume_scheduled', 'recovery.auto_resume_exhausted', 'recovery.auto_resume_cancelled'])
+
+// A model_recoverable pause that no auto-resume decision follows. Cancelled counts as a decision (the cancel row names why).
+function detectModelRecoverablePauseNotResumed(rows) {
+  const undecided = rows.flatMap((row, index) => {
+    if (row?.event !== 'goal.paused' || row.data?.pause_class !== 'model_recoverable') return []
+    return rows.slice(index + 1).some(later => AUTO_RESUME_DECISION_EVENTS.has(later?.event)) ? [] : [row]
+  })
+  if (undecided.length === 0) return undefined
+  const first = undecided[0].data
+  return {
+    count: undecided.length,
+    first_ts: firstTsOf(undecided),
+    detail: `paused as model_recoverable (${nonEmptyString(first.pause_reason) ?? nonEmptyString(first.cause) ?? 'no reason'}; goal_id=${nonEmptyString(first.goal_id) ?? 'n/a'}) and no recovery.auto_resume_scheduled, _exhausted or _cancelled row followed`,
+  }
+}
+
+function detectAutoResumeExhausted(rows) {
+  const matches = rows.filter(row => row?.event === 'recovery.auto_resume_exhausted')
+  if (matches.length === 0) return undefined
+  const first = matches[0].data ?? {}
+  return {
+    count: matches.length,
+    first_ts: firstTsOf(matches),
+    detail: `automatic resume exhausted (${nonEmptyString(first.limit_kind) ?? 'unknown'} limit; step ${first.step_attempts ?? 'n/a'}/${first.step_limit ?? 'n/a'}, goal ${first.goal_attempts ?? 'n/a'}/${first.goal_limit ?? 'n/a'}; step_id=${nonEmptyString(first.step_id) ?? 'n/a'}); the plan stays paused for a player`,
+  }
 }
 
 function detectBlockedBeforeMutation(rows) {
@@ -719,6 +753,8 @@ function detectJevDecidingSkipUnverified(rows) {
 }
 
 const SIGNATURES = [
+  { id: 'model_recoverable_pause_not_resumed', label: 'model_recoverable pause with no automatic resume decision', detect: detectModelRecoverablePauseNotResumed },
+  { id: 'auto_resume_exhausted', label: 'automatic resume of a model_recoverable pause exhausted', detect: detectAutoResumeExhausted },
   { id: 'rejected_blocker_pause', label: 'unverified world blocker relabelled as provider pause', detect: detectRejectedBlockerPause },
   { id: 'semantic_contract_dead_end', label: 'delegated semantic contract dead end before gameplay', detect: detectSemanticContractDeadEnd },
   { id: 'executor_research_facts_missing', label: 'paused research step lacks executor research facts', detect: detectExecutorResearchFactsMissing },

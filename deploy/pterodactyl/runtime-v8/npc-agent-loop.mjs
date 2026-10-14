@@ -62,6 +62,7 @@ import {
   withoutRawLeafRecipes,
 } from './handoff-packet.mjs'
 import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CLASS, REPLACEMENT_DECISION } from './authorization.mjs'
+import { isPauseClass, PAUSE_CLASS, pauseClassForCode, pauseClassLabel, transportFailureOf } from './pause-class.mjs'
 import { REFUSAL_CLASS, refusalClassLabel, refusalClassOf } from './refusal-class.mjs'
 import { batchStockDecision, batchStockOperationLines, evaluateBatchStock, stockClaimingOperation } from './batch-stock.mjs'
 import {
@@ -1101,14 +1102,18 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
     state[field] = value
   }
 
-  recordRunPause(_key, state, reason) {
+  recordRunPause(_key, state, reason, pauseInfo = {}) {
     state.pause_reason = reason
+    state.pause_class = isPauseClass(pauseInfo?.pause_class) ? pauseInfo.pause_class : ''
+    state.pause_subkind = typeof pauseInfo?.pause_subkind === 'string' ? pauseInfo.pause_subkind : ''
     state.persistent_runtime = undefined
     state.condition_wait = undefined
   }
 
   recordRunResume(_key, state, _reason) {
     state.pause_reason = ''
+    state.pause_class = ''
+    state.pause_subkind = ''
   }
 
   // Locators recorded by recordPlan. The state literal already carries the
@@ -1298,7 +1303,7 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
     else if (decision.durable_status === 'paused') {
       state.status = 'paused'
       state.blocker = ''
-      this.recordRunPause(key, state, cleanMemoryText(decision.pause_reason || decision.reason_code, 300))
+      this.recordRunPause(key, state, cleanMemoryText(decision.pause_reason || decision.reason_code, 300), decision)
       board = setTaskBoardStatus(board, 'paused', { pauseReason: state.pause_reason, now })
     }
     else if (decision.durable_status === 'completed') {
@@ -1673,7 +1678,9 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
     }, { chatMessage }).state
   }
 
-  pausePlan(key, reason = 'cancelled') {
+  // `pauseInfo.pause_class` is declared by whoever creates the pause (pause-class.mjs); without one the pause is recorded
+  // unclassified, never auto-resumes, and is reported by the supervisor (recovery.pause_unclassified).
+  pausePlan(key, reason = 'cancelled', pauseInfo = {}) {
     return this.applyOutcomeAuthority(key, {
       kind: 'cancelled',
       source: 'server_lifecycle',
@@ -1682,6 +1689,8 @@ export class NpcDialogueMemory extends BaseNpcDialogueMemory {
         server_authoritative: true,
         transition: 'paused',
         pause_reason: reason,
+        pause_class: pauseInfo?.pause_class,
+        pause_subkind: pauseInfo?.pause_subkind,
       },
     }).state
   }
@@ -2584,19 +2593,16 @@ function terminalProviderBudgetCode(value) {
     ?? 'provider_budget'
 }
 
-// Provider conditions that clear by waiting. The supervisor pauses these and
-// resumes automatically, so the loop leaves them to it (same set as
-// supervisor.mjs transientProviderFailure).
-const TRANSIENT_PROVIDER_FAILURE = /Hourly provider request budget reached|\bHTTP 429\b|\bHTTP 5\d\d\b|Provider timed out|\btimed out after \d+ ?ms|fetch failed|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|socket hang up|network error/i
-
+// Provider conditions that clear by waiting are pause_class transport (pause-class.mjs). The supervisor pauses these and
+// resumes them automatically, so the loop leaves them to it.
 // The pause-reason code for a provider failure that ends a request. The codes
 // match the supervisor's stranded-plan pause, so the in-game board shows the
 // same summary for them.
-function providerFailurePauseCause(message) {
+function providerFailurePauseCause(message, failure) {
   const text = String(message ?? '')
   if (!/provider/i.test(text) || /cancelled|superseded|epoch changed/i.test(text)) return undefined
   const budget = /provider_context_window_exceeded|provider_output_budget|finish=length/i.test(text)
-  if (!budget && TRANSIENT_PROVIDER_FAILURE.test(text)) return undefined
+  if (!budget && transportFailureOf(failure ?? text)) return undefined
   if (/provider_output_budget_exhausted|finish=length|output budget/i.test(text)) return 'provider_output_budget_exhausted'
   if (/^Provider response recovery exhausted after \d+ attempts/i.test(text)) return 'provider_recovery_exhausted'
   if (/provider_action_omission_repair_failed/i.test(text)) return 'provider_action_omission_repair_failed'
@@ -7379,7 +7385,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async pauseForStepContract(failure) {
     const detail = cleanMemoryText(failure?.reason, 200)
     const chatMessage = `I paused this goal: I could not get a valid completion checkpoint for the next step (${detail}), so I stopped instead of guessing. ${RESUME_HINT}`
-    const state = await this.pausePersistentPlan('step_contract_unavailable')
+    const state = await this.pausePersistentPlan('step_contract_unavailable', { pause_class: PAUSE_CLASS.GUARD })
     if (this.traceRequest) {
       await this.traceEvent('request.completed', {
         chat_message: chatMessage,
@@ -8768,7 +8774,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
     if (!routed.router_bypassed && intent === 'cancel_current') {
       if (healthyRuntime) await this.cancelInteractionWorldWork(routed.epoch)
-      const state = this.memory.pausePlan?.(memoryKey, 'user_cancel')
+      const state = this.memory.pausePlan?.(memoryKey, 'user_cancel', { pause_class: PAUSE_CLASS.OPERATOR })
       await this.persistState()
       this.clearLoadedSkillContext()
       super.cancel()
@@ -9093,7 +9099,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const key = this.activePlanKey()
     const before = this.memory.planningState?.(key)
     if (!before?.goal || before.goal.status !== GOAL_STATUS.ACTIVE || getActivePlanningPlan(before)) return { goal_id: before?.goal?.goal_id, paused: false }
-    const after = this.memory.dispatchPlanningEvent?.(key, { type: PLANNING_EVENT.RUN_PAUSED, source: 'runtime', goal_id: before.goal.goal_id, reason, now: Date.now() })
+    // Waiting for the player (an answer, or Resume): authority, never resumed by a timer.
+    const after = this.memory.dispatchPlanningEvent?.(key, { type: PLANNING_EVENT.RUN_PAUSED, source: 'runtime', goal_id: before.goal.goal_id, reason, pause_class: PAUSE_CLASS.AUTHORITY, now: Date.now() })
     await this.persistState()
     return { goal_id: before.goal.goal_id, paused: after?.run?.paused === true, requestId }
   }
@@ -9108,10 +9115,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return planning.goal
   }
 
-  async pausePersistentPlan(reason = 'user_stop') {
+  // `pauseInfo.pause_class` is the pause's declared class (pause-class.mjs). Every caller declares one; a missing class is recorded as
+  // unclassified, never auto-resumes, and the supervisor reports it (recovery.pause_unclassified).
+  async pausePersistentPlan(reason = 'user_stop', pauseInfo = {}) {
     await this.loadPersistentState()
     const key = this.activePlanKey()
-    const state = this.memory.pausePlan?.(key, reason)
+    const state = this.memory.pausePlan?.(key, reason, pauseInfo)
     await this.persistState()
     // Outside a request (the supervisor pausing a plan a failed request left
     // stranded, or a user stop) no terminal event follows, so name the pause
@@ -9605,10 +9614,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (request && request.start_status === 'paused' && request.start_pause_reason === state.pause_reason) return undefined
     if (request) request.goal_paused_traced = state.pause_reason
     const pauseReason = String(state.pause_reason ?? '')
+    const record = this.memory.pauseRecord?.(this.activePlanKey()) ?? state
     return {
       request_id: request?.id ?? this.lastTerminalRequestId,
       cause: cleanMemoryText(pauseReason.split(':')[0], 120) || 'paused',
       pause_reason: cleanMemoryText(pauseReason, 300),
+      pause_class: pauseClassLabel(record),
       provider_failure: /provider|request_failed/i.test(pauseReason),
       source,
       goal_id: state.goal_id,
@@ -9838,7 +9849,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // pausePersistentPlan traces that pause as goal.paused.
       const failsUpward = RECOVERABLE_PLANNER_FAILURE.test(message)
         || planState?.admission_status === 'action_omission_repair'
-      const pauseCause = failsUpward ? undefined : providerFailurePauseCause(message)
+      const pauseCause = failsUpward ? undefined : providerFailurePauseCause(message, error)
       if (pauseCause
         && planState?.status === 'active'
         && planState.condition_wait?.state !== 'active'
@@ -9873,7 +9884,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async pauseAfterProviderFailure(cause, message) {
     const key = this.activePlanKey()
     const pauseReason = cleanMemoryText(`${cause}: ${cleanMemoryText(message, 240)}`, 300)
-    const state = this.memory.pausePlan?.(key, pauseReason)
+    // Declared here, where the pause is created: the model could not act (model_recoverable) or the runtime stopped on purpose (guard).
+    const state = this.memory.pausePlan?.(key, pauseReason, { pause_class: pauseClassForCode(cause) })
     await this.persistState()
     this.active = false
     const chatMessage = `I paused this goal: ${PROVIDER_PAUSE_TEXT[cause] ?? PROVIDER_PAUSE_TEXT.request_failed}. ${RESUME_HINT}`
@@ -9990,17 +10002,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         slice_continuations: sliceContinuations,
         limit: REQUEST_CONTINUATION_BACKSTOP,
       })
-      await this.pausePersistentPlan(`request_continuation_backstop_${REQUEST_CONTINUATION_BACKSTOP}`)
+      await this.pausePersistentPlan(`request_continuation_backstop_${REQUEST_CONTINUATION_BACKSTOP}`, { pause_class: PAUSE_CLASS.GUARD })
       throw new AgentLoopError(`Request continuation backstop reached (${REQUEST_CONTINUATION_BACKSTOP} across all plan slices); durable plan paused`)
     }
     if (sliceContinuations >= continuationLimit) {
-      await this.pausePersistentPlan(`continuation_limit_${continuationLimit}`)
+      await this.pausePersistentPlan(`continuation_limit_${continuationLimit}`, { pause_class: PAUSE_CLASS.GUARD })
       throw new AgentLoopError(`Continuation limit reached (${continuationLimit}); durable plan paused`)
     }
     if (withinTurn) {
       if (this.inTurnSliceContinuations >= MAX_IN_TURN_SLICE_CONTINUATIONS) {
         await this.traceEvent('plan.slice_continuation_chain_limit', { limit: MAX_IN_TURN_SLICE_CONTINUATIONS })
-        await this.pausePersistentPlan(`slice_continuation_chain_limit_${MAX_IN_TURN_SLICE_CONTINUATIONS}`)
+        await this.pausePersistentPlan(`slice_continuation_chain_limit_${MAX_IN_TURN_SLICE_CONTINUATIONS}`, { pause_class: PAUSE_CLASS.GUARD })
         throw new AgentLoopError(`Slice continuation chain limit reached (${MAX_IN_TURN_SLICE_CONTINUATIONS}); durable plan paused`)
       }
       this.inTurnSliceContinuations++
@@ -10258,7 +10270,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   async pauseForUnverifiableGoal(unverifiable) {
     const detail = unverifiable.map(result => `${result.id}: ${result.error}`).join(', ')
     const chatMessage = `I cannot verify this goal's completion in game (${detail}). Please restate what "done" means so I can check it.`
-    const state = await this.pausePersistentPlan(`goal_definition_unverifiable: ${cleanMemoryText(detail, 200)}`)
+    const state = await this.pausePersistentPlan(`goal_definition_unverifiable: ${cleanMemoryText(detail, 200)}`, { pause_class: PAUSE_CLASS.GUARD })
     await this.traceEvent('request.completed', {
       chat_message: chatMessage,
       outcome: 'goal_definition_unverifiable',
@@ -10779,7 +10791,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // Only a live goal is paused; a completed or missing plan is left as it
       // is, but the request still stops visibly and says so.
       state = ['active', 'paused'].includes(previousStatus)
-        ? this.memory.pausePlan?.(key, pauseReason)
+        ? this.memory.pausePlan?.(key, pauseReason, { pause_class: pauseClassForCode(ceiling ? 'request_output_ceiling' : code) })
         : this.peekPlanState(key)
       await this.persistState()
       chatMessage = `I paused this goal: ${spent}. ${RESUME_HINT}`
@@ -12355,9 +12367,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // a bounded fluid-terrain sample set, and an entity-name read refused because the name is not an entity prototype
   // (a fluid name points at getFluidSourceTiles). Observation-only: neither row changes state or admits anything.
   async traceNativeObservationFact(toolName, args, raw) {
-    if (toolName !== 'getFluidSourceTiles' && toolName !== 'getNearbyEntities') return
+    if (toolName !== 'getFluidSourceTiles' && toolName !== 'getNearbyEntities' && toolName !== 'getPlacementCandidates' && toolName !== 'getEntityStatus') return
     let result
-    try { if (typeof raw === 'string' && raw.length <= 4096) result = JSON.parse(raw) } catch { /* unreadable stays undefined */ }
+    const readLimit = toolName === 'getPlacementCandidates' || toolName === 'getEntityStatus' ? 65536 : 4096
+    try { if (typeof raw === 'string' && raw.length <= readLimit) result = JSON.parse(raw) } catch { /* unreadable stays undefined */ }
     const readable = Boolean(result && typeof result === 'object' && !Array.isArray(result))
     if (toolName === 'getFluidSourceTiles') {
       await this.traceEvent('observation.fluid_sources_observed', {
@@ -12367,9 +12380,49 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         ok: readable ? result.ok === true : undefined,
         code: readable ? result.code : undefined,
         coverage: readable ? result.coverage : undefined,
+        coverage_complete: readable ? result.coverage_complete : undefined,
+        generated_chunk_count: readable ? result.generated_chunk_count : undefined,
+        ungenerated_chunk_count: readable ? result.ungenerated_chunk_count : undefined,
+        empty_result_is_conclusive: readable ? result.empty_result_is_conclusive : undefined,
+        ordering: readable ? result.ordering : undefined,
         surface_index: readable ? result.surface_index : undefined,
         returned_count: readable ? result.returned_count : undefined,
         truncated: readable ? result.truncated : undefined,
+      })
+    }
+    else if (toolName === 'getPlacementCandidates') {
+      const candidates = readable && Array.isArray(result.candidates) ? result.candidates : []
+      const joined = candidates.filter(candidate => candidate?.connects_to && typeof candidate.connects_to === 'object')
+      const electric = candidates.filter(candidate => candidate?.electric && typeof candidate.electric === 'object')
+      await this.traceEvent('observation.placement_candidates_observed', {
+        reason: 'bounded_native_placement_candidate_read',
+        entity_name: typeof args?.entity_name === 'string' ? args.entity_name.slice(0, 200) : undefined,
+        readable,
+        ok: readable ? result.ok === true : undefined,
+        code: readable ? result.code : undefined,
+        ordering: readable ? result.ordering : undefined,
+        legal_candidate_count: readable ? result.legal_candidate_count : undefined,
+        returned_candidate_count: readable ? result.returned_candidate_count : undefined,
+        connects_to_unit_number: Number.isSafeInteger(args?.connects_to?.unit_number) ? args.connects_to.unit_number : undefined,
+        connects_to_joined_count: args?.connects_to ? joined.length : undefined,
+        electric_candidate_count: electric.length,
+        max_poles_in_wire_reach: electric.length > 0 ? Math.max(...electric.map(candidate => Number(candidate.electric.poles_in_wire_reach_count) || 0)) : undefined,
+        max_covered_entities: electric.length > 0 ? Math.max(...electric.map(candidate => Number(candidate.electric.covers_entities_count) || 0)) : undefined,
+      })
+    }
+    else if (toolName === 'getEntityStatus') {
+      const gap = readable && result.entity && typeof result.entity.power_gap === 'object' ? result.entity.power_gap : undefined
+      if (!gap) return
+      await this.traceEvent('observation.power_gap_observed', {
+        reason: 'entity_shows_no_power',
+        unit_number: result.entity.unit_number,
+        status_name: result.entity.status_name,
+        poles_found: gap.poles_found,
+        search_radius: gap.search_radius,
+        nearest_pole_unit_number: gap.nearest_pole?.unit_number,
+        nearest_pole_distance: gap.nearest_pole?.distance,
+        supply_area_covers_entity: gap.nearest_pole?.supply_area_covers_entity,
+        supply_gap_tiles: gap.nearest_pole?.supply_gap_tiles,
       })
     }
     else if (readable && result.code === 'unknown_entity_prototype') {
@@ -13514,7 +13567,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   async pauseForExecutorStepIdentity(expected) {
     const chatMessage = `I paused this goal: my step executor kept sending actions for a step that is not the active one, so I stopped instead of guessing. ${RESUME_HINT}`
-    const state = await this.pausePersistentPlan('executor_step_identity_exhausted')
+    const state = await this.pausePersistentPlan('executor_step_identity_exhausted', { pause_class: PAUSE_CLASS.GUARD })
     const taskBoard = visibleTaskBoard(state?.task_board)
     await this.traceEvent('request.completed', {
       chat_message: chatMessage,
@@ -14068,7 +14121,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         throw new AgentLoopError('planner_only_handoff_superseded: committed plan changed')
       }
       const reason = `executor_handoff_failed:${handoff.reason ?? 'unknown'}`
-      const paused = this.memory.pausePlan(key, reason)
+      const paused = this.memory.pausePlan(key, reason, { pause_class: PAUSE_CLASS.GUARD })
       this.active = false
       await this.persistState()
       await this.traceEvent('plan.delegation_handoff_failed', { request_id: this.traceRequest?.id, plan_id: committed.plan_id, reason })

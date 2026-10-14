@@ -57,6 +57,8 @@ function compact_fluid_ports(entity: LuaEntity) {
     for (let connection_index = 0; connection_index < connection_count; connection_index++) {
       const connection = raw_connections[connection_index]
       const summary: Record<string, unknown> = {
+        // 1-based within this storage; getPlacementCandidates connects_to takes it as connection_index.
+        connection_index: connection_index + 1,
         position: connection.position,
       }
       if (connection.flow_direction !== undefined) summary.flow_direction = connection.flow_direction

@@ -8,6 +8,14 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 13: port unit 7, declared pause classes and bounded auto-resume (static only, not live-validated)
+
+- **Declared class.** Every pause now carries `pause_class` (`transport`, `model_recoverable`, `authority`, `operator`, `system`, `guard`) from the registry `runtime-v8/pause-class.mjs`, declared where the pause is created and stored in the planning reducer's durable run state. A missing or unknown class never auto-resumes and is traced (`recovery.pause_unclassified`). The transport subkind comes from structured provider fields (`http_status`, `transport_subkind`); the message regex remains only as a legacy fallback for re-wrapped errors.
+- **Auto-resume.** `transport` keeps its in-memory backoff. A `model_recoverable` pause (run E's `provider_action_omission_repair_failed`, a rejected unverified blocker, output budget exhausted without evidence) resumes after 15 s through the existing interrupted-plan recovery with a fresh executor restage; the committed plan, goal and step identity are untouched. Authority, operator, system and guard pauses never resume.
+- **Bound.** Owner-delegated 2026-10-13: at most 2 resumes per step identity (goal, plan, plan version, step) without verified progress, and at most 6 per goal. Both counts live in durable plan state and survive a restart; only a verified batch receipt for the step (or the step verifying) resets the step count. A scheduled resume carries actor, epoch, goal, plan, plan version and step and cancels with `recovery.auto_resume_cancelled` if any changed by fire time.
+- **Trace and run-check.** `recovery.auto_resume_scheduled|started|exhausted|cancelled` and `recovery.pause_unclassified`; `run-check` flags `model_recoverable_pause_not_resumed` and `auto_resume_exhausted`.
+- **Gate.** Static scenarios only (`pause-class-auto-resume.test.mjs`, `run-check.test.mjs`); no real-engine lane and no live provider run. `pause-class.mjs` joins the installer copy list, so the installer payload needs a repin.
+
 ## October 13: CLI-proxy rerun E (transport fixed, copper mined, controller paused)
 
 - **Provider repair.** Attempt D had resolved stale local LM Studio/Qwen settings and failed with connection refused. The owner confirmed the intended CLI proxy with `gpt-6-luna`; rerun E used that configuration, authenticated HTTP 200, and 12 successful responses with zero provider errors. `.env` was not read or edited.

@@ -1,4 +1,8 @@
+import type { LuaEntity, LuaFluidBox } from 'factorio:runtime'
+
 const MAX_CANDIDATE_FLUID_PORTS = 16
+const MAX_LIVE_FLUID_STORAGES = 8
+const MAX_LIVE_PIPE_CONNECTIONS = 8
 
 export interface CandidateFluidPort {
   storage_index: number
@@ -81,4 +85,99 @@ export function candidate_fluid_ports(
   }
 
   return ports.length > 0 ? ports : undefined
+}
+
+export interface LiveFluidPort {
+  storage_index: number
+  // 1-based position in the live connection listing of that storage.
+  connection_index: number
+  // The entity own edge tile that carries the connection.
+  position: { x: number, y: number }
+  // The tile the connection opens onto: where a joining entity must have its own port.
+  target_position: { x: number, y: number }
+  filter?: string
+  flow_direction?: string
+  connection_type?: string
+  connected: boolean
+}
+
+function position_xy(raw: any): { x: number, y: number } | undefined {
+  if (!finite_position(raw)) return undefined
+  return { x: raw.x, y: raw.y }
+}
+
+function storage_filter_name(fluidbox: LuaFluidBox, index: number): string | undefined {
+  const value: any = fluidbox.get_prototype(index)
+  if (!value) return undefined
+  const values: any[] = value.production_type ? [value] : value
+  for (const prototype of values) {
+    const name = prototype?.filter?.name
+    if (typeof name === 'string') return name
+  }
+  return undefined
+}
+
+/**
+ * The open and connected normal fluid ports of a placed entity, read from its
+ * live fluidbox. Underground and linked connections do not open onto an adjacent
+ * tile and are left out.
+ */
+export function live_fluid_ports(entity: LuaEntity): LiveFluidPort[] {
+  const fluidbox = entity.fluidbox
+  const storages = math.min(fluidbox.length, MAX_LIVE_FLUID_STORAGES)
+  const ports: LiveFluidPort[] = []
+  for (let index = 1; index <= storages; index++) {
+    const connections: any[] = fluidbox.get_pipe_connections(index) ?? []
+    const count = math.min(connections.length, MAX_LIVE_PIPE_CONNECTIONS)
+    for (let connection_index = 0; connection_index < count; connection_index++) {
+      const connection = connections[connection_index]
+      if (connection.connection_type !== undefined && connection.connection_type !== 'normal') continue
+      const position = position_xy(connection.position)
+      const target_position = position_xy(connection.target_position)
+      if (position === undefined || target_position === undefined) continue
+      ports.push({
+        storage_index: index,
+        connection_index: connection_index + 1,
+        position,
+        target_position,
+        filter: storage_filter_name(fluidbox, index),
+        flow_direction: connection.flow_direction,
+        connection_type: connection.connection_type,
+        connected: connection.target !== undefined,
+      })
+    }
+  }
+  return ports
+}
+
+const PORT_TILE_TOLERANCE = 0.001
+
+function same_tile(left: { x: number, y: number }, right: { x: number, y: number }) {
+  return math.abs(left.x - right.x) <= PORT_TILE_TOLERANCE && math.abs(left.y - right.y) <= PORT_TILE_TOLERANCE
+}
+
+function direction_vector(direction: number | undefined): { x: number, y: number } | undefined {
+  if (direction === 0) return { x: 0, y: -1 }
+  if (direction === 4) return { x: 1, y: 0 }
+  if (direction === 8) return { x: 0, y: 1 }
+  if (direction === 12) return { x: -1, y: 0 }
+  return undefined
+}
+
+/**
+ * True when a candidate port would join a live port: the candidate port sits on
+ * the tile the live port opens onto, faces back at the live entity own tile, and
+ * the two fluidboxes are compatible (a different pinned fluid, or two ports that
+ * are both input or both output, never connect). Derived only from the live
+ * fluidbox and the prototype fluidbox connections.
+ */
+export function fluid_ports_join(live: LiveFluidPort, candidate: CandidateFluidPort): boolean {
+  const facing = direction_vector(candidate.direction)
+  if (facing === undefined) return false
+  if (!same_tile(candidate.position, live.target_position)) return false
+  if (!same_tile({ x: candidate.position.x + facing.x, y: candidate.position.y + facing.y }, live.position)) return false
+  if (live.filter !== undefined && candidate.filter !== undefined && live.filter !== candidate.filter) return false
+  if (live.flow_direction === 'input' && candidate.flow_direction === 'input') return false
+  if (live.flow_direction === 'output' && candidate.flow_direction === 'output') return false
+  return true
 }

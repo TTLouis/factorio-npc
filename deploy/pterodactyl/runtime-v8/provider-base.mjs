@@ -1506,6 +1506,7 @@ export async function providerRequest(config, messages, {
         ? new DeploymentError(`provider_context_window_exceeded: Provider HTTP ${response.status} reported context/input token limit exhaustion`)
         : new DeploymentError(`Provider HTTP ${response.status}; request will not be retried automatically`)
       failure.code = diagnostics.diagnostic_code
+      failure.http_status = response.status // structured transport class (pause-class.mjs): 429 and 5xx wait, other statuses do not
       if (diagnostics.diagnostic_code === 'provider_context_window_exceeded') failure.failureClass = 'provider_budget'
       throw failure
     }
@@ -1769,7 +1770,7 @@ export async function providerRequest(config, messages, {
         http_status: httpStatus,
         response_content_type: responseContentType,
       }, traceOptions)
-      throw new DeploymentError(`Provider timed out after ${timeoutMs} ms`)
+      throw Object.assign(new DeploymentError(`Provider timed out after ${timeoutMs} ms`), { transport_subkind: 'timeout' })
     }
     throw error
   }

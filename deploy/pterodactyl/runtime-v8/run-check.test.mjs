@@ -694,3 +694,40 @@ test('sanitized October 13 run C trace exposes the previously missed rejected-bl
   assert.equal(finding.count, 1)
   assert.equal(rows.at(-1).data.task_board.completed_count, 0)
 })
+
+test('sanitized October 13 run E trace: a model_recoverable pause with no auto-resume decision is a finding; each decision row clears it', async () => {
+  const rows = await loadFixtureRows('luna-run-e-action-omission-pause.jsonl')
+  // The trace as run E wrote it declared no class: the existing signatures see nothing new.
+  assert.equal(findingsFor(analyzeBehaviorTrace(rows), 'model_recoverable_pause_not_resumed').length, 0)
+  const declared = rows.map(row => (row.event === 'goal.paused' ? { ...row, data: { ...row.data, pause_class: 'model_recoverable' } } : row))
+  const [finding] = findingsFor(analyzeBehaviorTrace(declared), 'model_recoverable_pause_not_resumed')
+  assert.equal(finding.request_id, 'req_mv6ofio6_1')
+  assert.equal(finding.count, 1)
+  assert.match(finding.detail, /provider_action_omission_repair_failed.*goal_0krmyq5_1.*no recovery\.auto_resume_scheduled/)
+
+  const decision = event => ({ schema: 1, ts: '2026-10-13T12:49:41.000Z', seq: 0, event, request_id: 'req_mv6ofio6_1', actor_id: 9, epoch: 1, data: { pause_class: 'model_recoverable', attempt: 1, limit: 2, delay_ms: 15000, goal_id: 'goal_0krmyq5_1' } })
+  for (const event of ['recovery.auto_resume_scheduled', 'recovery.auto_resume_cancelled']) {
+    assert.equal(findingsFor(analyzeBehaviorTrace([...declared, decision(event)]), 'model_recoverable_pause_not_resumed').length, 0, event)
+  }
+  // Other classes are not this signature.
+  const operator = rows.map(row => (row.event === 'goal.paused' ? { ...row, data: { ...row.data, pause_class: 'operator' } } : row))
+  assert.equal(findingsFor(analyzeBehaviorTrace(operator), 'model_recoverable_pause_not_resumed').length, 0)
+})
+
+test('an exhausted automatic resume is a finding that names the limit', async () => {
+  const rows = await loadFixtureRows('luna-run-e-action-omission-pause.jsonl')
+  const exhausted = {
+    schema: 1,
+    ts: '2026-10-13T12:49:41.000Z',
+    seq: 0,
+    event: 'recovery.auto_resume_exhausted',
+    request_id: 'req_mv6ofio6_1',
+    actor_id: 9,
+    epoch: 1,
+    data: { pause_class: 'model_recoverable', limit_kind: 'goal', step_attempts: 1, step_limit: 2, goal_attempts: 6, goal_limit: 6, step_id: 'step_1', goal_id: 'goal_0krmyq5_1' },
+  }
+  assert.equal(findingsFor(analyzeBehaviorTrace(rows), 'auto_resume_exhausted').length, 0)
+  const [finding] = findingsFor(analyzeBehaviorTrace([...rows, exhausted]), 'auto_resume_exhausted')
+  assert.equal(finding.count, 1)
+  assert.match(finding.detail, /goal limit; step 1\/2, goal 6\/6; step_id=step_1/)
+})

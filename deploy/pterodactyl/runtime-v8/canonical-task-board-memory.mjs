@@ -4,6 +4,7 @@ import { restoreLedger as restoreJevLedger, serializeLedger as serializeJevLedge
 import { restoreObservationLedger } from './targeted-observation.mjs'
 import { createTaskBoard, reconcileTaskBoard, setTaskBoardStatus, taskBoardTransferSupplyRefSeen } from './common.mjs'
 import { validateOutcomeCandidate } from './outcome-authority.mjs'
+import { PAUSE_CLASS } from './pause-class.mjs'
 import { REFUSAL_CLASS } from './refusal-class.mjs'
 import { completionContractSupported, provePermanentlyUnsatisfiable, sanitizeStepCompletionContract, strictTaskTypesForOperation } from './step-completion.mjs'
 import {
@@ -38,6 +39,7 @@ import {
 } from './task-ledger.mjs'
 import {
   applyPlanningEvent,
+  autoResumeAllowance,
   createEmptyPlanningState,
   evaluateDeadlockSignals,
   getActivePlan,
@@ -626,16 +628,56 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return undefined
   }
 
-  recordRunPause(key, state, reason) {
-    if (!this.#reducerHoldsGoal(key, state)) return super.recordRunPause(key, state, reason)
-    const after = this.#applyRunEvent(key, { type: PLANNING_EVENT.RUN_PAUSED, goal_id: state.goal_id, reason })
+  recordRunPause(key, state, reason, pauseInfo = {}) {
+    if (!this.#reducerHoldsGoal(key, state)) return super.recordRunPause(key, state, reason, pauseInfo)
+    const after = this.#applyRunEvent(key, {
+      type: PLANNING_EVENT.RUN_PAUSED,
+      goal_id: state.goal_id,
+      reason,
+      pause_class: pauseInfo?.pause_class,
+      pause_subkind: pauseInfo?.pause_subkind,
+    })
     // The reducer refused (goal not active): fall back to the legacy write so
     // the record still pauses.
-    if (!after?.run?.paused) return super.recordRunPause(key, state, reason)
+    if (!after?.run?.paused) return super.recordRunPause(key, state, reason, pauseInfo)
     state.pause_reason = after.run.pause_reason
+    state.pause_class = after.run.pause_class
+    state.pause_subkind = after.run.pause_subkind
     state.persistent_runtime = undefined
     state.condition_wait = undefined
     return undefined
+  }
+
+  // The durable record of why the run is paused, for the supervisor's automatic resume: { paused, pause_reason, pause_class,
+  // pause_subkind }. Read from the reducer run (it survives a restart); the legacy mirror is the fallback.
+  pauseRecord(key) {
+    const run = key ? this.planningByNpc.get(key)?.run : undefined
+    const legacy = key ? this.planByNpc.get(key) : undefined
+    if (run && this.#reducerHoldsGoal(key, legacy)) {
+      return { paused: run.paused === true, pause_reason: run.pause_reason, pause_class: run.pause_class, pause_subkind: run.pause_subkind, paused_at: run.paused_at, goal_id: legacy.goal_id }
+    }
+    return { paused: legacy?.status === 'paused', pause_reason: legacy?.pause_reason ?? '', pause_class: legacy?.pause_class ?? '', pause_subkind: legacy?.pause_subkind ?? '' }
+  }
+
+  // The durable, bounded automatic-resume allowance for the live goal / plan / plan version / step (planning-state.mjs).
+  autoResumeAllowance(key) {
+    return autoResumeAllowance(key ? this.planningByNpc.get(key) : undefined)
+  }
+
+  // Count one automatic model_recoverable resume attempt against the step identity and the goal. The reducer refuses an attempt whose
+  // goal, plan, plan version or step is no longer the live one; the result says whether it was recorded.
+  recordAutoResumeStarted(key, { plan_id: planId, plan_version: planVersion, step_id: stepId } = {}) {
+    const state = key ? this.planByNpc.get(key) : undefined
+    if (!key || !this.#reducerHoldsGoal(key, state)) return { recorded: false, allowance: this.autoResumeAllowance(key) }
+    const before = this.planningByNpc.get(key)
+    const after = this.#applyRunEvent(key, {
+      type: PLANNING_EVENT.RUN_AUTO_RESUME_STARTED,
+      goal_id: state.goal_id,
+      plan_id: planId,
+      plan_version: planVersion,
+      step_id: stepId,
+    })
+    return { recorded: after !== before, allowance: autoResumeAllowance(after) }
   }
 
   recordRunResume(key, state, reason) {
@@ -698,7 +740,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     if (!planning || planning.run || !this.#reducerHoldsGoal(key, legacyState)) return planning
     const base = { source: 'legacy_adopted', goal_id: legacyState.goal_id }
     if (legacyState.status === 'paused') {
-      this.#applyRunEvent(key, { ...base, type: PLANNING_EVENT.RUN_PAUSED, reason: legacyState.pause_reason })
+      this.#applyRunEvent(key, { ...base, type: PLANNING_EVENT.RUN_PAUSED, reason: legacyState.pause_reason, pause_class: legacyState.pause_class, pause_subkind: legacyState.pause_subkind })
     }
     if (legacyState.condition_wait) {
       this.#applyRunEvent(key, { ...base, type: PLANNING_EVENT.CONDITION_WAIT_RECORDED, wait: legacyState.condition_wait })
@@ -2549,7 +2591,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       this.disagreementStrikes.set(key, { step_id: stepId, count })
       const finalStep = Array.isArray(board?.steps) && board.active_index === board.steps.length - 1
       if (finalStep || count >= 2) {
-        current = this.pausePlan(key, `plan_board_disagreement:${disagreement.code}`) ?? state
+        current = this.pausePlan(key, `plan_board_disagreement:${disagreement.code}`, { pause_class: PAUSE_CLASS.GUARD }) ?? state
         paused = true
       }
     }

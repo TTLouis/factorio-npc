@@ -1520,6 +1520,9 @@ export function fluidSourceHintsFromRead(raw, args, tag, limits = EXECUTOR_FACT_
       surface_index: sample.surface_index,
       position: { x: sample.position.x, y: sample.position.y },
       as_of,
+      // A read over partly ungenerated chunks says so; the rendered hint carries it (absent on older reads).
+      ...(typeof result.coverage_complete === 'boolean' ? { coverage_complete: result.coverage_complete } : {}),
+      ...(result.coverage_complete === false && Number.isSafeInteger(result.ungenerated_chunk_count) && result.ungenerated_chunk_count > 0 ? { ungenerated_chunk_count: result.ungenerated_chunk_count } : {}),
     })),
   }
 }
@@ -1543,7 +1546,7 @@ function fluidHintsRecord(hints, limits) {
   const list = asList(hints).filter(anchor => isPlainObject(anchor) && factName(anchor.name) && factName(anchor.fluid_name)
     && Number.isSafeInteger(anchor.surface_index) && Number.isInteger(anchor.position?.x) && Number.isInteger(anchor.position?.y)).slice(0, limits.fluidHints)
   if (list.length === 0) return undefined
-  const parts = list.map(anchor => `${anchor.fluid_name}:${anchor.name}@(${anchor.position.x},${anchor.position.y}) surface=${anchor.surface_index} observed ${tagText(anchor.as_of)}`)
+  const parts = list.map(anchor => `${anchor.fluid_name}:${anchor.name}@(${anchor.position.x},${anchor.position.y}) surface=${anchor.surface_index} observed ${tagText(anchor.as_of)}${anchor.coverage_complete === false ? ` coverage=INCOMPLETE${Number.isSafeInteger(anchor.ungenerated_chunk_count) ? `(${anchor.ungenerated_chunk_count} chunks ungenerated; nearer water may exist)` : '(nearer water may exist)'}` : ''}`)
   const kept = boundedKept(parts, ' | ', limits.fluidHintChars)
   const more = parts.length - kept.length
   return {
