@@ -106,10 +106,12 @@ function subkindFromHttpStatus(status) {
   return undefined
 }
 
+const MODEL_BUDGET_TEXT = /provider_context_window_exceeded|provider_output_budget|finish=length/i
+
 // Legacy text fallback. Model-behaviour failures are excluded on purpose: waiting does not fix them.
 export function transportSubkindFromText(message) {
   const text = String(message ?? '')
-  if (/provider_context_window_exceeded|provider_output_budget|finish=length/i.test(text)) return undefined
+  if (MODEL_BUDGET_TEXT.test(text)) return undefined
   if (/Hourly provider request budget reached/i.test(text)) return TRANSPORT_SUBKIND.BUDGET
   if (/\bHTTP 429\b/.test(text)) return TRANSPORT_SUBKIND.RATE_LIMITED
   if (/\bHTTP 5\d\d\b/.test(text)) return TRANSPORT_SUBKIND.SERVER_ERROR
@@ -132,6 +134,10 @@ function failureMessage(failure) {
 // { subkind, source } for a transport condition, or undefined. `source` names the layer that decided:
 // 'declared' | 'structured' | 'legacy_text'.
 export function transportFailureOf(failure) {
+  // Context-window and output-budget failures are never transport, whatever status or text accompanies them: waiting does not fix them.
+  if (failure && typeof failure === 'object'
+    && (failure.code === 'provider_context_window_exceeded' || failure.failureClass === 'provider_budget')) return undefined
+  if (MODEL_BUDGET_TEXT.test(failureMessage(failure))) return undefined
   if (failure && typeof failure === 'object') {
     if (failure.pause_class === PAUSE_CLASS.TRANSPORT && TRANSPORT_SUBKINDS.includes(failure.pause_subkind)) {
       return { subkind: failure.pause_subkind, source: 'declared' }

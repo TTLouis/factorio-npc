@@ -47,7 +47,7 @@ import {
   serializeAuthorization,
 } from './authorization.mjs'
 import { sanitizePendingOperation } from './operation-reconciliation.mjs'
-import { isPauseClass, MODEL_RECOVERABLE_RESUME_LIMITS, PAUSE_CLASS, TRANSPORT_SUBKINDS } from './pause-class.mjs'
+import { AUTO_RESUMABLE_PAUSE_CLASSES, isPauseClass, MODEL_RECOVERABLE_RESUME_LIMITS, PAUSE_CLASS, TRANSPORT_SUBKINDS } from './pause-class.mjs'
 import { operationLedger, recordOperation, settleOperation } from './operation-ledger.mjs'
 import {
   addTask,
@@ -639,6 +639,7 @@ function pauseClassFields(event) {
 }
 
 const AUTO_RESUME_RETAINED_STEPS = 16
+const STICKY_PAUSE_CLASSES = Object.freeze([PAUSE_CLASS.OPERATOR, PAUSE_CLASS.AUTHORITY, PAUSE_CLASS.GUARD])
 
 // What a verified-world-progress reset compares. Admission is not progress: only the step finishing, evidence the reducer
 // accepted for the step, or a `deterministic_verification` landing in the step's receipt ledger (a batch receipt whose effect the
@@ -3118,6 +3119,9 @@ Object.assign(HANDLERS, {
   [PLANNING_EVENT.RUN_PAUSED](state, event, now) {
     if (!runEventAllowed(state, event)) return state
     const run = state.run ?? createEmptyRunState()
+    // A pause that needs a person (operator, authority, guard) is never downgraded to one a timer resumes (model_recoverable,
+    // transport): a failure that lands after a stop must not turn the stop back into a retry. The first pause stands unchanged.
+    if (run.paused && STICKY_PAUSE_CLASSES.includes(run.pause_class) && AUTO_RESUMABLE_PAUSE_CLASSES.includes(event.pause_class)) return state
     const reason = text(event.reason, RUN_STATE_LIMITS.pauseReason)
     return {
       ...state,

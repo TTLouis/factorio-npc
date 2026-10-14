@@ -60,6 +60,7 @@ import {
 // Pause-reason prefix for temporary provider failures that resume on their own
 // (see transientProviderFailure).
 export const TRANSIENT_PAUSE_PREFIX = 'provider_transient'
+const TRANSPORT_FALLBACK_SUBKIND = 'transport'
 const UI_CONTROL_MARKER = '[SGLUNA_UI_CONTROL]'
 const GOAL_UI_REFRESH_MS = 30_000
 const UI_CONTROL_ACTIONS = new Set(['pause', 'terminate', 'follow', 'stop_follow', 'new_task', 'keep_paused', 'revise', 'cancel'])
@@ -1771,6 +1772,7 @@ export function shouldRecoverInterruptedPlan(state, { awaitingNextSlice = false,
   return SYSTEM_RECOVERY_PAUSE_REASONS.has(pauseReason)
     || pauseReason.startsWith('server_stop_')
     || pauseReason.startsWith(`${TRANSIENT_PAUSE_PREFIX}:`)
+    || state.pause_class === PAUSE_CLASS.TRANSPORT
 }
 
 function idleAutorioRuntime(status) {
@@ -1951,11 +1953,13 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
 
   agent.cancel?.(`runtime_recovery_prepare:${reason}`)
   const epoch = await agent.captureEpoch()
+  if (options.isCancelled?.()) return { recovered: false, reason: 'cancelled_after_fire', state }
   // MW2b: before anything is issued again, reconcile any batch that was sent but never settled (a restart, an actor replacement
   // or a death can lose its acknowledgement and receipt) against the game's own batch records. The model is told what they prove.
   const recoveryRequestId = typeof options.requestId === 'string' && options.requestId ? options.requestId : `recovery_${Date.now().toString(36)}`
   const reconciliation = await agent.reconcileOutstandingOperation?.({ trigger: reason, requestId: recoveryRequestId })
   const reconciliationLine = reconciliation ? ` ${reconciliationGuidance(reconciliation, reconciliation.pending)}` : ''
+  if (options.isCancelled?.()) return { recovered: false, reason: 'cancelled_after_fire', state }
   // C7: a plan is resumed only when the reducer holds an active plan to carry.
   // Otherwise the goal is paused (a chat line follows) instead of waking a
   // model with nothing to execute.
@@ -2026,6 +2030,7 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
     await agent.traceEvent('runtime.recovery_started', { reason, details })
   }
   await restageRecoveryConversation(agent, { reason, recoveryMessage })
+  if (options.isCancelled?.()) return { recovered: false, reason: 'cancelled_after_fire', state }
   try {
     const result = await agent.runGuarded()
     return { recovered: true, result, state: agent.memory?.currentPlan?.(key) }
@@ -2491,8 +2496,11 @@ export class Session {
   // Resume a plan paused on a transient provider failure without a human.
   // Bounded: the attempt count resets only on real world progress, and any
   // player request, stop, or plan change cancels a pending resume.
-  async scheduleAutoResume(message) {
-    const kind = transientProviderFailure(message)
+  // `failure` is the Error (its structured fields decide the subkind) or a message (legacy text). Falls back to the subkind the
+  // pause itself declared (durable run state) when the failure carries none.
+  async scheduleAutoResume(failure) {
+    const declared = pauseClassOf(this.agent?.memory?.pauseRecord?.(this.planKey()))
+    const kind = transientProviderFailure(failure) ?? (declared.pause_class === PAUSE_CLASS.TRANSPORT ? (declared.pause_subkind || TRANSPORT_FALLBACK_SUBKIND) : undefined)
     if (!kind || this.stopping) return false
     const attempt = this.autoResume?.attempt ?? 0
     const maxAttempts = autoResumeMaxAttempts(kind)
@@ -2524,7 +2532,8 @@ export class Session {
 
   async runAutoResume() {
     const state = this.currentPlanState()
-    const pausedTransient = state?.status === 'paused' && String(state.pause_reason ?? '').startsWith(`${TRANSIENT_PAUSE_PREFIX}:`)
+    const declaredTransport = pauseClassOf(this.agent?.memory?.pauseRecord?.(this.planKey())).pause_class === PAUSE_CLASS.TRANSPORT
+    const pausedTransient = state?.status === 'paused' && (declaredTransport || String(state.pause_reason ?? '').startsWith(`${TRANSIENT_PAUSE_PREFIX}:`))
     if (this.stopping || !(pausedTransient || this.agent?.goalAwaitingNextSlice?.() === true)) {
       // The plan moved on (player continue, stop, new goal): nothing to resume.
       this.clearAutoResume()
@@ -2558,17 +2567,28 @@ export class Session {
     }
   }
 
-  // The actor identity a scheduled resume is bound to.
+  // The actor identity a scheduled resume is bound to. Both fields are required: a resume with no actor/epoch to correlate against is
+  // never scheduled (fail closed).
   currentActorCorrelation() {
     return { actor_id: this.lastStatus?.actor_id, epoch: this.lastStatus?.epoch }
   }
 
-  // Cancels the pending resume (transport and model_recoverable) when a person takes over; a trace row names why.
+  // A frozen (BLOCKED) plan is a structural stop: only a person unfreezes it. Read from the reducer's plan, not the legacy mirror.
+  planIsBlocked() {
+    const planning = this.agent?.memory?.planningState?.(this.planKey())
+    return getActivePlan(planning)?.status === PLAN_STATUS.BLOCKED || this.currentPlanState()?.status === 'blocked'
+  }
+
+  // Cancels the pending OR already-fired model_recoverable resume (and the transport timer) when a person takes over. It is
+  // synchronous on purpose: callers invoke it BEFORE queueing their own operator pause, and a resume job that already left its timer
+  // checks its token after every await, so no queued resume can start in between.
   cancelAutoResume(reason) {
     this.clearAutoResume()
     const pending = this.modelResume
     if (!pending) return false
     if (pending.timer) clearTimeout(pending.timer)
+    pending.token.cancelled = true
+    pending.token.reason = reason
     this.modelResume = null
     this.traceRecovery('recovery.auto_resume_cancelled', {
       reason,
@@ -2589,8 +2609,7 @@ export class Session {
     const key = this.planKey()
     const record = this.agent.memory.pauseRecord(key)
     if (!record?.paused) return null
-    // A frozen (BLOCKED) plan is a structural stop: only a person unfreezes it.
-    if (this.currentPlanState()?.status === 'blocked') return null
+    if (this.planIsBlocked()) return null
     const allowance = this.agent.memory.autoResumeAllowance?.(key)
     const decisionKey = `${record.goal_id ?? ''}|${record.paused_at ?? ''}|${record.pause_reason}|${allowance?.goal_attempts ?? 0}|${allowance?.step_attempts ?? 0}`
     if (this.lastPauseDecision === decisionKey) return null
@@ -2613,9 +2632,14 @@ export class Session {
   }
 
   async scheduleModelRecoverableResume(record, allowance) {
-    if (this.modelResume?.timer) return false
+    if (this.modelResume) return false
     if (!allowance?.step_key) {
       await this.traceRecovery('recovery.auto_resume_cancelled', { reason: 'no_active_plan', pause_class: PAUSE_CLASS.MODEL_RECOVERABLE, goal_id: record.goal_id })
+      return false
+    }
+    const actor = this.currentActorCorrelation()
+    if (!Number.isSafeInteger(actor.actor_id) || !Number.isSafeInteger(actor.epoch)) {
+      await this.traceRecovery('recovery.auto_resume_cancelled', { reason: 'actor_unknown', pause_class: PAUSE_CLASS.MODEL_RECOVERABLE, goal_id: record.goal_id })
       return false
     }
     if (allowance.limit_kind) {
@@ -2625,19 +2649,20 @@ export class Session {
     const attempt = allowance.step_attempts + 1
     const delayMs = MODEL_RECOVERABLE_RESUME_DELAY_MS
     const correlation = {
-      ...this.currentActorCorrelation(),
+      ...actor,
       goal_id: allowance.goal_id,
       plan_id: allowance.plan_id,
       plan_version: allowance.plan_version,
       step_id: allowance.step_id,
     }
+    const token = { cancelled: false, reason: undefined }
     const timer = setTimeout(() => {
-      if (this.modelResume?.timer !== timer) return
+      if (this.modelResume?.token !== token || token.cancelled) return
       this.modelResume.timer = null
-      this.queueEvent(() => this.runModelRecoverableResume(correlation, attempt), { reportError: true })
+      this.fireModelResume(token)
     }, delayMs)
     timer.unref?.()
-    this.modelResume = { timer, correlation, attempt, pause_class: PAUSE_CLASS.MODEL_RECOVERABLE }
+    this.modelResume = { token, timer, correlation, attempt, pause_class: PAUSE_CLASS.MODEL_RECOVERABLE }
     this.log(`Auto-resume ${attempt}/${allowance.per_step} (goal ${allowance.goal_attempts + 1}/${allowance.per_goal}) scheduled in ${Math.round(delayMs / 1000)} s after a model_recoverable pause`)
     await this.traceRecovery('recovery.auto_resume_scheduled', {
       pause_class: PAUSE_CLASS.MODEL_RECOVERABLE,
@@ -2656,6 +2681,14 @@ export class Session {
     })
     await this.printChat(`Paused because the model did not produce a usable action. Resuming automatically in ${Math.round(delayMs / 1000)} s with a fresh context (attempt ${attempt}/${allowance.per_step} for this step, ${allowance.goal_attempts + 1}/${allowance.per_goal} for this goal).`)
     return true
+  }
+
+  // The timer fired: queue the job. The record stays on the session while the job runs, so a stop or a player request can still
+  // cancel it by invalidating its token.
+  fireModelResume(token) {
+    const pending = this.modelResume
+    if (!pending || pending.token !== token || token.cancelled) return null
+    return this.queueEvent(() => this.runModelRecoverableResume(pending.correlation, pending.attempt, token), { reportError: true })
   }
 
   async reportModelResumeExhausted(allowance) {
@@ -2683,19 +2716,21 @@ export class Session {
   async modelResumeStaleReason(correlation) {
     if (this.stopping) return 'session_stopping'
     if (!this.agent?.memory?.pauseRecord) return 'agent_unavailable'
+    if (!Number.isSafeInteger(correlation.actor_id) || !Number.isSafeInteger(correlation.epoch)) return 'actor_unknown'
     let current
     try {
       current = await this.rawStatus()
     }
     catch {
-      current = this.lastStatus
+      return 'status_unreadable'
     }
-    if (correlation.actor_id !== undefined && current?.actor_id !== correlation.actor_id) return 'actor_changed'
-    if (correlation.epoch !== undefined && current?.epoch !== correlation.epoch) return 'epoch_changed'
+    if (current?.actor_id !== correlation.actor_id) return 'actor_changed'
+    if (current?.epoch !== correlation.epoch) return 'epoch_changed'
     const key = this.planKey()
     const record = this.agent.memory.pauseRecord(key)
     if (!record?.paused) return 'no_longer_paused'
     if (pauseClassOf(record).pause_class !== PAUSE_CLASS.MODEL_RECOVERABLE) return 'pause_class_changed'
+    if (this.planIsBlocked()) return 'plan_blocked'
     const allowance = this.agent.memory.autoResumeAllowance?.(key)
     if (allowance?.goal_id !== correlation.goal_id) return 'goal_changed'
     if (allowance.plan_id !== correlation.plan_id || allowance.plan_version !== correlation.plan_version) return 'plan_changed'
@@ -2703,9 +2738,14 @@ export class Session {
     return undefined
   }
 
-  async runModelRecoverableResume(correlation, attempt) {
+  // `token` is the schedule's cancel token (fireModelResume passes it). A direct call without one is cancellable through a record of
+  // its own. The token is checked after every await and immediately before the attempt is counted and before recovery starts.
+  async runModelRecoverableResume(correlation, attempt, token = undefined) {
     const key = this.planKey()
-    const stale = await this.modelResumeStaleReason(correlation)
+    if (!token) {
+      token = { cancelled: false, reason: undefined }
+      this.modelResume = { token, timer: null, correlation, attempt, pause_class: PAUSE_CLASS.MODEL_RECOVERABLE }
+    }
     const traceBase = {
       pause_class: PAUSE_CLASS.MODEL_RECOVERABLE,
       attempt,
@@ -2716,18 +2756,31 @@ export class Session {
       actor_id: correlation.actor_id,
       actor_epoch: correlation.epoch,
     }
-    this.modelResume = null
+    const finish = () => { if (this.modelResume?.token === token) this.modelResume = null }
+    const cancelled = () => token.cancelled === true || this.stopping === true
+    const abortCancelled = async () => {
+      finish()
+      await this.traceRecovery('recovery.auto_resume_cancelled', { ...traceBase, reason: 'cancelled_after_fire', cancelled_by: token.reason })
+      return null
+    }
+    if (cancelled()) return abortCancelled()
+    const stale = await this.modelResumeStaleReason(correlation)
+    if (cancelled()) return abortCancelled()
     if (stale) {
+      finish()
       await this.traceRecovery('recovery.auto_resume_cancelled', { ...traceBase, reason: stale })
       return null
     }
-    // Count the attempt BEFORE it runs, in durable plan state: a crash mid-attempt still spent it.
+    // Count the attempt BEFORE it runs, in durable plan state: a crash mid-attempt still spent it. No await between the last
+    // cancel check and the (synchronous) count.
     const counted = this.agent.memory.recordAutoResumeStarted?.(key, correlation)
     if (!counted?.recorded) {
+      finish()
       await this.traceRecovery('recovery.auto_resume_cancelled', { ...traceBase, reason: 'plan_identity_changed' })
       return null
     }
     await this.agent.persistState?.()
+    if (cancelled()) return abortCancelled()
     const requestId = `recovery_${Date.now().toString(36)}`
     await this.traceRecovery('recovery.auto_resume_started', {
       ...traceBase,
@@ -2737,11 +2790,14 @@ export class Session {
       goal_attempt: counted.allowance.goal_attempts,
       goal_limit: counted.allowance.per_goal,
     })
+    if (cancelled()) return abortCancelled()
     let result = null
     try {
-      result = await this.recoverInterruptedPlan('auto_resume_after_model_recoverable_pause', { attempt, pause_class: PAUSE_CLASS.MODEL_RECOVERABLE }, { allowModelRecoverable: true, requestId })
+      result = await this.recoverInterruptedPlan('auto_resume_after_model_recoverable_pause', { attempt, pause_class: PAUSE_CLASS.MODEL_RECOVERABLE }, { allowModelRecoverable: true, requestId, isCancelled: cancelled })
+      if (cancelled()) await this.traceRecovery('recovery.auto_resume_cancelled', { ...traceBase, reason: 'cancelled_after_fire', cancelled_by: token.reason })
     }
     finally {
+      finish()
       // A failed attempt leaves the plan paused again: decide on the next one (or the limit) right away.
       await this.considerPauseForAutoResume().catch(error => this.log(`Auto-resume follow-up failed: ${error instanceof Error ? error.message : String(error)}`))
     }
@@ -2781,7 +2837,7 @@ export class Session {
       if (this.agent.goalAwaitingNextSlice?.() === true) {
         // Nothing is executing between slices, so there is nothing to pause.
         if (transientProviderFailure(error)) {
-          await this.scheduleAutoResume(message)
+          await this.scheduleAutoResume(error)
           return null
         }
         await this.printChat(`I could not plan the next slice of the goal after ${reason}: ${message}. Say continue to retry.`)
@@ -2791,7 +2847,7 @@ export class Session {
       if (failure.pause_class === PAUSE_CLASS.TRANSPORT && typeof this.agent.pausePersistentPlan === 'function') {
         const paused = await this.agent.pausePersistentPlan(`${TRANSIENT_PAUSE_PREFIX}: ${uiText(message, 200)}`, { pause_class: PAUSE_CLASS.TRANSPORT, pause_subkind: failure.pause_subkind })
         if (paused) await this.syncTaskBoardUi(paused)
-        await this.scheduleAutoResume(message)
+        await this.scheduleAutoResume(error)
         return null
       }
       // A recovery that failed because the model again produced no usable action stays model_recoverable (bounded by the durable
@@ -3071,21 +3127,30 @@ export class Session {
       if (this.pollRuntimeCondition()) return
       this.ensureAuthorization().catch(error => this.log(`NPC authorization health check failed: ${error.message}`))
     }, 2000)
-    const startupState = this.currentPlanState()
+    this.queueStartupRecovery(this.currentPlanState())
+    this.log(`SGLuna Factorio ready; npc=${this.npcName} (${this.npcId}), actor_id=${this.lastStatus.actor_id}, chat=${describeChatPlayers(this.config.chatPlayers)}`)
+    return this.lastStatus
+  }
+
+  // What a restart does with the plan it finds: recover it (active, lifecycle or transport pause), announce a goal with no plan, or
+  // let the declared pause class decide (a model_recoverable pause that survived the restart resumes on its persisted attempt
+  // count, not a fresh one).
+  queueStartupRecovery(startupState) {
     if (startupState?.condition_wait?.state !== 'active' && this.recoverablePlan(startupState)) {
       this.queueEvent(async () => {
         await this.recoverInterruptedPlan('runtime_restart', { actor_id: this.lastStatus?.actor_id, epoch: this.lastStatus?.epoch })
       })
+      return 'recover'
     }
-    else if (!startupState) {
+    if (!startupState) {
       this.queueStartupGoalNotice()
+      return 'notice'
     }
-    else if (startupState.status === 'paused') {
-      // A model_recoverable pause that survived the restart resumes on its persisted attempt count, not a fresh one.
+    if (startupState.status === 'paused') {
       this.queueEvent(() => this.considerPauseForAutoResume())
+      return 'consider_pause'
     }
-    this.log(`SGLuna Factorio ready; npc=${this.npcName} (${this.npcId}), actor_id=${this.lastStatus.actor_id}, chat=${describeChatPlayers(this.config.chatPlayers)}`)
-    return this.lastStatus
+    return 'none'
   }
 
   // Which startup notice an active goal with no plan to carry needs, if any. Both wake no model.
@@ -3134,13 +3199,14 @@ export class Session {
         try {
           const state = await pauseStrandedPlanAfterRequestError(this, error)
           if (state) this.log('Canonical Task Board paused after a failed request left Autorio idle')
-          if (state && String(state.pause_reason ?? '').startsWith(`${TRANSIENT_PAUSE_PREFIX}:`)) {
-            await this.scheduleAutoResume(message)
+          if (state && (pauseClassOf(this.agent.memory?.pauseRecord?.(this.planKey())).pause_class === PAUSE_CLASS.TRANSPORT
+            || String(state.pause_reason ?? '').startsWith(`${TRANSIENT_PAUSE_PREFIX}:`))) {
+            await this.scheduleAutoResume(error)
           }
           else if (!state && transientProviderFailure(error) && this.agent.goalAwaitingNextSlice?.() === true) {
             // The failure hit the planner call for the next slice: there is no
             // active plan to pause, but the goal is still live.
-            await this.scheduleAutoResume(message)
+            await this.scheduleAutoResume(error)
           }
           else if (providerRecoveryExhausted(message)) {
             // Preserve the old diagnostic signal without blindly pausing if
@@ -3194,6 +3260,8 @@ export class Session {
     // cannot delay termination. The queued handler still owns durable-state
     // deletion, Autorio cancellation, UI clearing, and the final lifecycle ACK.
     if (input.action === 'terminate') this.agent?.cancel?.('ui_terminate_immediate')
+    // A person's control takes over from any pending or already-fired automatic resume, before its own queued work runs.
+    if (['pause', 'terminate', 'follow', 'new_task'].includes(input.action)) this.cancelAutoResume(`ui_${input.action}`)
     this.queueEvent(async () => {
       try {
         await executeUiControl(this, input)

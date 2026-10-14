@@ -29,6 +29,11 @@ const COMPLETION_EVIDENCE_KINDS = new Set([
   'condition_satisfied',
 ])
 
+// Allowlist (fail closed): only these reasons are known to be fixed by a fresh restage, so only they auto-resume. Every other reason,
+// including a new one, a Jev failure class, provider_safety and the *_retry_exhausted preflight pauses (the model was corrected
+// repeatedly and did not comply; a fresh restage is not shown to change that), is a guard pause that needs a player.
+export const MODEL_RECOVERABLE_OUTCOME_REASONS = Object.freeze(new Set(['provider_budget', 'provider_format']))
+
 const PROVIDER_CONTROL_PLANE_FAILURES = new Set([
   'provider_format',
   'provider_budget',
@@ -173,7 +178,7 @@ export function validateOutcomeCandidate(candidate, { world = {} } = {}) {
         accepted: true,
         durable_status: 'paused',
         pause_reason: `recoverable_provider_failure:${reasonCode}`,
-        pause_class: reasonCode === 'provider_safety' ? PAUSE_CLASS.GUARD : PAUSE_CLASS.MODEL_RECOVERABLE,
+        pause_class: MODEL_RECOVERABLE_OUTCOME_REASONS.has(reasonCode) ? PAUSE_CLASS.MODEL_RECOVERABLE : PAUSE_CLASS.GUARD,
       }
     }
     return { ...base, accepted: true, durable_status: 'active' }

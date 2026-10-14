@@ -24,6 +24,7 @@ import {
   autoResumeAllowance,
   createEmptyPlanningState,
   getActivePlan,
+  PLAN_STATUS,
   PLANNING_EVENT,
   restorePlanningState,
   serializePlanningState,
@@ -262,7 +263,7 @@ test('the step limit is reached without progress; a new goal starts from zero', 
 
 // --- the supervisor on a real agent (run E) -----------------------------------------------------------------------------
 
-function sessionFor(agent, { actor_id: actorId = 18, epoch = 3 } = {}) {
+function sessionFor(agent, { actor_id: actorId = 18, epoch = 3, realQueue = false } = {}) {
   const chat = []
   const logs = []
   const queued = []
@@ -279,9 +280,15 @@ function sessionFor(agent, { actor_id: actorId = 18, epoch = 3 } = {}) {
     log: message => logs.push(message),
     printChat: async (message) => { chat.push(message) },
     queueEvent: (fn) => { queued.push(fn); return Promise.resolve() },
+    eventQueue: Promise.resolve(),
     rawStatus: async () => ({ ...session.liveStatus }),
     syncTaskBoardUi: async () => {},
+    ensureAuthorization: async () => ({}),
+    rcon: { command: async () => '' },
+    npcName: 'SGLuna',
   })
+  // The real queue keeps the ordering the supervisor relies on (one event at a time, in order).
+  if (realQueue) delete session.queueEvent
   return { session, chat, logs, queued }
 }
 
@@ -337,7 +344,7 @@ async function scheduledRunE(t, options = {}) {
   const stateFile = path.join(dir, 'npc-state.json')
   const scenario = await runEScenario({ stateFile, ...options })
   assert.match(scenario.failure?.message ?? '', /provider_action_omission_repair_failed/)
-  const harness = sessionFor(scenario.agent)
+  const harness = sessionFor(scenario.agent, { realQueue: options.realQueue })
   const paused = await pauseStrandedPlanAfterRequestError(harness.session, scenario.failure)
   t.after(() => { if (harness.session.modelResume?.timer) clearTimeout(harness.session.modelResume.timer) })
   return { ...scenario, ...harness, paused, stateFile, dir }
@@ -483,7 +490,6 @@ test('a stale actor, epoch, goal, step or pause cancels the scheduled resume wit
     epoch_changed: run => { run.session.liveStatus = { actor_id: 18, epoch: 4 } },
     no_longer_paused: run => { const state = run.memory.currentPlan(KEY); run.memory.recordRunResume(KEY, state, 'player_continue') },
     pause_class_changed: async run => { await run.agent.pausePersistentPlan('user_stop', { pause_class: PAUSE_CLASS.OPERATOR }) },
-    session_stopping: run => { run.session.stopping = true },
   }
   for (const [reason, mutate] of Object.entries(reasons)) {
     const run = await scheduledRunE(t, { mode: 'fail' })
@@ -614,4 +620,215 @@ test('a BLOCKED plan is a structural stop: it is never auto-resumed, whatever it
   assert.equal(await run.session.considerPauseForAutoResume(), null)
   assert.equal(run.session.modelResume, null)
   assert.equal(recoveryRows(run.events, 'recovery.auto_resume_scheduled').length, 0)
+})
+
+// --- review fixes -------------------------------------------------------------------------------------------------------
+
+function gate() {
+  let open
+  const promise = new Promise((resolve) => { open = resolve })
+  return { promise, open }
+}
+
+test('a stop that arrives while a fired resume awaits the actor status cancels it: no attempt is counted and no recovery request runs', async t => {
+  const run = await scheduledRunE(t, { mode: 'fail', realQueue: true })
+  await run.session.considerPauseForAutoResume()
+  const { token, timer } = run.session.modelResume
+  clearTimeout(timer)
+  const status = gate()
+  run.session.rawStatus = async () => { await status.promise; return { actor_id: 18, epoch: 3 } }
+  const before = run.memory.autoResumeAllowance(KEY)
+  const recoveryRowsBefore = run.trace.filter(row => row.event.startsWith('runtime.recovery_')).length
+
+  // The timer fires: the job is queued and parks on rawStatus.
+  run.session.fireModelResume(token)
+  await new Promise(resolve => setImmediate(resolve))
+  // The player says stop. The cancel is marked synchronously, before the queued operator pause can run behind the job.
+  assert.equal(run.session.queuePlayerRequest('TTLouis', 'stop'), true)
+  assert.equal(token.cancelled, true, 'the token was invalidated synchronously')
+  assert.equal(run.session.modelResume, null)
+  status.open()
+  await run.session.eventQueue
+
+  const cancelled = recoveryRows(run.events, 'recovery.auto_resume_cancelled').map(row => row.reason)
+  assert.deepEqual(cancelled.sort(), ['cancelled_after_fire', 'player_request'])
+  assert.equal(recoveryRows(run.events, 'recovery.auto_resume_started').length, 0)
+  assert.equal(run.trace.filter(row => row.event.startsWith('runtime.recovery_')).length, recoveryRowsBefore, 'no recovery request ran')
+  assert.equal(run.memory.autoResumeAllowance(KEY).goal_attempts, before.goal_attempts, 'no attempt was counted')
+  assert.equal(run.game.mutations.length, 1)
+  assert.equal(run.memory.pauseRecord(KEY).pause_class, 'operator', 'the stop stands')
+})
+
+test('a cancel after the attempt was counted but before recovery runs still aborts the recovery', async t => {
+  const run = await scheduledRunE(t, { mode: 'fail' })
+  run.state.mode = 'ok' // the provider is healthy again: only the cancel can stop this attempt
+  await run.session.considerPauseForAutoResume()
+  const { token, timer, correlation } = run.session.modelResume
+  clearTimeout(timer)
+  const persisted = gate()
+  const persist = run.agent.persistState.bind(run.agent)
+  run.agent.persistState = async () => { await persisted.promise; return persist() }
+  const job = run.session.runModelRecoverableResume(correlation, 1, token)
+  await new Promise(resolve => setImmediate(resolve))
+  run.session.cancelAutoResume('ui_pause')
+  persisted.open()
+  await job
+  assert.equal(recoveryRows(run.events, 'recovery.auto_resume_started').length, 0)
+  assert.equal(run.game.mutations.length, 1, 'recovery never ran')
+  assert.ok(recoveryRows(run.events, 'recovery.auto_resume_cancelled').some(row => row.reason === 'cancelled_after_fire'))
+})
+
+test('a player request or a UI pause marks the cancel synchronously, before its queued work', async t => {
+  const run = await scheduledRunE(t, { mode: 'fail', realQueue: true })
+  await run.session.considerPauseForAutoResume()
+  const first = run.session.modelResume.token
+  run.session.queuePlayerRequest('TTLouis', 'what are you doing')
+  assert.equal(first.cancelled, true)
+  assert.equal(first.reason, 'player_request')
+  await run.session.eventQueue.catch(() => {})
+  run.session.lastPauseDecision = ''
+  await run.session.considerPauseForAutoResume()
+  const second = run.session.modelResume.token
+  run.session.queueUiControl({ action: 'pause', player_index: 1 })
+  assert.equal(second.cancelled, true)
+  assert.equal(second.reason, 'ui_pause')
+  await run.session.eventQueue.catch(() => {})
+})
+
+test('model_recoverable is an allowlist of outcome reasons: unknown and retry-exhausted reasons are guard pauses', () => {
+  const idle = { task_state: 'idle', queue_length: 0 }
+  const classOf = reasonCode => validateOutcomeCandidate({ kind: 'recoverable_provider_failure', source: 'x', reason_code: reasonCode }, { world: idle }).pause_class
+  for (const reason of ['provider_budget', 'provider_format']) assert.equal(classOf(reason), 'model_recoverable', reason)
+  for (const reason of ['requires_machine_retry_exhausted', 'research_preflight_retry_exhausted', 'provider_safety', 'a_reason_added_next_week', 'jev_invented_class']) {
+    assert.equal(classOf(reason), 'guard', reason)
+  }
+})
+
+test('context-window and output-budget failures are never transport, whatever status or code accompanies them', () => {
+  for (const failure of [
+    Object.assign(new Error('provider_context_window_exceeded: Provider HTTP 429 reported context/input token limit exhaustion'), { http_status: 429 }),
+    Object.assign(new Error('x'), { http_status: 500, code: 'provider_context_window_exceeded' }),
+    Object.assign(new Error('x'), { http_status: 503, failureClass: 'provider_budget' }),
+    Object.assign(new Error('provider_output_budget_exhausted: finish=length'), { http_status: 502, transport_subkind: 'server_error' }),
+  ]) {
+    assert.equal(transientProviderFailure(failure), undefined, failure.message)
+  }
+  assert.equal(classifyRequestFailure(Object.assign(new Error('provider_context_window_exceeded: Provider HTTP 429'), { http_status: 429 })).pause_class, 'model_recoverable')
+})
+
+test('a resume is never scheduled without an actor and epoch, and an unreadable status at fire time cancels it', async t => {
+  const missing = await scheduledRunE(t, { mode: 'fail' })
+  missing.session.lastStatus = { actor_id: 18 }
+  assert.equal(await missing.session.considerPauseForAutoResume(), false)
+  assert.equal(missing.session.modelResume, null)
+  assert.equal(recoveryRows(missing.events, 'recovery.auto_resume_cancelled').at(-1).reason, 'actor_unknown')
+  assert.equal(recoveryRows(missing.events, 'recovery.auto_resume_scheduled').length, 0)
+
+  const run = await scheduledRunE(t, { mode: 'fail' })
+  await run.session.considerPauseForAutoResume()
+  const { correlation, timer } = run.session.modelResume
+  clearTimeout(timer)
+  run.session.rawStatus = async () => { throw new Error('RCON is not connected') }
+  await run.session.runModelRecoverableResume(correlation, 1)
+  assert.equal(recoveryRows(run.events, 'recovery.auto_resume_cancelled').at(-1).reason, 'status_unreadable')
+  assert.equal(recoveryRows(run.events, 'recovery.auto_resume_started').length, 0)
+})
+
+function blockPlan(run) {
+  const plan = getActivePlan(run.memory.planningState(KEY))
+  run.memory.dispatchPlanningEvent(KEY, {
+    type: PLANNING_EVENT.STRUCTURAL_BLOCKER_CONFIRMED, source: 'runtime', now: Date.now(), plan_id: plan.plan_id, reason_code: 'missing_dependency', evidence_refs: ['ref_a'], detail: 'no route',
+  })
+}
+
+test('a plan the reducer holds BLOCKED is never scheduled or fired, with a real blocked-plus-paused state', async t => {
+  const run = await scheduledRunE(t, { mode: 'fail' })
+  blockPlan(run)
+  assert.equal(getActivePlan(run.memory.planningState(KEY)).status, PLAN_STATUS.BLOCKED)
+  assert.equal(run.memory.pauseRecord(KEY).paused, true)
+  assert.equal(run.memory.pauseRecord(KEY).pause_class, 'model_recoverable', 'the pause class alone would have scheduled a resume')
+  assert.equal(await run.session.considerPauseForAutoResume(), null)
+  assert.equal(run.session.modelResume, null)
+  assert.equal(recoveryRows(run.events, 'recovery.auto_resume_scheduled').length, 0)
+
+  // A resume scheduled before the block is cancelled at fire time.
+  const other = await scheduledRunE(t, { mode: 'fail' })
+  await other.session.considerPauseForAutoResume()
+  const { correlation, timer } = other.session.modelResume
+  clearTimeout(timer)
+  blockPlan(other)
+  await other.session.runModelRecoverableResume(correlation, 1)
+  assert.equal(recoveryRows(other.events, 'recovery.auto_resume_cancelled').at(-1).reason, 'plan_blocked')
+  assert.equal(recoveryRows(other.events, 'recovery.auto_resume_started').length, 0)
+})
+
+test('RUN_PAUSED never downgrades an operator, authority or guard pause to model_recoverable or transport', () => {
+  for (const sticky of [PAUSE_CLASS.OPERATOR, PAUSE_CLASS.AUTHORITY, PAUSE_CLASS.GUARD]) {
+    const paused = applyPlanningEvent(committedPlan(), { type: PLANNING_EVENT.RUN_PAUSED, now: tick(), source: 'runtime', reason: `held_${sticky}`, pause_class: sticky })
+    for (const [pauseClass, pauseSubkind] of [[PAUSE_CLASS.MODEL_RECOVERABLE, ''], [PAUSE_CLASS.TRANSPORT, 'timeout']]) {
+      const again = applyPlanningEvent(paused, { type: PLANNING_EVENT.RUN_PAUSED, now: tick(), source: 'runtime', reason: 'late failure', pause_class: pauseClass, pause_subkind: pauseSubkind })
+      assert.equal(again.run.pause_class, sticky, `${sticky} stays over ${pauseClass}`)
+      assert.equal(again.run.pause_reason, `held_${sticky}`)
+    }
+    // Moving to another non-resumable class, or being resumed and paused again, is still allowed.
+    assert.equal(applyPlanningEvent(paused, { type: PLANNING_EVENT.RUN_PAUSED, now: tick(), source: 'runtime', reason: 'user_stop', pause_class: PAUSE_CLASS.OPERATOR }).run.pause_class, PAUSE_CLASS.OPERATOR)
+    const resumed = applyPlanningEvent(paused, { type: PLANNING_EVENT.RUN_RESUMED, now: tick(), source: 'runtime' })
+    assert.equal(applyPlanningEvent(resumed, { type: PLANNING_EVENT.RUN_PAUSED, now: tick(), source: 'runtime', reason: 'x', pause_class: PAUSE_CLASS.MODEL_RECOVERABLE }).run.pause_class, 'model_recoverable')
+  }
+  // A resumable pause is replaced freely.
+  const model = pause(committedPlan())
+  assert.equal(applyPlanningEvent(model, { type: PLANNING_EVENT.RUN_PAUSED, now: tick(), source: 'runtime', reason: 'p', pause_class: PAUSE_CLASS.TRANSPORT, pause_subkind: 'timeout' }).run.pause_class, 'transport')
+})
+
+test('a late model failure after a stop does not turn the stop into a retry (through the agent)', async t => {
+  const run = await scheduledRunE(t, { mode: 'fail' })
+  await run.agent.pausePersistentPlan('user_stop', { pause_class: PAUSE_CLASS.OPERATOR })
+  await run.agent.pausePersistentPlan(`provider_recovery_exhausted: ${RUN_E_FAILURE}`, { pause_class: PAUSE_CLASS.MODEL_RECOVERABLE })
+  const record = run.memory.pauseRecord(KEY)
+  assert.deepEqual([record.pause_class, record.pause_reason], ['operator', 'user_stop'])
+  run.session.lastPauseDecision = ''
+  assert.equal(await run.session.considerPauseForAutoResume(), null)
+})
+
+test('transport auto-resume schedules from the declared class and subkind: a structured-only ECONNRESET with a plain message still schedules', async t => {
+  const { agent } = await startedAgent()
+  const { session, chat } = sessionFor(agent, { realQueue: true })
+  t.after(() => session.clearAutoResume())
+  const failure = Object.assign(new Error('upstream closed'), { code: 'ECONNRESET' })
+  await session.queueEvent(() => { throw failure }, { reportError: true })
+  assert.equal(agent.memory.currentPlan(KEY).status, 'paused')
+  const record = agent.memory.pauseRecord(KEY)
+  assert.deepEqual([record.pause_class, record.pause_subkind], ['transport', 'transport'])
+  assert.equal(session.autoResume?.kind, 'transport')
+  assert.ok(session.autoResume.timer)
+  assert.ok(chat.some(line => /Resuming automatically in 30 s \(attempt 1\/6\)/.test(line)))
+  // The durable subkind alone is enough when the failure object carries nothing.
+  session.clearAutoResume()
+  assert.equal(await session.scheduleAutoResume(new Error('opaque')), true)
+  assert.equal(session.autoResume.kind, 'transport')
+})
+
+test('the startup branch schedules from a persisted model_recoverable pause, and leaves an operator pause alone', async t => {
+  const run = await scheduledRunE(t, { mode: 'fail' })
+  await run.session.considerPauseForAutoResume()
+  clearTimeout(run.session.modelResume.timer)
+  await run.session.runModelRecoverableResume(run.session.modelResume.correlation, 1)
+  clearTimeout(run.session.modelResume.timer)
+
+  const world = makeWorld({ stateFile: run.stateFile, mode: 'fail' })
+  await world.agent.loadPersistentState()
+  const second = sessionFor(world.agent, { realQueue: true })
+  t.after(() => { if (second.session.modelResume?.timer) clearTimeout(second.session.modelResume.timer) })
+  assert.equal(second.session.queueStartupRecovery(second.session.currentPlanState()), 'consider_pause')
+  await second.session.eventQueue
+  assert.deepEqual(recoveryRows(world.events, 'recovery.auto_resume_scheduled').map(row => [row.attempt, row.goal_attempt]), [[2, 2]])
+
+  const stopped = await startedAgent()
+  stopped.agent.traceRequest = null
+  await stopped.agent.pausePersistentPlan('user_stop', { pause_class: PAUSE_CLASS.OPERATOR })
+  const third = sessionFor(stopped.agent, { realQueue: true })
+  assert.equal(third.session.queueStartupRecovery(third.session.currentPlanState()), 'consider_pause')
+  await third.session.eventQueue
+  assert.equal(third.session.modelResume, null)
+  assert.equal(recoveryRows(stopped.events, 'recovery.auto_resume_scheduled').length, 0)
 })
