@@ -3,7 +3,16 @@ import assert from 'node:assert/strict'
 
 import {
   buildHandoffPacket,
+  burnerFuelsFromDetails,
+  deriveFuelNeeds,
+  deriveMachineEnergy,
   deriveResidualNeeds,
+  expansionRecipeNames,
+  HANDOFF_DROP_ORDER,
+  machineStatusesFrom,
+  mergeRecipeFact,
+  recipeFactsFromDetails,
+  triggerProductionRoots,
   estimateTokens,
   HANDOFF_PACKET_LIMITS,
   executorFactsRefreshMessage,
@@ -1039,4 +1048,220 @@ test('6: lab-sized recipe arithmetic cannot truncate the separate iron and coppe
   assert.match(acquisition, /iron-ore missing=100.*nearest=\(192.5,8.5\)/)
   assert.match(acquisition, /copper-ore missing=100.*nearest=\(192.5,8.5\)/)
   assert.equal(packet.over_limit, false)
+})
+
+
+// --- Unit 8: trigger production roots, machine energy and burner fuel -------------------------------------------------
+
+const liveMachine = (name, source, extra = {}) => ({
+  name, type: 'furnace', placed_by_item: name, crafting_speed: 1, seconds_per_craft: 3.2, crafts_per_second: 0.3125,
+  energy_source: source, energy_watts: 90000, ...extra,
+})
+const smeltingDetails = (machines) => ({
+  found: true,
+  query: 'copper-plate',
+  truncated: false,
+  recipes: [{
+    name: 'copper-plate', enabled: true, energy: 3.2, categories: ['smelting'], hand_craftable_category: false,
+    ingredients: [{ type: 'item', name: 'copper-ore', amount: 1 }], products: [{ type: 'item', name: 'copper-plate', amount: 1 }],
+    crafting_machines: machines, crafting_machines_truncated: false,
+  }],
+})
+const FURNACES = [
+  liveMachine('electric-furnace', 'electric', { energy_watts: 180000 }),
+  liveMachine('steel-furnace', 'burner', { burner_effectivity: 1, fuel_categories: ['chemical'] }),
+  liveMachine('stone-furnace', 'burner', { burner_effectivity: 1, fuel_categories: ['chemical'] }),
+]
+const COPPER_PLATE_FACT = recipeFactsFromDetails(smeltingDetails(FURNACES), { tag: TAG })[0]
+const triggerPath = (overrides = {}, node = {}) => researchPathFact({ ok: true, target: 'electronics', node_count: 1, nodes: [
+  { name: 'electronics', researched: false, mode: 'trigger', status: 'ready', research_trigger: { type: 'craft-item', item: 'copper-plate', count: 10 }, ...node },
+], ...overrides }, 'electronics', TAG)
+const requirementResearch = (statuses) => ({ electronics: { trigger: { type: 'craft-item', item: 'copper-plate', count: 10 }, trigger_crafting: {
+  item: 'copper-plate', recipes: [{ recipe: 'copper-plate', enabled: true, categories: ['smelting'], hand_craftable: false, hand_craftable_reason: 'category_unsupported',
+    machines: Object.entries(statuses).map(([entity, status]) => ({ entity, item: entity, status })) }],
+} } })
+
+test('8 B: a production root comes only from a fresh, unresearched craft-item trigger on the research target', () => {
+  assert.deepEqual(triggerProductionRoots([triggerPath()]), [{ item: 'copper-plate', count: 10, technology: 'electronics', held_counted: false, status: 'ready' }])
+  for (const [label, path] of [
+    ['researched', triggerPath({}, { researched: true })],
+    ['lab research', researchPathFact({ ok: true, target: 'electronics', node_count: 1, nodes: [{ name: 'electronics', researched: false, mode: 'science', science: { count: 5, ingredients: [{ name: 'automation-science-pack', amount: 1 }] } }] }, 'electronics', TAG)],
+    ['another trigger type', triggerPath({}, { research_trigger: { type: 'mine-entity', entity: 'rock-huge' } })],
+    ['no count', triggerPath({}, { research_trigger: { type: 'craft-item', item: 'copper-plate' } })],
+    ['zero count', triggerPath({}, { research_trigger: { type: 'craft-item', item: 'copper-plate', count: 0 } })],
+    ['quality item', triggerPath({}, { research_trigger: { type: 'craft-item', item: 'copper-plate', item_quality: 'rare', count: 10 } })],
+    ['unreadable path', { target: 'electronics', state: 'unavailable', reason: 'research_path_read_failed' }],
+    ['deferred path', { target: 'electronics', state: 'deferred', reason: 'batch_in_flight' }],
+  ]) assert.deepEqual(triggerProductionRoots([path]), [], label)
+  // A prerequisite that is itself a trigger is not the contract's target: only the target node is a root.
+  const chain = researchPathFact({ ok: true, target: 'automation-science-pack', node_count: 2, nodes: [
+    { name: 'electronics', researched: false, mode: 'trigger', research_trigger: { type: 'craft-item', item: 'copper-plate', count: 10 } },
+    { name: 'automation-science-pack', researched: false, mode: 'trigger', research_trigger: { type: 'craft-item', item: 'lab', count: 1 } },
+  ] }, 'automation-science-pack', TAG)
+  assert.deepEqual(triggerProductionRoots([chain]).map(root => root.item), ['lab'])
+  const many = ['a', 'b', 'c', 'd', 'e', 'f'].map(name => researchPathFact({ ok: true, target: name, node_count: 1, nodes: [{ name, researched: false, mode: 'trigger', research_trigger: { type: 'craft-item', item: `item-${name}`, count: 1 } }] }, name, TAG))
+  assert.equal(triggerProductionRoots(many).length, EXECUTOR_FACT_LIMITS.researchTargets)
+})
+
+test('8 B: a production target is met by new crafts: held stock is shown, never netted, while its ingredients net against held stock', () => {
+  const production = [{ item: 'copper-plate', count: 10, technology: 'electronics', held_counted: false }]
+  const derived = deriveResidualNeeds({ roots: [], production, recipes: [COPPER_PLATE_FACT], held: heldOf({ 'copper-plate': 10, 'copper-ore': 4 }) })
+  assert.equal(derived.ok, true)
+  assert.deepEqual(derived.rows, [
+    { item: 'copper-plate', required: 10, held: 10, missing: 10, trigger: { technology: 'electronics', held_counted: false }, crafts: 10, recipe: 'copper-plate' },
+    { item: 'copper-ore', required: 10, held: 4, missing: 6 },
+  ])
+  // The target needs no held count of its own; an unread one is simply not shown.
+  const unread = deriveResidualNeeds({ roots: [], production, recipes: [COPPER_PLATE_FACT], held: heldOf({ 'copper-ore': 0 }) })
+  assert.equal(unread.ok, true)
+  assert.equal('held' in unread.rows[0], false)
+  assert.deepEqual(unread.rows[1], { item: 'copper-ore', required: 10, held: 0, missing: 10 })
+  // An ingredient count that is unknown still refuses, as for any root.
+  assert.deepEqual(deriveResidualNeeds({ roots: [], production, recipes: [COPPER_PLATE_FACT], held: heldOf({}) }), { ok: false, reason: 'held_unknown:copper-ore' })
+  // Without a usable recipe the target is stated with no crafts and no invented ingredients.
+  const bare = deriveResidualNeeds({ roots: [], production, recipes: [], held: heldOf({}) })
+  assert.deepEqual(bare.rows, [{ item: 'copper-plate', required: 10, missing: 10, trigger: { technology: 'electronics', held_counted: false } }])
+  // A recipe both a production target and an inventory root would expand is refused rather than double counted.
+  assert.deepEqual(deriveResidualNeeds({ roots: [{ item: 'copper-plate', count: 5 }], production, recipes: [COPPER_PLATE_FACT], held: heldOf({ 'copper-plate': 0, 'copper-ore': 0 }) }),
+    { ok: false, reason: 'shared_recipe:copper-plate' })
+  // Production alone is a valid input; neither roots nor production is not.
+  assert.deepEqual(deriveResidualNeeds({ roots: [], production: [], recipes: [], held: heldOf({}) }), { ok: false, reason: 'no_contract_roots' })
+  assert.deepEqual(expansionRecipeNames(['copper-plate', 'copper-ore'], [COPPER_PLATE_FACT]), ['copper-plate'])
+})
+
+test('8 C: recipe facts keep each machine native energy source from the mod answer, bounded, and never guess an unreported one', () => {
+  assert.deepEqual(COPPER_PLATE_FACT.machines, ['electric-furnace', 'steel-furnace', 'stone-furnace'])
+  assert.deepEqual(COPPER_PLATE_FACT.machine_energy, [
+    { name: 'electric-furnace', energy_source: 'electric', energy_watts: 180000, item: 'electric-furnace' },
+    { name: 'steel-furnace', energy_source: 'burner', fuel_categories: ['chemical'], energy_watts: 90000, item: 'steel-furnace' },
+    { name: 'stone-furnace', energy_source: 'burner', fuel_categories: ['chemical'], energy_watts: 90000, item: 'stone-furnace' },
+  ])
+  const mixed = recipeFactsFromDetails(smeltingDetails([
+    liveMachine('sink', 'void'), liveMachine('Bad Name', 'burner'), { name: 'mystery', type: 'furnace' }, liveMachine('lab-heater', 'nuclear-reactor'),
+  ]), { tag: TAG })[0]
+  assert.deepEqual(mixed.machine_energy.map(entry => `${entry.name}:${entry.energy_source}`), ['sink:void'])
+  assert.deepEqual(mixed.machines, ['sink', 'mystery', 'lab-heater'], 'an unreported energy source adds no energy record, not a guessed one')
+  assert.equal('machine_energy' in recipeFactsFromDetails(smeltingDetails([{ name: 'mystery', type: 'furnace' }]), { tag: TAG })[0], false)
+  const wide = recipeFactsFromDetails(smeltingDetails(Array.from({ length: 9 }, (_, index) => liveMachine(`furnace-${index}`, 'electric'))), { tag: TAG })[0]
+  assert.equal(wide.machine_energy.length, EXECUTOR_FACT_LIMITS.recipeMachines)
+  // A later read without energy records does not erase them.
+  assert.equal(mergeRecipeFact(COPPER_PLATE_FACT, { ...COPPER_PLATE_FACT, machine_energy: undefined }).machine_energy.length, 3)
+})
+
+test('8 C: the mod burner_fuels answer is validated, named and bounded', () => {
+  const valid = { found: true, burner_fuels: { categories: ['chemical'], matched_count: 3, truncated: false, items: [
+    { name: 'coal', category: 'chemical', fuel_value: 4000000, mined_from: ['coal'] },
+    { name: 'wood', category: 'chemical', fuel_value: 2000000 },
+  ] } }
+  assert.deepEqual(burnerFuelsFromDetails(valid), [
+    { name: 'coal', category: 'chemical', fuel_value: 4000000, mined_from: ['coal'] },
+    { name: 'wood', category: 'chemical', fuel_value: 2000000, mined_from: [] },
+  ])
+  for (const bad of [undefined, {}, { found: false, burner_fuels: valid.burner_fuels }, { found: true }, { found: true, burner_fuels: 'coal' }]) assert.deepEqual(burnerFuelsFromDetails(bad), [])
+  const items = [
+    { name: 'Bad Name', category: 'chemical', fuel_value: 1 }, { name: 'no-value', category: 'chemical', fuel_value: 0 },
+    { name: 'no-category', fuel_value: 5 }, { name: 'ok', category: 'chemical', fuel_value: 5, mined_from: ['a', 'b', 'c', 'd', 'e', 'f'] },
+  ]
+  const parsed = burnerFuelsFromDetails({ found: true, burner_fuels: { items } })
+  assert.deepEqual(parsed.map(item => item.name), ['ok'])
+  assert.equal(parsed[0].mined_from.length, EXECUTOR_FACT_LIMITS.rawLeafMinedFrom)
+  const crowded = Array.from({ length: 12 }, (_, index) => ({ name: `fuel-${index}`, category: 'chemical', fuel_value: index + 1 }))
+  assert.equal(burnerFuelsFromDetails({ found: true, burner_fuels: { items: crowded } }).length, EXECUTOR_FACT_LIMITS.fuelItems)
+})
+
+test('8 C: machine availability joins requirement statuses, fresh held counts and observed placement; locked and unverified machines are only counted', () => {
+  const statuses = machineStatusesFrom({ triggerReports: cacheTriggerCraftingReports(requirementResearch({ 'stone-furnace': 'craftable', 'steel-furnace': 'locked', 'electric-furnace': 'locked' }), TAG) })
+  assert.deepEqual([...statuses.entries()], [['stone-furnace', { item: 'stone-furnace', status: 'craftable' }], ['steel-furnace', { item: 'steel-furnace', status: 'locked' }], ['electric-furnace', { item: 'electric-furnace', status: 'locked' }]])
+  const facts = deriveMachineEnergy({ recipes: [COPPER_PLATE_FACT], recipeNames: ['copper-plate'], statuses, held: heldOf({ 'stone-furnace': 1 }), placed: new Map() })
+  assert.deepEqual(facts.machines, [{ name: 'stone-furnace', energy_source: 'burner', fuel_categories: ['chemical'], energy_watts: 90000, item: 'stone-furnace',
+    status: 'craftable', held: 1, placed: { observed: false } }])
+  assert.deepEqual(facts.omitted, { locked: 2, unverified: 0, truncated: 0 })
+  assert.equal(facts.burner_count, 1)
+  assert.deepEqual(facts.fuel_categories, ['chemical'])
+  // No status read at all: a machine counts as available only when the actor holds one or one was seen placed.
+  const bare = deriveMachineEnergy({ recipes: [COPPER_PLATE_FACT], recipeNames: ['copper-plate'], held: heldOf({ 'stone-furnace': 0, 'steel-furnace': 0 }), placed: new Map() })
+  assert.equal(bare, undefined, 'nothing available to the actor means nothing to carry')
+  const held = deriveMachineEnergy({ recipes: [COPPER_PLATE_FACT], recipeNames: ['copper-plate'], held: heldOf({ 'steel-furnace': 2 }), placed: new Map([['electric-furnace', { count: 1, via: 'checkpoint_machine' }]]) })
+  assert.deepEqual(held.machines.map(entry => [entry.name, entry.status, entry.held, entry.placed.observed]), [['electric-furnace', 'unknown', undefined, true], ['steel-furnace', 'unknown', 2, false]])
+  assert.deepEqual(held.omitted, { locked: 0, unverified: 1, truncated: 0 })
+  assert.equal(held.burner_count, 1)
+  // A recipe with no machine energy records says `unknown`, and a recipe that is not in the cache contributes nothing.
+  const unlabelled = deriveMachineEnergy({ recipes: [{ ...COPPER_PLATE_FACT, machine_energy: undefined }], recipeNames: ['copper-plate', 'not-cached'], held: heldOf({}), placed: new Map([['stone-furnace', { count: 1, via: 'historical_entities' }]]) })
+  assert.deepEqual(unlabelled.machines.map(entry => [entry.name, entry.energy_source]), [['stone-furnace', 'unknown']])
+  assert.equal(unlabelled.burner_count, 0)
+  assert.equal(deriveMachineEnergy({ recipes: [], recipeNames: ['copper-plate'], held: heldOf({}) }), undefined)
+  // Requirement machine options reach the same status map.
+  const fromOptions = machineStatusesFrom({ requirementMachines: new Map([['copper-plate', { machines: ['stone-furnace'], options: [{ entity: 'stone-furnace', item: 'stone-furnace', status: 'craftable' }, { entity: 'x y', item: 'z', status: 'craftable' }] }]]) })
+  assert.deepEqual([...fromOptions.keys()], ['stone-furnace'])
+})
+
+test('8 C: fuel needs list the candidates for the burner categories, minable first, with fresh held counts and unread counts distinct', () => {
+  const machineEnergy = { machines: [{ name: 'stone-furnace', energy_source: 'burner', fuel_categories: ['chemical'] }, { name: 'electric-furnace', energy_source: 'electric' }], fuel_categories: ['chemical'] }
+  const fuels = [
+    { name: 'wood', category: 'chemical', fuel_value: 2000000, mined_from: [] },
+    { name: 'uranium-fuel-cell', category: 'nuclear', fuel_value: 8000000000, mined_from: [] },
+    { name: 'solid-fuel', category: 'chemical', fuel_value: 12000000, mined_from: [] },
+    { name: 'coal', category: 'chemical', fuel_value: 4000000, mined_from: ['coal'] },
+  ]
+  const needs = deriveFuelNeeds({ machineEnergy, fuels, held: heldOf({ coal: 5 }) })
+  assert.deepEqual(needs.machines, ['stone-furnace'])
+  assert.deepEqual(needs.categories, ['chemical'])
+  assert.deepEqual(needs.items.map(item => [item.name, item.held]), [['coal', 5], ['solid-fuel', undefined], ['wood', undefined]])
+  assert.equal(needs.held_total, 5)
+  assert.equal(needs.unknown_held, 2)
+  assert.equal(deriveFuelNeeds({ machineEnergy: { machines: [{ name: 'electric-furnace', energy_source: 'electric' }], fuel_categories: [] }, fuels, held: heldOf({}) }), undefined)
+  assert.equal(deriveFuelNeeds({ machineEnergy: undefined, fuels, held: heldOf({}) }), undefined)
+})
+
+test('8 C/D: the packet states the trigger target, the energy source and placement, and the fuel with its acquisition; sizes are bounded', () => {
+  const statuses = machineStatusesFrom({ triggerReports: cacheTriggerCraftingReports(requirementResearch({ 'stone-furnace': 'craftable', 'steel-furnace': 'locked', 'electric-furnace': 'locked' }), TAG) })
+  const held = heldOf({ 'copper-plate': 0, 'copper-ore': 10, 'stone-furnace': 1, coal: 0, 'solid-fuel': 0, wood: 0 })
+  const machineEnergy = deriveMachineEnergy({ recipes: [COPPER_PLATE_FACT], recipeNames: ['copper-plate'], statuses, held, placed: new Map() })
+  const fuelNeeds = deriveFuelNeeds({ machineEnergy, held, fuels: [
+    { name: 'coal', category: 'chemical', fuel_value: 4000000, mined_from: ['coal'] },
+    { name: 'solid-fuel', category: 'chemical', fuel_value: 12000000, mined_from: [] },
+    { name: 'wood', category: 'chemical', fuel_value: 2000000, mined_from: [] },
+  ] })
+  fuelNeeds.items[0].raw = { mined_from: ['coal'], as_of: TAG, sources: [{ resource: 'coal', state: 'found', x: 192.5, y: 8.5, distance: 192.7, radius: 1024 }] }
+  const production = [{ item: 'copper-plate', count: 10, technology: 'electronics', held_counted: false, status: 'ready' }]
+  const residual = { roots: [], production, rows: deriveResidualNeeds({ roots: [], production, recipes: [COPPER_PLATE_FACT], held }).rows }
+  const executorFacts = { recipes: [COPPER_PLATE_FACT], counts: { items: [{ item: 'copper-ore', count: 10, state: 'fresh' }], unavailable: [], as_of: TAG }, residual, machine_energy: machineEnergy, fuel_needs: fuelNeeds }
+  const packet = buildHandoffPacket({ planningState: circuitState(), ...ARGS, executorFacts, limits: { maxChars: 100000 } })
+  const line = prefix => packet.text.split('\n').find(item => item.startsWith(prefix))
+  assert.equal(line('residual_needs'), 'residual_needs (derived from recipe_fact and fresh held_counts for the step contract trigger:copper-platex10; shared stock counted once): trigger craft-item copper-plate count=10 for electronics (counts new crafts; held stock not counted) held=0 crafts=10 via copper-plate | copper-ore required=10 held=10 missing=0')
+  assert.equal(line('machine_energy'), 'machine_energy (native prototype energy source; held = fresh live count of the machine item; placed = whether this harness observed an instance via historical_entities or checkpoint_machine, history and not a current exact target): stone-furnace energy=burner(fuel_categories=chemical, 90kW) status=craftable held=1 placed=not_observed | not_listed: locked=2')
+  assert.match(line('fuel_needs'), /^fuel_needs \(burner stone-furnace burn fuel_categories=chemical; candidates from item prototypes, held from the fresh read; amount needed not derived; sources searched are resource prototypes only, no_resource_source = none yields it, trees and other non-resource sources are not derived\): held_fuel=none \| coal fuel_value=4MJ held=0 raw: mined_from=coal \(source observation; reach\/path unverified\) nearest=\(192\.5,8\.5\) distance=192\.7 as_of=tick:612,epoch:3 \| solid-fuel fuel_value=12MJ held=0 no_resource_source \| wood fuel_value=2MJ held=0 no_resource_source$/)
+  assert.deepEqual({ machine_energy: packet.executor_facts.machine_energy, burner_machines: packet.executor_facts.burner_machines, fuel_needs: packet.executor_facts.fuel_needs }, { machine_energy: 1, burner_machines: 1, fuel_needs: 3 })
+  assert.equal(packet.dropped.length, 0)
+  // A packet without the new facts is unchanged: no keys, no lines.
+  const plain = buildHandoffPacket({ planningState: circuitState(), ...ARGS, executorFacts: FRESH_FACTS() })
+  assert.equal('machine_energy' in plain.executor_facts, false)
+  assert.ok(!plain.text.includes('machine_energy') && !plain.text.includes('fuel_needs'))
+
+  // The deferred refresh message carries them in the same words.
+  const refresh = executorFactsRefreshMessage(executorFacts)
+  assert.ok(refresh.includes(line('machine_energy')) && refresh.includes(line('fuel_needs')))
+
+  // Size control: whole records, by their named drop keys, in the documented order.
+  const order = HANDOFF_DROP_ORDER
+  assert.ok(order.indexOf('residual_needs') < order.indexOf('machine_energy'))
+  assert.ok(order.indexOf('machine_energy') < order.indexOf('raw_leaf_acquisition'))
+  assert.ok(order.indexOf('raw_leaf_acquisition') < order.indexOf('fuel_needs'))
+  assert.ok(order.indexOf('fuel_needs') < order.indexOf('roadmap_node'))
+  const tiny = buildHandoffPacket({ planningState: circuitState(), ...ARGS, executorFacts, limits: { maxChars: 1 } })
+  const dropped = tiny.dropped
+  for (const [first, second] of [['residual_needs', 'machine_energy'], ['machine_energy', 'fuel_needs']]) {
+    assert.ok(dropped.includes(first) && dropped.includes(second), `${first} and ${second} dropped`)
+    assert.ok(dropped.indexOf(first) < dropped.indexOf(second), `${first} drops before ${second}: ${dropped.join(', ')}`)
+  }
+  assert.deepEqual({ machine_energy: tiny.executor_facts.machine_energy, burner_machines: tiny.executor_facts.burner_machines, fuel_needs: tiny.executor_facts.fuel_needs }, { machine_energy: 0, burner_machines: 0, fuel_needs: 0 })
+  // Bounded rendering: many machines and many fuels cannot grow a record past its character limit (plus its fixed header).
+  const crowdedMachines = { machines: Array.from({ length: 6 }, (_, index) => ({ name: `furnace-with-a-long-name-${index}`, energy_source: 'burner', fuel_categories: ['chemical'], energy_watts: 90000, status: 'craftable', held: 100000, placed: { observed: true, count: 12, via: 'historical_entities' } })), omitted: { locked: 9, unverified: 9, truncated: 3 }, burner_count: 6, fuel_categories: ['chemical'] }
+  const crowdedFuel = { machines: ['furnace-0'], categories: ['chemical'], held_total: 0, unknown_held: 0, items: Array.from({ length: 6 }, (_, index) => ({ name: `${'fuel-'.repeat(8)}${index}`, category: 'chemical', fuel_value: 1000000, mined_from: [`resource-${'r'.repeat(30)}${index}`], held: 0 })) }
+  const crowded = buildHandoffPacket({ planningState: circuitState(), ...ARGS, executorFacts: { machine_energy: crowdedMachines, fuel_needs: crowdedFuel }, limits: { maxChars: 100000 } })
+  const crowdedLine = prefix => crowded.text.split('\n').find(item => item.startsWith(prefix))
+  assert.ok(crowdedLine('machine_energy').length <= 340 + EXECUTOR_FACT_LIMITS.machineEnergyChars + 160, crowdedLine('machine_energy'))
+  assert.match(crowdedLine('machine_energy'), /\(\+\d+ more\)/)
+  assert.ok(crowdedLine('fuel_needs').length <= 480 + EXECUTOR_FACT_LIMITS.fuelChars + 120, crowdedLine('fuel_needs'))
+  assert.match(crowdedLine('fuel_needs'), /\(\+\d+ more\)/)
 })

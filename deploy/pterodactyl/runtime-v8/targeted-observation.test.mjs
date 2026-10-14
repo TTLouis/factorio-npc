@@ -446,3 +446,18 @@ test('8 A: planner and draft requests keep the plan/currentStep comparison and r
   assert.equal(staleReply2._sglunaObservationRefusal.reason, 'stale_plan_or_step')
   for (const world of [stale, stepKey, staleLegacy]) assert.equal(world.game.entityReads, 0)
 })
+
+test('8 C: the resources that yield a burner fuel become eligible exact names for the targeted resource search', () => {
+  const world = executorFixture()
+  assert.deepEqual(world.agent.controlDecisionState(false).resourceSearchNames, [])
+  world.agent.recordHandoffToolFacts('getRecipeDetails', JSON.stringify({ found: true, query: 'copper-plate', truncated: false, recipes: [{
+    name: 'copper-plate', enabled: true, energy: 3.2, categories: ['smelting'], hand_craftable_category: false,
+    ingredients: [{ type: 'item', name: 'copper-ore', amount: 1 }], products: [{ type: 'item', name: 'copper-plate', amount: 1 }],
+    crafting_machines: [{ name: 'stone-furnace', type: 'furnace', energy_source: 'burner', fuel_categories: ['chemical'], energy_watts: 90000, placed_by_item: 'stone-furnace' }],
+  }],
+  burner_fuels: { categories: ['chemical'], matched_count: 2, truncated: false, items: [
+    { name: 'coal', category: 'chemical', fuel_value: 4000000, mined_from: ['coal'] },
+    { name: 'wood', category: 'chemical', fuel_value: 2000000 },
+  ] } }), { item_or_recipe: 'copper-plate' })
+  assert.deepEqual(world.agent.controlDecisionState(false).resourceSearchNames, ['coal'])
+})

@@ -87,7 +87,9 @@ export const HANDOFF_DROP_ORDER = Object.freeze([
   'contract',
   'fresh_counts',
   'residual_needs',
+  'machine_energy',
   'raw_leaf_acquisition',
+  'fuel_needs',
   'roadmap_node',
   'step_completed',
   'step_pending',
@@ -126,6 +128,11 @@ export const EXECUTOR_FACT_LIMITS = Object.freeze({
   rawLeafResources: 3,
   rawLeafRadius: 1024,
   rawLeafMinedFrom: 4,
+  // Unit 8: machine energy sources and the fuel a burner needs. The fuel list is the mod's own bounded answer (6 items).
+  machineEnergyChars: 560,
+  fuelItems: 6,
+  fuelChars: 780,
+  placedKinds: 64,
 })
 
 const HEADER = '[HANDOFF] Rebuilt from durable harness state, not from the previous conversation. Verify against the world before acting.'
@@ -355,6 +362,28 @@ function normalizeProduct(raw) {
   return product
 }
 
+// The energy source kinds the mod reports for a machine prototype (production_rates.ts energy_facts). Anything else is unknown.
+const MACHINE_ENERGY_SOURCES = new Set(['burner', 'electric', 'heat', 'fluid', 'void', 'other'])
+
+/** Per-machine native energy source facts out of a recipe's crafting_machines entries: bounded, name-checked, no guessing. */
+function normalizeMachineEnergy(raw, limits) {
+  return asList(raw).slice(0, limits.recipeMachines).flatMap((entry) => {
+    const name = factName(entry?.name)
+    // A machine whose answer carries no known energy source adds no record: the derivation then says `unknown`, never a guess.
+    if (!name || !MACHINE_ENERGY_SOURCES.has(entry.energy_source)) return []
+    const watts = finiteNumber(entry.energy_watts)
+    const fuelCategories = [...new Set(asList(entry.fuel_categories).map(factName).filter(Boolean))].slice(0, 4)
+    const item = factName(entry.item ?? entry.placed_by_item)
+    return [{
+      name,
+      energy_source: entry.energy_source,
+      ...(fuelCategories.length > 0 ? { fuel_categories: fuelCategories } : {}),
+      ...(watts !== undefined && watts >= 0 ? { energy_watts: watts } : {}),
+      ...(item ? { item } : {}),
+    }]
+  })
+}
+
 /**
  * One recipe fact, bounded and name-checked. `raw` is a recipe entry as the live game reported it (getRecipeDetails
  * `recipes[]`, or the requires_machine facts' recipe plus its machine names). `complete` is false when anything was
@@ -403,6 +432,7 @@ export function normalizeRecipeFact(raw, { source = 'unknown', tag, limits: over
     && amountsKnown
     && probabilitiesKnown
   const energy = finiteNumber(raw.energy)
+  const machineEnergy = normalizeMachineEnergy(raw.machine_energy, limits)
   return {
     name,
     ...(raw.applicability ? { applicability: recipeApplicability(raw.applicability) } : {}),
@@ -421,6 +451,7 @@ export function normalizeRecipeFact(raw, { source = 'unknown', tag, limits: over
     products: products.slice(0, limits.recipeProducts),
     machines: machines.slice(0, limits.recipeMachines),
     machines_truncated: machines.length > limits.recipeMachines || raw.machines_truncated === true,
+    ...(machineEnergy.length > 0 ? { machine_energy: machineEnergy } : {}),
     complete,
     source: typeof source === 'string' ? source.slice(0, 40) : 'unknown',
     as_of: normalizeFactTag(tag),
@@ -449,6 +480,7 @@ export function recipeFactsFromDetails(parsed, { tag, limits } = {}) {
       ingredients: entry?.ingredients,
       products: entry?.products,
       machines: asList(entry?.crafting_machines),
+      machine_energy: asList(entry?.crafting_machines),
       machines_truncated: entry?.crafting_machines_truncated === true,
     }, { source: 'getRecipeDetails', tag, limits })
     return fact ? [fact] : []
@@ -481,6 +513,7 @@ export function mergeRecipeFact(existing, incoming) {
     machines: incoming.machines.length > 0 ? incoming.machines : existing.machines,
     machines_truncated: incoming.machines.length > 0 ? incoming.machines_truncated : existing.machines_truncated,
     categories: incoming.categories.length > 0 ? incoming.categories : existing.categories,
+    ...(incoming.machine_energy === undefined && existing.machine_energy !== undefined ? { machine_energy: existing.machine_energy } : {}),
     ...(incoming.hand_craftable === undefined && existing.hand_craftable !== undefined ? { hand_craftable: existing.hand_craftable } : {}),
   }
 }
@@ -777,13 +810,35 @@ export function neededItems(roots, recipes, limit = EXECUTOR_FACT_LIMITS.countIt
  * quantities (a recipe yielding two per craft needs half the crafts). Returns `{ ok: true, rows }`, or
  * `{ ok: false, reason }` when an input is unknown: it never guesses. `held` is a Map of fresh counts.
  */
-export function deriveResidualNeeds({ roots, recipes, held }) {
-  if (!Array.isArray(roots) || roots.length === 0) return { ok: false, reason: 'no_contract_roots' }
+export function deriveResidualNeeds({ roots, recipes, held, production = [] }) {
+  const rootList = Array.isArray(roots) ? roots : []
+  const targets = Array.isArray(production) ? production : []
+  if (rootList.length === 0 && targets.length === 0) return { ok: false, reason: 'no_contract_roots' }
   const facts = Array.isArray(recipes) ? recipes : []
+  // Production targets (a research trigger's craft-item count) are met by NEW crafts only: held stock of the target item is
+  // shown but never netted against it. The recipe that makes the target still asks for its ingredients, and those are
+  // ordinary needs: they net against held stock like any other.
+  const targetRows = []
+  const targetDemand = new Map()
+  const usedByTargets = new Set()
+  for (const target of targets) {
+    const count = held instanceof Map ? held.get(target.item) : undefined
+    const row = { item: target.item, required: target.count, ...(Number.isSafeInteger(count) && count >= 0 ? { held: count } : {}), missing: target.count,
+      trigger: { technology: target.technology, held_counted: false, ...(target.status ? { status: target.status } : {}) } }
+    const expansion = expandableRecipe(target.item, facts)
+    if (expansion) {
+      if (usedByTargets.has(expansion.recipe.name)) return { ok: false, reason: `shared_recipe:${expansion.recipe.name}` }
+      usedByTargets.add(expansion.recipe.name)
+      row.crafts = Math.ceil(target.count / expansion.output)
+      row.recipe = expansion.recipe.name
+      for (const ingredient of expansion.recipe.ingredients) targetDemand.set(ingredient.name, (targetDemand.get(ingredient.name) ?? 0) + row.crafts * ingredient.amount)
+    }
+    targetRows.push(row)
+  }
   // Reachable graph through expandable recipes, in dependency order (consumers before their ingredients).
   const edges = new Map()
   const expansions = new Map()
-  const visit = [...roots.map(root => root.item)]
+  const visit = [...rootList.map(root => root.item), ...targetDemand.keys()]
   while (visit.length > 0) {
     const item = visit.pop()
     if (edges.has(item)) continue
@@ -807,14 +862,14 @@ export function deriveResidualNeeds({ roots, recipes, held }) {
   }
   if (order.length !== edges.size) return { ok: false, reason: 'recipe_cycle' }
   // Two needed items made by one recipe would each claim its ingredients: refuse rather than double count.
-  const used = new Set()
+  const used = new Set(usedByTargets)
   for (const expansion of expansions.values()) {
     if (!expansion) continue
     if (used.has(expansion.recipe.name)) return { ok: false, reason: `shared_recipe:${expansion.recipe.name}` }
     used.add(expansion.recipe.name)
   }
-  const demand = new Map()
-  for (const root of roots) demand.set(root.item, (demand.get(root.item) ?? 0) + root.count)
+  const demand = new Map(targetDemand)
+  for (const root of rootList) demand.set(root.item, (demand.get(root.item) ?? 0) + root.count)
   const rows = []
   for (const item of order) {
     const required = demand.get(item) ?? 0
@@ -832,7 +887,144 @@ export function deriveResidualNeeds({ roots, recipes, held }) {
     }
     rows.push(row)
   }
-  return { ok: true, rows }
+  return { ok: true, rows: [...targetRows, ...rows] }
+}
+
+/**
+ * The production roots of an active step whose contract is a research completion: for each fresh getResearchPath whose target
+ * node is a not-yet-researched trigger technology with a craft-item trigger, the item and the count the engine counts.
+ *
+ * Engine semantics (Factorio 2.0.77, established from this repository's evidence, not assumed):
+ *  - The craft-item trigger completes from the force item PRODUCTION STATISTICS flow of the item, not from inventory
+ *    contents. A furnace's smelted output enters those statistics natively (trigger-ladder lane: the technology completed
+ *    only after the furnace's products_finished reached the count); a standalone character's completed hand craft is
+ *    credited by the mod's completion bridge (crafted_items.ts), and only while the technology is ready.
+ *  - No historical backfill is performed, and no repository test or note shows stock that is merely held being credited.
+ * So `held_counted` is false: held stock of the item is not netted against the count. If a future measurement shows
+ * otherwise, this is the one place that changes.
+ */
+export function triggerProductionRoots(research, limits = EXECUTOR_FACT_LIMITS) {
+  const roots = []
+  for (const path of asList(research)) {
+    if (path?.state !== 'fresh') continue
+    const node = asList(path.nodes).find(entry => entry?.name === path.target)
+    const trigger = node?.research_trigger
+    if (!node || node.researched !== false || node.mode !== 'trigger' || trigger?.type !== 'craft-item') continue
+    const item = factName(trigger.item)
+    if (!item || !Number.isSafeInteger(trigger.count) || trigger.count < 1) continue
+    if (trigger.item_quality !== undefined && trigger.item_quality !== 'normal') continue
+    if (roots.some(root => root.item === item && root.technology === path.target)) continue
+    roots.push({ item, count: trigger.count, technology: path.target, held_counted: false, ...(typeof node.status === 'string' && node.status ? { status: oneLine(node.status, 40) } : {}) })
+  }
+  return roots.slice(0, limits.researchTargets)
+}
+
+/** The names of the recipes a derivation expands the given items with (the same single recipe `expandableRecipe` picks). */
+export function expansionRecipeNames(items, recipes) {
+  return [...new Set(asList(items).flatMap((item) => {
+    const expansion = expandableRecipe(item, asList(recipes))
+    return expansion ? [expansion.recipe.name] : []
+  }))]
+}
+
+// --- Machine energy and burner fuel (unit 8) -------------------------------------------------------------------------
+//
+// Which energy source each candidate machine of a recipe has (electric, burner with fuel categories, void, ...) is read from
+// the machine's own prototype by the mod. Here that is joined with what the harness knows about availability (a
+// craftable/locked status from the requirements read, a fresh held count, an observed placed instance) and, for a burner,
+// with the fuel items the mod reported for its categories. Nothing names an item, recipe or machine.
+
+/** Fuel items out of a parsed getRecipeDetails answer: `[{ name, category, fuel_value, mined_from }]`, bounded, or []. */
+export function burnerFuelsFromDetails(parsed, limits = EXECUTOR_FACT_LIMITS) {
+  if (!parsed || typeof parsed !== 'object' || parsed.found !== true || !parsed.burner_fuels || typeof parsed.burner_fuels !== 'object') return []
+  return asList(parsed.burner_fuels.items).slice(0, limits.fuelItems).flatMap((entry) => {
+    const name = factName(entry?.name)
+    const category = factName(entry?.category)
+    const value = finiteNumber(entry?.fuel_value)
+    if (!name || !category || value === undefined || !(value > 0)) return []
+    const minedFrom = [...new Set(asList(entry.mined_from).map(factName).filter(Boolean))].slice(0, limits.rawLeafMinedFrom)
+    return [{ name, category, fuel_value: value, mined_from: minedFrom }]
+  })
+}
+
+/** Machine statuses the requirements reads reported: Map of entity to { item, status }. A craftable report is never downgraded. */
+export function machineStatusesFrom({ triggerReports = [], requirementMachines = new Map() } = {}) {
+  const statuses = new Map()
+  const note = (entity, item, status) => {
+    const name = factName(entity)
+    if (!name || !['craftable', 'locked', 'no_recipe'].includes(status)) return
+    const known = statuses.get(name)
+    if (known?.status === 'craftable' && status !== 'craftable') return
+    statuses.set(name, { item: factName(item) ?? known?.item, status })
+  }
+  for (const report of asList(triggerReports)) {
+    for (const recipe of asList(report?.recipes)) for (const machine of asList(recipe?.machines)) note(machine?.entity, machine?.item, machine?.status)
+  }
+  for (const entry of requirementMachines instanceof Map ? requirementMachines.values() : []) {
+    for (const option of asList(entry?.options)) note(option?.entity, option?.item, option?.status)
+  }
+  return statuses
+}
+
+/**
+ * The candidate machines of the given recipes that are available to the actor, with their native energy source.
+ * A machine is listed when the requirements read called it craftable, or the actor holds one, or an instance was observed
+ * placed; locked and unverified machines are only counted. `held` is a Map of fresh counts (a machine item without a fresh
+ * count has held undefined, never zero); `placed` is a Map of entity name to { count, via }.
+ */
+export function deriveMachineEnergy({ recipes, recipeNames, statuses = new Map(), held = new Map(), placed = new Map(), limits = EXECUTOR_FACT_LIMITS }) {
+  const entries = new Map()
+  for (const recipeName of asList(recipeNames)) {
+    const fact = asList(recipes).find(recipe => recipe.name === recipeName)
+    if (!fact) continue
+    const energy = new Map(asList(fact.machine_energy).map(entry => [entry.name, entry]))
+    for (const machine of asList(fact.machines)) {
+      if (!entries.has(machine)) entries.set(machine, { name: machine, ...(energy.get(machine) ?? { energy_source: 'unknown' }) })
+    }
+  }
+  const listed = []
+  let locked = 0
+  let unverified = 0
+  for (const entry of entries.values()) {
+    const status = statuses.get(entry.name)
+    const item = status?.item ?? entry.item
+    const count = item && held instanceof Map ? held.get(item) : undefined
+    const seen = placed instanceof Map ? placed.get(entry.name) : undefined
+    const craftable = status?.status === 'craftable'
+    if (!craftable && !(count > 0) && !seen) {
+      if (status?.status === 'locked') locked += 1
+      else unverified += 1
+      continue
+    }
+    listed.push({ ...entry, ...(item ? { item } : {}), status: status?.status ?? 'unknown',
+      held: Number.isSafeInteger(count) && count >= 0 ? count : undefined,
+      placed: seen ? { observed: true, count: seen.count, via: seen.via } : { observed: false } })
+  }
+  listed.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
+  // Nothing available to the actor means nothing to carry; the recipe fact still names the candidate machines.
+  if (listed.length === 0) return undefined
+  const machines = listed.slice(0, limits.recipeMachines)
+  const burners = machines.filter(entry => entry.energy_source === 'burner')
+  return { machines, omitted: { locked, unverified, truncated: listed.length - machines.length },
+    burner_count: burners.length,
+    fuel_categories: [...new Set(burners.flatMap(entry => asList(entry.fuel_categories)))].sort() }
+}
+
+/** The fuel a set of burner machines needs: candidates from the mod's fuel list for their categories, with fresh held counts. */
+export function deriveFuelNeeds({ machineEnergy, fuels, held = new Map(), limits = EXECUTOR_FACT_LIMITS }) {
+  const burners = asList(machineEnergy?.machines).filter(entry => entry.energy_source === 'burner')
+  if (burners.length === 0) return undefined
+  const categories = machineEnergy.fuel_categories
+  const ordered = asList(fuels).filter(fuel => categories.includes(fuel.category))
+    .sort((left, right) => ((right.mined_from?.length > 0) - (left.mined_from?.length > 0)) || (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
+  const items = ordered.slice(0, limits.fuelItems).map((fuel) => {
+    const count = held instanceof Map ? held.get(fuel.name) : undefined
+    return { name: fuel.name, category: fuel.category, fuel_value: fuel.fuel_value, mined_from: fuel.mined_from,
+      held: Number.isSafeInteger(count) && count >= 0 ? count : undefined }
+  })
+  const heldTotal = items.reduce((sum, item) => sum + (item.held ?? 0), 0)
+  return { machines: burners.map(entry => entry.name), categories, items, held_total: heldTotal,
+    unknown_held: items.filter(item => item.held === undefined).length }
 }
 
 /**
@@ -956,8 +1148,11 @@ function machineRecord(machine, limits) {
 
 function residualRecord(residual, limits) {
   if (!residual?.rows || residual.rows.length === 0) return undefined
-  const rows = residual.rows.slice(0, limits.residualRows).map(row => `${row.item} required=${row.required} held=${row.held} missing=${row.missing}${row.crafts !== undefined ? ` crafts=${row.crafts} via ${row.recipe}` : ''}`)
-  const roots = asList(residual.roots).map(root => `${root.item}>=${root.count}`).join(',')
+  const rows = residual.rows.slice(0, limits.residualRows).map(row => row.trigger
+    // A research trigger counts NEW crafts: held stock of the item is shown for context, never netted against the count.
+    ? `trigger craft-item ${row.item} count=${row.required} for ${row.trigger.technology} (counts new crafts; held stock not counted)${row.held !== undefined ? ` held=${row.held}` : ''}${row.trigger.status && row.trigger.status !== 'ready' ? ` tech_status=${row.trigger.status}` : ''}${row.crafts !== undefined ? ` crafts=${row.crafts} via ${row.recipe}` : ''}`
+    : `${row.item} required=${row.required} held=${row.held} missing=${row.missing}${row.crafts !== undefined ? ` crafts=${row.crafts} via ${row.recipe}` : ''}`)
+  const roots = [...asList(residual.roots).map(root => `${root.item}>=${root.count}`), ...asList(residual.production).map(root => `trigger:${root.item}x${root.count}`)].join(',')
   return {
     key: 'residual_needs',
     block: 'step',
@@ -972,6 +1167,50 @@ function acquisitionRecord(residual, limits) {
   if (!rows.length) return undefined
   return { key: 'raw_leaf_acquisition', block: 'step', drop: 'raw_leaf_acquisition',
     text: `raw_leaf_acquisition: ${joinBounded(rows, ' | ', limits.acquisitionChars)}` }
+}
+
+const kilowatts = watts => `${Math.round(watts / 100) / 10}kW`
+const megajoules = joules => `${Math.round(joules / 10000) / 100}MJ`
+
+function machineSourceText(entry) {
+  const parts = []
+  if (entry.energy_source === 'burner') parts.push(`fuel_categories=${asList(entry.fuel_categories).join('+') || 'unknown'}`)
+  if (entry.energy_watts !== undefined) parts.push(kilowatts(entry.energy_watts))
+  return `${entry.energy_source}${parts.length > 0 ? `(${parts.join(', ')})` : ''}`
+}
+
+// Native energy source and placement of the machines the step's recipes can run in (unit 8). Facts only: which machine to use,
+// where to put it and how much fuel it needs stay the executor's decisions.
+function machineEnergyRecord(machineEnergy, limits) {
+  if (!machineEnergy) return undefined
+  const machines = asList(machineEnergy.machines).map(entry => `${entry.name} energy=${machineSourceText(entry)} status=${entry.status} held=${entry.held ?? 'unknown'} placed=${entry.placed?.observed ? `observed(x${entry.placed.count} via ${entry.placed.via})` : 'not_observed'}`)
+  const omitted = machineEnergy.omitted ?? {}
+  const unlisted = [omitted.locked > 0 ? `locked=${omitted.locked}` : '', omitted.unverified > 0 ? `unverified=${omitted.unverified}` : '', omitted.truncated > 0 ? `truncated=${omitted.truncated}` : ''].filter(Boolean)
+  return {
+    key: 'machine_energy',
+    block: 'step',
+    drop: 'machine_energy',
+    text: `machine_energy (native prototype energy source; held = fresh live count of the machine item; placed = whether this harness observed an instance via historical_entities or checkpoint_machine, history and not a current exact target): ${machines.length > 0 ? joinBounded(machines, ' | ', limits.machineEnergyChars) : 'no available machine listed'}${unlisted.length > 0 ? ` | not_listed: ${unlisted.join(' ')}` : ''}`,
+  }
+}
+
+// The fuel burner machines need (unit 8): the item candidates their fuel categories accept, what the actor holds of them, and, when none is
+// held, how each is natively acquired and where the nearest resource instance was last read. Resources only: items yielded by
+// non-resource entities (trees and the like) are not searched.
+function fuelNeedsRecord(fuel, limits) {
+  if (!fuel) return undefined
+  const items = asList(fuel.items)
+  const heldFuel = items.filter(item => item.held > 0).map(item => `${item.name}=${item.held}`)
+  const heldText = heldFuel.length > 0 ? heldFuel.join(',') : fuel.unknown_held > 0 ? `none_known (${fuel.unknown_held} unread)` : 'none'
+  const parts = items.map((item) => {
+    const base = `${item.name} fuel_value=${megajoules(item.fuel_value)} held=${item.held ?? 'unknown'}`
+    if (fuel.held_total > 0) return base
+    if (item.raw) return `${base} ${rawLeafRowText(item.raw)}`
+    return asList(item.mined_from).length > 0 ? `${base} raw: mined_from=${item.mined_from.join(',')} nearest=not_read` : `${base} no_resource_source`
+  })
+  const head = `fuel_needs (burner ${asList(fuel.machines).join(',')} burn fuel_categories=${asList(fuel.categories).join('+') || 'unknown'}; candidates from item prototypes, held from the fresh read; amount needed not derived; sources searched are resource prototypes only, no_resource_source = none yields it, trees and other non-resource sources are not derived)`
+  const body = `held_fuel=${heldText}${fuel.held_total > 0 ? ' (acquisition not searched)' : ''}${parts.length > 0 ? ` | ${joinBounded(parts, ' | ', limits.fuelChars)}` : ' | candidates=not_reported (the recipe read carried no fuel list)'}`
+  return { key: 'fuel_needs', block: 'step', drop: 'fuel_needs', text: `${head}: ${body}` }
 }
 
 // --- Historical native fluid-tile anchors (unit 3a) ----------------------------------------------------------------
@@ -1098,6 +1337,10 @@ function executorFactRecords(facts, plan, step, limits) {
   if (residual) records.push(residual)
   const acquisition = acquisitionRecord(facts.residual, limits)
   if (acquisition) records.push(acquisition)
+  const machineEnergy = machineEnergyRecord(facts.machine_energy, limits)
+  if (machineEnergy) records.push(machineEnergy)
+  const fuelNeeds = fuelNeedsRecord(facts.fuel_needs, limits)
+  if (fuelNeeds) records.push(fuelNeeds)
   asList(facts.recipes).slice(0, limits.recipes).forEach((fact, index) => {
     records.push({ key: `recipe_fact_${index}`, block: 'step', drop: 'recipe_facts', rank: index, text: recipeFactLine(fact, limits.recipeChars) })
   })
@@ -1121,6 +1364,11 @@ function executorFactsSummary(facts, kept) {
     fresh_items: keys.has('held_counts') ? counts.filter(entry => entry.state === 'fresh').length : 0,
     stale_items: keys.has('held_counts_stale') ? counts.filter(entry => entry.state === 'stale').length + asList(facts?.counts?.unavailable).length : 0,
     residual_needs: keys.has('residual_needs') ? asList(facts?.residual?.rows).length : 0,
+    ...(facts?.machine_energy ? {
+      machine_energy: keys.has('machine_energy') ? asList(facts.machine_energy.machines).length : 0,
+      burner_machines: keys.has('machine_energy') ? facts.machine_energy.burner_count : 0,
+      fuel_needs: keys.has('fuel_needs') ? asList(facts.fuel_needs?.items).length : 0,
+    } : {}),
     machine: keys.has('checkpoint_machine') ? (facts?.machine?.state ?? 'none') : 'none',
     historical_entity_kinds: keys.has('historical_entities') ? asList(facts?.historical_entities).length : 0,
     ...(asList(facts?.fluid_source_hints).length > 0
@@ -1144,6 +1392,10 @@ export function executorFactsRefreshMessage(facts, limits = EXECUTOR_FACT_LIMITS
   if (residual) records.push(residual)
   const acquisition = acquisitionRecord(facts.residual, limits)
   if (acquisition) records.push(acquisition)
+  const machineEnergy = machineEnergyRecord(facts.machine_energy, limits)
+  if (machineEnergy) records.push(machineEnergy)
+  const fuelNeeds = fuelNeedsRecord(facts.fuel_needs, limits)
+  if (fuelNeeds) records.push(fuelNeeds)
   if (records.length === 0) return ''
   return ['[HARNESS] Executor facts refreshed after the batch receipt landed (live reads taken now, same labels as the handoff packet; facts only):', ...records.map(record => record.text)].join('\n')
 }
