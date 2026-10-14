@@ -87,14 +87,14 @@ test('GPT-6 behind the CLI proxy takes the flat reasoning_effort, limited to low
   assert.equal(providerCapabilityProfile(localConfig('qwen3-coder-30b-a3b-instruct')).reasoning_effort_range, undefined)
 })
 
-test('the per-case reasoning policy drives GPT-6 effort; none and max map into the low-to-high range', async () => {
+test('the per-case reasoning policy drives GPT-6 effort; max clamps to high and a none round sends no field', async () => {
   const cases = [
     [{ triggerSource: 'new_goal' }, 'high', 'plan_authoring'],
     [{ reasoningBudget: 'normal' }, 'high', 'jev_budget_normal'],
     [{ triggerSource: 'post_step_continue' }, 'low', 'jev_post_step_continue'],
     [{ triggerSource: 'step_contract' }, 'low', 'step_contract'],
-    [{ triggerSource: 'interaction_router', interactionRouter: true }, 'low', 'interaction_router'],
-    [{ triggerSource: 'new_goal', recoveryAttempt: 1 }, 'low', 'strict_recovery'],
+    [{ triggerSource: 'interaction_router', interactionRouter: true, requestBodyPatch: { max_tokens: 180 } }, undefined, 'interaction_router'],
+    [{ triggerSource: 'new_goal', recoveryAttempt: 1 }, undefined, 'strict_recovery'],
   ]
   for (const [options, wire, reason] of cases) {
     const captured = []
@@ -113,6 +113,17 @@ test('the per-case reasoning policy drives GPT-6 effort; none and max map into t
     assert.equal(decisions[0].capability_profile, 'local')
     assert.notEqual(decisions[0].reason, 'provider_has_no_reasoning_control')
     assert.equal(message._sglunaProvider.requested_reasoning_effort, wire, reason)
+  }
+})
+
+test('a GPT-6 call refuses a wire effort outside low/medium/high', async () => {
+  const { providerRequest: baseProviderRequest } = await import('./provider-base.mjs')
+  for (const effort of ['none', 'minimal', 'max']) {
+    await assert.rejects(baseProviderRequest(localConfig('gpt-6-luna'), messages, {
+      fetchImpl: capturingFetch([]),
+      allowTools: false,
+      requestBodyPatch: { reasoning_effort: effort },
+    }), /low-to-high range/, effort)
   }
 })
 
