@@ -4,7 +4,7 @@ import { restoreLedger as restoreJevLedger, serializeLedger as serializeJevLedge
 import { restoreObservationLedger } from './targeted-observation.mjs'
 import { createTaskBoard, reconcileTaskBoard, setTaskBoardStatus, taskBoardTransferSupplyRefSeen } from './common.mjs'
 import { validateOutcomeCandidate } from './outcome-authority.mjs'
-import { PAUSE_CLASS } from './pause-class.mjs'
+import { PAUSE_CLASS, TRANSPORT_SUBKINDS } from './pause-class.mjs'
 import { REFUSAL_CLASS } from './refusal-class.mjs'
 import { completionContractSupported, provePermanentlyUnsatisfiable, sanitizeStepCompletionContract, strictTaskTypesForOperation } from './step-completion.mjs'
 import {
@@ -494,10 +494,39 @@ function restoreExecutorStepIdentityLedger(rows) {
   return ledger
 }
 
+// The pending intake retry (supervisor.mjs scheduleIntakeRetry): a player request whose first planner call failed on transport before
+// any plan was committed. Sanitized on the way in and on the way out of the snapshot; a record that is not whole is dropped.
+function sanitizeIntakeRetry(record) {
+  if (!record || typeof record !== 'object') return undefined
+  const text = typeof record.text === 'string' ? record.text.trim().slice(0, 4000) : ''
+  const sender = typeof record.sender === 'string' ? record.sender.slice(0, 128) : ''
+  if (!text || !sender || record.interaction_intent !== 'new_goal') return undefined
+  if (!Number.isSafeInteger(record.actor_id) || !Number.isSafeInteger(record.epoch)) return undefined
+  if (!Number.isSafeInteger(record.attempt) || record.attempt < 1 || record.attempt > 100) return undefined
+  if (!Number.isFinite(record.next_at) || !TRANSPORT_SUBKINDS.includes(record.transport_subkind)) return undefined
+  const token = (value, max) => (typeof value === 'string' && value.length > 0 ? value.slice(0, max) : undefined)
+  return {
+    sender,
+    text,
+    interaction_intent: 'new_goal',
+    request_id: token(record.request_id, 80),
+    origin_request_id: token(record.origin_request_id, 80),
+    goal_id: token(record.goal_id, 120),
+    actor_id: record.actor_id,
+    epoch: record.epoch,
+    attempt: record.attempt,
+    transport_subkind: record.transport_subkind,
+    cause_code: /^[A-Z][A-Z0-9_]{1,39}$/.test(record.cause_code ?? '') ? record.cause_code : undefined,
+    next_at: record.next_at,
+  }
+}
+
 export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   constructor(options = {}) {
     super(options)
     this.planningByNpc = new Map()
+    // The pending intake retry (at most one: a new request or control cancels it). Durable.
+    this.intakeRetryRecord = undefined
     // Board progress the reducer could not be brought up to on restore.
     this.restoreDiagnostics = []
     // Consecutive plan/board disagreements per NPC: { step_id, count }.
@@ -512,6 +541,17 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
 
   planningState(key) {
     return key ? this.planningByNpc.get(key) : undefined
+  }
+
+  // The pending intake retry, or undefined. The caller persists (agent.persistState) after a change.
+  intakeRetry() {
+    return this.intakeRetryRecord ? { ...this.intakeRetryRecord } : undefined
+  }
+
+  // Replace (record) or clear (undefined | null) the pending intake retry. Returns the stored record, or undefined.
+  setIntakeRetry(record) {
+    this.intakeRetryRecord = record ? sanitizeIntakeRetry(record) : undefined
+    return this.intakeRetry()
   }
 
   planningTrackerView(key) {
@@ -2738,6 +2778,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       // Executor step-identity corrections spent per goal/plan/step (npc-agent-loop correctExecutorStepIdentity): durable so a
       // restage, a new request or a restart inside the same step cannot renew the allowance.
       executor_step_identity_ledger: [...(this.executorStepIdentityLedger ?? new Map()).entries()].slice(-128),
+      ...(this.intakeRetryRecord ? { intake_retry: this.intakeRetryRecord } : {}),
       planning_states: [...this.planningByNpc.entries()].map(([key, state]) => ({
         key,
         state: serializePlanningState(state),
@@ -2876,6 +2917,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     super.restore(snapshot)
     this.targetedObservationLedger = restoreObservationLedger(snapshot?.targeted_observation_ledger)
     this.executorStepIdentityLedger = restoreExecutorStepIdentityLedger(snapshot?.executor_step_identity_ledger)
+    this.intakeRetryRecord = sanitizeIntakeRetry(snapshot?.intake_retry)
     if (snapshot?.jev_judgment_ledger) {
       const restoredLedger = restoreJevLedger(snapshot.jev_judgment_ledger)
       this.jevLedger = restoredLedger.ledger

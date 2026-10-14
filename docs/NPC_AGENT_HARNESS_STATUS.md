@@ -16,6 +16,15 @@ must not be used to reset current integration.
 - **Trace and run-check.** `recovery.auto_resume_scheduled|started|exhausted|cancelled` and `recovery.pause_unclassified`; `run-check` flags `model_recoverable_pause_not_resumed` and `auto_resume_exhausted`.
 - **Gate.** Static scenarios only (`pause-class-auto-resume.test.mjs`, `run-check.test.mjs`); no real-engine lane and no live provider run. `pause-class.mjs` joins the installer copy list, so the installer payload needs a repin.
 
+## October 14: port unit 11, cause codes and the intake retry (static only, not live-validated)
+
+Follows live run F ([checkpoint](validation/LUNA_GREEN_LIVE_RUN_F_2026-10-14.md)): the proxy host did not resolve, the first planner call failed with `fetch failed`, and the objective was lost.
+
+- **Cause code.** `provider.error` and `request.failed` now carry `cause_code` (a short upper-case token read from `error.cause.code` or `error.code`; never the cause message, URL or host) and, for a transport failure, `pause_class: transport` and `transport_subkind`. DNS codes (`ENOTFOUND`, `EAI_AGAIN`) and the other undici network codes classify as transport. Context-window and output-budget failures stay excluded.
+- **Intake retry.** A transport failure on the first planner call of a new goal (no plan, no committed goal work) is kept by the supervisor as one durable pending intake retry (`memory.intakeRetry()`, in `npc-state.json`): sender, text, intent, request id, actor and epoch it was received under, attempt, next time. It reuses unit 7's transport schedule and limits (`autoResumeDelayMs`, `autoResumeMaxAttempts`), is cancelled synchronously by any player request or UI control (`cancelAutoResume`), is fenced at fire time on actor, epoch and an admitted goal, survives a restart, and ends with one chat line when exhausted. Any other failure at intake behaves as before.
+- **Trace and run-check.** `recovery.intake_retry_scheduled|started|cancelled|exhausted`. `run-check` treats a `request.failed` with a scheduled retry as informational (`intake_retry_scheduled`); `intake_retry_exhausted` and a non-transport `recoverable=false` failure remain findings.
+- **Gate.** Static scenarios only (`intake-retry.test.mjs`, `run-check.test.mjs`); no live provider run. No new runtime module, so the installer copy list is unchanged.
+
 ## October 13: CLI-proxy rerun E (transport fixed, copper mined, controller paused)
 
 - **Provider repair.** Attempt D had resolved stale local LM Studio/Qwen settings and failed with connection refused. The owner confirmed the intended CLI proxy with `gpt-6-luna`; rerun E used that configuration, authenticated HTTP 200, and 12 successful responses with zero provider errors. `.env` was not read or edited.

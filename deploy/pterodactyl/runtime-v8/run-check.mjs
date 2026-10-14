@@ -79,6 +79,9 @@ import { estimateTokensFromChars } from './restage-policy.mjs'
 //   finds no recovery.auto_resume_scheduled / _exhausted / _cancelled row after it in the same request: the pause was never decided
 //   on, so the plan sits paused with nobody resuming it. The second reads recovery.auto_resume_exhausted (`limit_kind` step | goal):
 //   the bounded automatic resumes ran out and the plan stays paused for a player.
+// - intake_retry_exhausted (finding), intake_retry_scheduled (informational): a transport failure on the first planner call of a new
+//   goal (supervisor.mjs handleIntakeFailure). While recovery.intake_retry_scheduled follows the request.failed, the failure is not
+//   reported as request_failed_unrecoverable; recovery.intake_retry_exhausted is the finding.
 
 const LOOP_MIN_COUNT = 2
 
@@ -429,6 +432,18 @@ function detectAutoResumeExhausted(rows) {
   }
 }
 
+// The intake retry ran out its limit: the objective was reported to the player and dropped.
+function detectIntakeRetryExhausted(rows) {
+  const matches = rows.filter(row => row?.event === 'recovery.intake_retry_exhausted')
+  if (matches.length === 0) return undefined
+  const first = matches[0].data ?? {}
+  return {
+    count: matches.length,
+    first_ts: firstTsOf(matches),
+    detail: `intake retry exhausted after ${first.attempt ?? 'n/a'}/${first.limit ?? 'n/a'} attempts (${nonEmptyString(first.transport_subkind) ?? 'transport'}, cause ${nonEmptyString(first.cause_code) ?? 'unknown'}); the objective was dropped and the player asked to resend`,
+  }
+}
+
 function detectBlockedBeforeMutation(rows) {
   const matches = rows.filter(row => row?.event === 'request.completed' && row?.data?.outcome === 'blocked_before_mutation')
   if (matches.length === 0) return undefined
@@ -492,9 +507,13 @@ function detectNoChatReply(rows) {
 
 // A request that ends in request.failed with recoverable=false stops the run with no repair path: the loop reset itself
 // and the goal is left for the supervisor's stranded-plan pause. Emitted by runGuardedTurn (npc-agent-loop.mjs).
+// A transport failure at goal intake that the supervisor kept as an intake retry (recovery.intake_retry_scheduled in the same request)
+// is informational: the objective is not lost. Its exhaustion is its own finding (intake_retry_exhausted, which also covers the last
+// failed request); every other recoverable=false failure stays this one.
 function detectUnrecoverableRequestFailure(rows) {
   const terminal = terminalEvent(rows)
   if (terminal?.event !== 'request.failed' || terminal?.data?.recoverable !== false) return undefined
+  if (rows.some(row => row?.event === 'recovery.intake_retry_scheduled' || row?.event === 'recovery.intake_retry_exhausted')) return undefined
   return {
     count: 1,
     first_ts: nonEmptyString(terminal?.ts),
@@ -755,6 +774,7 @@ function detectJevDecidingSkipUnverified(rows) {
 const SIGNATURES = [
   { id: 'model_recoverable_pause_not_resumed', label: 'model_recoverable pause with no automatic resume decision', detect: detectModelRecoverablePauseNotResumed },
   { id: 'auto_resume_exhausted', label: 'automatic resume of a model_recoverable pause exhausted', detect: detectAutoResumeExhausted },
+  { id: 'intake_retry_exhausted', label: 'intake retry of a goal lost to a transport failure exhausted', detect: detectIntakeRetryExhausted },
   { id: 'rejected_blocker_pause', label: 'unverified world blocker relabelled as provider pause', detect: detectRejectedBlockerPause },
   { id: 'semantic_contract_dead_end', label: 'delegated semantic contract dead end before gameplay', detect: detectSemanticContractDeadEnd },
   { id: 'executor_research_facts_missing', label: 'paused research step lacks executor research facts', detect: detectExecutorResearchFactsMissing },
@@ -887,7 +907,24 @@ function detectContractsBoundJustInTime(rows) {
   }
 }
 
+// A request that failed at goal intake on transport and was kept as an intake retry: not lost, so not a finding.
+function detectIntakeRetryPending(rows) {
+  const matches = rows.filter(row => row?.event === 'recovery.intake_retry_scheduled')
+  if (matches.length === 0) return undefined
+  const first = matches[0].data ?? {}
+  return {
+    count: matches.length,
+    first_ts: firstTsOf(matches),
+    detail: `transport failure at goal intake kept as an intake retry (${nonEmptyString(first.transport_subkind) ?? 'transport'}, cause ${nonEmptyString(first.cause_code) ?? 'unknown'}; attempt ${first.attempt ?? 'n/a'}/${first.limit ?? 'n/a'})`,
+  }
+}
+
 const INFORMATIONAL_SIGNATURES = [
+  {
+    id: 'intake_retry_scheduled',
+    label: 'transport failure at goal intake kept as an automatic retry',
+    detect: detectIntakeRetryPending,
+  },
   {
     id: 'later_contracts_deferred',
     label: 'draft left later step contracts to be bound when each step starts',
