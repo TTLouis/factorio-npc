@@ -57,7 +57,13 @@ export function openRouterModelFamily(model) {
 // OpenAI-compatible server, and no live call was made to check one that
 // might. The family table stays explicit and empty by default rather than
 // guessing a request shape LM Studio may reject.
-const LOCAL_REASONING_FAMILIES = new Set()
+// GPT-6 behind the CLI proxy (owner, 2026-10-14) is the exception: it takes the
+// OpenAI chat-completions flat `reasoning_effort`. Without it the proxy applied its
+// own default, and runs H and I reasoned for 0 tokens on most calls. Its range is
+// limited to low/medium/high, the values every OpenAI reasoning model accepts: the
+// policy's max is clamped to high and a none round sends no field (provider.mjs).
+const LOCAL_REASONING_FAMILIES = new Set(['openai-gpt'])
+const LOCAL_REASONING_EFFORT_RANGES = Object.freeze({ 'openai-gpt': 'low_to_high' })
 export function localModelFamily(model) {
   const value = String(model ?? '').toLowerCase()
   if (/^gpt-6(?:[.-]|$)/.test(value)) return 'openai-gpt'
@@ -118,6 +124,7 @@ function localCapability(config, requested) {
     id: 'local',
     token_field: 'max_tokens',
     reasoning_effort: LOCAL_REASONING_FAMILIES.has(family),
+    ...(LOCAL_REASONING_EFFORT_RANGES[family] ? { reasoning_effort_range: LOCAL_REASONING_EFFORT_RANGES[family] } : {}),
     // CLIProxy Codex can attach generated images when tools/choice are omitted.
     // The October 5 live replay stayed compact when closed rounds kept the
     // function definitions and explicitly disallowed every tool invocation.
@@ -633,6 +640,7 @@ function applyRequestBodyPatch(body, patch, capability) {
   if (patch.reasoning_effort !== undefined) {
     check(capability.reasoning_effort === true, 'Provider profile does not allow reasoning_effort')
     check(['none', 'minimal', 'low', 'medium', 'high', 'max'].includes(patch.reasoning_effort), 'Invalid reasoning_effort override')
+    check(capability.reasoning_effort_range !== 'low_to_high' || ['low', 'medium', 'high'].includes(patch.reasoning_effort), 'reasoning_effort is outside the low-to-high range of this profile')
     // OpenRouter's wire shape nests effort under `reasoning` instead of the
     // flat `reasoning_effort` key every other profile here uses
     // (https://openrouter.ai/docs/use-cases/reasoning-tokens); the caller

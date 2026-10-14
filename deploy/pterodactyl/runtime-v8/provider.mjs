@@ -192,7 +192,12 @@ function reasoningOutputBudget(policy) {
 
 function reasoningBodyPatch(policy, capabilities) {
   const patch = {}
-  if (capabilities.reasoning_effort) {
+  if (capabilities.reasoning_effort_range === 'low_to_high') {
+    // A `none` round (interaction router at a 180-token cap, strict and output-budget recovery) sends no field: the
+    // proxy's own default, which those rounds ran on through runs H and I. Only a real effort is sent, max clamped to high.
+    if (policy.effort !== 'none') patch.reasoning_effort = policy.effort === 'max' ? 'high' : policy.effort
+  }
+  else if (capabilities.reasoning_effort) {
     patch.reasoning_effort = capabilities.id === 'openai-reasoning'
       ? (policy.effort === 'none' ? 'minimal' : policy.effort === 'max' ? 'high' : policy.effort)
       : policy.effort
