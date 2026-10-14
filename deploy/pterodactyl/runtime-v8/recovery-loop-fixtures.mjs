@@ -1,7 +1,7 @@
 // Fixtures for the composed recovery-loop scenarios (recovery-loop.test.mjs, unit 17).
 //
-// Every recovery test before this one stopped early (a checkpoint accepted, a batch admitted) and most called
-// Session.runModelRecoverableResume directly, with the inventory set to the answer. These fixtures let a scenario run the real
+// Earlier focused recovery tests often stopped at checkpoint acceptance or batch admission, or called
+// resume helpers directly with scripted inventory readings. These fixtures let a scenario run the real
 // chain end to end: the real NpcAgentLoop, the real Session scheduling (goal.paused -> considerPauseForAutoResume -> the timer ->
 // fireModelResume -> runModelRecoverableResume -> recoverInterruptedAgentPlan), a scripted model that throws on an unexpected
 // call, and a fake game whose world changes ONLY through admitted operations and the explicit passage of smelting time.
@@ -473,6 +473,7 @@ export class ScriptedModel {
 
 export function recoveryWorld({ game, model, stateFile = null, memory = new CanonicalTaskBoardMemory() } = {}) {
   const trace = []
+  let lastTraceAt = 0
   const agentLogs = []
   const jev = recordingJev(async (_state, questions) => (questions.intent ? { overrides: { intent: { choice: 'new_goal', confidence: 0.9 } } } : undefined))
   const agent = new NpcAgentLoop({
@@ -494,7 +495,10 @@ export function recoveryWorld({ game, model, stateFile = null, memory = new Cano
     npcId: 'sgluna',
   })
   // The row ts is strictly increasing so run-check orders rows of different requests as they were written.
-  agent.behaviorTrace = { emit: async (record) => { trace.push({ ...record, ts: record.ts ?? new Date(1_800_000_000_000 + trace.length * 50).toISOString() }) } }
+  agent.behaviorTrace = { emit: async (record) => {
+    lastTraceAt = Math.max(Date.parse(record.ts) || Date.now(), lastTraceAt + 1)
+    trace.push({ ...record, ts: new Date(lastTraceAt).toISOString() })
+  } }
   const named = name => trace.filter(row => row.event === name).map(row => row.data)
   return { game, model, memory, agent, trace, named, jev, agentLogs }
 }

@@ -26,8 +26,8 @@ import {
 import { analyzeBehaviorTrace } from './run-check.mjs'
 import { deployment, gather, inventoryCheckpoint, planReply } from './task-loop-fixtures.mjs'
 
-// Unit 17 (composed recovery-loop regressions). Every earlier recovery test stopped early (a checkpoint accepted, a batch admitted),
-// called Session.runModelRecoverableResume directly, and set the inventory to the expected answer. These drive the live failure chain
+// Unit 17 (composed recovery-loop regressions). Earlier focused recovery tests often stopped at checkpoint acceptance or batch admission,
+// or called resume helpers directly with scripted inventory readings. These drive the live failure chain
 // (run G -> H -> I, 2026-10-14) through the production scheduling path to a verified completion: a player request, the mod's
 // completion line, goal.paused -> considerPauseForAutoResume, the mocked 15 s timer, the fired resume, the restage, the executor's
 // batch, the game's receipt and the harness's own verification. The fake game changes only through admitted operations (see
@@ -517,27 +517,93 @@ test('R-noreplay: a lost acknowledgement whose effect is unknown after a restart
   assert.deepEqual(ctx.model.remaining, [])
 })
 
-// KNOWN GAP (found by R-restart, not fixed here): the machines a handoff packet reports come from the agent's in-memory live entity
-// observations (liveEntityObservations), which a restart empties. A restart between run G and run I therefore restages an executor whose
-// packet knows nothing about the furnace: residual_needs says copper-plate missing=1 and raw_leaf_acquisition sends it to mine more
-// copper ore, which is run I's defect (unit 15) again until the executor observes the furnace itself. The expectation below is the
-// behavior unit 15 gives within one process; it fails today, so it stays a todo until the restart restage can read the machines it
-// already knew (persisted unit numbers, or one nearby scan at restage).
-test.todo('R-restart: after a restart the restaged executor packet still credits the furnace output (in_machine_output) and demands no copper ore', async (t) => {
+// Recovery must rebuild its machine facts before the executor answers, even though entity observations died with the process.
+test('R-restart: the first packet rediscovers fresh furnace output and completes without demanding more ore', async (t) => {
   const stateFile = await tempStateFile(t)
   const ctx = await reachRunG(t, { stateFile })
   await runH(ctx)
-  const model = new ScriptedModel().push('executor', 'i:observe', (messages) => {
+  const model = new ScriptedModel().push('executor', 'i:collect', (messages) => {
     ctx.atI = { packet: stepBlockLines(messages) }
-    return observation()
+    return executorPlan([collect(3)])
   })
   const restarted = restartProcess(ctx, model)
   await restarted.world.agent.loadPersistentState()
   restarted.session.queueStartupRecovery(restarted.session.currentPlanState())
   await settle(restarted.session)
-  ctx.t.mock.timers.tick(15_000)
-  for (let spin = 0; spin < 400 && model.calls.length === 0; spin++) await new Promise(resolve => setImmediate(resolve))
+  await fireResumeTimer(restarted)
   const residual = ctx.atI.packet.find(line => line.startsWith('residual_needs'))
   assert.match(residual, /in_machine_output=3@stone-furnace unit=26 missing_after_machine=0/)
   assert.equal(ctx.atI.packet.some(line => line.startsWith('raw_leaf_acquisition')), false)
+  const [discovered] = restarted.world.named('context.recovery_machines_discovered')
+  assert.deepEqual([discovered.reason, discovered.machine_count, discovered.actor_id, discovered.actor_epoch], ['fresh_local_scan', 1, 18, 3])
+  assert.ok(discovered.request_id)
+  await completeAndReport(restarted)
+  assert.equal(ctx.game.inventory['copper-plate'], 12)
+  assert.equal(restarted.world.named('goal.evaluated').at(-1).satisfied, true)
+  assert.equal(restarted.world.memory.currentPlan(KEY), undefined)
+  assertStrictBoundary(restarted)
 })
+
+test('R-noreplay: a completed collection with a lost acknowledgement is settled after restart and never dispatched twice', async (t) => {
+  const stateFile = await tempStateFile(t)
+  const ctx = await reachRunG(t, { stateFile })
+  await runH(ctx)
+  await runIWithLostAcknowledgement(ctx)
+  ctx.game.completeBatch() // effect happened, but no completion line reached the first process
+  ctx.game.reloadMod()
+  const model = new ScriptedModel()
+    .push('executor', 'restart:observe', observation())
+    .push('executor', 'restart:attempt-replay', executorPlan([collect(3)]))
+  const restarted = restartProcess(ctx, model)
+  await restarted.world.agent.loadPersistentState()
+  assert.equal(restarted.session.queueStartupRecovery(restarted.session.currentPlanState()), 'recover')
+  await settle(restarted.session)
+  const [reconciled] = restarted.world.named('operation.reconciled')
+  assert.deepEqual([reconciled.trigger, reconciled.verdict, reconciled.effect], ['runtime_restart', 'admitted_completed', 'happened'])
+  assert.equal(restarted.world.named('operation.recovery_settled').at(-1).reason, 'restart_exact_completed_receipt')
+  assert.equal(collections(ctx), 1)
+  assert.equal(ctx.game.sent.length, 3)
+  assert.equal(ctx.game.inventory['copper-plate'], 12)
+  assert.equal(restarted.world.named('goal.evaluated').at(-1)?.satisfied, true)
+  assert.equal(restarted.world.memory.currentPlan(KEY), undefined)
+  assertStrictBoundary(restarted)
+})
+
+// The rediscovery read is advisory. A denied read or changed actor can never supply fresh machine stock.
+for (const scenario of ['failed_read', 'actor_changed', 'batch_in_flight']) {
+  test(`R-discovery: ${scenario} never credits output from an unsafe local scan`, async (t) => {
+    const ctx = await reachRunG(t)
+    const { agent, memory } = ctx.world
+    agent.liveEntityObservations.clear()
+    agent.planUpdateReason = 'recovery'
+    let scans = 0
+    const command = ctx.game.command.bind(ctx.game)
+    ctx.game.command = async text => {
+      if (text.includes('remote.call("autorio_tools","get_nearby_entities"')) {
+        scans += 1
+        if (scenario === 'failed_read') return JSON.stringify({ ok: false, entities: ctx.game.nearbySnapshot().entities })
+        if (scenario === 'actor_changed') ctx.game.status.epoch += 1
+      }
+      return command(text)
+    }
+    const runtime = scenario === 'batch_in_flight' ? { idle: false, queue_length: 1 } : { idle: true, queue_length: 0 }
+    const result = await agent.gatherExecutorHandoffFacts({ state: memory.planningState(KEY), actor: agent.epoch, runtime, checkpoint: 'C7', requestId: 'discovery_boundary' })
+    assert.equal(agent.liveEntityObservations.size, 0, 'no unsafe observation was bound')
+    if (scenario === 'actor_changed') {
+      assert.equal(result.refusal, 'actor_changed_during_handoff_refresh')
+      assert.equal(scans, 1)
+    }
+    else if (scenario === 'batch_in_flight') {
+      assert.equal(scans, 0, 'no discovery while native work is running')
+      assert.equal(result.facts.placed_machines.length, 0)
+      assert.equal(result.facts.residual, undefined)
+    }
+    else {
+      assert.equal(scans, 1)
+      assert.equal(result.facts.placed_machines.length, 0)
+      assert.equal(ctx.world.named('context.recovery_machines_discovered').at(-1).reason, 'local_scan_unavailable')
+      assert.equal(result.facts.residual.rows.find(row => row.item === 'copper-plate').missing, 1)
+    }
+    assertStrictBoundary(ctx)
+  })
+}
