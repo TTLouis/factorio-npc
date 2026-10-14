@@ -8,10 +8,17 @@
 // The loop only reads it (refusalClassOf). It keeps no list of codes to decide between recovery paths.
 //
 // The closed set below must equal REFUSAL_CLASSES in the mod's refusal_classes.ts; refusal-class.test.mjs proves it.
-//   argument      the model named or shaped something wrongly: one bounded correction turn, plan unchanged
-//   authority     a protected, reserved or player-owned target: one authorization retry inside the grant
+//   argument      the model named or shaped something wrongly: one bounded correction turn, plan unchanged; a refusal that survives
+//                 it ends the request as a model_recoverable pause
+//   authority     a protected, reserved or player-owned target: one authorization retry inside the grant; a refusal that survives
+//                 it ends the request as a guard pause with the step blocked
 //   prerequisite  a research precondition: bounded research recovery inside the same step
-//   world         everything else, and the fail-closed class: the request ends as blocked_preflight
+//   world         everything else, and the fail-closed class (an unclassified refusal is treated as world). Which end it gets is
+//                 decided by classifyBlockedEnd below: one correction turn and then a model_recoverable pause when the executor can
+//                 fix it, a guard pause with the step blocked when it cannot (EXECUTOR_UNFIXABLE_WORLD_CODES), and the MW5
+//                 replacement wake first when the refusal is harness evidence of world change (replacement-wake.mjs)
+
+import { PAUSE_CLASS } from './pause-class.mjs'
 
 export const REFUSAL_CLASS = Object.freeze({
   ARGUMENT: 'argument',
@@ -33,4 +40,65 @@ export function refusalClassOf(preflight) {
 export function refusalClassLabel(preflight) {
   const { refusal_class: refusalClass, classified } = refusalClassOf(preflight)
   return classified ? refusalClass : 'unclassified'
+}
+
+// --- who can fix a refusal -----------------------------------------------------------------------------------------------------
+//
+// The class above picks the in-request recovery. It does not say who can fix a refusal that outlived it. That is a second, separate
+// question (NEVER_WAKE_PREFLIGHT_CODES in replacement-wake.mjs answers a third: "is this harness evidence of world change that may
+// wake a replan"). It decides the pause class at the end of a request.
+//
+// A 'world' refusal the executor cannot fix by changing its own batch. Declared here, once, with the reason; everything else is
+// something a fresh executor on a fresh observation can still get right (its own inventory accounting such as supply_missing, a
+// placement or source that moved, a stale snapshot), so it gets one correction turn and, if that fails, a restageable pause.
+export const EXECUTOR_CANNOT_FIX = Object.freeze({
+  PLAN_LEVEL: 'plan_level', // the plan itself is wrong for the game's current state (a locked recipe): a planning decision is needed
+  AUTHORITY_GRANT: 'authority_grant', // the grant the work runs under is no longer current: a person or a new grant is needed
+  HARNESS_HOLD: 'harness_hold', // an effect that is not proven absent is held: reconciliation owns it, not a new batch
+  LIFECYCLE: 'lifecycle', // the actor or surface is not the one the plan assumed: an actor lifecycle event owns it
+})
+export const EXECUTOR_UNFIXABLE_WORLD_CODES = Object.freeze({
+  recipe_locked: EXECUTOR_CANNOT_FIX.PLAN_LEVEL,
+  authorization_stale: EXECUTOR_CANNOT_FIX.AUTHORITY_GRANT,
+  duplicate_effect_suppressed: EXECUTOR_CANNOT_FIX.HARNESS_HOLD,
+  no_actor: EXECUTOR_CANNOT_FIX.LIFECYCLE,
+  no_inventory: EXECUTOR_CANNOT_FIX.LIFECYCLE,
+  player_unavailable: EXECUTOR_CANNOT_FIX.LIFECYCLE,
+  different_surface: EXECUTOR_CANNOT_FIX.LIFECYCLE,
+  bootstrap_dependency_unresolved: EXECUTOR_CANNOT_FIX.LIFECYCLE,
+  technology_disabled: EXECUTOR_CANNOT_FIX.PLAN_LEVEL,
+  research_disabled: EXECUTOR_CANNOT_FIX.PLAN_LEVEL,
+})
+
+export function executorCannotFix(preflight) {
+  const code = preflight?.code
+  return typeof code === 'string' && Object.hasOwn(EXECUTOR_UNFIXABLE_WORLD_CODES, code) ? EXECUTOR_UNFIXABLE_WORLD_CODES[code] : undefined
+}
+
+// The recoveries a request can spend on a refusal, named for the trace.
+export const EXECUTOR_RECOVERY = Object.freeze({
+  ARGUMENT_RETRY: 'argument_retry',
+  SUPPLY_RECOVERY: 'supply_recovery',
+  WORLD_CORRECTION: 'world_correction',
+})
+
+// The pause class of a request that ends on a refusal. Pure and total: the same inputs always give the same answer and every answer
+// names its reason. 'model_recoverable' means a fresh executor can still fix it (the request ends paused, not blocked, and the
+// supervisor restages it under its caps); 'guard' means a person or a planning decision is needed and no timer resumes it.
+//   preflight      the refusal as the loop saw it (code, refusal_class)
+//   recoverySpent  which of EXECUTOR_RECOVERY this request already spent on it
+//   worldEvidence  the refusal is harness evidence of world change (replacement-wake.mjs); its MW5 wake was skipped or unavailable
+export function classifyBlockedEnd({ preflight, recoverySpent = [], worldEvidence = false } = {}) {
+  const { refusal_class: refusalClass, classified } = refusalClassOf(preflight)
+  const guard = reason => ({ pause_class: PAUSE_CLASS.GUARD, reason, executor_correctable: false })
+  const executor = reason => ({ pause_class: PAUSE_CLASS.MODEL_RECOVERABLE, reason, executor_correctable: true })
+  if (!classified) return guard('unclassified_refusal_fails_closed')
+  if (refusalClass === REFUSAL_CLASS.AUTHORITY) return guard('authority_refusal_needs_a_person')
+  if (refusalClass === REFUSAL_CLASS.PREREQUISITE) return guard('prerequisite_refusal_outside_research_recovery')
+  if (worldEvidence) return guard('world_evidence_wake_skipped')
+  const unfixable = executorCannotFix(preflight)
+  if (unfixable) return guard(`executor_cannot_fix:${unfixable}`)
+  if (refusalClass === REFUSAL_CLASS.ARGUMENT) return executor('argument_refusal_after_retry')
+  if (recoverySpent.length > 0) return executor(`world_refusal_after_${recoverySpent[0]}`)
+  return guard('no_executor_recovery_spent')
 }

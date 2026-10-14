@@ -63,14 +63,13 @@ import {
 } from './handoff-packet.mjs'
 import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CLASS, REPLACEMENT_DECISION } from './authorization.mjs'
 import { declarePauseClass, isPauseClass, PAUSE_CLASS, pauseClassForCode, pauseClassLabel, TRANSPORT_SUBKIND, transportFailureOf, transportTraceFields } from './pause-class.mjs'
-import { REFUSAL_CLASS, refusalClassLabel, refusalClassOf } from './refusal-class.mjs'
+import { classifyBlockedEnd, EXECUTOR_RECOVERY, executorCannotFix, REFUSAL_CLASS, refusalClassLabel, refusalClassOf } from './refusal-class.mjs'
 import { batchStockDecision, batchStockOperationLines, evaluateBatchStock, stockClaimingOperation } from './batch-stock.mjs'
 import {
   blockerFacts,
   blockerWorldEvidence,
   buildPlanBlockedMessage,
   MAX_REPLACEMENTS_PER_GOAL,
-  NEVER_WAKE_PREFLIGHT_CODES,
   plainBlockerReason,
   playerObjectiveGrant,
   REPLACEMENT_WAKE_SKIP,
@@ -110,7 +109,7 @@ import {
   typedStateDistillationQuestions,
   typedStateProvenance,
 } from './jev-decision-taxonomy.mjs'
-import { isLifecycleMetaStep, normalizeCanonicalPlan, validateOutcomeCandidate } from './outcome-authority.mjs'
+import { authoritativeRuntimeState, isLifecycleMetaStep, MODEL_RECOVERABLE_OUTCOME_REASONS, normalizeCanonicalPlan, validateOutcomeCandidate } from './outcome-authority.mjs'
 import {
   getActivePlan as getActivePlanningPlan,
   GOAL_STATUS,
@@ -264,10 +263,15 @@ const AUTHORIZATION_REFUSAL_RETRY_BUDGET = 1
 // the step blocked and nothing to wake the NPC again.
 const WORLD_CORRECTION_RETRY_BUDGET = 1
 export const WORLD_REFUSAL_UNCORRECTED_REASON = 'preflight_world_refusal_uncorrected'
+// A request that ends on a refusal an executor can still fix (an argument refusal after its retry, or a world refusal after a
+// recovery it spent) pauses as model_recoverable under this reason; the supervisor restages a fresh executor under its caps.
+export const EXECUTOR_REFUSAL_UNCORRECTED_REASON = 'preflight_executor_refusal_uncorrected'
 const PREFLIGHT_TRANSPORT_ERROR_CODE = 'preflight_transport_error'
-// A code in NEVER_WAKE_PREFLIGHT_CODES (replacement-wake.mjs) is one the harness never treats as correctable world change: a locked recipe
-// is answered by the live requirements block (owner decision 2026-10-05), a hold needs reconciliation, a missing actor is a lifecycle
-// event. Such a refusal gets no world-correction turn; it takes the terminal pause (endBlockedPreflightWithPause).
+// Which world refusals get no correction turn is declared next to the refusal class (EXECUTOR_UNFIXABLE_WORLD_CODES in refusal-class.mjs):
+// the ones the executor cannot fix by changing its batch. That is a different question from NEVER_WAKE_PREFLIGHT_CODES
+// (replacement-wake.mjs), which only says a code is never harness evidence of world change. Those refusals take the terminal guard
+// pause (endBlockedPreflightWithPause); every other request that ends on a refusal an executor can fix takes a model_recoverable one
+// (endExecutorRefusalWithPause).
 // MW2b: an identical batch refused because an earlier one's effect is not proven absent, and a batch proven not to have reached the game.
 const DUPLICATE_EFFECT_CODE = 'duplicate_effect_suppressed'
 const DUPLICATE_EFFECT_RETRY_BUDGET = 1
@@ -13220,14 +13224,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     })
   }
 
-  // The one terminal end for a preflight refusal that leaves the board blocked (recipe_locked, a world-evidence refusal whose MW5 wake
-  // was skipped, an unclassified refusal, an authority/argument refusal after its own retry, a prerequisite refusal outside research).
+  // The terminal end for a preflight refusal that only a person or a planning decision can resolve and that leaves the board blocked
+  // (recipe_locked, a world-evidence refusal whose MW5 wake was skipped, an unclassified refusal, an authority refusal after its own
+  // retry, a prerequisite refusal outside research, a lifecycle or harness-hold code). classifyBlockedEnd decides; a refusal an
+  // executor can still fix takes endExecutorRefusalWithPause instead.
   // The step stays blocked and the plan frozen, exactly as before; what changes is that the run is also paused through the outcome
   // authority, declared guard (a person or a later planning decision is needed; no timer resumes it), so the stop is durable, the
   // goal.paused row exists and the supervisor sees it. The player gets the one blocked chat line the request already produced.
-  async endBlockedPreflightWithPause({ stateResult, plan, durablePlan, before, preflight }) {
+  async endBlockedPreflightWithPause({ stateResult, plan, durablePlan, before, preflight, blockedEnd, recoverySpent = [] }) {
     const requestId = this.traceRequest?.id
     const reason = `blocked_${cleanMemoryText(preflight?.code ?? 'unknown', 80)}`
+    await this.traceBlockedEndClassified(preflight, blockedEnd, recoverySpent)
     if (this.requestInfo) {
       const state = this.memory.pausePlan?.(this.requestInfo.memoryKey, reason, { pause_class: PAUSE_CLASS.GUARD })
       if (state) stateResult = { ...(stateResult ?? {}), state }
@@ -13244,21 +13251,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       paused: record?.paused === true,
       task_board: visibleTaskBoard(stateResult?.state?.task_board),
     })
-    if (record?.paused === true) {
-      // goalPausedTrace reads the legacy status, which stays 'blocked' for a frozen plan; name the pause here, once per request.
-      if (this.traceRequest) this.traceRequest.goal_paused_traced = record.pause_reason
-      await this.traceEvent('goal.paused', {
-        request_id: requestId,
-        cause: reason,
-        pause_reason: cleanMemoryText(record.pause_reason, 300),
-        pause_class: pauseClassLabel(record),
-        provider_failure: false,
-        source: 'blocked_preflight',
-        goal_id: record.goal_id,
-        active_step_id: stateResult?.state?.task_board?.active_step_id,
-        resume: 'Revise or Cancel the blocked plan, or say continue',
-      })
-    }
+    if (record?.paused === true) await this.traceFrozenPlanPaused(record, reason, stateResult, 'blocked_preflight')
     this.active = false
     await this.traceEvent('request.completed', {
       chat_message: chatMessage,
@@ -13279,6 +13272,89 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       taskBoard: visibleTaskBoard(stateResult?.state?.task_board),
       blocker: preflight,
     }
+  }
+
+  // goalPausedTrace reads the legacy status, which stays 'blocked' for a frozen plan; name the pause here, once per request.
+  async traceFrozenPlanPaused(record, cause, stateResult, source) {
+    if (this.traceRequest) this.traceRequest.goal_paused_traced = record.pause_reason
+    await this.traceEvent('goal.paused', {
+      request_id: this.traceRequest?.id,
+      cause,
+      pause_reason: cleanMemoryText(record.pause_reason, 300),
+      pause_class: pauseClassLabel(record),
+      provider_failure: false,
+      source,
+      goal_id: record.goal_id,
+      active_step_id: stateResult?.state?.task_board?.active_step_id,
+      resume: 'Revise or Cancel the blocked plan, or say continue',
+    })
+  }
+
+  // A restage that starts a fresh executor context (supervisor recovery, including an auto-resume) starts its refusal correction budgets
+  // over: the argument retry and the world-correction turn are per executor context, so the restaged executor gets its one correction
+  // turn with the refusal facts. Unit 7's per-step cap and the deadlock limit still bound the total number of restages.
+  async resetRefusalRecoveryBudgets({ requestId } = {}) {
+    const before = { argument_retries: this.modelCorrectablePreflightRetries ?? 0, world_correction_retries: this.worldCorrectionRetries ?? 0 }
+    this.modelCorrectablePreflightRetries = 0
+    this.worldCorrectionRetries = 0
+    await this.traceEvent('operations.refusal_budget_reset', {
+      request_id: requestId ?? this.traceRequest?.id,
+      reason: 'fresh_restage_correction_budget',
+      before,
+    })
+  }
+
+  // Which executor recoveries this request already spent on the refusal that ended it (see EXECUTOR_RECOVERY).
+  executorRecoveriesSpent(preflight) {
+    const spent = []
+    if (refusalClassOf(preflight).refusal_class === REFUSAL_CLASS.ARGUMENT && (this.modelCorrectablePreflightRetries ?? 0) >= MODEL_CORRECTABLE_PREFLIGHT_RETRY_BUDGET) spent.push(EXECUTOR_RECOVERY.ARGUMENT_RETRY)
+    if (TRANSFER_SUPPLY_PREFLIGHT_CODES.has(preflight?.code)) {
+      const board = this.requestInfo ? this.memory.currentPlan?.(this.requestInfo.memoryKey)?.task_board : undefined
+      if (transferSupplyRecoveryCount(board) >= TRANSFER_SUPPLY_RECOVERY_BUDGET) spent.push(EXECUTOR_RECOVERY.SUPPLY_RECOVERY)
+    }
+    if ((this.worldCorrectionRetries ?? 0) >= WORLD_CORRECTION_RETRY_BUDGET) spent.push(EXECUTOR_RECOVERY.WORLD_CORRECTION)
+    return spent
+  }
+
+  async traceBlockedEndClassified(preflight, blockedEnd, recoverySpent) {
+    await this.traceEvent('operations.blocked_end_classified', {
+      request_id: this.traceRequest?.id,
+      code: preflight?.code,
+      refusal_class: refusalClassLabel(preflight),
+      recovery_spent: recoverySpent,
+      pause_class: blockedEnd?.pause_class,
+      reason: blockedEnd?.reason,
+    })
+  }
+
+  // The request ends on a refusal that only the executor caused and a fresh one can fix (classifyBlockedEnd): the step is NOT blocked
+  // and the plan is not frozen. It ends as a model_recoverable pause with the refusal's facts and the one chat line, and the
+  // supervisor restages a fresh executor under its persisted caps (per step without progress, per goal).
+  async endExecutorRefusalWithPause({ stateResult, plan, before, preflight, blockedEnd, recoverySpent }) {
+    const requestId = this.traceRequest?.id
+    const index = Number.isSafeInteger(preflight?.operation_index) ? preflight.operation_index : 0
+    if (this.requestInfo) {
+      const state = this.memory.setAdmissionState?.(this.requestInfo.memoryKey, 'preflight_rejected')
+      if (state) stateResult = { ...(stateResult ?? {}), state }
+    }
+    await this.traceBlockedEndClassified(preflight, blockedEnd, recoverySpent)
+    const retryBudget = recoverySpent.includes(EXECUTOR_RECOVERY.ARGUMENT_RETRY) ? MODEL_CORRECTABLE_PREFLIGHT_RETRY_BUDGET : WORLD_CORRECTION_RETRY_BUDGET
+    await this.traceEvent('operations.preflight_rejected', {
+      request_id: requestId,
+      failure_class: 'deterministic_preflight',
+      reason: EXECUTOR_REFUSAL_UNCORRECTED_REASON,
+      preflight,
+      refusal_class: refusalClassLabel(preflight),
+      recovery_spent: recoverySpent,
+      retry_budget: retryBudget,
+    })
+    return this.finishPreflightRecoveryFailure(stateResult, plan, before, preflight, {
+      source: 'executor_refusal_recovery',
+      reason: EXECUTOR_REFUSAL_UNCORRECTED_REASON,
+      retryBudget,
+      chatMessage: `[Plan paused] The game refused operation ${index + 1} (${cleanMemoryText(plan.operations?.[index]?.name, 80)}: ${cleanMemoryText(preflight?.code, 80)}) again after the correction. Nothing from the batch ran; the plan and step are unchanged.`,
+      facts: worldRefusalFacts(preflight),
+    })
   }
 
   // A world-class refusal that is not a harness-evidenced structural blocker. First one in a request: the facts go back to the
@@ -13347,23 +13423,73 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         evidence: [],
       }
       await this.traceEvent('outcome.candidate', failureCandidate)
-      const reduced = this.memory.applyOutcomeAuthority?.(this.requestInfo.memoryKey, failureCandidate, {
-        world: {
-          ...runtime,
-          persistent_runtime: persistentRuntime,
-          persistent_runtime_healthy: persistentRuntimeHealthy(persistentRuntime),
-          condition_wait_active: state?.condition_wait?.state === 'active',
-          condition_wait: state?.condition_wait,
-        },
-        chatMessage: plan.chatMessage,
-      })
+      const world = {
+        ...runtime,
+        persistent_runtime: persistentRuntime,
+        persistent_runtime_healthy: persistentRuntimeHealthy(persistentRuntime),
+        condition_wait_active: state?.condition_wait?.state === 'active',
+        condition_wait: state?.condition_wait,
+      }
+      const reduced = this.memory.applyOutcomeAuthority?.(this.requestInfo.memoryKey, failureCandidate, { world, chatMessage: plan.chatMessage })
       state = reduced?.state ?? state
       if (state) stateResult = { ...(stateResult ?? {}), state }
       await this.traceEvent(reduced?.decision?.accepted ? 'outcome.validated' : 'outcome.rejected', reduced?.decision ?? failureCandidate)
       await this.persistState()
+      // This failure was the one the deadlock detector counts as the step's third identical failure (planning-state.mjs
+      // DEADLOCK_REPEATED_FAILURE_LIMIT, which falls on the supervisor's last allowed restage): the plan is now frozen BLOCKED and no
+      // timer resumes it. End it as the one visible guard pause, exactly like a blocked preflight end, never a silent blocked stall.
+      const frozen = getActivePlanningPlan(this.memory.planningState?.(this.requestInfo.memoryKey))
+      if (frozen?.status === PLAN_STATUS.BLOCKED) {
+        const pauseReason = `blocked_${cleanMemoryText(frozen.blocker?.reason_code ?? 'deadlock', 80)}`
+        const paused = this.memory.pausePlan?.(this.requestInfo.memoryKey, pauseReason, { pause_class: PAUSE_CLASS.GUARD })
+        if (paused) {
+          state = paused
+          stateResult = { ...(stateResult ?? {}), state }
+        }
+        await this.persistState()
+        const record = this.memory.pauseRecord?.(this.requestInfo.memoryKey)
+        await this.traceEvent('operations.recovery_failure_frozen', {
+          request_id: this.traceRequest?.id,
+          reason: pauseReason,
+          failure_class: reason,
+          blocker_kind: frozen.blocker?.kind,
+          pause_class: PAUSE_CLASS.GUARD,
+          paused: record?.paused === true,
+        })
+        if (record?.paused === true) await this.traceFrozenPlanPaused(record, pauseReason, stateResult, 'recovery_failure_frozen')
+      }
+      else if (state?.status !== 'paused' && state?.status !== 'blocked') {
+        // The outcome authority declines to pause while the runtime is not idle (a task is running, or the status could not be read).
+        // This request is over (this.active is false below), and the supervisor drops a completion signal when the agent is not active,
+        // so nothing would wake the NPC again: end it as a visible pause instead of an active plan with no pending work. The class
+        // is the candidate's own when the runtime is known to be busy, and 'system' when its state is unknown.
+        const runtimeState = authoritativeRuntimeState(world)
+        const unknown = !runtimeState.active && !runtimeState.idle
+        const pauseClass = unknown
+          ? PAUSE_CLASS.SYSTEM
+          : MODEL_RECOVERABLE_OUTCOME_REASONS.has(reason) ? PAUSE_CLASS.MODEL_RECOVERABLE : PAUSE_CLASS.GUARD
+        const pauseReason = unknown ? `runtime_status_unknown:${reason}` : `recoverable_provider_failure:${reason}`
+        const paused = this.memory.pausePlan?.(this.requestInfo.memoryKey, pauseReason, { pause_class: pauseClass })
+        if (paused) {
+          state = paused
+          stateResult = { ...(stateResult ?? {}), state }
+        }
+        await this.persistState()
+        await this.traceEvent('operations.recovery_failure_runtime_gate', {
+          request_id: this.traceRequest?.id,
+          decision: unknown ? 'paused_runtime_status_unknown' : 'paused_runtime_active',
+          reason: pauseReason,
+          failure_class: reason,
+          pause_class: pauseClass,
+          paused: paused?.status === 'paused',
+          runtime: { active: runtimeState.active === true, idle: runtimeState.idle, task_state: runtimeState.task_state, queue_length: runtimeState.queue_length, status_error: runtime?.status_error },
+        })
+      }
     }
 
     this.active = false
+    // The line says "paused" only when the plan is paused or frozen; otherwise it states the facts without the prefix.
+    if (state?.status !== 'paused' && state?.status !== 'blocked') chatMessage = String(chatMessage ?? '').replace(/^\[Plan paused\]\s*/, '')
     await this.traceEvent('operations.preflight_recovery_exhausted', {
       failure_class: reason,
       retry_budget: retryBudget,
@@ -14768,10 +14894,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         // class-declared pause. A refusal that IS world evidence keeps the blocked end and the MW5 replacement wake below. A
         // refusal with no valid declared class (reported above) still fails closed to the blocked end: only a producer's own
         // 'world' declaration earns the correction turn.
+        const worldEvidence = blockerWorldEvidence({ trigger: 'operation_preflight_blocker', preflight: error?.preflight, existed: this.unitHadExisted(error?.preflight?.identity, error?.preflight) }).ok
         if (refusal.classified && refusal.refusal_class === REFUSAL_CLASS.WORLD
-          && !NEVER_WAKE_PREFLIGHT_CODES.includes(error?.preflight?.code)
-          && !blockerWorldEvidence({ trigger: 'operation_preflight_blocker', preflight: error?.preflight, existed: this.unitHadExisted(error?.preflight?.identity, error?.preflight) }).ok) {
+          && !executorCannotFix(error?.preflight)
+          && !worldEvidence) {
           return this.handleWorldRefusal(error, plan, before, stateResult)
+        }
+        // The one terminal decision (classifyBlockedEnd): who can fix this refusal decides the pause class. An executor-correctable one
+        // ends paused and restageable with the step untouched; every other one keeps the blocked step and the guard pause.
+        const recoverySpent = this.executorRecoveriesSpent(error?.preflight)
+        const blockedEnd = classifyBlockedEnd({ preflight: error?.preflight, recoverySpent, worldEvidence })
+        if (blockedEnd.executor_correctable) {
+          return this.endExecutorRefusalWithPause({ stateResult, plan, before, preflight: error?.preflight, blockedEnd, recoverySpent })
         }
         stateResult = await this.markAdmissionFailure(stateResult, operations, error, 'operation_preflight_blocker')
         await this.traceEvent('operations.preflight_rejected', {
@@ -14791,7 +14925,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           existed: this.unitHadExisted(error?.preflight?.identity, error?.preflight),
         })
         if (preflightWake !== undefined) return preflightWake
-        return this.endBlockedPreflightWithPause({ stateResult, plan, durablePlan, before, preflight: error?.preflight })
+        return this.endBlockedPreflightWithPause({ stateResult, plan, durablePlan, before, preflight: error?.preflight, blockedEnd, recoverySpent })
       }
 
       const admitGeneration = this.generation

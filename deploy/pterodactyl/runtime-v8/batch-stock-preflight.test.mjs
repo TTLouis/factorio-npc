@@ -317,7 +317,7 @@ test('placing two furnaces with one held and no craft is refused: each placement
   assert.equal((rcon.mutations[0].match(/'place_entity'/g) ?? []).length, 1, 'only the single placement that the stock covers was admitted')
 })
 
-test('a second refusal for the same batch ends in the blocked path, never a loop: the correction turn is bounded', async () => {
+test('a second refusal for the same batch ends in a model_recoverable pause, never a loop: the correction turn is bounded', async () => {
   const rcon = new StockRcon({ inventory: { 'stone-furnace': 1 } })
   const twice = planMessage([PLACE_FURNACE, PLACE_FURNACE], ['Place the furnaces'])
   const world = harness(rcon, [observe(), twice, twice])
@@ -325,7 +325,11 @@ test('a second refusal for the same batch ends in the blocked path, never a loop
   const result = await world.agent.request('place two furnaces', { sender: 'tester' })
 
   assert.equal(rcon.mutations.length, 0, 'nothing was ever admitted')
-  assert.equal(result.blocker?.code, 'batch_stock_insufficient')
+  // Unit 13: an argument refusal after its own retry is the executor's to fix, so the request pauses (model_recoverable) instead of
+  // blocking the step; the supervisor restages it under its caps.
+  assert.equal(result.blocker, undefined)
+  assert.equal(result.recoverableFailure?.reason, 'preflight_executor_refusal_uncorrected')
+  assert.equal(result.recoverableFailure?.preflight?.code, 'batch_stock_insufficient')
   assert.equal(world.named('operations.preflight_recoverable').length, 1)
   const [rejected] = world.named('operations.preflight_rejected')
   assert.equal(data(rejected).preflight.code, 'batch_stock_insufficient')

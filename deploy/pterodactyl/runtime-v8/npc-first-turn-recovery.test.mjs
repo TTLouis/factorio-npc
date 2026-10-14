@@ -38,6 +38,9 @@ class RuntimeRcon {
     this.batchFailure = batchFailure
   }
 
+  // What production getTaskStatus returns after a refused batch: nothing was sent, so the NPC is idle with an empty queue.
+  static IDLE_TASK_STATUS = { task_state: 'idle', queue_empty: true, queue_length: 0 }
+
   async command(text) {
     this.commands.push(text)
     if (text.includes('remote.call("sgluna_deployment","status")')) return JSON.stringify(deployment())
@@ -50,6 +53,7 @@ class RuntimeRcon {
         entities: [{ name: 'stone-furnace', type: 'furnace', unit_number: 582, position: { x: 2, y: 0 } }],
       })
     }
+    if (text.includes('remote.call("autorio_operations","status")')) return JSON.stringify(RuntimeRcon.IDLE_TASK_STATUS)
     if (text.includes('remote.call("autorio_navigation","status")')) {
       return JSON.stringify({ state: 'idle', target: null, last_result: 'arrived' })
     }
@@ -125,15 +129,17 @@ test('tools-disabled recovery cannot turn an unresolved identity into a craft mu
   // its recovery repeating the same unknown recipe, which then freezes.
   assert.equal(calls, 4)
   assert.equal(contexts[1].allowTools, false)
-  assert.equal(result.blocker.code, 'unknown_recipe')
+  // Unit 13: an argument refusal after its retry is the executor's to fix: no blocker, a recoverable failure.
+  assert.equal(result.blocker, undefined)
+  assert.equal(result.recoverableFailure.reason, 'preflight_executor_refusal_uncorrected')
+  assert.equal(result.recoverableFailure.preflight.code, 'unknown_recipe')
   assert.equal(rcon.mutations.length, 0)
 
-  // The terminal blocked end also pauses the run (guard class, blocked_<code>), so the stop is visible and no timer resumes it.
+  // The NPC is idle with an empty queue, so the plan pauses as model_recoverable (not blocked) and the step is untouched.
   const state = memory.currentPlan('npc:sgluna')
   assert.equal(state.status, 'paused')
-  assert.equal(state.pause_reason, 'blocked_unknown_recipe')
-  assert.equal(state.pause_class, 'guard')
-  assert.equal(state.admission_status, 'admission_failed')
+  assert.equal(state.pause_reason, 'recoverable_provider_failure:preflight_executor_refusal_uncorrected')
+  assert.equal(state.pause_class, 'model_recoverable')
   assert.equal(state.task_board.status, 'paused')
   assert.equal(state.task_board.active_index, 0)
   assert.equal(memory.byNpc.get('npc:sgluna').recent.length, 1)
@@ -150,16 +156,24 @@ test('gather_resource tree identity is rejected deterministically before mutatio
     ]),
     systemPrompt: 'NPC test prompt',
   })
+  const rows = []
+  agent.behaviorTrace = { emit: async (record) => { rows.push(record) } }
 
   const result = await agent.request('gather nearby resources', { sender: 'tester' })
-  assert.equal(result.blocker.code, 'invalid_target_kind')
-  assert.equal(result.blocker.expected_type, 'resource')
-  assert.equal(result.blocker.observed_type, 'tree')
+  // Unit 13: the refusal is still deterministic and nothing ran; being an argument refusal it ends as a model_recoverable pause.
+  assert.equal(result.blocker, undefined)
+  assert.equal(result.recoverableFailure.reason, 'preflight_executor_refusal_uncorrected')
+  // The bounded facts on the failure carry the code and target; the full refusal (expected and observed type) is on the trace row.
+  assert.equal(result.recoverableFailure.preflight.code, 'invalid_target_kind')
+  const rejected = rows.find(row => row.event === 'operations.preflight_rejected')
+  assert.equal(rejected.data.preflight.expected_type, 'resource')
+  assert.equal(rejected.data.preflight.observed_type, 'tree')
+  assert.ok(rejected.data.request_id)
   assert.equal(rcon.mutations.length, 0)
   const state = memory.currentPlan('npc:sgluna')
   assert.equal(state.status, 'paused')
-  assert.equal(state.pause_reason, 'blocked_invalid_target_kind')
-  assert.equal(state.pause_class, 'guard')
+  assert.equal(state.pause_reason, 'recoverable_provider_failure:preflight_executor_refusal_uncorrected')
+  assert.equal(state.pause_class, 'model_recoverable')
 })
 
 for (const { label, operation, code } of [

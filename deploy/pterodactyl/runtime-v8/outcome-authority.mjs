@@ -37,7 +37,11 @@ const COMPLETION_EVIDENCE_KINDS = new Set([
 // harness-evidenced structural blocker got one correction turn with its facts and was refused again. Unlike the *_retry_exhausted
 // pauses, ending the request here leaves an idle NPC with an active goal and no other wake, so it must be visible and must resume.
 // A fresh restage gives the executor new observations; unit 7's persisted caps (per step without progress, per goal) bound it.
-export const MODEL_RECOVERABLE_OUTCOME_REASONS = Object.freeze(new Set(['provider_budget', 'provider_format', 'preflight_world_refusal_uncorrected']))
+//
+// preflight_executor_refusal_uncorrected is the same exception for a refusal only the executor caused (2026-10-14, unit 13): an
+// argument refusal after its retry, or a world refusal after a recovery it spent. The pause class follows who can fix the refusal
+// (classifyBlockedEnd in refusal-class.mjs); with zero connected humans a guard pause there is a dead end.
+export const MODEL_RECOVERABLE_OUTCOME_REASONS = Object.freeze(new Set(['provider_budget', 'provider_format', 'preflight_world_refusal_uncorrected', 'preflight_executor_refusal_uncorrected']))
 
 const PROVIDER_CONTROL_PLANE_FAILURES = new Set([
   'provider_format',

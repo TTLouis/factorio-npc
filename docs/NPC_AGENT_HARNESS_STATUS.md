@@ -8,6 +8,12 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 14: port unit 13, pause class follows who can fix the refusal (static lane, not live-validated)
+
+- **One terminal decision.** `classifyBlockedEnd` (refusal-class.mjs) decides the pause class of a request that ends on a refusal, from the refusal class, which executor recoveries were spent and whether it is world evidence. An argument refusal after its retry, or a world refusal after a recovery it spent, ends as a `model_recoverable` pause (`preflight_executor_refusal_uncorrected`) with the step untouched, and unit 7 restages it. Everything else keeps the unit 12 guard pause. Both ends trace `operations.blocked_end_classified` with `request_id`, `recovery_spent`, `pause_class` and `reason`.
+- **Two meanings of never-wake.** The world-correction exclusion is now `EXECUTOR_UNFIXABLE_WORLD_CODES` (recipe_locked, authorization_stale, duplicate_effect_suppressed, no_actor, different_surface, bootstrap_dependency_unresolved), declared beside the refusal class with the reason for each. `NEVER_WAKE_PREFLIGHT_CODES` keeps only its MW5 meaning, so supply_missing now gets the correction turn.
+- **Deadlock freeze.** The third identical failure on a step (the request plus unit 7's two restages) trips the deadlock detector and froze the plan with no visible end. `finishPreflightRecoveryFailure` now ends that as one guard pause `blocked_<reason>`, traced `operations.recovery_failure_frozen` and `goal.paused`. For a repeating executor refusal this fires on the same attempt as the per-step cap, so `recovery.auto_resume_exhausted` is not reached for it.
+
 ## October 14: port unit 12, world-refusal correction turn and declared terminal pause (static and engine lanes, not live-validated)
 
 - **Correction turn.** A declared world-class preflight refusal that is not harness world evidence gets one correction turn carrying the refusal facts. A second refusal pauses the plan as `model_recoverable` (`preflight_world_refusal_uncorrected`), which unit 7's capped auto-resume restages. The exclusion reuses `NEVER_WAKE_PREFLIGHT_CODES`; there is no second list.

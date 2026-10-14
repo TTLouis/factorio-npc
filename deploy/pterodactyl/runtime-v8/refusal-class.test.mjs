@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 import { ADMISSION_REFUSAL, ADMISSION_REFUSAL_CLASS, ADMISSION_REFUSAL_CODES } from './authorization.mjs'
-import { REFUSAL_CLASS, REFUSAL_CLASSES, refusalClassLabel, refusalClassOf } from './refusal-class.mjs'
+import { classifyBlockedEnd, EXECUTOR_RECOVERY, EXECUTOR_UNFIXABLE_WORLD_CODES, executorCannotFix, REFUSAL_CLASS, REFUSAL_CLASSES, refusalClassLabel, refusalClassOf } from './refusal-class.mjs'
+import { NEVER_WAKE_PREFLIGHT_CODES } from './replacement-wake.mjs'
 
 // The mod owns the code -> class registry (packages/autorio/src/refusal_classes.ts). This runtime reads it as text so that the
 // two packages are proven to agree without importing TypeScript here. The gate mounts packages/autorio/src (see
@@ -151,4 +152,52 @@ test('the guard does catch a refusal that forgot its class, including one with a
   assert.equal(missing.length, 1)
   assert.doesNotMatch(missing[0].top, /refusal_class:/)
   assert.match(missing[0].top, /detail:/, 'a nested literal and a brace inside a string do not end the scan early')
+})
+
+// --- unit 13: who can fix a refusal ---------------------------------------------------------------------------------------------
+
+test('the world refusals an executor cannot fix are declared once, each is declared world by its producer, and each names why', () => {
+  assert.deepEqual(Object.keys(EXECUTOR_UNFIXABLE_WORLD_CODES).sort(), [
+    'authorization_stale', 'bootstrap_dependency_unresolved', 'different_surface', 'duplicate_effect_suppressed', 'no_actor', 'no_inventory',
+    'player_unavailable', 'recipe_locked', 'research_disabled', 'technology_disabled',
+  ])
+  const loopSource = readFileSync(new URL('./npc-agent-loop.mjs', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+  for (const [code, why] of Object.entries(EXECUTOR_UNFIXABLE_WORLD_CODES)) {
+    // The class each code is declared with by whoever produces it: the mod's registry, the admission table, or the loop itself.
+    const declared = Object.hasOwn(modRegistry, code)
+      ? modRegistry[code]
+      : Object.hasOwn(ADMISSION_REFUSAL_CLASS, code)
+        ? ADMISSION_REFUSAL_CLASS[code]
+        : code === 'duplicate_effect_suppressed' && /code: DUPLICATE_EFFECT_CODE,\n\s+refusal_class: REFUSAL_CLASS\.WORLD,/.test(loopSource) ? 'world' : undefined
+    assert.equal(declared, 'world', `${code} is declared a world refusal by its producer`)
+    assert.equal(executorCannotFix({ code }), why)
+    assert.ok(['plan_level', 'authority_grant', 'harness_hold', 'lifecycle'].includes(why), code)
+  }
+  // The two meanings differ: the executor's own inventory accounting is never world evidence, but a fresh executor can fix it.
+  assert.equal(NEVER_WAKE_PREFLIGHT_CODES.includes('supply_missing'), true)
+  assert.equal(executorCannotFix({ code: 'supply_missing' }), undefined)
+  assert.equal(executorCannotFix({}), undefined)
+})
+
+test('classifyBlockedEnd: the pause class follows who can fix the refusal, and every answer names its reason', () => {
+  const world = code => ({ code, refusal_class: 'world' })
+  const cases = [
+    // [label, input, pause_class, reason]
+    ['argument after its retry', { preflight: { code: 'unknown_prototype', refusal_class: 'argument' }, recoverySpent: [EXECUTOR_RECOVERY.ARGUMENT_RETRY] }, 'model_recoverable', 'argument_refusal_after_retry'],
+    ['world after the supply recovery', { preflight: world('supply_missing'), recoverySpent: [EXECUTOR_RECOVERY.SUPPLY_RECOVERY] }, 'model_recoverable', 'world_refusal_after_supply_recovery'],
+    ['world after the correction turn', { preflight: world('natural_harvest_source_not_found'), recoverySpent: [EXECUTOR_RECOVERY.WORLD_CORRECTION] }, 'model_recoverable', 'world_refusal_after_world_correction'],
+    ['world with no recovery spent', { preflight: world('natural_harvest_source_not_found'), recoverySpent: [] }, 'guard', 'no_executor_recovery_spent'],
+    ['authority', { preflight: { code: 'protected_entity_refused', refusal_class: 'authority' }, recoverySpent: [EXECUTOR_RECOVERY.ARGUMENT_RETRY] }, 'guard', 'authority_refusal_needs_a_person'],
+    ['prerequisite', { preflight: { code: 'force_busy', refusal_class: 'prerequisite' }, recoverySpent: [EXECUTOR_RECOVERY.WORLD_CORRECTION] }, 'guard', 'prerequisite_refusal_outside_research_recovery'],
+    ['plan-level world refusal', { preflight: world('recipe_locked'), recoverySpent: [EXECUTOR_RECOVERY.WORLD_CORRECTION] }, 'guard', 'executor_cannot_fix:plan_level'],
+    ['lifecycle', { preflight: world('no_actor'), recoverySpent: [] }, 'guard', 'executor_cannot_fix:lifecycle'],
+    ['harness hold', { preflight: world('duplicate_effect_suppressed'), recoverySpent: [EXECUTOR_RECOVERY.WORLD_CORRECTION] }, 'guard', 'executor_cannot_fix:harness_hold'],
+    ['world evidence whose wake was skipped', { preflight: world('extraction_empty'), recoverySpent: [EXECUTOR_RECOVERY.SUPPLY_RECOVERY], worldEvidence: true }, 'guard', 'world_evidence_wake_skipped'],
+    ['unclassified', { preflight: { code: 'brand_new_mod_code' }, recoverySpent: [EXECUTOR_RECOVERY.ARGUMENT_RETRY] }, 'guard', 'unclassified_refusal_fails_closed'],
+  ]
+  for (const [label, input, pauseClass, reason] of cases) {
+    const verdict = classifyBlockedEnd(input)
+    assert.deepEqual([verdict.pause_class, verdict.reason, verdict.executor_correctable], [pauseClass, reason, pauseClass === 'model_recoverable'], label)
+  }
+  assert.deepEqual(classifyBlockedEnd({}).pause_class, 'guard', 'no input at all fails closed')
 })

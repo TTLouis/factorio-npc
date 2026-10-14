@@ -430,6 +430,7 @@ const UI_TASK_PAUSE_SUMMARIES = new Map([
   ['jev_refinement_budget_exhausted', 'SGLuna could not settle on a plan it could commit. Reply with more specific direction, or continue to retry.'],
   ['recoverable_provider_failure:requires_machine_retry_exhausted', 'Paused: the craft needs a machine and the retry limit was reached. Press Resume or say continue.'],
   ['recoverable_provider_failure:research_preflight_retry_exhausted', 'Paused: the research request was refused repeatedly and the retry limit was reached. Press Resume or say continue.'],
+  ['recoverable_provider_failure:preflight_executor_refusal_uncorrected', 'Paused: the game refused the planned operation again after a correction, so nothing ran. The run retries from a fresh observation; Resume or say continue to retry now.'],
   ['recoverable_provider_failure:preflight_world_refusal_uncorrected', 'Paused: the game refused the planned operation twice, so nothing ran. The run retries from a fresh observation; Resume or say continue to retry now.'],
 ])
 
@@ -2033,6 +2034,8 @@ export async function recoverInterruptedAgentPlan(agent, reason, details = {}, o
   if (typeof agent.traceEvent === 'function') {
     agent.traceRequest = { id: recoveryRequestId, seq: 0 }
     await agent.traceEvent('runtime.recovery_started', { reason, details })
+    // A fresh executor context gets its own correction turn for a refusal (unit 13).
+    await agent.resetRefusalRecoveryBudgets?.({ requestId: recoveryRequestId })
   }
   await restageRecoveryConversation(agent, { reason, recoveryMessage })
   if (options.isCancelled?.()) return { recovered: false, reason: 'cancelled_after_fire', state }
