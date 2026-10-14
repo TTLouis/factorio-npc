@@ -8,6 +8,40 @@ blockers and settled owner decisions, read the
 ledger/refusal-clearance and goal-requirements changes; the earlier chat handoff
 must not be used to reset current integration.
 
+## October 14: port unit 12, world-refusal correction turn and declared terminal pause (static and engine lanes, not live-validated)
+
+- **Correction turn.** A declared world-class preflight refusal that is not harness world evidence gets one correction turn carrying the refusal facts. A second refusal pauses the plan as `model_recoverable` (`preflight_world_refusal_uncorrected`), which unit 7's capped auto-resume restages. The exclusion reuses `NEVER_WAKE_PREFLIGHT_CODES`; there is no second list.
+- **Terminal pause.** Every other request that would end `blocked_preflight` goes through one function, `endBlockedPreflightWithPause`. It applies a durable GUARD pause `blocked_<code>`, traces `operations.blocked_end_paused` and `goal.paused` with `request_id`, and sends one chat line. A timer never resumes it. This covers recipe_locked, a world-evidence refusal whose replan wake was skipped, unclassified refusals, authority or argument refusals after their own retry, and non-research prerequisites.
+- **Transport.** `preflight_transport_error` is now a transport pause with no correction turn.
+- **run-check.** Gains `silent_blocked_stall`, which flags a blocked request that nothing wakes again.
+- **Test fix.** A flaky handoff test failed because two restages in the same millisecond got the same handoff id. The packet now includes the conversation sequence.
+- **Gate.** 2291 runtime tests pass. All four engine lanes pass on `7f8d0021`. No installer repin was needed.
+- **Open.** Argument-after-retry and supply_missing end in a GUARD pause, which is a dead end with zero humans. `model_recoverable` may fit better. Decide from run H evidence.
+
+## October 14: live run G on ec6b8385 (first live auto-resume, then a silent world-refusal stall)
+
+- **Setup.** Candidate `ec6b8385` (units 7 to 10) in a freshly generated world, zero humans, game speed 1. One objective, no operator gameplay after the starter kit. The operator stopped it after 28 idle minutes. [Checkpoint](validation/LUNA_GREEN_LIVE_RUN_G_2026-10-14.md).
+- **Worked.** The goal was admitted with a new goal_id. A one-step plan (electronics and steam-power research triggers) was committed. The executor mined 50 iron ore and 10 copper ore natively and placed a stone furnace.
+- **First live auto-resume (unit 7).** An unverified world-blocker claim exhausted fresh-context recovery, and the goal paused as `model_recoverable`. `recovery.auto_resume_scheduled` fired, and a fresh restage continued the step.
+- **Stall.** A batch with `gather_resource coal 10` and a `supply_entity` into the furnace was refused with `supply_destination_conflict`. Iron ore and copper ore both target the furnace's one-slot source inventory. The refusal is `world` class, the MW5 replacement wake skipped it, and the request ended `blocked_preflight` with no pause. The model never saw the refusal facts, and the NPC stayed idle with an active goal.
+- **run-check.** Reported `restage_loop` (three times) and `stale_step_tracker_behind_batch` (once). Both follow from one coarse research-trigger step, and neither caused the stall. run-check did not flag the stall itself. Unit 12 addresses that gap.
+- **Not reached.** No smelting, red science or research. `logistic-science-pack` was not researched.
+
+## October 14: live run F on ec6b8385 (DNS failure, no gameplay)
+
+- **Setup.** The same candidate `ec6b8385` in a freshly generated world, actor 11, zero humans, game speed 1, with the run E starter kit and objective. [Checkpoint](validation/LUNA_GREEN_LIVE_RUN_F_2026-10-14.md).
+- **Result.** The first planner call failed after 187 ms with `fetch failed` and was marked `recoverable=false`. The goal was never admitted. There were no provider responses and no world actions. run-check reported `request_failed_unrecoverable`.
+- **Cause.** Infrastructure. The CLI-proxy host did not resolve from inside the container or from the host. Run E reached the same proxy on 2026-10-13. No gameplay was tested, so run F does not validate units 7 to 10.
+- **Finding 1 (unit 11).** The cause code was dropped. The logs said only `fetch failed`, so a DNS outage could not be told apart from a refusal or a timeout.
+- **Finding 2 (unit 11).** A transport failure on the first planner call lost the objective, because auto-resume only recovers a paused plan. With zero humans, the NPC stayed idle.
+
+## October 13-14: port units 8, 9 and 10 (static and engine lanes, not live-validated)
+
+- **Unit 8 (`e695d251`).** Executor targeted reads that admit the executor step id, trigger production roots, machine energy kinds and burner fuel facts carried to the executor as harness facts.
+- **Unit 9 (`26814155`, fix-forward `ec6b8385`).** `entity_count` step contracts, build bills from `place_items`, science residual from research progress, `harvested_from` for trees and rocks, and trigger readiness (`credited_only_after_prerequisites`). The fix-forward is a test-teardown retry only.
+- **Unit 10 (`b45d9f7f`).** Fluid-port placement with `connects_to`, rechecked at execution. Nearest-first water reads with chunk coverage. Electric prototype facts for pole reach, power, fuel and pumps.
+- **Candidate `ec6b8385`.** Gate green. The production, craft-trigger, native-admission and steam-lab engine lanes passed. Not live-validated. The live runs on this candidate are F and G above.
+
 ## October 13: port unit 7, declared pause classes and bounded auto-resume (static only, not live-validated)
 
 - **Declared class.** Every pause now carries `pause_class` (`transport`, `model_recoverable`, `authority`, `operator`, `system`, `guard`) from the registry `runtime-v8/pause-class.mjs`, declared where the pause is created and stored in the planning reducer's durable run state. A missing or unknown class never auto-resumes and is traced (`recovery.pause_unclassified`). The transport subkind comes from structured provider fields (`http_status`, `transport_subkind`); the message regex remains only as a legacy fallback for re-wrapped errors.

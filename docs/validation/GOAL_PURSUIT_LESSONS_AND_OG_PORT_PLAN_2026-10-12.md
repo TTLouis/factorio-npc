@@ -1,6 +1,6 @@
 # Goal-pursuit experiment: lessons and OG port plan (2026-10-12)
 
-Status: porting. Unit 1 is merged; see [Build status](#build-status). The owner chose the original
+Status: porting. Units 1 to 12 are merged; see [Build status](#build-status). Run G on `ec6b8385` was the first live proof of unit 7's auto-resume; run H is ready on `7f8d0021`. The owner chose the original
 (OG) staged planner/executor harness on 2026-10-12; the opt-in direct goal-pursuit loop
 (`SGLUNA_GOAL_PURSUIT_MODE=direct`) is concluded as a dead end.
 
@@ -134,6 +134,12 @@ owner's go.
 | 4. Dependency-aware batch stock accounting | `3fd26f42`, merge `0708bd4b`, fresh recipe integration `16138b9a` | Reviewed and merged. Ordered stock accounts for exact capacity, uncertain yields, native intermediate rules and current recipe eligibility. Combined gates green. |
 | 5. Steam-power exact-layout fixture | `481a1196`, evidence `133504ff` | Merged locally. Focused steam-lab and full production engine lanes passed; native powered lab research progresses with seeded science/prerequisites. |
 | 6. Raw-leaf acquisition facts (run C follow-up) | `ab2290f3`, merge `015c2ab3` | Merged. Bounded native source facts; static gate green, not live-validated. |
+| 7. Pause classes and bounded model-recoverable auto-resume | `5b944bd2`, `331ac818`, `07894735`, `628ad81b`, `baee1698`, `af0ef4ea`, merge `89eb30a5`, repin `9d86ec39` | Merged. Static gates green. First live auto-resume in run G (`ec6b8385`): the paused step restaged and continued. |
+| 8. Executor targeted reads, trigger production, machine energy and burner fuel facts | `ba9595b3`, `9f4fd990`, `4d1c7926`, `c8822525`, `785f4450`, merge `e695d251` | Merged. Static and engine lanes; not live-validated. |
+| 9. entity_count contracts, build bills, science residual, harvest sources, trigger readiness | `0be0c0f7`, `6a08b674`, `3e793817`, `450a5a24`, `5c8517c6`, merge `26814155`, fix-forward `ec6b8385` (test teardown retry) | Merged. Candidate `ec6b8385`: gate green; production, craft-trigger, native-admission and steam-lab lanes passed. Not live-validated. |
+| 10. Fluid-port placement, nearest-first water, chunk coverage, electric prototype facts | `965f5300`, `801d4d0e`, `c5b68c0e`, `b235d33d`, `5ebfcb3e`, `dc250511`, `389bdb7d`, `9c073021`, `3cea2a73`, `d2b478ae`, `8deef12f`, merge `b45d9f7f` | Merged. Candidate `ec6b8385` lanes passed. Not live-validated. |
+| 11. Transport cause codes and durable intake retry | `8ecdbf1f`, `08bffc6a`, `14bc1e45`, `25f1538b`, `038e2915`, merge `010e84a7` | Merged. Static scenarios only. Not exercised live; run F predates the merge. |
+| 12. World-refusal correction turn and declared terminal pause | `948e920f`, `ab7f1c08`, `dbac1446`, `58a3dd80`, merge `9501a5fe`, engine fixture `7f8d0021` | Merged. 2291 runtime tests and all four engine lanes pass on `7f8d0021`. No repin. Not live-validated. Open: GUARD versus model_recoverable for argument-after-retry and supply_missing, to decide from run H. |
 | Run C blocker recovery and diagnostics | `fdb55d72`, merge `b974dc97`, repin `473327a0` | Merged. Rejected blockers use durable bounded recovery; original run C diagnosed. Combined 2,129 runtime + 1,105 mod tests and 9 payload tests passed. See [checkpoint](LUNA_RUN_C_STATIC_FOLLOWUP_2026-10-13.md). |
 
 Additional run C fixes: recipe applicability `5c9826cb` and bounded resource observation recovery `ec2f359a` are reviewed and merged locally. Combined gate: 2,173 runtime/staging and 1,108 mod tests, typecheck and generated Lua passed; 9 payload tests passed. See [red-to-green checklist](GREEN_SCIENCE_RED_TO_GREEN_2026-10-13.md) for remaining candidate gates and the one-run authorization.
