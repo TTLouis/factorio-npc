@@ -50,6 +50,7 @@ import { executeReserveCommand, parseReserveCommand } from './reserve-command.mj
 import { reconciliationGuidance } from './operation-reconciliation.mjs'
 import {
   classifyRequestFailure,
+  failureCauseCode,
   isAutoResumable,
   MODEL_RECOVERABLE_RESUME_DELAY_MS,
   PAUSE_CLASS,
@@ -2092,6 +2093,8 @@ export class Session {
     this.lastUiFailureAt = 0
     // The pending model_recoverable resume ({ timer, correlation, attempt, pause_class }); its attempt COUNTS live in durable plan state.
     this.modelResume = null
+    // The pending intake retry ({ token, timer, record, running }); durable in memory.intakeRetry(). See handleIntakeFailure.
+    this.intakeRetry = null
     this.lastPauseDecision = ''
   }
 
@@ -2584,8 +2587,10 @@ export class Session {
   // checks its token after every await, so no queued resume can start in between.
   cancelAutoResume(reason) {
     this.clearAutoResume()
+    // The pending intake retry (a goal that never got its first plan) is cancelled by the same takeover, under the same fence.
+    const intakeCancelled = this.cancelIntakeRetry(reason)
     const pending = this.modelResume
-    if (!pending) return false
+    if (!pending) return intakeCancelled
     if (pending.timer) clearTimeout(pending.timer)
     pending.token.cancelled = true
     pending.token.reason = reason
@@ -2600,6 +2605,259 @@ export class Session {
       actor_id: pending.correlation.actor_id,
       actor_epoch: pending.correlation.epoch,
     })
+    return true
+  }
+
+  // --- intake retry (a goal lost at intake) --------------------------------------------------------------------------------------
+  //
+  // A new goal whose FIRST planner call fails on transport has no plan, so no pause exists for the automatic resume above to carry:
+  // the request failed and the objective vanished. The agent marks that failure (error.intake_failure, npc-agent-loop.mjs
+  // intakeTransportFailure) and the player request that hit it is kept here as ONE pending intake retry: sender, text, intent,
+  // request id, the actor and epoch it was received under, the attempt count and the time of the next attempt.
+  //   - same schedule and limits as a transport pause (autoResumeDelayMs / autoResumeMaxAttempts), not a parallel set of numbers;
+  //   - durable (memory.intakeRetry(), written with the rest of the NPC state), so a restart mid-backoff keeps it;
+  //   - the cancel token and fence follow modelResume: any player request or control cancels it synchronously (cancelAutoResume),
+  //     a changed actor or epoch cancels it at fire time, and the token is checked after every await;
+  //   - the limit ends with one chat line and a recovery.intake_retry_exhausted row. A failure that is not a transport failure at
+  //     intake is not handled here at all: it propagates exactly as before.
+
+  intakeTraceBase(record) {
+    return {
+      request_id: record.request_id,
+      origin_request_id: record.origin_request_id,
+      goal_id: record.goal_id,
+      interaction_intent: record.interaction_intent,
+      actor_id: record.actor_id,
+      actor_epoch: record.epoch,
+    }
+  }
+
+  async persistIntakeRetry() {
+    try { await this.agent?.persistState?.() }
+    catch (error) { this.log(`Unable to persist the intake retry: ${error instanceof Error ? error.message : String(error)}`) }
+  }
+
+  // Synchronous on purpose (see cancelAutoResume). A graceful stop keeps the durable record: the restart is what resumes it.
+  cancelIntakeRetry(reason) {
+    const pending = this.intakeRetry
+    if (!pending) return false
+    if (pending.timer) clearTimeout(pending.timer)
+    pending.token.cancelled = true
+    pending.token.reason = reason
+    this.intakeRetry = null
+    const kept = reason === 'session_stopping'
+    if (!kept) {
+      this.agent?.memory?.setIntakeRetry?.(null)
+      void this.persistIntakeRetry()
+    }
+    // A retry that already fired is mid-request: the takeover supersedes it.
+    if (pending.running && !kept) this.agent?.cancel?.('intake_retry_cancelled')
+    void this.traceRecovery('recovery.intake_retry_cancelled', {
+      ...this.intakeTraceBase(pending.record),
+      reason,
+      attempt: pending.record.attempt,
+      kept_for_restart: kept || undefined,
+    })
+    return true
+  }
+
+  // The reason a pending intake retry must not run now, or undefined. Compares what it was received under with the live values.
+  async intakeRetryStaleReason(record) {
+    if (this.stopping) return 'session_stopping'
+    if (!this.agent?.memory?.planningState) return 'agent_unavailable'
+    let current
+    try {
+      current = await this.rawStatus()
+    }
+    catch {
+      return 'status_unreadable'
+    }
+    if (current?.actor_id !== record.actor_id) return 'actor_changed'
+    if (current?.epoch !== record.epoch) return 'epoch_changed'
+    return this.intakeGoalAdmittedReason(record)
+  }
+
+  // A plan, or a goal other than the one the failed request admitted, appeared meanwhile: the request is no longer the intake.
+  intakeGoalAdmittedReason(record) {
+    const key = this.planKey()
+    const memory = this.agent.memory
+    const planning = memory.planningState?.(key)
+    if (getActivePlan(planning) || planning?.plans?.length > 0 || memory.currentPlan?.(key)) return 'goal_admitted'
+    const goal = planning?.goal
+    if (goal?.status === GOAL_STATUS.ACTIVE && goal.goal_id !== record.goal_id) return 'goal_admitted'
+    return undefined
+  }
+
+  intakePreview(text) {
+    return uiText(text, 70)
+  }
+
+  // True when this failure was handled here (retry scheduled, or the limit reported), false when the caller must handle it as
+  // before. `intake` is the running retry ({ token, record }) when the failure is a retry's own.
+  async handleIntakeFailure(error, { sender, text, received, intake } = {}) {
+    const failure = error?.intake_failure
+    if (!failure || this.stopping) return false
+    const transport = transportFailureOf(error)
+    if (!transport) return false
+    if (intake?.token?.cancelled) return false
+    const prior = intake?.record
+    const actor = prior ? { actor_id: prior.actor_id, epoch: prior.epoch } : (received ?? this.currentActorCorrelation())
+    const kind = transport.subkind
+    const causeCode = failureCauseCode(error)
+    const base = {
+      request_id: failure.request_id,
+      origin_request_id: prior?.origin_request_id ?? failure.request_id,
+      goal_id: failure.goal_id,
+      interaction_intent: failure.interaction_intent,
+      actor_id: actor.actor_id,
+      actor_epoch: actor.epoch,
+    }
+    if (!Number.isSafeInteger(actor.actor_id) || !Number.isSafeInteger(actor.epoch)) {
+      // Nothing to correlate the retry against: fail closed to today's behaviour, but say why.
+      await this.traceRecovery('recovery.intake_retry_cancelled', { ...base, reason: 'actor_unknown', transport_subkind: kind, cause_code: causeCode })
+      return false
+    }
+    const attempts = prior?.attempt ?? 0
+    const limit = autoResumeMaxAttempts(kind)
+    const preview = this.intakePreview(text)
+    if (attempts >= limit) {
+      await this.finishIntakeRetry(intake)
+      this.log(`Intake retry gave up after ${attempts} attempts (${kind})`)
+      await this.traceRecovery('recovery.intake_retry_exhausted', { ...base, reason: 'retry_limit_reached', attempt: attempts, limit, transport_subkind: kind, cause_code: causeCode })
+      const line = `I still cannot reach the model provider after ${attempts} automatic retries (${kind}), so I did not start "${preview}". Send the request again when the provider is reachable.`
+      await this.printChat(line)
+      await this.traceChatFailureReported(line, failure.request_id)
+      return true
+    }
+    const delayMs = autoResumeDelayMs(kind, attempts)
+    const kept = this.agent.memory.setIntakeRetry?.({
+      sender,
+      text,
+      interaction_intent: failure.interaction_intent,
+      request_id: failure.request_id,
+      origin_request_id: base.origin_request_id,
+      goal_id: failure.goal_id,
+      actor_id: actor.actor_id,
+      epoch: actor.epoch,
+      attempt: attempts + 1,
+      transport_subkind: kind,
+      cause_code: causeCode,
+      next_at: Date.now() + delayMs,
+    })
+    if (!kept) return false // the memory refused the record: handle the failure as before
+    this.armIntakeRetry(kept, delayMs)
+    await this.persistIntakeRetry()
+    this.log(`Intake retry ${kept.attempt}/${limit} scheduled in ${Math.round(delayMs / 1000)} s after a transport failure at goal intake (${kind})`)
+    await this.traceRecovery('recovery.intake_retry_scheduled', { ...base, reason: 'transport_failure_at_intake', attempt: kept.attempt, limit, delay_ms: delayMs, transport_subkind: kind, cause_code: causeCode })
+    const line = `I could not reach the model provider (${kind}), so I have not started "${preview}" yet. Retrying automatically in ${Math.round(delayMs / 1000)} s (attempt ${kept.attempt}/${limit}). Say stop to cancel.`
+    await this.printChat(line)
+    await this.traceChatFailureReported(line, failure.request_id)
+    return true
+  }
+
+  async traceChatFailureReported(line, requestId) {
+    try {
+      await this.agent?.traceEvent?.('chat.request_failed_reported', { chat_line_length: line.length, resume_hint_included: false }, { requestId })
+    }
+    catch (error) { this.log(`Unable to trace the intake chat line: ${error instanceof Error ? error.message : String(error)}`) }
+  }
+
+  // Replaces any pending retry with `record`: synchronous, so a cancel that arrives during the awaits that follow finds it.
+  armIntakeRetry(record, delayMs) {
+    if (this.intakeRetry?.timer) clearTimeout(this.intakeRetry.timer)
+    const token = { cancelled: false, reason: undefined }
+    const timer = setTimeout(() => {
+      if (this.intakeRetry?.token !== token || token.cancelled) return
+      this.intakeRetry.timer = null
+      this.queueEvent(() => this.runIntakeRetry(token), { reportError: true })
+    }, Math.max(0, delayMs))
+    timer.unref?.()
+    this.intakeRetry = { token, timer, record, running: false }
+    return token
+  }
+
+  // Drops the durable record of a retry that ended (not one that was replaced by its own next attempt).
+  async finishIntakeRetry(intake) {
+    if (!intake?.token || this.intakeRetry?.token !== intake.token) return
+    this.intakeRetry = null
+    this.agent?.memory?.setIntakeRetry?.(null)
+    await this.persistIntakeRetry()
+  }
+
+  // The timer fired. `token` is the schedule's cancel token; it is checked after every await and before the request is re-queued.
+  async runIntakeRetry(token) {
+    const pending = this.intakeRetry
+    if (!pending || pending.token !== token) return null
+    const record = pending.record
+    const traceBase = { ...this.intakeTraceBase(record), attempt: record.attempt }
+    const cancelled = () => token.cancelled === true || this.stopping === true
+    const abort = async (reason) => {
+      if (this.intakeRetry?.token === token) {
+        this.intakeRetry = null
+        this.agent.memory.setIntakeRetry?.(null)
+        await this.persistIntakeRetry()
+      }
+      // A cancel through cancelIntakeRetry already wrote its own row.
+      if (!token.cancelled) await this.traceRecovery('recovery.intake_retry_cancelled', { ...traceBase, reason })
+      return null
+    }
+    if (cancelled()) return abort('session_stopping')
+    const stale = await this.intakeRetryStaleReason(record)
+    if (cancelled()) return abort('session_stopping')
+    if (stale) return abort(stale)
+    pending.running = true
+    await this.traceRecovery('recovery.intake_retry_started', {
+      ...traceBase,
+      reason: 'backoff_elapsed',
+      limit: autoResumeMaxAttempts(record.transport_subkind),
+      transport_subkind: record.transport_subkind,
+    })
+    if (cancelled()) return abort('session_stopping')
+    try {
+      return await this.processPlayerRequest(record.sender, record.text, { received: { actor_id: record.actor_id, epoch: record.epoch }, intake: pending })
+    }
+    catch (error) {
+      // The takeover that cancelled the retry also aborted its request: that failure is the cancellation, not a new problem.
+      if (cancelled()) return null
+      throw error
+    }
+    finally {
+      // A retry that ended (admitted, or failed for another reason) leaves no record; one that rescheduled itself keeps the new one.
+      await this.finishIntakeRetry(pending)
+    }
+  }
+
+  // After a restart: the durable record is put back on its clock, unless the body or the goal moved on while the server was down.
+  async restoreIntakeRetry() {
+    const record = this.agent?.memory?.intakeRetry?.()
+    if (!record || this.stopping || this.intakeRetry) return false
+    const current = this.currentActorCorrelation()
+    const stale = current.actor_id !== record.actor_id ? 'actor_changed'
+      : current.epoch !== record.epoch ? 'epoch_changed'
+        : this.intakeGoalAdmittedReason(record)
+    const base = { ...this.intakeTraceBase(record), attempt: record.attempt }
+    if (stale) {
+      this.agent.memory.setIntakeRetry(null)
+      await this.persistIntakeRetry()
+      await this.traceRecovery('recovery.intake_retry_cancelled', { ...base, reason: stale, restored: true })
+      await this.printChat(`I restarted while waiting to retry "${this.intakePreview(record.text)}" and could not safely keep it (${stale}). Send the request again.`)
+      this.queueStartupGoalNotice()
+      return false
+    }
+    const kind = record.transport_subkind
+    const delayMs = Math.min(Math.max(0, record.next_at - Date.now()), autoResumeDelayMs(kind, record.attempt - 1))
+    this.armIntakeRetry(record, delayMs)
+    this.log(`Intake retry ${record.attempt} restored after a restart; due in ${Math.round(delayMs / 1000)} s`)
+    await this.traceRecovery('recovery.intake_retry_scheduled', {
+      ...base,
+      reason: 'restored_after_restart',
+      limit: autoResumeMaxAttempts(kind),
+      delay_ms: delayMs,
+      transport_subkind: kind,
+      cause_code: record.cause_code,
+      restored: true,
+    })
+    await this.printChat(`I restarted while waiting to retry "${this.intakePreview(record.text)}". Retrying in ${Math.round(delayMs / 1000)} s (attempt ${record.attempt}/${autoResumeMaxAttempts(kind)}). Say stop to cancel.`)
     return true
   }
 
@@ -3136,6 +3394,12 @@ export class Session {
   // let the declared pause class decide (a model_recoverable pause that survived the restart resumes on its persisted attempt
   // count, not a fresh one).
   queueStartupRecovery(startupState) {
+    // A pending intake retry survives the restart: it is put back on its clock (or dropped with a reason when the body or goal moved
+    // on). With no plan to carry, it replaces the "restarted before the first plan" notice.
+    if (this.agent?.memory?.intakeRetry?.()) {
+      this.queueEvent(() => this.restoreIntakeRetry(), { reportError: true })
+      if (!startupState) return 'intake_retry'
+    }
     if (startupState?.condition_wait?.state !== 'active' && this.recoverablePlan(startupState)) {
       this.queueEvent(async () => {
         await this.recoverInterruptedPlan('runtime_restart', { actor_id: this.lastStatus?.actor_id, epoch: this.lastStatus?.epoch })
@@ -3309,6 +3573,7 @@ export class Session {
     this.cancelAutoResume('player_request')
     const stop = control === 'stop'
     if (stop) this.agent.cancel('user_stop_immediate')
+    const received = this.currentActorCorrelation() // what the request arrived under: an intake retry is fenced to it
     this.queueEvent(async () => {
       try {
         if (stop) {
@@ -3321,23 +3586,37 @@ export class Session {
           await this.printChat(pauseChatLine(state, { cancelledWork: true }))
           return
         }
-        await this.ensureAuthorization()
-        await this.applyNavigationObstaclePolicy(text)
-        // Bind the visible user turn immediately. interaction.routed/request.received
-        // deduplicate this same entry; a true new_goal can still rotate the
-        // conversation before re-appending the message.
-        this.appendUiConversation('user', sender, text)
-        const result = await this.agent.request(text, { sender })
-        if (result?.chatMessage) this.appendUiConversation('assistant', this.npcName || 'SGLuna', result.chatMessage)
-        const finalized = await finalizeCompletedTaskBoundary(this, result)
-        if (!finalized) await this.syncTaskBoardUi()
-        if (result?.chatMessage) await this.printChat(result.chatMessage)
+        await this.processPlayerRequest(sender, text, { received })
       }
       finally {
         if (typeof onSettled === 'function') await onSettled()
       }
     }, { reportError: true })
     return true
+  }
+
+  // One player request through the agent and back to the player. `received` is the actor and epoch the request arrived under;
+  // `intake` is the running intake retry when this is one (its failure may schedule the next attempt instead of being reported).
+  async processPlayerRequest(sender, text, { received, intake } = {}) {
+    await this.ensureAuthorization()
+    await this.applyNavigationObstaclePolicy(text)
+    // Bind the visible user turn immediately. interaction.routed/request.received
+    // deduplicate this same entry; a true new_goal can still rotate the
+    // conversation before re-appending the message.
+    this.appendUiConversation('user', sender, text)
+    let result
+    try {
+      result = await this.agent.request(text, { sender, ...(intake ? { intakeRetryIntent: intake.record.interaction_intent } : {}) })
+    }
+    catch (error) {
+      if (await this.handleIntakeFailure(error, { sender, text, received, intake })) return null
+      throw error
+    }
+    if (result?.chatMessage) this.appendUiConversation('assistant', this.npcName || 'SGLuna', result.chatMessage)
+    const finalized = await finalizeCompletedTaskBoundary(this, result)
+    if (!finalized) await this.syncTaskBoardUi()
+    if (result?.chatMessage) await this.printChat(result.chatMessage)
+    return result
   }
 
   onGameLine(line) {
