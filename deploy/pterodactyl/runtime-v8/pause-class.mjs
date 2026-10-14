@@ -90,8 +90,10 @@ export function pauseClassLabel(record) {
 // EAI_AGAIN) is a transport condition: waiting can fix it. UND_ERR_ABORTED is deliberately absent (the loop's own cancellation).
 const NETWORK_ERROR_CODES = new Set([
   'ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED', 'ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT', 'EPIPE', 'EHOSTUNREACH', 'ENETUNREACH', 'ENETDOWN',
-  'UND_ERR_SOCKET', 'UND_ERR_CLOSED', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT',
+  'UND_ERR_SOCKET', 'UND_ERR_CLOSED', 'UND_ERR_CONNECT_TIMEOUT',
 ])
+// Undici's response timeouts are the timeout subkind (as a provider that "timed out after N ms" already is).
+const TIMEOUT_ERROR_CODES = new Set(['UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT'])
 const SAFE_CAUSE_CODE = /^[A-Z][A-Z0-9_]{1,39}$/
 
 // The error codes an error carries, outermost first: its own code, its cause's, and the first member of an AggregateError cause
@@ -108,7 +110,7 @@ function errorCodes(failure) {
 // error message: a network error's message names the host and URL (getaddrinfo ENOTFOUND <host>).
 export function failureCauseCode(failure) {
   const codes = errorCodes(failure).filter(code => SAFE_CAUSE_CODE.test(code))
-  return codes.find(code => NETWORK_ERROR_CODES.has(code)) ?? codes[0]
+  return codes.find(code => NETWORK_ERROR_CODES.has(code) || TIMEOUT_ERROR_CODES.has(code)) ?? codes[0]
 }
 
 // The bounded transport fields of a failure, for provider.error and request.failed rows:
@@ -179,7 +181,9 @@ export function transportFailureOf(failure) {
     if (TRANSPORT_SUBKINDS.includes(failure.transport_subkind)) return { subkind: failure.transport_subkind, source: 'structured' }
     const fromStatus = subkindFromHttpStatus(failure.http_status)
     if (fromStatus) return { subkind: fromStatus, source: 'structured' }
-    if (errorCodes(failure).some(code => NETWORK_ERROR_CODES.has(code))) return { subkind: TRANSPORT_SUBKIND.TRANSPORT, source: 'structured' }
+    const codes = errorCodes(failure)
+    if (codes.some(code => TIMEOUT_ERROR_CODES.has(code))) return { subkind: TRANSPORT_SUBKIND.TIMEOUT, source: 'structured' }
+    if (codes.some(code => NETWORK_ERROR_CODES.has(code))) return { subkind: TRANSPORT_SUBKIND.TRANSPORT, source: 'structured' }
   }
   const fromText = transportSubkindFromText(failureMessage(failure))
   return fromText ? { subkind: fromText, source: 'legacy_text' } : undefined

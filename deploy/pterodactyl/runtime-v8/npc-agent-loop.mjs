@@ -9128,6 +9128,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return { goal_id: before.goal.goal_id, paused: after?.run?.paused === true, requestId }
   }
 
+  // The supervisor gave up on an intake retry and told the player the objective was dropped: remove the plan-less goal the failed
+  // first attempt admitted, through the same clearTaskContext every goal replacement and completion uses (world facts and the task
+  // ledger are kept). Refuses anything that is not that exact goal with no plan. Returns whether it was removed.
+  async discardIntakeGoal(goalId, { requestId, reason } = {}) {
+    await this.loadPersistentState()
+    const key = this.activePlanKey()
+    const planning = this.memory.planningState?.(key)
+    if (!goalId || planning?.goal?.status !== GOAL_STATUS.ACTIVE || planning.goal.goal_id !== goalId
+      || getActivePlanningPlan(planning) || planning.plans?.length > 0 || this.memory.currentPlan?.(key)) return false
+    this.memory.clearTaskContext?.(key)
+    await this.persistState()
+    await this.traceEvent('planning.intake_goal_discarded', { request_id: requestId, reason, goal_id: goalId }, { requestId })
+    return true
+  }
+
   // Resume of that pause: the goal is re-driven from its own objective (no plan exists to
   // continue, and a bare "continue" must never become the objective of a new goal).
   redrivableGoalWithoutPlan(key) {

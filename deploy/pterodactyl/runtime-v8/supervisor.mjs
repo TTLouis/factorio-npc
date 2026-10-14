@@ -2095,6 +2095,9 @@ export class Session {
     this.modelResume = null
     // The pending intake retry ({ token, timer, record, running }); durable in memory.intakeRetry(). See handleIntakeFailure.
     this.intakeRetry = null
+    // Bumped by every takeover (cancelAutoResume). A request that is mid-flight when one arrives cannot schedule an intake retry
+    // afterwards: handleIntakeFailure compares the value it started under.
+    this.cancelGeneration = 0
     this.lastPauseDecision = ''
   }
 
@@ -2586,6 +2589,7 @@ export class Session {
   // synchronous on purpose: callers invoke it BEFORE queueing their own operator pause, and a resume job that already left its timer
   // checks its token after every await, so no queued resume can start in between.
   cancelAutoResume(reason) {
+    this.cancelGeneration = (this.cancelGeneration ?? 0) + 1
     this.clearAutoResume()
     // The pending intake retry (a goal that never got its first plan) is cancelled by the same takeover, under the same fence.
     const intakeCancelled = this.cancelIntakeRetry(reason)
@@ -2694,7 +2698,7 @@ export class Session {
 
   // True when this failure was handled here (retry scheduled, or the limit reported), false when the caller must handle it as
   // before. `intake` is the running retry ({ token, record }) when the failure is a retry's own.
-  async handleIntakeFailure(error, { sender, text, received, intake } = {}) {
+  async handleIntakeFailure(error, { sender, text, received, intake, generation } = {}) {
     const failure = error?.intake_failure
     if (!failure || this.stopping) return false
     const transport = transportFailureOf(error)
@@ -2712,6 +2716,11 @@ export class Session {
       actor_id: actor.actor_id,
       actor_epoch: actor.epoch,
     }
+    if (generation !== undefined && generation !== this.cancelGeneration) {
+      // A player request or control arrived while this request was in flight: what they said stands. The failure is reported as before.
+      await this.traceRecovery('recovery.intake_retry_cancelled', { ...base, reason: 'superseded_before_schedule', transport_subkind: kind, cause_code: causeCode })
+      return false
+    }
     if (!Number.isSafeInteger(actor.actor_id) || !Number.isSafeInteger(actor.epoch)) {
       // Nothing to correlate the retry against: fail closed to today's behaviour, but say why.
       await this.traceRecovery('recovery.intake_retry_cancelled', { ...base, reason: 'actor_unknown', transport_subkind: kind, cause_code: causeCode })
@@ -2724,6 +2733,9 @@ export class Session {
       await this.finishIntakeRetry(intake)
       this.log(`Intake retry gave up after ${attempts} attempts (${kind})`)
       await this.traceRecovery('recovery.intake_retry_exhausted', { ...base, reason: 'retry_limit_reached', attempt: attempts, limit, transport_subkind: kind, cause_code: causeCode })
+      // The objective is dropped and the player told so: the plan-less goal it admitted must not linger (a later restart notice, or a
+      // pending interrupted task when the next goal displaces it).
+      if (await this.agent.discardIntakeGoal?.(failure.goal_id, { requestId: failure.request_id, reason: 'intake_retry_exhausted' })) await this.syncTaskBoardUi()
       const line = `I still cannot reach the model provider after ${attempts} automatic retries (${kind}), so I did not start "${preview}". Send the request again when the provider is reachable.`
       await this.printChat(line)
       await this.traceChatFailureReported(line, failure.request_id)
@@ -2805,6 +2817,7 @@ export class Session {
     const stale = await this.intakeRetryStaleReason(record)
     if (cancelled()) return abort('session_stopping')
     if (stale) return abort(stale)
+    const generation = this.cancelGeneration
     pending.running = true
     await this.traceRecovery('recovery.intake_retry_started', {
       ...traceBase,
@@ -2814,7 +2827,7 @@ export class Session {
     })
     if (cancelled()) return abort('session_stopping')
     try {
-      return await this.processPlayerRequest(record.sender, record.text, { received: { actor_id: record.actor_id, epoch: record.epoch }, intake: pending })
+      return await this.processPlayerRequest(record.sender, record.text, { received: { actor_id: record.actor_id, epoch: record.epoch }, intake: pending, generation, isCancelled: cancelled })
     }
     catch (error) {
       // The takeover that cancelled the retry also aborted its request: that failure is the cancellation, not a new problem.
@@ -3571,6 +3584,7 @@ export class Session {
     }
     // A player turn takes over from any pending automatic resume.
     this.cancelAutoResume('player_request')
+    const generation = this.cancelGeneration // after this request's own bump: a later takeover changes it
     const stop = control === 'stop'
     if (stop) this.agent.cancel('user_stop_immediate')
     const received = this.currentActorCorrelation() // what the request arrived under: an intake retry is fenced to it
@@ -3586,7 +3600,7 @@ export class Session {
           await this.printChat(pauseChatLine(state, { cancelledWork: true }))
           return
         }
-        await this.processPlayerRequest(sender, text, { received })
+        await this.processPlayerRequest(sender, text, { received, generation })
       }
       finally {
         if (typeof onSettled === 'function') await onSettled()
@@ -3597,9 +3611,15 @@ export class Session {
 
   // One player request through the agent and back to the player. `received` is the actor and epoch the request arrived under;
   // `intake` is the running intake retry when this is one (its failure may schedule the next attempt instead of being reported).
-  async processPlayerRequest(sender, text, { received, intake } = {}) {
+  // `generation` is cancelGeneration as the request started; `isCancelled` (an intake retry's token) is checked after each await
+  // before the request reaches the agent, so a stop in that window is not lost.
+  async processPlayerRequest(sender, text, { received, intake, generation, isCancelled } = {}) {
+    const cancelled = () => isCancelled?.() === true
+    if (cancelled()) return null
     await this.ensureAuthorization()
+    if (cancelled()) return null
     await this.applyNavigationObstaclePolicy(text)
+    if (cancelled()) return null
     // Bind the visible user turn immediately. interaction.routed/request.received
     // deduplicate this same entry; a true new_goal can still rotate the
     // conversation before re-appending the message.
@@ -3609,7 +3629,7 @@ export class Session {
       result = await this.agent.request(text, { sender, ...(intake ? { intakeRetryIntent: intake.record.interaction_intent } : {}) })
     }
     catch (error) {
-      if (await this.handleIntakeFailure(error, { sender, text, received, intake })) return null
+      if (await this.handleIntakeFailure(error, { sender, text, received, intake, generation })) return null
       throw error
     }
     if (result?.chatMessage) this.appendUiConversation('assistant', this.npcName || 'SGLuna', result.chatMessage)
